@@ -30,6 +30,7 @@ pub(crate) enum Job {
     TestsWindows,
     CargoDeny,
     ClippyWindows,
+    ClippyMacos,
     Wasm,
     /// Portable locale parity plus the desktop end-to-end key-resolution tests.
     I18n,
@@ -84,6 +85,23 @@ fn default_spec(
         aliases,
         prefix: None,
         hosts: Host::ANY,
+        in_default_run: true,
+        caveat,
+    }
+}
+
+/// A CI job that only the named hosts can run, with no matrix leg in its name.
+fn host_spec(
+    name: &'static str,
+    aliases: &'static [&'static str],
+    hosts: &'static [Host],
+    caveat: &'static str,
+) -> Spec {
+    Spec {
+        name,
+        aliases,
+        prefix: None,
+        hosts,
         in_default_run: true,
         caveat,
     }
@@ -146,14 +164,12 @@ impl Job {
                 &["rustdoc", "docs"],
                 "Everything but the GPUI crates, which would drag the whole graphics toolchain into the job. A broken intra-doc link is neither a compile error nor a clippy lint, so nothing else catches one.",
             ),
-            Self::TestsLinux => Spec {
-                name: "tests (linux)",
-                aliases: &["test-linux"],
-                prefix: None,
-                hosts: &[Host::Linux],
-                in_default_run: true,
-                caveat: "Excludes openlogi-desktop, but still runs openlogi-ui's portable locale-parity test. Only the desktop end-to-end key-resolution tests are absent.",
-            },
+            Self::TestsLinux => host_spec(
+                "tests (linux)",
+                &["test-linux"],
+                &[Host::Linux],
+                "Excludes openlogi-desktop, but still runs openlogi-ui's portable locale-parity test. Only the desktop end-to-end key-resolution tests are absent.",
+            ),
             Self::TestsMacos => Spec {
                 name: "tests (macos)",
                 aliases: &["test-macos"],
@@ -162,14 +178,12 @@ impl Job {
                 in_default_run: true,
                 caveat: "CI's matrix is arm64 (macos-latest) and x86_64 (macos-15-intel); a host only ever covers its own arch.",
             },
-            Self::TestsWindows => Spec {
-                name: "tests (windows)",
-                aliases: &["test-windows"],
-                prefix: None,
-                hosts: &[Host::Windows],
-                in_default_run: true,
-                caveat: "Excludes openlogi-desktop like the Linux job. Executes the `cfg(windows)` tests, which `clippy (windows)` only compiles and no other host can run.",
-            },
+            Self::TestsWindows => host_spec(
+                "tests (windows)",
+                &["test-windows"],
+                &[Host::Windows],
+                "Excludes openlogi-desktop like the Linux job. Executes the `cfg(windows)` tests, which `clippy (windows)` only compiles and no other host can run.",
+            ),
             Self::CargoDeny => default_spec(
                 "cargo-deny",
                 &["deny"],
@@ -185,6 +199,12 @@ impl Job {
                 in_default_run: true,
                 caveat: "CI lints the whole workspace natively on windows-latest. Anywhere else this is the ring-free cross lint over the crates that carry Windows code — a proxy, not that job.",
             },
+            Self::ClippyMacos => host_spec(
+                "clippy (macos)",
+                &["clippy-macos"],
+                &[Host::Macos],
+                "CI lints the whole workspace natively on macos-latest (arm64), the only job that lints the macOS cfg (`tests (macos)` compiles it, without clippy). No other host can reproduce it. On a Mac it is the same command as host `clippy`, so the second run is a cache hit.",
+            ),
             Self::Wasm => default_spec(
                 "wasm (portable crates)",
                 &["wasm"],

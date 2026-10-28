@@ -53,6 +53,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(info) => println!("getThumbwheelInfo: {info:?}"),
         Err(e) => println!("getThumbwheelInfo failed: {e:?}"),
     }
+    let original = match tw.get_status().await {
+        Ok(status) => {
+            println!("getThumbwheelStatus: {status:?}");
+            Some(status)
+        }
+        Err(e) => {
+            println!("getThumbwheelStatus failed: {e:?}");
+            None
+        }
+    };
 
     println!("0x2150 resolved at feature index {}", feature.index);
     let feature_index = feature.index;
@@ -100,9 +110,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     drop(listener);
-    if let Err(e) = tw.undivert().await {
-        println!("could not restore native reporting: {e:?}");
+    let restore = thumbwheel::status_to_restore(original);
+    if let Err(e) = tw.restore(restore).await {
+        println!("could not restore reporting: {e:?}");
     }
-    println!("\n<<< native reporting restored");
+    println!("\n<<< reporting restored: {restore:?}");
     Ok(())
 }

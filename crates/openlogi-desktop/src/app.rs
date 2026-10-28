@@ -17,6 +17,7 @@ use self::menu::{APP_KEY_CONTEXT, CloseWindow, Minimize, NavigateBack, Zoom};
 use crate::features::action_ring::ActionRingPanel;
 use crate::features::camera::controls::CameraControlsPanel;
 use crate::features::camera::preview::CameraPreview;
+use crate::features::keyboard::disable_keys::DisableKeysPanel;
 use crate::features::keyboard::function_row::FunctionRowView;
 use crate::features::lighting::keyboard_rgb::LightingPanel;
 use crate::features::lighting::standalone::LightPanel;
@@ -125,9 +126,6 @@ impl DetailTab {
         if caps.buttons && can_show_mouse_model {
             tabs.push(Self::Buttons);
         }
-        if caps.haptic_panel || (caps.buttons && can_show_mouse_model) {
-            tabs.push(Self::ActionsRing);
-        }
         // The Keys tab needs something to bind: HID++ controls (measured, or
         // last-good for a sleeping keyboard) or the OS-hook F-row a depot
         // without control markers falls back to. A keyboard with neither
@@ -136,13 +134,32 @@ impl DetailTab {
         // rules out Keys even for a kind=Keyboard record — see
         // `can_show_mouse_model` above — so a misclassified mouse gets only
         // the Buttons panel, not both.
-        if matches!(record.kind, DeviceKind::Keyboard)
+        let shows_keys_tab = matches!(record.kind, DeviceKind::Keyboard)
             && !caps.pointer
-            && (caps.buttons || record.asset.is_some())
-        {
+            && (caps.buttons || record.asset.is_some());
+        // Keys goes first for a keyboard: it's the main screen for that device
+        // (and `default_for` picks the first tab), so adding the ring editor
+        // below must not reassign a keyboard's opening tab away from it.
+        if shows_keys_tab {
             tabs.push(Self::Keys);
         }
-        if caps.pointer || caps.scroll_inversion || caps.hires_wheel {
+        // A key can be bound to the Actions Ring action from the Keys panel
+        // (it's in the generic action catalog, not gated on haptics or a
+        // mouse model), so any keyboard that gets a Keys tab needs the ring
+        // editor too — otherwise the ring opens but has nothing configured
+        // in it and no way to configure it (#1833).
+        if caps.haptic_panel || (caps.buttons && can_show_mouse_model) || shows_keys_tab {
+            tabs.push(Self::ActionsRing);
+        }
+        let has_software_scroll = openlogi_hook::SOFTWARE_SCROLL_INVERSION
+            && record.capabilities.is_some()
+            && matches!(record.kind, DeviceKind::Mouse | DeviceKind::Trackball);
+        if caps.pointer
+            || caps.pointer_scaling
+            || caps.scroll_inversion
+            || caps.hires_wheel
+            || has_software_scroll
+        {
             tabs.push(Self::Pointer);
         }
         if caps.lighting {
@@ -183,6 +200,7 @@ pub struct AppView {
     mouse_model: Entity<MouseModelView>,
     action_ring_panel: Entity<ActionRingPanel>,
     keyboard_model: Entity<FunctionRowView>,
+    disable_keys_panel: Entity<DisableKeysPanel>,
     dpi_panel: Entity<DpiPanel>,
     smartshift_panel: Entity<SmartShiftPanel>,
     lighting_panel: Entity<LightingPanel>,
@@ -209,17 +227,26 @@ pub struct AppView {
     active_tab: DetailTab,
 }
 
-/// Open the dialog that says why a device the user asked to forget stayed.
+/// Open the dialog that says why a pairing the user asked to remove stayed —
+/// a forgotten device's, or a leftover slot's.
 fn explain_refused_removals(
     state: &Entity<AppState>,
     window: &mut Window,
     cx: &mut Context<AppView>,
 ) -> Subscription {
-    cx.subscribe_in(state, window, |_, _, event: &StateEvent, window, cx| {
-        if let StateEvent::DeviceRemovalFailed { name, failure } = event {
-            home::open_removal_failed(window, cx, name, failure);
-        }
-    })
+    cx.subscribe_in(
+        state,
+        window,
+        |_, _, event: &StateEvent, window, cx| match event {
+            StateEvent::DeviceRemovalFailed { name, failure } => {
+                home::open_removal_failed(window, cx, name, failure);
+            }
+            StateEvent::StalePairingRemovalFailed { name, failure } => {
+                home::open_stale_pairing_removal_failed(window, cx, name, failure);
+            }
+            _ => {}
+        },
+    )
 }
 
 impl Focusable for AppView {
@@ -256,6 +283,7 @@ impl AppView {
         let mouse_model = cx.new(|cx| MouseModelView::new(window, cx));
         let action_ring_panel = cx.new(ActionRingPanel::new);
         let keyboard_model = cx.new(FunctionRowView::new);
+        let disable_keys_panel = cx.new(DisableKeysPanel::new);
         let dpi_panel = cx.new(DpiPanel::new);
         let smartshift_panel = cx.new(SmartShiftPanel::new);
         let lighting_panel = cx.new(LightingPanel::new);
@@ -266,53 +294,7 @@ impl AppView {
         let app_catalog = cx.new(|cx| AppCatalogPicker::new(profile_icons.clone(), window, cx));
         let app_catalog_obs = cx.observe(&app_catalog, |_, _, cx| cx.notify());
         let state_obs = cx.subscribe(&state, |view, _, event: &StateEvent, cx| {
-            let is_current =
-                |key| AppState::try_read(cx).is_some_and(|state| state.is_current_device(key));
-            let on_home = matches!(view.route, Route::Home);
-            let relevant = match event {
-                StateEvent::AgentChanged
-                | StateEvent::InventoryChanged
-                | StateEvent::DeviceSelected(_) => true,
-                StateEvent::ForegroundChanged => !on_home,
-                StateEvent::BindingsChanged(key) => {
-                    !on_home
-                        && matches!(
-                            view.active_tab,
-                            DetailTab::Buttons | DetailTab::ActionsRing | DetailTab::Device
-                        )
-                        && is_current(key)
-                }
-                StateEvent::DpiChanged(key) | StateEvent::FnLockChanged(key) => {
-                    !on_home && view.active_tab == DetailTab::Device && is_current(key)
-                }
-                StateEvent::LightingChanged(key) => {
-                    on_home || (view.active_tab == DetailTab::Light && is_current(key))
-                }
-                StateEvent::DeviceConfigChanged(key) => {
-                    on_home
-                        || (matches!(view.active_tab, DetailTab::Pointer | DetailTab::Device)
-                            && is_current(key))
-                }
-                StateEvent::CameraChanged => on_home || view.active_tab == DetailTab::Light,
-                // Child entities own these surfaces and subscribe directly. A
-                // language switch already refreshes every window, and the root
-                // caches no localized text. A refused removal is a dialog,
-                // opened through `removal_obs`.
-                StateEvent::SmartShiftChanged(_)
-                | StateEvent::DeviceRemovalFailed { .. }
-                | StateEvent::CameraPermissionChanged
-                | StateEvent::DiagnosticsChanged
-                | StateEvent::LanguageChanged => false,
-                // App-wide settings render in their own window. The root only
-                // cares when a persistence/reload failure opens or closes its
-                // fail-closed configuration-error screen.
-                StateEvent::SettingsChanged => {
-                    view.config_issue_visible
-                        || AppState::try_read(cx)
-                            .is_some_and(|state| state.config_issue().is_some())
-                }
-            };
-            if relevant {
+            if view.repaints_for(event, cx) {
                 cx.notify();
             }
         });
@@ -323,6 +305,7 @@ impl AppView {
             mouse_model,
             action_ring_panel,
             keyboard_model,
+            disable_keys_panel,
             dpi_panel,
             smartshift_panel,
             lighting_panel,
@@ -338,6 +321,73 @@ impl AppView {
             config_issue_visible: false,
             accessibility_dismissed: false,
             active_tab: DetailTab::Buttons,
+        }
+    }
+
+    /// Whether `event` changes what the root view draws for the page and tab
+    /// on screen. Every event is matched here by name, so a new one has to be
+    /// placed; panels that own a surface subscribe to it themselves.
+    fn repaints_for(&self, event: &StateEvent, cx: &App) -> bool {
+        let is_current =
+            |key| AppState::try_read(cx).is_some_and(|state| state.is_current_device(key));
+        let on_home = matches!(self.route, Route::Home);
+        // The Secure Input bar shows only while a key binding exists, and the
+        // Keys tab's own view repaints only itself.
+        let footer_tracks_bindings = || {
+            AppState::try_read(cx)
+                .and_then(AppState::agent_status)
+                .is_some_and(status::Attention::depends_on_key_bindings)
+        };
+        match event {
+            StateEvent::AgentChanged
+            | StateEvent::InventoryChanged
+            | StateEvent::DeviceSelected(_) => true,
+            StateEvent::ForegroundChanged => !on_home,
+            StateEvent::BindingsChanged(key) => {
+                footer_tracks_bindings()
+                    || (!on_home
+                        && matches!(
+                            self.active_tab,
+                            DetailTab::Buttons | DetailTab::ActionsRing | DetailTab::Device
+                        )
+                        && is_current(key))
+            }
+            StateEvent::DpiChanged(key)
+            | StateEvent::FnLockChanged(key)
+            | StateEvent::BacklightChanged(key)
+            | StateEvent::EasySwitchChanged(key) => {
+                !on_home && self.active_tab == DetailTab::Device && is_current(key)
+            }
+            StateEvent::LightingChanged(key) => {
+                on_home || (self.active_tab == DetailTab::Light && is_current(key))
+            }
+            StateEvent::DeviceConfigChanged(key) => {
+                on_home
+                    || (matches!(self.active_tab, DetailTab::Pointer | DetailTab::Device)
+                        && is_current(key))
+            }
+            StateEvent::CameraChanged => on_home || self.active_tab == DetailTab::Light,
+            // Child entities own these surfaces and subscribe directly. A
+            // language switch already refreshes every window, and the root
+            // caches no localized text. A refused removal is a dialog,
+            // opened through `removal_obs`.
+            StateEvent::SmartShiftChanged(_)
+            | StateEvent::DisableKeysChanged(_)
+            | StateEvent::ReportRateChanged(_)
+            | StateEvent::PointerSpeedChanged(_)
+            | StateEvent::ForceSensingChanged(_)
+            | StateEvent::DeviceRemovalFailed { .. }
+            | StateEvent::StalePairingRemovalFailed { .. }
+            | StateEvent::CameraPermissionChanged
+            | StateEvent::DiagnosticsChanged
+            | StateEvent::LanguageChanged => false,
+            // App-wide settings render in their own window. The root only
+            // cares when a persistence/reload failure opens or closes its
+            // fail-closed configuration-error screen.
+            StateEvent::SettingsChanged => {
+                self.config_issue_visible
+                    || AppState::try_read(cx).is_some_and(|state| state.config_issue().is_some())
+            }
         }
     }
 
@@ -641,6 +691,7 @@ impl AppView {
                         mouse_model: &self.mouse_model,
                         action_ring: &self.action_ring_panel,
                         keyboard_model: &self.keyboard_model,
+                        disable_keys_panel: &self.disable_keys_panel,
                         dpi_panel: &self.dpi_panel,
                         smartshift_panel: &self.smartshift_panel,
                         lighting_panel: &self.lighting_panel,
@@ -674,9 +725,14 @@ impl AppView {
             )
         };
 
+        let has_key_bindings =
+            AppState::try_read(cx).is_some_and(|state| !state.keyboard_bindings().is_empty());
+        let attention = status::Attention::for_status(&status, has_key_bindings);
         root.child(header_el)
             .child(content_el)
-            .when(!granted, |this| this.child(status::attention_footer(cx)))
+            .when_some(attention, |this, attention| {
+                this.child(status::attention_footer(attention, cx))
+            })
             .into_any_element()
     }
 }

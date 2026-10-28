@@ -72,9 +72,9 @@ pub enum AssetError {
     SourcesUnavailable {
         /// Failure from the production custom domain.
         production: Box<AssetError>,
-        /// Failure from the versioned Cloudflare Pages branch alias.
+        /// Failure from the release-line Cloudflare Pages alias.
         pages: Box<AssetError>,
-        /// Failure from the versioned jsDelivr npm mirror.
+        /// Failure from the release-line jsDelivr npm mirror.
         jsdelivr: Box<AssetError>,
     },
     /// Probe workers ended without reporting every source.
@@ -88,10 +88,11 @@ pub enum AssetError {
         /// Schema version returned by the catalog.
         found: u32,
     },
-    /// The npm routing catalog does not describe the pinned package release.
-    #[error("npm route version {found} does not match pinned asset version {expected}")]
+    /// The npm routing catalog describes a release outside this build's
+    /// asset release line.
+    #[error("npm route version {found} is not in asset release line {expected}")]
     NpmRoutesVersionMismatch {
-        /// Asset package version required by this OpenLogi build.
+        /// Asset release line this OpenLogi build reads, such as `0.1.x`.
         expected: String,
         /// Asset package version returned by the catalog.
         found: String,

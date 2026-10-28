@@ -39,7 +39,10 @@ fn live_session(epoch: u64) -> RunningKeyboardSession {
 
 fn draining_session(epoch: u64) -> RunningKeyboardSession {
     let mut session = live_session(epoch);
-    assert_eq!(session.reconcile(None), ReconcileAction::Retiring);
+    assert_eq!(
+        session.reconcile_with(None, |_, _| CaptureSessionStop::Shutdown),
+        ReconcileAction::Retiring
+    );
     session
 }
 
@@ -107,7 +110,9 @@ fn binding_changes_refresh_without_rearming_hardware() {
     let new_dispatch = dispatch(Action::ShowDesktop);
 
     assert_eq!(
-        session.reconcile(Some((&current_target, &new_dispatch))),
+        session.reconcile_with(Some((&current_target, &new_dispatch)), |_, _| {
+            CaptureSessionStop::Shutdown
+        }),
         ReconcileAction::DispatchChanged
     );
     assert!(session.is_active());
@@ -127,7 +132,9 @@ fn target_changes_freeze_dispatch_until_teardown_finishes() {
         "the test must require different firmware capture"
     );
     assert_eq!(
-        session.reconcile(Some((&replacement, &new_dispatch))),
+        session.reconcile_with(Some((&replacement, &new_dispatch)), |_, _| {
+            CaptureSessionStop::Shutdown
+        }),
         ReconcileAction::Retiring
     );
     assert!(!session.is_active());
@@ -192,10 +199,15 @@ async fn recovery_manager_waits_for_control_events_and_shutdown_between_retries(
             registry,
             receiver_access: access.clone(),
             device_io,
+            transport_turns: crate::hardware::TransportTurns::default(),
         };
-        let mut actions =
-            crate::runtime::ActionRuntime::new(Arc::default(), device_access.clone(), ring)
-                .unwrap();
+        let mut actions = crate::runtime::ActionRuntime::new(
+            Arc::default(),
+            Arc::default(),
+            device_access.clone(),
+            ring,
+        )
+        .unwrap();
         let (shutdown_tx, shutdown) = oneshot::channel();
         let mut manager = std::pin::pin!(manage(KeyboardManagerContext {
             spec,
@@ -224,5 +236,44 @@ async fn recovery_manager_waits_for_control_events_and_shutdown_between_retries(
         }
         assert_eq!(tokio::time::Instant::now(), before_event);
         actions.shutdown();
+    }
+}
+
+/// A session body that panics used to take its completion report down with
+/// it, leaving the keyboard slot `Running` and the keys never re-armed.
+#[tokio::test]
+async fn a_session_body_that_panics_still_reports_done_after_its_inputs() {
+    let id = session_id(3);
+    let (events, mut event_rx) = mpsc::unbounded_channel();
+    let (sink, session_rx) = mpsc::unbounded_channel();
+    let forward = spawn_input_forwarder(id.clone(), session_rx, events.clone());
+    let (never_restored, restore) = oneshot::channel::<Option<PendingCaptureRestore>>();
+    let session_task = tokio::spawn(async move {
+        sink.send(CapturedInput::ButtonPulse(SEARCH_KEY))
+            .expect("the capture forwarder should remain open");
+        drop(never_restored);
+        // Dies with the sink still held, the way a panicking body does; the
+        // unwind is what closes the forwarder.
+        restore.await.expect("simulated capture panic")
+    });
+
+    complete_session(session_task, forward, events, id.clone()).await;
+
+    match event_rx.recv().await {
+        Some(KeyboardSessionEvent::Input(input)) => {
+            assert_eq!(input.session, id);
+            assert_eq!(input.input, CapturedInput::ButtonPulse(SEARCH_KEY));
+        }
+        _ => panic!("the input accepted before the panic must still be forwarded"),
+    }
+    match event_rx.recv().await {
+        Some(KeyboardSessionEvent::Done(done)) => {
+            assert_eq!(done.session, id);
+            assert!(
+                done.pending_restore.is_none(),
+                "a panicked body has no restoration to hand over"
+            );
+        }
+        _ => panic!("Done must follow the last input even when the body panicked"),
     }
 }

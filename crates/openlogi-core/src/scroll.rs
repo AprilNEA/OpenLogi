@@ -59,6 +59,16 @@ impl ScrollDelta {
     pub fn is_finite(self) -> bool {
         self.x().is_finite() && self.y().is_finite()
     }
+
+    /// Flip the sign of the vertical component, preserving the unit and the
+    /// horizontal component.
+    #[must_use]
+    pub const fn negate_y(self) -> Self {
+        match self {
+            Self::Pixels { x, y } => Self::Pixels { x, y: -y },
+            Self::WheelTicks { x, y } => Self::WheelTicks { x, y: -y },
+        }
+    }
 }
 
 #[cfg(test)]
@@ -78,5 +88,17 @@ mod tests {
         assert!(!ScrollDelta::pixels(f64::NAN, 0.0).is_finite());
         assert!(!ScrollDelta::wheel_ticks(0.0, f64::INFINITY).is_finite());
         assert!(ScrollDelta::wheel_ticks(0.25, -1.0).is_finite());
+    }
+
+    #[test]
+    fn negate_y_flips_only_the_vertical_component() {
+        assert_eq!(
+            ScrollDelta::wheel_ticks(3.0, 1.0).negate_y(),
+            ScrollDelta::wheel_ticks(3.0, -1.0)
+        );
+        assert_eq!(
+            ScrollDelta::pixels(-2.0, -5.0).negate_y(),
+            ScrollDelta::pixels(-2.0, 5.0)
+        );
     }
 }

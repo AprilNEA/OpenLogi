@@ -17,12 +17,6 @@
     clippy::needless_pass_by_value,
     reason = "GPUI builders take owned Copy palette values"
 )]
-// Not `expect`: these fire inside `assert_eq!`, and rustc does not credit an
-// expectation with a lint raised in a macro expansion.
-#![allow(
-    clippy::float_cmp,
-    reason = "test and product compute the callout px through the same path"
-)]
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -46,7 +40,7 @@ use crate::features::binding_editor::{
     editor_section,
 };
 use crate::features::mouse::geometry::asset_dimensions_for_png;
-use crate::features::profiles::friendly_app_name;
+use crate::features::profiles::profile_name;
 use crate::services::assets::{GlowGeometry, ResolvedAsset};
 use crate::state::{AppState, StateEvent, StateEvents};
 use crate::ui::action::localized_action_label;
@@ -100,6 +94,8 @@ pub struct FunctionRowView {
     text_state: Option<Entity<InputState>>,
     /// Draft copy of the Workflow steps under edit.
     workflow_draft: Vec<WorkflowStep>,
+    /// Whether the Open Application editor rejected a blank path.
+    application_invalid: bool,
     _state_obs: Subscription,
 }
 
@@ -114,6 +110,7 @@ impl FunctionRowView {
             active_editor: None,
             text_state: None,
             workflow_draft: Vec::new(),
+            application_invalid: false,
             _state_obs: state_obs,
         }
     }
@@ -125,6 +122,7 @@ impl FunctionRowView {
             self.active_editor = None;
             self.text_state = None;
             self.workflow_draft.clear();
+            self.application_invalid = false;
         }
         self.selected_key = idx;
         cx.notify();
@@ -134,11 +132,6 @@ impl FunctionRowView {
     /// target.
     pub(crate) fn click_key(&mut self, idx: usize, cx: &mut Context<Self>) {
         self.select_key(next_selection_after_click(self.selected_key, idx), cx);
-    }
-
-    #[expect(dead_code, reason = "public accessor for the selection state")]
-    pub(crate) fn selected_key(&self) -> Option<usize> {
-        self.selected_key
     }
 
     pub(crate) fn set_hovered_key(&mut self, idx: Option<usize>, cx: &mut Context<Self>) {
@@ -152,6 +145,7 @@ impl FunctionRowView {
         self.active_editor = Some(kind);
         self.text_state = None;
         self.workflow_draft.clear();
+        self.application_invalid = false;
         cx.notify();
     }
 
@@ -159,6 +153,12 @@ impl FunctionRowView {
         self.active_editor = None;
         self.text_state = None;
         self.workflow_draft.clear();
+        self.application_invalid = false;
+        cx.notify();
+    }
+
+    pub(crate) fn mark_application_invalid(&mut self, cx: &mut Context<Self>) {
+        self.application_invalid = true;
         cx.notify();
     }
 
@@ -238,6 +238,7 @@ impl Render for FunctionRowView {
             self.active_editor = None;
             self.text_state = None;
             self.workflow_draft.clear();
+            self.application_invalid = false;
         }
         let selected = self.selected_key;
         let hovered = self.hovered_key;
@@ -315,29 +316,40 @@ struct KeySlot {
 /// The action `target` is bound to in the selected device's open profile
 /// (a control) or the global F-row map (a function key). `None` when the key
 /// is on its native function.
-fn bound_action(state: &AppState, target: &KeyTarget) -> Option<Action> {
+pub(super) fn bound_action(state: &AppState, target: &KeyTarget) -> Option<Action> {
     match target {
-        KeyTarget::Control(button) => state
-            .button_bindings()
-            .get(button)
-            .filter(|action| **action != Action::None)
-            .cloned(),
+        KeyTarget::Control(button) => state.button_bindings().get(button).cloned(),
         KeyTarget::FunctionKey(trigger) => state.keyboard_bindings().get(trigger).cloned(),
     }
 }
 
 /// Persist `action` for `target`: a control binds per device (and per open
 /// app profile) like any mouse button; a function key binds globally.
-/// `None` returns a control to its native function; for a function key it
-/// clears the trigger.
+/// `None` removes the assignment in this scope (inheriting the device default
+/// in an app profile); for a function key it clears the global trigger.
 pub(super) fn commit_key_action(
     state: &mut AppState,
     target: &KeyTarget,
     action: Option<Action>,
 ) -> StateEvents {
     match target {
-        KeyTarget::Control(button) => state.commit_binding(*button, action.unwrap_or(Action::None)),
+        KeyTarget::Control(button) => match action {
+            Some(action) => state.commit_binding(*button, action),
+            None => state.clear_binding(*button),
+        },
         KeyTarget::FunctionKey(trigger) => state.commit_keyboard_binding(trigger.clone(), action),
+    }
+}
+
+/// The explicit action in the scope edited by the inspector. In an app profile,
+/// an inherited action is not selected; `None` selects the default-profile row.
+fn selected_key_action(state: &AppState, target: &KeyTarget) -> Option<Action> {
+    match target {
+        KeyTarget::Control(button) if state.editing_app().is_some() => state
+            .editing_app_overrides()
+            .and_then(|overrides| overrides.get(button))
+            .cloned(),
+        _ => bound_action(state, target),
     }
 }
 
@@ -775,6 +787,10 @@ fn callout_lane_is_lower(idx: usize) -> bool {
     idx.is_multiple_of(2)
 }
 
+fn binding_after_pick(current: Option<&Action>, picked: Action) -> Option<Action> {
+    (current != Some(&picked)).then_some(picked)
+}
+
 /// The scrollable config panel for the selected key. Lists the same action
 /// catalog the mouse picker uses, plus a Power User section. Renders the rows
 /// directly (no popover) in a tall card.
@@ -798,73 +814,87 @@ impl FunctionRowView {
                 kind,
                 self.text_state.clone(),
                 self.workflow_draft.clone(),
+                self.application_invalid,
                 view,
                 pal,
             );
         }
 
         let state = AppState::try_read(cx);
-        let current = state.and_then(|state| bound_action(state, &target));
+        let current = state.and_then(|state| selected_key_action(state, &target));
+        let uses_default = current.is_none();
         // A control binds inside the open app profile, like a mouse button.
         let app = match target {
-            KeyTarget::Control(_) => state.and_then(AppState::editing_app).map(|app| {
-                state
-                    .and_then(|state| state.recent_app_name(app))
-                    .map_or_else(|| friendly_app_name(app), str::to_string)
-            }),
+            KeyTarget::Control(_) => {
+                state.and_then(|state| state.editing_app().map(|app| profile_name(state, app)))
+            }
             KeyTarget::FunctionKey(_) => None,
         };
 
         let view_for_pick = view.clone();
         let target_for_pick = target.clone();
+        let current_for_pick = current.clone();
         let on_pick: PickFn = Rc::new(move |action, _window, cx| {
             AppState::apply(cx, |state| {
-                commit_key_action(state, &target_for_pick, Some(action))
+                commit_key_action(
+                    state,
+                    &target_for_pick,
+                    binding_after_pick(current_for_pick.as_ref(), action),
+                )
             });
             view_for_pick.update(cx, |_, vcx| vcx.notify());
         });
 
         let mut rows = Vec::new();
-        if let KeyTarget::Control(_) = target {
-            // A control's resting state is its firmware function, which is
-            // not an action in the catalog: give it a row of its own so the
-            // key can be returned to native (#1172).
-            let view_for_native = view.clone();
-            let target_for_native = target.clone();
-            rows.push(
-                v_flex().child(
-                    MenuRow::new("panel-native")
-                        .selected(current.is_none())
-                        .role(Role::MenuItem)
-                        .child(
-                            h_flex()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    svg()
-                                        .path("action-icons/keyboard.svg")
-                                        .size_4()
-                                        .flex_none()
-                                        .text_color(pal.text_muted),
-                                )
-                                .child(div().child(tr!("keyboard.native_function"))),
-                        )
-                        .when(current.is_none(), |row| {
-                            row.child(
-                                gpui_component::Icon::new(gpui_component::IconName::Check)
-                                    .size_3()
-                                    .text_color(rgb(ACCENT_BLUE)),
+        // Unbound is not a catalog action. A control rests on its firmware
+        // function (#1172); a function key rests on the key itself. The row
+        // clears the assignment, inheriting the device default in an app profile.
+        let view_for_native = view.clone();
+        let target_for_native = target.clone();
+        rows.push(
+            v_flex().child(
+                MenuRow::new("panel-native")
+                    .debug_selector(|| "key-panel-native".into())
+                    .selected(uses_default)
+                    .role(Role::MenuItem)
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                svg()
+                                    .path("action-icons/keyboard.svg")
+                                    .size_4()
+                                    .flex_none()
+                                    .text_color(pal.text_muted),
                             )
-                        })
-                        .on_click(move |_ev, _window, cx| {
-                            AppState::apply(cx, |state| {
-                                commit_key_action(state, &target_for_native, None)
-                            });
-                            view_for_native.update(cx, |_, vcx| vcx.notify());
-                        }),
-                ),
-            );
-        }
+                            .child(div().child(if app.is_some() {
+                                tr!("profiles.use_the_default_profile")
+                            } else {
+                                tr!("keyboard.native_function")
+                            })),
+                    )
+                    .when(uses_default, |row| {
+                        row.child(
+                            div()
+                                .debug_selector(|| "key-panel-native-check".into())
+                                .flex_none()
+                                .size_3()
+                                .child(
+                                    gpui_component::Icon::new(gpui_component::IconName::Check)
+                                        .size_3()
+                                        .text_color(rgb(ACCENT_BLUE)),
+                                ),
+                        )
+                    })
+                    .on_click(move |_ev, _window, cx| {
+                        AppState::apply(cx, |state| {
+                            commit_key_action(state, &target_for_native, None)
+                        });
+                        view_for_native.update(cx, |_, vcx| vcx.notify());
+                    }),
+            ),
+        );
         rows.extend(panel_action_rows(current.as_ref(), &on_pick, view, &pal));
 
         compact_panel(pal)
@@ -907,25 +937,30 @@ fn panel_action_rows(
 ) -> Vec<gpui::Div> {
     let mut children = action_rows("panel-action", current, on_pick, *pal);
 
-    let power_user_actions: &[(PowerUserKind, &str, &'static str)] = &[
+    let power_user_actions: &[(PowerUserKind, SharedString, &'static str)] = &[
+        (
+            PowerUserKind::OpenApplication,
+            tr!("action_ring.open_application_or_folder"),
+            "action-icons/grid-3x3.svg",
+        ),
         (
             PowerUserKind::TypeText,
-            "Type Text…",
+            tr!("actions.type_text"),
             "action-icons/keyboard.svg",
         ),
         (
             PowerUserKind::RunAppleScript,
-            "Run AppleScript…",
+            tr!("actions.run_applescript"),
             "action-icons/terminal.svg",
         ),
         (
             PowerUserKind::RunShellCommand,
-            "Run Shell Command…",
+            tr!("actions.run_shell_command"),
             "action-icons/terminal.svg",
         ),
         (
             PowerUserKind::Workflow,
-            "Workflow…",
+            tr!("actions.workflow"),
             "action-icons/list-checks.svg",
         ),
     ];
@@ -937,22 +972,11 @@ fn panel_action_rows(
                 |(idx, (kind, label, icon_path))| {
                     let kind = *kind;
                     let view = view.clone();
-                    let selected = matches!(
-                        (current, kind),
-                        (Some(Action::TypeText(_)), PowerUserKind::TypeText)
-                            | (
-                                Some(Action::RunAppleScript(_)),
-                                PowerUserKind::RunAppleScript
-                            )
-                            | (
-                                Some(Action::RunShellCommand(_)),
-                                PowerUserKind::RunShellCommand
-                            )
-                            | (Some(Action::Workflow(_)), PowerUserKind::Workflow)
-                    );
+                    let selected = power_user_selected(current, kind);
                     MenuRow::new(format!("panel-power-{idx}"))
                         .selected(selected)
                         .role(Role::MenuItem)
+                        .aria_label(label.clone())
                         .child(
                             h_flex()
                                 .items_center()
@@ -964,7 +988,7 @@ fn panel_action_rows(
                                         .flex_none()
                                         .text_color(pal.text_muted),
                                 )
-                                .child(div().child((*label).to_string())),
+                                .child(div().child(label.clone())),
                         )
                         .when(selected, |s| {
                             s.child(
@@ -980,6 +1004,27 @@ fn panel_action_rows(
             )),
     );
     children
+}
+
+/// Whether `current` is the action the `kind` editor makes, so its row reads
+/// as the key's binding.
+fn power_user_selected(current: Option<&Action>, kind: PowerUserKind) -> bool {
+    matches!(
+        (current, kind),
+        (
+            Some(Action::OpenApplication(_)),
+            PowerUserKind::OpenApplication
+        ) | (Some(Action::TypeText(_)), PowerUserKind::TypeText)
+            | (
+                Some(Action::RunAppleScript(_)),
+                PowerUserKind::RunAppleScript
+            )
+            | (
+                Some(Action::RunShellCommand(_)),
+                PowerUserKind::RunShellCommand
+            )
+            | (Some(Action::Workflow(_)), PowerUserKind::Workflow)
+    )
 }
 
 /// The keyboard image, or a labeled placeholder when no asset resolved. The

@@ -118,9 +118,7 @@ impl ButtonId {
     /// through (suppressing them would brick the mouse), and the DPI / thumb /
     /// dedicated gesture controls aren't visible to the OS hook at all (they're
     /// captured over HID++). Stored gesture bindings also project through this
-    /// set so Middle Click configurations written by v0.8.0 keep working;
-    /// [`Self::supports_gesture_mode`] separately controls which buttons may be
-    /// newly promoted by the UI.
+    /// set, including Middle Click gestures.
     #[must_use]
     pub fn is_os_hook_button(self) -> bool {
         matches!(
@@ -130,10 +128,23 @@ impl ButtonId {
     }
 
     /// Whether this button may use the OS hook's hold-and-swipe gesture path.
-    /// Back and Forward are the only eligible controls: Middle Click belongs
-    /// to the main wheel, whose controls intentionally remain single-action.
+    /// Middle, Back, and Forward are eligible controls. Wheel rotation and
+    /// tilt remain single-action controls.
     #[must_use]
     pub fn is_os_hook_gesture_source(self) -> bool {
+        matches!(
+            self,
+            ButtonId::MiddleClick | ButtonId::Back | ButtonId::Forward
+        )
+    }
+
+    /// Whether holding this button may turn the main wheel into a virtual
+    /// thumb wheel ([`Binding::WheelHold`](super::Binding::WheelHold)). Back
+    /// and Forward are the only eligible controls: they are where devices
+    /// report raw-wheel support (`0x1b04` `RAW_WHEEL`), and where Logi
+    /// Options+ offers its virtual thumb wheel.
+    #[must_use]
+    pub fn supports_wheel_hold(self) -> bool {
         matches!(self, ButtonId::Back | ButtonId::Forward)
     }
 
@@ -152,7 +163,7 @@ impl ButtonId {
     }
 
     /// Whether OpenLogi offers gesture mode for this logical control. Wheel
-    /// controls, the primary clicks and keyboard keys stay single-action by
+    /// rotation and tilt, the primary clicks and keyboard keys stay single-action by
     /// product policy; device-specific HID++ capability checks may further
     /// narrow this set at capture time.
     #[must_use]

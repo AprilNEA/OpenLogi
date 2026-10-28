@@ -1,12 +1,18 @@
-//! DockSwipe injection with read-only, per-display Space confirmation.
+//! Adjacent-Space switches with read-only, per-display Space confirmation.
 //!
-//! Private event format follows yabai's SIP-enabled implementation:
+//! An animated switch types the user's own "Move left/right a space"
+//! shortcut when it is enabled, so the Dock plays the slide it plays for the
+//! keyboard (#1722, #1972). Otherwise, and for an instant switch, it posts
+//! DockSwipe events. Their format follows yabai's SIP-enabled implementation:
 //! <https://github.com/asmvik/yabai/blob/dd845723416f5fe92af49fad5ebab00369e07edd/src/space_manager.c#L927-L981>
+//! A slide's frames follow Mac Mouse Fix's three-finger swipes instead, in
+//! both of its event layouts, and are paced the way Logi Options+ drives its
+//! three-finger swipe (see [`crate::inject::space_switch::slide`]).
 //! No Dock injection, cursor warp, focus click, or symbolic-hotkey mutation.
 
 use std::ffi::{c_int, c_void};
 use std::ptr::NonNull;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, mpsc};
 use std::time::{Duration, Instant};
 
@@ -26,10 +32,28 @@ use objc2_foundation::{
     ns_string,
 };
 
-use super::super::space_switch::{self, Backend, Direction, Failure, Lease, PostGate, SpaceState};
+use super::super::DesktopSwitch;
+use super::super::space_switch::{
+    self, Backend, Direction, Failure, Lease, Pace, PostGate, SlideFrame, SlidePhase, SpaceState,
+};
 use super::{app_services, app_services_symbol};
 
 static BUSY: AtomicBool = AtomicBool::new(false);
+/// Whether a switch slides. The host publishes the user's choice here
+/// through [`set_desktop_switch`]; until it does, switches stay instant.
+static SLIDE: AtomicBool = AtomicBool::new(false);
+
+pub(in crate::inject) fn set_desktop_switch(switch: DesktopSwitch) {
+    SLIDE.store(switch == DesktopSwitch::Animated, Ordering::Relaxed);
+}
+
+fn desktop_switch() -> DesktopSwitch {
+    if SLIDE.load(Ordering::Relaxed) {
+        DesktopSwitch::Animated
+    } else {
+        DesktopSwitch::Instant
+    }
+}
 
 pub(super) fn previous_desktop() {
     start(Direction::Previous);
@@ -49,14 +73,22 @@ fn start(direction: Direction) {
         tracing::warn!(?direction, "Space switch: cursor display unavailable");
         return;
     };
+    // Read once: a setting changed mid-switch applies to the next one.
+    let switch = desktop_switch();
     let result = space_switch::spawn_ordered(move |gate| {
         let _lease = lease;
         autoreleasepool(|_| {
-            let result = Native::new(display_id)
+            let result = Native::new(display_id, switch)
                 .and_then(|mut native| space_switch::run(&mut native, direction, gate));
             match result {
                 Ok(outcome) => {
-                    tracing::debug!(display_id, ?direction, ?outcome, "Space switch result");
+                    tracing::debug!(
+                        display_id,
+                        ?direction,
+                        ?switch,
+                        ?outcome,
+                        "Space switch result"
+                    );
                 }
                 Err(error) => tracing::warn!(
                     display_id,
@@ -122,6 +154,7 @@ impl Drop for Observer {
 struct Native {
     api: &'static Api,
     display: u32,
+    switch: DesktopSwitch,
     uuid: String,
     started: Instant,
     changed: mpsc::Receiver<()>,
@@ -129,7 +162,7 @@ struct Native {
 }
 
 impl Native {
-    fn new(display: u32) -> Result<Self, Failure> {
+    fn new(display: u32, switch: DesktopSwitch) -> Result<Self, Failure> {
         let api = API.as_ref().ok_or(Failure::Unavailable)?;
         // SAFETY: dynamically resolved CGDisplayCreateUUIDFromDisplayID accepts
         // a public CGDirectDisplayID and returns a Create-rule CFUUID or null.
@@ -145,6 +178,7 @@ impl Native {
         Ok(Self {
             api,
             display,
+            switch,
             uuid,
             started: Instant::now(),
             changed,
@@ -165,15 +199,11 @@ impl Backend for Native {
     }
 
     fn post(&mut self, direction: Direction, gate: PostGate) -> Result<(), Failure> {
-        let events = swipe_events(direction).ok_or(Failure::PostFailed)?;
+        let output = Output::prepare(self.switch, direction).ok_or(Failure::PostFailed)?;
         if cursor_display() != Some(self.display) {
             return Err(Failure::ContextChanged);
         }
-        gate.commit(|| {
-            for event in &events {
-                CGEvent::post(CGEventTapLocation::SessionEventTap, Some(event));
-            }
-        })
+        gate.commit(|| output.post())
     }
 
     fn elapsed(&self) -> Duration {
@@ -186,15 +216,114 @@ impl Backend for Native {
     }
 }
 
-fn swipe_events(direction: Direction) -> Option<[CFRetained<CGEvent>; 2]> {
+/// Every event of one switch. All of them are built before the first is
+/// posted, so a failed allocation cannot leave the Dock in an unterminated
+/// gesture. The shortcut builds its key edges the same way, when it posts.
+enum Output {
+    /// Began and Ended at full travel: the Dock switches at once.
+    Instant([CFRetained<CGEvent>; 2]),
+    /// A slide's frames, each with its time from the first.
+    Slide(Vec<(Duration, CFRetained<CGEvent>)>),
+    /// The user's enabled Space shortcut, typed as a keyboard types it. The
+    /// Dock then slides exactly as it does for the keyboard. `fallback` is
+    /// the slide to post instead if a held chord owns the shortcut's key.
+    Shortcut {
+        shortcut: super::symbolic_hotkey::SpaceShortcut,
+        fallback: Vec<(Duration, CFRetained<CGEvent>)>,
+    },
+}
+
+impl Output {
+    fn prepare(switch: DesktopSwitch, direction: Direction) -> Option<Self> {
+        match switch {
+            DesktopSwitch::Instant => swipe_events(direction).map(Self::Instant),
+            DesktopSwitch::Animated => {
+                let frames = slide_events(direction)?;
+                if let Some(shortcut) = super::symbolic_hotkey::space_shortcut(direction) {
+                    return Some(Self::Shortcut {
+                        shortcut,
+                        fallback: frames,
+                    });
+                }
+                tracing::debug!(?direction, "no usable Space shortcut — sliding");
+                Some(Self::Slide(frames))
+            }
+        }
+    }
+
+    /// Post every event, each frame of a slide at its time.
+    fn post(&self) {
+        match self {
+            Self::Instant(events) => {
+                for event in events {
+                    CGEvent::post(CGEventTapLocation::SessionEventTap, Some(event));
+                }
+            }
+            Self::Slide(frames) => post_slide(frames),
+            Self::Shortcut { shortcut, fallback } => {
+                if !shortcut.post() {
+                    tracing::debug!("Space shortcut not typed — sliding");
+                    post_slide(fallback);
+                }
+            }
+        }
+    }
+}
+
+fn post_slide(frames: &[(Duration, CFRetained<CGEvent>)]) {
+    space_switch::pace(
+        frames,
+        &mut SessionTap {
+            origin: Instant::now(),
+        },
+    );
+}
+
+/// Posts a slide's frames to the session event tap on the real clock.
+struct SessionTap {
+    origin: Instant,
+}
+
+impl Pace<CFRetained<CGEvent>> for SessionTap {
+    fn now(&self) -> Duration {
+        self.origin.elapsed()
+    }
+
+    fn sleep(&mut self, duration: Duration) {
+        std::thread::sleep(duration);
+    }
+
+    fn post(&mut self, event: &CFRetained<CGEvent>) {
+        CGEvent::post(CGEventTapLocation::SessionEventTap, Some(event));
+    }
+}
+
+/// The Dock swipe event layout this macOS reads. The one owner of that
+/// version split, for instant switches and slides alike.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DockSwipeLayout {
+    /// Private type-30 event fields, through macOS 26.
+    Fields,
+    /// An `IOHIDEvent` attached to the event, from macOS 27 (#1703).
+    HidEvent,
+}
+
+static DOCK_SWIPE_LAYOUT: LazyLock<DockSwipeLayout> = LazyLock::new(|| {
     if NSProcessInfo::processInfo()
         .operatingSystemVersion()
         .majorVersion
         >= 27
     {
-        hid_swipe_events(direction, natural_scrolling())
+        DockSwipeLayout::HidEvent
     } else {
-        field_swipe_events(direction)
+        DockSwipeLayout::Fields
+    }
+});
+
+fn swipe_events(direction: Direction) -> Option<[CFRetained<CGEvent>; 2]> {
+    match *DOCK_SWIPE_LAYOUT {
+        DockSwipeLayout::HidEvent => hid_swipe_events(direction, natural_scrolling()),
+        DockSwipeLayout::Fields => field_swipe_events(direction),
     }
 }
 
@@ -223,6 +352,74 @@ fn field_swipe_events(direction: Direction) -> Option<[CFRetained<CGEvent>; 2]> 
     Some([make(1)?, make(4)?])
 }
 
+/// The events of a slide in `direction`, each with its time from the first.
+fn slide_events(direction: Direction) -> Option<Vec<(Duration, CFRetained<CGEvent>)>> {
+    let frames = space_switch::slide(direction);
+    match *DOCK_SWIPE_LAYOUT {
+        DockSwipeLayout::HidEvent => hid_slide_events(&frames, natural_scrolling()),
+        DockSwipeLayout::Fields => frames
+            .into_iter()
+            .map(|frame| Some((frame.at, slide_event(frame)?)))
+            .collect(),
+    }
+}
+
+/// One frame of a slide, in the fields a trackpad's three-finger swipe
+/// fills. The layout follows Mac Mouse Fix's `TouchSimulator`, as proposed in
+/// #1672.
+fn slide_event(frame: SlideFrame) -> Option<CFRetained<CGEvent>> {
+    let event = CGEvent::new(None)?;
+    CGEvent::set_type(Some(&event), CGEventType(30));
+    let phase = i64::from(slide_phase(frame.phase));
+    // Dock swipe subtype, horizontal motion, and the phase in both slots the
+    // trackpad path fills.
+    for (field, value) in [(110, 23), (123, 1), (165, 1), (132, phase), (134, phase)] {
+        CGEvent::set_integer_value_field(Some(&event), CGEventField(field), value);
+    }
+    CGEvent::set_double_value_field(Some(&event), CGEventField(41), 33_231.0);
+    CGEvent::set_double_value_field(Some(&event), CGEventField(124), frame.progress);
+    // The Dock also reads the progress as raw IEEE-754 f32 bits.
+    CGEvent::set_integer_value_field(
+        Some(&event),
+        CGEventField(135),
+        i64::from(slide_progress_bits(frame.progress)),
+    );
+    let horizontal = f64::from(f32::from_bits(1));
+    CGEvent::set_double_value_field(Some(&event), CGEventField(119), horizontal);
+    CGEvent::set_double_value_field(Some(&event), CGEventField(139), horizontal);
+    CGEvent::set_integer_value_field(Some(&event), CGEventField(136), 1);
+    if frame.phase == SlidePhase::Ended {
+        // An emphatic exit velocity toward the progress sign asks the Dock to
+        // finish the switch rather than spring back, as the instant switch does.
+        let velocity = frame.progress.signum() * 9999.0;
+        CGEvent::set_double_value_field(Some(&event), CGEventField(129), velocity);
+        CGEvent::set_double_value_field(Some(&event), CGEventField(130), velocity);
+    }
+    CGEvent::set_integer_value_field(
+        Some(&event),
+        CGEventField::EventSourceUserData,
+        super::super::SYNTHETIC_EVENT_USER_DATA,
+    );
+    Some(event)
+}
+
+/// A slide phase as the Dock reads it, in both event layouts.
+const fn slide_phase(phase: SlidePhase) -> u32 {
+    match phase {
+        SlidePhase::Began => 1,
+        SlidePhase::Changed => 2,
+        SlidePhase::Ended => 4,
+    }
+}
+
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "the Dock swipe field stores its progress as IEEE-754 f32 bits"
+)]
+fn slide_progress_bits(progress: f64) -> u32 {
+    (progress as f32).to_bits()
+}
+
 const HID_TYPE_VELOCITY: u32 = 9;
 const HID_TYPE_DOCK_SWIPE: u32 = 23;
 const HID_FIELD_MOTION: u32 = HID_TYPE_DOCK_SWIPE << 16 | 1;
@@ -245,54 +442,95 @@ fn hid_event(class: &AnyClass, kind: u32) -> Option<Retained<AnyObject>> {
 }
 
 /// Whether trackpad/mouse scrolling is set to "natural" direction — read
-/// fresh on every swipe since it's a user preference that can change at
+/// fresh on every call since it's a user preference that can change at
 /// runtime without restarting the agent. `com.apple.swipescrolldirection`
 /// lives in `NSGlobalDomain`, which `standardUserDefaults` already searches
 /// as the last entry in its domain list, and is absent (meaning on, the
 /// macOS default since 10.7) until the user has touched the Trackpad/Mouse
 /// settings pane at least once.
-fn natural_scrolling() -> bool {
+pub(in crate::inject) fn natural_scrolling() -> bool {
     let defaults = NSUserDefaults::standardUserDefaults();
     let key = ns_string!("com.apple.swipescrolldirection");
     defaults.objectForKey(key).is_none() || defaults.boolForKey(key)
 }
 
-/// macOS 27 reads an `IOHIDEvent` attached to the event instead of its private
-/// fields, and signs progress and velocity the other way round.
-fn hid_swipe_events(direction: Direction, natural: bool) -> Option<[CFRetained<CGEvent>; 2]> {
-    let class = AnyClass::get(c"HIDEvent")?;
-    let set_hid = app_services::sky_light_symbol(c"SLEventSetIOHIDEvent")?;
-    // SAFETY: the resolved SPI has the `void(CGEventRef, IOHIDEventRef)` ABI.
-    let set_hid = unsafe { std::mem::transmute::<*mut c_void, SetHidEvent>(set_hid) };
-    // macOS 27 reads the swipe's sign the opposite way from the legacy
-    // field-based encoding, and only when natural scrolling is on (the
-    // default): with it off, Next/Previous are inverted (#1703, reported
-    // against two displays and 13/13 swipes on macOS 27.0.1).
-    let sign = if natural {
-        -direction.sign()
-    } else {
-        direction.sign()
-    };
-    let make = |phase: u32| {
-        let hid = dock_swipe_hid_event(class, phase, sign)?;
+/// Builds macOS 27's Dock swipes. macOS 27 reads an `IOHIDEvent` attached to
+/// the event instead of its private fields.
+struct HidSwipe {
+    class: &'static AnyClass,
+    attach: SetHidEvent,
+    /// macOS 27 reads the swipe's sign the opposite way from the legacy
+    /// field-based encoding, and only when natural scrolling is on (the
+    /// default): with it off, Next/Previous are inverted (#1703, reported
+    /// against two displays and 13/13 swipes on macOS 27.0.1).
+    flip: f64,
+}
+
+impl HidSwipe {
+    fn new(natural: bool) -> Option<Self> {
+        let class = AnyClass::get(c"HIDEvent")?;
+        let attach = app_services::sky_light_symbol(c"SLEventSetIOHIDEvent")?;
+        // SAFETY: the resolved SPI has the `void(CGEventRef, IOHIDEventRef)` ABI.
+        let attach = unsafe { std::mem::transmute::<*mut c_void, SetHidEvent>(attach) };
+        let flip = if natural { -1.0 } else { 1.0 };
+        Some(Self {
+            class,
+            attach,
+            flip,
+        })
+    }
+
+    /// A swipe event at `progress`, signed the way the private fields sign it.
+    fn event(&self, phase: u32, progress: f64) -> Option<CFRetained<CGEvent>> {
+        let hid = dock_swipe_hid_event(self.class, phase, self.flip * progress)?;
         let event = CGEvent::new(None)?;
         CGEvent::set_type(Some(&event), CGEventType(30));
         // SAFETY: both objects are live; SkyLight retains the HID event.
-        unsafe { set_hid(&raw const *event, Retained::as_ptr(&hid).cast()) };
+        unsafe { (self.attach)(&raw const *event, Retained::as_ptr(&hid).cast()) };
         CGEvent::set_integer_value_field(
             Some(&event),
             CGEventField::EventSourceUserData,
             super::super::SYNTHETIC_EVENT_USER_DATA,
         );
         Some(event)
-    };
-    Some([make(1)?, make(4)?])
+    }
 }
 
-/// macOS 27 requires a velocity child on the end phase of a DockSwipe.
-/// Private fields follow Mac Mouse Fix's event investigation:
-/// <https://github.com/noah-nuebling/mac-mouse-fix/commit/f92d2d53a>.
-fn dock_swipe_hid_event(class: &AnyClass, phase: u32, sign: f64) -> Option<Retained<AnyObject>> {
+/// macOS 27's instant switch: Began and Ended at full travel.
+fn hid_swipe_events(direction: Direction, natural: bool) -> Option<[CFRetained<CGEvent>; 2]> {
+    let swipe = HidSwipe::new(natural)?;
+    Some([
+        swipe.event(1, direction.sign())?,
+        swipe.event(4, direction.sign())?,
+    ])
+}
+
+/// macOS 27's slide: every frame carries its cumulative progress in the
+/// attached event, as Mac Mouse Fix posts its three-finger swipes on macOS 27.
+fn hid_slide_events(
+    frames: &[SlideFrame],
+    natural: bool,
+) -> Option<Vec<(Duration, CFRetained<CGEvent>)>> {
+    let swipe = HidSwipe::new(natural)?;
+    frames
+        .iter()
+        .map(|frame| {
+            Some((
+                frame.at,
+                swipe.event(slide_phase(frame.phase), frame.progress)?,
+            ))
+        })
+        .collect()
+}
+
+/// macOS 27 requires a velocity child on the end phase of a DockSwipe; it
+/// points the way `progress` does. Private fields follow Mac Mouse Fix's event
+/// investigation: <https://github.com/noah-nuebling/mac-mouse-fix/commit/f92d2d53a>.
+fn dock_swipe_hid_event(
+    class: &AnyClass,
+    phase: u32,
+    progress: f64,
+) -> Option<Retained<AnyObject>> {
     let hid = hid_event(class, HID_TYPE_DOCK_SWIPE)?;
     // SAFETY: private `HIDEvent` setters taking (u32), (NSInteger, u32),
     // (double, u32) and (HIDEvent) respectively.
@@ -302,10 +540,10 @@ fn dock_swipe_hid_event(class: &AnyClass, phase: u32, sign: f64) -> Option<Retai
             msg_send![&*hid, setIntegerValue: HID_MOTION_HORIZONTAL, forField: HID_FIELD_MOTION];
         let _: () =
             msg_send![&*hid, setIntegerValue: HID_FLAVOR_DOCK_PRIMARY, forField: HID_FIELD_FLAVOR];
-        let _: () = msg_send![&*hid, setDoubleValue: sign, forField: HID_FIELD_PROGRESS];
+        let _: () = msg_send![&*hid, setDoubleValue: progress, forField: HID_FIELD_PROGRESS];
         if phase == 4 {
             let velocity = hid_event(class, HID_TYPE_VELOCITY)?;
-            let speed = sign * 9999.0;
+            let speed = progress.signum() * 9999.0;
             let _: () =
                 msg_send![&*velocity, setDoubleValue: speed, forField: HID_FIELD_VELOCITY_X];
             let _: () =

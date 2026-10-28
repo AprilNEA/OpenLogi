@@ -112,7 +112,7 @@ impl Layout {
 /// The keys a layout places characters on: the main typing block, including
 /// ISO's extra key, and JIS's ¥ and _ keys. Never the keypad, whose digits
 /// sit at fixed positions and are not what a shortcut's digit means.
-fn typing_keys() -> impl Iterator<Item = u16> {
+pub(super) fn typing_keys() -> impl Iterator<Item = u16> {
     (0x00..=0x32).chain([0x5d, 0x5e])
 }
 

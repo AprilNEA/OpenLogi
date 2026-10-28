@@ -5,7 +5,7 @@ build instructions, see the [README](../README.md).
 
 ## Toolchain
 
-- Stable Rust (Edition 2024, MSRV 1.98 — the floor tracks current stable)
+- Stable Rust (Edition 2024, MSRV 1.99 — the floor tracks current stable)
 - macOS: Xcode 26+ with the optional **Metal Toolchain** component. The Metal
   Toolchain is what GPUI's `gpui_macos` build script compiles shaders with; the
   version floor is `actool`, which packaging uses to compile the app icon from
@@ -66,18 +66,25 @@ expose `libSystem` the way Apple's real linker wants.
 
 ### Nix package
 
-The root Flake exposes native `x86_64-linux` and `aarch64-linux` packages plus
-the NixOS module. It is separate from the devenv shell:
+The Flake in `packaging/` exposes native `x86_64-linux` and `aarch64-linux`
+packages plus the NixOS module. It is separate from the devenv shell. Nix only
+looks for a Flake in the working directory and its parents, so name it from the
+repository root:
 
 ```sh
-nix flake check --all-systems --no-build  # evaluate every output
-nix build .#openlogi                      # build + test this host's package
-nix run .#openlogi -- list                # run the packaged CLI
+nix flake check ./packaging --all-systems --no-build  # evaluate every output
+nix build ./packaging#openlogi                        # build + test this host's package
+nix run ./packaging#openlogi -- list                  # run the packaged CLI
 ```
 
 The package expression and NixOS module live beside the other Linux packaging
 inputs in `packaging/linux/`. `nix fmt` formats all Nix expressions through the
-Flake's pinned formatter.
+Flake's pinned formatter. It takes no Flake argument, so run it from
+`packaging/`.
+
+The root `flake.nix` is a deprecated alias for existing
+`github:AprilNEA/OpenLogi` inputs. It has no committed lock file, prints a
+warning on every evaluation, and will be removed in a later release.
 
 ### Dev app bundle (macOS)
 
@@ -160,6 +167,24 @@ flow (discovery → passkey → paired). Its agent version carries a `-mock` suf
 so a mock session is identifiable in the UI. It is a dev tool only and is never
 bundled.
 
+While the mock runs, type a command in its terminal and press Enter to change
+what it reports. `help` lists the commands, and `devices` numbers the devices
+that the other commands address:
+
+```text
+devices              # 1 is the online Bolt mouse in the built-in script
+battery 1 5          # it reads 5% and the overlay shows a low-battery notice
+offline 1            # it goes offline; reads and writes fail
+fail 3 error         # the keyboard stays online, but every request fails
+lock caps on         # the overlay shows the Caps Lock indicator
+backlight 2 4        # the overlay shows backlight level 2 of 4
+disconnect           # every client loses its connection and reconnects
+```
+
+The low-battery notice and the lock-key indicator follow the notification
+switches in Settings, as they do with the real agent. `advance <seconds>` moves
+time only in a `--fixture` run.
+
 The proposed architecture for recorded device profiles, raw HID++ replay, and
 deterministic hardware scenarios is documented in
 [Mock device and hardware record/replay architecture](MOCK_DEVICE_TESTING.md).
@@ -207,8 +232,9 @@ Crate-specific contracts stay in each crate's `AGENTS.md`; task workflows stay
 in `.agents/skills/`. No rule generator or install step is required.
 
 The root [AGENTS.md](../AGENTS.md) holds global instructions and the rule index.
-`CLAUDE.md` imports only that entrypoint. Claude Code discovers `.md` rules
-through `.claude/rules` and uses their `paths` metadata for conditional loading.
+`.claude/CLAUDE.md` imports only that entrypoint. Claude Code discovers `.md`
+rules through `.claude/rules` and uses their `paths` metadata for conditional
+loading.
 Other clients must follow the index; `.agents/rules/` is not a universal
 automatic discovery path. Keep the index as ordinary Markdown links: importing
 every rule from the root would load unrelated guidance into Claude's context.
@@ -330,6 +356,11 @@ Environment overrides:
   fully offline build (default: fetched on demand at first launch).
 - `OPENLOGI_SIGN_IDENTITY=<identity>` — codesign the `.app` and `.dmg` with the
   given Developer ID.
+- `OPENLOGI_SPARKLE_PUBLIC_ED_KEY=<base64>` — embed Sparkle.framework and update
+  through it (see Release updater publishing). Without it the bundle updates
+  through the built-in engine.
+- `OPENLOGI_UPDATE_BASE_URL=<url>` — update host of the embedded Sparkle feed;
+  required with `OPENLOGI_SPARKLE_PUBLIC_ED_KEY`.
 - `OPENLOGI_DMG_BACKGROUND_URL=<url>` — override the branded DMG background
   TIFF URL (default: `https://assets.openlogi.org/dmg/dmg-background.tiff`).
 
@@ -418,13 +449,63 @@ updater manifest at:
 ${OPENLOGI_UPDATE_BASE_URL}/channels/stable/latest.json
 ```
 
-The app embeds that manifest URL at build time via
-`OPENLOGI_UPDATE_MANIFEST_URL`, derived from `OPENLOGI_UPDATE_BASE_URL` in the
-release workflow. Release builds also embed `OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY`
+The app embeds the update host at build time via `OPENLOGI_UPDATE_BASE_URL`
+(unset or empty means `https://updates.openlogi.org`) and derives the manifest
+URL from it with `openlogi_core::update_feed`, the module that owns the
+channel layout on the host. Release builds also embed `OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY`
 and run with `Verification::Strict`: an update is installed only if the manifest
 asset carries a minisign signature that verifies against that key, plus a
 matching SHA-256. A build without the key embedded (local/dev) fails closed —
 the update check errors rather than installing an unverified artifact.
+
+The app follows one update channel per launch, which
+`UpdateChannel::followed` decides. A channel picked in Settings → Updates
+(`update_channel` in `config.toml`) wins. Without one, a pre-release such as
+`0.8.17-beta.12` follows `beta` and a final release follows `stable`. The
+engine reads `${OPENLOGI_UPDATE_BASE_URL}/channels/<channel>/latest.json`.
+Sparkle keeps reading the stable appcasts below and, on `beta`, also offers
+their items tagged `<sparkle:channel>beta</sparkle:channel>`. The beta
+channel's `latest.json` offers the newest beta when it is newer than the
+newest stable release, and that stable release otherwise. So an app on `beta`
+gets every stable release too, with one exception. The engine compares
+release versions and never offers a lower one, so an app on a beta numbered
+past a release cut after it stays on that beta until a release numbered past
+it. This happens when the release PR's version goes down after the beta,
+whether the later release is stable or another beta. Sparkle compares build
+versions and moves the app to the later release. `release channels` warns
+whenever a beta is numbered past what the beta channel offers.
+
+### macOS: Sparkle
+
+The signed macOS release bundle embeds
+[Sparkle](https://sparkle-project.org) and updates through it instead
+(`platform::updater` in `openlogi-desktop`). Each architecture ships its own
+DMG, so each reads its own feed:
+
+```text
+${OPENLOGI_UPDATE_BASE_URL}/channels/stable/appcast-arm64.xml
+${OPENLOGI_UPDATE_BASE_URL}/channels/stable/appcast-x86_64.xml
+```
+
+Each feed carries the newest stable release's item. When a beta is newer, the
+beta's item comes before it, tagged `<sparkle:channel>beta</sparkle:channel>`.
+An item is that architecture's notarized, stapled DMG with an EdDSA
+(`sparkle:edSignature`) signature over the exact file, and the release notes
+as Markdown. The bundle trusts only the key in its `SUPublicEDKey`, and
+`SUVerifyUpdateBeforeExtraction` makes Sparkle check that signature before it
+unpacks anything.
+
+Updates stay opt-in. The bundle ships `SUEnableAutomaticChecks = NO`, so
+Sparkle never schedules a check or asks to; the app runs the one launch check
+itself when **Check for updates** is on, without a window. With **Automatic
+updates** also on, a found update downloads in the background and installs on
+quit or through **Restart to Update**. "Check for Updates…" opens Sparkle's
+update window. A bundle without Sparkle (Windows, Linux, local builds) and a
+Sparkle that fails to load fall back to the engine and `latest.json`.
+
+`latest.json` and the DMG minisigs keep being published: bundles from before
+Sparkle read only that manifest, and they update into a Sparkle bundle through
+it.
 
 Configure the R2/update settings in one 1Password item referenced by the GitHub
 secret `OP_R2_SECRET_ITEM`. The item must contain:
@@ -438,15 +519,57 @@ secret `OP_R2_SECRET_ITEM`. The item must contain:
   publish job to sign release artifacts before `latest.json` is generated. It
   is stored base64 (not raw) so its two lines survive 1Password's paste
   handling; the workflow decodes it, mirroring the GitHub App key.
+- `OPENLOGI_SPARKLE_PUBLIC_ED_KEY` — Sparkle's base64 EdDSA public key, stamped
+  into the macOS bundle as `SUPublicEDKey`.
+- `OPENLOGI_SPARKLE_PRIVATE_ED_KEY` — the matching base64 private key (the
+  32-byte seed), used only in the publish job to sign the DMGs into the
+  appcasts. `release appcast` refuses a private key that does not belong to the
+  public key above.
 - `CLOUDFLARE_R2_ACCOUNT_ID` — Cloudflare account ID used for the S3 endpoint.
 - `CLOUDFLARE_R2_BUCKET` — bucket name.
 - `CLOUDFLARE_R2_ACCESS_KEY_ID` — R2 S3 access key.
 - `CLOUDFLARE_R2_SECRET_ACCESS_KEY` — R2 S3 secret key.
 
-The workflow uploads immutable artifacts under `/releases/<tag>/` and only the
-channel manifest under `/channels/stable/latest.json` is mutable.
+The workflow uploads immutable files under `/releases/<tag>/`: the artifacts
+first, then the release's feed record in `/releases/<tag>/feed/`. The record is
+the release's own `latest.json` and one single-item appcast per architecture.
+Only the channel files are mutable: `latest.json` and the two appcasts under
+`/channels/stable/`, and `latest.json` under `/channels/beta/`. After the
+record is up, `cargo xtask release channels` composes them from every record
+on R2, and they go up last. Each channel offers its newest release in
+Sparkle's order of build versions, whatever order the tags published in.
+Items are copied from the records byte for byte, so their signatures are the
+ones `release appcast` made. A record's appcasts go up before its
+`latest.json`, and a record counts only once its `latest.json` is up, so an
+upload that stops part way is skipped rather than blocking later releases.
+Records began after `v0.8.17`; until a stable release has one, the current
+stable channel files stand in for it, and after that they are not read.
+Publish jobs run one at a time (the `release-publish`
+concurrency group), so two tags never interleave these writes. Up to 100
+waiting publish jobs queue (`queue: max`) instead of replacing each other, and
+start in the order they began to wait. The queue only keeps writes apart: it
+does not order releases by version, and it does not make a re-run safe. Never
+re-run publish for a tag whose release has published, even partly. The release
+is immutable, so the re-run fails, after it has already overwritten that tag's
+R2 files and composed the channel files again. A missing artifact ships with
+the next tag.
 
-After a complete Linux release is published, the workflow dispatches
+Generate the Sparkle key pair once, with the `generate_keys` tool from the
+[Sparkle release](https://github.com/sparkle-project/Sparkle/releases) xtask
+embeds:
+
+```sh
+./bin/generate_keys --account openlogi         # prints the public key
+./bin/generate_keys --account openlogi -x sparkle-private.key
+# store the file's contents as OPENLOGI_SPARKLE_PRIVATE_ED_KEY, then delete it
+```
+
+The key cannot be replaced casually: every installed bundle trusts only the one
+it shipped with. Rotating it means shipping a bundle with the new key that is
+still signed with the old one, or relying on Sparkle's fallback to the DMG's
+Developer ID signature.
+
+After a complete Linux stable release is published, the workflow dispatches
 `publish-openlogi-installer` with the tag to `openlogi-org/get`. That repository
 downloads `install.sh`, `install.sh.minisig`, and `SHA256SUMS` from the published
 GitHub Release, verifies both the exact checksum and minisign signature, and
@@ -455,15 +578,194 @@ Cloudflare Pages at `get.openlogi.org`. It mirrors no native package binaries.
 The dispatch uses the same 1Password-backed GitHub App as the Homebrew update;
 the App must be installed for the `openlogi-org/get` repository.
 
-The manifest is generated by the workspace `xtask` helper:
+The workspace `xtask` helper writes the record into a stage laid out as on
+R2. First the manifest:
 
 ```sh
 cargo run -p xtask -- release latest-json \
   --dist dist \
   --tag v0.2.0 \
   --base-url https://updates.openlogi.org \
-  --output dist/latest.json
+  --stage .release/stage
 ```
+
+then the appcasts, after the DMGs are stapled (stapling rewrites them). The
+private key is read only from the environment:
+
+```sh
+OPENLOGI_SPARKLE_PRIVATE_ED_KEY=… cargo run -p xtask -- release appcast \
+  --dist dist \
+  --tag v0.2.0 \
+  --build-version 0.2.0 \
+  --base-url https://updates.openlogi.org \
+  --public-key "$OPENLOGI_SPARKLE_PUBLIC_ED_KEY" \
+  --release-notes .release/RELEASE_NOTES.md \
+  --stage .release/stage
+```
+
+An item's `sparkle:version` is the release's build version (see
+[Release versions](#release-versions)), and its `sparkle:shortVersionString`
+and title are the tag's version. Sparkle's version comparator stops at the
+first `-`, so it would read `1.2.0-beta.3` as `1.2.0`.
+
+The channel files come from a copy of R2's records and channel files, with
+this release's record in it:
+
+```sh
+cargo run -p xtask -- release channels \
+  --tag v0.2.0 \
+  --mirror .release/bucket \
+  --output-dir .release/channels \
+  --base-url https://updates.openlogi.org
+```
+
+A stable release's item also offers Sparkle deltas from the three newest
+earlier stable releases that embed Sparkle (0.8.14 and later). A beta's item
+offers none, so a beta update downloads the full DMG. The macOS build leg
+makes the deltas right after it staples the DMG, because Sparkle's
+`BinaryDelta` runs only on macOS:
+
+```sh
+GH_TOKEN=… cargo run -p xtask -- release sparkle-deltas \
+  --dmg dist/OpenLogi-v0.2.0-macos-arm64.dmg \
+  --tag v0.2.0
+```
+
+It downloads each earlier DMG from the GitHub Release, applies the new delta
+to that app, and keeps the delta only when the result matches the new app file
+for file. It writes `<dmg>.from-<version>.sparkle.delta` and a `.json` next to
+it; `release appcast` reads that metadata and signs the delta. A delta that
+cannot be made is a warning, and the feed still offers the full DMG. The deltas
+go to `/releases/<tag>/` with the DMGs; their metadata stays out of R2.
+
+Sparkle applies a download as a delta only when its file name ends in
+`.delta`. With any other name it cannot unarchive the file and downloads the
+full DMG instead. 0.8.16 and 0.8.17 shipped `.sparkle-delta` names, so no
+client used those deltas.
+
+### Release versions
+
+Every tag run starts with `cargo xtask release version`. It reads the tag and
+checks the workspace version of the tagged commit. A stable tag is on
+release-plz's version bump, so the workspace version must be the tag's
+version. A beta tags `master` between releases without a version bump, so the
+workspace version must be the stable release the beta follows. The command
+prints these values for the build:
+
+| Output | Stable `v0.8.17` | Beta `v0.8.17-beta.12` |
+| --- | --- | --- |
+| `channel` | `stable` | `beta` |
+| `version` | `0.8.17` | `0.8.17-beta.12` |
+| `build_version` | `0.8.17` | `0.8.16.12` |
+| `stamp_version` | empty | `0.8.17-beta.12` |
+
+A beta builds at its own version. Each build leg that compiles OpenLogi
+first runs `cargo xtask release stamp-version --version <stamp_version>`
+(`windows-msi` compiles nothing and has no such step). It writes
+the version into `[workspace.package]`, into the `version` of every path
+dependency and `[patch]` entry that points at a workspace crate, and into the
+workspace crates in `Cargo.lock`, and commits nothing. A dependency belongs
+to the workspace by its `path`, so a registry or git crate with a workspace
+crate's name keeps its requirement. The command fails on a requirement it
+would not write itself, such as `0.8`, before it writes anything. After
+writing, the command requires full `cargo metadata --locked` resolution and
+the requested version on every workspace crate. On failure, it tries to
+restore every file it may have written and names each file it could not
+restore. That run compiles xtask at the old version, but
+everything the leg builds after it, xtask included, sees the beta's
+`CARGO_PKG_VERSION`: the update engine's current version, the About page,
+diagnostics, `CFBundleShortVersionString`, the Linux packages and the
+AppStream release. nfpm writes a pre-release as `0.8.17~beta.12` in the deb
+and rpm. For the Arch package, `linux package` spells it `0.8.17beta.12`,
+because nfpm 2.46.3 leaves a semver pre-release out of the Arch `pkgver`;
+it reads `.PKGINFO` back to check. Each sorts below `0.8.17`. The Windows
+executables' `FILEVERSION` keeps only the first three fields (`0.8.17.0`). A
+stable tag's `stamp_version` is empty, and its legs skip the step.
+
+To try a beta's build before its tag exists, dispatch the Build workflow on
+the branch with `stamp_version` set. It builds unsigned and publishes
+nothing. It is not quite a tag's build: without a `build_version`, the macOS
+bundles' `CFBundleVersion` is the stamped version and the MSI's
+`ProductVersion` is `0.0.0`. Sparkle would read `0.8.18-beta.1` as `0.8.18`,
+so a signed stamp without a build version fails before anything builds.
+
+Sparkle and Windows Installer order releases by `build_version`. The macOS
+bundles carry it as `CFBundleVersion`, and the MSI as its `ProductVersion`. A
+beta's build version is the stable release before it plus a fourth field, the
+beta number. Sparkle ranks it above the stable release before it and below
+the next stable release. Windows Installer ignores the fourth field, so it
+treats the beta and that stable release as the same version, and the MSI
+allows same-version upgrades.
+
+The stable release before a beta is the newest stable tag reachable from the
+beta tag, and the beta's version must be above it. The beta number is the
+count of commits from that stable release to the beta
+(`git rev-list --count`), so it is at least 1 and grows with `master`.
+`release version` fails if the tag's number is a different count.
+
+Only `vX.Y.Z` and `vX.Y.Z-beta.N` are release tags.
+`xtask/src/support/release_tag.rs` owns the syntax and the encoding.
+
+The publish side follows the channel. A beta becomes a GitHub prerelease and
+never the latest release. It leaves the installer site and `openlogi@latest`
+as they are. Publishing recomposes the channel files in build-version order.
+The beta channel offers the beta with the highest build version if it is
+above the newest stable release's; otherwise it offers that stable release.
+The appcasts contain the stable item and any beta item the beta channel
+offers, and only apps on `beta` receive the beta item. The stable channel's
+`latest.json` keeps its bytes.
+
+The Homebrew tap gets one event per channel. A stable release sends
+`update-openlogi` for `openlogi@latest`. A publish that changes what the beta
+channel offers sends `update-openlogi-beta` for `openlogi@beta`, with the tag
+the beta channel now serves: the new beta, or a stable release newer than
+every beta. A tap workflow that listens only for `update-openlogi` ignores
+`update-openlogi-beta`, so a beta event cannot change `openlogi@latest`
+through it.
+
+A stable release's notes compare with the previous stable tag, so they cover
+its betas too. A beta's notes compare with the highest-version release tag
+below it that its commit can reach, betas included.
+`cargo xtask release version` picks that tag and prints it as
+`previous_tag`; publish passes it to GitHub's release-notes API.
+
+### Cutting a beta
+
+Run the Prerelease workflow (`.github/workflows/prerelease.yml`) from
+`master` in the Actions tab. It tags the `master` commit the run was
+dispatched on, and does not move to a newer commit when `master` advances.
+Nobody tags a beta by hand. It finds the open release-plz PR whose head
+contains that commit, the way `release-plz.yml` finds it, and stops if there
+is none. Then it runs
+`cargo xtask release next-beta --release-ref <the PR's head>`. The beta's
+version is that PR's workspace version, the next stable release. Its number
+is the count of commits since the stable release before it. With the release
+PR at 0.8.18 and `master` three commits after `v0.8.17`, the tag is
+`v0.8.18-beta.3`, and its build version is `0.8.17.3`.
+
+`release next-beta` refuses to name a beta when:
+
+- the release PR's version is not above the stable release before the beta;
+- `master` carries a version that has no stable tag yet;
+- the commit is that stable release, or already has a beta tag;
+- the tag exists, is not above the newest beta, or the newest beta is not on
+  the commit's history;
+- the build version does not fit an MSI `ProductVersion`.
+
+`release version` checks the first, second and last of these again on the
+pushed tag. They check the tag's version only, so a build, signature or
+publish can still fail. The others keep betas rising, one per commit.
+
+`release next-beta` reads the `HEAD` commit and the tags, not the working
+tree, so an uncommitted edit cannot change its answer. It needs the whole
+history and every `v*` tag, and refuses a shallow repository, because a
+shallow history can hide commits from the count. To run it outside the
+workflow, run `git fetch --tags` in a full clone first.
+
+The workflow creates the tag with the GitHub App's token, because a tag that
+`GITHUB_TOKEN` pushes starts no workflow. The tag push runs `release.yml`. A
+dry run prints the tag and creates nothing. Only one cut runs at a time, and
+a newer pending run replaces an older pending one.
 
 ## Crowdin translation sync
 

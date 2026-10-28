@@ -3,14 +3,17 @@
 use std::rc::Rc;
 
 use gpui::{
-    App, InteractiveElement, IntoElement, ParentElement, Role, StatefulInteractiveElement as _,
-    Styled, Window, div, prelude::FluentBuilder as _, px, rgb, svg,
+    App, Entity, InteractiveElement, IntoElement, ParentElement, Role,
+    StatefulInteractiveElement as _, Styled, Window, div, prelude::FluentBuilder as _, px, rgb,
+    svg,
 };
-use gpui_component::{Icon, IconName, Selectable as _, h_flex, v_flex};
-use openlogi_core::binding::{Action, Category, GestureDirection};
+use gpui_component::{
+    Icon, IconName, Selectable as _, button::Button, h_flex, input::InputState, v_flex,
+};
+use openlogi_core::binding::{Action, ApplicationTarget, Category, GestureDirection};
 
 use crate::ui::action::localized_action_label;
-use crate::ui::components::MenuRow;
+use crate::ui::components::{MenuRow, control_input};
 use crate::ui::section::section_label;
 use crate::ui::theme::{ACCENT_BLUE, Palette, Typography as _};
 
@@ -95,15 +98,18 @@ pub(crate) fn action_icon_path(action: &Action) -> &'static str {
         Action::VolumeUp => "action-icons/volume-2.svg",
         Action::VolumeDown => "action-icons/volume-1.svg",
         Action::MuteVolume => "action-icons/volume-x.svg",
-        Action::CycleDpiPresets | Action::SetDpiPreset(_) => "action-icons/gauge.svg",
+        Action::CycleDpiPresets | Action::SetDpiPreset(_) | Action::TogglePrecisionMode => {
+            "action-icons/gauge.svg"
+        }
         Action::ToggleSmartShift => "action-icons/refresh-cw.svg",
         Action::ScrollUp => "action-icons/chevrons-up.svg",
         Action::ScrollDown => "action-icons/chevrons-down.svg",
         Action::HorizontalScrollLeft => "action-icons/chevrons-left.svg",
         Action::HorizontalScrollRight => "action-icons/chevrons-right.svg",
-        Action::CustomShortcut(_) | Action::HoldShortcut(_) | Action::TypeText(_) => {
-            "action-icons/keyboard.svg"
-        }
+        Action::CustomShortcut(_)
+        | Action::HoldShortcut(_)
+        | Action::TapKeyHoldingModifiers(_)
+        | Action::TypeText(_) => "action-icons/keyboard.svg",
         Action::RunAppleScript(_) | Action::RunShellCommand(_) => "action-icons/terminal.svg",
     }
 }
@@ -182,9 +188,15 @@ pub(crate) fn action_rows_matching(
                         )
                         .when(selected, |row| {
                             row.child(
-                                Icon::new(IconName::Check)
+                                div()
+                                    .debug_selector(|| format!("{id_prefix}-{action:?}-check"))
+                                    .flex_none()
                                     .size_3()
-                                    .text_color(rgb(ACCENT_BLUE)),
+                                    .child(
+                                        Icon::new(IconName::Check)
+                                            .size_3()
+                                            .text_color(rgb(ACCENT_BLUE)),
+                                    ),
                             )
                         })
                         .on_click(move |_event, window, cx| (on_pick)(action.clone(), window, cx))
@@ -237,6 +249,63 @@ pub(crate) fn editor_scroll_list(
         .children(rows)
 }
 
+/// A single-field "Open Application or Folder" editor, matching the Action
+/// Ring editor's `path_editor`. Shared by the mouse inspector and the keyboard
+/// key panel: `on_pick` receives the validated target, `on_invalid` runs when
+/// Add is pressed on a blank path so the owner can set `invalid`.
+pub(crate) fn application_editor(
+    id_prefix: &'static str,
+    input: &Entity<InputState>,
+    invalid: bool,
+    on_invalid: Rc<dyn Fn(&mut App)>,
+    on_pick: &PickFn,
+    pal: Palette,
+) -> impl IntoElement {
+    let submit_input = input.clone();
+    let on_pick = on_pick.clone();
+    v_flex()
+        .gap_1()
+        .child(editor_section(
+            tr!("action_ring.open_application_or_folder"),
+            pal,
+        ))
+        .child(
+            h_flex()
+                .gap_2()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .debug_selector(move || format!("{id_prefix}-custom-application-input"))
+                        .child(control_input(input).cleanable(true)),
+                )
+                .child(
+                    Button::new(format!("{id_prefix}-custom-application-add"))
+                        .debug_selector(move || format!("{id_prefix}-custom-application-add"))
+                        .compact()
+                        .label(tr!("common.add"))
+                        .on_click(move |_, window, cx| {
+                            let path = submit_input.read(cx).value().to_string();
+                            match ApplicationTarget::new(path, "") {
+                                Ok(target) => {
+                                    (on_pick)(Action::OpenApplication(target), window, cx);
+                                }
+                                Err(_) => (on_invalid)(cx),
+                            }
+                        }),
+                ),
+        )
+        .when(invalid, |editor| {
+            editor.child(
+                div()
+                    .debug_selector(move || format!("{id_prefix}-custom-application-error"))
+                    .text_caption()
+                    .text_color(rgb(0x00ef_4444))
+                    .child(tr!("action_ring.custom_action_invalid_input")),
+            )
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -248,5 +317,39 @@ mod tests {
             .flat_map(|(_, actions)| actions)
             .collect::<Vec<_>>();
         assert!(actions.contains(&Action::ShowActionsRing));
+    }
+
+    /// [`action_icon_path`] is exhaustive over [`Action`], so the compiler
+    /// catches a missing arm — but nothing checks that the path an arm names is
+    /// actually embedded, and an unembedded path renders as a blank slot with
+    /// no error anywhere. [`Action::catalog`] misses the parameterised arms,
+    /// which hold the only references to the keyboard and terminal glyphs.
+    #[test]
+    fn every_reachable_action_icon_is_embedded() {
+        use gpui::AssetSource as _;
+        use openlogi_core::binding::ApplicationTarget;
+        use openlogi_ui::action_icons::ActionIcons;
+
+        let combo = || "Ctrl+A".parse().expect("Ctrl+A is a valid combo");
+        let uncataloged = [
+            Action::SetDpiPreset(0),
+            Action::CustomShortcut(combo()),
+            Action::HoldShortcut(combo()),
+            Action::TapKeyHoldingModifiers(combo()),
+            Action::TypeText(String::new()),
+            Action::RunShellCommand(String::new()),
+            Action::RunAppleScript(String::new()),
+            Action::Workflow(Vec::new()),
+            Action::OpenApplication(
+                ApplicationTarget::new("/usr/bin/true", "true").expect("non-empty path"),
+            ),
+        ];
+        for action in Action::catalog().into_iter().chain(uncataloged) {
+            let path = action_icon_path(&action);
+            assert!(
+                matches!(ActionIcons.load(path), Ok(Some(_))),
+                "{path}, bound to {action:?}, is not embedded"
+            );
+        }
     }
 }

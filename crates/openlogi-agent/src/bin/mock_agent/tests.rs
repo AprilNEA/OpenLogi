@@ -29,12 +29,14 @@ fn test_state() -> State {
 
 fn test_state_with_backlight(backlight: ProfileSetting<BacklightState>) -> State {
     let mut profile = built_in_profile().expect("built-in profile should construct");
+    advertise_mouse_backlight(&mut profile);
     profile.settings[0].backlight = backlight;
     State::new(profile, MockClock::Test(Duration::ZERO)).expect("backlight profile should validate")
 }
 
 fn test_state_with_unavailable_reads() -> State {
     let mut profile = built_in_profile().expect("built-in profile should construct");
+    advertise_mouse_backlight(&mut profile);
     let settings = &mut profile.settings[0];
     settings.dpi = ProfileSetting::Unavailable;
     settings.smartshift = ProfileSetting::Unavailable;
@@ -44,11 +46,40 @@ fn test_state_with_unavailable_reads() -> State {
         .expect("unavailable settings should preserve capability consistency")
 }
 
+/// Give the mouse slot (`settings[0]`) the backlight capability, so a profile
+/// that offers it a backlight setting stays consistent with its inventory.
+fn advertise_mouse_backlight(profile: &mut DeviceProfile) {
+    let capabilities = profile
+        .inventories
+        .iter_mut()
+        .flat_map(|inventory| inventory.paired.iter_mut())
+        .find(|device| device.slot == MOUSE_SLOT)
+        .and_then(|device| device.capabilities.as_mut())
+        .expect("the built-in profile has a probed mouse slot");
+    capabilities.backlight = true;
+}
+
 fn mouse_route() -> DeviceRoute {
     DeviceRoute::Bolt {
         receiver_uid: RECEIVER_UID.to_string(),
         slot: MOUSE_SLOT,
     }
+}
+
+fn keyboard_route() -> DeviceRoute {
+    DeviceRoute::Bolt {
+        receiver_uid: RECEIVER_UID.to_string(),
+        slot: KEYBOARD_SLOT,
+    }
+}
+
+fn test_state_with_disable_keys_scenario(scenario: DisableKeysScenario) -> State {
+    State::with_disable_keys_scenario(
+        built_in_profile().expect("built-in profile should construct"),
+        MockClock::Test(Duration::ZERO),
+        scenario,
+    )
+    .expect("Disable Keys profile should validate")
 }
 
 fn state_with_discovery() -> State {
@@ -186,6 +217,14 @@ async fn profile_backed_wheel_and_backlight_reads_return_exact_values() {
         status: openlogi_hid::BacklightStatus::PermanentManual,
         current_level: 3,
         nb_levels: 8,
+        power_save: true,
+        duration: Some(
+            openlogi_hid::BacklightDuration::try_from(30).expect("30 seconds is a valid timer"),
+        ),
+        controls: openlogi_hid::BacklightControls::AUTOMATIC
+            | openlogi_hid::BacklightControls::LEVEL
+            | openlogi_hid::BacklightControls::POWER_SAVE
+            | openlogi_hid::BacklightControls::DURATION,
     };
     let agent = MockAgent::new(test_state_with_backlight(ProfileSetting::Supported(
         expected,
@@ -197,6 +236,71 @@ async fn profile_backed_wheel_and_backlight_reads_return_exact_values() {
             .expect("backlight read should return exact profile state"),
         expected
     );
+}
+
+#[tokio::test]
+async fn backlight_changes_are_kept_and_unoffered_ones_refused() {
+    let manual = BacklightState {
+        enabled: true,
+        mode: openlogi_hid::BacklightMode::PermanentManual,
+        status: openlogi_hid::BacklightStatus::PermanentManual,
+        current_level: 3,
+        nb_levels: 8,
+        power_save: true,
+        duration: None,
+        controls: openlogi_hid::BacklightControls::AUTOMATIC
+            | openlogi_hid::BacklightControls::POWER_SAVE,
+    };
+    let agent = MockAgent::new(test_state_with_backlight(ProfileSetting::Supported(manual)));
+    let automatic = agent
+        .clone()
+        .set_backlight(
+            tarpc::context::current(),
+            mouse_route(),
+            BacklightChange::Automatic(true),
+        )
+        .await
+        .expect("the keyboard offers automatic brightness");
+    assert_eq!(automatic, manual.changed(BacklightChange::Automatic(true)));
+    assert!(matches!(
+        agent
+            .clone()
+            .set_backlight(
+                tarpc::context::current(),
+                mouse_route(),
+                BacklightChange::Level(5),
+            )
+            .await,
+        Err(WriteError::BacklightChangeUnsupported {
+            change: BacklightChange::Level(5)
+        })
+    ));
+    assert_eq!(
+        agent
+            .clone()
+            .read_backlight(tarpc::context::current(), mouse_route())
+            .await
+            .expect("the backlight reads back"),
+        automatic,
+        "a refused change leaves the kept one in place"
+    );
+
+    let keyboard = DeviceRoute::Bolt {
+        receiver_uid: RECEIVER_UID.to_string(),
+        slot: KEYBOARD_SLOT,
+    };
+    assert!(matches!(
+        agent
+            .set_backlight(
+                tarpc::context::current(),
+                keyboard,
+                BacklightChange::Enabled(false),
+            )
+            .await,
+        Err(WriteError::FeatureUnsupported {
+            feature_hex: 0x1982
+        })
+    ));
 }
 
 #[tokio::test]
@@ -528,4 +632,407 @@ fn unpairing_drops_the_slot_from_the_rendered_inventory() {
         product_id: 0xb034,
     };
     assert_eq!(state.unpair(&direct), Err(PairingFailure::ReceiverNotFound));
+}
+
+#[path = "tests/control.rs"]
+mod control;
+#[path = "tests/corpus.rs"]
+mod corpus;
+
+/// The built-in profile, with the mouse slot offering `hosts` as its
+/// Easy-Switch channels.
+fn test_state_with_easy_switch(hosts: openlogi_core::hid::EasySwitchHosts) -> State {
+    let mut profile = built_in_profile().expect("built-in profile should construct");
+    profile
+        .inventories
+        .iter_mut()
+        .flat_map(|inventory| inventory.paired.iter_mut())
+        .find(|device| device.slot == MOUSE_SLOT)
+        .and_then(|device| device.capabilities.as_mut())
+        .expect("the built-in profile has a probed mouse slot")
+        .easy_switch = true;
+    profile.settings[0].easy_switch = ProfileSetting::Supported(hosts);
+    State::new(profile, MockClock::Test(Duration::ZERO))
+        .expect("Easy-Switch profile should validate")
+}
+
+#[tokio::test]
+async fn easy_switch_names_are_kept_and_rejected_renames_change_nothing() {
+    use openlogi_core::hid::{EasySwitchHosts, EasySwitchSlot, HostConnection};
+
+    let slot = |index, name: Option<&str>| EasySwitchSlot {
+        index,
+        paired: name.is_some(),
+        connection: HostConnection::Bluetooth,
+        name: name.map(str::to_owned),
+        name_max_len: 8,
+        os: None,
+    };
+    let hosts = EasySwitchHosts {
+        current: Some(0),
+        slots: vec![slot(0, Some("Desk")), slot(1, None)],
+        can_rename: true,
+    };
+    let agent = MockAgent::new(test_state_with_easy_switch(hosts.clone()));
+    assert_eq!(
+        agent
+            .clone()
+            .read_easy_switch_hosts(tarpc::context::current(), mouse_route())
+            .await
+            .expect("the mouse lists its channels"),
+        hosts
+    );
+
+    let renamed = agent
+        .clone()
+        .rename_easy_switch_host(
+            tarpc::context::current(),
+            mouse_route(),
+            0,
+            " Studio ".into(),
+        )
+        .await
+        .expect("a paired channel takes a name that fits");
+    assert_eq!(renamed.slots[0].name.as_deref(), Some("Studio"));
+    for (index, name, error) in [
+        (1, "Laptop", WriteError::HostSlotEmpty { slot: 1 }),
+        (
+            0,
+            "Workstation",
+            WriteError::HostNameRejected { max_len: 8 },
+        ),
+    ] {
+        assert_eq!(
+            agent
+                .clone()
+                .rename_easy_switch_host(
+                    tarpc::context::current(),
+                    mouse_route(),
+                    index,
+                    name.into()
+                )
+                .await,
+            Err(error)
+        );
+    }
+    assert_eq!(
+        agent
+            .clone()
+            .read_easy_switch_hosts(tarpc::context::current(), mouse_route())
+            .await
+            .expect("the channels read back"),
+        renamed,
+        "a refused rename leaves the kept name in place"
+    );
+
+    let keyboard = DeviceRoute::Bolt {
+        receiver_uid: RECEIVER_UID.to_string(),
+        slot: KEYBOARD_SLOT,
+    };
+    assert_eq!(
+        agent
+            .rename_easy_switch_host(tarpc::context::current(), keyboard, 0, "Desk".into())
+            .await,
+        Err(WriteError::FeatureUnsupported {
+            feature_hex: 0x1815
+        })
+    );
+}
+
+#[test]
+fn disable_keys_scenarios_are_strict_and_reconnect_uses_logical_time() {
+    assert_eq!(
+        DisableKeysScenario::parse("ready").expect("ready scenario"),
+        DisableKeysScenario::Ready
+    );
+    DisableKeysScenario::parse("READY").expect_err("scenario names are case-sensitive");
+
+    let mut state = test_state_with_disable_keys_scenario(DisableKeysScenario::SameRouteReconnect);
+    state
+        .require_reachable(&keyboard_route())
+        .expect("initially online");
+    state.advance_test_time(Duration::from_secs(2));
+    assert_eq!(
+        state.require_reachable(&keyboard_route()),
+        Err(WriteError::DeviceUnreachable {
+            index: keyboard_route().device_index(),
+        })
+    );
+    state.advance_test_time(Duration::from_secs(2));
+    state
+        .require_reachable(&keyboard_route())
+        .expect("online after reconnect");
+}
+
+#[tokio::test]
+async fn disable_keys_obeys_mock_console_faults() {
+    let agent = MockAgent::new(test_state_with_disable_keys_scenario(
+        DisableKeysScenario::Ready,
+    ));
+    let device = agent
+        .state
+        .lock()
+        .await
+        .targets()
+        .iter()
+        .position(|target| target.route == keyboard_route())
+        .expect("keyboard target");
+    let settings = AppSettings::default();
+    for fault in [
+        super::control::Fault::Error,
+        super::control::Fault::Unreachable,
+    ] {
+        agent
+            .apply(
+                super::control::Command::Fault {
+                    device,
+                    fault: Some(fault),
+                },
+                &settings,
+            )
+            .await
+            .expect("set console fault");
+        assert_eq!(
+            agent
+                .clone()
+                .read_disable_keys(tarpc::context::current(), keyboard_route())
+                .await,
+            Err(fault.error(&keyboard_route()))
+        );
+        assert_eq!(
+            agent
+                .clone()
+                .set_disable_keys(
+                    tarpc::context::current(),
+                    keyboard_route(),
+                    DisableKeysMask::CAPS_LOCK
+                )
+                .await,
+            Err(fault.error(&keyboard_route()))
+        );
+    }
+    agent
+        .apply(
+            super::control::Command::Fault {
+                device,
+                fault: None,
+            },
+            &settings,
+        )
+        .await
+        .expect("clear fault");
+    let initial = agent
+        .clone()
+        .read_disable_keys(tarpc::context::current(), keyboard_route())
+        .await
+        .expect("read after clearing fault");
+    assert!(
+        !initial.disabled.contains(DisableKeysMask::CAPS_LOCK),
+        "failed writes must not change the profile"
+    );
+    agent
+        .set_disable_keys(
+            tarpc::context::current(),
+            keyboard_route(),
+            DisableKeysMask::CAPS_LOCK,
+        )
+        .await
+        .expect("write after clearing fault");
+}
+
+#[tokio::test]
+async fn disable_keys_obeys_mock_console_link_changes() {
+    let agent = MockAgent::new(test_state_with_disable_keys_scenario(
+        DisableKeysScenario::Ready,
+    ));
+    let device = agent
+        .state
+        .lock()
+        .await
+        .targets()
+        .iter()
+        .position(|target| target.route == keyboard_route())
+        .expect("keyboard target");
+    let settings = AppSettings::default();
+    agent
+        .apply(
+            super::control::Command::Link {
+                device,
+                online: false,
+            },
+            &settings,
+        )
+        .await
+        .expect("disconnect");
+    let offline = WriteError::DeviceUnreachable {
+        index: keyboard_route().device_index(),
+    };
+    assert_eq!(
+        agent
+            .clone()
+            .read_disable_keys(tarpc::context::current(), keyboard_route())
+            .await,
+        Err(offline.clone())
+    );
+    assert_eq!(
+        agent
+            .clone()
+            .set_disable_keys(
+                tarpc::context::current(),
+                keyboard_route(),
+                DisableKeysMask::CAPS_LOCK
+            )
+            .await,
+        Err(offline)
+    );
+    agent
+        .apply(
+            super::control::Command::Link {
+                device,
+                online: true,
+            },
+            &settings,
+        )
+        .await
+        .expect("reconnect");
+    let initial = agent
+        .clone()
+        .read_disable_keys(tarpc::context::current(), keyboard_route())
+        .await
+        .expect("read after reconnect");
+    assert!(
+        !initial.disabled.contains(DisableKeysMask::CAPS_LOCK),
+        "failed writes must not change the profile"
+    );
+    let confirmed = agent
+        .clone()
+        .set_disable_keys(
+            tarpc::context::current(),
+            keyboard_route(),
+            DisableKeysMask::CAPS_LOCK,
+        )
+        .await
+        .expect("write after reconnect");
+    assert!(confirmed.disabled.contains(DisableKeysMask::CAPS_LOCK));
+    assert_eq!(
+        agent
+            .read_disable_keys(tarpc::context::current(), keyboard_route())
+            .await
+            .expect("read back"),
+        confirmed
+    );
+}
+
+#[tokio::test]
+async fn disable_keys_mock_preserves_advertised_unknown_bits() {
+    let agent = MockAgent::new(test_state_with_disable_keys_scenario(
+        DisableKeysScenario::Ready,
+    ));
+    let result = agent
+        .clone()
+        .set_disable_keys(
+            tarpc::context::current(),
+            keyboard_route(),
+            DisableKeysMask::CAPS_LOCK,
+        )
+        .await
+        .expect("guarded write");
+    assert_eq!(result.supported.bits(), 0xb1);
+    assert_eq!(result.disabled.bits(), 0xa1);
+    assert_eq!(agent.state.lock().await.disable_keys_writes, 1);
+}
+
+#[tokio::test]
+async fn disable_keys_mock_rejects_unknown_and_unadvertised_known_bits() {
+    let agent = MockAgent::new(test_state_with_disable_keys_scenario(
+        DisableKeysScenario::Ready,
+    ));
+    for desired in [
+        DisableKeysMask::from_bits_retain(0x20),
+        DisableKeysMask::NUM_LOCK,
+    ] {
+        assert!(matches!(
+            agent
+                .clone()
+                .set_disable_keys(tarpc::context::current(), keyboard_route(), desired)
+                .await,
+            Err(WriteError::UnsupportedMask {
+                operation: HidppOperation::WriteDisableKeys,
+                feature_hex: 0x4521,
+                ..
+            })
+        ));
+    }
+}
+
+#[tokio::test]
+async fn disable_keys_read_and_reload_failure_counters_match_scenarios() {
+    let read_agent = MockAgent::new(test_state_with_disable_keys_scenario(
+        DisableKeysScenario::ReadFailsUntilRetry,
+    ));
+    for _ in 0..3 {
+        assert!(matches!(
+            read_agent
+                .clone()
+                .read_disable_keys(tarpc::context::current(), keyboard_route())
+                .await,
+            Err(WriteError::RequestTimedOut {
+                operation: HidppOperation::ReadDisableKeys
+            })
+        ));
+    }
+    read_agent
+        .read_disable_keys(tarpc::context::current(), keyboard_route())
+        .await
+        .expect("fourth read succeeds");
+
+    let reload_agent = MockAgent::new(test_state_with_disable_keys_scenario(
+        DisableKeysScenario::ReloadFailsOnce,
+    ));
+    reload_agent
+        .clone()
+        .reload_config(tarpc::context::current())
+        .await
+        .expect("first reload succeeds");
+    reload_agent
+        .clone()
+        .reload_config(tarpc::context::current())
+        .await
+        .expect_err("second reload fails once");
+    reload_agent
+        .reload_config(tarpc::context::current())
+        .await
+        .expect("third reload succeeds");
+}
+
+#[tokio::test]
+async fn disable_keys_write_mismatch_is_retained_and_reported() {
+    let agent = MockAgent::new(test_state_with_disable_keys_scenario(
+        DisableKeysScenario::WriteMismatch,
+    ));
+    assert!(matches!(
+        agent
+            .clone()
+            .set_disable_keys(
+                tarpc::context::current(),
+                keyboard_route(),
+                DisableKeysMask::CAPS_LOCK,
+            )
+            .await,
+        Err(WriteError::WriteNotApplied {
+            operation: HidppOperation::WriteDisableKeys,
+            expected: 0xa1,
+            actual: 0xa0,
+            ..
+        })
+    ));
+    assert_eq!(
+        agent
+            .read_disable_keys(tarpc::context::current(), keyboard_route())
+            .await
+            .expect("retained mismatch")
+            .disabled
+            .bits(),
+        0xa0
+    );
 }

@@ -14,7 +14,9 @@ use openlogi_ipc::{AgentRequest, AgentResponse, AgentStatus, ForegroundApps, Inv
 
 use super::*;
 
+mod easy_switch;
 mod persistence;
+mod report_rate;
 
 type Step = Box<dyn FnOnce(AgentRequest) -> AgentResponse + Send>;
 
@@ -29,6 +31,8 @@ fn snapshot() -> AgentSnapshot {
             agent_version: "test-agent".into(),
             input_monitoring_granted: true,
             hid_open_failures: false,
+            secure_input: openlogi_ipc::SecureInput::Off,
+            virtual_keyboard: openlogi_ipc::VirtualKeyboardStatus::Unsupported,
         },
         inventory: vec![DeviceInventory {
             receiver: ReceiverInfo {
@@ -46,6 +50,7 @@ fn snapshot() -> AgentSnapshot {
                 battery: None,
                 model_info: None,
                 capabilities: None,
+                settings_revision: 0,
             }],
         }],
         standalone: Vec::new(),
@@ -55,6 +60,7 @@ fn snapshot() -> AgentSnapshot {
             current: None,
             recent: Vec::new(),
         },
+        lights: Vec::new(),
     }
 }
 
@@ -199,6 +205,7 @@ async fn status_has_a_separate_explicit_json_contract() {
             "agent_version": "test-agent", "inventory": "ready",
             "accessibility_granted": false, "input_monitoring_granted": true,
             "hook_installed": false, "hid_open_failures": false, "launch_at_login": true,
+            "virtual_keyboard": "unsupported",
         })
     );
 }
@@ -280,6 +287,43 @@ async fn dpi_validates_supported_values_before_writing_and_checks_readback() {
         } else {
             assert_eq!(result["error"]["code"], "readback_mismatch");
         }
+    }
+}
+
+#[tokio::test]
+async fn agent_side_dpi_rejections_use_the_same_codes_as_local_checks() {
+    for (error, code) in [
+        (
+            WriteError::DpiUnsupported {
+                requested: Dpi::from(1200),
+            },
+            "invalid_value",
+        ),
+        (
+            WriteError::DpiNotApplied {
+                requested: Dpi::from(1200),
+                actual: Dpi::from(400),
+            },
+            "readback_mismatch",
+        ),
+    ] {
+        let result = run_script(
+            snapshot(),
+            ApiCommand::Dpi {
+                device: route().to_string(),
+                set: Some(1200),
+            },
+            vec![
+                dpi_read(400),
+                Box::new(move |request| {
+                    assert!(matches!(request, AgentRequest::SetDpi { .. }));
+                    AgentResponse::SetDpi(Err(error))
+                }),
+            ],
+        )
+        .await;
+        assert_eq!(result["ok"], false);
+        assert_eq!(result["error"]["code"], code);
     }
 }
 
@@ -417,7 +461,7 @@ async fn read_only_settings_never_send_writes() {
             assert!(matches!(request, AgentRequest::ReadFnLock { .. }));
             AgentResponse::ReadFnLock(Ok(FnLockState {
                 fn_lock: false,
-                default_fn_lock: true,
+                default_fn_lock: Some(true),
             }))
         })],
     )
@@ -426,6 +470,34 @@ async fn read_only_settings_never_send_writes() {
     assert_eq!(fn_lock["data"]["default_fn_lock"], true);
 }
 
+#[tokio::test]
+async fn a_keyboard_without_a_default_reports_default_fn_lock_as_null() {
+    // A 0x40a0 keyboard reports its state but no default.
+    let fn_lock = run_script(
+        snapshot(),
+        ApiCommand::FnLock {
+            device: route().to_string(),
+            set: None,
+        },
+        vec![Box::new(|request| {
+            assert!(matches!(request, AgentRequest::ReadFnLock { .. }));
+            AgentResponse::ReadFnLock(Ok(FnLockState {
+                fn_lock: true,
+                default_fn_lock: None,
+            }))
+        })],
+    )
+    .await;
+    let data = fn_lock["data"]
+        .as_object()
+        .expect("fn-lock data is an object");
+    assert_eq!(data.get("fn_lock"), Some(&serde_json::Value::Bool(true)));
+    assert_eq!(
+        data.get("default_fn_lock"),
+        Some(&serde_json::Value::Null),
+        "the field stays in the output as null, not dropped or made false"
+    );
+}
 #[tokio::test]
 async fn device_write_failure_is_not_retried_or_reported_as_success() {
     let result = run_script(
@@ -473,7 +545,7 @@ async fn fn_lock_uses_explicit_state_and_returns_firmware_echo() {
                 assert_eq!(fn_lock, enabled);
                 AgentResponse::SetFnLock(Ok(FnLockState {
                     fn_lock: observed,
-                    default_fn_lock: false,
+                    default_fn_lock: Some(false),
                 }))
             })],
         )
@@ -508,6 +580,24 @@ async fn unsupported_device_error_survives_the_json_boundary_without_a_write() {
     .await;
     assert_eq!(result["ok"], false);
     assert_eq!(result["error"]["code"], "unsupported_feature");
+}
+
+#[test]
+fn press_force_refusals_share_the_existing_codes() {
+    for (error, code) in [
+        (WriteError::ForceSensingUnchangeable, "unsupported_feature"),
+        (
+            WriteError::ForceSensingNotApplied {
+                requested: 4500,
+                actual: 5089,
+            },
+            "readback_mismatch",
+        ),
+    ] {
+        let result = envelope(Err(error.into()));
+        assert_eq!(result["ok"], false);
+        assert_eq!(result["error"]["code"], code);
+    }
 }
 
 #[test]

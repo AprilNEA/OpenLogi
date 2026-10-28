@@ -9,6 +9,7 @@ use openlogi_core::config::{
     AppIcon, AppSettings, Appearance, AssetSourcePreference, DeviceViewMode, MouseProfileTarget,
     ThumbwheelSensitivity, UiScale, VerticalScrollSensitivity,
 };
+use openlogi_core::update_feed::UpdateChannel;
 
 impl AppState {
     /// App-wide settings backing the Settings window (launch-at-login,
@@ -38,12 +39,10 @@ impl AppState {
         StateEvent::SettingsChanged.into()
     }
     /// Toggle the menu-bar (status item) icon preference and persist it. The
-    /// icon is hosted by the always-on agent, which reads this on startup and
-    /// installs the status item only when enabled — so the change takes effect
-    /// the next time the agent launches (a no-restart live toggle would need a
-    /// main-thread hop from the agent's IPC reload). `ReloadConfig` keeps the
-    /// agent's other config in sync meanwhile. An already-set value writes
-    /// nothing and is still reported.
+    /// icon is hosted by the always-on agent: on macOS the `ReloadConfig` this
+    /// triggers installs or removes the status item live; the Windows
+    /// notification-area icon follows on the agent's next launch. An
+    /// already-set value writes nothing and is still reported.
     ///
     /// The callers are the menu-bar / notification-area toggle in Settings,
     /// shown only where there's a tray (macOS + Windows), so the setter is
@@ -68,6 +67,18 @@ impl AppState {
         self.config
             .edit(|config| config.app_settings.check_for_updates = enabled);
         self.persist_config("update-check setting");
+        StateEvent::SettingsChanged.into()
+    }
+    /// Pick the update channel and persist it. The updater reads it at the
+    /// next launch, so there is no immediate side effect here. An
+    /// already-picked channel writes nothing and is still reported.
+    pub fn commit_update_channel(&mut self, channel: UpdateChannel) -> StateEvents {
+        if self.config.app_settings.update_channel == Some(channel) {
+            return StateEvent::SettingsChanged.into();
+        }
+        self.config
+            .edit(|config| config.app_settings.update_channel = Some(channel));
+        self.persist_config("update-channel setting");
         StateEvent::SettingsChanged.into()
     }
     /// Toggle opt-in automatic install and persist it. The launch-time updater
@@ -302,6 +313,46 @@ impl AppState {
         self.config
             .edit(|config| config.app_settings.smooth_scroll = enabled);
         self.persist_and_reload("smooth scroll");
+        StateEvent::SettingsChanged.into()
+    }
+    /// Toggle the overlay's low-battery notices and persist it. The agent
+    /// decides when a battery is low, so it reads the new value on config
+    /// reload; while off it posts no notice. An already-set value writes
+    /// nothing and is still reported; disk failures restore the persisted
+    /// value.
+    pub fn commit_low_battery_notifications(&mut self, enabled: bool) -> StateEvents {
+        if self.config.app_settings.low_battery_notifications == enabled {
+            return StateEvent::SettingsChanged.into();
+        }
+        self.config
+            .edit(|config| config.app_settings.low_battery_notifications = enabled);
+        self.persist_and_reload("low-battery notifications setting");
+        StateEvent::SettingsChanged.into()
+    }
+    /// Toggle the overlay's lock-key indicator and persist it. The agent
+    /// decides what the indicator shows, so it reads the new value on config
+    /// reload; while off it shows nothing. An already-set value writes nothing
+    /// and is still reported; disk failures restore the persisted value.
+    pub fn commit_lock_key_notifications(&mut self, enabled: bool) -> StateEvents {
+        if self.config.app_settings.lock_key_notifications == enabled {
+            return StateEvent::SettingsChanged.into();
+        }
+        self.config
+            .edit(|config| config.app_settings.lock_key_notifications = enabled);
+        self.persist_and_reload("lock-key notifications setting");
+        StateEvent::SettingsChanged.into()
+    }
+    /// Toggle the Previous/Next Desktop slide and persist it. The agent
+    /// switches desktops, so it reads the new value on config reload; the
+    /// next switch uses it. An already-set value writes nothing and is still
+    /// reported; disk failures restore the persisted value.
+    pub fn commit_animate_desktop_switch(&mut self, enabled: bool) -> StateEvents {
+        if self.config.app_settings.animate_desktop_switch == enabled {
+            return StateEvent::SettingsChanged.into();
+        }
+        self.config
+            .edit(|config| config.app_settings.animate_desktop_switch = enabled);
+        self.persist_and_reload("desktop switch animation setting");
         StateEvent::SettingsChanged.into()
     }
     /// Set traditional vertical mouse-wheel sensitivity and persist it. The

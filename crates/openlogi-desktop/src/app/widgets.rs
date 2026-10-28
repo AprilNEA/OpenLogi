@@ -14,7 +14,7 @@ use openlogi_core::device::DeviceKind;
 use openlogi_core::hid::DeviceRoute;
 
 use super::AppView;
-use crate::state::AppState;
+use crate::state::{AppState, DeviceRecord};
 use crate::ui::components::control_button;
 use crate::ui::theme::{Palette, Typography as _};
 
@@ -120,21 +120,29 @@ pub(super) fn route_label(route: Option<&DeviceRoute>) -> String {
     }
 }
 
-pub(super) fn kind_label(kind: DeviceKind) -> String {
-    match kind {
-        DeviceKind::Mouse => tr!("device.mouse").to_string(),
-        DeviceKind::Keyboard => tr!("device.keyboard").to_string(),
-        DeviceKind::Numpad => tr!("device.numpad").to_string(),
-        DeviceKind::Presenter => tr!("device.presenter").to_string(),
-        DeviceKind::Remote => tr!("device.remote").to_string(),
-        DeviceKind::Trackball => tr!("device.trackball").to_string(),
-        DeviceKind::Touchpad => tr!("device.touchpad").to_string(),
-        DeviceKind::Tablet => tr!("device.tablet").to_string(),
-        DeviceKind::Gamepad => tr!("device.gamepad").to_string(),
-        DeviceKind::Joystick => tr!("device.joystick").to_string(),
-        DeviceKind::Headset => tr!("device.headset").to_string(),
-        DeviceKind::Camera => tr!("camera.camera").to_string(),
-        DeviceKind::Unknown => tr!("device.device").to_string(),
-        DeviceKind::Light => tr!("device.lighting").to_string(),
+/// The receiver pairing slot a device sits in — "Slot 4" — or `None` for a
+/// device with no receiver between it and the host.
+///
+/// Called a slot, not a channel: a receiver slot is unrelated to the
+/// device's own Easy-Switch channel, and the two are easy to confuse.
+pub(super) fn receiver_slot_label(record: &DeviceRecord) -> Option<SharedString> {
+    matches!(
+        record.route,
+        Some(DeviceRoute::Bolt { .. } | DeviceRoute::Unifying { .. })
+    )
+    .then(|| tr!("device.receiver_slot_number", number => record.slot.to_string()))
+}
+
+/// How a device is reached, in words: the transport, plus the receiver slot
+/// when there is one ("Bolt receiver · Slot 4").
+pub(super) fn connection_summary(record: &DeviceRecord) -> String {
+    let route = route_label(record.route.as_ref());
+    match receiver_slot_label(record) {
+        Some(slot) => format!("{route} · {slot}"),
+        None => route,
     }
+}
+
+pub(super) fn kind_label(kind: DeviceKind) -> String {
+    tr!(kind.translation_key()).to_string()
 }

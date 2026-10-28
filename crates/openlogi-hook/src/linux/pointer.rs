@@ -107,56 +107,17 @@ fn focused_target(conn: &RustConnection, root: Window) -> Option<PointerTarget> 
 
 #[cfg(test)]
 mod tests {
-    use std::io::{BufRead as _, BufReader};
-    use std::process::{Child, Command, Stdio};
-
     use x11rb::protocol::xproto::{CreateWindowAux, PropMode, WindowClass};
     use x11rb::wrapper::ConnectionExt as _;
 
     use super::*;
-
-    struct XServer(Child);
-
-    impl XServer {
-        fn start() -> (Self, RustConnection, Window) {
-            let mut server = Self(
-                Command::new("Xvfb")
-                    .args([
-                        "-displayfd",
-                        "1",
-                        "-screen",
-                        "0",
-                        "640x480x24",
-                        "-nolisten",
-                        "tcp",
-                    ])
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::null())
-                    .spawn()
-                    .expect("start Xvfb"),
-            );
-            let mut display = String::new();
-            BufReader::new(server.0.stdout.take().unwrap())
-                .read_line(&mut display)
-                .unwrap();
-            let (conn, screen) =
-                RustConnection::connect(Some(&format!(":{}", display.trim()))).unwrap();
-            let root = conn.setup().roots[screen].root;
-            (server, conn, root)
-        }
-    }
-
-    impl Drop for XServer {
-        fn drop(&mut self) {
-            self.0.kill().expect("stop private Xvfb server");
-            self.0.wait().expect("reap private Xvfb server");
-        }
-    }
+    use crate::linux::xvfb::XServer;
 
     #[test]
     #[ignore = "requires Xvfb; starts its own isolated X server, never uses DISPLAY"]
     fn x11_pointer_distinguishes_client_desktop_obstacle_and_focus() {
-        let (_server, conn, root) = XServer::start();
+        let server = XServer::start();
+        let (conn, root) = server.connect();
         conn.warp_pointer(x11rb::NONE, root, 0, 0, 0, 0, 15, 17)
             .unwrap()
             .check()

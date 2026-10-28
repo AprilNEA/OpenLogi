@@ -184,7 +184,8 @@ fn sync_depot(
         "device_camera_image",
         "image_metadata",
     ] {
-        let Some(variant) = pick_variant_filename(&manifest_path, entry, ext, resource_key) else {
+        let Some(variant) = pick_variant_filename(&manifest_path, entry, depot, ext, resource_key)
+        else {
             continue;
         };
         if matches!(
@@ -244,6 +245,7 @@ fn fetch_to_cache(
 fn pick_variant_filename(
     manifest_path: &Path,
     entry: &DeviceEntry,
+    depot: &str,
     ext: u8,
     resource_key: &str,
 ) -> Option<String> {
@@ -253,10 +255,13 @@ fn pick_variant_filename(
     let manifest = DepotManifest::load_from(manifest_path)
         .map_err(|e| warn!(error = %e, path = %manifest_path.display(), "manifest unreadable"))
         .ok()?;
-    entry
-        .model_id_candidates()
-        .find_map(|base| manifest.resource_for_variant(base, ext, resource_key))
-        .map(str::to_string)
+    let candidates = super::images::candidate_manifest_bases(entry, depot);
+    for base in candidates {
+        if let Some(src) = manifest.resource_for_variant(&base, ext, resource_key) {
+            return Some(src.to_string());
+        }
+    }
+    None
 }
 
 /// A manual asset action requested from the Settings → Assets tab, pushed to

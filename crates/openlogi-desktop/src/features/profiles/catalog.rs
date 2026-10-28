@@ -183,7 +183,7 @@ impl AppCatalogPicker {
     pub(super) fn available_profiles(
         &self,
         observed: &HashSet<String>,
-        unavailable: &HashSet<String>,
+        unavailable: impl Fn(&str) -> bool,
     ) -> CatalogPresentation {
         let applications = match &self.load {
             CatalogLoad::Loading => return CatalogPresentation::Loading,
@@ -195,14 +195,10 @@ impl AppCatalogPicker {
             .iter()
             .filter_map(|application| {
                 let app = identity_for_application(application, observed, self.preferred_identity)?;
-                if unavailable.contains(&app) || !seen.insert(app.clone()) {
+                if unavailable(&app) || !seen.insert(app.clone()) {
                     return None;
                 }
-                Some(ProfileChoice {
-                    app,
-                    name: application.name.clone(),
-                    persisted: false,
-                })
+                Some(ProfileChoice::application(app, application.name.clone()))
             })
             .collect::<Vec<_>>();
         profiles.sort_by(|left, right| {

@@ -216,6 +216,30 @@ async fn capture_inventory(
         selected_device
     };
     sanitize::inventory(&mut retained)?;
+
+    // A paired device with a zero unit id and no serial number gets no identity
+    // representation in the fixture's ledger (openlogi-fixture's generate step
+    // skips it on this exact condition), so it has no principal for a settings
+    // route — or even a presence in `inventories.paired` — to resolve to.
+    // Leaving it in the capture produces a profile the generator can record
+    // but never verify; drop it instead (#1666), never the selected device.
+    let selected_slot = retained
+        .paired
+        .get(retained_selected)
+        .ok_or_else(|| anyhow!("the selected device is absent from the retained inventory"))?
+        .slot;
+    let mut paired_with_routes: Vec<(DeviceRoute, PairedDevice)> =
+        source_routes.into_iter().zip(retained.paired).collect();
+    paired_with_routes.retain(|(_, device)| {
+        device.slot == selected_slot
+            || device
+                .model_info
+                .as_ref()
+                .is_some_and(|model| model.unit_id != [0; 4] || model.serial_number.is_some())
+    });
+    let (source_routes, paired): (Vec<_>, Vec<_>) = paired_with_routes.into_iter().unzip();
+    retained.paired = paired;
+
     let profile_routes = retained
         .paired
         .iter()
@@ -224,6 +248,11 @@ async fn capture_inventory(
                 .ok_or_else(|| anyhow!("a sanitized profile route is not addressable"))
         })
         .collect::<Result<Vec<_>>>()?;
+    let retained_selected = retained
+        .paired
+        .iter()
+        .position(|device| device.slot == selected_slot)
+        .ok_or_else(|| anyhow!("the selected device did not survive capture filtering"))?;
     let selected_route = profile_routes
         .get(retained_selected)
         .cloned()
@@ -253,16 +282,10 @@ async fn capture_hidpp_settings(
         )
     })?;
 
-    let dpi = match capability_setting(device.online, capabilities.pointer) {
-        Some(setting) => setting,
-        None => {
-            semantic_read(
-                "DPI",
-                agent::call(client.read_dpi(context::current(), source_route.clone())),
-            )
-            .await?
-        }
-    };
+    let dpi = gated_read("DPI", device.online, capabilities.pointer, || {
+        agent::call(client.read_dpi(context::current(), source_route.clone()))
+    })
+    .await?;
     let smartshift = if device.online {
         semantic_read(
             "SmartShift",
@@ -272,40 +295,57 @@ async fn capture_hidpp_settings(
     } else {
         return Err(unknown_offline_support("SmartShift"));
     };
-    let wheel = match capability_setting(device.online, capabilities.hires_wheel) {
-        Some(setting) => setting,
-        None => {
-            semantic_read(
-                "wheel",
-                agent::call(client.read_wheel(context::current(), source_route.clone())),
-            )
-            .await?
-        }
-    };
-    // Schema v1 makes RGB lighting and keyboard backlight mutually exclusive,
-    // so observed RGB capability is a sufficient negative backlight fact.
-    let backlight = if capabilities.lighting {
-        ProfileSetting::Unsupported
-    } else if device.online {
-        semantic_read(
-            "backlight",
-            agent::call(client.read_backlight(context::current(), source_route.clone())),
-        )
-        .await?
-    } else {
-        return Err(unknown_offline_support("backlight"));
-    };
+    let wheel = gated_read("wheel", device.online, capabilities.hires_wheel, || {
+        agent::call(client.read_wheel(context::current(), source_route.clone()))
+    })
+    .await?;
+    let backlight = gated_read("backlight", device.online, capabilities.backlight, || {
+        agent::call(client.read_backlight(context::current(), source_route.clone()))
+    })
+    .await?;
+    let disable_keys = gated_read(
+        "Disable Keys",
+        device.online,
+        capabilities.disable_keys,
+        || agent::call(client.read_disable_keys(context::current(), source_route.clone())),
+    )
+    .await?;
 
-    let fn_lock = match capability_setting(device.online, capabilities.fn_lock) {
-        Some(setting) => setting,
-        None => {
-            semantic_read(
-                "fn-lock",
-                agent::call(client.read_fn_lock(context::current(), source_route.clone())),
-            )
-            .await?
-        }
-    };
+    let fn_lock = gated_read("fn-lock", device.online, capabilities.fn_lock, || {
+        agent::call(client.read_fn_lock(context::current(), source_route.clone()))
+    })
+    .await?;
+    let report_rate = gated_read(
+        "report-rate",
+        device.online,
+        capabilities.report_rate,
+        || agent::call(client.read_report_rate(context::current(), source_route.clone())),
+    )
+    .await?;
+    let mut easy_switch = gated_read(
+        "Easy-Switch",
+        device.online,
+        capabilities.easy_switch,
+        || agent::call(client.read_easy_switch_hosts(context::current(), source_route.clone())),
+    )
+    .await?;
+    if let Some(hosts) = easy_switch.value_mut() {
+        sanitize::easy_switch_hosts(hosts);
+    }
+    let pointer_speed = gated_read(
+        "pointer-speed",
+        device.online,
+        capabilities.pointer_scaling,
+        || agent::call(client.read_pointer_speed(context::current(), source_route.clone())),
+    )
+    .await?;
+    let force_sensing = gated_read(
+        "press-force",
+        device.online,
+        capabilities.force_sensing,
+        || agent::call(client.read_force_sensing(context::current(), source_route.clone())),
+    )
+    .await?;
 
     Ok(ProfileDeviceSettings {
         route: profile_route,
@@ -314,9 +354,32 @@ async fn capture_hidpp_settings(
         wheel,
         backlight,
         fn_lock,
+        report_rate,
+        easy_switch,
+        pointer_speed,
+        force_sensing,
+        disable_keys,
         lighting: profile_support(capabilities.lighting),
         light: ProfileSupport::Unsupported,
     })
+}
+
+/// One setting family: what the capability facts settle without asking, else
+/// what the agent reads from the online device. `read` runs only in the
+/// second case, so no request goes out for a setting the facts settle.
+async fn gated_read<T, Fut>(
+    family: &'static str,
+    online: bool,
+    supported: bool,
+    read: impl FnOnce() -> Fut,
+) -> Result<ProfileSetting<T>>
+where
+    Fut: Future<Output = Result<Result<T, WriteError>, CallFailure>>,
+{
+    match capability_setting(online, supported) {
+        Some(setting) => Ok(setting),
+        None => semantic_read(family, read()).await,
+    }
 }
 
 fn capability_setting<T>(online: bool, supported: bool) -> Option<ProfileSetting<T>> {
@@ -372,6 +435,11 @@ fn capture_standalone(source: &StandaloneDevice) -> Result<ProfileCaptureParts> 
         wheel: ProfileSetting::Unsupported,
         backlight: ProfileSetting::Unsupported,
         fn_lock: ProfileSetting::Unsupported,
+        report_rate: ProfileSetting::Unsupported,
+        easy_switch: ProfileSetting::Unsupported,
+        pointer_speed: ProfileSetting::Unsupported,
+        force_sensing: ProfileSetting::Unsupported,
+        disable_keys: ProfileSetting::Unsupported,
         lighting: ProfileSupport::Unsupported,
         light: profile_support(light_supported),
     };

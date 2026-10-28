@@ -21,6 +21,8 @@ use openlogi_ipc::client::{self, ConnectError};
 use super::target_selection::{self, FixtureTarget};
 
 mod audit;
+#[cfg(test)]
+mod corpus_tests;
 mod replay;
 
 pub(super) const DEFAULT_RECORDING_CAPACITY: usize = 8_192;
@@ -266,6 +268,8 @@ pub(super) async fn prepare_contribution_target(selector: Option<&str>) -> Resul
          connected receivers before target selection; notification flags are not restored. \
          Captured operations do not change device settings or pairings."
     );
+    #[cfg(target_os = "macos")]
+    crate::cmd::input_monitoring::request().await?;
     let inventories = openlogi_hid::enumerate()
         .await
         .map_err(|_| anyhow!("failed to enumerate HID++ devices for direct fixture capture"))?;
@@ -633,6 +637,7 @@ mod tests {
                     battery: None,
                     model_info: None,
                     capabilities: None,
+                    settings_revision: 0,
                 },
                 PairedDevice {
                     slot: 1,
@@ -643,6 +648,7 @@ mod tests {
                     battery: None,
                     model_info: None,
                     capabilities: None,
+                    settings_revision: 0,
                 },
                 PairedDevice {
                     slot: openlogi_device::DIRECT_DEVICE_INDEX,
@@ -653,6 +659,7 @@ mod tests {
                     battery: None,
                     model_info: None,
                     capabilities: None,
+                    settings_revision: 0,
                 },
             ],
         }];

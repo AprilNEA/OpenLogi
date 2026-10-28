@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use gpui::{
@@ -15,15 +15,18 @@ use gpui_component::{
 };
 use openlogi_core::binding::{Action, ButtonId, GestureDirection};
 
+use super::force_sensing::{ForceSensingFacts, ForceSensingSlider, PressForce};
 use super::geometry::{
     LabelDistribution, asset_dimensions_for_png, asset_has_button_labels, asset_hotspots_for_png,
     default_labels, labels_from_hotspots,
 };
 use super::hotspots::{Hotspot, MOUSE_MODEL_SIZE, MouseControlId, default_hotspots};
-use super::inspector::{ActionPickerContext, BindingInspectorData, binding_inspector};
+use super::inspector::{
+    ActionPickerContext, BindingInspectorData, ShortcutMode, binding_inspector,
+};
 use super::leader_lines::{Geometry as LeaderGeometry, Label, paint as paint_leader_lines};
 use crate::app::{glow_canvas, keyboard_glow};
-use crate::features::profiles::{friendly_app_name, profile_canvas_status};
+use crate::features::profiles::{profile_canvas_status, profile_name};
 use crate::services::assets::{GlowGeometry, ResolvedAsset};
 use crate::state::{AppState, DeviceKey, DeviceRecord, StateEvent};
 use crate::ui::theme::{self, ACCENT_BLUE};
@@ -57,7 +60,6 @@ const MODEL_HORIZONTAL_RESERVE: f32 =
 const MODEL_MIN_CONTENT_W: f32 = 200.;
 
 struct MouseWorkspaceData<'a> {
-    device_key: Option<DeviceKey>,
     asset: Option<&'a ResolvedAsset>,
     active: Option<MouseControlId>,
     bindings: &'a BTreeMap<ButtonId, Action>,
@@ -65,6 +67,8 @@ struct MouseWorkspaceData<'a> {
     glow: Option<(Arc<GlowGeometry>, Hsla)>,
     thumbwheel: bool,
     dpi_gestures: bool,
+    virtual_thumbwheel: bool,
+    wheel_hold: &'a BTreeSet<ButtonId>,
     editing_app: Option<String>,
     overridden: Option<&'a BTreeMap<ButtonId, Action>>,
 }
@@ -72,7 +76,6 @@ struct MouseWorkspaceData<'a> {
 impl<'a> MouseWorkspaceData<'a> {
     fn read(cx: &'a App) -> Option<Self> {
         AppState::try_read(cx).map(|state| Self {
-            device_key: state.current_record().map(DeviceRecord::device_key),
             asset: state
                 .current_record()
                 .and_then(|record| record.asset.as_ref()),
@@ -92,28 +95,31 @@ impl<'a> MouseWorkspaceData<'a> {
                 .current_record()
                 .and_then(|record| record.capabilities)
                 .is_some_and(|capabilities| capabilities.dpi_gestures),
-            editing_app: state.editing_app().map(|app| {
-                state
-                    .recent_app_name(app)
-                    .map_or_else(|| friendly_app_name(app), str::to_string)
-            }),
+            virtual_thumbwheel: state
+                .current_record()
+                .and_then(|record| record.capabilities)
+                .is_some_and(|capabilities| capabilities.virtual_thumbwheel),
+            wheel_hold: state.wheel_hold_buttons(),
+            editing_app: state.editing_app().map(|app| profile_name(state, app)),
             overridden: state.editing_app_overrides(),
         })
     }
 
-    fn empty(
-        bindings: &'a BTreeMap<ButtonId, Action>,
-        gesture_maps: &'a BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
-    ) -> Self {
+    fn empty() -> Self {
+        static NO_BINDINGS: BTreeMap<ButtonId, Action> = BTreeMap::new();
+        static NO_GESTURE_MAPS: BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>> =
+            BTreeMap::new();
+        static NO_WHEEL_HOLD: BTreeSet<ButtonId> = BTreeSet::new();
         Self {
-            device_key: None,
             asset: None,
             active: None,
-            bindings,
-            gesture_maps,
+            bindings: &NO_BINDINGS,
+            gesture_maps: &NO_GESTURE_MAPS,
             glow: None,
             thumbwheel: false,
             dpi_gestures: false,
+            virtual_thumbwheel: false,
+            wheel_hold: &NO_WHEEL_HOLD,
             editing_app: None,
             overridden: None,
         }
@@ -135,7 +141,10 @@ pub struct MouseModelView {
     /// Whether the last "Add" attempt on the corresponding custom editor
     /// failed to parse, so its caption can show an inline error.
     pub(super) custom_shortcut_invalid: bool,
+    pub(super) shortcut_mode: ShortcutMode,
     pub(super) custom_application_invalid: bool,
+    /// The press-force slider while the haptic panel's inspector shows it.
+    pub(super) force_sensing: Option<ForceSensingSlider>,
     _state_obs: Subscription,
 }
 
@@ -181,6 +190,7 @@ impl MouseModelView {
                 StateEvent::ForegroundChanged
                     | StateEvent::BindingsChanged(_)
                     | StateEvent::LightingChanged(_)
+                    | StateEvent::ForceSensingChanged(_)
             )
         });
         Self {
@@ -194,7 +204,9 @@ impl MouseModelView {
             custom_shortcut_input,
             custom_application_input,
             custom_shortcut_invalid: false,
+            shortcut_mode: ShortcutMode::Tap,
             custom_application_invalid: false,
+            force_sensing: None,
             _state_obs: state_obs,
         }
     }
@@ -213,6 +225,7 @@ impl MouseModelView {
             .update(cx, |input, cx| input.set_value("", window, cx));
         self.custom_shortcut_invalid = false;
         self.custom_application_invalid = false;
+        self.shortcut_mode = ShortcutMode::Tap;
     }
 
     /// Set (or clear, with `None`) the activated gesture direction. Callers must
@@ -241,7 +254,7 @@ impl MouseModelView {
         self.action_picker_open = false;
     }
 
-    fn select(&mut self, control: MouseControlId) {
+    pub(super) fn select(&mut self, control: MouseControlId) {
         if self.selected != Some(control) {
             self.selected = Some(control);
             self.gesture_active_dir = None;
@@ -295,14 +308,31 @@ impl MouseModelView {
             cx,
         );
     }
+
+    /// Follow a device change, then keep the press-force slider in step with
+    /// the selection it may have cleared. Runs before `render` reads the
+    /// state for the frame, since the slider sync needs the context mutably.
+    fn sync_selection(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<ForceSensingFacts> {
+        self.reset_for_device(
+            AppState::try_read(cx)
+                .and_then(AppState::current_record)
+                .map(DeviceRecord::device_key),
+        );
+        let facts = ForceSensingFacts::current(self.selected, cx);
+        ForceSensingSlider::sync(&mut self.force_sensing, facts.as_ref(), window, cx);
+        facts
+    }
 }
 
 impl Render for MouseModelView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.localize_action_picker_inputs(window, cx);
-        let (empty_bindings, empty_gesture_maps) = (BTreeMap::new(), BTreeMap::new());
+        let force_sensing = self.sync_selection(window, cx);
         let MouseWorkspaceData {
-            device_key,
             asset,
             active,
             bindings,
@@ -310,12 +340,11 @@ impl Render for MouseModelView {
             glow,
             thumbwheel,
             dpi_gestures,
+            virtual_thumbwheel,
+            wheel_hold,
             editing_app,
             overridden,
-        } = MouseWorkspaceData::read(cx)
-            .unwrap_or_else(|| MouseWorkspaceData::empty(&empty_bindings, &empty_gesture_maps));
-
-        self.reset_for_device(device_key);
+        } = MouseWorkspaceData::read(cx).unwrap_or_else(MouseWorkspaceData::empty);
 
         let gesture_buttons: Vec<ButtonId> = gesture_maps
             .keys()
@@ -387,8 +416,11 @@ impl Render for MouseModelView {
                 bindings,
                 gesture_maps,
                 dpi_gestures,
+                virtual_thumbwheel,
+                wheel_hold,
                 editing_app: editing_app.as_deref(),
                 overridden,
+                press_force: PressForce::of(force_sensing.as_ref(), self.force_sensing.as_ref()),
             },
             ActionPickerContext {
                 open: self.action_picker_open,
@@ -396,6 +428,7 @@ impl Render for MouseModelView {
                 shortcut_input: &self.custom_shortcut_input,
                 application_input: &self.custom_application_input,
                 shortcut_invalid: self.custom_shortcut_invalid,
+                shortcut_mode: self.shortcut_mode,
                 application_invalid: self.custom_application_invalid,
                 view: &view,
             },

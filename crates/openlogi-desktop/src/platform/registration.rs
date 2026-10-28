@@ -29,15 +29,10 @@ pub use macos::{agent_service_label, reregister_missing_job};
 /// `SMAppServiceStatus` plus a "not this platform" arm.
 ///
 /// Off macOS only `Self::Unsupported` is constructed, but cross-platform
-/// consumers name the other variants. Not `expect`: the dead-code lint fires
-/// only on the non-macOS lanes.
+/// consumers name the other variants.
 #[cfg_attr(
     not(target_os = "macos"),
-    expect(clippy::allow_attributes, reason = "see above")
-)]
-#[cfg_attr(
-    not(target_os = "macos"),
-    allow(dead_code, reason = "only Unsupported is constructed off macOS")
+    expect(dead_code, reason = "only Unsupported is constructed off macOS")
 )]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceStatus {

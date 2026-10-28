@@ -23,8 +23,6 @@ use super::ActionDispatchTarget;
 const EVENT_QUEUE_CAPACITY: usize = 128;
 /// Bounds how long graceful process exit waits for terminal handlers.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
-/// Lets the worker observe the out-of-band shutdown channel even while idle.
-const SHUTDOWN_POLL_PERIOD: Duration = Duration::from_millis(10);
 
 /// Process-unique identity of one HID++ hardware capture incarnation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -193,6 +191,11 @@ enum PressBehavior {
     },
     /// The long action fired; release must not also fire the short action.
     LongPressFired,
+    /// Wait for release, which fires `click` unless the wheel moved first.
+    WheelHoldPending { click: Action },
+    /// The wheel moved during the press, which made it a virtual thumb wheel;
+    /// release fires nothing.
+    WheelHoldScrolled,
 }
 
 impl PressBehavior {
@@ -206,27 +209,50 @@ impl PressBehavior {
                 long: binding.long().clone(),
                 deadline: pressed_at + LONG_PRESS_THRESHOLD,
             },
+            Some(Binding::WheelHold(binding)) => Self::WheelHoldPending {
+                click: binding.click().clone(),
+            },
         }
     }
 
     fn deadline(&self) -> Option<Instant> {
         match self {
             Self::LongPressPending { deadline, .. } => Some(*deadline),
-            Self::LifecycleOnly | Self::Immediate(_) | Self::LongPressFired => None,
+            Self::LifecycleOnly
+            | Self::Immediate(_)
+            | Self::LongPressFired
+            | Self::WheelHoldPending { .. }
+            | Self::WheelHoldScrolled => None,
         }
     }
 
     fn start_action(&self) -> Option<&Action> {
         match self {
             Self::Immediate(action) => Some(action),
-            Self::LifecycleOnly | Self::LongPressPending { .. } | Self::LongPressFired => None,
+            Self::LifecycleOnly
+            | Self::LongPressPending { .. }
+            | Self::LongPressFired
+            | Self::WheelHoldPending { .. }
+            | Self::WheelHoldScrolled => None,
         }
     }
 
     fn release_action(&self) -> Option<&Action> {
         match self {
             Self::LongPressPending { short, .. } => Some(short),
-            Self::LifecycleOnly | Self::Immediate(_) | Self::LongPressFired => None,
+            Self::WheelHoldPending { click } => Some(click),
+            Self::LifecycleOnly
+            | Self::Immediate(_)
+            | Self::LongPressFired
+            | Self::WheelHoldScrolled => None,
+        }
+    }
+
+    /// The wheel moved while this press was down. A wheel-hold press stops
+    /// owing its click; any other press is left as it is.
+    fn wheel_moved(&mut self) {
+        if matches!(self, Self::WheelHoldPending { .. }) {
+            *self = Self::WheelHoldScrolled;
         }
     }
 
@@ -315,9 +341,19 @@ pub(crate) enum ButtonRuntimeEvent {
 /// Inputs cannot represent `Up + action` or a source-authored `Cancel`.
 enum ButtonInput {
     Down(ActivePress),
-    Up { key: PressKey, released_at: Instant },
+    Up {
+        key: PressKey,
+        released_at: Instant,
+    },
     Pulse(ActivePress),
-    TriggerWhilePressed { token: PressToken, action: Action },
+    TriggerWhilePressed {
+        token: PressToken,
+        action: Action,
+    },
+    /// The wheel moved while the press `token` was down.
+    WheelWhilePressed {
+        token: PressToken,
+    },
 }
 
 enum ButtonCommand {
@@ -359,6 +395,15 @@ impl ButtonState {
         self.active.remove(&token.key)
     }
 
+    /// Record wheel movement on the exact press `token`, if it is still live.
+    fn wheel_moved(&mut self, token: &PressToken) {
+        if let Some(press) = self.active.get_mut(&token.key)
+            && press.token == *token
+        {
+            press.behavior.wheel_moved();
+        }
+    }
+
     fn cancel_source(&mut self, source: &ButtonSource) -> Vec<ActivePress> {
         self.cancel_where(|key| key.source == *source)
     }
@@ -372,6 +417,17 @@ impl ButtonState {
     }
 
     fn cancel_pointer_except(&mut self, current: openlogi_hook::PointerTarget) -> Vec<ActivePress> {
+        // A lifecycle-only press (a gesture hold) holds no output, and its own
+        // swipe may be what changed the hovered window (Next Desktop). Follow
+        // the pointer instead of canceling, so one hold can chain swipes; the
+        // press-time focus fallback stays with it.
+        for press in self.active.values_mut() {
+            if press.behavior == PressBehavior::LifecycleOnly
+                && let ActionDispatchTarget::Pointer { target, .. } = &mut press.target
+            {
+                *target = current;
+            }
+        }
         self.active.extract_if(|_, press| matches!(press.target, ActionDispatchTarget::Pointer { target, .. } if target != current))
             .map(|(_, press)| press)
             .collect()
@@ -394,11 +450,17 @@ impl ButtonState {
             .collect()
     }
 
-    fn has_due_long_press(&self, now: Instant) -> bool {
+    /// The earliest long-press threshold still pending, which is the only
+    /// reason the worker has to wake without a command.
+    fn next_deadline(&self) -> Option<Instant> {
         self.active
             .values()
             .filter_map(|press| press.behavior.deadline())
-            .any(|deadline| deadline <= now)
+            .min()
+    }
+
+    fn has_due_long_press(&self, now: Instant) -> bool {
+        self.next_deadline().is_some_and(|deadline| deadline <= now)
     }
 
     fn due_long_presses(&self, now: Instant) -> Vec<PressToken> {
@@ -550,6 +612,21 @@ impl ButtonInputHandle {
         )
     }
 
+    /// Tell the press `token` that the wheel moved while it was down, so a
+    /// wheel-hold press does not also fire its click on release.
+    pub(crate) fn try_wheel_while_pressed(&self, token: &PressToken) -> bool {
+        let generation = self.generation.load(Ordering::Acquire);
+        if token.generation != generation {
+            return false;
+        }
+        self.try_input(
+            generation,
+            ButtonInput::WheelWhilePressed {
+                token: token.clone(),
+            },
+        )
+    }
+
     pub(crate) fn cancel_stale_press(&self, token: &PressToken) {
         self.try_command(ButtonCommand::CancelStalePress(token.clone()));
     }
@@ -562,6 +639,13 @@ impl ButtonInputHandle {
 
     pub(crate) fn invalidate_all(&self) {
         self.generation.fetch_add(1, Ordering::AcqRel);
+        self.wake();
+    }
+
+    /// Make an idle worker re-read state published outside its queue. A full
+    /// queue drops the wake harmlessly: the worker is not blocked then, and
+    /// it re-reads that state between commands.
+    fn wake(&self) {
         let _ = self.events.try_send(ButtonCommand::Wake);
     }
 
@@ -625,8 +709,7 @@ impl ButtonInputHandle {
         match self.events.try_send(command) {
             Ok(()) => true,
             Err(mpsc::TrySendError::Full(_)) => {
-                self.generation.fetch_add(1, Ordering::AcqRel);
-                warn!("button lifecycle queue full — invalidating active presses");
+                self.invalidate_after_dropped_command();
                 false
             }
             Err(mpsc::TrySendError::Disconnected(_)) => {
@@ -634,6 +717,14 @@ impl ButtonInputHandle {
                 false
             }
         }
+    }
+
+    /// A dropped command may have been a release, so every active press is
+    /// invalidated. The worker can drain the full queue and block before the
+    /// generation changes, so the change needs its wake like any other.
+    fn invalidate_after_dropped_command(&self) {
+        self.invalidate_all();
+        warn!("button lifecycle queue full — invalidating active presses");
     }
 
     fn stop_accepting(&self) {
@@ -689,6 +780,9 @@ impl ButtonRuntimeOwner {
             let _ = worker.join();
             return false;
         }
+        // Send the wake only after the shutdown request is visible. Otherwise
+        // an idle worker could consume it first and block again on `events`.
+        self.input.wake();
         if wait.recv_timeout(timeout).is_err() {
             warn!("button lifecycle worker did not shut down before the deadline");
             // Dropping a JoinHandle detaches the worker; the queued request

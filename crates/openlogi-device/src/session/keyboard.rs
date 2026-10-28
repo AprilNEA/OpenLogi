@@ -27,8 +27,11 @@ use openlogi_core::binding::ButtonId;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-use super::capture::{ArmedCapture, CaptureHost, Liveness, open_device, run_capture};
-use super::capture_restore::{ArmedReporting, ReprogRestore, divert_change};
+use super::capture::{
+    ArmedCapture, CaptureHost, Liveness, ReportingChangeStream, open_device, run_capture,
+    subscribe_reporting_changes,
+};
+use super::capture_restore::{ArmedReporting, ReprogRestore, divert_keyboard_key};
 use super::gesture::{
     CaptureError, CaptureSessionFailure, CaptureSessionOutcome, CapturedInput,
     PendingCaptureRestore, enumerate_controls,
@@ -112,10 +115,14 @@ async fn arm_keyboard(
         info.index,
     );
     let controls = enumerate_controls(&rc).await?;
+    // Subscribed before the first diversion write (see
+    // `subscribe_reporting_changes`).
+    let reporting_changes = Some(subscribe_reporting_changes(&rc));
     let mut armed = ArmedKeys {
         controls: rc,
         reporting: Vec::new(),
         diverted: BTreeMap::new(),
+        reporting_changes,
     };
     if let Err(error) = arm_keys(&controls, wanted, &mut armed).await {
         let pending = armed.into_pending(shared);
@@ -152,6 +159,9 @@ struct ArmedKeys {
     controls: ReprogControlsV4,
     reporting: Vec<ArmedReporting>,
     diverted: BTreeMap<u16, ButtonId>,
+    /// Other clients' reporting changes on `controls`, until the running
+    /// session takes them.
+    reporting_changes: Option<ReportingChangeStream>,
 }
 
 impl ArmedCapture for ArmedKeys {
@@ -194,7 +204,7 @@ impl ArmedCapture for ArmedKeys {
         for &reporting in &self.reporting {
             if let Err(e) = self
                 .controls
-                .set_cid_reporting_full(reporting.cid, divert_change(reporting.original, false))
+                .set_cid_reporting_full(reporting.cid, divert_keyboard_key(reporting.original))
                 .await
             {
                 warn!(
@@ -206,11 +216,21 @@ impl ArmedCapture for ArmedKeys {
         }
     }
 
+    fn armed_reporting(&self) -> Option<(&ReprogControlsV4, &[ArmedReporting])> {
+        (!self.reporting.is_empty()).then_some((&self.controls, self.reporting.as_slice()))
+    }
+
+    fn take_reporting_changes(&mut self) -> Option<ReportingChangeStream> {
+        let changes = self.reporting_changes.take()?;
+        (!self.reporting.is_empty()).then_some(changes)
+    }
+
     fn into_pending(self, retired: &SharedChannel) -> Option<PendingCaptureRestore> {
         let feature_index = self.controls.feature_index();
         PendingCaptureRestore::new(
             retired,
             ReprogRestore::new(feature_index, self.reporting),
+            None,
             None,
         )
     }
@@ -236,10 +256,12 @@ async fn arm_keys(
             let original = armed.controls.get_cid_reporting(cid).await?;
             // A transport failure does not prove the firmware rejected the
             // command, so include this CID in rollback before writing.
-            armed.reporting.push(ArmedReporting { cid, original });
+            armed
+                .reporting
+                .push(ArmedReporting::keyboard(cid, original));
             armed
                 .controls
-                .set_cid_reporting_full(cid, divert_change(original, false))
+                .set_cid_reporting_full(cid, divert_keyboard_key(original))
                 .await?;
             armed.diverted.insert(cid, button);
         } else {

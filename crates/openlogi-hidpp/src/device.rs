@@ -51,7 +51,26 @@ impl Device {
     /// Returns [`DeviceError::UnsupportedProtocolVersion`] if the device only
     /// supports [`ProtocolVersion::V10`].
     pub async fn new(chan: Arc<HidppChannel>, device_index: u8) -> Result<Self, DeviceError> {
-        let Some(version) = protocol::determine_version(&chan, device_index).await? else {
+        let version = protocol::determine_version(&chan, device_index).await?;
+        Self::from_version(chan, device_index, version)
+    }
+
+    /// Initialize in an owned transaction, draining the submitted native ping.
+    /// The owner must drive this future to completion after requester cancellation.
+    pub async fn new_write_through(
+        chan: Arc<HidppChannel>,
+        device_index: u8,
+    ) -> Result<Self, DeviceError> {
+        let version = protocol::determine_version_write_through(&chan, device_index).await?;
+        Self::from_version(chan, device_index, version)
+    }
+
+    fn from_version(
+        chan: Arc<HidppChannel>,
+        device_index: u8,
+        version: Option<ProtocolVersion>,
+    ) -> Result<Self, DeviceError> {
+        let Some(version) = version else {
             return Err(DeviceError::DeviceNotFound);
         };
 

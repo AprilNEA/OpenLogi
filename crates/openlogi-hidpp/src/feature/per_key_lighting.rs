@@ -15,7 +15,7 @@ use openlogi_hidpp_derive::Feature;
 
 use crate::{
     feature::FeatureEndpoint,
-    protocol::v20::{ErrorType, Hidpp20Error},
+    protocol::v20::{self, ErrorType, Hidpp20Error},
 };
 
 /// Length of the zone-presence bitfield page returned by `getInfo`.
@@ -129,10 +129,9 @@ impl PerKeyLightingFeature {
     /// At most four zones are sent; extra entries are ignored.
     pub async fn set_individual_rgb_zones(&self, zones: &[RgbZone]) -> Result<(), Hidpp20Error> {
         validate_individual_zones(zones)?;
-        self.endpoint
-            .call_long(1, individual_zones_args(zones))
-            .await?;
-        Ok(())
+        let sent = zones.len().min(MAX_INDIVIDUAL_ZONES);
+        self.write_echoed(1, individual_zones_args(zones), &[0, 4, 8, 12][..sent])
+            .await
     }
 
     /// Sets five consecutive zones starting at `first_zone_id`.
@@ -142,10 +141,8 @@ impl PerKeyLightingFeature {
         colors: [Rgb; CONSECUTIVE_ZONES],
     ) -> Result<(), Hidpp20Error> {
         validate_zone_id(first_zone_id)?;
-        self.endpoint
-            .call_long(2, consecutive_zones_args(first_zone_id, colors))
-            .await?;
-        Ok(())
+        self.write_echoed(2, consecutive_zones_args(first_zone_id, colors), &[0])
+            .await
     }
 
     /// Sets eight consecutive zones from `first_zone_id` using 5-bit signed
@@ -180,8 +177,8 @@ impl PerKeyLightingFeature {
     /// At most three ranges are sent; extra entries are ignored.
     pub async fn set_range_rgb_zones(&self, ranges: &[RgbZoneRange]) -> Result<(), Hidpp20Error> {
         validate_ranges(ranges)?;
-        self.endpoint.call_long(5, range_zones_args(ranges)).await?;
-        Ok(())
+        let echoed: &[usize] = if ranges.is_empty() { &[] } else { &[0] };
+        self.write_echoed(5, range_zones_args(ranges), echoed).await
     }
 
     /// Applies one color to up to thirteen individually addressed zones.
@@ -193,10 +190,9 @@ impl PerKeyLightingFeature {
         zone_ids: &[u8],
     ) -> Result<(), Hidpp20Error> {
         validate_single_value_zones(zone_ids)?;
-        self.endpoint
-            .call_long(6, single_value_args(color, zone_ids))
-            .await?;
-        Ok(())
+        let echoed: &[usize] = if zone_ids.is_empty() { &[] } else { &[3] };
+        self.write_echoed(6, single_value_args(color, zone_ids), echoed)
+            .await
     }
 
     /// Commits all pending zone changes and updates the display.
@@ -222,10 +218,44 @@ impl PerKeyLightingFeature {
         packed: [u8; DELTA_PACKED_LEN],
     ) -> Result<(), Hidpp20Error> {
         validate_zone_id(first_zone_id)?;
-        self.endpoint
-            .call_long(function, delta_args(first_zone_id, packed))
-            .await?;
+        self.write_echoed(function, delta_args(first_zone_id, packed), &[0])
+            .await
+    }
+
+    /// Sends a zone write and checks that the reply repeats the zone ids at
+    /// `echoed`, the byte offsets into `args`.
+    ///
+    /// A HID++ 2.0 reply repeats the request's parameters, and a device that
+    /// supports them only in part answers with what it applied, so a reply
+    /// naming other zones is not a success. Logi Options+ makes the same
+    /// checks (reverse-engineered from its `devio::Feature8081PerKeyLighting`
+    /// setters): every zone of `setIndividualRgbZones`, the first zone of
+    /// the consecutive and delta setters, the first range start of
+    /// `setRangeRgbZones`, and the first zone after the colour of
+    /// `setRgbZonesSingleValue`. Its range check walks later entries at a
+    /// stride that does not match the request layout, so only the first
+    /// start is checked here. A short reply would zero-fill the echo and is
+    /// refused outright.
+    async fn write_echoed(
+        &self,
+        function: u8,
+        args: [u8; 16],
+        echoed: &[usize],
+    ) -> Result<(), Hidpp20Error> {
+        let reply = self.endpoint.call_long(function, args).await?;
+        check_echo(&reply, &args, echoed)
+    }
+}
+
+/// Whether `reply` is a long report repeating `args` at the `echoed` offsets.
+fn check_echo(reply: &v20::Message, args: &[u8; 16], echoed: &[usize]) -> Result<(), Hidpp20Error> {
+    let v20::Message::Long(_, payload) = reply else {
+        return Err(Hidpp20Error::UnsupportedResponse);
+    };
+    if echoed.iter().all(|&at| payload[at] == args[at]) {
         Ok(())
+    } else {
+        Err(Hidpp20Error::UnsupportedResponse)
     }
 }
 

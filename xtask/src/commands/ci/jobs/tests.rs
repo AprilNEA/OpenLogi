@@ -79,6 +79,7 @@ fn ci_yml_runs_what_this_runner_runs() {
         Job::TestsLinux,
         Job::TestsMacos,
         Job::TestsWindows,
+        Job::ClippyMacos,
     ] {
         let host = *job.spec().hosts.first().expect("every job names a host");
         let plan = job.plan(&sh, host).expect("a plan");
@@ -239,4 +240,6 @@ fn jobs_name_the_hosts_ci_gives_them() {
     assert_eq!(hosts(Job::Msrv), vec![Host::Linux, Host::Macos]);
     // Natively on Windows, everywhere else as the cross-lint proxy.
     assert_eq!(hosts(Job::ClippyWindows), Host::ANY.to_vec());
+    // macos-latest only: nothing cross-lints the macOS cfg.
+    assert_eq!(hosts(Job::ClippyMacos), vec![Host::Macos]);
 }

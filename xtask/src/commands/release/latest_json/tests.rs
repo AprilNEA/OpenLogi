@@ -5,14 +5,12 @@ fn collect_assets_requires_minisign_signature_for_each_dmg() {
     let dist = tempfile::tempdir().unwrap();
     fs_err::write(dist.path().join("OpenLogi-v1.2.3-macos-arm64.dmg"), b"dmg").unwrap();
 
-    assert!(
-        collect_assets(
-            dist.path(),
-            "https://updates.example/releases/v1.2.3",
-            false
-        )
-        .is_err()
-    );
+    collect_assets(
+        dist.path(),
+        "https://updates.example/releases/v1.2.3",
+        false,
+    )
+    .unwrap_err();
 }
 
 #[test]
@@ -82,12 +80,12 @@ fn collect_assets_includes_windows_msi_and_zip_per_arch() {
         .iter()
         .find(|a| a.name.ends_with("x86_64.msi"))
         .unwrap();
-    assert_eq!((msi.arch.as_str(), msi.format), ("x86_64", "msi"));
+    assert_eq!((msi.arch.as_str(), msi.format.as_str()), ("x86_64", "msi"));
     let zip = assets
         .iter()
         .find(|a| a.name.ends_with("x86_64.zip"))
         .unwrap();
-    assert_eq!((zip.arch.as_str(), zip.format), ("x86_64", "zip"));
+    assert_eq!((zip.arch.as_str(), zip.format.as_str()), ("x86_64", "zip"));
     assert!(assets.iter().any(|a| a.arch == "arm64"));
 }
 

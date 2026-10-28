@@ -14,7 +14,7 @@ use super::{
     fold_by_inventory_key, offline_record, pick_initial_device,
 };
 use crate::state::inventory::adopt_routes;
-use openlogi_core::hid::Dpi;
+use openlogi_core::hid::{DeviceRoute, Dpi};
 
 fn paired_device_no_model_info(slot: u8, wpid: Option<u16>) -> PairedDevice {
     PairedDevice {
@@ -26,6 +26,7 @@ fn paired_device_no_model_info(slot: u8, wpid: Option<u16>) -> PairedDevice {
         battery: None,
         model_info: None,
         capabilities: None,
+        settings_revision: 0,
     }
 }
 
@@ -58,6 +59,7 @@ fn direct_inventory(model_info: DeviceModelInfo) -> DeviceInventory {
             battery: None,
             model_info: Some(model_info),
             capabilities: Some(Capabilities::presumed_from_kind(DeviceKind::Mouse)),
+            settings_revision: 0,
         }],
     }
 }
@@ -89,6 +91,7 @@ fn receiver_inventory() -> DeviceInventory {
                 extended_model_id: 2,
             }),
             capabilities: Some(Capabilities::presumed_from_kind(DeviceKind::Mouse)),
+            settings_revision: 0,
         }],
     }
 }
@@ -121,6 +124,7 @@ fn cabled_inventory() -> DeviceInventory {
                 extended_model_id: 2,
             }),
             capabilities: Some(Capabilities::presumed_from_kind(DeviceKind::Mouse)),
+            settings_revision: 0,
         }],
     }
 }
@@ -173,6 +177,8 @@ fn online_record(key: &str) -> DeviceRecord {
         slot: 1,
         online: true,
         battery: None,
+        settings_revision: 0,
+        stale_pairings: Vec::new(),
     }
 }
 
@@ -199,6 +205,36 @@ fn folding_two_records_of_one_device_keeps_the_online_one() {
         assert_eq!(
             record.route_key, "unit:6be9d300",
             "the live record's route survives, live_first = {live_first}"
+        );
+    }
+}
+
+#[test]
+fn folding_two_routes_keeps_the_leftover_pairings() {
+    // A live direct link replacing the receiver record must not drop the
+    // receiver's leftover slots, or the card stops offering their cleanup.
+    let leftover = DeviceRoute::Bolt {
+        receiver_uid: "aabb".to_string(),
+        slot: 2,
+    };
+    for live_first in [true, false] {
+        let live = online_record("unit:6be9d300");
+        let mut asleep = online_record("unit:6be9d300");
+        asleep.online = false;
+        asleep.stale_pairings = vec![leftover.clone()];
+        let list = if live_first {
+            vec![live, asleep]
+        } else {
+            vec![asleep, live]
+        };
+
+        let folded = fold_by_inventory_key(list);
+        let record = &folded["unit:6be9d300"];
+        assert!(record.online, "live_first = {live_first}");
+        assert_eq!(
+            record.stale_pairings,
+            std::slice::from_ref(&leftover),
+            "live_first = {live_first}"
         );
     }
 }
@@ -270,6 +306,14 @@ fn mouse_identity(name: &str) -> DeviceIdentity {
             haptic_panel: false,
             dpi_gestures: false,
             fn_lock: false,
+            os_layout: false,
+            report_rate: false,
+            backlight: false,
+            easy_switch: false,
+            virtual_thumbwheel: false,
+            pointer_scaling: false,
+            force_sensing: false,
+            disable_keys: false,
         },
         light_capabilities: None,
         model_info: None,

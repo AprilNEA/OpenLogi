@@ -62,15 +62,40 @@ fn open_error(error: async_hid::HidError) -> BackendError {
                 "Input Monitoring is granted to this process — another app may \
                  hold the device exclusively, or macOS is serving a stale \
                  permission session (log out and back in)"
+                    .to_owned()
             } else {
-                "Input Monitoring is NOT granted to this process; grant it to \
-                 OpenLogi Agent under System Settings → Privacy & Security → \
-                 Input Monitoring"
+                missing_grant_hint(process_is_agent())
             };
             BackendError::Backend(format!("{message}: {hint}"))
         }
         other => other,
     }
+}
+
+/// Where a missing Input Monitoring grant has to be made. macOS judges the
+/// responsible process: the agent helper's own bundle for the shipped agent,
+/// but the launching app — usually a terminal — for a CLI command that opens
+/// devices directly.
+#[cfg(any(target_os = "macos", test))]
+fn missing_grant_hint(process_is_agent: bool) -> String {
+    let target = if process_is_agent {
+        openlogi_core::brand::Helper::Agent.display_name()
+    } else {
+        "the app that launched this command (for example Terminal)"
+    };
+    format!(
+        "Input Monitoring is NOT granted to this process; grant it to {target} under \
+         System Settings → Privacy & Security → Input Monitoring"
+    )
+}
+
+/// Whether this process is the agent helper, by its executable name.
+#[cfg(target_os = "macos")]
+fn process_is_agent() -> bool {
+    std::env::current_exe().is_ok_and(|exe| {
+        exe.file_name()
+            .is_some_and(|name| name == openlogi_core::brand::Helper::Agent.executable())
+    })
 }
 
 /// `DeviceId` is an opaque OS handle (a hidraw path, a Windows device path, an
@@ -187,8 +212,10 @@ use windows::normalize_collection_path;
 ///
 /// `long_only` marks a transport that exposes *only* the long report — no
 /// short-report (`0x10`) collection — so short HID++ requests must be
-/// up-converted to long (handled by the `hidpp` channel). BLE-direct devices on
-/// macOS are long-only; USB / receiver / wired-keyboard devices carry both.
+/// up-converted to long (handled by the `hidpp` channel). BLE-direct devices and
+/// the G733 headset's interface are long-only; USB / receiver / wired-keyboard
+/// devices carry both. On Windows a long-only collection is therefore never
+/// paired with a short sibling collection.
 /// Keeping the flag in this table means a new long-only transport is a
 /// single-line addition here, with no second site to update.
 ///
@@ -211,19 +238,6 @@ fn is_hidpp_long_collection(usage_page: u16, usage_id: u16) -> bool {
 /// Whether the matched HID++ collection exposes only the long report, so short
 /// requests must be re-framed as long (done in the `hidpp` channel). `false` for
 /// pages not in [`HIDPP_LONG_COLLECTIONS`].
-// Windows routes short vs long by report id over the composite channel
-// (WindowsHidppChannel), so the long-only up-conversion path — and thus this
-// helper — is only reached off Windows. Still compiled + unit-tested there.
-// Not `expect`: the lint fires in the `--lib` build and not in the `--test`
-// one, so an expectation is always unfulfilled for one of them.
-#[cfg_attr(
-    target_os = "windows",
-    expect(clippy::allow_attributes, reason = "see above"),
-    allow(
-        dead_code,
-        reason = "long-only up-conversion is the non-Windows AsyncHidChannel path"
-    )
-)]
 fn is_long_only_collection(usage_page: u16, usage_id: u16) -> bool {
     HIDPP_LONG_COLLECTIONS
         .iter()

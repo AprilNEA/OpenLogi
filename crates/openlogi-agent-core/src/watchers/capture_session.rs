@@ -8,7 +8,9 @@
 //! running epoch is mutually exclusive with post-session recovery.
 
 use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
 use tokio::time::Instant;
+use tracing::warn;
 
 use crate::runtime::HidppSessionId;
 
@@ -35,18 +37,18 @@ pub(super) enum CompletionAction {
     Remove { unexpected: bool },
 }
 
-enum SessionPhase {
-    Active(oneshot::Sender<()>),
+enum SessionPhase<Stop> {
+    Active(oneshot::Sender<Stop>),
     Draining,
 }
 
 /// One capture epoch, including its hardware identity, dispatch state and
 /// acknowledged teardown phase.
-pub(super) struct CaptureSession<Target, Dispatch> {
+pub(super) struct CaptureSession<Target, Dispatch, Stop = ()> {
     id: HidppSessionId,
     target: Target,
     dispatch: Dispatch,
-    phase: SessionPhase,
+    phase: SessionPhase<Stop>,
 }
 
 /// Firmware restoration and restart pacing retained after a capture task has
@@ -81,15 +83,35 @@ impl<Restore> CaptureRecovery<Restore> {
     }
 }
 
+/// Wait for a capture task and hand back the restoration it owes its slot.
+///
+/// A panic inside the session is folded into "ended with nothing to restore".
+/// The slot stays `Running` until its ordered completion arrives, so a task
+/// that dies without reporting one would leave the device unarmed for the
+/// rest of the agent's life. Whatever restoration the task held is lost with
+/// it; the re-arm its completion unlocks re-diverts the controls regardless.
+pub(super) async fn settle_capture_task<Restore>(
+    task: JoinHandle<Option<Restore>>,
+    kind: &'static str,
+) -> Option<Restore> {
+    match task.await {
+        Ok(pending_restore) => pending_restore,
+        Err(error) => {
+            warn!(%error, kind, "capture session task died — recovering its slot");
+            None
+        }
+    }
+}
+
 /// One manager-owned hardware slot. A session remains in `Running` while it
 /// drains; only its matching ordered completion moves the slot to recovery.
-pub(super) enum CaptureSlot<Target, Dispatch, Restore> {
-    Running(CaptureSession<Target, Dispatch>),
+pub(super) enum CaptureSlot<Target, Dispatch, Restore, Stop = ()> {
+    Running(CaptureSession<Target, Dispatch, Stop>),
     Recovering(CaptureRecovery<Restore>),
 }
 
-impl<Target, Dispatch, Restore> CaptureSlot<Target, Dispatch, Restore> {
-    pub(super) fn running(session: CaptureSession<Target, Dispatch>) -> Self {
+impl<Target, Dispatch, Restore, Stop> CaptureSlot<Target, Dispatch, Restore, Stop> {
+    pub(super) fn running(session: CaptureSession<Target, Dispatch, Stop>) -> Self {
         Self::Running(session)
     }
 
@@ -103,14 +125,14 @@ impl<Target, Dispatch, Restore> CaptureSlot<Target, Dispatch, Restore> {
         })
     }
 
-    pub(super) fn session(&self) -> Option<&CaptureSession<Target, Dispatch>> {
+    pub(super) fn session(&self) -> Option<&CaptureSession<Target, Dispatch, Stop>> {
         let Self::Running(session) = self else {
             return None;
         };
         Some(session)
     }
 
-    pub(super) fn session_mut(&mut self) -> Option<&mut CaptureSession<Target, Dispatch>> {
+    pub(super) fn session_mut(&mut self) -> Option<&mut CaptureSession<Target, Dispatch, Stop>> {
         let Self::Running(session) = self else {
             return None;
         };
@@ -158,13 +180,13 @@ impl<Target, Dispatch, Restore> CaptureSlot<Target, Dispatch, Restore> {
     }
 }
 
-impl<Target, Dispatch> CaptureSession<Target, Dispatch> {
+impl<Target, Dispatch, Stop> CaptureSession<Target, Dispatch, Stop> {
     /// Begin tracking an active capture task.
     pub(super) fn active(
         id: HidppSessionId,
         target: Target,
         dispatch: Dispatch,
-        stop: oneshot::Sender<()>,
+        stop: oneshot::Sender<Stop>,
     ) -> Self {
         Self {
             id,
@@ -220,11 +242,15 @@ impl<Target, Dispatch> CaptureSession<Target, Dispatch> {
     }
 }
 
-impl<Target: PartialEq, Dispatch: Clone + PartialEq> CaptureSession<Target, Dispatch> {
+impl<Target: PartialEq, Dispatch: Clone + PartialEq, Stop> CaptureSession<Target, Dispatch, Stop> {
     /// Reconcile against the latest wanted target and dispatch state. A target
     /// change begins teardown exactly once; dispatch-only changes hot-refresh
     /// the plan while preserving the hardware epoch.
-    pub(super) fn reconcile(&mut self, wanted: Option<(&Target, &Dispatch)>) -> ReconcileAction {
+    pub(super) fn reconcile_with(
+        &mut self,
+        wanted: Option<(&Target, &Dispatch)>,
+        stop_for_change: impl FnOnce(&Target, Option<&Target>) -> Stop,
+    ) -> ReconcileAction {
         if !self.is_active() {
             return ReconcileAction::None;
         }
@@ -237,11 +263,12 @@ impl<Target: PartialEq, Dispatch: Clone + PartialEq> CaptureSession<Target, Disp
             self.dispatch.clone_from(dispatch);
             return ReconcileAction::DispatchChanged;
         }
+        let stop_command = stop_for_change(&self.target, wanted.map(|(target, _)| target));
         let SessionPhase::Active(stop) = std::mem::replace(&mut self.phase, SessionPhase::Draining)
         else {
             return ReconcileAction::None;
         };
-        let _ = stop.send(());
+        let _ = stop.send(stop_command);
         ReconcileAction::Retiring
     }
 }
@@ -255,12 +282,23 @@ mod tests {
         CaptureSession::active(HidppSessionId::with_epoch("mouse-a", 7), 1, "old", stop)
     }
 
+    #[tokio::test]
+    async fn a_session_task_that_panics_still_settles_its_slot() {
+        let (never_reported, body) = oneshot::channel::<Option<u8>>();
+        drop(never_reported);
+        let died = tokio::spawn(async move { body.await.expect("simulated capture failure") });
+        assert_eq!(settle_capture_task(died, "test").await, None);
+
+        let finished = tokio::spawn(async { Some(3u8) });
+        assert_eq!(settle_capture_task(finished, "test").await, Some(3));
+    }
+
     #[test]
     fn dispatch_refresh_keeps_the_hardware_epoch_active() {
         let mut session = session();
 
         assert_eq!(
-            session.reconcile(Some((&1, &"new"))),
+            session.reconcile_with(Some((&1, &"new")), |_, _| ()),
             ReconcileAction::DispatchChanged
         );
         assert!(session.is_active());
@@ -272,13 +310,13 @@ mod tests {
         let mut session = session();
 
         assert_eq!(
-            session.reconcile(Some((&2, &"new"))),
+            session.reconcile_with(Some((&2, &"new")), |_, _| ()),
             ReconcileAction::Retiring
         );
         assert!(!session.is_active());
         assert_eq!(session.dispatch(), &"old");
         assert_eq!(
-            session.reconcile(Some((&1, &"later"))),
+            session.reconcile_with(Some((&1, &"later")), |_, _| ()),
             ReconcileAction::None
         );
         assert_eq!(session.dispatch(), &"old");
@@ -291,7 +329,10 @@ mod tests {
             session.completion(&HidppSessionId::with_epoch("mouse-a", 7)),
             CompletionAction::Remove { unexpected: true }
         );
-        assert_eq!(session.reconcile(None), ReconcileAction::Retiring);
+        assert_eq!(
+            session.reconcile_with(None, |_, _| ()),
+            ReconcileAction::Retiring
+        );
         assert_eq!(
             session.completion(&HidppSessionId::with_epoch("mouse-a", 7)),
             CompletionAction::Remove { unexpected: false }

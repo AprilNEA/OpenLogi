@@ -55,16 +55,15 @@ fn is_desktop(window: HWND) -> bool {
     if process_id(window) != Some(shell_pid) {
         return false;
     }
+    matches!(class_name(window).as_deref(), Some("WorkerW" | "Progman"))
+}
+
+fn class_name(window: HWND) -> Option<String> {
     let mut class = [0u16; 128];
     // SAFETY: class is a live buffer of 128 code units, window is a native handle.
     let len = unsafe { GetClassNameW(window, class.as_mut_ptr(), 128) };
-    let Ok(len) = usize::try_from(len) else {
-        return false;
-    };
-    matches!(
-        String::from_utf16_lossy(&class[..len]).as_str(),
-        "WorkerW" | "Progman"
-    )
+    let len = usize::try_from(len).ok().filter(|len| *len > 0)?;
+    Some(String::from_utf16_lossy(&class[..len]))
 }
 
 pub(crate) fn pointer_context() -> Option<PointerContext> {
@@ -102,5 +101,26 @@ pub(crate) fn pointer_context() -> Option<PointerContext> {
 
 pub(crate) fn pointer_target_is_focused(expected: PointerTarget) -> bool {
     // SAFETY: GetForegroundWindow has no preconditions and does not change focus.
-    window_target(unsafe { GetForegroundWindow() }) == Some(expected)
+    let foreground = unsafe { GetForegroundWindow() };
+    let focused = window_target(foreground);
+    if focused == Some(expected) {
+        return true;
+    }
+    // Name both windows, so a log tells another application apart from
+    // another window of the same one. Field expressions only run when debug
+    // logging is on, so the class lookups cost nothing otherwise.
+    let hovered_class = || match expected {
+        PointerTarget::Window { window_id, .. } => usize::try_from(window_id)
+            .ok()
+            .and_then(|id| class_name(std::ptr::without_provenance_mut(id))),
+        _ => None,
+    };
+    tracing::debug!(
+        ?expected,
+        hovered_class = ?hovered_class(),
+        foreground = ?focused,
+        foreground_class = ?class_name(foreground),
+        "window under the pointer is not the foreground window"
+    );
+    false
 }
