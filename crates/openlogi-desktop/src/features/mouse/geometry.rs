@@ -405,6 +405,7 @@ mod tests {
         let assignments = markers
             .iter()
             .map(|(slot_name, x, y)| Assignment {
+                slot_id: String::new(),
                 slot_name: (*slot_name).to_string(),
                 marker: Point { x: *x, y: *y },
                 label: Direction { x: 0, y: 0 },
