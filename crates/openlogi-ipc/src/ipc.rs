@@ -154,6 +154,8 @@ pub use succession::Identity;
 ///      timer, five-second steps up to two hours.
 /// v42: `KeyboardUsage` accepts Insert (`0x49`), so a `KeyCombo` can carry
 ///      a usage a v41 agent rejects.
+///      `Capabilities::gesture_button` appended — the device's `0x1b04`
+///      control table lists a divertable dedicated gesture button.
 pub const PROTOCOL_VERSION: u32 = 42;
 
 /// Environment variable through which the agent hands a supervised helper the

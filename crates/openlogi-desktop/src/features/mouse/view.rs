@@ -14,6 +14,7 @@ use gpui_component::{
     v_flex,
 };
 use openlogi_core::binding::{Action, ButtonId, GestureDirection};
+use openlogi_core::device::Capabilities;
 
 use super::force_sensing::{ForceSensingFacts, ForceSensingSlider, PressForce};
 use super::geometry::{
@@ -66,9 +67,7 @@ struct MouseWorkspaceData<'a> {
     bindings: &'a BTreeMap<ButtonId, Action>,
     gesture_maps: &'a BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
     glow: Option<(Arc<GlowGeometry>, Hsla)>,
-    thumbwheel: bool,
-    dpi_gestures: bool,
-    virtual_thumbwheel: bool,
+    capabilities: Capabilities,
     wheel_hold: &'a BTreeSet<ButtonId>,
     editing_app: Option<String>,
     overridden: Option<&'a BTreeMap<ButtonId, Action>>,
@@ -88,18 +87,10 @@ impl<'a> MouseWorkspaceData<'a> {
             glow: state
                 .current_record()
                 .and_then(|record| keyboard_glow(state, record)),
-            thumbwheel: state
+            capabilities: state
                 .current_record()
                 .and_then(|record| record.capabilities)
-                .is_some_and(|capabilities| capabilities.thumbwheel),
-            dpi_gestures: state
-                .current_record()
-                .and_then(|record| record.capabilities)
-                .is_some_and(|capabilities| capabilities.dpi_gestures),
-            virtual_thumbwheel: state
-                .current_record()
-                .and_then(|record| record.capabilities)
-                .is_some_and(|capabilities| capabilities.virtual_thumbwheel),
+                .unwrap_or_default(),
             wheel_hold: state.wheel_hold_buttons(),
             editing_app: state.editing_app().map(|app| profile_name(state, app)),
             overridden: state.editing_app_overrides(),
@@ -117,9 +108,7 @@ impl<'a> MouseWorkspaceData<'a> {
             bindings: &NO_BINDINGS,
             gesture_maps: &NO_GESTURE_MAPS,
             glow: None,
-            thumbwheel: false,
-            dpi_gestures: false,
-            virtual_thumbwheel: false,
+            capabilities: Capabilities::default(),
             wheel_hold: &NO_WHEEL_HOLD,
             editing_app: None,
             overridden: None,
@@ -351,9 +340,7 @@ impl Render for MouseModelView {
             bindings,
             gesture_maps,
             glow,
-            thumbwheel,
-            dpi_gestures,
-            virtual_thumbwheel,
+            capabilities,
             wheel_hold,
             editing_app,
             overridden,
@@ -377,7 +364,7 @@ impl Render for MouseModelView {
             mouse_h,
             hotspots,
             labels,
-        } = model_layout(asset, viewport_w, viewport_h, thumbwheel);
+        } = model_layout(asset, viewport_w, viewport_h, capabilities);
         let canvas_h = mouse_h;
 
         let highlight = self.hovered.or(active).or(self.selected);
@@ -428,8 +415,8 @@ impl Render for MouseModelView {
                 gesture_direction: self.gesture_active_dir,
                 bindings,
                 gesture_maps,
-                dpi_gestures,
-                virtual_thumbwheel,
+                dpi_gestures: capabilities.dpi_gestures,
+                virtual_thumbwheel: capabilities.virtual_thumbwheel,
                 wheel_hold,
                 editing_app: editing_app.as_deref(),
                 overridden,
@@ -503,7 +490,7 @@ fn model_layout(
     asset: Option<&ResolvedAsset>,
     viewport_w: f32,
     viewport_h: f32,
-    thumbwheel: bool,
+    capabilities: Capabilities,
 ) -> ModelLayout {
     let target_h = (viewport_h - MODEL_VERTICAL_RESERVE).clamp(MODEL_MIN_H, MOUSE_MODEL_SIZE.1);
     let has_labels = asset.is_none_or(asset_has_button_labels) && viewport_w >= 960.;
@@ -521,8 +508,14 @@ fn model_layout(
         0.
     };
     let max_image_w = (content_w - left_gutter - right_gutter).max(MODEL_MIN_CONTENT_W / 2.);
-    let (mouse_w, mouse_h, hotspots, mut labels) =
-        scaled_model(asset, target_h, max_image_w, thumbwheel, label_distribution);
+    let (mouse_w, mouse_h, hotspots, mut labels) = scaled_model(
+        asset,
+        target_h,
+        max_image_w,
+        capabilities.thumbwheel,
+        capabilities.gesture_button != Some(false),
+        label_distribution,
+    );
     if !has_labels {
         labels.clear();
     }
@@ -546,6 +539,7 @@ fn scaled_model(
     target_h: f32,
     max_w: f32,
     thumbwheel: bool,
+    gesture_button: bool,
     label_distribution: LabelDistribution,
 ) -> (f32, f32, Vec<Hotspot>, Vec<Label>) {
     if let Some(a) = asset {
@@ -555,7 +549,7 @@ fn scaled_model(
         (w, h, hotspots, labels)
     } else {
         let scale = (target_h / MOUSE_MODEL_SIZE.1).min(max_w / MOUSE_MODEL_SIZE.0);
-        let hotspots = default_hotspots(thumbwheel)
+        let hotspots = default_hotspots(thumbwheel, gesture_button)
             .into_iter()
             .map(|hs| Hotspot {
                 x: hs.x * scale,
@@ -565,7 +559,7 @@ fn scaled_model(
                 ..hs
             })
             .collect();
-        let labels = default_labels(thumbwheel, label_distribution)
+        let labels = default_labels(thumbwheel, gesture_button, label_distribution)
             .into_iter()
             .map(|l| Label {
                 y: l.y * scale,

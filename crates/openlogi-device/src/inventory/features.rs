@@ -26,7 +26,10 @@ use openlogi_core::device::{
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
-use crate::reprog_controls::{BACK_CIDS, DPI_MODE_SHIFT_CIDS, FORWARD_CIDS};
+use crate::reprog_controls::{
+    BACK_CIDS, DPI_MODE_SHIFT_CIDS, FORWARD_CIDS, GESTURE_BUTTON_CID,
+    MULTIPLATFORM_GESTURE_BUTTON_CID,
+};
 use crate::write::{force_button_is_changeable, panel_button};
 
 use super::events::{EventFeatureIndices, EventSubscriptionHandle};
@@ -537,6 +540,7 @@ async fn probe_extra_capabilities(
         let mut haptic_panel = false;
         let mut dpi_gestures = false;
         let mut virtual_thumbwheel = false;
+        let mut gesture_button = false;
         for index in 0..count {
             let info = feature.get_cid_info(index).await.map_err(|_| ())?;
             haptic_panel |= probe_haptic_controls
@@ -550,12 +554,16 @@ async fn probe_extra_capabilities(
                 || FORWARD_CIDS.contains(&info.cid.0))
                 && info.flags.is_divertable()
                 && info.flags.supports_raw_wheel();
+            gesture_button |= [GESTURE_BUTTON_CID, MULTIPLATFORM_GESTURE_BUTTON_CID]
+                .contains(&info.cid.0)
+                && info.flags.is_divertable();
         }
         // Publish only a complete control walk. A lost reply must retain the
         // cache's last-good capabilities and schedule repair, not hide support.
         caps.haptic_panel = haptic_panel;
         caps.dpi_gestures = dpi_gestures;
         caps.virtual_thumbwheel = virtual_thumbwheel;
+        caps.gesture_button = Some(gesture_button);
     }
     force_sensing_read
 }
@@ -707,6 +715,23 @@ mod tests {
                     "CID {cid:04x}, flags {flags:04x}"
                 );
                 assert!(!caps.haptic_panel);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn gesture_button_needs_a_divertable_gesture_control() {
+        // A divertable DPI button is a decoy: only the gesture CIDs count.
+        for cid in [0x00c3, 0x00d0, 0x00c4] {
+            for (flags, divertable) in [(0x0020, true), (0, false)] {
+                let probe = control_probe(vec![0x0001, 0x1b04], vec![(cid, flags)], None).await;
+                let caps = probe.capabilities.unwrap();
+                assert!(!probe.capabilities_incomplete);
+                assert_eq!(
+                    caps.gesture_button,
+                    Some(divertable && cid != 0x00c4),
+                    "CID {cid:04x}, flags {flags:04x}"
+                );
             }
         }
     }

@@ -370,8 +370,9 @@ fn active_thumbwheel_directions_highlight_the_paired_control() {
 
 #[test]
 fn fallback_model_only_adds_thumbwheel_when_capability_is_measured() {
-    let (_, _, without, _) = scaled_model(None, 560., 420., false, LabelDistribution::LeftOnly);
-    let (_, _, with, _) = scaled_model(None, 560., 420., true, LabelDistribution::LeftOnly);
+    let (_, _, without, _) =
+        scaled_model(None, 560., 420., false, true, LabelDistribution::LeftOnly);
+    let (_, _, with, _) = scaled_model(None, 560., 420., true, true, LabelDistribution::LeftOnly);
     assert_eq!(
         without
             .iter()

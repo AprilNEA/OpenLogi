@@ -70,9 +70,10 @@ impl Hotspot {
 
 /// Fallback hotspot layout for the no-asset path (synthetic silhouette).
 /// Primary L/R click are intentionally absent — Logi doesn't expose them
-/// as remappable and we follow the same rule everywhere.
+/// as remappable and we follow the same rule everywhere. The thumb wheel and
+/// the gesture button are drawn only when the device reports them.
 #[must_use]
-pub fn default_hotspots(thumbwheel: bool) -> Vec<Hotspot> {
+pub fn default_hotspots(thumbwheel: bool, gesture_button: bool) -> Vec<Hotspot> {
     let mut hotspots = vec![
         Hotspot {
             id: ButtonId::MiddleClick.into(),
@@ -102,14 +103,16 @@ pub fn default_hotspots(thumbwheel: bool) -> Vec<Hotspot> {
             w: 70.,
             h: 40.,
         },
-        Hotspot {
+    ];
+    if gesture_button {
+        hotspots.push(Hotspot {
             id: ButtonId::GestureButton.into(),
             x: 8.,
             y: 380.,
             w: 44.,
             h: 80.,
-        },
-    ];
+        });
+    }
     if thumbwheel {
         hotspots.push(Hotspot {
             id: MouseControlId::ThumbwheelRotation,
@@ -141,12 +144,12 @@ mod tests {
     #[test]
     fn fallback_thumbwheel_is_capability_gated() {
         assert!(
-            !default_hotspots(false)
+            !default_hotspots(false, true)
                 .iter()
                 .any(|hotspot| { hotspot.id == MouseControlId::ThumbwheelRotation })
         );
         assert_eq!(
-            default_hotspots(true)
+            default_hotspots(true, true)
                 .iter()
                 .filter(|hotspot| hotspot.id == MouseControlId::ThumbwheelRotation)
                 .count(),
@@ -155,19 +158,25 @@ mod tests {
     }
 
     #[test]
-    fn default_hotspots_expose_the_gesture_button() {
-        let hotspots = default_hotspots(false);
+    fn fallback_gesture_button_is_capability_gated() {
+        let gesture = MouseControlId::Button(ButtonId::GestureButton);
         assert!(
-            hotspots
+            default_hotspots(false, true)
                 .iter()
-                .any(|h| { h.id == MouseControlId::Button(ButtonId::GestureButton) }),
+                .any(|h| h.id == gesture),
             "the gesture button must be a mappable hotspot in the synthetic model"
+        );
+        assert!(
+            !default_hotspots(false, false)
+                .iter()
+                .any(|h| h.id == gesture),
+            "a mouse without a gesture button must not be offered one"
         );
     }
 
     #[test]
     fn default_hotspots_omit_primary_clicks() {
-        let hotspots = default_hotspots(false);
+        let hotspots = default_hotspots(false, true);
         assert!(
             !hotspots.iter().any(|h| {
                 matches!(
