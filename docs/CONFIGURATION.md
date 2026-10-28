@@ -424,9 +424,16 @@ Super.
 A chord has exactly one other key, and it may stand alone (`PageUp` with no
 modifier): a letter, a digit, `` - = [ ] \ ; ' ` , . / ``, `F1` to `F20`,
 `Enter`, `Escape` (`Esc`), `Backspace`, `Tab`, `Space`, the arrows `Left`,
-`Right`, `Up`, `Down`, and the editing keys `Insert` (`Ins`), `Delete` (`Del`),
-`Home`, `End`, `PageUp` (`PgUp`), and `PageDown` (`PgDn`). Names are
-case-insensitive. On macOS, `Insert` presses the Help key.
+`Right`, `Up`, `Down`, the editing keys `Insert` (`Ins`), `Delete` (`Del`),
+`Home`, `End`, `PageUp` (`PgUp`), and `PageDown` (`PgDn`), or `PrintScreen`
+(`Print`, `PrtSc`, `PrtScn`, `PrtScr`). Names are case-insensitive. On macOS,
+`Insert` presses the Help key and `PrintScreen` presses F13, the key macOS
+reads a PC keyboard's Print Screen as.
+
+`PrintScreen` presses the key itself, so a screenshot tool that listens for
+Print Screen, such as ShareX or Greenshot, receives it. On Windows and macOS,
+the `Screenshot` and `CaptureRegion` actions press the system's own screenshot
+shortcuts instead.
 
 `CustomShortcut` emits an immediate key-down/key-up pair. `HoldShortcut` keeps
 the chord down until the originating physical button is released, and also
