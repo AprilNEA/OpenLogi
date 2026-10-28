@@ -8,7 +8,7 @@
 //!
 //! All multi-byte fields in this feature are little-endian.
 
-use num_enum::{IntoPrimitive, TryFromPrimitive};
+use num_enum::{FromPrimitive, IntoPrimitive, TryFromPrimitive};
 use openlogi_hidpp_derive::Feature;
 
 use crate::{
@@ -124,7 +124,13 @@ pub enum BacklightEffect {
 }
 
 /// The current backlight status from `getBacklightInfo`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, IntoPrimitive, TryFromPrimitive)]
+///
+/// Version 4 keyboards (Alto Keys K75M, Alto Keys K98M) report status `6`,
+/// which no specification available to this crate names. It decodes as
+/// [`Self::Other`] instead of failing the reply: the status only says why
+/// the backlight is in its state, and the level, effect and durations in the
+/// same reply stay valid.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, IntoPrimitive, FromPrimitive)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
 #[repr(u8)]
@@ -141,6 +147,9 @@ pub enum BacklightStatus {
     TemporaryManual = 4,
     /// Permanent manual mode (set by software).
     PermanentManual = 5,
+    /// A status this crate does not model; carries the raw byte.
+    #[num_enum(catch_all)]
+    Other(u8),
 }
 
 /// The backlight configuration from [`BacklightFeature::get_backlight_config`].
@@ -341,6 +350,23 @@ impl SetBacklightConfig {
     }
 }
 
+impl BacklightInfo {
+    /// Decodes a long `getBacklightInfo` reply.
+    fn from_payload(payload: &[u8; 16]) -> Result<Self, Hidpp20Error> {
+        Ok(Self {
+            nb_levels: payload[0],
+            current_level: payload[1],
+            status: BacklightStatus::from(payload[2]),
+            effect: BacklightEffect::try_from(payload[3])
+                .map_err(|_| Hidpp20Error::UnsupportedResponse)?,
+            oob_duration_hands_out: u16::from_le_bytes([payload[4], payload[5]]),
+            oob_duration_hands_in: u16::from_le_bytes([payload[6], payload[7]]),
+            oob_duration_powered: u16::from_le_bytes([payload[8], payload[9]]),
+            oob_duration_not_powered: u16::from_le_bytes([payload[10], payload[11]]),
+        })
+    }
+}
+
 impl BacklightFeature {
     /// Whether an unsolicited report with `function_id` is the keyboard's
     /// `backlightInfoEvent`, sent when its backlight changes on the device —
@@ -387,18 +413,7 @@ impl BacklightFeature {
         let v20::Message::Long(_, payload) = self.endpoint.call(2, [0; 3]).await? else {
             return Err(Hidpp20Error::UnsupportedResponse);
         };
-        Ok(BacklightInfo {
-            nb_levels: payload[0],
-            current_level: payload[1],
-            status: BacklightStatus::try_from(payload[2])
-                .map_err(|_| Hidpp20Error::UnsupportedResponse)?,
-            effect: BacklightEffect::try_from(payload[3])
-                .map_err(|_| Hidpp20Error::UnsupportedResponse)?,
-            oob_duration_hands_out: u16::from_le_bytes([payload[4], payload[5]]),
-            oob_duration_hands_in: u16::from_le_bytes([payload[6], payload[7]]),
-            oob_duration_powered: u16::from_le_bytes([payload[8], payload[9]]),
-            oob_duration_not_powered: u16::from_le_bytes([payload[10], payload[11]]),
-        })
+        BacklightInfo::from_payload(&payload)
     }
 
     /// Applies a backlight effect temporarily (stored in RAM, not persisted).
@@ -413,8 +428,7 @@ impl BacklightInfoUpdate {
         Ok(Self {
             nb_levels: payload[0],
             current_level: payload[1],
-            status: BacklightStatus::try_from(payload[2])
-                .map_err(|_| Hidpp20Error::UnsupportedResponse)?,
+            status: BacklightStatus::from(payload[2]),
             effect: BacklightEffect::try_from(payload[3])
                 .map_err(|_| Hidpp20Error::UnsupportedResponse)?,
         })
@@ -424,8 +438,8 @@ impl BacklightInfoUpdate {
 #[cfg(test)]
 mod tests {
     use super::{
-        BacklightConfig, BacklightEffect, BacklightFeature, BacklightInfoUpdate, BacklightMode,
-        BacklightOptions, BacklightStatus, SetBacklightConfig,
+        BacklightConfig, BacklightEffect, BacklightFeature, BacklightInfo, BacklightInfoUpdate,
+        BacklightMode, BacklightOptions, BacklightStatus, Hidpp20Error, SetBacklightConfig,
     };
 
     /// `getBacklightConfig` options-byte value of `WOW`.
@@ -593,6 +607,59 @@ mod tests {
         assert_eq!(update.current_level, 5);
         assert_eq!(update.status, BacklightStatus::PermanentManual);
         assert_eq!(update.effect, BacklightEffect::Breathing);
+    }
+
+    /// The `getBacklightInfo` reply an Alto Keys K75M (`0x1982` version 4)
+    /// sent in #1874: eight levels, level 2, status `6`, the static effect,
+    /// and out-of-box durations 3 / 6 / 60 / 6.
+    const K75M_INFO: [u8; 16] = [
+        0x08, 0x02, 0x06, 0x00, 0x03, 0x00, 0x06, 0x00, 0x3c, 0x00, 0x06, 0x00, 0, 0, 0, 0,
+    ];
+
+    #[test]
+    fn an_unmodelled_status_keeps_the_rest_of_the_info_reply() {
+        let info = BacklightInfo::from_payload(&K75M_INFO).unwrap();
+
+        assert_eq!(info.status, BacklightStatus::Other(6));
+        assert_eq!(info.nb_levels, 8);
+        assert_eq!(info.current_level, 2);
+        assert_eq!(info.effect, BacklightEffect::Static);
+        assert_eq!(
+            [
+                info.oob_duration_hands_out,
+                info.oob_duration_hands_in,
+                info.oob_duration_powered,
+                info.oob_duration_not_powered,
+            ],
+            [3, 6, 60, 6]
+        );
+    }
+
+    #[test]
+    fn an_unmodelled_status_keeps_the_info_event() {
+        let update = BacklightInfoUpdate::from_payload(&K75M_INFO).unwrap();
+
+        assert_eq!(update.status, BacklightStatus::Other(6));
+        assert_eq!(update.current_level, 2);
+    }
+
+    #[test]
+    fn status_bytes_round_trip() {
+        for raw in 0..=u8::MAX {
+            assert_eq!(u8::from(BacklightStatus::from(raw)), raw);
+        }
+        assert_eq!(BacklightStatus::from(5), BacklightStatus::PermanentManual);
+    }
+
+    #[test]
+    fn an_unknown_effect_still_fails_the_info_reply() {
+        let mut payload = K75M_INFO;
+        payload[3] = 0x7f;
+
+        assert!(matches!(
+            BacklightInfo::from_payload(&payload),
+            Err(Hidpp20Error::UnsupportedResponse)
+        ));
     }
 
     #[test]
