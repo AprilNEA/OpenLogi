@@ -140,7 +140,10 @@ fn input_monitoring_item() -> SettingItem {
             } else if denied {
                 // The background agent reads the devices, so the grant has to
                 // name it; one given to OpenLogi itself or to Terminal does
-                // not reach it (#1851).
+                // not reach it (#1851). Denied also covers an enabled entry
+                // the agent cannot use: a stale one, or a grant made after
+                // launch whose automatic relaunch was refused
+                // (`InputMonitoring::NeedsRelaunch`). The hint covers both.
                 Some(tr!("permissions.input_monitoring_agent_instructions"))
             } else {
                 None
