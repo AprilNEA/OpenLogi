@@ -362,11 +362,14 @@ impl SharedHandles {
         // A DPI shift returns here, not to the last preset picked. Recorded
         // when the write is requested, as a preset pick is, so a pick made
         // while this write runs is not overwritten when it finishes.
-        if let Ok(mut cycles) = self.dpi_cycle.write() {
-            cycles.reapplied_at(route, dpi);
-        }
+        let reapplied = self
+            .dpi_cycle
+            .write()
+            .ok()
+            .map(|mut cycles| cycles.reapplied_at(route, dpi));
         let speeds = Arc::clone(&self.pointer_speeds);
-        self.device(route)
+        let result = self
+            .device(route)
             .run_in_turn(
                 HidppOperation::WriteDpi,
                 &ticket,
@@ -381,7 +384,17 @@ impl SharedHandles {
                 },
                 |_| async { Ok(()) },
             )
-            .await
+            .await;
+        // A rejected write leaves the mouse where it was. A newer write
+        // decides the DPI itself, so this one puts nothing back then.
+        if result.is_err()
+            && ticket.is_current()
+            && let Some(reapplied) = reapplied
+            && let Ok(mut cycles) = self.dpi_cycle.write()
+        {
+            cycles.revert(reapplied);
+        }
+        result
     }
 
     /// Apply `change` to the backlight of the keyboard at `route` and return

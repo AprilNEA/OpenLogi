@@ -50,11 +50,34 @@ impl DpiCycles {
     }
 
     /// [`Self::reapplied`] for every mouse at `route`: the settings app
-    /// writes by route, not by key.
-    pub fn reapplied_at(&mut self, route: &DeviceRoute, dpi: Dpi) {
-        for state in self.by_key.values_mut() {
+    /// writes by route, not by key. Returns what it replaced, for
+    /// [`Self::revert`].
+    pub(crate) fn reapplied_at(&mut self, route: &DeviceRoute, dpi: Dpi) -> Reapplied {
+        let mut replaced = Vec::new();
+        for (key, state) in &mut self.by_key {
             if state.target.as_ref() == Some(route) {
+                let (current, index) = (state.current, state.index);
                 state.reapplied(dpi);
+                replaced.push(Replaced {
+                    key: key.clone(),
+                    written: state.current,
+                    current,
+                    index,
+                });
+            }
+        }
+        Reapplied(replaced)
+    }
+
+    /// Undo [`Self::reapplied_at`] after the mouse rejected the write, on
+    /// each mouse whose DPI nothing has set since.
+    pub(crate) fn revert(&mut self, reapplied: Reapplied) {
+        for replaced in reapplied.0 {
+            if let Some(state) = self.by_key.get_mut(&replaced.key)
+                && state.current == replaced.written
+            {
+                state.current = replaced.current;
+                state.index = replaced.index;
             }
         }
     }
@@ -67,6 +90,19 @@ impl DpiCycles {
         let key = key.or(self.selected.as_deref())?;
         self.by_key.get(key).and_then(|state| state.target.clone())
     }
+}
+
+/// What [`DpiCycles::reapplied_at`] replaced.
+#[derive(Debug)]
+#[must_use]
+pub(crate) struct Reapplied(Vec<Replaced>);
+
+#[derive(Debug)]
+struct Replaced {
+    key: String,
+    written: Option<Dpi>,
+    current: Option<Dpi>,
+    index: usize,
 }
 
 /// The DPI a mouse had before a held DPI shift, read from its sensor when
