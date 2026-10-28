@@ -217,6 +217,14 @@ impl Agent for TestAgent {
     ) -> Result<PointerSpeed, WriteError> {
         unreachable!("profile capture must never write the pointer speed")
     }
+    async fn play_haptic(
+        self,
+        _: TarpcContext,
+        _route: Option<DeviceRoute>,
+        _feedback: openlogi_core::config::EventHapticFeedback,
+    ) -> Result<(), WriteError> {
+        unreachable!("profile capture must never play haptics")
+    }
     async fn set_backlight(
         self,
         _: TarpcContext,

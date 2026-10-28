@@ -690,7 +690,7 @@ fn one_shot_runtime(label: &str) -> Option<tokio::runtime::Runtime> {
 /// device via its current shared channel. Returns immediately; failures
 /// (incl. devices that expose neither `0x2111` nor the older `0x2110`
 /// SmartShift feature) are logged.
-pub fn toggle_smartshift_in_background(op: DeviceOp) {
+pub fn toggle_smartshift_in_background(op: DeviceOp, toggled: impl FnOnce() + Send + 'static) {
     let index = op.route.device_index();
     op.spawn_write(
         "SmartShift toggle",
@@ -698,6 +698,7 @@ pub fn toggle_smartshift_in_background(op: DeviceOp) {
         move |result| {
             log_outcome(index, "SmartShift toggle", result, |mode| {
                 debug!(index, ?mode, "SmartShift toggled");
+                toggled();
             });
         },
     );

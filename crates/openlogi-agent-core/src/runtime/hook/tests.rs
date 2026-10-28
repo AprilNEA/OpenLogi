@@ -53,6 +53,7 @@ fn test_dispatcher() -> (
                 transport_turns: crate::hardware::TransportTurns::default(),
             },
             action_ring,
+            haptics: crate::event_haptics::EventHaptics::default(),
         },
         buttons: owner.input(),
     };

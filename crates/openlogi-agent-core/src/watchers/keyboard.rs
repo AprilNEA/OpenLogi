@@ -172,7 +172,8 @@ fn dispatch_input(
         | CapturedInput::Scroll { .. }
         | CapturedInput::ThumbwheelDirection { .. }
         | CapturedInput::HeldWheel { .. }
-        | CapturedInput::MainWheel { .. } => {}
+        | CapturedInput::MainWheel { .. }
+        | CapturedInput::WheelRatchet => {}
     }
 }
 

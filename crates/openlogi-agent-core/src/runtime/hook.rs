@@ -21,6 +21,7 @@ use tracing::{info, warn};
 
 use super::scroll::ScrollInputHandle;
 use super::{ActionDispatchTarget, ActionDispatcher, PressToken};
+use crate::event_haptics::{EventCue, EventHaptics};
 use crate::event_monitor::SharedEventMonitor;
 
 /// The button maps and selected-device thumb-wheel polarity the OS-hook callback
@@ -370,6 +371,7 @@ fn handle_moved(
     delta_y: i32,
     hooks: &SharedHookMaps,
     dispatcher: &ActionDispatcher,
+    haptics: &EventHaptics,
 ) -> EventDisposition {
     let commit = HOLD.with_borrow_mut(|h| h.accumulate(delta_x, delta_y));
     if let Some((press, button, dir)) = commit {
@@ -381,7 +383,9 @@ fn handle_moved(
         });
         if let Some(action) = action {
             info!(button = %button, ?dir, action = %action.label(), "gesture swipe → executing bound action");
-            dispatcher.try_dispatch_while_pressed(&press, &action);
+            if dispatcher.try_dispatch_while_pressed(&press, &action) {
+                haptics.observe_host(EventCue::Gesture);
+            }
         }
     }
     EventDisposition::PassThrough
@@ -445,6 +449,7 @@ pub fn start(
     dispatcher: ActionDispatcher,
     scroll: ScrollInputHandle,
     monitor: SharedEventMonitor,
+    haptics: EventHaptics,
 ) -> Option<Hook> {
     if !Hook::has_accessibility() {
         warn!(
@@ -462,6 +467,9 @@ pub fn start(
     let result = Hook::start(move |event| match event {
         HookEvent::Mouse(event) => {
             monitor.record(&event);
+            // Before any remap: a press haptic answers every button,
+            // including the primary ones that never reach the remap path.
+            haptics.observe(&event, button_source_may_remap);
             match event {
                 MouseEvent::Button {
                     id,
@@ -476,7 +484,7 @@ pub fn start(
                     openlogi_hook::frontmost_safari_pid,
                 ),
                 MouseEvent::Moved { delta_x, delta_y } => {
-                    handle_moved(delta_x, delta_y, &hooks, &dispatcher)
+                    handle_moved(delta_x, delta_y, &hooks, &dispatcher, &haptics)
                 }
                 MouseEvent::CaptureInterrupted => {
                     HOLD.with_borrow_mut(HoldState::cancel);
@@ -519,13 +527,16 @@ pub fn start(
         // HoldShortcut enters the same down/up/cancel lifecycle as a mouse
         // button. The active set pairs key-up even if modifier state or config
         // changes while the key is down.
-        HookEvent::Key(event) => handle_key(
-            event,
-            &keyboard_bindings,
-            &action_tx,
-            &dispatcher,
-            ActionDispatchTarget::capture,
-        ),
+        HookEvent::Key(event) => {
+            haptics.observe_key(&event);
+            handle_key(
+                event,
+                &keyboard_bindings,
+                &action_tx,
+                &dispatcher,
+                ActionDispatchTarget::capture,
+            )
+        }
     });
 
     match result {

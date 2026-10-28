@@ -12,21 +12,24 @@ pub mod scroll;
 
 use std::collections::HashMap;
 use std::io;
+use std::num::NonZeroU8;
 use std::sync::{Arc, Mutex, PoisonError, RwLock, mpsc};
 use std::time::{Duration, Instant};
 
 use openlogi_core::binding::{Action, Binding, ButtonId};
+use openlogi_core::config::EventHapticInput;
 use tracing::{debug, info, warn};
 
 use self::button::{
     ButtonInputHandle, ButtonRuntimeEvent, ButtonRuntimeOwner, EndReason, PressControl,
 };
 pub(crate) use self::button::{HidppSessionId, PressToken};
+use crate::event_haptics::{EventCue, EventHaptics};
 use crate::hardware::{
     DeviceAccess, toggle_smartshift_in_background, write_pointer_speed_in_background,
 };
 use crate::pointer_speed::{PrecisionPress, SpeedWrite};
-use crate::{DpiCycleState, DpiCycles, PointerSpeeds};
+use crate::{DpiCycles, PointerSpeeds};
 
 /// Wait for a runtime worker's next command, or until its earliest deadline.
 ///
@@ -118,12 +121,18 @@ impl HeldShortcuts {
     }
 }
 
+/// How close to an end of its range the output volume counts as there:
+/// macOS steps it in sixteenths, so this is well inside one step.
+const VOLUME_EPSILON: f32 = 0.01;
+
 #[derive(Clone)]
 struct ActionExecutor {
     dpi_cycle: Arc<RwLock<DpiCycles>>,
     pointer_speeds: Arc<PointerSpeeds>,
     access: DeviceAccess,
     action_ring: tokio::sync::mpsc::UnboundedSender<Option<String>>,
+    /// Confirms DPI, SmartShift, and volume changes on the haptic mouse.
+    haptics: EventHaptics,
 }
 
 impl ActionExecutor {
@@ -139,13 +148,13 @@ impl ActionExecutor {
             return false;
         };
         info!(on, target = ?write.target, "precision mode toggled → writing pointer speed");
-        self.write_speed(write);
+        self.write_speed(write, || {});
         true
     }
 
     /// Write `write` in the background, and settle the restore it carries
-    /// once it lands.
-    fn write_speed(&self, write: SpeedWrite) {
+    /// once it lands, then call `applied`.
+    fn write_speed(&self, write: SpeedWrite, applied: impl FnOnce() + Send + 'static) {
         let speeds = Arc::clone(&self.pointer_speeds);
         let SpeedWrite {
             route,
@@ -158,7 +167,50 @@ impl ActionExecutor {
             if let Some(restore) = restore {
                 speeds.restored(&restore);
             }
+            applied();
         });
+    }
+
+    /// Cue a volume step, or the end of the range when the volume is already
+    /// there and `action` pushes past it.
+    fn cue_volume(&self, action: &Action) {
+        // Reading the volume is a CoreAudio round trip: skip it unless a
+        // volume cue plays.
+        if ![EventHapticInput::LevelSteps, EventHapticInput::LevelLimits]
+            .into_iter()
+            .any(|input| self.haptics.plays_host(input))
+        {
+            return;
+        }
+        let at_limit = openlogi_inject::output_volume().is_some_and(|volume| match action {
+            Action::VolumeUp => volume >= 1.0 - VOLUME_EPSILON,
+            _ => volume <= VOLUME_EPSILON,
+        });
+        self.haptics.observe_host(if at_limit {
+            EventCue::LevelLimit
+        } else {
+            EventCue::LevelStep
+        });
+    }
+
+    /// Flip the wheel between ratchet and free spin on the device
+    /// `device_key` names, or the selected one, and confirm it once written.
+    fn toggle_smartshift(&self, device_key: Option<&str>) {
+        let target = self
+            .dpi_cycle
+            .read()
+            .ok()
+            .and_then(|cycles| cycles.target_for(device_key));
+        if let Some(target) = target {
+            info!("SmartShift toggle → flipping wheel mode");
+            let haptics = self.haptics.clone();
+            let key = device_key.map(str::to_owned);
+            toggle_smartshift_in_background(self.access.op(&target), move || {
+                haptics.observe_for(key.as_deref(), EventCue::WheelMode);
+            });
+        } else {
+            debug!("no target device — SmartShift toggle skipped");
+        }
     }
 
     fn dispatch_to(&self, action: &Action, device_key: Option<&str>, target: ActionDispatchTarget) {
@@ -195,7 +247,9 @@ impl ActionExecutor {
                     return;
                 }
                 match self.dpi_cycle.write() {
-                    Ok(mut guard) => guard.state_for(device_key).and_then(DpiCycleState::cycle),
+                    Ok(mut guard) => guard
+                        .state_for(device_key)
+                        .and_then(|state| Some((state.cycle()?, state.index))),
                     Err(e) => {
                         warn!(error = %e, "dpi_cycle lock poisoned — cycle skipped");
                         None
@@ -205,24 +259,14 @@ impl ActionExecutor {
             Action::SetDpiPreset(i) => match self.dpi_cycle.write() {
                 Ok(mut guard) => guard
                     .state_for(device_key)
-                    .and_then(|state| state.set(usize::from(*i))),
+                    .and_then(|state| Some((state.set(usize::from(*i))?, state.index))),
                 Err(e) => {
                     warn!(error = %e, "dpi_cycle lock poisoned — set skipped");
                     None
                 }
             },
             Action::ToggleSmartShift => {
-                let target = self
-                    .dpi_cycle
-                    .read()
-                    .ok()
-                    .and_then(|cycles| cycles.target_for(device_key));
-                if let Some(target) = target {
-                    info!("SmartShift toggle → flipping wheel mode");
-                    toggle_smartshift_in_background(self.access.op(&target));
-                } else {
-                    debug!("no target device — SmartShift toggle skipped");
-                }
+                self.toggle_smartshift(device_key);
                 return;
             }
             Action::TogglePrecisionMode => {
@@ -253,19 +297,36 @@ impl ActionExecutor {
                 }
                 None
             }
+            Action::VolumeUp | Action::VolumeDown => {
+                // Read before the step: at the end of the range, the press
+                // is the one that hits the stop.
+                self.cue_volume(action);
+                openlogi_inject::execute(action);
+                None
+            }
             other => {
                 openlogi_inject::execute(other);
                 None
             }
         };
-        if let Some((dpi, target)) = next {
+        if let Some(((dpi, target), index)) = next {
             // No target: a dev environment without a real device.
             if let Some(target) = target {
                 info!(%dpi, "DPI action → writing to device");
+                // One tap per preset position, so the count tells which;
+                // played once the write lands, so a rejected or superseded
+                // preset is not confirmed.
+                let count = NonZeroU8::new(u8::try_from(index + 1).unwrap_or(u8::MAX));
+                let haptics = self.haptics.clone();
+                let key = device_key.map(str::to_owned);
                 // Numbered with the pointer-speed writes: on a DPI mouse it
                 // ends precision mode, and an older precision write must not
                 // land after it.
-                self.write_speed(self.pointer_speeds.preset_write(&target, dpi));
+                self.write_speed(self.pointer_speeds.preset_write(&target, dpi), move || {
+                    if let Some(count) = count {
+                        haptics.observe_for(key.as_deref(), EventCue::ModeChange { count });
+                    }
+                });
             } else {
                 debug!(%dpi, "no target device — DPI write skipped");
             }
@@ -357,12 +418,14 @@ impl ActionRuntime {
         pointer_speeds: Arc<PointerSpeeds>,
         access: DeviceAccess,
         action_ring: tokio::sync::mpsc::UnboundedSender<Option<String>>,
+        haptics: EventHaptics,
     ) -> io::Result<Self> {
         let executor = ActionExecutor {
             dpi_cycle,
             pointer_speeds,
             access,
             action_ring,
+            haptics,
         };
         let mut button_handler = ButtonEventHandler::new(executor.clone());
         let buttons = ButtonRuntimeOwner::spawn(move |event| button_handler.handle(event))?;
@@ -618,6 +681,7 @@ fn dispatch_browser_navigation(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::DpiCycleState;
 
     static BROWSER_NAV_TEST_LOCK: Mutex<()> = Mutex::new(());
 
@@ -635,6 +699,7 @@ mod tests {
                 transport_turns: crate::hardware::TransportTurns::default(),
             },
             action_ring,
+            haptics: crate::event_haptics::EventHaptics::default(),
         }
     }
 
@@ -771,6 +836,7 @@ mod tests {
                 transport_turns: crate::hardware::TransportTurns::default(),
             },
             action_ring,
+            haptics: crate::event_haptics::EventHaptics::default(),
         };
 
         executor.dispatch_to(

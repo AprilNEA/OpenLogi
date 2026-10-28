@@ -57,6 +57,12 @@ mod main_thread;
 )]
 mod menu_shortcut;
 mod scroll;
+#[expect(
+    unsafe_code,
+    reason = "CoreAudio property reads are unsafe FFI calls with out-pointers"
+)]
+mod volume;
+pub(crate) use volume::output_volume;
 /// Space switches — DockSwipe events, instant or a timed slide, or the user's
 /// Space shortcut for a slide — with read-only, per-display Space
 /// confirmation.

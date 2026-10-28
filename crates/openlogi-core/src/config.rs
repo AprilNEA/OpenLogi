@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 
 mod button_map;
 mod device;
+mod event_haptics;
 #[cfg(feature = "fs")]
 mod file;
 mod function_key;
@@ -33,6 +34,9 @@ mod wheel_hold;
 mod tests;
 
 pub use device::{DeviceConfig, DeviceIdentity, DisableKey, LinkConfig, LinkOverrides};
+pub use event_haptics::{
+    EVENT_HAPTIC_BUTTONS, EventHapticFeedback, EventHapticInput, EventHapticsConfig,
+};
 #[cfg(all(test, feature = "fs", unix))]
 use file::resolve_symlinks;
 #[cfg(feature = "fs")]

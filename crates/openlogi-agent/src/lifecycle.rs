@@ -237,7 +237,7 @@ impl Wanted {
             event_monitor,
             inputs,
             backlight_overlay,
-            ring_haptics,
+            haptics,
             demand,
         } = core;
         observable.set_virtual_keyboard(virtual_keyboard.status());
@@ -252,7 +252,7 @@ impl Wanted {
                 event_monitor,
                 inputs,
                 backlight_overlay,
-                ring_haptics,
+                haptics,
                 signals,
                 shutdown_requests,
                 hidpp_watchers: WatcherFleet::Inactive,
@@ -280,7 +280,7 @@ struct Running {
     event_monitor: Arc<EventMonitor>,
     inputs: InputServices,
     backlight_overlay: BacklightOverlayManager,
-    ring_haptics: server::RingHapticPlayer,
+    haptics: server::HapticPlayer,
     signals: ShutdownSignals,
     shutdown_requests: ShutdownRequests,
     hidpp_watchers: WatcherFleet,
@@ -574,7 +574,7 @@ impl Running {
     async fn begin_action_ring(&self, device_key: Option<&str>) {
         // A second trigger press while the ring is showing closes it.
         if let Some(dismissed) = self.inputs.ring.dismiss_active() {
-            self.ring_haptics.end_session(dismissed);
+            self.haptics.end_session(dismissed);
             return;
         }
         if let Some(session) = self
@@ -589,7 +589,7 @@ impl Running {
             // transitions can clear it, after which plays are accepted
             // without feedback. This still precedes every hover, because the
             // overlay can only hover once it has observed the invocation.
-            self.ring_haptics
+            self.haptics
                 .begin_session(invocation.session_id, haptic_route);
         }
     }
@@ -650,6 +650,7 @@ impl Running {
             self.inputs.dispatcher.clone(),
             self.inputs.scroll_input.clone(),
             Arc::clone(&self.event_monitor),
+            self.shared.event_haptics.clone(),
         )
     }
 
@@ -677,7 +678,7 @@ impl Running {
                 // hand it back while inventory still publishes the channels.
                 // No session arms until the agent stays, see
                 // `restart_hidpp_watchers`.
-                self.ring_haptics.finish().await;
+                self.haptics.finish().await;
                 self.hidpp_watchers
                     .begin_replacement(Replacement { path, retry });
             }
@@ -699,7 +700,7 @@ impl Running {
     fn restart_hidpp_watchers(&mut self) {
         // The agent stays — at startup, or after a replacement that did not
         // happen — so ring sessions arm the haptic engine again.
-        self.ring_haptics.resume();
+        self.haptics.resume();
         self.hidpp_watchers =
             WatcherFleet::Running(startup::spawn_hidpp_watchers(&self.shared, &self.inputs));
     }
@@ -763,7 +764,7 @@ impl Running {
         reason: &str,
         tray_guard: Option<tokio::sync::oneshot::Sender<()>>,
     ) -> ! {
-        self.ring_haptics.finish().await;
+        self.haptics.finish().await;
         std::mem::replace(&mut self.hidpp_watchers, WatcherFleet::Inactive)
             .stop_for_exit()
             .await;

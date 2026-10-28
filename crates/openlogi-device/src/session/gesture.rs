@@ -112,6 +112,9 @@ pub enum CapturedInput {
         /// the wheel's `0x2121` multiplier for a high-resolution one.
         per_notch: NonZeroU8,
     },
+    /// The wheel switched between ratchet and free spin on the device. Only
+    /// while the session's [`CaptureSpec::report_wheel_ratchet`] asks.
+    WheelRatchet,
 }
 
 /// HID++-divertable standard buttons: the `0x1b04` control ID and the
@@ -189,6 +192,11 @@ pub struct CaptureSpec {
     /// mode along with the divert; `None` leaves the wheel native. Inert on a
     /// device without the feature.
     pub divert_main_wheel: Option<MainWheelDivert>,
+    /// Report the wheel switching between ratchet and free spin on the
+    /// device (the SmartShift button) as [`CapturedInput::WheelRatchet`].
+    /// Diverts nothing: `0x2121` announces the switch either way, so this only
+    /// resolves where. Inert on a device without the feature.
+    pub report_wheel_ratchet: bool,
 }
 
 /// Capture the controls selected by `spec` on `route` until `host.shutdown`
@@ -300,6 +308,8 @@ impl ArmedCapture for GestureCapture {
             .main_wheel
             .as_ref()
             .map(|wheel| (wheel.feature_index, wheel.per_notch));
+        let ratchet_index = armed.ratchet_index;
+        let hires_index = main_wheel.map(|(index, _)| index).or(ratchet_index);
         move |msg| {
             if let Some(idx) = reprog_index
                 && let Some(event) = reprog_controls::decode_event(msg, device_index, idx)
@@ -338,15 +348,19 @@ impl ArmedCapture for GestureCapture {
                 }
                 return;
             }
-            if let Some((idx, per_notch)) = main_wheel
+            if let Some(idx) = hires_index
                 && let Some(event) = hires_wheel::decode_event(msg, device_index, idx)
             {
                 if let HiResWheelEvent::RatchetSwitch(state) = event {
-                    // Not input. The inventory's listener on this channel
-                    // counts it as a setting change, so clients re-read
-                    // SmartShift.
+                    // The inventory's listener on this channel also counts it
+                    // as a setting change, so clients re-read SmartShift.
                     debug!(index = device_index, ?state, "wheel ratchet switched");
-                } else if let Some(input) = main_wheel::movement_input(event, per_notch) {
+                    if ratchet_index.is_some() {
+                        let _ = sink.send(CapturedInput::WheelRatchet);
+                    }
+                } else if let Some((_, per_notch)) = main_wheel
+                    && let Some(input) = main_wheel::movement_input(event, per_notch)
+                {
                     let _ = sink.send(input);
                 }
             }
