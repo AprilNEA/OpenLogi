@@ -377,11 +377,18 @@ pub(crate) fn stop_for_current_publication(
 /// channel so inventory replaces it. Otherwise inventory keeps publishing it
 /// until its own probes fail twice, and the restarted session would arm on
 /// the same dead channel (#2020).
+///
+/// An accepted report stops as a channel change: inventory retires the
+/// channel on its next pass, so the restore waits for the replacement. Writing
+/// it through the silent channel would hold that channel open, one write
+/// timeout per control, while inventory tries to reopen the device.
 pub(crate) fn stop_for_dead_channel(
     registry: &ChannelRegistry,
     dead: &SharedChannel,
 ) -> CaptureStop {
-    registry.report_dead(dead);
+    if registry.report_dead(dead) {
+        return CaptureStop::ChannelChanged;
+    }
     stop_for_current_publication(registry, dead)
 }
 

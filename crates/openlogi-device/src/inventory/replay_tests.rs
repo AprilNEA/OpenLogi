@@ -597,7 +597,7 @@ async fn a_direct_channel_capture_reports_dead_retires_on_the_next_pass() {
     assert_eq!(initial, std::slice::from_ref(&expected));
     let stale = registry.lookup(&route).expect("direct route published");
 
-    registry.report_dead(&stale);
+    assert!(registry.report_dead(&stale));
     tokio::time::timeout(Duration::from_secs(1), enumerator.dead_channel_reported())
         .await
         .expect("a report wakes the inventory watcher");
@@ -616,7 +616,7 @@ async fn a_direct_channel_capture_reports_dead_retires_on_the_next_pass() {
     );
     assert!(!registry.is_current(&stale));
     assert!(registry.lookup(&route).is_none());
-    registry.report_dead(&stale);
+    assert!(!registry.report_dead(&stale));
     assert!(
         registry.take_dead_reports().is_empty(),
         "a channel inventory already withdrew is not reported again"
@@ -683,7 +683,7 @@ async fn a_receiver_slot_capture_report_leaves_the_receiver_channel_published() 
         .expect("initial probe succeeds");
     let slot = registry.lookup(&route).expect("receiver route published");
 
-    registry.report_dead(&slot);
+    assert!(!registry.report_dead(&slot));
 
     assert!(registry.take_dead_reports().is_empty());
     assert!(registry.is_current(&slot));

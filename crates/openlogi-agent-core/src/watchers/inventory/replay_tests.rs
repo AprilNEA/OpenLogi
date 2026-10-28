@@ -673,7 +673,7 @@ async fn a_capture_dead_channel_report_wakes_the_worker_and_replaces_the_channel
         .lookup(&direct_route())
         .expect("direct route published");
 
-    registry.report_dead(&stale);
+    assert!(registry.report_dead(&stale));
     let trigger = tokio::time::timeout(Duration::from_secs(1), worker.next_trigger())
         .await
         .expect("the report wakes the worker");

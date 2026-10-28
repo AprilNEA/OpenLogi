@@ -321,9 +321,13 @@ impl ChannelRegistry {
     /// probing it. Only direct routes are reported: a receiver's channel
     /// carries every paired slot, and one silent device behind it says
     /// nothing about the others.
-    pub fn report_dead(&self, shared: &SharedChannel) {
+    ///
+    /// Returns whether the report was accepted, i.e. whether inventory will
+    /// retire the channel.
+    #[must_use]
+    pub fn report_dead(&self, shared: &SharedChannel) -> bool {
         if !matches!(shared.route(), DeviceRoute::Direct { .. }) || !self.is_current(shared) {
-            return;
+            return false;
         }
         self.dead
             .channels
@@ -331,6 +335,7 @@ impl ChannelRegistry {
             .unwrap_or_else(PoisonError::into_inner)
             .push(Arc::downgrade(shared.channel()));
         self.dead.reported.notify_one();
+        true
     }
 
     /// Resolves once [`Self::report_dead`] has accepted a report, including
