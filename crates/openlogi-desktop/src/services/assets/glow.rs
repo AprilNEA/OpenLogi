@@ -14,6 +14,7 @@
 //! texture, so a depot's whole lighting footprint is the segment list.
 
 use std::path::Path;
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use serde::Deserialize;
 use tracing::warn;
@@ -63,7 +64,7 @@ pub(crate) struct GlowSeg {
 /// asset resolve. `holes` is the enclosed legend pixels themselves (not the
 /// bin they sit in), packed `x | (y << 16)` in the same space as
 /// `image_width` / `image_height`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug)]
 pub(crate) struct GlowGeometry {
     pub aspect: f32,
     pub segments: Vec<GlowSeg>,
@@ -71,6 +72,51 @@ pub(crate) struct GlowGeometry {
     pub image_height: u32,
     /// Enclosed legend pixels. Empty only when nothing was see-through.
     pub holes: Vec<u32>,
+    /// Device-pixel coverage for recent placements. Lives on the geometry so a
+    /// freed render cannot be mistaken for a later one that reused its address.
+    /// A mutex, not a `RefCell`, so this stays `Sync` inside `Arc`.
+    coverage: Mutex<Vec<CoverageSlot>>,
+}
+
+/// One snapped placement and the device pixels lit for it.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CachedSplat {
+    pub x: i32,
+    pub y: i32,
+    pub fraction: f32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct CoverageSlot {
+    ox: u32,
+    oy: u32,
+    rw: u32,
+    rh: u32,
+    scale: u32,
+    splats: Vec<CachedSplat>,
+}
+
+impl PartialEq for GlowGeometry {
+    fn eq(&self, other: &Self) -> bool {
+        self.aspect == other.aspect
+            && self.segments == other.segments
+            && self.image_width == other.image_width
+            && self.image_height == other.image_height
+            && self.holes == other.holes
+    }
+}
+
+impl Clone for GlowGeometry {
+    fn clone(&self) -> Self {
+        Self {
+            aspect: self.aspect,
+            segments: self.segments.clone(),
+            image_width: self.image_width,
+            image_height: self.image_height,
+            holes: self.holes.clone(),
+            coverage: Mutex::new(self.coverage_slots().clone()),
+        }
+    }
 }
 
 /// Holes for the keyboard render at `image_path`.
@@ -199,13 +245,13 @@ fn compute_glow_geometry(image_path: &Path) -> Option<GlowGeometry> {
     if holes.is_empty() {
         return None;
     }
-    Some(GlowGeometry {
-        aspect: image_width / image_height,
+    Some(GlowGeometry::new(
+        image_width / image_height,
         segments,
-        image_width: src_w,
-        image_height: src_h,
+        src_w,
+        src_h,
         holes,
-    })
+    ))
 }
 
 impl GlowGeometry {
@@ -262,13 +308,69 @@ impl GlowGeometry {
         if holes.is_empty() {
             return None;
         }
-        Some(Self {
-            aspect: wf / hf,
+        Some(Self::new(wf / hf, segments, w, h, holes))
+    }
+
+    pub(crate) fn new(
+        aspect: f32,
+        segments: Vec<GlowSeg>,
+        image_width: u32,
+        image_height: u32,
+        holes: Vec<u32>,
+    ) -> Self {
+        Self {
+            aspect,
             segments,
-            image_width: w,
-            image_height: h,
+            image_width,
+            image_height,
             holes,
-        })
+            coverage: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn coverage_slots(&self) -> MutexGuard<'_, Vec<CoverageSlot>> {
+        self.coverage.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Coverage for this placement. A repeat paint clones the stored pixels.
+    /// The slot is dropped with the geometry, so a later render that reuses
+    /// this allocation starts empty.
+    pub(crate) fn coverage_for(
+        &self,
+        place: (u32, u32, u32, u32, u32),
+        build: impl FnOnce() -> Vec<CachedSplat>,
+    ) -> Vec<CachedSplat> {
+        let (ox, oy, rw, rh, scale) = place;
+        if let Some(hit) = self.coverage_slots().iter().find(|slot| {
+            slot.ox == ox && slot.oy == oy && slot.rw == rw && slot.rh == rh && slot.scale == scale
+        }) {
+            return hit.splats.clone();
+        }
+        let splats = build();
+        let mut slots = self.coverage_slots();
+        if let Some(hit) = slots.iter().find(|slot| {
+            slot.ox == ox && slot.oy == oy && slot.rw == rw && slot.rh == rh && slot.scale == scale
+        }) {
+            return hit.splats.clone();
+        }
+        if slots.len() == 2 {
+            slots.remove(0);
+        }
+        slots.push(CoverageSlot {
+            ox,
+            oy,
+            rw,
+            rh,
+            scale,
+            splats: splats.clone(),
+        });
+        splats
+    }
+
+    /// How many placements this geometry has stored.
+    #[cfg(test)]
+    pub(crate) fn coverage_entries(&self) -> usize {
+        self.coverage_slots().len()
     }
 }
 

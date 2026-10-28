@@ -25,7 +25,7 @@ mod paths;
 pub(crate) mod queries;
 pub mod sync;
 
-pub(crate) use self::glow::GlowGeometry;
+pub(crate) use self::glow::{CachedSplat, GlowGeometry};
 
 use std::cell::RefCell;
 use std::collections::HashMap;
