@@ -34,7 +34,7 @@ use openlogi_core::binding::{Action, WorkflowStep};
 use super::editors::{
     PowerUserKind, text_editor_placeholder, text_editor_seed, workflow_editor_seed,
 };
-use crate::app::{glow_canvas, keyboard_glow};
+use crate::app::{GlowImage, glow_canvas, keyboard_glow};
 use crate::features::binding_editor::{
     PickFn, action_icon_path, action_rows, compact_panel, divider, editor_scroll_list,
     editor_section,
@@ -208,7 +208,7 @@ impl Render for FunctionRowView {
         let glow = state.and_then(|state| {
             state
                 .current_record()
-                .and_then(|record| keyboard_glow(state, record))
+                .and_then(|record| keyboard_glow(state, record, GlowImage::Detail))
         });
 
         let viewport_h = f32::from(window.viewport_size().height);

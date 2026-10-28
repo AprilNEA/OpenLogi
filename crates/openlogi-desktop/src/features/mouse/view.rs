@@ -25,7 +25,7 @@ use super::inspector::{
     ActionPickerContext, BindingInspectorData, ShortcutMode, binding_inspector,
 };
 use super::leader_lines::{Geometry as LeaderGeometry, Label, paint as paint_leader_lines};
-use crate::app::{glow_canvas, keyboard_glow};
+use crate::app::{GlowImage, glow_canvas, keyboard_glow};
 use crate::features::profiles::{profile_canvas_status, profile_name};
 use crate::services::assets::{GlowGeometry, ResolvedAsset};
 use crate::state::{AppState, DeviceKey, DeviceRecord, StateEvent};
@@ -86,7 +86,7 @@ impl<'a> MouseWorkspaceData<'a> {
             gesture_maps: state.gesture_bindings(),
             glow: state
                 .current_record()
-                .and_then(|record| keyboard_glow(state, record)),
+                .and_then(|record| keyboard_glow(state, record, GlowImage::Detail)),
             thumbwheel: state
                 .current_record()
                 .and_then(|record| record.capabilities)

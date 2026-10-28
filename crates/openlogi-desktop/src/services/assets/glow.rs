@@ -14,6 +14,7 @@
 //! texture, so a depot's whole lighting footprint is the segment list.
 
 use std::path::Path;
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use serde::Deserialize;
 use tracing::warn;
@@ -60,20 +61,77 @@ pub(crate) struct GlowSeg {
 
 /// The baked inter-key holes as normalized segments plus the mask's aspect
 /// ratio, ready to paint over the device image at any size. Decoded once per
-/// asset resolve; the segment list is the entire runtime footprint — there is
-/// no recoloured texture, so a session that cycles colours costs nothing extra.
-#[derive(Debug, Clone, PartialEq)]
+/// asset resolve. `holes` is the enclosed legend pixels themselves (not the
+/// bin they sit in), packed `x | (y << 16)` in the same space as
+/// `image_width` / `image_height`.
+#[derive(Debug)]
 pub(crate) struct GlowGeometry {
     pub aspect: f32,
     pub segments: Vec<GlowSeg>,
+    pub image_width: u32,
+    pub image_height: u32,
+    /// Enclosed legend pixels. Empty only when nothing was see-through.
+    pub holes: Vec<u32>,
+    /// Device-pixel coverage for recent placements. Lives on the geometry so a
+    /// freed render cannot be mistaken for a later one that reused its address.
+    /// A mutex, not a `RefCell`, so this stays `Sync` inside `Arc`.
+    coverage: Mutex<Vec<CoverageSlot>>,
 }
 
-/// The inter-key hole geometry for a depot: the pipeline-baked mask when the
-/// metadata ships one, otherwise derived at resolve time from the render's own
-/// alpha channel — so any keyboard with a transparent render glows, not just
-/// the depots the asset pipeline has processed.
+/// One snapped placement and the device pixels lit for it.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CachedSplat {
+    pub x: i32,
+    pub y: i32,
+    pub fraction: f32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct CoverageSlot {
+    ox: u32,
+    oy: u32,
+    rw: u32,
+    rh: u32,
+    scale: u32,
+    splats: Vec<CachedSplat>,
+}
+
+impl PartialEq for GlowGeometry {
+    fn eq(&self, other: &Self) -> bool {
+        self.aspect == other.aspect
+            && self.segments == other.segments
+            && self.image_width == other.image_width
+            && self.image_height == other.image_height
+            && self.holes == other.holes
+    }
+}
+
+impl Clone for GlowGeometry {
+    fn clone(&self) -> Self {
+        Self {
+            aspect: self.aspect,
+            segments: self.segments.clone(),
+            image_width: self.image_width,
+            image_height: self.image_height,
+            holes: self.holes.clone(),
+            coverage: Mutex::new(self.coverage_slots().clone()),
+        }
+    }
+}
+
+/// Holes for the keyboard render at `image_path`.
+///
+/// A depot-wide mask in `metadata.json` is one measurement shared by every
+/// colour variant. Those renders are not the same picture — the G513 family
+/// shifts the keyboard on the canvas between `front.png` and `front_ext*.png`
+/// — so painting the shared mask puts the lights off the keys in the grid,
+/// the list, and the carousel. When the file is on disk, measure that file.
+/// The baked mask is only a fallback when the render itself cannot be read.
 pub(crate) fn resolve_glow_geometry(dir: &Path, image_path: &Path) -> Option<GlowGeometry> {
-    load_glow_geometry(dir).or_else(|| compute_glow_geometry(image_path))
+    if image_path.is_file() {
+        return compute_glow_geometry(image_path);
+    }
+    load_glow_geometry(dir)
 }
 
 /// Load and decode the precomputed glow mask from a depot directory's metadata.
@@ -135,11 +193,14 @@ fn compute_glow_geometry(image_path: &Path) -> Option<GlowGeometry> {
         }
     }
 
+    // Normalize to the source image, not the binned grid. The gallery slots
+    // (grid card, list thumbnail, carousel card) contain-fit the PNG by its
+    // own aspect; a bin-rounded aspect shifts the lights off the keys.
     #[expect(
         clippy::cast_precision_loss,
-        reason = "mask coords are < 8192 px — well within f32 mantissa"
+        reason = "image coords are < 8192 px — well within f32 mantissa"
     )]
-    let (wf, hf) = (w as f32, h as f32);
+    let (image_width, image_height) = (src_w as f32, src_h as f32);
     let mut segments = Vec::new();
     for y in 0..h {
         let mut x = 0;
@@ -149,28 +210,48 @@ fn compute_glow_geometry(image_path: &Path) -> Option<GlowGeometry> {
                 while x < w && cells[(y * w + x) as usize] == 1 {
                     x += 1;
                 }
+                let x0 = start.saturating_mul(scale).min(src_w);
+                let x1 = x.saturating_mul(scale).min(src_w);
+                let y0 = y.saturating_mul(scale).min(src_h);
+                let y1 = y.saturating_add(1).saturating_mul(scale).min(src_h);
+                if x1 <= x0 || y1 <= y0 {
+                    continue;
+                }
                 #[expect(
                     clippy::cast_precision_loss,
-                    reason = "mask coords are < 8192 px — well within f32 mantissa"
+                    reason = "image coords are < 8192 px — well within f32 mantissa"
                 )]
                 segments.push(GlowSeg {
-                    x: start as f32 / wf,
-                    y: y as f32 / hf,
-                    w: (x - start) as f32 / wf,
-                    h: 1.0 / hf,
+                    x: x0 as f32 / image_width,
+                    y: y0 as f32 / image_height,
+                    w: (x1 - x0) as f32 / image_width,
+                    h: (y1 - y0) as f32 / image_height,
                 });
             } else {
                 x += 1;
             }
         }
     }
-    if segments.is_empty() {
+    // The bin is see-through when *any* source pixel is, so a segment is a
+    // few pixels taller than the legend. Painting that rectangle at list size
+    // (a whole character is under one device pixel) lights the key border.
+    // Keep the pixels that are actually clear.
+    let mut holes = Vec::new();
+    for (x, y, pixel) in img.enumerate_pixels() {
+        if pixel.0[3] < HOLE_ALPHA && cells[((y / scale) * w + (x / scale)) as usize] == 1 {
+            holes.push(x | (y << 16));
+        }
+    }
+    if holes.is_empty() {
         return None;
     }
-    Some(GlowGeometry {
-        aspect: wf / hf,
+    Some(GlowGeometry::new(
+        image_width / image_height,
         segments,
-    })
+        src_w,
+        src_h,
+        holes,
+    ))
 }
 
 impl GlowGeometry {
@@ -195,6 +276,7 @@ impl GlowGeometry {
         }
         let (wf, hf) = (w as f32, h as f32);
         let mut segments = Vec::new();
+        let mut holes = Vec::new();
         let mut idx: u64 = 0;
         let mut on = false;
         for &run in &mask.runs {
@@ -211,16 +293,84 @@ impl GlowGeometry {
                         w: (seg_end - start) as f32 / wf,
                         h: 1.0 / hf,
                     });
+                    let row_u = u32::try_from(row).ok()?;
+                    let col_start = u32::try_from(col).ok()?;
+                    let seg_len = usize::try_from(seg_end - start).ok()?;
+                    for col_u in (col_start..).take(seg_len) {
+                        holes.push(col_u | (row_u << 16));
+                    }
                     start = seg_end;
                 }
             }
             idx += u64::from(run);
             on = !on;
         }
-        Some(Self {
-            aspect: wf / hf,
+        if holes.is_empty() {
+            return None;
+        }
+        Some(Self::new(wf / hf, segments, w, h, holes))
+    }
+
+    pub(crate) fn new(
+        aspect: f32,
+        segments: Vec<GlowSeg>,
+        image_width: u32,
+        image_height: u32,
+        holes: Vec<u32>,
+    ) -> Self {
+        Self {
+            aspect,
             segments,
-        })
+            image_width,
+            image_height,
+            holes,
+            coverage: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn coverage_slots(&self) -> MutexGuard<'_, Vec<CoverageSlot>> {
+        self.coverage.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Coverage for this placement. A repeat paint clones the stored pixels.
+    /// The slot is dropped with the geometry, so a later render that reuses
+    /// this allocation starts empty.
+    pub(crate) fn coverage_for(
+        &self,
+        place: (u32, u32, u32, u32, u32),
+        build: impl FnOnce() -> Vec<CachedSplat>,
+    ) -> Vec<CachedSplat> {
+        let (ox, oy, rw, rh, scale) = place;
+        if let Some(hit) = self.coverage_slots().iter().find(|slot| {
+            slot.ox == ox && slot.oy == oy && slot.rw == rw && slot.rh == rh && slot.scale == scale
+        }) {
+            return hit.splats.clone();
+        }
+        let splats = build();
+        let mut slots = self.coverage_slots();
+        if let Some(hit) = slots.iter().find(|slot| {
+            slot.ox == ox && slot.oy == oy && slot.rw == rw && slot.rh == rh && slot.scale == scale
+        }) {
+            return hit.splats.clone();
+        }
+        if slots.len() == 2 {
+            slots.remove(0);
+        }
+        slots.push(CoverageSlot {
+            ox,
+            oy,
+            rw,
+            rh,
+            scale,
+            splats: splats.clone(),
+        });
+        splats
+    }
+
+    /// How many placements this geometry has stored.
+    #[cfg(test)]
+    pub(crate) fn coverage_entries(&self) -> usize {
+        self.coverage_slots().len()
     }
 }
 
@@ -314,6 +464,8 @@ mod tests {
         assert!((seg.x - 0.4).abs() < 1e-6, "hole at col 2 of 5");
         assert!((seg.y - 0.4).abs() < 1e-6, "hole at row 2 of 5");
         assert!((geom.aspect - 1.0).abs() < 1e-6);
+        // The border-connected clear pixels are not legend holes.
+        assert_eq!(geom.holes, vec![2 | (2 << 16)]);
     }
 
     #[test]
@@ -333,5 +485,86 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = write_png(dir.path(), "solid.png", &[&[1, 1], &[1, 1]]);
         assert!(compute_glow_geometry(&path).is_none());
+    }
+
+    /// Colour variants share one `metadata.json` glow. On the G513 that mask
+    /// was measured on a different render than the file on screen, so the
+    /// lights sit off the keys in every gallery layout. The holes have to
+    /// come from the PNG being drawn.
+    #[test]
+    fn resolve_uses_the_rendered_image_not_a_shifted_depot_mask() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Hole at column 2. A depot mask that lights column 1 instead is the
+        // shape of a variant render shifted relative to `metadata.json`.
+        let path = write_png(
+            dir.path(),
+            "front.png",
+            &[
+                &[0, 0, 0, 0, 0],
+                &[0, 1, 1, 1, 0],
+                &[0, 1, 0, 1, 0],
+                &[0, 1, 1, 1, 0],
+                &[0, 0, 0, 0, 0],
+            ],
+        );
+        // 5×5, on only at row 2 col 1 (index 11). Runs start transparent.
+        std::fs::write(
+            dir.path().join("metadata.json"),
+            r#"{"glow":{"width":5,"height":5,"runs":[11,1,13]}}"#,
+        )
+        .expect("write metadata");
+
+        let geom = resolve_glow_geometry(dir.path(), &path).expect("geometry");
+        assert_eq!(geom.segments.len(), 1);
+        let seg = geom.segments[0];
+        assert!(
+            (seg.x - 0.4).abs() < 1e-6,
+            "hole follows the rendered image (x={}), not the depot mask",
+            seg.x
+        );
+    }
+
+    /// Two colour variants in one depot do not share a mask. Each file's
+    /// holes stay on that file, which is what the grid, list, carousel, and
+    /// detail view each draw.
+    #[test]
+    fn resolve_measures_each_variant_on_its_own_render() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let left = write_png(
+            dir.path(),
+            "front.png",
+            &[
+                &[0, 0, 0, 0, 0, 0, 0],
+                &[0, 1, 1, 1, 1, 1, 0],
+                &[0, 1, 0, 1, 1, 1, 0],
+                &[0, 1, 1, 1, 1, 1, 0],
+                &[0, 0, 0, 0, 0, 0, 0],
+            ],
+        );
+        let right = write_png(
+            dir.path(),
+            "front_ext5.png",
+            &[
+                &[0, 0, 0, 0, 0, 0, 0],
+                &[0, 1, 1, 1, 1, 1, 0],
+                &[0, 1, 1, 1, 0, 1, 0],
+                &[0, 1, 1, 1, 1, 1, 0],
+                &[0, 0, 0, 0, 0, 0, 0],
+            ],
+        );
+        std::fs::write(
+            dir.path().join("metadata.json"),
+            r#"{"glow":{"width":7,"height":5,"runs":[35]}}"#,
+        )
+        .expect("write metadata");
+
+        let left_geom = resolve_glow_geometry(dir.path(), &left).expect("left");
+        let right_geom = resolve_glow_geometry(dir.path(), &right).expect("right");
+        assert_eq!(left_geom.segments.len(), 1);
+        assert_eq!(right_geom.segments.len(), 1);
+        assert!((left_geom.segments[0].x - 2.0 / 7.0).abs() < 1e-6);
+        assert!((right_geom.segments[0].x - 4.0 / 7.0).abs() < 1e-6);
+        assert!((left_geom.aspect - 7.0 / 5.0).abs() < 1e-6);
+        assert!((right_geom.aspect - left_geom.aspect).abs() < 1e-6);
     }
 }

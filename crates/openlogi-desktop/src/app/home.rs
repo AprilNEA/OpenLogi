@@ -8,6 +8,7 @@ pub(super) use views::device_gallery;
 #[cfg(test)]
 pub(super) use views::ordered_device_indices;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use gpui::{
@@ -38,7 +39,7 @@ use super::widgets::{
     settings_button,
 };
 use crate::features::lighting::visual as light_visual;
-use crate::services::assets::GlowGeometry;
+use crate::services::assets::{CachedSplat, GlowGeometry, ResolvedAsset};
 use crate::services::ipc::UnpairFailure;
 use crate::state::{AppState, DeviceRecord, ObservedConnection};
 use crate::ui::battery::{BatteryIndicator, glance_hint};
@@ -90,13 +91,29 @@ pub(super) fn home_header(cx: &mut Context<AppView>) -> impl IntoElement {
 /// home gallery and the device-detail model.
 const GLOW_OPACITY: f32 = 0.6;
 
+/// A list-thumbnail character covers about a third of one device pixel. Gain
+/// brings that pixel up to full strength; a border pixel that only clips the
+/// stroke stays dim.
+const COVERAGE_GAIN: f32 = 3.;
+
+/// Which render the glow has to sit on. The holes are measured on that file,
+/// so a colour variant does not reuse another picture's mask.
+#[derive(Clone, Copy)]
+pub(crate) enum GlowImage {
+    /// Home grid, list, and carousel. They draw the hero render.
+    Gallery,
+    /// Device detail. It draws [`crate::services::assets::ResolvedAsset::image_path`].
+    Detail,
+}
+
 /// The inter-key glow geometry and tinted colour for `record`, or `None` unless
-/// it's a keyboard with lighting enabled and a depot that ships a baked mask.
+/// it's a keyboard with lighting enabled and a render that has enclosed holes.
 /// The geometry is painted live by [`glow_canvas`] — no pre-rendered PNG, so a
 /// colour change costs no new texture.
 pub(crate) fn keyboard_glow(
     state: &AppState,
     record: &DeviceRecord,
+    image: GlowImage,
 ) -> Option<(Arc<GlowGeometry>, Hsla)> {
     if record.kind != DeviceKind::Keyboard {
         return None;
@@ -104,7 +121,12 @@ pub(crate) fn keyboard_glow(
     let lighting = state
         .lighting_for(&record.config_key, &record.route_key)
         .filter(|l| l.enabled)?;
-    let geom = record.asset.as_ref()?.glow.clone()?;
+    let asset = record.asset.as_ref()?;
+    let geom = match image {
+        GlowImage::Gallery => gallery_geometry(asset),
+        GlowImage::Detail => asset.glow.as_ref(),
+    }?
+    .clone();
     let (r, g, b) = lighting.color.components();
     let color = gpui::Rgba {
         r: f32::from(r) / 255.,
@@ -113,6 +135,19 @@ pub(crate) fn keyboard_glow(
         a: GLOW_OPACITY,
     };
     Some((geom, color.into()))
+}
+
+/// Gallery geometry for the file the card actually draws.
+///
+/// `hero_glow` is empty both when the hero is `image_path` and when a
+/// different hero has no enclosed holes. Only the first case may reuse
+/// `glow`. The second would paint the detail file's holes on the hero.
+fn gallery_geometry(asset: &ResolvedAsset) -> Option<&Arc<GlowGeometry>> {
+    match asset.hero_image_path.as_deref() {
+        Some(hero) if hero == asset.image_path => asset.glow.as_ref(),
+        Some(_) => asset.hero_glow.as_ref(),
+        None => None,
+    }
 }
 
 /// Paint a keyboard's baked inter-key holes in its lighting colour, scaled with
@@ -137,12 +172,37 @@ pub(crate) fn glow_canvas(geom: Arc<GlowGeometry>, color: Hsla) -> impl IntoElem
             };
             let ox = f32::from(bounds.origin.x) + (bw - rw) / 2.;
             let oy = f32::from(bounds.origin.y) + (bh - rh) / 2.;
-            for s in &geom.segments {
+            let scale = window.scale_factor();
+            let scale = if scale.is_finite() && scale > 0. {
+                scale
+            } else {
+                1.
+            };
+            // One quad per device pixel the legend actually covers, dimmed by
+            // that coverage. A full-bright quad on a pixel that only clips the
+            // character is the red dot on the key border in the list thumbnail.
+            let px_size = 1. / scale;
+            for splat in cached_glow_coverage(
+                &geom,
+                GlowPlacement {
+                    ox,
+                    oy,
+                    rw,
+                    rh,
+                    scale,
+                },
+            ) {
+                let mut tint = color;
+                tint.a *= (splat.fraction * COVERAGE_GAIN).min(1.);
+                #[expect(
+                    clippy::cast_precision_loss,
+                    reason = "device pixel index of a window coord fits in f32"
+                )]
                 let quad = gpui::Bounds {
-                    origin: point(px(ox + s.x * rw), px(oy + s.y * rh)),
-                    size: gpui::size(px((s.w * rw).max(1.)), px((s.h * rh).max(1.))),
+                    origin: point(px(splat.x as f32 / scale), px(splat.y as f32 / scale)),
+                    size: gpui::size(px(px_size), px(px_size)),
                 };
-                window.paint_quad(fill(quad, color));
+                window.paint_quad(fill(quad, tint));
             }
         },
     )
@@ -793,4 +853,332 @@ pub(super) fn device_empty_state(cx: &App) -> Div {
                 .text_color(pal.text_muted)
                 .child(tr!("device.quit_logi_options_hid_access")),
         )
+}
+
+/// Width and height of a `aspect` box contain-fit into `slot_w` × `slot_h`.
+pub(super) fn fitted_frame(slot_w: f32, slot_h: f32, aspect: f32) -> (f32, f32) {
+    if !(aspect.is_finite() && aspect > 0.) {
+        return (slot_w, slot_h);
+    }
+    if slot_w / slot_h > aspect {
+        (slot_h * aspect, slot_h)
+    } else {
+        (slot_w, slot_w / aspect)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct GlowPlacement {
+    ox: f32,
+    oy: f32,
+    rw: f32,
+    rh: f32,
+    scale: f32,
+}
+
+/// Device pixels to light, with the fraction of each that is legend.
+///
+/// `holes` are source pixels packed `x | (y << 16)`. They are splatted into
+/// the contain-fit rect after the same edge snap as the device image, so the
+/// bright pixel is the one that holds the character. A pixel that only clips
+/// the stroke comes back with a small fraction and stays dim.
+fn glow_coverage(
+    holes: &[u32],
+    image_width: u32,
+    image_height: u32,
+    place: GlowPlacement,
+) -> Vec<GlowSplat> {
+    if holes.is_empty()
+        || image_width == 0
+        || image_height == 0
+        || !(place.rw > 0. && place.rh > 0. && place.scale > 0.)
+        || !place.rw.is_finite()
+        || !place.rh.is_finite()
+        || !place.scale.is_finite()
+    {
+        return Vec::new();
+    }
+    let GlowPlacement {
+        ox,
+        oy,
+        rw,
+        rh,
+        scale,
+    } = place;
+    let left = round_half_toward_zero(ox * scale);
+    let top = round_half_toward_zero(oy * scale);
+    let right = round_half_toward_zero((ox + rw) * scale).max(left);
+    let bottom = round_half_toward_zero((oy + rh) * scale).max(top);
+    let dw = right - left;
+    let dh = bottom - top;
+    if dw < 1. || dh < 1. {
+        return Vec::new();
+    }
+    let mut counts: HashMap<(i32, i32), u32> = HashMap::new();
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "image coords are < 8192 px — well within f32 mantissa"
+    )]
+    let (iw, ih) = (image_width as f32, image_height as f32);
+    for &packed in holes {
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "image coords are < 8192 px — well within f32 mantissa"
+        )]
+        let (x, y) = ((packed & 0xffff) as f32, (packed >> 16) as f32);
+        let dx = left + (x + 0.5) / iw * dw;
+        let dy = top + (y + 0.5) / ih * dh;
+        let pixel_x = device_pixel(dx);
+        let pixel_y = device_pixel(dy);
+        *counts.entry((pixel_x, pixel_y)).or_default() += 1;
+    }
+    let area = (iw / dw) * (ih / dh);
+    let mut splats = Vec::with_capacity(counts.len());
+    for ((x, y), count) in counts {
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "legend pixels inside one device pixel fit in f32"
+        )]
+        let fraction = (count as f32 / area).min(1.);
+        // A couple of antialiased source pixels in a list-thumbnail pixel are
+        // the key border, not the character.
+        if fraction < 0.02 {
+            continue;
+        }
+        splats.push(GlowSplat { x, y, fraction });
+    }
+    // At list size a legend is one device pixel, and that pixel is the top
+    // edge of the key, flush with the gap. If nothing is lit above it, drop
+    // the light one pixel so it sits in the key face. Larger renders keep the
+    // pixel the legend actually covers.
+    if iw / dw >= 16. && ih / dh >= 16. {
+        let above: HashMap<(i32, i32), f32> = splats
+            .iter()
+            .map(|splat| ((splat.x, splat.y), splat.fraction))
+            .collect();
+        let bottom_i = device_pixel(bottom);
+        for splat in &mut splats {
+            let clear_above = above
+                .get(&(splat.x, splat.y - 1))
+                .is_none_or(|fraction| *fraction < 0.02);
+            if clear_above && splat.y + 1 < bottom_i {
+                splat.y += 1;
+            }
+        }
+    }
+    splats.sort_unstable_by_key(|splat| (splat.y, splat.x));
+    let mut merged: Vec<GlowSplat> = Vec::with_capacity(splats.len());
+    for splat in splats {
+        if let Some(prev) = merged.last_mut()
+            && prev.x == splat.x
+            && prev.y == splat.y
+        {
+            prev.fraction = prev.fraction.max(splat.fraction);
+            continue;
+        }
+        merged.push(splat);
+    }
+    merged
+}
+
+#[derive(Clone, Copy)]
+struct GlowSplat {
+    x: i32,
+    y: i32,
+    fraction: f32,
+}
+
+fn cached_glow_coverage(geom: &GlowGeometry, place: GlowPlacement) -> Vec<GlowSplat> {
+    let place_bits = (
+        place.ox.to_bits(),
+        place.oy.to_bits(),
+        place.rw.to_bits(),
+        place.rh.to_bits(),
+        place.scale.to_bits(),
+    );
+    geom.coverage_for(place_bits, || {
+        glow_coverage(&geom.holes, geom.image_width, geom.image_height, place)
+            .into_iter()
+            .map(|splat| CachedSplat {
+                x: splat.x,
+                y: splat.y,
+                fraction: splat.fraction,
+            })
+            .collect()
+    })
+    .into_iter()
+    .map(|splat| GlowSplat {
+        x: splat.x,
+        y: splat.y,
+        fraction: splat.fraction,
+    })
+    .collect()
+}
+
+/// Rounds to the nearest integer with 0.5 ties toward zero. Matches gpui's
+/// `snap_bounds`, which is what places the device image.
+fn round_half_toward_zero(value: f32) -> f32 {
+    (value.abs() - 0.5).ceil().copysign(value)
+}
+
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "device pixel index of a window coord fits in i32"
+)]
+fn device_pixel(value: f32) -> i32 {
+    value.floor() as i32
+}
+
+#[cfg(test)]
+mod glow_paint_tests {
+    use super::{
+        Arc, DeviceKind, GlowGeometry, GlowPlacement, ResolvedAsset, cached_glow_coverage,
+        fitted_frame, gallery_geometry, glow_coverage,
+    };
+
+    fn place(rw: f32, rh: f32, scale: f32) -> GlowPlacement {
+        GlowPlacement {
+            ox: 0.,
+            oy: 0.,
+            rw,
+            rh,
+            scale,
+        }
+    }
+
+    fn pack_row(xs: std::ops::Range<u32>, y: u32) -> Vec<u32> {
+        xs.map(|x| x | (y << 16)).collect()
+    }
+
+    #[test]
+    fn legend_pixel_lands_on_its_own_device_pixel() {
+        // 10×10 image, one clear pixel at (4, 6), drawn at 10×10.
+        let holes = vec![4 | (6 << 16)];
+        let splats = glow_coverage(&holes, 10, 10, place(10., 10., 1.));
+        assert_eq!(splats.len(), 1);
+        assert_eq!((splats[0].x, splats[0].y), (4, 6));
+        assert!((splats[0].fraction - 1.).abs() < 1e-4);
+    }
+
+    #[test]
+    fn list_thumbnail_keeps_the_character_and_drops_the_border() {
+        // 24×24 source in a 2×1 slot. Each device pixel covers 12×24 source
+        // pixels. Forty legend pixels sit in the left pixel; five clip the
+        // right one — the key border.
+        let mut holes = pack_row(0..10, 0);
+        holes.extend(pack_row(0..10, 1));
+        holes.extend(pack_row(0..10, 2));
+        holes.extend(pack_row(0..10, 3));
+        holes.extend(pack_row(12..17, 0));
+        let splats = glow_coverage(&holes, 24, 24, place(2., 1., 1.));
+        assert_eq!(splats.len(), 1, "the five-pixel fringe is not a light");
+        assert_eq!((splats[0].x, splats[0].y), (0, 0));
+        assert!(
+            splats[0].fraction > 0.1,
+            "the character pixel stays lit, fraction {}",
+            splats[0].fraction
+        );
+    }
+
+    #[test]
+    fn hidpi_legend_uses_device_pixels() {
+        // Logical 10×10 at 2x is 20×20 device pixels. Source pixel (4, 6)
+        // has its centre at device (9, 13).
+        let holes = vec![4 | (6 << 16)];
+        let splats = glow_coverage(&holes, 10, 10, place(10., 10., 2.));
+        assert_eq!(splats.len(), 1);
+        assert_eq!((splats[0].x, splats[0].y), (9, 13));
+    }
+
+    #[test]
+    fn list_thumbnail_drops_the_light_off_the_key_gap() {
+        // 64×64 source in a 4×4 slot (16 source px per device px). Forty legend
+        // pixels sit in device pixel (1, 0), with nothing above them — the gap
+        // over the key. The light belongs on the next pixel, in the key.
+        let mut holes = pack_row(16..26, 0);
+        holes.extend(pack_row(16..26, 1));
+        holes.extend(pack_row(16..26, 2));
+        holes.extend(pack_row(16..26, 3));
+        let splats = glow_coverage(&holes, 64, 64, place(4., 4., 1.));
+        assert_eq!(splats.len(), 1, "one light for the legend");
+        assert_eq!(
+            (splats[0].x, splats[0].y),
+            (1, 1),
+            "the light leaves the gap pixel"
+        );
+    }
+
+    #[test]
+    fn gallery_does_not_reuse_a_different_renders_holes() {
+        let detail = Arc::new(GlowGeometry::new(1., Vec::new(), 10, 10, vec![1]));
+        let hero = Arc::new(GlowGeometry::new(2., Vec::new(), 20, 10, vec![2]));
+        let mut asset = ResolvedAsset {
+            depot: "g513".to_string(),
+            display_name: "G513".to_string(),
+            kind: Some(DeviceKind::Keyboard),
+            image_path: std::path::PathBuf::from("/tmp/front.png"),
+            hero_image_path: Some(std::path::PathBuf::from("/tmp/front_ext5.png")),
+            glow: Some(detail.clone()),
+            hero_glow: Some(hero.clone()),
+            metadata: openlogi_assets::Metadata::default(),
+            png_width: 10,
+            png_height: 10,
+        };
+        assert!(std::ptr::eq(
+            gallery_geometry(&asset).unwrap().as_ref(),
+            hero.as_ref()
+        ));
+        asset.hero_glow = None;
+        assert!(gallery_geometry(&asset).is_none());
+        asset.hero_image_path = Some(asset.image_path.clone());
+        assert!(std::ptr::eq(
+            gallery_geometry(&asset).unwrap().as_ref(),
+            detail.as_ref()
+        ));
+        asset.hero_image_path = None;
+        assert!(gallery_geometry(&asset).is_none());
+    }
+
+    #[test]
+    fn repaint_reuses_coverage_until_the_placement_changes() {
+        let geom = GlowGeometry::new(1., Vec::new(), 10, 10, vec![4 | (6 << 16)]);
+        let first = cached_glow_coverage(&geom, place(10., 10., 1.));
+        let second = cached_glow_coverage(&geom, place(10., 10., 1.));
+        assert_eq!((first[0].x, first[0].y), (4, 6));
+        assert_eq!((second[0].x, second[0].y), (4, 6));
+        assert_eq!(geom.coverage_entries(), 1);
+        let moved = cached_glow_coverage(
+            &geom,
+            GlowPlacement {
+                ox: 3.,
+                oy: 2.,
+                rw: 10.,
+                rh: 10.,
+                scale: 1.,
+            },
+        );
+        assert_eq!((moved[0].x, moved[0].y), (7, 8));
+        assert_eq!(geom.coverage_entries(), 2);
+    }
+
+    #[test]
+    fn a_new_geometry_does_not_inherit_another_renders_coverage() {
+        let place = place(10., 10., 1.);
+        let first = GlowGeometry::new(1., Vec::new(), 10, 10, vec![4 | (6 << 16)]);
+        let painted = cached_glow_coverage(&first, place);
+        assert_eq!((painted[0].x, painted[0].y), (4, 6));
+        drop(first);
+        let second = GlowGeometry::new(1., Vec::new(), 10, 10, vec![1 | (1 << 16)]);
+        let painted = cached_glow_coverage(&second, place);
+        assert_eq!((painted[0].x, painted[0].y), (1, 1));
+        assert_eq!(second.coverage_entries(), 1);
+    }
+
+    #[test]
+    fn list_slot_frame_matches_the_render_aspect() {
+        let (w, h) = fitted_frame(120., 68., 2760. / 1600.);
+        assert!((h - 68.).abs() < 1e-4);
+        assert!((w - 68. * 2760. / 1600.).abs() < 1e-3);
+        assert!(w < 120.);
+    }
 }

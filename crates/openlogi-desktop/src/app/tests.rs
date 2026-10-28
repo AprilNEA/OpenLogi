@@ -1202,6 +1202,7 @@ fn keyboard_with_a_depot_but_no_capabilities_shows_keys_tab() {
         image_path: std::path::PathBuf::from("/tmp/mx-keys-mini.png"),
         hero_image_path: None,
         glow: None,
+        hero_glow: None,
         metadata: openlogi_assets::Metadata::default(),
         png_width: 1872,
         png_height: 728,

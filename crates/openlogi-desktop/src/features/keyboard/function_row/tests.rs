@@ -344,6 +344,7 @@ fn legacy_asset(
         image_path: PathBuf::from("/tmp/g513.png"),
         hero_image_path: None,
         glow: None,
+        hero_glow: None,
         metadata: Metadata {
             images: vec![ImageEntry {
                 key: "device_image".to_string(),
@@ -378,6 +379,7 @@ fn asset_with_controls(controls: &[(u16, f32, f32)]) -> ResolvedAsset {
         image_path: PathBuf::from("/tmp/mx-keys-mini.png"),
         hero_image_path: None,
         glow: None,
+        hero_glow: None,
         metadata: Metadata {
             images: vec![ImageEntry {
                 key: "device_keys_image".to_string(),
