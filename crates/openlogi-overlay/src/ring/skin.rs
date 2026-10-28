@@ -451,7 +451,7 @@ const fn lerp_hsla(a: Hsla, b: Hsla, t: f32) -> Hsla {
     }
 }
 
-fn slot_caption(presentation: &ActionRingPresentation) -> SharedString {
+pub(super) fn slot_caption(presentation: &ActionRingPresentation) -> SharedString {
     // User-authored labels render verbatim: passing them through the
     // localization table would translate any label that happens to collide
     // with a known key ("Copy" would become "Copier" under fr).

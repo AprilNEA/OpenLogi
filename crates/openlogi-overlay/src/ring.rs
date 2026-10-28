@@ -4,9 +4,11 @@
 //! panel centred on the cursor and clamped to its display. Wayland allows
 //! neither half of that, so there each display gets a window covering it and
 //! the same panel is drawn at the pointer, in the one window that heard it last.
-//! What the panel looks like, and how it moves, is [`skin`]; this module owns
-//! placement, hover state, and the window.
+//! What the panel looks like is the invocation's theme: [`classic`] for
+//! `Default`, [`skin`] for `InMotion`. This module owns placement, hover state,
+//! and the window.
 
+mod classic;
 mod skin;
 
 use gpui::{
@@ -15,7 +17,7 @@ use gpui::{
     WindowBackgroundAppearance, WindowId, WindowKind, WindowOptions, div, point,
     prelude::FluentBuilder as _, px,
 };
-use openlogi_core::binding::ActionRingSlot;
+use openlogi_core::binding::{ActionRingSlot, ActionRingTheme};
 use openlogi_ipc::ActionRingInvocation;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -166,7 +168,10 @@ impl Render for RingView {
                 .absolute()
                 .left(origin.x)
                 .top(origin.y)
-                .child(self.skinned_panel(edge, cx))
+                .child(match self.invocation.theme {
+                    ActionRingTheme::Default => self.classic_panel(edge, cx).into_any_element(),
+                    ActionRingTheme::InMotion => self.skinned_panel(edge, cx).into_any_element(),
+                })
         });
 
         div()
@@ -389,7 +394,7 @@ mod tests {
         assert_eq!(pointer.center_in(below), Some(point(px(10.0), px(20.0))));
     }
 
-    fn invocation() -> ActionRingInvocation {
+    fn invocation(theme: ActionRingTheme) -> ActionRingInvocation {
         ActionRingInvocation {
             session_id: 7,
             slots: [(
@@ -402,13 +407,17 @@ mod tests {
             )]
             .into(),
             language: None,
+            theme,
         }
     }
 
     /// Where the `Top` slot's centre lands when the panel centres on `center`
     /// well away from every edge.
-    fn top_slot_at(center: Point<Pixels>) -> Point<Pixels> {
-        let (x, y) = skin::slot_center(ActionRingSlot::Top);
+    fn top_slot_at(theme: ActionRingTheme, center: Point<Pixels>) -> Point<Pixels> {
+        let (x, y) = match theme {
+            ActionRingTheme::Default => classic::slot_center(ActionRingSlot::Top),
+            ActionRingTheme::InMotion => skin::slot_center(ActionRingSlot::Top),
+        };
         point(
             center.x - px(WINDOW_SIZE / 2.0) + px(x),
             center.y - px(WINDOW_SIZE / 2.0) + px(y),
@@ -417,6 +426,15 @@ mod tests {
 
     #[gpui::test]
     fn a_ring_window_that_loses_the_pointer_stops_drawing_and_hovering(cx: &mut TestAppContext) {
+        loses_the_pointer(ActionRingTheme::InMotion, cx);
+    }
+
+    #[gpui::test]
+    fn a_default_theme_ring_hovers_like_the_in_motion_one(cx: &mut TestAppContext) {
+        loses_the_pointer(ActionRingTheme::Default, cx);
+    }
+
+    fn loses_the_pointer(theme: ActionRingTheme, cx: &mut TestAppContext) {
         let live = Arc::new(ClickAwaySession::new());
         let (commands, mut sent) = mpsc::unbounded_channel();
         let pointer = cx.new(|_| RingPointer::default());
@@ -424,7 +442,7 @@ mod tests {
             let (commands, pointer, live) = (commands.clone(), pointer.clone(), Arc::clone(&live));
             cx.add_window(move |window, cx| {
                 RingView::new(
-                    invocation(),
+                    invocation(theme),
                     commands,
                     &live,
                     Placement::AtPointer,
@@ -447,7 +465,7 @@ mod tests {
 
         let mut below_cx = VisualTestContext::from_window(below.into(), cx);
         below_cx.simulate_mouse_move(center, None, Modifiers::default());
-        below_cx.simulate_mouse_move(top_slot_at(center), None, Modifiers::default());
+        below_cx.simulate_mouse_move(top_slot_at(theme, center), None, Modifiers::default());
         assert_eq!(
             below.read_with(cx, |view, _| view.hovered).unwrap(),
             Some(ActionRingSlot::Top),
@@ -484,7 +502,7 @@ mod tests {
             "the covered window redraws without its panel"
         );
 
-        above_cx.simulate_mouse_move(top_slot_at(center), None, Modifiers::default());
+        above_cx.simulate_mouse_move(top_slot_at(theme, center), None, Modifiers::default());
         assert_eq!(
             above.read_with(cx, |view, _| view.hovered).unwrap(),
             Some(ActionRingSlot::Top),

@@ -10,7 +10,9 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use openlogi_core::action_ring::DISPLAY_LIFETIME;
-use openlogi_core::binding::{Action, ActionRingIcon, ActionRingLayout, ActionRingSlot};
+use openlogi_core::binding::{
+    Action, ActionRingIcon, ActionRingLayout, ActionRingSlot, ActionRingTheme,
+};
 use openlogi_hid::DeviceRoute;
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, ActionRingPresentation, Generation, OBSERVE_HOLD,
@@ -48,6 +50,8 @@ pub struct ActionRingSessionSpec {
     pub layout: ActionRingLayout,
     /// Configured UI locale, or `None` to follow the overlay host's system locale.
     pub language: Option<String>,
+    /// How the overlay draws the ring.
+    pub theme: ActionRingTheme,
 }
 
 /// A validated slot activation returned to the action dispatcher.
@@ -153,6 +157,7 @@ impl ActionRingManager {
             session_id,
             slots,
             language: spec.language,
+            theme: spec.theme,
         };
         let mut state = self.state();
         state.active = Some(Session {
@@ -320,6 +325,7 @@ mod tests {
             haptic_route: None,
             layout: ActionRingConfig::default().default,
             language: None,
+            theme: ActionRingTheme::Default,
         }
     }
 

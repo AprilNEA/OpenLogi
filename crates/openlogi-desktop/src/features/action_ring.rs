@@ -10,11 +10,17 @@ use gpui::{
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
-    Icon, IconName, Selectable as _, button::Button, h_flex, input::InputState, tooltip::Tooltip,
+    Icon, IconName, Selectable as _,
+    button::Button,
+    h_flex,
+    input::InputState,
+    select::{SelectEvent, SelectItem, SelectState},
+    tooltip::Tooltip,
     v_flex,
 };
 use openlogi_core::binding::{
     ActionRingConfig, ActionRingEntry, ActionRingIcon, ActionRingLayout, ActionRingSlot,
+    ActionRingTheme,
 };
 use openlogi_ui::action_icons::RING_CANCEL_ICON;
 
@@ -23,6 +29,7 @@ use self::editor::{PowerUserInputs, action_library};
 use crate::features::keyboard::editors::{PowerUserKind, text_editor_placeholder};
 use crate::state::{AppState, StateEvent, StateEvents};
 use crate::ui::action::localized_action_label;
+use crate::ui::components::control_select;
 use crate::ui::theme::{self, Palette, Typography as _};
 
 /// Stateful Actions Ring editor. Ring configuration itself lives in
@@ -35,6 +42,7 @@ pub struct ActionRingPanel {
     type_text_input: Option<Entity<InputState>>,
     applescript_input: Option<Entity<InputState>>,
     shell_command_input: Option<Entity<InputState>>,
+    theme_select: Option<Entity<SelectState<Vec<ThemeOption>>>>,
     library_scroll: ScrollHandle,
     #[expect(dead_code, reason = "held to keep the AppState subscription alive")]
     state_obs: Subscription,
@@ -53,6 +61,7 @@ impl ActionRingPanel {
             type_text_input: None,
             applescript_input: None,
             shell_command_input: None,
+            theme_select: None,
             library_scroll: ScrollHandle::new(),
             state_obs,
         }
@@ -86,6 +95,56 @@ impl ActionRingPanel {
             ),
         }
     }
+
+    /// Get-or-create the theme picker, pointed at `current`: the device the
+    /// panel shows can change under a picker that was built for another one.
+    fn theme_select(
+        &mut self,
+        current: ActionRingTheme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<SelectState<Vec<ThemeOption>>> {
+        let state = self
+            .theme_select
+            .get_or_insert_with(|| {
+                let options = ActionRingTheme::ALL.map(ThemeOption).to_vec();
+                let state = cx.new(|cx| SelectState::new(options, None, window, cx));
+                cx.subscribe_in(&state, window, |_, state, event, _, cx| {
+                    let SelectEvent::Confirm(_) = event;
+                    if let Some(&theme) = state.read(cx).selected_value() {
+                        AppState::apply(cx, |app| app.commit_action_ring_theme(theme));
+                    }
+                })
+                .detach();
+                state
+            })
+            .clone();
+        if state.read(cx).selected_value() != Some(&current) {
+            state.update(cx, |state, cx| {
+                state.set_selected_value(&current, window, cx);
+            });
+        }
+        state
+    }
+}
+
+/// One entry of the theme picker.
+#[derive(Clone)]
+struct ThemeOption(ActionRingTheme);
+
+impl SelectItem for ThemeOption {
+    type Value = ActionRingTheme;
+
+    fn title(&self) -> SharedString {
+        match self.0 {
+            ActionRingTheme::Default => tr!("action_ring.theme_default"),
+            ActionRingTheme::InMotion => tr!("action_ring.theme_in_motion"),
+        }
+    }
+
+    fn value(&self) -> &Self::Value {
+        &self.0
+    }
 }
 
 impl Focusable for ActionRingPanel {
@@ -112,6 +171,7 @@ impl Render for ActionRingPanel {
             cx,
         );
         let power_user = self.power_user_inputs(window, cx);
+        let theme_select = self.theme_select(ring.theme, window, cx);
         let view = cx.entity();
 
         v_flex()
@@ -152,6 +212,7 @@ impl Render for ActionRingPanel {
                     )),
             )
             .child(enabled_row(ring.enabled, pal))
+            .child(theme_row(&theme_select, pal))
             .when(haptics_supported, |panel| {
                 panel.child(haptics_row(ring.haptics, pal))
             })
@@ -179,6 +240,26 @@ fn enabled_row(enabled: bool, pal: Palette) -> impl IntoElement {
             enabled,
             AppState::commit_action_ring_enabled,
         ))
+}
+
+/// The overlay theme picker. A select rather than a segment, so adding a
+/// theme adds a row, not a button the row must find room for.
+fn theme_row(select: &Entity<SelectState<Vec<ThemeOption>>>, pal: Palette) -> impl IntoElement {
+    h_flex()
+        .items_center()
+        .justify_between()
+        .gap_3()
+        .child(
+            v_flex()
+                .child(div().text_body().child(tr!("action_ring.theme")))
+                .child(
+                    div()
+                        .text_caption()
+                        .text_color(pal.text_muted)
+                        .child(tr!("action_ring.theme_description")),
+                ),
+        )
+        .child(div().w(px(180.0)).child(control_select(select)))
 }
 
 /// The haptic-feedback toggle row, shown only when the device supports it.

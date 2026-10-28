@@ -28,7 +28,7 @@ mod tests;
 pub use action::{Action, HeldKeys, WorkflowStep};
 pub use action_ring::{
     ActionRingConfig, ActionRingEntry, ActionRingIcon, ActionRingLayout, ActionRingSlot,
-    RingAction, RingActionError,
+    ActionRingTheme, RingAction, RingActionError,
 };
 pub use application_target::{ApplicationTarget, ApplicationTargetError};
 pub use button::{ButtonId, ParseButtonIdError};

@@ -33,7 +33,7 @@ use std::fmt::Write;
 
 use bincode::Options;
 use openlogi_core::app::ForegroundApp;
-use openlogi_core::binding::{ActionRingIcon, ActionRingSlot, KeyCombo};
+use openlogi_core::binding::{ActionRingIcon, ActionRingSlot, ActionRingTheme, KeyCombo};
 use openlogi_core::config::{ConfigRevision, Lighting, ScrollResolution};
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, ChangedOnLight, DeviceInventory,
@@ -477,9 +477,12 @@ fn action_ring_types() {
                 },
             )]),
             language: Some("fr".to_string()),
+            theme: ActionRingTheme::InMotion,
         },
-        "2a010003437574000701026672",
+        "2a01000343757400070102667201",
     );
+    assert_wire(&ActionRingTheme::Default, "00");
+    assert_wire(&ActionRingTheme::InMotion, "01");
     // The literal flag is one byte between label and icon.
     assert_wire(
         &ActionRingPresentation {

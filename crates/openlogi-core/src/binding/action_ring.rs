@@ -287,6 +287,26 @@ impl Default for ActionRingLayout {
     }
 }
 
+/// How the overlay draws a device's Actions Ring.
+///
+/// Serialized names are part of the TOML schema, and the enum crosses the IPC
+/// boundary inside the ring invocation: both are append-only.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionRingTheme {
+    /// A dark disc of round icon slots, with the hovered slot's label under the
+    /// cancel button.
+    #[default]
+    Default,
+    /// Captioned pills over animated HUD arcs, with enter and exit motion.
+    InMotion,
+}
+
+impl ActionRingTheme {
+    /// Every theme, in picker order.
+    pub const ALL: [Self; 2] = [Self::Default, Self::InMotion];
+}
+
 /// Per-device Actions Ring settings and application-specific layouts.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -297,6 +317,9 @@ pub struct ActionRingConfig {
     /// Whether ring hover and activation transitions play device haptics.
     #[serde(default = "default_true")]
     pub haptics: bool,
+    /// How the overlay draws the ring.
+    #[serde(default)]
+    pub theme: ActionRingTheme,
     /// Layout used when the foreground application has no override.
     #[serde(default)]
     pub default: ActionRingLayout,
@@ -310,6 +333,7 @@ impl Default for ActionRingConfig {
         Self {
             enabled: true,
             haptics: true,
+            theme: ActionRingTheme::Default,
             default: ActionRingLayout::default(),
             per_app: BTreeMap::new(),
         }
@@ -600,5 +624,15 @@ Bottom = { action = { CustomShortcut = "Cmd+Shift+P" } }
         assert_eq!(config.profile_layout(Some("exe:sharex.exe")), copy);
         assert_eq!(config.profile_layout(Some("app:sharex")), paste);
         assert_eq!(config.profile_layout(None), config.default);
+    }
+
+    #[test]
+    fn a_ring_without_a_theme_keeps_the_default_look() {
+        let config = toml::from_str::<ActionRingConfig>("haptics = false")
+            .expect("a ring without a theme must load");
+        assert_eq!(config.theme, ActionRingTheme::Default);
+        let config = toml::from_str::<ActionRingConfig>(r#"theme = "in_motion""#)
+            .expect("the in_motion theme must load");
+        assert_eq!(config.theme, ActionRingTheme::InMotion);
     }
 }

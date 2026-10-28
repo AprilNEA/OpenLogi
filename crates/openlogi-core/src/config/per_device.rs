@@ -13,7 +13,8 @@ use super::{
     SmartShift, ThumbwheelSensitivity,
 };
 use crate::binding::{
-    ActionRingConfig, ActionRingIcon, ActionRingSlot, Binding, ButtonId, RingAction,
+    ActionRingConfig, ActionRingIcon, ActionRingSlot, ActionRingTheme, Binding, ButtonId,
+    RingAction,
 };
 use crate::hid::{Dpi, PointerSpeed, ReportRate};
 
@@ -68,6 +69,15 @@ impl Config {
             .or_default()
             .action_ring
             .haptics = enabled;
+    }
+
+    /// Choose how the overlay draws `device_key`'s ring.
+    pub fn set_action_ring_theme(&mut self, device_key: &str, theme: ActionRingTheme) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .action_ring
+            .theme = theme;
     }
 
     /// Replace or clear one slot in the default Actions Ring layout.
