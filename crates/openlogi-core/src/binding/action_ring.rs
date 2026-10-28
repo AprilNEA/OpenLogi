@@ -301,11 +301,14 @@ pub enum ActionRingTheme {
     Classic,
     /// Captioned pills over animated HUD arcs, with enter and exit motion.
     InMotion,
+    /// Dark glass cards around a signal hub, with a pointer-lit halo on the
+    /// hovered one and a sector that turns to face it.
+    Obsidian,
 }
 
 impl ActionRingTheme {
     /// Every theme, in picker order.
-    pub const ALL: [Self; 2] = [Self::Classic, Self::InMotion];
+    pub const ALL: [Self; 3] = [Self::Classic, Self::InMotion, Self::Obsidian];
 }
 
 /// Per-device Actions Ring settings and application-specific layouts.
@@ -638,5 +641,8 @@ Bottom = { action = { CustomShortcut = "Cmd+Shift+P" } }
         let config = toml::from_str::<ActionRingConfig>(r#"theme = "in_motion""#)
             .expect("the in_motion theme must load");
         assert_eq!(config.theme, ActionRingTheme::InMotion);
+        let config = toml::from_str::<ActionRingConfig>(r#"theme = "obsidian""#)
+            .expect("the obsidian theme must load");
+        assert_eq!(config.theme, ActionRingTheme::Obsidian);
     }
 }

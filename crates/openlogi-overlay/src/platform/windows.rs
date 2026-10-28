@@ -66,7 +66,7 @@ impl RingPlacement {
         // its layout to match. Classic keeps its size, as it always did.
         let edge = DevicePixels(match self.theme {
             ActionRingTheme::Classic => full,
-            ActionRingTheme::InMotion => full
+            ActionRingTheme::InMotion | ActionRingTheme::Obsidian => full
                 .min(self.display.size.width.0)
                 .min(self.display.size.height.0),
         });
@@ -327,6 +327,22 @@ mod tests {
         // A display shorter than the disc anchors it top-left; it never shrinks.
         let bounds = classic((-100, -50), (-200, -100, 0, 0)).bounds(192);
         assert_eq!(bounds.origin, point(DevicePixels(-200), DevicePixels(-100)));
+        assert_eq!(bounds.size, size(DevicePixels(720), DevicePixels(720)));
+    }
+
+    #[test]
+    fn an_obsidian_ring_is_placed_like_in_motion_at_its_own_size() {
+        let obsidian = |cursor, rect| RingPlacement {
+            theme: ActionRingTheme::Obsidian,
+            ..placement(cursor, rect)
+        };
+        // 440 px at 100%, centred on the cursor.
+        let bounds = obsidian((900, 600), (0, 0, 1920, 1080)).bounds(96);
+        assert_eq!(bounds.origin, point(DevicePixels(680), DevicePixels(380)));
+        assert_eq!(bounds.size, size(DevicePixels(440), DevicePixels(440)));
+        // 1280×720 at 200%: 880 px would overhang, so it takes the 720 px height.
+        let bounds = obsidian((640, 360), (0, 0, 1280, 720)).bounds(192);
+        assert_eq!(bounds.origin, point(DevicePixels(280), DevicePixels(0)));
         assert_eq!(bounds.size, size(DevicePixels(720), DevicePixels(720)));
     }
 

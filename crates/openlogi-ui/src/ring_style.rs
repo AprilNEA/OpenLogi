@@ -5,7 +5,7 @@
 //! drift from the ring the way a copy would. Motion — clocks, easing, the
 //! animated arcs and glow — stays in the overlay: a still frame has none.
 
-use gpui::{Background, Hsla, linear_color_stop, linear_gradient};
+use gpui::{Background, BoxShadow, Hsla, linear_color_stop, linear_gradient, px, rgba};
 
 use crate::color;
 
@@ -145,5 +145,200 @@ pub mod in_motion {
     #[must_use]
     pub const fn track(breath: f32) -> Hsla {
         neutral(0.58, 0.10 + 0.04 * breath)
+    }
+}
+
+/// Dark glass cards on a dial of orbit lines, around a hub that names the
+/// hovered action. Its accent is a mint signal, not the brand blue: the theme
+/// is a look of its own, and every colour below is its own.
+pub mod obsidian {
+    use super::{Background, BoxShadow, Hsla, linear_color_stop, linear_gradient, px, rgba};
+
+    /// The panel's designed edge. The prototype's dial is 420 px; 20 px more
+    /// keeps the hovered bottom card's shadow inside the window.
+    pub const DESIGN_EDGE: f32 = 440.0;
+    /// Distance from the panel's centre to each card's centre.
+    pub const RADIUS: f32 = 151.0;
+    pub const CARD_W: f32 = 92.0;
+    pub const CARD_H: f32 = 64.0;
+    pub const CARD_RADIUS: f32 = 16.0;
+    pub const CARD_GLYPH: f32 = 19.0;
+    /// Between a card's glyph and its label.
+    pub const CARD_GAP: f32 = 6.0;
+    pub const CARD_LABEL: f32 = 11.0;
+    pub const HUB: f32 = 110.0;
+    pub const HUB_GLYPH: f32 = 20.0;
+    pub const HUB_LABEL: f32 = 12.0;
+    /// The two thin orbit lines and the soft disc under everything, as radii.
+    pub const ORBIT_OUTER: f32 = 161.7;
+    pub const ORBIT_INNER: f32 = 96.6;
+    pub const AMBIENT: f32 = 151.2;
+
+    /// `#RRGGBBAA` as a colour, so the tables below read like the prototype's
+    /// stylesheet.
+    fn hex(rgba_hex: u32) -> Hsla {
+        rgba(rgba_hex).into()
+    }
+
+    /// A box shadow in the prototype's order: offset, blur, spread, colour.
+    fn shadow(x: f32, y: f32, blur: f32, spread: f32, color: u32) -> BoxShadow {
+        BoxShadow::new(px(x), px(y), hex(color))
+            .blur_radius(px(blur))
+            .spread_radius(px(spread))
+    }
+
+    fn inset(x: f32, y: f32, blur: f32, color: u32) -> BoxShadow {
+        shadow(x, y, blur, 0.0, color).inset()
+    }
+
+    /// The mint signal: selected cards, the hub's glyph, the sector and dot.
+    #[must_use]
+    pub fn signal() -> Hsla {
+        hex(0x8ceb_d7ff)
+    }
+
+    /// The violet second accent, in the halo's shadow side.
+    #[must_use]
+    pub fn iris() -> Hsla {
+        hex(0xb5a5_f6ff)
+    }
+
+    /// Captions and the hub's label.
+    #[must_use]
+    pub fn text() -> Hsla {
+        hex(0xedf3_faff)
+    }
+
+    /// A card's glyph at rest.
+    #[must_use]
+    pub fn glyph() -> Hsla {
+        hex(0xbbc8_d8ff)
+    }
+
+    /// A card's fill: the glass at rest, or the mint-tinted glass of the
+    /// pressed card.
+    #[must_use]
+    pub fn card_fill(pressed: bool) -> Background {
+        if pressed {
+            linear_gradient(
+                155.0,
+                linear_color_stop(hex(0x213b_3aff), 0.0),
+                linear_color_stop(hex(0x1627_2cff), 0.80),
+            )
+        } else {
+            linear_gradient(
+                155.0,
+                linear_color_stop(hex(0x1d26_33ff), 0.0),
+                linear_color_stop(hex(0x1219_23ff), 0.76),
+            )
+        }
+    }
+
+    #[must_use]
+    pub fn card_border(pressed: bool) -> Hsla {
+        if pressed {
+            hex(0x8ceb_d77a)
+        } else {
+            hex(0xb9cb_e022)
+        }
+    }
+
+    /// A card's hovered border, between the rest and pressed ones.
+    #[must_use]
+    pub fn card_border_hovered() -> Hsla {
+        hex(0x9edc_e6a6)
+    }
+
+    /// A card's shadows: a hairline highlight along the top edge inside, and
+    /// a drop shadow under it; the pressed card adds a thin mint halo.
+    #[must_use]
+    pub fn card_shadow(pressed: bool) -> Vec<BoxShadow> {
+        if pressed {
+            vec![
+                inset(0.0, 1.0, 0.0, 0xbeff_ea1a),
+                shadow(0.0, 0.0, 0.0, 3.0, 0x8ceb_d708),
+                shadow(0.0, 5.0, 18.0, 0.0, 0x0000_0024),
+            ]
+        } else {
+            vec![
+                inset(0.0, 1.0, 0.0, 0xffff_ff08),
+                shadow(0.0, 5.0, 15.0, 0.0, 0x0000_0024),
+            ]
+        }
+    }
+
+    /// A card's shadows under the pointer: the highlight brightens and the
+    /// drop shadow deepens as the card lifts.
+    #[must_use]
+    pub fn card_shadow_hovered() -> Vec<BoxShadow> {
+        vec![
+            inset(0.0, 1.0, 0.0, 0xffff_ff12),
+            shadow(0.0, 8.0, 24.0, 0.0, 0x0000_0045),
+        ]
+    }
+
+    /// The hub's fill: lit from the top left, as the prototype's radial is.
+    #[must_use]
+    pub fn hub_fill() -> Background {
+        linear_gradient(
+            160.0,
+            linear_color_stop(hex(0x2432_3aff), 0.0),
+            linear_color_stop(hex(0x0d14_1cff), 1.0),
+        )
+    }
+
+    #[must_use]
+    pub fn hub_border() -> Hsla {
+        hex(0xa1d0_d933)
+    }
+
+    /// The hub's shadows: a highlight along the top inside, a deep shade
+    /// along the bottom inside, and two faint rings around it.
+    #[must_use]
+    pub fn hub_shadow() -> Vec<BoxShadow> {
+        vec![
+            inset(0.0, 1.0, 2.0, 0xc9ea_ff12),
+            inset(0.0, -7.0, 18.0, 0x0000_0044),
+            shadow(0.0, 0.0, 0.0, 6.0, 0xb9f4_e703),
+            shadow(0.0, 0.0, 0.0, 7.0, 0xa4cf_de15),
+        ]
+    }
+
+    #[must_use]
+    pub fn orbit_outer() -> Hsla {
+        hex(0x9fc3_dd19)
+    }
+
+    #[must_use]
+    pub fn orbit_inner() -> Hsla {
+        hex(0xb6cc_df10)
+    }
+
+    /// The soft disc under the dial, a flat stand-in for the prototype's
+    /// faint radial wash.
+    #[must_use]
+    pub fn ambient_fill() -> Hsla {
+        hex(0x72cf_d108)
+    }
+
+    #[must_use]
+    pub fn ambient_shadow() -> Vec<BoxShadow> {
+        vec![shadow(0.0, 0.0, 48.0, 0.0, 0x090c_1244)]
+    }
+
+    /// The halo under the hovered card: its rim, and its shadows inside and
+    /// out.
+    #[must_use]
+    pub fn halo_border() -> Hsla {
+        hex(0xa8eb_ee44)
+    }
+
+    #[must_use]
+    pub fn halo_shadow() -> Vec<BoxShadow> {
+        vec![
+            inset(0.0, 1.0, 1.0, 0xebff_f82b),
+            inset(0.0, -2.0, 8.0, 0xa59a_e41a),
+            shadow(0.0, 0.0, 24.0, 0.0, 0x8ceb_d71c),
+        ]
     }
 }

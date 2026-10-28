@@ -154,7 +154,8 @@ pub use succession::Identity;
 ///      timer, five-second steps up to two hours.
 /// v42: `KeyboardUsage` accepts Insert (`0x49`) and Print Screen (`0x46`),
 ///      so a `KeyCombo` can carry a usage a v41 agent rejects.
-///      `ActionRingInvocation::theme` appended.
+///      `ActionRingInvocation::theme` appended, and
+///      `ActionRingTheme::Obsidian` appended to it.
 pub const PROTOCOL_VERSION: u32 = 42;
 
 /// Environment variable through which the agent hands a supervised helper the

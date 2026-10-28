@@ -5,11 +5,13 @@
 //! neither half of that, so there each display gets a window covering it and
 //! the same panel is drawn at the pointer, in the one window that heard it last.
 //! What the panel looks like, and how big it is, is the invocation's theme:
-//! [`classic`] for `Classic`, [`skin`] for `InMotion`. This module owns
-//! placement, hover state, closing, and the window.
+//! [`classic`] for `Classic`, [`skin`] for `InMotion`, [`obsidian`] for
+//! `Obsidian`. This module owns placement, hover state, closing, and the
+//! window.
 
 mod classic;
 mod motion;
+mod obsidian;
 mod skin;
 
 use gpui::{
@@ -32,16 +34,16 @@ use crate::session::{self, ClickAwaySession, ShowingRing};
 /// shorter. Every placement path and the panel itself size the ring through
 /// this one decision.
 ///
-/// Classic is always its 360 px disc, as it was before themes. In Motion is
-/// 480 px, or the display's shorter side when that is smaller: a 1280×720
-/// display at 200% is 360 logical pixels tall, and a 480 px ring anchored to
-/// its top would put the bottom slot off screen, so the skin scales its layout
-/// to whatever edge this returns.
+/// Classic is always its 360 px disc, as it was before themes. In Motion and
+/// Obsidian are their designed size, or the display's shorter side when that
+/// is smaller: a 1280×720 display at 200% is 360 logical pixels tall, and a
+/// 480 px ring anchored to its top would put the bottom slot off screen, so
+/// those skins scale their layout to whatever edge this returns.
 pub(crate) fn panel_edge(theme: ActionRingTheme, available: Size<Pixels>) -> Pixels {
     match theme {
         ActionRingTheme::Classic => px(classic::PANEL_SIZE),
-        ActionRingTheme::InMotion => {
-            px(skin::DESIGN_EDGE).min(available.width.min(available.height))
+        ActionRingTheme::InMotion | ActionRingTheme::Obsidian => {
+            px(design_edge(theme)).min(available.width.min(available.height))
         }
     }
 }
@@ -51,6 +53,7 @@ pub(crate) const fn design_edge(theme: ActionRingTheme) -> f32 {
     match theme {
         ActionRingTheme::Classic => classic::PANEL_SIZE,
         ActionRingTheme::InMotion => skin::DESIGN_EDGE,
+        ActionRingTheme::Obsidian => obsidian::DESIGN_EDGE,
     }
 }
 /// Identifies the ring's windows to the compositor, whatever kind they are.
@@ -71,11 +74,12 @@ pub(crate) enum Placement {
 }
 
 /// How a ring looks, with the state that look needs: nothing for the classic
-/// disc, the motion clocks for In Motion. A classic ring cannot be mid-exit,
-/// so the type says so instead of a flag that is always off.
+/// disc, the motion clocks for the animated themes. A classic ring cannot be
+/// mid-exit, so the type says so instead of a flag that is always off.
 enum RingLook {
     Classic,
     InMotion(skin::Motion),
+    Obsidian(obsidian::Motion),
 }
 
 impl From<ActionRingTheme> for RingLook {
@@ -83,6 +87,7 @@ impl From<ActionRingTheme> for RingLook {
         match theme {
             ActionRingTheme::Classic => Self::Classic,
             ActionRingTheme::InMotion => Self::InMotion(skin::Motion::default()),
+            ActionRingTheme::Obsidian => Self::Obsidian(obsidian::Motion::default()),
         }
     }
 }
@@ -92,6 +97,7 @@ impl RingLook {
         match self {
             Self::Classic => ActionRingTheme::Classic,
             Self::InMotion(_) => ActionRingTheme::InMotion,
+            Self::Obsidian(_) => ActionRingTheme::Obsidian,
         }
     }
 
@@ -100,6 +106,17 @@ impl RingLook {
         match self {
             Self::Classic => false,
             Self::InMotion(motion) => motion.is_closing(),
+            Self::Obsidian(motion) => motion.is_closing(),
+        }
+    }
+
+    /// Start the exit of a look that has one: `None` for a look that goes at
+    /// once, `Some(false)` when the exit is already playing.
+    fn begin_close(&mut self, now: Instant) -> Option<bool> {
+        match self {
+            Self::Classic => None,
+            Self::InMotion(motion) => Some(motion.begin_close(now)),
+            Self::Obsidian(motion) => Some(motion.begin_close(now)),
         }
     }
 }
@@ -196,16 +213,19 @@ impl RingView {
     }
 
     /// Send the ring's final command once and close every window of the
-    /// session. An In Motion ring with motion on plays its exit first and
+    /// session. An animated ring with motion on plays its exit first and
     /// closes itself when that ends; the others go at once, so no invisible
     /// window stays to swallow a click.
     fn close(&mut self, command: OverlayCommand, window: &mut Window, cx: &mut Context<Self>) {
         let session_id = self.invocation.session_id;
-        match &mut self.look {
-            RingLook::InMotion(motion) if !cx.reduce_motion() => {
-                if !motion.begin_close(Instant::now()) {
-                    return;
-                }
+        let exit = if cx.reduce_motion() {
+            None
+        } else {
+            self.look.begin_close(Instant::now())
+        };
+        match exit {
+            Some(false) => {}
+            Some(true) => {
                 let _ = self.commands.send(command);
                 session::close_ring_windows(cx, session_id);
                 cx.notify();
@@ -220,7 +240,7 @@ impl RingView {
                 })
                 .detach();
             }
-            RingLook::Classic | RingLook::InMotion(_) => {
+            None => {
                 let _ = self.commands.send(command);
                 session::dismiss_from_window(cx, window, session_id);
             }
@@ -286,6 +306,9 @@ impl Render for RingView {
                 .child(match self.look {
                     RingLook::Classic => self.classic_panel(cx).into_any_element(),
                     RingLook::InMotion(_) => self.skinned_panel(edge, cx).into_any_element(),
+                    RingLook::Obsidian(_) => self
+                        .obsidian_panel(edge, origin, window, cx)
+                        .into_any_element(),
                 })
         });
 
@@ -424,13 +447,16 @@ mod tests {
         let wide = Size::new(px(1920.0), px(1080.0));
         assert_eq!(panel_edge(ActionRingTheme::Classic, wide), px(360.0));
         assert_eq!(panel_edge(ActionRingTheme::InMotion, wide), px(480.0));
+        assert_eq!(panel_edge(ActionRingTheme::Obsidian, wide), px(440.0));
         // 1280×720 at 200%: In Motion shrinks to the 360 px display, Classic
         // stays its 360 px disc, as before themes.
         let short = Size::new(px(640.0), px(360.0));
         assert_eq!(panel_edge(ActionRingTheme::InMotion, short), px(360.0));
+        assert_eq!(panel_edge(ActionRingTheme::Obsidian, short), px(360.0));
         assert_eq!(panel_edge(ActionRingTheme::Classic, short), px(360.0));
         let tiny = Size::new(px(200.0), px(100.0));
         assert_eq!(panel_edge(ActionRingTheme::InMotion, tiny), px(100.0));
+        assert_eq!(panel_edge(ActionRingTheme::Obsidian, tiny), px(100.0));
         assert_eq!(panel_edge(ActionRingTheme::Classic, tiny), px(360.0));
     }
 
@@ -570,6 +596,7 @@ mod tests {
         let (x, y) = match theme {
             ActionRingTheme::Classic => classic::slot_center(ActionRingSlot::Top),
             ActionRingTheme::InMotion => skin::slot_center(ActionRingSlot::Top),
+            ActionRingTheme::Obsidian => obsidian::slot_center(ActionRingSlot::Top),
         };
         let half = px(design_edge(theme) / 2.0);
         point(center.x - half + px(x), center.y - half + px(y))
@@ -583,6 +610,11 @@ mod tests {
     #[gpui::test]
     fn a_classic_ring_hovers_like_the_in_motion_one(cx: &mut TestAppContext) {
         loses_the_pointer(ActionRingTheme::Classic, cx);
+    }
+
+    #[gpui::test]
+    fn an_obsidian_ring_hovers_like_the_in_motion_one(cx: &mut TestAppContext) {
+        loses_the_pointer(ActionRingTheme::Obsidian, cx);
     }
 
     fn loses_the_pointer(theme: ActionRingTheme, cx: &mut TestAppContext) {
