@@ -299,6 +299,26 @@ mod tests {
     }
 
     #[test]
+    fn c545_routes_each_paired_slot_through_unifying() {
+        assert!(super::is_receiver_pid(0xc545));
+        assert!(super::speaks_unifying_protocol(0xc545));
+        assert_eq!(receiver_display_name(0xc545), "Lightspeed Receiver");
+        for slot in [1, 2] {
+            let route = DeviceRoute::for_slot(&inv(0xc545, Some("A1B2C3D4")), slot)
+                .expect("paired slot has a receiver route");
+            assert_eq!(
+                route,
+                DeviceRoute::Unifying {
+                    receiver_uid: "A1B2C3D4".to_string(),
+                    slot,
+                }
+            );
+            assert_eq!(route.device_index(), slot);
+            assert!(DeviceRoute::for_slot(&inv(0xc545, None), slot).is_none());
+        }
+    }
+
+    #[test]
     fn for_slot_is_direct_without_a_uid_on_the_direct_slot() {
         let route = DeviceRoute::for_slot(&inv(0xb025, None), DIRECT_DEVICE_INDEX);
         assert_matches!(
