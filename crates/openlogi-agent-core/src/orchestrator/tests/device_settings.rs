@@ -756,16 +756,22 @@ async fn a_panel_dpi_write_is_where_a_dpi_shift_returns() {
     assert_eq!(dpi.by_key["mouse"].index, 1);
 }
 
-/// A panel write the mouse rejects leaves the DPI a shift returns to as
-/// it was: with no DPI saved, the shift reads the mouse again.
+/// A panel write the mouse rejects is not where a DPI shift returns. The
+/// mouse may be anywhere then, so the shift reads it.
 #[tokio::test]
-async fn a_rejected_panel_dpi_write_is_not_where_a_dpi_shift_returns() {
+async fn a_rejected_panel_dpi_write_makes_a_dpi_shift_read_the_mouse() {
+    let mut config = Config::default();
+    config.set_dpi_presets("mouse", vec![Dpi::new(800), Dpi::new(1600)]);
     let mouse = dev("mouse", 1, true);
     let route = mouse.route.clone().unwrap();
-    let mut orch = orchestrator(Config::default());
+    let mut orch = orchestrator(config);
     orch.devices = vec![mouse];
     orch.rebuild();
     publish_dpi_mouse(&orch.shared, route.clone(), || false).await;
+    // A preset action picked 800 earlier.
+    if let Ok(mut cycles) = orch.shared.dpi_cycle.write() {
+        cycles.by_key.get_mut("mouse").unwrap().set(0);
+    }
 
     orch.shared
         .set_dpi(&route, Dpi::new(1600))
