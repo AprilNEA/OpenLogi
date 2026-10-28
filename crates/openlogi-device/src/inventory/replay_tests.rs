@@ -566,6 +566,129 @@ async fn disconnected_direct_channel_replays_last_good_then_opens_a_replacement(
         .expect("the initial probe cassette is consumed");
 }
 
+/// Capture's liveness ping can find a direct channel dead while inventory
+/// still publishes it and would need two failed probes, each up to its whole
+/// timeout, to notice (#2020). A report retires it on the very next pass.
+#[tokio::test]
+async fn a_direct_channel_capture_reports_dead_retires_on_the_next_pass() {
+    let fixture = direct_fixture(OpenOutcome::Hidpp, 1);
+    let expected = fixture.inventory.clone();
+    let route = crate::DeviceRoute::Direct {
+        vendor_id: expected.receiver.vendor_id,
+        product_id: expected.receiver.product_id,
+    };
+    let node_id = fixture.node_id.clone();
+    let backend = Arc::new(
+        ReplayBackend::new(
+            ReplayTopology {
+                nodes: vec![fixture.node],
+                channels: vec![fixture.channel],
+            },
+            vec![fixture.cassette],
+        )
+        .expect("valid direct replay"),
+    );
+    let registry = ChannelRegistry::default();
+    let mut enumerator = Enumerator::with_backend(backend.clone()).with_registry(registry.clone());
+    let initial = enumerator
+        .enumerate()
+        .await
+        .expect("initial probe succeeds");
+    assert_eq!(initial, std::slice::from_ref(&expected));
+    let stale = registry.lookup(&route).expect("direct route published");
+
+    registry.report_dead(&stale);
+    tokio::time::timeout(Duration::from_secs(1), enumerator.dead_channel_reported())
+        .await
+        .expect("a report wakes the inventory watcher");
+    let reported = enumerator
+        .enumerate()
+        .await
+        .expect("the reporting pass replays");
+    assert_eq!(
+        reported,
+        std::slice::from_ref(&expected),
+        "the device stays listed while its channel drains"
+    );
+    assert!(
+        enumerator.channels.is_retiring(&node_id),
+        "one pass retires a reported channel"
+    );
+    assert!(!registry.is_current(&stale));
+    assert!(registry.lookup(&route).is_none());
+    registry.report_dead(&stale);
+    assert!(
+        registry.take_dead_reports().is_empty(),
+        "a channel inventory already withdrew is not reported again"
+    );
+    drop(stale);
+
+    let draining = enumerator
+        .enumerate()
+        .await
+        .expect("quiescent retirement is deferred for one pass");
+    assert_eq!(draining, std::slice::from_ref(&expected));
+    let repaired = enumerator
+        .enumerate()
+        .await
+        .expect("replacement probe succeeds");
+
+    assert!(
+        enumerator.replaced_channels_last_tick(),
+        "the reopen must report the replacement so settings and captures re-apply"
+    );
+    assert_eq!(repaired, [expected]);
+    let replacement = registry.lookup(&route).expect("replacement published");
+    assert!(registry.is_current(&replacement));
+    assert_eq!(backend.open_count(&node_id).expect("known node"), 2);
+    backend
+        .channel_completion(DIRECT_CHANNEL)
+        .expect("known channel")
+        .require_complete()
+        .expect("the initial probe cassette is consumed");
+}
+
+/// A receiver's channel carries every paired slot, so a silent device behind
+/// it must not take the channel down for the others.
+#[tokio::test]
+async fn a_receiver_slot_capture_report_leaves_the_receiver_channel_published() {
+    let fixture = bolt_fixture(
+        "dead-report-receiver",
+        &[BoltSlot {
+            slot: 1,
+            online: true,
+        }],
+        1,
+    );
+    let route = crate::DeviceRoute::Bolt {
+        receiver_uid: BOLT_UID.to_string(),
+        slot: 1,
+    };
+    let backend = Arc::new(
+        ReplayBackend::new(
+            ReplayTopology {
+                nodes: vec![fixture.node],
+                channels: vec![fixture.channel],
+            },
+            vec![fixture.cassette],
+        )
+        .expect("valid Bolt replay"),
+    );
+    let registry = ChannelRegistry::default();
+    let mut enumerator = Enumerator::with_backend(backend.clone()).with_registry(registry.clone());
+    enumerator.timeouts.arrival_drain = Duration::ZERO;
+    enumerator
+        .enumerate()
+        .await
+        .expect("initial probe succeeds");
+    let slot = registry.lookup(&route).expect("receiver route published");
+
+    registry.report_dead(&slot);
+
+    assert!(registry.take_dead_reports().is_empty());
+    assert!(registry.is_current(&slot));
+}
+
 #[tokio::test]
 async fn vanished_direct_node_ages_out_independently_of_a_sleeping_receiver_slot() {
     let direct = direct_fixture(OpenOutcome::Hidpp, 1);

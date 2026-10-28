@@ -742,6 +742,36 @@ async fn channel_change_takes_teardown_precedence_over_ready_shutdown() {
 
 /// A mouse with only `0x2150` (index 3) whose `getThumbwheelStatus` reports
 /// `status`; `setThumbwheelReporting` writes are echoed.
+/// A liveness restart reports its channel before it stops, so inventory can
+/// replace it before the restarted session looks it up again (#2020).
+#[tokio::test]
+async fn a_dead_channel_stop_reports_the_channel_to_inventory() {
+    let route = DeviceRoute::Direct {
+        vendor_id: 0x046d,
+        product_id: 0xb35b,
+    };
+    let registry = ChannelRegistry::default();
+    let (raw, _) = ScriptedRawHidChannel::with_responder(|_| None);
+    let channel = scripted_channel(raw).await;
+    registry.replace_node(
+        NodeId::from("mouse-node".to_owned()),
+        [route.clone()],
+        channel,
+    );
+    let dead = registry
+        .lookup(&route)
+        .expect("the capture publication should be current");
+
+    assert!(
+        matches!(
+            stop_for_dead_channel(&registry, &dead),
+            CaptureStop::Shutdown
+        ),
+        "until inventory acts, the stop still restores through the published channel"
+    );
+    assert!(registry.take_dead_reports().contains(dead.channel()));
+}
+
 pub(super) fn thumbwheel_device(
     status: [u8; 2],
 ) -> (ScriptedRawHidChannel, crate::replay::ReplayChannelHandle) {

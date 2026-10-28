@@ -373,6 +373,18 @@ pub(crate) fn stop_for_current_publication(
     }
 }
 
+/// Stop a session whose liveness ping found its channel dead, and report the
+/// channel so inventory replaces it. Otherwise inventory keeps publishing it
+/// until its own probes fail twice, and the restarted session would arm on
+/// the same dead channel (#2020).
+pub(crate) fn stop_for_dead_channel(
+    registry: &ChannelRegistry,
+    dead: &SharedChannel,
+) -> CaptureStop {
+    registry.report_dead(dead);
+    stop_for_current_publication(registry, dead)
+}
+
 /// Wait until inventory removes or replaces the channel on which capture was
 /// armed. The returned reason never carries a cached replacement across an
 /// await; restoration performs a fresh registry lookup instead.
