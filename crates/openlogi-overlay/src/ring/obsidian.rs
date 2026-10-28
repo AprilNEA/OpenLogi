@@ -13,7 +13,7 @@ use std::time::Instant;
 use gpui::{
     Context, FontWeight, Hsla, InteractiveElement, IntoElement, ParentElement, PathBuilder, Pixels,
     Point, StatefulInteractiveElement as _, Styled, Window, canvas, div, linear_color_stop,
-    linear_gradient, point, prelude::FluentBuilder as _, px, rgba,
+    linear_gradient, point, prelude::FluentBuilder as _, px,
 };
 use openlogi_core::binding::ActionRingSlot;
 use openlogi_ui::action_icons::RING_CANCEL_ICON;
@@ -27,8 +27,8 @@ use openlogi_ui::ring_style::obsidian::{
 };
 
 use super::motion::{
-    Presence, ease_out_back, ease_out_cubic, ellipse_path, lerp_angle, paint_gradient_arc,
-    presence_at, slot_heading, smooth_towards, sweep_arc,
+    Presence, blend_shadows, ease_out_back, ease_out_cubic, ellipse_path, hex, lerp_angle,
+    paint_gradient_arc, presence_at, slot_heading, smooth_towards, sweep_arc,
 };
 use super::{RingLook, RingView};
 use crate::ipc::OverlayCommand;
@@ -363,11 +363,6 @@ impl RingView {
             .children(cards)
             .child(hub(hovered_icon, hovered_caption, hub_t, flash, layout, cx))
     }
-}
-
-/// `#RRGGBBAA` as a colour, for the few colours that only move.
-fn hex(rgba_hex: u32) -> Hsla {
-    rgba(rgba_hex).into()
 }
 
 /// A circle of `diameter` centred in the panel.
@@ -760,24 +755,7 @@ fn card_look(card: Card, layout: Layout) -> CardLook {
     let shadow = if pressed {
         card_shadow(true)
     } else {
-        card_shadow(false)
-            .into_iter()
-            .zip(card_shadow_hovered())
-            .map(|(rest, hot)| {
-                let between = |a: Pixels, b: Pixels| a + (b - a) * hover_t;
-                let mut blended = gpui::BoxShadow::new(
-                    between(rest.offset.x, hot.offset.x),
-                    between(rest.offset.y, hot.offset.y),
-                    lerp_hsla(rest.color, hot.color, hover_t),
-                )
-                .blur_radius(between(rest.blur_radius, hot.blur_radius))
-                .spread_radius(rest.spread_radius);
-                if rest.inset {
-                    blended = blended.inset();
-                }
-                blended
-            })
-            .collect()
+        blend_shadows(card_shadow(false), card_shadow_hovered(), hover_t)
     };
     let glyph_ink = if pressed {
         signal()

@@ -34,6 +34,23 @@ pub const fn lerp_hsla(a: Hsla, b: Hsla, t: f32) -> Hsla {
     }
 }
 
+/// `#RRGGBBAA` as a colour, so a theme's tables read like its prototype's
+/// stylesheet.
+fn hex(rgba_hex: u32) -> Hsla {
+    rgba(rgba_hex).into()
+}
+
+/// A box shadow in a stylesheet's order: offset, blur, spread, colour.
+fn shadow(x: f32, y: f32, blur: f32, spread: f32, color: u32) -> BoxShadow {
+    BoxShadow::new(px(x), px(y), hex(color))
+        .blur_radius(px(blur))
+        .spread_radius(px(spread))
+}
+
+fn inset(x: f32, y: f32, blur: f32, color: u32) -> BoxShadow {
+    shadow(x, y, blur, 0.0, color).inset()
+}
+
 /// The classic disc of round icon slots.
 pub mod classic {
     use super::{Hsla, color, neutral};
@@ -157,7 +174,9 @@ pub mod in_motion {
 /// hovered action. Its accent is a mint signal, not the brand blue: the theme
 /// is a look of its own, and every colour below is its own.
 pub mod obsidian {
-    use super::{Background, BoxShadow, Hsla, linear_color_stop, linear_gradient, px, rgba};
+    use super::{
+        Background, BoxShadow, Hsla, hex, inset, linear_color_stop, linear_gradient, shadow,
+    };
 
     /// The panel's designed edge. The prototype's dial is 420 px; 20 px more
     /// keeps the hovered bottom card's shadow inside the window.
@@ -178,23 +197,6 @@ pub mod obsidian {
     pub const ORBIT_OUTER: f32 = 161.7;
     pub const ORBIT_INNER: f32 = 96.6;
     pub const AMBIENT: f32 = 151.2;
-
-    /// `#RRGGBBAA` as a colour, so the tables below read like the prototype's
-    /// stylesheet.
-    fn hex(rgba_hex: u32) -> Hsla {
-        rgba(rgba_hex).into()
-    }
-
-    /// A box shadow in the prototype's order: offset, blur, spread, colour.
-    fn shadow(x: f32, y: f32, blur: f32, spread: f32, color: u32) -> BoxShadow {
-        BoxShadow::new(px(x), px(y), hex(color))
-            .blur_radius(px(blur))
-            .spread_radius(px(spread))
-    }
-
-    fn inset(x: f32, y: f32, blur: f32, color: u32) -> BoxShadow {
-        shadow(x, y, blur, 0.0, color).inset()
-    }
 
     /// The mint signal: selected cards, the hub's glyph, the sector and dot.
     #[must_use]

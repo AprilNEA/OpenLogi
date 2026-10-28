@@ -8,8 +8,9 @@
 use std::f32::consts::PI;
 use std::time::{Duration, Instant};
 
-use gpui::{Hsla, PathBuilder, Pixels, Point, Window, point, px};
+use gpui::{BoxShadow, Hsla, PathBuilder, Pixels, Point, Window, point, px, rgba};
 use openlogi_core::binding::ActionRingSlot;
+use openlogi_ui::ring_style::lerp_hsla;
 
 pub(super) const ENTER_SECS: f32 = 0.294;
 /// How long the exit plays before the window goes; [`super::RingView::close`]
@@ -167,6 +168,35 @@ pub(super) fn wrap_to_pi(delta: f32) -> f32 {
 /// `current` eased towards `target` the short way round the circle.
 pub(super) fn lerp_angle(current: f32, target: f32, dt: f32, tau: f32) -> f32 {
     current + wrap_to_pi(target - current) * (1.0 - (-dt / tau.max(0.001)).exp())
+}
+
+/// `#RRGGBBAA` as a colour, for the colours a theme only moves through.
+pub(super) fn hex(rgba_hex: u32) -> Hsla {
+    rgba(rgba_hex).into()
+}
+
+/// `rest` shadows eased `t` of the way to `hot` shadows, pair by pair, so a
+/// drop shadow deepens with a lift instead of switching halfway. The lists
+/// must pair up: the spread and inset come from `rest`.
+pub(super) fn blend_shadows(rest: Vec<BoxShadow>, hot: Vec<BoxShadow>, t: f32) -> Vec<BoxShadow> {
+    debug_assert_eq!(rest.len(), hot.len(), "shadow lists must pair up");
+    rest.into_iter()
+        .zip(hot)
+        .map(|(rest, hot)| {
+            let between = |a: Pixels, b: Pixels| a + (b - a) * t;
+            let mut blended = BoxShadow::new(
+                between(rest.offset.x, hot.offset.x),
+                between(rest.offset.y, hot.offset.y),
+                lerp_hsla(rest.color, hot.color, t),
+            )
+            .blur_radius(between(rest.blur_radius, hot.blur_radius))
+            .spread_radius(rest.spread_radius);
+            if rest.inset {
+                blended = blended.inset();
+            }
+            blended
+        })
+        .collect()
 }
 
 pub(super) fn ease_out_back(t: f32) -> f32 {
