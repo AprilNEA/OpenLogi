@@ -5,7 +5,7 @@
 //! neither half of that, so there each display gets a window covering it and
 //! the same panel is drawn at the pointer, in the one window that heard it last.
 //! What the panel looks like is the invocation's theme: [`classic`] for
-//! `Default`, [`skin`] for `InMotion`. This module owns placement, hover state,
+//! `Classic`, [`skin`] for `InMotion`. This module owns placement, hover state,
 //! and the window.
 
 mod classic;
@@ -169,7 +169,7 @@ impl Render for RingView {
                 .left(origin.x)
                 .top(origin.y)
                 .child(match self.invocation.theme {
-                    ActionRingTheme::Default => self.classic_panel(edge, cx).into_any_element(),
+                    ActionRingTheme::Classic => self.classic_panel(edge, cx).into_any_element(),
                     ActionRingTheme::InMotion => self.skinned_panel(edge, cx).into_any_element(),
                 })
         });
@@ -415,7 +415,7 @@ mod tests {
     /// well away from every edge.
     fn top_slot_at(theme: ActionRingTheme, center: Point<Pixels>) -> Point<Pixels> {
         let (x, y) = match theme {
-            ActionRingTheme::Default => classic::slot_center(ActionRingSlot::Top),
+            ActionRingTheme::Classic => classic::slot_center(ActionRingSlot::Top),
             ActionRingTheme::InMotion => skin::slot_center(ActionRingSlot::Top),
         };
         point(
@@ -430,8 +430,8 @@ mod tests {
     }
 
     #[gpui::test]
-    fn a_default_theme_ring_hovers_like_the_in_motion_one(cx: &mut TestAppContext) {
-        loses_the_pointer(ActionRingTheme::Default, cx);
+    fn a_classic_ring_hovers_like_the_in_motion_one(cx: &mut TestAppContext) {
+        loses_the_pointer(ActionRingTheme::Classic, cx);
     }
 
     fn loses_the_pointer(theme: ActionRingTheme, cx: &mut TestAppContext) {

@@ -481,7 +481,7 @@ fn action_ring_types() {
         },
         "2a01000343757400070102667201",
     );
-    assert_wire(&ActionRingTheme::Default, "00");
+    assert_wire(&ActionRingTheme::Classic, "00");
     assert_wire(&ActionRingTheme::InMotion, "01");
     // The literal flag is one byte between label and icon.
     assert_wire(

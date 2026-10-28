@@ -137,7 +137,7 @@ impl SelectItem for ThemeOption {
 
     fn title(&self) -> SharedString {
         match self.0 {
-            ActionRingTheme::Default => tr!("action_ring.theme_default"),
+            ActionRingTheme::Classic => tr!("action_ring.theme_classic"),
             ActionRingTheme::InMotion => tr!("action_ring.theme_in_motion"),
         }
     }

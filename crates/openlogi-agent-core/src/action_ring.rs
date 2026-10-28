@@ -325,7 +325,7 @@ mod tests {
             haptic_route: None,
             layout: ActionRingConfig::default().default,
             language: None,
-            theme: ActionRingTheme::Default,
+            theme: ActionRingTheme::Classic,
         }
     }
 

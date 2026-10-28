@@ -294,17 +294,18 @@ impl Default for ActionRingLayout {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ActionRingTheme {
-    /// A dark disc of round icon slots, with the hovered slot's label under the
-    /// cancel button.
+    /// The dark disc of round icon slots, with the hovered slot's label under
+    /// the cancel button. Named for what it is, not for being the default: the
+    /// TOML name is append-only, and another theme may become the default.
     #[default]
-    Default,
+    Classic,
     /// Captioned pills over animated HUD arcs, with enter and exit motion.
     InMotion,
 }
 
 impl ActionRingTheme {
     /// Every theme, in picker order.
-    pub const ALL: [Self; 2] = [Self::Default, Self::InMotion];
+    pub const ALL: [Self; 2] = [Self::Classic, Self::InMotion];
 }
 
 /// Per-device Actions Ring settings and application-specific layouts.
@@ -333,7 +334,7 @@ impl Default for ActionRingConfig {
         Self {
             enabled: true,
             haptics: true,
-            theme: ActionRingTheme::Default,
+            theme: ActionRingTheme::Classic,
             default: ActionRingLayout::default(),
             per_app: BTreeMap::new(),
         }
@@ -627,10 +628,13 @@ Bottom = { action = { CustomShortcut = "Cmd+Shift+P" } }
     }
 
     #[test]
-    fn a_ring_without_a_theme_keeps_the_default_look() {
+    fn a_ring_without_a_theme_is_classic() {
         let config = toml::from_str::<ActionRingConfig>("haptics = false")
             .expect("a ring without a theme must load");
-        assert_eq!(config.theme, ActionRingTheme::Default);
+        assert_eq!(config.theme, ActionRingTheme::Classic);
+        let config = toml::from_str::<ActionRingConfig>(r#"theme = "classic""#)
+            .expect("the classic theme must load");
+        assert_eq!(config.theme, ActionRingTheme::Classic);
         let config = toml::from_str::<ActionRingConfig>(r#"theme = "in_motion""#)
             .expect("the in_motion theme must load");
         assert_eq!(config.theme, ActionRingTheme::InMotion);

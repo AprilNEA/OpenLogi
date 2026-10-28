@@ -1,4 +1,4 @@
-//! The `Default` theme: a dark disc of round icon slots, with the hovered
+//! The `Classic` theme: a dark disc of round icon slots, with the hovered
 //! slot's label under the cancel button. It opens and closes without motion.
 
 use gpui::{
