@@ -382,6 +382,10 @@ fn all_catalog_variants_roundtrip_toml() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one entry per persisted Action variant, so the list grows with the enum"
+)]
 fn persisted_action_variant_names_are_stable() {
     let mut actions = Action::catalog();
     actions.extend([
@@ -407,6 +411,7 @@ fn persisted_action_variant_names_are_stable() {
                 .parse()
                 .unwrap_or_else(|error| panic!("valid shortcut failed: {error}")),
         ),
+        Action::HoldModifier("Ctrl".parse().expect("valid modifier")),
     ]);
     let mut actual: Vec<String> = actions
         .into_iter()
@@ -436,6 +441,7 @@ fn persisted_action_variant_names_are_stable() {
         "Find",
         "HorizontalScrollLeft",
         "HorizontalScrollRight",
+        "HoldModifier",
         "HoldShortcut",
         "LaunchpadShow",
         "LeftClick",
@@ -482,6 +488,41 @@ fn persisted_action_variant_names_are_stable() {
     ];
     expected.sort_unstable();
     assert_eq!(actual, expected);
+}
+
+#[test]
+fn hold_modifier_round_trips_and_labels_and_categorises() {
+    #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+    struct Wrapper {
+        binding: Action,
+    }
+
+    let wrapper = Wrapper {
+        binding: Action::HoldModifier("Ctrl+Shift".parse().expect("valid modifier set")),
+    };
+    let encoded = toml::to_string(&wrapper).expect("action serializes");
+    assert!(
+        encoded.contains("HoldModifier = \"Ctrl+Shift\""),
+        "unexpected encoding: {encoded}"
+    );
+    assert_eq!(toml::from_str::<Wrapper>(&encoded), Ok(wrapper));
+
+    let action = Action::HoldModifier("Ctrl".parse().expect("valid modifier"));
+    assert_eq!(action.label(), "Hold Ctrl");
+    assert_eq!(action.category(), Category::Editing);
+    assert!(action.translation_key().is_none());
+    assert_eq!(action.effect(), Effect::AgentSide);
+    assert_eq!(
+        action.held_modifier(),
+        Some("Ctrl".parse().expect("valid modifier"))
+    );
+    assert!(action.held_chord().is_none());
+    assert!(action.holds_while_pressed());
+
+    let chord = Action::HoldShortcut("Ctrl+A".parse().expect("valid shortcut"));
+    assert!(chord.held_modifier().is_none());
+    assert!(chord.holds_while_pressed());
+    assert!(!Action::Copy.holds_while_pressed());
 }
 
 #[test]

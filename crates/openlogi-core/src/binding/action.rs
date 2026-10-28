@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use super::application_target::ApplicationTarget;
 use super::category::Category;
 use super::key_combo::KeyCombo;
+use super::modifiers::BareModifiers;
 
 /// What pressing a [`ButtonId`](crate::binding::ButtonId) should do.
 ///
@@ -219,6 +220,21 @@ pub enum Action {
     /// returns to the sensor's default DPI. A DPI LED (HID++ `0x1300`) is
     /// lit while the mode is on. Does nothing on other devices.
     TogglePrecisionMode,
+    /// Hold one or more bare modifiers (Ctrl, Shift, Alt, Cmd, Super, or any
+    /// combination) for the lifetime of the physical button press, with no
+    /// ordinary key. The held state composes with input from other devices:
+    /// a keystroke typed on the keyboard meanwhile arrives modified. On macOS
+    /// that needs the virtual HID keyboard that release builds use.
+    ///
+    /// [`BareModifiers`] names modifiers exactly as [`KeyCombo`] does.
+    ///
+    /// Lifecycle: modifiers down on press start, up on every terminal outcome
+    /// (release, capture cancellation, invalid binding, shutdown). A one-shot
+    /// dispatcher with no release context degrades to a no-op rather than a
+    /// balanced tap: a lone modifier tap is never what the binding means, and
+    /// on its own Alt focuses the menu bar on Windows and Super opens the
+    /// Start menu or the desktop's launcher.
+    HoldModifier(BareModifiers),
 }
 
 /// Which of a held chord's keys stay down for the lifetime of the press.
@@ -368,6 +384,7 @@ macro_rules! derive_action_core {
                         }
                         None => format!("Tap {}", combo.rendered_key()),
                     },
+                    Action::HoldModifier(mods) => format!("Hold {}", mods.rendered_label()),
                 }
             }
 
@@ -388,7 +405,8 @@ macro_rules! derive_action_core {
                     | Action::Workflow(_)
                     | Action::OpenApplication(_)
                     | Action::HoldShortcut(_)
-                    | Action::TapKeyHoldingModifiers(_) => None,
+                    | Action::TapKeyHoldingModifiers(_)
+                    | Action::HoldModifier(_) => None,
                 }
             }
 
@@ -418,7 +436,8 @@ macro_rules! derive_action_core {
                     | Action::RunShellCommand(_)
                     | Action::Workflow(_)
                     | Action::HoldShortcut(_)
-                    | Action::TapKeyHoldingModifiers(_) => Category::Editing,
+                    | Action::TapKeyHoldingModifiers(_)
+                    | Action::HoldModifier(_) => Category::Editing,
                     Action::SetDpiPreset(_) => Category::Dpi,
                     Action::OpenApplication(_) => Category::System,
                 }
@@ -459,5 +478,23 @@ impl Action {
             Self::TapKeyHoldingModifiers(combo) => Some((combo, HeldKeys::ModifiersOnly)),
             _ => None,
         }
+    }
+
+    /// The bare modifiers whose output must remain down until the originating
+    /// press ends, or `None` for actions that hold a chord or nothing.
+    #[must_use]
+    pub fn held_modifier(&self) -> Option<BareModifiers> {
+        match self {
+            Self::HoldModifier(mods) => Some(*mods),
+            _ => None,
+        }
+    }
+
+    /// Whether this action holds output down for the lifetime of the
+    /// originating press: a chord ([`Self::held_chord`]) or bare modifiers
+    /// ([`Self::held_modifier`]).
+    #[must_use]
+    pub fn holds_while_pressed(&self) -> bool {
+        self.held_chord().is_some() || self.held_modifier().is_some()
     }
 }

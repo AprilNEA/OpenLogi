@@ -423,7 +423,7 @@ fn handle_key(
 
     info!(keycode, action = %action.label(), "key → executing bound action");
     let action_target = capture_target();
-    let queued = if action.held_chord().is_some() {
+    let queued = if action.holds_while_pressed() {
         let queued = dispatcher.try_hook_key_down(keycode, &action, action_target);
         if queued {
             HELD_KEYS.with_borrow_mut(|keys| {
@@ -516,9 +516,9 @@ pub fn start(
             }
         }
         // Function-key remapper: ordinary actions remain one-shot, while a
-        // HoldShortcut enters the same down/up/cancel lifecycle as a mouse
-        // button. The active set pairs key-up even if modifier state or config
-        // changes while the key is down.
+        // held chord or held modifiers enter the same down/up/cancel
+        // lifecycle as a mouse button. The active set pairs key-up even if
+        // modifier state or config changes while the key is down.
         HookEvent::Key(event) => handle_key(
             event,
             &keyboard_bindings,

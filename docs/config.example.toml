@@ -42,6 +42,8 @@ Back = "BrowserBack"
 Forward = { TapKeyHoldingModifiers = "Cmd+Tab" }
 # Hold the whole chord for exactly as long as the physical button is held.
 MiddleClick = { HoldShortcut = "Ctrl+Space" }
+# Hold bare Cmd while the button is held; keys typed arrive modified.
+WheelTiltLeft = { HoldModifier = "Cmd" }
 # Release before 500 ms runs `short`; reaching 500 ms runs `long` once.
 DpiToggle = { short = "ShowDesktop", long = "MissionControl" }
 # On a mouse without a thumb wheel, hold Back and turn the main wheel to scroll
