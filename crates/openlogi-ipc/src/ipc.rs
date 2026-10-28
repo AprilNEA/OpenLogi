@@ -153,7 +153,8 @@ pub use succession::Identity;
 ///      `BacklightChange::Duration` appended — the `0x1982` backlight
 ///      timer, five-second steps up to two hours.
 /// v42: `KeyboardUsage` accepts Insert (`0x49`), so a `KeyCombo` can carry
-///      a usage a v41 agent rejects.
+///      a usage a v41 agent rejects; `BacklightStatus::Unknown` appended,
+///      for a `0x1982` status the agent does not model.
 pub const PROTOCOL_VERSION: u32 = 42;
 
 /// Environment variable through which the agent hands a supervised helper the

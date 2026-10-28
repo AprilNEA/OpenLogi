@@ -312,6 +312,7 @@ fn status_label(status: BacklightStatus) -> &'static str {
         BacklightStatus::AlsSaturated => "off (ambient light saturated)",
         BacklightStatus::TemporaryManual => "on (level from backlight keys)",
         BacklightStatus::PermanentManual => "on (level from software)",
+        BacklightStatus::Unknown => "not recognised by OpenLogi",
     }
 }
 

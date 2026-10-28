@@ -882,6 +882,8 @@ fn semantic_read_payloads() {
 
     assert_wire(&BacklightMode::PermanentManual, "03");
     assert_wire(&BacklightStatus::PermanentManual, "05");
+    // v42 appends `Unknown` after the six statuses the agent models.
+    assert_wire(&BacklightStatus::Unknown, "06");
     let backlight: Result<BacklightState, WriteError> = Ok(BacklightState {
         enabled: true,
         mode: BacklightMode::Automatic,
