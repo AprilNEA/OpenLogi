@@ -18,6 +18,11 @@ const fn neutral(lightness: f32, alpha: f32) -> Hsla {
     }
 }
 
+/// The outline of a slot that holds no action. No theme draws one: the ring
+/// hides empty slots, and only the editor's preview shows them, as a neutral
+/// outline so they can still be picked.
+pub const EMPTY_SLOT_OUTLINE: Hsla = neutral(0.58, 0.14);
+
 /// `a` towards `b` by `t`, channel by channel.
 #[must_use]
 pub const fn lerp_hsla(a: Hsla, b: Hsla, t: f32) -> Hsla {
@@ -215,21 +220,21 @@ pub mod obsidian {
         hex(0xbbc8_d8ff)
     }
 
-    /// A card's fill: the glass at rest, or the mint-tinted glass of the
-    /// pressed card.
+    /// A card's fill: smoked glass at rest, letting a little of what is
+    /// behind it through, or the mint-tinted glass of the pressed card.
     #[must_use]
     pub fn card_fill(pressed: bool) -> Background {
         if pressed {
             linear_gradient(
                 155.0,
-                linear_color_stop(hex(0x213b_3aff), 0.0),
-                linear_color_stop(hex(0x1627_2cff), 0.80),
+                linear_color_stop(hex(0x213b_3ad6), 0.0),
+                linear_color_stop(hex(0x1627_2cd6), 0.80),
             )
         } else {
             linear_gradient(
                 155.0,
-                linear_color_stop(hex(0x1d26_33ff), 0.0),
-                linear_color_stop(hex(0x1219_23ff), 0.76),
+                linear_color_stop(hex(0x1d26_33c7), 0.0),
+                linear_color_stop(hex(0x1219_23c7), 0.76),
             )
         }
     }
@@ -249,31 +254,35 @@ pub mod obsidian {
         hex(0x9edc_e6a6)
     }
 
-    /// A card's shadows: a hairline highlight along the top edge inside, and
-    /// a drop shadow under it; the pressed card adds a thin mint halo.
+    /// A card's shadows: the glass's lit top edge and shaded bottom edge
+    /// inside, and a drop shadow under it; the pressed card adds a thin mint
+    /// halo.
     #[must_use]
     pub fn card_shadow(pressed: bool) -> Vec<BoxShadow> {
         if pressed {
             vec![
-                inset(0.0, 1.0, 0.0, 0xbeff_ea1a),
-                shadow(0.0, 0.0, 0.0, 3.0, 0x8ceb_d708),
-                shadow(0.0, 5.0, 18.0, 0.0, 0x0000_0024),
+                inset(0.0, 1.0, 0.0, 0xbeff_ea26),
+                inset(0.0, -2.0, 6.0, 0x0000_0030),
+                shadow(0.0, 0.0, 0.0, 3.0, 0x8ceb_d70c),
+                shadow(0.0, 5.0, 18.0, 0.0, 0x0000_0030),
             ]
         } else {
             vec![
-                inset(0.0, 1.0, 0.0, 0xffff_ff08),
-                shadow(0.0, 5.0, 15.0, 0.0, 0x0000_0024),
+                inset(0.0, 1.0, 0.0, 0xffff_ff14),
+                inset(0.0, -2.0, 6.0, 0x0000_0030),
+                shadow(0.0, 5.0, 15.0, 0.0, 0x0000_0030),
             ]
         }
     }
 
-    /// A card's shadows under the pointer: the highlight brightens and the
+    /// A card's shadows under the pointer: the top edge brightens and the
     /// drop shadow deepens as the card lifts.
     #[must_use]
     pub fn card_shadow_hovered() -> Vec<BoxShadow> {
         vec![
-            inset(0.0, 1.0, 0.0, 0xffff_ff12),
-            shadow(0.0, 8.0, 24.0, 0.0, 0x0000_0045),
+            inset(0.0, 1.0, 0.0, 0xffff_ff24),
+            inset(0.0, -2.0, 6.0, 0x0000_0030),
+            shadow(0.0, 8.0, 24.0, 0.0, 0x0000_0052),
         ]
     }
 

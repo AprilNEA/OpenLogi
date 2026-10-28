@@ -25,7 +25,7 @@ use openlogi_core::binding::{
 };
 use openlogi_ui::action_icons::RING_CANCEL_ICON;
 use openlogi_ui::color;
-use openlogi_ui::ring_style::{classic, in_motion, obsidian};
+use openlogi_ui::ring_style::{EMPTY_SLOT_OUTLINE, classic, in_motion, obsidian};
 
 use self::action_icons::action_icon_path;
 use self::editor::{PowerUserInputs, action_library};
@@ -684,7 +684,7 @@ fn slot_button(
         .text_color(ink)
         .cursor_pointer()
         .map(|button| match (shape, empty) {
-            (_, true) => button.border_1().border_color(in_motion::track(1.0)),
+            (_, true) => button.border_1().border_color(EMPTY_SLOT_OUTLINE),
             (SlotShape::Round, false) if selected => button
                 .bg(classic::selected_fill())
                 .border_2()

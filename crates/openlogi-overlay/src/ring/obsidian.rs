@@ -33,8 +33,11 @@ use super::motion::{
 use super::{RingLook, RingView};
 use crate::ipc::OverlayCommand;
 
-/// How fast a card lifts and its halo rises or fades.
-const HOVER_TAU: f32 = 0.07;
+/// How fast a card lifts and its halo rises or fades: the prototype's 230 ms
+/// ease, which this reaches about 95% of in three time constants.
+const HOVER_TAU: f32 = 0.11;
+/// How fast the hub opens around the hovered action's glyph and name.
+const HUB_TAU: f32 = 0.10;
 /// How closely the halo's light follows the pointer; it only hides the frame
 /// quantisation, the prototype moves it at once.
 const LIGHT_TAU: f32 = 0.05;
@@ -74,6 +77,8 @@ pub(super) struct Motion {
     /// ring nobody has hovered yet does not point anywhere.
     aim_angle: f32,
     aim_t: f32,
+    /// 0 with the hub showing the cancel cross, 1 showing the hovered action.
+    hub_t: f32,
     /// When the current hover began, for the rim's arrival turn.
     rim_born: Option<(ActionRingSlot, Instant)>,
     /// The card a click chose, for its wave and the hub's flash.
@@ -91,6 +96,7 @@ impl Default for Motion {
             light: DEFAULT_LIGHT,
             aim_angle: slot_heading(ActionRingSlot::Top),
             aim_t: 0.0,
+            hub_t: 0.0,
             rim_born: None,
             committed: None,
             born: now,
@@ -169,6 +175,11 @@ impl Motion {
             aim_target
         } else {
             smooth_towards(self.aim_t, aim_target, dt, AIM_TAU)
+        };
+        self.hub_t = if reduce {
+            aim_target
+        } else {
+            smooth_towards(self.hub_t, aim_target, dt, HUB_TAU)
         };
     }
 
@@ -302,7 +313,7 @@ impl RingView {
         let wave = motion.wave(now, reduce);
         let flash = motion.flash(now, reduce);
         let committed = motion.committed.map(|(slot, _)| slot);
-        let (aim_angle, aim_t) = (motion.aim_angle, motion.aim_t);
+        let (aim_angle, aim_t, hub_t) = (motion.aim_angle, motion.aim_t, motion.hub_t);
         let hovered = self
             .hovered
             .and_then(|slot| self.invocation.slots.get(&slot));
@@ -318,15 +329,14 @@ impl RingView {
             .into_iter()
             .zip(hover_t)
             .filter_map(|(slot, hover_t)| {
-                card_node(
-                    self,
+                let card = Card {
                     slot,
                     hover_t,
-                    committed == Some(slot),
-                    layout,
+                    light,
+                    pressed: committed == Some(slot),
                     reduce,
-                    cx,
-                )
+                };
+                card_node(self, card, layout, cx)
             })
             .collect::<Vec<_>>();
 
@@ -351,7 +361,7 @@ impl RingView {
             ))
             .children(halos)
             .children(cards)
-            .child(hub(hovered_icon, hovered_caption, flash, layout, cx))
+            .child(hub(hovered_icon, hovered_caption, hub_t, flash, layout, cx))
     }
 }
 
@@ -511,7 +521,11 @@ fn halo(
     rim: f32,
     layout: Layout,
 ) -> impl IntoElement {
-    let size = HALO * layout.fit * (0.82 + 0.18 * ease_out_back(hover_t));
+    // The halo fades in over the whole hover and grows with a little
+    // overshoot once it is visible, so it never pops: the prototype's 140 ms
+    // opacity ease under a 230 ms spring.
+    let grow = ease_out_back(((hover_t - 0.25) / 0.75).max(0.0));
+    let size = HALO * layout.fit * (0.82 + 0.18 * grow);
     let at = layout.slot_center(slot);
     let (dx, dy) = ((light.0 - 0.5) * size, (light.1 - 0.5) * size);
     // The glass is lit from where the pointer is: a gradient running from
@@ -532,7 +546,7 @@ fn halo(
             linear_color_stop(hex(0x151d_2a61), 0.6),
         ))
         .shadow(halo_shadow())
-        .opacity((hover_t * 1.5).min(1.0))
+        .opacity(hover_t)
         .child(
             div()
                 .absolute()
@@ -608,16 +622,23 @@ fn css(deg: f32) -> f32 {
     (deg - 90.0).to_radians()
 }
 
-/// The hub: the hovered action's glyph and name, or the cancel cross, and the
-/// flash a click sends through it.
+/// The hub: the cancel cross at rest, opening into the hovered action's
+/// glyph and name as `hub_t` rises, with the flash a click sends through it.
+///
+/// The cross fades out as the action fades in, the glyph grows as it
+/// arrives, and the glass brightens a little, so the hand-off reads as the
+/// hub taking the action in rather than a swap.
 fn hub(
     hovered_icon: Option<&'static str>,
     caption: Option<gpui::SharedString>,
+    hub_t: f32,
     flash: f32,
     layout: Layout,
     cx: &mut Context<RingView>,
 ) -> impl IntoElement {
     let size = HUB * layout.fit;
+    let open = ease_out_cubic(hub_t);
+    let glyph = (HUB_GLYPH + 6.0 * open) * layout.fit;
     centred(layout, size)
         .id("ring-cancel")
         .flex()
@@ -627,15 +648,42 @@ fn hub(
         .gap(px(CARD_GAP * layout.fit))
         .bg(hub_fill())
         .border_1()
-        .border_color(hub_border())
+        .border_color(lerp_hsla(hub_border(), signal().alpha(0.55), open))
         .shadow(hub_shadow())
         .text_color(signal())
         .cursor_pointer()
         .child(
-            gpui::svg()
-                .path(hovered_icon.unwrap_or(RING_CANCEL_ICON))
-                .size(px(HUB_GLYPH * layout.fit))
-                .flex_none(),
+            div()
+                .absolute()
+                .inset_0()
+                .rounded_full()
+                .bg(signal().alpha(0.08 * open)),
+        )
+        .child(
+            div()
+                .relative()
+                .size(px(glyph))
+                .flex_none()
+                .child(
+                    gpui::svg()
+                        .path(RING_CANCEL_ICON)
+                        .absolute()
+                        .inset_0()
+                        .size(px(glyph))
+                        .text_color(hex(0xa1ad_bdff))
+                        .opacity(1.0 - open),
+                )
+                .when_some(hovered_icon, |slot, icon| {
+                    slot.child(
+                        gpui::svg()
+                            .path(icon)
+                            .absolute()
+                            .inset_0()
+                            .size(px(glyph))
+                            .text_color(signal())
+                            .opacity(open),
+                    )
+                }),
         )
         .when_some(caption, |hub, caption| {
             hub.child(
@@ -646,6 +694,7 @@ fn hub(
                     .text_center()
                     .text_color(text())
                     .truncate()
+                    .opacity(open)
                     .child(caption),
             )
         })
@@ -666,23 +715,37 @@ fn hub(
         }))
 }
 
-/// One card: the hit box that stays put, and inside it the glass card that
-/// lifts under the pointer.
-fn card_node(
-    view: &RingView,
+/// What one card is drawn from this frame.
+#[derive(Clone, Copy)]
+struct Card {
     slot: ActionRingSlot,
     hover_t: f32,
+    /// Where the pointer's light sits in the card's box, 0..1 on each axis.
+    light: (f32, f32),
     pressed: bool,
-    layout: Layout,
     reduce: bool,
-    cx: &mut Context<RingView>,
-) -> Option<gpui::AnyElement> {
-    let presentation = view.invocation.slots.get(&slot)?;
-    let icon_path = presentation.icon.asset_path();
-    let caption = super::slot_caption(presentation);
-    let (left, top) = layout.slot_origin(slot);
+}
+
+/// How a card looks this frame: its lift, border, shadows, glyph colour and
+/// where its sheen comes from, each eased by how far the pointer is onto it.
+struct CardLook {
+    rise: f32,
+    border: Hsla,
+    shadow: Vec<gpui::BoxShadow>,
+    glyph_ink: Hsla,
+    /// The angle the pointer's light sweeps the glass from, CSS degrees.
+    lit_from: f32,
+}
+
+fn card_look(card: Card, layout: Layout) -> CardLook {
+    let Card {
+        hover_t,
+        light,
+        pressed,
+        reduce,
+        ..
+    } = card;
     let (w, h) = layout.card_size();
-    let session_id = view.invocation.session_id;
     let rise = if reduce {
         0.0
     } else {
@@ -693,14 +756,74 @@ fn card_node(
     } else {
         lerp_hsla(card_border(false), card_border_hovered(), hover_t)
     };
+    // The drop shadow deepens with the lift instead of switching halfway.
     let shadow = if pressed {
         card_shadow(true)
-    } else if hover_t > 0.5 {
-        card_shadow_hovered()
     } else {
         card_shadow(false)
+            .into_iter()
+            .zip(card_shadow_hovered())
+            .map(|(rest, hot)| {
+                let between = |a: Pixels, b: Pixels| a + (b - a) * hover_t;
+                let mut blended = gpui::BoxShadow::new(
+                    between(rest.offset.x, hot.offset.x),
+                    between(rest.offset.y, hot.offset.y),
+                    lerp_hsla(rest.color, hot.color, hover_t),
+                )
+                .blur_radius(between(rest.blur_radius, hot.blur_radius))
+                .spread_radius(rest.spread_radius);
+                if rest.inset {
+                    blended = blended.inset();
+                }
+                blended
+            })
+            .collect()
     };
-    let glyph_ink = if pressed { signal() } else { glyph() };
+    let glyph_ink = if pressed {
+        signal()
+    } else {
+        lerp_hsla(glyph(), text(), hover_t)
+    };
+    // The pointer's light sweeps across the glass: a soft sheen from the
+    // light's side, with the mint tint of the halo under it.
+    let (lx, ly) = ((light.0 - 0.5) * w, (light.1 - 0.5) * h);
+    let lit_from = (-lx).atan2(ly).to_degrees();
+    CardLook {
+        rise,
+        border,
+        shadow,
+        glyph_ink,
+        lit_from,
+    }
+}
+
+/// One card: the hit box that stays put, and inside it the glass card that
+/// lifts under the pointer and catches its light.
+fn card_node(
+    view: &RingView,
+    card: Card,
+    layout: Layout,
+    cx: &mut Context<RingView>,
+) -> Option<gpui::AnyElement> {
+    let Card {
+        slot,
+        hover_t,
+        pressed,
+        ..
+    } = card;
+    let presentation = view.invocation.slots.get(&slot)?;
+    let icon_path = presentation.icon.asset_path();
+    let caption = super::slot_caption(presentation);
+    let (left, top) = layout.slot_origin(slot);
+    let (w, h) = layout.card_size();
+    let session_id = view.invocation.session_id;
+    let CardLook {
+        rise,
+        border,
+        shadow,
+        glyph_ink,
+        lit_from,
+    } = card_look(card, layout);
     Some(
         div()
             .id(("ring-slot", slot.index()))
@@ -728,6 +851,18 @@ fn card_node(
                     .shadow(shadow)
                     .text_color(text())
                     .child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .rounded(px(CARD_RADIUS * layout.fit))
+                            .bg(linear_gradient(
+                                lit_from,
+                                linear_color_stop(hex(0xe5ff_f52a), 0.0),
+                                linear_color_stop(hex(0x8ceb_d700), 0.62),
+                            ))
+                            .opacity(hover_t),
+                    )
+                    .child(
                         gpui::svg()
                             .path(icon_path)
                             .size(px(CARD_GLYPH * layout.fit))
@@ -742,22 +877,7 @@ fn card_node(
                             .truncate()
                             .child(caption),
                     )
-                    .when(pressed, |card| {
-                        let dot = 4.0 * layout.fit;
-                        card.child(
-                            div()
-                                .absolute()
-                                .right(px(8.0 * layout.fit))
-                                .top(px(8.0 * layout.fit))
-                                .size(px(dot))
-                                .rounded_full()
-                                .bg(signal())
-                                .shadow(vec![
-                                    gpui::BoxShadow::new(px(0.0), px(0.0), hex(0x8ceb_d788))
-                                        .blur_radius(px(8.0)),
-                                ]),
-                        )
-                    }),
+                    .when(pressed, |card| card.child(pressed_dot(layout))),
             )
             .on_hover(cx.listener(move |this, hovered, _, cx| {
                 this.hover(slot, *hovered, cx);
@@ -771,6 +891,20 @@ fn card_node(
             }))
             .into_any_element(),
     )
+}
+
+/// The mint dot in a pressed card's corner.
+fn pressed_dot(layout: Layout) -> impl IntoElement {
+    div()
+        .absolute()
+        .right(px(8.0 * layout.fit))
+        .top(px(8.0 * layout.fit))
+        .size(px(4.0 * layout.fit))
+        .rounded_full()
+        .bg(signal())
+        .shadow(vec![
+            gpui::BoxShadow::new(px(0.0), px(0.0), hex(0x8ceb_d788)).blur_radius(px(8.0)),
+        ])
 }
 
 /// Centre of `slot`'s card within a full-size panel, for tests that aim the
