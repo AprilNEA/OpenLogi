@@ -5,7 +5,7 @@
 //! but the in-memory cache dies with the process, forcing every agent restart
 //! to re-interview every device. Persisting the cache means a device that was
 //! fully probed once keeps its identity across restarts, even on transports
-//! where a fresh walk is slow or failing (see `BOLT_SLOT_PROBE`).
+//! where a fresh walk is slow or failing (see `BOLT_SLOT_PROBE_TIMEOUT`).
 //!
 //! Only Bolt identities are persisted, because only they are keyed on the
 //! device's *own* identity (the pairing-register unit id), which no re-pairing
@@ -35,7 +35,28 @@ use super::features::{BatteryProbe, ProbedFeatures};
 /// (the cache is a warm-start optimization, not data anyone must keep).
 /// v2 dropped the `UnifyingSlot` key (slot-keyed, so not re-pair-safe).
 /// v3 adds event-capable feature indexes discovered by the immutable walk.
-const SCHEMA_VERSION: u32 = 3;
+/// v4 adds the `0x1F20` ADC-measurement event index.
+/// v5 adds the legacy `0x1000` and voltage `0x1001` battery event indexes.
+/// v6 records whether a `0x1004` battery reports a percentage.
+/// v7 adds the Fn-inversion `0x40a2`/`0x40a3` and extended-DPI `0x2202`
+/// event indexes.
+/// v8 adds the `0x4531` multi-platform event index and records whether the
+/// keyboard lets software set its platform (`Capabilities::os_layout`).
+/// v9 adds the extended report-rate `0x8061` event index and the
+/// `Capabilities::report_rate` flag.
+/// v10 adds the `0x1982` backlight event index.
+/// v11 adds the `Capabilities::easy_switch` flag (`0x1815` host slots).
+/// v12 adds the `Capabilities::virtual_thumbwheel` flag (Back/Forward
+/// raw-wheel reporting).
+/// v13 adds the `0x4220` lock-key event index.
+/// v14 adds the `Capabilities::pointer_scaling` flag (`0x2205` pointer
+/// motion scaling on a mouse without adjustable DPI).
+/// v15 adds the `0x4521` disable-keys event index.
+/// v16 adds the `0x2121` hi-res wheel event index.
+/// v17 records whether a legacy `0x1000` battery reports mileage.
+/// v18 adds the `Capabilities::force_sensing` flag (`0x19c0` press force
+/// software can change).
+const SCHEMA_VERSION: u32 = 18;
 
 impl ProbeCacheError {
     /// Report why a store could not keep a snapshot.
@@ -220,6 +241,22 @@ mod tests {
             model_ids: [0xb042, 0, 0],
             extended_model_id: 0,
         };
+        let events = EventFeatureIndices {
+            wireless_status: Some(7),
+            unified_battery: Some(9),
+            battery_status: Some(12),
+            battery_voltage: Some(13),
+            adc_measurement: Some(11),
+            fn_inversion: None,
+            fn_inversion_multi_host: None,
+            extended_dpi: None,
+            multi_platform: Some(14),
+            disable_keys: Some(18),
+            extended_report_rate: Some(15),
+            backlight: Some(16),
+            lock_key_state: Some(17),
+            hires_wheel: Some(19),
+        };
         let mut cache = HashMap::new();
         cache.insert(
             CacheKey::Bolt {
@@ -230,17 +267,17 @@ mod tests {
                     model_info: Some(model.clone()),
                     // A live reading at snapshot time.
                     battery: Some(BatteryInfo {
-                        percentage: 55,
+                        percentage: Some(55),
                         level: BatteryLevel::Good,
                         status: BatteryStatus::Discharging,
                     }),
                     ..Default::default()
                 },
-                battery: Some(BatteryProbe::Unified(9)),
-                events: EventFeatureIndices {
-                    wireless_status: Some(7),
-                    unified_battery: Some(9),
-                },
+                battery: Some(BatteryProbe::Unified {
+                    index: 9,
+                    state_of_charge: true,
+                }),
+                events,
                 probed_at: Instant::now(),
             },
         );
@@ -269,15 +306,14 @@ mod tests {
         assert_eq!(bolt.probe.model_info.as_ref(), Some(&model));
         assert_eq!(
             bolt.battery,
-            Some(BatteryProbe::Unified(9)),
+            Some(BatteryProbe::Unified {
+                index: 9,
+                state_of_charge: true,
+            }),
             "the battery *feature index* is immutable and kept"
         );
         assert_eq!(
-            bolt.events,
-            EventFeatureIndices {
-                wireless_status: Some(7),
-                unified_battery: Some(9),
-            },
+            bolt.events, events,
             "event feature indexes are immutable and kept"
         );
         assert!(

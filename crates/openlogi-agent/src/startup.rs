@@ -11,11 +11,13 @@ use futures::StreamExt as _;
 use futures::stream::{self, Stream};
 
 use openlogi_agent_core::action_ring::ActionRingManager;
+use openlogi_agent_core::backlight_overlay::BacklightOverlayManager;
 use openlogi_agent_core::event_monitor::EventMonitor;
 use openlogi_agent_core::observable::ObservableState;
-use openlogi_agent_core::orchestrator::{Orchestrator, SharedRuntime};
+use openlogi_agent_core::orchestrator::{Orchestrator, SharedHandles};
 use openlogi_agent_core::runtime::scroll::{ScrollInputHandle, ScrollRuntime};
 use openlogi_agent_core::runtime::{ActionDispatcher, ActionRuntime};
+use openlogi_agent_core::watchers::shutdown::{StopOutcome, WatcherHandle};
 use openlogi_agent_core::watchers::{self, gesture::GestureOutputs};
 use openlogi_core::config::Config;
 #[cfg(target_os = "macos")]
@@ -30,10 +32,11 @@ use crate::{pairing, server};
 /// plus the running IPC server's handles.
 pub(crate) struct Core {
     pub(crate) orchestrator: Arc<Mutex<Orchestrator>>,
-    pub(crate) shared: SharedRuntime,
+    pub(crate) shared: SharedHandles,
     pub(crate) observable: Arc<ObservableState>,
     pub(crate) event_monitor: Arc<EventMonitor>,
     pub(crate) inputs: InputServices,
+    pub(crate) backlight_overlay: BacklightOverlayManager,
     pub(crate) ring_haptics: server::RingHapticPlayer,
     /// Client declarations forwarded by the IPC server — the dormancy gate's
     /// demand channel. It buffers, so a declaration that lands before the
@@ -58,6 +61,7 @@ pub(crate) async fn bootstrap(config: Config) -> Option<Core> {
     )));
     let shared = orchestrator.lock().await.shared();
     let inputs = InputServices::start(&shared)?;
+    let backlight_overlay = BacklightOverlayManager::default();
 
     // Shared between the hook callback (which mirrors events into it) and
     // the IPC server (which the GUI polls); the janitor turns it back off.
@@ -77,6 +81,7 @@ pub(crate) async fn bootstrap(config: Config) -> Option<Core> {
         Arc::clone(&pairing),
         Arc::clone(&event_monitor),
         &inputs,
+        backlight_overlay.clone(),
     );
     Some(Core {
         orchestrator,
@@ -84,6 +89,7 @@ pub(crate) async fn bootstrap(config: Config) -> Option<Core> {
         observable,
         event_monitor,
         inputs,
+        backlight_overlay,
         ring_haptics,
         demand,
     })
@@ -91,11 +97,12 @@ pub(crate) async fn bootstrap(config: Config) -> Option<Core> {
 
 fn spawn_ipc_server(
     orchestrator: Arc<Mutex<Orchestrator>>,
-    shared: &SharedRuntime,
+    shared: &SharedHandles,
     observable: Arc<ObservableState>,
     pairing: Arc<pairing::PairingManager>,
     event_monitor: Arc<EventMonitor>,
     inputs: &InputServices,
+    backlight_overlay: BacklightOverlayManager,
 ) -> (
     server::RingHapticPlayer,
     tokio::sync::mpsc::UnboundedReceiver<openlogi_ipc::ClientKind>,
@@ -108,6 +115,7 @@ fn spawn_ipc_server(
         event_monitor,
         Arc::clone(&inputs.ring),
         inputs.dispatcher.clone(),
+        backlight_overlay,
     );
     let ring_haptics = server.ring_haptics.clone();
     tokio::spawn(server::run(server));
@@ -126,15 +134,13 @@ pub(crate) struct InputServices {
 }
 
 impl InputServices {
-    fn start(shared: &SharedRuntime) -> Option<Self> {
+    fn start(shared: &SharedHandles) -> Option<Self> {
         let ring = Arc::new(ActionRingManager::default());
         let (sender, triggers) = tokio::sync::mpsc::unbounded_channel();
         let action_runtime = match ActionRuntime::new(
             shared.dpi_cycle.clone(),
-            shared.capture_channel.clone(),
-            shared.channel_registry.clone(),
-            shared.receiver_access.clone(),
-            shared.device_io.clone(),
+            shared.pointer_speeds(),
+            shared.device_access(),
             sender,
         ) {
             Ok(runtime) => runtime,
@@ -168,34 +174,59 @@ impl InputServices {
     }
 }
 
+/// Graceful-shutdown handles for the three firmware-owning HID++ managers.
+pub(crate) struct HidppWatcherHandles {
+    gesture: WatcherHandle,
+    host_switch: WatcherHandle,
+    keyboard: WatcherHandle,
+}
+
+impl HidppWatcherHandles {
+    /// Stop all managers concurrently and confirm firmware teardown. The
+    /// lifecycle retains this future and owns the terminal-exit deadline.
+    pub(crate) async fn stop_and_wait(self) -> bool {
+        let (gesture, host_switch, keyboard) = tokio::join!(
+            self.gesture.stop_and_wait("gesture"),
+            self.host_switch.stop_and_wait("host-switch"),
+            self.keyboard.stop_and_wait("keyboard"),
+        );
+        [gesture, host_switch, keyboard]
+            .into_iter()
+            .all(StopOutcome::is_stopped)
+    }
+}
+
 /// Start the HID++ background sessions that do not need Accessibility.
-pub(crate) fn spawn_hidpp_watchers(shared: &SharedRuntime, inputs: &InputServices) {
-    watchers::gesture::spawn(
+pub(crate) fn spawn_hidpp_watchers(
+    shared: &SharedHandles,
+    inputs: &InputServices,
+) -> HidppWatcherHandles {
+    let gesture = watchers::gesture::spawn(
         &shared.capture_plans,
-        shared.capture_channel.clone(),
-        shared.receiver_access.clone(),
-        shared.channel_registry.clone(),
-        shared.device_io.clone(),
+        shared.device_access(),
         GestureOutputs::new(
             inputs.dispatcher.clone(),
             inputs.scroll_input.clone(),
             shared.hook_maps.clone(),
         ),
     );
-    watchers::host_switch::spawn(
+    let host_switch = watchers::host_switch::spawn(
         &shared.host_switch_links,
         shared.channel_pool.clone(),
         shared.receiver_access.clone(),
-        shared.device_io.clone(),
-    );
-    watchers::keyboard::spawn(
-        &shared.keyboard_spec,
-        shared.keyboard_channel.clone(),
-        shared.receiver_access.clone(),
         shared.channel_registry.clone(),
         shared.device_io.clone(),
+    );
+    let keyboard = watchers::keyboard::spawn(
+        &shared.keyboard_spec,
+        shared.keyboard_access(),
         inputs.dispatcher.clone(),
     );
+    HidppWatcherHandles {
+        gesture,
+        host_switch,
+        keyboard,
+    }
 }
 
 /// One tagged event from the per-source state watchers.
@@ -209,10 +240,15 @@ pub(crate) enum WatcherEvent {
     /// Camera activity flipped.
     Camera(bool),
     App(watchers::foreground_app::ForegroundUpdate),
+    Pointer(openlogi_hook::PointerContext),
     /// The Accessibility grant flipped.
     Accessibility(bool),
-    /// The Input Monitoring grant flipped.
-    InputMonitoring(bool),
+    /// Where the agent stands with Input Monitoring changed.
+    InputMonitoring(watchers::input_monitoring::InputMonitoring),
+    /// macOS Secure Event Input turned on or off, or moved to another app.
+    SecureInput(openlogi_ipc::SecureInput),
+    /// A standalone light was read, or announced a change.
+    Light(watchers::light::LightEvent),
     /// A watcher's channel closed (its thread died). Emitted once; the
     /// source then leaves the merge, so a dead watcher cannot busy-wake the
     /// loop.
@@ -225,14 +261,17 @@ pub(crate) enum Watcher {
     Inventory,
     Camera,
     App,
+    Pointer,
     Accessibility,
     InputMonitoring,
+    SecureInput,
+    Light,
 }
 
 /// Spawn the per-source state watchers at arming, merged into one tagged
 /// stream.
 pub(crate) fn spawn_state_watchers(
-    shared: &SharedRuntime,
+    shared: &SharedHandles,
 ) -> (
     impl Stream<Item = WatcherEvent> + Unpin + use<>,
     watchers::inventory::InventoryRefresh,
@@ -249,10 +288,25 @@ pub(crate) fn spawn_state_watchers(
         .chain(stream::iter([WatcherEvent::Lost(source)]))
         .boxed()
     }
-    let inventory = watchers::inventory::spawn_with_registry(
+    /// The longest a privacy grant goes unread when macOS posts no
+    /// notification for it. Every edit measured so far posts one, so this
+    /// bounds a lost notification, not the status latency clients see.
+    const GRANT_HEARTBEAT: Duration = Duration::from_secs(5);
+    let inventory = watchers::inventory::spawn_with_hardware(
+        shared.hardware(),
         shared.channel_registry.clone(),
-        shared.device_io.clone(),
     );
+    shared.publish_inventory_refresh(inventory.refresh.clone());
+    let (light_events, lights) = tokio::sync::mpsc::unbounded_channel();
+    // The stream owns the light watcher's handle: dropping the stream drops
+    // the handle, which stops the watcher. It only listens, so nothing on a
+    // light needs restoring when it stops.
+    let light_watcher =
+        watchers::light::spawn(shared.hardware(), &shared.watched_lights, light_events);
+    let mut pointer = watchers::pointer::spawn();
+    // Publish capability even when an unsupported source has no worker and
+    // closes immediately. The orchestrator starts unknown, never guessing.
+    pointer.mark_changed();
     let streams = stream::select_all([
         tagged(
             inventory.events,
@@ -269,16 +323,40 @@ pub(crate) fn spawn_state_watchers(
             Watcher::App,
             WatcherEvent::App,
         ),
+        stream::unfold(pointer, |mut rx| async move {
+            rx.changed().await.ok()?;
+            let context = rx.borrow_and_update().clone();
+            Some((WatcherEvent::Pointer(context), rx))
+        })
+        .chain(stream::iter([WatcherEvent::Lost(Watcher::Pointer)]))
+        .boxed(),
         tagged(
-            watchers::accessibility::spawn(Duration::from_millis(1200)),
+            watchers::accessibility::spawn(GRANT_HEARTBEAT),
             Watcher::Accessibility,
             WatcherEvent::Accessibility,
         ),
         tagged(
-            watchers::input_monitoring::spawn(Duration::from_millis(1200)),
+            watchers::input_monitoring::spawn(
+                GRANT_HEARTBEAT,
+                std::cfg_select! {
+                    target_os = "macos" => { crate::input_monitoring::fresh_grant }
+                    _ => { || None }
+                },
+            ),
             Watcher::InputMonitoring,
             WatcherEvent::InputMonitoring,
         ),
+        tagged(
+            watchers::secure_input::spawn(watchers::secure_input::PERIOD),
+            Watcher::SecureInput,
+            WatcherEvent::SecureInput,
+        ),
+        stream::unfold((lights, light_watcher), |(mut rx, watcher)| async move {
+            let event = rx.recv().await?;
+            Some((WatcherEvent::Light(event), (rx, watcher)))
+        })
+        .chain(stream::iter([WatcherEvent::Lost(Watcher::Light)]))
+        .boxed(),
     ]);
     (streams, inventory.refresh)
 }

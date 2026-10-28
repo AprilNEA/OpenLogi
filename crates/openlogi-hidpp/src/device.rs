@@ -51,7 +51,26 @@ impl Device {
     /// Returns [`DeviceError::UnsupportedProtocolVersion`] if the device only
     /// supports [`ProtocolVersion::V10`].
     pub async fn new(chan: Arc<HidppChannel>, device_index: u8) -> Result<Self, DeviceError> {
-        let Some(version) = protocol::determine_version(&chan, device_index).await? else {
+        let version = protocol::determine_version(&chan, device_index).await?;
+        Self::from_version(chan, device_index, version)
+    }
+
+    /// Initialize in an owned transaction, draining the submitted native ping.
+    /// The owner must drive this future to completion after requester cancellation.
+    pub async fn new_write_through(
+        chan: Arc<HidppChannel>,
+        device_index: u8,
+    ) -> Result<Self, DeviceError> {
+        let version = protocol::determine_version_write_through(&chan, device_index).await?;
+        Self::from_version(chan, device_index, version)
+    }
+
+    fn from_version(
+        chan: Arc<HidppChannel>,
+        device_index: u8,
+        version: Option<ProtocolVersion>,
+    ) -> Result<Self, DeviceError> {
+        let Some(version) = version else {
             return Err(DeviceError::DeviceNotFound);
         };
 
@@ -201,7 +220,7 @@ fn insert_feature<F: Feature>(
 /// report used to consume the caller's entire probe budget and abort
 /// enumeration. A HID++ round trip that is going to answer answers in tens of
 /// milliseconds; past this the report is lost, and re-asking beats waiting.
-const FEATURE_READ_ATTEMPT: Duration = Duration::from_millis(700);
+const FEATURE_READ_TIMEOUT: Duration = Duration::from_millis(700);
 
 /// Attempts per feature-table entry before enumeration gives up on it.
 ///
@@ -229,7 +248,7 @@ async fn read_feature_entry(
         let mut read = std::pin::pin!(feature_set.get_feature(index).fuse());
         let outcome = select! {
             result = read => Some(result),
-            () = futures_timer::Delay::new(FEATURE_READ_ATTEMPT).fuse() => None,
+            () = futures_timer::Delay::new(FEATURE_READ_TIMEOUT).fuse() => None,
         };
         match outcome {
             Some(Ok(info)) => return Ok(info),
@@ -256,7 +275,7 @@ mod tests {
     use std::sync::Arc;
 
     use crate::{
-        channel::tests::{MockRawHidChannel, channel_with_reader},
+        channel::mock::{MockRawHidChannel, channel_with_reader},
         feature::{CreatableFeature as _, feature_set::FeatureSetFeature},
         protocol::v20::Hidpp20Error,
     };

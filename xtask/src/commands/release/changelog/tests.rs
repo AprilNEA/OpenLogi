@@ -1,8 +1,8 @@
-use super::{latest_release_tag, release_version, strip_version_section};
+use super::{latest_release_tag, strip_version_section};
 
 #[test]
 fn latest_release_tag_ignores_non_release_shapes() {
-    let tags = "v0.7.10\nv0.7.4\nv0.7.4-rc.1\nv1\nvnext\n";
+    let tags = "v0.7.10\nv0.7.4\nv0.7.4-rc.1\nv0.7.11-beta.3\nv1\nvnext\n";
     assert_eq!(latest_release_tag(tags).as_deref(), Some("v0.7.10"));
 }
 
@@ -20,13 +20,6 @@ fn latest_release_tag_orders_numerically_not_lexically() {
 fn latest_release_tag_is_none_without_a_release_tag() {
     assert_eq!(latest_release_tag("vnext\n"), None);
     assert_eq!(latest_release_tag(""), None);
-}
-
-#[test]
-fn release_version_rejects_extra_fields() {
-    assert_eq!(release_version("v1.2.3"), Some([1, 2, 3]));
-    assert_eq!(release_version("v1.2.3.4"), None);
-    assert_eq!(release_version("1.2.3"), None);
 }
 
 #[test]

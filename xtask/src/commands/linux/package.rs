@@ -1,6 +1,6 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context as _, Result, bail, ensure};
 use clap::Parser;
 use xshell::{Shell, cmd};
 
@@ -16,6 +16,10 @@ pub(crate) struct Args {
     no_build: bool,
 }
 
+/// The package name `packaging/linux/nfpm.yaml` declares, which starts every
+/// package's file name.
+const PACKAGE_NAME: &str = "openlogi";
+
 /// The binaries `packaging/linux/nfpm.yaml` installs into `/usr/bin`.
 ///
 /// One list drives both the build and the existence check below. They used to
@@ -23,10 +27,10 @@ pub(crate) struct Args {
 /// package, so `openlogi-overlay` only ever reached a `.deb` when a cached
 /// `target/release` happened to still hold one from an earlier run.
 const PACKAGED_BINS: [&str; 4] = [
-    "openlogi",
-    "openlogi-desktop",
-    "openlogi-overlay",
-    "openlogi-agent",
+    openlogi_core::brand::CLI_EXECUTABLE,
+    openlogi_core::brand::GUI_EXECUTABLE,
+    openlogi_core::brand::Helper::Overlay.executable(),
+    openlogi_core::brand::Helper::Agent.executable(),
 ];
 
 pub(crate) fn run(args: &Args) -> Result<()> {
@@ -58,20 +62,81 @@ pub(crate) fn run(args: &Args) -> Result<()> {
         other => anyhow::bail!("unsupported Linux package architecture: {other}"),
     };
 
+    let version = env!("CARGO_PKG_VERSION");
     for packager in ["deb", "rpm", "archlinux"] {
         println!("==> nfpm {packager} ({pkg_arch})");
         cmd!(
             sh,
             "nfpm package --packager {packager} --config {config} --target {output}"
         )
-        .env("VERSION", env!("CARGO_PKG_VERSION"))
+        .env("VERSION", nfpm_version(packager, version))
         .env("PKG_ARCH", pkg_arch)
         .run()?;
     }
+    check_arch_pkgver(&sh, &output, &nfpm_version("archlinux", version))?;
 
     println!();
     println!("Linux packages written to {}", output.display());
     Ok(())
+}
+
+/// The version to hand nfpm for `packager`.
+///
+/// nfpm splits a semver pre-release off the version. Debian and RPM keep it
+/// (`0.8.18~beta.1`), and so does the Arch file name, but nfpm 2.46.3 writes
+/// it into the Arch `.PKGINFO` only when the package has an epoch. Without
+/// one, `0.8.18-beta.1` would declare `pkgver = 0.8.18-1`, the same as the
+/// final release. Arch spells a pre-release without the hyphen
+/// (`0.8.18beta.1`), which is not semver, so nfpm keeps it whole. pacman
+/// sorts it before `0.8.18`, and the file name stays the same.
+fn nfpm_version(packager: &str, version: &str) -> String {
+    match (packager, version.split_once('-')) {
+        ("archlinux", Some((release, pre))) => format!("{release}{}", pre.replace('-', "_")),
+        _ => version.to_owned(),
+    }
+}
+
+/// Fail unless the Arch package in `output` declares `version`.
+///
+/// pacman compares `pkgver` in `.PKGINFO`, not the file name, and nfpm has
+/// written the two differently (see [`nfpm_version`]).
+fn check_arch_pkgver(sh: &Shell, output: &Path, version: &str) -> Result<()> {
+    let prefix = format!("{PACKAGE_NAME}-{version}-");
+    let mut packages = Vec::new();
+    for entry in fs_err::read_dir(output)? {
+        let name = entry?.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with(&prefix) && name.ends_with(".pkg.tar.zst") {
+            packages.push(output.join(&*name));
+        }
+    }
+    let [package] = packages.as_slice() else {
+        bail!(
+            "expected one Arch package {prefix}*.pkg.tar.zst in {}, found {}",
+            output.display(),
+            packages.len()
+        );
+    };
+    let pkginfo = cmd!(sh, "tar -xOf {package} .PKGINFO")
+        .read()
+        .context("reading .PKGINFO back needs tar with zstd")?;
+    let declared = pkgver(&pkginfo);
+    ensure!(
+        declared
+            .and_then(|pkgver| pkgver.rsplit_once('-'))
+            .map(|(pkgver, _)| pkgver)
+            == Some(version),
+        "{} declares pkgver {declared:?}, not {version}-<pkgrel>",
+        package.display()
+    );
+    Ok(())
+}
+
+/// The `pkgver` line of a `.PKGINFO`.
+fn pkgver(pkginfo: &str) -> Option<&str> {
+    pkginfo
+        .lines()
+        .find_map(|line| line.strip_prefix("pkgver = "))
 }
 
 #[cfg(test)]

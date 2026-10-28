@@ -14,7 +14,7 @@ use openlogi_core::device::DeviceKind;
 use openlogi_core::hid::DeviceRoute;
 
 use super::AppView;
-use crate::state::AppState;
+use crate::state::{AppState, DeviceRecord};
 use crate::ui::components::control_button;
 use crate::ui::theme::{Palette, Typography as _};
 
@@ -26,7 +26,7 @@ pub(super) fn back_button(cx: &mut Context<AppView>) -> impl IntoElement {
         .ghost()
         .small()
         .icon(IconName::ChevronLeft)
-        .label(tr!("Devices"))
+        .label(tr!("device.devices"))
         .on_click(move |_, _, cx| view.update(cx, AppView::go_home))
 }
 
@@ -36,8 +36,8 @@ pub(super) fn settings_button() -> impl IntoElement {
     Button::new("home-settings")
         .outline()
         .icon(IconName::Settings)
-        .label(tr!("Settings"))
-        .tooltip(tr!("Settings"))
+        .label(tr!("app.settings"))
+        .tooltip(tr!("app.settings"))
         .on_click(|_, _, cx| crate::windows::settings::open(cx))
 }
 
@@ -47,8 +47,8 @@ pub(super) fn add_device_button() -> impl IntoElement {
     Button::new("header-add-device")
         .primary()
         .icon(IconName::Plus)
-        .label(tr!("Add Device"))
-        .tooltip(tr!("Add Device"))
+        .label(tr!("pairing.add_device"))
+        .tooltip(tr!("pairing.add_device"))
         .on_click(|_, _, cx| crate::windows::add_device::open(cx))
 }
 
@@ -67,9 +67,9 @@ pub(super) fn main_window_title(show_device: bool, cx: &Context<AppView>) -> Sha
 
 pub(super) fn status_badge(online: bool, pal: Palette) -> impl IntoElement {
     let label = if online {
-        tr!("Connected")
+        tr!("device.connected")
     } else {
-        tr!("Offline")
+        tr!("device.offline")
     };
     h_flex()
         .gap_1()
@@ -111,30 +111,38 @@ pub(super) fn sidebar_action(
 
 pub(super) fn route_label(route: Option<&DeviceRoute>) -> String {
     match route {
-        Some(DeviceRoute::Bolt { .. }) => tr!("Bolt receiver").to_string(),
-        Some(DeviceRoute::Unifying { .. }) => tr!("Unifying receiver").to_string(),
+        Some(DeviceRoute::Bolt { .. }) => tr!("device.bolt_receiver").to_string(),
+        Some(DeviceRoute::Unifying { .. }) => tr!("device.unifying_receiver").to_string(),
         Some(DeviceRoute::Direct { .. } | DeviceRoute::RawHid { .. }) => {
-            tr!("Direct connection").to_string()
+            tr!("device.direct_connection").to_string()
         }
-        None => tr!("Unavailable").to_string(),
+        None => tr!("common.unavailable").to_string(),
+    }
+}
+
+/// The receiver pairing slot a device sits in — "Slot 4" — or `None` for a
+/// device with no receiver between it and the host.
+///
+/// Called a slot, not a channel: a receiver slot is unrelated to the
+/// device's own Easy-Switch channel, and the two are easy to confuse.
+pub(super) fn receiver_slot_label(record: &DeviceRecord) -> Option<SharedString> {
+    matches!(
+        record.route,
+        Some(DeviceRoute::Bolt { .. } | DeviceRoute::Unifying { .. })
+    )
+    .then(|| tr!("device.receiver_slot_number", number => record.slot.to_string()))
+}
+
+/// How a device is reached, in words: the transport, plus the receiver slot
+/// when there is one ("Bolt receiver · Slot 4").
+pub(super) fn connection_summary(record: &DeviceRecord) -> String {
+    let route = route_label(record.route.as_ref());
+    match receiver_slot_label(record) {
+        Some(slot) => format!("{route} · {slot}"),
+        None => route,
     }
 }
 
 pub(super) fn kind_label(kind: DeviceKind) -> String {
-    match kind {
-        DeviceKind::Mouse => tr!("Mouse").to_string(),
-        DeviceKind::Keyboard => tr!("Keyboard").to_string(),
-        DeviceKind::Numpad => tr!("Numpad").to_string(),
-        DeviceKind::Presenter => tr!("Presenter").to_string(),
-        DeviceKind::Remote => tr!("Remote").to_string(),
-        DeviceKind::Trackball => tr!("Trackball").to_string(),
-        DeviceKind::Touchpad => tr!("Touchpad").to_string(),
-        DeviceKind::Tablet => tr!("Tablet").to_string(),
-        DeviceKind::Gamepad => tr!("Gamepad").to_string(),
-        DeviceKind::Joystick => tr!("Joystick").to_string(),
-        DeviceKind::Headset => tr!("Headset").to_string(),
-        DeviceKind::Camera => tr!("Camera").to_string(),
-        DeviceKind::Unknown => tr!("Device").to_string(),
-        DeviceKind::Light => tr!("Lighting").to_string(),
-    }
+    tr!(kind.translation_key()).to_string()
 }

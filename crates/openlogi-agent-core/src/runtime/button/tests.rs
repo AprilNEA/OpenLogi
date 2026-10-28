@@ -2,7 +2,7 @@
 
 use std::time::Instant;
 
-use openlogi_core::binding::LongPressBinding;
+use openlogi_core::binding::{LongPressBinding, WheelHoldBinding};
 
 use super::*;
 
@@ -10,11 +10,63 @@ fn hook_press(id: u64, button: ButtonId) -> ActivePress {
     ActivePress {
         token: PressToken::hook_for_test(id, button),
         behavior: PressBehavior::Immediate(Action::Copy),
+        target: ActionDispatchTarget::Keyboard,
     }
 }
 
 fn long_press(short: Action, long: Action) -> Binding {
     Binding::LongPress(LongPressBinding::new(short, long))
+}
+
+fn wheel_hold(click: Action) -> Binding {
+    Binding::WheelHold(WheelHoldBinding::horizontal_scroll(click))
+}
+
+fn hook_press_bound(id: u64, binding: &Binding) -> ActivePress {
+    ActivePress {
+        token: PressToken::hook_for_test(id, ButtonId::Back),
+        behavior: PressBehavior::new(Some(binding), Instant::now()),
+        target: ActionDispatchTarget::Keyboard,
+    }
+}
+
+/// Press `binding` on Back, feed `inputs`, and return every event the runtime
+/// emitted after the press.
+fn events_after_press(
+    binding: &Binding,
+    inputs: impl FnOnce(&ActivePress) -> Vec<ButtonInput>,
+) -> Vec<ButtonRuntimeEvent> {
+    let mut state = ButtonState::default();
+    let press = hook_press_bound(1, binding);
+    state.press(press.clone());
+    let mut events = Vec::new();
+    for input in inputs(&press) {
+        process_input(&mut state, input, &mut |event| events.push(event));
+    }
+    events
+}
+
+fn up(press: &ActivePress) -> ButtonInput {
+    ButtonInput::Up {
+        key: press.token.key.clone(),
+        released_at: Instant::now(),
+    }
+}
+
+fn wheel(press: &ActivePress) -> ButtonInput {
+    ButtonInput::WheelWhilePressed {
+        token: press.token.clone(),
+    }
+}
+
+fn triggered(events: &[ButtonRuntimeEvent]) -> Vec<&Action> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            ButtonRuntimeEvent::Triggered { action, .. } => Some(action),
+            _ => None,
+        })
+        .collect()
 }
 
 fn recv_event(receiver: &mpsc::Receiver<ButtonRuntimeEvent>) -> ButtonRuntimeEvent {
@@ -42,6 +94,99 @@ fn release_returns_the_exact_active_press_once() {
 }
 
 #[test]
+fn a_wheel_hold_click_fires_its_click_on_release_only() {
+    let binding = wheel_hold(Action::Copy);
+    assert_eq!(hook_press_bound(1, &binding).behavior.start_action(), None);
+    let events = events_after_press(&binding, |press| vec![up(press)]);
+    assert_eq!(triggered(&events), [&Action::Copy]);
+    assert!(matches!(
+        events.last(),
+        Some(ButtonRuntimeEvent::Ended {
+            reason: EndReason::Released,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn wheel_movement_during_a_wheel_hold_press_suppresses_its_click() {
+    let events = events_after_press(&wheel_hold(Action::Copy), |press| {
+        vec![wheel(press), wheel(press), up(press)]
+    });
+    assert_eq!(triggered(&events), Vec::<&Action>::new());
+    assert!(matches!(
+        events.as_slice(),
+        [ButtonRuntimeEvent::Ended {
+            reason: EndReason::Released,
+            ..
+        }]
+    ));
+}
+
+#[test]
+fn wheel_movement_for_a_replaced_press_cannot_suppress_the_live_click() {
+    let binding = wheel_hold(Action::Copy);
+    let mut state = ButtonState::default();
+    let first = hook_press_bound(1, &binding);
+    let second = hook_press_bound(2, &binding);
+    state.press(first.clone());
+    state.press(second.clone());
+    let mut events = Vec::new();
+    process_input(&mut state, wheel(&first), &mut |event| events.push(event));
+    process_input(&mut state, up(&second), &mut |event| events.push(event));
+    assert_eq!(triggered(&events), [&Action::Copy]);
+}
+
+#[test]
+fn wheel_movement_leaves_a_long_press_alone() {
+    let events = events_after_press(&long_press(Action::Copy, Action::Paste), |press| {
+        vec![wheel(press), up(press)]
+    });
+    assert_eq!(triggered(&events), [&Action::Copy]);
+}
+
+#[test]
+fn a_scrolled_hidpp_wheel_hold_press_ends_without_its_click() {
+    let (sent, received) = mpsc::channel();
+    let mut owner = ButtonRuntimeOwner::spawn(move |event| {
+        sent.send(event)
+            .expect("test receiver should stay connected");
+    })
+    .expect("button worker should start");
+    let input = owner.input();
+    let session = HidppSessionId::with_epoch("mouse-a", 7);
+    let binding = wheel_hold(Action::Copy);
+    let press = input
+        .try_hidpp_down(
+            &session,
+            ButtonId::Back,
+            Some(&binding),
+            ActionDispatchTarget::Keyboard,
+        )
+        .expect("down should be queued");
+    assert!(matches!(
+        recv_event(&received),
+        ButtonRuntimeEvent::Started(_)
+    ));
+    assert!(input.try_wheel_while_pressed(&press));
+    assert!(input.try_hidpp_up(&session, ButtonId::Back));
+    assert!(matches!(
+        recv_event(&received),
+        ButtonRuntimeEvent::Ended {
+            reason: EndReason::Released,
+            ..
+        }
+    ));
+    assert!(owner.shutdown());
+    assert!(
+        received
+            .try_iter()
+            .all(|event| !matches!(event, ButtonRuntimeEvent::Triggered { .. })),
+        "a press that scrolled must not click"
+    );
+}
+
+#[test]
 fn repress_replaces_the_old_press_with_a_new_identity() {
     let mut state = ButtonState::default();
     let old = hook_press(1, ButtonId::Back);
@@ -65,6 +210,7 @@ fn cancellation_is_scoped_to_one_session() {
             generation: 0,
         },
         behavior: PressBehavior::LifecycleOnly,
+        target: ActionDispatchTarget::Keyboard,
     };
     let second = ActivePress {
         token: PressToken {
@@ -73,6 +219,7 @@ fn cancellation_is_scoped_to_one_session() {
             generation: 0,
         },
         behavior: PressBehavior::LifecycleOnly,
+        target: ActionDispatchTarget::Keyboard,
     };
     state.press(first.clone());
     state.press(second.clone());
@@ -95,6 +242,7 @@ fn hook_cancellation_leaves_hidpp_presses_active() {
             generation: 0,
         },
         behavior: PressBehavior::LifecycleOnly,
+        target: ActionDispatchTarget::Keyboard,
     };
     state.press(hook.clone());
     state.press(hidpp.clone());
@@ -146,6 +294,180 @@ fn stale_token_cannot_trigger_after_same_key_repress() {
 }
 
 #[test]
+fn hook_actions_retain_the_press_time_target_across_focus_changes() {
+    let (sent, received) = mpsc::channel();
+    let mut owner = ButtonRuntimeOwner::spawn(move |event| {
+        sent.send(event)
+            .expect("test receiver should stay connected");
+    })
+    .expect("button worker should start");
+    let input = owner.input();
+    let target = ActionDispatchTarget::SafariProcess(417);
+    let token = input
+        .try_hook_down_with_target(ButtonId::Back, None, target)
+        .expect("Safari down should be queued");
+    let ButtonRuntimeEvent::Started(started) = recv_event(&received) else {
+        panic!("down should start the press lifecycle");
+    };
+    assert_eq!(started.target(), target);
+
+    input
+        .try_hook_down_with_target(ButtonId::Forward, None, ActionDispatchTarget::Keyboard)
+        .expect("post-focus-change down should be queued");
+    assert!(matches!(
+        recv_event(&received),
+        ButtonRuntimeEvent::Started(ActivePress {
+            target: ActionDispatchTarget::Keyboard,
+            ..
+        })
+    ));
+
+    assert!(input.try_trigger_while_pressed(&token, &Action::BrowserBack));
+    let ButtonRuntimeEvent::Triggered { press, action } = recv_event(&received) else {
+        panic!("queued browser action should retain its originating press");
+    };
+    assert_eq!(press.target(), target);
+    assert_eq!(action, Action::BrowserBack);
+    assert!(owner.shutdown());
+}
+
+#[test]
+fn hidpp_edges_and_pulses_retain_their_press_time_targets() {
+    for pointer in [None, Some(openlogi_hook::PointerTarget::Unavailable)] {
+        let (sent, received) = mpsc::channel();
+        let mut owner = ButtonRuntimeOwner::spawn(move |event| {
+            sent.send(event)
+                .expect("test receiver should stay connected");
+        })
+        .expect("button worker should start");
+        let input = owner.input();
+        let session = HidppSessionId::with_epoch("mouse-a", 7);
+        let safari = ActionDispatchTarget::for_pointer(pointer, || Some(417));
+        let keyboard = ActionDispatchTarget::for_pointer(pointer, || None);
+
+        input
+            .try_hidpp_down(&session, ButtonId::Back, None, safari)
+            .expect("HID++ down should be queued");
+        let ButtonRuntimeEvent::Started(started) = recv_event(&received) else {
+            panic!("HID++ down should start a lifecycle");
+        };
+        assert_eq!(started.target(), safari);
+        assert!(input.try_hidpp_up(&session, ButtonId::Back));
+        assert!(matches!(
+            recv_event(&received),
+            ButtonRuntimeEvent::Ended { .. }
+        ));
+
+        assert!(input.try_hidpp_pulse(&session, ButtonId::Forward, None, keyboard));
+        let ButtonRuntimeEvent::Started(started) = recv_event(&received) else {
+            panic!("HID++ pulse should start a lifecycle");
+        };
+        assert_eq!(started.target(), keyboard);
+        assert!(matches!(
+            recv_event(&received),
+            ButtonRuntimeEvent::Ended { .. }
+        ));
+        assert!(owner.shutdown());
+    }
+}
+
+#[test]
+fn pointer_change_cancels_old_target_but_preserves_keyboard_and_new_target() {
+    use openlogi_hook::PointerTarget;
+    // A bound press holds output against the old target and ends; an unbound
+    // gesture hold follows the pointer instead (the retarget test below).
+    let bound = Binding::Single(Action::Copy);
+    for old in [
+        PointerTarget::Window {
+            process_id: 41,
+            window_id: 7,
+        },
+        PointerTarget::Unavailable,
+    ] {
+        let (sent, received) = mpsc::channel();
+        let mut owner = ButtonRuntimeOwner::spawn(move |event| sent.send(event).expect("receiver"))
+            .expect("worker");
+        let input = owner.input();
+        let current = PointerTarget::Desktop;
+        let old_press = input
+            .try_hook_down_with_target(
+                ButtonId::Back,
+                Some(&bound),
+                ActionDispatchTarget::for_pointer(Some(old), || Some(417)),
+            )
+            .expect("old down");
+        let new_press = input
+            .try_hook_down_with_target(
+                ButtonId::Forward,
+                None,
+                ActionDispatchTarget::for_pointer(Some(current), || {
+                    panic!("identified target must not capture focus")
+                }),
+            )
+            .expect("new down");
+        let keyboard = input
+            .try_hook_key_down(42, &Action::Copy, ActionDispatchTarget::Keyboard)
+            .expect("key down");
+        for _ in 0..3 {
+            assert!(matches!(
+                recv_event(&received),
+                ButtonRuntimeEvent::Started(_)
+            ));
+        }
+        input.cancel_pointer_except(current);
+        let ButtonRuntimeEvent::Ended { press, reason } = recv_event(&received) else {
+            panic!("old target must end");
+        };
+        assert_eq!(press.token(), &old_press);
+        assert_eq!(reason, EndReason::Canceled(CancelReason::Invalidated));
+        assert!(input.try_hook_up(ButtonId::Forward));
+        let ButtonRuntimeEvent::Ended { press, .. } = recv_event(&received) else {
+            panic!("new target must survive");
+        };
+        assert_eq!(press.token(), &new_press);
+        assert!(input.try_hook_key_up(42));
+        let ButtonRuntimeEvent::Ended { press, .. } = recv_event(&received) else {
+            panic!("keyboard must survive");
+        };
+        assert_eq!(press.token(), &keyboard);
+        assert!(owner.shutdown());
+    }
+}
+
+#[test]
+fn pointer_change_retargets_a_gesture_hold_instead_of_canceling_it() {
+    use openlogi_hook::PointerTarget;
+    let (sent, received) = mpsc::channel();
+    let mut owner = ButtonRuntimeOwner::spawn(move |event| sent.send(event).expect("receiver"))
+        .expect("worker");
+    let input = owner.input();
+    let old = PointerTarget::Window {
+        process_id: 41,
+        window_id: 7,
+    };
+    let current = PointerTarget::Desktop;
+    let hold = input
+        .try_hook_down_with_target(
+            ButtonId::GestureButton,
+            None,
+            ActionDispatchTarget::for_pointer(Some(old), || None),
+        )
+        .expect("gesture down");
+    assert!(matches!(
+        recv_event(&received),
+        ButtonRuntimeEvent::Started(_)
+    ));
+    // The first swipe switched desktops, changing the hovered window (#1634).
+    input.cancel_pointer_except(current);
+    assert!(input.try_trigger_while_pressed(&hold, &Action::Copy));
+    let ButtonRuntimeEvent::Triggered { press, .. } = recv_event(&received) else {
+        panic!("the hold must survive the pointer change and keep triggering");
+    };
+    assert_eq!(press.token(), &hold);
+    assert!(owner.shutdown());
+}
+
+#[test]
 fn source_cancellation_invalidates_queued_gesture_work() {
     let (sent, received) = mpsc::channel();
     let mut owner = ButtonRuntimeOwner::spawn(move |event| {
@@ -156,7 +478,12 @@ fn source_cancellation_invalidates_queued_gesture_work() {
     let input = owner.input();
     let session = HidppSessionId::with_epoch("mouse-a", 7);
     let token = input
-        .try_hidpp_down(&session, ButtonId::Back, None)
+        .try_hidpp_down(
+            &session,
+            ButtonId::Back,
+            None,
+            ActionDispatchTarget::Keyboard,
+        )
         .expect("down should be queued");
     assert!(matches!(
         recv_event(&received),
@@ -229,6 +556,8 @@ fn invalidation_rejects_old_tokens_and_cancels_active_presses() {
 
     input.invalidate_all();
     assert!(!input.try_trigger_while_pressed(&token, &Action::Copy));
+    // The dispatcher posts a held-wheel scroll only for an accepted token.
+    assert!(!input.try_wheel_while_pressed(&token));
     assert!(matches!(
         recv_event(&received),
         ButtonRuntimeEvent::Ended {
@@ -278,7 +607,12 @@ fn pulse_has_an_immediate_balanced_lifecycle() {
     let binding = Binding::Single(Action::HoldShortcut(
         "Ctrl+Space".parse().expect("valid shortcut"),
     ));
-    assert!(input.try_hidpp_pulse(&session, ButtonId::Back, Some(&binding)));
+    assert!(input.try_hidpp_pulse(
+        &session,
+        ButtonId::Back,
+        Some(&binding),
+        ActionDispatchTarget::Keyboard,
+    ));
 
     let ButtonRuntimeEvent::Started(started) = recv_event(&received) else {
         panic!("pulse must start before ending");
@@ -299,6 +633,7 @@ fn release_before_long_press_threshold_fires_only_the_short_action() {
     let press = ActivePress {
         token: PressToken::hook_for_test(1, ButtonId::Back),
         behavior: PressBehavior::new(Some(&binding), pressed_at),
+        target: ActionDispatchTarget::Keyboard,
     };
     state.press(press.clone());
     let mut events = Vec::new();
@@ -337,6 +672,7 @@ fn threshold_fires_long_once_and_suppresses_short_on_release() {
     let press = ActivePress {
         token: PressToken::hook_for_test(1, ButtonId::Back),
         behavior: PressBehavior::new(Some(&binding), pressed_at),
+        target: ActionDispatchTarget::Keyboard,
     };
     state.press(press.clone());
     let mut events = Vec::new();
@@ -385,6 +721,7 @@ fn cancellation_never_fires_a_pending_short_or_long_action() {
     let press = ActivePress {
         token: PressToken::hook_for_test(1, ButtonId::Back),
         behavior: PressBehavior::new(Some(&binding), pressed_at),
+        target: ActionDispatchTarget::Keyboard,
     };
     state.press(press);
     let mut events = Vec::new();
@@ -422,7 +759,12 @@ fn pulse_degrades_long_press_to_its_short_action() {
     let session = HidppSessionId::with_epoch("keyboard-a", 4);
     let binding = long_press(Action::Copy, Action::Paste);
 
-    assert!(input.try_hidpp_pulse(&session, ButtonId::Back, Some(&binding)));
+    assert!(input.try_hidpp_pulse(
+        &session,
+        ButtonId::Back,
+        Some(&binding),
+        ActionDispatchTarget::Keyboard,
+    ));
     assert!(matches!(
         recv_event(&received),
         ButtonRuntimeEvent::Started(_)
@@ -483,6 +825,175 @@ fn worker_schedules_the_long_action_without_a_capture_thread_timer() {
 }
 
 #[test]
+fn the_worker_waits_only_for_the_earliest_pending_long_press_threshold() {
+    let binding = long_press(Action::Copy, Action::Paste);
+    let pressed_at = Instant::now();
+    let pressed_later = pressed_at + Duration::from_millis(100);
+    let long_press_on = |id, button, at| ActivePress {
+        token: PressToken::hook_for_test(id, button),
+        behavior: PressBehavior::new(Some(&binding), at),
+        target: ActionDispatchTarget::Keyboard,
+    };
+    let mut state = ButtonState::default();
+    assert_eq!(state.next_deadline(), None, "an idle worker has no timer");
+
+    state.press(hook_press(1, ButtonId::MiddleClick));
+    assert_eq!(
+        state.next_deadline(),
+        None,
+        "a held single action ends on a command, not a timer"
+    );
+
+    let late = long_press_on(2, ButtonId::Forward, pressed_later);
+    state.press(late.clone());
+    state.press(long_press_on(3, ButtonId::Back, pressed_at));
+    assert_eq!(
+        state.next_deadline(),
+        Some(pressed_at + LONG_PRESS_THRESHOLD)
+    );
+
+    let mut events = Vec::new();
+    emit_due_long_presses(
+        &mut state,
+        pressed_at + LONG_PRESS_THRESHOLD,
+        &mut |event| {
+            events.push(event);
+        },
+    );
+    assert_eq!(triggered(&events), [&Action::Paste]);
+    assert_eq!(
+        state.next_deadline(),
+        Some(pressed_later + LONG_PRESS_THRESHOLD),
+        "a fired threshold must not keep waking the worker"
+    );
+
+    assert!(state.release(&late.token.key).is_some());
+    assert_eq!(state.next_deadline(), None);
+}
+
+/// Scheduling slack for a wake-up the worker owes at a known instant.
+const WAKE_SLACK: Duration = Duration::from_millis(250);
+
+#[test]
+fn an_idle_worker_fires_a_long_press_at_its_threshold_without_further_input() {
+    let (sent, received) = mpsc::channel();
+    let mut owner = ButtonRuntimeOwner::spawn(move |event| {
+        sent.send(event)
+            .expect("test receiver should stay connected");
+    })
+    .expect("button worker should start");
+    let input = owner.input();
+    let binding = long_press(Action::Copy, Action::Paste);
+
+    let before_press = Instant::now();
+    assert!(
+        input
+            .try_hook_down(ButtonId::Back, Some(&binding))
+            .is_some()
+    );
+    assert!(matches!(
+        recv_event(&received),
+        ButtonRuntimeEvent::Started(_)
+    ));
+    // Nothing else is queued, so only the worker's own deadline can wake it.
+    let event = received
+        .recv_timeout(LONG_PRESS_THRESHOLD + WAKE_SLACK)
+        .expect("the threshold must wake the idle worker");
+    let elapsed = before_press.elapsed();
+    assert!(matches!(
+        event,
+        ButtonRuntimeEvent::Triggered {
+            action: Action::Paste,
+            ..
+        }
+    ));
+    assert!(
+        elapsed >= LONG_PRESS_THRESHOLD,
+        "long action fired early, after {elapsed:?}"
+    );
+    assert!(
+        elapsed < LONG_PRESS_THRESHOLD + WAKE_SLACK,
+        "long action fired late, after {elapsed:?}"
+    );
+
+    assert!(input.try_hook_up(ButtonId::Back));
+    assert!(matches!(
+        recv_event(&received),
+        ButtonRuntimeEvent::Ended {
+            reason: EndReason::Released,
+            ..
+        }
+    ));
+    assert!(owner.shutdown());
+}
+
+#[test]
+fn an_idle_worker_wakes_for_shutdown_and_releases_its_held_press() {
+    let (sent, received) = mpsc::channel();
+    let mut owner = ButtonRuntimeOwner::spawn(move |event| {
+        sent.send(event)
+            .expect("test receiver should stay connected");
+    })
+    .expect("button worker should start");
+    let input = owner.input();
+    let hold = Binding::Single(Action::HoldShortcut(
+        "Ctrl+Space".parse().expect("valid shortcut"),
+    ));
+    let token = input
+        .try_hook_down(ButtonId::Back, Some(&hold))
+        .expect("down should be queued");
+    assert!(matches!(
+        recv_event(&received),
+        ButtonRuntimeEvent::Started(_)
+    ));
+
+    // The hold has no deadline, so the worker waits without a timeout and
+    // only the shutdown handshake's wake can end that wait.
+    assert!(owner.shutdown_with_timeout(WAKE_SLACK));
+    let ButtonRuntimeEvent::Ended { press, reason } = recv_event(&received) else {
+        panic!("shutdown must end the held press");
+    };
+    assert_eq!(press.token, token);
+    assert_eq!(reason, EndReason::Canceled(CancelReason::Shutdown));
+}
+
+#[test]
+fn an_idle_worker_wakes_for_the_invalidation_after_a_full_queue() {
+    let (sent, received) = mpsc::channel();
+    let mut owner = ButtonRuntimeOwner::spawn(move |event| {
+        sent.send(event)
+            .expect("test receiver should stay connected");
+    })
+    .expect("button worker should start");
+    let input = owner.input();
+    let hold = Binding::Single(Action::HoldShortcut(
+        "Ctrl+Space".parse().expect("valid shortcut"),
+    ));
+    let token = input
+        .try_hook_down(ButtonId::Back, Some(&hold))
+        .expect("down should be queued");
+    assert!(matches!(
+        recv_event(&received),
+        ButtonRuntimeEvent::Started(_)
+    ));
+
+    // A producer saw the queue full, then the worker drained it and blocked
+    // before the generation changed. The dropped command may have been this
+    // hold's release, so only the invalidation's own wake can end it.
+    thread::sleep(Duration::from_millis(20));
+    input.invalidate_after_dropped_command();
+    let ButtonRuntimeEvent::Ended { press, reason } = received
+        .recv_timeout(WAKE_SLACK)
+        .expect("the invalidation must wake the idle worker")
+    else {
+        panic!("the invalidation must end the held press");
+    };
+    assert_eq!(press.token, token);
+    assert_eq!(reason, EndReason::Canceled(CancelReason::Invalidated));
+    assert!(owner.shutdown());
+}
+
+#[test]
 fn overdue_long_press_precedes_unrelated_queued_actions() {
     let (commands, queued) = mpsc::sync_channel(EVENT_QUEUE_CAPACITY);
     let binding = long_press(Action::Copy, Action::Paste);
@@ -493,6 +1004,7 @@ fn overdue_long_press_precedes_unrelated_queued_actions() {
     let press = ActivePress {
         token: PressToken::hook_for_test(1, ButtonId::Back),
         behavior: PressBehavior::new(Some(&binding), pressed_at),
+        target: ActionDispatchTarget::Keyboard,
     };
     state.press(press.clone());
     commands
@@ -554,6 +1066,7 @@ fn continuous_commands_cannot_starve_a_long_press_deadline() {
             input: ButtonInput::Down(ActivePress {
                 token: PressToken::hook_for_test(1, ButtonId::Back),
                 behavior: PressBehavior::new(Some(&binding), pressed_at),
+                target: ActionDispatchTarget::Keyboard,
             }),
         })
         .expect("test queue should accept the press");
@@ -604,6 +1117,10 @@ fn continuous_commands_cannot_starve_a_long_press_deadline() {
     shutdown_tx
         .send(ShutdownRequest { done })
         .expect("worker should accept shutdown");
+    // Once the long action has fired nothing is pending, so the worker blocks
+    // until woken: the handshake `ButtonRuntimeOwner::shutdown_with_timeout`
+    // performs.
+    let _ = commands.try_send(ButtonCommand::Wake);
     wait.recv_timeout(Duration::from_secs(1))
         .expect("worker should finish shutdown");
     worker.join().expect("worker should stop");
@@ -710,7 +1227,7 @@ fn function_key_hold_has_one_balanced_lifecycle() {
     let input = owner.input();
     let action = Action::HoldShortcut("Ctrl+Space".parse().expect("valid shortcut"));
     let token = input
-        .try_hook_key_down(0x7a, &action)
+        .try_hook_key_down(0x7a, &action, ActionDispatchTarget::Keyboard)
         .expect("key down should be queued");
 
     let ButtonRuntimeEvent::Started(started) = recv_event(&received) else {

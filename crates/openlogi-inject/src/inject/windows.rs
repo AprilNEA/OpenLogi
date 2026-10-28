@@ -12,13 +12,18 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN,
     MOUSEEVENTF_XUP, MOUSEINPUT, SendInput,
 };
+use windows_sys::Win32::UI::WindowsAndMessaging::{XBUTTON1, XBUTTON2};
 
 use openlogi_core::binding::{
-    Action, Effect, KeyCombo, MediaKey, MouseButton, NativeAction, Script, Shortcut, WorkflowStep,
+    Action, Effect, KeyCombo, KeyboardUsage, MediaKey, MouseButton, NativeAction, Shortcut,
 };
 use openlogi_core::scroll::ScrollDelta;
 
 use super::{HeldKey, KeyPhase, ScrollQuantizer};
+
+mod keyboard_layout;
+
+use keyboard_layout::ForegroundLayout;
 
 const WHEEL_DELTA: i32 = 120;
 const WHEEL_DELTA_F64: f64 = 120.0;
@@ -36,6 +41,7 @@ const VK_SHIFT: u16 = 0x10;
 const VK_CONTROL: u16 = 0x11;
 const VK_MENU: u16 = 0x12;
 const VK_LWIN: u16 = 0x5B;
+const VK_SNAPSHOT: u16 = 0x2C;
 const VK_BROWSER_BACK: u16 = 0xA6;
 const VK_BROWSER_FORWARD: u16 = 0xA7;
 const VK_VOLUME_MUTE: u16 = 0xAD;
@@ -45,11 +51,41 @@ const VK_MEDIA_NEXT_TRACK: u16 = 0xB0;
 const VK_MEDIA_PREV_TRACK: u16 = 0xB1;
 const VK_MEDIA_PLAY_PAUSE: u16 = 0xB3;
 
-// XBUTTON1/XBUTTON2 from WinUser.h — windows-sys puts them behind the
-// Win32_UI_WindowsAndMessaging feature; not worth enabling for two
-// integers (same treatment as the VK_* codes above).
-const XBUTTON1: i32 = 1;
-const XBUTTON2: i32 = 2;
+/// One key as [`key_input`] posts it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Key {
+    vk: u16,
+    /// The hardware scan code a physical press of the key carries, or 0 to
+    /// post the virtual key alone.
+    scan: u16,
+}
+
+impl From<u16> for Key {
+    /// A virtual key posted alone, with scan code 0.
+    fn from(vk: u16) -> Self {
+        Self { vk, scan: 0 }
+    }
+}
+
+impl Key {
+    /// The key for `usage` under `layout`, or `None` when the usage has no
+    /// Windows virtual key.
+    ///
+    /// A key a layout can move ([`KeyboardUsage::ascii_char`]) carries the
+    /// scan code of the key `layout` produces its virtual key with, as a
+    /// physical press does (see [`keyboard_layout`]). Every other key keeps
+    /// scan code 0, as it always has.
+    fn for_usage(usage: KeyboardUsage, layout: ForegroundLayout) -> Option<Self> {
+        let vk = super::hid_usage_to_windows(usage.code())?;
+        if usage.ascii_char().is_none() {
+            return Some(Self::from(vk));
+        }
+        Some(Self {
+            vk,
+            scan: layout.scan_code(vk),
+        })
+    }
+}
 
 /// Windows implementation: classify `action` into an [`Effect`] and
 /// synthesise events via `SendInput`. macOS window-manager actions map to
@@ -60,17 +96,12 @@ pub(super) fn execute(action: &Action) {
         Effect::None => {}
         Effect::Click(button) => post_click(button),
         Effect::Shortcut(shortcut) => press_shortcut(shortcut),
-        Effect::Key(combo) | Effect::HeldKey(combo) => post_custom_shortcut(combo),
+        Effect::Key(combo) | Effect::HeldKey(combo) => press_combo(combo),
         Effect::Scroll { dx, dy } => dispatch_scroll(dx, dy),
         Effect::Media(key) => dispatch_media(key),
         Effect::Native(native) => dispatch_native(native),
-        Effect::Script(script) => dispatch_script(script),
-        Effect::Text(text) => {
-            tracing::warn!(
-                chars = text.chars().count(),
-                "TypeText injection is not implemented on Windows yet"
-            );
-        }
+        Effect::Script(script) => super::dispatch_script(script),
+        Effect::Text(text) => type_text(text),
         Effect::AgentSide => {
             tracing::debug!(
                 action = action.label(),
@@ -89,7 +120,7 @@ pub(super) fn execute(action: &Action) {
 /// which isn't a USB HID keyboard usage and so has no [`KeyCombo`]
 /// representation — unlike on macOS/Linux, where the same shortcuts are
 /// ordinary modifier+key chords. [`press_shortcut`] posts the `Err` case
-/// directly instead of routing it through [`post_custom_shortcut`].
+/// directly instead of routing it through [`press_combo`].
 fn combo(shortcut: Shortcut) -> Result<KeyCombo, u16> {
     let text = match shortcut {
         Shortcut::BrowserBack => return Err(VK_BROWSER_BACK),
@@ -111,17 +142,12 @@ fn combo(shortcut: Shortcut) -> Result<KeyCombo, u16> {
         Shortcut::PrevTab => "Ctrl+Shift+Tab",
         Shortcut::ReloadPage => "Ctrl+R",
     };
-    Ok(parse_shortcut(text))
-}
-
-fn parse_shortcut(text: &str) -> KeyCombo {
-    text.parse()
-        .unwrap_or_else(|error| unreachable!("hardcoded shortcut table entry {text:?}: {error}"))
+    Ok(super::parse_shortcut(text))
 }
 
 fn press_shortcut(shortcut: Shortcut) {
     match combo(shortcut) {
-        Ok(combo) => post_custom_shortcut(&combo),
+        Ok(combo) => press_combo(&combo),
         Err(vk) => post_key(vk, &[]),
     }
 }
@@ -137,11 +163,13 @@ fn dispatch_native(native: NativeAction) {
         NativeAction::ShowDesktop => post_key(VK_D, &[VK_LWIN]),
         NativeAction::LaunchpadShow => post_key(VK_LWIN, &[]),
         NativeAction::LockScreen => post_key(VK_L, &[VK_LWIN]),
-        // Win+Shift+S opens the snip overlay, which serves both full-screen
-        // and region capture on Windows.
-        NativeAction::Screenshot | NativeAction::CaptureRegion => {
-            post_key(VK_S, &[VK_LWIN, VK_SHIFT]);
-        }
+        // Win+PrtScn saves a full-screen capture straight to
+        // `Pictures\Screenshots` with no further click, like ⌘⇧3 on macOS.
+        NativeAction::Screenshot => post_key(VK_SNAPSHOT, &[VK_LWIN]),
+        // Win+Shift+S opens the snip overlay, which waits for a region. It
+        // used to serve `Screenshot` too, so the two actions behaved the
+        // same (#1864).
+        NativeAction::CaptureRegion => post_key(VK_S, &[VK_LWIN, VK_SHIFT]),
         // Suspending reliably needs `SetSuspendState` (powrprof.dll), which
         // hibernates instead when hibernation is enabled — no clean win from
         // a background agent, so the action is skipped on Windows for now.
@@ -162,46 +190,19 @@ fn dispatch_media(key: MediaKey) {
     }
 }
 
-fn dispatch_script(script: Script<'_>) {
-    match script {
-        Script::AppleScript(_) => {
-            tracing::warn!("RunAppleScript is only supported on macOS");
-        }
-        Script::ShellCommand(cmd) => run_shell_command_async(cmd.to_string()),
-        Script::Workflow(steps) => run_workflow_async(steps.to_vec()),
-    }
+/// Not implemented yet: SendInput's KEYEVENTF_UNICODE path is unwired.
+pub(super) fn type_text(text: &str) {
+    tracing::warn!(
+        chars = text.chars().count(),
+        "TypeText injection is not implemented on Windows yet"
+    );
 }
 
-fn run_shell_command_async(cmd: String) {
-    std::thread::spawn(move || run_shell_command(&cmd));
+pub(super) fn run_apple_script(_src: &str) {
+    tracing::warn!("RunAppleScript is only supported on macOS");
 }
 
-fn run_workflow_async(steps: Vec<WorkflowStep>) {
-    std::thread::spawn(move || run_workflow(&steps));
-}
-
-fn run_workflow(steps: &[WorkflowStep]) {
-    for step in steps {
-        match step {
-            WorkflowStep::TypeText(text) => {
-                tracing::warn!(
-                    chars = text.chars().count(),
-                    "workflow TypeText injection is not implemented on Windows yet"
-                );
-            }
-            WorkflowStep::PressKey(combo) => post_custom_shortcut(combo),
-            WorkflowStep::Delay { millis } => {
-                std::thread::sleep(std::time::Duration::from_millis(*millis));
-            }
-            WorkflowStep::RunAppleScript(_) => {
-                tracing::warn!("workflow RunAppleScript is only supported on macOS");
-            }
-            WorkflowStep::RunShellCommand(cmd) => run_shell_command(cmd),
-        }
-    }
-}
-
-fn run_shell_command(cmd: &str) {
+pub(super) fn run_shell_command(cmd: &str) {
     // Without this flag `cmd.exe` allocates and briefly flashes a visible
     // console window, since the agent itself is a console-less GUI/background
     // process and the child would otherwise get one of its own.
@@ -217,21 +218,22 @@ fn post_click(button: MouseButton) {
         MouseButton::Right => (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, 0),
         MouseButton::Middle => (MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, 0),
         // Extra buttons share the X flag pair; mouseData carries which one.
-        MouseButton::Back => (MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, XBUTTON1),
-        MouseButton::Forward => (MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, XBUTTON2),
+        MouseButton::Back => (MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, i32::from(XBUTTON1)),
+        MouseButton::Forward => (MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, i32::from(XBUTTON2)),
     };
     send_inputs(&[mouse_input(down, data), mouse_input(up, data)]);
 }
 
-fn post_key(vk: u16, modifiers: &[u16]) {
+fn post_key(key: impl Into<Key>, modifiers: &[u16]) {
+    let key = key.into();
     let mut inputs = Vec::with_capacity(modifiers.len() * 2 + 2);
     for modifier in modifiers {
-        inputs.push(key_input(*modifier, false));
+        inputs.push(key_input(Key::from(*modifier), false));
     }
-    inputs.push(key_input(vk, false));
-    inputs.push(key_input(vk, true));
+    inputs.push(key_input(key, false));
+    inputs.push(key_input(key, true));
     for modifier in modifiers.iter().rev() {
-        inputs.push(key_input(*modifier, true));
+        inputs.push(key_input(Key::from(*modifier), true));
     }
     send_inputs(&inputs);
 }
@@ -276,8 +278,8 @@ pub(super) fn post_scroll(delta: ScrollDelta) {
     }
 }
 
-fn post_custom_shortcut(combo: &KeyCombo) {
-    let Some(vk) = super::hid_usage_to_windows(combo.key().code()) else {
+pub(super) fn press_combo(combo: &KeyCombo) {
+    let Some(key) = Key::for_usage(combo.key(), ForegroundLayout::current()) else {
         tracing::warn!(
             usage = combo.key().code(),
             chord = %combo.rendered_label(),
@@ -286,7 +288,7 @@ fn post_custom_shortcut(combo: &KeyCombo) {
         return;
     };
 
-    post_key(vk, &combo_modifiers(combo));
+    post_key(key, &combo_modifiers(combo));
 }
 
 fn combo_modifiers(combo: &KeyCombo) -> Vec<u16> {
@@ -303,14 +305,18 @@ fn combo_modifiers(combo: &KeyCombo) -> Vec<u16> {
     if combo.has_option() {
         modifiers.push(VK_MENU);
     }
+    if combo.has_super() {
+        modifiers.push(VK_LWIN);
+    }
     modifiers
 }
 
 /// Emit one edge for the physical keys whose ownership changed.
 pub(super) fn hold_keys(keys: &[HeldKey], phase: KeyPhase) {
+    let layout = ForegroundLayout::current();
     let keys: Vec<_> = keys
         .iter()
-        .filter_map(|key| held_virtual_key(*key))
+        .filter_map(|key| held_key(*key, layout))
         .collect();
     let key_up = phase == KeyPhase::Up;
     let mut inputs: Vec<_> = keys.iter().map(|key| key_input(*key, key_up)).collect();
@@ -320,13 +326,19 @@ pub(super) fn hold_keys(keys: &[HeldKey], phase: KeyPhase) {
     send_inputs(&inputs);
 }
 
-fn held_virtual_key(key: HeldKey) -> Option<u16> {
+/// The key a held chord posts for `key` under `layout`.
+///
+/// The release looks the scan code up again instead of reusing the press's.
+/// The two differ only if the layout changes during the hold, and the
+/// virtual key, which the system's key state is indexed by, stays the same.
+fn held_key(key: HeldKey, layout: ForegroundLayout) -> Option<Key> {
     match key {
-        HeldKey::Control => Some(VK_CONTROL),
-        HeldKey::Shift => Some(VK_SHIFT),
-        HeldKey::Alt => Some(VK_MENU),
+        HeldKey::Control => Some(VK_CONTROL.into()),
+        HeldKey::Shift => Some(VK_SHIFT.into()),
+        HeldKey::Alt => Some(VK_MENU.into()),
+        HeldKey::Super => Some(VK_LWIN.into()),
         HeldKey::Key(usage) => {
-            let key = super::hid_usage_to_windows(usage.code());
+            let key = Key::for_usage(usage, layout);
             if key.is_none() {
                 tracing::warn!(
                     usage = usage.code(),
@@ -361,17 +373,20 @@ fn send_inputs(inputs: &[INPUT]) {
     }
 }
 
-fn key_input(vk: u16, key_up: bool) -> INPUT {
+fn key_input(key: Key, key_up: bool) -> INPUT {
     let mut flags = 0;
     if key_up {
         flags |= KEYEVENTF_KEYUP;
     }
+    // Without `KEYEVENTF_SCANCODE`, Windows posts `wVk` and hands `wScan` to
+    // the receiving window in the message's `lParam`, so the scan code
+    // changes only what an app that reads it sees.
     INPUT {
         r#type: INPUT_KEYBOARD,
         Anonymous: INPUT_0 {
             ki: KEYBDINPUT {
-                wVk: vk,
-                wScan: 0,
+                wVk: key.vk,
+                wScan: key.scan,
                 dwFlags: flags,
                 time: 0,
                 dwExtraInfo: 0,
@@ -398,9 +413,77 @@ fn mouse_input(flags: u32, data: i32) -> INPUT {
 
 #[cfg(test)]
 mod tests {
-    use openlogi_core::binding::Shortcut;
+    use openlogi_core::binding::{KeyCombo, KeyboardUsage, Shortcut};
 
-    use super::{VK_BROWSER_BACK, VK_BROWSER_FORWARD, combo};
+    use super::{
+        ForegroundLayout, KEYEVENTF_KEYUP, Key, VK_BROWSER_BACK, VK_BROWSER_FORWARD, combo,
+        key_input,
+    };
+
+    fn usage(label: &str) -> KeyboardUsage {
+        label
+            .parse::<KeyCombo>()
+            .expect("test key must be valid")
+            .key()
+    }
+
+    /// A key a layout can move must carry the scan code of the key that
+    /// produces its virtual key under the active layout. Without it, an app
+    /// that matches shortcuts by scan code under a non-Latin layout ignores
+    /// the key, although a physical press of it works (#2026).
+    ///
+    /// The check is the inverse lookup, so it holds on any host layout.
+    /// Letters and digits have a virtual key on every layout Windows ships;
+    /// some punctuation keys do not, so they are left out.
+    #[test]
+    fn letter_and_digit_keys_carry_the_layouts_scan_code() {
+        let layout = ForegroundLayout::current();
+        for label in ('A'..='Z').chain('0'..='9') {
+            let key = Key::for_usage(usage(&label.to_string()), layout)
+                .expect("letters and digits have a Windows virtual key");
+            assert_ne!(key.scan, 0, "{label} must carry a scan code");
+            assert_eq!(
+                layout.virtual_key(key.scan),
+                key.vk,
+                "{label} must carry the scan code of the key that produces it"
+            );
+        }
+    }
+
+    /// Keys a layout never moves are posted as their virtual key alone, as
+    /// they were before #2026.
+    #[test]
+    fn fixed_keys_post_the_virtual_key_alone() {
+        let layout = ForegroundLayout::current();
+        for label in ["Enter", "Escape", "Tab", "Space", "F5"] {
+            let key = Key::for_usage(usage(label), layout)
+                .expect("fixed keys have a Windows virtual key");
+            assert_eq!(key.scan, 0, "{label} must not carry a scan code");
+        }
+    }
+
+    /// `key_input` posts the scan code beside the virtual key on both edges.
+    /// Dropping it is the bug in #2026.
+    #[test]
+    fn key_input_posts_the_scan_code_beside_the_virtual_key() {
+        let key = Key {
+            vk: u16::from(b'V'),
+            scan: 0x2F,
+        };
+        // SAFETY: `key_input` initialises the `ki` arm of the union it
+        // returns, so reading that arm is well-defined.
+        let (down, up) = unsafe {
+            (
+                key_input(key, false).Anonymous.ki,
+                key_input(key, true).Anonymous.ki,
+            )
+        };
+        assert_eq!((down.wVk, down.wScan, down.dwFlags), (key.vk, key.scan, 0));
+        assert_eq!(
+            (up.wVk, up.wScan, up.dwFlags),
+            (key.vk, key.scan, KEYEVENTF_KEYUP)
+        );
+    }
 
     /// Pin a handful of representative `Shortcut -> KeyCombo` rows so an
     /// edit to the table can't silently change what Ctrl+C sends.
@@ -431,7 +514,7 @@ mod tests {
         assert_eq!(combo(Shortcut::BrowserForward), Err(VK_BROWSER_FORWARD));
         // Every chord-shaped row must actually resolve through
         // hid_usage_to_windows, or a `Shortcut` silently no-ops instead of
-        // pressing anything (see `post_custom_shortcut`'s warn-and-drop
+        // pressing anything (see `press_combo`'s warn-and-drop
         // path). Iterates `Shortcut::ALL` rather than a hand-copied list,
         // so a newly added `Shortcut` variant is checked here
         // automatically instead of depending on someone remembering to

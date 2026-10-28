@@ -5,6 +5,7 @@ use std::fmt::Write as _;
 use serde::{Deserialize, Serialize};
 
 use crate::device::{BatteryInfo, BatteryStatus, Capabilities, DeviceKind, DeviceTransports};
+use crate::update_feed::UpdateChannel;
 
 /// Where the resolver found the bundled device renders.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -143,12 +144,18 @@ pub struct AppInfo {
     pub accessibility_granted: Option<bool>,
     /// `None` when the agent status is unavailable.
     pub hook_installed: Option<bool>,
+    /// Whether synthesized keys type on the agent's macOS virtual HID
+    /// keyboard (`Some(false)`: they are posted as `CGEvent`s). `None` off
+    /// macOS, or when the agent status is unavailable.
+    pub virtual_keyboard: Option<bool>,
     /// Launch-at-login setting, `None` when unknown.
     pub launch_at_login: Option<bool>,
     /// Menu-bar/tray icon setting, `None` when unknown.
     pub show_in_menu_bar: Option<bool>,
     /// Automatic update-check setting, `None` when unknown.
     pub check_for_updates: Option<bool>,
+    /// Update channel the updater follows this launch, `None` when unknown.
+    pub update_channel: Option<UpdateChannel>,
     /// Thumbwheel sensitivity setting, `None` when unknown.
     pub thumbwheel_sensitivity: Option<i32>,
     /// `schema_version` of the loaded `config.toml`, when one loaded.
@@ -245,12 +252,24 @@ impl DiagnosticsReport {
             opt_state(a.accessibility_granted, "granted", "denied"),
             opt_state(a.hook_installed, "installed", "not installed"),
         );
+        if a.os == "macos" {
+            let _ = writeln!(
+                out,
+                "- Virtual keyboard: {}",
+                opt_state(
+                    a.virtual_keyboard,
+                    "active",
+                    "unavailable (keys posted as CGEvents)"
+                ),
+            );
+        }
         let _ = writeln!(
             out,
-            "- Launch at login: {} · Menu bar: {} · Update check: {}",
+            "- Launch at login: {} · Menu bar: {} · Update check: {} · Update channel: {}",
             opt_state(a.launch_at_login, "yes", "no"),
             opt_state(a.show_in_menu_bar, "yes", "no"),
             opt_state(a.check_for_updates, "on", "off"),
+            a.update_channel.map_or("unknown", UpdateChannel::as_str),
         );
         let source = if a.running_from_bundle {
             "app bundle (release)"
@@ -323,10 +342,12 @@ impl DiagnosticsReport {
             );
             let caps = match d.capabilities {
                 Some(c) => format!(
-                    "buttons={}, pointer={}, lighting={}",
+                    "buttons={}, pointer={}, pointer_scaling={}, lighting={}, force_sensing={}",
                     yes_no(c.buttons),
                     yes_no(c.pointer),
+                    yes_no(c.pointer_scaling),
                     yes_no(c.lighting),
+                    yes_no(c.force_sensing),
                 ),
                 None => "not probed".to_string(),
             };
@@ -432,12 +453,14 @@ fn connection_label(connection: ConnectionKind) -> &'static str {
 
 fn battery_label(battery: Option<&BatteryInfo>) -> String {
     match battery {
-        Some(b) => format!(
-            "{}% ({}, {})",
-            b.percentage,
-            battery_status_label(b.status),
-            battery_level_label(b.level),
-        ),
+        Some(b) => {
+            let status = battery_status_label(b.status);
+            let level = battery_level_label(b.level);
+            match b.percentage {
+                Some(percentage) => format!("{percentage}% ({status}, {level})"),
+                None => format!("no percentage ({status}, {level})"),
+            }
+        }
         None => "n/a".to_string(),
     }
 }
@@ -510,6 +533,7 @@ mod tests {
     use crate::device::{
         BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceKind, DeviceTransports,
     };
+    use crate::update_feed::UpdateChannel;
 
     fn app() -> AppInfo {
         AppInfo {
@@ -526,9 +550,11 @@ mod tests {
             ui_language: None,
             accessibility_granted: Some(true),
             hook_installed: Some(true),
+            virtual_keyboard: Some(true),
             launch_at_login: Some(true),
             show_in_menu_bar: Some(true),
             check_for_updates: Some(false),
+            update_channel: Some(UpdateChannel::Stable),
             thumbwheel_sensitivity: Some(0),
             config_schema_version: Some(2),
             configured_device_count: Some(3),
@@ -564,7 +590,7 @@ mod tests {
                     connection: ConnectionKind::BoltReceiver,
                     online: true,
                     battery: Some(BatteryInfo {
-                        percentage: 80,
+                        percentage: Some(80),
                         level: BatteryLevel::Good,
                         status: BatteryStatus::Discharging,
                     }),
@@ -597,6 +623,16 @@ mod tests {
                         thumbwheel: false,
                         haptic_feedback: false,
                         haptic_panel: false,
+                        dpi_gestures: false,
+                        fn_lock: false,
+                        os_layout: false,
+                        report_rate: false,
+                        backlight: false,
+                        easy_switch: false,
+                        virtual_thumbwheel: false,
+                        pointer_scaling: false,
+                        force_sensing: false,
+                        disable_keys: false,
                     }),
                     dpi: Some("1600 dpi (range 200–8000, 5 steps)".to_string()),
                     config_key: "4082d".to_string(),
@@ -641,7 +677,9 @@ mod tests {
         assert!(md.contains(
             "Connection: Logi Bolt receiver · Online: yes · Battery: 80% (discharging, good)"
         ));
-        assert!(md.contains("Capabilities: buttons=no, pointer=no, lighting=no"));
+        assert!(
+            md.contains("Capabilities: buttons=no, pointer=no, pointer_scaling=no, lighting=no, force_sensing=no")
+        );
         assert!(md.contains("Model: 2b35a (wpid: 4093, model-ids: b35a/0000/0000, ext-model: 02)"));
         assert!(md.contains("Transports: eQuad"));
         assert!(md.contains("Render: ⚠️ none (silhouette) · Slot 2"));
@@ -650,6 +688,19 @@ mod tests {
         assert!(md.contains("Transports: USB"));
         assert!(md.contains("Render: mx_master_3s · Slot 1"));
         assert!(md.contains("Battery: n/a"));
+    }
+
+    #[test]
+    fn a_level_only_battery_does_not_render_as_zero_percent() {
+        let mut report = sample();
+        report.devices[0].battery = Some(BatteryInfo {
+            percentage: None,
+            level: BatteryLevel::Good,
+            status: BatteryStatus::Discharging,
+        });
+        let md = report.to_markdown();
+        assert!(md.contains("Battery: no percentage (discharging, good)"));
+        assert!(!md.contains("Battery: 0%"));
     }
 
     #[test]
@@ -708,6 +759,7 @@ mod tests {
         report.app.inventory = None;
         report.app.accessibility_granted = None;
         report.app.hook_installed = None;
+        report.app.virtual_keyboard = None;
         report.app.launch_at_login = None;
         let md = report.to_markdown();
         assert!(md.contains("- Agent: not connected"));
@@ -718,6 +770,22 @@ mod tests {
             "an unreachable agent must not claim the permission was denied"
         );
         assert!(md.contains("Input hook: unknown"));
+        assert!(md.contains("- Virtual keyboard: unknown"));
+    }
+
+    #[test]
+    fn the_virtual_keyboard_line_is_macos_only() {
+        let mut report = sample();
+        assert!(report.to_markdown().contains("- Virtual keyboard: active"));
+        report.app.virtual_keyboard = Some(false);
+        assert!(
+            report
+                .to_markdown()
+                .contains("- Virtual keyboard: unavailable (keys posted as CGEvents)")
+        );
+        report.app.os = "linux".to_string();
+        report.app.virtual_keyboard = None;
+        assert!(!report.to_markdown().contains("Virtual keyboard"));
     }
 
     #[test]

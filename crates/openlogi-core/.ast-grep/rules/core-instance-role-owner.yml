@@ -1,0 +1,18 @@
+# Owner: openlogi_core::single_instance::Role — the lock file each
+# single-instance role holds.
+id: core-instance-role-owner
+language: rust
+severity: error
+message: Single-instance lock files are named by openlogi_core::single_instance::Role; acquire(Role::Agent) or acquire(Role::App) instead of spelling the file name here.
+note: |
+  The agent's lock was spelled in four crates, including a tool that takes it
+  to keep agents off the hardware. See "Single source of truth" in AGENTS.md.
+files:
+  - crates/**/*.rs
+  - xtask/**/*.rs
+ignores:
+  - crates/openlogi-core/**
+rule:
+  any:
+    - pattern: '"agent.lock"'
+    - pattern: '"openlogi.lock"'

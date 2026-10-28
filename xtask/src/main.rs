@@ -22,6 +22,9 @@ enum Command {
     /// Linux package tasks.
     #[command(subcommand)]
     Linux(commands::linux::Command),
+    /// Lint hygiene that one clippy run cannot check.
+    #[command(subcommand)]
+    Lint(commands::lint::Command),
     /// Release metadata tasks.
     #[command(subcommand)]
     Release(commands::release::Command),
@@ -32,6 +35,7 @@ fn main() -> Result<()> {
         Command::Ci(args) => commands::ci::run(&args),
         Command::Macos(command) => commands::macos::run(command),
         Command::Linux(command) => commands::linux::run(command),
+        Command::Lint(command) => commands::lint::run(command),
         Command::Release(command) => commands::release::run(command),
     }
 }

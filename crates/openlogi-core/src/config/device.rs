@@ -2,17 +2,57 @@
 //! [`RawDeviceConfig`] migration shim that folds pre-v2 files into the
 //! unified `bindings` map.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
+use super::button_map::{deserialize_button_map, deserialize_button_maps_by_app};
 use super::settings::{
     CameraControls, GestureOwner, LightSettings, Lighting, ScrollResolution, SmartShift,
     ThumbwheelSensitivity, deserialize_gesture_owner,
 };
 use crate::binding::{Action, ActionRingConfig, Binding, ButtonId, GestureDirection};
 use crate::device::{Capabilities, DeviceKind, DeviceModelInfo, LightCapabilities};
-use crate::hid::Dpi;
+use crate::hid::{DisableKeysMask, Dpi, PointerSpeed, ReportRate};
+
+/// A known key controlled by HID++ `0x4521 DisableKeys`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DisableKey {
+    /// Caps Lock.
+    CapsLock,
+    /// Num Lock.
+    NumLock,
+    /// Scroll Lock.
+    ScrollLock,
+    /// Insert.
+    Insert,
+    /// Windows on non-macOS hosts and Command on macOS.
+    WindowsCommand,
+}
+
+impl DisableKey {
+    /// Known keys in stable display order.
+    pub const ALL: [Self; 5] = [
+        Self::CapsLock,
+        Self::NumLock,
+        Self::ScrollLock,
+        Self::Insert,
+        Self::WindowsCommand,
+    ];
+
+    /// Raw `DisableKeys` bit for this key.
+    #[must_use]
+    pub const fn mask(self) -> DisableKeysMask {
+        match self {
+            Self::CapsLock => DisableKeysMask::CAPS_LOCK,
+            Self::NumLock => DisableKeysMask::NUM_LOCK,
+            Self::ScrollLock => DisableKeysMask::SCROLL_LOCK,
+            Self::Insert => DisableKeysMask::INSERT,
+            Self::WindowsCommand => DisableKeysMask::WINDOWS_COMMAND,
+        }
+    }
+}
 
 /// Last-known identity of a device, captured while it was online so the UI can
 /// render its card and the *correct* config panels before any live HID++ probe
@@ -61,7 +101,21 @@ pub struct DeviceIdentity {
 }
 
 impl DeviceIdentity {
-    /// Remove per-unit identifiers before this model snapshot is persisted.
+    /// Drop the serial number and unit id from this model snapshot before it
+    /// is persisted, leaving the identity body with model-level fields only.
+    ///
+    /// This does **not** make the saved file free of per-unit identifiers.
+    /// Settings are keyed by what a device *is*, so [`canonical_device_key`]
+    /// makes the entry key itself a `serial:` or `unit:` fragment whenever the
+    /// device reported one, whatever transport it was reached by. Only a
+    /// device with no usable identity falls back to a route-derived key such
+    /// as `receiver:{uid}:slot:{n}`. The entry's `links` table, keyed by
+    /// [`route_key`], also persists receiver UIDs. `raw:` routes retain an
+    /// OS-node- or serial-derived identity; `unknown:` routes retain the
+    /// device's serial number or unit id.
+    ///
+    /// [`canonical_device_key`]: crate::config::canonical_device_key
+    /// [`route_key`]: crate::device_order::DeviceStableId::route_key
     #[must_use]
     pub fn without_unit_identifiers(mut self) -> Self {
         if let Some(model) = &mut self.model_info {
@@ -155,12 +209,8 @@ pub struct DeviceConfig {
     #[serde(skip_serializing)]
     // Consumed only by the `fs` half's load migration. The field stays in
     // every build: it is part of the shape serde *deserializes*, and dropping
-    // it would turn an old config's key into an unknown field.
-    #[cfg_attr(
-        not(feature = "fs"),
-        expect(clippy::allow_attributes, reason = "see above"),
-        allow(dead_code, reason = "only the `fs` half's load migration reads it")
-    )]
+    // it would turn an old config's key into an unknown field. Without `fs`,
+    // `dead_code` stays quiet because the derived `PartialEq` reads it.
     pub(super) gesture_owner: Option<GestureOwner>,
     /// Last-known identity (name / kind / capabilities), captured while the
     /// device was online. Lets the UI render this device — with the right
@@ -187,11 +237,11 @@ pub struct DeviceConfig {
     /// button is a [`Binding::Single`] of its former `Click`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub disabled_gestures: BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
-    /// Per-application binding overlays (P1.4). Keyed by bundle identifier
-    /// (e.g. `"com.microsoft.VSCode"` on macOS). When the foreground app's
-    /// id matches a key here, those bindings take precedence; anything not
-    /// listed falls through to `bindings`. Deliberately `Action`-valued (not
-    /// `Binding`): a per-app override replaces the whole button with one
+    /// Per-application binding overlays (P1.4). Keyed by the application
+    /// identifier defined by [`ForegroundApp::id`](crate::app::ForegroundApp::id).
+    /// When the foreground app's id matches a key here, these bindings take
+    /// precedence. Other buttons use `bindings`. Deliberately `Action`-valued
+    /// (not `Binding`): a per-app override replaces the whole button with one
     /// action, never a per-direction gesture overlay.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub per_app_bindings: BTreeMap<String, BTreeMap<ButtonId, Action>>,
@@ -258,6 +308,14 @@ pub struct DeviceConfig {
     /// current resolution unmanaged and omits the field from `config.toml`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scroll_resolution: Option<ScrollResolution>,
+    /// Smooth this device's main wheel in software: the agent diverts the
+    /// wheel's HID++ `0x2121` reports and posts eased scrolling for them, the
+    /// way Logi Options+ "Smooth scrolling" does. Takes effect only while the
+    /// agent may post input events (on macOS, with Accessibility access);
+    /// otherwise the wheel stays native. `false` (default) leaves the wheel
+    /// native, and is omitted from `config.toml`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub smooth_wheel: bool,
     /// Physical config keys of pointing devices that follow this keyboard's
     /// host switch channel. The relationship is keyboard-initiated: pressing
     /// one of this device's host keys switches every listed target first, then
@@ -265,11 +323,48 @@ pub struct DeviceConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub host_switch_targets: Vec<String>,
     /// Keyboard Fn-lock state (HID++ fn inversion, `0x40a2`/`0x40a3`): `true`
-    /// means the F-row sends F1–F12 without holding Fn. The state lives in
-    /// device RAM per host, so the agent re-applies it on reconnect like
-    /// [`Self::dpi`]. `None` means "never set — leave the keyboard alone".
+    /// means the F-row sends F1–F12 without holding Fn. Multi-host keyboards
+    /// store it per Easy-Switch slot and the user can flip it from the
+    /// keyboard (Fn+Esc), so the agent writes it on config reload and
+    /// re-applies it when the keyboard reconnects, like [`Self::dpi`]. `None`
+    /// means "never set — leave the keyboard alone".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fn_lock: Option<bool>,
+    /// Keep a multi-platform keyboard's key layout (HID++ `0x4531`) on the
+    /// host OS, the "keep keyboard in OS layout" setting of Logi Options+. The
+    /// agent writes the host's platform when the keyboard connects and again
+    /// whenever the keyboard reports a platform change (a platform key
+    /// combination). `None` means "never set", which is on, as in Options+.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep_os_layout: Option<bool>,
+    /// Report rate (HID++ `0x8060` / `0x8061`), in hertz. The agent re-applies
+    /// it when the device reconnects, like [`Self::dpi`], but only where the
+    /// device lists it for the connection it is on — a wired-only rate is
+    /// left alone while the mouse is wireless. `None` means "never set —
+    /// leave the device's rate alone".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_rate: Option<ReportRate>,
+    /// Pointer speed of a mouse that scales its own motion (HID++ `0x2205`;
+    /// see [`PointerSpeed`]). The agent writes it when the mouse reconnects
+    /// and when a reload changes it, like [`Self::fn_lock`]. While precision
+    /// mode is on, the mouse moves at [`PointerSpeed::MIN`] instead, and this
+    /// is the speed precision mode returns to. `None` means "never set —
+    /// leave the mouse's speed alone".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pointer_speed: Option<PointerSpeed>,
+    /// Press force of a force-sensing button — the MX Master 4's Haptic
+    /// Sense Panel (reverse-engineered HID++ `0x19c0`) — as a raw device
+    /// value: lower is a lighter press. The range differs from unit to unit,
+    /// so the agent clamps it into the one the device reports before writing.
+    /// The agent writes it when the device reconnects and when a reload
+    /// changes it, like [`Self::fn_lock`]. `None` means "never set — leave the
+    /// device's force alone".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub force_sensing: Option<u16>,
+    /// Known keys OpenLogi should disable on reconnect. `None` leaves the
+    /// firmware unmanaged; an explicit empty set re-enables every known key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disabled_keys: Option<BTreeSet<DisableKey>>,
 }
 
 impl DeviceConfig {
@@ -368,8 +463,14 @@ impl Default for DeviceConfig {
             thumbwheel_sensitivity: None,
             invert_scroll: false,
             scroll_resolution: None,
+            smooth_wheel: false,
             host_switch_targets: Vec::new(),
             fn_lock: None,
+            keep_os_layout: None,
+            report_rate: None,
+            pointer_speed: None,
+            force_sensing: None,
+            disabled_keys: None,
         }
     }
 }
@@ -449,18 +550,18 @@ struct RawDeviceConfig {
     #[serde(default)]
     links: BTreeMap<String, LinkConfig>,
     /// v2 shape — present on already-migrated files; wins on any key collision.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_button_map")]
     bindings: BTreeMap<ButtonId, Binding>,
     /// v4 stash of turned-off gesture maps (see [`DeviceConfig::disabled_gestures`]).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_button_map")]
     disabled_gestures: BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
     /// Legacy v1 per-button single bindings.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_button_map")]
     button_bindings: BTreeMap<ButtonId, Action>,
     /// Legacy v1 flat gesture map (implicitly the gesture button's directions).
     #[serde(default)]
     gesture_bindings: BTreeMap<GestureDirection, Action>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_button_maps_by_app")]
     per_app_bindings: BTreeMap<String, BTreeMap<ButtonId, Action>>,
     #[serde(default)]
     action_ring: ActionRingConfig,
@@ -487,9 +588,20 @@ struct RawDeviceConfig {
     #[serde(default)]
     scroll_resolution: Option<ScrollResolution>,
     #[serde(default)]
+    smooth_wheel: bool,
+    #[serde(default)]
     host_switch_targets: Vec<String>,
     #[serde(default)]
     fn_lock: Option<bool>,
+    #[serde(default)]
+    keep_os_layout: Option<bool>,
+    #[serde(default)]
+    report_rate: Option<ReportRate>,
+    #[serde(default)]
+    pointer_speed: Option<PointerSpeed>,
+    #[serde(default)]
+    force_sensing: Option<u16>,
+    disabled_keys: Option<BTreeSet<DisableKey>>,
     #[serde(default = "default_true")]
     enabled: bool,
     #[serde(default)]
@@ -548,15 +660,23 @@ impl From<RawDeviceConfig> for DeviceConfig {
             thumbwheel_sensitivity: raw.thumbwheel_sensitivity,
             invert_scroll: raw.invert_scroll,
             scroll_resolution: raw.scroll_resolution,
+            smooth_wheel: raw.smooth_wheel,
             host_switch_targets: raw.host_switch_targets,
             fn_lock: raw.fn_lock,
+            keep_os_layout: raw.keep_os_layout,
+            report_rate: raw.report_rate,
+            pointer_speed: raw.pointer_speed,
+            force_sensing: raw.force_sensing,
+            disabled_keys: raw.disabled_keys,
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::DeviceConfig;
+    use std::collections::BTreeSet;
+
+    use super::{DeviceConfig, DisableKey};
 
     #[test]
     fn host_switch_targets_round_trip_as_physical_keys() -> Result<(), Box<dyn std::error::Error>> {
@@ -573,6 +693,30 @@ mod tests {
         );
         let serialized = toml::to_string(&config)?;
         assert!(serialized.contains("host_switch_targets"));
+        Ok(())
+    }
+
+    #[test]
+    fn disabled_keys_preserves_unmanaged_empty_and_non_empty_states()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let missing: DeviceConfig = toml::from_str("")?;
+        assert_eq!(missing.disabled_keys, None);
+
+        let empty: DeviceConfig = toml::from_str("disabled_keys = []")?;
+        assert_eq!(empty.disabled_keys, Some(BTreeSet::new()));
+        assert!(toml::to_string(&empty)?.contains("disabled_keys = []"));
+
+        let configured: DeviceConfig =
+            toml::from_str("disabled_keys = [\"caps_lock\", \"windows_command\"]")?;
+        assert_eq!(
+            configured.disabled_keys,
+            Some(BTreeSet::from([
+                DisableKey::CapsLock,
+                DisableKey::WindowsCommand,
+            ]))
+        );
+        let round_trip: DeviceConfig = toml::from_str(&toml::to_string(&configured)?)?;
+        assert_eq!(round_trip.disabled_keys, configured.disabled_keys);
         Ok(())
     }
 }

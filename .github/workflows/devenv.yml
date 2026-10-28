@@ -30,7 +30,9 @@ jobs:
       - name: Install upstream Nix
         uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
       - name: Check devenv formatting
-        run: nix fmt -- --check devenv.nix
+        # nix fmt uses the Flake of the working directory, which is packaging/.
+        working-directory: packaging
+        run: nix fmt -- --check ../devenv.nix
       - name: Configure devenv binary cache
         uses: cachix/cachix-action@5f2d7c5294214f71b873db4b969586b980625e71 # v17
         with:

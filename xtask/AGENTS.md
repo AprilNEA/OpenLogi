@@ -40,7 +40,7 @@
   job skips where is data a test reads. It is also the only place the Windows
   cross-lint crate list lives — `devenv.nix`'s `openlogi:check-windows` calls it
   rather than repeating the `-p` flags. Adding a job to `ci.yml` means a `Job`
-  variant + `Spec` row, its steps, and a row in `.claude/rules/ci.md`; `--list`
+  variant + `Spec` row, its steps, and a row in `.agents/rules/ci.md`; `--list`
   renders itself from the rows. It does not repeat the commands — `--dry-run`
   prints the real argv, and a hand-copied third version of what `ci.yml` says
   is a version that can be wrong.
@@ -49,7 +49,6 @@
   but it holds no bundling logic: that is `xtask macos dev-bundle`, which shares the
   identity/helper/plist tables with `macos bundle`. Keep it that way; the two drifted
   badly while they were separate implementations.
-  `.github/scripts/release-notes/` is a dedicated Node/Octokit tool; don't wrap it in xtask.
 - Shell that is really program logic belongs here instead: `cargo xtask release changelog`
   replaced a script whose version parsing and changelog editing were two embedded Python
   heredocs. The release-plz workflow builds the binary on `master` before checking out

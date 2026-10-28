@@ -6,9 +6,14 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::hid::DeviceRoute;
+
 mod light;
 
-pub use light::{LightCapabilities, LightValueRange, LightValueRangeError, LightValueUnit};
+pub use light::{
+    ChangedOnLight, LightCapabilities, LightState, LightValueRange, LightValueRangeError,
+    LightValueUnit,
+};
 
 /// What a paired peripheral is. Mirrors `hidpp::receiver::bolt::BoltDeviceKind`
 /// but is owned by us so consumers don't depend on `hidpp`.
@@ -84,6 +89,28 @@ impl DeviceKind {
             _ => None,
         }
     }
+
+    /// Stable catalog key for the localized name of the kind, shared by every
+    /// binary that names a device by what it is.
+    #[must_use]
+    pub const fn translation_key(self) -> &'static str {
+        match self {
+            Self::Mouse => "device.mouse",
+            Self::Keyboard => "device.keyboard",
+            Self::Numpad => "device.numpad",
+            Self::Presenter => "device.presenter",
+            Self::Remote => "device.remote",
+            Self::Trackball => "device.trackball",
+            Self::Touchpad => "device.touchpad",
+            Self::Tablet => "device.tablet",
+            Self::Gamepad => "device.gamepad",
+            Self::Joystick => "device.joystick",
+            Self::Headset => "device.headset",
+            Self::Camera => "camera.camera",
+            Self::Unknown => "device.device",
+            Self::Light => "device.lighting",
+        }
+    }
 }
 
 /// What a device can be *configured* to do, derived from the HID++ feature
@@ -104,10 +131,10 @@ pub struct Capabilities {
     pub buttons: bool,
     /// Adjustable pointer resolution — HID++ `0x2201` / `0x2202` (AdjustableDpi).
     pub pointer: bool,
-    /// Solid-colour RGB the lighting panel can actually drive — HID++
-    /// `ColorLedEffects` (`0x8070`) or `PerKeyLighting` (`0x8080`), the features
-    /// `set_keyboard_color` writes. Backlight-only families aren't driven by the
-    /// panel, so they don't flip this and don't earn an inert Lighting tab.
+    /// Solid-colour RGB the lighting panel can drive — HID++ effect engines
+    /// (`0x8070` / `0x8071`) or per-zone lighting (`0x8080` / `0x8081`).
+    /// Backlight-only families aren't driven by the panel, so they don't earn
+    /// an inert Lighting tab.
     pub lighting: bool,
     /// Native vertical wheel inversion — HID++ `0x2121 HiResWheel` with the
     /// firmware-reported `has_invert` capability.
@@ -128,6 +155,59 @@ pub struct Capabilities {
     /// device's `0x1b04` control table.
     #[serde(default)]
     pub haptic_panel: bool,
+    /// A DPI/ModeShift control in the device's `0x1b04` control table supports
+    /// both diversion and raw-XY reporting for hold-and-swipe gestures.
+    #[serde(default)]
+    pub dpi_gestures: bool,
+    /// Keyboard Fn-lock can be read and written — HID++ `0x40a0`, `0x40a2` or
+    /// `0x40a3` fn inversion. Appended: crosses the IPC and the persisted
+    /// identity.
+    #[serde(default)]
+    pub fn_lock: bool,
+    /// The keyboard's key layout can be kept on the host OS — HID++ `0x4531
+    /// MultiPlatform`, when the probe also reads that it lets software set the
+    /// platform. Appended: crosses the IPC and the persisted identity.
+    #[serde(default)]
+    pub os_layout: bool,
+    /// The device's report rate can be chosen — HID++ `0x8060
+    /// AdjustableReportRate` or `0x8061 ExtendedAdjustableReportRate`.
+    /// Appended: crosses the IPC and the persisted identity.
+    #[serde(default)]
+    pub report_rate: bool,
+    /// The keyboard's backlight can be switched and tuned — HID++ `0x1982
+    /// Backlight`. Appended: crosses the IPC and the persisted identity.
+    #[serde(default)]
+    pub backlight: bool,
+    /// The device has Easy-Switch host slots whose computers' names and OS
+    /// software can read — HID++ `0x1815 HostsInfo`. Appended: crosses the
+    /// IPC and the persisted identity.
+    #[serde(default)]
+    pub easy_switch: bool,
+    /// Back or Forward in the device's `0x1b04` control table can be diverted
+    /// with raw-wheel reporting, so a wheel-hold binding can turn the main
+    /// wheel into a virtual thumb wheel. Appended: crosses the IPC and the
+    /// persisted identity.
+    #[serde(default)]
+    pub virtual_thumbwheel: bool,
+    /// The pointer speed is set by scaling the sensor's motion — HID++
+    /// `0x2205 PointerMotionScaling` — because the device has no adjustable
+    /// DPI. A device that also reports [`Self::pointer`] keeps it `false`:
+    /// the DPI control already sets its speed, and Logi Options+ uses DPI
+    /// there too. Appended: crosses the IPC and the persisted identity.
+    #[serde(default)]
+    pub pointer_scaling: bool,
+    /// The press force of a force-sensing button — the MX Master 4's Haptic
+    /// Sense Panel — can be changed: reverse-engineered HID++ `0x19c0
+    /// ForceSensingButton`, when the probe also reads that the device lets
+    /// software change it. Appended: crosses the IPC and the persisted
+    /// identity.
+    #[serde(default)]
+    pub force_sensing: bool,
+    /// Fixed lock/system-key disabling through HID++ `0x4521 DisableKeys`.
+    /// Measured only from feature-table presence. Appended after
+    /// `force_sensing`: crosses the IPC and the persisted identity.
+    #[serde(default)]
+    pub disable_keys: bool,
 }
 
 impl Capabilities {
@@ -137,22 +217,37 @@ impl Capabilities {
     pub fn from_feature_ids(ids: &[u16]) -> Self {
         const BUTTONS: [u16; 5] = [0x1b00, 0x1b01, 0x1b02, 0x1b03, 0x1b04];
         const POINTER: [u16; 2] = [0x2201, 0x2202];
-        // ColorLedEffects (0x8070), PerKeyLighting2 (0x8081) and PerKeyLighting
-        // (0x8080) — all three driven by `set_keyboard_color`, which prefers
-        // 0x8070's fixed effect to override a running onboard profile and falls
-        // back through 0x8081 to 0x8080. Other families (backlight 0x198x) stay
-        // out so they don't earn a tab the panel can't drive.
-        const LIGHTING: [u16; 3] = [0x8080, 0x8070, 0x8081];
+        // Every family here is driven by `set_keyboard_color`, which tries
+        // effect engines before per-zone paths. The 0x198x backlight is not
+        // lighting: `backlight` below covers 0x1982.
+        const LIGHTING: [u16; 4] = [0x8070, 0x8071, 0x8081, 0x8080];
         let has = |family: &[u16]| ids.iter().any(|id| family.contains(id));
+        let pointer = has(&POINTER);
         Self {
             buttons: has(&BUTTONS),
-            pointer: has(&POINTER),
+            pointer,
             lighting: has(&LIGHTING),
             scroll_inversion: false,
             hires_wheel: ids.contains(&0x2121),
             thumbwheel: ids.contains(&0x2150),
             haptic_feedback: ids.contains(&0x19b0),
             haptic_panel: false,
+            dpi_gestures: false,
+            fn_lock: ids.contains(&0x40a0) || ids.contains(&0x40a2) || ids.contains(&0x40a3),
+            // The probe clears it unless the keyboard lets software set the
+            // platform; the feature table alone cannot say.
+            os_layout: ids.contains(&0x4531),
+            report_rate: ids.contains(&0x8060) || ids.contains(&0x8061),
+            backlight: ids.contains(&0x1982),
+            easy_switch: ids.contains(&0x1815),
+            // Set by the `0x1b04` control walk; the feature table alone
+            // cannot say which controls report raw wheel.
+            virtual_thumbwheel: false,
+            pointer_scaling: !pointer && ids.contains(&0x2205),
+            // The probe clears it unless the device lets software change the
+            // force; the feature table alone cannot say.
+            force_sensing: ids.contains(&0x19c0),
+            disable_keys: ids.contains(&0x4521),
         }
     }
 
@@ -167,12 +262,7 @@ impl Capabilities {
             DeviceKind::Mouse | DeviceKind::Trackball => Self {
                 buttons: true,
                 pointer: true,
-                lighting: false,
-                scroll_inversion: false,
-                hires_wheel: false,
-                thumbwheel: false,
-                haptic_feedback: false,
-                haptic_panel: false,
+                ..Self::default()
             },
             DeviceKind::Keyboard => Self {
                 lighting: true,
@@ -221,12 +311,97 @@ pub enum BatteryStatus {
 /// Battery snapshot for one paired device, as last polled over HID++.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BatteryInfo {
-    /// Reported charge percentage (`0..=100`).
-    pub percentage: u8,
+    /// Reported charge percentage (`0..=100`), or `None` when the reading
+    /// carries no percentage.
+    ///
+    /// `None` is not an empty battery. Some devices only report a coarse
+    /// [`level`](Self::level), such as a `0x1004` device without the
+    /// state-of-charge capability. Others have no reading yet, such as a
+    /// device first seen while it charges. Read `level` in that case.
+    pub percentage: Option<u8>,
     /// Coarse bucket for UI that doesn't want the raw percentage.
     pub level: BatteryLevel,
     /// Charging state at poll time.
     pub status: BatteryStatus,
+}
+
+/// The charge at or below which a discharging battery needs attention.
+const LOW_BATTERY_PERCENT: u8 = 20;
+
+impl BatteryInfo {
+    /// Whether this reading should draw the user's attention: a discharging
+    /// battery at 20% or less, or, on a device that reports no percentage, at
+    /// the firmware's low or critical level.
+    ///
+    /// Every low-battery cue asks this one rule: the settings app's warning
+    /// tone and caption, and the agent's low-battery notice.
+    #[must_use]
+    pub fn needs_attention(&self) -> bool {
+        let low = match self.percentage {
+            Some(percentage) => percentage <= LOW_BATTERY_PERCENT,
+            None => matches!(self.level, BatteryLevel::Low | BatteryLevel::Critical),
+        };
+        low && !matches!(
+            self.status,
+            BatteryStatus::Charging | BatteryStatus::ChargingSlow | BatteryStatus::Full
+        )
+    }
+}
+
+/// Tidy a device name reported over HID++ for display.
+///
+/// Logitech reports gaming names in ALL CAPS (e.g. `"G513 RGB MECHANICAL
+/// GAMING KEYBOARD"`). This title-cases each word so the name reads like the
+/// curated asset names (`"MX Master 3S"`), and keeps model numbers (tokens
+/// with a digit, e.g. `G513`) and short acronyms (`RGB`, `TKL`, `SE`) as they
+/// are. A name already in mixed case is returned unchanged.
+#[must_use]
+pub fn prettify_codename(raw: &str) -> String {
+    if raw.chars().any(char::is_lowercase) {
+        return raw.to_string();
+    }
+    raw.split_whitespace()
+        .map(|word| {
+            if word.len() <= 3 || word.bytes().any(|b| b.is_ascii_digit()) {
+                word.to_string()
+            } else {
+                let mut chars = word.chars();
+                chars.next().map_or_else(String::new, |first| {
+                    first.to_uppercase().collect::<String>() + &chars.as_str().to_lowercase()
+                })
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// A keyboard lock key whose state the on-screen indicator reports.
+///
+/// Variants are append-only because this enum crosses bincode IPC.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum LockKey {
+    /// Num Lock.
+    NumLock,
+    /// Caps Lock.
+    CapsLock,
+    /// Scroll Lock.
+    ScrollLock,
+}
+
+impl LockKey {
+    /// Whether this platform shows the indicator for this key.
+    ///
+    /// Caps Lock shows everywhere. macOS gives Num Lock and Scroll Lock no
+    /// meaning, so they show only on the other platforms. Logi Options+ marks
+    /// both Windows-only; it ships for Windows and macOS only, and Linux treats
+    /// these keys as Windows does.
+    #[must_use]
+    pub const fn is_indicated_here(self) -> bool {
+        match self {
+            Self::CapsLock => true,
+            Self::NumLock | Self::ScrollLock => !cfg!(target_os = "macos"),
+        }
+    }
 }
 
 /// Identity of an enumerated receiver — no paired-device state (that lives
@@ -282,22 +457,61 @@ pub struct DeviceModelInfo {
     /// `[BTLE PID, eQuad PID, 0]`.
     pub model_ids: [u16; 3],
     /// Extra model byte prefixed to a PID to form the asset registry's
-    /// `modelId` — see [`Self::config_key`].
+    /// `modelId` — see [`Self::model_key`].
     pub extended_model_id: u8,
 }
 
 impl DeviceModelInfo {
-    /// Stable identifier used to key per-device configuration (button
-    /// bindings, etc.) and to look up assets in the OpenLogi asset registry.
-    ///
-    /// Format: `{extended_model_id:x}{model_ids[0]:04x}` — the same string
-    /// the depot `manifest.json` uses for its `modelId` field. Example: an
-    /// MX Master 4 with `extended_model_id = 0x02` and `model_ids[0] = 0xb042`
-    /// resolves to `"2b042"`.
+    /// The model's key in the OpenLogi asset registry: the string the depot
+    /// `manifest.json` uses for its `modelId` field, formatted
+    /// `{extended_model_id:x}{model_ids[0]:04x}`. An MX Master 4 with
+    /// `extended_model_id = 0x02` and `model_ids[0] = 0xb042` resolves to
+    /// `"2b042"`. Per-device configuration is keyed by
+    /// [`crate::device_order::DeviceIdentity::config_key`], not by this.
     #[must_use]
-    pub fn config_key(&self) -> String {
+    pub fn model_key(&self) -> String {
         format!("{:x}{:04x}", self.extended_model_id, self.model_ids[0])
     }
+
+    /// Identifies which transport `product_id` belongs to, by matching it
+    /// against the packed per-transport [`Self::model_ids`] slots.
+    ///
+    /// A `Direct` route only ever carries one vendor/product id — the HID
+    /// node this session actually enumerated — so on a multi-transport
+    /// device this pinpoints the transport that's *live right now*, as
+    /// opposed to [`Self::transports`], which is the static set the firmware
+    /// merely claims to support. Returns `None` when `product_id` matches
+    /// none of the enabled slots (unknown model info, or a PID this device
+    /// doesn't report).
+    #[must_use]
+    pub fn transport_for_product_id(&self, product_id: u16) -> Option<ModelTransport> {
+        let t = self.transports;
+        [
+            (t.bluetooth, ModelTransport::Bluetooth),
+            (t.btle, ModelTransport::Btle),
+            (t.equad, ModelTransport::Equad),
+            (t.usb, ModelTransport::Usb),
+        ]
+        .into_iter()
+        .filter_map(|(enabled, kind)| enabled.then_some(kind))
+        .zip(self.model_ids)
+        .find(|(_, pid)| *pid == product_id)
+        .map(|(kind, _)| kind)
+    }
+}
+
+/// One of the individual transports packed into [`DeviceModelInfo::model_ids`],
+/// as resolved by [`DeviceModelInfo::transport_for_product_id`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelTransport {
+    /// Classic Bluetooth.
+    Bluetooth,
+    /// Bluetooth Low Energy.
+    Btle,
+    /// Logitech eQuad (Unifying/Bolt receiver RF protocol).
+    Equad,
+    /// Wired USB.
+    Usb,
 }
 
 /// Mirror of hidpp's `DeviceTransport` bitfield — one bool per protocol the
@@ -350,6 +564,17 @@ pub struct PairedDevice {
     /// table. `None` for devices we couldn't probe (offline / unreachable);
     /// the GUI then falls back to [`Capabilities::presumed_from_kind`].
     pub capabilities: Option<Capabilities>,
+    /// Moves each time the device itself reports changing a setting — the
+    /// user toggling Fn lock on the keyboard, or a DPI button changing the
+    /// sensor — so a client re-reads that device's settings rather than keep
+    /// showing what it read before. Opaque: only a difference from the
+    /// previous snapshot of the same route means anything, and it restarts
+    /// when the agent reopens the device's channel.
+    ///
+    /// Appended. `default` keeps device fixtures recorded before it loading;
+    /// the IPC encoding is positional and always carries it.
+    #[serde(default)]
+    pub settings_revision: u64,
 }
 
 /// Address of a standalone raw-HID interface.
@@ -411,6 +636,14 @@ pub struct StandaloneDevice {
     pub registry_model_id: Option<String>,
 }
 
+impl StandaloneDevice {
+    /// The route that reaches this device.
+    #[must_use]
+    pub fn route(&self) -> DeviceRoute {
+        DeviceRoute::from(&self.address)
+    }
+}
+
 /// One receiver and its paired devices — the unit the agent's inventory
 /// snapshot is made of.
 ///
@@ -433,9 +666,53 @@ pub struct DeviceInventory {
 mod tests {
     use super::{
         BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceInventory, DeviceKind,
-        DeviceModelInfo, DeviceTransports, LightValueRange, LightValueUnit, PairedDevice,
-        ReceiverInfo,
+        DeviceModelInfo, DeviceTransports, LightValueRange, LightValueUnit, LockKey,
+        ModelTransport, PairedDevice, ReceiverInfo, prettify_codename,
     };
+
+    #[test]
+    fn a_low_discharging_battery_needs_attention() {
+        let battery = |percentage, level, status| BatteryInfo {
+            percentage,
+            level,
+            status,
+        };
+        let good = BatteryLevel::Good;
+        let discharging = BatteryStatus::Discharging;
+
+        assert!(battery(Some(20), good, discharging).needs_attention());
+        assert!(battery(Some(0), good, discharging).needs_attention());
+        assert!(!battery(Some(21), BatteryLevel::Low, discharging).needs_attention());
+        // A percentage decides on its own; the level only stands in for one.
+        assert!(!battery(None, good, discharging).needs_attention());
+        assert!(battery(None, BatteryLevel::Low, discharging).needs_attention());
+        assert!(battery(None, BatteryLevel::Critical, discharging).needs_attention());
+        assert!(!battery(None, BatteryLevel::Unknown, discharging).needs_attention());
+        assert!(battery(Some(10), good, BatteryStatus::Unknown).needs_attention());
+        assert!(battery(Some(10), good, BatteryStatus::Error).needs_attention());
+        for powered in [
+            BatteryStatus::Charging,
+            BatteryStatus::ChargingSlow,
+            BatteryStatus::Full,
+        ] {
+            assert!(
+                !battery(Some(5), BatteryLevel::Critical, powered).needs_attention(),
+                "{powered:?} is already being charged"
+            );
+            assert!(!battery(None, BatteryLevel::Critical, powered).needs_attention());
+        }
+    }
+
+    #[test]
+    fn prettify_codename_title_cases_shouted_names_only() {
+        assert_eq!(
+            prettify_codename("G513 RGB MECHANICAL GAMING KEYBOARD"),
+            "G513 RGB Mechanical Gaming Keyboard"
+        );
+        assert_eq!(prettify_codename("PRO X  SUPERLIGHT"), "PRO X Superlight");
+        assert_eq!(prettify_codename("MX Master 3S"), "MX Master 3S");
+        assert_eq!(prettify_codename(""), "");
+    }
 
     fn inventory(slot: u8, wpid: Option<u16>, battery_percentage: u8) -> DeviceInventory {
         DeviceInventory {
@@ -452,7 +729,7 @@ mod tests {
                 kind: DeviceKind::Mouse,
                 online: true,
                 battery: Some(BatteryInfo {
-                    percentage: battery_percentage,
+                    percentage: Some(battery_percentage),
                     level: BatteryLevel::Good,
                     status: BatteryStatus::Discharging,
                 }),
@@ -478,7 +755,18 @@ mod tests {
                     thumbwheel: false,
                     haptic_feedback: false,
                     haptic_panel: false,
+                    dpi_gestures: false,
+                    fn_lock: false,
+                    os_layout: false,
+                    report_rate: false,
+                    backlight: false,
+                    easy_switch: false,
+                    virtual_thumbwheel: false,
+                    pointer_scaling: false,
+                    force_sensing: false,
+                    disable_keys: false,
                 }),
+                settings_revision: 0,
             }],
         }
     }
@@ -502,6 +790,46 @@ mod tests {
             base,
             inventory(1, Some(0xb023), 87),
             "nested battery changes must affect inventory equality"
+        );
+    }
+
+    #[test]
+    fn transport_for_product_id_resolves_the_live_slot() {
+        // G915 X LS from issue #1218: usb + equad + btle all supported,
+        // model_ids packed BTLE/eQuad/USB per the ascending-bit-order
+        // contract documented on `DeviceModelInfo::model_ids`.
+        let model = DeviceModelInfo {
+            entity_count: 3,
+            serial_number: None,
+            unit_id: [0, 0, 0, 0],
+            transports: DeviceTransports {
+                usb: true,
+                equad: true,
+                btle: true,
+                bluetooth: false,
+            },
+            model_ids: [0xb38a, 0x40b5, 0xc356],
+            extended_model_id: 0x01,
+        };
+
+        assert_eq!(
+            model.transport_for_product_id(0xc356),
+            Some(ModelTransport::Usb),
+            "the USB-slot pid must resolve to Usb even though the device \
+             also supports BTLE"
+        );
+        assert_eq!(
+            model.transport_for_product_id(0xb38a),
+            Some(ModelTransport::Btle)
+        );
+        assert_eq!(
+            model.transport_for_product_id(0x40b5),
+            Some(ModelTransport::Equad)
+        );
+        assert_eq!(
+            model.transport_for_product_id(0xdead),
+            None,
+            "an unrecognized pid must not silently match a slot"
         );
     }
 
@@ -548,6 +876,16 @@ mod tests {
                 thumbwheel: true,
                 haptic_feedback: false,
                 haptic_panel: false,
+                dpi_gestures: false,
+                fn_lock: false,
+                os_layout: false,
+                report_rate: false,
+                backlight: false,
+                easy_switch: false,
+                virtual_thumbwheel: false,
+                pointer_scaling: false,
+                force_sensing: false,
+                disable_keys: false,
             }
         );
         assert!(!Capabilities::from_feature_ids(&[0x0003, 0x1b04]).thumbwheel);
@@ -564,6 +902,16 @@ mod tests {
                 thumbwheel: false,
                 haptic_feedback: false,
                 haptic_panel: false,
+                dpi_gestures: false,
+                fn_lock: false,
+                os_layout: false,
+                report_rate: false,
+                backlight: false,
+                easy_switch: false,
+                virtual_thumbwheel: false,
+                pointer_scaling: false,
+                force_sensing: false,
+                disable_keys: false,
             }
         );
         // No driving features → nothing offered.
@@ -571,15 +919,36 @@ mod tests {
             Capabilities::from_feature_ids(&[0x0000, 0x0003]),
             Capabilities::default()
         );
+        // 0x4531 offers the OS layout until the probe reads it cannot be set.
+        assert!(Capabilities::from_feature_ids(&[0x0001, 0x4531]).os_layout);
+        assert!(!Capabilities::from_feature_ids(&[0x0001, 0x40a3]).os_layout);
+        // Either report-rate feature offers the report rate.
+        assert!(Capabilities::from_feature_ids(&[0x0001, 0x8060]).report_rate);
+        assert!(Capabilities::from_feature_ids(&[0x0001, 0x8061]).report_rate);
+        assert!(!Capabilities::from_feature_ids(&[0x0001, 0x2202]).report_rate);
+        // Only the 0x1982 backlight is driven; the older 0x1981 is not.
+        assert!(Capabilities::from_feature_ids(&[0x0001, 0x1982]).backlight);
+        assert!(!Capabilities::from_feature_ids(&[0x0001, 0x1981]).backlight);
+        // 0x1815 HostsInfo offers the Easy-Switch hosts; 0x1814 ChangeHost
+        // alone switches channels but cannot name them.
+        assert!(Capabilities::from_feature_ids(&[0x0001, 0x1815]).easy_switch);
+        assert!(!Capabilities::from_feature_ids(&[0x0001, 0x1814]).easy_switch);
+        // 0x2205 sets the speed only where no DPI feature does (M590, MX
+        // Ergo); a mouse with both keeps its DPI control.
+        let scaled = Capabilities::from_feature_ids(&[0x0001, 0x2205]);
+        assert!(scaled.pointer_scaling && !scaled.pointer);
+        let both = Capabilities::from_feature_ids(&[0x0001, 0x2201, 0x2205]);
+        assert!(both.pointer && !both.pointer_scaling);
+        // 0x19c0 offers the press force until the probe reads it cannot be
+        // changed; the 0x19b0 haptic engine alone does not.
+        assert!(Capabilities::from_feature_ids(&[0x0001, 0x19c0]).force_sensing);
+        assert!(!Capabilities::from_feature_ids(&[0x0001, 0x19b0]).force_sensing);
     }
 
     #[test]
     fn every_drivable_lighting_family_earns_the_tab() {
-        // `set_keyboard_color` walks 0x8070 → 0x8081 → 0x8080, so a keyboard
-        // exposing any one of them can be coloured and must get the tab.
-        // 0x8081 was missing here, which left such a keyboard with no lighting
-        // UI at all.
-        for id in [0x8070, 0x8080, 0x8081] {
+        // `set_keyboard_color` walks 0x8070 → 0x8071 → 0x8081 → 0x8080.
+        for id in [0x8070, 0x8071, 0x8080, 0x8081] {
             assert!(
                 Capabilities::from_feature_ids(&[0x0001, id]).lighting,
                 "0x{id:04x} must offer the lighting tab"
@@ -587,6 +956,18 @@ mod tests {
         }
         // Backlight (0x198x) stays out — the panel cannot drive it.
         assert!(!Capabilities::from_feature_ids(&[0x0001, 0x1982]).lighting);
+        // Any fn-inversion feature gives the keyboard an Fn-lock control.
+        assert!(Capabilities::from_feature_ids(&[0x0001, 0x40a3]).fn_lock);
+        assert!(Capabilities::from_feature_ids(&[0x0001, 0x40a2]).fn_lock);
+        assert!(Capabilities::from_feature_ids(&[0x0001, 0x40a0]).fn_lock);
+        assert!(!Capabilities::from_feature_ids(&[0x0001, 0x1982]).fn_lock);
+    }
+
+    #[test]
+    fn only_measured_disable_keys_feature_enables_the_capability() {
+        assert!(Capabilities::from_feature_ids(&[0x4521]).disable_keys);
+        assert!(!Capabilities::from_feature_ids(&[0x4522]).disable_keys);
+        assert!(!Capabilities::presumed_from_kind(DeviceKind::Keyboard).disable_keys);
     }
 
     #[test]
@@ -651,5 +1032,17 @@ mod tests {
             "min = 2700\nmax = 6500\nstep = 0\nunit = 'kelvin'\n",
         );
         result.expect_err("a zero step must not survive deserialization");
+    }
+
+    #[test]
+    fn caps_lock_shows_everywhere_and_num_and_scroll_lock_not_on_macos() {
+        assert!(LockKey::CapsLock.is_indicated_here());
+        for key in [LockKey::NumLock, LockKey::ScrollLock] {
+            assert_eq!(
+                key.is_indicated_here(),
+                !cfg!(target_os = "macos"),
+                "{key:?}"
+            );
+        }
     }
 }

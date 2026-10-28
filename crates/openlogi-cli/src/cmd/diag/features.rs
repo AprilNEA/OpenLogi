@@ -19,11 +19,10 @@ pub async fn run(_args: FeaturesArgs) -> Result<()> {
     for inv in &inventories {
         for paired in inv.paired.iter().filter(|p| p.online) {
             any = true;
-            let route =
-                DeviceRoute::device_route_for(inv, paired.slot).unwrap_or(DeviceRoute::Direct {
-                    vendor_id: inv.receiver.vendor_id,
-                    product_id: inv.receiver.product_id,
-                });
+            let route = DeviceRoute::for_slot(inv, paired.slot).unwrap_or(DeviceRoute::Direct {
+                vendor_id: inv.receiver.vendor_id,
+                product_id: inv.receiver.product_id,
+            });
             match paired.codename.as_deref() {
                 Some(name) => println!("device: {name} ({route})"),
                 None => println!("device: Slot {} ({route})", paired.slot),
@@ -116,26 +115,27 @@ impl fmt::Display for FirmwareEntityDisplay<'_> {
             FirmwareEntity::Readable { index, info } => {
                 write!(
                     f,
-                    "fw {index}: {:?} {}{:02}.{:02}_B{:04} pid={:04x}",
-                    info.kind,
-                    info.prefix,
-                    info.number,
-                    info.revision,
-                    info.build,
-                    info.transport_pid
+                    "fw {index}: {:?} {}{:02}.{:02}_B{:04}",
+                    info.kind, info.prefix, info.number, info.revision, info.build
                 )?;
+                if let Some(pid) = info.transport_pid {
+                    write!(f, " pid={pid:04x}")?;
+                }
                 if info.active {
                     write!(f, " [active]")?;
                 }
 
-                // `extra_version` is optional by spec, and all-zero is how a
-                // device says it has none — so an empty field is absence, not
-                // a value being hidden. The PID above is not optional and is
-                // printed even when the device answers zero, which only a
-                // dormant entity is allowed to do.
-                if info.extra_version != [0; 5] {
-                    write!(f, " extra=")?;
-                    for byte in info.extra_version {
+                // The raw region is printed whole whenever it holds a nonzero
+                // byte that `pid=` does not already show, so the line never
+                // drops what the device sent. All zero is how a device fills
+                // bytes it does not implement.
+                let shown = if info.transport_pid.is_some() { 2 } else { 0 };
+                if info.transport_specific_info[shown..]
+                    .iter()
+                    .any(|&b| b != 0)
+                {
+                    write!(f, " transport-info=")?;
+                    for byte in info.transport_specific_info {
                         write!(f, "{byte:02x}")?;
                     }
                 }
@@ -168,8 +168,8 @@ mod tests {
                 revision: 0,
                 build: 8,
                 active: true,
-                transport_pid: 0xc08d,
-                extra_version: [0; 5],
+                transport_pid: Some(0xc08d),
+                transport_specific_info: [0xc0, 0x8d, 0, 0, 0, 0, 0],
             },
         }
     }
@@ -193,34 +193,60 @@ mod tests {
     fn a_dormant_entity_carries_no_marker() {
         let mut e = entry();
         info(&mut e).active = false;
+        info(&mut e).transport_pid = None;
+        info(&mut e).transport_specific_info = [0; 7];
         assert_eq!(
             FirmwareEntityDisplay(&e).to_string(),
-            "fw 1: MainApplication MPM17.00_B0008 pid=c08d"
+            "fw 1: MainApplication MPM17.00_B0008"
         );
     }
 
-    /// Only the active entity has to report a real PID, and a dormant one may
-    /// answer zero. That is still what the device said, so it is printed.
+    /// A PID the protocol layer read is printed even when it is zero: that is
+    /// still what the device said.
     #[test]
     fn a_zero_pid_is_reported_rather_than_hidden() {
         let mut e = entry();
-        info(&mut e).active = false;
-        info(&mut e).transport_pid = 0;
+        info(&mut e).transport_pid = Some(0);
+        info(&mut e).transport_specific_info = [0; 7];
         assert_eq!(
             FirmwareEntityDisplay(&e).to_string(),
-            "fw 1: MainApplication MPM17.00_B0008 pid=0000"
+            "fw 1: MainApplication MPM17.00_B0008 pid=0000 [active]"
         );
     }
 
-    /// `extra_version` is device-specific and normally zero. When a device
-    /// does fill it in, the bytes are the whole reason the field is carried.
+    /// Bytes after the PID are device-specific and normally zero. When a
+    /// device does fill them in, the whole region is printed.
     #[test]
-    fn populated_extra_version_bytes_are_shown() {
+    fn transport_bytes_beyond_the_pid_are_shown() {
         let mut e = entry();
-        info(&mut e).extra_version = [0x01, 0x02, 0x00, 0xff, 0x10];
+        info(&mut e).transport_specific_info = [0xc0, 0x8d, 0x01, 0x02, 0x00, 0xff, 0x10];
         assert_eq!(
             FirmwareEntityDisplay(&e).to_string(),
-            "fw 1: MainApplication MPM17.00_B0008 pid=c08d [active] extra=010200ff10"
+            "fw 1: MainApplication MPM17.00_B0008 pid=c08d [active] transport-info=c08d010200ff10"
+        );
+    }
+
+    /// A G502 LIGHTSPEED's dormant bootloader sends `0xaaef` in bytes 9 and
+    /// 10. It is not the PID of the link, so the line shows raw bytes and no
+    /// `pid=`.
+    #[test]
+    fn an_uninterpreted_region_is_shown_raw_not_as_a_pid() {
+        let e = FirmwareEntity::Readable {
+            index: 0,
+            info: FirmwareEntityInfo {
+                kind: DeviceEntityType::Bootloader,
+                prefix: "BOT".to_owned(),
+                number: 92,
+                revision: 0,
+                build: 8,
+                active: false,
+                transport_pid: None,
+                transport_specific_info: [0xaa, 0xef, 0, 0, 0, 0, 0],
+            },
+        };
+        assert_eq!(
+            FirmwareEntityDisplay(&e).to_string(),
+            "fw 0: Bootloader BOT92.00_B0008 transport-info=aaef0000000000"
         );
     }
 

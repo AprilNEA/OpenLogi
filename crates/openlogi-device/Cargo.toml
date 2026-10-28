@@ -10,14 +10,19 @@ description = "The contract between OpenLogi's HID++ layer and the HID stack ben
 keywords = ["logitech", "hidpp", "hid", "backend"]
 categories = ["hardware-support"]
 
+[features]
+# Scripted channels used by higher-layer tests. Never enabled by shipped bins.
+test-support = []
+
 # Nothing here may reach a host. That is not a style preference — it is what
 # lets a second backend (a scripted device tree, WebHID under wasm) exist at
 # all, and CI's `wasm (portable crates)` job holds this manifest to it. Adding
 # a dependency that cannot build for `wasm32-unknown-unknown` breaks that job.
 [dependencies]
 hidpp = { workspace = true }
-openlogi-core = { version = "0.8.3", path = "../openlogi-core", default-features = false }
+openlogi-core = { version = "0.8.18", path = "../openlogi-core", default-features = false }
 openlogi-device-registry = { workspace = true }
+openlogi-fixture = { workspace = true }
 futures-lite = { workspace = true }
 futures-concurrency = "7"
 serde = { workspace = true }
@@ -26,6 +31,7 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+serde_json.workspace = true
 tempfile = "3"
 tokio = { workspace = true, features = ["test-util"] }
 

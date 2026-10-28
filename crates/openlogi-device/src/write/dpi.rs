@@ -6,6 +6,7 @@ use hidpp::{
         CreatableFeature,
         adjustable_dpi::AdjustableDpiFeature,
         extended_dpi::{DpiDirection, DpiRange, ExtendedDpiFeature, SetDpiParameters},
+        root::FeatureInformation,
     },
     protocol::v20::{ErrorType, Hidpp20Error},
 };
@@ -18,8 +19,8 @@ use crate::channel::route::DeviceRoute;
 use super::{HidppOperation, WriteError, classify_hidpp_error, with_route};
 
 // DpiCapabilities and DpiInfo are pure IPC wire data with no HID++ I/O, so
-// they live in `openlogi_core::hid::dpi`; re-exported here unchanged so this
-// module's own API surface doesn't churn.
+// they live in `openlogi_core::hid::dpi`; the DPI writes name them through
+// here.
 pub use openlogi_core::hid::dpi::{Dpi, DpiCapabilities, DpiInfo};
 
 /// Sensor 0 is the only sensor OpenLogi drives: the UI exposes one DPI value
@@ -36,7 +37,12 @@ const SENSOR: u8 = 0;
 /// `0x2202`-only mouse gets a panel that cannot read or write anything.
 enum DpiFeature {
     /// `0x2201` — one DPI per sensor, described as a flat list of values.
-    Adjustable(Arc<AdjustableDpiFeature>),
+    Adjustable {
+        feature: Arc<AdjustableDpiFeature>,
+        /// The feature version the device's feature table reports for
+        /// `0x2201`.
+        version: u8,
+    },
 
     /// `0x2202` — independent X/Y DPI plus lift-off distance, described as a
     /// mix of fixed values and stepped ranges.
@@ -51,11 +57,14 @@ impl DpiFeature {
     /// keeps `0x2202` support purely additive. A device exposing both behaves
     /// exactly as it did before.
     async fn open(device: &mut Device) -> Result<Self, WriteError> {
-        if let Some(index) = feature_index(device, AdjustableDpiFeature::ID).await? {
-            return Ok(Self::Adjustable(device.add_feature(index)));
+        if let Some(info) = feature_info(device, AdjustableDpiFeature::ID).await? {
+            return Ok(Self::Adjustable {
+                feature: device.add_feature(info.index),
+                version: info.version,
+            });
         }
-        if let Some(index) = feature_index(device, ExtendedDpiFeature::ID).await? {
-            return Ok(Self::Extended(device.add_feature(index)));
+        if let Some(info) = feature_info(device, ExtendedDpiFeature::ID).await? {
+            return Ok(Self::Extended(device.add_feature(info.index)));
         }
         // Neither ID is present. Name the canonical one in the error: a caller
         // reading "0x2201 unsupported" is being told this device has no DPI
@@ -68,7 +77,7 @@ impl DpiFeature {
     /// The HID++ feature ID being driven, for error reporting.
     const fn id(&self) -> u16 {
         match self {
-            Self::Adjustable(_) => AdjustableDpiFeature::ID,
+            Self::Adjustable { .. } => AdjustableDpiFeature::ID,
             Self::Extended(_) => ExtendedDpiFeature::ID,
         }
     }
@@ -76,7 +85,7 @@ impl DpiFeature {
     /// The number of motion sensors the device reports.
     async fn sensor_count(&self) -> Result<u8, Hidpp20Error> {
         match self {
-            Self::Adjustable(feature) => feature.get_sensor_count().await,
+            Self::Adjustable { feature, .. } => feature.get_sensor_count().await,
             Self::Extended(feature) => feature.get_sensor_count().await,
         }
     }
@@ -84,7 +93,7 @@ impl DpiFeature {
     /// The DPI currently configured on [`SENSOR`].
     async fn current_dpi(&self) -> Result<Dpi, Hidpp20Error> {
         match self {
-            Self::Adjustable(feature) => feature.get_sensor_dpi(SENSOR).await.map(Dpi::from),
+            Self::Adjustable { feature, .. } => feature.get_sensor_dpi(SENSOR).await.map(Dpi::from),
             Self::Extended(feature) => Ok(feature
                 .get_sensor_dpi_parameters(SENSOR)
                 .await?
@@ -93,10 +102,27 @@ impl DpiFeature {
         }
     }
 
+    /// [`SENSOR`]'s default DPI, or `None` when the device reports none.
+    async fn default_dpi(&self) -> Result<Option<Dpi>, Hidpp20Error> {
+        let default = match self {
+            Self::Adjustable { feature, version } => {
+                feature.get_sensor_default_dpi(*version, SENSOR).await?
+            }
+            Self::Extended(feature) => {
+                let dpi = feature
+                    .get_sensor_dpi_parameters(SENSOR)
+                    .await?
+                    .default_dpi_x;
+                (dpi != 0).then_some(dpi)
+            }
+        };
+        Ok(default.map(Dpi::from))
+    }
+
     /// Every DPI value [`SENSOR`] accepts, as a flat list.
     async fn supported_dpi(&self) -> Result<Vec<u16>, Hidpp20Error> {
         match self {
-            Self::Adjustable(feature) => feature.get_sensor_dpi_list(SENSOR).await,
+            Self::Adjustable { feature, .. } => feature.get_sensor_dpi_list(SENSOR).await,
             Self::Extended(feature) => {
                 // `getSensorDpiList` (function 3) only answers on sensors that
                 // support profiles; the range description is the one every
@@ -113,27 +139,21 @@ impl DpiFeature {
     async fn set_dpi(&self, dpi: Dpi) -> Result<(), Hidpp20Error> {
         let dpi = dpi.into();
         match self {
-            Self::Adjustable(feature) => feature.set_sensor_dpi(SENSOR, dpi).await,
+            Self::Adjustable { feature, .. } => feature.set_sensor_dpi(SENSOR, dpi).await,
             Self::Extended(feature) => {
                 // `setSensorDpiParameters` writes DPI X, DPI Y and lift-off
-                // distance in one packet with no "leave unchanged" encoding, so
-                // read the current parameters first and put back what we are
-                // not asked to change. Writing a bare `lod` would silently
-                // retune the sensor's lift-off height.
+                // distance in one packet with no "leave unchanged" encoding.
+                // Which of Y and LOD the packet may carry is the sensor's
+                // capability bits, not a guess from the values a parameters
+                // read returns. The current LOD is put back so the write does
+                // not retune the lift-off height, and an independent Y axis is
+                // kept locked to X — the UI exposes a single DPI.
+                let capabilities = feature.get_sensor_capabilities(SENSOR).await?.capabilities;
                 let current = feature.get_sensor_dpi_parameters(SENSOR).await?;
                 feature
                     .set_sensor_dpi_parameters(
                         SENSOR,
-                        SetDpiParameters {
-                            dpi_x: dpi,
-                            // The spec has the host send 0 for dpiY when the
-                            // sensor has no independent Y axis, and reports 0
-                            // on read in exactly that case. When it does have
-                            // one, keep the axes locked together — the UI
-                            // exposes a single DPI.
-                            dpi_y: if current.dpi_y == 0 { 0 } else { dpi },
-                            lod: current.lod,
-                        },
+                        SetDpiParameters::for_sensor(capabilities, dpi, dpi, current.lod),
                     )
                     .await
             }
@@ -141,19 +161,21 @@ impl DpiFeature {
     }
 }
 
-/// Resolves `feature_hex` to its runtime index, or `None` when the device does
-/// not expose it.
+/// Resolves `feature_hex` to its feature-table entry (runtime index and
+/// feature version), or `None` when the device does not expose it.
 ///
 /// Unlike [`open_feature`](super::open_feature) an absent feature is not an
 /// error here — [`DpiFeature::open`] uses absence to fall through to the next
 /// candidate, and only a transport failure should abort the probe.
-async fn feature_index(device: &mut Device, feature_hex: u16) -> Result<Option<u8>, WriteError> {
-    Ok(device
+async fn feature_info(
+    device: &mut Device,
+    feature_hex: u16,
+) -> Result<Option<FeatureInformation>, WriteError> {
+    device
         .root()
         .get_feature(feature_hex)
         .await
-        .map_err(|e| classify_hidpp_error(e, HidppOperation::ResolveFeature, feature_hex))?
-        .map(|info| info.index))
+        .map_err(|e| classify_hidpp_error(e, HidppOperation::ResolveFeature, feature_hex))
 }
 
 /// Flattens `0x2202`'s fixed-value / stepped-range description into the flat
@@ -268,6 +290,19 @@ pub(super) async fn get_dpi_info_on_channel(
     })
 }
 
+/// A DPI to write, resolved against what sensor 0 reports when the write
+/// runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DpiTarget {
+    /// This DPI. The write fails when the sensor does not list it.
+    Value(Dpi),
+    /// The lowest DPI the sensor lists.
+    Lowest,
+    /// The sensor's default DPI, or the listed DPI nearest to it. Nothing is
+    /// written when the sensor reports no default.
+    Default,
+}
+
 /// Set sensor 0's DPI for the device addressed by `route`.
 pub async fn set_dpi(
     backend: &dyn HidBackend,
@@ -284,40 +319,92 @@ pub async fn set_dpi(
 /// The DPI write itself, on an already-open channel at HID++ `index`. Shared by
 /// [`set_dpi`] (which opens a fresh channel) and [`set_dpi_on`]
 /// (which reuses one).
+///
+/// Fails with [`WriteError::DpiUnsupported`], without writing, when `dpi` is
+/// not in the device-reported supported list, and with
+/// [`WriteError::DpiNotApplied`] when the device still reads back a different
+/// value after one re-write.
 pub(super) async fn set_dpi_on_channel(
     channel: &Arc<hidpp::channel::HidppChannel>,
     index: u8,
     dpi: Dpi,
 ) -> Result<(), WriteError> {
+    set_dpi_target_on_channel(channel, index, DpiTarget::Value(dpi))
+        .await
+        .map(|_| ())
+}
+
+/// The DPI write behind [`set_dpi_on_channel`] and [`set_dpi_target_on`]:
+/// resolve `target` against the sensor, write it and return the DPI written,
+/// or `None` when [`DpiTarget::Default`] finds no default.
+async fn set_dpi_target_on_channel(
+    channel: &Arc<hidpp::channel::HidppChannel>,
+    index: u8,
+    target: DpiTarget,
+) -> Result<Option<Dpi>, WriteError> {
     let mut device = Device::new(Arc::clone(channel), index)
         .await
         .map_err(|_| WriteError::DeviceUnreachable { index })?;
     let feature = DpiFeature::open(&mut device).await?;
-    feature
-        .set_dpi(dpi)
-        .await
-        .map_err(|e| classify_hidpp_error(e, HidppOperation::WriteDpi, feature.id()))?;
-    // Read back to confirm the firmware accepted the value. A mismatch is a
-    // silent failure mode that's otherwise invisible — devices in low-power
-    // states or with unsupported DPI ranges can ACK the write yet keep the old
-    // value. We log a warning but still return Ok because the request reached
-    // the device.
-    if let Ok(actual) = feature.current_dpi().await {
-        if actual == dpi {
-            debug!(index, %dpi, "wrote DPI (verified)");
-        } else {
-            tracing::warn!(
-                index,
-                requested = %dpi,
-                %actual,
-                "DPI write accepted but device reports a different value — \
-                 likely out of the device's supported range"
-            );
+    let feature_hex = feature.id();
+    let write_error = |e| classify_hidpp_error(e, HidppOperation::WriteDpi, feature_hex);
+    // Only a value the device itself reports is ever written. Every caller
+    // reaches this with a value from somewhere else — a config file, another
+    // device's settings, an IPC client — and firmware handed an unsupported
+    // DPI may clamp it, ignore it or reject it, none of which the caller asked
+    // for.
+    let supported = DpiCapabilities::new(feature.supported_dpi().await.map_err(write_error)?)?;
+    let dpi = match target {
+        DpiTarget::Value(dpi) => dpi,
+        DpiTarget::Lowest => supported.min(),
+        DpiTarget::Default => {
+            let Some(default) = feature.default_dpi().await.map_err(write_error)? else {
+                debug!(index, "sensor reports no default DPI — nothing written");
+                return Ok(None);
+            };
+            supported.nearest(default)
         }
-    } else {
-        debug!(index, %dpi, "wrote DPI (read-back skipped)");
+    };
+    if !supported.contains(dpi) {
+        return Err(WriteError::DpiUnsupported { requested: dpi });
     }
-    Ok(())
+    feature.set_dpi(dpi).await.map_err(write_error)?;
+    // Read back to confirm the firmware accepted the value. A mismatch is a
+    // silent failure mode that's otherwise invisible — a device in a low-power
+    // state can ACK the write yet keep the old value. A single re-write
+    // disambiguates: firmware still drowsy from a link re-establishment
+    // usually takes the second write, and a device that keeps a different
+    // value after that has not applied the request, which the caller is told.
+    // A failed read-back leaves the acknowledged write standing.
+    let Ok(actual) = feature.current_dpi().await else {
+        debug!(index, %dpi, "wrote DPI (read-back skipped)");
+        return Ok(Some(dpi));
+    };
+    if actual == dpi {
+        debug!(index, %dpi, "wrote DPI (verified)");
+        return Ok(Some(dpi));
+    }
+    feature.set_dpi(dpi).await.map_err(write_error)?;
+    match feature.current_dpi().await {
+        Ok(retried) if retried == dpi => {
+            tracing::info!(
+                index,
+                %dpi,
+                first_readback = %actual,
+                "DPI write landed on retry — first write was ACKed but dropped \
+                 (device likely mid link re-establishment)"
+            );
+            Ok(Some(dpi))
+        }
+        Ok(retried) => Err(WriteError::DpiNotApplied {
+            requested: dpi,
+            actual: retried,
+        }),
+        Err(_) => {
+            debug!(index, %dpi, "re-wrote DPI (read-back skipped)");
+            Ok(Some(dpi))
+        }
+    }
 }
 
 /// Write DPI on an already-open [`SharedChannel`] — the fast path that skips
@@ -326,7 +413,20 @@ pub async fn set_dpi_on(shared: &SharedChannel, dpi: Dpi) -> Result<(), WriteErr
     set_dpi_on_channel(shared.channel(), shared.device_index(), dpi).await
 }
 
+/// Write `target` to sensor 0 on an already-open [`SharedChannel`] and return
+/// the DPI written, or `None` when [`DpiTarget::Default`] finds no default.
+/// Resolving and writing in one call keeps both on one transport turn.
+pub async fn set_dpi_target_on(
+    shared: &SharedChannel,
+    target: DpiTarget,
+) -> Result<Option<Dpi>, WriteError> {
+    set_dpi_target_on_channel(shared.channel(), shared.device_index(), target).await
+}
+
 /// Read current DPI and supported values on an already-open [`SharedChannel`].
 pub async fn get_dpi_info_on(shared: &SharedChannel) -> Result<DpiInfo, WriteError> {
     get_dpi_info_on_channel(shared.channel(), shared.device_index()).await
 }
+
+#[cfg(test)]
+mod tests;

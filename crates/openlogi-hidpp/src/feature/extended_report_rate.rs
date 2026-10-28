@@ -70,6 +70,19 @@ pub struct ExtendedReportRateFeature {
 }
 
 impl ExtendedReportRateFeature {
+    /// Whether an unsolicited report with `function_id` is the device's
+    /// report-rate broadcast, sent when its rate changes on the device.
+    ///
+    /// Logi Options+ 2.8 (`Feature8061ExtendedAdjustableReportRate::
+    /// onFeatureReport`) takes exactly function `0` for its
+    /// `ReportRateInfoEvent`. Deliberately independent of the payload, like
+    /// `ExtendedDpiFeature::is_parameters_broadcast`: a listener re-reads the
+    /// rate with [`Self::get_report_rate`].
+    #[must_use]
+    pub const fn is_rate_broadcast(function_id: u8) -> bool {
+        function_id == 0
+    }
+
     /// Retrieves the report rates supported by `connection_type`.
     pub async fn get_device_capabilities(
         &self,
@@ -114,23 +127,42 @@ impl ExtendedReportRateFeature {
     }
 }
 
+/// The rate mask of a function 0 or 1 reply. It is byte 1 alone: Options+
+/// reads only that byte, as a one-byte `SupportedReportRates`. Byte 0 is not
+/// part of the mask, so none of its bits may read as a rate.
 fn report_rate_list_from_payload(payload: [u8; 16]) -> ExtendedReportRateList {
-    ExtendedReportRateList::from_bits_retain(u16::from_be_bytes([payload[0], payload[1]]))
+    ExtendedReportRateList::from_bits_retain(u16::from(payload[1]))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ExtendedReportRateList, report_rate_list_from_payload};
+    use super::{ExtendedReportRateFeature, ExtendedReportRateList, report_rate_list_from_payload};
 
     #[test]
-    fn parses_report_rate_mask() {
-        let mut payload = [0; 16];
-        payload[1] = 0b0100_1001;
+    fn only_function_zero_is_the_rate_broadcast() {
+        assert!(ExtendedReportRateFeature::is_rate_broadcast(0));
+        for function in 1..=0x0f {
+            assert!(
+                !ExtendedReportRateFeature::is_rate_broadcast(function),
+                "function {function}"
+            );
+        }
+    }
 
-        let rates = report_rate_list_from_payload(payload);
+    #[test]
+    fn the_rate_mask_is_byte_one_alone() {
+        let expected = ExtendedReportRateList::HZ_125
+            | ExtendedReportRateList::HZ_1000
+            | ExtendedReportRateList::HZ_8000;
+        for byte_zero in [0x00, 0x01, 0xff] {
+            let mut payload = [0; 16];
+            payload[0] = byte_zero;
+            payload[1] = 0b0100_1001;
 
-        assert!(rates.contains(ExtendedReportRateList::HZ_125));
-        assert!(rates.contains(ExtendedReportRateList::HZ_1000));
-        assert!(rates.contains(ExtendedReportRateList::HZ_8000));
+            let rates = report_rate_list_from_payload(payload);
+
+            assert_eq!(rates, expected, "byte 0 = {byte_zero:#04x}");
+            assert_eq!(rates.bits(), 0x0049);
+        }
     }
 }

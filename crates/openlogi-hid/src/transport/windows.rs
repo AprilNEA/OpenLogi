@@ -193,6 +193,17 @@ async fn find_windows_short_collection(
     // long handle. The grouping key (derived from the device path) is unique per
     // physical interface, so it always pairs the correct siblings. A node whose
     // path has an unexpected shape yields `None` and stays long-only.
+    //
+    // A long-only collection gets no short sibling, as on every other OS: the
+    // `hidpp` channel re-frames its short requests as long. The G733 headset's
+    // HID++ interface carries a `0xFF00 / 0x0001` collection beside its
+    // `0xFF43 / 0x0202` one. Pairing it as the short endpoint sent every short
+    // request to a collection no other OS uses for HID++ — the likely reason
+    // the headset never enumerated on Windows (#1957), while Linux, which
+    // treats the interface as long-only, reads its battery.
+    if super::is_long_only_collection(long_info.usage_page, long_info.usage_id) {
+        return Ok(None);
+    }
     let Some(long_key) = grouping_key(long_info) else {
         return Ok(None);
     };
@@ -253,9 +264,7 @@ impl RawHidChannel for WindowsHidppChannel {
     }
 
     async fn write_report(&self, src: &[u8]) -> Result<usize, Box<dyn Error + Send + Sync>> {
-        if !self.device_io.allows_io() {
-            return Err(super::device_io_error());
-        }
+        self.device_io.ensure_allowed()?;
         let endpoint = match src.first().copied().and_then(endpoint_for_report_id) {
             Some(ReportEndpoint::Short) => self.short.as_ref(),
             Some(ReportEndpoint::Long) => Some(&self.long),
@@ -271,9 +280,7 @@ impl RawHidChannel for WindowsHidppChannel {
             )
         })?;
 
-        if !self.device_io.allows_io() {
-            return Err(super::device_io_error());
-        }
+        self.device_io.ensure_allowed()?;
         let result = endpoint.write_report(src).await;
         if let Err(e) = &result
             && is_permanent_disconnect(e.as_ref())

@@ -13,23 +13,37 @@ publish = false
 anyhow = { workspace = true }
 # Clearing the custom icon a run of the app may have left on a bundle.
 appicon = { git = "https://github.com/AprilNEA/appicon", tag = "v0.1.1" }
+# Sparkle's keys are base64 (the bundle checks the embedded public key).
+base64 = "0.22.1"
 clap = { workspace = true }
 comfy-table = { version = "8.0.0", default-features = false }
 fs-err = "3.3.0"
+# The release side of gpui-updater: the Sparkle appcast (with its deltas),
+# EdDSA signing, and verified Sparkle deltas made with Sparkle's BinaryDelta.
+gpui-updater-release = { version = "0.4.4", default-features = false }
 # For `brand`: the bundle-identifier family stamped into every Info.plist and
 # advertised by the update manifest. The app reads the same constants at
 # runtime, so what packaging builds and what the app claims cannot diverge.
-openlogi-core = { version = "0.8.3", path = "../crates/openlogi-core" }
+openlogi-core = { version = "0.8.18", path = "../crates/openlogi-core" }
 path-absolutize = "3.1.1"
 plist = "1.10.0"
+# For `lint sweep-allows`: parsing each `allow` attribute the lexical scan finds,
+# and printing back the parts of a `cfg_attr` it keeps.
+quote = "1.0.47"
+# `release channels` reads the release records' appcasts the way an XML
+# parser (Sparkle's) sees them, and copies their items byte for byte.
+roxmltree = "0.20.0"
+semver = "1.0.28"
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2_hasher = { version = "0.3.2", features = ["sync"] }
 strum = { version = "0.27", features = ["derive"] }
+syn = "2.0.117"
 sysinfo = { version = "0.38.4", default-features = false, features = ["system"] }
 tempfile = "3.27.0"
 time = { version = "0.3", features = ["formatting"] }
 toml.workspace = true
+toml_edit = "0.22"
 which = "8.0.4"
 xshell = "0.2.7"
 

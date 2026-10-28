@@ -33,7 +33,6 @@ num_enum = "0.7.3"
 async-channel = "2.3.1"
 serde = { version = "1.0", features = ["derive"], optional = true }
 hex = "0.4.3"
-derive_builder = "0.20.2"
 bitflags = { version = "2", features = ["serde"] }
 # OpenLogi-specific: request-level wire tracing at trace!. Off by default
 # (level-gated); enable with OPENLOGI_LOG=hidpp=trace. Not in upstream hidpp.
@@ -41,7 +40,7 @@ tracing = { workspace = true }
 # OpenLogi-specific: generates the mechanical CreatableFeature/Feature impls
 # for feature structs shaped `{ endpoint: FeatureEndpoint }` or `{ endpoint,
 # events: EventSource<Event> }`. Not in upstream hidpp; used only here.
-openlogi-hidpp-derive = { version = "0.8.3", path = "../openlogi-hidpp-derive" }
+openlogi-hidpp-derive = { version = "0.8.18", path = "../openlogi-hidpp-derive" }
 derive_more = { version = "2.1.1", default-features = false, features = ["from", "into"] }
 
 [lints]

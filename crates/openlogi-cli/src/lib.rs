@@ -5,8 +5,8 @@ use std::process::ExitCode;
 
 use anyhow::Result;
 use clap::Parser;
-use tracing_subscriber::{EnvFilter, fmt};
 
+mod agent;
 mod cmd;
 
 /// OpenLogi: a local-first companion for Logitech HID++ peripherals.
@@ -27,12 +27,7 @@ struct Cli {
 /// Returns the exit status the process should terminate with — `list` uses a
 /// distinct one to report that no hardware is connected.
 pub async fn run() -> Result<ExitCode> {
-    fmt()
-        .with_writer(std::io::stderr)
-        .with_env_filter(
-            EnvFilter::try_from_env("OPENLOGI_LOG").unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
+    openlogi_core::logging::init_stderr();
 
     let cli = Cli::parse();
     let command = cli
@@ -51,6 +46,10 @@ mod tests {
     use cmd::diag::DiagCmd;
     use cmd::diag::lighting::Method;
     use cmd::diag::wheel::ResolutionArg;
+    use cmd::fixture::record_case::FixtureOperation;
+    use cmd::fixture::record_profile::RecordProfileArgs;
+    use cmd::fixture::verify::VerifyArgs;
+    use cmd::fixture::{FixtureCmd, FixtureRecordCmd};
 
     /// Clap's own structural validation (arg ID collisions, invalid
     /// `conflicts_with` targets, etc.) — cheap and catches a broken derive
@@ -104,6 +103,81 @@ mod tests {
     }
 
     #[test]
+    fn backlight_duration_accepts_an_options_plus_step_and_rejects_the_rest() {
+        let cli = Cli::try_parse_from(["openlogi", "backlight", "duration", "15"])
+            .expect("a 15 second duration parses");
+        match cli.cmd.expect("subcommand present") {
+            Command::Backlight(args) => {
+                assert!(matches!(
+                    args.action,
+                    Some(BacklightAction::Duration {
+                        duration: seconds
+                    }) if seconds.seconds() == 15
+                ));
+            }
+            other => panic!("expected Backlight, got {other:?}"),
+        }
+
+        let result = Cli::try_parse_from(["openlogi", "backlight", "duration", "7"]);
+        result.expect_err("7 seconds is not a 5-second step");
+        let two_hours = Cli::try_parse_from(["openlogi", "backlight", "duration", "7200"])
+            .expect("two hours is the protocol maximum");
+        match two_hours.cmd.expect("subcommand present") {
+            Command::Backlight(args) => {
+                assert!(matches!(
+                    args.action,
+                    Some(BacklightAction::Duration {
+                        duration: seconds
+                    }) if seconds.seconds() == 7_200
+                ));
+            }
+            other => panic!("expected Backlight, got {other:?}"),
+        }
+        let result = Cli::try_parse_from(["openlogi", "backlight", "duration", "7205"]);
+        result.expect_err("7205 seconds is past the protocol maximum");
+    }
+
+    #[test]
+    fn backlight_existing_actions_and_global_name_filter_remain_compatible() {
+        for (action, expected) in [
+            (vec!["status"], "Status"),
+            (vec!["on"], "On"),
+            (vec!["off"], "Off"),
+            (vec!["auto", "on"], "Auto { set: On }"),
+            (vec!["auto", "off"], "Auto { set: Off }"),
+            (vec!["level", "3"], "Level { level: 3 }"),
+            (vec!["battery-saving", "on"], "BatterySaving { set: On }"),
+            (vec!["battery-saving", "off"], "BatterySaving { set: Off }"),
+        ] {
+            let mut args = vec!["openlogi", "backlight"];
+            args.extend(action);
+            args.extend(["--device", "Test keyboard"]);
+            let cli = Cli::try_parse_from(args).unwrap();
+            let Some(Command::Backlight(args)) = cli.cmd else {
+                panic!("expected backlight command");
+            };
+            assert_eq!(args.device.as_deref(), Some("Test keyboard"));
+            assert_eq!(format!("{:?}", args.action.unwrap()), expected);
+        }
+    }
+
+    #[test]
+    fn backlight_help_explains_agent_requirement_and_selection_changes() {
+        let help = Cli::try_parse_from(["openlogi", "backlight", "--help"]).unwrap_err();
+        assert_eq!(help.kind(), clap::error::ErrorKind::DisplayHelp);
+        let text = help.to_string();
+        for expected in [
+            openlogi_core::env::PROFILE,
+            "No direct hardware fallback",
+            "Ambiguous matches",
+            "measured backlight support",
+            "unknown support requires an explicit name",
+        ] {
+            assert!(text.contains(expected), "missing {expected:?} in {text}");
+        }
+    }
+
+    #[test]
     fn smartshift_leave_flipped_conflicts_with_sensitivity() {
         let result = Cli::try_parse_from([
             "openlogi",
@@ -122,6 +196,48 @@ mod tests {
         // silently becoming "no change" downstream.
         let result = Cli::try_parse_from(["openlogi", "diag", "smartshift", "--sensitivity", "0"]);
         result.expect_err("a zero --sensitivity must fail to parse");
+    }
+
+    #[test]
+    fn smartshift_torque_conflicts_with_leave_flipped_and_sensitivity() {
+        let res1 = Cli::try_parse_from([
+            "openlogi",
+            "diag",
+            "smartshift",
+            "--leave-flipped",
+            "--torque",
+            "50",
+        ]);
+        res1.expect_err("--leave-flipped and --torque must conflict");
+
+        let res2 = Cli::try_parse_from([
+            "openlogi",
+            "diag",
+            "smartshift",
+            "--sensitivity",
+            "10",
+            "--torque",
+            "50",
+        ]);
+        res2.expect_err("--sensitivity and --torque must conflict");
+    }
+
+    #[test]
+    fn smartshift_rejects_zero_torque() {
+        let result = Cli::try_parse_from(["openlogi", "diag", "smartshift", "--torque", "0"]);
+        result.expect_err("a zero --torque must fail to parse");
+    }
+
+    #[test]
+    fn smartshift_parses_valid_torque() {
+        let cli =
+            Cli::try_parse_from(["openlogi", "diag", "smartshift", "--torque", "75"]).unwrap();
+        match cli.cmd.expect("subcommand present") {
+            Command::Diag(DiagCmd::Smartshift(args)) => {
+                assert_eq!(args.torque.map(std::num::NonZeroU8::get), Some(75));
+            }
+            other => panic!("expected Diag(Smartshift), got {other:?}"),
+        }
     }
 
     #[test]
@@ -190,5 +306,343 @@ mod tests {
             }
             other => panic!("expected Diag(Wheel), got {other:?}"),
         }
+    }
+
+    #[test]
+    fn fixture_record_case_parses_every_read_only_operation() {
+        let operations = [
+            ("feature-table", FixtureOperation::FeatureTable),
+            ("firmware-entities", FixtureOperation::FirmwareEntities),
+            (
+                "reprogrammable-controls",
+                FixtureOperation::ReprogrammableControls,
+            ),
+            ("raw-battery", FixtureOperation::RawBattery),
+            ("dpi-info", FixtureOperation::DpiInfo),
+            ("smartshift-status", FixtureOperation::SmartshiftStatus),
+            ("wheel-mode", FixtureOperation::WheelMode),
+            ("backlight-state", FixtureOperation::BacklightState),
+        ];
+
+        for (name, expected) in operations {
+            let cli = Cli::try_parse_from([
+                "openlogi",
+                "fixture",
+                "record",
+                "case",
+                "--operation",
+                name,
+                "--name",
+                "human name",
+                "--channel",
+                "logical-channel",
+                "--output",
+                "case.json",
+                "--device",
+                "MX Master 3S",
+                "--capacity",
+                "1024",
+                "--force",
+            ])
+            .unwrap_or_else(|error| panic!("{name} should parse: {error}"));
+
+            match cli.cmd.expect("subcommand present") {
+                Command::Fixture(FixtureCmd::Record(FixtureRecordCmd::Case(args))) => {
+                    assert_eq!(args.operation, expected);
+                    assert_eq!(args.name, "human name");
+                    assert_eq!(args.channel, "logical-channel");
+                    assert_eq!(args.output, std::path::PathBuf::from("case.json"));
+                    assert_eq!(args.device.as_deref(), Some("MX Master 3S"));
+                    assert_eq!(args.capacity, 1024);
+                    assert!(args.force);
+                }
+                other => panic!("expected Fixture(Record(Case)), got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn fixture_contribution_wizard_parses_one_resumable_command() {
+        let cli = Cli::try_parse_from([
+            "openlogi",
+            "fixture",
+            "contribute",
+            "--id",
+            "mx-master-3s-001",
+            "--name",
+            "MX Master 3S contribution",
+            "--output",
+            "fixtures/devices/mx-master-3s-001",
+            "--device",
+            "MX Master 3S",
+            "--profile-only",
+        ])
+        .expect("fixture contribution parses");
+
+        match cli.cmd.expect("subcommand present") {
+            Command::Fixture(FixtureCmd::Contribute(args)) => {
+                assert_eq!(args.id, "mx-master-3s-001");
+                assert_eq!(args.name, "MX Master 3S contribution");
+                assert_eq!(
+                    args.output,
+                    std::path::PathBuf::from("fixtures/devices/mx-master-3s-001")
+                );
+                assert_eq!(args.device.as_deref(), Some("MX Master 3S"));
+                assert!(args.profile_only);
+            }
+            other => panic!("expected Fixture(Contribute), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fixture_record_case_requires_operation_metadata_and_output() {
+        let required_flags = ["--operation", "--name", "--channel", "--output"];
+        let complete = [
+            "--operation",
+            "feature-table",
+            "--name",
+            "human name",
+            "--channel",
+            "logical-channel",
+            "--output",
+            "case.json",
+        ];
+
+        for missing in required_flags {
+            let mut args = vec!["openlogi", "fixture", "record", "case"];
+            let mut index = 0;
+            while index < complete.len() {
+                if complete[index] != missing {
+                    args.extend_from_slice(&complete[index..=index + 1]);
+                }
+                index += 2;
+            }
+            Cli::try_parse_from(args)
+                .expect_err("every operation and metadata flag must be required");
+        }
+    }
+
+    #[test]
+    fn fixture_record_case_capacity_is_nonzero_and_bounded() {
+        let parse = |capacity| {
+            Cli::try_parse_from([
+                "openlogi",
+                "fixture",
+                "record",
+                "case",
+                "--operation",
+                "dpi-info",
+                "--name",
+                "dpi",
+                "--channel",
+                "direct",
+                "--output",
+                "case.json",
+                "--capacity",
+                capacity,
+            ])
+        };
+
+        parse("1").expect("minimum capacity parses");
+        parse("65536").expect("maximum capacity parses");
+        parse("0").expect_err("zero capacity is rejected");
+        parse("65537").expect_err("capacity above the bound is rejected");
+    }
+
+    #[test]
+    fn fixture_record_case_exposes_no_write_pairing_or_allow_writes_path() {
+        for operation in ["set-dpi", "pair", "unpair", "raw-lighting"] {
+            Cli::try_parse_from([
+                "openlogi",
+                "fixture",
+                "record",
+                "case",
+                "--operation",
+                operation,
+                "--name",
+                "unsafe",
+                "--channel",
+                "direct",
+                "--output",
+                "case.json",
+            ])
+            .expect_err("write and pairing operation names must be rejected");
+        }
+
+        Cli::try_parse_from([
+            "openlogi",
+            "fixture",
+            "record",
+            "case",
+            "--operation",
+            "dpi-info",
+            "--name",
+            "dpi",
+            "--channel",
+            "direct",
+            "--output",
+            "case.json",
+            "--allow-writes",
+        ])
+        .expect_err("--allow-writes must not exist in this command");
+    }
+
+    #[test]
+    fn direct_fixture_help_discloses_receiver_discovery_side_effects() {
+        for args in [
+            vec!["openlogi", "fixture", "record", "case", "--help"],
+            vec!["openlogi", "fixture", "contribute", "--help"],
+        ] {
+            let help = Cli::try_parse_from(args)
+                .expect_err("help exits without accessing hardware")
+                .to_string();
+            for disclosure in [
+                "wireless notifications",
+                "arrival reports",
+                "before target selection",
+                "not restored",
+                "do not change device settings or pairings",
+            ] {
+                assert!(help.contains(disclosure), "missing {disclosure}: {help}");
+            }
+        }
+    }
+
+    #[test]
+    fn fixture_record_profile_requires_synthetic_metadata_and_output() {
+        let cli = Cli::try_parse_from([
+            "openlogi",
+            "fixture",
+            "record",
+            "profile",
+            "--id",
+            "mx-master-3s-001",
+            "--name",
+            "Synthetic MX Master 3S",
+            "--output",
+            "profile.json",
+            "--device",
+            "MX Master 3S",
+            "--force",
+        ])
+        .expect("valid profile capture parses");
+
+        match cli.cmd.expect("subcommand present") {
+            Command::Fixture(FixtureCmd::Record(FixtureRecordCmd::Profile(
+                RecordProfileArgs {
+                    id,
+                    name,
+                    output,
+                    device,
+                    force,
+                },
+            ))) => {
+                assert_eq!(id, "mx-master-3s-001");
+                assert_eq!(name, "Synthetic MX Master 3S");
+                assert_eq!(output, std::path::PathBuf::from("profile.json"));
+                assert_eq!(device.as_deref(), Some("MX Master 3S"));
+                assert!(force);
+            }
+            other => panic!("expected Fixture(Record(Profile)), got {other:?}"),
+        }
+
+        let required_flags = ["--id", "--name", "--output"];
+        let complete = [
+            "--id",
+            "synthetic-id",
+            "--name",
+            "Synthetic profile",
+            "--output",
+            "profile.json",
+        ];
+        for missing in required_flags {
+            let mut args = vec!["openlogi", "fixture", "record", "profile"];
+            let mut index = 0;
+            while index < complete.len() {
+                if complete[index] != missing {
+                    args.extend_from_slice(&complete[index..=index + 1]);
+                }
+                index += 2;
+            }
+            Cli::try_parse_from(args).expect_err("profile metadata and output must be explicit");
+        }
+    }
+
+    #[test]
+    fn fixture_record_profile_help_is_agent_only_and_semantic() {
+        let command = Cli::command();
+        let mut profile = command
+            .find_subcommand("fixture")
+            .and_then(|fixture| fixture.find_subcommand("record"))
+            .and_then(|record| record.find_subcommand("profile"))
+            .expect("profile command exists")
+            .clone();
+        let help = profile.render_long_help().to_string();
+
+        assert!(help.contains("running Agent IPC"), "{help}");
+        assert!(help.contains("without direct hardware access"), "{help}");
+        assert!(help.contains("Synthetic fixture profile ID"), "{help}");
+        for forbidden in ["--direct", "--capacity", "--allow-writes", "--operation"] {
+            assert!(
+                !help.contains(forbidden),
+                "profile help exposed {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn fixture_record_profile_exposes_no_direct_raw_or_write_path() {
+        let base = [
+            "openlogi",
+            "fixture",
+            "record",
+            "profile",
+            "--id",
+            "synthetic-id",
+            "--name",
+            "Synthetic profile",
+            "--output",
+            "profile.json",
+        ];
+        for forbidden in [
+            "--direct",
+            "--capacity",
+            "--allow-writes",
+            "--operation",
+            "--channel",
+        ] {
+            let mut args = base.to_vec();
+            args.push(forbidden);
+            if forbidden == "--capacity" || forbidden == "--operation" || forbidden == "--channel" {
+                args.push("value");
+            }
+            Cli::try_parse_from(args).expect_err("profile capture must reject non-Agent paths");
+        }
+    }
+
+    #[test]
+    fn fixture_verify_accepts_exactly_one_corpus_directory() {
+        let cli = Cli::try_parse_from([
+            "openlogi",
+            "fixture",
+            "verify",
+            "fixtures/devices/mx-master-3s-001",
+        ])
+        .expect("fixture verify parses");
+
+        match cli.cmd.expect("subcommand present") {
+            Command::Fixture(FixtureCmd::Verify(VerifyArgs { directory })) => {
+                assert_eq!(
+                    directory,
+                    std::path::PathBuf::from("fixtures/devices/mx-master-3s-001")
+                );
+            }
+            other => panic!("expected Fixture(Verify), got {other:?}"),
+        }
+
+        Cli::try_parse_from(["openlogi", "fixture", "verify"])
+            .expect_err("fixture directory must be required");
+        Cli::try_parse_from(["openlogi", "fixture", "verify", "one", "two"])
+            .expect_err("only one fixture directory may be verified at a time");
     }
 }

@@ -14,6 +14,25 @@ on:
         type: boolean
         required: false
         default: false
+      build_version:
+        description: >-
+          The release's build version, as `cargo xtask release version` prints
+          it: the bundles' CFBundleVersion and the MSI ProductVersion. Empty
+          for a build that is not a release.
+        type: string
+        required: false
+        default: ""
+      stamp_version:
+        description: >-
+          The version a beta builds at, as `cargo xtask release version` prints
+          it. The Rust-building legs stamp it into the workspace before they
+          build deliverables; the stamp command itself first compiles xtask at
+          the source tree's version. Empty for a stable release, which builds
+          at the workspace version,
+          and for a build that is not a release.
+        type: string
+        required: false
+        default: ""
     outputs:
       # The caller's publish gate ships the macOS DMG even when a Windows/Linux
       # leg failed, so it needs each leg's result — a single reusable-workflow
@@ -31,6 +50,9 @@ on:
       linux_result:
         description: Result of the Linux packages build job.
         value: ${{ jobs.results.outputs.linux }}
+      linux_flatpak_result:
+        description: Result of the Linux Flatpak bundle build job.
+        value: ${{ jobs.results.outputs.linux_flatpak }}
   # PR builds are opt-in: add the `needs: build` label to produce unsigned
   # installers for testing. `closed` / unlabel cancel an in-flight run via
   # concurrency (jobs below no-op on those actions).
@@ -42,6 +64,16 @@ on:
         description: Sign and notarize (needs the release-environment secrets).
         type: boolean
         default: false
+      # A dry run of a beta's build before the tag exists. Unsigned only: a
+      # signed bundle also needs the beta's numeric build version, which only
+      # `release version` on a tag supplies (see the should-build job).
+      stamp_version:
+        description: >-
+          Build unsigned at this version, as a beta tag would (for example
+          0.8.18-beta.1). Empty builds at the workspace version.
+        type: string
+        required: false
+        default: ""
 
 concurrency:
   # PR number keeps the group stable across open/sync/label/close — on a
@@ -63,8 +95,10 @@ env:
   RUSTC_WRAPPER: sccache
   SCCACHE_GHA_ENABLED: "true"
   # PR merge refs and release tags cannot warm another ref. Only dispatches
-  # and other branch-scoped runs write reusable compiler objects.
-  SCCACHE_GHA_RW_MODE: ${{ (github.event_name != 'pull_request' && github.ref_type != 'tag') && 'READ_WRITE' || 'READ_ONLY' }}
+  # and other branch-scoped runs write reusable compiler objects. Stamped
+  # workspace objects depend on the stamped version, so a stamped dispatch
+  # only reads; objects for unchanged third-party crates stay reusable.
+  SCCACHE_GHA_RW_MODE: ${{ (github.event_name != 'pull_request' && github.ref_type != 'tag' && !inputs.stamp_version) && 'READ_WRITE' || 'READ_ONLY' }}
 
 jobs:
   # Opt-in gate for PR builds. Non-PR triggers (workflow_call / dispatch)
@@ -76,6 +110,18 @@ jobs:
     outputs:
       run: ${{ steps.gate.outputs.run }}
     steps:
+      # Sparkle orders updates by CFBundleVersion, which falls back to the
+      # stamped version without a build version. It reads `0.8.18-beta.1` as
+      # `0.8.18`, so a signed tester build could not update through Sparkle to
+      # a later beta whose build version is below that, such as `0.8.17.N`.
+      # A tag always passes both; a dispatch can only pass the stamp.
+      - name: Refuse a signed stamp without its build version
+        if: ${{ inputs.sign && inputs.stamp_version != '' && inputs.build_version == '' }}
+        env:
+          STAMP_VERSION: ${{ inputs.stamp_version }}
+        run: |
+          echo "::error::A signed build at ${STAMP_VERSION} needs the beta's build version, which only a beta tag supplies. Dispatch a stamped build unsigned." >&2
+          exit 1
       - id: gate
         env:
           EVENT_NAME: ${{ github.event_name }}
@@ -179,10 +225,14 @@ jobs:
           APPLE_ID: ${{ secrets.OP_APPLE_SECRET_ITEM }}/APPLE_ID
           APPLE_PASSWORD: ${{ secrets.OP_APPLE_SECRET_ITEM }}/APPLE_PASSWORD
           APPLE_TEAM_ID: ${{ secrets.OP_APPLE_SECRET_ITEM }}/APPLE_TEAM_ID
+          # Base64 of the agent's Developer ID provisioning profile, which grants
+          # the HID virtual-device entitlement (the virtual HID keyboard).
+          APPLE_AGENT_PROVISIONING_PROFILE: ${{ secrets.OP_APPLE_SECRET_ITEM }}/APPLE_AGENT_PROVISIONING_PROFILE
           GITHUB_APP_ID: ${{ secrets.OP_GITHUB_APP_ITEM }}/GITHUB_APP_ID
           GITHUB_APP_PRIVATE_KEY: ${{ secrets.OP_GITHUB_APP_ITEM }}/GITHUB_APP_PRIVATE_KEY
           OPENLOGI_UPDATE_BASE_URL: ${{ secrets.OP_R2_SECRET_ITEM }}/OPENLOGI_UPDATE_BASE_URL
           OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY: ${{ secrets.OP_R2_SECRET_ITEM }}/OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY
+          OPENLOGI_SPARKLE_PUBLIC_ED_KEY: ${{ secrets.OP_R2_SECRET_ITEM }}/OPENLOGI_SPARKLE_PUBLIC_ED_KEY
 
       - name: Cache Homebrew downloads
         uses: actions/cache@v6
@@ -210,10 +260,12 @@ jobs:
           APPLE_ID: ${{ steps.load_secrets.outputs.APPLE_ID }}
           APPLE_PASSWORD: ${{ steps.load_secrets.outputs.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ steps.load_secrets.outputs.APPLE_TEAM_ID }}
+          APPLE_AGENT_PROVISIONING_PROFILE: ${{ steps.load_secrets.outputs.APPLE_AGENT_PROVISIONING_PROFILE }}
           GITHUB_APP_ID: ${{ steps.load_secrets.outputs.GITHUB_APP_ID }}
           GITHUB_APP_PRIVATE_KEY: ${{ steps.load_secrets.outputs.GITHUB_APP_PRIVATE_KEY }}
           OPENLOGI_UPDATE_BASE_URL: ${{ steps.load_secrets.outputs.OPENLOGI_UPDATE_BASE_URL }}
           OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY: ${{ steps.load_secrets.outputs.OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY }}
+          OPENLOGI_SPARKLE_PUBLIC_ED_KEY: ${{ steps.load_secrets.outputs.OPENLOGI_SPARKLE_PUBLIC_ED_KEY }}
         run: |
           set -euo pipefail
           : "${APPLE_SIGNING_IDENTITY:?Configure APPLE_SIGNING_IDENTITY in 1Password}"
@@ -222,10 +274,12 @@ jobs:
           : "${APPLE_ID:?Configure APPLE_ID in 1Password}"
           : "${APPLE_PASSWORD:?Configure APPLE_PASSWORD in 1Password}"
           : "${APPLE_TEAM_ID:?Configure APPLE_TEAM_ID in 1Password}"
+          : "${APPLE_AGENT_PROVISIONING_PROFILE:?Configure APPLE_AGENT_PROVISIONING_PROFILE in 1Password}"
           : "${GITHUB_APP_ID:?Configure GITHUB_APP_ID in 1Password}"
           : "${GITHUB_APP_PRIVATE_KEY:?Configure GITHUB_APP_PRIVATE_KEY in 1Password}"
           : "${OPENLOGI_UPDATE_BASE_URL:?Configure OPENLOGI_UPDATE_BASE_URL in 1Password}"
           : "${OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY:?Configure OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY in 1Password}"
+          : "${OPENLOGI_SPARKLE_PUBLIC_ED_KEY:?Configure OPENLOGI_SPARKLE_PUBLIC_ED_KEY in 1Password}"
 
       - name: Import Apple signing certificate
         if: ${{ inputs.sign }}
@@ -234,16 +288,39 @@ jobs:
           p12-file-base64: ${{ steps.load_secrets.outputs.APPLE_CERTIFICATE }}
           p12-password: ${{ steps.load_secrets.outputs.APPLE_CERTIFICATE_PASSWORD }}
 
+      # A beta builds at its own version, so its bundles, packages and
+      # update engine all report it. `cargo xtask release stamp-version`
+      # writes it into the workspace manifests and Cargo.lock, uncommitted.
+      - name: Stamp the release version
+        if: ${{ inputs.stamp_version }}
+        shell: bash
+        env:
+          STAMP_VERSION: ${{ inputs.stamp_version }}
+        run: cargo run -q -p xtask -- release stamp-version --version "$STAMP_VERSION"
+
       - name: Build and package OpenLogi
         env:
           APPLE_SIGNING_IDENTITY: ${{ steps.load_secrets.outputs.APPLE_SIGNING_IDENTITY }}
+          APPLE_AGENT_PROVISIONING_PROFILE: ${{ steps.load_secrets.outputs.APPLE_AGENT_PROVISIONING_PROFILE }}
           OPENLOGI_UPDATE_BASE_URL: ${{ steps.load_secrets.outputs.OPENLOGI_UPDATE_BASE_URL }}
           OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY: ${{ steps.load_secrets.outputs.OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY }}
+          # With the key, the bundle embeds Sparkle.framework and reads its
+          # per-architecture appcast; an unsigned build has none and updates
+          # through the built-in engine.
+          OPENLOGI_SPARKLE_PUBLIC_ED_KEY: ${{ steps.load_secrets.outputs.OPENLOGI_SPARKLE_PUBLIC_ED_KEY }}
+          # `macos package` stamps it as every bundle's CFBundleVersion; empty
+          # means the crate version.
+          OPENLOGI_BUILD_VERSION: ${{ inputs.build_version }}
         run: |
           set -euo pipefail
-          export OPENLOGI_UPDATE_MANIFEST_URL="${OPENLOGI_UPDATE_BASE_URL%/}/channels/stable/latest.json"
           if [ "${{ inputs.sign }}" = "true" ]; then
-            cargo run -p xtask -- macos package --target ${{ matrix.target }} --sign-identity "$APPLE_SIGNING_IDENTITY"
+            # xtask checks the profile before it builds, and the signed agent
+            # against it after signing.
+            profile="$RUNNER_TEMP/openlogi-agent.provisionprofile"
+            printf '%s' "$APPLE_AGENT_PROVISIONING_PROFILE" | base64 --decode > "$profile"
+            cargo run -p xtask -- macos package --target ${{ matrix.target }} \
+              --sign-identity "$APPLE_SIGNING_IDENTITY" \
+              --agent-provisioning-profile "$profile"
           else
             cargo run -p xtask -- macos package --target ${{ matrix.target }}
           fi
@@ -285,6 +362,37 @@ jobs:
           check "$app/Contents/Library/LoginItems/OpenLogi Agent.app" "org.openlogi.agent" "OpenLogi Agent"
           check "$app/Contents/Library/LoginItems/OpenLogi Overlay.app" "org.openlogi.overlay" "OpenLogi Overlay"
 
+      # Same deliberate redundancy for Sparkle: a release that reads the wrong
+      # architecture's feed installs a DMG that cannot run, and one whose
+      # Sparkle polls breaks the opt-in update promise.
+      - name: Verify Sparkle configuration
+        if: ${{ inputs.sign }}
+        env:
+          EXPECTED_ARCH: ${{ matrix.arch }}
+          OPENLOGI_UPDATE_BASE_URL: ${{ steps.load_secrets.outputs.OPENLOGI_UPDATE_BASE_URL }}
+          OPENLOGI_SPARKLE_PUBLIC_ED_KEY: ${{ steps.load_secrets.outputs.OPENLOGI_SPARKLE_PUBLIC_ED_KEY }}
+          OPENLOGI_BUILD_VERSION: ${{ inputs.build_version }}
+        run: |
+          set -euo pipefail
+          app="target/release/bundle/osx/OpenLogi.app"
+          framework="$app/Contents/Frameworks/Sparkle.framework"
+          plist() { /usr/libexec/PlistBuddy -c "Print :$1" "$app/Contents/Info.plist"; }
+          [ -f "$framework/Versions/B/Sparkle" ]
+          # Not sandboxed: Sparkle's XPC services are removed, not shipped.
+          [ ! -e "$framework/XPCServices" ]
+          [ ! -e "$framework/Versions/B/XPCServices" ]
+          [ "$(plist SUFeedURL)" = "${OPENLOGI_UPDATE_BASE_URL%/}/channels/stable/appcast-${EXPECTED_ARCH}.xml" ]
+          [ "$(plist SUPublicEDKey)" = "$OPENLOGI_SPARKLE_PUBLIC_ED_KEY" ]
+          [ "$(plist SUEnableAutomaticChecks)" = "false" ]
+          [ "$(plist SUAllowsAutomaticUpdates)" = "true" ]
+          [ "$(plist SUEnableSystemProfiling)" = "false" ]
+          [ "$(plist SUVerifyUpdateBeforeExtraction)" = "true" ]
+          # Sparkle compares the appcast's build version against
+          # CFBundleVersion; cargo-bundle's build timestamp there would rank
+          # above every release, so no update would ever be offered. Without a
+          # build version, the crate version stands in for it.
+          [ "$(plist CFBundleVersion)" = "${OPENLOGI_BUILD_VERSION:-$(plist CFBundleShortVersionString)}" ]
+
       - name: Verify signed app bundle
         if: ${{ inputs.sign }}
         run: |
@@ -293,13 +401,30 @@ jobs:
           helper="$app/Contents/Library/LoginItems/OpenLogi Agent.app"
           overlay="$app/Contents/Library/LoginItems/OpenLogi Overlay.app"
           cli="$app/Contents/MacOS/openlogi"
+          framework="$app/Contents/Frameworks/Sparkle.framework"
           codesign --verify --strict --verbose=2 "$app"
           [ -d "$helper" ] && codesign --verify --strict --verbose=2 "$helper"
           [ -d "$overlay" ] && codesign --verify --strict --verbose=2 "$overlay"
           [ -f "$cli" ] && codesign --verify --strict --verbose=2 "$cli"
+          codesign --verify --deep --strict --verbose=2 "$framework"
+          # The hardened runtime loads only a framework signed by the app's own
+          # team; Sparkle ships ad-hoc signed until xtask re-signs it.
+          team() { codesign -dv "$1" 2>&1 | sed -n 's/^TeamIdentifier=//p'; }
+          app_team=$(team "$app")
+          [ -n "$app_team" ]
+          [ "$app_team" != "not set" ]
+          for code in "$framework" "$framework/Versions/B/Autoupdate" "$framework/Versions/B/Updater.app"; do
+            [ "$(team "$code")" = "$app_team" ]
+          done
           # Fail the release if camera access would still be blocked at runtime.
           codesign -d --entitlements - "$app" 2>/dev/null \
             | grep -q 'com.apple.security.device.camera'
+          # Fail the release if the agent would type through CGEventPost instead
+          # of its virtual HID keyboard. The claim and the profile ship together:
+          # AMFI kills an agent that claims the entitlement without its profile.
+          [ -f "$helper/Contents/embedded.provisionprofile" ]
+          codesign -d --entitlements - "$helper" 2>/dev/null \
+            | grep -q 'com.apple.developer.hid.virtual.device'
 
       - name: Notarize DMG
         if: ${{ inputs.sign }}
@@ -329,10 +454,30 @@ jobs:
           ref_name="${ref_name//\//-}"
           cp target/release/OpenLogi.dmg "dist/OpenLogi-${ref_name}-macos-${{ matrix.arch }}.dmg"
 
+      # Here and not in the publish job: Sparkle's BinaryDelta runs only on
+      # macOS. The deltas come from the stapled DMG, which holds the exact app
+      # users install, and each one is applied and compared before it is kept.
+      # One that cannot be made is a warning: the feed still offers the full
+      # DMG, so it costs a larger download, never an update.
+      - name: Make Sparkle deltas
+        if: ${{ inputs.sign && github.ref_type == 'tag' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cargo run -p xtask -- release sparkle-deltas \
+            --dmg "dist/OpenLogi-${GITHUB_REF_NAME}-macos-${{ matrix.arch }}.dmg" \
+            --tag "$GITHUB_REF_NAME"
+
       - uses: actions/upload-artifact@v7
         with:
           name: OpenLogi-macos-dmg-${{ matrix.arch }}
-          path: dist/*.dmg
+          # The deltas travel with their DMG; `release appcast` reads the
+          # metadata next to each one in the publish job.
+          path: |
+            dist/*.dmg
+            dist/*.sparkle.delta
+            dist/*.sparkle.delta.json
           # 'warn' (the default) would let an empty-dist job stay green while
           # `results.macos` reports success and the publish gate ships nothing —
           # same reasoning as the windows zip upload.
@@ -473,6 +618,16 @@ jobs:
           : "${OPENLOGI_UPDATE_BASE_URL:?Configure OPENLOGI_UPDATE_BASE_URL in the R2 1Password item}"
           : "${OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY:?Configure OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY in the R2 1Password item}"
 
+      # A beta builds at its own version, so its bundles, packages and
+      # update engine all report it. `cargo xtask release stamp-version`
+      # writes it into the workspace manifests and Cargo.lock, uncommitted.
+      - name: Stamp the release version
+        if: ${{ inputs.stamp_version }}
+        shell: bash
+        env:
+          STAMP_VERSION: ${{ inputs.stamp_version }}
+        run: cargo run -q -p xtask -- release stamp-version --version "$STAMP_VERSION"
+
       # The CLI ships inside the same zip and MSI rather than as a separate
       # artifact, so job and artifact names carry no GUI qualifier. The GUI is
       # a thin IPC client; the headless agent (ported in
@@ -480,9 +635,10 @@ jobs:
       # spawns a sibling `openlogi-agent.exe` when the pipe is absent — so the
       # agent MUST ship next to the GUI or the app connects to nothing (#347).
       # The updater env mirrors the macOS bundle step: openlogi-desktop reads the
-      # key and manifest URL via option_env! at compile time. Unsigned builds
-      # get empty values and keep the fail-closed dev behaviour, so the
-      # manifest-URL export is guarded rather than derived from an empty base.
+      # key and update host via option_env! at compile time and derives the
+      # manifest URL from the host itself. Unsigned builds get empty values:
+      # the app then reads the official host and keeps the fail-closed dev
+      # behaviour, since no key is embedded.
       - name: Build OpenLogi executables
         shell: bash
         env:
@@ -490,9 +646,6 @@ jobs:
           OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY: ${{ steps.update_config.outputs.OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY }}
         run: |
           set -euo pipefail
-          if [ -n "$OPENLOGI_UPDATE_BASE_URL" ]; then
-            export OPENLOGI_UPDATE_MANIFEST_URL="${OPENLOGI_UPDATE_BASE_URL%/}/channels/stable/latest.json"
-          fi
           cargo build --release -p openlogi-desktop -p openlogi-overlay -p openlogi-agent -p openlogi --target ${{ matrix.target }}
 
       # Federated (passwordless) login. Requires an app registration whose federated
@@ -590,6 +743,9 @@ jobs:
             Write-Error "expected 4 staged files, found $staged — a name collision dropped one"
             exit 1
           }
+          # The MSI extracts this ZIP but only installs its explicitly listed
+          # executables, so the portable marker never enters an MSI install.
+          Copy-Item packaging\windows\openlogi-installation.json stage\openlogi-installation.json
           # Zipping after signing is safe: Authenticode lives in the PE files.
           $ref = $env:GITHUB_REF_NAME -replace '/', '-'
           Compress-Archive -Path stage\* -DestinationPath "dist\OpenLogi-$ref-windows-${{ matrix.arch }}.zip"
@@ -699,12 +855,14 @@ jobs:
 
       - name: Build the MSI
         shell: pwsh
+        env:
+          OPENLOGI_BUILD_VERSION: ${{ inputs.build_version }}
         run: |
-          # ProductVersion must be a numeric x.y.z; non-tag dispatches build a
-          # throwaway 0.0.0 package.
-          if ($env:GITHUB_REF_NAME -match '^v(\d+\.\d+\.\d+)$') {
-            $version = $Matches[1]
-          } else {
+          # ProductVersion is the release's build version (numeric, three or
+          # four fields); a build that is not a release makes a throwaway
+          # 0.0.0 package.
+          $version = $env:OPENLOGI_BUILD_VERSION
+          if (-not $version) {
             $version = '0.0.0'
           }
           # Selected by exact name, never by glob order: the zip carries multiple
@@ -858,15 +1016,26 @@ jobs:
           # libxkbcommon-x11-dev / libwayland-dev / libx11-xcb-dev, so every
           # tagged Linux build failed to link (`-lxkbcommon-x11`) and took the
           # whole GitHub Release down with it.
+          # `zstd` lets `linux package` read the Arch package's .PKGINFO back.
           sudo apt-get install -y \
             libudev-dev \
             gcc g++ clang libfontconfig-dev libwayland-dev \
             libxkbcommon-x11-dev libx11-xcb-dev \
-            libssl-dev libzstd-dev pkg-config
+            libssl-dev libzstd-dev pkg-config zstd
           curl -fsSLo /tmp/nfpm.deb \
             "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_${NFPM_ARCH}.deb"
           echo "${NFPM_SHA256}  /tmp/nfpm.deb" | sha256sum -c
           sudo dpkg -i /tmp/nfpm.deb
+
+      # A beta builds at its own version, so its bundles, packages and
+      # update engine all report it. `cargo xtask release stamp-version`
+      # writes it into the workspace manifests and Cargo.lock, uncommitted.
+      - name: Stamp the release version
+        if: ${{ inputs.stamp_version }}
+        shell: bash
+        env:
+          STAMP_VERSION: ${{ inputs.stamp_version }}
+        run: cargo run -q -p xtask -- release stamp-version --version "$STAMP_VERSION"
 
       - name: Build and package
         run: cargo run -p xtask -- linux package
@@ -917,6 +1086,144 @@ jobs:
           name: OpenLogi-linux-packages-${{ matrix.arch }}
           path: dist/*
 
+  # The same tree the .deb/.rpm are cut from, packaged as a single-file Flatpak
+  # bundle for the distributions where neither is native. Separate from
+  # linux-packages rather than folded into it: this build compiles the whole
+  # workspace again inside the Flatpak SDK, where the runner's rust-cache cannot
+  # reach, so pairing them would tie a thirty-minute job to an hour-long one and
+  # lose the .deb when the Flatpak leg failed.
+  linux-flatpak:
+    name: Linux Flatpak (${{ matrix.arch }})
+    needs: should-build
+    if: ${{ needs.should-build.outputs.run == 'true' }}
+    runs-on: ${{ matrix.runner }}
+    # Measured at ~10 minutes cold on ubuntu-latest, so this is a bound on a
+    # hang rather than an estimate — sized like linux-packages' 30 above, with
+    # room for the arm runner being slower.
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      # Native builds, like the packages above: the bundle is labelled with this
+      # arch, so a mismatched runner would ship a wrongly-named file.
+      - name: Verify runner architecture
+        env:
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: |
+          case "$(uname -m)" in
+            x86_64) got=amd64 ;;
+            aarch64) got=arm64 ;;
+            *) echo "unexpected machine $(uname -m)" >&2; exit 1 ;;
+          esac
+          test "$got" = "$EXPECTED_ARCH"
+
+      - name: Install flatpak and the runtime
+        env:
+          RUNTIME_VERSION: "25.08"
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder
+          flatpak remote-add --if-not-exists --user \
+            flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          # llvm20 because openlogi-camera pulls v4l2-sys-mit, whose build
+          # script runs bindgen and dlopens libclang; the base SDK ships none.
+          flatpak install --user -y --noninteractive flathub \
+            "org.freedesktop.Platform//${RUNTIME_VERSION}" \
+            "org.freedesktop.Sdk//${RUNTIME_VERSION}" \
+            "org.freedesktop.Sdk.Extension.llvm20//${RUNTIME_VERSION}"
+
+      # A beta builds at its own version, so its bundles, packages and
+      # update engine all report it. `cargo xtask release stamp-version`
+      # writes it into the workspace manifests and Cargo.lock, uncommitted.
+      # The AppStream stamp below reads the version back, so this goes first.
+      # The bundle itself builds inside the Flatpak SDK; only this step
+      # compiles on the runner, so only a stamped run sets up a toolchain.
+      # This leg runs no sccache action, so the workflow's sccache wrapper is
+      # switched off here. The bundle's sources skip target/.
+      - uses: dtolnay/rust-toolchain@stable
+        if: ${{ inputs.stamp_version }}
+      - name: Stamp the release version
+        if: ${{ inputs.stamp_version }}
+        shell: bash
+        env:
+          RUSTC_WRAPPER: ""
+          STAMP_VERSION: ${{ inputs.stamp_version }}
+        run: cargo run -q -p xtask -- release stamp-version --version "$STAMP_VERSION"
+
+      # AppStream is what software centres read, and a stale <release> would
+      # advertise a version the bundle is not. Both values come from the tree
+      # being built rather than from an input, so the label cannot drift from
+      # the binaries the way a version passed by hand can.
+      - name: Stamp the AppStream release
+        run: |
+          set -euo pipefail
+          version="$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
+          # The commit's own date, not today's: a rebuild of an old tag must
+          # not claim to have been released the day it was rebuilt.
+          released="$(git log -1 --format=%cs)"
+          echo "stamping ${version} (${released})"
+          python3 - "$version" "$released" <<'PY'
+          import re, sys
+          version, released = sys.argv[1], sys.argv[2]
+          path = "packaging/linux/flatpak/org.openlogi.OpenLogi.metainfo.xml"
+          text = open(path, encoding="utf-8").read()
+          text, n = re.subn(
+              r'<release version="[^"]*" date="[^"]*"/>',
+              f'<release version="{version}" date="{released}"/>',
+              text,
+              count=1,
+          )
+          if n != 1:
+              raise SystemExit("no <release> element to stamp in " + path)
+          open(path, "w", encoding="utf-8").write(text)
+          PY
+          grep '<release ' packaging/linux/flatpak/org.openlogi.OpenLogi.metainfo.xml
+
+      - name: Build the bundle
+        env:
+          PKG_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          # --disable-rofiles-fuse: the copy-on-write mount flatpak-builder
+          # prefers needs a FUSE mount the runner will not always grant, and
+          # failing that way looks like a build error rather than an
+          # environment one. The build is a throwaway tree here, so the
+          # protection it provides buys nothing.
+          flatpak-builder --user --disable-rofiles-fuse --force-clean \
+            --repo=repo --default-branch=stable \
+            build packaging/linux/flatpak/org.openlogi.OpenLogi.yml
+
+          mkdir -p dist
+          ref_name="${GITHUB_REF_NAME:-dev}"
+          ref_name="${ref_name//\//-}"
+          # --runtime-repo so installing the bundle knows where to get the
+          # runtime it needs; without it the install fails on a machine that
+          # does not already have the freedesktop platform.
+          flatpak build-bundle \
+            --runtime-repo=https://dl.flathub.org/repo/flathub.flatpakrepo \
+            repo "dist/openlogi-${ref_name}-linux-${PKG_ARCH}.flatpak" \
+            org.openlogi.OpenLogi stable
+          ls -lh dist/
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: OpenLogi-linux-flatpak-${{ matrix.arch }}
+          path: dist/*
+          # Already a compressed OSTree stream; zipping it again buys nothing.
+          compression-level: 0
+
   # Single owner of the GitHub Release. softprops/action-gh-release@v3 creates the
   # release as a draft, uploads every asset to that (mutable) draft, then publishes
   # it as its final step — so the release only becomes immutable once all DMGs and
@@ -931,13 +1238,14 @@ jobs:
   results:
     name: Build results
     if: ${{ always() }}
-    needs: [should-build, macos, windows, windows-msi, linux-packages]
+    needs: [should-build, macos, windows, windows-msi, linux-packages, linux-flatpak]
     runs-on: ubuntu-latest
     outputs:
       macos: ${{ needs.macos.result }}
       windows: ${{ needs.windows.result }}
       windows_msi: ${{ needs['windows-msi'].result }}
       linux: ${{ needs['linux-packages'].result }}
+      linux_flatpak: ${{ needs['linux-flatpak'].result }}
     steps:
       - name: Summarize
         run: |
@@ -945,3 +1253,4 @@ jobs:
           echo "windows=${{ needs.windows.result }}"
           echo "windows-msi=${{ needs['windows-msi'].result }}"
           echo "linux-packages=${{ needs['linux-packages'].result }}"
+          echo "linux-flatpak=${{ needs['linux-flatpak'].result }}"

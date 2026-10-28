@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "name": "dpi-info",
+  "channel": "target",
+  "report_support": "long_only",
+  "exchanges": [
+    {
+      "request_match": "hidpp20",
+      "request": "11ff001000000000000000000000000000000000",
+      "response": "11ff001004050000000000000000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "11ff000022010000000000000000000000000000",
+      "response": "11ff00000d000200000000000000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "11ff0d0000000000000000000000000000000000",
+      "response": "11ff0d0001000000000000000000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "11ff0d2000000000000000000000000000000000",
+      "response": "11ff0d200003e803e80000000000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "11ff0d1000000000000000000000000000000000",
+      "response": "11ff0d100000c8e0321f40000000000000000000",
+      "required": true
+    }
+  ]
+}

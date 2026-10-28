@@ -2,6 +2,7 @@
 //! (Bolt and Unifying pairing registers and the `0x0005` marketing type),
 //! battery level/status, and serial-number normalisation. No I/O.
 
+use hidpp::feature::adc_measurement::AdcChargingStatus as HidppAdcChargingStatus;
 use hidpp::feature::battery_status::LegacyBatteryStatus as HidppLegacyBatteryStatus;
 use hidpp::feature::battery_voltage::VoltageChargingStatus as HidppVoltageChargingStatus;
 use hidpp::feature::device_type_and_name::DeviceType as HidppDeviceType;
@@ -10,7 +11,7 @@ use hidpp::feature::unified_battery::{
 };
 use hidpp::receiver::bolt::DeviceKind as BoltDeviceKind;
 use hidpp::receiver::unifying::DeviceKind as UnifyingDeviceKind;
-use openlogi_core::device::{BatteryLevel, BatteryStatus, DeviceKind};
+use openlogi_core::device::{BatteryInfo, BatteryLevel, BatteryStatus, DeviceKind};
 
 /// Trim NUL padding and whitespace from a `DeviceInformation` serial; an
 /// all-padding serial collapses to `None`.
@@ -153,13 +154,27 @@ pub(crate) fn map_voltage_battery_status(status: HidppVoltageChargingStatus) -> 
     }
 }
 
-/// Estimate a charge percentage from a `0x1001` battery voltage reading.
+/// Map a `0x1F20` ADC-measurement charging status to our [`BatteryStatus`].
+pub(crate) fn map_adc_battery_status(status: HidppAdcChargingStatus) -> BatteryStatus {
+    match status {
+        HidppAdcChargingStatus::Discharging => BatteryStatus::Discharging,
+        HidppAdcChargingStatus::Charging => BatteryStatus::Charging,
+        HidppAdcChargingStatus::Full => BatteryStatus::Full,
+        _ => BatteryStatus::Unknown,
+    }
+}
+
+/// Estimate a charge percentage from a `0x1001` or `0x1F20` battery voltage
+/// reading.
 ///
-/// The feature reports millivolt, not percent, so the discharge curve is ours
+/// Both features report millivolt, not percent, so the discharge curve is ours
 /// to model. The thresholds and linear interpolation between them are
 /// reverse-engineered, matching Solaar's `estimate_battery_level_percentage`
 /// table for the single-cell Li-Po batteries these devices carry; libratbag
-/// carries an equivalent mapping.
+/// carries an equivalent mapping, and Solaar applies the same table to
+/// `0x1F20`. The Linux kernel's `0x1F20` table reads the same voltage ~15
+/// points higher mid-range; HeadsetControl's G733 calibration sits with
+/// Solaar's.
 pub(crate) fn voltage_battery_percentage(voltage_mv: u16) -> u8 {
     /// Solaar's measured (millivolt, percent) discharge curve, descending.
     const CURVE: [(u16, u8); 13] = [
@@ -198,12 +213,51 @@ pub(crate) fn voltage_battery_percentage(voltage_mv: u16) -> u8 {
     0
 }
 
+/// Build a [`BatteryInfo`] from a legacy `0x1000` reading.
+///
+/// The discharge level is a reading only while the device runs on battery.
+/// In every other state the firmware reports `0`, meaning unknown. That is
+/// how the Linux HID++ driver reads the feature
+/// (`hidpp20_batterylevel_map_status_capacity`), and it sets charge complete
+/// to 100 %. Here charge complete reads 100 % / [`BatteryLevel::Full`]. Any
+/// other off-battery state that reports `0` has no percentage and a
+/// [`BatteryLevel::Unknown`] level: the "charging, no reading" shape a voltage
+/// source gives on a cold start, rather than a critically empty battery.
+///
+/// `mileage` is the device's capability: with it the discharge level is a gauge
+/// reading and takes the display buckets; without it the level is one of four
+/// coarse levels, which [`coarse_legacy_battery_level`] reads back.
+pub(crate) fn legacy_battery_info(
+    discharge_level: u8,
+    status: HidppLegacyBatteryStatus,
+    mileage: bool,
+) -> BatteryInfo {
+    let level_of = if mileage {
+        legacy_battery_level_from_percentage
+    } else {
+        coarse_legacy_battery_level
+    };
+    let status = map_legacy_battery_status(status);
+    let (percentage, level) = match status {
+        BatteryStatus::Full => (Some(100), BatteryLevel::Full),
+        BatteryStatus::Discharging => (Some(discharge_level), level_of(discharge_level)),
+        _ if discharge_level == 0 => (None, BatteryLevel::Unknown),
+        _ => (Some(discharge_level), level_of(discharge_level)),
+    };
+    BatteryInfo {
+        percentage,
+        level,
+        status,
+    }
+}
+
 /// Derive a coarse [`BatteryLevel`] from a discharge percentage. The legacy
 /// `0x1000` feature reports a percentage but, unlike `0x1004`, no level bitmask,
 /// so the bucket is ours to pick.
 ///
-/// ponytail: fixed display buckets, not device thresholds. Lift to the device's
-/// own thresholds only if `0x1000`'s capability query (function 1) is wired up.
+/// Fixed display buckets, not device thresholds: a `0x1000` mileage reading
+/// and the voltage estimates come with none. A `0x1000` device without
+/// mileage uses [`coarse_legacy_battery_level`] instead.
 pub(crate) fn legacy_battery_level_from_percentage(percentage: u8) -> BatteryLevel {
     match percentage {
         90..=u8::MAX => BatteryLevel::Full,
@@ -213,11 +267,30 @@ pub(crate) fn legacy_battery_level_from_percentage(percentage: u8) -> BatteryLev
     }
 }
 
+/// Read back the level a legacy `0x1000` device without mileage encodes in its
+/// discharge level.
+///
+/// Such a device reports one of four levels as a percentage. The HID++ 2.0
+/// draft maps `0`–`10` to critical, `11`–`30` to low, `31`–`80` to good and
+/// `81`–`100` to full. The Linux HID++ driver (`hidpp_map_battery_level`)
+/// moves `30` to good, because some devices report `30` on new batteries and
+/// Logitech's Windows software shows it as good. This follows the driver.
+pub(crate) fn coarse_legacy_battery_level(discharge_level: u8) -> BatteryLevel {
+    match discharge_level {
+        0..=10 => BatteryLevel::Critical,
+        11..=29 => BatteryLevel::Low,
+        30..=80 => BatteryLevel::Good,
+        81..=u8::MAX => BatteryLevel::Full,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        BatteryLevel, DeviceKind, UnifyingDeviceKind, legacy_battery_level_from_percentage,
-        map_unifying_kind, resolve_device_kind, voltage_battery_percentage,
+        BatteryLevel, BatteryStatus, DeviceKind, HidppLegacyBatteryStatus,
+        HidppVoltageChargingStatus, UnifyingDeviceKind, coarse_legacy_battery_level,
+        legacy_battery_info, legacy_battery_level_from_percentage, map_unifying_kind,
+        map_voltage_battery_status, resolve_device_kind, voltage_battery_percentage,
     };
 
     #[test]
@@ -281,11 +354,87 @@ mod tests {
     }
 
     #[test]
+    fn coarse_legacy_levels_follow_the_four_level_ranges() {
+        for (discharge_level, expected) in [
+            (0, BatteryLevel::Critical),
+            (5, BatteryLevel::Critical),
+            (10, BatteryLevel::Critical),
+            (11, BatteryLevel::Low),
+            (25, BatteryLevel::Low),
+            (29, BatteryLevel::Low),
+            // The draft says low; the Linux driver and Logitech's Windows
+            // software say good.
+            (30, BatteryLevel::Good),
+            (50, BatteryLevel::Good),
+            (80, BatteryLevel::Good),
+            (81, BatteryLevel::Full),
+            (100, BatteryLevel::Full),
+            (u8::MAX, BatteryLevel::Full),
+        ] {
+            assert_eq!(
+                coarse_legacy_battery_level(discharge_level),
+                expected,
+                "discharge level {discharge_level}"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_mileage_selects_the_level_mapping() {
+        // Values where the four-level ranges and the display buckets disagree.
+        for (discharge_level, coarse, display) in [
+            (15, BatteryLevel::Low, BatteryLevel::Critical),
+            (30, BatteryLevel::Good, BatteryLevel::Low),
+            (85, BatteryLevel::Full, BatteryLevel::Good),
+        ] {
+            let without = legacy_battery_info(
+                discharge_level,
+                HidppLegacyBatteryStatus::Discharging,
+                false,
+            );
+            let with =
+                legacy_battery_info(discharge_level, HidppLegacyBatteryStatus::Discharging, true);
+            assert_eq!(without.level, coarse, "{discharge_level} without mileage");
+            assert_eq!(with.level, display, "{discharge_level} with mileage");
+            assert_eq!(without.percentage, Some(discharge_level));
+            assert_eq!(with.percentage, Some(discharge_level));
+        }
+    }
+
+    #[test]
+    fn legacy_off_battery_rules_do_not_depend_on_mileage() {
+        for mileage in [false, true] {
+            let full = legacy_battery_info(0, HidppLegacyBatteryStatus::Full, mileage);
+            assert_eq!(
+                (full.percentage, full.level),
+                (Some(100), BatteryLevel::Full)
+            );
+            let charging = legacy_battery_info(0, HidppLegacyBatteryStatus::Recharging, mileage);
+            assert_eq!(
+                (charging.percentage, charging.level),
+                (None, BatteryLevel::Unknown)
+            );
+        }
+    }
+
+    #[test]
     fn voltage_percentage_clamps_at_the_curve_ends() {
         assert_eq!(voltage_battery_percentage(4400), 100);
         assert_eq!(voltage_battery_percentage(4186), 100);
         assert_eq!(voltage_battery_percentage(3500), 0);
         assert_eq!(voltage_battery_percentage(3200), 0);
+    }
+
+    #[test]
+    fn an_undefined_voltage_status_is_unknown_not_full() {
+        assert_eq!(
+            map_voltage_battery_status(HidppVoltageChargingStatus::Unknown),
+            BatteryStatus::Unknown
+        );
+        assert_eq!(
+            map_voltage_battery_status(HidppVoltageChargingStatus::Full),
+            BatteryStatus::Full
+        );
     }
 
     #[test]

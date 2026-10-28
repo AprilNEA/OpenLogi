@@ -5,26 +5,37 @@
 //! here. Per-component scratch state (hover index) stays
 //! in the owning entity.
 //!
-//! [`AppState::with_runtime`] resolves every paired device's asset + DPI
-//! target up front so views can switch instantly when the active device
-//! changes — no synchronous I/O during the device switch.
+//! [`AppState::new`] resolves every paired device's asset + DPI target up
+//! front so views can switch instantly when the active device changes — no
+//! synchronous I/O during the device switch.
+//!
+//! A mutator's prefix says where the change goes: `commit_*` persists it to
+//! `config.toml` (and tells the agent or the device when they care), `set_*`
+//! changes this process's memory and nothing else.
 
 use std::collections::BTreeMap;
 
-use gpui::{App, Context, Entity, EventEmitter, Global};
-use openlogi_core::app::ForegroundApp;
+use gpui::{App, Context, Entity, Global};
+use openlogi_core::app::{AppAliases, ForegroundApp, profile_applies_to};
 use openlogi_core::config::Config;
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_core::hid::{Dpi, SmartShiftStatus};
 use tokio::sync::mpsc;
 use tracing::warn;
 
+pub use backlight::DurationSteps;
 pub use config::ConfigPersistence;
 pub(crate) use device_key::DeviceKey;
+pub(crate) use device_session::ObservedConnection;
 pub use devices::DeviceRecord;
+pub(crate) use easy_switch::HostRenameRefusal;
+pub(crate) use events::{StateEvent, StateEvents};
 pub use light::LightCommandStatus;
 pub(crate) use load::Load;
-pub use load::{DpiStatus, SmartShiftLoad};
+pub use load::{
+    BacklightLoad, DisableKeysLoad, DpiLoad, EasySwitchLoad, FnLockLoad, ForceSensingLoad,
+    PointerSpeedLoad, ReportRateLoad, SmartShiftLoad,
+};
 
 /// Result of confirming a SmartShift write by reading the value back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,81 +57,89 @@ use agent::AgentSession;
 use bindings::BindingState;
 use device_store::DeviceStore;
 pub(crate) use devices::camera_model_info;
-use light::LightingState;
+pub(crate) use disable_keys::{DisableKeysError, DisableKeysPersistenceStatus};
+use light::LightSession;
 use pointer::PointerState;
 
 use crate::services::assets::AssetResolver;
 use crate::services::device_reads::DeviceReads;
+pub(crate) use crate::services::disable_keys_reads::ConfigReconciliation;
+use crate::services::disable_keys_reads::DisableKeysReads;
 use crate::state::config::ConfigState;
 use crate::state::devices::{build_device_list, pick_initial_device};
 
 mod action_ring;
 mod agent;
+mod backlight;
 mod bindings;
 mod camera;
 mod config;
 mod device_key;
-mod device_runtime;
+mod device_session;
 mod device_store;
 mod devices;
+mod disable_keys;
 mod dpi;
+mod easy_switch;
+mod events;
+mod fn_lock;
+mod force_sensing;
 mod inventory;
 mod light;
 mod lighting;
 mod load;
+mod os_layout;
 mod pointer;
+mod pointer_speed;
+mod reconciliation;
+mod report_rate;
 mod scroll;
 mod settings;
 mod smartshift;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 /// Default DPI value applied to a fresh AppState. Matches a common Logitech
 /// mid-range mouse and keeps the dot-preview visually obvious from frame one.
 pub const DEFAULT_DPI: Dpi = Dpi::new(1600);
 
-/// Semantic changes emitted by the shared application-state entity.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum StateEvent {
-    /// Agent connection or permission state changed.
-    AgentChanged,
-    /// The foreground application or recent-application list changed.
-    ForegroundChanged,
-    /// Cached diagnostics/event-monitor data changed.
-    #[cfg_attr(
-        not(all(target_os = "macos", debug_assertions)),
-        expect(dead_code, reason = "the live event monitor is macOS debug-only")
-    )]
-    DiagnosticsChanged,
-    /// The merged device inventory changed.
-    InventoryChanged,
-    /// The active device changed.
-    DeviceSelected(DeviceKey),
-    /// Mouse, keyboard, gesture, or Actions Ring bindings changed.
-    BindingsChanged(DeviceKey),
-    /// DPI data or the active DPI value changed.
-    DpiChanged(DeviceKey),
-    /// SmartShift data or write status changed.
-    SmartShiftChanged(DeviceKey),
-    /// Device or standalone-light settings changed.
-    LightingChanged(DeviceKey),
-    /// Camera settings or activity changed.
-    CameraChanged,
-    /// Host camera-permission status may have changed.
-    #[cfg_attr(
-        not(target_os = "macos"),
-        expect(dead_code, reason = "camera consent polling is macOS-only")
-    )]
-    CameraPermissionChanged,
-    /// Per-device preferences outside the feature-specific events changed.
-    DeviceConfigChanged(DeviceKey),
-    /// Application-wide preferences changed.
-    SettingsChanged,
-    /// The interface language switched live. Views re-render localized strings
-    /// on the accompanying refresh; this event is for localized text *cached
-    /// in state*, which must be recomputed in the new locale.
-    LanguageChanged,
+/// Everything a fresh [`AppState`] is built from.
+pub struct Sources<'a> {
+    /// The configuration as loaded.
+    pub config: Config,
+    /// The receivers and paired devices the agent has enumerated so far.
+    pub inventories: &'a [DeviceInventory],
+    /// The standalone raw-HID devices the agent has recognized so far.
+    pub standalone: &'a [StandaloneDevice],
+    /// Resolves each device's art.
+    pub resolver: &'a AssetResolver,
+    /// The webcams this process enumerated itself; they never come over IPC.
+    pub cameras: &'a [openlogi_camera::Camera],
+    /// Where changes to `config` may be written.
+    pub persistence: ConfigPersistence,
+    /// Sender to the IPC client thread.
+    pub ipc_commands: mpsc::UnboundedSender<crate::services::ipc::Command>,
+}
+
+#[cfg(test)]
+impl<'a> Sources<'a> {
+    /// No devices and nothing written to disk: where most state tests start.
+    pub(crate) fn in_memory(
+        config: Config,
+        resolver: &'a AssetResolver,
+        ipc_commands: mpsc::UnboundedSender<crate::services::ipc::Command>,
+    ) -> Self {
+        Self {
+            config,
+            inventories: &[],
+            standalone: &[],
+            resolver,
+            cameras: &[],
+            persistence: ConfigPersistence::MemoryOnly,
+            ipc_commands,
+        }
+    }
 }
 
 struct GlobalAppState(Entity<AppState>);
@@ -162,7 +181,7 @@ pub struct AppState {
     config: ConfigState,
     /// Agent-owned observations accepted by this GUI session.
     agent: AgentSession,
-    /// Merged device catalog, valid active selection, and per-device runtime.
+    /// Merged device catalog, valid active selection, and per-device sessions.
     devices: DeviceStore,
     /// Binding-editor scope and projections derived from config.
     bindings: BindingState,
@@ -170,8 +189,16 @@ pub struct AppState {
     action_ring_editing_apps: BTreeMap<String, String>,
     /// DPI/SmartShift reads and the active pointer editor value.
     pointer: PointerState,
+    /// Dedicated generation-fenced Disable Keys read owner.
+    disable_keys_reads: DisableKeysReads,
+    /// Monotonic identity for Disable Keys write/reload transactions.
+    next_disable_keys_request_id: u64,
     /// Standalone-light sequencing and aggregate camera activity.
-    lighting: LightingState,
+    lights: LightSession,
+    /// Which timer steps the backlight card is showing. A disclosure, not a
+    /// keyboard setting: the keyboard keeps whatever duration was last
+    /// written, and switching this writes nothing.
+    duration_steps: DurationSteps,
     /// Sender to the IPC client thread. The agent owns the hook and device I/O.
     ipc_commands: mpsc::UnboundedSender<crate::services::ipc::Command>,
     /// Camera-consent poll started by an in-app macOS prompt. The app-state
@@ -208,13 +235,20 @@ impl AppState {
         Self::global(cx).update(cx, update)
     }
 
-    /// Start any pending DPI/SmartShift read for the selected device. Called
+    /// Start any pending device-setting read for the selected device. Called
     /// after inventory or selection changes; render paths only consume caches.
     pub(crate) fn load_current_device_reads(cx: &mut App) {
         Self::update(cx, |state, cx| {
             state.load_current_dpi(cx);
             state.load_current_smartshift(cx);
             state.confirm_current_smartshift(cx);
+            state.load_current_fn_lock(cx);
+            state.load_current_report_rate(cx);
+            state.load_current_pointer_speed(cx);
+            state.load_current_force_sensing(cx);
+            state.load_current_backlight(cx);
+            state.load_current_easy_switch(cx);
+            state.load_current_disable_keys(cx);
         });
     }
 
@@ -228,17 +262,18 @@ impl AppState {
     /// The initial selection prefers [`Config::selected_device`] if it still
     /// matches one of the paired devices; otherwise it falls back to index 0.
     #[must_use]
-    pub fn with_runtime(
-        config: Config,
-        inventories: &[DeviceInventory],
-        standalone: &[StandaloneDevice],
-        cache: &AssetResolver,
-        cameras: &[openlogi_camera::Camera],
-        config_persistence: ConfigPersistence,
-        ipc_commands: mpsc::UnboundedSender<crate::services::ipc::Command>,
-    ) -> Self {
-        let mut config = ConfigState::new(config, config_persistence);
-        let device_list = build_device_list(inventories, standalone, cache, &config, cameras);
+    pub fn new(sources: Sources<'_>) -> Self {
+        let Sources {
+            config,
+            inventories,
+            standalone,
+            resolver,
+            cameras,
+            persistence,
+            ipc_commands,
+        } = sources;
+        let mut config = ConfigState::new(config, persistence);
+        let device_list = build_device_list(inventories, standalone, resolver, &config, cameras);
         // Fold each online device's route into its canonical entry before
         // anything writes to the config — the first frame after a schema-5
         // upgrade is the earliest moment this can happen, and the ordering
@@ -248,7 +283,7 @@ impl AppState {
         let adopted = config.edit(|config| inventory::adopt_routes(config, &device_list));
         // Adoption re-keyed entries, so rebuild before reading the list again.
         let device_list = if adopted {
-            build_device_list(inventories, standalone, cache, &config, cameras)
+            build_device_list(inventories, standalone, resolver, &config, cameras)
         } else {
             device_list
         };
@@ -269,7 +304,10 @@ impl AppState {
             bindings,
             action_ring_editing_apps: BTreeMap::new(),
             pointer: PointerState::default(),
-            lighting: LightingState::default(),
+            lights: LightSession::default(),
+            duration_steps: DurationSteps::Short,
+            disable_keys_reads: DisableKeysReads::default(),
+            next_disable_keys_request_id: 0,
             ipc_commands,
             #[cfg(target_os = "macos")]
             camera_permission_poll: None,
@@ -277,7 +315,7 @@ impl AppState {
         // Plain `persist_config`, not `persist_and_reload` as
         // `refresh_inventories` uses for the same fold: there is no agent
         // connection to reload yet this early in startup, and the
-        // unconditional `ReloadConfig` send at the end of this constructor
+        // unconditional `LoadConfig` send at the end of this constructor
         // (below) already covers both branches once `state` is fully built —
         // sending it here too would just queue a second, redundant reload.
         if adopted {
@@ -286,14 +324,14 @@ impl AppState {
             state.persist_config("device identity");
         }
         if state.config.should_reload_agent() {
-            state.send_ipc(crate::services::ipc::Command::ReloadConfig);
+            state.send_ipc(crate::services::ipc::LoadConfig);
         }
         state
     }
     /// Send a device command to the agent over IPC, logging a dropped channel
     /// (the client thread is gone) rather than surfacing it.
-    fn send_ipc(&self, command: crate::services::ipc::Command) -> bool {
-        if self.ipc_commands.send(command).is_err() {
+    fn send_ipc(&self, command: impl Into<crate::services::ipc::Command>) -> bool {
+        if self.ipc_commands.send(command.into()).is_err() {
             warn!("IPC client thread is gone — device command dropped");
             return false;
         }
@@ -308,8 +346,29 @@ impl AppState {
     /// next reconnect or wake. A failed write restores the last persisted
     /// config and surfaces the persistence error in the GUI.
     fn persist_and_reload(&mut self, what: &str) -> bool {
+        self.persist_and_reload_choosing(what, Vec::new())
+    }
+
+    /// [`Self::persist_and_reload`] for a save in which the user set controls
+    /// of lights without a write to the light. `chosen` names them, so the
+    /// agent drops the changes made on the lights for those controls
+    /// ([`openlogi_ipc::Agent::reload_saved_config`]). The reload carries the
+    /// revision of the file this save wrote, so the agent can tell an edit
+    /// made after the save.
+    fn persist_and_reload_choosing(
+        &mut self,
+        what: &str,
+        chosen: Vec<openlogi_ipc::ChosenLight>,
+    ) -> bool {
         if self.persist_config(what) {
-            self.send_ipc(crate::services::ipc::Command::ReloadConfig);
+            let revision = self.config.revision();
+            let mut reload = crate::services::ipc::ReloadConfig {
+                chosen,
+                revision,
+                ..Default::default()
+            };
+            self.track_external_config_reload(&mut reload);
+            self.send_config_reload(reload);
             true
         } else {
             false
@@ -336,6 +395,37 @@ impl AppState {
         }
     }
 
+    /// Replace local projections after another writer replaced a GUI save,
+    /// without persisting the GUI's older choice. A recovery retry must still
+    /// confirm the refreshed revision with the agent and then re-read hardware.
+    /// Both outcomes carry invalidation events; only `Ok` confirms that the
+    /// local projections adopted the external file.
+    fn reconcile_external_config(&mut self) -> Result<StateEvents, StateEvents> {
+        let mut events = StateEvents::none();
+        for key in self.disable_keys_reads.reconcile_external_config() {
+            events = events.and(StateEvent::DisableKeysChanged(key));
+        }
+        let events = events.and(self.disable_keys_config_events());
+        let previous_language = self.config.app_settings.language.clone();
+        if let Err(error) = self.config.refresh_feature() {
+            warn!(%error, "could not reconcile externally edited configuration");
+            return Err(events.and(StateEvent::SettingsChanged));
+        }
+        self.disable_keys_reads.external_config_refreshed();
+        let language_changed = self.config.app_settings.language != previous_language;
+        self.restore_config_projections();
+        let events = events
+            .and(StateEvent::SettingsChanged)
+            .and(self.for_current_device(StateEvent::BindingsChanged))
+            .and(self.for_current_device(StateEvent::DpiChanged));
+        Ok(if language_changed {
+            openlogi_core::locale::activate(self.config.app_settings.language.as_deref());
+            StateEvents::from(StateEvent::LanguageChanged).and(events)
+        } else {
+            events
+        })
+    }
+
     /// Current config failure, shown as a fail-closed whole-window notice.
     #[must_use]
     pub fn config_issue(&self) -> Option<&str> {
@@ -346,8 +436,29 @@ impl AppState {
     pub fn apply_config_reload_result(
         &mut self,
         result: Result<(), openlogi_ipc::ConfigReloadError>,
-    ) -> bool {
-        self.config.apply_reload_result(result)
+    ) -> StateEvents {
+        if self.config.apply_reload_result(result) {
+            StateEvent::SettingsChanged.into()
+        } else {
+            StateEvents::none()
+        }
+    }
+
+    /// Apply the agent's acknowledgement of a GUI save.
+    pub fn apply_saved_config_reload_result(
+        &mut self,
+        result: Result<openlogi_ipc::SavedConfigVerdict, openlogi_ipc::ConfigReloadError>,
+    ) -> StateEvents {
+        match result {
+            Ok(openlogi_ipc::SavedConfigVerdict::Accepted) => {
+                self.apply_config_reload_result(Ok(()))
+            }
+            Ok(openlogi_ipc::SavedConfigVerdict::FileChangedAfterSave) => {
+                let _ = self.config.apply_reload_result(Ok(()));
+                self.reconcile_saved_config()
+            }
+            Err(error) => self.apply_config_reload_result(Err(error)),
+        }
     }
     /// A clone of the IPC command sender used by the state entity to issue
     /// device reads and writes through the agent.
@@ -418,16 +529,25 @@ impl AppState {
             .map(|app| (app.id.as_str(), app.display_name.as_str()))
     }
 
-    /// The name the agent last reported for `app`, or `None` for one it has not
-    /// seen this session — a hand-written profile, or one carried in from
+    /// The name the agent last reported for an application the profile keyed
+    /// `key` applies to — the application itself, one whose executable an
+    /// `exe:` key names, or one an `app:` alias lists — or `None` when it has
+    /// seen none this session: a hand-written profile, or one carried in from
     /// another machine.
     #[must_use]
-    pub fn recent_app_name(&self, app: &str) -> Option<&str> {
+    pub fn recent_app_name(&self, key: &str) -> Option<&str> {
         self.foreground()
             .recent
             .iter()
-            .find(|seen| seen.id == app)
+            .find(|seen| profile_applies_to(key, &self.config.apps, &seen.id))
             .map(|seen| seen.display_name.as_str())
+    }
+
+    /// The `[apps]` alias table, which names the application an `app:<alias>`
+    /// profile key stands for.
+    #[must_use]
+    pub fn app_aliases(&self) -> &AppAliases {
+        &self.config.apps
     }
 
     /// The application whose profile the user is asking about.
@@ -457,5 +577,3 @@ impl AppState {
             .then_some(app.display_name.as_str())
     }
 }
-
-impl EventEmitter<StateEvent> for AppState {}

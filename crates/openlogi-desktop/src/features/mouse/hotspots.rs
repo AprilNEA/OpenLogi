@@ -38,10 +38,10 @@ impl MouseControlId {
     }
 
     #[must_use]
-    pub(crate) fn label(self) -> &'static str {
+    pub(crate) fn translation_key(self) -> &'static str {
         match self {
-            Self::Button(button) => button.label(),
-            Self::ThumbwheelRotation => "Thumb Wheel",
+            Self::Button(button) => button.translation_key(),
+            Self::ThumbwheelRotation => "pointer.thumb_wheel",
         }
     }
 }

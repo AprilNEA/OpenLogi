@@ -20,7 +20,7 @@
 use fluent_langneg::{LanguageIdentifier, NegotiationStrategy, negotiate_languages};
 
 /// Locales the GUI ships, as `(code, native name)`. The codes match the
-/// `locales/*.yml` filenames; a subset (`en`, `zh-CN`, `zh-HK`, `it`) also
+/// `locales/*.toml` filenames; a subset (`en`, `zh-CN`, `zh-HK`, `it`) also
 /// matches gpui-component's bundled `ui.yml`, so choosing one localizes the
 /// framework's own widgets too. Under a locale the framework doesn't bundle, our
 /// app strings localize but gpui-component's built-in widget strings fall back
@@ -29,6 +29,7 @@ use fluent_langneg::{LanguageIdentifier, NegotiationStrategy, negotiate_language
 /// native-name alphabetical within each script.
 pub const SUPPORTED: &[(&str, &str)] = &[
     ("be", "Беларуская"),
+    ("cs", "Čeština"),
     ("da", "Dansk"),
     ("de", "Deutsch"),
     ("en", "English"),
@@ -159,6 +160,9 @@ mod tests {
         assert_eq!(match_supported("zh-Hant"), Some("zh-TW"));
         assert_eq!(match_supported("zh-HK"), Some("zh-HK"));
         assert_eq!(match_supported("zh-Hant-HK"), Some("zh-HK"));
+        assert_eq!(match_supported("cs"), Some("cs"));
+        assert_eq!(match_supported("cs-CZ"), Some("cs"));
+        assert_eq!(match_supported("cs_CZ"), Some("cs"));
         assert_eq!(match_supported("ja"), Some("ja"));
         assert_eq!(match_supported("ja-JP"), Some("ja"));
         assert_eq!(match_supported("ru"), Some("ru"));
@@ -187,6 +191,7 @@ mod tests {
     #[test]
     fn explicit_setting_wins_over_system() {
         assert_eq!(resolve(Some("zh-CN")), "zh-CN");
+        assert_eq!(resolve(Some("cs")), "cs");
         // An unknown stored code falls through to system/`en`, never panics.
         assert!(
             SUPPORTED

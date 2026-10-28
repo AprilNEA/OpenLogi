@@ -11,13 +11,16 @@
 //! Solaar) and searching registers by fuzzing them.
 
 use std::sync::Arc;
+use std::time::Duration;
 
-use derive_builder::Builder;
 use futures::{FutureExt, pin_mut, select};
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 use openlogi_device_registry::receiver::{ReceiverProtocol, find_receiver};
 
-use super::{RECEIVER_DEVICE_INDEX, ReceiverError};
+use super::{
+    NotificationFlags, RECEIVER_DEVICE_INDEX, ReceiverError, read_notification_flags,
+    write_notification_flags,
+};
 use crate::{
     channel::{HidppChannel, MessageListenerGuard},
     emitter::EventEmitter,
@@ -143,37 +146,19 @@ impl Receiver {
         self.emitter.create_receiver()
     }
 
-    /// Queries the current information about what notifications are enabled.
-    pub async fn get_notification_state(&self) -> Result<NotificationState, ReceiverError> {
-        let response = self
-            .chan
-            .read_register(
-                RECEIVER_DEVICE_INDEX,
-                Register::Notifications.into(),
-                [0u8; 3],
-            )
-            .await?;
-
-        Ok(NotificationState {
-            wireless_notifications: (response[1] & 1) != 0,
-        })
+    /// Queries which notifications are enabled.
+    pub async fn get_notification_flags(&self) -> Result<NotificationFlags, ReceiverError> {
+        Ok(read_notification_flags(&self.chan).await?)
     }
 
-    /// Configures what notifications are enabled and thus reported by the
-    /// receiver.
-    pub async fn set_notification_state(
+    /// Configures which notifications are enabled. Edit the value from
+    /// [`Self::get_notification_flags`]: the write replaces every bit,
+    /// including ones other host software set.
+    pub async fn set_notification_flags(
         &self,
-        state: NotificationState,
+        flags: NotificationFlags,
     ) -> Result<(), ReceiverError> {
-        self.chan
-            .write_register(
-                RECEIVER_DEVICE_INDEX,
-                Register::Notifications.into(),
-                [0, u8::from(state.wireless_notifications), 0],
-            )
-            .await?;
-
-        Ok(())
+        Ok(write_notification_flags(&self.chan, flags).await?)
     }
 
     /// Counts the amount of devices currently paired to this receiver. The
@@ -195,8 +180,8 @@ impl Receiver {
     /// Triggers device arrival notifications for all devices currently
     /// connected to the receiver. This is useful for device enumeration.
     ///
-    /// Check [`Self::get_notification_state`] first to make sure that
-    /// [`NotificationState::wireless_notifications`] is enabled.
+    /// Check [`Self::get_notification_flags`] first to make sure that
+    /// [`NotificationFlags::WIRELESS`] is enabled.
     pub async fn trigger_device_arrival(&self) -> Result<(), ReceiverError> {
         self.chan
             .write_register(
@@ -213,8 +198,8 @@ impl Receiver {
     /// [`Self::trigger_device_arrival`] and collecting incoming
     /// [`Event::DeviceConnection`] events.
     ///
-    /// Check [`Self::get_notification_state`] first to make sure that
-    /// [`NotificationState::wireless_notifications`] is enabled.
+    /// Check [`Self::get_notification_flags`] first to make sure that
+    /// [`NotificationFlags::WIRELESS`] is enabled.
     pub async fn collect_paired_devices(&self) -> Result<Vec<DeviceConnection>, ReceiverError> {
         // The idea here is that, when triggering fake device arrival notifications, the
         // receiver will send the register write confirmation message only AFTER sending
@@ -274,14 +259,11 @@ impl Receiver {
     ) -> Result<DevicePairingInformation, ReceiverError> {
         let response = self
             .chan
-            .read_long_register(
+            .read_long_sub_register(
                 RECEIVER_DEVICE_INDEX,
                 Register::ReceiverInfo.into(),
-                [
-                    u8::from(InfoSubRegister::DevicePairingInformation) + (device_index & 0x0f),
-                    0x00,
-                    0x00,
-                ],
+                u8::from(InfoSubRegister::DevicePairingInformation) + (device_index & 0x0f),
+                [0x00, 0x00],
             )
             .await?;
 
@@ -297,27 +279,42 @@ impl Receiver {
     }
 
     /// Provides the codename of a specific paired device by its index.
+    ///
+    /// The first read (param `0x01`) carries the name's length and its first
+    /// 13 bytes. A longer name is completed by a second read (param `0x02`),
+    /// whose reply is `[sub_reg, 0x02]` followed by the next 14 name bytes
+    /// with no repeated length — captured from a Bolt receiver with an
+    /// MX Anywhere 3S paired (#1962). Only those two reads are confirmed, so a
+    /// name past their 27 bytes stays truncated rather than guessing a third.
+    /// If the second read fails, times out after a short wait, or does not
+    /// echo its chunk, the first 13 bytes are returned, as before.
     pub async fn get_device_codename(&self, device_index: u8) -> Result<String, ReceiverError> {
-        // For device names longer than 13 characters this may need to be called
-        // multiple times with different parameters. I don't have a device with
-        // such a name to be able to test this.
-
-        let response = self
+        let sub_register = u8::from(InfoSubRegister::DeviceCodename) + (device_index & 0x0f);
+        let first = self
             .chan
-            .read_long_register(
+            .read_long_sub_register(
                 RECEIVER_DEVICE_INDEX,
                 Register::ReceiverInfo.into(),
-                [
-                    u8::from(InfoSubRegister::DeviceCodename) + (device_index & 0x0f),
-                    0x01,
-                    0x00,
-                ],
+                sub_register,
+                [0x01, 0x00],
             )
             .await?;
+        let second = if codename_continues(&first) {
+            self.chan
+                .read_long_sub_register_with_timeout(
+                    RECEIVER_DEVICE_INDEX,
+                    Register::ReceiverInfo.into(),
+                    sub_register,
+                    [0x02, 0x00],
+                    CODENAME_CONTINUATION_TIMEOUT,
+                )
+                .await
+                .ok()
+        } else {
+            None
+        };
 
-        Ok(parse_codename(&response)
-            .ok_or(Hidpp10Error::UnsupportedResponse)?
-            .to_string())
+        Ok(assemble_codename(&first, second.as_ref()).ok_or(Hidpp10Error::UnsupportedResponse)?)
     }
 
     /// Unpairs a device from the receiver by its index.
@@ -397,27 +394,46 @@ impl Receiver {
     }
 }
 
-/// Extract the codename chunk from a `DeviceCodename` register read.
-///
-/// `response[2]` is the device-reported name length. A name longer than the
-/// 13 bytes one response carries is clamped to the chunk present (fetching
-/// the rest takes further reads with different parameters); a length byte
-/// pointing past the response must not panic. `None` for non-UTF-8 bytes.
-fn parse_codename(response: &[u8; 16]) -> Option<&str> {
-    let end = 3usize.saturating_add(usize::from(response[2]));
-    let raw = response.get(3..end.min(response.len()))?;
-    str::from_utf8(raw).ok()
+/// Name bytes the first `DeviceCodename` chunk carries, after
+/// `[sub_reg, chunk, length]`.
+const FIRST_CHUNK_NAME_BYTES: usize = 13;
+
+/// Name bytes a second `DeviceCodename` chunk carries, after `[sub_reg, chunk]`.
+const SECOND_CHUNK_NAME_BYTES: usize = 14;
+
+/// How long the optional second `DeviceCodename` read may wait. The receiver
+/// answers its own registers in milliseconds, and this read runs in the
+/// sequential register pass before any slot's feature walk, inside the
+/// receiver probe budget. A lost reply costs this wait plus the channel's
+/// [`STALE_REPLY_GRACE`](crate::channel::STALE_REPLY_GRACE) on the next
+/// register read, so it is kept short: the first 13 bytes are still a usable
+/// name, and the five-second default would push a slot falling back on its
+/// cached data past the receiver's budget.
+const CODENAME_CONTINUATION_TIMEOUT: Duration = Duration::from_millis(250);
+
+/// Whether the first `DeviceCodename` chunk reports a name longer than it holds.
+fn codename_continues(first: &[u8; 16]) -> bool {
+    usize::from(first[2]) > FIRST_CHUNK_NAME_BYTES
 }
 
-/// Indicates which notifications are enabled and thus sent by the receiver.
+/// Join a `DeviceCodename` read into the name.
 ///
-/// This information can be queried using [`Receiver::get_notification_state`].
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Builder)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
-#[non_exhaustive]
-pub struct NotificationState {
-    /// Whether the receiver sends device arrival/removal notifications.
-    pub wireless_notifications: bool,
+/// `first[2]` is the device-reported name length, and `first[3..]` holds up
+/// to 13 of its bytes. `second`, when present and echoing chunk `0x02`,
+/// supplies the next 14 from `second[2..]`. A length past what the chunks
+/// carry is clamped, and must not panic. The bytes are joined before UTF-8
+/// decoding, so a character split across the two chunks survives. `None` for
+/// non-UTF-8 bytes.
+fn assemble_codename(first: &[u8; 16], second: Option<&[u8; 16]>) -> Option<String> {
+    let len = usize::from(first[2]);
+    let mut name = first[3..3 + len.min(FIRST_CHUNK_NAME_BYTES)].to_vec();
+    if let Some(second) = second.filter(|second| second[1] == 0x02) {
+        let rest = len
+            .saturating_sub(FIRST_CHUNK_NAME_BYTES)
+            .min(SECOND_CHUNK_NAME_BYTES);
+        name.extend_from_slice(&second[2..2 + rest]);
+    }
+    String::from_utf8(name).ok()
 }
 
 /// Represents information about a paired device.
@@ -444,22 +460,79 @@ pub struct DevicePairingInformation {
 mod tests {
     use super::*;
 
-    #[test]
-    fn codename_with_oversized_length_clamps_to_available_chunk() {
-        let mut response = [0u8; 16];
-        response[2] = 200;
-        response[3..16].copy_from_slice(b"MX Anywhere 3");
+    /// The two `DeviceCodename` replies a Bolt receiver gave for an
+    /// MX Anywhere 3S in slot 1 (#1962), without their report header.
+    const MX_ANYWHERE_3S_FIRST: [u8; 16] = *b"\x61\x01\x0eMX Anywhere 3";
+    const MX_ANYWHERE_3S_SECOND: [u8; 16] =
+        *b"\x61\x02S\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00";
 
-        assert_eq!(parse_codename(&response), Some("MX Anywhere 3"));
+    #[test]
+    fn a_long_codename_is_completed_by_its_second_chunk() {
+        assert!(codename_continues(&MX_ANYWHERE_3S_FIRST));
+        assert_eq!(
+            assemble_codename(&MX_ANYWHERE_3S_FIRST, Some(&MX_ANYWHERE_3S_SECOND)).as_deref(),
+            Some("MX Anywhere 3S")
+        );
     }
 
     #[test]
-    fn codename_within_bounds_parses() {
+    fn a_missing_or_unechoed_second_chunk_keeps_the_first_thirteen_bytes() {
+        assert_eq!(
+            assemble_codename(&MX_ANYWHERE_3S_FIRST, None).as_deref(),
+            Some("MX Anywhere 3")
+        );
+        let mut wrong_chunk = MX_ANYWHERE_3S_SECOND;
+        wrong_chunk[1] = 0x01;
+        assert_eq!(
+            assemble_codename(&MX_ANYWHERE_3S_FIRST, Some(&wrong_chunk)).as_deref(),
+            Some("MX Anywhere 3")
+        );
+    }
+
+    #[test]
+    fn codename_with_oversized_length_clamps_to_the_chunks_present() {
+        let mut first = MX_ANYWHERE_3S_FIRST;
+        first[2] = 200;
+        let mut second = [0u8; 16];
+        second[1] = 0x02;
+        second[2..16].copy_from_slice(b"S and the rest");
+
+        assert_eq!(
+            assemble_codename(&first, None).as_deref(),
+            Some("MX Anywhere 3")
+        );
+        assert_eq!(
+            assemble_codename(&first, Some(&second)).as_deref(),
+            Some("MX Anywhere 3S and the rest")
+        );
+    }
+
+    #[test]
+    fn a_short_codename_needs_no_second_chunk() {
         let mut response = [0u8; 16];
         response[2] = 5;
         response[3..8].copy_from_slice(b"Casa!");
 
-        assert_eq!(parse_codename(&response), Some("Casa!"));
+        assert!(!codename_continues(&response));
+        assert_eq!(assemble_codename(&response, None).as_deref(), Some("Casa!"));
+    }
+
+    #[test]
+    fn a_character_split_across_chunks_decodes() {
+        let mut first = [0u8; 16];
+        first[1] = 0x01;
+        first[2] = 15;
+        first[3..15].copy_from_slice(b"MX Ergo Plus");
+        first[15] = 0xc3; // first byte of "é"
+        let mut second = [0u8; 16];
+        second[1] = 0x02;
+        second[2] = 0xa9; // second byte of "é"
+        second[3] = b'!';
+
+        assert_eq!(
+            assemble_codename(&first, Some(&second)).as_deref(),
+            Some("MX Ergo Plusé!")
+        );
     }
 
     #[test]
@@ -469,6 +542,6 @@ mod tests {
         response[3] = 0xff;
         response[4] = 0xfe;
 
-        assert_eq!(parse_codename(&response), None);
+        assert_eq!(assemble_codename(&response, None), None);
     }
 }

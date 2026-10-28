@@ -13,7 +13,7 @@ use serde::Deserialize;
 use thiserror::Error;
 use toml_edit::{DocumentMut, Item, Table};
 
-use super::{Config, SCHEMA_VERSION};
+use super::{Config, ConfigRevision, SCHEMA_VERSION};
 use crate::paths::{self, PathsError};
 
 const CONFIG_BACKUP_GENERATIONS: usize = 5;
@@ -89,12 +89,26 @@ pub enum ConfigError {
         /// The schema version the file declared.
         found: u32,
     },
+    /// A per-app profile key names an alias that `[apps]` does not define, so
+    /// the profile could never apply.
+    #[error(
+        "config at {path}: device {device} has a per-app profile for {key}, but [apps] defines no such alias"
+    )]
+    UndefinedAppAlias {
+        /// The config file containing the profile.
+        path: PathBuf,
+        /// The device whose profile it is.
+        device: String,
+        /// The `app:<alias>` profile key.
+        key: String,
+    },
 }
 
 /// A loaded config file plus the exact source revision it came from.
 ///
-/// Saving compares that source with the current file before writing, so an
-/// editor or another process cannot be overwritten by a stale GUI snapshot.
+/// Saving compares that source with the current file before writing and locks
+/// out other cooperating writers through a persistent sidecar. External editors
+/// that do not take the lock can still race with a save after its revision check.
 /// Existing comments and formatting are retained for keys that still exist.
 #[derive(Debug, Clone)]
 pub struct ConfigFile {
@@ -150,9 +164,52 @@ impl ConfigFile {
         }
     }
 
+    /// Re-read the retained path and return a freshly revision-tracked file.
+    ///
+    /// Feature-local conflict recovery uses this to merge its one confirmed
+    /// mutation onto the newest on-disk configuration without overwriting
+    /// unrelated edits made after the GUI started.
+    pub fn reload(&self) -> Result<(Config, Self), ConfigError> {
+        Self::load_from_path(&self.path)
+    }
+
     /// Save `config` only if the file still matches the loaded revision.
+    /// Returns a [`ConfigError::Write`] with [`io::ErrorKind::WouldBlock`] if
+    /// another writer holds the lock, rather than blocking the caller.
     pub fn save(&mut self, config: &Config) -> Result<(), ConfigError> {
-        let current = match fs::read_to_string(&self.path) {
+        // Atomic replacement must update the target, not replace its symlink.
+        // Resolve once so the lock, conflict check, backup and commit use the
+        // same target path even if the config link is repointed during a save.
+        let target = resolve_symlinks(&self.path).map_err(|source| ConfigError::Read {
+            path: self.path.clone(),
+            source,
+        })?;
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).map_err(|source| ConfigError::Write {
+                path: target.clone(),
+                source,
+            })?;
+        }
+        // Lock a stable inode, not the config that atomic replacement swaps out.
+        // Place the sidecar beside the target so symlink aliases share the lock.
+        // Keep the sidecar on disk: unlinking it would let writers lock different
+        // inodes. The handle holds the lock through the check, backups and commit.
+        let lock_path = target.with_added_extension("lock");
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .map_err(|source| ConfigError::Write {
+                path: lock_path.clone(),
+                source,
+            })?;
+        lock.try_lock().map_err(|source| ConfigError::Write {
+            path: lock_path,
+            source: source.into(),
+        })?;
+        let current = match fs::read_to_string(&target) {
             Ok(source) => Some(source),
             Err(error) if error.kind() == io::ErrorKind::NotFound => None,
             Err(source) => {
@@ -189,19 +246,16 @@ impl ConfigFile {
             })?;
         }
 
-        if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent).map_err(|source| ConfigError::Write {
-                path: self.path.clone(),
-                source,
-            })?;
-        }
         let body = render_config(config, self.source.as_deref(), &self.path)?;
-        backup_config_once(&self.path).map_err(|source| ConfigError::Write {
+        // Re-read at backup time so an edit landing after the conflict check
+        // is still recoverable, but from the resolved target rather than
+        // through the link, which may have been repointed since.
+        backup_config_once(&self.path, &target).map_err(|source| ConfigError::Write {
             path: self.path.clone(),
             source,
         })?;
-        write_atomic(&self.path, body.as_bytes()).map_err(|source| ConfigError::Write {
-            path: self.path.clone(),
+        write_atomic(&target, body.as_bytes()).map_err(|source| ConfigError::Write {
+            path: target,
             source,
         })?;
         // The migrated file is gone from disk now, and its copy is safely
@@ -211,6 +265,13 @@ impl ConfigFile {
         self.migrated_from = None;
         self.source = Some(body);
         Ok(())
+    }
+
+    /// The revision of the file as this handle loaded it or last saved it.
+    /// A missing file has the revision of an empty one.
+    #[must_use]
+    pub fn revision(&self) -> ConfigRevision {
+        ConfigRevision::of(self.source.as_deref().unwrap_or_default())
     }
 }
 
@@ -279,6 +340,13 @@ fn parse_config(path: &Path, source: &str) -> Result<(Config, u32), ConfigError>
         config.migrate_thumbwheel_native_direction();
     }
     config.repair_duplicate_routes();
+    if let Some((device, key)) = config.undefined_app_alias() {
+        return Err(ConfigError::UndefinedAppAlias {
+            path: path.to_path_buf(),
+            device: device.to_string(),
+            key: key.to_string(),
+        });
+    }
     config.schema_version = SCHEMA_VERSION;
     Ok((config, header.schema_version))
 }
@@ -367,15 +435,17 @@ fn reconcile_item(current: &mut Item, generated: &Item) {
     }
 }
 
-fn backup_config_once(path: &Path) -> io::Result<()> {
+/// Back up the contents of `target` (the file `path` resolves to) beside
+/// `path` the first time this process saves it.
+fn backup_config_once(path: &Path, target: &Path) -> io::Result<()> {
     let mut backed_up = BACKED_UP_CONFIGS
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
     if backed_up.contains(path) {
         return Ok(());
     }
-    match fs::metadata(path) {
-        Ok(_) => backup_existing_config(path)?,
+    match fs::read(target) {
+        Ok(current) => backup_existing_config(path, &current)?,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(error),
     }
@@ -383,7 +453,8 @@ fn backup_config_once(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-pub(super) fn backup_existing_config(path: &Path) -> io::Result<()> {
+/// Rotate the backups beside `path` and store `current` as the newest.
+pub(super) fn backup_existing_config(path: &Path, current: &[u8]) -> io::Result<()> {
     for generation in (1..CONFIG_BACKUP_GENERATIONS).rev() {
         let source = config_backup_path(path, generation)?;
         match fs::read(&source) {
@@ -392,7 +463,7 @@ pub(super) fn backup_existing_config(path: &Path) -> io::Result<()> {
             Err(error) => return Err(error),
         }
     }
-    write_atomic(&config_backup_path(path, 1)?, &fs::read(path)?)
+    write_atomic(&config_backup_path(path, 1)?, current)
 }
 
 /// Path of the pre-migration copy: the config's own name with
@@ -422,6 +493,34 @@ pub(super) fn config_backup_path(path: &Path, generation: usize) -> io::Result<P
     let mut backup_name = OsString::from(file_name);
     backup_name.push(format!(".backup.{generation}"));
     Ok(path.with_file_name(backup_name))
+}
+
+/// Follow `path` through every symlink to the file it finally names, which
+/// need not exist yet (a dangling link is written through, not replaced).
+/// Relative link targets resolve against the link's own directory.
+pub(super) fn resolve_symlinks(path: &Path) -> io::Result<PathBuf> {
+    // Linux's loop limit (`MAXSYMLINKS`); macOS stops at 32. Inclusive, so
+    // the file reached by the last permitted hop is still examined.
+    const MAX_LINKS: usize = 40;
+    let mut current = path.to_path_buf();
+    for _ in 0..=MAX_LINKS {
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                let link = fs::read_link(&current)?;
+                current = match current.parent() {
+                    Some(parent) => parent.join(link),
+                    None => link,
+                };
+            }
+            Ok(_) => return Ok(current),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(current),
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "too many levels of symbolic links",
+    ))
 }
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {

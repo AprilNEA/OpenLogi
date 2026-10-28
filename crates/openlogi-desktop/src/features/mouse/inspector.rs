@@ -1,6 +1,6 @@
 //! Fixed binding inspector for the Buttons workspace.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use gpui::{
@@ -9,21 +9,22 @@ use gpui::{
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
-    Icon, IconName, Selectable as _, Sizable as _, button::Button, h_flex, input::InputState,
-    scroll::ScrollableElement as _, v_flex,
+    Disableable as _, Icon, IconName, Selectable as _, Sizable as _, button::Button, h_flex,
+    input::InputState, scroll::ScrollableElement as _, v_flex,
 };
 use openlogi_core::binding::{Action, ButtonId, GestureDirection, default_binding};
 
+use super::force_sensing::{PressForce, force_sensing_row};
 use super::hotspots::MouseControlId;
-use super::picker::{
-    GESTURE_BUTTON_ICON, PickFn, action_icon_path, action_rows_matching, editor_section,
-    gesture_direction_icon,
-};
 use super::thumbwheel::ThumbwheelPreset;
 use super::view::MouseModelView;
+use crate::features::binding_editor::{
+    GESTURE_BUTTON_ICON, PickFn, action_icon_path, action_rows_matching, application_editor,
+    editor_section, gesture_direction_icon,
+};
 use crate::state::AppState;
 use crate::ui::action::localized_action_label;
-use crate::ui::components::{MenuRow, control_button, control_input};
+use crate::ui::components::{MenuRow, Toggle, control_button, control_input, toggle_row};
 use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
 
 pub(super) const INSPECTOR_W: f32 = 328.;
@@ -32,32 +33,56 @@ pub(super) const INSPECTOR_W: f32 = 328.;
 pub(super) struct BindingInspectorData<'a> {
     pub selected: Option<MouseControlId>,
     pub gesture_direction: Option<GestureDirection>,
-    pub action_picker_open: bool,
     pub bindings: &'a BTreeMap<ButtonId, Action>,
     pub gesture_maps: &'a BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
+    pub dpi_gestures: bool,
+    /// The device reports raw wheel on Back/Forward, so holding one can
+    /// scroll sideways (`Capabilities::virtual_thumbwheel`).
+    pub virtual_thumbwheel: bool,
+    /// Buttons that hold the wheel to scroll sideways, from the global profile.
+    pub wheel_hold: &'a BTreeSet<ButtonId>,
     pub editing_app: Option<&'a str>,
     pub overridden: Option<&'a BTreeMap<ButtonId, Action>>,
+    /// The haptic panel's press-force row, present only while
+    /// [`ForceSensingFacts::current`](super::force_sensing::ForceSensingFacts::current)
+    /// says it shows.
+    pub press_force: Option<PressForce<'a>>,
 }
 
 #[derive(Clone, Copy)]
-struct ActionPickerContext<'a> {
-    open: bool,
-    search: &'a Entity<InputState>,
-    view: &'a Entity<MouseModelView>,
+pub(super) struct ActionPickerContext<'a> {
+    pub open: bool,
+    pub search: &'a Entity<InputState>,
+    pub shortcut_input: &'a Entity<InputState>,
+    pub application_input: &'a Entity<InputState>,
+    pub shortcut_invalid: bool,
+    pub shortcut_mode: ShortcutMode,
+    pub application_invalid: bool,
+    pub view: &'a Entity<MouseModelView>,
+}
+
+/// Whether the custom shortcut editor records a tapped or a held chord.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ShortcutMode {
+    Tap,
+    Hold,
+}
+
+impl ShortcutMode {
+    fn action(self, combo: openlogi_core::binding::KeyCombo) -> Action {
+        match self {
+            Self::Tap => Action::CustomShortcut(combo),
+            Self::Hold => Action::HoldShortcut(combo),
+        }
+    }
 }
 
 pub(super) fn binding_inspector(
     data: BindingInspectorData<'_>,
-    action_search: &Entity<InputState>,
-    view: &Entity<MouseModelView>,
+    picker: ActionPickerContext<'_>,
     cx: &Context<MouseModelView>,
 ) -> gpui::Div {
     let pal = theme::palette(cx);
-    let picker = ActionPickerContext {
-        open: data.action_picker_open,
-        search: action_search,
-        view,
-    };
     let body = match data.selected {
         None => empty_inspector(
             data.editing_app,
@@ -96,23 +121,27 @@ pub(super) fn binding_inspector(
 fn empty_inspector(app: Option<&str>, override_count: usize, pal: Palette) -> gpui::Div {
     let summary = match (app, override_count) {
         (Some(app), 0) => tr!(
-            "No overrides yet. Select a button to customize for %{app}.",
+            "profiles.app_profile_no_overrides",
             app => app.to_string()
         ),
         (Some(app), 1) => tr!(
-            "%{app} overrides 1 button. Others inherit Default.",
+            "profiles.app_profile_single_override",
             app => app.to_string()
         ),
         (Some(app), count) => tr!(
-            "%{app} overrides %{count} buttons. Others inherit Default.",
+            "profiles.app_profile_override_count",
             app => app.to_string(),
             count => count.to_string()
         ),
-        (None, _) => tr!("Select a button on the device to change what it does."),
+        (None, _) => tr!("profiles.select_device_button_description"),
     };
     v_flex()
         .gap_3()
-        .child(inspector_heading(tr!("Button inspector"), None, pal))
+        .child(inspector_heading(
+            tr!("actions.button_inspector"),
+            None,
+            pal,
+        ))
         .child(div().text_body().text_color(pal.text_muted).child(summary))
 }
 
@@ -130,7 +159,7 @@ fn button_inspector(
     if data.editing_app.is_none()
         && let Some(gesture_map) = gesture_map
     {
-        return gesture_inspector(button, gesture_map, data.gesture_direction, picker, pal, cx);
+        return gesture_inspector(button, gesture_map, data, picker, pal, cx);
     }
     if let Some(app) = data.editing_app
         && !overridden
@@ -144,19 +173,9 @@ fn button_inspector(
         .get(&button)
         .cloned()
         .unwrap_or_else(|| default_binding(button));
-    let status = match (
-        data.editing_app,
-        overridden,
-        action == default_binding(button),
-    ) {
-        (Some(app), true, _) => tr!("Overridden in %{app}", app => app.to_string()),
-        (Some(_), false, _) => tr!("Inherited from Default"),
-        (None, _, true) => tr!("Device default"),
-        (None, _, false) => tr!("Customized"),
-    };
     let observer = picker.view.clone();
     let on_pick: PickFn = Rc::new(move |action, _window, cx| {
-        AppState::update_bindings(cx, |state| state.commit_binding(button, action));
+        AppState::apply(cx, |state| state.commit_binding(button, action));
         observer.update(cx, |view, cx| {
             view.close_action_picker();
             cx.notify();
@@ -165,19 +184,28 @@ fn button_inspector(
 
     v_flex()
         .gap_3()
-        .child(inspector_heading(tr!(button.label()), Some(status), pal))
+        .child(inspector_heading(
+            tr!(button.translation_key()),
+            Some(button_status(button, &action, data, overridden)),
+            pal,
+        ))
         .child(current_action_card(&action, picker, pal))
+        .children(wheel_hold_section(
+            button,
+            data,
+            overridden,
+            picker.view,
+            pal,
+        ))
         .when(overridden, |panel| {
             let observer = picker.view.clone();
             panel.child(
                 control_button("inspector-use-default")
                     .w_full()
                     .icon(IconName::Undo)
-                    .label(tr!("Use the default profile"))
+                    .label(tr!("profiles.use_the_default_profile"))
                     .on_click(move |_, _, cx| {
-                        AppState::update_bindings(cx, |state| {
-                            state.clear_app_binding(button);
-                        });
+                        AppState::apply(cx, |state| state.clear_app_binding(button));
                         observer.update(cx, |view, cx| {
                             view.close_action_picker();
                             cx.notify();
@@ -185,38 +213,128 @@ fn button_inspector(
                     }),
             )
         })
-        .when(
-            data.editing_app.is_none()
-                && (button.is_hidpp_gesture_source() || button.is_os_hook_button()),
-            |panel| {
-                let observer = picker.view.clone();
-                panel.child(
+        .when(can_enable_gestures(button, data.editing_app), |panel| {
+            let observer = picker.view.clone();
+            let unavailable = button == ButtonId::DpiToggle && !data.dpi_gestures;
+            panel
+                .child(
                     control_button("inspector-use-gestures")
                         .w_full()
                         .icon(Icon::empty().path(GESTURE_BUTTON_ICON))
-                        .label(tr!("Use gestures"))
+                        .label(tr!("actions.use_gestures"))
+                        .disabled(unavailable)
                         .on_click(move |_, _, cx| {
-                            AppState::update_bindings(cx, |state| {
-                                state.commit_gesture_mode(button, true);
-                            });
+                            AppState::apply(cx, |state| state.commit_gesture_mode(button, true));
                             observer.update(cx, |view, cx| {
                                 view.set_gesture_selected_dir(Some(GestureDirection::Click));
                                 cx.notify();
                             });
                         }),
                 )
-            },
+                .when(unavailable, |panel| {
+                    panel.child(
+                        div()
+                            .text_body()
+                            .text_color(pal.text_muted)
+                            .child(tr!("actions.dpi_gestures_unavailable")),
+                    )
+                })
+        })
+        .children(
+            data.press_force
+                .map(|press_force| force_sensing_row(press_force, pal)),
         )
         .when(picker.open, |panel| {
             panel.child(action_library(
                 "inspector-action",
                 Some(&action),
-                picker.search,
+                picker,
                 &on_pick,
                 pal,
                 cx,
             ))
         })
+}
+
+/// The heading's status line. A button that holds the wheel is customized
+/// even while its press keeps the default action.
+fn button_status(
+    button: ButtonId,
+    action: &Action,
+    data: &BindingInspectorData<'_>,
+    overridden: bool,
+) -> gpui::SharedString {
+    let default = *action == default_binding(button) && !data.wheel_hold.contains(&button);
+    match (data.editing_app, overridden, default) {
+        (Some(app), true, _) => tr!("actions.overridden_in_app", app => app.to_string()),
+        (Some(_), false, _) => tr!("profiles.inherited_from_default"),
+        (None, _, true) => tr!("pointer.device_default"),
+        (None, _, false) => tr!("profiles.customized"),
+    }
+}
+
+/// Back/Forward's wheel-hold control: the switch in the global profile, or,
+/// in an app profile that has not overridden the button, a note that an
+/// action picked there replaces it.
+fn wheel_hold_section(
+    button: ButtonId,
+    data: &BindingInspectorData<'_>,
+    overridden: bool,
+    view: &Entity<MouseModelView>,
+    pal: Palette,
+) -> Option<gpui::AnyElement> {
+    let enabled = data.wheel_hold.contains(&button);
+    match data.editing_app {
+        None if button.supports_wheel_hold() && (data.virtual_thumbwheel || enabled) => {
+            Some(wheel_hold_row(button, enabled, view, pal).into_any_element())
+        }
+        Some(app) if enabled && !overridden => Some(
+            div()
+                .debug_selector(|| "inspector-wheel-hold-app-note".into())
+                .text_caption()
+                .text_color(pal.text_muted)
+                .child(tr!(
+                    "actions.app_profile_action_replaces_wheel_hold",
+                    app => app.to_string()
+                ))
+                .into_any_element(),
+        ),
+        _ => None,
+    }
+}
+
+/// Back/Forward's wheel-hold switch. Shown only in the global profile: a
+/// per-app entry holds one action, so the mode is device-wide. Turning it
+/// off stays possible on a device that does not report raw wheel, so a
+/// binding carried over from another mouse can be removed.
+///
+/// The gesture inspector offers it too. Turning it on there leaves gesture
+/// mode, stashing the direction map, so the selected direction is cleared
+/// as "Use a single action" does.
+fn wheel_hold_row(
+    button: ButtonId,
+    enabled: bool,
+    view: &Entity<MouseModelView>,
+    pal: Palette,
+) -> impl IntoElement {
+    let observer = view.clone();
+    toggle_row(
+        "inspector-wheel-hold-row",
+        pal,
+        tr!("actions.hold_to_scroll_sideways"),
+        tr!("actions.hold_to_scroll_sideways_description"),
+        Toggle::new("inspector-wheel-hold-toggle")
+            .selected(enabled)
+            .on_change(move |enabled, _window, cx| {
+                AppState::apply(cx, |state| state.commit_wheel_hold(button, *enabled));
+                if *enabled {
+                    observer.update(cx, |view, cx| {
+                        view.set_gesture_selected_dir(None);
+                        cx.notify();
+                    });
+                }
+            }),
+    )
 }
 
 fn inherited_gesture_inspector(
@@ -228,7 +346,7 @@ fn inherited_gesture_inspector(
 ) -> gpui::Div {
     let observer = picker.view.clone();
     let on_pick: PickFn = Rc::new(move |action, _window, cx| {
-        AppState::update_bindings(cx, |state| state.commit_binding(button, action));
+        AppState::apply(cx, |state| state.commit_binding(button, action));
         observer.update(cx, |view, cx| {
             view.close_action_picker();
             cx.notify();
@@ -238,22 +356,22 @@ fn inherited_gesture_inspector(
     v_flex()
         .gap_3()
         .child(inspector_heading(
-            tr!(button.label()),
-            Some(tr!("Inherited from Default")),
+            tr!(button.translation_key()),
+            Some(tr!("profiles.inherited_from_default")),
             pal,
         ))
         .child(gesture_summary_card(picker, pal))
         .child(div().text_caption().text_color(pal.text_muted).child(tr!(
-            "Choosing an action replaces the inherited gestures in %{app}.",
+            "actions.app_profile_action_replaces_gestures",
             app => app.to_string()
         )))
         .child(
             Button::new("inspector-edit-default-gestures")
                 .small()
                 .w_full()
-                .label(tr!("Edit Default gestures"))
+                .label(tr!("actions.edit_default_gestures"))
                 .on_click(move |_, _, cx| {
-                    AppState::update_bindings(cx, |state| state.set_editing_app(None));
+                    AppState::apply(cx, |state| state.set_editing_app(None));
                     edit_default.update(cx, |view, cx| {
                         view.set_gesture_selected_dir(Some(GestureDirection::Click));
                         cx.notify();
@@ -264,7 +382,7 @@ fn inherited_gesture_inspector(
             panel.child(action_library(
                 "inspector-gesture-override",
                 None,
-                picker.search,
+                picker,
                 &on_pick,
                 pal,
                 cx,
@@ -275,17 +393,20 @@ fn inherited_gesture_inspector(
 fn gesture_inspector(
     button: ButtonId,
     gesture_map: &BTreeMap<GestureDirection, Action>,
-    selected_direction: Option<GestureDirection>,
+    data: &BindingInspectorData<'_>,
     picker: ActionPickerContext<'_>,
     pal: Palette,
     cx: &Context<MouseModelView>,
 ) -> gpui::Div {
-    let direction = selected_direction.unwrap_or(GestureDirection::Click);
+    let direction = data.gesture_direction.unwrap_or(GestureDirection::Click);
+    // Gesture mode never holds the wheel, so the switch here is off and only
+    // turning it on is useful, which needs measured raw wheel.
+    let offer_wheel_hold = button.supports_wheel_hold() && data.virtual_thumbwheel;
     let current = gesture_action(gesture_map, button, direction);
     let observer = picker.view.clone();
     let on_pick: PickFn = Rc::new(move |action, _window, cx| {
-        AppState::update_bindings(cx, |state| {
-            state.commit_gesture_binding(button, direction, action);
+        AppState::apply(cx, |state| {
+            state.commit_gesture_binding(button, direction, action)
         });
         observer.update(cx, |view, cx| {
             view.close_action_picker();
@@ -297,8 +418,8 @@ fn gesture_inspector(
     v_flex()
         .gap_3()
         .child(inspector_heading(
-            tr!(button.label()),
-            Some(tr!("5 directions")),
+            tr!(button.translation_key()),
+            Some(tr!("actions.five_directions")),
             pal,
         ))
         .child(gesture_directions(
@@ -309,25 +430,30 @@ fn gesture_inspector(
             pal,
         ))
         .child(current_action_card(&current, picker, pal))
+        .when(offer_wheel_hold, |panel| {
+            panel.child(wheel_hold_row(button, false, picker.view, pal))
+        })
         .child(
             control_button("inspector-single-action")
                 .w_full()
-                .label(tr!("Use a single action"))
+                .label(tr!("actions.use_a_single_action"))
                 .on_click(move |_, _, cx| {
-                    AppState::update_bindings(cx, |state| {
-                        state.commit_gesture_mode(button, false);
-                    });
+                    AppState::apply(cx, |state| state.commit_gesture_mode(button, false));
                     turn_off.update(cx, |view, cx| {
                         view.set_gesture_selected_dir(None);
                         cx.notify();
                     });
                 }),
         )
+        .children(
+            data.press_force
+                .map(|press_force| force_sensing_row(press_force, pal)),
+        )
         .when(picker.open, |panel| {
             panel.child(action_library(
                 "inspector-gesture-action",
                 Some(&current),
-                picker.search,
+                picker,
                 &on_pick,
                 pal,
                 cx,
@@ -344,7 +470,7 @@ fn gesture_directions(
 ) -> impl IntoElement {
     v_flex()
         .gap_1()
-        .child(editor_section(tr!("Direction"), pal))
+        .child(editor_section(tr!("actions.direction"), pal))
         .children(
             GestureDirection::ALL
                 .into_iter()
@@ -353,9 +479,15 @@ fn gesture_directions(
                     let selected = direction == active;
                     let action = gesture_action(gesture_map, button, direction);
                     let view = view.clone();
+                    let aria_label = format!(
+                        "{}: {}",
+                        tr!(direction.translation_key()),
+                        localized_action_label(&action)
+                    );
                     MenuRow::new(("inspector-direction", index))
                         .selected(selected)
                         .role(Role::Button)
+                        .aria_label(aria_label)
                         .child(
                             h_flex()
                                 .min_w_0()
@@ -368,7 +500,11 @@ fn gesture_directions(
                                 .child(
                                     v_flex()
                                         .min_w_0()
-                                        .child(div().text_body().child(tr!(direction.label())))
+                                        .child(
+                                            div()
+                                                .text_body()
+                                                .child(tr!(direction.translation_key())),
+                                        )
                                         .child(
                                             div()
                                                 .truncate()
@@ -395,6 +531,13 @@ fn gesture_directions(
         )
 }
 
+/// Whether the default-profile inspector may promote `button` into gesture
+/// mode. Per-app bindings are single-action overrides, so they cannot carry a
+/// direction map.
+fn can_enable_gestures(button: ButtonId, editing_app: Option<&str>) -> bool {
+    editing_app.is_none() && button.supports_gesture_mode()
+}
+
 fn thumbwheel_inspector(
     bindings: &BTreeMap<ButtonId, Action>,
     editing_app: Option<&str>,
@@ -416,20 +559,24 @@ fn thumbwheel_inspector(
             || overrides.contains_key(&ButtonId::ThumbwheelScrollUp)
     });
     let status = match (editing_app, is_overridden) {
-        (Some(app), true) => tr!("Overridden in %{app}", app => app.to_string()),
-        (Some(_), false) => tr!("Inherited from Default"),
-        (None, _) => tr!("Default profile"),
+        (Some(app), true) => tr!("actions.overridden_in_app", app => app.to_string()),
+        (Some(_), false) => tr!("profiles.inherited_from_default"),
+        (None, _) => tr!("profiles.default_profile"),
     };
-    let current_label = current.map_or_else(|| tr!("Custom"), |preset| tr!(preset.label()));
+    let current_label = current.map_or_else(|| tr!("common.custom"), |p| tr!(p.translation_key()));
     let current_icon = current.map_or("action-icons/chevrons-right.svg", ThumbwheelPreset::icon);
     let observer = picker.view.clone();
 
     v_flex()
         .gap_3()
-        .child(inspector_heading(tr!("Thumb Wheel"), Some(status), pal))
+        .child(inspector_heading(
+            tr!("pointer.thumb_wheel"),
+            Some(status),
+            pal,
+        ))
         .child(selection_card(
             "inspector-current-thumbwheel-preset",
-            tr!("Preset"),
+            tr!("common.preset"),
             current_icon,
             current_label,
             picker,
@@ -439,7 +586,7 @@ fn thumbwheel_inspector(
             panel.child(
                 v_flex()
                     .gap_1()
-                    .child(editor_section(tr!("Preset"), pal))
+                    .child(editor_section(tr!("common.preset"), pal))
                     .children(ThumbwheelPreset::ALL.into_iter().enumerate().map(
                         |(index, preset)| {
                             let selected = current == Some(preset);
@@ -447,6 +594,7 @@ fn thumbwheel_inspector(
                             MenuRow::new(("inspector-thumbwheel", index))
                                 .selected(selected)
                                 .role(Role::Button)
+                                .aria_label(tr!(preset.translation_key()))
                                 .child(
                                     h_flex()
                                         .items_center()
@@ -457,7 +605,7 @@ fn thumbwheel_inspector(
                                                 .size_4()
                                                 .text_color(pal.text_muted),
                                         )
-                                        .child(div().child(tr!(preset.label()))),
+                                        .child(div().child(tr!(preset.translation_key()))),
                                 )
                                 .when(selected, |row| {
                                     row.child(
@@ -467,8 +615,8 @@ fn thumbwheel_inspector(
                                     )
                                 })
                                 .on_click(move |_, _, cx| {
-                                    AppState::update_bindings(cx, |state| {
-                                        state.commit_thumbwheel_preset(preset);
+                                    AppState::apply(cx, |state| {
+                                        state.commit_thumbwheel_preset(preset)
                                     });
                                     observer.update(cx, |view, cx| {
                                         view.close_action_picker();
@@ -486,11 +634,9 @@ fn thumbwheel_inspector(
                     .small()
                     .w_full()
                     .icon(IconName::Undo)
-                    .label(tr!("Use the default profile"))
+                    .label(tr!("profiles.use_the_default_profile"))
                     .on_click(move |_, _, cx| {
-                        AppState::update_bindings(cx, |state| {
-                            state.clear_app_thumbwheel();
-                        });
+                        AppState::apply(cx, AppState::clear_app_thumbwheel);
                         observer.update(cx, |view, cx| {
                             view.close_action_picker();
                             cx.notify();
@@ -523,7 +669,7 @@ fn current_action_card(
 ) -> impl IntoElement {
     selection_card(
         "inspector-current-action",
-        tr!("Current action"),
+        tr!("actions.current_action"),
         action_icon_path(action),
         localized_action_label(action),
         picker,
@@ -534,9 +680,9 @@ fn current_action_card(
 fn gesture_summary_card(picker: ActionPickerContext<'_>, pal: Palette) -> impl IntoElement {
     selection_card(
         "inspector-current-gesture-summary",
-        tr!("Current action"),
+        tr!("actions.current_action"),
         GESTURE_BUTTON_ICON,
-        tr!("5 directions"),
+        tr!("actions.five_directions"),
         picker,
         pal,
     )
@@ -555,10 +701,12 @@ fn selection_card(
     let opening = !picker.open;
     let accessible_label = value.clone();
     BaseButton::new(id)
+        .debug_selector(move || id.to_string())
         .accessibility_label(accessible_label)
         .aria_expanded(picker.open)
         .flex()
         .flex_col()
+        .items_stretch()
         .gap_2()
         .rounded(pal.control_radius)
         .border_1()
@@ -610,6 +758,9 @@ fn selection_card(
                 search.update(cx, |search, cx| search.set_value("", window, cx));
             }
             toggle.update(cx, |view, cx| {
+                if opening {
+                    view.clear_custom_action_drafts(window, cx);
+                }
                 view.toggle_action_picker();
                 cx.notify();
             });
@@ -619,18 +770,43 @@ fn selection_card(
 fn action_library(
     id_prefix: &'static str,
     current: Option<&Action>,
-    action_search: &Entity<InputState>,
+    picker: ActionPickerContext<'_>,
     on_pick: &PickFn,
     pal: Palette,
     cx: &Context<MouseModelView>,
 ) -> impl IntoElement {
-    let query = action_search.read(cx).value();
+    let query = picker.search.read(cx).value();
     let rows = action_rows_matching(id_prefix, current, &query, on_pick, pal);
     v_flex()
         .gap_2()
         .pt_1()
-        .child(editor_section(tr!("Actions"), pal))
-        .child(control_input(action_search).cleanable(true))
+        .child(custom_shortcut_editor(
+            id_prefix,
+            picker.shortcut_input,
+            picker.shortcut_invalid,
+            picker.shortcut_mode,
+            picker.view,
+            on_pick,
+            pal,
+        ))
+        .child(application_editor(
+            id_prefix,
+            picker.application_input,
+            picker.application_invalid,
+            Rc::new({
+                let view = picker.view.clone();
+                move |cx| {
+                    view.update(cx, |view, cx| {
+                        view.custom_application_invalid = true;
+                        cx.notify();
+                    });
+                }
+            }),
+            on_pick,
+            pal,
+        ))
+        .child(editor_section(tr!("actions.actions"), pal))
+        .child(control_input(picker.search).cleanable(true))
         .child(
             v_flex()
                 .gap_0p5()
@@ -640,11 +816,87 @@ fn action_library(
                             .py_3()
                             .text_body()
                             .text_color(pal.text_muted)
-                            .child(tr!("No actions found")),
+                            .child(tr!("actions.no_actions_found")),
                     )
                 })
                 .children(rows),
         )
+}
+
+/// A single-field "Custom Shortcut" editor, matching the Action Ring editor's
+/// `shortcut_editor` (`features/action_ring/editor.rs`) so the same custom
+/// action is reachable from the plain per-button picker, not just the ring.
+fn custom_shortcut_editor(
+    id_prefix: &'static str,
+    input: &Entity<InputState>,
+    invalid: bool,
+    mode: ShortcutMode,
+    view: &Entity<MouseModelView>,
+    on_pick: &PickFn,
+    pal: Palette,
+) -> impl IntoElement {
+    let submit_input = input.clone();
+    let on_pick = on_pick.clone();
+    let mode_button = |option: ShortcutMode| {
+        let (id, label) = match option {
+            ShortcutMode::Tap => ("tap", tr!("actions.shortcut_tap")),
+            ShortcutMode::Hold => ("hold", tr!("actions.shortcut_hold")),
+        };
+        let view = view.clone();
+        control_button(format!("{id_prefix}-shortcut-{id}"))
+            .debug_selector(move || format!("{id_prefix}-shortcut-{id}"))
+            .selected(mode == option)
+            .label(label)
+            .on_click(move |_, _, cx| {
+                view.update(cx, |view, cx| {
+                    view.shortcut_mode = option;
+                    cx.notify();
+                });
+            })
+    };
+    let tap_button = mode_button(ShortcutMode::Tap);
+    let hold_button = mode_button(ShortcutMode::Hold);
+    let view = view.clone();
+    v_flex()
+        .gap_1()
+        .child(editor_section(tr!("action_ring.custom_shortcut"), pal))
+        .child(h_flex().gap_2().child(tap_button).child(hold_button))
+        .child(
+            h_flex()
+                .gap_2()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .debug_selector(move || format!("{id_prefix}-custom-shortcut-input"))
+                        .child(control_input(input).cleanable(true)),
+                )
+                .child(
+                    Button::new(format!("{id_prefix}-custom-shortcut-add"))
+                        .debug_selector(move || format!("{id_prefix}-custom-shortcut-add"))
+                        .compact()
+                        .label(tr!("common.add"))
+                        .on_click(move |_, window, cx| {
+                            let shortcut = submit_input.read(cx).value().to_string();
+                            match shortcut.parse::<openlogi_core::binding::KeyCombo>() {
+                                Ok(combo) => (on_pick)(mode.action(combo), window, cx),
+                                Err(_) => view.update(cx, |view, cx| {
+                                    view.custom_shortcut_invalid = true;
+                                    cx.notify();
+                                }),
+                            }
+                        }),
+                ),
+        )
+        .when(invalid, |editor| {
+            editor.child(
+                div()
+                    .debug_selector(move || format!("{id_prefix}-custom-shortcut-error"))
+                    .text_caption()
+                    .text_color(rgb(0x00ef_4444))
+                    .child(tr!("action_ring.custom_action_invalid_input")),
+            )
+        })
 }
 
 fn gesture_action(
@@ -659,4 +911,75 @@ fn gesture_action(
             Action::None
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_profile_offers_gestures_for_every_supported_button() {
+        let supported: Vec<_> = ButtonId::ALL
+            .into_iter()
+            .filter(|button| can_enable_gestures(*button, None))
+            .collect();
+
+        assert_eq!(
+            supported,
+            vec![
+                ButtonId::MiddleClick,
+                ButtonId::Back,
+                ButtonId::Forward,
+                ButtonId::DpiToggle,
+                ButtonId::GestureButton,
+                ButtonId::HapticPanel,
+            ]
+        );
+    }
+
+    #[test]
+    fn per_app_profile_does_not_offer_forward_gesture_mode() {
+        assert!(!can_enable_gestures(
+            ButtonId::Forward,
+            Some("com.apple.Safari")
+        ));
+    }
+
+    fn global_profile<'a>(
+        bindings: &'a BTreeMap<ButtonId, Action>,
+        gesture_maps: &'a BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
+        wheel_hold: &'a BTreeSet<ButtonId>,
+    ) -> BindingInspectorData<'a> {
+        BindingInspectorData {
+            selected: Some(MouseControlId::Button(ButtonId::Back)),
+            gesture_direction: None,
+            bindings,
+            gesture_maps,
+            dpi_gestures: false,
+            virtual_thumbwheel: true,
+            wheel_hold,
+            editing_app: None,
+            overridden: None,
+            press_force: None,
+        }
+    }
+
+    #[test]
+    fn a_button_holding_the_wheel_reads_customized_even_with_its_default_click() {
+        let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
+        let (bindings, gesture_maps) = (BTreeMap::new(), BTreeMap::new());
+        let action = default_binding(ButtonId::Back);
+        let plain = BTreeSet::new();
+        let data = global_profile(&bindings, &gesture_maps, &plain);
+        assert_eq!(
+            button_status(ButtonId::Back, &action, &data, false),
+            tr!("pointer.device_default")
+        );
+        let held = BTreeSet::from([ButtonId::Back]);
+        let data = global_profile(&bindings, &gesture_maps, &held);
+        assert_eq!(
+            button_status(ButtonId::Back, &action, &data, false),
+            tr!("profiles.customized")
+        );
+    }
 }

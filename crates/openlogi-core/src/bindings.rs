@@ -61,8 +61,9 @@ pub fn button_bindings_for(
     bindings
 }
 
-/// Per-direction maps for every HID++ gesture source (the dedicated gesture
-/// button, the MX Master 4 haptic panel) in gesture mode on `config_key`,
+/// Per-direction maps for every HID++ gesture source (DPI/ModeShift, the
+/// dedicated gesture button, and the MX Master 4 haptic panel) in gesture mode
+/// on `config_key`, with `app_bundle`'s single-action overrides applied,
 /// keyed by the button its captured swipes dispatch as. Each map is seeded
 /// via [`Binding::fill_gesture_defaults`] — the one canonical seeding rule —
 /// so the watcher always dispatches the full five-direction set the GUI
@@ -71,11 +72,12 @@ pub fn button_bindings_for(
 pub fn hidpp_gesture_maps_for(
     config: &Config,
     config_key: Option<&str>,
+    app_bundle: Option<&str>,
 ) -> BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>> {
     let Some(key) = config_key else {
         return BTreeMap::new();
     };
-    let stored = config.bindings_for(key);
+    let stored = config.effective_bindings(key, app_bundle);
     ButtonId::ALL
         .iter()
         .copied()
@@ -90,18 +92,19 @@ pub fn hidpp_gesture_maps_for(
             binding.fill_gesture_defaults();
             match binding {
                 Binding::Gesture(map) => Some((button, map)),
-                Binding::Single(_) | Binding::LongPress(_) => None,
+                Binding::Single(_) | Binding::LongPress(_) | Binding::WheelHold(_) => None,
             }
         })
         .collect()
 }
 
-/// Per-direction maps for every OS-hook button (Middle/Back/Forward) in
-/// gesture mode on `config_key`, with `app_bundle`'s per-app overlay applied,
-/// for the OS hook to resolve a hold+swipe. Gesture mode is per-button (see
-/// [`Config::is_gesture_mode`]), so any number of entries may be live at once —
-/// concurrency between them is the hook's first-hold-wins policy, not a config
-/// concern.
+/// Per-direction maps for every OS-hook button with a stored gesture binding on
+/// `config_key`, with `app_bundle`'s per-app overlay applied, for the OS hook to
+/// resolve a hold+swipe. Middle Click, Back, and Forward can each enter
+/// gesture mode through the GUI.
+/// Gesture mode is per-button (see [`Config::is_gesture_mode`]), so any number
+/// of entries may be live at once — concurrency between them is the hook's
+/// first-hold-wins policy, not a config concern.
 ///
 /// Unlike [`hidpp_gesture_maps_for`] (whose maps seed every direction at
 /// projection time), this returns each button's raw stored map. In practice
@@ -134,7 +137,7 @@ pub fn oshook_gestures_for(
         .filter(|(id, _)| id.is_os_hook_button())
         .filter_map(|(id, binding)| match binding {
             Binding::Gesture(map) => Some((id, map)),
-            Binding::Single(_) | Binding::LongPress(_) => None,
+            Binding::Single(_) | Binding::LongPress(_) | Binding::WheelHold(_) => None,
         })
         .collect()
 }
@@ -252,29 +255,46 @@ mod tests {
     }
 
     #[test]
-    fn oshook_gestures_includes_every_gesture_mode_button() {
-        // The owner lock is gone: every OS-hook button in gesture mode
-        // dispatches, each through its own direction map.
+    fn oshook_gestures_includes_new_middle_click_gesture() {
         let mut cfg = Config::default();
         cfg.set_gesture_mode("2b042", ButtonId::Back, true);
+        cfg.set_gesture_mode("2b042", ButtonId::Forward, true);
         cfg.set_gesture_mode("2b042", ButtonId::MiddleClick, true);
+        cfg.set_gesture_direction(
+            "2b042",
+            ButtonId::MiddleClick,
+            GestureDirection::Up,
+            Action::Copy,
+        );
 
         let oshook = oshook_gestures_for(&cfg, Some("2b042"), None);
         assert!(oshook.contains_key(&ButtonId::Back), "got: {oshook:?}");
-        assert!(
-            oshook.contains_key(&ButtonId::MiddleClick),
-            "got: {oshook:?}"
+        assert!(oshook.contains_key(&ButtonId::Forward), "got: {oshook:?}");
+        assert_eq!(
+            oshook
+                .get(&ButtonId::MiddleClick)
+                .and_then(|map| map.get(&GestureDirection::Click)),
+            Some(&Action::MiddleClick),
+            "a tap must retain native middle-click behavior"
+        );
+        assert_eq!(
+            oshook
+                .get(&ButtonId::MiddleClick)
+                .and_then(|map| map.get(&GestureDirection::Up)),
+            Some(&Action::Copy),
+            "a new Middle Click swipe must reach the OS hook"
         );
     }
 
     #[test]
     fn hidpp_gesture_maps_includes_every_gesture_mode_source() {
-        // Both HID++ sources in gesture mode dispatch simultaneously, each
+        // All HID++ sources in gesture mode dispatch simultaneously, each
         // through its own seeded direction map.
         let mut cfg = Config::default();
+        cfg.set_gesture_mode("2b042", ButtonId::DpiToggle, true);
         cfg.set_gesture_mode("2b042", ButtonId::HapticPanel, true);
 
-        let maps = hidpp_gesture_maps_for(&cfg, Some("2b042"));
+        let maps = hidpp_gesture_maps_for(&cfg, Some("2b042"), None);
         // The dedicated button gestures by default...
         let dedicated = maps
             .get(&ButtonId::GestureButton)
@@ -289,6 +309,12 @@ mod tests {
             .expect("a gesture-mode panel must dispatch");
         for dir in GestureDirection::ALL {
             assert!(panel.contains_key(&dir), "unseeded panel arm {dir:?}");
+        }
+        let dpi = maps
+            .get(&ButtonId::DpiToggle)
+            .expect("a gesture-mode DPI button must dispatch through HID++");
+        for dir in GestureDirection::ALL {
+            assert!(dpi.contains_key(&dir), "unseeded DPI arm {dir:?}");
         }
     }
 
@@ -323,11 +349,54 @@ mod tests {
     }
 
     #[test]
+    fn per_app_overrides_replace_hidpp_gestures_and_clearing_restores_them() {
+        for button in [
+            ButtonId::DpiToggle,
+            ButtonId::GestureButton,
+            ButtonId::HapticPanel,
+        ] {
+            let mut cfg = Config::default();
+            cfg.set_gesture_mode("2b042", button, true);
+            let global = hidpp_gesture_maps_for(&cfg, Some("2b042"), None);
+            assert!(global.contains_key(&button));
+
+            for action in [Action::Paste, Action::None] {
+                cfg.set_per_app_binding(
+                    "2b042",
+                    "com.example.Editor",
+                    button,
+                    Some(action.clone()),
+                );
+                let mut expected = global.clone();
+                expected.remove(&button);
+                assert_eq!(
+                    hidpp_gesture_maps_for(&cfg, Some("2b042"), Some("com.example.Editor")),
+                    expected
+                );
+                assert_eq!(
+                    bindings_for(&cfg, Some("2b042"), Some("com.example.Editor")).get(&button),
+                    Some(&action)
+                );
+                assert_eq!(hidpp_gesture_maps_for(&cfg, Some("2b042"), None), global);
+                assert_eq!(
+                    hidpp_gesture_maps_for(&cfg, Some("2b042"), Some("com.example.Other")),
+                    global
+                );
+            }
+            cfg.set_per_app_binding("2b042", "com.example.Editor", button, None);
+            assert_eq!(
+                hidpp_gesture_maps_for(&cfg, Some("2b042"), Some("com.example.Editor")),
+                global
+            );
+        }
+    }
+
+    #[test]
     fn hidpp_maps_silent_for_a_demoted_dedicated_button() {
         // Default device: the dedicated HID++ gesture button gestures, with its
         // defaults seeded.
         let mut cfg = Config::default();
-        let maps = hidpp_gesture_maps_for(&cfg, Some("2b042"));
+        let maps = hidpp_gesture_maps_for(&cfg, Some("2b042"), None);
         assert_eq!(
             maps.get(&ButtonId::GestureButton)
                 .and_then(|m| m.get(&GestureDirection::Up)),
@@ -340,7 +409,7 @@ mod tests {
         cfg.set_gesture_mode("2b042", ButtonId::GestureButton, false);
         cfg.set_gesture_mode("2b042", ButtonId::Back, true);
         assert!(
-            hidpp_gesture_maps_for(&cfg, Some("2b042")).is_empty(),
+            hidpp_gesture_maps_for(&cfg, Some("2b042"), None).is_empty(),
             "a demoted dedicated button must dispatch nothing over HID++"
         );
     }

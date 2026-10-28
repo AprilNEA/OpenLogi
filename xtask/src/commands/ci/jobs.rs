@@ -19,6 +19,7 @@ use super::{Host, Step};
 pub(crate) enum Job {
     Rustfmt,
     Typos,
+    AstGrep,
     PublishClosure,
     Shell,
     Clippy,
@@ -26,8 +27,10 @@ pub(crate) enum Job {
     Rustdoc,
     TestsLinux,
     TestsMacos,
+    TestsWindows,
     CargoDeny,
     ClippyWindows,
+    ClippyMacos,
     Wasm,
     /// Portable locale parity plus the desktop end-to-end key-resolution tests.
     I18n,
@@ -62,8 +65,14 @@ struct Spec {
 
 /// The names that select more than one job, because `ci.yml` has more than one.
 const GROUPS: [(&str, &[Job]); 2] = [
-    ("tests", &[Job::TestsLinux, Job::TestsMacos]),
-    ("test", &[Job::TestsLinux, Job::TestsMacos]),
+    (
+        "tests",
+        &[Job::TestsLinux, Job::TestsMacos, Job::TestsWindows],
+    ),
+    (
+        "test",
+        &[Job::TestsLinux, Job::TestsMacos, Job::TestsWindows],
+    ),
 ];
 
 fn default_spec(
@@ -76,6 +85,23 @@ fn default_spec(
         aliases,
         prefix: None,
         hosts: Host::ANY,
+        in_default_run: true,
+        caveat,
+    }
+}
+
+/// A CI job that only the named hosts can run, with no matrix leg in its name.
+fn host_spec(
+    name: &'static str,
+    aliases: &'static [&'static str],
+    hosts: &'static [Host],
+    caveat: &'static str,
+) -> Spec {
+    Spec {
+        name,
+        aliases,
+        prefix: None,
+        hosts,
         in_default_run: true,
         caveat,
     }
@@ -105,6 +131,11 @@ impl Job {
                 &["spelling"],
                 "Low-noise source spelling check. Needs typos-cli, which the devenv shell provides.",
             ),
+            Self::AstGrep => default_spec(
+                "ast-grep",
+                &["sg", "ssot"],
+                "The single-source-of-truth guards registered in sgconfig.yml: each names the module that owns a decision and fails on its ingredients anywhere else. Needs ast-grep, which the devenv shell provides.",
+            ),
             Self::PublishClosure => default_spec(
                 "publish closure",
                 &["publish-closure", "publish"],
@@ -115,14 +146,11 @@ impl Job {
                 &[],
                 "shellcheck and shfmt over every tracked shell script. shfmt decides what counts as one — by extension, and by shebang for the extensionless ones — and takes its formatting options from .editorconfig, which any printer flag would discard.",
             ),
-            Self::Clippy => Spec {
-                name: "clippy",
-                aliases: &[],
-                prefix: None,
-                hosts: Host::ANY,
-                in_default_run: true,
-                caveat: "CI runs it on ubuntu-latest, so it compiles linux cfg. Host clippy on macOS or Windows is a different compilation, not this job.",
-            },
+            Self::Clippy => default_spec(
+                "clippy",
+                &[],
+                "CI runs it on ubuntu-latest, so it compiles linux cfg. Host clippy on macOS or Windows is a different compilation, not this job.",
+            ),
             Self::Msrv => Spec {
                 name: "MSRV (cargo check)",
                 aliases: &["msrv"],
@@ -131,22 +159,17 @@ impl Job {
                 in_default_run: true,
                 caveat: "rust-toolchain.toml pins the channel to stable and rustup honours that over an installed toolchain, so CI and this runner both set RUSTUP_TOOLCHAIN to the rust-version floor — without it the check silently runs stable.",
             },
-            Self::Rustdoc => Spec {
-                name: "rustdoc (non-GUI crates)",
-                aliases: &["rustdoc", "docs"],
-                prefix: None,
-                hosts: Host::ANY,
-                in_default_run: true,
-                caveat: "Everything but the GPUI crates, which would drag the whole graphics toolchain into the job. A broken intra-doc link is neither a compile error nor a clippy lint, so nothing else catches one.",
-            },
-            Self::TestsLinux => Spec {
-                name: "tests (linux)",
-                aliases: &["test-linux"],
-                prefix: None,
-                hosts: &[Host::Linux],
-                in_default_run: true,
-                caveat: "Excludes openlogi-desktop, but still runs openlogi-ui's portable locale-parity test. Only the desktop end-to-end key-resolution tests are absent.",
-            },
+            Self::Rustdoc => default_spec(
+                "rustdoc (non-GUI crates)",
+                &["rustdoc", "docs"],
+                "Everything but the GPUI crates, which would drag the whole graphics toolchain into the job. A broken intra-doc link is neither a compile error nor a clippy lint, so nothing else catches one.",
+            ),
+            Self::TestsLinux => host_spec(
+                "tests (linux)",
+                &["test-linux"],
+                &[Host::Linux],
+                "Excludes openlogi-desktop, but still runs openlogi-ui's portable locale-parity test. Only the desktop end-to-end key-resolution tests are absent.",
+            ),
             Self::TestsMacos => Spec {
                 name: "tests (macos)",
                 aliases: &["test-macos"],
@@ -155,14 +178,17 @@ impl Job {
                 in_default_run: true,
                 caveat: "CI's matrix is arm64 (macos-latest) and x86_64 (macos-15-intel); a host only ever covers its own arch.",
             },
-            Self::CargoDeny => Spec {
-                name: "cargo-deny",
-                aliases: &["deny"],
-                prefix: None,
-                hosts: Host::ANY,
-                in_default_run: true,
-                caveat: "Rooted at crates/openlogi — exactly the crates published to crates.io. Falls back to `nix run nixpkgs#cargo-deny` when the binary is not installed.",
-            },
+            Self::TestsWindows => host_spec(
+                "tests (windows)",
+                &["test-windows"],
+                &[Host::Windows],
+                "Excludes openlogi-desktop like the Linux job. Executes the `cfg(windows)` tests, which `clippy (windows)` only compiles and no other host can run.",
+            ),
+            Self::CargoDeny => default_spec(
+                "cargo-deny",
+                &["deny"],
+                "Rooted at crates/openlogi — exactly the crates published to crates.io. Falls back to `nix run nixpkgs#cargo-deny` when the binary is not installed.",
+            ),
             Self::ClippyWindows => Spec {
                 name: "clippy (windows)",
                 aliases: &["clippy-windows"],
@@ -173,14 +199,17 @@ impl Job {
                 in_default_run: true,
                 caveat: "CI lints the whole workspace natively on windows-latest. Anywhere else this is the ring-free cross lint over the crates that carry Windows code — a proxy, not that job.",
             },
-            Self::Wasm => Spec {
-                name: "wasm (portable crates)",
-                aliases: &["wasm"],
-                prefix: None,
-                hosts: Host::ANY,
-                in_default_run: true,
-                caveat: "Proves the portable crates depend on nothing host-bound. A check, so it catches what cannot build for wasm — not what builds and then fails at runtime, which `std::thread::spawn` in the hidpp read loop and `tokio::time` both would.",
-            },
+            Self::ClippyMacos => host_spec(
+                "clippy (macos)",
+                &["clippy-macos"],
+                &[Host::Macos],
+                "CI lints the whole workspace natively on macos-latest (arm64), the only job that lints the macOS cfg (`tests (macos)` compiles it, without clippy). No other host can reproduce it. On a Mac it is the same command as host `clippy`, so the second run is a cache hit.",
+            ),
+            Self::Wasm => default_spec(
+                "wasm (portable crates)",
+                &["wasm"],
+                "Proves the portable crates depend on nothing host-bound. A check, so it catches what cannot build for wasm — not what builds and then fails at runtime, which `std::thread::spawn` in the hidpp read loop and `tokio::time` both would.",
+            ),
             Self::I18n => focused_spec(
                 "i18n",
                 &[],
@@ -195,7 +224,7 @@ impl Job {
     }
 
     /// The jobs a bare `cargo xtask ci` runs — every job in `ci.yml`, in
-    /// workflow order. Both test jobs are in it: on a host that cannot run one
+    /// workflow order. Every test job is in it: on a host that cannot run one
     /// of them, a named skip is the honest report, and silence is not.
     pub(crate) fn default_run() -> impl Iterator<Item = Self> {
         Self::iter().filter(|job| job.spec().in_default_run)

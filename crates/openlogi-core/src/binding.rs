@@ -14,6 +14,7 @@ mod action_ring;
 mod application_target;
 mod button;
 mod category;
+mod control;
 mod defaults;
 mod effect;
 mod gesture;
@@ -24,20 +25,21 @@ mod value;
 #[cfg(test)]
 mod tests;
 
-pub use action::{Action, WorkflowStep};
+pub use action::{Action, HeldKeys, WorkflowStep};
 pub use action_ring::{
     ActionRingConfig, ActionRingEntry, ActionRingIcon, ActionRingLayout, ActionRingSlot,
     RingAction, RingActionError,
 };
 pub use application_target::{ApplicationTarget, ApplicationTargetError};
-pub use button::ButtonId;
+pub use button::{ButtonId, ParseButtonIdError};
 pub use category::Category;
+pub use control::{Cid, KNOWN_CONTROLS, KnownControl, UNKNOWN_CONTROL_TRANSLATION_KEY};
 pub use defaults::{default_binding, default_binding_for, default_gesture_binding};
 pub use effect::{Effect, MediaKey, MouseButton, NativeAction, Script, Shortcut};
 pub use gesture::GestureDirection;
 pub use key_combo::{KeyCombo, KeyComboParseError, KeyboardUsage, KeyboardUsageError};
 pub use swipe::{
-    GESTURE_HOLD_FOR_SWIPE, GESTURE_SWIPE_DEADZONE, GESTURE_SWIPE_THRESHOLD, SwipeAccumulator,
-    detect_swipe,
+    GESTURE_HOLD_FOR_SWIPE, GESTURE_REARM_PAUSE, GESTURE_REPEAT_DISTANCE, GESTURE_SWIPE_DEADZONE,
+    GESTURE_SWIPE_THRESHOLD, SwipeAccumulator, detect_swipe,
 };
-pub use value::{Binding, LONG_PRESS_THRESHOLD, LongPressBinding};
+pub use value::{Binding, HeldWheel, LONG_PRESS_THRESHOLD, LongPressBinding, WheelHoldBinding};
