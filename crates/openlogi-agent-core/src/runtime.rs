@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex, PoisonError, RwLock, mpsc};
 use std::time::{Duration, Instant};
 
 use openlogi_core::binding::{Action, Binding, ButtonId};
+use openlogi_core::config::EventHapticInput;
 use tracing::{debug, info, warn};
 
 use self::button::{
@@ -262,11 +263,7 @@ impl ActionExecutor {
             let count =
                 index.and_then(|index| NonZeroU8::new(u8::try_from(index + 1).unwrap_or(u8::MAX)));
             if let Some(count) = count {
-                let cue = EventCue::ModeChange { count };
-                match key.as_deref() {
-                    Some(key) => haptics.observe_on(key, cue),
-                    None => haptics.observe_host(cue),
-                }
+                haptics.observe_for(key.as_deref(), EventCue::ModeChange { count });
             }
         }
     }
@@ -497,6 +494,14 @@ impl ActionExecutor {
     /// Cue a volume step, or the end of the range when the volume is already
     /// there and `action` pushes past it.
     fn cue_volume(&self, action: &Action) {
+        // Reading the volume is a CoreAudio round trip: skip it unless a
+        // volume cue plays.
+        if ![EventHapticInput::LevelSteps, EventHapticInput::LevelLimits]
+            .into_iter()
+            .any(|input| self.haptics.plays_host(input))
+        {
+            return;
+        }
         let at_limit = openlogi_inject::output_volume().is_some_and(|volume| match action {
             Action::VolumeUp => volume >= 1.0 - VOLUME_EPSILON,
             _ => volume <= VOLUME_EPSILON,
@@ -521,10 +526,7 @@ impl ActionExecutor {
             let haptics = self.haptics.clone();
             let key = device_key.map(str::to_owned);
             toggle_smartshift_in_background(self.access.op(&target), move || {
-                match key.as_deref() {
-                    Some(key) => haptics.observe_on(key, EventCue::WheelMode),
-                    None => haptics.observe_host(EventCue::WheelMode),
-                }
+                haptics.observe_for(key.as_deref(), EventCue::WheelMode);
             });
         } else {
             debug!("no target device — SmartShift toggle skipped");

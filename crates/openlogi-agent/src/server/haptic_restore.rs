@@ -129,6 +129,27 @@ impl<R> RestoreLedger<R> {
         }
     }
 
+    /// A play outside any session or hold — a preview, a script's tap —
+    /// armed `route`, and arming returned `restore`: `Some` when it turned
+    /// the engine on. The engine stays on until `until`, so a run of such
+    /// plays does not turn it off and on between them; a restore already
+    /// owed there is never made due sooner.
+    pub(super) fn lent(&mut self, route: DeviceRoute, restore: Option<R>, until: Instant) {
+        if let Some(owed) = self.owed.iter_mut().find(|owed| owed.route == route) {
+            owed.due = owed.due.max(until);
+            if let Some(restore) = restore {
+                owed.restore = restore;
+            }
+        } else if let Some(restore) = restore {
+            self.owed.push(Owed {
+                route,
+                restore,
+                session: 0,
+                due: until,
+            });
+        }
+    }
+
     /// Event haptics stopped playing on `route`. What it owes is due as it
     /// would have been without the hold: at once for an enable the hold
     /// made, and after its session for one a ring session made.
@@ -375,6 +396,41 @@ mod tests {
         ledger.closed(2, start);
         assert_eq!(due(&mut ledger, start), vec![(mouse(), 8)]);
         assert_eq!(ledger.next_due(), None);
+    }
+
+    #[test]
+    fn a_lent_engine_is_handed_back_after_the_last_play_that_lent_it() {
+        let start = Instant::now();
+        let lend = Duration::from_secs(3);
+        let mut ledger = RestoreLedger::default();
+        ledger.lent(mouse(), Some(7), start + lend);
+        let again = start + Duration::from_secs(1);
+        // The next tap finds the engine on: it only extends the loan.
+        ledger.lent(mouse(), None, again + lend);
+        assert_eq!(due(&mut ledger, start + lend), vec![]);
+        assert_eq!(due(&mut ledger, again + lend), vec![(mouse(), 7)]);
+        ledger.lent(mouse(), None, again + lend);
+        assert_eq!(ledger.next_due(), None, "found on, owes nothing");
+    }
+
+    #[test]
+    fn a_lend_never_hands_back_an_open_session_early() {
+        let start = Instant::now();
+        let mut ledger = RestoreLedger::default();
+        ledger.opened(1, mouse(), Some(7), start);
+        ledger.lent(mouse(), None, start + Duration::from_secs(3));
+        assert_eq!(ledger.next_due(), Some(start + SESSION_LIFETIME));
+    }
+
+    #[test]
+    fn a_held_device_keeps_a_lent_engine_on() {
+        let start = Instant::now();
+        let mut ledger = RestoreLedger::default();
+        ledger.hold(mouse(), None, start);
+        ledger.lent(mouse(), Some(7), start);
+        assert_eq!(due(&mut ledger, start + SESSION_LIFETIME), vec![]);
+        ledger.release(&mouse());
+        assert_eq!(due(&mut ledger, start), vec![(mouse(), 7)]);
     }
 
     #[test]

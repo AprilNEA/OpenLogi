@@ -12,7 +12,7 @@
 //!
 //! The agent's single-flight haptic player drains the cues through
 //! [`EventHaptics::next_play`], so a cue costs nothing until the player is free.
-//! [`CueQueue`] decides what plays next: a press before a wheel detent, wheel
+//! The cue queue decides what plays next: a press before a wheel detent, wheel
 //! detents no closer together than [`WHEEL_INTERVAL`], and nothing that waited
 //! past [`STALE_AFTER`].
 
@@ -139,6 +139,20 @@ pub struct EventHapticsTarget {
     pub route: DeviceRoute,
     /// The device's settings.
     pub config: EventHapticsConfig,
+}
+
+/// The device the player holds the haptic engine on for, and which arming
+/// of it is current.
+///
+/// The generation changes whenever the engine there must be armed again: the
+/// target moved, or the device may have lost the engine's enable flag in a
+/// power transition the route does not show ([`EventHaptics::rearm`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct EngineHold {
+    /// The target's route, or `None` while event haptics play nowhere.
+    pub route: Option<DeviceRoute>,
+    /// Which arming is current; only ever grows.
+    pub generation: u64,
 }
 
 /// One play the player owes.
@@ -407,7 +421,7 @@ struct Inner {
     /// The target, as the hook callback reads it.
     target: RwLock<Option<EventHapticsTarget>>,
     /// The target's route, for the player's arming lifecycle.
-    route: watch::Sender<Option<DeviceRoute>>,
+    hold: watch::Sender<EngineHold>,
     queue: Mutex<CueQueue>,
     /// Diverted-wheel distance, in hi-res units, short of a whole detent.
     partial_units: Mutex<u32>,
@@ -424,7 +438,7 @@ impl Default for EventHaptics {
         Self {
             inner: Arc::new(Inner {
                 target: RwLock::new(None),
-                route: watch::Sender::new(None),
+                hold: watch::Sender::new(EngineHold::default()),
                 queue: Mutex::new(CueQueue::default()),
                 partial_units: Mutex::new(0),
                 partial_thumb_increments: Mutex::new(0),
@@ -453,18 +467,39 @@ impl EventHaptics {
             if *current == target {
                 return;
             }
+            let retargeted = current.as_ref().map(|target| &target.route) != route.as_ref();
             *current = target;
+            // A cue belongs to the device it was felt on: one left over from
+            // the previous target must not play on the next one.
+            if retargeted {
+                self.queue().clear();
+            }
         }
         // The hook notes the pointer's display only while a crossing plays:
         // it costs a lookup on every pointer move.
         openlogi_hook::track_pointer_display(tracks_display);
-        if route.is_none() {
-            self.queue().clear();
-        }
-        self.inner.route.send_if_modified(|current| {
-            let changed = *current != route;
-            *current = route;
-            changed
+        self.inner.hold.send_if_modified(|hold| {
+            if hold.route == route {
+                return false;
+            }
+            hold.route = route;
+            hold.generation += 1;
+            true
+        });
+    }
+
+    /// Ask the player to arm the engine on `route` again, if event haptics
+    /// play there: the device came back from a power transition — a system
+    /// wake, its own reconnect broadcast — that may have turned the engine
+    /// off while its route stayed the same. Only the orchestrator calls this,
+    /// as it re-applies the device's other volatile settings.
+    pub fn rearm(&self, route: &DeviceRoute) {
+        self.inner.hold.send_if_modified(|hold| {
+            if hold.route.as_ref() != Some(route) {
+                return false;
+            }
+            hold.generation += 1;
+            true
         });
     }
 
@@ -586,14 +621,29 @@ impl EventHaptics {
     /// Record `cue` for something that happened on the host rather than on a
     /// device: a volume step, a copy. It plays on the target, if any.
     pub fn observe_host(&self, cue: EventCue) {
-        let plays = self.inner.target.try_read().is_ok_and(|target| {
-            target
-                .as_ref()
-                .is_some_and(|target| target.config.feedback(cue.input()).plays())
-        });
-        if plays {
+        if self.plays_host(cue.input()) {
             self.cue(cue);
         }
+    }
+
+    /// Record `cue` for the device `device_key` names, or for the host when
+    /// no device is named ([`Self::observe_on`], [`Self::observe_host`]).
+    pub fn observe_for(&self, device_key: Option<&str>, cue: EventCue) {
+        match device_key {
+            Some(key) => self.observe_on(key, cue),
+            None => self.observe_host(cue),
+        }
+    }
+
+    /// Whether `input` plays something on the target, if any: lets a caller
+    /// skip the work of finding out which cue an event makes.
+    #[must_use]
+    pub fn plays_host(&self, input: EventHapticInput) -> bool {
+        self.inner.target.try_read().is_ok_and(|target| {
+            target
+                .as_ref()
+                .is_some_and(|target| target.config.feedback(input).plays())
+        })
     }
 
     /// Record the detents a diverted main wheel's report completes. `delta`
@@ -659,11 +709,11 @@ impl EventHaptics {
         self.inner.wake.notify_one();
     }
 
-    /// The target route, for the player to arm the engine on and hand it
-    /// back from.
+    /// The device to hold the engine on for, for the player to arm it there
+    /// and hand it back.
     #[must_use]
-    pub fn routes(&self) -> watch::Receiver<Option<DeviceRoute>> {
-        self.inner.route.subscribe()
+    pub fn holds(&self) -> watch::Receiver<EngineHold> {
+        self.inner.hold.subscribe()
     }
 
     /// Resolve once a cue was recorded since the last call.
@@ -1106,6 +1156,25 @@ mod tests {
     }
 
     #[test]
+    fn a_cue_does_not_follow_the_target_to_another_mouse() {
+        let haptics = EventHaptics::default();
+        haptics.publish(Some(target(direct(0xb042))));
+        haptics.observe(&press(ButtonId::LeftClick, None), |_| true);
+        haptics.publish(Some(target(direct(0xb034))));
+        assert_eq!(played(&haptics), None);
+
+        let mut retuned = target(direct(0xb034));
+        haptics.observe(&press(ButtonId::LeftClick, None), |_| true);
+        retuned.config.wheel = EventHapticFeedback::Off;
+        haptics.publish(Some(retuned));
+        assert_eq!(
+            played(&haptics),
+            Some((HapticWaveform::WhisperCollision, LEFT)),
+            "new settings on the same mouse keep its cues"
+        );
+    }
+
+    #[test]
     fn fractional_wheel_ticks_add_up_to_detents() {
         let haptics = EventHaptics::default();
         haptics.publish(Some(target(direct(0xb042))));
@@ -1328,13 +1397,39 @@ mod tests {
     #[test]
     fn withdrawing_the_target_drops_queued_cues_and_its_route() {
         let haptics = EventHaptics::default();
-        let routes = haptics.routes();
+        let holds = haptics.holds();
         haptics.publish(Some(target(direct(0xb042))));
-        assert_eq!(*routes.borrow(), Some(direct(0xb042)));
+        assert_eq!(holds.borrow().route, Some(direct(0xb042)));
         haptics.observe(&press(ButtonId::LeftClick, None), |_| true);
         haptics.publish(None);
         assert_eq!(played(&haptics), None);
-        assert_eq!(*routes.borrow(), None);
+        assert_eq!(holds.borrow().route, None);
+    }
+
+    #[test]
+    fn every_retarget_and_rearm_asks_for_a_fresh_arming() {
+        let haptics = EventHaptics::default();
+        let mut holds = haptics.holds();
+        let mut generation = || {
+            assert!(holds.has_changed().expect("sender alive"), "no new hold");
+            holds.borrow_and_update().generation
+        };
+        haptics.publish(Some(target(direct(0xb042))));
+        let first = generation();
+        haptics.rearm(&direct(0xb034));
+        haptics.rearm(&direct(0xb042));
+        let rearmed = generation();
+        assert!(rearmed > first);
+        haptics.publish(None);
+        haptics.publish(Some(target(direct(0xb042))));
+        assert!(generation() > rearmed, "back on the same mouse");
+        let mut retuned = target(direct(0xb042));
+        retuned.config.wheel = EventHapticFeedback::Off;
+        haptics.publish(Some(retuned));
+        assert!(
+            !holds.has_changed().expect("sender alive"),
+            "same mouse, new settings"
+        );
     }
 
     #[test]
