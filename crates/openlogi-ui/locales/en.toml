@@ -355,6 +355,8 @@ haptic_display_crossing = "Moving to another display"
 haptic_drag = "Drag and drop"
 haptic_copy = "Copy and cut"
 haptic_battery_note = "Every tap runs the motor and uses some battery. The wheels, drags, and display crossings play most often."
+haptic_strength = "Strength"
+haptic_strength_device = "Device default"
 smartshift = "SmartShift"
 
 [actions]

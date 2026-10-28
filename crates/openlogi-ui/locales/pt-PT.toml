@@ -355,6 +355,8 @@ haptic_display_crossing = "Passagem para outro ecrã"
 haptic_drag = "Arrastar e largar"
 haptic_copy = "Copiar e cortar"
 haptic_battery_note = "Cada toque aciona o motor e gasta um pouco de bateria. As rodas, o arrastar e a passagem para outro ecrã são os mais frequentes."
+haptic_strength = "Intensidade"
+haptic_strength_device = "Predefinição do dispositivo"
 smartshift = "SmartShift"
 
 [actions]

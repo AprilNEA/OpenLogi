@@ -355,6 +355,8 @@ haptic_display_crossing = "別のディスプレイへの移動"
 haptic_drag = "ドラッグ&ドロップ"
 haptic_copy = "コピーとカット"
 haptic_battery_note = "タップのたびにモーターが動き、バッテリーを少し消費します。最も頻繁に鳴るのはホイール、ドラッグ、ディスプレイの移動です。"
+haptic_strength = "強さ"
+haptic_strength_device = "デバイスの既定値"
 smartshift = "SmartShift"
 
 [actions]

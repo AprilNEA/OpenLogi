@@ -355,6 +355,8 @@ haptic_display_crossing = "Skift til en anden skærm"
 haptic_drag = "Træk og slip"
 haptic_copy = "Kopiér og klip"
 haptic_battery_note = "Hvert tryk kører motoren og bruger lidt batteri. Hjulene, træk og skift til en anden skærm spiller oftest."
+haptic_strength = "Styrke"
+haptic_strength_device = "Enhedens standard"
 smartshift = "SmartShift"
 
 [actions]

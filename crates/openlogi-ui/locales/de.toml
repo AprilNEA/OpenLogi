@@ -355,6 +355,8 @@ haptic_display_crossing = "Wechsel auf einen anderen Monitor"
 haptic_drag = "Ziehen und Ablegen"
 haptic_copy = "Kopieren und Ausschneiden"
 haptic_battery_note = "Jedes Antippen lässt den Motor laufen und kostet etwas Akku. Am häufigsten spielen die Räder, das Ziehen und der Monitorwechsel."
+haptic_strength = "Stärke"
+haptic_strength_device = "Gerätestandard"
 smartshift = "SmartShift"
 
 [actions]

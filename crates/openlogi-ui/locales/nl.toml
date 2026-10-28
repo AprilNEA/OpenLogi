@@ -355,6 +355,8 @@ haptic_display_crossing = "Naar een ander scherm"
 haptic_drag = "Slepen en neerzetten"
 haptic_copy = "Kopiëren en knippen"
 haptic_battery_note = "Elke tik laat de motor draaien en kost wat batterij. De wielen, slepen en naar een ander scherm gaan spelen het vaakst."
+haptic_strength = "Sterkte"
+haptic_strength_device = "Standaard van het apparaat"
 smartshift = "SmartShift"
 
 [actions]

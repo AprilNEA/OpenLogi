@@ -100,3 +100,28 @@ fn each_button_and_the_wheel_save_their_own_feedback() {
         "an unchanged choice reloads nothing"
     );
 }
+
+#[test]
+fn a_chosen_strength_saves_and_reloads_once_whether_event_haptics_are_on_or_not() {
+    use openlogi_core::hid::HapticStrength;
+
+    let (mut state, mut receiver) = mouse_state(true);
+    assert_eq!(
+        state.current_haptic_strength(),
+        None,
+        "the device keeps its own"
+    );
+    let strong = HapticStrength::try_new(90).expect("valid strength");
+
+    let _ = state.commit_haptic_strength(strong);
+    assert_eq!(state.current_haptic_strength(), Some(strong));
+    assert_eq!(state.config.haptic_strength(KNOWN_MOUSE_KEY), Some(strong));
+    assert!(!state.current_event_haptics_config().enabled);
+    assert!(matches!(
+        drain(&mut receiver).as_slice(),
+        [Command::ReloadConfig(_)]
+    ));
+
+    let _ = state.commit_haptic_strength(strong);
+    assert!(drain(&mut receiver).is_empty(), "the same strength again");
+}

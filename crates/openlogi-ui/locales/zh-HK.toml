@@ -355,6 +355,8 @@ haptic_display_crossing = "移到另一部顯示器"
 haptic_drag = "拖放"
 haptic_copy = "複製及剪下"
 haptic_battery_note = "每次觸感都會驅動摩打並消耗少量電量。滾輪、拖放和切換顯示器觸發得最頻繁。"
+haptic_strength = "強度"
+haptic_strength_device = "裝置預設"
 smartshift = "SmartShift"
 
 [actions]

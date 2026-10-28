@@ -355,6 +355,8 @@ haptic_display_crossing = "Přechod na jiný displej"
 haptic_drag = "Přetažení"
 haptic_copy = "Kopírování a vyjmutí"
 haptic_battery_note = "Každé ťuknutí spustí motor a spotřebuje trochu baterie. Nejčastěji se ozývají kolečka, přetahování a přechod na jiný displej."
+haptic_strength = "Síla"
+haptic_strength_device = "Výchozí zařízení"
 smartshift = "SmartShift"
 
 [actions]

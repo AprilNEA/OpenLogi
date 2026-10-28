@@ -355,6 +355,8 @@ haptic_display_crossing = "Μετάβαση σε άλλη οθόνη"
 haptic_drag = "Μεταφορά και απόθεση"
 haptic_copy = "Αντιγραφή και αποκοπή"
 haptic_battery_note = "Κάθε απτικό χτύπημα κινεί το μοτέρ και καταναλώνει λίγη μπαταρία. Οι τροχοί, η μεταφορά και η μετάβαση σε άλλη οθόνη παίζουν πιο συχνά."
+haptic_strength = "Ένταση"
+haptic_strength_device = "Προεπιλογή συσκευής"
 smartshift = "SmartShift"
 
 [actions]

@@ -1,6 +1,7 @@
 //! Per-device button and wheel haptics.
 
 use openlogi_core::config::{EventHapticFeedback, EventHapticInput, EventHapticsConfig};
+use openlogi_core::hid::HapticStrength;
 use tracing::debug;
 
 use crate::state::devices::DeviceRecord;
@@ -63,6 +64,37 @@ impl AppState {
             |haptics| haptics.feedback(input) == feedback,
             |config, key| config.set_event_haptic_feedback(key, input, feedback),
         )
+    }
+
+    /// The haptic strength the user chose for the active device, or `None`
+    /// while it keeps its own.
+    #[must_use]
+    pub fn current_haptic_strength(&self) -> Option<HapticStrength> {
+        self.current_record()
+            .and_then(DeviceRecord::persistent_config_key)
+            .and_then(|key| self.config.haptic_strength(key))
+    }
+
+    /// Choose how strongly the active device's haptic engine plays, persist
+    /// it, and reload the agent so it writes the device. Committing the
+    /// current value saves and reloads nothing.
+    pub fn commit_haptic_strength(&mut self, strength: HapticStrength) -> StateEvents {
+        let events = self.for_current_device(StateEvent::DeviceConfigChanged);
+        let Some(key) = self
+            .current_record()
+            .and_then(DeviceRecord::persistent_config_key)
+            .map(str::to_string)
+        else {
+            debug!("no persistent device key — haptic strength ignored");
+            return events;
+        };
+        if self.config.haptic_strength(&key) == Some(strength) {
+            return events;
+        }
+        self.config
+            .edit(|config| config.set_haptic_strength(&key, strength));
+        self.persist_and_reload("haptic strength");
+        events
     }
 
     /// Apply `edit` to the active device's event haptics unless `unchanged`

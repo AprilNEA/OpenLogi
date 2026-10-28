@@ -355,6 +355,8 @@ haptic_display_crossing = "Siirtyminen toiselle näytölle"
 haptic_drag = "Vedä ja pudota"
 haptic_copy = "Kopioi ja leikkaa"
 haptic_battery_note = "Jokainen napautus käyttää moottoria ja kuluttaa hieman akkua. Rullat, vetäminen ja siirtyminen toiselle näytölle toistuvat useimmin."
+haptic_strength = "Voimakkuus"
+haptic_strength_device = "Laitteen oletus"
 smartshift = "SmartShift"
 
 [actions]
