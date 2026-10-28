@@ -718,6 +718,7 @@ fn hid_usage_to_windows(usage: u8) -> Option<u16> {
         0x36 => Some(0xbc),
         0x37 => Some(0xbe),
         0x38 => Some(0xbf),
+        0x46 => Some(0x2c),
         0x49 => Some(0x2d),
         0x4a => Some(0x24),
         0x4b => Some(0x21),
@@ -1172,6 +1173,7 @@ mod tests {
         assert_eq!(hid_usage_to_windows(0x50), Some(0x25)); // Left
         assert_eq!(hid_usage_to_windows(0x2c), Some(0x20)); // Space
         assert_eq!(hid_usage_to_windows(0x33), Some(0xba)); // Semicolon
+        assert_eq!(hid_usage_to_windows(0x46), Some(0x2c)); // VK_SNAPSHOT
         assert_eq!(hid_usage_to_windows(0x49), Some(0x2d)); // Insert
         assert_eq!(hid_usage_to_windows(0xff), None);
     }
