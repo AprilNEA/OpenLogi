@@ -66,17 +66,27 @@ fn mode_to_firmware(mode: BacklightMode) -> FirmwareMode {
     }
 }
 
-/// Map the fork's `0x1982` status onto OpenLogi's [`BacklightStatus`]. The
-/// source enum is `#[non_exhaustive]`; an unmodelled future variant maps to
-/// [`BacklightStatus::AlsAutomatic`], the firmware's out-of-box behaviour.
+/// Map the fork's `0x1982` status onto OpenLogi's [`BacklightStatus`].
+///
+/// A status byte neither side models — `FirmwareStatus::Other`, or a future
+/// variant of the `#[non_exhaustive]` source enum — maps to
+/// [`BacklightStatus::Unknown`] rather than to a status the keyboard did not
+/// report. The raw byte goes to the debug log.
 fn status_from_firmware(status: FirmwareStatus) -> BacklightStatus {
     match status {
         FirmwareStatus::DisabledBySoftware => BacklightStatus::DisabledBySoftware,
         FirmwareStatus::DisabledByCriticalBattery => BacklightStatus::DisabledByCriticalBattery,
+        FirmwareStatus::AlsAutomatic => BacklightStatus::AlsAutomatic,
         FirmwareStatus::AlsSaturated => BacklightStatus::AlsSaturated,
         FirmwareStatus::TemporaryManual => BacklightStatus::TemporaryManual,
         FirmwareStatus::PermanentManual => BacklightStatus::PermanentManual,
-        _ => BacklightStatus::AlsAutomatic,
+        _ => {
+            debug!(
+                status = u8::from(status),
+                "0x1982 reports a backlight status OpenLogi does not model"
+            );
+            BacklightStatus::Unknown
+        }
     }
 }
 
@@ -367,6 +377,9 @@ mod tests {
         short_config_reply: bool,
         /// Acknowledge `setBacklightConfig` but keep the old level.
         ignores_level: bool,
+        /// The first four `getBacklightInfo` bytes: level count, current
+        /// level, status and effect.
+        info: [u8; 4],
     }
 
     impl Keyboard {
@@ -389,6 +402,29 @@ mod tests {
                 version: 3,
                 short_config_reply: false,
                 ignores_level: false,
+                info: [
+                    NB_LEVELS,
+                    SHOWN_LEVEL,
+                    u8::from(FirmwareStatus::AlsAutomatic),
+                    u8::from(hidpp::feature::backlight::BacklightEffect::Static),
+                ],
+            }
+        }
+
+        /// The Alto Keys K75M in #1874, `0x1982` version 4 over Bluetooth:
+        /// its recorded `getBacklightConfig` reply (enabled, options
+        /// `0x4525`, level 2, every duration 12 units) and `getBacklightInfo`
+        /// (eight levels, level 2, status `6`, the static effect).
+        fn k75m() -> Self {
+            let mut config = [0u8; 16];
+            config[..14].copy_from_slice(&[
+                0x01, 0x25, 0x45, 0x03, 0x00, 0x02, 0x0c, 0x00, 0x0c, 0x00, 0x0c, 0x00, 0x0c, 0x00,
+            ]);
+            Self {
+                config,
+                version: 4,
+                info: [0x08, 0x02, 0x06, 0x00],
+                ..Self::v3()
             }
         }
 
@@ -454,12 +490,7 @@ mod tests {
                     true
                 }
                 (BACKLIGHT_INDEX, 0x02) => {
-                    payload[..4].copy_from_slice(&[
-                        NB_LEVELS,
-                        SHOWN_LEVEL,
-                        u8::from(FirmwareStatus::AlsAutomatic),
-                        u8::from(hidpp::feature::backlight::BacklightEffect::Static),
-                    ]);
+                    payload[..4].copy_from_slice(&keyboard.info);
                     true
                 }
                 _ => return None,
@@ -796,5 +827,42 @@ mod tests {
             status_from_firmware(FirmwareStatus::AlsSaturated),
             BacklightStatus::AlsSaturated
         );
+    }
+
+    #[test]
+    fn an_unmodelled_status_is_unknown_not_a_guess() {
+        assert_eq!(
+            status_from_firmware(FirmwareStatus::AlsAutomatic),
+            BacklightStatus::AlsAutomatic
+        );
+        assert_eq!(
+            status_from_firmware(FirmwareStatus::from(6)),
+            BacklightStatus::Unknown
+        );
+    }
+
+    #[tokio::test]
+    async fn a_version_4_keyboard_with_status_6_reads() -> Result<(), WriteError> {
+        let (raw, _handle) = stateful_backlight(Keyboard::k75m());
+        let channel = scripted_channel(raw).await;
+
+        let state = get_backlight_on_channel(&channel, 0xff).await?;
+
+        // Options 0x4525 name no mode support, so only battery saving and
+        // the timer are offered.
+        assert_eq!(
+            state,
+            BacklightState {
+                enabled: true,
+                mode: BacklightMode::None,
+                status: BacklightStatus::Unknown,
+                current_level: 2,
+                nb_levels: 8,
+                power_save: true,
+                controls: BacklightControls::POWER_SAVE | BacklightControls::DURATION,
+                duration: BacklightDuration::from_units(12),
+            }
+        );
+        Ok(())
     }
 }

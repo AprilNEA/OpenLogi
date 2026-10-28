@@ -139,7 +139,8 @@ fn lit_caption(state: BacklightState) -> gpui::SharedString {
         BacklightStatus::DisabledBySoftware
         | BacklightStatus::AlsAutomatic
         | BacklightStatus::TemporaryManual
-        | BacklightStatus::PermanentManual => tr!("device.light_the_keys_description"),
+        | BacklightStatus::PermanentManual
+        | BacklightStatus::Unknown => tr!("device.light_the_keys_description"),
     }
 }
 
@@ -430,6 +431,11 @@ mod tests {
             tr!("device.backlight_off_bright")
         );
         assert_eq!(lit_caption(lit), tr!("device.light_the_keys_description"));
+        // A status OpenLogi does not model gives no firmware reason either.
+        assert_eq!(
+            lit_caption(with(BacklightStatus::Unknown)),
+            tr!("device.light_the_keys_description")
+        );
         // Turned off by the user: no firmware reason to give.
         let off = BacklightState {
             enabled: false,

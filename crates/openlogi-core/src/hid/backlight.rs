@@ -51,6 +51,11 @@ pub enum BacklightStatus {
     TemporaryManual,
     /// Holding a level written by software.
     PermanentManual,
+    /// A status the keyboard reports that OpenLogi does not model, such as
+    /// the `6` that `0x1982` version 4 keyboards send. It says nothing about
+    /// whether the LEDs are lit; [`BacklightState::enabled`] and
+    /// [`BacklightState::current_level`] still do.
+    Unknown,
 }
 
 /// Snapshot of a keyboard's backlight, merged from the `0x1982`
