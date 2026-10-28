@@ -386,6 +386,11 @@ impl HeldDpiShifts {
         info!(%low, "DPI shift held");
         let write = executor.pointer_speeds.preset_write(&route, low);
         let own_restore = write.restore.clone();
+        // The DPI the shift starts from stays its fallback: a rejected panel
+        // write during the hold clears `current`.
+        if let Some(dpi) = current {
+            before.set(dpi);
+        }
         executor.write_speed_reading(write, current.is_none().then(|| before.clone()));
         self.by_device.insert(
             device,
@@ -1044,6 +1049,26 @@ mod tests {
         let mut held = HeldDpiShifts::default();
         held.start(&executor, &press, Some("mouse"));
         assert_eq!(held.by_device.values().next().unwrap().before.get(), None);
+    }
+
+    /// A panel write the mouse rejects during a hold clears `current`, so
+    /// the release falls back to the DPI the shift started from.
+    #[test]
+    fn a_rejected_panel_dpi_during_a_shift_still_returns_to_the_start() {
+        let executor = dpi_shift_executor(Some(Dpi::new(1200)));
+        let press = PressToken::hook_for_test(1, ButtonId::G6);
+        let mut held = HeldDpiShifts::default();
+        held.start(&executor, &press, Some("mouse"));
+
+        let route = DeviceRoute::Bolt {
+            receiver_uid: "AA00".into(),
+            slot: 1,
+        };
+        let mut cycles = executor.dpi_cycle.write().unwrap();
+        cycles.reapplied_at(&route, Dpi::new(1600));
+        cycles.rejected_at(&route, Dpi::new(1600));
+        let shift = held.by_device.values().next().unwrap();
+        assert_eq!(shift.restore_to(&cycles), Some(Dpi::new(1200)));
     }
 
     #[test]
