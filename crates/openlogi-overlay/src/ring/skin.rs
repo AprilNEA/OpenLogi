@@ -199,12 +199,20 @@ impl Layout {
         let (x, y) = slot.unit_offset();
         (
             self.edge / 2.0 + x * RADIUS * self.fit - self.pill_width() / 2.0,
-            self.edge / 2.0 + y * RADIUS * self.fit - PILL_H / 2.0,
+            self.edge / 2.0 + y * RADIUS * self.fit - self.pill_height() / 2.0,
         )
     }
 
+    /// The pill scales with the slot radius in both directions: a shorter
+    /// panel brings the slots closer, and a pill that kept its designed height
+    /// would overlap its neighbours below 320 px, so a click near a shared
+    /// corner could reach the wrong action.
     fn pill_width(self) -> f32 {
         PILL_W * self.fit
+    }
+
+    fn pill_height(self) -> f32 {
+        PILL_H * self.fit
     }
 }
 
@@ -232,12 +240,12 @@ fn slot_element(
             .left(px(left))
             .top(px(top))
             .w(px(layout.pill_width()))
-            .h(px(PILL_H))
+            .h(px(layout.pill_height()))
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(6.0))
-            .px(px(12.0))
+            .gap(px(6.0 * layout.fit))
+            .px(px(12.0 * layout.fit))
             .rounded_full()
             .bg(slot_fill(hover_t))
             .text_color(ink)
@@ -251,7 +259,7 @@ fn slot_element(
             )
             .child(
                 div()
-                    .w(px(layout.pill_width() - 40.0))
+                    .w(px(layout.pill_width() - 40.0 * layout.fit))
                     .text_xs()
                     .truncate()
                     .child(caption),
@@ -760,11 +768,40 @@ mod tests {
                 left >= 0.0 && left + layout.pill_width() <= layout.edge,
                 "{slot:?}"
             );
-            assert!(top >= 0.0 && top + PILL_H <= layout.edge, "{slot:?}");
+            assert!(
+                top >= 0.0 && top + layout.pill_height() <= layout.edge,
+                "{slot:?}"
+            );
         }
         let (left, top) = layout.slot_origin(ActionRingSlot::Bottom);
-        assert!((top + PILL_H / 2.0 - (180.0 + 120.0)).abs() < 0.01);
+        assert!((top + layout.pill_height() / 2.0 - (180.0 + 120.0)).abs() < 0.01);
         assert!((left + layout.pill_width() / 2.0 - 180.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn neighbouring_pills_never_overlap_however_short_the_panel() {
+        // 1024×600 at 200% is a 300 px panel: at the designed pill height the
+        // Top and TopRight pills shared a 12×5 px corner, so a click there
+        // could pick either. 240 px is below any display GPUI would offer and
+        // stands in for the limit.
+        for edge in [480.0, 360.0, 300.0, 240.0] {
+            let layout = Layout::fitting(px(edge));
+            let rect = |slot: ActionRingSlot| {
+                let (left, top) = layout.slot_origin(slot);
+                (
+                    left,
+                    top,
+                    left + layout.pill_width(),
+                    top + layout.pill_height(),
+                )
+            };
+            for (index, slot) in ActionRingSlot::ALL.into_iter().enumerate() {
+                let next = ActionRingSlot::ALL[(index + 1) % ActionRingSlot::ALL.len()];
+                let (a, b) = (rect(slot), rect(next));
+                let apart = a.2 <= b.0 || b.2 <= a.0 || a.3 <= b.1 || b.3 <= a.1;
+                assert!(apart, "{slot:?} and {next:?} overlap on a {edge} px panel");
+            }
+        }
     }
 
     #[test]
