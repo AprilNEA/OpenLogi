@@ -6,6 +6,7 @@ use hidpp::{
         CreatableFeature,
         adjustable_dpi::AdjustableDpiFeature,
         extended_dpi::{DpiDirection, DpiRange, ExtendedDpiFeature, SetDpiParameters},
+        onboard_profiles::{OnboardMode, OnboardProfilesFeature},
         root::FeatureInformation,
     },
     protocol::v20::{ErrorType, Hidpp20Error},
@@ -46,7 +47,14 @@ enum DpiFeature {
 
     /// `0x2202` — independent X/Y DPI plus lift-off distance, described as a
     /// mix of fixed values and stepped ranges.
-    Extended(Arc<ExtendedDpiFeature>),
+    Extended {
+        feature: Arc<ExtendedDpiFeature>,
+        /// `0x8100`, when the device stores onboard profiles. While one of
+        /// them is active the firmware rejects `setSensorDpiParameters` with
+        /// `LOGITECH_INTERNAL` (a PRO X SUPERLIGHT 2 does), so a write first
+        /// hands the settings to the host.
+        onboard_profiles: Option<Arc<OnboardProfilesFeature>>,
+    },
 }
 
 impl DpiFeature {
@@ -64,7 +72,14 @@ impl DpiFeature {
             });
         }
         if let Some(info) = feature_info(device, ExtendedDpiFeature::ID).await? {
-            return Ok(Self::Extended(device.add_feature(info.index)));
+            let feature = device.add_feature(info.index);
+            let onboard_profiles = feature_info(device, OnboardProfilesFeature::ID)
+                .await?
+                .map(|info| device.add_feature(info.index));
+            return Ok(Self::Extended {
+                feature,
+                onboard_profiles,
+            });
         }
         // Neither ID is present. Name the canonical one in the error: a caller
         // reading "0x2201 unsupported" is being told this device has no DPI
@@ -78,7 +93,7 @@ impl DpiFeature {
     const fn id(&self) -> u16 {
         match self {
             Self::Adjustable { .. } => AdjustableDpiFeature::ID,
-            Self::Extended(_) => ExtendedDpiFeature::ID,
+            Self::Extended { .. } => ExtendedDpiFeature::ID,
         }
     }
 
@@ -86,7 +101,7 @@ impl DpiFeature {
     async fn sensor_count(&self) -> Result<u8, Hidpp20Error> {
         match self {
             Self::Adjustable { feature, .. } => feature.get_sensor_count().await,
-            Self::Extended(feature) => feature.get_sensor_count().await,
+            Self::Extended { feature, .. } => feature.get_sensor_count().await,
         }
     }
 
@@ -94,7 +109,7 @@ impl DpiFeature {
     async fn current_dpi(&self) -> Result<Dpi, Hidpp20Error> {
         match self {
             Self::Adjustable { feature, .. } => feature.get_sensor_dpi(SENSOR).await.map(Dpi::from),
-            Self::Extended(feature) => Ok(feature
+            Self::Extended { feature, .. } => Ok(feature
                 .get_sensor_dpi_parameters(SENSOR)
                 .await?
                 .dpi_x
@@ -108,7 +123,7 @@ impl DpiFeature {
             Self::Adjustable { feature, version } => {
                 feature.get_sensor_default_dpi(*version, SENSOR).await?
             }
-            Self::Extended(feature) => {
+            Self::Extended { feature, .. } => {
                 let dpi = feature
                     .get_sensor_dpi_parameters(SENSOR)
                     .await?
@@ -123,7 +138,7 @@ impl DpiFeature {
     async fn supported_dpi(&self) -> Result<Vec<u16>, Hidpp20Error> {
         match self {
             Self::Adjustable { feature, .. } => feature.get_sensor_dpi_list(SENSOR).await,
-            Self::Extended(feature) => {
+            Self::Extended { feature, .. } => {
                 // `getSensorDpiList` (function 3) only answers on sensors that
                 // support profiles; the range description is the one every
                 // 0x2202 sensor reports. X is the axis the UI drives.
@@ -140,7 +155,18 @@ impl DpiFeature {
         let dpi = dpi.into();
         match self {
             Self::Adjustable { feature, .. } => feature.set_sensor_dpi(SENSOR, dpi).await,
-            Self::Extended(feature) => {
+            Self::Extended {
+                feature,
+                onboard_profiles,
+            } => {
+                // A device in host mode stays there: switching it back would
+                // hand the DPI to the stored profile again.
+                if let Some(onboard_profiles) = onboard_profiles
+                    && onboard_profiles.get_onboard_mode().await? == OnboardMode::Onboard
+                {
+                    onboard_profiles.set_onboard_mode(OnboardMode::Host).await?;
+                    debug!("switched onboard profiles to host mode for a DPI write");
+                }
                 // `setSensorDpiParameters` writes DPI X, DPI Y and lift-off
                 // distance in one packet with no "leave unchanged" encoding.
                 // Which of Y and LOD the packet may carry is the sensor's
