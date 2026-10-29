@@ -447,10 +447,6 @@ impl RecordsShortcut for MouseModelView {
 }
 
 impl Render for MouseModelView {
-    #[expect(
-        clippy::too_many_lines,
-        reason = "the model view assembles its canvas, labels and inspector inline"
-    )]
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.localize_action_picker_inputs(window, cx);
         let force_sensing = self.sync_selection(window, cx);
