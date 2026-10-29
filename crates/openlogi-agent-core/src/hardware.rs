@@ -1414,6 +1414,56 @@ pub(crate) fn restore_dpi_in_background(
     );
 }
 
+/// Read the DPI of `op`'s mouse once this write's turn comes, and write the
+/// DPI `step` picks from that reading, unless a newer pointer-speed write was
+/// requested after `ticket`. For a preset step on a mouse whose DPI OpenLogi
+/// never set. As a pointer-speed write does, it then sets the DPI LED when
+/// `led` says, and runs `on_applied` once it landed.
+pub(crate) fn step_dpi_in_background(
+    op: DeviceOp,
+    ticket: WriteTicket,
+    led: Option<bool>,
+    step: impl FnOnce(Dpi) -> Option<Dpi> + Send + 'static,
+    on_applied: impl FnOnce() + Send + 'static,
+) {
+    let index = op.route.device_index();
+    let turn = op.access.transport_turns.turn_for(&op.route);
+    op.spawn_timed_write(
+        "DPI step",
+        move |op| async move {
+            within_turn(
+                &ticket,
+                &turn,
+                || async move {
+                    let started = tokio::time::Instant::now();
+                    let shared = op.resolve()?;
+                    let reading = openlogi_hid::get_dpi_info_on(&shared).await?.current;
+                    let Some(dpi) = step(reading) else {
+                        return Ok(Some(None));
+                    };
+                    openlogi_hid::set_dpi_on(&shared, dpi).await?;
+                    if let Some(on) = led {
+                        show_precision_led(&shared, on, started).await;
+                    }
+                    Ok(Some(Some((reading, dpi))))
+                },
+                || async { Ok(None) },
+            )
+            .await
+        },
+        move |result| {
+            log_outcome(index, "DPI step", result, |stepped| match stepped {
+                Some(Some((reading, dpi))) => {
+                    debug!(index, %reading, %dpi, "DPI stepped from the mouse's reading");
+                    on_applied();
+                }
+                Some(None) => debug!(index, "no DPI preset to step to"),
+                None => debug!(index, "DPI step superseded by a newer write"),
+            });
+        },
+    );
+}
+
 /// Spawn an OS thread that reconciles the configured native HiResWheel mode
 /// for `op`'s device. Unsupported devices are expected and only logged at
 /// debug level. The write stands down if, by its turn, `capture_plans` hands

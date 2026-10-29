@@ -166,6 +166,38 @@ impl DpiCycleState {
         Some(self.select())
     }
 
+    /// Steps to the lowest preset above `reading`, the DPI read from a
+    /// mouse OpenLogi never set, stopping at the highest. The index says
+    /// nothing about where such a mouse is.
+    pub fn step_up_from(&mut self, reading: Dpi) -> Option<(Dpi, Option<DeviceRoute>)> {
+        let reading = self.normalize(reading);
+        let dpis = self.normalized_presets();
+        let above = (0..dpis.len())
+            .filter(|&i| dpis[i] > reading)
+            .min_by_key(|&i| dpis[i]);
+        self.index = above.or_else(|| (0..dpis.len()).max_by_key(|&i| dpis[i]))?;
+        Some(self.select())
+    }
+
+    /// Steps to the highest preset below `reading`, stopping at the lowest;
+    /// see [`Self::step_up_from`].
+    pub fn step_down_from(&mut self, reading: Dpi) -> Option<(Dpi, Option<DeviceRoute>)> {
+        let reading = self.normalize(reading);
+        let dpis = self.normalized_presets();
+        let below = (0..dpis.len())
+            .filter(|&i| dpis[i] < reading)
+            .max_by_key(|&i| dpis[i]);
+        self.index = below.or_else(|| (0..dpis.len()).min_by_key(|&i| dpis[i]))?;
+        Some(self.select())
+    }
+
+    fn normalized_presets(&self) -> Vec<Dpi> {
+        self.presets
+            .iter()
+            .map(|&dpi| self.normalize(dpi))
+            .collect()
+    }
+
     /// The lowest preset, which a held DPI shift drops to.
     #[must_use]
     pub fn lowest(&self) -> Option<Dpi> {
@@ -253,6 +285,40 @@ mod tests {
         assert_eq!((key, low), ("a", Dpi::new(800)));
         cycles.state_for(Some("a")).unwrap().step_up();
         assert_eq!(cycles.current("a"), Some(Dpi::new(1600)));
+    }
+
+    /// A mouse OpenLogi never set steps from the DPI it reads: at 1600 with
+    /// the G502's stock presets the next one is 3200, not the 800 after
+    /// index 0. A reading between presets steps to the nearest one past it.
+    #[test]
+    fn a_step_from_a_reading_goes_past_the_mouse_dpi() {
+        let mut state = DpiCycleState {
+            presets: [400, 800, 1600, 3200, 6400].map(Dpi::new).to_vec(),
+            ..DpiCycleState::default()
+        };
+        let up = |state: &mut DpiCycleState, reading| state.step_up_from(Dpi::new(reading));
+        let down = |state: &mut DpiCycleState, reading| state.step_down_from(Dpi::new(reading));
+        assert_eq!(up(&mut state, 1600).unwrap().0, Dpi::new(3200));
+        assert_eq!(state.index, 3);
+        assert_eq!(state.current, Some(Dpi::new(3200)));
+        assert_eq!(down(&mut state, 1600).unwrap().0, Dpi::new(800));
+        assert_eq!(up(&mut state, 1200).unwrap().0, Dpi::new(1600));
+        assert_eq!(down(&mut state, 1200).unwrap().0, Dpi::new(800));
+        assert_eq!(
+            up(&mut state, 6400).unwrap().0,
+            Dpi::new(6400),
+            "stops at the top"
+        );
+        assert_eq!(
+            down(&mut state, 100).unwrap().0,
+            Dpi::new(400),
+            "stops at the bottom"
+        );
+        assert!(
+            DpiCycleState::default()
+                .step_up_from(Dpi::new(800))
+                .is_none()
+        );
     }
 
     #[test]

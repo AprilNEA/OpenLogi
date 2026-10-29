@@ -24,10 +24,10 @@ use self::button::{
 pub(crate) use self::button::{HidppSessionId, PressToken};
 use crate::dpi::DpiBeforeShift;
 use crate::hardware::{
-    DeviceAccess, restore_dpi_in_background, toggle_smartshift_in_background,
-    write_pointer_speed_in_background,
+    DeviceAccess, restore_dpi_in_background, step_dpi_in_background,
+    toggle_smartshift_in_background, write_pointer_speed_in_background,
 };
-use crate::pointer_speed::{PrecisionPress, Restore, ShiftRestore, SpeedWrite};
+use crate::pointer_speed::{PrecisionPress, Restore, ShiftRestore, SpeedPlace, SpeedWrite};
 use crate::{DpiCycleState, DpiCycles, PointerSpeeds};
 use openlogi_hid::{DeviceRoute, Dpi};
 
@@ -213,6 +213,51 @@ impl ActionExecutor {
         }
     }
 
+    /// [`Self::step_dpi`] for a mouse whose DPI OpenLogi never set: its
+    /// preset index says nothing about where it is, so the write reads the
+    /// mouse first and steps from that. `false` when the DPI is known, or
+    /// there is no preset or mouse to step, so the plain step runs.
+    fn step_dpi_from_reading(&self, device_key: Option<&str>, action: &Action) -> bool {
+        let unknown = self.dpi_cycle.read().ok().and_then(|cycles| {
+            let key = device_key.or(cycles.selected.as_deref())?;
+            let state = cycles.by_key.get(key)?;
+            let route = state.target.clone()?;
+            (state.current.is_none() && !state.presets.is_empty()).then(|| (key.to_owned(), route))
+        });
+        let Some((key, route)) = unknown else {
+            return false;
+        };
+        let step = if matches!(action, Action::NextDpiPreset) {
+            DpiCycleState::step_up_from
+        } else {
+            DpiCycleState::step_down_from
+        };
+        info!("DPI preset step on a DPI OpenLogi never set → reading the mouse first");
+        let SpeedPlace {
+            route,
+            ticket,
+            restore,
+            led,
+        } = self.pointer_speeds.preset_place(&route);
+        let cycles = Arc::clone(&self.dpi_cycle);
+        let speeds = Arc::clone(&self.pointer_speeds);
+        step_dpi_in_background(
+            self.access.op(&route),
+            ticket,
+            led,
+            move |reading| {
+                let mut cycles = cycles.write().ok()?;
+                step(cycles.by_key.get_mut(&key)?, reading).map(|(dpi, _)| dpi)
+            },
+            move || {
+                if let Some(restore) = restore {
+                    speeds.restored(&restore);
+                }
+            },
+        );
+        true
+    }
+
     fn dispatch_to(&self, action: &Action, device_key: Option<&str>, target: ActionDispatchTarget) {
         // The ring is drawn by OpenLogi at the cursor and acts on no window, so
         // no pointer target gates it. It must not: while the ring is showing,
@@ -254,7 +299,12 @@ impl ActionExecutor {
                     }
                 }
             }
-            Action::NextDpiPreset | Action::PreviousDpiPreset => self.step_dpi(device_key, action),
+            Action::NextDpiPreset | Action::PreviousDpiPreset => {
+                if self.step_dpi_from_reading(device_key, action) {
+                    return;
+                }
+                self.step_dpi(device_key, action)
+            }
             Action::SetDpiPreset(i) => match self.dpi_cycle.write() {
                 Ok(mut guard) => guard
                     .state_for(device_key)
@@ -311,6 +361,12 @@ impl ActionExecutor {
                 None
             }
         };
+        self.write_dpi_action(action, next);
+    }
+
+    /// Write the DPI a preset action picked, `next`; `None` when it had no
+    /// preset to pick.
+    fn write_dpi_action(&self, action: &Action, next: Option<(Dpi, Option<DeviceRoute>)>) {
         if let Some((dpi, target)) = next {
             // No target: a dev environment without a real device.
             if let Some(target) = target {
@@ -995,6 +1051,19 @@ mod tests {
         let mut executor = executor_with(Arc::default());
         executor.dpi_cycle = Arc::new(RwLock::new(cycles));
         executor
+    }
+
+    /// A preset step reads the mouse first only while OpenLogi never set its
+    /// DPI; once it did, the index is where the mouse is.
+    #[test]
+    fn a_dpi_step_reads_the_mouse_only_while_its_dpi_is_unknown() {
+        let unknown = dpi_shift_executor(None);
+        assert!(unknown.step_dpi_from_reading(Some("mouse"), &Action::NextDpiPreset));
+        assert!(unknown.step_dpi_from_reading(Some("mouse"), &Action::PreviousDpiPreset));
+        assert!(!unknown.step_dpi_from_reading(Some("missing"), &Action::NextDpiPreset));
+
+        let known = dpi_shift_executor(Some(Dpi::new(1600)));
+        assert!(!known.step_dpi_from_reading(Some("mouse"), &Action::NextDpiPreset));
     }
 
     #[test]

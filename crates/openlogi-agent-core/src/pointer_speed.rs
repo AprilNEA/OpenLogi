@@ -200,6 +200,38 @@ pub(crate) struct SpeedWrite {
     pub(crate) led: Option<bool>,
 }
 
+/// A [`SpeedWrite`] before its target is known.
+pub(crate) struct SpeedPlace {
+    /// The mouse to write.
+    pub(crate) route: DeviceRoute,
+    /// Its place among the mouse's pointer-speed writes.
+    pub(crate) ticket: WriteTicket,
+    /// The pending restore the write settles once it lands, if any.
+    pub(crate) restore: Option<Restore>,
+    /// What the mouse's DPI LED shows after the write; see
+    /// [`SpeedWrite::led`].
+    pub(crate) led: Option<bool>,
+}
+
+impl SpeedPlace {
+    /// The write of `target` at this place.
+    pub(crate) fn aimed(self, target: SpeedTarget) -> SpeedWrite {
+        let Self {
+            route,
+            ticket,
+            restore,
+            led,
+        } = self;
+        SpeedWrite {
+            route,
+            target,
+            ticket,
+            restore,
+            led,
+        }
+    }
+}
+
 impl SpeedWrite {
     /// The DPI this write sets, when it names one.
     pub(crate) fn dpi(&self) -> Option<Dpi> {
@@ -410,6 +442,13 @@ impl PointerSpeeds {
     /// settles the restore that mouse is owed, as a write of its own speed
     /// does, but leaves its saved DPI as it is.
     pub(crate) fn preset_write(&self, route: &DeviceRoute, dpi: Dpi) -> SpeedWrite {
+        self.preset_place(route)
+            .aimed(SpeedTarget::Dpi(DpiTarget::Value(dpi)))
+    }
+
+    /// The place, restore and LED of a [`Self::preset_write`] whose DPI the
+    /// write picks once it has read the mouse.
+    pub(crate) fn preset_place(&self, route: &DeviceRoute) -> SpeedPlace {
         let mut state = self.lock();
         let key = state
             .online
@@ -423,11 +462,7 @@ impl PointerSpeeds {
                 state.pending_restore(&key)
             }
         });
-        self.write(
-            route.clone(),
-            SpeedTarget::Dpi(DpiTarget::Value(dpi)),
-            restore,
-        )
+        self.place(route.clone(), restore)
     }
 
     /// The writes a config reload owes. `change` tells what the reload
@@ -500,11 +535,17 @@ impl PointerSpeeds {
         target: SpeedTarget,
         restore: Option<Restore>,
     ) -> SpeedWrite {
+        self.place(route, restore).aimed(target)
+    }
+
+    /// The next place among `route`'s pointer-speed writes, for a write that
+    /// settles `restore`. Settling one ends precision mode, so the LED goes
+    /// dark.
+    fn place(&self, route: DeviceRoute, restore: Option<Restore>) -> SpeedPlace {
         let ticket = self.order.request(&route);
         let led = restore.as_ref().map(|_| false);
-        SpeedWrite {
+        SpeedPlace {
             route,
-            target,
             ticket,
             restore,
             led,
