@@ -7,8 +7,11 @@ use std::fmt;
 use std::future::Future;
 use std::sync::{Arc, RwLock};
 
+use hidpp::channel::HidppChannel;
 use hidpp::feature::CreatableFeature as _;
+use hidpp::feature::gestures2::Gestures2Feature;
 use hidpp::feature::hires_wheel::HiResWheelFeature;
+use hidpp::feature::root::RootFeature;
 use hidpp::protocol::v20::Hidpp20Error;
 use thiserror::Error;
 
@@ -194,11 +197,22 @@ impl ReprogRestore {
 }
 
 /// The thumb wheel a capture session diverted, and the reporting state to
-/// hand back.
+/// hand back: the `0x2150` wheel's mode and rotation sign, or the diversion
+/// bit of Gestures2 gesture 46 on devices without `0x2150`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct ThumbwheelRestore {
-    feature_index: u8,
-    status: ThumbwheelStatus,
+pub(crate) enum ThumbwheelRestore {
+    Thumbwheel {
+        feature_index: u8,
+        status: ThumbwheelStatus,
+    },
+    /// Teardown selects native reporting, like the main wheel. A diversion bit
+    /// found set at arming belongs to a session that never tore down, so
+    /// restoring it would leave the wheel diverted indefinitely.
+    ///
+    /// Gesture 46 is looked up again at teardown, not kept from arming: a
+    /// feature table that changed in between (firmware update) must not turn
+    /// the write into one aimed at another feature.
+    Gesture46,
 }
 
 impl ThumbwheelRestore {
@@ -206,11 +220,28 @@ impl ThumbwheelRestore {
     /// [`thumbwheel::status_to_restore`] derives from the status read before
     /// arming.
     pub(crate) fn new(feature_index: u8, original: Option<ThumbwheelStatus>) -> Self {
-        Self {
+        Self::Thumbwheel {
             feature_index,
             status: thumbwheel::status_to_restore(original),
         }
     }
+}
+
+/// Select native reporting for Gestures2 gesture 46. The feature is resolved
+/// through the root now. A device that no longer reports `0x6501` has nothing
+/// to restore.
+async fn restore_gesture46(
+    channel: Arc<HidppChannel>,
+    device_index: u8,
+) -> Result<(), Hidpp20Error> {
+    let root = RootFeature::new(Arc::clone(&channel), device_index, 0);
+    let Some(info) = root.get_feature(Gestures2Feature::ID).await? else {
+        return Ok(());
+    };
+    Gestures2Feature::new(channel, device_index, info.index)
+        .set_thumbwheel_diverted(false)
+        .await
+        .map(|_| ())
 }
 
 /// The main wheel a capture session diverted over `0x2121`. Teardown always
@@ -285,8 +316,18 @@ impl RestorePlan for CaptureRestorePlan {
             restored &= restore_result(main_wheel::undivert(&feature).await, "main wheel");
         }
         if let Some(thumb) = self.thumb {
-            let thumbwheel = Thumbwheel::new(channel, device_index, thumb.feature_index);
-            restored &= restore_result(thumbwheel.restore(thumb.status).await, "thumb wheel");
+            let result = match thumb {
+                ThumbwheelRestore::Thumbwheel {
+                    feature_index,
+                    status,
+                } => {
+                    Thumbwheel::new(channel, device_index, feature_index)
+                        .restore(status)
+                        .await
+                }
+                ThumbwheelRestore::Gesture46 => restore_gesture46(channel, device_index).await,
+            };
+            restored &= restore_result(result, "thumb wheel");
         }
         restored
     }

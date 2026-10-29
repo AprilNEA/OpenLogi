@@ -43,7 +43,7 @@ pub use super::capture::CaptureHost;
 use super::capture::{ArmedCapture, Liveness, ReportingChangeStream, run_capture};
 use accum::CaptureAccum;
 pub(crate) use arm::enumerate_controls;
-use arm::{ArmedControls, ArmedThumbwheel, arm_controls};
+use arm::{ArmedControls, ArmedThumb, ArmedThumbwheel, arm_controls};
 pub use main_wheel::MainWheelDivert;
 
 use super::capture_restore::ArmedReporting;
@@ -166,8 +166,8 @@ pub const GESTURE_SOURCE_BUTTONS: [(u16, ButtonId); 3] = [
 /// Which of one device's controls a capture session should divert.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CaptureSpec {
-    /// Divert the thumb wheel over `0x2150` (rotation rebind / sensitivity /
-    /// click bound).
+    /// Divert the thumb wheel over `0x2150`, or Gestures2 gesture 46 on a
+    /// device without it (rotation rebind / sensitivity / click bound).
     pub capture_thumbwheel: bool,
     /// Gesture-source CIDs ([`GESTURE_SOURCE_BUTTONS`] members) to divert
     /// with raw-XY — one per source in gesture mode; empty when no HID++
@@ -260,6 +260,7 @@ impl ArmedCapture for GestureCapture {
             buttons = armed.button_cids.len(),
             wheel_buttons = armed.wheel_button_cids.len(),
             thumbwheel = armed.thumb.is_some(),
+            gesture_thumbwheel = matches!(armed.thumb, Some(ArmedThumb::Gesture46(_))),
             main_wheel = armed.main_wheel.is_some(),
             wake_rearm,
             "control capture active"
@@ -277,14 +278,11 @@ impl ArmedCapture for GestureCapture {
         let reprog_index = armed.reprog.as_ref().map(ReprogControlsV4::feature_index);
         let gesture_cids = armed.gesture_cids.clone();
         let gesture_button_set = armed.gesture_button_cids.clone();
-        let thumb_index = armed
-            .thumb
-            .as_ref()
-            .map(|thumb| thumb.wheel.feature_index());
-        let thumb_resolution = armed
-            .thumb
-            .as_ref()
-            .map_or(WheelResolution::UNKNOWN, ArmedThumbwheel::resolution);
+        let thumbwheel = armed.thumb.as_ref().and_then(ArmedThumb::as_thumbwheel);
+        let thumb_index = thumbwheel.map(|thumb| thumb.wheel.feature_index());
+        let thumb_resolution =
+            thumbwheel.map_or(WheelResolution::UNKNOWN, ArmedThumbwheel::resolution);
+        let gesture_thumb_index = armed.thumb.as_ref().and_then(ArmedThumb::gesture46_index);
         let dpi_set = armed.dpi_cids.clone();
         // A wheel-hold button's press and release are ordinary button edges;
         // only the raw wheel it unlocks needs its own attribution.
@@ -336,6 +334,17 @@ impl ArmedCapture for GestureCapture {
                 if let Some(input) = thumbwheel_input(event, previous, thumb_resolution) {
                     let _ = sink.send(input);
                 }
+                return;
+            }
+            if let Some(idx) = gesture_thumb_index
+                && let Some(step) = thumbwheel::decode_gesture46_step(msg, device_index, idx)
+            {
+                // Gesture 46 reports no resolution, so its steps pass through
+                // as increments; the sign already reads positive-is-up.
+                let _ = sink.send(CapturedInput::Scroll {
+                    increments: step,
+                    resolution: WheelResolution::UNKNOWN,
+                });
                 return;
             }
             if let Some((idx, per_notch)) = main_wheel
