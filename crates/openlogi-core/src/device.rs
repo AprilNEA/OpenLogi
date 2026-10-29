@@ -223,6 +223,11 @@ pub struct Capabilities {
     /// HID++ `0x8110` button spy.
     #[serde(default)]
     pub button_spy: bool,
+    /// A headset's sidetone level can be read and changed — HID++ `0x8300
+    /// Sidetone`. Appended after `button_spy`: crosses the IPC and the
+    /// persisted identity.
+    #[serde(default)]
+    pub sidetone: bool,
 }
 
 impl Capabilities {
@@ -278,6 +283,7 @@ impl Capabilities {
             disable_keys: ids.contains(&0x4521),
             onboard_profiles: ids.contains(&0x8100),
             button_spy: ids.contains(&0x8110),
+            sidetone: ids.contains(&0x8300),
         }
     }
 
@@ -826,6 +832,7 @@ mod tests {
                     disable_keys: false,
                     onboard_profiles: false,
                     button_spy: false,
+                    sidetone: false,
                 }),
                 settings_revision: 0,
                 hidpp10: false,
@@ -950,6 +957,7 @@ mod tests {
                 disable_keys: false,
                 onboard_profiles: false,
                 button_spy: false,
+                sidetone: false,
             }
         );
         assert!(!Capabilities::from_feature_ids(&[0x0003, 0x1b04]).thumbwheel);
@@ -978,6 +986,7 @@ mod tests {
                 disable_keys: false,
                 onboard_profiles: false,
                 button_spy: false,
+                sidetone: false,
             }
         );
         // No driving features → nothing offered.
@@ -1009,6 +1018,9 @@ mod tests {
         // changed; the 0x19b0 haptic engine alone does not.
         assert!(Capabilities::from_feature_ids(&[0x0001, 0x19c0]).force_sensing);
         assert!(!Capabilities::from_feature_ids(&[0x0001, 0x19b0]).force_sensing);
+        // The G535's table: sidetone, and battery through 0x1f20.
+        let headset = Capabilities::from_feature_ids(&[0x0001, 0x0003, 0x0005, 0x8300, 0x1f20]);
+        assert!(headset.sidetone && !headset.buttons && !headset.pointer);
     }
 
     #[test]

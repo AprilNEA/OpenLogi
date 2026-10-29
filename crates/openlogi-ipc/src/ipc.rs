@@ -22,7 +22,7 @@ use openlogi_core::hid::{
     BacklightChange, BacklightState, DeviceRoute, DisableKeysMask, DisableKeysState, Dpi, DpiInfo,
     EasySwitchHosts, FnLockState, ForceSensingInfo, LightCommand, OnboardState, PairingError,
     PasskeyMethod, PointerSpeed, ReceiverSelector, ReportRate, ReportRateInfo, ScrollWheelMode,
-    SmartShiftStatus, WriteError,
+    SidetoneLevel, SmartShiftStatus, WriteError,
 };
 use serde::{Deserialize, Serialize};
 pub use succession::Identity;
@@ -169,7 +169,10 @@ pub use succession::Identity;
 ///      `HidppOperation::ChangeHost` appended — software-initiated `0x1814`
 ///      host switching of one device. `AgentSnapshot::flow` appended —
 ///      whether Flow is enabled, and the coarse link state of each
-///      configured peer.
+///      configured peer. `Capabilities::sidetone`,
+///      `HidppOperation::{ReadSidetone, WriteSidetone}` and
+///      `Agent::{read_sidetone, set_sidetone}` appended after them — a
+///      headset's HID++ `0x8300` sidetone level, as a [`SidetoneLevel`].
 pub const PROTOCOL_VERSION: u32 = 44;
 
 /// Environment variable through which the agent hands a supervised helper the
@@ -1029,4 +1032,14 @@ pub trait Agent {
     /// write was issued. It does not mean the device arrived: once the write
     /// takes effect, its radio link has left this computer.
     async fn switch_host(route: DeviceRoute, host: u8) -> Result<(), WriteError>;
+
+    /// Read the sidetone level of the headset on `route` (HID++ `0x8300`).
+    async fn read_sidetone(route: DeviceRoute) -> Result<SidetoneLevel, WriteError>;
+    /// Write the sidetone level of the headset on `route` now and answer with
+    /// the level the headset confirms. The headset keeps it across power
+    /// cycles, so nothing is saved to the config.
+    async fn set_sidetone(
+        route: DeviceRoute,
+        level: SidetoneLevel,
+    ) -> Result<SidetoneLevel, WriteError>;
 }

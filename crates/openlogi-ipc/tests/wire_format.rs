@@ -50,7 +50,7 @@ use openlogi_core::hid::{
     DpiInfo, EasySwitchHosts, EasySwitchSlot, FnLockState, ForceSensingInfo, HidppFeatureErrorKind,
     HidppOperation, HostConnection, HostOsInfo, HostOsKind, LightCommand, OnboardMode,
     OnboardProfile, OnboardState, PasskeyMethod, ProfileIndex, ReceiverSelector, ReportRate,
-    ReportRateInfo, ScrollReportingTarget, ScrollWheelMode, SmartShiftAutoDisengage,
+    ReportRateInfo, ScrollReportingTarget, ScrollWheelMode, SidetoneLevel, SmartShiftAutoDisengage,
     SmartShiftMode, SmartShiftStatus, SmartShiftThreshold, TunableTorque, WriteError,
 };
 use openlogi_ipc::{
@@ -375,6 +375,32 @@ fn reload_saved_config() {
         &AgentResponse::ReloadSavedConfigWithVerdict(Ok(SavedConfigVerdict::FileChangedAfterSave)),
         "2e0001",
     );
+}
+
+/// The sidetone calls follow the saved-config verdict, and carry the level
+/// as one byte.
+#[test]
+fn sidetone_calls() {
+    let route = DeviceRoute::Direct {
+        vendor_id: 0x046d,
+        product_id: 0x0ac4,
+    };
+    let level = SidetoneLevel::try_new(40).expect("a level in range");
+    assert_wire(&HidppOperation::ReadSidetone, "1f");
+    assert_wire(&HidppOperation::WriteSidetone, "20");
+    assert_wire(&level, "28");
+    assert_wire(&Ok::<SidetoneLevel, WriteError>(level), "0028");
+    assert_wire(
+        &AgentRequest::ReadSidetone {
+            route: route.clone(),
+        },
+        "3102fb6d04fbc40a",
+    );
+    assert_wire(
+        &AgentRequest::SetSidetone { route, level },
+        "3202fb6d04fbc40a28",
+    );
+    assert_wire(&AgentResponse::SetSidetone(Ok(level)), "320028");
 }
 
 /// The overlay long-polls the backlight indicator by generation, like
@@ -778,6 +804,7 @@ fn device_inventory() {
                 disable_keys: false,
                 onboard_profiles: false,
                 button_spy: false,
+                sidetone: true,
             }),
             settings_revision: 7,
             hidpp10: false,
@@ -785,7 +812,7 @@ fn device_inventory() {
     }];
     assert_wire(
         &inventory,
-        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b00001010150020001030106323134304c5a0102030400010100fb34b0fb8240000b0101010000010101010100010101010101010000000700",
+        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b00001010150020001030106323134304c5a0102030400010100fb34b0fb8240000b010101000001010101010001010101010101000000010700",
     );
 }
 
