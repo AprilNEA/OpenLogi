@@ -229,14 +229,14 @@ pub mod obsidian {
         if pressed {
             linear_gradient(
                 155.0,
-                linear_color_stop(hex(0x213b_3ad6), 0.0),
-                linear_color_stop(hex(0x1627_2cd6), 0.80),
+                linear_color_stop(hex(0x213b_3aa3), 0.0),
+                linear_color_stop(hex(0x1627_2ca3), 0.80),
             )
         } else {
             linear_gradient(
                 155.0,
-                linear_color_stop(hex(0x1d26_33c7), 0.0),
-                linear_color_stop(hex(0x1219_23c7), 0.76),
+                linear_color_stop(hex(0x1d26_3394), 0.0),
+                linear_color_stop(hex(0x1219_2394), 0.76),
             )
         }
     }
@@ -300,8 +300,8 @@ pub mod obsidian {
     pub fn hub_fill() -> Background {
         linear_gradient(
             160.0,
-            linear_color_stop(hex(0x2432_3aff), 0.0),
-            linear_color_stop(hex(0x0d14_1cff), 1.0),
+            linear_color_stop(hex(0x2432_3acc), 0.0),
+            linear_color_stop(hex(0x0d14_1ccc), 1.0),
         )
     }
 
