@@ -24,6 +24,7 @@ fn transient_identity_is_not_persisted_or_retained_after_resolution() {
         &resolver,
         &state.config,
         &[],
+        &[],
     );
     let merged = state.merge_inventory_snapshot(stable_list);
 
@@ -56,6 +57,7 @@ fn transient_probe_folds_into_its_known_card() {
         &resolver,
         &state.config,
         &[],
+        &[],
     );
     let merged = state.merge_inventory_snapshot(transient_list);
 
@@ -85,6 +87,7 @@ fn transient_record_beside_its_live_device_is_dropped() {
         &[],
         &resolver,
         &state.config,
+        &[],
         &[],
     );
     assert_eq!(both.len(), 2);
@@ -116,6 +119,7 @@ fn transient_probe_adopts_the_absent_sibling_of_a_live_twin() {
         &[],
         &resolver,
         &state.config,
+        &[],
         &[],
     );
     let merged = state.merge_inventory_snapshot(snapshot);
@@ -153,6 +157,7 @@ fn ambiguous_transient_probe_is_not_adopted() {
         &[],
         &resolver,
         &state.config,
+        &[],
         &[],
     );
     let merged = state.merge_inventory_snapshot(transient_list);

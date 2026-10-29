@@ -307,6 +307,9 @@ impl Runtime {
                     });
                 });
             }
+            ipc::GuiUpdate::MicrophoneWritten { id, result } => cx.update(|cx| {
+                AppState::apply(cx, |state| state.apply_microphone_written(id, result));
+            }),
             ipc::GuiUpdate::DisableKeysWriteResult { context, result } => cx.update(|cx| {
                 AppState::apply(cx, |state| {
                     state.apply_disable_keys_write_result(context, result)

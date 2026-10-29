@@ -44,6 +44,7 @@ use openlogi_core::hid::{
     BacklightState, DeviceRoute, DisableKeysState, Dpi, EasySwitchHosts, FnLockState,
     ForceSensingInfo, LightCommand, PointerSpeed, ReportRateInfo, WriteError,
 };
+use openlogi_core::microphone::{Microphone, MicrophoneError};
 use openlogi_ipc::client::{self, ConnectError};
 use openlogi_ipc::{
     AgentClient, AgentSnapshot, ClientKind, ConfigReloadError, PairingFailure, SavedConfigVerdict,
@@ -71,7 +72,7 @@ pub use request::{
     ReadEasySwitchHosts, ReadFnLock, ReadForceSensing, ReadPointerSpeed, ReadReportRate,
     ReadSmartShift, ReloadConfig, RenameEasySwitchHost, RequestAccessibilityPrompt, SetBacklight,
     SetDisableKeys, SetDpi, SetFnLock, SetForceSensing, SetLight, SetLightManualPower, SetLighting,
-    SetPointerSpeed, SetReportRate, SetSmartShift, StartPairing, UnpairDevice,
+    SetMicrophone, SetPointerSpeed, SetReportRate, SetSmartShift, StartPairing, UnpairDevice,
 };
 
 /// Complete identity of one Disable Keys write/reload transaction.
@@ -123,6 +124,14 @@ pub enum GuiUpdate {
         command: LightCommand,
         /// Agent acceptance or typed device failure.
         result: Result<(), WriteError>,
+    },
+    /// What a microphone read back after a control write, or why it refused
+    /// it; `None` when the agent could not be reached. Answers
+    /// [`SetMicrophone`].
+    MicrophoneWritten {
+        /// The microphone that was written.
+        id: String,
+        result: Option<Result<Microphone, MicrophoneError>>,
     },
     /// Result of a guarded Disable Keys replacement.
     DisableKeysWriteResult {

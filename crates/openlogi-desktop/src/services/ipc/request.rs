@@ -22,6 +22,7 @@ use openlogi_core::hid::{
     EasySwitchHosts, FnLockState, ForceSensingInfo, LightCommand, PointerSpeed, ReceiverSelector,
     ReportRate, ReportRateInfo, SmartShiftStatus, WriteError,
 };
+use openlogi_core::microphone::{Microphone, MicrophoneChange, MicrophoneError};
 use openlogi_ipc::{
     AgentClient, ChosenLight, ConfigReloadError, PairingCommandError, PairingFailure, SavedConfig,
     SavedConfigVerdict,
@@ -389,6 +390,33 @@ impl Request for SetLight {
 
     fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
         report_light_result(updates, self.key, self.request_id, self.command, outcome);
+    }
+}
+
+/// One microphone control write, answered as a
+/// [`GuiUpdate::MicrophoneWritten`] with what the microphone read back.
+pub struct SetMicrophone {
+    pub id: String,
+    pub change: MicrophoneChange,
+}
+
+impl Request for SetMicrophone {
+    type Answer = Result<Microphone, MicrophoneError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .set_microphone(context::current(), self.id.clone(), self.change)
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
+        if let Ok(Err(error)) = &outcome {
+            warn!(%error, change = ?self.change, "agent rejected microphone change");
+        }
+        let _ = updates.send(GuiUpdate::MicrophoneWritten {
+            id: self.id,
+            result: outcome.ok(),
+        });
     }
 }
 
@@ -970,6 +998,7 @@ commands! {
     SetLighting,
     SetLight,
     SetLightManualPower,
+    SetMicrophone,
     SetSmartShift,
     SetFnLock,
     SetReportRate,

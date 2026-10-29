@@ -66,7 +66,18 @@ impl AppState {
         resolver: &AssetResolver,
         cameras: &[openlogi_camera::Camera],
     ) -> StateEvents {
-        let new_list = build_device_list(inventories, standalone, resolver, &self.config, cameras);
+        let microphones = self.microphones().to_vec();
+        let rebuild = |config: &Config| {
+            build_device_list(
+                inventories,
+                standalone,
+                resolver,
+                config,
+                cameras,
+                &microphones,
+            )
+        };
+        let new_list = rebuild(&self.config);
         // Adoption runs before anything else touches the config. Only an
         // online record's identity was actually read this snapshot, so only an
         // online sighting can attribute its route to a device with confidence
@@ -92,7 +103,7 @@ impl AppState {
         // skips it — a grace-kept record is never online. That guard existing
         // for its own reason is what this rebuild silently depends on.
         let new_list = if adopted {
-            build_device_list(inventories, standalone, resolver, &self.config, cameras)
+            rebuild(&self.config)
         } else {
             new_list
         };

@@ -1239,6 +1239,14 @@ fn light_tab_follows_light_capabilities() {
     );
 }
 
+#[test]
+fn a_microphone_shows_its_controls_and_the_device_tab() {
+    assert_eq!(
+        DetailTab::tabs_for(&record(DeviceKind::Microphone, None)),
+        vec![DetailTab::Microphone, DetailTab::Device]
+    );
+}
+
 /// An unprobed (offline) device has no measured capabilities and falls back
 /// to a kind presumption, so a sleeping mouse keeps its button/pointer tabs.
 #[test]

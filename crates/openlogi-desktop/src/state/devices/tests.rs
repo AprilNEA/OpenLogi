@@ -139,7 +139,7 @@ fn cabled_inventory() -> DeviceInventory {
 /// snapshot.
 fn records_from(config: &Config, inventories: &[DeviceInventory]) -> Vec<DeviceRecord> {
     let resolver = AssetResolver::new();
-    let list = build_device_list(inventories, &[], &resolver, config, &[]);
+    let list = build_device_list(inventories, &[], &resolver, config, &[], &[]);
     fold_by_inventory_key(list).into_values().collect()
 }
 
@@ -272,7 +272,7 @@ fn adoption_folds_the_pre_upgrade_entry_and_converges() {
     // onto itself and nothing would ever move.
     let mut config = receiver_only_config();
     let resolver = AssetResolver::new();
-    let list = build_device_list(&[receiver_inventory()], &[], &resolver, &config, &[]);
+    let list = build_device_list(&[receiver_inventory()], &[], &resolver, &config, &[], &[]);
     assert!(adopt_routes(&mut config, &list), "the fold is a change");
 
     assert_eq!(
@@ -284,7 +284,7 @@ fn adoption_folds_the_pre_upgrade_entry_and_converges() {
         !config.devices.contains_key("receiver:82839805:slot:1"),
         "the legacy entry is consumed"
     );
-    let list = build_device_list(&[receiver_inventory()], &[], &resolver, &config, &[]);
+    let list = build_device_list(&[receiver_inventory()], &[], &resolver, &config, &[], &[]);
     assert_eq!(
         list[0].config_key, "unit:6be9d300",
         "the next build reads the canonical key"
@@ -350,6 +350,7 @@ fn standalone_registry_identity_is_preserved_without_hidpp_model_info() {
         &AssetResolver::new(),
         &Config::default(),
         &[],
+        &[],
     );
 
     assert_eq!(list.len(), 1);
@@ -366,7 +367,7 @@ fn standalone_registry_identity_is_preserved_without_hidpp_model_info() {
 fn no_model_info_uses_receiver_slot_as_config_key() {
     let inv = inventory_with(vec![paired_device_no_model_info(1, Some(0x4076))]);
     let resolver = AssetResolver::new();
-    let list = build_device_list(&[inv], &[], &resolver, &Config::default(), &[]);
+    let list = build_device_list(&[inv], &[], &resolver, &Config::default(), &[], &[]);
     assert_eq!(list.len(), 1);
     assert_eq!(list[0].config_key, "receiver:da2699e1:slot:1");
     assert_eq!(list[0].model_key, "wpid4076");
@@ -378,7 +379,7 @@ fn no_model_info_uses_receiver_slot_as_config_key() {
 fn no_model_info_falls_back_to_slot_when_no_wpid() {
     let inv = inventory_with(vec![paired_device_no_model_info(3, None)]);
     let resolver = AssetResolver::new();
-    let list = build_device_list(&[inv], &[], &resolver, &Config::default(), &[]);
+    let list = build_device_list(&[inv], &[], &resolver, &Config::default(), &[], &[]);
     assert_eq!(list.len(), 1);
     assert_eq!(list[0].config_key, "receiver:da2699e1:slot:3");
     assert_eq!(list[0].model_key, "slot3");
@@ -390,7 +391,7 @@ fn no_model_info_display_name_falls_back_to_slot() {
     rust_i18n::set_locale("en");
     let inv = inventory_with(vec![paired_device_no_model_info(2, Some(0x4051))]);
     let resolver = AssetResolver::new();
-    let list = build_device_list(&[inv], &[], &resolver, &Config::default(), &[]);
+    let list = build_device_list(&[inv], &[], &resolver, &Config::default(), &[], &[]);
     assert_eq!(list[0].display_name, "Slot 2");
 }
 
@@ -402,7 +403,7 @@ fn saved_custom_name_identifies_the_device_without_replacing_its_model_name() {
     let mut config = Config::default();
     config.set_device_custom_name("receiver:da2699e1:slot:2", Some("Office keyboard".into()));
 
-    let list = build_device_list(&[inv], &[], &AssetResolver::new(), &config, &[]);
+    let list = build_device_list(&[inv], &[], &AssetResolver::new(), &config, &[], &[]);
 
     assert_eq!(list[0].display_name, "Office keyboard");
     assert_eq!(list[0].model_name, "Slot 2");
@@ -500,6 +501,7 @@ fn zero_unit_direct_inventory_is_transient() {
         &[],
         &resolver,
         &Config::default(),
+        &[],
         &[],
     );
 
@@ -752,7 +754,7 @@ fn webcams_are_appended_as_camera_records() {
         max_fps: Some(60),
     };
     let resolver = AssetResolver::new();
-    let list = build_device_list(&[], &[], &resolver, &Config::default(), &[camera]);
+    let list = build_device_list(&[], &[], &resolver, &Config::default(), &[camera], &[]);
 
     assert_eq!(list.len(), 1);
     assert_eq!(list[0].kind, DeviceKind::Camera);
@@ -778,7 +780,7 @@ fn webcam_without_serial_uses_model_scoped_key() {
         max_fps: None,
     };
     let resolver = AssetResolver::new();
-    let list = build_device_list(&[], &[], &resolver, &Config::default(), &[camera]);
+    let list = build_device_list(&[], &[], &resolver, &Config::default(), &[camera], &[]);
     // Port-stable even without a serial: settings follow the model, not the
     // OS capture id (which embeds the USB location on macOS/Windows).
     assert_eq!(list[0].config_key, "camera:046d:082d");
@@ -801,8 +803,8 @@ fn webcam_config_key_survives_a_usb_port_change() {
         ..port_a.clone()
     };
     let resolver = AssetResolver::new();
-    let a = build_device_list(&[], &[], &resolver, &Config::default(), &[port_a]);
-    let b = build_device_list(&[], &[], &resolver, &Config::default(), &[port_b]);
+    let a = build_device_list(&[], &[], &resolver, &Config::default(), &[port_a], &[]);
+    let b = build_device_list(&[], &[], &resolver, &Config::default(), &[port_b], &[]);
     assert_eq!(a[0].config_key, b[0].config_key);
     assert_eq!(a[0].record_key(), b[0].record_key());
     assert_ne!(a[0].capture_id, b[0].capture_id);
@@ -827,7 +829,7 @@ fn two_serial_less_same_model_cameras_stay_distinct() {
         ..a.clone()
     };
     let resolver = AssetResolver::new();
-    let list = build_device_list(&[], &[], &resolver, &Config::default(), &[a, b]);
+    let list = build_device_list(&[], &[], &resolver, &Config::default(), &[a, b], &[]);
     assert_eq!(list.len(), 2);
     assert_eq!(list[0].config_key, list[1].config_key);
     assert_eq!(list[0].config_key, "camera:046d:0893");
