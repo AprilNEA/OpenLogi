@@ -505,7 +505,7 @@ fn a_carried_over_wheel_hold_can_still_be_turned_off(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn an_app_profile_explains_that_an_action_replaces_wheel_hold(cx: &mut TestAppContext) {
+fn an_app_profile_explains_what_its_action_does_to_wheel_hold(cx: &mut TestAppContext) {
     let _locale = LOCALE_LOCK.lock().unwrap();
     rust_i18n::set_locale("en");
     let mut config = Config::ephemeral();
@@ -526,7 +526,7 @@ fn an_app_profile_explains_that_an_action_replaces_wheel_hold(cx: &mut TestAppCo
     );
     assert!(
         cx.debug_bounds("inspector-wheel-hold-app-note").is_some(),
-        "the app profile says what picking an action does"
+        "the app profile says that holding still scrolls sideways"
     );
     view.update(cx, |view, _| {
         view.select(MouseControlId::Button(ButtonId::Forward));
@@ -546,8 +546,25 @@ fn an_app_profile_explains_that_an_action_replaces_wheel_hold(cx: &mut TestAppCo
     });
     cx.update(|window, cx| window.draw(cx).clear(cx));
     assert!(
+        cx.debug_bounds("inspector-wheel-hold-app-note").is_some(),
+        "an app action replaces only the click, so holding still scrolls"
+    );
+
+    let combo: openlogi_core::binding::KeyCombo = "Shift+A".parse().expect("combo parses");
+    cx.update(|_, cx| {
+        AppState::apply(cx, |state| {
+            state.commit_binding(ButtonId::Back, Action::HoldShortcut(combo))
+        });
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(
         cx.debug_bounds("inspector-wheel-hold-app-note").is_none(),
-        "once the app overrides the button, its own action already applies"
+        "a Hold shortcut takes the hold"
+    );
+    assert!(
+        cx.debug_bounds("inspector-wheel-hold-app-replaced-note")
+            .is_some(),
+        "and the app profile says so"
     );
     drop(view);
     cx.update(|window, _| window.remove_window());

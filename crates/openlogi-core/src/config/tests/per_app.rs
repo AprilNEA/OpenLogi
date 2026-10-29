@@ -1,6 +1,7 @@
 //! Per-app overlays and the application selectors that pick them.
 
 use super::*;
+use crate::binding::{KeyCombo, WheelHoldBinding};
 
 #[test]
 fn per_app_overlay_takes_precedence() {
@@ -50,6 +51,61 @@ fn per_app_overlay_takes_precedence() {
         other.get(&ButtonId::Back),
         Some(&Binding::Single(Action::BrowserBack))
     );
+}
+
+#[test]
+fn an_app_action_replaces_only_the_click_of_a_wheel_hold() {
+    let hold = WheelHoldBinding::horizontal_scroll(Action::MouseBack);
+    let mut cfg = Config::default();
+    cfg.set_binding("2b023", ButtonId::Back, Binding::WheelHold(hold.clone()));
+    for action in [Action::Copy, Action::None, Action::ShowActionsRing] {
+        cfg.set_per_app_binding(
+            "2b023",
+            "com.example.Editor",
+            ButtonId::Back,
+            Some(action.clone()),
+        );
+        assert_eq!(
+            cfg.effective_bindings("2b023", Some("com.example.Editor"))
+                .get(&ButtonId::Back),
+            Some(&Binding::WheelHold(hold.with_click(action.clone()))),
+            "{action:?} keeps holding to scroll sideways"
+        );
+    }
+    assert_eq!(
+        cfg.effective_bindings("2b023", Some("com.example.Other"))
+            .get(&ButtonId::Back),
+        Some(&Binding::WheelHold(hold)),
+        "another application inherits the device's click"
+    );
+}
+
+#[test]
+fn an_app_hold_shortcut_replaces_a_whole_wheel_hold() {
+    let mut cfg = Config::default();
+    cfg.set_binding(
+        "2b023",
+        ButtonId::Back,
+        Binding::WheelHold(WheelHoldBinding::horizontal_scroll(Action::MouseBack)),
+    );
+    let combo: KeyCombo = "Shift+A".parse().expect("combo parses");
+    for action in [
+        Action::HoldShortcut(combo.clone()),
+        Action::TapKeyHoldingModifiers(combo),
+    ] {
+        cfg.set_per_app_binding(
+            "2b023",
+            "com.example.Editor",
+            ButtonId::Back,
+            Some(action.clone()),
+        );
+        assert_eq!(
+            cfg.effective_bindings("2b023", Some("com.example.Editor"))
+                .get(&ButtonId::Back),
+            Some(&Binding::Single(action.clone())),
+            "{action:?} needs the press the wheel hold would use"
+        );
+    }
 }
 
 #[test]

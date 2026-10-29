@@ -91,6 +91,15 @@ impl WheelHoldBinding {
     pub const fn wheel(&self) -> HeldWheel {
         self.wheel
     }
+
+    /// The same wheel hold with `click` as its click action.
+    #[must_use]
+    pub fn with_click(&self, click: Action) -> Self {
+        Self {
+            click,
+            wheel: self.wheel,
+        }
+    }
 }
 
 /// What a single rebindable [`ButtonId`](crate::binding::ButtonId) does: one
