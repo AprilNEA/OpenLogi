@@ -1416,9 +1416,10 @@ pub(crate) fn restore_dpi_in_background(
 
 /// Read the DPI of `op`'s mouse once this write's turn comes, and write the
 /// DPI `step` picks from that reading, unless a newer pointer-speed write was
-/// requested after `ticket`. For a preset step on a mouse whose DPI OpenLogi
-/// never set. As a pointer-speed write does, it then sets the DPI LED when
-/// `led` says, and runs `on_applied` once it landed.
+/// requested after `ticket`, before or during the read. For a preset step on
+/// a mouse whose DPI OpenLogi never set. As a pointer-speed write does, it
+/// then sets the DPI LED when `led` says, and runs `on_applied` once it
+/// landed.
 pub(crate) fn step_dpi_in_background(
     op: DeviceOp,
     ticket: WriteTicket,
@@ -1431,6 +1432,7 @@ pub(crate) fn step_dpi_in_background(
     op.spawn_timed_write(
         "DPI step",
         move |op| async move {
+            let recheck = ticket.clone();
             within_turn(
                 &ticket,
                 &turn,
@@ -1438,6 +1440,11 @@ pub(crate) fn step_dpi_in_background(
                     let started = tokio::time::Instant::now();
                     let shared = op.resolve()?;
                     let reading = openlogi_hid::get_dpi_info_on(&shared).await?.current;
+                    // A write requested during the read holds the newer DPI;
+                    // `step` must not overwrite what it cached.
+                    if !recheck.is_current() {
+                        return Ok(None);
+                    }
                     let Some(dpi) = step(reading) else {
                         return Ok(Some(None));
                     };
