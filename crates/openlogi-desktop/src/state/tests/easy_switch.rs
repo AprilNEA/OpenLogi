@@ -3,8 +3,10 @@
 
 use super::fn_lock::drain;
 use super::*;
-use crate::services::ipc::{Command, ReadEasySwitchHosts, RenameEasySwitchHost};
-use crate::state::easy_switch::rename_target;
+use crate::services::ipc::{
+    Command, ReadEasySwitchHosts, RenameEasySwitchHost, SwitchEasySwitchHost,
+};
+use crate::state::easy_switch::{rename_target, switch_target};
 use crate::state::events::StateEvents;
 use crate::state::{EasySwitchLoad, HostRenameRefusal};
 use openlogi_core::hid::{
@@ -631,4 +633,125 @@ fn a_re_read_while_a_rename_is_unanswered_keeps_it_shown(cx: &mut gpui::TestAppC
     let _ = renamed(cx, &key, &route, work, Ok(working.clone()));
     assert_eq!(current_load(cx), Load::Ready(Arc::new(working)));
     assert_eq!(current_refusal(cx), None);
+}
+
+/// The switches among the queued commands, by slot.
+fn switches(receiver: &mut tokio::sync::mpsc::UnboundedReceiver<Command>) -> Vec<u8> {
+    drain(receiver)
+        .into_iter()
+        .filter_map(|command| match command {
+            Command::SwitchEasySwitchHost(SwitchEasySwitchHost { slot, .. }) => Some(slot),
+            _ => None,
+        })
+        .collect()
+}
+
+fn switch(cx: &mut gpui::TestAppContext, key: &DeviceKey, slot: u8) -> StateEvents {
+    cx.update(|cx| AppState::update(cx, |state, _| state.switch_easy_switch_host(key, slot)))
+}
+
+fn current_switch_refusal(cx: &gpui::TestAppContext) -> Option<HostRenameRefusal> {
+    cx.read(|cx| {
+        AppState::try_read(cx)
+            .expect("state installed")
+            .current_host_switch_refusal()
+    })
+}
+
+#[test]
+fn a_switch_target_is_a_paired_channel_the_device_is_not_on() {
+    let hosts = hosts();
+    assert!(!switch_target(&hosts, 0), "the device is already there");
+    assert!(switch_target(&hosts, 1));
+    assert!(
+        !switch_target(&hosts, 2),
+        "an empty channel would strand it"
+    );
+    assert!(!switch_target(&hosts, 3), "no such channel");
+}
+
+#[gpui::test]
+fn a_switch_goes_to_the_agent_only_for_a_channel_the_reading_offers(cx: &mut gpui::TestAppContext) {
+    let (state, mut receiver) = keyboard_state(true);
+    let (key, route) = installed_and_read(cx, &mut receiver, state, hosts());
+
+    for slot in [0, 2, 3] {
+        let _ = switch(cx, &key, slot);
+        assert!(switches(&mut receiver).is_empty(), "channel {slot}");
+    }
+    assert_eq!(
+        switch(cx, &key, 1),
+        [StateEvent::EasySwitchChanged(key.clone())]
+    );
+    let commands = drain(&mut receiver);
+    let sent: Vec<_> = commands
+        .iter()
+        .filter_map(|command| match command {
+            Command::SwitchEasySwitchHost(switch) => Some((&switch.route, switch.slot)),
+            Command::ReloadConfig(_) => panic!("a switch does not touch the config"),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(sent, [(&route, 1)], "over the device's own connection");
+}
+
+#[gpui::test]
+fn a_refused_switch_is_kept_until_the_next_one_and_rereads_the_device(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (state, mut receiver) = keyboard_state(true);
+    let (key, route) = installed_and_read(cx, &mut receiver, state, hosts());
+    let _ = switch(cx, &key, 1);
+    let _ = drain(&mut receiver);
+
+    let events = cx.update(|cx| {
+        AppState::update(cx, |state, _| {
+            state.apply_easy_switch_host_switched(
+                &key,
+                &route,
+                1,
+                Err(WriteError::HostSlotEmpty { slot: 1 }),
+            )
+        })
+    });
+    assert_eq!(events, [StateEvent::EasySwitchChanged(key.clone())]);
+    assert_eq!(
+        current_switch_refusal(cx),
+        Some(HostRenameRefusal {
+            slot: 1,
+            error: WriteError::HostSlotEmpty { slot: 1 },
+        })
+    );
+    assert_eq!(current_refusal(cx), None, "a rename refusal stays apart");
+    cx.run_until_parked();
+    assert_eq!(
+        hosts_reads(&drain(&mut receiver)),
+        1,
+        "the device is read again"
+    );
+
+    let _ = switch(cx, &key, 1);
+    assert_eq!(current_switch_refusal(cx), None);
+}
+
+#[gpui::test]
+fn a_switch_answer_for_a_connection_the_device_left_is_dropped(cx: &mut gpui::TestAppContext) {
+    let (state, mut receiver) = keyboard_state(true);
+    let (key, _route) = installed_and_read(cx, &mut receiver, state, hosts());
+    let elsewhere = DeviceRoute::Bolt {
+        receiver_uid: "82839805".into(),
+        slot: 1,
+    };
+    let events = cx.update(|cx| {
+        AppState::update(cx, |state, _| {
+            state.apply_easy_switch_host_switched(
+                &key,
+                &elsewhere,
+                1,
+                Err(WriteError::AgentUnavailable),
+            )
+        })
+    });
+    assert!(events.is_empty());
+    assert_eq!(current_switch_refusal(cx), None);
 }

@@ -48,6 +48,7 @@ use tokio::{
 use tracing::{debug, info};
 
 mod cookies;
+mod direct;
 mod hosts;
 mod restore;
 
@@ -55,6 +56,7 @@ pub use cookies::{
     FollowerLink, FollowerRelease, LeadCookie, link_follower_cookies_on,
     release_follower_cookies_on,
 };
+pub use direct::switch_easy_switch_host_on;
 use hosts::{HostTable, KeyboardHosts, follower_host, read_host_table, renames_host};
 use restore::rollback_host_switch_start;
 pub use restore::{

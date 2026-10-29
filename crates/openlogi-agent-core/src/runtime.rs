@@ -23,9 +23,11 @@ use self::button::{
 };
 pub(crate) use self::button::{HidppSessionId, PressToken};
 use crate::hardware::{
-    DeviceAccess, toggle_smartshift_in_background, write_pointer_speed_in_background,
+    DeviceAccess, switch_host_in_background, toggle_smartshift_in_background,
+    write_pointer_speed_in_background,
 };
 use crate::pointer_speed::{PrecisionPress, SpeedWrite};
+use crate::watchers::host_switch::LinkedHostSwitch;
 use crate::{DpiCycleState, DpiCycles, PointerSpeeds};
 
 /// Wait for a runtime worker's next command, or until its earliest deadline.
@@ -123,6 +125,7 @@ struct ActionExecutor {
     dpi_cycle: Arc<RwLock<DpiCycles>>,
     pointer_speeds: Arc<PointerSpeeds>,
     access: DeviceAccess,
+    linked_host_switch: LinkedHostSwitch,
     action_ring: tokio::sync::mpsc::UnboundedSender<Option<String>>,
 }
 
@@ -141,6 +144,33 @@ impl ActionExecutor {
         info!(on, target = ?write.target, "precision mode toggled → writing pointer speed");
         self.write_speed(write);
         true
+    }
+
+    /// Move the device whose button or Actions Ring fired `action` to the
+    /// Easy-Switch channel the action names, as its own channel key would.
+    /// A device linked to a keyboard (`host_switch_targets`), or a keyboard
+    /// with linked devices, moves with the rest of its link instead, as when
+    /// the keyboard's host key is pressed: the channel is then the
+    /// keyboard's.
+    fn switch_host(&self, action: &Action, device_key: Option<&str>) {
+        let Some(slot) = action.easy_switch_host() else {
+            return;
+        };
+        let target = self
+            .dpi_cycle
+            .read()
+            .ok()
+            .and_then(|cycles| cycles.target_for(device_key));
+        if let Some(target) = target {
+            if self.linked_host_switch.request(&target, slot) {
+                info!(slot, "Easy-Switch action → switching linked devices");
+                return;
+            }
+            info!(slot, "Easy-Switch action → switching host");
+            switch_host_in_background(self.access.op(&target), slot);
+        } else {
+            debug!("no target device — Easy-Switch action skipped");
+        }
     }
 
     /// Write `write` in the background, and settle the restore it carries
@@ -229,6 +259,12 @@ impl ActionExecutor {
                 if !self.toggle_precision_mode(device_key, PrecisionPress::Assigned) {
                     debug!("no online mouse with pointer scaling — precision toggle skipped");
                 }
+                return;
+            }
+            Action::EasySwitchChannel1
+            | Action::EasySwitchChannel2
+            | Action::EasySwitchChannel3 => {
+                self.switch_host(action, device_key);
                 return;
             }
             // Browser navigation uses Safari's captured Accessibility target
@@ -356,12 +392,14 @@ impl ActionRuntime {
         dpi_cycle: Arc<RwLock<DpiCycles>>,
         pointer_speeds: Arc<PointerSpeeds>,
         access: DeviceAccess,
+        linked_host_switch: LinkedHostSwitch,
         action_ring: tokio::sync::mpsc::UnboundedSender<Option<String>>,
     ) -> io::Result<Self> {
         let executor = ActionExecutor {
             dpi_cycle,
             pointer_speeds,
             access,
+            linked_host_switch,
             action_ring,
         };
         let mut button_handler = ButtonEventHandler::new(executor.clone());
@@ -634,6 +672,7 @@ mod tests {
                 device_io,
                 transport_turns: crate::hardware::TransportTurns::default(),
             },
+            linked_host_switch: crate::watchers::host_switch::LinkedHostSwitch::default(),
             action_ring,
         }
     }
@@ -770,6 +809,7 @@ mod tests {
                 device_io,
                 transport_turns: crate::hardware::TransportTurns::default(),
             },
+            linked_host_switch: crate::watchers::host_switch::LinkedHostSwitch::default(),
             action_ring,
         };
 

@@ -895,7 +895,13 @@ impl FunctionRowView {
                     }),
             ),
         );
-        rows.extend(panel_action_rows(current.as_ref(), &on_pick, view, &pal));
+        rows.extend(panel_action_rows(
+            &target,
+            current.as_ref(),
+            &on_pick,
+            view,
+            &pal,
+        ));
 
         compact_panel(pal)
             .w(px(PANEL_W))
@@ -930,12 +936,19 @@ fn title_header(key_name: &SharedString, app: Option<&str>, pal: &Palette) -> im
 /// The action rows + a Power User section, mirroring the picker's list but
 /// adapted for the panel context (no popover dismissal).
 fn panel_action_rows(
+    target: &KeyTarget,
     current: Option<&Action>,
     on_pick: &PickFn,
     view: &Entity<FunctionRowView>,
     pal: &Palette,
 ) -> Vec<gpui::Div> {
-    let mut children = action_rows("panel-action", current, on_pick, *pal);
+    // A function key binds globally, so the agent cannot tell which keyboard
+    // pressed it; a control belongs to its device.
+    let offered = |action: &Action| match target {
+        KeyTarget::FunctionKey(_) => !action.needs_firing_device(),
+        KeyTarget::Control(_) => true,
+    };
+    let mut children = action_rows("panel-action", current, offered, on_pick, *pal);
 
     let power_user_actions: &[(PowerUserKind, SharedString, &'static str)] = &[
         (

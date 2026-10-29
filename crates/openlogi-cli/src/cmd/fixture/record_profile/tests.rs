@@ -417,6 +417,15 @@ impl Agent for TestAgent {
         unreachable!("profile capture is read-only")
     }
 
+    async fn switch_easy_switch_host(
+        self,
+        _: TarpcContext,
+        _route: DeviceRoute,
+        _slot: u8,
+    ) -> Result<(), WriteError> {
+        unreachable!("profile capture must never send a device to another host")
+    }
+
     async fn observe_notices(self, _: TarpcContext, _since: Generation) -> NoticeObservation {
         unreachable!("profile capture must not inspect the overlay's notices")
     }

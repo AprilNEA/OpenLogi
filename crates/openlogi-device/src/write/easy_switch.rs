@@ -15,6 +15,9 @@
 //! device whose capabilities include `SET_NAME` is written — the bit Options+
 //! gates on — and only a paired slot, the only kind Options+ offers to
 //! rename. The name is read back afterwards.
+//!
+//! Switching to a slot belongs to the host-switch session, the one owner of
+//! `0x1814 ChangeHost` (`session::host_switch::direct`).
 
 use std::sync::Arc;
 

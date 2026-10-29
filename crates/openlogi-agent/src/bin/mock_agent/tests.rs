@@ -739,6 +739,87 @@ async fn easy_switch_names_are_kept_and_rejected_renames_change_nothing() {
     );
 }
 
+/// A switch publishes the device leaving this computer, so the GUI sees it
+/// go, and the reading it finds on return still names this computer. A
+/// switch to the channel it is already on leaves it here.
+#[tokio::test]
+async fn easy_switch_takes_the_device_away_and_keeps_this_computers_channel() {
+    use openlogi_core::hid::{EasySwitchHosts, EasySwitchSlot, HostConnection};
+
+    let slot = |index, paired| EasySwitchSlot {
+        index,
+        paired,
+        connection: HostConnection::Bluetooth,
+        name: None,
+        name_max_len: 8,
+        os: None,
+    };
+    let hosts = EasySwitchHosts {
+        current: Some(0),
+        slots: vec![slot(0, true), slot(1, true), slot(2, false)],
+        can_rename: false,
+    };
+    let agent = MockAgent::new(test_state_with_easy_switch(hosts.clone()));
+    let mouse_online = |observation: &Observation| {
+        observation
+            .snapshot
+            .inventory
+            .iter()
+            .flat_map(|inventory| &inventory.paired)
+            .find(|device| device.slot == MOUSE_SLOT)
+            .expect("the mouse stays paired")
+            .online
+    };
+    let before = agent.current().await;
+    assert!(mouse_online(&before));
+
+    assert_eq!(
+        agent
+            .clone()
+            .switch_easy_switch_host(tarpc::context::current(), mouse_route(), 2)
+            .await,
+        Err(WriteError::HostSlotEmpty { slot: 2 })
+    );
+    assert_eq!(
+        agent.current().await.generation,
+        before.generation,
+        "a refused switch leaves the device here"
+    );
+    agent
+        .clone()
+        .switch_easy_switch_host(tarpc::context::current(), mouse_route(), 0)
+        .await
+        .expect("a switch to the current channel is accepted");
+    assert_eq!(
+        agent.current().await.generation,
+        before.generation,
+        "a switch to the current channel leaves the device here"
+    );
+
+    agent
+        .clone()
+        .switch_easy_switch_host(tarpc::context::current(), mouse_route(), 1)
+        .await
+        .expect("a paired channel takes the device");
+    let switched = agent.current().await;
+    assert_eq!(switched.generation, before.generation + 1);
+    assert!(!mouse_online(&switched), "the device left this computer");
+
+    *agent
+        .state
+        .lock()
+        .await
+        .online_mut(&mouse_route())
+        .expect("the mouse has a link") = true;
+    assert_eq!(
+        agent
+            .read_easy_switch_hosts(tarpc::context::current(), mouse_route())
+            .await
+            .expect("the returned device lists its channels"),
+        hosts
+    );
+}
+
 #[test]
 fn disable_keys_scenarios_are_strict_and_reconnect_uses_logical_time() {
     assert_eq!(

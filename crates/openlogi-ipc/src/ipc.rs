@@ -152,8 +152,12 @@ pub use succession::Identity;
 ///      offers, and `BacklightState::duration` and
 ///      `BacklightChange::Duration` appended — the `0x1982` backlight
 ///      timer, five-second steps up to two hours.
-/// v42: `KeyboardUsage` accepts Insert (`0x49`), so a `KeyCombo` can carry
-///      a usage a v41 agent rejects.
+/// v42: `Agent::switch_easy_switch_host` appended — move a device to another
+///      Easy-Switch channel with HID++ `0x1814`, from the settings app;
+///      `HidppOperation::SwitchHost` appended; `Action::{EasySwitchChannel1,
+///      EasySwitchChannel2, EasySwitchChannel3}` and
+///      `ActionRingIcon::{Channel1, Channel2, Channel3}` appended — the same
+///      move bound to a button or an Actions Ring slot.
 pub const PROTOCOL_VERSION: u32 = 42;
 
 /// Environment variable through which the agent hands a supervised helper the
@@ -955,4 +959,14 @@ pub trait Agent {
     async fn reload_saved_config_with_verdict(
         saved: SavedConfig,
     ) -> Result<SavedConfigVerdict, ConfigReloadError>;
+
+    /// Move the device on `route` to Easy-Switch `slot` (zero-based), as its
+    /// own channel key does (HID++ `0x1814`). The device leaves this
+    /// computer once the request is out, so nothing is read back; it drops
+    /// out of the inventory and its settings are replayed when it returns.
+    /// A device without `0x1814` is refused with
+    /// [`WriteError::FeatureUnsupported`], and a slot it does not have or
+    /// reports empty with [`WriteError::HostSlotEmpty`], before anything is
+    /// sent. A device already on `slot` is left alone.
+    async fn switch_easy_switch_host(route: DeviceRoute, slot: u8) -> Result<(), WriteError>;
 }

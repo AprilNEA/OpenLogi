@@ -1,13 +1,17 @@
-//! Tests for the `0x1815` Easy-Switch reads and the host rename.
+//! Tests for the `0x1815` Easy-Switch reads, the host rename, and the
+//! `0x1814` host switch.
 
 use std::assert_matches;
 use std::sync::{Arc, Mutex};
 
 use super::*;
 use crate::channel::scripted::{ScriptedRawHidChannel, feature_error, scripted_channel};
+use crate::session::host_switch::switch_easy_switch_host_on;
 
 /// The `0x1815` feature index on the scripted keyboard.
 const HOSTS_INDEX: u8 = 0x0c;
+/// The `0x1814` feature index on the scripted keyboard.
+const CHANGE_HOST_INDEX: u8 = 0x0b;
 /// HID++ 2.0 `InvalidFunctionId`.
 const INVALID_FUNCTION: u8 = 0x07;
 /// HID++ 2.0 `Busy`.
@@ -79,6 +83,10 @@ struct Keyboard {
     os_reads: Vec<u8>,
     /// Every name write, as `(slot, offset, bytes)`.
     writes: Vec<(u8, u8, Vec<u8>)>,
+    /// Whether the keyboard has `0x1814` ChangeHost.
+    change_host: bool,
+    /// Every `setCurrentHost`, by slot.
+    switches: Vec<u8>,
 }
 
 /// macOS 15.2.3.
@@ -105,6 +113,8 @@ impl Keyboard {
             name_reads: Vec::new(),
             os_reads: Vec::new(),
             writes: Vec::new(),
+            change_host: true,
+            switches: Vec::new(),
         }
     }
 
@@ -124,10 +134,23 @@ impl Keyboard {
         let mut payload = [0u8; 16];
         match (request[2], function) {
             (0x00, 0x01) => payload[0] = 4,
-            (0x00, 0x00) => {
-                if u16::from_be_bytes([request[4], request[5]]) == 0x1815 {
-                    payload[0] = HOSTS_INDEX;
-                }
+            (0x00, 0x00) => match u16::from_be_bytes([request[4], request[5]]) {
+                0x1815 => payload[0] = HOSTS_INDEX,
+                0x1814 if self.change_host => payload[0] = CHANGE_HOST_INDEX,
+                _ => {}
+            },
+            (CHANGE_HOST_INDEX, 0x00) => {
+                payload[..3].copy_from_slice(&[
+                    u8::try_from(self.slots.len()).expect("a few slots"),
+                    self.current,
+                    0,
+                ]);
+            }
+            (CHANGE_HOST_INDEX, 0x01) => {
+                // `setCurrentHost` goes out as a notification: the device
+                // leaves instead of answering.
+                self.switches.push(request[4]);
+                return None;
             }
             (HOSTS_INDEX, 0x00) => {
                 payload[..4].copy_from_slice(&[
@@ -521,4 +544,54 @@ async fn a_reply_for_another_slot_or_offset_fails_the_read() {
             })
         );
     }
+}
+
+#[tokio::test]
+async fn a_switch_sends_the_device_to_a_paired_slot() {
+    let keyboard = Arc::new(Mutex::new(Keyboard::new()));
+    let shared = keyboard_channel(&keyboard).await;
+    assert_eq!(switch_easy_switch_host_on(&shared, 1).await, Ok(true));
+    assert_eq!(keyboard.lock().expect("keyboard lock").switches, [1]);
+}
+
+#[tokio::test]
+async fn a_switch_to_the_current_slot_sends_nothing() {
+    let keyboard = Arc::new(Mutex::new(Keyboard {
+        current: 1,
+        ..Keyboard::new()
+    }));
+    let shared = keyboard_channel(&keyboard).await;
+    assert_eq!(switch_easy_switch_host_on(&shared, 1).await, Ok(false));
+    assert!(keyboard.lock().expect("keyboard lock").switches.is_empty());
+}
+
+/// An empty slot, and one past the device's last, would strand the device.
+#[tokio::test]
+async fn a_switch_to_an_empty_or_missing_slot_is_refused_before_sending() {
+    let keyboard = Arc::new(Mutex::new(Keyboard::new()));
+    let shared = keyboard_channel(&keyboard).await;
+    assert_eq!(
+        switch_easy_switch_host_on(&shared, 2).await,
+        Err(WriteError::HostSlotEmpty { slot: 2 })
+    );
+    assert_eq!(
+        switch_easy_switch_host_on(&shared, 3).await,
+        Err(WriteError::HostSlotEmpty { slot: 3 })
+    );
+    assert!(keyboard.lock().expect("keyboard lock").switches.is_empty());
+}
+
+#[tokio::test]
+async fn a_device_without_change_host_cannot_switch() {
+    let keyboard = Arc::new(Mutex::new(Keyboard {
+        change_host: false,
+        ..Keyboard::new()
+    }));
+    let shared = keyboard_channel(&keyboard).await;
+    assert_eq!(
+        switch_easy_switch_host_on(&shared, 1).await,
+        Err(WriteError::FeatureUnsupported {
+            feature_hex: 0x1814
+        })
+    );
 }

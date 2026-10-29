@@ -785,7 +785,7 @@ fn action_library(
     cx: &Context<MouseModelView>,
 ) -> impl IntoElement {
     let query = picker.search.read(cx).value();
-    let rows = action_rows_matching(id_prefix, current, &query, on_pick, pal);
+    let rows = action_rows_matching(id_prefix, current, &query, |_| true, on_pick, pal);
     v_flex()
         .gap_2()
         .pt_1()

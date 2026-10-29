@@ -1276,6 +1276,31 @@ impl Agent for MockAgent {
         info!(%route, slot, "rename_easy_switch_host");
         Ok(stored.clone())
     }
+
+    /// The device leaves this computer, as a real one does: it goes offline
+    /// and its reading keeps this computer's channel as current. The
+    /// console's `online <n>` brings it back, as the channel button would.
+    async fn switch_easy_switch_host(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        slot: u8,
+    ) -> Result<(), WriteError> {
+        let mut state = self.state.lock().await;
+        let settings = state.settings_for(&route)?;
+        let stored = profile_value(&settings.easy_switch, &route, 0x1815)?;
+        if !stored.slot(slot).is_some_and(|host| host.paired) {
+            return Err(WriteError::HostSlotEmpty { slot });
+        }
+        if stored.current == Some(slot) {
+            return Ok(());
+        }
+        if let Some(online) = state.online_mut(&route) {
+            *online = false;
+        }
+        info!(%route, slot, "switch_easy_switch_host");
+        Ok(())
+    }
     /// The mock reports no changes on its lights, so it has none to keep.
     async fn reload_saved_config(
         self,
