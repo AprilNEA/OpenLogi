@@ -151,21 +151,28 @@ impl DpiFeature {
     }
 
     /// Sets [`SENSOR`]'s DPI.
-    async fn set_dpi(&self, dpi: Dpi) -> Result<(), Hidpp20Error> {
+    ///
+    /// Each error names the feature that raised it: a failed `0x8100` mode
+    /// read or switch is not a DPI write the sensor rejected.
+    async fn set_dpi(&self, dpi: Dpi) -> Result<(), WriteError> {
+        let dpi_error = |e| classify_hidpp_error(e, HidppOperation::WriteDpi, self.id());
         let dpi = dpi.into();
         match self {
-            Self::Adjustable { feature, .. } => feature.set_sensor_dpi(SENSOR, dpi).await,
+            Self::Adjustable { feature, .. } => {
+                feature.set_sensor_dpi(SENSOR, dpi).await.map_err(dpi_error)
+            }
             Self::Extended {
                 feature,
                 onboard_profiles,
             } => {
-                // A device in host mode stays there: switching it back would
-                // hand the DPI to the stored profile again.
-                if let Some(onboard_profiles) = onboard_profiles
-                    && onboard_profiles.get_onboard_mode().await? == OnboardMode::Onboard
-                {
-                    onboard_profiles.set_onboard_mode(OnboardMode::Host).await?;
-                    debug!("switched onboard profiles to host mode for a DPI write");
+                if let Some(onboard_profiles) = onboard_profiles {
+                    hand_dpi_to_host(onboard_profiles).await.map_err(|e| {
+                        classify_hidpp_error(
+                            e,
+                            HidppOperation::WriteDpi,
+                            OnboardProfilesFeature::ID,
+                        )
+                    })?;
                 }
                 // `setSensorDpiParameters` writes DPI X, DPI Y and lift-off
                 // distance in one packet with no "leave unchanged" encoding.
@@ -174,17 +181,37 @@ impl DpiFeature {
                 // read returns. The current LOD is put back so the write does
                 // not retune the lift-off height, and an independent Y axis is
                 // kept locked to X — the UI exposes a single DPI.
-                let capabilities = feature.get_sensor_capabilities(SENSOR).await?.capabilities;
-                let current = feature.get_sensor_dpi_parameters(SENSOR).await?;
+                let capabilities = feature
+                    .get_sensor_capabilities(SENSOR)
+                    .await
+                    .map_err(dpi_error)?
+                    .capabilities;
+                let current = feature
+                    .get_sensor_dpi_parameters(SENSOR)
+                    .await
+                    .map_err(dpi_error)?;
                 feature
                     .set_sensor_dpi_parameters(
                         SENSOR,
                         SetDpiParameters::for_sensor(capabilities, dpi, dpi, current.lod),
                     )
                     .await
+                    .map_err(dpi_error)
             }
         }
     }
+}
+
+/// Switches a device whose active onboard profile owns the DPI to host mode,
+/// so its firmware accepts `setSensorDpiParameters`. A device already in host
+/// mode stays there: switching it back would hand the DPI to the stored
+/// profile again.
+async fn hand_dpi_to_host(onboard_profiles: &OnboardProfilesFeature) -> Result<(), Hidpp20Error> {
+    if onboard_profiles.get_onboard_mode().await? == OnboardMode::Onboard {
+        onboard_profiles.set_onboard_mode(OnboardMode::Host).await?;
+        debug!("switched onboard profiles to host mode for a DPI write");
+    }
+    Ok(())
 }
 
 /// Resolves `feature_hex` to its feature-table entry (runtime index and
@@ -394,7 +421,7 @@ async fn set_dpi_target_on_channel(
     if !supported.contains(dpi) {
         return Err(WriteError::DpiUnsupported { requested: dpi });
     }
-    feature.set_dpi(dpi).await.map_err(write_error)?;
+    feature.set_dpi(dpi).await?;
     // Read back to confirm the firmware accepted the value. A mismatch is a
     // silent failure mode that's otherwise invisible — a device in a low-power
     // state can ACK the write yet keep the old value. A single re-write
@@ -410,7 +437,7 @@ async fn set_dpi_target_on_channel(
         debug!(index, %dpi, "wrote DPI (verified)");
         return Ok(Some(dpi));
     }
-    feature.set_dpi(dpi).await.map_err(write_error)?;
+    feature.set_dpi(dpi).await?;
     match feature.current_dpi().await {
         Ok(retried) if retried == dpi => {
             tracing::info!(

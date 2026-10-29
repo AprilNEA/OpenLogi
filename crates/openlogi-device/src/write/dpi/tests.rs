@@ -343,6 +343,26 @@ async fn an_extended_write_leaves_a_device_already_in_host_mode_alone() -> Resul
 }
 
 #[tokio::test]
+async fn a_failed_onboard_mode_read_is_blamed_on_onboard_profiles() {
+    let mut sensor = ExtendedSensor::new(SensorCapabilities::DPI_Y | SensorCapabilities::LOD);
+    // No mode the device can be in.
+    sensor.onboard_mode = Some(0x07);
+    let harness = Harness::new(sensor).await;
+
+    let result = set_dpi_on(&harness.shared, Dpi::new(1200)).await;
+
+    assert_eq!(
+        result,
+        Err(WriteError::UnsupportedResponse {
+            operation: HidppOperation::WriteDpi,
+            feature_hex: 0x8100,
+        })
+    );
+    assert!(harness.onboard_mode_writes().is_empty());
+    assert!(harness.parameter_writes().is_empty());
+}
+
+#[tokio::test]
 async fn a_capability_reply_for_another_sensor_blocks_the_write() {
     let mut sensor = ExtendedSensor::new(SensorCapabilities::DPI_Y | SensorCapabilities::LOD);
     sensor.capability_echo = 1;
