@@ -746,8 +746,12 @@ mod tests {
     /// flag with no scan code, which no keyboard produces (#1895).
     ///
     /// `Key::plain` refuses that shape in a debug build, so a call site that
-    /// skips `for_vk` trips this assertion before it can ship.
+    /// skips `for_vk` trips this assertion before it can ship. It is a
+    /// `debug_assert!`, so the test is gated on `debug_assertions` too: under
+    /// `cargo test --release` the assertion is compiled out and there is
+    /// nothing to panic.
     #[test]
+    #[cfg(debug_assertions)]
     #[should_panic(expected = "loses the shift modifier")]
     fn plain_key_refuses_an_extended_virtual_key() {
         let _ = Key::plain(VK_RIGHT);
