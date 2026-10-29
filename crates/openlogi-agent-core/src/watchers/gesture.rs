@@ -35,7 +35,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
 use tracing::{debug, warn};
 
-use self::dispatch::InputDispatcher;
+use self::dispatch::{GestureAdmission, InputDispatcher};
 use super::capture_manager::{self, CaptureManager, ManagerInputs, PendingRestore};
 use super::capture_session::{
     CaptureRecovery, CaptureSession, CaptureSlot, ReconcileAction, settle_capture_task,
@@ -267,16 +267,19 @@ fn reconcile_session(
     wanted: Option<(&CaptureTarget, &DispatchPlan)>,
     dispatcher: &mut InputDispatcher,
 ) {
-    // A swipe that switches desktops moves the pointer onto another window,
-    // republishing an otherwise identical plan. Keep the hold so the same
-    // press can chain further swipes (#1634).
     let pointer_only = wanted.is_some_and(|(_, plan)| same_bindings(session.dispatch(), plan));
-    if session.reconcile_with(wanted, stop_for_target_change) == ReconcileAction::DispatchChanged {
-        if !pointer_only {
-            dispatcher.cancel_session(session.id());
+    match session.reconcile_with(wanted, stop_for_target_change) {
+        ReconcileAction::DispatchChanged => {
+            if !pointer_only {
+                dispatcher.cancel_session(session.id());
+            }
+            let config_key = session.dispatch().config_key.clone();
+            session.rekey(&config_key);
         }
-        let config_key = session.dispatch().config_key.clone();
-        session.rekey(&config_key);
+        ReconcileAction::Retiring => {
+            dispatcher.cancel_gesture_session(session.id(), session.dispatch());
+        }
+        ReconcileAction::None => {}
     }
 }
 
@@ -533,7 +536,13 @@ impl GestureManagerState {
                 let live = self.slots.get(key).and_then(GestureSlot::session);
                 let dispatch_context = dispatch_context_for(&event.session, live);
                 if let Some((session, plan)) = dispatch_context {
-                    self.input_dispatcher.dispatch(session, plan, event.input);
+                    let admission = if live.is_some_and(RunningSession::is_active) {
+                        GestureAdmission::Active
+                    } else {
+                        GestureAdmission::Restoring
+                    };
+                    self.input_dispatcher
+                        .dispatch(session, plan, event.input, admission);
                 } else {
                     self.input_dispatcher.cancel_session(&event.session);
                     debug!(

@@ -30,7 +30,7 @@ use futures::StreamExt as _;
 use openlogi_agent_core::backlight_overlay::BacklightOverlayManager;
 use openlogi_agent_core::event_monitor::EventMonitor;
 use openlogi_agent_core::observable::ObservableState;
-use openlogi_agent_core::orchestrator::{Orchestrator, SharedHandles};
+use openlogi_agent_core::orchestrator::{ForegroundChange, Orchestrator, SharedHandles};
 use openlogi_agent_core::runtime::hook;
 use openlogi_agent_core::watchers::foreground_app::ForegroundUpdate;
 use openlogi_agent_core::watchers::input_monitoring::InputMonitoring;
@@ -531,8 +531,10 @@ impl Running {
     /// Publish one foreground-app change and cancel button lifecycles whose
     /// bindings were resolved against the previous app profile.
     async fn apply_foreground(&self, app: ForegroundUpdate) {
-        if self.orchestrator.lock().await.set_current_app(app) {
-            self.inputs.dispatcher.cancel_all_buttons();
+        match self.orchestrator.lock().await.set_current_app(app) {
+            ForegroundChange::Unchanged => {}
+            ForegroundChange::ContextOnly => self.inputs.dispatcher.cancel_context_buttons(),
+            ForegroundChange::BindingsChanged => self.inputs.dispatcher.cancel_all_buttons(),
         }
     }
 

@@ -17,7 +17,15 @@ use self::wheel::{ScrollScale, WheelAccumulators, WheelOutput, WheelRotation};
 use super::GestureOutputs;
 use crate::capture_plan::DispatchPlan;
 use crate::runtime::hook::SharedHookMaps;
-use crate::runtime::{HidppSessionId, PressToken};
+use crate::runtime::{ActionDispatchTarget, HidppSessionId, PressToken};
+
+/// Gesture semantics stop when firmware restoration begins; physical edges
+/// and scroll reporting may still drain under the frozen capture plan.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum GestureAdmission {
+    Active,
+    Restoring,
+}
 
 /// Effective thumb-wheel configuration whose continuity is tied to one
 /// dispatch plan. A binding or sensitivity update clears accumulated state
@@ -137,6 +145,19 @@ impl InputDispatcher {
         self.held_presses.get(session, button).is_some()
     }
 
+    pub(super) fn cancel_gesture_session(&mut self, session: &HidppSessionId, plan: &DispatchPlan) {
+        self.held_presses.tokens.retain(|(owner, button), press| {
+            let gesture = plan.gesture_bindings.contains_key(button)
+                || plan.side_gesture_bindings.contains_key(button);
+            if owner == session && gesture {
+                self.outputs.actions.cancel_gesture_press(press);
+                false
+            } else {
+                true
+            }
+        });
+    }
+
     /// Cancel every input lifecycle retained for one capture session.
     pub(super) fn cancel_session(&mut self, session: &HidppSessionId) {
         self.outputs.cancel_session(session);
@@ -151,6 +172,7 @@ impl InputDispatcher {
         session: &HidppSessionId,
         plan: &DispatchPlan,
         input: CapturedInput,
+        admission: GestureAdmission,
     ) {
         let key = session.device_key();
         if self.record_thumbwheel_direction(key, input) {
@@ -158,6 +180,9 @@ impl InputDispatcher {
         }
         match input {
             CapturedInput::Gesture(button, direction) => {
+                if admission == GestureAdmission::Restoring {
+                    return;
+                }
                 let Some(press) = self.held_presses.get(session, button) else {
                     debug!(key, %button, ?direction, "gesture from a canceled button lifecycle — ignored");
                     return;
@@ -169,11 +194,14 @@ impl InputDispatcher {
                     .and_then(|map| map.get(&direction))
                 {
                     debug!(key, %button, ?direction, action = %action.label(), "gesture → action");
-                    if !self
-                        .outputs
-                        .actions
-                        .try_dispatch_while_pressed(press, action)
-                    {
+                    if !self.outputs.actions.try_dispatch_while_pressed(
+                        press,
+                        action,
+                        ActionDispatchTarget::for_pointer(
+                            plan.pointer_target,
+                            openlogi_hook::frontmost_safari_pid,
+                        ),
+                    ) {
                         debug!(key, %button, ?direction, "gesture press no longer active — ignored");
                     }
                 } else {
@@ -199,7 +227,7 @@ impl InputDispatcher {
                     binding,
                     plan.pointer_target,
                 );
-                if tracks_hold {
+                if tracks_hold && (!is_gesture || admission == GestureAdmission::Active) {
                     if let Some(press) = press {
                         self.held_presses.start(session, button, press);
                     } else {

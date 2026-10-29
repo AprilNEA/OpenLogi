@@ -349,6 +349,7 @@ enum ButtonInput {
     TriggerWhilePressed {
         token: PressToken,
         action: Action,
+        target: ActionDispatchTarget,
     },
     /// The wheel moved while the press `token` was down.
     WheelWhilePressed {
@@ -357,10 +358,17 @@ enum ButtonInput {
 }
 
 enum ButtonCommand {
-    Input { generation: u64, input: ButtonInput },
-    CancelStalePress(PressToken),
+    Input {
+        generation: u64,
+        input: ButtonInput,
+    },
+    CancelPress {
+        token: PressToken,
+        reason: CancelReason,
+    },
     CancelSource(ButtonSource),
     CancelHooks,
+    CancelContext,
     CancelPointerExcept(openlogi_hook::PointerTarget),
     Wake,
 }
@@ -412,23 +420,19 @@ impl ButtonState {
         self.cancel_where(|key| matches!(key.source, ButtonSource::OsHook(_)))
     }
 
+    fn cancel_context(&mut self) -> Vec<ActivePress> {
+        self.active
+            .extract_if(|_, press| !matches!(press.behavior, PressBehavior::LifecycleOnly))
+            .map(|(_, press)| press)
+            .collect()
+    }
+
     fn cancel_all(&mut self) -> Vec<ActivePress> {
         self.active.drain().map(|(_, press)| press).collect()
     }
 
     fn cancel_pointer_except(&mut self, current: openlogi_hook::PointerTarget) -> Vec<ActivePress> {
-        // A lifecycle-only press (a gesture hold) holds no output, and its own
-        // swipe may be what changed the hovered window (Next Desktop). Follow
-        // the pointer instead of canceling, so one hold can chain swipes; the
-        // press-time focus fallback stays with it.
-        for press in self.active.values_mut() {
-            if press.behavior == PressBehavior::LifecycleOnly
-                && let ActionDispatchTarget::Pointer { target, .. } = &mut press.target
-            {
-                *target = current;
-            }
-        }
-        self.active.extract_if(|_, press| matches!(press.target, ActionDispatchTarget::Pointer { target, .. } if target != current))
+        self.active.extract_if(|_, press| !matches!(press.behavior, PressBehavior::LifecycleOnly) && matches!(press.target, ActionDispatchTarget::Pointer { target, .. } if target != current))
             .map(|(_, press)| press)
             .collect()
     }
@@ -558,6 +562,10 @@ impl ButtonInputHandle {
         self.try_command(ButtonCommand::CancelHooks);
     }
 
+    pub(crate) fn cancel_context(&self) {
+        self.try_command(ButtonCommand::CancelContext);
+    }
+
     pub(crate) fn cancel_pointer_except(&self, current: openlogi_hook::PointerTarget) {
         self.try_command(ButtonCommand::CancelPointerExcept(current));
     }
@@ -598,7 +606,12 @@ impl ButtonInputHandle {
         self.try_input(generation, ButtonInput::Pulse(press))
     }
 
-    pub(crate) fn try_trigger_while_pressed(&self, token: &PressToken, action: &Action) -> bool {
+    pub(crate) fn try_trigger_while_pressed(
+        &self,
+        token: &PressToken,
+        action: &Action,
+        target: ActionDispatchTarget,
+    ) -> bool {
         let generation = self.generation.load(Ordering::Acquire);
         if token.generation != generation {
             return false;
@@ -608,6 +621,7 @@ impl ButtonInputHandle {
             ButtonInput::TriggerWhilePressed {
                 token: token.clone(),
                 action: action.clone(),
+                target,
             },
         )
     }
@@ -628,7 +642,14 @@ impl ButtonInputHandle {
     }
 
     pub(crate) fn cancel_stale_press(&self, token: &PressToken) {
-        self.try_command(ButtonCommand::CancelStalePress(token.clone()));
+        self.cancel_press(token, CancelReason::StaleHold);
+    }
+
+    pub(crate) fn cancel_press(&self, token: &PressToken, reason: CancelReason) {
+        self.try_command(ButtonCommand::CancelPress {
+            token: token.clone(),
+            reason,
+        });
     }
 
     pub(crate) fn cancel_hidpp_session(&self, session: &HidppSessionId) {

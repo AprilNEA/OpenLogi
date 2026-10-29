@@ -1,7 +1,7 @@
 //! Regression tests for OS-hook state and dispatch policy.
 
 use super::*;
-use openlogi_core::binding::{GESTURE_SWIPE_THRESHOLD, LongPressBinding};
+use openlogi_core::binding::LongPressBinding;
 use openlogi_core::config::KeyModifiers;
 
 fn token(id: u64, button: ButtonId) -> PressToken {
@@ -28,38 +28,9 @@ fn attributed_sources_still_follow_the_device_policy() {
     assert!(button_source_may_remap(Some(&logitech_mouse)));
 }
 
-fn test_dispatcher() -> (
-    ActionDispatcher,
-    super::super::button::ButtonRuntimeOwner,
-    mpsc::Receiver<super::super::button::ButtonRuntimeEvent>,
-) {
-    let (events, received) = mpsc::channel();
-    let owner = super::super::button::ButtonRuntimeOwner::spawn(move |event| {
-        events
-            .send(event)
-            .expect("test receiver should stay connected");
-    })
-    .expect("button worker should start");
-    let (action_ring, _ring_events) = tokio::sync::mpsc::unbounded_channel();
-    let dispatcher = ActionDispatcher {
-        executor: super::super::ActionExecutor {
-            dpi_cycle: Arc::new(RwLock::new(crate::DpiCycles::default())),
-            pointer_speeds: Arc::default(),
-            access: crate::hardware::DeviceAccess {
-                channel: Arc::new(RwLock::new(None)),
-                registry: openlogi_hid::ChannelRegistry::default(),
-                receiver_access: crate::receiver_access::ReceiverAccess::default(),
-                device_io: openlogi_hid::device_io_channel().1,
-                transport_turns: crate::hardware::TransportTurns::default(),
-            },
-            action_ring,
-        },
-        buttons: owner.input(),
-    };
-    (dispatcher, owner, received)
-}
+use crate::runtime::test_dispatcher;
 
-// The mid-swipe gate itself is unit-tested on `SwipeAccumulator` in
+// The distance recognizer itself is unit-tested on `SwipeAccumulator` in
 // `openlogi-core`; these cover only what `HoldState` adds on top — tagging a
 // commit with the exact press and held button, and matching the release.
 
@@ -67,17 +38,23 @@ fn test_dispatcher() -> (
 fn accumulate_tags_a_committed_swipe_with_the_held_press() {
     let mut hold = HoldState::default();
     let press = token(1, ButtonId::Back);
-    hold.begin(ButtonId::Back, press.clone());
-    hold.swipe.backdate_hold_for_test();
+    hold.begin(
+        ButtonId::Back,
+        press.clone(),
+        BTreeMap::new(),
+        GesturePolicy::default(),
+    );
+    assert_eq!(hold.accumulate(0, 0), None);
+    assert_eq!(hold.accumulate(49, 0), None);
 
     assert_eq!(
-        hold.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
+        hold.accumulate(60, 0),
         Some((press.clone(), ButtonId::Back, GestureDirection::Right))
     );
     assert_eq!(
         hold.accumulate(50, 0),
         None,
-        "continuing the same swipe does not repeat"
+        "same-direction travel stays below the repeat distance"
     );
     assert_eq!(hold.end(ButtonId::Back), Some((press, false)));
 }
@@ -90,17 +67,28 @@ fn a_same_button_repress_restarts_the_stale_hold() {
         hold.prepare_begin(ButtonId::Back),
         HoldAdmission::Begin
     ));
-    hold.begin(ButtonId::Back, old);
+    hold.begin(
+        ButtonId::Back,
+        old,
+        BTreeMap::new(),
+        GesturePolicy::default(),
+    );
 
     let replacement = token(2, ButtonId::Back);
     assert!(
         matches!(hold.prepare_begin(ButtonId::Back), HoldAdmission::Begin),
         "a same-button re-press is proof of a lost release"
     );
-    hold.begin(ButtonId::Back, replacement.clone());
-    hold.swipe.backdate_hold_for_test();
+    hold.begin(
+        ButtonId::Back,
+        replacement.clone(),
+        BTreeMap::new(),
+        GesturePolicy::default(),
+    );
+    assert_eq!(hold.accumulate(0, 0), None);
+    assert_eq!(hold.accumulate(49, 0), None);
     assert_eq!(
-        hold.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
+        hold.accumulate(60, 0),
         Some((replacement, ButtonId::Back, GestureDirection::Right))
     );
 }
@@ -108,7 +96,12 @@ fn a_same_button_repress_restarts_the_stale_hold() {
 #[test]
 fn an_aged_hold_yields_to_a_new_buttons_press() {
     let mut hold = HoldState::default();
-    hold.begin(ButtonId::Back, token(1, ButtonId::Back));
+    hold.begin(
+        ButtonId::Back,
+        token(1, ButtonId::Back),
+        BTreeMap::new(),
+        GesturePolicy::default(),
+    );
     hold.backdate_for_test();
 
     let replacement = token(2, ButtonId::Forward);
@@ -116,10 +109,16 @@ fn an_aged_hold_yields_to_a_new_buttons_press() {
         panic!("an aged hold must yield to a new press");
     };
     assert_eq!(stale, token(1, ButtonId::Back));
-    hold.begin(ButtonId::Forward, replacement.clone());
-    hold.swipe.backdate_hold_for_test();
+    hold.begin(
+        ButtonId::Forward,
+        replacement.clone(),
+        BTreeMap::new(),
+        GesturePolicy::default(),
+    );
+    assert_eq!(hold.accumulate(0, 0), None);
+    assert_eq!(hold.accumulate(49, 0), None);
     assert_eq!(
-        hold.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
+        hold.accumulate(60, 0),
         Some((replacement, ButtonId::Forward, GestureDirection::Right))
     );
 }
@@ -128,15 +127,21 @@ fn an_aged_hold_yields_to_a_new_buttons_press() {
 fn begin_is_first_wins_while_a_hold_is_active() {
     let mut hold = HoldState::default();
     let first = token(1, ButtonId::Back);
-    hold.begin(ButtonId::Back, first.clone());
-    hold.swipe.backdate_hold_for_test();
+    hold.begin(
+        ButtonId::Back,
+        first.clone(),
+        BTreeMap::new(),
+        GesturePolicy::default(),
+    );
+    assert_eq!(hold.accumulate(0, 0), None);
+    assert_eq!(hold.accumulate(49, 0), None);
     assert!(
         matches!(hold.prepare_begin(ButtonId::Forward), HoldAdmission::Refuse),
         "a second press must not hijack the active hold"
     );
 
     assert_eq!(
-        hold.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
+        hold.accumulate(60, 0),
         Some((first.clone(), ButtonId::Back, GestureDirection::Right))
     );
     assert_eq!(hold.end(ButtonId::Forward), None);
@@ -147,7 +152,12 @@ fn begin_is_first_wins_while_a_hold_is_active() {
 fn end_matches_the_held_button_and_returns_its_token() {
     let mut hold = HoldState::default();
     let press = token(1, ButtonId::Back);
-    hold.begin(ButtonId::Back, press.clone());
+    hold.begin(
+        ButtonId::Back,
+        press.clone(),
+        BTreeMap::new(),
+        GesturePolicy::default(),
+    );
     assert_eq!(hold.end(ButtonId::Forward), None);
     assert_eq!(hold.end(ButtonId::Back), Some((press, true)));
 }
@@ -587,4 +597,181 @@ fn resolve_gesture_click_falls_back_when_click_is_absent() {
         resolve_gesture_click(&empty, ButtonId::Forward),
         default_binding(ButtonId::Forward)
     );
+}
+
+fn gesture_button_event(
+    pressed: bool,
+    hooks: &SharedHookMaps,
+    dispatcher: &ActionDispatcher,
+) -> EventDisposition {
+    let mouse = EventDevice {
+        vendor_id: Some(0x046d),
+        ..EventDevice::default()
+    };
+    handle_button(
+        ButtonId::Back,
+        pressed,
+        Some(&mouse),
+        hooks,
+        dispatcher,
+        || None,
+    )
+}
+
+#[test]
+fn gesture_repeats_on_the_same_press_across_pointer_refresh_and_reversal() {
+    use super::super::button::ButtonRuntimeEvent;
+    use openlogi_hook::PointerTarget;
+
+    HOLD.with_borrow_mut(HoldState::cancel);
+    SUPPRESSED_PRESSES.with_borrow_mut(HashSet::clear);
+    let (dispatcher, mut owner, events) = test_dispatcher();
+    let directions = BTreeMap::from([
+        (GestureDirection::Up, Action::VolumeUp),
+        (GestureDirection::Down, Action::VolumeDown),
+        (GestureDirection::Click, Action::Copy),
+    ]);
+    let hooks = Arc::new(RwLock::new(HookMaps {
+        gestures: BTreeMap::from([(ButtonId::Back, directions.clone())]),
+        gesture_policies: BTreeMap::from([(
+            ButtonId::Back,
+            GesturePolicy::for_bindings(&directions),
+        )]),
+        pointer_target: Some(PointerTarget::Desktop),
+        ..HookMaps::default()
+    }));
+    assert_eq!(
+        gesture_button_event(true, &hooks, &dispatcher),
+        EventDisposition::Suppress
+    );
+    let ButtonRuntimeEvent::Started(press) = events
+        .recv_timeout(Duration::from_secs(1))
+        .expect("physical down")
+    else {
+        panic!("started")
+    };
+    let mut at = Instant::now();
+    for (index, sign) in [-1, -1, 1, 1].into_iter().enumerate() {
+        if index == 1 {
+            let current = PointerTarget::Window {
+                process_id: 41,
+                window_id: 7,
+            };
+            hooks.write().expect("maps").pointer_target = Some(current);
+            dispatcher.cancel_pointer_buttons_except(current);
+        }
+        handle_moved_at(at, 0, sign * 600, &hooks, &dispatcher);
+        let ButtonRuntimeEvent::Triggered {
+            press: triggered,
+            action,
+        } = events
+            .recv_timeout(Duration::from_secs(1))
+            .expect("directional pulse")
+        else {
+            panic!("triggered")
+        };
+        assert_eq!(triggered.token(), press.token());
+        let current = hooks.read().expect("maps").pointer_target.unwrap();
+        let mut output = Vec::new();
+        if triggered
+            .target()
+            .resolve_with(&action, || current, |_| false, || None)
+            .is_some()
+        {
+            output.push(action.clone());
+        }
+        assert_eq!(
+            output,
+            [if sign < 0 {
+                Action::VolumeUp
+            } else {
+                Action::VolumeDown
+            }],
+            "fresh semantic target reaches output admission"
+        );
+        assert_eq!(
+            action,
+            if sign < 0 {
+                Action::VolumeUp
+            } else {
+                Action::VolumeDown
+            }
+        );
+        at += Duration::from_millis(400);
+    }
+    assert_eq!(
+        gesture_button_event(false, &hooks, &dispatcher),
+        EventDisposition::Suppress
+    );
+    let ButtonRuntimeEvent::Ended {
+        press: released, ..
+    } = events
+        .recv_timeout(Duration::from_secs(1))
+        .expect("physical release")
+    else {
+        panic!("ended")
+    };
+    assert_eq!(released.token(), press.token());
+    assert!(events.try_recv().is_err(), "no click or stationary repeat");
+    assert!(owner.shutdown());
+}
+
+#[test]
+fn changed_gesture_binding_cancels_and_still_suppresses_the_matching_release() {
+    use super::super::button::ButtonRuntimeEvent;
+
+    HOLD.with_borrow_mut(HoldState::cancel);
+    SUPPRESSED_PRESSES.with_borrow_mut(HashSet::clear);
+    let (dispatcher, mut owner, events) = test_dispatcher();
+    let hooks = Arc::new(RwLock::new(HookMaps {
+        gestures: BTreeMap::from([(
+            ButtonId::Back,
+            BTreeMap::from([(GestureDirection::Up, Action::VolumeUp)]),
+        )]),
+        ..HookMaps::default()
+    }));
+    let mouse = EventDevice {
+        vendor_id: Some(0x046d),
+        ..EventDevice::default()
+    };
+    handle_button(
+        ButtonId::Back,
+        true,
+        Some(&mouse),
+        &hooks,
+        &dispatcher,
+        || None,
+    );
+    assert!(matches!(
+        events.recv_timeout(Duration::from_secs(1)).expect("down"),
+        ButtonRuntimeEvent::Started(_)
+    ));
+    hooks
+        .write()
+        .expect("maps")
+        .gestures
+        .get_mut(&ButtonId::Back)
+        .unwrap()
+        .insert(GestureDirection::Up, Action::Copy);
+    handle_moved(0, -1000, &hooks, &dispatcher);
+    assert!(matches!(
+        events.recv_timeout(Duration::from_secs(1)).expect("cancel"),
+        ButtonRuntimeEvent::Ended { .. }
+    ));
+    assert_eq!(
+        handle_button(
+            ButtonId::Back,
+            false,
+            Some(&mouse),
+            &hooks,
+            &dispatcher,
+            || None
+        ),
+        EventDisposition::Suppress
+    );
+    assert!(
+        events.try_recv().is_err(),
+        "canceled release emits no click"
+    );
+    assert!(owner.shutdown());
 }
