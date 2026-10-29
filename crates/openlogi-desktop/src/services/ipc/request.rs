@@ -20,7 +20,7 @@ use openlogi_core::config::{ConfigRevision, Lighting};
 use openlogi_core::hid::{
     BacklightChange, BacklightState, DeviceRoute, DisableKeysMask, DisableKeysState, Dpi, DpiInfo,
     EasySwitchHosts, FnLockState, ForceSensingInfo, LightCommand, OnboardState, PointerSpeed,
-    ReceiverSelector, ReportRate, ReportRateInfo, SmartShiftStatus, WriteError,
+    ReceiverSelector, ReportRate, ReportRateInfo, SidetoneLevel, SmartShiftStatus, WriteError,
 };
 use openlogi_ipc::{
     AgentClient, ChosenLight, ConfigReloadError, PairingCommandError, PairingFailure, SavedConfig,
@@ -228,6 +228,31 @@ impl Request for SetPointerSpeed {
 
     fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
         let _ = updates.send(GuiUpdate::PointerSpeedWritten {
+            key: self.key,
+            result: or_unavailable(outcome),
+        });
+    }
+}
+
+/// Write a headset's sidetone level now, answered as
+/// [`GuiUpdate::SidetoneWritten`] with the level the headset confirms.
+pub struct SetSidetone {
+    pub route: DeviceRoute,
+    pub level: SidetoneLevel,
+    pub key: DeviceKey,
+}
+
+impl Request for SetSidetone {
+    type Answer = Result<SidetoneLevel, WriteError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .set_sidetone(context::current(), self.route.clone(), self.level)
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
+        let _ = updates.send(GuiUpdate::SidetoneWritten {
             key: self.key,
             result: or_unavailable(outcome),
         });
@@ -537,6 +562,26 @@ impl Request for ReadPointerSpeed {
     async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
         client
             .read_pointer_speed(context::current(), self.route.clone())
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, _: &UpdateSender) {
+        let _ = self.reply.send(or_unavailable(outcome));
+    }
+}
+
+/// Read a headset's sidetone level; the answer goes back over `reply`.
+pub struct ReadSidetone {
+    pub route: DeviceRoute,
+    pub reply: oneshot::Sender<Result<SidetoneLevel, WriteError>>,
+}
+
+impl Request for ReadSidetone {
+    type Answer = Result<SidetoneLevel, WriteError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .read_sidetone(context::current(), self.route.clone())
             .await
     }
 
@@ -993,6 +1038,7 @@ commands! {
     SetFnLock,
     SetReportRate,
     SetPointerSpeed,
+    SetSidetone,
     SetForceSensing,
     SetBacklight,
     RenameEasySwitchHost,
@@ -1001,6 +1047,7 @@ commands! {
     ReadFnLock,
     ReadReportRate,
     ReadPointerSpeed,
+    ReadSidetone,
     ReadForceSensing,
     ReadBacklight,
     ReadEasySwitchHosts,

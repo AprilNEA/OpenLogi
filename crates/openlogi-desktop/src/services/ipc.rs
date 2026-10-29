@@ -42,7 +42,7 @@ use std::time::{Duration, Instant};
 
 use openlogi_core::hid::{
     BacklightState, DeviceRoute, DisableKeysState, Dpi, EasySwitchHosts, FnLockState,
-    ForceSensingInfo, LightCommand, PointerSpeed, ReportRateInfo, WriteError,
+    ForceSensingInfo, LightCommand, PointerSpeed, ReportRateInfo, SidetoneLevel, WriteError,
 };
 use openlogi_ipc::client::{self, ConnectError};
 use openlogi_ipc::{
@@ -69,10 +69,10 @@ pub use request::PollEventMonitor;
 pub use request::{
     CancelPairing, Command, LoadConfig, PairDevice, ReadBacklight, ReadDisableKeys, ReadDpi,
     ReadEasySwitchHosts, ReadFnLock, ReadForceSensing, ReadOnboard, ReadPointerSpeed,
-    ReadReportRate, ReadSmartShift, ReloadConfig, RenameEasySwitchHost, RequestAccessibilityPrompt,
-    SetBacklight, SetDisableKeys, SetDpi, SetFnLock, SetForceSensing, SetLight,
-    SetLightManualPower, SetLighting, SetPointerSpeed, SetReportRate, SetSmartShift, StartPairing,
-    UnpairDevice,
+    ReadReportRate, ReadSidetone, ReadSmartShift, ReloadConfig, RenameEasySwitchHost,
+    RequestAccessibilityPrompt, SetBacklight, SetDisableKeys, SetDpi, SetFnLock, SetForceSensing,
+    SetLight, SetLightManualPower, SetLighting, SetPointerSpeed, SetReportRate, SetSidetone,
+    SetSmartShift, StartPairing, UnpairDevice,
 };
 
 /// Complete identity of one Disable Keys write/reload transaction.
@@ -177,6 +177,14 @@ pub enum GuiUpdate {
         key: DeviceKey,
         /// The read-back, or why the write did not land.
         result: Result<PointerSpeed, WriteError>,
+    },
+    /// What a headset confirms after a sidetone write the GUI asked for: the
+    /// level it took, or the typed refusal. Answers [`SetSidetone`].
+    SidetoneWritten {
+        /// The headset that was written.
+        key: DeviceKey,
+        /// The confirmed level, or why the write did not land.
+        result: Result<SidetoneLevel, WriteError>,
     },
     /// What a force-sensing button reports after a press-force write the GUI
     /// asked for: the force it took, or the typed refusal. Answers

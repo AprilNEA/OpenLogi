@@ -52,6 +52,7 @@ mod tests {
             openlogi_ui::action_icons::RING_CANCEL_ICON,
             "icons/check.svg",
             "icons/chevron-down.svg",
+            crate::features::audio::AUDIO_ICON,
         ] {
             let bytes = AppAssets.load(path).unwrap().unwrap();
             assert!(

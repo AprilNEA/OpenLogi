@@ -22,6 +22,7 @@ use super::widgets::{back_button, connection_summary, kind_label, sidebar_action
 use super::{AppView, DetailTab};
 use crate::app::menu::open_config_folder;
 use crate::features::action_ring::ActionRingPanel;
+use crate::features::audio::{AUDIO_ICON, AudioPanel};
 use crate::features::camera::controls::CameraControlsPanel;
 use crate::features::camera::preview::CameraPreview;
 use crate::features::keyboard::disable_keys::DisableKeysPanel;
@@ -104,6 +105,7 @@ pub(super) struct DetailPanels<'a> {
     pub camera_preview: &'a gpui::Entity<CameraPreview>,
     pub camera_controls: &'a gpui::Entity<CameraControlsPanel>,
     pub light_panel: &'a gpui::Entity<LightPanel>,
+    pub audio_panel: &'a gpui::Entity<AudioPanel>,
 }
 
 /// The device-detail workspace below the identity bar: stable navigation rail
@@ -137,6 +139,7 @@ pub(super) fn detail_content(
             camera_tab(panels.camera_preview, panels.camera_controls).into_any_element()
         }
         DetailTab::Light => light_tab(panels.light_panel, cx).into_any_element(),
+        DetailTab::Audio => audio_tab(panels.audio_panel).into_any_element(),
         DetailTab::Device => device_tab(panels.disable_keys_panel, cx).into_any_element(),
     };
     let navigation = detail_navigation(tabs, active, cx);
@@ -254,6 +257,7 @@ fn detail_tab_icon(tab: DetailTab) -> &'static str {
         DetailTab::Pointer => "action-icons/gauge.svg",
         DetailTab::Lighting | DetailTab::Light => "action-icons/palette.svg",
         DetailTab::Camera => "action-icons/camera.svg",
+        DetailTab::Audio => AUDIO_ICON,
         DetailTab::Device => "action-icons/settings.svg",
     }
 }
@@ -731,6 +735,18 @@ fn wheel_resolution_control(selected: Option<ScrollResolution>, enabled: bool) -
 /// Lighting tab: the RGB controls (swatches, on/off, brightness) in a titled
 /// card. Shown when the device reports a lighting capability — see
 /// [`DetailTab::tabs_for`].
+/// Audio tab: the headset's sidetone in one card.
+fn audio_tab(audio_panel: &gpui::Entity<AudioPanel>) -> impl IntoElement {
+    tab_body(
+        ContentWidth::Small,
+        PanelCard::new(
+            tr!("device.audio"),
+            Icon::empty().path(AUDIO_ICON),
+            audio_panel.clone().into_any_element(),
+        ),
+    )
+}
+
 fn lighting_tab(lighting_panel: &gpui::Entity<LightingPanel>) -> impl IntoElement {
     tab_body(
         ContentWidth::Small,

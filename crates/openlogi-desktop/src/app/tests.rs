@@ -1260,6 +1260,21 @@ fn light_tab_follows_light_capabilities() {
     );
 }
 
+/// A G535 measures sidetone and nothing else, so it opens on the Audio tab.
+#[test]
+fn a_sidetone_headset_opens_on_the_audio_tab() {
+    let caps = Some(Capabilities {
+        sidetone: true,
+        ..Capabilities::default()
+    });
+    let headset = record(DeviceKind::Headset, caps);
+    assert_eq!(
+        DetailTab::tabs_for(&headset),
+        vec![DetailTab::Audio, DetailTab::Device]
+    );
+    assert_eq!(DetailTab::default_for(&headset), DetailTab::Audio);
+}
+
 /// An unprobed (offline) device has no measured capabilities and falls back
 /// to a kind presumption, so a sleeping mouse keeps its button/pointer tabs.
 #[test]
