@@ -3,8 +3,9 @@
 use std::time::Duration;
 
 use gpui::App;
-use openlogi_core::binding::{GamingButtons, GamingLayout};
+use openlogi_core::binding::{GamingButtons, GamingLayout, is_g_series};
 use openlogi_core::config::OnboardMemory;
+use openlogi_core::device::DeviceKind;
 use openlogi_core::hid::{OnboardMode, OnboardState};
 
 use super::events::StateEvents;
@@ -18,6 +19,16 @@ impl AppState {
         self.current_record()
             .and_then(|record| record.capabilities)
             .is_some_and(|capabilities| capabilities.onboard_profiles)
+    }
+
+    /// Whether the current device is a G-series keyboard, whose F-row gets a
+    /// G-Shift layer.
+    #[must_use]
+    pub fn current_gshift_keyboard(&self) -> bool {
+        self.current_record().is_some_and(|record| {
+            record.kind == DeviceKind::Keyboard
+                && is_g_series(&record.model_key, record.capabilities.as_ref())
+        })
     }
 
     #[must_use]

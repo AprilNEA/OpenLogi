@@ -42,7 +42,7 @@ use crate::features::binding_editor::{
 use crate::features::mouse::geometry::asset_dimensions_for_png;
 use crate::features::profiles::profile_name;
 use crate::services::assets::{GlowGeometry, ResolvedAsset};
-use crate::state::{AppState, StateEvent, StateEvents};
+use crate::state::{AppState, BindingLayer, StateEvent, StateEvents};
 use crate::ui::action::localized_action_label;
 use crate::ui::components::MenuRow;
 use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
@@ -319,7 +319,7 @@ struct KeySlot {
 pub(super) fn bound_action(state: &AppState, target: &KeyTarget) -> Option<Action> {
     match target {
         KeyTarget::Control(button) => state.button_bindings().get(button).cloned(),
-        KeyTarget::FunctionKey(trigger) => state.keyboard_bindings().get(trigger).cloned(),
+        KeyTarget::FunctionKey(trigger) => state.editing_keyboard_bindings().get(trigger).cloned(),
     }
 }
 
@@ -937,14 +937,16 @@ fn title_header(key_name: &SharedString, app: Option<&str>, pal: &Palette) -> im
 /// What a key's picker offers beyond the catalog and leaves out of it.
 #[derive(Clone, Copy, Default)]
 struct KeyActionOffer {
+    gshift: bool,
     hide_actions_ring: bool,
 }
 
 impl KeyActionOffer {
     fn offer(self) -> ActionOffer<'static> {
+        const GSHIFT: &[Action] = &[Action::GShift];
         const ACTIONS_RING: &[Action] = &[Action::ShowActionsRing];
         ActionOffer {
-            extra: &[],
+            extra: if self.gshift { GSHIFT } else { &[] },
             hidden: if self.hide_actions_ring {
                 ACTIONS_RING
             } else {
@@ -954,12 +956,16 @@ impl KeyActionOffer {
     }
 }
 
+/// A G-series keyboard's function key may hold G-Shift in the normal layer.
 /// A keyboard without an Actions Ring is not offered one.
-fn key_action_offer(state: Option<&AppState>, _target: &KeyTarget) -> KeyActionOffer {
+fn key_action_offer(state: Option<&AppState>, target: &KeyTarget) -> KeyActionOffer {
     let Some(state) = state else {
         return KeyActionOffer::default();
     };
     KeyActionOffer {
+        gshift: matches!(target, KeyTarget::FunctionKey(_))
+            && state.current_gshift_keyboard()
+            && state.binding_layer() == BindingLayer::Normal,
         hide_actions_ring: !state
             .current_record()
             .is_none_or(crate::app::offers_actions_ring),

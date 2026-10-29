@@ -214,6 +214,21 @@ impl Config {
         &self.keyboard.bindings
     }
 
+    /// Records (or, with `action = None`, clears) `trigger` in the keyboard's
+    /// G-Shift layer, device-agnostic like [`Self::set_keyboard_binding`].
+    pub fn set_keyboard_gshift_binding(&mut self, trigger: KeyTrigger, action: Option<Action>) {
+        match action {
+            Some(action) => self.keyboard.gshift_bindings.insert(trigger, action),
+            None => self.keyboard.gshift_bindings.remove(&trigger),
+        };
+    }
+
+    /// The keyboard's G-Shift layer (read accessor).
+    #[must_use]
+    pub fn keyboard_gshift_bindings(&self) -> &BTreeMap<KeyTrigger, Action> {
+        &self.keyboard.gshift_bindings
+    }
+
     /// HID++ config key of the active device, if any.
     #[must_use]
     pub fn selected_device(&self) -> Option<&str> {

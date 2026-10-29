@@ -128,4 +128,21 @@ pub struct KeyboardConfig {
     /// Function-key trigger → action map for the remapper.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub bindings: BTreeMap<KeyTrigger, Action>,
+    /// The G-Shift layer: what a trigger runs while a key bound to G-Shift
+    /// is held.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub gshift_bindings: BTreeMap<KeyTrigger, Action>,
+}
+
+impl KeyboardConfig {
+    /// What `trigger` runs, from the G-Shift layer while `shifted`. A
+    /// trigger the layer leaves unbound keeps its normal action, as a mouse
+    /// button does.
+    #[must_use]
+    pub fn action_for(&self, trigger: &KeyTrigger, shifted: bool) -> Option<&Action> {
+        shifted
+            .then(|| self.gshift_bindings.get(trigger))
+            .flatten()
+            .or_else(|| self.bindings.get(trigger))
+    }
 }

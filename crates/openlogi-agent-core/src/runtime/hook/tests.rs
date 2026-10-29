@@ -209,10 +209,10 @@ fn queued_key_action_retains_its_press_time_target() {
     let (dispatcher, mut owner, _events) = test_dispatcher();
     let keycode = 0x7a;
     let modifiers = KeyModifiers::default();
-    let bindings = Arc::new(RwLock::new(BTreeMap::from([(
-        KeyTrigger { keycode, modifiers },
-        Action::BrowserBack,
-    )])));
+    let bindings = Arc::new(RwLock::new(KeyboardConfig {
+        bindings: BTreeMap::from([(KeyTrigger { keycode, modifiers }, Action::BrowserBack)]),
+        ..KeyboardConfig::default()
+    }));
     let (actions, queued) = mpsc::sync_channel(1);
     let target = ActionDispatchTarget::SafariProcess(417);
 
@@ -246,10 +246,10 @@ fn dpi_shift_on_a_key_runs_as_a_held_press() {
     let (dispatcher, mut owner, events) = test_dispatcher();
     let keycode = 0x7a;
     let modifiers = KeyModifiers::default();
-    let bindings = Arc::new(RwLock::new(BTreeMap::from([(
-        KeyTrigger { keycode, modifiers },
-        Action::DpiShift,
-    )])));
+    let bindings = Arc::new(RwLock::new(KeyboardConfig {
+        bindings: BTreeMap::from([(KeyTrigger { keycode, modifiers }, Action::DpiShift)]),
+        ..KeyboardConfig::default()
+    }));
     let (actions, queued) = mpsc::sync_channel(1);
     let key = |pressed| {
         handle_key(
@@ -652,4 +652,97 @@ fn held_gshift_replaces_a_gesture_button_with_its_shifted_binding() {
     // A button with no shifted binding keeps its gestures under G-Shift.
     maps.gestures.insert(ButtonId::Forward, BTreeMap::new());
     assert!(maps.press_binding(ButtonId::Forward).1);
+}
+
+/// A key bound to G-Shift switches the other keys to their G-Shift layer
+/// while it is down, and is never sent to the focused app itself.
+#[test]
+fn a_held_gshift_key_runs_the_other_keys_shifted_layer() {
+    let (dispatcher, mut owner, _events) = test_dispatcher();
+    let modifiers = KeyModifiers::default();
+    let (f1, f2, f12) = (0x7a, 0x78, 0x6f);
+    let trigger = |keycode| KeyTrigger { keycode, modifiers };
+    let bindings = Arc::new(RwLock::new(KeyboardConfig {
+        bindings: BTreeMap::from([
+            (trigger(f12), Action::GShift),
+            (trigger(f1), Action::VolumeUp),
+            (trigger(f2), Action::MuteVolume),
+        ]),
+        gshift_bindings: BTreeMap::from([(trigger(f1), Action::MissionControl)]),
+    }));
+    let (actions, queued) = mpsc::sync_channel(4);
+    let key = |keycode, pressed| {
+        handle_key(
+            KeyEvent {
+                keycode,
+                pressed,
+                modifiers,
+            },
+            &bindings,
+            &actions,
+            &dispatcher,
+            ActionDispatchTarget::capture,
+        )
+    };
+    let tap = |keycode| {
+        assert_eq!(key(keycode, true), EventDisposition::Suppress);
+        key(keycode, false);
+        queued.try_recv().expect("action should be queued").0
+    };
+
+    assert_eq!(key(f12, true), EventDisposition::Suppress);
+    assert_eq!(key(f12, true), EventDisposition::Suppress, "auto-repeat");
+    queued.try_recv().unwrap_err();
+    assert_eq!(tap(f1), Action::MissionControl);
+    assert_eq!(
+        tap(f2),
+        Action::MuteVolume,
+        "an unshifted key keeps its action"
+    );
+    assert_eq!(key(f12, false), EventDisposition::Suppress);
+    queued.try_recv().unwrap_err();
+    assert_eq!(tap(f1), Action::VolumeUp);
+    assert!(owner.shutdown());
+}
+
+/// A G-Shift key released while capture was interrupted never reports its
+/// release, so the interruption forgets it rather than leave every later key
+/// shifted.
+#[test]
+fn an_interrupted_capture_forgets_a_held_gshift_key() {
+    let (dispatcher, mut owner, _events) = test_dispatcher();
+    let modifiers = KeyModifiers::default();
+    let (f1, f12) = (0x7a, 0x6f);
+    let trigger = |keycode| KeyTrigger { keycode, modifiers };
+    let bindings = Arc::new(RwLock::new(KeyboardConfig {
+        bindings: BTreeMap::from([
+            (trigger(f12), Action::GShift),
+            (trigger(f1), Action::VolumeUp),
+        ]),
+        gshift_bindings: BTreeMap::from([(trigger(f1), Action::MissionControl)]),
+    }));
+    let (actions, queued) = mpsc::sync_channel(2);
+    let key = |keycode, pressed| {
+        handle_key(
+            KeyEvent {
+                keycode,
+                pressed,
+                modifiers,
+            },
+            &bindings,
+            &actions,
+            &dispatcher,
+            ActionDispatchTarget::capture,
+        )
+    };
+
+    assert_eq!(key(f12, true), EventDisposition::Suppress);
+    forget_held_keys();
+    key(f1, true);
+    key(f1, false);
+    assert_eq!(
+        queued.try_recv().expect("action should be queued").0,
+        Action::VolumeUp
+    );
+    assert!(owner.shutdown());
 }

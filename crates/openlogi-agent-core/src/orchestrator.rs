@@ -664,7 +664,7 @@ impl Orchestrator {
             channel_pool: hardware.channel_pool(),
             hardware,
             hook_maps: Arc::new(RwLock::new(HookMaps::default())),
-            keyboard_bindings: Arc::new(RwLock::new(config.keyboard.bindings.clone())),
+            keyboard_bindings: Arc::new(RwLock::new(config.keyboard.clone())),
             scroll_preferences: Arc::new(ScrollPreferences::new(
                 config.app_settings.smooth_scroll,
                 config.app_settings.vertical_scroll_sensitivity,
@@ -951,7 +951,7 @@ impl Orchestrator {
         // agent restart.
         write_value(
             &self.shared.keyboard_bindings,
-            self.config.keyboard.bindings.clone(),
+            self.config.keyboard.clone(),
             "keyboard_bindings",
         );
         publish_arc_if_changed(

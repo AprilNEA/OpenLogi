@@ -128,7 +128,7 @@ pub(super) fn detail_content(
         DetailTab::ActionsRing => {
             action_ring_tab(panels.action_ring, profile_icons, app_catalog, cx).into_any_element()
         }
-        DetailTab::Keys => keys_tab(panels.keyboard_model).into_any_element(),
+        DetailTab::Keys => keys_tab(panels.keyboard_model, cx).into_any_element(),
         DetailTab::Pointer => {
             pointer_tab(panels.dpi_panel, panels.smartshift_panel, cx).into_any_element()
         }
@@ -278,7 +278,8 @@ fn buttons_tab(
 fn gshift_layer_bar(cx: &mut Context<AppView>) -> Option<impl IntoElement> {
     let pal = theme::palette(cx);
     let state = AppState::try_read(cx)?;
-    if state.current_gaming_layout().is_none() || !state.current_device_is_persistent() {
+    let offers_gshift = state.current_gaming_layout().is_some() || state.current_gshift_keyboard();
+    if !offers_gshift || !state.current_device_is_persistent() {
         return None;
     }
     let gshift = state.binding_layer() == BindingLayer::GShift;
@@ -335,9 +336,18 @@ fn tab_body(
         .child(div().w_full().max_w(width.rems()).child(content))
 }
 
-/// Keys tab: the function-row remapper for a keyboard.
-fn keys_tab(keyboard_model: &gpui::Entity<FunctionRowView>) -> impl IntoElement {
-    tab_body(ContentWidth::DoubleExtraLarge, keyboard_model.clone()).justify_center()
+/// Keys tab: the function-row remapper for a keyboard, with the G-Shift
+/// layer switch on a G-series keyboard.
+fn keys_tab(
+    keyboard_model: &gpui::Entity<FunctionRowView>,
+    cx: &mut Context<AppView>,
+) -> impl IntoElement {
+    v_flex()
+        .flex_1()
+        .w_full()
+        .min_h_0()
+        .children(gshift_layer_bar(cx))
+        .child(tab_body(ContentWidth::DoubleExtraLarge, keyboard_model.clone()).justify_center())
 }
 
 fn action_ring_tab(

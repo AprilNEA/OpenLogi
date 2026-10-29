@@ -581,3 +581,56 @@ fn gesture_maps_cover_every_gesture_mode_button() {
         "a promoted OS-hook button gets its own menu simultaneously"
     );
 }
+
+/// A G-series keyboard's Keys panel edits the F-row G-Shift layer while that
+/// layer is open, and the normal map otherwise. An MX keyboard has no layer.
+#[test]
+fn a_g_series_keyboard_edits_its_f_row_gshift_layer() {
+    use super::fn_lock::keyboard_inventory;
+    use crate::state::BindingLayer;
+    use openlogi_core::config::KeyTrigger;
+
+    let resolver = AssetResolver::new();
+    let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut mx_keys = keyboard_inventory(true);
+    mx_keys.paired[0].capabilities = Some(Capabilities::from_feature_ids(&[0x1b04, 0x40a2]));
+    let mx = AppState::new(Sources {
+        inventories: &[mx_keys],
+        ..Sources::in_memory(Config::ephemeral(), &resolver, commands.clone())
+    });
+    assert!(!mx.current_gshift_keyboard());
+
+    let mut g512 = keyboard_inventory(true);
+    g512.paired[0].capabilities = Some(Capabilities::from_feature_ids(&[
+        0x1b04, 0x40a2, 0x8060, 0x8070, 0x8080,
+    ]));
+    let mut state = AppState::new(Sources {
+        inventories: &[g512],
+        ..Sources::in_memory(Config::ephemeral(), &resolver, commands)
+    });
+    assert!(state.current_gshift_keyboard());
+    let f1: KeyTrigger = "f1".parse().unwrap();
+
+    let _ = state.commit_keyboard_binding(f1.clone(), Some(Action::VolumeUp));
+    let _ = state.set_binding_layer(BindingLayer::GShift);
+    assert!(state.editing_keyboard_bindings().is_empty());
+    let _ = state.commit_keyboard_binding(f1.clone(), Some(Action::MissionControl));
+
+    assert_eq!(
+        state.config.keyboard_gshift_bindings().get(&f1),
+        Some(&Action::MissionControl)
+    );
+    assert_eq!(
+        state.config.keyboard_bindings().get(&f1),
+        Some(&Action::VolumeUp)
+    );
+    assert_eq!(
+        state.editing_keyboard_bindings().get(&f1),
+        Some(&Action::MissionControl)
+    );
+    let _ = state.set_binding_layer(BindingLayer::Normal);
+    assert_eq!(
+        state.editing_keyboard_bindings().get(&f1),
+        Some(&Action::VolumeUp)
+    );
+}

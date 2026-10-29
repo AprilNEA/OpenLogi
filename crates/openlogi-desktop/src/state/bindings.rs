@@ -6,7 +6,7 @@ use openlogi_core::binding::{
     Action, Binding, ButtonId, GestureDirection, LongPressBinding, WheelHoldBinding,
 };
 use openlogi_core::bindings::{bindings_for, hidpp_gesture_maps_for, oshook_gestures_for};
-use openlogi_core::config::{Config, KeyTrigger};
+use openlogi_core::config::{Config, KeyTrigger, KeyboardConfig};
 use tracing::debug;
 
 use crate::features::mouse::thumbwheel::{ThumbwheelPair, ThumbwheelPreset};
@@ -41,8 +41,8 @@ pub(super) struct BindingState {
     /// Device-global like the gesture maps: a per-app entry holds one
     /// `Action`, so wheel-hold lives only in the global profile.
     wheel_hold_buttons: BTreeSet<ButtonId>,
-    /// Global keyboard F-key bindings (Esc + F1-F19).
-    keyboard_bindings: BTreeMap<KeyTrigger, Action>,
+    /// Global keyboard F-key bindings (Esc + F1-F19) and their G-Shift layer.
+    keyboard: KeyboardConfig,
 }
 
 impl BindingState {
@@ -53,7 +53,7 @@ impl BindingState {
             button_bindings: BTreeMap::new(),
             gesture_bindings: BTreeMap::new(),
             wheel_hold_buttons: BTreeSet::new(),
-            keyboard_bindings: config.keyboard.bindings.clone(),
+            keyboard: config.keyboard.clone(),
         };
         state.refresh_device(config, persistent_key);
         state
@@ -110,7 +110,7 @@ impl BindingState {
 
     fn restore(&mut self, config: &Config, persistent_key: Option<&str>) {
         self.refresh_device(config, persistent_key);
-        self.keyboard_bindings = config.keyboard.bindings.clone();
+        self.keyboard = config.keyboard.clone();
     }
 }
 
@@ -235,7 +235,18 @@ impl AppState {
     /// Global keyboard F-key bindings.
     #[must_use]
     pub fn keyboard_bindings(&self) -> &BTreeMap<KeyTrigger, Action> {
-        &self.bindings.keyboard_bindings
+        &self.bindings.keyboard.bindings
+    }
+
+    /// The keyboard F-key bindings the Keys panel edits: the G-Shift layer
+    /// while that is the layer open.
+    #[must_use]
+    pub fn editing_keyboard_bindings(&self) -> &BTreeMap<KeyTrigger, Action> {
+        if self.binding_layer() == BindingLayer::GShift {
+            &self.bindings.keyboard.gshift_bindings
+        } else {
+            &self.bindings.keyboard.bindings
+        }
     }
 
     pub(super) fn refresh_binding_projections(&mut self) {
@@ -472,7 +483,8 @@ impl AppState {
         events
     }
     /// Records (or, with `action = None`, clears) the F-key `trigger` binding
-    /// in the global `[keyboard]` map. Mirrors [`Self::commit_binding`] minus
+    /// in the global `[keyboard]` map, or in its G-Shift layer while that is
+    /// the layer open. Mirrors [`Self::commit_binding`] minus
     /// the device key — keyboard bindings are device-agnostic, so the write
     /// happens with or without a selected device; only the event it reports is
     /// addressed to the selected device, as every binding change's is. The
@@ -483,18 +495,28 @@ impl AppState {
         trigger: KeyTrigger,
         action: Option<Action>,
     ) -> StateEvents {
+        let gshift = self.binding_layer() == BindingLayer::GShift;
+        let keyboard = &mut self.bindings.keyboard;
+        let layer = if gshift {
+            &mut keyboard.gshift_bindings
+        } else {
+            &mut keyboard.bindings
+        };
         match action {
             Some(ref a) => {
-                self.bindings
-                    .keyboard_bindings
-                    .insert(trigger.clone(), a.clone());
+                layer.insert(trigger.clone(), a.clone());
             }
             None => {
-                self.bindings.keyboard_bindings.remove(&trigger);
+                layer.remove(&trigger);
             }
         }
-        self.config
-            .edit(|config| config.set_keyboard_binding(trigger, action));
+        self.config.edit(|config| {
+            if gshift {
+                config.set_keyboard_gshift_binding(trigger, action);
+            } else {
+                config.set_keyboard_binding(trigger, action);
+            }
+        });
         self.persist_and_reload("keyboard binding");
         self.for_current_device(StateEvent::BindingsChanged)
     }
