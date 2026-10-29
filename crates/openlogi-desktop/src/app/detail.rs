@@ -30,6 +30,7 @@ use crate::features::keyboard::function_row::FunctionRowView;
 use crate::features::lighting::keyboard_rgb::LightingPanel;
 use crate::features::lighting::standalone::LightPanel;
 use crate::features::lighting::visual as light_visual;
+use crate::features::microphone::MicrophonePanel;
 use crate::features::mouse::view::MouseModelView;
 use crate::features::pointer::dpi::DpiPanel;
 use crate::features::pointer::momentum::{MomentumPanel, confirm_turning_off_with_smooth_wheel};
@@ -108,6 +109,7 @@ pub(super) struct DetailPanels<'a> {
     pub camera_controls: &'a gpui::Entity<CameraControlsPanel>,
     pub light_panel: &'a gpui::Entity<LightPanel>,
     pub audio_panel: &'a gpui::Entity<AudioPanel>,
+    pub microphone_panel: &'a gpui::Entity<MicrophonePanel>,
 }
 
 /// The device-detail workspace below the identity bar: stable navigation rail
@@ -148,6 +150,7 @@ pub(super) fn detail_content(
         }
         DetailTab::Light => light_tab(panels.light_panel, cx).into_any_element(),
         DetailTab::Audio => audio_tab(panels.audio_panel).into_any_element(),
+        DetailTab::Microphone => microphone_tab(panels.microphone_panel).into_any_element(),
         DetailTab::Device => device_tab(panels.disable_keys_panel, cx).into_any_element(),
     };
     let navigation = detail_navigation(tabs, active, cx);
@@ -267,6 +270,7 @@ fn detail_tab_icon(tab: DetailTab) -> &'static str {
         DetailTab::Lighting | DetailTab::Light => "action-icons/palette.svg",
         DetailTab::Camera => "action-icons/camera.svg",
         DetailTab::Audio => AUDIO_ICON,
+        DetailTab::Microphone => MICROPHONE_ICON,
         DetailTab::Device => "action-icons/settings.svg",
     }
 }
@@ -933,6 +937,26 @@ fn light_tab(
                         light_panel.clone().into_any_element(),
                     )),
             ),
+    )
+}
+
+/// The microphone glyph: Lucide's `mic`, which the bundled icon subset lacks.
+pub(super) const MICROPHONE_ICON: &str = "action-icons/mic.svg";
+
+/// Microphone controls, the hardware half of G HUB's microphone page, in one
+/// untitled card — the rail already names the page, as with Lighting.
+fn microphone_tab(microphone_panel: &gpui::Entity<MicrophonePanel>) -> impl IntoElement {
+    tab_body(
+        DetailTab::Microphone,
+        ContentWidth::ExtraLarge,
+        div()
+            .w(LIGHT_CONTROLS_W)
+            .min_w(LIGHT_CONTROLS_MIN_W)
+            .child(PanelCard::new(
+                SharedString::default(),
+                Icon::empty().path(MICROPHONE_ICON),
+                microphone_panel.clone().into_any_element(),
+            )),
     )
 }
 

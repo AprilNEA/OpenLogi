@@ -15,10 +15,12 @@ use openlogi_core::device_order::{
 use openlogi_core::hid::{
     DeviceRoute, KeypadDescriptor, LOGITECH_VENDOR_ID, ReceiverBrand, find_receiver,
 };
+use openlogi_core::microphone::Microphone;
 use tracing::debug;
 
 use super::device_key::DeviceKey;
 use super::device_session::ObservedConnection;
+use super::microphone::microphone_record_key;
 use crate::services::assets::{AssetResolver, ResolvedAsset};
 
 /// One paired device with everything the UI needs to switch to it in O(1):
@@ -267,6 +269,7 @@ pub(super) fn build_device_list(
     resolver: &AssetResolver,
     config: &Config,
     cameras: &[Camera],
+    microphones: &[Microphone],
 ) -> Vec<DeviceRecord> {
     let mut list = Vec::new();
     for inv in inventories {
@@ -361,14 +364,7 @@ pub(super) fn build_device_list(
         .known_identities()
         .filter(|(key, _)| !folded_keys.contains(*key));
     append_offline_known(&mut list, known, resolver, &present_receivers, config);
-    // Cameras are UVC, not HID++, so they come from a parallel discovery path
-    // (AVFoundation on macOS) rather than the receiver inventory. The caller
-    // enumerates them off the UI thread — discovery is too slow for the render
-    // path — so this assembly stays pure; the merge in
-    // `super::AppState::refresh_inventories` reconciles them by inventory key.
-    for camera in cameras {
-        list.push(camera_record(camera, resolver));
-    }
+    append_host_discovered(&mut list, cameras, microphones, resolver);
     apply_custom_names(&mut list, config);
     sort_device_list(&mut list);
     list
@@ -504,6 +500,78 @@ fn camera_record(camera: &Camera, resolver: &AssetResolver) -> DeviceRecord {
         receiver_brand: None,
         capture_id: Some(camera.unique_id.clone()),
         kind: DeviceKind::Camera,
+        capabilities: None,
+        hidpp10: false,
+        light_capabilities: None,
+        slot: 0,
+        online: true,
+        battery: None,
+        settings_revision: 0,
+        stale_pairings: Vec::new(),
+    }
+}
+
+/// Append a record for each camera and USB microphone. Neither is HID++, so
+/// each comes from its own discovery path rather than the receiver inventory:
+/// cameras are UVC (AVFoundation on macOS), microphones come from the agent's
+/// audio-stack watcher. The caller enumerates cameras off the UI thread —
+/// discovery is too slow for the render path — so this assembly stays pure;
+/// the merge in `super::AppState::refresh_inventories` reconciles them by
+/// inventory key.
+fn append_host_discovered(
+    list: &mut Vec<DeviceRecord>,
+    cameras: &[Camera],
+    microphones: &[Microphone],
+    resolver: &AssetResolver,
+) {
+    list.extend(cameras.iter().map(|camera| camera_record(camera, resolver)));
+    list.extend(
+        microphones
+            .iter()
+            .map(|mic| microphone_record(mic, resolver)),
+    );
+}
+
+/// A [`DeviceRecord`] for a USB microphone.
+///
+/// Its key comes from [`microphone_record_key`], which the microphone panel
+/// uses to find the controls the agent reported. `route: None` and
+/// `capabilities: None` keep it out of every HID++ path; its image resolves
+/// through the asset registry's model ID, like a standalone device's.
+fn microphone_record(microphone: &Microphone, resolver: &AssetResolver) -> DeviceRecord {
+    let config_key = microphone_record_key(&microphone.id);
+    let asset = microphone
+        .registry_model_id
+        .as_deref()
+        .and_then(|model_id| resolver.resolve_registry_model(model_id));
+    let display_name = asset
+        .as_ref()
+        .filter(|asset| !asset.display_name.trim().is_empty())
+        .map_or_else(
+            || microphone.name.clone(),
+            |asset| asset.display_name.clone(),
+        );
+    DeviceRecord {
+        model_key: format!("mic:{:04x}", microphone.product_id),
+        route_key: config_key.clone(),
+        config_key,
+        // Not a HID++ identity, so nothing for `Config::resolve_device_key`
+        // to fold it into.
+        canonical_key: None,
+        persistent: true,
+        model_name: display_name.clone(),
+        display_name,
+        asset,
+        model_info: None,
+        codename: None,
+        serial_number: None,
+        unit_id: [0; 4],
+        driver_id: None,
+        registry_model_id: microphone.registry_model_id.clone(),
+        route: None,
+        receiver_brand: None,
+        capture_id: None,
+        kind: DeviceKind::Microphone,
         capabilities: None,
         hidpp10: false,
         light_capabilities: None,

@@ -23,6 +23,7 @@ use crate::features::keyboard::disable_keys::DisableKeysPanel;
 use crate::features::keyboard::function_row::FunctionRowView;
 use crate::features::lighting::keyboard_rgb::LightingPanel;
 use crate::features::lighting::standalone::LightPanel;
+use crate::features::microphone::MicrophonePanel;
 use crate::features::mouse::view::MouseModelView;
 use crate::features::pointer::dpi::DpiPanel;
 use crate::features::pointer::momentum::{MomentumPanel, MomentumScope};
@@ -89,6 +90,8 @@ enum DetailTab {
     Light,
     /// Headset audio — sidetone.
     Audio,
+    /// USB microphone controls (gain, mute, headphones, monitoring).
+    Microphone,
     /// Device info and configuration.
     Device,
 }
@@ -190,6 +193,11 @@ impl DetailTab {
         if caps.sidetone {
             tabs.push(Self::Audio);
         }
+        // A microphone is a USB audio device with no HID++ capabilities; its
+        // controls come from the agent's audio-stack reading.
+        if matches!(record.kind, DeviceKind::Microphone) {
+            tabs.push(Self::Microphone);
+        }
         tabs.push(Self::Device);
         tabs
     }
@@ -211,6 +219,7 @@ impl DetailTab {
             Self::Lighting | Self::Light => tr!("device.lighting"),
             Self::Camera => tr!("camera.camera"),
             Self::Audio => tr!("device.audio"),
+            Self::Microphone => tr!("device.microphone"),
             Self::Device => tr!("device.device"),
         }
     }
@@ -232,6 +241,7 @@ pub struct AppView {
     camera_controls: Entity<CameraControlsPanel>,
     light_panel: Entity<LightPanel>,
     audio_panel: Entity<AudioPanel>,
+    microphone_panel: Entity<MicrophonePanel>,
     profile_icons: ProfileIconCache,
     app_catalog: Entity<AppCatalogPicker>,
     /// Redraw the profile picker after discovery, filtering, or expansion changes.
@@ -317,6 +327,7 @@ impl AppView {
         let camera_controls = cx.new(CameraControlsPanel::new);
         let light_panel = cx.new(LightPanel::new);
         let audio_panel = cx.new(AudioPanel::new);
+        let microphone_panel = cx.new(MicrophonePanel::new);
         let profile_icons = ProfileIconCache::default();
         let app_catalog = cx.new(|cx| AppCatalogPicker::new(profile_icons.clone(), window, cx));
         let app_catalog_obs = cx.observe(&app_catalog, |_, _, cx| cx.notify());
@@ -341,6 +352,7 @@ impl AppView {
             camera_controls,
             light_panel,
             audio_panel,
+            microphone_panel,
             profile_icons,
             app_catalog,
             _app_catalog_obs: app_catalog_obs,
@@ -406,6 +418,7 @@ impl AppView {
             // caches no localized text. A refused removal is a dialog,
             // opened through `removal_obs`.
             StateEvent::SmartShiftChanged(_)
+            | StateEvent::MicrophoneChanged
             | StateEvent::DisableKeysChanged(_)
             | StateEvent::ReportRateChanged(_)
             | StateEvent::PointerSpeedChanged(_)
@@ -744,6 +757,7 @@ impl AppView {
                         camera_controls: &self.camera_controls,
                         light_panel: &self.light_panel,
                         audio_panel: &self.audio_panel,
+                        microphone_panel: &self.microphone_panel,
                     },
                     &self.profile_icons,
                     &self.app_catalog,

@@ -59,6 +59,7 @@ pub(crate) mod force_sensing;
 pub(crate) mod keypad_pages;
 mod light_adoption;
 mod lighting;
+mod microphone;
 mod os_layout;
 mod pointer_speed;
 mod profile_scope;
