@@ -45,7 +45,9 @@ use crate::ui::theme::{
 mod backlight;
 mod easy_switch;
 
-const CAMERA_PREVIEW_W: Rems = rems(32.125);
+/// The preview plus the card's padding and its 1 px border. The border stays
+/// one pixel at every interface scale, so keep a little slack for it below 100 %.
+const CAMERA_PREVIEW_W: Rems = rems(32.25);
 const CAMERA_CONTROLS_W: Rems = rems(31.25);
 const LIGHT_CONTROLS_W: Rems = rems(25.);
 const LIGHT_CONTROLS_MIN_W: Rems = rems(22.5);
@@ -982,7 +984,9 @@ fn device_description_list(record: DeviceRecord) -> impl IntoElement {
 
     DescriptionList::new()
         .columns(1)
-        .label_width(px(100.))
+        // Match the configuration card: a fixed 100 px cut "Geräteschlüssel"
+        // and longer translations into their values (#1856).
+        .label_width(rems(12.))
         .bordered(false)
         .children(items)
 }
@@ -1020,6 +1024,21 @@ mod tests {
     use crate::state::tests::{KNOWN_MOUSE_KEY, direct_inventory};
     use crate::state::{AppState, Sources};
     use crate::ui::theme;
+
+    #[test]
+    fn camera_preview_fits_its_card_at_every_interface_scale() {
+        for scale in openlogi_core::config::UiScale::ALL {
+            let rem = theme::rem_size(scale);
+            let column = super::CAMERA_PREVIEW_W.to_pixels(rem);
+            let card = crate::features::camera::preview::PREVIEW_W.to_pixels(rem)
+                + theme::CARD_PAD.rems().to_pixels(rem) * 2.
+                + px(2.);
+            assert!(
+                card <= column,
+                "{scale:?}: card {card:?} > column {column:?}"
+            );
+        }
+    }
 
     /// Hosts the row at a card-like width so a long caption has to wrap.
     struct DeviceEnabledRowHost;

@@ -265,6 +265,48 @@ async fn input_accepted_during_restoration_precedes_session_done() {
     }
 }
 
+/// The failure behind #1857 and #1849: a session body that panics used to
+/// take its completion report down with it, so the manager's slot stayed
+/// `Running` and the device was never re-armed.
+#[tokio::test]
+async fn a_session_body_that_panics_still_reports_done_after_its_inputs() {
+    let id = session_id(7);
+    let key = physical_key();
+    let (events, mut event_rx) = mpsc::unbounded_channel();
+    let (sink, session_rx) = mpsc::unbounded_channel();
+    let forward_task = spawn_input_forwarder(key.clone(), id.clone(), session_rx, events.clone());
+    let (never_restored, restore) = oneshot::channel::<Option<PendingCaptureRestore>>();
+    let session_task = tokio::spawn(async move {
+        sink.send(CapturedInput::ButtonPulse(ButtonId::DpiToggle))
+            .expect("the capture forwarder should remain open");
+        drop(never_restored);
+        // Dies with the sink still held, the way a panicking body does; the
+        // unwind is what closes the forwarder.
+        restore.await.expect("simulated capture panic")
+    });
+
+    complete_session(session_task, forward_task, events, key.clone(), id.clone()).await;
+
+    match event_rx.recv().await {
+        Some(SessionEvent::Input(input)) => {
+            assert_eq!(input.session, id);
+            assert_eq!(input.input, CapturedInput::ButtonPulse(ButtonId::DpiToggle));
+        }
+        _ => panic!("the input accepted before the panic must still be forwarded"),
+    }
+    match event_rx.recv().await {
+        Some(SessionEvent::Done(done)) => {
+            assert_eq!(done.session, id);
+            assert_eq!(done.physical_key, key);
+            assert!(
+                done.pending_restore.is_none(),
+                "a panicked body has no restoration to hand over"
+            );
+        }
+        _ => panic!("Done must follow the last input even when the body panicked"),
+    }
+}
+
 #[test]
 fn accepts_inputs_from_the_current_session_until_teardown_finishes() {
     assert!(dispatch_context_for(&session_id(7), Some(&live_session_with_epoch(7))).is_some());

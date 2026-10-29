@@ -3,14 +3,17 @@
 use std::rc::Rc;
 
 use gpui::{
-    App, InteractiveElement, IntoElement, ParentElement, Role, StatefulInteractiveElement as _,
-    Styled, Window, div, prelude::FluentBuilder as _, px, rgb, svg,
+    App, Entity, InteractiveElement, IntoElement, ParentElement, Role,
+    StatefulInteractiveElement as _, Styled, Window, div, prelude::FluentBuilder as _, px, rgb,
+    svg,
 };
-use gpui_component::{Icon, IconName, Selectable as _, h_flex, v_flex};
-use openlogi_core::binding::{Action, Category, GestureDirection};
+use gpui_component::{
+    Icon, IconName, Selectable as _, button::Button, h_flex, input::InputState, v_flex,
+};
+use openlogi_core::binding::{Action, ApplicationTarget, Category, GestureDirection};
 
 use crate::ui::action::localized_action_label;
-use crate::ui::components::MenuRow;
+use crate::ui::components::{MenuRow, control_input};
 use crate::ui::section::section_label;
 use crate::ui::theme::{ACCENT_BLUE, Palette, Typography as _};
 
@@ -192,9 +195,15 @@ pub(crate) fn action_rows_matching(
                         )
                         .when(selected, |row| {
                             row.child(
-                                Icon::new(IconName::Check)
+                                div()
+                                    .debug_selector(|| format!("{id_prefix}-{action:?}-check"))
+                                    .flex_none()
                                     .size_3()
-                                    .text_color(rgb(ACCENT_BLUE)),
+                                    .child(
+                                        Icon::new(IconName::Check)
+                                            .size_3()
+                                            .text_color(rgb(ACCENT_BLUE)),
+                                    ),
                             )
                         })
                         .on_click(move |_event, window, cx| (on_pick)(action.clone(), window, cx))
@@ -247,6 +256,119 @@ pub(crate) fn editor_scroll_list(
         .children(rows)
 }
 
+/// A single-field "Open Application or Folder" editor, matching the Action
+/// Ring editor's `path_editor`. Shared by the mouse inspector and the keyboard
+/// key panel: `on_pick` receives the validated target, `on_invalid` runs when
+/// Add is pressed on a blank path so the owner can set `invalid`.
+pub(crate) fn application_editor(
+    id_prefix: &'static str,
+    input: &Entity<InputState>,
+    invalid: bool,
+    on_invalid: Rc<dyn Fn(&mut App)>,
+    on_pick: &PickFn,
+    pal: Palette,
+) -> impl IntoElement {
+    let on_pick = on_pick.clone();
+    add_field_editor(
+        id_prefix,
+        "application",
+        tr!("action_ring.open_application_or_folder"),
+        input,
+        invalid,
+        move |path, window, cx| match ApplicationTarget::new(path, "") {
+            Ok(target) => (on_pick)(Action::OpenApplication(target), window, cx),
+            Err(_) => (on_invalid)(cx),
+        },
+        pal,
+    )
+}
+
+/// A single-field "Run Shell Command" editor, matching the Action Ring
+/// editor's Power User text field. Shared the same way as
+/// [`application_editor`]: `on_pick` receives the command, `on_invalid` runs
+/// when Add is pressed on a blank command so the owner can set `invalid`.
+pub(crate) fn command_editor(
+    id_prefix: &'static str,
+    input: &Entity<InputState>,
+    invalid: bool,
+    on_invalid: Rc<dyn Fn(&mut App)>,
+    on_pick: &PickFn,
+    pal: Palette,
+) -> impl IntoElement {
+    let on_pick = on_pick.clone();
+    add_field_editor(
+        id_prefix,
+        "command",
+        tr!("actions.run_shell_command_heading"),
+        input,
+        invalid,
+        move |command, window, cx| match run_command_action(command) {
+            Some(action) => (on_pick)(action, window, cx),
+            None => (on_invalid)(cx),
+        },
+        pal,
+    )
+}
+
+/// The action a Run Command field commits, or `None` for a blank command,
+/// which would run nothing.
+fn run_command_action(command: String) -> Option<Action> {
+    if command.trim().is_empty() {
+        None
+    } else {
+        Some(Action::RunShellCommand(command))
+    }
+}
+
+/// The heading, text field, Add button and inline error every single-field
+/// custom-action editor shares. `on_add` receives the field's text when Add
+/// is pressed. `field` names the debug selectors
+/// `{id_prefix}-custom-{field}-input`, `-add` and `-error`.
+fn add_field_editor(
+    id_prefix: &'static str,
+    field: &'static str,
+    heading: gpui::SharedString,
+    input: &Entity<InputState>,
+    invalid: bool,
+    on_add: impl Fn(String, &mut Window, &mut App) + 'static,
+    pal: Palette,
+) -> impl IntoElement {
+    let submit_input = input.clone();
+    v_flex()
+        .gap_1()
+        .child(editor_section(heading, pal))
+        .child(
+            h_flex()
+                .gap_2()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .debug_selector(move || format!("{id_prefix}-custom-{field}-input"))
+                        .child(control_input(input).cleanable(true)),
+                )
+                .child(
+                    Button::new(format!("{id_prefix}-custom-{field}-add"))
+                        .debug_selector(move || format!("{id_prefix}-custom-{field}-add"))
+                        .compact()
+                        .label(tr!("common.add"))
+                        .on_click(move |_, window, cx| {
+                            let text = submit_input.read(cx).value().to_string();
+                            on_add(text, window, cx);
+                        }),
+                ),
+        )
+        .when(invalid, |editor| {
+            editor.child(
+                div()
+                    .debug_selector(move || format!("{id_prefix}-custom-{field}-error"))
+                    .text_caption()
+                    .text_color(rgb(0x00ef_4444))
+                    .child(tr!("action_ring.custom_action_invalid_input")),
+            )
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -258,6 +380,16 @@ mod tests {
             .flat_map(|(_, actions)| actions)
             .collect::<Vec<_>>();
         assert!(actions.contains(&Action::ShowActionsRing));
+    }
+
+    #[test]
+    fn run_command_field_commits_its_text_and_rejects_a_blank_command() {
+        assert_eq!(
+            run_command_action("snipaste snip".to_string()),
+            Some(Action::RunShellCommand("snipaste snip".to_string()))
+        );
+        assert_eq!(run_command_action(String::new()), None);
+        assert_eq!(run_command_action("  \t".to_string()), None);
     }
 
     /// [`action_icon_path`] is exhaustive over [`Action`], so the compiler

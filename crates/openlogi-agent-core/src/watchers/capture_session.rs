@@ -8,7 +8,9 @@
 //! running epoch is mutually exclusive with post-session recovery.
 
 use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
 use tokio::time::Instant;
+use tracing::warn;
 
 use crate::runtime::HidppSessionId;
 
@@ -78,6 +80,26 @@ impl<Restore> CaptureRecovery<Restore> {
     /// if restart pacing has already elapsed.
     pub(super) fn blocks_restart(&self, now: Instant) -> bool {
         self.pending_restore.is_some() || self.restart_at.is_some_and(|deadline| deadline > now)
+    }
+}
+
+/// Wait for a capture task and hand back the restoration it owes its slot.
+///
+/// A panic inside the session is folded into "ended with nothing to restore".
+/// The slot stays `Running` until its ordered completion arrives, so a task
+/// that dies without reporting one would leave the device unarmed for the
+/// rest of the agent's life. Whatever restoration the task held is lost with
+/// it; the re-arm its completion unlocks re-diverts the controls regardless.
+pub(super) async fn settle_capture_task<Restore>(
+    task: JoinHandle<Option<Restore>>,
+    kind: &'static str,
+) -> Option<Restore> {
+    match task.await {
+        Ok(pending_restore) => pending_restore,
+        Err(error) => {
+            warn!(%error, kind, "capture session task died — recovering its slot");
+            None
+        }
     }
 }
 
@@ -258,6 +280,17 @@ mod tests {
     fn session() -> CaptureSession<u8, &'static str> {
         let (stop, _stop_rx) = oneshot::channel();
         CaptureSession::active(HidppSessionId::with_epoch("mouse-a", 7), 1, "old", stop)
+    }
+
+    #[tokio::test]
+    async fn a_session_task_that_panics_still_settles_its_slot() {
+        let (never_reported, body) = oneshot::channel::<Option<u8>>();
+        drop(never_reported);
+        let died = tokio::spawn(async move { body.await.expect("simulated capture failure") });
+        assert_eq!(settle_capture_task(died, "test").await, None);
+
+        let finished = tokio::spawn(async { Some(3u8) });
+        assert_eq!(settle_capture_task(finished, "test").await, Some(3));
     }
 
     #[test]

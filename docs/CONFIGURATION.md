@@ -120,16 +120,19 @@ Common device fields are:
   mouse's main wheel in software, as Logi Options+ "Smooth scrolling" does,
   whatever `smooth_scroll` says. The agent switches the wheel to diverted
   reporting and posts eased scrolling for each report, applying the mouse's
-  scroll inversion and `vertical_scroll_sensitivity`. It needs the input access
-  the mouse hook needs (Accessibility on macOS) and `capture_mouse_events` on;
-  without them the wheel stays native. The agent hands the wheel back to native
-  reporting when the switch goes off, the mouse is disabled, or the agent
-  exits. If the agent crashes first, the wheel does not scroll until the agent
-  runs again (the launch-at-login service restarts it) or the mouse reconnects,
-  which drops the diversion. The desktop's Scrolling card offers it as
-  **Smooth wheel** when the current connection has `0x2121`; a smooth wheel
-  turned on over another connection can still be turned off there. Absent or
-  `false` leaves the wheel native
+  scroll inversion and `vertical_scroll_sensitivity`. While it is on,
+  `scroll_resolution` only sets how finely the wheel reports: each report is
+  converted back to notches, so a notch scrolls the same distance at either
+  resolution, and `vertical_scroll_sensitivity` is what makes it faster. It
+  needs the input access the mouse hook needs (Accessibility on macOS) and
+  `capture_mouse_events` on; without them the wheel stays native. The agent
+  hands the wheel back to native reporting when the switch goes off, the mouse
+  is disabled, or the agent exits. If the agent crashes first, the wheel does
+  not scroll until the agent runs again (the launch-at-login service restarts
+  it) or the mouse reconnects, which drops the diversion. The desktop's
+  Scrolling card offers it as **Smooth wheel** when the current connection has
+  `0x2121`; a smooth wheel turned on over another connection can still be turned
+  off there. Absent or `false` leaves the wheel native
 - `bindings`: a button maps to one action, an independent short/long action
   pair, or a gesture-direction map.
   `Thumbwheel` is the thumb wheel's capacitive tap — it has no GUI control and
@@ -139,8 +142,20 @@ Common device fields are:
   as `KeyScreenCapture`, `KeyCalculator` or `KeyLock`, or `control:0x<cid>` for
   any control `openlogi diag controls` reports as divertable. A bound key is
   diverted to OpenLogi while the agent runs; an unbound key keeps its firmware
-  function, so binding `None` is the same as removing the entry. Naming one
-  control under both spellings in the same table is an error, not a merge
+  function. An explicit `None` action instead diverts and suppresses the key;
+  it is **not** the same as removing the entry. In the Keys panel, **Native
+  function** removes the device-default assignment. **Use the default profile**
+  in an app scope removes only that app's override and inherits the device
+  default, which may itself be assigned. **Do Nothing** keeps an explicit `None`.
+  The selected row shows the assignment in the scope being edited, not the
+  inherited action. For example, when an app inherits **Copy**, only **Use the
+  default profile** is selected. Choosing **Copy** creates an explicit app
+  override even though the effective action is unchanged; choosing **Copy**
+  again or **Use the default profile** removes that override. The keyboard
+  illustration continues to show the effective action, including inheritance.
+  To undo an older GUI's Native selection that saved `None`, select Native again;
+  existing `None` entries are not migrated because they may be intentional.
+  Naming one control under both spellings in the same table is an error, not a merge
 - `per_app_bindings`: sparse action overlays keyed by macOS bundle id (or the
   exact executable path for applications without a bundle id), Linux application
   id, exact lower-cased Windows executable path, or `exe:<filename>.exe`. macOS
@@ -405,6 +420,13 @@ so `Cmd+C` copies everywhere. `Super` (aliases `Win`, `Meta`) always presses the
 platform's logo key — Command on macOS, the Windows key, `KEY_LEFTMETA` on Linux —
 so `Win+L` locks Windows and `Super+End` reaches GNOME and KDE shortcuts bound to
 Super.
+
+A chord has exactly one other key, and it may stand alone (`PageUp` with no
+modifier): a letter, a digit, `` - = [ ] \ ; ' ` , . / ``, `F1` to `F20`,
+`Enter`, `Escape` (`Esc`), `Backspace`, `Tab`, `Space`, the arrows `Left`,
+`Right`, `Up`, `Down`, and the editing keys `Insert` (`Ins`), `Delete` (`Del`),
+`Home`, `End`, `PageUp` (`PgUp`), and `PageDown` (`PgDn`). Names are
+case-insensitive. On macOS, `Insert` presses the Help key.
 
 `CustomShortcut` emits an immediate key-down/key-up pair. `HoldShortcut` keeps
 the chord down until the originating physical button is released, and also

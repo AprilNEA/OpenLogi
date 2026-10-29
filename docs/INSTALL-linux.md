@@ -220,8 +220,10 @@ Four production executables land in `target/release/`:
 
 OpenLogi needs:
 
-- **Write access to `/dev/uinput`** — to create the virtual input device for
-  button remapping.
+- **Read/write access to `/dev/uinput`** — to create the virtual input device
+  for button remapping. Write access alone is not enough: device creation opens
+  the node read/write, so a rule from another package that sets its mode to
+  `0620` blocks it.
 - **Read/write access to `/dev/hidraw*`** — to send HID++ commands to the Bolt
   receiver, or to the device itself when it is paired over Bluetooth.
 - **Read access to the mouse's `/dev/input/event*` node** — the hook grabs the
@@ -242,8 +244,7 @@ Verify access (should open without error):
 
 ```sh
 # Check uinput
-openlogi-agent --check-uinput 2>/dev/null || \
-    test -w /dev/uinput && echo "uinput OK"
+test -r /dev/uinput && test -w /dev/uinput && echo "uinput OK"
 
 # Check a hidraw node
 ls -la /dev/hidraw*

@@ -6,6 +6,8 @@ use openlogi_core::config::FunctionKey;
 use openlogi_core::device::DeviceKind;
 use std::path::PathBuf;
 
+mod native_function;
+
 /// The F-row the fallback shows: Esc then F1–F19.
 const FUNCTION_KEYS: [FunctionKey; 20] = FunctionKey::ALL;
 
@@ -399,4 +401,115 @@ fn assert_approx_eq(actual: f32, expected: f32) {
         (actual - expected).abs() < 0.0001,
         "expected {expected}, got {actual}"
     );
+}
+
+#[test]
+fn an_open_application_binding_selects_its_power_user_row() {
+    let open = Action::OpenApplication(
+        openlogi_core::binding::ApplicationTarget::new("/Applications/Calculator.app", "")
+            .expect("non-empty path"),
+    );
+    assert!(power_user_selected(
+        Some(&open),
+        PowerUserKind::OpenApplication
+    ));
+    assert!(!power_user_selected(Some(&open), PowerUserKind::TypeText));
+    assert!(!power_user_selected(
+        Some(&Action::Copy),
+        PowerUserKind::OpenApplication
+    ));
+}
+
+#[gpui::test]
+fn open_application_editor_binds_the_selected_key(cx: &mut gpui::TestAppContext) {
+    use crate::services::i18n::LOCALE_LOCK;
+    use gpui::{Modifiers, VisualTestContext, size};
+    use openlogi_core::binding::ApplicationTarget;
+
+    fn click(cx: &mut VisualTestContext, selector: &'static str) {
+        let bounds = cx.debug_bounds(selector).expect(selector);
+        cx.simulate_click(bounds.center(), Modifiers::default());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+    }
+    fn f1_binding(cx: &mut VisualTestContext, trigger: &KeyTarget) -> Option<Action> {
+        cx.update(|_, cx| bound_action(AppState::try_read(cx).unwrap(), trigger))
+    }
+
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    cx.update(|cx| {
+        gpui_component::init(cx);
+        cx.set_reduce_motion(true);
+        let resolver = crate::services::assets::AssetResolver::new();
+        let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let state = cx.new(|_| {
+            AppState::new(crate::state::Sources::in_memory(
+                openlogi_core::config::Config::ephemeral(),
+                &resolver,
+                commands,
+            ))
+        });
+        AppState::set_global(state, cx);
+    });
+    let (view, cx) = cx.add_window_view(|_, cx| FunctionRowView::new(cx));
+    cx.simulate_resize(size(px(1200.), px(900.)));
+    // Slot 1 of the fallback F-row is F1.
+    let f1 = key_slots(None)[1].target.clone();
+    view.update(cx, |view, cx| {
+        view.select_key(Some(1), cx);
+        view.open_editor(PowerUserKind::OpenApplication, cx);
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+
+    // A blank path is rejected in place and binds nothing.
+    click(cx, "key-editor-custom-application-add");
+    view.read_with(cx, |view, _| {
+        assert!(view.application_invalid);
+        assert_eq!(view.active_editor, Some(PowerUserKind::OpenApplication));
+    });
+    assert!(
+        cx.debug_bounds("key-editor-custom-application-error")
+            .is_some()
+    );
+    assert_eq!(f1_binding(cx, &f1), None);
+
+    click(cx, "key-editor-custom-application-input");
+    cx.simulate_input("/Applications/Calculator.app");
+    click(cx, "key-editor-custom-application-add");
+    let expected = Action::OpenApplication(
+        ApplicationTarget::new("/Applications/Calculator.app", "").expect("non-empty path"),
+    );
+    assert_eq!(f1_binding(cx, &f1), Some(expected));
+    view.read_with(cx, |view, _| {
+        assert_eq!(view.active_editor, None);
+        assert!(!view.application_invalid);
+    });
+
+    // Reopening the editor seeds the bound path.
+    view.update(cx, |view, cx| {
+        view.open_editor(PowerUserKind::OpenApplication, cx);
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    view.read_with(cx, |view, cx| {
+        assert_eq!(
+            view.text_state().expect("editor input").read(cx).value(),
+            "/Applications/Calculator.app"
+        );
+    });
+
+    // Re-adding the unchanged path keeps a saved display name.
+    let named = Action::OpenApplication(
+        ApplicationTarget::new("/Applications/Calculator.app", "My calculator").expect("valid"),
+    );
+    cx.update(|_, cx| {
+        AppState::apply(cx, |state| {
+            commit_key_action(state, &f1, Some(named.clone()))
+        });
+    });
+    click(cx, "key-editor-custom-application-add");
+    assert_eq!(f1_binding(cx, &f1), Some(named));
+
+    drop(view);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
 }

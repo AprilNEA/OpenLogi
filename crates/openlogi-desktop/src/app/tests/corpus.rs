@@ -111,12 +111,18 @@ fn reviewed_detail_tabs(id: &str) -> Vec<DetailTab> {
             DetailTab::ActionsRing,
             DetailTab::Device,
         ],
-        "mx-master-4-001" | "mx-master-3s-001" | "mx-anywhere-3s-001" => vec![
+        "mx-master-4-001" | "mx-master-3s-001" | "mx-master-3-001" | "mx-anywhere-3s-001" => vec![
             DetailTab::Buttons,
             DetailTab::ActionsRing,
             DetailTab::Pointer,
             DetailTab::Device,
         ],
+        // A keyboard with HID++ controls and no pointer sensor gets Keys and
+        // the ring editor. Its Fn lock, OS layout, backlight, Easy-Switch, and
+        // disabled-key settings are cards on the Device tab, not extra tabs.
+        "mx-mechanical-mini-mac-001" => {
+            vec![DetailTab::Keys, DetailTab::ActionsRing, DetailTab::Device]
+        }
         id => panic!("{id}: add reviewed desktop panel expectations"),
     }
 }

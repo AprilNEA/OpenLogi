@@ -742,6 +742,76 @@ async fn channel_change_takes_teardown_precedence_over_ready_shutdown() {
 
 /// A mouse with only `0x2150` (index 3) whose `getThumbwheelStatus` reports
 /// `status`; `setThumbwheelReporting` writes are echoed.
+/// A liveness restart reports its channel before it stops. Inventory retires
+/// a reported channel on its next pass, so the restore waits for the
+/// replacement instead of timing out against the silent channel (#2020).
+#[tokio::test]
+async fn a_dead_channel_stop_reports_the_channel_and_restores_on_the_replacement() {
+    let route = DeviceRoute::Direct {
+        vendor_id: 0x046d,
+        product_id: 0xb35b,
+    };
+    let registry = ChannelRegistry::default();
+    let node = NodeId::from("mouse-node".to_owned());
+    let (raw, handle) = ScriptedRawHidChannel::with_responder(|_| None);
+    let channel = scripted_channel(raw).await;
+    let pending = diverted_gesture(&route, &channel);
+    registry.replace_node(node.clone(), [route.clone()], channel);
+    let dead = registry
+        .lookup(&route)
+        .expect("the capture publication should be current");
+
+    let stop = stop_for_dead_channel(&registry, &dead);
+    assert!(
+        matches!(stop, CaptureStop::ChannelChanged),
+        "an accepted report hands the restore to the replacement"
+    );
+    assert!(registry.take_dead_reports().contains(dead.channel()));
+    let pending = match restore_after_stop(stop, Some(pending), &registry).await {
+        CaptureSessionOutcome::RestorePending(pending) => pending,
+        CaptureSessionOutcome::Restored => panic!("the restore is owed to the replacement"),
+    };
+    assert!(
+        handle.written_reports().is_empty(),
+        "no restore write goes to the reported channel"
+    );
+
+    let (replacement_raw, replacement_handle) =
+        ScriptedRawHidChannel::with_responder(|request| Some(request.to_vec()));
+    registry.replace_node(node, [route], scripted_channel(replacement_raw).await);
+    assert!(matches!(
+        pending.retry(&registry).await,
+        CaptureSessionOutcome::Restored
+    ));
+    assert_eq!(replacement_handle.written_reports().len(), 1);
+}
+
+/// A receiver's channel carries every paired slot, so its report is ignored
+/// and the stop restores through the receiver as any other stop does.
+#[tokio::test]
+async fn a_dead_receiver_slot_stop_restores_through_the_receiver() {
+    let route = DeviceRoute::Bolt {
+        receiver_uid: "receiver-a".to_owned(),
+        slot: 1,
+    };
+    let registry = ChannelRegistry::default();
+    let (raw, _) = ScriptedRawHidChannel::with_responder(|_| None);
+    registry.replace_node(
+        NodeId::from("receiver-node".to_owned()),
+        [route.clone()],
+        scripted_channel(raw).await,
+    );
+    let slot = registry
+        .lookup(&route)
+        .expect("the capture publication should be current");
+
+    assert!(matches!(
+        stop_for_dead_channel(&registry, &slot),
+        CaptureStop::Shutdown
+    ));
+    assert!(registry.take_dead_reports().is_empty());
+}
+
 pub(super) fn thumbwheel_device(
     status: [u8; 2],
 ) -> (ScriptedRawHidChannel, crate::replay::ReplayChannelHandle) {

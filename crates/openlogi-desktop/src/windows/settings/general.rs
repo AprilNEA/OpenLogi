@@ -65,8 +65,8 @@ pub(super) fn general_page(
     };
 
     // One `show_in_menu_bar` setting drives the macOS status item and the
-    // Windows notification-area icon (honored at next agent launch); Linux
-    // has no tray, so no switch.
+    // Windows notification-area icon (live on macOS, at the next agent launch
+    // on Windows); Linux has no tray, so no switch.
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     let group = group.item(
         SettingItem::new(

@@ -115,3 +115,17 @@ fn child_of_lightspeed_receiver_is_detected() {
 fn unrelated_device_is_not_a_child() {
     assert!(!is_receiver_child_sysfs_path(UNRELATED));
 }
+
+#[test]
+fn missing_grant_hint_names_the_agent_only_for_the_agent() {
+    assert!(missing_grant_hint(true).contains("grant it to OpenLogi Agent under"));
+    let command = missing_grant_hint(false);
+    assert!(!command.contains("OpenLogi Agent"), "got: {command}");
+    assert!(command.contains("the app that launched this command"));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_test_binary_is_not_the_agent() {
+    assert!(!process_is_agent());
+}
