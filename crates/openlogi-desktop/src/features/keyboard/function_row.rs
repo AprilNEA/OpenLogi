@@ -49,7 +49,7 @@ use crate::features::binding_editor::{
 use crate::features::mouse::geometry::asset_dimensions_for_png;
 use crate::features::profiles::profile_name;
 use crate::services::assets::{GlowGeometry, ResolvedAsset};
-use crate::state::{AppState, DeviceKey, DeviceRecord, StateEvent, StateEvents};
+use crate::state::{AppState, BindingLayer, DeviceKey, DeviceRecord, StateEvent, StateEvents};
 use crate::ui::action::localized_action_label;
 use crate::ui::components::MenuRow;
 use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
@@ -135,19 +135,21 @@ pub struct FunctionRowView {
     /// The keypad binding page the grid keys are being edited on — this
     /// editor's own choice, independent of the page the keypad is showing.
     keypad_page: KeypadPage,
-    /// The device and app profile being edited: another device starts back
-    /// on page 1, and either change drops the open editor.
+    /// The device, app profile and binding layer being edited: another
+    /// device starts back on page 1, and any change drops the open editor.
     edit_scope: EditScope,
     _state_obs: Subscription,
 }
 
-/// Which device's bindings, in which app profile, the view edits — beside
-/// the key and the page, what a draft was started for.
+/// Which device's bindings, in which app profile and layer, the view edits —
+/// beside the key and the page, what a draft was started for.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct EditScope {
     device: Option<DeviceKey>,
     /// The open app profile, `None` for the device's global one.
     profile: Option<String>,
+    /// The open binding layer: a commit saves to it.
+    layer: BindingLayer,
 }
 
 impl FunctionRowView {
@@ -179,7 +181,7 @@ impl FunctionRowView {
     }
 
     /// Close the open editor and discard its drafts. Every change of the key
-    /// being edited — another key, page, device, or app profile — calls
+    /// being edited — another key, page, device, app profile, or layer — calls
     /// this, or a draft started for one would save onto the next.
     fn drop_editor(&mut self) {
         self.active_editor = None;
@@ -209,17 +211,18 @@ impl FunctionRowView {
         }
     }
 
-    /// Follow the selected device and the open app profile — dropping a
-    /// draft started for another, and starting a new device on page 1 — keep
-    /// the edited page on the device's pages (clamped when pages were
-    /// removed), and answer the device's last page and whether removing it
-    /// would drop bindings (so removal asks).
+    /// Follow the selected device, the open app profile and the binding layer —
+    /// dropping a draft started for another, and starting a new device on page 1 —
+    /// keep the edited page on the device's pages (clamped when pages were
+    /// removed), and answer the device's last page and whether removing it would
+    /// drop bindings (so removal asks).
     fn sync_edit_scope(&mut self, state: Option<&AppState>) -> LastPage {
         let scope = EditScope {
             device: state
                 .and_then(AppState::current_record)
                 .map(DeviceRecord::device_key),
             profile: state.and_then(AppState::editing_app).map(str::to_owned),
+            layer: state.map_or(BindingLayer::Normal, AppState::binding_layer),
         };
         if self.edit_scope != scope {
             if self.edit_scope.device != scope.device {
@@ -580,7 +583,7 @@ pub(super) fn bound_action(state: &AppState, target: &KeyTarget) -> Option<Actio
             .get(&ButtonId::Grid(*slot))
             .filter(|action| **action != Action::None)
             .cloned(),
-        KeyTarget::FunctionKey(trigger) => state.keyboard_bindings().get(trigger).cloned(),
+        KeyTarget::FunctionKey(trigger) => state.editing_keyboard_action(trigger).cloned(),
     }
 }
 
@@ -1217,7 +1220,7 @@ impl FunctionRowView {
                     }),
             ),
         );
-        let offer = key_action_offer(AppState::try_read(cx));
+        let offer = key_action_offer(AppState::try_read(cx), &target);
         rows.extend(panel_action_rows(
             current.as_ref(),
             offer,
@@ -1261,11 +1264,19 @@ fn inspector_title(title: SharedString, pal: &Palette) -> impl IntoElement {
         )
 }
 
-/// What a key's picker leaves out of the catalog for the current device.
-fn key_action_offer(state: Option<&AppState>) -> ActionOffer<'static> {
+/// What a key's picker offers beyond the catalog and leaves out of it for
+/// the current device. A G-series keyboard's function key may hold G-Shift
+/// in the normal layer.
+fn key_action_offer(state: Option<&AppState>, target: &KeyTarget) -> ActionOffer<'static> {
+    const GSHIFT: &[Action] = &[Action::GShift];
+    let gshift = state.is_some_and(|state| {
+        matches!(target, KeyTarget::FunctionKey(_))
+            && state.current_gshift_keyboard()
+            && state.binding_layer() == BindingLayer::Normal
+    });
     ActionOffer {
+        extra: if gshift { GSHIFT } else { &[] },
         hidden: hidden_actions(state),
-        ..ActionOffer::default()
     }
 }
 

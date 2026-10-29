@@ -1,5 +1,5 @@
 # OpenLogi configuration example. Copy only the sections you need.
-schema_version = 11
+schema_version = 12
 selected_device = "receiver:aabbccdd:slot:1"
 
 [app_settings]
@@ -166,6 +166,10 @@ dpi = 800
 [keyboard.bindings]
 f1 = "MissionControl"
 "shift+command+f5" = "ShowDesktop"
+# On a G-series keyboard, a key bound to "GShift" switches the other keys to
+# this table while it is held; a key missing here keeps its normal binding.
+# [keyboard.gshift_bindings]
+# f1 = "VolumeUp"
 # Application aliases: one name for an application across platforms. Each
 # platform field takes the identifiers OpenLogi reports there, one string or an
 # array of them. Windows identifiers are lower-case paths or `exe:<filename>`.
