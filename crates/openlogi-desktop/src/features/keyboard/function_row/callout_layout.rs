@@ -24,6 +24,8 @@ const RUN_GAP: f32 = 6.;
 const SIDE_CARD_W: f32 = 128.;
 /// Space between the board render and a card beside it.
 const SIDE_GAP: f32 = 24.;
+/// Width a band of cards beside the board adds to the pane.
+const SIDE_BAND_W: f32 = SIDE_GAP + SIDE_CARD_W;
 /// Space between two cards stacked beside the board.
 const SIDE_CARD_GAP: f32 = 8.;
 /// Straight end a leader keeps before it meets a card beside the board.
@@ -66,37 +68,13 @@ enum Band {
 /// `img_w` × `img_h` render) in the callout band above the board and beside
 /// it.
 pub(super) fn callout_layout(markers: &[(f32, f32)], img_w: f32, img_h: f32) -> CalloutLayout {
-    let top_row = markers
-        .iter()
-        .map(|&(_, y)| y)
-        .fold(f32::INFINITY, f32::min);
-    let bands: Vec<Band> = markers
-        .iter()
-        .map(|&(x, y)| {
-            if y - top_row < ROW_BAND {
-                Band::Top
-            } else if x >= 1. - SIDE_COLUMN {
-                Band::Right
-            } else if x <= SIDE_COLUMN {
-                Band::Left
-            } else {
-                Band::Top
-            }
-        })
-        .collect();
-    let side_band_w = SIDE_GAP + SIDE_CARD_W;
+    let bands = bands(markers);
     let image_left = if bands.contains(&Band::Left) {
-        side_band_w
+        SIDE_BAND_W
     } else {
         0.
     };
-    let pane_w = image_left
-        + img_w
-        + if bands.contains(&Band::Right) {
-            side_band_w
-        } else {
-            0.
-        };
+    let pane_w = img_w + side_bands_width(markers);
     // Each key's marker in pane coordinates.
     let keys: Vec<(f32, f32)> = markers
         .iter()
@@ -133,6 +111,40 @@ pub(super) fn callout_layout(markers: &[(f32, f32)], img_w: f32, img_h: f32) -> 
         img_h,
     );
     layout
+}
+
+/// How much wider than the render the pane gets for the cards beside the
+/// board: one band per side that has a key down its edge.
+pub(super) fn side_bands_width(markers: &[(f32, f32)]) -> f32 {
+    let bands = bands(markers);
+    [Band::Left, Band::Right]
+        .into_iter()
+        .filter(|band| bands.contains(band))
+        .map(|_| SIDE_BAND_W)
+        .sum()
+}
+
+/// Which band each marker's card goes to: the top row and anything away from
+/// the edges above the board, a key down an edge beside it.
+fn bands(markers: &[(f32, f32)]) -> Vec<Band> {
+    let top_row = markers
+        .iter()
+        .map(|&(_, y)| y)
+        .fold(f32::INFINITY, f32::min);
+    markers
+        .iter()
+        .map(|&(x, y)| {
+            if y - top_row < ROW_BAND {
+                Band::Top
+            } else if x >= 1. - SIDE_COLUMN {
+                Band::Right
+            } else if x <= SIDE_COLUMN {
+                Band::Left
+            } else {
+                Band::Top
+            }
+        })
+        .collect()
 }
 
 /// The band above the board: each card centred over its key, the lanes

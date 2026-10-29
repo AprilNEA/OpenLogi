@@ -248,22 +248,25 @@ fn pixel_markers_for_a_different_render_fall_back_to_even_spacing() {
 fn render_size_follows_the_png_aspect_up_to_the_width_cap() {
     // MX Keys-class render (1872x728): width-bound at a roomy viewport.
     let mx = legacy_asset(&[], 0., (1872, 728), (1872, 728));
-    let (w, h) = keyboard_render_size(Some(&mx), 900.);
+    let (w, h) = keyboard_render_size(Some(&mx), 900., KEYBOARD_W);
     assert_approx_eq(w, 700.);
     assert!((h - 700. * 728. / 1872.).abs() < 0.01);
 
     // G513 render (2760x1600) is far taller at the same width.
     let g513 = legacy_asset(&[], 0., (2760, 1600), (2760, 1600));
-    let (w, h) = keyboard_render_size(Some(&g513), 900.);
+    let (w, h) = keyboard_render_size(Some(&g513), 900., KEYBOARD_W);
     assert_approx_eq(w, 700.);
     assert!((h - 700. * 1600. / 2760.).abs() < 0.01);
 
     // A short viewport shrinks the render instead of overflowing it.
-    let (w, h) = keyboard_render_size(Some(&g513), 500.);
+    let (w, h) = keyboard_render_size(Some(&g513), 500., KEYBOARD_W);
     assert_approx_eq(h, KEYBOARD_MIN_IMG_H);
     assert!((w - KEYBOARD_MIN_IMG_H * 2760. / 1600.).abs() < 0.01);
 
-    assert_eq!(keyboard_render_size(None, 900.), FALLBACK_KEYBOARD_SIZE);
+    assert_eq!(
+        keyboard_render_size(None, 900., KEYBOARD_W),
+        FALLBACK_KEYBOARD_SIZE
+    );
 }
 
 /// A card's box as `(left, top, right, bottom)`, grown by `margin`.
@@ -274,6 +277,20 @@ fn card_box(card: &CardRect, margin: f32) -> (f32, f32, f32, f32) {
         card.left + card.width + margin,
         card.top + KEY_CALLOUT_H + margin,
     )
+}
+
+#[test]
+fn side_cards_take_their_room_from_the_render_not_from_the_window() {
+    let side = 152.;
+    // Without cards beside the board nothing changes.
+    assert_approx_eq(keyboard_max_width(800., 0.), KEYBOARD_W);
+    // A roomy window keeps the full render beside the band.
+    assert_approx_eq(keyboard_max_width(1400., side), KEYBOARD_W);
+    // Where the render alone fitted, the render shrinks so the pane still fits.
+    let w = keyboard_max_width(1000., side);
+    assert_approx_eq(w + side, 1000. - KEYS_HORIZONTAL_RESERVE);
+    // Where it did not, the pane stays as wide as the render alone was.
+    assert_approx_eq(keyboard_max_width(800., side) + side, KEYBOARD_W);
 }
 
 /// Points sampled along each leader segment when checking it against cards.

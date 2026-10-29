@@ -52,7 +52,7 @@ use gpui::{Animation, AnimationExt, img};
 mod callout_layout;
 mod key_points;
 
-use callout_layout::{CalloutLayout, CardRect, callout_layout};
+use callout_layout::{CalloutLayout, CardRect, callout_layout, side_bands_width};
 pub(crate) use key_points::KeyTarget;
 use key_points::key_slots;
 #[cfg(test)]
@@ -72,6 +72,9 @@ const CALLOUT_BAND_H: f32 = 118.;
 /// padding, footer) — the viewport height minus this and the callout band is
 /// what the render may occupy before it scales down to fit.
 const KEYS_VERTICAL_RESERVE: f32 = 224.;
+/// Horizontal chrome around the Keys tab body: the device rail and the tab's
+/// padding.
+const KEYS_HORIZONTAL_RESERVE: f32 = crate::ui::theme::DETAIL_RAIL_W + 48.;
 /// Floor on the render height so a tiny window still shows a usable model.
 const KEYBOARD_MIN_IMG_H: f32 = 160.;
 const KEY_CALLOUT_H: f32 = 48.;
@@ -212,10 +215,19 @@ impl Render for FunctionRowView {
                 .and_then(|record| keyboard_glow(state, record))
         });
 
-        let viewport_h = f32::from(window.viewport_size().height);
-        let render_size = keyboard_render_size(asset, viewport_h);
+        let layouts = key_slots(asset);
+        let markers: Vec<(f32, f32)> = layouts
+            .iter()
+            .map(|layout| (layout.point.x_frac, layout.point.y_frac))
+            .collect();
+        let viewport = window.viewport_size();
+        let render_size = keyboard_render_size(
+            asset,
+            f32::from(viewport.height),
+            keyboard_max_width(f32::from(viewport.width), side_bands_width(&markers)),
+        );
         let image_path = asset.map(|asset| asset.image_path.clone());
-        let slots: Vec<KeySlot> = key_slots(asset)
+        let slots: Vec<KeySlot> = layouts
             .into_iter()
             .enumerate()
             .map(|(idx, layout)| {
@@ -289,17 +301,26 @@ impl Render for FunctionRowView {
     }
 }
 
-/// The keyboard render size: the actual PNG aspect at up to [`KEYBOARD_W`]
-/// wide, shrunk to fit the viewport height. Sizing off the real aspect keeps
+/// The widest the render may get. A board without cards beside it keeps
+/// [`KEYBOARD_W`]. One with them gives up as much width as keeps the whole
+/// pane inside the Keys tab, but never more than the pane would have
+/// overflowed with the render alone, so the band never makes it wider.
+fn keyboard_max_width(viewport_w: f32, side_bands_w: f32) -> f32 {
+    let room = (viewport_w - KEYS_HORIZONTAL_RESERVE).max(KEYBOARD_W);
+    KEYBOARD_W.min(room - side_bands_w)
+}
+
+/// The keyboard render size: the actual PNG aspect at up to `max_w` wide,
+/// shrunk to fit the viewport height. Sizing off the real aspect keeps
 /// `ObjectFit::Contain` from letterboxing and keeps the marker overlays
 /// registered with the rendered keys — the G513 render (with wrist rest) is
 /// nearly twice as tall as an MX Keys render at the same width.
-fn keyboard_render_size(asset: Option<&ResolvedAsset>, viewport_h: f32) -> (f32, f32) {
+fn keyboard_render_size(asset: Option<&ResolvedAsset>, viewport_h: f32, max_w: f32) -> (f32, f32) {
     let Some(asset) = asset.filter(|a| a.png_height > 0) else {
         return FALLBACK_KEYBOARD_SIZE;
     };
     let target_h = (viewport_h - KEYS_VERTICAL_RESERVE - CALLOUT_BAND_H).max(KEYBOARD_MIN_IMG_H);
-    asset_dimensions_for_png(asset, target_h, KEYBOARD_W)
+    asset_dimensions_for_png(asset, target_h, max_w)
 }
 
 /// One key with its resolved layout + binding.
