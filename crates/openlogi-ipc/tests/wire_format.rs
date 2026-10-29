@@ -49,6 +49,9 @@ use openlogi_core::hid::{
     SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus, SmartShiftThreshold, TunableTorque,
     WriteError,
 };
+use openlogi_core::microphone::{
+    GainStage, Microphone, MicrophoneChange, MicrophoneControls, MicrophoneError, MilliDecibels,
+};
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, ActionRingPresentation, AgentRequest,
     AgentResponse, AgentSnapshot, AgentStatus, BacklightObservation, ChosenLight, ClientKind,
@@ -112,7 +115,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// unreleased version and leave this pin alone (`crates/openlogi-ipc/AGENTS.md`).
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 42);
+    assert_eq!(PROTOCOL_VERSION, 43);
 }
 
 #[test]
@@ -373,6 +376,70 @@ fn reload_saved_config() {
     );
 }
 
+/// A microphone and its controls ride the snapshot; a change and its result
+/// ride `set_microphone`.
+#[test]
+fn microphones() {
+    let gain = GainStage {
+        level: MilliDecibels::new(12_000),
+        min: MilliDecibels::new(-12_000),
+        max: MilliDecibels::new(21_000),
+    };
+    let yeti = Microphone {
+        id: "Yeti:SN1".into(),
+        vendor_id: 0x046d,
+        product_id: 0x0ab7,
+        name: "Yeti".into(),
+        registry_model_id: Some("0ab7".into()),
+        controls: MicrophoneControls {
+            gain: Some(gain),
+            muted: Some(false),
+            headphone_volume: None,
+            headphones_muted: Some(true),
+            monitoring: Some(true),
+            monitoring_level: Some(gain),
+        },
+    };
+    assert_wire(
+        &yeti,
+        "08596574693a534e31fb6d04fbb70a045965746901043061623701fbc05dfbbf5dfb10a40100000101010101fbc05dfbbf5dfb10a4",
+    );
+    assert_wire(&MicrophoneControls::default(), "000000000000");
+
+    assert_wire(
+        &MicrophoneChange::Gain(MilliDecibels::new(-6_000)),
+        "00fbdf2e",
+    );
+    assert_wire(&MicrophoneChange::Muted(true), "0101");
+    assert_wire(
+        &MicrophoneChange::HeadphoneVolume(MilliDecibels::new(0)),
+        "0200",
+    );
+    assert_wire(&MicrophoneChange::HeadphonesMuted(false), "0300");
+    assert_wire(&MicrophoneChange::Monitoring(true), "0401");
+    assert_wire(
+        &MicrophoneChange::MonitoringLevel(MilliDecibels::new(-17_625)),
+        "05fbb189",
+    );
+
+    assert_wire(&MicrophoneError::NotConnected, "00");
+    assert_wire(&MicrophoneError::NoSuchControl, "01");
+    assert_wire(&MicrophoneError::PlatformUnsupported, "02");
+    assert_wire(&MicrophoneError::Rejected(-1), "0301");
+
+    assert_wire(
+        &AgentRequest::SetMicrophone {
+            id: "Yeti:SN1".into(),
+            change: MicrophoneChange::Muted(true),
+        },
+        "2f08596574693a534e310101",
+    );
+    assert_wire(
+        &AgentResponse::SetMicrophone(Err(MicrophoneError::NotConnected)),
+        "2f0100",
+    );
+}
+
 /// The overlay long-polls the backlight indicator by generation, like
 /// the other observe calls.
 #[test]
@@ -596,15 +663,20 @@ fn agent_snapshot() {
         foreground: ForegroundApps::default(),
         // Pinned populated in `observed_light` below.
         lights: Vec::new(),
+        // Pinned populated in `microphones` below.
+        microphones: Vec::new(),
     };
-    assert_wire(&snapshot, "010001010705302e362e360100000000000000000000");
+    assert_wire(&snapshot, "010001010705302e362e36010000000000000000000000");
 
     // The observation is the snapshot with its generation in front.
     let observed = Observation {
         generation: 3,
         snapshot,
     };
-    assert_wire(&observed, "03010001010705302e362e360100000000000000000000");
+    assert_wire(
+        &observed,
+        "03010001010705302e362e36010000000000000000000000",
+    );
 }
 
 /// The foreground application rides the snapshot, so both halves are pinned:
@@ -652,6 +724,7 @@ fn device_inventory() {
     // `Light` was appended after `Unknown`; preserve every existing kind's
     // bincode discriminant.
     assert_wire(&DeviceKind::Light, "0d");
+    assert_wire(&DeviceKind::Microphone, "0e");
     // A level-only battery (no state-of-charge gauge) carries no percentage.
     assert_wire(
         &BatteryInfo {

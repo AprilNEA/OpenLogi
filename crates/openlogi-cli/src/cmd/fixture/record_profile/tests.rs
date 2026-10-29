@@ -417,6 +417,16 @@ impl Agent for TestAgent {
         unreachable!("profile capture is read-only")
     }
 
+    async fn set_microphone(
+        self,
+        _: TarpcContext,
+        _id: String,
+        _change: openlogi_core::microphone::MicrophoneChange,
+    ) -> Result<openlogi_core::microphone::Microphone, openlogi_core::microphone::MicrophoneError>
+    {
+        unreachable!("profile capture is read-only")
+    }
+
     async fn observe_notices(self, _: TarpcContext, _since: Generation) -> NoticeObservation {
         unreachable!("profile capture must not inspect the overlay's notices")
     }
@@ -556,6 +566,7 @@ fn fixture_agent_with(edit: impl FnOnce(&mut DeviceProfile)) -> TestAgent {
             recent: Vec::new(),
         },
         lights: Vec::new(),
+        microphones: Vec::new(),
     };
     TestAgent::from_profile(profile, snapshot)
 }

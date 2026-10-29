@@ -12,6 +12,7 @@ publish = false
 
 [dependencies]
 axwatch = { workspace = true }
+openlogi-audio = { path = "../openlogi-audio" }
 openlogi-core = { path = "../openlogi-core", features = ["worker"] }
 openlogi-inject = { path = "../openlogi-inject" }
 openlogi-hid = { path = "../openlogi-hid" }

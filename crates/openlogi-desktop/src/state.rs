@@ -88,6 +88,7 @@ mod inventory;
 mod light;
 mod lighting;
 mod load;
+mod microphone;
 mod os_layout;
 mod pointer;
 mod pointer_speed;
@@ -195,6 +196,8 @@ pub struct AppState {
     next_disable_keys_request_id: u64,
     /// Standalone-light sequencing and aggregate camera activity.
     lights: LightSession,
+    /// USB microphones from the latest snapshot and the last refused write.
+    microphones: microphone::MicrophoneSession,
     /// Which timer steps the backlight card is showing. A disclosure, not a
     /// keyboard setting: the keyboard keeps whatever duration was last
     /// written, and switching this writes nothing.
@@ -273,7 +276,8 @@ impl AppState {
             ipc_commands,
         } = sources;
         let mut config = ConfigState::new(config, persistence);
-        let device_list = build_device_list(inventories, standalone, resolver, &config, cameras);
+        let device_list =
+            build_device_list(inventories, standalone, resolver, &config, cameras, &[]);
         // Fold each online device's route into its canonical entry before
         // anything writes to the config — the first frame after a schema-5
         // upgrade is the earliest moment this can happen, and the ordering
@@ -283,7 +287,7 @@ impl AppState {
         let adopted = config.edit(|config| inventory::adopt_routes(config, &device_list));
         // Adoption re-keyed entries, so rebuild before reading the list again.
         let device_list = if adopted {
-            build_device_list(inventories, standalone, resolver, &config, cameras)
+            build_device_list(inventories, standalone, resolver, &config, cameras, &[])
         } else {
             device_list
         };
@@ -305,6 +309,7 @@ impl AppState {
             action_ring_editing_apps: BTreeMap::new(),
             pointer: PointerState::default(),
             lights: LightSession::default(),
+            microphones: microphone::MicrophoneSession::default(),
             duration_steps: DurationSteps::Short,
             disable_keys_reads: DisableKeysReads::default(),
             next_disable_keys_request_id: 0,

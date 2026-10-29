@@ -69,6 +69,9 @@ pub(crate) enum StateEvent {
     LightingChanged(DeviceKey),
     /// Camera settings or activity changed.
     CameraChanged,
+    /// A microphone came or went, one of its controls read differently, or a
+    /// write to it was refused.
+    MicrophoneChanged,
     /// Host camera-permission status may have changed.
     #[cfg_attr(
         not(any(target_os = "macos", test)),
@@ -112,6 +115,7 @@ impl StateEvent {
             | Self::DeviceRemovalFailed { .. }
             | Self::StalePairingRemovalFailed { .. }
             | Self::CameraChanged
+            | Self::MicrophoneChanged
             | Self::CameraPermissionChanged
             | Self::SettingsChanged
             | Self::LanguageChanged => None,
@@ -257,6 +261,7 @@ impl AppState {
             | StateEvent::DisableKeysChanged(_)
             | StateEvent::LightingChanged(_)
             | StateEvent::CameraChanged
+            | StateEvent::MicrophoneChanged
             | StateEvent::CameraPermissionChanged
             | StateEvent::DeviceConfigChanged(_)
             | StateEvent::SettingsChanged

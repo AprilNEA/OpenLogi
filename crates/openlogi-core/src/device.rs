@@ -60,6 +60,9 @@ pub enum DeviceKind {
     /// This is an identity hint only. UI controls are gated by the dedicated
     /// light capability descriptor, never by this variant alone.
     Light,
+    /// USB microphone whose controls the agent drives through the host's
+    /// audio stack, reported in [`crate::microphone::Microphone`].
+    Microphone,
 }
 
 impl DeviceKind {
@@ -86,6 +89,7 @@ impl DeviceKind {
             "headset" => Some(Self::Headset),
             "camera" => Some(Self::Camera),
             "light" | "lighting" | "illumination_light" => Some(Self::Light),
+            "microphone" => Some(Self::Microphone),
             _ => None,
         }
     }
@@ -109,6 +113,7 @@ impl DeviceKind {
             Self::Camera => "camera.camera",
             Self::Unknown => "device.device",
             Self::Light => "device.lighting",
+            Self::Microphone => "device.microphone",
         }
     }
 }

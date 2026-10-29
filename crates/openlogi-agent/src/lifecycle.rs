@@ -442,6 +442,7 @@ impl Running {
             WatcherEvent::Light(LightEvent::Changed { route, change }) => {
                 self.orchestrator.lock().await.light_changed(&route, change);
             }
+            WatcherEvent::Microphones(microphones) => self.observable.set_microphones(microphones),
             // Watcher thread death — without a snapshot the GUI would scan
             // forever.
             WatcherEvent::Lost(Watcher::Inventory) => {

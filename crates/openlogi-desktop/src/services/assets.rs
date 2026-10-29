@@ -266,7 +266,7 @@ impl AssetResolver {
                 depot: depot.to_owned(),
                 registry_model_id: registry_model_id.to_owned(),
             },
-            || self.load_standalone_files(depot, entry, registry_model_id),
+            || self.load_standalone_files(depot, entry),
         )
     }
 
@@ -427,25 +427,25 @@ impl AssetResolver {
         None
     }
 
-    fn load_standalone_files(
-        &self,
-        depot: &str,
-        entry: &DeviceEntry,
-        registry_model_id: &str,
-    ) -> Option<ResolvedAsset> {
+    fn load_standalone_files(&self, depot: &str, entry: &DeviceEntry) -> Option<ResolvedAsset> {
         for root in &self.read_roots {
             let Ok(dir) = safe_component_path(root, depot, "asset depot") else {
                 continue;
             };
             let manifest = load_manifest(&dir);
+            // The same manifest bases the depot sync fetched the render by:
+            // the registry model ids, then the depot name, which is how
+            // G HUB's own depots (the Yeti's `yeti_classic`) key a device.
             let Some(image_name) = manifest
                 .as_ref()
-                .and_then(|manifest| manifest.device_image_for(registry_model_id))
-                .or_else(|| entry.preferred_file(&FRONT_RENDER_FILES))
+                .and_then(|manifest| {
+                    find_variant_in_manifest(manifest, entry, depot, 0, variant_image_for)
+                })
+                .or_else(|| entry.preferred_file(&FRONT_RENDER_FILES).map(str::to_owned))
             else {
                 continue;
             };
-            let Ok(image_path) = safe_component_path(&dir, image_name, "asset file") else {
+            let Ok(image_path) = safe_component_path(&dir, &image_name, "asset file") else {
                 continue;
             };
             if !image_path.is_file() {

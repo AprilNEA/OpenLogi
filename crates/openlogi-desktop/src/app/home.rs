@@ -272,7 +272,7 @@ fn transport_glance(
     pal: Palette,
     saved_transport: Option<ObservedConnection>,
 ) -> impl IntoElement {
-    let path = if matches!(record.kind, DeviceKind::Camera) {
+    let path = if matches!(record.kind, DeviceKind::Camera | DeviceKind::Microphone) {
         "action-icons/usb.svg"
     } else {
         connection_icon_path(
@@ -601,15 +601,17 @@ fn connection_view(
         .child("·")
         .child(
             svg()
-                .path(if matches!(record.kind, DeviceKind::Camera) {
-                    "action-icons/usb.svg"
-                } else {
-                    connection_icon_path(
-                        record.route.as_ref(),
-                        record.model_info.as_ref(),
-                        saved_transport,
-                    )
-                })
+                .path(
+                    if matches!(record.kind, DeviceKind::Camera | DeviceKind::Microphone) {
+                        "action-icons/usb.svg"
+                    } else {
+                        connection_icon_path(
+                            record.route.as_ref(),
+                            record.model_info.as_ref(),
+                            saved_transport,
+                        )
+                    },
+                )
                 .size_3()
                 .flex_none(),
         )
@@ -650,18 +652,19 @@ fn device_image(
         return img(path).max_w_full().max_h_full().into_any_element();
     }
     // Cameras carry no depot asset, so give them a recognisable glyph on their
-    // gallery card instead of the generic chip fallback.
-    let icon = if matches!(record.kind, DeviceKind::Camera) {
-        IconName::Eye
-    } else {
-        IconName::Cpu
+    // gallery card instead of the generic chip fallback; so does a microphone
+    // whose image has not been fetched yet.
+    let icon = match record.kind {
+        DeviceKind::Camera => Icon::new(IconName::Eye),
+        DeviceKind::Microphone => Icon::empty().path(super::detail::MICROPHONE_ICON),
+        _ => Icon::new(IconName::Cpu),
     };
     div()
         .size_full()
         .flex()
         .items_center()
         .justify_center()
-        .child(Icon::new(icon).size_8().text_color(pal.text_muted))
+        .child(icon.size_8().text_color(pal.text_muted))
         .into_any_element()
 }
 

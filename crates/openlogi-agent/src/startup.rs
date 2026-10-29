@@ -249,6 +249,8 @@ pub(crate) enum WatcherEvent {
     SecureInput(openlogi_ipc::SecureInput),
     /// A standalone light was read, or announced a change.
     Light(watchers::light::LightEvent),
+    /// The microphones or one of their controls changed.
+    Microphones(Vec<openlogi_core::microphone::Microphone>),
     /// A watcher's channel closed (its thread died). Emitted once; the
     /// source then leaves the merge, so a dead watcher cannot busy-wake the
     /// loop.
@@ -266,6 +268,7 @@ pub(crate) enum Watcher {
     InputMonitoring,
     SecureInput,
     Light,
+    Microphone,
 }
 
 /// Spawn the per-source state watchers at arming, merged into one tagged
@@ -345,6 +348,11 @@ pub(crate) fn spawn_state_watchers(
             ),
             Watcher::InputMonitoring,
             WatcherEvent::InputMonitoring,
+        ),
+        tagged(
+            watchers::microphone::spawn(watchers::microphone::PERIOD),
+            Watcher::Microphone,
+            WatcherEvent::Microphones,
         ),
         tagged(
             watchers::secure_input::spawn(watchers::secure_input::PERIOD),

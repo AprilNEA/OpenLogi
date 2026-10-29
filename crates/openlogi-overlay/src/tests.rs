@@ -16,7 +16,7 @@ fn the_shared_catalog_is_wired_up() {
 fn every_device_kind_has_a_name_to_fall_back_to() {
     use openlogi_core::device::DeviceKind;
 
-    const KINDS: [DeviceKind; 14] = [
+    const KINDS: [DeviceKind; 15] = [
         DeviceKind::Mouse,
         DeviceKind::Keyboard,
         DeviceKind::Numpad,
@@ -31,6 +31,7 @@ fn every_device_kind_has_a_name_to_fall_back_to() {
         DeviceKind::Camera,
         DeviceKind::Unknown,
         DeviceKind::Light,
+        DeviceKind::Microphone,
     ];
     // Exhaustive on purpose: a new kind stops this compiling until it is
     // listed above.
@@ -48,7 +49,8 @@ fn every_device_kind_has_a_name_to_fall_back_to() {
         | DeviceKind::Headset
         | DeviceKind::Camera
         | DeviceKind::Unknown
-        | DeviceKind::Light => {}
+        | DeviceKind::Light
+        | DeviceKind::Microphone => {}
     };
     for kind in KINDS {
         let key = kind.translation_key();

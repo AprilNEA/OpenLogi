@@ -30,6 +30,7 @@ fn snapshot(cx: &mut gpui::TestAppContext, inventory: Vec<DeviceInventory>) {
         pairing: None,
         foreground: ForegroundApps::default(),
         lights: Vec::new(),
+        microphones: Vec::new(),
     };
     cx.update(|cx| {
         AppState::update(cx, |state, _| {
