@@ -9,7 +9,7 @@ use gpui_component::{
     button::{Button, ButtonVariants as _},
     v_flex,
 };
-use openlogi_core::binding::GamingButtons;
+use openlogi_core::binding::{GamingButtons, is_g_series};
 use openlogi_core::device::{Capabilities, DeviceKind};
 use openlogi_ipc::InventoryHealth;
 use tracing::info;
@@ -160,8 +160,11 @@ impl DetailTab {
         // mouse model), so any keyboard that gets a Keys tab needs the ring
         // editor too — otherwise the ring opens but has nothing configured
         // in it and no way to configure it (#1833).
-        // A G-series mouse gets no ring: its buttons are for games.
-        if caps.haptic_panel || (buttons && can_show_mouse_model && !gaming) || shows_keys_tab {
+        // A G-series device gets no ring: its buttons and keys are for games.
+        // Measured capabilities only, since a presumed keyboard guesses
+        // lighting.
+        let g_series = is_g_series(&record.model_key, record.capabilities.as_ref());
+        if !g_series && (caps.haptic_panel || (buttons && can_show_mouse_model) || shows_keys_tab) {
             tabs.push(Self::ActionsRing);
         }
         let has_software_scroll = openlogi_hook::SOFTWARE_SCROLL_INVERSION

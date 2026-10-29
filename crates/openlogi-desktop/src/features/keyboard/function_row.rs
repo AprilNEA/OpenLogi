@@ -36,8 +36,8 @@ use super::editors::{
 };
 use crate::app::{glow_canvas, keyboard_glow};
 use crate::features::binding_editor::{
-    PickFn, action_icon_path, action_rows, compact_panel, divider, editor_scroll_list,
-    editor_section,
+    ActionOffer, PickFn, action_icon_path, action_rows_with, compact_panel, divider,
+    editor_scroll_list, editor_section,
 };
 use crate::features::mouse::geometry::asset_dimensions_for_png;
 use crate::features::profiles::profile_name;
@@ -895,7 +895,14 @@ impl FunctionRowView {
                     }),
             ),
         );
-        rows.extend(panel_action_rows(current.as_ref(), &on_pick, view, &pal));
+        let offer = key_action_offer(state, &target);
+        rows.extend(panel_action_rows(
+            current.as_ref(),
+            offer.offer(),
+            &on_pick,
+            view,
+            &pal,
+        ));
 
         compact_panel(pal)
             .w(px(PANEL_W))
@@ -927,15 +934,48 @@ fn title_header(key_name: &SharedString, app: Option<&str>, pal: &Palette) -> im
         )
 }
 
+/// What a key's picker offers beyond the catalog and leaves out of it.
+#[derive(Clone, Copy, Default)]
+struct KeyActionOffer {
+    hide_actions_ring: bool,
+}
+
+impl KeyActionOffer {
+    fn offer(self) -> ActionOffer<'static> {
+        const ACTIONS_RING: &[Action] = &[Action::ShowActionsRing];
+        ActionOffer {
+            extra: &[],
+            hidden: if self.hide_actions_ring {
+                ACTIONS_RING
+            } else {
+                &[]
+            },
+        }
+    }
+}
+
+/// A keyboard without an Actions Ring is not offered one.
+fn key_action_offer(state: Option<&AppState>, _target: &KeyTarget) -> KeyActionOffer {
+    let Some(state) = state else {
+        return KeyActionOffer::default();
+    };
+    KeyActionOffer {
+        hide_actions_ring: !state
+            .current_record()
+            .is_none_or(crate::app::offers_actions_ring),
+    }
+}
+
 /// The action rows + a Power User section, mirroring the picker's list but
 /// adapted for the panel context (no popover dismissal).
 fn panel_action_rows(
     current: Option<&Action>,
+    offer: ActionOffer<'_>,
     on_pick: &PickFn,
     view: &Entity<FunctionRowView>,
     pal: &Palette,
 ) -> Vec<gpui::Div> {
-    let mut children = action_rows("panel-action", current, on_pick, *pal);
+    let mut children = action_rows_with("panel-action", current, "", offer, on_pick, *pal);
 
     let power_user_actions: &[(PowerUserKind, SharedString, &'static str)] = &[
         (

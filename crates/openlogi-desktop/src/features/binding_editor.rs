@@ -115,34 +115,6 @@ pub(crate) fn action_icon_path(action: &Action) -> &'static str {
     }
 }
 
-/// Build every category-grouped action row.
-pub(crate) fn action_rows(
-    id_prefix: &'static str,
-    current: Option<&Action>,
-    on_pick: &PickFn,
-    pal: Palette,
-) -> Vec<gpui::Div> {
-    action_rows_matching(id_prefix, current, "", on_pick, pal)
-}
-
-/// Build action rows filtered by localized action or category name.
-pub(crate) fn action_rows_matching(
-    id_prefix: &'static str,
-    current: Option<&Action>,
-    query: &str,
-    on_pick: &PickFn,
-    pal: Palette,
-) -> Vec<gpui::Div> {
-    action_rows_with(
-        id_prefix,
-        current,
-        query,
-        ActionOffer::default(),
-        on_pick,
-        pal,
-    )
-}
-
 /// What a picker offers beyond the catalog, and what of it it leaves out.
 #[derive(Clone, Copy, Default)]
 pub(crate) struct ActionOffer<'a> {
@@ -150,6 +122,9 @@ pub(crate) struct ActionOffer<'a> {
     pub hidden: &'a [Action],
 }
 
+/// Build every category-grouped action row matching `query` (localized
+/// action or category name), with `offer`'s extras and without its hidden
+/// actions.
 pub(crate) fn action_rows_with(
     id_prefix: &'static str,
     current: Option<&Action>,

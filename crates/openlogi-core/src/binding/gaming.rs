@@ -102,6 +102,15 @@ impl GamingButtons {
     }
 }
 
+/// Whether a device is a Logitech G-series device: a mouse with a dumped
+/// layout, or any device that reports a gaming feature. `capabilities` must
+/// be measured: a kind's presumed set guesses lighting for every keyboard.
+#[must_use]
+pub fn is_g_series(model_key: &str, capabilities: Option<&Capabilities>) -> bool {
+    GamingButtons::for_device(model_key, capabilities).is_some()
+        || capabilities.is_some_and(Capabilities::reports_gaming_feature)
+}
+
 impl GamingLayout {
     /// The layout for a HID++ model key.
     #[must_use]
@@ -144,6 +153,26 @@ impl GamingLayout {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_gaming_feature_or_a_dumped_layout_makes_a_device_g_series() {
+        let g512 = Capabilities::from_feature_ids(&[0x1b04, 0x40a2, 0x8060, 0x8070, 0x8080]);
+        let g_mouse = Capabilities::from_feature_ids(&[0x2201, 0x8100, 0x8110]);
+        let mx_keys = Capabilities::from_feature_ids(&[0x1b04, 0x1982, 0x40a2, 0x4531]);
+        let mx_master = Capabilities::from_feature_ids(&[0x1b04, 0x2201, 0x2121]);
+        assert!(is_g_series("0c33c", Some(&g512)));
+        assert!(is_g_series("unknown", Some(&g_mouse)));
+        assert!(
+            is_g_series("0407f", None),
+            "a dumped model answers unprobed"
+        );
+        assert!(!is_g_series("02b378", Some(&mx_keys)));
+        assert!(!is_g_series("0b034", Some(&mx_master)));
+        assert!(
+            !is_g_series("0c33c", None),
+            "an unprobed device is not guessed"
+        );
+    }
 
     #[test]
     fn gaming_buttons_name_the_dumped_layout_or_the_standard_buttons() {

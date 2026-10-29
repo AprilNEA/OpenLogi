@@ -1163,10 +1163,12 @@ fn keyboard_without_asset_hides_buttons_tab() {
 
 #[test]
 fn keyboard_with_buttons_shows_keys_tab() {
+    // An MX-style keyboard: RGB lighting would make it G-series, which gets
+    // no ring.
     let caps = Some(Capabilities {
         buttons: true,
         pointer: false,
-        lighting: true,
+        lighting: false,
         scroll_inversion: false,
         hires_wheel: false,
         thumbwheel: false,
@@ -1498,6 +1500,28 @@ fn a_mouse_without_reprogcontrols_gets_buttons_but_no_ring() {
         assert!(!super::offers_actions_ring(&mouse));
         assert!(tabs.contains(&DetailTab::Pointer));
     }
+}
+
+/// A G-series keyboard's keys are for games too: it keeps the Keys panel
+/// but gets no Actions Ring. An MX keyboard keeps its ring.
+#[test]
+fn a_g_series_keyboard_gets_keys_but_no_ring() {
+    let g512 = record(
+        DeviceKind::Keyboard,
+        Some(Capabilities::from_feature_ids(&[
+            0x1b04, 0x40a2, 0x8060, 0x8070, 0x8080,
+        ])),
+    );
+    let tabs = DetailTab::tabs_for(&g512);
+    assert!(tabs.contains(&DetailTab::Keys));
+    assert!(!tabs.contains(&DetailTab::ActionsRing));
+    assert!(!super::offers_actions_ring(&g512));
+
+    let mx_keys = record(
+        DeviceKind::Keyboard,
+        Some(Capabilities::from_feature_ids(&[0x1b04, 0x1982, 0x40a2])),
+    );
+    assert!(super::offers_actions_ring(&mx_keys));
 }
 
 /// The function-row remapper has no OS-hook fallback: it diverts every key

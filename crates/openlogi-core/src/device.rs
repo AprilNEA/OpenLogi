@@ -230,6 +230,15 @@ impl Capabilities {
         !self.buttons && (self.onboard_profiles || self.button_spy)
     }
 
+    /// Whether the device reports a gaming feature OpenLogi measures. Logitech
+    /// numbers its gaming-only HID++ features `0x8000`–`0x8FFF`: RGB
+    /// lighting, report rate, onboard profiles and button spy all sit there.
+    /// Consumers ask [`is_g_series`](crate::binding::is_g_series).
+    #[must_use]
+    pub(crate) const fn reports_gaming_feature(&self) -> bool {
+        self.lighting || self.report_rate || self.onboard_profiles || self.button_spy
+    }
+
     /// Derive capabilities from the set of HID++ feature IDs a device reports.
     /// Membership of a driving feature ID flips the corresponding flag.
     #[must_use]
