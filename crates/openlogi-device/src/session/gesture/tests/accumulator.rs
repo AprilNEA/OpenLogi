@@ -1,6 +1,7 @@
 //! The capture accumulator: presses, taps, swipes and raw XY across the gesture sources.
 
 use super::*;
+use openlogi_core::config::GestureHold;
 
 const GESTURE: &[u16] = &[reprog_controls::GESTURE_BUTTON_CID];
 
@@ -55,8 +56,12 @@ fn a_configured_hold_gate_reaches_the_hidpp_hold() {
     // accumulator both stored the configured value and backdates against it.
     // With either bug this swipe stays under the gate and reads as a click.
     let (tx, mut rx) = mpsc::unbounded_channel();
-    let mut acc = CaptureAccum::default().with_gesture_hold(GestureHold::MAX);
-    assert_eq!(acc.gesture_hold(), GestureHold::MAX);
+    let tuning = GestureTuning {
+        hold: GestureHold::MAX,
+        ..GestureTuning::default()
+    };
+    let mut acc = CaptureAccum::default().with_gesture_tuning(tuning);
+    assert_eq!(acc.gesture_tuning(), tuning);
     handle_reprog(&mut acc, press(), GESTURE, &[], &[], &tx);
     acc.backdate_hold_for_test();
     stale_report(&mut acc, &tx);

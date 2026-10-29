@@ -175,7 +175,7 @@ fn reprog_event(event: u8, payload_head: &[u8]) -> v20::Message {
 #[tokio::test]
 async fn raw_wheel_while_back_is_held_reaches_the_dispatcher_in_order() {
     let (armed, _channel, _handle) = arm(DIVERTABLE_RAW_WHEEL, true).await;
-    let capture = GestureCapture::new(armed, GestureHold::DEFAULT);
+    let capture = GestureCapture::new(armed, GestureTuning::default());
     let (sink, mut inputs) = mpsc::unbounded_channel();
     let handler = capture.report_handler(0xff, sink);
     handler(&reprog_event(0, &BACK.to_be_bytes()));

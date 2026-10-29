@@ -328,6 +328,12 @@ pub struct DeviceConfig {
     /// captured controls instead of hot-replacing them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gesture_hold: Option<GestureHold>,
+    /// Whether carrying a gesture on past its first commit fires that
+    /// direction again. `None` and `true` keep the behaviour #1652 added, where
+    /// a long hold-and-drag steps through several desktops; `false` limits one
+    /// press to a single swipe, so the same stroke can never act twice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gesture_repeat: Option<bool>,
     /// Physical config keys of pointing devices that follow this keyboard's
     /// host switch channel. The relationship is keyboard-initiated: pressing
     /// one of this device's host keys switches every listed target first, then
@@ -477,6 +483,7 @@ impl Default for DeviceConfig {
             scroll_resolution: None,
             smooth_wheel: false,
             gesture_hold: None,
+            gesture_repeat: None,
             host_switch_targets: Vec::new(),
             fn_lock: None,
             keep_os_layout: None,
@@ -605,6 +612,8 @@ struct RawDeviceConfig {
     #[serde(default)]
     gesture_hold: Option<GestureHold>,
     #[serde(default)]
+    gesture_repeat: Option<bool>,
+    #[serde(default)]
     host_switch_targets: Vec<String>,
     #[serde(default)]
     fn_lock: Option<bool>,
@@ -677,6 +686,7 @@ impl From<RawDeviceConfig> for DeviceConfig {
             scroll_resolution: raw.scroll_resolution,
             smooth_wheel: raw.smooth_wheel,
             gesture_hold: raw.gesture_hold,
+            gesture_repeat: raw.gesture_repeat,
             host_switch_targets: raw.host_switch_targets,
             fn_lock: raw.fn_lock,
             keep_os_layout: raw.keep_os_layout,
@@ -702,6 +712,15 @@ mod tests {
         // the field: an out-of-range value must never reach the runtime.
         toml::from_str::<DeviceConfig>("gesture_hold = 20").unwrap_err();
         toml::from_str::<DeviceConfig>("gesture_hold = 2000").unwrap_err();
+    }
+
+    #[test]
+    fn gesture_repeat_defaults_to_chaining_and_can_be_disabled() {
+        let unset: DeviceConfig = toml::from_str("").expect("empty table is valid");
+        assert_eq!(unset.gesture_repeat, None, "unset keeps chaining");
+        let off: DeviceConfig =
+            toml::from_str("gesture_repeat = false").expect("valid explicit opt-out");
+        assert_eq!(off.gesture_repeat, Some(false));
     }
 
     #[test]

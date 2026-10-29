@@ -141,6 +141,12 @@ Common device fields are:
   binding, it is read when the capture session arms, so editing it restores and
   re-diverts the mouse's captured controls once — set it while the mouse is
   idle instead of between gestures.
+- `gesture_repeat` for a mouse whose gesture button swipes: whether carrying
+  the stroke past its first commit fires that direction again, the way Logi
+  Options+ steps through several desktops. `true` (the default) keeps that
+  stepping, one fire per `600` raw units of travel; `false` limits one press to
+  a single swipe, so a long hold-and-drag acts once. Omit it to keep the
+  default. Like `gesture_hold`, it is read when the capture session arms.
 - `bindings`: a button maps to one action, an independent short/long action
   pair, or a gesture-direction map.
   `Thumbwheel` is the thumb wheel's capacitive tap — it has no GUI control and

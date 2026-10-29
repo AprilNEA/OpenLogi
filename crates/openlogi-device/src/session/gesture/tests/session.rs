@@ -3,16 +3,22 @@
 use super::*;
 use crate::channel::registry::PublicationState;
 use crate::channel::scripted::feature_error;
+use openlogi_core::binding::GestureRepeat;
+use openlogi_core::config::GestureHold;
 
 #[test]
 fn resetting_input_state_keeps_the_configured_hold_gate() {
     // `reset_input_state` rebuilds the accumulator after a reconnect; it must
     // carry the configured gate across, or a device set to 400 ms silently
     // returns to 160 ms the first time it wakes.
-    let capture = GestureCapture::new(ArmedControls::default(), GestureHold::MAX);
+    let tuning = GestureTuning {
+        hold: GestureHold::MAX,
+        repeat: GestureRepeat::Once,
+    };
+    let capture = GestureCapture::new(ArmedControls::default(), tuning);
     capture.reset_input_state();
     let accum = capture.accum.lock().unwrap_or_else(PoisonError::into_inner);
-    assert_eq!(accum.gesture_hold(), GestureHold::MAX);
+    assert_eq!(accum.gesture_tuning(), tuning);
 }
 
 #[tokio::test]

@@ -37,6 +37,8 @@ smooth_wheel = true
 # Milliseconds the gesture button must be held before a swipe may commit
 # (40-1000, default 160). Lower it for a quick hold-and-flick.
 # gesture_hold = 120
+# false limits one press to a single swipe instead of stepping through desktops.
+# gesture_repeat = false
 
 [devices."receiver:aabbccdd:slot:1".bindings]
 Back = "BrowserBack"

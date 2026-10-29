@@ -40,6 +40,6 @@ pub use gesture::GestureDirection;
 pub use key_combo::{KeyCombo, KeyComboParseError, KeyboardUsage, KeyboardUsageError};
 pub use swipe::{
     GESTURE_HOLD_FOR_SWIPE, GESTURE_REARM_PAUSE, GESTURE_REPEAT_DISTANCE, GESTURE_SWIPE_DEADZONE,
-    GESTURE_SWIPE_THRESHOLD, SwipeAccumulator, detect_swipe,
+    GESTURE_SWIPE_THRESHOLD, GestureRepeat, GestureTuning, SwipeAccumulator, detect_swipe,
 };
 pub use value::{Binding, HeldWheel, LONG_PRESS_THRESHOLD, LongPressBinding, WheelHoldBinding};

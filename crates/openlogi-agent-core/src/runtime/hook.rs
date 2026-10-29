@@ -11,9 +11,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use openlogi_core::binding::{
-    Action, Binding, ButtonId, GestureDirection, SwipeAccumulator, default_binding,
+    Action, Binding, ButtonId, GestureDirection, GestureTuning, SwipeAccumulator, default_binding,
 };
-use openlogi_core::config::{GestureHold, KeyTrigger};
+use openlogi_core::config::KeyTrigger;
 use openlogi_hook::{
     EventDevice, EventDisposition, Hook, HookEvent, KeyEvent, MouseEvent, source_is_remappable,
 };
@@ -48,9 +48,9 @@ pub struct HookMaps {
     /// Entries survive map rebuilds because they are hardware observations,
     /// not configuration.
     pub(crate) thumbwheel_positive_is_forward: BTreeMap<String, bool>,
-    /// How long a gesture button must be held before its travel commits, from
-    /// the selected device's `gesture_hold` (default 160 ms).
-    pub(crate) gesture_hold: GestureHold,
+    /// How the selected device's gesture holds behave: the hold gate and
+    /// whether one press may chain swipes.
+    pub(crate) gesture_tuning: GestureTuning,
 }
 
 /// Shared, atomically-published [`HookMaps`], threaded between the config owner
@@ -120,13 +120,13 @@ impl HoldState {
     }
 
     /// Store the token returned by the accepted lifecycle `Down`.
-    fn begin(&mut self, button: ButtonId, press: PressToken, hold: GestureHold) {
+    fn begin(&mut self, button: ButtonId, press: PressToken, tuning: GestureTuning) {
         self.current = Some(GestureHoldState {
             button,
             started_at: Instant::now(),
             press,
         });
-        self.swipe.begin(hold);
+        self.swipe.begin(tuning);
     }
 
     /// Feed a pointer-move delta into the active hold, tagging a committed swipe
@@ -254,15 +254,18 @@ fn handle_button(
     }
     // `try_read` only: a blocking read on the tap thread freezes every pointer
     // event while a config rebuild holds the write lock. Fail open if unavailable.
-    let (binding, is_gesture, pointer_target, gesture_hold) =
+    // A `map_or` with a call inside would allocate the default on every event;
+    // the fallback is built once per press instead.
+    let fallback = GestureTuning::default();
+    let (binding, is_gesture, pointer_target, gesture_tuning) =
         hooks
             .try_read()
-            .map_or((None, false, None, GestureHold::DEFAULT), |maps| {
+            .map_or((None, false, None, fallback), |maps| {
                 (
                     maps.bindings.get(&id).cloned(),
                     maps.gestures.contains_key(&id),
                     maps.pointer_target,
-                    maps.gesture_hold,
+                    maps.gesture_tuning,
                 )
             });
     let action_target = if pressed {
@@ -280,7 +283,7 @@ fn handle_button(
                 dispatcher.cancel_stale_hook_press(stale);
             }
             if let Some(press) = dispatcher.try_hook_button_down(id, None, action_target) {
-                HOLD.with_borrow_mut(|h| h.begin(id, press, gesture_hold));
+                HOLD.with_borrow_mut(|h| h.begin(id, press, gesture_tuning));
                 return EventDisposition::Suppress;
             }
             return SUPPRESSED_PRESSES

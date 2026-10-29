@@ -323,6 +323,7 @@ pub(super) fn fold(device: &mut DeviceConfig, mut legacy: DeviceConfig, route_ke
     fold_option_field!(force_sensing);
     fold_option_field!(disabled_keys);
     fold_option_field!(gesture_hold);
+    fold_option_field!(gesture_repeat);
     // The user-assigned alias. Without this a legacy entry carrying a name
     // folded into a canonical entry with none would drop it silently — the
     // one field here a user typed by hand, so the loss is the most visible.
@@ -786,7 +787,7 @@ mod tests {
         assert!(config.adopt_route(&canonical, "receiver:82839805:slot:1", None));
 
         assert_eq!(config.devices["unit:6be9d300"].gesture_hold, Some(gate));
-        assert_eq!(config.gesture_hold("unit:6be9d300"), gate);
+        assert_eq!(config.gesture_tuning("unit:6be9d300").hold, gate);
     }
 
     #[test]
