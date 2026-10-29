@@ -57,6 +57,8 @@ pub(super) struct ActionPickerContext<'a> {
     pub application_input: &'a Entity<InputState>,
     pub command_input: &'a Entity<InputState>,
     pub shortcut_mode: ShortcutMode,
+    /// Whether Record is waiting for the next key press.
+    pub shortcut_recording: bool,
     pub invalid: InvalidDrafts,
     pub view: &'a Entity<MouseModelView>,
 }
@@ -789,15 +791,7 @@ fn action_library(
     v_flex()
         .gap_2()
         .pt_1()
-        .child(custom_shortcut_editor(
-            id_prefix,
-            picker.shortcut_input,
-            picker.invalid.shortcut,
-            picker.shortcut_mode,
-            picker.view,
-            on_pick,
-            pal,
-        ))
+        .child(custom_shortcut_editor(id_prefix, &picker, on_pick, pal))
         .child(application_editor(
             id_prefix,
             picker.application_input,
@@ -851,15 +845,17 @@ fn action_library(
 /// A single-field "Custom Shortcut" editor, matching the Action Ring editor's
 /// `shortcut_editor` (`features/action_ring/editor.rs`) so the same custom
 /// action is reachable from the plain per-button picker, not just the ring.
+/// Record fills the field from the next key press; Add commits the field.
 fn custom_shortcut_editor(
     id_prefix: &'static str,
-    input: &Entity<InputState>,
-    invalid: bool,
-    mode: ShortcutMode,
-    view: &Entity<MouseModelView>,
+    picker: &ActionPickerContext<'_>,
     on_pick: &PickFn,
     pal: Palette,
 ) -> impl IntoElement {
+    let input = picker.shortcut_input;
+    let mode = picker.shortcut_mode;
+    let recording = picker.shortcut_recording;
+    let view = picker.view;
     let submit_input = input.clone();
     let on_pick = on_pick.clone();
     let mode_button = |option: ShortcutMode| {
@@ -881,6 +877,7 @@ fn custom_shortcut_editor(
     };
     let tap_button = mode_button(ShortcutMode::Tap);
     let hold_button = mode_button(ShortcutMode::Hold);
+    let record_view = view.clone();
     let view = view.clone();
     v_flex()
         .gap_1()
@@ -895,6 +892,22 @@ fn custom_shortcut_editor(
                         .min_w_0()
                         .debug_selector(move || format!("{id_prefix}-custom-shortcut-input"))
                         .child(control_input(input).cleanable(true)),
+                )
+                .child(
+                    Button::new(format!("{id_prefix}-custom-shortcut-record"))
+                        .debug_selector(move || format!("{id_prefix}-custom-shortcut-record"))
+                        .compact()
+                        .selected(recording)
+                        .label(if recording {
+                            tr!("common.cancel")
+                        } else {
+                            tr!("actions.record_shortcut")
+                        })
+                        .on_click(move |_, window, cx| {
+                            record_view.update(cx, |view, cx| {
+                                view.toggle_shortcut_recording(window, cx);
+                            });
+                        }),
                 )
                 .child(
                     Button::new(format!("{id_prefix}-custom-shortcut-add"))
@@ -913,7 +926,16 @@ fn custom_shortcut_editor(
                         }),
                 ),
         )
-        .when(invalid, |editor| {
+        .when(recording, |editor| {
+            editor.child(
+                div()
+                    .debug_selector(move || format!("{id_prefix}-custom-shortcut-recording"))
+                    .text_caption()
+                    .text_color(pal.text_muted)
+                    .child(tr!("actions.press_the_shortcut_to_record")),
+            )
+        })
+        .when(picker.invalid.shortcut, |editor| {
             editor.child(
                 div()
                     .debug_selector(move || format!("{id_prefix}-custom-shortcut-error"))
