@@ -117,6 +117,9 @@ fn reviewed_detail_tabs(id: &str) -> Vec<DetailTab> {
             DetailTab::Pointer,
             DetailTab::Device,
         ],
+        // The G604 exposes pointer and lighting capabilities, but no mapped
+        // reprogrammable controls yet.
+        "g604-001" => vec![DetailTab::Pointer, DetailTab::Lighting, DetailTab::Device],
         // A keyboard with HID++ controls and no pointer sensor gets Keys and
         // the ring editor. Its Fn lock, OS layout, backlight, Easy-Switch, and
         // disabled-key settings are cards on the Device tab, not extra tabs.

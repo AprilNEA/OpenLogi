@@ -12,7 +12,7 @@ struct Diagnostics {
     cases: Vec<String>,
     // Feature ID, version, type bits; control ID, task ID, capability bits.
     features: Vec<(u16, u8, u8)>,
-    controls: Vec<(u16, u16, u16)>,
+    controls: Option<Vec<(u16, u16, u16)>>,
     raw_battery: String,
 }
 
@@ -61,15 +61,28 @@ async fn contributed_corpus_replays_every_declared_operation() {
                     expected.features,
                     "{specimen}/{case}"
                 ),
-                SemanticObservation::ReprogrammableControls(result) => assert_eq!(
-                    result
-                        .expect("control table")
-                        .iter()
-                        .map(|entry| (entry.cid, entry.task_id, entry.flags.bits()))
-                        .collect::<Vec<_>>(),
-                    expected.controls,
-                    "{specimen}/{case}"
-                ),
+                SemanticObservation::ReprogrammableControls(result) => {
+                    match expected.controls.as_ref() {
+                        Some(controls) => assert_eq!(
+                            result
+                                .expect("control table")
+                                .iter()
+                                .map(|entry| (entry.cid, entry.task_id, entry.flags.bits()))
+                                .collect::<Vec<_>>(),
+                            *controls,
+                            "{specimen}/{case}"
+                        ),
+                        None => assert!(
+                            matches!(
+                                result,
+                                Err(WriteError::FeatureUnsupported {
+                                    feature_hex: 0x1b04
+                                })
+                            ),
+                            "{specimen}/{case}: expected unsupported 0x1b04, got {result:?}"
+                        ),
+                    }
+                }
                 SemanticObservation::RawBattery(result) => assert_eq!(
                     result.expect("battery diagnostic"),
                     expected.raw_battery,
