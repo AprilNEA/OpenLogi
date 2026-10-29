@@ -18,7 +18,7 @@ use openlogi_core::binding::{Action, ButtonId, GestureDirection};
 use super::force_sensing::{ForceSensingFacts, ForceSensingSlider, PressForce};
 use super::geometry::{
     LabelDistribution, asset_dimensions_for_png, asset_has_button_labels, asset_hotspots_for_png,
-    default_labels, labels_from_hotspots,
+    labels_from_hotspots,
 };
 use super::hotspots::{Hotspot, MOUSE_MODEL_SIZE, MouseControlId, default_hotspots};
 use super::inspector::{
@@ -613,7 +613,8 @@ fn scaled_model(
         (w, h, hotspots, labels)
     } else {
         let scale = (target_h / MOUSE_MODEL_SIZE.1).min(max_w / MOUSE_MODEL_SIZE.0);
-        let hotspots = default_hotspots(thumbwheel)
+        let (w, h) = (MOUSE_MODEL_SIZE.0 * scale, MOUSE_MODEL_SIZE.1 * scale);
+        let hotspots: Vec<Hotspot> = default_hotspots(thumbwheel)
             .into_iter()
             .map(|hs| Hotspot {
                 x: hs.x * scale,
@@ -623,19 +624,10 @@ fn scaled_model(
                 ..hs
             })
             .collect();
-        let labels = default_labels(thumbwheel, label_distribution)
-            .into_iter()
-            .map(|l| Label {
-                y: l.y * scale,
-                ..l
-            })
-            .collect();
-        (
-            MOUSE_MODEL_SIZE.0 * scale,
-            MOUSE_MODEL_SIZE.1 * scale,
-            hotspots,
-            labels,
-        )
+        // Placed at the scaled size, like an asset's: the cards keep their
+        // height however small the silhouette gets.
+        let labels = labels_from_hotspots(&hotspots, w, h, label_distribution);
+        (w, h, hotspots, labels)
     }
 }
 

@@ -273,16 +273,6 @@ fn side_leaders_cross(
     })
 }
 
-/// Label positions for the synthetic fallback silhouette.
-pub fn default_labels(thumbwheel: bool, distribution: LabelDistribution) -> Vec<Label> {
-    labels_from_hotspots(
-        &super::hotspots::default_hotspots(thumbwheel),
-        MOUSE_MODEL_SIZE.0,
-        MOUSE_MODEL_SIZE.1,
-        distribution,
-    )
-}
-
 /// Logitech's stable slot vocabulary → OpenLogi's visual control IDs. Intentionally
 /// conservative; unknown names fall through so widening `MouseControlId` later
 /// doesn't break old depots.
@@ -327,6 +317,17 @@ mod tests {
 
     use super::*;
     use crate::features::mouse::hotspots::default_hotspots;
+
+    /// Label positions for the synthetic fallback silhouette at its authored
+    /// size.
+    fn default_labels(thumbwheel: bool, distribution: LabelDistribution) -> Vec<Label> {
+        labels_from_hotspots(
+            &default_hotspots(thumbwheel),
+            MOUSE_MODEL_SIZE.0,
+            MOUSE_MODEL_SIZE.1,
+            distribution,
+        )
+    }
 
     #[test]
     fn default_labels_include_capability_gated_thumbwheel() {

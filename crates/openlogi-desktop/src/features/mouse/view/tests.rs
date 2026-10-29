@@ -704,3 +704,20 @@ fn a_gesture_button_without_raw_wheel_offers_no_wheel_hold(cx: &mut TestAppConte
     cx.update(|window, _| window.remove_window());
     cx.run_until_parked();
 }
+
+/// The fallback silhouette shrinks on a small window, but its cards keep
+/// their height, so they must be placed at the scaled size, not scaled after.
+#[test]
+fn a_shrunk_fallback_model_keeps_its_cards_apart() {
+    let target_h = MOUSE_MODEL_SIZE.1 * 0.776;
+    let (_, h, _, labels) = scaled_model(None, target_h, 1000., false, LabelDistribution::LeftOnly);
+    assert!((h - target_h).abs() < 0.01);
+    let mut ys: Vec<f32> = labels.iter().map(|label| label.y).collect();
+    ys.sort_by(f32::total_cmp);
+    for pair in ys.windows(2) {
+        assert!(
+            pair[1] - pair[0] >= super::super::geometry::LABEL_H,
+            "cards overlap: {ys:?}"
+        );
+    }
+}
