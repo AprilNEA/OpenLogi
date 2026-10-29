@@ -257,34 +257,41 @@ pub mod obsidian {
     }
 
     /// A card's shadows: the glass's lit top edge and shaded bottom edge
-    /// inside, and a drop shadow under it; the pressed card adds a thin mint
-    /// halo.
+    /// inside, and under it a tight contact shadow that draws its edge and a
+    /// soft one pulled in from its sides, so it sits cleanly on a light
+    /// background instead of in a grey smudge; the pressed card adds a thin
+    /// mint halo.
     #[must_use]
     pub fn card_shadow(pressed: bool) -> Vec<BoxShadow> {
-        if pressed {
+        let mut shadows = if pressed {
             vec![
                 inset(0.0, 1.0, 0.0, 0xbeff_ea26),
                 inset(0.0, -2.0, 6.0, 0x0000_0030),
                 shadow(0.0, 0.0, 0.0, 3.0, 0x8ceb_d70c),
-                shadow(0.0, 5.0, 18.0, 0.0, 0x0000_0030),
             ]
         } else {
             vec![
                 inset(0.0, 1.0, 0.0, 0xffff_ff14),
                 inset(0.0, -2.0, 6.0, 0x0000_0030),
-                shadow(0.0, 5.0, 15.0, 0.0, 0x0000_0030),
             ]
-        }
+        };
+        shadows.extend([
+            shadow(0.0, 1.0, 2.0, 0.0, 0x0a0f_182e),
+            shadow(0.0, 6.0, 14.0, -3.0, 0x0a0f_1824),
+        ]);
+        shadows
     }
 
-    /// A card's shadows under the pointer: the top edge brightens and the
-    /// drop shadow deepens as the card lifts.
+    /// A card's shadows under the pointer: the top edge brightens, the
+    /// contact shadow firms and the soft one drops further as the card
+    /// lifts. Pairs up with the resting card's list.
     #[must_use]
     pub fn card_shadow_hovered() -> Vec<BoxShadow> {
         vec![
             inset(0.0, 1.0, 0.0, 0xffff_ff24),
             inset(0.0, -2.0, 6.0, 0x0000_0030),
-            shadow(0.0, 8.0, 24.0, 0.0, 0x0000_0052),
+            shadow(0.0, 2.0, 4.0, 0.0, 0x0a0f_1838),
+            shadow(0.0, 12.0, 24.0, -3.0, 0x0a0f_1833),
         ]
     }
 
@@ -332,9 +339,14 @@ pub mod obsidian {
         hex(0x72cf_d108)
     }
 
+    /// A faint edge round the disc and a soft shade pulled in under it, in
+    /// place of one wide dark blur that clouded a light background.
     #[must_use]
     pub fn ambient_shadow() -> Vec<BoxShadow> {
-        vec![shadow(0.0, 0.0, 48.0, 0.0, 0x090c_1244)]
+        vec![
+            shadow(0.0, 1.0, 3.0, 0.0, 0x0a0f_1814),
+            shadow(0.0, 10.0, 36.0, -10.0, 0x0a0f_1826),
+        ]
     }
 
     /// The halo under the hovered card: its rim, and its shadows inside and
