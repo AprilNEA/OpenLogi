@@ -978,7 +978,9 @@ fn device_description_list(record: DeviceRecord) -> impl IntoElement {
 
     DescriptionList::new()
         .columns(1)
-        .label_width(rems(6.25))
+        // Match the configuration card: a fixed 100 px cut "Geräteschlüssel"
+        // and longer translations into their values (#1856).
+        .label_width(rems(12.))
         .bordered(false)
         .children(items)
 }
