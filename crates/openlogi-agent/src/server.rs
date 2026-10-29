@@ -21,6 +21,7 @@ use openlogi_agent_core::runtime::ActionDispatcher;
 use openlogi_core::binding::ActionRingSlot;
 use openlogi_core::config::{ConfigFile, ConfigRevision, Lighting};
 use openlogi_core::device::DeviceInventory;
+use openlogi_core::microphone::{Microphone, MicrophoneChange, MicrophoneError};
 use openlogi_hid::{
     BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
     ForceSensingInfo, HapticRestore, HapticRestoreOutcome, HapticWaveform, HidppOperation,
@@ -442,6 +443,23 @@ impl Agent for AgentServer {
     ) -> Result<SavedConfigVerdict, ConfigReloadError> {
         let revision = self.reload(Some(&saved)).await?;
         Ok(saved_config_verdict(&saved, revision))
+    }
+
+    async fn set_microphone(
+        self,
+        _: Context,
+        id: String,
+        change: MicrophoneChange,
+    ) -> Result<Microphone, MicrophoneError> {
+        // CoreAudio property calls block on the audio server.
+        let microphone = tokio::task::spawn_blocking(move || openlogi_audio::apply(&id, change))
+            .await
+            .map_err(|error| {
+                warn!(%error, "microphone write task failed");
+                MicrophoneError::Rejected(-1)
+            })??;
+        self.observable.set_microphone(microphone.clone());
+        Ok(microphone)
     }
 
     async fn observe_notices(self, _: Context, since: Generation) -> NoticeObservation {

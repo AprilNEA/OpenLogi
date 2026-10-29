@@ -11,6 +11,7 @@ members = [
     "crates/openlogi-hid",
     "crates/openlogi-device",
     "crates/openlogi-camera",
+    "crates/openlogi-audio",
     "crates/openlogi-permissions",
     "crates/openlogi-assets",
     "crates/openlogi-cli",
@@ -80,6 +81,8 @@ objc2 = "0.6.4"
 objc2-app-kit = "0.3.2"
 objc2-foundation = "0.3.2"
 objc2-core-foundation = { version = "0.3.2", default-features = false }
+objc2-core-audio = { version = "0.3.2", default-features = false }
+objc2-core-audio-types = { version = "0.3.2", default-features = false }
 objc2-application-services = { version = "0.3.2", default-features = false }
 objc2-core-graphics = { version = "0.3.2", default-features = false }
 objc2-io-kit = { version = "0.3.2", default-features = false }

@@ -24,6 +24,7 @@ use openlogi_core::hid::{
     PointerSpeed, ReceiverSelector, ReportRate, ReportRateInfo, ScrollWheelMode, SmartShiftStatus,
     WriteError,
 };
+use openlogi_core::microphone::{Microphone, MicrophoneChange, MicrophoneError};
 use serde::{Deserialize, Serialize};
 pub use succession::Identity;
 
@@ -154,7 +155,10 @@ pub use succession::Identity;
 ///      timer, five-second steps up to two hours.
 /// v42: `KeyboardUsage` accepts Insert (`0x49`) and Print Screen (`0x46`),
 ///      so a `KeyCombo` can carry a usage a v41 agent rejects.
-pub const PROTOCOL_VERSION: u32 = 42;
+/// v43: `AgentSnapshot::microphones`, `DeviceKind::Microphone` and
+///      `Agent::set_microphone` appended — USB microphones (the Blue Yeti)
+///      and their gain, mute, headphone and monitoring controls.
+pub const PROTOCOL_VERSION: u32 = 43;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -276,6 +280,10 @@ pub struct AgentSnapshot {
     /// light reached only through its raw report reads nothing back and is
     /// not listed.
     pub lights: Vec<ObservedLight>,
+    /// The recognized USB microphones connected now, and what each of their
+    /// controls reads. Re-read about once a second, so a change made on the
+    /// microphone or in the system's sound settings shows up too.
+    pub microphones: Vec<Microphone>,
 }
 
 /// A standalone light as it reported itself to the agent.
@@ -955,4 +963,10 @@ pub trait Agent {
     async fn reload_saved_config_with_verdict(
         saved: SavedConfig,
     ) -> Result<SavedConfigVerdict, ConfigReloadError>;
+    /// Apply `change` to the microphone [`Microphone::id`] names and answer
+    /// with what it reads back, which the next snapshot carries too.
+    async fn set_microphone(
+        id: String,
+        change: MicrophoneChange,
+    ) -> Result<Microphone, MicrophoneError>;
 }

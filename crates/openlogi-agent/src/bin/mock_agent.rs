@@ -60,6 +60,9 @@ use openlogi_core::device::{
     PairedDevice, StandaloneDevice, prettify_codename,
 };
 use openlogi_core::hid::{DisableKeysMask, DisableKeysState, HidppOperation};
+use openlogi_core::microphone::{
+    GainStage, Microphone, MicrophoneChange, MicrophoneControls, MicrophoneError, MilliDecibels,
+};
 use openlogi_core::single_instance::{self, InstanceError, Role};
 use openlogi_fixture::{DeviceProfile, FixtureError, ProfileDeviceSettings, ProfileSetting};
 use openlogi_hid::{
@@ -413,6 +416,8 @@ struct State {
     disable_keys_reads: u64,
     disable_keys_writes: u64,
     reload_calls: u64,
+    /// A scripted Yeti whose control writes persist.
+    microphone: Microphone,
 }
 
 impl State {
@@ -451,6 +456,7 @@ impl State {
             disable_keys_reads: 0,
             disable_keys_writes: 0,
             reload_calls: 0,
+            microphone: demo_yeti(),
         })
     }
 
@@ -978,6 +984,55 @@ fn snapshot_of(state: &State) -> AgentSnapshot {
         pairing: state.phase.clone(),
         foreground: state.foreground(),
         lights: Vec::new(),
+        microphones: vec![state.microphone.clone()],
+    }
+}
+
+/// The scripted Yeti, with the ranges the real one reports.
+fn demo_yeti() -> Microphone {
+    let stage = |level, min, max| GainStage {
+        level: MilliDecibels::new(level),
+        min: MilliDecibels::new(min),
+        max: MilliDecibels::new(max),
+    };
+    Microphone {
+        id: "mock:yeti".into(),
+        vendor_id: 0x046d,
+        product_id: 0x0ab7,
+        name: "Yeti".into(),
+        registry_model_id: Some("0ab7".into()),
+        controls: MicrophoneControls {
+            gain: Some(stage(12_000, -12_000, 21_000)),
+            muted: Some(false),
+            headphone_volume: Some(stage(0, -40_063, 0)),
+            headphones_muted: Some(false),
+            monitoring: Some(true),
+            monitoring_level: Some(stage(-474, -17_625, 12_000)),
+        },
+    }
+}
+
+/// Apply `change` to the scripted microphone, clamping levels as the device does.
+fn apply_to_mock(
+    controls: &mut MicrophoneControls,
+    change: MicrophoneChange,
+) -> Result<(), MicrophoneError> {
+    fn level(stage: &mut Option<GainStage>, value: MilliDecibels) -> Result<(), MicrophoneError> {
+        let stage = stage.as_mut().ok_or(MicrophoneError::NoSuchControl)?;
+        stage.level = stage.clamp(value);
+        Ok(())
+    }
+    fn switch(slot: &mut Option<bool>, on: bool) -> Result<(), MicrophoneError> {
+        *slot.as_mut().ok_or(MicrophoneError::NoSuchControl)? = on;
+        Ok(())
+    }
+    match change {
+        MicrophoneChange::Gain(value) => level(&mut controls.gain, value),
+        MicrophoneChange::Muted(on) => switch(&mut controls.muted, on),
+        MicrophoneChange::HeadphoneVolume(value) => level(&mut controls.headphone_volume, value),
+        MicrophoneChange::HeadphonesMuted(on) => switch(&mut controls.headphones_muted, on),
+        MicrophoneChange::Monitoring(on) => switch(&mut controls.monitoring, on),
+        MicrophoneChange::MonitoringLevel(value) => level(&mut controls.monitoring_level, value),
     }
 }
 
@@ -1293,6 +1348,21 @@ impl Agent for MockAgent {
     ) -> Result<SavedConfigVerdict, ConfigReloadError> {
         info!("reload_saved_config_with_verdict (accepted no-op in the mock)");
         Ok(SavedConfigVerdict::Accepted)
+    }
+
+    async fn set_microphone(
+        self,
+        _: Context,
+        id: String,
+        change: MicrophoneChange,
+    ) -> Result<Microphone, MicrophoneError> {
+        let mut state = self.state.lock().await;
+        if state.microphone.id != id {
+            return Err(MicrophoneError::NotConnected);
+        }
+        apply_to_mock(&mut state.microphone.controls, change)?;
+        info!(?change, "set_microphone");
+        Ok(state.microphone.clone())
     }
     async fn observe_notices(self, _: Context, since: Generation) -> NoticeObservation {
         if since == 0

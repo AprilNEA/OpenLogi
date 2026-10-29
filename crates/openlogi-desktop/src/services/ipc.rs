@@ -1257,6 +1257,7 @@ mod tests {
             pairing: None,
             foreground: ForegroundApps::default(),
             lights: Vec::new(),
+            microphones: Vec::new(),
         }
     }
 
