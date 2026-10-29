@@ -75,14 +75,22 @@ struct Key {
     scan: u16,
 }
 
-impl From<u16> for Key {
+impl Key {
     /// A virtual key posted alone, with scan code 0.
-    fn from(vk: u16) -> Self {
+    ///
+    /// Only for a key that is not extended: [`key_input`] derives the extended
+    /// flag from the virtual key alone, so an extended key built this way would
+    /// go out flagged with no scan code — the form that loses the Shift
+    /// modifier (#1895). Extended keys come from [`Self::for_vk`] or
+    /// [`Self::for_usage`], which look their scan code up.
+    fn plain(vk: u16) -> Self {
+        debug_assert!(
+            !is_extended_key(vk),
+            "an extended key posted with scan code 0 loses the shift modifier (#1895)"
+        );
         Self { vk, scan: 0 }
     }
-}
 
-impl Key {
     /// The key for `usage` under `layout`, or `None` when the usage has no
     /// Windows virtual key.
     ///
@@ -94,7 +102,7 @@ impl Key {
     fn for_usage(usage: KeyboardUsage, layout: ForegroundLayout) -> Option<Self> {
         let vk = super::hid_usage_to_windows(usage.code())?;
         if usage.ascii_char().is_none() && !is_extended_key(vk) {
-            return Some(Self::from(vk));
+            return Some(Self::plain(vk));
         }
         Some(Self {
             vk,
@@ -102,8 +110,7 @@ impl Key {
         })
     }
 
-    /// The key for a bare virtual key, as `post_key`'s modifier list and
-    /// `NativeAction` pass it.
+    /// The key for a bare virtual key, as `post_vk` and `held_key` pass it.
     ///
     /// Extended keys get the scan code `layout` gives them; every other key is
     /// posted alone, as before.
@@ -114,7 +121,7 @@ impl Key {
                 scan: layout.scan_code(vk),
             };
         }
-        Self::from(vk)
+        Self::plain(vk)
     }
 }
 
@@ -222,7 +229,7 @@ fn combo(shortcut: Shortcut) -> Result<KeyCombo, u16> {
 fn press_shortcut(shortcut: Shortcut) {
     match combo(shortcut) {
         Ok(combo) => press_combo(&combo),
-        Err(vk) => post_key(vk, &[]),
+        Err(vk) => post_vk(vk, &[]),
     }
 }
 
@@ -231,19 +238,19 @@ fn press_shortcut(shortcut: Shortcut) {
 /// synthesis (see the comment below) and is skipped.
 fn dispatch_native(native: NativeAction) {
     match native {
-        NativeAction::MissionControl | NativeAction::AppExpose => post_key(VK_TAB, &[VK_LWIN]),
-        NativeAction::PreviousDesktop => post_key(VK_LEFT, &[VK_LWIN, VK_CONTROL]),
-        NativeAction::NextDesktop => post_key(VK_RIGHT, &[VK_LWIN, VK_CONTROL]),
-        NativeAction::ShowDesktop => post_key(VK_D, &[VK_LWIN]),
-        NativeAction::LaunchpadShow => post_key(VK_LWIN, &[]),
-        NativeAction::LockScreen => post_key(VK_L, &[VK_LWIN]),
+        NativeAction::MissionControl | NativeAction::AppExpose => post_vk(VK_TAB, &[VK_LWIN]),
+        NativeAction::PreviousDesktop => post_vk(VK_LEFT, &[VK_LWIN, VK_CONTROL]),
+        NativeAction::NextDesktop => post_vk(VK_RIGHT, &[VK_LWIN, VK_CONTROL]),
+        NativeAction::ShowDesktop => post_vk(VK_D, &[VK_LWIN]),
+        NativeAction::LaunchpadShow => post_vk(VK_LWIN, &[]),
+        NativeAction::LockScreen => post_vk(VK_L, &[VK_LWIN]),
         // Win+PrtScn saves a full-screen capture straight to
         // `Pictures\Screenshots` with no further click, like ⌘⇧3 on macOS.
-        NativeAction::Screenshot => post_key(VK_SNAPSHOT, &[VK_LWIN]),
+        NativeAction::Screenshot => post_vk(VK_SNAPSHOT, &[VK_LWIN]),
         // Win+Shift+S opens the snip overlay, which waits for a region. It
         // used to serve `Screenshot` too, so the two actions behaved the
         // same (#1864).
-        NativeAction::CaptureRegion => post_key(VK_S, &[VK_LWIN, VK_SHIFT]),
+        NativeAction::CaptureRegion => post_vk(VK_S, &[VK_LWIN, VK_SHIFT]),
         // Suspending reliably needs `SetSuspendState` (powrprof.dll), which
         // hibernates instead when hibernation is enabled — no clean win from
         // a background agent, so the action is skipped on Windows for now.
@@ -255,12 +262,12 @@ fn dispatch_native(native: NativeAction) {
 
 fn dispatch_media(key: MediaKey) {
     match key {
-        MediaKey::PlayPause => post_key(VK_MEDIA_PLAY_PAUSE, &[]),
-        MediaKey::NextTrack => post_key(VK_MEDIA_NEXT_TRACK, &[]),
-        MediaKey::PrevTrack => post_key(VK_MEDIA_PREV_TRACK, &[]),
-        MediaKey::VolumeUp => post_key(VK_VOLUME_UP, &[]),
-        MediaKey::VolumeDown => post_key(VK_VOLUME_DOWN, &[]),
-        MediaKey::Mute => post_key(VK_VOLUME_MUTE, &[]),
+        MediaKey::PlayPause => post_vk(VK_MEDIA_PLAY_PAUSE, &[]),
+        MediaKey::NextTrack => post_vk(VK_MEDIA_NEXT_TRACK, &[]),
+        MediaKey::PrevTrack => post_vk(VK_MEDIA_PREV_TRACK, &[]),
+        MediaKey::VolumeUp => post_vk(VK_VOLUME_UP, &[]),
+        MediaKey::VolumeDown => post_vk(VK_VOLUME_DOWN, &[]),
+        MediaKey::Mute => post_vk(VK_VOLUME_MUTE, &[]),
     }
 }
 
@@ -298,9 +305,22 @@ fn post_click(button: MouseButton) {
     send_inputs(&[mouse_input(down, data), mouse_input(up, data)]);
 }
 
-fn post_key(key: impl Into<Key>, modifiers: &[u16]) {
-    let key = key.into();
+/// Post the already-resolved key `key` with `modifiers` held around it.
+fn post_key(key: Key, modifiers: &[u16]) {
+    post_key_in(key, modifiers, ForegroundLayout::current());
+}
+
+/// Post the bare virtual key `vk` with `modifiers` held around it.
+///
+/// The key goes through [`Key::for_vk`] for the same reason the modifiers do:
+/// an extended key needs its hardware scan code, or Windows treats the press as
+/// an unidentified keyboard and drops the modifiers (#1895).
+fn post_vk(vk: u16, modifiers: &[u16]) {
     let layout = ForegroundLayout::current();
+    post_key_in(Key::for_vk(vk, layout), modifiers, layout);
+}
+
+fn post_key_in(key: Key, modifiers: &[u16], layout: ForegroundLayout) {
     let mut inputs = Vec::with_capacity(modifiers.len() * 2 + 2);
     for modifier in modifiers {
         inputs.push(key_input(Key::for_vk(*modifier, layout), false));
@@ -503,10 +523,10 @@ mod tests {
     };
 
     use super::{
-        ForegroundLayout, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, Key, VK_BROWSER_BACK,
-        VK_BROWSER_FORWARD, VK_DELETE, VK_DOWN, VK_END, VK_HOME, VK_INSERT, VK_LEFT, VK_LWIN,
-        VK_NEXT, VK_PRIOR, VK_RIGHT, VK_SHIFT, VK_UP, combo, is_extended_key, key_input,
-        send_inputs,
+        ForegroundLayout, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY,
+        KEYEVENTF_KEYUP, Key, VK_BROWSER_BACK, VK_BROWSER_FORWARD, VK_DELETE, VK_DOWN, VK_END,
+        VK_HOME, VK_INSERT, VK_LEFT, VK_LWIN, VK_NEXT, VK_PRIOR, VK_RIGHT, VK_SHIFT, VK_UP, combo,
+        is_extended_key, key_input, send_inputs,
     };
 
     fn usage(label: &str) -> KeyboardUsage {
@@ -713,10 +733,41 @@ mod tests {
     #[test]
     fn key_input_leaves_plain_keys_alone() {
         // SAFETY: `key_input` fully initialises the `INPUT` it returns.
-        let ki = unsafe { key_input(Key::from(u16::from(b'B')), false).Anonymous.ki };
+        let ki = unsafe { key_input(Key::plain(u16::from(b'B')), false).Anonymous.ki };
         assert_eq!(ki.wVk, u16::from(b'B'));
         assert_eq!(ki.wScan, 0);
         assert_eq!(ki.dwFlags & KEYEVENTF_EXTENDEDKEY, 0);
+    }
+
+    /// Every production path that posts an extended key has to build it with
+    /// [`Key::for_vk`], because [`key_input`] takes the flag from the virtual
+    /// key but the scan code from the `Key`. This is the shape the previous
+    /// head sent for `PreviousDesktop`, `NextDesktop` and `LaunchpadShow`: the
+    /// flag with no scan code, which no keyboard produces (#1895).
+    ///
+    /// `Key::plain` refuses that shape in a debug build, so a call site that
+    /// skips `for_vk` trips this assertion before it can ship.
+    #[test]
+    #[should_panic(expected = "loses the shift modifier")]
+    fn plain_key_refuses_an_extended_virtual_key() {
+        let _ = Key::plain(VK_RIGHT);
+    }
+
+    /// The control of the #1895 regression test has to be the pre-fix form: the
+    /// virtual key with no scan code and no extended flag. `key_input` cannot
+    /// produce it, so the control builds its own `INPUT`; if that ever starts
+    /// carrying the flag, the control stops proving anything and the guard
+    /// below goes quiet.
+    #[test]
+    fn pre_fix_control_carries_no_flag_and_no_scan_code() {
+        // SAFETY: `pre_fix_input` fully initialises the `INPUT` it returns.
+        let down = unsafe { pre_fix_input(VK_RIGHT, false).Anonymous.ki };
+        assert_eq!(down.wVk, VK_RIGHT);
+        assert_eq!(down.wScan, 0);
+        assert_eq!(down.dwFlags, 0, "the control must not be flagged");
+        // SAFETY: as above.
+        let up = unsafe { pre_fix_input(VK_RIGHT, true).Anonymous.ki };
+        assert_eq!(up.dwFlags, KEYEVENTF_KEYUP);
     }
 
     /// One key event as the system-wide keyboard hook saw it.
@@ -832,29 +883,40 @@ mod tests {
             return original;
         }
         send_inputs(&[
-            key_input(Key::from(VK_NUMLOCK), false),
-            key_input(Key::from(VK_NUMLOCK), true),
+            key_input(Key::plain(VK_NUMLOCK), false),
+            key_input(Key::plain(VK_NUMLOCK), true),
         ]);
         std::thread::sleep(std::time::Duration::from_millis(50));
         assert_eq!(num_lock_on(), on, "could not switch Num Lock");
         original
     }
 
-    /// The pre-fix key: the virtual key alone, with no scan code, and therefore
-    /// no extended flag either. The regression test injects it as the control,
-    /// so the assertion below is not vacuous.
-    fn pre_fix_key(vk: u16) -> Key {
-        Key { vk, scan: 0 }
+    /// The pre-fix form: the keyboard `INPUT` this backend built before #1895 —
+    /// the virtual key, scan code 0, and no extended flag.
+    ///
+    /// `key_input` cannot produce it, because it derives the extended flag from
+    /// the virtual key alone. The regression test injects this form as the
+    /// control, so the assertion below is not vacuous.
+    fn pre_fix_input(vk: u16, key_up: bool) -> INPUT {
+        INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: vk,
+                    wScan: 0,
+                    dwFlags: if key_up { KEYEVENTF_KEYUP } else { 0 },
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        }
     }
 
-    /// Inject `Shift+Right` with the given key builder and return the key
+    /// Inject `Shift+Right` with the given input builder and return the key
     /// events the hook saw.
-    fn inject_shift_right(build: impl Fn(u16) -> Key) -> Vec<Observed> {
+    fn inject_shift_right(build: impl Fn(u16, bool) -> INPUT) -> Vec<Observed> {
         OBSERVED.lock().expect("event log poisoned").clear();
-        send_inputs(&[
-            key_input(build(VK_SHIFT), false),
-            key_input(build(VK_RIGHT), false),
-        ]);
+        send_inputs(&[build(VK_SHIFT, false), build(VK_RIGHT, false)]);
         for _ in 0..200 {
             pump_messages();
             let seen = OBSERVED.lock().expect("event log poisoned");
@@ -868,10 +930,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         // Let the modifiers go again.
-        send_inputs(&[
-            key_input(build(VK_RIGHT), true),
-            key_input(build(VK_SHIFT), true),
-        ]);
+        send_inputs(&[build(VK_RIGHT, true), build(VK_SHIFT, true)]);
         OBSERVED.lock().expect("event log poisoned").clone()
     }
 
@@ -914,8 +973,8 @@ mod tests {
         assert!(!hook.is_null(), "could not install the keyboard hook");
 
         let layout = ForegroundLayout::current();
-        let control = inject_shift_right(pre_fix_key);
-        let fixed = inject_shift_right(|vk| Key::for_vk(vk, layout));
+        let control = inject_shift_right(pre_fix_input);
+        let fixed = inject_shift_right(|vk, up| key_input(Key::for_vk(vk, layout), up));
 
         // Drop the hook.
         // SAFETY: `hook` came from `SetWindowsHookExW` and is removed once.
