@@ -25,7 +25,7 @@ use openlogi_hid::{
     BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
     ForceSensingInfo, HapticRestore, HapticRestoreOutcome, HapticWaveform, HidppOperation,
     LightCommand, OnboardState, PointerSpeed, ReceiverSelector, ReportRate, ReportRateInfo,
-    ScrollWheelMode, SmartShiftStatus, WriteError,
+    ScrollWheelMode, SidetoneLevel, SmartShiftStatus, WriteError,
 };
 use openlogi_ipc::transport;
 use openlogi_ipc::{
@@ -455,6 +455,28 @@ impl Agent for AgentServer {
     ) -> Result<SavedConfigVerdict, ConfigReloadError> {
         let revision = self.reload(Some(&saved)).await?;
         Ok(saved_config_verdict(&saved, revision))
+    }
+
+    async fn read_sidetone(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<SidetoneLevel, WriteError> {
+        self.shared
+            .device(&route)
+            .run(HidppOperation::ReadSidetone, |c| async move {
+                openlogi_hid::get_sidetone_on(&c).await
+            })
+            .await
+    }
+
+    async fn set_sidetone(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        level: SidetoneLevel,
+    ) -> Result<SidetoneLevel, WriteError> {
+        self.shared.set_sidetone(&route, level).await
     }
 
     async fn observe_notices(self, _: Context, since: Generation) -> NoticeObservation {

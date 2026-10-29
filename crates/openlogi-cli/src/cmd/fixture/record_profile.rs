@@ -346,6 +346,10 @@ async fn capture_hidpp_settings(
         || agent::call(client.read_force_sensing(context::current(), source_route.clone())),
     )
     .await?;
+    let sidetone = gated_read("sidetone", device.online, capabilities.sidetone, || {
+        agent::call(client.read_sidetone(context::current(), source_route.clone()))
+    })
+    .await?;
 
     Ok(ProfileDeviceSettings {
         route: profile_route,
@@ -359,6 +363,7 @@ async fn capture_hidpp_settings(
         pointer_speed,
         force_sensing,
         disable_keys,
+        sidetone,
         lighting: profile_support(capabilities.lighting),
         light: ProfileSupport::Unsupported,
     })
@@ -440,6 +445,7 @@ fn capture_standalone(source: &StandaloneDevice) -> Result<ProfileCaptureParts> 
         pointer_speed: ProfileSetting::Unsupported,
         force_sensing: ProfileSetting::Unsupported,
         disable_keys: ProfileSetting::Unsupported,
+        sidetone: ProfileSetting::Unsupported,
         lighting: ProfileSupport::Unsupported,
         light: profile_support(light_supported),
     };

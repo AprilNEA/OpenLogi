@@ -22,7 +22,7 @@ use openlogi_core::hid::{
     BacklightChange, BacklightState, DeviceRoute, DisableKeysMask, DisableKeysState, Dpi, DpiInfo,
     EasySwitchHosts, FnLockState, ForceSensingInfo, LightCommand, OnboardState, PairingError,
     PasskeyMethod, PointerSpeed, ReceiverSelector, ReportRate, ReportRateInfo, ScrollWheelMode,
-    SmartShiftStatus, WriteError,
+    SidetoneLevel, SmartShiftStatus, WriteError,
 };
 use serde::{Deserialize, Serialize};
 pub use succession::Identity;
@@ -158,7 +158,10 @@ pub use succession::Identity;
 ///      `PreviousDpiPreset`, `DpiShift` and `GShift` actions,
 ///      `Agent::read_onboard`, `HidppOperation::ReadOnboard` and
 ///      `PairingFailure::ReceiverFull` appended — G-series onboard memory,
-///      host mode and G-Shift.
+///      host mode and G-Shift. `Capabilities::sidetone`,
+///      `HidppOperation::{ReadSidetone, WriteSidetone}` and
+///      `Agent::{read_sidetone, set_sidetone}` appended after them — a
+///      headset's HID++ `0x8300` sidetone level, as a [`SidetoneLevel`].
 pub const PROTOCOL_VERSION: u32 = 43;
 
 /// Environment variable through which the agent hands a supervised helper the
@@ -966,4 +969,14 @@ pub trait Agent {
 
     /// Read a G-series mouse's onboard memory.
     async fn read_onboard(route: DeviceRoute) -> Result<OnboardState, WriteError>;
+
+    /// Read the sidetone level of the headset on `route` (HID++ `0x8300`).
+    async fn read_sidetone(route: DeviceRoute) -> Result<SidetoneLevel, WriteError>;
+    /// Write the sidetone level of the headset on `route` now and answer with
+    /// the level the headset confirms. The headset keeps it across power
+    /// cycles, so nothing is saved to the config.
+    async fn set_sidetone(
+        route: DeviceRoute,
+        level: SidetoneLevel,
+    ) -> Result<SidetoneLevel, WriteError>;
 }

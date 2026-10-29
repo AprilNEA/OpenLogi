@@ -28,8 +28,8 @@ use openlogi_core::device_order::{DeviceIdentity, DeviceStableId, PhysicalDevice
 use openlogi_hid::{
     BacklightChange, BacklightState, CaptureChannelSlot, ChannelPool, ChannelRegistry,
     DeviceIoGate, DeviceRoute, DisableKeysMask, Dpi, EasySwitchHosts, FnLockState,
-    ForceSensingInfo, HidppOperation, HostOs, PointerSpeed, ReportRate, ReportRateInfo, WriteError,
-    commands_for_light_settings, is_reserved_keyboard_control,
+    ForceSensingInfo, HidppOperation, HostOs, PointerSpeed, ReportRate, ReportRateInfo,
+    SidetoneLevel, WriteError, commands_for_light_settings, is_reserved_keyboard_control,
 };
 #[cfg(test)]
 use openlogi_ipc::ChosenLight;
@@ -177,6 +177,8 @@ pub struct SharedHandles {
     pointer_speeds: Arc<PointerSpeeds>,
     /// Orders every path's press-force writes per force-sensing device.
     force_sensing_order: WriteOrder,
+    /// Orders the GUI's sidetone writes per headset.
+    sidetone_order: WriteOrder,
     /// Orders the GUI's backlight writes per keyboard.
     backlight_order: WriteOrder,
     /// Orders host renames per device.
@@ -345,6 +347,26 @@ impl SharedHandles {
                 &ticket,
                 |c| async move { openlogi_hid::set_force_sensing_on(&c, force).await },
                 |c| async move { openlogi_hid::get_force_sensing_on(&c).await },
+            )
+            .await
+    }
+
+    /// Write `level` to the headset at `route` and return the level it
+    /// confirms. When a newer sidetone write for the headset is requested
+    /// before this one gets its turn, this one reads the headset instead of
+    /// writing a level that is about to be replaced.
+    pub async fn set_sidetone(
+        &self,
+        route: &DeviceRoute,
+        level: SidetoneLevel,
+    ) -> Result<SidetoneLevel, WriteError> {
+        let ticket = self.sidetone_order.request(route);
+        self.device(route)
+            .run_in_turn(
+                HidppOperation::WriteSidetone,
+                &ticket,
+                |c| async move { openlogi_hid::set_sidetone_on(&c, level).await },
+                |c| async move { openlogi_hid::get_sidetone_on(&c).await },
             )
             .await
     }
@@ -684,6 +706,7 @@ impl Orchestrator {
             report_rate_order: WriteOrder::default(),
             pointer_speeds: Arc::default(),
             force_sensing_order: WriteOrder::default(),
+            sidetone_order: WriteOrder::default(),
             backlight_order: WriteOrder::default(),
             host_name_order: WriteOrder::default(),
             follower_cookie_order: WriteOrder::default(),
