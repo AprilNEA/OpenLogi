@@ -22,6 +22,7 @@
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::brand::is_openlogi_foreground_id;
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
+use openlogi_core::microphone::Microphone;
 use openlogi_hook::Hook;
 use openlogi_ipc::{
     AgentSnapshot, AgentStatus, FlowStatus, ForegroundApps, FoundDevice, Generation,
@@ -80,6 +81,7 @@ impl ObservableState {
                 foreground: ForegroundApps::default(),
                 lights: Vec::new(),
                 flow: FlowStatus::default(),
+                microphones: Vec::new(),
             },
         });
         Self {
@@ -210,6 +212,38 @@ impl ObservableState {
                 return false;
             }
             snapshot.flow = flow;
+            true
+        });
+    }
+
+    /// Publish the microphones and what their controls read, as the
+    /// microphone watcher last found them.
+    pub fn set_microphones(&self, microphones: Vec<Microphone>) {
+        self.update(|snapshot| {
+            if snapshot.microphones == microphones {
+                return false;
+            }
+            snapshot.microphones = microphones;
+            true
+        });
+    }
+
+    /// Publish what one microphone read back after a write, so a client sees
+    /// the result before the watcher's next read. A microphone the snapshot
+    /// does not list (it was unplugged meanwhile) is left out.
+    pub fn set_microphone(&self, microphone: Microphone) {
+        self.update(|snapshot| {
+            let Some(listed) = snapshot
+                .microphones
+                .iter_mut()
+                .find(|listed| listed.id == microphone.id)
+            else {
+                return false;
+            };
+            if *listed == microphone {
+                return false;
+            }
+            *listed = microphone;
             true
         });
     }

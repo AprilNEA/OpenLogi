@@ -24,6 +24,7 @@ use openlogi_core::hid::{
     PasskeyMethod, PointerSpeed, ReceiverSelector, ReportRate, ReportRateInfo, ScrollWheelMode,
     SidetoneLevel, SmartShiftStatus, WriteError,
 };
+use openlogi_core::microphone::{Microphone, MicrophoneChange, MicrophoneError};
 use serde::{Deserialize, Serialize};
 pub use succession::Identity;
 
@@ -173,6 +174,10 @@ pub use succession::Identity;
 ///      `HidppOperation::{ReadSidetone, WriteSidetone}` and
 ///      `Agent::{read_sidetone, set_sidetone}` appended after them — a
 ///      headset's HID++ `0x8300` sidetone level, as a [`SidetoneLevel`].
+///      `AgentSnapshot::microphones`, `DeviceKind::Microphone` and
+///      `Agent::set_microphone` appended after those — USB microphones
+///      (the Blue Yeti) and their gain, mute, headphone and monitoring
+///      controls.
 pub const PROTOCOL_VERSION: u32 = 44;
 
 /// Environment variable through which the agent hands a supervised helper the
@@ -298,6 +303,10 @@ pub struct AgentSnapshot {
     /// Whether cross-machine Flow is enabled, and the coarse link state of
     /// each configured peer. See [`FlowStatus`].
     pub flow: FlowStatus,
+    /// The recognized USB microphones connected now, and what each of their
+    /// controls reads. Re-read about once a second, so a change made on the
+    /// microphone or in the system's sound settings shows up too.
+    pub microphones: Vec<Microphone>,
 }
 
 /// A standalone light as it reported itself to the agent.
@@ -1042,4 +1051,10 @@ pub trait Agent {
         route: DeviceRoute,
         level: SidetoneLevel,
     ) -> Result<SidetoneLevel, WriteError>;
+    /// Apply `change` to the microphone [`Microphone::id`] names and answer
+    /// with what it reads back, which the next snapshot carries too.
+    async fn set_microphone(
+        id: String,
+        change: MicrophoneChange,
+    ) -> Result<Microphone, MicrophoneError>;
 }

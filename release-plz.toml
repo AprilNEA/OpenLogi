@@ -101,6 +101,12 @@ version_group = "openlogi"
 name = "openlogi-camera"
 version_group = "openlogi"
 
+# USB microphone controls. Published and grouped for the same reason as
+# `openlogi-camera`: `openlogi-cli` depends on it by an exact version.
+[[package]]
+name = "openlogi-audio"
+version_group = "openlogi"
+
 [[package]]
 name = "openlogi-cli"
 version_group = "openlogi"

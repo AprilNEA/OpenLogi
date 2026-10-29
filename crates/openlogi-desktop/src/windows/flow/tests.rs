@@ -95,6 +95,7 @@ fn snapshot() -> AgentSnapshot {
                 },
             ],
         },
+        microphones: Vec::new(),
     }
 }
 

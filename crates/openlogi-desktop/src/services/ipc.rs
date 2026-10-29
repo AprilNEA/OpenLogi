@@ -1309,6 +1309,7 @@ mod tests {
             foreground: ForegroundApps::default(),
             lights: Vec::new(),
             flow: openlogi_ipc::FlowStatus::default(),
+            microphones: Vec::new(),
         }
     }
 
