@@ -353,11 +353,11 @@ mod tests {
             theme: ActionRingTheme::Porcelain,
             ..placement(cursor, rect)
         };
-        // 420 px at 100%, centred on the cursor.
+        // 400 px at 100%, centred on the cursor.
         let bounds = porcelain((900, 600), (0, 0, 1920, 1080)).bounds(96);
-        assert_eq!(bounds.origin, point(DevicePixels(690), DevicePixels(390)));
-        assert_eq!(bounds.size, size(DevicePixels(420), DevicePixels(420)));
-        // 1280×720 at 200%: 840 px would overhang, so it takes the 720 px height.
+        assert_eq!(bounds.origin, point(DevicePixels(700), DevicePixels(400)));
+        assert_eq!(bounds.size, size(DevicePixels(400), DevicePixels(400)));
+        // 1280×720 at 200%: 800 px would overhang, so it takes the 720 px height.
         let bounds = porcelain((640, 360), (0, 0, 1280, 720)).bounds(192);
         assert_eq!(bounds.origin, point(DevicePixels(280), DevicePixels(0)));
         assert_eq!(bounds.size, size(DevicePixels(720), DevicePixels(720)));

@@ -640,8 +640,7 @@ fn porcelain_backdrop() -> Div {
         .child(
             centred_circle(2.0 * porcelain::INSET_RING * scale)
                 .border_1()
-                .border_color(porcelain::inset_ring_border())
-                .shadow(porcelain::inset_ring_shadow()),
+                .border_color(porcelain::inset_ring_border()),
         )
         .child(
             centred_circle(porcelain::HUB * scale)
@@ -662,8 +661,8 @@ fn porcelain_backdrop() -> Div {
         )
 }
 
-/// A Porcelain disc at the preview's scale: at rest, or as the ring shows
-/// the hovered one, its 2 px lift aside.
+/// A Porcelain disc at the preview's scale: at rest, or pressed in as the
+/// ring shows the hovered one, its 1.5 px sink aside.
 fn preview_disc(hovered: bool) -> Div {
     let scale = SlotShape::Disc.scale();
     let (border, shadow) = if hovered {

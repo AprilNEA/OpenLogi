@@ -1,8 +1,10 @@
-//! The `Porcelain` theme: ceramic discs with their captions under them, on a
-//! light platter around a hub that names the hovered action. A terracotta
-//! needle inside the platter's inset ring turns to point at the hovered disc,
-//! the disc and its caption lift a little under the pointer, and a click
-//! presses the disc in and draws a short stroke under its caption.
+//! The `Porcelain` theme: ceramic discs with their captions under them, on
+//! one glazed platter that holds the whole ring, around a hub that names the
+//! hovered action and closes the ring. A terracotta needle inside the
+//! platter's inset ring turns to point at the hovered disc, the disc presses
+//! in under the pointer as its caption warms, a click presses it further and
+//! draws a short stroke under the caption, and the ring opens by gathering
+//! its nodes out from the centre and closes by gathering them back.
 //!
 //! The look at rest is [`openlogi_ui::ring_style::porcelain`], shared with
 //! the settings app's preview; everything that moves is here.
@@ -22,21 +24,23 @@ pub(super) use openlogi_ui::ring_style::porcelain::DESIGN_EDGE;
 use openlogi_ui::ring_style::porcelain::{
     DISC, DISC_GLYPH, HUB, HUB_GAP, HUB_GLYPH, HUB_LABEL, INSET_RING, LABEL, MARK_H, MARK_W,
     NEEDLE_INNER, NEEDLE_OUTER, NEEDLE_W, NODE_GAP, NODE_H, NODE_PAD_TOP, NODE_W, PLATTER, RADIUS,
-    accent, disc_border, disc_border_hovered, disc_fill, disc_shadow, disc_shadow_hovered,
-    hub_border, hub_fill, hub_shadow, ink, inset_ring_border, inset_ring_shadow, label,
-    label_hovered, muted, needle_highlight, platter_border, platter_fill, platter_shadow,
+    accent, close_ink, disc_border, disc_border_hovered, disc_fill, disc_shadow,
+    disc_shadow_hovered, hub_border, hub_fill, hub_shadow, hub_shadow_hovered, ink,
+    inset_ring_border, label, label_hovered, muted, needle_highlight, platter_border, platter_fill,
+    platter_shadow,
 };
 
 use super::motion::{
-    Presence, blend_shadows, ease_out_cubic, ellipse_path, hex, presence_at, slot_heading,
-    smooth_towards, wrap_to_pi,
+    Stage, blend_shadows, ease_out_cubic, ellipse_path, gather_shift, keyframes, slot_heading,
+    smooth_towards, stage_at, wrap_to_pi,
 };
 use super::{RingLook, RingView};
 use crate::ipc::OverlayCommand;
 
-/// How fast a disc and its caption lift and settle: the prototype's 190 ms
-/// ease, which this reaches about 95% of in three time constants.
-const HOVER_TAU: f32 = 0.09;
+/// How fast a disc, its caption and the hub press in and ease back: the
+/// prototype's 170 ms ease, which this reaches about 95% of in three time
+/// constants.
+const HOVER_TAU: f32 = 0.08;
 /// How fast the hub opens around the hovered action's glyph and name.
 const HUB_TAU: f32 = 0.10;
 /// How fast the needle shows and hides: the prototype's 140 ms fade.
@@ -51,26 +55,28 @@ const OVERSHOOT_AT: f32 = 0.78;
 /// caption for this long.
 const PRESS_SECS: f32 = 0.24;
 const MARK_SECS: f32 = 0.30;
-/// The press: at each point of it, how far the disc sinks and how much of
-/// its size it keeps. Down and smaller a third of the way in, back up past
-/// rest at three quarters, at rest at the end.
+/// The click's press: at each point of it, how far the disc sinks and how
+/// much of its size it keeps. From rest it goes in and a touch smaller a
+/// third of the way in, and eases back out by three quarters.
 const PRESS_KEYS: [(f32, f32, f32); 4] = [
     (0.0, 0.0, 1.0),
-    (0.33, 1.4, 0.96),
-    (0.75, -1.0, 1.008),
+    (0.33, 2.5, 0.955),
+    (0.75, 0.8, 0.99),
     (1.0, 0.0, 1.0),
 ];
 /// The stroke: at each point of it, how wide it is of its full width and
 /// its alpha. It grows in fast and shrinks away.
 const MARK_KEYS: [(f32, f32, f32); 3] = [(0.0, 0.4, 0.0), (0.3, 1.0, 0.85), (1.0, 0.65, 0.0)];
-/// How far a hovered disc and its caption rise.
-const LIFT: f32 = 2.0;
 /// Segments in each round end of the needle.
 const CAP_STEPS: u8 = 8;
+const _: () = assert!(PLATTER * 2.0 <= DESIGN_EDGE, "the platter fits the window");
 
-/// Hover, needle, press and enter/exit clocks for one open ring.
+/// Hover, needle, press and open/close clocks for one open ring.
 pub(super) struct Motion {
     hover_t: [f32; 8],
+    /// Whether the pointer is on the hub, and how far the hub has pressed in.
+    hub_hovered: bool,
+    hub_press_t: f32,
     /// Where the needle points, and the turn it is making to get there.
     aim: f32,
     turn: Option<Turn>,
@@ -99,6 +105,8 @@ impl Default for Motion {
         let now = Instant::now();
         Self {
             hover_t: [0.0; 8],
+            hub_hovered: false,
+            hub_press_t: 0.0,
             // The prototype's needle starts pointing right, unseen.
             aim: slot_heading(ActionRingSlot::Right),
             turn: None,
@@ -136,15 +144,20 @@ impl Motion {
     fn advance(&mut self, hovered: Option<ActionRingSlot>, now: Instant, reduce: bool) {
         let dt = now.saturating_duration_since(self.last_tick).as_secs_f32();
         self.last_tick = now;
+        let ease = |current: f32, target: f32, tau: f32| {
+            if reduce {
+                target
+            } else {
+                smooth_towards(current, target, dt, tau)
+            }
+        };
         for slot in ActionRingSlot::ALL {
             let target = if hovered == Some(slot) { 1.0 } else { 0.0 };
             let index = slot.index();
-            self.hover_t[index] = if reduce {
-                target
-            } else {
-                smooth_towards(self.hover_t[index], target, dt, HOVER_TAU)
-            };
+            self.hover_t[index] = ease(self.hover_t[index], target, HOVER_TAU);
         }
+        let hub_target = if self.hub_hovered { 1.0 } else { 0.0 };
+        self.hub_press_t = ease(self.hub_press_t, hub_target, HOVER_TAU);
         // A new heading starts a turn from wherever the needle shows this
         // frame, so a turn cut short carries on rather than jumping.
         if let Some(heading) = hovered.map(slot_heading)
@@ -159,20 +172,8 @@ impl Motion {
             });
         }
         let aim_target = if hovered.is_some() { 1.0 } else { 0.0 };
-        self.aim_t = if reduce {
-            aim_target
-        } else {
-            smooth_towards(self.aim_t, aim_target, dt, AIM_TAU)
-        };
-        self.hub_t = if reduce {
-            aim_target
-        } else {
-            smooth_towards(self.hub_t, aim_target, dt, HUB_TAU)
-        };
-    }
-
-    fn presence(&self, now: Instant, reduce: bool) -> Presence {
-        presence_at(self.born, self.close_started, now, reduce)
+        self.aim_t = ease(self.aim_t, aim_target, AIM_TAU);
+        self.hub_t = ease(self.hub_t, aim_target, HUB_TAU);
     }
 
     /// Where the needle points this frame: its heading, or the turn towards
@@ -194,13 +195,13 @@ impl Motion {
         }
     }
 
-    /// The pressed disc, while the press plays: its slot, how far it sinks
-    /// and how much of its size it keeps.
+    /// The pressed disc, while the click's press plays: its slot, how far it
+    /// sinks and how much of its size it keeps.
     fn press(&self, now: Instant, reduce: bool) -> Option<(ActionRingSlot, f32, f32)> {
         let (slot, started) = self.pressed.filter(|_| !reduce)?;
         let t = now.saturating_duration_since(started).as_secs_f32() / PRESS_SECS;
         (t < 1.0).then(|| {
-            let (sink, kept) = keyframes(&PRESS_KEYS, t);
+            let (sink, kept) = keyframes(&PRESS_KEYS, t, ease_out_cubic);
             (slot, sink, kept)
         })
     }
@@ -211,25 +212,15 @@ impl Motion {
         let (slot, started) = self.pressed.filter(|_| !reduce)?;
         let t = now.saturating_duration_since(started).as_secs_f32() / MARK_SECS;
         (t < 1.0).then(|| {
-            let (width, alpha) = keyframes(&MARK_KEYS, t);
+            let (width, alpha) = keyframes(&MARK_KEYS, t, ease_out_cubic);
             (slot, width, alpha)
         })
     }
-}
 
-/// The pair of values at `t` along `keys`, each `(at, a, b)` in order of
-/// `at` from 0 to 1, eased between the keys either side of `t`.
-fn keyframes(keys: &[(f32, f32, f32)], t: f32) -> (f32, f32) {
-    let t = t.clamp(0.0, 1.0);
-    for pair in keys.windows(2) {
-        if let [(at0, a0, b0), (at1, a1, b1)] = *pair
-            && t <= at1
-        {
-            let k = ease_out_cubic((t - at0) / (at1 - at0));
-            return (a0 + (a1 - a0) * k, b0 + (b1 - b0) * k);
-        }
+    /// How far open the ring is this frame.
+    fn stage(&self, now: Instant, reduce: bool) -> Stage {
+        stage_at(self.born, self.close_started, now, reduce)
     }
-    keys.last().map_or((0.0, 0.0), |&(_, a, b)| (a, b))
 }
 
 /// The panel's edge and how far the layout is scaled down to fit it. `fit`
@@ -269,6 +260,12 @@ impl Layout {
         )
     }
 
+    /// How far a node's content sits back towards the centre when the node
+    /// is `reach` of the way out.
+    fn gather_shift(self, slot: ActionRingSlot, reach: f32) -> (f32, f32) {
+        gather_shift(slot, RADIUS * self.fit, reach)
+    }
+
     /// The slot's centre, for tests that aim at it.
     #[cfg(test)]
     fn slot_center(self, slot: ActionRingSlot) -> Point<Pixels> {
@@ -300,12 +297,13 @@ impl RingView {
             unreachable!("porcelain_panel is only drawn for a Porcelain ring");
         };
         motion.advance(self.hovered, now, reduce);
-        let presence = motion.presence(now, reduce);
+        let stage = motion.stage(now, reduce);
         let hover_t = motion.hover_t;
         let needle = (motion.needle_angle(now, reduce), motion.aim_t);
         let press = motion.press(now, reduce);
         let mark = motion.mark(now, reduce);
         let hub_t = motion.hub_t;
+        let hub_press_t = motion.hub_press_t;
         let hovered = self
             .hovered
             .and_then(|slot| self.invocation.slots.get(&slot));
@@ -314,7 +312,8 @@ impl RingView {
         let nodes = ActionRingSlot::ALL
             .into_iter()
             .zip(hover_t)
-            .filter_map(|(slot, hover_t)| {
+            .zip(stage.nodes)
+            .filter_map(|((slot, hover_t), stage)| {
                 let playing_on =
                     |(at, a, b): (ActionRingSlot, f32, f32)| (at == slot).then_some((a, b));
                 let node = Node {
@@ -322,27 +321,33 @@ impl RingView {
                     hover_t,
                     press: press.and_then(playing_on),
                     mark: mark.and_then(playing_on),
-                    reduce,
+                    stage,
                 };
                 node_element(self, node, layout, cx)
             })
             .collect::<Vec<_>>();
+        let hub = Hub {
+            hovered_icon,
+            caption: hovered_caption,
+            open: hub_t,
+            press_t: hub_press_t,
+            dial: stage.dial,
+        };
 
         div()
             .id("ring-porcelain")
             .relative()
             .size(px(layout.edge))
-            .opacity(presence.opacity)
             .on_click(cx.listener(|this, _, window, cx| {
                 cx.stop_propagation();
                 let session_id = this.invocation.session_id;
                 this.close(OverlayCommand::Cancel { session_id }, window, cx);
             }))
-            .child(platter(layout, presence.scale))
-            .child(inset_ring(layout, presence.scale))
-            .child(needle_canvas(layout, presence.scale, needle, reduce))
+            .child(platter(layout, stage.dial))
+            .child(inset_ring(layout, stage.dial))
+            .child(needle_canvas(layout, stage.dial, needle, reduce))
             .children(nodes)
-            .child(hub(hovered_icon, hovered_caption, hub_t, layout, cx))
+            .child(hub_element(hub, layout, cx))
     }
 }
 
@@ -356,28 +361,29 @@ fn centred(layout: Layout, diameter: f32) -> gpui::Div {
         .rounded_full()
 }
 
-/// The glazed platter under everything, grown in with the ring.
-fn platter(layout: Layout, scale: f32) -> impl IntoElement {
+/// The glazed platter that holds the whole ring, grown in with it.
+fn platter(layout: Layout, (scale, opacity): (f32, f32)) -> impl IntoElement {
     centred(layout, 2.0 * PLATTER * layout.fit * scale)
         .bg(platter_fill())
         .border_1()
         .border_color(platter_border())
         .shadow(platter_shadow())
+        .opacity(opacity)
 }
 
 /// The thin ring inside the platter that the needle runs along.
-fn inset_ring(layout: Layout, scale: f32) -> impl IntoElement {
+fn inset_ring(layout: Layout, (scale, opacity): (f32, f32)) -> impl IntoElement {
     centred(layout, 2.0 * INSET_RING * layout.fit * scale)
         .border_1()
         .border_color(inset_ring_border())
-        .shadow(inset_ring_shadow())
+        .opacity(opacity)
 }
 
 /// The needle: a terracotta capsule just inside the inset ring, pointing at
-/// `angle` and shown `aim_t` of the way, over its shadow and with a lit tip.
+/// `angle` and shown `aim_t` of the way, with a lit tip.
 fn needle_canvas(
     layout: Layout,
-    scale: f32,
+    (scale, opacity): (f32, f32),
     (angle, aim_t): (f32, f32),
     reduce: bool,
 ) -> impl IntoElement {
@@ -387,31 +393,24 @@ fn needle_canvas(
             if !reduce {
                 window.request_animation_frame();
             }
-            if aim_t < 0.01 {
+            let shown = aim_t * opacity;
+            if shown < 0.01 {
                 return;
             }
             let center = bounds.center();
             let scale = scale * layout.fit;
-            let along = |radius: f32, drop: f32| {
+            let along = |radius: f32| {
                 point(
                     center.x + px(radius * scale * angle.cos()),
-                    center.y + px(radius * scale * angle.sin() + drop),
+                    center.y + px(radius * scale * angle.sin()),
                 )
             };
             let width = NEEDLE_W * scale;
-            let shadow_drop = 2.0 * scale;
-            for (drop, color) in [
-                (shadow_drop, hex(0xa74d_2cff).alpha(0.14 * aim_t)),
-                (0.0, accent().alpha(aim_t)),
-            ] {
-                if let Some(path) =
-                    capsule_path(along(NEEDLE_INNER, drop), along(NEEDLE_OUTER, drop), width)
-                {
-                    window.paint_path(path, color);
-                }
+            if let Some(path) = capsule_path(along(NEEDLE_INNER), along(NEEDLE_OUTER), width) {
+                window.paint_path(path, accent().alpha(shown));
             }
-            if let Some(tip) = ellipse_path(along(NEEDLE_OUTER, 0.0), width * 0.3, None) {
-                window.paint_path(tip, needle_highlight().alpha(0.9 * aim_t));
+            if let Some(tip) = ellipse_path(along(NEEDLE_OUTER), width * 0.3, None) {
+                window.paint_path(tip, needle_highlight().alpha(0.9 * shown));
             }
         },
     )
@@ -454,18 +453,20 @@ fn capsule_path(from: Point<Pixels>, to: Point<Pixels>, width: f32) -> Option<gp
 struct Node {
     slot: ActionRingSlot,
     hover_t: f32,
-    /// The press, while it plays on this node: how far the disc sinks and how
-    /// much of its size it keeps.
+    /// The click's press, while it plays on this node: how far the disc
+    /// sinks and how much of its size it keeps.
     press: Option<(f32, f32)>,
     /// The stroke, while it plays under this node: its width of the full one
     /// and its alpha.
     mark: Option<(f32, f32)>,
-    reduce: bool,
+    /// How far out from the centre the node is, its scale and its opacity.
+    stage: (f32, f32, f32),
 }
 
 /// One node: the hit box that stays put, and inside it the disc and caption
-/// that lift under the pointer, the disc pressed in by a click with the
-/// stroke it draws under the caption.
+/// that gather out from the centre as the ring opens, shade in under the
+/// pointer without moving, the disc pressed in by a click with the stroke it
+/// draws under the caption.
 fn node_element(
     view: &RingView,
     node: Node,
@@ -477,21 +478,22 @@ fn node_element(
         hover_t,
         press,
         mark,
-        reduce,
+        stage: (reach, scale, opacity),
     } = node;
     let presentation = view.invocation.slots.get(&slot)?;
     let icon_path = presentation.icon.asset_path();
     let caption = super::slot_caption(presentation);
     let (left, top) = layout.slot_origin(slot);
+    let (shift_x, shift_y) = layout.gather_shift(slot, reach);
     let (w, h) = layout.node_size();
     let fit = layout.fit;
     let session_id = view.invocation.session_id;
-    let rise = if reduce { 0.0 } else { LIFT * fit * hover_t };
+    // The pointer moves nothing: the hover is colour and shade alone. A
+    // click presses the disc in and back.
     let (sink, kept) = press.unwrap_or((0.0, 1.0));
-    let disc = DISC * fit * kept;
-    // The disc keeps its centre as it shrinks under the press.
-    let disc_top = NODE_PAD_TOP * fit + (DISC * fit - disc) / 2.0 - rise + sink * fit;
-    let caption_top = (NODE_PAD_TOP + DISC + NODE_GAP) * fit - rise;
+    let disc = DISC * fit * kept * scale;
+    let disc_top = NODE_PAD_TOP * fit + (DISC * fit - disc) / 2.0 + sink * fit;
+    let caption_top = (NODE_PAD_TOP + DISC + NODE_GAP) * fit;
     Some(
         div()
             .id(("ring-slot", slot.index()))
@@ -504,51 +506,43 @@ fn node_element(
             .child(
                 div()
                     .absolute()
-                    .left(px((w - disc) / 2.0))
-                    .top(px(disc_top))
-                    .size(px(disc))
-                    .rounded_full()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .bg(disc_fill())
-                    .border_1()
-                    .border_color(lerp_hsla(disc_border(), disc_border_hovered(), hover_t))
-                    .shadow(blend_shadows(disc_shadow(), disc_shadow_hovered(), hover_t))
-                    .text_color(ink())
+                    .left(px(shift_x))
+                    .top(px(shift_y))
+                    .size_full()
+                    .opacity(opacity)
+                    .child(disc_element(
+                        icon_path,
+                        hover_t,
+                        ((w - disc) / 2.0, disc_top),
+                        (disc, DISC_GLYPH * fit * scale),
+                    ))
                     .child(
-                        gpui::svg()
-                            .path(icon_path)
-                            .size(px(DISC_GLYPH * fit))
-                            .flex_none(),
-                    ),
+                        div()
+                            .absolute()
+                            .left(px(fit))
+                            .top(px(caption_top))
+                            .w(px((NODE_W - 2.0) * fit))
+                            .text_size(px(LABEL * fit))
+                            .text_center()
+                            .text_color(lerp_hsla(label(), label_hovered(), hover_t))
+                            .truncate()
+                            .child(caption),
+                    )
+                    .when_some(mark, |content, (width, alpha)| {
+                        let width = MARK_W * fit * width;
+                        content.child(
+                            div()
+                                .absolute()
+                                .left(px((w - width) / 2.0))
+                                .bottom(px(fit))
+                                .w(px(width))
+                                .h(px(MARK_H * fit))
+                                .rounded(px(fit))
+                                .bg(accent())
+                                .opacity(alpha),
+                        )
+                    }),
             )
-            .child(
-                div()
-                    .absolute()
-                    .left(px(fit))
-                    .top(px(caption_top))
-                    .w(px((NODE_W - 2.0) * fit))
-                    .text_size(px(LABEL * fit))
-                    .text_center()
-                    .text_color(lerp_hsla(label(), label_hovered(), hover_t))
-                    .truncate()
-                    .child(caption),
-            )
-            .when_some(mark, |node, (width, alpha)| {
-                let width = MARK_W * fit * width;
-                node.child(
-                    div()
-                        .absolute()
-                        .left(px((w - width) / 2.0))
-                        .bottom(px(fit))
-                        .w(px(width))
-                        .h(px(MARK_H * fit))
-                        .rounded(px(fit))
-                        .bg(accent())
-                        .opacity(alpha),
-                )
-            })
             .on_hover(cx.listener(move |this, hovered, _, cx| {
                 this.hover(slot, *hovered, cx);
             }))
@@ -563,20 +557,66 @@ fn node_element(
     )
 }
 
-/// The hub: the cancel cross at rest, opening into the hovered action's
-/// glyph and name as `hub_t` rises. The cross fades out as the action fades
-/// in, so the hand-off reads as the hub taking the action in.
-fn hub(
+/// A disc face at `(left, top)` of its node, `size` across with a glyph of
+/// `glyph`: white ceramic that sinks under a crescent of shade as `hover_t`
+/// presses it in.
+fn disc_element(
+    icon_path: &'static str,
+    hover_t: f32,
+    (left, top): (f32, f32),
+    (size, glyph): (f32, f32),
+) -> impl IntoElement {
+    div()
+        .absolute()
+        .left(px(left))
+        .top(px(top))
+        .size(px(size))
+        .rounded_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(disc_fill())
+        .border_1()
+        .border_color(lerp_hsla(disc_border(), disc_border_hovered(), hover_t))
+        .shadow(blend_shadows(disc_shadow(), disc_shadow_hovered(), hover_t))
+        .child(
+            // An svg paints in its own colour only, never an inherited one.
+            gpui::svg()
+                .path(icon_path)
+                .size(px(glyph))
+                .flex_none()
+                .text_color(ink()),
+        )
+}
+
+/// What the hub is drawn from this frame.
+struct Hub {
     hovered_icon: Option<&'static str>,
     caption: Option<gpui::SharedString>,
-    hub_t: f32,
-    layout: Layout,
-    cx: &mut Context<RingView>,
-) -> impl IntoElement {
+    /// 0 showing the cancel cross, 1 showing the hovered action.
+    open: f32,
+    /// How far the hub has pressed in under the pointer.
+    press_t: f32,
+    /// The platter's scale and opacity, which the hub shares.
+    dial: (f32, f32),
+}
+
+/// The hub: the cancel cross at rest, opening into the hovered action's
+/// glyph and name as `open` rises, and shading in under the pointer with
+/// the cross turning terracotta, since pressing it closes the ring.
+fn hub_element(hub: Hub, layout: Layout, cx: &mut Context<RingView>) -> impl IntoElement {
+    let Hub {
+        hovered_icon,
+        caption,
+        open,
+        press_t,
+        dial: (scale, opacity),
+    } = hub;
     let fit = layout.fit;
-    let open = ease_out_cubic(hub_t);
-    let glyph = HUB_GLYPH * fit;
-    centred(layout, HUB * fit)
+    let open = ease_out_cubic(open);
+    let glyph = HUB_GLYPH * fit * scale;
+    let size = HUB * fit * scale;
+    centred(layout, size)
         .id("ring-cancel")
         .flex()
         .flex_col()
@@ -585,8 +625,9 @@ fn hub(
         .gap(px(HUB_GAP * fit))
         .bg(hub_fill())
         .border_1()
-        .border_color(hub_border())
-        .shadow(hub_shadow())
+        .border_color(lerp_hsla(hub_border(), disc_border_hovered(), press_t))
+        .shadow(blend_shadows(hub_shadow(), hub_shadow_hovered(), press_t))
+        .opacity(opacity)
         .cursor_pointer()
         .child(
             div()
@@ -599,7 +640,7 @@ fn hub(
                         .absolute()
                         .inset_0()
                         .size(px(glyph))
-                        .text_color(muted())
+                        .text_color(lerp_hsla(muted(), close_ink(), press_t))
                         .opacity(1.0 - open),
                 )
                 .when_some(hovered_icon, |slot, icon| {
@@ -627,6 +668,12 @@ fn hub(
                     .child(caption),
             )
         })
+        .on_hover(cx.listener(|this, hovered, _, cx| {
+            if let RingLook::Porcelain(motion) = &mut this.look {
+                motion.hub_hovered = *hovered;
+            }
+            cx.notify();
+        }))
         .on_click(cx.listener(move |this, _, window, cx| {
             cx.stop_propagation();
             let session_id = this.invocation.session_id;
@@ -649,18 +696,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn nodes_sit_at_the_prototype_radius() {
+    fn nodes_sit_at_the_prototype_radius_inside_the_platter() {
         let (x, y) = slot_center(ActionRingSlot::Right);
         assert!((x - (DESIGN_EDGE / 2.0 + RADIUS)).abs() < 0.01);
         assert!((y - DESIGN_EDGE / 2.0).abs() < 0.01);
         let (left, top) = Layout::full().slot_origin(ActionRingSlot::Top);
         assert!((left + NODE_W / 2.0 - DESIGN_EDGE / 2.0).abs() < 0.01);
         assert!((top + NODE_H / 2.0 - (DESIGN_EDGE / 2.0 - RADIUS)).abs() < 0.01);
+        // Every corner of every node is on the platter.
+        for slot in ActionRingSlot::ALL {
+            let (left, top) = Layout::full().slot_origin(slot);
+            for (x, y) in [
+                (left, top),
+                (left + NODE_W, top),
+                (left, top + NODE_H),
+                (left + NODE_W, top + NODE_H),
+            ] {
+                let from_centre =
+                    ((x - DESIGN_EDGE / 2.0).powi(2) + (y - DESIGN_EDGE / 2.0).powi(2)).sqrt();
+                assert!(from_centre <= PLATTER, "{slot:?} hangs off the platter");
+            }
+        }
     }
 
     #[test]
     fn neighbouring_nodes_never_overlap_however_short_the_panel() {
-        for edge in [420.0, 360.0, 300.0, 240.0] {
+        for edge in [400.0, 360.0, 300.0, 240.0] {
             let layout = Layout::fitting(px(edge));
             let rect = |slot: ActionRingSlot| {
                 let (left, top) = layout.slot_origin(slot);
@@ -743,13 +804,13 @@ mod tests {
         let (slot, sink, kept) = motion.press(ms(80), false).expect("the disc is pressed");
         assert_eq!(slot, ActionRingSlot::Bottom);
         assert!(
-            sink > 1.0 && kept < 0.97,
-            "a third of the way in it is down and smaller"
+            sink > 2.0 && kept < 0.96,
+            "a third of the way in it is in and a touch smaller"
         );
-        let (_, sink, kept) = motion.press(ms(180), false).expect("the disc springs back");
+        let (_, sink, kept) = motion.press(ms(180), false).expect("the disc eases back");
         assert!(
-            sink < 0.0 && kept > 1.0,
-            "three quarters in it is up past rest"
+            sink > 0.0 && sink < 1.0 && kept > 0.98 && kept < 1.0,
+            "three quarters in it is most of the way back out"
         );
         let (_, width, alpha) = motion.mark(ms(90), false).expect("the stroke shows");
         assert!(width > 0.99 && alpha > 0.84);
@@ -760,5 +821,82 @@ mod tests {
             "reduced motion presses nothing"
         );
         assert!(motion.mark(ms(90), true).is_none());
+    }
+
+    #[test]
+    fn the_hub_presses_in_under_the_pointer_and_eases_back() {
+        let mut motion = Motion::default();
+        let mut now = motion.born;
+        motion.hub_hovered = true;
+        for _ in 0..30 {
+            now += Duration::from_millis(16);
+            motion.advance(None, now, false);
+        }
+        assert!(motion.hub_press_t > 0.9);
+        motion.hub_hovered = false;
+        for _ in 0..30 {
+            now += Duration::from_millis(16);
+            motion.advance(None, now, false);
+        }
+        assert!(motion.hub_press_t < 0.1);
+    }
+
+    #[test]
+    fn the_ring_gathers_its_nodes_out_on_opening_and_back_on_closing() {
+        let mut motion = Motion::default();
+        let born = motion.born;
+        let ms = |ms: u64| born + Duration::from_millis(ms);
+        let opening = motion.stage(born, false);
+        assert!(
+            opening.dial.1 < 0.01 && opening.dial.0 < 0.2,
+            "the platter starts small and unseen"
+        );
+        for (reach, _, opacity) in opening.nodes {
+            assert!(
+                reach.abs() < 0.001 && opacity < 0.001,
+                "the nodes start at the centre"
+            );
+        }
+        let layout = Layout::full();
+        let (dx, dy) = layout.gather_shift(ActionRingSlot::Right, 0.0);
+        assert!(
+            (dx + RADIUS).abs() < 0.001 && dy.abs() < 0.001,
+            "gathered to the centre"
+        );
+        let (dx, dy) = layout.gather_shift(ActionRingSlot::Right, 1.0);
+        assert!(dx.abs() < 0.001 && dy.abs() < 0.001, "out in place");
+        let half_way = motion.stage(ms(150), false);
+        let (first, last) = (half_way.nodes[0].0, half_way.nodes[7].0);
+        assert!(first > last, "the first node is further out than the last");
+        assert!(first > 0.3 && first < 1.04);
+        let open = motion.stage(ms(500), false);
+        assert!((open.dial.0 - 1.0).abs() < 0.001 && (open.dial.1 - 1.0).abs() < 0.001);
+        for (reach, scale, opacity) in open.nodes {
+            assert!((reach - 1.0).abs() < 0.001 && (scale - 1.0).abs() < 0.001);
+            assert!((opacity - 1.0).abs() < 0.001);
+        }
+        assert!(motion.begin_close(ms(1000)));
+        let closing = motion.stage(ms(1100), false);
+        assert!(
+            closing.dial.0 < 1.0 && closing.nodes[0].0 < 1.0,
+            "closing gathers back"
+        );
+        let closed = motion.stage(ms(1300), false);
+        assert!(closed.dial.1 < 0.001);
+        for (reach, _, opacity) in closed.nodes {
+            assert!(reach.abs() < 0.001 && opacity < 0.001);
+        }
+        // Reduced motion is open at once, and gone at once.
+        let mut still = Motion::default();
+        let still_open = still.stage(still.born, true);
+        assert!((still_open.dial.1 - 1.0).abs() < f32::EPSILON);
+        assert!(
+            still_open
+                .nodes
+                .iter()
+                .all(|&(reach, _, _)| (reach - 1.0).abs() < f32::EPSILON)
+        );
+        still.begin_close(still.born);
+        assert!(still.stage(still.born, true).dial.1 < f32::EPSILON);
     }
 }

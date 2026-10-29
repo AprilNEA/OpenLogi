@@ -53,6 +53,114 @@ pub(super) fn presence_at(
     }
 }
 
+/// The opening: the dial grows in over this long, scale then opacity at each
+/// point, running a touch past full size; the nodes follow, each starting this
+/// much after the one before, gathering out from the centre to this reach and
+/// scale, running a touch past their place.
+const DIAL_ENTER_SECS: f32 = 0.36;
+const DIAL_ENTER: [(f32, f32, f32); 3] = [(0.0, 0.18, 0.0), (0.8, 1.018, 1.0), (1.0, 1.0, 1.0)];
+const NODE_ENTER_SECS: f32 = 0.26;
+const NODE_ENTER_DELAY: f32 = 0.05;
+const NODE_ENTER_STAGGER: f32 = 0.012;
+const NODE_ENTER: [(f32, f32, f32); 3] = [(0.0, 0.0, 0.18), (0.82, 1.035, 1.015), (1.0, 1.0, 1.0)];
+/// The closing, within [`EXIT`]: the dial shrinks away and the nodes gather
+/// back, each a little after the one before.
+const DIAL_EXIT: [(f32, f32, f32); 3] = [(0.0, 1.0, 1.0), (0.28, 0.985, 0.96), (1.0, 0.18, 0.0)];
+const NODE_EXIT_SECS: f32 = 0.15;
+const NODE_EXIT_STAGGER: f32 = 0.006;
+const NODE_EXIT: [(f32, f32, f32); 2] = [(0.0, 1.0, 1.0), (1.0, 0.0, 0.18)];
+const _: () = assert!(
+    NODE_EXIT_SECS + 7.0 * NODE_EXIT_STAGGER <= EXIT_SECS,
+    "the last node is gathered before the window goes"
+);
+
+/// How far a ring that opens by gathering its nodes out from the centre is
+/// open this frame: the dial's scale and opacity, and each node's reach from
+/// the centre, scale and opacity.
+pub(super) struct Stage {
+    pub(super) dial: (f32, f32),
+    pub(super) nodes: [(f32, f32, f32); 8],
+}
+
+/// The [`Stage`] of a ring born at `born`, closing since `close_started`.
+/// Reduced motion is either fully open or, once closing, gone.
+pub(super) fn stage_at(
+    born: Instant,
+    close_started: Option<Instant>,
+    now: Instant,
+    reduce: bool,
+) -> Stage {
+    if reduce {
+        let opacity = if close_started.is_some() { 0.0 } else { 1.0 };
+        return Stage {
+            dial: (1.0, opacity),
+            nodes: [(1.0, 1.0, opacity); 8],
+        };
+    }
+    let since = |started: Instant| now.saturating_duration_since(started).as_secs_f32();
+    let elapsed = since(born);
+    let dial = keyframes(&DIAL_ENTER, elapsed / DIAL_ENTER_SECS, ease_out_cubic);
+    let nodes = std::array::from_fn(|index| {
+        let delay = NODE_ENTER_DELAY + NODE_ENTER_STAGGER * order(index);
+        let t = (elapsed - delay) / NODE_ENTER_SECS;
+        node_stage(keyframes(&NODE_ENTER, t, ease_out_cubic))
+    });
+    let opened = Stage { dial, nodes };
+    let Some(started) = close_started else {
+        return opened;
+    };
+    // The opening keeps running under the closing, so a ring closed part way
+    // in carries on from where it got instead of jumping to full size first.
+    let elapsed = since(started);
+    let (scale, opacity) = keyframes(&DIAL_EXIT, elapsed / EXIT_SECS, ease_in_out_cubic);
+    let (grown, shown) = opened.dial;
+    let nodes = std::array::from_fn(|index| {
+        let t = (elapsed - NODE_EXIT_STAGGER * order(index)) / NODE_EXIT_SECS;
+        let (reach, scale, opacity) = node_stage(keyframes(&NODE_EXIT, t, ease_in_cubic));
+        let (entered, grown, shown) = opened.nodes[index];
+        (reach * entered, scale * grown, opacity * shown)
+    });
+    Stage {
+        dial: (scale * grown, opacity * shown),
+        nodes,
+    }
+}
+
+/// A node's place in the stagger, from its index among the eight.
+fn order(index: usize) -> f32 {
+    u8::try_from(index).map_or(f32::MAX, f32::from)
+}
+
+/// A node's reach and scale, with the opacity that follows its reach: unseen
+/// at the centre, seen in full once it is out.
+fn node_stage((reach, scale): (f32, f32)) -> (f32, f32, f32) {
+    (reach, scale, reach.clamp(0.0, 1.0))
+}
+
+/// How far a node `reach` of the way out sits back towards the centre, for a
+/// ring whose nodes are `radius` pixels out: the gather happens inside the hit
+/// box, which stays at the slot so the pointer finds it from the first frame.
+pub(super) fn gather_shift(slot: ActionRingSlot, radius: f32, reach: f32) -> (f32, f32) {
+    let (x, y) = slot.unit_offset();
+    let back = radius * (reach - 1.0);
+    (x * back, y * back)
+}
+
+/// The pair of values at `t` along `keys`, each `(at, a, b)` in order of
+/// `at` from 0 to 1, with `ease` applied between the keys either side of `t`.
+pub(super) fn keyframes(keys: &[(f32, f32, f32)], t: f32, ease: fn(f32) -> f32) -> (f32, f32) {
+    let t = t.clamp(0.0, 1.0);
+    for pair in keys.windows(2) {
+        if let [(at0, a0, b0), (at1, a1, b1)] = *pair
+            && t <= at1
+        {
+            let k = ease((t - at0) / (at1 - at0));
+            return (a0 + (a1 - a0) * k, b0 + (b1 - b0) * k);
+        }
+    }
+    keys.last().map_or((0.0, 0.0), |&(_, a, b)| (a, b))
+}
+
 pub(super) fn ellipse_path(
     center: Point<Pixels>,
     radius: f32,
@@ -215,6 +323,15 @@ pub(super) fn ease_in_cubic(t: f32) -> f32 {
     t * t * t
 }
 
+fn ease_in_out_cubic(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    if t < 0.5 {
+        4.0 * t * t * t
+    } else {
+        1.0 - (-2.0 * t + 2.0).powi(3) / 2.0
+    }
+}
+
 /// `current` eased towards `target` with time constant `tau`, frame-rate
 /// independent: it covers the same fraction of the remaining distance per
 /// second whatever `dt` is.
@@ -270,6 +387,39 @@ mod tests {
             angle = lerp_angle(angle, 0.2, 1.0 / 60.0, 0.13);
         }
         assert!(wrap_to_pi(angle - 0.2).abs() < 0.05);
+    }
+
+    #[test]
+    fn closing_part_way_in_carries_on_from_where_the_opening_got() {
+        let born = Instant::now();
+        let closed_at = born + Duration::from_millis(120);
+        let before = stage_at(born, None, closed_at, false);
+        assert!(
+            before.dial.0 < 0.9,
+            "still opening at 120 ms: {}",
+            before.dial.0
+        );
+        let after = stage_at(born, Some(closed_at), closed_at, false);
+        assert!(
+            (after.dial.0 - before.dial.0).abs() < 0.001,
+            "the dial holds its size"
+        );
+        assert!((after.dial.1 - before.dial.1).abs() < 0.001);
+        for (index, (reach, scale, opacity)) in after.nodes.into_iter().enumerate() {
+            let (entered, grown, shown) = before.nodes[index];
+            assert!(
+                (reach - entered).abs() < 0.001,
+                "node {index} holds its reach"
+            );
+            assert!((scale - grown).abs() < 0.001 && (opacity - shown).abs() < 0.001);
+        }
+        let gone = stage_at(born, Some(closed_at), closed_at + EXIT, false);
+        assert!(gone.dial.1 < 0.001, "gone when the window goes");
+        assert!(
+            gone.nodes
+                .iter()
+                .all(|&(reach, _, opacity)| reach < 0.001 && opacity < 0.001)
+        );
     }
 
     #[test]

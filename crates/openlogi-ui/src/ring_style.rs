@@ -354,45 +354,50 @@ pub mod obsidian {
     }
 }
 
-/// Ceramic discs with their captions under them, on a light platter around a
-/// hub, with a needle that turns to point at the hovered one. A light theme
-/// with a terracotta accent; every colour below is its own.
+/// Ceramic discs with their captions under them, on one opaque glazed platter
+/// that holds the whole ring, around a hub that names the hovered action. A
+/// light theme with a terracotta accent; every colour below is its own.
+///
+/// Nothing casts a shadow outside itself: the platter is the ring's whole
+/// window, and depth is inset light and shade, deepest on whatever is
+/// pressed in under the pointer.
 pub mod porcelain {
-    use super::{
-        Background, BoxShadow, Hsla, hex, inset, linear_color_stop, linear_gradient, shadow,
-    };
+    use super::{Background, BoxShadow, Hsla, hex, inset, linear_color_stop, linear_gradient};
 
-    /// The panel's designed edge: the prototype's dial, which everything fits
-    /// inside, the hovered bottom disc's shadow included.
-    pub const DESIGN_EDGE: f32 = 420.0;
+    /// The prototype's 420 px dial, with its platter 2% wider so every node
+    /// sits on it, is shown this much smaller: a compact ring. Every size
+    /// below but the text is the prototype's times this.
+    const SHRINK: f32 = 400.0 / 440.0;
+    /// The panel's designed edge: the platter plus a pixel each side.
+    pub const DESIGN_EDGE: f32 = 440.0 * SHRINK;
     /// Distance from the panel's centre to each node's centre.
-    pub const RADIUS: f32 = 151.2;
+    pub const RADIUS: f32 = 151.2 * SHRINK;
     /// A node: the hit box holding a disc above its caption, centred on the
     /// slot.
-    pub const NODE_W: f32 = 88.0;
-    pub const NODE_H: f32 = 84.0;
+    pub const NODE_W: f32 = 88.0 * SHRINK;
+    pub const NODE_H: f32 = 84.0 * SHRINK;
     /// The column inside a node: this much down to the disc, then the gap to
     /// the caption; the disc's centre lands 11 px above the slot's.
-    pub const NODE_PAD_TOP: f32 = 5.0;
-    pub const NODE_GAP: f32 = 8.0;
-    pub const DISC: f32 = 52.0;
-    pub const DISC_GLYPH: f32 = 20.0;
+    pub const NODE_PAD_TOP: f32 = 5.0 * SHRINK;
+    pub const NODE_GAP: f32 = 8.0 * SHRINK;
+    pub const DISC: f32 = 52.0 * SHRINK;
+    pub const DISC_GLYPH: f32 = 20.0 * SHRINK;
     pub const LABEL: f32 = 11.0;
-    pub const HUB: f32 = 128.0;
-    pub const HUB_GLYPH: f32 = 23.0;
+    pub const HUB: f32 = 128.0 * SHRINK;
+    pub const HUB_GLYPH: f32 = 23.0 * SHRINK;
     pub const HUB_LABEL: f32 = 12.0;
-    pub const HUB_GAP: f32 = 7.0;
+    pub const HUB_GAP: f32 = 7.0 * SHRINK;
     /// The platter under everything and the thin ring inside it, as radii.
-    pub const PLATTER: f32 = 168.0;
-    pub const INSET_RING: f32 = 91.1;
+    pub const PLATTER: f32 = 218.0 * SHRINK;
+    pub const INSET_RING: f32 = 91.1 * SHRINK;
     /// The needle: a capsule this wide between these radii, just inside the
     /// inset ring.
-    pub const NEEDLE_INNER: f32 = 75.5;
-    pub const NEEDLE_OUTER: f32 = 89.5;
-    pub const NEEDLE_W: f32 = 5.0;
+    pub const NEEDLE_INNER: f32 = 75.5 * SHRINK;
+    pub const NEEDLE_OUTER: f32 = 89.5 * SHRINK;
+    pub const NEEDLE_W: f32 = 5.0 * SHRINK;
     /// The stroke a click draws under the caption.
-    pub const MARK_W: f32 = 20.0;
-    pub const MARK_H: f32 = 2.0;
+    pub const MARK_W: f32 = 20.0 * SHRINK;
+    pub const MARK_H: f32 = 2.0 * SHRINK;
 
     /// The terracotta accent: the needle, the hub's glyph and the click
     /// stroke.
@@ -413,6 +418,12 @@ pub mod porcelain {
         hex(0x6265_5fff)
     }
 
+    /// The hub's cancel cross under the pointer: the accent, a shade deeper.
+    #[must_use]
+    pub fn close_ink() -> Hsla {
+        hex(0xab49_27ff)
+    }
+
     /// A caption at rest.
     #[must_use]
     pub fn label() -> Hsla {
@@ -431,42 +442,34 @@ pub mod porcelain {
         hex(0xf6b4_9aff)
     }
 
-    /// The platter: glazed ceramic lit from the top left.
+    /// The platter: glazed ceramic lit from above, opaque on any desktop.
     #[must_use]
     pub fn platter_fill() -> Background {
         linear_gradient(
-            145.0,
-            linear_color_stop(hex(0xfaf9_f5ff), 0.0),
-            linear_color_stop(hex(0xeeed_e7ff), 0.75),
+            170.0,
+            linear_color_stop(hex(0xfaf9_f4ff), 0.0),
+            linear_color_stop(hex(0xebeb_e2ff), 0.9),
         )
     }
 
     #[must_use]
     pub fn platter_border() -> Hsla {
-        hex(0xdede_d6ff)
+        hex(0xc7c9_bfff)
     }
 
-    /// The platter's shadows: a lit top edge and a shaded bottom edge inside,
-    /// a shadow falling to the bottom right and light to the top left.
+    /// The platter's edges: a lit top edge and a shaded bottom edge inside.
     #[must_use]
     pub fn platter_shadow() -> Vec<BoxShadow> {
         vec![
-            inset(0.0, 2.0, 5.0, 0xffff_ffff),
-            inset(0.0, -2.0, 4.0, 0xd7d7_ce60),
-            shadow(9.0, 12.0, 24.0, 0.0, 0xb8b7_ab19),
-            shadow(-8.0, -8.0, 22.0, 0.0, 0xffff_ff90),
+            inset(0.0, 1.0, 0.0, 0xffff_ffff),
+            inset(0.0, -2.0, 3.0, 0xd0d0_c452),
         ]
     }
 
-    /// The thin ring inside the platter, with a hairline of light under it.
+    /// The thin ring inside the platter that the needle runs along.
     #[must_use]
     pub fn inset_ring_border() -> Hsla {
         hex(0xd5d4_cbff)
-    }
-
-    #[must_use]
-    pub fn inset_ring_shadow() -> Vec<BoxShadow> {
-        vec![shadow(0.0, 1.0, 0.0, 0.0, 0xfffe_faff)]
     }
 
     /// A disc: white ceramic shading to cream at its lower right.
@@ -484,32 +487,35 @@ pub mod porcelain {
         hex(0xe0df_d5ff)
     }
 
-    /// A disc's border under the pointer: a little warmer and darker.
+    /// A pressed-in disc's border, and the hub's: a shade darker.
     #[must_use]
     pub fn disc_border_hovered() -> Hsla {
-        hex(0xc6bd_a9ff)
+        hex(0xc4c3_b6ff)
     }
 
-    /// A disc's shadows: a drop shadow under it, a lit top edge and a shaded
-    /// bottom edge inside.
+    /// A disc's edges at rest: a lit top edge and a shaded bottom edge
+    /// inside. The first two entries are the press-in crescents at zero, so
+    /// the rest and hovered lists blend entry by entry.
     #[must_use]
     pub fn disc_shadow() -> Vec<BoxShadow> {
         vec![
-            shadow(0.0, 3.0, 5.0, 0.0, 0xaaa9_9d26),
+            inset(0.0, 2.0, 3.0, 0x6b6d_5a00),
+            inset(0.0, -1.0, 2.0, 0xffff_ff00),
             inset(0.0, 2.0, 1.0, 0xffff_ffff),
             inset(0.0, -1.0, 1.0, 0xcfce_c64d),
         ]
     }
 
-    /// A disc's shadows under the pointer: the drop shadow deepens as the
-    /// disc lifts and the bottom edge's shade goes. The third entry pairs
-    /// with the rest list's so the two blend shadow by shadow.
+    /// A disc pressed in under the pointer: a thin crescent of shade under
+    /// the top rim, a thin crescent of light along the bottom, and the lit
+    /// top edge turns to a hairline of shade.
     #[must_use]
     pub fn disc_shadow_hovered() -> Vec<BoxShadow> {
         vec![
-            shadow(0.0, 6.0, 10.0, 0.0, 0xaaa9_9d2b),
-            inset(0.0, 2.0, 1.0, 0xffff_ffff),
-            inset(0.0, -1.0, 1.0, 0xcfce_c600),
+            inset(0.0, 2.0, 3.0, 0x6b6d_5a80),
+            inset(0.0, -1.0, 2.0, 0xffff_ffcc),
+            inset(0.0, 1.0, 1.0, 0x5c5e_4d33),
+            inset(0.0, 0.0, 0.0, 0xcfce_c600),
         ]
     }
 
@@ -528,12 +534,24 @@ pub mod porcelain {
         hex(0xdede_d4ff)
     }
 
-    /// The hub's shadows: a lit top edge inside and a soft shadow under it.
+    /// The hub's edges at rest: a lit top edge inside, with the press-in
+    /// crescents at zero so the two lists blend entry by entry.
     #[must_use]
     pub fn hub_shadow() -> Vec<BoxShadow> {
         vec![
+            inset(0.0, 2.0, 4.0, 0x6b6d_5a00),
+            inset(0.0, -1.0, 2.0, 0xffff_ff00),
             inset(0.0, 2.0, 1.0, 0xffff_ffff),
-            shadow(0.0, 7.0, 14.0, 0.0, 0xa5a3_9724),
+        ]
+    }
+
+    /// The hub pressed in under the pointer, as a disc is.
+    #[must_use]
+    pub fn hub_shadow_hovered() -> Vec<BoxShadow> {
+        vec![
+            inset(0.0, 2.0, 4.0, 0x6b6d_5a80),
+            inset(0.0, -1.0, 2.0, 0xffff_ffcc),
+            inset(0.0, 1.0, 1.0, 0x5c5e_4d33),
         ]
     }
 }

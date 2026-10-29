@@ -456,7 +456,7 @@ mod tests {
         assert_eq!(panel_edge(ActionRingTheme::Classic, wide), px(360.0));
         assert_eq!(panel_edge(ActionRingTheme::InMotion, wide), px(480.0));
         assert_eq!(panel_edge(ActionRingTheme::Obsidian, wide), px(440.0));
-        assert_eq!(panel_edge(ActionRingTheme::Porcelain, wide), px(420.0));
+        assert_eq!(panel_edge(ActionRingTheme::Porcelain, wide), px(400.0));
         // 1280×720 at 200%: In Motion shrinks to the 360 px display, Classic
         // stays its 360 px disc, as before themes.
         let short = Size::new(px(640.0), px(360.0));
