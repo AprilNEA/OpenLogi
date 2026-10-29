@@ -80,13 +80,13 @@ impl Key {
     ///
     /// Only for a key that is not extended: [`key_input`] derives the extended
     /// flag from the virtual key alone, so an extended key built this way would
-    /// go out flagged with no scan code — the form that loses the Shift
-    /// modifier (#1895). Extended keys come from [`Self::for_vk`] or
-    /// [`Self::for_usage`], which look their scan code up.
+    /// go out flagged with no scan code, a form no keyboard sends. Extended keys
+    /// come from [`Self::for_vk`] or [`Self::for_usage`], which look their scan
+    /// code up.
     fn plain(vk: u16) -> Self {
         debug_assert!(
             !is_extended_key(vk),
-            "an extended key posted with scan code 0 loses the shift modifier (#1895)"
+            "an extended key needs its scan code: build it with Key::for_vk or Key::for_usage"
         );
         Self { vk, scan: 0 }
     }
@@ -313,8 +313,8 @@ fn post_key(key: Key, modifiers: &[u16]) {
 /// Post the bare virtual key `vk` with `modifiers` held around it.
 ///
 /// The key goes through [`Key::for_vk`] for the same reason the modifiers do:
-/// an extended key needs its hardware scan code, or Windows treats the press as
-/// an unidentified keyboard and drops the modifiers (#1895).
+/// an extended key carries its hardware scan code, as a physical press does
+/// (see [`is_extended_key`]).
 fn post_vk(vk: u16, modifiers: &[u16]) {
     let layout = ForegroundLayout::current();
     post_key_in(Key::for_vk(vk, layout), modifiers, layout);
@@ -740,10 +740,9 @@ mod tests {
     }
 
     /// Every production path that posts an extended key has to build it with
-    /// [`Key::for_vk`], because [`key_input`] takes the flag from the virtual
-    /// key but the scan code from the `Key`. This is the shape the previous
-    /// head sent for `PreviousDesktop`, `NextDesktop` and `LaunchpadShow`: the
-    /// flag with no scan code, which no keyboard produces (#1895).
+    /// [`Key::for_vk`] or [`Key::for_usage`], because [`key_input`] takes the
+    /// flag from the virtual key but the scan code from the `Key`. Otherwise
+    /// the key goes out flagged with no scan code, a form no keyboard sends.
     ///
     /// `Key::plain` refuses that shape in a debug build, so a call site that
     /// skips `for_vk` trips this assertion before it can ship. It is a
@@ -752,7 +751,7 @@ mod tests {
     /// nothing to panic.
     #[test]
     #[cfg(debug_assertions)]
-    #[should_panic(expected = "loses the shift modifier")]
+    #[should_panic(expected = "needs its scan code")]
     fn plain_key_refuses_an_extended_virtual_key() {
         let _ = Key::plain(VK_RIGHT);
     }
