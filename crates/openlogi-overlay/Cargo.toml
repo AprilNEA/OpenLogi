@@ -45,7 +45,7 @@ embed-resource = "3.0.9"
 core-graphics = { workspace = true }
 objc2 = { workspace = true }
 # NSScreen: the notice sits above the Dock, so it needs each screen's visible frame.
-objc2-app-kit = { workspace = true, features = ["NSApplication", "NSResponder", "NSWindow", "NSEvent", "NSScreen", "block2"] }
+objc2-app-kit = { workspace = true, features = ["NSApplication", "NSResponder", "NSWindow", "NSEvent", "NSScreen", "NSWorkspace", "block2"] }
 # NSEvent global-monitor handlers are ObjC blocks (click-away dismissal).
 block2 = { workspace = true }
 
