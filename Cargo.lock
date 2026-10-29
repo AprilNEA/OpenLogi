@@ -5695,6 +5695,7 @@ dependencies = [
  "clap",
  "futures",
  "openlogi-assets",
+ "openlogi-audio",
  "openlogi-camera",
  "openlogi-core",
  "openlogi-device",

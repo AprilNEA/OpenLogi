@@ -13,6 +13,7 @@ pub mod fixture;
 mod input_monitoring;
 pub mod light;
 pub mod list;
+pub mod mic;
 pub mod snapshot;
 
 #[derive(Debug, Subcommand)]
@@ -27,6 +28,9 @@ pub enum Command {
     Snapshot(snapshot::SnapshotArgs),
     /// Read or write device-level UVC image controls on a webcam.
     Camera(camera::CameraArgs),
+    /// Read or set a USB microphone's gain, mute, headphone and monitoring
+    /// controls.
+    Mic(mic::MicArgs),
     /// Manage assets fetched from OpenLogi's asset mirrors.
     #[command(subcommand)]
     Assets(assets::AssetsCmd),
@@ -55,6 +59,7 @@ impl Command {
             Self::Snapshot(args) => snapshot::run(args)?,
             // UVC control transfers are blocking IOKit — no async runtime needed.
             Self::Camera(args) => camera::run(args)?,
+            Self::Mic(args) => mic::run(args)?,
             // `assets sync` is blocking HTTP — no need for the async runtime.
             Self::Assets(cmd) => cmd.run()?,
             Self::Diag(cmd) => cmd.run().await?,
