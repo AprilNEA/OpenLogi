@@ -413,6 +413,32 @@ mod tests {
             .collect()
     }
 
+    /// A write's read-back that lands after a newer poll is stale. The
+    /// watcher's next poll, unchanged as it is, puts the reading back.
+    #[test]
+    fn the_next_poll_replaces_a_stale_microphone_read_back() {
+        use openlogi_core::microphone::{Microphone, MicrophoneControls};
+
+        let yeti = |muted| Microphone {
+            id: "yeti".into(),
+            vendor_id: 0x046d,
+            product_id: 0x0ab7,
+            name: "Yeti".into(),
+            registry_model_id: Some("0ab7".into()),
+            controls: MicrophoneControls {
+                muted: Some(muted),
+                ..MicrophoneControls::default()
+            },
+        };
+        let state = state();
+        state.set_microphones(vec![yeti(true)]);
+        state.set_microphone(yeti(false));
+        assert_eq!(state.snapshot().microphones, vec![yeti(false)]);
+
+        state.set_microphones(vec![yeti(true)]);
+        assert_eq!(state.snapshot().microphones, vec![yeti(true)]);
+    }
+
     #[test]
     fn revisiting_an_app_moves_it_to_the_front_instead_of_repeating_it() {
         let state = state();
