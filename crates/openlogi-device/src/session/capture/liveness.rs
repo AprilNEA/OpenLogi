@@ -65,6 +65,9 @@ pub(super) enum PingOutcome {
     AllSilent,
     /// The channel failed before delivery could be established.
     ChannelFailed,
+    /// The OS refused to send the probe (#1799). Says nothing about
+    /// delivery, so it neither strikes nor clears a strike.
+    Refused,
 }
 
 /// What capture should do after accounting for a completed probe.
@@ -123,6 +126,9 @@ impl CaptureLiveness {
         self.idle_deadline = now + IDLE_INTERVAL;
         if outcome == PingOutcome::ChannelFailed {
             return LivenessDecision::Restart;
+        }
+        if outcome == PingOutcome::Refused && !activity {
+            return LivenessDecision::Continue;
         }
         if activity || outcome == PingOutcome::Delivered {
             self.silent_strikes = 0;
@@ -230,6 +236,32 @@ mod tests {
         tokio::time::advance(IDLE_INTERVAL).await;
         assert!(matches!(
             liveness.finish_ping(Instant::now(), activity.seq(), PingOutcome::ChannelFailed,),
+            LivenessDecision::Restart
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn refused_pings_neither_restart_nor_strike() {
+        let activity = ChannelActivity::default();
+        let mut liveness = CaptureLiveness::new(Instant::now(), activity.seq());
+
+        tokio::time::advance(IDLE_INTERVAL).await;
+        assert!(matches!(
+            liveness.finish_ping(Instant::now(), activity.seq(), PingOutcome::AllSilent,),
+            LivenessDecision::Continue
+        ));
+        // However long the OS refuses writes, the channel is kept, and the
+        // strike from before the spell neither clears nor grows.
+        for _ in 0..10 {
+            tokio::time::advance(IDLE_INTERVAL).await;
+            assert!(matches!(
+                liveness.finish_ping(Instant::now(), activity.seq(), PingOutcome::Refused,),
+                LivenessDecision::Continue
+            ));
+        }
+        tokio::time::advance(IDLE_INTERVAL).await;
+        assert!(matches!(
+            liveness.finish_ping(Instant::now(), activity.seq(), PingOutcome::AllSilent,),
             LivenessDecision::Restart
         ));
     }

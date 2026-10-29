@@ -384,6 +384,12 @@ impl HidppChannel {
         self.raw_channel.is_connected()
     }
 
+    /// Whether the OS is refusing writes on the underlying transport for now
+    /// (see [`RawHidChannel::writes_refused`]).
+    pub fn writes_refused(&self) -> bool {
+        self.raw_channel.writes_refused()
+    }
+
     /// Replace the software-id policy for outgoing requests.
     ///
     /// `&mut self` on purpose: the policy is decided while the channel is

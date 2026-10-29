@@ -750,7 +750,11 @@ impl RawHidChannel for AsyncHidChannel {
                     self.mark_disconnected();
                 }
                 #[cfg(target_os = "macos")]
-                if transfer_refused(&e) && !self.writes_refused.swap(true, Ordering::AcqRel) {
+                if !transfer_refused(&e) {
+                    // Some other failure: the spell, if any, is over, and
+                    // this one is for the caller to judge on its own.
+                    self.writes_refused.store(false, Ordering::Release);
+                } else if !self.writes_refused.swap(true, Ordering::AcqRel) {
                     warn!(name = %self.info.name, error = %e, "{TRANSFER_REFUSED_HINT}");
                 }
                 Err(e.into())
@@ -782,6 +786,13 @@ impl RawHidChannel for AsyncHidChannel {
 
     fn is_connected(&self) -> bool {
         self.connected.load(Ordering::Acquire)
+    }
+
+    fn writes_refused(&self) -> bool {
+        #[cfg(target_os = "macos")]
+        return self.writes_refused.load(Ordering::Acquire);
+        #[cfg(not(target_os = "macos"))]
+        false
     }
 
     fn supports_short_long_hidpp(&self) -> Option<(bool, bool)> {
