@@ -332,6 +332,35 @@ fn ease_in_out_cubic(t: f32) -> f32 {
     }
 }
 
+/// `position`, moving at `velocity`, carried `dt` towards `target` on a
+/// spring that rings `hz` times a second and loses `damping` of critical
+/// damping's pull: below 1 it runs a little past the target and settles,
+/// and a change of target mid-way carries on from where it is. Stepped in
+/// slices of at most 1/240 s so the result does not depend on the frame
+/// rate.
+pub(super) fn spring_towards(
+    (position, velocity): (f32, f32),
+    target: f32,
+    dt: f32,
+    hz: f32,
+    damping: f32,
+) -> (f32, f32) {
+    const SLICE: f32 = 1.0 / 240.0;
+    let omega = 2.0 * PI * hz;
+    let (mut position, mut velocity) = (position, velocity);
+    // A long stall, a dragged window say, plays a tenth of a second of motion
+    // rather than seconds of it at once.
+    let mut left = dt.min(0.1);
+    while left > 0.0 {
+        let step = left.min(SLICE);
+        let pull = omega * omega * (target - position) - 2.0 * damping * omega * velocity;
+        velocity += pull * step;
+        position += velocity * step;
+        left -= step;
+    }
+    (position, velocity)
+}
+
 /// `current` eased towards `target` with time constant `tau`, frame-rate
 /// independent: it covers the same fraction of the remaining distance per
 /// second whatever `dt` is.
@@ -420,6 +449,25 @@ mod tests {
                 .iter()
                 .all(|&(reach, _, opacity)| reach < 0.001 && opacity < 0.001)
         );
+    }
+
+    #[test]
+    fn spring_runs_a_little_past_then_settles_whatever_the_frame_rate() {
+        let run = |frames: u32, dt: f32| {
+            let mut state = (0.0, 0.0);
+            let mut peak: f32 = 0.0;
+            for _ in 0..frames {
+                state = spring_towards(state, 1.0, dt, 3.2, 0.6);
+                peak = peak.max(state.0);
+            }
+            (state.0, peak)
+        };
+        let (at_60, peak_60) = run(60, 1.0 / 60.0);
+        let (at_144, peak_144) = run(144, 1.0 / 144.0);
+        assert!(peak_60 > 1.02 && peak_60 < 1.15, "overshoot {peak_60}");
+        assert!((at_60 - 1.0).abs() < 0.01, "settled at {at_60}");
+        assert!((peak_60 - peak_144).abs() < 0.005);
+        assert!((at_60 - at_144).abs() < 0.005);
     }
 
     #[test]

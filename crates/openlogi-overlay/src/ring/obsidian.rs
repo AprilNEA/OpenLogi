@@ -27,8 +27,8 @@ use openlogi_ui::ring_style::obsidian::{
 };
 
 use super::motion::{
-    Presence, blend_shadows, ease_out_back, ease_out_cubic, ellipse_path, hex, lerp_angle,
-    paint_gradient_arc, presence_at, slot_heading, smooth_towards, sweep_arc,
+    Stage, blend_shadows, ease_out_cubic, ellipse_path, gather_shift, hex, lerp_angle,
+    paint_gradient_arc, slot_heading, smooth_towards, spring_towards, stage_at, sweep_arc,
 };
 use super::{RingLook, RingView};
 use crate::ipc::OverlayCommand;
@@ -54,6 +54,16 @@ const DEFAULT_LIGHT: (f32, f32) = (0.34, 0.24);
 /// How far a hovered card rises.
 const LIFT: f32 = 2.0;
 const HALO: f32 = 116.0;
+/// A halo grows from this much of its size as it appears, on a spring that
+/// runs a touch past full size before it settles, and sinks back towards it
+/// as it fades: about 2 px of overshoot, at rest in a third of a second.
+const BUBBLE_HIDDEN: f32 = 0.84;
+const BUBBLE_HZ: f32 = 3.2;
+const BUBBLE_DAMPING: f32 = 0.6;
+/// How fast a halo fades in, and out; leaving is the quicker, so moving
+/// between cards never shows two full halos.
+const BUBBLE_IN_TAU: f32 = 0.06;
+const BUBBLE_OUT_TAU: f32 = 0.045;
 const WAVE: f32 = 105.0;
 /// The sector: a wedge this wide around the aimed card, on an annulus between
 /// these radii, in six steps of alpha peaking just before its middle.
@@ -68,9 +78,10 @@ const TICK_OUTER: f32 = 173.6;
 const TICKS: u8 = 48;
 const DOT_ORBIT: f32 = 161.2;
 
-/// Hover, aim, light, wave and enter/exit clocks for one open ring.
+/// Hover, halo, aim, light, wave and open/close clocks for one open ring.
 pub(super) struct Motion {
     hover_t: [f32; 8],
+    bubbles: [Bubble; 8],
     /// Where the light sits in the hovered card's box, 0..1 on each axis.
     light: (f32, f32),
     /// The sector's and dot's heading, and how far they are shown at all: a
@@ -88,11 +99,58 @@ pub(super) struct Motion {
     close_started: Option<Instant>,
 }
 
+/// One card's halo: its size as a fraction of the full one, how fast that is
+/// changing, and its opacity. A halo that reverses half way carries on from
+/// where it is, never jumping.
+#[derive(Clone, Copy)]
+struct Bubble {
+    scale: f32,
+    velocity: f32,
+    opacity: f32,
+}
+
+impl Default for Bubble {
+    fn default() -> Self {
+        Self {
+            scale: BUBBLE_HIDDEN,
+            velocity: 0.0,
+            opacity: 0.0,
+        }
+    }
+}
+
+impl Bubble {
+    fn advance(&mut self, shown: bool, dt: f32, reduce: bool) {
+        let (scale, opacity, tau) = if shown {
+            (1.0, 1.0, BUBBLE_IN_TAU)
+        } else {
+            (BUBBLE_HIDDEN, 0.0, BUBBLE_OUT_TAU)
+        };
+        if reduce {
+            *self = Self {
+                scale,
+                velocity: 0.0,
+                opacity,
+            };
+            return;
+        }
+        (self.scale, self.velocity) = spring_towards(
+            (self.scale, self.velocity),
+            scale,
+            dt,
+            BUBBLE_HZ,
+            BUBBLE_DAMPING,
+        );
+        self.opacity = smooth_towards(self.opacity, opacity, dt, tau);
+    }
+}
+
 impl Default for Motion {
     fn default() -> Self {
         let now = Instant::now();
         Self {
             hover_t: [0.0; 8],
+            bubbles: [Bubble::default(); 8],
             light: DEFAULT_LIGHT,
             aim_angle: slot_heading(ActionRingSlot::Top),
             aim_t: 0.0,
@@ -144,6 +202,7 @@ impl Motion {
             } else {
                 smooth_towards(self.hover_t[index], target, dt, HOVER_TAU)
             };
+            self.bubbles[index].advance(hovered == Some(slot), dt, reduce);
         }
         self.light = match (reduce, pointer_in_card) {
             (true, _) => DEFAULT_LIGHT,
@@ -183,8 +242,10 @@ impl Motion {
         };
     }
 
-    fn presence(&self, now: Instant, reduce: bool) -> Presence {
-        presence_at(self.born, self.close_started, now, reduce)
+    /// How far open the ring is this frame: the dial grows in and the cards
+    /// gather out from the centre, and back on closing, as Porcelain's do.
+    fn stage(&self, now: Instant, reduce: bool) -> Stage {
+        stage_at(self.born, self.close_started, now, reduce)
     }
 
     /// How far the halo's rim still has to turn to settle, in radians.
@@ -273,6 +334,12 @@ impl Layout {
     fn card_size(self) -> (f32, f32) {
         (CARD_W * self.fit, CARD_H * self.fit)
     }
+
+    /// How far a card's glass and halo sit back towards the centre when the
+    /// card is `reach` of the way out.
+    fn gather_shift(self, slot: ActionRingSlot, reach: f32) -> (f32, f32) {
+        gather_shift(slot, RADIUS * self.fit, reach)
+    }
 }
 
 impl RingView {
@@ -306,8 +373,9 @@ impl RingView {
             unreachable!("obsidian_panel is only drawn for an Obsidian ring");
         };
         motion.advance(self.hovered, pointer_in_card, now, reduce);
-        let presence = motion.presence(now, reduce);
+        let stage = motion.stage(now, reduce);
         let hover_t = motion.hover_t;
+        let bubbles = motion.bubbles;
         let light = motion.light;
         let rim = motion.rim_angle(now, reduce);
         let wave = motion.wave(now, reduce);
@@ -321,47 +389,51 @@ impl RingView {
         let hovered_caption = hovered.map(super::slot_caption);
         let halos = ActionRingSlot::ALL
             .into_iter()
-            .zip(hover_t)
-            .filter(|(_, hover_t)| *hover_t >= 0.02)
-            .map(|(slot, hover_t)| halo(slot, hover_t, light, rim, layout))
+            .zip(bubbles)
+            .zip(stage.nodes)
+            .filter(|((_, bubble), (_, _, opacity))| bubble.opacity * opacity >= 0.01)
+            .map(|((slot, bubble), node)| halo(slot, bubble, node, light, rim, layout))
             .collect::<Vec<_>>();
         let cards = ActionRingSlot::ALL
             .into_iter()
             .zip(hover_t)
-            .filter_map(|(slot, hover_t)| {
+            .zip(stage.nodes)
+            .filter_map(|((slot, hover_t), stage)| {
                 let card = Card {
                     slot,
                     hover_t,
                     light,
                     pressed: committed == Some(slot),
+                    stage,
                     reduce,
                 };
                 card_node(self, card, layout, cx)
             })
             .collect::<Vec<_>>();
+        let hub = Hub {
+            hovered_icon,
+            caption: hovered_caption,
+            open: hub_t,
+            flash,
+            dial: stage.dial,
+        };
 
         div()
             .id("ring-obsidian")
             .relative()
             .size(px(layout.edge))
-            .opacity(presence.opacity)
             .on_click(cx.listener(|this, _, window, cx| {
                 cx.stop_propagation();
                 let session_id = this.invocation.session_id;
                 this.close(OverlayCommand::Cancel { session_id }, window, cx);
             }))
-            .child(ambient(layout))
+            .child(ambient(layout, stage.dial))
             .child(dial_canvas(
-                layout,
-                presence.scale,
-                aim_angle,
-                aim_t,
-                wave,
-                reduce,
+                layout, stage.dial, aim_angle, aim_t, wave, reduce,
             ))
             .children(halos)
             .children(cards)
-            .child(hub(hovered_icon, hovered_caption, hub_t, flash, layout, cx))
+            .child(hub_element(hub, layout, cx))
     }
 }
 
@@ -375,24 +447,26 @@ fn centred(layout: Layout, diameter: f32) -> gpui::Div {
         .rounded_full()
 }
 
-/// The soft disc under the dial.
-fn ambient(layout: Layout) -> impl IntoElement {
-    centred(layout, 2.0 * AMBIENT * layout.fit)
+/// The soft disc under the dial, grown in with it.
+fn ambient(layout: Layout, (scale, opacity): (f32, f32)) -> impl IntoElement {
+    centred(layout, 2.0 * AMBIENT * layout.fit * scale)
         .bg(ambient_fill())
         .shadow(ambient_shadow())
+        .opacity(opacity)
 }
 
 /// The dial: the two orbit lines, the tick band, the sector and the dot that
-/// face the hovered card, and the click wave.
+/// face the hovered card, and the click wave, grown in at `scale` and
+/// `opacity` as the ring opens.
 fn dial_canvas(
     layout: Layout,
-    scale: f32,
+    (scale, opacity): (f32, f32),
     aim_angle: f32,
     aim_t: f32,
     wave: Option<(ActionRingSlot, f32, f32)>,
     reduce: bool,
 ) -> impl IntoElement {
-    canvas(
+    let canvas = canvas(
         |bounds, _, _| bounds,
         move |bounds, _, window, _| {
             if !reduce {
@@ -421,7 +495,9 @@ fn dial_canvas(
         },
     )
     .absolute()
-    .size_full()
+    .size_full();
+    // The paths take their opacity from the element they are painted in.
+    div().absolute().size_full().opacity(opacity).child(canvas)
 }
 
 fn paint_orbits(window: &mut Window, center: Point<Pixels>, scale: f32) {
@@ -507,41 +583,43 @@ fn paint_dot(window: &mut Window, center: Point<Pixels>, scale: f32, aim: f32, a
     }
 }
 
-/// The lit halo under the hovered card: glass with the light where the
-/// pointer is, a violet shade opposite, and a rim that turns into place.
+/// The lit halo under the hovered card: clear glass with the light where the
+/// pointer is, a violet shade opposite, and a rim that turns into place. It
+/// gathers out with its card as the ring opens.
 fn halo(
     slot: ActionRingSlot,
-    hover_t: f32,
+    bubble: Bubble,
+    (reach, scale, opacity): (f32, f32, f32),
     light: (f32, f32),
     rim: f32,
     layout: Layout,
 ) -> impl IntoElement {
-    // The halo fades in over the whole hover and grows with a little
-    // overshoot once it is visible, so it never pops: the prototype's 140 ms
-    // opacity ease under a 230 ms spring.
-    let grow = ease_out_back(((hover_t - 0.25) / 0.75).max(0.0));
-    let size = HALO * layout.fit * (0.82 + 0.18 * grow);
+    let size = HALO * layout.fit * bubble.scale * scale;
     let at = layout.slot_center(slot);
+    let (shift_x, shift_y) = layout.gather_shift(slot, reach);
     let (dx, dy) = ((light.0 - 0.5) * size, (light.1 - 0.5) * size);
-    // The glass is lit from where the pointer is: a gradient running from
-    // the light's side of the circle into the dark core.
+    // The glass is lit from where the pointer is: a sheen from the light's
+    // side that clears to nothing past the middle, so the bubble stays clear
+    // over a light background instead of clouding it.
     let lit_from = (-dx).atan2(dy).to_degrees();
     let glint = 20.0 * layout.fit;
     div()
         .absolute()
-        .left(px(f32::from(at.x) - size / 2.0))
-        .top(px(f32::from(at.y) - size / 2.0))
+        .left(px(f32::from(at.x) + shift_x - size / 2.0))
+        .top(px(f32::from(at.y) + shift_y - size / 2.0))
         .size(px(size))
         .rounded_full()
         .border_1()
         .border_color(halo_border())
         .bg(linear_gradient(
             lit_from,
-            linear_color_stop(hex(0xe5ff_f52e), 0.0),
-            linear_color_stop(hex(0x151d_2a61), 0.6),
+            linear_color_stop(hex(0xe5ff_f538), 0.0),
+            // The same colour, clear: a fade to transparent black would grey
+            // the middle of the sweep.
+            linear_color_stop(hex(0xe5ff_f500), 0.68),
         ))
         .shadow(halo_shadow())
-        .opacity(hover_t)
+        .opacity(bubble.opacity * opacity)
         .child(
             div()
                 .absolute()
@@ -617,35 +695,49 @@ fn css(deg: f32) -> f32 {
     (deg - 90.0).to_radians()
 }
 
+/// What the hub is drawn from this frame.
+struct Hub {
+    hovered_icon: Option<&'static str>,
+    caption: Option<gpui::SharedString>,
+    /// 0 showing the cancel cross, 1 showing the hovered action.
+    open: f32,
+    /// The flash a click sends through it.
+    flash: f32,
+    /// The dial's scale and opacity, which the hub shares.
+    dial: (f32, f32),
+}
+
 /// The hub: the cancel cross at rest, opening into the hovered action's
-/// glyph and name as `hub_t` rises, with the flash a click sends through it.
+/// glyph and name as `open` rises, with the flash a click sends through it.
 ///
 /// The cross fades out as the action fades in, the glyph grows as it
 /// arrives, and the glass brightens a little, so the hand-off reads as the
 /// hub taking the action in rather than a swap.
-fn hub(
-    hovered_icon: Option<&'static str>,
-    caption: Option<gpui::SharedString>,
-    hub_t: f32,
-    flash: f32,
-    layout: Layout,
-    cx: &mut Context<RingView>,
-) -> impl IntoElement {
-    let size = HUB * layout.fit;
-    let open = ease_out_cubic(hub_t);
-    let glyph = (HUB_GLYPH + 6.0 * open) * layout.fit;
+fn hub_element(hub: Hub, layout: Layout, cx: &mut Context<RingView>) -> impl IntoElement {
+    let Hub {
+        hovered_icon,
+        caption,
+        open,
+        flash,
+        dial: (scale, opacity),
+    } = hub;
+    let fit = layout.fit * scale;
+    let size = HUB * fit;
+    let open = ease_out_cubic(open);
+    let glyph = (HUB_GLYPH + 6.0 * open) * fit;
     centred(layout, size)
         .id("ring-cancel")
         .flex()
         .flex_col()
         .items_center()
         .justify_center()
-        .gap(px(CARD_GAP * layout.fit))
+        .gap(px(CARD_GAP * fit))
         .bg(hub_fill())
         .border_1()
         .border_color(lerp_hsla(hub_border(), signal().alpha(0.55), open))
         .shadow(hub_shadow())
         .text_color(signal())
+        .opacity(opacity)
         .cursor_pointer()
         .child(
             div()
@@ -683,8 +775,8 @@ fn hub(
         .when_some(caption, |hub, caption| {
             hub.child(
                 div()
-                    .w(px((HUB - 10.0) * layout.fit))
-                    .text_size(px(HUB_LABEL * layout.fit))
+                    .w(px((HUB - 10.0) * fit))
+                    .text_size(px(HUB_LABEL * fit))
                     .font_weight(FontWeight::MEDIUM)
                     .text_center()
                     .text_color(text())
@@ -718,6 +810,8 @@ struct Card {
     /// Where the pointer's light sits in the card's box, 0..1 on each axis.
     light: (f32, f32),
     pressed: bool,
+    /// How far out from the centre the card is, its scale and its opacity.
+    stage: (f32, f32, f32),
     reduce: bool,
 }
 
@@ -776,7 +870,8 @@ fn card_look(card: Card, layout: Layout) -> CardLook {
 }
 
 /// One card: the hit box that stays put, and inside it the glass card that
-/// lifts under the pointer and catches its light.
+/// gathers out from the centre as the ring opens, lifts under the pointer and
+/// catches its light.
 fn card_node(
     view: &RingView,
     card: Card,
@@ -787,6 +882,7 @@ fn card_node(
         slot,
         hover_t,
         pressed,
+        stage: (reach, scale, opacity),
         ..
     } = card;
     let presentation = view.invocation.slots.get(&slot)?;
@@ -794,6 +890,10 @@ fn card_node(
     let caption = super::slot_caption(presentation);
     let (left, top) = layout.slot_origin(slot);
     let (w, h) = layout.card_size();
+    let (shift_x, shift_y) = layout.gather_shift(slot, reach);
+    // The glass shrinks about its own centre, inside the hit box.
+    let fit = layout.fit * scale;
+    let (glass_w, glass_h) = (w * scale, h * scale);
     let session_id = view.invocation.session_id;
     let CardLook {
         rise,
@@ -814,25 +914,27 @@ fn card_node(
             .child(
                 div()
                     .absolute()
-                    .left(px(0.0))
-                    .top(px(-rise))
-                    .size_full()
+                    .left(px(shift_x + (w - glass_w) / 2.0))
+                    .top(px(shift_y + (h - glass_h) / 2.0 - rise))
+                    .w(px(glass_w))
+                    .h(px(glass_h))
                     .flex()
                     .flex_col()
                     .items_center()
                     .justify_center()
-                    .gap(px(CARD_GAP * layout.fit))
-                    .rounded(px(CARD_RADIUS * layout.fit))
+                    .gap(px(CARD_GAP * fit))
+                    .rounded(px(CARD_RADIUS * fit))
                     .bg(card_fill(pressed))
                     .border_1()
                     .border_color(border)
                     .shadow(shadow)
                     .text_color(text())
+                    .opacity(opacity)
                     .child(
                         div()
                             .absolute()
                             .inset_0()
-                            .rounded(px(CARD_RADIUS * layout.fit))
+                            .rounded(px(CARD_RADIUS * fit))
                             .bg(linear_gradient(
                                 lit_from,
                                 linear_color_stop(hex(0xe5ff_f52a), 0.0),
@@ -843,14 +945,14 @@ fn card_node(
                     .child(
                         gpui::svg()
                             .path(icon_path)
-                            .size(px(CARD_GLYPH * layout.fit))
+                            .size(px(CARD_GLYPH * fit))
                             .flex_none()
                             .text_color(glyph_ink),
                     )
                     .child(
                         div()
-                            .w(px((CARD_W - 6.0) * layout.fit))
-                            .text_size(px(CARD_LABEL * layout.fit))
+                            .w(px((CARD_W - 6.0) * fit))
+                            .text_size(px(CARD_LABEL * fit))
                             .text_center()
                             .truncate()
                             .child(caption),
@@ -950,6 +1052,49 @@ mod tests {
             motion.wave(later, true).is_none(),
             "reduced motion plays no wave"
         );
+    }
+
+    #[test]
+    fn the_halo_springs_in_fades_out_quicker_and_never_jumps() {
+        let mut motion = Motion::default();
+        let mut now = motion.born;
+        let step = std::time::Duration::from_millis(16);
+        let top = ActionRingSlot::Top.index();
+        let mut peak: f32 = 0.0;
+        let mut frames_to_show = None;
+        for frame in 0..30 {
+            now += step;
+            let before = motion.bubbles[top].scale;
+            motion.advance(Some(ActionRingSlot::Top), None, now, false);
+            let bubble = motion.bubbles[top];
+            assert!((bubble.scale - before).abs() < 0.04, "no jump in a frame");
+            peak = peak.max(bubble.scale);
+            if bubble.opacity > 0.9 && frames_to_show.is_none() {
+                frames_to_show = Some(frame);
+            }
+        }
+        assert!(peak > 1.005 && peak < 1.03, "a touch of overshoot: {peak}");
+        assert!((motion.bubbles[top].scale - 1.0).abs() < 0.01);
+        let mut frames_to_hide = None;
+        for frame in 0..30 {
+            now += step;
+            let before = motion.bubbles[top].scale;
+            motion.advance(None, None, now, false);
+            assert!((motion.bubbles[top].scale - before).abs() < 0.04);
+            if motion.bubbles[top].opacity < 0.1 && frames_to_hide.is_none() {
+                frames_to_hide = Some(frame);
+            }
+        }
+        let shown = frames_to_show.expect("the halo shows");
+        let hidden = frames_to_hide.expect("the halo fades");
+        assert!(
+            hidden < shown,
+            "fading out is the quicker: {hidden} vs {shown} frames"
+        );
+        let mut still = Motion::default();
+        still.advance(Some(ActionRingSlot::Top), None, still.born, true);
+        assert!((still.bubbles[top].scale - 1.0).abs() < f32::EPSILON);
+        assert!((still.bubbles[top].opacity - 1.0).abs() < f32::EPSILON);
     }
 
     #[test]
