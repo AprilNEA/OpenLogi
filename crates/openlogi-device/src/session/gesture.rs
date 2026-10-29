@@ -234,12 +234,7 @@ pub async fn run_capture_session(
     if let Some(direction) = armed.thumbwheel_direction() {
         let _ = host.sink.send(direction);
     }
-    Ok(run_capture(
-        shared,
-        GestureCapture::new(armed, spec.gesture_hold),
-        host,
-    )
-    .await)
+    Ok(run_capture(shared, GestureCapture::new(armed, spec.gesture_hold), host).await)
 }
 
 /// Gesture capture as [`run_capture`] drives it: the armed controls, and the

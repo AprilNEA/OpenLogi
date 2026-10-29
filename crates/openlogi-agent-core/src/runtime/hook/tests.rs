@@ -123,7 +123,11 @@ fn a_same_button_repress_restarts_the_stale_hold() {
 #[test]
 fn an_aged_hold_yields_to_a_new_buttons_press() {
     let mut hold = HoldState::default();
-    hold.begin(ButtonId::Back, token(1, ButtonId::Back), GestureHold::DEFAULT);
+    hold.begin(
+        ButtonId::Back,
+        token(1, ButtonId::Back),
+        GestureHold::DEFAULT,
+    );
     hold.backdate_for_test();
 
     let replacement = token(2, ButtonId::Forward);
