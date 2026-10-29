@@ -64,6 +64,7 @@ mod pointer_speed;
 mod profile_scope;
 mod reload;
 mod report_rate;
+mod sidetone;
 mod smartshift;
 mod smooth_wheel;
 mod transient_identity;
