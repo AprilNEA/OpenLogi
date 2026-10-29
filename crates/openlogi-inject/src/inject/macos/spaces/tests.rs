@@ -287,6 +287,35 @@ fn an_animated_switch_prepares_every_slide_frame_with_its_time() {
     }
 }
 
+#[test]
+fn a_mirror_set_under_the_cursor_is_one_display() {
+    // #2147: the cursor lies on a hardware mirror set's primary (3) and on
+    // its mirror (1). Both resolve to the primary, which is the target.
+    assert_eq!(mirror_set([3, 3]), Some(3));
+    assert_eq!(mirror_set([5]), Some(5));
+}
+
+#[test]
+fn no_display_or_two_mirror_sets_fail_closed() {
+    assert_eq!(mirror_set(std::iter::empty()), None);
+    assert_eq!(mirror_set([0]), None);
+    assert_eq!(mirror_set([3, 0]), None);
+    assert_eq!(mirror_set([3, 1]), None);
+}
+
+#[test]
+fn an_unmirrored_display_is_its_own_mirror_root() {
+    let displays = CGDisplay::active_displays().unwrap_or_default();
+    if displays.is_empty() {
+        eprintln!("mirror-root assertions skipped: no active display");
+    }
+    for display in displays {
+        if !CGDisplay::new(display).is_in_mirror_set() {
+            assert_eq!(mirror_root(display), display);
+        }
+    }
+}
+
 /// Opt-in hardware test. Run in a logged-in macOS session with Accessibility
 /// granted to the test host, a next Space on the pointer's display, and no
 /// concurrent trackpad/keyboard Space switching. For each switch style,
