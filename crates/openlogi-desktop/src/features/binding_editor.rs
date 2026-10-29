@@ -13,6 +13,7 @@ use gpui_component::{
 use openlogi_core::binding::{Action, ApplicationTarget, Category, GestureDirection};
 
 pub(crate) use self::shortcut_recorder::{Recording, RecordsShortcut, ShortcutRecorder};
+use crate::state::AppState;
 use crate::ui::action::localized_action_label;
 use crate::ui::components::{MenuRow, control_input};
 use crate::ui::section::section_label;
@@ -121,10 +122,25 @@ pub(crate) fn action_icon_path(action: &Action) -> &'static str {
 pub(crate) fn action_rows(
     id_prefix: &'static str,
     current: Option<&Action>,
+    hidden: &[Action],
     on_pick: &PickFn,
     pal: Palette,
 ) -> Vec<gpui::Div> {
-    action_rows_matching(id_prefix, current, "", on_pick, pal)
+    action_rows_matching(id_prefix, current, "", hidden, on_pick, pal)
+}
+
+/// The catalog actions a picker for the current device leaves out: the
+/// Actions Ring, when the device has none to open.
+pub(crate) fn hidden_actions(state: Option<&AppState>) -> &'static [Action] {
+    const NO_ACTIONS_RING: &[Action] = &[Action::ShowActionsRing];
+    if state
+        .and_then(AppState::current_record)
+        .is_none_or(crate::app::offers_actions_ring)
+    {
+        &[]
+    } else {
+        NO_ACTIONS_RING
+    }
 }
 
 /// Build action rows filtered by localized action or category name.
@@ -132,6 +148,7 @@ pub(crate) fn action_rows_matching(
     id_prefix: &'static str,
     current: Option<&Action>,
     query: &str,
+    hidden: &[Action],
     on_pick: &PickFn,
     pal: Palette,
 ) -> Vec<gpui::Div> {
@@ -150,6 +167,7 @@ pub(crate) fn action_rows_matching(
                 catalog_index += 1;
                 (key, action)
             })
+            .filter(|(_, action)| !hidden.contains(action))
             .filter(|(_, action)| {
                 query.is_empty()
                     || category_matches

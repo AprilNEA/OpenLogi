@@ -20,7 +20,7 @@ use super::thumbwheel::ThumbwheelPreset;
 use super::view::MouseModelView;
 use crate::features::binding_editor::{
     GESTURE_BUTTON_ICON, PickFn, action_icon_path, action_rows_matching, application_editor,
-    command_editor, editor_section, gesture_direction_icon,
+    command_editor, editor_section, gesture_direction_icon, hidden_actions,
 };
 use crate::state::AppState;
 use crate::ui::action::localized_action_label;
@@ -789,7 +789,8 @@ fn action_library(
     cx: &Context<MouseModelView>,
 ) -> impl IntoElement {
     let query = picker.search.read(cx).value();
-    let rows = action_rows_matching(id_prefix, current, &query, on_pick, pal);
+    let hidden = hidden_actions(AppState::try_read(cx));
+    let rows = action_rows_matching(id_prefix, current, &query, hidden, on_pick, pal);
     v_flex()
         .gap_2()
         .pt_1()
