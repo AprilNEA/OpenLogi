@@ -6,8 +6,8 @@
 //! lifecycle: one open channel, one message listener, and every diverted
 //! control handed back to the firmware on shutdown. What is its own is the
 //! arming — diversion on exactly the controls the caller asks for (an unbound
-//! key is never diverted, so it keeps its native firmware function) — and the
-//! edge decoding.
+//! key is never diverted, so it keeps its native firmware function), kept in
+//! step with that request while the session runs — and the edge decoding.
 //!
 //! Which controls exist is the keyboard's business: the caller names them by
 //! control ID ([`ButtonId::Control`]) and this session diverts whichever of
@@ -20,11 +20,11 @@
 //! interface and never reach `0x1b04`.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use hidpp::protocol::v20;
 use openlogi_core::binding::ButtonId;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tracing::{debug, info, warn};
 
 use super::capture::{
@@ -40,7 +40,7 @@ use super::restore::rollback_start;
 use crate::channel::route::DeviceRoute;
 use crate::{ChannelRegistry, SharedChannel};
 
-use crate::reprog_controls::{self, RawControlEvent, ReprogControlsV4};
+use crate::reprog_controls::{self, CtrlIdInfo, RawControlEvent, ReprogControlsV4};
 
 /// Controls that are never diverted as keyboard keys, whatever a binding says.
 ///
@@ -74,9 +74,14 @@ pub fn is_reserved_keyboard_control(cid: u16) -> bool {
 /// [`CapturedInput::ButtonUp`] edges to `host.sink`.
 ///
 /// `wanted` maps `0x1b04` control IDs to the [`ButtonId`] they dispatch as —
-/// the caller passes only the keys that carry a real binding. Controls the
-/// device doesn't expose (or can't divert) are skipped with a debug log, so a
-/// partially-supported keyboard degrades per key rather than failing whole.
+/// the caller publishes only the keys that carry a real binding, possibly
+/// none. The session follows every new value in place: it hands back the
+/// keys that left the set, diverts the keys that joined it, and does not
+/// write a key that stays. A per-app binding change therefore costs a few
+/// writes instead of a full re-arm, during which every key would run its
+/// native function (#2140). Controls the device doesn't expose (or can't
+/// divert) are skipped with a debug log, so a partially-supported keyboard
+/// degrades per key rather than failing whole.
 ///
 /// Runs on the exact channel currently published by `host.registry`. A
 /// registry miss returns [`CaptureError::DeviceNotFound`] without falling back
@@ -84,11 +89,11 @@ pub fn is_reserved_keyboard_control(cid: u16) -> bool {
 /// inventory publication.
 pub async fn run_keyboard_capture_session(
     route: DeviceRoute,
-    wanted: BTreeMap<u16, ButtonId>,
+    wanted: watch::Receiver<BTreeMap<u16, ButtonId>>,
     host: CaptureHost<'_>,
 ) -> Result<CaptureSessionOutcome, CaptureSessionFailure> {
     let shared = host.channel_for(&route)?;
-    let armed = arm_keyboard(&shared, &wanted, host.registry).await?;
+    let armed = arm_keyboard(&shared, wanted, host.registry).await?;
     Ok(run_capture(shared, armed, host).await)
 }
 
@@ -99,7 +104,7 @@ pub async fn run_keyboard_capture_session(
 /// opaque restore capability for the manager to retain and retry.
 async fn arm_keyboard(
     shared: &SharedChannel,
-    wanted: &BTreeMap<u16, ButtonId>,
+    wanted: watch::Receiver<BTreeMap<u16, ButtonId>>,
     registry: &ChannelRegistry,
 ) -> Result<ArmedKeys, CaptureSessionFailure> {
     let device = open_device(shared).await?;
@@ -114,54 +119,187 @@ async fn arm_keyboard(
         shared.device_index(),
         info.index,
     );
-    let controls = enumerate_controls(&rc).await?;
+    let table = enumerate_controls(&rc).await?;
     // Subscribed before the first diversion write (see
     // `subscribe_reporting_changes`).
     let reporting_changes = Some(subscribe_reporting_changes(&rc));
     let mut armed = ArmedKeys {
         controls: rc,
+        table,
         reporting: Vec::new(),
-        diverted: BTreeMap::new(),
+        keys: Arc::default(),
         reporting_changes,
+        wanted,
     };
-    if let Err(error) = arm_keys(&controls, wanted, &mut armed).await {
+    // Arming is the first change, from no key diverted to the wanted set.
+    if let Err(error) = armed.retarget().await {
         let pending = armed.into_pending(shared);
         return Err(rollback_start(error, pending, registry).await);
     }
     Ok(armed)
 }
 
-/// Diff one full diverted-control snapshot into exactly one edge per physical
-/// transition. Unchanged snapshots are deliberately silent.
-fn emit_button_edges(
-    down: &mut BTreeSet<u16>,
-    cids: &[u16],
-    diverted: &BTreeMap<u16, ButtonId>,
-    sink: &mpsc::UnboundedSender<CapturedInput>,
-) {
-    for (&cid, &button) in diverted {
-        let now = cids.contains(&cid);
-        let was = down.contains(&cid);
-        if now && !was {
-            let _ = sink.send(CapturedInput::ButtonDown(button));
-        } else if !now && was {
-            let _ = sink.send(CapturedInput::ButtonUp(button));
-        }
-        if now {
-            down.insert(cid);
-        } else {
-            down.remove(&cid);
+/// The keys a session dispatches, and which of them are held. The report
+/// handler reads it on the channel's read thread while a divert-set change
+/// updates it, so the session and the handler share it behind a `Mutex`.
+#[derive(Debug, Default)]
+struct DivertedKeys {
+    /// Every key the session has diverted, and the button it dispatches as.
+    buttons: BTreeMap<u16, ButtonId>,
+    /// The diverted keys physically held, as of the last report.
+    held: BTreeSet<u16>,
+}
+
+impl DivertedKeys {
+    /// Diff one full diverted-control snapshot into exactly one edge per
+    /// physical transition. Unchanged snapshots are deliberately silent.
+    fn report(&mut self, cids: &[u16], sink: &mpsc::UnboundedSender<CapturedInput>) {
+        for (&cid, &button) in &self.buttons {
+            let now = cids.contains(&cid);
+            let was = self.held.contains(&cid);
+            if now && !was {
+                let _ = sink.send(CapturedInput::ButtonDown(button));
+            } else if !now && was {
+                let _ = sink.send(CapturedInput::ButtonUp(button));
+            }
+            if now {
+                self.held.insert(cid);
+            } else {
+                self.held.remove(&cid);
+            }
         }
     }
+
+    /// Stop dispatching `cid`. A press still held gets no release edge: the
+    /// binding change that removed the key also cancels the owner's input
+    /// lifecycles.
+    fn remove(&mut self, cid: u16) {
+        self.buttons.remove(&cid);
+        self.held.remove(&cid);
+    }
+}
+
+/// The firmware writes that take a session from the keys it has diverted to
+/// the keys its owner wants. A key in both sets is not written: it stays
+/// diverted, so it never runs its native function in between.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct DivertChange {
+    /// Diverted keys the owner no longer wants, to hand back to the firmware.
+    hand_back: Vec<u16>,
+    /// Wanted keys this keyboard can divert that are not diverted yet.
+    divert: Vec<(u16, ButtonId)>,
+    /// Diverted keys that stay, with the button each dispatches as now.
+    keep: Vec<(u16, ButtonId)>,
+}
+
+impl DivertChange {
+    fn between(
+        diverted: &BTreeMap<u16, ButtonId>,
+        wanted: &BTreeMap<u16, ButtonId>,
+        table: &[CtrlIdInfo],
+    ) -> Self {
+        let mut change = Self {
+            hand_back: diverted
+                .keys()
+                .copied()
+                .filter(|cid| !wanted.contains_key(cid))
+                .collect(),
+            ..Self::default()
+        };
+        for (&cid, &button) in wanted {
+            if diverted.contains_key(&cid) {
+                change.keep.push((cid, button));
+            } else if can_divert(cid, table) {
+                change.divert.push((cid, button));
+            }
+        }
+        change
+    }
+
+    /// Whether the change writes nothing.
+    fn writes_nothing(&self) -> bool {
+        self.hand_back.is_empty() && self.divert.is_empty()
+    }
+}
+
+/// Whether a session may divert `cid` on the keyboard whose `0x1b04` control
+/// table is `table`. A key it may not divert is logged and left native, so
+/// support degrades per key.
+fn can_divert(cid: u16, table: &[CtrlIdInfo]) -> bool {
+    if is_reserved_keyboard_control(cid) {
+        warn!(
+            cid = format_args!("{cid:#06x}"),
+            "reserved control requested as a keyboard key — left native"
+        );
+        return false;
+    }
+    let divertable = table.iter().any(|c| c.cid == cid && c.is_divertable());
+    if !divertable {
+        debug!(
+            cid = format_args!("{cid:#06x}"),
+            "bound key not divertable on this keyboard — left native"
+        );
+    }
+    divertable
 }
 
 struct ArmedKeys {
     controls: ReprogControlsV4,
+    /// The keyboard's `0x1b04` control table, read once at arming, so a
+    /// divert-set change writes only the keys that change.
+    table: Vec<CtrlIdInfo>,
+    /// Every key whose diversion may have been written, with the reporting
+    /// state that teardown hands back.
     reporting: Vec<ArmedReporting>,
-    diverted: BTreeMap<u16, ButtonId>,
+    /// What the report handler dispatches.
+    keys: Arc<Mutex<DivertedKeys>>,
     /// Other clients' reporting changes on `controls`, until the running
     /// session takes them.
     reporting_changes: Option<ReportingChangeStream>,
+    /// The keys the owner wants diverted. [`ArmedCapture::retarget`] marks a
+    /// value seen when it applies it.
+    wanted: watch::Receiver<BTreeMap<u16, ButtonId>>,
+}
+
+impl ArmedKeys {
+    /// The dispatch state, recovered even if a prior holder panicked — every
+    /// critical section is panic-free, so the data is consistent.
+    fn keys(&self) -> MutexGuard<'_, DivertedKeys> {
+        self.keys.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Hand back the keys `change` drops, then divert the keys it adds.
+    async fn apply(&mut self, change: DivertChange) -> Result<(), CaptureError> {
+        for cid in change.hand_back {
+            if let Some(position) = self.reporting.iter().position(|r| r.cid == cid) {
+                let reporting = self.reporting[position];
+                self.controls
+                    .set_cid_reporting_full(cid, reporting.undivert_change())
+                    .await?;
+                // Forgotten only once the firmware has it back: after a
+                // failure, teardown hands it back again.
+                self.reporting.remove(position);
+            }
+            self.keys().remove(cid);
+        }
+        for (cid, button) in change.divert {
+            let original = self.controls.get_cid_reporting(cid).await?;
+            // A transport failure does not prove the firmware rejected the
+            // command, so include this CID in rollback before writing.
+            self.reporting.push(ArmedReporting::keyboard(cid, original));
+            // Dispatched before the write lands, so the key's first diverted
+            // report is not dropped.
+            self.keys().buttons.insert(cid, button);
+            self.controls
+                .set_cid_reporting_full(cid, divert_keyboard_key(original))
+                .await?;
+        }
+        let mut keys = self.keys();
+        for (cid, button) in change.keep {
+            keys.buttons.insert(cid, button);
+        }
+        Ok(())
+    }
 }
 
 impl ArmedCapture for ArmedKeys {
@@ -171,7 +309,7 @@ impl ArmedCapture for ArmedKeys {
     fn log_active(&self, device_index: u8, wake_rearm: bool) {
         info!(
             index = device_index,
-            keys = self.diverted.len(),
+            keys = self.keys().buttons.len(),
             wake_rearm,
             "keyboard key capture active"
         );
@@ -182,21 +320,19 @@ impl ArmedCapture for ArmedKeys {
         device_index: u8,
         sink: mpsc::UnboundedSender<CapturedInput>,
     ) -> impl Fn(&v20::Message) + Send + Sync + 'static {
-        // Physical press state per CID. Behind a `Mutex` because the channel's
-        // read thread invokes the handler by shared reference.
-        let held: Mutex<BTreeSet<u16>> = Mutex::new(BTreeSet::new());
         let feature_index = self.controls.feature_index();
-        let diverted = self.diverted.clone();
+        let keys = Arc::clone(&self.keys);
         move |msg| {
             let Some(RawControlEvent::DivertedButtons(cids)) =
                 reprog_controls::decode_event(msg, device_index, feature_index)
             else {
                 return;
             };
-            // Recover the guard even if a prior holder panicked — the critical
-            // section is panic-free, so the data is consistent.
-            let mut down = held.lock().unwrap_or_else(PoisonError::into_inner);
-            emit_button_edges(&mut down, &cids, &diverted, &sink);
+            // Recover the guard even if a prior holder panicked — every
+            // critical section is panic-free, so the data is consistent.
+            keys.lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .report(&cids, &sink);
         }
     }
 
@@ -216,13 +352,37 @@ impl ArmedCapture for ArmedKeys {
         }
     }
 
+    async fn retarget_requested(&self) {
+        // A clone starts at the version this session last applied, so waiting
+        // on it leaves that version for `retarget` to mark seen.
+        let mut request = self.wanted.clone();
+        if request.changed().await.is_err() {
+            // The owner is gone, and its shutdown request ends the session.
+            std::future::pending::<()>().await;
+        }
+    }
+
+    async fn retarget(&mut self) -> Result<(), CaptureError> {
+        let wanted = self.wanted.borrow_and_update().clone();
+        let change = DivertChange::between(&self.keys().buttons, &wanted, &self.table);
+        if !change.writes_nothing() {
+            debug!(
+                hand_back = change.hand_back.len(),
+                divert = change.divert.len(),
+                "keyboard divert set changed"
+            );
+        }
+        self.apply(change).await
+    }
+
     fn armed_reporting(&self) -> Option<(&ReprogControlsV4, &[ArmedReporting])> {
         (!self.reporting.is_empty()).then_some((&self.controls, self.reporting.as_slice()))
     }
 
     fn take_reporting_changes(&mut self) -> Option<ReportingChangeStream> {
-        let changes = self.reporting_changes.take()?;
-        (!self.reporting.is_empty()).then_some(changes)
+        // Kept while no key is diverted too: a later divert-set change may
+        // divert one.
+        self.reporting_changes.take()
     }
 
     fn into_pending(self, retired: &SharedChannel) -> Option<PendingCaptureRestore> {
@@ -234,44 +394,6 @@ impl ArmedCapture for ArmedKeys {
             None,
         )
     }
-}
-
-/// Divert every wanted control the keyboard exposes, adding successful CIDs to
-/// dispatch state and every possibly-applied write to rollback state. Missing
-/// or non-divertable controls are skipped so support degrades per key.
-async fn arm_keys(
-    controls: &[reprog_controls::CtrlIdInfo],
-    wanted: &BTreeMap<u16, ButtonId>,
-    armed: &mut ArmedKeys,
-) -> Result<(), CaptureError> {
-    for (&cid, &button) in wanted {
-        if is_reserved_keyboard_control(cid) {
-            warn!(
-                cid = format_args!("{cid:#06x}"),
-                "reserved control requested as a keyboard key — left native"
-            );
-            continue;
-        }
-        if controls.iter().any(|c| c.cid == cid && c.is_divertable()) {
-            let original = armed.controls.get_cid_reporting(cid).await?;
-            // A transport failure does not prove the firmware rejected the
-            // command, so include this CID in rollback before writing.
-            armed
-                .reporting
-                .push(ArmedReporting::keyboard(cid, original));
-            armed
-                .controls
-                .set_cid_reporting_full(cid, divert_keyboard_key(original))
-                .await?;
-            armed.diverted.insert(cid, button);
-        } else {
-            debug!(
-                cid = format_args!("{cid:#06x}"),
-                "bound key not divertable on this keyboard — left native"
-            );
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -306,18 +428,20 @@ mod tests {
 
     #[test]
     fn keyboard_snapshots_emit_balanced_edges_without_duplicates() {
-        let diverted = BTreeMap::from([
-            (0x00d4, ButtonId::control(0x00d4)),
-            (0x0103, ButtonId::control(0x0103)),
-        ]);
+        let mut keys = DivertedKeys {
+            buttons: BTreeMap::from([
+                (0x00d4, ButtonId::control(0x00d4)),
+                (0x0103, ButtonId::control(0x0103)),
+            ]),
+            held: BTreeSet::new(),
+        };
         let (sink, mut inputs) = mpsc::unbounded_channel();
-        let mut down = BTreeSet::new();
 
-        emit_button_edges(&mut down, &[0x00d4], &diverted, &sink);
-        emit_button_edges(&mut down, &[0x00d4], &diverted, &sink);
-        emit_button_edges(&mut down, &[0x00d4, 0x0103], &diverted, &sink);
-        emit_button_edges(&mut down, &[0x0103], &diverted, &sink);
-        emit_button_edges(&mut down, &[], &diverted, &sink);
+        keys.report(&[0x00d4], &sink);
+        keys.report(&[0x00d4], &sink);
+        keys.report(&[0x00d4, 0x0103], &sink);
+        keys.report(&[0x0103], &sink);
+        keys.report(&[], &sink);
 
         assert_eq!(
             std::iter::from_fn(|| inputs.try_recv().ok()).collect::<Vec<_>>(),
@@ -327,6 +451,83 @@ mod tests {
                 CapturedInput::ButtonUp(ButtonId::control(0x00d4)),
                 CapturedInput::ButtonUp(ButtonId::control(0x0103)),
             ]
+        );
+    }
+
+    /// A key removed while held is forgotten: its next snapshot emits
+    /// nothing, and a later divert starts it released.
+    #[test]
+    fn a_removed_key_emits_no_edges() {
+        let mut keys = DivertedKeys {
+            buttons: BTreeMap::from([(0x00d4, ButtonId::control(0x00d4))]),
+            held: BTreeSet::new(),
+        };
+        let (sink, mut inputs) = mpsc::unbounded_channel();
+        keys.report(&[0x00d4], &sink);
+        keys.remove(0x00d4);
+        keys.report(&[], &sink);
+        keys.buttons.insert(0x00d4, ButtonId::control(0x00d4));
+        keys.report(&[0x00d4], &sink);
+
+        assert_eq!(
+            std::iter::from_fn(|| inputs.try_recv().ok()).collect::<Vec<_>>(),
+            vec![
+                CapturedInput::ButtonDown(ButtonId::control(0x00d4)),
+                CapturedInput::ButtonDown(ButtonId::control(0x00d4)),
+            ]
+        );
+    }
+
+    fn control(cid: u16, divertable: bool) -> CtrlIdInfo {
+        let flags = if divertable {
+            reprog_controls::CidFlags::DIVERTABLE
+        } else {
+            reprog_controls::CidFlags::empty()
+        };
+        CtrlIdInfo {
+            cid,
+            task_id: 0,
+            flags: flags.bits(),
+        }
+    }
+
+    fn keys(cids: &[u16]) -> BTreeMap<u16, ButtonId> {
+        cids.iter()
+            .map(|&cid| (cid, ButtonId::control(cid)))
+            .collect()
+    }
+
+    /// Only the keys that leave or join the set are written. A key the
+    /// keyboard cannot divert, or a reserved one, never enters the change.
+    #[test]
+    fn a_divert_change_writes_only_the_keys_that_change() {
+        let table = [
+            control(0x00e7, true),
+            control(0x00e8, true),
+            control(0x00e9, true),
+            control(0x00ea, false),
+            control(0x00d1, true),
+        ];
+        let change = DivertChange::between(
+            &keys(&[0x00e7, 0x00e8]),
+            &keys(&[0x00e7, 0x00e9, 0x00ea, 0x00d1, 0x00fe]),
+            &table,
+        );
+        assert_eq!(
+            change,
+            DivertChange {
+                hand_back: vec![0x00e8],
+                divert: vec![(0x00e9, ButtonId::control(0x00e9))],
+                keep: vec![(0x00e7, ButtonId::control(0x00e7))],
+            }
+        );
+
+        let unchanged = DivertChange::between(&keys(&[0x00e7]), &keys(&[0x00e7]), &table);
+        assert!(unchanged.writes_nothing());
+        assert!(DivertChange::between(&keys(&[]), &keys(&[]), &table).writes_nothing());
+        assert_eq!(
+            DivertChange::between(&keys(&[0x00e7, 0x00e8]), &keys(&[]), &table).hand_back,
+            [0x00e7, 0x00e8]
         );
     }
 }
