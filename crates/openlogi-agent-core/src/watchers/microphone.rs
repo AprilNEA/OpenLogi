@@ -4,8 +4,10 @@
 //! `openlogi-audio` on a short period. A level can change without OpenLogi —
 //! the mute button on a Yeti, the system's sound settings, another app — and
 //! the audio stack offers no notification this agent could rely on for all of
-//! them, so the poll is the authority. A sample equal to the last one sends
-//! nothing, so the snapshot only moves when something did.
+//! them, so the poll is the authority. Every read is sent, even one equal to
+//! the last: a write's read-back may have replaced it in the snapshot
+//! meanwhile, and the snapshot already drops a sample equal to what it holds,
+//! so it only moves when something did.
 
 use std::thread;
 use std::time::Duration;
@@ -20,13 +22,12 @@ pub const PERIOD: Duration = Duration::from_secs(1);
 /// What to do with one poll of the audio stack.
 #[derive(Default)]
 struct Sampler {
-    last: Option<Vec<Microphone>>,
     failing: bool,
 }
 
 impl Sampler {
-    /// The list to publish after `sample`, or `None` when nothing changed. A
-    /// failed read keeps the last list: one refused query is not a microphone
+    /// The list to publish after `sample`, or `None` after a failed read,
+    /// which keeps the last list: one refused query is not a microphone
     /// unplugged.
     fn observe(
         &mut self,
@@ -35,10 +36,6 @@ impl Sampler {
         match sample {
             Ok(microphones) => {
                 self.failing = false;
-                if self.last.as_ref() == Some(&microphones) {
-                    return None;
-                }
-                self.last = Some(microphones.clone());
                 Some(microphones)
             }
             Err(error) => {
@@ -52,8 +49,7 @@ impl Sampler {
     }
 }
 
-/// Start the watcher. The first successful read is sent at once; later ones
-/// only when they differ. Dropping the receiver stops the worker on its next
+/// Start the watcher. Every successful read is sent, the first at once. Dropping the receiver stops the worker on its next
 /// send. Without an audio backend the channel closes at once.
 #[must_use]
 pub fn spawn(period: Duration) -> mpsc::UnboundedReceiver<Vec<Microphone>> {
@@ -108,15 +104,16 @@ mod tests {
         assert_eq!(sampler.observe(Ok(Vec::new())), Some(Vec::new()));
     }
 
+    /// An unchanged read is still sent: a write's older read-back may have
+    /// replaced it in the snapshot since the last poll.
     #[test]
-    fn an_unchanged_read_sends_nothing() {
+    fn every_read_is_sent_even_when_unchanged() {
         let mut sampler = Sampler::default();
         sampler.observe(Ok(vec![yeti(false)]));
 
-        assert_eq!(sampler.observe(Ok(vec![yeti(false)])), None);
         assert_eq!(
-            sampler.observe(Ok(vec![yeti(true)])),
-            Some(vec![yeti(true)])
+            sampler.observe(Ok(vec![yeti(false)])),
+            Some(vec![yeti(false)])
         );
         assert_eq!(sampler.observe(Ok(Vec::new())), Some(Vec::new()));
     }
@@ -128,7 +125,9 @@ mod tests {
 
         assert_eq!(sampler.observe(Err(MicrophoneError::Rejected(-1))), None);
         assert_eq!(sampler.observe(Err(MicrophoneError::Rejected(-1))), None);
-        // Recovering with the same reading is not a change either.
-        assert_eq!(sampler.observe(Ok(vec![yeti(false)])), None);
+        assert_eq!(
+            sampler.observe(Ok(vec![yeti(false)])),
+            Some(vec![yeti(false)])
+        );
     }
 }
