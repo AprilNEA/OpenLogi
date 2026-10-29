@@ -203,6 +203,9 @@ fn record_fills_the_custom_shortcut_from_the_next_key_press(cx: &mut TestAppCont
     install_app_state(cx);
     let (view, cx) = cx.add_window_view(MouseModelView::new);
     cx.simulate_resize(size(px(1200.), px(1000.)));
+    // Focus events, which end a recording, only fire in an active window.
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
     cx.update(|window, cx| window.draw(cx).clear(cx));
     click_picker_control(cx, "label-card-Button(Forward)");
     click_picker_control(cx, "inspector-current-action");
@@ -247,6 +250,21 @@ fn record_fills_the_custom_shortcut_from_the_next_key_press(cx: &mut TestAppCont
         cx.debug_bounds("inspector-action-custom-shortcut-error")
             .is_some()
     );
+
+    // Moving focus out of the Record area ends the recording, so the next
+    // key press reaches the newly focused field (#2138 review).
+    click_picker_control(cx, "inspector-action-custom-shortcut-record");
+    click_picker_control(cx, "inspector-action-custom-application-input");
+    view.read_with(cx, |view, _| assert!(view.shortcut_recorder.is_none()));
+    assert!(
+        cx.debug_bounds("inspector-action-custom-shortcut-recording")
+            .is_none()
+    );
+    cx.simulate_input("x");
+    view.read_with(cx, |view, cx| {
+        assert_eq!(view.custom_application_input.read(cx).value(), "x");
+    });
+    assert_eq!(shortcut_text(cx), "Ctrl+Shift+PageUp");
 
     click_picker_control(cx, "inspector-action-custom-shortcut-add");
     view.read_with(cx, |view, _| assert!(!view.action_picker_open));
@@ -354,6 +372,7 @@ fn a_selected_gesture_can_render_in_the_binding_inspector(cx: &mut TestAppContex
                 command_input: &view.custom_command_input,
                 shortcut_mode: view.shortcut_mode,
                 shortcut_recording: false,
+                shortcut_record_focus: &view.shortcut_record_focus,
                 invalid: view.invalid_drafts,
                 view: &entity,
             },

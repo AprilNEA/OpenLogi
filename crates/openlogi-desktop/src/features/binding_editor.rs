@@ -12,7 +12,7 @@ use gpui_component::{
 };
 use openlogi_core::binding::{Action, ApplicationTarget, Category, GestureDirection};
 
-pub(crate) use self::shortcut_recorder::{Recording, ShortcutRecorder};
+pub(crate) use self::shortcut_recorder::{Recording, RecordsShortcut, ShortcutRecorder};
 use crate::ui::action::localized_action_label;
 use crate::ui::components::{MenuRow, control_input};
 use crate::ui::section::section_label;

@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use gpui::{
-    Context, Entity, InteractiveElement, IntoElement, ParentElement, Role,
+    Context, Entity, FocusHandle, InteractiveElement, IntoElement, ParentElement, Role,
     StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px, rgb, svg,
 };
 use gpui_base::Button as BaseButton;
@@ -59,6 +59,8 @@ pub(super) struct ActionPickerContext<'a> {
     pub shortcut_mode: ShortcutMode,
     /// Whether Record is waiting for the next key press.
     pub shortcut_recording: bool,
+    /// The Record button's area, which holds focus while recording.
+    pub shortcut_record_focus: &'a FocusHandle,
     pub invalid: InvalidDrafts,
     pub view: &'a Entity<MouseModelView>,
 }
@@ -894,20 +896,22 @@ fn custom_shortcut_editor(
                         .child(control_input(input).cleanable(true)),
                 )
                 .child(
-                    Button::new(format!("{id_prefix}-custom-shortcut-record"))
-                        .debug_selector(move || format!("{id_prefix}-custom-shortcut-record"))
-                        .compact()
-                        .selected(recording)
-                        .label(if recording {
-                            tr!("common.cancel")
-                        } else {
-                            tr!("actions.record_shortcut")
-                        })
-                        .on_click(move |_, window, cx| {
-                            record_view.update(cx, |view, cx| {
-                                view.toggle_shortcut_recording(window, cx);
-                            });
-                        }),
+                    div().track_focus(picker.shortcut_record_focus).child(
+                        Button::new(format!("{id_prefix}-custom-shortcut-record"))
+                            .debug_selector(move || format!("{id_prefix}-custom-shortcut-record"))
+                            .compact()
+                            .selected(recording)
+                            .label(if recording {
+                                tr!("common.cancel")
+                            } else {
+                                tr!("actions.record_shortcut")
+                            })
+                            .on_click(move |_, window, cx| {
+                                record_view.update(cx, |view, cx| {
+                                    view.toggle_shortcut_recording(window, cx);
+                                });
+                            }),
+                    ),
                 )
                 .child(
                     Button::new(format!("{id_prefix}-custom-shortcut-add"))

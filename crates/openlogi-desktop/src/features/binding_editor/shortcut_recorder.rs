@@ -1,6 +1,6 @@
 //! Records a custom shortcut from the next key the user presses.
 
-use gpui::{App, Keystroke, Subscription, Window};
+use gpui::{Context, FocusHandle, Keystroke, Subscription, Window};
 use openlogi_core::binding::KeyCombo;
 
 #[cfg(test)]
@@ -11,7 +11,8 @@ mod tests;
 pub(crate) enum Recording {
     /// A chord a custom shortcut can send.
     Chord(KeyCombo),
-    /// Escape without modifiers, which stops recording without a chord.
+    /// The recording stopped without a chord: Escape without modifiers, or
+    /// focus left the recording area.
     Cancelled,
     /// A key a custom shortcut cannot send, such as a media key.
     Unsupported,
@@ -52,34 +53,61 @@ impl From<&Keystroke> for Recording {
     }
 }
 
-/// A recording in progress. It takes the next key press in the window that
-/// started it, ahead of the window's key bindings, so a chord such as Cmd+W
-/// records instead of closing the window. Dropping it stops recording.
+/// A view that owns a [`ShortcutRecorder`].
+pub(crate) trait RecordsShortcut: Sized + 'static {
+    /// The recording ended with `recording`. The view must drop its
+    /// [`ShortcutRecorder`] here, which stops the recording.
+    fn shortcut_recorded(
+        &mut self,
+        recording: Recording,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    );
+}
+
+/// A recording in progress, scoped to the element that tracks `focus`.
+///
+/// Starting it focuses that element. While focus stays inside it, the next
+/// key press in the window is recorded ahead of the window's key bindings, so
+/// a chord such as Cmd+W records instead of closing the window. When focus
+/// leaves it, for example because the user clicks elsewhere or the editor is
+/// no longer rendered, the recording ends as [`Recording::Cancelled`] and key
+/// presses reach their usual target. Dropping it stops recording.
 pub(crate) struct ShortcutRecorder {
     _interceptor: Subscription,
+    _focus_out: Subscription,
 }
 
 impl ShortcutRecorder {
-    /// Start recording. `on_recorded` runs once, for the first key press.
-    pub(crate) fn start(
-        window: &Window,
-        cx: &mut App,
-        on_recorded: impl FnOnce(Recording, &mut Window, &mut App) + 'static,
+    /// Start recording for the view `cx` belongs to.
+    pub(crate) fn start<V: RecordsShortcut>(
+        focus: &FocusHandle,
+        window: &mut Window,
+        cx: &mut Context<V>,
     ) -> Self {
+        window.focus(focus, cx);
         let target = window.window_handle();
-        let mut on_recorded = Some(on_recorded);
+        let view = cx.weak_entity();
+        let area = focus.clone();
         let interceptor = cx.intercept_keystrokes(move |event, window, cx| {
             if window.window_handle() != target {
                 return;
             }
-            let Some(on_recorded) = on_recorded.take() else {
-                return;
+            let recording = if area.contains_focused(window, cx) {
+                cx.stop_propagation();
+                Recording::from(&event.keystroke)
+            } else {
+                Recording::Cancelled
             };
-            cx.stop_propagation();
-            on_recorded(Recording::from(&event.keystroke), window, cx);
+            view.update(cx, |view, cx| view.shortcut_recorded(recording, window, cx))
+                .ok();
+        });
+        let focus_out = cx.on_focus_out(focus, window, |view, _, window, cx| {
+            view.shortcut_recorded(Recording::Cancelled, window, cx);
         });
         Self {
             _interceptor: interceptor,
+            _focus_out: focus_out,
         }
     }
 }

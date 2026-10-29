@@ -26,7 +26,7 @@ use super::inspector::{
 };
 use super::leader_lines::{Geometry as LeaderGeometry, Label, paint as paint_leader_lines};
 use crate::app::{glow_canvas, keyboard_glow};
-use crate::features::binding_editor::{Recording, ShortcutRecorder};
+use crate::features::binding_editor::{Recording, RecordsShortcut, ShortcutRecorder};
 use crate::features::keyboard::editors::{PowerUserKind, text_editor_placeholder};
 use crate::features::profiles::{profile_canvas_status, profile_name};
 use crate::services::assets::{GlowGeometry, ResolvedAsset};
@@ -147,6 +147,8 @@ pub struct MouseModelView {
     pub(super) shortcut_mode: ShortcutMode,
     /// The custom shortcut recording in progress, if any.
     shortcut_recorder: Option<ShortcutRecorder>,
+    /// The Record button's area; a recording lasts while focus stays in it.
+    shortcut_record_focus: FocusHandle,
     /// The press-force slider while the haptic panel's inspector shows it.
     pub(super) force_sensing: Option<ForceSensingSlider>,
     _state_obs: Subscription,
@@ -222,6 +224,7 @@ impl MouseModelView {
             invalid_drafts: InvalidDrafts::default(),
             shortcut_mode: ShortcutMode::Tap,
             shortcut_recorder: None,
+            shortcut_record_focus: cx.focus_handle(),
             force_sensing: None,
             _state_obs: state_obs,
         }
@@ -272,23 +275,12 @@ impl MouseModelView {
         cx: &mut Context<Self>,
     ) {
         if self.shortcut_recorder.take().is_none() {
-            let view = cx.entity().downgrade();
-            self.shortcut_recorder = Some(ShortcutRecorder::start(
-                window,
-                cx,
-                move |recording, window, cx| {
-                    view.update(cx, |view, cx| {
-                        view.finish_shortcut_recording(recording, window, cx);
-                    })
-                    .ok();
-                },
-            ));
+            let area = self.shortcut_record_focus.clone();
+            self.shortcut_recorder = Some(ShortcutRecorder::start(&area, window, cx));
         }
         cx.notify();
     }
 
-    /// A recorded chord fills the shortcut field, and Add commits it in the
-    /// chosen mode. A key a shortcut cannot send shows the field's error.
     /// The action picker's state, as the inspector reads it.
     fn action_picker_context<'a>(&'a self, view: &'a Entity<Self>) -> ActionPickerContext<'a> {
         ActionPickerContext {
@@ -299,29 +291,10 @@ impl MouseModelView {
             command_input: &self.custom_command_input,
             shortcut_mode: self.shortcut_mode,
             shortcut_recording: self.shortcut_recorder.is_some(),
+            shortcut_record_focus: &self.shortcut_record_focus,
             invalid: self.invalid_drafts,
             view,
         }
-    }
-
-    fn finish_shortcut_recording(
-        &mut self,
-        recording: Recording,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.shortcut_recorder = None;
-        match recording {
-            Recording::Chord(combo) => {
-                self.custom_shortcut_input.update(cx, |input, cx| {
-                    input.set_value(combo.rendered_label(), window, cx);
-                });
-                self.invalid_drafts.shortcut = false;
-            }
-            Recording::Cancelled => {}
-            Recording::Unsupported => self.invalid_drafts.shortcut = true,
-        }
-        cx.notify();
     }
 
     fn reset_for_device(&mut self, device_key: Option<DeviceKey>) {
@@ -408,6 +381,30 @@ impl MouseModelView {
         let facts = ForceSensingFacts::current(self.selected, cx);
         ForceSensingSlider::sync(&mut self.force_sensing, facts.as_ref(), window, cx);
         facts
+    }
+}
+
+impl RecordsShortcut for MouseModelView {
+    /// A recorded chord fills the shortcut field, and Add commits it in the
+    /// chosen mode. A key a shortcut cannot send shows the field's error.
+    fn shortcut_recorded(
+        &mut self,
+        recording: Recording,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.shortcut_recorder = None;
+        match recording {
+            Recording::Chord(combo) => {
+                self.custom_shortcut_input.update(cx, |input, cx| {
+                    input.set_value(combo.rendered_label(), window, cx);
+                });
+                self.invalid_drafts.shortcut = false;
+            }
+            Recording::Cancelled => {}
+            Recording::Unsupported => self.invalid_drafts.shortcut = true,
+        }
+        cx.notify();
     }
 }
 
