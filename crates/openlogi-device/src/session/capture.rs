@@ -36,7 +36,7 @@ use redivert::ReportingChanges;
 use super::capture_restore::{
     ArmedReporting, CaptureChannelSlot, CaptureError, CaptureSessionOutcome, CaptureSessionStop,
     CaptureStop, PendingCaptureRestore, drop_listener_after, restore_after_stop,
-    stop_for_current_publication, wait_for_channel_change,
+    stop_for_current_publication, stop_for_dead_channel, wait_for_channel_change,
 };
 use super::gesture::CapturedInput;
 use crate::reprog_controls::{CidReportingChangeEcho, ReprogControlsV4};
@@ -450,7 +450,7 @@ async fn monitor<A: ArmedCapture>(
                     outcome,
                 ) == LivenessDecision::Restart {
                     warn!(index = context.device_index, capture = A::NAME, "capture channel stopped delivering — restarting session on a fresh channel");
-                    return stop_for_current_publication(context.registry, context.shared);
+                    return stop_for_dead_channel(context.registry, context.shared);
                 }
             }
         }

@@ -152,11 +152,12 @@ pub use succession::Identity;
 ///      offers, and `BacklightState::duration` and
 ///      `BacklightChange::Duration` appended — the `0x1982` backlight
 ///      timer, five-second steps up to two hours.
-/// v42: `KeyboardUsage` accepts Insert (`0x49`), so a `KeyCombo` can carry
-///      a usage a v41 agent rejects. `Capabilities::{onboard_profiles,
-///      button_spy}`, the `NextDpiPreset`, `PreviousDpiPreset`, `DpiShift` and
-///      `GShift` actions, `Agent::read_onboard`, `HidppOperation::ReadOnboard`
-///      and `PairingFailure::ReceiverFull` appended — G-series onboard memory,
+/// v42: `KeyboardUsage` accepts Insert (`0x49`) and Print Screen (`0x46`),
+///      so a `KeyCombo` can carry a usage a v41 agent rejects.
+///      `Capabilities::{onboard_profiles, button_spy}`, the `NextDpiPreset`,
+///      `PreviousDpiPreset`, `DpiShift` and `GShift` actions,
+///      `Agent::read_onboard`, `HidppOperation::ReadOnboard` and
+///      `PairingFailure::ReceiverFull` appended — G-series onboard memory,
 ///      host mode and G-Shift.
 pub const PROTOCOL_VERSION: u32 = 42;
 
