@@ -661,6 +661,36 @@ fn a_per_app_only_key_keeps_the_keyboard_session_with_nothing_diverted() {
         [(KEY, ButtonId::control(KEY))]
     );
 }
+/// A keyboard that binds keys only for another app never takes the session
+/// from a keyboard whose bindings apply now, even when it comes first in
+/// inventory order.
+#[test]
+fn a_keyboard_with_current_bindings_wins_over_a_per_app_only_one() {
+    let mut config = Config::default();
+    config.set_per_app_binding(
+        "editor-only",
+        "editor",
+        ButtonId::control(0x00e7),
+        Some(Action::Copy),
+    );
+    config.set_binding(
+        "everywhere",
+        ButtonId::control(0x00e8),
+        Binding::Single(Action::Paste),
+    );
+    let mut orch = orchestrator(config);
+    let keyboards = [("editor-only", 2), ("everywhere", 3)].map(|(key, index)| {
+        let mut keyboard = dev(key, index, true);
+        keyboard.kind = DeviceKind::Keyboard;
+        keyboard
+    });
+    orch.devices = keyboards.into();
+    orch.rebuild();
+    assert_eq!(
+        orch.keyboard_spec_for().expect("spec").config_key,
+        "everywhere"
+    );
+}
 #[test]
 fn a_disabled_mouse_keeps_its_latest_route_for_restore() {
     let mut config = Config::default();

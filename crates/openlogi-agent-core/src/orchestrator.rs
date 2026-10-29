@@ -823,8 +823,10 @@ impl Orchestrator {
     /// keyboard OpenLogi has never seen is remappable the day it ships.
     ///
     /// One session at a time, and only a keyboard with something bound in
-    /// some profile can hold it: an online bound keyboard wins over an asleep
-    /// one, so a stale
+    /// some profile can hold it. A keyboard that binds keys for the app in
+    /// front wins over one that binds keys only for other apps, so an empty
+    /// session never takes the place of a keyboard whose bindings apply now.
+    /// Then an online bound keyboard wins over an asleep one, so a stale
     /// receiver slot for the same model (#1581) — which carries no bindings —
     /// never takes the session from the keyboard that is actually typing, and
     /// never shadows it while it naps. Among bound keyboards in the same
@@ -857,10 +859,10 @@ impl Orchestrator {
                 }
             })
             .collect();
+        // `min_by_key` keeps the first of equal candidates: inventory order.
         let chosen = candidates
             .iter()
-            .find(|candidate| candidate.dev.online)
-            .or_else(|| candidates.first())?;
+            .min_by_key(|candidate| (candidate.divert.wanted.is_empty(), !candidate.dev.online))?;
         for &cid in &chosen.divert.reserved {
             warn!(
                 cid = format_args!("{cid:#06x}"),
