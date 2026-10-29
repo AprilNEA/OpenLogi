@@ -1819,10 +1819,19 @@ impl Orchestrator {
             ) {
                 continue;
             }
+            // The same precedence the tray and the GUI use: a user-assigned
+            // name, then the product name the settings app persisted, then the
+            // firmware codename.
             let name = self
                 .config
                 .device_custom_name(&device.config_key)
                 .map(str::to_owned)
+                .or_else(|| {
+                    self.config
+                        .device_identity(&device.config_key)
+                        .map(|identity| identity.display_name.trim().to_owned())
+                        .filter(|name| !name.is_empty())
+                })
                 .or_else(|| device.codename.as_deref().map(prettify_codename));
             info!(device = %device.config_key, ?battery, "announcing a low battery");
             self.observable.notices().post(
