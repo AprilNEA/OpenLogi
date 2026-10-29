@@ -86,7 +86,7 @@ pub(super) async fn probe_direct(
     // failed and the cache stood in) a rejection below would be
     // indistinguishable from a transient glitch, so the node is settled as a
     // failed probe and its last inventory replayed.
-    let capabilities = probe.capabilities;
+    let capabilities = probe.capabilities();
     let walk_succeeded = capabilities.is_some() && probe.refresh == Refresh::Answered;
     let caps = capabilities.unwrap_or_default();
     // An unlinked answer came from a battery feature too: a headset dongle

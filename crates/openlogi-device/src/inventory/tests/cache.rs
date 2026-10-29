@@ -332,7 +332,7 @@ async fn a_failed_direct_reprobe_retires_the_channel() {
     let backend = Arc::new(RejectingWritesBackend { node: info });
     let mut enumerator = Enumerator::with_backend(backend);
     let mut last_good = cache_entry();
-    last_good.probe.capabilities = Some(Capabilities {
+    last_good.probe.protocol = ProbedProtocol::Hidpp20(Capabilities {
         pointer: true,
         ..Capabilities::default()
     });

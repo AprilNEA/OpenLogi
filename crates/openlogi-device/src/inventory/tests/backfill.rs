@@ -9,9 +9,9 @@ use super::*;
 fn an_incomplete_capability_walk_keeps_the_last_complete_answer() {
     let mut fresh = probed(None, false);
     fresh.capabilities_incomplete = true;
-    fresh.capabilities = Some(Capabilities::default());
+    fresh.protocol = ProbedProtocol::Hidpp20(Capabilities::default());
     let mut cached = probed(None, false);
-    cached.capabilities = Some(Capabilities {
+    cached.protocol = ProbedProtocol::Hidpp20(Capabilities {
         haptic_panel: true,
         dpi_gestures: true,
         ..Capabilities::default()
@@ -20,7 +20,7 @@ fn an_incomplete_capability_walk_keeps_the_last_complete_answer() {
     keep_known_capabilities(&mut fresh, &cached);
 
     assert_eq!(
-        fresh.capabilities, cached.capabilities,
+        fresh.protocol, cached.protocol,
         "the last complete control walk must survive a lost reply"
     );
     assert!(
@@ -33,9 +33,9 @@ fn an_incomplete_capability_walk_keeps_the_last_complete_answer() {
 #[test]
 fn a_complete_capability_walk_is_left_alone() {
     let mut fresh = probed(None, false);
-    fresh.capabilities = Some(Capabilities::default());
+    fresh.protocol = ProbedProtocol::Hidpp20(Capabilities::default());
     let mut cached = probed(None, false);
-    cached.capabilities = Some(Capabilities {
+    cached.protocol = ProbedProtocol::Hidpp20(Capabilities {
         haptic_panel: true,
         dpi_gestures: true,
         ..Capabilities::default()
@@ -43,7 +43,10 @@ fn a_complete_capability_walk_is_left_alone() {
 
     keep_known_capabilities(&mut fresh, &cached);
 
-    assert_eq!(fresh.capabilities, Some(Capabilities::default()));
+    assert_eq!(
+        fresh.protocol,
+        ProbedProtocol::Hidpp20(Capabilities::default())
+    );
 }
 
 #[test]

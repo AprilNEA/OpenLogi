@@ -303,6 +303,7 @@ async fn walk_bolt_slot(
         );
     }
 
+    let capabilities = probe.capabilities();
     let device = PairedDevice {
         slot,
         // The device's own `0x0005` name comes first, as on Unifying; the cache
@@ -319,7 +320,7 @@ async fn walk_bolt_slot(
         online,
         battery: probe.battery,
         model_info: probe.model_info,
-        capabilities: probe.capabilities,
+        capabilities,
         settings_revision: pass.settings_revision(slot),
     };
     (device, outcome)

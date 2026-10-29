@@ -6,7 +6,8 @@ use openlogi_core::device::{BatteryInfo, BatteryLevel, BatteryStatus};
 
 use super::events::{EventFeatureIndices, EventSubscriptionHandle};
 use super::features::{
-    BatteryProbe, BatteryRead, ProbedFeatures, Refresh, probe_features, read_battery,
+    BatteryProbe, BatteryRead, ProbedFeatures, ProbedProtocol, Refresh, probe_features,
+    read_battery,
 };
 use crate::backend::NodeId;
 
@@ -52,7 +53,7 @@ pub(super) struct Cached {
     /// Which battery feature this device exposes and its runtime index, captured
     /// by the full probe. Lets cache hits re-read the volatile battery in one
     /// round-trip — no `Device::new` ping, no table walk. `None` when the device
-    /// exposes neither `0x1004` nor the legacy `0x1000`.
+    /// exposes no battery source [`BatteryProbe`] knows.
     pub(super) battery: Option<BatteryProbe>,
     /// Event-capable feature indexes found by the same immutable table walk.
     pub(super) events: EventFeatureIndices,
@@ -212,9 +213,8 @@ async fn probe_or_reuse_registered(
             (fresh.battery, fresh.unlinked) =
                 refresh_battery(channel, index, probe, cached.map(|known| &known.probe)).await;
         }
-        // `capabilities` is `Some` exactly when the feature-table walk succeeded;
-        // only then is the probe worth caching.
-        if fresh.capabilities.is_some() {
+        // Only a completed probe is worth caching.
+        if fresh.completed() {
             if let Some(c) = cached {
                 backfill_identity(&mut fresh, &c.probe);
             }
@@ -294,8 +294,8 @@ async fn probe_or_reuse_registered(
 /// feature vanish. A probe whose capability reads all succeeded is returned
 /// untouched, including one that legitimately lost a capability.
 pub(super) fn keep_known_capabilities(fresh: &mut ProbedFeatures, cached: &ProbedFeatures) {
-    if fresh.capabilities_incomplete && cached.capabilities.is_some() {
-        fresh.capabilities.clone_from(&cached.capabilities);
+    if fresh.capabilities_incomplete && matches!(cached.protocol, ProbedProtocol::Hidpp20(_)) {
+        fresh.protocol = cached.protocol;
     }
 }
 
@@ -446,21 +446,39 @@ mod hold_tests {
     }
 
     #[test]
-    fn a_level_only_unified_reading_passes_through_while_charging() {
+    fn a_level_only_reading_passes_through_while_charging() {
+        // `0x1004` without state of charge and the HID++ 1.0 `0x07` register
+        // report a level and never a percentage, so there is none to hold.
         let level_only = BatteryProbe::Unified {
             index: 0,
             state_of_charge: false,
         };
-        let fresh = BatteryInfo {
+        for probe in [level_only, BatteryProbe::StatusRegister] {
+            let fresh = BatteryInfo {
+                percentage: None,
+                level: BatteryLevel::Low,
+                status: BatteryStatus::Charging,
+            };
+            let live = hold_percentage_while_charging(
+                fresh.clone(),
+                Some(&battery(None, BatteryStatus::Discharging)),
+                probe,
+            );
+            assert_eq!(live, fresh, "{probe:?}");
+        }
+
+        // A `0x07` charging report without a level stays unknown rather than
+        // borrowing the last level.
+        let no_level = BatteryInfo {
             percentage: None,
-            level: BatteryLevel::Low,
+            level: BatteryLevel::Unknown,
             status: BatteryStatus::Charging,
         };
         let live = hold_percentage_while_charging(
-            fresh.clone(),
+            no_level.clone(),
             Some(&battery(None, BatteryStatus::Discharging)),
-            level_only,
+            BatteryProbe::StatusRegister,
         );
-        assert_eq!(live, fresh);
+        assert_eq!(live, no_level);
     }
 }
