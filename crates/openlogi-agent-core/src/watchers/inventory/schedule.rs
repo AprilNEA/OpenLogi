@@ -52,6 +52,8 @@ pub(super) enum ReconcileTrigger {
     Initial,
     /// Bounded repair of a failed open/probe or pending miss grace.
     RepairRetry,
+    /// A capture session found a published channel dead.
+    DeadChannel,
     /// A persistent HID++ channel reported lifecycle state.
     HidEvent(HidppEventSource),
     /// The host HID node set changed.

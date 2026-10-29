@@ -865,6 +865,7 @@ fn hid_usage_to_linux(usage: u8) -> Option<KeyCode> {
         0x36 => Some(KeyCode::KEY_COMMA),
         0x37 => Some(KeyCode::KEY_DOT),
         0x38 => Some(KeyCode::KEY_SLASH),
+        0x46 => Some(KeyCode::KEY_SYSRQ),
         0x49 => Some(KeyCode::KEY_INSERT),
         0x4a => Some(KeyCode::KEY_HOME),
         0x4b => Some(KeyCode::KEY_PAGEUP),
@@ -1253,6 +1254,7 @@ mod tests {
         assert_eq!(hid_usage_to_linux(0x50), Some(KeyCode::KEY_LEFT));
         assert_eq!(hid_usage_to_linux(0x3a), Some(KeyCode::KEY_F1));
         assert_eq!(hid_usage_to_linux(0x6f), Some(KeyCode::KEY_F20));
+        assert_eq!(hid_usage_to_linux(0x46), Some(KeyCode::KEY_SYSRQ));
         assert_eq!(hid_usage_to_linux(0x49), Some(KeyCode::KEY_INSERT));
         assert_eq!(hid_usage_to_linux(0xff), None);
     }

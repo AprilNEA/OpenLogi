@@ -86,6 +86,7 @@ pub(super) use browser::ax_browser_navigate;
 use dock::{app_expose, launchpad, mission_control, show_desktop};
 use keyboard_layout::layout_key;
 use keycode::hid_usage_to_macos;
+pub(super) use keycode::pressed_usage;
 use menu_shortcut::{MenuPress, MenuShortcut};
 use scroll::dispatch_scroll;
 pub(super) use scroll::{post_phased_scroll, post_scroll, post_smooth_scroll};

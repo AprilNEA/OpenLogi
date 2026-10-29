@@ -634,6 +634,63 @@ fn a_back_binding_alone_keeps_its_whole_family_on_a_keyboard() {
     }
 }
 
+/// A keyboard that binds a key only for one app keeps its capture session
+/// while other apps are in front, with nothing diverted. A focus change then
+/// changes the divert set of the same target in place, instead of arming the
+/// keyboard from scratch (#2140).
+#[test]
+fn a_per_app_only_key_keeps_the_keyboard_session_with_nothing_diverted() {
+    const KEY: u16 = 0x00e7;
+    let mut config = Config::default();
+    config.set_per_app_binding("kbd", "editor", ButtonId::control(KEY), Some(Action::Copy));
+    let mut orch = orchestrator(config);
+    let mut keyboard = dev("kbd", 2, true);
+    keyboard.kind = DeviceKind::Keyboard;
+    orch.devices = vec![keyboard];
+    orch.rebuild();
+    let elsewhere = orch
+        .keyboard_spec_for()
+        .expect("a per-app key holds the session");
+    assert!(elsewhere.wanted.is_empty(), "{:#06x?}", elsewhere.wanted);
+
+    orch.set_current_app(Some(ForegroundApp::unnamed("editor".into())));
+    let in_editor = orch.keyboard_spec_for().expect("spec");
+    assert_eq!(in_editor.route, elsewhere.route);
+    assert_eq!(
+        in_editor.wanted.into_iter().collect::<Vec<_>>(),
+        [(KEY, ButtonId::control(KEY))]
+    );
+}
+/// A keyboard that binds keys only for another app never takes the session
+/// from a keyboard whose bindings apply now, even when it comes first in
+/// inventory order.
+#[test]
+fn a_keyboard_with_current_bindings_wins_over_a_per_app_only_one() {
+    let mut config = Config::default();
+    config.set_per_app_binding(
+        "editor-only",
+        "editor",
+        ButtonId::control(0x00e7),
+        Some(Action::Copy),
+    );
+    config.set_binding(
+        "everywhere",
+        ButtonId::control(0x00e8),
+        Binding::Single(Action::Paste),
+    );
+    let mut orch = orchestrator(config);
+    let keyboards = [("editor-only", 2), ("everywhere", 3)].map(|(key, index)| {
+        let mut keyboard = dev(key, index, true);
+        keyboard.kind = DeviceKind::Keyboard;
+        keyboard
+    });
+    orch.devices = keyboards.into();
+    orch.rebuild();
+    assert_eq!(
+        orch.keyboard_spec_for().expect("spec").config_key,
+        "everywhere"
+    );
+}
 #[test]
 fn a_disabled_mouse_keeps_its_latest_route_for_restore() {
     let mut config = Config::default();
