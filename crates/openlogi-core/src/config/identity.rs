@@ -322,6 +322,7 @@ pub(super) fn fold(device: &mut DeviceConfig, mut legacy: DeviceConfig, route_ke
     fold_option_field!(pointer_speed);
     fold_option_field!(force_sensing);
     fold_option_field!(disabled_keys);
+    fold_option_field!(gesture_hold);
     // The user-assigned alias. Without this a legacy entry carrying a name
     // folded into a canonical entry with none would drop it silently — the
     // one field here a user typed by hand, so the loss is the most visible.
@@ -407,6 +408,7 @@ fn fold_maps(device: &mut DeviceConfig, legacy: &mut DeviceConfig, route_key: &s
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::GestureHold;
     use crate::device_order::{DeviceIdentity, DeviceStableId};
 
     fn cabled() -> DeviceStableId {
@@ -760,6 +762,31 @@ mod tests {
             !config.devices.contains_key("receiver:82839805:slot:1"),
             "the legacy entry is consumed, not left behind"
         );
+    }
+
+    #[test]
+    fn adopting_a_route_keeps_a_hold_gate_set_before_the_reconnect() {
+        // A gate edited onto the route-keyed entry while the device is offline
+        // must survive adoption. Before `fold` carried the field, adoption
+        // consumed the legacy entry and the device silently reverted to 160 ms.
+        let mut config = Config::default();
+        let gate = GestureHold::try_new(70).expect("valid hold");
+        config.devices.insert(
+            "receiver:82839805:slot:1".to_string(),
+            DeviceConfig {
+                gesture_hold: Some(gate),
+                ..DeviceConfig::default()
+            },
+        );
+        config
+            .devices
+            .insert("unit:6be9d300".to_string(), DeviceConfig::default());
+
+        let canonical = PhysicalDeviceKey::parse("unit:6be9d300").expect("valid");
+        assert!(config.adopt_route(&canonical, "receiver:82839805:slot:1", None));
+
+        assert_eq!(config.devices["unit:6be9d300"].gesture_hold, Some(gate));
+        assert_eq!(config.gesture_hold("unit:6be9d300"), gate);
     }
 
     #[test]

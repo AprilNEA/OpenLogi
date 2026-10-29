@@ -33,6 +33,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use hidpp::feature::hires_wheel::{self, HiResWheelEvent};
 use hidpp::protocol::v20;
 use openlogi_core::binding::{ButtonId, GestureDirection};
+use openlogi_core::config::GestureHold;
 use tokio::sync::mpsc;
 use tracing::{debug, info};
 
@@ -189,6 +190,18 @@ pub struct CaptureSpec {
     /// mode along with the divert; `None` leaves the wheel native. Inert on a
     /// device without the feature.
     pub divert_main_wheel: Option<MainWheelDivert>,
+    /// Hold gate for gesture swipes captured in this session: the device's
+    /// `gesture_hold`, or [`GestureHold::DEFAULT`] (160 ms) when the config
+    /// leaves it unset.
+    ///
+    /// This is a software value, but it sits in the target rather than the
+    /// dispatch plan because the accumulator that reads it lives inside the
+    /// capture session, which the dispatch plan cannot reach. The trade-off is
+    /// deliberate: editing `gesture_hold` restores and re-diverts this device's
+    /// captured controls once, the same way any other [`CaptureSpec`] edit
+    /// does, instead of hot-replacing mid-session. Bindings and thumb-wheel
+    /// sensitivity, which are edited far more often, stay hot-replaceable.
+    pub gesture_hold: GestureHold,
 }
 
 /// Capture the controls selected by `spec` on `route` until `host.shutdown`
@@ -221,7 +234,7 @@ pub async fn run_capture_session(
     if let Some(direction) = armed.thumbwheel_direction() {
         let _ = host.sink.send(direction);
     }
-    Ok(run_capture(shared, GestureCapture::new(armed), host).await)
+    Ok(run_capture(shared, GestureCapture::new(armed, spec.gesture_hold), host).await)
 }
 
 /// Gesture capture as [`run_capture`] drives it: the armed controls, and the
@@ -237,10 +250,12 @@ struct GestureCapture {
 }
 
 impl GestureCapture {
-    fn new(armed: ArmedControls) -> Self {
+    fn new(armed: ArmedControls, gesture_hold: GestureHold) -> Self {
         Self {
             armed,
-            accum: Arc::default(),
+            accum: Arc::new(Mutex::new(
+                CaptureAccum::default().with_gesture_hold(gesture_hold),
+            )),
             thumb_status: Arc::new(Mutex::new(RotationStatus::Inactive)),
         }
     }
@@ -354,7 +369,11 @@ impl ArmedCapture for GestureCapture {
     }
 
     fn reset_input_state(&self) {
-        *self.accum.lock().unwrap_or_else(PoisonError::into_inner) = CaptureAccum::default();
+        let mut accum = self.accum.lock().unwrap_or_else(PoisonError::into_inner);
+        // Keep the configured gate across a reconnect: it is config, not input
+        // state, and dropping it would silently restore 160 ms.
+        let gesture_hold = accum.gesture_hold();
+        *accum = CaptureAccum::default().with_gesture_hold(gesture_hold);
         // A power cycle ends any roll in progress; carrying it over would
         // swallow the first tap after the reconnect.
         *self
