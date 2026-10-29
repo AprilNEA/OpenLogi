@@ -386,6 +386,73 @@ impl From<VerticalScrollSensitivity> for f32 {
     }
 }
 
+/// Out-of-the-box gesture hold, in milliseconds. The single source of the
+/// runtime default: [`GestureHold::DEFAULT`] validates it, and
+/// [`GESTURE_HOLD_FOR_SWIPE`](crate::binding::GESTURE_HOLD_FOR_SWIPE) is the
+/// same value as a [`Duration`](std::time::Duration).
+pub const GESTURE_HOLD_DEFAULT_MS: u16 = 160;
+const GESTURE_HOLD_MIN_MS: u16 = 40;
+const GESTURE_HOLD_MAX_MS: u16 = 1000;
+
+/// How long a gesture button must be held before its travel may commit to a
+/// swipe direction, in milliseconds.
+///
+/// This is the single source of the runtime default:
+/// [`GESTURE_HOLD_FOR_SWIPE`](crate::binding::GESTURE_HOLD_FOR_SWIPE) is this
+/// type's [`DEFAULT`](Self::DEFAULT) as a [`Duration`](std::time::Duration).
+/// A shorter value suits a user who flicks the gesture button and releases
+/// inside the default gate, which otherwise reads the press as a plain click;
+/// the range keeps a value above sensor noise while never reaching a second.
+#[nutype(
+    const_fn,
+    validate(greater_or_equal = GESTURE_HOLD_MIN_MS, less_or_equal = GESTURE_HOLD_MAX_MS),
+    derive(
+        Debug,
+        Clone,
+        Copy,
+        PartialEq,
+        Eq,
+        PartialOrd,
+        Ord,
+        TryFrom,
+        Into,
+        Display,
+        Serialize,
+        Deserialize
+    )
+)]
+pub struct GestureHold(u16);
+
+impl GestureHold {
+    /// Shortest selectable hold.
+    pub const MIN: Self = match Self::try_new(GESTURE_HOLD_MIN_MS) {
+        Ok(value) => value,
+        Err(_) => panic!("valid minimum gesture hold"),
+    };
+    /// Longest selectable hold.
+    pub const MAX: Self = match Self::try_new(GESTURE_HOLD_MAX_MS) {
+        Ok(value) => value,
+        Err(_) => panic!("valid maximum gesture hold"),
+    };
+    /// Out-of-the-box hold: the shared runtime default.
+    pub const DEFAULT: Self = match Self::try_new(GESTURE_HOLD_DEFAULT_MS) {
+        Ok(value) => value,
+        Err(_) => panic!("valid default gesture hold"),
+    };
+
+    /// This hold as a [`Duration`](std::time::Duration).
+    #[must_use]
+    pub fn duration(self) -> std::time::Duration {
+        std::time::Duration::from_millis(u64::from(self.into_inner()))
+    }
+}
+
+impl Default for GestureHold {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
 /// Thumb-wheel responsiveness on OpenLogi's `1..=100` scale.
 #[nutype(
     const_fn,

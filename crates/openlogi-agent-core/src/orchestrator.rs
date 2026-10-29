@@ -785,6 +785,9 @@ impl Orchestrator {
             gestures,
             pointer_target,
             selected_device: key.map(str::to_owned),
+            gesture_tuning: key
+                .map(|key| self.config.gesture_tuning(key))
+                .unwrap_or_default(),
             ..HookMaps::default()
         }
     }

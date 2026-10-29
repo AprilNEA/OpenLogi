@@ -305,6 +305,9 @@ pub fn plan_for_device(
             .is_some_and(|binding| binding.click_action() != default_binding(*button))
     });
     let thumbwheel_sensitivity = config.thumbwheel_sensitivity(config_key);
+    // One accessor for both capture paths; `plan_for_device` keeps its own
+    // length budget, so the value is read once into a local.
+    let gesture_tuning = config.gesture_tuning(config_key);
     DeviceCapturePlan {
         target: CaptureTarget {
             physical_key,
@@ -323,6 +326,7 @@ pub fn plan_for_device(
                 // Needs the device's wheel capabilities and the settings of
                 // its current link, so the orchestrator fills it in.
                 divert_main_wheel: None,
+                gesture_tuning,
             },
             rearm_generation,
         },

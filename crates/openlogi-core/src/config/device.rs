@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 
 use super::button_map::{deserialize_button_map, deserialize_button_maps_by_app};
 use super::settings::{
-    CameraControls, GestureOwner, LightSettings, Lighting, ScrollResolution, SmartShift,
-    ThumbwheelSensitivity, deserialize_gesture_owner,
+    CameraControls, GestureHold, GestureOwner, LightSettings, Lighting, ScrollResolution,
+    SmartShift, ThumbwheelSensitivity, deserialize_gesture_owner,
 };
 use crate::binding::{Action, ActionRingConfig, Binding, ButtonId, GestureDirection};
 use crate::device::{Capabilities, DeviceKind, DeviceModelInfo, LightCapabilities};
@@ -316,6 +316,24 @@ pub struct DeviceConfig {
     /// native, and is omitted from `config.toml`.
     #[serde(default, skip_serializing_if = "is_false")]
     pub smooth_wheel: bool,
+    /// How long this device's gesture button must be held before its travel may
+    /// commit to a swipe direction. `None` uses the runtime default
+    /// ([`GESTURE_HOLD_FOR_SWIPE`](crate::binding::GESTURE_HOLD_FOR_SWIPE), the
+    /// validated [`GestureHold::DEFAULT`], 160 ms) and is omitted from
+    /// `config.toml`. Lowering it lets a quick hold-and-flick register as a
+    /// swipe instead of a plain click on release.
+    ///
+    /// Unlike `thumbwheel_sensitivity`, this value is read when a capture
+    /// session arms, so editing it restores and re-diverts the device's
+    /// captured controls instead of hot-replacing them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gesture_hold: Option<GestureHold>,
+    /// Whether carrying a gesture on past its first commit fires that
+    /// direction again. `None` and `true` keep the behaviour #1652 added, where
+    /// a long hold-and-drag steps through several desktops; `false` limits one
+    /// press to a single swipe, so the same stroke can never act twice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gesture_repeat: Option<bool>,
     /// Physical config keys of pointing devices that follow this keyboard's
     /// host switch channel. The relationship is keyboard-initiated: pressing
     /// one of this device's host keys switches every listed target first, then
@@ -464,6 +482,8 @@ impl Default for DeviceConfig {
             invert_scroll: false,
             scroll_resolution: None,
             smooth_wheel: false,
+            gesture_hold: None,
+            gesture_repeat: None,
             host_switch_targets: Vec::new(),
             fn_lock: None,
             keep_os_layout: None,
@@ -590,6 +610,10 @@ struct RawDeviceConfig {
     #[serde(default)]
     smooth_wheel: bool,
     #[serde(default)]
+    gesture_hold: Option<GestureHold>,
+    #[serde(default)]
+    gesture_repeat: Option<bool>,
+    #[serde(default)]
     host_switch_targets: Vec<String>,
     #[serde(default)]
     fn_lock: Option<bool>,
@@ -661,6 +685,8 @@ impl From<RawDeviceConfig> for DeviceConfig {
             invert_scroll: raw.invert_scroll,
             scroll_resolution: raw.scroll_resolution,
             smooth_wheel: raw.smooth_wheel,
+            gesture_hold: raw.gesture_hold,
+            gesture_repeat: raw.gesture_repeat,
             host_switch_targets: raw.host_switch_targets,
             fn_lock: raw.fn_lock,
             keep_os_layout: raw.keep_os_layout,
@@ -677,6 +703,25 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::{DeviceConfig, DisableKey};
+
+    #[test]
+    fn gesture_hold_round_trips_and_rejects_out_of_range() {
+        let config: DeviceConfig = toml::from_str("gesture_hold = 80").expect("valid hold");
+        assert_eq!(config.gesture_hold.map(u16::from), Some(80));
+        // Below the floor and above the ceiling both fail the file, not just
+        // the field: an out-of-range value must never reach the runtime.
+        toml::from_str::<DeviceConfig>("gesture_hold = 20").unwrap_err();
+        toml::from_str::<DeviceConfig>("gesture_hold = 2000").unwrap_err();
+    }
+
+    #[test]
+    fn gesture_repeat_defaults_to_chaining_and_can_be_disabled() {
+        let unset: DeviceConfig = toml::from_str("").expect("empty table is valid");
+        assert_eq!(unset.gesture_repeat, None, "unset keeps chaining");
+        let off: DeviceConfig =
+            toml::from_str("gesture_repeat = false").expect("valid explicit opt-out");
+        assert_eq!(off.gesture_repeat, Some(false));
+    }
 
     #[test]
     fn host_switch_targets_round_trip_as_physical_keys() -> Result<(), Box<dyn std::error::Error>> {

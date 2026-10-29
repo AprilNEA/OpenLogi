@@ -4,6 +4,7 @@
 
 use std::num::NonZeroU8;
 
+use openlogi_core::binding::GestureTuning;
 use openlogi_core::binding::{ButtonId, GestureDirection, SwipeAccumulator};
 use tokio::sync::mpsc;
 use tracing::{debug, trace};
@@ -43,10 +44,17 @@ enum HoldState {
     },
 }
 
-/// Begin a hold for `cid`, its swipe accumulator started fresh.
-fn begin_hold(cid: u16, button: ButtonId, overlap: bool, skip_first_raw_xy: bool) -> HoldState {
+/// Begin a hold for `cid`, its swipe accumulator started fresh under the
+/// device's configured [`GestureTuning`].
+fn begin_hold(
+    cid: u16,
+    button: ButtonId,
+    overlap: bool,
+    skip_first_raw_xy: bool,
+    gesture_tuning: GestureTuning,
+) -> HoldState {
     let mut swipe = SwipeAccumulator::default();
-    swipe.begin();
+    swipe.begin(gesture_tuning);
     HoldState::Holding {
         cid,
         button,
@@ -62,6 +70,9 @@ fn begin_hold(cid: u16, button: ButtonId, overlap: bool, skip_first_raw_xy: bool
 pub(super) struct CaptureAccum {
     /// The hold owning raw-XY motion, if any (see [`HoldState`]).
     hold: HoldState,
+    /// Behaviour applied to every hold this accumulator begins, from the
+    /// device's `gesture_hold` and `gesture_repeat` settings.
+    gesture_tuning: GestureTuning,
     /// The armed gesture sources held in the last event, for edge detection:
     /// a source not previously held that becomes the holder is a fresh touch
     /// (its first raw-XY sample is then stale and discarded).
@@ -72,6 +83,20 @@ pub(super) struct CaptureAccum {
     /// Diverted standard-button and wheel-hold CIDs held in the last event,
     /// in press order.
     buttons_down: Vec<u16>,
+}
+
+impl CaptureAccum {
+    /// Apply the device's gesture tuning to every hold this accumulator begins
+    /// from now on.
+    pub(super) fn with_gesture_tuning(mut self, gesture_tuning: GestureTuning) -> Self {
+        self.gesture_tuning = gesture_tuning;
+        self
+    }
+
+    /// The tuning this accumulator currently applies.
+    pub(super) fn gesture_tuning(&self) -> GestureTuning {
+        self.gesture_tuning
+    }
 }
 
 #[cfg(test)]
@@ -175,6 +200,7 @@ impl CaptureAccum {
                                 button,
                                 held.len() > 1,
                                 !self.gestures_down.contains(&cid),
+                                self.gesture_tuning,
                             ),
                             None => HoldState::Idle,
                         }

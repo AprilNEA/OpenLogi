@@ -1,6 +1,7 @@
 //! The capture accumulator: presses, taps, swipes and raw XY across the gesture sources.
 
 use super::*;
+use openlogi_core::config::GestureHold;
 
 const GESTURE: &[u16] = &[reprog_controls::GESTURE_BUTTON_CID];
 
@@ -47,6 +48,38 @@ fn alternate_gesture_control_delivers_click_and_swipe() {
             "one hold must dispatch only once"
         );
     }
+}
+
+#[test]
+fn a_configured_hold_gate_reaches_the_hidpp_hold() {
+    // A gate longer than the old fixed 320 ms backdate only commits if the
+    // accumulator both stored the configured value and backdates against it.
+    // With either bug this swipe stays under the gate and reads as a click.
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let tuning = GestureTuning {
+        hold: GestureHold::MAX,
+        ..GestureTuning::default()
+    };
+    let mut acc = CaptureAccum::default().with_gesture_tuning(tuning);
+    assert_eq!(acc.gesture_tuning(), tuning);
+    handle_reprog(&mut acc, press(), GESTURE, &[], &[], &tx);
+    acc.backdate_hold_for_test();
+    stale_report(&mut acc, &tx);
+    handle_reprog(
+        &mut acc,
+        RawControlEvent::RawXy { dx: 120, dy: 5 },
+        GESTURE,
+        &[],
+        &[],
+        &tx,
+    );
+    assert_eq!(
+        next_gesture(&mut rx),
+        Ok(CapturedInput::Gesture(
+            ButtonId::GestureButton,
+            GestureDirection::Right
+        ))
+    );
 }
 
 const PANEL: &[u16] = &[reprog_controls::HAPTIC_PANEL_CID];

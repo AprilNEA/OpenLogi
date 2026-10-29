@@ -13,7 +13,8 @@ use super::{
     SmartShift, ThumbwheelSensitivity,
 };
 use crate::binding::{
-    ActionRingConfig, ActionRingIcon, ActionRingSlot, Binding, ButtonId, RingAction,
+    ActionRingConfig, ActionRingIcon, ActionRingSlot, Binding, ButtonId, GestureRepeat,
+    GestureTuning, RingAction,
 };
 use crate::hid::{Dpi, PointerSpeed, ReportRate};
 
@@ -479,6 +480,27 @@ impl Config {
     #[must_use]
     pub fn smooth_wheel(&self, device_key: &str) -> bool {
         self.devices.get(device_key).is_some_and(|d| d.smooth_wheel)
+    }
+
+    /// How `device_key`'s gesture button holds behave: the hold gate
+    /// ([`GestureHold::DEFAULT`], 160 ms, when unset) and whether one press may
+    /// chain several swipes (yes when unset).
+    ///
+    /// Both capture paths resolve the two through this one accessor, so the
+    /// HID++ and OS-hook paths can never disagree about them, and the default
+    /// for either lives in exactly one place.
+    #[must_use]
+    pub fn gesture_tuning(&self, device_key: &str) -> GestureTuning {
+        let Some(device) = self.devices.get(device_key) else {
+            return GestureTuning::default();
+        };
+        GestureTuning {
+            hold: device.gesture_hold.unwrap_or_default(),
+            repeat: match device.gesture_repeat {
+                Some(false) => GestureRepeat::Once,
+                None | Some(true) => GestureRepeat::Chain,
+            },
+        }
     }
 
     /// Turn `device_key`'s diverted smooth wheel on or off.
