@@ -121,7 +121,7 @@ fn cursor_display() -> Option<u32> {
         return None;
     }
     let hits = displays.get(..usize::try_from(count).ok()?)?;
-    mirror_set(hits.iter().map(|&display| mirror_root(display)))
+    mirror_set(hits.iter().map(|&display| Quartz.root(display)))
 }
 
 /// The one mirror set all of `roots` name, as its root display. A mirror
@@ -134,18 +134,43 @@ fn mirror_set(roots: impl IntoIterator<Item = u32>) -> Option<u32> {
     roots.all(|other| other == root).then_some(root)
 }
 
-/// The display `display`'s mirror set is drawn from, or `display` itself
-/// when it mirrors nothing. A hardware mirror set names its primary display;
-/// any mirror names the display it copies. Asking both lets either answer
-/// resolve the set. Each returns `display` or 0 when there is no set.
-fn mirror_root(display: u32) -> u32 {
-    let primary = match CGDisplay::new(display).primary_display() {
-        0 => display,
-        primary => primary,
-    };
-    match CGDisplay::new(primary).mirrors_display() {
-        0 => primary,
-        source => source,
+/// The two questions Quartz answers about a display's mirror set. A seam so
+/// [`MirrorSets::root`] is testable without a mirrored display.
+trait MirrorSets {
+    /// The primary of `display`'s hardware mirror set, or `display` itself
+    /// outside one (`CGDisplayPrimaryDisplay`).
+    fn primary(&self, display: u32) -> u32;
+
+    /// The display `display` copies, or 0 when it copies none
+    /// (`CGDisplayMirrorsDisplay`).
+    fn mirrors(&self, display: u32) -> u32;
+
+    /// The display `display`'s mirror set is drawn from, or `display` itself
+    /// when it mirrors nothing. A hardware set resolves to its primary first,
+    /// then to the display that primary copies, so either answer reporting
+    /// the set is enough.
+    fn root(&self, display: u32) -> u32 {
+        let primary = match self.primary(display) {
+            0 => display,
+            primary => primary,
+        };
+        match self.mirrors(primary) {
+            0 => primary,
+            source => source,
+        }
+    }
+}
+
+/// The live display configuration.
+struct Quartz;
+
+impl MirrorSets for Quartz {
+    fn primary(&self, display: u32) -> u32 {
+        CGDisplay::new(display).primary_display()
+    }
+
+    fn mirrors(&self, display: u32) -> u32 {
+        CGDisplay::new(display).mirrors_display()
     }
 }
 
