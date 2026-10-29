@@ -59,6 +59,11 @@ use crate::binding::{Binding, ButtonId, GestureDirection};
 /// persisted shape or enum vocabulary changes; readers inspect this value
 /// before consuming the rest of the file.
 ///
+/// v11 adds per-device [`DeviceConfig::gesture_hold`]. Older files omit the
+/// setting and keep the 160 ms hold gate. The bump makes a v10 build reject a
+/// file that stores the field at the version check instead of failing after
+/// parsing an unknown field.
+///
 /// v10 adds per-device [`DeviceConfig::disabled_keys`]. Older files omit the
 /// setting and leave the firmware unmanaged. The bump makes a v9 build reject
 /// a file that stores the field at the version check instead of failing after

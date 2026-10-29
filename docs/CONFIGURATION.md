@@ -41,6 +41,8 @@ profiles so they keep their native direction. v9 adds the `[apps]` alias table;
 v8 files load unchanged.
 v10 adds the per-device `disabled_keys` policy. Older readers reject a v10
 header before parsing its fields. A v9 file without the policy still loads.
+v11 adds the per-device `gesture_hold` gate. Older readers reject a v11
+header before parsing its fields. A v10 file without the gate still loads.
 
 ## Shape
 
