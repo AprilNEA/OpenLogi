@@ -188,6 +188,7 @@ tablet = "Планшет"
 gamepad = "Геймпад"
 joystick = "Джойстик"
 headset = "Гарнітура"
+microphone = "Мікрофон"
 quit_logi_options_hid_access = "Користуєтесь Logi Options+? Спершу закрийте цю програму, оскільки обидві змагаються за доступ до HID++."
 device = "Пристрій"
 manage_this_device = "Керувати пристроєм"
@@ -727,6 +728,18 @@ applying_light_setting = "Застосування налаштування св
 auto_on_with_camera = "Автоувімкнення разом із камерою"
 camera_light_auto_description = "Вмикати це світло, поки використовується будь-яка камера, і вимикати, коли камери зупиняються."
 keyboard_lighting_description = "Застосовується OpenLogi, поки він працює, і не зберігається в клавіатурі."
+
+[microphone]
+gain = "Підсилення мікрофона"
+mute = "Вимкнути мікрофон"
+mute_description = "Те саме, що й кнопка вимкнення звуку на мікрофоні."
+headphones = "Навушники"
+headphone_volume = "Гучність навушників"
+mute_headphones = "Вимкнути звук у навушниках"
+monitoring = "Моніторинг мікрофона"
+monitoring_description = "Чути власний голос у навушниках."
+monitoring_level = "Рівень моніторингу"
+write_failed = "Мікрофон не прийняв зміну: %{error}"
 
 [action_ring]
 actions_ring = "Кільце дій"

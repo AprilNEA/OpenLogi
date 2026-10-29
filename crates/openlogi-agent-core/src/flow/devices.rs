@@ -269,7 +269,8 @@ const fn category(kind: DeviceKind) -> proto::DeviceCategory {
         | DeviceKind::Headset
         | DeviceKind::Camera
         | DeviceKind::Unknown
-        | DeviceKind::Light => proto::DeviceCategory::Other,
+        | DeviceKind::Light
+        | DeviceKind::Microphone => proto::DeviceCategory::Other,
     }
 }
 

@@ -30,6 +30,7 @@ pub mod hid;
 pub mod locale;
 #[cfg(feature = "logging")]
 pub mod logging;
+pub mod microphone;
 #[cfg(feature = "fs")]
 pub mod paths;
 pub mod scroll;
