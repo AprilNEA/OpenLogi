@@ -28,7 +28,7 @@ use gpui_component::{
 };
 use openlogi_core::config::{DeviceViewMode, LightSettings};
 use openlogi_core::device::{DeviceKind, DeviceModelInfo, ModelTransport};
-use openlogi_core::hid::{DeviceRoute, ReceiverProtocol};
+use openlogi_core::hid::{DeviceRoute, ReceiverBrand, ReceiverProtocol};
 use openlogi_ipc::PairingFailure;
 
 use super::AppView;
@@ -277,6 +277,7 @@ fn transport_glance(
     } else {
         connection_icon_path(
             record.route.as_ref(),
+            record.receiver_brand,
             record.model_info.as_ref(),
             saved_transport,
         )
@@ -606,6 +607,7 @@ fn connection_view(
                 } else {
                     connection_icon_path(
                         record.route.as_ref(),
+                        record.receiver_brand,
                         record.model_info.as_ref(),
                         saved_transport,
                     )
@@ -678,6 +680,7 @@ fn device_image(
 /// link after restart; radio support alone does not select Bluetooth.
 pub(super) fn connection_icon_path(
     route: Option<&DeviceRoute>,
+    receiver_brand: Option<ReceiverBrand>,
     model: Option<&DeviceModelInfo>,
     saved_transport: Option<ObservedConnection>,
 ) -> &'static str {
@@ -704,6 +707,13 @@ pub(super) fn connection_icon_path(
         (Some(DeviceRoute::Bolt { .. }), _)
         | (None, Some(ObservedConnection::Receiver(ReceiverProtocol::Bolt))) => {
             "action-icons/bolt.svg"
+        }
+        // A Lightspeed receiver speaks the Unifying protocol but is not one,
+        // so it gets the plain dongle mark, not the Unifying logo.
+        (Some(DeviceRoute::Unifying { .. }), _)
+            if receiver_brand == Some(ReceiverBrand::Lightspeed) =>
+        {
+            "action-icons/usb.svg"
         }
         (Some(DeviceRoute::Unifying { .. }), _)
         | (None, Some(ObservedConnection::Receiver(ReceiverProtocol::Unifying))) => {

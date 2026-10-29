@@ -6,7 +6,7 @@ use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, DeviceModelInfo, DeviceTransports, LightCapabilities,
     LightValueRange, LightValueUnit,
 };
-use openlogi_core::hid::DeviceRoute;
+use openlogi_core::hid::{DeviceRoute, ReceiverBrand};
 
 #[gpui::test]
 fn config_error_folder_button_opens_from_the_active_window(cx: &mut gpui::TestAppContext) {
@@ -322,6 +322,24 @@ fn model_with_pids(transports: DeviceTransports, pids: &[u16]) -> DeviceModelInf
     }
 }
 
+/// A Lightspeed receiver rides the Unifying route but is no Unifying
+/// receiver, so it never wears the Unifying logo.
+#[test]
+fn a_lightspeed_receiver_gets_the_dongle_icon() {
+    let route = DeviceRoute::Unifying {
+        receiver_uid: "r".into(),
+        slot: 1,
+    };
+    assert_eq!(
+        connection_icon_path(Some(&route), Some(ReceiverBrand::Lightspeed), None, None),
+        "action-icons/usb.svg"
+    );
+    assert_eq!(
+        connection_icon_path(Some(&route), Some(ReceiverBrand::Unifying), None, None),
+        "action-icons/unifying.svg"
+    );
+}
+
 #[test]
 fn connection_icon_matches_route() {
     let bolt = DeviceRoute::Bolt {
@@ -348,11 +366,11 @@ fn connection_icon_matches_route() {
         ..DeviceTransports::default()
     };
     assert_eq!(
-        connection_icon_path(Some(&bolt), None, None),
+        connection_icon_path(Some(&bolt), None, None, None),
         "action-icons/bolt.svg"
     );
     assert_eq!(
-        connection_icon_path(Some(&uni), None, None),
+        connection_icon_path(Some(&uni), None, None, None),
         "action-icons/unifying.svg"
     );
     // The matching USB PID selects the cable icon.
@@ -363,6 +381,7 @@ fn connection_icon_matches_route() {
     assert_eq!(
         connection_icon_path(
             Some(&direct_wired_pid),
+            None,
             Some(&model_with_pids(wired, &[0xb019])),
             None
         ),
@@ -381,6 +400,7 @@ fn connection_icon_matches_route() {
     assert_eq!(
         connection_icon_path(
             Some(&direct_equad_pid),
+            None,
             Some(&model_with_pids(equad_only, &[0xb01a])),
             None
         ),
@@ -394,6 +414,7 @@ fn connection_icon_matches_route() {
     assert_eq!(
         connection_icon_path(
             Some(&direct_unknown_pid),
+            None,
             Some(&model_with_pids(DeviceTransports::default(), &[])),
             None
         ),
@@ -404,6 +425,7 @@ fn connection_icon_matches_route() {
     assert_eq!(
         connection_icon_path(
             Some(&direct_unknown_pid),
+            None,
             Some(&model_with_pids(bt, &[0xb019])),
             None
         ),
@@ -412,6 +434,7 @@ fn connection_icon_matches_route() {
     assert_eq!(
         connection_icon_path(
             Some(&direct_unknown_pid),
+            None,
             Some(&model_with_pids(btle, &[0xb01b])),
             None
         ),
@@ -419,12 +442,12 @@ fn connection_icon_matches_route() {
     );
     // Unknown transports (no 0x0003 snapshot) keep the old default.
     assert_eq!(
-        connection_icon_path(Some(&direct_unknown_pid), None, None),
+        connection_icon_path(Some(&direct_unknown_pid), None, None, None),
         "action-icons/bluetooth.svg"
     );
     // No route and no model information means the default icon.
     assert_eq!(
-        connection_icon_path(None, None, None),
+        connection_icon_path(None, None, None, None),
         "action-icons/circle-dot.svg"
     );
 }
@@ -468,6 +491,7 @@ fn connection_icon_preserves_saved_wired_device_without_live_route() {
     assert_eq!(
         connection_icon_path(
             record.route.as_ref(),
+            record.receiver_brand,
             record.model_info.as_ref(),
             state.offline_connection(record)
         ),
@@ -500,13 +524,13 @@ fn connection_icon_follows_live_route_on_multi_transport_device() {
         product_id: 0xb38a,
     };
     assert_eq!(
-        connection_icon_path(Some(&usb_direct), Some(&model), None),
+        connection_icon_path(Some(&usb_direct), None, Some(&model), None),
         "action-icons/usb.svg",
         "plugged in over USB must show the USB glyph even though the same \
          device also supports Bluetooth/BTLE"
     );
     assert_eq!(
-        connection_icon_path(Some(&btle_direct), Some(&model), None),
+        connection_icon_path(Some(&btle_direct), None, Some(&model), None),
         "action-icons/bluetooth.svg",
         "the same device connected over BTLE must show the Bluetooth glyph"
     );
@@ -564,6 +588,7 @@ fn disconnected_gaming_keyboards_keep_the_observed_usb_icon() {
         assert_eq!(
             connection_icon_path(
                 record.route.as_ref(),
+                record.receiver_brand,
                 record.model_info.as_ref(),
                 state.offline_connection(record)
             ),
@@ -580,6 +605,7 @@ fn disconnected_gaming_keyboards_keep_the_observed_usb_icon() {
         assert_eq!(
             connection_icon_path(
                 record.route.as_ref(),
+                record.receiver_brand,
                 record.model_info.as_ref(),
                 state.offline_connection(record)
             ),
@@ -601,7 +627,7 @@ fn disconnected_multi_transport_keyboard_without_history_is_unknown() {
         &[0xb38a, 0x40b5, 0xc356],
     );
     assert_eq!(
-        connection_icon_path(None, Some(&model), None),
+        connection_icon_path(None, None, Some(&model), None),
         "action-icons/circle-dot.svg"
     );
 }
@@ -663,6 +689,7 @@ fn disconnected_keyboard_icon_uses_only_unambiguous_saved_links() {
         assert_eq!(
             connection_icon_path(
                 record.route.as_ref(),
+                record.receiver_brand,
                 record.model_info.as_ref(),
                 state.offline_connection(record),
             ),
@@ -692,6 +719,7 @@ fn live_bluetooth_icon_does_not_use_a_saved_usb_transport() {
     assert_eq!(
         connection_icon_path(
             Some(&route),
+            None,
             Some(&model),
             Some(crate::state::ObservedConnection::Direct(
                 ModelTransport::Usb
@@ -752,6 +780,7 @@ fn assert_keyboard_profile(state: &crate::state::AppState, key: &str, icon: &str
     assert_eq!(
         connection_icon_path(
             record.route.as_ref(),
+            record.receiver_brand,
             record.model_info.as_ref(),
             state.offline_connection(record)
         ),
@@ -974,6 +1003,7 @@ fn record(kind: DeviceKind, capabilities: Option<Capabilities>) -> DeviceRecord 
         driver_id: None,
         registry_model_id: None,
         route: None,
+        receiver_brand: None,
         capture_id: None,
         kind,
         capabilities,
@@ -1285,6 +1315,24 @@ fn receiver_slot_is_named_only_for_receiver_routes() {
     direct.slot = 0xff;
     assert_eq!(receiver_slot_label(&direct), None);
     assert_eq!(connection_summary(&direct), "Direct connection");
+
+    // A Lightspeed receiver shares the Unifying route; its card names it.
+    let mut lightspeed = record(DeviceKind::Mouse, None);
+    lightspeed.route = Some(DeviceRoute::Unifying {
+        receiver_uid: "70E09081".to_string(),
+        slot: 1,
+    });
+    lightspeed.receiver_brand = Some(ReceiverBrand::Lightspeed);
+    lightspeed.slot = 1;
+    assert_eq!(
+        connection_summary(&lightspeed),
+        "Lightspeed receiver · Slot 1"
+    );
+    lightspeed.receiver_brand = Some(ReceiverBrand::Unifying);
+    assert_eq!(
+        connection_summary(&lightspeed),
+        "Unifying receiver · Slot 1"
+    );
 }
 
 /// A healthy status — hook live — with `secure_input` as given.
