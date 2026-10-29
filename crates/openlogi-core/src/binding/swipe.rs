@@ -6,6 +6,7 @@
 use std::time::Instant;
 
 use super::GestureDirection;
+use crate::config::GestureHold;
 
 /// Minimum dominant-axis travel (raw-XY units) before a held gesture commits to
 /// a direction. Tuned to match Logitech Options+'s responsiveness.
@@ -31,8 +32,10 @@ pub const GESTURE_REARM_PAUSE: std::time::Duration = std::time::Duration::from_m
 /// Minimum time a gesture button must be held before its travel can commit to a
 /// swipe. Distinguishes a deliberate hold-and-swipe from a quick click whose
 /// cursor happened to be moving. Shared by both gesture paths (the HID++ thumb
-/// pad and the OS-hook Back/Forward buttons).
-pub const GESTURE_HOLD_FOR_SWIPE: std::time::Duration = std::time::Duration::from_millis(160);
+/// pad and the OS-hook Back/Forward buttons), and derived from
+/// [`GestureHold::DEFAULT`] so the default exists once.
+pub const GESTURE_HOLD_FOR_SWIPE: std::time::Duration =
+    std::time::Duration::from_millis(crate::config::GESTURE_HOLD_DEFAULT_MS as u64);
 
 /// Classify the *running* raw-XY travel of a held gesture button into a
 /// directional swipe, the instant it commits — or `None` while it's still too
@@ -118,12 +121,21 @@ pub struct SwipeAccumulator {
     repeat_cross: i32,
     /// When the last motion arrived, to detect the pause that ends a stroke.
     moved_at: Option<Instant>,
+    /// The gate this hold must clear before its travel may commit. Set by
+    /// [`Self::begin`] from the device's `gesture_hold`; the derived `Default`
+    /// is [`GestureHold::DEFAULT`], so a fresh accumulator still has one.
+    hold: GestureHold,
 }
 
 impl SwipeAccumulator {
-    /// Begin a fresh hold, resetting the travel accumulator and commit state.
-    pub fn begin(&mut self) {
+    /// Begin a fresh hold whose travel may commit after `hold`, resetting the
+    /// travel accumulator and commit state.
+    ///
+    /// The gate applies to this hold only, so a device configured with a
+    /// shorter one does not change the shared default.
+    pub fn begin(&mut self, hold: GestureHold) {
         self.held_since = Some(Instant::now());
+        self.hold = hold;
         self.dx = 0;
         self.dy = 0;
         self.fired = false;
@@ -231,7 +243,7 @@ impl SwipeAccumulator {
         }
         let held_long_enough = self
             .held_since
-            .is_some_and(|t| t.elapsed() >= GESTURE_HOLD_FOR_SWIPE);
+            .is_some_and(|t| t.elapsed() >= self.hold.duration());
         if held_long_enough && let Some(dir) = detect_swipe(self.dx, self.dy) {
             self.fired = true;
             self.last = Some(dir);
@@ -254,14 +266,15 @@ impl SwipeAccumulator {
         was_click
     }
 
-    /// Test-only seam: backdate the current hold so its [`GESTURE_HOLD_FOR_SWIPE`]
-    /// gate is already satisfied, letting a test exercise a committed swipe
-    /// without sleeping. Real code never calls this — [`Self::begin`] records the
-    /// true start instant. A no-op when not currently holding.
+    /// Test-only seam: backdate the current hold so its own gate — whatever
+    /// [`GestureHold`] this hold began with — is already satisfied, letting a
+    /// test exercise a committed swipe without sleeping. Real code never calls
+    /// this; [`Self::begin`] records the true start instant. A no-op when not
+    /// currently holding.
     #[doc(hidden)]
     pub fn backdate_hold_for_test(&mut self) {
         if self.held_since.is_some() {
-            self.held_since = Instant::now().checked_sub(GESTURE_HOLD_FOR_SWIPE * 2);
+            self.held_since = Instant::now().checked_sub(self.hold.duration() * 2);
         }
     }
 
@@ -384,7 +397,7 @@ mod tests {
     #[test]
     fn accumulator_commits_a_direction_once_after_the_hold_gate() {
         let mut acc = SwipeAccumulator::default();
-        acc.begin();
+        acc.begin(GestureHold::DEFAULT);
         acc.backdate_hold_for_test();
         // A clear rightward swipe commits exactly once, mid-motion.
         assert_eq!(
@@ -398,7 +411,7 @@ mod tests {
     #[test]
     fn accumulator_chains_reversals_within_one_hold() {
         let mut acc = SwipeAccumulator::default();
-        acc.begin();
+        acc.begin(GestureHold::DEFAULT);
         acc.backdate_hold_for_test();
         let t = GESTURE_SWIPE_THRESHOLD + 10;
         // Each reversal fires at the normal threshold (issue #1634).
@@ -411,7 +424,7 @@ mod tests {
     #[test]
     fn accumulator_continuous_swipe_keeps_stepping() {
         let mut acc = SwipeAccumulator::default();
-        acc.begin();
+        acc.begin(GestureHold::DEFAULT);
         acc.backdate_hold_for_test();
         assert_eq!(
             acc.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
@@ -429,7 +442,7 @@ mod tests {
     #[test]
     fn accumulator_diagonal_motion_does_not_repeat() {
         let mut acc = SwipeAccumulator::default();
-        acc.begin();
+        acc.begin(GestureHold::DEFAULT);
         acc.backdate_hold_for_test();
         assert_eq!(
             acc.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
@@ -445,7 +458,7 @@ mod tests {
     #[test]
     fn accumulator_large_report_carries_into_the_next_repeat() {
         let mut acc = SwipeAccumulator::default();
-        acc.begin();
+        acc.begin(GestureHold::DEFAULT);
         acc.backdate_hold_for_test();
         assert_eq!(
             acc.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
@@ -463,7 +476,7 @@ mod tests {
     #[test]
     fn accumulator_carried_travel_keeps_its_drift() {
         let mut acc = SwipeAccumulator::default();
-        acc.begin();
+        acc.begin(GestureHold::DEFAULT);
         acc.backdate_hold_for_test();
         assert_eq!(
             acc.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
@@ -485,7 +498,7 @@ mod tests {
     #[test]
     fn accumulator_backtracking_takes_back_drift() {
         let mut acc = SwipeAccumulator::default();
-        acc.begin();
+        acc.begin(GestureHold::DEFAULT);
         acc.backdate_hold_for_test();
         assert_eq!(
             acc.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
@@ -504,7 +517,7 @@ mod tests {
     #[test]
     fn accumulator_keeps_sideways_drift_at_zero_progress() {
         let mut acc = SwipeAccumulator::default();
-        acc.begin();
+        acc.begin(GestureHold::DEFAULT);
         acc.backdate_hold_for_test();
         assert_eq!(
             acc.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
@@ -526,7 +539,7 @@ mod tests {
     #[test]
     fn accumulator_overshoot_alone_does_not_repeat() {
         let mut acc = SwipeAccumulator::default();
-        acc.begin();
+        acc.begin(GestureHold::DEFAULT);
         acc.backdate_hold_for_test();
         assert_eq!(
             acc.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
@@ -538,7 +551,7 @@ mod tests {
     #[test]
     fn accumulator_reverses_from_the_turning_point_after_an_overshoot() {
         let mut acc = SwipeAccumulator::default();
-        acc.begin();
+        acc.begin(GestureHold::DEFAULT);
         acc.backdate_hold_for_test();
         assert_eq!(
             acc.accumulate(-(GESTURE_SWIPE_THRESHOLD + 10), 0),
@@ -557,7 +570,7 @@ mod tests {
     #[test]
     fn accumulator_reversal_survives_jitter_back_toward_the_last_swipe() {
         let mut acc = SwipeAccumulator::default();
-        acc.begin();
+        acc.begin(GestureHold::DEFAULT);
         acc.backdate_hold_for_test();
         assert_eq!(
             acc.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
@@ -572,7 +585,7 @@ mod tests {
     #[test]
     fn accumulator_reversal_survives_a_rest_halfway() {
         let mut acc = SwipeAccumulator::default();
-        acc.begin();
+        acc.begin(GestureHold::DEFAULT);
         acc.backdate_hold_for_test();
         assert_eq!(
             acc.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
@@ -586,7 +599,7 @@ mod tests {
     #[test]
     fn accumulator_repeats_a_direction_after_a_rest() {
         let mut acc = SwipeAccumulator::default();
-        acc.begin();
+        acc.begin(GestureHold::DEFAULT);
         acc.backdate_hold_for_test();
         let t = GESTURE_SWIPE_THRESHOLD + 10;
         assert_eq!(acc.accumulate(t, 0), Some(GestureDirection::Right));
@@ -598,7 +611,7 @@ mod tests {
     #[test]
     fn accumulator_repeat_after_a_rest_ignores_an_abandoned_reversal() {
         let mut acc = SwipeAccumulator::default();
-        acc.begin();
+        acc.begin(GestureHold::DEFAULT);
         acc.backdate_hold_for_test();
         let t = GESTURE_SWIPE_THRESHOLD + 10;
         assert_eq!(acc.accumulate(t, 0), Some(GestureDirection::Right));
@@ -613,7 +626,7 @@ mod tests {
     #[test]
     fn accumulator_backtracking_counts_against_a_reversal() {
         let mut acc = SwipeAccumulator::default();
-        acc.begin();
+        acc.begin(GestureHold::DEFAULT);
         acc.backdate_hold_for_test();
         let t = GESTURE_SWIPE_THRESHOLD + 10;
         assert_eq!(acc.accumulate(t, 0), Some(GestureDirection::Right));
@@ -626,7 +639,7 @@ mod tests {
     #[test]
     fn accumulator_net_zero_wobble_after_a_swipe_never_fires() {
         let mut acc = SwipeAccumulator::default();
-        acc.begin();
+        acc.begin(GestureHold::DEFAULT);
         acc.backdate_hold_for_test();
         let t = GESTURE_SWIPE_THRESHOLD + 10;
         assert_eq!(acc.accumulate(t, 0), Some(GestureDirection::Right));
@@ -639,7 +652,7 @@ mod tests {
     #[test]
     fn accumulator_does_not_commit_before_the_hold_gate() {
         let mut acc = SwipeAccumulator::default();
-        acc.begin(); // held_since = now, so the gate is not yet satisfied
+        acc.begin(GestureHold::DEFAULT); // held_since = now, so the gate is not yet satisfied
         // A big delta arriving immediately (a quick click whose cursor drifted)
         // must not commit.
         assert_eq!(acc.accumulate(GESTURE_SWIPE_THRESHOLD + 100, 0), None);
@@ -652,13 +665,13 @@ mod tests {
     fn accumulator_end_reports_click_only_when_no_swipe_fired() {
         // A hold with only tiny drift never commits → end() is a click.
         let mut acc = SwipeAccumulator::default();
-        acc.begin();
+        acc.begin(GestureHold::DEFAULT);
         acc.backdate_hold_for_test();
         assert_eq!(acc.accumulate(2, -1), None);
         assert!(acc.end(), "a hold that never swiped is a click");
 
         // A hold that committed a swipe → end() is not a click.
-        acc.begin();
+        acc.begin(GestureHold::DEFAULT);
         acc.backdate_hold_for_test();
         assert!(acc.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0).is_some());
         assert!(!acc.end(), "a committed swipe must not also click");
@@ -678,7 +691,7 @@ mod tests {
         // several deltas each too small to commit on their own must sum across
         // the hold until the running total crosses the threshold, then commit.
         let mut acc = SwipeAccumulator::default();
-        acc.begin();
+        acc.begin(GestureHold::DEFAULT);
         acc.backdate_hold_for_test();
         // Just under half the threshold: one or two steps never reach it, three do.
         let step = GESTURE_SWIPE_THRESHOLD / 2 - 1;
@@ -698,7 +711,7 @@ mod tests {
         // overflow both an i32 sum and a naive cross-band multiply — both must
         // saturate, not panic (debug builds panic on overflow).
         let mut acc = SwipeAccumulator::default();
-        acc.begin();
+        acc.begin(GestureHold::DEFAULT);
         acc.backdate_hold_for_test();
         assert_eq!(
             acc.accumulate(i32::MAX, i32::MAX),
@@ -711,7 +724,7 @@ mod tests {
             "the saturating sum must not panic"
         );
         // A clean axis on a fresh hold still commits with a saturated magnitude.
-        acc.begin();
+        acc.begin(GestureHold::DEFAULT);
         acc.backdate_hold_for_test();
         assert_eq!(acc.accumulate(i32::MAX, 0), Some(GestureDirection::Right));
     }
@@ -723,7 +736,7 @@ mod tests {
         // fresh begin() must wipe both the `fired` latch and the travel, so the
         // next press isn't poisoned by the old one.
         let mut acc = SwipeAccumulator::default();
-        acc.begin();
+        acc.begin(GestureHold::DEFAULT);
         acc.backdate_hold_for_test();
         // Stale hold commits LEFT (negative dx) and latches `fired`.
         assert_eq!(
@@ -731,7 +744,7 @@ mod tests {
             Some(GestureDirection::Left)
         );
         // No end() — a dropped release, then a fresh press.
-        acc.begin();
+        acc.begin(GestureHold::DEFAULT);
         acc.backdate_hold_for_test();
         // Had `fired` leaked this would be None; had the negative travel leaked it
         // would commit Left. Committing Right proves begin() reset both.
@@ -748,7 +761,7 @@ mod tests {
         let mut acc = SwipeAccumulator::default();
         assert!(!acc.end(), "a release with no hold is not a click");
         // A redundant second release after a real hold already ended is inert too.
-        acc.begin();
+        acc.begin(GestureHold::DEFAULT);
         assert!(acc.end(), "the held release is a click");
         assert!(!acc.end(), "the redundant second release is not a click");
     }

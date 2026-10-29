@@ -1,5 +1,5 @@
 # OpenLogi configuration example. Copy only the sections you need.
-schema_version = 10
+schema_version = 11
 selected_device = "receiver:aabbccdd:slot:1"
 
 [app_settings]
@@ -34,6 +34,9 @@ invert_scroll = false
 scroll_resolution = "high"
 # Ease this mouse's main wheel in software (needs Accessibility on macOS).
 smooth_wheel = true
+# Milliseconds the gesture button must be held before a swipe may commit
+# (40-1000, default 160). Lower it for a quick hold-and-flick.
+# gesture_hold = 120
 
 [devices."receiver:aabbccdd:slot:1".bindings]
 Back = "BrowserBack"

@@ -49,6 +49,34 @@ fn alternate_gesture_control_delivers_click_and_swipe() {
     }
 }
 
+#[test]
+fn a_configured_hold_gate_reaches_the_hidpp_hold() {
+    // A gate longer than the old fixed 320 ms backdate only commits if the
+    // accumulator both stored the configured value and backdates against it.
+    // With either bug this swipe stays under the gate and reads as a click.
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default().with_gesture_hold(GestureHold::MAX);
+    assert_eq!(acc.gesture_hold(), GestureHold::MAX);
+    handle_reprog(&mut acc, press(), GESTURE, &[], &[], &tx);
+    acc.backdate_hold_for_test();
+    stale_report(&mut acc, &tx);
+    handle_reprog(
+        &mut acc,
+        RawControlEvent::RawXy { dx: 120, dy: 5 },
+        GESTURE,
+        &[],
+        &[],
+        &tx,
+    );
+    assert_eq!(
+        next_gesture(&mut rx),
+        Ok(CapturedInput::Gesture(
+            ButtonId::GestureButton,
+            GestureDirection::Right
+        ))
+    );
+}
+
 const PANEL: &[u16] = &[reprog_controls::HAPTIC_PANEL_CID];
 
 const BOTH: &[u16] = &[

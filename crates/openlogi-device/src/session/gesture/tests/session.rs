@@ -4,6 +4,17 @@ use super::*;
 use crate::channel::registry::PublicationState;
 use crate::channel::scripted::feature_error;
 
+#[test]
+fn resetting_input_state_keeps_the_configured_hold_gate() {
+    // `reset_input_state` rebuilds the accumulator after a reconnect; it must
+    // carry the configured gate across, or a device set to 400 ms silently
+    // returns to 160 ms the first time it wakes.
+    let capture = GestureCapture::new(ArmedControls::default(), GestureHold::MAX);
+    capture.reset_input_state();
+    let accum = capture.accum.lock().unwrap_or_else(PoisonError::into_inner);
+    assert_eq!(accum.gesture_hold(), GestureHold::MAX);
+}
+
 #[tokio::test]
 async fn alternate_gesture_control_arming_respects_mode_and_capabilities() {
     for cid in [0x00d0u16, 0x00c3, 0x00d7] {

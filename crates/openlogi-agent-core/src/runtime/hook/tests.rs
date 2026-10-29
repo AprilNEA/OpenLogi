@@ -2,7 +2,7 @@
 
 use super::*;
 use openlogi_core::binding::{GESTURE_SWIPE_THRESHOLD, LongPressBinding};
-use openlogi_core::config::KeyModifiers;
+use openlogi_core::config::{GestureHold, KeyModifiers};
 
 fn token(id: u64, button: ButtonId) -> PressToken {
     PressToken::hook_for_test(id, button)
@@ -67,7 +67,7 @@ fn test_dispatcher() -> (
 fn accumulate_tags_a_committed_swipe_with_the_held_press() {
     let mut hold = HoldState::default();
     let press = token(1, ButtonId::Back);
-    hold.begin(ButtonId::Back, press.clone());
+    hold.begin(ButtonId::Back, press.clone(), GestureHold::DEFAULT);
     hold.swipe.backdate_hold_for_test();
 
     assert_eq!(
@@ -83,6 +83,21 @@ fn accumulate_tags_a_committed_swipe_with_the_held_press() {
 }
 
 #[test]
+fn a_configured_hold_gate_reaches_the_os_hook_hold() {
+    // Past the old fixed 320 ms backdate, so this commits only when the gate
+    // travelled from the caller into the accumulator and backdating used it.
+    let mut hold = HoldState::default();
+    let press = token(1, ButtonId::Back);
+    hold.begin(ButtonId::Back, press.clone(), GestureHold::MAX);
+    hold.swipe.backdate_hold_for_test();
+
+    assert_eq!(
+        hold.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
+        Some((press, ButtonId::Back, GestureDirection::Right))
+    );
+}
+
+#[test]
 fn a_same_button_repress_restarts_the_stale_hold() {
     let mut hold = HoldState::default();
     let old = token(1, ButtonId::Back);
@@ -90,14 +105,14 @@ fn a_same_button_repress_restarts_the_stale_hold() {
         hold.prepare_begin(ButtonId::Back),
         HoldAdmission::Begin
     ));
-    hold.begin(ButtonId::Back, old);
+    hold.begin(ButtonId::Back, old, GestureHold::DEFAULT);
 
     let replacement = token(2, ButtonId::Back);
     assert!(
         matches!(hold.prepare_begin(ButtonId::Back), HoldAdmission::Begin),
         "a same-button re-press is proof of a lost release"
     );
-    hold.begin(ButtonId::Back, replacement.clone());
+    hold.begin(ButtonId::Back, replacement.clone(), GestureHold::DEFAULT);
     hold.swipe.backdate_hold_for_test();
     assert_eq!(
         hold.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
@@ -108,7 +123,7 @@ fn a_same_button_repress_restarts_the_stale_hold() {
 #[test]
 fn an_aged_hold_yields_to_a_new_buttons_press() {
     let mut hold = HoldState::default();
-    hold.begin(ButtonId::Back, token(1, ButtonId::Back));
+    hold.begin(ButtonId::Back, token(1, ButtonId::Back), GestureHold::DEFAULT);
     hold.backdate_for_test();
 
     let replacement = token(2, ButtonId::Forward);
@@ -116,7 +131,7 @@ fn an_aged_hold_yields_to_a_new_buttons_press() {
         panic!("an aged hold must yield to a new press");
     };
     assert_eq!(stale, token(1, ButtonId::Back));
-    hold.begin(ButtonId::Forward, replacement.clone());
+    hold.begin(ButtonId::Forward, replacement.clone(), GestureHold::DEFAULT);
     hold.swipe.backdate_hold_for_test();
     assert_eq!(
         hold.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
@@ -128,7 +143,7 @@ fn an_aged_hold_yields_to_a_new_buttons_press() {
 fn begin_is_first_wins_while_a_hold_is_active() {
     let mut hold = HoldState::default();
     let first = token(1, ButtonId::Back);
-    hold.begin(ButtonId::Back, first.clone());
+    hold.begin(ButtonId::Back, first.clone(), GestureHold::DEFAULT);
     hold.swipe.backdate_hold_for_test();
     assert!(
         matches!(hold.prepare_begin(ButtonId::Forward), HoldAdmission::Refuse),
@@ -147,7 +162,7 @@ fn begin_is_first_wins_while_a_hold_is_active() {
 fn end_matches_the_held_button_and_returns_its_token() {
     let mut hold = HoldState::default();
     let press = token(1, ButtonId::Back);
-    hold.begin(ButtonId::Back, press.clone());
+    hold.begin(ButtonId::Back, press.clone(), GestureHold::DEFAULT);
     assert_eq!(hold.end(ButtonId::Forward), None);
     assert_eq!(hold.end(ButtonId::Back), Some((press, true)));
 }
