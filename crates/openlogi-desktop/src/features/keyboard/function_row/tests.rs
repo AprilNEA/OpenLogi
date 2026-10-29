@@ -1,5 +1,7 @@
+use super::callout_layout::{CalloutLayout, CardRect, callout_layout};
 use super::key_points::{KeyPoint, key_slots};
 use super::*;
+use crate::features::mouse::leader_lines::routes_cross;
 use openlogi_assets::{Assignment, Direction, ImageEntry, Metadata, Origin, Point};
 use openlogi_core::binding::ButtonId;
 use openlogi_core::config::FunctionKey;
@@ -264,60 +266,126 @@ fn render_size_follows_the_png_aspect_up_to_the_width_cap() {
     assert_eq!(keyboard_render_size(None, 900.), FALLBACK_KEYBOARD_SIZE);
 }
 
-#[test]
-fn callouts_spread_evenly_from_margin_to_margin() {
-    let margin = KEY_CALLOUT_W / 2.0 + 4.0;
-    assert_approx_eq(callout_center_x(0, 13, 700.0), margin);
-    assert_approx_eq(callout_center_x(12, 13, 700.0), 700.0 - margin);
-    assert_approx_eq(callout_center_x(0, 1, 700.0), 350.0);
-    assert!(callout_left_px(0, 13, 700.0, KEY_CALLOUT_W) >= 0.0);
-    assert!(callout_left_px(12, 13, 700.0, KEY_CALLOUT_W) <= 700.0 - KEY_CALLOUT_W);
+/// A card's box as `(left, top, right, bottom)`, grown by `margin`.
+fn card_box(card: &CardRect, margin: f32) -> (f32, f32, f32, f32) {
+    (
+        card.left - margin,
+        card.top - margin,
+        card.left + card.width + margin,
+        card.top + KEY_CALLOUT_H + margin,
+    )
 }
 
-/// Bubbles share a stagger lane with every second key; same-lane
-/// neighbours must never overlap for any board size the row can show.
-#[test]
-fn same_lane_callouts_never_overlap() {
-    for count in [13usize, 20] {
-        for idx in 0..count.saturating_sub(2) {
-            let gap = callout_center_x(idx + 2, count, KEYBOARD_W)
-                - callout_center_x(idx, count, KEYBOARD_W);
+/// Points sampled along each leader segment when checking it against cards.
+const SAMPLES: u16 = 400;
+
+/// Cards never overlap, a leader keeps clear of every other card, and no two
+/// leaders cross.
+fn assert_clean_callouts(layout: &CalloutLayout) {
+    for (a, card) in layout.cards.iter().enumerate() {
+        for other in &layout.cards[a + 1..] {
+            let (l1, t1, r1, b1) = card_box(card, -0.01);
+            let (l2, t2, r2, b2) = card_box(other, -0.01);
             assert!(
-                gap >= KEY_CALLOUT_W,
-                "lane neighbours {idx}/{} overlap at count {count}: gap {gap}",
-                idx + 2
+                !(l1 < r2 && l2 < r1 && t1 < b2 && t2 < b1),
+                "cards overlap: {card:?} / {other:?}"
+            );
+        }
+    }
+    for (i, leader) in layout.leaders.iter().enumerate() {
+        for (j, card) in layout.cards.iter().enumerate() {
+            if i == j {
+                continue;
+            }
+            let (left, top, right, bottom) = card_box(card, 6.);
+            for segment in leader.windows(2) {
+                let ((x0, y0), (x1, y1)) = (segment[0], segment[1]);
+                for step in 0..=SAMPLES {
+                    let t = f32::from(step) / f32::from(SAMPLES);
+                    let (x, y) = (x0 + (x1 - x0) * t, y0 + (y1 - y0) * t);
+                    assert!(
+                        !(x > left && x < right && y > top && y < bottom),
+                        "leader {i} runs through card {j} at ({x}, {y})"
+                    );
+                }
+            }
+        }
+        for other in &layout.leaders[i + 1..] {
+            assert!(
+                !routes_cross(leader, other),
+                "leaders cross: {leader:?} / {other:?}"
             );
         }
     }
 }
 
 #[test]
-fn function_key_callouts_stagger_even_lower_odd_upper() {
-    assert!(callout_top_px(0) > callout_top_px(1));
-    assert_eq!(callout_top_px(0), callout_top_px(2));
-    assert_eq!(callout_top_px(1), callout_top_px(3));
+fn the_fallback_f_row_fits_its_callouts_without_overlap_or_crossing() {
+    let markers: Vec<(f32, f32)> = key_points(None)
+        .into_iter()
+        .map(|point| (point.x_frac, point.y_frac))
+        .collect();
+    let layout = callout_layout(&markers, KEYBOARD_W, 272.);
+
+    assert_eq!(layout.pane_w, KEYBOARD_W);
+    assert_clean_callouts(&layout);
+    for card in &layout.cards {
+        assert!(card.left >= -0.01 && card.left + card.width <= KEYBOARD_W + 0.01);
+    }
+}
+
+/// The MX Mechanical Mini's depot marks twelve top-row keys and the four
+/// navigation keys down the right edge.
+#[test]
+fn cards_sit_straight_above_or_beside_their_keys_when_there_is_room() {
+    let top_xs = [
+        25.9, 32., 38.15, 44.4, 50.5, 56.7, 63., 69., 75.2, 81.3, 87.35, 93.6,
+    ];
+    let mut markers: Vec<(f32, f32)> = top_xs.iter().map(|x| (x / 100. + 0.02, 0.133)).collect();
+    markers.extend([25.3, 39.7, 54., 68.7].map(|y| (0.956, y / 100. + 0.023)));
+    let (img_w, img_h) = (700., 270.);
+    let layout = callout_layout(&markers, img_w, img_h);
+
+    assert_clean_callouts(&layout);
+    for (i, &(x, _)) in markers.iter().enumerate().take(top_xs.len()) {
+        let card = layout.cards[i];
+        assert!(
+            (card.left + card.width / 2. - x * img_w).abs() < 0.5,
+            "card {i} is not above its key"
+        );
+        assert_eq!(layout.leaders[i].len(), 2, "leader {i} is not straight");
+        assert!(card.width > 60., "cards use the room two pitches give");
+    }
+    for i in top_xs.len()..markers.len() {
+        assert!(
+            layout.cards[i].left >= img_w,
+            "card {i} is not beside the board"
+        );
+    }
+    assert!(layout.pane_w > img_w);
+    assert_eq!(layout.image_left, 0.);
 }
 
 #[test]
-#[expect(
-    clippy::cast_precision_loss,
-    reason = "lane counts are bounded by FUNCTION_KEYS"
-)]
-fn staggered_function_key_callout_rows_fit_the_keyboard_width() {
-    let lower_count = FUNCTION_KEYS
-        .iter()
-        .enumerate()
-        .filter(|(idx, _)| callout_lane_is_lower(*idx))
-        .count();
-    let upper_count = FUNCTION_KEYS.len() - lower_count;
-    assert!(
-        KEY_CALLOUT_W * lower_count as f32 <= KEYBOARD_W,
-        "lower callout lane overlaps before spacing is considered"
-    );
-    assert!(
-        KEY_CALLOUT_W * upper_count as f32 <= KEYBOARD_W,
-        "upper callout lane overlaps before spacing is considered"
-    );
+fn a_crowded_row_pushes_cards_apart_without_crossing() {
+    // A G513-class render packs Esc–F12 into the left half of the image.
+    let markers: Vec<(f32, f32)> = (0..13u8)
+        .map(|i| (0.05 + f32::from(i) * 0.035, 0.12))
+        .collect();
+    let layout = callout_layout(&markers, KEYBOARD_W, 400.);
+
+    assert_clean_callouts(&layout);
+}
+
+#[test]
+fn a_key_down_the_left_edge_moves_the_board_right_for_its_card() {
+    let markers = [(0.3, 0.1), (0.5, 0.1), (0.04, 0.5)];
+    let layout = callout_layout(&markers, 600., 240.);
+
+    assert!(layout.image_left > 0.);
+    assert_eq!(layout.cards[2].left, 0.);
+    assert!(layout.pane_w > 600. + layout.image_left - 0.01);
+    assert_clean_callouts(&layout);
 }
 
 /// A legacy pixel-marker asset: `device_image` assignments in absolute

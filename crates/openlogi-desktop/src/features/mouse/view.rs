@@ -609,7 +609,7 @@ fn scaled_model(
     if let Some(a) = asset {
         let (w, h) = asset_dimensions_for_png(a, target_h, max_w);
         let hotspots = asset_hotspots_for_png(a, w, h);
-        let labels = labels_from_hotspots(&hotspots, h, label_distribution);
+        let labels = labels_from_hotspots(&hotspots, w, h, label_distribution);
         (w, h, hotspots, labels)
     } else {
         let scale = (target_h / MOUSE_MODEL_SIZE.1).min(max_w / MOUSE_MODEL_SIZE.0);
