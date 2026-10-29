@@ -195,10 +195,12 @@ impl AppCatalogPicker {
             .iter()
             .filter_map(|application| {
                 let app = identity_for_application(application, observed, self.preferred_identity)?;
-                if unavailable(&app) || !seen.insert(app.clone()) {
+                if unavailable(&app) {
                     return None;
                 }
-                Some(ProfileChoice::application(app, application.name.clone()))
+                let choice = ProfileChoice::application(app, application.name.clone());
+                // Installations that share a profile key are one choice.
+                (!unavailable(&choice.app) && seen.insert(choice.app.clone())).then_some(choice)
             })
             .collect::<Vec<_>>();
         profiles.sort_by(|left, right| {
