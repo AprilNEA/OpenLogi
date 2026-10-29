@@ -150,7 +150,7 @@ pub(super) fn plan(job: Job, sh: &Shell, host: Host) -> Result<Plan> {
         Job::Shell => shell(job, sh),
         Job::Clippy => Ok(clippy(job, host)),
         Job::Msrv => msrv(job, sh, host),
-        Job::Rustdoc => Ok(rustdoc(job)),
+        Job::Rustdoc => Ok(Plan::run(job, [rustdoc()])),
         Job::TestsLinux | Job::TestsWindows => Ok(Plan::run(
             job,
             [Step::new("cargo").args(["test", "--workspace", "--exclude", "openlogi-desktop"])],
@@ -158,7 +158,10 @@ pub(super) fn plan(job: Job, sh: &Shell, host: Host) -> Result<Plan> {
         Job::TestsMacos => Ok(tests_macos(job)),
         Job::CargoDeny => Ok(cargo_deny(job)),
         Job::ClippyWindows => clippy_windows(job, sh, host),
-        Job::ClippyMacos => Ok(Plan::run(job, [Step::new("cargo").args(CLIPPY_ARGS)])),
+        Job::ClippyMacos => Ok(Plan::run(
+            job,
+            [Step::new("cargo").args(CLIPPY_ARGS), rustdoc()],
+        )),
         Job::Wasm => wasm(job, sh),
         Job::I18n => Ok(Plan::run(
             job,
@@ -293,22 +296,22 @@ fn msrv(job: Job, sh: &Shell, host: Host) -> Result<Plan> {
     ))
 }
 
-fn rustdoc(job: Job) -> Plan {
+/// `cargo doc` over every crate but the GPUI ones. `ci.yml` runs it twice:
+/// in `rustdoc (non-GUI crates)` for the linux cfg, and in `clippy (macos)`
+/// for the macOS cfg.
+fn rustdoc() -> Step {
     let excludes = RUSTDOC_EXCLUDES
         .iter()
         .flat_map(|crate_name| ["--exclude", crate_name]);
-    Plan::run(
-        job,
-        [Step::new("cargo")
-            .args([
-                "doc",
-                "--workspace",
-                "--no-deps",
-                "--document-private-items",
-            ])
-            .args(excludes)
-            .env("RUSTDOCFLAGS", "-D warnings")],
-    )
+    Step::new("cargo")
+        .args([
+            "doc",
+            "--workspace",
+            "--no-deps",
+            "--document-private-items",
+        ])
+        .args(excludes)
+        .env("RUSTDOCFLAGS", "-D warnings")
 }
 
 fn tests_macos(job: Job) -> Plan {

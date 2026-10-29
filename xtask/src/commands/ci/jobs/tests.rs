@@ -39,6 +39,39 @@ fn workflow_commands(workflow: &str) -> String {
         .join(" ")
 }
 
+/// The commands of the `ci.yml` job whose `name:` `job` answers to, joined as
+/// [`workflow_commands`] joins them. A job runs from its id under `jobs:` to
+/// the next job's id; `None` when no job carries such a name.
+fn job_commands(workflow: &str, job: Job) -> Option<String> {
+    let mut blocks: Vec<Vec<&str>> = Vec::new();
+    for line in workflow
+        .lines()
+        .map(str::trim_end)
+        .skip_while(|line| *line != "jobs:")
+        .skip(1)
+    {
+        // A job id sits two spaces in; a comment there is not one.
+        let starts_job = line
+            .strip_prefix("  ")
+            .is_some_and(|rest| !rest.starts_with([' ', '#']) && rest.ends_with(':'));
+        if starts_job {
+            blocks.push(Vec::new());
+        }
+        if let Some(block) = blocks.last_mut() {
+            block.push(line);
+        }
+    }
+    blocks
+        .into_iter()
+        .find(|block| {
+            block.iter().any(|line| {
+                line.strip_prefix("    name: ")
+                    .is_some_and(|name| job.answers_to(name))
+            })
+        })
+        .map(|block| workflow_commands(&block.join("\n")))
+}
+
 #[test]
 fn wrapped_commands_join_under_either_line_ending() {
     let joined = "cargo doc --workspace --exclude openlogi-ui";
@@ -50,8 +83,24 @@ fn wrapped_commands_join_under_either_line_ending() {
     }
 }
 
+#[test]
+fn job_commands_stop_at_the_next_job() {
+    let workflow = "on:\n  push:\njobs:\n  clippy:\n    name: clippy\n    steps:\n      \
+                    - run: cargo clippy\n  # not a job:\n      - run: cargo doc\n  fmt:\n    \
+                    name: rustfmt\n    steps:\n      - run: cargo fmt\n";
+    let clippy = job_commands(workflow, Job::Clippy).expect("the clippy job");
+    assert!(clippy.contains("cargo clippy"), "{clippy}");
+    assert!(clippy.contains("cargo doc"), "{clippy}");
+    assert!(!clippy.contains("cargo fmt"), "{clippy}");
+    assert_eq!(job_commands(workflow, Job::Rustdoc), None);
+}
+
 /// `ci.yml` is the pipeline's source of truth and this runner is a copy of it.
 /// A copy nothing checks is a copy that drifts.
+///
+/// Each command is looked for in its own job, not anywhere in the file: the
+/// rustdoc step runs in both `rustdoc (non-GUI crates)` and `clippy (macos)`,
+/// and dropping it from one must still fail here.
 ///
 /// Only the jobs whose plan does not depend on the host are compared. The
 /// other seven pick their invocation — or whether they can run at all — from
@@ -67,7 +116,6 @@ fn ci_yml_runs_what_this_runner_runs() {
     let Some(workflow) = workflow() else {
         return;
     };
-    let commands = workflow_commands(&workflow);
     let sh = Shell::new().expect("a shell");
     sh.change_dir(repo_root().expect("repo root"));
 
@@ -86,11 +134,14 @@ fn ci_yml_runs_what_this_runner_runs() {
         let Action::Run(steps) = plan.action else {
             panic!("{job:?} planned no steps for {host}");
         };
+        let commands = job_commands(&workflow, job)
+            .unwrap_or_else(|| panic!("ci.yml has no job named like {job:?}"));
         for step in steps {
             let argv = step.argv_line();
             assert!(
                 commands.contains(&argv),
-                "ci.yml does not run `{argv}` for {job:?}"
+                "ci.yml's `{}` job does not run `{argv}`",
+                job.name()
             );
         }
     }
