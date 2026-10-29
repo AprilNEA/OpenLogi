@@ -43,12 +43,13 @@ pub use function_key::FunctionKey;
 pub use identity::canonical_device_key;
 pub use key_trigger::{KeyModifiers, KeyTrigger, KeyboardConfig, ParseTriggerError};
 pub use revision::ConfigRevision;
+pub(crate) use settings::GESTURE_HOLD_DEFAULT_MS;
 pub use settings::LightSettings;
 pub use settings::{
     AppIcon, AppSettings, Appearance, AssetSourcePreference, CameraControls, DeviceViewMode,
-    GESTURE_HOLD_DEFAULT_MS, GestureHold, Lighting, MouseProfileTarget,
-    SMARTSHIFT_AUTO_DISENGAGE_DEFAULT, SMARTSHIFT_MIN_AUTO_DISENGAGE, ScrollResolution, SmartShift,
-    ThumbwheelSensitivity, UiScale, VerticalScrollSensitivity, WheelMode,
+    GestureHold, Lighting, MouseProfileTarget, SMARTSHIFT_AUTO_DISENGAGE_DEFAULT,
+    SMARTSHIFT_MIN_AUTO_DISENGAGE, ScrollResolution, SmartShift, ThumbwheelSensitivity, UiScale,
+    VerticalScrollSensitivity, WheelMode,
 };
 
 use crate::app::AppAliases;

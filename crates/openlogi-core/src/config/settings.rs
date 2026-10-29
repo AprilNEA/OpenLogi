@@ -390,7 +390,7 @@ impl From<VerticalScrollSensitivity> for f32 {
 /// runtime default: [`GestureHold::DEFAULT`] validates it, and
 /// [`GESTURE_HOLD_FOR_SWIPE`](crate::binding::GESTURE_HOLD_FOR_SWIPE) is the
 /// same value as a [`Duration`](std::time::Duration).
-pub const GESTURE_HOLD_DEFAULT_MS: u16 = 160;
+pub(crate) const GESTURE_HOLD_DEFAULT_MS: u16 = 160;
 const GESTURE_HOLD_MIN_MS: u16 = 40;
 const GESTURE_HOLD_MAX_MS: u16 = 1000;
 
