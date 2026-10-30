@@ -274,20 +274,7 @@ impl InputDispatcher {
                 self.outputs.actions.try_hidpp_button_up(session, button);
                 self.held_presses.end(session, button);
             }
-            CapturedInput::ButtonPulse(button) => {
-                let binding = plan.bindings.get(&button);
-                if let Some(binding) = binding {
-                    debug!(key, ?button, action = %binding.click_action().label(), "HID++ button pulse → binding");
-                } else {
-                    debug!(key, ?button, "HID++ button pulse with no binding — ignored");
-                }
-                self.outputs.actions.dispatch_hidpp_button_pulse(
-                    session,
-                    button,
-                    binding,
-                    plan.pointer_target,
-                );
-            }
+            CapturedInput::ButtonPulse(button) => self.dispatch_button_pulse(session, plan, button),
             CapturedInput::Scroll {
                 increments,
                 resolution,
@@ -315,6 +302,29 @@ impl InputDispatcher {
                 unreachable!("the session's forwarder records diverted buttons instead")
             }
         }
+    }
+
+    /// A firmware-reported tap with no hold, such as the thumb-wheel touch
+    /// sensor: fire `button`'s binding once.
+    fn dispatch_button_pulse(
+        &self,
+        session: &HidppSessionId,
+        plan: &DispatchPlan,
+        button: ButtonId,
+    ) {
+        let key = session.device_key();
+        let binding = plan.bindings.get(&button);
+        if let Some(binding) = binding {
+            debug!(key, ?button, action = %binding.click_action().label(), "HID++ button pulse → binding");
+        } else {
+            debug!(key, ?button, "HID++ button pulse with no binding — ignored");
+        }
+        self.outputs.actions.dispatch_hidpp_button_pulse(
+            session,
+            button,
+            binding,
+            plan.pointer_target,
+        );
     }
 
     /// Main-wheel movement under a held wheel-hold button: scroll in its
