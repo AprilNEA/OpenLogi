@@ -40,7 +40,7 @@ mod report_rate;
 mod smartshift;
 
 pub use backlight::{get_backlight, get_backlight_on, update_backlight, update_backlight_on};
-pub use button_spy::{ButtonSpyWatch, watch_button_spy};
+pub use button_spy::{ButtonSpyError, ButtonSpyStop, ButtonSpyWatch, watch_button_spy};
 pub use diagnostics::{
     FeatureEntry, FirmwareEntity, FirmwareEntityInfo, RAW_BATTERY_FEATURES, ReprogControlEntry,
     dump_features, dump_firmware_entities, dump_reprog_controls, read_battery_raw,

@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
-use openlogi_hid::{OnboardMode, WriteError};
+use openlogi_hid::{ButtonSpyError, ButtonSpyStop};
 
 use crate::cmd::diag::select_device;
 
@@ -27,20 +27,14 @@ pub async fn run(args: MouseButtonsArgs) -> Result<()> {
     let (route, name) = select_device(args.device.as_deref(), &[0x8110]).await?;
     println!("device: {name} ({route})");
 
-    // In host mode the OpenLogi agent or G HUB owns the spy, and stopping it
-    // here would leave their captured buttons dead.
-    match openlogi_hid::get_onboard(&route).await {
-        Ok(state) if state.mode == OnboardMode::Host => bail!(
-            "the mouse is in host mode, so another program owns its button spy; \
-             quit the OpenLogi agent and G HUB, then run this again"
+    let mut watch = match openlogi_hid::watch_button_spy(&route).await {
+        Ok(watch) => watch,
+        Err(ButtonSpyError::HostMode) => bail!(
+            "the mouse is in host mode, so the OpenLogi agent or G HUB owns its button spy; \
+             quit them, then run this again"
         ),
-        Ok(_) | Err(WriteError::FeatureUnsupported { .. }) => {}
-        Err(error) => tracing::warn!("could not read the onboard mode, assuming onboard: {error}"),
-    }
-
-    let mut watch = openlogi_hid::watch_button_spy(&route)
-        .await
-        .context("start the HID++ 0x8110 button spy")?;
+        Err(error) => return Err(error).context("start the HID++ 0x8110 button spy"),
+    };
     println!("  slots: {}", watch.mapping().len());
     println!("  host-mode mapping: {}", MappingDisplay(watch.mapping()));
     println!(
@@ -55,17 +49,22 @@ pub async fn run(args: MouseButtonsArgs) -> Result<()> {
             () = &mut deadline => break,
             mask = watch.next() => {
                 let Some(mask) = mask else {
-                    bail!("the mouse stopped answering");
+                    bail!("the button spy's report stream closed");
                 };
                 println!("  {mask:#06x}  {}", HeldSlots(mask));
             }
         }
     }
-    watch
+    match watch
         .stop()
         .await
-        .context("stop the HID++ 0x8110 button spy")?;
-    println!("  spy stopped");
+        .context("stop the HID++ 0x8110 button spy")?
+    {
+        ButtonSpyStop::Stopped => println!("  spy stopped"),
+        ButtonSpyStop::HostOwned => {
+            println!("  the mouse went into host mode, so its spy stays on for that program");
+        }
+    }
     Ok(())
 }
 

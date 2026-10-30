@@ -28,7 +28,7 @@ use openlogi_device::write::{
     self as device, Dpi, DpiInfo, FeatureEntry, FirmwareEntity, HapticWaveform, LightingMethod,
     LitraModel, PointerScaling, ReprogControlEntry, ScrollResolution, ScrollWheelMode,
 };
-use openlogi_device::{ButtonSpyWatch, LightWatch};
+use openlogi_device::{ButtonSpyError, ButtonSpyWatch, LightWatch};
 use openlogi_device::{DeviceIoGate, DeviceIoSignal, DeviceRoute};
 
 /// This host's HID stack.
@@ -150,8 +150,8 @@ pub async fn get_onboard(route: &DeviceRoute) -> Result<OnboardState, WriteError
 }
 
 /// Read the HID++ `0x8110` slot mapping of the mouse `route` reaches and
-/// start its button spy.
-pub async fn watch_button_spy(route: &DeviceRoute) -> Result<ButtonSpyWatch, WriteError> {
+/// start its button spy, unless the mouse is in host mode.
+pub async fn watch_button_spy(route: &DeviceRoute) -> Result<ButtonSpyWatch, ButtonSpyError> {
     device::watch_button_spy(&*native_backend(), route).await
 }
 
