@@ -368,9 +368,10 @@ pub(super) async fn probe_features(
 ) -> (ProbedFeatures, Option<BatteryProbe>, EventFeatureIndices) {
     match Device::new(Arc::clone(channel), slot).await {
         Ok(device) => probe_hidpp20(device, channel, slot, subscriptions).await,
-        Err(DeviceError::UnsupportedProtocolVersion) => match registers {
-            Some(registers) => probe_hidpp10(channel, slot, registers).await,
-            None => {
+        Err(DeviceError::UnsupportedProtocolVersion) => {
+            if let Some(registers) = registers {
+                probe_hidpp10(channel, slot, registers).await
+            } else {
                 debug!(
                     slot,
                     "HID++ 1.0 device outside a register phase, not probed"
@@ -381,7 +382,7 @@ pub(super) async fn probe_features(
                     EventFeatureIndices::default(),
                 )
             }
-        },
+        }
         Err(e) => {
             debug!(slot, error = ?e, "Device::new failed");
             (
