@@ -154,6 +154,41 @@ impl ActionExecutor {
 
     /// [`Self::write_speed`], first reading the sensor DPI into `before`.
     fn write_speed_reading(&self, write: SpeedWrite, before: Option<DpiBeforeShift>) {
+        self.write_speed_then(write, before, || {});
+    }
+
+    /// Write the DPI a preset action picked. If the mouse rejects it, the
+    /// cache forgets that DPI, so a DPI shift reads the mouse instead.
+    fn write_preset(&self, route: &DeviceRoute, dpi: Dpi) {
+        let rejected = self.preset_rejected(route.clone());
+        self.write_speed_then(
+            self.pointer_speeds.preset_write(route, dpi),
+            None,
+            move || {
+                rejected(dpi);
+            },
+        );
+    }
+
+    /// What a preset write the mouse at `route` rejected does with its DPI:
+    /// the mouse kept its old DPI, so the cache forgets the rejected one,
+    /// unless a newer choice has replaced it meanwhile.
+    fn preset_rejected(&self, route: DeviceRoute) -> impl FnOnce(Dpi) + Send + 'static {
+        let cycles = Arc::clone(&self.dpi_cycle);
+        move |dpi| match cycles.write() {
+            Ok(mut cycles) => cycles.rejected_at(&route, dpi),
+            Err(e) => warn!(error = %e, "dpi_cycle lock poisoned — rejected DPI kept"),
+        }
+    }
+
+    /// [`Self::write_speed_reading`], running `on_failed` when the mouse
+    /// rejects the write or it times out.
+    fn write_speed_then(
+        &self,
+        write: SpeedWrite,
+        before: Option<DpiBeforeShift>,
+        on_failed: impl FnOnce() + Send + 'static,
+    ) {
         let speeds = Arc::clone(&self.pointer_speeds);
         let SpeedWrite {
             route,
@@ -173,6 +208,7 @@ impl ActionExecutor {
                     speeds.restored(&restore);
                 }
             },
+            on_failed,
         );
     }
 
@@ -254,6 +290,7 @@ impl ActionExecutor {
                     speeds.restored(&restore);
                 }
             },
+            self.preset_rejected(route.clone()),
         );
         true
     }
@@ -374,7 +411,7 @@ impl ActionExecutor {
                 // Numbered with the pointer-speed writes: on a DPI mouse it
                 // ends precision mode, and an older precision write must not
                 // land after it.
-                self.write_speed(self.pointer_speeds.preset_write(&target, dpi));
+                self.write_preset(&target, dpi);
             } else {
                 debug!(%dpi, "no target device — DPI write skipped");
             }
@@ -1064,6 +1101,48 @@ mod tests {
 
         let known = dpi_shift_executor(Some(Dpi::new(1600)));
         assert!(!known.step_dpi_from_reading(Some("mouse"), &Action::NextDpiPreset));
+    }
+
+    /// A preset step caches its DPI when the write is requested. When the
+    /// mouse rejects it, the next DPI shift must not return to that DPI: the
+    /// rejection forgets it, so the shift reads the mouse and returns there.
+    #[test]
+    fn a_rejected_preset_step_leaves_the_dpi_shift_returning_to_the_old_dpi() {
+        let executor = dpi_shift_executor(Some(Dpi::new(400)));
+        let route = DeviceRoute::Bolt {
+            receiver_uid: "AA00".into(),
+            slot: 1,
+        };
+        let stepped = executor.step_dpi(Some("mouse"), &Action::NextDpiPreset);
+        assert_eq!(stepped.map(|(dpi, _)| dpi), Some(Dpi::new(1600)));
+        executor.preset_rejected(route)(Dpi::new(1600));
+        assert_eq!(executor.dpi_cycle.read().unwrap().current("mouse"), None);
+
+        let press = PressToken::hook_for_test(1, ButtonId::G6);
+        let mut held = HeldDpiShifts::default();
+        held.start(&executor, &press, Some("mouse"));
+        let shift = held.by_device.values().next().unwrap();
+        // What the shift's own write reads from the mouse, which kept 400.
+        shift.before.set(Dpi::new(400));
+        let cycles = executor.dpi_cycle.read().unwrap();
+        assert_eq!(shift.restore_to(&cycles), Some(Dpi::new(400)));
+    }
+
+    /// A rejection that arrives after a newer preset pick leaves that pick.
+    #[test]
+    fn a_rejected_preset_step_keeps_a_newer_pick() {
+        let executor = dpi_shift_executor(Some(Dpi::new(400)));
+        let route = DeviceRoute::Bolt {
+            receiver_uid: "AA00".into(),
+            slot: 1,
+        };
+        executor.step_dpi(Some("mouse"), &Action::NextDpiPreset);
+        executor.step_dpi(Some("mouse"), &Action::PreviousDpiPreset);
+        executor.preset_rejected(route)(Dpi::new(1600));
+        assert_eq!(
+            executor.dpi_cycle.read().unwrap().current("mouse"),
+            Some(Dpi::new(400))
+        );
     }
 
     #[test]

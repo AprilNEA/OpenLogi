@@ -649,6 +649,12 @@ fn log_outcome<T>(
     }
 }
 
+/// Whether a bounded background write was rejected or timed out, so its
+/// device may not hold what it asked for.
+fn write_failed<T>(result: &Result<Result<T, WriteError>, Elapsed>) -> bool {
+    matches!(result, Ok(Err(_)) | Err(_))
+}
+
 /// Wait for `ticket`'s turn, then for `transport`, then give whichever of
 /// `write` and `superseded` runs the whole `WRITE_TIMEOUT`. Every ordered
 /// write goes through here: neither wait is part of the deadline, and the
@@ -796,6 +802,9 @@ pub(crate) fn write_force_sensing_in_background(op: DeviceOp, ticket: WriteTicke
 /// When `led` is set, the same turn then lights (`true`) or darkens the DPI
 /// LED with [`show_precision_led`]. The LED never fails the speed write: it
 /// gives up before the turn's timeout would.
+///
+/// `on_failed` runs when the mouse rejected the write or it timed out, so the
+/// mouse may not have the target; not when a newer write superseded it.
 pub(crate) fn write_pointer_speed_in_background(
     op: DeviceOp,
     ticket: WriteTicket,
@@ -803,6 +812,7 @@ pub(crate) fn write_pointer_speed_in_background(
     led: Option<bool>,
     before: Option<DpiBeforeShift>,
     on_applied: impl FnOnce() + Send + 'static,
+    on_failed: impl FnOnce() + Send + 'static,
 ) {
     let index = op.route.device_index();
     let turn = op.access.transport_turns.turn_for(&op.route);
@@ -838,6 +848,7 @@ pub(crate) fn write_pointer_speed_in_background(
             .await
         },
         move |result| {
+            let failed = write_failed(&result);
             log_outcome(index, "pointer-speed write", result, |landed| match landed {
                 Some(Landed::Speed(applied)) => {
                     debug!(index, ?target, %applied, "pointer speed written");
@@ -858,6 +869,9 @@ pub(crate) fn write_pointer_speed_in_background(
                 }
                 None => debug!(index, ?target, "pointer-speed write superseded by a newer one"),
             });
+            if failed {
+                on_failed();
+            }
         },
     );
 }
@@ -1419,16 +1433,20 @@ pub(crate) fn restore_dpi_in_background(
 /// requested after `ticket`, before or during the read. For a preset step on
 /// a mouse whose DPI OpenLogi never set. As a pointer-speed write does, it
 /// then sets the DPI LED when `led` says, and runs `on_applied` once it
-/// landed.
+/// landed. `on_failed` gets the DPI `step` picked when the mouse rejected it
+/// or the write timed out.
 pub(crate) fn step_dpi_in_background(
     op: DeviceOp,
     ticket: WriteTicket,
     led: Option<bool>,
     step: impl FnOnce(Dpi) -> Option<Dpi> + Send + 'static,
     on_applied: impl FnOnce() + Send + 'static,
+    on_failed: impl FnOnce(Dpi) + Send + 'static,
 ) {
     let index = op.route.device_index();
     let turn = op.access.transport_turns.turn_for(&op.route);
+    let picked = Arc::new(Mutex::new(None));
+    let picked_by_step = Arc::clone(&picked);
     op.spawn_timed_write(
         "DPI step",
         move |op| async move {
@@ -1448,6 +1466,9 @@ pub(crate) fn step_dpi_in_background(
                     let Some(dpi) = step(reading) else {
                         return Ok(Some(None));
                     };
+                    *picked_by_step
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner) = Some(dpi);
                     openlogi_hid::set_dpi_on(&shared, dpi).await?;
                     if let Some(on) = led {
                         show_precision_led(&shared, on, started).await;
@@ -1459,6 +1480,7 @@ pub(crate) fn step_dpi_in_background(
             .await
         },
         move |result| {
+            let failed = write_failed(&result);
             log_outcome(index, "DPI step", result, |stepped| match stepped {
                 Some(Some((reading, dpi))) => {
                     debug!(index, %reading, %dpi, "DPI stepped from the mouse's reading");
@@ -1467,6 +1489,10 @@ pub(crate) fn step_dpi_in_background(
                 Some(None) => debug!(index, "no DPI preset to step to"),
                 None => debug!(index, "DPI step superseded by a newer write"),
             });
+            let picked = *picked.lock().unwrap_or_else(PoisonError::into_inner);
+            if failed && let Some(dpi) = picked {
+                on_failed(dpi);
+            }
         },
     );
 }

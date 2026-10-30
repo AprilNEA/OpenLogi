@@ -2066,6 +2066,7 @@ impl Orchestrator {
                     speeds.restored(&restore);
                 }
             },
+            || {},
         );
     }
 
