@@ -695,6 +695,12 @@ where
 /// camera is next viewed, since the hardware only retains them until it loses
 /// power. Serializes to the same TOML table the earlier fixed-field struct
 /// wrote, so existing saved controls load unchanged.
+///
+/// The table also holds the live preview's chosen mode as `stream_width`,
+/// `stream_height` and `stream_fps`. Those are not controls: nothing is written
+/// to the camera for them, they say what frame size and rate the app asks for
+/// when it opens its own preview stream, and profile snapshots neither capture
+/// nor apply them. The desktop's `AppState` owns their meaning.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct CameraControls(pub BTreeMap<String, i32>);

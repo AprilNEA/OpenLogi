@@ -182,6 +182,15 @@ Common device fields are:
   `action_ring.per_app` takes the same selectors as `per_app_bindings`,
   including the Windows `exe:<filename>` fallback and `app:<alias>` keys
 - `lighting`, `smartshift`, and camera controls / profiles
+- `camera_controls` also holds the live preview's mode as `stream_width`,
+  `stream_height` (pixels) and `stream_fps`. All three must be present and
+  positive to count; otherwise, or when the camera no longer offers that mode,
+  the preview opens at the camera's default, the mode nearest 720p at 30 fps.
+  It shapes only the stream OpenLogi's own preview opens — resolution and frame
+  rate are negotiated per stream, so other applications are not affected — and
+  profiles neither save nor apply it. The Camera tab offers it as **Resolution**
+  and **Frame rate** on Linux; macOS and Windows list no modes yet, so the
+  entries have no effect there
 - standalone `light`: the agent writes it when the light connects, when a save
   changes it, and, with `auto_camera` on, when camera use starts or stops.
   Saving another setting leaves a change made with the light's own buttons in

@@ -34,6 +34,7 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Bool, NSObject};
 use objc2::{AnyThread, DefinedClass, class, define_class, msg_send};
 
+use crate::StreamMode;
 pub use crate::capture_types::{CaptureError, Frame};
 
 /// kCVPixelFormatType_32BGRA ('BGRA').
@@ -496,9 +497,15 @@ impl CameraStream {
 
 /// Start a live capture stream on the camera with `unique_id`.
 ///
+/// `_mode` is ignored: this backend lists no [`StreamMode`]s (see
+/// `crate::stream_modes`) and streams at its fixed 720p preset.
+///
 /// # Errors
 /// Same as [`capture_frame`], minus `Timeout` (frames are polled, not awaited).
-pub fn start_stream(unique_id: &str) -> Result<CameraStream, CaptureError> {
+pub fn start_stream(
+    unique_id: &str,
+    _mode: Option<StreamMode>,
+) -> Result<CameraStream, CaptureError> {
     Ok(CameraStream {
         session: open_session(unique_id, true)?,
     })

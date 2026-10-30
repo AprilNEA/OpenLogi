@@ -148,6 +148,7 @@ Per-application profiles switch with the focused app. An `[apps]` alias lets one
 
 - Any Logitech UVC webcam (Brio, StreamCam, the C920 series, …), plug and play
 - Live preview that holds the camera only while you watch; leave it and the LED goes off
+- On Linux, pick the preview's resolution and frame rate from the modes your camera reports (this shapes OpenLogi's own preview, not what other apps get)
 - Zoom, pan, tilt, focus, exposure, white balance, and every other UVC control, written to the hardware so Meet, Zoom, and OBS see the change
 - Built-in Default / Streaming / Video call profiles plus your own snapshots, kept per camera
 

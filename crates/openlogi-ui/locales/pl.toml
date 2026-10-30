@@ -667,6 +667,10 @@ image = "Obraz"
 streaming = "Strumieniowanie"
 video_call = "Rozmowa wideo"
 camera_preview_platform_unavailable = "Podgląd na żywo nie jest jeszcze dostępny na tej platformie."
+resolution = "Resolution"
+frame_rate = "Frame rate"
+frame_rate_fps = "%{fps} fps"
+stream_note = "Applies to this preview only. Other apps choose their own resolution and frame rate."
 
 [lighting]
 colour_temperature = "Temperatura barwowa"

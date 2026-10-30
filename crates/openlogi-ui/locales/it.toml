@@ -667,6 +667,10 @@ image = "Immagine"
 streaming = "Streaming"
 video_call = "Videochiamata"
 camera_preview_platform_unavailable = "L'anteprima dal vivo non è ancora disponibile su questa piattaforma."
+resolution = "Resolution"
+frame_rate = "Frame rate"
+frame_rate_fps = "%{fps} fps"
+stream_note = "Applies to this preview only. Other apps choose their own resolution and frame rate."
 
 [lighting]
 colour_temperature = "Temperatura colore"

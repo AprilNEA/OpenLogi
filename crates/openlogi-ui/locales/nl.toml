@@ -667,6 +667,10 @@ image = "Beeld"
 streaming = "Streaming"
 video_call = "Videogesprek"
 camera_preview_platform_unavailable = "Livevoorbeeld is nog niet beschikbaar op dit platform."
+resolution = "Resolution"
+frame_rate = "Frame rate"
+frame_rate_fps = "%{fps} fps"
+stream_note = "Applies to this preview only. Other apps choose their own resolution and frame rate."
 
 [lighting]
 colour_temperature = "Kleurtemperatuur"

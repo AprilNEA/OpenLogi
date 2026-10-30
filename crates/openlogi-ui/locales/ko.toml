@@ -667,6 +667,10 @@ image = "이미지"
 streaming = "스트리밍"
 video_call = "영상 통화"
 camera_preview_platform_unavailable = "라이브 미리보기는 이 플랫폼에서 아직 지원되지 않습니다."
+resolution = "Resolution"
+frame_rate = "Frame rate"
+frame_rate_fps = "%{fps} fps"
+stream_note = "Applies to this preview only. Other apps choose their own resolution and frame rate."
 
 [lighting]
 colour_temperature = "색온도"

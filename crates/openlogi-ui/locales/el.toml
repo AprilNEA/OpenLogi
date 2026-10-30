@@ -667,6 +667,10 @@ image = "Εικόνα"
 streaming = "Ροή βίντεο"
 video_call = "Βιντεοκλήση"
 camera_preview_platform_unavailable = "Η ζωντανή προεπισκόπηση δεν είναι ακόμη διαθέσιμη σε αυτήν την πλατφόρμα."
+resolution = "Resolution"
+frame_rate = "Frame rate"
+frame_rate_fps = "%{fps} fps"
+stream_note = "Applies to this preview only. Other apps choose their own resolution and frame rate."
 
 [lighting]
 colour_temperature = "Θερμοκρασία χρώματος"

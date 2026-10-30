@@ -667,6 +667,10 @@ image = "Bild"
 streaming = "Strömning"
 video_call = "Videosamtal"
 camera_preview_platform_unavailable = "Direktförhandsvisning är inte tillgänglig på den här plattformen ännu."
+resolution = "Resolution"
+frame_rate = "Frame rate"
+frame_rate_fps = "%{fps} fps"
+stream_note = "Applies to this preview only. Other apps choose their own resolution and frame rate."
 
 [lighting]
 colour_temperature = "Färgtemperatur"

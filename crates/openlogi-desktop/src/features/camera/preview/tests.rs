@@ -2,7 +2,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use gpui::{AppContext as _, Entity, TestAppContext, VisualTestContext, point, px, size};
-use openlogi_camera::CaptureError;
+use openlogi_camera::{Camera, CaptureError};
 use openlogi_core::config::Config;
 
 use super::*;
@@ -13,6 +13,10 @@ use crate::state::Sources;
 struct FakeCapture {
     granted: Cell<bool>,
     failure: RefCell<Option<CaptureError>>,
+    /// What every camera reports offering. Empty, like a backend that lists none.
+    modes: RefCell<StreamModes>,
+    /// The mode each successful or failed open asked for, in order.
+    opened_modes: RefCell<Vec<Option<StreamMode>>>,
     events: Rc<RefCell<Vec<String>>>,
     frames: RefCell<Vec<Rc<Frames>>>,
 }
@@ -22,7 +26,20 @@ impl Capture for Rc<FakeCapture> {
         self.granted.get()
     }
 
-    fn start_stream(&self, target: &str) -> Result<Box<dyn PreviewStream>, CaptureError> {
+    fn release_delay(&self) -> Duration {
+        RELEASE_DELAY
+    }
+
+    fn stream_modes(&self, _target: &str) -> Result<StreamModes, CaptureError> {
+        Ok(self.modes.borrow().clone())
+    }
+
+    fn start_stream(
+        &self,
+        target: &str,
+        mode: Option<StreamMode>,
+    ) -> Result<Box<dyn PreviewStream>, CaptureError> {
+        self.opened_modes.borrow_mut().push(mode);
         self.events.borrow_mut().push(format!("open {target}"));
         if let Some(error) = self.failure.borrow().clone() {
             return Err(error);
@@ -479,4 +496,369 @@ fn textures_follow_frame_generation_and_are_released_without_another_render(
     view.update(cx, |view, cx| view.set_target(None, cx));
     assert!(!cx.update(|window, _| window.has_image_atlas_entry(&replacement)));
     view.read_with(cx, |view, _| assert!(view.current_image.is_none()));
+}
+
+// ---- Resolution and frame rate ---------------------------------------------
+
+/// What the fake camera takes to let go of a dropped stream. Not the real
+/// backend's figure: the tests pin the behaviour around the wait, not its length.
+const RELEASE_DELAY: Duration = Duration::from_millis(700);
+
+const CAMERA_ID: &str = "cam-1";
+
+fn mode(width: u32, height: u32, fps: u32) -> StreamMode {
+    StreamMode { width, height, fps }
+}
+
+/// The default mode of [`streamcam_modes`]: the one nearest 720p at 30 fps.
+fn default_mode() -> StreamMode {
+    mode(1280, 720, 30)
+}
+
+/// What a StreamCam-like camera offers.
+fn streamcam_modes() -> StreamModes {
+    StreamModes::new([
+        mode(1920, 1080, 60),
+        mode(1920, 1080, 30),
+        mode(1280, 720, 60),
+        mode(1280, 720, 30),
+        mode(640, 360, 30),
+    ])
+}
+
+/// A preview over a state whose one camera, [`CAMERA_ID`], is the selected
+/// device, and over a capture that grants access and offers the StreamCam's
+/// modes. Also returns the camera's config key, where its mode is saved.
+fn camera_preview(cx: &mut TestAppContext) -> (Entity<CameraPreview>, Rc<FakeCapture>, String) {
+    cx.update(gpui_component::init);
+    let key = cx.update(|cx| {
+        let resolver = AssetResolver::new();
+        let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let camera = Camera {
+            name: "Logitech StreamCam".to_string(),
+            unique_id: CAMERA_ID.to_string(),
+            serial_number: Some("SN-1".to_string()),
+            vendor_id: 0x046d,
+            product_id: 0x0893,
+            max_resolution: None,
+            max_fps: None,
+        };
+        let state = cx.new(|_| {
+            AppState::new(Sources {
+                cameras: &[camera],
+                ..Sources::in_memory(Config::ephemeral(), &resolver, commands)
+            })
+        });
+        let key = state
+            .read(cx)
+            .current_record()
+            .expect("the camera is selected")
+            .config_key
+            .clone();
+        AppState::set_global(state, cx);
+        key
+    });
+    let capture = Rc::new(FakeCapture::default());
+    capture.granted.set(true);
+    *capture.modes.borrow_mut() = streamcam_modes();
+    let view = cx.new(|cx| CameraPreview::with_capture(Box::new(capture.clone()), cx));
+    (view, capture, key)
+}
+
+fn select_camera(view: &Entity<CameraPreview>, cx: &mut TestAppContext) {
+    view.update(cx, |view, cx| view.set_target(Some(CAMERA_ID.into()), cx));
+}
+
+/// Save `mode` for the camera as the rows' pills do, announcing the change.
+fn pick(cx: &mut TestAppContext, key: &str, mode: StreamMode) {
+    cx.update(|cx| AppState::apply(cx, |state| state.commit_camera_stream_mode(key, mode)));
+    cx.run_until_parked();
+}
+
+fn advance(cx: &mut TestAppContext, by: Duration) {
+    cx.executor().advance_clock(by);
+    cx.run_until_parked();
+}
+
+fn events(capture: &FakeCapture) -> Vec<String> {
+    capture.events.borrow().clone()
+}
+
+fn rows_shown(view: &Entity<CameraPreview>, cx: &mut TestAppContext) -> bool {
+    cx.update(|cx| view.read(cx).mode_rows(theme::palette(cx), cx).is_some())
+}
+
+#[gpui::test]
+fn a_stream_opens_at_the_saved_mode(cx: &mut TestAppContext) {
+    let (view, capture, key) = camera_preview(cx);
+    pick(cx, &key, mode(1920, 1080, 60));
+
+    select_camera(&view, cx);
+
+    assert_eq!(*capture.opened_modes.borrow(), [Some(mode(1920, 1080, 60))]);
+}
+
+#[gpui::test]
+fn with_nothing_saved_a_stream_opens_at_the_cameras_default(cx: &mut TestAppContext) {
+    let (view, capture, _key) = camera_preview(cx);
+
+    select_camera(&view, cx);
+
+    assert_eq!(*capture.opened_modes.borrow(), [Some(default_mode())]);
+}
+
+#[gpui::test]
+fn a_saved_mode_the_camera_does_not_offer_opens_at_the_default(cx: &mut TestAppContext) {
+    // Saved for a camera since swapped out, or one this driver stopped listing.
+    let (view, capture, key) = camera_preview(cx);
+    pick(cx, &key, mode(3840, 2160, 30));
+
+    select_camera(&view, cx);
+
+    assert_eq!(*capture.opened_modes.borrow(), [Some(default_mode())]);
+}
+
+#[gpui::test]
+fn a_target_that_is_not_the_selected_camera_opens_at_the_default_without_rows(
+    cx: &mut TestAppContext,
+) {
+    let (view, capture, key) = camera_preview(cx);
+    pick(cx, &key, mode(1920, 1080, 60));
+
+    view.update(cx, |view, cx| {
+        view.set_target(Some("another-camera".into()), cx);
+    });
+
+    assert_eq!(
+        *capture.opened_modes.borrow(),
+        [Some(default_mode())],
+        "another camera must not borrow the selected one's saved mode"
+    );
+    assert!(
+        !rows_shown(&view, cx),
+        "its rows would save under the wrong key"
+    );
+}
+
+#[gpui::test]
+fn choosing_another_mode_reopens_the_stream_after_the_camera_lets_go(cx: &mut TestAppContext) {
+    let (view, capture, key) = camera_preview(cx);
+    select_camera(&view, cx);
+    assert_eq!(events(&capture), ["open cam-1"]);
+
+    pick(cx, &key, mode(1920, 1080, 60));
+    assert_eq!(
+        events(&capture),
+        ["open cam-1", "drop cam-1"],
+        "the old stream is released at once, the new one not before the delay"
+    );
+    view.read_with(cx, |view, _| {
+        assert!(matches!(&view.lifecycle, PreviewLifecycle::Restarting { target, .. } if target == CAMERA_ID));
+    });
+
+    advance(cx, RELEASE_DELAY.saturating_sub(Duration::from_millis(1)));
+    assert_eq!(events(&capture), ["open cam-1", "drop cam-1"]);
+
+    advance(cx, Duration::from_millis(1));
+    assert_eq!(events(&capture), ["open cam-1", "drop cam-1", "open cam-1"]);
+    assert_eq!(
+        *capture.opened_modes.borrow(),
+        [Some(default_mode()), Some(mode(1920, 1080, 60))]
+    );
+    view.read_with(cx, |view, _| {
+        assert!(matches!(
+            &view.lifecycle,
+            PreviewLifecycle::Streaming { mode: Some(running), .. } if *running == mode(1920, 1080, 60)
+        ));
+    });
+}
+
+#[gpui::test]
+fn a_pick_during_the_wait_replaces_the_one_before_it(cx: &mut TestAppContext) {
+    let (view, capture, key) = camera_preview(cx);
+    select_camera(&view, cx);
+    pick(cx, &key, mode(1920, 1080, 60));
+    advance(cx, RELEASE_DELAY / 2);
+
+    pick(cx, &key, mode(640, 360, 30));
+    advance(cx, RELEASE_DELAY);
+
+    assert_eq!(
+        events(&capture),
+        ["open cam-1", "drop cam-1", "open cam-1"],
+        "one reopen, not one per pick"
+    );
+    assert_eq!(
+        capture.opened_modes.borrow().last().copied(),
+        Some(Some(mode(640, 360, 30))),
+        "the reopen reads the latest choice"
+    );
+}
+
+#[gpui::test]
+fn choosing_the_mode_already_running_does_not_reopen(cx: &mut TestAppContext) {
+    let (view, capture, key) = camera_preview(cx);
+    select_camera(&view, cx);
+
+    // Nothing was saved, so the stream runs at the default; saving that same
+    // mode explicitly changes nothing the camera would notice.
+    pick(cx, &key, default_mode());
+    advance(cx, RELEASE_DELAY * 2);
+
+    assert_eq!(events(&capture), ["open cam-1"]);
+}
+
+#[gpui::test]
+fn an_unrelated_camera_change_does_not_reopen(cx: &mut TestAppContext) {
+    let (view, capture, key) = camera_preview(cx);
+    select_camera(&view, cx);
+
+    cx.update(|cx| {
+        AppState::apply(cx, |state| {
+            state.commit_camera_control(&key, openlogi_camera::CameraControl::Brightness, 10)
+        });
+    });
+    advance(cx, RELEASE_DELAY * 2);
+
+    assert_eq!(events(&capture), ["open cam-1"]);
+}
+
+#[gpui::test]
+fn a_backend_that_lists_no_modes_never_reopens_and_shows_no_rows(cx: &mut TestAppContext) {
+    let (view, capture, key) = camera_preview(cx);
+    *capture.modes.borrow_mut() = StreamModes::default();
+    select_camera(&view, cx);
+
+    pick(cx, &key, mode(1920, 1080, 60));
+    advance(cx, RELEASE_DELAY * 2);
+
+    assert_eq!(events(&capture), ["open cam-1"]);
+    assert_eq!(*capture.opened_modes.borrow(), [None]);
+    assert!(!rows_shown(&view, cx));
+}
+
+#[gpui::test]
+fn the_rows_show_when_the_camera_lists_modes_and_follow_the_stream(cx: &mut TestAppContext) {
+    let (view, _capture, key) = camera_preview(cx);
+    assert!(
+        !rows_shown(&view, cx),
+        "nothing to choose before a camera is open"
+    );
+
+    select_camera(&view, cx);
+    assert!(rows_shown(&view, cx));
+
+    pick(cx, &key, mode(1920, 1080, 60));
+    assert!(
+        rows_shown(&view, cx),
+        "still offered while the camera reopens"
+    );
+
+    view.update(cx, |view, cx| view.set_target(None, cx));
+    assert!(
+        !rows_shown(&view, cx),
+        "another camera's modes must not linger"
+    );
+}
+
+#[gpui::test]
+fn the_rows_stay_when_a_mode_fails_to_open_so_another_can_be_picked(cx: &mut TestAppContext) {
+    let (view, capture, key) = camera_preview(cx);
+    pick(cx, &key, mode(1920, 1080, 60));
+    *capture.failure.borrow_mut() = Some(CaptureError::Setup("refused".into()));
+
+    select_camera(&view, cx);
+    view.read_with(cx, |view, _| {
+        assert!(matches!(
+            &view.lifecycle,
+            PreviewLifecycle::StartFailed { .. }
+        ));
+    });
+    assert!(rows_shown(&view, cx));
+
+    // The retry timer picks the new choice up.
+    *capture.failure.borrow_mut() = None;
+    pick(cx, &key, mode(640, 360, 30));
+    advance(cx, RETRY_INTERVAL);
+    assert_eq!(
+        capture.opened_modes.borrow().last().copied(),
+        Some(Some(mode(640, 360, 30)))
+    );
+    view.read_with(cx, |view, _| {
+        assert!(matches!(
+            &view.lifecycle,
+            PreviewLifecycle::Streaming { .. }
+        ));
+    });
+}
+
+#[gpui::test]
+fn leaving_during_a_reopen_cancels_it(cx: &mut TestAppContext) {
+    let (view, capture, key) = camera_preview(cx);
+    select_camera(&view, cx);
+    pick(cx, &key, mode(1920, 1080, 60));
+
+    view.update(cx, |view, cx| view.set_target(None, cx));
+    advance(cx, RELEASE_DELAY * 2);
+
+    assert_eq!(events(&capture), ["open cam-1", "drop cam-1"]);
+    view.read_with(cx, |view, _| {
+        assert!(matches!(view.lifecycle, PreviewLifecycle::Stopped));
+    });
+}
+
+#[gpui::test]
+fn a_reopen_waits_for_revoked_access_instead_of_opening(cx: &mut TestAppContext) {
+    let (view, capture, key) = camera_preview(cx);
+    select_camera(&view, cx);
+    pick(cx, &key, mode(1920, 1080, 60));
+
+    capture.granted.set(false);
+    advance(cx, RELEASE_DELAY);
+
+    assert_eq!(events(&capture), ["open cam-1", "drop cam-1"]);
+    view.read_with(cx, |view, _| {
+        assert!(matches!(&view.lifecycle, PreviewLifecycle::AwaitingAccess(id) if id == CAMERA_ID));
+    });
+}
+
+#[gpui::test]
+fn a_reopen_keeps_the_last_frame_on_screen(cx: &mut TestAppContext) {
+    let (view, capture, key) = camera_preview(cx);
+    select_camera(&view, cx);
+    let window = cx.add_empty_window();
+    capture.frames.borrow()[0].publish(vec![1, 2, 3, 255, 4, 5, 6, 255]);
+    draw(&view, window);
+    view.read_with(window, |view, _| assert!(view.current_image.is_some()));
+
+    cx_pick(window, &key, mode(1920, 1080, 60));
+
+    view.read_with(window, |view, _| {
+        assert!(matches!(
+            &view.lifecycle,
+            PreviewLifecycle::Restarting { .. }
+        ));
+        assert!(
+            view.current_image.is_some(),
+            "a frozen frame beats a blank box while the camera reopens"
+        );
+    });
+}
+
+/// [`pick`] for a window context, where the test has no `TestAppContext` left.
+fn cx_pick(cx: &mut VisualTestContext, key: &str, mode: StreamMode) {
+    cx.update(|_, cx| AppState::apply(cx, |state| state.commit_camera_stream_mode(key, mode)));
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn the_rows_render_without_a_stream_frame(cx: &mut TestAppContext) {
+    // Smoke: the rows are built from the saved mode and the camera's list, in
+    // every lifecycle state that shows them.
+    let (view, _capture, key) = camera_preview(cx);
+    select_camera(&view, cx);
+    let window = cx.add_empty_window();
+    draw(&view, window);
+    cx_pick(window, &key, mode(1920, 1080, 30));
+    draw(&view, window);
 }

@@ -667,6 +667,10 @@ image = "Görüntü"
 streaming = "Yayın"
 video_call = "Görüntülü görüşme"
 camera_preview_platform_unavailable = "Canlı önizleme bu platformda henüz kullanılamıyor."
+resolution = "Resolution"
+frame_rate = "Frame rate"
+frame_rate_fps = "%{fps} fps"
+stream_note = "Applies to this preview only. Other apps choose their own resolution and frame rate."
 
 [lighting]
 colour_temperature = "Renk sıcaklığı"

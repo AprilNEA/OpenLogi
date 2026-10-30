@@ -667,6 +667,10 @@ image = "画像"
 streaming = "配信"
 video_call = "ビデオ通話"
 camera_preview_platform_unavailable = "ライブプレビューはこのプラットフォームではまだ利用できません。"
+resolution = "Resolution"
+frame_rate = "Frame rate"
+frame_rate_fps = "%{fps} fps"
+stream_note = "Applies to this preview only. Other apps choose their own resolution and frame rate."
 
 [lighting]
 colour_temperature = "色温度"

@@ -667,6 +667,10 @@ image = "Obraz"
 streaming = "Streamování"
 video_call = "Videohovor"
 camera_preview_platform_unavailable = "Živý náhled zatím na této platformě není dostupný."
+resolution = "Resolution"
+frame_rate = "Frame rate"
+frame_rate_fps = "%{fps} fps"
+stream_note = "Applies to this preview only. Other apps choose their own resolution and frame rate."
 
 [lighting]
 colour_temperature = "Teplota barev"

@@ -16,6 +16,12 @@
 //! Windows matches it with Media Foundation capture and DirectShow controls;
 //! Linux uses V4L2 for both, through the kernel's `uvcvideo` driver. Other
 //! platforms return an empty list.
+//!
+//! Resolution and frame rate are a property of a *stream*, not of the camera:
+//! see [`StreamMode`]. Only the Linux backend lists and honours them so far;
+//! the others report [`StreamModes`] empty and stream at their fixed preset.
+
+use std::time::Duration;
 
 use openlogi_device_registry::camera::find_unnamed_camera;
 use serde::Serialize;
@@ -25,6 +31,9 @@ pub use controls::{AutoState, AutoToggle, CameraControl, CameraState, ControlErr
 
 mod capture_types;
 pub use capture_types::{CaptureError, Frame};
+
+mod stream_mode;
+pub use stream_mode::{StreamMode, StreamModes};
 
 #[cfg(target_os = "macos")]
 mod macos;
@@ -70,7 +79,7 @@ mod capture_linux;
 #[cfg(target_os = "linux")]
 pub use capture_linux::{
     CameraStream, camera_access_granted, camera_authorization, capture_frame,
-    request_camera_access, start_stream,
+    request_camera_access, start_stream, stream_modes,
 };
 
 #[cfg(target_os = "linux")]
@@ -86,6 +95,7 @@ mod capture {
     use std::sync::Arc;
     use std::time::Duration;
 
+    use crate::StreamMode;
     use crate::capture_types::{CaptureError, Frame};
 
     /// Stub: returns [`CaptureError::Unsupported`] on this platform.
@@ -114,7 +124,10 @@ mod capture {
     }
 
     /// Stub: returns [`CaptureError::Unsupported`] on this platform.
-    pub fn start_stream(_unique_id: &str) -> Result<CameraStream, CaptureError> {
+    pub fn start_stream(
+        _unique_id: &str,
+        _mode: Option<StreamMode>,
+    ) -> Result<CameraStream, CaptureError> {
         Err(CaptureError::Unsupported)
     }
 
@@ -182,6 +195,40 @@ mod uvc {
 pub use uvc::{
     apply_settings, control_range, control_ranges, read_camera_state, set_auto, set_control,
 };
+
+/// The modes the camera with `unique_id` can stream at, for the pixel format
+/// this crate would stream it in.
+///
+/// Only the Linux backend can list them so far; here the list is always empty,
+/// which callers read as "nothing to choose" and hide mode selection. The
+/// stream itself runs at the backend's fixed preset, whatever `mode`
+/// [`start_stream`] is handed.
+///
+/// # Errors
+/// Never fails on this platform. (Linux: see its `stream_modes`.)
+#[cfg(not(target_os = "linux"))]
+pub fn stream_modes(_unique_id: &str) -> Result<StreamModes, CaptureError> {
+    Ok(StreamModes::default())
+}
+
+/// How long a camera needs after its [`CameraStream`] is dropped before it can
+/// be opened again without the driver stalling the caller.
+///
+/// A V4L2 stream is torn down on its own thread and a UVC camera takes ~600 ms
+/// to give its bandwidth back, so reopening sooner makes `start_stream` wait
+/// on the driver. A caller that reopens on purpose (a mode change) waits this
+/// long on a timer instead of on its UI thread. Zero on platforms that list no
+/// [`StreamModes`], where nothing reopens on purpose.
+#[cfg(target_os = "linux")]
+pub const RELEASE_DELAY: Duration = capture_linux::RELEASE_DELAY;
+
+/// How long a camera needs after its [`CameraStream`] is dropped before it can
+/// be opened again without the driver stalling the caller.
+///
+/// This platform lists no [`StreamModes`], so nothing reopens a stream on
+/// purpose and there is no teardown to wait out.
+#[cfg(not(target_os = "linux"))]
+pub const RELEASE_DELAY: Duration = Duration::ZERO;
 
 /// Logitech's USB vendor id. Reported in decimal (`1133`) inside an
 /// `AVCaptureDevice` modelID, and in hex (`046d`) most everywhere else.

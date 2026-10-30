@@ -667,6 +667,10 @@ image = "图像"
 streaming = "直播"
 video_call = "视频通话"
 camera_preview_platform_unavailable = "实时预览暂不支持此平台。"
+resolution = "Resolution"
+frame_rate = "Frame rate"
+frame_rate_fps = "%{fps} fps"
+stream_note = "Applies to this preview only. Other apps choose their own resolution and frame rate."
 
 [lighting]
 colour_temperature = "色温"

@@ -40,6 +40,7 @@ use windows::Win32::Media::MediaFoundation::{
 };
 use windows::Win32::System::Com::CoTaskMemFree;
 
+use crate::StreamMode;
 pub use crate::capture_types::{CaptureError, Frame};
 use crate::com_windows::{ComApartment, MediaFoundation};
 
@@ -132,13 +133,19 @@ impl Drop for CameraStream {
 /// Returns only after a decoded frame has been stored. Later read failures
 /// can still end the stream; startup does not guarantee continued delivery.
 ///
+/// `_mode` is ignored: this backend lists no [`StreamMode`]s (see
+/// `crate::stream_modes`) and streams at the media type Media Foundation picks.
+///
 /// # Errors
 /// [`CaptureError::NotFound`] for an unknown id, [`CaptureError::AccessDenied`]
 /// when the system privacy toggle blocks cameras,
 /// [`CaptureError::ResourcesUnavailable`] when hardware resources are unavailable,
 /// [`CaptureError::Timeout`] when setup and the first frame exceed five seconds,
 /// or [`CaptureError::Setup`] on other Media Foundation errors.
-pub fn start_stream(unique_id: &str) -> Result<CameraStream, CaptureError> {
+pub fn start_stream(
+    unique_id: &str,
+    _mode: Option<StreamMode>,
+) -> Result<CameraStream, CaptureError> {
     let shared = Arc::new(Shared {
         latest: Mutex::new(None),
         generation: AtomicU64::new(0),
@@ -173,7 +180,7 @@ pub fn start_stream(unique_id: &str) -> Result<CameraStream, CaptureError> {
 /// # Errors
 /// As [`start_stream`], plus [`CaptureError::Timeout`] when no frame arrives.
 pub fn capture_frame(unique_id: &str, timeout: Duration) -> Result<Frame, CaptureError> {
-    let stream = start_stream(unique_id)?;
+    let stream = start_stream(unique_id, None)?;
     let deadline = Instant::now() + timeout;
     loop {
         if let Some(frame) = stream.take_frame() {

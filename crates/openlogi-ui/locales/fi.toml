@@ -667,6 +667,10 @@ image = "Kuva"
 streaming = "Suoratoisto"
 video_call = "Videopuhelu"
 camera_preview_platform_unavailable = "Live-esikatselu ei ole vielä saatavilla tällä alustalla."
+resolution = "Resolution"
+frame_rate = "Frame rate"
+frame_rate_fps = "%{fps} fps"
+stream_note = "Applies to this preview only. Other apps choose their own resolution and frame rate."
 
 [lighting]
 colour_temperature = "Värilämpötila"

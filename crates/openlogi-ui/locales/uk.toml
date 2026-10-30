@@ -667,6 +667,10 @@ image = "Зображення"
 streaming = "Стримінг"
 video_call = "Відеодзвінок"
 camera_preview_platform_unavailable = "Перегляд у реальному часі поки не доступний на цій платформі."
+resolution = "Resolution"
+frame_rate = "Frame rate"
+frame_rate_fps = "%{fps} fps"
+stream_note = "Applies to this preview only. Other apps choose their own resolution and frame rate."
 
 [lighting]
 colour_temperature = "Температура кольору"
