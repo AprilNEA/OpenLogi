@@ -30,10 +30,14 @@ pub(crate) enum ThumbwheelPreset {
     VerticalScrollReversed,
     HorizontalScroll,
     HorizontalScrollReversed,
+    /// Both directions drive pinch zoom: rolling up zooms out, down zooms in.
+    Zoom,
+    /// The reversed pairing: rolling up zooms in, down zooms out.
+    ZoomReversed,
 }
 
 impl ThumbwheelPreset {
-    pub(crate) const ALL: [Self; 14] = [
+    pub(crate) const ALL: [Self; 16] = [
         Self::BackForward,
         Self::UndoRedo,
         Self::BrowserHistory,
@@ -48,6 +52,8 @@ impl ThumbwheelPreset {
         Self::VerticalScrollReversed,
         Self::HorizontalScroll,
         Self::HorizontalScrollReversed,
+        Self::Zoom,
+        Self::ZoomReversed,
     ];
 
     #[must_use]
@@ -72,6 +78,8 @@ impl ThumbwheelPreset {
             Self::HorizontalScrollReversed => {
                 (Action::HorizontalScrollLeft, Action::HorizontalScrollRight)
             }
+            Self::Zoom => (Action::ZoomOut, Action::ZoomIn),
+            Self::ZoomReversed => (Action::ZoomIn, Action::ZoomOut),
         };
         ThumbwheelPair { backward, forward }
     }
@@ -108,6 +116,8 @@ impl ThumbwheelPreset {
             Self::VerticalScrollReversed => "pointer.vertical_scroll_reversed",
             Self::HorizontalScroll => "pointer.horizontal_scroll",
             Self::HorizontalScrollReversed => "pointer.horizontal_scroll_reversed",
+            Self::Zoom => "pointer.zoom",
+            Self::ZoomReversed => "pointer.zoom_reversed",
         }
     }
 
@@ -126,6 +136,9 @@ impl ThumbwheelPreset {
             Self::HorizontalScroll | Self::HorizontalScrollReversed => {
                 "action-icons/chevrons-right.svg"
             }
+            // One glyph per feature — the row label carries the direction,
+            // same convention as the two volume rows sharing volume-2.
+            Self::Zoom | Self::ZoomReversed => "action-icons/zoom-in.svg",
         }
     }
 }
@@ -153,6 +166,8 @@ mod tests {
             (Action::ScrollUp, Action::ScrollDown),
             (Action::HorizontalScrollRight, Action::HorizontalScrollLeft),
             (Action::HorizontalScrollLeft, Action::HorizontalScrollRight),
+            (Action::ZoomOut, Action::ZoomIn),
+            (Action::ZoomIn, Action::ZoomOut),
         ];
 
         assert_eq!(expected.len(), ThumbwheelPreset::ALL.len());

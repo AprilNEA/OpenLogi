@@ -64,6 +64,20 @@ fn an_unreported_resolution_leaves_increments_unscaled() {
 }
 
 #[test]
+fn zoom_streams_rotation_increments_without_native_resolution_scaling() {
+    let mut wheels = WheelAccumulators::default();
+    let rotation = WheelRotation::from_increments(3).expect("non-zero rotation");
+    // Default sensitivity is 1×, and a 20/120 wheel must not shrink zoom the
+    // way it shrinks native scroll: magnification follows the raw increments.
+    let scale = ScrollScale::new(TRACED, ThumbwheelSensitivity::DEFAULT);
+    let output = wheels.advance(rotation, &Action::ZoomIn, scale, Instant::now());
+    let WheelOutput::Zoom(delta) = output else {
+        panic!("expected continuous zoom output");
+    };
+    assert_distance(delta, 3.0);
+}
+
+#[test]
 fn rotation_separates_direction_and_positive_magnitude() {
     let up = WheelRotation::from_increments(3).expect("non-zero rotation");
     assert_eq!(up.button(), ButtonId::ThumbwheelScrollUp);
