@@ -8,10 +8,11 @@
 //! the mouse; the read-back then replaces the optimistic pick.
 
 use gpui::{AnyElement, App, IntoElement, ParentElement, Styled, div};
-use gpui_component::{Selectable as _, button::Button, h_flex, v_flex};
+use gpui_component::{Disableable as _, Selectable as _, h_flex, v_flex};
 use openlogi_core::hid::ReportRate;
 
 use crate::state::{AppState, DeviceKey, ReportRateLoad};
+use crate::ui::components::Pill;
 use crate::ui::status::{retry_line, status_line};
 use crate::ui::theme::{Palette, Typography as _};
 
@@ -20,6 +21,8 @@ pub(super) struct ReportRateFacts {
     key: DeviceKey,
     load: ReportRateLoad,
     reachable: bool,
+    /// A G-series mouse's stored profile owns the rate.
+    locked: bool,
 }
 
 impl ReportRateFacts {
@@ -35,6 +38,7 @@ impl ReportRateFacts {
             key: record.device_key(),
             load: state.current_report_rate_load(),
             reachable: record.route.is_some(),
+            locked: state.current_report_rate_locked(),
         })
     }
 }
@@ -50,6 +54,7 @@ pub(super) fn report_rate_section(
         key,
         load,
         reachable,
+        locked,
     } = facts?;
     let body: AnyElement = match load {
         ReportRateLoad::Ready(info) => h_flex()
@@ -58,7 +63,7 @@ pub(super) fn report_rate_section(
             .children(
                 info.supported
                     .iter()
-                    .map(|&rate| rate_pill(rate, rate == info.current)),
+                    .map(|&rate| rate_pill(rate, rate == info.current, locked)),
             )
             .into_any_element(),
         ReportRateLoad::Unknown | ReportRateLoad::Loading if !reachable => return None,
@@ -89,19 +94,25 @@ pub(super) fn report_rate_section(
                 div()
                     .text_caption()
                     .text_color(pal.text_muted)
-                    .child(tr!("pointer.report_rate_description")),
+                    .child(if locked {
+                        tr!("pointer.report_rate_onboard")
+                    } else {
+                        tr!("pointer.report_rate_description")
+                    }),
             )
             .into_any_element(),
     )
 }
 
 /// One rate pill. Clicking it writes `rate` to the selected mouse.
-fn rate_pill(rate: ReportRate, selected: bool) -> impl IntoElement {
-    Button::new(("report-rate", usize::from(rate.into_inner())))
-        .compact()
-        .label(tr!("pointer.report_rate_hz", rate => rate))
-        .selected(selected)
-        .on_click(move |_event, _window, cx| {
-            AppState::apply(cx, |state| state.commit_report_rate(rate));
-        })
+fn rate_pill(rate: ReportRate, selected: bool, locked: bool) -> impl IntoElement {
+    Pill::new(
+        ("report-rate", usize::from(rate.into_inner())),
+        tr!("pointer.report_rate_hz", rate => rate),
+    )
+    .selected(selected)
+    .disabled(locked)
+    .on_click(move |_event, _window, cx| {
+        AppState::apply(cx, |state| state.commit_report_rate(rate));
+    })
 }

@@ -26,6 +26,63 @@ use super::events::StateEvents;
 use super::load::BacklightLoad;
 use super::{AppState, StateEvent};
 
+/// Which timer steps the Device tab's backlight card shows — a disclosure,
+/// not a keyboard setting: the keyboard keeps whatever duration was last
+/// written, and switching shows or hides steps without writing anything.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DurationSteps {
+    /// The short timers Logi Options+ offers by default.
+    #[default]
+    Short,
+    /// The short timers plus the longer steps, up to the two hours `0x1982`
+    /// stores.
+    Extended,
+}
+
+/// The timer steps the Device tab shows without the extended switch: the
+/// short timers Logi Options+ offers by default.
+pub(crate) const SHORT_DURATION_SECONDS: &[u16] = &[5, 10, 15, 20, 25, 30];
+
+/// The longer timers added when the extended switch is on, up to the two
+/// hours `0x1982` stores.
+pub(crate) const EXTENDED_DURATION_SECONDS: &[u16] = &[60, 120, 300, 600, 1_800, 3_600, 7_200];
+
+impl DurationSteps {
+    /// The step tables this choice shows, in display order; the card draws
+    /// one pill row per table.
+    #[must_use]
+    pub const fn steps(self) -> &'static [&'static [u16]] {
+        match self {
+            Self::Short => &[SHORT_DURATION_SECONDS],
+            Self::Extended => &[SHORT_DURATION_SECONDS, EXTENDED_DURATION_SECONDS],
+        }
+    }
+
+    /// Whether `seconds` is one of the steps this choice shows.
+    #[must_use]
+    pub const fn contains(self, seconds: u16) -> bool {
+        match self {
+            Self::Short => listed(seconds, SHORT_DURATION_SECONDS),
+            Self::Extended => {
+                listed(seconds, SHORT_DURATION_SECONDS)
+                    || listed(seconds, EXTENDED_DURATION_SECONDS)
+            }
+        }
+    }
+}
+
+/// Whether `seconds` is one of `steps`.
+const fn listed(seconds: u16, steps: &[u16]) -> bool {
+    let mut index = 0;
+    while index < steps.len() {
+        if steps[index] == seconds {
+            return true;
+        }
+        index += 1;
+    }
+    false
+}
+
 impl AppState {
     /// Whether the active device reports a backlight control (HID++
     /// `0x1982`).
@@ -119,6 +176,18 @@ impl AppState {
         StateEvent::BacklightChanged(key.clone()).into()
     }
 
+    /// Which timer steps the backlight card is showing.
+    #[must_use]
+    pub fn duration_steps(&self) -> DurationSteps {
+        self.duration_steps
+    }
+
+    /// Show or hide timers past 30 seconds. Writes nothing to the keyboard.
+    pub fn set_duration_steps(&mut self, steps: DurationSteps) -> StateEvents {
+        self.duration_steps = steps;
+        self.for_current_device(StateEvent::BacklightChanged)
+    }
+
     /// Re-run `key`'s exhausted backlight read — the "click to retry"
     /// affordance on a [`BacklightLoad::Failed`] keyboard.
     pub(crate) fn retry_backlight_read(&mut self, key: &DeviceKey) -> StateEvents {
@@ -160,5 +229,46 @@ pub(super) fn change_target(
         | BacklightLoad::Loading
         | BacklightLoad::Failed(_)
         | BacklightLoad::Unsupported(_) => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use openlogi_core::hid::BacklightDuration;
+
+    use super::{DurationSteps, EXTENDED_DURATION_SECONDS, SHORT_DURATION_SECONDS};
+
+    #[test]
+    fn every_step_the_panel_shows_is_a_valid_timer() {
+        // The panel converts a step the user clicks with `expect`, which
+        // stands only while every listed step is one the keyboard can store.
+        for seconds in SHORT_DURATION_SECONDS
+            .iter()
+            .chain(EXTENDED_DURATION_SECONDS)
+            .copied()
+        {
+            BacklightDuration::try_from(seconds)
+                .expect("a panel step is within the two hours `0x1982` stores");
+        }
+    }
+
+    #[test]
+    fn contains_agrees_with_the_tables_the_choice_shows() {
+        for seconds in 0..=BacklightDuration::MAX_SECONDS {
+            assert_eq!(
+                SHORT_DURATION_SECONDS.contains(&seconds),
+                DurationSteps::Short.contains(seconds),
+                "{seconds}: Short contains disagrees with its table"
+            );
+            let shown = SHORT_DURATION_SECONDS
+                .iter()
+                .chain(EXTENDED_DURATION_SECONDS)
+                .any(|&step| step == seconds);
+            assert_eq!(
+                shown,
+                DurationSteps::Extended.contains(seconds),
+                "{seconds}: Extended contains disagrees with its tables"
+            );
+        }
     }
 }

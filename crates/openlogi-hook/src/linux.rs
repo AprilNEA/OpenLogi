@@ -30,6 +30,8 @@
 mod foreground;
 pub(crate) mod pointer;
 mod supervisor;
+#[cfg(test)]
+mod xvfb;
 
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -48,8 +50,8 @@ use tracing::{debug, error, warn};
 use x11rb::protocol::xproto::ConnectionExt as _;
 
 use crate::{
-    ButtonId, CursorPosition, Delivery, EventDisposition, ForegroundApp, HookBackend, HookError,
-    HookEvent, LOGITECH_VENDOR_ID, MouseEvent,
+    ButtonId, CursorPosition, Delivery, EventDevice, EventDisposition, ForegroundApp, HookBackend,
+    HookError, HookEvent, LOGITECH_VENDOR_ID, MouseEvent,
 };
 use foreground::{FRONTMOST, X11Source};
 pub(crate) use foreground::{
@@ -335,8 +337,7 @@ fn translate(event: &evdev::InputEvent, hires_scroll: bool) -> Option<MouseEvent
     match event.destructure() {
         EventSummary::Key(_, key, value) => {
             let id = key_to_button(key)?;
-            // Device is already Logitech-only (see `is_hookable_mouse`); the
-            // agent runtime treats `device: None` as remappable on Linux.
+            // `dispatch` names the device the event was read from.
             Some(MouseEvent::Button {
                 id,
                 pressed: value != 0,
@@ -483,16 +484,27 @@ impl LowResCompanions {
 /// the caller to vertical wheel events. Through [`Delivery`] the callback
 /// sees the reversed delta, so a suppressed impulse the agent replays is
 /// reversed too (#1737), and a forwarded event is negated once on its way out.
+///
+/// A button event names `source`, the device it was read from, so the agent
+/// can tell it from the same button reported over HID++ (#2158).
 fn dispatch(
     event: InputEvent,
     hires_scroll: bool,
     invert: bool,
+    source: &EventDevice,
     cb: &dyn Fn(HookEvent) -> EventDisposition,
 ) -> Option<InputEvent> {
-    let delivery = translate(&event, hires_scroll).map_or_else(
-        || Delivery::forwarded(invert),
-        |mouse| Delivery::run(HookEvent::Mouse(mouse), invert, cb),
-    );
+    let delivery = translate(&event, hires_scroll)
+        .map(|mut mouse| {
+            if let MouseEvent::Button { device, .. } = &mut mouse {
+                *device = Some(source.clone());
+            }
+            mouse
+        })
+        .map_or_else(
+            || Delivery::forwarded(invert),
+            |mouse| Delivery::run(HookEvent::Mouse(mouse), invert, cb),
+        );
     match delivery.disposition {
         EventDisposition::PassThrough => Some(invert_wheel(event, delivery.invert_native)),
         EventDisposition::Suppress => None,
@@ -525,6 +537,14 @@ fn device_thread(
     let hires_scroll = device
         .supported_relative_axes()
         .is_some_and(|axes| axes.contains(RelativeAxisCode::REL_WHEEL_HI_RES));
+    // Ids only. Every hooked device is a Logitech relative-pointer mouse (see
+    // `find_mouse_devices`), and without a name `source_is_remappable` stays
+    // true for all of them, as it was before button events named a device.
+    let source = EventDevice {
+        vendor_id: Some(u32::from(device.input_id().vendor())),
+        product_id: Some(u32::from(device.input_id().product())),
+        product_name: None,
+    };
 
     let device_fd = device.as_raw_fd();
     let stop_fd = stop_rx.as_raw_fd();
@@ -597,7 +617,7 @@ fn device_thread(
                 );
                 let invert = is_vertical_wheel
                     && *report_inverted.get_or_insert_with(crate::scroll_inversion);
-                if let Some(forwarded) = dispatch(event, hires_scroll, invert, &*cb) {
+                if let Some(forwarded) = dispatch(event, hires_scroll, invert, &source, &*cb) {
                     if let EventSummary::RelativeAxis(_, axis, _) = event.destructure() {
                         companions.hires_forwarded(axis);
                     }
@@ -1068,6 +1088,31 @@ mod tests {
         caps.abs = Some([AbsoluteAxisCode::ABS_MISC].into_iter().collect());
         assert!(caps.is_hookable());
     }
+
+    // ── dispatch ─────────────────────────────────────────────────────────────
+
+    /// A button names the device it was read from (#2158), and that name
+    /// keeps every hooked device remappable, as an unnamed button was.
+    #[test]
+    fn dispatched_buttons_name_their_source_and_stay_remappable() {
+        let source = EventDevice {
+            vendor_id: Some(LOGITECH_VENDOR_ID),
+            product_id: Some(0xb02a),
+            product_name: None,
+        };
+        let seen = std::cell::RefCell::new(None);
+        let event = InputEvent::new(EventType::KEY.0, KeyCode::BTN_BACK.0, 1);
+        let forwarded = dispatch(event, false, false, &source, &|hook_event| {
+            if let HookEvent::Mouse(MouseEvent::Button { device, .. }) = hook_event {
+                *seen.borrow_mut() = device;
+            }
+            EventDisposition::Suppress
+        });
+        assert!(forwarded.is_none());
+        let device = seen.into_inner().expect("the button names its source");
+        assert_eq!(device, source);
+        assert!(crate::source_is_remappable(Some(&device)));
+    }
 }
 
 #[cfg(test)]
@@ -1164,12 +1209,18 @@ mod scroll_inversion_tests {
         disposition: EventDisposition,
     ) -> (Option<ScrollDelta>, Option<i32>) {
         let seen = Cell::new(None);
-        let forwarded = dispatch(event, hires_scroll, invert, &|hook_event| {
-            if let HookEvent::Mouse(MouseEvent::Scroll { delta, .. }) = hook_event {
-                seen.set(Some(delta));
-            }
-            disposition
-        });
+        let forwarded = dispatch(
+            event,
+            hires_scroll,
+            invert,
+            &EventDevice::default(),
+            &|hook_event| {
+                if let HookEvent::Mouse(MouseEvent::Scroll { delta, .. }) = hook_event {
+                    seen.set(Some(delta));
+                }
+                disposition
+            },
+        );
         (seen.get(), forwarded.map(value_of))
     }
 

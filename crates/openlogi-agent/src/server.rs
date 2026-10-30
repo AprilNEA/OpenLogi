@@ -24,8 +24,8 @@ use openlogi_core::device::DeviceInventory;
 use openlogi_hid::{
     BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
     ForceSensingInfo, HapticRestore, HapticRestoreOutcome, HapticWaveform, HidppOperation,
-    LightCommand, PointerSpeed, ReceiverSelector, ReportRate, ReportRateInfo, ScrollWheelMode,
-    SmartShiftStatus, WriteError,
+    LightCommand, OnboardState, PointerSpeed, ReceiverSelector, ReportRate, ReportRateInfo,
+    ScrollWheelMode, SmartShiftStatus, WriteError,
 };
 use openlogi_ipc::transport;
 use openlogi_ipc::{
@@ -116,6 +116,8 @@ impl AgentServer {
                 let launch_at_login = config.app_settings.launch_at_login;
                 #[cfg(target_os = "macos")]
                 let app_icon = config.app_settings.app_icon;
+                #[cfg(target_os = "macos")]
+                let show_in_menu_bar = config.app_settings.show_in_menu_bar;
                 let language = config.app_settings.language.clone();
                 match saved {
                     None => self.orchestrator.lock().await.reload_config(config),
@@ -133,6 +135,10 @@ impl AgentServer {
                 // restyle — the GUI can only reach the Dock and the bundle.
                 #[cfg(target_os = "macos")]
                 crate::tray::set_icon(app_icon);
+                // The "Show in menu bar" toggle too: install or remove the
+                // item now rather than at the next agent launch.
+                #[cfg(target_os = "macos")]
+                crate::tray::set_visible(show_in_menu_bar, app_icon);
                 // And the interface language: re-resolve the process locale
                 // (the Windows popup rebuilds per show and picks it up alone)
                 // and rebuild the macOS menu, whose titles were stamped at
@@ -303,6 +309,19 @@ impl Agent for AgentServer {
         desired: openlogi_hid::DisableKeysMask,
     ) -> Result<openlogi_hid::DisableKeysState, WriteError> {
         self.shared.set_disable_keys(&route, desired).await
+    }
+
+    async fn read_onboard(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<OnboardState, WriteError> {
+        self.shared
+            .device(&route)
+            .run(HidppOperation::ReadOnboard, |c| async move {
+                openlogi_hid::get_onboard_on(&c).await
+            })
+            .await
     }
 
     async fn request_accessibility_prompt(self, _: Context) {

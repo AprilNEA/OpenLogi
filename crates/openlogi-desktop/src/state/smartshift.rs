@@ -2,7 +2,8 @@
 //! swr-backed queries owned by the device-read service.
 
 use gpui::{App, Context};
-use openlogi_core::hid::{DeviceRoute, SmartShiftStatus};
+use openlogi_core::config::{SMARTSHIFT_AUTO_DISENGAGE_DEFAULT, SmartShift};
+use openlogi_core::hid::{DeviceRoute, SmartShiftAutoDisengage, SmartShiftStatus};
 use tracing::debug;
 
 use super::device_key::DeviceKey;
@@ -220,8 +221,10 @@ impl AppState {
     /// on a background thread), optimistically cache it, and persist it to
     /// `config.toml` — the values live in device RAM and reset on a power
     /// cycle (#189), so the agent re-applies them when the device reconnects.
-    /// No-op when no device is selected.
+    /// A threshold the config cannot hold is replaced first (see
+    /// [`with_persistable_threshold`]). No-op when no device is selected.
     pub fn commit_smartshift(&mut self, status: SmartShiftStatus) -> StateEvents {
+        let status = with_persistable_threshold(status);
         let events = self.for_current_device(StateEvent::SmartShiftChanged);
         let Some(record) = self.current_record() else {
             debug!("no active device — SmartShift change ignored");
@@ -298,6 +301,25 @@ impl AppState {
 pub(crate) enum ConfirmationOutcome {
     Confirmed,
     Failed,
+}
+
+/// `status` with an auto-disengage the config loader accepts.
+///
+/// Firmware can report a threshold below the configuration floor (an MX Master 3
+/// reports `4`, #2079). A write that keeps the read threshold — the free-spin
+/// pill, the torque slider — would then save a `config.toml` the next launch
+/// refuses to parse. Such a threshold becomes the default, the value the
+/// SmartShift panel already shows for it, before the write reaches the device,
+/// the cache, or the config.
+fn with_persistable_threshold(status: SmartShiftStatus) -> SmartShiftStatus {
+    if SmartShift::accepts_auto_disengage(status.auto_disengage) {
+        status
+    } else {
+        SmartShiftStatus {
+            auto_disengage: SmartShiftAutoDisengage::Threshold(SMARTSHIFT_AUTO_DISENGAGE_DEFAULT),
+            ..status
+        }
+    }
 }
 
 pub(crate) fn smartshift_write_outcome(

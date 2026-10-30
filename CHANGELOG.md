@@ -7,6 +7,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.19] - 2026-10-29
+
+### Added
+
+- *(desktop)* record a custom shortcut from a key press ([#2138](https://github.com/AprilNEA/OpenLogi/pull/2138))
+- *(core)* accept Print Screen in shortcuts ([#2128](https://github.com/AprilNEA/OpenLogi/pull/2128))
+- *(gui)* offer run shell command in the mouse button picker ([#2124](https://github.com/AprilNEA/OpenLogi/pull/2124))
+- *(gui)* offer open application or folder in the keyboard key panel ([#2103](https://github.com/AprilNEA/OpenLogi/pull/2103))
+- *(core)* accept Insert and keycap abbreviations in shortcuts ([#2087](https://github.com/AprilNEA/OpenLogi/pull/2087))
+
+### Changed
+
+- *(agent)* block the button worker until a command or long-press deadline ([#2094](https://github.com/AprilNEA/OpenLogi/pull/2094))
+- *(hook)* read the power epoch only while a callback is entered ([#2097](https://github.com/AprilNEA/OpenLogi/pull/2097))
+
+### Fixed
+
+- *(inject)* switch spaces on a mirrored display set ([#2148](https://github.com/AprilNEA/OpenLogi/pull/2148))
+- *(device,agent)* change the diverted keyboard keys in place on app switch ([#2144](https://github.com/AprilNEA/OpenLogi/pull/2144))
+- *(device,agent)* let capture report a dead channel to inventory ([#2112](https://github.com/AprilNEA/OpenLogi/pull/2112))
+- *(i18n)* translate the German leftovers and fix the Scroll Lock toast ([#2111](https://github.com/AprilNEA/OpenLogi/pull/2111))
+- *(desktop)* size the device details labels in rem like the configuration card ([#2114](https://github.com/AprilNEA/OpenLogi/pull/2114))
+- *(overlay)* run the overlay without AccessKit so closed windows are freed ([#2115](https://github.com/AprilNEA/OpenLogi/pull/2115))
+- *(gui)* ignore a stale asset origin when placing mouse hotspots ([#1577](https://github.com/AprilNEA/OpenLogi/pull/1577))
+- *(windows)* suppress console flash from RunShellCommand ([#1361](https://github.com/AprilNEA/OpenLogi/pull/1361))
+- *(gui)* read the camera controls off the UI thread ([#2104](https://github.com/AprilNEA/OpenLogi/pull/2104))
+- *(agent)* re-arm capture after a session task panics ([#1902](https://github.com/AprilNEA/OpenLogi/pull/1902))
+- *(cli)* request Input Monitoring before direct fixture capture ([#2084](https://github.com/AprilNEA/OpenLogi/pull/2084))
+- *(gui)* restore native keyboard controls when clearing bindings ([#2036](https://github.com/AprilNEA/OpenLogi/pull/2036))
+- *(gui)* size the camera preview with the interface scale ([#2058](https://github.com/AprilNEA/OpenLogi/pull/2058))
+- *(agent)* apply the macOS menu-bar toggle without a restart ([#2099](https://github.com/AprilNEA/OpenLogi/pull/2099))
+- *(linux)* require read/write access to /dev/uinput in the input access probe ([#2098](https://github.com/AprilNEA/OpenLogi/pull/2098))
+- *(hook)* follow WM_CLASS rewrites on the focused X11 window ([#2080](https://github.com/AprilNEA/OpenLogi/pull/2080))
+- *(desktop)* replace a sub-floor smartshift threshold before saving it ([#2081](https://github.com/AprilNEA/OpenLogi/pull/2081))
+- *(linux)* stabilize actions ring placement during gnome animations ([#2037](https://github.com/AprilNEA/OpenLogi/pull/2037))
+- *(linux)* retry Hyprland desktop switches with the Lua dispatcher ([#2059](https://github.com/AprilNEA/OpenLogi/pull/2059))
+- *(cli)* read 0x1001 battery voltage in diag battery ([#2049](https://github.com/AprilNEA/OpenLogi/pull/2049))
+- *(macos)* keep held modifiers on re-posted media keys ([#2056](https://github.com/AprilNEA/OpenLogi/pull/2056))
+- *(agent)* keep the macOS relaunch successor out of the agent's process group ([#2063](https://github.com/AprilNEA/OpenLogi/pull/2063))
+- *(agent)* recover mouse capture across Bluetooth and Bolt switches ([#1746](https://github.com/AprilNEA/OpenLogi/pull/1746))
+- *(overlay)* keep the Windows Actions Ring from taking the foreground ([#2053](https://github.com/AprilNEA/OpenLogi/pull/2053))
+- *(desktop)* mark the selected pill with the accent border ([#2047](https://github.com/AprilNEA/OpenLogi/pull/2047))
+
+## [0.8.18] - 2026-10-25
+
+### Added
+
+- *(assets)* ask the jsDelivr data API for the newest asset release ([#2040](https://github.com/AprilNEA/OpenLogi/pull/2040))
+- *(desktop)* add a keyboard backlight duration timer ([#1879](https://github.com/AprilNEA/OpenLogi/pull/1879))
+- *(core,agent,gui)* add guarded disable-keys controls ([#993](https://github.com/AprilNEA/OpenLogi/pull/993))
+- *(core,agent,gui)* add a press force setting for the MX Master 4 Haptic Sense Panel ([#2021](https://github.com/AprilNEA/OpenLogi/pull/2021))
+- *(hidpp)* add capability-bound force sensing buttons ([#2016](https://github.com/AprilNEA/OpenLogi/pull/2016))
+- *(release)* cut betas from a workflow and tell the tap about them ([#2005](https://github.com/AprilNEA/OpenLogi/pull/2005))
+- *(release)* build a beta at its own version ([#2004](https://github.com/AprilNEA/OpenLogi/pull/2004))
+- *(xtask,ci)* compose update channel files from per-release records ([#2000](https://github.com/AprilNEA/OpenLogi/pull/2000))
+- *(agent)* drive the mock agent from a stdin control console ([#2003](https://github.com/AprilNEA/OpenLogi/pull/2003))
+
+### Fixed
+
+- *(assets)* follow the 0.1 asset release line instead of pinning 0.1.0 ([#2039](https://github.com/AprilNEA/OpenLogi/pull/2039))
+- *(i18n)* translate the receiver chooser, old-pairing cleanup, and update channel in Czech ([#2034](https://github.com/AprilNEA/OpenLogi/pull/2034))
+- *(cli)* route backlight operations through the agent ([#2031](https://github.com/AprilNEA/OpenLogi/pull/2031))
+- *(windows)* post the layout's scan code with keys a layout can move ([#2028](https://github.com/AprilNEA/OpenLogi/pull/2028))
+- *(overlay)* draw the Windows Actions Ring without a window frame ([#1913](https://github.com/AprilNEA/OpenLogi/pull/1913))
+- *(agent)* re-apply volatile settings after replacing a dead channel ([#1997](https://github.com/AprilNEA/OpenLogi/pull/1997))
+- *(i18n)* translate the disable-keys strings in 22 locales ([#2024](https://github.com/AprilNEA/OpenLogi/pull/2024))
+- *(deps)* update Tokio for AsyncFd soundness advisory ([#2019](https://github.com/AprilNEA/OpenLogi/pull/2019))
+- *(device)* bound Bolt receiver identity reads ([#2009](https://github.com/AprilNEA/OpenLogi/pull/2009))
+- *(release)* name Sparkle deltas so Sparkle applies them ([#2002](https://github.com/AprilNEA/OpenLogi/pull/2002))
+
 ## [0.8.17] - 2026-10-22
 
 ### Added

@@ -27,8 +27,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    Context, InteractiveElement, IntoElement, ParentElement, Render, RenderImage, SharedString,
-    Styled, Subscription, Task, Window, div, img, prelude::FluentBuilder as _, px,
+    Context, InteractiveElement, IntoElement, ParentElement, Rems, Render, RenderImage,
+    SharedString, Styled, Subscription, Task, Window, div, img, prelude::FluentBuilder as _, rems,
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::v_flex;
@@ -44,8 +44,10 @@ use capture::{Capture, PreviewStream, SystemCapture};
 #[cfg(test)]
 mod tests;
 
-const PREVIEW_W: f32 = 480.;
-const PREVIEW_H: f32 = 270.; // 16:9
+// In rems, like the card that frames it, so the interface scale sizes both:
+// a fixed-pixel preview overflows the card below 100 % and leaves a gap above.
+pub(crate) const PREVIEW_W: Rems = rems(30.); // 480 px at the standard 16 px rem
+const PREVIEW_H: Rems = rems(16.875); // 16:9
 /// How long to wait before opening a camera again after a failed start. A
 /// camera another application holds becomes free when that application lets go
 /// of it, which raises no event to wait on — so poll, slowly enough that a
@@ -268,8 +270,8 @@ impl Render for CameraPreview {
             );
 
         v_flex()
-            .w(px(PREVIEW_W))
-            .h(px(PREVIEW_H))
+            .w(PREVIEW_W)
+            .h(PREVIEW_H)
             .items_center()
             .justify_center()
             .rounded_md()
@@ -277,7 +279,7 @@ impl Render for CameraPreview {
             .border_color(pal.border)
             .bg(pal.panel)
             .when_some(image, |surface, image| {
-                surface.child(img(image).w(px(PREVIEW_W)).h(px(PREVIEW_H)).rounded_md())
+                surface.child(img(image).w(PREVIEW_W).h(PREVIEW_H).rounded_md())
             })
             .when(show_placeholder && !capture_supported, |surface| {
                 surface.child(note(tr!("camera.camera_preview_platform_unavailable"), pal))

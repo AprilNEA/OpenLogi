@@ -137,7 +137,7 @@ Profile pro Anwendung wechseln mit der App im Fokus. Ein `[apps]`-Alias lässt e
 <table>
     <tr>
         <td width="50%"><img src="https://assets.openlogi.org/screenshots/macos/light/cards/keys-backlight.png" width="400" alt="Karten für Tasten und Hintergrundbeleuchtung einer MX Keys S"></td>
-        <td width="50%"><b>Tastatur</b><ul><li>Fn Lock sowie Multi-Plattform-Tastaturen, die beim Layout des Host-Betriebssystems bleiben</li><li>Stufe der Hintergrundbeleuchtung, automatische Helligkeit und Energiesparen</li><li>Bildschirmanzeige der Beleuchtungsstufe, sobald sie sich ändert</li><li>Statisches RGB auf unterstützten Tastaturen</li></ul></td>
+        <td width="50%"><b>Tastatur</b><ul><li>Fn Lock sowie Multi-Plattform-Tastaturen, die beim Layout des Host-Betriebssystems bleiben</li><li>Stufe der Hintergrundbeleuchtung, automatische Helligkeit, Energiesparen und wie lange die Tasten leuchten</li><li>Bildschirmanzeige der Beleuchtungsstufe, sobald sie sich ändert</li><li>Statisches RGB auf unterstützten Tastaturen</li></ul></td>
     </tr>
     <tr>
         <td width="50%"><img src="https://assets.openlogi.org/screenshots/macos/light/cards/litra.png" width="400" alt="Litra-Glow-Beleuchtungspanel mit Helligkeit und Farbtemperatur"></td>
@@ -171,6 +171,7 @@ Der Funktionsumfang hängt davon ab, was das jeweilige Gerät meldet; die App ze
 
 > [!IMPORTANT]
 > Beende zuerst **Logi Options+** (und unter Linux Solaar). Ein Empfänger kann immer nur einer Anwendung gleichzeitig gehören.
+> Unter macOS belegt auch **Karabiner-Elements** eine Bluetooth-Tastatur, die es verändert. Schalte in Karabiner-Elements → Settings → Devices für diese Tastatur **Modify events** aus.
 
 | Plattform | System | Architektur |
 | --- | --- | --- |
@@ -212,7 +213,13 @@ Oder installiere mit einem Befehl das passende Paket für deine Distribution. Da
 curl -fsSL https://github.com/AprilNEA/OpenLogi/releases/latest/download/install.sh | sh
 ```
 
-Wie du das Skript vor dem Ausführen prüfst, sowie Hinweise zu Flatpak, NixOS und Distributionen ohne systemd findest du in [INSTALL-linux.md](INSTALL-linux.md).
+Unter Arch Linux baut das AUR-Paket [`openlogi`](https://aur.archlinux.org/packages/openlogi) das Release aus dem Quellcode:
+
+```sh
+yay -S openlogi
+```
+
+Wie du das Skript vor dem Ausführen prüfst, sowie Hinweise zum AUR-Paket, Flatpak, NixOS und Distributionen ohne systemd findest du in [INSTALL-linux.md](INSTALL-linux.md).
 
 ### Windows
 

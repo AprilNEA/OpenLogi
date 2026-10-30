@@ -266,6 +266,7 @@ fn profile_validator_rejects_route_and_setting_inconsistencies() {
         current_level: 4,
         nb_levels: 4,
         power_save: false,
+        duration: None,
         controls: BacklightControls::default(),
     });
     let error = invalid_backlight

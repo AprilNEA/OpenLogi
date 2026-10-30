@@ -3,6 +3,27 @@
 use super::*;
 
 #[test]
+fn offline_slots_remain_in_inventory_without_a_live_route() {
+    let mut receiver = inventory(&[1, 4]);
+    receiver[0].paired[0].online = false;
+    assert_eq!(
+        routes_for_inventories(&receiver),
+        vec![DeviceRoute::Unifying {
+            receiver_uid: "receiver-1".into(),
+            slot: 4,
+        }],
+        "an inactive device route must not survive merely because its USB receiver remains connected"
+    );
+    receiver[0].paired[1].online = false;
+    assert!(routes_for_inventories(&receiver).is_empty());
+    assert_eq!(
+        receiver[0].paired.len(),
+        2,
+        "remembered pairings remain intact"
+    );
+}
+
+#[test]
 fn settled_inventories_publish_exact_receiver_routes() {
     assert_eq!(
         routes_for_inventories(&inventory(&[1, 4])),

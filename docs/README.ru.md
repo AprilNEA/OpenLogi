@@ -136,7 +136,7 @@
 <table>
     <tr>
         <td width="50%"><img src="https://assets.openlogi.org/screenshots/macos/light/cards/keys-backlight.png" width="400" alt="Карточки «Клавиши» и «Подсветка» для MX Keys S"></td>
-        <td width="50%"><b>Клавиатура</b><ul><li>Fn Lock и мультиплатформенные клавиатуры, которые остаются на раскладке ОС хоста</li><li>Уровень подсветки, автояркость и экономия заряда</li><li>Уровень подсветки показывается на экране при изменении</li><li>Статическая RGB-подсветка на поддерживаемых клавиатурах</li></ul></td>
+        <td width="50%"><b>Клавиатура</b><ul><li>Fn Lock и мультиплатформенные клавиатуры, которые остаются на раскладке ОС хоста</li><li>Уровень подсветки, автояркость, экономия заряда и время подсветки клавиш</li><li>Уровень подсветки показывается на экране при изменении</li><li>Статическая RGB-подсветка на поддерживаемых клавиатурах</li></ul></td>
     </tr>
     <tr>
         <td width="50%"><img src="https://assets.openlogi.org/screenshots/macos/light/cards/litra.png" width="400" alt="Панель освещения Litra Glow с яркостью и цветовой температурой"></td>
@@ -170,6 +170,7 @@
 
 > [!IMPORTANT]
 > Сначала закройте **Logi Options+** (а в Linux — и Solaar). Приёмник может принадлежать только одному приложению одновременно.
+> В macOS **Karabiner-Elements** тоже блокирует Bluetooth-клавиатуру, которую изменяет. Отключите **Modify events** для этой клавиатуры в Karabiner-Elements → Settings → Devices.
 
 | Платформа | Система | Архитектура |
 | --- | --- | --- |
@@ -211,7 +212,13 @@ brew install --cask openlogi
 curl -fsSL https://github.com/AprilNEA/OpenLogi/releases/latest/download/install.sh | sh
 ```
 
-Как просмотреть скрипт перед запуском, а также Flatpak, NixOS и дистрибутивы без systemd — в [INSTALL-linux.md](INSTALL-linux.md).
+В Arch Linux пакет AUR [`openlogi`](https://aur.archlinux.org/packages/openlogi) собирает релиз из исходного кода:
+
+```sh
+yay -S openlogi
+```
+
+Как просмотреть скрипт перед запуском, а также пакет AUR, Flatpak, NixOS и дистрибутивы без systemd — в [INSTALL-linux.md](INSTALL-linux.md).
 
 ### Windows
 

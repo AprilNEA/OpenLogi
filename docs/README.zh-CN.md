@@ -137,7 +137,7 @@ OpenLogi 能做、而 Options+ 做不到的事：
 <table>
     <tr>
         <td width="50%"><img src="https://assets.openlogi.org/screenshots/macos/light/cards/keys-backlight.png" width="400" alt="MX Keys S 的按键和背光卡片"></td>
-        <td width="50%"><b>键盘</b><ul><li>Fn Lock；多平台键盘保持当前系统的布局</li><li>背光档位、自动亮度和省电模式</li><li>调整背光时在屏幕上显示档位</li><li>受支持键盘的静态 RGB 灯光</li></ul></td>
+        <td width="50%"><b>键盘</b><ul><li>Fn Lock；多平台键盘保持当前系统的布局</li><li>背光档位、自动亮度、省电模式和按键亮灯时长</li><li>调整背光时在屏幕上显示档位</li><li>受支持键盘的静态 RGB 灯光</li></ul></td>
     </tr>
     <tr>
         <td width="50%"><img src="https://assets.openlogi.org/screenshots/macos/light/cards/litra.png" width="400" alt="Litra Glow 灯光面板：亮度和色温"></td>
@@ -171,6 +171,7 @@ OpenLogi 能做、而 Options+ 做不到的事：
 
 > [!IMPORTANT]
 > 先退出 **Logi Options+**（Linux 上还有 Solaar）。同一个接收器同时只能由一个应用占用。
+> 在 macOS 上，**Karabiner-Elements** 也会独占它修改的蓝牙键盘。请在 Karabiner-Elements → Settings → Devices 中为该键盘关闭 **Modify events**。
 
 | 平台 | 系统 | 架构 |
 | --- | --- | --- |
@@ -212,7 +213,13 @@ brew install --cask openlogi
 curl -fsSL https://github.com/AprilNEA/OpenLogi/releases/latest/download/install.sh | sh
 ```
 
-想先审阅脚本再运行，或使用 Flatpak、NixOS、无 systemd 的发行版，见 [INSTALL-linux.md](INSTALL-linux.md)。
+在 Arch Linux 上，AUR 软件包 [`openlogi`](https://aur.archlinux.org/packages/openlogi) 会从源码构建发布版本：
+
+```sh
+yay -S openlogi
+```
+
+想先审阅脚本再运行，或使用 AUR 软件包、Flatpak、NixOS、无 systemd 的发行版，见 [INSTALL-linux.md](INSTALL-linux.md)。
 
 ### Windows
 

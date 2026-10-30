@@ -136,7 +136,7 @@ Los perfiles por aplicación cambian con la app que tengas en primer plano. Un a
 <table>
     <tr>
         <td width="50%"><img src="https://assets.openlogi.org/screenshots/macos/light/cards/keys-backlight.png" width="400" alt="Tarjetas de Teclas y Retroiluminación de un MX Keys S"></td>
-        <td width="50%"><b>Teclado</b><ul><li>Fn Lock, y teclados multiplataforma que mantienen la distribución del sistema anfitrión</li><li>Nivel de retroiluminación, brillo automático y ahorro de batería</li><li>El nivel de retroiluminación se muestra en pantalla mientras cambia</li><li>RGB estático en los teclados compatibles</li></ul></td>
+        <td width="50%"><b>Teclado</b><ul><li>Fn Lock, y teclados multiplataforma que mantienen la distribución del sistema anfitrión</li><li>Nivel de retroiluminación, brillo automático, ahorro de batería y cuánto tiempo siguen iluminadas las teclas</li><li>El nivel de retroiluminación se muestra en pantalla mientras cambia</li><li>RGB estático en los teclados compatibles</li></ul></td>
     </tr>
     <tr>
         <td width="50%"><img src="https://assets.openlogi.org/screenshots/macos/light/cards/litra.png" width="400" alt="Panel de iluminación de una Litra Glow con brillo y temperatura de color"></td>
@@ -170,6 +170,7 @@ Las funciones disponibles dependen de lo que informe cada dispositivo; la aplica
 
 > [!IMPORTANT]
 > Cierra antes **Logi Options+** (y Solaar en Linux). Un receptor solo puede pertenecer a una aplicación a la vez.
+> En macOS, **Karabiner-Elements** también bloquea un teclado Bluetooth que modifica. Desactiva **Modify events** para ese teclado en Karabiner-Elements → Settings → Devices.
 
 | Plataforma | Sistema | Arquitectura |
 | --- | --- | --- |
@@ -211,7 +212,13 @@ O instala el paquete adecuado para tu distribución con un solo comando. Verific
 curl -fsSL https://github.com/AprilNEA/OpenLogi/releases/latest/download/install.sh | sh
 ```
 
-Para revisar el script antes de ejecutarlo, y para Flatpak, NixOS y distribuciones sin systemd, consulta [INSTALL-linux.md](INSTALL-linux.md).
+En Arch Linux, el paquete de AUR [`openlogi`](https://aur.archlinux.org/packages/openlogi) compila la versión desde el código fuente:
+
+```sh
+yay -S openlogi
+```
+
+Para revisar el script antes de ejecutarlo, y para el paquete de AUR, Flatpak, NixOS y distribuciones sin systemd, consulta [INSTALL-linux.md](INSTALL-linux.md).
 
 ### Windows
 

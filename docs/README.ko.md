@@ -137,7 +137,7 @@ OpenLogi는 되고 Options+는 안 되는 것들:
 <table>
     <tr>
         <td width="50%"><img src="https://assets.openlogi.org/screenshots/macos/light/cards/keys-backlight.png" width="400" alt="MX Keys S의 키 카드와 백라이트 카드"></td>
-        <td width="50%"><b>키보드</b><ul><li>Fn Lock, 그리고 호스트 OS 레이아웃을 유지하는 멀티 플랫폼 키보드</li><li>백라이트 밝기, 자동 밝기, 배터리 절약</li><li>백라이트 밝기를 바꿀 때 화면에 표시</li><li>지원 키보드의 정적 RGB</li></ul></td>
+        <td width="50%"><b>키보드</b><ul><li>Fn Lock, 그리고 호스트 OS 레이아웃을 유지하는 멀티 플랫폼 키보드</li><li>백라이트 밝기, 자동 밝기, 배터리 절약, 키 조명 유지 시간</li><li>백라이트 밝기를 바꿀 때 화면에 표시</li><li>지원 키보드의 정적 RGB</li></ul></td>
     </tr>
     <tr>
         <td width="50%"><img src="https://assets.openlogi.org/screenshots/macos/light/cards/litra.png" width="400" alt="밝기와 색온도를 설정하는 Litra Glow 조명 패널"></td>
@@ -171,6 +171,7 @@ OpenLogi는 되고 Options+는 안 되는 것들:
 
 > [!IMPORTANT]
 > 먼저 **Logi Options+**(Linux에서는 Solaar도)를 종료하세요. 하나의 수신기는 한 번에 하나의 애플리케이션만 소유할 수 있습니다.
+> macOS에서는 **Karabiner-Elements**도 수정 대상인 Bluetooth 키보드를 독점합니다. Karabiner-Elements → Settings → Devices에서 해당 키보드의 **Modify events**를 끄세요.
 
 | 플랫폼 | 시스템 | 아키텍처 |
 | --- | --- | --- |
@@ -212,7 +213,13 @@ OpenLogi를 열고 macOS가 요청하면 **손쉬운 사용**과 **입력 모니
 curl -fsSL https://github.com/AprilNEA/OpenLogi/releases/latest/download/install.sh | sh
 ```
 
-실행 전에 스크립트를 확인하는 방법과 Flatpak, NixOS, systemd가 없는 배포판에 대해서는 [INSTALL-linux.md](INSTALL-linux.md)를 참고하세요.
+Arch Linux에서는 AUR 패키지 [`openlogi`](https://aur.archlinux.org/packages/openlogi)가 릴리스를 소스에서 빌드합니다:
+
+```sh
+yay -S openlogi
+```
+
+실행 전에 스크립트를 확인하는 방법과 AUR 패키지, Flatpak, NixOS, systemd가 없는 배포판에 대해서는 [INSTALL-linux.md](INSTALL-linux.md)를 참고하세요.
 
 ### Windows
 

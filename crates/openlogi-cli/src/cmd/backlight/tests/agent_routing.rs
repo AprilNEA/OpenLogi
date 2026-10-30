@@ -71,11 +71,10 @@ fn state() -> BacklightState {
         current_level: 2,
         nb_levels: 8,
         power_save: true,
-        controls: BacklightControls {
-            automatic: true,
-            level: true,
-            power_save: true,
-        },
+        duration: None,
+        controls: BacklightControls::AUTOMATIC
+            | BacklightControls::LEVEL
+            | BacklightControls::POWER_SAVE,
     }
 }
 

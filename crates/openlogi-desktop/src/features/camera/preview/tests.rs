@@ -1,7 +1,7 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use gpui::{AppContext as _, Entity, TestAppContext, VisualTestContext, point, size};
+use gpui::{AppContext as _, Entity, TestAppContext, VisualTestContext, point, px, size};
 use openlogi_camera::CaptureError;
 use openlogi_core::config::Config;
 
@@ -111,7 +111,7 @@ fn tick(cx: &mut TestAppContext) {
 fn draw(view: &Entity<CameraPreview>, cx: &mut VisualTestContext) {
     cx.draw(
         point(px(0.), px(0.)),
-        size(px(PREVIEW_W), px(PREVIEW_H)),
+        size(PREVIEW_W.to_pixels(px(16.)), PREVIEW_H.to_pixels(px(16.))),
         |_, _| view.clone().into_any_element(),
     );
 }

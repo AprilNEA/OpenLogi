@@ -23,6 +23,7 @@ use openlogi_core::hid::{Dpi, SmartShiftStatus};
 use tokio::sync::mpsc;
 use tracing::warn;
 
+pub use backlight::DurationSteps;
 pub use config::ConfigPersistence;
 pub(crate) use device_key::DeviceKey;
 pub(crate) use device_session::ObservedConnection;
@@ -33,7 +34,7 @@ pub use light::LightCommandStatus;
 pub(crate) use load::Load;
 pub use load::{
     BacklightLoad, DisableKeysLoad, DpiLoad, EasySwitchLoad, FnLockLoad, ForceSensingLoad,
-    PointerSpeedLoad, ReportRateLoad, SmartShiftLoad,
+    OnboardLoad, PointerSpeedLoad, ReportRateLoad, SmartShiftLoad,
 };
 
 /// Result of confirming a SmartShift write by reading the value back.
@@ -71,6 +72,7 @@ mod action_ring;
 mod agent;
 mod backlight;
 mod bindings;
+pub use bindings::BindingLayer;
 mod camera;
 mod config;
 mod device_key;
@@ -87,6 +89,7 @@ mod inventory;
 mod light;
 mod lighting;
 mod load;
+mod onboard;
 mod os_layout;
 mod pointer;
 mod pointer_speed;
@@ -194,6 +197,10 @@ pub struct AppState {
     next_disable_keys_request_id: u64,
     /// Standalone-light sequencing and aggregate camera activity.
     lights: LightSession,
+    /// Which timer steps the backlight card is showing. A disclosure, not a
+    /// keyboard setting: the keyboard keeps whatever duration was last
+    /// written, and switching this writes nothing.
+    duration_steps: DurationSteps,
     /// Sender to the IPC client thread. The agent owns the hook and device I/O.
     ipc_commands: mpsc::UnboundedSender<crate::services::ipc::Command>,
     /// Camera-consent poll started by an in-app macOS prompt. The app-state
@@ -244,6 +251,7 @@ impl AppState {
             state.load_current_backlight(cx);
             state.load_current_easy_switch(cx);
             state.load_current_disable_keys(cx);
+            state.load_current_onboard(cx);
         });
     }
 
@@ -300,6 +308,7 @@ impl AppState {
             action_ring_editing_apps: BTreeMap::new(),
             pointer: PointerState::default(),
             lights: LightSession::default(),
+            duration_steps: DurationSteps::Short,
             disable_keys_reads: DisableKeysReads::default(),
             next_disable_keys_request_id: 0,
             ipc_commands,

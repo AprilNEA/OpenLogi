@@ -26,6 +26,12 @@ pub(crate) fn create_status_item() -> Retained<NSStatusItem> {
     NSStatusBar::systemStatusBar().statusItemWithLength(VARIABLE_LENGTH)
 }
 
+/// Take `item` out of the system status bar. Dropping the last [`Retained`]
+/// alone would not: the status bar keeps its own reference.
+pub(crate) fn remove_status_item(item: &NSStatusItem) {
+    NSStatusBar::systemStatusBar().removeStatusItem(item);
+}
+
 /// Create a menu with AppKit auto-enabling disabled (the agent manages item
 /// state itself).
 pub(crate) fn new_menu(mtm: MainThreadMarker) -> Retained<NSMenu> {

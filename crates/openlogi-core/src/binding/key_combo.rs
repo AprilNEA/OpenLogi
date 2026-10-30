@@ -81,6 +81,8 @@ impl KeyboardUsage {
             0x37 => ".".to_string(),
             0x38 => "/".to_string(),
             0x3a..=0x45 => format!("F{}", code - 0x3a + 1),
+            0x46 => "PrintScreen".to_string(),
+            0x49 => "Insert".to_string(),
             0x4a => "Home".to_string(),
             0x4b => "PageUp".to_string(),
             0x4c => "Delete".to_string(),
@@ -108,7 +110,7 @@ pub struct KeyboardUsageError(pub u8);
 const fn validate_keyboard_usage(value: &u8) -> Result<(), KeyboardUsageError> {
     if matches!(
         value,
-        0x04..=0x31 | 0x33..=0x38 | 0x3a..=0x45 | 0x4a..=0x52 | 0x68..=0x6f
+        0x04..=0x31 | 0x33..=0x38 | 0x3a..=0x46 | 0x49..=0x52 | 0x68..=0x6f
     ) {
         Ok(())
     } else {
@@ -367,11 +369,13 @@ fn parse_key(token: &str) -> Result<KeyboardUsage, KeyComboParseError> {
             "backspace" => 0x2a,
             "tab" => 0x2b,
             "space" => 0x2c,
+            "printscreen" | "print-screen" | "print" | "prtsc" | "prtscn" | "prtscr" => 0x46,
+            "insert" | "ins" => 0x49,
             "home" => 0x4a,
-            "pageup" | "page-up" => 0x4b,
-            "delete" => 0x4c,
+            "pageup" | "page-up" | "pgup" => 0x4b,
+            "delete" | "del" => 0x4c,
             "end" => 0x4d,
-            "pagedown" | "page-down" => 0x4e,
+            "pagedown" | "page-down" | "pgdn" => 0x4e,
             "right" => 0x4f,
             "left" => 0x50,
             "down" => 0x51,
@@ -446,6 +450,73 @@ mod tests {
         let combo = "Cmd+A".parse::<KeyCombo>().expect("valid shortcut failed");
         assert_eq!(combo.key().code(), 0x04);
         assert_eq!(combo.rendered_label(), "Cmd+A");
+    }
+
+    /// The six keys of the editing cluster bind alone or in a chord, under
+    /// their full names and the abbreviations printed on keycaps (#2085).
+    #[test]
+    fn parses_the_editing_cluster_and_its_keycap_abbreviations() {
+        for (names, code, label) in [
+            (&["Insert", "Ins"][..], 0x49, "Insert"),
+            (&["Delete", "Del"][..], 0x4c, "Delete"),
+            (&["Home"][..], 0x4a, "Home"),
+            (&["End"][..], 0x4d, "End"),
+            (&["PageUp", "Page-Up", "PgUp"][..], 0x4b, "PageUp"),
+            (&["PageDown", "Page-Down", "PgDn"][..], 0x4e, "PageDown"),
+        ] {
+            for name in names {
+                let combo = name.parse::<KeyCombo>().expect("editing key must parse");
+                assert_eq!(combo.key().code(), code, "{name}");
+                assert_eq!(combo.rendered_label(), label, "{name}");
+                assert_eq!(combo.key().ascii_char(), None, "{name}");
+            }
+        }
+        let combo = "Shift+Ins"
+            .parse::<KeyCombo>()
+            .expect("valid shortcut failed");
+        assert_eq!(combo.rendered_label(), "Shift+Insert");
+    }
+
+    /// Print Screen binds alone or in a chord, under its full name, the X11
+    /// keysym name, and the abbreviations printed on keycaps (#1641).
+    #[test]
+    fn parses_print_screen_and_its_keycap_abbreviations() {
+        for name in [
+            "PrintScreen",
+            "Print-Screen",
+            "Print",
+            "PrtSc",
+            "PrtScn",
+            "PrtScr",
+        ] {
+            let combo = name.parse::<KeyCombo>().expect("Print Screen must parse");
+            assert_eq!(combo.key().code(), 0x46, "{name}");
+            assert_eq!(combo.rendered_label(), "PrintScreen", "{name}");
+            assert_eq!(combo.key().ascii_char(), None, "{name}");
+        }
+        let combo = "Alt+PrtSc"
+            .parse::<KeyCombo>()
+            .expect("valid shortcut failed");
+        assert!(combo.has_option());
+        assert_eq!(combo.rendered_label(), "Alt+PrintScreen");
+    }
+
+    /// Every usage the validator accepts renders a label the parser reads
+    /// back, so a key added to one of the three tables cannot be saved under
+    /// a name the config then fails to load.
+    #[test]
+    fn every_supported_usage_label_parses_back() {
+        for code in 0..=u8::MAX {
+            let Ok(key) = KeyboardUsage::try_new(code) else {
+                continue;
+            };
+            let label = key.label();
+            assert_eq!(
+                label.parse::<KeyCombo>().map(|combo| combo.key()),
+                Ok(key),
+                "usage {code:#04x} label {label:?}"
+            );
+        }
     }
 
     #[test]

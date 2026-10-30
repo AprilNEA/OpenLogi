@@ -41,11 +41,12 @@ use openlogi_core::device::{
     LightValueUnit, LockKey, PairedDevice, RawDeviceAddress, ReceiverInfo, StandaloneDevice,
 };
 use openlogi_core::hid::{
-    BacklightChange, BacklightControls, BacklightMode, BacklightState, BacklightStatus, Click,
-    DeviceRoute, DisableKeysMask, DisableKeysState, Dpi, DpiCapabilities, DpiInfo, EasySwitchHosts,
-    EasySwitchSlot, FnLockState, ForceSensingInfo, HidppFeatureErrorKind, HidppOperation,
-    HostConnection, HostOsInfo, HostOsKind, LightCommand, PasskeyMethod, ReceiverSelector,
-    ReportRate, ReportRateInfo, ScrollReportingTarget, ScrollWheelMode, SmartShiftAutoDisengage,
+    BacklightChange, BacklightControls, BacklightDuration, BacklightMode, BacklightState,
+    BacklightStatus, Click, DeviceRoute, DisableKeysMask, DisableKeysState, Dpi, DpiCapabilities,
+    DpiInfo, EasySwitchHosts, EasySwitchSlot, FnLockState, ForceSensingInfo, HidppFeatureErrorKind,
+    HidppOperation, HostConnection, HostOsInfo, HostOsKind, LightCommand, OnboardMode,
+    OnboardProfile, OnboardState, PasskeyMethod, ProfileIndex, ReceiverSelector, ReportRate,
+    ReportRateInfo, ScrollReportingTarget, ScrollWheelMode, SmartShiftAutoDisengage,
     SmartShiftMode, SmartShiftStatus, SmartShiftThreshold, TunableTorque, WriteError,
 };
 use openlogi_ipc::{
@@ -111,7 +112,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// unreleased version and leave this pin alone (`crates/openlogi-ipc/AGENTS.md`).
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 41);
+    assert_eq!(PROTOCOL_VERSION, 43);
 }
 
 #[test]
@@ -448,6 +449,8 @@ fn key_combo_modifier_bits() {
     let combo = |text: &str| text.parse::<KeyCombo>().expect("valid chord");
     assert_wire(&combo("Cmd+L"), "010f");
     assert_wire(&combo("Super+L"), "100f");
+    assert_wire(&combo("Insert"), "0049");
+    assert_wire(&combo("PrintScreen"), "0046");
 }
 
 /// The agent identity is frozen: a helper from any build has to be able to
@@ -708,13 +711,41 @@ fn device_inventory() {
                 pointer_scaling: true,
                 force_sensing: true,
                 disable_keys: false,
+                onboard_profiles: false,
+                button_spy: false,
             }),
             settings_revision: 7,
         }],
     }];
     assert_wire(
         &inventory,
-        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b00001010150020001030106323134304c5a0102030400010100fb34b0fb8240000b0101010000010101010100010101010101010007",
+        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b00001010150020001030106323134304c5a0102030400010100fb34b0fb8240000b01010100000101010101000101010101010100000007",
+    );
+}
+
+#[test]
+fn onboard_state() {
+    assert_wire(&HidppOperation::ReadOnboard, "1c");
+    assert_wire(
+        &AgentRequest::ReadOnboard {
+            route: DeviceRoute::Bolt {
+                receiver_uid: "F00DCAFE".into(),
+                slot: 1,
+            },
+        },
+        "2f0008463030444341464501",
+    );
+    assert_wire(
+        &OnboardState {
+            mode: OnboardMode::Onboard,
+            active_profile: ProfileIndex::new(5),
+            profiles: vec![OnboardProfile {
+                index: ProfileIndex::new(5).unwrap(),
+                name: Some("Stock".into()),
+                enabled: true,
+            }],
+        },
+        "0001050105010553746f636b01",
     );
 }
 
@@ -887,14 +918,15 @@ fn semantic_read_payloads() {
         current_level: 4,
         nb_levels: 8,
         power_save: true,
-        controls: BacklightControls {
-            automatic: true,
-            level: true,
-            power_save: false,
-        },
+        duration: BacklightDuration::try_from(30).ok(),
+        controls: BacklightControls::AUTOMATIC
+            | BacklightControls::LEVEL
+            | BacklightControls::DURATION,
     });
-    // v36 appends `power_save` and `controls` after the level count.
-    assert_wire(&backlight, "00010102040801010100");
+    // v36 appends `power_save` and `controls`; the timer's `duration` and
+    // `duration` ride v41 as the controls bit set (30 seconds) — the
+    // validated timer now serializes as an `Option` tag plus its seconds.
+    assert_wire(&backlight, "000101020408010b011e");
 
     let fn_lock: Result<FnLockState, WriteError> = Ok(FnLockState {
         fn_lock: true,
@@ -1086,6 +1118,12 @@ fn backlight_changes_and_errors() {
     assert_wire(&BacklightChange::Automatic(false), "0100");
     assert_wire(&BacklightChange::Level(3), "0203");
     assert_wire(&BacklightChange::PowerSave(true), "0301");
+    // Variant 4, then the seconds as a varint. 15 fits one byte; the
+    // validated timer serializes transparently as its seconds.
+    assert_wire(
+        &BacklightChange::Duration(BacklightDuration::try_from(15).expect("15 is a listed step")),
+        "040f",
+    );
     assert_wire(
         &WriteError::BacklightChangeUnsupported {
             change: BacklightChange::Level(8),

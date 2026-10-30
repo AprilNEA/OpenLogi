@@ -136,7 +136,7 @@ Per-application profiles switch with the focused app. An `[apps]` alias lets one
 <table>
     <tr>
         <td width="50%"><img src="https://assets.openlogi.org/screenshots/macos/light/cards/keys-backlight.png" width="400" alt="Keys and Backlight cards for an MX Keys S"></td>
-        <td width="50%"><b>Keyboard</b><ul><li>Fn Lock, and multi-platform keyboards that stay on the host OS layout</li><li>Backlight level, automatic brightness, and battery saving</li><li>The backlight level shown on screen as it changes</li><li>Static RGB on supported keyboards</li></ul></td>
+        <td width="50%"><b>Keyboard</b><ul><li>Fn Lock, and multi-platform keyboards that stay on the host OS layout</li><li>Backlight level, automatic brightness, battery saving, and how long the keys stay lit</li><li>The backlight level shown on screen as it changes</li><li>Static RGB on supported keyboards</li></ul></td>
     </tr>
     <tr>
         <td width="50%"><img src="https://assets.openlogi.org/screenshots/macos/light/cards/litra.png" width="400" alt="Litra Glow lighting panel with brightness and color temperature"></td>
@@ -170,6 +170,7 @@ Feature coverage depends on what each device reports; the app shows only the con
 
 > [!IMPORTANT]
 > Quit **Logi Options+** (and Solaar on Linux) first. Only one application can own a receiver at a time.
+> On macOS, **Karabiner-Elements** also locks a Bluetooth keyboard that it modifies. Turn off **Modify events** for that keyboard in Karabiner-Elements → Settings → Devices.
 
 | Platform | System | Architecture |
 | --- | --- | --- |
@@ -211,7 +212,13 @@ Or install the right package for your distribution with one command. It verifies
 curl -fsSL https://github.com/AprilNEA/OpenLogi/releases/latest/download/install.sh | sh
 ```
 
-To read the script before running it, and for Flatpak, NixOS, and distributions without systemd, see [INSTALL-linux.md](docs/INSTALL-linux.md).
+On Arch Linux, the [`openlogi`](https://aur.archlinux.org/packages/openlogi) AUR package builds the release from source:
+
+```sh
+yay -S openlogi
+```
+
+To read the script before running it, and for the AUR package, Flatpak, NixOS, and distributions without systemd, see [INSTALL-linux.md](docs/INSTALL-linux.md).
 
 ### Windows
 

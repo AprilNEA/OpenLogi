@@ -170,6 +170,14 @@ impl Agent for TestAgent {
         unreachable!("profile capture must never write Fn-lock")
     }
 
+    async fn read_onboard(
+        self,
+        _: TarpcContext,
+        _route: DeviceRoute,
+    ) -> Result<openlogi_core::hid::OnboardState, WriteError> {
+        unreachable!("profile capture does not read onboard memory")
+    }
+
     async fn unpair_device(
         self,
         _: TarpcContext,
@@ -522,6 +530,7 @@ fn fixture_agent_with(edit: impl FnOnce(&mut DeviceProfile)) -> TestAgent {
         current_level: 3,
         nb_levels: 8,
         power_save: false,
+        duration: None,
         controls: BacklightControls::default(),
     });
     profile.standalone[0].address.identity = RAW_STANDALONE_ID.to_string();

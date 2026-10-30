@@ -136,7 +136,7 @@ Uygulama başına profiller, odaktaki uygulamayla birlikte değişir. Bir `[apps
 <table>
     <tr>
         <td width="50%"><img src="https://assets.openlogi.org/screenshots/macos/light/cards/keys-backlight.png" width="400" alt="MX Keys S için Tuşlar ve Arka aydınlatma kartları"></td>
-        <td width="50%"><b>Klavye</b><ul><li>Fn Lock ve ana bilgisayarın işletim sistemi düzeninde kalan çok platformlu klavyeler</li><li>Arka aydınlatma seviyesi, otomatik parlaklık ve pil tasarrufu</li><li>Arka aydınlatma seviyesi değiştikçe ekranda gösterilir</li><li>Desteklenen klavyelerde statik RGB</li></ul></td>
+        <td width="50%"><b>Klavye</b><ul><li>Fn Lock ve ana bilgisayarın işletim sistemi düzeninde kalan çok platformlu klavyeler</li><li>Arka aydınlatma seviyesi, otomatik parlaklık, pil tasarrufu ve tuşların ne kadar süre aydınlık kalacağı</li><li>Arka aydınlatma seviyesi değiştikçe ekranda gösterilir</li><li>Desteklenen klavyelerde statik RGB</li></ul></td>
     </tr>
     <tr>
         <td width="50%"><img src="https://assets.openlogi.org/screenshots/macos/light/cards/litra.png" width="400" alt="Parlaklık ve renk sıcaklığı içeren Litra Glow aydınlatma paneli"></td>
@@ -170,6 +170,7 @@ Uygulama başına profiller, odaktaki uygulamayla birlikte değişir. Bir `[apps
 
 > [!IMPORTANT]
 > Önce **Logi Options+**'tan (Linux'ta Solaar'dan da) çıkın. Bir alıcıyı aynı anda yalnızca bir uygulama kullanabilir.
+> macOS'ta **Karabiner-Elements** de değiştirdiği Bluetooth klavyeyi kilitler. Karabiner-Elements → Settings → Devices bölümünde o klavye için **Modify events** seçeneğini kapatın.
 
 | Platform | Sistem | Mimari |
 | --- | --- | --- |
@@ -211,7 +212,13 @@ Veya dağıtımınıza uygun paketi tek bir komutla kurun. Komut minisign imzas�
 curl -fsSL https://github.com/AprilNEA/OpenLogi/releases/latest/download/install.sh | sh
 ```
 
-Betiği çalıştırmadan önce okumak ve Flatpak, NixOS ile systemd olmayan dağıtımlar için [INSTALL-linux.md](INSTALL-linux.md)'ye bakın.
+Arch Linux'ta [`openlogi`](https://aur.archlinux.org/packages/openlogi) AUR paketi sürümü kaynak koddan derler:
+
+```sh
+yay -S openlogi
+```
+
+Betiği çalıştırmadan önce okumak ve AUR paketi, Flatpak, NixOS ile systemd olmayan dağıtımlar için [INSTALL-linux.md](INSTALL-linux.md)'ye bakın.
 
 ### Windows
 
