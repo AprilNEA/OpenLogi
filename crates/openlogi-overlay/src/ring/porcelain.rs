@@ -22,9 +22,9 @@ use openlogi_ui::action_icons::RING_CANCEL_ICON;
 use openlogi_ui::ring_style::lerp_hsla;
 pub(super) use openlogi_ui::ring_style::porcelain::DESIGN_EDGE;
 use openlogi_ui::ring_style::porcelain::{
-    DISC, DISC_GLYPH, HUB, HUB_GAP, HUB_GLYPH, HUB_LABEL, INSET_RING, LABEL, MARK_H, MARK_W,
-    NEEDLE_INNER, NEEDLE_OUTER, NEEDLE_W, NODE_GAP, NODE_H, NODE_PAD_TOP, NODE_W, PLATTER, RADIUS,
-    accent, close_ink, disc_border, disc_border_hovered, disc_fill, disc_shadow,
+    DISC, DISC_GLYPH, HUB, HUB_GAP, HUB_GLYPH, HUB_LABEL, HUB_OPEN, INSET_RING, LABEL, MARK_H,
+    MARK_W, NEEDLE_INNER, NEEDLE_OUTER, NEEDLE_W, NODE_GAP, NODE_H, NODE_PAD_TOP, NODE_W, PLATTER,
+    RADIUS, accent, close_ink, disc_border, disc_border_hovered, disc_fill, disc_shadow,
     disc_shadow_hovered, hub_border, hub_fill, hub_shadow, hub_shadow_hovered, ink,
     inset_ring_border, label, label_hovered, muted, needle_highlight, platter_border, platter_fill,
     platter_shadow,
@@ -59,6 +59,10 @@ const MARK_KEYS: [(f32, f32, f32); 3] = [(0.0, 0.4, 0.0), (0.3, 1.0, 0.85), (1.0
 /// Segments in each round end of the needle.
 const CAP_STEPS: u8 = 8;
 const _: () = assert!(PLATTER * 2.0 <= DESIGN_EDGE, "the platter fits the window");
+const _: () = assert!(
+    HUB_OPEN / 2.0 < NEEDLE_INNER,
+    "the open hub clears the needle"
+);
 
 /// Hover, needle, press and open/close clocks for one open ring.
 pub(super) struct Motion {
@@ -633,7 +637,10 @@ fn hub_element(hub: Hub, layout: Layout, cx: &mut Context<RingView>) -> impl Int
     let fit = layout.fit;
     let open = ease_out_cubic(open);
     let glyph = HUB_GLYPH * fit * scale;
-    let size = HUB * fit * scale;
+    // The hub opens around the hovered action, wide enough to carry its
+    // whole caption, wrapped, as In Motion's does: a node truncates a long
+    // label, and user-authored labels can differ only at their end.
+    let size = (HUB + (HUB_OPEN - HUB) * open) * fit * scale;
     centred(layout, size)
         .id("ring-cancel")
         .flex()
@@ -676,12 +683,11 @@ fn hub_element(hub: Hub, layout: Layout, cx: &mut Context<RingView>) -> impl Int
         .when_some(caption, |hub, caption| {
             hub.child(
                 div()
-                    .w(px((HUB - 16.0) * fit))
+                    .w(px((HUB_OPEN - 24.0) * fit))
                     .text_size(px(HUB_LABEL * fit))
                     .font_weight(FontWeight::MEDIUM)
                     .text_center()
                     .text_color(ink())
-                    .truncate()
                     .opacity(open)
                     .child(caption),
             )

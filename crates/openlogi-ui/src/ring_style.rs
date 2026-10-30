@@ -197,6 +197,9 @@ pub mod obsidian {
     pub const CARD_GAP: f32 = 6.0;
     pub const CARD_LABEL: f32 = 11.0;
     pub const HUB: f32 = 110.0;
+    /// The hub opened around a hovered card: wide enough to carry the
+    /// card's whole caption, wrapped, inside the inner orbit.
+    pub const HUB_OPEN: f32 = 136.0;
     pub const HUB_GLYPH: f32 = 20.0;
     pub const HUB_LABEL: f32 = 12.0;
     /// The two thin orbit lines and the soft disc under everything, as radii.
@@ -402,6 +405,9 @@ pub mod porcelain {
     pub const DISC_GLYPH: f32 = 20.0 * SHRINK;
     pub const LABEL: f32 = 11.0;
     pub const HUB: f32 = 128.0 * SHRINK;
+    /// The hub opened around a hovered disc: wide enough to carry the
+    /// disc's whole caption, wrapped, and still clear of the needle.
+    pub const HUB_OPEN: f32 = 140.0 * SHRINK;
     pub const HUB_GLYPH: f32 = 23.0 * SHRINK;
     pub const HUB_LABEL: f32 = 12.0;
     pub const HUB_GAP: f32 = 7.0 * SHRINK;

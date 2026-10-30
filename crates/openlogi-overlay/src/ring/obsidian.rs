@@ -23,9 +23,10 @@ use openlogi_ui::ring_style::lerp_hsla;
 pub(super) use openlogi_ui::ring_style::obsidian::DESIGN_EDGE;
 use openlogi_ui::ring_style::obsidian::{
     AMBIENT, CARD_GAP, CARD_GLYPH, CARD_H, CARD_LABEL, CARD_RADIUS, CARD_W, HUB, HUB_GLYPH,
-    HUB_LABEL, ORBIT_INNER, ORBIT_OUTER, RADIUS, ambient_fill, ambient_shadow, card_border,
-    card_border_hovered, card_fill, card_shadow, card_shadow_hovered, glyph, halo_border,
-    halo_shadow, hub_border, hub_fill, hub_shadow, orbit_inner, orbit_outer, signal, text,
+    HUB_LABEL, HUB_OPEN, ORBIT_INNER, ORBIT_OUTER, RADIUS, ambient_fill, ambient_shadow,
+    card_border, card_border_hovered, card_fill, card_shadow, card_shadow_hovered, glyph,
+    halo_border, halo_shadow, hub_border, hub_fill, hub_shadow, orbit_inner, orbit_outer, signal,
+    text,
 };
 
 use super::motion::{
@@ -79,6 +80,10 @@ const TICK_INNER: f32 = 169.1;
 const TICK_OUTER: f32 = 173.6;
 const TICKS: u8 = 48;
 const DOT_ORBIT: f32 = 161.2;
+const _: () = assert!(
+    HUB_OPEN / 2.0 < ORBIT_INNER,
+    "the open hub stays inside the inner orbit"
+);
 
 /// Hover, halo, aim, light, wave and open/close clocks for one open ring.
 pub(super) struct Motion {
@@ -847,8 +852,11 @@ pub(super) fn hub_element(
         opacity,
         look,
     } = hub;
-    let size = HUB * fit;
     let open = ease_out_cubic(open);
+    // The hub opens around the hovered action, wide enough to carry its
+    // whole caption, wrapped, as In Motion's does: a card truncates a long
+    // label, and user-authored labels can differ only at their end.
+    let size = (HUB + (HUB_OPEN - HUB) * open) * fit;
     let glyph = (HUB_GLYPH + 6.0 * open) * fit;
     centred_in(edge, size)
         .id("ring-cancel")
@@ -900,12 +908,11 @@ pub(super) fn hub_element(
         .when_some(caption, |hub, caption| {
             hub.child(
                 div()
-                    .w(px((HUB - 10.0) * fit))
+                    .w(px((HUB_OPEN - 28.0) * fit))
                     .text_size(px(HUB_LABEL * fit))
                     .font_weight(FontWeight::MEDIUM)
                     .text_center()
                     .text_color(text())
-                    .truncate()
                     .opacity(open)
                     .child(caption),
             )
