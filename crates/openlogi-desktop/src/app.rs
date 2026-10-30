@@ -8,6 +8,7 @@ use gpui_component::{
     button::{Button, ButtonVariants as _},
     v_flex,
 };
+use openlogi_core::binding::GamingButtons;
 use openlogi_core::device::{Capabilities, DeviceKind};
 use openlogi_ipc::InventoryHealth;
 use tracing::info;
@@ -87,6 +88,12 @@ enum DetailTab {
     Device,
 }
 
+/// Whether `record` has an Actions Ring to open: binding the action anywhere
+/// else would open a ring nothing can configure.
+pub(crate) fn offers_actions_ring(record: &DeviceRecord) -> bool {
+    DetailTab::tabs_for(record).contains(&DetailTab::ActionsRing)
+}
+
 impl DetailTab {
     /// The detail sections shown for `record`, in tab order. Always non-empty:
     /// every device gets at least the info tab.
@@ -122,7 +129,12 @@ impl DetailTab {
         if matches!(record.kind, DeviceKind::Camera) {
             tabs.push(Self::Camera);
         }
-        if caps.buttons && can_show_mouse_model {
+        // A G-series mouse has no ReprogControls, but the OS hook still remaps
+        // its middle/back/forward, so it gets the panel too. The model draws
+        // only what such a mouse can deliver (#392, #730, #877).
+        let gaming = GamingButtons::for_device(&record.model_key, Some(&caps)).is_some();
+        let buttons = caps.buttons || gaming;
+        if buttons && can_show_mouse_model {
             tabs.push(Self::Buttons);
         }
         // The Keys tab needs something to bind: HID++ controls (measured, or
@@ -147,7 +159,8 @@ impl DetailTab {
         // mouse model), so any keyboard that gets a Keys tab needs the ring
         // editor too — otherwise the ring opens but has nothing configured
         // in it and no way to configure it (#1833).
-        if caps.haptic_panel || (caps.buttons && can_show_mouse_model) || shows_keys_tab {
+        // A G-series mouse gets no ring: its buttons are for games.
+        if caps.haptic_panel || (buttons && can_show_mouse_model && !gaming) || shows_keys_tab {
             tabs.push(Self::ActionsRing);
         }
         let has_software_scroll = openlogi_hook::SOFTWARE_SCROLL_INVERSION
@@ -364,6 +377,9 @@ impl AppView {
                 on_home
                     || (matches!(self.active_tab, DetailTab::Pointer | DetailTab::Device)
                         && is_current(key))
+            }
+            StateEvent::OnboardChanged(key) => {
+                !on_home && self.active_tab == DetailTab::Pointer && is_current(key)
             }
             StateEvent::CameraChanged => on_home || self.active_tab == DetailTab::Light,
             // Child entities own these surfaces and subscribe directly. A

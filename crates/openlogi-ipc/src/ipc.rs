@@ -20,9 +20,9 @@ use openlogi_core::device::{
 };
 use openlogi_core::hid::{
     BacklightChange, BacklightState, DeviceRoute, DisableKeysMask, DisableKeysState, Dpi, DpiInfo,
-    EasySwitchHosts, FnLockState, ForceSensingInfo, LightCommand, PairingError, PasskeyMethod,
-    PointerSpeed, ReceiverSelector, ReportRate, ReportRateInfo, ScrollWheelMode, SmartShiftStatus,
-    WriteError,
+    EasySwitchHosts, FnLockState, ForceSensingInfo, LightCommand, OnboardState, PairingError,
+    PasskeyMethod, PointerSpeed, ReceiverSelector, ReportRate, ReportRateInfo, ScrollWheelMode,
+    SmartShiftStatus, WriteError,
 };
 use serde::{Deserialize, Serialize};
 pub use succession::Identity;
@@ -154,7 +154,12 @@ pub use succession::Identity;
 ///      timer, five-second steps up to two hours.
 /// v42: `KeyboardUsage` accepts Insert (`0x49`) and Print Screen (`0x46`),
 ///      so a `KeyCombo` can carry a usage a v41 agent rejects.
-pub const PROTOCOL_VERSION: u32 = 42;
+/// v43: `Capabilities::{onboard_profiles, button_spy}`, the `NextDpiPreset`,
+///      `PreviousDpiPreset`, `DpiShift` and `GShift` actions,
+///      `Agent::read_onboard`, `HidppOperation::ReadOnboard` and
+///      `PairingFailure::ReceiverFull` appended — G-series onboard memory,
+///      host mode and G-Shift.
+pub const PROTOCOL_VERSION: u32 = 43;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -461,6 +466,8 @@ pub enum PairingFailure {
     UnknownDevice,
     /// There is no pairing session to receive this command.
     NoActiveSession,
+    /// The receiver has no free slot.
+    ReceiverFull,
 }
 
 /// Immediate command-acceptance failure for pairing RPCs.
@@ -516,6 +523,7 @@ impl From<PairingError> for PairingFailure {
             PairingError::MalformedNotification(what) => Self::Hid {
                 message: format!("malformed pairing notification ({what})"),
             },
+            PairingError::ReceiverFull => Self::ReceiverFull,
         }
     }
 }
@@ -955,4 +963,7 @@ pub trait Agent {
     async fn reload_saved_config_with_verdict(
         saved: SavedConfig,
     ) -> Result<SavedConfigVerdict, ConfigReloadError>;
+
+    /// Read a G-series mouse's onboard memory.
+    async fn read_onboard(route: DeviceRoute) -> Result<OnboardState, WriteError>;
 }

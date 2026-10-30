@@ -9,7 +9,7 @@ use std::time::Duration;
 use gpui::{Context, Subscription};
 use openlogi_core::hid::{
     BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
-    ForceSensingInfo, PointerSpeed, ReportRateInfo, SmartShiftStatus, WriteError,
+    ForceSensingInfo, OnboardState, PointerSpeed, ReportRateInfo, SmartShiftStatus, WriteError,
 };
 use swr_core::{
     MaybeSend, MaybeSync, QueryHandle, QueryOptions, QueryState, Retry, RetryPolicy, Runtime,
@@ -20,11 +20,12 @@ use tokio::sync::mpsc;
 
 use super::ipc::{
     Command, ReadBacklight, ReadDpi, ReadEasySwitchHosts, ReadFnLock, ReadForceSensing,
-    ReadPointerSpeed, ReadReportRate, ReadSmartShift,
+    ReadOnboard, ReadPointerSpeed, ReadReportRate, ReadSmartShift,
 };
 use crate::state::{
     AppState, BacklightLoad, DeviceKey, DpiLoad, EasySwitchLoad, FnLockLoad, ForceSensingLoad,
-    HostRenameRefusal, Load, PointerSpeedLoad, ReportRateLoad, SmartShiftLoad, StateEvent,
+    HostRenameRefusal, Load, OnboardLoad, PointerSpeedLoad, ReportRateLoad, SmartShiftLoad,
+    StateEvent,
 };
 
 const ROOT: &str = "device-read";
@@ -36,6 +37,7 @@ const POINTER_SPEED: &str = "pointer-speed";
 const FORCE_SENSING: &str = "force-sensing";
 const BACKLIGHT: &str = "backlight";
 const EASY_SWITCH: &str = "easy-switch";
+const ONBOARD: &str = "onboard";
 
 /// Preserve the old budget: one initial attempt and two retries.
 const READ_RETRY_POLICY: RetryPolicy = RetryPolicy {
@@ -83,6 +85,7 @@ pub(crate) struct DeviceReads {
     /// out on; cleared with that read.
     host_renames: BTreeMap<DeviceKey, HostRenames>,
     next_host_rename: u64,
+    onboard: BTreeMap<DeviceKey, DeviceRead<OnboardState>>,
 }
 
 /// The Easy-Switch host renames sent to one device that have not been
@@ -384,6 +387,73 @@ impl DeviceReads {
                 _observer: observer,
             },
         );
+    }
+
+    pub(crate) fn ensure_onboard(
+        &mut self,
+        key: DeviceKey,
+        route: DeviceRoute,
+        commands: mpsc::UnboundedSender<Command>,
+        cx: &mut Context<AppState>,
+    ) {
+        if self
+            .onboard
+            .get(&key)
+            .is_some_and(|read| read.route == route)
+        {
+            return;
+        }
+        self.remove_onboard(&key);
+        let Some((client, runtime)) = self.cache() else {
+            return;
+        };
+        let flight = self.take_flight();
+        let fetch_route = route.clone();
+        let fetcher = Retry::new(
+            runtime,
+            move |_| {
+                let commands = commands.clone();
+                let route = fetch_route.clone();
+                read_ipc(move |reply| ReadOnboard { route, reply }.into(), commands)
+            },
+            READ_RETRY_POLICY,
+        )
+        .retry_if(|error| !fn_lock_error_is_permanent(error));
+        let handle = client.subscribe(query_key(ONBOARD, &key), fetcher, QueryOptions::immutable());
+        read_through(&client, ONBOARD, &key, &handle);
+        let query = Query::new(&client, handle, cx);
+        let load = project_load(query.read(cx), fn_lock_error_is_permanent);
+        let observed_key = key.clone();
+        let observer = cx.observe(query.state(), move |state, query_state, cx| {
+            let load = project_load(query_state.read(cx), fn_lock_error_is_permanent);
+            if state
+                .device_reads_mut()
+                .update_onboard(&observed_key, flight, load)
+            {
+                cx.emit(StateEvent::OnboardChanged(observed_key.clone()));
+            }
+        });
+        self.onboard.insert(
+            key,
+            DeviceRead {
+                route,
+                flight,
+                load,
+                query,
+                _observer: observer,
+            },
+        );
+    }
+
+    pub(crate) fn refresh_onboard(&mut self, key: &DeviceKey) {
+        if let Some(read) = self.onboard.get_mut(key) {
+            read.query.revalidate();
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn onboard_load(&self, key: &DeviceKey) -> Option<&OnboardLoad> {
+        self.onboard.get(key).map(|read| &read.load)
     }
 
     /// Show `state` as `key`'s Fn-lock reading now. Used for the value the
@@ -1257,6 +1327,7 @@ impl DeviceReads {
         self.remove_force_sensing(key);
         self.remove_backlight(key);
         self.remove_easy_switch(key);
+        self.remove_onboard(key);
     }
 
     pub(crate) fn remove_dpi(&mut self, key: &DeviceKey) {
@@ -1270,6 +1341,13 @@ impl DeviceReads {
         if let Some(read) = self.smartshift.remove(key) {
             drop(read);
             self.clear::<SmartShiftStatus>(SMARTSHIFT, key);
+        }
+    }
+
+    fn remove_onboard(&mut self, key: &DeviceKey) {
+        if let Some(read) = self.onboard.remove(key) {
+            drop(read);
+            self.clear::<OnboardState>(ONBOARD, key);
         }
     }
 
@@ -1329,6 +1407,7 @@ impl DeviceReads {
             .chain(self.force_sensing.keys())
             .chain(self.backlight.keys())
             .chain(self.easy_switch.keys())
+            .chain(self.onboard.keys())
             .filter(|key| !present(key.as_str()))
             .cloned()
             .collect();
@@ -1479,6 +1558,21 @@ impl DeviceReads {
                 Load::Ready(renames.shown(hosts))
             }
             (load, _) => load,
+        };
+        if read.load == load {
+            return false;
+        }
+        read.load = load;
+        true
+    }
+
+    fn update_onboard(&mut self, key: &DeviceKey, flight: u64, load: OnboardLoad) -> bool {
+        let Some(read) = self
+            .onboard
+            .get_mut(key)
+            .filter(|read| read.flight == flight)
+        else {
+            return false;
         };
         if read.load == load {
             return false;

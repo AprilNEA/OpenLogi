@@ -171,6 +171,7 @@ OpenLogi 能做、而 Options+ 做不到的事：
 
 > [!IMPORTANT]
 > 先退出 **Logi Options+**（Linux 上还有 Solaar）。同一个接收器同时只能由一个应用占用。
+> 在 macOS 上，**Karabiner-Elements** 也会独占它修改的蓝牙键盘。请在 Karabiner-Elements → Settings → Devices 中为该键盘关闭 **Modify events**。
 
 | 平台 | 系统 | 架构 |
 | --- | --- | --- |

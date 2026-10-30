@@ -297,6 +297,7 @@ fn same_bindings(a: &DispatchPlan, b: &DispatchPlan) -> bool {
         thumbwheel_sensitivity,
         invert_wheel,
         pointer_target: _,
+        shift_bindings,
     } = a;
     *config_key == b.config_key
         && *bindings == b.bindings
@@ -304,6 +305,7 @@ fn same_bindings(a: &DispatchPlan, b: &DispatchPlan) -> bool {
         && *side_gesture_bindings == b.side_gesture_bindings
         && *thumbwheel_sensitivity == b.thumbwheel_sensitivity
         && *invert_wheel == b.invert_wheel
+        && *shift_bindings == b.shift_bindings
 }
 
 fn reconcile_session(

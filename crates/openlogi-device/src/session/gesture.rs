@@ -26,6 +26,7 @@
 mod accum;
 mod arm;
 pub(super) mod main_wheel;
+mod spy;
 
 use std::num::NonZeroU8;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -45,6 +46,9 @@ use accum::CaptureAccum;
 pub(crate) use arm::enumerate_controls;
 use arm::{ArmedControls, ArmedThumbwheel, arm_controls};
 pub use main_wheel::MainWheelDivert;
+pub(crate) use spy::SpyRestore;
+use spy::{ArmedOnboard, SpyEdges};
+pub use spy::{HostMode, OnboardTarget, SlotRoute};
 
 use super::capture_restore::ArmedReporting;
 pub use super::capture_restore::{
@@ -120,6 +124,13 @@ pub enum CapturedInput {
         /// the wheel's `0x2121` multiplier for a high-resolution one.
         per_notch: NonZeroU8,
     },
+    /// The device power-cycled with buttons held. Their presses are over, but
+    /// nobody let go: they end without the action a release would run.
+    Interrupted,
+    /// The session put the mouse in host mode. A session it replaced left
+    /// onboard mode, which loads the stored profile's DPI, so the agent
+    /// writes the saved one again.
+    HostModeEntered,
 }
 
 /// HID++-divertable standard buttons: the `0x1b04` control ID and the
@@ -160,7 +171,8 @@ pub const DIVERTABLE_STANDARD_BUTTONS: [(u16, ButtonId); 9] = {
 /// delivers — the dedicated gesture button on most MX mice (and its
 /// multiplatform CID on the M720 Triathlon), and the Haptic
 /// Sense Panel on MX Master 4 (two distinct physical controls). Each source in
-/// gesture mode is diverted with raw-XY; one with a non-default single binding
+/// gesture mode is diverted with raw-XY, or plainly for its click alone when
+/// the control reports no raw XY; one with a non-default single binding
 /// instead is plain-diverted like a standard button.
 pub const GESTURE_SOURCE_BUTTONS: [(u16, ButtonId); 3] = [
     (reprog_controls::GESTURE_BUTTON_CID, ButtonId::GestureButton),
@@ -179,7 +191,8 @@ pub struct CaptureSpec {
     pub capture_thumbwheel: bool,
     /// Gesture-source CIDs ([`GESTURE_SOURCE_BUTTONS`] members) to divert
     /// with raw-XY — one per source in gesture mode; empty when no HID++
-    /// control gestures.
+    /// control gestures. A control without raw XY is diverted plainly and
+    /// delivers only its click.
     pub divert_gesture_sources: Vec<u16>,
     /// Standard-button CIDs requested as raw-XY gesture sources. A control is
     /// armed only when its HID++ capability flags advertise raw-XY support.
@@ -197,17 +210,21 @@ pub struct CaptureSpec {
     /// mode along with the divert; `None` leaves the wheel native. Inert on a
     /// device without the feature.
     pub divert_main_wheel: Option<MainWheelDivert>,
+    /// G-series host mode or onboard profile.
+    pub onboard: Option<OnboardTarget>,
 }
 
 /// Capture the controls selected by `spec` on `route` until `host.shutdown`
 /// resolves, forwarding each event to `host.sink`.
 ///
 /// Each gesture source in `spec.divert_gesture_sources` is diverted with
-/// raw-XY. A source not in gesture mode keeps its native behavior — unless a
-/// non-default single binding puts it in `spec.divert_buttons`, in which case
-/// it is diverted as a plain button (the OS hook never sees a gesture-source
-/// CID, so this is the binding's only delivery path). The DPI/ModeShift
-/// capture and the channel-reuse slot are independent of this.
+/// raw-XY, or plainly when the control reports no raw XY: it then cannot
+/// swipe, but its click still replaces the firmware action. A source not in
+/// gesture mode keeps its native behavior — unless a non-default single
+/// binding puts it in `spec.divert_buttons`, in which case it is diverted as
+/// a plain button (the OS hook never sees a gesture-source CID, so this is
+/// the binding's only delivery path). The DPI/ModeShift capture and the
+/// channel-reuse slot are independent of this.
 ///
 /// Runs on the inventory-owned channel `host.registry` currently publishes
 /// for `route`: sharing that connection avoids splitting HID++ replies and
@@ -232,6 +249,13 @@ pub async fn run_capture_session(
     for button in armed.diverted_buttons() {
         let _ = host.sink.send(CapturedInput::ButtonDiverted(button));
     }
+    if armed
+        .onboard
+        .as_ref()
+        .is_some_and(|onboard| onboard.spy().is_some())
+    {
+        let _ = host.sink.send(CapturedInput::HostModeEntered);
+    }
     Ok(run_capture(shared, GestureCapture::new(armed), host).await)
 }
 
@@ -245,6 +269,7 @@ struct GestureCapture {
     /// The status of the last thumb-wheel report, for [`thumbwheel_input`].
     /// Behind a `Mutex` for the same reason as `accum`.
     thumb_status: Arc<Mutex<RotationStatus>>,
+    spy_edges: Arc<Mutex<SpyEdges>>,
 }
 
 impl GestureCapture {
@@ -253,6 +278,7 @@ impl GestureCapture {
             armed,
             accum: Arc::default(),
             thumb_status: Arc::new(Mutex::new(RotationStatus::Inactive)),
+            spy_edges: Arc::default(),
         }
     }
 }
@@ -272,6 +298,10 @@ impl ArmedCapture for GestureCapture {
             wheel_buttons = armed.wheel_button_cids.len(),
             thumbwheel = armed.thumb.is_some(),
             main_wheel = armed.main_wheel.is_some(),
+            spy_buttons = armed
+                .onboard
+                .as_ref()
+                .map_or(0, ArmedOnboard::captured_count),
             wake_rearm,
             "control capture active"
         );
@@ -311,7 +341,22 @@ impl ArmedCapture for GestureCapture {
             .main_wheel
             .as_ref()
             .map(|wheel| (wheel.feature_index, wheel.per_notch));
+        let spy = armed.onboard.as_ref().and_then(ArmedOnboard::spy);
+        let spy_edges = Arc::clone(&self.spy_edges);
+        spy_edges
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .attach(sink.clone());
         move |msg| {
+            if let Some((spy_index, captured)) = &spy
+                && let Some(mask) = spy::decode_mask(msg, device_index, *spy_index)
+            {
+                spy_edges
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .on_mask(mask, captured, &sink);
+                return;
+            }
             if let Some(idx) = reprog_index
                 && let Some(event) = reprog_controls::decode_event(msg, device_index, idx)
             {
@@ -372,10 +417,14 @@ impl ArmedCapture for GestureCapture {
             .thumb_status
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = RotationStatus::Inactive;
+        self.spy_edges
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .interrupt();
     }
 
-    async fn rearm(&self) {
-        self.armed.rearm().await;
+    async fn rearm(&self) -> bool {
+        self.armed.rearm().await
     }
 
     fn armed_reporting(&self) -> Option<(&ReprogControlsV4, &[ArmedReporting])> {

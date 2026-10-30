@@ -179,6 +179,13 @@ impl Binding {
         matches!(self, Binding::WheelHold(_))
     }
 
+    /// Whether the press holds the G-Shift layer. Only a plain binding does:
+    /// the other shapes decide what the press was after it starts.
+    #[must_use]
+    pub fn is_gshift(&self) -> bool {
+        matches!(self, Binding::Single(Action::GShift))
+    }
+
     /// Promote a [`Single`](Binding::Single) binding in place to a
     /// [`Gesture`](Binding::Gesture), keeping its action as the
     /// [`GestureDirection::Click`] entry and leaving the swipe arms unbound.

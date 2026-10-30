@@ -150,9 +150,10 @@ pub(super) trait ArmedCapture {
     /// Forget input state that a device power-cycle invalidated.
     fn reset_input_state(&self) {}
 
-    /// Re-issue every diversion after a wireless reconnect. Failures are
-    /// logged, not propagated: the next reconnection broadcast retries.
-    async fn rearm(&self);
+    /// Re-issue every diversion after a wireless reconnect. A failure the next
+    /// reconnection broadcast can retry is logged. `false` ends the session:
+    /// its controls are restored and capture arms again from scratch.
+    async fn rearm(&self) -> bool;
 
     /// Resolve when the session's owner asks this capture to divert a
     /// different set of controls. Waiting does not consume the request: it
@@ -449,8 +450,9 @@ async fn monitor<A: ArmedCapture>(
                 info!(?broadcast, capture = A::NAME, "device reconnected — re-arming capture");
                 context.armed.reset_input_state();
                 tokio::time::sleep(REARM_SETTLE_DELAY).await;
-                if device_io.allows_io() {
-                    context.armed.rearm().await;
+                if device_io.allows_io() && !context.armed.rearm().await {
+                    warn!(index = context.device_index, capture = A::NAME, "re-arm after wake failed — restarting session");
+                    return stop_for_current_publication(context.registry, context.shared);
                 }
             }
             echo = changes.next() => {

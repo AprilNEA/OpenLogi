@@ -270,6 +270,10 @@ impl Action {
             // are all handled above (or beside) the injector — see
             // `Effect::AgentSide`.
             Action::CycleDpiPresets
+            | Action::NextDpiPreset
+            | Action::PreviousDpiPreset
+            | Action::DpiShift
+            | Action::GShift
             | Action::SetDpiPreset(_)
             | Action::ToggleSmartShift
             | Action::TogglePrecisionMode

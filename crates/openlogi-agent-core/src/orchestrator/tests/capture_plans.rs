@@ -505,6 +505,25 @@ fn assert_side_gesture_capture_follows_platform_ownership_and_hook_availability(
     );
 }
 
+/// macOS hands Back/Forward gestures to HID++ raw XY, which a spy-only mouse
+/// cannot report, so its gestures must stay in the hook's maps.
+#[test]
+fn a_spy_only_mouse_keeps_its_side_gestures_in_the_os_hook() {
+    let mut config = Config::default();
+    config.set_gesture_mode("0407f", ButtonId::Back, true);
+    let mut orch = orchestrator(config);
+    orch.devices = vec![dev("0407f", 1, true)];
+    orch.rebuild();
+    orch.set_os_mouse_hook_available(true);
+
+    let hook_maps = orch
+        .shared
+        .hook_maps
+        .read()
+        .expect("hook maps should not be poisoned");
+    assert!(hook_maps.gestures.contains_key(&ButtonId::Back));
+}
+
 #[test]
 fn side_gesture_capture_follows_platform_ownership_and_hook_availability() {
     assert_side_gesture_capture_follows_platform_ownership_and_hook_availability(ButtonId::Forward);

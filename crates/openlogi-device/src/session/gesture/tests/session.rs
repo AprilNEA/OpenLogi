@@ -50,8 +50,10 @@ async fn alternate_gesture_control_arming_respects_mode_and_capabilities() {
                 arm_controls_into(&device, &channel, 0xff, &spec, &mut armed)
                     .await
                     .unwrap();
-                let expected =
-                    cid != 0x00d7 && flags & 0x0020 != 0 && (!gestures || flags & 0x0100 != 0);
+                // Gesture mode diverts with raw XY where the control offers
+                // it, and plainly (click only) where it does not.
+                let expected = cid != 0x00d7 && flags & 0x0020 != 0;
+                let raw_xy = gestures && flags & 0x0100 != 0;
                 let writes: Vec<_> = handle
                     .written_reports()
                     .into_iter()
@@ -62,7 +64,7 @@ async fn alternate_gesture_control_arming_respects_mode_and_capabilities() {
                 assert_eq!(
                     writes,
                     if expected {
-                        vec![vec![hi, lo, if gestures { 0x33 } else { 0x23 }]]
+                        vec![vec![hi, lo, if raw_xy { 0x33 } else { 0x23 }]]
                     } else {
                         vec![]
                     },
@@ -158,13 +160,14 @@ async fn dpi_gesture_arming_never_overwrites_raw_xy_with_plain_diversion() {
 /// [`reprog_controls::MULTIPLATFORM_GESTURE_BUTTON_CID`] rather than the MX
 /// gesture CID, so arming must find it in the device's own control table:
 /// raw-XY diversion in gesture mode, plain diversion for a single binding, and
-/// left native when a gesture was asked of a control without raw XY.
+/// plain diversion as a click-only gesture source when a gesture was asked of
+/// a control without raw XY.
 #[tokio::test]
 async fn m720_gesture_button_arms_from_its_reported_control_table() {
     let cid = reprog_controls::MULTIPLATFORM_GESTURE_BUTTON_CID;
     for (gestures, raw_xy, expected_flags) in [
         (true, true, vec![0x33]),
-        (true, false, vec![]),
+        (true, false, vec![0x23]),
         (false, true, vec![0x23]),
         (false, false, vec![0x23]),
     ] {
@@ -221,11 +224,7 @@ async fn m720_gesture_button_arms_from_its_reported_control_table() {
         );
         assert_eq!(
             armed.gesture_cids,
-            if gestures && raw_xy {
-                vec![cid]
-            } else {
-                vec![]
-            }
+            if gestures { vec![cid] } else { vec![] }
         );
         assert_eq!(
             armed.button_cids,
@@ -236,6 +235,88 @@ async fn m720_gesture_button_arms_from_its_reported_control_table() {
             }
         );
     }
+}
+
+/// The first-generation MX Master's gesture button is divertable but reports
+/// no raw XY (`mse, reprogrammable, divertable`). Left native in gesture
+/// mode, its firmware ran its own action in place of the configured click
+/// (#1311, #2167). Arming diverts it plainly as a gesture source, so a press
+/// and release reach the map's `Click`, with the button edges around it.
+#[tokio::test]
+async fn a_gesture_source_without_raw_xy_still_delivers_its_click() {
+    let cid = reprog_controls::GESTURE_BUTTON_CID;
+    let (raw, handle) = ScriptedRawHidChannel::with_dynamic_responder(move |request| {
+        let mut response = vec![0; 20];
+        response[..4].copy_from_slice(&request[..4]);
+        response[0] = 0x11;
+        match (request[2], request[3] >> 4) {
+            (0, 1) => response[4] = 4,
+            (0, 0) => response[4] = 2,
+            (2, 0) => response[4] = 1,
+            (2, 1) => {
+                response[4..6].copy_from_slice(&cid.to_be_bytes());
+                // mse | reprogrammable | divertable; no raw-XY bit.
+                response[8] = 0x31;
+                response[12] = 0;
+            }
+            (2, 2) => response[4..6].copy_from_slice(&cid.to_be_bytes()),
+            (2, 3) => return Some(request.to_vec()),
+            _ => panic!("unexpected capture request: {request:02x?}"),
+        }
+        Some(response)
+    });
+    let channel = scripted_channel(raw).await;
+    let device = Device::new(channel.clone(), 0xff).await.unwrap();
+    let spec = CaptureSpec {
+        divert_gesture_sources: vec![cid],
+        ..CaptureSpec::default()
+    };
+    let mut armed = ArmedControls::default();
+    arm_controls_into(&device, &channel, 0xff, &spec, &mut armed)
+        .await
+        .unwrap();
+    let writes: Vec<_> = handle
+        .written_reports()
+        .into_iter()
+        .filter(|report| report[2] == 2 && report[3] >> 4 == 3)
+        .map(|report| report[4..7].to_vec())
+        .collect();
+    let [hi, lo] = cid.to_be_bytes();
+    assert_eq!(writes, vec![vec![hi, lo, 0x23]], "plain divert, raw XY off");
+    assert_eq!(armed.gesture_cids, vec![cid]);
+    assert!(armed.button_cids.is_empty());
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+    for event in [
+        RawControlEvent::DivertedButtons([cid, 0, 0, 0]),
+        RawControlEvent::DivertedButtons([0; 4]),
+    ] {
+        handle_reprog(
+            &mut acc,
+            event,
+            &armed.gesture_cids,
+            &armed.dpi_cids,
+            &armed.button_cids,
+            &tx,
+        );
+    }
+    assert_eq!(
+        rx.try_recv(),
+        Ok(CapturedInput::ButtonDown(ButtonId::GestureButton))
+    );
+    assert_eq!(
+        rx.try_recv(),
+        Ok(CapturedInput::Gesture(
+            ButtonId::GestureButton,
+            GestureDirection::Click
+        ))
+    );
+    assert_eq!(
+        rx.try_recv(),
+        Ok(CapturedInput::ButtonUp(ButtonId::GestureButton))
+    );
+    assert!(rx.try_recv().is_err(), "one press is one click");
 }
 
 /// The buttons a session reports as diverted are the ones arming wrote, not
@@ -324,6 +405,7 @@ async fn pending_restore_waits_for_a_replacement_then_undiverts_through_it() {
         ),
         None,
         None,
+        None,
     )
     .expect("one diverted control should require restoration");
 
@@ -371,6 +453,7 @@ fn diverted_gesture(
                 PointerDivert::RawXy,
             )],
         ),
+        None,
         None,
         None,
     )
@@ -578,6 +661,7 @@ async fn restore_retries_when_inventory_changes_during_an_awaited_write() {
         ),
         None,
         None,
+        None,
     )
     .expect("one diverted control should require restoration");
 
@@ -642,6 +726,7 @@ async fn failed_setup_rollback_returns_its_restore_capability() {
         ),
         None,
         None,
+        None,
     );
 
     let failure = rollback_start(
@@ -693,6 +778,7 @@ async fn an_offline_receiver_slot_restores_on_return_to_the_same_usb_channel() {
                 PointerDivert::RawXy,
             )],
         ),
+        None,
         None,
         None,
     );
@@ -1022,4 +1108,127 @@ async fn a_transport_failure_reading_thumbwheel_info_fails_arming_before_any_div
         .unwrap_err();
     assert!(armed.thumb.is_none(), "the wheel must not be owned");
     assert_eq!(reporting_writes(&handle), Vec::<[u8; 2]>::new());
+}
+
+/// A wake that mutes the captured buttons but cannot start the spy leaves
+/// them dead, so the session has to end and restore the mouse.
+#[tokio::test]
+async fn host_rearm_reports_a_spy_that_did_not_start() {
+    const ONBOARD: u8 = 9;
+    const SPY: u8 = 10;
+    const START_SPY: u8 = 1;
+    let spy_fails = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (raw, _handle) = ScriptedRawHidChannel::with_dynamic_responder({
+        let spy_fails = Arc::clone(&spy_fails);
+        move |request| {
+            let mut response = vec![0; 20];
+            response[..4].copy_from_slice(&request[..4]);
+            response[0] = 0x11;
+            match (request[2], request[3] >> 4) {
+                (0, 1) => response[4] = 4,
+                (0, 0) => {
+                    response[4] = match u16::from_be_bytes([request[4], request[5]]) {
+                        0x8100 => ONBOARD,
+                        0x8110 => SPY,
+                        _ => 0,
+                    };
+                }
+                (SPY, START_SPY) if spy_fails.load(std::sync::atomic::Ordering::Relaxed) => {
+                    response[2] = 0xff;
+                    response[3] = SPY;
+                    response[4] = request[3];
+                    response[5] = 2;
+                }
+                (ONBOARD | SPY, _) => {}
+                _ => panic!("unexpected capture request: {request:02x?}"),
+            }
+            Some(response)
+        }
+    });
+    let channel = scripted_channel(raw).await;
+    let device = Device::new(channel.clone(), 0xff).await.unwrap();
+    let spec = CaptureSpec {
+        onboard: Some(OnboardTarget::Host(HostMode {
+            slots: vec![(ButtonId::G9, SlotRoute::Captured)],
+            report_rate: None,
+        })),
+        ..CaptureSpec::default()
+    };
+    let mut armed = ArmedControls::default();
+    arm_controls_into(&device, &channel, 0xff, &spec, &mut armed)
+        .await
+        .unwrap();
+
+    assert!(armed.rearm().await);
+    spy_fails.store(true, std::sync::atomic::Ordering::Relaxed);
+    assert!(!armed.rearm().await);
+}
+
+/// A session that puts the mouse in host mode says so, so the agent writes
+/// the saved DPI that leaving onboard mode may have replaced.
+#[tokio::test]
+async fn a_host_mode_session_reports_entering_host_mode() {
+    const ONBOARD: u8 = 9;
+    const SPY: u8 = 10;
+    let (raw, _handle) = ScriptedRawHidChannel::with_dynamic_responder(move |request| {
+        let mut response = vec![0; 20];
+        response[..4].copy_from_slice(&request[..4]);
+        response[0] = 0x11;
+        match (request[2], request[3] >> 4) {
+            (0, 1) => response[4] = 4,
+            (0, 0) => {
+                response[4] = match u16::from_be_bytes([request[4], request[5]]) {
+                    0x8100 => ONBOARD,
+                    0x8110 => SPY,
+                    _ => 0,
+                };
+            }
+            (ONBOARD | SPY, _) => {}
+            _ => panic!("unexpected capture request: {request:02x?}"),
+        }
+        Some(response)
+    });
+    let channel = scripted_channel(raw).await;
+    let (sink, mut inputs) = mpsc::unbounded_channel();
+    let (shutdown, shutdown_rx) = oneshot::channel();
+    let session = tokio::spawn(async move {
+        let route = DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xc539,
+        };
+        let registry = ChannelRegistry::default();
+        registry.replace_node(
+            NodeId::from("mouse-node".to_owned()),
+            [route.clone()],
+            channel,
+        );
+        let (_signal, device_io) = crate::device_io_channel();
+        let spec = CaptureSpec {
+            onboard: Some(OnboardTarget::Host(HostMode {
+                slots: vec![(ButtonId::G9, SlotRoute::Captured)],
+                report_rate: None,
+            })),
+            ..CaptureSpec::default()
+        };
+        let host = CaptureHost {
+            sink,
+            shutdown: shutdown_rx,
+            channel_slot: Arc::new(std::sync::RwLock::new(None)),
+            registry: &registry,
+            device_io,
+        };
+        run_capture_session(route, spec, host).await
+    });
+
+    let input = tokio::time::timeout(std::time::Duration::from_secs(2), inputs.recv())
+        .await
+        .expect("the session reports in time")
+        .expect("the session is running");
+    assert_eq!(input, CapturedInput::HostModeEntered);
+    shutdown.send(CaptureSessionStop::Shutdown).unwrap();
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), session)
+        .await
+        .expect("the session stops")
+        .expect("the session task does not panic");
+    assert!(matches!(outcome, Ok(CaptureSessionOutcome::Restored)));
 }

@@ -523,10 +523,10 @@ mod tests {
     };
 
     use super::{
-        ForegroundLayout, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY,
-        KEYEVENTF_KEYUP, Key, VK_BROWSER_BACK, VK_BROWSER_FORWARD, VK_DELETE, VK_DOWN, VK_END,
-        VK_HOME, VK_INSERT, VK_LEFT, VK_LWIN, VK_NEXT, VK_PRIOR, VK_RIGHT, VK_SHIFT, VK_UP, combo,
-        is_extended_key, key_input, send_inputs,
+        ForegroundLayout, HeldKey, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
+        KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, Key, VK_BROWSER_BACK, VK_BROWSER_FORWARD,
+        VK_DELETE, VK_DOWN, VK_END, VK_HOME, VK_INSERT, VK_LEFT, VK_LWIN, VK_NEXT, VK_PRIOR,
+        VK_RIGHT, VK_SHIFT, VK_UP, combo, held_key, is_extended_key, key_input, send_inputs,
     };
 
     fn usage(label: &str) -> KeyboardUsage {
@@ -726,6 +726,59 @@ mod tests {
         );
         assert_ne!(up_ki.dwFlags & KEYEVENTF_KEYUP, 0);
         assert_eq!(up_ki.wScan, down_ki.wScan);
+    }
+
+    /// The navigation keys a shortcut can name, with the virtual key each one
+    /// resolves to.
+    const SHORTCUT_NAVIGATION_KEYS: &[(&str, u16)] = &[
+        ("PageUp", VK_PRIOR),
+        ("PageDown", VK_NEXT),
+        ("Home", VK_HOME),
+        ("End", VK_END),
+        ("Insert", VK_INSERT),
+        ("Delete", VK_DELETE),
+        ("Left", VK_LEFT),
+        ("Up", VK_UP),
+        ("Right", VK_RIGHT),
+        ("Down", VK_DOWN),
+    ];
+
+    /// A `CustomShortcut` key resolves through [`Key::for_usage`] and a
+    /// `HoldShortcut` key through [`held_key`], not through [`Key::for_vk`],
+    /// so the navigation keys need their flag and scan code on those paths
+    /// too. A game that reads keys by scan code ignored a PageUp bound to a
+    /// mouse button while it went out with scan code 0, although letter keys
+    /// worked (#2170).
+    #[test]
+    fn shortcut_navigation_keys_carry_their_hardware_scan_code() {
+        let layout = ForegroundLayout::current();
+        for &(label, vk) in SHORTCUT_NAVIGATION_KEYS {
+            let (_, scan) = EXTENDED_KEYS_AND_THEIR_SCAN_CODES
+                .iter()
+                .copied()
+                .find(|&(extended, _)| extended == vk)
+                .expect("every navigation key is an extended key");
+            let expected = Key { vk, scan };
+            let key = Key::for_usage(usage(label), layout)
+                .expect("navigation keys have a Windows virtual key");
+            assert_eq!(
+                key, expected,
+                "{label} in a custom shortcut must carry its hardware scan code"
+            );
+            assert_eq!(
+                held_key(HeldKey::Key(usage(label)), layout),
+                Some(expected),
+                "{label} in a held shortcut must carry its hardware scan code"
+            );
+            // SAFETY: `key_input` fully initialises the `INPUT` it returns, so
+            // reading the `ki` arm of the union is well-defined.
+            let ki = unsafe { key_input(key, false).Anonymous.ki };
+            assert_ne!(
+                ki.dwFlags & KEYEVENTF_EXTENDEDKEY,
+                0,
+                "{label} must set KEYEVENTF_EXTENDEDKEY"
+            );
+        }
     }
 
     /// A plain key must not be flagged and must not carry a scan code: marking

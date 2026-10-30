@@ -418,3 +418,131 @@ fn a_saved_report_rate_survives_route_adoption() {
         Some(ReportRate::new(500))
     );
 }
+
+/// A profile is a plain number in the file, and the mouse has no profile 0.
+#[test]
+fn onboard_profile_is_a_nonzero_number_in_the_file() {
+    let body = |profile: u8| {
+        format!("schema_version = 7\n[devices.\"unit:1\".onboard_memory]\nprofile = {profile}\n")
+    };
+    let parsed: Config = toml::from_str(&body(3)).expect("profile 3 loads");
+    assert_eq!(
+        parsed.onboard_memory("unit:1"),
+        Some(OnboardMemory::Profile(
+            crate::hid::ProfileIndex::new(3).unwrap()
+        ))
+    );
+    assert!(
+        toml::from_str::<Config>(&body(0)).is_err(),
+        "profile 0 is refused when the file loads"
+    );
+}
+
+#[test]
+fn onboard_memory_and_report_rate_roundtrip() {
+    let mut cfg = Config::default();
+    cfg.set_onboard_memory(
+        "unit:1",
+        Some(OnboardMemory::Profile(
+            crate::hid::ProfileIndex::new(5).unwrap(),
+        )),
+    );
+    cfg.set_report_rate("unit:1", ReportRate::new(1000));
+    cfg.set_onboard_memory("unit:2", Some(OnboardMemory::Off));
+    let restored = write_and_read(&cfg);
+    assert_eq!(
+        restored.onboard_memory("unit:1"),
+        Some(OnboardMemory::Profile(
+            crate::hid::ProfileIndex::new(5).unwrap()
+        ))
+    );
+    assert_eq!(restored.onboard_memory("unit:2"), Some(OnboardMemory::Off));
+    assert_eq!(restored.report_rate("unit:1"), Some(ReportRate::new(1000)));
+}
+
+#[test]
+fn host_mode_is_implied_only_by_host_only_buttons_or_report_rate() {
+    let layout = Some(&G502_LIGHTSPEED);
+    let mut cfg = Config::default();
+    assert_eq!(cfg.effective_onboard_memory("g502", layout), None);
+
+    cfg.set_binding("g502", ButtonId::Back, Binding::Single(Action::Copy));
+    assert_eq!(cfg.effective_onboard_memory("g502", layout), None);
+
+    cfg.set_binding(
+        "g502",
+        ButtonId::G7,
+        Binding::Single(Action::PreviousDpiPreset),
+    );
+    assert_eq!(cfg.effective_onboard_memory("g502", layout), None);
+
+    cfg.set_binding("g502", ButtonId::G7, Binding::Single(Action::Copy));
+    assert_eq!(
+        cfg.effective_onboard_memory("g502", layout),
+        Some(OnboardMemory::Off)
+    );
+    assert_eq!(cfg.effective_onboard_memory("g502", None), None);
+
+    cfg.set_onboard_memory(
+        "g502",
+        Some(OnboardMemory::Profile(
+            crate::hid::ProfileIndex::new(1).unwrap(),
+        )),
+    );
+    assert_eq!(
+        cfg.effective_onboard_memory("g502", layout),
+        Some(OnboardMemory::Profile(
+            crate::hid::ProfileIndex::new(1).unwrap()
+        ))
+    );
+
+    let mut rate_only = Config::default();
+    rate_only.set_report_rate("g502", ReportRate::new(500));
+    assert_eq!(
+        rate_only.effective_onboard_memory("g502", layout),
+        Some(OnboardMemory::Off)
+    );
+}
+
+#[test]
+fn gshift_layer_roundtrips_and_needs_host_mode() {
+    let layout = Some(&G502_LIGHTSPEED);
+    let mut cfg = Config::default();
+    cfg.set_binding("g502", ButtonId::Forward, Binding::Single(Action::GShift));
+    assert!(cfg.uses_gshift("g502"));
+    assert_eq!(
+        cfg.effective_onboard_memory("g502", layout),
+        Some(OnboardMemory::Off)
+    );
+
+    cfg.set_gshift_binding("g502", ButtonId::G8, Some(Action::VolumeUp));
+    let restored = write_and_read(&cfg);
+    assert_eq!(
+        restored
+            .gshift_overrides("g502")
+            .and_then(|layer| layer.get(&ButtonId::G8)),
+        Some(&Action::VolumeUp)
+    );
+
+    cfg.set_gshift_binding("g502", ButtonId::G8, None);
+    assert_eq!(cfg.gshift_overrides("g502"), None);
+}
+
+#[test]
+fn gshift_is_held_only_by_a_plain_binding() {
+    let mut cfg = Config::default();
+    cfg.set_binding(
+        "g502",
+        ButtonId::Forward,
+        Binding::LongPress(crate::binding::LongPressBinding::new(
+            Action::GShift,
+            Action::Copy,
+        )),
+    );
+    assert!(
+        !cfg.uses_gshift("g502"),
+        "a long press keeps its long action"
+    );
+    cfg.set_binding("g502", ButtonId::Forward, Binding::Single(Action::GShift));
+    assert!(cfg.uses_gshift("g502"));
+}
