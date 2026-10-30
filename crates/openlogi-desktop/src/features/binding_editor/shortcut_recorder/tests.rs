@@ -1,7 +1,7 @@
 use gpui::{
-    Context, Entity, FocusHandle, InteractiveElement as _, IntoElement, KeyBinding, Keystroke,
-    ParentElement as _, Render, Styled as _, TestAppContext, VisualTestContext, Window, actions,
-    div, prelude::FluentBuilder as _,
+    Context, Entity, FocusHandle, InteractiveElement as _, IntoElement, KeyBinding, KeyDownEvent,
+    Keystroke, Modifiers, ParentElement as _, Render, Styled as _, TestAppContext,
+    VisualTestContext, Window, actions, div, prelude::FluentBuilder as _,
 };
 
 use super::*;
@@ -14,6 +14,35 @@ fn record(keystroke: &str) -> Recording {
 
 fn chord(text: &str) -> Recording {
     Recording::Chord(text.parse().expect("chord parses"))
+}
+
+const CMD_SHIFT: Modifiers = Modifiers {
+    control: false,
+    alt: false,
+    shift: true,
+    platform: true,
+    function: false,
+};
+
+/// A keystroke as GPUI's platforms report a shifted digit or symbol: the
+/// shifted character, without Shift.
+fn reported(key: &str) -> Keystroke {
+    Keystroke {
+        modifiers: Modifiers {
+            platform: true,
+            ..Modifiers::default()
+        },
+        key: key.into(),
+        key_char: None,
+    }
+}
+
+fn logo() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "Cmd"
+    } else {
+        "Super"
+    }
 }
 
 #[test]
@@ -35,6 +64,36 @@ fn escape_alone_cancels_and_a_key_a_shortcut_cannot_send_is_unsupported() {
     assert_eq!(record("escape"), Recording::Cancelled);
     assert_eq!(record("shift-escape"), chord("Shift+Escape"));
     assert_eq!(record("f21"), Recording::Unsupported);
+}
+
+/// #2121: Cmd+Shift+] arrives as Cmd+`}` on US layouts, and Cmd+Shift+7 as
+/// Cmd+`/` on German. Recording either as a chord would send another key.
+#[test]
+fn shift_with_a_digit_or_symbol_key_is_not_recorded() {
+    for key in ["}", "!", "/"] {
+        assert_eq!(
+            Recording::from_press(&reported(key), CMD_SHIFT),
+            Recording::ShiftedSymbol,
+            "{key}"
+        );
+    }
+}
+
+#[test]
+fn shift_that_gpui_keeps_still_records() {
+    let press = |keystroke: &str| {
+        let keystroke = Keystroke::parse(keystroke).expect("keystroke parses");
+        Recording::from_press(&keystroke, keystroke.modifiers)
+    };
+    let logo = logo();
+    assert_eq!(press("cmd-shift-a"), chord(&format!("{logo}+Shift+A")));
+    assert_eq!(press("shift-tab"), chord("Shift+Tab"));
+    assert_eq!(press("ctrl-shift-pageup"), chord("Ctrl+Shift+PageUp"));
+    assert_eq!(
+        Recording::from_press(&reported("/"), reported("/").modifiers),
+        chord(&format!("{logo}+/")),
+        "without Shift held, a symbol records as pressed"
+    );
 }
 
 /// A window whose root handles `CloseProbe` (bound to Cmd+W) and renders a
@@ -112,6 +171,23 @@ fn a_recording_takes_one_key_press_ahead_of_key_bindings(cx: &mut TestAppContext
     probe.read_with(cx, |probe, _| {
         assert_eq!(probe.recordings.len(), 1, "a recording takes one key press");
         assert_eq!(probe.closed, 1, "the next press reaches the binding again");
+    });
+}
+
+/// The interceptor reads Shift from the window's modifier state, which GPUI
+/// updates from modifier changes and not from key presses (#2121).
+#[gpui::test]
+fn a_recording_sees_shift_that_the_keystroke_dropped(cx: &mut TestAppContext) {
+    let (probe, cx) = probe_window(cx);
+
+    cx.simulate_modifiers_change(CMD_SHIFT);
+    cx.simulate_event(KeyDownEvent {
+        keystroke: reported("}"),
+        is_held: false,
+        prefer_character_input: false,
+    });
+    probe.read_with(cx, |probe, _| {
+        assert_eq!(probe.recordings, [Recording::ShiftedSymbol]);
     });
 }
 

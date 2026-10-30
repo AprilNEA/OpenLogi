@@ -72,9 +72,22 @@ pub(super) struct ActionPickerContext<'a> {
 /// inline error until its text changes or the picker reopens.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct InvalidDrafts {
-    pub shortcut: bool,
+    pub shortcut: Option<ShortcutError>,
     pub application: bool,
     pub command: bool,
+}
+
+/// Why the custom shortcut editor shows an error.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ShortcutError {
+    /// The typed text, or the recorded key, is not a chord a shortcut can
+    /// send.
+    Unrecognized,
+    /// Record saw Shift with a digit or symbol key, which it cannot record
+    /// (see [`Recording::ShiftedSymbol`]). Typing the chord still works.
+    ///
+    /// [`Recording::ShiftedSymbol`]: crate::features::binding_editor::Recording::ShiftedSymbol
+    ShiftedSymbol,
 }
 
 /// Whether the custom shortcut editor records a tapped or a held chord.
@@ -946,7 +959,8 @@ fn custom_shortcut_editor(
                             match shortcut.parse::<openlogi_core::binding::KeyCombo>() {
                                 Ok(combo) => (on_pick)(mode.action(combo), window, cx),
                                 Err(_) => view.update(cx, |view, cx| {
-                                    view.invalid_drafts.shortcut = true;
+                                    view.invalid_drafts.shortcut =
+                                        Some(ShortcutError::Unrecognized);
                                     cx.notify();
                                 }),
                             }
@@ -962,13 +976,18 @@ fn custom_shortcut_editor(
                     .child(tr!("actions.press_the_shortcut_to_record")),
             )
         })
-        .when(picker.invalid.shortcut, |editor| {
+        .when_some(picker.invalid.shortcut, |editor, error| {
             editor.child(
                 div()
                     .debug_selector(move || format!("{id_prefix}-custom-shortcut-error"))
                     .text_caption()
                     .text_color(rgb(0x00ef_4444))
-                    .child(tr!("action_ring.custom_action_invalid_input")),
+                    .child(match error {
+                        ShortcutError::Unrecognized => {
+                            tr!("action_ring.custom_action_invalid_input")
+                        }
+                        ShortcutError::ShiftedSymbol => tr!("actions.shifted_symbol_unrecordable"),
+                    }),
             )
         })
 }
