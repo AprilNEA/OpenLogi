@@ -311,6 +311,9 @@ impl InputDispatcher {
             }
             CapturedInput::Interrupted => self.cancel_session(session),
             CapturedInput::HostModeEntered => self.outputs.actions.host_mode_entered(key),
+            CapturedInput::ButtonDiverted(_) => {
+                unreachable!("the session's forwarder records diverted buttons instead")
+            }
         }
     }
 

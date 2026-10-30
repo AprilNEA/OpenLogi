@@ -238,6 +238,68 @@ async fn m720_gesture_button_arms_from_its_reported_control_table() {
     }
 }
 
+/// The buttons a session reports as diverted are the ones arming wrote, not
+/// the ones the plan asked for: a Forward the device cannot divert still
+/// reaches the OS, so the OS hook must keep handling it (#2158).
+#[tokio::test]
+async fn diverted_buttons_are_what_arming_wrote_not_what_was_requested() {
+    const BACK_CID: u16 = 0x0053;
+    const FORWARD_CID: u16 = 0x0056;
+    let (raw, _handle) = ScriptedRawHidChannel::with_dynamic_responder(|request| {
+        let mut response = vec![0; 20];
+        response[..4].copy_from_slice(&request[..4]);
+        response[0] = 0x11;
+        match (request[2], request[3] >> 4) {
+            (0, 1) => response[4] = 4,
+            // Every feature sits at index 2, and `0x1b04` lists two controls.
+            (0 | 2, 0) => response[4] = 2,
+            (2, 1) => {
+                // Index 0 is a divertable Back, index 1 a Forward that is not.
+                let (cid, flags) = if request[4] == 0 {
+                    (BACK_CID, 0x20)
+                } else {
+                    (FORWARD_CID, 0x00)
+                };
+                response[4..6].copy_from_slice(&cid.to_be_bytes());
+                response[8] = flags;
+            }
+            (2, 2) => response[4..6].copy_from_slice(&request[4..6]),
+            (2, 3) => return Some(request.to_vec()),
+            _ => panic!("unexpected capture request: {request:02x?}"),
+        }
+        Some(response)
+    });
+    let channel = scripted_channel(raw).await;
+    let device = Device::new(channel.clone(), 0xff).await.unwrap();
+    let spec = CaptureSpec {
+        divert_buttons: vec![(BACK_CID, ButtonId::Back), (FORWARD_CID, ButtonId::Forward)],
+        ..CaptureSpec::default()
+    };
+    let mut armed = ArmedControls::default();
+    arm_controls_into(&device, &channel, 0xff, &spec, &mut armed)
+        .await
+        .unwrap();
+    assert_eq!(
+        armed.diverted_buttons(),
+        std::collections::BTreeSet::from([ButtonId::Back])
+    );
+}
+
+#[test]
+fn diverted_buttons_cover_every_button_diversion_once() {
+    let mut armed = ArmedControls::default();
+    armed.button_cids.push((0x0053, ButtonId::Back));
+    armed.wheel_button_cids.push((0x0056, ButtonId::Forward));
+    // A second Back CID on the same mouse is still one button.
+    armed.gesture_button_cids.push((0x00ba, ButtonId::Back));
+    // DPI/ModeShift plain diversion is not a button the OS ever sees.
+    armed.dpi_cids.push(0x00c4);
+    assert_eq!(
+        armed.diverted_buttons(),
+        std::collections::BTreeSet::from([ButtonId::Back, ButtonId::Forward])
+    );
+}
+
 #[tokio::test]
 async fn pending_restore_waits_for_a_replacement_then_undiverts_through_it() {
     let route = DeviceRoute::Direct {

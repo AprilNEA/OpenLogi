@@ -3,6 +3,8 @@
 //! Installs the platform hook lazily, reads atomically published button maps,
 //! and converts callback-thread mouse/key input into the shared action runtime.
 
+mod diverted;
+
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::mpsc;
@@ -22,6 +24,7 @@ use tracing::{info, warn};
 use super::scroll::ScrollInputHandle;
 use super::{ActionDispatchTarget, ActionDispatcher, PressToken};
 use crate::event_monitor::SharedEventMonitor;
+pub(crate) use diverted::DivertedButtons;
 
 /// The button maps and selected-device thumb-wheel polarity the OS-hook callback
 /// reads, kept behind ONE lock so a config rebuild publishes one coherent
@@ -44,6 +47,11 @@ pub struct HookMaps {
     /// Entries survive map rebuilds because they are hardware observations,
     /// not configuration.
     pub(crate) thumbwheel_positive_is_forward: BTreeMap<String, bool>,
+    /// OS-hook buttons that live HID++ capture sessions have diverted on
+    /// directly connected devices, reported by the sessions themselves. Like
+    /// the thumb-wheel polarities, these are hardware observations and
+    /// survive map rebuilds.
+    pub(crate) diverted_buttons: DivertedButtons,
     /// The selected device's G-Shift bindings.
     pub(crate) shift_bindings: BTreeMap<ButtonId, Binding>,
     /// Devices with a G-Shift button held, set by HID++ capture. Survives map
@@ -193,6 +201,9 @@ thread_local! {
     /// Accepted non-gesture presses retain their edge disposition even when
     /// moving the pointer changes the binding before physical release.
     static SUPPRESSED_PRESSES: RefCell<HashSet<ButtonId>> = RefCell::new(HashSet::new());
+    /// Presses dropped as echoes of a HID++-diverted control. Their release
+    /// is dropped too, even if the capture session ends in between.
+    static ECHOED_PRESSES: RefCell<HashSet<ButtonId>> = RefCell::new(HashSet::new());
     /// Function keys whose held action owns an accepted lifecycle. Repeated
     /// key-down events are auto-repeat, not replacement presses; their first
     /// matching key-up ends the lifecycle.
@@ -270,11 +281,26 @@ fn handle_button(
     }
     // `try_read` only: a blocking read on the tap thread freezes every pointer
     // event while a config rebuild holds the write lock. Fail open if unavailable.
-    let (binding, is_gesture, pointer_target) =
-        hooks.try_read().map_or((None, false, None), |maps| {
+    let (binding, is_gesture, pointer_target, diverted) =
+        hooks.try_read().map_or((None, false, None, false), |maps| {
             let (binding, is_gesture) = maps.press_binding(id);
-            (binding, is_gesture, maps.pointer_target)
+            (
+                binding,
+                is_gesture,
+                maps.pointer_target,
+                device.is_some_and(|source| maps.diverted_buttons.owns(source, id)),
+            )
         });
+    let echoed = ECHOED_PRESSES.with_borrow_mut(|echoes| {
+        if pressed {
+            echoed_press(id, diverted, echoes)
+        } else {
+            echoes.remove(&id)
+        }
+    });
+    if echoed {
+        return EventDisposition::Suppress;
+    }
     let action_target = if pressed {
         ActionDispatchTarget::for_pointer(pointer_target, capture_safari_pid)
     } else {
@@ -340,6 +366,22 @@ fn handle_button(
 /// click, which stays native when that is the button's own action.
 fn binding_is_native_click(id: ButtonId, binding: &Binding) -> bool {
     !matches!(binding, Binding::LongPress(_)) && is_native_click(id, &binding.click_action())
+}
+
+/// Whether a press is the OS copy of a control a HID++ capture session has
+/// diverted on the same device, remembering the answer for its release.
+///
+/// The session dispatches that press, so the hook must not dispatch it again
+/// (#2158). It must not pass it through either: diversion already took the
+/// control out of the native report, so this copy reaching the desktop would
+/// be a second, unbound press.
+fn echoed_press(id: ButtonId, diverted: bool, echoes: &mut HashSet<ButtonId>) -> bool {
+    if diverted {
+        echoes.insert(id);
+    } else {
+        echoes.remove(&id);
+    }
+    diverted
 }
 
 /// Press of a remapped single-action button: suppress when the action was

@@ -11,7 +11,7 @@ use tracing::debug;
 use super::{NodeProbe, PassContext, ProbeVerdict};
 use crate::backend::NodeInfo;
 use crate::channel::route::DIRECT_DEVICE_INDEX;
-use crate::inventory::cache::{CacheKey, CacheOutcome, probe_or_reuse, seen};
+use crate::inventory::cache::{CacheKey, CacheOutcome, ProbeTarget, probe_or_reuse, seen};
 use crate::inventory::features::Refresh;
 use crate::inventory::mappings::resolve_device_kind;
 
@@ -63,7 +63,10 @@ pub(super) async fn probe_direct(
     // the device behind it is linked is the probe's answer, not this call's.
     let (probe, outcome) = probe_or_reuse(
         &channel,
-        DIRECT_DEVICE_INDEX,
+        ProbeTarget {
+            index: DIRECT_DEVICE_INDEX,
+            registers: None,
+        },
         Some(id),
         cached,
         true,
@@ -86,7 +89,7 @@ pub(super) async fn probe_direct(
     // failed and the cache stood in) a rejection below would be
     // indistinguishable from a transient glitch, so the node is settled as a
     // failed probe and its last inventory replayed.
-    let capabilities = probe.capabilities;
+    let capabilities = probe.capabilities();
     let walk_succeeded = capabilities.is_some() && probe.refresh == Refresh::Answered;
     let caps = capabilities.unwrap_or_default();
     // An unlinked answer came from a battery feature too: a headset dongle

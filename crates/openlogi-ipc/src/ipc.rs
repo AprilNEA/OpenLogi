@@ -154,12 +154,12 @@ pub use succession::Identity;
 ///      timer, five-second steps up to two hours.
 /// v42: `KeyboardUsage` accepts Insert (`0x49`) and Print Screen (`0x46`),
 ///      so a `KeyCombo` can carry a usage a v41 agent rejects.
-///      `Capabilities::{onboard_profiles, button_spy}`, the `NextDpiPreset`,
+/// v43: `Capabilities::{onboard_profiles, button_spy}`, the `NextDpiPreset`,
 ///      `PreviousDpiPreset`, `DpiShift` and `GShift` actions,
 ///      `Agent::read_onboard`, `HidppOperation::ReadOnboard` and
 ///      `PairingFailure::ReceiverFull` appended — G-series onboard memory,
 ///      host mode and G-Shift.
-pub const PROTOCOL_VERSION: u32 = 42;
+pub const PROTOCOL_VERSION: u32 = 43;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to

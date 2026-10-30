@@ -89,6 +89,14 @@ pub enum CapturedInput {
         /// Whether a positive native delta is physical forward/up.
         positive_is_forward: bool,
     },
+    /// A button this session diverted while arming, reported once per button
+    /// before any of its presses. Like [`Self::ThumbwheelDirection`] this is a
+    /// session fact rather than user input: once a control is diverted, its
+    /// presses belong to this session, so an OS hook that still sees the
+    /// control on the same device is seeing an echo. Linux 7.3's
+    /// `hid-logitech-hidpp` re-reports a diverted Back/Forward on a Bluetooth
+    /// Signature M650 as evdev buttons (#2158).
+    ButtonDiverted(ButtonId),
     /// A diverted button's physical up edge.
     ButtonUp(ButtonId),
     /// An instantaneous firmware-reported tap with no observable hold
@@ -233,6 +241,9 @@ pub async fn run_capture_session(
     let armed = arm_controls(&shared, &spec, host.registry).await?;
     if let Some(direction) = armed.thumbwheel_direction() {
         let _ = host.sink.send(direction);
+    }
+    for button in armed.diverted_buttons() {
+        let _ = host.sink.send(CapturedInput::ButtonDiverted(button));
     }
     if armed
         .onboard

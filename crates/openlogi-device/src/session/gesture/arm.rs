@@ -2,6 +2,7 @@
 //! diverts, the firmware state that records, and how it is re-armed and handed
 //! back.
 
+use std::collections::BTreeSet;
 use std::num::NonZeroU8;
 use std::sync::Arc;
 
@@ -93,6 +94,19 @@ impl ArmedControls {
         Some(CapturedInput::ThumbwheelDirection {
             positive_is_forward,
         })
+    }
+
+    /// Every button whose presses this session now reports, each once: the
+    /// plain, wheel-hold, and raw-XY button diversions arming actually wrote.
+    /// A requested control the device does not expose, or cannot divert, is
+    /// absent — its presses still reach the OS.
+    pub(super) fn diverted_buttons(&self) -> BTreeSet<ButtonId> {
+        self.button_cids
+            .iter()
+            .chain(&self.wheel_button_cids)
+            .chain(&self.gesture_button_cids)
+            .map(|&(_, button)| button)
+            .collect()
     }
 
     /// The `0x1b04` accessor and every control armed through it, or `None`
