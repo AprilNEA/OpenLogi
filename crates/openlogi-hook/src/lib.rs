@@ -28,7 +28,7 @@
 use std::cfg_select;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-
+use std::time::Duration;
 use thiserror::Error;
 
 pub use openlogi_core::app::ForegroundApp;
@@ -494,6 +494,11 @@ trait HookBackend {
     fn cursor_position() -> Option<CursorPosition> {
         None
     }
+
+    /// See [`crate::user_idle_time`].
+    fn user_idle() -> Option<Duration> {
+        None
+    }
 }
 
 /// The backend for a platform with no hook: every default, and a
@@ -822,6 +827,18 @@ pub fn watch_frontmost_application_activations(
 #[must_use]
 pub fn cursor_position() -> Option<CursorPosition> {
     Backend::cursor_position()
+}
+
+/// How long this login session has gone without keyboard or mouse input, by
+/// the clock the OS uses to start the screensaver and turn off the display.
+///
+/// Reads no device and installs no hook. On Windows this is
+/// `GetLastInputInfo`, which any input in the session resets, injected input
+/// included. `None` when the read fails and on macOS and Linux, where this
+/// crate does not read an idle clock.
+#[must_use]
+pub fn user_idle_time() -> Option<Duration> {
+    Backend::user_idle()
 }
 
 #[cfg(target_os = "macos")]
