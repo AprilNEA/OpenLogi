@@ -170,6 +170,7 @@ Feature coverage depends on what each device reports; the app shows only the con
 
 > [!IMPORTANT]
 > Quit **Logi Options+** (and Solaar on Linux) first. Only one application can own a receiver at a time.
+> On macOS, **Karabiner-Elements** also locks a Bluetooth keyboard that it modifies. Turn off **Modify events** for that keyboard in Karabiner-Elements → Settings → Devices.
 
 | Platform | System | Architecture |
 | --- | --- | --- |

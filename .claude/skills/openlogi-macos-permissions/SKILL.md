@@ -19,7 +19,7 @@ list). Classify before doing anything else. The discriminator is one log line:
 |---|---|---|
 | `HID++ candidate interfaces count=0` | enumeration | **No.** The device's HID++ collection never matched — unsupported device, or not connected. |
 | `failed to open HID++ channel … Failed to open device: Input Monitoring is NOT granted to this process…` | open | **Yes.** The message classifies itself — grant Input Monitoring to the identity named in §2. |
-| `… Failed to open device: Input Monitoring is granted to this process — another app may hold the device exclusively, or macOS is serving a stale permission session (log out and back in)` | open | **The grant is fine.** Quit the other app (usually Logi Options+), or log out and back in. See §5. |
+| `… Failed to open device: Input Monitoring is granted to this process — another app may hold the device exclusively (quit Logi Options+; in Karabiner-Elements → Settings → Devices, turn off "Modify events" for this device), or macOS is serving a stale permission session (log out and back in)` | open | **The grant is fine.** Quit the other app (usually Logi Options+). For a Bluetooth-direct keyboard, also check Karabiner-Elements: it seizes every device it modifies, and the seize covers the HID++ collection on the same `IOHIDDevice`. Otherwise log out and back in. See §5. |
 | `opened HID++ channel` … then `Device::new failed` / `enumerate_features failed` with `Channel(Timeout)` or `report writer callback error: 0xE00002D6` | probe | **No.** The open succeeded, so investigate the probe/transport path, including the current status of upstream `sidit77/async-hid#45`. |
 
 All of these lines are `debug`-level except the open failure, which is a

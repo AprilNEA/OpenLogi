@@ -171,6 +171,7 @@ Les fonctionnalités disponibles dépendent de ce que chaque appareil signale ; 
 
 > [!IMPORTANT]
 > Quittez d'abord **Logi Options+** (et Solaar sous Linux). Un récepteur ne peut appartenir qu'à une seule application à la fois.
+> Sous macOS, **Karabiner-Elements** verrouille aussi un clavier Bluetooth qu'il modifie. Désactivez **Modify events** pour ce clavier dans Karabiner-Elements → Settings → Devices.
 
 | Plateforme | Système | Architecture |
 | --- | --- | --- |
