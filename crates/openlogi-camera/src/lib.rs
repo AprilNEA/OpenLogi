@@ -21,6 +21,10 @@
 //! the stream that makes it: see [`StreamMode`]. The Linux, macOS and Windows
 //! backends list and honour them; any other platform reports [`StreamModes`]
 //! empty and streams at its fixed preset.
+//!
+//! A camera lists only the modes its USB link has the bandwidth for, so one on
+//! a slow port or cable offers less than it can deliver. [`usb_link()`] says when
+//! that is the case, on the platforms that can tell (macOS and Windows).
 
 use std::time::Duration;
 
@@ -36,8 +40,14 @@ pub use capture_types::{CaptureError, Frame};
 mod stream_mode;
 pub use stream_mode::{StreamMode, StreamModes};
 
-// The pure part of the Windows mode logic is compiled for tests on every host,
-// so its decisions are checked off Windows too.
+mod usb_link;
+pub use usb_link::{UsbLink, UsbSpeed, usb_link};
+
+// The pure parts of the Windows link and mode logic are compiled for tests on
+// every host, so their decisions are checked off Windows too.
+#[cfg(any(test, target_os = "windows"))]
+mod usb_windows;
+
 #[cfg(any(test, target_os = "windows"))]
 mod mf_formats;
 
@@ -364,7 +374,7 @@ fn enumerate_all() -> Vec<Camera> {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let serials = uvc_macos::usb_serials_by_location();
-    macos::enumerate()
+    let cameras: Vec<Camera> = macos::enumerate()
         .iter()
         .filter_map(|raw| {
             let mut camera = Camera::from_raw(&raw.name, &raw.unique_id, &raw.model_id)?;
@@ -379,12 +389,16 @@ fn enumerate_all() -> Vec<Camera> {
             }
             Some(camera)
         })
-        .collect()
+        .collect();
+    uvc_macos::observe_links(&cameras);
+    cameras
 }
 
 #[cfg(target_os = "windows")]
 fn enumerate_all() -> Vec<Camera> {
-    uvc_windows::enumerate()
+    let cameras = uvc_windows::enumerate();
+    usb_windows::observe_links(&cameras);
+    cameras
 }
 
 #[cfg(target_os = "linux")]
