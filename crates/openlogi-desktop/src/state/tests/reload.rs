@@ -161,6 +161,32 @@ fn smooth_scroll_change_reloads_the_agent_once() {
 }
 
 #[test]
+fn momentum_scrolling_change_reloads_the_agent_once() {
+    let resolver = AssetResolver::new();
+    let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = AppState::new(Sources::in_memory(Config::ephemeral(), &resolver, commands));
+    assert!(
+        !state.app_settings().momentum_scrolling.enabled,
+        "off unless turned on"
+    );
+
+    let momentum = openlogi_core::config::MomentumScrolling {
+        enabled: true,
+        ..state.app_settings().momentum_scrolling
+    };
+    let _ = state.commit_momentum_scrolling(momentum);
+
+    assert!(state.app_settings().momentum_scrolling.enabled);
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(crate::services::ipc::Command::ReloadConfig(_))
+    ));
+
+    let _ = state.commit_momentum_scrolling(momentum);
+    assert!(receiver.try_recv().is_err());
+}
+
+#[test]
 fn turning_off_low_battery_notifications_reloads_the_agent_once() {
     let resolver = AssetResolver::new();
     let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();

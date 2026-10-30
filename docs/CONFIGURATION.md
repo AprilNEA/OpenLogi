@@ -61,6 +61,28 @@ optional physical device key.
 - `vertical_scroll_sensitivity`, from `1` through `100` (`14` is 1×);
   continuous trackpad input remains native
 - `thumbwheel_sensitivity`, from `1` through `100` (`14` is 1×)
+- `[app_settings.momentum_scrolling]` (off by default) is Magic Mouse-style
+  gliding for a mouse whose `smooth_wheel` is on. When SmartShift lets the wheel
+  spin freely, the page glides off at the speed it was spun, slows along the
+  chosen shape, and stops the moment a finger stops the wheel. Ratchet scrolling
+  keeps its steps. A glide's speed is `(1 − t/T)^p` of its start speed over
+  `T = τ·(p + 1)`, so every shape covers start speed × τ. Each value is clamped
+  into its range when the agent reads it:
+  - `enabled` (default `false`)
+  - `pixels_per_notch`, `10` through `60` (default `28`): reference pixels per
+    wheel notch, for ratchet steps and for the speed a spin launches the glide
+    at. macOS posts pixels; Windows and Linux scale native wheel ticks against
+    the default
+  - `glide_shape`: `sharp` (`p` ½), `linear` (1), `smooth` (2, default) or
+    `floaty` (4)
+  - `max_glide_speed`, `2000` through `15000` px/s (default `8000`): the fastest
+    one spin glides
+  - `glide_ms`, `150` through `1200` (default `400`): the glide's time constant
+    τ
+  - `repeat_boost`, `100` through `200` percent (default `135`): spinning again
+    while the page still glides, or soon after it stopped, the same way,
+    multiplies the glide by this much each time, up to 3× past
+    `max_glide_speed`; `100` turns it off
 - `mouse_profile_target`: `pointer` (default, including existing configs that
   omit this preference) or `focused`. Mouse button profiles follow the window
   under the pointer; the desktop uses the global bindings. Keyboard profiles

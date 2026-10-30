@@ -2,17 +2,17 @@
 
 use std::collections::HashMap;
 use std::io;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use openlogi_core::config::VerticalScrollSensitivity;
+use openlogi_core::config::{MomentumParams, MomentumScrolling, VerticalScrollSensitivity};
 use openlogi_core::scroll::ScrollDelta;
 use tracing::warn;
 
-use super::{ScrollEngine, ScrollFrame, ScrollSource, WheelDelta};
+use super::{HidppWheel, ScrollEngine, ScrollFrame, ScrollSource, WheelDelta};
 use crate::runtime::{HidppSessionId, receive_command};
 
 /// OS-hook callbacks must fail open rather than wait for the worker.
@@ -36,6 +36,11 @@ struct ScrollPreferenceSnapshot {
 /// consistent settings snapshot instead of two independently changing values.
 pub struct ScrollPreferences {
     encoded: AtomicU8,
+    /// Momentum scrolling, resolved (`None` while off) and read by the
+    /// worker once per turn. Independent of `encoded`: it only shapes the
+    /// diverted main wheel's output, so no joint snapshot with the smoothing
+    /// switch is needed.
+    momentum: Mutex<Option<MomentumParams>>,
 }
 
 impl ScrollPreferences {
@@ -44,7 +49,19 @@ impl ScrollPreferences {
     pub fn new(smooth_scroll: bool, vertical_sensitivity: VerticalScrollSensitivity) -> Self {
         Self {
             encoded: AtomicU8::new(Self::encode(smooth_scroll, vertical_sensitivity)),
+            momentum: Mutex::new(MomentumScrolling::default().resolve()),
         }
+    }
+
+    /// Publish the momentum-scrolling settings, resolved once here.
+    pub fn publish_momentum(&self, momentum: MomentumScrolling) {
+        *self.momentum.lock().unwrap_or_else(PoisonError::into_inner) = momentum.resolve();
+    }
+
+    /// The current momentum-scrolling settings; `None` while it is off.
+    #[must_use]
+    pub fn momentum(&self) -> Option<MomentumParams> {
+        *self.momentum.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Publish both settings as one snapshot.
@@ -100,6 +117,9 @@ enum ScrollOutputMode {
     /// whose own per-device switch asked for smoothing by diverting it.
     Eased {
         at: Instant,
+        /// The raw signed wheel notches before sensitivity scaling, which
+        /// momentum scrolling's free-spin detector measures speed in.
+        notches: f64,
     },
     Direct,
 }
@@ -135,10 +155,10 @@ impl ScrollInput {
     /// recognizers need.
     fn output_under(&self, smoothing: bool) -> ScrollOutputMode {
         match (self.output, &self.source) {
-            (ScrollOutputMode::Eased { at }, _) => ScrollOutputMode::Eased { at },
+            (ScrollOutputMode::Eased { at, notches }, _) => ScrollOutputMode::Eased { at, notches },
             (
                 ScrollOutputMode::Smooth { at } | ScrollOutputMode::Phased { at },
-                ScrollSource::Hidpp(_),
+                ScrollSource::Hidpp(..),
             ) => ScrollOutputMode::hidpp(smoothing, self.impulse, at)
                 .unwrap_or(ScrollOutputMode::Direct),
             (
@@ -152,7 +172,8 @@ impl ScrollInput {
 
 enum ScrollCommand {
     Input(ScrollInput),
-    CancelSource(ScrollSource),
+    /// Cancel both wheels of a HID++ capture session.
+    CancelSession(HidppSessionId),
     Wake,
 }
 
@@ -209,7 +230,7 @@ impl OverflowCancellations {
         input.generation == self.generation
             && match &input.source {
                 ScrollSource::OsHook(_) => true,
-                ScrollSource::Hidpp(session) => self
+                ScrollSource::Hidpp(session, _) => self
                     .sessions
                     .get(session.device_key())
                     .is_none_or(|cancelled_epoch| session.epoch() > *cancelled_epoch),
@@ -284,7 +305,11 @@ impl ScrollInputHandle {
         ) else {
             return false;
         };
-        self.try_enqueue(ScrollSource::Hidpp(session.clone()), impulse, output)
+        self.try_enqueue(
+            ScrollSource::Hidpp(session.clone(), HidppWheel::Thumb),
+            impulse,
+            output,
+        )
     }
 
     /// Queue one diverted main-wheel impulse from an active HID++ session.
@@ -315,9 +340,12 @@ impl ScrollInputHandle {
         };
         let queued = self.accepting.load(Ordering::Acquire)
             && self.try_enqueue(
-                ScrollSource::Hidpp(session.clone()),
+                ScrollSource::Hidpp(session.clone(), HidppWheel::Main),
                 scaled,
-                ScrollOutputMode::Eased { at: Instant::now() },
+                ScrollOutputMode::Eased {
+                    at: Instant::now(),
+                    notches: impulse.y,
+                },
             );
         if queued { Ok(()) } else { Err(scaled.into()) }
     }
@@ -355,10 +383,9 @@ impl ScrollInputHandle {
     /// Cancel output belonging to one HID++ capture-session incarnation.
     pub(crate) fn cancel_hidpp_session(&self, session: &HidppSessionId) {
         let generation = self.generation.load(Ordering::Acquire);
-        let source = ScrollSource::Hidpp(session.clone());
         match self
             .commands
-            .try_send(ScrollCommand::CancelSource(source.clone()))
+            .try_send(ScrollCommand::CancelSession(session.clone()))
         {
             Ok(()) | Err(mpsc::TrySendError::Disconnected(_)) => {}
             Err(mpsc::TrySendError::Full(_)) => {
@@ -513,7 +540,7 @@ fn run_worker(
                         engine.cancel_all(emit_smooth);
                     }
                     if cancellations.cancel(&session, cancelled_generation) {
-                        engine.cancel_source(&ScrollSource::Hidpp(session), emit_smooth);
+                        engine.cancel_session(&session, emit_smooth);
                     }
                 }
                 ScrollControl::Shutdown(request) => {
@@ -530,6 +557,7 @@ fn run_worker(
         // new setting after receiving, so a toggle cancels the previous gesture
         // before the first input under the new setting starts another one.
         let smoothing = preferences.smooth_scroll_enabled();
+        engine.set_momentum(preferences.momentum());
         let toggled = smoothing != observed_smoothing;
         observed_smoothing = smoothing;
         if cancellations.advance_to(shared_generation.load(Ordering::Acquire)) {
@@ -545,8 +573,11 @@ fn run_worker(
         match command {
             Ok(ScrollCommand::Input(input)) if cancellations.accepts(&input) => {
                 match input.output_under(smoothing) {
-                    ScrollOutputMode::Smooth { at } | ScrollOutputMode::Eased { at } => {
+                    ScrollOutputMode::Smooth { at } => {
                         engine.impulse(input.source, input.impulse, at, emit_smooth);
+                    }
+                    ScrollOutputMode::Eased { at, notches } => {
+                        engine.wheel_impulse(input.source, input.impulse, notches, at, emit_smooth);
                     }
                     ScrollOutputMode::Phased { at } => {
                         engine.phased_impulse(input.source, input.impulse, at, emit_smooth);
@@ -557,8 +588,8 @@ fn run_worker(
                     }
                 }
             }
-            Ok(ScrollCommand::CancelSource(source)) => {
-                engine.cancel_source(&source, emit_smooth);
+            Ok(ScrollCommand::CancelSession(session)) => {
+                engine.cancel_session(&session, emit_smooth);
             }
             Ok(ScrollCommand::Input(_) | ScrollCommand::Wake) => {}
             Err(mpsc::RecvTimeoutError::Timeout) => {
@@ -1006,7 +1037,8 @@ mod tests {
     #[test]
     fn stale_input_is_reclassified_as_if_submitted_now() {
         let at = Instant::now();
-        let hidpp = ScrollSource::Hidpp(HidppSessionId::with_epoch("mouse-a", 1));
+        let hidpp =
+            ScrollSource::Hidpp(HidppSessionId::with_epoch("mouse-a", 1), HidppWheel::Thumb);
         let hook = ScrollSource::current_hook();
         let input = |source: &ScrollSource, x, y, output| ScrollInput {
             generation: 0,
@@ -1109,14 +1141,35 @@ mod tests {
         assert!(matches!(queued.output, ScrollOutputMode::Smooth { .. }));
     }
 
+    /// The thumb wheel and the diverted main wheel of one session are
+    /// separate sources, so one's momentum and easing never reach the
+    /// other's motion — and both belong to the session its cancellation
+    /// ends.
+    #[test]
+    fn the_main_and_thumb_wheels_are_separate_sources_of_one_session() {
+        let (input, commands, _controls) = standalone_input(2, preferences(true, 14));
+        let session = HidppSessionId::with_epoch("mouse-a", 7);
+        assert!(input.try_hidpp_scroll(&session, ScrollDelta::wheel_ticks(1.0, 0.0)));
+        input
+            .try_hidpp_wheel_scroll(&session, ScrollDelta::wheel_ticks(0.0, 1.0))
+            .expect("the main wheel's tick is queued");
+        let source = |command| match command {
+            Ok(ScrollCommand::Input(input)) => input.source,
+            _ => panic!("expected queued input"),
+        };
+        let thumb = source(commands.recv());
+        let main = source(commands.recv());
+        assert_ne!(thumb, main);
+        assert!(thumb.in_session(&session) && main.in_session(&session));
+    }
+
     #[test]
     fn hidpp_cancellation_targets_its_session() {
         let (input, commands, _controls) = standalone_input(1, preferences(true, 14));
         let session = HidppSessionId::with_epoch("mouse-a", 7);
         input.cancel_hidpp_session(&session);
 
-        let ScrollCommand::CancelSource(ScrollSource::Hidpp(cancelled)) =
-            commands.recv().expect("queued cancellation")
+        let ScrollCommand::CancelSession(cancelled) = commands.recv().expect("queued cancellation")
         else {
             panic!("expected HID++ source cancellation");
         };
@@ -1194,7 +1247,7 @@ mod tests {
         let successor = HidppSessionId::with_epoch("mouse-a", 8);
         let input = |session: &HidppSessionId, generation| ScrollInput {
             generation,
-            source: ScrollSource::Hidpp(session.clone()),
+            source: ScrollSource::Hidpp(session.clone(), HidppWheel::Thumb),
             impulse: WheelDelta { x: 0.0, y: 1.0 },
             output: ScrollOutputMode::Direct,
         };
@@ -1249,7 +1302,7 @@ mod tests {
         commands
             .send(ScrollCommand::Input(ScrollInput {
                 generation: 1,
-                source: ScrollSource::Hidpp(session.clone()),
+                source: ScrollSource::Hidpp(session.clone(), HidppWheel::Thumb),
                 impulse: WheelDelta { x: 0.0, y: 1.0 },
                 output: ScrollOutputMode::Smooth { at: Instant::now() },
             }))
@@ -1303,7 +1356,7 @@ mod tests {
         let direct = |session: &HidppSessionId, generation, y| {
             Ok(ScrollCommand::Input(ScrollInput {
                 generation,
-                source: ScrollSource::Hidpp(session.clone()),
+                source: ScrollSource::Hidpp(session.clone(), HidppWheel::Thumb),
                 impulse: WheelDelta { x: 0.0, y },
                 output: ScrollOutputMode::Direct,
             }))

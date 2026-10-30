@@ -177,6 +177,40 @@ impl AppState {
         self.persist_and_reload("smooth wheel");
         events
     }
+
+    /// Turn Glide on free spin and the active device's smooth wheel on or off
+    /// together — the glide only works on a smoothed wheel — with one save
+    /// and one agent reload. Turning them on needs `0x2121 HiResWheel` on the
+    /// current link; without it nothing changes. The glide is app-wide, so
+    /// turning it off stops it on every mouse.
+    pub fn commit_glide_with_smooth_wheel(&mut self, enabled: bool) -> StateEvents {
+        let events = self
+            .for_current_device(StateEvent::DeviceConfigChanged)
+            .and(StateEvent::SettingsChanged);
+        if enabled && !self.current_hires_wheel_supported() {
+            debug!("smooth wheel requires HiResWheel on this link");
+            return events;
+        }
+        let Some(key) = self
+            .current_record()
+            .and_then(DeviceRecord::persistent_config_key)
+            .map(str::to_string)
+        else {
+            debug!("no persistent device key — glide and smooth-wheel change ignored");
+            return events;
+        };
+        if self.config.smooth_wheel(&key) == enabled
+            && self.config.app_settings.momentum_scrolling.enabled == enabled
+        {
+            return events;
+        }
+        self.config.edit(|config| {
+            config.set_smooth_wheel(&key, enabled);
+            config.app_settings.momentum_scrolling.enabled = enabled;
+        });
+        self.persist_and_reload("glide and smooth wheel");
+        events
+    }
 }
 
 pub(crate) fn set_scroll_resolution_if_supported(
