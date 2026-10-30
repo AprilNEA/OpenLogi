@@ -33,5 +33,8 @@ futures = "0.3"
 openlogi-ipc = { path = "../openlogi-ipc", version = "0.8.19", features = ["test-support"] }
 tempfile = "3"
 
+[target.'cfg(target_os = "windows")'.dependencies]
+winreg = "0.55"
+
 [lints]
 workspace = true

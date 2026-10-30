@@ -5675,6 +5675,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "winreg",
 ]
 
 [[package]]
