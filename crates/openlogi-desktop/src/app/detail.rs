@@ -22,8 +22,8 @@ use super::widgets::{back_button, connection_summary, kind_label, sidebar_action
 use super::{AppView, DetailTab};
 use crate::app::menu::open_config_folder;
 use crate::features::action_ring::ActionRingPanel;
-use crate::features::camera::controls::CameraControlsPanel;
-use crate::features::camera::preview::CameraPreview;
+use crate::features::camera::controls::{CameraControlsPanel, CameraPanelPart};
+use crate::features::camera::preview::{CameraPreview, PREVIEW_W};
 use crate::features::keyboard::disable_keys::DisableKeysPanel;
 use crate::features::keyboard::function_row::FunctionRowView;
 use crate::features::lighting::keyboard_rgb::LightingPanel;
@@ -38,6 +38,7 @@ use crate::features::profiles::{
 use crate::state::{AppState, BindingLayer, DeviceRecord, Load, StateEvents};
 use crate::ui::battery::BatteryIndicator;
 use crate::ui::components::{PanelCard, Toggle, toggle_row};
+use crate::ui::section::section_label;
 use crate::ui::theme::{
     self, ContentWidth, DETAIL_RAIL_W, HEADER_H, Palette, SCREEN_PAD, Typography as _,
 };
@@ -47,8 +48,6 @@ mod easy_switch;
 
 /// The preview plus the card's padding and its 1 px border. The border stays
 /// one pixel at every interface scale, so keep a little slack for it below 100 %.
-const CAMERA_PREVIEW_W: Rems = rems(32.25);
-const CAMERA_CONTROLS_W: Rems = rems(31.25);
 const LIGHT_CONTROLS_W: Rems = rems(25.);
 const LIGHT_CONTROLS_MIN_W: Rems = rems(22.5);
 const POINTER_CARD_MIN_W: Rems = rems(20.75);
@@ -107,6 +106,8 @@ pub(super) struct DetailPanels<'a> {
     pub lighting_panel: &'a gpui::Entity<LightingPanel>,
     pub camera_preview: &'a gpui::Entity<CameraPreview>,
     pub camera_controls: &'a gpui::Entity<CameraControlsPanel>,
+    pub camera_presets: &'a gpui::Entity<CameraPanelPart>,
+    pub camera_lens: &'a gpui::Entity<CameraPanelPart>,
     pub light_panel: &'a gpui::Entity<LightPanel>,
 }
 
@@ -137,9 +138,14 @@ pub(super) fn detail_content(
             pointer_tab(panels.dpi_panel, panels.smartshift_panel, cx).into_any_element()
         }
         DetailTab::Lighting => lighting_tab(panels.lighting_panel).into_any_element(),
-        DetailTab::Camera => {
-            camera_tab(panels.camera_preview, panels.camera_controls).into_any_element()
-        }
+        DetailTab::Camera => camera_tab(
+            panels.camera_preview,
+            panels.camera_presets,
+            panels.camera_lens,
+            panels.camera_controls,
+            cx,
+        )
+        .into_any_element(),
         DetailTab::Light => light_tab(panels.light_panel, cx).into_any_element(),
         DetailTab::Device => device_tab(panels.disable_keys_panel, cx).into_any_element(),
     };
@@ -734,46 +740,54 @@ fn lighting_tab(lighting_panel: &gpui::Entity<LightingPanel>) -> impl IntoElemen
     )
 }
 
-/// Camera tab: the live webcam preview beside the device-level image controls,
-/// each in a titled card. Side by side at the default window width so every
-/// control is visible without scrolling; the cards wrap to a stacked column
-/// when the window is too narrow. The preview drives the capture session via
+/// Camera tab: the live webcam preview over the lens controls that frame it,
+/// beside the presets and the controls that shape its light and colour. Side by side at the default window width so every
+/// control is visible without scrolling; the columns wrap to a stack when the
+/// window is too narrow. The preview drives the capture session via
 /// [`CameraPreview::set_target`] (called from `AppView`'s [`Render::render`](gpui::Render::render));
-/// the controls
-/// panel reads/writes UVC settings directly on the device.
+/// the controls panel reads/writes UVC settings directly on the device.
 fn camera_tab(
     camera_preview: &gpui::Entity<CameraPreview>,
+    camera_presets: &gpui::Entity<CameraPanelPart>,
+    camera_lens: &gpui::Entity<CameraPanelPart>,
     camera_controls: &gpui::Entity<CameraControlsPanel>,
+    cx: &Context<AppView>,
 ) -> impl IntoElement {
-    tab_body(
-        ContentWidth::DoubleExtraLarge,
-        h_flex()
-            .w_full()
-            .flex_wrap()
-            .justify_center()
-            .items_start()
-            .gap_3()
-            .child(
-                div()
-                    .w(CAMERA_PREVIEW_W)
-                    .flex_shrink_0()
-                    .child(PanelCard::new(
-                        tr!("camera.camera"),
-                        Icon::new(IconName::Eye),
-                        camera_preview.clone().into_any_element(),
-                    )),
-            )
-            .child(
-                div()
-                    .w(CAMERA_CONTROLS_W)
-                    .flex_shrink_0()
-                    .child(PanelCard::new(
-                        tr!("camera.camera_controls"),
-                        Icon::new(IconName::Settings),
-                        camera_controls.clone().into_any_element(),
-                    )),
-            ),
-    )
+    let pal = theme::palette(cx);
+    v_flex()
+        .flex_1()
+        .w_full()
+        .min_h_0()
+        .child(camera_presets.clone())
+        .child(tab_body(
+            ContentWidth::DoubleExtraLarge,
+            h_flex()
+                .w_full()
+                .flex_wrap()
+                .justify_center()
+                .items_start()
+                .gap_6()
+                .child(
+                    v_flex()
+                        .w(PREVIEW_W)
+                        .flex_shrink_0()
+                        .gap_6()
+                        .child(
+                            v_flex()
+                                .w_full()
+                                .gap_2()
+                                .child(section_label(tr!("camera.camera"), pal).px_4())
+                                .child(camera_preview.clone()),
+                        )
+                        .child(camera_lens.clone()),
+                )
+                .child(
+                    div()
+                        .w(PREVIEW_W)
+                        .flex_shrink_0()
+                        .child(camera_controls.clone()),
+                ),
+        ))
 }
 
 /// Standalone-light controls in a separate panel from HID++ keyboard RGB.
@@ -1173,21 +1187,6 @@ mod tests {
     use crate::state::tests::{KNOWN_MOUSE_KEY, direct_inventory};
     use crate::state::{AppState, Sources};
     use crate::ui::theme;
-
-    #[test]
-    fn camera_preview_fits_its_card_at_every_interface_scale() {
-        for scale in openlogi_core::config::UiScale::ALL {
-            let rem = theme::rem_size(scale);
-            let column = super::CAMERA_PREVIEW_W.to_pixels(rem);
-            let card = crate::features::camera::preview::PREVIEW_W.to_pixels(rem)
-                + theme::CARD_PAD.rems().to_pixels(rem) * 2.
-                + px(2.);
-            assert!(
-                card <= column,
-                "{scale:?}: card {card:?} > column {column:?}"
-            );
-        }
-    }
 
     /// Hosts the row at a card-like width so a long caption has to wrap.
     struct DeviceEnabledRowHost;

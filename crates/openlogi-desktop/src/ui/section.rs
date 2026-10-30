@@ -14,6 +14,7 @@
 //! heading to match its rows, a panel lets it sit flush.
 
 use gpui::{Div, ParentElement, SharedString, Styled, div};
+use gpui_component::v_flex;
 
 use crate::ui::theme::{Palette, Typography as _};
 
@@ -24,4 +25,15 @@ pub fn section_label(label: impl Into<SharedString>, pal: Palette) -> Div {
         .text_caption()
         .text_color(pal.text_muted)
         .child(label.into())
+}
+
+/// One card holding a group of rows. Rows bring their own inset and draw the
+/// hairline above them, so the card adds only its boundary.
+pub fn settings_group(pal: Palette) -> Div {
+    v_flex()
+        .w_full()
+        .rounded(pal.card_radius)
+        .border_1()
+        .border_color(pal.border)
+        .bg(pal.panel)
 }

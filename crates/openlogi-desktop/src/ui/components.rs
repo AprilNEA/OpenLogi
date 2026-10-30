@@ -416,6 +416,12 @@ pub(crate) fn segment_track(pal: theme::Palette) -> gpui::Div {
         .bg(pal.muted)
 }
 
+/// One choice inside a [`segment_track`]. Selection is a neutral lift, so the
+/// accent stays reserved for what is switched on.
+pub(crate) fn segment(id: impl Into<ElementId>, selected: bool, pal: theme::Palette) -> BaseButton {
+    segment_style(BaseButton::new(id), selected, pal)
+}
+
 fn segment_style(base: BaseButton, selected: bool, pal: theme::Palette) -> BaseButton {
     let fill = move |hovered: bool| match (selected, hovered) {
         (true, _) => pal.control_hover,

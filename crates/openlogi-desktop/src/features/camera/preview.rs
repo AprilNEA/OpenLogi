@@ -274,12 +274,17 @@ impl Render for CameraPreview {
             .h(PREVIEW_H)
             .items_center()
             .justify_center()
-            .rounded_md()
+            .rounded(pal.card_radius)
             .border_1()
             .border_color(pal.border)
             .bg(pal.panel)
             .when_some(image, |surface, image| {
-                surface.child(img(image).w(PREVIEW_W).h(PREVIEW_H).rounded_md())
+                surface.child(
+                    img(image)
+                        .w(PREVIEW_W)
+                        .h(PREVIEW_H)
+                        .rounded(pal.card_radius),
+                )
             })
             .when(show_placeholder && !capture_supported, |surface| {
                 surface.child(note(tr!("camera.camera_preview_platform_unavailable"), pal))

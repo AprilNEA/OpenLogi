@@ -16,7 +16,7 @@ use tracing::info;
 
 use self::menu::{APP_KEY_CONTEXT, CloseWindow, Minimize, NavigateBack, Zoom};
 use crate::features::action_ring::ActionRingPanel;
-use crate::features::camera::controls::CameraControlsPanel;
+use crate::features::camera::controls::{CameraControlsPanel, CameraPanelPart};
 use crate::features::camera::preview::CameraPreview;
 use crate::features::keyboard::disable_keys::DisableKeysPanel;
 use crate::features::keyboard::function_row::FunctionRowView;
@@ -219,6 +219,8 @@ pub struct AppView {
     lighting_panel: Entity<LightingPanel>,
     camera_preview: Entity<CameraPreview>,
     camera_controls: Entity<CameraControlsPanel>,
+    camera_presets: Entity<CameraPanelPart>,
+    camera_lens: Entity<CameraPanelPart>,
     light_panel: Entity<LightPanel>,
     profile_icons: ProfileIconCache,
     app_catalog: Entity<AppCatalogPicker>,
@@ -302,6 +304,8 @@ impl AppView {
         let lighting_panel = cx.new(LightingPanel::new);
         let camera_preview = cx.new(CameraPreview::new);
         let camera_controls = cx.new(CameraControlsPanel::new);
+        let camera_presets = cx.new(|cx| CameraPanelPart::presets(camera_controls.clone(), cx));
+        let camera_lens = cx.new(|cx| CameraPanelPart::lens(camera_controls.clone(), cx));
         let light_panel = cx.new(LightPanel::new);
         let profile_icons = ProfileIconCache::default();
         let app_catalog = cx.new(|cx| AppCatalogPicker::new(profile_icons.clone(), window, cx));
@@ -324,6 +328,8 @@ impl AppView {
             lighting_panel,
             camera_preview,
             camera_controls,
+            camera_presets,
+            camera_lens,
             light_panel,
             profile_icons,
             app_catalog,
@@ -715,6 +721,8 @@ impl AppView {
                         lighting_panel: &self.lighting_panel,
                         camera_preview: &self.camera_preview,
                         camera_controls: &self.camera_controls,
+                        camera_presets: &self.camera_presets,
+                        camera_lens: &self.camera_lens,
                         light_panel: &self.light_panel,
                     },
                     &self.profile_icons,

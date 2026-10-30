@@ -15,8 +15,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    App, AppContext as _, Context, IntoElement, ParentElement, Render, SharedString, Styled,
-    Subscription, Task, Window, div, px,
+    App, AppContext as _, Context, Entity, IntoElement, ParentElement, Render, SharedString,
+    Styled, Subscription, Task, Window, div, px,
 };
 use gpui_component::{WindowExt as _, dialog::DialogButtonProps, input::InputState, v_flex};
 use openlogi_camera::{AutoToggle, CameraControl, ControlRange};
@@ -26,7 +26,6 @@ use tracing::debug;
 use crate::state::{AppState, StateEvent};
 use crate::ui::commit_slider::{CommitSlider, SliderRange};
 use crate::ui::components::control_input;
-use crate::ui::section::section_label;
 use crate::ui::theme::{self, Typography as _};
 
 mod hardware;
@@ -35,7 +34,7 @@ mod rows;
 mod tests;
 use hardware::{Cancel, Hardware, Loaded, Saved, SystemUvc, Uvc};
 use rows::{
-    control_label, control_row, from_slider, profiles_row, reset_button, section_indices, to_slider,
+    ControlGroup, control_label, control_section, from_slider, lens_section, presets_bar, to_slider,
 };
 
 /// How long to wait before reading a camera again after it could not be read.
@@ -76,6 +75,45 @@ const BUILTIN_PROFILES: [BuiltinProfile; 3] = [
 struct BuiltinProfile {
     id: &'static str,
     values: &'static [(CameraControl, f32)],
+}
+
+/// A part of the panel shown elsewhere on the tab: the preset bar above the
+/// columns, or the lens group under the preview. Views of their own because
+/// they sit apart from the panel while acting on its rows.
+pub struct CameraPanelPart {
+    panel: Entity<CameraControlsPanel>,
+    render: fn(&mut CameraControlsPanel, &mut Context<CameraControlsPanel>) -> gpui::Div,
+    #[expect(dead_code, reason = "held to keep the panel subscription alive")]
+    panel_obs: Subscription,
+}
+
+impl CameraPanelPart {
+    pub fn presets(panel: Entity<CameraControlsPanel>, cx: &mut Context<Self>) -> Self {
+        Self::new(panel, presets_bar, cx)
+    }
+
+    pub fn lens(panel: Entity<CameraControlsPanel>, cx: &mut Context<Self>) -> Self {
+        Self::new(panel, lens_section, cx)
+    }
+
+    fn new(
+        panel: Entity<CameraControlsPanel>,
+        render: fn(&mut CameraControlsPanel, &mut Context<CameraControlsPanel>) -> gpui::Div,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let panel_obs = cx.observe(&panel, |_, _, cx| cx.notify());
+        Self {
+            panel,
+            render,
+            panel_obs,
+        }
+    }
+}
+
+impl Render for CameraPanelPart {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.panel.update(cx, self.render)
+    }
 }
 
 pub struct CameraControlsPanel {
@@ -742,22 +780,10 @@ impl Render for CameraControlsPanel {
                 .child(tr!("camera.camera_controls_unavailable"));
         }
 
-        let lens: Vec<usize> = section_indices(&self.sliders, true);
-        let image: Vec<usize> = section_indices(&self.sliders, false);
-
-        let mut panel = v_flex().gap_2().w_full().child(profiles_row(&key, cx));
-        if !lens.is_empty() && !image.is_empty() {
-            panel = panel.child(section_label(tr!("camera.lens"), pal).mt_1());
-        }
-        for ix in lens {
-            panel = panel.child(control_row(self, ix, cx));
-        }
-        if !image.is_empty() && self.sliders.len() != image.len() {
-            panel = panel.child(section_label(tr!("camera.image"), pal).mt_1());
-        }
-        for ix in image {
-            panel = panel.child(control_row(self, ix, cx));
-        }
-        panel.child(reset_button(cx))
+        v_flex()
+            .gap_6()
+            .w_full()
+            .children(control_section(self, ControlGroup::Exposure, cx))
+            .children(control_section(self, ControlGroup::Image, cx))
     }
 }
