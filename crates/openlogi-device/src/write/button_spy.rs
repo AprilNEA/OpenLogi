@@ -130,22 +130,19 @@ pub(super) async fn watch_button_spy_on_channel(
     let count = spy.get_button_count().await.map_err(spy_error)?;
     let mapping = spy.get_mapping(count).await.map_err(spy_error)?;
 
-    if let Some(onboard) = &onboard {
-        onboard
-            .set_mode(OnboardMode::Host)
-            .await
-            .map_err(onboard_error)?;
+    // A request whose reply is lost may still have switched the mouse, so
+    // every failure from here on tries the way back.
+    if let Some(onboard) = &onboard
+        && let Err(error) = onboard.set_mode(OnboardMode::Host).await
+    {
+        restore_onboard(onboard).await;
+        return Err(onboard_error(error).into());
     }
     // Listen first: a press right after the start must not be lost.
     let events = spy.listen().boxed();
     if let Err(error) = spy.start_spy().await {
-        if let Some(onboard) = &onboard
-            && let Err(restore) = onboard.set_mode(OnboardMode::Onboard).await
-        {
-            warn!(
-                ?restore,
-                "leaving host mode after a refused spy start failed"
-            );
+        if let Some(onboard) = &onboard {
+            restore_onboard(onboard).await;
         }
         return Err(spy_error(error).into());
     }
@@ -155,6 +152,14 @@ pub(super) async fn watch_button_spy_on_channel(
         events,
         mapping,
     })
+}
+
+/// The way back to onboard mode after a failed start. The start's own error
+/// is the one the caller sees.
+async fn restore_onboard(onboard: &OnboardProfilesFeature) {
+    if let Err(error) = onboard.set_mode(OnboardMode::Onboard).await {
+        warn!(?error, "leaving host mode after a failed spy start failed");
+    }
 }
 
 fn onboard_error(error: Hidpp20Error) -> WriteError {

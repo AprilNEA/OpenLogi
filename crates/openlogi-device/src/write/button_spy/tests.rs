@@ -26,6 +26,9 @@ struct Mouse {
     mode: Option<Arc<AtomicU8>>,
     /// The error code it answers a `getMode` with.
     mode_error: Option<u8>,
+    /// The error code it answers a switch to host mode with, after it
+    /// switched: a reply lost on the way back.
+    host_error: Option<u8>,
     /// The error code it answers a spy start with.
     start_error: Option<u8>,
     /// The error code it answers a spy stop with.
@@ -64,7 +67,14 @@ impl Mouse {
                     }
                     response[4] = self.mode.as_ref()?.load(Ordering::SeqCst);
                 }
-                (ONBOARD, SET_MODE) => self.mode.as_ref()?.store(request[4], Ordering::SeqCst),
+                (ONBOARD, SET_MODE) => {
+                    self.mode.as_ref()?.store(request[4], Ordering::SeqCst);
+                    if request[4] == HOST_MODE
+                        && let Some(refused) = refuse(self.host_error)
+                    {
+                        return Some(refused);
+                    }
+                }
                 (SPY, GET_COUNT) => response[4] = 11,
                 (SPY, GET_MAPPING) => response[4..15].copy_from_slice(&MAPPING),
                 (SPY, START_SPY) => {
@@ -210,6 +220,33 @@ async fn a_refused_start_names_the_spy_and_gives_onboard_mode_back() {
         "{error:?}"
     );
     assert_eq!(mode.load(Ordering::SeqCst), ONBOARD_MODE);
+}
+
+#[tokio::test]
+async fn a_failed_switch_to_host_mode_still_gives_onboard_mode_back() {
+    let (mut mouse, mode) = Mouse::in_mode(ONBOARD_MODE);
+    mouse.host_error = Some(0x05);
+    let (raw, handle) = ScriptedRawHidChannel::with_dynamic_responder(mouse.responder());
+    let channel = scripted_channel(raw).await;
+
+    let Err(error) = watch_button_spy_on_channel(&channel, 0xff).await else {
+        panic!("the mouse refused host mode");
+    };
+    assert!(
+        matches!(
+            error,
+            ButtonSpyError::Write(WriteError::HidppFeature {
+                feature_hex: 0x8100,
+                ..
+            })
+        ),
+        "{error:?}"
+    );
+    assert_eq!(mode.load(Ordering::SeqCst), ONBOARD_MODE);
+    assert_eq!(
+        calls_on(SPY, &handle.written_reports()),
+        [GET_COUNT, GET_MAPPING]
+    );
 }
 
 #[tokio::test]
