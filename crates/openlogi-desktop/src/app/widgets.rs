@@ -33,7 +33,7 @@ pub(super) fn back_button(cx: &mut Context<AppView>) -> impl IntoElement {
 /// Settings button in the Home header: opens the Settings window. The visible
 /// label keeps the action discoverable without requiring hover.
 pub(super) fn settings_button() -> impl IntoElement {
-    Button::new("home-settings")
+    control_button("home-settings")
         .outline()
         .icon(IconName::Settings)
         .label(tr!("app.settings"))
@@ -44,7 +44,7 @@ pub(super) fn settings_button() -> impl IntoElement {
 /// Primary action that opens the pairing window. The empty state carries its
 /// own equivalent CTA, so this never floats alone in an empty header.
 pub(super) fn add_device_button() -> impl IntoElement {
-    Button::new("header-add-device")
+    control_button("header-add-device")
         .primary()
         .icon(IconName::Plus)
         .label(tr!("pairing.add_device"))
@@ -72,13 +72,8 @@ pub(super) fn status_badge(online: bool, pal: Palette) -> impl IntoElement {
         tr!("device.offline")
     };
     h_flex()
-        .gap_1()
+        .gap_1p5()
         .items_center()
-        .rounded_full()
-        .border_1()
-        .border_color(pal.border)
-        .px_2()
-        .py_1()
         .text_caption()
         .text_color(pal.text_muted)
         .child(connectivity_dot(online, pal))

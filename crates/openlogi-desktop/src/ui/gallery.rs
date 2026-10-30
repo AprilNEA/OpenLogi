@@ -23,7 +23,9 @@ use super::battery::BatteryIndicator;
 use super::carousel::Carousel;
 use super::choice_card::ChoiceCard;
 use super::commit_slider::{CommitSlider, SliderRange};
-use super::components::{MenuRow, PanelCard, Pill, PresetChip, ProfileTab, Toggle, toggle_row};
+use super::components::{
+    MenuRow, PanelCard, Pill, PresetChip, ProfileTab, Toggle, segment_track, toggle_row,
+};
 use super::status::{retry_line, status_line};
 use super::theme::{self, ContentWidth, OPENLOGI_DARK, OPENLOGI_LIGHT, Palette, Typography as _};
 
@@ -344,9 +346,7 @@ impl ComponentGallery {
         gallery_panel(
             "ProfileTab",
             IconName::Eye,
-            h_flex()
-                .gap_2()
-                .flex_wrap()
+            segment_track(pal)
                 .child(
                     ProfileTab::new("gallery-profile-default", "Default")
                         .selected(self.profile_selected == 0)

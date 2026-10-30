@@ -332,16 +332,13 @@ fn device_ring(enabled: bool) -> Hsla {
     }
 }
 
-/// The device class as a small pill riding the name line, in the outlined
-/// shape of the header's `status_badge`.
+/// The device class as a small neutral tag riding the name line.
 pub(super) fn kind_badge(kind: DeviceKind, pal: Palette) -> impl IntoElement {
     div()
         .flex_none()
         .px_1p5()
         .py_0p5()
-        .rounded_full()
-        .border_1()
-        .border_color(pal.border)
+        .rounded(pal.control_radius * 0.5)
         .bg(pal.muted)
         .text_caption()
         .text_color(pal.text_muted)

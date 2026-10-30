@@ -439,7 +439,7 @@ pub trait Typography: Styled + Sized {
     /// inside a card rather than titling a screen.
     #[must_use]
     fn text_subheading(self) -> Self {
-        self.text_size(rems(0.9375))
+        self.text_size(rems(0.875))
             .font_weight(FontWeight::SEMIBOLD)
             .line_height(relative(1.4))
     }
@@ -447,7 +447,7 @@ pub trait Typography: Styled + Sized {
     /// Default body copy — control labels, descriptions, values.
     #[must_use]
     fn text_body(self) -> Self {
-        self.text_size(rems(0.9375)).line_height(relative(1.45))
+        self.text_size(rems(0.875)).line_height(relative(1.45))
     }
 
     /// De-emphasised metadata and helper text — the muted line under a label,

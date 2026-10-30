@@ -89,7 +89,11 @@ pub(super) fn detail_header(
         )
         .child(div().flex_1())
         .children(battery)
-        .when_some(online, |this, online| this.child(status_badge(online, pal)))
+        // Only the exception earns a badge: a device on this page is usually
+        // connected, and saying so on every page is noise.
+        .when(online == Some(false), |this| {
+            this.child(status_badge(false, pal))
+        })
 }
 
 /// Long-lived child panels rendered by the device workspace.
@@ -214,21 +218,9 @@ fn detail_navigation(
                 } else {
                     pal.text_muted
                 })
-                .when(selected, |row| row.bg(crate::ui::theme::accent_tint()))
-                .hover(move |row| {
-                    row.bg(if selected {
-                        crate::ui::theme::accent_tint_hover()
-                    } else {
-                        pal.control_hover
-                    })
-                })
-                .focus_visible(move |row| {
-                    row.bg(if selected {
-                        crate::ui::theme::accent_tint_hover()
-                    } else {
-                        pal.control_hover
-                    })
-                })
+                .when(selected, |row| row.bg(pal.control_hover))
+                .hover(move |row| row.bg(pal.control_hover))
+                .focus_visible(move |row| row.bg(pal.control_hover))
                 .child(
                     Icon::empty()
                         .path(detail_tab_icon(tab))
