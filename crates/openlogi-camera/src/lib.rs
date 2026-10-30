@@ -18,9 +18,9 @@
 //! platforms return an empty list.
 //!
 //! Resolution and frame rate are negotiated per stream, so a choice shapes only
-//! the stream that makes it: see [`StreamMode`]. The Linux and macOS backends
-//! list and honour them; any other platform reports [`StreamModes`] empty and
-//! streams at its fixed preset.
+//! the stream that makes it: see [`StreamMode`]. The Linux, macOS and Windows
+//! backends list and honour them; any other platform reports [`StreamModes`]
+//! empty and streams at its fixed preset.
 
 use std::time::Duration;
 
@@ -35,6 +35,11 @@ pub use capture_types::{CaptureError, Frame};
 
 mod stream_mode;
 pub use stream_mode::{StreamMode, StreamModes};
+
+// The pure part of the Windows mode logic is compiled for tests on every host,
+// so its decisions are checked off Windows too.
+#[cfg(any(test, target_os = "windows"))]
+mod mf_formats;
 
 #[cfg(target_os = "macos")]
 mod macos;
@@ -55,7 +60,7 @@ mod capture_windows;
 #[cfg(target_os = "windows")]
 pub use capture_windows::{
     CameraStream, camera_access_granted, camera_authorization, capture_frame,
-    request_camera_access, start_stream,
+    request_camera_access, start_stream, stream_modes,
 };
 
 #[cfg(target_os = "macos")]
@@ -200,14 +205,14 @@ pub use uvc::{
 /// The modes the camera with `unique_id` can stream at, for the pixel format
 /// this crate would stream it in.
 ///
-/// Only the Linux and macOS backends can list them; here the list is always
-/// empty, which callers read as "nothing to choose" and hide mode selection.
-/// The stream itself runs at the backend's fixed preset, whatever `mode`
-/// [`start_stream`] is handed.
+/// Only the Linux, macOS and Windows backends can list them; here the list is
+/// always empty, which callers read as "nothing to choose" and hide mode
+/// selection. The stream itself runs at the backend's fixed preset, whatever
+/// `mode` [`start_stream`] is handed.
 ///
 /// # Errors
 /// Never fails on this platform. (Elsewhere: see that platform's `stream_modes`.)
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 pub fn stream_modes(_unique_id: &str) -> Result<StreamModes, CaptureError> {
     Ok(StreamModes::default())
 }
@@ -220,17 +225,18 @@ pub fn stream_modes(_unique_id: &str) -> Result<StreamModes, CaptureError> {
 /// on the driver. A caller that reopens on purpose (a mode change) waits this
 /// long on a timer instead of on its UI thread. Zero where there is nothing to
 /// wait out: macOS, whose `stopRunning` returns once the camera is released,
-/// and platforms that list no [`StreamModes`], where nothing reopens on
-/// purpose.
+/// Windows, whose reader releases the camera before the stream's drop returns
+/// (and a reopen that still meets a busy camera is retried by the caller), and
+/// platforms that list no [`StreamModes`], where nothing reopens on purpose.
 #[cfg(target_os = "linux")]
 pub const RELEASE_DELAY: Duration = capture_linux::RELEASE_DELAY;
 
 /// How long a camera needs after its [`CameraStream`] is dropped before it can
 /// be opened again without the driver stalling the caller.
 ///
-/// Nothing to wait out here: dropping a stream on macOS releases the camera
-/// before the drop returns, and the other platforms list no [`StreamModes`], so
-/// nothing reopens a stream on purpose.
+/// Nothing to wait out here: dropping a stream on macOS or Windows releases
+/// the camera before the drop returns, and the other platforms list no
+/// [`StreamModes`], so nothing reopens a stream on purpose.
 #[cfg(not(target_os = "linux"))]
 pub const RELEASE_DELAY: Duration = Duration::ZERO;
 

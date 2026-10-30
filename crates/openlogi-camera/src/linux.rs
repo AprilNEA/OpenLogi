@@ -16,6 +16,7 @@ use v4l::frameinterval::FrameIntervalEnum;
 use v4l::video::Capture;
 use v4l::{Device, FourCC};
 
+use crate::stream_mode::whole_fps;
 use crate::{Camera, StreamMode, StreamModes};
 
 /// Where the kernel lists V4L2 nodes, one directory per `/dev/video*`.
@@ -368,16 +369,8 @@ pub(crate) fn stream_modes(device: &Device, fourcc: FourCC) -> StreamModes {
 /// for a zero interval (it would divide by zero) or one too slow to round to a
 /// frame per second.
 pub(crate) fn fps_of(interval: Fraction) -> Option<u32> {
-    let (period, per) = (
-        u64::from(interval.numerator),
-        u64::from(interval.denominator),
-    );
-    if period == 0 {
-        return None;
-    }
-    u32::try_from((per + period / 2) / period)
-        .ok()
-        .filter(|fps| *fps > 0)
+    // A period of `n / d` seconds per frame is `d / n` frames per second.
+    whole_fps(interval.denominator, interval.numerator)
 }
 
 /// Read a sysfs attribute, trimming the trailing newline the kernel appends.

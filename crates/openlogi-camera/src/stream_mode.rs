@@ -49,6 +49,29 @@ impl fmt::Display for StreamMode {
     }
 }
 
+/// Whole frames per second for a rate of `numerator / denominator` fps: the
+/// nearest whole number, not a truncation, because the rates cameras report are
+/// rounded the way their firmware rounds them — a UVC camera's `30` is often
+/// `10000000 / 333333`, and `7.5` reads as `8`. `None` for a zero denominator,
+/// or a rate too slow to round to one frame per second (a driver reporting a
+/// zero interval would otherwise divide by zero).
+///
+/// The one place that decides this for every backend that reports a ratio:
+/// Linux reads the reciprocal (V4L2 intervals are seconds per frame), Windows
+/// reads the rate as is.
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
+pub(crate) fn whole_fps(numerator: u32, denominator: u32) -> Option<u32> {
+    if denominator == 0 {
+        return None;
+    }
+    let (numerator, denominator) = (u64::from(numerator), u64::from(denominator));
+    // Rounds half up, in integers: no float to truncate, and in `u64` the
+    // rounding add cannot overflow whatever a hostile driver reports.
+    u32::try_from((2 * numerator + denominator) / (2 * denominator))
+        .ok()
+        .filter(|fps| *fps > 0)
+}
+
 /// Pixel count of a frame size, for ordering and for finding the nearest one.
 const fn area((width, height): (u32, u32)) -> u64 {
     // `as` is a lossless widening here; `From` is not usable in a `const fn`.
@@ -333,6 +356,43 @@ mod tests {
             streamcam().with_resolution(mode(1280, 720, 30), (800, 600)),
             None
         );
+    }
+
+    #[test]
+    fn a_rate_is_the_nearest_whole_fps() {
+        assert_eq!(whole_fps(30, 1), Some(30));
+        assert_eq!(
+            whole_fps(10_000_000, 333_333),
+            Some(30),
+            "the 30 fps a UVC camera reports as a frame interval"
+        );
+        // The other intervals V4L2 drivers report, read as their reciprocal.
+        assert_eq!(whole_fps(10_000_000, 333_334), Some(30));
+        assert_eq!(whole_fps(10_000_000, 166_666), Some(60));
+        assert_eq!(whole_fps(10_000_000, 400_000), Some(25));
+        assert_eq!(whole_fps(10_000_000, 1_333_333), Some(8), "7.5 fps");
+        assert_eq!(whole_fps(60_000, 1001), Some(60), "NTSC 59.94");
+        assert_eq!(whole_fps(15, 2), Some(8), "7.5 rounds up");
+        assert_eq!(whole_fps(29, 3), Some(10), "9.67");
+    }
+
+    #[test]
+    fn a_rate_that_is_not_one_reads_as_none() {
+        assert_eq!(whole_fps(30, 0), None, "no denominator");
+        assert_eq!(whole_fps(0, 1), None);
+        assert_eq!(whole_fps(1, 3), None, "a third of a frame per second");
+        assert_eq!(
+            whole_fps(1, 2),
+            Some(1),
+            "half a frame per second rounds up"
+        );
+    }
+
+    #[test]
+    fn extreme_ratios_neither_overflow_nor_wrap() {
+        assert_eq!(whole_fps(u32::MAX, 1), Some(u32::MAX));
+        assert_eq!(whole_fps(1, u32::MAX), None);
+        assert_eq!(whole_fps(u32::MAX, u32::MAX), Some(1));
     }
 
     #[test]
