@@ -59,10 +59,7 @@ fn open_error(error: async_hid::HidError) -> BackendError {
         #[cfg(target_os = "macos")]
         BackendError::Backend(message) => {
             let hint = if crate::permissions::has_access() {
-                "Input Monitoring is granted to this process — another app may \
-                 hold the device exclusively, or macOS is serving a stale \
-                 permission session (log out and back in)"
-                    .to_owned()
+                GRANTED_OPEN_HINT.to_owned()
             } else {
                 missing_grant_hint(process_is_agent())
             };
@@ -71,6 +68,23 @@ fn open_error(error: async_hid::HidError) -> BackendError {
         other => other,
     }
 }
+
+/// What a failed open means once Input Monitoring is granted: another client
+/// opened the device with `kIOHIDOptionsTypeSeizeDevice`, or macOS is serving a
+/// stale permission session.
+///
+/// Name the two holders users actually hit. Logi Options+ is the obvious one.
+/// Karabiner-Elements seizes every device it modifies (keyboards by default),
+/// and a seize covers the whole `IOHIDDevice`. A Bluetooth-direct keyboard is
+/// one `IOHIDDevice` whose HID++ collection sits beside the keyboard
+/// collections, so the seize blocks our non-exclusive open too. A receiver
+/// exposes HID++ on its own USB interface, a separate `IOHIDDevice`, which is
+/// why this conflict is Bluetooth-specific.
+#[cfg(any(target_os = "macos", test))]
+const GRANTED_OPEN_HINT: &str = "Input Monitoring is granted to this process — another app may \
+     hold the device exclusively (quit Logi Options+; in Karabiner-Elements → Settings → \
+     Devices, turn off \"Modify events\" for this device), or macOS is serving a stale \
+     permission session (log out and back in)";
 
 /// Where a missing Input Monitoring grant has to be made. macOS judges the
 /// responsible process: the agent helper's own bundle for the shipped agent,

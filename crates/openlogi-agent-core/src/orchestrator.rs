@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 
 use openlogi_core::app::ForegroundApp;
-use openlogi_core::binding::{Binding, ButtonId};
+use openlogi_core::binding::{Binding, ButtonId, GamingButtons, GamingLayout};
 use openlogi_core::bindings::{button_bindings_for, oshook_gestures_for};
 use openlogi_core::config::{
     AppSettings, Config, ConfigRevision, LightSettings, MouseProfileTarget, canonical_device_key,
@@ -40,6 +40,7 @@ use tracing::{debug, info, warn};
 use crate::action_ring::ActionRingSessionSpec;
 use crate::capture_plan::{
     CapturePublication, SharedCapturePlans, hidpp_side_gesture_maps_for, plan_for_device,
+    shift_bindings_for,
 };
 use crate::hardware::{
     DeviceAccess, DeviceOp, HardwareContext, KeptOsLayouts, VolatileMouseSettings, WriteOrder,
@@ -358,8 +359,15 @@ impl SharedHandles {
         let AppWrite { ticket, restore } = self
             .pointer_speeds
             .app_write(route, SavedSpeed::Dpi(Some(dpi)));
+        // A DPI shift returns here, not to the last preset picked. Recorded
+        // when the write is requested, as a preset pick is, so a pick made
+        // while this write runs is not overwritten when it finishes.
+        if let Ok(mut cycles) = self.dpi_cycle.write() {
+            cycles.reapplied_at(route, dpi);
+        }
         let speeds = Arc::clone(&self.pointer_speeds);
-        self.device(route)
+        let result = self
+            .device(route)
             .run_in_turn(
                 HidppOperation::WriteDpi,
                 &ticket,
@@ -374,7 +382,15 @@ impl SharedHandles {
                 },
                 |_| async { Ok(()) },
             )
-            .await
+            .await;
+        // A rejected write leaves the mouse where it was, which only a
+        // reading of it can tell.
+        if result.is_err()
+            && let Ok(mut cycles) = self.dpi_cycle.write()
+        {
+            cycles.rejected_at(route, dpi);
+        }
+        result
     }
 
     /// Apply `change` to the backlight of the keyboard at `route` and return
@@ -767,6 +783,7 @@ impl Orchestrator {
         let mut gestures = oshook_gestures_for(&self.config, key, app);
         if cfg!(target_os = "macos")
             && let Some(key) = key
+            && !self.is_spy_only(key)
         {
             for button in hidpp_side_gesture_maps_for(&self.config, key, app)
                 .keys()
@@ -780,24 +797,43 @@ impl Orchestrator {
                 gestures.remove(button);
             }
         }
+        let shift_bindings = key
+            .map(|key| shift_bindings_for(&self.config, key))
+            .unwrap_or_default();
         HookMaps {
             bindings,
             gestures,
             pointer_target,
             selected_device: key.map(str::to_owned),
+            shift_bindings,
             ..HookMaps::default()
         }
     }
 
-    /// Publish hook maps while preserving thumb-wheel polarities learned from
-    /// hardware capture sessions. Selection, polarity, and bindings share the
-    /// one lock the callback reads, so a device switch cannot combine facts
-    /// from two devices.
+    /// Whether `key` is a G-series mouse: one with a layout, or any other
+    /// without ReprogControls. It has no `0x1b04` raw XY, so its gesture
+    /// buttons stay with the OS hook.
+    fn is_spy_only(&self, key: &str) -> bool {
+        self.devices
+            .iter()
+            .find(|dev| dev.config_key == key)
+            .is_some_and(|dev| {
+                GamingButtons::for_device(&dev.model_key, dev.capabilities.as_ref()).is_some()
+            })
+    }
+
+    /// Publish hook maps while preserving what hardware capture sessions
+    /// reported: thumb-wheel polarities, diverted buttons and held G-Shift
+    /// buttons. Selection, polarity, and bindings share the one lock the
+    /// callback reads, so a device switch cannot combine facts from two
+    /// devices.
     fn publish_hook_maps(&self, mut maps: HookMaps) {
         match self.shared.hook_maps.write() {
             Ok(mut current) => {
                 maps.thumbwheel_positive_is_forward =
                     std::mem::take(&mut current.thumbwheel_positive_is_forward);
+                maps.shift_held = std::mem::take(&mut current.shift_held);
+                maps.diverted_buttons = std::mem::take(&mut current.diverted_buttons);
                 *current = maps;
             }
             Err(error) => {
@@ -807,8 +843,13 @@ impl Orchestrator {
     }
 
     /// The keyboard key-capture spec for the managed keyboard, or `None` when
-    /// no enabled keyboard carries a real binding (an unbound key must never
-    /// be diverted).
+    /// no enabled keyboard carries a real binding in any profile (an unbound
+    /// key must never be diverted).
+    ///
+    /// A keyboard that binds keys only for some apps still holds the session
+    /// while another app is in front, with an empty divert set. The session
+    /// then diverts and hands back keys in place as the app in front changes,
+    /// instead of being armed from scratch on every focus change (#2140).
     ///
     /// The bound keys *are* the divert set: every
     /// [`ButtonId::Control`] in the
@@ -817,8 +858,11 @@ impl Orchestrator {
     /// table reports as divertable. No fixed key table sits in between, so a
     /// keyboard OpenLogi has never seen is remappable the day it ships.
     ///
-    /// One session at a time, and only a keyboard with something bound can
-    /// hold it: an online bound keyboard wins over an asleep one, so a stale
+    /// One session at a time, and only a keyboard with something bound in
+    /// some profile can hold it. A keyboard that binds keys for the app in
+    /// front wins over one that binds keys only for other apps, so an empty
+    /// session never takes the place of a keyboard whose bindings apply now.
+    /// Then an online bound keyboard wins over an asleep one, so a stale
     /// receiver slot for the same model (#1581) — which carries no bindings —
     /// never takes the session from the keyboard that is actually typing, and
     /// never shadows it while it naps. Among bound keyboards in the same
@@ -836,24 +880,25 @@ impl Orchestrator {
             .iter()
             .filter(|d| d.kind == DeviceKind::Keyboard && d.route.is_some())
             .filter(|d| self.config.device_enabled(&d.config_key))
-            .filter_map(|dev| {
+            .filter(|d| binds_keys_in_some_profile(&self.config, &d.config_key))
+            .map(|dev| {
                 let bindings = button_bindings_for(
                     &self.config,
                     Some(&dev.config_key),
                     self.current_app.as_deref(),
                 );
-                let divert = keyboard_divert_set(&bindings);
-                (!divert.wanted.is_empty()).then_some(KeyboardCandidate {
+                let divert = keyboard_divert_set(bindings.keys().copied());
+                KeyboardCandidate {
                     dev,
                     bindings,
                     divert,
-                })
+                }
             })
             .collect();
+        // `min_by_key` keeps the first of equal candidates: inventory order.
         let chosen = candidates
             .iter()
-            .find(|candidate| candidate.dev.online)
-            .or_else(|| candidates.first())?;
+            .min_by_key(|candidate| (candidate.divert.wanted.is_empty(), !candidate.dev.online))?;
         for &cid in &chosen.divert.reserved {
             warn!(
                 cid = format_args!("{cid:#06x}"),
@@ -951,18 +996,40 @@ impl Orchestrator {
             let Some(route) = dev.route.clone() else {
                 continue;
             };
-            let presets = self.config.dpi_presets(&dev.config_key);
+            let mut presets = self.config.dpi_presets(&dev.config_key);
+            if presets.is_empty()
+                && let Some(layout) = GamingLayout::for_model_key(&dev.model_key)
+            {
+                presets = layout
+                    .stock_dpi_presets
+                    .iter()
+                    .copied()
+                    .map(Dpi::new)
+                    .collect();
+            }
+            let committed = configured_dpi(&self.config, dev);
             let previous = guard
                 .by_key
                 .get(&dev.config_key)
-                .filter(|state| state.presets == presets);
+                .filter(|state| state.committed == committed);
+            let current = previous.map_or(committed, |state| state.current);
+            let before_shift = guard
+                .by_key
+                .get(&dev.config_key)
+                .map(|state| state.before_shift.clone())
+                .unwrap_or_default();
+            let nearest = current.and_then(|dpi| crate::dpi::nearest_preset(&presets, dpi));
+            let same_presets = previous.filter(|state| state.presets == presets);
             by_key.insert(
                 dev.config_key.clone(),
                 DpiCycleState {
-                    index: previous.map_or(0, |state| state.index),
-                    capabilities: previous.and_then(|state| state.capabilities.clone()),
+                    index: same_presets.map_or_else(|| nearest.unwrap_or(0), |state| state.index),
+                    capabilities: same_presets.and_then(|state| state.capabilities.clone()),
                     presets,
                     target: Some(route),
+                    current,
+                    committed,
+                    before_shift,
                 },
             );
         }
@@ -1042,6 +1109,8 @@ impl Orchestrator {
             plan.dispatch.invert_wheel = wheel_inverted(&self.config, dev);
             plan.target.spec.divert_main_wheel =
                 main_wheel_divert(&self.config, dev, self.os_mouse_hook_available);
+            let mut plan =
+                plan.with_onboard(&self.config, GamingLayout::for_model_key(&dev.model_key));
             if let Some(keyboard) = keyboard
                 .as_ref()
                 .filter(|keyboard| keyboard.route == plan.target.route)
@@ -1405,6 +1474,16 @@ impl Orchestrator {
                 .and_then(|d| d.effective_smartshift(&route_key))
                 .map(openlogi_hid::SmartShiftStatus::from),
         };
+        // The saved DPI goes out with the speed write on a DPI mouse.
+        let written_dpi = settings
+            .dpi
+            .or_else(|| speed_write.as_ref().and_then(SpeedWrite::dpi));
+        if let Ok(mut cycles) = self.shared.dpi_cycle.write() {
+            cycles.reconnected(key);
+            if let Some(dpi) = written_dpi {
+                cycles.reapplied(key, dpi);
+            }
+        }
         if !settings.is_empty() {
             crate::hardware::reapply_mouse_volatile_in_background(
                 &self.shared.device(&route),
@@ -1981,11 +2060,13 @@ impl Orchestrator {
             ticket,
             target,
             led,
+            None,
             move || {
                 if let Some(restore) = restore {
                     speeds.restored(&restore);
                 }
             },
+            || {},
         );
     }
 
@@ -2072,7 +2153,8 @@ fn write_value<T>(lock: &RwLock<T>, value: T, name: &str) {
 
 /// Publish a fresh immutable snapshot only when its projected value changed.
 /// A keyboard that could hold the key-capture session: it is enabled, has a
-/// route, and at least one of its keys is bound.
+/// route, and at least one of its keys is bound in some profile. `divert` is
+/// what the app in front binds, and may be empty.
 struct KeyboardCandidate<'a> {
     dev: &'a AgentDevice,
     bindings: BTreeMap<ButtonId, Binding>,
@@ -2087,14 +2169,15 @@ struct KeyboardDivertSet {
     reserved: Vec<u16>,
 }
 
-/// Which of `bindings` carry a stored binding on a keyboard control — a
-/// control is diverted whenever it is present at all, even as
+/// Which of `buttons`, the buttons a profile stores a binding for, are
+/// keyboard controls — a control is diverted whenever it is present at all,
+/// even as
 /// [`openlogi_core::binding::Action::None`] (which means "suppress this key," not "leave native"):
 /// `button_bindings_for` seeds no default for a [`ButtonId::Control`], so
 /// presence here is always an explicit user choice (#1747).
-fn keyboard_divert_set(bindings: &BTreeMap<ButtonId, Binding>) -> KeyboardDivertSet {
+fn keyboard_divert_set(buttons: impl IntoIterator<Item = ButtonId>) -> KeyboardDivertSet {
     let mut set = KeyboardDivertSet::default();
-    for button in bindings.keys() {
+    for button in buttons {
         let Some(cid) = button.cid().map(openlogi_core::binding::Cid::raw) else {
             continue;
         };
@@ -2106,10 +2189,29 @@ fn keyboard_divert_set(bindings: &BTreeMap<ButtonId, Binding>) -> KeyboardDivert
         if is_reserved_keyboard_control(cid) {
             set.reserved.push(cid);
         } else {
-            set.wanted.insert(cid, *button);
+            set.wanted.insert(cid, button);
         }
     }
     set
+}
+
+/// Whether `config_key` binds a key the capture session would divert in its
+/// device-wide profile or in any of its per-app profiles. A per-app override
+/// replaces the whole button, so its presence diverts the key exactly as a
+/// device-wide binding does.
+fn binds_keys_in_some_profile(config: &Config, config_key: &str) -> bool {
+    let device_wide = config.effective_bindings(config_key, None);
+    !keyboard_divert_set(device_wide.into_keys())
+        .wanted
+        .is_empty()
+        || config
+            .app_profiles(config_key)
+            .filter_map(|app| config.per_app_overrides(config_key, app))
+            .any(|overrides| {
+                !keyboard_divert_set(overrides.keys().copied())
+                    .wanted
+                    .is_empty()
+            })
 }
 
 fn publish_arc_if_changed<T: PartialEq>(publication: &watch::Sender<Arc<T>>, value: T) {

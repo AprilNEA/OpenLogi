@@ -9,11 +9,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
-    CameraControls, Config, DeviceIdentity, DisableKey, LightSettings, Lighting, ScrollResolution,
-    SmartShift, ThumbwheelSensitivity,
+    CameraControls, Config, DeviceIdentity, DisableKey, LightSettings, Lighting, OnboardMemory,
+    ScrollResolution, SmartShift, ThumbwheelSensitivity,
 };
 use crate::binding::{
-    ActionRingConfig, ActionRingIcon, ActionRingSlot, Binding, ButtonId, RingAction,
+    Action, ActionRingConfig, ActionRingIcon, ActionRingSlot, Binding, ButtonId, GamingLayout,
+    RingAction, default_binding,
 };
 use crate::hid::{Dpi, PointerSpeed, ReportRate};
 
@@ -337,6 +338,21 @@ impl Config {
             .or_default()
             .keep_os_layout = Some(keep);
     }
+
+    /// The stored onboard memory of `device_key`.
+    #[must_use]
+    pub fn onboard_memory(&self, device_key: &str) -> Option<OnboardMemory> {
+        self.devices.get(device_key).and_then(|d| d.onboard_memory)
+    }
+
+    /// Store the onboard memory of `device_key`.
+    pub fn set_onboard_memory(&mut self, device_key: &str, memory: Option<OnboardMemory>) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .onboard_memory = memory;
+    }
+
     /// The persisted report rate for `device_key`, or `None` when the user
     /// never chose one (the device keeps its own rate).
     #[must_use]
@@ -383,6 +399,78 @@ impl Config {
             .entry(device_key.to_string())
             .or_default()
             .force_sensing = Some(force);
+    }
+
+    /// The G-Shift layer of `device_key`, if not empty.
+    #[must_use]
+    pub fn gshift_overrides(&self, device_key: &str) -> Option<&BTreeMap<ButtonId, Action>> {
+        self.devices
+            .get(device_key)
+            .map(|d| &d.gshift_bindings)
+            .filter(|bindings| !bindings.is_empty())
+    }
+
+    /// Set or clear a G-Shift binding.
+    pub fn set_gshift_binding(
+        &mut self,
+        device_key: &str,
+        button: ButtonId,
+        action: Option<Action>,
+    ) {
+        let bindings = &mut self
+            .devices
+            .entry(device_key.to_string())
+            .or_default()
+            .gshift_bindings;
+        match action {
+            Some(action) => bindings.insert(button, action),
+            None => bindings.remove(&button),
+        };
+    }
+
+    /// Whether `device_key` uses G-Shift.
+    #[must_use]
+    pub fn uses_gshift(&self, device_key: &str) -> bool {
+        self.devices.get(device_key).is_some_and(|device| {
+            !device.gshift_bindings.is_empty()
+                || device.bindings.values().any(Binding::is_gshift)
+                || device
+                    .per_app_bindings
+                    .values()
+                    .flat_map(BTreeMap::values)
+                    .any(|action| *action == Action::GShift)
+        })
+    }
+
+    /// The stored choice, else host mode when a setting needs it.
+    #[must_use]
+    pub fn effective_onboard_memory(
+        &self,
+        device_key: &str,
+        layout: Option<&GamingLayout>,
+    ) -> Option<OnboardMemory> {
+        let device = self.devices.get(device_key)?;
+        if device.onboard_memory.is_some() {
+            return device.onboard_memory;
+        }
+        let layout = layout?;
+        let customized = |button: &ButtonId, binding: &Binding| {
+            layout.needs_host_mode(*button)
+                && (!matches!(binding, Binding::Single(_))
+                    || binding.click_action() != default_binding(*button))
+        };
+        let needs_host = device.report_rate.is_some()
+            || self.uses_gshift(device_key)
+            || device
+                .bindings
+                .iter()
+                .any(|(b, binding)| customized(b, binding))
+            || device
+                .per_app_bindings
+                .values()
+                .flatten()
+                .any(|(b, action)| customized(b, &Binding::Single(action.clone())));
+        needs_host.then_some(OnboardMemory::Off)
     }
 
     /// Record the SmartShift wheel config for `device_key`, so the agent can

@@ -363,6 +363,8 @@ fn a_selected_gesture_can_render_in_the_binding_inspector(cx: &mut TestAppContex
                 editing_app: None,
                 overridden: None,
                 press_force: None,
+                extra_actions: &[],
+                hidden_actions: &[],
             },
             ActionPickerContext {
                 open: true,
@@ -457,8 +459,9 @@ fn active_thumbwheel_directions_highlight_the_paired_control() {
 
 #[test]
 fn fallback_model_only_adds_thumbwheel_when_capability_is_measured() {
-    let (_, _, without, _) = scaled_model(None, 560., 420., false, LabelDistribution::LeftOnly);
-    let (_, _, with, _) = scaled_model(None, 560., 420., true, LabelDistribution::LeftOnly);
+    let (_, _, without, _) =
+        scaled_model(None, None, 560., 420., false, LabelDistribution::LeftOnly);
+    let (_, _, with, _) = scaled_model(None, None, 560., 420., true, LabelDistribution::LeftOnly);
     assert_eq!(
         without
             .iter()
@@ -705,12 +708,46 @@ fn a_gesture_button_without_raw_wheel_offers_no_wheel_hold(cx: &mut TestAppConte
     cx.run_until_parked();
 }
 
+/// An app profile replaces a gesture button's gestures with a button binding,
+/// which gets a release, so its picker offers the held actions too.
+#[gpui::test]
+fn an_inherited_gesture_button_offers_the_held_actions(cx: &mut TestAppContext) {
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    let mut config = Config::ephemeral();
+    config.set_gesture_mode(crate::state::tests::KNOWN_MOUSE_KEY, ButtonId::Back, true);
+    let (view, cx) = wheel_hold_view(cx, true, config, ButtonId::Back);
+    cx.update(|_, cx| {
+        AppState::apply(cx, |state| {
+            state.set_editing_app(Some("com.apple.Safari".into()))
+        });
+    });
+    view.update(cx, |view, _| view.action_picker_open = true);
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+
+    assert!(cx.debug_bounds("inspector-gesture-override-Copy").is_some());
+    assert!(
+        cx.debug_bounds("inspector-gesture-override-DpiShift")
+            .is_some()
+    );
+    drop(view);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+}
+
 /// The fallback silhouette shrinks on a small window, but its cards keep
 /// their height, so they must be placed at the scaled size, not scaled after.
 #[test]
 fn a_shrunk_fallback_model_keeps_its_cards_apart() {
     let target_h = MOUSE_MODEL_SIZE.1 * 0.776;
-    let (_, h, _, labels) = scaled_model(None, target_h, 1000., false, LabelDistribution::LeftOnly);
+    let (_, h, _, labels) = scaled_model(
+        None,
+        None,
+        target_h,
+        1000.,
+        false,
+        LabelDistribution::LeftOnly,
+    );
     assert!((h - target_h).abs() < 0.01);
     let mut ys: Vec<f32> = labels.iter().map(|label| label.y).collect();
     ys.sort_by(f32::total_cmp);

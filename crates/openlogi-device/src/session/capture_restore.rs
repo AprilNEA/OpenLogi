@@ -12,6 +12,7 @@ use hidpp::feature::hires_wheel::HiResWheelFeature;
 use hidpp::protocol::v20::Hidpp20Error;
 use thiserror::Error;
 
+use super::gesture::SpyRestore;
 use super::gesture::main_wheel;
 use super::restore::{PendingRestore, RestoreOutcome, RestorePlan, SessionFailure};
 use crate::backend::BackendError;
@@ -249,6 +250,7 @@ pub struct CaptureRestorePlan {
     reprog: Option<ReprogRestore>,
     thumb: Option<ThumbwheelRestore>,
     main_wheel: Option<HiResWheelRestore>,
+    spy: Option<SpyRestore>,
 }
 
 impl fmt::Debug for CaptureRestorePlan {
@@ -263,6 +265,7 @@ impl fmt::Debug for CaptureRestorePlan {
             )
             .field("has_thumbwheel", &self.thumb.is_some())
             .field("has_main_wheel", &self.main_wheel.is_some())
+            .field("host_mode", &self.spy.is_some())
             .finish()
     }
 }
@@ -285,8 +288,11 @@ impl RestorePlan for CaptureRestorePlan {
             restored &= restore_result(main_wheel::undivert(&feature).await, "main wheel");
         }
         if let Some(thumb) = self.thumb {
-            let thumbwheel = Thumbwheel::new(channel, device_index, thumb.feature_index);
+            let thumbwheel = Thumbwheel::new(channel.clone(), device_index, thumb.feature_index);
             restored &= restore_result(thumbwheel.restore(thumb.status).await, "thumb wheel");
+        }
+        if let Some(spy) = &self.spy {
+            restored &= spy.restore_on(&channel, device_index).await;
         }
         restored
     }
@@ -313,19 +319,21 @@ impl PendingCaptureRestore {
                 reprog: None,
                 thumb: None,
                 main_wheel: None,
+                spy: None,
             },
         )
     }
 
-    /// The restore owed for `reprog` and the two wheels, or `None` when the
-    /// session diverted nothing.
+    /// The restore owed for `reprog`, the two wheels and host mode, or `None`
+    /// when the session diverted nothing.
     pub(crate) fn new(
         retired: &SharedChannel,
         reprog: Option<ReprogRestore>,
         thumb: Option<ThumbwheelRestore>,
         main_wheel: Option<HiResWheelRestore>,
+        spy: Option<SpyRestore>,
     ) -> Option<Self> {
-        if reprog.is_none() && thumb.is_none() && main_wheel.is_none() {
+        if reprog.is_none() && thumb.is_none() && main_wheel.is_none() && spy.is_none() {
             return None;
         }
         Some(Self::owing(
@@ -334,6 +342,7 @@ impl PendingCaptureRestore {
                 reprog,
                 thumb,
                 main_wheel,
+                spy,
             },
         ))
     }

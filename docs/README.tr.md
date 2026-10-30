@@ -170,6 +170,7 @@ Uygulama başına profiller, odaktaki uygulamayla birlikte değişir. Bir `[apps
 
 > [!IMPORTANT]
 > Önce **Logi Options+**'tan (Linux'ta Solaar'dan da) çıkın. Bir alıcıyı aynı anda yalnızca bir uygulama kullanabilir.
+> macOS'ta **Karabiner-Elements** de değiştirdiği Bluetooth klavyeyi kilitler. Karabiner-Elements → Settings → Devices bölümünde o klavye için **Modify events** seçeneğini kapatın.
 
 | Platform | Sistem | Mimari |
 | --- | --- | --- |

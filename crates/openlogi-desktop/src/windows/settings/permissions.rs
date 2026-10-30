@@ -117,8 +117,10 @@ fn input_monitoring_item() -> SettingItem {
                 .and_then(AppState::agent_status);
             // Granted-but-still-failing is the one state the badge
             // alone cannot express: the grant exists, yet every
-            // open is refused — an exclusive open elsewhere, or a
-            // TCC session only a re-login refreshes (#704).
+            // open is refused — an exclusive open elsewhere (Logi
+            // Options+, or Karabiner-Elements seizing a Bluetooth
+            // keyboard, #2171), or a TCC session only a re-login
+            // refreshes (#704).
             let stalled = status
                 .as_ref()
                 .is_some_and(|s| s.input_monitoring_granted && s.hid_open_failures);

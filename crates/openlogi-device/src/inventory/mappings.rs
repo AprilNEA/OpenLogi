@@ -11,6 +11,10 @@ use hidpp::feature::unified_battery::{
 };
 use hidpp::receiver::bolt::DeviceKind as BoltDeviceKind;
 use hidpp::receiver::unifying::DeviceKind as UnifyingDeviceKind;
+use hidpp::register::battery::{
+    ChargeReading, ChargingState as HidppRegisterChargingState, StatusLevel as HidppStatusLevel,
+    StatusReading,
+};
 use openlogi_core::device::{BatteryInfo, BatteryLevel, BatteryStatus, DeviceKind};
 
 /// Trim NUL padding and whitespace from a `DeviceInformation` serial; an
@@ -164,6 +168,69 @@ pub(crate) fn map_adc_battery_status(status: HidppAdcChargingStatus) -> BatteryS
     }
 }
 
+/// Map a HID++ 1.0 battery register's charging state to our [`BatteryStatus`].
+fn map_register_charging(state: HidppRegisterChargingState) -> BatteryStatus {
+    match state {
+        HidppRegisterChargingState::Discharging => BatteryStatus::Discharging,
+        HidppRegisterChargingState::Recharging => BatteryStatus::Charging,
+        HidppRegisterChargingState::Full => BatteryStatus::Full,
+        _ => BatteryStatus::Unknown,
+    }
+}
+
+/// Map a HID++ 1.0 `0x07` level to our [`BatteryLevel`]. Empty takes our
+/// lowest level, so a nearly dead battery still raises the low-battery cue. A
+/// missing level, which Solaar notes a charging report can carry, is unknown.
+fn map_status_register_level(level: Option<HidppStatusLevel>) -> BatteryLevel {
+    match level {
+        Some(HidppStatusLevel::Full) => BatteryLevel::Full,
+        Some(HidppStatusLevel::Good) => BatteryLevel::Good,
+        Some(HidppStatusLevel::Low) => BatteryLevel::Low,
+        Some(HidppStatusLevel::Critical | HidppStatusLevel::Empty) => BatteryLevel::Critical,
+        _ => BatteryLevel::Unknown,
+    }
+}
+
+/// Build a [`BatteryInfo`] from a HID++ 1.0 `0x07` reading.
+///
+/// The register reports a coarse level and no percentage, the same shape as a
+/// `0x1004` battery without state of charge, so the reading has none either.
+/// Charge complete reads [`BatteryLevel::Full`] whatever level the register
+/// sent alongside it.
+pub(crate) fn status_register_battery_info(reading: StatusReading) -> BatteryInfo {
+    let status = map_register_charging(reading.charging);
+    let level = if status == BatteryStatus::Full {
+        BatteryLevel::Full
+    } else {
+        map_status_register_level(reading.level)
+    };
+    BatteryInfo {
+        percentage: None,
+        level,
+        status,
+    }
+}
+
+/// Build a [`BatteryInfo`] from a HID++ 1.0 `0x0D` reading, a percentage that
+/// takes the display buckets.
+///
+/// Charge complete reads 100 % / [`BatteryLevel::Full`] whatever charge the
+/// register sent alongside it, as [`legacy_battery_info`] reads it for
+/// `0x1000`.
+pub(crate) fn charge_register_battery_info(reading: ChargeReading) -> BatteryInfo {
+    let status = map_register_charging(reading.charging);
+    let percentage = if status == BatteryStatus::Full {
+        100
+    } else {
+        reading.percentage
+    };
+    BatteryInfo {
+        percentage: Some(percentage),
+        level: legacy_battery_level_from_percentage(percentage),
+        status,
+    }
+}
+
 /// Estimate a charge percentage from a `0x1001` or `0x1F20` battery voltage
 /// reading.
 ///
@@ -287,11 +354,98 @@ pub(crate) fn coarse_legacy_battery_level(discharge_level: u8) -> BatteryLevel {
 #[cfg(test)]
 mod tests {
     use super::{
-        BatteryLevel, BatteryStatus, DeviceKind, HidppLegacyBatteryStatus,
-        HidppVoltageChargingStatus, UnifyingDeviceKind, coarse_legacy_battery_level,
-        legacy_battery_info, legacy_battery_level_from_percentage, map_unifying_kind,
-        map_voltage_battery_status, resolve_device_kind, voltage_battery_percentage,
+        BatteryInfo, BatteryLevel, BatteryStatus, ChargeReading, DeviceKind,
+        HidppLegacyBatteryStatus, HidppVoltageChargingStatus, StatusReading, UnifyingDeviceKind,
+        charge_register_battery_info, coarse_legacy_battery_level, legacy_battery_info,
+        legacy_battery_level_from_percentage, map_unifying_kind, map_voltage_battery_status,
+        resolve_device_kind, status_register_battery_info, voltage_battery_percentage,
     };
+
+    #[test]
+    fn status_register_reports_a_level_and_never_a_percentage() {
+        for (wire, level, status) in [
+            (
+                [0x07, 0x00, 0x00],
+                BatteryLevel::Full,
+                BatteryStatus::Discharging,
+            ),
+            (
+                [0x05, 0x00, 0x00],
+                BatteryLevel::Good,
+                BatteryStatus::Discharging,
+            ),
+            (
+                [0x03, 0x21, 0x00],
+                BatteryLevel::Low,
+                BatteryStatus::Charging,
+            ),
+            (
+                [0x01, 0x00, 0x00],
+                BatteryLevel::Critical,
+                BatteryStatus::Discharging,
+            ),
+            // Empty: a nearly dead battery must still read as needing a charge.
+            (
+                [0x00, 0x00, 0x00],
+                BatteryLevel::Critical,
+                BatteryStatus::Discharging,
+            ),
+            // A charging report without a level: "charging, no reading".
+            (
+                [0x00, 0x21, 0x00],
+                BatteryLevel::Unknown,
+                BatteryStatus::Charging,
+            ),
+            // Charge complete is full whatever level came with it.
+            ([0x05, 0x22, 0x00], BatteryLevel::Full, BatteryStatus::Full),
+        ] {
+            let reading = StatusReading::try_from(wire).unwrap();
+            assert_eq!(
+                status_register_battery_info(reading),
+                BatteryInfo {
+                    percentage: None,
+                    level,
+                    status,
+                },
+                "{wire:02x?}"
+            );
+        }
+    }
+
+    #[test]
+    fn charge_register_buckets_its_percentage_and_reads_charge_complete_as_full() {
+        for (wire, percentage, level, status) in [
+            (
+                [0x4b, 0x00, 0x30],
+                75,
+                BatteryLevel::Good,
+                BatteryStatus::Discharging,
+            ),
+            (
+                [0x0a, 0x00, 0x50],
+                10,
+                BatteryLevel::Critical,
+                BatteryStatus::Charging,
+            ),
+            (
+                [0x5f, 0x00, 0x90],
+                100,
+                BatteryLevel::Full,
+                BatteryStatus::Full,
+            ),
+        ] {
+            let reading = ChargeReading::try_from(wire).unwrap();
+            assert_eq!(
+                charge_register_battery_info(reading),
+                BatteryInfo {
+                    percentage: Some(percentage),
+                    level,
+                    status,
+                },
+                "{wire:02x?}"
+            );
+        }
+    }
 
     #[test]
     fn probe_overrides_a_misreporting_register() {

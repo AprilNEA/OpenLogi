@@ -52,6 +52,7 @@ pub use openlogi_core::hid::smartshift;
 pub use openlogi_core::hid::smartshift::{
     SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus, SmartShiftThreshold, TunableTorque,
 };
+pub use openlogi_core::hid::{OnboardMode, OnboardProfile, OnboardState};
 pub use pairing::{
     Click, DiscoveredDevice, PairingCommand, PairingError, PairingEvent, PairingReceiver,
     PasskeyMethod, ReceiverFamily, ReceiverSelector, list_pairing_receivers, run_pairing, unpair,
@@ -81,19 +82,19 @@ pub use write::{
     dump_features, dump_firmware_entities, dump_reprog_controls, encode_litra_command,
     ensure_haptics_armed_on, find_litra, get_backlight, get_backlight_on, get_disable_keys,
     get_disable_keys_on, get_dpi, get_dpi_info, get_dpi_info_on, get_easy_switch_hosts,
-    get_easy_switch_hosts_on, get_fn_lock, get_fn_lock_on, get_force_sensing_on,
-    get_pointer_speed_on, get_report_rate_info, get_report_rate_info_on, get_scroll_wheel_mode,
-    get_scroll_wheel_mode_on, get_smartshift_status, get_smartshift_status_on, keep_os_layout_on,
-    litra_model_for_route, matches_litra, play_haptic, play_haptic_on, read_battery_raw,
-    read_litra_state, rename_easy_switch_host, rename_easy_switch_host_on, restore_haptics_on,
-    set_disable_keys, set_disable_keys_on, set_disable_keys_write_through_on, set_dpi,
-    set_dpi_led_on, set_dpi_on, set_dpi_target_on, set_fn_lock, set_fn_lock_on,
-    set_force_sensing_on, set_keyboard_color, set_keyboard_color_on, set_keyboard_color_with,
-    set_keyboard_color_with_on, set_pointer_speed_on, set_report_rate, set_report_rate_on,
-    set_scroll_inversion, set_scroll_inversion_on, set_scroll_resolution, set_scroll_resolution_on,
-    set_scroll_wheel_mode, set_scroll_wheel_mode_on, set_smartshift, set_smartshift_on,
-    set_smartshift_sensitivity, set_smartshift_torque, toggle_smartshift, toggle_smartshift_on,
-    update_backlight, update_backlight_on, watch_litra,
+    get_easy_switch_hosts_on, get_fn_lock, get_fn_lock_on, get_force_sensing_on, get_onboard,
+    get_onboard_on, get_pointer_speed_on, get_report_rate_info, get_report_rate_info_on,
+    get_scroll_wheel_mode, get_scroll_wheel_mode_on, get_smartshift_status,
+    get_smartshift_status_on, keep_os_layout_on, litra_model_for_route, matches_litra, play_haptic,
+    play_haptic_on, read_battery_raw, read_litra_state, rename_easy_switch_host,
+    rename_easy_switch_host_on, restore_haptics_on, set_disable_keys, set_disable_keys_on,
+    set_disable_keys_write_through_on, set_dpi, set_dpi_led_on, set_dpi_on, set_dpi_target_on,
+    set_fn_lock, set_fn_lock_on, set_force_sensing_on, set_keyboard_color, set_keyboard_color_on,
+    set_keyboard_color_with, set_keyboard_color_with_on, set_pointer_speed_on, set_report_rate,
+    set_report_rate_on, set_scroll_inversion, set_scroll_inversion_on, set_scroll_resolution,
+    set_scroll_resolution_on, set_scroll_wheel_mode, set_scroll_wheel_mode_on, set_smartshift,
+    set_smartshift_on, set_smartshift_sensitivity, set_smartshift_torque, toggle_smartshift,
+    toggle_smartshift_on, update_backlight, update_backlight_on, watch_litra,
 };
 
 /// Scripted transport helpers for tests in higher layers.

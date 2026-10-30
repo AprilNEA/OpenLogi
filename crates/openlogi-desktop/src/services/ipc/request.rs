@@ -19,8 +19,8 @@ use std::future::Future;
 use openlogi_core::config::{ConfigRevision, Lighting};
 use openlogi_core::hid::{
     BacklightChange, BacklightState, DeviceRoute, DisableKeysMask, DisableKeysState, Dpi, DpiInfo,
-    EasySwitchHosts, FnLockState, ForceSensingInfo, LightCommand, PointerSpeed, ReceiverSelector,
-    ReportRate, ReportRateInfo, SmartShiftStatus, WriteError,
+    EasySwitchHosts, FnLockState, ForceSensingInfo, LightCommand, OnboardState, PointerSpeed,
+    ReceiverSelector, ReportRate, ReportRateInfo, SmartShiftStatus, WriteError,
 };
 use openlogi_ipc::{
     AgentClient, ChosenLight, ConfigReloadError, PairingCommandError, PairingFailure, SavedConfig,
@@ -627,6 +627,25 @@ impl Request for ReadFnLock {
     }
 }
 
+pub struct ReadOnboard {
+    pub route: DeviceRoute,
+    pub reply: oneshot::Sender<Result<OnboardState, WriteError>>,
+}
+
+impl Request for ReadOnboard {
+    type Answer = Result<OnboardState, WriteError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .read_onboard(context::current(), self.route.clone())
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, _: &UpdateSender) {
+        let _ = self.reply.send(or_unavailable(outcome));
+    }
+}
+
 /// Have the agent re-read the `config.toml` the GUI just saved
 /// ([`openlogi_ipc::Agent::reload_saved_config`]).
 ///
@@ -988,6 +1007,7 @@ commands! {
     LoadConfig,
     ReadDisableKeys,
     SetDisableKeys,
+    ReadOnboard,
     ReloadConfig,
     RequestAccessibilityPrompt,
     StartPairing,

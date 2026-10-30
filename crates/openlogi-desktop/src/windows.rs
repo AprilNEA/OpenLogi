@@ -8,21 +8,99 @@
 //! [`open_or_focus`] activates it when still open, otherwise opens a fresh one
 //! wired for per-window light/dark tracking via
 //! [`crate::ui::theme::apply_from_settings`].
+//!
+//! Every window opens through a [`WindowFit`], which shrinks its authored size
+//! and floor to the display's work area so none starts with its titlebar or
+//! lower edge off-screen.
 
 pub mod add_device;
 pub mod main_window;
 pub mod settings;
 pub mod update_consent;
 
+#[cfg(test)]
+mod tests;
+
 use crate::ui::theme::Typography as _;
 use gpui::{
     App, AppContext as _, Bounds, Context, Decorations, Global, IntoElement, ParentElement as _,
-    Pixels, Render, SharedString, Size, Styled as _, Subscription, TitlebarOptions, Window,
-    WindowBounds, WindowHandle, WindowOptions, div,
+    Pixels, Point, Render, SharedString, Size, Styled as _, Subscription, TitlebarOptions, Window,
+    WindowBounds, WindowHandle, WindowOptions, div, px,
 };
 use gpui_component::{ActiveTheme as _, Root, TitleBar};
 use openlogi_core::brand::APP_ID;
 use tracing::warn;
+
+/// Logical room kept around a window's client area for the native frame, so
+/// the *outer* window fits the work area and not just its content.
+///
+/// gpui treats [`WindowBounds`] and `window_min_size` as the client area and
+/// grows the frame outside it. Windows splits its frame (about 39 × 16 px at
+/// 100 % and 150 % scaling) evenly around the client, so a client as tall as
+/// the work area pushes the titlebar off the top. macOS pins the frame's
+/// top-left to the client origin, so its 28 pt titlebar hangs below the
+/// client instead. A centred client fits on both while each side keeps half
+/// of this allowance.
+const FRAME_ALLOWANCE: Size<Pixels> = Size {
+    width: px(24.),
+    height: px(56.),
+};
+
+/// Where a new window opens and how far the user may shrink it, fitted to the
+/// work area of the display it opens on.
+///
+/// Each window is authored for a preferred size and a content floor. When the
+/// work area — the display less the taskbar, dock or menu bar — cannot hold
+/// them with the native frame, both shrink to what fits, centred in that area.
+/// A 1920×1080 laptop at 150 % scaling offers only 1280×680 logical px above
+/// the Windows taskbar, and a window opened taller than that has its titlebar
+/// and lower edge off-screen, so it can be neither moved nor resized (#2169).
+/// Below the authored floor the content may crowd, which still beats a window
+/// the user cannot reach.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WindowFit {
+    bounds: Bounds<Pixels>,
+    min_size: Size<Pixels>,
+}
+
+impl WindowFit {
+    /// Fit a window authored for `preferred`, with a floor of `min_size`, onto
+    /// the primary display — where gpui opens a window that names no display.
+    /// With no display reported, the window keeps its authored geometry.
+    pub fn on_primary_display(preferred: Size<Pixels>, min_size: Size<Pixels>, cx: &App) -> Self {
+        match cx.primary_display() {
+            Some(display) => Self::within(display.visible_bounds(), preferred, min_size),
+            None => Self {
+                bounds: Bounds::new(Point::default(), preferred),
+                min_size,
+            },
+        }
+    }
+
+    /// Fit a window authored for `preferred`, with a floor of `min_size`, into
+    /// `work_area`.
+    fn within(work_area: Bounds<Pixels>, preferred: Size<Pixels>, min_size: Size<Pixels>) -> Self {
+        let room = Size {
+            width: (work_area.size.width - FRAME_ALLOWANCE.width).max(Pixels::ZERO),
+            height: (work_area.size.height - FRAME_ALLOWANCE.height).max(Pixels::ZERO),
+        };
+        let size = preferred.min(&room);
+        Self {
+            bounds: Bounds::centered_at(work_area.center(), size),
+            min_size: min_size.min(&size),
+        }
+    }
+}
+
+impl From<WindowFit> for WindowOptions {
+    fn from(fit: WindowFit) -> Self {
+        Self {
+            window_bounds: Some(WindowBounds::Windowed(fit.bounds)),
+            window_min_size: Some(fit.min_size),
+            ..Self::default()
+        }
+    }
+}
 
 /// One live handle per auxiliary window, stored as a GPUI global so the menu
 /// actions and footer links can find an already-open window and focus it.
@@ -147,20 +225,19 @@ pub fn open_or_focus<V: AuxWindow + 'static>(
         return;
     }
 
-    let bounds = Bounds::centered(None, size, cx);
+    // Aux windows are fixed-content dialogs authored for `size`; that makes it
+    // the floor too, the way the main window sets one in `main_window` — below
+    // it rows clip their trailing controls. Only a work area too small to hold
+    // `size` lowers it.
+    let fit = WindowFit::on_primary_display(size, size, cx);
     let options = WindowOptions {
-        window_bounds: Some(WindowBounds::Windowed(bounds)),
-        // Aux windows are fixed-content dialogs authored for `size`; that
-        // makes it the floor too, the way the main window sets one in
-        // `main_window_options` — below it rows clip their trailing controls.
-        window_min_size: Some(size),
         // Same identity as the main window (see `main_window`): a Wayland
         // app_id that doesn't match the desktop file's `StartupWMClass` leaves
         // the window ungrouped under the launcher icon and unrecognized by our
         // own `gnome_shell` frontmost backend.
         app_id: Some(APP_ID.into()),
         titlebar: Some(titlebar_options(title.clone())),
-        ..WindowOptions::default()
+        ..WindowOptions::from(fit)
     };
 
     let opened = cx.open_window(options, |window, cx| {
