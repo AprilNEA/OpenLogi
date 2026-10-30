@@ -77,6 +77,7 @@ const _: () = assert!(
 /// How far a ring that opens by gathering its nodes out from the centre is
 /// open this frame: the dial's scale and opacity, and each node's reach from
 /// the centre, scale and opacity.
+#[derive(Clone, Copy)]
 pub(super) struct Stage {
     pub(super) dial: (f32, f32),
     pub(super) nodes: [(f32, f32, f32); 8],

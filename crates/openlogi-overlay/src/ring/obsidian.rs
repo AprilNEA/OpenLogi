@@ -318,6 +318,44 @@ impl Motion {
         stage_at(self.born, self.close_started, now, reduce)
     }
 
+    /// Advance the clocks to `now`, with the pointer at `pointer` within a
+    /// panel `edge` pixels square, and copy out what this frame draws.
+    pub(super) fn frame(
+        &mut self,
+        hovered: Option<ActionRingSlot>,
+        pointer: Point<Pixels>,
+        edge: Pixels,
+        now: Instant,
+        reduce: bool,
+    ) -> Frame {
+        let layout = Layout::fitting(edge);
+        // The light follows the pointer within the hovered card's box. Render
+        // runs every frame while motion is on, so the pointer is this
+        // frame's; no move handler is needed.
+        let pointer_in_card = hovered.map(|slot| {
+            let (left, top) = layout.slot_origin(slot);
+            let (w, h) = layout.card_size();
+            (
+                ((f32::from(pointer.x) - left) / w).clamp(0.18, 0.82),
+                ((f32::from(pointer.y) - top) / h).clamp(0.16, 0.84),
+            )
+        });
+        self.advance(hovered, pointer_in_card, now, reduce);
+        Frame {
+            hover_t: self.hover_t,
+            bubbles: self.bubbles,
+            light: self.light,
+            rim: self.rim_angle(now, reduce),
+            wave: self.wave(now, reduce),
+            flash: self.flash(now, reduce),
+            committed: self.click.slot(),
+            aim: self.aim,
+            hub_t: self.hub_t,
+            stage: self.stage(now, reduce),
+            reduce,
+        }
+    }
+
     /// How far the halo's rim still has to turn to settle, in radians.
     fn rim_angle(&self, now: Instant, reduce: bool) -> f32 {
         if reduce {
@@ -338,6 +376,25 @@ impl Motion {
     fn flash(&self, now: Instant, reduce: bool) -> f32 {
         self.click.flash(now, reduce)
     }
+}
+
+/// What one frame of the panel is drawn from: the clocks as they stand,
+/// copied out of the motion so the panel borrows nothing.
+#[derive(Clone, Copy)]
+pub(super) struct Frame {
+    hover_t: [f32; 8],
+    bubbles: [Bubble; 8],
+    light: (f32, f32),
+    /// How far the halo's rim still has to turn, in radians.
+    rim: f32,
+    wave: Option<(ActionRingSlot, f32, f32)>,
+    flash: f32,
+    /// The card a click chose.
+    committed: Option<ActionRingSlot>,
+    aim: Aim,
+    hub_t: f32,
+    stage: Stage,
+    reduce: bool,
 }
 
 /// The panel's edge and how far the layout is scaled down to fit it. `fit`
@@ -397,45 +454,29 @@ impl Layout {
 }
 
 impl RingView {
-    /// The panel, `edge` pixels square (see [`super::panel_edge`]), drawn at
-    /// `origin` within the window so the pointer can be read against it.
-    /// It takes the background click itself so the stock root handler never
-    /// closes without the exit.
+    /// The panel, `edge` pixels square (see [`super::panel_edge`]), drawn
+    /// from `frame`. It takes the background click itself so the stock root
+    /// handler never closes without the exit.
     pub(super) fn obsidian_panel(
-        &mut self,
+        &self,
+        frame: &Frame,
         edge: Pixels,
-        origin: Point<Pixels>,
-        window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let now = Instant::now();
-        let reduce = cx.reduce_motion();
+        let Frame {
+            hover_t,
+            bubbles,
+            light,
+            rim,
+            wave,
+            flash,
+            committed,
+            aim,
+            hub_t,
+            stage,
+            reduce,
+        } = *frame;
         let layout = Layout::fitting(edge);
-        // The light follows the pointer within the hovered card's box. Render
-        // runs every frame while motion is on, so the window's position is
-        // this frame's; no move handler is needed.
-        let pointer_in_card = self.hovered.map(|slot| {
-            let (left, top) = layout.slot_origin(slot);
-            let (w, h) = layout.card_size();
-            let local = window.mouse_position() - origin;
-            (
-                ((f32::from(local.x) - left) / w).clamp(0.18, 0.82),
-                ((f32::from(local.y) - top) / h).clamp(0.16, 0.84),
-            )
-        });
-        let RingLook::Obsidian(motion) = &mut self.look else {
-            unreachable!("obsidian_panel is only drawn for an Obsidian ring");
-        };
-        motion.advance(self.hovered, pointer_in_card, now, reduce);
-        let stage = motion.stage(now, reduce);
-        let hover_t = motion.hover_t;
-        let bubbles = motion.bubbles;
-        let light = motion.light;
-        let rim = motion.rim_angle(now, reduce);
-        let wave = motion.wave(now, reduce);
-        let flash = motion.flash(now, reduce);
-        let committed = motion.click.slot();
-        let (aim, hub_t) = (motion.aim, motion.hub_t);
         let hovered = self
             .hovered
             .and_then(|slot| self.invocation.slots.get(&slot));

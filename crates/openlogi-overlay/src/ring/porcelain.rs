@@ -206,6 +206,41 @@ impl Motion {
     fn stage(&self, now: Instant, reduce: bool) -> Stage {
         stage_at(self.born, self.close_started, now, reduce)
     }
+
+    /// Advance the clocks to `now` and copy out what this frame draws.
+    pub(super) fn frame(
+        &mut self,
+        hovered: Option<ActionRingSlot>,
+        now: Instant,
+        reduce: bool,
+    ) -> Frame {
+        self.advance(hovered, now, reduce);
+        Frame {
+            hover_t: self.hover_t,
+            needle: (self.needle_angle(now, reduce), self.aim_t),
+            press: self.press(now, reduce),
+            mark: self.mark(now, reduce),
+            hub_t: self.hub_t,
+            hub_press_t: self.hub_press_t,
+            stage: self.stage(now, reduce),
+            reduce,
+        }
+    }
+}
+
+/// What one frame of the panel is drawn from: the clocks as they stand,
+/// copied out of the motion so the panel borrows nothing.
+#[derive(Clone, Copy)]
+pub(super) struct Frame {
+    hover_t: [f32; 8],
+    /// Where the needle points and how far it is shown.
+    needle: (f32, f32),
+    press: Option<(ActionRingSlot, f32, f32)>,
+    mark: Option<(ActionRingSlot, f32, f32)>,
+    hub_t: f32,
+    hub_press_t: f32,
+    stage: Stage,
+    reduce: bool,
 }
 
 /// The panel's edge and how far the layout is scaled down to fit it. `fit`
@@ -271,24 +306,22 @@ impl RingView {
     /// the background click itself so the stock root handler never closes
     /// without the exit.
     pub(super) fn porcelain_panel(
-        &mut self,
+        &self,
+        frame: Frame,
         edge: Pixels,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let now = Instant::now();
-        let reduce = cx.reduce_motion();
+        let Frame {
+            hover_t,
+            needle,
+            press,
+            mark,
+            hub_t,
+            hub_press_t,
+            stage,
+            reduce,
+        } = frame;
         let layout = Layout::fitting(edge);
-        let RingLook::Porcelain(motion) = &mut self.look else {
-            unreachable!("porcelain_panel is only drawn for a Porcelain ring");
-        };
-        motion.advance(self.hovered, now, reduce);
-        let stage = motion.stage(now, reduce);
-        let hover_t = motion.hover_t;
-        let needle = (motion.needle_angle(now, reduce), motion.aim_t);
-        let press = motion.press(now, reduce);
-        let mark = motion.mark(now, reduce);
-        let hub_t = motion.hub_t;
-        let hub_press_t = motion.hub_press_t;
         let hovered = self
             .hovered
             .and_then(|slot| self.invocation.slots.get(&slot));

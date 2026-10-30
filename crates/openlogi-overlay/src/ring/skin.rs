@@ -20,11 +20,11 @@ use openlogi_ui::ring_style::in_motion::{
     TRACK_OUTER, hub_fill, hub_fill_hovered, slot_fill, slot_ink, track,
 };
 
+use super::RingView;
 use super::motion::{
     Presence, ease_out_back, ease_out_cubic, ellipse_path, lerp_angle, presence_at, radial_spoke,
     slot_heading, smooth_towards,
 };
-use super::{RingLook, RingView};
 use crate::ipc::OverlayCommand;
 
 /// The hub open: the circle that carries the hovered slot's full caption.
@@ -113,6 +113,36 @@ impl Motion {
     fn elapsed(&self, now: Instant) -> f32 {
         now.saturating_duration_since(self.born).as_secs_f32()
     }
+
+    /// Advance the clocks to `now` and copy out what this frame draws.
+    pub(super) fn frame(
+        &mut self,
+        hovered: Option<ActionRingSlot>,
+        now: Instant,
+        reduce: bool,
+    ) -> Frame {
+        self.advance(hovered, now, reduce);
+        Frame {
+            hover_t: self.hover_t,
+            arc_angle: self.arc_angle,
+            hub_t: self.hub_t,
+            presence: self.presence(now, reduce),
+            elapsed: self.elapsed(now),
+            reduce,
+        }
+    }
+}
+
+/// What one frame of the panel is drawn from: the clocks as they stand,
+/// copied out of the motion so the panel borrows nothing.
+#[derive(Clone, Copy)]
+pub(super) struct Frame {
+    hover_t: [f32; 8],
+    arc_angle: f32,
+    hub_t: f32,
+    presence: Presence,
+    elapsed: f32,
+    reduce: bool,
 }
 
 impl RingView {
@@ -121,19 +151,19 @@ impl RingView {
     /// pills, hub and the ambient field alike. It takes the background click
     /// itself so the stock root handler never closes without the exit.
     pub(super) fn skinned_panel(
-        &mut self,
+        &self,
+        frame: Frame,
         edge: Pixels,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let now = Instant::now();
-        let reduce = cx.reduce_motion();
-        let RingLook::InMotion(motion) = &mut self.look else {
-            unreachable!("skinned_panel is only drawn for an In Motion ring");
-        };
-        motion.advance(self.hovered, now, reduce);
-        let presence = motion.presence(now, reduce);
-        let elapsed = motion.elapsed(now);
-        let (hover_t, arc_angle, hub_t) = (motion.hover_t, motion.arc_angle, motion.hub_t);
+        let Frame {
+            hover_t,
+            arc_angle,
+            hub_t,
+            presence,
+            elapsed,
+            reduce,
+        } = frame;
         let layout = Layout::fitting(edge);
         let slots = ActionRingSlot::ALL
             .into_iter()

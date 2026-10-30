@@ -318,22 +318,35 @@ impl Render for RingView {
         let viewport = window.viewport_size();
         let theme = self.look.theme();
         let edge = panel_edge(theme, viewport);
+        // An animated look advances its clocks in the one arm that holds it
+        // and hands back the frame its panel draws from, so no panel has to
+        // match the look again.
+        let now = Instant::now();
+        let reduce = cx.reduce_motion();
+        let hovered = self.hovered;
         let panel = panel_origin(theme, placement, center, viewport).map(|origin| {
-            div()
-                .absolute()
-                .left(origin.x)
-                .top(origin.y)
-                .child(match self.look {
-                    RingLook::Classic => self.classic_panel(cx).into_any_element(),
-                    RingLook::InMotion(_) => self.skinned_panel(edge, cx).into_any_element(),
-                    RingLook::Obsidian(_) => self
-                        .obsidian_panel(edge, origin, window, cx)
-                        .into_any_element(),
-                    RingLook::Porcelain(_) => self.porcelain_panel(edge, cx).into_any_element(),
-                    RingLook::ObsidianSignal(_) => {
-                        self.obsidian_signal_panel(edge, cx).into_any_element()
-                    }
-                })
+            let panel = match &mut self.look {
+                RingLook::Classic => self.classic_panel(cx).into_any_element(),
+                RingLook::InMotion(motion) => {
+                    let frame = motion.frame(hovered, now, reduce);
+                    self.skinned_panel(frame, edge, cx).into_any_element()
+                }
+                RingLook::Obsidian(motion) => {
+                    let pointer = window.mouse_position() - origin;
+                    let frame = motion.frame(hovered, pointer, edge, now, reduce);
+                    self.obsidian_panel(&frame, edge, cx).into_any_element()
+                }
+                RingLook::Porcelain(motion) => {
+                    let frame = motion.frame(hovered, now, reduce);
+                    self.porcelain_panel(frame, edge, cx).into_any_element()
+                }
+                RingLook::ObsidianSignal(motion) => {
+                    let frame = motion.frame(hovered, now, reduce);
+                    self.obsidian_signal_panel(frame, edge, cx)
+                        .into_any_element()
+                }
+            };
+            div().absolute().left(origin.x).top(origin.y).child(panel)
         });
 
         div()
