@@ -37,11 +37,11 @@ use openlogi_core::action_ring::DISPLAY_LIFETIME;
 use crate::backlight::BacklightView;
 use crate::ipc::OverlayCommand;
 use crate::notice::NoticeShelf;
-use crate::platform::{MotionPreference, RingPlacement, settle_latest_invocation};
+use crate::platform::{RingPlacement, motion};
 use crate::ring::{RingPointer, RingView};
 use crate::session::{
     ClickAwaySession, claim_the_role, close_all_ring_windows, close_ring_windows,
-    spawn_click_away_dismissal,
+    settle_latest_invocation, spawn_click_away_dismissal,
 };
 
 #[expect(
@@ -102,7 +102,7 @@ fn main() -> Result<()> {
         })
         .detach();
         cx.spawn(async move |cx| {
-            let mut motion = MotionPreference::default();
+            let mut preference = motion::MotionPreference::default();
             while let Some(observed) = invocations.recv().await {
                 // No ring is what a dismissal looks like: close whatever is
                 // showing and open nothing. The agent has already forgotten the
@@ -119,8 +119,8 @@ fn main() -> Result<()> {
                     cx,
                     invocation,
                     &mut invocations,
-                    &mut motion,
-                    async { platform::read_reduced_motion() },
+                    &mut preference,
+                    async { motion::read() },
                 )
                 .await
                 else {
