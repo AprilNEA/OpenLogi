@@ -123,7 +123,7 @@ fn reviewed_detail_tabs(id: &str) -> Vec<DetailTab> {
         // The keypad (kind Numpad, a measured 0x1b04 table, no pointer
         // sensor) is configured on Keys too, and a key can open the Actions
         // Ring, so the ring editor follows it.
-        "mx-mechanical-mini-mac-001" | "mx-creative-keypad-001" => {
+        "mx-mechanical-mini-mac-001" | "mx-keys-s-001" | "mx-creative-keypad-001" => {
             vec![DetailTab::Keys, DetailTab::ActionsRing, DetailTab::Device]
         }
         id => panic!("{id}: add reviewed desktop panel expectations"),
