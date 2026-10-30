@@ -170,6 +170,7 @@ fn online_record(key: &str) -> DeviceRecord {
         driver_id: None,
         registry_model_id: None,
         route: None,
+        receiver_brand: None,
         capture_id: None,
         kind: DeviceKind::Mouse,
         capabilities: Some(Capabilities::presumed_from_kind(DeviceKind::Mouse)),
@@ -834,4 +835,37 @@ fn two_serial_less_same_model_cameras_stay_distinct() {
     assert_ne!(list[0].inventory_key(), list[1].inventory_key());
     assert_ne!(list[0].record_key(), list[1].record_key());
     assert_ne!(list[0].capture_id, list[1].capture_id);
+}
+
+/// A Lightspeed receiver rides the Unifying route, so the record keeps the
+/// receiver's brand from its product id; a direct device has no receiver.
+#[test]
+fn records_carry_the_receiver_brand() {
+    use openlogi_core::hid::ReceiverBrand;
+
+    let mut lightspeed = inventory_with(vec![paired_device_no_model_info(1, Some(0x407f))]);
+    lightspeed.receiver.name = "USB Receiver".into();
+    lightspeed.receiver.product_id = 0xc539;
+    let unifying = inventory_with(vec![paired_device_no_model_info(2, Some(0x4082))]);
+    let config = Config::default();
+    let resolver = AssetResolver::new();
+
+    let list = build_device_list(&[lightspeed, unifying], &[], &resolver, &config, &[]);
+
+    let brand_of = |slot| {
+        list.iter()
+            .find(|r| r.slot == slot)
+            .map(|r| r.receiver_brand)
+    };
+    assert_eq!(brand_of(1), Some(Some(ReceiverBrand::Lightspeed)));
+    assert_eq!(brand_of(2), Some(Some(ReceiverBrand::Unifying)));
+
+    let direct = build_device_list(
+        &[direct_inventory(model_info(2, 0xb034))],
+        &[],
+        &resolver,
+        &config,
+        &[],
+    );
+    assert_eq!(direct[0].receiver_brand, None);
 }
