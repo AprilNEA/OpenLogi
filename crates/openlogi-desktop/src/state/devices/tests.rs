@@ -10,8 +10,8 @@ use std::collections::HashSet;
 
 use super::{
     Camera, Capabilities, DeviceIdentity, DeviceKind, DeviceModelInfo, DeviceRecord,
-    DeviceTransports, append_offline_known, build_device_list, direct_key_prefix, effective_kind,
-    fold_by_inventory_key, offline_record, pick_initial_device,
+    DeviceTransports, adopt_transient_record, append_offline_known, build_device_list,
+    direct_key_prefix, effective_kind, fold_by_inventory_key, offline_record, pick_initial_device,
 };
 use crate::state::inventory::adopt_routes;
 use openlogi_core::hid::{DeviceRoute, Dpi, ReceiverBrand};
@@ -167,6 +167,33 @@ fn records_keep_the_registered_receiver_family() {
 
         assert_eq!(records[0].receiver_brand, Some(expected));
     }
+}
+
+/// The family names the receiver behind the route, so an adopted card takes
+/// it from the live sighting together with the route: a mouse last seen on a
+/// Lightspeed receiver and now on its cable has no receiver family.
+#[test]
+fn an_adopted_card_takes_its_receiver_family_from_the_live_route() {
+    let mut known = online_record("unit:6be9d300");
+    known.route = Some(DeviceRoute::Unifying {
+        receiver_uid: "DA2699E1".to_string(),
+        slot: 1,
+    });
+    known.receiver_brand = Some(ReceiverBrand::Lightspeed);
+    let cable = DeviceRoute::Direct {
+        vendor_id: 0x046d,
+        product_id: 0xc08d,
+    };
+    let mut live = online_record("direct:046d:c08d:6be9d300");
+    live.route = Some(cable.clone());
+
+    let adopted = adopt_transient_record(&known, live);
+
+    assert_eq!(adopted.route, Some(cable));
+    assert_eq!(
+        adopted.receiver_brand, None,
+        "a cable has no receiver family"
+    );
 }
 
 fn online_record(key: &str) -> DeviceRecord {
