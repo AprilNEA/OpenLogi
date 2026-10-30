@@ -461,12 +461,11 @@ fn short_collection<'a>(
     // request to a collection no other OS uses for HID++ — the likely reason
     // the headset never enumerated on Windows (#1957), while Linux, which
     // treats the interface as long-only, reads its battery.
-    if super::is_long_only_collection(long_info.usage_page, long_info.usage_id) {
-        return None;
-    }
+    let (short_page, short_usage) =
+        super::short_collection(long_info.usage_page, long_info.usage_id)?;
     siblings
         .iter()
-        .find(|d| d.usage_page == 0xff00 && d.usage_id == 0x0001)
+        .find(|d| d.usage_page == short_page && d.usage_id == short_usage)
 }
 
 /// Open every sibling that carries a vendor report neither HID++ handle does.
