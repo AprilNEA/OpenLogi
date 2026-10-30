@@ -189,8 +189,10 @@ Common device fields are:
   It shapes only the stream OpenLogi's own preview opens — resolution and frame
   rate are negotiated per stream, so other applications are not affected — and
   profiles neither save nor apply it. The Camera tab offers it as **Resolution**
-  and **Frame rate** on Linux; macOS and Windows list no modes yet, so the
-  entries have no effect there
+  and **Frame rate** dropdowns. A camera lists only the modes its USB link can
+  carry, so on macOS and Windows the tab also says when a camera is on a slower
+  link than it supports (for example a USB 3 camera on a USB 2 port, hub, or
+  cable), which is when the list is shorter than the camera can offer
 - standalone `light`: the agent writes it when the light connects, when a save
   changes it, and, with `auto_camera` on, when camera use starts or stops.
   Saving another setting leaves a change made with the light's own buttons in
