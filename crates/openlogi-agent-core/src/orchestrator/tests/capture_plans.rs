@@ -6,6 +6,77 @@ use openlogi_hid::reprog_controls::BACK_CIDS;
 use super::*;
 
 #[test]
+fn a_new_route_does_not_rearm_an_existing_capture() {
+    let mut orch = orchestrator(Config::default());
+    let old = direct_inventory(Some("old"), [1, 2, 3, 4]);
+    let mut new = direct_inventory(Some("new"), [5, 6, 7, 8]);
+    new.receiver.product_id = 0xb042;
+    orch.refresh_inventory(std::slice::from_ref(&old), &[], false);
+    let before = orch.shared.capture_plans.borrow().plans()[0].target.clone();
+    orch.refresh_inventory(&[old, new], &[], false);
+    let plans = orch.shared.capture_plans.borrow();
+    let retained = plans
+        .plans()
+        .iter()
+        .find(|plan| plan.target.route == before.route)
+        .unwrap();
+    assert_eq!(
+        retained.target, before,
+        "discovery on another route must not send the existing capture into native teardown"
+    );
+}
+
+#[test]
+fn settings_reapply_after_a_node_change_does_not_rearm_other_captures() {
+    let mut orch = orchestrator(Config::default());
+    let inventory = direct_inventory(Some("old"), [1, 2, 3, 4]);
+    orch.refresh_inventory(std::slice::from_ref(&inventory), &[], false);
+    let before = orch.shared.capture_plans.borrow().clone();
+    orch.reapply_volatile_on_next_refresh();
+    orch.refresh_inventory(std::slice::from_ref(&inventory), &[], false);
+    assert_eq!(
+        orch.shared.capture_plans.borrow().as_ref(),
+        before.as_ref(),
+        "general settings reapply must not retire an unrelated capture on node changes"
+    );
+}
+
+#[test]
+fn a_device_wake_does_not_rearm_other_routes_but_system_resume_does() {
+    for resume_first in [false, true] {
+        let mut orch = orchestrator(Config::default());
+        let old = direct_inventory(Some("old"), [1, 2, 3, 4]);
+        let mut other = direct_inventory(Some("other"), [5, 6, 7, 8]);
+        other.receiver.product_id = 0xb042;
+        let devices = [old, other];
+        orch.refresh_inventory(&devices, &[], false);
+        let before = orch.shared.capture_plans.borrow().clone();
+        orch.reapply_reconnected_on_next_refresh();
+        orch.refresh_inventory(&devices, &[], false);
+        assert_eq!(
+            orch.shared.capture_plans.borrow().as_ref(),
+            before.as_ref(),
+            "a session owns its wireless wake rearm; an identity-free notification must not cycle every capture"
+        );
+        if resume_first {
+            orch.reapply_after_system_resume();
+            orch.reapply_reconnected_on_next_refresh();
+        } else {
+            orch.reapply_reconnected_on_next_refresh();
+            orch.reapply_after_system_resume();
+        }
+        orch.refresh_inventory(&devices, &[], false);
+        let resumed = orch.shared.capture_plans.borrow();
+        for (old, new) in before.plans().iter().zip(resumed.plans()) {
+            assert_ne!(
+                old.target.rearm_generation, new.target.rearm_generation,
+                "a system wake must retain its request to rearm every online route"
+            );
+        }
+    }
+}
+
+#[test]
 fn config_reload_publishes_scroll_preferences_without_restarting_the_hook() {
     let mut orch = orchestrator(Config::default());
     let preferences = Arc::clone(&orch.shared.scroll_preferences);
@@ -434,6 +505,25 @@ fn assert_side_gesture_capture_follows_platform_ownership_and_hook_availability(
     );
 }
 
+/// macOS hands Back/Forward gestures to HID++ raw XY, which a spy-only mouse
+/// cannot report, so its gestures must stay in the hook's maps.
+#[test]
+fn a_spy_only_mouse_keeps_its_side_gestures_in_the_os_hook() {
+    let mut config = Config::default();
+    config.set_gesture_mode("0407f", ButtonId::Back, true);
+    let mut orch = orchestrator(config);
+    orch.devices = vec![dev("0407f", 1, true)];
+    orch.rebuild();
+    orch.set_os_mouse_hook_available(true);
+
+    let hook_maps = orch
+        .shared
+        .hook_maps
+        .read()
+        .expect("hook maps should not be poisoned");
+    assert!(hook_maps.gestures.contains_key(&ButtonId::Back));
+}
+
 #[test]
 fn side_gesture_capture_follows_platform_ownership_and_hook_availability() {
     assert_side_gesture_capture_follows_platform_ownership_and_hook_availability(ButtonId::Forward);
@@ -563,6 +653,63 @@ fn a_back_binding_alone_keeps_its_whole_family_on_a_keyboard() {
     }
 }
 
+/// A keyboard that binds a key only for one app keeps its capture session
+/// while other apps are in front, with nothing diverted. A focus change then
+/// changes the divert set of the same target in place, instead of arming the
+/// keyboard from scratch (#2140).
+#[test]
+fn a_per_app_only_key_keeps_the_keyboard_session_with_nothing_diverted() {
+    const KEY: u16 = 0x00e7;
+    let mut config = Config::default();
+    config.set_per_app_binding("kbd", "editor", ButtonId::control(KEY), Some(Action::Copy));
+    let mut orch = orchestrator(config);
+    let mut keyboard = dev("kbd", 2, true);
+    keyboard.kind = DeviceKind::Keyboard;
+    orch.devices = vec![keyboard];
+    orch.rebuild();
+    let elsewhere = orch
+        .keyboard_spec_for()
+        .expect("a per-app key holds the session");
+    assert!(elsewhere.wanted.is_empty(), "{:#06x?}", elsewhere.wanted);
+
+    orch.set_current_app(Some(ForegroundApp::unnamed("editor".into())));
+    let in_editor = orch.keyboard_spec_for().expect("spec");
+    assert_eq!(in_editor.route, elsewhere.route);
+    assert_eq!(
+        in_editor.wanted.into_iter().collect::<Vec<_>>(),
+        [(KEY, ButtonId::control(KEY))]
+    );
+}
+/// A keyboard that binds keys only for another app never takes the session
+/// from a keyboard whose bindings apply now, even when it comes first in
+/// inventory order.
+#[test]
+fn a_keyboard_with_current_bindings_wins_over_a_per_app_only_one() {
+    let mut config = Config::default();
+    config.set_per_app_binding(
+        "editor-only",
+        "editor",
+        ButtonId::control(0x00e7),
+        Some(Action::Copy),
+    );
+    config.set_binding(
+        "everywhere",
+        ButtonId::control(0x00e8),
+        Binding::Single(Action::Paste),
+    );
+    let mut orch = orchestrator(config);
+    let keyboards = [("editor-only", 2), ("everywhere", 3)].map(|(key, index)| {
+        let mut keyboard = dev(key, index, true);
+        keyboard.kind = DeviceKind::Keyboard;
+        keyboard
+    });
+    orch.devices = keyboards.into();
+    orch.rebuild();
+    assert_eq!(
+        orch.keyboard_spec_for().expect("spec").config_key,
+        "everywhere"
+    );
+}
 #[test]
 fn a_disabled_mouse_keeps_its_latest_route_for_restore() {
     let mut config = Config::default();

@@ -36,6 +36,7 @@ use tokio::time::error::Elapsed;
 use tracing::{debug, info, warn};
 
 use crate::capture_plan::SharedCapturePlans;
+use crate::dpi::DpiBeforeShift;
 use crate::pointer_speed::SpeedTarget;
 use crate::receiver_access::ReceiverAccess;
 
@@ -648,6 +649,12 @@ fn log_outcome<T>(
     }
 }
 
+/// Whether a bounded background write was rejected or timed out, so its
+/// device may not hold what it asked for.
+fn write_failed<T>(result: &Result<Result<T, WriteError>, Elapsed>) -> bool {
+    matches!(result, Ok(Err(_)) | Err(_))
+}
+
 /// Wait for `ticket`'s turn, then for `transport`, then give whichever of
 /// `write` and `superseded` runs the whole `WRITE_TIMEOUT`. Every ordered
 /// write goes through here: neither wait is part of the deadline, and the
@@ -795,12 +802,17 @@ pub(crate) fn write_force_sensing_in_background(op: DeviceOp, ticket: WriteTicke
 /// When `led` is set, the same turn then lights (`true`) or darkens the DPI
 /// LED with [`show_precision_led`]. The LED never fails the speed write: it
 /// gives up before the turn's timeout would.
+///
+/// `on_failed` runs when the mouse rejected the write or it timed out, so the
+/// mouse may not have the target; not when a newer write superseded it.
 pub(crate) fn write_pointer_speed_in_background(
     op: DeviceOp,
     ticket: WriteTicket,
     target: SpeedTarget,
     led: Option<bool>,
+    before: Option<DpiBeforeShift>,
     on_applied: impl FnOnce() + Send + 'static,
+    on_failed: impl FnOnce() + Send + 'static,
 ) {
     let index = op.route.device_index();
     let turn = op.access.transport_turns.turn_for(&op.route);
@@ -813,6 +825,11 @@ pub(crate) fn write_pointer_speed_in_background(
                 || async {
                     let started = tokio::time::Instant::now();
                     let shared = op.resolve()?;
+                    if let Some(before) = before
+                        && before.get().is_none()
+                    {
+                        before.set(openlogi_hid::get_dpi_info_on(&shared).await?.current);
+                    }
                     let landed = match target {
                         SpeedTarget::Scaled(speed) => openlogi_hid::set_pointer_speed_on(&shared, speed)
                             .await
@@ -831,6 +848,7 @@ pub(crate) fn write_pointer_speed_in_background(
             .await
         },
         move |result| {
+            let failed = write_failed(&result);
             log_outcome(index, "pointer-speed write", result, |landed| match landed {
                 Some(Landed::Speed(applied)) => {
                     debug!(index, ?target, %applied, "pointer speed written");
@@ -851,6 +869,9 @@ pub(crate) fn write_pointer_speed_in_background(
                 }
                 None => debug!(index, ?target, "pointer-speed write superseded by a newer one"),
             });
+            if failed {
+                on_failed();
+            }
         },
     );
 }
@@ -1356,6 +1377,124 @@ fn log_wheel_result(
     log_outcome(index, "wheel mode write", result, |_written| {
         debug!(index, ?change, "native wheel mode written");
     });
+}
+
+/// Write the DPI `restore` yields once this write's turn comes, if any, and
+/// forget `before` once it is written. As a pointer-speed write does, it then
+/// sets the DPI LED when `led` says, and runs `on_restored` once it landed.
+pub(crate) fn restore_dpi_in_background(
+    op: DeviceOp,
+    ticket: WriteTicket,
+    before: DpiBeforeShift,
+    led: Option<bool>,
+    restore: impl FnOnce() -> Option<Dpi> + Send + 'static,
+    on_restored: impl FnOnce() + Send + 'static,
+) {
+    let index = op.route.device_index();
+    let turn = op.access.transport_turns.turn_for(&op.route);
+    op.spawn_timed_write(
+        "DPI restore",
+        move |op| async move {
+            within_turn(
+                &ticket,
+                &turn,
+                || async move {
+                    let Some(dpi) = restore() else {
+                        return Ok(Some(None));
+                    };
+                    let started = tokio::time::Instant::now();
+                    let shared = op.resolve()?;
+                    openlogi_hid::set_dpi_on(&shared, dpi).await?;
+                    if let Some(on) = led {
+                        show_precision_led(&shared, on, started).await;
+                    }
+                    before.clear();
+                    Ok(Some(Some(dpi)))
+                },
+                || async { Ok(None) },
+            )
+            .await
+        },
+        move |result| {
+            log_outcome(index, "DPI restore", result, |restored| match restored {
+                Some(Some(dpi)) => {
+                    debug!(index, %dpi, "DPI restored");
+                    on_restored();
+                }
+                Some(None) => debug!(index, "no DPI to restore"),
+                None => debug!(index, "DPI restore superseded by a newer write"),
+            });
+        },
+    );
+}
+
+/// Read the DPI of `op`'s mouse once this write's turn comes, and write the
+/// DPI `step` picks from that reading, unless a newer pointer-speed write was
+/// requested after `ticket`, before or during the read. For a preset step on
+/// a mouse whose DPI OpenLogi never set. As a pointer-speed write does, it
+/// then sets the DPI LED when `led` says, and runs `on_applied` once it
+/// landed. `on_failed` gets the DPI `step` picked when the mouse rejected it
+/// or the write timed out.
+pub(crate) fn step_dpi_in_background(
+    op: DeviceOp,
+    ticket: WriteTicket,
+    led: Option<bool>,
+    step: impl FnOnce(Dpi) -> Option<Dpi> + Send + 'static,
+    on_applied: impl FnOnce() + Send + 'static,
+    on_failed: impl FnOnce(Dpi) + Send + 'static,
+) {
+    let index = op.route.device_index();
+    let turn = op.access.transport_turns.turn_for(&op.route);
+    let picked = Arc::new(Mutex::new(None));
+    let picked_by_step = Arc::clone(&picked);
+    op.spawn_timed_write(
+        "DPI step",
+        move |op| async move {
+            let recheck = ticket.clone();
+            within_turn(
+                &ticket,
+                &turn,
+                || async move {
+                    let started = tokio::time::Instant::now();
+                    let shared = op.resolve()?;
+                    let reading = openlogi_hid::get_dpi_info_on(&shared).await?.current;
+                    // A write requested during the read holds the newer DPI;
+                    // `step` must not overwrite what it cached.
+                    if !recheck.is_current() {
+                        return Ok(None);
+                    }
+                    let Some(dpi) = step(reading) else {
+                        return Ok(Some(None));
+                    };
+                    *picked_by_step
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner) = Some(dpi);
+                    openlogi_hid::set_dpi_on(&shared, dpi).await?;
+                    if let Some(on) = led {
+                        show_precision_led(&shared, on, started).await;
+                    }
+                    Ok(Some(Some((reading, dpi))))
+                },
+                || async { Ok(None) },
+            )
+            .await
+        },
+        move |result| {
+            let failed = write_failed(&result);
+            log_outcome(index, "DPI step", result, |stepped| match stepped {
+                Some(Some((reading, dpi))) => {
+                    debug!(index, %reading, %dpi, "DPI stepped from the mouse's reading");
+                    on_applied();
+                }
+                Some(None) => debug!(index, "no DPI preset to step to"),
+                None => debug!(index, "DPI step superseded by a newer write"),
+            });
+            let picked = *picked.lock().unwrap_or_else(PoisonError::into_inner);
+            if failed && let Some(dpi) = picked {
+                on_failed(dpi);
+            }
+        },
+    );
 }
 
 /// Spawn an OS thread that reconciles the configured native HiResWheel mode

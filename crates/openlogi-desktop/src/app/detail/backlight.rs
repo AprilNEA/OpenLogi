@@ -11,15 +11,13 @@ use gpui::{
     AnyElement, App, InteractiveElement as _, IntoElement, ParentElement as _, Styled as _, div,
     prelude::FluentBuilder as _,
 };
-use gpui_component::{
-    Disableable as _, Icon, IconName, Selectable as _, button::Button, h_flex, v_flex,
-};
+use gpui_component::{Disableable as _, Icon, IconName, Selectable as _, h_flex, v_flex};
 use openlogi_core::hid::{
     BacklightChange, BacklightControls, BacklightDuration, BacklightState, BacklightStatus,
 };
 
 use crate::state::{AppState, BacklightLoad, DeviceKey, DurationSteps};
-use crate::ui::components::{PanelCard, Toggle, toggle_row};
+use crate::ui::components::{PanelCard, Pill, Toggle, toggle_row};
 use crate::ui::status::{retry_line, status_line};
 use crate::ui::theme::{Palette, Typography as _};
 
@@ -163,9 +161,7 @@ fn level_row(state: BacklightState, pal: Palette) -> impl IntoElement {
                 .gap_2()
                 .flex_wrap()
                 .children((0..state.nb_levels).map(|level| {
-                    Button::new(("backlight-level", usize::from(level)))
-                        .compact()
-                        .label(level.to_string())
+                    Pill::new(("backlight-level", usize::from(level)), level.to_string())
                         .selected(level == state.current_level)
                         .disabled(!state.enabled)
                         .on_click(move |_event, _window, cx| {
@@ -244,14 +240,15 @@ fn duration_pills(state: BacklightState, steps: &[u16]) -> impl IntoElement {
             )]
             let duration = BacklightDuration::try_from(seconds)
                 .expect("the panel only offers steps the keyboard can store");
-            Button::new(("backlight-duration", usize::from(seconds)))
-                .compact()
-                .label(duration_label(seconds))
-                .selected(Some(duration) == state.duration)
-                .disabled(!state.enabled)
-                .on_click(move |_event, _window, cx| {
-                    commit(cx, BacklightChange::Duration(duration));
-                })
+            Pill::new(
+                ("backlight-duration", usize::from(seconds)),
+                duration_label(seconds),
+            )
+            .selected(Some(duration) == state.duration)
+            .disabled(!state.enabled)
+            .on_click(move |_event, _window, cx| {
+                commit(cx, BacklightChange::Duration(duration));
+            })
         }))
 }
 

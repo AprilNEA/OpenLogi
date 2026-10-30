@@ -28,7 +28,9 @@ use super::{
 };
 use crate::backend::NodeInfo;
 use crate::host_lock::ReceiverRegisterPhase;
-use crate::inventory::cache::{CacheKey, CacheOutcome, Cached, is_stale, probe_or_reuse};
+use crate::inventory::cache::{
+    CacheKey, CacheOutcome, Cached, ProbeTarget, is_stale, probe_or_reuse,
+};
 use crate::inventory::events::EventSubscriptionHandle;
 use crate::inventory::features::ProbedFeatures;
 use crate::inventory::mappings::{map_unifying_kind, resolve_device_kind};
@@ -130,7 +132,7 @@ pub(super) async fn probe_unifying_receiver(
     };
     let slot_results = connections
         .iter()
-        .map(|conn| probe_unifying_slot(&channel, conn, receiver_uid, pass))
+        .map(|conn| probe_unifying_slot(&channel, conn, receiver_uid, &registers, pass))
         .collect::<Vec<_>>()
         .join()
         .await;
@@ -303,10 +305,15 @@ where
 /// working `get_device_pairing_information` call; we derive a stable cache key
 /// from the receiver UID + slot so the feature-table walk is amortised at ~30s
 /// and two receivers sharing a slot number don't collide in the cache.
+///
+/// `registers` is the receiver's register phase, held by the caller to the
+/// end of the walk: a HID++ 1.0 slot is probed through its registers, and a
+/// codename read is register I/O too.
 pub(in crate::inventory) async fn probe_unifying_slot(
     channel: &Arc<HidppChannel>,
     event: &UnifyingDeviceConnection,
     receiver_uid: &str,
+    registers: &ReceiverRegisterPhase,
     pass: PassContext<'_>,
 ) -> Option<(PairedDevice, CacheOutcome)> {
     let slot = event.index;
@@ -331,7 +338,10 @@ pub(in crate::inventory) async fn probe_unifying_slot(
         probe_budget,
         probe_or_reuse(
             channel,
-            slot,
+            ProbeTarget {
+                index: slot,
+                registers: Some(registers),
+            },
             Some(id.clone()),
             cached,
             event.online,
@@ -351,12 +361,13 @@ pub(in crate::inventory) async fn probe_unifying_slot(
 
     // HID++ 2.0's marketing name is the same identity we need for display and
     // avoids another receiver-register round trip. Keep the legacy codename
-    // read only for a completed feature walk that did not expose a name; never
-    // put it in front of the feature probe, where one missing receiver ACK can
-    // otherwise starve a healthy Lightspeed mouse forever.
+    // read only for a completed probe that did not expose a name — a HID++ 1.0
+    // device never does; never put it in front of the feature probe, where one
+    // missing receiver ACK can otherwise starve a healthy Lightspeed mouse
+    // forever.
     let codename = if let Some(name) = probe.marketing_name.clone() {
         Some(name)
-    } else if probe.capabilities.is_some() {
+    } else if probe.completed() {
         read_codename(channel, slot).await
     } else {
         None
@@ -405,6 +416,7 @@ pub(in crate::inventory) fn assemble_unifying_device(
     online: bool,
     settings_revision: u64,
 ) -> PairedDevice {
+    let capabilities = probe.capabilities();
     PairedDevice {
         slot,
         codename,
@@ -413,7 +425,7 @@ pub(in crate::inventory) fn assemble_unifying_device(
         online,
         battery: probe.battery,
         model_info: probe.model_info,
-        capabilities: probe.capabilities,
+        capabilities,
         settings_revision,
     }
 }

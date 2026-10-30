@@ -13,7 +13,7 @@ categories = ["hardware-support", "os"]
 [dependencies]
 shellexpand.workspace = true
 opener.workspace = true
-openlogi-core = { path = "../openlogi-core", version = "0.8.18" }
+openlogi-core = { path = "../openlogi-core", version = "0.8.19" }
 tracing = { workspace = true }
 
 [dev-dependencies]
@@ -54,6 +54,9 @@ mach2 = "0.5"
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",
+    # `CREATE_NO_WINDOW`, so the `cmd /C` behind `RunShellCommand` opens no
+    # console window.
+    "Win32_System_Threading",
     "Win32_UI_Input_KeyboardAndMouse",
     # The foreground window's thread, whose keyboard layout translates the
     # keys `SendInput` posts.

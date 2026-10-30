@@ -287,6 +287,84 @@ fn an_animated_switch_prepares_every_slide_frame_with_its_time() {
     }
 }
 
+/// A display configuration as Quartz would report it, one
+/// `(display, primary, mirrors)` row per mirrored display. A display without
+/// a row is unmirrored.
+struct Displays(&'static [(u32, u32, u32)]);
+
+impl Displays {
+    fn row(&self, display: u32) -> Option<&(u32, u32, u32)> {
+        self.0.iter().find(|row| row.0 == display)
+    }
+
+    /// The target for a cursor that lies on all of `hits`.
+    fn cursor_target<const N: usize>(&self, hits: [u32; N]) -> Option<u32> {
+        mirror_set(hits.map(|display| self.root(display)))
+    }
+}
+
+impl MirrorSets for Displays {
+    fn primary(&self, display: u32) -> u32 {
+        self.row(display).map_or(display, |row| row.1)
+    }
+
+    fn mirrors(&self, display: u32) -> u32 {
+        self.row(display).map_or(0, |row| row.2)
+    }
+}
+
+#[test]
+fn a_hardware_mirror_and_its_primary_are_one_cursor_display() {
+    // #2147: the external display (3) is the primary and the built-in (1)
+    // its hardware mirror. The cursor lies on both.
+    let displays = Displays(&[(3, 3, 0), (1, 3, 3)]);
+    assert_eq!(displays.cursor_target([3, 1]), Some(3));
+    // The primary alone names the set when `mirrors` reports nothing.
+    let primary_only = Displays(&[(3, 3, 0), (1, 3, 0)]);
+    assert_eq!(primary_only.cursor_target([3, 1]), Some(3));
+}
+
+#[test]
+fn a_software_mirror_resolves_to_the_display_it_copies() {
+    let displays = Displays(&[(4, 4, 0), (2, 2, 4)]);
+    assert_eq!(displays.cursor_target([4, 2]), Some(4));
+}
+
+#[test]
+fn a_hardware_set_that_copies_a_display_resolves_through_its_primary() {
+    // 1 is a hardware mirror of 3, and 3 a software mirror of 4.
+    let displays = Displays(&[(1, 3, 3), (3, 3, 4), (4, 4, 0)]);
+    assert_eq!(displays.root(1), 4);
+    assert_eq!(displays.cursor_target([4, 3, 1]), Some(4));
+}
+
+#[test]
+fn an_unmirrored_display_is_its_own_cursor_display() {
+    assert_eq!(Displays(&[]).cursor_target([5]), Some(5));
+}
+
+#[test]
+fn no_display_or_two_mirror_sets_fail_closed() {
+    let unmirrored = Displays(&[]);
+    assert_eq!(unmirrored.cursor_target([]), None);
+    assert_eq!(unmirrored.cursor_target([0]), None);
+    assert_eq!(unmirrored.cursor_target([3, 0]), None);
+    assert_eq!(unmirrored.cursor_target([3, 1]), None);
+}
+
+#[test]
+fn every_live_unmirrored_display_is_its_own_root() {
+    let displays = CGDisplay::active_displays().unwrap_or_default();
+    if displays.is_empty() {
+        eprintln!("mirror-root assertions skipped: no active display");
+    }
+    for display in displays {
+        if !CGDisplay::new(display).is_in_mirror_set() {
+            assert_eq!(Quartz.root(display), display);
+        }
+    }
+}
+
 /// Opt-in hardware test. Run in a logged-in macOS session with Accessibility
 /// granted to the test host, a next Space on the pointer's display, and no
 /// concurrent trackpad/keyboard Space switching. For each switch style,

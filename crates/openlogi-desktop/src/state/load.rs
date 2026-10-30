@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use openlogi_core::hid::{
     BacklightState, DisableKeysState, DpiInfo, EasySwitchHosts, FnLockState, ForceSensingInfo,
-    PointerSpeed, ReportRateInfo, SmartShiftStatus,
+    OnboardState, PointerSpeed, ReportRateInfo, SmartShiftStatus,
 };
 
 /// State projected from an swr-backed device query: unqueried, in flight,
@@ -66,3 +66,5 @@ pub type EasySwitchLoad = Load<Arc<EasySwitchHosts>>;
 
 /// Per-device Disable Keys capability/current-state load.
 pub type DisableKeysLoad = Load<Arc<DisableKeysState>>;
+
+pub type OnboardLoad = Load<Arc<OnboardState>>;

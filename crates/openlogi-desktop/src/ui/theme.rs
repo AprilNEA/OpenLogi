@@ -261,7 +261,7 @@ pub fn register_builtin_themes(cx: &mut App) {
     }
 }
 
-fn rem_size(scale: UiScale) -> Pixels {
+pub(crate) fn rem_size(scale: UiScale) -> Pixels {
     px(BASE_REM_SIZE * f32::from(scale.percent()) / 100.)
 }
 

@@ -12,7 +12,6 @@ fn target() -> KeyboardTarget {
             vendor_id: 0x046d,
             product_id: 0xc548,
         },
-        wanted: BTreeMap::new(),
     }
 }
 
@@ -24,6 +23,7 @@ fn dispatch(action: Action) -> KeyboardDispatchPlan {
     KeyboardDispatchPlan {
         config_key: "keyboard-a".to_owned(),
         bindings: BTreeMap::from([(SEARCH_KEY, Binding::Single(action))]),
+        divert: BTreeMap::from([(0x00d4, SEARCH_KEY)]),
     }
 }
 
@@ -54,7 +54,7 @@ async fn publication_and_receiver_request_change_wanted_state_immediately() {
     let published = KeyboardSpec {
         config_key: "keyboard-a".to_owned(),
         route: target().route,
-        wanted: target().wanted,
+        wanted: dispatch(Action::MissionControl).divert,
         bindings: dispatch(Action::MissionControl).bindings,
     };
 
@@ -119,12 +119,75 @@ fn binding_changes_refresh_without_rearming_hardware() {
     assert_eq!(session.dispatch(), &new_dispatch);
 }
 
+/// A per-app profile that binds one more key changes the plan, not the
+/// target (#2140): the session stays active, and the new divert set reaches
+/// it. A plan with the same divert set publishes nothing.
+#[tokio::test]
+async fn divert_set_changes_reach_the_running_session_in_place() {
+    let access = ReceiverAccess::default();
+    let (_signal, device_io) = openlogi_hid::device_io_channel();
+    let (ring, _ring_rx) = mpsc::unbounded_channel();
+    let mut actions = crate::runtime::ActionRuntime::new(
+        Arc::default(),
+        Arc::default(),
+        DeviceAccess {
+            channel: CaptureChannelSlot::default(),
+            registry: ChannelRegistry::default(),
+            receiver_access: access,
+            device_io,
+            transport_turns: crate::hardware::TransportTurns::default(),
+        },
+        ring,
+    )
+    .unwrap();
+    let divert = watch::Sender::new(dispatch(Action::MissionControl).divert);
+    let mut session_view = divert.subscribe();
+    let mut session = live_session(7);
+    let mut per_app = dispatch(Action::ShowDesktop);
+    let backlight_down = ButtonId::control(0x01a1);
+    per_app
+        .bindings
+        .insert(backlight_down, Binding::Single(Action::Copy));
+    per_app.divert.insert(0x01a1, backlight_down);
+
+    reconcile_session(
+        &mut session,
+        Some(&(target(), per_app.clone())),
+        &actions.dispatcher(),
+        &divert,
+    );
+    assert!(session.is_active(), "a divert-set change must not restart");
+    assert_eq!(session.dispatch(), &per_app);
+    assert!(session_view.has_changed().unwrap());
+    assert_eq!(*session_view.borrow_and_update(), per_app.divert);
+
+    let mut same_keys = per_app.clone();
+    same_keys
+        .bindings
+        .insert(backlight_down, Binding::Single(Action::Paste));
+    reconcile_session(
+        &mut session,
+        Some(&(target(), same_keys)),
+        &actions.dispatcher(),
+        &divert,
+    );
+    assert!(
+        !session_view.has_changed().unwrap(),
+        "an action-only change must not write firmware"
+    );
+    actions.shutdown();
+}
+
 #[test]
 fn target_changes_freeze_dispatch_until_teardown_finishes() {
     let mut session = live_session(7);
     let old_dispatch = session.dispatch().clone();
-    let mut replacement = target();
-    replacement.wanted.insert(0x00d4, SEARCH_KEY);
+    let replacement = KeyboardTarget {
+        route: DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xc52b,
+        },
+    };
     let new_dispatch = dispatch(Action::ShowDesktop);
 
     assert!(
@@ -184,7 +247,7 @@ async fn recovery_manager_waits_for_control_events_and_shutdown_between_retries(
         let (spec_tx, spec) = watch::channel(Some(Arc::new(KeyboardSpec {
             config_key: "keyboard-a".to_owned(),
             route: target().route,
-            wanted: target().wanted,
+            wanted: dispatch(Action::MissionControl).divert,
             bindings: dispatch(Action::MissionControl).bindings,
         })));
         let capture = CaptureChannelSlot::default();
@@ -236,5 +299,44 @@ async fn recovery_manager_waits_for_control_events_and_shutdown_between_retries(
         }
         assert_eq!(tokio::time::Instant::now(), before_event);
         actions.shutdown();
+    }
+}
+
+/// A session body that panics used to take its completion report down with
+/// it, leaving the keyboard slot `Running` and the keys never re-armed.
+#[tokio::test]
+async fn a_session_body_that_panics_still_reports_done_after_its_inputs() {
+    let id = session_id(3);
+    let (events, mut event_rx) = mpsc::unbounded_channel();
+    let (sink, session_rx) = mpsc::unbounded_channel();
+    let forward = spawn_input_forwarder(id.clone(), session_rx, events.clone());
+    let (never_restored, restore) = oneshot::channel::<Option<PendingCaptureRestore>>();
+    let session_task = tokio::spawn(async move {
+        sink.send(CapturedInput::ButtonPulse(SEARCH_KEY))
+            .expect("the capture forwarder should remain open");
+        drop(never_restored);
+        // Dies with the sink still held, the way a panicking body does; the
+        // unwind is what closes the forwarder.
+        restore.await.expect("simulated capture panic")
+    });
+
+    complete_session(session_task, forward, events, id.clone()).await;
+
+    match event_rx.recv().await {
+        Some(KeyboardSessionEvent::Input(input)) => {
+            assert_eq!(input.session, id);
+            assert_eq!(input.input, CapturedInput::ButtonPulse(SEARCH_KEY));
+        }
+        _ => panic!("the input accepted before the panic must still be forwarded"),
+    }
+    match event_rx.recv().await {
+        Some(KeyboardSessionEvent::Done(done)) => {
+            assert_eq!(done.session, id);
+            assert!(
+                done.pending_restore.is_none(),
+                "a panicked body has no restoration to hand over"
+            );
+        }
+        _ => panic!("Done must follow the last input even when the body panicked"),
     }
 }

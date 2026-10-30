@@ -332,10 +332,13 @@ async fn a_failed_direct_reprobe_retires_the_channel() {
     let backend = Arc::new(RejectingWritesBackend { node: info });
     let mut enumerator = Enumerator::with_backend(backend);
     let mut last_good = cache_entry();
-    last_good.probe.capabilities = Some(Capabilities {
-        pointer: true,
-        ..Capabilities::default()
-    });
+    last_good.probe.protocol = ProbedProtocol::Hidpp20 {
+        capabilities: Capabilities {
+            pointer: true,
+            ..Capabilities::default()
+        },
+        incomplete: false,
+    };
     last_good.probed_at = Instant::now()
         .checked_sub(REFRESH_INTERVAL + Duration::from_nanos(1))
         .expect("the refresh interval fits the monotonic clock");

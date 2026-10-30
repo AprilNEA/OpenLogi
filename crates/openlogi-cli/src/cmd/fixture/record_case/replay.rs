@@ -135,7 +135,8 @@ fn unique_replacement(audit: &HidCassetteAudit, kind: SanitizedIdentityKind) -> 
 #[cfg(test)]
 mod tests {
     use openlogi_core::hid::{
-        SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus, SmartShiftThreshold,
+        BacklightControls, BacklightMode, BacklightState, BacklightStatus, SmartShiftAutoDisengage,
+        SmartShiftMode, SmartShiftStatus, SmartShiftThreshold,
     };
     use openlogi_device::reprog_controls::CidFlags;
     use openlogi_device::write::{FeatureEntry, ReprogControlEntry};
@@ -496,6 +497,138 @@ mod tests {
             .expect("control-table cassette consumed");
     }
 
+    #[tokio::test]
+    async fn mx_master_3_dpi_read_expands_the_recorded_4000_dpi_range() {
+        let Some((backend, route)) = mx_master_3_replay("dpi-info") else {
+            return;
+        };
+
+        let observed = FixtureOperation::DpiInfo.observe(&backend, &route).await;
+
+        // The recorded 0x00c8, 0xe032, 0x0fa0 list encodes 200..=4000 in 50-DPI steps.
+        assert_eq!(
+            observed,
+            SemanticObservation::DpiInfo(Ok(DpiInfo {
+                current: Dpi::new(1000),
+                capabilities: DpiCapabilities::new((200..=4000).step_by(50).collect())
+                    .expect("reviewed sensor range is valid"),
+            }))
+        );
+        backend.require_complete().expect("DPI cassette consumed");
+    }
+
+    #[tokio::test]
+    async fn mx_master_3_smartshift_read_uses_legacy_feature_in_free_spin() {
+        let Some((backend, route)) = mx_master_3_replay("smartshift-status") else {
+            return;
+        };
+
+        let observed = FixtureOperation::SmartshiftStatus
+            .observe(&backend, &route)
+            .await;
+
+        assert_eq!(
+            observed,
+            SemanticObservation::SmartshiftStatus(Ok(SmartShiftStatus {
+                mode: SmartShiftMode::Free,
+                auto_disengage: SmartShiftAutoDisengage::Threshold(
+                    SmartShiftThreshold::try_new(10).expect("reviewed threshold is valid"),
+                ),
+                tunable_torque: None,
+            }))
+        );
+        backend
+            .require_complete()
+            .expect("legacy SmartShift cassette consumed");
+    }
+
+    /// The Easy-Switch host keys (`0x00d1`–`0x00d3`) are Fn-row keys that
+    /// cannot be reprogrammed or diverted; the volume keys are divertable
+    /// hotkeys. No control on the keyboard carries the mouse flag.
+    #[tokio::test]
+    async fn mx_mechanical_mini_control_read_preserves_keyboard_key_flags() {
+        let Some((backend, route)) = mx_mechanical_mini_replay("reprogrammable-controls") else {
+            return;
+        };
+
+        let observed = FixtureOperation::ReprogrammableControls
+            .observe(&backend, &route)
+            .await;
+        let SemanticObservation::ReprogrammableControls(controls) = observed else {
+            panic!("expected a control-table observation, got {observed:?}");
+        };
+        let controls = controls.expect("recorded control table is readable");
+
+        assert_eq!(controls.len(), 32);
+        let fn_row = CidFlags::FUNCTION_KEY | CidFlags::FN_TOGGLE | CidFlags::ANALYTICS_KEY_EVENTS;
+        for expected in [
+            ReprogControlEntry {
+                cid: 0x00d1,
+                task_id: 0x00ae,
+                flags: fn_row,
+            },
+            ReprogControlEntry {
+                cid: 0x00e2,
+                task_id: 0x00c1,
+                flags: fn_row | CidFlags::REPROGRAMMABLE | CidFlags::DIVERTABLE,
+            },
+            ReprogControlEntry {
+                cid: 0x00e8,
+                task_id: 0x0002,
+                flags: CidFlags::HOTKEY
+                    | CidFlags::REPROGRAMMABLE
+                    | CidFlags::DIVERTABLE
+                    | CidFlags::ANALYTICS_KEY_EVENTS,
+            },
+        ] {
+            assert_eq!(
+                controls
+                    .iter()
+                    .find(|control| control.cid == expected.cid)
+                    .copied(),
+                Some(expected)
+            );
+        }
+        assert!(
+            controls
+                .iter()
+                .all(|control| !control.flags.contains(CidFlags::MOUSE))
+        );
+        backend
+            .require_complete()
+            .expect("control-table cassette consumed");
+    }
+
+    #[tokio::test]
+    async fn mx_mechanical_mini_backlight_read_offers_only_power_save() {
+        let Some((backend, route)) = mx_mechanical_mini_replay("backlight-state") else {
+            return;
+        };
+
+        let observed = FixtureOperation::BacklightState
+            .observe(&backend, &route)
+            .await;
+
+        // The recorded 0x0505 options support only power save and the wow
+        // effect, and feature version 2 predates levels and durations.
+        assert_eq!(
+            observed,
+            SemanticObservation::BacklightState(Ok(BacklightState {
+                enabled: true,
+                mode: BacklightMode::None,
+                status: BacklightStatus::TemporaryManual,
+                current_level: 0,
+                nb_levels: 8,
+                power_save: true,
+                controls: BacklightControls::POWER_SAVE,
+                duration: None,
+            }))
+        );
+        backend
+            .require_complete()
+            .expect("backlight cassette consumed");
+    }
+
     fn mx_master_4_replay(case: &str) -> Option<(ReplayBackend, DeviceRoute)> {
         corpus_replay(
             "mx-master-4-001",
@@ -534,6 +667,34 @@ mod tests {
                     product_id: 0xb034,
                 },
                 0xb034,
+            ),
+        )
+    }
+
+    fn mx_master_3_replay(case: &str) -> Option<(ReplayBackend, DeviceRoute)> {
+        corpus_replay(
+            "mx-master-3-001",
+            case,
+            target(
+                DeviceRoute::Direct {
+                    vendor_id: 0x046d,
+                    product_id: 0xb023,
+                },
+                0xb023,
+            ),
+        )
+    }
+
+    fn mx_mechanical_mini_replay(case: &str) -> Option<(ReplayBackend, DeviceRoute)> {
+        corpus_replay(
+            "mx-mechanical-mini-mac-001",
+            case,
+            target(
+                DeviceRoute::Direct {
+                    vendor_id: 0x046d,
+                    product_id: 0xb36d,
+                },
+                0xb36d,
             ),
         )
     }

@@ -9,9 +9,9 @@ use super::{
     ArmedControl, HostSwitchError, HostSwitchRestoreOutcome, HostSwitchSessionOutcome,
     HostSwitchStop, HostTable, HostTrigger, KeyboardHosts, KeyboardPosition,
     PendingHostSwitchRestore, PreparedHostChange, ReportingMode, announced_host,
-    host_change_required, host_channel, key_trigger, prepare_host_change_with, queued_departure,
-    restoration_change, rollback_host_switch_start, run_host_switch_session, shares_channel,
-    timed_hidpp,
+    host_change_required, host_channel, key_trigger, monitor_host_switch, prepare_host_change_with,
+    queued_departure, restoration_change, rollback_host_switch_start, run_host_switch_session,
+    shares_channel, timed_hidpp,
 };
 use crate::ChannelPool;
 use crate::backend::NodeId;
@@ -1085,6 +1085,49 @@ fn a_departure_queued_before_the_channel_changed_still_moves_the_linked_devices(
     );
 }
 
+#[tokio::test]
+async fn an_offline_receiver_slot_keeps_a_queued_departure_but_drops_a_press() {
+    let route = DeviceRoute::Bolt {
+        receiver_uid: "receiver".to_owned(),
+        slot: KEYBOARD_SLOT,
+    };
+    let registry = ChannelRegistry::default();
+    let (raw, handle) = ScriptedRawHidChannel::with_responder(|_| None);
+    let channel = raw_scripted_channel(raw).await;
+    let shared = SharedChannel::new(Arc::clone(&channel), route.clone());
+    let node = NodeId::from("receiver-node".to_owned());
+    registry.replace_node(node.clone(), [route], Arc::clone(&channel));
+    registry.replace_node(node, [], channel);
+    let position = KeyboardPosition {
+        feature_index: 3,
+        version: 2,
+        host_count: 3,
+        current_host: 0,
+        announces: false,
+    };
+    for (trigger, expected) in [
+        (HostTrigger::Reported(1), HostSwitchStop::Departed(1)),
+        (HostTrigger::Pressed(1), HostSwitchStop::ReceiverSlotGone),
+    ] {
+        let (_shutdown_tx, shutdown) = oneshot::channel();
+        let (triggers_tx, mut triggers) = mpsc::unbounded_channel();
+        triggers_tx.send(trigger).unwrap();
+        let (_signal, gate) = device_io_channel();
+        let stop = monitor_host_switch(
+            shutdown,
+            &mut triggers,
+            position,
+            &registry,
+            &shared,
+            gate,
+            &mut KeyboardHosts::default(),
+        )
+        .await;
+        assert_eq!(stop, expected, "queued trigger: {trigger:?}");
+    }
+    assert!(handle.written_reports().is_empty());
+}
+
 #[test]
 fn a_failed_host_read_follows_only_an_announcement_to_another_host() {
     let (triggers_tx, mut triggers) = tokio::sync::mpsc::unbounded_channel();
@@ -1102,6 +1145,49 @@ fn a_failed_host_read_follows_only_an_announcement_to_another_host() {
         Some(2),
         "a report and a change to the same host are skipped"
     );
+}
+
+#[tokio::test]
+async fn an_offline_receiver_departure_restores_when_its_slot_returns_on_the_same_channel() {
+    let route = DeviceRoute::Bolt {
+        receiver_uid: "receiver".to_owned(),
+        slot: KEYBOARD_SLOT,
+    };
+    let registry = ChannelRegistry::default();
+    let (raw, handle) = ScriptedRawHidChannel::with_responder(|request| Some(request.to_vec()));
+    let channel = raw_scripted_channel(raw).await;
+    let shared = SharedChannel::new(Arc::clone(&channel), route.clone());
+    let node = NodeId::from("receiver-node".to_owned());
+    registry.replace_node(node.clone(), [route.clone()], Arc::clone(&channel));
+    let pending = PendingHostSwitchRestore::new(&shared, 0x22, vec![armed_control()])
+        .expect("armed host control requires restoration");
+    registry.replace_node(node.clone(), [], Arc::clone(&channel));
+    let (_signal, gate) = device_io_channel();
+    let pool = ChannelPool::with_backend(ScriptedBackend::new(Vec::new()));
+    let outcome = super::depart(
+        super::Departure::new(&shared, None, 1),
+        Some(pending),
+        super::Followers {
+            targets: &[],
+            registry: &registry,
+            channel_pool: &pool,
+            device_io: &gate,
+        },
+    )
+    .await;
+    let (follow_up, pending) = outcome.into_parts();
+    assert_eq!(follow_up, super::HostSwitchFollowUp::AwaitDeparture);
+    let pending = match pending.unwrap().retry(&registry).await {
+        HostSwitchRestoreOutcome::RestorePending(pending) => pending,
+        HostSwitchRestoreOutcome::Restored => panic!("an offline slot cannot restore"),
+    };
+    assert!(handle.written_reports().is_empty());
+    registry.replace_node(node, [route], channel);
+    assert!(matches!(
+        pending.retry(&registry).await,
+        HostSwitchRestoreOutcome::Restored
+    ));
+    assert_eq!(handle.written_reports().len(), 1);
 }
 
 #[test]

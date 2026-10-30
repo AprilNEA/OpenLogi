@@ -52,6 +52,7 @@ pub use openlogi_core::hid::smartshift;
 pub use openlogi_core::hid::smartshift::{
     SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus, SmartShiftThreshold, TunableTorque,
 };
+pub use openlogi_core::hid::{OnboardMode, OnboardProfile, OnboardState};
 pub use pairing::{
     Click, DiscoveredDevice, PairingCommand, PairingError, PairingEvent, PairingReceiver,
     PasskeyMethod, ReceiverFamily, ReceiverSelector, list_pairing_receivers, run_pairing, unpair,
@@ -75,13 +76,14 @@ pub use write::{
     ForceSensingInfo, HapticRestore, HapticRestoreOutcome, HapticWaveform, HidppFeatureErrorKind,
     HidppOperation, HostConnection, HostOs, HostOsInfo, HostOsKind, LITRA_BEAM_PRODUCT_ID,
     LITRA_GLOW_PRODUCT_ID, LightChange, LightCommand, LightControls, LightWatch, LightingMethod,
-    LitraDescriptor, LitraModel, OsLayoutOutcome, OsMask, OsVersion, PointerSpeed, ReportRate,
-    ReportRateInfo, ReprogControlEntry, ScrollReportingTarget, ScrollResolution, ScrollWheelMode,
-    WriteError, apply_litra, commands_for_light_settings, dump_features, dump_firmware_entities,
-    dump_reprog_controls, encode_litra_command, ensure_haptics_armed_on, find_litra, get_backlight,
-    get_backlight_on, get_disable_keys, get_disable_keys_on, get_dpi, get_dpi_info,
-    get_dpi_info_on, get_easy_switch_hosts, get_easy_switch_hosts_on, get_fn_lock, get_fn_lock_on,
-    get_force_sensing_on, get_pointer_speed_on, get_report_rate_info, get_report_rate_info_on,
+    LitraDescriptor, LitraModel, OsLayoutOutcome, OsMask, OsVersion, PointerSpeed,
+    RAW_BATTERY_FEATURES, ReportRate, ReportRateInfo, ReprogControlEntry, ScrollReportingTarget,
+    ScrollResolution, ScrollWheelMode, WriteError, apply_litra, commands_for_light_settings,
+    dump_features, dump_firmware_entities, dump_reprog_controls, encode_litra_command,
+    ensure_haptics_armed_on, find_litra, get_backlight, get_backlight_on, get_disable_keys,
+    get_disable_keys_on, get_dpi, get_dpi_info, get_dpi_info_on, get_easy_switch_hosts,
+    get_easy_switch_hosts_on, get_fn_lock, get_fn_lock_on, get_force_sensing_on, get_onboard,
+    get_onboard_on, get_pointer_speed_on, get_report_rate_info, get_report_rate_info_on,
     get_scroll_wheel_mode, get_scroll_wheel_mode_on, get_smartshift_status,
     get_smartshift_status_on, keep_os_layout_on, litra_model_for_route, matches_litra, play_haptic,
     play_haptic_on, read_battery_raw, read_litra_state, rename_easy_switch_host,

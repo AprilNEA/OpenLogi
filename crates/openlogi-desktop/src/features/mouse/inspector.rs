@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use gpui::{
-    Context, Entity, InteractiveElement, IntoElement, ParentElement, Role,
+    Context, Entity, FocusHandle, InteractiveElement, IntoElement, ParentElement, Role,
     StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px, rgb, svg,
 };
 use gpui_base::Button as BaseButton;
@@ -19,8 +19,8 @@ use super::hotspots::MouseControlId;
 use super::thumbwheel::ThumbwheelPreset;
 use super::view::MouseModelView;
 use crate::features::binding_editor::{
-    GESTURE_BUTTON_ICON, PickFn, action_icon_path, action_rows_matching, editor_section,
-    gesture_direction_icon,
+    ActionOffer, GESTURE_BUTTON_ICON, PickFn, action_icon_path, action_rows_with,
+    application_editor, command_editor, editor_section, gesture_direction_icon,
 };
 use crate::state::AppState;
 use crate::ui::action::localized_action_label;
@@ -47,6 +47,9 @@ pub(super) struct BindingInspectorData<'a> {
     /// [`ForceSensingFacts::current`](super::force_sensing::ForceSensingFacts::current)
     /// says it shows.
     pub press_force: Option<PressForce<'a>>,
+    pub extra_actions: &'a [Action],
+    /// Catalog actions the picker leaves out.
+    pub hidden_actions: &'a [Action],
 }
 
 #[derive(Clone, Copy)]
@@ -55,10 +58,23 @@ pub(super) struct ActionPickerContext<'a> {
     pub search: &'a Entity<InputState>,
     pub shortcut_input: &'a Entity<InputState>,
     pub application_input: &'a Entity<InputState>,
-    pub shortcut_invalid: bool,
+    pub command_input: &'a Entity<InputState>,
     pub shortcut_mode: ShortcutMode,
-    pub application_invalid: bool,
+    /// Whether Record is waiting for the next key press.
+    pub shortcut_recording: bool,
+    /// The Record button's area, which holds focus while recording.
+    pub shortcut_record_focus: &'a FocusHandle,
+    pub invalid: InvalidDrafts,
     pub view: &'a Entity<MouseModelView>,
+}
+
+/// Which custom-action editors rejected their last Add, so each shows an
+/// inline error until its text changes or the picker reopens.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct InvalidDrafts {
+    pub shortcut: bool,
+    pub application: bool,
+    pub command: bool,
 }
 
 /// Whether the custom shortcut editor records a tapped or a held chord.
@@ -145,6 +161,10 @@ fn empty_inspector(app: Option<&str>, override_count: usize, pal: Palette) -> gp
         .child(div().text_body().text_color(pal.text_muted).child(summary))
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the button inspector lays out its rows inline"
+)]
 fn button_inspector(
     button: ButtonId,
     data: &BindingInspectorData<'_>,
@@ -165,7 +185,7 @@ fn button_inspector(
         && !overridden
         && gesture_map.is_some()
     {
-        return inherited_gesture_inspector(button, app, picker, pal, cx);
+        return inherited_gesture_inspector(button, app, data, picker, pal, cx);
     }
 
     let action = data
@@ -249,6 +269,10 @@ fn button_inspector(
                 "inspector-action",
                 Some(&action),
                 picker,
+                ActionOffer {
+                    extra: data.extra_actions,
+                    hidden: data.hidden_actions,
+                },
                 &on_pick,
                 pal,
                 cx,
@@ -340,6 +364,7 @@ fn wheel_hold_row(
 fn inherited_gesture_inspector(
     button: ButtonId,
     app: &str,
+    data: &BindingInspectorData<'_>,
     picker: ActionPickerContext<'_>,
     pal: Palette,
     cx: &Context<MouseModelView>,
@@ -383,6 +408,12 @@ fn inherited_gesture_inspector(
                 "inspector-gesture-override",
                 None,
                 picker,
+                // The pick replaces the gestures with a button binding,
+                // which gets a release, so held actions fit here.
+                ActionOffer {
+                    extra: data.extra_actions,
+                    hidden: data.hidden_actions,
+                },
                 &on_pick,
                 pal,
                 cx,
@@ -454,6 +485,10 @@ fn gesture_inspector(
                 "inspector-gesture-action",
                 Some(&current),
                 picker,
+                ActionOffer {
+                    extra: &[],
+                    hidden: data.hidden_actions,
+                },
                 &on_pick,
                 pal,
                 cx,
@@ -771,29 +806,46 @@ fn action_library(
     id_prefix: &'static str,
     current: Option<&Action>,
     picker: ActionPickerContext<'_>,
+    offer: ActionOffer<'_>,
     on_pick: &PickFn,
     pal: Palette,
     cx: &Context<MouseModelView>,
 ) -> impl IntoElement {
     let query = picker.search.read(cx).value();
-    let rows = action_rows_matching(id_prefix, current, &query, on_pick, pal);
+    let rows = action_rows_with(id_prefix, current, &query, offer, on_pick, pal);
     v_flex()
         .gap_2()
         .pt_1()
-        .child(custom_shortcut_editor(
+        .child(custom_shortcut_editor(id_prefix, &picker, on_pick, pal))
+        .child(application_editor(
             id_prefix,
-            picker.shortcut_input,
-            picker.shortcut_invalid,
-            picker.shortcut_mode,
-            picker.view,
+            picker.application_input,
+            picker.invalid.application,
+            Rc::new({
+                let view = picker.view.clone();
+                move |cx| {
+                    view.update(cx, |view, cx| {
+                        view.invalid_drafts.application = true;
+                        cx.notify();
+                    });
+                }
+            }),
             on_pick,
             pal,
         ))
-        .child(custom_application_editor(
+        .child(command_editor(
             id_prefix,
-            picker.application_input,
-            picker.application_invalid,
-            picker.view,
+            picker.command_input,
+            picker.invalid.command,
+            Rc::new({
+                let view = picker.view.clone();
+                move |cx| {
+                    view.update(cx, |view, cx| {
+                        view.invalid_drafts.command = true;
+                        cx.notify();
+                    });
+                }
+            }),
             on_pick,
             pal,
         ))
@@ -818,15 +870,17 @@ fn action_library(
 /// A single-field "Custom Shortcut" editor, matching the Action Ring editor's
 /// `shortcut_editor` (`features/action_ring/editor.rs`) so the same custom
 /// action is reachable from the plain per-button picker, not just the ring.
+/// Record fills the field from the next key press; Add commits the field.
 fn custom_shortcut_editor(
     id_prefix: &'static str,
-    input: &Entity<InputState>,
-    invalid: bool,
-    mode: ShortcutMode,
-    view: &Entity<MouseModelView>,
+    picker: &ActionPickerContext<'_>,
     on_pick: &PickFn,
     pal: Palette,
 ) -> impl IntoElement {
+    let input = picker.shortcut_input;
+    let mode = picker.shortcut_mode;
+    let recording = picker.shortcut_recording;
+    let view = picker.view;
     let submit_input = input.clone();
     let on_pick = on_pick.clone();
     let mode_button = |option: ShortcutMode| {
@@ -848,6 +902,7 @@ fn custom_shortcut_editor(
     };
     let tap_button = mode_button(ShortcutMode::Tap);
     let hold_button = mode_button(ShortcutMode::Hold);
+    let record_view = view.clone();
     let view = view.clone();
     v_flex()
         .gap_1()
@@ -864,6 +919,24 @@ fn custom_shortcut_editor(
                         .child(control_input(input).cleanable(true)),
                 )
                 .child(
+                    div().track_focus(picker.shortcut_record_focus).child(
+                        Button::new(format!("{id_prefix}-custom-shortcut-record"))
+                            .debug_selector(move || format!("{id_prefix}-custom-shortcut-record"))
+                            .compact()
+                            .selected(recording)
+                            .label(if recording {
+                                tr!("common.cancel")
+                            } else {
+                                tr!("actions.record_shortcut")
+                            })
+                            .on_click(move |_, window, cx| {
+                                record_view.update(cx, |view, cx| {
+                                    view.toggle_shortcut_recording(window, cx);
+                                });
+                            }),
+                    ),
+                )
+                .child(
                     Button::new(format!("{id_prefix}-custom-shortcut-add"))
                         .debug_selector(move || format!("{id_prefix}-custom-shortcut-add"))
                         .compact()
@@ -873,76 +946,26 @@ fn custom_shortcut_editor(
                             match shortcut.parse::<openlogi_core::binding::KeyCombo>() {
                                 Ok(combo) => (on_pick)(mode.action(combo), window, cx),
                                 Err(_) => view.update(cx, |view, cx| {
-                                    view.custom_shortcut_invalid = true;
+                                    view.invalid_drafts.shortcut = true;
                                     cx.notify();
                                 }),
                             }
                         }),
                 ),
         )
-        .when(invalid, |editor| {
+        .when(recording, |editor| {
+            editor.child(
+                div()
+                    .debug_selector(move || format!("{id_prefix}-custom-shortcut-recording"))
+                    .text_caption()
+                    .text_color(pal.text_muted)
+                    .child(tr!("actions.press_the_shortcut_to_record")),
+            )
+        })
+        .when(picker.invalid.shortcut, |editor| {
             editor.child(
                 div()
                     .debug_selector(move || format!("{id_prefix}-custom-shortcut-error"))
-                    .text_caption()
-                    .text_color(rgb(0x00ef_4444))
-                    .child(tr!("action_ring.custom_action_invalid_input")),
-            )
-        })
-}
-
-/// A single-field "Open Application or Folder" editor, matching the Action
-/// Ring editor's `path_editor`.
-fn custom_application_editor(
-    id_prefix: &'static str,
-    input: &Entity<InputState>,
-    invalid: bool,
-    view: &Entity<MouseModelView>,
-    on_pick: &PickFn,
-    pal: Palette,
-) -> impl IntoElement {
-    let submit_input = input.clone();
-    let on_pick = on_pick.clone();
-    let view = view.clone();
-    v_flex()
-        .gap_1()
-        .child(editor_section(
-            tr!("action_ring.open_application_or_folder"),
-            pal,
-        ))
-        .child(
-            h_flex()
-                .gap_2()
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .debug_selector(move || format!("{id_prefix}-custom-application-input"))
-                        .child(control_input(input).cleanable(true)),
-                )
-                .child(
-                    Button::new(format!("{id_prefix}-custom-application-add"))
-                        .debug_selector(move || format!("{id_prefix}-custom-application-add"))
-                        .compact()
-                        .label(tr!("common.add"))
-                        .on_click(move |_, window, cx| {
-                            let path = submit_input.read(cx).value().to_string();
-                            match openlogi_core::binding::ApplicationTarget::new(path, "") {
-                                Ok(target) => {
-                                    (on_pick)(Action::OpenApplication(target), window, cx);
-                                }
-                                Err(_) => view.update(cx, |view, cx| {
-                                    view.custom_application_invalid = true;
-                                    cx.notify();
-                                }),
-                            }
-                        }),
-                ),
-        )
-        .when(invalid, |editor| {
-            editor.child(
-                div()
-                    .debug_selector(move || format!("{id_prefix}-custom-application-error"))
                     .text_caption()
                     .text_color(rgb(0x00ef_4444))
                     .child(tr!("action_ring.custom_action_invalid_input")),
@@ -1007,6 +1030,8 @@ mod tests {
             bindings,
             gesture_maps,
             dpi_gestures: false,
+            extra_actions: &[],
+            hidden_actions: &[],
             virtual_thumbwheel: true,
             wheel_hold,
             editing_app: None,
