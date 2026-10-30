@@ -2,11 +2,11 @@
 
 use std::collections::HashSet;
 use std::hash::Hash;
-use std::sync::{Arc, PoisonError, RwLock};
+use std::sync::{Arc, Mutex, PoisonError, RwLock, Weak};
 
 use crate::backend::NodeId;
 use hidpp::channel::HidppChannel;
-use tokio::sync::watch;
+use tokio::sync::{Notify, watch};
 
 use crate::{DeviceRoute, SharedChannel};
 
@@ -223,13 +223,41 @@ impl<Node: Eq, Channel> Registry<Node, Channel> {
 #[derive(Clone)]
 pub struct ChannelRegistry {
     inner: Registry<NodeId, Arc<HidppChannel>>,
+    dead: Arc<DeadChannelReports>,
 }
 
 impl Default for ChannelRegistry {
     fn default() -> Self {
         Self {
             inner: Registry::new(Arc::ptr_eq),
+            dead: Arc::default(),
         }
+    }
+}
+
+/// Direct channels capture found dead while inventory still publishes them.
+/// Held weakly so a report never keeps a retired connection from draining.
+#[derive(Default)]
+struct DeadChannelReports {
+    channels: Mutex<Vec<Weak<HidppChannel>>>,
+    reported: Notify,
+}
+
+/// The connections reported through [`ChannelRegistry::report_dead`] since
+/// inventory last took them.
+pub(crate) struct DeadChannels(Vec<Weak<HidppChannel>>);
+
+impl DeadChannels {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Whether `channel` is one of the reported connections. A weak reference
+    /// keeps its allocation, so a new channel can never alias a reported one.
+    pub(crate) fn contains(&self, channel: &Arc<HidppChannel>) -> bool {
+        self.0
+            .iter()
+            .any(|dead| std::ptr::eq(dead.as_ptr(), Arc::as_ptr(channel)))
     }
 }
 
@@ -281,6 +309,50 @@ impl ChannelRegistry {
         self.inner.any_current(|route, channel| {
             shared.matches(route) && Arc::ptr_eq(channel, shared.channel())
         })
+    }
+
+    /// Tell inventory that capture stopped hearing from the device behind
+    /// `shared` while inventory still publishes it.
+    ///
+    /// Inventory otherwise replaces a channel only after two probes in a row
+    /// fail, and a silent channel can hold each probe for its whole timeout,
+    /// so every re-armed capture would reuse the dead channel meanwhile
+    /// (#2020). The next inventory pass retires a reported channel without
+    /// probing it. Only direct routes are reported: a receiver's channel
+    /// carries every paired slot, and one silent device behind it says
+    /// nothing about the others.
+    ///
+    /// Returns whether the report was accepted, i.e. whether inventory will
+    /// retire the channel.
+    #[must_use]
+    pub fn report_dead(&self, shared: &SharedChannel) -> bool {
+        if !matches!(shared.route(), DeviceRoute::Direct { .. }) || !self.is_current(shared) {
+            return false;
+        }
+        self.dead
+            .channels
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(Arc::downgrade(shared.channel()));
+        self.dead.reported.notify_one();
+        true
+    }
+
+    /// Resolves once [`Self::report_dead`] has accepted a report, including
+    /// one accepted before this was awaited.
+    pub async fn dead_channel_reported(&self) {
+        self.dead.reported.notified().await;
+    }
+
+    /// Take the reported channels for inventory to retire.
+    pub(crate) fn take_dead_reports(&self) -> DeadChannels {
+        DeadChannels(std::mem::take(
+            &mut *self
+                .dead
+                .channels
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        ))
     }
 
     /// How inventory publishes the connection `shared` was taken from now.

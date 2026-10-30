@@ -81,6 +81,7 @@ impl KeyboardUsage {
             0x37 => ".".to_string(),
             0x38 => "/".to_string(),
             0x3a..=0x45 => format!("F{}", code - 0x3a + 1),
+            0x46 => "PrintScreen".to_string(),
             0x49 => "Insert".to_string(),
             0x4a => "Home".to_string(),
             0x4b => "PageUp".to_string(),
@@ -109,7 +110,7 @@ pub struct KeyboardUsageError(pub u8);
 const fn validate_keyboard_usage(value: &u8) -> Result<(), KeyboardUsageError> {
     if matches!(
         value,
-        0x04..=0x31 | 0x33..=0x38 | 0x3a..=0x45 | 0x49..=0x52 | 0x68..=0x6f
+        0x04..=0x31 | 0x33..=0x38 | 0x3a..=0x46 | 0x49..=0x52 | 0x68..=0x6f
     ) {
         Ok(())
     } else {
@@ -368,6 +369,7 @@ fn parse_key(token: &str) -> Result<KeyboardUsage, KeyComboParseError> {
             "backspace" => 0x2a,
             "tab" => 0x2b,
             "space" => 0x2c,
+            "printscreen" | "print-screen" | "print" | "prtsc" | "prtscn" | "prtscr" => 0x46,
             "insert" | "ins" => 0x49,
             "home" => 0x4a,
             "pageup" | "page-up" | "pgup" => 0x4b,
@@ -473,6 +475,30 @@ mod tests {
             .parse::<KeyCombo>()
             .expect("valid shortcut failed");
         assert_eq!(combo.rendered_label(), "Shift+Insert");
+    }
+
+    /// Print Screen binds alone or in a chord, under its full name, the X11
+    /// keysym name, and the abbreviations printed on keycaps (#1641).
+    #[test]
+    fn parses_print_screen_and_its_keycap_abbreviations() {
+        for name in [
+            "PrintScreen",
+            "Print-Screen",
+            "Print",
+            "PrtSc",
+            "PrtScn",
+            "PrtScr",
+        ] {
+            let combo = name.parse::<KeyCombo>().expect("Print Screen must parse");
+            assert_eq!(combo.key().code(), 0x46, "{name}");
+            assert_eq!(combo.rendered_label(), "PrintScreen", "{name}");
+            assert_eq!(combo.key().ascii_char(), None, "{name}");
+        }
+        let combo = "Alt+PrtSc"
+            .parse::<KeyCombo>()
+            .expect("valid shortcut failed");
+        assert!(combo.has_option());
+        assert_eq!(combo.rendered_label(), "Alt+PrintScreen");
     }
 
     /// Every usage the validator accepts renders a label the parser reads

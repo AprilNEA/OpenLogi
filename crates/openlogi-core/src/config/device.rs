@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 
 use super::button_map::{deserialize_button_map, deserialize_button_maps_by_app};
 use super::settings::{
-    CameraControls, GestureOwner, LightSettings, Lighting, ScrollResolution, SmartShift,
-    ThumbwheelSensitivity, deserialize_gesture_owner,
+    CameraControls, GestureOwner, LightSettings, Lighting, OnboardMemory, ScrollResolution,
+    SmartShift, ThumbwheelSensitivity, deserialize_gesture_owner,
 };
 use crate::binding::{Action, ActionRingConfig, Binding, ButtonId, GestureDirection};
 use crate::device::{Capabilities, DeviceKind, DeviceModelInfo, LightCapabilities};
@@ -365,6 +365,12 @@ pub struct DeviceConfig {
     /// firmware unmanaged; an explicit empty set re-enables every known key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disabled_keys: Option<BTreeSet<DisableKey>>,
+    /// Gaming-mouse onboard memory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub onboard_memory: Option<OnboardMemory>,
+    /// Bindings used while G-Shift is held.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub gshift_bindings: BTreeMap<ButtonId, Action>,
 }
 
 impl DeviceConfig {
@@ -471,6 +477,8 @@ impl Default for DeviceConfig {
             pointer_speed: None,
             force_sensing: None,
             disabled_keys: None,
+            onboard_memory: None,
+            gshift_bindings: BTreeMap::new(),
         }
     }
 }
@@ -602,6 +610,9 @@ struct RawDeviceConfig {
     #[serde(default)]
     force_sensing: Option<u16>,
     disabled_keys: Option<BTreeSet<DisableKey>>,
+    onboard_memory: Option<OnboardMemory>,
+    #[serde(default, deserialize_with = "deserialize_button_map")]
+    gshift_bindings: BTreeMap<ButtonId, Action>,
     #[serde(default = "default_true")]
     enabled: bool,
     #[serde(default)]
@@ -668,6 +679,8 @@ impl From<RawDeviceConfig> for DeviceConfig {
             pointer_speed: raw.pointer_speed,
             force_sensing: raw.force_sensing,
             disabled_keys: raw.disabled_keys,
+            onboard_memory: raw.onboard_memory,
+            gshift_bindings: raw.gshift_bindings,
         }
     }
 }

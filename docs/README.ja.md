@@ -171,6 +171,7 @@ OpenLogi にできて Options+ にできないこと：
 
 > [!IMPORTANT]
 > 先に **Logi Options+**（Linux では Solaar も）を終了してください。1 つのレシーバーを同時に所有できるアプリケーションは 1 つだけです。
+> macOS では、**Karabiner-Elements** も変更対象の Bluetooth キーボードを占有します。Karabiner-Elements → Settings → Devices で、そのキーボードの **Modify events** をオフにしてください。
 
 | プラットフォーム | システム | アーキテクチャ |
 | --- | --- | --- |

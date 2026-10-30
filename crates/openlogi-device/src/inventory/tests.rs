@@ -14,7 +14,7 @@ use super::cache::{
     is_stale, keep_known_capabilities,
 };
 use super::events::EventFeatureIndices;
-use super::features::ProbedFeatures;
+use super::features::{ProbedFeatures, ProbedProtocol};
 use super::ledger;
 use super::probe::{
     NodeProbe, PassContext, ProbeVerdict, assemble_bolt_probe, assemble_unifying_device,
