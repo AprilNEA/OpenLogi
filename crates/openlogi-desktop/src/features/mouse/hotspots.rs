@@ -68,6 +68,28 @@ impl Hotspot {
     }
 }
 
+/// Where the silhouette places a G-series button it has no hotspot for, when
+/// the mouse has no artwork: the wheel tilts beside the wheel, G7/G8 by the
+/// left click, G9 behind the wheel and G6 on the side.
+pub(super) fn gaming_fallback_hotspot(button: ButtonId) -> Option<Hotspot> {
+    let (x, y, w, h) = match button {
+        ButtonId::WheelTiltLeft => (138., 120., 38., 70.),
+        ButtonId::WheelTiltRight => (244., 120., 38., 70.),
+        ButtonId::G6 => (0., 360., 40., 50.),
+        ButtonId::G7 => (100., 60., 50., 50.),
+        ButtonId::G8 => (100., 120., 50., 50.),
+        ButtonId::G9 => (185., 215., 50., 40.),
+        _ => return None,
+    };
+    Some(Hotspot {
+        id: button.into(),
+        x,
+        y,
+        w,
+        h,
+    })
+}
+
 /// Fallback hotspot layout for the no-asset path (synthetic silhouette).
 /// Primary L/R click are intentionally absent — Logi doesn't expose them
 /// as remappable and we follow the same rule everywhere.

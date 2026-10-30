@@ -5,10 +5,11 @@ use gpui::{
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
-    Icon, IconName, TitleBar,
+    Icon, IconName, Root, TitleBar,
     button::{Button, ButtonVariants as _},
     v_flex,
 };
+use openlogi_core::binding::GamingButtons;
 use openlogi_core::device::{Capabilities, DeviceKind};
 use openlogi_ipc::InventoryHealth;
 use tracing::info;
@@ -129,7 +130,12 @@ impl DetailTab {
         if matches!(record.kind, DeviceKind::Camera) {
             tabs.push(Self::Camera);
         }
-        if caps.buttons && can_show_mouse_model {
+        // A G-series mouse has no ReprogControls, but the OS hook still remaps
+        // its middle/back/forward, so it gets the panel too. The model draws
+        // only what such a mouse can deliver (#392, #730, #877).
+        let gaming = GamingButtons::for_device(&record.model_key, Some(&caps)).is_some();
+        let buttons = caps.buttons || gaming;
+        if buttons && can_show_mouse_model {
             tabs.push(Self::Buttons);
         }
         // The Keys tab needs something to bind: HID++ controls (measured, or
@@ -155,15 +161,15 @@ impl DetailTab {
         // editor too — otherwise the ring opens but has nothing configured
         // in it and no way to configure it (#1833).
         // A G-series device gets no ring: its buttons and keys are for games.
-        // Measured capabilities only, since a presumed keyboard guesses
-        // lighting.
-        let g_series = record
-            .capabilities
-            .as_ref()
-            .is_some_and(Capabilities::is_g_series);
-        if !g_series
-            && (caps.haptic_panel || (caps.buttons && can_show_mouse_model) || shows_keys_tab)
-        {
+        // A dumped or ReprogControls-less mouse is G-series by `gaming`; any
+        // other device by its measured gaming features, since a presumed
+        // keyboard guesses lighting.
+        let g_series = gaming
+            || record
+                .capabilities
+                .as_ref()
+                .is_some_and(Capabilities::is_g_series);
+        if !g_series && (caps.haptic_panel || (buttons && can_show_mouse_model) || shows_keys_tab) {
             tabs.push(Self::ActionsRing);
         }
         let has_software_scroll = openlogi_hook::SOFTWARE_SCROLL_INVERSION
@@ -381,6 +387,9 @@ impl AppView {
                     || (matches!(self.active_tab, DetailTab::Pointer | DetailTab::Device)
                         && is_current(key))
             }
+            StateEvent::OnboardChanged(key) => {
+                !on_home && self.active_tab == DetailTab::Pointer && is_current(key)
+            }
             StateEvent::CameraChanged => on_home || self.active_tab == DetailTab::Light,
             // Child entities own these surfaces and subscribe directly. A
             // language switch already refreshes every window, and the root
@@ -562,13 +571,15 @@ fn app_title_bar(cx: &App) -> impl IntoElement {
 impl Render for AppView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let content = self.render_content(window, cx);
-        // Root owns dialog state but the application must mount its layer.
-        // Keep it present across connecting, permission, and error screens too.
+        // Root owns overlay state but the application must mount its layers.
+        // Keep them present across connecting, permission, and error screens too.
         div()
             .relative()
             .size_full()
             .child(content)
-            .children(gpui_component::Root::render_dialog_layer(window, cx))
+            .children(Root::render_sheet_layer(window, cx))
+            .children(Root::render_dialog_layer(window, cx))
+            .children(Root::render_notification_layer(window, cx))
     }
 }
 

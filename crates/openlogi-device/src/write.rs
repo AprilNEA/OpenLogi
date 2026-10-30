@@ -32,6 +32,7 @@ mod haptic;
 mod hires_wheel;
 mod lighting;
 mod litra;
+mod onboard;
 mod os_layout;
 mod pointer_scaling;
 mod report_rate;
@@ -81,6 +82,7 @@ pub use litra::{
     encode_command as encode_litra_command, find_litra, litra_model_for_route, matches_litra,
     read_state as read_litra_state, watch as watch_litra,
 };
+pub use onboard::{get_onboard, get_onboard_on};
 pub use openlogi_core::hid::{DisableKeysMask, DisableKeysState};
 pub use openlogi_core::hid::{
     EasySwitchHosts, EasySwitchSlot, HostConnection, HostOsInfo, HostOsKind,
@@ -91,6 +93,7 @@ pub use pointer_scaling::{
     PointerScaling, get_pointer_scaling, get_pointer_speed_on, set_pointer_scaling,
     set_pointer_speed_on,
 };
+pub(crate) use report_rate::set_report_rate_on_channel;
 pub use report_rate::{
     get_report_rate_info, get_report_rate_info_on, set_report_rate, set_report_rate_on,
 };

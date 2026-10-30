@@ -3,11 +3,14 @@
 //! These functions keep Logitech asset coordinate translation and fallback
 //! label layout separate from the GPUI element tree in `view`.
 
-use openlogi_core::binding::ButtonId;
+use openlogi_assets::ImageEntry;
+use openlogi_core::binding::{ButtonId, GamingLayout};
 
 use super::hotspots::{Hotspot, MOUSE_MODEL_SIZE, MouseControlId};
 use super::leader_lines::{Label, Side};
-use crate::services::assets::ResolvedAsset;
+use crate::services::assets::{ResolvedAsset, SIDE_VIEW_KEY};
+
+const FRONT_VIEW_KEY: &str = "device_image";
 
 /// Approx pixel width of each hotspot hit-target. Logitech only gives us a
 /// marker point per button, not a rectangle, so we size by hand.
@@ -50,7 +53,10 @@ pub fn asset_dimensions_for_png(asset: &ResolvedAsset, target_h: f32, max_w: f32
     if asset.png_height == 0 {
         return MOUSE_MODEL_SIZE;
     }
-    let aspect = (asset.png_width as f32) / (asset.png_height as f32);
+    let side_w = asset.side_view.as_ref().map_or(0., |side| {
+        side.png_width as f32 * asset.png_height as f32 / side.png_height.max(1) as f32
+    });
+    let aspect = (asset.png_width as f32 + side_w) / (asset.png_height as f32);
     let w = target_h * aspect;
     if w > max_w {
         (max_w, max_w / aspect)
@@ -62,11 +68,74 @@ pub fn asset_dimensions_for_png(asset: &ResolvedAsset, target_h: f32, max_w: f32
 /// Whether the asset exposes any remappable button markers. Mice do (so the
 /// model reserves a side gutter for their leader-line labels); keyboards and
 /// other label-less devices don't, so the model can hand them the full width.
-pub fn asset_has_button_labels(asset: &ResolvedAsset) -> bool {
+pub fn asset_has_button_labels(asset: &ResolvedAsset, layout: Option<&GamingLayout>) -> bool {
     asset
         .metadata
         .assignments()
         .any(|a| map_slot_name(&a.slot_name).is_some())
+        || layout.is_some_and(|layout| {
+            [FRONT_VIEW_KEY, SIDE_VIEW_KEY]
+                .into_iter()
+                .filter_map(|key| asset.metadata.image(key))
+                .any(|image| !gaming_controls(image, layout).is_empty())
+        })
+}
+
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "device images are < 4096 px on either axis — well within f32 mantissa"
+)]
+pub fn side_view_width(asset: &ResolvedAsset, mouse_h: f32) -> f32 {
+    asset.side_view.as_ref().map_or(0., |side| {
+        side.png_width as f32 * mouse_h / side.png_height.max(1) as f32
+    })
+}
+
+fn gaming_controls(image: &ImageEntry, layout: &GamingLayout) -> Vec<(ButtonId, f32, f32)> {
+    let mut controls: Vec<(ButtonId, f32, f32)> = Vec::new();
+    for assignment in &image.assignments {
+        let Some(button) = assignment
+            .g_number()
+            .and_then(|number| layout.button_for_g_number(number))
+            .filter(|button| layout.remappable().any(|b| b == *button))
+        else {
+            continue;
+        };
+        if !controls.iter().any(|(b, ..)| *b == button) {
+            controls.push((button, assignment.marker.x, assignment.marker.y));
+        }
+    }
+    controls
+}
+
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "device images are < 4096 px on either axis — well within f32 mantissa"
+)]
+fn gaming_hotspots(
+    image: &ImageEntry,
+    layout: &GamingLayout,
+    left: f32,
+    w: f32,
+    h: f32,
+) -> impl Iterator<Item = Hotspot> {
+    let (origin_w, origin_h) = (
+        image.origin.width.max(1) as f32,
+        image.origin.height.max(1) as f32,
+    );
+    gaming_controls(image, layout)
+        .into_iter()
+        .map(move |(button, mx, my)| {
+            let cx = left + mx / origin_w * w;
+            let cy = my / origin_h * h;
+            Hotspot {
+                id: button.into(),
+                x: cx - ASSET_HOTSPOT / 2.,
+                y: cy - ASSET_HOTSPOT / 2.,
+                w: ASSET_HOTSPOT,
+                h: ASSET_HOTSPOT,
+            }
+        })
 }
 
 /// Convert Logitech's percent-based markers into mouse-local pixel rects,
@@ -98,11 +167,43 @@ pub fn asset_has_button_labels(asset: &ResolvedAsset) -> bool {
 /// Primary left/right clicks deliberately have no entry — Logi never
 /// exposes them as remappable (and Options+ doesn't either), so we don't
 /// invent markers for them.
+///
+/// G-series depots also mark a side render, drawn left of the front one.
+pub fn asset_hotspots_for_png(
+    asset: &ResolvedAsset,
+    layout: Option<&GamingLayout>,
+    mouse_w: f32,
+    mouse_h: f32,
+) -> Vec<Hotspot> {
+    let side_w = side_view_width(asset, mouse_h);
+    let mut hotspots = main_view_hotspots(asset, mouse_w - side_w, mouse_h)
+        .into_iter()
+        .map(|hotspot| Hotspot {
+            x: hotspot.x + side_w,
+            ..hotspot
+        })
+        .collect::<Vec<_>>();
+    if let Some(layout) = layout {
+        if asset.side_view.is_some()
+            && let Some(image) = asset.metadata.image(SIDE_VIEW_KEY)
+        {
+            hotspots.extend(gaming_hotspots(image, layout, 0., side_w, mouse_h));
+        }
+        if let Some(image) = asset.metadata.image(FRONT_VIEW_KEY) {
+            let new = gaming_hotspots(image, layout, side_w, mouse_w - side_w, mouse_h)
+                .filter(|hotspot| !hotspots.iter().any(|h| h.id == hotspot.id))
+                .collect::<Vec<_>>();
+            hotspots.extend(new);
+        }
+    }
+    hotspots
+}
+
 #[expect(
     clippy::cast_precision_loss,
     reason = "device images are < 4096 px on either axis — well within f32 mantissa"
 )]
-pub fn asset_hotspots_for_png(asset: &ResolvedAsset, mouse_w: f32, mouse_h: f32) -> Vec<Hotspot> {
+fn main_view_hotspots(asset: &ResolvedAsset, mouse_w: f32, mouse_h: f32) -> Vec<Hotspot> {
     let png_w = asset.png_width as f32;
     let png_h = asset.png_height as f32;
     let origin_w = asset
@@ -222,12 +323,45 @@ pub fn labels_from_hotspots(
 }
 
 /// Label positions for the synthetic fallback silhouette.
-pub fn default_labels(thumbwheel: bool, distribution: LabelDistribution) -> Vec<Label> {
+pub fn default_labels(
+    layout: Option<&GamingLayout>,
+    thumbwheel: bool,
+    distribution: LabelDistribution,
+) -> Vec<Label> {
     labels_from_hotspots(
-        &super::hotspots::default_hotspots(thumbwheel),
+        &fallback_hotspots(layout, thumbwheel),
         MOUSE_MODEL_SIZE.1,
         distribution,
     )
+}
+
+/// The fallback silhouette's hotspots for a device without an image. A
+/// G-series mouse keeps only the buttons its layout has: the generic DPI and
+/// gesture buttons are `0x1b04` controls it cannot capture. The layout's
+/// other buttons get placed hotspots, so each one can still be opened.
+pub fn fallback_hotspots(layout: Option<&GamingLayout>, thumbwheel: bool) -> Vec<Hotspot> {
+    let mut hotspots = super::hotspots::default_hotspots(thumbwheel);
+    hotspots.retain(|hotspot| on_fallback(layout, hotspot));
+    for button in layout.into_iter().flat_map(GamingLayout::remappable) {
+        if !hotspots
+            .iter()
+            .any(|hotspot| hotspot.id.button() == Some(button))
+            && let Some(hotspot) = super::hotspots::gaming_fallback_hotspot(button)
+        {
+            hotspots.push(hotspot);
+        }
+    }
+    hotspots
+}
+
+/// Whether the fallback silhouette shows `hotspot` for a device with `layout`.
+fn on_fallback(layout: Option<&GamingLayout>, hotspot: &Hotspot) -> bool {
+    layout.is_none_or(|layout| {
+        hotspot
+            .id
+            .button()
+            .is_some_and(|button| layout.remappable().any(|b| b == button))
+    })
 }
 
 /// Logitech's stable slot vocabulary → OpenLogi's visual control IDs. Intentionally
@@ -275,15 +409,134 @@ mod tests {
     use super::*;
     use crate::features::mouse::hotspots::default_hotspots;
 
+    fn g502_asset() -> ResolvedAsset {
+        let metadata: openlogi_assets::Metadata = serde_json::from_str(
+            r#"{"images":[
+              {"key":"device_image","origin":{"width":1391,"height":2700},"assignments":[
+                {"slotId":"g502wireless_g1_m1","marker":{"x":538,"y":614}},
+                {"slotId":"g502wireless_g3_m1","marker":{"x":800,"y":869}},
+                {"slotId":"g502wireless_g7_m1","marker":{"x":295,"y":989}},
+                {"slotId":"g502wireless_g10_m1","marker":{"x":900,"y":869}}]},
+              {"key":"device_side","origin":{"width":936,"height":2700},"assignments":[
+                {"slotId":"g502wireless_g4_m1","marker":{"x":580,"y":1800}}]}]}"#,
+        )
+        .expect("metadata parses");
+        ResolvedAsset {
+            depot: "g502_wireless".into(),
+            display_name: "G502 Lightspeed".into(),
+            kind: None,
+            image_path: "front.png".into(),
+            hero_image_path: None,
+            glow: None,
+            metadata,
+            png_width: 1391,
+            png_height: 2700,
+            side_view: Some(crate::services::assets::SideView {
+                image_path: "side.png".into(),
+                png_width: 936,
+                png_height: 2700,
+            }),
+        }
+    }
+
+    #[test]
+    fn g502_markers_land_on_their_view_and_skip_the_primary_clicks() {
+        let asset = g502_asset();
+        let layout = GamingLayout::for_model_key("0407f");
+        let (w, h) = asset_dimensions_for_png(&asset, 540., 1000.);
+        assert!((w - 465.4).abs() < 0.1 && (h - 540.).abs() < f32::EPSILON);
+        let hotspots = asset_hotspots_for_png(&asset, layout, w, h);
+        let center = |button: ButtonId| {
+            hotspots
+                .iter()
+                .find(|h| h.id == button.into())
+                .map(Hotspot::center)
+                .expect("hotspot present")
+        };
+        let (back_x, back_y) = center(ButtonId::Back);
+        assert!((back_x - 116.).abs() < 0.1 && (back_y - 360.).abs() < 0.1);
+        let (g7_x, _) = center(ButtonId::G7);
+        assert!(
+            (g7_x - (187.2 + 59.)).abs() < 0.1,
+            "front markers sit right of the side view"
+        );
+        center(ButtonId::MiddleClick);
+        center(ButtonId::WheelTiltRight);
+        assert!(!hotspots.iter().any(|h| h.id == ButtonId::LeftClick.into()));
+        assert!(asset_has_button_labels(&asset, layout));
+        assert!(!asset_has_button_labels(&asset, None));
+        assert!(asset_hotspots_for_png(&asset, None, w, h).is_empty());
+    }
+
+    #[test]
+    fn side_markers_need_the_side_image() {
+        let asset = ResolvedAsset {
+            side_view: None,
+            ..g502_asset()
+        };
+        let layout = GamingLayout::for_model_key("0407f");
+        let (w, h) = asset_dimensions_for_png(&asset, 540., 1000.);
+        let hotspots = asset_hotspots_for_png(&asset, layout, w, h);
+        assert!(!hotspots.iter().any(|h| h.id == ButtonId::Back.into()));
+        assert!(hotspots.iter().any(|h| h.id == ButtonId::G7.into()));
+    }
+
+    /// A gaming mouse without an image keeps only what it can deliver: the
+    /// DPI toggle, the gesture button and the thumb wheel are HID++-only
+    /// controls, and offering them would take a binding and drop it. A model
+    /// nobody has dumped offers what the OS hook remaps; a dumped one also
+    /// gets placed hotspots for every other button its layout remaps.
+    #[test]
+    fn an_undivertable_mouse_without_an_image_keeps_only_what_it_delivers() {
+        use openlogi_core::binding::STANDARD_BUTTONS;
+        let ids = |layout| -> Vec<_> {
+            fallback_hotspots(layout, true)
+                .iter()
+                .map(|hotspot| hotspot.id)
+                .collect()
+        };
+        let os_hook: Vec<MouseControlId> =
+            [ButtonId::MiddleClick, ButtonId::Back, ButtonId::Forward]
+                .map(Into::into)
+                .into();
+        assert_eq!(ids(Some(&STANDARD_BUTTONS)), os_hook);
+
+        let g502 = GamingLayout::for_model_key("0407f").expect("the G502 layout");
+        let mut every: Vec<MouseControlId> = g502.remappable().map(Into::into).collect();
+        let mut drawn = ids(Some(g502));
+        every.sort_by_key(|id| format!("{id:?}"));
+        drawn.sort_by_key(|id| format!("{id:?}"));
+        assert_eq!(drawn, every, "every remappable button can be opened");
+
+        assert_eq!(fallback_hotspots(None, true), default_hotspots(true));
+    }
+
+    #[test]
+    fn an_unverified_gaming_depot_marks_only_the_standard_buttons() {
+        use openlogi_core::binding::STANDARD_BUTTONS;
+        let asset = g502_asset();
+        let (w, h) = asset_dimensions_for_png(&asset, 540., 1000.);
+        let mut ids: Vec<_> = asset_hotspots_for_png(&asset, Some(&STANDARD_BUTTONS), w, h)
+            .iter()
+            .map(|hotspot| hotspot.id)
+            .collect();
+        ids.sort_by_key(|id| format!("{id:?}"));
+        assert_eq!(
+            ids,
+            [ButtonId::Back.into(), ButtonId::MiddleClick.into()],
+            "the fixture marks G1, G3, G7, G10 and G4"
+        );
+    }
+
     #[test]
     fn default_labels_include_capability_gated_thumbwheel() {
         assert!(
-            !default_labels(false, LabelDistribution::LeftOnly)
+            !default_labels(None, false, LabelDistribution::LeftOnly)
                 .iter()
                 .any(|label| label.id == MouseControlId::ThumbwheelRotation)
         );
         assert_eq!(
-            default_labels(true, LabelDistribution::LeftOnly)
+            default_labels(None, true, LabelDistribution::LeftOnly)
                 .iter()
                 .filter(|label| label.id == MouseControlId::ThumbwheelRotation)
                 .count(),
@@ -447,6 +700,7 @@ mod tests {
             },
             png_width: png.0,
             png_height: png.1,
+            side_view: None,
         }
     }
 
@@ -463,7 +717,7 @@ mod tests {
             &[("SLOT_NAME_MIDDLE_BUTTON", 66., 14.)],
         );
 
-        let hotspots = asset_hotspots_for_png(&asset, 300., 470.);
+        let hotspots = asset_hotspots_for_png(&asset, None, 300., 470.);
 
         assert_eq!(hotspots.len(), 1);
         let (cx, _) = hotspots[0].center();
@@ -483,7 +737,7 @@ mod tests {
             &[("SLOT_NAME_MIDDLE_BUTTON", 25., 14.)],
         );
 
-        let hotspots = asset_hotspots_for_png(&asset, 300., 470.);
+        let hotspots = asset_hotspots_for_png(&asset, None, 300., 470.);
 
         assert_eq!(hotspots.len(), 1);
         let (cx, _) = hotspots[0].center();

@@ -170,6 +170,7 @@ A cobertura de recursos depende do que cada dispositivo informa; o app mostra s�
 
 > [!IMPORTANT]
 > Feche o **Logi Options+** (e o Solaar no Linux) primeiro. Só um aplicativo pode controlar um receptor por vez.
+> No macOS, o **Karabiner-Elements** também bloqueia um teclado Bluetooth que ele modifica. Desative **Modify events** para esse teclado em Karabiner-Elements → Settings → Devices.
 
 | Plataforma | Sistema | Arquitetura |
 | --- | --- | --- |

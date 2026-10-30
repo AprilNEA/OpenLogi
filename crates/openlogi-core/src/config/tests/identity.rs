@@ -31,6 +31,8 @@ fn device_identity_roundtrips_and_is_iterable() {
             pointer_scaling: false,
             force_sensing: false,
             disable_keys: false,
+            onboard_profiles: false,
+            button_spy: false,
         },
         light_capabilities: None,
         driver_id: None,
