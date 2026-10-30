@@ -24,7 +24,7 @@ use super::{
 };
 use crate::backend::NodeInfo;
 use crate::host_lock::ReceiverRegisterPhase;
-use crate::inventory::cache::{CacheKey, CacheOutcome, probe_or_reuse, seen};
+use crate::inventory::cache::{CacheKey, CacheOutcome, ProbeTarget, probe_or_reuse, seen};
 use crate::inventory::events::EventSubscriptionHandle;
 use crate::inventory::features::ProbedFeatures;
 use crate::inventory::mappings::{map_kind, resolve_device_kind};
@@ -272,7 +272,11 @@ async fn walk_bolt_slot(
         slot_budget,
         probe_or_reuse(
             channel,
-            slot,
+            // The slot walks run after the register phase is released.
+            ProbeTarget {
+                index: slot,
+                registers: None,
+            },
             id.clone(),
             cached,
             online,

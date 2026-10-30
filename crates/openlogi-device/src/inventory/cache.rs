@@ -10,6 +10,7 @@ use super::features::{
     read_battery,
 };
 use crate::backend::NodeId;
+use crate::host_lock::ReceiverRegisterPhase;
 
 /// How long a device's probe is reused before a fresh read.
 /// The expensive part of a probe (the `enumerate_features` feature-table walk)
@@ -117,9 +118,10 @@ async fn refresh_battery(
     channel: &Arc<HidppChannel>,
     index: u8,
     probe: BatteryProbe,
+    registers: Option<&ReceiverRegisterPhase>,
     previous: Option<&ProbedFeatures>,
 ) -> (Option<BatteryInfo>, bool) {
-    match read_battery(channel, index, probe).await {
+    match read_battery(channel, index, probe, registers).await {
         BatteryRead::Reading(battery) => (
             Some(hold_percentage_while_charging(
                 battery,
@@ -162,6 +164,18 @@ pub(super) fn seen(id: Option<CacheKey>) -> CacheOutcome {
     id.map_or(CacheOutcome::Unkeyed, CacheOutcome::Seen)
 }
 
+/// The device a probe addresses, and the register access its caller holds.
+#[derive(Clone, Copy)]
+pub(super) struct ProbeTarget<'a> {
+    /// A receiver slot, or `0xff` for a direct device.
+    pub(super) index: u8,
+    /// The receiver's register phase, when the caller holds it for the whole
+    /// probe. A HID++ 1.0 device's registers are read only under it, because
+    /// their replies carry no software id. Only the Unifying slot walk holds
+    /// it that long.
+    pub(super) registers: Option<&'a ReceiverRegisterPhase>,
+}
+
 /// Whether `cached` is stale enough that the device should be re-probed.
 pub(super) fn is_stale(cached: &Cached, now: Instant) -> bool {
     super::probe_cache_is_stale(cached.probed_at, now)
@@ -179,7 +193,7 @@ pub(super) fn is_stale(cached: &Cached, now: Instant) -> bool {
 /// [`EventSubscriptionHandle::sync_lock_keys`]).
 pub(super) async fn probe_or_reuse(
     channel: &Arc<HidppChannel>,
-    index: u8,
+    target: ProbeTarget<'_>,
     id: Option<CacheKey>,
     cached: Option<&Cached>,
     online: bool,
@@ -187,9 +201,11 @@ pub(super) async fn probe_or_reuse(
     subscriptions: Option<&EventSubscriptionHandle>,
 ) -> (ProbedFeatures, CacheOutcome) {
     let probed =
-        probe_or_reuse_registered(channel, index, id, cached, online, now, subscriptions).await;
+        probe_or_reuse_registered(channel, target, id, cached, online, now, subscriptions).await;
     if let Some(subscriptions) = subscriptions {
-        subscriptions.sync_lock_keys(channel, index, online).await;
+        subscriptions
+            .sync_lock_keys(channel, target.index, online)
+            .await;
     }
     probed
 }
@@ -197,21 +213,29 @@ pub(super) async fn probe_or_reuse(
 /// [`probe_or_reuse`] without the lock-key state.
 async fn probe_or_reuse_registered(
     channel: &Arc<HidppChannel>,
-    index: u8,
+    target: ProbeTarget<'_>,
     id: Option<CacheKey>,
     cached: Option<&Cached>,
     online: bool,
     now: Instant,
     subscriptions: Option<&EventSubscriptionHandle>,
 ) -> (ProbedFeatures, CacheOutcome) {
+    let ProbeTarget { index, registers } = target;
     if let (Some(cached), Some(subscriptions)) = (cached, subscriptions) {
         subscriptions.register_device(index, cached.events);
     }
     if online && cached.is_none_or(|c| is_stale(c, now)) {
-        let (mut fresh, battery, events) = probe_features(channel, index, subscriptions).await;
+        let (mut fresh, battery, events) =
+            probe_features(channel, index, subscriptions, registers).await;
         if let Some(probe) = battery {
-            (fresh.battery, fresh.unlinked) =
-                refresh_battery(channel, index, probe, cached.map(|known| &known.probe)).await;
+            (fresh.battery, fresh.unlinked) = refresh_battery(
+                channel,
+                index,
+                probe,
+                registers,
+                cached.map(|known| &known.probe),
+            )
+            .await;
         }
         // Only a completed probe is worth caching.
         if fresh.completed() {
@@ -276,7 +300,7 @@ async fn probe_or_reuse_registered(
             {
                 let mut entry = c.clone();
                 (entry.probe.battery, entry.probe.unlinked) =
-                    refresh_battery(channel, index, probe, Some(&c.probe)).await;
+                    refresh_battery(channel, index, probe, registers, Some(&c.probe)).await;
                 return (entry.probe.clone(), CacheOutcome::Update(key, entry));
             }
             (c.probe.clone(), seen(id))

@@ -33,9 +33,15 @@ async fn offline_arrival_rebroadcasts_surface_without_probing_the_device() {
         subscriptions: None,
         timeouts: &ProbeTimeouts::DEFAULT,
     };
-    let (device, _) = probe_unifying_slot(&channel, &event, "SERIAL", pass)
-        .await
-        .expect("an offline slot still surfaces from its re-broadcast");
+    let (device, _) = probe_unifying_slot(
+        &channel,
+        &event,
+        "SERIAL",
+        &host_lock::ReceiverRegisterPhase::uncontended(),
+        pass,
+    )
+    .await
+    .expect("an offline slot still surfaces from its re-broadcast");
 
     assert!(!device.online);
     assert_eq!(device.wpid, Some(0x4069));
@@ -83,9 +89,15 @@ async fn hidpp10_slot_is_named_by_the_receiver_and_reports_its_battery() {
         subscriptions: None,
         timeouts: &ProbeTimeouts::DEFAULT,
     };
-    let (device, outcome) = probe_unifying_slot(&channel, &event, "SERIAL", pass)
-        .await
-        .expect("an online slot surfaces");
+    let (device, outcome) = probe_unifying_slot(
+        &channel,
+        &event,
+        "SERIAL",
+        &host_lock::ReceiverRegisterPhase::uncontended(),
+        pass,
+    )
+    .await
+    .expect("an online slot surfaces");
 
     assert_eq!(device.codename.as_deref(), Some("Performance MX"));
     assert_eq!(device.kind, DeviceKind::Mouse);

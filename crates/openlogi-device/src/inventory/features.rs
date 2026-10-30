@@ -30,6 +30,7 @@ use openlogi_core::device::{
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
+use crate::host_lock::ReceiverRegisterPhase;
 use crate::reprog_controls::{BACK_CIDS, DPI_MODE_SHIFT_CIDS, FORWARD_CIDS};
 use crate::write::{force_button_is_changeable, panel_button};
 
@@ -188,10 +189,15 @@ pub(super) enum BatteryProbe {
 /// no feature-table walk. This is the cache's battery read after a full probe
 /// or on a cache hit. The cache resolves an unavailable answer against its
 /// last-known state.
+///
+/// A HID++ 1.0 register is read only under the receiver's register phase,
+/// for the reason `probe_hidpp10` gives; without `registers` it is
+/// unavailable.
 pub(super) async fn read_battery(
     channel: &Arc<HidppChannel>,
     slot: u8,
     probe: BatteryProbe,
+    registers: Option<&ReceiverRegisterPhase>,
 ) -> BatteryRead {
     let reading = match probe {
         BatteryProbe::Unified {
@@ -249,6 +255,7 @@ pub(super) async fn read_battery(
                 _ => None,
             }
         }
+        BatteryProbe::StatusRegister | BatteryProbe::ChargeRegister if registers.is_none() => None,
         BatteryProbe::StatusRegister => register_battery::read_status(channel, slot)
             .await
             .ok()
@@ -348,15 +355,33 @@ fn derive_capabilities(
 /// Return the battery feature separately. The cache owns the live read and
 /// resolves the reading against its last-known state after this probe.
 ///
+/// `registers` is the receiver's register phase, when the caller holds it for
+/// the whole probe. A HID++ 1.0 device is probed only under it (see
+/// `probe_hidpp10`); without it the device stays unanswered.
+///
 /// Only online, responsive devices reach here.
 pub(super) async fn probe_features(
     channel: &Arc<HidppChannel>,
     slot: u8,
     subscriptions: Option<&EventSubscriptionHandle>,
+    registers: Option<&ReceiverRegisterPhase>,
 ) -> (ProbedFeatures, Option<BatteryProbe>, EventFeatureIndices) {
     match Device::new(Arc::clone(channel), slot).await {
         Ok(device) => probe_hidpp20(device, channel, slot, subscriptions).await,
-        Err(DeviceError::UnsupportedProtocolVersion) => probe_hidpp10(channel, slot).await,
+        Err(DeviceError::UnsupportedProtocolVersion) => match registers {
+            Some(registers) => probe_hidpp10(channel, slot, registers).await,
+            None => {
+                debug!(
+                    slot,
+                    "HID++ 1.0 device outside a register phase, not probed"
+                );
+                (
+                    ProbedFeatures::default(),
+                    None,
+                    EventFeatureIndices::default(),
+                )
+            }
+        },
         Err(e) => {
             debug!(slot, error = ?e, "Device::new failed");
             (
@@ -483,13 +508,15 @@ async fn probe_hidpp20(
 /// or device-side identity to read, and the receiver supplies its name and
 /// kind; what is left to learn is which register reports its battery.
 ///
-/// These are register reads, which carry no software id. Behind a Unifying
-/// receiver they run inside the slot walk, which holds the receiver's
-/// register phase to its end, so another OpenLogi process cannot take their
-/// replies.
+/// These are register reads, which carry no software id, so another OpenLogi
+/// process could take their replies. They go out only under the receiver's
+/// register phase, which `_registers` proves the caller holds. The Unifying
+/// slot walk holds it to its end; the direct path and the Bolt slot walk run
+/// outside it.
 async fn probe_hidpp10(
     channel: &HidppChannel,
     slot: u8,
+    _registers: &ReceiverRegisterPhase,
 ) -> (ProbedFeatures, Option<BatteryProbe>, EventFeatureIndices) {
     match find_battery_register(channel, slot).await {
         Ok(battery) => (
@@ -739,6 +766,7 @@ mod tests {
     use crate::channel::scripted::{
         ScriptedRawHidChannel, feature_error, register_error, scripted_channel,
     };
+    use crate::host_lock::ReceiverRegisterPhase;
 
     /// A HID++ 1.0 mouse at slot 1 with register `0x07` (a Performance MX, per
     /// Solaar), whose read of register `0x0D` answers `charge_register_error`.
@@ -753,7 +781,13 @@ mod tests {
             }
         });
         let channel = scripted_channel(raw).await;
-        let (probe, battery, _) = probe_features(&channel, 1, None).await;
+        let (probe, battery, _) = probe_features(
+            &channel,
+            1,
+            None,
+            Some(&ReceiverRegisterPhase::uncontended()),
+        )
+        .await;
         (probe, battery)
     }
 
@@ -786,6 +820,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn hidpp10_device_outside_the_register_phase_is_not_probed() {
+        // A wired HID++ 1.0 mouse, or one behind a receiver OpenLogi does not
+        // recognize: no register phase is held, so its registers stay unread.
+        // The responder answers them anyway, so a stray read fails the
+        // assertion below instead of timing out.
+        let (raw, handle) = ScriptedRawHidChannel::with_dynamic_responder(|request| {
+            match (request[2], request[3]) {
+                (0x00, _) => Some(register_error(request, 0x01)),
+                (0x81, register) => Some(vec![0x10, request[1], 0x81, register, 0x05, 0x00, 0x00]),
+                _ => None,
+            }
+        });
+        let channel = scripted_channel(raw).await;
+        let (probe, battery, _) = probe_features(&channel, 0xff, None, None).await;
+        assert!(!probe.completed());
+        assert_eq!(battery, None);
+        assert!(
+            handle
+                .written_reports()
+                .iter()
+                .all(|report| report.get(2) != Some(&0x81)),
+            "no register read may go out without the register phase"
+        );
+    }
+
+    #[tokio::test]
+    async fn battery_registers_are_not_read_outside_the_register_phase() {
+        let (raw, handle) = ScriptedRawHidChannel::with_dynamic_responder(|request| {
+            Some(vec![0x10, request[1], 0x81, request[3], 0x05, 0x00, 0x00])
+        });
+        let channel = scripted_channel(raw).await;
+        let writes_before = handle.written_reports().len();
+        for probe in [BatteryProbe::StatusRegister, BatteryProbe::ChargeRegister] {
+            assert_eq!(
+                read_battery(&channel, 1, probe, None).await,
+                BatteryRead::Unavailable
+            );
+        }
+        assert_eq!(handle.written_reports().len(), writes_before);
+    }
+
+    #[tokio::test]
     async fn status_register_battery_reads_as_a_level_without_a_percentage() {
         let (raw, _) = ScriptedRawHidChannel::with_dynamic_responder(|request| {
             assert_eq!((request[2], request[3]), (0x81, 0x07), "{request:02x?}");
@@ -793,8 +869,13 @@ mod tests {
         });
         let channel = scripted_channel(raw).await;
 
-        let BatteryRead::Reading(battery) =
-            read_battery(&channel, 1, BatteryProbe::StatusRegister).await
+        let BatteryRead::Reading(battery) = read_battery(
+            &channel,
+            1,
+            BatteryProbe::StatusRegister,
+            Some(&ReceiverRegisterPhase::uncontended()),
+        )
+        .await
         else {
             panic!("expected a reading");
         };
@@ -811,8 +892,13 @@ mod tests {
         });
         let channel = scripted_channel(raw).await;
 
-        let BatteryRead::Reading(battery) =
-            read_battery(&channel, 1, BatteryProbe::ChargeRegister).await
+        let BatteryRead::Reading(battery) = read_battery(
+            &channel,
+            1,
+            BatteryProbe::ChargeRegister,
+            Some(&ReceiverRegisterPhase::uncontended()),
+        )
+        .await
         else {
             panic!("expected a reading");
         };
@@ -852,7 +938,7 @@ mod tests {
             Some(response)
         });
         let channel = scripted_channel(raw).await;
-        probe_features(&channel, 0xff, None).await.0
+        probe_features(&channel, 0xff, None, None).await.0
     }
 
     /// Probe a `DisableKeys` descriptor with the supplied feature-table flags.
@@ -879,7 +965,7 @@ mod tests {
             Some(response)
         });
         let channel = scripted_channel(raw).await;
-        probe_features(&channel, 0xff, None).await.0
+        probe_features(&channel, 0xff, None, None).await.0
     }
 
     #[tokio::test]
@@ -987,7 +1073,7 @@ mod tests {
             Some(response)
         });
         let channel = scripted_channel(raw).await;
-        probe_features(&channel, 0xff, None).await.0
+        probe_features(&channel, 0xff, None, None).await.0
     }
 
     #[tokio::test]
@@ -1038,7 +1124,7 @@ mod tests {
             Some(response)
         });
         let channel = scripted_channel(raw).await;
-        probe_features(&channel, 0xff, None).await.0
+        probe_features(&channel, 0xff, None, None).await.0
     }
 
     #[tokio::test]
@@ -1120,7 +1206,7 @@ mod tests {
             CountRead::FeatureError(_) => ScriptedRawHidChannel::with_dynamic_responder(responder),
         };
         let channel = scripted_channel(raw).await;
-        probe_features(&channel, 0xff, None).await.0
+        probe_features(&channel, 0xff, None, None).await.0
     }
 
     #[tokio::test]
@@ -1191,9 +1277,9 @@ mod tests {
             Some(response)
         });
         let channel = scripted_channel(raw).await;
-        let (probe, battery_probe, _) = probe_features(&channel, 0xff, None).await;
+        let (probe, battery_probe, _) = probe_features(&channel, 0xff, None, None).await;
         let battery = match battery_probe {
-            Some(battery_probe) => match read_battery(&channel, 0xff, battery_probe).await {
+            Some(battery_probe) => match read_battery(&channel, 0xff, battery_probe, None).await {
                 BatteryRead::Reading(info) => Some(info),
                 _ => None,
             },
@@ -1286,9 +1372,9 @@ mod tests {
             Some(response)
         });
         let channel = scripted_channel(raw).await;
-        let (probe, battery_probe, _) = probe_features(&channel, 0xff, None).await;
+        let (probe, battery_probe, _) = probe_features(&channel, 0xff, None, None).await;
         let battery = match battery_probe {
-            Some(battery_probe) => match read_battery(&channel, 0xff, battery_probe).await {
+            Some(battery_probe) => match read_battery(&channel, 0xff, battery_probe, None).await {
                 BatteryRead::Reading(info) => Some(info),
                 _ => None,
             },
@@ -1422,7 +1508,7 @@ mod tests {
             Some(response)
         });
         let channel = scripted_channel(raw).await;
-        read_battery(&channel, 0xff, BatteryProbe::Adc(8)).await
+        read_battery(&channel, 0xff, BatteryProbe::Adc(8), None).await
     }
 
     #[tokio::test]
@@ -1480,7 +1566,8 @@ mod tests {
             Some(response)
         });
         let channel = scripted_channel(raw).await;
-        let BatteryRead::Reading(battery) = read_battery(&channel, 0xff, legacy(2)).await else {
+        let BatteryRead::Reading(battery) = read_battery(&channel, 0xff, legacy(2), None).await
+        else {
             panic!("expected a reading");
         };
         battery

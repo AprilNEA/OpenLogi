@@ -28,7 +28,9 @@ use super::{
 };
 use crate::backend::NodeInfo;
 use crate::host_lock::ReceiverRegisterPhase;
-use crate::inventory::cache::{CacheKey, CacheOutcome, Cached, is_stale, probe_or_reuse};
+use crate::inventory::cache::{
+    CacheKey, CacheOutcome, Cached, ProbeTarget, is_stale, probe_or_reuse,
+};
 use crate::inventory::events::EventSubscriptionHandle;
 use crate::inventory::features::ProbedFeatures;
 use crate::inventory::mappings::{map_unifying_kind, resolve_device_kind};
@@ -130,7 +132,7 @@ pub(super) async fn probe_unifying_receiver(
     };
     let slot_results = connections
         .iter()
-        .map(|conn| probe_unifying_slot(&channel, conn, receiver_uid, pass))
+        .map(|conn| probe_unifying_slot(&channel, conn, receiver_uid, &registers, pass))
         .collect::<Vec<_>>()
         .join()
         .await;
@@ -303,10 +305,15 @@ where
 /// working `get_device_pairing_information` call; we derive a stable cache key
 /// from the receiver UID + slot so the feature-table walk is amortised at ~30s
 /// and two receivers sharing a slot number don't collide in the cache.
+///
+/// `registers` is the receiver's register phase, held by the caller to the
+/// end of the walk: a HID++ 1.0 slot is probed through its registers, and a
+/// codename read is register I/O too.
 pub(in crate::inventory) async fn probe_unifying_slot(
     channel: &Arc<HidppChannel>,
     event: &UnifyingDeviceConnection,
     receiver_uid: &str,
+    registers: &ReceiverRegisterPhase,
     pass: PassContext<'_>,
 ) -> Option<(PairedDevice, CacheOutcome)> {
     let slot = event.index;
@@ -331,7 +338,10 @@ pub(in crate::inventory) async fn probe_unifying_slot(
         probe_budget,
         probe_or_reuse(
             channel,
-            slot,
+            ProbeTarget {
+                index: slot,
+                registers: Some(registers),
+            },
             Some(id.clone()),
             cached,
             event.online,

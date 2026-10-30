@@ -11,7 +11,7 @@ use tracing::debug;
 use super::{NodeProbe, PassContext, ProbeVerdict};
 use crate::backend::NodeInfo;
 use crate::channel::route::DIRECT_DEVICE_INDEX;
-use crate::inventory::cache::{CacheKey, CacheOutcome, probe_or_reuse, seen};
+use crate::inventory::cache::{CacheKey, CacheOutcome, ProbeTarget, probe_or_reuse, seen};
 use crate::inventory::features::Refresh;
 use crate::inventory::mappings::resolve_device_kind;
 
@@ -63,7 +63,10 @@ pub(super) async fn probe_direct(
     // the device behind it is linked is the probe's answer, not this call's.
     let (probe, outcome) = probe_or_reuse(
         &channel,
-        DIRECT_DEVICE_INDEX,
+        ProbeTarget {
+            index: DIRECT_DEVICE_INDEX,
+            registers: None,
+        },
         Some(id),
         cached,
         true,
