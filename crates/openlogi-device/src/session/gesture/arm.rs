@@ -142,9 +142,9 @@ impl ArmedControls {
             retired,
             reprog,
             thumb.as_ref().map(|thumb| thumb.restore),
-            main_wheel
-                .as_ref()
-                .map(|wheel| HiResWheelRestore::new(wheel.feature_index)),
+            main_wheel.as_ref().map(|wheel| {
+                HiResWheelRestore::new(wheel.feature_index, wheel.original_resolution)
+            }),
         )
     }
 
@@ -396,7 +396,7 @@ async fn arm_main_wheel(
             // A refused write may still have moved the target, and an echo
             // mismatch says it did something else: hand the wheel back.
             warn!(?error, "main wheel refused the divert — handing it back");
-            main_wheel::undivert(&wheel.feature).await?;
+            main_wheel::undivert(&wheel.feature, wheel.original_resolution).await?;
             armed.main_wheel = None;
             Ok(())
         }

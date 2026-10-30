@@ -8,7 +8,7 @@ use std::future::Future;
 use std::sync::{Arc, RwLock};
 
 use hidpp::feature::CreatableFeature as _;
-use hidpp::feature::hires_wheel::HiResWheelFeature;
+use hidpp::feature::hires_wheel::{HiResWheelFeature, WheelResolution};
 use hidpp::protocol::v20::Hidpp20Error;
 use thiserror::Error;
 
@@ -216,15 +216,21 @@ impl ThumbwheelRestore {
 /// The main wheel a capture session diverted over `0x2121`. Teardown always
 /// selects native reporting, like a `0x1b04` control found diverted before
 /// arming: a diverted wheel then is left over from a session that never tore
-/// down, and handing it back keeps the wheel scrolling.
+/// down, and handing it back keeps the wheel scrolling. It also restores the
+/// resolution the wheel had before arming, so a session's own resolution
+/// request never outlives it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct HiResWheelRestore {
     feature_index: u8,
+    resolution: WheelResolution,
 }
 
 impl HiResWheelRestore {
-    pub(crate) fn new(feature_index: u8) -> Self {
-        Self { feature_index }
+    pub(crate) fn new(feature_index: u8, resolution: WheelResolution) -> Self {
+        Self {
+            feature_index,
+            resolution,
+        }
     }
 }
 
@@ -282,7 +288,10 @@ impl RestorePlan for CaptureRestorePlan {
         if let Some(wheel) = self.main_wheel {
             let feature =
                 HiResWheelFeature::new(channel.clone(), device_index, wheel.feature_index);
-            restored &= restore_result(main_wheel::undivert(&feature).await, "main wheel");
+            restored &= restore_result(
+                main_wheel::undivert(&feature, wheel.resolution).await,
+                "main wheel",
+            );
         }
         if let Some(thumb) = self.thumb {
             let thumbwheel = Thumbwheel::new(channel, device_index, thumb.feature_index);
