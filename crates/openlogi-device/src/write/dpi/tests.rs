@@ -1,6 +1,9 @@
 use std::sync::{Mutex, PoisonError};
 
-use hidpp::feature::extended_dpi::{Lod, SensorCapabilities};
+use hidpp::{
+    feature::extended_dpi::{Lod, SensorCapabilities},
+    protocol::v20::ErrorType,
+};
 
 use super::*;
 use crate::channel::scripted::{ScriptedRawHidChannel, scripted_channel};
@@ -17,6 +20,12 @@ const GET_RANGES: u8 = 2;
 const GET_PARAMETERS: u8 = 5;
 const SET_PARAMETERS: u8 = 6;
 
+const ONBOARD_PROFILES_INDEX: u8 = 0x06;
+const SET_ONBOARD_MODE: u8 = 1;
+const GET_ONBOARD_MODE: u8 = 2;
+const ONBOARD: u8 = 1;
+const HOST: u8 = 2;
+
 /// The firmware side of a scripted DPI feature.
 trait Sensor: Send + 'static {
     /// HID++ feature ID the sensor's feature lookup answers for.
@@ -29,8 +38,15 @@ trait Sensor: Send + 'static {
         0
     }
 
-    /// The payload answering one request to [`Self::INDEX`].
-    fn respond(&mut self, request: &[u8]) -> Option<[u8; 16]>;
+    /// The payload answering one request to [`Self::INDEX`], or the HID++
+    /// error the firmware answers it with.
+    fn respond(&mut self, request: &[u8]) -> Option<Result<[u8; 16], ErrorType>>;
+
+    /// The `0x8100 OnboardProfiles` mode, or `None` when the device has no
+    /// such feature.
+    fn onboard_mode(&mut self) -> Option<&mut u8> {
+        None
+    }
 }
 
 /// A `0x2201` sensor that supports 800 and 1600 DPI.
@@ -55,7 +71,7 @@ impl Sensor for AdjustableSensor {
         self.version
     }
 
-    fn respond(&mut self, request: &[u8]) -> Option<[u8; 16]> {
+    fn respond(&mut self, request: &[u8]) -> Option<Result<[u8; 16], ErrorType>> {
         let mut payload = [0u8; 16];
         payload[0] = request[4];
         match request[3] >> 4 {
@@ -73,7 +89,7 @@ impl Sensor for AdjustableSensor {
             }
             _ => return None,
         }
-        Some(payload)
+        Some(Ok(payload))
     }
 }
 
@@ -82,9 +98,14 @@ impl Sensor for AdjustableSensor {
 /// Its parameters read always reports a non-zero `dpiY` and a real lift-off
 /// distance, whatever the capability bits say, so a write that carries Y or
 /// LOD only because a read returned them is visible on the wire.
+///
+/// With `onboard_mode` set the device also has `0x8100`, and like a PRO X
+/// SUPERLIGHT 2 it rejects every parameter write while that mode is
+/// [`ONBOARD`].
 #[derive(Clone, Copy)]
 struct ExtendedSensor {
     capabilities: SensorCapabilities,
+    onboard_mode: Option<u8>,
     /// Sensor index echoed by the `getSensorCapabilities` reply.
     capability_echo: u8,
     dpi_x: u16,
@@ -96,6 +117,7 @@ impl ExtendedSensor {
     fn new(capabilities: SensorCapabilities) -> Self {
         Self {
             capabilities,
+            onboard_mode: None,
             capability_echo: SENSOR,
             dpi_x: 800,
             dpi_y: 800,
@@ -108,10 +130,17 @@ impl Sensor for ExtendedSensor {
     const FEATURE_ID: u16 = 0x2202;
     const INDEX: u8 = EXTENDED_INDEX;
 
-    fn respond(&mut self, request: &[u8]) -> Option<[u8; 16]> {
+    fn onboard_mode(&mut self) -> Option<&mut u8> {
+        self.onboard_mode.as_mut()
+    }
+
+    fn respond(&mut self, request: &[u8]) -> Option<Result<[u8; 16], ErrorType>> {
         let mut payload = [0u8; 16];
         match request[3] >> 4 {
             GET_SENSOR_COUNT => payload[0] = 1,
+            SET_PARAMETERS if self.onboard_mode == Some(ONBOARD) => {
+                return Some(Err(ErrorType::LogitechInternal));
+            }
             GET_CAPABILITIES => {
                 payload[0] = self.capability_echo;
                 payload[2] = self.capabilities.bits();
@@ -136,12 +165,13 @@ impl Sensor for ExtendedSensor {
             }
             _ => return None,
         }
-        Some(payload)
+        Some(Ok(payload))
     }
 }
 
-/// Answer the root ping and feature lookup, and hand everything addressed to
-/// the sensor's feature index to the sensor.
+/// Answer the root ping and feature lookup and the sensor's `0x8100` mode
+/// functions, and hand everything addressed to the sensor's feature index to
+/// the sensor.
 fn respond<S: Sensor>(sensor: &mut S, request: &[u8]) -> Option<Vec<u8>> {
     let mut payload = [0u8; 16];
     match (request[2], request[3] >> 4) {
@@ -151,9 +181,30 @@ fn respond<S: Sensor>(sensor: &mut S, request: &[u8]) -> Option<Vec<u8>> {
             if feature_id == S::FEATURE_ID {
                 payload[0] = S::INDEX;
                 payload[2] = sensor.version();
+            } else if feature_id == 0x8100 && sensor.onboard_mode().is_some() {
+                payload[0] = ONBOARD_PROFILES_INDEX;
             }
         }
-        (index, _) if index == S::INDEX => payload = sensor.respond(request)?,
+        (ONBOARD_PROFILES_INDEX, function) => {
+            let mode = sensor.onboard_mode()?;
+            match function {
+                SET_ONBOARD_MODE => *mode = request[4],
+                GET_ONBOARD_MODE => payload[0] = *mode,
+                _ => return None,
+            }
+        }
+        (index, _) if index == S::INDEX => match sensor.respond(request)? {
+            Ok(reply) => payload = reply,
+            Err(error) => {
+                let mut response = vec![0u8; 20];
+                response[0] = 0x11;
+                response[1] = request[1];
+                response[2] = 0xff;
+                response[3..5].copy_from_slice(&request[2..4]);
+                response[5] = u8::from(error);
+                return Some(response);
+            }
+        },
         _ => return None,
     }
     let mut response = vec![0u8; 20];
@@ -197,6 +248,14 @@ impl Harness {
         (self.written)()
             .into_iter()
             .filter(|report| report[2] == index && report[3] >> 4 == function)
+            .collect()
+    }
+
+    /// The mode of every `0x8100 setOnboardMode` request.
+    fn onboard_mode_writes(&self) -> Vec<u8> {
+        self.requests_to(ONBOARD_PROFILES_INDEX, SET_ONBOARD_MODE)
+            .iter()
+            .map(|report| report[4])
             .collect()
     }
 
@@ -251,6 +310,56 @@ async fn extended_writes_carry_y_and_lod_only_when_the_sensor_advertises_them()
         );
     }
     Ok(())
+}
+
+#[tokio::test]
+async fn an_extended_write_hands_an_onboard_profile_device_to_the_host_first()
+-> Result<(), WriteError> {
+    let mut sensor = ExtendedSensor::new(SensorCapabilities::DPI_Y | SensorCapabilities::LOD);
+    sensor.onboard_mode = Some(ONBOARD);
+    let harness = Harness::new(sensor).await;
+
+    set_dpi_on(&harness.shared, Dpi::new(1200)).await?;
+
+    assert_eq!(harness.onboard_mode_writes(), [HOST]);
+    assert_eq!(
+        harness.parameter_writes(),
+        [(1200, 1200, u8::from(Lod::Medium))]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_extended_write_leaves_a_device_already_in_host_mode_alone() -> Result<(), WriteError> {
+    let mut sensor = ExtendedSensor::new(SensorCapabilities::DPI_Y | SensorCapabilities::LOD);
+    sensor.onboard_mode = Some(HOST);
+    let harness = Harness::new(sensor).await;
+
+    set_dpi_on(&harness.shared, Dpi::new(1200)).await?;
+
+    assert!(harness.onboard_mode_writes().is_empty());
+    assert_eq!(harness.parameter_writes().len(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_failed_onboard_mode_read_is_blamed_on_onboard_profiles() {
+    let mut sensor = ExtendedSensor::new(SensorCapabilities::DPI_Y | SensorCapabilities::LOD);
+    // No mode the device can be in.
+    sensor.onboard_mode = Some(0x07);
+    let harness = Harness::new(sensor).await;
+
+    let result = set_dpi_on(&harness.shared, Dpi::new(1200)).await;
+
+    assert_eq!(
+        result,
+        Err(WriteError::UnsupportedResponse {
+            operation: HidppOperation::WriteDpi,
+            feature_hex: 0x8100,
+        })
+    );
+    assert!(harness.onboard_mode_writes().is_empty());
+    assert!(harness.parameter_writes().is_empty());
 }
 
 #[tokio::test]
