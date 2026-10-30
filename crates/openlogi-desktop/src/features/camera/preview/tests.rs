@@ -1,8 +1,9 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use gpui::{AppContext as _, Entity, TestAppContext, VisualTestContext, point, px, size};
-use openlogi_camera::{Camera, CaptureError};
+use gpui::{Entity, TestAppContext, VisualTestContext, point, px, size};
+use gpui_component::select::SelectEvent;
+use openlogi_camera::{Camera, CaptureError, UsbSpeed};
 use openlogi_core::config::Config;
 
 use super::*;
@@ -15,6 +16,9 @@ struct FakeCapture {
     failure: RefCell<Option<CaptureError>>,
     /// What every camera reports offering. Empty, like a backend that lists none.
     modes: RefCell<StreamModes>,
+    /// How every camera reports being attached. `None`, like a platform that
+    /// cannot tell.
+    link: Cell<Option<UsbLink>>,
     /// The mode each successful or failed open asked for, in order.
     opened_modes: RefCell<Vec<Option<StreamMode>>>,
     events: Rc<RefCell<Vec<String>>>,
@@ -32,6 +36,10 @@ impl Capture for Rc<FakeCapture> {
 
     fn stream_modes(&self, _target: &str) -> Result<StreamModes, CaptureError> {
         Ok(self.modes.borrow().clone())
+    }
+
+    fn usb_link(&self, _target: &str) -> Option<UsbLink> {
+        self.link.get()
     }
 
     fn start_stream(
@@ -585,7 +593,7 @@ fn events(capture: &FakeCapture) -> Vec<String> {
 }
 
 fn rows_shown(view: &Entity<CameraPreview>, cx: &mut TestAppContext) -> bool {
-    cx.update(|cx| view.read(cx).mode_rows(theme::palette(cx), cx).is_some())
+    cx.update(|cx| view.read(cx).mode_choice(cx).is_some())
 }
 
 #[gpui::test]
@@ -852,13 +860,285 @@ fn cx_pick(cx: &mut VisualTestContext, key: &str, mode: StreamMode) {
 }
 
 #[gpui::test]
-fn the_rows_render_without_a_stream_frame(cx: &mut TestAppContext) {
-    // Smoke: the rows are built from the saved mode and the camera's list, in
-    // every lifecycle state that shows them.
+fn the_dropdowns_render_without_a_stream_frame(cx: &mut TestAppContext) {
+    // Smoke: the dropdowns are built from the saved mode and the camera's list,
+    // in every lifecycle state that shows them.
     let (view, _capture, key) = camera_preview(cx);
     select_camera(&view, cx);
     let window = cx.add_empty_window();
     draw(&view, window);
     cx_pick(window, &key, mode(1920, 1080, 30));
     draw(&view, window);
+}
+
+#[gpui::test]
+fn the_link_notice_renders_with_and_without_the_dropdowns(cx: &mut TestAppContext) {
+    // Smoke: the notice sits in the same column as the dropdowns, so it must
+    // draw whether or not the camera lists modes.
+    let (view, capture, _key) = camera_preview(cx);
+    capture
+        .link
+        .set(Some(link(UsbSpeed::High, Some(UsbSpeed::Super))));
+    select_camera(&view, cx);
+    let window = cx.add_empty_window();
+    draw(&view, window);
+    assert!(view.read_with(window, |view, _| view.link_notice().is_some()));
+
+    // A camera that lists no modes has no dropdowns, but the notice stays.
+    *capture.modes.borrow_mut() = StreamModes::default();
+    view.update(window, |view, cx| view.set_target(None, cx));
+    view.update(window, |view, cx| {
+        view.set_target(Some(CAMERA_ID.into()), cx);
+    });
+    draw(&view, window);
+    assert!(view.read_with(window, |view, _| view.link_notice().is_some()));
+}
+
+/// What the two dropdowns currently show: the selected size and rate.
+fn dropdowns(
+    view: &Entity<CameraPreview>,
+    cx: &mut VisualTestContext,
+) -> (Option<(u32, u32)>, Option<u32>) {
+    let picker = view
+        .read_with(cx, |view, _| view.mode_picker.clone())
+        .expect("the dropdowns were drawn");
+    picker.read_with(cx, |picker, cx| {
+        (
+            picker.resolution.read(cx).selected_value().copied(),
+            picker.rate.read(cx).selected_value().copied(),
+        )
+    })
+}
+
+/// The mode saved for the camera.
+fn saved(cx: &mut VisualTestContext, key: &str) -> Option<StreamMode> {
+    cx.update(|_, cx| AppState::try_read(cx).and_then(|state| state.camera_stream_mode(key)))
+}
+
+/// What a click on a dropdown's row announces, without driving the popup.
+fn confirm_resolution(
+    view: &Entity<CameraPreview>,
+    cx: &mut VisualTestContext,
+    resolution: (u32, u32),
+) {
+    let picker = view
+        .read_with(cx, |view, _| view.mode_picker.clone())
+        .expect("the dropdowns were drawn");
+    let select = picker.read_with(cx, |picker, _| picker.resolution.clone());
+    select.update(cx, |_, cx| cx.emit(SelectEvent::Confirm(Some(resolution))));
+    cx.run_until_parked();
+}
+
+fn confirm_rate(view: &Entity<CameraPreview>, cx: &mut VisualTestContext, fps: u32) {
+    let picker = view
+        .read_with(cx, |view, _| view.mode_picker.clone())
+        .expect("the dropdowns were drawn");
+    let select = picker.read_with(cx, |picker, _| picker.rate.clone());
+    select.update(cx, |_, cx| cx.emit(SelectEvent::Confirm(Some(fps))));
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn the_dropdowns_show_the_mode_the_stream_resolves_to(cx: &mut TestAppContext) {
+    let (view, _capture, key) = camera_preview(cx);
+    select_camera(&view, cx);
+    let window = cx.add_empty_window();
+
+    draw(&view, window);
+    assert_eq!(
+        dropdowns(&view, window),
+        (Some((1280, 720)), Some(30)),
+        "nothing saved shows the default the stream opened at"
+    );
+
+    cx_pick(window, &key, mode(1920, 1080, 60));
+    draw(&view, window);
+    assert_eq!(
+        dropdowns(&view, window),
+        (Some((1920, 1080)), Some(60)),
+        "a saved choice moves both dropdowns"
+    );
+
+    // Saved for a camera since swapped out: the stream falls back to the
+    // default, and so must what the dropdowns claim.
+    cx_pick(window, &key, mode(3840, 2160, 30));
+    draw(&view, window);
+    assert_eq!(dropdowns(&view, window), (Some((1280, 720)), Some(30)));
+}
+
+#[gpui::test]
+fn picking_a_size_keeps_the_rate_when_the_new_size_offers_it(cx: &mut TestAppContext) {
+    let (view, _capture, key) = camera_preview(cx);
+    select_camera(&view, cx);
+    let window = cx.add_empty_window();
+    cx_pick(window, &key, mode(1920, 1080, 60));
+    draw(&view, window);
+
+    confirm_resolution(&view, window, (1280, 720));
+
+    assert_eq!(saved(window, &key), Some(mode(1280, 720, 60)));
+}
+
+#[gpui::test]
+fn picking_a_size_takes_the_nearest_rate_when_it_does_not_offer_the_current_one(
+    cx: &mut TestAppContext,
+) {
+    let (view, _capture, key) = camera_preview(cx);
+    select_camera(&view, cx);
+    let window = cx.add_empty_window();
+    cx_pick(window, &key, mode(1920, 1080, 60));
+    draw(&view, window);
+
+    confirm_resolution(&view, window, (640, 360));
+
+    assert_eq!(
+        saved(window, &key),
+        Some(mode(640, 360, 30)),
+        "640x360 has no 60 fps"
+    );
+    draw(&view, window);
+    assert_eq!(
+        dropdowns(&view, window),
+        (Some((640, 360)), Some(30)),
+        "the rate dropdown follows the size"
+    );
+}
+
+#[gpui::test]
+fn picking_a_rate_keeps_the_size(cx: &mut TestAppContext) {
+    let (view, _capture, key) = camera_preview(cx);
+    select_camera(&view, cx);
+    let window = cx.add_empty_window();
+    cx_pick(window, &key, mode(1920, 1080, 60));
+    draw(&view, window);
+
+    confirm_rate(&view, window, 30);
+
+    assert_eq!(saved(window, &key), Some(mode(1920, 1080, 30)));
+}
+
+#[gpui::test]
+fn a_pick_the_camera_does_not_offer_is_not_saved(cx: &mut TestAppContext) {
+    let (view, _capture, key) = camera_preview(cx);
+    select_camera(&view, cx);
+    let window = cx.add_empty_window();
+    draw(&view, window);
+
+    // 24 fps at 1280x720 is not on the StreamCam's list, and nor is 800x600.
+    confirm_rate(&view, window, 24);
+    confirm_resolution(&view, window, (800, 600));
+
+    assert_eq!(saved(window, &key), None);
+}
+
+#[gpui::test]
+fn a_dropdown_a_refused_pick_left_behind_is_put_back(cx: &mut TestAppContext) {
+    let (view, _capture, key) = camera_preview(cx);
+    select_camera(&view, cx);
+    let window = cx.add_empty_window();
+    draw(&view, window);
+
+    // The select moved to 1920x1080 on its own, but nothing was saved.
+    let picker = view
+        .read_with(window, |view, _| view.mode_picker.clone())
+        .expect("drawn");
+    let select = picker.read_with(window, |picker, _| picker.resolution.clone());
+    select.update_in(window, |select, window, cx| {
+        select.set_selected_value(&(1920, 1080), window, cx);
+    });
+    assert_eq!(saved(window, &key), None);
+
+    draw(&view, window);
+    assert_eq!(
+        dropdowns(&view, window).0,
+        Some((1280, 720)),
+        "the dropdown shows what the stream runs at"
+    );
+}
+
+fn link(speed: UsbSpeed, capable: Option<UsbSpeed>) -> UsbLink {
+    UsbLink { speed, capable }
+}
+
+fn link_notice(view: &Entity<CameraPreview>, cx: &mut TestAppContext) -> Option<String> {
+    view.read_with(cx, |view, _| {
+        view.link_notice().map(|notice| notice.to_string())
+    })
+}
+
+#[gpui::test]
+fn a_camera_on_a_slower_link_than_it_supports_says_so(cx: &mut TestAppContext) {
+    let (view, capture, _key) = camera_preview(cx);
+    capture
+        .link
+        .set(Some(link(UsbSpeed::High, Some(UsbSpeed::Super))));
+    assert_eq!(
+        link_notice(&view, cx),
+        None,
+        "nothing is known before the camera opens"
+    );
+
+    select_camera(&view, cx);
+
+    let notice =
+        link_notice(&view, cx).expect("a USB 2.0 link under a USB 3 camera is worth saying");
+    assert!(
+        notice.contains("USB 2.0 (480 Mbps)") && notice.contains("USB 3.0 (5 Gbps)"),
+        "the notice names the link and what the camera supports: {notice}"
+    );
+}
+
+#[gpui::test]
+fn a_link_that_is_no_limit_says_nothing(cx: &mut TestAppContext) {
+    let (view, capture, _key) = camera_preview(cx);
+    let no_limit = [
+        Some(link(UsbSpeed::Super, Some(UsbSpeed::Super))),
+        Some(link(UsbSpeed::SuperPlus, Some(UsbSpeed::Super))),
+        Some(link(UsbSpeed::High, None)),
+        None,
+    ];
+    for link in no_limit {
+        capture.link.set(link);
+        select_camera(&view, cx);
+        assert_eq!(link_notice(&view, cx), None, "{link:?}");
+        view.update(cx, |view, cx| view.set_target(None, cx));
+    }
+}
+
+#[gpui::test]
+fn the_notice_goes_with_the_camera_and_follows_the_next_open(cx: &mut TestAppContext) {
+    let (view, capture, _key) = camera_preview(cx);
+    capture
+        .link
+        .set(Some(link(UsbSpeed::High, Some(UsbSpeed::Super))));
+    select_camera(&view, cx);
+    assert!(link_notice(&view, cx).is_some());
+
+    view.update(cx, |view, cx| view.set_target(None, cx));
+    assert_eq!(
+        link_notice(&view, cx),
+        None,
+        "another camera's link must not linger"
+    );
+
+    // Replugged on a faster link.
+    capture
+        .link
+        .set(Some(link(UsbSpeed::Super, Some(UsbSpeed::Super))));
+    select_camera(&view, cx);
+    assert_eq!(link_notice(&view, cx), None);
+}
+
+#[gpui::test]
+fn the_notice_stays_when_the_camera_fails_to_open(cx: &mut TestAppContext) {
+    // A link too slow for the chosen mode is a plausible reason to fail.
+    let (view, capture, _key) = camera_preview(cx);
+    capture
+        .link
+        .set(Some(link(UsbSpeed::High, Some(UsbSpeed::Super))));
+    *capture.failure.borrow_mut() = Some(CaptureError::Setup("refused".into()));
+
+    select_camera(&view, cx);
+
+    assert!(link_notice(&view, cx).is_some());
 }

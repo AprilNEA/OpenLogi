@@ -4,17 +4,22 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use openlogi_camera::{CameraStream, CaptureError, Frame, StreamMode, StreamModes};
+use openlogi_camera::{CameraStream, CaptureError, Frame, StreamMode, StreamModes, UsbLink};
 
 pub(super) trait Capture {
     fn access_granted(&self) -> bool;
     /// How long a dropped stream's camera needs before it can be opened again
     /// without the open stalling the caller.
     fn release_delay(&self) -> Duration;
-    /// The resolutions and frame rates `target` offers. Driver metadata only,
-    /// cheap enough to read on the UI thread; empty when the platform backend
-    /// lists none.
+    /// The resolutions and frame rates `target` offers. Driver metadata, cheap
+    /// enough to read on the UI thread (where reading it takes the device, as
+    /// on Windows, only a camera's first read does); empty when the platform
+    /// backend lists none.
     fn stream_modes(&self, target: &str) -> Result<StreamModes, CaptureError>;
+    /// How `target` is attached over USB, as the last scan found it. Answers
+    /// from memory, so it is cheap on the UI thread; `None` where the platform
+    /// cannot tell.
+    fn usb_link(&self, target: &str) -> Option<UsbLink>;
     /// Open `target` at `mode`, or at the backend's default when `None`.
     fn start_stream(
         &self,
@@ -41,6 +46,10 @@ impl Capture for SystemCapture {
 
     fn stream_modes(&self, target: &str) -> Result<StreamModes, CaptureError> {
         openlogi_camera::stream_modes(target)
+    }
+
+    fn usb_link(&self, target: &str) -> Option<UsbLink> {
+        openlogi_camera::usb_link(target)
     }
 
     fn start_stream(

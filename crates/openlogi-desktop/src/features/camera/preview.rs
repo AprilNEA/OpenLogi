@@ -16,15 +16,18 @@
 //! helper's typed permission event starts the deferred stream.
 //!
 //! While streaming it captures at the resolution and frame rate chosen in the
-//! rows under the preview (720p at about 30 fps until one is chosen; the rows
+//! dropdowns under the preview (720p at about 30 fps until one is chosen; they
 //! appear where the platform backend lists modes), rebuilds the GPU texture
 //! only when a new frame arrives, and repaints at the camera's delivery rate.
-//! The choice only shapes this preview's own stream — it is saved per camera
-//! ([`AppState::commit_camera_stream_mode`]) and is not a device setting other
-//! applications see. A changed choice reopens the stream: the old one is
-//! dropped, the last frame stays on screen, and the new one opens after the
-//! camera has had [`openlogi_camera::RELEASE_DELAY`] to let go, on a timer so
-//! the UI thread never waits on the driver.
+//! The choice is saved per camera ([`AppState::commit_camera_stream_mode`]) and
+//! shapes this preview only: other applications choose their own, as the note
+//! under the dropdowns says. A camera on a slow USB link lists fewer modes than
+//! it can deliver, so when [`openlogi_camera::usb_link()`] shows it could run
+//! faster, a notice under the preview says so and what to try. A changed
+//! choice reopens the stream: the old one is dropped, the last frame stays on
+//! screen, and the new one opens after the camera has had
+//! [`openlogi_camera::RELEASE_DELAY`] to let go, on a timer so the UI thread
+//! never waits on the driver.
 //!
 //! When the camera cannot be opened at all the placeholder says why rather than
 //! waiting on a first frame that is never coming. Resource contention can clear
@@ -34,14 +37,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, App, Context, InteractiveElement, IntoElement, ParentElement, Rems, Render,
-    RenderImage, SharedString, Styled, Subscription, Task, Window, div, img,
+    App, AppContext as _, Context, Entity, InteractiveElement, IntoElement, ParentElement, Rems,
+    Render, RenderImage, SharedString, Styled, Subscription, Task, Window, div, img,
     prelude::FluentBuilder as _, rems,
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::v_flex;
 use image::{Frame as ImageFrame, RgbaImage};
-use openlogi_camera::{CameraAuthorization, CaptureError, Frame, StreamMode, StreamModes};
+use openlogi_camera::{CameraAuthorization, CaptureError, Frame, StreamMode, StreamModes, UsbLink};
 
 use crate::state::{AppState, StateEvent};
 use crate::ui::theme::{self, Palette, Typography as _};
@@ -71,8 +74,15 @@ pub struct CameraPreview {
     lifecycle: PreviewLifecycle,
     /// What the selected camera offers, read each time its stream (re)opens.
     /// Empty before the first open, after the target changes, and on backends
-    /// that list nothing — which hides the mode rows.
+    /// that list nothing — which hides the mode dropdowns.
     modes: StreamModes,
+    /// How the selected camera is attached over USB, read with its modes.
+    /// `None` before the first open, after the target changes, and where the
+    /// platform cannot tell.
+    link: Option<UsbLink>,
+    /// The resolution and frame-rate dropdowns, once a camera has offered
+    /// modes to put in them.
+    mode_picker: Option<Entity<modes::ModePicker>>,
     current_image: Option<Arc<RenderImage>>,
     _state_obs: Subscription,
 }
@@ -125,7 +135,7 @@ impl PreviewLifecycle {
 /// The camera `target` is, as the selected device: its config key and the mode
 /// saved for it (`None` when none is chosen). `None` when `target` is not the
 /// selected camera — the preview then falls back to the backend's default and
-/// shows no mode rows, rather than guessing whose settings to use.
+/// shows no mode dropdowns, rather than guessing whose settings to use.
 fn saved_mode(target: &str, cx: &App) -> Option<(String, Option<StreamMode>)> {
     let state = AppState::try_read(cx)?;
     let record = state
@@ -153,9 +163,9 @@ impl CameraPreview {
                     cx.notify();
                 }
                 // The camera's saved mode may have changed: reopen at it, and
-                // repaint so the rows mark the new choice. The root view does
-                // not repaint on this event while the Camera tab is open, so
-                // the preview listens for itself.
+                // repaint so the dropdowns show the new choice. The root view
+                // does not repaint on this event while the Camera tab is open,
+                // so the preview listens for itself.
                 StateEvent::CameraChanged => {
                     preview.apply_saved_mode(cx);
                     cx.notify();
@@ -167,6 +177,8 @@ impl CameraPreview {
             capture,
             lifecycle: PreviewLifecycle::Stopped,
             modes: StreamModes::default(),
+            link: None,
+            mode_picker: None,
             current_image: None,
             _state_obs: state_obs,
         }
@@ -188,8 +200,9 @@ impl CameraPreview {
         // repaint pump, and free the GPU texture immediately — not in `render`,
         // which stops running the moment the preview leaves the screen.
         self.lifecycle = PreviewLifecycle::Stopped;
-        // Another camera's modes must not be offered for this one.
+        // Another camera's modes and link must not be offered for this one.
         self.modes = StreamModes::default();
+        self.link = None;
         if let Some(old) = self.current_image.take() {
             cx.drop_image(old, None);
         }
@@ -279,13 +292,17 @@ impl CameraPreview {
 
     fn start_stream(&mut self, target: String, cx: &mut Context<Self>) {
         // What the camera offers, and the saved choice among it. Driver
-        // metadata only, so cheap enough for the UI thread. A camera whose
-        // modes cannot be read gets none listed and the backend's default;
-        // opening it below then reports the real error.
+        // metadata, cheap enough for the UI thread: opening the stream below
+        // blocks it for longer. A camera whose modes cannot be read gets none
+        // listed and the backend's default; opening it then reports the real
+        // error.
         self.modes = self.capture.stream_modes(&target).unwrap_or_else(|error| {
             tracing::debug!(%error, "camera modes unavailable");
             StreamModes::default()
         });
+        // Read on every open, so the notice follows a camera that was replugged
+        // at another speed.
+        self.link = self.capture.usb_link(&target);
         let saved = saved_mode(&target, cx).and_then(|(_, saved)| saved);
         let mode = self.modes.resolve(saved);
 
@@ -389,7 +406,7 @@ impl Render for CameraPreview {
                 openlogi_camera::camera_authorization(),
                 CameraAuthorization::Undetermined
             );
-        let mode_rows = self.mode_rows(pal, cx);
+        let mode_picker = self.show_modes(window, cx);
 
         let surface = v_flex()
             .w(PREVIEW_W)
@@ -456,25 +473,77 @@ impl Render for CameraPreview {
         v_flex()
             .gap_3()
             .child(surface)
-            .when_some(mode_rows, ParentElement::child)
+            .when_some(self.show_link_notice(pal), ParentElement::child)
+            .when_some(mode_picker, ParentElement::child)
     }
 }
 
 impl CameraPreview {
-    /// The resolution and frame-rate rows, when the selected camera lists modes.
+    /// The [`Self::link_notice`] as it appears under the preview.
+    fn show_link_notice(&self, pal: Palette) -> Option<gpui::Div> {
+        self.link_notice().map(|notice| {
+            div()
+                .w(PREVIEW_W)
+                .text_caption()
+                .text_color(pal.text_primary)
+                .child(notice)
+        })
+    }
+
+    /// Why the camera may offer less than it can deliver, when it is attached
+    /// at a lower USB speed than it supports; `None` when the link is no
+    /// limit, or when it cannot be told.
+    ///
+    /// Says what the link is and what the camera supports rather than naming
+    /// the modes that are missing: the camera lists only what its link
+    /// carries, so which ones it holds back is not known.
+    fn link_notice(&self) -> Option<SharedString> {
+        let link = self.link?;
+        let capable = link.faster_available()?;
+        Some(tr!(
+            "camera.usb_link_limited",
+            speed => link.speed.to_string(),
+            capable => capable.to_string()
+        ))
+    }
+
+    /// The resolution and frame-rate dropdowns, brought up to date with what
+    /// the selected camera offers, or `None` when it lists no modes.
+    fn show_modes(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<modes::ModePicker>> {
+        let choice = self.mode_choice(cx)?;
+        // Built on first use: its dropdowns need a window, which the preview's
+        // constructor does not have.
+        let picker = self
+            .mode_picker
+            .get_or_insert_with(|| cx.new(|cx| modes::ModePicker::new(window, cx)))
+            .clone();
+        picker.update(cx, |picker, cx| picker.show(choice, window, cx));
+        Some(picker)
+    }
+
+    /// What the resolution and frame-rate dropdowns show, when the selected
+    /// camera lists modes.
     ///
     /// Shown whenever its modes are known — streaming, restarting, or a start
     /// that failed — because a mode that will not open is exactly when picking
-    /// another is wanted. The marked pill is the mode the stream resolves to,
-    /// not the raw saved choice, so a stale choice shows the default it fell
-    /// back to.
-    fn mode_rows(&self, pal: Palette, cx: &App) -> Option<AnyElement> {
+    /// another is wanted. The selection is the mode the stream resolves to, not
+    /// the raw saved choice, so a stale choice shows the default it fell back
+    /// to.
+    fn mode_choice(&self, cx: &App) -> Option<modes::ModeChoice> {
         if self.modes.is_empty() {
             return None;
         }
         let (config_key, saved) = saved_mode(self.lifecycle.target()?, cx)?;
         let selected = self.modes.resolve(saved)?;
-        Some(modes::mode_section(&config_key, &self.modes, selected, pal))
+        Some(modes::ModeChoice {
+            config_key,
+            modes: self.modes.clone(),
+            selected,
+        })
     }
 }
 

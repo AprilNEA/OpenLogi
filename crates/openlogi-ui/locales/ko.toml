@@ -671,6 +671,7 @@ resolution = "Resolution"
 frame_rate = "Frame rate"
 frame_rate_fps = "%{fps} fps"
 stream_note = "Applies to this preview only. Other apps choose their own resolution and frame rate."
+usb_link_limited = "Connected at %{speed}, but this camera supports %{capable}. On the faster link it may offer more resolutions and frame rates. Plug it straight into a USB 3 port, without a hub, using a USB 3 cable."
 
 [lighting]
 colour_temperature = "색온도"

@@ -130,8 +130,10 @@ impl AppState {
         })
     }
 
-    /// Persist the resolution and frame rate for `config_key`'s live preview.
-    /// No agent IPC, like the controls: the preview is driven from the GUI.
+    /// Persist the resolution and frame rate for `config_key`'s live preview,
+    /// which opens its stream at it. It shapes the preview alone: other
+    /// applications negotiate their own. No agent IPC, like the controls: the
+    /// preview is driven from the GUI.
     ///
     /// Announces nothing when `mode` is already saved, so picking the selected
     /// option again does not restart the stream, and nothing when `mode` does
