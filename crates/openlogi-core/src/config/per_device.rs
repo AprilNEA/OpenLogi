@@ -9,8 +9,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
-    CameraControls, Config, DeviceIdentity, DisableKey, LightSettings, Lighting, ScrollResolution,
-    SmartShift, ThumbwheelSensitivity,
+    CameraControls, Config, DEFAULT_DPI_PRESETS, DeviceIdentity, DisableKey, LightSettings,
+    Lighting, ScrollResolution, SmartShift, ThumbwheelSensitivity,
 };
 use crate::binding::{
     ActionRingConfig, ActionRingIcon, ActionRingSlot, Binding, ButtonId, RingAction,
@@ -100,24 +100,25 @@ impl Config {
             .set_icon(slot, icon);
     }
 
-    /// The ordered DPI preset list for `device_key`, or an empty `Vec` if the
-    /// device has none configured yet.
+    /// The ordered DPI preset list for `device_key`: the one the user set,
+    /// or [`DEFAULT_DPI_PRESETS`] while they never set one. A list the user
+    /// emptied stays empty.
     #[must_use]
     pub fn dpi_presets(&self, device_key: &str) -> Vec<Dpi> {
         self.devices
             .get(device_key)
-            .map(|d| d.dpi_presets.clone())
-            .unwrap_or_default()
+            .and_then(|d| d.dpi_presets.clone())
+            .unwrap_or_else(|| DEFAULT_DPI_PRESETS.to_vec())
     }
 
-    /// Replace the DPI preset list for `device_key`. Pass an empty `Vec` to
-    /// clear (the device block is kept; the field is just omitted on save
-    /// thanks to `skip_serializing_if`).
+    /// Replace the DPI preset list for `device_key`. An empty `Vec` is saved
+    /// as an empty list, so the device keeps having none instead of falling
+    /// back to [`DEFAULT_DPI_PRESETS`].
     pub fn set_dpi_presets(&mut self, device_key: &str, presets: Vec<Dpi>) {
         self.devices
             .entry(device_key.to_string())
             .or_default()
-            .dpi_presets = presets;
+            .dpi_presets = Some(presets);
     }
 
     /// The last-known [`DeviceIdentity`] for `device_key`, or `None` if the

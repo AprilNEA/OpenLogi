@@ -250,14 +250,16 @@ pub struct DeviceConfig {
     pub action_ring: ActionRingConfig,
     /// Ordered list of DPI presets cycled through by
     /// [`Action::CycleDpiPresets`] and indexed by
-    /// [`Action::SetDpiPreset`]. Empty means "no presets configured" —
-    /// the cycle action becomes a no-op until the user adds at least one.
+    /// [`Action::SetDpiPreset`]. `None` means the user never set a list, and
+    /// [`Config::dpi_presets`](super::Config::dpi_presets) offers
+    /// [`DEFAULT_DPI_PRESETS`]. An empty list is the user's choice of none:
+    /// the cycle action is a no-op until they add one.
     #[serde(
         default,
         deserialize_with = "deserialize_dpi_presets",
-        skip_serializing_if = "Vec::is_empty"
+        skip_serializing_if = "Option::is_none"
     )]
-    pub dpi_presets: Vec<Dpi>,
+    pub dpi_presets: Option<Vec<Dpi>>,
     /// The sensor DPI the user committed for this device. Persisted because
     /// the value lives in device RAM and resets on a power cycle (#189); the
     /// agent re-applies it when the device reconnects. `None` until the user
@@ -452,7 +454,7 @@ impl Default for DeviceConfig {
             disabled_gestures: BTreeMap::new(),
             per_app_bindings: BTreeMap::new(),
             action_ring: ActionRingConfig::default(),
-            dpi_presets: Vec::new(),
+            dpi_presets: None,
             dpi: None,
             lighting: None,
             light: None,
@@ -489,6 +491,10 @@ fn is_true(b: &bool) -> bool {
     *b
 }
 
+/// The DPI presets a mouse offers until the user sets its own list: the two
+/// office-mouse speeds, which the DPI button then toggles between.
+pub const DEFAULT_DPI_PRESETS: [Dpi; 2] = [Dpi::new(800), Dpi::new(1000)];
+
 /// `skip_serializing_if` helper for plain `bool` fields whose default is
 /// `false`: keeps an unset toggle out of `config.toml` entirely.
 #[expect(
@@ -499,7 +505,7 @@ fn is_false(b: &bool) -> bool {
     !*b
 }
 
-fn deserialize_dpi_presets<'de, D>(deserializer: D) -> Result<Vec<Dpi>, D::Error>
+fn deserialize_dpi_presets<'de, D>(deserializer: D) -> Result<Option<Vec<Dpi>>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -512,7 +518,8 @@ where
                 ))
             })
         })
-        .collect()
+        .collect::<Result<Vec<_>, _>>()
+        .map(Some)
 }
 
 fn deserialize_optional_dpi<'de, D>(deserializer: D) -> Result<Option<Dpi>, D::Error>
@@ -566,7 +573,7 @@ struct RawDeviceConfig {
     #[serde(default)]
     action_ring: ActionRingConfig,
     #[serde(default, deserialize_with = "deserialize_dpi_presets")]
-    dpi_presets: Vec<Dpi>,
+    dpi_presets: Option<Vec<Dpi>>,
     #[serde(default, deserialize_with = "deserialize_optional_dpi")]
     dpi: Option<Dpi>,
     #[serde(default)]

@@ -326,6 +326,9 @@ pub(super) fn fold(device: &mut DeviceConfig, mut legacy: DeviceConfig, route_ke
     // folded into a canonical entry with none would drop it silently — the
     // one field here a user typed by hand, so the loss is the most visible.
     fold_option_field!(custom_name);
+    // A DPI cycle is ordered, so two lists are not merged; an emptied list is
+    // the user's choice and wins like any other.
+    fold_option_field!(dpi_presets);
 
     if device.identity.is_none() {
         device.identity = legacy.identity.take();
@@ -333,9 +336,9 @@ pub(super) fn fold(device: &mut DeviceConfig, mut legacy: DeviceConfig, route_ke
 
     // Collections with no natural per-item override: take the legacy value
     // wholesale when the canonical side is empty (i.e. never configured).
-    // Merging two curated lists is not a safe default — a DPI cycle is
-    // ordered and a host-switch list is positional — so a populated
-    // canonical side wins, and the list it displaces is logged.
+    // Merging two curated lists is not a safe default — a host-switch list
+    // is positional — so a populated canonical side wins, and the list it
+    // displaces is logged.
     macro_rules! fold_if_empty {
         ($field:ident) => {
             if device.$field.is_empty() {
@@ -349,7 +352,6 @@ pub(super) fn fold(device: &mut DeviceConfig, mut legacy: DeviceConfig, route_ke
             }
         };
     }
-    fold_if_empty!(dpi_presets);
     fold_if_empty!(host_switch_targets);
 
     // `ActionRingConfig` has its own notion of "unset". Two configured rings
