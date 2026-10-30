@@ -509,6 +509,98 @@ fn safari_target_never_relaxes_device_isolation() {
 }
 
 #[test]
+fn native_side_buttons_landing_in_safari_are_dispatched_instead_of_passed_through() {
+    use super::super::button::ButtonRuntimeEvent;
+
+    let mouse = EventDevice {
+        vendor_id: Some(0x046d),
+        product_name: Some("Logitech MX Master 3".into()),
+        ..EventDevice::default()
+    };
+    for (id, action) in [
+        (ButtonId::Back, Action::MouseBack),
+        (ButtonId::Forward, Action::MouseForward),
+    ] {
+        let (dispatcher, mut owner, events) = test_dispatcher();
+        let hooks = Arc::new(RwLock::new(HookMaps {
+            bindings: BTreeMap::from([(id, action.clone().into())]),
+            ..HookMaps::default()
+        }));
+        assert_eq!(
+            handle_button(id, true, Some(&mouse), &hooks, &dispatcher, || Some(417)),
+            EventDisposition::Suppress,
+            "Safari has no handler for the native {id} press"
+        );
+        let ButtonRuntimeEvent::Started(press) =
+            events.recv_timeout(Duration::from_secs(1)).expect("down")
+        else {
+            panic!("started");
+        };
+        assert_eq!(press.target(), ActionDispatchTarget::SafariProcess(417));
+        assert_eq!(press.start_action(), Some(&action));
+        assert_eq!(
+            handle_button(id, false, Some(&mouse), &hooks, &dispatcher, || {
+                panic!("release does not retarget")
+            }),
+            EventDisposition::Suppress,
+            "the suppressed press keeps its release"
+        );
+        assert!(owner.shutdown());
+    }
+}
+
+#[test]
+fn native_buttons_stay_native_outside_safari() {
+    use openlogi_hook::PointerTarget;
+
+    let mouse = EventDevice {
+        vendor_id: Some(0x046d),
+        product_name: Some("Logitech MX Master 3".into()),
+        ..EventDevice::default()
+    };
+    let other_window = PointerTarget::Window {
+        process_id: 9,
+        window_id: 3,
+    };
+    for (id, action, pointer_target, frontmost_safari) in [
+        // No Safari in front.
+        (ButtonId::Back, Action::MouseBack, None, None),
+        (ButtonId::Forward, Action::MouseForward, None, None),
+        // Safari in front, but the pointer is over another app's window,
+        // which receives the native press.
+        (
+            ButtonId::Back,
+            Action::MouseBack,
+            Some(other_window),
+            Some(417),
+        ),
+        // Safari handles the middle click itself.
+        (ButtonId::MiddleClick, Action::MiddleClick, None, Some(417)),
+    ] {
+        let (dispatcher, mut owner, events) = test_dispatcher();
+        let hooks = Arc::new(RwLock::new(HookMaps {
+            bindings: BTreeMap::from([(id, action.into())]),
+            pointer_target,
+            ..HookMaps::default()
+        }));
+        for pressed in [true, false] {
+            assert_eq!(
+                handle_button(id, pressed, Some(&mouse), &hooks, &dispatcher, || {
+                    frontmost_safari
+                }),
+                EventDisposition::PassThrough,
+                "{id} over {pointer_target:?} with Safari {frontmost_safari:?}"
+            );
+        }
+        assert!(owner.shutdown());
+        assert!(matches!(
+            events.try_recv(),
+            Err(mpsc::TryRecvError::Disconnected)
+        ));
+    }
+}
+
+#[test]
 fn scroll_interception_uses_the_button_source_safety_policy_and_skips_trackpads() {
     let logitech = EventDevice {
         vendor_id: Some(openlogi_hook::LOGITECH_VENDOR_ID),

@@ -37,19 +37,43 @@ impl ActionDispatchTarget {
         }
         // Safari's existing AX implementation uses AXFocusedWindow. It is
         // admitted only after the exact hovered window passed the focus check.
-        Some(match target {
-            PointerTarget::Window { process_id, .. } => {
-                if frontmost_safari_pid() == Some(process_id) {
-                    Self::SafariProcess(process_id)
-                } else {
-                    Self::Keyboard
-                }
-            }
-            PointerTarget::Unavailable => {
-                fallback_safari_pid.map_or(Self::Keyboard, Self::SafariProcess)
-            }
-            _ => Self::Keyboard,
-        })
+        Some(
+            pointer_safari_pid(target, fallback_safari_pid, frontmost_safari_pid)
+                .map_or(Self::Keyboard, Self::SafariProcess),
+        )
+    }
+
+    /// The Safari process a press captured with this target lands in, if
+    /// any. Nonblocking given a nonblocking `frontmost_safari_pid`, so the
+    /// tap callback may ask it.
+    pub(super) fn safari_pid(
+        self,
+        frontmost_safari_pid: impl FnOnce() -> Option<i32>,
+    ) -> Option<i32> {
+        match self {
+            Self::SafariProcess(pid) => Some(pid),
+            Self::Keyboard => None,
+            Self::Pointer {
+                target,
+                fallback_safari_pid,
+            } => pointer_safari_pid(target, fallback_safari_pid, frontmost_safari_pid),
+        }
+    }
+}
+
+/// A hovered window is Safari's only while Safari is frontmost; an
+/// unidentified target keeps the Safari process focused at the press.
+fn pointer_safari_pid(
+    target: PointerTarget,
+    fallback_safari_pid: Option<i32>,
+    frontmost_safari_pid: impl FnOnce() -> Option<i32>,
+) -> Option<i32> {
+    match target {
+        PointerTarget::Window { process_id, .. } => {
+            frontmost_safari_pid().filter(|&pid| pid == process_id)
+        }
+        PointerTarget::Unavailable => fallback_safari_pid,
+        _ => None,
     }
 }
 
@@ -160,6 +184,35 @@ mod tests {
             BROWSER,
             || false
         ));
+    }
+
+    #[test]
+    fn a_press_lands_in_safari_only_on_its_window_or_its_captured_focus() {
+        let pointer = |target, fallback_safari_pid| ActionDispatchTarget::Pointer {
+            target,
+            fallback_safari_pid,
+        };
+        for (target, frontmost, expected) in [
+            (ActionDispatchTarget::SafariProcess(41), None, Some(41)),
+            (ActionDispatchTarget::Keyboard, Some(41), None),
+            (pointer(BROWSER, None), Some(41), Some(41)),
+            // Safari is in front, but the hovered window is another app's.
+            (pointer(BROWSER, None), Some(52), None),
+            (pointer(BROWSER, None), None, None),
+            (
+                pointer(PointerTarget::Unavailable, Some(52)),
+                None,
+                Some(52),
+            ),
+            (pointer(PointerTarget::Unavailable, None), Some(52), None),
+            (pointer(PointerTarget::Desktop, Some(52)), Some(52), None),
+        ] {
+            assert_eq!(
+                target.safari_pid(|| frontmost),
+                expected,
+                "{target:?} with Safari {frontmost:?} in front"
+            );
+        }
     }
 
     #[test]

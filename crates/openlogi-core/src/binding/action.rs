@@ -36,7 +36,8 @@ pub enum Action {
     /// Mouse "back" side button (extra button 4). Synthesizes the real mouse
     /// button event, which browsers and most apps interpret as "navigate back"
     /// natively — unlike [`Action::BrowserBack`], which sends ⌘[ and is ignored
-    /// by many apps.
+    /// by many apps. Safari has no handler for the button, so the agent
+    /// navigates Safari as [`Action::BrowserBack`] does instead.
     MouseBack,
     /// Mouse "forward" side button (extra button 5). Native counterpart to
     /// [`Action::MouseBack`]; see [`Action::BrowserForward`] for the ⌘] form.

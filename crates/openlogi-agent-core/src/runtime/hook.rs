@@ -273,7 +273,7 @@ fn handle_button(
     device: Option<&EventDevice>,
     hooks: &SharedHookMaps,
     dispatcher: &ActionDispatcher,
-    capture_safari_pid: impl FnOnce() -> Option<i32>,
+    capture_safari_pid: impl Fn() -> Option<i32>,
 ) -> EventDisposition {
     // Primary L/R always pass through (suppressing them would brick the mouse).
     if !id.is_os_hook_button() || !button_source_may_remap(device) {
@@ -302,7 +302,7 @@ fn handle_button(
         return EventDisposition::Suppress;
     }
     let action_target = if pressed {
-        ActionDispatchTarget::for_pointer(pointer_target, capture_safari_pid)
+        ActionDispatchTarget::for_pointer(pointer_target, &capture_safari_pid)
     } else {
         ActionDispatchTarget::Keyboard
     };
@@ -350,7 +350,15 @@ fn handle_button(
     let Some(binding) = binding else {
         return SUPPRESSED_PRESSES.with_borrow_mut(|s| remapped_press_disposition(id, false, s));
     };
-    if binding_is_native_click(id, &binding) {
+    // A native press Safari would ignore is dispatched instead, and the
+    // executor navigates Safari.
+    if binding_is_native_click(id, &binding)
+        && super::safari_click_navigation(
+            &binding.click_action(),
+            action_target.safari_pid(&capture_safari_pid),
+        )
+        .is_none()
+    {
         return SUPPRESSED_PRESSES.with_borrow_mut(|s| remapped_press_disposition(id, false, s));
     }
     info!(button = %id, action = %binding.click_action().label(), "button → handling binding");
@@ -648,7 +656,8 @@ fn resolve_gesture_click(
 /// to the very click (or extra-button press) it already produces. In that case
 /// the hook should pass the event through to the OS rather than suppress and
 /// re-synthesise it. For Back/Forward this keeps the genuine hardware button
-/// 4/5 intact instead of round-tripping it through synthesis.
+/// 4/5 intact instead of round-tripping it through synthesis — except in
+/// Safari, which ignores those buttons (see [`handle_button`]).
 fn is_native_click(id: ButtonId, action: &Action) -> bool {
     matches!(
         (id, action),

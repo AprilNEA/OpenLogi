@@ -15,7 +15,7 @@ use std::io;
 use std::sync::{Arc, Mutex, PoisonError, RwLock, mpsc};
 use std::time::{Duration, Instant};
 
-use openlogi_core::binding::{Action, Binding, ButtonId};
+use openlogi_core::binding::{Action, Binding, ButtonId, Effect, MouseButton};
 use tracing::{debug, info, warn};
 
 use self::button::{
@@ -311,8 +311,24 @@ impl ActionExecutor {
             }
             return;
         }
-        let Some(target) = target.resolve(action) else {
+        let Some(resolved) = target.resolve(action) else {
             return;
+        };
+        let navigation = safari_click_navigation(action, resolved.safari_pid(|| None));
+        let (action, target) = match &navigation {
+            // Admitted again as the navigation it becomes, which acts on
+            // Safari's focused window, so a click aimed at another window
+            // must not navigate this one.
+            Some(navigation) => {
+                let Some(target @ ActionDispatchTarget::SafariProcess(_)) =
+                    target.resolve(navigation)
+                else {
+                    debug!(action = %action.label(), "Safari target moved or not focused — navigation skipped");
+                    return;
+                };
+                (navigation, target)
+            }
+            None => (action, resolved),
         };
 
         let next = match action {
@@ -801,6 +817,19 @@ impl ActionDispatcher {
     /// depend on Accessibility and remains active when the native hook stops.
     pub fn cancel_hook_buttons(&self) {
         self.buttons.cancel_hooks();
+    }
+}
+
+/// The browser navigation a mouse button 4 or 5 click performs when it lands
+/// in the Safari process `safari_pid`. Safari has no handler for those
+/// buttons, so posting the click there does nothing; anywhere else the click
+/// stays a click.
+fn safari_click_navigation(action: &Action, safari_pid: Option<i32>) -> Option<Action> {
+    safari_pid?;
+    match action.effect() {
+        Effect::Click(MouseButton::Back) => Some(Action::BrowserBack),
+        Effect::Click(MouseButton::Forward) => Some(Action::BrowserForward),
+        _ => None,
     }
 }
 
@@ -1364,6 +1393,25 @@ mod tests {
                 assert_eq!(pid_and_direction, Some((417, forward)));
                 assert!(!keyboard);
             }
+        }
+    }
+
+    #[test]
+    fn side_button_clicks_navigate_only_when_aimed_at_safari() {
+        let safari = Some(417);
+        for (action, safari_pid, expected) in [
+            (Action::MouseBack, safari, Some(Action::BrowserBack)),
+            (Action::MouseForward, safari, Some(Action::BrowserForward)),
+            (Action::MouseBack, None, None),
+            (Action::MouseForward, None, None),
+            (Action::MiddleClick, safari, None),
+            (Action::BrowserBack, safari, None),
+        ] {
+            assert_eq!(
+                safari_click_navigation(&action, safari_pid),
+                expected,
+                "{action:?} in Safari {safari_pid:?}"
+            );
         }
     }
 
