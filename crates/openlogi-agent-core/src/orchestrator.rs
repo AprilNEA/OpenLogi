@@ -789,15 +789,16 @@ impl Orchestrator {
         }
     }
 
-    /// Publish hook maps while preserving thumb-wheel polarities learned from
-    /// hardware capture sessions. Selection, polarity, and bindings share the
-    /// one lock the callback reads, so a device switch cannot combine facts
-    /// from two devices.
+    /// Publish hook maps while preserving what hardware capture sessions
+    /// reported: thumb-wheel polarities and diverted buttons. Selection,
+    /// polarity, and bindings share the one lock the callback reads, so a
+    /// device switch cannot combine facts from two devices.
     fn publish_hook_maps(&self, mut maps: HookMaps) {
         match self.shared.hook_maps.write() {
             Ok(mut current) => {
                 maps.thumbwheel_positive_is_forward =
                     std::mem::take(&mut current.thumbwheel_positive_is_forward);
+                maps.diverted_buttons = std::mem::take(&mut current.diverted_buttons);
                 *current = maps;
             }
             Err(error) => {
@@ -807,8 +808,13 @@ impl Orchestrator {
     }
 
     /// The keyboard key-capture spec for the managed keyboard, or `None` when
-    /// no enabled keyboard carries a real binding (an unbound key must never
-    /// be diverted).
+    /// no enabled keyboard carries a real binding in any profile (an unbound
+    /// key must never be diverted).
+    ///
+    /// A keyboard that binds keys only for some apps still holds the session
+    /// while another app is in front, with an empty divert set. The session
+    /// then diverts and hands back keys in place as the app in front changes,
+    /// instead of being armed from scratch on every focus change (#2140).
     ///
     /// The bound keys *are* the divert set: every
     /// [`ButtonId::Control`] in the
@@ -817,8 +823,11 @@ impl Orchestrator {
     /// table reports as divertable. No fixed key table sits in between, so a
     /// keyboard OpenLogi has never seen is remappable the day it ships.
     ///
-    /// One session at a time, and only a keyboard with something bound can
-    /// hold it: an online bound keyboard wins over an asleep one, so a stale
+    /// One session at a time, and only a keyboard with something bound in
+    /// some profile can hold it. A keyboard that binds keys for the app in
+    /// front wins over one that binds keys only for other apps, so an empty
+    /// session never takes the place of a keyboard whose bindings apply now.
+    /// Then an online bound keyboard wins over an asleep one, so a stale
     /// receiver slot for the same model (#1581) — which carries no bindings —
     /// never takes the session from the keyboard that is actually typing, and
     /// never shadows it while it naps. Among bound keyboards in the same
@@ -836,24 +845,25 @@ impl Orchestrator {
             .iter()
             .filter(|d| d.kind == DeviceKind::Keyboard && d.route.is_some())
             .filter(|d| self.config.device_enabled(&d.config_key))
-            .filter_map(|dev| {
+            .filter(|d| binds_keys_in_some_profile(&self.config, &d.config_key))
+            .map(|dev| {
                 let bindings = button_bindings_for(
                     &self.config,
                     Some(&dev.config_key),
                     self.current_app.as_deref(),
                 );
-                let divert = keyboard_divert_set(&bindings);
-                (!divert.wanted.is_empty()).then_some(KeyboardCandidate {
+                let divert = keyboard_divert_set(bindings.keys().copied());
+                KeyboardCandidate {
                     dev,
                     bindings,
                     divert,
-                })
+                }
             })
             .collect();
+        // `min_by_key` keeps the first of equal candidates: inventory order.
         let chosen = candidates
             .iter()
-            .find(|candidate| candidate.dev.online)
-            .or_else(|| candidates.first())?;
+            .min_by_key(|candidate| (candidate.divert.wanted.is_empty(), !candidate.dev.online))?;
         for &cid in &chosen.divert.reserved {
             warn!(
                 cid = format_args!("{cid:#06x}"),
@@ -2072,7 +2082,8 @@ fn write_value<T>(lock: &RwLock<T>, value: T, name: &str) {
 
 /// Publish a fresh immutable snapshot only when its projected value changed.
 /// A keyboard that could hold the key-capture session: it is enabled, has a
-/// route, and at least one of its keys is bound.
+/// route, and at least one of its keys is bound in some profile. `divert` is
+/// what the app in front binds, and may be empty.
 struct KeyboardCandidate<'a> {
     dev: &'a AgentDevice,
     bindings: BTreeMap<ButtonId, Binding>,
@@ -2087,14 +2098,15 @@ struct KeyboardDivertSet {
     reserved: Vec<u16>,
 }
 
-/// Which of `bindings` carry a stored binding on a keyboard control — a
-/// control is diverted whenever it is present at all, even as
+/// Which of `buttons`, the buttons a profile stores a binding for, are
+/// keyboard controls — a control is diverted whenever it is present at all,
+/// even as
 /// [`openlogi_core::binding::Action::None`] (which means "suppress this key," not "leave native"):
 /// `button_bindings_for` seeds no default for a [`ButtonId::Control`], so
 /// presence here is always an explicit user choice (#1747).
-fn keyboard_divert_set(bindings: &BTreeMap<ButtonId, Binding>) -> KeyboardDivertSet {
+fn keyboard_divert_set(buttons: impl IntoIterator<Item = ButtonId>) -> KeyboardDivertSet {
     let mut set = KeyboardDivertSet::default();
-    for button in bindings.keys() {
+    for button in buttons {
         let Some(cid) = button.cid().map(openlogi_core::binding::Cid::raw) else {
             continue;
         };
@@ -2106,10 +2118,29 @@ fn keyboard_divert_set(bindings: &BTreeMap<ButtonId, Binding>) -> KeyboardDivert
         if is_reserved_keyboard_control(cid) {
             set.reserved.push(cid);
         } else {
-            set.wanted.insert(cid, *button);
+            set.wanted.insert(cid, button);
         }
     }
     set
+}
+
+/// Whether `config_key` binds a key the capture session would divert in its
+/// device-wide profile or in any of its per-app profiles. A per-app override
+/// replaces the whole button, so its presence diverts the key exactly as a
+/// device-wide binding does.
+fn binds_keys_in_some_profile(config: &Config, config_key: &str) -> bool {
+    let device_wide = config.effective_bindings(config_key, None);
+    !keyboard_divert_set(device_wide.into_keys())
+        .wanted
+        .is_empty()
+        || config
+            .app_profiles(config_key)
+            .filter_map(|app| config.per_app_overrides(config_key, app))
+            .any(|overrides| {
+                !keyboard_divert_set(overrides.keys().copied())
+                    .wanted
+                    .is_empty()
+            })
 }
 
 fn publish_arc_if_changed<T: PartialEq>(publication: &watch::Sender<Arc<T>>, value: T) {

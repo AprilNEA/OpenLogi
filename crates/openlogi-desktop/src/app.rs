@@ -4,7 +4,7 @@ use gpui::{
     prelude::FluentBuilder as _,
 };
 use gpui_component::{
-    Icon, IconName, Sizable as _, TitleBar,
+    Icon, IconName, Root, Sizable as _, TitleBar,
     button::{Button, ButtonVariants as _},
     v_flex,
 };
@@ -542,13 +542,15 @@ fn app_title_bar(cx: &App) -> impl IntoElement {
 impl Render for AppView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let content = self.render_content(window, cx);
-        // Root owns dialog state but the application must mount its layer.
-        // Keep it present across connecting, permission, and error screens too.
+        // Root owns overlay state but the application must mount its layers.
+        // Keep them present across connecting, permission, and error screens too.
         div()
             .relative()
             .size_full()
             .child(content)
-            .children(gpui_component::Root::render_dialog_layer(window, cx))
+            .children(Root::render_sheet_layer(window, cx))
+            .children(Root::render_dialog_layer(window, cx))
+            .children(Root::render_notification_layer(window, cx))
     }
 }
 

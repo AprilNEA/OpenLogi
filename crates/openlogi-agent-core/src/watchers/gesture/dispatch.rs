@@ -246,6 +246,9 @@ impl InputDispatcher {
             CapturedInput::ThumbwheelDirection { .. } => {
                 unreachable!("thumb-wheel direction reports return before dispatch")
             }
+            CapturedInput::ButtonDiverted(_) => {
+                unreachable!("the session's forwarder records diverted buttons instead")
+            }
         }
     }
 
