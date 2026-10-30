@@ -25,11 +25,12 @@ mod dispatch;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use openlogi_core::binding::ButtonId;
 use openlogi_core::device_order::PhysicalDeviceKey;
 use openlogi_core::scroll::ScrollDelta;
 use openlogi_hid::{
-    CaptureHost, CaptureSessionOutcome, CaptureSessionStop, CapturedInput, PendingCaptureRestore,
-    run_capture_session,
+    CaptureHost, CaptureSessionOutcome, CaptureSessionStop, CapturedInput, DeviceRoute,
+    PendingCaptureRestore, run_capture_session,
 };
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
@@ -149,6 +150,7 @@ struct GestureManagerState {
 struct SessionChannels {
     events: mpsc::UnboundedSender<SessionEvent>,
     access: DeviceAccess,
+    hook_maps: SharedHookMaps,
 }
 
 struct GestureManagerContext {
@@ -159,16 +161,53 @@ struct GestureManagerContext {
     shutdown: oneshot::Receiver<()>,
 }
 
+/// The OS-hook record of the buttons one capture session diverted (#2158).
+///
+/// The session's own forwarder and completion tasks write it, not the manager
+/// loop. The hook must know a button's owner before the kernel's echo of the
+/// button's first press arrives, and the manager can be busy awaiting
+/// another device's I/O.
+#[derive(Clone)]
+struct DivertedButtonRecord {
+    hook_maps: SharedHookMaps,
+    session: HidppSessionId,
+    route: DeviceRoute,
+}
+
+impl DivertedButtonRecord {
+    fn record(&self, button: ButtonId) {
+        if let Ok(mut maps) = self.hook_maps.write() {
+            maps.diverted_buttons
+                .record(&self.session, &self.route, button);
+        }
+    }
+
+    /// Hand every recorded button back to the hook. Called once the session's
+    /// task has ended and its inputs are drained, so it reports no more.
+    fn release(&self) {
+        if let Ok(mut maps) = self.hook_maps.write() {
+            maps.diverted_buttons.release(&self.session);
+        }
+    }
+}
+
 /// Forward one capture session's inputs onto the manager's ordered event
 /// channel. The sender closes only after the device listener has been dropped.
+/// A diverted-button report goes into `diverted` instead, before any press
+/// the session reports after it is forwarded.
 fn spawn_input_forwarder(
     physical_key: PhysicalDeviceKey,
     session: HidppSessionId,
     mut inputs: mpsc::UnboundedReceiver<CapturedInput>,
     events: mpsc::UnboundedSender<SessionEvent>,
+    diverted: DivertedButtonRecord,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         while let Some(input) = inputs.recv().await {
+            if let CapturedInput::ButtonDiverted(button) = input {
+                diverted.record(button);
+                continue;
+            }
             let _ = events.send(SessionEvent::Input(CapturedEvent {
                 physical_key: physical_key.clone(),
                 session: session.clone(),
@@ -179,15 +218,18 @@ fn spawn_input_forwarder(
 }
 
 /// Report completion only after every input accepted by the device listener
-/// has reached the manager's event channel.
+/// has reached the manager's event channel, and the hook has been handed back
+/// the buttons the session diverted.
 async fn report_done_after_inputs(
     forward_task: tokio::task::JoinHandle<()>,
     events: mpsc::UnboundedSender<SessionEvent>,
     done: SessionDone,
+    diverted: DivertedButtonRecord,
 ) {
     if let Err(error) = forward_task.await {
         debug!(%error, "capture input forwarder ended unexpectedly");
     }
+    diverted.release();
     let _ = events.send(SessionEvent::Done(done));
 }
 
@@ -200,6 +242,7 @@ async fn complete_session(
     events: mpsc::UnboundedSender<SessionEvent>,
     physical_key: PhysicalDeviceKey,
     session: HidppSessionId,
+    diverted: DivertedButtonRecord,
 ) {
     let pending_restore = settle_capture_task(session_task, "gesture").await;
     // Use the same channel as input so completion follows every diverted
@@ -212,20 +255,21 @@ async fn complete_session(
             session,
             pending_restore,
         },
+        diverted,
     )
     .await;
 }
 
-/// Return the target and plan that own an input from the currently tracked
-/// session. An active session follows compatible plan updates; a deliberately
-/// stopped session keeps its frozen plan and remains admissible until its task
-/// reports that native firmware reporting has been restored.
+/// Return the plan that owns an input from the currently tracked session. An
+/// active session follows compatible plan updates; a deliberately stopped
+/// session keeps its frozen plan and remains admissible until its task reports
+/// that native firmware reporting has been restored.
 fn dispatch_context_for<'a>(
     input_session: &HidppSessionId,
     live: Option<&'a RunningSession>,
-) -> Option<(&'a HidppSessionId, &'a CaptureTarget, &'a DispatchPlan)> {
+) -> Option<(&'a HidppSessionId, &'a DispatchPlan)> {
     live.filter(|session| session.owns(input_session))
-        .map(|session| (session.id(), session.target(), session.dispatch()))
+        .map(|session| (session.id(), session.dispatch()))
 }
 
 /// Snapshot the sessions that should be armed. An exclusive request
@@ -532,9 +576,8 @@ impl GestureManagerState {
                 }
                 let live = self.slots.get(key).and_then(GestureSlot::session);
                 let dispatch_context = dispatch_context_for(&event.session, live);
-                if let Some((session, target, plan)) = dispatch_context {
-                    self.input_dispatcher
-                        .dispatch(session, &target.route, plan, event.input);
+                if let Some((session, plan)) = dispatch_context {
+                    self.input_dispatcher.dispatch(session, plan, event.input);
                 } else {
                     self.input_dispatcher.cancel_session(&event.session);
                     debug!(
@@ -547,11 +590,6 @@ impl GestureManagerState {
             }
             SessionEvent::Done(done) => {
                 let key = &done.physical_key;
-                // The task has ended, so it no longer reports what it
-                // diverted. Released by epoch before any slot check: a stale
-                // epoch must not leave the hook dropping real presses.
-                self.input_dispatcher
-                    .release_diverted_buttons(&done.session);
                 // Completion is queued behind every input the listener
                 // accepted during restoration, so cancellation cannot
                 // overtake the last diverted edge.
@@ -727,7 +765,11 @@ async fn manage(context: GestureManagerContext) -> ManagerCompletion {
     // retry deadline, a deliberately stopped one immediately frees its key for the
     // replacement once its teardown has drained, and stale completions are
     // ignored by the shared capture-session lifecycle.
-    let channels = SessionChannels { events, access };
+    let channels = SessionChannels {
+        events,
+        access,
+        hook_maps: outputs.hook_maps.clone(),
+    };
     capture_manager::run(
         GestureManager {
             state: GestureManagerState::new(outputs),
@@ -758,6 +800,11 @@ fn spawn_session(
     } = plan;
     let physical_key = target.physical_key.clone();
     let (stop_tx, stop_rx) = oneshot::channel();
+    let diverted = DivertedButtonRecord {
+        hook_maps: channels.hook_maps.clone(),
+        session: id.clone(),
+        route: target.route.clone(),
+    };
     // Tag this session's inputs with its device key so dispatch resolves them
     // against the right plan.
     let (session_tx, session_rx) = mpsc::unbounded_channel::<CapturedInput>();
@@ -766,6 +813,7 @@ fn spawn_session(
         id.clone(),
         session_rx,
         channels.events.clone(),
+        diverted.clone(),
     );
     let events = channels.events.clone();
     let done_id = id.clone();
@@ -807,6 +855,7 @@ fn spawn_session(
         events,
         done_key,
         done_id,
+        diverted,
     ));
     CaptureSession::active(id, target, dispatch, stop_tx)
 }

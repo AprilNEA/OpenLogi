@@ -9,8 +9,8 @@ use std::time::Instant;
 use openlogi_core::binding::{Action, Binding, ButtonId, HeldWheel, default_binding};
 use openlogi_core::config::ThumbwheelSensitivity;
 use openlogi_core::scroll::ScrollDelta;
+use openlogi_hid::CapturedInput;
 use openlogi_hid::thumbwheel::WheelResolution;
-use openlogi_hid::{CapturedInput, DeviceRoute};
 use tracing::debug;
 
 use self::wheel::{ScrollScale, WheelAccumulators, WheelOutput, WheelRotation};
@@ -131,19 +131,6 @@ impl InputDispatcher {
         true
     }
 
-    /// Publish a button `session` diverted on `route` into the OS-hook
-    /// snapshot, so the hook drops an OS copy of its presses (#2158).
-    fn record_diverted_button(
-        &self,
-        session: &HidppSessionId,
-        route: &DeviceRoute,
-        button: ButtonId,
-    ) {
-        if let Ok(mut maps) = self.hook_maps.write() {
-            maps.diverted_buttons.record(session, route, button);
-        }
-    }
-
     /// Whether `session` still holds an admitted gesture press for `button`.
     #[cfg(test)]
     pub(super) fn holds_gesture_press(&self, session: &HidppSessionId, button: ButtonId) -> bool {
@@ -157,22 +144,11 @@ impl InputDispatcher {
         self.held_presses.cancel_session(session);
     }
 
-    /// Hand the OS hook back every button `session` diverted, once its task
-    /// has ended. A dispatch-plan change cancels the session's lifecycles but
-    /// keeps its diversion, so it must not call this.
-    pub(super) fn release_diverted_buttons(&self, session: &HidppSessionId) {
-        if let Ok(mut maps) = self.hook_maps.write() {
-            maps.diverted_buttons.release(session);
-        }
-    }
-
     /// Route one captured input from `session` to its bound action or
-    /// re-synthesised scroll output. `route` is the transport the session
-    /// armed on.
+    /// re-synthesised scroll output.
     pub(super) fn dispatch(
         &mut self,
         session: &HidppSessionId,
-        route: &DeviceRoute,
         plan: &DispatchPlan,
         input: CapturedInput,
     ) {
@@ -270,8 +246,8 @@ impl InputDispatcher {
             CapturedInput::ThumbwheelDirection { .. } => {
                 unreachable!("thumb-wheel direction reports return before dispatch")
             }
-            CapturedInput::ButtonDiverted(button) => {
-                self.record_diverted_button(session, route, button);
+            CapturedInput::ButtonDiverted(_) => {
+                unreachable!("the session's forwarder records diverted buttons instead")
             }
         }
     }
