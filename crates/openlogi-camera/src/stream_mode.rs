@@ -4,9 +4,9 @@
 //! Unlike brightness or zoom, resolution and frame rate are not registers the
 //! camera holds: UVC negotiates them with the camera every time a stream opens
 //! (the probe/commit handshake behind V4L2's set-format and set-parameters
-//! ioctls). A choice therefore shapes only the stream that asked for it —
-//! OpenLogi's own preview — and never what Meet, Zoom or OBS receive; each of
-//! those negotiates for itself.
+//! ioctls). A mode is therefore the preview's own: Meet, Zoom or OBS each
+//! negotiate theirs when they open the camera, so a choice here shapes
+//! OpenLogi's preview and nothing else.
 //!
 //! Everything here is platform-independent. A backend enumerates the modes its
 //! camera offers ([`StreamModes`]) and opens the stream at the mode it is

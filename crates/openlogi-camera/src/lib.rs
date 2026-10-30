@@ -17,9 +17,10 @@
 //! Linux uses V4L2 for both, through the kernel's `uvcvideo` driver. Other
 //! platforms return an empty list.
 //!
-//! Resolution and frame rate are a property of a *stream*, not of the camera:
-//! see [`StreamMode`]. Only the Linux backend lists and honours them so far;
-//! the others report [`StreamModes`] empty and stream at their fixed preset.
+//! Resolution and frame rate are negotiated per stream, so a choice shapes only
+//! the stream that makes it: see [`StreamMode`]. The Linux and macOS backends
+//! list and honour them; any other platform reports [`StreamModes`] empty and
+//! streams at its fixed preset.
 
 use std::time::Duration;
 
@@ -43,7 +44,7 @@ mod capture_macos;
 #[cfg(target_os = "macos")]
 pub use capture_macos::{
     CameraStream, camera_access_granted, camera_authorization, capture_frame,
-    request_camera_access, start_stream,
+    request_camera_access, start_stream, stream_modes,
 };
 
 #[cfg(target_os = "windows")]
@@ -199,14 +200,14 @@ pub use uvc::{
 /// The modes the camera with `unique_id` can stream at, for the pixel format
 /// this crate would stream it in.
 ///
-/// Only the Linux backend can list them so far; here the list is always empty,
-/// which callers read as "nothing to choose" and hide mode selection. The
-/// stream itself runs at the backend's fixed preset, whatever `mode`
+/// Only the Linux and macOS backends can list them; here the list is always
+/// empty, which callers read as "nothing to choose" and hide mode selection.
+/// The stream itself runs at the backend's fixed preset, whatever `mode`
 /// [`start_stream`] is handed.
 ///
 /// # Errors
-/// Never fails on this platform. (Linux: see its `stream_modes`.)
-#[cfg(not(target_os = "linux"))]
+/// Never fails on this platform. (Elsewhere: see that platform's `stream_modes`.)
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn stream_modes(_unique_id: &str) -> Result<StreamModes, CaptureError> {
     Ok(StreamModes::default())
 }
@@ -217,16 +218,19 @@ pub fn stream_modes(_unique_id: &str) -> Result<StreamModes, CaptureError> {
 /// A V4L2 stream is torn down on its own thread and a UVC camera takes ~600 ms
 /// to give its bandwidth back, so reopening sooner makes `start_stream` wait
 /// on the driver. A caller that reopens on purpose (a mode change) waits this
-/// long on a timer instead of on its UI thread. Zero on platforms that list no
-/// [`StreamModes`], where nothing reopens on purpose.
+/// long on a timer instead of on its UI thread. Zero where there is nothing to
+/// wait out: macOS, whose `stopRunning` returns once the camera is released,
+/// and platforms that list no [`StreamModes`], where nothing reopens on
+/// purpose.
 #[cfg(target_os = "linux")]
 pub const RELEASE_DELAY: Duration = capture_linux::RELEASE_DELAY;
 
 /// How long a camera needs after its [`CameraStream`] is dropped before it can
 /// be opened again without the driver stalling the caller.
 ///
-/// This platform lists no [`StreamModes`], so nothing reopens a stream on
-/// purpose and there is no teardown to wait out.
+/// Nothing to wait out here: dropping a stream on macOS releases the camera
+/// before the drop returns, and the other platforms list no [`StreamModes`], so
+/// nothing reopens a stream on purpose.
 #[cfg(not(target_os = "linux"))]
 pub const RELEASE_DELAY: Duration = Duration::ZERO;
 
