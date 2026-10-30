@@ -38,6 +38,13 @@ pub enum Register {
     /// to read the pairing count and to trigger device-arrival events.
     Connections = 0x02,
 
+    /// Opens or closes the pairing lock and unpairs devices. The layout
+    /// (`[action, slot, timeout]`) is reverse engineered from Solaar.
+    ///
+    /// Use [`Receiver::open_pairing_lock`], [`Receiver::close_pairing_lock`]
+    /// and [`Receiver::unpair_device`].
+    Pairing = 0xb2,
+
     /// Provides information about the receiver and paired devices. It uses
     /// sub-registers, as defined in [`InfoSubRegister`], to differentiate
     /// between different kinds of information.
@@ -171,6 +178,32 @@ impl Receiver {
                 Register::Connections.into(),
                 [0x02, 0x00, 0x00],
             )
+            .await?;
+
+        Ok(())
+    }
+
+    /// Opens the pairing lock for `timeout` seconds ([`None`] = receiver
+    /// default): the next powered-on unpaired device in range links on its
+    /// own. The receiver confirms the lock state with a `0x4a` notification.
+    pub async fn open_pairing_lock(&self, timeout: Option<u8>) -> Result<(), ReceiverError> {
+        self.write_pairing([0x01, 0x00, timeout.unwrap_or(0x00)])
+            .await
+    }
+
+    /// Closes the pairing lock.
+    pub async fn close_pairing_lock(&self) -> Result<(), ReceiverError> {
+        self.write_pairing([0x02, 0x00, 0x00]).await
+    }
+
+    /// Unpairs the device in `slot` from the receiver.
+    pub async fn unpair_device(&self, slot: u8) -> Result<(), ReceiverError> {
+        self.write_pairing([0x03, slot, 0x00]).await
+    }
+
+    async fn write_pairing(&self, payload: [u8; 3]) -> Result<(), ReceiverError> {
+        self.chan
+            .write_register(RECEIVER_DEVICE_INDEX, Register::Pairing.into(), payload)
             .await?;
 
         Ok(())

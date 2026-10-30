@@ -16,6 +16,17 @@ use hidpp::{
     protocol::v10::MessageType,
 };
 
+/// HID++ device index addressing the receiver itself (not a paired device).
+const RECEIVER_INDEX: u8 = 0xff;
+/// Bolt pair / cancel register (long).
+const BOLT_PAIRING: u8 = 0xc1;
+/// Unifying pairing-lock register (short).
+const UNIFYING_PAIRING: u8 = 0xb2;
+
+fn session_receiver(channel: &Arc<HidppChannel>, family: ReceiverFamily) -> TypedReceiver {
+    TypedReceiver::new(channel, family).expect("the mock's product ID matches the family")
+}
+
 #[test]
 fn receiver_family_follows_the_shared_protocol_registry() {
     for receiver in crate::RECEIVERS {
@@ -92,6 +103,8 @@ async fn queued_discovery_notifications_after_selection_do_not_emit_device_found
     let Ok(channel) = HidppChannel::from_raw_channel(raw).await else {
         panic!("mock must support HID++");
     };
+    let channel = Arc::new(channel);
+    let receiver = session_receiver(&channel, ReceiverFamily::Bolt);
     let (command_tx, mut commands) = mpsc::unbounded_channel();
     let (notification_tx, mut notifications) = mpsc::unbounded_channel();
     let (event_tx, mut events) = mpsc::unbounded_channel();
@@ -141,7 +154,7 @@ async fn queued_discovery_notifications_after_selection_do_not_emit_device_found
         tokio::join!(
             run_session(
                 &channel,
-                ReceiverFamily::Bolt,
+                &receiver,
                 NotificationFlags::empty(),
                 &mut commands,
                 &mut notifications,
@@ -167,10 +180,12 @@ async fn queued_discovery_notifications_after_selection_do_not_emit_device_found
 
 #[tokio::test]
 async fn unifying_session_rejects_bolt_pair_command_before_writing_it() {
-    let (raw, mut written_reports) = EchoRawHidChannel::new();
+    let (raw, mut written_reports) = EchoRawHidChannel::unifying();
     let Ok(channel) = HidppChannel::from_raw_channel(raw).await else {
         panic!("mock must support HID++");
     };
+    let channel = Arc::new(channel);
+    let receiver = session_receiver(&channel, ReceiverFamily::Unifying);
     let (command_tx, mut commands) = mpsc::unbounded_channel();
     let (_notification_tx, mut notifications) = mpsc::unbounded_channel();
     let (event_tx, _events) = mpsc::unbounded_channel();
@@ -191,7 +206,7 @@ async fn unifying_session_rejects_bolt_pair_command_before_writing_it() {
         Duration::from_secs(2),
         run_session(
             &channel,
-            ReceiverFamily::Unifying,
+            &receiver,
             NotificationFlags::empty(),
             &mut commands,
             &mut notifications,
@@ -246,6 +261,8 @@ async fn malformed_passkey_after_pair_cancels_bolt_pairing() {
     let Ok(channel) = HidppChannel::from_raw_channel(raw).await else {
         panic!("mock must support HID++");
     };
+    let channel = Arc::new(channel);
+    let receiver = session_receiver(&channel, ReceiverFamily::Bolt);
     let (command_tx, mut commands) = mpsc::unbounded_channel();
     let (notification_tx, mut notifications) = mpsc::unbounded_channel();
     let (event_tx, _events) = mpsc::unbounded_channel();
@@ -290,7 +307,7 @@ async fn malformed_passkey_after_pair_cancels_bolt_pairing() {
         tokio::join!(
             run_session(
                 &channel,
-                ReceiverFamily::Bolt,
+                &receiver,
                 NotificationFlags::empty(),
                 &mut commands,
                 &mut notifications,
@@ -338,6 +355,8 @@ async fn failed_bolt_pair_write_cancels_bolt_pairing() {
     let Ok(channel) = HidppChannel::from_raw_channel(raw).await else {
         panic!("mock must support HID++");
     };
+    let channel = Arc::new(channel);
+    let receiver = session_receiver(&channel, ReceiverFamily::Bolt);
     let (command_tx, mut commands) = mpsc::unbounded_channel();
     let (_notification_tx, mut notifications) = mpsc::unbounded_channel();
     let (event_tx, _events) = mpsc::unbounded_channel();
@@ -358,7 +377,7 @@ async fn failed_bolt_pair_write_cancels_bolt_pairing() {
         Duration::from_secs(2),
         run_session(
             &channel,
-            ReceiverFamily::Bolt,
+            &receiver,
             NotificationFlags::empty(),
             &mut commands,
             &mut notifications,
@@ -448,10 +467,12 @@ async fn run_unifying_session(
     Vec<Vec<u8>>,
     Duration,
 ) {
-    let (raw, mut written_reports) = EchoRawHidChannel::new();
+    let (raw, mut written_reports) = EchoRawHidChannel::unifying();
     let Ok(channel) = HidppChannel::from_raw_channel(raw).await else {
         panic!("mock must support HID++");
     };
+    let channel = Arc::new(channel);
+    let receiver = session_receiver(&channel, ReceiverFamily::Unifying);
     let (_command_tx, mut commands) = mpsc::unbounded_channel();
     let (notification_tx, mut notifications) = mpsc::unbounded_channel();
     let (event_tx, mut events) = mpsc::unbounded_channel();
@@ -463,7 +484,7 @@ async fn run_unifying_session(
         LOCK_CONFIRMATION_TIMEOUT * 5,
         run_session(
             &channel,
-            ReceiverFamily::Unifying,
+            &receiver,
             NotificationFlags::empty(),
             &mut commands,
             &mut notifications,
@@ -480,10 +501,12 @@ async fn run_unifying_session(
 
 #[tokio::test]
 async fn unifying_reports_searching_only_once_the_receiver_confirms_the_lock() {
-    let (raw, mut written_reports) = EchoRawHidChannel::new();
+    let (raw, mut written_reports) = EchoRawHidChannel::unifying();
     let Ok(channel) = HidppChannel::from_raw_channel(raw).await else {
         panic!("mock must support HID++");
     };
+    let channel = Arc::new(channel);
+    let receiver = session_receiver(&channel, ReceiverFamily::Unifying);
     let (_command_tx, mut commands) = mpsc::unbounded_channel();
     let (notification_tx, mut notifications) = mpsc::unbounded_channel();
     let (event_tx, mut events) = mpsc::unbounded_channel();
@@ -525,7 +548,7 @@ async fn unifying_reports_searching_only_once_the_receiver_confirms_the_lock() {
         let (result, ()) = tokio::join!(
             run_session(
                 &channel,
-                ReceiverFamily::Unifying,
+                &receiver,
                 NotificationFlags::empty(),
                 &mut commands,
                 &mut notifications,
@@ -666,11 +689,19 @@ struct EchoRawHidChannel {
     incoming_rx: tokio::sync::Mutex<mpsc::UnboundedReceiver<Vec<u8>>>,
     written_tx: mpsc::UnboundedSender<Vec<u8>>,
     fail_bolt_pair_write: AtomicBool,
+    product_id: u16,
 }
 
 impl EchoRawHidChannel {
     fn new() -> (Self, mpsc::UnboundedReceiver<Vec<u8>>) {
         Self::with_failed_bolt_pair_write(false)
+    }
+
+    /// A Unifying receiver (`046d:c52b`).
+    fn unifying() -> (Self, mpsc::UnboundedReceiver<Vec<u8>>) {
+        let (mut raw, written) = Self::new();
+        raw.product_id = 0xc52b;
+        (raw, written)
     }
 
     fn failing_bolt_pair_write() -> (Self, mpsc::UnboundedReceiver<Vec<u8>>) {
@@ -688,6 +719,7 @@ impl EchoRawHidChannel {
                 incoming_rx: tokio::sync::Mutex::new(incoming_rx),
                 written_tx,
                 fail_bolt_pair_write: AtomicBool::new(fail_bolt_pair_write),
+                product_id: 0xc548,
             },
             written_rx,
         )
@@ -701,7 +733,7 @@ impl RawHidChannel for EchoRawHidChannel {
     }
 
     fn product_id(&self) -> u16 {
-        0xc548
+        self.product_id
     }
 
     async fn write_report(&self, src: &[u8]) -> Result<usize, Box<dyn Error + Sync + Send>> {

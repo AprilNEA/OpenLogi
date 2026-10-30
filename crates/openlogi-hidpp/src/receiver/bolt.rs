@@ -380,14 +380,27 @@ impl Receiver {
         Ok(())
     }
 
-    /// Cancels the device discovery process.
-    pub async fn cancel_device_discovery(&self) -> Result<(), ReceiverError> {
+    /// Cancels the device discovery process. Pass the `timeout` discovery was
+    /// opened with: the stop action echoes the window, as Solaar's does.
+    pub async fn cancel_device_discovery(&self, timeout: Option<u8>) -> Result<(), ReceiverError> {
         self.chan
             .write_register(
                 RECEIVER_DEVICE_INDEX,
                 Register::DeviceDiscovery.into(),
-                [0x00, 0x02, 0x00],
+                [timeout.unwrap_or(0x00), 0x02, 0x00],
             )
+            .await?;
+
+        Ok(())
+    }
+
+    /// Cancels an in-progress [`Self::pair_device`].
+    pub async fn cancel_pairing(&self) -> Result<(), ReceiverError> {
+        let mut payload = [0u8; 16];
+        payload[0] = 0x02;
+
+        self.chan
+            .write_long_register(RECEIVER_DEVICE_INDEX, Register::Pairing.into(), payload)
             .await?;
 
         Ok(())
