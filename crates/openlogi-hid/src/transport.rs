@@ -210,7 +210,11 @@ use windows::WindowsHidppChannel;
 #[cfg(test)]
 use windows::normalize_collection_path;
 
-/// HID++ long-report vendor collections, as `(usage_page, usage_id, long_only)`.
+/// A HID collection, as `(usage_page, usage_id)`.
+type HidCollection = (u16, u16);
+
+/// HID++ long-report vendor collections, as
+/// `(usage_page, usage_id, short_collection)`.
 ///
 /// Logitech exposes its HID++ long-report (report id `0x11`) under a
 /// vendor-defined HID collection, but the page differs by transport:
@@ -227,23 +231,23 @@ use windows::normalize_collection_path;
 ///   Lightspeed receiver (`c54f`). Short (`0x0301`) and long collections share
 ///   one interface, so it is not long-only.
 ///
-/// `long_only` marks a transport that exposes *only* the long report — no
-/// short-report (`0x10`) collection — so short HID++ requests must be
-/// up-converted to long (handled by the `hidpp` channel). BLE-direct devices and
-/// the G733 headset's interface are long-only; USB / receiver / wired-keyboard
-/// devices carry both. On Windows a long-only collection is therefore never
-/// paired with a short sibling collection.
+/// `short_collection` names the `(usage_page, usage_id)` of the short-report
+/// (`0x10`) sibling, which Windows opens as its own handle. `None` marks a
+/// transport that exposes *only* the long report, so short HID++ requests must
+/// be up-converted to long (handled by the `hidpp` channel). BLE-direct devices
+/// and the G733 headset's interface are long-only; USB / receiver /
+/// wired-keyboard devices carry both.
 /// Keeping the flag in this table means a new long-only transport is a
 /// single-line addition here, with no second site to update.
 ///
 /// Filtering on these pairs gives us one HID node per physical HID++ device on
 /// every supported OS, without reading report descriptors (`async-hid 0.4`
 /// only exposes those on Linux).
-const HIDPP_LONG_COLLECTIONS: [(u16, u16, bool); 4] = [
-    (0xff00, 0x0002, false),
-    (0xff43, 0x0202, true),
-    (0xff43, 0x0602, false),
-    (0xff43, 0x0302, false),
+const HIDPP_LONG_COLLECTIONS: [(u16, u16, Option<HidCollection>); 4] = [
+    (0xff00, 0x0002, Some((0xff00, 0x0001))),
+    (0xff43, 0x0202, None),
+    (0xff43, 0x0602, Some((0xff00, 0x0001))),
+    (0xff43, 0x0302, Some((0xff43, 0x0301))),
 ];
 
 /// Whether `(usage_page, usage_id)` is one of the HID++ long-report collections.
@@ -256,10 +260,21 @@ fn is_hidpp_long_collection(usage_page: u16, usage_id: u16) -> bool {
 /// Whether the matched HID++ collection exposes only the long report, so short
 /// requests must be re-framed as long (done in the `hidpp` channel). `false` for
 /// pages not in [`HIDPP_LONG_COLLECTIONS`].
+#[cfg(any(not(target_os = "windows"), test))]
 fn is_long_only_collection(usage_page: u16, usage_id: u16) -> bool {
     HIDPP_LONG_COLLECTIONS
         .iter()
-        .any(|&(page, usage, long_only)| long_only && (page, usage) == (usage_page, usage_id))
+        .any(|&(page, usage, short)| short.is_none() && (page, usage) == (usage_page, usage_id))
+}
+
+/// The short-report sibling of a long-report collection. `None` for a long-only
+/// collection and for pages not in [`HIDPP_LONG_COLLECTIONS`].
+#[cfg(any(target_os = "windows", test))]
+fn short_collection(usage_page: u16, usage_id: u16) -> Option<HidCollection> {
+    HIDPP_LONG_COLLECTIONS
+        .iter()
+        .find(|&&(page, usage, _)| (page, usage) == (usage_page, usage_id))
+        .and_then(|&(_, _, short)| short)
 }
 
 /// Process-wide HID backend, created once and reused for every enumeration.

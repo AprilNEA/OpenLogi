@@ -28,6 +28,16 @@ fn only_ble_collection_is_long_only() {
 }
 
 #[test]
+fn each_collection_names_its_own_short_sibling() {
+    assert_eq!(short_collection(0xff00, 0x0002), Some((0xff00, 0x0001)));
+    assert_eq!(short_collection(0xff43, 0x0602), Some((0xff00, 0x0001)));
+    // PRO X3 SUPERSTRIKE: its short collection is on the same 0xFF43 page.
+    assert_eq!(short_collection(0xff43, 0x0302), Some((0xff43, 0x0301)));
+    assert_eq!(short_collection(0xff43, 0x0202), None); // long-only
+    assert_eq!(short_collection(0x0001, 0x0002), None); // not a HID++ collection
+}
+
+#[test]
 fn short_and_long_collections_of_one_interface_share_a_grouping_key() {
     // Real Bolt receiver paths: the short (Col01) and long (Col02) HID++
     // collections of interface MI_02 must collapse to the same key.
