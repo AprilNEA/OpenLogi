@@ -179,6 +179,7 @@ fn dispatch_input(
         CapturedInput::Gesture(..)
         | CapturedInput::Scroll { .. }
         | CapturedInput::ThumbwheelDirection { .. }
+        | CapturedInput::ButtonDiverted(_)
         | CapturedInput::HeldWheel { .. }
         | CapturedInput::MainWheel { .. } => {}
     }

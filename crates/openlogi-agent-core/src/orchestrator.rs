@@ -789,15 +789,16 @@ impl Orchestrator {
         }
     }
 
-    /// Publish hook maps while preserving thumb-wheel polarities learned from
-    /// hardware capture sessions. Selection, polarity, and bindings share the
-    /// one lock the callback reads, so a device switch cannot combine facts
-    /// from two devices.
+    /// Publish hook maps while preserving what hardware capture sessions
+    /// reported: thumb-wheel polarities and diverted buttons. Selection,
+    /// polarity, and bindings share the one lock the callback reads, so a
+    /// device switch cannot combine facts from two devices.
     fn publish_hook_maps(&self, mut maps: HookMaps) {
         match self.shared.hook_maps.write() {
             Ok(mut current) => {
                 maps.thumbwheel_positive_is_forward =
                     std::mem::take(&mut current.thumbwheel_positive_is_forward);
+                maps.diverted_buttons = std::mem::take(&mut current.diverted_buttons);
                 *current = maps;
             }
             Err(error) => {

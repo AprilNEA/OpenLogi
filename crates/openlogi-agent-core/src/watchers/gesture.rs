@@ -216,16 +216,16 @@ async fn complete_session(
     .await;
 }
 
-/// Return the plan that owns an input from the currently tracked session. An
-/// active session follows compatible plan updates; a deliberately stopped
-/// session keeps its frozen plan and remains admissible until its task reports
-/// that native firmware reporting has been restored.
+/// Return the target and plan that own an input from the currently tracked
+/// session. An active session follows compatible plan updates; a deliberately
+/// stopped session keeps its frozen plan and remains admissible until its task
+/// reports that native firmware reporting has been restored.
 fn dispatch_context_for<'a>(
     input_session: &HidppSessionId,
     live: Option<&'a RunningSession>,
-) -> Option<(&'a HidppSessionId, &'a DispatchPlan)> {
+) -> Option<(&'a HidppSessionId, &'a CaptureTarget, &'a DispatchPlan)> {
     live.filter(|session| session.owns(input_session))
-        .map(|session| (session.id(), session.dispatch()))
+        .map(|session| (session.id(), session.target(), session.dispatch()))
 }
 
 /// Snapshot the sessions that should be armed. An exclusive request
@@ -532,8 +532,9 @@ impl GestureManagerState {
                 }
                 let live = self.slots.get(key).and_then(GestureSlot::session);
                 let dispatch_context = dispatch_context_for(&event.session, live);
-                if let Some((session, plan)) = dispatch_context {
-                    self.input_dispatcher.dispatch(session, plan, event.input);
+                if let Some((session, target, plan)) = dispatch_context {
+                    self.input_dispatcher
+                        .dispatch(session, &target.route, plan, event.input);
                 } else {
                     self.input_dispatcher.cancel_session(&event.session);
                     debug!(
@@ -546,6 +547,11 @@ impl GestureManagerState {
             }
             SessionEvent::Done(done) => {
                 let key = &done.physical_key;
+                // The task has ended, so it no longer reports what it
+                // diverted. Released by epoch before any slot check: a stale
+                // epoch must not leave the hook dropping real presses.
+                self.input_dispatcher
+                    .release_diverted_buttons(&done.session);
                 // Completion is queued behind every input the listener
                 // accepted during restoration, so cancellation cannot
                 // overtake the last diverted edge.

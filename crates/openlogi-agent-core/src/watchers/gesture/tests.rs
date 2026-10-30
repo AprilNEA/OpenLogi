@@ -439,7 +439,7 @@ fn side_gesture_transition_keeps_the_retiring_plan_until_native_restore() {
     );
     assert!(!session.is_active());
 
-    let (_, retained) = dispatch_context_for(session.id(), Some(&session))
+    let (_, _, retained) = dispatch_context_for(session.id(), Some(&session))
         .expect("the draining session must remain an admissible input owner");
     assert!(
         retained
@@ -863,6 +863,7 @@ async fn a_pointer_only_plan_refresh_keeps_a_held_gesture() {
     let id = session.id().clone();
     dispatcher.dispatch(
         &id,
+        &session.target().route,
         session.dispatch(),
         CapturedInput::ButtonDown(ButtonId::GestureButton),
     );
@@ -894,6 +895,117 @@ async fn a_pointer_only_plan_refresh_keeps_a_held_gesture() {
         &mut dispatcher,
     );
     assert!(!dispatcher.holds_gesture_press(&id, ButtonId::GestureButton));
+
+    scroll.shutdown();
+    actions.shutdown();
+}
+
+/// #2158: a button a session diverted reaches the OS-hook snapshot, survives
+/// a binding change that keeps the diversion, and is handed back when that
+/// session's task ends, and only that session's.
+#[tokio::test]
+async fn diverted_buttons_follow_the_capture_task_not_its_bindings() {
+    use crate::runtime::scroll::{ScrollPreferences, ScrollRuntime};
+    let (_signal, device_io) = openlogi_hid::device_io_channel();
+    let (ring, _ring_rx) = mpsc::unbounded_channel();
+    let device_access = DeviceAccess {
+        channel: CaptureChannelSlot::default(),
+        registry: openlogi_hid::ChannelRegistry::default(),
+        receiver_access: ReceiverAccess::default(),
+        device_io,
+        transport_turns: crate::hardware::TransportTurns::default(),
+    };
+    let mut actions =
+        crate::runtime::ActionRuntime::new(Arc::default(), Arc::default(), device_access, ring)
+            .unwrap();
+    let mut scroll = ScrollRuntime::spawn(Arc::new(ScrollPreferences::new(
+        false,
+        VerticalScrollSensitivity::default(),
+    )))
+    .unwrap();
+    let hook_maps = SharedHookMaps::default();
+    let mut state = GestureManagerState::new(GestureOutputs::new(
+        actions.dispatcher(),
+        scroll.input(),
+        hook_maps.clone(),
+    ));
+
+    let mut config = openlogi_core::config::Config::default();
+    let mut plan_with_back = |action| {
+        config.set_binding("mouse-a", ButtonId::Back, Binding::Single(action));
+        crate::capture_plan::plan_for_device(
+            &config,
+            physical_key(),
+            "mouse-a",
+            route(),
+            None,
+            0,
+            true,
+        )
+    };
+    let first = plan_with_back(Action::NextTab);
+    let rebound = plan_with_back(Action::PrevTab);
+    assert_eq!(first.target, rebound.target, "a rebind keeps the diversion");
+
+    let key = physical_key();
+    state.slots.insert(
+        key.clone(),
+        GestureSlot::running(live_session_from_plan(7, first)),
+    );
+    let (_plans_tx, plans) = watch::channel(Arc::new(CapturePublication::from_plans(Vec::new())));
+    let requests = ReceiverAccess::default().subscribe_requests();
+    // The OS input source of `route()`.
+    let source = openlogi_hook::EventDevice {
+        vendor_id: Some(0x046d),
+        product_id: Some(0xc548),
+        product_name: None,
+    };
+    let owned = || {
+        hook_maps
+            .read()
+            .unwrap()
+            .diverted_buttons
+            .owns(&source, ButtonId::Back)
+    };
+    let diverted = |epoch| {
+        SessionEvent::Input(CapturedEvent {
+            physical_key: key.clone(),
+            session: session_id(epoch),
+            input: CapturedInput::ButtonDiverted(ButtonId::Back),
+        })
+    };
+    let done = |epoch| {
+        SessionEvent::Done(SessionDone {
+            physical_key: key.clone(),
+            session: session_id(epoch),
+            pending_restore: None,
+        })
+    };
+
+    state.handle_session_event(diverted(6), false, &requests, &plans);
+    assert!(!owned(), "a superseded epoch's report is stale");
+    state.handle_session_event(diverted(7), false, &requests, &plans);
+    assert!(owned());
+
+    let session = state
+        .slots
+        .get_mut(&key)
+        .and_then(GestureSlot::session_mut)
+        .expect("the session is live");
+    reconcile_session(
+        session,
+        Some((&rebound.target, &rebound.dispatch)),
+        &mut state.input_dispatcher,
+    );
+    assert!(owned(), "a binding change keeps the firmware diversion");
+
+    state.handle_session_event(done(6), false, &requests, &plans);
+    assert!(owned(), "a stale task's end releases only its own epoch");
+    state.handle_session_event(done(7), false, &requests, &plans);
+    assert!(
+        !owned(),
+        "the hook handles Back again once the task has ended"
+    );
 
     scroll.shutdown();
     actions.shutdown();
