@@ -39,7 +39,8 @@ fn alternate_gesture_control_delivers_click_and_swipe() {
                     GestureDirection::Right
                 } else {
                     GestureDirection::Click
-                }
+                },
+                None
             ))
         );
         assert!(
@@ -95,8 +96,9 @@ fn next_gesture(
 ) -> Result<CapturedInput, mpsc::error::TryRecvError> {
     loop {
         let input = rx.try_recv()?;
-        if matches!(input, CapturedInput::Gesture(..)) {
-            return Ok(input);
+        // The trace is diagnostic payload; compare the gesture itself.
+        if let CapturedInput::Gesture(button, direction, _) = input {
+            return Ok(CapturedInput::Gesture(button, direction, None));
         }
     }
 }
@@ -117,7 +119,8 @@ fn a_still_held_second_source_takes_over_when_the_holder_releases() {
         next_gesture(&mut rx),
         Ok(CapturedInput::Gesture(
             ButtonId::GestureButton,
-            GestureDirection::Click
+            GestureDirection::Click,
+            None
         )),
         "the released holder still clicks"
     );
@@ -135,7 +138,8 @@ fn a_still_held_second_source_takes_over_when_the_holder_releases() {
         next_gesture(&mut rx),
         Ok(CapturedInput::Gesture(
             ButtonId::HapticPanel,
-            GestureDirection::Right
+            GestureDirection::Right,
+            None
         )),
         "the taken-over hold dispatches through the panel's own map"
     );
@@ -186,7 +190,8 @@ fn raw_xy_during_a_two_source_overlap_is_dropped_not_misattributed() {
         next_gesture(&mut rx),
         Ok(CapturedInput::Gesture(
             ButtonId::GestureButton,
-            GestureDirection::Right
+            GestureDirection::Right,
+            None
         )),
         "the original hold resumes once the overlap ends"
     );
@@ -206,7 +211,8 @@ fn a_same_report_swap_to_the_panel_still_discards_its_contact_jump() {
         next_gesture(&mut rx),
         Ok(CapturedInput::Gesture(
             ButtonId::GestureButton,
-            GestureDirection::Click
+            GestureDirection::Click,
+            None
         )),
         "the swapped-out holder still clicks"
     );
@@ -237,7 +243,8 @@ fn a_same_report_swap_to_the_panel_still_discards_its_contact_jump() {
         next_gesture(&mut rx),
         Ok(CapturedInput::Gesture(
             ButtonId::HapticPanel,
-            GestureDirection::Right
+            GestureDirection::Right,
+            None
         ))
     );
 }
@@ -265,7 +272,8 @@ fn quick_tap_is_a_click_even_while_the_cursor_moves() {
         next_gesture(&mut rx),
         Ok(CapturedInput::Gesture(
             ButtonId::GestureButton,
-            GestureDirection::Click
+            GestureDirection::Click,
+            None
         ))
     );
     assert!(
@@ -296,7 +304,8 @@ fn a_held_gesture_commits_a_swipe_and_does_not_also_click() {
         next_gesture(&mut rx),
         Ok(CapturedInput::Gesture(
             ButtonId::GestureButton,
-            GestureDirection::Right
+            GestureDirection::Right,
+            None
         ))
     );
 
@@ -340,7 +349,8 @@ fn the_haptic_panel_gestures_when_diverted_for_gestures() {
         next_gesture(&mut rx),
         Ok(CapturedInput::Gesture(
             ButtonId::HapticPanel,
-            GestureDirection::Up
+            GestureDirection::Up,
+            None
         ))
     );
 
@@ -363,7 +373,8 @@ fn a_quick_panel_tap_is_a_click() {
         next_gesture(&mut rx),
         Ok(CapturedInput::Gesture(
             ButtonId::HapticPanel,
-            GestureDirection::Click
+            GestureDirection::Click,
+            None
         ))
     );
     assert!(
@@ -409,7 +420,8 @@ fn the_panels_first_raw_xy_sample_after_contact_is_discarded() {
         next_gesture(&mut rx),
         Ok(CapturedInput::Gesture(
             ButtonId::HapticPanel,
-            GestureDirection::Right
+            GestureDirection::Right,
+            None
         ))
     );
 }
@@ -438,7 +450,8 @@ fn the_dedicated_buttons_first_sample_is_discarded_as_stale() {
         next_gesture(&mut rx),
         Ok(CapturedInput::Gesture(
             ButtonId::GestureButton,
-            GestureDirection::Right
+            GestureDirection::Right,
+            None
         )),
         "the stroke made during the hold decides"
     );
@@ -453,7 +466,8 @@ fn the_dedicated_buttons_first_sample_is_discarded_as_stale() {
         next_gesture(&mut rx),
         Ok(CapturedInput::Gesture(
             ButtonId::GestureButton,
-            GestureDirection::Click
+            GestureDirection::Click,
+            None
         )),
         "a hold with only its stale report is a click"
     );
@@ -633,10 +647,11 @@ fn a_side_gesture_button_uses_its_hidpp_raw_xy() {
         Ok(CapturedInput::ButtonDown(ButtonId::Forward))
     );
     assert_eq!(
-        rx.try_recv(),
+        next_gesture(&mut rx),
         Ok(CapturedInput::Gesture(
             ButtonId::Forward,
-            GestureDirection::Left
+            GestureDirection::Left,
+            None
         ))
     );
     assert_eq!(
@@ -665,10 +680,11 @@ fn a_side_gesture_button_tap_is_a_click() {
         Ok(CapturedInput::ButtonDown(ButtonId::Forward))
     );
     assert_eq!(
-        rx.try_recv(),
+        next_gesture(&mut rx),
         Ok(CapturedInput::Gesture(
             ButtonId::Forward,
-            GestureDirection::Click
+            GestureDirection::Click,
+            None
         ))
     );
     assert_eq!(
@@ -704,10 +720,11 @@ fn a_dpi_gesture_button_uses_the_shared_raw_xy_path() {
         Ok(CapturedInput::ButtonDown(ButtonId::DpiToggle))
     );
     assert_eq!(
-        rx.try_recv(),
+        next_gesture(&mut rx),
         Ok(CapturedInput::Gesture(
             ButtonId::DpiToggle,
-            GestureDirection::Up
+            GestureDirection::Up,
+            None
         ))
     );
     assert_eq!(

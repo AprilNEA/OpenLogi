@@ -5,6 +5,7 @@
 use std::num::NonZeroU8;
 
 use openlogi_core::binding::{ButtonId, GestureDirection, SwipeAccumulator};
+use openlogi_core::config::{GestureAxisBias, GestureSensitivity};
 use tokio::sync::mpsc;
 use tracing::{debug, trace};
 
@@ -44,8 +45,15 @@ enum HoldState {
 }
 
 /// Begin a hold for `cid`, its swipe accumulator started fresh.
-fn begin_hold(cid: u16, button: ButtonId, overlap: bool, skip_first_raw_xy: bool) -> HoldState {
-    let mut swipe = SwipeAccumulator::default();
+fn begin_hold(
+    cid: u16,
+    button: ButtonId,
+    overlap: bool,
+    skip_first_raw_xy: bool,
+    sensitivity: GestureSensitivity,
+    axis_bias: GestureAxisBias,
+) -> HoldState {
+    let mut swipe = SwipeAccumulator::new(sensitivity, axis_bias);
     swipe.begin();
     HoldState::Holding {
         cid,
@@ -72,6 +80,32 @@ pub(super) struct CaptureAccum {
     /// Diverted standard-button and wheel-hold CIDs held in the last event,
     /// in press order.
     buttons_down: Vec<u16>,
+    /// Configured gesture sensitivity for swipe classification.
+    sensitivity: GestureSensitivity,
+    /// Configured gesture axis bias for directional balance.
+    axis_bias: GestureAxisBias,
+}
+
+/// A fresh accumulator carrying `spec`'s gesture sensitivity and axis bias.
+pub(super) fn capture_accum_for(spec: &super::CaptureSpec) -> CaptureAccum {
+    CaptureAccum {
+        sensitivity: spec.gesture_sensitivity,
+        axis_bias: spec.gesture_axis_bias,
+        ..CaptureAccum::default()
+    }
+}
+
+impl CaptureAccum {
+    /// Drop hold/button state but keep the configured sensitivity/axis bias.
+    pub(super) fn reset_preserving_config(&mut self) {
+        let sensitivity = self.sensitivity;
+        let axis_bias = self.axis_bias;
+        *self = CaptureAccum {
+            sensitivity,
+            axis_bias,
+            ..CaptureAccum::default()
+        };
+    }
 }
 
 #[cfg(test)]
@@ -161,8 +195,12 @@ impl CaptureAccum {
                             && swipe.end()
                         {
                             debug!(%button, "gesture click");
-                            let _ =
-                                sink.send(CapturedInput::Gesture(button, GestureDirection::Click));
+                            let trace = swipe.create_trace(button, GestureDirection::Click, false);
+                            let _ = sink.send(CapturedInput::Gesture(
+                                button,
+                                GestureDirection::Click,
+                                Some(trace),
+                            ));
                         }
                         // ...and the first still-held source begins (or takes
                         // over) the hold. A source not down in the previous event
@@ -175,6 +213,8 @@ impl CaptureAccum {
                                 button,
                                 held.len() > 1,
                                 !self.gestures_down.contains(&cid),
+                                self.sensitivity,
+                                self.axis_bias,
                             ),
                             None => HoldState::Idle,
                         }
@@ -254,8 +294,9 @@ impl CaptureAccum {
         // the accumulator gates on hold duration internally and drops travel that
         // arrives outside a hold.
         if let Some(direction) = swipe.accumulate(i32::from(dx), i32::from(dy)) {
+            let trace = swipe.create_trace(*button, direction, swipe.is_fast_flick());
             debug!(?direction, %button, "gesture committed");
-            let _ = sink.send(CapturedInput::Gesture(*button, direction));
+            let _ = sink.send(CapturedInput::Gesture(*button, direction, Some(trace)));
         }
     }
 
