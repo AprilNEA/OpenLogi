@@ -468,6 +468,15 @@ impl SlotShape {
     }
 }
 
+/// The caption a slot shows: the name the user gave it, or its action's
+/// localized name without one, as the agent decides for the ring.
+fn entry_caption(entry: &ActionRingEntry) -> SharedString {
+    entry.custom_label().map_or_else(
+        || localized_action_label(entry.action()),
+        |label| SharedString::from(label.to_owned()),
+    )
+}
+
 /// A still frame of the ring as `theme` draws it, with the selected slot in
 /// its hovered state. Sizes, colours and fills come from
 /// [`openlogi_ui::ring_style`], which the overlay draws from too; only the
@@ -479,10 +488,7 @@ fn ring_preview(
     view: &Entity<ActionRingPanel>,
 ) -> impl IntoElement {
     let shape = SlotShape::of(theme);
-    let selected_caption = layout
-        .slots
-        .get(&selected_slot)
-        .map(|entry| localized_action_label(entry.action()));
+    let selected_caption = layout.slots.get(&selected_slot).map(entry_caption);
     let backdrop = match shape {
         SlotShape::Round => classic_backdrop(selected_caption).into_any_element(),
         SlotShape::Pill => in_motion_backdrop().into_any_element(),
@@ -850,7 +856,7 @@ fn slot_button(
     let scale = shape.scale();
     let label = entry.map_or_else(
         || tr!("action_ring.empty_slot").to_string(),
-        |entry| localized_action_label(entry.action()).to_string(),
+        |entry| entry_caption(entry).to_string(),
     );
     let icon_path = entry.map(|entry| {
         entry.custom_icon().map_or_else(
