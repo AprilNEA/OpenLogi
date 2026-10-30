@@ -705,7 +705,8 @@ pub(super) fn connection_icon_path(
         | (None, Some(ObservedConnection::Receiver(ReceiverProtocol::Bolt))) => {
             "action-icons/bolt.svg"
         }
-        // TODO: Replace the Nano and Lightspeed fallbacks with their appropriate logos.
+        // Nano and Lightspeed receivers share the Unifying icon until they
+        // have their own (#2165).
         (Some(DeviceRoute::Unifying { .. }), _)
         | (None, Some(ObservedConnection::Receiver(ReceiverProtocol::Unifying))) => {
             "action-icons/unifying.svg"
