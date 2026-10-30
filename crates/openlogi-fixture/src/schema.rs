@@ -6,7 +6,7 @@ use openlogi_core::device::{Capabilities, DeviceInventory, LightCapabilities, St
 use openlogi_core::hid::{
     BacklightState, BacklightStatus, DIRECT_DEVICE_INDEX, DeviceRoute, DisableKeysState, DpiInfo,
     EasySwitchHosts, FnLockState, ForceSensingInfo, PointerSpeed, ReportRateInfo, ScrollWheelMode,
-    SmartShiftStatus,
+    SidetoneLevel, SmartShiftStatus,
 };
 use serde::{Deserialize, Deserializer, Serialize, de};
 use thiserror::Error;
@@ -209,6 +209,10 @@ pub struct ProfileDeviceSettings {
     /// Fixed lock/system-key disabling read state.
     #[serde(default = "ProfileSetting::unsupported")]
     pub disable_keys: ProfileSetting<DisableKeysState>,
+    /// Headset sidetone (`0x8300`) read state. Defaults to unsupported so
+    /// profiles recorded before it existed keep loading.
+    #[serde(default = "ProfileSetting::unsupported")]
+    pub sidetone: ProfileSetting<SidetoneLevel>,
     /// RGB keyboard-lighting write support.
     pub lighting: ProfileSupport,
     /// Standalone-light command support.
@@ -658,6 +662,7 @@ fn validate_setting_support(
             || settings.pointer_speed.supports_feature()
             || settings.force_sensing.supports_feature()
             || settings.disable_keys.supports_feature()
+            || settings.sidetone.supports_feature()
             || settings.lighting.is_supported()
         {
             return Err(FixtureError::invalid(
@@ -690,60 +695,57 @@ fn validate_setting_support(
             ));
         }
         if let Some(capabilities) = facts.capabilities {
-            validate_capability_support(
-                settings,
-                "DPI",
-                settings.dpi.supports_feature(),
-                capabilities.pointer,
-            )?;
-            validate_capability_support(
-                settings,
-                "wheel",
-                settings.wheel.supports_feature(),
-                capabilities.hires_wheel,
-            )?;
-            validate_capability_support(
-                settings,
-                "lighting",
-                settings.lighting.is_supported(),
-                capabilities.lighting,
-            )?;
-            validate_capability_support(
-                settings,
-                "report rate",
-                settings.report_rate.supports_feature(),
-                capabilities.report_rate,
-            )?;
-            validate_capability_support(
-                settings,
-                "backlight",
-                settings.backlight.supports_feature(),
-                capabilities.backlight,
-            )?;
-            validate_capability_support(
-                settings,
-                "Easy-Switch",
-                settings.easy_switch.supports_feature(),
-                capabilities.easy_switch,
-            )?;
-            validate_capability_support(
-                settings,
-                "pointer speed",
-                settings.pointer_speed.supports_feature(),
-                capabilities.pointer_scaling,
-            )?;
-            validate_capability_support(
-                settings,
-                "press force",
-                settings.force_sensing.supports_feature(),
-                capabilities.force_sensing,
-            )?;
-            validate_capability_support(
-                settings,
-                "Disable Keys",
-                settings.disable_keys.supports_feature(),
-                capabilities.disable_keys,
-            )?;
+            let families = [
+                ("DPI", settings.dpi.supports_feature(), capabilities.pointer),
+                (
+                    "wheel",
+                    settings.wheel.supports_feature(),
+                    capabilities.hires_wheel,
+                ),
+                (
+                    "lighting",
+                    settings.lighting.is_supported(),
+                    capabilities.lighting,
+                ),
+                (
+                    "report rate",
+                    settings.report_rate.supports_feature(),
+                    capabilities.report_rate,
+                ),
+                (
+                    "backlight",
+                    settings.backlight.supports_feature(),
+                    capabilities.backlight,
+                ),
+                (
+                    "Easy-Switch",
+                    settings.easy_switch.supports_feature(),
+                    capabilities.easy_switch,
+                ),
+                (
+                    "pointer speed",
+                    settings.pointer_speed.supports_feature(),
+                    capabilities.pointer_scaling,
+                ),
+                (
+                    "press force",
+                    settings.force_sensing.supports_feature(),
+                    capabilities.force_sensing,
+                ),
+                (
+                    "Disable Keys",
+                    settings.disable_keys.supports_feature(),
+                    capabilities.disable_keys,
+                ),
+                (
+                    "sidetone",
+                    settings.sidetone.supports_feature(),
+                    capabilities.sidetone,
+                ),
+            ];
+            for (family, declared, advertised) in families {
+                validate_capability_support(settings, family, declared, advertised)?;
+            }
         }
     }
     Ok(())

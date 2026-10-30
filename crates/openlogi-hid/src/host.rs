@@ -28,6 +28,7 @@ use openlogi_device::pairing::PairingReceiver;
 use openlogi_device::write::{
     self as device, Dpi, DpiInfo, FeatureEntry, FirmwareEntity, HapticWaveform, LightingMethod,
     LitraModel, PointerScaling, ReprogControlEntry, ScrollResolution, ScrollWheelMode,
+    SidetoneLevel,
 };
 use openlogi_device::{DeviceIoGate, DeviceIoSignal, DeviceRoute};
 
@@ -67,6 +68,20 @@ pub async fn get_dpi_info(route: &DeviceRoute) -> Result<DpiInfo, WriteError> {
 /// Write a new sensor DPI to the device `route` reaches.
 pub async fn set_dpi(route: &DeviceRoute, dpi: Dpi) -> Result<(), WriteError> {
     device::set_dpi(&*native_backend(), route, dpi).await
+}
+
+/// Read the sidetone level of the headset `route` reaches.
+pub async fn get_sidetone(route: &DeviceRoute) -> Result<SidetoneLevel, WriteError> {
+    device::get_sidetone(&*native_backend(), route).await
+}
+
+/// Write a sidetone level to the headset `route` reaches and return the
+/// level it confirms.
+pub async fn set_sidetone(
+    route: &DeviceRoute,
+    level: SidetoneLevel,
+) -> Result<SidetoneLevel, WriteError> {
+    device::set_sidetone(&*native_backend(), route, level).await
 }
 
 /// Read the pointer-motion scaling of the device `route` reaches.

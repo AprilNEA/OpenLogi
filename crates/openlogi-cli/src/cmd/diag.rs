@@ -18,6 +18,7 @@ pub mod features;
 pub mod lighting;
 pub mod onboard;
 pub mod pointer_speed;
+pub mod sidetone;
 pub mod smartshift;
 pub mod wheel;
 
@@ -41,6 +42,8 @@ pub enum DiagCmd {
     PointerSpeed(pointer_speed::PointerSpeedArgs),
     /// Read a G-series mouse's onboard profiles and mode.
     Onboard(onboard::OnboardArgs),
+    /// Read a headset's HID++ 0x8300 sidetone level, or set it.
+    Sidetone(sidetone::SidetoneArgs),
 }
 
 impl DiagCmd {
@@ -58,6 +61,7 @@ impl DiagCmd {
             Self::Wheel(args) => wheel::run(args).await,
             Self::PointerSpeed(args) => pointer_speed::run(args).await,
             Self::Onboard(args) => onboard::run(args).await,
+            Self::Sidetone(args) => sidetone::run(args).await,
         }
     }
 }

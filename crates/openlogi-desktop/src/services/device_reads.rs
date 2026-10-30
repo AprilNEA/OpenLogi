@@ -1,5 +1,5 @@
 //! SWR-backed device-setting reads (DPI, SmartShift, Fn lock, report rate,
-//! pointer speed, press force, backlight, Easy-Switch hosts) keyed by device
+//! pointer speed, sidetone, press force, backlight, Easy-Switch hosts) keyed by device
 //! identity.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -9,7 +9,8 @@ use std::time::Duration;
 use gpui::{Context, Subscription};
 use openlogi_core::hid::{
     BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
-    ForceSensingInfo, OnboardState, PointerSpeed, ReportRateInfo, SmartShiftStatus, WriteError,
+    ForceSensingInfo, OnboardState, PointerSpeed, ReportRateInfo, SidetoneLevel, SmartShiftStatus,
+    WriteError,
 };
 use swr_core::{
     MaybeSend, MaybeSync, QueryHandle, QueryOptions, QueryState, Retry, RetryPolicy, Runtime,
@@ -20,12 +21,12 @@ use tokio::sync::mpsc;
 
 use super::ipc::{
     Command, ReadBacklight, ReadDpi, ReadEasySwitchHosts, ReadFnLock, ReadForceSensing,
-    ReadOnboard, ReadPointerSpeed, ReadReportRate, ReadSmartShift,
+    ReadOnboard, ReadPointerSpeed, ReadReportRate, ReadSidetone, ReadSmartShift,
 };
 use crate::state::{
     AppState, BacklightLoad, DeviceKey, DpiLoad, EasySwitchLoad, FnLockLoad, ForceSensingLoad,
-    HostRenameRefusal, Load, OnboardLoad, PointerSpeedLoad, ReportRateLoad, SmartShiftLoad,
-    StateEvent,
+    HostRenameRefusal, Load, OnboardLoad, PointerSpeedLoad, ReportRateLoad, SidetoneLoad,
+    SmartShiftLoad, StateEvent,
 };
 
 const ROOT: &str = "device-read";
@@ -34,6 +35,7 @@ const SMARTSHIFT: &str = "smartshift";
 const FN_LOCK: &str = "fn-lock";
 const REPORT_RATE: &str = "report-rate";
 const POINTER_SPEED: &str = "pointer-speed";
+const SIDETONE: &str = "sidetone";
 const FORCE_SENSING: &str = "force-sensing";
 const BACKLIGHT: &str = "backlight";
 const EASY_SWITCH: &str = "easy-switch";
@@ -74,6 +76,7 @@ pub(crate) struct DeviceReads {
     fn_lock: BTreeMap<DeviceKey, DeviceRead<FnLockState>>,
     report_rate: BTreeMap<DeviceKey, DeviceRead<ReportRateInfo>>,
     pointer_speed: BTreeMap<DeviceKey, DeviceRead<PointerSpeed>>,
+    sidetone: BTreeMap<DeviceKey, DeviceRead<SidetoneLevel>>,
     force_sensing: BTreeMap<DeviceKey, DeviceRead<ForceSensingInfo>>,
     backlight: BTreeMap<DeviceKey, DeviceRead<BacklightState>>,
     /// The backlight changes sent per keyboard, for the read on the route
@@ -727,6 +730,114 @@ impl DeviceReads {
         self.pointer_speed.get(key).map(|read| &read.load)
     }
 
+    /// Start the sidetone query unless the same headset route is already
+    /// subscribed. A write answers through [`Self::set_sidetone_ready`],
+    /// or [`Self::refresh_sidetone`] when the headset refused it.
+    pub(crate) fn ensure_sidetone(
+        &mut self,
+        key: DeviceKey,
+        route: DeviceRoute,
+        commands: mpsc::UnboundedSender<Command>,
+        cx: &mut Context<AppState>,
+    ) {
+        if self
+            .sidetone
+            .get(&key)
+            .is_some_and(|read| read.route == route)
+        {
+            return;
+        }
+        self.remove_sidetone(&key);
+        let Some((client, runtime)) = self.cache() else {
+            return;
+        };
+        let flight = self.take_flight();
+        let fetch_route = route.clone();
+        let fetcher = Retry::new(
+            runtime,
+            move |_| {
+                let commands = commands.clone();
+                let route = fetch_route.clone();
+                read_ipc(move |reply| ReadSidetone { route, reply }.into(), commands)
+            },
+            READ_RETRY_POLICY,
+        )
+        .retry_if(|error| !unsupported_error_is_permanent(error));
+        let handle = client.subscribe(
+            query_key(SIDETONE, &key),
+            fetcher,
+            QueryOptions::immutable(),
+        );
+        read_through(&client, SIDETONE, &key, &handle);
+        let query = Query::new(&client, handle, cx);
+        let load = project_load(query.read(cx), unsupported_error_is_permanent);
+        let observed_key = key.clone();
+        let observer = cx.observe(query.state(), move |state, query_state, cx| {
+            let load = project_load(query_state.read(cx), unsupported_error_is_permanent);
+            if state
+                .device_reads_mut()
+                .update_sidetone(&observed_key, flight, load)
+            {
+                cx.emit(StateEvent::SidetoneChanged(observed_key.clone()));
+            }
+        });
+        self.sidetone.insert(
+            key,
+            DeviceRead {
+                route,
+                flight,
+                load,
+                query,
+                _observer: observer,
+            },
+        );
+    }
+
+    /// Show `level` as `key`'s sidetone reading now: the level the GUI
+    /// just asked for, then what the headset read back. Like
+    /// [`Self::set_fn_lock_ready`], a local write supersedes a fetch still in
+    /// flight. The level belongs to the headset, not to the connection, so an
+    /// answer from a route the headset has since left still holds.
+    pub(crate) fn set_sidetone_ready(&mut self, key: &DeviceKey, level: SidetoneLevel) {
+        let value = Arc::new(level);
+        if let Some(client) = &self.client {
+            client.set::<_, Cached<SidetoneLevel>, WriteError>(
+                query_key(SIDETONE, key),
+                Some(value.clone()),
+            );
+        }
+        if let Some(read) = self.sidetone.get_mut(key) {
+            read.load = Load::Ready(value);
+        }
+    }
+
+    /// Re-read `key`'s sidetone level from the headset, keeping the last value
+    /// on screen while it answers. The fallback after a write the headset
+    /// refused, when the shown value is no longer known to be its own.
+    pub(crate) fn refresh_sidetone(&mut self, key: &DeviceKey) {
+        if let Some(read) = self.sidetone.get_mut(key) {
+            read.query.revalidate();
+        }
+    }
+
+    /// Retry an exhausted sidetone query.
+    pub(crate) fn retry_sidetone(&mut self, key: &DeviceKey) {
+        let Some(read) = self.sidetone.get_mut(key) else {
+            return;
+        };
+        if !matches!(read.load, Load::Ready(_)) {
+            read.load = Load::Loading;
+        }
+        read.query.revalidate();
+    }
+
+    /// `key`'s sidetone load, or `None` while nothing has subscribed to
+    /// it.
+    #[must_use]
+    pub(crate) fn sidetone_load(&self, key: &DeviceKey) -> Option<&SidetoneLoad> {
+        self.sidetone.get(key).map(|read| &read.load)
+    }
+
     /// Start the press-force query unless the same device route is already
     /// subscribed. A write answers through [`Self::set_force_sensing_ready`],
     /// or [`Self::refresh_force_sensing`] when the device refused it.
@@ -1324,6 +1435,7 @@ impl DeviceReads {
         self.remove_fn_lock(key);
         self.remove_report_rate(key);
         self.remove_pointer_speed(key);
+        self.remove_sidetone(key);
         self.remove_force_sensing(key);
         self.remove_backlight(key);
         self.remove_easy_switch(key);
@@ -1372,6 +1484,13 @@ impl DeviceReads {
         }
     }
 
+    fn remove_sidetone(&mut self, key: &DeviceKey) {
+        if let Some(read) = self.sidetone.remove(key) {
+            drop(read);
+            self.clear::<SidetoneLevel>(SIDETONE, key);
+        }
+    }
+
     fn remove_force_sensing(&mut self, key: &DeviceKey) {
         if let Some(read) = self.force_sensing.remove(key) {
             drop(read);
@@ -1404,6 +1523,7 @@ impl DeviceReads {
             .chain(self.fn_lock.keys())
             .chain(self.report_rate.keys())
             .chain(self.pointer_speed.keys())
+            .chain(self.sidetone.keys())
             .chain(self.force_sensing.keys())
             .chain(self.backlight.keys())
             .chain(self.easy_switch.keys())
@@ -1493,6 +1613,21 @@ impl DeviceReads {
     ) -> bool {
         let Some(read) = self
             .pointer_speed
+            .get_mut(key)
+            .filter(|read| read.flight == flight)
+        else {
+            return false;
+        };
+        if read.load == load {
+            return false;
+        }
+        read.load = load;
+        true
+    }
+
+    fn update_sidetone(&mut self, key: &DeviceKey, flight: u64, load: SidetoneLoad) -> bool {
+        let Some(read) = self
+            .sidetone
             .get_mut(key)
             .filter(|read| read.flight == flight)
         else {

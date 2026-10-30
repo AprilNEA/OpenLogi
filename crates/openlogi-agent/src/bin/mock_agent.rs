@@ -65,7 +65,7 @@ use openlogi_fixture::{DeviceProfile, FixtureError, ProfileDeviceSettings, Profi
 use openlogi_hid::{
     BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
     ForceSensingInfo, LightCommand, OnboardState, PasskeyMethod, PointerSpeed, ReceiverSelector,
-    ReportRate, ReportRateInfo, ScrollWheelMode, SmartShiftStatus, WriteError,
+    ReportRate, ReportRateInfo, ScrollWheelMode, SidetoneLevel, SmartShiftStatus, WriteError,
 };
 use openlogi_ipc::transport;
 use openlogi_ipc::{
@@ -1243,6 +1243,27 @@ impl Agent for MockAgent {
         stored.current = stored.clamp(force);
         info!(%route, force, applied = stored.current, "set_force_sensing");
         Ok(*stored)
+    }
+    async fn read_sidetone(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<SidetoneLevel, WriteError> {
+        let state = self.state.lock().await;
+        profile_value(&state.settings_for(&route)?.sidetone, &route, 0x8300).copied()
+    }
+    async fn set_sidetone(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        level: SidetoneLevel,
+    ) -> Result<SidetoneLevel, WriteError> {
+        let mut state = self.state.lock().await;
+        let settings = state.settings_for_mut(&route)?;
+        let stored = profile_value_mut(&mut settings.sidetone, &route, 0x8300)?;
+        *stored = level;
+        info!(%route, %level, "set_sidetone");
+        Ok(level)
     }
     async fn set_backlight(
         self,

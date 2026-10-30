@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use openlogi_core::hid::{
     BacklightState, DisableKeysState, DpiInfo, EasySwitchHosts, FnLockState, ForceSensingInfo,
-    OnboardState, PointerSpeed, ReportRateInfo, SmartShiftStatus,
+    OnboardState, PointerSpeed, ReportRateInfo, SidetoneLevel, SmartShiftStatus,
 };
 
 /// State projected from an swr-backed device query: unqueried, in flight,
@@ -50,6 +50,9 @@ pub type ReportRateLoad = Load<Arc<ReportRateInfo>>;
 /// the speed the mouse moves at now: the persisted `pointer_speed`, or the
 /// slowest speed while precision mode is on.
 pub type PointerSpeedLoad = Load<Arc<PointerSpeed>>;
+/// Per-headset sidetone (`0x8300`) load state. See [`Load`]. The headset
+/// stores the level itself, so the read is the only record.
+pub type SidetoneLoad = Load<Arc<SidetoneLevel>>;
 /// Per-device press-force (`0x19c0`) load state. See [`Load`]. The read is
 /// the force the button clicks at now, the range the device accepts, and
 /// whether software may change it.

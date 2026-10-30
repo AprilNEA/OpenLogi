@@ -11,7 +11,7 @@ use openlogi_core::hid::{
     BacklightChange, BacklightControls, BacklightMode, BacklightState, BacklightStatus,
     DisableKeysMask, DisableKeysState, Dpi, DpiInfo, EasySwitchHosts, EasySwitchSlot, FnLockState,
     ForceSensingInfo, HostConnection, LightCommand, PasskeyMethod, PointerSpeed, ReceiverSelector,
-    ReportRate, ReportRateInfo, ScrollWheelMode, SmartShiftStatus,
+    ReportRate, ReportRateInfo, ScrollWheelMode, SidetoneLevel, SmartShiftStatus,
 };
 use openlogi_fixture::{
     CANONICAL_DEVICE_PROFILE_JSON, SyntheticIdentityKind, classify_synthetic_identity_bytes,
@@ -48,6 +48,7 @@ enum ReadFamily {
     PointerSpeed,
     ForceSensing,
     DisableKeys,
+    Sidetone,
 }
 
 #[derive(Clone)]
@@ -453,6 +454,28 @@ impl Agent for TestAgent {
         _force: u16,
     ) -> Result<ForceSensingInfo, WriteError> {
         unreachable!("profile capture must never write the press force")
+    }
+
+    async fn read_sidetone(
+        self,
+        _: TarpcContext,
+        route: DeviceRoute,
+    ) -> Result<SidetoneLevel, WriteError> {
+        self.read(
+            ReadFamily::Sidetone,
+            &route,
+            |settings| &settings.sidetone,
+            0x8300,
+        )
+    }
+
+    async fn set_sidetone(
+        self,
+        _: TarpcContext,
+        _route: DeviceRoute,
+        _level: SidetoneLevel,
+    ) -> Result<SidetoneLevel, WriteError> {
+        unreachable!("profile capture must never write the sidetone")
     }
 
     async fn read_disable_keys(

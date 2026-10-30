@@ -353,6 +353,11 @@ impl Runtime {
                     AppState::apply(cx, |state| state.apply_pointer_speed_written(&key, result));
                 });
             }
+            ipc::GuiUpdate::SidetoneWritten { key, result } => {
+                cx.update(|cx| {
+                    AppState::apply(cx, |state| state.apply_sidetone_written(&key, result));
+                });
+            }
             ipc::GuiUpdate::ForceSensingWritten {
                 key,
                 write,

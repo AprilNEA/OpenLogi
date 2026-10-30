@@ -22,6 +22,7 @@ pub mod pointer_speed;
 pub mod report_rate;
 pub mod route;
 pub mod scroll;
+pub mod sidetone;
 pub mod smartshift;
 
 pub use backlight::{
@@ -45,6 +46,7 @@ pub use route::{
     speaks_unifying_protocol,
 };
 pub use scroll::{ScrollReportingTarget, ScrollWheelMode};
+pub use sidetone::SidetoneLevel;
 pub use smartshift::{
     SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus, SmartShiftThreshold, TunableTorque,
 };

@@ -1037,6 +1037,7 @@ fn tabs_prefer_buttons_when_a_keyboard_kind_measures_a_pointer() {
         disable_keys: false,
         onboard_profiles: false,
         button_spy: false,
+        sidetone: false,
     });
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
     assert!(
@@ -1075,6 +1076,7 @@ fn tabs_follow_capabilities_not_kind() {
         disable_keys: false,
         onboard_profiles: false,
         button_spy: false,
+        sidetone: false,
     });
     // After 0x0005 kind-correction the record has kind=Mouse, not Keyboard.
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Mouse, caps));
@@ -1160,6 +1162,7 @@ fn keyboard_without_asset_hides_buttons_tab() {
         disable_keys: false,
         onboard_profiles: false,
         button_spy: false,
+        sidetone: false,
     });
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
     assert!(
@@ -1192,6 +1195,7 @@ fn keyboard_with_buttons_shows_keys_tab() {
         disable_keys: false,
         onboard_profiles: false,
         button_spy: false,
+        sidetone: false,
     });
     let keyboard = record(DeviceKind::Keyboard, caps);
     let tabs = DetailTab::tabs_for(&keyboard);
@@ -1254,6 +1258,21 @@ fn light_tab_follows_light_capabilities() {
         DetailTab::tabs_for(&device),
         vec![DetailTab::Light, DetailTab::Device]
     );
+}
+
+/// A G535 measures sidetone and nothing else, so it opens on the Audio tab.
+#[test]
+fn a_sidetone_headset_opens_on_the_audio_tab() {
+    let caps = Some(Capabilities {
+        sidetone: true,
+        ..Capabilities::default()
+    });
+    let headset = record(DeviceKind::Headset, caps);
+    assert_eq!(
+        DetailTab::tabs_for(&headset),
+        vec![DetailTab::Audio, DetailTab::Device]
+    );
+    assert_eq!(DetailTab::default_for(&headset), DetailTab::Audio);
 }
 
 /// An unprobed (offline) device has no measured capabilities and falls back
