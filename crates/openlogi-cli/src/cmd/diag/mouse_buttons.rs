@@ -6,7 +6,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
-use openlogi_hid::{ButtonSpyError, ButtonSpyStop};
+use openlogi_hid::ButtonSpyError;
+use openlogi_ipc::client::ConnectError;
 
 use crate::cmd::diag::select_device;
 
@@ -23,6 +24,14 @@ pub struct MouseButtonsArgs {
 }
 
 pub async fn run(args: MouseButtonsArgs) -> Result<()> {
+    // The agent arms host mode on a G-series mouse whenever it connects or
+    // wakes, and the watch holds host mode itself: they cannot share it.
+    if !matches!(
+        crate::agent::connect().await,
+        Err(ConnectError::Endpoint(_))
+    ) {
+        bail!("the OpenLogi agent is running; quit it, then run this again");
+    }
     // 0x8110 = MouseButtonSpy, the G-series button report.
     let (route, name) = select_device(args.device.as_deref(), &[0x8110]).await?;
     println!("device: {name} ({route})");
@@ -30,13 +39,19 @@ pub async fn run(args: MouseButtonsArgs) -> Result<()> {
     let mut watch = match openlogi_hid::watch_button_spy(&route).await {
         Ok(watch) => watch,
         Err(ButtonSpyError::HostMode) => bail!(
-            "the mouse is in host mode, so the OpenLogi agent or G HUB owns its button spy; \
-             quit them, then run this again"
+            "the mouse is in host mode, so G HUB or another program owns its button spy; \
+             quit it, then run this again"
         ),
         Err(error) => return Err(error).context("start the HID++ 0x8110 button spy"),
     };
     println!("  slots: {}", watch.mapping().len());
     println!("  host-mode mapping: {}", MappingDisplay(watch.mapping()));
+    if watch.holds_host_mode() {
+        println!(
+            "  host mode is on until the watch ends: a slot mapped to 0 sends nothing; \
+             if you interrupt the command, switch the mouse off and on"
+        );
+    }
     println!(
         "  press and release each button, one at a time ({} s)",
         args.duration
@@ -49,21 +64,22 @@ pub async fn run(args: MouseButtonsArgs) -> Result<()> {
             () = &mut deadline => break,
             mask = watch.next() => {
                 let Some(mask) = mask else {
-                    bail!("the button spy's report stream closed");
+                    eprintln!("  the button spy's report stream closed");
+                    break;
                 };
                 println!("  {mask:#06x}  {}", HeldSlots(mask));
             }
         }
     }
-    match watch
+    let restores_onboard = watch.holds_host_mode();
+    watch
         .stop()
         .await
-        .context("stop the HID++ 0x8110 button spy")?
-    {
-        ButtonSpyStop::Stopped => println!("  spy stopped"),
-        ButtonSpyStop::HostOwned => {
-            println!("  the mouse went into host mode, so its spy stays on for that program");
-        }
+        .context("stop the HID++ 0x8110 button spy")?;
+    if restores_onboard {
+        println!("  spy stopped, onboard mode restored");
+    } else {
+        println!("  spy stopped");
     }
     Ok(())
 }

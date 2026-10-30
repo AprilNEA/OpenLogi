@@ -1,7 +1,12 @@
 //! G-series `0x8110` button spy for diagnostics: which slot a press lands
-//! on, the fact a model's `GamingLayout` is built from. The program that
-//! puts the mouse in host mode — the capture session, or G HUB — owns the
-//! spy, so a watch neither starts nor stops it then.
+//! on, the fact a model's `GamingLayout` is built from.
+//!
+//! In onboard mode the active profile decides what a button does, and a
+//! button the profile leaves unbound can report nothing (a G903, #2178).
+//! A watch therefore puts
+//! a mouse with `0x8100` in host mode, where every slot reports, and returns
+//! it to onboard mode when it stops. A mouse already in host mode belongs to
+//! the program that switched it, so a watch refuses it.
 
 use std::sync::Arc;
 
@@ -17,6 +22,7 @@ use hidpp::{
     },
     protocol::v20::Hidpp20Error,
 };
+use tracing::warn;
 
 use super::{HidppOperation, WriteError, classify_hidpp_error, open_feature, with_route};
 use crate::backend::HidBackend;
@@ -33,24 +39,14 @@ pub enum ButtonSpyError {
     Write(#[from] WriteError),
 }
 
-/// What [`ButtonSpyWatch::stop`] did.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ButtonSpyStop {
-    /// The spy is stopped.
-    Stopped,
-    /// The mouse went into host mode during the watch. The spy now belongs
-    /// to the program that switched it, so it stays on.
-    HostOwned,
-}
-
 /// A started `0x8110` button spy. Every press or release reports the mask of
 /// held slots, bit `n` for slot `n`.
 ///
-/// [`Self::stop`] stops the spy. Dropped without it, the mouse keeps
-/// reporting until it reconnects.
+/// [`Self::stop`] stops the spy and returns the mouse to onboard mode.
+/// Dropped without it, the mouse stays in host mode until it power-cycles.
 pub struct ButtonSpyWatch {
     spy: Arc<MouseButtonSpyFeature>,
-    /// `None` on a mouse without `0x8100`, which has no host mode.
+    /// Set when the watch put the mouse in host mode and owes the way back.
     onboard: Option<Arc<OnboardProfilesFeature>>,
     events: Boxed<MouseButtonSpyEvent>,
     mapping: Vec<u8>,
@@ -62,6 +58,13 @@ impl ButtonSpyWatch {
     #[must_use]
     pub fn mapping(&self) -> &[u8] {
         &self.mapping
+    }
+
+    /// Whether the watch put the mouse in host mode. A mouse without
+    /// `0x8100` has no host mode, and its spy runs as the mouse is.
+    #[must_use]
+    pub fn holds_host_mode(&self) -> bool {
+        self.onboard.is_some()
     }
 
     /// The held-slot mask after the next press or release, or `None` once
@@ -78,28 +81,23 @@ impl ButtonSpyWatch {
         }
     }
 
-    /// Stop the spy, unless the mouse went into host mode during the watch.
-    ///
-    /// The mode is read before and after the stop. A program that took host
-    /// mode between the two reads gets its spy back: the capture session
-    /// sets host mode before it starts the spy, so a spy start the stop
-    /// cancelled shows up as host mode on the second read.
-    pub async fn stop(self) -> Result<ButtonSpyStop, WriteError> {
-        if in_host_mode(self.onboard.as_deref()).await? {
-            return Ok(ButtonSpyStop::HostOwned);
+    /// Stop the spy, then return the mouse to onboard mode. The mode goes
+    /// back even when the stop fails: a mouse left in host mode keeps its
+    /// unmapped buttons silent.
+    pub async fn stop(self) -> Result<(), WriteError> {
+        let stopped = self.spy.stop_spy().await.map_err(spy_error);
+        if let Some(onboard) = &self.onboard {
+            onboard
+                .set_mode(OnboardMode::Onboard)
+                .await
+                .map_err(onboard_error)?;
         }
-        self.spy.stop_spy().await.map_err(spy_error)?;
-        if in_host_mode(self.onboard.as_deref()).await? {
-            self.spy.start_spy().await.map_err(spy_error)?;
-            return Ok(ButtonSpyStop::HostOwned);
-        }
-        Ok(ButtonSpyStop::Stopped)
+        stopped
     }
 }
 
 /// Read the `0x8110` slot mapping of the mouse on `route` and start its
-/// button spy. Leaves the onboard mode as it is, and refuses a mouse in host
-/// mode.
+/// button spy, in host mode when the mouse has one.
 pub async fn watch_button_spy(
     backend: &dyn HidBackend,
     route: &DeviceRoute,
@@ -124,14 +122,33 @@ pub(super) async fn watch_button_spy_on_channel(
         Err(WriteError::FeatureUnsupported { .. }) => None,
         Err(error) => return Err(error.into()),
     };
-    if in_host_mode(onboard.as_deref()).await? {
+    if let Some(onboard) = &onboard
+        && onboard.get_mode().await.map_err(onboard_error)? == OnboardMode::Host
+    {
         return Err(ButtonSpyError::HostMode);
     }
     let count = spy.get_button_count().await.map_err(spy_error)?;
     let mapping = spy.get_mapping(count).await.map_err(spy_error)?;
+
+    if let Some(onboard) = &onboard {
+        onboard
+            .set_mode(OnboardMode::Host)
+            .await
+            .map_err(onboard_error)?;
+    }
     // Listen first: a press right after the start must not be lost.
     let events = spy.listen().boxed();
-    spy.start_spy().await.map_err(spy_error)?;
+    if let Err(error) = spy.start_spy().await {
+        if let Some(onboard) = &onboard
+            && let Err(restore) = onboard.set_mode(OnboardMode::Onboard).await
+        {
+            warn!(
+                ?restore,
+                "leaving host mode after a refused spy start failed"
+            );
+        }
+        return Err(spy_error(error).into());
+    }
     Ok(ButtonSpyWatch {
         spy,
         onboard,
@@ -140,19 +157,12 @@ pub(super) async fn watch_button_spy_on_channel(
     })
 }
 
-/// Whether the mouse is in host mode. A mouse without `0x8100` has none.
-async fn in_host_mode(onboard: Option<&OnboardProfilesFeature>) -> Result<bool, WriteError> {
-    let Some(onboard) = onboard else {
-        return Ok(false);
-    };
-    let mode = onboard.get_mode().await.map_err(|error| {
-        classify_hidpp_error(
-            error,
-            HidppOperation::ReadOnboard,
-            OnboardProfilesFeature::ID,
-        )
-    })?;
-    Ok(mode == OnboardMode::Host)
+fn onboard_error(error: Hidpp20Error) -> WriteError {
+    classify_hidpp_error(
+        error,
+        HidppOperation::ReadOnboard,
+        OnboardProfilesFeature::ID,
+    )
 }
 
 fn spy_error(error: Hidpp20Error) -> WriteError {
