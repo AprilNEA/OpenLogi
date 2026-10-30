@@ -16,6 +16,7 @@ pub mod controls;
 pub mod dpi;
 pub mod features;
 pub mod lighting;
+pub mod mouse_buttons;
 pub mod onboard;
 pub mod pointer_speed;
 pub mod smartshift;
@@ -41,6 +42,8 @@ pub enum DiagCmd {
     PointerSpeed(pointer_speed::PointerSpeedArgs),
     /// Read a G-series mouse's onboard profiles and mode.
     Onboard(onboard::OnboardArgs),
+    /// Print which HID++ 0x8110 slot each button of a G-series mouse sends.
+    MouseButtons(mouse_buttons::MouseButtonsArgs),
 }
 
 impl DiagCmd {
@@ -58,6 +61,7 @@ impl DiagCmd {
             Self::Wheel(args) => wheel::run(args).await,
             Self::PointerSpeed(args) => pointer_speed::run(args).await,
             Self::Onboard(args) => onboard::run(args).await,
+            Self::MouseButtons(args) => mouse_buttons::run(args).await,
         }
     }
 }

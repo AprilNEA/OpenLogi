@@ -71,8 +71,8 @@ pub use session::keyboard::{
     RESERVED_KEYBOARD_CONTROLS, is_reserved_keyboard_control, run_keyboard_capture_session,
 };
 pub use write::{
-    DisableKeysMask, DisableKeysState, Dpi, DpiCapabilities, DpiInfo, DpiLed, DpiTarget,
-    EasySwitchHosts, EasySwitchSlot, FeatureEntry, FirmwareEntity, FirmwareEntityInfo,
+    ButtonSpyWatch, DisableKeysMask, DisableKeysState, Dpi, DpiCapabilities, DpiInfo, DpiLed,
+    DpiTarget, EasySwitchHosts, EasySwitchSlot, FeatureEntry, FirmwareEntity, FirmwareEntityInfo,
     ForceSensingInfo, HapticRestore, HapticRestoreOutcome, HapticWaveform, HidppFeatureErrorKind,
     HidppOperation, HostConnection, HostOs, HostOsInfo, HostOsKind, LITRA_BEAM_PRODUCT_ID,
     LITRA_GLOW_PRODUCT_ID, LightChange, LightCommand, LightControls, LightWatch, LightingMethod,
@@ -94,7 +94,7 @@ pub use write::{
     set_report_rate_on, set_scroll_inversion, set_scroll_inversion_on, set_scroll_resolution,
     set_scroll_resolution_on, set_scroll_wheel_mode, set_scroll_wheel_mode_on, set_smartshift,
     set_smartshift_on, set_smartshift_sensitivity, set_smartshift_torque, toggle_smartshift,
-    toggle_smartshift_on, update_backlight, update_backlight_on, watch_litra,
+    toggle_smartshift_on, update_backlight, update_backlight_on, watch_button_spy, watch_litra,
 };
 
 /// Scripted transport helpers for tests in higher layers.

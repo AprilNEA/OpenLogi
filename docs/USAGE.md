@@ -10,6 +10,7 @@ openlogi list                 # paired devices: slot, codename, kind, online, ba
 openlogi assets sync          # pre-fetch device renders from the fastest available mirror
 openlogi diag features        # dump every HID++ feature the active device reports
 openlogi diag controls        # dump reprogrammable controls and capability flags
+openlogi diag mouse-buttons   # print the 0x8110 slot each G-series mouse button sends
 openlogi diag dpi             # read → write → read-back → restore DPI (smoke test)
 openlogi diag pointer-speed             # test 0x2205 pointer scaling and attempt to restore it
 openlogi diag smartshift                # toggle SmartShift and restore (smoke test)
@@ -21,6 +22,8 @@ Running `openlogi` with no subcommand defaults to `list`. Set
 `OPENLOGI_LOG=debug` for verbose tracing in the CLI, GUI, or agent.
 
 `openlogi diag pointer-speed` temporarily changes the selected device's pointer scaling. The command attempts to restore and verify the original scaling even when the test write fails. `--device NAME` selects a device; `--target RAW` sets the temporary 8.8 fixed-point value (`256` is 1×). By default, the command halves the current value, or doubles it when the raw value is `1`. Firmware may accept extreme values without clipping. A restoration error means the original speed could not be confirmed.
+
+`openlogi diag mouse-buttons` starts the HID++ `0x8110` button spy of a G-series mouse and prints the held slots on every press and release, with the G number G HUB shows for each slot. This is the slot order a new model's button layout needs. It listens for `--duration SECS` (default 60) and then stops the spy; Ctrl-C leaves the spy reporting until the mouse reconnects. The mouse stays in its onboard mode, so each button still does what its profile says. The command refuses a mouse in host mode, because the OpenLogi agent or G HUB owns the spy then.
 
 ## Keyboard backlight
 
