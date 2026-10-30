@@ -208,9 +208,28 @@ pub struct Capabilities {
     /// `force_sensing`: crosses the IPC and the persisted identity.
     #[serde(default)]
     pub disable_keys: bool,
+    /// HID++ `0x8100` onboard profiles.
+    #[serde(default)]
+    pub onboard_profiles: bool,
+    /// HID++ `0x8110` button spy.
+    #[serde(default)]
+    pub button_spy: bool,
 }
 
 impl Capabilities {
+    /// A gaming device with no ReprogControls to divert controls through: it
+    /// carries the gaming control tables (`0x8100` / `0x8110`) instead. Only
+    /// its OS-visible middle/back/forward can be remapped, by the input hook,
+    /// unless its model has a `GamingLayout`.
+    ///
+    /// Derived, not stored, so `buttons` keeps meaning ReprogControls in every
+    /// config and cache already written. Consumers ask
+    /// [`GamingButtons::for_device`](crate::binding::GamingButtons::for_device).
+    #[must_use]
+    pub(crate) const fn no_button_diversion(&self) -> bool {
+        !self.buttons && (self.onboard_profiles || self.button_spy)
+    }
+
     /// Derive capabilities from the set of HID++ feature IDs a device reports.
     /// Membership of a driving feature ID flips the corresponding flag.
     #[must_use]
@@ -248,6 +267,8 @@ impl Capabilities {
             // force; the feature table alone cannot say.
             force_sensing: ids.contains(&0x19c0),
             disable_keys: ids.contains(&0x4521),
+            onboard_profiles: ids.contains(&0x8100),
+            button_spy: ids.contains(&0x8110),
         }
     }
 
@@ -765,6 +786,8 @@ mod tests {
                     pointer_scaling: false,
                     force_sensing: false,
                     disable_keys: false,
+                    onboard_profiles: false,
+                    button_spy: false,
                 }),
                 settings_revision: 0,
             }],
@@ -886,6 +909,8 @@ mod tests {
                 pointer_scaling: false,
                 force_sensing: false,
                 disable_keys: false,
+                onboard_profiles: false,
+                button_spy: false,
             }
         );
         assert!(!Capabilities::from_feature_ids(&[0x0003, 0x1b04]).thumbwheel);
@@ -912,6 +937,8 @@ mod tests {
                 pointer_scaling: false,
                 force_sensing: false,
                 disable_keys: false,
+                onboard_profiles: false,
+                button_spy: false,
             }
         );
         // No driving features → nothing offered.
@@ -988,6 +1015,34 @@ mod tests {
         assert!(!capabilities.thumbwheel);
         assert!(capabilities.scroll_inversion);
         Ok(())
+    }
+
+    /// Real feature tables: a G502 LIGHTSPEED, and a G705 reported on #886.
+    /// Both carry `0x8100`/`0x8110` and nothing in the `0x1b0x` family.
+    #[test]
+    fn gaming_mice_have_no_button_diversion() {
+        use super::Capabilities;
+        let g502 = Capabilities::from_feature_ids(&[
+            0x0000, 0x0001, 0x0003, 0x0005, 0x1001, 0x8070, 0x1300, 0x8100, 0x8110, 0x8060, 0x2201,
+            0x2121,
+        ]);
+        let g705 = Capabilities::from_feature_ids(&[
+            0x0000, 0x0001, 0x0003, 0x0005, 0x0007, 0x1d4b, 0x0020, 0x00d0, 0x1004, 0x8081, 0x8071,
+            0x8100, 0x8110, 0x8060, 0x2201, 0x1500, 0x1e00,
+        ]);
+        for gaming in [g502, g705] {
+            assert!(!gaming.buttons && gaming.no_button_diversion());
+            assert!(gaming.pointer);
+        }
+    }
+
+    #[test]
+    fn a_reprogcontrols_mouse_can_divert() {
+        use super::Capabilities;
+        let mx = Capabilities::from_feature_ids(&[0x1b04, 0x2201, 0x2121]);
+        assert!(mx.buttons && !mx.no_button_diversion());
+        // ReprogControls win when a device has both families.
+        assert!(!Capabilities::from_feature_ids(&[0x1b04, 0x8110]).no_button_diversion());
     }
 
     #[test]

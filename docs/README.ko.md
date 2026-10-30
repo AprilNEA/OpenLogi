@@ -171,6 +171,7 @@ OpenLogi는 되고 Options+는 안 되는 것들:
 
 > [!IMPORTANT]
 > 먼저 **Logi Options+**(Linux에서는 Solaar도)를 종료하세요. 하나의 수신기는 한 번에 하나의 애플리케이션만 소유할 수 있습니다.
+> macOS에서는 **Karabiner-Elements**도 수정 대상인 Bluetooth 키보드를 독점합니다. Karabiner-Elements → Settings → Devices에서 해당 키보드의 **Modify events**를 끄세요.
 
 | 플랫폼 | 시스템 | 아키텍처 |
 | --- | --- | --- |

@@ -117,6 +117,16 @@ pub struct ReceiverRegisterPhase {
     _lock: Option<HostLock>,
 }
 
+impl ReceiverRegisterPhase {
+    /// A phase for a test that drives a scripted receiver: no other process
+    /// talks to it, so there is nothing to arbitrate.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn uncontended() -> Self {
+        Self { _lock: None }
+    }
+}
+
 /// Serialise a receiver's register phase across OpenLogi processes.
 ///
 /// HID++ 1.0 register replies carry no software id, and an error reply

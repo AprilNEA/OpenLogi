@@ -6,7 +6,7 @@ use openlogi_core::hid::PairingError;
 use openlogi_fixture::{
     CassetteExchange, FIXTURE_SCHEMA_VERSION, HidCassette, ReportSupport, RequestMatch,
 };
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 
 use super::{
     ChannelConnection, NodePresence, OpenOutcome, RawWriterAvailability, ReplayBackend,
@@ -96,12 +96,99 @@ async fn keyboard_capture_replay_restores_original_reporting_on_normal_shutdown(
     let (shutdown, host) = replay.host(sink);
     let capture = run_keyboard_capture_session(
         replay.route.clone(),
-        BTreeMap::from([(KEYBOARD_CID, ButtonId::control(KEYBOARD_CID))]),
+        watch::channel(BTreeMap::from([(
+            KEYBOARD_CID,
+            ButtonId::control(KEYBOARD_CID),
+        )]))
+        .1,
         host,
     );
 
     let (outcome, ()) = tokio::join!(capture, replay.stop_after_arm(shutdown));
 
+    replay.assert_restored(
+        outcome,
+        KEYBOARD_CID,
+        KEYBOARD_ARMED_FLAGS,
+        KEYBOARD_RESTORED_FLAGS,
+    );
+}
+
+/// A per-app binding change retargets a running keyboard session in place
+/// (#2140). The session hands back only the key that left the set and
+/// diverts only the key that joined it. It does not read the control table
+/// again or write the key that stays, and teardown hands back exactly the
+/// keys diverted at that moment. The strict cassette fails on any other
+/// request.
+#[tokio::test]
+async fn keyboard_capture_replay_changes_the_diverted_keys_in_place() {
+    const STAYS: u16 = KEYBOARD_CID;
+    const LEAVES: u16 = 0x00e8;
+    const JOINS: u16 = 0x00e9;
+    let replay = ArmedReplay::enumerate(keyboard_cassette(
+        "keyboard capture changes its keys in place",
+        &[STAYS, LEAVES, JOINS],
+        vec![
+            reprog_reporting_state_exchange(STAYS),
+            reprog_reporting_change_exchange(STAYS, KEYBOARD_ARMED_FLAGS),
+            reprog_reporting_state_exchange(LEAVES),
+            reprog_reporting_change_exchange(LEAVES, KEYBOARD_ARMED_FLAGS),
+            root_feature_lookup_exchange(0x1d4b, 0, 0),
+            reprog_reporting_change_exchange(LEAVES, KEYBOARD_RESTORED_FLAGS),
+            reprog_reporting_state_exchange(JOINS),
+            reprog_reporting_change_exchange(JOINS, KEYBOARD_ARMED_FLAGS),
+            reprog_reporting_change_exchange(STAYS, KEYBOARD_RESTORED_FLAGS),
+            reprog_reporting_change_exchange(JOINS, KEYBOARD_RESTORED_FLAGS),
+        ],
+    ))
+    .await;
+    let outcome = replay
+        .retarget_keyboard_then_stop(&[STAYS, LEAVES], &[STAYS, JOINS], JOINS)
+        .await;
+    assert!(matches!(
+        outcome.expect("keyboard capture shuts down cleanly"),
+        CaptureSessionOutcome::Restored
+    ));
+    let completion = replay
+        .backend
+        .channel_completion(CAPTURE_CHANNEL)
+        .expect("known capture channel");
+    assert_eq!(
+        reporting_writes(&completion.written_reports),
+        [
+            (STAYS, KEYBOARD_ARMED_FLAGS),
+            (LEAVES, KEYBOARD_ARMED_FLAGS),
+            (LEAVES, KEYBOARD_RESTORED_FLAGS),
+            (JOINS, KEYBOARD_ARMED_FLAGS),
+            (STAYS, KEYBOARD_RESTORED_FLAGS),
+            (JOINS, KEYBOARD_RESTORED_FLAGS),
+        ]
+        .map(|(cid, flags)| reprog_reporting_change_payload(cid, flags).to_vec())
+    );
+    replay
+        .backend
+        .require_complete()
+        .expect("keyboard cassette is strictly consumed");
+}
+
+/// A keyboard that binds keys only for some apps holds its session with no
+/// key diverted, and diverts a key in place when the app in front binds it.
+#[tokio::test]
+async fn keyboard_capture_replay_diverts_a_key_into_an_empty_session() {
+    let replay = ArmedReplay::enumerate(keyboard_cassette(
+        "keyboard capture starts with no key diverted",
+        &[KEYBOARD_CID],
+        vec![
+            root_feature_lookup_exchange(0x1d4b, 0, 0),
+            reprog_reporting_state_exchange(KEYBOARD_CID),
+            reprog_reporting_change_exchange(KEYBOARD_CID, KEYBOARD_ARMED_FLAGS),
+            reprog_reporting_change_exchange(KEYBOARD_CID, KEYBOARD_RESTORED_FLAGS),
+        ],
+    ))
+    .await;
+    let outcome = replay
+        .retarget_keyboard_then_stop(&[], &[KEYBOARD_CID], KEYBOARD_CID)
+        .await;
     replay.assert_restored(
         outcome,
         KEYBOARD_CID,
@@ -160,7 +247,7 @@ async fn capture_replay_failed_wake_discovery_restores_before_retry() {
                 if keyboard {
                     run_keyboard_capture_session(
                         replay.route.clone(),
-                        BTreeMap::from([(cid, ButtonId::control(cid))]),
+                        watch::channel(BTreeMap::from([(cid, ButtonId::control(cid))])).1,
                         host,
                     )
                     .await
@@ -327,6 +414,48 @@ impl ArmedReplay {
             .send(CaptureSessionStop::Shutdown)
             .expect("capture session still owns its shutdown receiver");
         self.wireless_lookup.release();
+    }
+
+    /// Run a keyboard session over the keys `from`, ask for the keys `to`
+    /// once it monitors, and shut it down while the change's last write —
+    /// diverting `last_diverted` — waits for its response, so shutdown can
+    /// only land after the change.
+    async fn retarget_keyboard_then_stop(
+        &self,
+        from: &[u16],
+        to: &[u16],
+        last_diverted: u16,
+    ) -> Result<CaptureSessionOutcome, CaptureSessionFailure> {
+        let (wanted_tx, wanted) = watch::channel(keyboard_keys(from));
+        let (sink, _captured) = mpsc::unbounded_channel();
+        let (shutdown, host) = self.host(sink);
+        let last_write = self
+            .backend
+            .hold_next_response(
+                CAPTURE_CHANNEL,
+                RequestMatch::Hidpp20,
+                &reprog_reporting_change_request(last_diverted, KEYBOARD_ARMED_FLAGS),
+            )
+            .expect("the change's last write can be held");
+        let capture = run_keyboard_capture_session(self.route.clone(), wanted, host);
+        let change_then_stop = async {
+            self.wireless_lookup.request_written().await;
+            wanted_tx.send_replace(keyboard_keys(to));
+            self.wireless_lookup.release();
+            // A session that ends instead of changing never writes it.
+            tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                last_write.request_written(),
+            )
+            .await
+            .expect("the change diverts its last key");
+            shutdown
+                .send(CaptureSessionStop::Shutdown)
+                .expect("capture session still owns its shutdown receiver");
+            last_write.release();
+        };
+        let (outcome, ()) = tokio::join!(capture, change_then_stop);
+        outcome
     }
 
     /// A normal shutdown restored `cid`'s reporting through the channel the
@@ -513,27 +642,79 @@ fn capture_cassette(
     armed_flags: u8,
     restored_flags: u8,
 ) -> HidCassette {
+    let session = [
+        reprog_reporting_state_exchange(cid),
+        reprog_reporting_change_exchange(cid, armed_flags),
+        root_feature_lookup_exchange(0x1d4b, 0, 0),
+        reprog_reporting_change_exchange(cid, restored_flags),
+    ];
     cassette(
         name,
         CAPTURE_CHANNEL,
-        vec![
-            root_ping_exchange(),
-            root_feature_lookup_exchange(0x0001, 0x01, 0),
-            feature_set_count_exchange(2),
-            feature_set_entry_exchange(1, 0x0001),
-            feature_set_entry_exchange(2, reprog_controls::FEATURE_ID),
-            reprog_control_count_exchange(1),
-            reprog_control_info_exchange(cid, control_flags),
-            root_ping_exchange(),
-            root_feature_lookup_exchange(reprog_controls::FEATURE_ID, REPROG_FEATURE_INDEX, 4),
-            reprog_control_count_exchange(1),
-            reprog_control_info_exchange(cid, control_flags),
-            reprog_reporting_state_exchange(cid),
-            reprog_reporting_change_exchange(cid, armed_flags),
-            root_feature_lookup_exchange(0x1d4b, 0, 0),
-            reprog_reporting_change_exchange(cid, restored_flags),
-        ],
+        capture_prelude(&[cid], control_flags)
+            .into_iter()
+            .chain(session)
+            .collect(),
     )
+}
+
+/// The exchanges of a keyboard session over the control table `table`: the
+/// shared prelude, then `session` from the first reporting read on.
+fn keyboard_cassette(name: &str, table: &[u16], session: Vec<CassetteExchange>) -> HidCassette {
+    cassette(
+        name,
+        CAPTURE_CHANNEL,
+        capture_prelude(table, KEYBOARD_CONTROL_FLAGS)
+            .into_iter()
+            .chain(session)
+            .collect(),
+    )
+}
+
+/// The exchanges before a capture session's first reporting read: the
+/// production probe, then the session's own open and control-table read.
+fn capture_prelude(table: &[u16], control_flags: (u8, u8)) -> Vec<CassetteExchange> {
+    let count = u8::try_from(table.len()).expect("a test control table fits a count byte");
+    let control_table = || {
+        (0u8..)
+            .zip(table)
+            .map(|(index, &cid)| reprog_control_info_exchange(index, cid, control_flags))
+    };
+    [
+        root_ping_exchange(),
+        root_feature_lookup_exchange(0x0001, 0x01, 0),
+        feature_set_count_exchange(2),
+        feature_set_entry_exchange(1, 0x0001),
+        feature_set_entry_exchange(2, reprog_controls::FEATURE_ID),
+        reprog_control_count_exchange(count),
+    ]
+    .into_iter()
+    .chain(control_table())
+    .chain([
+        root_ping_exchange(),
+        root_feature_lookup_exchange(reprog_controls::FEATURE_ID, REPROG_FEATURE_INDEX, 4),
+        reprog_control_count_exchange(count),
+    ])
+    .chain(control_table())
+    .collect()
+}
+
+/// `0x1b04` controls that dispatch as their own control buttons.
+fn keyboard_keys(cids: &[u16]) -> BTreeMap<u16, ButtonId> {
+    cids.iter()
+        .map(|&cid| (cid, ButtonId::control(cid)))
+        .collect()
+}
+
+/// The payload of every `setCidReporting` write in `reports`, in order.
+fn reporting_writes(reports: &[Vec<u8>]) -> Vec<Vec<u8>> {
+    reports
+        .iter()
+        .filter(|report| {
+            report[0] == 0x11 && report[2] == REPROG_FEATURE_INDEX && report[3] >> 4 == 3
+        })
+        .map(|report| report[4..].to_vec())
+        .collect()
 }
 
 fn bolt_pairing_cancel_cassette() -> HidCassette {
@@ -618,14 +799,20 @@ fn reprog_control_count_exchange(count: u8) -> CassetteExchange {
     )
 }
 
-fn reprog_control_info_exchange(cid: u16, (flags, flags_high): (u8, u8)) -> CassetteExchange {
+fn reprog_control_info_exchange(
+    index: u8,
+    cid: u16,
+    (flags, flags_high): (u8, u8),
+) -> CassetteExchange {
+    let mut request = [0u8; 16];
+    request[0] = index;
     let mut response = [0u8; 16];
     response[0..2].copy_from_slice(&cid.to_be_bytes());
     response[2..4].copy_from_slice(&0x009cu16.to_be_bytes());
     response[4] = flags;
     response[8] = flags_high;
     hidpp20_exchange(
-        hidpp20_long(0xff, REPROG_FEATURE_INDEX, 1, [0; 16]),
+        hidpp20_long(0xff, REPROG_FEATURE_INDEX, 1, request),
         hidpp20_long(0xff, REPROG_FEATURE_INDEX, 1, response),
     )
 }
@@ -644,9 +831,17 @@ fn reprog_reporting_state_exchange(cid: u16) -> CassetteExchange {
 }
 
 fn reprog_reporting_change_exchange(cid: u16, flags: u8) -> CassetteExchange {
-    let payload = reprog_reporting_change_payload(cid, flags);
-    let report = hidpp20_long(0xff, REPROG_FEATURE_INDEX, 3, payload);
+    let report = reprog_reporting_change_request(cid, flags);
     hidpp20_exchange(report.clone(), report)
+}
+
+fn reprog_reporting_change_request(cid: u16, flags: u8) -> Vec<u8> {
+    hidpp20_long(
+        0xff,
+        REPROG_FEATURE_INDEX,
+        3,
+        reprog_reporting_change_payload(cid, flags),
+    )
 }
 
 fn reprog_reporting_change_payload(cid: u16, flags: u8) -> [u8; 16] {

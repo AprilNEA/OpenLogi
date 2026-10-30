@@ -171,6 +171,7 @@ Der Funktionsumfang hängt davon ab, was das jeweilige Gerät meldet; die App ze
 
 > [!IMPORTANT]
 > Beende zuerst **Logi Options+** (und unter Linux Solaar). Ein Empfänger kann immer nur einer Anwendung gleichzeitig gehören.
+> Unter macOS belegt auch **Karabiner-Elements** eine Bluetooth-Tastatur, die es verändert. Schalte in Karabiner-Elements → Settings → Devices für diese Tastatur **Modify events** aus.
 
 | Plattform | System | Architektur |
 | --- | --- | --- |

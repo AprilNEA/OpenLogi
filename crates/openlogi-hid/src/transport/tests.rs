@@ -124,6 +124,16 @@ fn missing_grant_hint_names_the_agent_only_for_the_agent() {
     assert!(command.contains("the app that launched this command"));
 }
 
+#[test]
+fn granted_open_hint_names_the_exclusive_holders() {
+    // Karabiner-Elements seizes a Bluetooth-direct keyboard it modifies, which
+    // blocks the HID++ collection on the same IOHIDDevice (issue #2171).
+    assert!(GRANTED_OPEN_HINT.contains("Logi Options+"));
+    assert!(GRANTED_OPEN_HINT.contains("Karabiner-Elements"));
+    assert!(GRANTED_OPEN_HINT.contains("\"Modify events\""));
+    assert!(GRANTED_OPEN_HINT.contains("log out and back in"));
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn a_test_binary_is_not_the_agent() {

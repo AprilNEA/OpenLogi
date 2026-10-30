@@ -106,16 +106,27 @@ pub fn configure_application() {
     }
 }
 
-/// Make the transparent ring panel borderless and remove its native shadow.
+/// Make the transparent ring panel borderless, remove its native shadow, and
+/// keep a click on it from making it the key window.
+///
+/// A panel becomes key when it is clicked unless it becomes key only if
+/// needed, and a key non-activating panel takes the keyboard from the
+/// frontmost app. The agent posts a slot's shortcut while the clicked ring is
+/// still closing, so the keys reached the ring, which beeped, instead of the
+/// app (#1625). The overlay reads no keyboard input, and GPUI's view does not
+/// claim `needsPanelToBecomeKey`, so the panel never becomes key.
 #[cfg(target_os = "macos")]
 pub fn configure_windows() {
     use objc2::MainThreadMarker;
-    use objc2_app_kit::{NSApplication, NSWindowStyleMask};
+    use objc2_app_kit::{NSApplication, NSPanel, NSWindowStyleMask};
 
     if let Some(marker) = MainThreadMarker::new() {
         for window in NSApplication::sharedApplication(marker).windows() {
             window.setStyleMask(NSWindowStyleMask::NonactivatingPanel);
             window.setHasShadow(false);
+            if let Some(panel) = window.downcast_ref::<NSPanel>() {
+                panel.setBecomesKeyOnlyIfNeeded(true);
+            }
         }
     }
 }

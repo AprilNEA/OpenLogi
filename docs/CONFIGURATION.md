@@ -167,6 +167,17 @@ Common device fields are:
   across platforms (see [Application aliases](#application-aliases)). An
   overlay holds one action per button; gesture-direction maps live in
   `bindings`
+- `gshift_bindings` for G-series mice: the G-Shift layer, one action per
+  button, for example `G7 = "Copy"`. While a button bound to `GShift` is held,
+  a button in this layer runs its layer action; a button the layer leaves out
+  keeps its normal binding
+- `onboard_memory` for G-series mice with HID++ `0x8100` onboard profiles:
+  `"off"` puts the mouse in host mode, where OpenLogi owns its buttons, DPI and
+  report rate. `{ profile = <n> }` selects onboard profile `<n>` (from 1), and
+  the mouse uses the buttons and DPI levels stored in that profile. When the
+  field is absent, the agent selects host mode only if a setting needs it: a
+  `report_rate`, a G-Shift binding, or a remapped button that the mouse
+  reports only in host mode. Otherwise the agent leaves the onboard mode alone
 - `action_ring`: default and complete per-application eight-slot layouts;
   `action_ring.per_app` takes the same selectors as `per_app_bindings`,
   including the Windows `exe:<filename>` fallback and `app:<alias>` keys
@@ -424,9 +435,16 @@ Super.
 A chord has exactly one other key, and it may stand alone (`PageUp` with no
 modifier): a letter, a digit, `` - = [ ] \ ; ' ` , . / ``, `F1` to `F20`,
 `Enter`, `Escape` (`Esc`), `Backspace`, `Tab`, `Space`, the arrows `Left`,
-`Right`, `Up`, `Down`, and the editing keys `Insert` (`Ins`), `Delete` (`Del`),
-`Home`, `End`, `PageUp` (`PgUp`), and `PageDown` (`PgDn`). Names are
-case-insensitive. On macOS, `Insert` presses the Help key.
+`Right`, `Up`, `Down`, the editing keys `Insert` (`Ins`), `Delete` (`Del`),
+`Home`, `End`, `PageUp` (`PgUp`), and `PageDown` (`PgDn`), or `PrintScreen`
+(`Print`, `PrtSc`, `PrtScn`, `PrtScr`). Names are case-insensitive. On macOS,
+`Insert` presses the Help key and `PrintScreen` presses F13, the key macOS
+reads a PC keyboard's Print Screen as.
+
+`PrintScreen` presses the key itself, so a screenshot tool that listens for
+Print Screen, such as ShareX or Greenshot, receives it. On Windows and macOS,
+the `Screenshot` and `CaptureRegion` actions press the system's own screenshot
+shortcuts instead.
 
 `CustomShortcut` emits an immediate key-down/key-up pair. `HoldShortcut` keeps
 the chord down until the originating physical button is released, and also
