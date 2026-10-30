@@ -307,14 +307,18 @@ pub enum ActionRingTheme {
     /// Ceramic discs with their captions under them, on a light platter
     /// around a hub, with a needle that turns to point at the hovered one.
     Porcelain,
+    /// Obsidian's cards, orbits and hub on one opaque graphite chassis, with
+    /// the hovered card pressing in and turning into a circle.
+    ObsidianSignal,
 }
 
 impl ActionRingTheme {
     /// Every theme, in picker order.
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::Classic,
         Self::InMotion,
         Self::Obsidian,
+        Self::ObsidianSignal,
         Self::Porcelain,
     ];
 }
@@ -655,5 +659,8 @@ Bottom = { action = { CustomShortcut = "Cmd+Shift+P" } }
         let config = toml::from_str::<ActionRingConfig>(r#"theme = "porcelain""#)
             .expect("the porcelain theme must load");
         assert_eq!(config.theme, ActionRingTheme::Porcelain);
+        let config = toml::from_str::<ActionRingConfig>(r#"theme = "obsidian_signal""#)
+            .expect("the obsidian_signal theme must load");
+        assert_eq!(config.theme, ActionRingTheme::ObsidianSignal);
     }
 }

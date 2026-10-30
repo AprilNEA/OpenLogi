@@ -5,15 +5,17 @@
 //! the hub.
 //!
 //! The look at rest is [`openlogi_ui::ring_style::obsidian`], shared with the
-//! settings app's preview; everything that moves is here.
+//! settings app's preview; everything that moves is here. The dial, the aim
+//! and click clocks and the hub are drawn by [`super::obsidian_signal`] too,
+//! at its own size.
 
 use std::f32::consts::PI;
 use std::time::Instant;
 
 use gpui::{
-    Context, FontWeight, Hsla, InteractiveElement, IntoElement, ParentElement, PathBuilder, Pixels,
-    Point, StatefulInteractiveElement as _, Styled, Window, canvas, div, linear_color_stop,
-    linear_gradient, point, prelude::FluentBuilder as _, px,
+    BoxShadow, Context, FontWeight, Hsla, InteractiveElement, IntoElement, ParentElement,
+    PathBuilder, Pixels, Point, StatefulInteractiveElement as _, Styled, Window, canvas, div,
+    linear_color_stop, linear_gradient, point, prelude::FluentBuilder as _, px,
 };
 use openlogi_core::binding::ActionRingSlot;
 use openlogi_ui::action_icons::RING_CANCEL_ICON;
@@ -84,16 +86,12 @@ pub(super) struct Motion {
     bubbles: [Bubble; 8],
     /// Where the light sits in the hovered card's box, 0..1 on each axis.
     light: (f32, f32),
-    /// The sector's and dot's heading, and how far they are shown at all: a
-    /// ring nobody has hovered yet does not point anywhere.
-    aim_angle: f32,
-    aim_t: f32,
+    aim: Aim,
     /// 0 with the hub showing the cancel cross, 1 showing the hovered action.
     hub_t: f32,
     /// When the current hover began, for the rim's arrival turn.
     rim_born: Option<(ActionRingSlot, Instant)>,
-    /// The card a click chose, for its wave and the hub's flash.
-    committed: Option<(ActionRingSlot, Instant)>,
+    click: Click,
     born: Instant,
     last_tick: Instant,
     close_started: Option<Instant>,
@@ -145,6 +143,91 @@ impl Bubble {
     }
 }
 
+/// The sector's and dot's heading, and how far they are shown at all: a ring
+/// nobody has hovered yet does not point anywhere. The heading turns the
+/// short way to a newly hovered card and holds when the pointer leaves.
+#[derive(Clone, Copy)]
+pub(super) struct Aim {
+    pub(super) angle: f32,
+    pub(super) t: f32,
+}
+
+impl Default for Aim {
+    fn default() -> Self {
+        Self {
+            angle: slot_heading(ActionRingSlot::Top),
+            t: 0.0,
+        }
+    }
+}
+
+impl Aim {
+    pub(super) fn advance(&mut self, hovered: Option<ActionRingSlot>, dt: f32, reduce: bool) {
+        let heading = hovered.map(slot_heading);
+        self.angle = if reduce {
+            heading.unwrap_or(self.angle)
+        } else {
+            heading.map_or(self.angle, |heading| {
+                lerp_angle(self.angle, heading, dt, AIM_TAU)
+            })
+        };
+        let target = if hovered.is_some() { 1.0 } else { 0.0 };
+        self.t = if reduce {
+            target
+        } else {
+            smooth_towards(self.t, target, dt, AIM_TAU)
+        };
+    }
+}
+
+/// The card a click chose, for the wave it sends out and the flash through
+/// the hub, which play into the exit.
+#[derive(Clone, Copy, Default)]
+pub(super) struct Click(Option<(ActionRingSlot, Instant)>);
+
+impl Click {
+    pub(super) fn commit(&mut self, slot: ActionRingSlot, now: Instant) {
+        self.0 = Some((slot, now));
+    }
+
+    /// The chosen card, if any.
+    pub(super) fn slot(self) -> Option<ActionRingSlot> {
+        self.0.map(|(slot, _)| slot)
+    }
+
+    /// The chosen card and when the click landed, for whatever else plays
+    /// from it.
+    pub(super) fn started(self) -> Option<(ActionRingSlot, Instant)> {
+        self.0
+    }
+
+    /// The click wave, while it plays: its card, its scale and its alpha.
+    pub(super) fn wave(self, now: Instant, reduce: bool) -> Option<(ActionRingSlot, f32, f32)> {
+        if reduce {
+            return None;
+        }
+        let (slot, started) = self.0?;
+        let t = now.saturating_duration_since(started).as_secs_f32() / WAVE_SECS;
+        (t < 1.0).then(|| (slot, 0.7 + 0.72 * ease_out_cubic(t), 0.65 * (1.0 - t)))
+    }
+
+    /// How bright the hub's flash is, 0 when none plays.
+    pub(super) fn flash(self, now: Instant, reduce: bool) -> f32 {
+        if reduce {
+            return 0.0;
+        }
+        self.0.map_or(0.0, |(_, started)| {
+            let t = now.saturating_duration_since(started).as_secs_f32() / FLASH_SECS;
+            let pulse = if t < 0.22 {
+                t / 0.22
+            } else {
+                1.0 - ease_out_cubic((t - 0.22) / 0.78)
+            };
+            0.14 * pulse.clamp(0.0, 1.0)
+        })
+    }
+}
+
 impl Default for Motion {
     fn default() -> Self {
         let now = Instant::now();
@@ -152,11 +235,10 @@ impl Default for Motion {
             hover_t: [0.0; 8],
             bubbles: [Bubble::default(); 8],
             light: DEFAULT_LIGHT,
-            aim_angle: slot_heading(ActionRingSlot::Top),
-            aim_t: 0.0,
+            aim: Aim::default(),
             hub_t: 0.0,
             rim_born: None,
-            committed: None,
+            click: Click::default(),
             born: now,
             last_tick: now,
             close_started: None,
@@ -182,7 +264,7 @@ impl Motion {
     /// Remember the card a click chose, so its wave and the hub's flash play
     /// into the exit.
     fn commit(&mut self, slot: ActionRingSlot, now: Instant) {
-        self.committed = Some((slot, now));
+        self.click.commit(slot, now);
     }
 
     fn advance(
@@ -221,24 +303,12 @@ impl Motion {
             Some(_) => {}
             None => self.rim_born = None,
         }
-        let heading = hovered.map(slot_heading);
-        self.aim_angle = if reduce {
-            heading.unwrap_or(self.aim_angle)
-        } else {
-            heading.map_or(self.aim_angle, |heading| {
-                lerp_angle(self.aim_angle, heading, dt, AIM_TAU)
-            })
-        };
-        let aim_target = if hovered.is_some() { 1.0 } else { 0.0 };
-        self.aim_t = if reduce {
-            aim_target
-        } else {
-            smooth_towards(self.aim_t, aim_target, dt, AIM_TAU)
-        };
+        self.aim.advance(hovered, dt, reduce);
+        let open = if hovered.is_some() { 1.0 } else { 0.0 };
         self.hub_t = if reduce {
-            aim_target
+            open
         } else {
-            smooth_towards(self.hub_t, aim_target, dt, HUB_TAU)
+            smooth_towards(self.hub_t, open, dt, HUB_TAU)
         };
     }
 
@@ -261,28 +331,12 @@ impl Motion {
 
     /// The click wave, while it plays: its card, its scale and its alpha.
     fn wave(&self, now: Instant, reduce: bool) -> Option<(ActionRingSlot, f32, f32)> {
-        if reduce {
-            return None;
-        }
-        let (slot, started) = self.committed?;
-        let t = now.saturating_duration_since(started).as_secs_f32() / WAVE_SECS;
-        (t < 1.0).then(|| (slot, 0.7 + 0.72 * ease_out_cubic(t), 0.65 * (1.0 - t)))
+        self.click.wave(now, reduce)
     }
 
     /// How bright the hub's flash is, 0 when none plays.
     fn flash(&self, now: Instant, reduce: bool) -> f32 {
-        if reduce {
-            return 0.0;
-        }
-        self.committed.map_or(0.0, |(_, started)| {
-            let t = now.saturating_duration_since(started).as_secs_f32() / FLASH_SECS;
-            let pulse = if t < 0.22 {
-                t / 0.22
-            } else {
-                1.0 - ease_out_cubic((t - 0.22) / 0.78)
-            };
-            0.14 * pulse.clamp(0.0, 1.0)
-        })
+        self.click.flash(now, reduce)
     }
 }
 
@@ -380,8 +434,8 @@ impl RingView {
         let rim = motion.rim_angle(now, reduce);
         let wave = motion.wave(now, reduce);
         let flash = motion.flash(now, reduce);
-        let committed = motion.committed.map(|(slot, _)| slot);
-        let (aim_angle, aim_t, hub_t) = (motion.aim_angle, motion.aim_t, motion.hub_t);
+        let committed = motion.click.slot();
+        let (aim, hub_t) = (motion.aim, motion.hub_t);
         let hovered = self
             .hovered
             .and_then(|slot| self.invocation.slots.get(&slot));
@@ -415,7 +469,12 @@ impl RingView {
             caption: hovered_caption,
             open: hub_t,
             flash,
-            dial: stage.dial,
+            opacity: stage.dial.1,
+            look: HubLook {
+                border: lerp_hsla(hub_border(), signal().alpha(0.55), ease_out_cubic(hub_t)),
+                shadow: hub_shadow(),
+                cross: hex(0xa1ad_bdff),
+            },
         };
 
         div()
@@ -429,20 +488,29 @@ impl RingView {
             }))
             .child(ambient(layout, stage.dial))
             .child(dial_canvas(
-                layout, stage.dial, aim_angle, aim_t, wave, reduce,
+                layout.fit * stage.dial.0,
+                stage.dial.1,
+                aim,
+                wave,
+                reduce,
             ))
             .children(halos)
             .children(cards)
-            .child(hub_element(hub, layout, cx))
+            .child(hub_element(hub, layout.edge, layout.fit * stage.dial.0, cx))
     }
 }
 
 /// A circle of `diameter` centred in the panel.
 fn centred(layout: Layout, diameter: f32) -> gpui::Div {
+    centred_in(layout.edge, diameter)
+}
+
+/// A circle of `diameter` centred in a panel `edge` pixels square.
+pub(super) fn centred_in(edge: f32, diameter: f32) -> gpui::Div {
     div()
         .absolute()
-        .left(px(layout.edge / 2.0 - diameter / 2.0))
-        .top(px(layout.edge / 2.0 - diameter / 2.0))
+        .left(px(edge / 2.0 - diameter / 2.0))
+        .top(px(edge / 2.0 - diameter / 2.0))
         .size(px(diameter))
         .rounded_full()
 }
@@ -456,13 +524,13 @@ fn ambient(layout: Layout, (scale, opacity): (f32, f32)) -> impl IntoElement {
 }
 
 /// The dial: the two orbit lines, the tick band, the sector and the dot that
-/// face the hovered card, and the click wave, grown in at `scale` and
-/// `opacity` as the ring opens.
-fn dial_canvas(
-    layout: Layout,
-    (scale, opacity): (f32, f32),
-    aim_angle: f32,
-    aim_t: f32,
+/// face the aimed card, and the click wave, filling the panel it is put in.
+/// `scale` is the panel's fit times the dial's growth as the ring opens, and
+/// `opacity` that growth's; the sizes are the design's times `scale`.
+pub(super) fn dial_canvas(
+    scale: f32,
+    opacity: f32,
+    aim: Aim,
     wave: Option<(ActionRingSlot, f32, f32)>,
     reduce: bool,
 ) -> impl IntoElement {
@@ -473,12 +541,11 @@ fn dial_canvas(
                 window.request_animation_frame();
             }
             let center = bounds.center();
-            let scale = scale * layout.fit;
             paint_orbits(window, center, scale);
             paint_ticks(window, center, scale);
-            if aim_t > 0.01 {
-                paint_sector(window, center, scale, aim_angle, aim_t);
-                paint_dot(window, center, scale, aim_angle, aim_t);
+            if aim.t > 0.01 {
+                paint_sector(window, center, scale, aim.angle, aim.t);
+                paint_dot(window, center, scale, aim.angle, aim.t);
             }
             if let Some((slot, wave_scale, alpha)) = wave {
                 let (x, y) = slot.unit_offset();
@@ -696,36 +763,53 @@ fn css(deg: f32) -> f32 {
 }
 
 /// What the hub is drawn from this frame.
-struct Hub {
-    hovered_icon: Option<&'static str>,
-    caption: Option<gpui::SharedString>,
+pub(super) struct Hub {
+    pub(super) hovered_icon: Option<&'static str>,
+    pub(super) caption: Option<gpui::SharedString>,
     /// 0 showing the cancel cross, 1 showing the hovered action.
-    open: f32,
+    pub(super) open: f32,
     /// The flash a click sends through it.
-    flash: f32,
-    /// The dial's scale and opacity, which the hub shares.
-    dial: (f32, f32),
+    pub(super) flash: f32,
+    /// The dial's opacity, which the hub shares.
+    pub(super) opacity: f32,
+    pub(super) look: HubLook,
+}
+
+/// The hub's border, shadows and cross colour this frame: the theme's, eased
+/// by whatever opens or presses it.
+pub(super) struct HubLook {
+    pub(super) border: Hsla,
+    pub(super) shadow: Vec<BoxShadow>,
+    pub(super) cross: Hsla,
 }
 
 /// The hub: the cancel cross at rest, opening into the hovered action's
-/// glyph and name as `open` rises, with the flash a click sends through it.
+/// glyph and name as `open` rises, with the flash a click sends through it,
+/// centred in a panel `edge` pixels square at `fit` of its designed size.
+/// It closes the ring on a click; a theme that presses it in under the
+/// pointer adds its own hover.
 ///
 /// The cross fades out as the action fades in, the glyph grows as it
 /// arrives, and the glass brightens a little, so the hand-off reads as the
 /// hub taking the action in rather than a swap.
-fn hub_element(hub: Hub, layout: Layout, cx: &mut Context<RingView>) -> impl IntoElement {
+pub(super) fn hub_element(
+    hub: Hub,
+    edge: f32,
+    fit: f32,
+    cx: &mut Context<RingView>,
+) -> gpui::Stateful<gpui::Div> {
     let Hub {
         hovered_icon,
         caption,
         open,
         flash,
-        dial: (scale, opacity),
+        opacity,
+        look,
     } = hub;
-    let fit = layout.fit * scale;
     let size = HUB * fit;
     let open = ease_out_cubic(open);
     let glyph = (HUB_GLYPH + 6.0 * open) * fit;
-    centred(layout, size)
+    centred_in(edge, size)
         .id("ring-cancel")
         .flex()
         .flex_col()
@@ -734,8 +818,8 @@ fn hub_element(hub: Hub, layout: Layout, cx: &mut Context<RingView>) -> impl Int
         .gap(px(CARD_GAP * fit))
         .bg(hub_fill())
         .border_1()
-        .border_color(lerp_hsla(hub_border(), signal().alpha(0.55), open))
-        .shadow(hub_shadow())
+        .border_color(look.border)
+        .shadow(look.shadow)
         .text_color(signal())
         .opacity(opacity)
         .cursor_pointer()
@@ -757,7 +841,7 @@ fn hub_element(hub: Hub, layout: Layout, cx: &mut Context<RingView>) -> impl Int
                         .absolute()
                         .inset_0()
                         .size(px(glyph))
-                        .text_color(hex(0xa1ad_bdff))
+                        .text_color(look.cross)
                         .opacity(1.0 - open),
                 )
                 .when_some(hovered_icon, |slot, icon| {
@@ -1128,22 +1212,22 @@ mod tests {
     fn the_aim_turns_the_short_way_and_fades_when_nothing_is_hovered() {
         let mut motion = Motion::default();
         let start = motion.born;
-        assert!(motion.aim_t.abs() < 0.001, "a fresh ring points nowhere");
+        assert!(motion.aim.t.abs() < 0.001, "a fresh ring points nowhere");
         let mut now = start;
         for _ in 0..30 {
             now += std::time::Duration::from_millis(16);
             motion.advance(Some(ActionRingSlot::Left), None, now, false);
         }
-        assert!(motion.aim_t > 0.9);
+        assert!(motion.aim.t > 0.9);
         let left = slot_heading(ActionRingSlot::Left);
-        assert!(super::super::motion::wrap_to_pi(motion.aim_angle - left).abs() < 0.1);
+        assert!(super::super::motion::wrap_to_pi(motion.aim.angle - left).abs() < 0.1);
         for _ in 0..30 {
             now += std::time::Duration::from_millis(16);
             motion.advance(None, None, now, false);
         }
-        assert!(motion.aim_t < 0.1, "the sector fades with nothing hovered");
+        assert!(motion.aim.t < 0.1, "the sector fades with nothing hovered");
         assert!(
-            super::super::motion::wrap_to_pi(motion.aim_angle - left).abs() < 0.1,
+            super::super::motion::wrap_to_pi(motion.aim.angle - left).abs() < 0.1,
             "but the heading holds"
         );
     }

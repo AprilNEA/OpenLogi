@@ -25,7 +25,9 @@ use openlogi_core::binding::{
 };
 use openlogi_ui::action_icons::RING_CANCEL_ICON;
 use openlogi_ui::color;
-use openlogi_ui::ring_style::{EMPTY_SLOT_OUTLINE, classic, in_motion, obsidian, porcelain};
+use openlogi_ui::ring_style::{
+    EMPTY_SLOT_OUTLINE, classic, in_motion, obsidian, obsidian_signal, porcelain,
+};
 
 use self::action_icons::action_icon_path;
 use self::editor::{PowerUserInputs, action_library};
@@ -144,6 +146,7 @@ impl SelectItem for ThemeOption {
             ActionRingTheme::InMotion => tr!("action_ring.theme_in_motion"),
             ActionRingTheme::Obsidian => tr!("action_ring.theme_obsidian"),
             ActionRingTheme::Porcelain => tr!("action_ring.theme_porcelain"),
+            ActionRingTheme::ObsidianSignal => tr!("action_ring.theme_obsidian_signal"),
         }
     }
 
@@ -374,6 +377,9 @@ enum SlotShape {
     Card,
     /// Porcelain: a ceramic disc with its caption under it, on a clear node.
     Disc,
+    /// Obsidian Signal: Obsidian's card on the graphite chassis, rounded
+    /// into a circle when hovered, on a clear node.
+    Cell,
 }
 
 impl SlotShape {
@@ -383,6 +389,7 @@ impl SlotShape {
             ActionRingTheme::InMotion => Self::Pill,
             ActionRingTheme::Obsidian => Self::Card,
             ActionRingTheme::Porcelain => Self::Disc,
+            ActionRingTheme::ObsidianSignal => Self::Cell,
         }
     }
 
@@ -394,6 +401,7 @@ impl SlotShape {
             Self::Pill => PREVIEW_SIZE / in_motion::DESIGN_EDGE,
             Self::Card => PREVIEW_SIZE / obsidian::DESIGN_EDGE,
             Self::Disc => PREVIEW_SIZE / porcelain::DESIGN_EDGE,
+            Self::Cell => PREVIEW_SIZE / obsidian_signal::DESIGN_EDGE,
         }
     }
 
@@ -404,6 +412,7 @@ impl SlotShape {
             Self::Pill => in_motion::RADIUS * self.scale(),
             Self::Card => obsidian::RADIUS * self.scale(),
             Self::Disc => porcelain::RADIUS * self.scale(),
+            Self::Cell => obsidian_signal::RADIUS * self.scale(),
         }
     }
 
@@ -425,6 +434,10 @@ impl SlotShape {
                 porcelain::NODE_W * self.scale(),
                 porcelain::NODE_H * self.scale(),
             ),
+            Self::Cell => (
+                obsidian_signal::CARD_W * self.scale(),
+                obsidian_signal::CARD_H * self.scale(),
+            ),
         }
     }
 
@@ -444,12 +457,14 @@ impl SlotShape {
             Self::Pill => "action-ring-preview-pill",
             Self::Card => "action-ring-preview-card",
             Self::Disc => "action-ring-preview-disc",
+            Self::Cell => "action-ring-preview-cell",
         }
     }
 
-    /// The slot's caption, when the shape carries one beside its glyph.
+    /// The slot's caption, when the shape carries one beside its glyph: the
+    /// round slot has none, and the cell keeps its caption in with its glyph.
     const fn carries_caption(self) -> bool {
-        !matches!(self, Self::Round)
+        !matches!(self, Self::Round | Self::Cell)
     }
 }
 
@@ -473,6 +488,7 @@ fn ring_preview(
         SlotShape::Pill => in_motion_backdrop().into_any_element(),
         SlotShape::Card => obsidian_backdrop().into_any_element(),
         SlotShape::Disc => porcelain_backdrop().into_any_element(),
+        SlotShape::Cell => obsidian_signal_backdrop().into_any_element(),
     };
     div()
         .relative()
@@ -584,14 +600,51 @@ fn in_motion_backdrop() -> Div {
 /// The ticks, the sector and the dot are left out: they are hover state, and
 /// a still frame would spend 48 elements on hairlines.
 fn obsidian_backdrop() -> Div {
-    let scale = SlotShape::Card.scale();
+    obsidian_dial(
+        SlotShape::Card.scale(),
+        obsidian::ambient_shadow(),
+        obsidian::hub_shadow(),
+        obsidian::signal(),
+    )
+}
+
+/// Obsidian Signal's dial at rest: Obsidian's, shrunk onto the graphite
+/// chassis that holds the whole ring.
+fn obsidian_signal_backdrop() -> Div {
+    let scale = SlotShape::Cell.scale();
+    div()
+        .absolute()
+        .size_full()
+        .child(
+            centred_circle(2.0 * obsidian_signal::CHASSIS * scale)
+                .bg(obsidian_signal::chassis_fill())
+                .border_1()
+                .border_color(obsidian_signal::chassis_border())
+                .shadow(obsidian_signal::chassis_shadow()),
+        )
+        .child(obsidian_dial(
+            scale * obsidian_signal::SHRINK,
+            obsidian_signal::ambient_shadow(),
+            obsidian_signal::hub_shadow(),
+            obsidian_signal::cross(),
+        ))
+}
+
+/// Obsidian's dial at `scale`: the soft disc, the two orbit lines and the
+/// hub, with the shadows and cross colour the theme gives them.
+fn obsidian_dial(
+    scale: f32,
+    ambient_shadow: Vec<gpui::BoxShadow>,
+    hub_shadow: Vec<gpui::BoxShadow>,
+    cross: Hsla,
+) -> Div {
     div()
         .absolute()
         .size_full()
         .child(
             centred_circle(2.0 * obsidian::AMBIENT * scale)
                 .bg(obsidian::ambient_fill())
-                .shadow(obsidian::ambient_shadow()),
+                .shadow(ambient_shadow),
         )
         .children(
             [
@@ -612,8 +665,8 @@ fn obsidian_backdrop() -> Div {
                 .bg(obsidian::hub_fill())
                 .border_1()
                 .border_color(obsidian::hub_border())
-                .shadow(obsidian::hub_shadow())
-                .text_color(obsidian::signal())
+                .shadow(hub_shadow)
+                .text_color(cross)
                 .child(
                     svg()
                         .path(RING_CANCEL_ICON)
@@ -688,11 +741,13 @@ fn preview_disc(hovered: bool) -> Div {
 
 /// A slot's caption as `shape` carries it: the pill's runs on from its glyph,
 /// the card's and the disc's sit centred under theirs.
-fn slot_caption(shape: SlotShape, caption: SharedString) -> Div {
+fn slot_caption(shape: SlotShape, selected: bool, caption: SharedString) -> Div {
     let scale = shape.scale();
     let (width, centred) = match shape {
         SlotShape::Card => ((obsidian::CARD_W - 6.0) * scale, true),
         SlotShape::Disc => ((porcelain::NODE_W - 2.0) * scale, true),
+        SlotShape::Cell if selected => (obsidian_signal::CELL_LABEL * scale, true),
+        SlotShape::Cell => ((obsidian_signal::CARD_W - 6.0) * scale, true),
         SlotShape::Pill | SlotShape::Round => ((in_motion::PILL_W - 40.0) * scale, false),
     };
     div()
@@ -703,24 +758,69 @@ fn slot_caption(shape: SlotShape, caption: SharedString) -> Div {
         .child(caption)
 }
 
+/// An Obsidian Signal card at the preview's scale: at rest, or rounded into
+/// its circle and pressed in, as the ring shows the hovered one. The glyph
+/// and caption go inside it.
+fn preview_cell(hovered: bool) -> Div {
+    let scale = SlotShape::Cell.scale();
+    let (w, h, radius, gap) = if hovered {
+        let circle = obsidian_signal::CELL;
+        (circle, circle, circle / 2.0, obsidian_signal::CELL_GAP)
+    } else {
+        (
+            obsidian_signal::CARD_W,
+            obsidian_signal::CARD_H,
+            obsidian_signal::CARD_RADIUS,
+            obsidian_signal::CARD_GAP,
+        )
+    };
+    let (border, shadow) = if hovered {
+        (
+            obsidian_signal::cell_border_hovered(),
+            obsidian_signal::cell_shadow_hovered(),
+        )
+    } else {
+        (
+            obsidian_signal::card_border(false),
+            obsidian_signal::cell_shadow(),
+        )
+    };
+    div()
+        .w(px(w * scale))
+        .h(px(h * scale))
+        .flex_none()
+        .rounded(px(radius * scale))
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap(px(gap * scale))
+        .bg(obsidian_signal::cell_fill(false))
+        .border_1()
+        .border_color(border)
+        .shadow(shadow)
+}
+
 /// A slot's caption colour, its glyph colour and its glyph size, for `shape`
 /// with the slot selected or not.
 ///
 /// The card's glyph takes the signal colour when the card is pressed and a
-/// muted one otherwise, and the disc's caption warms under the pointer while
-/// its glyph stays inked; the other shapes ink glyph and caption alike.
+/// muted one otherwise, the cell's brightens to the text's under the pointer,
+/// and the disc's caption warms under the pointer while its glyph stays
+/// inked; the other shapes ink glyph and caption alike.
 fn slot_inks(shape: SlotShape, selected: bool) -> (Hsla, Hsla, f32) {
     let hover = if selected { 1.0 } else { 0.0 };
     let ink = match shape {
         SlotShape::Round => classic::GLYPH,
         SlotShape::Pill => in_motion::slot_ink(hover),
-        SlotShape::Card => obsidian::text(),
+        SlotShape::Card | SlotShape::Cell => obsidian::text(),
         SlotShape::Disc if selected => porcelain::label_hovered(),
         SlotShape::Disc => porcelain::label(),
     };
     let glyph_ink = match shape {
         SlotShape::Card if selected => obsidian::signal(),
-        SlotShape::Card => obsidian::glyph(),
+        SlotShape::Cell if selected => obsidian::text(),
+        SlotShape::Card | SlotShape::Cell => obsidian::glyph(),
         SlotShape::Disc => porcelain::ink(),
         SlotShape::Round | SlotShape::Pill => ink,
     };
@@ -729,6 +829,7 @@ fn slot_inks(shape: SlotShape, selected: bool) -> (Hsla, Hsla, f32) {
         SlotShape::Pill => in_motion::PILL_GLYPH,
         SlotShape::Card => obsidian::CARD_GLYPH,
         SlotShape::Disc => porcelain::DISC_GLYPH,
+        SlotShape::Cell => obsidian_signal::CARD_GLYPH,
     } * shape.scale();
     (ink, glyph_ink, glyph)
 }
@@ -778,6 +879,7 @@ fn slot_button(
             SlotShape::Round | SlotShape::Pill => button.rounded_full(),
             SlotShape::Card => button.rounded(px(obsidian::CARD_RADIUS * scale)),
             SlotShape::Disc => button.rounded(px(14.0 * scale)),
+            SlotShape::Cell => button.rounded(px(obsidian_signal::CARD_RADIUS * scale)),
         })
         .text_color(ink)
         .cursor_pointer()
@@ -796,9 +898,9 @@ fn slot_button(
                 .border_1()
                 .border_color(obsidian::card_border(selected))
                 .shadow(obsidian::card_shadow(selected)),
-            // The node is clear, as the ring's is: the disc inside it carries
-            // the look.
-            (SlotShape::Disc, false) => button,
+            // The node is clear, as the ring's is: the disc or cell inside it
+            // carries the look.
+            (SlotShape::Disc | SlotShape::Cell, false) => button,
         })
         // How the glyph and caption sit: the pill in a row from its left edge,
         // the card in a column; the round slot centres its glyph alone.
@@ -815,7 +917,7 @@ fn slot_button(
                 .justify_start()
                 .pt(px(porcelain::NODE_PAD_TOP * scale))
                 .gap(px(porcelain::NODE_GAP * scale)),
-            (SlotShape::Round, _) | (_, true) => button,
+            (SlotShape::Round | SlotShape::Cell, _) | (_, true) => button,
         })
         .accessibility_label(accessible_label)
         .tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx))
@@ -827,6 +929,10 @@ fn slot_button(
                 .text_color(glyph_ink);
             button.child(match shape {
                 SlotShape::Disc => preview_disc(selected).child(icon).into_any_element(),
+                SlotShape::Cell => preview_cell(selected)
+                    .child(icon)
+                    .child(slot_caption(shape, selected, caption.clone()))
+                    .into_any_element(),
                 SlotShape::Round | SlotShape::Pill | SlotShape::Card => icon.into_any_element(),
             })
         })
@@ -837,7 +943,7 @@ fn slot_button(
         // do; the round slot leaves it to the label under the hub and the
         // tooltip.
         .when(shape.carries_caption() && !empty, |button| {
-            button.child(slot_caption(shape, caption))
+            button.child(slot_caption(shape, selected, caption))
         })
         .hover(|button| button.opacity(0.85))
         .focus_visible(|button| button.border_2().border_color(rgb(theme::ACCENT_BLUE)))
@@ -891,13 +997,19 @@ mod tests {
         const PILL: &str = "action-ring-preview-pill";
         const CARD: &str = "action-ring-preview-card";
         const DISC: &str = "action-ring-preview-disc";
+        const CELL: &str = "action-ring-preview-cell";
         cx.update(gpui_component::init);
         install_app_state(cx);
         for (theme, present, absent) in [
-            (ActionRingTheme::Classic, ROUND, [PILL, CARD, DISC]),
-            (ActionRingTheme::InMotion, PILL, [ROUND, CARD, DISC]),
-            (ActionRingTheme::Obsidian, CARD, [ROUND, PILL, DISC]),
-            (ActionRingTheme::Porcelain, DISC, [ROUND, PILL, CARD]),
+            (ActionRingTheme::Classic, ROUND, [PILL, CARD, DISC, CELL]),
+            (ActionRingTheme::InMotion, PILL, [ROUND, CARD, DISC, CELL]),
+            (ActionRingTheme::Obsidian, CARD, [ROUND, PILL, DISC, CELL]),
+            (ActionRingTheme::Porcelain, DISC, [ROUND, PILL, CARD, CELL]),
+            (
+                ActionRingTheme::ObsidianSignal,
+                CELL,
+                [ROUND, PILL, CARD, DISC],
+            ),
         ] {
             let (_, cx) = cx.add_window_view(move |_, cx| PreviewOnly {
                 theme,

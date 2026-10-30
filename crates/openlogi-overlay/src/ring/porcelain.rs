@@ -31,8 +31,8 @@ use openlogi_ui::ring_style::porcelain::{
 };
 
 use super::motion::{
-    Stage, blend_shadows, ease_out_cubic, ellipse_path, gather_shift, keyframes, slot_heading,
-    smooth_towards, stage_at, wrap_to_pi,
+    Stage, blend_shadows, ease_out_cubic, ellipse_path, gather_shift, keyframes, press_at,
+    slot_heading, smooth_towards, stage_at, wrap_to_pi,
 };
 use super::{RingLook, RingView};
 use crate::ipc::OverlayCommand;
@@ -51,19 +51,8 @@ const TURN_SECS: f32 = 0.30;
 const OVERSHOOT_FRACTION: f32 = 0.04;
 const OVERSHOOT_MAX: f32 = 4.0 * PI / 180.0;
 const OVERSHOOT_AT: f32 = 0.78;
-/// A click presses the disc in for this long, and draws the stroke under the
-/// caption for this long.
-const PRESS_SECS: f32 = 0.24;
+/// A click draws the stroke under the caption for this long.
 const MARK_SECS: f32 = 0.30;
-/// The click's press: at each point of it, how far the disc sinks and how
-/// much of its size it keeps. From rest it goes in and a touch smaller a
-/// third of the way in, and eases back out by three quarters.
-const PRESS_KEYS: [(f32, f32, f32); 4] = [
-    (0.0, 0.0, 1.0),
-    (0.33, 2.5, 0.955),
-    (0.75, 0.8, 0.99),
-    (1.0, 0.0, 1.0),
-];
 /// The stroke: at each point of it, how wide it is of its full width and
 /// its alpha. It grows in fast and shrinks away.
 const MARK_KEYS: [(f32, f32, f32); 3] = [(0.0, 0.4, 0.0), (0.3, 1.0, 0.85), (1.0, 0.65, 0.0)];
@@ -199,11 +188,7 @@ impl Motion {
     /// sinks and how much of its size it keeps.
     fn press(&self, now: Instant, reduce: bool) -> Option<(ActionRingSlot, f32, f32)> {
         let (slot, started) = self.pressed.filter(|_| !reduce)?;
-        let t = now.saturating_duration_since(started).as_secs_f32() / PRESS_SECS;
-        (t < 1.0).then(|| {
-            let (sink, kept) = keyframes(&PRESS_KEYS, t, ease_out_cubic);
-            (slot, sink, kept)
-        })
+        press_at(started, now).map(|(sink, kept)| (slot, sink, kept))
     }
 
     /// The stroke under the pressed caption, while it plays: its slot, how

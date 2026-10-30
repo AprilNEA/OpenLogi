@@ -567,3 +567,154 @@ pub mod porcelain {
         ]
     }
 }
+
+/// Obsidian's kin: the same cards, orbits and signal hub on one opaque
+/// machined graphite chassis that holds the whole ring, with a card pressing
+/// in and turning into a circle under the pointer instead of lifting under a
+/// lit halo. Whatever it shares with [`obsidian`] it takes from there, so the
+/// two cannot drift apart; every size is Obsidian's, shown this much smaller.
+pub mod obsidian_signal {
+    use super::{
+        Background, BoxShadow, Hsla, hex, inset, linear_color_stop, linear_gradient, obsidian,
+        shadow,
+    };
+
+    pub use super::obsidian::{ambient_fill, card_border, glyph, hub_border, signal, text};
+
+    /// The prototype's 420 px dial, with its chassis 2% wider so every card
+    /// sits on it, is shown this much smaller: a compact ring, as Porcelain
+    /// is. Every size below but the text is Obsidian's times this.
+    pub const SHRINK: f32 = 400.0 / 440.0;
+    /// The panel's designed edge: the chassis plus a pixel each side.
+    pub const DESIGN_EDGE: f32 = 440.0 * SHRINK;
+    /// Distance from the panel's centre to each card's centre.
+    pub const RADIUS: f32 = obsidian::RADIUS * SHRINK;
+    /// A card at rest: the hit box, which stays this size however the card
+    /// inside it changes shape.
+    pub const CARD_W: f32 = obsidian::CARD_W * SHRINK;
+    pub const CARD_H: f32 = obsidian::CARD_H * SHRINK;
+    pub const CARD_RADIUS: f32 = obsidian::CARD_RADIUS * SHRINK;
+    pub const CARD_GLYPH: f32 = obsidian::CARD_GLYPH * SHRINK;
+    pub const CARD_GAP: f32 = obsidian::CARD_GAP * SHRINK;
+    pub const CARD_LABEL: f32 = obsidian::CARD_LABEL;
+    /// A card under the pointer: a circle this wide, its caption at most
+    /// this wide inside it, and this much between glyph and caption.
+    pub const CELL: f32 = 80.0 * SHRINK;
+    pub const CELL_LABEL: f32 = 64.0 * SHRINK;
+    pub const CELL_GAP: f32 = 4.0 * SHRINK;
+    /// The soft disc under the dial, as a radius.
+    pub const AMBIENT: f32 = obsidian::AMBIENT * SHRINK;
+    /// The chassis under everything, as a radius.
+    pub const CHASSIS: f32 = 218.0 * SHRINK;
+
+    /// The chassis: machined graphite lit from above, opaque on any desktop.
+    #[must_use]
+    pub fn chassis_fill() -> Background {
+        linear_gradient(
+            180.0,
+            linear_color_stop(hex(0x202c_37ff), 0.0),
+            linear_color_stop(hex(0x0f18_20ff), 0.9),
+        )
+    }
+
+    #[must_use]
+    pub fn chassis_border() -> Hsla {
+        hex(0x535e_6bff)
+    }
+
+    /// The chassis's edges: a lit top edge and a shaded bottom edge inside.
+    #[must_use]
+    pub fn chassis_shadow() -> Vec<BoxShadow> {
+        vec![
+            inset(0.0, 1.0, 0.0, 0xffff_ff1c),
+            inset(0.0, -2.0, 5.0, 0x0000_0055),
+        ]
+    }
+
+    /// The soft dark glow around the disc under the dial, which the chassis
+    /// contains.
+    #[must_use]
+    pub fn ambient_shadow() -> Vec<BoxShadow> {
+        vec![shadow(0.0, 0.0, 48.0, 0.0, 0x090c_1244)]
+    }
+
+    /// A card's fill: the prototype's graphite, letting a little of the
+    /// chassis through, or the mint-tinted pressed card.
+    #[must_use]
+    pub fn cell_fill(pressed: bool) -> Background {
+        if pressed {
+            linear_gradient(
+                155.0,
+                linear_color_stop(hex(0x213b_3ad9), 0.0),
+                linear_color_stop(hex(0x1627_2cd9), 0.80),
+            )
+        } else {
+            linear_gradient(
+                155.0,
+                linear_color_stop(hex(0x1d26_33d9), 0.0),
+                linear_color_stop(hex(0x1219_23d9), 0.76),
+            )
+        }
+    }
+
+    /// A card's border under the pointer, and the hub's.
+    #[must_use]
+    pub fn cell_border_hovered() -> Hsla {
+        hex(0x86b8_bd66)
+    }
+
+    /// A card's shadows at rest: the lit top edge inside and the drop shadow
+    /// under it, with the press-in pair at zero so the rest and hovered
+    /// lists blend entry by entry.
+    #[must_use]
+    pub fn cell_shadow() -> Vec<BoxShadow> {
+        vec![
+            inset(3.0, 4.0, 8.0, 0x0000_0000),
+            inset(-2.0, -2.0, 5.0, 0xc4e5_f000),
+            inset(0.0, 1.0, 0.0, 0xffff_ff08),
+            shadow(0.0, 5.0, 15.0, 0.0, 0x0000_0024),
+        ]
+    }
+
+    /// A card pressed in under the pointer: shade falls in from the top left
+    /// and light from the bottom right, the lit edge goes and the drop
+    /// shadow tightens to a hairline.
+    #[must_use]
+    pub fn cell_shadow_hovered() -> Vec<BoxShadow> {
+        vec![
+            inset(3.0, 4.0, 8.0, 0x0000_00a6),
+            inset(-2.0, -2.0, 5.0, 0xc4e5_f029),
+            inset(0.0, 0.0, 0.0, 0xffff_ff00),
+            shadow(0.0, 1.0, 1.0, 0.0, 0x0000_0014),
+        ]
+    }
+
+    /// The hub's shadows at rest: a lit top edge inside and a soft shadow
+    /// under it, with the press-in pair at zero.
+    #[must_use]
+    pub fn hub_shadow() -> Vec<BoxShadow> {
+        vec![
+            inset(3.0, 4.0, 10.0, 0x0000_0000),
+            inset(-3.0, -3.0, 7.0, 0xc4e5_f000),
+            inset(0.0, 1.0, 2.0, 0xc9ea_ff12),
+            shadow(0.0, 4.0, 12.0, 0.0, 0x0000_0026),
+        ]
+    }
+
+    /// The hub pressed in under the pointer, as a card is.
+    #[must_use]
+    pub fn hub_shadow_hovered() -> Vec<BoxShadow> {
+        vec![
+            inset(3.0, 4.0, 10.0, 0x0000_00b3),
+            inset(-3.0, -3.0, 7.0, 0xc4e5_f02b),
+            inset(0.0, 0.0, 0.0, 0xc9ea_ff00),
+            shadow(0.0, 0.0, 0.0, 0.0, 0x0000_0000),
+        ]
+    }
+
+    /// The hub's cancel cross at rest; under the pointer it takes the signal.
+    #[must_use]
+    pub fn cross() -> Hsla {
+        hex(0xa1ad_bdff)
+    }
+}

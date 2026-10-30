@@ -161,6 +161,25 @@ pub(super) fn keyframes(keys: &[(f32, f32, f32)], t: f32, ease: fn(f32) -> f32) 
     keys.last().map_or((0.0, 0.0), |&(_, a, b)| (a, b))
 }
 
+/// A click presses a disc or card in for this long: at each point of it, how
+/// far it sinks and how much of its size it keeps. From rest it goes in and
+/// a touch smaller a third of the way in, and eases back out by three
+/// quarters.
+pub(super) const PRESS_SECS: f32 = 0.24;
+const PRESS_KEYS: [(f32, f32, f32); 4] = [
+    (0.0, 0.0, 1.0),
+    (0.33, 2.5, 0.955),
+    (0.75, 0.8, 0.99),
+    (1.0, 0.0, 1.0),
+];
+
+/// The press that began at `started`, while it plays: how far the pressed
+/// thing sinks and how much of its size it keeps.
+pub(super) fn press_at(started: Instant, now: Instant) -> Option<(f32, f32)> {
+    let t = now.saturating_duration_since(started).as_secs_f32() / PRESS_SECS;
+    (t < 1.0).then(|| keyframes(&PRESS_KEYS, t, ease_out_cubic))
+}
+
 pub(super) fn ellipse_path(
     center: Point<Pixels>,
     radius: f32,

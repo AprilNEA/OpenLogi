@@ -6,12 +6,14 @@
 //! the same panel is drawn at the pointer, in the one window that heard it last.
 //! What the panel looks like, and how big it is, is the invocation's theme:
 //! [`classic`] for `Classic`, [`skin`] for `InMotion`, [`obsidian`] for
-//! `Obsidian`, [`porcelain`] for `Porcelain`. This module owns placement,
-//! hover state, closing, and the window.
+//! `Obsidian`, [`porcelain`] for `Porcelain`, [`obsidian_signal`] for
+//! `ObsidianSignal`. This module owns placement, hover state, closing, and
+//! the window.
 
 mod classic;
 mod motion;
 mod obsidian;
+mod obsidian_signal;
 mod porcelain;
 mod skin;
 
@@ -43,7 +45,10 @@ use crate::session::{self, ClickAwaySession, ShowingRing};
 pub(crate) fn panel_edge(theme: ActionRingTheme, available: Size<Pixels>) -> Pixels {
     match theme {
         ActionRingTheme::Classic => px(classic::PANEL_SIZE),
-        ActionRingTheme::InMotion | ActionRingTheme::Obsidian | ActionRingTheme::Porcelain => {
+        ActionRingTheme::InMotion
+        | ActionRingTheme::Obsidian
+        | ActionRingTheme::Porcelain
+        | ActionRingTheme::ObsidianSignal => {
             px(design_edge(theme)).min(available.width.min(available.height))
         }
     }
@@ -56,6 +61,7 @@ pub(crate) const fn design_edge(theme: ActionRingTheme) -> f32 {
         ActionRingTheme::InMotion => skin::DESIGN_EDGE,
         ActionRingTheme::Obsidian => obsidian::DESIGN_EDGE,
         ActionRingTheme::Porcelain => porcelain::DESIGN_EDGE,
+        ActionRingTheme::ObsidianSignal => obsidian_signal::DESIGN_EDGE,
     }
 }
 /// Identifies the ring's windows to the compositor, whatever kind they are.
@@ -83,6 +89,7 @@ enum RingLook {
     InMotion(skin::Motion),
     Obsidian(obsidian::Motion),
     Porcelain(porcelain::Motion),
+    ObsidianSignal(obsidian_signal::Motion),
 }
 
 impl From<ActionRingTheme> for RingLook {
@@ -92,6 +99,9 @@ impl From<ActionRingTheme> for RingLook {
             ActionRingTheme::InMotion => Self::InMotion(skin::Motion::default()),
             ActionRingTheme::Obsidian => Self::Obsidian(obsidian::Motion::default()),
             ActionRingTheme::Porcelain => Self::Porcelain(porcelain::Motion::default()),
+            ActionRingTheme::ObsidianSignal => {
+                Self::ObsidianSignal(obsidian_signal::Motion::default())
+            }
         }
     }
 }
@@ -103,6 +113,7 @@ impl RingLook {
             Self::InMotion(_) => ActionRingTheme::InMotion,
             Self::Obsidian(_) => ActionRingTheme::Obsidian,
             Self::Porcelain(_) => ActionRingTheme::Porcelain,
+            Self::ObsidianSignal(_) => ActionRingTheme::ObsidianSignal,
         }
     }
 
@@ -113,6 +124,7 @@ impl RingLook {
             Self::InMotion(motion) => motion.is_closing(),
             Self::Obsidian(motion) => motion.is_closing(),
             Self::Porcelain(motion) => motion.is_closing(),
+            Self::ObsidianSignal(motion) => motion.is_closing(),
         }
     }
 
@@ -124,6 +136,7 @@ impl RingLook {
             Self::InMotion(motion) => Some(motion.begin_close(now)),
             Self::Obsidian(motion) => Some(motion.begin_close(now)),
             Self::Porcelain(motion) => Some(motion.begin_close(now)),
+            Self::ObsidianSignal(motion) => Some(motion.begin_close(now)),
         }
     }
 }
@@ -317,6 +330,9 @@ impl Render for RingView {
                         .obsidian_panel(edge, origin, window, cx)
                         .into_any_element(),
                     RingLook::Porcelain(_) => self.porcelain_panel(edge, cx).into_any_element(),
+                    RingLook::ObsidianSignal(_) => {
+                        self.obsidian_signal_panel(edge, cx).into_any_element()
+                    }
                 })
         });
 
@@ -457,17 +473,23 @@ mod tests {
         assert_eq!(panel_edge(ActionRingTheme::InMotion, wide), px(480.0));
         assert_eq!(panel_edge(ActionRingTheme::Obsidian, wide), px(440.0));
         assert_eq!(panel_edge(ActionRingTheme::Porcelain, wide), px(400.0));
+        assert_eq!(panel_edge(ActionRingTheme::ObsidianSignal, wide), px(400.0));
         // 1280×720 at 200%: In Motion shrinks to the 360 px display, Classic
         // stays its 360 px disc, as before themes.
         let short = Size::new(px(640.0), px(360.0));
         assert_eq!(panel_edge(ActionRingTheme::InMotion, short), px(360.0));
         assert_eq!(panel_edge(ActionRingTheme::Obsidian, short), px(360.0));
         assert_eq!(panel_edge(ActionRingTheme::Porcelain, short), px(360.0));
+        assert_eq!(
+            panel_edge(ActionRingTheme::ObsidianSignal, short),
+            px(360.0)
+        );
         assert_eq!(panel_edge(ActionRingTheme::Classic, short), px(360.0));
         let tiny = Size::new(px(200.0), px(100.0));
         assert_eq!(panel_edge(ActionRingTheme::InMotion, tiny), px(100.0));
         assert_eq!(panel_edge(ActionRingTheme::Obsidian, tiny), px(100.0));
         assert_eq!(panel_edge(ActionRingTheme::Porcelain, tiny), px(100.0));
+        assert_eq!(panel_edge(ActionRingTheme::ObsidianSignal, tiny), px(100.0));
         assert_eq!(panel_edge(ActionRingTheme::Classic, tiny), px(360.0));
     }
 
@@ -591,6 +613,7 @@ mod tests {
             ActionRingTheme::InMotion,
             ActionRingTheme::Obsidian,
             ActionRingTheme::Porcelain,
+            ActionRingTheme::ObsidianSignal,
         ] {
             let mut look = RingLook::from(theme);
             assert!(!look.is_closing(), "{theme:?} opens with no exit playing");
@@ -640,6 +663,7 @@ mod tests {
             ActionRingTheme::InMotion => skin::slot_center(ActionRingSlot::Top),
             ActionRingTheme::Obsidian => obsidian::slot_center(ActionRingSlot::Top),
             ActionRingTheme::Porcelain => porcelain::slot_center(ActionRingSlot::Top),
+            ActionRingTheme::ObsidianSignal => obsidian_signal::slot_center(ActionRingSlot::Top),
         };
         let half = px(design_edge(theme) / 2.0);
         point(center.x - half + px(x), center.y - half + px(y))
@@ -663,6 +687,11 @@ mod tests {
     #[gpui::test]
     fn a_porcelain_ring_hovers_like_the_in_motion_one(cx: &mut TestAppContext) {
         loses_the_pointer(ActionRingTheme::Porcelain, cx);
+    }
+
+    #[gpui::test]
+    fn an_obsidian_signal_ring_hovers_like_the_in_motion_one(cx: &mut TestAppContext) {
+        loses_the_pointer(ActionRingTheme::ObsidianSignal, cx);
     }
 
     fn loses_the_pointer(theme: ActionRingTheme, cx: &mut TestAppContext) {

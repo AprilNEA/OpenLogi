@@ -66,10 +66,12 @@ impl RingPlacement {
         // its layout to match. Classic keeps its size, as it always did.
         let edge = DevicePixels(match self.theme {
             ActionRingTheme::Classic => full,
-            ActionRingTheme::InMotion | ActionRingTheme::Obsidian | ActionRingTheme::Porcelain => {
-                full.min(self.display.size.width.0)
-                    .min(self.display.size.height.0)
-            }
+            ActionRingTheme::InMotion
+            | ActionRingTheme::Obsidian
+            | ActionRingTheme::Porcelain
+            | ActionRingTheme::ObsidianSignal => full
+                .min(self.display.size.width.0)
+                .min(self.display.size.height.0),
         });
         let half = DevicePixels(edge.0 / 2);
         let desired = self.cursor - point(half, half);
@@ -348,19 +350,22 @@ mod tests {
     }
 
     #[test]
-    fn a_porcelain_ring_is_placed_like_in_motion_at_its_own_size() {
-        let porcelain = |cursor, rect| RingPlacement {
-            theme: ActionRingTheme::Porcelain,
-            ..placement(cursor, rect)
-        };
-        // 400 px at 100%, centred on the cursor.
-        let bounds = porcelain((900, 600), (0, 0, 1920, 1080)).bounds(96);
-        assert_eq!(bounds.origin, point(DevicePixels(700), DevicePixels(400)));
-        assert_eq!(bounds.size, size(DevicePixels(400), DevicePixels(400)));
-        // 1280×720 at 200%: 800 px would overhang, so it takes the 720 px height.
-        let bounds = porcelain((640, 360), (0, 0, 1280, 720)).bounds(192);
-        assert_eq!(bounds.origin, point(DevicePixels(280), DevicePixels(0)));
-        assert_eq!(bounds.size, size(DevicePixels(720), DevicePixels(720)));
+    fn the_400_px_rings_are_placed_like_in_motion_at_their_own_size() {
+        for theme in [ActionRingTheme::Porcelain, ActionRingTheme::ObsidianSignal] {
+            let ring = |cursor, rect| RingPlacement {
+                theme,
+                ..placement(cursor, rect)
+            };
+            // 400 px at 100%, centred on the cursor.
+            let bounds = ring((900, 600), (0, 0, 1920, 1080)).bounds(96);
+            assert_eq!(bounds.origin, point(DevicePixels(700), DevicePixels(400)));
+            assert_eq!(bounds.size, size(DevicePixels(400), DevicePixels(400)));
+            // 1280×720 at 200%: 800 px would overhang, so it takes the 720 px
+            // height.
+            let bounds = ring((640, 360), (0, 0, 1280, 720)).bounds(192);
+            assert_eq!(bounds.origin, point(DevicePixels(280), DevicePixels(0)));
+            assert_eq!(bounds.size, size(DevicePixels(720), DevicePixels(720)));
+        }
     }
 
     fn rect_bounds(rect: (i32, i32, i32, i32)) -> Bounds<DevicePixels> {
