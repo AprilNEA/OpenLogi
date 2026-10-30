@@ -80,14 +80,19 @@ impl ButtonSpyWatch {
 
     /// Stop the spy, unless the mouse went into host mode during the watch.
     ///
-    /// The mode is read right before the stop. A program that switches the
-    /// mouse between the two requests still loses its spy; it restarts the
-    /// spy when it next arms.
+    /// The mode is read before and after the stop. A program that took host
+    /// mode between the two reads gets its spy back: the capture session
+    /// sets host mode before it starts the spy, so a spy start the stop
+    /// cancelled shows up as host mode on the second read.
     pub async fn stop(self) -> Result<ButtonSpyStop, WriteError> {
         if in_host_mode(self.onboard.as_deref()).await? {
             return Ok(ButtonSpyStop::HostOwned);
         }
         self.spy.stop_spy().await.map_err(spy_error)?;
+        if in_host_mode(self.onboard.as_deref()).await? {
+            self.spy.start_spy().await.map_err(spy_error)?;
+            return Ok(ButtonSpyStop::HostOwned);
+        }
         Ok(ButtonSpyStop::Stopped)
     }
 }

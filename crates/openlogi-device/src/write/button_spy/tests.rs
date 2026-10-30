@@ -27,6 +27,8 @@ struct Mouse {
     mode_error: Option<u8>,
     /// The error code it answers a spy start with.
     start_error: Option<u8>,
+    /// The mode another program switches it to just before a spy stop lands.
+    mode_at_stop: Option<u8>,
 }
 
 impl Mouse {
@@ -67,7 +69,11 @@ impl Mouse {
                         return Some(feature_error(request, error));
                     }
                 }
-                (SPY, STOP_SPY) => {}
+                (SPY, STOP_SPY) => {
+                    if let (Some(mode), Some(at_stop)) = (&self.mode, self.mode_at_stop) {
+                        mode.store(at_stop, Ordering::SeqCst);
+                    }
+                }
                 _ => return None,
             }
             Some(response)
@@ -186,6 +192,22 @@ async fn a_mouse_switched_to_host_mode_during_the_watch_keeps_its_spy() {
     assert_eq!(
         spy_calls(&handle.written_reports()),
         [GET_COUNT, GET_MAPPING, START_SPY]
+    );
+}
+
+#[tokio::test]
+async fn a_spy_taken_over_right_before_the_stop_is_started_again() {
+    let (mut mouse, _mode) = Mouse::in_mode(ONBOARD_MODE);
+    mouse.mode_at_stop = Some(HOST_MODE);
+    let (raw, handle) = ScriptedRawHidChannel::with_dynamic_responder(mouse.responder());
+    let channel = scripted_channel(raw).await;
+
+    let watch = watch_button_spy_on_channel(&channel, 0xff).await.unwrap();
+
+    assert_eq!(watch.stop().await.unwrap(), ButtonSpyStop::HostOwned);
+    assert_eq!(
+        spy_calls(&handle.written_reports()),
+        [GET_COUNT, GET_MAPPING, START_SPY, STOP_SPY, START_SPY]
     );
 }
 
