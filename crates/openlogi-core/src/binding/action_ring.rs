@@ -287,6 +287,42 @@ impl Default for ActionRingLayout {
     }
 }
 
+/// How the overlay draws a device's Actions Ring.
+///
+/// Serialized names are part of the TOML schema, and the enum crosses the IPC
+/// boundary inside the ring invocation: both are append-only.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionRingTheme {
+    /// The dark disc of round icon slots, with the hovered slot's label under
+    /// the cancel button. Named for what it is, not for being the default: the
+    /// TOML name is append-only, and another theme may become the default.
+    #[default]
+    Classic,
+    /// Captioned pills over animated HUD arcs, with enter and exit motion.
+    InMotion,
+    /// Dark glass cards around a signal hub, with a pointer-lit halo on the
+    /// hovered one and a sector that turns to face it.
+    Obsidian,
+    /// Ceramic discs with their captions under them, on a light platter
+    /// around a hub, with a needle that turns to point at the hovered one.
+    Porcelain,
+    /// Obsidian's cards, orbits and hub on one opaque graphite chassis, with
+    /// the hovered card pressing in and turning into a circle.
+    ObsidianSignal,
+}
+
+impl ActionRingTheme {
+    /// Every theme, in picker order.
+    pub const ALL: [Self; 5] = [
+        Self::Classic,
+        Self::InMotion,
+        Self::Obsidian,
+        Self::ObsidianSignal,
+        Self::Porcelain,
+    ];
+}
+
 /// Per-device Actions Ring settings and application-specific layouts.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -297,6 +333,9 @@ pub struct ActionRingConfig {
     /// Whether ring hover and activation transitions play device haptics.
     #[serde(default = "default_true")]
     pub haptics: bool,
+    /// How the overlay draws the ring.
+    #[serde(default)]
+    pub theme: ActionRingTheme,
     /// Layout used when the foreground application has no override.
     #[serde(default)]
     pub default: ActionRingLayout,
@@ -310,6 +349,7 @@ impl Default for ActionRingConfig {
         Self {
             enabled: true,
             haptics: true,
+            theme: ActionRingTheme::Classic,
             default: ActionRingLayout::default(),
             per_app: BTreeMap::new(),
         }
@@ -600,5 +640,27 @@ Bottom = { action = { CustomShortcut = "Cmd+Shift+P" } }
         assert_eq!(config.profile_layout(Some("exe:sharex.exe")), copy);
         assert_eq!(config.profile_layout(Some("app:sharex")), paste);
         assert_eq!(config.profile_layout(None), config.default);
+    }
+
+    #[test]
+    fn a_ring_without_a_theme_is_classic() {
+        let config = toml::from_str::<ActionRingConfig>("haptics = false")
+            .expect("a ring without a theme must load");
+        assert_eq!(config.theme, ActionRingTheme::Classic);
+        let config = toml::from_str::<ActionRingConfig>(r#"theme = "classic""#)
+            .expect("the classic theme must load");
+        assert_eq!(config.theme, ActionRingTheme::Classic);
+        let config = toml::from_str::<ActionRingConfig>(r#"theme = "in_motion""#)
+            .expect("the in_motion theme must load");
+        assert_eq!(config.theme, ActionRingTheme::InMotion);
+        let config = toml::from_str::<ActionRingConfig>(r#"theme = "obsidian""#)
+            .expect("the obsidian theme must load");
+        assert_eq!(config.theme, ActionRingTheme::Obsidian);
+        let config = toml::from_str::<ActionRingConfig>(r#"theme = "porcelain""#)
+            .expect("the porcelain theme must load");
+        assert_eq!(config.theme, ActionRingTheme::Porcelain);
+        let config = toml::from_str::<ActionRingConfig>(r#"theme = "obsidian_signal""#)
+            .expect("the obsidian_signal theme must load");
+        assert_eq!(config.theme, ActionRingTheme::ObsidianSignal);
     }
 }

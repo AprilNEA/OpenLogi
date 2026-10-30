@@ -33,7 +33,7 @@ use std::fmt::Write;
 
 use bincode::Options;
 use openlogi_core::app::ForegroundApp;
-use openlogi_core::binding::{ActionRingIcon, ActionRingSlot, KeyCombo};
+use openlogi_core::binding::{ActionRingIcon, ActionRingSlot, ActionRingTheme, KeyCombo};
 use openlogi_core::config::{ConfigRevision, Lighting, ScrollResolution};
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, ChangedOnLight, DeviceInventory,
@@ -112,7 +112,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// unreleased version and leave this pin alone (`crates/openlogi-ipc/AGENTS.md`).
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 42);
+    assert_eq!(PROTOCOL_VERSION, 43);
 }
 
 #[test]
@@ -477,9 +477,15 @@ fn action_ring_types() {
                 },
             )]),
             language: Some("fr".to_string()),
+            theme: ActionRingTheme::InMotion,
         },
-        "2a010003437574000701026672",
+        "2a01000343757400070102667201",
     );
+    assert_wire(&ActionRingTheme::Classic, "00");
+    assert_wire(&ActionRingTheme::InMotion, "01");
+    assert_wire(&ActionRingTheme::Obsidian, "02");
+    assert_wire(&ActionRingTheme::Porcelain, "03");
+    assert_wire(&ActionRingTheme::ObsidianSignal, "04");
     // The literal flag is one byte between label and icon.
     assert_wire(
         &ActionRingPresentation {

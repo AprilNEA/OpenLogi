@@ -1,6 +1,7 @@
 //! Native window policy for the standalone overlay: the Actions Ring and its
-//! notices.
+//! notices, and the OS reads they depend on.
 
+pub(crate) mod motion;
 #[cfg(not(target_os = "windows"))]
 mod placement;
 // Keep Windows geometry tests runnable on the host; only native.rs needs Win32.

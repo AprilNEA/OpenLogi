@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use openlogi_core::app::ForegroundApp;
-use openlogi_core::binding::{ActionRingIcon, ActionRingSlot};
+use openlogi_core::binding::{ActionRingIcon, ActionRingSlot, ActionRingTheme};
 use openlogi_core::config::{ConfigRevision, Lighting};
 use openlogi_core::device::{
     BatteryInfo, ChangedOnLight, DeviceInventory, DeviceKind, LightState, LockKey, StandaloneDevice,
@@ -154,7 +154,10 @@ pub use succession::Identity;
 ///      timer, five-second steps up to two hours.
 /// v42: `KeyboardUsage` accepts Insert (`0x49`) and Print Screen (`0x46`),
 ///      so a `KeyCombo` can carry a usage a v41 agent rejects.
-pub const PROTOCOL_VERSION: u32 = 42;
+/// v43: `ActionRingInvocation::theme` appended, and
+///      `ActionRingTheme::Obsidian`, `Porcelain` and `ObsidianSignal`
+///      appended to it, so a ring opens in the theme its device picked.
+pub const PROTOCOL_VERSION: u32 = 43;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -578,6 +581,8 @@ pub struct ActionRingInvocation {
     pub slots: BTreeMap<ActionRingSlot, ActionRingPresentation>,
     /// Configured UI locale, or `None` to follow the overlay host's system locale.
     pub language: Option<String>,
+    /// How the overlay draws this ring.
+    pub theme: ActionRingTheme,
 }
 
 /// The ring the overlay should be showing, stamped with its generation.

@@ -46,7 +46,8 @@ core-graphics = { workspace = true }
 objc2 = { workspace = true }
 # NSScreen: the notice sits above the Dock, so it needs each screen's visible frame.
 # NSPanel: a click must not make the ring the key window.
-objc2-app-kit = { workspace = true, features = ["NSApplication", "NSResponder", "NSWindow", "NSPanel", "NSEvent", "NSScreen", "block2"] }
+# NSWorkspace: the OS reduce-motion preference, read before each ring opens.
+objc2-app-kit = { workspace = true, features = ["NSApplication", "NSResponder", "NSWindow", "NSPanel", "NSEvent", "NSScreen", "NSWorkspace", "block2"] }
 # NSEvent global-monitor handlers are ObjC blocks (click-away dismissal).
 block2 = { workspace = true }
 

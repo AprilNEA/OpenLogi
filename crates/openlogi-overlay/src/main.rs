@@ -37,11 +37,11 @@ use openlogi_core::action_ring::DISPLAY_LIFETIME;
 use crate::backlight::BacklightView;
 use crate::ipc::OverlayCommand;
 use crate::notice::NoticeShelf;
-use crate::platform::RingPlacement;
+use crate::platform::{RingPlacement, motion};
 use crate::ring::{RingPointer, RingView};
 use crate::session::{
     ClickAwaySession, claim_the_role, close_all_ring_windows, close_ring_windows,
-    spawn_click_away_dismissal,
+    settle_latest_invocation, spawn_click_away_dismissal,
 };
 
 #[expect(
@@ -102,11 +102,28 @@ fn main() -> Result<()> {
         })
         .detach();
         cx.spawn(async move |cx| {
+            let mut preference = motion::MotionPreference::default();
             while let Some(observed) = invocations.recv().await {
                 // No ring is what a dismissal looks like: close whatever is
                 // showing and open nothing. The agent has already forgotten the
                 // session, so there is nothing to acknowledge either.
                 let Some(invocation) = observed else {
+                    cx.update(close_all_ring_windows);
+                    continue;
+                };
+                // The OS reduce-motion preference is read before every open,
+                // off the UI thread; a dismissal or a newer request that
+                // arrives meanwhile wins over the one that started the read.
+                cx.update(close_all_ring_windows);
+                let Some(invocation) = settle_latest_invocation(
+                    cx,
+                    invocation,
+                    &mut invocations,
+                    &mut preference,
+                    async { motion::read() },
+                )
+                .await
+                else {
                     cx.update(close_all_ring_windows);
                     continue;
                 };
@@ -120,7 +137,7 @@ fn main() -> Result<()> {
                             reason = "only the Wayland placement drains its openings"
                         )
                     )]
-                    let mut placement = match RingPlacement::capture(cx) {
+                    let mut placement = match RingPlacement::capture(cx, invocation.theme) {
                         Ok(placement) => placement,
                         Err(error) => {
                             warn!(%error, "could not locate Actions Ring display");

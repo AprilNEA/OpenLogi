@@ -1,7 +1,7 @@
 //! Actions Ring settings and editor scope for the selected device.
 
 use openlogi_core::binding::{
-    ActionRingConfig, ActionRingIcon, ActionRingLayout, ActionRingSlot, RingAction,
+    ActionRingConfig, ActionRingIcon, ActionRingLayout, ActionRingSlot, ActionRingTheme, RingAction,
 };
 
 use super::events::StateEvents;
@@ -174,6 +174,22 @@ impl AppState {
         self.config
             .edit(|config| config.set_action_ring_haptics(&key, enabled));
         self.persist_and_reload("Actions Ring haptics");
+        events
+    }
+
+    /// Choose how the overlay draws the active device's ring.
+    pub fn commit_action_ring_theme(&mut self, theme: ActionRingTheme) -> StateEvents {
+        let events = self.for_current_device(StateEvent::BindingsChanged);
+        let Some(key) = self
+            .current_record()
+            .and_then(DeviceRecord::persistent_config_key)
+            .map(str::to_string)
+        else {
+            return events;
+        };
+        self.config
+            .edit(|config| config.set_action_ring_theme(&key, theme));
+        self.persist_and_reload("Actions Ring theme");
         events
     }
 }

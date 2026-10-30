@@ -1,57 +1,71 @@
 //! The ring itself: the GPUI view, and the window it is drawn in.
 //!
-//! Where a client can place its own windows, the window is the ring: a 360×360
+//! Where a client can place its own windows, the window is the ring: a square
 //! panel centred on the cursor and clamped to its display. Wayland allows
 //! neither half of that, so there each display gets a window covering it and
 //! the same panel is drawn at the pointer, in the one window that heard it last.
+//! What the panel looks like, and how big it is, is the invocation's theme:
+//! [`classic`] for `Classic`, [`skin`] for `InMotion`, [`obsidian`] for
+//! `Obsidian`, [`porcelain`] for `Porcelain`, [`obsidian_signal`] for
+//! `ObsidianSignal`. This module owns placement, hover state, closing, and
+//! the window.
+
+mod classic;
+mod motion;
+mod obsidian;
+mod obsidian_signal;
+mod porcelain;
+mod skin;
 
 use gpui::{
-    Bounds, Context, Div, Entity, Hsla, InteractiveElement, IntoElement, MouseMoveEvent,
+    AppContext as _, Bounds, Context, Entity, InteractiveElement, IntoElement, MouseMoveEvent,
     ParentElement, Pixels, Point, Render, SharedString, Size, StatefulInteractiveElement as _,
     Styled, Subscription, Window, WindowBackgroundAppearance, WindowId, WindowKind, WindowOptions,
-    div, point, prelude::FluentBuilder as _, px, svg,
+    div, point, prelude::FluentBuilder as _, px,
 };
-use openlogi_core::binding::{Action, ActionRingSlot};
-use openlogi_ipc::ActionRingInvocation;
-use openlogi_ui::action_icons::RING_CANCEL_ICON;
-use openlogi_ui::color;
+use openlogi_core::binding::{Action, ActionRingSlot, ActionRingTheme};
+use openlogi_ipc::{ActionRingInvocation, ActionRingPresentation};
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::mpsc;
 
 use crate::ipc::OverlayCommand;
 use crate::session::{self, ClickAwaySession, ShowingRing};
 
-pub(crate) const WINDOW_SIZE: f32 = 360.0;
-pub(crate) const SLOT_SIZE: f32 = 54.0;
-pub(crate) const RADIUS: f32 = 122.0;
-/// Identifies the ring's windows to the compositor, whatever kind they are.
-pub(crate) const RING_APP_ID: &str = "openlogi-action-ring";
-
-/// The ring's own neutral scale. It floats over whatever is on the desktop, so
-/// unlike the settings app it cannot take its surfaces from the OS appearance —
-/// it commits to a dark panel and rides its own contrast. Only the accent is
-/// shared (`openlogi_ui::color`); these greys are local by nature.
-const PANEL: Hsla = neutral(0.06, 0.82);
-const SLOT_RESTING: Hsla = neutral(0.16, 0.98);
-const CANCEL_RESTING: Hsla = neutral(0.20, 0.98);
-const GLYPH: Hsla = neutral(0.98, 1.0);
-const LABEL: Hsla = neutral(0.94, 1.0);
-const CANCEL_GLYPH: Hsla = neutral(0.82, 1.0);
-
-const fn neutral(lightness: f32, alpha: f32) -> Hsla {
-    Hsla {
-        h: 0.0,
-        s: 0.0,
-        l: lightness,
-        a: alpha,
+/// The ring's edge for `theme` on a display offering `available`: the theme's
+/// designed size, or less when the theme can shrink and the display is
+/// shorter. Every placement path and the panel itself size the ring through
+/// this one decision.
+///
+/// Classic is always its 360 px disc, as it was before themes. The other
+/// themes are their designed size, or the display's shorter side when that
+/// is smaller: a 1280×720 display at 200% is 360 logical pixels tall, and a
+/// 480 px ring anchored to its top would put the bottom slot off screen, so
+/// those skins scale their layout to whatever edge this returns.
+pub(crate) fn panel_edge(theme: ActionRingTheme, available: Size<Pixels>) -> Pixels {
+    match theme {
+        ActionRingTheme::Classic => px(classic::PANEL_SIZE),
+        ActionRingTheme::InMotion
+        | ActionRingTheme::Obsidian
+        | ActionRingTheme::Porcelain
+        | ActionRingTheme::ObsidianSignal => {
+            px(design_edge(theme)).min(available.width.min(available.height))
+        }
     }
 }
 
-/// The accent deepened for the dark panel: the brand lightness sits too close to
-/// the white glyph a selected slot carries, so the fill drops to `0.48` and the
-/// ring around it rises to `0.78`. Both keep the brand hue and saturation.
-const SELECTED_FILL_L: f32 = 0.48;
-const SELECTED_BORDER_L: f32 = 0.78;
+/// The ring's designed edge for `theme`, where no display is known yet.
+pub(crate) const fn design_edge(theme: ActionRingTheme) -> f32 {
+    match theme {
+        ActionRingTheme::Classic => classic::PANEL_SIZE,
+        ActionRingTheme::InMotion => skin::DESIGN_EDGE,
+        ActionRingTheme::Obsidian => obsidian::DESIGN_EDGE,
+        ActionRingTheme::Porcelain => porcelain::DESIGN_EDGE,
+        ActionRingTheme::ObsidianSignal => obsidian_signal::DESIGN_EDGE,
+    }
+}
+/// Identifies the ring's windows to the compositor, whatever kind they are.
+pub(crate) const RING_APP_ID: &str = "openlogi-action-ring";
 
 /// Where the ring's panel sits inside the window it was given.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -65,6 +79,66 @@ pub(crate) enum Placement {
         expect(dead_code, reason = "only Wayland covers a display")
     )]
     AtPointer,
+}
+
+/// How a ring looks, with the state that look needs: nothing for the classic
+/// disc, the motion clocks for the animated themes. A classic ring cannot be
+/// mid-exit, so the type says so instead of a flag that is always off.
+enum RingLook {
+    Classic,
+    InMotion(skin::Motion),
+    Obsidian(obsidian::Motion),
+    Porcelain(porcelain::Motion),
+    ObsidianSignal(obsidian_signal::Motion),
+}
+
+impl From<ActionRingTheme> for RingLook {
+    fn from(theme: ActionRingTheme) -> Self {
+        match theme {
+            ActionRingTheme::Classic => Self::Classic,
+            ActionRingTheme::InMotion => Self::InMotion(skin::Motion::default()),
+            ActionRingTheme::Obsidian => Self::Obsidian(obsidian::Motion::default()),
+            ActionRingTheme::Porcelain => Self::Porcelain(porcelain::Motion::default()),
+            ActionRingTheme::ObsidianSignal => {
+                Self::ObsidianSignal(obsidian_signal::Motion::default())
+            }
+        }
+    }
+}
+
+impl RingLook {
+    const fn theme(&self) -> ActionRingTheme {
+        match self {
+            Self::Classic => ActionRingTheme::Classic,
+            Self::InMotion(_) => ActionRingTheme::InMotion,
+            Self::Obsidian(_) => ActionRingTheme::Obsidian,
+            Self::Porcelain(_) => ActionRingTheme::Porcelain,
+            Self::ObsidianSignal(_) => ActionRingTheme::ObsidianSignal,
+        }
+    }
+
+    /// Whether the exit animation is already playing.
+    const fn is_closing(&self) -> bool {
+        match self {
+            Self::Classic => false,
+            Self::InMotion(motion) => motion.is_closing(),
+            Self::Obsidian(motion) => motion.is_closing(),
+            Self::Porcelain(motion) => motion.is_closing(),
+            Self::ObsidianSignal(motion) => motion.is_closing(),
+        }
+    }
+
+    /// Start the exit of a look that has one: `None` for a look that goes at
+    /// once, `Some(false)` when the exit is already playing.
+    fn begin_close(&mut self, now: Instant) -> Option<bool> {
+        match self {
+            Self::Classic => None,
+            Self::InMotion(motion) => Some(motion.begin_close(now)),
+            Self::Obsidian(motion) => Some(motion.begin_close(now)),
+            Self::Porcelain(motion) => Some(motion.begin_close(now)),
+            Self::ObsidianSignal(motion) => Some(motion.begin_close(now)),
+        }
+    }
 }
 
 /// Which of a ring's windows draws its panel, and where.
@@ -113,6 +187,7 @@ pub(crate) struct RingView {
     _pointer_changes: Subscription,
     /// Publishes click-away identity for exactly this view's lifetime.
     _showing: ShowingRing,
+    look: RingLook,
 }
 
 impl RingView {
@@ -128,6 +203,7 @@ impl RingView {
         cx: &mut Context<Self>,
     ) -> Self {
         let showing = live.showing(invocation.session_id);
+        let look = RingLook::from(invocation.theme);
         let pointer_changes = cx.observe_in(&pointer, window, |this, pointer, window, cx| {
             // A window that stopped drawing the panel has no slot under the pointer.
             if pointer
@@ -147,7 +223,74 @@ impl RingView {
             pointer,
             _pointer_changes: pointer_changes,
             _showing: showing,
+            look,
         }
+    }
+
+    /// Whether the exit animation is already playing.
+    pub(crate) const fn is_closing(&self) -> bool {
+        self.look.is_closing()
+    }
+
+    /// Send the ring's final command once and close every window of the
+    /// session. An animated ring with motion on plays its exit first and
+    /// closes itself when that ends; the others go at once, so no invisible
+    /// window stays to swallow a click.
+    fn close(&mut self, command: OverlayCommand, window: &mut Window, cx: &mut Context<Self>) {
+        let session_id = self.invocation.session_id;
+        let exit = if cx.reduce_motion() {
+            None
+        } else {
+            self.look.begin_close(Instant::now())
+        };
+        match exit {
+            Some(false) => {}
+            Some(true) => {
+                let _ = self.commands.send(command);
+                session::close_ring_windows(cx, session_id);
+                cx.notify();
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(motion::EXIT).await;
+                    let _ = this.update(cx, |_, cx| {
+                        let id = cx.entity_id();
+                        cx.with_window(id, |window, cx| {
+                            session::dismiss_from_window(cx, window, session_id);
+                        });
+                    });
+                })
+                .detach();
+            }
+            None => {
+                let _ = self.commands.send(command);
+                session::dismiss_from_window(cx, window, session_id);
+            }
+        }
+    }
+
+    /// Record the slot under the pointer, telling the agent when it changes.
+    /// A ring that is closing keeps the slot it had.
+    fn hover(&mut self, slot: ActionRingSlot, hovered: bool, cx: &mut Context<Self>) {
+        if self.is_closing() {
+            return;
+        }
+        if hovered && self.hovered != Some(slot) {
+            self.hovered = Some(slot);
+            let _ = self.commands.send(OverlayCommand::Hover {
+                session_id: self.invocation.session_id,
+                slot,
+            });
+            cx.notify();
+        } else if !hovered && self.hovered == Some(slot) {
+            self.hovered = None;
+            cx.notify();
+        }
+    }
+
+    /// The hovered slot's caption, if any slot is hovered.
+    fn hovered_caption(&self) -> Option<SharedString> {
+        self.hovered
+            .and_then(|slot| self.invocation.slots.get(&slot))
+            .map(slot_caption)
     }
 
     /// The ring session this view is showing.
@@ -162,154 +305,48 @@ impl RingView {
             session_id: self.invocation.session_id,
         });
     }
-
-    fn slot_element(
-        &self,
-        slot: ActionRingSlot,
-        cx: &mut Context<Self>,
-    ) -> Option<gpui::AnyElement> {
-        let presentation = self.invocation.slots.get(&slot)?;
-        let icon_path = presentation.icon.asset_path();
-        let selected = self.hovered == Some(slot);
-        let (left, top) = slot.placement(WINDOW_SIZE, RADIUS, SLOT_SIZE);
-        let session_id = self.invocation.session_id;
-        let activate = self.commands.clone();
-        Some(
-            div()
-                .id(("ring-slot", slot.index()))
-                .absolute()
-                .left(px(left))
-                .top(px(top))
-                .size(px(SLOT_SIZE))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded_full()
-                .bg(if selected {
-                    color::accent_at_lightness(SELECTED_FILL_L)
-                } else {
-                    SLOT_RESTING
-                })
-                .when(selected, |slot| {
-                    slot.border_2()
-                        .border_color(color::accent_at_lightness(SELECTED_BORDER_L))
-                })
-                .shadow_md()
-                .text_color(GLYPH)
-                .cursor_pointer()
-                .child(svg().path(icon_path).size(px(22.0)).text_color(GLYPH))
-                .on_hover(cx.listener(move |this, hovered, _, cx| {
-                    if *hovered && this.hovered != Some(slot) {
-                        this.hovered = Some(slot);
-                        let _ = this
-                            .commands
-                            .send(OverlayCommand::Hover { session_id, slot });
-                        cx.notify();
-                    } else if !*hovered && this.hovered == Some(slot) {
-                        this.hovered = None;
-                        cx.notify();
-                    }
-                }))
-                .on_click(move |_, window, cx| {
-                    cx.stop_propagation();
-                    let _ = activate.send(OverlayCommand::Activate { session_id, slot });
-                    session::dismiss_from_window(cx, window, session_id);
-                })
-                .into_any_element(),
-        )
-    }
-}
-
-impl RingView {
-    /// The fixed 360×360 ring. Both placements anchor this same element.
-    fn panel(&self, cx: &mut Context<Self>) -> Div {
-        let session_id = self.invocation.session_id;
-        let center_commands = self.commands.clone();
-        let hovered_label = self.hovered.and_then(|slot| {
-            let presentation = self.invocation.slots.get(&slot)?;
-            // User-authored labels render verbatim: passing them through the
-            // localization table would translate any label that happens to
-            // collide with a known key ("Copy" → "Copier" under fr).
-            let label = if presentation.literal {
-                presentation.label.clone()
-            } else if let Some(key) = Action::translation_key_for_label(&presentation.label) {
-                rust_i18n::t!(key).into_owned()
-            } else {
-                presentation.label.clone()
-            };
-            Some(SharedString::from(label))
-        });
-        let slots = ActionRingSlot::ALL
-            .into_iter()
-            .filter_map(|slot| self.slot_element(slot, cx))
-            .collect::<Vec<_>>();
-
-        div()
-            .relative()
-            .size(px(WINDOW_SIZE))
-            .child(
-                div()
-                    .absolute()
-                    .left(px(18.0))
-                    .top(px(18.0))
-                    .size(px(WINDOW_SIZE - 36.0))
-                    .rounded_full()
-                    .bg(PANEL)
-                    .shadow_lg(),
-            )
-            .children(slots)
-            .child(
-                div()
-                    .id("ring-cancel")
-                    .absolute()
-                    .left(px(WINDOW_SIZE / 2.0 - 24.0))
-                    .top(px(WINDOW_SIZE / 2.0 - 24.0))
-                    .size(px(48.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded_full()
-                    .bg(CANCEL_RESTING)
-                    .text_color(CANCEL_GLYPH)
-                    .cursor_pointer()
-                    .child(svg().path(RING_CANCEL_ICON).size(px(20.0)).flex_none())
-                    .on_click(move |_, window, cx| {
-                        cx.stop_propagation();
-                        let _ = center_commands.send(OverlayCommand::Cancel { session_id });
-                        session::dismiss_from_window(cx, window, session_id);
-                    }),
-            )
-            .when_some(hovered_label, |ring, label| {
-                ring.child(
-                    div()
-                        .absolute()
-                        .left(px(WINDOW_SIZE / 2.0 - 80.0))
-                        .top(px(WINDOW_SIZE / 2.0 + 34.0))
-                        .w(px(160.0))
-                        .text_center()
-                        .text_sm()
-                        .text_color(LABEL)
-                        .child(label),
-                )
-            })
-    }
 }
 
 impl Render for RingView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let session_id = self.invocation.session_id;
-        let root_commands = self.commands.clone();
         let placement = self.placement;
         let center = self
             .pointer
             .read(cx)
             .center_in(window.window_handle().window_id());
-        let panel = panel_origin(placement, center, window.viewport_size()).map(|origin| {
-            div()
-                .absolute()
-                .left(origin.x)
-                .top(origin.y)
-                .child(self.panel(cx))
+        let viewport = window.viewport_size();
+        let theme = self.look.theme();
+        let edge = panel_edge(theme, viewport);
+        // An animated look advances its clocks in the one arm that holds it
+        // and hands back the frame its panel draws from, so no panel has to
+        // match the look again.
+        let now = Instant::now();
+        let reduce = cx.reduce_motion();
+        let hovered = self.hovered;
+        let panel = panel_origin(theme, placement, center, viewport).map(|origin| {
+            let panel = match &mut self.look {
+                RingLook::Classic => self.classic_panel(cx).into_any_element(),
+                RingLook::InMotion(motion) => {
+                    let frame = motion.frame(hovered, now, reduce);
+                    self.skinned_panel(frame, edge, cx).into_any_element()
+                }
+                RingLook::Obsidian(motion) => {
+                    let pointer = window.mouse_position() - origin;
+                    let frame = motion.frame(hovered, pointer, edge, now, reduce);
+                    self.obsidian_panel(&frame, edge, cx).into_any_element()
+                }
+                RingLook::Porcelain(motion) => {
+                    let frame = motion.frame(hovered, now, reduce);
+                    self.porcelain_panel(frame, edge, cx).into_any_element()
+                }
+                RingLook::ObsidianSignal(motion) => {
+                    let frame = motion.frame(hovered, now, reduce);
+                    self.obsidian_signal_panel(frame, edge, cx)
+                        .into_any_element()
+                }
+            };
+            div().absolute().left(origin.x).top(origin.y).child(panel)
         });
 
         div()
@@ -327,11 +364,26 @@ impl Render for RingView {
                 }))
             })
             .children(panel)
-            .on_click(move |_, window, cx| {
-                let _ = root_commands.send(OverlayCommand::Cancel { session_id });
-                session::dismiss_from_window(cx, window, session_id);
-            })
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.close(OverlayCommand::Cancel { session_id }, window, cx);
+            }))
     }
+}
+
+/// The caption a slot shows for `presentation`.
+///
+/// User-authored labels render verbatim: passing them through the
+/// localization table would translate any label that happens to collide
+/// with a known key ("Copy" would become "Copier" under fr).
+fn slot_caption(presentation: &ActionRingPresentation) -> SharedString {
+    let label = if presentation.literal {
+        presentation.label.clone()
+    } else if let Some(key) = Action::translation_key_for_label(&presentation.label) {
+        rust_i18n::t!(key).into_owned()
+    } else {
+        presentation.label.clone()
+    };
+    SharedString::from(label)
 }
 
 /// Appearance shared by the platform-specific placement paths.
@@ -357,6 +409,7 @@ pub(crate) fn ring_window_options() -> WindowOptions {
 /// `viewport` is the pointer's space. Display bounds are logical pixels and
 /// disagree with it under fractional scaling, so the clamp cannot use them.
 fn panel_origin(
+    theme: ActionRingTheme,
     placement: Placement,
     center: Option<Point<Pixels>>,
     viewport: Size<Pixels>,
@@ -365,7 +418,8 @@ fn panel_origin(
         Placement::Window => return Some(Point::default()),
         Placement::AtPointer => center?,
     };
-    let size = Size::new(px(WINDOW_SIZE), px(WINDOW_SIZE));
+    let edge = panel_edge(theme, viewport);
+    let size = Size::new(edge, edge);
     Some(clamp_window_origin(
         point(center.x - size.width / 2.0, center.y - size.height / 2.0),
         size,
@@ -390,7 +444,7 @@ mod tests {
     use std::cell::Cell;
     use std::rc::Rc;
 
-    use gpui::{AppContext as _, Modifiers, TestAppContext, VisualTestContext, WindowHandle};
+    use gpui::{Modifiers, TestAppContext, VisualTestContext, WindowHandle};
     use openlogi_core::binding::ActionRingIcon;
     use openlogi_ipc::ActionRingPresentation;
 
@@ -416,16 +470,47 @@ mod tests {
 
     #[test]
     fn a_window_sized_ring_fills_its_window() {
+        for theme in ActionRingTheme::ALL {
+            let edge = px(design_edge(theme));
+            assert_eq!(
+                panel_origin(theme, Placement::Window, None, Size::new(edge, edge)),
+                Some(Point::default())
+            );
+        }
+    }
+
+    #[test]
+    fn each_theme_sizes_the_ring_its_own_way() {
+        let wide = Size::new(px(1920.0), px(1080.0));
+        assert_eq!(panel_edge(ActionRingTheme::Classic, wide), px(360.0));
+        assert_eq!(panel_edge(ActionRingTheme::InMotion, wide), px(480.0));
+        assert_eq!(panel_edge(ActionRingTheme::Obsidian, wide), px(440.0));
+        assert_eq!(panel_edge(ActionRingTheme::Porcelain, wide), px(400.0));
+        assert_eq!(panel_edge(ActionRingTheme::ObsidianSignal, wide), px(400.0));
+        // 1280×720 at 200%: In Motion shrinks to the 360 px display, Classic
+        // stays its 360 px disc, as before themes.
+        let short = Size::new(px(640.0), px(360.0));
+        assert_eq!(panel_edge(ActionRingTheme::InMotion, short), px(360.0));
+        assert_eq!(panel_edge(ActionRingTheme::Obsidian, short), px(360.0));
+        assert_eq!(panel_edge(ActionRingTheme::Porcelain, short), px(360.0));
         assert_eq!(
-            panel_origin(Placement::Window, None, Size::new(px(360.0), px(360.0))),
-            Some(Point::default())
+            panel_edge(ActionRingTheme::ObsidianSignal, short),
+            px(360.0)
         );
+        assert_eq!(panel_edge(ActionRingTheme::Classic, short), px(360.0));
+        let tiny = Size::new(px(200.0), px(100.0));
+        assert_eq!(panel_edge(ActionRingTheme::InMotion, tiny), px(100.0));
+        assert_eq!(panel_edge(ActionRingTheme::Obsidian, tiny), px(100.0));
+        assert_eq!(panel_edge(ActionRingTheme::Porcelain, tiny), px(100.0));
+        assert_eq!(panel_edge(ActionRingTheme::ObsidianSignal, tiny), px(100.0));
+        assert_eq!(panel_edge(ActionRingTheme::Classic, tiny), px(360.0));
     }
 
     #[test]
     fn a_display_sized_ring_draws_nothing_until_the_pointer_is_known() {
         assert_eq!(
             panel_origin(
+                ActionRingTheme::InMotion,
                 Placement::AtPointer,
                 None,
                 Size::new(px(1920.0), px(1080.0))
@@ -438,11 +523,12 @@ mod tests {
     fn a_display_sized_ring_centers_on_the_pointer() {
         assert_eq!(
             panel_origin(
+                ActionRingTheme::InMotion,
                 Placement::AtPointer,
                 Some(point(px(900.0), px(500.0))),
                 Size::new(px(1920.0), px(1080.0))
             ),
-            Some(point(px(720.0), px(320.0)))
+            Some(point(px(660.0), px(260.0)))
         );
     }
 
@@ -450,11 +536,34 @@ mod tests {
     fn a_display_sized_ring_stays_whole_against_an_edge() {
         assert_eq!(
             panel_origin(
+                ActionRingTheme::InMotion,
                 Placement::AtPointer,
                 Some(point(px(4.0), px(1076.0))),
                 Size::new(px(1920.0), px(1080.0))
             ),
-            Some(point(px(0.0), px(720.0)))
+            Some(point(px(0.0), px(600.0)))
+        );
+    }
+
+    #[test]
+    fn a_display_shorter_than_the_ring_shrinks_the_panel_to_its_short_side() {
+        // 1280×720 at 200%: 640×360 logical. The panel becomes 360 px and
+        // sits flush with the top and bottom edges instead of overhanging.
+        let viewport = Size::new(px(640.0), px(360.0));
+        assert_eq!(panel_edge(ActionRingTheme::InMotion, viewport), px(360.0));
+        assert_eq!(
+            panel_origin(
+                ActionRingTheme::InMotion,
+                Placement::AtPointer,
+                Some(point(px(320.0), px(180.0))),
+                viewport
+            ),
+            Some(point(px(140.0), px(0.0)))
+        );
+        assert_eq!(
+            panel_edge(ActionRingTheme::InMotion, Size::new(px(1920.0), px(1080.0))),
+            px(skin::DESIGN_EDGE),
+            "a display taller than the ring leaves it at full size"
         );
     }
 
@@ -510,7 +619,39 @@ mod tests {
         assert_eq!(pointer.center_in(below), Some(point(px(10.0), px(20.0))));
     }
 
-    fn invocation() -> ActionRingInvocation {
+    #[test]
+    fn every_look_decides_its_own_closing_once() {
+        let now = Instant::now();
+        for theme in [
+            ActionRingTheme::InMotion,
+            ActionRingTheme::Obsidian,
+            ActionRingTheme::Porcelain,
+            ActionRingTheme::ObsidianSignal,
+        ] {
+            let mut look = RingLook::from(theme);
+            assert!(!look.is_closing(), "{theme:?} opens with no exit playing");
+            assert_eq!(
+                look.begin_close(now),
+                Some(true),
+                "{theme:?} plays its exit"
+            );
+            assert!(look.is_closing());
+            assert_eq!(
+                look.begin_close(now),
+                Some(false),
+                "{theme:?} does not restart an exit that is playing"
+            );
+        }
+        let mut classic = RingLook::from(ActionRingTheme::Classic);
+        assert_eq!(
+            classic.begin_close(now),
+            None,
+            "the classic disc goes at once"
+        );
+        assert!(!classic.is_closing());
+    }
+
+    fn invocation(theme: ActionRingTheme) -> ActionRingInvocation {
         ActionRingInvocation {
             session_id: 7,
             slots: [(
@@ -523,21 +664,50 @@ mod tests {
             )]
             .into(),
             language: None,
+            theme,
         }
     }
 
     /// Where the `Top` slot's centre lands when the panel centres on `center`
     /// well away from every edge.
-    fn top_slot_at(center: Point<Pixels>) -> Point<Pixels> {
-        let (left, top) = ActionRingSlot::Top.placement(WINDOW_SIZE, RADIUS, SLOT_SIZE);
-        point(
-            center.x - px(WINDOW_SIZE / 2.0) + px(left + SLOT_SIZE / 2.0),
-            center.y - px(WINDOW_SIZE / 2.0) + px(top + SLOT_SIZE / 2.0),
-        )
+    fn top_slot_at(theme: ActionRingTheme, center: Point<Pixels>) -> Point<Pixels> {
+        let (x, y) = match theme {
+            ActionRingTheme::Classic => classic::slot_center(ActionRingSlot::Top),
+            ActionRingTheme::InMotion => skin::slot_center(ActionRingSlot::Top),
+            ActionRingTheme::Obsidian => obsidian::slot_center(ActionRingSlot::Top),
+            ActionRingTheme::Porcelain => porcelain::slot_center(ActionRingSlot::Top),
+            ActionRingTheme::ObsidianSignal => obsidian_signal::slot_center(ActionRingSlot::Top),
+        };
+        let half = px(design_edge(theme) / 2.0);
+        point(center.x - half + px(x), center.y - half + px(y))
     }
 
     #[gpui::test]
     fn a_ring_window_that_loses_the_pointer_stops_drawing_and_hovering(cx: &mut TestAppContext) {
+        loses_the_pointer(ActionRingTheme::InMotion, cx);
+    }
+
+    #[gpui::test]
+    fn a_classic_ring_hovers_like_the_in_motion_one(cx: &mut TestAppContext) {
+        loses_the_pointer(ActionRingTheme::Classic, cx);
+    }
+
+    #[gpui::test]
+    fn an_obsidian_ring_hovers_like_the_in_motion_one(cx: &mut TestAppContext) {
+        loses_the_pointer(ActionRingTheme::Obsidian, cx);
+    }
+
+    #[gpui::test]
+    fn a_porcelain_ring_hovers_like_the_in_motion_one(cx: &mut TestAppContext) {
+        loses_the_pointer(ActionRingTheme::Porcelain, cx);
+    }
+
+    #[gpui::test]
+    fn an_obsidian_signal_ring_hovers_like_the_in_motion_one(cx: &mut TestAppContext) {
+        loses_the_pointer(ActionRingTheme::ObsidianSignal, cx);
+    }
+
+    fn loses_the_pointer(theme: ActionRingTheme, cx: &mut TestAppContext) {
         let live = Arc::new(ClickAwaySession::new());
         let (commands, mut sent) = mpsc::unbounded_channel();
         let pointer = cx.new(|_| RingPointer::default());
@@ -545,7 +715,7 @@ mod tests {
             let (commands, pointer, live) = (commands.clone(), pointer.clone(), Arc::clone(&live));
             cx.add_window(move |window, cx| {
                 RingView::new(
-                    invocation(),
+                    invocation(theme),
                     commands,
                     &live,
                     Placement::AtPointer,
@@ -568,7 +738,7 @@ mod tests {
 
         let mut below_cx = VisualTestContext::from_window(below.into(), cx);
         below_cx.simulate_mouse_move(center, None, Modifiers::default());
-        below_cx.simulate_mouse_move(top_slot_at(center), None, Modifiers::default());
+        below_cx.simulate_mouse_move(top_slot_at(theme, center), None, Modifiers::default());
         assert_eq!(
             below.read_with(cx, |view, _| view.hovered).unwrap(),
             Some(ActionRingSlot::Top),
@@ -605,7 +775,7 @@ mod tests {
             "the covered window redraws without its panel"
         );
 
-        above_cx.simulate_mouse_move(top_slot_at(center), None, Modifiers::default());
+        above_cx.simulate_mouse_move(top_slot_at(theme, center), None, Modifiers::default());
         assert_eq!(
             above.read_with(cx, |view, _| view.hovered).unwrap(),
             Some(ActionRingSlot::Top),
