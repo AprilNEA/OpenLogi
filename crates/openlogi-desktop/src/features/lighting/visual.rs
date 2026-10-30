@@ -4,14 +4,12 @@
 //! the protocol-neutral generated visual and never borrow another model's
 //! image or diffuser geometry.
 
-use gpui::{
-    BoxShadow, ParentElement, Styled, div, hsla, img, point, prelude::FluentBuilder as _, px,
-};
+use gpui::{BoxShadow, ParentElement, Styled, div, img, point, prelude::FluentBuilder as _, px};
 use gpui_component::{Icon, IconName};
 use openlogi_core::config::LightSettings;
 
 use crate::services::assets::ResolvedAsset;
-use crate::ui::theme::Palette;
+use crate::ui::theme::{self, Palette};
 
 /// What a light's visual reflects about the device — connection and power
 /// are independent facts (an enabled light can be offline), so this is a
@@ -97,7 +95,7 @@ fn generated_visual(
 ) -> gpui::Div {
     let LightView { online, enabled } = view;
     let powered = online && enabled;
-    let glow = light_color(settings.temperature_kelvin.unwrap_or(4600));
+    let glow = theme::light_temperature_color(settings.temperature_kelvin.unwrap_or(4600));
     let brightness = f32::from(settings.brightness_percent.min(100)) / 100.;
     let halo_size = width.min(height) * 0.56;
     let face_size = halo_size * 0.58;
@@ -158,11 +156,4 @@ fn generated_visual(
                     })),
             ),
         )
-}
-
-fn light_color(kelvin: u16) -> gpui::Hsla {
-    let normalized = (f32::from(kelvin.clamp(2700, 6500)) - 2700.) / 3800.;
-    let hue = 0.09 + normalized * 0.05;
-    let saturation = 0.9 - normalized * 0.48;
-    hsla(hue, saturation, 0.68, 1.)
 }

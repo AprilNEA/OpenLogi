@@ -1,16 +1,14 @@
 //! Permissions settings page (macOS / Linux).
 
 #[cfg(target_os = "macos")]
-use super::{App, AppState, InteractiveElement, Permission};
-use super::{IconName, Palette, SettingPage};
+use super::{App, AppState, Button, Permission};
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use super::{
-    ParentElement, PermissionStatus, SettingField, SettingGroup, SettingItem, SharedString, Styled,
-    div, h_flex, px, rgb, theme,
+    Hsla, ParentElement, PermissionStatus, SettingField, SettingGroup, SettingItem, SharedString,
+    Styled, div, h_flex, theme,
 };
+use super::{IconName, Palette, SettingPage};
 use crate::ui::theme::Typography as _;
-#[cfg(target_os = "macos")]
-use gpui_base::Button as BaseButton;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use openlogi_permissions as permissions;
 
@@ -170,21 +168,21 @@ fn permission_item(
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn status_badge(status: PermissionStatus, pal: Palette) -> gpui::Div {
     let (label, color) = match status {
-        PermissionStatus::Granted => (tr!("permissions.granted"), theme::STATUS_CONNECTED),
-        PermissionStatus::Denied => (tr!("permissions.not_granted"), theme::STATUS_CONNECTING),
-        PermissionStatus::Unknown => (tr!("permissions.unknown"), theme::STATUS_OFFLINE),
+        PermissionStatus::Granted => (tr!("permissions.granted"), pal.success),
+        PermissionStatus::Denied => (tr!("permissions.not_granted"), pal.warning),
+        PermissionStatus::Unknown => (tr!("permissions.unknown"), pal.text_muted),
     };
     badge(label, color, pal)
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-fn badge(label: SharedString, color: u32, pal: Palette) -> gpui::Div {
+fn badge(label: SharedString, color: Hsla, pal: Palette) -> gpui::Div {
     h_flex()
         .items_center()
         .gap_1()
         .text_caption()
         .text_color(pal.text_primary)
-        .child(div().size(px(6.)).rounded_full().bg(rgb(color)))
+        .child(div().size_1p5().rounded_full().bg(color))
         .child(label)
 }
 
@@ -202,7 +200,7 @@ fn permission_field(
     let never_requested = matches!(status, PermissionStatus::Unknown)
         && matches!(permission, Permission::Bluetooth | Permission::Camera);
     let status_el = if never_requested {
-        badge(tr!("permissions.not_requested"), theme::STATUS_OFFLINE, pal)
+        badge(tr!("permissions.not_requested"), pal.text_muted, pal)
     } else {
         status_badge(status, pal)
     };
@@ -219,19 +217,9 @@ fn permission_field(
         .gap_3()
         .child(status_el)
         .child(
-            BaseButton::new(id)
-                .accessibility_label(action_label.clone())
-                .px_2()
-                .py_1()
-                .rounded(pal.control_radius)
-                .border_1()
-                .border_color(pal.border)
-                .text_caption()
-                .cursor_pointer()
-                .bg(pal.control)
-                .hover(move |s| s.bg(pal.control_hover))
-                .focus_visible(move |s| s.bg(pal.control_hover))
-                .child(action_label)
+            Button::new(id)
+                .outline()
+                .label(action_label)
                 .on_click(move |_, _, cx| {
                     // Accessibility must be prompted in the agent (it owns the
                     // hook); prompting in the GUI would authorize the wrong

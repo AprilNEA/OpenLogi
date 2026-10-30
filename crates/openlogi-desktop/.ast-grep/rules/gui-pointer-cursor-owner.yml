@@ -1,0 +1,19 @@
+# Owner: gpui-base's Link — the only element whose contract is opening an
+# external resource, and the only one that shows the pointing-hand cursor.
+id: gui-pointer-cursor-owner
+language: rust
+severity: error
+message: The pointing-hand cursor is for links to external resources; in-app controls keep the default arrow. Build an external link with gpui_base::Link.
+note: |
+  Twenty-two cards, chips, rows, and buttons set cursor_pointer, so the
+  cursor promised a web link where the control ran an in-app command. The
+  GPUI Kit design guide keeps the arrow for buttons, menu items, and tabs.
+  A Link to a URL may keep the hand; mark that line with
+  `// ast-grep-ignore: gui-pointer-cursor-owner` and say it opens a URL.
+files:
+  - crates/openlogi-desktop/src/**/*.rs
+ignores:
+  - "**/tests.rs"
+  - "**/tests/**"
+rule:
+  pattern: $E.cursor_pointer()

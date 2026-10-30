@@ -5,7 +5,7 @@ use std::sync::Arc;
 use gpui::{
     Anchor, Context, Entity, InteractiveElement, IntoElement, ParentElement, Role,
     StatefulInteractiveElement as _, Styled, UniformListScrollHandle, WeakEntity, div,
-    prelude::FluentBuilder as _, px, uniform_list,
+    prelude::FluentBuilder as _, px, rems, uniform_list,
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
@@ -20,7 +20,7 @@ use super::shell::application_mark;
 use super::{AddAppChoices, CatalogPresentation, ProfileChoice, ProfileScopeActions};
 use crate::features::binding_editor::{compact_panel, divider, title};
 use crate::ui::components::{MenuRow, control_button, control_input};
-use crate::ui::theme::{self, Palette, SelectableStyle as _, Typography as _};
+use crate::ui::theme::{Palette, SelectableStyle as _, Typography as _};
 
 const APP_ROW_H: f32 = 44.;
 /// Icon tile edge inside picker rows: the height of the two-line text block,
@@ -114,7 +114,7 @@ fn add_app_content(
     let application_rows = Arc::new(application_rows);
 
     compact_panel(pal)
-        .w(px(320.))
+        .w(rems(20.))
         .child(title(tr!("profiles.add_app_profile"), pal))
         .child(divider(pal))
         .child(
@@ -241,21 +241,15 @@ fn applications_toggle(
         } else {
             pal.text_muted
         })
-        .selected_fill(expanded)
+        .selected_fill(expanded, pal)
         .hover(move |button| {
             button.bg(if expanded {
-                theme::accent_tint_hover()
+                pal.accent_tint_hover
             } else {
                 pal.control_hover
             })
         })
-        .focus_visible(move |button| {
-            button.bg(if expanded {
-                theme::accent_tint_hover()
-            } else {
-                pal.control_hover
-            })
-        })
+        .focus_visible(move |style| style.focus_ring(pal))
         .child(
             // The chevron sits centred in a row-icon-wide slot so the label
             // starts where the application names below do.

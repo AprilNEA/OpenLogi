@@ -27,11 +27,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    Context, InteractiveElement, IntoElement, ParentElement, Rems, Render, RenderImage,
-    SharedString, Styled, Subscription, Task, Window, div, img, prelude::FluentBuilder as _, rems,
+    Context, IntoElement, ParentElement, Rems, Render, RenderImage, SharedString, Styled,
+    Subscription, Task, Window, div, img, prelude::FluentBuilder as _, rems,
 };
-use gpui_base::Button as BaseButton;
-use gpui_component::v_flex;
+use gpui_component::{button::Button, v_flex};
 use image::{Frame as ImageFrame, RgbaImage};
 use openlogi_camera::{CameraAuthorization, CaptureError, Frame};
 
@@ -274,12 +273,17 @@ impl Render for CameraPreview {
             .h(PREVIEW_H)
             .items_center()
             .justify_center()
-            .rounded_md()
+            .rounded(pal.card_radius)
             .border_1()
             .border_color(pal.border)
             .bg(pal.panel)
             .when_some(image, |surface, image| {
-                surface.child(img(image).w(PREVIEW_W).h(PREVIEW_H).rounded_md())
+                surface.child(
+                    img(image)
+                        .w(PREVIEW_W)
+                        .h(PREVIEW_H)
+                        .rounded(pal.card_radius),
+                )
             })
             .when(show_placeholder && !capture_supported, |surface| {
                 surface.child(note(tr!("camera.camera_preview_platform_unavailable"), pal))
@@ -310,14 +314,9 @@ impl Render for CameraPreview {
                 show_placeholder && capture_supported && !granted && authorization_undetermined,
                 |surface| {
                     surface.child(
-                        BaseButton::new("camera-request-access")
-                            .accessibility_label(tr!("camera.click_to_enable_camera_access"))
-                            .text_body()
-                            .text_color(pal.text_muted)
-                            .cursor_pointer()
-                            .hover(|s| s.text_color(pal.text_primary))
-                            .focus_visible(|s| s.text_color(pal.text_primary))
-                            .child(tr!("camera.click_to_enable_camera_access"))
+                        Button::new("camera-request-access")
+                            .outline()
+                            .label(tr!("camera.click_to_enable_camera_access"))
                             .on_click(|_, _, cx| {
                                 crate::features::camera::request_camera_access(cx);
                             }),

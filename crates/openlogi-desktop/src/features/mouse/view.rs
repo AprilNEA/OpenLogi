@@ -4,8 +4,8 @@ use std::sync::Arc;
 use gpui::{
     AnyElement, App, AppContext as _, Context, ElementId, Entity, FocusHandle, Focusable, Hsla,
     InteractiveElement, IntoElement, ParentElement, Render, RenderOnce,
-    StatefulInteractiveElement as _, Styled, Subscription, Window, canvas, div, hsla, img,
-    prelude::FluentBuilder as _, px, rgb,
+    StatefulInteractiveElement as _, Styled, Subscription, Window, canvas, div, img,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
@@ -31,7 +31,7 @@ use crate::features::keyboard::editors::{PowerUserKind, text_editor_placeholder}
 use crate::features::profiles::{profile_canvas_status, profile_name};
 use crate::services::assets::{GlowGeometry, ResolvedAsset};
 use crate::state::{AppState, BindingLayer, DeviceKey, DeviceRecord, StateEvent};
-use crate::ui::theme::{self, ACCENT_BLUE};
+use crate::ui::theme::{self, SelectableStyle as _};
 
 const SIDE_GAP: f32 = 24.;
 const LABEL_W: f32 = 156.;
@@ -68,9 +68,12 @@ const MODEL_MIN_H: f32 = 360.;
 /// Max width the model (side gutter + image) may occupy, matching the
 /// `buttons_tab` content cap so a wide keyboard image never overflows the panel.
 const MODEL_CONTENT_MAX_W: f32 = 760.;
-/// Horizontal chrome the model can't draw into (the buttons-tab padding).
-const MODEL_HORIZONTAL_RESERVE: f32 =
-    crate::ui::theme::DETAIL_RAIL_W + super::inspector::INSPECTOR_W + 48.;
+/// Horizontal chrome the model can't draw into besides the navigation rail:
+/// the inspector and the buttons-tab padding.
+const MODEL_HORIZONTAL_RESERVE: f32 = super::inspector::INSPECTOR_W + 48.;
+/// The narrowest content area, beside the navigation rail, that still fits the
+/// side labels (a 960 px window at the standard scale).
+const MODEL_LABELS_MIN_W: f32 = 792.;
 /// Floor for the model's available width on a narrow window.
 const MODEL_MIN_CONTENT_W: f32 = 200.;
 
@@ -477,7 +480,7 @@ impl Render for MouseModelView {
             .collect();
 
         let viewport_h = f32::from(window.viewport_size().height);
-        let viewport_w = f32::from(window.viewport_size().width);
+        let viewport_w = content_width(window);
         let ModelLayout {
             canvas_w,
             mouse_left,
@@ -597,9 +600,17 @@ struct ModelLayout {
     labels: Vec<Label>,
 }
 
+/// The window width beside the navigation rail. The rail is in rems, so it
+/// widens with the interface scale; take its pixel width at this window's rem.
+fn content_width(window: &Window) -> f32 {
+    let rail_w = theme::DETAIL_RAIL_W.to_pixels(window.rem_size());
+    f32::from(window.viewport_size().width - rail_w)
+}
+
 /// Scale the model to fit the content area in both axes. A tall mouse is bound
 /// by the viewport height; a wide keyboard is bound by the available width and
-/// drops the label gutter so it remains centred.
+/// drops the label gutter so it remains centred. `viewport_w` excludes the
+/// navigation rail.
 fn model_layout(
     asset: Option<&ResolvedAsset>,
     layout: Option<&GamingLayout>,
@@ -608,8 +619,8 @@ fn model_layout(
     thumbwheel: bool,
 ) -> ModelLayout {
     let target_h = (viewport_h - MODEL_VERTICAL_RESERVE).clamp(MODEL_MIN_H, MOUSE_MODEL_SIZE.1);
-    let has_labels =
-        asset.is_none_or(|asset| asset_has_button_labels(asset, layout)) && viewport_w >= 960.;
+    let has_labels = asset.is_none_or(|asset| asset_has_button_labels(asset, layout))
+        && viewport_w >= MODEL_LABELS_MIN_W;
     let content_w =
         (viewport_w - MODEL_HORIZONTAL_RESERVE).clamp(MODEL_MIN_CONTENT_W, MODEL_CONTENT_MAX_W);
     let label_distribution = if has_labels && content_w >= TWO_SIDED_LABEL_MIN_W {
@@ -700,7 +711,7 @@ fn leader_canvas(
 ) -> impl IntoElement {
     canvas(
         move |_bounds, _, _| (hotspots, labels, highlight),
-        move |bounds, payload, window, _app| {
+        move |bounds, payload, window, cx| {
             let (hotspots, labels, highlight) = payload;
             paint_leader_lines(
                 bounds,
@@ -712,6 +723,7 @@ fn leader_canvas(
                 &hotspots,
                 &labels,
                 highlight,
+                theme::palette(cx),
                 window,
             );
         },
@@ -799,7 +811,8 @@ fn hotspots_layer(
 ///
 /// Its `rounded_*` values are illustration proportions — the body shell and the
 /// two drawn side buttons — not UI chrome, so they stay fixed rather than
-/// tracking the `Palette` radius tokens the way real cards and controls do.
+/// tracking the `Palette` radius tokens the way real cards and controls do
+/// (each is exempted from `gui-theme-radius-owner`).
 #[derive(IntoElement)]
 struct Silhouette {
     w: f32,
@@ -810,6 +823,7 @@ impl RenderOnce for Silhouette {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let Self { w, h } = self;
         let pal = theme::palette(cx);
+        // ast-grep-ignore: gui-theme-radius-owner
         div()
             .absolute()
             .inset_0()
@@ -820,6 +834,7 @@ impl RenderOnce for Silhouette {
             .border_color(pal.text_muted)
             .bg(pal.muted)
             .child(
+                // ast-grep-ignore: gui-theme-radius-owner
                 div()
                     .absolute()
                     .left(px(w / 2. - 14.))
@@ -827,7 +842,7 @@ impl RenderOnce for Silhouette {
                     .w(px(28.))
                     .h(px(110.))
                     .rounded_md()
-                    .bg(hsla(0., 0., 0.25, 1.0)),
+                    .bg(pal.text_muted),
             )
             .child(
                 div()
@@ -839,6 +854,7 @@ impl RenderOnce for Silhouette {
                     .bg(pal.border),
             )
             .child(
+                // ast-grep-ignore: gui-theme-radius-owner
                 div()
                     .absolute()
                     .left(px(8.))
@@ -846,7 +862,7 @@ impl RenderOnce for Silhouette {
                     .w(px(34.))
                     .h(px(150.))
                     .rounded_md()
-                    .bg(hsla(0., 0., 0.25, 1.0)),
+                    .bg(pal.text_muted),
             )
     }
 }
@@ -886,7 +902,8 @@ struct HotspotTrigger {
 }
 
 impl RenderOnce for HotspotTrigger {
-    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let pal = theme::palette(cx);
         let highlighted = self.hovered || self.selected;
         let selected = self.selected;
         let view = self.view;
@@ -913,22 +930,18 @@ impl RenderOnce for HotspotTrigger {
                     .rounded_full()
                     .border_1()
                     .border_color(if highlighted {
-                        gpui::Hsla::from(rgb(ACCENT_BLUE))
+                        pal.accent
                     } else {
-                        hsla(0., 0., 0.95, 0.85)
+                        theme::PHOTO_MARK_RIM
                     })
                     .bg(if highlighted {
-                        gpui::Hsla::from(rgb(ACCENT_BLUE))
+                        pal.accent
                     } else {
-                        hsla(0., 0., 0.18, 0.85)
+                        theme::PHOTO_MARK_FILL
                     }),
             )
-            .focus_visible(|style| {
-                style
-                    .rounded_full()
-                    .border_2()
-                    .border_color(rgb(ACCENT_BLUE))
-            })
+            .rounded_full()
+            .focus_visible(move |style| style.focus_ring(pal))
             .on_click(move |_event, _window, cx| {
                 click_view.update(cx, |this, cx| {
                     this.select(btn);

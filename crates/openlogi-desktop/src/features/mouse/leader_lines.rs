@@ -1,13 +1,13 @@
 //! Canvas-painted leader lines from each hotspot to its side-label anchor.
 //!
 //! Each polyline is hotspot-centre → short horizontal stub → diagonal to the
-//! label anchor. The control being interacted with gets a blue, thicker line;
+//! label anchor. The control being interacted with gets an accent, thicker line;
 //! the other controls keep muted lines so their mapping remains visible.
 
-use gpui::{Bounds, PathBuilder, Pixels, Point, Window, hsla, point, px, rgb};
+use gpui::{Bounds, PathBuilder, Pixels, Point, Window, point, px};
 
 use super::hotspots::{Hotspot, MouseControlId};
-use crate::ui::theme::ACCENT_BLUE;
+use crate::ui::theme::Palette;
 
 /// Length of the horizontal stub before turning toward the label.
 /// Kept small enough to fit inside the gap between mouse and card so
@@ -53,6 +53,7 @@ pub fn paint(
     hotspots: &[Hotspot],
     labels: &[Label],
     highlighted: Option<MouseControlId>,
+    pal: Palette,
     window: &mut Window,
 ) {
     for label in labels {
@@ -65,6 +66,7 @@ pub fn paint(
             *hotspot,
             *label,
             highlighted == Some(label.id),
+            pal,
             window,
         );
     }
@@ -76,6 +78,7 @@ fn paint_one(
     hotspot: Hotspot,
     label: Label,
     highlight: bool,
+    pal: Palette,
     window: &mut Window,
 ) {
     let Geometry {
@@ -121,11 +124,11 @@ fn paint_one(
 
     if let Ok(built) = path.build() {
         if highlight {
-            window.paint_path(built, rgb(ACCENT_BLUE));
+            window.paint_path(built, pal.accent);
         } else {
-            // Muted gray — readable against the dark background without
+            // Faint muted ink — readable on either appearance without
             // competing with the highlighted line.
-            window.paint_path(built, hsla(0., 0., 0.55, 0.35));
+            window.paint_path(built, pal.text_muted.opacity(0.35));
         }
     }
 }

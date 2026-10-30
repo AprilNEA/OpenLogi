@@ -7,7 +7,7 @@ use super::{
     Updater, div, h_flex, img, px, v_flex,
 };
 use crate::platform::installation::{HomebrewCask, Installation, InstallationSource, LinuxPackage};
-use crate::ui::theme::Typography as _;
+use crate::ui::theme::{SelectableStyle as _, Typography as _};
 use gpui_base::Link;
 use gpui_component::ActiveTheme as _;
 use openlogi_core::update_feed::UpdateChannel;
@@ -263,7 +263,8 @@ fn installation_label(installation: Installation) -> gpui::SharedString {
 fn release_link(cx: &App) -> Link {
     let pal = crate::ui::theme::palette(cx);
     let link_color = cx.theme().link;
-    let focus_color = cx.theme().ring;
+    // Opens the releases page in the browser, so it keeps the link cursor.
+    // ast-grep-ignore: gui-pointer-cursor-owner
     Link::new("update-changelog")
         .href(RELEASES_URL)
         .accessibility_label(tr!("updates.view_changelog"))
@@ -279,7 +280,7 @@ fn release_link(cx: &App) -> Link {
         .cursor_pointer()
         .hover(move |style| style.bg(pal.control_hover))
         .active(move |style| style.bg(pal.control))
-        .focus_visible(move |style| style.bg(focus_color).text_color(pal.page))
+        .focus_visible(move |style| style.focus_ring(pal))
         .debug_selector(|| "update-source-link".into())
         .child(div().underline().child("GitHub Releases"))
         .child(gpui_component::Icon::new(IconName::ExternalLink).size_3p5())

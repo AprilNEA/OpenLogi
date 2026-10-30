@@ -15,7 +15,7 @@ pub(super) use gpui::{
     App, AppContext, Axis, ClipboardItem, Context, Entity, FocusHandle, FontWeight, Hsla,
     InteractiveElement, IntoElement, ParentElement, Render, SharedString, Size,
     StatefulInteractiveElement, Styled, Subscription, Window, div, img, prelude::FluentBuilder, px,
-    rgb,
+    rems,
 };
 pub(super) use gpui_component::{
     ActiveTheme, Disableable, Icon, IconName, IndexPath, Selectable, Sizable, TITLE_BAR_HEIGHT,

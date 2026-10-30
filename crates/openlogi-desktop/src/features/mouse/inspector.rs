@@ -5,7 +5,7 @@ use std::rc::Rc;
 
 use gpui::{
     Context, Entity, FocusHandle, InteractiveElement, IntoElement, ParentElement, Role,
-    StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px, rgb, svg,
+    StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px, svg,
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
@@ -25,7 +25,7 @@ use crate::features::binding_editor::{
 use crate::state::AppState;
 use crate::ui::action::localized_action_label;
 use crate::ui::components::{MenuRow, Toggle, control_button, control_input, toggle_row};
-use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
+use crate::ui::theme::{self, Palette, SelectableStyle as _, Typography as _};
 
 pub(super) const INSPECTOR_W: f32 = 328.;
 
@@ -550,11 +550,7 @@ fn gesture_directions(
                                 ),
                         )
                         .when(selected, |row| {
-                            row.child(
-                                Icon::new(IconName::Check)
-                                    .size_3()
-                                    .text_color(rgb(ACCENT_BLUE)),
-                            )
+                            row.child(Icon::new(IconName::Check).size_3().text_color(pal.accent))
                         })
                         .on_click(move |_, _, cx| {
                             view.update(cx, |view, cx| {
@@ -644,9 +640,7 @@ fn thumbwheel_inspector(
                                 )
                                 .when(selected, |row| {
                                     row.child(
-                                        Icon::new(IconName::Check)
-                                            .size_3()
-                                            .text_color(rgb(ACCENT_BLUE)),
+                                        Icon::new(IconName::Check).size_3().text_color(pal.accent),
                                     )
                                 })
                                 .on_click(move |_, _, cx| {
@@ -748,9 +742,8 @@ fn selection_card(
         .border_color(pal.border)
         .bg(pal.control)
         .p_3()
-        .cursor_pointer()
         .hover(move |card| card.bg(pal.control_hover))
-        .focus_visible(move |card| card.bg(pal.control_hover).border_color(rgb(ACCENT_BLUE)))
+        .focus_visible(move |style| style.focus_ring(pal))
         .child(
             div()
                 .text_caption()
@@ -967,7 +960,7 @@ fn custom_shortcut_editor(
                 div()
                     .debug_selector(move || format!("{id_prefix}-custom-shortcut-error"))
                     .text_caption()
-                    .text_color(rgb(0x00ef_4444))
+                    .text_color(pal.danger)
                     .child(tr!("action_ring.custom_action_invalid_input")),
             )
         })

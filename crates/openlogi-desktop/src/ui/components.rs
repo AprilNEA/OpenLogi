@@ -7,7 +7,7 @@
 use gpui::{
     AnyElement, App, ClickEvent, ElementId, Entity, InteractiveElement, Interactivity, IntoElement,
     ParentElement, Pixels, RenderOnce, Role, SharedString, Stateful, StatefulInteractiveElement,
-    Styled, Window, div, prelude::FluentBuilder as _, px, rgb,
+    Styled, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
@@ -22,7 +22,7 @@ use gpui_component::{
     v_flex,
 };
 
-use super::theme::{self, ACCENT_BLUE, SelectableStyle as _, Typography as _};
+use super::theme::{self, SelectableStyle as _, Typography as _};
 
 /// A gpui-component button at the house control height.
 ///
@@ -36,13 +36,13 @@ use super::theme::{self, ACCENT_BLUE, SelectableStyle as _, Typography as _};
 pub(crate) fn control_button(id: impl Into<ElementId>) -> gpui_component::button::Button {
     gpui_component::button::Button::new(id)
         .small()
-        .h(px(theme::CONTROL_H))
+        .h(theme::CONTROL_H)
 }
 
 /// A single-line input at the house control height; see [`control_button`].
 /// Pins via `min_h` because the inherent `Input::h` is multi-line-only.
 pub(crate) fn control_input(state: &Entity<InputState>) -> Input {
-    Input::new(state).small().min_h(px(theme::CONTROL_H))
+    Input::new(state).small().min_h(theme::CONTROL_H)
 }
 
 /// Cancel and Save buttons for a form dialog opened with `open_dialog`.
@@ -93,7 +93,7 @@ pub(crate) fn localize_placeholder(
 pub(crate) fn control_select<D: SearchableListDelegate + 'static>(
     state: &Entity<SelectState<D>>,
 ) -> Select<D> {
-    Select::new(state).small().min_h(px(theme::CONTROL_H))
+    Select::new(state).small().min_h(theme::CONTROL_H)
 }
 
 /// A controlled on/off switch with a compact state label.
@@ -191,8 +191,7 @@ impl RenderOnce for Toggle {
             .checked(self.selected)
             .disabled(self.disabled)
             .with_size(self.size)
-            .label(label)
-            .color(rgb(ACCENT_BLUE));
+            .label(label);
         if let Some(handler) = self.on_change {
             toggle = toggle.on_click(move |selected, window, cx| handler(selected, window, cx));
         }
@@ -384,21 +383,15 @@ impl RenderOnce for MenuRow {
             .rounded(pal.control_radius)
             .text_body()
             .text_color(pal.text_primary)
-            .selected_fill(selected)
+            .selected_fill(selected, pal)
             .hover(move |style| {
                 style.bg(if selected {
-                    theme::accent_tint_hover()
+                    pal.accent_tint_hover
                 } else {
                     pal.control_hover
                 })
             })
-            .focus_visible(move |style| {
-                style.bg(if selected {
-                    theme::accent_tint_hover()
-                } else {
-                    pal.control_hover
-                })
-            })
+            .focus_visible(move |style| style.focus_ring(pal))
             .children(self.children)
             .when_some(self.on_click, |row, handler| {
                 row.on_click(move |event, window, cx| handler(event, window, cx))
@@ -487,7 +480,6 @@ impl StatefulInteractiveElement for ProfileTab {}
 impl RenderOnce for ProfileTab {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let pal = theme::palette(cx);
-        let accent = rgb(ACCENT_BLUE);
         let has_delete = self.delete.is_some();
         let label = self.label;
         self.base
@@ -503,7 +495,7 @@ impl RenderOnce for ProfileTab {
             .rounded_full()
             .border_1()
             .border_color(if self.selected {
-                accent.into()
+                pal.accent
             } else {
                 pal.border
             })
@@ -514,26 +506,18 @@ impl RenderOnce for ProfileTab {
                 pal.text_muted
             })
             .bg(if self.selected {
-                theme::accent_tint()
+                pal.accent_tint
             } else {
                 pal.control
             })
             .hover(move |style| {
                 style.bg(if self.selected {
-                    theme::accent_tint_hover()
+                    pal.accent_tint_hover
                 } else {
                     pal.control_hover
                 })
             })
-            .focus_visible(move |style| {
-                style
-                    .bg(if self.selected {
-                        theme::accent_tint_hover()
-                    } else {
-                        pal.control_hover
-                    })
-                    .border_color(accent)
-            })
+            .focus_visible(move |style| style.focus_ring(pal))
             .when_some(self.icon, |tab, icon| tab.child(icon.size_3()))
             .child(label.clone())
             .children(self.children)
@@ -550,7 +534,7 @@ impl RenderOnce for ProfileTab {
                         .rounded_full()
                         .text_color(pal.text_muted)
                         .hover(|style| style.text_color(pal.text_primary))
-                        .focus_visible(|style| style.text_color(pal.text_primary))
+                        .focus_visible(move |style| style.focus_ring(pal))
                         .child(Icon::new(IconName::Close).size_3())
                         .on_click(move |event, window, cx| {
                             cx.stop_propagation();
@@ -608,10 +592,10 @@ impl RenderOnce for PresetChip {
             .rounded(pal.control_radius)
             .selected_border(selected, pal)
             .bg(pal.control)
-            .selected_fill(selected)
+            .selected_fill(selected, pal)
             .hover(move |style| {
                 style.bg(if selected {
-                    theme::accent_tint_hover()
+                    pal.accent_tint_hover
                 } else {
                     pal.control_hover
                 })
@@ -663,7 +647,7 @@ impl Pill {
             .selected(self.selected)
             .disabled(self.disabled)
             .when(marked, |pill| {
-                pill.selected_border(true, pal).selected_fill(true)
+                pill.selected_border(true, pal).selected_fill(true, pal)
             })
     }
 }

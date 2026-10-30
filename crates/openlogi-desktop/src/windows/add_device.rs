@@ -32,7 +32,7 @@ use openlogi_ipc::{FoundDevice, PairingFailure, PairingPhase};
 use crate::app::menu::{CloseWindow, Minimize, Zoom};
 use crate::services::ipc::{CancelPairing, Command, PairDevice, StartPairing};
 use crate::state::{AppState, StateEvent};
-use crate::ui::theme::{self, Palette, Typography as _};
+use crate::ui::theme::{self, Palette, SelectableStyle as _, Typography as _};
 use crate::windows::{self, AuxWindow};
 
 /// The pairing flow as the window renders it: the agent's [`PairingPhase`]
@@ -270,7 +270,7 @@ impl AddDeviceView {
                     .border_color(pal.border)
                     .bg(pal.control)
                     .hover(|s| s.bg(pal.control_hover))
-                    .focus_visible(|s| s.bg(pal.control_hover))
+                    .focus_visible(move |style| style.focus_ring(pal))
                     .child(div().text_body().child(label))
                     .on_click(move |_, _, cx| {
                         cx.set_global(PairingSelection(Some(receiver.clone())));
@@ -469,10 +469,9 @@ fn device_row(device: &FoundDevice, pal: Palette) -> impl IntoElement {
         .rounded(pal.control_radius)
         .border_1()
         .border_color(pal.border)
-        .cursor_pointer()
         .bg(pal.control)
         .hover(|s| s.bg(pal.control_hover))
-        .focus_visible(|s| s.bg(pal.control_hover))
+        .focus_visible(move |style| style.focus_ring(pal))
         .child(div().text_body().child(name))
         .on_click(move |_, _, cx| send(cx, PairDevice { address }))
 }

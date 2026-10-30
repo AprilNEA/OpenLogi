@@ -1,51 +1,43 @@
 //! OpenLogi UI theme and shared sizes.
 //!
-//! Two layers:
-//!
-//! - **Brand / status** colours are fixed `u32` constants. They're saturated
-//!   enough to read on both light and dark backgrounds, so they don't change
-//!   with the OS appearance (the OpenLogi accent blue, the connectivity dots).
-//! - **Surface / text** colours flip with the appearance and live in
-//!   [`Palette`], chosen by [`palette`] from the active gpui-component theme
-//!   mode. The bespoke surfaces (window, cards, mouse model)
-//!   read these so they track the same light/dark switch as gpui-component's
-//!   own widgets — which is what keeps a popover from rendering white under
-//!   an otherwise dark UI (see `main.rs`'s appearance wiring).
+//! Every colour the app paints comes from the active gpui-component theme.
+//! [`palette`] resolves the semantic roles the bespoke surfaces need (window,
+//! cards, mouse model, selection, status) from `cx.theme()`, so a theme picked
+//! in Settings → Appearance re-skins those surfaces exactly as it re-skins the
+//! framework's own widgets. The bundled "OpenLogi" theme
+//! (`themes/openlogi.json`) supplies the defaults. Raw colour constructors
+//! belong in this module only; the `gui-theme-color-owner` ast-grep rule
+//! rejects them elsewhere in the crate.
 
 #[cfg(test)]
 use gpui::rgb;
-use gpui::{App, FontWeight, Hsla, Pixels, Rems, Rgba, Styled, Window, hsla, px, relative, rems};
-use gpui_component::{ActiveTheme as _, Theme, ThemeMode, ThemeRegistry};
+use gpui::{
+    App, BoxShadow, FontWeight, Hsla, Pixels, Rems, Rgba, Styled, Window, hsla, px, relative, rems,
+};
+use gpui_component::{ActiveTheme as _, Colorize as _, Theme, ThemeMode, ThemeRegistry};
 use openlogi_core::config::{Appearance, UiScale};
 
 use crate::state::AppState;
 
 use super::spacing::DynamicSpacing;
 
-// The brand accent lives in `openlogi-ui` so the overlay paints the same blue
-// this app does — it cannot depend on this crate, and a local copy is how the
-// ring ended up with a blue of its own. Re-exported so screens keep reading it
-// off `theme::`, beside the status hues and the appearance-derived [`Palette`].
-pub use openlogi_ui::color::{ACCENT_BLUE, accent};
-
-/// Status colours for the connectivity readouts. Fixed like the accent, but the
-/// overlay draws no status, so they stay with the app that does.
-pub const STATUS_CONNECTED: u32 = 0x0022_c55e;
-pub const STATUS_CONNECTING: u32 = 0x00ea_b308;
-pub const STATUS_OFFLINE: u32 = 0x006b_7280;
-/// Ring color for a device the user disabled ("Manage this device" off).
-pub const STATUS_DISABLED: u32 = 0x00ef_4444;
-
-/// Sizes that several components need to agree on.
-pub const HEADER_H: f32 = 64.;
-pub const FOOTER_H: f32 = 40.;
-pub const DETAIL_RAIL_W: f32 = 168.;
-/// Height of standalone form controls: buttons, text inputs, tabs.
+/// Sizes that several components need to agree on. They are rems, so the
+/// window chrome grows and shrinks with the interface scale along with the text
+/// and spacing it holds. The pixel size in each comment is the size at the
+/// standard 16 px rem.
+///
+/// Home and device-detail header height (64 px).
+pub const HEADER_H: Rems = rems(4.);
+/// Attention footer height (40 px).
+pub const FOOTER_H: Rems = rems(2.5);
+/// Device-detail navigation rail width (168 px).
+pub const DETAIL_RAIL_W: Rems = rems(10.5);
+/// Height of standalone form controls: buttons, text inputs, tabs (30 px).
 /// gpui-component's `.small()` maps to a 24 px `h_6`, which reads undersized
-/// against this 30 px control rhythm — small controls pin the height
+/// against this control rhythm — small controls pin the height
 /// explicitly (single-line `Input`s via `min_h`; their inherent `h` is
 /// multi-line-only and would be ignored).
-pub const CONTROL_H: f32 = 30.;
+pub const CONTROL_H: Rems = rems(1.875);
 
 const BASE_REM_SIZE: f32 = 16.;
 
@@ -95,6 +87,62 @@ pub const CARD_GAP: DynamicSpacing = DynamicSpacing::Base12;
 
 /// Apple HIG / WCAG minimum contrast for normal text up to 17pt.
 const MIN_TEXT_CONTRAST: f32 = 4.5;
+/// WCAG 1.4.11 minimum contrast for icons, status dots, and other graphics.
+const MIN_GRAPHIC_CONTRAST: f32 = 3.;
+
+/// Rim of an unselected hotspot mark drawn on a device photo. A photo keeps its
+/// own colours whatever the theme, so a mark on it uses a fixed light rim and
+/// dark fill that read against both light and dark product shells.
+pub const PHOTO_MARK_RIM: Hsla = hsla(0., 0., 0.95, 0.85);
+/// Fill of an unselected hotspot mark drawn on a device photo; see
+/// [`PHOTO_MARK_RIM`].
+pub const PHOTO_MARK_FILL: Hsla = hsla(0., 0., 0.18, 0.85);
+
+/// The glow of a lit key light, shown on its emblem. It depicts the physical
+/// light, so it stays warm under every theme.
+pub const WARM_LIGHT: Hsla = hsla(0.105, 0.9, 0.66, 1.);
+
+/// The colours of the Appearance page's light / dark mode thumbnails. They
+/// depict each mode, so they stay fixed whatever theme is active.
+#[derive(Clone, Copy)]
+pub struct ModePreview {
+    pub wallpaper: Hsla,
+    pub window: Hsla,
+    pub bar: Hsla,
+    pub line: Hsla,
+}
+
+impl ModePreview {
+    pub const LIGHT: Self = Self {
+        wallpaper: hsla(0.6026, 0.2549, 0.9, 1.),
+        window: hsla(0., 0., 1., 1.),
+        bar: hsla(0.6, 0.1724, 0.8294, 1.),
+        line: Self::LINE,
+    };
+    pub const DARK: Self = Self {
+        wallpaper: hsla(0.6667, 0.0617, 0.1588, 1.),
+        window: hsla(0.6667, 0.0526, 0.1118, 1.),
+        bar: hsla(0.6667, 0.0645, 0.2431, 1.),
+        line: Self::LINE,
+    };
+    const LINE: Hsla = hsla(0.6034, 0.9122, 0.598, 1.);
+    /// The macOS window controls: close, minimise, zoom.
+    pub const TRAFFIC_LIGHTS: [Hsla; 3] = [
+        hsla(0.0079, 1., 0.6706, 1.),
+        hsla(0.1138, 0.9905, 0.5882, 1.),
+        hsla(0.3583, 0.6667, 0.4706, 1.),
+    ];
+}
+
+/// The colour a light at `kelvin` casts, for illustrations of that light:
+/// amber at 2700 K, cooling toward a pale daylight at 6500 K.
+#[must_use]
+pub fn light_temperature_color(kelvin: u16) -> Hsla {
+    let normalized = (f32::from(kelvin.clamp(2700, 6500)) - 2700.) / 3800.;
+    let hue = 0.09 + normalized * 0.05;
+    let saturation = 0.9 - normalized * 0.48;
+    hsla(hue, saturation, 0.68, 1.)
+}
 
 /// Responsive bounds for a device card in the Home grid. At standard scale,
 /// two cards fit the 720 px minimum window after the screen inset and gap; at
@@ -105,15 +153,13 @@ pub const GALLERY_CARD_MIN_W: Rems = rems(19.375);
 pub const GALLERY_CARD_MAX_W: Rems = rems(25.3125);
 pub const GALLERY_PHOTO_H: f32 = 196.;
 
-/// Appearance-dependent surface + text colours for the bespoke (non
-/// gpui-component) surfaces. Resolved once per render via [`palette`] and
-/// passed down to the free helper builders.
+/// Semantic colours and radii for the bespoke (non gpui-component) surfaces.
+/// Resolved once per render via [`palette`] and passed down to the free helper
+/// builders.
 ///
-/// These are now *derived from the active gpui-component theme's semantic
-/// tokens* (see [`palette`]), so the hand-painted surfaces re-skin with whatever
-/// theme the user selects in Settings → Appearance — the same `cx.theme()` the
-/// framework widgets read. The bundled "OpenLogi" theme (`themes/openlogi.json`)
-/// provides the default values for those roles.
+/// Every field derives from the active gpui-component theme (see [`palette`]),
+/// so the hand-painted surfaces re-skin with whatever theme the user selects in
+/// Settings → Appearance — the same `cx.theme()` the framework widgets read.
 #[derive(Clone, Copy, Debug)]
 pub struct Palette {
     /// Window and page background.
@@ -132,6 +178,24 @@ pub struct Palette {
     pub text_primary: Hsla,
     /// De-emphasised labels / metadata.
     pub text_muted: Hsla,
+    /// Selection and emphasis ink — a selected item's border, check mark, or
+    /// value text. The theme's `primary`, made legible as text on the page and
+    /// panel surfaces. It is not legible as text on [`Palette::accent_tint`]
+    /// or its hover shade, which pull the background toward it.
+    pub accent: Hsla,
+    /// Faint fill marking a selected row or chip. Text on it stays
+    /// `text_primary`; only borders and marks on it take the accent.
+    pub accent_tint: Hsla,
+    /// [`Palette::accent_tint`] deepened for hover on an already-selected item.
+    pub accent_tint_hover: Hsla,
+    /// Error text and failure marks, legible as text.
+    pub danger: Hsla,
+    /// Attention marks — a pending permission, a low battery.
+    pub warning: Hsla,
+    /// Positive state marks — granted, charging, on.
+    pub success: Hsla,
+    /// The keyboard focus colour; see [`SelectableStyle::focus_ring`].
+    pub ring: Hsla,
     /// Corner radius for the bespoke card / panel surfaces. Derived from the
     /// active gpui-component theme radius (`cx.theme().radius`) so the
     /// hand-painted cards follow the Appearance → radius slider — which the old
@@ -148,6 +212,10 @@ pub struct Palette {
     /// [`Palette::card_radius`] so a control's corner sits concentrically inside
     /// its card's.
     pub control_radius: Pixels,
+    /// The radius of a circle or a pill — a round icon button, a status dot.
+    /// The theme's `radius_full`, which drops to zero when the user picks
+    /// square corners, so nothing stays round in a square UI.
+    pub radius_full: Pixels,
 }
 
 fn contrast_ratio(foreground: Hsla, background: Hsla) -> f32 {
@@ -208,6 +276,24 @@ fn normalize_theme_text_contrast(theme: &mut Theme) {
     );
 }
 
+/// The first shade of `color`, stepping toward `foreground` in Oklab by tenths,
+/// that reaches `minimum` contrast on both the page and the card surface.
+///
+/// Theme status and primary colours are tuned as button fills, and several
+/// bundled themes put them below text contrast on their own page (a yellow
+/// warning on white, a deep primary on near-black). Moving toward the
+/// foreground keeps the hue recognisable while making it readable. A colour
+/// that already passes is returned unchanged.
+fn legible(color: Hsla, minimum: f32, foreground: Hsla, background: Hsla, surface: Hsla) -> Hsla {
+    if minimum_text_contrast(color, background, surface) >= minimum {
+        return color;
+    }
+    (1..=10u8)
+        .map(|step| color.mix_oklab(foreground, 1. - f32::from(step) / 10.))
+        .find(|shade| minimum_text_contrast(*shade, background, surface) >= minimum)
+        .unwrap_or(foreground)
+}
+
 /// Derive the app palette from the active gpui-component theme's semantic
 /// tokens, so the hand-painted surfaces (window, cards, mouse model) re-skin
 /// with the selected theme exactly as the framework widgets do.
@@ -216,10 +302,15 @@ fn normalize_theme_text_contrast(theme: &mut Theme) {
 /// - `panel` ← `group_box` (content cards)
 /// - `control` / `control_hover` ← `secondary` / `secondary_hover`
 /// - `muted` ← `muted` (non-interactive tracks and disabled illustrations)
-/// - `border`, `text_primary` ← `foreground`, `text_muted` ← `muted_foreground`.
+/// - `border`, `text_primary` ← `foreground`, `text_muted` ← `muted_foreground`
+/// - `accent` ← `primary`, and `danger` ← `danger`, both at text contrast
+/// - `warning`, `success` ← their roles at graphic contrast; they only mark
+///   icons, dots, and fills
 #[must_use]
 pub fn palette(cx: &App) -> Palette {
     let t = cx.theme();
+    let shade = |color, minimum| legible(color, minimum, t.foreground, t.background, t.group_box);
+    let accent = shade(t.primary, MIN_TEXT_CONTRAST);
     Palette {
         page: t.background,
         panel: t.group_box,
@@ -229,8 +320,16 @@ pub fn palette(cx: &App) -> Palette {
         border: t.border,
         text_primary: t.foreground,
         text_muted: t.muted_foreground,
+        accent,
+        accent_tint: accent.opacity(0.12),
+        accent_tint_hover: accent.opacity(0.18),
+        danger: shade(t.danger, MIN_TEXT_CONTRAST),
+        warning: shade(t.warning, MIN_GRAPHIC_CONTRAST),
+        success: shade(t.success, MIN_GRAPHIC_CONTRAST),
+        ring: t.ring,
         card_radius: t.radius * 1.5,
         control_radius: t.radius,
+        radius_full: t.radius_full(),
     }
 }
 
@@ -363,22 +462,6 @@ pub fn apply_from_settings(window: Option<&mut Window>, cx: &mut App) {
     cx.refresh_windows();
 }
 
-/// Faint accent fill marking a *selected* row / chip — tinted, not painted, so
-/// it reads on both palettes while the label stays in `text_primary` (a blue
-/// label fails AA contrast on the light surface). Hand-matched to [`accent`]
-/// (hue 0.6 / sat 0.9 / light 0.6); the `accent_tint_matches_accent` test pins
-/// that it stays derived from the brand colour.
-#[must_use]
-pub fn accent_tint() -> Hsla {
-    hsla(0.6, 0.9, 0.6, 0.12)
-}
-
-/// [`accent_tint`] deepened for hover on an already-selected row.
-#[must_use]
-pub fn accent_tint_hover() -> Hsla {
-    hsla(0.6, 0.9, 0.6, 0.18)
-}
-
 /// Chaining helpers expressing the single "selected" decision — accent border
 /// plus a faint accent fill — instead of every pill / chip / row hand-rolling
 /// the `if selected { accent } else { border }` ternary (which had drifted into
@@ -389,18 +472,38 @@ pub trait SelectableStyle: Styled + Sized {
     #[must_use]
     fn selected_border(self, selected: bool, pal: Palette) -> Self {
         self.border_1()
-            .border_color(if selected { accent() } else { pal.border })
+            .border_color(if selected { pal.accent } else { pal.border })
     }
 
     /// A faint accent fill when `selected`; leaves the background untouched
     /// otherwise so the caller's resting fill shows through.
     #[must_use]
-    fn selected_fill(self, selected: bool) -> Self {
+    fn selected_fill(self, selected: bool, pal: Palette) -> Self {
         if selected {
-            self.bg(accent_tint())
+            self.bg(pal.accent_tint)
         } else {
             self
         }
+    }
+
+    /// The keyboard focus ring for a bespoke control. Apply it inside the
+    /// control's `focus_visible` refinement, so it appears only after keyboard
+    /// navigation and never on a mouse click.
+    ///
+    /// It matches the ring gpui-component draws around its own controls — a
+    /// solid line in the theme's `ring` colour inside a translucent halo — so
+    /// Tab moves through one treatment instead of a different hover-like tint
+    /// on every control. The ring is two spread shadows outside the element's
+    /// edge: it takes no layout space, and it follows the element's corner
+    /// radius. A clipping ancestor cuts it off, so leave it a few pixels of
+    /// room. The widths are physical pixels on purpose: like the framework's
+    /// ring, they must not grow with the interface scale.
+    #[must_use]
+    fn focus_ring(self, pal: Palette) -> Self {
+        self.shadow(vec![
+            BoxShadow::new(px(0.), px(0.), pal.ring.opacity(0.5)).spread_radius(px(3.)),
+            BoxShadow::new(px(0.), px(0.), pal.ring).spread_radius(px(1.)),
+        ])
     }
 }
 
@@ -574,31 +677,58 @@ mod tests {
         color.into()
     }
 
-    /// `accent_tint` is hand-written `hsla` (gpui's `rgb→hsla` isn't `const`),
-    /// so pin that it stays derived from `ACCENT_BLUE` rather than drifting into
-    /// an arbitrary blue — selected chips must match the accent borders and text
-    /// they sit beside.
-    #[test]
-    fn accent_tint_matches_accent() {
-        let a = accent();
-        let t = accent_tint();
-        assert!((a.h - t.h).abs() < 0.02, "hue {} vs {}", a.h, t.h);
-        assert!((a.s - t.s).abs() < 0.05, "sat {} vs {}", a.s, t.s);
-        assert!((a.l - t.l).abs() < 0.05, "light {} vs {}", a.l, t.l);
+    /// Theme authors tune `primary`, `danger`, `warning`, and `success` as
+    /// button fills, and several bundled themes leave them illegible as text or
+    /// marks on their own page — a yellow warning on white, a deep primary on
+    /// near-black. The palette must still clear its contrast floor on both
+    /// surfaces for every theme a user can pick.
+    #[gpui::test]
+    fn every_bundled_theme_palette_is_legible(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            register_builtin_themes(cx);
+            let themes: Vec<_> = ThemeRegistry::global(cx)
+                .themes()
+                .values()
+                .cloned()
+                .collect();
+            assert!(themes.len() > 2, "upstream themes should be registered");
+            for config in themes {
+                Theme::global_mut(cx).apply_config(&config);
+                normalize_theme_text_contrast(Theme::global_mut(cx));
+                let t = cx.theme();
+                let (background, surface) = (t.background, t.group_box);
+                let pal = palette(cx);
+                for (role, color, minimum) in [
+                    ("accent", pal.accent, MIN_TEXT_CONTRAST),
+                    ("danger", pal.danger, MIN_TEXT_CONTRAST),
+                    ("warning", pal.warning, MIN_GRAPHIC_CONTRAST),
+                    ("success", pal.success, MIN_GRAPHIC_CONTRAST),
+                ] {
+                    let contrast = minimum_text_contrast(color, background, surface);
+                    assert!(
+                        contrast >= minimum,
+                        "{}: {role} {color:?} reaches {contrast:.2}:1, below {minimum}:1",
+                        config.name
+                    );
+                }
+            }
+        });
     }
 
-    /// `accent_tint_hover` is also a hand-written `hsla`; pin that it stays
-    /// derived from `ACCENT_BLUE` and sits deeper than the resting `accent_tint`.
     #[test]
-    fn accent_tint_hover_matches_accent() {
-        let a = accent();
-        let th = accent_tint_hover();
-        assert!((a.h - th.h).abs() < 0.02, "hue {} vs {}", a.h, th.h);
-        assert!((a.s - th.s).abs() < 0.05, "sat {} vs {}", a.s, th.s);
-        assert!((a.l - th.l).abs() < 0.05, "light {} vs {}", a.l, th.l);
-        assert!(
-            th.a > accent_tint().a,
-            "hover tint should sit deeper than the resting tint"
+    fn legible_keeps_a_passing_colour_and_darkens_a_failing_one() {
+        let white: Hsla = rgb(0xff_ffff).into();
+        let ink: Hsla = rgb(0x1a_1a1d).into();
+        let strong: Hsla = rgb(0x1d_4ed8).into();
+        assert_eq!(
+            legible(strong, MIN_TEXT_CONTRAST, ink, white, white),
+            strong
         );
+
+        let yellow: Hsla = rgb(0xea_b308).into();
+        let shaded = legible(yellow, MIN_GRAPHIC_CONTRAST, ink, white, white);
+        assert!(minimum_text_contrast(shaded, white, white) >= MIN_GRAPHIC_CONTRAST);
+        assert_ne!(shaded, ink, "the shade should keep some of its hue");
     }
 }

@@ -1,21 +1,16 @@
-//! The brand accent — the one colour both GPUI processes paint with.
+//! The brand accent the overlay paints with.
 //!
-//! It does *not* flip with the OS appearance: it is saturated enough to read on
-//! the settings app's light card surfaces and on the overlay's near-black ring
-//! panel alike, so a single constant serves both. That is why it lives here
-//! rather than in either binary — the overlay cannot depend on
-//! `openlogi-desktop`, and a local copy is how the ring ended up drawing a blue
-//! of its own, five degrees of hue off the brand.
-//!
-//! Everything else stays with its owner: the settings app's status hues and its
-//! appearance-derived surface and text colours are resolved from the active
-//! `gpui-component` theme, which this crate deliberately does not depend on, and
-//! the overlay never draws them.
+//! It does *not* flip with the OS appearance: it is saturated enough to read
+//! on the overlay's near-black ring panel, which floats over whatever is on the
+//! desktop and so cannot follow a theme. The settings app does not use it: its
+//! accent is the active gpui-component theme's `primary`, resolved by
+//! `openlogi-desktop`'s `ui::theme::palette`, so a theme the user picks
+//! re-colours selection there. This crate deliberately does not depend on
+//! `gpui-component`, so that resolution cannot live here.
 
 use gpui::{Hsla, rgb};
 
-/// Primary action / selection blue. The brand colour, identical in both
-/// appearances.
+/// The brand blue, identical in both appearances.
 pub const ACCENT_BLUE: u32 = 0x003b_82f6;
 
 /// [`ACCENT_BLUE`] as an [`Hsla`], so callers stop re-`rgb()`-ing the constant.
@@ -27,9 +22,9 @@ pub fn accent() -> Hsla {
 /// The accent at a different lightness, keeping its hue and saturation.
 ///
 /// The overlay draws its ring on a near-black panel, where the brand lightness
-/// sits too close to the white glyph the slot carries; the settings app never
-/// needs to move it. Shifting only `l` is what keeps that a *shade of the
-/// accent* rather than a second blue — the drift this module exists to prevent.
+/// sits too close to the white glyph the slot carries. Shifting only `l` is
+/// what keeps that a *shade of the accent* rather than a second blue — the
+/// drift this module exists to prevent.
 #[must_use]
 pub fn accent_at_lightness(lightness: f32) -> Hsla {
     Hsla {

@@ -24,8 +24,8 @@ use std::sync::Arc;
 use gpui::{
     AnyElement, App, AppContext as _, Bounds, Context, Entity, FontWeight, Hsla,
     InteractiveElement, IntoElement, ParentElement, PathBuilder, Render, RenderOnce, Role,
-    SharedString, StatefulInteractiveElement as _, Styled, Subscription, Window, canvas, div, hsla,
-    point, prelude::FluentBuilder as _, px, rgb, svg,
+    SharedString, StatefulInteractiveElement as _, Styled, Subscription, Window, canvas, div,
+    point, prelude::FluentBuilder as _, px, svg,
 };
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{Selectable as _, h_flex, input::InputState, v_flex};
@@ -45,7 +45,7 @@ use crate::services::assets::{GlowGeometry, ResolvedAsset};
 use crate::state::{AppState, StateEvent, StateEvents};
 use crate::ui::action::localized_action_label;
 use crate::ui::components::MenuRow;
-use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
+use crate::ui::theme::{self, Palette, Typography as _};
 use gpui::ease_in_out;
 use gpui::{Animation, AnimationExt, img};
 
@@ -500,7 +500,7 @@ impl RenderOnce for KeyboardPane {
                     .h(px(img_h))
                     .children(self.slots.into_iter().map(|slot| {
                     let highlighted = key_is_highlighted(slot.idx, selected, hovered);
-                    key_click_target(slot, highlighted, (img_w, img_h), &view_clone)
+                    key_click_target(slot, highlighted, (img_w, img_h), &view_clone, pal)
                 })),
             )
     }
@@ -545,22 +545,21 @@ impl RenderOnce for KeyCallout {
             .justify_center()
             .items_center()
             .gap(px(1.))
-            .rounded_md()
+            .rounded(pal.control_radius)
             .border_1()
             .border_color(if highlighted {
-                rgb(ACCENT_BLUE).into()
+                pal.accent
             } else {
                 pal.border
             })
             .bg(if highlighted {
-                theme::accent_tint()
+                pal.accent_tint
             } else {
                 pal.control
             })
-            .cursor_pointer()
             .hover(move |s| {
                 s.bg(if highlighted {
-                    theme::accent_tint_hover()
+                    pal.accent_tint_hover
                 } else {
                     pal.control_hover
                 })
@@ -572,11 +571,7 @@ impl RenderOnce for KeyCallout {
                     .text_ellipsis()
                     .text_caption()
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(if highlighted {
-                        rgb(ACCENT_BLUE).into()
-                    } else {
-                        pal.text_primary
-                    })
+                    .text_color(pal.text_primary)
                     .child(self.slot.label.clone()),
             )
             .child(
@@ -588,7 +583,7 @@ impl RenderOnce for KeyCallout {
                     .when_some(binding_icon, |row, icon| {
                         row.child(svg().path(icon).size(px(9.)).flex_none().text_color(
                             if highlighted {
-                                rgb(ACCENT_BLUE).into()
+                                pal.accent
                             } else {
                                 pal.text_muted
                             },
@@ -602,7 +597,7 @@ impl RenderOnce for KeyCallout {
                             .whitespace_nowrap()
                             .text_caption()
                             .text_color(if highlighted {
-                                rgb(ACCENT_BLUE).into()
+                                pal.text_primary
                             } else {
                                 pal.text_muted
                             })
@@ -626,6 +621,7 @@ fn key_click_target(
     highlighted: bool,
     (img_w, img_h): (f32, f32),
     view: &Entity<FunctionRowView>,
+    pal: Palette,
 ) -> impl IntoElement {
     let idx = slot.idx;
     let x_frac = slot.x_frac;
@@ -645,7 +641,6 @@ fn key_click_target(
         .flex()
         .items_center()
         .justify_center()
-        .cursor_pointer()
         .when(highlighted, |el| {
             el.child(
                 div()
@@ -660,13 +655,13 @@ fn key_click_target(
                             .h(px(KEY_HOTSPOT_DOT))
                             .rounded_full()
                             .border_1()
-                            .border_color(gpui::Hsla::from(rgb(ACCENT_BLUE)))
-                            .bg(gpui::Hsla::from(rgb(ACCENT_BLUE))),
+                            .border_color(pal.accent)
+                            .bg(pal.accent),
                     )
                     .rounded_full()
                     .border_1()
-                    .border_color(theme::accent_tint_hover())
-                    .bg(theme::accent_tint()),
+                    .border_color(pal.accent_tint_hover)
+                    .bg(pal.accent_tint),
             )
         })
         .on_hover(move |hovered, _window, cx| {
@@ -695,9 +690,18 @@ fn keyboard_leader_canvas(
         slots.iter().map(|s| (s.idx, s.x_frac, s.y_frac)).collect();
     canvas(
         move |_bounds, _, _| (guides, selected, hovered),
-        move |bounds, payload, window, _app| {
+        move |bounds, payload, window, cx| {
             let (guides, selected, hovered) = payload;
-            paint_keyboard_leaders(bounds, guides, selected, hovered, (img_w, img_h), window);
+            let pal = theme::palette(cx);
+            paint_keyboard_leaders(
+                bounds,
+                guides,
+                selected,
+                hovered,
+                (img_w, img_h),
+                pal,
+                window,
+            );
         },
     )
     .absolute()
@@ -712,6 +716,7 @@ fn paint_keyboard_leaders(
     selected: Option<usize>,
     hovered: Option<usize>,
     (img_w, img_h): (f32, f32),
+    pal: Palette,
     window: &mut Window,
 ) {
     let count = guides.len();
@@ -731,9 +736,9 @@ fn paint_keyboard_leaders(
         path.line_to(end);
         if let Ok(path) = path.build() {
             if highlighted {
-                window.paint_path(path, rgb(ACCENT_BLUE));
+                window.paint_path(path, pal.accent);
             } else {
-                window.paint_path(path, hsla(0., 0., 0.55, 0.35));
+                window.paint_path(path, pal.text_muted.opacity(0.35));
             }
         }
     }
@@ -883,7 +888,7 @@ impl FunctionRowView {
                                 .child(
                                     gpui_component::Icon::new(gpui_component::IconName::Check)
                                         .size_3()
-                                        .text_color(rgb(ACCENT_BLUE)),
+                                        .text_color(pal.accent),
                                 ),
                         )
                     })
@@ -994,7 +999,7 @@ fn panel_action_rows(
                             s.child(
                                 gpui_component::Icon::new(gpui_component::IconName::Check)
                                     .size_3()
-                                    .text_color(rgb(ACCENT_BLUE)),
+                                    .text_color(pal.accent),
                             )
                         })
                         .on_click(move |_ev, _window, cx| {
@@ -1041,7 +1046,7 @@ fn image_or_fallback(
         Some(_) | None => div()
             .w(px(img_w))
             .h(px(160.))
-            .rounded_md()
+            .rounded(pal.card_radius)
             .border_1()
             .border_color(pal.border)
             .bg(pal.panel)

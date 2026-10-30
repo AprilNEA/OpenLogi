@@ -1,0 +1,40 @@
+# Owner: openlogi-desktop's ui::theme::SelectableStyle::focus_ring — the one
+# keyboard focus treatment for bespoke controls, matching the ring
+# gpui-component draws around its own.
+id: gui-focus-ring-owner
+language: rust
+severity: error
+message: A bespoke control's focus_visible refinement must be exactly `|style| style.focus_ring(pal)` (ui::theme::SelectableStyle); it owns the keyboard focus treatment.
+note: |
+  Twenty-three bespoke controls styled focus_visible by hand, most with the
+  same fill or text colour as their hover, so a keyboard user could not tell
+  which control had focus. Use gpui-component's Button or another stock
+  control where one fits; it draws its own ring. See "Single source of truth"
+  in AGENTS.md.
+files:
+  - crates/openlogi-desktop/src/**/*.rs
+ignores:
+  - "**/tests.rs"
+  - "**/tests/**"
+rule:
+  kind: call_expression
+  has:
+    field: function
+    kind: field_expression
+    has:
+      field: field
+      regex: ^focus_visible$
+  not:
+    has:
+      field: arguments
+      has:
+        kind: closure_expression
+        has:
+          field: body
+          kind: call_expression
+          has:
+            field: function
+            kind: field_expression
+            has:
+              field: field
+              regex: ^focus_ring$

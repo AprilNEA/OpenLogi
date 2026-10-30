@@ -6,11 +6,10 @@ use super::super::leader_lines::{Label, Side};
 use super::super::thumbwheel::ThumbwheelPreset;
 use crate::features::binding_editor::{GESTURE_BUTTON_ICON, action_icon_path};
 use crate::ui::action::localized_action_label;
-use crate::ui::theme::{self, ACCENT_BLUE, Typography as _};
+use crate::ui::theme::{self, SelectableStyle as _, Typography as _};
 use gpui::{
     App, ElementId, Entity, Hsla, InteractiveElement, IntoElement, ParentElement, RenderOnce,
-    StatefulInteractiveElement as _, Styled, Window, div, prelude::FluentBuilder as _, px, rgb,
-    svg,
+    StatefulInteractiveElement as _, Styled, Window, div, prelude::FluentBuilder as _, px, svg,
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{Icon, IconName, h_flex};
@@ -112,14 +111,11 @@ impl RenderOnce for LabelTrigger {
         let view = self.view;
         let click_view = view.clone();
         let pal = theme::palette(cx);
-        let binding_color = if highlighted {
-            rgb(ACCENT_BLUE).into()
-        } else {
-            pal.text_primary
-        };
-        // Always show the action the button actually performs. Default and
-        // customised bindings use the same neutral value colour; only the
-        // actively highlighted control takes the accent.
+        // Always show the action the button actually performs, in the same
+        // neutral value colour whether it is a default or a custom binding. A
+        // highlighted card already carries the accent in its border and tint,
+        // and accent text on that tint falls below text contrast.
+        let binding_color = pal.text_primary;
         let binding_description = self.binding.text.clone();
         let button_name = tr!(self.label.id.translation_key());
         BaseButton::new(self.id)
@@ -138,31 +134,23 @@ impl RenderOnce for LabelTrigger {
             .rounded(pal.control_radius)
             .border_1()
             .border_color(if highlighted {
-                rgb(ACCENT_BLUE).into()
+                pal.accent
             } else {
                 pal.border
             })
             .bg(if highlighted {
-                theme::accent_tint()
+                pal.accent_tint
             } else {
                 pal.control
             })
-            .cursor_pointer()
             .hover(move |s| {
                 s.bg(if highlighted {
-                    theme::accent_tint_hover()
+                    pal.accent_tint_hover
                 } else {
                     pal.control_hover
                 })
             })
-            .focus_visible(move |s| {
-                s.bg(if highlighted {
-                    theme::accent_tint_hover()
-                } else {
-                    pal.control_hover
-                })
-                .border_color(rgb(ACCENT_BLUE))
-            })
+            .focus_visible(move |style| style.focus_ring(pal))
             // Button name — the caption (xs / muted), the same size as the
             // inspector title and category headers it shares the binding flow with.
             .child(

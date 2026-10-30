@@ -41,14 +41,14 @@ pub(super) fn settings_button() -> impl IntoElement {
         .on_click(|_, _, cx| crate::windows::settings::open(cx))
 }
 
-/// Primary action that opens the pairing window. The empty state carries its
-/// own equivalent CTA, so this never floats alone in an empty header.
+/// Opens the pairing window. An ordinary header command, so it matches the
+/// Settings button beside it; the empty state's Add Device stays primary,
+/// because there it is the screen's one next step.
 pub(super) fn add_device_button() -> impl IntoElement {
     Button::new("header-add-device")
-        .primary()
+        .outline()
         .icon(IconName::Plus)
         .label(tr!("pairing.add_device"))
-        .tooltip(tr!("pairing.add_device"))
         .on_click(|_, _, cx| crate::windows::add_device::open(cx))
 }
 

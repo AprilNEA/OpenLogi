@@ -6,7 +6,7 @@
 
 use gpui::{
     App, BorderStyle, Bounds, Corners, FontWeight, Hsla, IntoElement, ParentElement, PathBuilder,
-    RenderOnce, Styled, Window, canvas, point, prelude::FluentBuilder as _, px, quad, rgb, size,
+    RenderOnce, Styled, Window, canvas, point, prelude::FluentBuilder as _, px, quad, size,
 };
 use gpui_component::h_flex;
 use openlogi_core::device::{BatteryInfo, BatteryLevel, BatteryStatus};
@@ -281,9 +281,9 @@ fn battery_tone(battery: &BatteryInfo) -> BatteryTone {
 
 fn tone_color(tone: BatteryTone, pal: Palette) -> Hsla {
     match tone {
-        BatteryTone::Charging | BatteryTone::Full => rgb(theme::STATUS_CONNECTED).into(),
-        BatteryTone::Low => rgb(theme::STATUS_CONNECTING).into(),
-        BatteryTone::Critical | BatteryTone::Error => rgb(theme::STATUS_DISABLED).into(),
+        BatteryTone::Charging | BatteryTone::Full => pal.success,
+        BatteryTone::Low => pal.warning,
+        BatteryTone::Critical | BatteryTone::Error => pal.danger,
         BatteryTone::Normal => pal.text_primary,
     }
 }
