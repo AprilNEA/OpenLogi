@@ -162,7 +162,7 @@ impl Job {
             Self::Rustdoc => default_spec(
                 "rustdoc (non-GUI crates)",
                 &["rustdoc", "docs"],
-                "Everything but the GPUI crates, which would drag the whole graphics toolchain into the job. A broken intra-doc link is neither a compile error nor a clippy lint, so nothing else catches one.",
+                "Everything but the GPUI crates, which would drag the whole graphics toolchain into the job. A broken intra-doc link is neither a compile error nor a clippy lint, so nothing else catches one. CI runs it on ubuntu-latest, so it documents the linux cfg; `clippy (macos)` documents the macOS cfg. On a Mac this command documents the macOS cfg instead.",
             ),
             Self::TestsLinux => host_spec(
                 "tests (linux)",
@@ -203,7 +203,7 @@ impl Job {
                 "clippy (macos)",
                 &["clippy-macos"],
                 &[Host::Macos],
-                "CI lints the whole workspace natively on macos-latest (arm64), the only job that lints the macOS cfg (`tests (macos)` compiles it, without clippy). No other host can reproduce it. On a Mac it is the same command as host `clippy`, so the second run is a cache hit.",
+                "CI lints the whole workspace natively on macos-latest (arm64), then documents the `rustdoc` crates: the only job that lints or documents the macOS cfg (`tests (macos)` compiles it, without clippy). No other host can reproduce it: a cross `cargo doc` stops at ring's build script. On a Mac both commands are the ones host `clippy` and `rustdoc` run, so the second run is a cache hit.",
             ),
             Self::Wasm => default_spec(
                 "wasm (portable crates)",

@@ -241,6 +241,8 @@ jobs:
       # toolchain into this job. Excluding by name rather than listing the
       # covered crates keeps a new crate documented by default — the hid-only
       # version of this step let five broken links rot in `openlogi-core`.
+      # On ubuntu-latest this documents the Linux cfg only; `clippy (macos)`
+      # runs the same step for the macOS cfg.
       - name: cargo doc
         env:
           RUSTDOCFLAGS: "-D warnings"
@@ -385,10 +387,10 @@ jobs:
       # never compile.
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
-  # The only job that lints the macOS cfg: the ObjC surface, the CGEventTap
-  # hook, CGEvent synthesis, the AVFoundation camera backend, and the
-  # launchd/SMAppService registration, none of which the Linux or Windows
-  # clippy jobs compile. The pre-push hook runs the same command on a Mac, but
+  # The only job that lints and documents the macOS cfg: the ObjC surface, the
+  # CGEventTap hook, CGEvent synthesis, the AVFoundation camera backend, and
+  # the launchd/SMAppService registration, none of which the Linux or Windows
+  # clippy jobs compile. The pre-push hook runs the same commands on a Mac, but
   # a hook can be skipped. Same cache key as `tests (macos)`.
   clippy-macos:
     name: clippy (macos)
@@ -408,6 +410,19 @@ jobs:
           cache-targets: false
           save-if: ${{ github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main' }}
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      # `rustdoc (non-GUI crates)`'s step for the macOS cfg, which that job
+      # cannot document: on Linux a cross target stops at ring's build script,
+      # which needs Apple's C toolchain. A step here rather than a job of its
+      # own, so it takes no extra macOS runner.
+      - name: cargo doc
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+        run: |
+          cargo doc --workspace --no-deps --document-private-items \
+            --exclude openlogi-ui \
+            --exclude openlogi-desktop \
+            --exclude openlogi-overlay \
+            --exclude openlogi-agent
 
   wasm:
     name: wasm (portable crates)

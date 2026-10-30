@@ -99,6 +99,12 @@ a new crate is documented by default. The classic silent breakage — handing a 
 impl to a derive macro kills every `Type::trait_method` doc link — is explained in
 `.agents/rules/rust.md`.
 
+rustdoc documents only the host's `cfg`, like clippy. CI documents the Linux `cfg`
+in `rustdoc (non-GUI crates)` and the macOS `cfg` in a second step of
+`clippy (macos)`. A Linux host cannot stand in for the second: a cross
+`cargo doc --target aarch64-apple-darwin` stops at ring's build script, which needs
+Apple's C toolchain. The Windows `cfg` is not documented anywhere.
+
 prek hooks (`prek.toml`): typos, `cargo fmt`, and the ast-grep guards at commit;
 full-workspace clippy
 **and rustdoc** at push (rust-scoped, so non-Rust pushes skip it). Hooks are a
@@ -153,13 +159,13 @@ warning that host clippy `-D warnings` does not surface still fails CI.
 | `shell` | `git ls-files -z \| xargs -0 shfmt -f` piped into `xargs shellcheck` and `xargs shfmt -d` | any (needs `shellcheck` + `shfmt`; both are in the devenv shell) |
 | `clippy` | `cargo clippy --workspace --all-targets -- -D warnings` | **Linux** is the CI job. Host clippy on macOS/Windows compiles a different `cfg` |
 | `MSRV (cargo check, <os>)` | `RUSTUP_TOOLCHAIN=<rust-version> cargo check --workspace --all-targets` | macOS and Linux. `<rust-version>` is `rust-version` in the root `Cargo.toml` |
-| `rustdoc (non-GUI crates)` | `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items --exclude openlogi-ui --exclude openlogi-desktop --exclude openlogi-overlay --exclude openlogi-agent` | any |
+| `rustdoc (non-GUI crates)` | `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items --exclude openlogi-ui --exclude openlogi-desktop --exclude openlogi-overlay --exclude openlogi-agent` | any. CI runs it on `ubuntu-latest`, so it documents the Linux `cfg`; on macOS the same command documents the macOS `cfg` |
 | `tests (linux)` | `cargo test --workspace --exclude openlogi-desktop` | Linux |
 | `tests (macos, <arch>)` | `cargo test --workspace --all-targets` | macOS. CI matrix is arm64 (`macos-latest`) and x86_64 (`macos-15-intel`) |
 | `tests (windows)` | `cargo test --workspace --exclude openlogi-desktop` | **Windows** only — the one place the `cfg(windows)` tests execute; nothing reproduces it elsewhere |
 | `cargo-deny` | `cargo deny --config .cargo/deny.toml --all-features --manifest-path crates/openlogi/Cargo.toml check` | any (needs `cargo-deny`; `nix run nixpkgs#cargo-deny -- …` also works) |
 | `clippy (windows)` | `cargo clippy --workspace --all-targets -- -D warnings` | **Windows**. Elsewhere: `devenv tasks run openlogi:check-windows` (ring-free subset, not the full workspace) |
-| `clippy (macos)` | `cargo clippy --workspace --all-targets -- -D warnings` | **macOS** only. CI runs it on `macos-latest` (arm64); it is the one job that lints the macOS `cfg` (`tests (macos)` compiles it, without clippy), and no other host can reproduce it |
+| `clippy (macos)` | `cargo clippy --workspace --all-targets -- -D warnings`, then the `rustdoc (non-GUI crates)` command | **macOS** only. CI runs it on `macos-latest` (arm64); it is the one job that lints and documents the macOS `cfg` (`tests (macos)` compiles it, without clippy), and no other host can reproduce it |
 | `wasm (portable crates)` | `cargo check -p openlogi-hidpp -p openlogi-device --target wasm32-unknown-unknown` then `cargo check -p openlogi-core --no-default-features --target wasm32-unknown-unknown` | any (needs the `wasm32-unknown-unknown` std; devenv installs it) |
 
 CI always sets `CARGO_TERM_COLOR=always`, `CARGO_INCREMENTAL=0`, and
