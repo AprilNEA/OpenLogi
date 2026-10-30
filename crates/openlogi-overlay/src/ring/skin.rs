@@ -16,8 +16,9 @@ use openlogi_ui::action_icons::RING_CANCEL_ICON;
 use openlogi_ui::color;
 pub(super) use openlogi_ui::ring_style::in_motion::DESIGN_EDGE;
 use openlogi_ui::ring_style::in_motion::{
-    CANCEL_GLYPH, GLYPH, HUB, HUB_GLOW, HUB_GLYPH, PILL_GLYPH, PILL_H, PILL_W, RADIUS, TRACK_INNER,
-    TRACK_OUTER, hub_fill, hub_fill_hovered, slot_fill, slot_ink, track,
+    CANCEL_GLYPH, GLYPH, HUB, HUB_GLOW, HUB_GLYPH, PILL_CAPTION_INSET, PILL_GAP, PILL_GLYPH,
+    PILL_H, PILL_PADDING, PILL_W, RADIUS, TRACK_INNER, TRACK_OUTER, hub_fill, hub_fill_hovered,
+    slot_fill, slot_ink, track,
 };
 
 use super::RingView;
@@ -271,8 +272,8 @@ fn slot_element(
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(6.0 * layout.fit))
-            .px(px(12.0 * layout.fit))
+            .gap(px(PILL_GAP * layout.fit))
+            .px(px(PILL_PADDING * layout.fit))
             .rounded_full()
             .bg(slot_fill(hover_t))
             .text_color(ink)
@@ -286,7 +287,7 @@ fn slot_element(
             )
             .child(
                 div()
-                    .w(px(layout.pill_width() - 40.0 * layout.fit))
+                    .w(px(layout.pill_width() - PILL_CAPTION_INSET * layout.fit))
                     .text_xs()
                     .truncate()
                     .child(caption),

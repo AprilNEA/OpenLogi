@@ -748,7 +748,10 @@ fn slot_caption(shape: SlotShape, selected: bool, caption: SharedString) -> Div 
         SlotShape::Disc => ((porcelain::NODE_W - 2.0) * scale, true),
         SlotShape::Cell if selected => (obsidian_signal::CELL_LABEL * scale, true),
         SlotShape::Cell => ((obsidian_signal::CARD_W - 6.0) * scale, true),
-        SlotShape::Pill | SlotShape::Round => ((in_motion::PILL_W - 40.0) * scale, false),
+        SlotShape::Pill | SlotShape::Round => (
+            (in_motion::PILL_W - in_motion::PILL_CAPTION_INSET) * scale,
+            false,
+        ),
     };
     div()
         .w(px(width))
@@ -907,8 +910,8 @@ fn slot_button(
         .map(|button| match (shape, empty) {
             (SlotShape::Pill, false) => button
                 .justify_start()
-                .gap(px(6.0 * scale))
-                .px(px(12.0 * scale)),
+                .gap(px(in_motion::PILL_GAP * scale))
+                .px(px(in_motion::PILL_PADDING * scale)),
             (SlotShape::Card, false) => button
                 .flex_col()
                 .gap(px(obsidian::CARD_GAP * scale)),

@@ -105,6 +105,12 @@ pub mod in_motion {
     pub const PILL_W: f32 = 132.0;
     pub const PILL_H: f32 = 34.0;
     pub const PILL_GLYPH: f32 = 16.0;
+    /// Inside a pill: the padding either side, the gap between glyph and
+    /// caption, and how much narrower than the pill the caption is (the
+    /// padding, glyph and gap on its left, and room on its right).
+    pub const PILL_PADDING: f32 = 12.0;
+    pub const PILL_GAP: f32 = 6.0;
+    pub const PILL_CAPTION_INSET: f32 = 40.0;
     /// Distance from the panel's centre to each pill's centre.
     pub const RADIUS: f32 = 160.0;
     /// The hub at rest: the cancel button.
