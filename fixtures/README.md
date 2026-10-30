@@ -121,6 +121,21 @@ This specimen exposes legacy SmartShift (`0x2110`) in free-spin mode, with an au
 
 The firmware-entities case is excluded because the bootloader and application entities contain nonzero `extra_version` bytes that remain unclassified. The generated manifest retains the seven accepted cases and removes the excluded case's unit-ID occurrence. This capture does not verify setting writes, gestures, thumbwheel or physical wheel behavior, reconnects, or the receiver transport the device also advertises. The Agent was restored after capture.
 
+## G604 capture
+
+`devices/g604-001` records a G604 (`wpid 0x4085`) on a Lightspeed receiver,
+slot 1. Its feature table includes `0x8100` and `0x8110`, but not
+`0x1b04`; the fixture therefore records no reprogrammable-control table and
+does not establish a button-slot mapping. The profile reports no mapped button
+capability. DPI, battery, wheel, lighting, and unsupported SmartShift/backlight
+reads are covered by seven cassettes.
+
+The firmware-entities cassette is intentionally excluded: its
+transport-specific response bytes are nonzero and not classified for this
+transport. This fixture does not establish firmware-field semantics or button
+slot order. The captures are sanitized and replay-verified; semantic accuracy
+still requires hardware/maintainer review.
+
 ## MX Mechanical Mini for Mac capture
 
 `devices/mx-mechanical-mini-mac-001` was captured on macOS 26.5.1 (25F80) on 2026-10-27 through Bluetooth LE (`046d:b36d`), with main firmware RBK75.01_0014. It is the first keyboard in the corpus. The semantic profile came from CLI and Agent 0.8.18; the HID++ cassettes came from the release CLI 0.8.18. Device identities are synthetic, and Easy-Switch host names are replaced with `Computer 1`–`Computer 3`.
