@@ -22,10 +22,13 @@ pub const RELEASES_URL: &str = "https://github.com/AprilNEA/OpenLogi/releases/la
 /// The application identifier: the Wayland xdg-toplevel `app_id` (and X11
 /// `WM_CLASS`) the GUI advertises, the root of the macOS bundle-id family
 /// (`org.openlogi.agent`, `org.openlogi.openlogi-dev`), and the value the Linux
-/// `.desktop` file pins as `StartupWMClass`. Defined once here so the window the
-/// compositor sees, the launcher that groups it, and the frontmost backend that
-/// self-identifies OpenLogi can never disagree. The `.desktop` file carries its
-/// own literal copy (it can't reference Rust) — keep the two in sync.
+/// `.desktop` file pins as `StartupWMClass` — and the basename native packages
+/// install that file under, since Wayland compositors resolve a window's icon
+/// from the desktop file named for its `app_id`. Defined once here so the
+/// window the compositor sees, the launcher that groups it, and the frontmost
+/// backend that self-identifies OpenLogi can never disagree. The `.desktop`
+/// file carries its own literal copy (it can't reference Rust) — keep the two
+/// in sync.
 pub const APP_ID: &str = "org.openlogi.openlogi";
 
 /// The always-on agent's bundle identifier — the process that owns the hook and

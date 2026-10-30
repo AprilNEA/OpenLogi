@@ -58,6 +58,8 @@ EOF
 cat >"${MOCK_BIN}/sudo" <<'EOF'
 #!/bin/sh
 printf 'sudo %s\n' "$*" >>"$MOCK_LOG"
+# A privileged rm targets real system paths; record it, never run it.
+[ "${1:-}" = rm ] && exit 0
 "$@"
 EOF
 
@@ -357,7 +359,8 @@ for binary in openlogi openlogi-desktop openlogi-overlay openlogi-agent; do
 done
 assert_contains "$MOCK_LOG" '/etc/udev/rules.d/70-openlogi.rules'
 assert_contains "$MOCK_LOG" '/usr/lib/systemd/user/openlogi-agent.service'
-assert_contains "$MOCK_LOG" '/usr/share/applications/openlogi.desktop'
+assert_contains "$MOCK_LOG" '/usr/share/applications/org.openlogi.openlogi.desktop'
+assert_contains "$MOCK_LOG" 'rm -f /usr/share/applications/openlogi.desktop'
 assert_contains "$MOCK_LOG" '/usr/share/icons/hicolor/1024x1024/apps/openlogi.png'
 assert_contains "$MOCK_SERVICE_CAPTURE" "ExecStart=${SOURCE_PREFIX}/bin/openlogi-agent"
 assert_contains "$MOCK_LOG" 'systemctl --user enable --now openlogi-agent.service'

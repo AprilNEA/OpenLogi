@@ -9,6 +9,8 @@ Terminal=false
 # Ties the running window (Wayland xdg-toplevel app_id / X11 WM_CLASS) back to
 # this launcher so GNOME groups it under the OpenLogi icon instead of a generic
 # one. Must match `openlogi_core::brand::APP_ID`, the value the GUI advertises.
+# Wayland compositors match the app_id against the desktop-file basename
+# instead, so the native installers rename this file to `org.openlogi.openlogi.desktop`.
 StartupWMClass=org.openlogi.openlogi
 Categories=Settings;HardwareSettings;
 Keywords=logitech;mouse;hid;remap;dpi;

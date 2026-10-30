@@ -159,6 +159,7 @@ pub fn open_or_focus<V: AuxWindow + 'static>(
         // the window ungrouped under the launcher icon and unrecognized by our
         // own `gnome_shell` frontmost backend.
         app_id: Some(APP_ID.into()),
+        icon: crate::app_assets::window_icon(),
         titlebar: Some(titlebar_options(title.clone())),
         ..WindowOptions::default()
     };

@@ -424,8 +424,11 @@ install_source() {
     /etc/udev/rules.d/70-openlogi.rules
   install_source_file 644 "${TEMP_DIR}/openlogi-agent.service" \
     /usr/lib/systemd/user/openlogi-agent.service
+  # Named for the window's Wayland app_id, so compositors find its icon; the
+  # entry earlier installers wrote under the old name would duplicate it.
   install_source_file 644 "${SCRIPT_DIR}/desktop/openlogi.desktop" \
-    /usr/share/applications/openlogi.desktop
+    /usr/share/applications/org.openlogi.openlogi.desktop
+  run_source_privileged rm -f /usr/share/applications/openlogi.desktop
   install_source_file 644 "${REPO_ROOT}/design/icon/openlogi.png" \
     /usr/share/icons/hicolor/1024x1024/apps/openlogi.png
   for size in 512 256 128 64 48 32 16; do

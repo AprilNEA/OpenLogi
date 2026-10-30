@@ -26,6 +26,7 @@ fn window_options(cx: &mut App) -> WindowOptions {
         // is the shared `brand::APP_ID`, matching the desktop file's
         // `StartupWMClass` and the macOS bundle-id family.
         app_id: Some(APP_ID.into()),
+        icon: crate::app_assets::window_icon(),
         // Min height keeps the buttons tab's mouse model above its scale floor
         // (`MODEL_MIN_H` + the chrome/padding reserve) so its side labels never
         // overlap; below this the model can't shrink further without crowding.
