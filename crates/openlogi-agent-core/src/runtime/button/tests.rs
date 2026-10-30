@@ -2,7 +2,7 @@
 
 use std::time::Instant;
 
-use openlogi_core::binding::{LongPressBinding, WheelHoldBinding};
+use openlogi_core::binding::{LongPressBinding, MultiClickBinding, WheelHoldBinding};
 
 use super::*;
 
@@ -1294,4 +1294,373 @@ fn shutdown_deadline_includes_a_blocked_terminal_handler() {
     assert!(!owner.shutdown_with_timeout(Duration::from_millis(20)));
     assert!(started.elapsed() < Duration::from_millis(200));
     let _ = release_tx.send(());
+}
+
+fn multi_click(click: Action, double: Action) -> Binding {
+    Binding::MultiClick(MultiClickBinding::new(click, double))
+}
+
+/// A Back press from `binding`, stamped as seen by the producer at `at`.
+fn press_at(id: u64, binding: &Binding, at: Instant) -> ActivePress {
+    ActivePress {
+        token: PressToken::hook_for_test(id, ButtonId::Back),
+        behavior: PressBehavior::new(Some(binding), at),
+        target: ActionDispatchTarget::Keyboard,
+    }
+}
+
+fn release_at(press: &ActivePress, at: Instant) -> ButtonInput {
+    ButtonInput::Up {
+        key: press.token.key.clone(),
+        released_at: at,
+    }
+}
+
+/// One complete click of `id` at `at`: press and release together.
+fn click_at(
+    state: &mut ButtonState,
+    binding: &Binding,
+    id: u64,
+    at: Instant,
+    events: &mut Vec<ButtonRuntimeEvent>,
+) {
+    let press = press_at(id, binding, at);
+    process_input(state, ButtonInput::Down(press.clone()), &mut |e| {
+        events.push(e);
+    });
+    process_input(state, release_at(&press, at), &mut |e| events.push(e));
+}
+
+fn ended_tokens(events: &[ButtonRuntimeEvent]) -> Vec<(&PressToken, EndReason)> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            ButtonRuntimeEvent::Ended { press, reason } => Some((press.token(), *reason)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_multi_click_press_fires_nothing_on_press_or_release() {
+    let binding = multi_click(Action::Copy, Action::Paste);
+    assert_eq!(press_at(1, &binding, Instant::now()).start_action(), None);
+
+    let mut state = ButtonState::default();
+    let mut events = Vec::new();
+    click_at(&mut state, &binding, 1, Instant::now(), &mut events);
+
+    assert!(triggered(&events).is_empty());
+    assert!(
+        ended_tokens(&events).is_empty(),
+        "the released first click stays active while it waits for a second"
+    );
+}
+
+#[test]
+fn a_second_click_inside_the_window_fires_only_the_double() {
+    let binding = multi_click(Action::Copy, Action::Paste);
+    let t0 = Instant::now();
+    let mut state = ButtonState::default();
+    let mut events = Vec::new();
+
+    click_at(&mut state, &binding, 1, t0, &mut events);
+    click_at(
+        &mut state,
+        &binding,
+        2,
+        t0 + DOUBLE_CLICK_WINDOW / 2,
+        &mut events,
+    );
+    emit_due_long_presses(&mut state, t0 + DOUBLE_CLICK_WINDOW * 4, &mut |e| {
+        events.push(e);
+    });
+
+    assert_eq!(triggered(&events), [&Action::Paste]);
+    let first = PressToken::hook_for_test(1, ButtonId::Back);
+    let second = PressToken::hook_for_test(2, ButtonId::Back);
+    assert_eq!(
+        ended_tokens(&events),
+        [
+            (&first, EndReason::Released),
+            (&second, EndReason::Released)
+        ],
+        "each press ends exactly once, and nothing is left waiting"
+    );
+    assert!(
+        state
+            .due_long_presses(t0 + DOUBLE_CLICK_WINDOW * 4)
+            .is_empty()
+    );
+}
+
+#[test]
+fn a_lone_click_fires_when_the_window_closes_and_not_before() {
+    let binding = multi_click(Action::Copy, Action::Paste);
+    let t0 = Instant::now();
+    let mut state = ButtonState::default();
+    let mut events = Vec::new();
+    click_at(&mut state, &binding, 1, t0, &mut events);
+
+    emit_due_long_presses(&mut state, t0 + DOUBLE_CLICK_WINDOW / 2, &mut |e| {
+        events.push(e);
+    });
+    assert!(triggered(&events).is_empty(), "still inside the window");
+
+    emit_due_long_presses(&mut state, t0 + DOUBLE_CLICK_WINDOW, &mut |e| {
+        events.push(e);
+    });
+    assert_eq!(triggered(&events), [&Action::Copy]);
+    assert_eq!(
+        ended_tokens(&events),
+        [(
+            &PressToken::hook_for_test(1, ButtonId::Back),
+            EndReason::Released
+        )]
+    );
+
+    emit_due_long_presses(&mut state, t0 + DOUBLE_CLICK_WINDOW * 4, &mut |e| {
+        events.push(e);
+    });
+    assert_eq!(triggered(&events).len(), 1, "the click fires once");
+}
+
+#[test]
+fn a_second_press_after_the_window_still_owes_the_first_its_click() {
+    let binding = multi_click(Action::Copy, Action::Paste);
+    let t0 = Instant::now();
+    let mut state = ButtonState::default();
+    let mut events = Vec::new();
+    click_at(&mut state, &binding, 1, t0, &mut events);
+
+    // Stamped after the window closed, though the worker met it before the
+    // timer ran: the single click is owed, and this press starts afresh.
+    let late = press_at(2, &binding, t0 + DOUBLE_CLICK_WINDOW * 2);
+    process_input(&mut state, ButtonInput::Down(late.clone()), &mut |e| {
+        events.push(e);
+    });
+    assert_eq!(triggered(&events), [&Action::Copy]);
+
+    process_input(
+        &mut state,
+        release_at(&late, t0 + DOUBLE_CLICK_WINDOW * 2),
+        &mut |e| events.push(e),
+    );
+    emit_due_long_presses(&mut state, t0 + DOUBLE_CLICK_WINDOW * 4, &mut |e| {
+        events.push(e);
+    });
+    assert_eq!(triggered(&events), [&Action::Copy, &Action::Copy]);
+}
+
+#[test]
+fn a_second_press_stamped_inside_the_window_wins_however_late_the_worker_is() {
+    let binding = multi_click(Action::Copy, Action::Paste);
+    let t0 = Instant::now();
+    let mut state = ButtonState::default();
+    let mut events = Vec::new();
+    click_at(&mut state, &binding, 1, t0, &mut events);
+
+    click_at(
+        &mut state,
+        &binding,
+        2,
+        t0 + DOUBLE_CLICK_WINDOW
+            .checked_sub(Duration::from_millis(1))
+            .expect("the window is longer than a millisecond"),
+        &mut events,
+    );
+    assert_eq!(triggered(&events), [&Action::Paste]);
+}
+
+#[test]
+fn a_third_click_starts_a_new_sequence_instead_of_a_second_double() {
+    let binding = multi_click(Action::Copy, Action::Paste);
+    let t0 = Instant::now();
+    let step = DOUBLE_CLICK_WINDOW / 4;
+    let mut state = ButtonState::default();
+    let mut events = Vec::new();
+
+    click_at(&mut state, &binding, 1, t0, &mut events);
+    click_at(&mut state, &binding, 2, t0 + step, &mut events);
+    click_at(&mut state, &binding, 3, t0 + step * 2, &mut events);
+    assert_eq!(triggered(&events), [&Action::Paste]);
+
+    emit_due_long_presses(&mut state, t0 + DOUBLE_CLICK_WINDOW * 4, &mut |e| {
+        events.push(e);
+    });
+    assert_eq!(triggered(&events), [&Action::Paste, &Action::Copy]);
+}
+
+#[test]
+fn a_duplicate_release_while_waiting_does_not_lose_the_click() {
+    let binding = multi_click(Action::Copy, Action::Paste);
+    let t0 = Instant::now();
+    let mut state = ButtonState::default();
+    let mut events = Vec::new();
+    let press = press_at(1, &binding, t0);
+    process_input(&mut state, ButtonInput::Down(press.clone()), &mut |e| {
+        events.push(e);
+    });
+    process_input(&mut state, release_at(&press, t0), &mut |e| events.push(e));
+    process_input(
+        &mut state,
+        release_at(&press, t0 + DOUBLE_CLICK_WINDOW * 2),
+        &mut |e| events.push(e),
+    );
+    assert!(triggered(&events).is_empty() && ended_tokens(&events).is_empty());
+
+    emit_due_long_presses(&mut state, t0 + DOUBLE_CLICK_WINDOW, &mut |e| {
+        events.push(e);
+    });
+    assert_eq!(triggered(&events), [&Action::Copy]);
+}
+
+#[test]
+fn cancelling_a_waiting_click_fires_nothing() {
+    let binding = multi_click(Action::Copy, Action::Paste);
+    let t0 = Instant::now();
+    let mut state = ButtonState::default();
+    let mut events = Vec::new();
+    click_at(&mut state, &binding, 1, t0, &mut events);
+
+    emit_canceled(state.cancel_hooks(), CancelReason::SourceEnded, &mut |e| {
+        events.push(e);
+    });
+    emit_due_long_presses(&mut state, t0 + DOUBLE_CLICK_WINDOW * 4, &mut |e| {
+        events.push(e);
+    });
+
+    assert!(triggered(&events).is_empty());
+    assert_eq!(
+        ended_tokens(&events),
+        [(
+            &PressToken::hook_for_test(1, ButtonId::Back),
+            EndReason::Canceled(CancelReason::SourceEnded)
+        )]
+    );
+}
+
+fn pointer_press(id: u64, binding: &Binding, at: Instant) -> ActivePress {
+    use openlogi_hook::PointerTarget;
+    let mut press = press_at(id, binding, at);
+    press.target = ActionDispatchTarget::for_pointer(
+        Some(PointerTarget::Window {
+            process_id: 41,
+            window_id: 7,
+        }),
+        || Some(417),
+    );
+    press
+}
+
+#[test]
+fn a_pointer_change_cancels_a_released_click_that_is_still_waiting() {
+    use openlogi_hook::PointerTarget;
+    let binding = multi_click(Action::Copy, Action::Paste);
+    let t0 = Instant::now();
+    let mut state = ButtonState::default();
+    let mut events = Vec::new();
+    let press = pointer_press(1, &binding, t0);
+    process_input(&mut state, ButtonInput::Down(press.clone()), &mut |e| {
+        events.push(e);
+    });
+    process_input(&mut state, release_at(&press, t0), &mut |e| events.push(e));
+
+    // The settled click would be refused for the changed target anyway, so
+    // it is dropped here rather than lingering and then doing nothing.
+    assert_eq!(state.cancel_pointer_except(PointerTarget::Desktop).len(), 1);
+    emit_due_long_presses(&mut state, t0 + DOUBLE_CLICK_WINDOW, &mut |e| {
+        events.push(e);
+    });
+    assert!(triggered(&events).is_empty());
+}
+
+#[test]
+fn a_pointer_change_still_cancels_a_multi_click_that_is_held_down() {
+    use openlogi_hook::PointerTarget;
+    let binding = multi_click(Action::Copy, Action::Paste);
+    let mut state = ButtonState::default();
+    state.press(pointer_press(1, &binding, Instant::now()));
+
+    assert_eq!(state.cancel_pointer_except(PointerTarget::Desktop).len(), 1);
+}
+
+#[test]
+fn pulses_make_a_double_and_a_lone_pulse_settles_to_its_click() {
+    let binding = multi_click(Action::Copy, Action::Paste);
+    let t0 = Instant::now();
+    let mut state = ButtonState::default();
+    let mut events = Vec::new();
+
+    process_input(
+        &mut state,
+        ButtonInput::Pulse(press_at(1, &binding, t0)),
+        &mut |e| events.push(e),
+    );
+    assert!(triggered(&events).is_empty());
+    process_input(
+        &mut state,
+        ButtonInput::Pulse(press_at(2, &binding, t0 + DOUBLE_CLICK_WINDOW / 2)),
+        &mut |e| events.push(e),
+    );
+    assert_eq!(triggered(&events), [&Action::Paste]);
+
+    process_input(
+        &mut state,
+        ButtonInput::Pulse(press_at(3, &binding, t0 + DOUBLE_CLICK_WINDOW * 10)),
+        &mut |e| events.push(e),
+    );
+    emit_due_long_presses(&mut state, t0 + DOUBLE_CLICK_WINDOW * 20, &mut |e| {
+        events.push(e);
+    });
+    assert_eq!(triggered(&events), [&Action::Paste, &Action::Copy]);
+}
+
+#[test]
+fn worker_settles_a_lone_click_and_fires_a_quick_double_once() {
+    let (sent, received) = mpsc::channel();
+    let mut owner = ButtonRuntimeOwner::spawn(move |event| {
+        sent.send(event)
+            .expect("test receiver should stay connected");
+    })
+    .expect("button worker should start");
+    let input = owner.input();
+    let binding = multi_click(Action::Copy, Action::Paste);
+
+    // A quick double fires the double on the second release, never the click:
+    // Started, Started, Ended(first), Triggered(double), Ended(second).
+    for _ in 0..2 {
+        assert!(
+            input
+                .try_hook_down(ButtonId::Back, Some(&binding))
+                .is_some()
+        );
+        assert!(input.try_hook_up(ButtonId::Back));
+    }
+    let events: Vec<_> = (0..5).map(|_| recv_event(&received)).collect();
+    assert_eq!(triggered(&events), [&Action::Paste]);
+
+    // A lone click settles on the worker's own clock.
+    assert!(
+        input
+            .try_hook_down(ButtonId::Back, Some(&binding))
+            .is_some()
+    );
+    assert!(input.try_hook_up(ButtonId::Back));
+    assert!(matches!(
+        recv_event(&received),
+        ButtonRuntimeEvent::Started(_)
+    ));
+    let ButtonRuntimeEvent::Triggered { action, .. } = recv_event(&received) else {
+        panic!("the window closing must fire the single click");
+    };
+    assert_eq!(action, Action::Copy);
+    assert!(matches!(
+        recv_event(&received),
+        ButtonRuntimeEvent::Ended {
+            reason: EndReason::Released,
+            ..
+        }
+    ));
+    assert!(owner.shutdown());
 }

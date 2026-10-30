@@ -14,7 +14,9 @@ use std::sync::mpsc;
 use std::thread::{self, JoinHandle, ThreadId};
 use std::time::{Duration, Instant};
 
-use openlogi_core::binding::{Action, Binding, ButtonId, LONG_PRESS_THRESHOLD};
+use openlogi_core::binding::{
+    Action, Binding, ButtonId, DOUBLE_CLICK_WINDOW, LONG_PRESS_THRESHOLD,
+};
 use tracing::warn;
 
 use super::ActionDispatchTarget;
@@ -196,6 +198,26 @@ enum PressBehavior {
     /// The wheel moved during the press, which made it a virtual thumb wheel;
     /// release fires nothing.
     WheelHoldScrolled,
+    /// First press of a multi-click binding, still down. Release does not
+    /// fire: it opens the window for a second click.
+    MultiClickDown {
+        click: Action,
+        double: Action,
+        /// When the producer saw the edge, so a press the worker only reaches
+        /// late is still judged against the window it fell in.
+        pressed_at: Instant,
+    },
+    /// The first click is released. The press stays active, and so keeps its
+    /// lifecycle, until a second press joins it or `deadline` settles it.
+    MultiClickAwaiting {
+        click: Action,
+        double: Action,
+        deadline: Instant,
+    },
+    /// A press inside the window; its release fires `double`.
+    MultiClickSecond { double: Action },
+    /// The window closed and `click` fired; the press ends at once.
+    MultiClickSettled,
 }
 
 impl PressBehavior {
@@ -204,6 +226,11 @@ impl PressBehavior {
             None => Self::LifecycleOnly,
             Some(Binding::Single(action)) => Self::Immediate(action.clone()),
             Some(binding @ Binding::Gesture(_)) => Self::Immediate(binding.click_action()),
+            Some(Binding::MultiClick(binding)) => Self::MultiClickDown {
+                click: binding.click().clone(),
+                double: binding.double().clone(),
+                pressed_at,
+            },
             Some(Binding::LongPress(binding)) => Self::LongPressPending {
                 short: binding.short().clone(),
                 long: binding.long().clone(),
@@ -217,12 +244,17 @@ impl PressBehavior {
 
     fn deadline(&self) -> Option<Instant> {
         match self {
-            Self::LongPressPending { deadline, .. } => Some(*deadline),
+            Self::LongPressPending { deadline, .. } | Self::MultiClickAwaiting { deadline, .. } => {
+                Some(*deadline)
+            }
             Self::LifecycleOnly
             | Self::Immediate(_)
             | Self::LongPressFired
             | Self::WheelHoldPending { .. }
-            | Self::WheelHoldScrolled => None,
+            | Self::WheelHoldScrolled
+            | Self::MultiClickDown { .. }
+            | Self::MultiClickSecond { .. }
+            | Self::MultiClickSettled => None,
         }
     }
 
@@ -233,7 +265,11 @@ impl PressBehavior {
             | Self::LongPressPending { .. }
             | Self::LongPressFired
             | Self::WheelHoldPending { .. }
-            | Self::WheelHoldScrolled => None,
+            | Self::WheelHoldScrolled
+            | Self::MultiClickDown { .. }
+            | Self::MultiClickAwaiting { .. }
+            | Self::MultiClickSecond { .. }
+            | Self::MultiClickSettled => None,
         }
     }
 
@@ -241,10 +277,14 @@ impl PressBehavior {
         match self {
             Self::LongPressPending { short, .. } => Some(short),
             Self::WheelHoldPending { click } => Some(click),
+            Self::MultiClickSecond { double } => Some(double),
             Self::LifecycleOnly
             | Self::Immediate(_)
             | Self::LongPressFired
-            | Self::WheelHoldScrolled => None,
+            | Self::WheelHoldScrolled
+            | Self::MultiClickDown { .. }
+            | Self::MultiClickAwaiting { .. }
+            | Self::MultiClickSettled => None,
         }
     }
 
@@ -256,16 +296,32 @@ impl PressBehavior {
         }
     }
 
+    /// Fire whatever this press owes at its deadline: the long action of a
+    /// long press, or the single click of a multi-click whose window closed.
     fn fire_long(&mut self, now: Instant) -> Option<Action> {
-        let Self::LongPressPending { long, deadline, .. } = self else {
-            return None;
-        };
-        if now < *deadline {
-            return None;
+        match self {
+            Self::LongPressPending { long, deadline, .. } if now >= *deadline => {
+                let action = long.clone();
+                *self = Self::LongPressFired;
+                Some(action)
+            }
+            Self::MultiClickAwaiting {
+                click, deadline, ..
+            } if now >= *deadline => {
+                let action = click.clone();
+                *self = Self::MultiClickSettled;
+                Some(action)
+            }
+            _ => None,
         }
-        let action = long.clone();
-        *self = Self::LongPressFired;
-        Some(action)
+    }
+
+    /// When the producer saw the first edge of a multi-click press.
+    pub(super) fn multi_click_pressed_at(&self) -> Option<Instant> {
+        match self {
+            Self::MultiClickDown { pressed_at, .. } => Some(*pressed_at),
+            _ => None,
+        }
     }
 }
 
@@ -384,6 +440,40 @@ impl ButtonState {
         self.active.remove(key)
     }
 
+    /// A release of a multi-click press that was down opens its window: the
+    /// press stays active, awaiting a second click. A release that finds it
+    /// already awaiting is a duplicate edge and changes nothing. Returns
+    /// whether `key` was such a press.
+    fn open_multi_click_window(&mut self, key: &PressKey, released_at: Instant) -> bool {
+        let Some(press) = self.active.get_mut(key) else {
+            return false;
+        };
+        match &press.behavior {
+            PressBehavior::MultiClickDown { click, double, .. } => {
+                press.behavior = PressBehavior::MultiClickAwaiting {
+                    click: click.clone(),
+                    double: double.clone(),
+                    deadline: released_at + DOUBLE_CLICK_WINDOW,
+                };
+                true
+            }
+            PressBehavior::MultiClickAwaiting { .. } => true,
+            _ => false,
+        }
+    }
+
+    /// Remove and return the press at `key` if it is awaiting a second click.
+    fn take_awaiting_multi_click(&mut self, key: &PressKey) -> Option<ActivePress> {
+        if matches!(
+            self.active.get(key)?.behavior,
+            PressBehavior::MultiClickAwaiting { .. }
+        ) {
+            self.active.remove(key)
+        } else {
+            None
+        }
+    }
+
     fn active(&self, token: &PressToken) -> Option<&ActivePress> {
         self.active
             .get(&token.key)
@@ -428,7 +518,9 @@ impl ButtonState {
                 *target = current;
             }
         }
-        self.active.extract_if(|_, press| matches!(press.target, ActionDispatchTarget::Pointer { target, .. } if target != current))
+        self.active.extract_if(|_, press| {
+            matches!(press.target, ActionDispatchTarget::Pointer { target, .. } if target != current)
+        })
             .map(|(_, press)| press)
             .collect()
     }
@@ -445,7 +537,13 @@ impl ButtonState {
                 if press.token != *token {
                     return None;
                 }
-                press.fire_long(now).map(|action| (press.clone(), action))
+                let action = press.fire_long(now)?;
+                let fired = press.clone();
+                if matches!(fired.behavior, PressBehavior::MultiClickSettled) {
+                    // Its physical release came earlier: nothing else ends it.
+                    self.active.remove(&token.key);
+                }
+                Some((fired, action))
             })
             .collect()
     }
