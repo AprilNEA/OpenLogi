@@ -3,7 +3,8 @@
 //! screens.
 
 use gpui::{
-    Context, IntoElement, ParentElement, SharedString, Styled, div, prelude::FluentBuilder as _,
+    Context, InteractiveElement as _, IntoElement, ParentElement, SharedString, Styled,
+    WindowControlArea, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     IconName, Sizable as _,
@@ -15,8 +16,34 @@ use openlogi_core::hid::{DeviceRoute, ReceiverBrand};
 
 use super::AppView;
 use crate::state::{AppState, DeviceRecord};
+use crate::ui::caption;
 use crate::ui::components::control_button;
-use crate::ui::theme::{Palette, Typography as _};
+use crate::ui::theme::{HEADER_H, Palette, Typography as _};
+use crate::windows::CAPTION_IN_HEADER;
+
+/// The row every screen hangs its title and actions on. Where the window has
+/// no native caption this row is the drag region, and it keeps clear of the
+/// window controls pinned over its corner.
+pub(super) fn top_bar(pal: Palette) -> gpui::Div {
+    h_flex()
+        .h(px(HEADER_H))
+        .flex_shrink_0()
+        .w_full()
+        .px_5()
+        .gap_3()
+        .items_center()
+        .border_b_1()
+        .border_color(pal.border)
+        .when(CAPTION_IN_HEADER, |this| {
+            this.window_control_area(WindowControlArea::Drag)
+                .pr(caption::CONTROLS_W + px(12.))
+        })
+}
+
+/// Keeps a control clickable inside the drag region of a [`top_bar`].
+pub(super) fn bar_action() -> gpui::Div {
+    div().flex_shrink_0().occlude()
+}
 
 /// "← Devices" affordance on the detail screen; returns to the gallery without
 /// changing the active-device selection.

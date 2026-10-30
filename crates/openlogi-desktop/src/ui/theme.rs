@@ -37,7 +37,7 @@ pub const STATUS_OFFLINE: u32 = 0x006b_7280;
 pub const STATUS_DISABLED: u32 = 0x00ef_4444;
 
 /// Sizes that several components need to agree on.
-pub const HEADER_H: f32 = 64.;
+pub const HEADER_H: f32 = 48.;
 pub const FOOTER_H: f32 = 40.;
 pub const DETAIL_RAIL_W: f32 = 168.;
 /// Height of standalone form controls: buttons, text inputs, tabs.

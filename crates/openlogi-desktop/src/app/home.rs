@@ -12,8 +12,8 @@ use std::sync::Arc;
 
 use gpui::{
     Anchor, AnyElement, App, AppContext as _, Context, Div, ElementId, Hsla, InteractiveElement,
-    IntoElement, ParentElement, SharedString, StatefulInteractiveElement as _, Styled, Window,
-    canvas, div, fill, img, point, prelude::FluentBuilder as _, px, rgb, svg,
+    IntoElement, ParentElement, Rems, SharedString, StatefulInteractiveElement as _, Styled,
+    Window, canvas, div, fill, img, point, prelude::FluentBuilder as _, px, rems, rgb, svg,
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
@@ -34,8 +34,8 @@ use openlogi_ipc::PairingFailure;
 use super::AppView;
 use super::status::{loading_body, notice_body};
 use super::widgets::{
-    add_device_button, connection_summary, connectivity_dot, kind_label, receiver_slot_label,
-    settings_button,
+    add_device_button, bar_action, connection_summary, connectivity_dot, kind_label,
+    receiver_slot_label, settings_button, top_bar,
 };
 use crate::features::lighting::visual as light_visual;
 use crate::services::assets::GlowGeometry;
@@ -43,8 +43,12 @@ use crate::services::ipc::UnpairFailure;
 use crate::state::{AppState, DeviceRecord, ObservedConnection};
 use crate::ui::battery::{BatteryIndicator, glance_hint};
 use crate::ui::components::{control_input, save_cancel_footer};
-use crate::ui::theme::{self, ContentWidth, HEADER_H, Palette, Typography as _};
+use crate::ui::theme::{self, ContentWidth, Palette, Typography as _};
 use crate::windows::add_device::pairing_failure_text;
+
+/// What sets the device count on the title's baseline: the distance by which
+/// the title's line box runs further below its text than the caption's does.
+const COUNT_BASELINE_LIFT: Rems = rems(0.09375);
 
 /// Home (gallery) top bar: title/count, the persisted layout switcher, Settings,
 /// and Add Device.
@@ -60,30 +64,33 @@ pub(super) fn home_header(cx: &mut Context<AppView>) -> impl IntoElement {
     } else {
         tr!("device.device_count_plural", count => device_count)
     };
-    h_flex()
-        .h(px(HEADER_H))
-        .w_full()
-        .px_5()
-        .gap_3()
-        .items_center()
-        .border_b_1()
-        .border_color(pal.border)
+    top_bar(pal)
         .child(
-            v_flex()
+            h_flex()
                 .flex_1()
                 .min_w_0()
-                .gap_0p5()
+                .gap_2()
+                .items_end()
                 .child(div().text_heading().child(tr!("device.devices")))
                 .child(
                     div()
+                        // Flex has no text baselines to align: the title's box
+                        // ends lower under its text, so lift the count onto it.
+                        .mb(COUNT_BASELINE_LIFT)
                         .text_caption()
                         .text_color(pal.text_muted)
                         .child(device_count_label),
                 ),
         )
-        .child(views::device_view_switcher(current_mode, view))
-        .child(settings_button())
-        .child(add_device_button())
+        .child(
+            bar_action()
+                .flex()
+                .items_center()
+                .gap_3()
+                .child(views::device_view_switcher(current_mode, view))
+                .child(settings_button())
+                .child(add_device_button()),
+        )
 }
 
 /// Opacity the lighting colour is painted at over the device image, in both the

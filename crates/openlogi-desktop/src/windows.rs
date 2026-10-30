@@ -153,6 +153,20 @@ pub fn titlebar_options(title: impl Into<SharedString>) -> TitlebarOptions {
     }
 }
 
+/// Whether the main window draws its caption inside its own top bar instead of
+/// under a native one. Windows only: the native bar there is a plain strip the
+/// top bar can replace, and [`crate::ui::caption`] gives the OS its controls.
+pub const CAPTION_IN_HEADER: bool = cfg!(target_os = "windows");
+
+/// Titlebar options for the main window; see [`CAPTION_IN_HEADER`]. The title
+/// stays set so the taskbar and Alt-Tab keep naming the window.
+pub fn main_titlebar_options(title: impl Into<SharedString>) -> TitlebarOptions {
+    TitlebarOptions {
+        appears_transparent: CAPTION_IN_HEADER || cfg!(target_os = "linux"),
+        ..titlebar_options(title)
+    }
+}
+
 /// Client-side window titlebar for auxiliary windows: window controls
 /// (minimize / maximize / close on Linux + Windows), the drag region, and the
 /// window `title` centred. Each auxiliary view renders this as the top of its

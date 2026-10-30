@@ -18,7 +18,9 @@ use gpui_component::{
 use openlogi_core::config::{OnboardMemory, ScrollResolution};
 use openlogi_core::device::DeviceKind;
 
-use super::widgets::{back_button, connection_summary, kind_label, sidebar_action, status_badge};
+use super::widgets::{
+    back_button, bar_action, connection_summary, kind_label, sidebar_action, status_badge, top_bar,
+};
 use super::{AppView, DetailTab};
 use crate::app::menu::open_config_folder;
 use crate::features::action_ring::ActionRingPanel;
@@ -39,9 +41,7 @@ use crate::state::{AppState, BindingLayer, DeviceRecord, Load, StateEvents};
 use crate::ui::battery::BatteryIndicator;
 use crate::ui::components::{PanelCard, Toggle, toggle_row};
 use crate::ui::section::section_label;
-use crate::ui::theme::{
-    self, ContentWidth, DETAIL_RAIL_W, HEADER_H, Palette, SCREEN_PAD, Typography as _,
-};
+use crate::ui::theme::{self, ContentWidth, DETAIL_RAIL_W, Palette, SCREEN_PAD, Typography as _};
 
 mod backlight;
 mod easy_switch;
@@ -68,25 +68,16 @@ pub(super) fn detail_header(
     let battery = record
         .and_then(|r| r.battery.as_ref())
         .map(BatteryIndicator::inline);
-    h_flex()
-        .h(px(HEADER_H))
-        .flex_shrink_0()
-        .w_full()
-        .px_5()
-        .gap_3()
-        .items_center()
-        .border_b_1()
-        .border_color(pal.border)
-        .child(back_button(cx))
+    top_bar(pal)
+        .child(bar_action().child(back_button(cx)))
         .child(
             div()
+                .flex_1()
                 .min_w_0()
-                .max_w(px(220.))
                 .truncate()
                 .text_heading()
                 .child(name),
         )
-        .child(div().flex_1())
         .children(battery)
         // Only the exception earns a badge: a device on this page is usually
         // connected, and saying so on every page is noise.
