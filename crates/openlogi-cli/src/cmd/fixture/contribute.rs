@@ -89,6 +89,7 @@ async fn start(args: ContributeArgs, state_path: &Path) -> Result<()> {
         args.device.as_deref(),
     )
     .await?;
+    require_fixture_representation(&captured.selected_route)?;
     let profile = captured.profile;
 
     if args.profile_only || matches!(captured.selected_route, DeviceRoute::RawHid { .. }) {
@@ -317,6 +318,15 @@ fn validate_resumable_cases(directory: &Path, cassettes: &[HidCassette]) -> Resu
     Ok(())
 }
 
+/// Refuses a route no fixture can describe, before step 1 tells the user to
+/// stop the Agent for a step 2 that could never succeed.
+fn require_fixture_representation(route: &DeviceRoute) -> Result<()> {
+    if matches!(route, DeviceRoute::Hidpp20Receiver { .. }) {
+        bail!("HID++ 2.0 receiver routes have no fixture representation yet");
+    }
+    Ok(())
+}
+
 fn identity_plan(
     profile: &DeviceProfile,
     selected_route: &DeviceRoute,
@@ -528,6 +538,20 @@ mod tests {
             profile_only: false,
         };
         assert!(validate_args(&args).is_err());
+    }
+
+    #[test]
+    fn a_hidpp20_receiver_route_is_refused_before_step_one_writes() {
+        let route = DeviceRoute::Hidpp20Receiver {
+            receiver_uid: "OL-RECEIVER".to_string(),
+            slot: 1,
+        };
+        require_fixture_representation(&route).expect_err("no fixture representation");
+        require_fixture_representation(&DeviceRoute::Bolt {
+            receiver_uid: "OL-BOLT-UID-0001".to_string(),
+            slot: 2,
+        })
+        .expect("Bolt routes are representable");
     }
 
     #[test]
