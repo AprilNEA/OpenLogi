@@ -46,7 +46,7 @@ description = "Lightweight, local-first alternative to Logitech Options+ for HID
 hidpp = { package = "openlogi-hidpp", path = "crates/openlogi-hidpp", version = "0.8.19" }
 openlogi-device-registry = { path = "crates/openlogi-device-registry", version = "0.8.19" }
 openlogi-fixture = { path = "crates/openlogi-fixture", version = "0.8.19" }
-async-hid = { package = "openlogi-async-hid", version = "=0.5.3-openlogi.1" }
+async-hid = { package = "openlogi-async-hid", git = "https://github.com/AprilNEA/async-hid", rev = "55a3f9033be09835b00daf5c6ba2efad0341b7de" }
 interprocess = { version = "2", features = ["tokio"] }
 # The agent <-> GUI RPC layer itself, over the `interprocess` transport above.
 # 0.38 is a hard floor: earlier releases hard-depend on opentelemetry 0.30 (not
