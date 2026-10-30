@@ -230,7 +230,7 @@ async fn probe_or_reuse_registered(
             // the GUI for `REFRESH_INTERVAL`. A previous complete walk
             // outranks this partial one, so defer to it and re-probe next
             // reconciliation.
-            if fresh.capabilities_incomplete {
+            if fresh.capabilities_incomplete() {
                 if let Some(c) = cached {
                     keep_known_capabilities(&mut fresh, &c.probe);
                 }
@@ -294,8 +294,18 @@ async fn probe_or_reuse_registered(
 /// feature vanish. A probe whose capability reads all succeeded is returned
 /// untouched, including one that legitimately lost a capability.
 pub(super) fn keep_known_capabilities(fresh: &mut ProbedFeatures, cached: &ProbedFeatures) {
-    if fresh.capabilities_incomplete && matches!(cached.protocol, ProbedProtocol::Hidpp20(_)) {
-        fresh.protocol = cached.protocol;
+    if let (
+        ProbedProtocol::Hidpp20 {
+            capabilities,
+            incomplete: true,
+        },
+        ProbedProtocol::Hidpp20 {
+            capabilities: known,
+            ..
+        },
+    ) = (&mut fresh.protocol, cached.protocol)
+    {
+        *capabilities = known;
     }
 }
 

@@ -54,15 +54,6 @@ pub(super) struct ProbedFeatures {
     pub(super) marketing_name: Option<String>,
     /// Which protocol the device answered in, and with it the configuration
     /// capabilities derived from its feature table.
-    ///
-    /// Invariant: `capabilities_incomplete` implies this is
-    /// [`ProbedProtocol::Hidpp20`]. The sole non-test writer,
-    /// [`probe_features`], returns `Default` when the feature table is
-    /// unavailable and only sets the qualifier after constructing the
-    /// capability set. The cache only replaces that set with another
-    /// `Hidpp20`, and persistence only round-trips probes produced here. If
-    /// another writer is added, preserve this proof or replace the pair with a
-    /// sum type.
     pub(super) protocol: ProbedProtocol,
     /// A `DeviceInformation` read *failed* (vs. the feature being absent), so
     /// the identity fields above may be missing data the device does have.
@@ -70,10 +61,6 @@ pub(super) struct ProbedFeatures {
     /// means only the serial-number read failed, while `true` with `None` means
     /// the whole device-information read failed.
     pub(super) identity_incomplete: bool,
-    /// A capability read *failed* (vs. the device not having the capability),
-    /// so `protocol` above understates what the device can do. Memoizing
-    /// that would hide a panel in the GUI for `REFRESH_INTERVAL`.
-    pub(super) capabilities_incomplete: bool,
     /// The battery feature answered that the battery-powered end is not
     /// linked: a headset dongle whose headset is switched off. Volatile like
     /// `battery`, so never persisted. The cache resolves both fields from
@@ -106,9 +93,22 @@ impl ProbedFeatures {
     /// its kind-based fallback.
     pub(super) fn capabilities(&self) -> Option<Capabilities> {
         match self.protocol {
-            ProbedProtocol::Hidpp20(capabilities) => Some(capabilities),
+            ProbedProtocol::Hidpp20 { capabilities, .. } => Some(capabilities),
             ProbedProtocol::Unanswered | ProbedProtocol::Hidpp10 => None,
         }
+    }
+
+    /// Whether a capability read failed part way, so [`Self::capabilities`]
+    /// understates the device. Only a HID++ 2.0 feature walk can fall short
+    /// this way.
+    pub(super) fn capabilities_incomplete(&self) -> bool {
+        matches!(
+            self.protocol,
+            ProbedProtocol::Hidpp20 {
+                incomplete: true,
+                ..
+            }
+        )
     }
 
     /// Whether the probe learned what the device is: a completed HID++ 2.0
@@ -127,7 +127,14 @@ pub(super) enum ProbedProtocol {
     #[default]
     Unanswered,
     /// HID++ 2.0, with the capabilities derived from its feature table.
-    Hidpp20(Capabilities),
+    Hidpp20 {
+        capabilities: Capabilities,
+        /// A capability read *failed* (vs. the device not having the
+        /// capability), so `capabilities` understates what the device can do.
+        /// Memoizing that would hide a panel in the GUI for
+        /// `REFRESH_INTERVAL`.
+        incomplete: bool,
+    },
     /// HID++ 1.0: no feature table, so no capabilities to derive. The
     /// receiver supplies the device's name.
     Hidpp10,
@@ -457,9 +464,13 @@ async fn probe_hidpp20(
             model_info,
             kind,
             marketing_name,
-            protocol: capabilities.map_or(ProbedProtocol::Unanswered, ProbedProtocol::Hidpp20),
+            protocol: capabilities.map_or(ProbedProtocol::Unanswered, |capabilities| {
+                ProbedProtocol::Hidpp20 {
+                    capabilities,
+                    incomplete: capabilities_incomplete,
+                }
+            }),
             identity_incomplete,
-            capabilities_incomplete,
             unlinked: false,
             refresh: Refresh::Answered,
         },
@@ -899,7 +910,7 @@ mod tests {
                 )
                 .await;
                 let caps = probe.capabilities().unwrap();
-                assert!(!probe.capabilities_incomplete);
+                assert!(!probe.capabilities_incomplete());
                 assert_eq!(
                     caps.dpi_gestures,
                     supported && cid != 0x0053,
@@ -922,7 +933,7 @@ mod tests {
                 )
                 .await;
                 let caps = probe.capabilities().unwrap();
-                assert!(!probe.capabilities_incomplete);
+                assert!(!probe.capabilities_incomplete());
                 assert_eq!(
                     caps.virtual_thumbwheel,
                     supported && cid != 0x0052,
@@ -942,7 +953,7 @@ mod tests {
             )
             .await;
             let caps = probe.capabilities().unwrap();
-            assert_eq!(probe.capabilities_incomplete, fail_at.is_some());
+            assert_eq!(probe.capabilities_incomplete(), fail_at.is_some());
             assert_eq!(caps.haptic_panel, fail_at.is_none());
             assert_eq!(caps.dpi_gestures, fail_at.is_none());
             assert_eq!(caps.virtual_thumbwheel, fail_at.is_none());
@@ -988,7 +999,7 @@ mod tests {
             (0x0002, false),
         ] {
             let probe = multi_platform_probe(Some(word)).await;
-            assert!(!probe.capabilities_incomplete);
+            assert!(!probe.capabilities_incomplete());
             assert_eq!(
                 probe.capabilities().unwrap().os_layout,
                 settable,
@@ -997,7 +1008,7 @@ mod tests {
         }
         // An unanswered read leaves the set incomplete, so it is not memoized.
         let probe = multi_platform_probe(None).await;
-        assert!(probe.capabilities_incomplete);
+        assert!(probe.capabilities_incomplete());
     }
 
     /// Probe a mouse whose `0x19c0` (at index 2) reports `count` buttons and
@@ -1045,7 +1056,7 @@ mod tests {
             (0, MX_MASTER_4, false),
         ] {
             let probe = force_sensing_probe(count, Some(info)).await;
-            assert!(!probe.capabilities_incomplete);
+            assert!(!probe.capabilities_incomplete());
             assert_eq!(
                 probe.capabilities().unwrap().force_sensing,
                 offered,
@@ -1054,7 +1065,7 @@ mod tests {
         }
         // An unanswered read leaves the set incomplete, so it is not memoized.
         let probe = force_sensing_probe(1, None).await;
-        assert!(probe.capabilities_incomplete);
+        assert!(probe.capabilities_incomplete());
     }
 
     /// How a `0x19c0` `getCount` read goes in [`force_sensing_count_probe`].
@@ -1125,7 +1136,7 @@ mod tests {
             (CountRead::TransportFailure, true),
         ] {
             let probe = force_sensing_count_probe(count).await;
-            assert_eq!(probe.capabilities_incomplete, incomplete, "{count:?}");
+            assert_eq!(probe.capabilities_incomplete(), incomplete, "{count:?}");
             let caps = probe.capabilities().unwrap();
             // An answer withdraws the button; an unanswered read keeps the
             // feature table's presumption for the cache to repair.
@@ -1203,7 +1214,7 @@ mod tests {
                 state_of_charge: false,
             })
         );
-        assert!(!probe.capabilities_incomplete);
+        assert!(!probe.capabilities_incomplete());
         let battery = battery.expect("a level-only reading");
         assert_eq!(battery.percentage, None);
         assert_eq!(battery.level, BatteryLevel::Good);
@@ -1215,7 +1226,7 @@ mod tests {
         let (probe, battery_probe, battery) =
             unified_probe(Some(RECHARGEABLE | STATE_OF_CHARGE), [67, 0x04, 0]).await;
         assert_eq!(battery_probe, Some(unified(2)));
-        assert!(!probe.capabilities_incomplete);
+        assert!(!probe.capabilities_incomplete());
         assert_eq!(battery.expect("a reading").percentage, Some(67));
     }
 
@@ -1224,7 +1235,7 @@ mod tests {
         let (probe, battery_probe, battery) = unified_probe(None, [67, 0x04, 0]).await;
         assert_eq!(battery_probe, Some(unified(2)));
         assert!(
-            probe.capabilities_incomplete,
+            probe.capabilities_incomplete(),
             "an assumed capability must not be memoized"
         );
         assert_eq!(battery.expect("a reading").percentage, Some(67));
@@ -1299,7 +1310,7 @@ mod tests {
                 mileage: false,
             })
         );
-        assert!(!probe.capabilities_incomplete);
+        assert!(!probe.capabilities_incomplete());
         let battery = battery.expect("a reading");
         assert_eq!(battery.percentage, Some(85));
         assert_eq!(battery.level, BatteryLevel::Full);
@@ -1324,7 +1335,7 @@ mod tests {
         let (probe, battery_probe, battery) =
             legacy_probe(Some([100, MILEAGE | LEGACY_RECHARGEABLE]), [85, 84, 0]).await;
         assert_eq!(battery_probe, Some(legacy(2)));
-        assert!(!probe.capabilities_incomplete);
+        assert!(!probe.capabilities_incomplete());
         let battery = battery.expect("a reading");
         assert_eq!(battery.percentage, Some(85));
         assert_eq!(battery.level, BatteryLevel::Good);
@@ -1335,7 +1346,7 @@ mod tests {
         let (probe, battery_probe, battery) = legacy_probe(None, [85, 50, 0]).await;
         assert_eq!(battery_probe, Some(legacy(2)));
         assert!(
-            probe.capabilities_incomplete,
+            probe.capabilities_incomplete(),
             "an assumed capability must not be memoized"
         );
         assert_eq!(battery.expect("a reading").level, BatteryLevel::Good);

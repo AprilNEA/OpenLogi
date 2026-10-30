@@ -56,8 +56,9 @@ use super::features::{BatteryProbe, ProbedFeatures};
 /// v17 records whether a legacy `0x1000` battery reports mileage.
 /// v18 adds the `Capabilities::force_sensing` flag (`0x19c0` press force
 /// software can change).
-/// v19 folds `capabilities` into `protocol`, which also records HID++ 1.0, and
-/// adds the HID++ 1.0 battery registers to `BatteryProbe`.
+/// v19 folds `capabilities` and `capabilities_incomplete` into `protocol`,
+/// which also records HID++ 1.0, and adds the HID++ 1.0 battery registers to
+/// `BatteryProbe`.
 const SCHEMA_VERSION: u32 = 19;
 
 impl ProbeCacheError {
