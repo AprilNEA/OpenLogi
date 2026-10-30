@@ -50,8 +50,10 @@ async fn alternate_gesture_control_arming_respects_mode_and_capabilities() {
                 arm_controls_into(&device, &channel, 0xff, &spec, &mut armed)
                     .await
                     .unwrap();
-                let expected =
-                    cid != 0x00d7 && flags & 0x0020 != 0 && (!gestures || flags & 0x0100 != 0);
+                // Gesture mode diverts with raw XY where the control offers
+                // it, and plainly (click only) where it does not.
+                let expected = cid != 0x00d7 && flags & 0x0020 != 0;
+                let raw_xy = gestures && flags & 0x0100 != 0;
                 let writes: Vec<_> = handle
                     .written_reports()
                     .into_iter()
@@ -62,7 +64,7 @@ async fn alternate_gesture_control_arming_respects_mode_and_capabilities() {
                 assert_eq!(
                     writes,
                     if expected {
-                        vec![vec![hi, lo, if gestures { 0x33 } else { 0x23 }]]
+                        vec![vec![hi, lo, if raw_xy { 0x33 } else { 0x23 }]]
                     } else {
                         vec![]
                     },
@@ -158,13 +160,14 @@ async fn dpi_gesture_arming_never_overwrites_raw_xy_with_plain_diversion() {
 /// [`reprog_controls::MULTIPLATFORM_GESTURE_BUTTON_CID`] rather than the MX
 /// gesture CID, so arming must find it in the device's own control table:
 /// raw-XY diversion in gesture mode, plain diversion for a single binding, and
-/// left native when a gesture was asked of a control without raw XY.
+/// plain diversion as a click-only gesture source when a gesture was asked of
+/// a control without raw XY.
 #[tokio::test]
 async fn m720_gesture_button_arms_from_its_reported_control_table() {
     let cid = reprog_controls::MULTIPLATFORM_GESTURE_BUTTON_CID;
     for (gestures, raw_xy, expected_flags) in [
         (true, true, vec![0x33]),
-        (true, false, vec![]),
+        (true, false, vec![0x23]),
         (false, true, vec![0x23]),
         (false, false, vec![0x23]),
     ] {
@@ -221,11 +224,7 @@ async fn m720_gesture_button_arms_from_its_reported_control_table() {
         );
         assert_eq!(
             armed.gesture_cids,
-            if gestures && raw_xy {
-                vec![cid]
-            } else {
-                vec![]
-            }
+            if gestures { vec![cid] } else { vec![] }
         );
         assert_eq!(
             armed.button_cids,
@@ -236,6 +235,88 @@ async fn m720_gesture_button_arms_from_its_reported_control_table() {
             }
         );
     }
+}
+
+/// The first-generation MX Master's gesture button is divertable but reports
+/// no raw XY (`mse, reprogrammable, divertable`). Left native in gesture
+/// mode, its firmware ran its own action in place of the configured click
+/// (#1311, #2167). Arming diverts it plainly as a gesture source, so a press
+/// and release reach the map's `Click`, with the button edges around it.
+#[tokio::test]
+async fn a_gesture_source_without_raw_xy_still_delivers_its_click() {
+    let cid = reprog_controls::GESTURE_BUTTON_CID;
+    let (raw, handle) = ScriptedRawHidChannel::with_dynamic_responder(move |request| {
+        let mut response = vec![0; 20];
+        response[..4].copy_from_slice(&request[..4]);
+        response[0] = 0x11;
+        match (request[2], request[3] >> 4) {
+            (0, 1) => response[4] = 4,
+            (0, 0) => response[4] = 2,
+            (2, 0) => response[4] = 1,
+            (2, 1) => {
+                response[4..6].copy_from_slice(&cid.to_be_bytes());
+                // mse | reprogrammable | divertable; no raw-XY bit.
+                response[8] = 0x31;
+                response[12] = 0;
+            }
+            (2, 2) => response[4..6].copy_from_slice(&cid.to_be_bytes()),
+            (2, 3) => return Some(request.to_vec()),
+            _ => panic!("unexpected capture request: {request:02x?}"),
+        }
+        Some(response)
+    });
+    let channel = scripted_channel(raw).await;
+    let device = Device::new(channel.clone(), 0xff).await.unwrap();
+    let spec = CaptureSpec {
+        divert_gesture_sources: vec![cid],
+        ..CaptureSpec::default()
+    };
+    let mut armed = ArmedControls::default();
+    arm_controls_into(&device, &channel, 0xff, &spec, &mut armed)
+        .await
+        .unwrap();
+    let writes: Vec<_> = handle
+        .written_reports()
+        .into_iter()
+        .filter(|report| report[2] == 2 && report[3] >> 4 == 3)
+        .map(|report| report[4..7].to_vec())
+        .collect();
+    let [hi, lo] = cid.to_be_bytes();
+    assert_eq!(writes, vec![vec![hi, lo, 0x23]], "plain divert, raw XY off");
+    assert_eq!(armed.gesture_cids, vec![cid]);
+    assert!(armed.button_cids.is_empty());
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+    for event in [
+        RawControlEvent::DivertedButtons([cid, 0, 0, 0]),
+        RawControlEvent::DivertedButtons([0; 4]),
+    ] {
+        handle_reprog(
+            &mut acc,
+            event,
+            &armed.gesture_cids,
+            &armed.dpi_cids,
+            &armed.button_cids,
+            &tx,
+        );
+    }
+    assert_eq!(
+        rx.try_recv(),
+        Ok(CapturedInput::ButtonDown(ButtonId::GestureButton))
+    );
+    assert_eq!(
+        rx.try_recv(),
+        Ok(CapturedInput::Gesture(
+            ButtonId::GestureButton,
+            GestureDirection::Click
+        ))
+    );
+    assert_eq!(
+        rx.try_recv(),
+        Ok(CapturedInput::ButtonUp(ButtonId::GestureButton))
+    );
+    assert!(rx.try_recv().is_err(), "one press is one click");
 }
 
 /// The buttons a session reports as diverted are the ones arming wrote, not

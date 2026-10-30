@@ -10,7 +10,7 @@ use hidpp::feature::{CreatableFeature as _, hires_wheel::HiResWheelFeature};
 use hidpp::protocol::v20::Hidpp20Error;
 use hidpp::{channel::HidppChannel, device::Device};
 use openlogi_core::binding::ButtonId;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use super::main_wheel::{self, ArmedMainWheel, MainWheelDivert};
 use super::{CaptureSpec, CapturedInput};
@@ -32,8 +32,11 @@ use crate::{ChannelRegistry, SharedChannel};
 pub(super) struct ArmedControls {
     /// `0x1b04` accessor, present when the device exposes it.
     pub(super) reprog: Option<ReprogControlsV4>,
-    /// The gesture-source CIDs diverted with raw-XY reporting: the
-    /// `spec.divert_gesture_sources` members the device exposes.
+    /// The gesture-source CIDs armed for gesture mode: the
+    /// `spec.divert_gesture_sources` members the device exposes and can
+    /// divert. Each is diverted with raw-XY reporting when the control offers
+    /// it, and plainly otherwise, so a source that cannot report a swipe
+    /// still delivers its click.
     pub(super) gesture_cids: Vec<u16>,
     /// Raw-XY-capable additional CIDs diverted as gesture sources (side
     /// buttons on supported desktops and a gesture-mode DPI/ModeShift button).
@@ -175,10 +178,10 @@ impl ArmedControls {
 }
 
 /// Resolve features off the device's root and divert the controls `spec`
-/// selects: the gesture sources (raw-XY), DPI/ModeShift buttons and rebindable
-/// standard buttons over `0x1b04`, and the thumb wheel over `0x2150`. The
-/// root-feature lookup mirrors `write::open_feature`,
-/// since hidpp 0.2's registry doesn't carry the features OpenLogi reimplements.
+/// selects: the gesture sources (raw-XY where offered), DPI/ModeShift buttons
+/// and rebindable standard buttons over `0x1b04`, and the thumb wheel over
+/// `0x2150`. The root-feature lookup mirrors `write::open_feature`, since
+/// hidpp 0.2's registry doesn't carry the features OpenLogi reimplements.
 ///
 /// A failure mid-way tries to hand every possibly-diverted control back to the
 /// firmware. If compensation is incomplete, the returned failure carries an
@@ -234,13 +237,25 @@ pub(super) async fn arm_controls_into(
         // Divert each gesture-mode source; a source not listed stays native
         // (an idle HID++ control must not be captured-and-dropped).
         for &cid in &spec.divert_gesture_sources {
-            if controls
-                .iter()
-                .any(|c| c.cid == cid && c.is_divertable() && c.supports_raw_xy())
-            {
-                arm_reprog_control(&rc, cid, PointerDivert::RawXy, &mut armed.reporting).await?;
-                armed.gesture_cids.push(cid);
-            }
+            let Some(control) = controls.iter().find(|c| c.cid == cid && c.is_divertable()) else {
+                continue;
+            };
+            // A source without raw XY (the first-generation MX Master's
+            // gesture button) cannot report a swipe. Left native, its
+            // firmware runs its own action in place of the configured click,
+            // so divert it plainly: its press and release still reach the
+            // accumulator as a hold, which ends as the map's `Click`.
+            let divert = if control.supports_raw_xy() {
+                PointerDivert::RawXy
+            } else {
+                info!(
+                    cid = format_args!("{cid:#06x}"),
+                    "gesture source reports no raw XY — armed for its click only"
+                );
+                PointerDivert::Plain
+            };
+            arm_reprog_control(&rc, cid, divert, &mut armed.reporting).await?;
+            armed.gesture_cids.push(cid);
         }
         for &(cid, button) in &spec.divert_gesture_buttons {
             if let Some(control) = controls.iter().find(|c| c.cid == cid)
