@@ -255,10 +255,15 @@ fn main_view_hotspots(asset: &ResolvedAsset, mouse_w: f32, mouse_h: f32) -> Vec<
 /// grouping is kept only while every leader on the side can still reach its
 /// card without crossing another; otherwise the side falls back to plain
 /// height order, which never crosses.
+///
+/// `room_h` is the height the cards may use, centred on the model and at
+/// least `mouse_h`: a model shrunk to fit a narrow window leaves height
+/// beside it that a crowded side needs (see [`place_side`]).
 pub fn labels_from_hotspots(
     hotspots: &[Hotspot],
     mouse_w: f32,
     mouse_h: f32,
+    room_h: f32,
     distribution: LabelDistribution,
 ) -> Vec<Label> {
     if hotspots.is_empty() {
@@ -292,10 +297,10 @@ pub fn labels_from_hotspots(
             .filter_map(|(index, label)| (label.side == side).then_some(index))
             .collect();
         let grouped = vertical_order(hotspots, &labels, &on_side, true);
-        place_side(&mut labels, hotspots, &grouped, mouse_h);
+        place_side(&mut labels, hotspots, &grouped, mouse_h, room_h);
         if side_leaders_cross(hotspots, &labels, &grouped, mouse_w) {
             let plain = vertical_order(hotspots, &labels, &on_side, false);
-            place_side(&mut labels, hotspots, &plain, mouse_h);
+            place_side(&mut labels, hotspots, &plain, mouse_h, room_h);
         }
     }
 
@@ -332,15 +337,32 @@ fn vertical_order(
 }
 
 /// Put `order`'s cards as close to their hotspots' heights as the card
-/// height, the gap between cards and the model's height allow.
-fn place_side(labels: &mut [Label], hotspots: &[Hotspot], order: &[usize], mouse_h: f32) {
+/// height and the gap between cards allow. A side that does not fit the
+/// model's height reaches past its top and bottom into `room_h`, only as far
+/// as it needs; one that does not fit `room_h` either closes its gaps, so
+/// every card stays on screen.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "a side holds a handful of cards — well within f32 mantissa"
+)]
+fn place_side(
+    labels: &mut [Label],
+    hotspots: &[Hotspot],
+    order: &[usize],
+    mouse_h: f32,
+    room_h: f32,
+) {
     let ideal: Vec<f32> = order.iter().map(|&i| hotspots[i].center().1).collect();
-    let ys = spread_in_order(
-        &ideal,
-        LABEL_H + LABEL_GAP,
-        LABEL_H / 2.,
-        mouse_h - LABEL_H / 2.,
-    );
+    let pitch = LABEL_H + LABEL_GAP;
+    let span = order.len().saturating_sub(1) as f32 * pitch;
+    let overhang = ((span - (mouse_h - LABEL_H)) / 2.).clamp(0., ((room_h - mouse_h) / 2.).max(0.));
+    let lo = LABEL_H / 2. - overhang;
+    let hi = mouse_h - LABEL_H / 2. + overhang;
+    let spacing = match order.len() {
+        0 | 1 => pitch,
+        count => pitch.min((hi - lo) / (count - 1) as f32),
+    };
+    let ys = spread_in_order(&ideal, spacing, lo, hi);
     for (&index, y) in order.iter().zip(ys) {
         labels[index].y = y;
     }
@@ -458,6 +480,7 @@ mod tests {
         labels_from_hotspots(
             &fallback_hotspots(layout, thumbwheel),
             MOUSE_MODEL_SIZE.0,
+            MOUSE_MODEL_SIZE.1,
             MOUSE_MODEL_SIZE.1,
             distribution,
         )
@@ -703,10 +726,34 @@ mod tests {
             &hotspots,
             MOUSE_MODEL_SIZE.0,
             MOUSE_MODEL_SIZE.1,
+            MOUSE_MODEL_SIZE.1,
             LabelDistribution::LeftOnly,
         );
         assert_eq!(label_for(&labels, ButtonId::MiddleClick).y, 100.);
         assert_eq!(label_for(&labels, ButtonId::DpiToggle).y, 300.);
+    }
+
+    /// The room beside the model is only for a side that does not fit it.
+    #[test]
+    fn a_side_that_fits_the_model_ignores_the_room_beside_it() {
+        let hotspots = [
+            hotspot(ButtonId::MiddleClick, 200., 5.),
+            hotspot(ButtonId::Forward, 200., 195.),
+            hotspot(ButtonId::Back, 220., 215.),
+        ];
+        let at = |room_h| -> Vec<f32> {
+            labels_from_hotspots(
+                &hotspots,
+                MOUSE_MODEL_SIZE.0,
+                MOUSE_MODEL_SIZE.1,
+                room_h,
+                LabelDistribution::LeftOnly,
+            )
+            .iter()
+            .map(|label| label.y)
+            .collect()
+        };
+        assert_eq!(at(MOUSE_MODEL_SIZE.1), at(MOUSE_MODEL_SIZE.1 + 300.));
     }
 
     #[test]
@@ -718,6 +765,7 @@ mod tests {
         let labels = labels_from_hotspots(
             &hotspots,
             MOUSE_MODEL_SIZE.0,
+            MOUSE_MODEL_SIZE.1,
             MOUSE_MODEL_SIZE.1,
             LabelDistribution::LeftOnly,
         );
@@ -734,6 +782,7 @@ mod tests {
             let labels = labels_from_hotspots(
                 &hotspots,
                 MOUSE_MODEL_SIZE.0,
+                MOUSE_MODEL_SIZE.1,
                 MOUSE_MODEL_SIZE.1,
                 distribution,
             );
@@ -755,6 +804,7 @@ mod tests {
         let mut labels = labels_from_hotspots(
             &hotspots,
             MOUSE_MODEL_SIZE.0,
+            MOUSE_MODEL_SIZE.1,
             MOUSE_MODEL_SIZE.1,
             LabelDistribution::LeftOnly,
         );
@@ -783,6 +833,7 @@ mod tests {
             &hotspots,
             MOUSE_MODEL_SIZE.0,
             MOUSE_MODEL_SIZE.1,
+            MOUSE_MODEL_SIZE.1,
             LabelDistribution::LeftOnly,
         );
         assert_clean_layout(&hotspots, &labels, MOUSE_MODEL_SIZE.0);
@@ -803,6 +854,7 @@ mod tests {
         let labels = labels_from_hotspots(
             &hotspots,
             MOUSE_MODEL_SIZE.0,
+            MOUSE_MODEL_SIZE.1,
             MOUSE_MODEL_SIZE.1,
             LabelDistribution::BothSides,
         );
