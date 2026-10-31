@@ -13,7 +13,7 @@ use hidpp::{
     },
     feature::feature_set::FeatureSetFeature,
     feature::unified_battery::{BatteryInfo as UnifiedBatteryInfo, UnifiedBatteryFeature},
-    protocol::v20::Hidpp20Error,
+    protocol::v20::{ErrorType, Hidpp20Error},
 };
 
 use crate::backend::HidBackend;
@@ -25,6 +25,8 @@ use crate::write::{HidppOperation, WriteError, classify_hidpp_error, open_featur
 /// version. Returned by [`dump_features`] for diagnostics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FeatureEntry {
+    /// Position of the entry in the device's feature table.
+    pub index: u8,
     /// HID++ feature ID.
     pub id: u16,
     /// Feature version reported by the device.
@@ -62,46 +64,69 @@ impl From<CidInfo> for ReprogControlEntry {
 /// feature IDs a given peripheral actually exposes (e.g. whether a mouse
 /// speaks `0x2201 AdjustableDpi`, `0x2202 ExtendedAdjustableDpi`, or both —
 /// `write::dpi` drives either).
+///
+/// Index `0` is the root feature. Most devices list it in their FeatureSet
+/// table, and the dump keeps that row. [`FeatureSetFeature`] reserves the
+/// index, though, and some firmware refuses it: the Yeti X answers
+/// `InvalidArgument` (#786). A refused root row is left out, so each
+/// [`FeatureEntry::index`] stays the device's own index. Any other error
+/// fails the dump.
 pub async fn dump_features(
     backend: &dyn HidBackend,
     route: &DeviceRoute,
 ) -> Result<Vec<FeatureEntry>, WriteError> {
     let index = route.device_index();
     with_route(backend, route, move |channel| async move {
-        let mut device = Device::new(Arc::clone(&channel), index)
-            .await
-            .map_err(|_| WriteError::DeviceUnreachable { index })?;
-        // The root feature exposes the FeatureSet (0x0001) at a fixed
-        // address; we look it up directly rather than going through
-        // `enumerate_features` so the iteration is observable.
-        let feature_set_info = device
-            .root()
-            .get_feature(FeatureSetFeature::ID)
-            .await
-            .map_err(|e| {
-                classify_hidpp_error(e, HidppOperation::DumpFeatures, FeatureSetFeature::ID)
-            })?
-            .ok_or(WriteError::FeatureUnsupported {
-                feature_hex: FeatureSetFeature::ID,
-            })?;
-        let feature_set = device.add_feature::<FeatureSetFeature>(feature_set_info.index);
-        let count = feature_set.count().await.map_err(|e| {
-            classify_hidpp_error(e, HidppOperation::DumpFeatures, FeatureSetFeature::ID)
-        })?;
-        let mut entries = Vec::with_capacity(usize::from(count));
-        for i in 0..=count {
-            let info = feature_set.get_feature(i).await.map_err(|e| {
-                classify_hidpp_error(e, HidppOperation::DumpFeatures, FeatureSetFeature::ID)
-            })?;
-            entries.push(FeatureEntry {
-                id: info.id,
-                version: info.version,
-                typ: info.typ,
-            });
-        }
-        Ok(entries)
+        dump_features_on_channel(&channel, index).await
     })
     .await
+}
+
+/// [`dump_features`] against an already-open channel, the shape the tests
+/// drive a scripted device through.
+pub(crate) async fn dump_features_on_channel(
+    channel: &Arc<HidppChannel>,
+    index: u8,
+) -> Result<Vec<FeatureEntry>, WriteError> {
+    let mut device = Device::new(Arc::clone(channel), index)
+        .await
+        .map_err(|_| WriteError::DeviceUnreachable { index })?;
+    // The root feature exposes the FeatureSet (0x0001) at a fixed
+    // address; we look it up directly rather than going through
+    // `enumerate_features` so the iteration is observable.
+    let feature_set_info = device
+        .root()
+        .get_feature(FeatureSetFeature::ID)
+        .await
+        .map_err(|e| classify_hidpp_error(e, HidppOperation::DumpFeatures, FeatureSetFeature::ID))?
+        .ok_or(WriteError::FeatureUnsupported {
+            feature_hex: FeatureSetFeature::ID,
+        })?;
+    let feature_set = device.add_feature::<FeatureSetFeature>(feature_set_info.index);
+    let count = feature_set.count().await.map_err(|e| {
+        classify_hidpp_error(e, HidppOperation::DumpFeatures, FeatureSetFeature::ID)
+    })?;
+    let mut entries = Vec::with_capacity(usize::from(count) + 1);
+    for i in 0..=count {
+        let info = match feature_set.get_feature(i).await {
+            Ok(info) => info,
+            Err(Hidpp20Error::Feature(ErrorType::InvalidArgument)) if i == 0 => continue,
+            Err(e) => {
+                return Err(classify_hidpp_error(
+                    e,
+                    HidppOperation::DumpFeatures,
+                    FeatureSetFeature::ID,
+                ));
+            }
+        };
+        entries.push(FeatureEntry {
+            index: i,
+            id: info.id,
+            version: info.version,
+            typ: info.typ,
+        });
+    }
+    Ok(entries)
 }
 
 /// Enumerate the device's HID++ `0x1b04` reprogrammable controls. This is a
