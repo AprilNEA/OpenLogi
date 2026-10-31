@@ -108,7 +108,8 @@ pub type SharedHookMaps = Arc<RwLock<HookMaps>>;
 /// (keycode + modifiers).
 pub type SharedKeyboardBindings = Arc<RwLock<BTreeMap<KeyTrigger, Action>>>;
 
-/// Tracks which OS-hook gesture button (Middle/Back/Forward) is mid-hold and defers the
+/// Tracks which OS-hook gesture button (Middle/Back/Forward, or the gesture
+/// button where the hook reports it) is mid-hold and defers the
 /// swipe detection itself to a shared [`SwipeAccumulator`], which commits a swipe
 /// *mid-motion* like the HID++ gesture-button path in `openlogi-hid`. This wrapper
 /// adds only the button identity the accumulator doesn't track; a press that
@@ -300,7 +301,7 @@ fn handle_button(
     capture_safari_pid: impl FnOnce() -> Option<i32>,
 ) -> EventDisposition {
     // Primary L/R always pass through (suppressing them would brick the mouse).
-    if !id.is_os_hook_button() || !button_source_may_remap(device) {
+    if !id.may_reach_os_hook() || !button_source_may_remap(device) {
         return EventDisposition::PassThrough;
     }
     // `try_read` only: a blocking read on the tap thread freezes every pointer

@@ -163,8 +163,10 @@ pub fn hidpp_gesture_maps_for(
 /// directions via [`Binding::fill_gesture_defaults`] when a button is
 /// promoted — so only a hand-edited sparse map leaves a direction unbound, in
 /// which case that swipe simply does nothing. The dedicated gesture button is
-/// intentionally excluded: it never reaches the OS hook (it's captured over
-/// HID++), so it has no entry here.
+/// intentionally excluded: capture plans read this projection to leave a
+/// control undiverted, and its HID++ capture must stay. The agent gives the
+/// hook the gesture button's map itself, for the one device that reports it
+/// as a native button (the Performance MX's thumb rest on Linux).
 ///
 /// A per-app override of a gesture button turns it into a [`Binding::Single`]
 /// for that app, so it stops being a gesture button there and falls through to

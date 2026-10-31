@@ -18,7 +18,9 @@ use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{
     ActionRingIcon, Binding, ButtonId, GamingButtons, GamingLayout, GridKey, KeypadPage,
 };
-use openlogi_core::bindings::{bindings_on_page, button_bindings_for, oshook_gestures_for};
+use openlogi_core::bindings::{
+    bindings_on_page, button_bindings_for, hidpp_gesture_maps_for, oshook_gestures_for,
+};
 use openlogi_core::config::{
     AppSettings, Config, ConfigRevision, LightSettings, MouseProfileTarget, canonical_device_key,
 };
@@ -827,6 +829,16 @@ impl Orchestrator {
         // G-series layout changes, so this map needs no layout.
         let mut bindings = button_bindings_for(&self.config, key, app, None);
         let mut gestures = oshook_gestures_for(&self.config, key, app);
+        // The hook reports the gesture button only from a device whose Linux
+        // button table maps a native button to it, and runs its map there the
+        // way a HID++ capture would. It joins here, not in
+        // `oshook_gestures_for`: capture plans read that projection to leave a
+        // control undiverted, and an MX Master's gesture button stays on HID++.
+        if let Some(map) =
+            hidpp_gesture_maps_for(&self.config, key, app).remove(&ButtonId::GestureButton)
+        {
+            gestures.insert(ButtonId::GestureButton, map);
+        }
         if cfg!(target_os = "macos")
             && let Some(key) = key
             && !self.is_spy_only(key)

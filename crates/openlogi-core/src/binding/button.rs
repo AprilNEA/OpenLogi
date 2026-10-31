@@ -182,6 +182,21 @@ impl ButtonId {
         )
     }
 
+    /// Whether the OS hook acts on this button when it reports one: the
+    /// [`is_os_hook_button`](Self::is_os_hook_button) set plus
+    /// [`ButtonId::GestureButton`]. The hook reports the gesture button only
+    /// from a device whose Linux button table maps a native button to it (the
+    /// Performance MX's thumb rest), and a HID++ capture session that diverted
+    /// it on that device still owns it there.
+    ///
+    /// The gesture button stays out of `is_os_hook_button` on purpose. Capture
+    /// plans read that set to leave a control native under the capture opt-out,
+    /// and an MX Master's gesture button must stay on HID++.
+    #[must_use]
+    pub fn may_reach_os_hook(self) -> bool {
+        self.is_os_hook_button() || self == ButtonId::GestureButton
+    }
+
     /// Whether this button may use the OS hook's hold-and-swipe gesture path.
     /// Middle, Back, and Forward are eligible controls. Wheel rotation and
     /// tilt remain single-action controls.

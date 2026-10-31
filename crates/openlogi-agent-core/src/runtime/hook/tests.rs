@@ -658,11 +658,7 @@ fn zoom_stays_native_until_it_is_bound() {
         bindings: BTreeMap::from([(ButtonId::Zoom, default_binding(ButtonId::Zoom).into())]),
         ..HookMaps::default()
     }));
-    let performance_mx = EventDevice {
-        vendor_id: Some(0x046d),
-        product_id: Some(0x101a),
-        product_name: None,
-    };
+    let performance_mx = performance_mx();
     for pressed in [true, false] {
         assert_eq!(
             handle_button(
@@ -712,6 +708,101 @@ fn zoom_stays_native_until_it_is_bound() {
         ),
         EventDisposition::Suppress
     );
+    assert!(owner.shutdown());
+}
+
+fn performance_mx() -> EventDevice {
+    EventDevice {
+        vendor_id: Some(0x046d),
+        product_id: Some(0x101a),
+        product_name: None,
+    }
+}
+
+/// The next action a press triggered, skipping its start and end.
+fn next_trigger(events: &mpsc::Receiver<super::super::button::ButtonRuntimeEvent>) -> Action {
+    use super::super::button::ButtonRuntimeEvent;
+    loop {
+        match events.recv_timeout(Duration::from_secs(1)).expect("event") {
+            ButtonRuntimeEvent::Triggered { action, .. } => return action,
+            ButtonRuntimeEvent::Started(_) | ButtonRuntimeEvent::Ended { .. } => {}
+        }
+    }
+}
+
+/// The Performance MX's thumb rest reaches the hook as the gesture button.
+/// No capture session owns it there, so the hook runs its gesture map: a tap
+/// fires the click direction and a swipe its own direction.
+#[test]
+fn the_hook_runs_the_gesture_button_where_no_capture_session_diverted_it() {
+    let (dispatcher, mut owner, events) = test_dispatcher();
+    let hooks = Arc::new(RwLock::new(HookMaps {
+        gestures: BTreeMap::from([(
+            ButtonId::GestureButton,
+            BTreeMap::from([
+                (GestureDirection::Click, Action::AppExpose),
+                (GestureDirection::Right, Action::NextTab),
+            ]),
+        )]),
+        ..HookMaps::default()
+    }));
+    let source = performance_mx();
+    let press = |pressed| {
+        handle_button(
+            ButtonId::GestureButton,
+            pressed,
+            Some(&source),
+            &hooks,
+            &dispatcher,
+            || None,
+        )
+    };
+
+    assert_eq!(press(true), EventDisposition::Suppress);
+    assert_eq!(press(false), EventDisposition::Suppress);
+    assert_eq!(next_trigger(&events), Action::AppExpose);
+
+    assert_eq!(press(true), EventDisposition::Suppress);
+    HOLD.with_borrow_mut(|hold| hold.swipe.backdate_hold_for_test());
+    assert_eq!(
+        handle_moved(GESTURE_SWIPE_THRESHOLD + 10, 0, &hooks, &dispatcher),
+        EventDisposition::PassThrough
+    );
+    assert_eq!(next_trigger(&events), Action::NextTab);
+    assert_eq!(press(false), EventDisposition::Suppress);
+    assert!(owner.shutdown());
+}
+
+/// A device whose capture session diverted the gesture button keeps it on
+/// HID++: the hook drops its OS copy as an echo instead of running it twice.
+#[test]
+fn a_gesture_button_a_capture_session_diverted_stays_with_that_session() {
+    let (dispatcher, mut owner, events) = test_dispatcher();
+    let mut maps = HookMaps {
+        gestures: BTreeMap::from([(
+            ButtonId::GestureButton,
+            BTreeMap::from([(GestureDirection::Click, Action::AppExpose)]),
+        )]),
+        ..HookMaps::default()
+    };
+    maps.diverted_buttons
+        .record(&m650_session(7), &m650_route(), ButtonId::GestureButton);
+    let hooks = Arc::new(RwLock::new(maps));
+    for pressed in [true, false] {
+        assert_eq!(
+            handle_button(
+                ButtonId::GestureButton,
+                pressed,
+                Some(&m650_bluetooth()),
+                &hooks,
+                &dispatcher,
+                || None
+            ),
+            EventDisposition::Suppress,
+            "pressed {pressed}"
+        );
+    }
+    assert!(events.recv_timeout(Duration::from_millis(200)).is_err());
     assert!(owner.shutdown());
 }
 

@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 
 use openlogi_core::device_order::PhysicalDeviceKey;
-use openlogi_hid::reprog_controls::BACK_CIDS;
+use openlogi_hid::reprog_controls::{BACK_CIDS, GESTURE_BUTTON_CID};
 
 use super::*;
 use crate::runtime::PointerSelection;
@@ -900,5 +900,39 @@ fn two_mouse_hidpp_plans_are_device_scoped_while_hook_fallback_is_selected_devic
     assert!(
         hook_maps.gestures.contains_key(&ButtonId::Forward),
         "the passive Windows fallback is one selected-device map, not a per-source map"
+    );
+}
+
+/// The hook gets the gesture button's map, for the Performance MX's thumb
+/// rest, without taking the button from a device that captures it over HID++.
+#[test]
+fn the_hook_gets_the_gesture_buttons_map_while_hidpp_keeps_capturing_it() {
+    use openlogi_core::binding::{GestureDirection, default_gesture_binding};
+
+    let mut orch = orchestrator(Config::default());
+    orch.devices = vec![dev("a", 1, true)];
+    orch.rebuild();
+    orch.set_os_mouse_hook_available(true);
+
+    let defaults = GestureDirection::ALL
+        .into_iter()
+        .map(|direction| (direction, default_gesture_binding(direction)))
+        .collect();
+    assert_eq!(
+        orch.shared
+            .hook_maps
+            .read()
+            .expect("hook maps should not be poisoned")
+            .gestures
+            .get(&ButtonId::GestureButton),
+        Some(&defaults)
+    );
+    assert!(
+        orch.shared.capture_plans.borrow().plans()[0]
+            .target
+            .spec
+            .divert_gesture_sources
+            .contains(&GESTURE_BUTTON_CID),
+        "the gesture button must still be diverted over HID++"
     );
 }
