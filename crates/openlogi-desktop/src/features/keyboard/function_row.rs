@@ -872,10 +872,12 @@ fn key_click_target(
         })
 }
 
+/// A key with no assignment keeps its own function, so its callout names
+/// that the way the panel's native row does; only `Action::None` turns it off.
 fn binding_label(action: Option<&Action>) -> gpui::SharedString {
     match action {
         Some(action) => localized_action_label(action),
-        None => tr!("common.off"),
+        None => tr!("keyboard.native_function"),
     }
 }
 
