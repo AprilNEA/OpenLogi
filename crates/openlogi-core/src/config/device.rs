@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 
 use super::button_map::{deserialize_button_map, deserialize_button_maps_by_app};
 use super::settings::{
-    CameraControls, GestureOwner, LightSettings, Lighting, OnboardMemory, ScrollResolution,
-    SmartShift, ThumbwheelSensitivity, deserialize_gesture_owner,
+    CameraControls, CameraStreamMode, GestureOwner, LightSettings, Lighting, OnboardMemory,
+    ScrollResolution, SmartShift, ThumbwheelSensitivity, deserialize_gesture_owner,
 };
 use crate::binding::{Action, ActionRingConfig, Binding, ButtonId, GestureDirection};
 use crate::device::{Capabilities, DeviceKind, DeviceModelInfo, LightCapabilities};
@@ -291,6 +291,11 @@ pub struct DeviceConfig {
     /// The camera profile last applied from the GUI, highlighted on reopen.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub camera_profile: Option<String>,
+    /// The frame size and rate the webcam's live preview opens at, picked in
+    /// the Camera tab. `None` until the user picks one: the preview then opens
+    /// at the camera's default, and the field stays out of `config.toml`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub camera_stream_mode: Option<CameraStreamMode>,
     /// Per-device thumb-wheel sensitivity override. `None` falls back to the
     /// app-wide
     /// [`AppSettings::thumbwheel_sensitivity`](crate::config::AppSettings::thumbwheel_sensitivity).
@@ -466,6 +471,7 @@ impl Default for DeviceConfig {
             camera_controls: None,
             camera_profiles: BTreeMap::new(),
             camera_profile: None,
+            camera_stream_mode: None,
             thumbwheel_sensitivity: None,
             invert_scroll: false,
             scroll_resolution: None,
@@ -590,6 +596,8 @@ struct RawDeviceConfig {
     #[serde(default)]
     camera_profile: Option<String>,
     #[serde(default)]
+    camera_stream_mode: Option<CameraStreamMode>,
+    #[serde(default)]
     thumbwheel_sensitivity: Option<ThumbwheelSensitivity>,
     #[serde(default)]
     invert_scroll: bool,
@@ -668,6 +676,7 @@ impl From<RawDeviceConfig> for DeviceConfig {
             camera_controls: raw.camera_controls,
             camera_profiles: raw.camera_profiles,
             camera_profile: raw.camera_profile,
+            camera_stream_mode: raw.camera_stream_mode,
             thumbwheel_sensitivity: raw.thumbwheel_sensitivity,
             invert_scroll: raw.invert_scroll,
             scroll_resolution: raw.scroll_resolution,

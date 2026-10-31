@@ -1,20 +1,12 @@
 //! Webcam control state and camera profiles.
 
+use std::num::NonZeroU32;
+
 use openlogi_camera::{CameraControl, StreamMode};
+use openlogi_core::config::CameraStreamMode;
 
 use super::events::StateEvents;
 use super::{AppState, StateEvent};
-
-/// Where the preview's chosen [`StreamMode`] is saved: three entries in the
-/// camera's control map, beside the UVC controls' own.
-///
-/// The prefix keeps them clear of every [`CameraControl`] and `AutoToggle`
-/// name (a test pins that). A profile never captures or applies them: its
-/// snapshot is built from the controls panel's rows and applied by explicit
-/// lookups, and the stream mode is a viewing preference, not an image setting.
-const STREAM_WIDTH: &str = "stream_width";
-const STREAM_HEIGHT: &str = "stream_height";
-const STREAM_FPS: &str = "stream_fps";
 
 impl AppState {
     /// Request Camera access and retain the permission poll for the app
@@ -108,56 +100,44 @@ impl AppState {
         StateEvent::CameraChanged.into()
     }
     /// The resolution and frame rate saved for `config_key`'s live preview, or
-    /// `None` when none is saved — or the entries are incomplete or not
-    /// positive, which reads as "not chosen" rather than as a mode.
+    /// `None` when none is saved.
     ///
     /// Not checked against what the camera offers: that needs the device, so
     /// the backend resolves a stale choice to the camera's default instead.
     #[must_use]
     pub fn camera_stream_mode(&self, config_key: &str) -> Option<StreamMode> {
-        let controls = self.config.camera_controls(config_key)?;
-        let read = |name: &str| {
-            controls
-                .0
-                .get(name)
-                .and_then(|value| u32::try_from(*value).ok())
-                .filter(|value| *value > 0)
-        };
+        let saved = self.config.camera_stream_mode(config_key)?;
         Some(StreamMode {
-            width: read(STREAM_WIDTH)?,
-            height: read(STREAM_HEIGHT)?,
-            fps: read(STREAM_FPS)?,
+            width: saved.width.get(),
+            height: saved.height.get(),
+            fps: saved.fps.get(),
         })
     }
 
     /// Persist the resolution and frame rate for `config_key`'s live preview,
     /// which opens its stream at it. It shapes the preview alone: other
     /// applications negotiate their own. No agent IPC, like the controls: the
-    /// preview is driven from the GUI.
+    /// preview is driven from the GUI. Saved apart from the UVC controls, so
+    /// camera profiles neither capture nor apply it.
     ///
     /// Announces nothing when `mode` is already saved, so picking the selected
-    /// option again does not restart the stream, and nothing when `mode` does
-    /// not fit the stored representation (no camera offers one that large).
+    /// option again does not restart the stream, and nothing for a mode with a
+    /// zero in it, which no camera offers.
     pub fn commit_camera_stream_mode(&mut self, config_key: &str, mode: StreamMode) -> StateEvents {
         if self.camera_stream_mode(config_key) == Some(mode) {
             return StateEvents::none();
         }
-        let (Ok(width), Ok(height), Ok(fps)) = (
-            i32::try_from(mode.width),
-            i32::try_from(mode.height),
-            i32::try_from(mode.fps),
+        let (Some(width), Some(height), Some(fps)) = (
+            NonZeroU32::new(mode.width),
+            NonZeroU32::new(mode.height),
+            NonZeroU32::new(mode.fps),
         ) else {
             return StateEvents::none();
         };
-        // One edit and one write, so the three entries never land half-saved.
-        self.commit_camera_entries(
-            config_key,
-            &[
-                (STREAM_WIDTH, width),
-                (STREAM_HEIGHT, height),
-                (STREAM_FPS, fps),
-            ],
-        );
+        let saved = CameraStreamMode { width, height, fps };
+        self.config
+            .edit(|config| config.set_camera_stream_mode(config_key, saved));
+        self.persist_config("camera stream mode");
         StateEvent::CameraChanged.into()
     }
 
@@ -178,16 +158,8 @@ impl AppState {
         StateEvent::CameraChanged.into()
     }
     fn commit_camera_entry(&mut self, config_key: &str, name: &str, value: i32) {
-        self.commit_camera_entries(config_key, &[(name, value)]);
-    }
-
-    /// Insert `entries` into `config_key`'s control map in one edit and one
-    /// write, leaving every other entry as it was.
-    fn commit_camera_entries(&mut self, config_key: &str, entries: &[(&str, i32)]) {
         let mut controls = self.config.camera_controls(config_key).unwrap_or_default();
-        for &(name, value) in entries {
-            controls.0.insert(name.to_string(), value);
-        }
+        controls.0.insert(name.to_string(), value);
         self.config
             .edit(|config| config.set_camera_controls(config_key, controls));
         self.persist_config("camera controls");

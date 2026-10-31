@@ -3,6 +3,7 @@
 //! [`SmartShift`], and the legacy [`GestureOwner`], plus their serde helpers.
 
 use std::collections::BTreeMap;
+use std::num::NonZeroU32;
 
 use az::SaturatingAs;
 use nutype::nutype;
@@ -695,15 +696,29 @@ where
 /// camera is next viewed, since the hardware only retains them until it loses
 /// power. Serializes to the same TOML table the earlier fixed-field struct
 /// wrote, so existing saved controls load unchanged.
-///
-/// The table also holds the live preview's chosen mode as `stream_width`,
-/// `stream_height` and `stream_fps`. Those are not controls: nothing is written
-/// to the camera for them, they say what frame size and rate the app asks for
-/// when it opens its own preview stream, and profile snapshots neither capture
-/// nor apply them. The desktop's `AppState` owns their meaning.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct CameraControls(pub BTreeMap<String, i32>);
+
+/// The frame size and rate a webcam's live preview asks for when it opens its
+/// stream, picked in the Camera tab.
+///
+/// Not a UVC control: nothing is written to the camera for it, and other
+/// applications negotiate their own mode. So it is stored beside
+/// [`CameraControls`], not in it, and camera profiles neither capture nor
+/// apply it. A camera that no longer offers the mode opens at its default.
+/// Every value is non-zero, so a zero refuses to load like any other
+/// out-of-range setting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CameraStreamMode {
+    /// Frame width in pixels.
+    pub width: NonZeroU32,
+    /// Frame height in pixels.
+    pub height: NonZeroU32,
+    /// Whole frames per second.
+    pub fps: NonZeroU32,
+}
 
 /// Who owns a gaming mouse's buttons, DPI levels and report rate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

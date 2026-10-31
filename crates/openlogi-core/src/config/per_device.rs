@@ -9,8 +9,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
-    CameraControls, Config, DeviceIdentity, DisableKey, LightSettings, Lighting, OnboardMemory,
-    ScrollResolution, SmartShift, ThumbwheelSensitivity,
+    CameraControls, CameraStreamMode, Config, DeviceIdentity, DisableKey, LightSettings, Lighting,
+    OnboardMemory, ScrollResolution, SmartShift, ThumbwheelSensitivity,
 };
 use crate::binding::{
     Action, ActionRingConfig, ActionRingIcon, ActionRingSlot, Binding, ButtonId, GamingLayout,
@@ -247,6 +247,23 @@ impl Config {
             .entry(device_key.to_string())
             .or_default()
             .camera_profile = name;
+    }
+
+    /// The frame size and rate saved for `device_key`'s live preview, or
+    /// `None` when the user never picked one.
+    #[must_use]
+    pub fn camera_stream_mode(&self, device_key: &str) -> Option<CameraStreamMode> {
+        self.devices
+            .get(device_key)
+            .and_then(|d| d.camera_stream_mode)
+    }
+
+    /// Record the frame size and rate `device_key`'s live preview opens at.
+    pub fn set_camera_stream_mode(&mut self, device_key: &str, mode: CameraStreamMode) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .camera_stream_mode = Some(mode);
     }
 
     /// The standalone-light config for `device_key`, or `None` if unset.

@@ -1,4 +1,4 @@
-//! Per-device settings: DPI and its presets, SmartShift, scroll inversion and resolution, the smooth wheel, keeping the OS layout, the report rate, and the stored bindings.
+//! Per-device settings: DPI and its presets, SmartShift, scroll inversion and resolution, the smooth wheel, keeping the OS layout, the report rate, the camera preview's mode, and the stored bindings.
 
 use super::*;
 use std::collections::BTreeSet;
@@ -381,6 +381,73 @@ fn a_saved_force_sensing_survives_route_adoption() {
     let canonical = crate::device_order::PhysicalDeviceKey::parse("unit:a393cae0").expect("valid");
     assert!(config.adopt_route(&canonical, route, None));
     assert_eq!(config.force_sensing("unit:a393cae0"), Some(6000));
+}
+
+fn stream_mode(width: u32, height: u32, fps: u32) -> CameraStreamMode {
+    let non_zero = |value| std::num::NonZeroU32::new(value).expect("non-zero");
+    CameraStreamMode {
+        width: non_zero(width),
+        height: non_zero(height),
+        fps: non_zero(fps),
+    }
+}
+
+#[test]
+fn camera_stream_mode_roundtrips_apart_from_the_camera_controls() {
+    let key = "camera:046d:0893";
+    let mut cfg = Config::default();
+    cfg.set_camera_controls(key, CameraControls::default());
+    cfg.set_camera_stream_mode(key, stream_mode(1920, 1080, 60));
+    let toml = toml::to_string(&cfg).expect("serialize");
+    assert!(toml.contains("camera_stream_mode"), "{toml}");
+
+    let restored = write_and_read(&cfg);
+    assert_eq!(
+        restored.camera_stream_mode(key),
+        Some(stream_mode(1920, 1080, 60))
+    );
+    assert_eq!(
+        restored.camera_controls(key),
+        Some(CameraControls::default()),
+        "the mode adds nothing to the controls"
+    );
+    assert_eq!(restored.camera_stream_mode("camera:046d:085e"), None);
+}
+
+#[test]
+fn unset_camera_stream_mode_is_omitted_from_toml() {
+    // Absent means the preview opens at the camera's default, so saving a
+    // control must not write a mode.
+    let mut cfg = Config::default();
+    cfg.set_camera_controls("camera:046d:0893", CameraControls::default());
+    let toml = toml::to_string(&cfg).expect("serialize");
+    assert!(!toml.contains("camera_stream_mode"), "{toml}");
+    assert_eq!(
+        write_and_read(&cfg).camera_stream_mode("camera:046d:0893"),
+        None
+    );
+}
+
+#[test]
+fn a_camera_stream_mode_with_a_zero_or_a_missing_value_does_not_load() {
+    let config = |mode: &str| {
+        toml::from_str::<Config>(&format!(
+            "schema_version = {SCHEMA_VERSION}\n[devices.cam.camera_stream_mode]\n{mode}\n"
+        ))
+    };
+    let loaded = config("width = 1280\nheight = 720\nfps = 30").expect("a whole mode loads");
+    assert_eq!(
+        loaded.camera_stream_mode("cam"),
+        Some(stream_mode(1280, 720, 30))
+    );
+
+    for mode in [
+        "width = 0\nheight = 720\nfps = 30",
+        "width = 1280\nheight = 720\nfps = 0",
+        "width = 1280\nheight = 720",
+    ] {
+        config(mode).expect_err(mode);
+    }
 }
 
 #[test]

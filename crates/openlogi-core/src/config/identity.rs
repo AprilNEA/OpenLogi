@@ -315,6 +315,7 @@ pub(super) fn fold(device: &mut DeviceConfig, mut legacy: DeviceConfig, route_ke
     fold_option_field!(light);
     fold_option_field!(camera_controls);
     fold_option_field!(camera_profile);
+    fold_option_field!(camera_stream_mode);
     fold_option_field!(thumbwheel_sensitivity);
     fold_option_field!(fn_lock);
     fold_option_field!(keep_os_layout);
