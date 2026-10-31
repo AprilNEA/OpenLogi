@@ -10,9 +10,10 @@
 //! registration yet — so just "Show Main Window" (also the left-click action)
 //! and "Quit OpenLogi". Show focuses the running GUI if there is one (a
 //! second launch would exit on the `openlogi.lock` singleton) or spawns the
-//! sibling `OpenLogi.exe` / `openlogi-desktop.exe`. Quit terminates the GUI
-//! first — a surviving GUI's IPC retry loop would immediately respawn the
-//! agent we are quitting — then exits.
+//! sibling `OpenLogi.exe` / `openlogi-desktop.exe`. Quit asks the GUI to
+//! close cleanly first — a surviving GUI's IPC retry loop would immediately
+//! respawn the agent we are quitting — and retains a bounded hard-stop
+//! fallback before the agent exits.
 //!
 //! Everything runs on one dedicated thread: the hidden window, its message
 //! pump, and the menu. The icon is re-added when Explorer restarts (the
@@ -24,12 +25,20 @@
     reason = "raw win32: Shell_NotifyIconW + a hidden window's message pump — localized here"
 )]
 use std::cell::RefCell;
+use std::ffi::{OsStr, OsString};
+use std::os::windows::ffi::OsStringExt;
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::{Duration, Instant};
 
 use tracing::{info, warn};
-use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
+use windows_sys::Win32::Foundation::{FILETIME, HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::HBRUSH;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::System::Threading::{
+    GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
+    QueryFullProcessImageNameW, TerminateProcess,
+};
 use windows_sys::Win32::UI::Shell::{
     NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW, Shell_NotifyIconW,
 };
@@ -39,8 +48,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetWindowThreadProcessId, HICON, IDI_APPLICATION, IsIconic, IsWindowVisible, LR_DEFAULTCOLOR,
     LoadIconW, MF_SEPARATOR, MF_STRING, MSG, RegisterClassW, RegisterWindowMessageW, SW_RESTORE,
     SetForegroundWindow, ShowWindow, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu,
-    TranslateMessage, WM_APP, WM_CONTEXTMENU, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP, WNDCLASSW,
-    WS_OVERLAPPED,
+    TranslateMessage, WM_APP, WM_CLOSE, WM_CONTEXTMENU, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP,
+    WNDCLASSW, WS_OVERLAPPED,
 };
 
 use crate::shutdown::{self, ShutdownRequestSender};
@@ -50,6 +59,10 @@ const WM_TRAY: u32 = WM_APP + 1;
 /// Menu command ids returned by `TrackPopupMenu`.
 const ID_SHOW: usize = 1;
 const ID_QUIT: usize = 2;
+/// How long tray Quit gives the GUI to run its normal teardown before using
+/// the existing hard-stop fallback.
+const GRACEFUL_QUIT_TIMEOUT: Duration = Duration::from_secs(2);
+const GRACEFUL_QUIT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// The `TaskbarCreated` broadcast id, resolved once the window exists. Zero
 /// until then; real ids are never zero (`RegisterWindowMessageW` starts at
@@ -309,11 +322,12 @@ unsafe fn show_menu(hwnd: HWND) {
 /// GUI is running (a second launch would just exit on the `openlogi.lock`
 /// singleton, so spawning blindly does nothing visible).
 fn open_or_focus_gui() {
-    let pids = gui_pids();
-    if pids.is_empty() {
+    let processes = gui_processes();
+    if processes.is_empty() {
         spawn_gui();
         return;
     }
+    let pids: Vec<_> = processes.iter().map(|process| process.pid).collect();
     if !focus_window_of(&pids) {
         // Running but windowless should not happen (the GUI always has its
         // main window); log rather than spawn a doomed duplicate.
@@ -333,7 +347,13 @@ fn open_or_focus_gui() {
 /// same-user filter keeps other sessions (fast user switching) out of
 /// Show/Quit — their windows are invisible to `EnumWindows` and their
 /// processes unkillable anyway, but don't even consider them.
-fn gui_pids() -> Vec<u32> {
+struct GuiProcess {
+    pid: u32,
+    started_at: u64,
+    handle: Option<OwnedHandle>,
+}
+
+fn gui_processes() -> Vec<GuiProcess> {
     use sysinfo::{Pid, Process, ProcessesToUpdate, System};
     let mut system = System::new();
     system.refresh_processes(ProcessesToUpdate::All, true);
@@ -347,7 +367,17 @@ fn gui_pids() -> Vec<u32> {
             is_gui_process_name(&p.name().to_string_lossy())
                 && (own_user.is_none() || p.user_id() == own_user)
         })
-        .map(|p| p.pid().as_u32())
+        .map(|process| {
+            let mut target = GuiProcess {
+                pid: process.pid().as_u32(),
+                started_at: process.start_time(),
+                handle: None,
+            };
+            // Keep sysinfo's snapshot (and its process handles) alive while
+            // acquiring our handle, so the identified PID cannot be recycled.
+            target.handle = open_gui_process(&target, process.name());
+            target
+        })
         .collect()
 }
 
@@ -397,6 +427,129 @@ fn focus_window_of(pids: &[u32]) -> bool {
     search.focused
 }
 
+/// Ask visible top-level windows to close and return the PIDs whose close
+/// request was queued, so fallback diagnostics describe each process accurately.
+fn request_gui_close(pids: &[u32]) -> Vec<u32> {
+    struct Search<'a> {
+        pids: &'a [u32],
+        requested: Vec<u32>,
+    }
+    unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> i32 {
+        // SAFETY: lparam is the &mut Search passed to EnumWindows below and
+        // outlives the enumeration; the win32 queries take a valid hwnd.
+        unsafe {
+            let search = &mut *(lparam as *mut Search<'_>);
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(hwnd, &raw mut pid);
+            if search.pids.contains(&pid)
+                && IsWindowVisible(hwnd) != 0
+                && windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW(hwnd, WM_CLOSE, 0, 0)
+                    != 0
+                && !search.requested.contains(&pid)
+            {
+                search.requested.push(pid);
+            }
+            1
+        }
+    }
+    let mut search = Search {
+        pids,
+        requested: Vec::new(),
+    };
+    // SAFETY: the callback only dereferences the &mut Search for the duration
+    // of this call.
+    unsafe {
+        EnumWindows(Some(enum_proc), std::ptr::addr_of_mut!(search) as LPARAM);
+    }
+    search.requested
+}
+
+/// Open and validate the process once, then retain its kernel identity through
+/// termination. A PID lookup after validation could target a replacement.
+fn open_gui_process(target: &GuiProcess, expected_name: &OsStr) -> Option<OwnedHandle> {
+    // sysinfo reports zero when it could not open a process handle. Without
+    // that pinned identity, do not act on a potentially recycled PID.
+    if target.started_at == 0 {
+        return None;
+    }
+    // SAFETY: OpenProcess accepts a numeric PID and returns an owned handle.
+    let raw = unsafe {
+        OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION
+                | PROCESS_TERMINATE
+                | windows_sys::Win32::System::Threading::PROCESS_SYNCHRONIZE,
+            0,
+            target.pid,
+        )
+    };
+    if raw.is_null() {
+        return None;
+    }
+    // SAFETY: this non-null OpenProcess result is owned exactly once here.
+    let handle = unsafe { OwnedHandle::from_raw_handle(raw) };
+    let mut created = FILETIME::default();
+    let mut exited = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    // SAFETY: the owned process handle is live; all outputs are writable.
+    if unsafe {
+        GetProcessTimes(
+            raw,
+            &raw mut created,
+            &raw mut exited,
+            &raw mut kernel,
+            &raw mut user,
+        )
+    } == 0
+    {
+        return None;
+    }
+    // Process enumeration and handle acquisition are separate operations.
+    // Validate the image on the retained handle, not only the snapshot's name.
+    let mut image = vec![0u16; 32_768];
+    let mut length = 32_768;
+    // SAFETY: the owned handle is valid and length describes the writable buffer.
+    if unsafe { QueryFullProcessImageNameW(raw, 0, image.as_mut_ptr(), &raw mut length) } == 0 {
+        return None;
+    }
+    let image = std::path::PathBuf::from(OsString::from_wide(&image[..length as usize]));
+    if image.file_name() != Some(expected_name) {
+        return None;
+    }
+    // sysinfo exposes creation time as whole Unix seconds, unlike FILETIME.
+    let ticks = (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime);
+    let started_at = (ticks / 10_000_000).checked_sub(11_644_473_600)?;
+    (started_at == target.started_at).then_some(handle)
+}
+
+fn any_process_running(targets: &[(u32, OwnedHandle)]) -> bool {
+    targets.iter().any(|(_, handle)| process_running(handle))
+}
+
+fn process_running(handle: &OwnedHandle) -> bool {
+    use windows_sys::Win32::Foundation::WAIT_TIMEOUT;
+    use windows_sys::Win32::System::Threading::WaitForSingleObject;
+    // SAFETY: the process handle remains owned throughout this probe.
+    unsafe { WaitForSingleObject(handle.as_raw_handle(), 0) == WAIT_TIMEOUT }
+}
+
+/// Wait for all target processes to exit. The injected probes keep the
+/// bounded wait and fallback decision independently testable.
+fn wait_for_exit_with(
+    timeout: Duration,
+    mut any_running: impl FnMut() -> bool,
+    mut pause: impl FnMut(Duration),
+) -> bool {
+    let deadline = Instant::now() + timeout;
+    while any_running() {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        pause(GRACEFUL_QUIT_POLL_INTERVAL);
+    }
+    true
+}
+
 /// Launch the GUI binary sitting next to the agent.
 fn spawn_gui() {
     let Ok(exe) = std::env::current_exe() else {
@@ -424,25 +577,73 @@ fn spawn_gui() {
     }
 }
 
-/// Quit the whole app: GUI first (its IPC retry loop would otherwise respawn
-/// the agent we are about to exit), then the icon, then the agent. Mirrors
-/// the macOS Quit semantics; the GUI holds no unsaved state (config writes
-/// are immediate).
+/// Quit the whole app: ask the GUI to exit cleanly first (its IPC retry loop
+/// would otherwise respawn the agent we are about to exit), force-stop it only
+/// after a bounded wait, then remove the icon and exit the agent.
 #[expect(
     clippy::cast_possible_truncation,
     reason = "NOTIFYICONDATAW is a few hundred bytes"
 )]
 fn quit(hwnd: HWND) {
-    use sysinfo::{Pid, ProcessesToUpdate, System};
-    let mut system = System::new();
-    system.refresh_processes(ProcessesToUpdate::All, true);
-    for pid in gui_pids() {
-        if let Some(process) = system.process(Pid::from_u32(pid)) {
-            if process.kill() {
-                info!(pid, "tray Quit — terminated the GUI");
-            } else {
-                warn!(pid, "tray Quit — could not terminate the GUI");
+    let processes: Vec<_> = gui_processes()
+        .into_iter()
+        .filter_map(|target| {
+            if target.handle.is_none() {
+                warn!(
+                    pid = target.pid,
+                    "tray Quit — could not retain GUI process; skipping it"
+                );
             }
+            target.handle.map(|handle| (target.pid, handle))
+        })
+        .collect();
+    let pids: Vec<_> = processes.iter().map(|(pid, _)| *pid).collect();
+    let close_requested = request_gui_close(&pids);
+    if !close_requested.is_empty() {
+        info!(
+            count = close_requested.len(),
+            "tray Quit — requested graceful GUI shutdown"
+        );
+        if wait_for_exit_with(
+            GRACEFUL_QUIT_TIMEOUT,
+            || any_process_running(&processes),
+            std::thread::sleep,
+        ) {
+            info!("tray Quit — GUI exited gracefully");
+        }
+    }
+
+    for (pid, handle) in processes {
+        if !process_running(&handle) {
+            continue;
+        }
+        // SAFETY: terminate the same kernel process retained before WM_CLOSE,
+        // never a fresh process found by looking its PID up again.
+        if unsafe { TerminateProcess(handle.as_raw_handle(), 1) } != 0 {
+            // TerminateProcess is asynchronous; wait before the agent exits so
+            // GUI teardown and singleton release have a chance to finish.
+            if !wait_for_exit_with(
+                GRACEFUL_QUIT_TIMEOUT,
+                || process_running(&handle),
+                std::thread::sleep,
+            ) {
+                warn!(
+                    pid,
+                    "tray Quit — GUI termination did not finish within the timeout"
+                );
+            } else if close_requested.contains(&pid) {
+                warn!(
+                    pid,
+                    "tray Quit — graceful shutdown timed out; terminated the GUI"
+                );
+            } else {
+                warn!(
+                    pid,
+                    "tray Quit — no close request was sent; terminated the GUI"
+                );
+            }
+        } else {
+            warn!(pid, "tray Quit — could not terminate the GUI");
         }
     }
     // SAFETY: removing the icon this thread added.
@@ -466,12 +667,82 @@ fn wide(s: &str) -> Vec<u16> {
 
 #[cfg(test)]
 mod tests {
-    use super::is_gui_process_name;
+    use std::cell::Cell;
+    use std::os::windows::io::AsRawHandle;
+    use std::time::Duration;
+
+    use super::{
+        GuiProcess, is_gui_process_name, open_gui_process, process_running, wait_for_exit_with,
+    };
 
     #[test]
     fn the_cli_binary_is_not_the_gui() {
         assert!(is_gui_process_name("OpenLogi.exe"));
         assert!(is_gui_process_name("openlogi-desktop.exe"));
         assert!(!is_gui_process_name("openlogi.exe")); // the CLI
+    }
+
+    #[test]
+    fn process_handle_rejects_a_mismatched_creation_time() {
+        let target = GuiProcess {
+            pid: std::process::id(),
+            started_at: 1,
+            handle: None,
+        };
+        let executable = std::env::current_exe().unwrap();
+        assert!(open_gui_process(&target, executable.file_name().unwrap()).is_none());
+    }
+
+    #[test]
+    fn retained_handle_tracks_exit_without_resolving_the_pid_again() {
+        use std::process::Command;
+        use sysinfo::{Pid, ProcessesToUpdate, System};
+
+        let mut child = Command::new("cmd.exe")
+            .args(["/C", "pause"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut system = System::new();
+        system.refresh_processes(ProcessesToUpdate::All, true);
+        let process = system.process(Pid::from_u32(child.id())).unwrap();
+        let target = GuiProcess {
+            pid: child.id(),
+            started_at: process.start_time(),
+            handle: None,
+        };
+        assert!(open_gui_process(&target, std::ffi::OsStr::new("OpenLogi.exe")).is_none());
+        let handle = open_gui_process(&target, process.name()).unwrap();
+        assert!(process_running(&handle));
+        // SAFETY: the retained handle refers only to this test's child.
+        let terminated = unsafe { super::TerminateProcess(handle.as_raw_handle(), 1) };
+        assert_ne!(terminated, 0);
+        child.wait().unwrap();
+        assert!(!process_running(&handle));
+    }
+
+    #[test]
+    fn graceful_quit_stops_waiting_after_the_process_exits() {
+        let probes = Cell::new(0);
+        let exited = wait_for_exit_with(
+            Duration::from_secs(1),
+            || {
+                let probe = probes.get() + 1;
+                probes.set(probe);
+                probe < 3
+            },
+            |_| {},
+        );
+
+        assert!(exited);
+        assert_eq!(probes.get(), 3);
+    }
+
+    #[test]
+    fn graceful_quit_reports_timeout_for_the_force_kill_fallback() {
+        let exited = wait_for_exit_with(Duration::ZERO, || true, |_| {});
+
+        assert!(!exited);
     }
 }
