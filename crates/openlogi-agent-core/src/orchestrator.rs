@@ -110,6 +110,11 @@ struct AgentDevice {
     codename: Option<String>,
     /// The device's latest battery reading, `None` when it has none.
     battery: Option<BatteryInfo>,
+    /// [`PairedDevice::hidpp10`](openlogi_core::device::PairedDevice::hidpp10):
+    /// the device answered as HID++ 1.0. It has no `0x1b04` controls for a
+    /// capture session to divert, so only the OS hook remaps its buttons
+    /// (#2161).
+    hidpp10: bool,
 }
 
 impl AgentDevice {
@@ -1242,6 +1247,13 @@ impl Orchestrator {
         let mut plans = Vec::new();
         let mut routes = BTreeMap::new();
         for dev in &self.devices {
+            // A HID++ 1.0 device has no `0x1b04` controls: a capture session
+            // would fail its HID++ 2.0 ping and re-arm every second. The OS
+            // hook owns its buttons, and with nothing diverted there is no
+            // restore for its route to follow.
+            if dev.hidpp10 {
+                continue;
+            }
             let Some((physical_key, route)) = Self::capture_identity(dev) else {
                 continue;
             };

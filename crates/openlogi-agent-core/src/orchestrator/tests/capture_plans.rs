@@ -936,3 +936,35 @@ fn the_hook_gets_the_gesture_buttons_map_while_hidpp_keeps_capturing_it() {
         "the gesture button must still be diverted over HID++"
     );
 }
+
+#[test]
+fn a_hidpp10_device_gets_no_capture_session() {
+    // Its HID++ 2.0 ping fails, so a session would end at once and re-arm
+    // every second. The OS hook remaps its buttons instead.
+    let mut orch = orchestrator(Config::default());
+    orch.devices = vec![
+        AgentDevice {
+            hidpp10: true,
+            ..dev("performance-mx", 2, true)
+        },
+        dev("mx-master", 1, true),
+    ];
+    orch.rebuild();
+    orch.set_os_mouse_hook_available(true);
+
+    let routes: Vec<_> = orch
+        .shared
+        .capture_plans
+        .borrow()
+        .plans()
+        .iter()
+        .map(|plan| plan.target.route.clone())
+        .collect();
+    assert_eq!(
+        routes,
+        [DeviceRoute::Bolt {
+            receiver_uid: "AA00".to_string(),
+            slot: 1,
+        }]
+    );
+}

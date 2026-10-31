@@ -185,9 +185,14 @@ pub(super) fn assignments_changed(previous: &Config, config: &Config, key: &str)
 }
 
 /// Build the agent device list from an inventory snapshot. Mirrors the GUI's
-/// `build_device_list` minus the asset/display fields: a device is included
-/// only once its HID++ DeviceInformation (`model_info`) has resolved, since the
-/// model key is derived from it.
+/// `build_device_list` minus the asset/display fields. A HID++ 2.0 device is
+/// included only once its DeviceInformation (`model_info`) has resolved, so its
+/// settings are never read under a key it is about to leave. A HID++ 1.0
+/// device never reports model info: it is included without a serial or unit
+/// id, under [`PairedDevice::model_key`]'s fallback, and its receiver route
+/// keys it by receiver and slot, as the GUI does.
+///
+/// [`PairedDevice::model_key`]: openlogi_core::device::PairedDevice::model_key
 ///
 /// `config` is read, never written: [`Config::resolve_device_key`] needs it to
 /// answer where a device's settings actually live, which depends on what the
@@ -202,22 +207,19 @@ pub(super) fn build_devices(
     let mut devices = Vec::new();
     for inv in inventories {
         for paired in &inv.paired {
-            let Some(model) = paired.model_info.as_ref() else {
-                continue;
+            let (serial, unit_id) = match &paired.model_info {
+                Some(model) => (model.serial_number.as_deref(), model.unit_id),
+                None if paired.hidpp10 => (None, [0; 4]),
+                None => continue,
             };
             let route = DeviceRoute::for_slot(inv, paired.slot);
-            let stable_id = DeviceStableId::from_parts(
-                route.as_ref(),
-                paired.slot,
-                model.serial_number.as_deref(),
-                model.unit_id,
-            );
+            let stable_id =
+                DeviceStableId::from_parts(route.as_ref(), paired.slot, serial, unit_id);
             // An offline probe reports an all-zero unit id, which is not a
             // physical identity — offer it only while the device is online,
             // exactly as the GUI does, or every sleeping device would resolve
             // to the same non-key.
-            let identity =
-                DeviceIdentity::from_parts(model.serial_number.as_deref(), model.unit_id);
+            let identity = DeviceIdentity::from_parts(serial, unit_id);
             let Some(config_key) =
                 config.resolve_device_key(&stable_id, paired.online.then_some(&identity))
             else {
@@ -225,11 +227,11 @@ pub(super) fn build_devices(
             };
             devices.push(AgentDevice {
                 config_key: config_key.into_string(),
-                model_key: model.model_key(),
+                model_key: paired.model_key(),
                 route,
                 slot: paired.slot,
-                serial: model.serial_number.clone(),
-                unit_id: model.unit_id,
+                serial: serial.map(str::to_owned),
+                unit_id,
                 capabilities: paired.capabilities,
                 kind: paired.kind,
                 light_capabilities: None,
@@ -237,6 +239,7 @@ pub(super) fn build_devices(
                 settings_revision: paired.settings_revision,
                 codename: paired.codename.clone(),
                 battery: paired.battery.clone(),
+                hidpp10: paired.hidpp10,
             });
         }
     }
@@ -270,6 +273,7 @@ pub(super) fn build_devices(
             // Its name is its display name, and it reports no battery.
             codename: None,
             battery: None,
+            hidpp10: false,
         });
     }
     // Order by the same canonical key the GUI carousel uses, so the
