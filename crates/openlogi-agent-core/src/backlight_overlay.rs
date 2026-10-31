@@ -3,6 +3,7 @@
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
+use openlogi_core::config::AppSettings;
 use openlogi_ipc::{BacklightObservation, Generation, OBSERVE_HOLD};
 use tokio::sync::watch;
 
@@ -36,8 +37,29 @@ impl Default for BacklightOverlayManager {
 }
 
 impl BacklightOverlayManager {
+    /// Show a keyboard's new backlight level, unless the user turned
+    /// [`AppSettings::backlight_notifications`] off. Answers whether the
+    /// level is shown.
+    ///
+    /// Call it inside a Tokio runtime: a task hides the level when its time
+    /// is up.
+    #[must_use]
+    pub fn announce(
+        &self,
+        current_level: u8,
+        levels: u8,
+        visible: bool,
+        settings: &AppSettings,
+    ) -> bool {
+        if !settings.backlight_notifications {
+            return false;
+        }
+        self.show(current_level, levels, visible);
+        true
+    }
+
     /// Show the latest event and hide it after the transient display lifetime.
-    pub fn show(&self, current_level: u8, levels: u8, visible: bool) {
+    fn show(&self, current_level: u8, levels: u8, visible: bool) {
         let generation = {
             let mut state = self.state();
             state.generation = state.generation.wrapping_add(1);
@@ -119,5 +141,26 @@ mod tests {
         tokio::time::advance(Duration::from_secs(1)).await;
         let hidden = manager.observe(latest.generation).await;
         assert!(!hidden.visible);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_level_shows_only_while_the_user_wants_the_indicator() {
+        let manager = BacklightOverlayManager::default();
+        let muted = AppSettings {
+            backlight_notifications: false,
+            ..AppSettings::default()
+        };
+
+        assert!(!manager.announce(3, 8, true, &muted));
+        assert_eq!(
+            manager.published.borrow().generation,
+            0,
+            "the cell never moved"
+        );
+
+        assert!(manager.announce(3, 8, true, &AppSettings::default()));
+        let shown = manager.observe(0).await;
+        assert!(shown.visible);
+        assert_eq!(shown.current_level, 3);
     }
 }

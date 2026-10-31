@@ -253,8 +253,11 @@ impl MockAgent {
                 }
             }
             Command::Backlight { level, levels } => {
-                self.backlight.show(level, levels, true);
-                Ok(format!("showing backlight level {level} of {levels}"))
+                if self.backlight.announce(level, levels, true, settings) {
+                    Ok(format!("showing backlight level {level} of {levels}"))
+                } else {
+                    Ok("not shown: backlight_notifications is off".to_owned())
+                }
             }
             Command::Advance(duration) => {
                 let mut state = self.state.lock().await;

@@ -342,6 +342,19 @@ impl AppState {
         self.persist_and_reload("lock-key notifications setting");
         StateEvent::SettingsChanged.into()
     }
+    /// Toggle the overlay's backlight indicator and persist it. The agent
+    /// decides what the indicator shows, so it reads the new value on config
+    /// reload; while off it shows nothing. An already-set value writes nothing
+    /// and is still reported; disk failures restore the persisted value.
+    pub fn commit_backlight_notifications(&mut self, enabled: bool) -> StateEvents {
+        if self.config.app_settings.backlight_notifications == enabled {
+            return StateEvent::SettingsChanged.into();
+        }
+        self.config
+            .edit(|config| config.app_settings.backlight_notifications = enabled);
+        self.persist_and_reload("backlight notifications setting");
+        StateEvent::SettingsChanged.into()
+    }
     /// Toggle the Previous/Next Desktop slide and persist it. The agent
     /// switches desktops, so it reads the new value on config reload; the
     /// next switch uses it. An already-set value writes nothing and is still

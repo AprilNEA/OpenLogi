@@ -20,6 +20,7 @@ fn muted() -> AppSettings {
     AppSettings {
         low_battery_notifications: false,
         lock_key_notifications: false,
+        backlight_notifications: false,
         ..AppSettings::default()
     }
 }
@@ -514,6 +515,28 @@ async fn a_backlight_level_reaches_the_overlay() {
         (observed.current_level, observed.levels, observed.visible),
         (2, 4, true)
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_backlight_level_shows_only_while_the_user_wants_the_indicator() {
+    let agent = MockAgent::new(test_state());
+    let reply = agent
+        .apply(
+            Command::Backlight {
+                level: 2,
+                levels: 4,
+            },
+            &muted(),
+        )
+        .await
+        .expect("backlight applied");
+    assert!(reply.starts_with("not shown"), "{reply}");
+    let observed = agent
+        .clone()
+        .observe_backlight(tarpc::context::current(), 0)
+        .await;
+    assert!(!observed.visible);
+    assert_eq!(observed.generation, 0, "the cell never moved");
 }
 
 #[tokio::test]

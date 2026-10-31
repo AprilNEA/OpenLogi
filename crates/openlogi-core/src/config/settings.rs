@@ -304,6 +304,10 @@ pub struct AppSettings {
     /// [`LockKey::is_indicated_here`](crate::device::LockKey::is_indicated_here)).
     #[serde(default = "default_true")]
     pub lock_key_notifications: bool,
+    /// Whether the overlay briefly shows a keyboard's backlight level when
+    /// the keyboard changes it, as with the backlight keys. **On by default.**
+    #[serde(default = "default_true")]
+    pub backlight_notifications: bool,
     /// Whether Previous Desktop and Next Desktop slide to the neighbouring
     /// desktop the way a three-finger swipe does. **On by default**, as in
     /// Logi Options+; off switches instantly. Only macOS reads it.
@@ -514,6 +518,7 @@ impl Default for AppSettings {
             mouse_profile_target: MouseProfileTarget::Pointer,
             low_battery_notifications: true,
             lock_key_notifications: true,
+            backlight_notifications: true,
             animate_desktop_switch: true,
         }
     }
