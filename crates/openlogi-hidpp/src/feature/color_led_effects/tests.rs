@@ -251,10 +251,11 @@ fn zone_info_refuses_a_short_reply() {
     assert_matches!(reply, Err(Hidpp20Error::UnsupportedResponse));
 }
 
-/// Walks the feature table of a mock device that lists `0x8070` at
-/// `version`, and returns whether the device then provides
+/// Walks the feature table of a mock device whose root reports FeatureSet at
+/// `feature_set_version` and whose table lists `0x8070` with `version` in the
+/// version byte. Returns whether the device then provides
 /// `(ColorLedEffectsFeature, ColorLedEffectsV1Feature)`.
-fn enumerated_color_led_effects(version: u8) -> (bool, bool) {
+fn enumerated_color_led_effects(feature_set_version: u8, version: u8) -> (bool, bool) {
     use std::sync::Arc;
 
     use super::{ColorLedEffectsFeature, ColorLedEffectsV1Feature};
@@ -282,7 +283,7 @@ fn enumerated_color_led_effects(version: u8) -> (bool, bool) {
             // Root ping: HID++ 4.2.
             Message::Short(header(0, 1), [4, 2, 0]),
             // Root getFeature(0x0001): FeatureSet sits at index 1.
-            Message::Short(header(0, 0), [1, 0, 0]),
+            Message::Short(header(0, 0), [1, 0, feature_set_version]),
             // FeatureSet: two entries after the root.
             Message::Short(header(1, 0), [2, 0, 0]),
             Message::Long(header(1, 1), entry(0x0001, 0)),
@@ -309,13 +310,21 @@ fn enumerated_color_led_effects(version: u8) -> (bool, bool) {
 fn a_version_0_device_gets_no_version_1_functions() {
     // Logi Options+ 2.8 sends functions 4, 5, 7, 8 and 13 only to version 1
     // or later (static analysis). The zone and effect functions stay.
-    assert_eq!(enumerated_color_led_effects(0), (true, false));
+    assert_eq!(enumerated_color_led_effects(1, 0), (true, false));
 }
 
 #[test]
 fn a_version_1_or_later_device_gets_both_function_sets() {
-    assert_eq!(enumerated_color_led_effects(1), (true, true));
-    assert_eq!(enumerated_color_led_effects(7), (true, true));
+    assert_eq!(enumerated_color_led_effects(1, 1), (true, true));
+    assert_eq!(enumerated_color_led_effects(1, 7), (true, true));
+}
+
+#[test]
+fn a_version_0_feature_table_has_no_version_byte_to_read() {
+    // A FeatureSet version 0 reply has no version field. The Yeti X answers
+    // as version 0 and leaves stale report data there: `0x54` in one run and
+    // `0x69` in the next (#786). That byte must not select the V1 functions.
+    assert_eq!(enumerated_color_led_effects(0, 0x69), (true, false));
 }
 
 #[test]
