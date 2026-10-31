@@ -415,10 +415,14 @@ fn scroll(delta_x: f64, delta_y: f64) -> MouseEvent {
     }
 }
 
-fn translate(event: &evdev::InputEvent, hires_scroll: bool) -> Option<MouseEvent> {
+fn translate(
+    event: &evdev::InputEvent,
+    hires_scroll: bool,
+    button_map: ButtonMap,
+) -> Option<MouseEvent> {
     match event.destructure() {
         EventSummary::Key(_, key, value) => {
-            let id = key_to_button(key)?;
+            let id = button_map.button(key)?;
             // `dispatch` names the device the event was read from.
             Some(MouseEvent::Button {
                 id,
@@ -502,6 +506,54 @@ fn key_to_button(key: KeyCode) -> Option<ButtonId> {
     }
 }
 
+/// The buttons a specific mouse reports differently from [`key_to_button`],
+/// keyed by the vendor and product of the evdev node the hook reads it from.
+const DEVICE_BUTTONS: [DeviceButtons; 1] = [DeviceButtons {
+    vendor_id: LOGITECH_VENDOR_ID,
+    // Performance MX. Its Unifying receiver's per-device node carries the
+    // wireless product id.
+    product_id: 0x101a,
+    keys: &[
+        // The button at the bottom of the thumb rest. Forward is BTN_EXTRA.
+        (KeyCode::BTN_FORWARD, ButtonId::GestureButton),
+        // The zoom button below Back and Forward: BTN_MOUSE + 8, a code the
+        // kernel headers leave unnamed.
+        (KeyCode(0x118), ButtonId::Zoom),
+    ],
+}];
+
+/// One [`DEVICE_BUTTONS`] entry.
+struct DeviceButtons {
+    vendor_id: u32,
+    product_id: u32,
+    keys: &'static [(KeyCode, ButtonId)],
+}
+
+/// How one hooked device's evdev button codes map to [`ButtonId`]s: its
+/// [`DEVICE_BUTTONS`] entry first, then the generic [`key_to_button`].
+#[derive(Clone, Copy, Debug, Default)]
+struct ButtonMap(&'static [(KeyCode, ButtonId)]);
+
+impl ButtonMap {
+    /// The map for the device `source` names.
+    fn for_source(source: &EventDevice) -> Self {
+        DEVICE_BUTTONS
+            .iter()
+            .find(|device| {
+                source.vendor_id == Some(device.vendor_id)
+                    && source.product_id == Some(device.product_id)
+            })
+            .map_or_else(Self::default, |device| Self(device.keys))
+    }
+
+    fn button(self, key: KeyCode) -> Option<ButtonId> {
+        self.0
+            .iter()
+            .find_map(|&(code, id)| (code == key).then_some(id))
+            .or_else(|| key_to_button(key))
+    }
+}
+
 /// Run one event past the callback and return what to forward to the desktop
 /// for it, if anything. On a hi-res device, wheel events reach it only
 /// through [`PassThroughWheel`], and low-res counts never do.
@@ -512,7 +564,8 @@ fn key_to_button(key: KeyCode) -> Option<ButtonId> {
 /// reversed too (#1737), and a forwarded event is negated once on its way out.
 ///
 /// A button event names `source`, the device it was read from, so the agent
-/// can tell it from the same button reported over HID++ (#2158).
+/// can tell it from the same button reported over HID++ (#2158), and reads
+/// its buttons through that device's [`ButtonMap`].
 fn dispatch(
     event: InputEvent,
     hires_scroll: bool,
@@ -520,7 +573,7 @@ fn dispatch(
     source: &EventDevice,
     cb: &dyn Fn(HookEvent) -> EventDisposition,
 ) -> Option<InputEvent> {
-    let delivery = translate(&event, hires_scroll)
+    let delivery = translate(&event, hires_scroll, ButtonMap::for_source(source))
         .map(|mut mouse| {
             if let MouseEvent::Button { device, .. } = &mut mouse {
                 *device = Some(source.clone());
@@ -727,13 +780,82 @@ mod tests {
         assert_eq!(key_to_button(KeyCode::KEY_LEFTSHIFT), None);
     }
 
+    // ── per-device buttons ───────────────────────────────────────────────────
+
+    fn logitech_mouse(product_id: u32) -> EventDevice {
+        EventDevice {
+            vendor_id: Some(LOGITECH_VENDOR_ID),
+            product_id: Some(product_id),
+            product_name: None,
+        }
+    }
+
+    const PERFORMANCE_MX: u32 = 0x101a;
+    const ZOOM_CODE: KeyCode = KeyCode(0x118);
+
+    #[test]
+    fn performance_mx_thumb_rest_is_its_gesture_button() {
+        let buttons = ButtonMap::for_source(&logitech_mouse(PERFORMANCE_MX));
+        assert_eq!(
+            buttons.button(KeyCode::BTN_FORWARD),
+            Some(ButtonId::GestureButton)
+        );
+    }
+
+    #[test]
+    fn performance_mx_zoom_code_is_zoom() {
+        let buttons = ButtonMap::for_source(&logitech_mouse(PERFORMANCE_MX));
+        assert_eq!(buttons.button(ZOOM_CODE), Some(ButtonId::Zoom));
+    }
+
+    #[test]
+    fn performance_mx_keeps_the_generic_map_for_its_other_buttons() {
+        let buttons = ButtonMap::for_source(&logitech_mouse(PERFORMANCE_MX));
+        let cases = [
+            (KeyCode::BTN_LEFT, ButtonId::LeftClick),
+            (KeyCode::BTN_RIGHT, ButtonId::RightClick),
+            (KeyCode::BTN_MIDDLE, ButtonId::MiddleClick),
+            (KeyCode::BTN_SIDE, ButtonId::Back),
+            (KeyCode::BTN_EXTRA, ButtonId::Forward),
+        ];
+        for (key, expected) in cases {
+            assert_eq!(buttons.button(key), Some(expected), "{key:?}");
+        }
+    }
+
+    #[test]
+    fn btn_forward_stays_forward_on_other_mice() {
+        // An MX Master 3 over Bluetooth, and a source with no ids at all.
+        for source in [logitech_mouse(0xb023), EventDevice::default()] {
+            let buttons = ButtonMap::for_source(&source);
+            assert_eq!(
+                buttons.button(KeyCode::BTN_FORWARD),
+                Some(ButtonId::Forward),
+                "{source:?}"
+            );
+            assert_eq!(buttons.button(ZOOM_CODE), None, "{source:?}");
+        }
+    }
+
+    #[test]
+    fn the_product_id_alone_does_not_select_a_device_table() {
+        let other_vendor = EventDevice {
+            vendor_id: Some(0x1234),
+            ..logitech_mouse(PERFORMANCE_MX)
+        };
+        assert_eq!(
+            ButtonMap::for_source(&other_vendor).button(KeyCode::BTN_FORWARD),
+            Some(ButtonId::Forward)
+        );
+    }
+
     // ── translate ────────────────────────────────────────────────────────────
 
     #[test]
     fn translate_btn_left_down_returns_button_pressed() {
         let event = InputEvent::new(EventType::KEY.0, KeyCode::BTN_LEFT.0, 1);
         assert_matches!(
-            translate(&event, false),
+            translate(&event, false, ButtonMap::default()),
             Some(MouseEvent::Button {
                 id: ButtonId::LeftClick,
                 pressed: true,
@@ -746,7 +868,7 @@ mod tests {
     fn translate_btn_left_up_returns_button_released() {
         let event = InputEvent::new(EventType::KEY.0, KeyCode::BTN_LEFT.0, 0);
         assert_matches!(
-            translate(&event, false),
+            translate(&event, false, ButtonMap::default()),
             Some(MouseEvent::Button {
                 id: ButtonId::LeftClick,
                 pressed: false,
@@ -759,7 +881,7 @@ mod tests {
     fn translate_btn_back_returns_back() {
         let event = InputEvent::new(EventType::KEY.0, KeyCode::BTN_BACK.0, 1);
         assert_matches!(
-            translate(&event, false),
+            translate(&event, false, ButtonMap::default()),
             Some(MouseEvent::Button {
                 id: ButtonId::Back,
                 pressed: true,
@@ -772,7 +894,7 @@ mod tests {
     fn translate_btn_side_returns_back() {
         let event = InputEvent::new(EventType::KEY.0, KeyCode::BTN_SIDE.0, 1);
         assert_matches!(
-            translate(&event, false),
+            translate(&event, false, ButtonMap::default()),
             Some(MouseEvent::Button {
                 id: ButtonId::Back,
                 pressed: true,
@@ -785,7 +907,7 @@ mod tests {
     fn translate_btn_forward_returns_forward() {
         let event = InputEvent::new(EventType::KEY.0, KeyCode::BTN_FORWARD.0, 1);
         assert_matches!(
-            translate(&event, false),
+            translate(&event, false, ButtonMap::default()),
             Some(MouseEvent::Button {
                 id: ButtonId::Forward,
                 pressed: true,
@@ -794,13 +916,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn translate_reads_buttons_through_the_device_map() {
+        let buttons = ButtonMap::for_source(&logitech_mouse(PERFORMANCE_MX));
+        let event = InputEvent::new(EventType::KEY.0, ZOOM_CODE.0, 1);
+        assert_matches!(
+            translate(&event, false, buttons),
+            Some(MouseEvent::Button {
+                id: ButtonId::Zoom,
+                pressed: true,
+                device: None,
+            })
+        );
+        assert!(translate(&event, false, ButtonMap::default()).is_none());
+    }
+
     // ── movement ─────────────────────────────────────────────────────────────
 
     #[test]
     fn translate_rel_x_returns_horizontal_move() {
         let event = InputEvent::new(EventType::RELATIVE.0, RelativeAxisCode::REL_X.0, 7);
         assert_matches!(
-            translate(&event, false),
+            translate(&event, false, ButtonMap::default()),
             Some(MouseEvent::Moved {
                 delta_x: 7,
                 delta_y: 0
@@ -812,7 +949,7 @@ mod tests {
     fn translate_rel_y_returns_vertical_move() {
         let event = InputEvent::new(EventType::RELATIVE.0, RelativeAxisCode::REL_Y.0, -4);
         assert_matches!(
-            translate(&event, false),
+            translate(&event, false, ButtonMap::default()),
             Some(MouseEvent::Moved {
                 delta_x: 0,
                 delta_y: -4
@@ -825,7 +962,7 @@ mod tests {
     #[test]
     fn translate_rel_wheel_returns_scroll_y() {
         let event = InputEvent::new(EventType::RELATIVE.0, RelativeAxisCode::REL_WHEEL.0, 3);
-        let result = translate(&event, false);
+        let result = translate(&event, false, ButtonMap::default());
         assert!(
             matches!(result, Some(MouseEvent::Scroll { delta, .. })
                 if delta == crate::ScrollDelta::wheel_ticks(0.0, 3.0)),
@@ -836,7 +973,7 @@ mod tests {
     #[test]
     fn translate_rel_hwheel_returns_scroll_x() {
         let event = InputEvent::new(EventType::RELATIVE.0, RelativeAxisCode::REL_HWHEEL.0, -2);
-        let result = translate(&event, false);
+        let result = translate(&event, false, ButtonMap::default());
         assert!(
             matches!(result, Some(MouseEvent::Scroll { delta, .. })
                 if delta == crate::ScrollDelta::wheel_ticks(-2.0, 0.0)),
@@ -854,7 +991,7 @@ mod tests {
             RelativeAxisCode::REL_WHEEL_HI_RES.0,
             60,
         );
-        let result = translate(&event, true);
+        let result = translate(&event, true, ButtonMap::default());
         assert!(
             matches!(result, Some(MouseEvent::Scroll { delta, .. })
                 if delta == crate::ScrollDelta::wheel_ticks(0.0, 0.5)),
@@ -869,7 +1006,7 @@ mod tests {
             RelativeAxisCode::REL_HWHEEL_HI_RES.0,
             -120,
         );
-        let result = translate(&event, true);
+        let result = translate(&event, true, ButtonMap::default());
         assert!(
             matches!(result, Some(MouseEvent::Scroll { delta, .. })
                 if delta == crate::ScrollDelta::wheel_ticks(-1.0, 0.0)),
@@ -880,13 +1017,13 @@ mod tests {
     #[test]
     fn translate_low_res_wheel_skipped_when_hires_active() {
         let event = InputEvent::new(EventType::RELATIVE.0, RelativeAxisCode::REL_WHEEL.0, 1);
-        assert!(translate(&event, true).is_none());
+        assert!(translate(&event, true, ButtonMap::default()).is_none());
     }
 
     #[test]
     fn translate_low_res_hwheel_skipped_when_hires_active() {
         let event = InputEvent::new(EventType::RELATIVE.0, RelativeAxisCode::REL_HWHEEL.0, 1);
-        assert!(translate(&event, true).is_none());
+        assert!(translate(&event, true, ButtonMap::default()).is_none());
     }
 
     // ── waking and report times ──────────────────────────────────────────────
@@ -981,13 +1118,13 @@ mod tests {
     #[test]
     fn translate_non_mouse_key_returns_none() {
         let event = InputEvent::new(EventType::KEY.0, KeyCode::KEY_A.0, 1);
-        assert!(translate(&event, false).is_none());
+        assert!(translate(&event, false, ButtonMap::default()).is_none());
     }
 
     #[test]
     fn translate_sync_event_returns_none() {
         let event = InputEvent::new(EventType::SYNCHRONIZATION.0, 0, 0);
-        assert!(translate(&event, false).is_none());
+        assert!(translate(&event, false, ButtonMap::default()).is_none());
     }
 
     // ── is_hookable_mouse ────────────────────────────────────────────────────
@@ -1210,6 +1347,32 @@ mod tests {
         assert_eq!(device, source);
         assert!(crate::source_is_remappable(Some(&device)));
     }
+
+    /// A debounced button change reads through the device's [`ButtonMap`],
+    /// like every other event the hook dispatches.
+    #[test]
+    fn debounced_buttons_read_through_the_device_map() {
+        let source = logitech_mouse(PERFORMANCE_MX);
+        let seen = std::cell::RefCell::new(Vec::new());
+        let mut pending = Vec::new();
+        let zoom = ButtonChange {
+            button: ZOOM_CODE,
+            pressed: true,
+        };
+        deliver_buttons(
+            [zoom],
+            &source,
+            &|hook_event| {
+                if let HookEvent::Mouse(MouseEvent::Button { id, .. }) = hook_event {
+                    seen.borrow_mut().push(id);
+                }
+                EventDisposition::PassThrough
+            },
+            &mut pending,
+        );
+        assert_eq!(seen.into_inner(), [ButtonId::Zoom]);
+        assert_eq!(pending, [InputEvent::from(zoom)]);
+    }
 }
 
 #[cfg(test)]
@@ -1309,7 +1472,7 @@ mod scroll_inversion_tests {
 
     /// The delta [`translate`] reads from an untouched wheel event.
     fn wheel_delta(event: InputEvent, hires_scroll: bool) -> ScrollDelta {
-        match translate(&event, hires_scroll) {
+        match translate(&event, hires_scroll, ButtonMap::default()) {
             Some(MouseEvent::Scroll { delta, .. }) => delta,
             other => panic!("a wheel event translates to a scroll, got {other:?}"),
         }
