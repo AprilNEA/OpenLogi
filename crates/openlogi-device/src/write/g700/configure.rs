@@ -24,8 +24,9 @@ use hidpp::{
 };
 use thiserror::Error;
 
-use super::find_g700;
+use super::{G700Identity, G700Link, read_identity};
 use crate::backend::HidBackend;
+use crate::channel::route::DeviceRoute;
 use crate::write::WriteError;
 
 /// A G700 settings register a write went to.
@@ -141,6 +142,21 @@ pub enum G700Error {
     /// The RAM page was asked to be restored; it never is.
     #[error("page {RAM_PAGE} is RAM and is never restored")]
     RamPage,
+    /// The mouse at the route is not the one the backup was taken from.
+    #[error("the backup is of another mouse: {}", IdentityDiff(.backup, .device))]
+    IdentityMismatch {
+        /// What the backup records.
+        backup: Box<G700Identity>,
+        /// What the mouse reads as.
+        device: Box<G700Identity>,
+    },
+    /// The interval is not one a profile can store: a whole number of
+    /// milliseconds that is a rate of 125, 250, 500 or 1000 Hz.
+    #[error("{millis} ms is not a report interval a profile stores")]
+    InvalidReportInterval {
+        /// The interval.
+        millis: u8,
+    },
     /// A page differs from its backup, and the backup cannot be put back.
     #[error("page {page} differs from the backup, whose copy cannot be restored: {source}")]
     Unrestorable {
@@ -213,8 +229,19 @@ fn plan_restore(pages: Vec<(u8, Page, Page)>) -> Result<Vec<RestoreStep>, G700Er
     Ok(steps)
 }
 
-/// Find a G700 and put `backup` pages back where they differ. The backup
-/// must be of this same mouse: pages of unknown purpose are restored too.
+/// Whose backup a restore may put back.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BackupOrigin {
+    /// The mouse this identity names; any other is refused before a write.
+    Identified(G700Identity),
+    /// Any mouse — the caller vouches for the backup.
+    Forced,
+}
+
+/// Put `backup` pages back where they differ on the G700 at `route`. The
+/// backup must be of this same mouse — pages of unknown purpose are restored
+/// too — so unless `origin` is [`BackupOrigin::Forced`] the mouse's identity
+/// is read first and a mismatch refused before any write.
 ///
 /// Every page is read and checked against its backup first; a page that
 /// differs and whose backup is neither erased nor carries a valid CRC fails
@@ -223,13 +250,56 @@ fn plan_restore(pages: Vec<(u8, Page, Page)>) -> Result<Vec<RestoreStep>, G700Er
 /// the pages before it are back and the rest untouched.
 pub async fn restore_g700_pages(
     backend: &dyn HidBackend,
+    route: &DeviceRoute,
+    origin: &BackupOrigin,
     backup: Vec<(u8, Page)>,
 ) -> Result<Vec<RestoredPage>, G700Error> {
     if backup.iter().any(|(page, _)| *page == RAM_PAGE) {
         return Err(G700Error::RamPage);
     }
-    let link = find_g700(backend).await?;
-    restore_on(&link.chan, link.device_index, backup).await
+    let link = G700Link::open(backend, route).await?;
+    if let BackupOrigin::Identified(expected) = origin {
+        let device = read_identity(&link).await?;
+        if device != *expected {
+            return Err(G700Error::IdentityMismatch {
+                backup: Box::new(expected.clone()),
+                device: Box::new(device),
+            });
+        }
+    }
+    restore_on(link.chan(), link.device_index(), backup).await
+}
+
+/// The fields in which two identities differ, for [`G700Error`]'s message.
+struct IdentityDiff<'a>(&'a G700Identity, &'a G700Identity);
+
+impl fmt::Display for IdentityDiff<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (backup, device) = (self.0, self.1);
+        let mut differences = Vec::new();
+        if backup.route != device.route {
+            differences.push(format!("route {} vs {}", backup.route, device.route));
+        }
+        if backup.device_index != device.device_index {
+            differences.push(format!(
+                "device index {} vs {}",
+                backup.device_index, device.device_index
+            ));
+        }
+        if backup.readable_pages != device.readable_pages {
+            differences.push(format!(
+                "{} vs {} readable pages",
+                backup.readable_pages, device.readable_pages
+            ));
+        }
+        if backup.directory != device.directory {
+            differences.push(format!(
+                "directory {:?} vs {:?}",
+                backup.directory, device.directory
+            ));
+        }
+        write!(f, "{} (backup vs mouse)", differences.join(", "))
+    }
 }
 
 async fn restore_on(
@@ -319,15 +389,16 @@ impl ProfileDpiChange {
     }
 }
 
-/// Find a G700 and change one DPI mode of one of its onboard profiles; every
-/// other byte of the profile page stays as it was.
+/// Change one DPI mode of one of the onboard profiles of the G700 at
+/// `route`; every other byte of the profile page stays as it was.
 pub async fn set_g700_profile_dpi(
     backend: &dyn HidBackend,
+    route: &DeviceRoute,
     change: ProfileDpiChange,
 ) -> Result<ProfileDpiWrite, G700Error> {
     let change = change.validate()?;
-    let link = find_g700(backend).await?;
-    set_profile_dpi_on(&link.chan, link.device_index, change).await
+    let link = G700Link::open(backend, route).await?;
+    set_profile_dpi_on(link.chan(), link.device_index(), change).await
 }
 
 async fn set_profile_dpi_on(
@@ -335,38 +406,119 @@ async fn set_profile_dpi_on(
     device_index: u8,
     change: ProfileDpiChange,
 ) -> Result<ProfileDpiWrite, G700Error> {
-    let directory = g700::parse_directory(&read(chan, device_index, DIRECTORY_PAGE).await?);
-    let entry =
-        directory
-            .entries()
-            .get(usize::from(change.profile))
-            .ok_or(G700Error::NoSuchProfile {
-                index: change.profile,
-                enabled: directory.entries().len(),
-            })?;
-    let base = read_trusted(chan, device_index, entry.page).await?;
-    let (page, before, after) = change.apply(&base);
-    g700::memory_writer(chan, device_index)
-        .write_page(entry.page, &page)
-        .await?;
+    let (page, (before, after)) = rewrite_profile(chan, device_index, change.profile, |page| {
+        let (page, before, after) = change.apply(page);
+        (page, (before, after))
+    })
+    .await?;
     Ok(ProfileDpiWrite {
-        page: entry.page,
+        page,
         before,
         after,
     })
 }
 
-/// Find a G700 and set its report interval, until it next switches
+/// A new report interval for one onboard profile.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ProfileRateChange {
+    /// The profile's directory index.
+    pub profile: u8,
+    /// The interval the profile plays at.
+    pub interval: ReportInterval,
+}
+
+/// The report interval a [`set_g700_profile_report_interval`] changed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ProfileRateWrite {
+    /// The page the profile lives on.
+    pub page: u8,
+    /// The interval byte as it was; a profile may hold one that names no
+    /// interval.
+    pub before: u8,
+    /// The interval as written.
+    pub after: ReportInterval,
+}
+
+/// Change the report interval one of the onboard profiles of the G700 at
+/// `route` plays at; every other byte of the profile page stays as it was.
+/// The mouse takes it up the next time it selects the profile, which for
+/// the profile it plays means the next power-up or profile switch.
+pub async fn set_g700_profile_report_interval(
+    backend: &dyn HidBackend,
+    route: &DeviceRoute,
+    change: ProfileRateChange,
+) -> Result<ProfileRateWrite, G700Error> {
+    if !profile_interval_valid(change.interval) {
+        return Err(G700Error::InvalidReportInterval {
+            millis: change.interval.millis(),
+        });
+    }
+    let link = G700Link::open(backend, route).await?;
+    set_profile_rate_on(link.chan(), link.device_index(), change).await
+}
+
+async fn set_profile_rate_on(
+    chan: &HidppChannel,
+    device_index: u8,
+    change: ProfileRateChange,
+) -> Result<ProfileRateWrite, G700Error> {
+    let (page, before) = rewrite_profile(chan, device_index, change.profile, |page| {
+        let mut profile = G700Profile::parse(page);
+        let before = profile.report_interval_millis;
+        profile.report_interval_millis = change.interval.millis();
+        (profile.to_page(), before)
+    })
+    .await?;
+    Ok(ProfileRateWrite {
+        page,
+        before,
+        after: change.interval,
+    })
+}
+
+/// Whether a profile may store `interval`: the rates the G700 offers, as
+/// libratbag's `ReportRates=125;250;500;1000` has them.
+pub(super) fn profile_interval_valid(interval: ReportInterval) -> bool {
+    matches!(interval.millis(), 1 | 2 | 4 | 8)
+}
+
+/// Rewrites the page of directory profile `profile` with what `edit` makes
+/// of it, and returns the page number with what `edit` returned beside the
+/// page. The base is read so it can be trusted (see [`read_trusted`]).
+async fn rewrite_profile<T>(
+    chan: &HidppChannel,
+    device_index: u8,
+    profile: u8,
+    edit: impl FnOnce(&Page) -> (Page, T),
+) -> Result<(u8, T), G700Error> {
+    let directory = g700::parse_directory(&read(chan, device_index, DIRECTORY_PAGE).await?);
+    let entry = directory
+        .entries()
+        .get(usize::from(profile))
+        .ok_or(G700Error::NoSuchProfile {
+            index: profile,
+            enabled: directory.entries().len(),
+        })?;
+    let base = read_trusted(chan, device_index, entry.page).await?;
+    let (page, edited) = edit(&base);
+    g700::memory_writer(chan, device_index)
+        .write_page(entry.page, &page)
+        .await?;
+    Ok((entry.page, edited))
+}
+
+/// Set the report interval of the G700 at `route`, until it next switches
 /// profile; returns the interval it reads back.
 pub async fn set_g700_report_interval(
     backend: &dyn HidBackend,
+    route: &DeviceRoute,
     interval: ReportInterval,
 ) -> Result<ReportInterval, G700Error> {
-    let link = find_g700(backend).await?;
-    set_report_interval_on(&link.chan, link.device_index, interval).await
+    let link = G700Link::open(backend, route).await?;
+    set_report_interval_on(link.chan(), link.device_index(), interval).await
 }
 
-async fn set_report_interval_on(
+pub(super) async fn set_report_interval_on(
     chan: &HidppChannel,
     device_index: u8,
     interval: ReportInterval,
@@ -383,17 +535,18 @@ async fn set_report_interval_on(
     })
 }
 
-/// Find a G700 and set the resolution its sensor runs at, until it next
-/// switches DPI mode or profile; returns the resolution it reads back.
+/// Set the resolution the sensor of the G700 at `route` runs at, until it
+/// next switches DPI mode or profile; returns the resolution it reads back.
 pub async fn set_g700_resolution(
     backend: &dyn HidBackend,
+    route: &DeviceRoute,
     resolution: Resolution,
 ) -> Result<Resolution, G700Error> {
-    let link = find_g700(backend).await?;
-    set_resolution_on(&link.chan, link.device_index, resolution).await
+    let link = G700Link::open(backend, route).await?;
+    set_resolution_on(link.chan(), link.device_index(), resolution).await
 }
 
-async fn set_resolution_on(
+pub(super) async fn set_resolution_on(
     chan: &HidppChannel,
     device_index: u8,
     resolution: Resolution,
@@ -410,14 +563,15 @@ async fn set_resolution_on(
     })
 }
 
-/// Find a G700 and make it play `profile`: an index the directory lists, or
-/// the factory profile. Returns the profile it reads back.
+/// Make the G700 at `route` play `profile`: an index the directory lists,
+/// or the factory profile. Returns the profile it reads back.
 pub async fn set_g700_current_profile(
     backend: &dyn HidBackend,
+    route: &DeviceRoute,
     profile: CurrentProfile,
 ) -> Result<CurrentProfile, G700Error> {
-    let link = find_g700(backend).await?;
-    set_current_profile_on(&link.chan, link.device_index, profile).await
+    let link = G700Link::open(backend, route).await?;
+    set_current_profile_on(link.chan(), link.device_index(), profile).await
 }
 
 async fn set_current_profile_on(

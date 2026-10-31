@@ -14,8 +14,9 @@
 //! The erase comes before the first copy, so a write cut short leaves the
 //! page half written. Like libratbag, [`MemoryWriter`] first switches the
 //! device to its factory profile, which also keeps the profile buttons from
-//! selecting the page meanwhile, and selects the previous profile again only
-//! once the page reads back as written. Beyond libratbag it reads the RAM
+//! selecting the page meanwhile, and selects the previous profile again once
+//! the page reads back as written — or once a step before the erase failed,
+//! which leaves the page as it was. Beyond libratbag it reads the RAM
 //! page back after each upload, so a transfer the device took wrongly stops
 //! before anything is erased or copied, and it refuses pages whose content
 //! it cannot account for.
@@ -25,7 +26,7 @@ use std::{fmt, time::Duration};
 use thiserror::Error;
 
 use super::{
-    HALF_PAGE, HALF_PAGE_LEN, Page, RAM_PAGE, READ_CHUNK,
+    HALF_PAGE, HALF_PAGE_LEN, LAST_PAGE, Page, RAM_PAGE, READ_CHUNK,
     directory::{DIRECTORY_PAGE, ProfileDirectory},
     hot, read_memory, read_page,
 };
@@ -191,6 +192,10 @@ pub enum Refusal {
     /// The page is [`RAM_PAGE`], which every write is staged in.
     #[error("it is the RAM page that writes are staged in")]
     RamPage,
+    /// The page is past [`LAST_PAGE`], the last page onboard memory can
+    /// have.
+    #[error("it is past page {}, the last page of onboard memory", LAST_PAGE)]
+    PastLastPage,
     /// The channel cannot send the long reports a write needs.
     #[error("the channel cannot send long HID++ reports")]
     NoLongReports,
@@ -341,7 +346,9 @@ pub enum PageWriteError {
     /// A step of the write failed. The device is left on its factory
     /// profile — when the failed step is [`WriteStep::SelectFactory`] itself,
     /// on either that or the previous profile — and the page as
-    /// [`WriteStep::page_state`] says.
+    /// [`WriteStep::page_state`] says. A step before the erase fails this
+    /// way only when selecting the previous profile again failed too;
+    /// otherwise it is [`Self::Abandoned`].
     #[error(
         "writing page {page} failed while {step}; {}; the device is left on its factory profile{}",
         .step.page_state(),
@@ -353,6 +360,22 @@ pub enum PageWriteError {
         /// The step that failed.
         step: WriteStep,
         /// Why.
+        #[source]
+        source: StepError,
+    },
+    /// A step before the erase failed, so the page holds what it held
+    /// before, and the previous profile was selected again.
+    #[error(
+        "writing page {page} failed while {step}, before anything was erased; the page is untouched and {profile:?} is selected again"
+    )]
+    Abandoned {
+        /// The page.
+        page: u8,
+        /// The step that failed.
+        step: WriteStep,
+        /// The profile selected again.
+        profile: CurrentProfile,
+        /// Why the step failed.
         #[source]
         source: StepError,
     },
@@ -446,8 +469,10 @@ fn first_difference(a: &[u8], b: &[u8]) -> Option<usize> {
 /// read — past the end of its memory, such as pages 27 to 31 of a G700 — is
 /// [`PageWriteError::Unreadable`]. It then reads the current profile, selects
 /// the factory profile, writes, reads the page back, and on a match selects
-/// the previous profile again. Any failure after the switch leaves the device
-/// on its factory profile, which plays no page from flash.
+/// the previous profile again. A failure before the erase selects the
+/// previous profile again too, the page being intact; any failure from the
+/// erase on leaves the device on its factory profile, which plays no page
+/// from flash.
 pub struct MemoryWriter<'a> {
     chan: &'a HidppChannel,
     device_index: u8,
@@ -477,7 +502,8 @@ impl<'a> MemoryWriter<'a> {
     }
 
     /// Writes `content` to `page`, its CRC recomputed first. The page must
-    /// be the directory, a page the directory lists, or erased flash.
+    /// be the directory, a page the directory lists, or erased flash, and
+    /// not past [`LAST_PAGE`].
     pub async fn write_page(&self, page: u8, content: &Page) -> Result<(), PageWriteError> {
         let mut content = content.clone();
         content.update_crc();
@@ -512,6 +538,12 @@ impl<'a> MemoryWriter<'a> {
             return Err(PageWriteError::Refused {
                 page,
                 reason: Refusal::RamPage,
+            });
+        }
+        if page > LAST_PAGE {
+            return Err(PageWriteError::Refused {
+                page,
+                reason: Refusal::PastLastPage,
             });
         }
         if !self
@@ -553,13 +585,13 @@ impl<'a> MemoryWriter<'a> {
                 .map_err(failed(WriteStep::Erase))?,
             Image::Written(content) => {
                 for half in [Half::First, Half::Second] {
-                    let data = half.of(content);
-                    hot::upload(self.chan, self.device_index, data, self.ack_timeout)
-                        .await
-                        .map_err(failed(WriteStep::Upload(half)))?;
-                    self.verify_upload(data)
-                        .await
-                        .map_err(failed(WriteStep::VerifyUpload(half)))?;
+                    if let Err((step, source)) = self.stage(half.of(content), half).await {
+                        return Err(if half == Half::First {
+                            self.abandon(page, step, previous, source).await
+                        } else {
+                            failed(step)(source)
+                        });
+                    }
                     if half == Half::First {
                         self.command(MemoryCommand::Erase { page })
                             .await
@@ -599,6 +631,51 @@ impl<'a> MemoryWriter<'a> {
                 })?;
         }
         Ok(())
+    }
+
+    /// Uploads `data`, `half` of a page, to the RAM page and reads it back;
+    /// the step that failed, with why, otherwise.
+    async fn stage(
+        &self,
+        data: &[u8; HALF_PAGE],
+        half: Half,
+    ) -> Result<(), (WriteStep, StepError)> {
+        hot::upload(self.chan, self.device_index, data, self.ack_timeout)
+            .await
+            .map_err(|source| (WriteStep::Upload(half), source))?;
+        self.verify_upload(data)
+            .await
+            .map_err(|source| (WriteStep::VerifyUpload(half), source))
+    }
+
+    /// The error of a write that failed at `step`, before the erase, while
+    /// the device played the factory profile: `previous` is selected again
+    /// first, since the page is intact. When that fails too, the device
+    /// stays on its factory profile and the error says so.
+    async fn abandon(
+        &self,
+        page: u8,
+        step: WriteStep,
+        previous: CurrentProfile,
+        source: StepError,
+    ) -> PageWriteError {
+        if previous != CurrentProfile::Factory
+            && let Err(error) = write_current_profile(self.chan, self.device_index, previous).await
+        {
+            tracing::debug!(
+                page,
+                ?previous,
+                ?error,
+                "selecting the previous profile again failed"
+            );
+            return PageWriteError::Failed { page, step, source };
+        }
+        PageWriteError::Abandoned {
+            page,
+            step,
+            profile: previous,
+            source,
+        }
     }
 
     async fn read(&self, page: u8) -> Result<Page, PageWriteError> {

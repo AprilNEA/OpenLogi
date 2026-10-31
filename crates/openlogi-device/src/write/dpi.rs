@@ -16,7 +16,8 @@ use crate::SharedChannel;
 use crate::backend::HidBackend;
 use crate::channel::route::DeviceRoute;
 
-use super::{HidppOperation, WriteError, classify_hidpp_error, with_route};
+use super::g700::{G700Link, g700_dpi_info, set_g700_dpi_target};
+use super::{HidppOperation, WriteError, classify_hidpp_error, with_shared_route};
 
 // DpiCapabilities and DpiInfo are pure IPC wire data with no HID++ I/O, so
 // they live in `openlogi_core::hid::dpi`; the DPI writes name them through
@@ -210,9 +211,11 @@ pub(super) fn expand_dpi_ranges(ranges: &[DpiRange]) -> Vec<u16> {
 /// Used by `openlogi diag dpi` and any future Settings → Diagnostics
 /// surface that wants to display the current value without writing.
 pub async fn get_dpi(backend: &dyn HidBackend, route: &DeviceRoute) -> Result<Dpi, WriteError> {
-    let index = route.device_index();
-    with_route(backend, route, move |channel| async move {
-        get_dpi_on_channel(&channel, index).await
+    with_shared_route(backend, route, |shared| async move {
+        if let Some(link) = G700Link::on_shared(&shared).await? {
+            return g700_dpi_info(&link).await.map(|info| info.current);
+        }
+        get_dpi_on_channel(shared.channel(), shared.device_index()).await
     })
     .await
 }
@@ -255,9 +258,8 @@ pub async fn get_dpi_info(
     backend: &dyn HidBackend,
     route: &DeviceRoute,
 ) -> Result<DpiInfo, WriteError> {
-    let index = route.device_index();
-    with_route(backend, route, move |channel| async move {
-        get_dpi_info_on_channel(&channel, index).await
+    with_shared_route(backend, route, |shared| async move {
+        get_dpi_info_on(&shared).await
     })
     .await
 }
@@ -313,34 +315,20 @@ pub async fn set_dpi(
     route: &DeviceRoute,
     dpi: Dpi,
 ) -> Result<(), WriteError> {
-    let index = route.device_index();
-    with_route(backend, route, move |channel| async move {
-        set_dpi_on_channel(&channel, index, dpi).await
+    with_shared_route(backend, route, |shared| async move {
+        set_dpi_on(&shared, dpi).await
     })
     .await
 }
 
-/// The DPI write itself, on an already-open channel at HID++ `index`. Shared by
-/// [`set_dpi`] (which opens a fresh channel) and [`set_dpi_on`]
-/// (which reuses one).
+/// The DPI write behind [`set_dpi_target_on`] for a device with a DPI
+/// feature: resolve `target` against the sensor, write it and return the DPI
+/// written, or `None` when [`DpiTarget::Default`] finds no default.
 ///
-/// Fails with [`WriteError::DpiUnsupported`], without writing, when `dpi` is
-/// not in the device-reported supported list, and with
+/// Fails with [`WriteError::DpiUnsupported`], without writing, when the DPI
+/// is not in the device-reported supported list, and with
 /// [`WriteError::DpiNotApplied`] when the device still reads back a different
 /// value after one re-write.
-pub(super) async fn set_dpi_on_channel(
-    channel: &Arc<hidpp::channel::HidppChannel>,
-    index: u8,
-    dpi: Dpi,
-) -> Result<(), WriteError> {
-    set_dpi_target_on_channel(channel, index, DpiTarget::Value(dpi))
-        .await
-        .map(|_| ())
-}
-
-/// The DPI write behind [`set_dpi_on_channel`] and [`set_dpi_target_on`]:
-/// resolve `target` against the sensor, write it and return the DPI written,
-/// or `None` when [`DpiTarget::Default`] finds no default.
 async fn set_dpi_target_on_channel(
     channel: &Arc<hidpp::channel::HidppChannel>,
     index: u8,
@@ -414,21 +402,34 @@ async fn set_dpi_target_on_channel(
 /// Write DPI on an already-open [`SharedChannel`] — the fast path that skips
 /// enumeration and channel setup.
 pub async fn set_dpi_on(shared: &SharedChannel, dpi: Dpi) -> Result<(), WriteError> {
-    set_dpi_on_channel(shared.channel(), shared.device_index(), dpi).await
+    set_dpi_target_on(shared, DpiTarget::Value(dpi))
+        .await
+        .map(|_| ())
 }
 
 /// Write `target` to sensor 0 on an already-open [`SharedChannel`] and return
 /// the DPI written, or `None` when [`DpiTarget::Default`] finds no default.
 /// Resolving and writing in one call keeps both on one transport turn.
+///
+/// A G700, which has no DPI feature, takes the value in its live resolution
+/// register instead; see `g700::live` for why its onboard profile is left
+/// alone.
 pub async fn set_dpi_target_on(
     shared: &SharedChannel,
     target: DpiTarget,
 ) -> Result<Option<Dpi>, WriteError> {
+    if let Some(link) = G700Link::on_shared(shared).await? {
+        return set_g700_dpi_target(&link, target).await;
+    }
     set_dpi_target_on_channel(shared.channel(), shared.device_index(), target).await
 }
 
 /// Read current DPI and supported values on an already-open [`SharedChannel`].
+/// A G700 answers from its live resolution register and its sensor table.
 pub async fn get_dpi_info_on(shared: &SharedChannel) -> Result<DpiInfo, WriteError> {
+    if let Some(link) = G700Link::on_shared(shared).await? {
+        return g700_dpi_info(&link).await;
+    }
     get_dpi_info_on_channel(shared.channel(), shared.device_index()).await
 }
 

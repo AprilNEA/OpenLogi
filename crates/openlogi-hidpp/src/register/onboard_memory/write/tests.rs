@@ -427,6 +427,28 @@ fn the_ram_page_is_refused_without_a_frame() {
 }
 
 #[test]
+fn a_page_past_the_last_page_is_refused_without_a_frame() {
+    futures::executor::block_on(async {
+        let (channel, handle, _sim) = device(g700_like()).await;
+        let image = PageImage::from_backup(pattern_page(32)).unwrap();
+
+        let result = writer(&channel).restore_page(32, &image).await;
+
+        assert!(
+            matches!(
+                result,
+                Err(PageWriteError::Refused {
+                    page: 32,
+                    reason: Refusal::PastLastPage
+                })
+            ),
+            "{result:?}"
+        );
+        assert!(handle.written_reports().is_empty(), "not even a read");
+    });
+}
+
+#[test]
 fn a_page_past_the_end_of_memory_is_unreadable_and_not_written() {
     futures::executor::block_on(async {
         let (channel, handle, _sim) = device(g700_like()).await;
@@ -566,9 +588,10 @@ fn an_upload_acknowledged_out_of_order_stops_before_the_erase() {
         assert!(
             matches!(
                 result,
-                Err(PageWriteError::Failed {
+                Err(PageWriteError::Abandoned {
                     page: 3,
                     step: WriteStep::Upload(Half::First),
+                    profile: CurrentProfile::Index(2),
                     source: StepError::UnexpectedAck {
                         chunk: 1,
                         acknowledged: 0
@@ -587,8 +610,8 @@ fn an_upload_acknowledged_out_of_order_stops_before_the_erase() {
         assert_eq!(sim.pages[3], *pattern_page(3).as_bytes());
         assert_eq!(
             sim.current,
-            [0xff, 0x00, 0x00],
-            "left on the factory profile"
+            [0x00, 0x02, 0x00],
+            "the previous profile again"
         );
     });
 }
@@ -605,7 +628,7 @@ fn an_unacknowledged_chunk_times_out_before_the_erase() {
         assert!(
             matches!(
                 result,
-                Err(PageWriteError::Failed {
+                Err(PageWriteError::Abandoned {
                     step: WriteStep::Upload(Half::First),
                     source: StepError::Chunk {
                         chunk: 1,
@@ -621,7 +644,13 @@ fn an_unacknowledged_chunk_times_out_before_the_erase() {
                 .iter()
                 .any(|frame| frame[2..4] == [0x82, 0xa0])
         );
-        assert_eq!(sim.lock().unwrap().pages[3], *pattern_page(3).as_bytes());
+        let sim = sim.lock().unwrap();
+        assert_eq!(sim.pages[3], *pattern_page(3).as_bytes());
+        assert_eq!(
+            sim.current,
+            [0x00, 0x02, 0x00],
+            "the previous profile again"
+        );
     });
 }
 
@@ -637,8 +666,9 @@ fn an_upload_the_ram_page_does_not_hold_stops_before_the_erase() {
         assert!(
             matches!(
                 result,
-                Err(PageWriteError::Failed {
+                Err(PageWriteError::Abandoned {
                     step: WriteStep::VerifyUpload(Half::First),
+                    profile: CurrentProfile::Index(2),
                     source: StepError::UploadDiffers { offset: 0 },
                     ..
                 })
@@ -650,7 +680,45 @@ fn an_upload_the_ram_page_does_not_hold_stops_before_the_erase() {
                 .iter()
                 .any(|frame| frame[2..4] == [0x82, 0xa0])
         );
-        assert_eq!(sim.lock().unwrap().pages[3], *pattern_page(3).as_bytes());
+        let sim = sim.lock().unwrap();
+        assert_eq!(sim.pages[3], *pattern_page(3).as_bytes());
+        assert_eq!(
+            sim.current,
+            [0x00, 0x02, 0x00],
+            "the previous profile again"
+        );
+    });
+}
+
+#[test]
+fn an_upload_that_fails_while_the_factory_profile_played_keeps_it() {
+    futures::executor::block_on(async {
+        let mut memory = g700_like();
+        memory.current = [0xff, 0x00, 0x00];
+        memory.fault = Some(Fault::DropUploadData);
+        let (channel, handle, _sim) = device(memory).await;
+
+        let result = writer(&channel).write_page(3, &pattern_page(0x33)).await;
+
+        assert!(
+            matches!(
+                result,
+                Err(PageWriteError::Abandoned {
+                    profile: CurrentProfile::Factory,
+                    ..
+                })
+            ),
+            "{result:?}"
+        );
+        let selections: Vec<_> = sets(&handle)
+            .into_iter()
+            .filter(|frame| frame[2..4] == [0x80, 0x0f])
+            .collect();
+        assert_eq!(
+            selections,
+            [select([0xff, 0x00, 0x00])],
+            "the factory profile is not selected twice"
+        );
     });
 }
 
@@ -871,5 +939,16 @@ fn a_failed_write_says_what_the_page_and_the_profile_are_left_as() {
         failed(WriteStep::Copy(Half::First)),
         "writing page 3 failed while copying the first half; the page is left part-written; \
          the device is left on its factory profile"
+    );
+    assert_eq!(
+        PageWriteError::Abandoned {
+            page: 3,
+            step: WriteStep::Upload(Half::First),
+            profile: CurrentProfile::Index(2),
+            source: StepError::Device(Hidpp10Error::UnsupportedResponse),
+        }
+        .to_string(),
+        "writing page 3 failed while uploading the first half, before anything was erased; \
+         the page is untouched and Index(2) is selected again"
     );
 }

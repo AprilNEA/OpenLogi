@@ -23,11 +23,16 @@ use hidpp::{
         v10::Hidpp10Error,
         v20::{ErrorType, Hidpp20Error},
     },
-    register::battery::{self as register_battery, BatteryRegister},
+    register::{
+        battery::{self as register_battery, BatteryRegister},
+        report_rate::read_report_interval,
+        resolution::read_current_resolution,
+    },
 };
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, Capabilities, DeviceKind, DeviceModelInfo, DeviceTransports,
 };
+use openlogi_device_registry::g700::is_g700;
 use serde::{Deserialize, Serialize};
 use tokio::time::timeout;
 use tracing::debug;
@@ -93,13 +98,15 @@ pub(super) enum Refresh {
 }
 
 impl ProbedFeatures {
-    /// The capabilities a completed HID++ 2.0 feature walk measured. `None`
-    /// for a HID++ 1.0 device too: it has no table to measure, so the UI keeps
+    /// The capabilities a completed HID++ 2.0 feature walk measured, or the
+    /// registers of a HID++ 1.0 model OpenLogi drives (the G700). `None` for
+    /// any other HID++ 1.0 device: it has no table to measure, so the UI keeps
     /// its kind-based fallback.
     pub(super) fn capabilities(&self) -> Option<Capabilities> {
         match self.protocol {
             ProbedProtocol::Hidpp20 { capabilities, .. } => Some(capabilities),
-            ProbedProtocol::Unanswered | ProbedProtocol::Hidpp10 => None,
+            ProbedProtocol::Hidpp10 { capabilities } => capabilities,
+            ProbedProtocol::Unanswered => None,
         }
     }
 
@@ -126,7 +133,7 @@ impl ProbedFeatures {
     /// Whether the device answered as HID++ 1.0, which carries over to
     /// [`PairedDevice::hidpp10`](openlogi_core::device::PairedDevice::hidpp10).
     pub(super) fn is_hidpp10(&self) -> bool {
-        matches!(self.protocol, ProbedProtocol::Hidpp10)
+        matches!(self.protocol, ProbedProtocol::Hidpp10 { .. })
     }
 }
 
@@ -146,9 +153,14 @@ pub(super) enum ProbedProtocol {
         /// `REFRESH_INTERVAL`.
         incomplete: bool,
     },
-    /// HID++ 1.0: no feature table, so no capabilities to derive. The
-    /// receiver supplies the device's name.
-    Hidpp10,
+    /// HID++ 1.0: no feature table. The receiver supplies the device's name.
+    Hidpp10 {
+        /// What the registers of a model whose register set OpenLogi drives
+        /// — the G700, by `openlogi_device_registry::g700` — answered;
+        /// `None` for any other HID++ 1.0 device, which has nothing to
+        /// measure.
+        capabilities: Option<Capabilities>,
+    },
 }
 
 /// What one battery read learned about the device.
@@ -466,7 +478,7 @@ async fn probe_hidpp10_held(
         );
         (
             ProbedFeatures {
-                protocol: ProbedProtocol::Hidpp10,
+                protocol: ProbedProtocol::Hidpp10 { capabilities: None },
                 ..ProbedFeatures::default()
             },
             None,
@@ -595,24 +607,34 @@ async fn probe_hidpp20(
     )
 }
 
-/// Probe a HID++ 1.0 device. With no feature table there are no capabilities
-/// or device-side identity to read, and the receiver supplies its name and
-/// kind; what is left to learn is which register reports its battery.
+/// Probe a HID++ 1.0 device. With no feature table there is no device-side
+/// identity to read, and the receiver supplies its name and kind; what is
+/// left to learn is which register reports its battery and, for a G700, which
+/// of its pointer-settings registers answer (see [`g700_capabilities`]).
 ///
 /// These are register reads, which carry no software id, so another OpenLogi
 /// process could take their replies. They go out only under the receiver's
 /// register phase, which `_registers` proves the caller holds. The Unifying
-/// slot walk holds it to its end; the direct path and the Bolt slot walk run
-/// outside it.
+/// slot walk and the probe of a G700 on its cable hold it to their end; the
+/// Bolt slot walk and every other direct device run outside it.
 async fn probe_hidpp10(
     channel: &HidppChannel,
     slot: u8,
     _registers: &ReceiverRegisterPhase,
 ) -> (ProbedFeatures, Option<BatteryProbe>, EventFeatureIndices) {
-    match find_battery_register(channel, slot).await {
-        Ok(battery) => (
+    let measured = match find_battery_register(channel, slot).await {
+        Ok(battery) if is_g700(channel.vendor_id, channel.product_id, slot) => {
+            g700_capabilities(channel, slot)
+                .await
+                .map(|capabilities| (battery, Some(capabilities)))
+        }
+        Ok(battery) => Ok((battery, None)),
+        Err(e) => Err(e),
+    };
+    match measured {
+        Ok((battery, capabilities)) => (
             ProbedFeatures {
-                protocol: ProbedProtocol::Hidpp10,
+                protocol: ProbedProtocol::Hidpp10 { capabilities },
                 ..ProbedFeatures::default()
             },
             battery,
@@ -627,6 +649,26 @@ async fn probe_hidpp10(
             )
         }
     }
+}
+
+/// What a G700 can be configured to do, read off the registers that drive
+/// it: the DPI from the current-resolution register `0x63`, the report rate
+/// from `0x64`. Its buttons live in its onboard profiles, which no capability
+/// here covers yet. A register the mouse refuses is absent; one it does not
+/// answer fails the probe, so a guess is never memoized.
+async fn g700_capabilities(channel: &HidppChannel, slot: u8) -> Result<Capabilities, Hidpp10Error> {
+    fn answered<T>(read: Result<T, Hidpp10Error>) -> Result<bool, Hidpp10Error> {
+        match read {
+            Ok(_) => Ok(true),
+            Err(Hidpp10Error::RegisterAccess(_)) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+    Ok(Capabilities {
+        pointer: answered(read_current_resolution(channel, slot).await)?,
+        report_rate: answered(read_report_interval(channel, slot).await)?,
+        ..Capabilities::default()
+    })
 }
 
 /// The battery register a HID++ 1.0 device implements, trying `0x0D` before
@@ -911,7 +953,10 @@ mod tests {
         // 0x02: invalid address, the device's answer for a register it lacks.
         let (probe, battery) = hidpp10_probe(0x02).await;
 
-        assert_eq!(probe.protocol, ProbedProtocol::Hidpp10);
+        assert_eq!(
+            probe.protocol,
+            ProbedProtocol::Hidpp10 { capabilities: None }
+        );
         assert!(
             probe.completed(),
             "a HID++ 1.0 probe has no walk to wait for"

@@ -36,11 +36,11 @@ pub use host::{
     get_onboard, get_pointer_scaling, get_scroll_wheel_mode, get_sidetone, get_smartshift_status,
     list_pairing_receivers, play_haptic, raw_feature_calls, read_battery_raw, read_g700_memory,
     read_litra_state, restore_g700_pages, set_dpi, set_fn_lock, set_g700_current_profile,
-    set_g700_profile_dpi, set_g700_report_interval, set_g700_resolution, set_keyboard_color,
-    set_keyboard_color_with, set_pointer_scaling, set_scroll_inversion, set_scroll_resolution,
-    set_scroll_wheel_mode, set_sidetone, set_smartshift, set_smartshift_sensitivity,
-    set_smartshift_torque, toggle_smartshift, update_backlight, walk_per_key_zones,
-    watch_button_spy, watch_hotplug, watch_litra,
+    set_g700_profile_dpi, set_g700_profile_report_interval, set_g700_report_interval,
+    set_g700_resolution, set_keyboard_color, set_keyboard_color_with, set_pointer_scaling,
+    set_scroll_inversion, set_scroll_resolution, set_scroll_wheel_mode, set_sidetone,
+    set_smartshift, set_smartshift_sensitivity, set_smartshift_torque, toggle_smartshift,
+    update_backlight, walk_per_key_zones, watch_button_spy, watch_hotplug, watch_litra,
 };
 pub use lighting::{set_keyboard_color_on, set_keyboard_color_with_on};
 pub use probe_cache::FileProbeCacheStore;

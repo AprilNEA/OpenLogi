@@ -17,6 +17,7 @@ use super::events::EventSubscriptionHandle;
 use crate::backend::NodeInfo;
 use crate::channel::route::is_receiver_pid;
 use crate::host_lock::{self, ReceiverRegisterPhase};
+use openlogi_device_registry::g700::{G700Link, g700_link};
 
 use super::cache::{CacheKey, CacheOutcome, Cached};
 
@@ -412,7 +413,23 @@ pub(super) async fn probe_one(
             // (Bluetooth-direct, USB-C cable). HID++ at device-index 0xff
             // addresses the device's own features. Probe in case it answers.
             // P2.4 — verified path; no Bolt-pairing slot indirection needed.
-            within_budget(budget, receiver, probe_direct(channel, &info, pass)).await
+            // A G700 on its cable is probed through its registers, which
+            // carry no software id, so it takes the node's register phase
+            // the way a receiver does.
+            let registers = if g700_link(info.vendor_id, info.product_id) == Some(G700Link::Cable) {
+                let Some(registers) = lock_receiver_registers(&info, pass.timeouts).await else {
+                    return NodeProbe::deferred();
+                };
+                Some(registers)
+            } else {
+                None
+            };
+            within_budget(
+                budget,
+                receiver,
+                probe_direct(channel, &info, registers.as_ref(), pass),
+            )
+            .await
         }
     }
 }

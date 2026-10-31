@@ -1,12 +1,16 @@
 //! `openlogi diag g700` — Logitech G700 onboard-profile diagnostics.
 //!
+//! Every subcommand finds the mouse the way `openlogi list` does — a probe of
+//! this host's devices, which asks the G700's receiver to announce its paired
+//! devices — and then addresses the G700 that probe lists.
+//!
 //! `dump` reads the G700's settings registers and all of its onboard memory,
 //! prints the profiles it finds, and can save every page to a JSON backup.
-//! It only reads: no request it sends can change the mouse.
+//! None of its requests to the mouse change it.
 //!
 //! The other subcommands write, one setting at a time, and read back what
-//! they wrote: `restore` puts pages back from a `dump` backup, `set-dpi`
-//! changes one DPI mode of one onboard profile, and `set-rate`,
+//! they wrote: `restore` puts pages back from a `dump` backup, `set-dpi` and
+//! `set-rate --profile` change one onboard profile, and `set-rate`,
 //! `set-resolution` and `set-profile` set the live registers.
 
 use std::fmt;
@@ -21,15 +25,20 @@ use openlogi_hid::g700::{
     self as codec, Binding, CurrentProfile, DIRECTORY_PAGE, DpiLed, DpiMode, G700Profile,
     PAGE_SIZE, Page, ProfileDirectory, RAM_PAGE, ReportInterval, Resolution, Special,
 };
-use openlogi_hid::{G700MemoryDump, PageRead, ProfileDpiChange, RestoreOutcome};
+use openlogi_hid::{
+    BackupOrigin, DeviceRoute, G700Identity, G700MemoryDump, PageRead, ProfileDpiChange,
+    ProfileRateChange, RestoreOutcome,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 /// The `format` field of a backup file.
 const BACKUP_FORMAT: &str = "openlogi-g700-memory-dump";
 
-/// The `version` field of a backup file.
-const BACKUP_VERSION: u64 = 1;
+/// The `version` field of a backup file this build writes. Version 2 adds the
+/// `identity` block; version 1 carries the same facts in its `route`,
+/// `device_index` and `pages` fields, and still restores.
+const BACKUP_VERSION: u64 = 2;
 
 #[derive(Debug, Args)]
 pub struct G700Args {
@@ -48,8 +57,9 @@ pub enum G700Cmd {
     /// Change one DPI mode of one onboard profile. Rewrites the profile's
     /// flash page; every other byte of it stays as it was.
     SetDpi(SetDpiArgs),
-    /// Set the report interval (register 0x64). It lasts until the mouse
-    /// switches profile.
+    /// Set the report interval: of the mouse until it switches profile
+    /// (register 0x64), or with `--profile` the one an onboard profile plays
+    /// at (rewrites its flash page).
     SetRate(SetRateArgs),
     /// Set the resolution the sensor runs at (register 0x63). It lasts until
     /// the mouse switches DPI mode or profile.
@@ -77,6 +87,10 @@ pub struct RestoreArgs {
     /// backup holds, except the RAM page 0.
     #[arg(long = "page", value_name = "N")]
     pub pages: Vec<u8>,
+    /// Restore even when the mouse does not match the backup's identity —
+    /// its route, device index, memory size and profile directory.
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[derive(Debug, Args)]
@@ -101,6 +115,10 @@ pub struct SetRateArgs {
     /// The interval between reports in milliseconds: 1 is 1000 Hz, 4 is 250 Hz.
     #[arg(long, value_name = "MS")]
     pub interval_ms: u8,
+    /// Change this onboard profile's interval instead, by its index as
+    /// `dump` numbers them: 1, 2, 4 or 8 ms.
+    #[arg(long, value_name = "INDEX")]
+    pub profile: Option<u8>,
 }
 
 #[derive(Debug, Args)]
@@ -139,6 +157,15 @@ pub async fn run(args: G700Args) -> Result<()> {
 /// The hint every command adds when the mouse cannot be reached.
 const UNREACHABLE_HINT: &str = "is the G700 paired and awake, or on its cable?";
 
+/// The route of the G700 a probe of this host lists.
+async fn g700_route() -> Result<DeviceRoute> {
+    let inventories = openlogi_hid::enumerate()
+        .await
+        .map_err(|error| anyhow!("probing this host's devices failed: {error}"))?;
+    openlogi_hid::find_g700_route(&inventories)
+        .ok_or_else(|| anyhow!("no G700 found: {UNREACHABLE_HINT}"))
+}
+
 async fn dump(args: DumpArgs) -> Result<()> {
     if let Some(out) = &args.out
         && out.exists()
@@ -149,7 +176,8 @@ async fn dump(args: DumpArgs) -> Result<()> {
             out.display()
         );
     }
-    let dump = openlogi_hid::read_g700_memory()
+    let route = g700_route().await?;
+    let dump = openlogi_hid::read_g700_memory(&route)
         .await
         .map_err(|error| anyhow!("{error}: {UNREACHABLE_HINT}"))?;
     let route = &dump.route;
@@ -174,14 +202,20 @@ async fn dump(args: DumpArgs) -> Result<()> {
 
 async fn restore(args: RestoreArgs) -> Result<()> {
     let backup = read_backup(&args.backup)?;
-    let pages = select_pages(backup, &args.pages)?;
+    let origin = if args.force {
+        BackupOrigin::Forced
+    } else {
+        BackupOrigin::Identified(backup.identity)
+    };
+    let pages = select_pages(backup.pages, &args.pages)?;
     let numbers: Vec<u8> = pages.iter().map(|(page, _)| *page).collect();
     println!(
         "restoring pages {} from {}",
         PageList(&numbers),
         args.backup.display()
     );
-    let restored = openlogi_hid::restore_g700_pages(pages)
+    let route = g700_route().await?;
+    let restored = openlogi_hid::restore_g700_pages(&route, &origin, pages)
         .await
         .map_err(|error| anyhow!("{error}\n  {error:?}"))?;
     for page in &restored {
@@ -196,11 +230,9 @@ async fn restore(args: RestoreArgs) -> Result<()> {
 }
 
 /// The pages of `backup` to restore: those `requested`, or every page but
-/// the RAM page when none is.
+/// the RAM page when none is. A request for the RAM page itself goes on to
+/// the device layer, which refuses it before finding the mouse.
 fn select_pages(backup: Vec<(u8, Page)>, requested: &[u8]) -> Result<Vec<(u8, Page)>> {
-    if requested.contains(&RAM_PAGE) {
-        bail!("page {RAM_PAGE} is RAM and is never restored");
-    }
     if requested.is_empty() {
         return Ok(backup
             .into_iter()
@@ -225,12 +257,16 @@ async fn set_dpi(args: SetDpiArgs) -> Result<()> {
         .raw
         .or_else(|| args.dpi.map(codec::raw_from_dpi))
         .ok_or_else(|| anyhow!("pass --dpi or --raw"))?;
-    let write = openlogi_hid::set_g700_profile_dpi(ProfileDpiChange {
-        profile: args.profile,
-        mode: args.mode,
-        x: raw,
-        y: raw,
-    })
+    let route = g700_route().await?;
+    let write = openlogi_hid::set_g700_profile_dpi(
+        &route,
+        ProfileDpiChange {
+            profile: args.profile,
+            mode: args.mode,
+            x: raw,
+            y: raw,
+        },
+    )
     .await
     .map_err(|error| anyhow!("{error}\n  {error:?}"))?;
     println!(
@@ -247,7 +283,24 @@ async fn set_dpi(args: SetDpiArgs) -> Result<()> {
 async fn set_rate(args: SetRateArgs) -> Result<()> {
     let interval = ReportInterval::try_from(args.interval_ms)
         .map_err(|_| anyhow!("the interval must be at least 1 ms"))?;
-    let actual = openlogi_hid::set_g700_report_interval(interval)
+    let route = g700_route().await?;
+    if let Some(profile) = args.profile {
+        let write = openlogi_hid::set_g700_profile_report_interval(
+            &route,
+            ProfileRateChange { profile, interval },
+        )
+        .await
+        .map_err(|error| anyhow!("{error}\n  {error:?}"))?;
+        println!(
+            "profile {profile} (page {}), report interval: {} ms -> {} ms = {} Hz; written, verified",
+            write.page,
+            write.before,
+            write.after.millis(),
+            write.after.rate_hz()
+        );
+        return Ok(());
+    }
+    let actual = openlogi_hid::set_g700_report_interval(&route, interval)
         .await
         .map_err(|error| anyhow!("{error}\n  {error:?}"))?;
     println!(
@@ -263,7 +316,8 @@ async fn set_resolution(args: SetResolutionArgs) -> Result<()> {
         x: args.raw,
         y: args.raw_y.unwrap_or(args.raw),
     };
-    let actual = openlogi_hid::set_g700_resolution(requested)
+    let route = g700_route().await?;
+    let actual = openlogi_hid::set_g700_resolution(&route, requested)
         .await
         .map_err(|error| anyhow!("{error}\n  {error:?}"))?;
     println!(
@@ -281,7 +335,8 @@ async fn set_profile(args: SetProfileArgs) -> Result<()> {
         Some(index) => CurrentProfile::Index(index),
         None => CurrentProfile::Factory,
     };
-    let actual = openlogi_hid::set_g700_current_profile(requested)
+    let route = g700_route().await?;
+    let actual = openlogi_hid::set_g700_current_profile(&route, requested)
         .await
         .map_err(|error| anyhow!("{error}\n  {error:?}"))?;
     println!("current profile (0x0F): {actual:?}, read back");
@@ -298,29 +353,48 @@ struct BackupPage {
     crc_valid: Option<bool>,
 }
 
+/// The `identity` block of a version 2 backup (see [`G700Identity`]).
+#[derive(Debug, Deserialize)]
+struct BackupIdentity {
+    route: String,
+    device_index: u8,
+    readable_pages: usize,
+    directory: Vec<(u8, u8)>,
+}
+
 /// The parts of a backup file a restore reads.
 #[derive(Debug, Deserialize)]
 struct BackupFile {
     format: String,
     version: u64,
+    route: String,
+    device_index: u8,
+    identity: Option<BackupIdentity>,
     pages: Vec<BackupPage>,
 }
 
-/// The pages of the backup at `path`. The file is checked against itself
-/// first: every page must decode to a full page whose CRC verdict matches
-/// the one the dump recorded, so a damaged file is refused before anything
-/// reaches the mouse.
-fn read_backup(path: &Path) -> Result<Vec<(u8, Page)>> {
+/// A backup, checked: its pages and the mouse it was taken from.
+#[derive(Debug, PartialEq)]
+struct Backup {
+    identity: G700Identity,
+    pages: Vec<(u8, Page)>,
+}
+
+/// The backup at `path`. The file is checked against itself first: every
+/// page must decode to a full page whose CRC verdict matches the one the
+/// dump recorded, so a damaged file is refused before anything reaches the
+/// mouse, and a version 2 identity must agree with the pages it describes.
+fn read_backup(path: &Path) -> Result<Backup> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("read the backup {}", path.display()))?;
     parse_backup(&text).with_context(|| format!("the backup {}", path.display()))
 }
 
-fn parse_backup(text: &str) -> Result<Vec<(u8, Page)>> {
+fn parse_backup(text: &str) -> Result<Backup> {
     let file: BackupFile = serde_json::from_str(text)?;
-    if file.format != BACKUP_FORMAT || file.version != BACKUP_VERSION {
+    if file.format != BACKUP_FORMAT || !(1..=BACKUP_VERSION).contains(&file.version) {
         bail!(
-            "format {:?} version {} is not a {BACKUP_FORMAT} version {BACKUP_VERSION} backup",
+            "format {:?} version {} is not a {BACKUP_FORMAT} backup of version 1 to {BACKUP_VERSION}",
             file.format,
             file.version
         );
@@ -346,7 +420,23 @@ fn parse_backup(text: &str) -> Result<Vec<(u8, Page)>> {
         }
         pages.push((entry.page, page));
     }
-    Ok(pages)
+    let identity = G700Identity::of_pages(
+        file.route,
+        file.device_index,
+        pages.iter().map(|(number, page)| (*number, page)),
+    );
+    if let Some(recorded) = file.identity {
+        let recorded = G700Identity {
+            route: recorded.route,
+            device_index: recorded.device_index,
+            readable_pages: recorded.readable_pages,
+            directory: recorded.directory,
+        };
+        if recorded != identity {
+            bail!("the identity {recorded:?} contradicts the pages, which say {identity:?}");
+        }
+    }
+    Ok(Backup { identity, pages })
 }
 
 /// Decodes [`hex`]'s output.
@@ -681,12 +771,19 @@ fn backup_json(dump: &G700MemoryDump, created_unix: u64) -> Value {
         }),
         Err(error) => json!({ "page": read.page, "error": format!("{error:?}") }),
     };
+    let identity = dump.identity();
     json!({
         "format": BACKUP_FORMAT,
         "version": BACKUP_VERSION,
         "created_unix": created_unix,
         "route": dump.route.to_string(),
         "device_index": dump.device_index,
+        "identity": {
+            "route": identity.route,
+            "device_index": identity.device_index,
+            "readable_pages": identity.readable_pages,
+            "directory": identity.directory,
+        },
         "registers": {
             "current_profile_0x0f": error_or(&dump.current_profile, |current| {
                 json!({ "decoded": format!("{current:?}"), "encoded": hex(&current.to_register()) })
@@ -723,7 +820,9 @@ fn hex(bytes: &[u8]) -> String {
 mod tests {
     use openlogi_hid::g700::{Binding, ButtonMask, KeyModifiers, MacroPointer, Page, Special};
 
-    use super::{BindingDisplay, hex, parse_backup, select_pages, unhex};
+    use openlogi_hid::G700Identity;
+
+    use super::{Backup, BindingDisplay, hex, parse_backup, select_pages, unhex};
 
     #[test]
     fn bindings_print_in_ratbagctl_words() {
@@ -779,9 +878,29 @@ mod tests {
         serde_json::json!({
             "format": "openlogi-g700-memory-dump",
             "version": 1,
+            "route": "slot 1 on receiver 500F9BB6",
+            "device_index": 1,
             "pages": pages,
         })
         .to_string()
+    }
+
+    fn identity(readable_pages: usize, directory: Vec<(u8, u8)>) -> G700Identity {
+        G700Identity {
+            route: "slot 1 on receiver 500F9BB6".into(),
+            device_index: 1,
+            readable_pages,
+            directory,
+        }
+    }
+
+    /// A directory listing profiles on pages 2 and 3.
+    fn directory() -> Page {
+        let mut bytes = [0xff; 512];
+        bytes[..6].copy_from_slice(&[0x02, 0x00, 0x01, 0x03, 0x00, 0x03]);
+        let mut page = Page::from_bytes(bytes);
+        page.update_crc();
+        page
     }
 
     fn valid_page(fill: u8) -> Page {
@@ -800,11 +919,41 @@ mod tests {
 
     #[test]
     fn a_backup_reads_back_the_pages_a_dump_wrote() {
-        let text = backup_text(&[(1, &valid_page(0x01)), (8, &Page::erased())]);
+        let text = backup_text(&[(1, &directory()), (8, &Page::erased())]);
 
-        let pages = parse_backup(&text).unwrap();
+        let backup = parse_backup(&text).unwrap();
 
-        assert_eq!(pages, [(1, valid_page(0x01)), (8, Page::erased())]);
+        assert_eq!(
+            backup,
+            Backup {
+                identity: identity(2, vec![(2, 0), (3, 0)]),
+                pages: vec![(1, directory()), (8, Page::erased())],
+            },
+            "a version 1 backup's identity comes from its route and pages"
+        );
+    }
+
+    #[test]
+    fn a_version_2_identity_must_agree_with_its_pages() {
+        let v2 = |readable_pages: usize| {
+            let mut file: serde_json::Value =
+                serde_json::from_str(&backup_text(&[(1, &directory())])).unwrap();
+            file["version"] = 2.into();
+            file["identity"] = serde_json::json!({
+                "route": "slot 1 on receiver 500F9BB6",
+                "device_index": 1,
+                "readable_pages": readable_pages,
+                "directory": [[2, 0], [3, 0]],
+            });
+            file.to_string()
+        };
+
+        assert_eq!(
+            parse_backup(&v2(1)).unwrap().identity,
+            identity(1, vec![(2, 0), (3, 0)])
+        );
+        let error = parse_backup(&v2(27)).unwrap_err();
+        assert!(error.to_string().contains("contradicts"), "{error}");
     }
 
     #[test]
@@ -812,11 +961,15 @@ mod tests {
         let text = serde_json::json!({
             "format": "openlogi-g700-memory-dump",
             "version": 1,
+            "route": "slot 1 on receiver 500F9BB6",
+            "device_index": 1,
             "pages": [{ "page": 27, "error": "RegisterAccess(InvalidParamValue)" }],
         })
         .to_string();
 
-        assert_eq!(parse_backup(&text).unwrap(), []);
+        let backup = parse_backup(&text).unwrap();
+        assert_eq!(backup.pages, []);
+        assert_eq!(backup.identity.readable_pages, 0);
     }
 
     #[test]
@@ -850,7 +1003,12 @@ mod tests {
             .collect();
         assert_eq!(selected, [1, 8]);
 
-        select_pages(backup.clone(), &[0]).unwrap_err();
+        let ram = select_pages(backup.clone(), &[0]).unwrap();
+        assert_eq!(
+            ram,
+            [(0, valid_page(0))],
+            "an explicit RAM page is the device layer's to refuse"
+        );
         select_pages(backup.clone(), &[9]).unwrap_err();
         let one = select_pages(backup, &[8, 8]).unwrap();
         assert_eq!(one, [(8, Page::erased())], "a repeated page once");

@@ -14,6 +14,9 @@ use hidpp::channel::HidppChannel;
 
 use route::DeviceRoute;
 
+use crate::backend::NodeId;
+use crate::host_lock::{RECEIVER_REGISTER_TIMEOUT, ReceiverRegisterPhase, lock_receiver_registers};
+
 pub(crate) mod pool;
 pub(crate) mod registry;
 pub(crate) mod route;
@@ -27,19 +30,45 @@ pub use registry::ChannelRegistry;
 /// can reuse an inventory- or capture-owned connection instead of
 /// re-enumerating and opening a fresh channel each time (which costs ~100ms+).
 ///
-/// Cheap to clone (an `Arc` plus the [`DeviceRoute`] it points at). Built by
-/// the inventory registry or a standalone capture session.
+/// Cheap to clone (an `Arc` plus the [`DeviceRoute`] it points at and the
+/// node it was opened on). Built by the inventory registry or a standalone
+/// capture session.
 #[derive(Clone)]
 pub struct SharedChannel {
     channel: Arc<HidppChannel>,
     route: DeviceRoute,
+    /// The HID node the channel is open on: what another OpenLogi process
+    /// knows the same connection by, so register I/O can take that node's
+    /// cross-process register phase.
+    node: NodeId,
 }
 
 impl SharedChannel {
-    /// Wrap an open channel that reaches `route`.
+    /// Wrap an open channel on `node` that reaches `route`.
+    #[must_use]
+    pub(crate) fn on_node(channel: Arc<HidppChannel>, route: DeviceRoute, node: NodeId) -> Self {
+        Self {
+            channel,
+            route,
+            node,
+        }
+    }
+
+    /// Wrap a test's channel that reaches `route`, on a node named after the
+    /// route.
+    #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub(crate) fn new(channel: Arc<HidppChannel>, route: DeviceRoute) -> Self {
-        Self { channel, route }
+        let node = NodeId::from(format!("test:{route}"));
+        Self::on_node(channel, route, node)
+    }
+
+    /// Take the node's HID++ 1.0 register phase, which every OpenLogi process
+    /// takes before register I/O on the node (see
+    /// [`lock_receiver_registers`]); `None` when another process still holds
+    /// it after [`RECEIVER_REGISTER_TIMEOUT`].
+    pub(crate) async fn lock_registers(&self) -> Option<ReceiverRegisterPhase> {
+        lock_receiver_registers(&self.node, RECEIVER_REGISTER_TIMEOUT).await
     }
 
     /// Whether this channel reaches `route` — so the write path only reuses it
@@ -57,6 +86,11 @@ impl SharedChannel {
         self.route.device_index()
     }
 
+    /// The HID node the channel is open on.
+    pub(crate) fn node(&self) -> &NodeId {
+        &self.node
+    }
+
     /// The physical route this channel addresses, used to serialize complete
     /// native lighting transactions rather than just individual HID reports.
     #[must_use]
@@ -71,6 +105,7 @@ impl SharedChannel {
         WeakSharedChannel {
             channel: Arc::downgrade(&self.channel),
             route: self.route.clone(),
+            node: self.node.clone(),
         }
     }
 }
@@ -82,6 +117,7 @@ impl SharedChannel {
 pub struct WeakSharedChannel {
     channel: Weak<HidppChannel>,
     route: DeviceRoute,
+    node: NodeId,
 }
 
 impl WeakSharedChannel {
@@ -90,7 +126,7 @@ impl WeakSharedChannel {
     pub fn upgrade(&self) -> Option<SharedChannel> {
         self.channel
             .upgrade()
-            .map(|channel| SharedChannel::new(channel, self.route.clone()))
+            .map(|channel| SharedChannel::on_node(channel, self.route.clone(), self.node.clone()))
     }
 }
 

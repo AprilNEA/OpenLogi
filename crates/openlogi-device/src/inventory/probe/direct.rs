@@ -11,9 +11,11 @@ use tracing::debug;
 use super::{NodeProbe, PassContext, ProbeVerdict};
 use crate::backend::NodeInfo;
 use crate::channel::route::DIRECT_DEVICE_INDEX;
+use crate::host_lock::ReceiverRegisterPhase;
 use crate::inventory::cache::{CacheKey, CacheOutcome, ProbeTarget, probe_or_reuse, seen};
 use crate::inventory::features::Refresh;
 use crate::inventory::mappings::{direct_identity_kind, resolve_device_kind};
+use crate::write::g700_wired_device_index;
 
 /// Prefer the device's own HID++ marketing name over the host HID collection
 /// label. Windows Bluetooth frequently exposes only a generic `"Mouse"`, while
@@ -39,9 +41,14 @@ pub(in crate::inventory) fn preferred_direct_codename(
 /// only if that rejection rests on a completed feature walk or a HID++ 1.0
 /// answer, so a device that merely failed to answer is settled as a failed
 /// probe instead.
+///
+/// `registers` is the node's register phase, held for a G700 on its cable,
+/// which is probed through its registers at whichever of its indexes it
+/// answers at (see `write::g700_wired_device_index`).
 pub(super) async fn probe_direct(
     channel: Arc<HidppChannel>,
     info: &NodeInfo,
+    registers: Option<&ReceiverRegisterPhase>,
     pass: PassContext<'_>,
 ) -> NodeProbe {
     // A transport that reported a permanent disconnect will never answer, and
@@ -57,6 +64,17 @@ pub(super) async fn probe_direct(
         );
         return failed_probe(info);
     }
+    let index = if registers.is_some() {
+        match g700_wired_device_index(&channel, &info.id).await {
+            Ok(index) => index,
+            Err(error) => {
+                debug!(?error, "G700 cable answers at no index — failed probe");
+                return failed_probe(info);
+            }
+        }
+    } else {
+        DIRECT_DEVICE_INDEX
+    };
     let id = CacheKey::Direct(info.id.clone());
     let cached = pass.cache.get(&id);
     // A direct device's HID node is present (it is the candidate), so probe it
@@ -64,10 +82,7 @@ pub(super) async fn probe_direct(
     // the device behind it is linked is the probe's answer, not this call's.
     let (probe, outcome) = probe_or_reuse(
         &channel,
-        ProbeTarget {
-            index: DIRECT_DEVICE_INDEX,
-            registers: None,
-        },
+        ProbeTarget { index, registers },
         Some(id),
         cached,
         true,

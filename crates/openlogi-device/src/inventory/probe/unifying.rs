@@ -19,6 +19,7 @@ use hidpp::{
     },
 };
 use openlogi_core::device::{DeviceInventory, DeviceKind, PairedDevice, ReceiverInfo};
+use openlogi_device_registry::g700::{G700_NAME, is_g700};
 use tokio::time::timeout;
 use tracing::debug;
 
@@ -368,12 +369,18 @@ pub(in crate::inventory) async fn probe_unifying_slot(
     // device never does; never put it in front of the feature probe, where one
     // missing receiver ACK can otherwise starve a healthy Lightspeed mouse
     // forever.
+    // A G700's own receiver keeps no name for it, so the registry's model
+    // name stands in.
     let codename = if let Some(name) = probe.marketing_name.clone() {
         Some(name)
     } else if !event.online {
         read_codename(channel, slot, RECEIVER_OPERATION_TIMEOUT).await
     } else if probe.completed() {
-        read_codename(channel, slot, SEND_RESPONSE_TIMEOUT).await
+        read_codename(channel, slot, SEND_RESPONSE_TIMEOUT)
+            .await
+            .or_else(|| {
+                is_g700(channel.vendor_id, channel.product_id, slot).then(|| G700_NAME.to_string())
+            })
     } else {
         None
     };

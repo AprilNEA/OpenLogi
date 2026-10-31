@@ -472,3 +472,184 @@ fn codename_clamps_overlong_len() {
 fn codename_rejects_short_response() {
     assert_eq!(parse_codename(&[0x40]), None);
 }
+
+/// A G700 at `device` answering the probe's register reads: `0x07` battery
+/// full, `0x0D` refused, `0x63` 850 dpi (raw 36), `0x64` 4 ms. Its receiver
+/// refuses `0xB5` — the c531 answers no pairing or name sub-register.
+fn g700_registers(request: &[u8], device: u8) -> Option<Vec<u8>> {
+    if request[1] == 0xff && request[2..4] == [0x83, 0xb5] {
+        return Some(register_error(request, 0x03));
+    }
+    if request[1] != device {
+        return None;
+    }
+    match (request[0], request[2], request[3]) {
+        // HID++ 2.0's ping reaches a HID++ 1.0 device as sub id 0x00.
+        (0x10, 0x00, _) => Some(register_error(request, 0x01)),
+        (0x10, 0x81, 0x0d) => Some(register_error(request, 0x02)),
+        (0x10, 0x81, 0x07) => Some(vec![0x10, device, 0x81, 0x07, 0x07, 0x00, 0x00]),
+        (0x10, 0x81, 0x0f) => Some(vec![0x10, device, 0x81, 0x0f, 0x00, 0x02, 0x00]),
+        (0x10, 0x81, 0x64) => Some(vec![0x10, device, 0x81, 0x64, 0x04, 0x00, 0x00]),
+        (0x10, 0x83, 0x63) => {
+            let mut reply = vec![0x11, device, 0x83, 0x63, 36, 0, 36, 0];
+            reply.resize(20, 0);
+            Some(reply)
+        }
+        _ => panic!("unexpected request: {request:02x?}"),
+    }
+}
+
+/// The capabilities a G700 measures to: its DPI and its report rate.
+fn g700_capabilities() -> Capabilities {
+    Capabilities {
+        pointer: true,
+        report_rate: true,
+        ..Capabilities::default()
+    }
+}
+
+#[tokio::test]
+async fn g700_slot_measures_its_dpi_and_report_rate_registers() {
+    // The arrival the G700 broadcast behind its c531 receiver, captured on
+    // hardware: slot 1, WPID 0x1023.
+    let message = Message::Short(
+        MessageHeader {
+            device_index: 1,
+            sub_id: 0x41,
+        },
+        [0x07, 0x12, 0x23, 0x10],
+    );
+    let Some(UnifyingEvent::DeviceConnection(event)) = decode_notification(&message) else {
+        panic!("expected a device-connection event");
+    };
+    assert_eq!(event.wpid, 0x1023);
+    let (raw, _) =
+        ScriptedRawHidChannel::with_dynamic_responder(|request| g700_registers(request, 1));
+    let channel = scripted_channel(raw.presenting_as(0xc531)).await;
+
+    let cache = HashMap::new();
+    let pass = PassContext {
+        cache: &cache,
+        now: Instant::now(),
+        subscriptions: None,
+        timeouts: &ProbeTimeouts::DEFAULT,
+    };
+    let (device, outcome) = probe_unifying_slot(
+        &channel,
+        &event,
+        "500F9BB6",
+        &host_lock::ReceiverRegisterPhase::uncontended(),
+        pass,
+    )
+    .await
+    .expect("an online slot surfaces");
+
+    assert_eq!(device.kind, DeviceKind::Mouse);
+    assert_eq!(
+        device.codename.as_deref(),
+        Some("G700"),
+        "the c531 names no device, so the registry does"
+    );
+    assert_eq!(device.capabilities, Some(g700_capabilities()));
+    let battery = device.battery.expect("register 0x07 reports the battery");
+    assert_eq!(battery.level, BatteryLevel::Full);
+    assert!(
+        matches!(outcome, CacheOutcome::Fresh(..)),
+        "a completed register probe is memoized"
+    );
+}
+
+#[tokio::test]
+async fn another_hidpp10_slot_behind_a_g700_receiver_measures_nothing() {
+    // Slot 2 is not where the G700 answers, so its registers are not read
+    // as a G700's: the probe stops at the battery register.
+    let message = Message::Short(
+        MessageHeader {
+            device_index: 2,
+            sub_id: 0x41,
+        },
+        [0x07, 0x12, 0x23, 0x10],
+    );
+    let Some(UnifyingEvent::DeviceConnection(event)) = decode_notification(&message) else {
+        panic!("expected a device-connection event");
+    };
+    let (raw, handle) =
+        ScriptedRawHidChannel::with_dynamic_responder(|request| g700_registers(request, 2));
+    let channel = scripted_channel(raw.presenting_as(0xc531)).await;
+    let cache = HashMap::new();
+    let pass = PassContext {
+        cache: &cache,
+        now: Instant::now(),
+        subscriptions: None,
+        timeouts: &ProbeTimeouts::DEFAULT,
+    };
+
+    let (device, _) = probe_unifying_slot(
+        &channel,
+        &event,
+        "500F9BB6",
+        &host_lock::ReceiverRegisterPhase::uncontended(),
+        pass,
+    )
+    .await
+    .expect("an online slot surfaces");
+
+    assert_eq!(device.capabilities, None);
+    assert!(
+        handle
+            .written_reports()
+            .iter()
+            .all(|report| !matches!(report[3], 0x63 | 0x64)),
+        "no pointer register is read"
+    );
+}
+
+#[tokio::test]
+async fn a_g700_on_its_cable_is_probed_under_its_register_phase() {
+    let info = NodeInfo {
+        product_id: 0xc06b,
+        ..scripted_node_info(&format!("g700-cable-{}", std::process::id()))
+    };
+    // The cable answers at 0xFF.
+    let (raw, _) =
+        ScriptedRawHidChannel::with_dynamic_responder(|request| g700_registers(request, 0xff));
+    let channel = scripted_channel(raw.presenting_as(0xc06b)).await;
+    let cache = HashMap::new();
+    let pass = PassContext {
+        cache: &cache,
+        now: Instant::now(),
+        subscriptions: None,
+        timeouts: &ProbeTimeouts::DEFAULT,
+    };
+
+    // Another process holding the node's phase defers the probe.
+    let held = host_lock::try_lock(&host_lock::node_lock_name(&info.id))
+        .unwrap()
+        .expect("the test takes the phase first");
+    let timeouts = ProbeTimeouts {
+        register_lock: Duration::from_millis(50),
+        ..ProbeTimeouts::DEFAULT
+    };
+    let deferred = probe_one(
+        info.clone(),
+        Arc::clone(&channel),
+        PassContext {
+            timeouts: &timeouts,
+            ..pass
+        },
+    )
+    .await;
+    assert_eq!(deferred.verdict, ProbeVerdict::Deferred);
+    drop(held);
+
+    let probe = probe_one(info, channel, pass).await;
+
+    assert_eq!(probe.verdict, ProbeVerdict::Healthy { complete: true });
+    let inventory = probe.inventory.expect("the cable is a device");
+    let [device] = inventory.paired.as_slice() else {
+        panic!("one device: {:?}", inventory.paired);
+    };
+    assert_eq!(device.slot, DIRECT_DEVICE_INDEX);
+    assert_eq!(device.capabilities, Some(g700_capabilities()));
+    assert!(device.battery.is_some());
+}
