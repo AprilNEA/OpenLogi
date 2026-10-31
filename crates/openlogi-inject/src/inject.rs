@@ -137,6 +137,20 @@ impl HeldOutput {
         released: Option<(&KeyCombo, HeldKeys)>,
         pressed: Option<(&KeyCombo, HeldKeys)>,
     ) -> HoldTransition {
+        // A chord whose key this platform cannot press holds nothing: its
+        // modifiers would stay down with no key to finish them (#1654). Its
+        // release is skipped too, so it never drops another chord's modifier.
+        let released = released.filter(|(combo, _)| combo.key().is_pressable_here());
+        let pressed = pressed.filter(|(combo, _)| {
+            let pressable = combo.key().is_pressable_here();
+            if !pressable {
+                tracing::warn!(
+                    usage = combo.key().code(),
+                    "held shortcut key cannot be pressed on this platform — chord ignored"
+                );
+            }
+            pressable
+        });
         let tapped = pressed.and_then(|(combo, keys)| {
             (keys == HeldKeys::ModifiersOnly).then(|| HeldKey::key(combo.key()))
         });
@@ -713,7 +727,7 @@ fn hid_usage_to_windows(usage: u8) -> Option<u16> {
         0x1e..=0x26 => Some(u16::from(b'1' + usage - 0x1e)),
         0x27 => Some(u16::from(b'0')),
         0x3a..=0x45 => Some(0x70 + u16::from(usage - 0x3a)),
-        0x68..=0x6f => Some(0x7c + u16::from(usage - 0x68)),
+        0x68..=0x73 => Some(0x7c + u16::from(usage - 0x68)),
         0x28 => Some(0x0d),
         0x29 => Some(0x1b),
         0x2a => Some(0x08),
@@ -856,6 +870,38 @@ mod tests {
             output.transition(Some((&f13, HeldKeys::WholeChord)), None),
             HoldTransition {
                 up: vec![HeldKey::Key(f13.key())],
+                down: vec![],
+                tap: None,
+            }
+        );
+    }
+
+    /// macOS has no F21, so Ctrl+F21 holds nothing: it neither presses Control
+    /// nor, on release, lifts the Control another hold keeps down.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_chord_macos_cannot_press_holds_nothing() {
+        let control_a = combo("Ctrl+A");
+        let control_f21 = combo("Ctrl+F21");
+        let mut output = HeldOutput::default();
+
+        let _ = output.transition(None, Some((&control_a, HeldKeys::WholeChord)));
+        for keys in [HeldKeys::WholeChord, HeldKeys::ModifiersOnly] {
+            assert_eq!(
+                output.transition(None, Some((&control_f21, keys))),
+                HoldTransition::default(),
+                "{keys:?}"
+            );
+            assert_eq!(
+                output.transition(Some((&control_f21, keys)), None),
+                HoldTransition::default(),
+                "{keys:?}"
+            );
+        }
+        assert_eq!(
+            output.transition(Some((&control_a, HeldKeys::WholeChord)), None),
+            HoldTransition {
+                up: vec![HeldKey::Control, HeldKey::Key(control_a.key())],
                 down: vec![],
                 tap: None,
             }
@@ -1217,6 +1263,8 @@ mod tests {
         assert_eq!(hid_usage_to_windows(0x1e), Some(0x31)); // 1
         assert_eq!(hid_usage_to_windows(0x3a), Some(0x70)); // F1
         assert_eq!(hid_usage_to_windows(0x6f), Some(0x83)); // F20
+        assert_eq!(hid_usage_to_windows(0x70), Some(0x84)); // F21
+        assert_eq!(hid_usage_to_windows(0x73), Some(0x87)); // F24
         assert_eq!(hid_usage_to_windows(0x50), Some(0x25)); // Left
         assert_eq!(hid_usage_to_windows(0x2c), Some(0x20)); // Space
         assert_eq!(hid_usage_to_windows(0x33), Some(0xba)); // Semicolon

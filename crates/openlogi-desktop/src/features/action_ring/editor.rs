@@ -220,7 +220,7 @@ fn shortcut_editor(
                         .label(tr!("common.add"))
                         .on_click(move |_, _, cx| {
                             let shortcut = submit_input.read(cx).value().to_string();
-                            if let Ok(combo) = shortcut.parse::<KeyCombo>() {
+                            if let Ok(combo) = KeyCombo::parse_here(&shortcut) {
                                 commit_action(slot, Action::CustomShortcut(combo), cx);
                             }
                         }),

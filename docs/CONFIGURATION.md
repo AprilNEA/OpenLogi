@@ -445,13 +445,15 @@ so `Win+L` locks Windows and `Super+End` reaches GNOME and KDE shortcuts bound t
 Super.
 
 A chord has exactly one other key, and it may stand alone (`PageUp` with no
-modifier): a letter, a digit, `` - = [ ] \ ; ' ` , . / ``, `F1` to `F20`,
+modifier): a letter, a digit, `` - = [ ] \ ; ' ` , . / ``, `F1` to `F24`,
 `Enter`, `Escape` (`Esc`), `Backspace`, `Tab`, `Space`, the arrows `Left`,
 `Right`, `Up`, `Down`, the editing keys `Insert` (`Ins`), `Delete` (`Del`),
 `Home`, `End`, `PageUp` (`PgUp`), and `PageDown` (`PgDn`), or `PrintScreen`
 (`Print`, `PrtSc`, `PrtScn`, `PrtScr`). Names are case-insensitive. On macOS,
 `Insert` presses the Help key and `PrintScreen` presses F13, the key macOS
-reads a PC keyboard's Print Screen as.
+reads a PC keyboard's Print Screen as. macOS has no `F21` to `F24`: the shortcut
+editor refuses them there, and a config that names one still loads, but the
+agent skips that binding.
 
 `PrintScreen` presses the key itself, so a screenshot tool that listens for
 Print Screen, such as ShareX or Greenshot, receives it. On Windows and macOS,

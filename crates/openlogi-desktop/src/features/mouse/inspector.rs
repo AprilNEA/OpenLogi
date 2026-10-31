@@ -12,7 +12,9 @@ use gpui_component::{
     Disableable as _, Icon, IconName, Selectable as _, Sizable as _, button::Button, h_flex,
     input::InputState, scroll::ScrollableElement as _, v_flex,
 };
-use openlogi_core::binding::{Action, ButtonId, GestureDirection, default_binding};
+use openlogi_core::binding::{
+    Action, ButtonId, GestureDirection, KeyCombo, KeyComboParseError, default_binding,
+};
 
 use super::force_sensing::{PressForce, force_sensing_row};
 use super::hotspots::MouseControlId;
@@ -88,6 +90,33 @@ pub(super) enum ShortcutError {
     ///
     /// [`Recording::ShiftedSymbol`]: crate::features::binding_editor::Recording::ShiftedSymbol
     ShiftedSymbol,
+    /// The typed chord names a key this platform cannot press: F21–F24 on
+    /// macOS (see [`KeyCombo::parse_here`]).
+    NotPressableHere,
+}
+
+impl ShortcutError {
+    /// The message the editor shows under the shortcut field.
+    fn message(self) -> gpui::SharedString {
+        match self {
+            Self::Unrecognized => tr!("action_ring.custom_action_invalid_input"),
+            Self::ShiftedSymbol => tr!("actions.shifted_symbol_unrecordable"),
+            Self::NotPressableHere => tr!("actions.shortcut_key_unavailable_on_macos"),
+        }
+    }
+}
+
+impl From<KeyComboParseError> for ShortcutError {
+    fn from(error: KeyComboParseError) -> Self {
+        match error {
+            KeyComboParseError::NotPressableHere(_) => Self::NotPressableHere,
+            KeyComboParseError::Empty
+            | KeyComboParseError::MissingKey
+            | KeyComboParseError::MultipleKeys
+            | KeyComboParseError::UnknownToken(_)
+            | KeyComboParseError::InvalidModifiers(_) => Self::Unrecognized,
+        }
+    }
 }
 
 /// Whether the custom shortcut editor records a tapped or a held chord.
@@ -98,7 +127,7 @@ pub(super) enum ShortcutMode {
 }
 
 impl ShortcutMode {
-    fn action(self, combo: openlogi_core::binding::KeyCombo) -> Action {
+    fn action(self, combo: KeyCombo) -> Action {
         match self {
             Self::Tap => Action::CustomShortcut(combo),
             Self::Hold => Action::HoldShortcut(combo),
@@ -956,11 +985,10 @@ fn custom_shortcut_editor(
                         .label(tr!("common.add"))
                         .on_click(move |_, window, cx| {
                             let shortcut = submit_input.read(cx).value().to_string();
-                            match shortcut.parse::<openlogi_core::binding::KeyCombo>() {
+                            match KeyCombo::parse_here(&shortcut) {
                                 Ok(combo) => (on_pick)(mode.action(combo), window, cx),
-                                Err(_) => view.update(cx, |view, cx| {
-                                    view.invalid_drafts.shortcut =
-                                        Some(ShortcutError::Unrecognized);
+                                Err(error) => view.update(cx, |view, cx| {
+                                    view.invalid_drafts.shortcut = Some(error.into());
                                     cx.notify();
                                 }),
                             }
@@ -982,12 +1010,7 @@ fn custom_shortcut_editor(
                     .debug_selector(move || format!("{id_prefix}-custom-shortcut-error"))
                     .text_caption()
                     .text_color(rgb(0x00ef_4444))
-                    .child(match error {
-                        ShortcutError::Unrecognized => {
-                            tr!("action_ring.custom_action_invalid_input")
-                        }
-                        ShortcutError::ShiftedSymbol => tr!("actions.shifted_symbol_unrecordable"),
-                    }),
+                    .child(error.message()),
             )
         })
 }

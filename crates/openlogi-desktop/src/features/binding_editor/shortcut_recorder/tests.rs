@@ -63,7 +63,21 @@ fn a_key_press_records_its_modifiers_and_key() {
 fn escape_alone_cancels_and_a_key_a_shortcut_cannot_send_is_unsupported() {
     assert_eq!(record("escape"), Recording::Cancelled);
     assert_eq!(record("shift-escape"), chord("Shift+Escape"));
-    assert_eq!(record("f21"), Recording::Unsupported);
+    assert_eq!(record("f25"), Recording::Unsupported);
+}
+
+/// #1654: F21–F24 record on Windows and Linux. macOS has no key codes past
+/// F20, so the recorder refuses them there.
+#[test]
+fn f21_to_f24_record_except_on_macos() {
+    for (key, name) in [("f21", "F21"), ("f24", "F24")] {
+        let expected = if cfg!(target_os = "macos") {
+            Recording::Unsupported
+        } else {
+            chord(name)
+        };
+        assert_eq!(record(key), expected, "{key}");
+    }
 }
 
 /// #2121: Cmd+Shift+] arrives as Cmd+`}` on US layouts, and Cmd+Shift+7 as
