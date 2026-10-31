@@ -45,8 +45,6 @@ pub use channel::route::{
 };
 pub use channel::{ChannelPool, ChannelRegistry, SharedChannel, WeakSharedChannel};
 pub use device_io::{DeviceIoGate, DeviceIoSignal, IoSuspended, device_io_channel};
-/// The HID++ 1.0 register codecs that decode a [`G700MemoryDump`].
-pub use hidpp::register as hidpp10_register;
 pub use inventory::hotplug::watch_hotplug;
 pub use inventory::standalone::enumerate_standalone;
 pub use inventory::{Enumerator, InventoryError, enumerate};
@@ -79,13 +77,14 @@ pub use session::keyboard::{
 pub use write::{
     ButtonSpyError, ButtonSpyWatch, DisableKeysMask, DisableKeysState, Dpi, DpiCapabilities,
     DpiInfo, DpiLed, DpiTarget, EasySwitchHosts, EasySwitchSlot, FeatureEntry, FirmwareEntity,
-    FirmwareEntityInfo, ForceSensingInfo, G700MemoryDump, HapticRestore, HapticRestoreOutcome,
-    HapticWaveform, HidppFeatureErrorKind, HidppOperation, HostConnection, HostOs, HostOsInfo,
-    HostOsKind, KeyDisplay, KeyImageJpeg, LITRA_BEAM_PRODUCT_ID, LITRA_GLOW_PRODUCT_ID,
-    LightChange, LightCommand, LightControls, LightWatch, LightingMethod, LitraDescriptor,
-    LitraModel, OsLayoutOutcome, OsMask, OsVersion, PageRead, PointerSpeed, RAW_BATTERY_FEATURES,
-    RAW_FEATURE_PARAMS, RawFeatureAnswers, RawFeatureCall, RawFeatureReply, ReportRate,
-    ReportRateInfo, ReprogControlEntry, ScrollReportingTarget, ScrollResolution, ScrollWheelMode,
+    FirmwareEntityInfo, ForceSensingInfo, G700Error, G700MemoryDump, G700Register, HapticRestore,
+    HapticRestoreOutcome, HapticWaveform, HidppFeatureErrorKind, HidppOperation, HostConnection,
+    HostOs, HostOsInfo, HostOsKind, KeyDisplay, KeyImageJpeg, LITRA_BEAM_PRODUCT_ID,
+    LITRA_GLOW_PRODUCT_ID, LightChange, LightCommand, LightControls, LightWatch, LightingMethod,
+    LitraDescriptor, LitraModel, OsLayoutOutcome, OsMask, OsVersion, PageRead, PointerSpeed,
+    ProfileDpiChange, ProfileDpiWrite, RAW_BATTERY_FEATURES, RAW_FEATURE_PARAMS, RawFeatureAnswers,
+    RawFeatureCall, RawFeatureReply, ReportRate, ReportRateInfo, ReprogControlEntry,
+    RestoreOutcome, RestoredPage, ScrollReportingTarget, ScrollResolution, ScrollWheelMode,
     SidetoneLevel, WriteError, apply_litra, commands_for_light_settings, dump_features,
     dump_firmware_entities, dump_reprog_controls, encode_litra_command, ensure_haptics_armed_on,
     find_litra, get_backlight, get_backlight_on, get_disable_keys, get_disable_keys_on, get_dpi,
@@ -95,17 +94,40 @@ pub use write::{
     get_sidetone, get_sidetone_on, get_smartshift_status, get_smartshift_status_on, get_unit_id_on,
     keep_os_layout_on, key_display_for, litra_model_for_route, matches_litra, play_haptic,
     play_haptic_on, raw_feature_calls, read_battery_raw, read_g700_memory, read_litra_state,
-    rename_easy_switch_host, rename_easy_switch_host_on, restore_haptics_on, set_disable_keys,
-    set_disable_keys_on, set_disable_keys_write_through_on, set_dpi, set_dpi_led_on, set_dpi_on,
-    set_dpi_target_on, set_fn_lock, set_fn_lock_on, set_force_sensing_on, set_keyboard_color,
-    set_keyboard_color_on, set_keyboard_color_with, set_keyboard_color_with_on,
-    set_pointer_speed_on, set_report_rate, set_report_rate_on, set_scroll_inversion,
-    set_scroll_inversion_on, set_scroll_resolution, set_scroll_resolution_on,
+    rename_easy_switch_host, rename_easy_switch_host_on, restore_g700_pages, restore_haptics_on,
+    set_disable_keys, set_disable_keys_on, set_disable_keys_write_through_on, set_dpi,
+    set_dpi_led_on, set_dpi_on, set_dpi_target_on, set_fn_lock, set_fn_lock_on,
+    set_force_sensing_on, set_g700_current_profile, set_g700_profile_dpi, set_g700_report_interval,
+    set_g700_resolution, set_keyboard_color, set_keyboard_color_on, set_keyboard_color_with,
+    set_keyboard_color_with_on, set_pointer_speed_on, set_report_rate, set_report_rate_on,
+    set_scroll_inversion, set_scroll_inversion_on, set_scroll_resolution, set_scroll_resolution_on,
     set_scroll_wheel_mode, set_scroll_wheel_mode_on, set_sidetone, set_sidetone_on, set_smartshift,
     set_smartshift_on, set_smartshift_sensitivity, set_smartshift_torque, toggle_smartshift,
     toggle_smartshift_on, update_backlight, update_backlight_on, watch_button_spy, watch_litra,
     write_key_image_on,
 };
+
+/// The value types and codecs of a Logitech G700's settings registers and
+/// onboard memory: what a [`G700MemoryDump`] decodes into and the `set_g700_*`
+/// functions take. Reading and writing the mouse stays with those functions.
+pub mod g700 {
+    pub use hidpp::register::battery::{ChargingState, StatusLevel, StatusReading};
+    pub use hidpp::register::current_profile::CurrentProfile;
+    pub use hidpp::register::onboard_memory::directory::{
+        DIRECTORY_PAGE, DirectoryEntry, ProfileDirectory,
+    };
+    pub use hidpp::register::onboard_memory::g700::{
+        BUTTON_COUNT, Binding, ButtonMask, DPI_MODE_COUNT, DPI_RAW_MAX, DpiLed, DpiMode,
+        G700Profile, KeyModifiers, MacroPointer, PROFILE_COUNT, Special, dpi_from_raw,
+        parse_directory, raw_from_dpi,
+    };
+    pub use hidpp::register::onboard_memory::{
+        LAST_PAGE, PAGE_SIZE, Page, PageState, PageWriteError, RAM_PAGE, Refusal, StepError,
+        UnrestorablePage, WriteStep,
+    };
+    pub use hidpp::register::report_rate::ReportInterval;
+    pub use hidpp::register::resolution::Resolution;
+}
 
 /// Scripted transport helpers for tests in higher layers.
 #[cfg(feature = "test-support")]

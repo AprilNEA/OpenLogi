@@ -1,12 +1,15 @@
-//! Read-only dump of a Logitech G700's settings registers and onboard memory.
+//! The Logitech G700: finding it, dumping its settings registers and onboard
+//! memory, and writing them (see `configure`).
 //!
 //! The G700 is a HID++ 1.0 mouse: no feature table, settings at fixed
-//! registers, five profiles in onboard flash. This finds the mouse and reads
-//! everything a backup needs and nothing else. Only `GET_REGISTER` and
-//! `GET_LONG_REGISTER` requests go out — to the receiver as well, which is why
-//! the mouse is found here rather than through an inventory probe (that one
-//! may set the receiver's notification flags). Decoding is left to the codecs
-//! in [`hidpp::register`], which callers reach as [`crate::hidpp10_register`].
+//! registers, five profiles in onboard flash. The mouse is found here rather
+//! than through an inventory probe, which may set the receiver's notification
+//! flags: finding it sends only `GET_REGISTER`/`GET_LONG_REGISTER` requests,
+//! so the dump changes nothing. Decoding is left to the codecs in
+//! [`hidpp::register`], which callers reach as [`crate::g700`]; every
+//! request goes through this module.
+
+mod configure;
 
 use std::sync::Arc;
 
@@ -29,9 +32,15 @@ use tracing::debug;
 
 use crate::backend::{HidBackend, NodeInfo};
 use crate::channel::route::{DIRECT_DEVICE_INDEX, DeviceRoute, LOGITECH_VENDOR_ID};
-use crate::host_lock::{RECEIVER_REGISTER_TIMEOUT, lock_receiver_registers};
+use crate::host_lock::{RECEIVER_REGISTER_TIMEOUT, ReceiverRegisterPhase, lock_receiver_registers};
 
 use super::WriteError;
+
+pub use configure::{
+    G700Error, G700Register, ProfileDpiChange, ProfileDpiWrite, RestoreOutcome, RestoredPage,
+    restore_g700_pages, set_g700_current_profile, set_g700_profile_dpi, set_g700_report_interval,
+    set_g700_resolution,
+};
 
 /// One page read of a [`G700MemoryDump`].
 #[derive(Debug)]
@@ -68,61 +77,82 @@ pub struct G700MemoryDump {
     pub rereads: Vec<PageRead>,
 }
 
-/// Find a G700 — behind its own Nano receiver, or on its cable — and dump
-/// it.
+/// A G700 found and ready for register traffic.
+struct G700Link {
+    chan: Arc<HidppChannel>,
+    route: DeviceRoute,
+    device_index: u8,
+    /// Behind a receiver, its register phase, held for as long as the link
+    /// lives: HID++ 1.0 replies carry no software id, and every `0xA2` reply
+    /// has the same header, so another process's register reads on that
+    /// receiver must wait or defer meanwhile.
+    _registers: Option<ReceiverRegisterPhase>,
+}
+
+/// Find a G700 — behind its own Nano receiver, or on its cable.
 ///
-/// Behind the receiver the mouse is addressed at
-/// [`G700_RECEIVER_SLOT`]: that receiver refuses the pairing-information
-/// register, and learning the slot from arrival notifications would mean a
-/// register write to trigger them. Through the receiver the dump holds the
-/// receiver's register phase to the last page, some seconds, so another
-/// OpenLogi process's register reads on that receiver wait or defer
-/// meanwhile: HID++ 1.0 replies carry no software id, and every `0xA2` reply
-/// has the same header.
-///
-/// [`WriteError::DeviceUnreachable`] when a receiver is there but none of the
-/// settings registers answers — the mouse is off, asleep, or not paired.
-pub async fn read_g700_memory(backend: &dyn HidBackend) -> Result<G700MemoryDump, WriteError> {
+/// Behind the receiver the mouse is addressed at [`G700_RECEIVER_SLOT`]:
+/// that receiver refuses the pairing-information register, and learning the
+/// slot from arrival notifications would mean a register write to trigger
+/// them. A receiver whose register phase another process holds is passed
+/// over.
+async fn find_g700(backend: &dyn HidBackend) -> Result<G700Link, WriteError> {
     for node in backend.enumerate_hidpp().await? {
         if node.vendor_id != LOGITECH_VENDOR_ID {
             continue;
         }
-        let dump = match node.product_id {
+        let link = match node.product_id {
             G700_WIRED_PRODUCT_ID => {
                 let Some(chan) = backend.open_hidpp(&node).await? else {
                     continue;
                 };
-                let route = DeviceRoute::Direct {
-                    vendor_id: node.vendor_id,
-                    product_id: node.product_id,
-                };
-                read_g700_memory_on_channel(&chan, route, DIRECT_DEVICE_INDEX).await?
+                G700Link {
+                    chan,
+                    route: DeviceRoute::Direct {
+                        vendor_id: node.vendor_id,
+                        product_id: node.product_id,
+                    },
+                    device_index: DIRECT_DEVICE_INDEX,
+                    _registers: None,
+                }
             }
-            G700_RECEIVER_PRODUCT_ID => match dump_behind_receiver(backend, &node).await? {
-                Some(dump) => dump,
+            G700_RECEIVER_PRODUCT_ID => match link_behind_receiver(backend, &node).await? {
+                Some(link) => link,
                 None => continue,
             },
             _ => continue,
         };
-        return Ok(dump);
+        return Ok(link);
     }
     Err(WriteError::DeviceNotFound)
 }
 
-/// Dump the G700 behind the receiver on `node`; `None` when the node is not
-/// that receiver or another process holds its register phase.
-async fn dump_behind_receiver(
+/// Find a G700 and dump it; read-only.
+///
+/// Through the receiver the dump holds the receiver's register phase to the
+/// last page, some seconds, so another OpenLogi process's register reads on
+/// that receiver wait or defer meanwhile.
+///
+/// [`WriteError::DeviceUnreachable`] when a receiver is there but none of the
+/// settings registers answers — the mouse is off, asleep, or not paired.
+pub async fn read_g700_memory(backend: &dyn HidBackend) -> Result<G700MemoryDump, WriteError> {
+    let link = find_g700(backend).await?;
+    read_g700_memory_on_channel(&link.chan, link.route.clone(), link.device_index).await
+}
+
+/// The G700 behind the receiver on `node`; `None` when the node is not that
+/// receiver or another process holds its register phase.
+async fn link_behind_receiver(
     backend: &dyn HidBackend,
     node: &NodeInfo,
-) -> Result<Option<G700MemoryDump>, WriteError> {
+) -> Result<Option<G700Link>, WriteError> {
     let Some(chan) = backend.open_hidpp(node).await? else {
         return Ok(None);
     };
     let Some(Receiver::Unifying(unifying)) = receiver::detect(Arc::clone(&chan)) else {
         return Ok(None);
     };
-    let Some(_registers) = lock_receiver_registers(&node.id, RECEIVER_REGISTER_TIMEOUT).await
-    else {
+    let Some(registers) = lock_receiver_registers(&node.id, RECEIVER_REGISTER_TIMEOUT).await else {
         debug!(node = %node.id, "receiver register phase held elsewhere — passing the node over");
         return Ok(None);
     };
@@ -133,13 +163,15 @@ async fn dump_behind_receiver(
             return Ok(None);
         }
     };
-    let route = DeviceRoute::Unifying {
-        receiver_uid,
-        slot: G700_RECEIVER_SLOT,
-    };
-    read_g700_memory_on_channel(&chan, route, G700_RECEIVER_SLOT)
-        .await
-        .map(Some)
+    Ok(Some(G700Link {
+        chan,
+        route: DeviceRoute::Unifying {
+            receiver_uid,
+            slot: G700_RECEIVER_SLOT,
+        },
+        device_index: G700_RECEIVER_SLOT,
+        _registers: Some(registers),
+    }))
 }
 
 async fn read_g700_memory_on_channel(

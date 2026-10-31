@@ -67,7 +67,11 @@ pub use easy_switch::{
 pub use error::{HidppFeatureErrorKind, HidppOperation, WriteError};
 pub use fn_lock::{get_fn_lock, get_fn_lock_on, set_fn_lock, set_fn_lock_on};
 pub use force_sensing::{get_force_sensing_on, set_force_sensing_on};
-pub use g700::{G700MemoryDump, PageRead, read_g700_memory};
+pub use g700::{
+    G700Error, G700MemoryDump, G700Register, PageRead, ProfileDpiChange, ProfileDpiWrite,
+    RestoreOutcome, RestoredPage, read_g700_memory, restore_g700_pages, set_g700_current_profile,
+    set_g700_profile_dpi, set_g700_report_interval, set_g700_resolution,
+};
 pub use haptic::{
     HapticRestore, HapticRestoreOutcome, ensure_haptics_armed_on, play_haptic, play_haptic_on,
     restore_haptics_on,
