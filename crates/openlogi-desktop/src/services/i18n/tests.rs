@@ -1,5 +1,5 @@
 use openlogi_core::binding::{
-    Action, ActionRingIcon, ButtonId, GestureDirection, KNOWN_CONTROLS, KeyCombo,
+    Action, ActionRingIcon, ButtonId, GestureDirection, GridKey, KNOWN_CONTROLS, KeyCombo,
 };
 
 use crate::features::mouse::thumbwheel::ThumbwheelPreset;
@@ -25,6 +25,14 @@ fn typed_translation_keys_resolve() {
         assert!(
             covered(b.translation_key()),
             "no catalog key for ButtonId::{b:?}"
+        );
+    }
+    // Grid keys bind from config.toml before any GUI list exists; their
+    // labels must still resolve the day a picker offers them.
+    for key in GridKey::ALL {
+        assert!(
+            covered(key.translation_key()),
+            "no catalog key for GridKey::{key:?}"
         );
     }
     for d in GestureDirection::ALL {

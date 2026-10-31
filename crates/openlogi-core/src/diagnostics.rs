@@ -27,6 +27,10 @@ pub enum ConnectionKind {
     BoltReceiver,
     /// Paired through a legacy Unifying receiver.
     UnifyingReceiver,
+    /// Paired through a Logitech Nano receiver.
+    NanoReceiver,
+    /// Paired through a Logitech Lightspeed receiver.
+    LightspeedReceiver,
     /// Connected directly over Bluetooth — no receiver involved.
     BluetoothDirect,
     /// Connected over a USB cable.
@@ -445,6 +449,8 @@ fn connection_label(connection: ConnectionKind) -> &'static str {
     match connection {
         ConnectionKind::BoltReceiver => "Logi Bolt receiver",
         ConnectionKind::UnifyingReceiver => "Logi Unifying receiver",
+        ConnectionKind::NanoReceiver => "Logitech Nano receiver",
+        ConnectionKind::LightspeedReceiver => "Logitech Lightspeed receiver",
         ConnectionKind::BluetoothDirect => "Bluetooth (direct)",
         ConnectionKind::Wired => "Wired (USB)",
         ConnectionKind::Unknown => "unknown",
@@ -633,6 +639,8 @@ mod tests {
                         pointer_scaling: false,
                         force_sensing: false,
                         disable_keys: false,
+                        onboard_profiles: false,
+                        button_spy: false,
                     }),
                     dpi: Some("1600 dpi (range 200–8000, 5 steps)".to_string()),
                     config_key: "4082d".to_string(),

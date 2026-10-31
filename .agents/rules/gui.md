@@ -32,6 +32,14 @@ paths:
   Use measured or last-good `Capabilities` for hardware features. Extend `tabs_for`
   for panel selection, including device-kind presentation and offline fallbacks.
   When a device image has Logi metadata, do not invent missing button markers.
+- **Setting scope:** a device page holds that device's settings; app-wide values
+  live in Settings and are the default. Do not put an app-wide control on a
+  device page. To let a device override one, store `Option<T>` on `DeviceConfig`
+  and resolve it in one `Config` accessor, as `thumbwheel_sensitivity` does;
+  committing the app-wide value clears the override. When a device differs,
+  show the app-wide value and a reset on its page, and how many devices
+  override it in Settings. If the agent cannot apply the value per device, the
+  page says which device it follows.
 - **Presentation owners:** use desktop's `ui::components` and `ui::theme` for
   existing screens. `control_button`, `control_input`, and `control_select` apply
   `CONTROL_H` (30 px); `Palette` and the component theme must agree on `ThemeMode`.

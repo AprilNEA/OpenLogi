@@ -16,6 +16,7 @@ pub mod error;
 pub mod fn_lock;
 pub mod force_sensing;
 pub mod light;
+pub mod onboard;
 pub mod pairing;
 pub mod pointer_speed;
 pub mod report_rate;
@@ -34,13 +35,14 @@ pub use error::{HidppFeatureErrorKind, HidppOperation, WriteError};
 pub use fn_lock::FnLockState;
 pub use force_sensing::ForceSensingInfo;
 pub use light::{LightCommand, commands_for_light_settings};
+pub use onboard::{OnboardMode, OnboardProfile, OnboardState, ProfileIndex};
 pub use pairing::{Click, PairingError, PasskeyMethod, ReceiverSelector};
 pub use pointer_speed::PointerSpeed;
 pub use report_rate::{ReportRate, ReportRateInfo};
 pub use route::{
-    DIRECT_DEVICE_INDEX, DeviceRoute, LOGITECH_VENDOR_ID, RECEIVERS, ReceiverBrand,
-    ReceiverDescriptor, ReceiverProtocol, find_receiver, is_receiver_pid, receiver_display_name,
-    speaks_unifying_protocol,
+    DIRECT_DEVICE_INDEX, DeviceRoute, KeypadDescriptor, LOGITECH_VENDOR_ID, RECEIVERS,
+    ReceiverBrand, ReceiverDescriptor, ReceiverProtocol, find_receiver, is_receiver_pid,
+    receiver_display_name, speaks_unifying_protocol,
 };
 pub use scroll::{ScrollReportingTarget, ScrollWheelMode};
 pub use smartshift::{

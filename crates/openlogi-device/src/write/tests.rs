@@ -8,7 +8,9 @@ use hidpp::feature::smartshift::WheelMode;
 
 use crate::SharedChannel;
 use crate::channel::scripted::{ScriptedRawHidChannel, feature_error, scripted_channel};
-use crate::write::diagnostics::dump_firmware_entities_on_channel;
+use crate::write::diagnostics::{
+    dump_features_on_channel, dump_firmware_entities_on_channel, read_battery_raw_on_channel,
+};
 use crate::write::dpi::expand_dpi_ranges;
 use crate::write::lighting::{collect_present_zones, per_key_commit, per_key_frames};
 use crate::write::smartshift::{
@@ -1108,6 +1110,78 @@ async fn a_channel_failure_aborts_the_dump_instead_of_blaming_the_firmware() {
     );
 }
 
+const BATTERY_VOLTAGE_INDEX: u8 = 0x06;
+
+/// A G502 LIGHTSPEED's battery surface: `0x1001 BatteryVoltage` at index
+/// 0x06 and none of the other battery features, reading 3912 mV on battery.
+/// With `voltage` false the device exposes no battery feature at all.
+fn voltage_only_battery(request: &[u8], voltage: bool) -> Option<Vec<u8>> {
+    if request.len() < 7 || !matches!(request[0], 0x10 | 0x11) {
+        return None;
+    }
+    let mut payload = [0u8; 16];
+    let long = match (request[2], request[3] >> 4) {
+        // Root ping used by Device::new.
+        (0x00, 0x01) => {
+            payload[0] = 4;
+            false
+        }
+        // Root feature lookup.
+        (0x00, 0x00) => {
+            let feature_id = u16::from_be_bytes([request[4], request[5]]);
+            payload[0] = u8::from(voltage && feature_id == 0x1001) * BATTERY_VOLTAGE_INDEX;
+            false
+        }
+        // getBatteryInfo: 0x0f48 mV, flags clear (discharging, not critical).
+        (BATTERY_VOLTAGE_INDEX, 0x00) if voltage => {
+            payload[..3].copy_from_slice(&[0x0f, 0x48, 0x00]);
+            true
+        }
+        _ => return None,
+    };
+
+    let mut response = vec![0u8; if long { 20 } else { 7 }];
+    response[0] = if long { 0x11 } else { 0x10 };
+    response[1..4].copy_from_slice(&request[1..4]);
+    let payload_len = response.len() - 4;
+    response[4..].copy_from_slice(&payload[..payload_len]);
+    Some(response)
+}
+
+#[tokio::test]
+async fn the_raw_battery_read_reports_a_voltage_only_device() {
+    // The inventory reads these devices through 0x1001; the diagnostic must
+    // too, and print the measured voltage rather than an estimated percentage.
+    let (raw, _handle) =
+        ScriptedRawHidChannel::with_responder(|request| voltage_only_battery(request, true));
+    let channel = scripted_channel(raw).await;
+
+    let line = read_battery_raw_on_channel(&channel, 1)
+        .await
+        .expect("a 0x1001 device has a readable battery");
+    assert_eq!(
+        line,
+        "0x1001 BatteryVoltage: voltage_mv=3912 critical=false status=Discharging"
+    );
+}
+
+#[tokio::test]
+async fn the_raw_battery_read_fails_only_without_any_battery_feature() {
+    let (raw, _handle) =
+        ScriptedRawHidChannel::with_responder(|request| voltage_only_battery(request, false));
+    let channel = scripted_channel(raw).await;
+
+    let error = read_battery_raw_on_channel(&channel, 1)
+        .await
+        .expect_err("no battery feature to read");
+    assert_eq!(
+        error,
+        WriteError::FeatureUnsupported {
+            feature_hex: 0x1004
+        }
+    );
+}
+
 /// A multi-host keyboard: `0x40a3` at index 0x09 and `0x1815 HostsInfo` at
 /// index 0x0a reporting host slot 2 as current. Both fn-inversion echoes
 /// report whatever state the last `set` wrote (shared across the test through
@@ -1729,4 +1803,96 @@ async fn per_key_frames_are_fenced_before_their_one_commit() -> Result<(), Write
     assert_eq!(commits.len(), 1, "exactly one frameEnd");
     assert!(commits[0] > fence, "the frameEnd follows the fence");
     Ok(())
+}
+
+/// Feature index the scripted Yeti X reports for `0x0001 FeatureSet`.
+const FEATURE_SET_INDEX: u8 = 0x01;
+/// `ErrorType::InvalidArgument`, the Yeti X's answer for a feature-table index
+/// it does not list.
+const INVALID_ARGUMENT: u8 = 0x02;
+/// The Yeti X feature table at indexes 1 to 8, as captured in #786.
+const YETI_X_FEATURES: [u16; 8] = [
+    0x0001, 0x0003, 0x0005, 0x8070, 0x8330, 0x8350, 0x8360, 0x8370,
+];
+
+/// A Yeti X (`046d:0aaf`) answering FeatureSet `getFeatureID` for indexes 1 to
+/// 8 and refusing index 0, the root, with `InvalidArgument` (#786). `refused`
+/// names one more index the device refuses, so a test can break the table
+/// elsewhere.
+fn yeti_x_feature_table(request: &[u8], refused: u8) -> Option<Vec<u8>> {
+    if request.len() < 7 || !matches!(request[0], 0x10 | 0x11) {
+        return None;
+    }
+    let mut payload = [0u8; 16];
+    match (request[2], request[3] >> 4) {
+        // Root ping used by Device::new.
+        (0x00, 0x01) => payload[0] = 4,
+        // Root feature lookup.
+        (0x00, 0x00) => {
+            let feature_id = u16::from_be_bytes([request[4], request[5]]);
+            payload[0] = u8::from(feature_id == 0x0001) * FEATURE_SET_INDEX;
+        }
+        // getCount: the table without the root.
+        (FEATURE_SET_INDEX, 0x00) => {
+            payload[0] = u8::try_from(YETI_X_FEATURES.len()).expect("a u8 count");
+        }
+        // getFeatureID.
+        (FEATURE_SET_INDEX, 0x01) => {
+            let index = request[4];
+            let feature_id = index
+                .checked_sub(1)
+                .filter(|_| index != refused)
+                .and_then(|slot| YETI_X_FEATURES.get(usize::from(slot)));
+            let Some(feature_id) = feature_id else {
+                return Some(feature_error(request, INVALID_ARGUMENT));
+            };
+            payload[..2].copy_from_slice(&feature_id.to_be_bytes());
+        }
+        _ => return None,
+    }
+
+    let long = request[0] == 0x11;
+    let mut response = vec![0u8; if long { 20 } else { 7 }];
+    response[0] = request[0];
+    response[1..4].copy_from_slice(&request[1..4]);
+    let payload_len = response.len() - 4;
+    response[4..].copy_from_slice(&payload[..payload_len]);
+    Some(response)
+}
+
+#[tokio::test]
+async fn a_refused_root_index_leaves_out_only_the_root_row() {
+    let (raw, _handle) =
+        ScriptedRawHidChannel::with_dynamic_responder(|request| yeti_x_feature_table(request, 0));
+    let channel = scripted_channel(raw).await;
+    let entries = dump_features_on_channel(&channel, 0xff)
+        .await
+        .expect("a refused root row is not a failed dump");
+    let rows: Vec<(u8, u16)> = entries
+        .iter()
+        .map(|entry| (entry.index, entry.id))
+        .collect();
+    let expected: Vec<(u8, u16)> = (1..).zip(YETI_X_FEATURES).collect();
+    assert_eq!(rows, expected);
+}
+
+#[tokio::test]
+async fn a_refused_index_after_the_root_still_fails_the_dump() {
+    let (raw, _handle) =
+        ScriptedRawHidChannel::with_dynamic_responder(|request| yeti_x_feature_table(request, 3));
+    let channel = scripted_channel(raw).await;
+    let error = dump_features_on_channel(&channel, 0xff)
+        .await
+        .expect_err("only the root row may be refused");
+    assert!(
+        matches!(
+            error,
+            WriteError::HidppFeature {
+                operation: HidppOperation::DumpFeatures,
+                feature_hex: 0x0001,
+                kind: HidppFeatureErrorKind::InvalidArgument,
+            }
+        ),
+        "unexpected error: {error:?}"
+    );
 }

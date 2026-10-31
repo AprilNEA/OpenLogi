@@ -281,3 +281,36 @@ fn preset_chip_children_are_separate_keyboard_targets(cx: &mut TestAppContext) {
     assert_eq!(applications.get(), 2);
     assert_eq!(removals.get(), 2);
 }
+
+/// #2046: a stock selected `Button` differs from its neighbours only by the
+/// theme's pressed fill, about 1.07:1 on the light theme. A pill carries the
+/// accent mark instead, and only while there is something to choose.
+#[gpui::test]
+fn only_an_enabled_selected_pill_carries_the_accent_mark(cx: &mut TestAppContext) {
+    cx.update(gpui_component::init);
+    let pal = cx.update(|cx| theme::palette(cx));
+    let mark = |selected: bool, disabled: bool| {
+        let mut button = Pill::new("pill", "5 min")
+            .selected(selected)
+            .disabled(disabled)
+            .into_button(pal);
+        let style = button.style();
+        (style.border_color, style.background.clone())
+    };
+
+    assert_eq!(
+        mark(true, false),
+        (Some(theme::accent()), Some(theme::accent_tint().into())),
+        "the selected pill takes the accent border and fill",
+    );
+    assert_eq!(
+        mark(false, false),
+        (None, None),
+        "an unselected pill keeps the stock look",
+    );
+    assert_eq!(
+        mark(true, true),
+        (None, None),
+        "a disabled pill keeps the stock disabled look",
+    );
+}

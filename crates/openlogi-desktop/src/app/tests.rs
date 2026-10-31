@@ -61,6 +61,8 @@ fn config_error_folder_button_opens_from_the_active_window(cx: &mut gpui::TestAp
 
 #[gpui::test]
 fn main_window_renders_profile_confirmation_dialogs(cx: &mut gpui::TestAppContext) {
+    use std::{cell::Cell, rc::Rc};
+
     use gpui::{AppContext as _, InteractiveElement as _, ParentElement as _, div};
     use gpui_component::{Root, WindowExt as _};
 
@@ -85,15 +87,20 @@ fn main_window_renders_profile_confirmation_dialogs(cx: &mut gpui::TestAppContex
         let view = cx.new(|cx| AppView::new(window, cx));
         Root::new(view, window, cx)
     });
+    let dialog_renders = Rc::new(Cell::new(0));
     cx.update(|window, cx| {
-        window.open_alert_dialog(cx, |alert, _, _| {
+        let renders = dialog_renders.clone();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            renders.set(renders.get() + 1);
             alert.confirm().title(
                 div()
                     .debug_selector(|| "profile-confirmation".into())
                     .child("Remove Safari profile?"),
             )
         });
+        dialog_renders.set(0);
         window.draw(cx).clear(cx);
+        assert_eq!(dialog_renders.get(), 1, "mount the dialog once per frame");
     });
     assert!(
         cx.debug_bounds("profile-confirmation").is_some(),
@@ -974,6 +981,7 @@ fn record(kind: DeviceKind, capabilities: Option<Capabilities>) -> DeviceRecord 
         driver_id: None,
         registry_model_id: None,
         route: None,
+        receiver_brand: None,
         capture_id: None,
         kind,
         capabilities,
@@ -1027,6 +1035,8 @@ fn tabs_prefer_buttons_when_a_keyboard_kind_measures_a_pointer() {
         pointer_scaling: false,
         force_sensing: false,
         disable_keys: false,
+        onboard_profiles: false,
+        button_spy: false,
     });
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
     assert!(
@@ -1063,6 +1073,8 @@ fn tabs_follow_capabilities_not_kind() {
         pointer_scaling: false,
         force_sensing: false,
         disable_keys: false,
+        onboard_profiles: false,
+        button_spy: false,
     });
     // After 0x0005 kind-correction the record has kind=Mouse, not Keyboard.
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Mouse, caps));
@@ -1146,6 +1158,8 @@ fn keyboard_without_asset_hides_buttons_tab() {
         pointer_scaling: false,
         force_sensing: false,
         disable_keys: false,
+        onboard_profiles: false,
+        button_spy: false,
     });
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
     assert!(
@@ -1176,6 +1190,8 @@ fn keyboard_with_buttons_shows_keys_tab() {
         pointer_scaling: false,
         force_sensing: false,
         disable_keys: false,
+        onboard_profiles: false,
+        button_spy: false,
     });
     let keyboard = record(DeviceKind::Keyboard, caps);
     let tabs = DetailTab::tabs_for(&keyboard);
@@ -1187,6 +1203,22 @@ fn keyboard_with_buttons_shows_keys_tab() {
     // Keys stays the keyboard's opening tab: adding the ring editor must not
     // reassign `default_for` away from the main keyboard screen.
     assert_eq!(DetailTab::default_for(&keyboard), DetailTab::Keys);
+}
+
+/// A numpad is keyboard-like: the MX Creative Keypad (kind Numpad, buttons
+/// measured from its 0x1b04 table) shows Keys with neither the mouse Buttons
+/// panel nor Pointer.
+#[test]
+fn numpad_with_buttons_shows_keys_tab() {
+    let caps = Some(Capabilities {
+        buttons: true,
+        pointer: false,
+        ..Capabilities::default()
+    });
+    let tabs = DetailTab::tabs_for(&record(DeviceKind::Numpad, caps));
+    assert!(tabs.contains(&DetailTab::Keys), "numpad lost its Keys tab");
+    assert!(!tabs.contains(&DetailTab::Buttons));
+    assert!(!tabs.contains(&DetailTab::Pointer));
 }
 
 /// A sleeping keyboard whose slot was never probed has no capability data,
@@ -1205,6 +1237,7 @@ fn keyboard_with_a_depot_but_no_capabilities_shows_keys_tab() {
         metadata: openlogi_assets::Metadata::default(),
         png_width: 1872,
         png_height: 728,
+        side_view: None,
     });
     assert!(DetailTab::tabs_for(&keyboard).contains(&DetailTab::Keys));
     assert!(!DetailTab::tabs_for(&record(DeviceKind::Keyboard, None)).contains(&DetailTab::Keys));
@@ -1263,6 +1296,8 @@ mod corpus;
 /// device's Easy-Switch channel; a direct device has no slot to name.
 #[test]
 fn receiver_slot_is_named_only_for_receiver_routes() {
+    use openlogi_core::hid::ReceiverBrand;
+
     use super::widgets::{connection_summary, receiver_slot_label};
     use crate::services::i18n::LOCALE_LOCK;
 
@@ -1276,6 +1311,21 @@ fn receiver_slot_is_named_only_for_receiver_routes() {
     bolt.slot = 4;
     assert_eq!(receiver_slot_label(&bolt).as_deref(), Some("Slot 4"));
     assert_eq!(connection_summary(&bolt), "Bolt receiver · Slot 4");
+
+    let mut compatible = bolt.clone();
+    compatible.route = Some(DeviceRoute::Unifying {
+        receiver_uid: "OL-RECEIVER-UID-0001".to_string(),
+        slot: 4,
+    });
+    for (brand, label) in [
+        (ReceiverBrand::Unifying, "Unifying receiver"),
+        (ReceiverBrand::Nano, "Nano receiver"),
+        (ReceiverBrand::Lightspeed, "Lightspeed receiver"),
+    ] {
+        compatible.receiver_brand = Some(brand);
+        assert_eq!(receiver_slot_label(&compatible).as_deref(), Some("Slot 4"));
+        assert_eq!(connection_summary(&compatible), format!("{label} · Slot 4"));
+    }
 
     let mut direct = record(DeviceKind::Mouse, None);
     direct.route = Some(DeviceRoute::Direct {
@@ -1468,4 +1518,45 @@ fn a_key_binding_edit_repaints_the_secure_input_notice(cx: &mut gpui::TestAppCon
         "clearing the last key repaints the window"
     );
     assert!(!secure_input_notice_drawn(cx));
+}
+
+/// A G-series mouse carries the gaming control tables and no `0x1b04`. The
+/// OS hook still remaps its middle/back/forward, so it gets the Buttons panel,
+/// with or without a layout for the model (#392, #730, #877). It gets no
+/// Actions Ring, so its buttons are not offered one either.
+#[test]
+fn a_mouse_without_reprogcontrols_gets_buttons_but_no_ring() {
+    let caps = Some(Capabilities::from_feature_ids(&[0x2201, 0x8100, 0x8110]));
+    let unknown_model = record(DeviceKind::Mouse, caps);
+    let g502 = DeviceRecord {
+        model_key: "0407f".to_string(),
+        ..record(DeviceKind::Mouse, caps)
+    };
+    for mouse in [unknown_model, g502] {
+        let tabs = DetailTab::tabs_for(&mouse);
+        assert!(tabs.contains(&DetailTab::Buttons));
+        assert!(!tabs.contains(&DetailTab::ActionsRing));
+        assert!(!super::offers_actions_ring(&mouse));
+        assert!(tabs.contains(&DetailTab::Pointer));
+    }
+}
+
+/// The function-row remapper has no OS-hook fallback: it diverts every key
+/// over `0x1b04`. A gaming keyboard has the gaming tables and no
+/// ReprogControls, so Keys would open a panel whose capture session cannot
+/// start. The feature list is a real G713 dump (#886).
+#[test]
+fn a_gaming_keyboard_gets_no_keys_or_mouse_tabs() {
+    let g713 = Capabilities::from_feature_ids(&[
+        0x0000, 0x0001, 0x0003, 0x0005, 0x0020, 0x8071, 0x8081, 0x1bc0, 0x40a3, 0x4522, 0x4540,
+        0x8010, 0x8040, 0x8100, 0x8060, 0x00c2, 0x00d0,
+    ]);
+    assert_eq!(
+        openlogi_core::binding::GamingButtons::for_device("0c339", Some(&g713)),
+        Some(openlogi_core::binding::GamingButtons::Standard)
+    );
+    let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, Some(g713)));
+    assert!(!tabs.contains(&DetailTab::Keys));
+    assert!(!tabs.contains(&DetailTab::Buttons) && !tabs.contains(&DetailTab::ActionsRing));
+    assert!(tabs.contains(&DetailTab::Lighting));
 }

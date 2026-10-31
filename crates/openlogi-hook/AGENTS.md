@@ -57,10 +57,14 @@ crate's own load-bearing behavior.
   tap-thread stall force-exited healthy agents on lid close (#952); the callback
   watchdog would read a callback entered just before the same freeze the same way. A
   gap with no transition in it is charged in full, so a watchdog merely delayed by
-  scheduling still catches a wedged tap on schedule. Likewise the between-slice
-  capability probe runs under `TapPhase::Probing` with its own budget: it is a
-  WindowServer/TCC round trip, not tap servicing — and a stop that waited out a slow
-  probe gets the short budget afresh for the teardown. Refresh progress *before*
+  scheduling still catches a wedged tap on schedule. The callback watchdog reads the
+  epoch only on polls that find a callback entered (#2096), so its first sighting
+  after idle polls is judged against the epoch it read last: a transition anywhere
+  since then caps that one gap. Never charge more than a per-poll read would.
+  Likewise the between-slice capability probe runs under `TapPhase::Probing` with
+  its own budget: it is a WindowServer/TCC round trip, not tap servicing — and a
+  stop that waited out a slow probe gets the short budget afresh for the teardown.
+  Refresh progress *before*
   publishing `Armed` again, or the watchdog judges a probe that already returned against
   the pre-probe mark. Both exit logs carry `stalled_ms` (uptime since the stall began)
   and `watched_ms`; a wide gap between them is the process-frozen signature.

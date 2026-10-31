@@ -39,12 +39,10 @@ impl AppState {
         StateEvent::SettingsChanged.into()
     }
     /// Toggle the menu-bar (status item) icon preference and persist it. The
-    /// icon is hosted by the always-on agent, which reads this on startup and
-    /// installs the status item only when enabled — so the change takes effect
-    /// the next time the agent launches (a no-restart live toggle would need a
-    /// main-thread hop from the agent's IPC reload). `ReloadConfig` keeps the
-    /// agent's other config in sync meanwhile. An already-set value writes
-    /// nothing and is still reported.
+    /// icon is hosted by the always-on agent: on macOS the `ReloadConfig` this
+    /// triggers installs or removes the status item live; the Windows
+    /// notification-area icon follows on the agent's next launch. An
+    /// already-set value writes nothing and is still reported.
     ///
     /// The callers are the menu-bar / notification-area toggle in Settings,
     /// shown only where there's a tray (macOS + Windows), so the setter is

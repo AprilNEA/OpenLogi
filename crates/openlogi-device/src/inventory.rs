@@ -141,6 +141,7 @@ fn routes_for_inventories(inventories: &[DeviceInventory]) -> Vec<DeviceRoute> {
             inventory
                 .paired
                 .iter()
+                .filter(|paired| paired.online)
                 .filter_map(|paired| DeviceRoute::for_slot(inventory, paired.slot))
         })
         .collect()
@@ -434,11 +435,49 @@ impl Enumerator {
         self
     }
 
+    /// Resolves once a capture session reports a published channel dead, so
+    /// the persistent watcher can run the pass that replaces it. Never
+    /// resolves for an enumerator that publishes into no registry.
+    pub async fn dead_channel_reported(&self) {
+        match &self.registry {
+            Some(registry) => registry.dead_channel_reported().await,
+            None => std::future::pending().await,
+        }
+    }
+
+    /// Retire the channels capture reported dead the way a node whose probes
+    /// keep failing is retired, without first waiting for those probes to
+    /// time out. The node replays its last inventory while the channel drains
+    /// and reopens on a later pass, as in that path.
+    fn retire_reported_channels(&mut self) {
+        let Some(registry) = &self.registry else {
+            return;
+        };
+        let reported = registry.take_dead_reports();
+        if reported.is_empty() {
+            return;
+        }
+        let nodes: Vec<NodeId> = self
+            .channels
+            .active_iter()
+            .filter(|(_, cached)| reported.contains(&cached.channel))
+            .map(|(node, _)| node.clone())
+            .collect();
+        for node in nodes {
+            registry.remove_node(&node);
+            if self.channels.retire_node(&node) {
+                warn!("capture reported the channel dead — retiring it before reopen");
+            }
+            self.evicted_nodes.insert(node);
+        }
+    }
+
     async fn prepare_nodes(
         &mut self,
         backend: &dyn HidBackend,
         candidates: Vec<NodeInfo>,
     ) -> PreparedNodes {
+        self.retire_reported_channels();
         let mut active = Vec::new();
         let mut seen_nodes = HashSet::new();
         let mut open_failures = Vec::new();
@@ -696,9 +735,11 @@ impl Enumerator {
                     .map_or_else(Vec::new, |inventory| {
                         routes_for_inventories(std::slice::from_ref(inventory))
                     });
-                if routes.is_empty() {
+                if settled.inventory.is_none() {
                     registry.remove_node(&node);
                 } else {
+                    // A healthy receiver may have no online slots. Keep its
+                    // USB transport published while withdrawing those routes.
                     registry.replace_node(node.clone(), routes, channel);
                 }
             }

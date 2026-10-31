@@ -138,8 +138,10 @@ fn print_empty_notes(status: Option<&AgentStatus>) {
             println!("Notes:");
             println!(
                 "  - Input Monitoring is granted, but the agent's device opens keep \
-                 failing — another app may hold the devices (quit Logi Options+), or \
-                 macOS is serving a stale permission session: log out and back in."
+                 failing — another app may hold the devices (quit Logi Options+; for a \
+                 Bluetooth keyboard, turn off \"Modify events\" for it in \
+                 Karabiner-Elements → Settings → Devices), or macOS is serving a stale \
+                 permission session: log out and back in."
             );
         }
         _ => {

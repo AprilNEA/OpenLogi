@@ -12,9 +12,11 @@ use hidpp::feature::hires_wheel::HiResWheelFeature;
 use hidpp::protocol::v20::Hidpp20Error;
 use thiserror::Error;
 
+use super::gesture::SpyRestore;
 use super::gesture::main_wheel;
 use super::restore::{PendingRestore, RestoreOutcome, RestorePlan, SessionFailure};
 use crate::backend::BackendError;
+use crate::channel::registry::PublicationState;
 use crate::reprog_controls::{self, ReprogControlsV4};
 use crate::thumbwheel::{self, Thumbwheel, ThumbwheelStatus};
 use crate::{ChannelRegistry, DeviceRoute, IoSuspended, SharedChannel};
@@ -69,6 +71,10 @@ pub(crate) struct ArmedReporting {
     pub(crate) cid: u16,
     pub(crate) original: reprog_controls::CidReporting,
     policy: ReprogRestorePolicy,
+    /// Hand back the diversion found at arming instead of clearing it: the
+    /// host kernel diverted this control and listens to it, see
+    /// [`ArmedReporting::kernel_diversion_on`].
+    restore_as_found: bool,
 }
 
 /// How a capture session diverts one pointer control: what the firmware
@@ -106,6 +112,7 @@ impl ArmedReporting {
             cid,
             original,
             policy: ReprogRestorePolicy::Pointer(divert),
+            restore_as_found: false,
         }
     }
 
@@ -116,6 +123,7 @@ impl ArmedReporting {
             cid,
             original,
             policy: ReprogRestorePolicy::Keyboard,
+            restore_as_found: false,
         }
     }
 
@@ -128,8 +136,39 @@ impl ArmedReporting {
         }
     }
 
+    /// Keep a diversion found at arming when the restore writes through
+    /// `route` and the host kernel owns the control there. Linux 7.3+
+    /// `hid-logitech-hidpp` diverts the Bluetooth Signature M650's
+    /// Back/Forward at connect and maps the diverted reports to
+    /// `BTN_BACK`/`BTN_FORWARD`, because the native reports have broken
+    /// timing. Clearing that diversion would undo the kernel's fix until the
+    /// mouse reconnects. Elsewhere a found diversion is a leftover with no
+    /// listener, so [`Self::undivert_change`] still clears it.
+    ///
+    /// `route` is the route the restore writes through, not the one capture
+    /// armed on: a handoff restores through the device's new route, where the
+    /// kernel may not listen. Keyboard keys are never the kernel's.
+    pub(crate) fn kernel_diversion_on(self, route: &DeviceRoute) -> Self {
+        Self {
+            restore_as_found: self.original.diverted
+                && matches!(self.policy, ReprogRestorePolicy::Pointer(_))
+                && kernel_diverts(route, self.cid),
+            ..self
+        }
+    }
+
     /// Compute the `setCidReporting` change that restores this control.
     pub(crate) fn undivert_change(self) -> reprog_controls::CidReportingChange {
+        if self.restore_as_found {
+            return reprog_controls::CidReportingChange {
+                diverted: Some(true),
+                raw_xy: Some(self.original.raw_xy),
+                raw_wheel: (self.policy == ReprogRestorePolicy::Pointer(PointerDivert::RawWheel))
+                    .then_some(self.original.raw_wheel),
+                remap: self.original.remap,
+                ..Default::default()
+            };
+        }
         match self.policy {
             ReprogRestorePolicy::Pointer(PointerDivert::Plain | PointerDivert::RawXy) => {
                 undivert_change(self.original)
@@ -160,6 +199,20 @@ impl ArmedReporting {
         };
         (!holds(change, current)).then_some(change)
     }
+}
+
+/// Whether the host kernel diverts `cid` on `route` itself and turns its
+/// diverted reports into input events: the Bluetooth Signature M650's
+/// Back/Forward under `HIDPP_QUIRK_HIDPP_REPROG_CONTROLS_BTNS` (Linux 7.3+).
+fn kernel_diverts(route: &DeviceRoute, cid: u16) -> bool {
+    cfg!(target_os = "linux")
+        && *route
+            == (DeviceRoute::Direct {
+                vendor_id: 0x046d,
+                product_id: 0xb02a,
+            })
+        // The classic Back/Forward CIDs, the first of each family.
+        && [reprog_controls::BACK_CIDS[0], reprog_controls::FORWARD_CIDS[0]].contains(&cid)
 }
 
 /// Whether `current` already has every flag that `change` writes. The remap
@@ -233,6 +286,8 @@ pub(crate) enum CaptureStop {
     Shutdown,
     /// Inventory removed or replaced the channel that armed capture.
     ChannelChanged,
+    /// The paired slot went offline while its USB receiver remains current.
+    ReceiverSlotGone,
     /// The same physical device moved. Restore through the successor route
     /// instead of the transport it left.
     Handoff(DeviceRoute),
@@ -246,6 +301,7 @@ pub struct CaptureRestorePlan {
     reprog: Option<ReprogRestore>,
     thumb: Option<ThumbwheelRestore>,
     main_wheel: Option<HiResWheelRestore>,
+    spy: Option<SpyRestore>,
 }
 
 impl fmt::Debug for CaptureRestorePlan {
@@ -260,6 +316,7 @@ impl fmt::Debug for CaptureRestorePlan {
             )
             .field("has_thumbwheel", &self.thumb.is_some())
             .field("has_main_wheel", &self.main_wheel.is_some())
+            .field("host_mode", &self.spy.is_some())
             .finish()
     }
 }
@@ -273,6 +330,7 @@ impl RestorePlan for CaptureRestorePlan {
             let controls =
                 ReprogControlsV4::new(channel.clone(), device_index, reprog.feature_index);
             for &reporting in &reprog.controls {
+                let reporting = reporting.kernel_diversion_on(current.route());
                 restored &= restore_reporting(&controls, reporting, "captured control").await;
             }
         }
@@ -282,8 +340,11 @@ impl RestorePlan for CaptureRestorePlan {
             restored &= restore_result(main_wheel::undivert(&feature).await, "main wheel");
         }
         if let Some(thumb) = self.thumb {
-            let thumbwheel = Thumbwheel::new(channel, device_index, thumb.feature_index);
+            let thumbwheel = Thumbwheel::new(channel.clone(), device_index, thumb.feature_index);
             restored &= restore_result(thumbwheel.restore(thumb.status).await, "thumb wheel");
+        }
+        if let Some(spy) = &self.spy {
+            restored &= spy.restore_on(&channel, device_index).await;
         }
         restored
     }
@@ -310,19 +371,21 @@ impl PendingCaptureRestore {
                 reprog: None,
                 thumb: None,
                 main_wheel: None,
+                spy: None,
             },
         )
     }
 
-    /// The restore owed for `reprog` and the two wheels, or `None` when the
-    /// session diverted nothing.
+    /// The restore owed for `reprog`, the two wheels and host mode, or `None`
+    /// when the session diverted nothing.
     pub(crate) fn new(
         retired: &SharedChannel,
         reprog: Option<ReprogRestore>,
         thumb: Option<ThumbwheelRestore>,
         main_wheel: Option<HiResWheelRestore>,
+        spy: Option<SpyRestore>,
     ) -> Option<Self> {
-        if reprog.is_none() && thumb.is_none() && main_wheel.is_none() {
+        if reprog.is_none() && thumb.is_none() && main_wheel.is_none() && spy.is_none() {
             return None;
         }
         Some(Self::owing(
@@ -331,6 +394,7 @@ impl PendingCaptureRestore {
                 reprog,
                 thumb,
                 main_wheel,
+                spy,
             },
         ))
     }
@@ -346,6 +410,11 @@ pub(crate) async fn restore_after_stop(
         return CaptureSessionOutcome::Restored;
     };
     match stop {
+        // An offline slot can return without the receiver being unplugged.
+        // Its exact route must be published again before restoration writes.
+        CaptureStop::ReceiverSlotGone => {
+            CaptureSessionOutcome::RestorePending(pending.allow_current_channel())
+        }
         CaptureStop::Shutdown => pending.allow_current_channel().retry(registry).await,
         CaptureStop::ChannelChanged => pending.retry(registry).await,
         CaptureStop::Handoff(route) => pending.retry_via(route, registry).await,
@@ -358,11 +427,30 @@ pub(crate) fn stop_for_current_publication(
     registry: &ChannelRegistry,
     retired: &SharedChannel,
 ) -> CaptureStop {
-    if registry.is_current(retired) {
-        CaptureStop::Shutdown
-    } else {
-        CaptureStop::ChannelChanged
+    match registry.publication(retired) {
+        PublicationState::Current => CaptureStop::Shutdown,
+        PublicationState::SlotOffline => CaptureStop::ReceiverSlotGone,
+        PublicationState::Retired => CaptureStop::ChannelChanged,
     }
+}
+
+/// Stop a session whose liveness ping found its channel dead, and report the
+/// channel so inventory replaces it. Otherwise inventory keeps publishing it
+/// until its own probes fail twice, and the restarted session would arm on
+/// the same dead channel (#2020).
+///
+/// An accepted report stops as a channel change: inventory retires the
+/// channel on its next pass, so the restore waits for the replacement. Writing
+/// it through the silent channel would hold that channel open, one write
+/// timeout per control, while inventory tries to reopen the device.
+pub(crate) fn stop_for_dead_channel(
+    registry: &ChannelRegistry,
+    dead: &SharedChannel,
+) -> CaptureStop {
+    if registry.report_dead(dead) {
+        return CaptureStop::ChannelChanged;
+    }
+    stop_for_current_publication(registry, dead)
 }
 
 /// Wait until inventory removes or replaces the channel on which capture was
@@ -375,7 +463,7 @@ pub(crate) async fn wait_for_channel_change(
     let mut changes = registry.subscribe();
     loop {
         if !registry.is_current(retired) {
-            return CaptureStop::ChannelChanged;
+            return stop_for_current_publication(registry, retired);
         }
         if changes.changed().await.is_err() {
             // The borrowed registry owns the sender, so this is unreachable;

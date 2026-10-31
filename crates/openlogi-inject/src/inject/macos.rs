@@ -86,6 +86,7 @@ pub(super) use browser::ax_browser_navigate;
 use dock::{app_expose, launchpad, mission_control, show_desktop};
 use keyboard_layout::layout_key;
 use keycode::hid_usage_to_macos;
+pub(super) use keycode::pressed_usage;
 use menu_shortcut::{MenuPress, MenuShortcut};
 use scroll::dispatch_scroll;
 pub(super) use scroll::{post_phased_scroll, post_scroll, post_smooth_scroll};
@@ -400,11 +401,12 @@ fn key_event(vk: u16, flags: CGEventFlags, phase: KeyPhase) -> Option<CGEvent> {
 }
 
 /// Post a key-down + key-up pair for `vk` with `flags` set: through the
-/// virtual HID keyboard when it carries the pair, otherwise as `CGEvent`s.
+/// virtual HID keyboard when it carries the pair, otherwise as the
+/// `CGEvent`s a physical keyboard sends, with each modifier pressed and
+/// released as a key of its own (see [`symbolic_hotkey::post_keystroke`]).
 fn post_key(vk: u16, flags: CGEventFlags) {
     if !virtual_keyboard::tap(vk, flags) {
-        post_cg_key_phase(vk, flags, KeyPhase::Down);
-        post_cg_key_phase(vk, flags, KeyPhase::Up);
+        symbolic_hotkey::post_keystroke(vk, flags);
     }
 }
 
@@ -598,6 +600,11 @@ fn post_media_key(nx_key: i32) {
     const NX_KEY_UP: i32 = 0x0B;
 
     autoreleasepool(|_| {
+        // Carry the modifiers the user is holding, as the real key would: apps
+        // like Volume Control and macOS's own Option+Shift fine-step volume
+        // read them off the media key event.
+        let modifiers =
+            NSEvent::modifierFlags_class() & NSEventModifierFlags::DeviceIndependentFlagsMask;
         for (state, phase) in [(NX_KEY_DOWN, "down"), (NX_KEY_UP, "up")] {
             // data1 layout for subtype 8: high word is NX_KEYTYPE_*, next byte
             // is key state (0x0A down, 0x0B up), low bit is repeat (0 here).
@@ -605,7 +612,7 @@ fn post_media_key(nx_key: i32) {
             let Some(ns_event) = NSEvent::otherEventWithType_location_modifierFlags_timestamp_windowNumber_context_subtype_data1_data2(
                 NSEventType::SystemDefined,
                 NSPoint::new(0.0, 0.0),
-                NSEventModifierFlags::empty(),
+                modifiers,
                 0.0,
                 0,
                 None,

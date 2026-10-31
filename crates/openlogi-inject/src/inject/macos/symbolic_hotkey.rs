@@ -103,6 +103,30 @@ impl SpaceShortcut {
     }
 }
 
+/// Type `virtual_key` under `flags` as `CGEvent`s, around whatever modifiers
+/// held chords keep down, in the shape a physical keyboard sends (see
+/// [`keystroke`]).
+///
+/// This is the fallback for a key press the virtual HID keyboard declined.
+/// A key event that only carries the modifier flags can leave those
+/// modifiers down: Command stays held, and an App Switcher that Command-Tab
+/// opened never closes (#2178).
+///
+/// No edge is offered to the virtual keyboard again. It declines a press of
+/// a key a held chord keeps down on it, but would accept that key's up edge
+/// and release the key under the chord.
+pub(super) fn post_keystroke(virtual_key: u16, flags: CGEventFlags) {
+    super::super::with_held_modifiers(|held| {
+        let Some(edges) = keystroke(virtual_key, flags, held) else {
+            tracing::warn!(virtual_key, "could not build the shortcut's key events");
+            return;
+        };
+        for edge in edges {
+            edge.event.post(CGEventTapLocation::HID);
+        }
+    });
+}
+
 /// One key edge of a keystroke, with the `CGEvent` that posts it when the
 /// virtual HID keyboard does not carry it.
 struct KeyEdge {
@@ -400,6 +424,36 @@ mod tests {
                 (0x14, Up, COMMAND | SHIFT),
                 (0x38, Flags, COMMAND),
                 (0x37, Flags, NONE),
+            ]
+        );
+    }
+
+    /// The `CGEvent` fallback for a shortcut press releases each modifier it
+    /// presses as a key of its own: a Tab that only carries Command's flag
+    /// left Command down and the App Switcher open (#2178).
+    #[test]
+    fn a_shortcut_releases_every_modifier_it_presses() {
+        let events = keystroke(0x30, COMMAND, HeldModifiers::default()).expect("keyboard events");
+        assert_eq!(
+            edges(&events),
+            [
+                (0x37, Flags, COMMAND),
+                (0x30, Down, COMMAND),
+                (0x30, Up, COMMAND),
+                (0x37, Flags, NONE),
+            ]
+        );
+        let events =
+            keystroke(0x30, CONTROL | SHIFT, HeldModifiers::default()).expect("keyboard events");
+        assert_eq!(
+            edges(&events),
+            [
+                (0x3b, Flags, CONTROL),
+                (0x38, Flags, CONTROL | SHIFT),
+                (0x30, Down, CONTROL | SHIFT),
+                (0x30, Up, CONTROL | SHIFT),
+                (0x38, Flags, CONTROL),
+                (0x3b, Flags, NONE),
             ]
         );
     }

@@ -59,18 +59,57 @@ fn open_error(error: async_hid::HidError) -> BackendError {
         #[cfg(target_os = "macos")]
         BackendError::Backend(message) => {
             let hint = if crate::permissions::has_access() {
-                "Input Monitoring is granted to this process — another app may \
-                 hold the device exclusively, or macOS is serving a stale \
-                 permission session (log out and back in)"
+                GRANTED_OPEN_HINT.to_owned()
             } else {
-                "Input Monitoring is NOT granted to this process; grant it to \
-                 OpenLogi Agent under System Settings → Privacy & Security → \
-                 Input Monitoring"
+                missing_grant_hint(process_is_agent())
             };
             BackendError::Backend(format!("{message}: {hint}"))
         }
         other => other,
     }
+}
+
+/// What a failed open means once Input Monitoring is granted: another client
+/// opened the device with `kIOHIDOptionsTypeSeizeDevice`, or macOS is serving a
+/// stale permission session.
+///
+/// Name the two holders users actually hit. Logi Options+ is the obvious one.
+/// Karabiner-Elements seizes every device it modifies (keyboards by default),
+/// and a seize covers the whole `IOHIDDevice`. A Bluetooth-direct keyboard is
+/// one `IOHIDDevice` whose HID++ collection sits beside the keyboard
+/// collections, so the seize blocks our non-exclusive open too. A receiver
+/// exposes HID++ on its own USB interface, a separate `IOHIDDevice`, which is
+/// why this conflict is Bluetooth-specific.
+#[cfg(any(target_os = "macos", test))]
+const GRANTED_OPEN_HINT: &str = "Input Monitoring is granted to this process — another app may \
+     hold the device exclusively (quit Logi Options+; in Karabiner-Elements → Settings → \
+     Devices, turn off \"Modify events\" for this device), or macOS is serving a stale \
+     permission session (log out and back in)";
+
+/// Where a missing Input Monitoring grant has to be made. macOS judges the
+/// responsible process: the agent helper's own bundle for the shipped agent,
+/// but the launching app — usually a terminal — for a CLI command that opens
+/// devices directly.
+#[cfg(any(target_os = "macos", test))]
+fn missing_grant_hint(process_is_agent: bool) -> String {
+    let target = if process_is_agent {
+        openlogi_core::brand::Helper::Agent.display_name()
+    } else {
+        "the app that launched this command (for example Terminal)"
+    };
+    format!(
+        "Input Monitoring is NOT granted to this process; grant it to {target} under \
+         System Settings → Privacy & Security → Input Monitoring"
+    )
+}
+
+/// Whether this process is the agent helper, by its executable name.
+#[cfg(target_os = "macos")]
+fn process_is_agent() -> bool {
+    std::env::current_exe().is_ok_and(|exe| {
+        exe.file_name()
+            .is_some_and(|name| name == openlogi_core::brand::Helper::Agent.executable())
+    })
 }
 
 /// `DeviceId` is an opaque OS handle (a hidraw path, a Windows device path, an
@@ -197,10 +236,15 @@ use windows::normalize_collection_path;
 /// Filtering on these pairs gives us one HID node per physical HID++ device on
 /// every supported OS, without reading report descriptors (`async-hid 0.4`
 /// only exposes those on Linux).
-const HIDPP_LONG_COLLECTIONS: [(u16, u16, bool); 3] = [
+const HIDPP_LONG_COLLECTIONS: [(u16, u16, bool); 4] = [
     (0xff00, 0x0002, false),
     (0xff43, 0x0202, true),
     (0xff43, 0x0602, false),
+    // Wired MX Creative Keypad. Its five collections share one registry entry
+    // and accept standard short/long framing on any handle (measured live);
+    // only this vendor pair is listed so the device enumerates as one HID++
+    // node. Its grid keys additionally push vendor report 0x13 on this node.
+    (0xff43, 0x1a02, false),
 ];
 
 /// Whether `(usage_page, usage_id)` is one of the HID++ long-report collections.

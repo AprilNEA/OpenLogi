@@ -33,7 +33,9 @@ use std::fmt::Write;
 
 use bincode::Options;
 use openlogi_core::app::ForegroundApp;
-use openlogi_core::binding::{ActionRingIcon, ActionRingSlot, KeyCombo};
+use openlogi_core::binding::{
+    Action, ActionRingIcon, ActionRingSlot, ButtonId, GridKey, GridSlot, KeyCombo, KeypadPage,
+};
 use openlogi_core::config::{ConfigRevision, Lighting, ScrollResolution};
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, ChangedOnLight, DeviceInventory,
@@ -44,10 +46,10 @@ use openlogi_core::hid::{
     BacklightChange, BacklightControls, BacklightDuration, BacklightMode, BacklightState,
     BacklightStatus, Click, DeviceRoute, DisableKeysMask, DisableKeysState, Dpi, DpiCapabilities,
     DpiInfo, EasySwitchHosts, EasySwitchSlot, FnLockState, ForceSensingInfo, HidppFeatureErrorKind,
-    HidppOperation, HostConnection, HostOsInfo, HostOsKind, LightCommand, PasskeyMethod,
-    ReceiverSelector, ReportRate, ReportRateInfo, ScrollReportingTarget, ScrollWheelMode,
-    SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus, SmartShiftThreshold, TunableTorque,
-    WriteError,
+    HidppOperation, HostConnection, HostOsInfo, HostOsKind, LightCommand, OnboardMode,
+    OnboardProfile, OnboardState, PasskeyMethod, ProfileIndex, ReceiverSelector, ReportRate,
+    ReportRateInfo, ScrollReportingTarget, ScrollWheelMode, SmartShiftAutoDisengage,
+    SmartShiftMode, SmartShiftStatus, SmartShiftThreshold, TunableTorque, WriteError,
 };
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, ActionRingPresentation, AgentRequest,
@@ -112,7 +114,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// unreleased version and leave this pin alone (`crates/openlogi-ipc/AGENTS.md`).
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 41);
+    assert_eq!(PROTOCOL_VERSION, 43);
 }
 
 #[test]
@@ -449,6 +451,8 @@ fn key_combo_modifier_bits() {
     let combo = |text: &str| text.parse::<KeyCombo>().expect("valid chord");
     assert_wire(&combo("Cmd+L"), "010f");
     assert_wire(&combo("Super+L"), "100f");
+    assert_wire(&combo("Insert"), "0049");
+    assert_wire(&combo("PrintScreen"), "0046");
 }
 
 /// The agent identity is frozen: a helper from any build has to be able to
@@ -516,6 +520,22 @@ fn action_ring_types() {
     assert_wire(&HidppOperation::WriteOsLayout, "12");
     assert_wire(&HidppOperation::ReadReportRate, "13");
     assert_wire(&HidppOperation::WriteReportRate, "14");
+    assert_wire(&HidppOperation::WriteKeyImage, "1d");
+}
+
+/// The keypad page actions are appended `Action` variants, and a later page's
+/// grid slot crosses the wire by its persisted name.
+#[test]
+fn keypad_page_actions_and_slots() {
+    assert_wire(&Action::PreviousKeypadPage, "3b");
+    assert_wire(&Action::NextKeypadPage, "3c");
+    assert_wire(
+        &ButtonId::Grid(GridSlot {
+            page: KeypadPage::new(2).expect("page 2 exists"),
+            key: GridKey::Middle,
+        }),
+        "1070616765323a677269644d6964646c65",
+    );
 }
 
 #[test]
@@ -709,13 +729,41 @@ fn device_inventory() {
                 pointer_scaling: true,
                 force_sensing: true,
                 disable_keys: false,
+                onboard_profiles: false,
+                button_spy: false,
             }),
             settings_revision: 7,
         }],
     }];
     assert_wire(
         &inventory,
-        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b00001010150020001030106323134304c5a0102030400010100fb34b0fb8240000b0101010000010101010100010101010101010007",
+        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b00001010150020001030106323134304c5a0102030400010100fb34b0fb8240000b01010100000101010101000101010101010100000007",
+    );
+}
+
+#[test]
+fn onboard_state() {
+    assert_wire(&HidppOperation::ReadOnboard, "1c");
+    assert_wire(
+        &AgentRequest::ReadOnboard {
+            route: DeviceRoute::Bolt {
+                receiver_uid: "F00DCAFE".into(),
+                slot: 1,
+            },
+        },
+        "2f0008463030444341464501",
+    );
+    assert_wire(
+        &OnboardState {
+            mode: OnboardMode::Onboard,
+            active_profile: ProfileIndex::new(5),
+            profiles: vec![OnboardProfile {
+                index: ProfileIndex::new(5).unwrap(),
+                name: Some("Stock".into()),
+                enabled: true,
+            }],
+        },
+        "0001050105010553746f636b01",
     );
 }
 

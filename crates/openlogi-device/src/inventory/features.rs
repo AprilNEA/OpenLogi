@@ -1,8 +1,9 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use hidpp::{
     channel::HidppChannel,
-    device::Device,
+    device::{Device, DeviceError},
     feature::hires_wheel::HiResWheelFeature,
     feature::{
         CreatableFeature,
@@ -18,22 +19,29 @@ use hidpp::{
         reprog_controls::{ReprogControlsFeature, control_ids},
         unified_battery::UnifiedBatteryFeature,
     },
-    protocol::v20::{ErrorType, Hidpp20Error},
+    protocol::{
+        v10::Hidpp10Error,
+        v20::{ErrorType, Hidpp20Error},
+    },
+    register::battery::{self as register_battery, BatteryRegister},
 };
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, Capabilities, DeviceKind, DeviceModelInfo, DeviceTransports,
 };
 use serde::{Deserialize, Serialize};
+use tokio::time::timeout;
 use tracing::debug;
 
+use crate::host_lock::ReceiverRegisterPhase;
 use crate::reprog_controls::{BACK_CIDS, DPI_MODE_SHIFT_CIDS, FORWARD_CIDS};
 use crate::write::{force_button_is_changeable, panel_button};
 
 use super::events::{EventFeatureIndices, EventSubscriptionHandle};
 use super::mappings::{
-    legacy_battery_info, legacy_battery_level_from_percentage, map_adc_battery_status,
-    map_battery_level, map_battery_status, map_device_type, map_voltage_battery_status,
-    normalize_serial_number, voltage_battery_percentage,
+    charge_register_battery_info, legacy_battery_info, legacy_battery_level_from_percentage,
+    map_adc_battery_status, map_battery_level, map_battery_status, map_device_type,
+    map_voltage_battery_status, normalize_serial_number, status_register_battery_info,
+    voltage_battery_percentage,
 };
 
 /// Everything a single device probe yields. Any field is `None` when the
@@ -47,25 +55,15 @@ pub(super) struct ProbedFeatures {
     /// Marketing name from HID++ `0x0005`; preferred over generic OS HID names
     /// such as Windows Bluetooth's plain `"Mouse"`.
     pub(super) marketing_name: Option<String>,
-    /// Configuration capabilities derived from the device's feature table.
-    ///
-    /// Invariant: `capabilities_incomplete` implies this is `Some`. The sole
-    /// non-test writer, [`probe_features`], returns `Default` when the feature
-    /// table is unavailable and only sets the qualifier after constructing the
-    /// capability set. The cache only replaces that set with another `Some`,
-    /// and persistence only round-trips probes produced here. If another writer
-    /// is added, preserve this proof or replace the pair with a sum type.
-    pub(super) capabilities: Option<Capabilities>,
+    /// Which protocol the device answered in, and with it the configuration
+    /// capabilities derived from its feature table.
+    pub(super) protocol: ProbedProtocol,
     /// A `DeviceInformation` read *failed* (vs. the feature being absent), so
     /// the identity fields above may be missing data the device does have.
     /// This is intentionally independent of `model_info`: `true` with `Some`
     /// means only the serial-number read failed, while `true` with `None` means
     /// the whole device-information read failed.
     pub(super) identity_incomplete: bool,
-    /// A capability read *failed* (vs. the device not having the capability),
-    /// so `capabilities` above understates what the device can do. Memoizing
-    /// that would hide a panel in the GUI for `REFRESH_INTERVAL`.
-    pub(super) capabilities_incomplete: bool,
     /// The battery feature answered that the battery-powered end is not
     /// linked: a headset dongle whose headset is switched off. Volatile like
     /// `battery`, so never persisted. The cache resolves both fields from
@@ -79,17 +77,72 @@ pub(super) struct ProbedFeatures {
 }
 
 /// Whether a probe's data is the device's answer or the cache's stand-in for
-/// a refresh that just failed.
+/// a device that did not answer its refresh.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum Refresh {
-    /// The data comes from a feature walk the device completed: this one, or
-    /// the one behind a cache entry that is still fresh.
+    /// The data comes from a probe the device completed: this one, or the one
+    /// behind a cache entry that is still fresh, or whose due refresh the
+    /// device answered without finishing the re-read (see
+    /// [`refresh_features`]).
     #[default]
     Answered,
-    /// A due refresh failed, so the cache's last-known answer stands in.
-    /// Callers keep publishing its identity, but must not take it as evidence
-    /// that the device is reachable.
+    /// The device did not answer a due refresh's ping, so the cache's
+    /// last-known answer stands in. Callers keep publishing its identity, but
+    /// must not take it as evidence that the device is reachable.
     Failed,
+}
+
+impl ProbedFeatures {
+    /// The capabilities a completed HID++ 2.0 feature walk measured. `None`
+    /// for a HID++ 1.0 device too: it has no table to measure, so the UI keeps
+    /// its kind-based fallback.
+    pub(super) fn capabilities(&self) -> Option<Capabilities> {
+        match self.protocol {
+            ProbedProtocol::Hidpp20 { capabilities, .. } => Some(capabilities),
+            ProbedProtocol::Unanswered | ProbedProtocol::Hidpp10 => None,
+        }
+    }
+
+    /// Whether a capability read failed part way, so [`Self::capabilities`]
+    /// understates the device. Only a HID++ 2.0 feature walk can fall short
+    /// this way.
+    pub(super) fn capabilities_incomplete(&self) -> bool {
+        matches!(
+            self.protocol,
+            ProbedProtocol::Hidpp20 {
+                incomplete: true,
+                ..
+            }
+        )
+    }
+
+    /// Whether the probe learned what the device is: a completed HID++ 2.0
+    /// feature walk, or a HID++ 1.0 device, which has no table to walk. Only a
+    /// completed probe is memoized or followed by a receiver codename read.
+    pub(super) fn completed(&self) -> bool {
+        !matches!(self.protocol, ProbedProtocol::Unanswered)
+    }
+}
+
+/// What a probe learned about the protocol a device speaks.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(super) enum ProbedProtocol {
+    /// The probe did not get that far: the device never answered, or its
+    /// feature table could not be read.
+    #[default]
+    Unanswered,
+    /// HID++ 2.0, with the capabilities derived from its feature table.
+    Hidpp20 {
+        capabilities: Capabilities,
+        /// A capability read *failed* (vs. the device not having the
+        /// capability), so `capabilities` understates what the device can do.
+        /// Memoizing that would hide a panel in the GUI for
+        /// `REFRESH_INTERVAL`.
+        incomplete: bool,
+    },
+    /// HID++ 1.0: no feature table, so no capabilities to derive. The
+    /// receiver supplies the device's name.
+    Hidpp10,
 }
 
 /// What one battery read learned about the device.
@@ -109,7 +162,8 @@ pub(super) enum BatteryRead {
 /// — the same enhanced-then-legacy split SmartShift has with `0x2111`/`0x2110`.
 /// G-series wireless gaming devices (G915, G903 LS) expose neither and report
 /// battery only as a voltage via `0x1001`; wireless G-series headsets (G733)
-/// report it as a voltage via `0x1F20` instead.
+/// report it as a voltage via `0x1F20` instead. HID++ 1.0 devices (Performance
+/// MX, M705) have no feature table and report it through a fixed register.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) enum BatteryProbe {
     /// `0x1004` at `index`. `state_of_charge` is the device's capability bit
@@ -128,16 +182,26 @@ pub(super) enum BatteryProbe {
     },
     Voltage(u8),
     Adc(u8),
+    /// HID++ 1.0 register `0x07`: a coarse level, no percentage.
+    StatusRegister,
+    /// HID++ 1.0 register `0x0D`: a percentage.
+    ChargeRegister,
 }
 
-/// Read just the battery by addressing its feature at the known runtime index —
-/// one round-trip, with no `Device::new` ping and no feature-table walk. This is
-/// the cache's battery read after a full probe or on a cache hit. The cache
-/// resolves an unavailable answer against its last-known state.
+/// Read just the battery by addressing its feature at the known runtime index,
+/// or its HID++ 1.0 register — one round-trip, with no `Device::new` ping and
+/// no feature-table walk. This is the cache's battery read after a full probe
+/// or on a cache hit. The cache resolves an unavailable answer against its
+/// last-known state.
+///
+/// A HID++ 1.0 register is read only under the receiver's register phase,
+/// for the reason `probe_hidpp10` gives; without `registers` it is
+/// unavailable.
 pub(super) async fn read_battery(
     channel: &Arc<HidppChannel>,
     slot: u8,
     probe: BatteryProbe,
+    registers: Option<&ReceiverRegisterPhase>,
 ) -> BatteryRead {
     let reading = match probe {
         BatteryProbe::Unified {
@@ -195,6 +259,15 @@ pub(super) async fn read_battery(
                 _ => None,
             }
         }
+        BatteryProbe::StatusRegister | BatteryProbe::ChargeRegister if registers.is_none() => None,
+        BatteryProbe::StatusRegister => register_battery::read_status(channel, slot)
+            .await
+            .ok()
+            .map(status_register_battery_info),
+        BatteryProbe::ChargeRegister => register_battery::read_charge(channel, slot)
+            .await
+            .ok()
+            .map(charge_register_battery_info),
     };
     reading.map_or(BatteryRead::Unavailable, BatteryRead::Reading)
 }
@@ -280,30 +353,128 @@ fn derive_capabilities(
     capabilities
 }
 
-/// Read device identity and capabilities through one HID++ session for `slot`.
-/// Reuse the enumerated feature table to derive [`Capabilities`] without
-/// another round-trip.
+/// Read device identity and capabilities through one HID++ session for `slot`,
+/// in whichever protocol the device answers.
 ///
 /// Return the battery feature separately. The cache owns the live read and
 /// resolves the reading against its last-known state after this probe.
+///
+/// `registers` is the receiver's register phase, when the caller holds it for
+/// the whole probe. A HID++ 1.0 device is probed only under it (see
+/// `probe_hidpp10`); without it the device stays unanswered.
 ///
 /// Only online, responsive devices reach here.
 pub(super) async fn probe_features(
     channel: &Arc<HidppChannel>,
     slot: u8,
     subscriptions: Option<&EventSubscriptionHandle>,
-) -> (ProbedFeatures, Option<BatteryProbe>, EventFeatureIndices) {
-    let mut device = match Device::new(Arc::clone(channel), slot).await {
-        Ok(d) => d,
+    registers: Option<&ReceiverRegisterPhase>,
+) -> FeatureProbe {
+    match Device::new(Arc::clone(channel), slot).await {
+        Ok(device) => probe_hidpp20(device, channel, slot, subscriptions).await,
+        Err(DeviceError::UnsupportedProtocolVersion) => {
+            probe_hidpp10_held(channel, slot, registers).await
+        }
         Err(e) => {
             debug!(slot, error = ?e, "Device::new failed");
-            return (
-                ProbedFeatures::default(),
-                None,
-                EventFeatureIndices::default(),
-            );
+            unanswered()
+        }
+    }
+}
+
+/// What one device probe yields: its features, the battery source the cache
+/// reads, and the event-capable feature indexes.
+pub(super) type FeatureProbe = (ProbedFeatures, Option<BatteryProbe>, EventFeatureIndices);
+
+/// What a due refresh of a device the cache already knows learned.
+pub(super) enum Refreshed {
+    /// The device did not answer the protocol ping, so nothing shows that it
+    /// is reachable.
+    Unreachable,
+    /// The device answered the ping, so its channel delivers replies. The
+    /// probe after the ping is `None` when it ran past its budget.
+    Answered(Option<FeatureProbe>),
+}
+
+/// [`probe_features`] for a device the cache already knows, with the work
+/// after the protocol ping bounded by `walk_budget`.
+///
+/// The ping shows whether the device is reachable. The walk after it re-reads
+/// immutable data that the cache already holds, with one request per feature
+/// and per reprogrammable control among others. A control-table read is not
+/// retried. A Bluetooth link that drops a few replies can make the walk outlast
+/// the whole probe budget while the device keeps answering (#2107). A probe
+/// cut off by that budget counts as a failure, and two failures retire the
+/// channel. With its own budget, the walk ends first, and the caller still
+/// learns that the device answered.
+pub(super) async fn refresh_features(
+    channel: &Arc<HidppChannel>,
+    slot: u8,
+    subscriptions: Option<&EventSubscriptionHandle>,
+    registers: Option<&ReceiverRegisterPhase>,
+    walk_budget: Duration,
+) -> Refreshed {
+    let walk = match Device::new(Arc::clone(channel), slot).await {
+        Ok(device) => {
+            timeout(
+                walk_budget,
+                probe_hidpp20(device, channel, slot, subscriptions),
+            )
+            .await
+        }
+        Err(DeviceError::UnsupportedProtocolVersion) => {
+            timeout(walk_budget, probe_hidpp10_held(channel, slot, registers)).await
+        }
+        Err(e) => {
+            debug!(slot, error = ?e, "Device::new failed");
+            return Refreshed::Unreachable;
         }
     };
+    if walk.is_err() {
+        debug!(
+            slot,
+            ?walk_budget,
+            "refresh walk ran past its budget after the device answered its ping"
+        );
+    }
+    Refreshed::Answered(walk.ok())
+}
+
+/// [`probe_hidpp10`] when the caller holds the receiver's register phase.
+/// Without it, the device stays unanswered.
+async fn probe_hidpp10_held(
+    channel: &HidppChannel,
+    slot: u8,
+    registers: Option<&ReceiverRegisterPhase>,
+) -> FeatureProbe {
+    if let Some(registers) = registers {
+        probe_hidpp10(channel, slot, registers).await
+    } else {
+        debug!(
+            slot,
+            "HID++ 1.0 device outside a register phase, not probed"
+        );
+        unanswered()
+    }
+}
+
+/// The probe of a device that gave no usable answer.
+fn unanswered() -> FeatureProbe {
+    (
+        ProbedFeatures::default(),
+        None,
+        EventFeatureIndices::default(),
+    )
+}
+
+/// Probe a HID++ 2.0 device. Reuse the enumerated feature table to derive
+/// [`Capabilities`] without another round-trip.
+async fn probe_hidpp20(
+    mut device: Device,
+    channel: &Arc<HidppChannel>,
+    slot: u8,
+    subscriptions: Option<&EventSubscriptionHandle>,
+) -> (ProbedFeatures, Option<BatteryProbe>, EventFeatureIndices) {
     // The enumeration response IS the device's feature-ID table — capture it
     // for capability derivation instead of discarding it.
     let mut battery_probe = None;
@@ -392,15 +563,72 @@ pub(super) async fn probe_features(
             model_info,
             kind,
             marketing_name,
-            capabilities,
+            protocol: capabilities.map_or(ProbedProtocol::Unanswered, |capabilities| {
+                ProbedProtocol::Hidpp20 {
+                    capabilities,
+                    incomplete: capabilities_incomplete,
+                }
+            }),
             identity_incomplete,
-            capabilities_incomplete,
             unlinked: false,
             refresh: Refresh::Answered,
         },
         battery_probe,
         event_features,
     )
+}
+
+/// Probe a HID++ 1.0 device. With no feature table there are no capabilities
+/// or device-side identity to read, and the receiver supplies its name and
+/// kind; what is left to learn is which register reports its battery.
+///
+/// These are register reads, which carry no software id, so another OpenLogi
+/// process could take their replies. They go out only under the receiver's
+/// register phase, which `_registers` proves the caller holds. The Unifying
+/// slot walk holds it to its end; the direct path and the Bolt slot walk run
+/// outside it.
+async fn probe_hidpp10(
+    channel: &HidppChannel,
+    slot: u8,
+    _registers: &ReceiverRegisterPhase,
+) -> (ProbedFeatures, Option<BatteryProbe>, EventFeatureIndices) {
+    match find_battery_register(channel, slot).await {
+        Ok(battery) => (
+            ProbedFeatures {
+                protocol: ProbedProtocol::Hidpp10,
+                ..ProbedFeatures::default()
+            },
+            battery,
+            EventFeatureIndices::default(),
+        ),
+        Err(e) => {
+            debug!(slot, error = ?e, "HID++ 1.0 battery-register probe failed");
+            (
+                ProbedFeatures::default(),
+                None,
+                EventFeatureIndices::default(),
+            )
+        }
+    }
+}
+
+/// The battery register a HID++ 1.0 device implements, trying `0x0D` before
+/// `0x07` as Solaar does; `Ok(None)` when it refuses both. A read the device
+/// did not answer is an `Err`, not an absent register, so the probe is retried
+/// instead of memoizing a device without a battery.
+async fn find_battery_register(
+    channel: &HidppChannel,
+    slot: u8,
+) -> Result<Option<BatteryProbe>, Hidpp10Error> {
+    for (register, probe) in [
+        (BatteryRegister::Charge, BatteryProbe::ChargeRegister),
+        (BatteryRegister::Status, BatteryProbe::StatusRegister),
+    ] {
+        if register.is_implemented(channel, slot).await? {
+            return Ok(Some(probe));
+        }
+    }
+    Ok(None)
 }
 
 /// Read the battery capability the feature table cannot answer (see
@@ -597,6 +825,8 @@ fn force_sensing_error_answer(error: Hidpp20Error) -> Result<bool, ()> {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use hidpp::feature::{
         CreatableFeature as _, FeatureType, adc_measurement::AdcMeasurementFeature,
         battery_status::BatteryStatusFeature, battery_voltage::BatteryVoltageFeature,
@@ -606,10 +836,174 @@ mod tests {
     use openlogi_core::device::{BatteryInfo, BatteryLevel, BatteryStatus};
 
     use super::{
-        BatteryProbe, BatteryRead, ProbedFeatures, battery_feature_index, probe_features,
-        read_battery,
+        BatteryProbe, BatteryRead, ProbedFeatures, ProbedProtocol, Refreshed,
+        battery_feature_index, probe_features, read_battery, refresh_features,
     };
-    use crate::channel::scripted::{ScriptedRawHidChannel, feature_error, scripted_channel};
+    use crate::channel::scripted::{
+        ScriptedRawHidChannel, feature_error, ping_reply, register_error, scripted_channel,
+    };
+    use crate::host_lock::ReceiverRegisterPhase;
+
+    #[tokio::test]
+    async fn a_refresh_reports_the_answered_ping_when_its_walk_runs_past_the_budget() {
+        // Only the ping is answered. The feature-table lookup after it never
+        // is, so the walk can only end at its budget.
+        let (raw, _) = ScriptedRawHidChannel::with_responder(ping_reply);
+        let channel = scripted_channel(raw).await;
+        let refreshed =
+            refresh_features(&channel, 0xff, None, None, Duration::from_millis(50)).await;
+        assert!(
+            matches!(refreshed, Refreshed::Answered(None)),
+            "the ping was answered, and the walk did not finish"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refresh_whose_ping_goes_unanswered_is_unreachable() {
+        let (raw, _) = ScriptedRawHidChannel::with_failing_writes(|_| None, |_| true);
+        let channel = scripted_channel(raw).await;
+        let refreshed = refresh_features(&channel, 0xff, None, None, Duration::from_secs(8)).await;
+        assert!(matches!(refreshed, Refreshed::Unreachable));
+    }
+
+    /// A HID++ 1.0 mouse at slot 1 with register `0x07` (a Performance MX, per
+    /// Solaar), whose read of register `0x0D` answers `charge_register_error`.
+    async fn hidpp10_probe(charge_register_error: u8) -> (ProbedFeatures, Option<BatteryProbe>) {
+        let (raw, _) = ScriptedRawHidChannel::with_dynamic_responder(move |request| {
+            match (request[2], request[3]) {
+                // HID++ 2.0's ping reaches a HID++ 1.0 device as sub id 0x00.
+                (0x00, _) => Some(register_error(request, 0x01)),
+                (0x81, 0x0d) => Some(register_error(request, charge_register_error)),
+                (0x81, 0x07) => Some(vec![0x10, request[1], 0x81, 0x07, 0x05, 0x00, 0x00]),
+                _ => panic!("unexpected request: {request:02x?}"),
+            }
+        });
+        let channel = scripted_channel(raw).await;
+        let (probe, battery, _) = probe_features(
+            &channel,
+            1,
+            None,
+            Some(&ReceiverRegisterPhase::uncontended()),
+        )
+        .await;
+        (probe, battery)
+    }
+
+    #[tokio::test]
+    async fn hidpp10_device_is_probed_through_its_battery_register() {
+        // 0x02: invalid address, the device's answer for a register it lacks.
+        let (probe, battery) = hidpp10_probe(0x02).await;
+
+        assert_eq!(probe.protocol, ProbedProtocol::Hidpp10);
+        assert!(
+            probe.completed(),
+            "a HID++ 1.0 probe has no walk to wait for"
+        );
+        assert_eq!(
+            probe.capabilities(),
+            None,
+            "no feature table, no measurement"
+        );
+        assert_eq!(battery, Some(BatteryProbe::StatusRegister));
+    }
+
+    #[tokio::test]
+    async fn hidpp10_probe_fails_when_the_receiver_answers_for_the_device() {
+        // 0x09: the receiver reports the device disconnected. That says
+        // nothing about its registers, so nothing may be memoized.
+        let (probe, battery) = hidpp10_probe(0x09).await;
+
+        assert!(!probe.completed());
+        assert_eq!(battery, None);
+    }
+
+    #[tokio::test]
+    async fn hidpp10_device_outside_the_register_phase_is_not_probed() {
+        // A wired HID++ 1.0 mouse, or one behind a receiver OpenLogi does not
+        // recognize: no register phase is held, so its registers stay unread.
+        // The responder answers them anyway, so a stray read fails the
+        // assertion below instead of timing out.
+        let (raw, handle) = ScriptedRawHidChannel::with_dynamic_responder(|request| {
+            match (request[2], request[3]) {
+                (0x00, _) => Some(register_error(request, 0x01)),
+                (0x81, register) => Some(vec![0x10, request[1], 0x81, register, 0x05, 0x00, 0x00]),
+                _ => None,
+            }
+        });
+        let channel = scripted_channel(raw).await;
+        let (probe, battery, _) = probe_features(&channel, 0xff, None, None).await;
+        assert!(!probe.completed());
+        assert_eq!(battery, None);
+        assert!(
+            handle
+                .written_reports()
+                .iter()
+                .all(|report| report.get(2) != Some(&0x81)),
+            "no register read may go out without the register phase"
+        );
+    }
+
+    #[tokio::test]
+    async fn battery_registers_are_not_read_outside_the_register_phase() {
+        let (raw, handle) = ScriptedRawHidChannel::with_dynamic_responder(|request| {
+            Some(vec![0x10, request[1], 0x81, request[3], 0x05, 0x00, 0x00])
+        });
+        let channel = scripted_channel(raw).await;
+        let writes_before = handle.written_reports().len();
+        for probe in [BatteryProbe::StatusRegister, BatteryProbe::ChargeRegister] {
+            assert_eq!(
+                read_battery(&channel, 1, probe, None).await,
+                BatteryRead::Unavailable
+            );
+        }
+        assert_eq!(handle.written_reports().len(), writes_before);
+    }
+
+    #[tokio::test]
+    async fn status_register_battery_reads_as_a_level_without_a_percentage() {
+        let (raw, _) = ScriptedRawHidChannel::with_dynamic_responder(|request| {
+            assert_eq!((request[2], request[3]), (0x81, 0x07), "{request:02x?}");
+            Some(vec![0x10, request[1], 0x81, 0x07, 0x03, 0x21, 0x00])
+        });
+        let channel = scripted_channel(raw).await;
+
+        let BatteryRead::Reading(battery) = read_battery(
+            &channel,
+            1,
+            BatteryProbe::StatusRegister,
+            Some(&ReceiverRegisterPhase::uncontended()),
+        )
+        .await
+        else {
+            panic!("expected a reading");
+        };
+        assert_eq!(battery.percentage, None);
+        assert_eq!(battery.level, BatteryLevel::Low);
+        assert_eq!(battery.status, BatteryStatus::Charging);
+    }
+
+    #[tokio::test]
+    async fn charge_register_battery_reads_its_percentage() {
+        let (raw, _) = ScriptedRawHidChannel::with_dynamic_responder(|request| {
+            assert_eq!((request[2], request[3]), (0x81, 0x0d), "{request:02x?}");
+            Some(vec![0x10, request[1], 0x81, 0x0d, 0x4b, 0x00, 0x30])
+        });
+        let channel = scripted_channel(raw).await;
+
+        let BatteryRead::Reading(battery) = read_battery(
+            &channel,
+            1,
+            BatteryProbe::ChargeRegister,
+            Some(&ReceiverRegisterPhase::uncontended()),
+        )
+        .await
+        else {
+            panic!("expected a reading");
+        };
+        assert_eq!(battery.percentage, Some(75));
+        assert_eq!(battery.level, BatteryLevel::Good);
+        assert_eq!(battery.status, BatteryStatus::Discharging);
+    }
 
     async fn control_probe(
         features: Vec<u16>,
@@ -642,7 +1036,7 @@ mod tests {
             Some(response)
         });
         let channel = scripted_channel(raw).await;
-        probe_features(&channel, 0xff, None).await.0
+        probe_features(&channel, 0xff, None, None).await.0
     }
 
     /// Probe a `DisableKeys` descriptor with the supplied feature-table flags.
@@ -669,7 +1063,7 @@ mod tests {
             Some(response)
         });
         let channel = scripted_channel(raw).await;
-        probe_features(&channel, 0xff, None).await.0
+        probe_features(&channel, 0xff, None, None).await.0
     }
 
     #[tokio::test]
@@ -681,7 +1075,7 @@ mod tests {
         ] {
             let capabilities = disable_keys_probe(typ)
                 .await
-                .capabilities
+                .capabilities()
                 .expect("feature table responded");
             assert_eq!(capabilities.disable_keys, supported, "{typ:?}");
         }
@@ -699,8 +1093,8 @@ mod tests {
                     None,
                 )
                 .await;
-                let caps = probe.capabilities.unwrap();
-                assert!(!probe.capabilities_incomplete);
+                let caps = probe.capabilities().unwrap();
+                assert!(!probe.capabilities_incomplete());
                 assert_eq!(
                     caps.dpi_gestures,
                     supported && cid != 0x0053,
@@ -722,8 +1116,8 @@ mod tests {
                     None,
                 )
                 .await;
-                let caps = probe.capabilities.unwrap();
-                assert!(!probe.capabilities_incomplete);
+                let caps = probe.capabilities().unwrap();
+                assert!(!probe.capabilities_incomplete());
                 assert_eq!(
                     caps.virtual_thumbwheel,
                     supported && cid != 0x0052,
@@ -742,8 +1136,8 @@ mod tests {
                 fail_at,
             )
             .await;
-            let caps = probe.capabilities.unwrap();
-            assert_eq!(probe.capabilities_incomplete, fail_at.is_some());
+            let caps = probe.capabilities().unwrap();
+            assert_eq!(probe.capabilities_incomplete(), fail_at.is_some());
             assert_eq!(caps.haptic_panel, fail_at.is_none());
             assert_eq!(caps.dpi_gestures, fail_at.is_none());
             assert_eq!(caps.virtual_thumbwheel, fail_at.is_none());
@@ -777,7 +1171,7 @@ mod tests {
             Some(response)
         });
         let channel = scripted_channel(raw).await;
-        probe_features(&channel, 0xff, None).await.0
+        probe_features(&channel, 0xff, None, None).await.0
     }
 
     #[tokio::test]
@@ -789,16 +1183,16 @@ mod tests {
             (0x0002, false),
         ] {
             let probe = multi_platform_probe(Some(word)).await;
-            assert!(!probe.capabilities_incomplete);
+            assert!(!probe.capabilities_incomplete());
             assert_eq!(
-                probe.capabilities.unwrap().os_layout,
+                probe.capabilities().unwrap().os_layout,
                 settable,
                 "capabilities {word:04x}"
             );
         }
         // An unanswered read leaves the set incomplete, so it is not memoized.
         let probe = multi_platform_probe(None).await;
-        assert!(probe.capabilities_incomplete);
+        assert!(probe.capabilities_incomplete());
     }
 
     /// Probe a mouse whose `0x19c0` (at index 2) reports `count` buttons and
@@ -828,7 +1222,7 @@ mod tests {
             Some(response)
         });
         let channel = scripted_channel(raw).await;
-        probe_features(&channel, 0xff, None).await.0
+        probe_features(&channel, 0xff, None, None).await.0
     }
 
     #[tokio::test]
@@ -846,16 +1240,16 @@ mod tests {
             (0, MX_MASTER_4, false),
         ] {
             let probe = force_sensing_probe(count, Some(info)).await;
-            assert!(!probe.capabilities_incomplete);
+            assert!(!probe.capabilities_incomplete());
             assert_eq!(
-                probe.capabilities.unwrap().force_sensing,
+                probe.capabilities().unwrap().force_sensing,
                 offered,
                 "count {count}, info {info:02x?}"
             );
         }
         // An unanswered read leaves the set incomplete, so it is not memoized.
         let probe = force_sensing_probe(1, None).await;
-        assert!(probe.capabilities_incomplete);
+        assert!(probe.capabilities_incomplete());
     }
 
     /// How a `0x19c0` `getCount` read goes in [`force_sensing_count_probe`].
@@ -910,7 +1304,7 @@ mod tests {
             CountRead::FeatureError(_) => ScriptedRawHidChannel::with_dynamic_responder(responder),
         };
         let channel = scripted_channel(raw).await;
-        probe_features(&channel, 0xff, None).await.0
+        probe_features(&channel, 0xff, None, None).await.0
     }
 
     #[tokio::test]
@@ -926,8 +1320,8 @@ mod tests {
             (CountRead::TransportFailure, true),
         ] {
             let probe = force_sensing_count_probe(count).await;
-            assert_eq!(probe.capabilities_incomplete, incomplete, "{count:?}");
-            let caps = probe.capabilities.unwrap();
+            assert_eq!(probe.capabilities_incomplete(), incomplete, "{count:?}");
+            let caps = probe.capabilities().unwrap();
             // An answer withdraws the button; an unanswered read keeps the
             // feature table's presumption for the cache to repair.
             assert_eq!(caps.force_sensing, incomplete, "{count:?}");
@@ -981,9 +1375,9 @@ mod tests {
             Some(response)
         });
         let channel = scripted_channel(raw).await;
-        let (probe, battery_probe, _) = probe_features(&channel, 0xff, None).await;
+        let (probe, battery_probe, _) = probe_features(&channel, 0xff, None, None).await;
         let battery = match battery_probe {
-            Some(battery_probe) => match read_battery(&channel, 0xff, battery_probe).await {
+            Some(battery_probe) => match read_battery(&channel, 0xff, battery_probe, None).await {
                 BatteryRead::Reading(info) => Some(info),
                 _ => None,
             },
@@ -1004,7 +1398,7 @@ mod tests {
                 state_of_charge: false,
             })
         );
-        assert!(!probe.capabilities_incomplete);
+        assert!(!probe.capabilities_incomplete());
         let battery = battery.expect("a level-only reading");
         assert_eq!(battery.percentage, None);
         assert_eq!(battery.level, BatteryLevel::Good);
@@ -1016,7 +1410,7 @@ mod tests {
         let (probe, battery_probe, battery) =
             unified_probe(Some(RECHARGEABLE | STATE_OF_CHARGE), [67, 0x04, 0]).await;
         assert_eq!(battery_probe, Some(unified(2)));
-        assert!(!probe.capabilities_incomplete);
+        assert!(!probe.capabilities_incomplete());
         assert_eq!(battery.expect("a reading").percentage, Some(67));
     }
 
@@ -1025,7 +1419,7 @@ mod tests {
         let (probe, battery_probe, battery) = unified_probe(None, [67, 0x04, 0]).await;
         assert_eq!(battery_probe, Some(unified(2)));
         assert!(
-            probe.capabilities_incomplete,
+            probe.capabilities_incomplete(),
             "an assumed capability must not be memoized"
         );
         assert_eq!(battery.expect("a reading").percentage, Some(67));
@@ -1076,9 +1470,9 @@ mod tests {
             Some(response)
         });
         let channel = scripted_channel(raw).await;
-        let (probe, battery_probe, _) = probe_features(&channel, 0xff, None).await;
+        let (probe, battery_probe, _) = probe_features(&channel, 0xff, None, None).await;
         let battery = match battery_probe {
-            Some(battery_probe) => match read_battery(&channel, 0xff, battery_probe).await {
+            Some(battery_probe) => match read_battery(&channel, 0xff, battery_probe, None).await {
                 BatteryRead::Reading(info) => Some(info),
                 _ => None,
             },
@@ -1100,7 +1494,7 @@ mod tests {
                 mileage: false,
             })
         );
-        assert!(!probe.capabilities_incomplete);
+        assert!(!probe.capabilities_incomplete());
         let battery = battery.expect("a reading");
         assert_eq!(battery.percentage, Some(85));
         assert_eq!(battery.level, BatteryLevel::Full);
@@ -1125,7 +1519,7 @@ mod tests {
         let (probe, battery_probe, battery) =
             legacy_probe(Some([100, MILEAGE | LEGACY_RECHARGEABLE]), [85, 84, 0]).await;
         assert_eq!(battery_probe, Some(legacy(2)));
-        assert!(!probe.capabilities_incomplete);
+        assert!(!probe.capabilities_incomplete());
         let battery = battery.expect("a reading");
         assert_eq!(battery.percentage, Some(85));
         assert_eq!(battery.level, BatteryLevel::Good);
@@ -1136,7 +1530,7 @@ mod tests {
         let (probe, battery_probe, battery) = legacy_probe(None, [85, 50, 0]).await;
         assert_eq!(battery_probe, Some(legacy(2)));
         assert!(
-            probe.capabilities_incomplete,
+            probe.capabilities_incomplete(),
             "an assumed capability must not be memoized"
         );
         assert_eq!(battery.expect("a reading").level, BatteryLevel::Good);
@@ -1212,7 +1606,7 @@ mod tests {
             Some(response)
         });
         let channel = scripted_channel(raw).await;
-        read_battery(&channel, 0xff, BatteryProbe::Adc(8)).await
+        read_battery(&channel, 0xff, BatteryProbe::Adc(8), None).await
     }
 
     #[tokio::test]
@@ -1270,7 +1664,8 @@ mod tests {
             Some(response)
         });
         let channel = scripted_channel(raw).await;
-        let BatteryRead::Reading(battery) = read_battery(&channel, 0xff, legacy(2)).await else {
+        let BatteryRead::Reading(battery) = read_battery(&channel, 0xff, legacy(2), None).await
+        else {
             panic!("expected a reading");
         };
         battery
