@@ -26,6 +26,7 @@ fn raw_light_dev(key: &str) -> AgentDevice {
         settings_revision: 0,
         codename: None,
         battery: None,
+        hidpp10: false,
     }
 }
 
@@ -119,6 +120,62 @@ fn build_devices_still_finds_settings_left_under_a_pre_upgrade_receiver_key() {
             .map(|entry| entry.effective_dpi(&stable_id(device).route_key())),
         Some(Some(Dpi::new(3200))),
         "the DPI the agent re-applies on reconnect is still reachable"
+    );
+}
+
+/// A Unifying receiver with one mouse in slot 2 that reports no model info:
+/// a HID++ 1.0 device when `hidpp10`, else a HID++ 2.0 device whose
+/// DeviceInformation read has not resolved.
+fn unifying_inventory_without_model_info(hidpp10: bool) -> DeviceInventory {
+    DeviceInventory {
+        receiver: ReceiverInfo {
+            name: "Unifying Receiver".to_string(),
+            vendor_id: 0x046d,
+            product_id: 0xc52b,
+            unique_id: Some("A1B2C3D4".to_string()),
+        },
+        paired: vec![PairedDevice {
+            slot: 2,
+            codename: Some("Performance MX".to_string()),
+            wpid: Some(0x101a),
+            kind: DeviceKind::Mouse,
+            online: true,
+            battery: None,
+            model_info: None,
+            capabilities: None,
+            settings_revision: 0,
+            hidpp10,
+        }],
+    }
+}
+
+#[test]
+fn build_devices_keys_a_hidpp10_device_by_its_receiver_slot() {
+    // No model info means no serial or unit id, so the Unifying route keys the
+    // device by receiver and slot: the key the GUI resolves for its card.
+    let devices = build_devices(
+        &Config::default(),
+        &[unifying_inventory_without_model_info(true)],
+        &[],
+    );
+    let device = devices.first().expect("the HID++ 1.0 mouse is listed");
+    assert_eq!(device.config_key, "receiver:a1b2c3d4:slot:2");
+    assert_eq!(device.model_key, "wpid101a");
+    assert!(device.hidpp10);
+}
+
+#[test]
+fn build_devices_waits_for_a_hidpp20_devices_model_info() {
+    // Its settings live under its serial or unit id once DeviceInformation
+    // resolves; keyed by receiver slot until then, the agent would read them
+    // from another entry.
+    assert!(
+        build_devices(
+            &Config::default(),
+            &[unifying_inventory_without_model_info(false)],
+            &[],
+        )
+        .is_empty()
     );
 }
 
