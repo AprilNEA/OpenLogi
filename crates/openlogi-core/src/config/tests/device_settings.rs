@@ -112,7 +112,7 @@ fn a_smooth_wheel_opt_in_survives_route_adoption() {
     let mut config = Config::default();
     config.set_smooth_wheel(route, true);
     let canonical = crate::device_order::PhysicalDeviceKey::parse("unit:4f4c4403").expect("valid");
-    assert!(config.adopt_route(&canonical, route, None));
+    assert!(config.adopt_route(&canonical, route, [0; 4], None));
     assert!(
         !config.devices.contains_key(route),
         "sanity: the route entry folded"
@@ -291,7 +291,7 @@ fn a_keep_os_layout_opt_out_survives_route_adoption() {
     let mut config = Config::default();
     config.set_keep_os_layout(route, false);
     let canonical = crate::device_order::PhysicalDeviceKey::parse("unit:6be9d300").expect("valid");
-    assert!(config.adopt_route(&canonical, route, None));
+    assert!(config.adopt_route(&canonical, route, [0; 4], None));
     assert!(
         !config.devices.contains_key(route),
         "sanity: the route entry folded"
@@ -379,7 +379,7 @@ fn a_saved_force_sensing_survives_route_adoption() {
     let mut config = Config::default();
     config.set_force_sensing(route, 6000);
     let canonical = crate::device_order::PhysicalDeviceKey::parse("unit:a393cae0").expect("valid");
-    assert!(config.adopt_route(&canonical, route, None));
+    assert!(config.adopt_route(&canonical, route, [0; 4], None));
     assert_eq!(config.force_sensing("unit:a393cae0"), Some(6000));
 }
 
@@ -457,7 +457,7 @@ fn a_saved_pointer_speed_survives_route_adoption() {
     let mut config = Config::default();
     config.set_pointer_speed(route, PointerSpeed::MAX);
     let canonical = crate::device_order::PhysicalDeviceKey::parse("unit:a393cae0").expect("valid");
-    assert!(config.adopt_route(&canonical, route, None));
+    assert!(config.adopt_route(&canonical, route, [0; 4], None));
     assert_eq!(
         config.pointer_speed("unit:a393cae0"),
         Some(PointerSpeed::MAX)
@@ -475,7 +475,7 @@ fn a_saved_report_rate_survives_route_adoption() {
     let mut config = Config::default();
     config.set_report_rate(route, ReportRate::new(500));
     let canonical = crate::device_order::PhysicalDeviceKey::parse("unit:a393cae0").expect("valid");
-    assert!(config.adopt_route(&canonical, route, None));
+    assert!(config.adopt_route(&canonical, route, [0; 4], None));
     assert!(
         !config.devices.contains_key(route),
         "sanity: the route entry folded"

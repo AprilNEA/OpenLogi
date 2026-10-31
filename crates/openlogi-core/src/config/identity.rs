@@ -100,7 +100,13 @@ impl Config {
     /// route index is metadata OpenLogi wrote itself, and must not out-rank a
     /// legacy entry holding the user's actual bindings and DPI.
     ///
-    /// Failing both, and for a device whose identity is unreadable (asleep),
+    /// `unit_id` is the device's raw unit id. A device whose serial was not
+    /// readable on an earlier sighting had its settings saved under
+    /// `unit:<id>`; once the serial arrives that key is a pre-serial
+    /// candidate on the same terms as the route-derived one, until
+    /// [`Self::adopt_route`] folds it in. Pass `[0; 4]` when there is none.
+    ///
+    /// Failing those, and for a device whose identity is unreadable (asleep),
     /// the route is resolved through the persisted `links` index, then finally
     /// through the route-derived key that every entry used before this
     /// indirection existed.
@@ -109,6 +115,7 @@ impl Config {
         &self,
         stable: &DeviceStableId,
         identity: Option<&DeviceIdentity>,
+        unit_id: [u8; 4],
     ) -> Option<PhysicalDeviceKey> {
         if let Some(key) = identity
             .and_then(DeviceIdentity::config_key)
@@ -119,12 +126,14 @@ impl Config {
                     .get(key)
                     .is_some_and(DeviceConfig::holds_settings)
             };
-            let legacy = stable
+            let route_legacy = stable
                 .physical_key()
                 .filter(|legacy| legacy.as_str() != key.as_str());
-            if let Some(legacy) = legacy
-                && !holds_settings(key.as_str())
-                && holds_settings(legacy.as_str())
+            if !holds_settings(key.as_str())
+                && let Some(legacy) = [route_legacy, superseded_unit_key(&key, unit_id)]
+                    .into_iter()
+                    .flatten()
+                    .find(|legacy| holds_settings(legacy.as_str()))
             {
                 return Some(legacy);
             }
@@ -144,7 +153,9 @@ impl Config {
     }
 
     /// Record that the device keyed `canonical` was reached by `route_key`,
-    /// folding in any entry still keyed by that route.
+    /// folding in any entry still keyed by that route, and any entry still
+    /// keyed by the device's own `unit_id` from before its serial was
+    /// readable (see [`Self::resolve_device_key`]; `[0; 4]` for none).
     ///
     /// `capabilities` is what the device just measured on this route, and it
     /// is what makes the per-link table a record of the hardware rather than
@@ -176,8 +187,20 @@ impl Config {
         &mut self,
         canonical: &PhysicalDeviceKey,
         route_key: &str,
+        unit_id: [u8; 4],
         capabilities: Option<Capabilities>,
     ) -> bool {
+        // Take the entries being folded in before the route is cleared from
+        // every other entry: the `unit:<id>` entry's link on this route holds
+        // its per-link overrides, and `fold` must see it to keep them.
+        let legacy = (route_key != canonical.as_str())
+            .then(|| self.devices.remove(route_key))
+            .flatten();
+        let unit_key = superseded_unit_key(canonical, unit_id)
+            .filter(|key| self.devices.contains_key(key.as_str()));
+        let unit = unit_key
+            .as_ref()
+            .and_then(|key| self.devices.remove(key.as_str()));
         let mut changed = false;
         // A route names one device at a time. Re-pairing a different unit into
         // a slot must move the index, not leave the slot pointing at both.
@@ -186,15 +209,18 @@ impl Config {
                 changed = true;
             }
         }
-        let legacy = (route_key != canonical.as_str())
-            .then(|| self.devices.remove(route_key))
-            .flatten();
         let device = self
             .devices
             .entry(canonical.as_str().to_string())
             .or_default();
         if !device.links.contains_key(route_key) {
             changed = true;
+        }
+        let route_folded = legacy.is_some();
+        // Folded before this sighting's link is created, so a link the folded
+        // entry carries is taken rather than shadowed by an empty one.
+        for entry in legacy.into_iter().chain(unit) {
+            fold(device, entry, route_key);
         }
         let link = device.links.entry(route_key.to_string()).or_default();
         // Only a probe that actually answered may overwrite the record, and
@@ -204,12 +230,13 @@ impl Config {
             link.capabilities = capabilities;
             changed = true;
         }
-        let Some(legacy) = legacy else {
-            return changed;
-        };
-        fold(device, legacy, route_key);
-        self.repoint_references(route_key, canonical.as_str());
-        true
+        if route_folded {
+            self.repoint_references(route_key, canonical.as_str());
+        }
+        if let Some(unit_key) = &unit_key {
+            self.repoint_references(unit_key.as_str(), canonical.as_str());
+        }
+        changed || route_folded || unit_key.is_some()
     }
 
     /// Rewrite every reference to `old` — the carousel selection and any
@@ -226,6 +253,15 @@ impl Config {
             }
         }
     }
+}
+
+/// The `unit:<id>` key a device was saved under before its serial was
+/// readable, when that is not `key` itself. `None` for an all-zero unit.
+fn superseded_unit_key(key: &PhysicalDeviceKey, unit_id: [u8; 4]) -> Option<PhysicalDeviceKey> {
+    DeviceIdentity::Unit(unit_id)
+        .config_key()
+        .filter(|unit| unit != key.as_str())
+        .and_then(|unit| PhysicalDeviceKey::parse(&unit))
 }
 
 /// Merge a legacy route-keyed entry into its device's canonical entry.
@@ -432,7 +468,7 @@ mod tests {
         let config = Config::default();
         let unit = DeviceIdentity::Unit([0x6b, 0xe9, 0xd3, 0x00]);
         let key = config
-            .resolve_device_key(&cabled(), Some(&unit))
+            .resolve_device_key(&cabled(), Some(&unit), [0; 4])
             .expect("a non-zero unit is a physical identity");
         assert_eq!(key.as_str(), "unit:6be9d300");
     }
@@ -443,8 +479,8 @@ mod tests {
         let config = Config::default();
         let unit = DeviceIdentity::Unit([0x6b, 0xe9, 0xd3, 0x00]);
         assert_eq!(
-            config.resolve_device_key(&cabled(), Some(&unit)),
-            config.resolve_device_key(&on_receiver(), Some(&unit)),
+            config.resolve_device_key(&cabled(), Some(&unit), [0; 4]),
+            config.resolve_device_key(&on_receiver(), Some(&unit), [0; 4]),
         );
     }
 
@@ -476,7 +512,7 @@ mod tests {
 
         let unit = DeviceIdentity::Unit([0x6b, 0xe9, 0xd3, 0x00]);
         let key = config
-            .resolve_device_key(&on_receiver(), Some(&unit))
+            .resolve_device_key(&on_receiver(), Some(&unit), [0; 4])
             .expect("resolves");
         assert_eq!(key.as_str(), "receiver:82839805:slot:1");
         assert_eq!(
@@ -502,7 +538,7 @@ mod tests {
 
         let serial = DeviceIdentity::Serial("beam-1".to_string());
         let key = config
-            .resolve_device_key(&litra(), Some(&serial))
+            .resolve_device_key(&litra(), Some(&serial), [0; 4])
             .expect("resolves");
         assert_eq!(key.as_str(), "raw:046d:c901:ff43:0202:serial:beam-1");
     }
@@ -529,7 +565,7 @@ mod tests {
 
         let unit = DeviceIdentity::Unit([0x6b, 0xe9, 0xd3, 0x00]);
         let key = config
-            .resolve_device_key(&on_receiver(), Some(&unit))
+            .resolve_device_key(&on_receiver(), Some(&unit), [0; 4])
             .expect("resolves");
         assert_eq!(key.as_str(), "receiver:82839805:slot:1");
     }
@@ -557,7 +593,7 @@ mod tests {
 
         let unit = DeviceIdentity::Unit([0x6b, 0xe9, 0xd3, 0x00]);
         let key = config
-            .resolve_device_key(&on_receiver(), Some(&unit))
+            .resolve_device_key(&on_receiver(), Some(&unit), [0; 4])
             .expect("resolves");
         assert_eq!(key.as_str(), "unit:6be9d300");
     }
@@ -618,7 +654,7 @@ mod tests {
         config.selected_device = Some("receiver:82839805:slot:1".to_string());
 
         let canonical = PhysicalDeviceKey::parse("unit:6be9d300").expect("valid");
-        assert!(config.adopt_route(&canonical, "receiver:82839805:slot:1", None));
+        assert!(config.adopt_route(&canonical, "receiver:82839805:slot:1", [0; 4], None));
 
         assert_eq!(config.selected_device.as_deref(), Some("unit:6be9d300"));
         assert_eq!(
@@ -642,7 +678,7 @@ mod tests {
         config.devices.insert("unit:6be9d300".to_string(), device);
 
         let key = config
-            .resolve_device_key(&on_receiver(), None)
+            .resolve_device_key(&on_receiver(), None, [0; 4])
             .expect("the indexed route resolves");
         assert_eq!(key.as_str(), "unit:6be9d300");
     }
@@ -651,7 +687,7 @@ mod tests {
     fn an_unindexed_route_falls_back_to_todays_key() {
         let config = Config::default();
         let key = config
-            .resolve_device_key(&on_receiver(), None)
+            .resolve_device_key(&on_receiver(), None, [0; 4])
             .expect("receiver keys are physical");
         assert_eq!(key.as_str(), "receiver:82839805:slot:1");
     }
@@ -663,7 +699,7 @@ mod tests {
         let config = Config::default();
         let zero = DeviceIdentity::Unit([0; 4]);
         let key = config
-            .resolve_device_key(&on_receiver(), Some(&zero))
+            .resolve_device_key(&on_receiver(), Some(&zero), [0; 4])
             .expect("falls back rather than failing");
         assert_eq!(key.as_str(), "receiver:82839805:slot:1");
     }
@@ -676,7 +712,7 @@ mod tests {
             product_id: 0xc08d,
             identity: DeviceIdentity::Unit([0; 4]),
         };
-        assert_eq!(config.resolve_device_key(&anonymous, None), None);
+        assert_eq!(config.resolve_device_key(&anonymous, None, [0; 4]), None);
     }
 
     #[test]
@@ -697,7 +733,7 @@ mod tests {
             .insert("unit:6be9d300".to_string(), DeviceConfig::default());
 
         let canonical = PhysicalDeviceKey::parse("unit:6be9d300").expect("valid");
-        assert!(config.adopt_route(&canonical, "receiver:82839805:slot:1", None));
+        assert!(config.adopt_route(&canonical, "receiver:82839805:slot:1", [0; 4], None));
 
         assert_eq!(
             config.devices["unit:6be9d300"].custom_name.as_deref(),
@@ -728,7 +764,7 @@ mod tests {
             .insert("unit:6be9d300".to_string(), canonical_entry);
 
         let canonical = PhysicalDeviceKey::parse("unit:6be9d300").expect("valid");
-        assert!(config.adopt_route(&canonical, "receiver:82839805:slot:1", None));
+        assert!(config.adopt_route(&canonical, "receiver:82839805:slot:1", [0; 4], None));
 
         assert_eq!(
             config.devices["unit:6be9d300"].custom_name.as_deref(),
@@ -754,7 +790,7 @@ mod tests {
             .insert("unit:6be9d300".to_string(), DeviceConfig::default());
 
         let canonical = PhysicalDeviceKey::parse("unit:6be9d300").expect("valid");
-        assert!(config.adopt_route(&canonical, "receiver:82839805:slot:1", None));
+        assert!(config.adopt_route(&canonical, "receiver:82839805:slot:1", [0; 4], None));
 
         let device = &config.devices["unit:6be9d300"];
         assert!(device.lighting.is_some(), "lighting moved to device level");
@@ -781,8 +817,13 @@ mod tests {
             ..Capabilities::default()
         };
 
-        assert!(config.adopt_route(&canonical, "direct:046d:c08d", Some(wired)));
-        assert!(config.adopt_route(&canonical, "receiver:82839805:slot:1", Some(wireless)));
+        assert!(config.adopt_route(&canonical, "direct:046d:c08d", [0; 4], Some(wired)));
+        assert!(config.adopt_route(
+            &canonical,
+            "receiver:82839805:slot:1",
+            [0; 4],
+            Some(wireless)
+        ));
 
         let links = &config.devices["unit:6be9d300"].links;
         assert_eq!(links["direct:046d:c08d"].capabilities, Some(wired));
@@ -793,9 +834,9 @@ mod tests {
 
         // Re-sighting the same route with the same answer is not a change:
         // reporting one would persist the config on every poll.
-        assert!(!config.adopt_route(&canonical, "direct:046d:c08d", Some(wired)));
+        assert!(!config.adopt_route(&canonical, "direct:046d:c08d", [0; 4], Some(wired)));
         // An unprobed sighting is not evidence the capability went away.
-        assert!(!config.adopt_route(&canonical, "direct:046d:c08d", None));
+        assert!(!config.adopt_route(&canonical, "direct:046d:c08d", [0; 4], None));
         assert_eq!(
             config.devices["unit:6be9d300"].links["direct:046d:c08d"].capabilities,
             Some(wired)
@@ -824,7 +865,7 @@ mod tests {
             .insert("unit:6be9d300".to_string(), canonical_entry);
 
         let canonical = PhysicalDeviceKey::parse("unit:6be9d300").expect("valid");
-        config.adopt_route(&canonical, "receiver:82839805:slot:1", None);
+        config.adopt_route(&canonical, "receiver:82839805:slot:1", [0; 4], None);
 
         let device = &config.devices["unit:6be9d300"];
         assert_eq!(device.dpi, Some(Dpi::new(1600)), "canonical stays default");
@@ -846,7 +887,7 @@ mod tests {
             .insert("unit:6be9d300".to_string(), DeviceConfig::default());
         let canonical = PhysicalDeviceKey::parse("unit:6be9d300").expect("valid");
 
-        assert!(config.adopt_route(&canonical, "direct:046d:c08d", None));
+        assert!(config.adopt_route(&canonical, "direct:046d:c08d", [0; 4], None));
         assert!(
             config.devices["unit:6be9d300"]
                 .links
@@ -868,7 +909,7 @@ mod tests {
         config.devices.insert("unit:6be9d300".to_string(), device);
         let canonical = PhysicalDeviceKey::parse("unit:6be9d300").expect("valid");
 
-        assert!(!config.adopt_route(&canonical, "direct:046d:c08d", None));
+        assert!(!config.adopt_route(&canonical, "direct:046d:c08d", [0; 4], None));
     }
 
     #[test]
@@ -887,7 +928,7 @@ mod tests {
             .insert("unit:bbbbbbbb".to_string(), DeviceConfig::default());
 
         let second = PhysicalDeviceKey::parse("unit:bbbbbbbb").expect("valid");
-        config.adopt_route(&second, "receiver:82839805:slot:1", None);
+        config.adopt_route(&second, "receiver:82839805:slot:1", [0; 4], None);
 
         assert!(
             !config.devices["unit:aaaaaaaa"]
@@ -922,7 +963,7 @@ mod tests {
             .insert("unit:6be9d300".to_string(), DeviceConfig::default());
 
         let canonical = PhysicalDeviceKey::parse("unit:6be9d300").expect("valid");
-        config.adopt_route(&canonical, "receiver:82839805:slot:1", None);
+        config.adopt_route(&canonical, "receiver:82839805:slot:1", [0; 4], None);
 
         let device = &config.devices["unit:6be9d300"];
         assert_eq!(
@@ -952,7 +993,7 @@ mod tests {
             .insert("unit:6be9d300".to_string(), DeviceConfig::default());
 
         let canonical = PhysicalDeviceKey::parse("unit:6be9d300").expect("valid");
-        config.adopt_route(&canonical, "receiver:82839805:slot:1", None);
+        config.adopt_route(&canonical, "receiver:82839805:slot:1", [0; 4], None);
 
         assert_eq!(
             config.devices["unit:6be9d300"].light,
@@ -992,7 +1033,7 @@ mod tests {
                     },
                 );
 
-                assert!(config.adopt_route(&canonical, route, None));
+                assert!(config.adopt_route(&canonical, route, [0; 4], None));
                 let expected = canonical_policy.as_ref().or(legacy_policy.as_ref());
                 assert_eq!(
                     config.disabled_keys(canonical.as_str()),
@@ -1000,7 +1041,7 @@ mod tests {
                     "canonical={canonical_policy:?}, legacy={legacy_policy:?}"
                 );
                 assert!(!config.devices.contains_key(route));
-                assert!(!config.adopt_route(&canonical, route, None));
+                assert!(!config.adopt_route(&canonical, route, [0; 4], None));
                 let restored: Config =
                     toml::from_str(&toml::to_string(&config).expect("serialize")).expect("reload");
                 assert_eq!(restored.disabled_keys(canonical.as_str()), expected);
@@ -1026,11 +1067,127 @@ mod tests {
             .insert("unit:6be9d300".to_string(), DeviceConfig::default());
 
         let canonical = PhysicalDeviceKey::parse("unit:6be9d300").expect("valid");
-        config.adopt_route(&canonical, "receiver:82839805:slot:1", None);
+        config.adopt_route(&canonical, "receiver:82839805:slot:1", [0; 4], None);
 
         assert!(
             !config.devices["unit:6be9d300"].enabled,
             "the legacy opt-out survives adoption"
         );
+    }
+
+    // A direct device whose serial read failed on first sight (#482) is keyed
+    // `unit:<id>`; settings saved in that window must survive the serial
+    // arriving on a later probe (#2025).
+    const LATE_UNIT: [u8; 4] = [0x01, 0x02, 0x03, 0x04];
+    const LATE_ROUTE: &str = "direct:046d:b35b";
+
+    fn late_serial(identity: DeviceIdentity) -> (DeviceStableId, DeviceIdentity) {
+        let stable = DeviceStableId::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xb35b,
+            identity: identity.clone(),
+        };
+        (stable, identity)
+    }
+
+    /// Stage 1: sighted without a serial, the user set a DPI there.
+    fn saved_before_serial() -> Config {
+        let mut config = Config::default();
+        let (stable, identity) = late_serial(DeviceIdentity::from_parts(None, LATE_UNIT));
+        let key = canonical_device_key(&stable, Some(&identity)).expect("unit key");
+        assert_eq!(key.as_str(), "unit:01020304");
+        config.adopt_route(&key, LATE_ROUTE, LATE_UNIT, None);
+        config.set_dpi(key.as_str(), Dpi::new(1600));
+        config.selected_device = Some(key.into_string());
+        config
+    }
+
+    fn resolve_with(config: &Config, serial: Option<&str>, unit: [u8; 4]) -> PhysicalDeviceKey {
+        let (stable, identity) = late_serial(DeviceIdentity::from_parts(serial, unit));
+        config
+            .resolve_device_key(&stable, Some(&identity), unit)
+            .expect("key")
+    }
+
+    #[test]
+    fn before_the_serial_the_unit_entry_is_resolved() {
+        let config = saved_before_serial();
+        let key = resolve_with(&config, None, LATE_UNIT);
+        assert_eq!(config.dpi(key.as_str()), Some(Dpi::new(1600)));
+    }
+
+    #[test]
+    fn once_the_serial_arrives_the_unit_entry_is_still_resolved() {
+        let config = saved_before_serial();
+        let key = resolve_with(&config, Some("ABCD1234"), LATE_UNIT);
+        assert_eq!(key.as_str(), "unit:01020304", "until adoption folds it");
+        assert_eq!(config.dpi(key.as_str()), Some(Dpi::new(1600)));
+    }
+
+    #[test]
+    fn adopting_after_the_serial_folds_the_unit_entry_into_the_serial_one() {
+        let mut config = saved_before_serial();
+        let (stable, identity) =
+            late_serial(DeviceIdentity::from_parts(Some("ABCD1234"), LATE_UNIT));
+        let canonical = canonical_device_key(&stable, Some(&identity)).expect("key");
+        assert!(config.adopt_route(&canonical, LATE_ROUTE, LATE_UNIT, None));
+
+        let key = resolve_with(&config, Some("ABCD1234"), LATE_UNIT);
+        assert_eq!(key.as_str(), "serial:abcd1234");
+        assert_eq!(config.dpi(key.as_str()), Some(Dpi::new(1600)));
+        assert!(config.devices[key.as_str()].links.contains_key(LATE_ROUTE));
+        assert!(
+            !config.devices.contains_key("unit:01020304"),
+            "the unit entry is consumed, not orphaned"
+        );
+        assert_eq!(config.selected_device.as_deref(), Some("serial:abcd1234"));
+    }
+
+    #[test]
+    fn folding_the_unit_entry_keeps_its_link_override() {
+        let mut config = saved_before_serial();
+        config
+            .devices
+            .get_mut("unit:01020304")
+            .and_then(|device| device.links.get_mut(LATE_ROUTE))
+            .expect("stage 1 indexed the route")
+            .overrides
+            .dpi = Some(Dpi::new(800));
+        let canonical = PhysicalDeviceKey::parse("serial:abcd1234").expect("valid");
+        config.adopt_route(&canonical, LATE_ROUTE, LATE_UNIT, None);
+
+        let device = &config.devices["serial:abcd1234"];
+        assert_eq!(device.dpi, Some(Dpi::new(1600)));
+        assert_eq!(device.links[LATE_ROUTE].overrides.dpi, Some(Dpi::new(800)));
+    }
+
+    #[test]
+    fn a_different_unit_id_is_not_folded() {
+        // A same-model twin shares the `direct:` route, so only the unit id
+        // may attribute the entry, never the route.
+        let mut config = saved_before_serial();
+        let other = [0x0a, 0x0b, 0x0c, 0x0d];
+        assert_ne!(
+            config.dpi(resolve_with(&config, Some("FFFF0000"), other).as_str()),
+            Some(Dpi::new(1600))
+        );
+        let canonical = PhysicalDeviceKey::parse("serial:ffff0000").expect("valid");
+        config.adopt_route(&canonical, LATE_ROUTE, other, None);
+        assert_eq!(config.dpi("unit:01020304"), Some(Dpi::new(1600)));
+        assert_eq!(config.dpi("serial:ffff0000"), None);
+    }
+
+    #[test]
+    fn an_all_zero_unit_id_is_never_a_fold_candidate() {
+        let mut config = Config::default();
+        config.set_dpi("unit:00000000", Dpi::new(1600));
+        assert_eq!(
+            resolve_with(&config, Some("ABCD1234"), [0; 4]).as_str(),
+            "serial:abcd1234"
+        );
+        let canonical = PhysicalDeviceKey::parse("serial:abcd1234").expect("valid");
+        config.adopt_route(&canonical, LATE_ROUTE, [0; 4], None);
+        assert!(config.devices.contains_key("unit:00000000"));
+        assert_eq!(config.dpi("serial:abcd1234"), None);
     }
 }

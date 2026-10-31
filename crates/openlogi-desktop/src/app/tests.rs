@@ -657,7 +657,7 @@ fn disconnected_keyboard_icon_uses_only_unambiguous_saved_links() {
             },
         );
         for link in *links {
-            config.adopt_route(&key, link, None);
+            config.adopt_route(&key, link, [0; 4], None);
         }
         let resolver = AssetResolver::new();
         let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();

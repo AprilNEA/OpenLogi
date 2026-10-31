@@ -116,7 +116,11 @@ impl AgentDevice {
     /// key cached when this inventory record was built.
     fn resolve_config_key(&self, config: &Config) -> Option<PhysicalDeviceKey> {
         let identity = DeviceIdentity::from_parts(self.serial.as_deref(), self.unit_id);
-        config.resolve_device_key(&stable_id(self), self.online.then_some(&identity))
+        config.resolve_device_key(
+            &stable_id(self),
+            self.online.then_some(&identity),
+            self.unit_id,
+        )
     }
 }
 

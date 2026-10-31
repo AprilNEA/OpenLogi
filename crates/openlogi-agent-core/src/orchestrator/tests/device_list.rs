@@ -203,7 +203,7 @@ fn the_agent_reads_settings_under_the_device_key() {
     config.set_dpi("unit:6be9d300", Dpi::new(1600));
 
     let key = config
-        .resolve_device_key(&direct_stable_id(), None)
+        .resolve_device_key(&direct_stable_id(), None, [0; 4])
         .expect("resolves through the indexed route");
     assert_eq!(config.devices[key.as_str()].dpi, Some(Dpi::new(1600)));
 }

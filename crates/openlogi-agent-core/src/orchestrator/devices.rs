@@ -215,9 +215,11 @@ pub(super) fn build_devices(
             // to the same non-key.
             let identity =
                 DeviceIdentity::from_parts(model.serial_number.as_deref(), model.unit_id);
-            let Some(config_key) =
-                config.resolve_device_key(&stable_id, paired.online.then_some(&identity))
-            else {
+            let Some(config_key) = config.resolve_device_key(
+                &stable_id,
+                paired.online.then_some(&identity),
+                model.unit_id,
+            ) else {
                 continue;
             };
             devices.push(AgentDevice {
@@ -246,9 +248,11 @@ pub(super) fn build_devices(
             device.unit_id,
         );
         let identity = DeviceIdentity::from_parts(device.serial_number.as_deref(), device.unit_id);
-        let Some(config_key) =
-            config.resolve_device_key(&stable_id, device.online.then_some(&identity))
-        else {
+        let Some(config_key) = config.resolve_device_key(
+            &stable_id,
+            device.online.then_some(&identity),
+            device.unit_id,
+        ) else {
             continue;
         };
         devices.push(AgentDevice {

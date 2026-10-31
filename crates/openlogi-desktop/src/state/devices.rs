@@ -273,7 +273,7 @@ pub(super) fn build_device_list(
             );
             let identity = RouteIdentity::from_parts(serial_number.as_deref(), unit_id);
             let (config_key, persistent) = config
-                .resolve_device_key(&stable_id, paired.online.then_some(&identity))
+                .resolve_device_key(&stable_id, paired.online.then_some(&identity), unit_id)
                 .map_or_else(
                     || (stable_id.runtime_key(), false),
                     |key| (key.into_string(), true),
@@ -519,7 +519,11 @@ fn append_standalone(
         );
         let identity = RouteIdentity::from_parts(device.serial_number.as_deref(), device.unit_id);
         let (config_key, persistent) = config
-            .resolve_device_key(&stable_id, device.online.then_some(&identity))
+            .resolve_device_key(
+                &stable_id,
+                device.online.then_some(&identity),
+                device.unit_id,
+            )
             .map_or_else(
                 || (stable_id.runtime_key(), false),
                 |key| (key.into_string(), true),
