@@ -151,3 +151,39 @@ fn equal_runtime_projection_does_not_wake_managers() {
             .expect("publication remains open")
     );
 }
+
+/// The overlay pre-warm answer follows the online devices and their bindings.
+/// Focus and pointer moves republish the capture plans but leave the answer
+/// alone, so they must not wake the overlay supervisor.
+#[test]
+fn ring_prewarm_follows_ring_devices_but_not_focus_or_pointer() {
+    let mut orch = orchestrator(Config::default());
+    let mut prewarm = orch.shared.ring_prewarm.clone();
+    let mut panel_mouse = dev("mx-master-4", 1, true);
+    panel_mouse.capabilities = Some(Capabilities {
+        buttons: true,
+        haptic_panel: true,
+        ..Capabilities::default()
+    });
+    orch.devices = vec![panel_mouse, dev("mx-master-3s", 2, true)];
+    orch.rebuild();
+    assert!(prewarm.has_changed().expect("publication remains open"));
+    assert!(*prewarm.borrow_and_update());
+
+    orch.set_current_app(Some(ForegroundApp::unnamed("code".to_string())));
+    orch.set_pointer_context(openlogi_hook::PointerContext {
+        app: None,
+        target: openlogi_hook::PointerTarget::Desktop,
+    });
+    assert!(
+        !prewarm.has_changed().expect("publication remains open"),
+        "a focus or pointer move is not a pre-warm change"
+    );
+
+    orch.devices[0].online = false;
+    orch.publish_device_runtime();
+    assert!(
+        !*prewarm.borrow_and_update(),
+        "a mouse without a panel does not inherit the panel's ring default"
+    );
+}

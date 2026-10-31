@@ -83,7 +83,7 @@ impl AgentServer {
         dispatcher: ActionDispatcher,
         backlight_overlay: BacklightOverlayManager,
     ) -> (Self, tokio::sync::mpsc::UnboundedReceiver<ClientKind>) {
-        let ring_haptics = RingHapticPlayer::spawn(shared.clone());
+        let ring_haptics = RingHapticPlayer::spawn(shared.clone(), Arc::clone(&action_ring));
         let (demand, declarations) = tokio::sync::mpsc::unbounded_channel();
         (
             Self {
@@ -909,7 +909,7 @@ impl Budget {
 
 impl RingHapticPlayer {
     /// Spawn the single-flight worker. Must be called from a tokio runtime.
-    pub fn spawn(shared: SharedHandles) -> Self {
+    pub fn spawn(shared: SharedHandles, action_ring: Arc<ActionRingManager>) -> Self {
         let (tx, mut rx) = tokio::sync::watch::channel::<
             Option<(DeviceRoute, HapticWaveform, &'static str)>,
         >(None);
@@ -982,7 +982,9 @@ impl RingHapticPlayer {
                 if news.hand_back.is_some() {
                     ledger.leaving(Instant::now());
                 }
-                while let Some(owed) = ledger.take_due(Instant::now()) {
+                while let Some(owed) =
+                    ledger.take_due(Instant::now(), (!paused).then_some(action_ring.as_ref()))
+                {
                     if restore_firmware_haptics(&shared, &owed.route, owed.restore).await
                         == RestoreAttempt::Unreached
                     {
@@ -1269,7 +1271,7 @@ mod tests {
             )),
         )
         .shared();
-        let player = super::RingHapticPlayer::spawn(shared);
+        let player = super::RingHapticPlayer::spawn(shared, Arc::default());
         player.begin_session(
             1,
             Some(openlogi_hid::DeviceRoute::Direct {

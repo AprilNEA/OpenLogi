@@ -1,22 +1,13 @@
 //! Agent-owned state for the transient keyboard backlight indicator.
 
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::Duration;
-
-use openlogi_ipc::{BacklightObservation, Generation, OBSERVE_HOLD};
+use openlogi_ipc::{BacklightObservation, Generation};
 use tokio::sync::watch;
 
-/// How long the indicator shows one level change.
-pub(crate) const DISPLAY_LIFETIME: Duration = Duration::from_millis(1500);
+use crate::indicator::Indicator;
 
 #[derive(Clone)]
 pub struct BacklightOverlayManager {
-    state: Arc<Mutex<State>>,
-    published: watch::Sender<BacklightObservation>,
-}
-
-struct State {
-    generation: Generation,
+    indicator: Indicator<BacklightObservation>,
 }
 
 impl Default for BacklightOverlayManager {
@@ -27,61 +18,54 @@ impl Default for BacklightOverlayManager {
             levels: 0,
             visible: false,
         };
-        let (published, _) = watch::channel(initial);
         Self {
-            state: Arc::new(Mutex::new(State { generation: 0 })),
-            published,
+            indicator: Indicator::new(initial),
         }
     }
 }
 
 impl BacklightOverlayManager {
-    /// Show the latest event and hide it after the transient display lifetime.
+    /// Publish the latest event, allowing a bounded cold start before its
+    /// first delivery starts the transient display lifetime.
     pub fn show(&self, current_level: u8, levels: u8, visible: bool) {
-        let generation = {
-            let mut state = self.state();
-            state.generation = state.generation.wrapping_add(1);
-            self.published.send_replace(BacklightObservation {
-                generation: state.generation,
-                current_level,
-                levels,
-                visible,
-            });
-            state.generation
-        };
-        let published = self.published.clone();
-        let state = Arc::clone(&self.state);
-        tokio::spawn(async move {
-            tokio::time::sleep(DISPLAY_LIFETIME).await;
-            let mut state = state.lock().unwrap_or_else(PoisonError::into_inner);
-            if state.generation == generation {
-                state.generation = state.generation.wrapping_add(1);
-                published.send_modify(|observation| {
-                    observation.generation = state.generation;
-                    observation.visible = false;
-                });
-            }
+        self.indicator.show(BacklightObservation {
+            generation: 0,
+            current_level,
+            levels,
+            visible,
         });
     }
 
     /// Observe the current indicator state.
     pub async fn observe(&self, since: Generation) -> BacklightObservation {
-        let mut receiver = self.published.subscribe();
-        let changed = receiver.wait_for(|state| state.generation != since);
-        match tokio::time::timeout(OBSERVE_HOLD, changed).await {
-            Ok(Ok(state)) => state.clone(),
-            Ok(Err(_)) | Err(_) => self.published.borrow().clone(),
-        }
+        self.indicator.observe(since).await
     }
 
-    fn state(&self) -> MutexGuard<'_, State> {
-        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    /// Follow state changes without marking the indicator as delivered.
+    #[must_use]
+    pub fn subscribe(&self) -> watch::Receiver<BacklightObservation> {
+        self.indicator.subscribe()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::indicator::DISPLAY_LIFETIME;
+    use std::time::Duration;
+
+    #[tokio::test(start_paused = true)]
+    async fn a_cold_overlay_still_receives_the_first_backlight_change() {
+        let manager = BacklightOverlayManager::default();
+        manager.show(3, 8, true);
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(2)).await;
+        tokio::task::yield_now().await;
+
+        let shown = manager.observe(0).await;
+        assert!(shown.visible, "startup must not consume the first hint");
+        assert_eq!(shown.current_level, 3);
+    }
 
     #[tokio::test(start_paused = true)]
     async fn a_new_press_after_expiry_has_a_new_generation() {
@@ -113,8 +97,8 @@ mod tests {
         let latest = manager.observe(1).await;
         tokio::task::yield_now().await;
         tokio::time::advance(Duration::from_millis(500)).await;
-        assert_eq!(manager.published.borrow().generation, latest.generation);
-        assert!(manager.published.borrow().visible);
+        assert_eq!(manager.subscribe().borrow().generation, latest.generation);
+        assert!(manager.subscribe().borrow().visible);
 
         tokio::time::advance(Duration::from_secs(1)).await;
         let hidden = manager.observe(latest.generation).await;

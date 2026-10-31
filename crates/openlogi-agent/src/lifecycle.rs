@@ -38,7 +38,7 @@ use openlogi_agent_core::watchers::inventory::{InventoryEvent, InventoryRefresh}
 use openlogi_agent_core::watchers::light::LightEvent;
 use openlogi_core::config::Config;
 use openlogi_hook::Hook;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, watch};
 use tracing::{debug, info, warn};
 
 #[cfg(target_os = "macos")]
@@ -210,7 +210,7 @@ impl Booted {
 struct Wanted(Booted);
 
 impl Wanted {
-    /// The arming point: the tray may show, the overlay may start,
+    /// The arming point: the tray may show, the overlay supervisor starts,
     /// permissions may prompt, devices may open.
     fn arm(self) -> Armed {
         let Booted {
@@ -226,7 +226,6 @@ impl Wanted {
         let _ = armed_tx.send(());
         #[cfg(target_os = "macos")]
         armed_session::record();
-        overlay::spawn();
         prompt_missing_accessibility(capture_mouse_events);
         let virtual_keyboard = VirtualKeyboard::install();
 
@@ -244,6 +243,8 @@ impl Wanted {
         // Closing the channel turns post-arming declarations into no-ops in
         // the server's `declare_client` handler.
         drop(demand);
+        let (indicators, indicator_state) = watch::channel(OverlayIndicators::default());
+        let overlay = start_overlay(&inputs, indicator_state);
         Armed {
             running: Running {
                 orchestrator,
@@ -253,6 +254,8 @@ impl Wanted {
                 inputs,
                 backlight_overlay,
                 ring_haptics,
+                overlay,
+                indicators,
                 signals,
                 shutdown_requests,
                 hidpp_watchers: WatcherFleet::Inactive,
@@ -263,6 +266,39 @@ impl Wanted {
             },
         }
     }
+}
+
+/// The last observations of the agent-owned indicators, published by the
+/// control loop so the supervisor can restart a helper while any is showing.
+#[derive(Default)]
+struct OverlayIndicators {
+    backlight: Option<openlogi_ipc::BacklightObservation>,
+    notices: Option<openlogi_ipc::NoticeObservation>,
+    lock_keys: Option<openlogi_ipc::LockKeyObservation>,
+}
+
+impl OverlayIndicators {
+    fn is_showing(&self) -> bool {
+        self.backlight.as_ref().is_some_and(|state| state.visible)
+            || self
+                .notices
+                .as_ref()
+                .is_some_and(|state| !state.notices.is_empty())
+            || self
+                .lock_keys
+                .as_ref()
+                .is_some_and(|state| state.shown.is_some())
+    }
+}
+
+/// Start the supervisor, parked until content needs drawing or a device in
+/// hand can open a ring. Indicators use the same helper as the ring.
+fn start_overlay(
+    inputs: &InputServices,
+    indicators: watch::Receiver<OverlayIndicators>,
+) -> overlay::Overlay {
+    let ring = Arc::clone(&inputs.ring);
+    overlay::Overlay::start(move || ring.is_showing() || indicators.borrow().is_showing())
 }
 
 /// An armed agent ready to start its watcher fleets.
@@ -281,6 +317,10 @@ struct Running {
     inputs: InputServices,
     backlight_overlay: BacklightOverlayManager,
     ring_haptics: server::RingHapticPlayer,
+    /// Starts the Actions Ring overlay when a ring opens, or ahead of time
+    /// while a device in hand can open one.
+    overlay: overlay::Overlay,
+    indicators: watch::Sender<OverlayIndicators>,
     signals: ShutdownSignals,
     shutdown_requests: ShutdownRequests,
     hidpp_watchers: WatcherFleet,
@@ -315,9 +355,25 @@ impl Armed {
         running.restart_hidpp_watchers();
         let (mut watchers, inventory_refresh) = startup::spawn_state_watchers(&running.shared);
         let mut ring = running.inputs.ring.subscribe();
+        // Only the overlay's RPC observation consumes first delivery.
+        let mut backlight = running.backlight_overlay.subscribe();
+        let mut lock_keys = running.observable.lock_keys().subscribe();
+        backlight.mark_changed();
+        lock_keys.mark_changed();
+        // The orchestrator republishes the pre-warm answer only when it
+        // changes; the first answer may predate this loop.
+        let mut ring_prewarm = running.shared.ring_prewarm.clone();
+        running.overlay.prewarm(*ring_prewarm.borrow_and_update());
 
         info!("openlogi-agent started");
         loop {
+            let notices_since = {
+                let indicators = running.indicators.borrow();
+                indicators
+                    .notices
+                    .as_ref()
+                    .map_or(0, |state| state.generation)
+            };
             tokio::select! {
                 biased;
 
@@ -350,6 +406,32 @@ impl Armed {
                     running
                         .observable
                         .set_virtual_keyboard(running.virtual_keyboard.status());
+                }
+                Ok(()) = ring_prewarm.changed() => {
+                    running.overlay.prewarm(*ring_prewarm.borrow_and_update());
+                }
+                Ok(()) = backlight.changed() => {
+                    let observed = backlight.borrow_and_update().clone();
+                    let showing = observed.visible;
+                    running.indicators.send_modify(|state| state.backlight = Some(observed));
+                    if showing {
+                        running.overlay.show_requested();
+                    }
+                }
+                observed = running.observable.notices().observe(notices_since) => {
+                    let showing = !observed.notices.is_empty();
+                    running.indicators.send_modify(|state| state.notices = Some(observed));
+                    if showing {
+                        running.overlay.show_requested();
+                    }
+                }
+                Ok(()) = lock_keys.changed() => {
+                    let observed = lock_keys.borrow_and_update().clone();
+                    let showing = observed.shown.is_some();
+                    running.indicators.send_modify(|state| state.lock_keys = Some(observed));
+                    if showing {
+                        running.overlay.show_requested();
+                    }
                 }
                 else => break,
             }
@@ -591,6 +673,7 @@ impl Running {
             // overlay can only hover once it has observed the invocation.
             self.ring_haptics
                 .begin_session(invocation.session_id, haptic_route);
+            self.overlay.show_requested();
         }
     }
 

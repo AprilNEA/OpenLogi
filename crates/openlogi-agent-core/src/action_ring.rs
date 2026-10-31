@@ -21,21 +21,22 @@ use tokio::time::Instant;
 
 /// Slack between the window closing and the session expiring.
 ///
-/// The two clocks do not start together: a session is stamped in `begin`,
-/// while the overlay's timer starts only once the long poll has delivered the
-/// invocation and the window is up. Giving them equal durations expired the
-/// session *before* the ring the user could still click disappeared, and a
-/// click landing in that tail returned `SessionNotFound` — the window closed
-/// and the action silently did not run. This covers that gap plus the click's
-/// round-trip back.
+/// The two clocks do not start together: a session is stamped in `begin` and
+/// again when the long poll first delivers it ([`ActionRingManager::observe`]),
+/// while the overlay's timer starts only once the window is up. Giving them
+/// equal durations expired the session *before* the ring the user could still
+/// click disappeared, and a click landing in that tail returned
+/// `SessionNotFound` — the window closed and the action silently did not run.
+/// This covers the window coming up plus the click's round-trip back. The
+/// delivery stamp keeps a helper started by the press itself — process start,
+/// IPC connect, a restart backoff — out of that budget.
 const SESSION_GRACE: Duration = Duration::from_secs(3);
 
-/// How long a session lives after [`ActionRingManager::begin`] opens it.
+/// How long a session lives after opening or a new observer's delivery.
 ///
-/// No session outlives this: hover, activation, and cancel all find an older
-/// one expired. Work that must not outlast a session, but may never hear it
-/// close (the overlay can exit without cancelling), ends this long after the
-/// session opened.
+/// Hover and activation find an older session expired. Delivery can restart
+/// this allowance; work that must wait for expiration uses
+/// [`ActionRingManager::session_deadline`] rather than its own opening clock.
 pub const SESSION_LIFETIME: Duration = DISPLAY_LIFETIME.saturating_add(SESSION_GRACE);
 
 /// Immutable input used to open one ring session.
@@ -199,6 +200,24 @@ impl ActionRingManager {
         state.showing()
     }
 
+    /// When `session_id` is guaranteed expired, accounting for late delivery.
+    /// Closed, expired, or replaced sessions return `None`. Haptic restores
+    /// consult this before taking an owed enable, so a helper's cold start
+    /// cannot leave a live ring playing on an engine already handed back.
+    pub fn session_deadline(&self, session_id: u64) -> Option<std::time::Instant> {
+        let mut state = self.state();
+        self.expire_and_publish(&mut state);
+        state
+            .active
+            .as_ref()
+            .filter(|session| session.invocation.session_id == session_id)
+            .map(|session| {
+                // Expiration is strictly after SESSION_LIFETIME, including
+                // for a delivery racing the timer at the exact boundary.
+                (session.opened_at + SESSION_LIFETIME + Duration::from_nanos(1)).into_std()
+            })
+    }
+
     /// Subscribe to the latest ring state. Every close path republishes the state.
     /// Rapid updates may replace intermediate states before a subscriber reads them.
     pub fn subscribe(&self) -> watch::Receiver<RingObservation> {
@@ -206,14 +225,36 @@ impl ActionRingManager {
     }
 
     /// Serve one [`Agent::observe_action_ring`](openlogi_ipc::Agent::observe_action_ring).
+    ///
+    /// Delivering a session to an observer that had not seen it restarts the
+    /// session's lifetime, so the time a helper took to start and connect is
+    /// not taken from the ring it then draws.
     pub async fn observe(&self, since: Generation) -> RingObservation {
         let mut rx = self.published.subscribe();
         let changed = rx.wait_for(|observed| observed.generation != since);
-        match tokio::time::timeout(OBSERVE_HOLD, changed).await {
+        let observed = match tokio::time::timeout(OBSERVE_HOLD, changed).await {
             Ok(Ok(observed)) => observed.clone(),
             // Hold elapsed, or the manager is gone: answer with what we have.
             Ok(Err(_)) | Err(_) => self.published.borrow().clone(),
+        };
+        if observed.generation != since {
+            return self.delivered(since);
         }
+        observed
+    }
+
+    /// Choose and restamp the current answer under the session lock, after
+    /// expiration: a session the agent has given up on stays given up.
+    fn delivered(&self, since: Generation) -> RingObservation {
+        let mut state = self.state();
+        self.expire_and_publish(&mut state);
+        let observed = self.published.borrow().clone();
+        if observed.generation != since
+            && let Some(session) = state.active.as_mut()
+        {
+            session.opened_at = Instant::now();
+        }
+        observed
     }
 
     /// Republish what the overlay should be showing. Called after every change
@@ -519,5 +560,62 @@ mod tests {
         ));
         assert!(ring.has_changed().unwrap(), "expiration must notify");
         assert_eq!(ring.borrow_and_update().invocation, None);
+    }
+
+    /// A helper started by the press itself sees the ring only once it has
+    /// spawned and connected; that delay must not come out of the ring's life.
+    #[tokio::test(start_paused = true)]
+    async fn a_late_delivery_restarts_the_session_lifetime() {
+        let manager = ActionRingManager::default();
+        let invocation = manager.begin(spec());
+        tokio::time::advance(Duration::from_secs(5)).await;
+        assert_eq!(
+            manager.observe(0).await.invocation,
+            Some(invocation.clone())
+        );
+        tokio::time::advance(SESSION_LIFETIME.saturating_sub(Duration::from_secs(1))).await;
+
+        assert!(
+            manager
+                .hover(invocation.session_id, ActionRingSlot::Top)
+                .is_ok(),
+            "the session lives a full lifetime from its delivery"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_late_observer_never_receives_an_expired_session() {
+        let manager = ActionRingManager::default();
+        let invocation = manager.begin(spec());
+        let opened = manager.subscribe().borrow().generation;
+        tokio::time::advance(SESSION_LIFETIME + Duration::from_secs(1)).await;
+
+        let observed = manager.observe(0).await;
+
+        assert_eq!(observed.invocation, None);
+        assert!(observed.generation > opened, "expiration must be published");
+        assert_eq!(
+            manager.hover(invocation.session_id, ActionRingSlot::Top),
+            Err(ActionRingCommandError::SessionNotFound)
+        );
+    }
+
+    /// A long poll answering a generation the overlay has already seen
+    /// delivers nothing, so a connected overlay cannot keep a session alive.
+    #[tokio::test(start_paused = true)]
+    async fn repeated_long_polls_do_not_extend_a_session() {
+        let manager = ActionRingManager::default();
+        let invocation = manager.begin(spec());
+        let seen = manager.observe(0).await.generation;
+        assert!(
+            OBSERVE_HOLD > SESSION_LIFETIME,
+            "this test relies on one hold outlasting the session"
+        );
+        assert_eq!(manager.observe(seen).await.generation, seen);
+
+        assert_eq!(
+            manager.hover(invocation.session_id, ActionRingSlot::Top),
+            Err(ActionRingCommandError::SessionNotFound)
+        );
     }
 }

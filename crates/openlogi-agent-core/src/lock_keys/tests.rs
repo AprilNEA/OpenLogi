@@ -22,6 +22,19 @@ async fn settle() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_cold_overlay_still_receives_the_first_lock_key_change() {
+    let indicator = LockKeyIndicator::default();
+    indicator.show(CAPS_ON, Some("de".into()));
+    settle().await;
+    tokio::time::advance(Duration::from_secs(2)).await;
+    settle().await;
+
+    let shown = indicator.observe(0).await;
+    assert_eq!(shown.shown, Some(CAPS_ON));
+    assert_eq!(shown.language.as_deref(), Some("de"));
+}
+
+#[tokio::test(start_paused = true)]
 async fn the_first_observation_answers_at_once_with_nothing_shown() {
     let indicator = LockKeyIndicator::default();
     let asked = tokio::time::Instant::now();
@@ -53,7 +66,7 @@ async fn a_change_shows_until_its_time_is_up_and_ends_in_its_language() {
     tokio::time::advance(just_before).await;
     settle().await;
     assert_eq!(
-        indicator.published.borrow().generation,
+        indicator.subscribe().borrow().generation,
         shown.generation,
         "still showing just before its time is up"
     );
@@ -84,8 +97,8 @@ async fn a_newer_change_replaces_the_shown_one_and_gets_its_own_time() {
     // The first change's time is up here; it must not end the newer one.
     tokio::time::advance(Duration::from_millis(500)).await;
     settle().await;
-    assert_eq!(indicator.published.borrow().generation, latest.generation);
-    assert_eq!(indicator.published.borrow().shown, Some(CAPS_OFF));
+    assert_eq!(indicator.subscribe().borrow().generation, latest.generation);
+    assert_eq!(indicator.subscribe().borrow().shown, Some(CAPS_OFF));
 
     tokio::time::advance(Duration::from_secs(1)).await;
     let ended = indicator.observe(latest.generation).await;
@@ -131,7 +144,11 @@ async fn an_announced_change_shows_only_while_the_user_wants_the_indicator() {
         ..AppSettings::default()
     };
     assert!(!indicator.announce(CAPS_ON, &off));
-    assert_eq!(indicator.published.borrow().generation, 1, "nothing shown");
+    assert_eq!(
+        indicator.subscribe().borrow().generation,
+        1,
+        "nothing shown"
+    );
 
     let on = AppSettings {
         language: Some("fr".into()),
@@ -158,7 +175,7 @@ async fn a_key_is_announced_only_where_the_platform_indicates_it() {
         indicated
     );
     assert_eq!(
-        indicator.published.borrow().shown,
+        indicator.subscribe().borrow().shown,
         indicated.then_some(num_lock)
     );
 }
