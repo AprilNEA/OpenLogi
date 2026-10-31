@@ -28,11 +28,11 @@ pub(super) const REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 ///
 /// Cutting the re-read short costs only a deferred self-heal, because the cache
 /// already holds the data. The budget must end inside the direct probe's own
-/// budget, with room for the ping before it and the battery read after it. A
-/// probe cut off by the direct budget counts as a failure, and two failures
-/// retire the channel. Receiver slots run under tighter budgets of their own,
-/// which end first.
-pub(super) const REFRESH_WALK_BUDGET: Duration = Duration::from_secs(12);
+/// budget, with room for the ping before it and the battery and lock-key reads
+/// after it. A probe cut off by the direct budget counts as a failure, and two
+/// failures retire the channel. A receiver slot cut off here gets the same
+/// cached data as one cut off by its own slot budget.
+pub(super) const REFRESH_WALK_BUDGET: Duration = Duration::from_secs(8);
 
 /// Stable identity used to memoize a device's probe across `enumerate` ticks.
 /// Keyed on the device's *own* identity (never its slot) so a re-paired or

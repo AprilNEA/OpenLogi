@@ -862,7 +862,7 @@ mod tests {
     async fn a_refresh_whose_ping_goes_unanswered_is_unreachable() {
         let (raw, _) = ScriptedRawHidChannel::with_failing_writes(|_| None, |_| true);
         let channel = scripted_channel(raw).await;
-        let refreshed = refresh_features(&channel, 0xff, None, None, Duration::from_secs(12)).await;
+        let refreshed = refresh_features(&channel, 0xff, None, None, Duration::from_secs(8)).await;
         assert!(matches!(refreshed, Refreshed::Unreachable));
     }
 
