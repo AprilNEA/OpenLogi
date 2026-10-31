@@ -3,7 +3,8 @@
 //! screens.
 
 use gpui::{
-    Context, IntoElement, ParentElement, SharedString, Styled, div, prelude::FluentBuilder as _,
+    Context, InteractiveElement as _, IntoElement, ParentElement, SharedString, Styled,
+    WindowControlArea, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     IconName, Sizable as _,
@@ -15,8 +16,34 @@ use openlogi_core::hid::{DeviceRoute, ReceiverBrand};
 
 use super::AppView;
 use crate::state::{AppState, DeviceRecord};
+use crate::ui::caption;
 use crate::ui::components::control_button;
-use crate::ui::theme::{Palette, Typography as _};
+use crate::ui::theme::{HEADER_H, Palette, Typography as _};
+use crate::windows::CAPTION_IN_HEADER;
+
+/// The row every screen hangs its title and actions on. Where the window has
+/// no native caption this row is the drag region, and it keeps clear of the
+/// window controls pinned over its corner.
+pub(super) fn top_bar(pal: Palette) -> gpui::Div {
+    h_flex()
+        .h(px(HEADER_H))
+        .flex_shrink_0()
+        .w_full()
+        .px_5()
+        .gap_3()
+        .items_center()
+        .border_b_1()
+        .border_color(pal.border)
+        .when(CAPTION_IN_HEADER, |this| {
+            this.window_control_area(WindowControlArea::Drag)
+                .pr(caption::CONTROLS_W + px(12.))
+        })
+}
+
+/// Keeps a control clickable inside the drag region of a [`top_bar`].
+pub(super) fn bar_action() -> gpui::Div {
+    div().flex_shrink_0().occlude()
+}
 
 /// "← Devices" affordance on the detail screen; returns to the gallery without
 /// changing the active-device selection.
@@ -33,7 +60,7 @@ pub(super) fn back_button(cx: &mut Context<AppView>) -> impl IntoElement {
 /// Settings button in the Home header: opens the Settings window. The visible
 /// label keeps the action discoverable without requiring hover.
 pub(super) fn settings_button() -> impl IntoElement {
-    Button::new("home-settings")
+    control_button("home-settings")
         .outline()
         .icon(IconName::Settings)
         .label(tr!("app.settings"))
@@ -44,7 +71,7 @@ pub(super) fn settings_button() -> impl IntoElement {
 /// Primary action that opens the pairing window. The empty state carries its
 /// own equivalent CTA, so this never floats alone in an empty header.
 pub(super) fn add_device_button() -> impl IntoElement {
-    Button::new("header-add-device")
+    control_button("header-add-device")
         .primary()
         .icon(IconName::Plus)
         .label(tr!("pairing.add_device"))
@@ -72,13 +99,8 @@ pub(super) fn status_badge(online: bool, pal: Palette) -> impl IntoElement {
         tr!("device.offline")
     };
     h_flex()
-        .gap_1()
+        .gap_1p5()
         .items_center()
-        .rounded_full()
-        .border_1()
-        .border_color(pal.border)
-        .px_2()
-        .py_1()
         .text_caption()
         .text_color(pal.text_muted)
         .child(connectivity_dot(online, pal))

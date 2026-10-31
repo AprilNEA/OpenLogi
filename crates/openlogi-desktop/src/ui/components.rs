@@ -7,7 +7,7 @@
 use gpui::{
     AnyElement, App, ClickEvent, ElementId, Entity, InteractiveElement, Interactivity, IntoElement,
     ParentElement, Pixels, RenderOnce, Role, SharedString, Stateful, StatefulInteractiveElement,
-    Styled, Window, div, prelude::FluentBuilder as _, px, rgb,
+    Styled, Window, div, prelude::FluentBuilder as _, px, rems, rgb,
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
@@ -406,7 +406,48 @@ impl RenderOnce for MenuRow {
     }
 }
 
-/// A selectable camera-profile chip.
+/// The inset track behind a row of [`segment`]s.
+pub(crate) fn segment_track(pal: theme::Palette) -> gpui::Div {
+    h_flex()
+        .flex_shrink_0()
+        .gap_0p5()
+        .p_0p5()
+        .rounded(pal.control_radius)
+        .bg(pal.muted)
+}
+
+/// One choice inside a [`segment_track`]. Selection is a neutral lift, so the
+/// accent stays reserved for what is switched on.
+pub(crate) fn segment(id: impl Into<ElementId>, selected: bool, pal: theme::Palette) -> BaseButton {
+    segment_style(BaseButton::new(id), selected, pal)
+}
+
+fn segment_style(base: BaseButton, selected: bool, pal: theme::Palette) -> BaseButton {
+    let fill = move |hovered: bool| match (selected, hovered) {
+        (true, _) => pal.control_hover,
+        (false, true) => pal.control,
+        (false, false) => gpui::transparent_black(),
+    };
+    base.selected(selected)
+        .flex()
+        .items_center()
+        .justify_center()
+        .gap_1()
+        .h(rems(1.5))
+        .px_2()
+        .rounded(pal.control_radius * 0.75)
+        .text_caption()
+        .text_color(if selected {
+            pal.text_primary
+        } else {
+            pal.text_muted
+        })
+        .bg(fill(false))
+        .hover(move |style| style.bg(fill(true)).text_color(pal.text_primary))
+        .focus_visible(move |style| style.bg(fill(true)).text_color(pal.text_primary))
+}
+
+/// A selectable camera-profile segment.
 #[derive(IntoElement)]
 pub(crate) struct ProfileTab {
     base: BaseButton,
@@ -487,53 +528,17 @@ impl StatefulInteractiveElement for ProfileTab {}
 impl RenderOnce for ProfileTab {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let pal = theme::palette(cx);
-        let accent = rgb(ACCENT_BLUE);
         let has_delete = self.delete.is_some();
         let label = self.label;
-        self.base
-            .selected(self.selected)
+        // The same tab as the device profile bar, on the shared segment states.
+        segment_style(self.base, self.selected, pal)
+            .h(px(theme::CONTROL_H))
+            .px_2p5()
+            .text_body()
+            .text_color(pal.text_primary)
             .aria_selected(self.selected)
             .accessibility_label(label.clone())
-            .when(!has_delete, gpui::Styled::px_2)
-            .when(has_delete, |tab| tab.pl_2().pr_1())
-            .flex()
-            .py_0p5()
-            .gap_1()
-            .items_center()
-            .rounded_full()
-            .border_1()
-            .border_color(if self.selected {
-                accent.into()
-            } else {
-                pal.border
-            })
-            .text_caption()
-            .text_color(if self.selected {
-                pal.text_primary
-            } else {
-                pal.text_muted
-            })
-            .bg(if self.selected {
-                theme::accent_tint()
-            } else {
-                pal.control
-            })
-            .hover(move |style| {
-                style.bg(if self.selected {
-                    theme::accent_tint_hover()
-                } else {
-                    pal.control_hover
-                })
-            })
-            .focus_visible(move |style| {
-                style
-                    .bg(if self.selected {
-                        theme::accent_tint_hover()
-                    } else {
-                        pal.control_hover
-                    })
-                    .border_color(accent)
-            })
+            .when(has_delete, gpui::Styled::pr_1)
             .when_some(self.icon, |tab, icon| tab.child(icon.size_3()))
             .child(label.clone())
             .children(self.children)

@@ -13,7 +13,7 @@ use tracing::warn;
 
 use crate::app::AppView;
 use crate::ui::theme;
-use crate::windows::{WindowFit, WindowRegistry, titlebar_options};
+use crate::windows::{WindowFit, WindowRegistry, main_titlebar_options};
 
 /// The client size a fresh main window opens at when the work area holds it.
 pub(super) const PREFERRED_SIZE: Size<Pixels> = Size {
@@ -43,8 +43,9 @@ fn window_options(cx: &mut App) -> WindowOptions {
         app_id: Some(APP_ID.into()),
         // Linux: transparent chrome so `AppView::render` can draw a client-side
         // `TitleBar` (the compositor declines server-side decorations and gpui's
-        // fallback is unpainted). macOS/Windows keep their native titlebar.
-        titlebar: Some(titlebar_options("OpenLogi")),
+        // fallback is unpainted). Windows: transparent so the top bar carries
+        // the window controls. macOS keeps its native titlebar.
+        titlebar: Some(main_titlebar_options("OpenLogi")),
         ..WindowOptions::from(fit)
     }
 }

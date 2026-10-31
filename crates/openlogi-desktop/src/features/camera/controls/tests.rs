@@ -327,3 +327,32 @@ fn a_canceled_load_does_not_write_its_saved_settings() {
     assert!(loaded.state.is_none());
     assert_eq!(uvc.calls(), vec![format!("read {UID}")]);
 }
+
+#[test]
+fn every_control_reads_in_the_group_it_affects() {
+    use super::ControlGroup;
+
+    for control in [
+        CameraControl::Zoom,
+        CameraControl::Pan,
+        CameraControl::Tilt,
+        CameraControl::Focus,
+    ] {
+        assert!(
+            ControlGroup::of(control) == ControlGroup::Lens,
+            "{control:?}"
+        );
+    }
+    for control in [
+        CameraControl::Exposure,
+        CameraControl::PowerLineFrequency,
+        CameraControl::LowLightCompensation,
+        CameraControl::Gain,
+        CameraControl::BacklightCompensation,
+    ] {
+        assert!(
+            ControlGroup::of(control) == ControlGroup::Exposure,
+            "{control:?}"
+        );
+    }
+}

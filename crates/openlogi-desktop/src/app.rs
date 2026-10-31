@@ -16,7 +16,7 @@ use tracing::info;
 
 use self::menu::{APP_KEY_CONTEXT, CloseWindow, Minimize, NavigateBack, Zoom};
 use crate::features::action_ring::ActionRingPanel;
-use crate::features::camera::controls::CameraControlsPanel;
+use crate::features::camera::controls::{CameraControlsPanel, CameraPanelPart};
 use crate::features::camera::preview::CameraPreview;
 use crate::features::keyboard::disable_keys::DisableKeysPanel;
 use crate::features::keyboard::function_row::FunctionRowView;
@@ -28,6 +28,7 @@ use crate::features::pointer::smartshift::SmartShiftPanel;
 use crate::features::profiles::{AppCatalogPicker, ProfileIconCache};
 use crate::services::assets::user_cache_root;
 use crate::state::{AgentLink, AppState, DeviceRecord, StateEvent, StateEvents};
+use crate::ui::caption;
 use crate::ui::theme::{self, ContentWidth, Typography as _};
 
 pub(crate) mod deeplink;
@@ -219,6 +220,8 @@ pub struct AppView {
     lighting_panel: Entity<LightingPanel>,
     camera_preview: Entity<CameraPreview>,
     camera_controls: Entity<CameraControlsPanel>,
+    camera_presets: Entity<CameraPanelPart>,
+    camera_lens: Entity<CameraPanelPart>,
     light_panel: Entity<LightPanel>,
     profile_icons: ProfileIconCache,
     app_catalog: Entity<AppCatalogPicker>,
@@ -302,6 +305,8 @@ impl AppView {
         let lighting_panel = cx.new(LightingPanel::new);
         let camera_preview = cx.new(CameraPreview::new);
         let camera_controls = cx.new(CameraControlsPanel::new);
+        let camera_presets = cx.new(|cx| CameraPanelPart::presets(camera_controls.clone(), cx));
+        let camera_lens = cx.new(|cx| CameraPanelPart::lens(camera_controls.clone(), cx));
         let light_panel = cx.new(LightPanel::new);
         let profile_icons = ProfileIconCache::default();
         let app_catalog = cx.new(|cx| AppCatalogPicker::new(profile_icons.clone(), window, cx));
@@ -324,6 +329,8 @@ impl AppView {
             lighting_panel,
             camera_preview,
             camera_controls,
+            camera_presets,
+            camera_lens,
             light_panel,
             profile_icons,
             app_catalog,
@@ -572,6 +579,10 @@ impl Render for AppView {
             .children(Root::render_sheet_layer(window, cx))
             .children(Root::render_dialog_layer(window, cx))
             .children(Root::render_notification_layer(window, cx))
+            // Last, so a dialog's backdrop never takes the window controls away.
+            .when(crate::windows::CAPTION_IN_HEADER, |this| {
+                this.child(caption::window_controls(window, theme::palette(cx)))
+            })
     }
 }
 
@@ -606,6 +617,13 @@ impl AppView {
                 this.child(app_title_bar(cx))
             });
         let root = Self::with_back_navigation(root, cx);
+        // Frames without a top bar still need a way to move the window, and a
+        // row for the window controls to sit on.
+        let bare = |root: gpui::Div, pal: theme::Palette| {
+            root.when(crate::windows::CAPTION_IN_HEADER, |this| {
+                this.child(caption::caption_row(pal))
+            })
+        };
 
         let config_issue = AppState::try_global(cx)
             .map(|state| state.read(cx))
@@ -614,7 +632,7 @@ impl AppView {
         self.config_issue_visible = config_issue.is_some();
         if let Some(issue) = config_issue {
             window.set_window_title("OpenLogi");
-            return root
+            return bare(root, pal)
                 .child(status::config_issue_body(issue, cx))
                 .into_any_element();
         }
@@ -632,15 +650,21 @@ impl AppView {
         let status = match link {
             AgentLink::Connecting => {
                 window.set_window_title("OpenLogi");
-                return root.child(status::connecting_body(cx)).into_any_element();
+                return bare(root, pal)
+                    .child(status::connecting_body(cx))
+                    .into_any_element();
             }
             AgentLink::Unreachable => {
                 window.set_window_title("OpenLogi");
-                return root.child(status::unreachable_body(cx)).into_any_element();
+                return bare(root, pal)
+                    .child(status::unreachable_body(cx))
+                    .into_any_element();
             }
             AgentLink::OutdatedGui => {
                 window.set_window_title("OpenLogi");
-                return root.child(status::outdated_gui_body(cx)).into_any_element();
+                return bare(root, pal)
+                    .child(status::outdated_gui_body(cx))
+                    .into_any_element();
             }
             AgentLink::Ready(status) => status,
         };
@@ -648,7 +672,9 @@ impl AppView {
         let granted = status.accessibility_granted;
         if !granted && !self.accessibility_dismissed {
             window.set_window_title("OpenLogi");
-            return root.child(Self::accessibility_gate(cx)).into_any_element();
+            return bare(root, pal)
+                .child(Self::accessibility_gate(cx))
+                .into_any_element();
         }
 
         let has_device = AppState::try_global(cx)
@@ -715,6 +741,8 @@ impl AppView {
                         lighting_panel: &self.lighting_panel,
                         camera_preview: &self.camera_preview,
                         camera_controls: &self.camera_controls,
+                        camera_presets: &self.camera_presets,
+                        camera_lens: &self.camera_lens,
                         light_panel: &self.light_panel,
                     },
                     &self.profile_icons,

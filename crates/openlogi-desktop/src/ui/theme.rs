@@ -37,7 +37,7 @@ pub const STATUS_OFFLINE: u32 = 0x006b_7280;
 pub const STATUS_DISABLED: u32 = 0x00ef_4444;
 
 /// Sizes that several components need to agree on.
-pub const HEADER_H: f32 = 64.;
+pub const HEADER_H: f32 = 48.;
 pub const FOOTER_H: f32 = 40.;
 pub const DETAIL_RAIL_W: f32 = 168.;
 /// Height of standalone form controls: buttons, text inputs, tabs.
@@ -439,7 +439,7 @@ pub trait Typography: Styled + Sized {
     /// inside a card rather than titling a screen.
     #[must_use]
     fn text_subheading(self) -> Self {
-        self.text_size(rems(0.9375))
+        self.text_size(rems(0.875))
             .font_weight(FontWeight::SEMIBOLD)
             .line_height(relative(1.4))
     }
@@ -447,7 +447,7 @@ pub trait Typography: Styled + Sized {
     /// Default body copy — control labels, descriptions, values.
     #[must_use]
     fn text_body(self) -> Self {
-        self.text_size(rems(0.9375)).line_height(relative(1.45))
+        self.text_size(rems(0.875)).line_height(relative(1.45))
     }
 
     /// De-emphasised metadata and helper text — the muted line under a label,
