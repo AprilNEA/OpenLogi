@@ -40,7 +40,8 @@ pub async fn run(args: MouseButtonsArgs) -> Result<()> {
         Ok(watch) => watch,
         Err(ButtonSpyError::HostMode) => bail!(
             "the mouse is in host mode, so G HUB or another program owns its button spy; \
-             quit it, then run this again"
+             quit it, then run this again. If the mouse stays in host mode, \
+             switch it off and on"
         ),
         Err(error) => return Err(error).context("start the HID++ 0x8110 button spy"),
     };
