@@ -14,7 +14,7 @@
 //!
 //! Where each platform gets both numbers is its own: macOS reads the registry
 //! and the BOS descriptor itself, Windows asks the hub driver, which has read
-//! them. Each records what a scan found with [`remember_links`], and
+//! them. Each records what a scan found with `remember_links`, and
 //! [`usb_link()`] reads it back.
 
 use std::collections::HashMap;
