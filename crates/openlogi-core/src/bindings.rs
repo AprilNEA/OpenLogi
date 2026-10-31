@@ -7,13 +7,15 @@
 use std::collections::BTreeMap;
 
 use crate::binding::{
-    Action, Binding, ButtonId, GestureDirection, default_binding, default_binding_for,
+    Action, Binding, ButtonId, GamingLayout, GestureDirection, default_binding_for,
+    default_binding_on,
 };
 use crate::config::Config;
 
 /// Effective per-button single-action map for the device `config_key`, with
 /// `app_bundle`'s per-app overlay applied. Unset buttons fall back to
-/// [`default_binding`].
+/// [`default_binding_on`] with the device's `layout`, which is `None` for a
+/// device without a dumped G-series layout.
 ///
 /// This projection is for one-shot consumers such as thumb-wheel rotation and
 /// the GUI. Lifecycle-aware button paths use [`button_bindings_for`] so a long
@@ -25,8 +27,9 @@ pub fn bindings_for(
     config: &Config,
     config_key: Option<&str>,
     app_bundle: Option<&str>,
+    layout: Option<&GamingLayout>,
 ) -> BTreeMap<ButtonId, Action> {
-    button_bindings_for(config, config_key, app_bundle)
+    button_bindings_for(config, config_key, app_bundle, layout)
         .into_iter()
         .map(|(button, binding)| (button, binding.click_action()))
         .collect()
@@ -36,12 +39,15 @@ pub fn bindings_for(
 ///
 /// Unlike [`bindings_for`], this preserves threshold-based long presses. A
 /// sparse gesture map receives only its missing `Click` default so it keeps its
-/// gesture identity while retaining the same plain-click fallback.
+/// gesture identity while retaining the same plain-click fallback. Unset
+/// buttons fall back to [`default_binding_on`] with `layout`, as in
+/// [`bindings_for`].
 #[must_use]
 pub fn button_bindings_for(
     config: &Config,
     config_key: Option<&str>,
     app_bundle: Option<&str>,
+    layout: Option<&GamingLayout>,
 ) -> BTreeMap<ButtonId, Binding> {
     let stored = config_key
         .map(|key| config.effective_bindings(key, app_bundle))
@@ -50,12 +56,12 @@ pub fn button_bindings_for(
         .iter()
         .chain(&ButtonId::G_BUTTONS)
         .copied()
-        .map(|button| (button, Binding::Single(default_binding(button))))
+        .map(|button| (button, Binding::Single(default_binding_on(layout, button))))
         .collect();
     for (button, mut binding) in stored {
         if let Binding::Gesture(map) = &mut binding {
             map.entry(GestureDirection::Click)
-                .or_insert_with(|| default_binding(button));
+                .or_insert_with(|| default_binding_on(layout, button));
         }
         bindings.insert(button, binding);
     }
@@ -148,6 +154,24 @@ mod tests {
     use crate::binding::{LongPressBinding, default_gesture_binding};
 
     use super::*;
+    use crate::binding::default_binding;
+
+    #[test]
+    fn an_unset_g_button_projects_its_layouts_stock_function() {
+        use crate::binding::G502_LIGHTSPEED;
+        let mut cfg = Config::default();
+        cfg.set_binding("0407f", ButtonId::G7, Binding::Single(Action::None));
+        let g502 = bindings_for(&cfg, Some("0407f"), None, Some(&G502_LIGHTSPEED));
+        assert_eq!(g502.get(&ButtonId::G6), Some(&Action::DpiShift));
+        assert_eq!(
+            g502.get(&ButtonId::G7),
+            Some(&Action::None),
+            "a stored binding wins over the stock function"
+        );
+        assert_eq!(g502.get(&ButtonId::G8), Some(&Action::NextDpiPreset));
+        let unknown = bindings_for(&cfg, Some("0407f"), None, None);
+        assert_eq!(unknown.get(&ButtonId::G6), Some(&Action::None));
+    }
 
     #[test]
     fn click_less_gesture_keeps_default_click_in_projection() {
@@ -159,7 +183,7 @@ mod tests {
         map.insert(GestureDirection::Up, Action::Copy);
         cfg.set_binding("2b042", ButtonId::GestureButton, Binding::Gesture(map));
 
-        let projected = bindings_for(&cfg, Some("2b042"), None);
+        let projected = bindings_for(&cfg, Some("2b042"), None, None);
         assert_eq!(
             projected.get(&ButtonId::GestureButton),
             Some(&default_binding(ButtonId::GestureButton)),
@@ -173,9 +197,9 @@ mod tests {
         let binding = Binding::LongPress(LongPressBinding::new(Action::Copy, Action::Paste));
         cfg.set_binding("2b042", ButtonId::Back, binding.clone());
 
-        let lifecycle = button_bindings_for(&cfg, Some("2b042"), None);
+        let lifecycle = button_bindings_for(&cfg, Some("2b042"), None, None);
         assert_eq!(lifecycle.get(&ButtonId::Back), Some(&binding));
-        let actions = bindings_for(&cfg, Some("2b042"), None);
+        let actions = bindings_for(&cfg, Some("2b042"), None, None);
         assert_eq!(actions.get(&ButtonId::Back), Some(&Action::Copy));
     }
 
@@ -192,7 +216,7 @@ mod tests {
             Action::VolumeUp.into(),
         );
 
-        let projected = bindings_for(&cfg, Some("2b034"), None);
+        let projected = bindings_for(&cfg, Some("2b034"), None, None);
         assert_eq!(projected.get(&ButtonId::Thumbwheel), Some(&Action::None));
     }
 
@@ -201,7 +225,7 @@ mod tests {
         let mut cfg = Config::default();
         cfg.set_binding("2b034", ButtonId::Thumbwheel, Action::AppExpose.into());
 
-        let projected = bindings_for(&cfg, Some("2b034"), None);
+        let projected = bindings_for(&cfg, Some("2b034"), None, None);
         assert_eq!(
             projected.get(&ButtonId::Thumbwheel),
             Some(&Action::AppExpose)
@@ -216,7 +240,7 @@ mod tests {
         map.insert(GestureDirection::Click, Action::Paste);
         cfg.set_binding("2b042", ButtonId::GestureButton, Binding::Gesture(map));
 
-        let projected = bindings_for(&cfg, Some("2b042"), None);
+        let projected = bindings_for(&cfg, Some("2b042"), None, None);
         assert_eq!(
             projected.get(&ButtonId::GestureButton),
             Some(&Action::Paste)
@@ -375,7 +399,8 @@ mod tests {
                     expected
                 );
                 assert_eq!(
-                    bindings_for(&cfg, Some("2b042"), Some("com.example.Editor")).get(&button),
+                    bindings_for(&cfg, Some("2b042"), Some("com.example.Editor"), None)
+                        .get(&button),
                     Some(&action)
                 );
                 assert_eq!(hidpp_gesture_maps_for(&cfg, Some("2b042"), None), global);
