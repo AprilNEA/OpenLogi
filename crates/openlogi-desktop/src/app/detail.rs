@@ -432,7 +432,13 @@ fn clicks_card(pal: Palette, cx: &mut Context<AppView>) -> Option<impl IntoEleme
     if !AppState::click_debounce_available() {
         return None;
     }
-    let current = AppState::try_read(cx).and_then(AppState::current_click_debounce);
+    // A device without a persistent key cannot store a window yet, so the
+    // switch would not stay on.
+    let state = AppState::try_read(cx)?;
+    if !state.current_device_is_persistent() {
+        return None;
+    }
+    let current = state.current_click_debounce();
     let filter_row = toggle_row(
         "click-debounce-row",
         pal,
