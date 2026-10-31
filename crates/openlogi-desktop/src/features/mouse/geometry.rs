@@ -297,41 +297,39 @@ pub fn labels_from_hotspots(
             .enumerate()
             .filter_map(|(index, label)| (label.side == side).then_some(index))
             .collect();
-        let grouped = vertical_order(hotspots, &labels, &on_side, true);
+        let by_height = height_order(hotspots, &on_side);
+        let grouped = with_navigation_pair(by_height.clone(), &labels);
         place_side(&mut labels, hotspots, &grouped, mouse_h, room_h);
         if side_leaders_cross(hotspots, &labels, &grouped, mouse_w) {
-            let plain = vertical_order(hotspots, &labels, &on_side, false);
-            place_side(&mut labels, hotspots, &plain, mouse_h, room_h);
+            place_side(&mut labels, hotspots, &by_height, mouse_h, room_h);
         }
     }
 
     labels
 }
 
-/// One side's labels top to bottom: by hotspot height, with Back and Forward
-/// pulled together when `keep_navigation_pair` is set.
-fn vertical_order(
-    hotspots: &[Hotspot],
-    labels: &[Label],
-    on_side: &[usize],
-    keep_navigation_pair: bool,
-) -> Vec<usize> {
+/// One side's labels top to bottom by hotspot height.
+fn height_order(hotspots: &[Hotspot], on_side: &[usize]) -> Vec<usize> {
     let mut order = on_side.to_vec();
     order.sort_by(|&a, &b| hotspots[a].center().1.total_cmp(&hotspots[b].center().1));
-    if keep_navigation_pair {
-        let back = order
-            .iter()
-            .position(|&index| labels[index].id == ButtonId::Back.into());
-        let forward = order
-            .iter()
-            .position(|&index| labels[index].id == ButtonId::Forward.into());
-        if let (Some(back), Some(forward)) = (back, forward) {
-            let first = back.min(forward);
-            let second = back.max(forward);
-            if second > first + 1 {
-                let navigation_button = order.remove(second);
-                order.insert(first + 1, navigation_button);
-            }
+    order
+}
+
+/// `order` with Back and Forward pulled together: the lower of the two moves
+/// up to sit right after the higher when other cards sit between them.
+fn with_navigation_pair(mut order: Vec<usize>, labels: &[Label]) -> Vec<usize> {
+    let back = order
+        .iter()
+        .position(|&index| labels[index].id == ButtonId::Back.into());
+    let forward = order
+        .iter()
+        .position(|&index| labels[index].id == ButtonId::Forward.into());
+    if let (Some(back), Some(forward)) = (back, forward) {
+        let first = back.min(forward);
+        let second = back.max(forward);
+        if second > first + 1 {
+            let navigation_button = order.remove(second);
+            order.insert(first + 1, navigation_button);
         }
     }
     order
