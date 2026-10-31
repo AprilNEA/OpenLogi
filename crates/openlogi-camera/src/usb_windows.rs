@@ -5,8 +5,10 @@
 //! for SuperSpeed (it reads the BOS descriptor when the device enumerates).
 //! Both come from one question to the hub the camera hangs off —
 //! `IOCTL_USB_GET_NODE_CONNECTION_INFORMATION_EX` for the speed and its `_V2`
-//! for the capability, the calls the SDK's USBView sample makes. Nothing is
-//! sent to the camera.
+//! for the capability, the calls the SDK's USBView sample makes. The first
+//! answer's speed stops at high speed, so the `_V2` flags also say whether the
+//! device runs at SuperSpeed, as they do in USBView. Nothing is sent to the
+//! camera.
 //!
 //! Finding that hub and port from a camera's DirectShow device path takes the
 //! Configuration Manager: the path names an interface, whose device node is
@@ -27,6 +29,7 @@ const SPEED_HIGH: u8 = 2;
 const SPEED_SUPER: u8 = 3;
 
 /// `USB_NODE_CONNECTION_INFORMATION_EX_V2_FLAGS` bits that matter here.
+const OPERATING_AT_SUPERSPEED: u32 = 1 << 0;
 const CAPABLE_OF_SUPERSPEED: u32 = 1 << 1;
 const OPERATING_AT_SUPERSPEED_PLUS: u32 = 1 << 2;
 const CAPABLE_OF_SUPERSPEED_PLUS: u32 = 1 << 3;
@@ -35,13 +38,17 @@ const CAPABLE_OF_SUPERSPEED_PLUS: u32 = 1 << 3;
 /// the hub could be asked, the V2 `flags`. `None` for a speed that is not one
 /// a hub reports.
 ///
-/// Without the flags the camera is reported as running at its speed and
-/// declaring nothing, which is what the macOS side does for a camera that
-/// could not be asked.
+/// The `speed` of the first answer is `SPEED_HIGH` for a device running at
+/// SuperSpeed too: only the flags tell the two apart, so they are read first.
+/// Without them the camera is reported as running at its speed and declaring
+/// nothing, which is what the macOS side does for a camera that could not be
+/// asked.
 fn link_from(speed: u8, flags: Option<u32>) -> Option<UsbLink> {
     let flags = flags.unwrap_or(0);
     let speed = if flags & OPERATING_AT_SUPERSPEED_PLUS != 0 {
         UsbSpeed::SuperPlus
+    } else if flags & OPERATING_AT_SUPERSPEED != 0 {
+        UsbSpeed::Super
     } else {
         match speed {
             SPEED_LOW => UsbSpeed::Low,
@@ -416,21 +423,32 @@ mod tests {
 
     #[test]
     fn a_camera_running_at_what_it_declares_is_not_limited() {
-        // Running at SuperSpeed sets both of the first two bits.
-        let link = link_from(SPEED_SUPER, Some(0b11)).unwrap();
+        // Running at SuperSpeed sets both of the first two bits, and the hub
+        // still reports its speed as high: that answer stops there.
+        let link = link_from(SPEED_HIGH, Some(0b11)).unwrap();
         assert_eq!(link.speed, UsbSpeed::Super);
         assert_eq!(link.capable, Some(UsbSpeed::Super));
         assert_eq!(link.faster_available(), None);
     }
 
     #[test]
+    fn the_flags_say_superspeed_even_when_the_hub_speed_does_not() {
+        let link = link_from(SPEED_HIGH, Some(OPERATING_AT_SUPERSPEED)).unwrap();
+        assert_eq!(link.speed, UsbSpeed::Super);
+
+        // The hub's own speed still counts when the flags are silent.
+        let link = link_from(SPEED_SUPER, Some(0)).unwrap();
+        assert_eq!(link.speed, UsbSpeed::Super);
+    }
+
+    #[test]
     fn superspeed_plus_outranks_superspeed() {
-        let running = link_from(SPEED_SUPER, Some(0b1111)).unwrap();
+        let running = link_from(SPEED_HIGH, Some(0b1111)).unwrap();
         assert_eq!(running.speed, UsbSpeed::SuperPlus);
         assert_eq!(running.capable, Some(UsbSpeed::SuperPlus));
 
         // Capable of 10 Gbps on a 5 Gbps link.
-        let slower = link_from(SPEED_SUPER, Some(0b1011)).unwrap();
+        let slower = link_from(SPEED_HIGH, Some(0b1011)).unwrap();
         assert_eq!(slower.speed, UsbSpeed::Super);
         assert_eq!(slower.faster_available(), Some(UsbSpeed::SuperPlus));
     }
