@@ -107,6 +107,7 @@ fn direct_inventory(serial_number: Option<&str>, unit_id: [u8; 4]) -> DeviceInve
             }),
             capabilities: Some(Capabilities::presumed_from_kind(DeviceKind::Mouse)),
             settings_revision: 0,
+            hidpp10: false,
         }],
     }
 }

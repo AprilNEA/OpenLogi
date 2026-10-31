@@ -45,6 +45,7 @@ fn numpad_state(
             }),
             capabilities: Some(Capabilities::presumed_from_kind(DeviceKind::Numpad)),
             settings_revision: 0,
+            hidpp10: false,
         }],
     };
     let resolver = AssetResolver::new();

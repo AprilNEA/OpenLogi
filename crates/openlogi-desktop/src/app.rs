@@ -10,7 +10,7 @@ use gpui_component::{
     v_flex,
 };
 use openlogi_core::binding::GamingButtons;
-use openlogi_core::device::{Capabilities, DeviceKind};
+use openlogi_core::device::DeviceKind;
 use openlogi_ipc::InventoryHealth;
 use tracing::info;
 
@@ -104,15 +104,17 @@ impl DetailTab {
     /// device can do that thing, so a misclassified device can't lose its
     /// panels (issue #127). Devices we never probed (offline at startup) have no
     /// measured capabilities; we presume a set from their kind so a sleeping
-    /// mouse still shows its (host-side) button bindings.
+    /// mouse still shows its (host-side) button bindings. A HID++ 1.0 device
+    /// has no table at all; it is presumed only the host-side set, so it gets
+    /// no Pointer tab whose DPI control would have no effect (#2161).
     ///
     /// The Buttons panel renders a mouse-model silhouette with hotspots. It is
     /// only useful for pointer-type devices; keyboards get the Keys panel
     /// instead, even when they expose ReprogControls over HID++.
+    ///
+    /// [`Capabilities`]: openlogi_core::device::Capabilities
     fn tabs_for(record: &DeviceRecord) -> Vec<Self> {
-        let caps = record
-            .capabilities
-            .unwrap_or_else(|| Capabilities::presumed_from_kind(record.kind));
+        let caps = record.capabilities_or_presumed();
         // Buttons panel is a mouse-model silhouette — only for pointer devices.
         // Keyboards get the Keys panel instead, even when they expose ReprogControls.
         // `caps.pointer` (a measured HID++ DPI feature) settles it on its own
