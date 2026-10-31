@@ -82,10 +82,6 @@ inputs in `packaging/linux/`. `nix fmt` formats all Nix expressions through the
 Flake's pinned formatter. It takes no Flake argument, so run it from
 `packaging/`.
 
-The root `flake.nix` is a deprecated alias for existing
-`github:AprilNEA/OpenLogi` inputs. It has no committed lock file, prints a
-warning on every evaluation, and will be removed in a later release.
-
 ### Dev app bundle (macOS)
 
 On macOS the desktop binary is launched from inside a throwaway

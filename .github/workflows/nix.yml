@@ -6,9 +6,8 @@ name: Nix CI
 # (for example a new native dependency that package.nix does not wrap) without
 # a full Nix rebuild on every crate Cargo.toml bump.
 #
-# The Flake lives in packaging/. The root flake.nix is a deprecated alias for
-# existing `github:AprilNEA/OpenLogi` inputs; nix fmt only uses the Flake of
-# the working directory, so formatting runs from packaging/.
+# The Flake lives in packaging/. nix fmt only uses the Flake of the working
+# directory, so formatting runs from packaging/.
 #
 # packaging/flake.lock pins nixpkgs exactly; update-flake-lock.yml advances it in
 # a tested PR instead of allowing an unreviewed upstream channel to drift under
@@ -20,7 +19,6 @@ on:
   workflow_dispatch:
   pull_request:
     paths:
-      - "flake.nix"
       - "packaging/flake.nix"
       - "packaging/flake.lock"
       - "packaging/linux/package.nix"
@@ -57,12 +55,9 @@ jobs:
           flake.nix
           linux/package.nix
           linux/nixos-module.nix
-          ../flake.nix
           ../devenv.nix
       - name: Evaluate all Flake outputs
         run: nix flake check ./packaging --all-systems --no-build --show-trace
-      - name: Evaluate the deprecated root alias
-        run: nix flake check --all-systems --no-build --no-write-lock-file --show-trace
 
   build:
     name: nix build (${{ matrix.system }})
