@@ -35,9 +35,11 @@ pub use application_target::{ApplicationTarget, ApplicationTargetError};
 pub use button::{ButtonId, GridKey, GridSlot, KeypadPage, ParseButtonIdError};
 pub use category::Category;
 pub use control::{Cid, KNOWN_CONTROLS, KnownControl, UNKNOWN_CONTROL_TRANSLATION_KEY};
-pub use defaults::{default_binding, default_binding_for, default_gesture_binding};
+pub use defaults::{
+    default_binding, default_binding_for, default_binding_on, default_gesture_binding,
+};
 pub use effect::{Effect, MediaKey, MouseButton, NativeAction, Script, Shortcut};
-pub use gaming::{G502_LIGHTSPEED, GamingButtons, GamingLayout, STANDARD_BUTTONS};
+pub use gaming::{G502_LIGHTSPEED, GamingButtons, GamingLayout, STANDARD_BUTTONS, Slot};
 pub use gesture::GestureDirection;
 pub use key_combo::{KeyCombo, KeyComboParseError, KeyboardUsage, KeyboardUsageError};
 pub use swipe::{

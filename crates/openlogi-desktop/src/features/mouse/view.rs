@@ -541,6 +541,7 @@ impl Render for MouseModelView {
                 selected: self.selected,
                 gesture_direction: self.gesture_active_dir,
                 bindings,
+                layout,
                 gesture_maps,
                 dpi_gestures,
                 virtual_thumbwheel,

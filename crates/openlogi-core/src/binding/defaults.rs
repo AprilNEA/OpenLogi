@@ -2,10 +2,15 @@
 
 use super::action::Action;
 use super::button::ButtonId;
+use super::gaming::GamingLayout;
 use super::gesture::GestureDirection;
 use super::value::Binding;
 
 /// Sensible defaults for a fresh device so the panel isn't empty on first run.
+///
+/// A G-series button (`G6`–`G9`) gets [`Action::None`] here: its stock
+/// function differs per model, so a caller that can see one asks
+/// [`default_binding_on`] with the device's layout.
 ///
 /// `GestureButton` matches what Logi Options+ ships for MX-line devices:
 /// gesture button → Mission Control, captured per-direction (see
@@ -71,14 +76,13 @@ pub fn default_binding(button: ButtonId) -> Action {
         ButtonId::ThumbwheelScrollDown => Action::HorizontalScrollRight,
         ButtonId::GestureButton => Action::MissionControl,
         ButtonId::HapticPanel => Action::ShowActionsRing,
-        ButtonId::G6 => Action::DpiShift,
-        ButtonId::G7 => Action::PreviousDpiPreset,
-        ButtonId::G8 => Action::NextDpiPreset,
+        // A G-series button's stock function differs per model, so the
+        // model's `GamingLayout` names it (see [`default_binding_on`]).
         #[expect(
             clippy::match_same_arms,
-            reason = "G9's stock function has no host equivalent; unrelated to the keyboard arm"
+            reason = "the layout owns a G button's default; unrelated to the keyboard arm"
         )]
-        ButtonId::G9 => Action::None,
+        ButtonId::G6 | ButtonId::G7 | ButtonId::G8 | ButtonId::G9 => Action::None,
         // Keyboard keys stay on their native firmware function until the user
         // explicitly binds them; an unbound key is never diverted, so a
         // `None` default keeps the projection total without capturing anything.
@@ -87,6 +91,17 @@ pub fn default_binding(button: ButtonId) -> Action {
         // and seed the same inert default.
         ButtonId::Control(_) | ButtonId::Grid(_) => Action::None,
     }
+}
+
+/// The default action of `button` on a device with `layout`: the model's
+/// stock function for a G-series button whose function differs per model
+/// (see [`GamingLayout::stock_action`]), [`default_binding`] for every other
+/// button. `layout` is `None` for a device without a dumped layout.
+#[must_use]
+pub fn default_binding_on(layout: Option<&GamingLayout>, button: ButtonId) -> Action {
+    layout
+        .and_then(|layout| layout.stock_action(button))
+        .unwrap_or_else(|| default_binding(button))
 }
 
 /// Per-direction defaults for the gesture button. These are captured live over

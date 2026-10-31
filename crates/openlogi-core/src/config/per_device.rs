@@ -14,7 +14,7 @@ use super::{
 };
 use crate::binding::{
     Action, ActionRingConfig, ActionRingIcon, ActionRingSlot, Binding, ButtonId, GamingLayout,
-    KeypadPage, RingAction, default_binding,
+    KeypadPage, RingAction, default_binding_on,
 };
 use crate::hid::{Dpi, PointerSpeed, ReportRate};
 
@@ -474,7 +474,7 @@ impl Config {
         let customized = |button: &ButtonId, binding: &Binding| {
             layout.needs_host_mode(*button)
                 && (!matches!(binding, Binding::Single(_))
-                    || binding.click_action() != default_binding(*button))
+                    || binding.click_action() != default_binding_on(Some(layout), *button))
         };
         let needs_host = device.report_rate.is_some()
             || self.uses_gshift(device_key)

@@ -41,8 +41,8 @@ use tracing::{debug, info, warn};
 
 use crate::action_ring::ActionRingSessionSpec;
 use crate::capture_plan::{
-    CapturePublication, SharedCapturePlans, hidpp_side_gesture_maps_for, plan_for_device,
-    shift_bindings_for,
+    CapturePublication, PlanDevice, SharedCapturePlans, hidpp_side_gesture_maps_for,
+    plan_for_device, shift_bindings_for,
 };
 use crate::hardware::{
     DeviceAccess, DeviceOp, HardwareContext, KeptOsLayouts, VolatileMouseSettings, WriteOrder,
@@ -806,7 +806,9 @@ impl Orchestrator {
             return HookMaps::default();
         }
         let (app, pointer_target) = self.mouse_context();
-        let mut bindings = button_bindings_for(&self.config, key, app);
+        // The OS hook only sees standard HID buttons, whose defaults no
+        // G-series layout changes, so this map needs no layout.
+        let mut bindings = button_bindings_for(&self.config, key, app, None);
         let mut gestures = oshook_gestures_for(&self.config, key, app);
         if cfg!(target_os = "macos")
             && let Some(key) = key
@@ -963,7 +965,12 @@ impl Orchestrator {
     /// `config_key`'s stored bindings for the foreground app, across every
     /// keypad page.
     fn foreground_key_bindings(&self, config_key: &str) -> BTreeMap<ButtonId, Binding> {
-        button_bindings_for(&self.config, Some(config_key), self.current_app.as_deref())
+        button_bindings_for(
+            &self.config,
+            Some(config_key),
+            self.current_app.as_deref(),
+            None,
+        )
     }
 
     /// The part of `stored` that `config_key`'s keys act on now: its current
@@ -1225,11 +1232,15 @@ impl Orchestrator {
             } else {
                 self.mouse_context()
             };
+            let layout = GamingLayout::for_model_key(&dev.model_key);
             let mut plan = plan_for_device(
                 &self.config,
-                physical_key,
-                &dev.config_key,
-                route,
+                PlanDevice {
+                    physical_key,
+                    config_key: &dev.config_key,
+                    route,
+                    layout,
+                },
                 app,
                 rearm_generation,
                 self.os_mouse_hook_available,
@@ -1238,8 +1249,7 @@ impl Orchestrator {
             plan.dispatch.invert_wheel = wheel_inverted(&self.config, dev);
             plan.target.spec.divert_main_wheel =
                 main_wheel_divert(&self.config, dev, self.os_mouse_hook_available);
-            let mut plan =
-                plan.with_onboard(&self.config, GamingLayout::for_model_key(&dev.model_key));
+            let mut plan = plan.with_onboard(&self.config, layout);
             if let Some(keyboard) = keyboards
                 .iter()
                 .find(|keyboard| keyboard.route == plan.target.route)
@@ -2390,7 +2400,7 @@ fn keyboard_divert_set(bindings: &BTreeMap<ButtonId, Binding>) -> KeyboardDivert
 /// single action, so its presence captures the key exactly as the same
 /// device-wide binding does.
 fn binds_keys_in_some_profile(config: &Config, config_key: &str) -> bool {
-    let device_wide = button_bindings_for(config, Some(config_key), None);
+    let device_wide = button_bindings_for(config, Some(config_key), None, None);
     !keyboard_divert_set(&device_wide).captures_nothing()
         || config
             .app_profiles(config_key)

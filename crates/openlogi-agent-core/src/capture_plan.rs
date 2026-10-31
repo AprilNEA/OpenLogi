@@ -111,9 +111,8 @@ impl DeviceCapturePlan {
                 let diverted = &self.target.spec.divert_buttons;
                 OnboardTarget::Host(HostMode {
                     slots: layout
-                        .slots
-                        .iter()
-                        .map(|&button| {
+                        .buttons()
+                        .map(|button| {
                             let captured = layout.needs_host_mode(button)
                                 || (shift
                                     && may_capture(button)
@@ -263,18 +262,34 @@ pub(crate) fn shift_bindings_for(config: &Config, config_key: &str) -> BTreeMap<
         .collect()
 }
 
+/// The device a capture plan is built for.
+pub struct PlanDevice<'a> {
+    /// The physical device the plan's capture session belongs to.
+    pub physical_key: PhysicalDeviceKey,
+    /// The key of the device's settings in the config.
+    pub config_key: &'a str,
+    /// The route the plan captures on.
+    pub route: DeviceRoute,
+    /// The device's G-series layout, which names the stock functions of its
+    /// G buttons. `None` for a device without one.
+    pub layout: Option<&'a GamingLayout>,
+}
+
 /// Build one device's plan from the config (per-app effective for `app`).
 #[must_use]
 pub fn plan_for_device(
     config: &Config,
-    physical_key: PhysicalDeviceKey,
-    config_key: &str,
-    route: DeviceRoute,
+    PlanDevice {
+        physical_key,
+        config_key,
+        route,
+        layout,
+    }: PlanDevice<'_>,
     app: Option<&str>,
     rearm_generation: u64,
     os_mouse_hook_available: bool,
 ) -> DeviceCapturePlan {
-    let bindings = button_bindings_for(config, Some(config_key), app);
+    let bindings = button_bindings_for(config, Some(config_key), app, layout);
     // Gesture-mode OS-hook controls normally stay native so the hook sees the
     // press. Back/Forward may additionally request device-owned HID++ raw XY:
     // macOS uses it exclusively, while Windows keeps the hook as fallback.
@@ -446,10 +461,13 @@ mod tests {
     ) -> DeviceCapturePlan {
         super::plan_for_device(
             config,
-            PhysicalDeviceKey::parse("receiver:cafe:slot:2")
-                .expect("fixture should be a physical key"),
-            config_key,
-            route,
+            super::PlanDevice {
+                physical_key: PhysicalDeviceKey::parse("receiver:cafe:slot:2")
+                    .expect("fixture should be a physical key"),
+                config_key,
+                route,
+                layout: GamingLayout::for_model_key(config_key),
+            },
             app,
             rearm_generation,
             os_mouse_hook_available,
