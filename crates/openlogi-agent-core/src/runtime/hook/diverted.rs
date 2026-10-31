@@ -54,14 +54,15 @@ impl DirectDevice {
     }
 }
 
-/// The OS-hook buttons one capture session diverted on the device at `route`.
+/// The hook-reachable buttons one capture session diverted on the device at
+/// `route`.
 #[derive(Debug)]
 struct Diversion {
     route: DeviceRoute,
     buttons: BTreeSet<ButtonId>,
 }
 
-/// The OS-hook buttons each live capture session has diverted, keyed by its
+/// The hook-reachable buttons each live capture session has diverted, keyed by its
 /// capture epoch. A session reports what arming wrote
 /// ([`CapturedInput::ButtonDiverted`](openlogi_hid::CapturedInput::ButtonDiverted)),
 /// and its entry is released when its task ends.
@@ -69,16 +70,16 @@ struct Diversion {
 pub(crate) struct DivertedButtons(HashMap<u64, Diversion>);
 
 impl DivertedButtons {
-    /// Record that `session` diverted `button` on `route`. Only an OS-hook
-    /// button can reach the hook at all, so any other diversion is not
-    /// recorded.
+    /// Record that `session` diverted `button` on `route`. Only a button the
+    /// hook acts on ([`ButtonId::may_reach_os_hook`]) can reach the hook at
+    /// all, so any other diversion is not recorded.
     pub(crate) fn record(
         &mut self,
         session: &HidppSessionId,
         route: &DeviceRoute,
         button: ButtonId,
     ) {
-        if !button.is_os_hook_button() {
+        if !button.may_reach_os_hook() {
             return;
         }
         self.0
