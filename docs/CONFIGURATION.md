@@ -140,12 +140,16 @@ Common device fields are:
   drops the release of a press it passed, so a bounce in the middle of a drag
   still ends the drag. It filters only the clicks the OS input hook sees from
   this device, so it needs the hook's input access and `capture_mouse_events`
-  on, and it does not see a button that a HID++ capture session diverts. On
-  macOS, devices that share one receiver share one filter with the longest
-  window among them. Windows ignores the field, because its hook cannot tell
-  which device sent a click. The desktop's **Clicks** card offers 15, 30, and
-  60 ms. Absent leaves every click unfiltered; a value outside the range is a
-  load error
+  on, and it does not see a button that a HID++ capture session diverts. The
+  hook knows a device only by the vendor and product ids of its events: on
+  macOS a receiver's clicks carry the receiver's ids, and two mice of one model
+  carry the same ids. When another online device that can click shares those
+  ids and has no window, the agent does not filter them, so a device that did
+  not opt in never loses a click. Keyboards do not count. When every such
+  device has a window, they share the longest. Windows ignores the field,
+  because its hook cannot tell which device sent a click. The desktop's
+  **Clicks** card offers 15, 30, and 60 ms. Absent leaves every click
+  unfiltered; a value outside the range is a load error
 - `bindings`: a button maps to one action, an independent short/long action
   pair, or a gesture-direction map.
   `Thumbwheel` is the thumb wheel's capacitive tap — it has no GUI control and

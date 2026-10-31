@@ -855,9 +855,10 @@ fn debounced_g903_maps() -> SharedHookMaps {
     };
     let mut maps = HookMaps::default();
     let window = openlogi_core::config::ClickDebounce::try_new(30).expect("valid window");
-    for source in InputSource::of_pairing(&receiver, Some(0x4087)) {
-        maps.click_debounce.insert(source, window);
-    }
+    maps.click_debounce = InputSource::of_pairing(&receiver, Some(0x4087))
+        .into_iter()
+        .map(|source| (source, Some(window)))
+        .collect();
     Arc::new(RwLock::new(maps))
 }
 

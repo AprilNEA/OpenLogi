@@ -10,6 +10,12 @@
 //! press of through, so a button cannot stay down at the OS. The cost of that
 //! rule is a bounce in the middle of a hold: the OS has already seen the
 //! release, so a drag ends there.
+//!
+//! The hook knows a device only by the vendor and product ids of its events,
+//! and two devices can share them: two mice behind one receiver on macOS, or
+//! two mice of one model. Ids that another clicking device without a window
+//! also uses are not filtered, so a device that did not opt in never loses a
+//! click.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -35,8 +41,7 @@ impl InputSource {
     /// the receiver otherwise, because macOS attributes a receiver's clicks to
     /// the receiver. The second is the pairing's wireless product id, because
     /// Linux `hid-logitech-dj` gives each paired device its own input node
-    /// under that id. Devices that share one receiver share its first source,
-    /// so on macOS they share one filter.
+    /// under that id. Devices that share one receiver share its first source.
     pub(crate) fn of_pairing(receiver: &ReceiverInfo, wpid: Option<u16>) -> Vec<Self> {
         let node = Self {
             vendor_id: receiver.vendor_id,
@@ -65,22 +70,34 @@ impl InputSource {
 }
 
 /// The input sources whose clicks are filtered, each with its window. The
-/// orchestrator builds it from the online, enabled devices that have a window
-/// configured; the hook callback reads it.
+/// orchestrator builds it from the online devices; the hook callback reads it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct DebouncedSources(Vec<(InputSource, ClickDebounce)>);
 
-impl DebouncedSources {
-    /// Filter `source` with `window`. Two devices behind one source get the
-    /// longer of their windows: the source cannot tell their clicks apart, and
-    /// a bounce that passes is the fault the user turned the filter on for.
-    pub(crate) fn insert(&mut self, source: InputSource, window: ClickDebounce) {
-        match self.0.iter_mut().find(|(known, _)| *known == source) {
-            Some((_, current)) => *current = (*current).max(window),
-            None => self.0.push((source, window)),
+/// Each item is one device's claim on one source: the device's window, or
+/// `None` for a device that can click but has no window. A source is filtered
+/// only when every claim on it has a window, and then with the longest of
+/// them: the source cannot tell those devices' clicks apart, and each of them
+/// asked for at least that much filtering.
+impl FromIterator<(InputSource, Option<ClickDebounce>)> for DebouncedSources {
+    fn from_iter<I: IntoIterator<Item = (InputSource, Option<ClickDebounce>)>>(claims: I) -> Self {
+        let mut merged: Vec<(InputSource, Option<ClickDebounce>)> = Vec::new();
+        for (source, window) in claims {
+            match merged.iter_mut().find(|(known, _)| *known == source) {
+                Some((_, current)) => *current = current.zip(window).map(|(a, b)| a.max(b)),
+                None => merged.push((source, window)),
+            }
         }
+        Self(
+            merged
+                .into_iter()
+                .filter_map(|(source, window)| Some((source, window?)))
+                .collect(),
+        )
     }
+}
 
+impl DebouncedSources {
     /// The window for `source`, or `None` when its clicks are not filtered.
     fn window_for(&self, source: InputSource) -> Option<Duration> {
         self.0
@@ -208,11 +225,10 @@ mod tests {
 
     /// A G903 on a Lightspeed receiver with a 30 ms window.
     fn g903() -> DebouncedSources {
-        let mut sources = DebouncedSources::default();
-        for source in InputSource::of_pairing(&receiver(0xc539), Some(0x4087)) {
-            sources.insert(source, window(30));
-        }
-        sources
+        InputSource::of_pairing(&receiver(0xc539), Some(0x4087))
+            .into_iter()
+            .map(|source| (source, Some(window(30))))
+            .collect()
     }
 
     /// Feed `edges` (pressed, milliseconds after the start) from `device` and
@@ -392,17 +408,39 @@ mod tests {
 
     #[test]
     fn a_shared_source_uses_the_longer_window() {
-        let mut sources = DebouncedSources::default();
-        let node = InputSource::of_pairing(&receiver(0xc548), None);
-        sources.insert(node[0], window(20));
-        sources.insert(node[0], window(60));
-        sources.insert(node[0], window(40));
+        let node = InputSource::of_pairing(&receiver(0xc548), None)[0];
+        let sources: DebouncedSources = [20, 60, 40]
+            .into_iter()
+            .map(|ms| (node, Some(window(ms))))
+            .collect();
         let verdicts = run(
             &sources,
             &event_device(0xc548),
             &[(true, 0), (false, 60), (true, 110), (false, 170)],
         );
         assert_eq!(verdicts, [PASS, PASS, DROP, DROP]);
+    }
+
+    #[test]
+    fn a_source_another_device_clicks_through_without_a_window_is_not_filtered() {
+        // Three G903s on three Lightspeed receivers; the second has no window.
+        let sources: DebouncedSources = [Some(window(30)), None, Some(window(60))]
+            .into_iter()
+            .flat_map(|window| {
+                InputSource::of_pairing(&receiver(0xc539), Some(0x4087))
+                    .into_iter()
+                    .map(move |source| (source, window))
+            })
+            .collect();
+        assert_eq!(sources, DebouncedSources::default());
+        for product_id in [0xc539, 0x4087] {
+            let verdicts = run(
+                &sources,
+                &event_device(product_id),
+                &[(true, 0), (false, 60), (true, 66), (false, 72)],
+            );
+            assert_eq!(verdicts, [PASS; 4]);
+        }
     }
 
     #[test]

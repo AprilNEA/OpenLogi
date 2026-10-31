@@ -115,6 +115,22 @@ struct AgentDevice {
 }
 
 impl AgentDevice {
+    /// Whether the OS hook can see button events from this device. Only a
+    /// kind that never points is ruled out, and only when the device reports
+    /// no pointer sensor: a device whose kind HID++ reported wrongly still
+    /// counts (#1699), and so does an unknown one.
+    fn may_send_clicks(&self) -> bool {
+        let never_points = matches!(
+            self.kind,
+            DeviceKind::Keyboard
+                | DeviceKind::Numpad
+                | DeviceKind::Headset
+                | DeviceKind::Camera
+                | DeviceKind::Light
+        );
+        !never_points || self.capabilities.is_some_and(|caps| caps.pointer)
+    }
+
     /// A reload may adopt the remembered route into a physical key without
     /// another inventory pass. Resolve against the supplied config, not the
     /// key cached when this inventory record was built.
@@ -841,26 +857,33 @@ impl Orchestrator {
         }
     }
 
-    /// The input sources whose clicks the OS hook filters, from every online,
-    /// enabled device with a click-debounce window (#2182). Empty where the
-    /// hook cannot attribute a button event to a device.
+    /// The input sources whose clicks the OS hook filters (#2182). Every
+    /// online device claims its sources: an enabled device with its
+    /// click-debounce window, and any other device that can click without
+    /// one, so ids it shares with a filtered device stay unfiltered. Empty
+    /// where the hook cannot attribute a button event to a device.
     fn click_debounce_sources(&self) -> DebouncedSources {
-        let mut sources = DebouncedSources::default();
         if !openlogi_hook::BUTTON_SOURCES_ATTRIBUTED {
-            return sources;
+            return DebouncedSources::default();
         }
-        for device in self
-            .devices
+        self.devices
             .iter()
-            .filter(|device| device.online && self.config.device_enabled(&device.config_key))
-        {
-            if let Some(window) = self.config.click_debounce(&device.config_key) {
-                for &source in &device.input_sources {
-                    sources.insert(source, window);
-                }
-            }
-        }
-        sources
+            .filter(|device| device.online)
+            .filter_map(|device| {
+                let window = self
+                    .config
+                    .device_enabled(&device.config_key)
+                    .then(|| self.config.click_debounce(&device.config_key))
+                    .flatten();
+                (window.is_some() || device.may_send_clicks()).then_some((device, window))
+            })
+            .flat_map(|(device, window)| {
+                device
+                    .input_sources
+                    .iter()
+                    .map(move |&source| (source, window))
+            })
+            .collect()
     }
     /// Publish [`Self::click_debounce_sources`] into the hook maps. The
     /// inventory fast path calls this on every tick, so the write lock is

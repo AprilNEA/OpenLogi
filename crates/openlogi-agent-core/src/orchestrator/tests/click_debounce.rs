@@ -32,11 +32,43 @@ fn published(orch: &Orchestrator) -> DebouncedSources {
 }
 
 fn g903_sources(ms: u8) -> DebouncedSources {
-    let mut sources = DebouncedSources::default();
-    for source in InputSource::of_pairing(&g903_inventory(true).receiver, Some(0x4087)) {
-        sources.insert(source, window(ms));
+    InputSource::of_pairing(&g903_inventory(true).receiver, Some(0x4087))
+        .into_iter()
+        .map(|source| (source, Some(window(ms))))
+        .collect()
+}
+
+/// The G903's receiver with a second paired device of `kind` in slot 2.
+fn g903_receiver_with(kind: DeviceKind, wpid: u16) -> DeviceInventory {
+    let mut inventory = g903_inventory(true);
+    let mut other = inventory.paired[0].clone();
+    other.slot = 2;
+    other.wpid = Some(wpid);
+    other.kind = kind;
+    other.capabilities = Some(Capabilities::presumed_from_kind(kind));
+    if let Some(model) = other.model_info.as_mut() {
+        model.unit_id = [2, 2, 2, 2];
     }
-    sources
+    inventory.paired.push(other);
+    inventory
+}
+
+/// An orchestrator over `inventories` with `ms` configured for the G903 only.
+fn orchestrator_over(inventories: &[DeviceInventory], ms: u8) -> Orchestrator {
+    let mut orch = orchestrator(Config::default());
+    orch.refresh_inventory(inventories, &[], false);
+    assert_eq!(orch.devices.len(), 2, "two distinct devices");
+    let key = orch
+        .devices
+        .iter()
+        .find(|device| device.slot == 1 && device.unit_id == [9, 0, 3, 1])
+        .expect("the G903")
+        .config_key
+        .clone();
+    let mut config = Config::default();
+    config.set_click_debounce(&key, Some(window(ms)));
+    orch.reload_config(config);
+    orch
 }
 
 /// An orchestrator that sees the G903 online, with `ms` configured for it.
@@ -98,4 +130,37 @@ fn a_rebuild_for_another_reason_keeps_the_filter() {
     let mut orch = orchestrator_with_debounce(Some(45));
     orch.set_current_app(Some(ForegroundApp::unnamed("browser".into())));
     assert_eq!(published(&orch), g903_sources(45));
+}
+
+#[test]
+fn another_mouse_on_the_same_receiver_keeps_the_receiver_ids_unfiltered() {
+    if !openlogi_hook::BUTTON_SOURCES_ATTRIBUTED {
+        return;
+    }
+    let orch = orchestrator_over(&[g903_receiver_with(DeviceKind::Mouse, 0x4099)], 30);
+    // The receiver's ids also carry the other mouse's clicks, so only the
+    // G903's own wireless id stays filtered.
+    let own = InputSource::of_pairing(&g903_inventory(true).receiver, Some(0x4087))[1];
+    let expected: DebouncedSources = [(own, Some(window(30)))].into_iter().collect();
+    assert_eq!(published(&orch), expected);
+}
+
+#[test]
+fn a_keyboard_on_the_same_receiver_does_not_turn_the_filter_off() {
+    if !openlogi_hook::BUTTON_SOURCES_ATTRIBUTED {
+        return;
+    }
+    let orch = orchestrator_over(&[g903_receiver_with(DeviceKind::Keyboard, 0x4099)], 30);
+    assert_eq!(published(&orch), g903_sources(30));
+}
+
+#[test]
+fn a_second_mouse_of_the_same_model_without_a_window_is_not_filtered() {
+    let mut second = g903_inventory(true);
+    second.receiver.unique_id = Some("LS02".into());
+    if let Some(model) = second.paired[0].model_info.as_mut() {
+        model.unit_id = [2, 2, 2, 2];
+    }
+    let orch = orchestrator_over(&[g903_inventory(true), second], 30);
+    assert_eq!(published(&orch), DebouncedSources::default());
 }
