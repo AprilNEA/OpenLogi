@@ -291,11 +291,20 @@ impl CameraPreview {
     }
 
     fn start_stream(&mut self, target: String, cx: &mut Context<Self>) {
-        // What the camera offers, and the saved choice among it. Driver
-        // metadata, cheap enough for the UI thread: opening the stream below
-        // blocks it for longer. A camera whose modes cannot be read gets none
-        // listed and the backend's default; opening it then reports the real
-        // error.
+        // Ask for the saved choice as it is. The backend opens at it when the
+        // camera offers it and at the camera's default when it does not, so the
+        // preview never settles that against a list of its own.
+        let saved = saved_mode(&target, cx).and_then(|(_, saved)| saved);
+        let opened = self.capture.start_stream(&target, saved);
+
+        // What the camera offers is read after the open, failed or not: where
+        // listing takes the camera (Windows), the open is what read them, so
+        // this is the list the stream was opened against, not one from before
+        // the camera came back on another cable. It stays listed for a camera
+        // that failed to open — a mode that will not open is exactly when
+        // picking another is wanted — and is driver metadata otherwise, cheap
+        // enough for the UI thread. A camera whose modes cannot be read gets
+        // none listed.
         self.modes = self.capture.stream_modes(&target).unwrap_or_else(|error| {
             tracing::debug!(%error, "camera modes unavailable");
             StreamModes::default()
@@ -303,10 +312,8 @@ impl CameraPreview {
         // Read on every open, so the notice follows a camera that was replugged
         // at another speed.
         self.link = self.capture.usb_link(&target);
-        let saved = saved_mode(&target, cx).and_then(|(_, saved)| saved);
-        let mode = self.modes.resolve(saved);
 
-        let stream = match self.capture.start_stream(&target, mode) {
+        let stream = match opened {
             Ok(stream) => stream,
             Err(error) => {
                 tracing::warn!(%error, "camera preview failed to start");
@@ -363,7 +370,9 @@ impl CameraPreview {
         self.lifecycle = PreviewLifecycle::Streaming {
             target,
             stream,
-            mode,
+            // The mode the backend resolved the saved choice to: the same
+            // decision, over the list it was made against.
+            mode: self.modes.resolve(saved),
             last_generation: 0,
             _repaint_task: repaint_task,
         };

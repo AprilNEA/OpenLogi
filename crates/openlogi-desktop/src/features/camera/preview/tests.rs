@@ -16,6 +16,10 @@ struct FakeCapture {
     failure: RefCell<Option<CaptureError>>,
     /// What every camera reports offering. Empty, like a backend that lists none.
     modes: RefCell<StreamModes>,
+    /// What the camera offers once it is opened, replacing [`Self::modes`] at
+    /// each open, successful or not: a backend whose listing is what its open
+    /// read (Windows), so the list before an open is the last one's.
+    offered_on_open: RefCell<Option<StreamModes>>,
     /// How every camera reports being attached. `None`, like a platform that
     /// cannot tell.
     link: Cell<Option<UsbLink>>,
@@ -49,6 +53,9 @@ impl Capture for Rc<FakeCapture> {
     ) -> Result<Box<dyn PreviewStream>, CaptureError> {
         self.opened_modes.borrow_mut().push(mode);
         self.events.borrow_mut().push(format!("open {target}"));
+        if let Some(read) = self.offered_on_open.borrow().clone() {
+            *self.modes.borrow_mut() = read;
+        }
         if let Some(error) = self.failure.borrow().clone() {
             return Err(error);
         }
@@ -606,28 +613,116 @@ fn a_stream_opens_at_the_saved_mode(cx: &mut TestAppContext) {
     assert_eq!(*capture.opened_modes.borrow(), [Some(mode(1920, 1080, 60))]);
 }
 
+/// The mode the running stream was opened at, as the preview tracks it.
+fn running_mode(view: &Entity<CameraPreview>, cx: &mut TestAppContext) -> Option<StreamMode> {
+    view.read_with(cx, |view, _| match &view.lifecycle {
+        PreviewLifecycle::Streaming { mode, .. } => *mode,
+        _ => panic!("the preview is not streaming"),
+    })
+}
+
+/// What the dropdowns offer and mark as selected.
+fn choice(view: &Entity<CameraPreview>, cx: &mut TestAppContext) -> (StreamModes, StreamMode) {
+    cx.update(|cx| {
+        let choice = view
+            .read(cx)
+            .mode_choice(cx)
+            .expect("the camera lists modes");
+        (choice.modes, choice.selected)
+    })
+}
+
 #[gpui::test]
-fn with_nothing_saved_a_stream_opens_at_the_cameras_default(cx: &mut TestAppContext) {
+fn with_nothing_saved_a_stream_asks_for_no_mode_and_runs_at_the_default(cx: &mut TestAppContext) {
     let (view, capture, _key) = camera_preview(cx);
 
     select_camera(&view, cx);
 
-    assert_eq!(*capture.opened_modes.borrow(), [Some(default_mode())]);
+    assert_eq!(*capture.opened_modes.borrow(), [None]);
+    assert_eq!(running_mode(&view, cx), Some(default_mode()));
 }
 
 #[gpui::test]
-fn a_saved_mode_the_camera_does_not_offer_opens_at_the_default(cx: &mut TestAppContext) {
+fn a_saved_mode_the_camera_does_not_offer_is_left_to_the_backend_to_replace(
+    cx: &mut TestAppContext,
+) {
     // Saved for a camera since swapped out, or one this driver stopped listing.
     let (view, capture, key) = camera_preview(cx);
     pick(cx, &key, mode(3840, 2160, 30));
 
     select_camera(&view, cx);
 
-    assert_eq!(*capture.opened_modes.borrow(), [Some(default_mode())]);
+    assert_eq!(
+        *capture.opened_modes.borrow(),
+        [Some(mode(3840, 2160, 30))],
+        "the choice is handed over as saved: only the backend knows what it opened against"
+    );
+    assert_eq!(
+        running_mode(&view, cx),
+        Some(default_mode()),
+        "and the preview tracks the default it resolves to"
+    );
+    assert_eq!(choice(&view, cx).1, default_mode());
 }
 
 #[gpui::test]
-fn a_target_that_is_not_the_selected_camera_opens_at_the_default_without_rows(
+fn modes_that_are_only_known_once_the_camera_is_open_are_shown_after_it_opens(
+    cx: &mut TestAppContext,
+) {
+    // A backend whose listing is what its open read: nothing before the first.
+    let (view, capture, key) = camera_preview(cx);
+    *capture.offered_on_open.borrow_mut() = Some(streamcam_modes());
+    *capture.modes.borrow_mut() = StreamModes::default();
+    pick(cx, &key, mode(1920, 1080, 60));
+
+    select_camera(&view, cx);
+
+    assert_eq!(
+        *capture.opened_modes.borrow(),
+        [Some(mode(1920, 1080, 60))],
+        "the saved choice is asked for although nothing was listed to check it against"
+    );
+    assert_eq!(choice(&view, cx), (streamcam_modes(), mode(1920, 1080, 60)));
+    assert_eq!(running_mode(&view, cx), Some(mode(1920, 1080, 60)));
+}
+
+#[gpui::test]
+fn modes_that_changed_since_the_last_open_are_the_ones_shown(cx: &mut TestAppContext) {
+    let (view, capture, key) = camera_preview(cx);
+    *capture.offered_on_open.borrow_mut() = Some(streamcam_modes());
+    pick(cx, &key, mode(1920, 1080, 60));
+    select_camera(&view, cx);
+    assert_eq!(choice(&view, cx), (streamcam_modes(), mode(1920, 1080, 60)));
+
+    // Back on a USB 2 cable: the camera offers less, and the list from before
+    // must neither be shown nor decide which mode the preview claims to run.
+    let slower = StreamModes::new([mode(1920, 1080, 5), mode(1280, 720, 10), mode(640, 480, 30)]);
+    *capture.offered_on_open.borrow_mut() = Some(slower.clone());
+    view.update(cx, |view, cx| view.set_target(None, cx));
+    select_camera(&view, cx);
+
+    assert_eq!(choice(&view, cx), (slower, mode(1280, 720, 10)));
+    assert_eq!(running_mode(&view, cx), Some(mode(1280, 720, 10)));
+}
+
+#[gpui::test]
+fn the_modes_are_read_after_the_open_even_when_it_fails(cx: &mut TestAppContext) {
+    let (view, capture, key) = camera_preview(cx);
+    *capture.offered_on_open.borrow_mut() = Some(streamcam_modes());
+    *capture.modes.borrow_mut() = StreamModes::default();
+    *capture.failure.borrow_mut() = Some(CaptureError::Setup("refused".into()));
+    pick(cx, &key, mode(1920, 1080, 60));
+
+    select_camera(&view, cx);
+
+    assert!(
+        rows_shown(&view, cx),
+        "what the failed open read is what another pick is made from"
+    );
+}
+
+#[gpui::test]
+fn a_target_that_is_not_the_selected_camera_asks_for_no_mode_and_shows_no_rows(
     cx: &mut TestAppContext,
 ) {
     let (view, capture, key) = camera_preview(cx);
@@ -639,7 +734,7 @@ fn a_target_that_is_not_the_selected_camera_opens_at_the_default_without_rows(
 
     assert_eq!(
         *capture.opened_modes.borrow(),
-        [Some(default_mode())],
+        [None],
         "another camera must not borrow the selected one's saved mode"
     );
     assert!(
@@ -671,7 +766,7 @@ fn choosing_another_mode_reopens_the_stream_after_the_camera_lets_go(cx: &mut Te
     assert_eq!(events(&capture), ["open cam-1", "drop cam-1", "open cam-1"]);
     assert_eq!(
         *capture.opened_modes.borrow(),
-        [Some(default_mode()), Some(mode(1920, 1080, 60))]
+        [None, Some(mode(1920, 1080, 60))]
     );
     view.read_with(cx, |view, _| {
         assert!(matches!(

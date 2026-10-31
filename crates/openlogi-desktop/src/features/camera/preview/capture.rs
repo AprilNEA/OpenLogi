@@ -11,16 +11,19 @@ pub(super) trait Capture {
     /// How long a dropped stream's camera needs before it can be opened again
     /// without the open stalling the caller.
     fn release_delay(&self) -> Duration;
-    /// The resolutions and frame rates `target` offers. Driver metadata, cheap
-    /// enough to read on the UI thread (where reading it takes the device, as
-    /// on Windows, only a camera's first read does); empty when the platform
+    /// The resolutions and frame rates `target` offers. Cheap enough to read on
+    /// the UI thread, because no backend takes the camera to answer: where
+    /// listing them would (Windows), they are what the camera's latest open
+    /// read, so ask after [`Capture::start_stream`]. Empty when the platform
     /// backend lists none.
     fn stream_modes(&self, target: &str) -> Result<StreamModes, CaptureError>;
     /// How `target` is attached over USB, as the last scan found it. Answers
     /// from memory, so it is cheap on the UI thread; `None` where the platform
     /// cannot tell.
     fn usb_link(&self, target: &str) -> Option<UsbLink>;
-    /// Open `target` at `mode`, or at the backend's default when `None`.
+    /// Open `target` at `mode` when the camera offers it, or at the backend's
+    /// default when it does not (or when `None`): the backend resolves the
+    /// request against the modes it opens the camera with.
     fn start_stream(
         &self,
         target: &str,

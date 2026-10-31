@@ -10,11 +10,12 @@
 //! Dropping the [`CameraStream`] stops the thread, which releases the device
 //! (camera LED off).
 //!
-//! A preview streams at the [`StreamMode`] it is handed, when the camera lists
-//! any (see [`stream_modes`]): the reader selects the native media type that
-//! offers it, which is what switches the camera to that size and rate. The
-//! mode belongs to the preview alone — other applications negotiate their own
-//! when they open the camera.
+//! A preview streams at the [`StreamMode`] it is handed, when the camera offers
+//! it: the reader selects the native media type that offers it, which is what
+//! switches the camera to that size and rate. What the camera offers is read
+//! from its native media types by that same open, and kept for
+//! [`stream_modes`]. The mode belongs to the preview alone — other
+//! applications negotiate their own when they open the camera.
 //!
 //! There is no per-app consent prompt to drive here: desktop apps see the
 //! camera unless the system-wide privacy toggle blocks them, which surfaces
@@ -137,10 +138,10 @@ impl Drop for CameraStream {
 /// Returns only after a decoded frame has been stored. Later read failures
 /// can still end the stream; startup does not guarantee continued delivery.
 ///
-/// The stream opens at `mode` when the camera [lists](stream_modes) it, and
-/// otherwise at the camera's default mode (the one nearest 1280×720 at 30
-/// fps); `None` asks for that default. A camera that lists no mode streams at
-/// the media type Media Foundation picks.
+/// The stream opens at `mode` when the camera offers it, and otherwise at the
+/// camera's default mode (the one nearest 1280×720 at 30 fps); `None` asks for
+/// that default. A camera that offers no mode streams at the media type Media
+/// Foundation picks. What it offered is kept for [`stream_modes`].
 ///
 /// # Errors
 /// [`CaptureError::NotFound`] for an unknown id, [`CaptureError::AccessDenied`]
@@ -216,14 +217,15 @@ pub fn camera_authorization() -> crate::CameraAuthorization {
 /// No-op: Windows has no consent prompt to trigger for desktop apps.
 pub fn request_camera_access() {}
 
-/// What each camera's native media types offered the last time they were read,
+/// What each camera's native media types offered the last time it was opened,
 /// by `unique_id`.
 ///
-/// Reading them takes the camera's media source, which takes long enough to
-/// stall a UI thread, so [`stream_modes`] answers from here once a camera has
-/// been read. Every successful open reads the same list on its way to
-/// selecting from it and refreshes the entry, so a camera that comes back on a
-/// slower port is corrected by the next preview of it.
+/// Reading them takes the camera's media source, which a UI thread must not
+/// wait for and which the open reads anyway on its way to selecting from them.
+/// So the open is what fills this: it forgets the camera's entry first and
+/// keeps the new one once the types are read, which leaves an entry only for a
+/// camera whose latest open got that far, and never one a camera that came
+/// back on a slower port would be read from.
 static MODES: LazyLock<Mutex<HashMap<String, StreamModes>>> = LazyLock::new(Mutex::default);
 
 /// Held only to read or swap one entry, never across Media Foundation calls.
@@ -231,61 +233,20 @@ fn known_modes() -> MutexGuard<'static, HashMap<String, StreamModes>> {
     MODES.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// The modes the camera with `unique_id` can stream at.
+/// The modes the camera with `unique_id` offered when it was last opened.
 ///
 /// Read from the camera's native media types, limited to the pixel formats the
 /// preview converts to RGB32 — a type Media Foundation cannot convert would
-/// fail to open, so it is not offered. The first call for a camera activates
-/// its media source, which takes a moment, so the answer is kept and later
-/// calls read memory. Nothing is captured: the camera's LED stays off.
+/// fail to open, so it is not offered. Listing them takes the camera's media
+/// source, so this never does: it answers from what the latest open read, and
+/// a camera that has not been opened, or whose latest open failed before it
+/// read them, lists none. Ask after [`start_stream`], whose open is what reads
+/// them.
 ///
 /// # Errors
-/// [`CaptureError::NotFound`] when no camera has that id,
-/// [`CaptureError::AccessDenied`] when the system privacy toggle blocks
-/// cameras, [`CaptureError::Timeout`] when activating it takes over five
-/// seconds, or [`CaptureError::Setup`] on other Media Foundation errors.
+/// Never fails on this platform; the signature matches the other backends'.
 pub fn stream_modes(unique_id: &str) -> Result<StreamModes, CaptureError> {
-    if let Some(modes) = known_modes().get(unique_id) {
-        return Ok(modes.clone());
-    }
-    // Like a stream, on a thread of its own: the apartment and the platform it
-    // enters are not the caller's to join.
-    let stop = Arc::new(AtomicBool::new(false));
-    let (tx, rx) = mpsc::channel();
-    let (id, worker_stop) = (unique_id.to_string(), Arc::clone(&stop));
-    let worker = std::thread::Builder::new()
-        .name("openlogi-camera-modes".into())
-        .spawn(move || {
-            let _ = tx.send(read_modes(&id, &worker_stop));
-        })
-        .map_err(|e| CaptureError::Setup(e.to_string()))?;
-    if let Ok(modes) = rx.recv_timeout(SETUP_TIMEOUT) {
-        let _ = worker.join();
-        modes
-    } else {
-        // The worker stops at its next checkpoint and releases the camera.
-        stop.store(true, Ordering::Relaxed);
-        Err(CaptureError::Timeout)
-    }
-}
-
-/// Activate the camera `unique_id` names, read the modes its native types
-/// offer, and keep them for [`stream_modes`]. Runs on its own thread.
-fn read_modes(unique_id: &str, stop: &AtomicBool) -> Result<StreamModes, CaptureError> {
-    // Declared before anything COM so it drops last, as in `reader_thread`.
-    let com = ComApartment::enter();
-    let cancellation = SetupCancellation { stop };
-    cancellation.checkpoint()?;
-    let media_foundation = com.start_media_foundation().map_err(setup_err)?;
-    // The reader, and the media source under it, release at the end of this
-    // block, before the platform guard.
-    let modes = {
-        let reader = create_reader(&media_foundation, unique_id, &cancellation)?;
-        mf_formats::offered(&native_formats(&reader, &cancellation)?)
-    };
-    known_modes().insert(unique_id.to_owned(), modes.clone());
-    drop(media_foundation);
-    Ok(modes)
+    Ok(known_modes().get(unique_id).cloned().unwrap_or_default())
 }
 
 /// The reader thread: builds the Media Foundation graph, reports the outcome
@@ -458,11 +419,13 @@ fn open_reader(
     mode: Option<StreamMode>,
     cancellation: &SetupCancellation<'_>,
 ) -> Result<(IMFSourceReader, StrideHint), CaptureError> {
+    // What this camera offered before says nothing about what it offers now.
+    known_modes().remove(unique_id);
     let reader = create_reader(platform, unique_id, cancellation)?;
     let stream = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0.cast_unsigned();
 
-    // Every open reads the camera's list on its way to selecting from it, so
-    // it also keeps what `stream_modes` answers from current.
+    // The list the mode is selected from is the one `stream_modes` answers
+    // with once this open is done.
     let formats = native_formats(&reader, cancellation)?;
     known_modes().insert(unique_id.to_owned(), mf_formats::offered(&formats));
 
