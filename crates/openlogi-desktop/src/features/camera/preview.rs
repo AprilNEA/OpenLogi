@@ -203,9 +203,7 @@ impl CameraPreview {
         // Another camera's modes and link must not be offered for this one.
         self.modes = StreamModes::default();
         self.link = None;
-        if let Some(old) = self.current_image.take() {
-            cx.drop_image(old, None);
-        }
+        self.drop_frame(cx);
 
         let Some(target) = target else {
             cx.notify();
@@ -215,13 +213,27 @@ impl CameraPreview {
         cx.notify();
     }
 
+    /// Free the frame on screen and its GPU texture at once — not in `render`,
+    /// which stops running the moment the preview leaves the screen.
+    fn drop_frame(&mut self, cx: &mut Context<Self>) {
+        if let Some(old) = self.current_image.take() {
+            cx.drop_image(old, None);
+        }
+    }
+
     /// Open `target`, unless Camera access is not granted: then wait for it.
     /// Opening only on a standing grant means selecting a camera never blocks
     /// the UI thread on the permission dialog.
+    ///
+    /// A reopen keeps the last frame while it waits ([`Self::restart`]), but
+    /// only until it is clear that no new stream is coming: if access is gone
+    /// or the open fails, the frame goes, because the placeholder says why and
+    /// a frozen frame would pass for a live one.
     fn open_when_granted(&mut self, target: String, cx: &mut Context<Self>) {
         if self.capture.access_granted() {
             self.start_stream(target, cx);
         } else {
+            self.drop_frame(cx);
             self.lifecycle = PreviewLifecycle::AwaitingAccess(target);
         }
     }
@@ -317,6 +329,7 @@ impl CameraPreview {
             Ok(stream) => stream,
             Err(error) => {
                 tracing::warn!(%error, "camera preview failed to start");
+                self.drop_frame(cx);
                 let retry_target = target.clone();
                 let retry_task = cx.spawn(async move |this, cx| {
                     cx.background_executor().timer(RETRY_INTERVAL).await;

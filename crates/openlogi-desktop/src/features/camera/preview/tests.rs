@@ -925,18 +925,25 @@ fn a_reopen_waits_for_revoked_access_instead_of_opening(cx: &mut TestAppContext)
     });
 }
 
-#[gpui::test]
-fn a_reopen_keeps_the_last_frame_on_screen(cx: &mut TestAppContext) {
+/// A selected camera streaming with its first frame drawn, so a reopen has a
+/// frame to keep or to drop.
+fn frame_on_screen(cx: &mut TestAppContext) -> (Entity<CameraPreview>, Rc<FakeCapture>, String) {
     let (view, capture, key) = camera_preview(cx);
     select_camera(&view, cx);
     let window = cx.add_empty_window();
     capture.frames.borrow()[0].publish(vec![1, 2, 3, 255, 4, 5, 6, 255]);
     draw(&view, window);
     view.read_with(window, |view, _| assert!(view.current_image.is_some()));
+    (view, capture, key)
+}
 
-    cx_pick(window, &key, mode(1920, 1080, 60));
+#[gpui::test]
+fn a_reopen_keeps_the_last_frame_on_screen(cx: &mut TestAppContext) {
+    let (view, _capture, key) = frame_on_screen(cx);
 
-    view.read_with(window, |view, _| {
+    pick(cx, &key, mode(1920, 1080, 60));
+
+    view.read_with(cx, |view, _| {
         assert!(matches!(
             &view.lifecycle,
             PreviewLifecycle::Restarting { .. }
@@ -944,6 +951,46 @@ fn a_reopen_keeps_the_last_frame_on_screen(cx: &mut TestAppContext) {
         assert!(
             view.current_image.is_some(),
             "a frozen frame beats a blank box while the camera reopens"
+        );
+    });
+}
+
+#[gpui::test]
+fn a_reopen_that_fails_drops_the_frame_so_the_error_shows(cx: &mut TestAppContext) {
+    let (view, capture, key) = frame_on_screen(cx);
+
+    pick(cx, &key, mode(1920, 1080, 60));
+    *capture.failure.borrow_mut() = Some(CaptureError::Setup("refused".into()));
+    advance(cx, RELEASE_DELAY);
+
+    view.read_with(cx, |view, _| {
+        assert!(matches!(
+            &view.lifecycle,
+            PreviewLifecycle::StartFailed { .. }
+        ));
+        assert!(
+            view.current_image.is_none(),
+            "the placeholder only shows the failure once the frozen frame is gone"
+        );
+    });
+}
+
+#[gpui::test]
+fn a_reopen_that_finds_access_gone_drops_the_frame(cx: &mut TestAppContext) {
+    let (view, capture, key) = frame_on_screen(cx);
+
+    pick(cx, &key, mode(1920, 1080, 60));
+    capture.granted.set(false);
+    advance(cx, RELEASE_DELAY);
+
+    view.read_with(cx, |view, _| {
+        assert!(matches!(
+            &view.lifecycle,
+            PreviewLifecycle::AwaitingAccess(_)
+        ));
+        assert!(
+            view.current_image.is_none(),
+            "a frozen frame must not hide that Camera access is needed"
         );
     });
 }
