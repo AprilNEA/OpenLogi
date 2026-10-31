@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use hidpp::channel::HidppChannel;
-use openlogi_core::device::{DeviceInventory, DeviceKind, PairedDevice, ReceiverInfo};
+use openlogi_core::device::{DeviceInventory, PairedDevice, ReceiverInfo};
 use tracing::debug;
 
 use super::{NodeProbe, PassContext, ProbeVerdict};
@@ -13,7 +13,7 @@ use crate::backend::NodeInfo;
 use crate::channel::route::DIRECT_DEVICE_INDEX;
 use crate::inventory::cache::{CacheKey, CacheOutcome, ProbeTarget, probe_or_reuse, seen};
 use crate::inventory::features::Refresh;
-use crate::inventory::mappings::resolve_device_kind;
+use crate::inventory::mappings::{direct_identity_kind, resolve_device_kind};
 
 /// Prefer the device's own HID++ marketing name over the host HID collection
 /// label. Windows Bluetooth frequently exposes only a generic `"Mouse"`, while
@@ -85,10 +85,12 @@ pub(super) async fn probe_direct(
     // write attempt. We reuse the capabilities the probe already derived from
     // the feature table — no extra round-trip.
     // A completed feature-table walk is what makes this probe's verdict
-    // trustworthy: without it (the device never answered, or its refresh just
-    // failed and the cache stood in) a rejection below would be
+    // trustworthy: without it (the device never answered, or it did not answer
+    // its refresh ping and the cache stood in) a rejection below would be
     // indistinguishable from a transient glitch, so the node is settled as a
-    // failed probe and its last inventory replayed.
+    // failed probe and its last inventory replayed. A refresh that the device
+    // answered but did not finish re-reading still counts: its cached walk is
+    // complete, and the ping shows the channel works (#2107).
     let capabilities = probe.capabilities();
     let walk_succeeded = capabilities.is_some() && probe.refresh == Refresh::Answered;
     let caps = capabilities.unwrap_or_default();
@@ -142,10 +144,15 @@ pub(super) async fn probe_direct(
             slot: DIRECT_DEVICE_INDEX,
             codename: Some(codename),
             wpid: None,
-            // No receiver pairing register here, so `0x0005` is the only kind
-            // hint — but kind is just identity now; the UI gates on the
-            // capabilities below, so a misread kind can't hide the panels (#127).
-            kind: resolve_device_kind(probe.kind, DeviceKind::Unknown),
+            // No receiver pairing register here, so the kind comes from `0x0005`
+            // with the identity registry as this path's register (the MX Creative
+            // Keypad reports no DeviceType). Kind is just identity now; the UI
+            // gates on the capabilities below, so a misread kind can't hide the
+            // panels (#127).
+            kind: resolve_device_kind(
+                probe.kind,
+                direct_identity_kind(info.vendor_id, info.product_id),
+            ),
             // The HID node is present, but for a headset dongle that says
             // nothing about the headset: its battery feature does.
             online: !probe.unlinked,

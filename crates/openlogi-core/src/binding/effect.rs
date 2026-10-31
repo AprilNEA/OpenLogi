@@ -270,10 +270,16 @@ impl Action {
             // are all handled above (or beside) the injector — see
             // `Effect::AgentSide`.
             Action::CycleDpiPresets
+            | Action::NextDpiPreset
+            | Action::PreviousDpiPreset
+            | Action::DpiShift
+            | Action::GShift
             | Action::SetDpiPreset(_)
             | Action::ToggleSmartShift
             | Action::TogglePrecisionMode
             | Action::ShowActionsRing
+            | Action::PreviousKeypadPage
+            | Action::NextKeypadPage
             | Action::OpenApplication(_) => Effect::AgentSide,
 
             Action::ScrollUp => Effect::Scroll { dx: 0, dy: 1 },

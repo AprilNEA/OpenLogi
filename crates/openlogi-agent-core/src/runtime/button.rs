@@ -282,6 +282,11 @@ impl ActivePress {
         self.token.key.source.device_key()
     }
 
+    /// Whether the OS input hook, rather than an HID++ session, captured it.
+    pub(crate) fn captured_by_os_hook(&self) -> bool {
+        matches!(self.token.key.source, ButtonSource::OsHook(_))
+    }
+
     pub(crate) fn start_action(&self) -> Option<&Action> {
         self.behavior.start_action()
     }

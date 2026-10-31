@@ -185,6 +185,24 @@ impl DeviceStableId {
         }
     }
 
+    /// The direct route a saved [`Self::route_key`] names — a config entry's
+    /// `links` key, `direct:<vid>:<pid>` — or `None` for any other key,
+    /// including a key that carries more after the product ID.
+    ///
+    /// The inverse of [`Self::route_key`]'s direct arm, so an offline entry
+    /// still says how it was reached: a route-keyed fact such as
+    /// [`DeviceRoute::keypad`] holds while the device is unplugged.
+    #[must_use]
+    pub fn direct_route_of_key(key: &str) -> Option<DeviceRoute> {
+        let (vendor_id, product_id) = key.strip_prefix("direct:")?.split_once(':')?;
+        let vendor_id = u16::from_str_radix(vendor_id, 16).ok()?;
+        let product_id = u16::from_str_radix(product_id, 16).ok()?;
+        Some(DeviceRoute::Direct {
+            vendor_id,
+            product_id,
+        })
+    }
+
     /// Stable key for persisted per-physical-device configuration.
     ///
     /// Receiver-connected devices are identified by receiver UID + pairing
@@ -509,5 +527,36 @@ mod tests {
             identity: DeviceIdentity::Unit([1, 2, 3, 4]),
         };
         assert_eq!(unknown.route_key(), unknown.runtime_key());
+    }
+
+    #[test]
+    fn a_saved_direct_key_names_its_route_and_nothing_else_does() {
+        let wired = DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xc354,
+        };
+        let id = DeviceStableId::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xc354,
+            identity: DeviceIdentity::from_parts(Some("2603WD7076V8"), [0; 4]),
+        };
+        assert_eq!(
+            DeviceStableId::direct_route_of_key(&id.route_key()),
+            Some(wired)
+        );
+        // A runtime key carries the device identity after the route: it is not
+        // a `links` key, and neither is any other shape.
+        for key in [
+            id.runtime_key().as_str(),
+            "direct:046d:c355:extra",
+            "receiver:82839805:slot:1",
+            "serial:2603wd7076v8",
+            "unit:4f4c4403",
+            "raw:046d:c900:ff43:0202:abc",
+            "direct:046d",
+            "direct:zz:c354",
+        ] {
+            assert_eq!(DeviceStableId::direct_route_of_key(key), None, "{key}");
+        }
     }
 }

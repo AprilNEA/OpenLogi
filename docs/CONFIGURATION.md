@@ -167,10 +167,33 @@ Common device fields are:
   across platforms (see [Application aliases](#application-aliases)). An
   overlay holds one action per button; gesture-direction maps live in
   `bindings`
+- `gshift_bindings` for G-series mice: the G-Shift layer, one action per
+  button, for example `G7 = "Copy"`. While a button bound to `GShift` is held,
+  a button in this layer runs its layer action; a button the layer leaves out
+  keeps its normal binding
+- `onboard_memory` for G-series mice with HID++ `0x8100` onboard profiles:
+  `"off"` puts the mouse in host mode, where OpenLogi owns its buttons, DPI and
+  report rate. `{ profile = <n> }` selects onboard profile `<n>` (from 1), and
+  the mouse uses the buttons and DPI levels stored in that profile. When the
+  field is absent, the agent selects host mode only if a setting needs it: a
+  `report_rate`, a G-Shift binding, or a remapped button that the mouse
+  reports only in host mode. Otherwise the agent leaves the onboard mode alone
 - `action_ring`: default and complete per-application eight-slot layouts;
   `action_ring.per_app` takes the same selectors as `per_app_bindings`,
   including the Windows `exe:<filename>` fallback and `app:<alias>` keys
 - `lighting`, `smartshift`, and camera controls / profiles
+- `camera_stream_mode`: the live preview's mode, a table of `width`, `height`
+  (pixels) and `fps`. All three are required and must be positive, or the file
+  does not load. Without the table, or when the camera no longer offers that
+  mode, the preview opens at the camera's default, the mode nearest 720p at
+  30 fps.
+  It shapes only the stream OpenLogi's own preview opens — resolution and frame
+  rate are negotiated per stream, so other applications are not affected — and
+  profiles neither save nor apply it. The Camera tab offers it as **Resolution**
+  and **Frame rate** dropdowns. A camera lists only the modes its USB link can
+  carry, so on macOS and Windows the tab also says when a camera is on a slower
+  link than it supports (for example a USB 3 camera on a USB 2 port, hub, or
+  cable), which is when the list is shorter than the camera can offer
 - standalone `light`: the agent writes it when the light connects, when a save
   changes it, and, with `auto_camera` on, when camera use starts or stops.
   Saving another setting leaves a change made with the light's own buttons in

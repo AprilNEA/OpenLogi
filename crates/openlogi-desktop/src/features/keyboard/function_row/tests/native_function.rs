@@ -30,6 +30,7 @@ impl Render for CalculatorInspector {
                     y_frac: 0.1,
                     binding: "Copy".into(),
                     binding_icon: None,
+                    lcd_icon: None,
                 }],
                 &self.view,
                 cx,

@@ -1,9 +1,9 @@
 //! Debug-only gallery for reviewing shared controls without app runtime state.
 
 use gpui::{
-    App, AppContext as _, Bounds, Context, InteractiveElement, IntoElement, ParentElement, Render,
-    Role, SharedString, Size, StatefulInteractiveElement as _, Styled, Window, WindowBounds,
-    WindowOptions, div, px, rems,
+    App, AppContext as _, Context, InteractiveElement, IntoElement, ParentElement, Render, Role,
+    SharedString, Size, StatefulInteractiveElement as _, Styled, Window, WindowOptions, div, px,
+    rems,
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
@@ -44,13 +44,15 @@ pub(crate) fn run() {
         })
         .detach();
 
-        let bounds = Bounds::centered(None, Size::new(px(1100.), px(800.)), cx);
+        let fit = crate::windows::WindowFit::on_primary_display(
+            Size::new(px(1100.), px(800.)),
+            Size::new(px(760.), px(600.)),
+            cx,
+        );
         let options = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
-            window_min_size: Some(Size::new(px(760.), px(600.))),
             app_id: Some(APP_ID.into()),
             titlebar: Some(crate::windows::titlebar_options(TITLE)),
-            ..WindowOptions::default()
+            ..WindowOptions::from(fit)
         };
         let opened = cx.open_window(options, |window, cx| {
             theme::apply_scale(window, UiScale::Normal);

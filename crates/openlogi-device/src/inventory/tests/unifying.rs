@@ -117,6 +117,60 @@ async fn hidpp10_slot_is_named_by_the_receiver_and_reports_its_battery() {
     );
 }
 
+#[tokio::test]
+async fn hidpp10_trackball_slot_takes_its_kind_from_the_arrival() {
+    // #2202: an M570 (wpid 0x1028, HID++ 1.0) surfaced as Unknown. With no
+    // feature table, the arrival nibble is its only kind source, and the GUI
+    // picks the Buttons panel from it. `0x28` is the trackball nibble plus
+    // the encryption bit, not a wire capture.
+    let message = Message::Short(
+        MessageHeader {
+            device_index: 1,
+            sub_id: 0x41,
+        },
+        [0x04, 0x28, 0x28, 0x10],
+    );
+    let Some(UnifyingEvent::DeviceConnection(event)) = decode_notification(&message) else {
+        panic!("expected a device-connection event");
+    };
+    let (raw, _) = ScriptedRawHidChannel::with_responder(|request| {
+        match (request[1], request[2], request[3]) {
+            (0x01, 0x00, _) => Some(register_error(request, 0x01)),
+            (0x01, 0x81, 0x0d | 0x07) => Some(register_error(request, 0x02)),
+            (0xff, 0x83, 0xb5) if request[4] == 0x40 => {
+                let mut response = vec![0x11, 0xff, 0x83, 0xb5, 0x40, 4];
+                response.extend_from_slice(b"M570");
+                // A long report is 20 bytes; a shorter one is dropped.
+                response.resize(20, 0);
+                Some(response)
+            }
+            _ => panic!("unexpected request: {request:02x?}"),
+        }
+    });
+    let channel = scripted_channel(raw).await;
+
+    let cache = HashMap::new();
+    let pass = PassContext {
+        cache: &cache,
+        now: Instant::now(),
+        subscriptions: None,
+        timeouts: &ProbeTimeouts::DEFAULT,
+    };
+    let (device, _) = probe_unifying_slot(
+        &channel,
+        &event,
+        "SERIAL",
+        &host_lock::ReceiverRegisterPhase::uncontended(),
+        pass,
+    )
+    .await
+    .expect("an online slot surfaces");
+
+    assert_eq!(device.codename.as_deref(), Some("M570"));
+    assert_eq!(device.kind, DeviceKind::Trackball);
+    assert_eq!(device.capabilities, None);
+}
+
 #[test]
 fn unifying_arrival_liveness_survives_missing_feature_data() {
     let device = assemble_unifying_device(

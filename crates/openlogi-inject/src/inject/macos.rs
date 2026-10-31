@@ -401,11 +401,12 @@ fn key_event(vk: u16, flags: CGEventFlags, phase: KeyPhase) -> Option<CGEvent> {
 }
 
 /// Post a key-down + key-up pair for `vk` with `flags` set: through the
-/// virtual HID keyboard when it carries the pair, otherwise as `CGEvent`s.
+/// virtual HID keyboard when it carries the pair, otherwise as the
+/// `CGEvent`s a physical keyboard sends, with each modifier pressed and
+/// released as a key of its own (see [`symbolic_hotkey::post_keystroke`]).
 fn post_key(vk: u16, flags: CGEventFlags) {
     if !virtual_keyboard::tap(vk, flags) {
-        post_cg_key_phase(vk, flags, KeyPhase::Down);
-        post_cg_key_phase(vk, flags, KeyPhase::Up);
+        symbolic_hotkey::post_keystroke(vk, flags);
     }
 }
 

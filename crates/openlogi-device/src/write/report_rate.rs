@@ -274,7 +274,7 @@ pub async fn set_report_rate_on(
     set_report_rate_on_channel(shared.channel(), shared.device_index(), rate).await
 }
 
-async fn set_report_rate_on_channel(
+pub(crate) async fn set_report_rate_on_channel(
     channel: &Arc<HidppChannel>,
     index: u8,
     rate: ReportRate,

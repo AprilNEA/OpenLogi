@@ -12,7 +12,9 @@ use openlogi_core::device::{
 use openlogi_core::device_order::{
     DeviceIdentity as RouteIdentity, DeviceStableId, PhysicalDeviceKey,
 };
-use openlogi_core::hid::{DeviceRoute, LOGITECH_VENDOR_ID};
+use openlogi_core::hid::{
+    DeviceRoute, KeypadDescriptor, LOGITECH_VENDOR_ID, ReceiverBrand, find_receiver,
+};
 use tracing::debug;
 
 use super::device_key::DeviceKey;
@@ -70,6 +72,9 @@ pub struct DeviceRecord {
     /// Model-level asset registry identity for standalone devices.
     pub registry_model_id: Option<String>,
     pub route: Option<DeviceRoute>,
+    /// Marketed family of the receiver behind `route`, kept separate from the
+    /// Unifying-compatible protocol used to address Nano and Lightspeed slots.
+    pub receiver_brand: Option<ReceiverBrand>,
     /// OS capture id for cameras (AVFoundation uniqueID / DirectShow path).
     /// Distinct from [`Self::config_key`], which prefers the port-stable USB
     /// serial. `None` for HID++ devices (those open via [`Self::route`]).
@@ -151,6 +156,28 @@ impl DeviceRecord {
 }
 
 impl super::AppState {
+    /// The known keypad the selected device is ([`DeviceRoute::keypad`]), or
+    /// `None` for any other device — a number pad among them: the keypad's
+    /// grid and paging keys are its identity fact, not every number pad's.
+    ///
+    /// Online, the live route answers. Offline there is none, so the routes
+    /// the saved entry's `links` record answer instead, and an unplugged
+    /// keypad keeps its keys and app profiles.
+    #[must_use]
+    pub fn current_keypad(&self) -> Option<&'static KeypadDescriptor> {
+        let record = self.current_record()?;
+        if let Some(route) = &record.route {
+            return route.keypad();
+        }
+        self.config
+            .devices
+            .get(&record.config_key)?
+            .links
+            .keys()
+            .filter_map(|key| DeviceStableId::direct_route_of_key(key))
+            .find_map(|route| route.keypad())
+    }
+
     /// Presentation-only connection mode last observed for an offline device.
     /// After restart, only a sole recorded link is unambiguous: the saved link
     /// index has no chronology. Never restore a hardware-write route from history.
@@ -171,14 +198,20 @@ impl super::AppState {
         if links.next().is_some() {
             return None;
         }
-        let (vendor, product) = link.strip_prefix("direct:")?.split_once(':')?;
-        if u16::from_str_radix(vendor, 16).ok()? != LOGITECH_VENDOR_ID {
+        let DeviceRoute::Direct {
+            vendor_id,
+            product_id,
+        } = DeviceStableId::direct_route_of_key(link)?
+        else {
+            return None;
+        };
+        if vendor_id != LOGITECH_VENDOR_ID {
             return None;
         }
         record
             .model_info
             .as_ref()?
-            .transport_for_product_id(u16::from_str_radix(product, 16).ok()?)
+            .transport_for_product_id(product_id)
             .map(ObservedConnection::Direct)
     }
 }
@@ -208,6 +241,8 @@ pub(super) fn build_device_list(
     for inv in inventories {
         for paired in &inv.paired {
             let route = DeviceRoute::for_slot(inv, paired.slot);
+            let receiver_brand = find_receiver(inv.receiver.vendor_id, inv.receiver.product_id)
+                .map(|receiver| receiver.brand);
             let (model_key, asset, model_info, codename, serial_number, unit_id) =
                 if let Some(model) = paired.model_info.as_ref() {
                     let asset = resolver.resolve(model, paired.codename.as_deref());
@@ -273,6 +308,7 @@ pub(super) fn build_device_list(
                 driver_id: None,
                 registry_model_id: None,
                 route,
+                receiver_brand,
                 capture_id: None,
                 kind,
                 capabilities: paired.capabilities,
@@ -440,6 +476,7 @@ fn camera_record(camera: &Camera, resolver: &AssetResolver) -> DeviceRecord {
         driver_id: None,
         registry_model_id: None,
         route: None,
+        receiver_brand: None,
         capture_id: Some(camera.unique_id.clone()),
         kind: DeviceKind::Camera,
         capabilities: None,
@@ -519,6 +556,7 @@ fn append_standalone(
             driver_id: Some(device.driver_id.clone()),
             registry_model_id: device.registry_model_id.clone(),
             route,
+            receiver_brand: None,
             capture_id: None,
             kind: device.kind,
             capabilities: device.capabilities,
@@ -719,6 +757,7 @@ fn offline_record(
         driver_id: identity.driver_id.clone(),
         registry_model_id: identity.registry_model_id.clone(),
         route: None,
+        receiver_brand: None,
         capture_id: None,
         kind: identity.kind,
         capabilities: Some(identity.capabilities),
@@ -779,6 +818,8 @@ pub(super) fn adopt_transient_record(known: &DeviceRecord, live: DeviceRecord) -
             .registry_model_id
             .or_else(|| known.registry_model_id.clone()),
         route: live.route,
+        // The family names the receiver behind `route`, so it travels with it.
+        receiver_brand: live.receiver_brand,
         capture_id: live.capture_id.or_else(|| known.capture_id.clone()),
         kind: if known.kind == DeviceKind::Unknown {
             live.kind
@@ -881,6 +922,7 @@ fn demo_keyboard() -> DeviceRecord {
         driver_id: None,
         registry_model_id: None,
         route: None,
+        receiver_brand: None,
         capture_id: None,
         kind: DeviceKind::Keyboard,
         capabilities: Some(Capabilities {
@@ -898,13 +940,15 @@ fn demo_keyboard() -> DeviceRecord {
 
 /// Last step of the device-kind precedence chain:
 ///
-/// > **asset registry** > HID++ `0x0005` > Bolt pairing register
+/// > **asset registry** > HID++ `0x0005` > register
 ///
-/// The two HID++ sources are already folded into `hid_kind` by
-/// `resolve_device_kind` (`crates/openlogi-hid/src/inventory/mappings.rs`); this applies
-/// the final override. Adding a kind source means slotting it into this one
-/// chain — here if it should beat the HID++ sources, in `resolve_device_kind`
-/// otherwise — and updating both docs.
+/// where *register* is the Bolt pairing register for receiver-attached
+/// devices and the curated identity registry (`direct_identity_kind`) on the
+/// direct path. The two HID++ sources are already folded into `hid_kind` by
+/// `resolve_device_kind` (`crates/openlogi-device/src/inventory/mappings.rs`);
+/// this applies the final override. Adding a kind source means slotting it
+/// into this one chain — here if it should beat the HID++ sources, in
+/// `resolve_device_kind` otherwise — and updating both docs.
 ///
 /// The registry type wins because it is per-model and human-maintained, so a
 /// device that matched a known depot is classified by what that model *is* —

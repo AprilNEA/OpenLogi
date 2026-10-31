@@ -7,11 +7,11 @@ use std::{error::Error, io};
 use async_hid::{AsyncHidRead, AsyncHidWrite, DeviceInfo, DeviceReader, DeviceWriter};
 #[cfg(target_os = "windows")]
 use futures_lite::StreamExt as _;
-use hidpp::channel::{LONG_REPORT_ID, SHORT_REPORT_ID};
+use hidpp::channel::SHORT_REPORT_ID;
 #[cfg(target_os = "windows")]
 use hidpp::{
     async_trait,
-    channel::{LONG_REPORT_LENGTH, RawHidChannel, SHORT_REPORT_LENGTH},
+    channel::{RawHidChannel, SHORT_REPORT_LENGTH},
 };
 #[cfg(target_os = "windows")]
 use tokio::sync::Mutex;
@@ -27,19 +27,26 @@ use super::windows_hid::NativeHidWriter;
 #[cfg(target_os = "windows")]
 use super::HID_BACKEND;
 
-const VERY_LONG_REPORT_ID: u8 = 0x12;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReportEndpoint {
     Short,
     Long,
 }
 
-fn endpoint_for_report_id(report_id: u8) -> Option<ReportEndpoint> {
-    match report_id {
-        SHORT_REPORT_ID => Some(ReportEndpoint::Short),
-        LONG_REPORT_ID | VERY_LONG_REPORT_ID => Some(ReportEndpoint::Long),
-        _ => None,
+/// The collection a report with `report_id` is written to.
+///
+/// Windows splits a device's top-level collections into separate handles, and
+/// only the short collection carries report `0x10`. Every other report goes to
+/// the long handle — the node the device was matched on — which carries the
+/// long and very-long HID++ reports and, on the MX Creative Keypad, its vendor
+/// channel (output `0x14`, input `0x13`): those reach the same node on macOS,
+/// where they were hardware-verified. A report the node does not declare is
+/// refused by the OS on write, so routing it there cannot misdeliver it.
+fn endpoint_for_report_id(report_id: u8) -> ReportEndpoint {
+    if report_id == SHORT_REPORT_ID {
+        ReportEndpoint::Short
+    } else {
+        ReportEndpoint::Long
     }
 }
 
@@ -265,17 +272,18 @@ impl RawHidChannel for WindowsHidppChannel {
 
     async fn write_report(&self, src: &[u8]) -> Result<usize, Box<dyn Error + Send + Sync>> {
         self.device_io.ensure_allowed()?;
-        let endpoint = match src.first().copied().and_then(endpoint_for_report_id) {
-            Some(ReportEndpoint::Short) => self.short.as_ref(),
-            Some(ReportEndpoint::Long) => Some(&self.long),
-            _ => None,
+        let report_id = src.first().copied().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "empty HID output report")
+        })?;
+        let endpoint = match endpoint_for_report_id(report_id) {
+            ReportEndpoint::Short => self.short.as_ref(),
+            ReportEndpoint::Long => Some(&self.long),
         }
         .ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::Unsupported,
                 format!(
-                    "unsupported HID++ report id {:#04x}",
-                    src.first().copied().unwrap_or_default()
+                    "report id {report_id:#04x} needs the short collection, which this device lacks"
                 ),
             )
         })?;
@@ -293,7 +301,6 @@ impl RawHidChannel for WindowsHidppChannel {
     async fn read_report(&self, buf: &mut [u8]) -> Result<usize, Box<dyn Error + Send + Sync>> {
         if let Some(short) = &self.short {
             let mut short_buf = [0u8; SHORT_REPORT_LENGTH];
-            let mut long_buf = [0u8; LONG_REPORT_LENGTH];
             let mut short_reader = short.reader.lock().await;
             let mut long_reader = self.long.reader.lock().await;
             // `select!` drops the losing read future, but no report is lost:
@@ -302,14 +309,19 @@ impl RawHidChannel for WindowsHidppChannel {
             // drop, and the next `read_report` — re-locking this same endpoint —
             // resumes it and retrieves the report. This relies on reusing the
             // per-endpoint reader across calls; do not reopen readers per read.
+            //
+            // The long handle reads straight into the caller's buffer, which
+            // the `hidpp` read loop sizes for the widest input report: the
+            // MX Creative Keypad's 32-byte grid frames arrive on this handle,
+            // and a 20-byte HID++ long buffer would truncate them.
             return tokio::select! {
                 res = short_reader.read_input_report(&mut short_buf) => match res {
                     Ok(len) => copy_report(&short_buf, len, buf),
                     Err(async_hid::HidError::Disconnected) => self.park_disconnected().await,
                     Err(e) => Err(e.into()),
                 },
-                res = long_reader.read_input_report(&mut long_buf) => match res {
-                    Ok(len) => copy_report(&long_buf, len, buf),
+                res = long_reader.read_input_report(buf) => match res {
+                    Ok(len) => Ok(len),
                     Err(async_hid::HidError::Disconnected) => self.park_disconnected().await,
                     Err(e) => Err(e.into()),
                 },
@@ -358,23 +370,26 @@ fn copy_report(
 
 #[cfg(test)]
 mod tests {
+    use hidpp::channel::LONG_REPORT_ID;
+
     use super::*;
+
+    /// Logitech's very-long HID++ lighting report.
+    const VERY_LONG_REPORT_ID: u8 = 0x12;
 
     #[test]
     fn report_ids_select_their_windows_endpoint() {
         assert_eq!(
             endpoint_for_report_id(SHORT_REPORT_ID),
-            Some(ReportEndpoint::Short)
+            ReportEndpoint::Short
         );
-        assert_eq!(
-            endpoint_for_report_id(LONG_REPORT_ID),
-            Some(ReportEndpoint::Long)
-        );
+        assert_eq!(endpoint_for_report_id(LONG_REPORT_ID), ReportEndpoint::Long);
         assert_eq!(
             endpoint_for_report_id(VERY_LONG_REPORT_ID),
-            Some(ReportEndpoint::Long)
+            ReportEndpoint::Long
         );
-        assert_eq!(endpoint_for_report_id(0x13), None);
+        // The MX Creative Keypad's vendor image write rides the matched node.
+        assert_eq!(endpoint_for_report_id(0x14), ReportEndpoint::Long);
     }
 
     /// `HidEndpoint::write_report` boxes the `async_hid` error before the

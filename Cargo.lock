@@ -5588,14 +5588,20 @@ name = "openlogi-agent-core"
 version = "0.8.19"
 dependencies = [
  "axwatch",
+ "backon",
  "futures-lite",
+ "image",
  "openlogi-core",
  "openlogi-device",
+ "openlogi-device-registry",
  "openlogi-fixture",
  "openlogi-hid",
  "openlogi-hook",
  "openlogi-inject",
  "openlogi-ipc",
+ "openlogi-ui",
+ "resvg 0.46.0",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
 ]
@@ -5792,6 +5798,7 @@ dependencies = [
  "atomic-write-file",
  "futures-concurrency",
  "futures-lite",
+ "image",
  "objc2-io-kit",
  "openlogi-async-hid",
  "openlogi-core",

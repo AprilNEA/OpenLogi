@@ -6,12 +6,17 @@
 //! while the keyboard physically makes room. Only one key is selected at a
 //! time.
 //!
-//! Which keys appear is the asset's call (see [`key_points::key_slots`]): a
-//! depot with control markers shows the keyboard's own HID++ controls, each
-//! bound per device through [`AppState::commit_binding`] and diverted by the
-//! agent while bound; a depot without them shows the OS-hook F-row, bound
-//! globally through [`AppState::commit_keyboard_binding`]. The panel lists
-//! the same action catalog the mouse picker uses, plus a Power User section.
+//! Which keys appear is the asset's call (see [`key_points::key_surface`]): a
+//! depot with control markers shows the keyboard's own HID++ controls on the
+//! photo, each bound per device through [`AppState::commit_binding`] and
+//! diverted by the agent while bound; a keypad whose depot marks its keys,
+//! or whose render is the stock one OpenLogi measured, has its keys drawn on
+//! the device render itself, the way Options+ shows it; any other keypad
+//! shows its own keycaps drawn from the device model beside the render, bound
+//! the same per-device way; any other markerless device shows the OS-hook F-row,
+//! bound globally through [`AppState::commit_keyboard_binding`]. The panel
+//! lists the same action catalog the mouse picker uses, plus a Power User
+//! section.
 
 #![expect(
     clippy::needless_pass_by_value,
@@ -29,7 +34,7 @@ use gpui::{
 };
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{Selectable as _, h_flex, input::InputState, v_flex};
-use openlogi_core::binding::{Action, WorkflowStep};
+use openlogi_core::binding::{Action, ActionRingIcon, ButtonId, KeypadPage, WorkflowStep};
 
 use super::editors::{
     PowerUserKind, text_editor_placeholder, text_editor_seed, workflow_editor_seed,
@@ -42,19 +47,23 @@ use crate::features::binding_editor::{
 use crate::features::mouse::geometry::asset_dimensions_for_png;
 use crate::features::profiles::profile_name;
 use crate::services::assets::{GlowGeometry, ResolvedAsset};
-use crate::state::{AppState, StateEvent, StateEvents};
+use crate::state::{AppState, DeviceKey, DeviceRecord, StateEvent, StateEvents};
 use crate::ui::action::localized_action_label;
 use crate::ui::components::MenuRow;
 use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
 use gpui::ease_in_out;
 use gpui::{Animation, AnimationExt, img};
 
+mod callout_layout;
 mod key_points;
+mod keypad;
 
+use callout_layout::{CalloutLayout, CardRect, callout_layout, side_bands_width};
 pub(crate) use key_points::KeyTarget;
-use key_points::key_slots;
 #[cfg(test)]
 use key_points::{EVEN_SPACING_END, EVEN_SPACING_START, key_x_fractions};
+use key_points::{KeySurface, key_surface, keypad_canvas};
+use keypad::{KeypadPane, KeypadPhotoPane, LastPage, keypad_page_bar, keypad_photo_render_size};
 
 /// Width of the config panel (CSS px) when a key is selected.
 const PANEL_W: f32 = 320.;
@@ -70,12 +79,14 @@ const CALLOUT_BAND_H: f32 = 118.;
 /// padding, footer) — the viewport height minus this and the callout band is
 /// what the render may occupy before it scales down to fit.
 const KEYS_VERTICAL_RESERVE: f32 = 224.;
+/// Horizontal chrome around the Keys tab body: the device rail and the tab's
+/// padding.
+const KEYS_HORIZONTAL_RESERVE: f32 = crate::ui::theme::DETAIL_RAIL_W + 48.;
 /// Floor on the render height so a tiny window still shows a usable model.
 const KEYBOARD_MIN_IMG_H: f32 = 160.;
-const KEY_CALLOUT_W: f32 = 60.;
 const KEY_CALLOUT_H: f32 = 48.;
-const KEY_CALLOUT_TOP_UPPER: f32 = 4.;
-const KEY_CALLOUT_TOP_LOWER: f32 = 50.;
+const KEY_CALLOUT_TOP_UPPER: f32 = 2.;
+const KEY_CALLOUT_TOP_LOWER: f32 = 56.;
 const KEY_TARGET_W: f32 = 30.;
 const KEY_TARGET_H: f32 = 30.;
 const KEY_HOTSPOT_DOT: f32 = 12.;
@@ -96,7 +107,22 @@ pub struct FunctionRowView {
     workflow_draft: Vec<WorkflowStep>,
     /// Whether the Open Application editor rejected a blank path.
     application_invalid: bool,
+    /// The keypad binding page the grid keys are being edited on — this
+    /// editor's own choice, independent of the page the keypad is showing.
+    keypad_page: KeypadPage,
+    /// The device and app profile being edited: another device starts back
+    /// on page 1, and either change drops the open editor.
+    edit_scope: EditScope,
     _state_obs: Subscription,
+}
+
+/// Which device's bindings, in which app profile, the view edits — beside
+/// the key and the page, what a draft was started for.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct EditScope {
+    device: Option<DeviceKey>,
+    /// The open app profile, `None` for the device's global one.
+    profile: Option<String>,
 }
 
 impl FunctionRowView {
@@ -111,6 +137,8 @@ impl FunctionRowView {
             text_state: None,
             workflow_draft: Vec::new(),
             application_invalid: false,
+            keypad_page: KeypadPage::FIRST,
+            edit_scope: EditScope::default(),
             _state_obs: state_obs,
         }
     }
@@ -119,13 +147,28 @@ impl FunctionRowView {
     pub(crate) fn select_key(&mut self, idx: Option<usize>, cx: &mut Context<Self>) {
         // Changing selection also drops any open editor + its drafts.
         if self.selected_key != idx {
-            self.active_editor = None;
-            self.text_state = None;
-            self.workflow_draft.clear();
-            self.application_invalid = false;
+            self.drop_editor();
         }
         self.selected_key = idx;
         cx.notify();
+    }
+
+    /// Close the open editor and discard its drafts. Every change of the key
+    /// being edited — another key, page, device, or app profile — calls
+    /// this, or a draft started for one would save onto the next.
+    fn drop_editor(&mut self) {
+        self.active_editor = None;
+        self.text_state = None;
+        self.workflow_draft.clear();
+        self.application_invalid = false;
+    }
+
+    /// Edit the grid keys on `page`, dropping any open editor when it moves.
+    fn move_keypad_page(&mut self, page: KeypadPage) {
+        if self.keypad_page != page {
+            self.keypad_page = page;
+            self.drop_editor();
+        }
     }
 
     /// Toggle a key selection from a click on either its callout or key hit
@@ -141,6 +184,43 @@ impl FunctionRowView {
         }
     }
 
+    /// Follow the selected device and the open app profile — dropping a
+    /// draft started for another, and starting a new device on page 1 — keep
+    /// the edited page on the device's pages (clamped when pages were
+    /// removed), and answer the device's last page and whether removing it
+    /// would drop bindings (so removal asks).
+    fn sync_edit_scope(&mut self, state: Option<&AppState>) -> LastPage {
+        let scope = EditScope {
+            device: state
+                .and_then(AppState::current_record)
+                .map(DeviceRecord::device_key),
+            profile: state.and_then(AppState::editing_app).map(str::to_owned),
+        };
+        if self.edit_scope != scope {
+            if self.edit_scope.device != scope.device {
+                self.move_keypad_page(KeypadPage::FIRST);
+            }
+            self.drop_editor();
+            self.edit_scope = scope;
+        }
+        let last = state.map_or(KeypadPage::FIRST, AppState::current_keypad_pages);
+        self.move_keypad_page(self.keypad_page.min(last));
+        // Every profile's keys, not just the open one's: removal drops them all.
+        let binds_keys = state.is_some_and(|state| state.current_keypad_page_binds(last));
+        LastPage {
+            page: last,
+            binds_keys,
+        }
+    }
+
+    /// Edit the grid keys on `page`.
+    pub(crate) fn set_keypad_page(&mut self, page: KeypadPage, cx: &mut Context<Self>) {
+        if self.keypad_page != page {
+            self.move_keypad_page(page);
+            cx.notify();
+        }
+    }
+
     pub(crate) fn open_editor(&mut self, kind: PowerUserKind, cx: &mut Context<Self>) {
         self.active_editor = Some(kind);
         self.text_state = None;
@@ -150,10 +230,7 @@ impl FunctionRowView {
     }
 
     pub(crate) fn close_editor(&mut self, cx: &mut Context<Self>) {
-        self.active_editor = None;
-        self.text_state = None;
-        self.workflow_draft.clear();
-        self.application_invalid = false;
+        self.drop_editor();
         cx.notify();
     }
 
@@ -205,40 +282,52 @@ impl Render for FunctionRowView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state = AppState::try_read(cx);
         let asset = state.and_then(|state| state.current_record()?.asset.as_ref());
+        // Without a record there is no device surface to trust, and the F-row
+        // fallback is as honest as anything that shows.
+        let known_keypad = state.and_then(AppState::current_keypad);
         let glow = state.and_then(|state| {
             state
                 .current_record()
                 .and_then(|record| keyboard_glow(state, record))
         });
 
-        let viewport_h = f32::from(window.viewport_size().height);
-        let render_size = keyboard_render_size(asset, viewport_h);
+        let viewport = window.viewport_size();
+        let viewport_h = f32::from(viewport.height);
         let image_path = asset.map(|asset| asset.image_path.clone());
-        let slots: Vec<KeySlot> = key_slots(asset)
-            .into_iter()
-            .enumerate()
-            .map(|(idx, layout)| {
-                let bound = state.and_then(|state| bound_action(state, &layout.target));
-                KeySlot {
-                    idx,
-                    label: layout.legend.into(),
-                    x_frac: layout.point.x_frac,
-                    y_frac: layout.point.y_frac,
-                    binding: binding_label(bound.as_ref()),
-                    binding_icon: bound.as_ref().map(action_icon_path),
-                    target: layout.target,
-                }
-            })
-            .collect();
+        let surface = key_surface(asset, known_keypad);
+        let keypad = matches!(surface, KeySurface::Keypad(_));
+        // A keypad on its photo draws its keys on the render itself: the
+        // keyboard's callout band cannot lay eleven bubbles across a
+        // portrait render, and the keys sit under the user's eyes already.
+        let keypad_photo = matches!(surface, KeySurface::Photo(_)) && known_keypad.is_some();
+        // The schematic keeps photo and keycaps on one alignment line.
+        let photo = asset
+            .filter(|asset| asset.png_height > 0)
+            .map_or((0., 0.), |asset| {
+                asset_dimensions_for_png(asset, keypad_canvas().1, 360.)
+            });
+        let last_page = self.sync_edit_scope(state);
+        let pal = theme::palette(cx);
+        let slots = key_slots_from_layouts(surface, state, self.keypad_page);
+        let render_size = if keypad_photo {
+            keypad_photo_render_size(asset, viewport_h)
+        } else {
+            let markers: Vec<(f32, f32)> = slots
+                .iter()
+                .map(|slot| (slot.x_frac, slot.y_frac))
+                .collect();
+            keyboard_render_size(
+                asset,
+                viewport_h,
+                keyboard_max_width(f32::from(viewport.width), side_bands_width(&markers)),
+            )
+        };
 
         // A stale selection can outlive a device switch to a shorter F-row;
         // drop it instead of indexing past the new slot list.
         if self.selected_key.is_some_and(|idx| idx >= slots.len()) {
             self.selected_key = None;
-            self.active_editor = None;
-            self.text_state = None;
-            self.workflow_draft.clear();
-            self.application_invalid = false;
+            self.drop_editor();
         }
         let selected = self.selected_key;
         let hovered = self.hovered_key;
@@ -273,32 +362,101 @@ impl Render for FunctionRowView {
             }
         }
         let view = cx.entity();
-        let keyboard =
+        // The same selection, panel, and editor machinery on either surface:
+        // the keyboard's photo with callouts, or the keypad's photo beside
+        // drawn keycaps.
+        let device = if keypad {
+            KeypadPane::new(slots.clone(), image_path, photo, view.clone())
+                .selected(selected)
+                .hovered(hovered)
+                .into_any_element()
+        } else if keypad_photo {
+            KeypadPhotoPane::new(slots.clone(), image_path, render_size, view.clone())
+                .selected(selected)
+                .hovered(hovered)
+                .into_any_element()
+        } else {
             KeyboardPane::new(slots.clone(), image_path, glow, render_size, view.clone())
                 .selected(selected)
-                .hovered(hovered);
+                .hovered(hovered)
+                .into_any_element()
+        };
         let panel = selected.map(|selected| self.config_panel(selected, &slots, &view, cx));
+        let page_bar = (keypad || keypad_photo)
+            .then(|| keypad_page_bar(self.keypad_page, last_page, &view, &pal));
 
         // The whole row animates as one: when a key is selected the right-side
         // panel grows in and the keyboard nudges left to make room.
         v_flex()
             .w_full()
             .items_center()
-            .child(InspectorRow::new(keyboard).panel(panel))
+            .gap_3()
+            .children(page_bar)
+            .child(InspectorRow::new(device).panel(panel))
     }
 }
 
-/// The keyboard render size: the actual PNG aspect at up to [`KEYBOARD_W`]
-/// wide, shrunk to fit the viewport height. Sizing off the real aspect keeps
+fn binding_line(
+    binding: SharedString,
+    icon: Option<&'static str>,
+    max_w: f32,
+    highlighted: bool,
+    pal: &Palette,
+) -> gpui::Div {
+    h_flex()
+        .items_center()
+        .justify_center()
+        .gap(px(2.))
+        .max_w(px(max_w))
+        .when_some(icon, |row, icon| {
+            row.child(
+                svg()
+                    .path(icon)
+                    .size(px(9.))
+                    .flex_none()
+                    .text_color(if highlighted {
+                        rgb(ACCENT_BLUE).into()
+                    } else {
+                        pal.text_muted
+                    }),
+            )
+        })
+        .child(
+            div()
+                .min_w_0()
+                .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .text_caption()
+                .text_color(if highlighted {
+                    rgb(ACCENT_BLUE).into()
+                } else {
+                    pal.text_muted
+                })
+                .child(binding),
+        )
+}
+
+/// The widest the render may get. A board without cards beside it keeps
+/// [`KEYBOARD_W`]. One with them gives up as much width as keeps the whole
+/// pane inside the Keys tab, but never more than the pane would have
+/// overflowed with the render alone, so the band never makes it wider.
+fn keyboard_max_width(viewport_w: f32, side_bands_w: f32) -> f32 {
+    let room = (viewport_w - KEYS_HORIZONTAL_RESERVE).max(KEYBOARD_W);
+    KEYBOARD_W.min(room - side_bands_w)
+}
+
+/// The keyboard render size: the actual PNG aspect at up to `max_w` wide,
+/// shrunk to fit the viewport height. Sizing off the real aspect keeps
 /// `ObjectFit::Contain` from letterboxing and keeps the marker overlays
 /// registered with the rendered keys — the G513 render (with wrist rest) is
 /// nearly twice as tall as an MX Keys render at the same width.
-fn keyboard_render_size(asset: Option<&ResolvedAsset>, viewport_h: f32) -> (f32, f32) {
+fn keyboard_render_size(asset: Option<&ResolvedAsset>, viewport_h: f32, max_w: f32) -> (f32, f32) {
     let Some(asset) = asset.filter(|a| a.png_height > 0) else {
         return FALLBACK_KEYBOARD_SIZE;
     };
     let target_h = (viewport_h - KEYS_VERTICAL_RESERVE - CALLOUT_BAND_H).max(KEYBOARD_MIN_IMG_H);
-    asset_dimensions_for_png(asset, target_h, KEYBOARD_W)
+    asset_dimensions_for_png(asset, target_h, max_w)
 }
 
 /// One key with its resolved layout + binding.
@@ -311,22 +469,71 @@ struct KeySlot {
     y_frac: f32,
     binding: SharedString,
     binding_icon: Option<&'static str>,
+    /// The glyph the keypad's LCD shows for this key's binding — the agent
+    /// paints exactly this icon on the device, so the render mirrors it.
+    lcd_icon: Option<&'static str>,
 }
 
-/// The action `target` is bound to in the selected device's open profile
-/// (a control) or the global F-row map (a function key). `None` when the key
-/// is on its native function.
+/// One [`KeySlot`] per displayed key, each carrying the action it is bound
+/// to right now — the panes and the config panel render the same truth
+/// from the same source.
+/// The tab's keys with their current bindings, grid keys read on `page`.
+fn key_slots_from_layouts(
+    surface: KeySurface,
+    state: Option<&AppState>,
+    page: KeypadPage,
+) -> Vec<KeySlot> {
+    let key_actions = state.map(AppState::keypad_key_actions).unwrap_or_default();
+    surface
+        .slots()
+        .into_iter()
+        .enumerate()
+        .map(|(idx, mut layout)| {
+            layout.target = layout.target.on_page(page);
+            let bound = match &layout.target {
+                // The face the keypad shows, which a long press can set
+                // without a press action.
+                KeyTarget::Grid(slot) => key_actions.get(&ButtonId::Grid(*slot)).cloned(),
+                target => state.and_then(|state| bound_action(state, target)),
+            };
+            KeySlot {
+                idx,
+                label: layout.legend.into(),
+                x_frac: layout.point.x_frac,
+                y_frac: layout.point.y_frac,
+                binding: binding_label(bound.as_ref()),
+                binding_icon: bound.as_ref().map(action_icon_path),
+                lcd_icon: bound
+                    .as_ref()
+                    .map(|action| ActionRingIcon::for_action(action).asset_path()),
+                target: layout.target,
+            }
+        })
+        .collect()
+}
+
+/// The action `target` is bound to in the selected device's open profile:
+/// a per-device binding (a control or keypad key) or the global F-row map
+/// (a function key). `None` when the key is on its native function. A
+/// control bound to [`Action::None`] is suppressed, so that is its action; a
+/// keypad key is only ever observed, so [`Action::None`] there does nothing.
 pub(super) fn bound_action(state: &AppState, target: &KeyTarget) -> Option<Action> {
     match target {
         KeyTarget::Control(button) => state.button_bindings().get(button).cloned(),
+        KeyTarget::Grid(slot) => state
+            .button_bindings()
+            .get(&ButtonId::Grid(*slot))
+            .filter(|action| **action != Action::None)
+            .cloned(),
         KeyTarget::FunctionKey(trigger) => state.keyboard_bindings().get(trigger).cloned(),
     }
 }
 
-/// Persist `action` for `target`: a control binds per device (and per open
-/// app profile) like any mouse button; a function key binds globally.
-/// `None` removes the assignment in this scope (inheriting the device default
-/// in an app profile); for a function key it clears the global trigger.
+/// Persist `action` for `target`: controls and keypad keys bind per device
+/// (and per open app profile) like any mouse button; a function key binds
+/// globally. `None` removes the assignment in this scope (inheriting the
+/// device default in an app profile); for a function key it clears the global
+/// trigger.
 pub(super) fn commit_key_action(
     state: &mut AppState,
     target: &KeyTarget,
@@ -337,6 +544,10 @@ pub(super) fn commit_key_action(
             Some(action) => state.commit_binding(*button, action),
             None => state.clear_binding(*button),
         },
+        KeyTarget::Grid(slot) => match action {
+            Some(action) => state.commit_binding(ButtonId::Grid(*slot), action),
+            None => state.clear_binding(ButtonId::Grid(*slot)),
+        },
         KeyTarget::FunctionKey(trigger) => state.commit_keyboard_binding(trigger.clone(), action),
     }
 }
@@ -344,26 +555,33 @@ pub(super) fn commit_key_action(
 /// The explicit action in the scope edited by the inspector. In an app profile,
 /// an inherited action is not selected; `None` selects the default-profile row.
 fn selected_key_action(state: &AppState, target: &KeyTarget) -> Option<Action> {
-    match target {
-        KeyTarget::Control(button) if state.editing_app().is_some() => state
+    let button = match target {
+        KeyTarget::Control(button) => *button,
+        KeyTarget::Grid(slot) => ButtonId::Grid(*slot),
+        KeyTarget::FunctionKey(_) => return bound_action(state, target),
+    };
+    if state.editing_app().is_some() {
+        state
             .editing_app_overrides()
-            .and_then(|overrides| overrides.get(button))
-            .cloned(),
-        _ => bound_action(state, target),
+            .and_then(|overrides| overrides.get(&button))
+            .cloned()
+    } else {
+        bound_action(state, target)
     }
 }
 
-/// The two-pane row: keyboard photo + an optional side panel.
+/// The two-pane row: keyboard photo (or keypad keycaps) + an optional side
+/// panel.
 #[derive(IntoElement)]
 struct InspectorRow {
-    keyboard: KeyboardPane,
+    keyboard: AnyElement,
     panel: Option<gpui::Div>,
 }
 
 impl InspectorRow {
-    fn new(keyboard: KeyboardPane) -> Self {
+    fn new(keyboard: impl Into<AnyElement>) -> Self {
         Self {
-            keyboard,
+            keyboard: keyboard.into(),
             panel: None,
         }
     }
@@ -449,16 +667,23 @@ impl RenderOnce for KeyboardPane {
         let selected = self.selected;
         let hovered = self.hovered;
         let pal = theme::palette(cx);
+        let markers: Vec<(f32, f32)> = self
+            .slots
+            .iter()
+            .map(|slot| (slot.x_frac, slot.y_frac))
+            .collect();
+        let layout = callout_layout(&markers, img_w, img_h);
+        let image_left = layout.image_left;
 
         div()
             .relative()
-            .w(px(img_w))
+            .w(px(layout.pane_w))
             .h(px(CALLOUT_BAND_H + img_h))
             .child(
             div()
                 .absolute()
                 .top(px(CALLOUT_BAND_H))
-                .left(px(0.))
+                .left(px(image_left))
                 .w(px(img_w))
                 .h(px(img_h))
                 // The keyboard's RGB paints *behind* the render, so the opaque
@@ -470,22 +695,16 @@ impl RenderOnce for KeyboardPane {
                 })
                     .child(image_or_fallback(img_path, img_w, img_h, &pal)),
             )
-            .child(keyboard_leader_canvas(
-                self.slots.clone(),
-                selected,
-                hovered,
-                (img_w, img_h),
-            ))
+            .child(keyboard_leader_canvas(&layout, selected, hovered, img_h))
             .children({
-                let count = self.slots.len();
                 let view_for_callouts = view_clone.clone();
+                let cards = layout.cards.clone();
                 self.slots.iter().cloned().map(move |slot| {
                     let highlighted = key_is_highlighted(slot.idx, selected, hovered);
                     KeyCallout {
+                        card: cards[slot.idx],
                         slot,
-                        count,
                         highlighted,
-                        img_w,
                         view: view_for_callouts.clone(),
                     }
                 })
@@ -495,7 +714,7 @@ impl RenderOnce for KeyboardPane {
                 div()
                     .absolute()
                     .top(px(CALLOUT_BAND_H))
-                    .left(px(0.))
+                    .left(px(image_left))
                     .w(px(img_w))
                     .h(px(img_h))
                     .children(self.slots.into_iter().map(|slot| {
@@ -506,13 +725,12 @@ impl RenderOnce for KeyboardPane {
     }
 }
 
-/// One callout bubble in the band above the keyboard.
+/// One callout bubble, above its key or beside it (see [`callout_layout`]).
 #[derive(IntoElement)]
 struct KeyCallout {
     slot: KeySlot,
-    count: usize,
+    card: CardRect,
     highlighted: bool,
-    img_w: f32,
     view: Entity<FunctionRowView>,
 }
 
@@ -520,8 +738,7 @@ impl RenderOnce for KeyCallout {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let pal = theme::palette(cx);
         let idx = self.slot.idx;
-        let left = callout_left_px(idx, self.count, self.img_w, KEY_CALLOUT_W);
-        let top = callout_top_px(idx);
+        let CardRect { left, top, width } = self.card;
         let view_hover = self.view.clone();
         let view_click = self.view;
         let binding = self.slot.binding;
@@ -539,7 +756,7 @@ impl RenderOnce for KeyCallout {
             .absolute()
             .top(px(top))
             .left(px(left))
-            .w(px(KEY_CALLOUT_W))
+            .w(px(width))
             .h(px(KEY_CALLOUT_H))
             .px_1()
             .justify_center()
@@ -567,7 +784,7 @@ impl RenderOnce for KeyCallout {
             })
             .child(
                 div()
-                    .max_w(px(KEY_CALLOUT_W - 8.))
+                    .max_w(px(width - 8.))
                     .whitespace_nowrap()
                     .text_ellipsis()
                     .text_caption()
@@ -579,36 +796,13 @@ impl RenderOnce for KeyCallout {
                     })
                     .child(self.slot.label.clone()),
             )
-            .child(
-                h_flex()
-                    .items_center()
-                    .justify_center()
-                    .gap(px(2.))
-                    .max_w(px(KEY_CALLOUT_W - 8.))
-                    .when_some(binding_icon, |row, icon| {
-                        row.child(svg().path(icon).size(px(9.)).flex_none().text_color(
-                            if highlighted {
-                                rgb(ACCENT_BLUE).into()
-                            } else {
-                                pal.text_muted
-                            },
-                        ))
-                    })
-                    .child(
-                        div()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .whitespace_nowrap()
-                            .text_caption()
-                            .text_color(if highlighted {
-                                rgb(ACCENT_BLUE).into()
-                            } else {
-                                pal.text_muted
-                            })
-                            .child(binding),
-                    ),
-            )
+            .child(binding_line(
+                binding,
+                binding_icon,
+                width - 8.,
+                highlighted,
+                &pal,
+            ))
             .on_hover(move |hovered, _window, cx| {
                 let next = (*hovered).then_some(idx);
                 view_hover.update(cx, |v, vcx| v.set_hovered_key(next, vcx));
@@ -686,49 +880,43 @@ fn binding_label(action: Option<&Action>) -> gpui::SharedString {
 }
 
 fn keyboard_leader_canvas(
-    slots: Vec<KeySlot>,
+    layout: &CalloutLayout,
     selected: Option<usize>,
     hovered: Option<usize>,
-    (img_w, img_h): (f32, f32),
+    img_h: f32,
 ) -> impl IntoElement {
-    let guides: Vec<(usize, f32, f32)> =
-        slots.iter().map(|s| (s.idx, s.x_frac, s.y_frac)).collect();
+    let leaders = layout.leaders.clone();
     canvas(
-        move |_bounds, _, _| (guides, selected, hovered),
+        move |_bounds, _, _| (leaders, selected, hovered),
         move |bounds, payload, window, _app| {
-            let (guides, selected, hovered) = payload;
-            paint_keyboard_leaders(bounds, guides, selected, hovered, (img_w, img_h), window);
+            let (leaders, selected, hovered) = payload;
+            paint_keyboard_leaders(bounds, &leaders, selected, hovered, window);
         },
     )
     .absolute()
     .inset_0()
-    .w(px(img_w))
+    .w(px(layout.pane_w))
     .h(px(CALLOUT_BAND_H + img_h))
 }
 
 fn paint_keyboard_leaders(
     bounds: Bounds<gpui::Pixels>,
-    guides: Vec<(usize, f32, f32)>,
+    leaders: &[Vec<(f32, f32)>],
     selected: Option<usize>,
     hovered: Option<usize>,
-    (img_w, img_h): (f32, f32),
     window: &mut Window,
 ) {
-    let count = guides.len();
-    for (idx, x_frac, y_frac) in guides {
+    for (idx, corners) in leaders.iter().enumerate() {
         let highlighted = key_is_highlighted(idx, selected, hovered);
-        let key_x = x_frac * img_w;
-        let key_y = CALLOUT_BAND_H + (y_frac * img_h);
-        let callout_x = callout_center_x(idx, count, img_w);
-        let callout_bottom = callout_top_px(idx) + KEY_CALLOUT_H;
-        let start = bounds.origin + point(px(callout_x), px(callout_bottom));
-        let elbow = bounds.origin + point(px(callout_x), px(CALLOUT_BAND_H - 14.));
-        let end = bounds.origin + point(px(key_x), px(key_y));
-
         let mut path = PathBuilder::stroke(if highlighted { px(2.) } else { px(1.) });
-        path.move_to(start);
-        path.line_to(elbow);
-        path.line_to(end);
+        for (i, &(x, y)) in corners.iter().enumerate() {
+            let corner = bounds.origin + point(px(x), px(y));
+            if i == 0 {
+                path.move_to(corner);
+            } else {
+                path.line_to(corner);
+            }
+        }
         if let Ok(path) = path.build() {
             if highlighted {
                 window.paint_path(path, rgb(ACCENT_BLUE));
@@ -747,44 +935,12 @@ fn key_is_highlighted(idx: usize, selected: Option<usize>, hovered: Option<usize
     selected == Some(idx) || hovered == Some(idx)
 }
 
-/// Callout bubbles lay out *evenly* across the pane instead of over their
-/// keys: a dense F-row (a G513 packs Esc-F12 into half the render width)
-/// would otherwise stack the bubbles into an overlapping wall. The leader
-/// lines fan from each bubble down to its true key position.
-#[expect(
-    clippy::cast_precision_loss,
-    reason = "idx/count index the function row — at most a couple of dozen keys"
-)]
-fn callout_center_x(idx: usize, count: usize, image_w: f32) -> f32 {
-    let margin = KEY_CALLOUT_W / 2.0 + 4.0;
-    if count <= 1 {
-        return image_w / 2.0;
-    }
-    margin + (idx as f32) * (image_w - 2.0 * margin) / ((count - 1) as f32)
-}
-
-fn callout_left_px(idx: usize, count: usize, image_w: f32, callout_w: f32) -> f32 {
-    (callout_center_x(idx, count, image_w) - callout_w / 2.0).clamp(0.0, image_w - callout_w)
-}
-
 fn key_target_left_px(x_frac: f32, img_w: f32, target_w: f32) -> f32 {
     (x_frac * img_w - target_w / 2.0).clamp(0.0, img_w - target_w)
 }
 
 fn key_target_top_px(y_frac: f32, img_h: f32, target_h: f32) -> f32 {
     (y_frac * img_h - target_h / 2.0).clamp(0.0, img_h - target_h)
-}
-
-fn callout_top_px(idx: usize) -> f32 {
-    if callout_lane_is_lower(idx) {
-        KEY_CALLOUT_TOP_LOWER
-    } else {
-        KEY_CALLOUT_TOP_UPPER
-    }
-}
-
-fn callout_lane_is_lower(idx: usize) -> bool {
-    idx.is_multiple_of(2)
 }
 
 fn binding_after_pick(current: Option<&Action>, picked: Action) -> Option<Action> {
@@ -823,9 +979,10 @@ impl FunctionRowView {
         let state = AppState::try_read(cx);
         let current = state.and_then(|state| selected_key_action(state, &target));
         let uses_default = current.is_none();
-        // A control binds inside the open app profile, like a mouse button.
+        // A control or keypad key binds inside the open app profile, like a
+        // mouse button.
         let app = match target {
-            KeyTarget::Control(_) => {
+            KeyTarget::Control(_) | KeyTarget::Grid(_) => {
                 state.and_then(|state| state.editing_app().map(|app| profile_name(state, app)))
             }
             KeyTarget::FunctionKey(_) => None,

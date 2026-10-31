@@ -8,11 +8,12 @@
 //! of that, and `zune-jpeg` decodes it straight to BGRA in one pass. YUYV is
 //! the fallback for the few cameras that don't offer MJPEG.
 //!
-//! Resolution follows the session's [`Quality`]: the live preview streams 720p,
-//! while a snapshot takes the camera's largest mode. Note this only sizes
-//! *OpenLogi's own* stream — resolution is negotiated per handle, so it is not
-//! a device setting other applications observe, unlike the UVC controls in
-//! `uvc_linux`.
+//! Resolution follows the session's [`Quality`]: the live preview streams the
+//! [`StreamMode`] it is asked for (720p at about 30 fps when none is chosen),
+//! while a snapshot takes the camera's largest mode. Note this only shapes
+//! *OpenLogi's own* stream — resolution and frame rate are negotiated per
+//! handle (V4L2's set-format and set-parameters ioctls), so they are not device
+//! settings other applications observe, unlike the UVC controls in `uvc_linux`.
 //!
 //! Unlike macOS, Linux has no per-app camera consent model — access is decided
 //! by filesystem permission on `/dev/video*` (the `video` group). So
@@ -27,6 +28,7 @@ use v4l::buffer::Type;
 use v4l::io::mmap::Stream as MmapStream;
 use v4l::io::traits::{CaptureStream, Stream as StreamTrait};
 use v4l::video::Capture;
+use v4l::video::capture::Parameters;
 use v4l::{Device, Format, FourCC};
 use zune_core::bytestream::ZCursor;
 use zune_core::colorspace::ColorSpace;
@@ -34,12 +36,18 @@ use zune_core::options::DecoderOptions;
 use zune_jpeg::JpegDecoder;
 
 pub use crate::capture_types::{CaptureError, Frame};
-use crate::{CameraAuthorization, linux};
+use crate::stream_mode::DEFAULT_RESOLUTION;
+use crate::{CameraAuthorization, StreamMode, StreamModes, linux};
 
-/// Preview target. The driver picks the nearest size it supports, so this is a
-/// request rather than a guarantee — the negotiated format is read back.
-const PREVIEW_WIDTH: u32 = 1280;
-const PREVIEW_HEIGHT: u32 = 720;
+/// How long a camera needs after its [`CameraStream`] is dropped before it can
+/// be opened again without the driver stalling the caller.
+///
+/// A dropped stream is torn down on its own thread, and `VIDIOC_STREAMOFF`
+/// takes ~600 ms on a UVC camera (see [`CameraStream::drop`]). Opening sooner
+/// is not an error — [`with_busy_retry`] waits it out — but the wait would land
+/// on the caller's thread, so a caller reopening on purpose, a mode change,
+/// sleeps this long first instead. 100 ms of headroom over the measurement.
+pub const RELEASE_DELAY: Duration = Duration::from_millis(700);
 
 /// Size requested for a native-resolution session when the driver reports only
 /// stepwise or continuous frame sizes, with no discrete list to pick a maximum
@@ -79,10 +87,11 @@ impl Encoding {
 /// What a capture session optimises for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Quality {
-    /// 720p. Sharp in the preview box at a fraction of a 4K frame's decode,
-    /// copy and texture upload — and a live stream pays that cost 30 times a
-    /// second.
-    Preview,
+    /// The mode the user chose, or — when none is chosen, or the chosen one is
+    /// no longer offered — the camera's mode nearest 720p at 30 fps. Sharp in
+    /// the preview box at a fraction of a 4K frame's decode, copy and texture
+    /// upload, and a live stream pays that cost every frame.
+    Preview(Option<StreamMode>),
     /// The camera's largest mode. A snapshot is taken once and kept, so it is
     /// worth the sensor's full detail; this mirrors the macOS backend, where
     /// only the preview session carries a 720p preset.
@@ -97,8 +106,20 @@ struct Session {
     height: u32,
 }
 
-/// Open `unique_id` and negotiate a decodable format on it.
-fn open_session(unique_id: &str, quality: Quality) -> Result<Session, CaptureError> {
+/// An opened camera node and the pixel format this backend will stream it in.
+struct Opened {
+    device: Device,
+    encoding: Encoding,
+    fourcc: FourCC,
+}
+
+/// Open `unique_id` and pick the decodable pixel format to stream it in.
+///
+/// Shared by [`open_session`] and [`stream_modes`], so the list of modes a user
+/// chooses from is always the list of the format that will then be streamed —
+/// a camera's MJPEG and YUYV modes differ (many top out lower, or at a slower
+/// rate, in YUYV).
+fn open_device(unique_id: &str) -> Result<Opened, CaptureError> {
     let path = linux::node_for_unique_id(unique_id).ok_or(CaptureError::NotFound)?;
     let device = Device::with_path(&path).map_err(|error| {
         if error.kind() == std::io::ErrorKind::PermissionDenied {
@@ -130,22 +151,44 @@ fn open_session(unique_id: &str, quality: Quality) -> Result<Session, CaptureErr
             ))
         })?;
 
-    let (width, height) = match quality {
-        Quality::Preview => (PREVIEW_WIDTH, PREVIEW_HEIGHT),
-        Quality::Native => largest_size(&device, FourCC::new(fourcc)),
+    Ok(Opened {
+        device,
+        encoding,
+        fourcc: FourCC::new(fourcc),
+    })
+}
+
+/// Open `unique_id` and negotiate a decodable format on it.
+fn open_session(unique_id: &str, quality: Quality) -> Result<Session, CaptureError> {
+    let Opened {
+        device,
+        encoding,
+        fourcc,
+    } = open_device(unique_id)?;
+
+    let (size, fps) = match quality {
+        Quality::Preview(requested) => {
+            preview_target(&linux::stream_modes(&device, fourcc), requested)
+        }
+        Quality::Native => (largest_size(&device, fourcc), None),
     };
-    let requested = Format::new(width, height, FourCC::new(fourcc));
+    let requested = Format::new(size.0, size.1, fourcc);
     let actual = with_busy_retry(|| device.set_format(&requested))
         .map_err(|error| CaptureError::Setup(error.to_string()))?;
 
     // The driver may substitute a format it prefers; decoding the wrong layout
     // would render as noise, so fail loudly instead.
-    if actual.fourcc != FourCC::new(fourcc) {
+    if actual.fourcc != fourcc {
         return Err(CaptureError::Setup(format!(
-            "driver substituted {} for the requested {}",
+            "driver substituted {} for the requested {fourcc}",
             actual.fourcc,
-            FourCC::new(fourcc)
         )));
+    }
+
+    // After the format, not before: `S_FMT` resets the frame interval to the
+    // new size's default, so a rate set earlier would be thrown away.
+    if let Some(fps) = fps {
+        request_fps(&device, fps);
     }
 
     Ok(Session {
@@ -154,6 +197,46 @@ fn open_session(unique_id: &str, quality: Quality) -> Result<Session, CaptureErr
         width: actual.width,
         height: actual.height,
     })
+}
+
+/// The frame size, and frame rate when there is one to ask for, a preview
+/// session requests: the user's `requested` mode if the camera offers it, else
+/// the camera's default mode (see [`StreamModes::resolve`]).
+///
+/// A camera that lists no discrete modes — a stepwise or continuous driver, or
+/// one whose enumeration failed — gets the preset 720p and **no** frame rate,
+/// the behaviour before modes were selectable: there is no rate to ask for.
+fn preview_target(modes: &StreamModes, requested: Option<StreamMode>) -> ((u32, u32), Option<u32>) {
+    match modes.resolve(requested) {
+        Some(mode) => (mode.resolution(), Some(mode.fps)),
+        None => (DEFAULT_RESOLUTION, None),
+    }
+}
+
+/// Ask the driver for `fps` on this handle (V4L2's set-parameters ioctl).
+///
+/// Best effort: the stream is already usable at the driver's own rate, so a
+/// refusal costs the user's frame rate, not their preview. The driver answers
+/// with the rate it settled on, which can differ from the request, and that is
+/// what gets logged.
+fn request_fps(device: &Device, fps: u32) {
+    match with_busy_retry(|| device.set_params(&Parameters::with_fps(fps))) {
+        Ok(actual) => {
+            let granted = linux::fps_of(actual.interval);
+            if granted == Some(fps) {
+                tracing::debug!(fps, "camera frame rate set");
+            } else {
+                tracing::warn!(
+                    requested = fps,
+                    ?granted,
+                    "camera granted a different frame rate"
+                );
+            }
+        }
+        Err(error) => {
+            tracing::warn!(%error, fps, "camera refused the frame rate; streaming at its default");
+        }
+    }
 }
 
 /// The largest frame size the camera offers for `fourcc`, by pixel count.
@@ -315,12 +398,35 @@ impl Drop for CameraStream {
     }
 }
 
-/// Start a live capture stream on the camera with `unique_id`.
+/// The [`StreamMode`]s the camera with `unique_id` offers, in the pixel format
+/// [`start_stream`] will use — so every mode listed is one it can start.
+///
+/// Reads the driver's metadata only (no buffers, no streaming), so it is cheap
+/// and works while another handle, including this process's own preview, is
+/// streaming. Empty when the driver reports only stepwise or continuous sizes.
+///
+/// # Errors
+/// [`CaptureError::NotFound`] when no camera matches, [`CaptureError::AccessDenied`]
+/// without permission on the node, [`CaptureError::Setup`] when the camera
+/// offers neither MJPEG nor YUYV.
+pub fn stream_modes(unique_id: &str) -> Result<StreamModes, CaptureError> {
+    let Opened { device, fourcc, .. } = open_device(unique_id)?;
+    Ok(linux::stream_modes(&device, fourcc))
+}
+
+/// Start a live capture stream on the camera with `unique_id`, at `mode` when
+/// the camera offers it and at its default mode (nearest 720p at 30 fps)
+/// otherwise. A stale `mode` — saved for a camera that has since been swapped,
+/// or a driver that dropped it — therefore degrades to a working stream rather
+/// than failing.
 ///
 /// # Errors
 /// Same as [`capture_frame`], minus `Timeout` (frames are polled, not awaited).
-pub fn start_stream(unique_id: &str) -> Result<CameraStream, CaptureError> {
-    let session = open_session(unique_id, Quality::Preview)?;
+pub fn start_stream(
+    unique_id: &str,
+    mode: Option<StreamMode>,
+) -> Result<CameraStream, CaptureError> {
+    let session = open_session(unique_id, Quality::Preview(mode))?;
     let stream = build_stream(&session, STREAM_TIMEOUT)?;
 
     let shared = Arc::new(Shared {
@@ -531,5 +637,55 @@ mod tests {
         // slice below.
         assert_eq!(used(&[0; 10], 99), 10);
         assert_eq!(used(&[0; 10], 4), 4);
+    }
+
+    fn mode(width: u32, height: u32, fps: u32) -> StreamMode {
+        StreamMode { width, height, fps }
+    }
+
+    /// What a StreamCam-like camera offers over MJPEG.
+    fn modes() -> StreamModes {
+        StreamModes::new([
+            mode(1920, 1080, 60),
+            mode(1920, 1080, 30),
+            mode(1280, 720, 60),
+            mode(1280, 720, 30),
+            mode(640, 360, 30),
+        ])
+    }
+
+    #[test]
+    fn preview_asks_for_the_chosen_mode() {
+        let chosen = mode(1920, 1080, 60);
+        assert_eq!(
+            preview_target(&modes(), Some(chosen)),
+            ((1920, 1080), Some(60))
+        );
+    }
+
+    #[test]
+    fn preview_without_a_choice_uses_720p30() {
+        assert_eq!(preview_target(&modes(), None), ((1280, 720), Some(30)));
+    }
+
+    #[test]
+    fn preview_falls_back_when_the_chosen_mode_is_no_longer_offered() {
+        // Saved for another camera, or one this driver doesn't list.
+        let stale = mode(3840, 2160, 30);
+        assert_eq!(
+            preview_target(&modes(), Some(stale)),
+            ((1280, 720), Some(30))
+        );
+    }
+
+    #[test]
+    fn preview_of_a_camera_with_no_modes_keeps_the_preset_and_no_rate() {
+        // A stepwise driver: nothing to resolve against, and no rate to ask for.
+        let none = StreamModes::default();
+        assert_eq!(preview_target(&none, None), (DEFAULT_RESOLUTION, None));
+        assert_eq!(
+            preview_target(&none, Some(mode(1920, 1080, 60))),
+            (DEFAULT_RESOLUTION, None)
+        );
     }
 }

@@ -19,8 +19,8 @@ use super::hotspots::MouseControlId;
 use super::thumbwheel::ThumbwheelPreset;
 use super::view::MouseModelView;
 use crate::features::binding_editor::{
-    GESTURE_BUTTON_ICON, PickFn, action_icon_path, action_rows_matching, application_editor,
-    command_editor, editor_section, gesture_direction_icon,
+    ActionOffer, GESTURE_BUTTON_ICON, PickFn, action_icon_path, action_rows_with,
+    application_editor, command_editor, editor_section, gesture_direction_icon,
 };
 use crate::state::AppState;
 use crate::ui::action::localized_action_label;
@@ -47,6 +47,9 @@ pub(super) struct BindingInspectorData<'a> {
     /// [`ForceSensingFacts::current`](super::force_sensing::ForceSensingFacts::current)
     /// says it shows.
     pub press_force: Option<PressForce<'a>>,
+    pub extra_actions: &'a [Action],
+    /// Catalog actions the picker leaves out.
+    pub hidden_actions: &'a [Action],
 }
 
 #[derive(Clone, Copy)]
@@ -69,9 +72,22 @@ pub(super) struct ActionPickerContext<'a> {
 /// inline error until its text changes or the picker reopens.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct InvalidDrafts {
-    pub shortcut: bool,
+    pub shortcut: Option<ShortcutError>,
     pub application: bool,
     pub command: bool,
+}
+
+/// Why the custom shortcut editor shows an error.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ShortcutError {
+    /// The typed text, or the recorded key, is not a chord a shortcut can
+    /// send.
+    Unrecognized,
+    /// Record saw Shift with a digit or symbol key, which it cannot record
+    /// (see [`Recording::ShiftedSymbol`]). Typing the chord still works.
+    ///
+    /// [`Recording::ShiftedSymbol`]: crate::features::binding_editor::Recording::ShiftedSymbol
+    ShiftedSymbol,
 }
 
 /// Whether the custom shortcut editor records a tapped or a held chord.
@@ -158,6 +174,10 @@ fn empty_inspector(app: Option<&str>, override_count: usize, pal: Palette) -> gp
         .child(div().text_body().text_color(pal.text_muted).child(summary))
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the button inspector lays out its rows inline"
+)]
 fn button_inspector(
     button: ButtonId,
     data: &BindingInspectorData<'_>,
@@ -178,7 +198,7 @@ fn button_inspector(
         && !overridden
         && gesture_map.is_some()
     {
-        return inherited_gesture_inspector(button, app, picker, pal, cx);
+        return inherited_gesture_inspector(button, app, data, picker, pal, cx);
     }
 
     let action = data
@@ -262,6 +282,10 @@ fn button_inspector(
                 "inspector-action",
                 Some(&action),
                 picker,
+                ActionOffer {
+                    extra: data.extra_actions,
+                    hidden: data.hidden_actions,
+                },
                 &on_pick,
                 pal,
                 cx,
@@ -353,6 +377,7 @@ fn wheel_hold_row(
 fn inherited_gesture_inspector(
     button: ButtonId,
     app: &str,
+    data: &BindingInspectorData<'_>,
     picker: ActionPickerContext<'_>,
     pal: Palette,
     cx: &Context<MouseModelView>,
@@ -396,6 +421,12 @@ fn inherited_gesture_inspector(
                 "inspector-gesture-override",
                 None,
                 picker,
+                // The pick replaces the gestures with a button binding,
+                // which gets a release, so held actions fit here.
+                ActionOffer {
+                    extra: data.extra_actions,
+                    hidden: data.hidden_actions,
+                },
                 &on_pick,
                 pal,
                 cx,
@@ -467,6 +498,10 @@ fn gesture_inspector(
                 "inspector-gesture-action",
                 Some(&current),
                 picker,
+                ActionOffer {
+                    extra: &[],
+                    hidden: data.hidden_actions,
+                },
                 &on_pick,
                 pal,
                 cx,
@@ -784,12 +819,13 @@ fn action_library(
     id_prefix: &'static str,
     current: Option<&Action>,
     picker: ActionPickerContext<'_>,
+    offer: ActionOffer<'_>,
     on_pick: &PickFn,
     pal: Palette,
     cx: &Context<MouseModelView>,
 ) -> impl IntoElement {
     let query = picker.search.read(cx).value();
-    let rows = action_rows_matching(id_prefix, current, &query, on_pick, pal);
+    let rows = action_rows_with(id_prefix, current, &query, offer, on_pick, pal);
     v_flex()
         .gap_2()
         .pt_1()
@@ -923,7 +959,8 @@ fn custom_shortcut_editor(
                             match shortcut.parse::<openlogi_core::binding::KeyCombo>() {
                                 Ok(combo) => (on_pick)(mode.action(combo), window, cx),
                                 Err(_) => view.update(cx, |view, cx| {
-                                    view.invalid_drafts.shortcut = true;
+                                    view.invalid_drafts.shortcut =
+                                        Some(ShortcutError::Unrecognized);
                                     cx.notify();
                                 }),
                             }
@@ -939,13 +976,18 @@ fn custom_shortcut_editor(
                     .child(tr!("actions.press_the_shortcut_to_record")),
             )
         })
-        .when(picker.invalid.shortcut, |editor| {
+        .when_some(picker.invalid.shortcut, |editor, error| {
             editor.child(
                 div()
                     .debug_selector(move || format!("{id_prefix}-custom-shortcut-error"))
                     .text_caption()
                     .text_color(rgb(0x00ef_4444))
-                    .child(tr!("action_ring.custom_action_invalid_input")),
+                    .child(match error {
+                        ShortcutError::Unrecognized => {
+                            tr!("action_ring.custom_action_invalid_input")
+                        }
+                        ShortcutError::ShiftedSymbol => tr!("actions.shifted_symbol_unrecordable"),
+                    }),
             )
         })
 }
@@ -1007,6 +1049,8 @@ mod tests {
             bindings,
             gesture_maps,
             dpi_gestures: false,
+            extra_actions: &[],
+            hidden_actions: &[],
             virtual_thumbwheel: true,
             wheel_hold,
             editing_app: None,

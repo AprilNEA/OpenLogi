@@ -5,8 +5,16 @@ fn matches_usb_ble_and_keyboard_hidpp_collections() {
     assert!(is_hidpp_long_collection(0xff00, 0x0002)); // USB / receiver / BT-classic
     assert!(is_hidpp_long_collection(0xff43, 0x0202)); // BLE-direct (Lift, Signature)
     assert!(is_hidpp_long_collection(0xff43, 0x0602)); // wired G-series keyboard (G513)
+    assert!(is_hidpp_long_collection(0xff43, 0x1a02)); // wired MX Creative Keypad
     assert!(!is_hidpp_long_collection(0x0001, 0x0002)); // generic-desktop mouse
     assert!(!is_hidpp_long_collection(0xff43, 0x0002)); // page right, usage wrong
+}
+
+/// The MX Creative Keypad's only HID++ collection (0xff43 / 0x1a02) must make
+/// its node a candidate — without the table entry it is never opened.
+#[test]
+fn wired_keypad_collection_is_a_hidpp_candidate() {
+    assert!(is_hidpp_candidate(0x046d, 0xc354, 0xff43, 0x1a02, false));
 }
 
 #[test]
@@ -22,6 +30,7 @@ fn only_ble_collection_is_long_only() {
     assert!(is_long_only_collection(0xff43, 0x0202)); // BLE-direct → short-unsupported
     assert!(!is_long_only_collection(0xff00, 0x0002)); // USB / receiver carries both reports
     assert!(!is_long_only_collection(0xff43, 0x0602)); // wired G-series keyboard carries both
+    assert!(!is_long_only_collection(0xff43, 0x1a02)); // wired MX Creative Keypad carries both
     assert!(!is_long_only_collection(0x0001, 0x0002)); // not a HID++ collection at all
 }
 
@@ -122,6 +131,16 @@ fn missing_grant_hint_names_the_agent_only_for_the_agent() {
     let command = missing_grant_hint(false);
     assert!(!command.contains("OpenLogi Agent"), "got: {command}");
     assert!(command.contains("the app that launched this command"));
+}
+
+#[test]
+fn granted_open_hint_names_the_exclusive_holders() {
+    // Karabiner-Elements seizes a Bluetooth-direct keyboard it modifies, which
+    // blocks the HID++ collection on the same IOHIDDevice (issue #2171).
+    assert!(GRANTED_OPEN_HINT.contains("Logi Options+"));
+    assert!(GRANTED_OPEN_HINT.contains("Karabiner-Elements"));
+    assert!(GRANTED_OPEN_HINT.contains("\"Modify events\""));
+    assert!(GRANTED_OPEN_HINT.contains("log out and back in"));
 }
 
 #[cfg(target_os = "macos")]

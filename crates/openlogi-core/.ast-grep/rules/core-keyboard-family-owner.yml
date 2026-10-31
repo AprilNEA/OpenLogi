@@ -1,0 +1,32 @@
+# Owner: openlogi_core::device::DeviceKind::is_keyboard_family — which kinds
+# bind keys on the keyboard plane rather than pointer buttons.
+id: core-keyboard-family-owner
+language: rust
+severity: error
+message: DeviceKind::is_keyboard_family() (openlogi-core device.rs) decides which kinds are keyboard-like; call it instead of matching Keyboard and Numpad together here.
+note: |
+  The Keys-tab gate, the agent's keyboard capture filter, and its app-context
+  choice each matched `Keyboard | Numpad`, so a new keyed kind would have had
+  to be added at every site. See "Single source of truth" in AGENTS.md.
+files:
+  - crates/**/*.rs
+ignores:
+  - crates/openlogi-core/src/device.rs
+rule:
+  # A pattern that also names a kind outside the family — an exhaustive match
+  # over every kind, say — decides a different set, not this one.
+  not:
+    regex: 'DeviceKind::(Mouse|Presenter|Remote|Trackball|Touchpad|Tablet|Gamepad|Joystick|Headset|Camera|Unknown|Light)\b'
+  any:
+    # A match arm, `if let`, or `let` pattern: the or-pattern itself.
+    - all:
+        - kind: or_pattern
+        - not:
+            inside:
+              kind: or_pattern
+        - regex: '(?s)DeviceKind::Keyboard\b.*DeviceKind::Numpad\b|DeviceKind::Numpad\b.*DeviceKind::Keyboard\b'
+    # `matches!` keeps its pattern as unparsed tokens, possibly wrapped over
+    # several lines by rustfmt.
+    - all:
+        - kind: macro_invocation
+        - regex: '(?s)^matches!\s*[\(\[\{].*(DeviceKind::Keyboard\b.*\|.*DeviceKind::Numpad\b|DeviceKind::Numpad\b.*\|.*DeviceKind::Keyboard\b)'
