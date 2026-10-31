@@ -348,6 +348,12 @@ smooth_wheel = "Plynulé kolečko"
 smooth_wheel_description = "OpenLogi přijímá každý krok kolečka této myši a posouvá plynule, i když je Plynulé posouvání vypnuté."
 smooth_wheel_unsupported = "Toto zařízení nepodporuje plynulé kolečko."
 smooth_wheel_other_connection = "Zařízení podporuje plynulé kolečko při jiném typu připojení, ale ne při tomto."
+clicks = "Kliknutí"
+click_debounce = "Ignorovat zákmity tlačítka"
+click_debounce_description = "Pro opotřebované tlačítko, které z jednoho kliknutí udělá dvě. OpenLogi ignoruje stisk, který přijde takto brzy po uvolnění."
+click_debounce_window = "Okno"
+click_debounce_window_description = "Delší okno zachytí více zákmitů, ale může pohltit velmi rychlé dvojité kliknutí."
+click_debounce_ms = "%{ms} ms"
 smartshift = "SmartShift"
 
 [actions]

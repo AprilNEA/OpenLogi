@@ -844,3 +844,61 @@ fn an_echoed_press_keeps_its_release_after_the_session_ends() {
     );
     assert!(owner.shutdown());
 }
+
+/// A G903's receiver as macOS attributes its clicks, with a 30 ms window.
+fn debounced_g903_maps() -> SharedHookMaps {
+    let receiver = openlogi_core::device::ReceiverInfo {
+        name: "USB Receiver".to_owned(),
+        vendor_id: 0x046d,
+        product_id: 0xc539,
+        unique_id: None,
+    };
+    let mut maps = HookMaps::default();
+    let window = openlogi_core::config::ClickDebounce::try_new(30).expect("valid window");
+    for source in InputSource::of_pairing(&receiver, Some(0x4087)) {
+        maps.click_debounce.insert(source, window);
+    }
+    Arc::new(RwLock::new(maps))
+}
+
+/// #2182: the hook drops a bounced left click before remapping sees it. The
+/// edges arrive faster than any window, so the second press is bounce.
+#[test]
+fn a_bounced_left_click_from_a_filtered_source_is_dropped() {
+    let hooks = debounced_g903_maps();
+    let receiver = EventDevice {
+        vendor_id: Some(0x046d),
+        product_id: Some(0xc539),
+        product_name: Some("USB Receiver".to_owned()),
+    };
+    let verdicts: Vec<_> = [true, false, true, false]
+        .into_iter()
+        .map(|pressed| debounce_button(ButtonId::LeftClick, pressed, Some(&receiver), &hooks))
+        .collect();
+    assert_eq!(
+        verdicts,
+        [
+            EventDisposition::PassThrough,
+            EventDisposition::PassThrough,
+            EventDisposition::Suppress,
+            EventDisposition::Suppress,
+        ]
+    );
+}
+
+/// A trackpad never reaches the filter, even under a filtered source's ids.
+#[test]
+fn a_trackpad_click_is_never_debounced() {
+    let hooks = debounced_g903_maps();
+    let trackpad = EventDevice {
+        vendor_id: Some(0x046d),
+        product_id: Some(0xc539),
+        product_name: Some("Logitech Touchpad".to_owned()),
+    };
+    for pressed in [true, false, true, false] {
+        assert_eq!(
+            debounce_button(ButtonId::LeftClick, pressed, Some(&trackpad), &hooks),
+            EventDisposition::PassThrough
+        );
+    }
+}

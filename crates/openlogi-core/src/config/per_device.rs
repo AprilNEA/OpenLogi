@@ -9,8 +9,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
-    CameraControls, CameraStreamMode, Config, DeviceIdentity, DisableKey, LightSettings, Lighting,
-    OnboardMemory, ScrollResolution, SmartShift, ThumbwheelSensitivity,
+    CameraControls, CameraStreamMode, ClickDebounce, Config, DeviceIdentity, DisableKey,
+    LightSettings, Lighting, OnboardMemory, ScrollResolution, SmartShift, ThumbwheelSensitivity,
 };
 use crate::binding::{
     Action, ActionRingConfig, ActionRingIcon, ActionRingSlot, Binding, ButtonId, GamingLayout,
@@ -635,5 +635,25 @@ impl Config {
             .entry(device_key.to_string())
             .or_default()
             .smooth_wheel = enabled;
+    }
+
+    /// `device_key`'s click-debounce window
+    /// ([`DeviceConfig::click_debounce_ms`](super::DeviceConfig::click_debounce_ms)),
+    /// or `None` when every press of the device passes. Unconfigured devices
+    /// are not filtered.
+    #[must_use]
+    pub fn click_debounce(&self, device_key: &str) -> Option<ClickDebounce> {
+        self.devices
+            .get(device_key)
+            .and_then(|device| device.click_debounce_ms)
+    }
+
+    /// Set `device_key`'s click-debounce window, or turn the filter off with
+    /// `None`.
+    pub fn set_click_debounce(&mut self, device_key: &str, window: Option<ClickDebounce>) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .click_debounce_ms = window;
     }
 }

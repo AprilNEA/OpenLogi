@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 
 use super::button_map::{deserialize_button_map, deserialize_button_maps_by_app};
 use super::settings::{
-    CameraControls, CameraStreamMode, GestureOwner, LightSettings, Lighting, OnboardMemory,
-    ScrollResolution, SmartShift, ThumbwheelSensitivity, deserialize_gesture_owner,
+    CameraControls, CameraStreamMode, ClickDebounce, GestureOwner, LightSettings, Lighting,
+    OnboardMemory, ScrollResolution, SmartShift, ThumbwheelSensitivity, deserialize_gesture_owner,
 };
 use crate::binding::{Action, ActionRingConfig, Binding, ButtonId, GestureDirection, KeypadPage};
 use crate::device::{Capabilities, DeviceKind, DeviceModelInfo, LightCapabilities};
@@ -321,6 +321,15 @@ pub struct DeviceConfig {
     /// native, and is omitted from `config.toml`.
     #[serde(default, skip_serializing_if = "is_false")]
     pub smooth_wheel: bool,
+    /// Drop switch bounce from this device's buttons (#2182): a press that
+    /// follows the same button's release sooner than this window is ignored,
+    /// and so is its release. The agent filters the button events its OS
+    /// input hook sees, so the filter needs that hook, and a platform whose
+    /// hook can tell which device sent a button (macOS and Linux; not
+    /// Windows). `None` (default) passes every press, and is omitted from
+    /// `config.toml`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub click_debounce_ms: Option<ClickDebounce>,
     /// Physical config keys of pointing devices that follow this keyboard's
     /// host switch channel. The relationship is keyboard-initiated: pressing
     /// one of this device's host keys switches every listed target first, then
@@ -482,6 +491,7 @@ impl Default for DeviceConfig {
             invert_scroll: false,
             scroll_resolution: None,
             smooth_wheel: false,
+            click_debounce_ms: None,
             host_switch_targets: Vec::new(),
             fn_lock: None,
             keep_os_layout: None,
@@ -623,6 +633,8 @@ struct RawDeviceConfig {
     #[serde(default)]
     smooth_wheel: bool,
     #[serde(default)]
+    click_debounce_ms: Option<ClickDebounce>,
+    #[serde(default)]
     host_switch_targets: Vec<String>,
     #[serde(default)]
     fn_lock: Option<bool>,
@@ -700,6 +712,7 @@ impl From<RawDeviceConfig> for DeviceConfig {
             invert_scroll: raw.invert_scroll,
             scroll_resolution: raw.scroll_resolution,
             smooth_wheel: raw.smooth_wheel,
+            click_debounce_ms: raw.click_debounce_ms,
             host_switch_targets: raw.host_switch_targets,
             fn_lock: raw.fn_lock,
             keep_os_layout: raw.keep_os_layout,
@@ -718,7 +731,7 @@ impl From<RawDeviceConfig> for DeviceConfig {
 mod tests {
     use std::collections::BTreeSet;
 
-    use super::{DeviceConfig, DisableKey, KeypadPage};
+    use super::{ClickDebounce, DeviceConfig, DisableKey, KeypadPage};
 
     #[test]
     fn host_switch_targets_round_trip_as_physical_keys() -> Result<(), Box<dyn std::error::Error>> {
@@ -770,6 +783,46 @@ mod tests {
         let device: DeviceConfig = toml::from_str("dpi = 1200")?;
         assert_eq!(device.keypad_pages, KeypadPage::FIRST);
         assert!(!toml::to_string(&device)?.contains("keypad_pages"));
+        Ok(())
+    }
+
+    /// A device without the setting is not filtered and writes nothing; a
+    /// stored window reloads as the same window (#2182).
+    #[test]
+    fn click_debounce_is_off_until_set_and_round_trips_in_milliseconds()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let unset: DeviceConfig = toml::from_str("dpi = 1200")?;
+        assert_eq!(unset.click_debounce_ms, None);
+        assert!(!toml::to_string(&unset)?.contains("click_debounce_ms"));
+
+        let set: DeviceConfig = toml::from_str("click_debounce_ms = 45")?;
+        assert_eq!(set.click_debounce_ms, Some(ClickDebounce::try_new(45)?));
+        let serialized = toml::to_string(&set)?;
+        assert!(serialized.contains("click_debounce_ms = 45"));
+        let round_trip: DeviceConfig = toml::from_str(&serialized)?;
+        assert_eq!(round_trip.click_debounce_ms, set.click_debounce_ms);
+        Ok(())
+    }
+
+    /// A hand-edited window outside the supported range is a load error, as an
+    /// out-of-range DPI is, rather than a filter that eats real clicks or one
+    /// that never fires.
+    #[test]
+    fn click_debounce_outside_its_range_does_not_load() -> Result<(), Box<dyn std::error::Error>> {
+        for body in [
+            "click_debounce_ms = 0",
+            "click_debounce_ms = 9",
+            "click_debounce_ms = 101",
+        ] {
+            assert!(
+                toml::from_str::<DeviceConfig>(body).is_err(),
+                "{body} should not load"
+            );
+        }
+        for ms in [10, 100] {
+            let edge: DeviceConfig = toml::from_str(&format!("click_debounce_ms = {ms}"))?;
+            assert_eq!(edge.click_debounce_ms, Some(ClickDebounce::try_new(ms)?));
+        }
         Ok(())
     }
 }

@@ -348,6 +348,12 @@ smooth_wheel = "부드러운 휠"
 smooth_wheel_description = "OpenLogi가 이 마우스 휠의 모든 단계를 받아 부드러운 스크롤이 꺼져 있어도 부드럽게 스크롤합니다."
 smooth_wheel_unsupported = "이 기기는 부드러운 휠을 지원하지 않습니다."
 smooth_wheel_other_connection = "다른 연결 방식에서는 부드러운 휠을 지원하지만 현재 연결에서는 지원하지 않습니다."
+clicks = "클릭"
+click_debounce = "채터링 무시"
+click_debounce_description = "마모된 버튼이 한 번의 클릭을 두 번으로 만드는 경우에 사용합니다. OpenLogi는 버튼을 놓은 뒤 이 시간 안에 들어온 누름을 무시합니다."
+click_debounce_window = "무시 시간"
+click_debounce_window_description = "시간이 길수록 채터링을 더 많이 걸러내지만, 매우 빠른 더블 클릭을 놓칠 수 있습니다."
+click_debounce_ms = "%{ms} ms"
 smartshift = "SmartShift"
 
 [actions]

@@ -348,6 +348,12 @@ smooth_wheel = "Molette fluide"
 smooth_wheel_description = "OpenLogi reçoit chaque cran de la molette de cette souris et la fait défiler en douceur, même si Défilement fluide est désactivé."
 smooth_wheel_unsupported = "Cet appareil ne prend pas en charge la molette fluide."
 smooth_wheel_other_connection = "L’appareil prend en charge la molette fluide avec son autre connexion, mais pas celle-ci."
+clicks = "Clics"
+click_debounce = "Ignorer les rebonds du bouton"
+click_debounce_description = "Pour un bouton usé qui transforme un clic en deux. OpenLogi ignore un appui qui suit le relâchement d'aussi près."
+click_debounce_window = "Fenêtre"
+click_debounce_window_description = "Une fenêtre plus longue filtre davantage de rebonds, mais peut ignorer un double-clic très rapide."
+click_debounce_ms = "%{ms} ms"
 smartshift = "SmartShift"
 
 [actions]

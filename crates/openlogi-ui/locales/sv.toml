@@ -348,6 +348,12 @@ smooth_wheel = "Mjukt hjul"
 smooth_wheel_description = "OpenLogi tar emot varje steg från musens hjul och rullar mjukt, även när Mjuk rullning är avstängd."
 smooth_wheel_unsupported = "Den här enheten stöder inte mjukt hjul."
 smooth_wheel_other_connection = "Enheten stöder mjukt hjul via den andra anslutningen, men inte denna."
+clicks = "Klick"
+click_debounce = "Ignorera kontaktstuds"
+click_debounce_description = "För en sliten knapp som gör ett klick till två. OpenLogi ignorerar ett tryck som kommer så snart efter att knappen släppts."
+click_debounce_window = "Fönster"
+click_debounce_window_description = "Ett längre fönster fångar mer studs men kan svälja ett mycket snabbt dubbelklick."
+click_debounce_ms = "%{ms} ms"
 smartshift = "SmartShift"
 
 [actions]

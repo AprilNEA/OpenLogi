@@ -26,6 +26,7 @@ fn raw_light_dev(key: &str) -> AgentDevice {
         settings_revision: 0,
         codename: None,
         battery: None,
+        input_sources: Vec::new(),
     }
 }
 
