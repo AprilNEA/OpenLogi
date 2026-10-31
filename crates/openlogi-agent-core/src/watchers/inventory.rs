@@ -56,6 +56,9 @@ pub enum InventoryEvent {
         /// macOS the observable signature of a missing or stale Input
         /// Monitoring grant (the open denial itself is silent).
         hid_open_failures: bool,
+        /// Whether the trigger implies volatile device RAM may have reset even
+        /// when route and online state look unchanged.
+        reapply_volatile: Option<ReapplyReason>,
         /// This pass satisfies a requested volatile-settings confirmation,
         /// including low-frequency recovery after enumeration failures. The
         /// orchestrator may consume one bounded settings retry.
@@ -92,6 +95,15 @@ pub enum InventoryEvent {
     DeviceWake,
 }
 
+/// Why volatile settings must be reapplied after the next published snapshot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReapplyReason {
+    /// A device reconnect needs the short link-race confirmation budget.
+    Reconnect,
+    /// Host resume or node replacement needs the full boot-race budget.
+    Volatile,
+}
+
 /// The watcher's cross-pass memory, factored out of the I/O loop so the
 /// result → event decision is unit-testable without spawning the thread or
 /// touching real HID.
@@ -103,6 +115,8 @@ struct WatchState {
     /// Consecutive failures, counted only before the first success.
     initial_failures: u8,
     raw_nodes: RawNodeLedger,
+    /// Cleared only after a snapshot carrying the request reaches the agent.
+    pending_reapply: Option<ReapplyReason>,
 }
 
 #[derive(Default)]
@@ -178,6 +192,18 @@ fn raw_node_key(device: &StandaloneDevice) -> String {
 }
 
 impl WatchState {
+    fn observe_trigger(&mut self, trigger: ReconcileTrigger) {
+        if let Some(reason) = trigger.reapply_reason()
+            && self.pending_reapply != Some(ReapplyReason::Volatile)
+        {
+            self.pending_reapply = Some(reason);
+        }
+    }
+
+    fn snapshot_published(&mut self) {
+        self.pending_reapply = None;
+    }
+
     /// Combine a successful HID++ enumeration with the independently fallible
     /// raw-HID pass. A raw backend failure must not suppress fresh mouse and
     /// keyboard inventory, nor count every remembered light as detached.
@@ -203,6 +229,7 @@ impl WatchState {
             inventories,
             standalone,
             hid_open_failures,
+            reapply_volatile: self.pending_reapply,
             confirms_volatile_settings,
         }
     }
@@ -492,6 +519,7 @@ impl InventoryWorker {
     }
 
     async fn settle_trigger(&mut self, trigger: ReconcileTrigger) -> bool {
+        self.state.observe_trigger(trigger);
         match trigger {
             ReconcileTrigger::Hotplug => {
                 tokio::time::sleep(HOTPLUG_SETTLE).await;
@@ -515,6 +543,8 @@ impl InventoryWorker {
                 let mut device_wake = source == HidppEventSource::WirelessDeviceStatus;
                 while let Ok(drained) = self.hid_events.try_recv() {
                     device_wake |= drained == HidppEventSource::WirelessDeviceStatus;
+                    self.state
+                        .observe_trigger(ReconcileTrigger::HidEvent(drained));
                 }
                 if device_wake && self.events.send(InventoryEvent::DeviceWake).is_err() {
                     return false;
@@ -561,6 +591,11 @@ impl InventoryWorker {
                 let standalone = self.hardware.enumerate_standalone().await;
                 let standalone_failed = standalone.is_err();
                 let open_failures = self.enumerator.open_failures_last_tick();
+                if self.enumerator.replaced_channels_last_tick() {
+                    self.state.observe_trigger(ReconcileTrigger::HidEvent(
+                        HidppEventSource::WirelessDeviceStatus,
+                    ));
+                }
                 let event = self.state.classify_parts(
                     inventories,
                     standalone,
@@ -570,11 +605,10 @@ impl InventoryWorker {
                 let needs_repair = self.enumerator.retry_needed_last_tick()
                     || standalone_failed
                     || self.state.raw_nodes.has_pending_misses();
-                let replaced = self.enumerator.replaced_channels_last_tick();
                 (
                     Some(event),
                     ScanOutcome::Snapshot { needs_repair },
-                    replaced,
+                    self.enumerator.replaced_channels_last_tick(),
                 )
             }
             Err(error) => (self.state.classify(Err(error)), ScanOutcome::Failed, false),
@@ -586,8 +620,8 @@ impl InventoryWorker {
             );
             return true;
         }
-        // Request the reconnect re-apply before the snapshot that publishes
-        // the replacement channel, so that snapshot carries it out.
+        // Preserve the immediate wake notification before the replacement
+        // snapshot; the snapshot also carries the intent until publication.
         if replaced {
             info!("reopened a channel retired for failing probes — re-applying volatile settings");
             if self.events.send(InventoryEvent::DeviceWake).is_err() {
@@ -595,11 +629,15 @@ impl InventoryWorker {
                 return false;
             }
         }
-        if let Some(event) = event
-            && self.events.send(event).is_err()
-        {
-            debug!("inventory watcher receiver dropped — exiting");
-            return false;
+        if let Some(event) = event {
+            let is_snapshot = matches!(event, InventoryEvent::Snapshot { .. });
+            if self.events.send(event).is_err() {
+                debug!("inventory watcher receiver dropped — exiting");
+                return false;
+            }
+            if is_snapshot {
+                self.state.snapshot_published();
+            }
         }
         self.schedule.scan_finished(
             trigger,
@@ -709,7 +747,10 @@ mod tests {
     use openlogi_core::device::{DeviceKind, RawDeviceAddress, StandaloneDevice};
     use openlogi_hid::{BackendError, InventoryError};
 
-    use super::{INITIAL_FAILURE_LIMIT, InventoryEvent, WatchState};
+    use super::{
+        INITIAL_FAILURE_LIMIT, InventoryEvent, ReapplyReason, ReconcileTrigger, WatchState,
+    };
+    use openlogi_hid::inventory::events::HidppEventSource;
 
     /// A transport-level enumerate failure — what the watcher's `Err` arm now
     /// sees (a partial per-node read is replayed by the hid ledger as `Ok`).
@@ -741,6 +782,67 @@ mod tests {
         // last snapshot instead of flapping to "No devices" (#218).
         assert!(state.classify(Err(enumerate_failed())).is_none());
         assert!(state.classify(Err(enumerate_failed())).is_none());
+    }
+
+    #[test]
+    fn reconnect_reapply_survives_failed_and_unpublished_scans() {
+        let mut state = WatchState::default();
+        let _ = state.classify(Ok((vec![], vec![])));
+        state.snapshot_published();
+        state.observe_trigger(ReconcileTrigger::Hotplug);
+        assert!(state.classify(Err(enumerate_failed())).is_none());
+        state.observe_trigger(ReconcileTrigger::RepairRetry);
+        assert!(state.classify(Err(enumerate_failed())).is_none());
+        assert_matches!(
+            state.classify(Ok((vec![], vec![]))),
+            Some(InventoryEvent::Snapshot {
+                reapply_volatile: Some(ReapplyReason::Volatile),
+                ..
+            })
+        );
+        // A result discarded because I/O became suspended is not acknowledged.
+        state.observe_trigger(ReconcileTrigger::RecoveryScan);
+        assert_matches!(
+            state.classify(Ok((vec![], vec![]))),
+            Some(InventoryEvent::Snapshot {
+                reapply_volatile: Some(ReapplyReason::Volatile),
+                ..
+            })
+        );
+        state.snapshot_published();
+        assert_matches!(
+            state.classify(Ok((vec![], vec![]))),
+            Some(InventoryEvent::Snapshot {
+                reapply_volatile: None,
+                ..
+            })
+        );
+    }
+
+    #[test]
+    fn reconnect_drained_during_battery_settle_is_retained() {
+        let mut state = WatchState::default();
+        state.observe_trigger(ReconcileTrigger::HidEvent(HidppEventSource::UnifiedBattery));
+        state.observe_trigger(ReconcileTrigger::HidEvent(
+            HidppEventSource::WirelessDeviceStatus,
+        ));
+        state.observe_trigger(ReconcileTrigger::HidEvent(HidppEventSource::UnifiedBattery));
+        assert_matches!(
+            state.classify(Ok((vec![], vec![]))),
+            Some(InventoryEvent::Snapshot {
+                reapply_volatile: Some(ReapplyReason::Reconnect),
+                ..
+            })
+        );
+        state.snapshot_published();
+        state.observe_trigger(ReconcileTrigger::HidEvent(HidppEventSource::UnifiedBattery));
+        assert_matches!(
+            state.classify(Ok((vec![], vec![]))),
+            Some(InventoryEvent::Snapshot {
+                reapply_volatile: None,
+                ..
+            })
+        );
     }
 
     #[test]
@@ -776,6 +878,49 @@ mod tests {
             state.classify(Ok((vec![], vec![]))),
             Some(InventoryEvent::Snapshot { .. })
         );
+    }
+
+    #[test]
+    fn reconnect_intent_keeps_its_short_budget_after_a_failed_scan() {
+        let mut state = WatchState::default();
+        state.observe_trigger(ReconcileTrigger::HidEvent(
+            HidppEventSource::WirelessDeviceStatus,
+        ));
+        assert!(state.classify(Err(enumerate_failed())).is_none());
+        state.observe_trigger(ReconcileTrigger::RepairRetry);
+        assert_matches!(
+            state.classify(Ok((vec![], vec![]))),
+            Some(InventoryEvent::Snapshot {
+                reapply_volatile: Some(ReapplyReason::Reconnect),
+                ..
+            })
+        );
+    }
+
+    #[test]
+    fn reconnect_never_shrinks_a_latched_resume_budget() {
+        for triggers in [
+            [
+                ReconcileTrigger::SystemResume,
+                ReconcileTrigger::HidEvent(HidppEventSource::WirelessDeviceStatus),
+            ],
+            [
+                ReconcileTrigger::HidEvent(HidppEventSource::WirelessDeviceStatus),
+                ReconcileTrigger::SystemResume,
+            ],
+        ] {
+            let mut state = WatchState::default();
+            for trigger in triggers {
+                state.observe_trigger(trigger);
+            }
+            assert_matches!(
+                state.classify(Ok((vec![], vec![]))),
+                Some(InventoryEvent::Snapshot {
+                    reapply_volatile: Some(ReapplyReason::Volatile),
+                    ..
+                })
+            );
+        }
     }
 
     fn raw_light(identity: &str) -> StandaloneDevice {

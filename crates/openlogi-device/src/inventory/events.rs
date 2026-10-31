@@ -23,7 +23,7 @@
 //! [`PairedDevice::settings_revision`]: openlogi_core::device::PairedDevice::settings_revision
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, PoisonError, RwLock};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 use hidpp::channel::{HidppChannel, HidppMessage, MessageListenerGuard};
 use hidpp::feature::CreatableFeature;
@@ -195,13 +195,15 @@ const LOCK_KEY_QUEUE: usize = 8;
 /// Clones are installed only on inventory-owned channels. Reconciliation
 /// requests share a capacity-one queue: every source asks for the same full
 /// reconciliation, so a burst has no additional meaning and must not grow
-/// memory while a slow probe is running. Backlight readings keep only their
+/// memory while a slow probe is running. Receiver reconnects take priority over
+/// device wakes, then ordinary events. Backlight readings keep only their
 /// latest value in a separate channel, so a slow probe never drops one. Lock
 /// keys use a short queue instead, so two keys changing in one broadcast are
 /// both reported.
 #[derive(Clone)]
 pub struct EventNotifier {
-    sender: mpsc::Sender<HidppEventSource>,
+    sender: mpsc::Sender<()>,
+    pending: Arc<Mutex<Option<HidppEventSource>>>,
     backlight: watch::Sender<Option<BacklightUpdate>>,
     lock_keys: mpsc::Sender<LockKeyUpdate>,
     #[cfg(test)]
@@ -210,7 +212,22 @@ pub struct EventNotifier {
 
 impl EventNotifier {
     fn notify(&self, source: HidppEventSource) {
-        let _ = self.sender.try_send(source);
+        let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+        match *pending {
+            None => {
+                *pending = Some(source);
+                let _ = self.sender.try_send(());
+            }
+            Some(previous) => {
+                use HidppEventSource::{ReceiverConnection, WirelessDeviceStatus};
+                *pending = Some(match (previous, source) {
+                    (ReceiverConnection, _) | (_, ReceiverConnection) => ReceiverConnection,
+                    (WirelessDeviceStatus, _) | (_, WirelessDeviceStatus) => WirelessDeviceStatus,
+                    _ => previous,
+                });
+            }
+        }
+        drop(pending);
         #[cfg(test)]
         if let Some(observation) = &self.observation {
             observation.count.fetch_add(1, Ordering::Release);
@@ -232,7 +249,8 @@ impl EventNotifier {
 /// The receiving half of the reconciliation-request queue, the latest
 /// backlight reading and the lock-key updates.
 pub struct EventReceiver {
-    lifecycle: mpsc::Receiver<HidppEventSource>,
+    lifecycle: mpsc::Receiver<()>,
+    pending: Arc<Mutex<Option<HidppEventSource>>>,
     backlight: watch::Receiver<Option<BacklightUpdate>>,
     lock_keys: Option<mpsc::Receiver<LockKeyUpdate>>,
 }
@@ -240,7 +258,11 @@ pub struct EventReceiver {
 impl EventReceiver {
     /// Receive the next reconciliation request.
     pub async fn recv(&mut self) -> Option<HidppEventSource> {
-        self.lifecycle.recv().await
+        self.lifecycle.recv().await?;
+        self.pending
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
     }
 
     /// Receive a queued reconciliation request without waiting.
@@ -250,7 +272,12 @@ impl EventReceiver {
     /// [`mpsc::error::TryRecvError::Empty`] when nothing is queued, and
     /// [`mpsc::error::TryRecvError::Disconnected`] once every notifier is gone.
     pub fn try_recv(&mut self) -> Result<HidppEventSource, mpsc::error::TryRecvError> {
-        self.lifecycle.try_recv()
+        self.lifecycle.try_recv()?;
+        self.pending
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+            .ok_or(mpsc::error::TryRecvError::Empty)
     }
 
     /// Subscribe to the latest backlight reading, independently of inventory.
@@ -271,11 +298,13 @@ impl EventReceiver {
 #[must_use]
 pub fn event_channel() -> (EventNotifier, EventReceiver) {
     let (sender, receiver) = mpsc::channel(1);
+    let pending = Arc::new(Mutex::new(None));
     let (backlight, backlight_receiver) = watch::channel(None);
     let (lock_keys, lock_key_receiver) = mpsc::channel(LOCK_KEY_QUEUE);
     (
         EventNotifier {
             sender,
+            pending: Arc::clone(&pending),
             backlight,
             lock_keys,
             #[cfg(test)]
@@ -283,6 +312,7 @@ pub fn event_channel() -> (EventNotifier, EventReceiver) {
         },
         EventReceiver {
             lifecycle: receiver,
+            pending,
             backlight: backlight_receiver,
             lock_keys: Some(lock_key_receiver),
         },
@@ -318,6 +348,7 @@ impl EventObserver {
 #[cfg(test)]
 pub(crate) fn observed_event_channel() -> (EventNotifier, EventReceiver, EventObserver) {
     let (sender, receiver) = mpsc::channel(1);
+    let pending = Arc::new(Mutex::new(None));
     let (backlight, backlight_receiver) = watch::channel(None);
     let (lock_keys, lock_key_receiver) = mpsc::channel(LOCK_KEY_QUEUE);
     let observation = Arc::new(EventObservation {
@@ -327,12 +358,14 @@ pub(crate) fn observed_event_channel() -> (EventNotifier, EventReceiver, EventOb
     (
         EventNotifier {
             sender,
+            pending: Arc::clone(&pending),
             backlight,
             lock_keys,
             observation: Some(Arc::clone(&observation)),
         },
         EventReceiver {
             lifecycle: receiver,
+            pending,
             backlight: backlight_receiver,
             lock_keys: Some(lock_key_receiver),
         },
@@ -1869,5 +1902,60 @@ mod tests {
             Ok(HidppEventSource::ReceiverConnection)
         );
         assert_eq!(receiver.try_recv(), Err(mpsc::error::TryRecvError::Empty));
+    }
+
+    #[test]
+    fn reconnect_upgrades_pending_battery_and_settings_requests() {
+        for source in [
+            HidppEventSource::ReceiverConnection,
+            HidppEventSource::WirelessDeviceStatus,
+        ] {
+            for background in [
+                HidppEventSource::UnifiedBattery,
+                HidppEventSource::BatteryStatus,
+                HidppEventSource::BatteryVoltage,
+                HidppEventSource::AdcMeasurement,
+                HidppEventSource::FnInversion,
+                HidppEventSource::ExtendedDpi,
+                HidppEventSource::MultiPlatform,
+                HidppEventSource::DisableKeys,
+                HidppEventSource::ExtendedReportRate,
+                HidppEventSource::Backlight,
+                HidppEventSource::HiResWheelRatchet,
+            ] {
+                let (notifier, mut receiver) = event_channel();
+                notifier.notify(background);
+                notifier.notify(source);
+                notifier.notify(background);
+                assert_eq!(receiver.try_recv(), Ok(source));
+                assert_eq!(receiver.try_recv(), Err(mpsc::error::TryRecvError::Empty));
+                notifier.notify(background);
+                assert_eq!(receiver.try_recv(), Ok(background));
+            }
+        }
+    }
+
+    #[test]
+    fn receiver_connection_keeps_full_reapply_budget_in_a_wireless_burst() {
+        for sources in [
+            [
+                HidppEventSource::WirelessDeviceStatus,
+                HidppEventSource::ReceiverConnection,
+            ],
+            [
+                HidppEventSource::ReceiverConnection,
+                HidppEventSource::WirelessDeviceStatus,
+            ],
+        ] {
+            let (notifier, mut receiver) = event_channel();
+            for source in sources {
+                notifier.notify(source);
+            }
+            assert_eq!(
+                receiver.try_recv(),
+                Ok(HidppEventSource::ReceiverConnection)
+            );
+            assert_eq!(receiver.try_recv(), Err(mpsc::error::TryRecvError::Empty));
+        }
     }
 }
