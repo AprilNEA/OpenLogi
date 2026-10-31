@@ -518,8 +518,10 @@ so it can be turned off. Picking a different action for the button keeps the
 wheel hold and changes `click`. A button in gesture mode offers the switch too:
 turning it on leaves gesture mode with the gesture map's `Click` as the press,
 and turning gestures back on restores the saved directions. The setting is per
-device, not per application: an app profile that gives the button its own
-action replaces the wheel hold in that application.
+device, not per application. An app profile that gives the button its own
+action replaces only `click` in that application, so holding the button still
+scrolls sideways there. A `HoldShortcut` or `TapKeyHoldingModifiers` action
+needs the press itself, so in an app profile it replaces the wheel hold.
 
 An Actions Ring entry wraps the action and may add an icon or literal label:
 

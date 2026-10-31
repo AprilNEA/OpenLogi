@@ -731,6 +731,41 @@ mod tests {
     }
 
     #[test]
+    fn an_app_click_on_a_wheel_hold_button_keeps_the_wheel_diverted() {
+        const EDITOR: &str = "com.example.Editor";
+        let mut cfg = wheel_hold_config(true);
+        cfg.set_per_app_binding("2b01a", EDITOR, ButtonId::Back, Some(Action::Undo));
+        let plan = plan_for_device(&cfg, "2b01a", route(), Some(EDITOR), 0, true);
+        assert_eq!(
+            plan.dispatch.bindings.get(&ButtonId::Back),
+            Some(&Binding::WheelHold(WheelHoldBinding::horizontal_scroll(
+                Action::Undo
+            )))
+        );
+        assert!(
+            wheel_diverts(&plan, ButtonId::Back),
+            "the app's click keeps holding to scroll sideways"
+        );
+
+        let combo: openlogi_core::binding::KeyCombo = "Shift+A".parse().expect("combo parses");
+        let hold = Action::HoldShortcut(combo);
+        cfg.set_per_app_binding("2b01a", EDITOR, ButtonId::Back, Some(hold.clone()));
+        let plan = plan_for_device(&cfg, "2b01a", route(), Some(EDITOR), 0, true);
+        assert_eq!(
+            plan.dispatch.bindings.get(&ButtonId::Back),
+            Some(&Binding::Single(hold))
+        );
+        assert!(
+            !wheel_diverts(&plan, ButtonId::Back),
+            "a hold shortcut owns the whole press"
+        );
+        assert!(
+            wheel_diverts(&plan, ButtonId::Forward),
+            "Forward keeps the device's wheel hold"
+        );
+    }
+
+    #[test]
     fn releasing_a_control_releases_its_wheel_hold_diversion() {
         let mut plan = plan_for_device(&wheel_hold_config(true), "2b01a", route(), None, 0, true);
         let owned: BTreeMap<u16, ButtonId> = plan
