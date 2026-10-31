@@ -1,6 +1,7 @@
+use gpui_updater_release::sparkle::framework;
 use plist::{Dictionary, Value};
 
-use super::{Feed, code_inside_out, configure, framework};
+use super::{Feed, code_inside_out, configure};
 use crate::support::info_plist::BundleVersions;
 use crate::support::update_feed::MacArch;
 
@@ -19,7 +20,7 @@ fn versions(short: &str, build: &str) -> BundleVersions {
 fn feed_points_each_architecture_at_its_own_appcast() {
     let feed = Feed::new(PUBLIC_KEY, "https://updates.openlogi.org/", MacArch::X86_64).unwrap();
     assert_eq!(
-        feed.url,
+        feed.url(),
         "https://updates.openlogi.org/channels/stable/appcast-x86_64.xml"
     );
     // Surrounding whitespace from a pasted secret is not part of the key.
@@ -29,9 +30,9 @@ fn feed_points_each_architecture_at_its_own_appcast() {
         MacArch::Arm64,
     )
     .unwrap();
-    assert_eq!(feed.public_key, PUBLIC_KEY);
+    assert_eq!(feed.settings.public_ed_key.as_deref(), Some(PUBLIC_KEY));
     assert_eq!(
-        feed.url,
+        feed.url(),
         "https://u.example/channels/stable/appcast-arm64.xml"
     );
 }
@@ -52,11 +53,10 @@ fn feed_rejects_keys_that_are_not_an_ed25519_public_key() {
 #[test]
 fn info_plist_keeps_sparkle_from_polling_and_verifies_before_extracting() {
     let feed = Feed::new(PUBLIC_KEY, "https://u.example", MacArch::Arm64).unwrap();
-    let entries: Dictionary = feed
-        .info_plist_entries()
-        .into_iter()
-        .map(|(key, value)| (key.to_owned(), value))
-        .collect();
+    let entries: Dictionary = feed.settings.entries().into_iter().collect();
+    // Exactly the six keys OpenLogi sets; every other Sparkle key keeps its
+    // default.
+    assert_eq!(entries.len(), 6, "{entries:?}");
     let boolean = |key| entries.get(key).and_then(Value::as_boolean);
     assert_eq!(boolean("SUEnableAutomaticChecks"), Some(false));
     assert_eq!(boolean("SUAllowsAutomaticUpdates"), Some(true));

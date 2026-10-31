@@ -113,26 +113,27 @@ fn write_appcasts(args: &Args, private_key: &str) -> Result<()> {
         page_url: update_feed::release_page_url(&tag),
         notes,
     };
-    let release_base = update_feed::release_url(&args.base_url, &tag);
-    let record_base = update_feed::record_url(&args.base_url, &tag);
+    let host = update_feed::channel_layout(&args.base_url, tag.channel());
+    let record_layout = update_feed::record_layout(&args.base_url, &tag);
+    let tag_name = tag.to_string();
 
     // Collect every record before writing any, so a bad delta leaves no
     // record half-written next to the others.
     let mut records = Vec::new();
     for (arch, dmg) in release_dmgs(&args.dist)? {
         let name = file_name(&dmg)?;
-        let enclosure = Enclosure::for_file(&dmg, format!("{release_base}/{name}"), Some(&key))
+        let enclosure = Enclosure::for_file(&dmg, host.file_url(&tag_name, name), Some(&key))
             .with_context(|| format!("could not sign {}", dmg.display()))?;
         let mut item = item(&release, enclosure);
         for delta in release_deltas(&args.dist, name, &bundle_version)? {
-            let url = format!("{release_base}/{}", file_name(&delta.path)?);
+            let url = host.file_url(&tag_name, file_name(&delta.path)?);
             item = item.delta(
                 delta
                     .enclosure(url, Some(&key))
                     .with_context(|| format!("could not sign {}", delta.path.display()))?,
             );
         }
-        let record_url = format!("{record_base}/{}", arch.appcast_file_name());
+        let record_url = record_layout.appcast_url(arch.as_str());
         records.push((arch, record(&record_url, &release, arch, item), record_url));
     }
 
@@ -140,7 +141,7 @@ fn write_appcasts(args: &Args, private_key: &str) -> Result<()> {
     fs_err::create_dir_all(&output_dir)
         .with_context(|| format!("could not create {}", output_dir.display()))?;
     for (arch, xml, record_url) in records {
-        let path = output_dir.join(arch.appcast_file_name());
+        let path = args.stage.join(record_layout.appcast_path(arch.as_str()));
         fs_err::write(&path, xml).with_context(|| format!("could not write {}", path.display()))?;
         println!("{} → {}", path.display(), record_url);
     }
