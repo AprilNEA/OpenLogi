@@ -36,6 +36,26 @@ const RECOVERY_WAKE_MARGIN: Duration = Duration::from_secs(1);
 pub(super) const RECOVERY_SCAN_PERIOD: Duration =
     PROBE_CACHE_FRESHNESS.saturating_sub(RECOVERY_WAKE_MARGIN);
 
+/// Input-free time after which the user counts as away from the machine.
+///
+/// On Windows the recovery scan's HID++ exchange with a Unifying receiver was
+/// measured resetting the session idle clock (#1667): a scan every
+/// [`RECOVERY_SCAN_PERIOD`] held that clock under 29 s, so the screensaver and
+/// display sleep never started. A normal pass ends within a few seconds, so an
+/// idle clock this old at the next recovery deadline means no input since that
+/// pass.
+pub(super) const USER_AWAY_AFTER: Duration = Duration::from_secs(15);
+
+const _: () = assert!(
+    USER_AWAY_AFTER.as_millis() < RECOVERY_SCAN_PERIOD.as_millis(),
+    "an idle clock that every scan resets must still reach the away threshold"
+);
+
+/// Disagreement allowed between the OS idle clock and [`Instant`] when judging
+/// whether input arrived after a hold. Both clocks are read together, so the
+/// error is the 10–16 ms `GetTickCount` step at each of the two reads.
+const IDLE_CLOCK_SLACK: Duration = Duration::from_millis(100);
+
 /// Wall-clock lead over monotonic time that means the monotonic clock paused
 /// during system sleep. NTP false positives only cause harmless re-apply.
 const WAKE_GAP: Duration = Duration::from_mins(1);
@@ -102,6 +122,8 @@ pub(super) struct Schedule {
     retry_due: Option<Instant>,
     confirmation: Option<Confirmation>,
     recovery_due: Instant,
+    /// When the latest recovery hold was decided; cleared by every pass.
+    held_at: Option<Instant>,
     retry_count: u8,
 }
 
@@ -111,6 +133,7 @@ impl Schedule {
             retry_due: None,
             confirmation: None,
             recovery_due: now + RECOVERY_SCAN_PERIOD,
+            held_at: None,
             retry_count: 0,
         }
     }
@@ -175,6 +198,7 @@ impl Schedule {
             (false, ScanOutcome::Failed) => {}
         }
         self.recovery_due = clock.started + RECOVERY_SCAN_PERIOD;
+        self.held_at = None;
 
         if !matches!(
             trigger,
@@ -202,6 +226,36 @@ impl Schedule {
             due: now + FAST_RETRY_DELAY,
             failures: 0,
         });
+    }
+
+    /// Hold a due recovery scan while the user is away; `true` when held.
+    ///
+    /// The scan is the fallback for events that never arrived. While nobody is
+    /// at the machine a late answer costs nothing, and the scan itself keeps
+    /// Windows from counting the session idle. A hold moves the deadline one
+    /// period out. No scan runs between two holds, so any input after the
+    /// previous hold is the user's, and the next deadline scans even when the
+    /// user has gone quiet again: a returning user gets a scan within one
+    /// period. A settings confirmation that waits on recovery waits with it.
+    /// `None` is a platform without an idle clock, which keeps scanning on
+    /// schedule.
+    pub(super) fn hold_recovery_while_away(
+        &mut self,
+        now: Instant,
+        user_idle: Option<Duration>,
+    ) -> bool {
+        let Some(idle) = user_idle else {
+            return false;
+        };
+        let input_since_hold = self.held_at.is_some_and(|held| {
+            idle.saturating_add(IDLE_CLOCK_SLACK) < now.saturating_duration_since(held)
+        });
+        if idle < USER_AWAY_AFTER || input_since_hold {
+            return false;
+        }
+        self.held_at = Some(now);
+        self.recovery_due = now + RECOVERY_SCAN_PERIOD;
+        true
     }
 }
 
@@ -509,6 +563,83 @@ mod tests {
             ),
             "the cache is stale only after the freshness window"
         );
+    }
+
+    #[test]
+    fn recovery_waits_while_the_user_is_away() {
+        let started = Instant::now();
+        let mut schedule = Schedule::new(started);
+        schedule.scan_finished(
+            ReconcileTrigger::Initial,
+            ScanOutcome::Snapshot {
+                needs_repair: false,
+            },
+            closed(started),
+        );
+        let (due, purpose) = schedule.next_deadline();
+        assert_eq!(purpose, DeadlinePurpose::RecoveryScan);
+
+        // #1667: the previous pass's arrival drain left the Windows idle clock
+        // at 27,484 ms when the next recovery came due.
+        assert!(schedule.hold_recovery_while_away(due, Some(Duration::from_millis(27_484))));
+        assert_eq!(
+            schedule.next_deadline(),
+            (due + RECOVERY_SCAN_PERIOD, DeadlinePurpose::RecoveryScan)
+        );
+    }
+
+    #[test]
+    fn recovery_runs_for_a_present_user_and_without_an_idle_clock() {
+        let started = Instant::now();
+        let mut schedule = Schedule::new(started);
+        let (due, _) = schedule.next_deadline();
+
+        let present = USER_AWAY_AFTER.saturating_sub(Duration::from_millis(1));
+        assert!(!schedule.hold_recovery_while_away(due, Some(present)));
+        assert!(!schedule.hold_recovery_while_away(due, None));
+        assert_eq!(
+            schedule.next_deadline(),
+            (due, DeadlinePurpose::RecoveryScan)
+        );
+    }
+
+    #[test]
+    fn input_after_a_hold_releases_the_next_recovery() {
+        let start = Instant::now();
+        let mut schedule = Schedule::new(start);
+        let first = schedule.next_deadline().0;
+        assert!(schedule.hold_recovery_while_away(first, Some(Duration::from_secs(20))));
+
+        // One touch a second after the hold, then quiet past the threshold.
+        let second = schedule.next_deadline().0;
+        let quiet = RECOVERY_SCAN_PERIOD.saturating_sub(Duration::from_secs(1));
+        assert!(quiet >= USER_AWAY_AFTER);
+        assert!(!schedule.hold_recovery_while_away(second, Some(quiet)));
+    }
+
+    #[test]
+    fn an_unbroken_absence_keeps_holding_and_a_pass_starts_over() {
+        let start = Instant::now();
+        let mut schedule = Schedule::new(start);
+        let first = schedule.next_deadline().0;
+        let idle = Duration::from_secs(20);
+        assert!(schedule.hold_recovery_while_away(first, Some(idle)));
+
+        let second = schedule.next_deadline().0;
+        assert!(schedule.hold_recovery_while_away(second, Some(idle + RECOVERY_SCAN_PERIOD)));
+
+        // A pass resets the idle clock itself, so the hold history is dropped.
+        let event = second + Duration::from_secs(3);
+        schedule.scan_finished(
+            ReconcileTrigger::HidEvent(HidppEventSource::UnifiedBattery),
+            ScanOutcome::Snapshot {
+                needs_repair: false,
+            },
+            closed(event),
+        );
+        assert!(schedule.held_at.is_none());
+        let third = schedule.next_deadline().0;
+        assert!(schedule.hold_recovery_while_away(third, Some(Duration::from_secs(27))));
     }
 
     #[test]
