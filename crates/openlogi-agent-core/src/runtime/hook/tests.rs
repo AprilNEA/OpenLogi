@@ -651,6 +651,71 @@ fn long_press_never_passes_through_as_a_native_click() {
 }
 
 #[test]
+fn zoom_stays_native_until_it_is_bound() {
+    use super::super::button::ButtonRuntimeEvent;
+    let (dispatcher, mut owner, events) = test_dispatcher();
+    let hooks = Arc::new(RwLock::new(HookMaps {
+        bindings: BTreeMap::from([(ButtonId::Zoom, default_binding(ButtonId::Zoom).into())]),
+        ..HookMaps::default()
+    }));
+    let performance_mx = EventDevice {
+        vendor_id: Some(0x046d),
+        product_id: Some(0x101a),
+        product_name: None,
+    };
+    for pressed in [true, false] {
+        assert_eq!(
+            handle_button(
+                ButtonId::Zoom,
+                pressed,
+                Some(&performance_mx),
+                &hooks,
+                &dispatcher,
+                || None
+            ),
+            EventDisposition::PassThrough,
+            "pressed {pressed}"
+        );
+    }
+    assert!(events.recv_timeout(Duration::from_millis(200)).is_err());
+
+    hooks
+        .write()
+        .expect("maps")
+        .bindings
+        .insert(ButtonId::Zoom, Action::MiddleClick.into());
+    assert_eq!(
+        handle_button(
+            ButtonId::Zoom,
+            true,
+            Some(&performance_mx),
+            &hooks,
+            &dispatcher,
+            || None
+        ),
+        EventDisposition::Suppress
+    );
+    let ButtonRuntimeEvent::Started(press) =
+        events.recv_timeout(Duration::from_secs(1)).expect("down")
+    else {
+        panic!("started");
+    };
+    assert_eq!(press.start_action(), Some(&Action::MiddleClick));
+    assert_eq!(
+        handle_button(
+            ButtonId::Zoom,
+            false,
+            Some(&performance_mx),
+            &hooks,
+            &dispatcher,
+            || None
+        ),
+        EventDisposition::Suppress
+    );
+    assert!(owner.shutdown());
+}
+
+#[test]
 fn resolve_gesture_click_falls_back_when_click_is_absent() {
     let no_click = BTreeMap::from([(
         ButtonId::Back,

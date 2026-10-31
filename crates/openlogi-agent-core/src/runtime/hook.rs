@@ -676,7 +676,9 @@ fn resolve_gesture_click(
 /// to the very click (or extra-button press) it already produces. In that case
 /// the hook should pass the event through to the OS rather than suppress and
 /// re-synthesise it. For Back/Forward this keeps the genuine hardware button
-/// 4/5 intact instead of round-tripping it through synthesis.
+/// 4/5 intact instead of round-tripping it through synthesis. Zoom has no
+/// host action to name, so its `None` seed stands for its own press, the way
+/// `None` leaves a HID++ control undiverted.
 fn is_native_click(id: ButtonId, action: &Action) -> bool {
     matches!(
         (id, action),
@@ -685,6 +687,7 @@ fn is_native_click(id: ButtonId, action: &Action) -> bool {
             | (ButtonId::MiddleClick, Action::MiddleClick)
             | (ButtonId::Back, Action::MouseBack)
             | (ButtonId::Forward, Action::MouseForward)
+            | (ButtonId::Zoom, Action::None)
     )
 }
 
