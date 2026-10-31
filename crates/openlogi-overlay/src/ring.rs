@@ -1,37 +1,64 @@
 //! The ring itself: the GPUI view, and the window it is drawn in.
 //!
-//! Where a client can place its own windows, the window is the ring: a 360×360
-//! panel centred on the cursor and clamped to its display. Wayland allows
-//! neither half of that, so there each display gets a window covering it and
-//! the same panel is drawn at the pointer, in the one window that heard it last.
+//! Where a client can place its own windows, the window is the ring: a
+//! square panel centred on the cursor and clamped to its display. Wayland
+//! allows neither half of that, so there each display gets a window covering
+//! it and the same panel is drawn at the pointer, in the one window that heard
+//! it last.
+//!
+//! The ring is eight free-floating slots around a cancel button, with the
+//! desktop showing through between them; there is no backing disc. On open the
+//! slots fly out from the cursor to their places on the ring, so the motion
+//! itself says where the ring came from.
 
 use gpui::{
-    Bounds, Context, Div, Entity, Hsla, InteractiveElement, IntoElement, MouseMoveEvent,
-    ParentElement, Pixels, Point, Render, SharedString, Size, StatefulInteractiveElement as _,
-    Styled, Subscription, Window, WindowBackgroundAppearance, WindowId, WindowKind, WindowOptions,
-    div, point, prelude::FluentBuilder as _, px, svg,
+    Animation, AnimationExt as _, Bounds, Context, Div, Entity, Hsla, InteractiveElement,
+    IntoElement, MouseMoveEvent, ParentElement, Pixels, Point, Render, SharedString, Size,
+    StatefulInteractiveElement as _, Styled, Subscription, Task, Window,
+    WindowBackgroundAppearance, WindowId, WindowKind, WindowOptions, div, point,
+    prelude::FluentBuilder as _, px, svg,
 };
+use openlogi_core::action_ring::geometry::{CANCEL_DIAMETER, RADIUS, SLOT_DIAMETER};
 use openlogi_core::binding::{Action, ActionRingSlot};
 use openlogi_ipc::ActionRingInvocation;
 use openlogi_ui::action_icons::RING_CANCEL_ICON;
 use openlogi_ui::color;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc;
 
 use crate::ipc::OverlayCommand;
 use crate::session::{self, ClickAwaySession, ShowingRing};
 
-pub(crate) const WINDOW_SIZE: f32 = 360.0;
-pub(crate) const SLOT_SIZE: f32 = 54.0;
-pub(crate) const RADIUS: f32 = 122.0;
+/// The window is the ring (`openlogi_core::action_ring::geometry`) plus room
+/// for the hover label under it and the slot shadows.
+pub(crate) const WINDOW_SIZE: f32 = 300.0;
+pub(crate) const SLOT_SIZE: f32 = SLOT_DIAMETER;
 /// Identifies the ring's windows to the compositor, whatever kind they are.
 pub(crate) const RING_APP_ID: &str = "openlogi-action-ring";
+const CANCEL_SIZE: f32 = CANCEL_DIAMETER;
+const SLOT_GLYPH: f32 = 20.0;
+const CANCEL_GLYPH_SIZE: f32 = 16.0;
+/// Widest the hover label's pill may grow. Nothing sits beside it under the
+/// ring, so it may run wider than the ring's slots; longer text is ellipsized.
+const LABEL_WIDTH: f32 = 240.0;
+
+/// How long the slots take to fly out from the cursor to their places on the
+/// ring. Short enough to read as the ring *appearing* rather than a transition
+/// the user waits on; the cubic ease-out front-loads the motion, so the slots
+/// are most of the way home by the midpoint and the tail only settles them.
+const FLY_OUT: Duration = Duration::from_millis(180);
+
+/// Cubic ease-out: fast off the cursor, settling gently into place.
+fn ease_out_cubic(delta: f32) -> f32 {
+    1.0 - (1.0 - delta).powi(3)
+}
 
 /// The ring's own neutral scale. It floats over whatever is on the desktop, so
 /// unlike the settings app it cannot take its surfaces from the OS appearance —
-/// it commits to a dark panel and rides its own contrast. Only the accent is
+/// it commits to dark slots and rides its own contrast. Only the accent is
 /// shared (`openlogi_ui::color`); these greys are local by nature.
-const PANEL: Hsla = neutral(0.06, 0.82);
+const LABEL_PILL: Hsla = neutral(0.06, 0.82);
 const SLOT_RESTING: Hsla = neutral(0.16, 0.98);
 const CANCEL_RESTING: Hsla = neutral(0.20, 0.98);
 const GLYPH: Hsla = neutral(0.98, 1.0);
@@ -111,6 +138,27 @@ pub(crate) struct RingView {
     pointer: Entity<RingPointer>,
     /// Redraws this window when the panel moves, whichever window took it.
     _pointer_changes: Subscription,
+    /// Whether the fly-out has been started. GPUI draws a new window once,
+    /// synchronously, inside `open_window` — before the platform has put it
+    /// on screen — and an animation started on that draw has its clock running
+    /// while the window is still invisible; by the first frame anyone sees,
+    /// most of the motion is gone. So the first render only parks the slots
+    /// at the cursor and asks for a frame, and the animation is started on the
+    /// frame after, which comes from the frame loop of a presented window.
+    armed: bool,
+    /// Whether the fly-out has landed, so the slots answer the cursor. Until
+    /// then they are on their way out from under it, and the topmost one would
+    /// read as hovered — a spurious haptic on every open — so slot hover and
+    /// click are held back. Set by `landing`.
+    landed: bool,
+    /// Lands the fly-out one [`FLY_OUT`] after the render that starts it, or
+    /// at once under Reduce Motion, which draws the slots in place. Dropped,
+    /// and so cancelled, if this window stops drawing the panel first.
+    landing: Option<Task<()>>,
+    /// The slot under the pointer, landed or not. GPUI reports a hover once,
+    /// when it starts, so one that starts in flight is kept here and becomes
+    /// `hovered` on landing.
+    pointer_over: Option<ActionRingSlot>,
     /// Publishes click-away identity for exactly this view's lifetime.
     _showing: ShowingRing,
 }
@@ -136,6 +184,12 @@ impl RingView {
                 .is_none()
             {
                 this.hovered = None;
+                // The slots' animation state goes with the panel, so the next
+                // time this window draws it they fly out afresh, and must
+                // land again before they answer the cursor.
+                this.landed = false;
+                this.landing = None;
+                this.pointer_over = None;
             }
             cx.notify();
         });
@@ -146,6 +200,10 @@ impl RingView {
             placement,
             pointer,
             _pointer_changes: pointer_changes,
+            armed: false,
+            landed: false,
+            landing: None,
+            pointer_over: None,
             _showing: showing,
         }
     }
@@ -163,66 +221,122 @@ impl RingView {
         });
     }
 
+    /// Track the slot under the pointer, and hover it if the slots have landed.
+    fn slot_hovered(&mut self, slot: ActionRingSlot, hovered: bool, cx: &mut Context<Self>) {
+        if hovered {
+            self.pointer_over = Some(slot);
+        } else if self.pointer_over == Some(slot) {
+            self.pointer_over = None;
+        }
+        self.sync_hover(cx);
+    }
+
+    /// The fly-out has landed: hover whatever slot the pointer is resting on.
+    fn land(&mut self, cx: &mut Context<Self>) {
+        self.landed = true;
+        self.landing = None;
+        self.sync_hover(cx);
+    }
+
+    /// Once the slots have landed, hover the slot under the pointer,
+    /// reporting it to the agent if it is newly hovered.
+    fn sync_hover(&mut self, cx: &mut Context<Self>) {
+        if !self.landed || self.hovered == self.pointer_over {
+            return;
+        }
+        self.hovered = self.pointer_over;
+        if let Some(slot) = self.hovered {
+            let _ = self.commands.send(OverlayCommand::Hover {
+                session_id: self.invocation.session_id,
+                slot,
+            });
+        }
+        cx.notify();
+    }
+
     fn slot_element(
         &self,
         slot: ActionRingSlot,
+        armed: bool,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
         let presentation = self.invocation.slots.get(&slot)?;
         let icon_path = presentation.icon.asset_path();
         let selected = self.hovered == Some(slot);
-        let (left, top) = slot.placement(WINDOW_SIZE, RADIUS, SLOT_SIZE);
+        let home = slot.placement(WINDOW_SIZE, RADIUS, SLOT_SIZE);
         let session_id = self.invocation.session_id;
-        let activate = self.commands.clone();
-        Some(
-            div()
-                .id(("ring-slot", slot.index()))
-                .absolute()
-                .left(px(left))
-                .top(px(top))
-                .size(px(SLOT_SIZE))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded_full()
-                .bg(if selected {
-                    color::accent_at_lightness(SELECTED_FILL_L)
-                } else {
-                    SLOT_RESTING
-                })
-                .when(selected, |slot| {
-                    slot.border_2()
-                        .border_color(color::accent_at_lightness(SELECTED_BORDER_L))
-                })
-                .shadow_md()
-                .text_color(GLYPH)
-                .cursor_pointer()
-                .child(svg().path(icon_path).size(px(22.0)).text_color(GLYPH))
-                .on_hover(cx.listener(move |this, hovered, _, cx| {
-                    if *hovered && this.hovered != Some(slot) {
-                        this.hovered = Some(slot);
-                        let _ = this
-                            .commands
-                            .send(OverlayCommand::Hover { session_id, slot });
-                        cx.notify();
-                    } else if !*hovered && this.hovered == Some(slot) {
-                        this.hovered = None;
-                        cx.notify();
-                    }
-                }))
-                .on_click(move |_, window, cx| {
-                    cx.stop_propagation();
-                    let _ = activate.send(OverlayCommand::Activate { session_id, slot });
-                    session::dismiss_from_window(cx, window, session_id);
-                })
-                .into_any_element(),
-        )
+        let element = div()
+            .id(("ring-slot", slot.index()))
+            .absolute()
+            .size(px(SLOT_SIZE))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_full()
+            .bg(if selected {
+                color::accent_at_lightness(SELECTED_FILL_L)
+            } else {
+                SLOT_RESTING
+            })
+            .when(selected, |slot| {
+                slot.border_2()
+                    .border_color(color::accent_at_lightness(SELECTED_BORDER_L))
+            })
+            .shadow_md()
+            .text_color(GLYPH)
+            .cursor_pointer()
+            .child(svg().path(icon_path).size(px(SLOT_GLYPH)).text_color(GLYPH))
+            .on_hover(cx.listener(move |this, hovered, _, cx| {
+                this.slot_hovered(slot, *hovered, cx);
+            }))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                cx.stop_propagation();
+                if !this.landed {
+                    return;
+                }
+                let _ = this
+                    .commands
+                    .send(OverlayCommand::Activate { session_id, slot });
+                session::dismiss_from_window(cx, window, session_id);
+            }));
+        // Position is owned by the fly-out: the slot starts under the cursor
+        // and flies to `home`, fading in on the way. Before the view is armed
+        // it just waits at the start. Reduce Motion renders the end state
+        // directly (GPUI's contract for one-shot animations), so the ring
+        // simply appears in place.
+        let fly_out = move |slot: gpui::Stateful<gpui::Div>, progress: f32| {
+            let (left, top) = fly_out_position(home, progress);
+            slot.left(px(left)).top(px(top)).opacity(progress)
+        };
+        Some(if armed {
+            element
+                .with_animation(
+                    ("ring-slot-fly-out", slot.index()),
+                    Animation::new(FLY_OUT).with_easing(ease_out_cubic),
+                    fly_out,
+                )
+                .into_any_element()
+        } else {
+            fly_out(element, 0.0).into_any_element()
+        })
     }
 }
 
+/// Where a slot sits `progress` (0..=1) of the way from the ring's centre to
+/// its `home` placement. Positions are the slot's top-left corner, as GPUI lays
+/// it out.
+fn fly_out_position(home: (f32, f32), progress: f32) -> (f32, f32) {
+    let centre = WINDOW_SIZE / 2.0 - SLOT_SIZE / 2.0;
+    (
+        centre + (home.0 - centre) * progress,
+        centre + (home.1 - centre) * progress,
+    )
+}
+
 impl RingView {
-    /// The fixed 360×360 ring. Both placements anchor this same element.
-    fn panel(&self, cx: &mut Context<Self>) -> Div {
+    /// The fixed ring. Both placements anchor this same element. `armed` is
+    /// whether the slots fly out on this render or wait under the cursor.
+    fn panel(&self, armed: bool, cx: &mut Context<Self>) -> Div {
         let session_id = self.invocation.session_id;
         let center_commands = self.commands.clone();
         let hovered_label = self.hovered.and_then(|slot| {
@@ -241,38 +355,37 @@ impl RingView {
         });
         let slots = ActionRingSlot::ALL
             .into_iter()
-            .filter_map(|slot| self.slot_element(slot, cx))
+            .filter_map(|slot| self.slot_element(slot, armed, cx))
             .collect::<Vec<_>>();
 
+        // The cancel button is not animated: it marks the cursor the ring was
+        // raised at, and it is there on the first frame so the press reads as
+        // acknowledged before the slots have finished arriving.
         div()
             .relative()
             .size(px(WINDOW_SIZE))
-            .child(
-                div()
-                    .absolute()
-                    .left(px(18.0))
-                    .top(px(18.0))
-                    .size(px(WINDOW_SIZE - 36.0))
-                    .rounded_full()
-                    .bg(PANEL)
-                    .shadow_lg(),
-            )
             .children(slots)
             .child(
                 div()
                     .id("ring-cancel")
                     .absolute()
-                    .left(px(WINDOW_SIZE / 2.0 - 24.0))
-                    .top(px(WINDOW_SIZE / 2.0 - 24.0))
-                    .size(px(48.0))
+                    .left(px(WINDOW_SIZE / 2.0 - CANCEL_SIZE / 2.0))
+                    .top(px(WINDOW_SIZE / 2.0 - CANCEL_SIZE / 2.0))
+                    .size(px(CANCEL_SIZE))
                     .flex()
                     .items_center()
                     .justify_center()
                     .rounded_full()
                     .bg(CANCEL_RESTING)
+                    .shadow_md()
                     .text_color(CANCEL_GLYPH)
                     .cursor_pointer()
-                    .child(svg().path(RING_CANCEL_ICON).size(px(20.0)).flex_none())
+                    .child(
+                        svg()
+                            .path(RING_CANCEL_ICON)
+                            .size(px(CANCEL_GLYPH_SIZE))
+                            .flex_none(),
+                    )
                     .on_click(move |_, window, cx| {
                         cx.stop_propagation();
                         let _ = center_commands.send(OverlayCommand::Cancel { session_id });
@@ -280,16 +393,34 @@ impl RingView {
                     }),
             )
             .when_some(hovered_label, |ring, label| {
+                // With the desktop showing through the ring, the label brings
+                // its own dark pill so it stays legible over anything. It sits
+                // under the ring: the centre is too tight for text now, and
+                // below the bottom slot it never covers a target. Only one
+                // line fits between the bottom slot and the window's edge, so
+                // a long label is ellipsized rather than wrapped and clipped.
                 ring.child(
                     div()
                         .absolute()
-                        .left(px(WINDOW_SIZE / 2.0 - 80.0))
-                        .top(px(WINDOW_SIZE / 2.0 + 34.0))
-                        .w(px(160.0))
-                        .text_center()
-                        .text_sm()
-                        .text_color(LABEL)
-                        .child(label),
+                        .left(px((WINDOW_SIZE - LABEL_WIDTH) / 2.0))
+                        .top(px(WINDOW_SIZE / 2.0 + RADIUS + SLOT_SIZE / 2.0 + 6.0))
+                        .w(px(LABEL_WIDTH))
+                        .flex()
+                        .justify_center()
+                        .child(
+                            div()
+                                .max_w_full()
+                                .px_3()
+                                .py_1()
+                                .rounded_full()
+                                .bg(LABEL_PILL)
+                                .shadow_md()
+                                .text_center()
+                                .text_sm()
+                                .text_color(LABEL)
+                                .truncate()
+                                .child(label),
+                        ),
                 )
             })
     }
@@ -305,11 +436,31 @@ impl Render for RingView {
             .read(cx)
             .center_in(window.window_handle().window_id());
         let panel = panel_origin(placement, center, window.viewport_size()).map(|origin| {
+            // The first render that draws the panel only parks the slots and
+            // asks for a frame; see `armed`.
+            let armed = std::mem::replace(&mut self.armed, true);
+            if !armed {
+                window.request_animation_frame();
+            } else if !self.landed && self.landing.is_none() {
+                // This render starts the fly-out. Reduce Motion draws the
+                // slots in place, so the ring must not look ready while
+                // ignoring the cursor.
+                let flight = if cx.reduce_motion() {
+                    Duration::ZERO
+                } else {
+                    FLY_OUT
+                };
+                let flight = cx.background_executor().timer(flight);
+                self.landing = Some(cx.spawn_in(window, async move |this, cx| {
+                    flight.await;
+                    let _ = this.update(cx, RingView::land);
+                }));
+            }
             div()
                 .absolute()
                 .left(origin.x)
                 .top(origin.y)
-                .child(self.panel(cx))
+                .child(self.panel(armed, cx))
         });
 
         div()
@@ -394,10 +545,30 @@ mod tests {
     use openlogi_core::binding::ActionRingIcon;
     use openlogi_ipc::ActionRingPresentation;
 
+    use tokio::sync::mpsc::error::TryRecvError;
+
     use super::*;
 
     fn window(id: u64) -> WindowId {
         WindowId::from(id)
+    }
+
+    #[test]
+    fn slots_fly_out_from_the_centre_to_their_placement() {
+        let home = ActionRingSlot::Right.placement(WINDOW_SIZE, RADIUS, SLOT_SIZE);
+        let centre = WINDOW_SIZE / 2.0 - SLOT_SIZE / 2.0;
+        assert_eq!(fly_out_position(home, 0.0), (centre, centre));
+        assert_eq!(fly_out_position(home, 1.0), home);
+        let (mid_x, mid_y) = fly_out_position(home, 0.5);
+        assert!((mid_x - (centre + RADIUS / 2.0)).abs() < 1e-3);
+        assert!((mid_y - centre).abs() < 1e-3);
+    }
+
+    #[test]
+    fn the_fly_out_curve_is_front_loaded_and_lands_exactly() {
+        assert!((ease_out_cubic(0.0)).abs() < 1e-6);
+        assert!((ease_out_cubic(1.0) - 1.0).abs() < 1e-6);
+        assert!(ease_out_cubic(0.5) > 0.85);
     }
 
     #[test]
@@ -417,7 +588,11 @@ mod tests {
     #[test]
     fn a_window_sized_ring_fills_its_window() {
         assert_eq!(
-            panel_origin(Placement::Window, None, Size::new(px(360.0), px(360.0))),
+            panel_origin(
+                Placement::Window,
+                None,
+                Size::new(px(WINDOW_SIZE), px(WINDOW_SIZE))
+            ),
             Some(Point::default())
         );
     }
@@ -442,7 +617,10 @@ mod tests {
                 Some(point(px(900.0), px(500.0))),
                 Size::new(px(1920.0), px(1080.0))
             ),
-            Some(point(px(720.0), px(320.0)))
+            Some(point(
+                px(900.0 - WINDOW_SIZE / 2.0),
+                px(500.0 - WINDOW_SIZE / 2.0)
+            ))
         );
     }
 
@@ -454,7 +632,7 @@ mod tests {
                 Some(point(px(4.0), px(1076.0))),
                 Size::new(px(1920.0), px(1080.0))
             ),
-            Some(point(px(0.0), px(720.0)))
+            Some(point(px(0.0), px(1080.0 - WINDOW_SIZE)))
         );
     }
 
@@ -538,6 +716,11 @@ mod tests {
 
     #[gpui::test]
     fn a_ring_window_that_loses_the_pointer_stops_drawing_and_hovering(cx: &mut TestAppContext) {
+        // The slots' fly-out runs on the wall clock, and test windows have no
+        // frame loop. This test is about which window draws the panel, so it
+        // takes the end state Reduce Motion renders and draws the frame a
+        // window asks for once it has the panel; its slots are then home.
+        cx.update(|cx| cx.set_reduce_motion(true));
         let live = Arc::new(ClickAwaySession::new());
         let (commands, mut sent) = mpsc::unbounded_channel();
         let pointer = cx.new(|_| RingPointer::default());
@@ -568,6 +751,7 @@ mod tests {
 
         let mut below_cx = VisualTestContext::from_window(below.into(), cx);
         below_cx.simulate_mouse_move(center, None, Modifiers::default());
+        start_fly_out(&mut below_cx, below);
         below_cx.simulate_mouse_move(top_slot_at(center), None, Modifiers::default());
         assert_eq!(
             below.read_with(cx, |view, _| view.hovered).unwrap(),
@@ -605,12 +789,154 @@ mod tests {
             "the covered window redraws without its panel"
         );
 
+        start_fly_out(&mut above_cx, above);
         above_cx.simulate_mouse_move(top_slot_at(center), None, Modifiers::default());
         assert_eq!(
             above.read_with(cx, |view, _| view.hovered).unwrap(),
             Some(ActionRingSlot::Top),
             "the window on top draws a working panel"
         );
+    }
+
+    /// Open one of a ring's windows, drawing the panel at `placement`.
+    fn open_ring(
+        cx: &mut TestAppContext,
+        commands: &mpsc::UnboundedSender<OverlayCommand>,
+        live: &Arc<ClickAwaySession>,
+        placement: Placement,
+        pointer: &Entity<RingPointer>,
+    ) -> WindowHandle<RingView> {
+        let (commands, live, pointer) = (commands.clone(), Arc::clone(live), pointer.clone());
+        cx.add_window(move |window, cx| {
+            RingView::new(
+                invocation(),
+                commands,
+                &live,
+                placement,
+                pointer,
+                window,
+                cx,
+            )
+        })
+    }
+
+    /// Draw `ring` until its fly-out has started: the first frame that draws
+    /// the panel parks the slots, and the next one sends them out.
+    fn start_fly_out(cx: &mut TestAppContext, ring: WindowHandle<RingView>) {
+        for _ in 0..2 {
+            ring.update(cx, |_, window, _| window.refresh()).unwrap();
+            cx.run_until_parked();
+        }
+        assert!(
+            ring.read_with(cx, |view, _| view.landing.is_some() || view.landed)
+                .unwrap(),
+            "the fly-out has started"
+        );
+    }
+
+    fn hovered(cx: &mut TestAppContext, ring: WindowHandle<RingView>) -> Option<ActionRingSlot> {
+        ring.read_with(cx, |view, _| view.hovered).unwrap()
+    }
+
+    #[gpui::test]
+    fn a_slot_entered_in_flight_is_hovered_once_the_slots_land(cx: &mut TestAppContext) {
+        let live = Arc::new(ClickAwaySession::new());
+        let (commands, mut sent) = mpsc::unbounded_channel();
+        let pointer = cx.new(|_| RingPointer::default());
+        let ring = open_ring(cx, &commands, &live, Placement::Window, &pointer);
+        start_fly_out(cx, ring);
+
+        // GPUI reports the hover once, while the slot is still on its way.
+        ring.update(cx, |view, _, cx| {
+            view.slot_hovered(ActionRingSlot::Top, true, cx);
+        })
+        .unwrap();
+        assert_eq!(hovered(cx, ring), None, "not before the slots land");
+        assert!(matches!(sent.try_recv(), Err(TryRecvError::Empty)));
+
+        cx.executor().advance_clock(FLY_OUT);
+        cx.run_until_parked();
+        assert_eq!(
+            hovered(cx, ring),
+            Some(ActionRingSlot::Top),
+            "the pointer resting on the slot hovers it on landing"
+        );
+        assert!(matches!(
+            sent.try_recv(),
+            Ok(OverlayCommand::Hover {
+                session_id: 7,
+                slot: ActionRingSlot::Top
+            })
+        ));
+        assert!(
+            matches!(sent.try_recv(), Err(TryRecvError::Empty)),
+            "reported once"
+        );
+    }
+
+    #[gpui::test]
+    fn under_reduce_motion_the_slots_answer_as_soon_as_they_appear(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let live = Arc::new(ClickAwaySession::new());
+        let (commands, _sent) = mpsc::unbounded_channel();
+        let pointer = cx.new(|_| RingPointer::default());
+        let ring = open_ring(cx, &commands, &live, Placement::Window, &pointer);
+        start_fly_out(cx, ring);
+        assert!(
+            ring.read_with(cx, |view, _| view.landed).unwrap(),
+            "drawn in place, so no wait"
+        );
+    }
+
+    #[gpui::test]
+    fn a_window_that_takes_the_panel_back_lands_again_before_it_answers(cx: &mut TestAppContext) {
+        let live = Arc::new(ClickAwaySession::new());
+        let (commands, mut sent) = mpsc::unbounded_channel();
+        let pointer = cx.new(|_| RingPointer::default());
+        let first = open_ring(cx, &commands, &live, Placement::AtPointer, &pointer);
+        let second = open_ring(cx, &commands, &live, Placement::AtPointer, &pointer);
+        let center = point(px(600.0), px(500.0));
+        let hear = |cx: &mut TestAppContext, ring: WindowHandle<RingView>| {
+            VisualTestContext::from_window(ring.into(), cx).simulate_mouse_move(
+                center,
+                None,
+                Modifiers::default(),
+            );
+        };
+
+        hear(cx, first);
+        start_fly_out(cx, first);
+        cx.executor().advance_clock(FLY_OUT);
+        cx.run_until_parked();
+        assert!(first.read_with(cx, |view, _| view.landed).unwrap());
+
+        // Another window takes the panel mid-session, then the first takes it
+        // back: its slots fly out afresh, so they must land again.
+        hear(cx, second);
+        assert!(
+            first
+                .read_with(cx, |view, _| !view.landed && view.landing.is_none())
+                .unwrap(),
+            "a window that stops drawing the panel forgets its landing"
+        );
+        hear(cx, first);
+        start_fly_out(cx, first);
+        while sent.try_recv().is_ok() {}
+        first
+            .update(cx, |view, _, cx| {
+                view.slot_hovered(ActionRingSlot::Top, true, cx);
+            })
+            .unwrap();
+        assert_eq!(
+            hovered(cx, first),
+            None,
+            "not while the slots fly out again"
+        );
+        assert!(matches!(sent.try_recv(), Err(TryRecvError::Empty)));
+
+        cx.executor().advance_clock(FLY_OUT);
+        cx.run_until_parked();
+        assert_eq!(hovered(cx, first), Some(ActionRingSlot::Top));
     }
 
     #[test]
