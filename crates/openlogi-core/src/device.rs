@@ -63,6 +63,15 @@ pub enum DeviceKind {
 }
 
 impl DeviceKind {
+    /// Whether this kind binds keys, not pointer buttons: keyboards and
+    /// standalone numpads. Such a device gets the Keys panel, its bindings
+    /// resolve against the foreground app rather than the app under the
+    /// pointer, and the agent captures it on the keyboard input plane.
+    #[must_use]
+    pub const fn is_keyboard_family(self) -> bool {
+        matches!(self, Self::Keyboard | Self::Numpad)
+    }
+
     /// Parse the OpenLogi asset registry's `type` string into a [`DeviceKind`].
     ///
     /// The registry field is free-form and case-inconsistent (both `"mouse"`
@@ -287,6 +296,12 @@ impl Capabilities {
             },
             DeviceKind::Keyboard => Self {
                 lighting: true,
+                ..Self::default()
+            },
+            // A numpad's controls are HID++ buttons (page buttons / grid keys)
+            // — keep its Keys panel configurable before the first probe.
+            DeviceKind::Numpad => Self {
+                buttons: true,
                 ..Self::default()
             },
             _ => Self::default(),
@@ -1052,6 +1067,11 @@ mod tests {
         assert!(mouse.buttons && mouse.pointer && !mouse.lighting);
         assert!(!mouse.thumbwheel);
         assert!(Capabilities::presumed_from_kind(DeviceKind::Keyboard).lighting);
+        // An unprobed numpad keeps its Keys panel: its controls are HID++
+        // buttons, so buttons=true — and it has nothing else to presume.
+        let numpad = Capabilities::presumed_from_kind(DeviceKind::Numpad);
+        assert!(numpad.buttons);
+        assert!(!numpad.pointer && !numpad.lighting);
         // An unidentified device presumes nothing — it must be measured.
         assert_eq!(
             Capabilities::presumed_from_kind(DeviceKind::Unknown),
@@ -1098,6 +1118,19 @@ mod tests {
                 !cfg!(target_os = "macos"),
                 "{key:?}"
             );
+        }
+    }
+
+    #[test]
+    fn only_keyboards_and_numpads_are_keyboard_family() {
+        assert!(DeviceKind::Keyboard.is_keyboard_family());
+        assert!(DeviceKind::Numpad.is_keyboard_family());
+        for kind in [
+            DeviceKind::Mouse,
+            DeviceKind::Trackball,
+            DeviceKind::Unknown,
+        ] {
+            assert!(!kind.is_keyboard_family(), "{kind:?}");
         }
     }
 }

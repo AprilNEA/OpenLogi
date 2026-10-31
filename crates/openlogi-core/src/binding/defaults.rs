@@ -82,7 +82,10 @@ pub fn default_binding(button: ButtonId) -> Action {
         // Keyboard keys stay on their native firmware function until the user
         // explicitly binds them; an unbound key is never diverted, so a
         // `None` default keeps the projection total without capturing anything.
-        ButtonId::Control(_) => Action::None,
+        // Keypad grid keys stay on their own firmware function whatever the
+        // binding says — they report through a vendor report, not a divert —
+        // and seed the same inert default.
+        ButtonId::Control(_) | ButtonId::Grid(_) => Action::None,
     }
 }
 

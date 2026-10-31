@@ -599,9 +599,7 @@ fn a_control_the_keyboard_session_owns_leaves_the_keyboard_capture_plan() {
     orch.devices = vec![keyboard];
     orch.rebuild();
 
-    let spec = orch
-        .keyboard_spec_for()
-        .expect("the bound key publishes a spec");
+    let spec = sole_keyboard_spec(&orch).expect("the bound key publishes a spec");
     assert_eq!(
         spec.wanted.keys().copied().collect::<Vec<_>>(),
         [multiplatform_back]
@@ -639,7 +637,7 @@ fn a_back_binding_alone_keeps_its_whole_family_on_a_keyboard() {
     orch.devices = vec![keyboard];
     orch.rebuild();
 
-    assert!(orch.keyboard_spec_for().is_none());
+    assert!(sole_keyboard_spec(&orch).is_none());
     let published = orch.shared.capture_plans.borrow();
     let diverted: Vec<u16> = published.plans()[0]
         .target
@@ -667,22 +665,21 @@ fn a_per_app_only_key_keeps_the_keyboard_session_with_nothing_diverted() {
     keyboard.kind = DeviceKind::Keyboard;
     orch.devices = vec![keyboard];
     orch.rebuild();
-    let elsewhere = orch
-        .keyboard_spec_for()
-        .expect("a per-app key holds the session");
+    let elsewhere = sole_keyboard_spec(&orch).expect("a per-app key holds the session");
     assert!(elsewhere.wanted.is_empty(), "{:#06x?}", elsewhere.wanted);
 
     orch.set_current_app(Some(ForegroundApp::unnamed("editor".into())));
-    let in_editor = orch.keyboard_spec_for().expect("spec");
+    let in_editor = sole_keyboard_spec(&orch).expect("spec");
     assert_eq!(in_editor.route, elsewhere.route);
     assert_eq!(
         in_editor.wanted.into_iter().collect::<Vec<_>>(),
         [(KEY, ButtonId::control(KEY))]
     );
 }
-/// A keyboard that binds keys only for another app never takes the session
-/// from a keyboard whose bindings apply now, even when it comes first in
-/// inventory order.
+/// On a route two inventory entries share, a keyboard that binds keys only
+/// for another app never takes the session from a keyboard whose bindings
+/// apply now, even when it comes first in inventory order. On routes of
+/// their own, each holds a session.
 #[test]
 fn a_keyboard_with_current_bindings_wins_over_a_per_app_only_one() {
     let mut config = Config::default();
@@ -698,15 +695,32 @@ fn a_keyboard_with_current_bindings_wins_over_a_per_app_only_one() {
         Binding::Single(Action::Paste),
     );
     let mut orch = orchestrator(config);
-    let keyboards = [("editor-only", 2), ("everywhere", 3)].map(|(key, index)| {
-        let mut keyboard = dev(key, index, true);
-        keyboard.kind = DeviceKind::Keyboard;
-        keyboard
-    });
-    orch.devices = keyboards.into();
+    let keyboards = || {
+        [("editor-only", 2), ("everywhere", 3)].map(|(key, index)| {
+            let mut keyboard = dev(key, index, true);
+            keyboard.kind = DeviceKind::Keyboard;
+            keyboard
+        })
+    };
+    orch.devices = keyboards().into();
     orch.rebuild();
     assert_eq!(
-        orch.keyboard_spec_for().expect("spec").config_key,
+        orch.keyboard_specs_for()
+            .into_iter()
+            .map(|spec| (spec.config_key, spec.wanted.is_empty()))
+            .collect::<Vec<_>>(),
+        [
+            ("editor-only".to_owned(), true),
+            ("everywhere".to_owned(), false)
+        ]
+    );
+
+    let mut sharing = keyboards();
+    sharing[1].route = sharing[0].route.clone();
+    orch.devices = sharing.into();
+    orch.rebuild();
+    assert_eq!(
+        sole_keyboard_spec(&orch).expect("spec").config_key,
         "everywhere"
     );
 }

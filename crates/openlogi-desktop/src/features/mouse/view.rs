@@ -22,7 +22,8 @@ use super::geometry::{
 };
 use super::hotspots::{Hotspot, MOUSE_MODEL_SIZE, MouseControlId};
 use super::inspector::{
-    ActionPickerContext, BindingInspectorData, InvalidDrafts, ShortcutMode, binding_inspector,
+    ActionPickerContext, BindingInspectorData, InvalidDrafts, ShortcutError, ShortcutMode,
+    binding_inspector,
 };
 use super::leader_lines::{Geometry as LeaderGeometry, Label, paint as paint_leader_lines};
 use crate::app::{glow_canvas, keyboard_glow};
@@ -209,7 +210,7 @@ impl MouseModelView {
         });
         cx.subscribe(&custom_shortcut_input, |view, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
-                view.invalid_drafts.shortcut = false;
+                view.invalid_drafts.shortcut = None;
                 cx.notify();
             }
         })
@@ -424,7 +425,8 @@ impl MouseModelView {
 
 impl RecordsShortcut for MouseModelView {
     /// A recorded chord fills the shortcut field, and Add commits it in the
-    /// chosen mode. A key a shortcut cannot send shows the field's error.
+    /// chosen mode. A key the recorder cannot turn into a chord shows the
+    /// field's error and leaves the field as it was.
     fn shortcut_recorded(
         &mut self,
         recording: Recording,
@@ -437,10 +439,15 @@ impl RecordsShortcut for MouseModelView {
                 self.custom_shortcut_input.update(cx, |input, cx| {
                     input.set_value(combo.rendered_label(), window, cx);
                 });
-                self.invalid_drafts.shortcut = false;
+                self.invalid_drafts.shortcut = None;
             }
             Recording::Cancelled => {}
-            Recording::Unsupported => self.invalid_drafts.shortcut = true,
+            Recording::Unsupported => {
+                self.invalid_drafts.shortcut = Some(ShortcutError::Unrecognized);
+            }
+            Recording::ShiftedSymbol => {
+                self.invalid_drafts.shortcut = Some(ShortcutError::ShiftedSymbol);
+            }
         }
         cx.notify();
     }

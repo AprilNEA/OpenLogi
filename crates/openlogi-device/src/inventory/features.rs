@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use hidpp::{
     channel::HidppChannel,
@@ -28,6 +29,7 @@ use openlogi_core::device::{
     BatteryInfo, BatteryLevel, Capabilities, DeviceKind, DeviceModelInfo, DeviceTransports,
 };
 use serde::{Deserialize, Serialize};
+use tokio::time::timeout;
 use tracing::debug;
 
 use crate::host_lock::ReceiverRegisterPhase;
@@ -75,16 +77,18 @@ pub(super) struct ProbedFeatures {
 }
 
 /// Whether a probe's data is the device's answer or the cache's stand-in for
-/// a refresh that just failed.
+/// a device that did not answer its refresh.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum Refresh {
     /// The data comes from a probe the device completed: this one, or the one
-    /// behind a cache entry that is still fresh.
+    /// behind a cache entry that is still fresh, or whose due refresh the
+    /// device answered without finishing the re-read (see
+    /// [`refresh_features`]).
     #[default]
     Answered,
-    /// A due refresh failed, so the cache's last-known answer stands in.
-    /// Callers keep publishing its identity, but must not take it as evidence
-    /// that the device is reachable.
+    /// The device did not answer a due refresh's ping, so the cache's
+    /// last-known answer stands in. Callers keep publishing its identity, but
+    /// must not take it as evidence that the device is reachable.
     Failed,
 }
 
@@ -365,33 +369,102 @@ pub(super) async fn probe_features(
     slot: u8,
     subscriptions: Option<&EventSubscriptionHandle>,
     registers: Option<&ReceiverRegisterPhase>,
-) -> (ProbedFeatures, Option<BatteryProbe>, EventFeatureIndices) {
+) -> FeatureProbe {
     match Device::new(Arc::clone(channel), slot).await {
         Ok(device) => probe_hidpp20(device, channel, slot, subscriptions).await,
         Err(DeviceError::UnsupportedProtocolVersion) => {
-            if let Some(registers) = registers {
-                probe_hidpp10(channel, slot, registers).await
-            } else {
-                debug!(
-                    slot,
-                    "HID++ 1.0 device outside a register phase, not probed"
-                );
-                (
-                    ProbedFeatures::default(),
-                    None,
-                    EventFeatureIndices::default(),
-                )
-            }
+            probe_hidpp10_held(channel, slot, registers).await
         }
         Err(e) => {
             debug!(slot, error = ?e, "Device::new failed");
-            (
-                ProbedFeatures::default(),
-                None,
-                EventFeatureIndices::default(),
-            )
+            unanswered()
         }
     }
+}
+
+/// What one device probe yields: its features, the battery source the cache
+/// reads, and the event-capable feature indexes.
+pub(super) type FeatureProbe = (ProbedFeatures, Option<BatteryProbe>, EventFeatureIndices);
+
+/// What a due refresh of a device the cache already knows learned.
+pub(super) enum Refreshed {
+    /// The device did not answer the protocol ping, so nothing shows that it
+    /// is reachable.
+    Unreachable,
+    /// The device answered the ping, so its channel delivers replies. The
+    /// probe after the ping is `None` when it ran past its budget.
+    Answered(Option<FeatureProbe>),
+}
+
+/// [`probe_features`] for a device the cache already knows, with the work
+/// after the protocol ping bounded by `walk_budget`.
+///
+/// The ping shows whether the device is reachable. The walk after it re-reads
+/// immutable data that the cache already holds, with one request per feature
+/// and per reprogrammable control among others. A control-table read is not
+/// retried. A Bluetooth link that drops a few replies can make the walk outlast
+/// the whole probe budget while the device keeps answering (#2107). A probe
+/// cut off by that budget counts as a failure, and two failures retire the
+/// channel. With its own budget, the walk ends first, and the caller still
+/// learns that the device answered.
+pub(super) async fn refresh_features(
+    channel: &Arc<HidppChannel>,
+    slot: u8,
+    subscriptions: Option<&EventSubscriptionHandle>,
+    registers: Option<&ReceiverRegisterPhase>,
+    walk_budget: Duration,
+) -> Refreshed {
+    let walk = match Device::new(Arc::clone(channel), slot).await {
+        Ok(device) => {
+            timeout(
+                walk_budget,
+                probe_hidpp20(device, channel, slot, subscriptions),
+            )
+            .await
+        }
+        Err(DeviceError::UnsupportedProtocolVersion) => {
+            timeout(walk_budget, probe_hidpp10_held(channel, slot, registers)).await
+        }
+        Err(e) => {
+            debug!(slot, error = ?e, "Device::new failed");
+            return Refreshed::Unreachable;
+        }
+    };
+    if walk.is_err() {
+        debug!(
+            slot,
+            ?walk_budget,
+            "refresh walk ran past its budget after the device answered its ping"
+        );
+    }
+    Refreshed::Answered(walk.ok())
+}
+
+/// [`probe_hidpp10`] when the caller holds the receiver's register phase.
+/// Without it, the device stays unanswered.
+async fn probe_hidpp10_held(
+    channel: &HidppChannel,
+    slot: u8,
+    registers: Option<&ReceiverRegisterPhase>,
+) -> FeatureProbe {
+    if let Some(registers) = registers {
+        probe_hidpp10(channel, slot, registers).await
+    } else {
+        debug!(
+            slot,
+            "HID++ 1.0 device outside a register phase, not probed"
+        );
+        unanswered()
+    }
+}
+
+/// The probe of a device that gave no usable answer.
+fn unanswered() -> FeatureProbe {
+    (
+        ProbedFeatures::default(),
+        None,
+        EventFeatureIndices::default(),
+    )
 }
 
 /// Probe a HID++ 2.0 device. Reuse the enumerated feature table to derive
@@ -752,6 +825,8 @@ fn force_sensing_error_answer(error: Hidpp20Error) -> Result<bool, ()> {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use hidpp::feature::{
         CreatableFeature as _, FeatureType, adc_measurement::AdcMeasurementFeature,
         battery_status::BatteryStatusFeature, battery_voltage::BatteryVoltageFeature,
@@ -761,13 +836,35 @@ mod tests {
     use openlogi_core::device::{BatteryInfo, BatteryLevel, BatteryStatus};
 
     use super::{
-        BatteryProbe, BatteryRead, ProbedFeatures, ProbedProtocol, battery_feature_index,
-        probe_features, read_battery,
+        BatteryProbe, BatteryRead, ProbedFeatures, ProbedProtocol, Refreshed,
+        battery_feature_index, probe_features, read_battery, refresh_features,
     };
     use crate::channel::scripted::{
-        ScriptedRawHidChannel, feature_error, register_error, scripted_channel,
+        ScriptedRawHidChannel, feature_error, ping_reply, register_error, scripted_channel,
     };
     use crate::host_lock::ReceiverRegisterPhase;
+
+    #[tokio::test]
+    async fn a_refresh_reports_the_answered_ping_when_its_walk_runs_past_the_budget() {
+        // Only the ping is answered. The feature-table lookup after it never
+        // is, so the walk can only end at its budget.
+        let (raw, _) = ScriptedRawHidChannel::with_responder(ping_reply);
+        let channel = scripted_channel(raw).await;
+        let refreshed =
+            refresh_features(&channel, 0xff, None, None, Duration::from_millis(50)).await;
+        assert!(
+            matches!(refreshed, Refreshed::Answered(None)),
+            "the ping was answered, and the walk did not finish"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refresh_whose_ping_goes_unanswered_is_unreachable() {
+        let (raw, _) = ScriptedRawHidChannel::with_failing_writes(|_| None, |_| true);
+        let channel = scripted_channel(raw).await;
+        let refreshed = refresh_features(&channel, 0xff, None, None, Duration::from_secs(8)).await;
+        assert!(matches!(refreshed, Refreshed::Unreachable));
+    }
 
     /// A HID++ 1.0 mouse at slot 1 with register `0x07` (a Performance MX, per
     /// Solaar), whose read of register `0x0D` answers `charge_register_error`.

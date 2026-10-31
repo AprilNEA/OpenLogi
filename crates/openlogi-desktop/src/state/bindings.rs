@@ -3,9 +3,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use openlogi_core::binding::{
-    Action, Binding, ButtonId, GestureDirection, LongPressBinding, WheelHoldBinding,
+    Action, Binding, ButtonId, GestureDirection, KeypadPage, LongPressBinding, WheelHoldBinding,
 };
-use openlogi_core::bindings::{bindings_for, hidpp_gesture_maps_for, oshook_gestures_for};
+use openlogi_core::bindings::{
+    bindings_for, button_bindings_for, hidpp_gesture_maps_for, oshook_gestures_for,
+};
 use openlogi_core::config::{Config, KeyTrigger};
 use tracing::debug;
 
@@ -236,6 +238,63 @@ impl AppState {
     #[must_use]
     pub fn keyboard_bindings(&self) -> &BTreeMap<KeyTrigger, Action> {
         &self.bindings.keyboard_bindings
+    }
+
+    /// The last of the selected device's keypad binding pages — its page
+    /// count; one for any device that never had more.
+    #[must_use]
+    pub fn current_keypad_pages(&self) -> KeypadPage {
+        self.current_record()
+            .and_then(DeviceRecord::persistent_config_key)
+            .map_or(KeypadPage::FIRST, |key| self.config.keypad_pages(key))
+    }
+
+    /// What each of the selected keypad's grid keys shows in the open
+    /// profile ([`Binding::key_action`]) — the face the agent paints on its
+    /// LCD. A key that does nothing is absent.
+    ///
+    /// Unlike [`Self::button_bindings`], a long press with only its long arm
+    /// set shows that arm.
+    #[must_use]
+    pub fn keypad_key_actions(&self) -> BTreeMap<ButtonId, Action> {
+        let key = self
+            .current_record()
+            .and_then(DeviceRecord::persistent_config_key);
+        button_bindings_for(&self.config, key, self.editing_app())
+            .into_iter()
+            .filter(|(button, _)| button.grid_slot().is_some())
+            .filter_map(|(button, binding)| Some((button, binding.key_action()?)))
+            .collect()
+    }
+
+    /// Whether the selected keypad binds any key on `page` in any profile —
+    /// what removing that page would drop.
+    #[must_use]
+    pub fn current_keypad_page_binds(&self, page: KeypadPage) -> bool {
+        self.current_record()
+            .and_then(DeviceRecord::persistent_config_key)
+            .is_some_and(|key| self.config.keypad_page_binds(key, page))
+    }
+
+    /// Give the selected keypad pages `1..=last`, persist it, and have the
+    /// agent reload. Shrinking drops the removed pages' grid bindings (see
+    /// [`Config::set_keypad_pages`]); the binding projection is refreshed so
+    /// the editor and the paging buttons' seeded actions follow at once.
+    pub fn commit_keypad_pages(&mut self, last: KeypadPage) -> StateEvents {
+        let events = self.for_current_device(StateEvent::BindingsChanged);
+        let Some(key) = self
+            .current_record()
+            .and_then(DeviceRecord::persistent_config_key)
+            .map(str::to_string)
+        else {
+            debug!("no persistent device key — keypad pages not stored");
+            return StateEvents::default();
+        };
+        self.config
+            .edit(|config| config.set_keypad_pages(&key, last));
+        self.refresh_binding_projections();
+        self.persist_and_reload("keypad pages");
+        events
     }
 
     pub(super) fn refresh_binding_projections(&mut self) {

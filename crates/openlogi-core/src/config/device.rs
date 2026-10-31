@@ -11,7 +11,7 @@ use super::settings::{
     CameraControls, GestureOwner, LightSettings, Lighting, OnboardMemory, ScrollResolution,
     SmartShift, ThumbwheelSensitivity, deserialize_gesture_owner,
 };
-use crate::binding::{Action, ActionRingConfig, Binding, ButtonId, GestureDirection};
+use crate::binding::{Action, ActionRingConfig, Binding, ButtonId, GestureDirection, KeypadPage};
 use crate::device::{Capabilities, DeviceKind, DeviceModelInfo, LightCapabilities};
 use crate::hid::{DisableKeysMask, Dpi, PointerSpeed, ReportRate};
 
@@ -371,6 +371,12 @@ pub struct DeviceConfig {
     /// Bindings used while G-Shift is held.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub gshift_bindings: BTreeMap<ButtonId, Action>,
+    /// The last of a keypad's binding pages — its page count. Grid bindings
+    /// on later pages are dropped when it shrinks (see
+    /// [`Config::set_keypad_pages`](crate::config::Config::set_keypad_pages)).
+    /// One page is the default and is omitted from `config.toml`.
+    #[serde(default, skip_serializing_if = "is_first_page")]
+    pub keypad_pages: KeypadPage,
 }
 
 impl DeviceConfig {
@@ -479,8 +485,19 @@ impl Default for DeviceConfig {
             disabled_keys: None,
             onboard_memory: None,
             gshift_bindings: BTreeMap::new(),
+            keypad_pages: KeypadPage::FIRST,
         }
     }
+}
+
+/// `skip_serializing_if` helper: a single-page keypad (or any other device)
+/// keeps `keypad_pages` out of `config.toml`.
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde's skip_serializing_if requires a fn(&T) -> bool signature"
+)]
+fn is_first_page(page: &KeypadPage) -> bool {
+    *page == KeypadPage::FIRST
 }
 
 /// `serde(default)` helper for `bool` fields that default to `true`.
@@ -613,6 +630,8 @@ struct RawDeviceConfig {
     onboard_memory: Option<OnboardMemory>,
     #[serde(default, deserialize_with = "deserialize_button_map")]
     gshift_bindings: BTreeMap<ButtonId, Action>,
+    #[serde(default)]
+    keypad_pages: KeypadPage,
     #[serde(default = "default_true")]
     enabled: bool,
     #[serde(default)]
@@ -681,6 +700,7 @@ impl From<RawDeviceConfig> for DeviceConfig {
             disabled_keys: raw.disabled_keys,
             onboard_memory: raw.onboard_memory,
             gshift_bindings: raw.gshift_bindings,
+            keypad_pages: raw.keypad_pages,
         }
     }
 }
@@ -689,7 +709,7 @@ impl From<RawDeviceConfig> for DeviceConfig {
 mod tests {
     use std::collections::BTreeSet;
 
-    use super::{DeviceConfig, DisableKey};
+    use super::{DeviceConfig, DisableKey, KeypadPage};
 
     #[test]
     fn host_switch_targets_round_trip_as_physical_keys() -> Result<(), Box<dyn std::error::Error>> {
@@ -730,6 +750,17 @@ mod tests {
         );
         let round_trip: DeviceConfig = toml::from_str(&toml::to_string(&configured)?)?;
         assert_eq!(round_trip.disabled_keys, configured.disabled_keys);
+        Ok(())
+    }
+
+    /// Every device entry written before binding pages existed omits
+    /// `keypad_pages`, and must still load — as one page.
+    #[test]
+    fn a_device_without_keypad_pages_loads_with_one_page() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let device: DeviceConfig = toml::from_str("dpi = 1200")?;
+        assert_eq!(device.keypad_pages, KeypadPage::FIRST);
+        assert!(!toml::to_string(&device)?.contains("keypad_pages"));
         Ok(())
     }
 }

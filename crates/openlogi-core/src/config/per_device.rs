@@ -14,7 +14,7 @@ use super::{
 };
 use crate::binding::{
     Action, ActionRingConfig, ActionRingIcon, ActionRingSlot, Binding, ButtonId, GamingLayout,
-    RingAction, default_binding,
+    KeypadPage, RingAction, default_binding,
 };
 use crate::hid::{Dpi, PointerSpeed, ReportRate};
 
@@ -535,6 +535,49 @@ impl Config {
             .entry(device_key.to_string())
             .or_default()
             .enabled = enabled;
+    }
+
+    /// The last of `device_key`'s keypad binding pages — its page count.
+    /// One page for any device that never had more.
+    #[must_use]
+    pub fn keypad_pages(&self, device_key: &str) -> KeypadPage {
+        self.devices
+            .get(device_key)
+            .map_or(KeypadPage::FIRST, |device| device.keypad_pages)
+    }
+
+    /// Give `device_key` pages `1..=last`. Shrinking drops every grid binding
+    /// on a removed page — device-wide and in each per-app overlay — so a
+    /// page re-added later starts empty instead of resurrecting old keys.
+    pub fn set_keypad_pages(&mut self, device_key: &str, last: KeypadPage) {
+        let device = self.devices.entry(device_key.to_string()).or_default();
+        device.keypad_pages = last;
+        let kept = |button: &ButtonId| button.grid_slot().is_none_or(|slot| slot.page <= last);
+        device.bindings.retain(|button, _| kept(button));
+        device.disabled_gestures.retain(|button, _| kept(button));
+        for overlay in device.per_app_bindings.values_mut() {
+            overlay.retain(|button, _| kept(button));
+        }
+    }
+
+    /// Whether any grid key on `page` of `device_key` is bound — device-wide
+    /// or in any per-app overlay — i.e. whether shrinking past `page`
+    /// ([`Self::set_keypad_pages`]) would drop a binding.
+    #[must_use]
+    pub fn keypad_page_binds(&self, device_key: &str, page: KeypadPage) -> bool {
+        let Some(device) = self.devices.get(device_key) else {
+            return false;
+        };
+        let on_page = |button: &ButtonId| button.grid_slot().is_some_and(|slot| slot.page == page);
+        device
+            .bindings
+            .iter()
+            .any(|(button, binding)| on_page(button) && *binding != Binding::Single(Action::None))
+            || device
+                .per_app_bindings
+                .values()
+                .flatten()
+                .any(|(button, action)| on_page(button) && *action != Action::None)
     }
 
     /// The effective thumb-wheel sensitivity for `device_key`: the device's

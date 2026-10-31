@@ -146,7 +146,7 @@ impl DetailTab {
         // rules out Keys even for a kind=Keyboard record — see
         // `can_show_mouse_model` above — so a misclassified mouse gets only
         // the Buttons panel, not both.
-        let shows_keys_tab = matches!(record.kind, DeviceKind::Keyboard)
+        let shows_keys_tab = record.kind.is_keyboard_family()
             && !caps.pointer
             && (caps.buttons || record.asset.is_some());
         // Keys goes first for a keyboard: it's the main screen for that device

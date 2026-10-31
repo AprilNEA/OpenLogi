@@ -1,0 +1,21 @@
+# Owner: openlogi_device_registry::keypad — a keypad's key grid (its rows and
+# columns) is a product identity fact declared once beside the product.
+id: registry-keypad-grid-owner
+language: rust
+severity: error
+message: A keypad's key grid is declared in openlogi-device-registry's keypad module (MX_CREATIVE_KEYPAD_GRID); use that constant and KeyGrid::cell instead of declaring another grid here.
+note: |
+  GridKey::position hard-coded three columns while the registry declared the
+  MX Creative Keypad's panel as a three-by-three KeyGrid, so the grid width
+  had two owners. See "Single source of truth" in AGENTS.md.
+files:
+  - crates/**/*.rs
+ignores:
+  - crates/openlogi-device-registry/src/keypad.rs
+  - crates/**/tests.rs
+  - crates/**/tests/**
+rule:
+  kind: struct_expression
+  has:
+    field: name
+    regex: '(^|::)KeyGrid$'

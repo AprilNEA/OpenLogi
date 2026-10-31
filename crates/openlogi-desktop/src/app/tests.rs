@@ -1205,6 +1205,22 @@ fn keyboard_with_buttons_shows_keys_tab() {
     assert_eq!(DetailTab::default_for(&keyboard), DetailTab::Keys);
 }
 
+/// A numpad is keyboard-like: the MX Creative Keypad (kind Numpad, buttons
+/// measured from its 0x1b04 table) shows Keys with neither the mouse Buttons
+/// panel nor Pointer.
+#[test]
+fn numpad_with_buttons_shows_keys_tab() {
+    let caps = Some(Capabilities {
+        buttons: true,
+        pointer: false,
+        ..Capabilities::default()
+    });
+    let tabs = DetailTab::tabs_for(&record(DeviceKind::Numpad, caps));
+    assert!(tabs.contains(&DetailTab::Keys), "numpad lost its Keys tab");
+    assert!(!tabs.contains(&DetailTab::Buttons));
+    assert!(!tabs.contains(&DetailTab::Pointer));
+}
+
 /// A sleeping keyboard whose slot was never probed has no capability data,
 /// but a resolved depot already says which controls it has: the Keys tab
 /// shows them so bindings can be set before the keyboard wakes.

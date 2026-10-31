@@ -8,7 +8,9 @@ use hidpp::feature::smartshift::WheelMode;
 
 use crate::SharedChannel;
 use crate::channel::scripted::{ScriptedRawHidChannel, feature_error, scripted_channel};
-use crate::write::diagnostics::{dump_firmware_entities_on_channel, read_battery_raw_on_channel};
+use crate::write::diagnostics::{
+    dump_features_on_channel, dump_firmware_entities_on_channel, read_battery_raw_on_channel,
+};
 use crate::write::dpi::expand_dpi_ranges;
 use crate::write::lighting::{collect_present_zones, per_key_commit, per_key_frames};
 use crate::write::smartshift::{
@@ -1801,4 +1803,96 @@ async fn per_key_frames_are_fenced_before_their_one_commit() -> Result<(), Write
     assert_eq!(commits.len(), 1, "exactly one frameEnd");
     assert!(commits[0] > fence, "the frameEnd follows the fence");
     Ok(())
+}
+
+/// Feature index the scripted Yeti X reports for `0x0001 FeatureSet`.
+const FEATURE_SET_INDEX: u8 = 0x01;
+/// `ErrorType::InvalidArgument`, the Yeti X's answer for a feature-table index
+/// it does not list.
+const INVALID_ARGUMENT: u8 = 0x02;
+/// The Yeti X feature table at indexes 1 to 8, as captured in #786.
+const YETI_X_FEATURES: [u16; 8] = [
+    0x0001, 0x0003, 0x0005, 0x8070, 0x8330, 0x8350, 0x8360, 0x8370,
+];
+
+/// A Yeti X (`046d:0aaf`) answering FeatureSet `getFeatureID` for indexes 1 to
+/// 8 and refusing index 0, the root, with `InvalidArgument` (#786). `refused`
+/// names one more index the device refuses, so a test can break the table
+/// elsewhere.
+fn yeti_x_feature_table(request: &[u8], refused: u8) -> Option<Vec<u8>> {
+    if request.len() < 7 || !matches!(request[0], 0x10 | 0x11) {
+        return None;
+    }
+    let mut payload = [0u8; 16];
+    match (request[2], request[3] >> 4) {
+        // Root ping used by Device::new.
+        (0x00, 0x01) => payload[0] = 4,
+        // Root feature lookup.
+        (0x00, 0x00) => {
+            let feature_id = u16::from_be_bytes([request[4], request[5]]);
+            payload[0] = u8::from(feature_id == 0x0001) * FEATURE_SET_INDEX;
+        }
+        // getCount: the table without the root.
+        (FEATURE_SET_INDEX, 0x00) => {
+            payload[0] = u8::try_from(YETI_X_FEATURES.len()).expect("a u8 count");
+        }
+        // getFeatureID.
+        (FEATURE_SET_INDEX, 0x01) => {
+            let index = request[4];
+            let feature_id = index
+                .checked_sub(1)
+                .filter(|_| index != refused)
+                .and_then(|slot| YETI_X_FEATURES.get(usize::from(slot)));
+            let Some(feature_id) = feature_id else {
+                return Some(feature_error(request, INVALID_ARGUMENT));
+            };
+            payload[..2].copy_from_slice(&feature_id.to_be_bytes());
+        }
+        _ => return None,
+    }
+
+    let long = request[0] == 0x11;
+    let mut response = vec![0u8; if long { 20 } else { 7 }];
+    response[0] = request[0];
+    response[1..4].copy_from_slice(&request[1..4]);
+    let payload_len = response.len() - 4;
+    response[4..].copy_from_slice(&payload[..payload_len]);
+    Some(response)
+}
+
+#[tokio::test]
+async fn a_refused_root_index_leaves_out_only_the_root_row() {
+    let (raw, _handle) =
+        ScriptedRawHidChannel::with_dynamic_responder(|request| yeti_x_feature_table(request, 0));
+    let channel = scripted_channel(raw).await;
+    let entries = dump_features_on_channel(&channel, 0xff)
+        .await
+        .expect("a refused root row is not a failed dump");
+    let rows: Vec<(u8, u16)> = entries
+        .iter()
+        .map(|entry| (entry.index, entry.id))
+        .collect();
+    let expected: Vec<(u8, u16)> = (1..).zip(YETI_X_FEATURES).collect();
+    assert_eq!(rows, expected);
+}
+
+#[tokio::test]
+async fn a_refused_index_after_the_root_still_fails_the_dump() {
+    let (raw, _handle) =
+        ScriptedRawHidChannel::with_dynamic_responder(|request| yeti_x_feature_table(request, 3));
+    let channel = scripted_channel(raw).await;
+    let error = dump_features_on_channel(&channel, 0xff)
+        .await
+        .expect_err("only the root row may be refused");
+    assert!(
+        matches!(
+            error,
+            WriteError::HidppFeature {
+                operation: HidppOperation::DumpFeatures,
+                feature_hex: 0x0001,
+                kind: HidppFeatureErrorKind::InvalidArgument,
+            }
+        ),
+        "unexpected error: {error:?}"
+    );
 }

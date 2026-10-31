@@ -1,20 +1,29 @@
 use super::callout_layout::{CalloutLayout, CardRect, callout_layout};
-use super::key_points::{KeyPoint, key_slots};
+use super::key_points::{KeyPoint, key_slots, photo_key_shape};
 use super::*;
 use crate::features::mouse::leader_lines::routes_cross;
 use openlogi_assets::{Assignment, Direction, ImageEntry, Metadata, Origin, Point};
-use openlogi_core::binding::ButtonId;
+use openlogi_core::binding::{ButtonId, Cid, GridKey};
 use openlogi_core::config::FunctionKey;
 use openlogi_core::device::DeviceKind;
+use openlogi_core::hid::{DeviceRoute, KeypadDescriptor};
 use std::path::PathBuf;
 
 mod native_function;
+/// The MX Creative Keypad, as its wired route names it.
+fn mx_keypad() -> Option<&'static KeypadDescriptor> {
+    DeviceRoute::Direct {
+        vendor_id: 0x046d,
+        product_id: 0xc354,
+    }
+    .keypad()
+}
 
 /// The F-row the fallback shows: Esc then F1–F19.
 const FUNCTION_KEYS: [FunctionKey; 20] = FunctionKey::ALL;
 
 fn key_points(asset: Option<&ResolvedAsset>) -> Vec<KeyPoint> {
-    key_slots(asset)
+    key_slots(asset, None)
         .into_iter()
         .map(|slot| slot.point)
         .collect()
@@ -68,9 +77,203 @@ fn fallback_key_positions_cover_the_full_top_row() {
     assert_eq!(positions.first().copied(), Some(EVEN_SPACING_START));
     assert_eq!(positions.last().copied(), Some(EVEN_SPACING_END));
     // Without markers the tab falls back to the OS-hook F-row.
-    let slots = key_slots(None);
+    let slots = key_slots(None, None);
     assert!(matches!(slots[0].target, KeyTarget::FunctionKey(ref t) if t.to_string() == "esc"));
     assert_eq!(slots[1].legend, "F1");
+}
+
+/// A keypad has no F-row to bind — that row belongs to keyboards, and a
+/// chip of it would write a global binding for a key that exists on neither
+/// the device nor the plane. What a markerless keypad shows is what it has:
+/// its nine grid keys, then the paging controls OpenLogi catalogued.
+#[test]
+fn a_keypad_without_markers_gets_keycaps_not_the_global_f_row() {
+    let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    let slots = key_slots(None, mx_keypad());
+
+    assert_eq!(slots.len(), 11, "nine grid keys and two paging keys");
+    assert!(
+        !slots
+            .iter()
+            .any(|slot| matches!(slot.target, KeyTarget::FunctionKey(_))),
+        "no keypad key binds to the global keyboard plane"
+    );
+    assert_eq!(slots[0].target, KeyTarget::grid(GridKey::TopLeft));
+    assert_eq!(slots[0].legend, "Grid Key (Top Left)");
+    assert_eq!(slots[4].target, KeyTarget::grid(GridKey::Middle));
+    assert_eq!(slots[4].legend, "Grid Key (Middle)");
+    assert_eq!(
+        slots[9].target,
+        KeyTarget::Control(ButtonId::control(0x01a1)),
+        "the paging row follows the grid, in left-to-right order"
+    );
+    assert_eq!(slots[9].legend, "Left Paging Button");
+    assert_eq!(
+        slots[10].target,
+        KeyTarget::Control(ButtonId::control(0x01a2))
+    );
+}
+
+/// Where the keycaps sit comes from the device model: the grid fills three
+/// rows in the same row-major order the firmware reports, and the paging row
+/// lies under the first two columns as it does on the chassis.
+#[test]
+fn keypad_keycaps_follow_the_device_layout() {
+    let slots = key_slots(None, mx_keypad());
+
+    for row in 0..3 {
+        let y = slots[row * 3].point.y_frac;
+        for col in 0..3 {
+            let slot = &slots[row * 3 + col];
+            assert_approx_eq(slot.point.y_frac, y);
+            if col > 0 {
+                let left = &slots[row * 3 + col - 1];
+                assert!(left.point.x_frac < slot.point.x_frac, "left to right");
+            }
+        }
+        if row > 0 {
+            assert!(slots[row * 3].point.y_frac > slots[row * 3 - 3].point.y_frac);
+        }
+    }
+    // Paging: below the grid, lined up under columns one and two.
+    assert!(slots[9].point.y_frac > slots[6].point.y_frac);
+    assert_approx_eq(slots[9].point.x_frac, slots[6].point.x_frac);
+    assert_approx_eq(slots[10].point.x_frac, slots[7].point.x_frac);
+}
+
+/// A keypad depot that marks only its paging keys has not answered what the
+/// tab asks: the photo path would show two bubbles and hide the nine grid
+/// keys it exists to bind. The device-model keycap map — every key, always —
+/// stays until the grid is marked too.
+#[test]
+fn paging_markers_alone_leave_the_keypad_on_the_keycap_map() {
+    let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    let asset = asset_with_controls(&[(0x01a1, 25.20, 82.04), (0x01a2, 49.91, 82.04)]);
+
+    let marked = key_slots(Some(&asset), mx_keypad());
+
+    assert_eq!(marked, key_slots(None, mx_keypad()));
+}
+
+/// Logi's own keypad depot marks no key, so the stock render carries the
+/// centres OpenLogi measured off it: every key the schematic shows, in the
+/// same order and binding the same targets, but on the photo — and on the
+/// keys the OpenLogi-authored markers name, two independent measurements of
+/// one render.
+#[test]
+fn the_stock_keypad_render_puts_every_key_on_the_photo() {
+    let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+
+    let KeySurface::Photo(stock) = key_surface(Some(&stock_keypad_asset((935, 1105))), mx_keypad())
+    else {
+        panic!("the stock render maps the keys onto the photo");
+    };
+
+    let schematic = key_slots(None, mx_keypad());
+    assert_eq!(
+        stock.iter().map(|slot| &slot.target).collect::<Vec<_>>(),
+        schematic
+            .iter()
+            .map(|slot| &slot.target)
+            .collect::<Vec<_>>(),
+    );
+    let marked = key_slots(Some(&keypad_marker_asset()), mx_keypad());
+    // The draft's right paging marker sits ~6 px left of that key's centre,
+    // so the cross-check stops at the left paging key.
+    for (stock, marked) in stock.iter().zip(&marked).take(10) {
+        assert!(
+            (stock.point.x_frac - marked.point.x_frac).abs() < 0.005
+                && (stock.point.y_frac - marked.point.y_frac).abs() < 0.005,
+            "{} sits off its authored marker",
+            stock.legend
+        );
+    }
+}
+
+/// A re-staged render is not the one the keys were measured on: rather than
+/// land the keys off the physical ones, the keypad keeps its schematic.
+#[test]
+fn a_restaged_keypad_render_falls_back_to_the_keycap_map() {
+    let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+
+    let surface = key_surface(Some(&stock_keypad_asset((1057, 1227))), mx_keypad());
+
+    assert!(matches!(surface, KeySurface::Keypad(_)));
+}
+
+/// The OpenLogi-authored c354 depot marks every key on the front render:
+/// the nine grid keys by `_g<index>` (wire order, row-major) and the two
+/// paging controls by their CIDs. Those caps go onto the render — positions
+/// as authored, since keypad markers need no Logitech canvas correction —
+/// in physical reading order.
+#[test]
+fn grid_markers_put_the_keypad_caps_on_the_photo() {
+    let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+
+    let slots = key_slots(Some(&keypad_marker_asset()), mx_keypad());
+
+    assert_eq!(
+        slots.len(),
+        11,
+        "the whole device is marked, so no key falls back to the schematic"
+    );
+    assert!(
+        !slots
+            .iter()
+            .any(|slot| matches!(slot.target, KeyTarget::FunctionKey(_))),
+        "a keypad binds its own keys, never the global F-row"
+    );
+    assert_eq!(slots[0].target, KeyTarget::grid(GridKey::TopLeft));
+    assert_eq!(slots[0].legend, "Grid Key (Top Left)");
+    assert_approx_eq(slots[0].point.x_frac, 24.92 / 100.);
+    assert_approx_eq(slots[0].point.y_frac, 20.77 / 100.);
+    assert_eq!(slots[4].target, KeyTarget::grid(GridKey::Middle));
+    assert_eq!(slots[8].target, KeyTarget::grid(GridKey::BottomRight));
+    assert_eq!(
+        slots[9].target,
+        KeyTarget::Control(ButtonId::control(0x01a1)),
+        "the paging keys join as the controls they are, under the grid"
+    );
+    assert_eq!(slots[9].legend, "Left Paging Button");
+    assert_eq!(
+        slots[10].target,
+        KeyTarget::Control(ButtonId::control(0x01a2))
+    );
+    assert!(
+        slots[9].point.y_frac > slots[6].point.y_frac,
+        "the paging row sits below the grid rows, in left-to-right order"
+    );
+}
+
+/// The photo keys must keep the render's gaps: at the authored positions
+/// and the render they were measured on, no two keys may overlap.
+#[test]
+fn photo_keys_keep_the_render_gaps_between_them() {
+    let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    let render = (935., 1105.);
+    let slots = key_slots(Some(&keypad_marker_asset()), mx_keypad());
+
+    for (a, b) in slots.iter().zip(&slots[1..]) {
+        let (one, two) = (
+            photo_key_shape(&a.target, render.0),
+            photo_key_shape(&b.target, render.0),
+        );
+        let (w1, h1, w2, h2) = (one.w, one.h, two.w, two.h);
+        let dx = (b.point.x_frac - a.point.x_frac).abs() * render.0;
+        let dy = (b.point.y_frac - a.point.y_frac).abs() * render.1;
+        assert!(
+            2. * dx >= w1 + w2 || 2. * dy >= h1 + h2,
+            "caps for {} and {} overlap",
+            a.legend,
+            b.legend
+        );
+    }
 }
 
 /// A Logi depot with control markers shows the keyboard's own controls —
@@ -94,7 +297,7 @@ fn control_markers_become_control_slots_in_reading_order() {
         (0x00e9, 85.5, 13.8),
     ]);
 
-    let slots = key_slots(Some(&asset));
+    let slots = key_slots(Some(&asset), None);
 
     assert_eq!(slots.len(), 10, "every marked control, no phantom F-keys");
     let targets: Vec<_> = slots.iter().map(|slot| slot.target.clone()).collect();
@@ -130,7 +333,7 @@ fn control_slots_read_row_by_row_and_name_unknown_controls_by_number() {
         (0x00d4, 63.0, 11.0),
     ]);
 
-    let slots = key_slots(Some(&asset));
+    let slots = key_slots(Some(&asset), None);
 
     let legends: Vec<&str> = slots.iter().map(|slot| slot.legend.as_str()).collect();
     assert_eq!(
@@ -159,7 +362,7 @@ fn control_slots_dedupe_repeats_and_skip_easy_switch() {
         assignments: vec![control_assignment(0x00d1, 8.65, 13.8)],
     });
 
-    let slots = key_slots(Some(&asset));
+    let slots = key_slots(Some(&asset), None);
 
     assert_eq!(slots.len(), 1);
     assert_eq!(
@@ -187,7 +390,7 @@ fn control_slots_dedupe_across_image_groups_keeping_the_keys_image_position() {
         ],
     });
 
-    let slots = key_slots(Some(&asset));
+    let slots = key_slots(Some(&asset), None);
 
     let screen_capture: Vec<_> = slots
         .iter()
@@ -483,6 +686,64 @@ fn asset_with_controls(controls: &[(u16, f32, f32)]) -> ResolvedAsset {
     }
 }
 
+/// The c354 depot as authored: `device_keys_image` marks the nine grid keys
+/// row-major (`_g1`…`_g9`, at centres measured off the render) and the two
+/// paging controls by CID.
+fn keypad_marker_asset() -> ResolvedAsset {
+    let mut assignments: Vec<Assignment> = [
+        (1, 24.92, 20.77),
+        (2, 50.33, 20.77),
+        (3, 75.73, 20.77),
+        (4, 24.92, 42.27),
+        (5, 50.33, 42.27),
+        (6, 75.73, 42.27),
+        (7, 24.92, 63.84),
+        (8, 50.33, 63.84),
+        (9, 75.73, 63.84),
+    ]
+    .into_iter()
+    .map(|(index, x, y)| Assignment {
+        slot_id: format!("mx-creative-keypad-c354_g{index}"),
+        slot_name: String::new(),
+        marker: Point { x, y },
+        label: Direction { x: 0, y: 0 },
+    })
+    .collect();
+    assignments.push(control_assignment(0x01a1, 25.20, 82.05));
+    assignments.push(control_assignment(0x01a2, 49.91, 82.04));
+    ResolvedAsset {
+        depot: "mx_creative_keypad".to_string(),
+        display_name: "MX Creative Keypad".to_string(),
+        kind: Some(DeviceKind::Numpad),
+        image_path: PathBuf::from("/tmp/mx-creative-keypad.png"),
+        hero_image_path: None,
+        glow: None,
+        metadata: Metadata {
+            images: vec![ImageEntry {
+                key: "device_keys_image".to_string(),
+                origin: Origin {
+                    width: 935,
+                    height: 1105,
+                },
+                assignments,
+            }],
+        },
+        png_width: 935,
+        png_height: 1105,
+        side_view: None,
+    }
+}
+
+/// The keypad depot as Logi ships it: the front render, no key markers.
+fn stock_keypad_asset(png: (u32, u32)) -> ResolvedAsset {
+    ResolvedAsset {
+        metadata: Metadata { images: Vec::new() },
+        png_width: png.0,
+        png_height: png.1,
+        ..keypad_marker_asset()
+    }
+}
+
 fn assert_approx_eq(actual: f32, expected: f32) {
     assert!(
         (actual - expected).abs() < 0.0001,
@@ -541,7 +802,7 @@ fn open_application_editor_binds_the_selected_key(cx: &mut gpui::TestAppContext)
     let (view, cx) = cx.add_window_view(|_, cx| FunctionRowView::new(cx));
     cx.simulate_resize(size(px(1200.), px(900.)));
     // Slot 1 of the fallback F-row is F1.
-    let f1 = key_slots(None)[1].target.clone();
+    let f1 = key_slots(None, None)[1].target.clone();
     view.update(cx, |view, cx| {
         view.select_key(Some(1), cx);
         view.open_editor(PowerUserKind::OpenApplication, cx);
@@ -599,4 +860,113 @@ fn open_application_editor_binds_the_selected_key(cx: &mut gpui::TestAppContext)
     drop(view);
     cx.update(|window, _| window.remove_window());
     cx.run_until_parked();
+}
+
+/// The view edits grid keys on its chosen page by moving their targets there;
+/// the paging buttons and F-row keys have no pages and stay as they are.
+#[test]
+fn only_grid_targets_move_to_the_edited_page() {
+    use openlogi_core::binding::{GridSlot, KeypadPage};
+    let second = KeypadPage::new(2).unwrap();
+
+    assert_eq!(
+        KeyTarget::grid(GridKey::Middle).on_page(second),
+        KeyTarget::Grid(GridSlot {
+            page: second,
+            key: GridKey::Middle,
+        })
+    );
+    let paging = KeyTarget::Control(ButtonId::Control(Cid::RIGHT_PAGING));
+    assert_eq!(paging.clone().on_page(second), paging);
+    // Every keypad layout slot starts on page 1, whatever page is edited.
+    let keypad = key_surface(None, mx_keypad()).slots();
+    assert!(
+        keypad
+            .iter()
+            .filter_map(|slot| match &slot.target {
+                KeyTarget::Grid(grid) => Some(grid.page),
+                _ => None,
+            })
+            .all(|page| page == KeypadPage::FIRST)
+    );
+}
+
+/// A key-row view whose workflow editor has a draft open on keypad page 2.
+fn view_with_a_draft_on_page_two(cx: &mut gpui::TestAppContext) -> Entity<FunctionRowView> {
+    use crate::services::assets::AssetResolver;
+    use crate::state::Sources;
+
+    cx.update(|cx| {
+        let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let resolver = AssetResolver::new();
+        let state = cx.new(|_| {
+            AppState::new(Sources::in_memory(
+                openlogi_core::config::Config::ephemeral(),
+                &resolver,
+                commands,
+            ))
+        });
+        AppState::set_global(state, cx);
+        cx.new(|cx| {
+            let mut view = FunctionRowView::new(cx);
+            view.set_keypad_page(KeypadPage::new(2).unwrap(), cx);
+            view.select_key(Some(0), cx);
+            view.open_editor(PowerUserKind::Workflow, cx);
+            view.push_workflow_step(WorkflowStep::Delay { millis: 50 }, cx);
+            view
+        })
+    })
+}
+
+#[gpui::test]
+fn turning_the_page_drops_a_draft_for_the_old_page(cx: &mut gpui::TestAppContext) {
+    let view = view_with_a_draft_on_page_two(cx);
+    cx.update(|cx| {
+        view.update(cx, |view, cx| {
+            view.set_keypad_page(KeypadPage::FIRST, cx);
+            assert_eq!(view.active_editor, None);
+            assert!(view.workflow_draft().is_empty());
+        });
+    });
+}
+
+#[gpui::test]
+fn removing_the_edited_page_drops_its_draft(cx: &mut gpui::TestAppContext) {
+    let view = view_with_a_draft_on_page_two(cx);
+    cx.update(|cx| {
+        view.update(cx, |view, _| {
+            // No device has a second page, so the edited page clamps to 1.
+            view.sync_edit_scope(None);
+            assert_eq!(view.keypad_page, KeypadPage::FIRST);
+            assert_eq!(view.active_editor, None);
+            assert!(view.workflow_draft().is_empty());
+        });
+    });
+}
+
+#[gpui::test]
+fn switching_the_app_profile_drops_a_draft_for_the_old_one(cx: &mut gpui::TestAppContext) {
+    let (state, _commands) = crate::state::tests::keypad_pages::keypad_state();
+    cx.update(|cx| {
+        let state = cx.new(|_| state);
+        AppState::set_global(state, cx);
+        let view = cx.new(FunctionRowView::new);
+        view.update(cx, |view, cx| {
+            view.sync_edit_scope(AppState::try_read(cx));
+            view.select_key(Some(0), cx);
+            view.open_editor(PowerUserKind::Workflow, cx);
+            view.push_workflow_step(WorkflowStep::Delay { millis: 50 }, cx);
+        });
+
+        AppState::global(cx).update(cx, |state, _| {
+            let _ = state.set_editing_app(Some("com.apple.Safari".into()));
+        });
+        view.update(cx, |view, cx| {
+            view.sync_edit_scope(AppState::try_read(cx));
+            assert_eq!(view.active_editor, None);
+            assert!(view.workflow_draft().is_empty());
+            // The key stays selected: only the draft belonged to the profile.
+            assert_eq!(view.selected_key, Some(0));
+        });
+    });
 }

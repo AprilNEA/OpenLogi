@@ -40,9 +40,9 @@ pub use pairing::{Click, PairingError, PasskeyMethod, ReceiverSelector};
 pub use pointer_speed::PointerSpeed;
 pub use report_rate::{ReportRate, ReportRateInfo};
 pub use route::{
-    DIRECT_DEVICE_INDEX, DeviceRoute, LOGITECH_VENDOR_ID, RECEIVERS, ReceiverBrand,
-    ReceiverDescriptor, ReceiverProtocol, find_receiver, is_receiver_pid, receiver_display_name,
-    speaks_unifying_protocol,
+    DIRECT_DEVICE_INDEX, DeviceRoute, KeypadDescriptor, LOGITECH_VENDOR_ID, RECEIVERS,
+    ReceiverBrand, ReceiverDescriptor, ReceiverProtocol, find_receiver, is_receiver_pid,
+    receiver_display_name, speaks_unifying_protocol,
 };
 pub use scroll::{ScrollReportingTarget, ScrollWheelMode};
 pub use smartshift::{

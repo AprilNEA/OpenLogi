@@ -20,7 +20,6 @@ use openlogi_core::hid::smartshift::{
     SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus, TunableTorque,
 };
 use openlogi_device::ChannelPool;
-use openlogi_device::LightWatch;
 use openlogi_device::backend::{HidBackend, HotplugStream};
 use openlogi_device::backlight::{BacklightChange, BacklightState};
 use openlogi_device::inventory::{Enumerator, InventoryError};
@@ -29,6 +28,7 @@ use openlogi_device::write::{
     self as device, Dpi, DpiInfo, FeatureEntry, FirmwareEntity, HapticWaveform, LightingMethod,
     LitraModel, PointerScaling, ReprogControlEntry, ScrollResolution, ScrollWheelMode,
 };
+use openlogi_device::{ButtonSpyError, ButtonSpyWatch, LightWatch};
 use openlogi_device::{DeviceIoGate, DeviceIoSignal, DeviceRoute};
 
 /// This host's HID stack.
@@ -147,6 +147,12 @@ pub async fn set_scroll_wheel_mode(
 /// Read the onboard memory of the device on `route`.
 pub async fn get_onboard(route: &DeviceRoute) -> Result<OnboardState, WriteError> {
     device::get_onboard(&*native_backend(), route).await
+}
+
+/// Read the HID++ `0x8110` slot mapping of the mouse `route` reaches and
+/// start its button spy, unless the mouse is in host mode.
+pub async fn watch_button_spy(route: &DeviceRoute) -> Result<ButtonSpyWatch, ButtonSpyError> {
+    device::watch_button_spy(&*native_backend(), route).await
 }
 
 /// Read the Fn-lock state of the keyboard `route` reaches.

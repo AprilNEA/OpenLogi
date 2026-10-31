@@ -1,7 +1,8 @@
-use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext, size};
+use gpui::{Entity, KeyDownEvent, Keystroke, Modifiers, TestAppContext, VisualTestContext, size};
 use openlogi_core::binding::default_binding;
 use openlogi_core::config::Config;
 
+use super::ShortcutError::{ShiftedSymbol, Unrecognized};
 use super::*;
 use crate::services::assets::AssetResolver;
 use crate::services::i18n::LOCALE_LOCK;
@@ -20,6 +21,28 @@ fn install_app_state(cx: &mut TestAppContext) {
 fn click_picker_control(cx: &mut VisualTestContext, selector: &'static str) {
     let bounds = cx.debug_bounds(selector).expect(selector);
     cx.simulate_click(bounds.center(), Modifiers::default());
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+}
+
+/// Press `key` with Cmd+Shift held, in the order GPUI's platforms report a
+/// shifted digit or symbol: a modifier change that holds Shift, then the
+/// shifted character without Shift (#2121).
+fn press_shifted_symbol(cx: &mut VisualTestContext, key: &str) {
+    let cmd = Modifiers {
+        platform: true,
+        ..Modifiers::default()
+    };
+    cx.simulate_modifiers_change(Modifiers { shift: true, ..cmd });
+    cx.simulate_event(KeyDownEvent {
+        keystroke: Keystroke {
+            modifiers: cmd,
+            key: key.into(),
+            key_char: None,
+        },
+        is_held: false,
+        prefer_character_input: false,
+    });
+    cx.simulate_modifiers_change(Modifiers::default());
     cx.update(|window, cx| window.draw(cx).clear(cx));
 }
 
@@ -99,7 +122,7 @@ fn action_picker_renders_after_opening_through_the_inspector(cx: &mut TestAppCon
 
     click_picker_control(cx, "inspector-action-custom-shortcut-add");
     view.read_with(cx, |view, _| {
-        assert!(view.invalid_drafts.shortcut);
+        assert_eq!(view.invalid_drafts.shortcut, Some(Unrecognized));
         assert!(!view.invalid_drafts.application);
     });
     assert!(
@@ -110,7 +133,7 @@ fn action_picker_renders_after_opening_through_the_inspector(cx: &mut TestAppCon
     click_picker_control(cx, "inspector-action-custom-application-add");
     view.read_with(cx, |view, _| {
         assert!(view.action_picker_open);
-        assert!(view.invalid_drafts.shortcut);
+        assert_eq!(view.invalid_drafts.shortcut, Some(Unrecognized));
         assert!(view.invalid_drafts.application);
     });
     assert!(
@@ -123,7 +146,7 @@ fn action_picker_renders_after_opening_through_the_inspector(cx: &mut TestAppCon
     cx.simulate_input("Cmd+K");
     cx.update(|window, cx| window.draw(cx).clear(cx));
     view.read_with(cx, |view, _| {
-        assert!(!view.invalid_drafts.shortcut);
+        assert_eq!(view.invalid_drafts.shortcut, None);
         assert!(view.invalid_drafts.application);
     });
     assert!(
@@ -245,11 +268,23 @@ fn record_fills_the_custom_shortcut_from_the_next_key_press(cx: &mut TestAppCont
 
     click_picker_control(cx, "inspector-action-custom-shortcut-record");
     press(cx, "f21");
-    view.read_with(cx, |view, _| assert!(view.invalid_drafts.shortcut));
+    view.read_with(cx, |view, _| {
+        assert_eq!(view.invalid_drafts.shortcut, Some(Unrecognized));
+    });
     assert!(
         cx.debug_bounds("inspector-action-custom-shortcut-error")
             .is_some()
     );
+
+    // #2121: Cmd+Shift+] arrives as Cmd+`}`. Record refuses it and leaves
+    // the field as it was.
+    click_picker_control(cx, "inspector-action-custom-shortcut-record");
+    press_shifted_symbol(cx, "}");
+    view.read_with(cx, |view, _| {
+        assert_eq!(view.invalid_drafts.shortcut, Some(ShiftedSymbol));
+        assert!(view.shortcut_recorder.is_none());
+    });
+    assert_eq!(shortcut_text(cx), "Ctrl+Shift+PageUp");
 
     // Moving focus out of the Record area ends the recording, so the next
     // key press reaches the newly focused field (#2138 review).
@@ -423,7 +458,7 @@ fn clearing_custom_action_drafts_resets_text_and_invalid_state(cx: &mut TestAppC
             view.custom_command_input
                 .update(cx, |input, cx| input.set_value("echo hi", window, cx));
             view.invalid_drafts = InvalidDrafts {
-                shortcut: true,
+                shortcut: Some(ShiftedSymbol),
                 application: true,
                 command: true,
             };

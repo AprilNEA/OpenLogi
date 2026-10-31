@@ -128,7 +128,9 @@ pub(super) fn detail_content(
         DetailTab::ActionsRing => {
             action_ring_tab(panels.action_ring, profile_icons, app_catalog, cx).into_any_element()
         }
-        DetailTab::Keys => keys_tab(panels.keyboard_model).into_any_element(),
+        DetailTab::Keys => {
+            keys_tab(panels.keyboard_model, profile_icons, app_catalog, cx).into_any_element()
+        }
         DetailTab::Pointer => {
             pointer_tab(panels.dpi_panel, panels.smartshift_panel, cx).into_any_element()
         }
@@ -335,9 +337,26 @@ fn tab_body(
         .child(div().w_full().max_w(width.rems()).child(content))
 }
 
-/// Keys tab: the function-row remapper for a keyboard.
-fn keys_tab(keyboard_model: &gpui::Entity<FunctionRowView>) -> impl IntoElement {
-    tab_body(ContentWidth::DoubleExtraLarge, keyboard_model.clone()).justify_center()
+/// Keys tab: the function-row remapper for a keyboard. A keypad's keys all
+/// bind per app profile, so it gets the Buttons tab's profile selector; a
+/// keyboard's F-row binds globally and a selector there would mislead.
+fn keys_tab(
+    keyboard_model: &gpui::Entity<FunctionRowView>,
+    profile_icons: &ProfileIconCache,
+    app_catalog: &gpui::Entity<AppCatalogPicker>,
+    cx: &mut Context<AppView>,
+) -> impl IntoElement {
+    let keypad = AppState::try_read(cx)
+        .and_then(AppState::current_keypad)
+        .is_some();
+    v_flex()
+        .flex_1()
+        .w_full()
+        .min_h_0()
+        .when(keypad, |tab| {
+            tab.children(button_profile_scope_bar(profile_icons, app_catalog, cx))
+        })
+        .child(tab_body(ContentWidth::DoubleExtraLarge, keyboard_model.clone()).justify_center())
 }
 
 fn action_ring_tab(

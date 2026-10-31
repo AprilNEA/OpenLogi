@@ -18,6 +18,7 @@
 
 mod channel;
 mod device_io;
+mod keypad_vendor;
 
 pub mod backend;
 pub mod backlight;
@@ -68,33 +69,35 @@ pub use session::host_switch::{
     run_host_switch_session, switch_linked_hosts,
 };
 pub use session::keyboard::{
-    RESERVED_KEYBOARD_CONTROLS, is_reserved_keyboard_control, run_keyboard_capture_session,
+    KeyboardWanted, RESERVED_KEYBOARD_CONTROLS, is_reserved_keyboard_control,
+    run_keyboard_capture_session,
 };
 pub use write::{
-    DisableKeysMask, DisableKeysState, Dpi, DpiCapabilities, DpiInfo, DpiLed, DpiTarget,
-    EasySwitchHosts, EasySwitchSlot, FeatureEntry, FirmwareEntity, FirmwareEntityInfo,
-    ForceSensingInfo, HapticRestore, HapticRestoreOutcome, HapticWaveform, HidppFeatureErrorKind,
-    HidppOperation, HostConnection, HostOs, HostOsInfo, HostOsKind, LITRA_BEAM_PRODUCT_ID,
-    LITRA_GLOW_PRODUCT_ID, LightChange, LightCommand, LightControls, LightWatch, LightingMethod,
-    LitraDescriptor, LitraModel, OsLayoutOutcome, OsMask, OsVersion, PointerSpeed,
-    RAW_BATTERY_FEATURES, ReportRate, ReportRateInfo, ReprogControlEntry, ScrollReportingTarget,
-    ScrollResolution, ScrollWheelMode, WriteError, apply_litra, commands_for_light_settings,
-    dump_features, dump_firmware_entities, dump_reprog_controls, encode_litra_command,
-    ensure_haptics_armed_on, find_litra, get_backlight, get_backlight_on, get_disable_keys,
-    get_disable_keys_on, get_dpi, get_dpi_info, get_dpi_info_on, get_easy_switch_hosts,
-    get_easy_switch_hosts_on, get_fn_lock, get_fn_lock_on, get_force_sensing_on, get_onboard,
-    get_onboard_on, get_pointer_speed_on, get_report_rate_info, get_report_rate_info_on,
-    get_scroll_wheel_mode, get_scroll_wheel_mode_on, get_smartshift_status,
-    get_smartshift_status_on, keep_os_layout_on, litra_model_for_route, matches_litra, play_haptic,
-    play_haptic_on, read_battery_raw, read_litra_state, rename_easy_switch_host,
-    rename_easy_switch_host_on, restore_haptics_on, set_disable_keys, set_disable_keys_on,
-    set_disable_keys_write_through_on, set_dpi, set_dpi_led_on, set_dpi_on, set_dpi_target_on,
-    set_fn_lock, set_fn_lock_on, set_force_sensing_on, set_keyboard_color, set_keyboard_color_on,
-    set_keyboard_color_with, set_keyboard_color_with_on, set_pointer_speed_on, set_report_rate,
-    set_report_rate_on, set_scroll_inversion, set_scroll_inversion_on, set_scroll_resolution,
-    set_scroll_resolution_on, set_scroll_wheel_mode, set_scroll_wheel_mode_on, set_smartshift,
-    set_smartshift_on, set_smartshift_sensitivity, set_smartshift_torque, toggle_smartshift,
-    toggle_smartshift_on, update_backlight, update_backlight_on, watch_litra,
+    ButtonSpyError, ButtonSpyWatch, DisableKeysMask, DisableKeysState, Dpi, DpiCapabilities,
+    DpiInfo, DpiLed, DpiTarget, EasySwitchHosts, EasySwitchSlot, FeatureEntry, FirmwareEntity,
+    FirmwareEntityInfo, ForceSensingInfo, HapticRestore, HapticRestoreOutcome, HapticWaveform,
+    HidppFeatureErrorKind, HidppOperation, HostConnection, HostOs, HostOsInfo, HostOsKind,
+    KeyDisplay, KeyImageJpeg, LITRA_BEAM_PRODUCT_ID, LITRA_GLOW_PRODUCT_ID, LightChange,
+    LightCommand, LightControls, LightWatch, LightingMethod, LitraDescriptor, LitraModel,
+    OsLayoutOutcome, OsMask, OsVersion, PointerSpeed, RAW_BATTERY_FEATURES, ReportRate,
+    ReportRateInfo, ReprogControlEntry, ScrollReportingTarget, ScrollResolution, ScrollWheelMode,
+    WriteError, apply_litra, commands_for_light_settings, dump_features, dump_firmware_entities,
+    dump_reprog_controls, encode_litra_command, ensure_haptics_armed_on, find_litra, get_backlight,
+    get_backlight_on, get_disable_keys, get_disable_keys_on, get_dpi, get_dpi_info,
+    get_dpi_info_on, get_easy_switch_hosts, get_easy_switch_hosts_on, get_fn_lock, get_fn_lock_on,
+    get_force_sensing_on, get_onboard, get_onboard_on, get_pointer_speed_on, get_report_rate_info,
+    get_report_rate_info_on, get_scroll_wheel_mode, get_scroll_wheel_mode_on,
+    get_smartshift_status, get_smartshift_status_on, keep_os_layout_on, key_display_for,
+    litra_model_for_route, matches_litra, play_haptic, play_haptic_on, read_battery_raw,
+    read_litra_state, rename_easy_switch_host, rename_easy_switch_host_on, restore_haptics_on,
+    set_disable_keys, set_disable_keys_on, set_disable_keys_write_through_on, set_dpi,
+    set_dpi_led_on, set_dpi_on, set_dpi_target_on, set_fn_lock, set_fn_lock_on,
+    set_force_sensing_on, set_keyboard_color, set_keyboard_color_on, set_keyboard_color_with,
+    set_keyboard_color_with_on, set_pointer_speed_on, set_report_rate, set_report_rate_on,
+    set_scroll_inversion, set_scroll_inversion_on, set_scroll_resolution, set_scroll_resolution_on,
+    set_scroll_wheel_mode, set_scroll_wheel_mode_on, set_smartshift, set_smartshift_on,
+    set_smartshift_sensitivity, set_smartshift_torque, toggle_smartshift, toggle_smartshift_on,
+    update_backlight, update_backlight_on, watch_button_spy, watch_litra, write_key_image_on,
 };
 
 /// Scripted transport helpers for tests in higher layers.

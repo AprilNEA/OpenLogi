@@ -12,7 +12,9 @@ use openlogi_core::device::{
 use openlogi_core::device_order::{
     DeviceIdentity as RouteIdentity, DeviceStableId, PhysicalDeviceKey,
 };
-use openlogi_core::hid::{DeviceRoute, LOGITECH_VENDOR_ID, ReceiverBrand, find_receiver};
+use openlogi_core::hid::{
+    DeviceRoute, KeypadDescriptor, LOGITECH_VENDOR_ID, ReceiverBrand, find_receiver,
+};
 use tracing::debug;
 
 use super::device_key::DeviceKey;
@@ -154,6 +156,28 @@ impl DeviceRecord {
 }
 
 impl super::AppState {
+    /// The known keypad the selected device is ([`DeviceRoute::keypad`]), or
+    /// `None` for any other device — a number pad among them: the keypad's
+    /// grid and paging keys are its identity fact, not every number pad's.
+    ///
+    /// Online, the live route answers. Offline there is none, so the routes
+    /// the saved entry's `links` record answer instead, and an unplugged
+    /// keypad keeps its keys and app profiles.
+    #[must_use]
+    pub fn current_keypad(&self) -> Option<&'static KeypadDescriptor> {
+        let record = self.current_record()?;
+        if let Some(route) = &record.route {
+            return route.keypad();
+        }
+        self.config
+            .devices
+            .get(&record.config_key)?
+            .links
+            .keys()
+            .filter_map(|key| DeviceStableId::direct_route_of_key(key))
+            .find_map(|route| route.keypad())
+    }
+
     /// Presentation-only connection mode last observed for an offline device.
     /// After restart, only a sole recorded link is unambiguous: the saved link
     /// index has no chronology. Never restore a hardware-write route from history.
@@ -174,14 +198,20 @@ impl super::AppState {
         if links.next().is_some() {
             return None;
         }
-        let (vendor, product) = link.strip_prefix("direct:")?.split_once(':')?;
-        if u16::from_str_radix(vendor, 16).ok()? != LOGITECH_VENDOR_ID {
+        let DeviceRoute::Direct {
+            vendor_id,
+            product_id,
+        } = DeviceStableId::direct_route_of_key(link)?
+        else {
+            return None;
+        };
+        if vendor_id != LOGITECH_VENDOR_ID {
             return None;
         }
         record
             .model_info
             .as_ref()?
-            .transport_for_product_id(u16::from_str_radix(product, 16).ok()?)
+            .transport_for_product_id(product_id)
             .map(ObservedConnection::Direct)
     }
 }
@@ -910,13 +940,15 @@ fn demo_keyboard() -> DeviceRecord {
 
 /// Last step of the device-kind precedence chain:
 ///
-/// > **asset registry** > HID++ `0x0005` > Bolt pairing register
+/// > **asset registry** > HID++ `0x0005` > register
 ///
-/// The two HID++ sources are already folded into `hid_kind` by
-/// `resolve_device_kind` (`crates/openlogi-hid/src/inventory/mappings.rs`); this applies
-/// the final override. Adding a kind source means slotting it into this one
-/// chain — here if it should beat the HID++ sources, in `resolve_device_kind`
-/// otherwise — and updating both docs.
+/// where *register* is the Bolt pairing register for receiver-attached
+/// devices and the curated identity registry (`direct_identity_kind`) on the
+/// direct path. The two HID++ sources are already folded into `hid_kind` by
+/// `resolve_device_kind` (`crates/openlogi-device/src/inventory/mappings.rs`);
+/// this applies the final override. Adding a kind source means slotting it
+/// into this one chain — here if it should beat the HID++ sources, in
+/// `resolve_device_kind` otherwise — and updating both docs.
 ///
 /// The registry type wins because it is per-model and human-maintained, so a
 /// device that matched a known depot is classified by what that model *is* —

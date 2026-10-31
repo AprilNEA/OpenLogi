@@ -7,6 +7,7 @@ ruleDirs:
   - crates/openlogi-core/.ast-grep/rules
   - crates/openlogi-desktop/.ast-grep/rules
   - crates/openlogi-device/.ast-grep/rules
+  - crates/openlogi-device-registry/.ast-grep/rules
   - crates/openlogi-fixture/.ast-grep/rules
   - crates/openlogi-hidpp/.ast-grep/rules
   - crates/openlogi-hook/.ast-grep/rules
