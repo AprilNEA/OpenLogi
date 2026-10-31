@@ -85,10 +85,12 @@ pub(super) async fn probe_direct(
     // write attempt. We reuse the capabilities the probe already derived from
     // the feature table — no extra round-trip.
     // A completed feature-table walk is what makes this probe's verdict
-    // trustworthy: without it (the device never answered, or its refresh just
-    // failed and the cache stood in) a rejection below would be
+    // trustworthy: without it (the device never answered, or it did not answer
+    // its refresh ping and the cache stood in) a rejection below would be
     // indistinguishable from a transient glitch, so the node is settled as a
-    // failed probe and its last inventory replayed.
+    // failed probe and its last inventory replayed. A refresh that the device
+    // answered but did not finish re-reading still counts: its cached walk is
+    // complete, and the ping shows the channel works (#2107).
     let capabilities = probe.capabilities();
     let walk_succeeded = capabilities.is_some() && probe.refresh == Refresh::Answered;
     let caps = capabilities.unwrap_or_default();
