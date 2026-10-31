@@ -27,7 +27,7 @@ use super::inspector::{
 };
 use super::leader_lines::{Geometry as LeaderGeometry, Label, paint as paint_leader_lines};
 use crate::app::{glow_canvas, keyboard_glow};
-use crate::features::binding_editor::{Recording, RecordsShortcut, ShortcutRecorder};
+use crate::features::binding_editor::{Recording, RecordsShortcut, ShortcutRecorder, hidden_actions};
 use crate::features::keyboard::editors::{PowerUserKind, text_editor_placeholder};
 use crate::features::profiles::{profile_canvas_status, profile_name};
 use crate::services::assets::{GlowGeometry, ResolvedAsset};
@@ -42,8 +42,6 @@ const TWO_SIDED_LABEL_MIN_W: f32 = 700.;
 const CARD_EDGE_INSET: f32 = SIDE_GAP;
 
 const HOTSPOT_DOT: f32 = 12.;
-/// Left out for a device without an Actions Ring tab.
-const NO_ACTIONS_RING: &[Action] = &[Action::ShowActionsRing];
 
 /// The held actions, which only a button press can run.
 fn held_actions(offer_gshift: bool) -> &'static [Action] {
@@ -132,14 +130,7 @@ impl<'a> MouseWorkspaceData<'a> {
                 state.current_gaming_layout().is_some()
                     && state.binding_layer() == BindingLayer::Normal,
             ),
-            hidden_actions: if state
-                .current_record()
-                .is_none_or(crate::app::offers_actions_ring)
-            {
-                &[]
-            } else {
-                NO_ACTIONS_RING
-            },
+            hidden_actions: hidden_actions(Some(state)),
         })
     }
 

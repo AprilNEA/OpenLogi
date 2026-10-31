@@ -272,6 +272,16 @@ impl Capabilities {
         }
     }
 
+    /// Whether the device is a Logitech G-series device. Logitech numbers
+    /// its gaming-only HID++ features `0x8000`–`0x8FFF`; RGB lighting and
+    /// the report rate are the ones OpenLogi measures. Ask it of measured
+    /// capabilities only: [`Self::presumed_from_kind`] guesses lighting for
+    /// every keyboard.
+    #[must_use]
+    pub const fn is_g_series(&self) -> bool {
+        self.lighting || self.report_rate
+    }
+
     /// Best-effort capabilities for a device we could not probe (offline /
     /// never reached), guessed from its [`DeviceKind`]. Used only as a fallback
     /// when no measured [`Capabilities`] exist — a sleeping mouse should still
@@ -690,6 +700,20 @@ mod tests {
         DeviceModelInfo, DeviceTransports, LightValueRange, LightValueUnit, LockKey,
         ModelTransport, PairedDevice, ReceiverInfo, prettify_codename,
     };
+
+    /// RGB lighting or a report rate, both in Logitech's gaming feature
+    /// range, make a device G-series; an MX keyboard or mouse has neither.
+    #[test]
+    fn a_gaming_feature_makes_a_device_g_series() {
+        let g512 = Capabilities::from_feature_ids(&[0x1b04, 0x40a2, 0x8060, 0x8070, 0x8080]);
+        let g_mouse = Capabilities::from_feature_ids(&[0x1b04, 0x2201, 0x8060]);
+        let mx_keys = Capabilities::from_feature_ids(&[0x1b04, 0x1982, 0x40a2, 0x4531]);
+        let mx_master = Capabilities::from_feature_ids(&[0x1b04, 0x2201, 0x2121]);
+        assert!(g512.is_g_series());
+        assert!(g_mouse.is_g_series());
+        assert!(!mx_keys.is_g_series());
+        assert!(!mx_master.is_g_series());
+    }
 
     #[test]
     fn a_low_discharging_battery_needs_attention() {

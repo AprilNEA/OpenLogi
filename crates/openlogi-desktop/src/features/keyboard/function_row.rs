@@ -36,8 +36,8 @@ use super::editors::{
 };
 use crate::app::{glow_canvas, keyboard_glow};
 use crate::features::binding_editor::{
-    PickFn, action_icon_path, action_rows, compact_panel, divider, editor_scroll_list,
-    editor_section,
+    ActionOffer, PickFn, action_icon_path, action_rows, compact_panel, divider, editor_scroll_list,
+    editor_section, hidden_actions,
 };
 use crate::features::mouse::geometry::asset_dimensions_for_png;
 use crate::features::profiles::profile_name;
@@ -895,7 +895,11 @@ impl FunctionRowView {
                     }),
             ),
         );
-        rows.extend(panel_action_rows(current.as_ref(), &on_pick, view, &pal));
+        let offer = ActionOffer {
+            hidden: hidden_actions(AppState::try_read(cx)),
+            ..ActionOffer::default()
+        };
+        rows.extend(panel_action_rows(current.as_ref(), offer, &on_pick, view, &pal));
 
         compact_panel(pal)
             .w(px(PANEL_W))
@@ -931,11 +935,12 @@ fn title_header(key_name: &SharedString, app: Option<&str>, pal: &Palette) -> im
 /// adapted for the panel context (no popover dismissal).
 fn panel_action_rows(
     current: Option<&Action>,
+    offer: ActionOffer<'_>,
     on_pick: &PickFn,
     view: &Entity<FunctionRowView>,
     pal: &Palette,
 ) -> Vec<gpui::Div> {
-    let mut children = action_rows("panel-action", current, on_pick, *pal);
+    let mut children = action_rows("panel-action", current, offer, on_pick, *pal);
 
     let power_user_actions: &[(PowerUserKind, SharedString, &'static str)] = &[
         (

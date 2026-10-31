@@ -160,8 +160,16 @@ impl DetailTab {
         // mouse model), so any keyboard that gets a Keys tab needs the ring
         // editor too — otherwise the ring opens but has nothing configured
         // in it and no way to configure it (#1833).
-        // A G-series mouse gets no ring: its buttons are for games.
-        if caps.haptic_panel || (buttons && can_show_mouse_model && !gaming) || shows_keys_tab {
+        // A G-series device gets no ring: its buttons and keys are for games.
+        // A dumped or ReprogControls-less mouse is G-series by `gaming`; any
+        // other device by its measured gaming features, since a presumed
+        // keyboard guesses lighting.
+        let g_series = gaming
+            || record
+                .capabilities
+                .as_ref()
+                .is_some_and(Capabilities::is_g_series);
+        if !g_series && (caps.haptic_panel || (buttons && can_show_mouse_model) || shows_keys_tab) {
             tabs.push(Self::ActionsRing);
         }
         let has_software_scroll = openlogi_hook::SOFTWARE_SCROLL_INVERSION
