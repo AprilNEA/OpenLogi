@@ -326,6 +326,7 @@ async fn walk_bolt_slot(
         model_info: probe.model_info,
         capabilities,
         settings_revision: pass.settings_revision(slot),
+        hidpp10: false,
     };
     (device, outcome)
 }

@@ -101,6 +101,10 @@ async fn hidpp10_slot_is_named_by_the_receiver_and_reports_its_battery() {
 
     assert_eq!(device.codename.as_deref(), Some("Performance MX"));
     assert_eq!(device.kind, DeviceKind::Mouse);
+    assert!(
+        device.hidpp10,
+        "the GUI presumes only host-side tabs for it"
+    );
     assert_eq!(
         device.capabilities, None,
         "no feature table: the UI keeps its kind-based fallback"
@@ -169,6 +173,7 @@ async fn hidpp10_trackball_slot_takes_its_kind_from_the_arrival() {
     assert_eq!(device.codename.as_deref(), Some("M570"));
     assert_eq!(device.kind, DeviceKind::Trackball);
     assert_eq!(device.capabilities, None);
+    assert!(device.hidpp10);
 }
 
 #[test]
@@ -185,6 +190,10 @@ fn unifying_arrival_liveness_survives_missing_feature_data() {
     assert!(device.online);
     assert_eq!(device.wpid, Some(0x40b8));
     assert_eq!(device.kind, DeviceKind::Mouse);
+    assert!(
+        !device.hidpp10,
+        "a probe that did not complete says nothing of the protocol"
+    );
 }
 
 #[tokio::test]

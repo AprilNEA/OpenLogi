@@ -101,6 +101,7 @@ pub(crate) fn direct_inventory(unit_id: [u8; 4]) -> DeviceInventory {
             }),
             capabilities: Some(Capabilities::presumed_from_kind(DeviceKind::Mouse)),
             settings_revision: 0,
+            hidpp10: false,
         }],
     }
 }

@@ -228,6 +228,7 @@ mod tests {
                 capture_id: None,
                 kind: DeviceKind::Mouse,
                 capabilities: None,
+                hidpp10: false,
                 light_capabilities: None,
                 slot: 1,
                 online: true,

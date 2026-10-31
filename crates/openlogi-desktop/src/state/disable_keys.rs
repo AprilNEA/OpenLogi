@@ -575,6 +575,7 @@ mod tests {
                 online: true,
                 battery: None,
                 settings_revision: 0,
+                hidpp10: false,
                 model_info: Some(DeviceModelInfo {
                     entity_count: 1,
                     serial_number: None,
