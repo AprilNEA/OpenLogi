@@ -59,6 +59,8 @@ unknown-git = "deny"
 # that appears as `git+…` in Cargo.lock must be listed here.
 allow-git = [
     "https://github.com/AprilNEA/appicon",
+    # Verification draft only: openlogi-async-hid 0.5.3-openlogi.2 candidate.
+    "https://github.com/AprilNEA/async-hid",
     "https://github.com/AprilNEA/gpui-kit",
     "https://github.com/longbridge/gpui-kit",
 ]
