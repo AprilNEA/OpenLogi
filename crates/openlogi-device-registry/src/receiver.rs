@@ -50,9 +50,9 @@ impl ReceiverDescriptor {
 
 /// All receiver identities supported by OpenLogi.
 ///
-/// Each entry is a protocol claim and must be backed by hardware verification
-/// or an established reference implementation. Marketing families and protocol
-/// families are recorded separately: Nano and Lightspeed currently use
+/// Entries are protocol claims backed by hardware verification or an established
+/// reference implementation, unless explicitly marked experimental. Marketing
+/// and protocol families are recorded separately: Nano and Lightspeed currently use
 /// [`ReceiverProtocol::Unifying`].
 pub const RECEIVERS: &[ReceiverDescriptor] = &[
     ReceiverDescriptor::logitech(0xc52b, ReceiverBrand::Unifying, ReceiverProtocol::Unifying),
@@ -85,6 +85,13 @@ pub const RECEIVERS: &[ReceiverDescriptor] = &[
     // Lightspeed receiver, verified with a G915 (WPID 0x407c).
     ReceiverDescriptor::logitech(
         0xc541,
+        ReceiverBrand::Lightspeed,
+        ReceiverProtocol::Unifying,
+    ),
+    // c545 uses the Unifying protocol; verified by discovering a G915 X LS
+    // keyboard and G502 X LIGHTSPEED mouse on the same physical receiver.
+    ReceiverDescriptor::logitech(
+        0xc545,
         ReceiverBrand::Lightspeed,
         ReceiverProtocol::Unifying,
     ),
@@ -165,5 +172,14 @@ mod tests {
     #[test]
     fn lookup_requires_the_matching_vendor() {
         assert!(find_receiver(0xffff, 0xc54d).is_none());
+    }
+
+    #[test]
+    fn c545_receiver_is_lightspeed_over_unifying_protocol() {
+        let receiver = find_receiver(LOGITECH_VENDOR_ID, 0xc545).expect("c545 receiver");
+
+        assert_eq!(receiver.brand, ReceiverBrand::Lightspeed);
+        assert_eq!(receiver.protocol, ReceiverProtocol::Unifying);
+        assert!(find_receiver(0xffff, 0xc545).is_none());
     }
 }
