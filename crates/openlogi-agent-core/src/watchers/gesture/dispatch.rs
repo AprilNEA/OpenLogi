@@ -17,7 +17,7 @@ use self::wheel::{ScrollScale, WheelAccumulators, WheelOutput, WheelRotation};
 use super::GestureOutputs;
 use crate::capture_plan::DispatchPlan;
 use crate::runtime::hook::SharedHookMaps;
-use crate::runtime::{HidppSessionId, PressToken};
+use crate::runtime::{ActionName, HidppSessionId, PressToken};
 
 /// Effective thumb-wheel configuration whose continuity is tied to one
 /// dispatch plan. A binding or sensitivity update clears accumulated state
@@ -225,7 +225,7 @@ impl InputDispatcher {
                     .or_else(|| plan.side_gesture_bindings.get(&button))
                     .and_then(|map| map.get(&direction))
                 {
-                    debug!(key, %button, ?direction, action = %action.label(), "gesture → action");
+                    debug!(key, %button, ?direction, action = %ActionName(action), "gesture → action");
                     if !self
                         .outputs
                         .actions
@@ -249,7 +249,7 @@ impl InputDispatcher {
                 let binding = self.binding_for(session, plan, button, is_gesture);
                 let tracks_hold = is_gesture || binding.is_some_and(Binding::is_wheel_hold);
                 if let Some(binding) = binding {
-                    debug!(key, ?button, action = %binding.click_action().label(), "HID++ button → binding");
+                    debug!(key, ?button, action = %ActionName(&binding.click_action()), "HID++ button → binding");
                 } else {
                     debug!(key, ?button, "HID++ button with no binding — ignored");
                 }
@@ -315,7 +315,7 @@ impl InputDispatcher {
         let key = session.device_key();
         let binding = plan.bindings.get(&button);
         if let Some(binding) = binding {
-            debug!(key, ?button, action = %binding.click_action().label(), "HID++ button pulse → binding");
+            debug!(key, ?button, action = %ActionName(&binding.click_action()), "HID++ button pulse → binding");
         } else {
             debug!(key, ?button, "HID++ button pulse with no binding — ignored");
         }
@@ -354,6 +354,7 @@ impl InputDispatcher {
         match binding.wheel() {
             HeldWheel::HorizontalScroll => self.outputs.post_scroll(
                 session,
+                plan,
                 held_wheel_scroll(delta, per_notch, plan.invert_wheel),
             ),
         }
@@ -382,11 +383,11 @@ impl InputDispatcher {
         ) {
             WheelOutput::Idle => {}
             WheelOutput::Scroll(delta) => {
-                debug!(key, ?button, action = %action.label(), ?delta, "thumb wheel → scroll");
-                self.outputs.post_scroll(session, delta);
+                debug!(key, ?button, action = %ActionName(action), ?delta, "thumb wheel → scroll");
+                self.outputs.post_scroll(session, plan, delta);
             }
             WheelOutput::FireAction(repeats) => {
-                debug!(key, ?button, action = %action.label(), repeats, "thumb wheel → action");
+                debug!(key, ?button, action = %ActionName(action), repeats, "thumb wheel → action");
                 for _ in 0..repeats {
                     self.outputs.actions.dispatch_pointer_action(
                         action,

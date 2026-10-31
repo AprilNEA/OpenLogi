@@ -10,18 +10,21 @@ use std::sync::{LazyLock, Mutex};
 
 use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY,
-    KEYEVENTF_KEYUP, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
-    MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
-    MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT, SendInput,
+    GetAsyncKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT,
+    KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN,
+    MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_RIGHTDOWN,
+    MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT,
+    SendInput,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{XBUTTON1, XBUTTON2};
 
 use openlogi_core::binding::{
     Action, Effect, KeyCombo, KeyboardUsage, MediaKey, MouseButton, NativeAction, Shortcut,
 };
-use openlogi_core::scroll::ScrollDelta;
+use openlogi_core::config::KeyModifiers;
+use openlogi_core::scroll::{ScrollDelivery, ScrollDelta};
 
+use super::compat::{CompatKey, CompatStep, MAX_STEPS, compat_steps, unreleased_steps};
 use super::{HeldKey, KeyPhase, ScrollQuantizer};
 
 mod keyboard_layout;
@@ -55,6 +58,9 @@ const VK_VOLUME_UP: u16 = 0xAF;
 const VK_MEDIA_NEXT_TRACK: u16 = 0xB0;
 const VK_MEDIA_PREV_TRACK: u16 = 0xB1;
 const VK_MEDIA_PLAY_PAUSE: u16 = 0xB3;
+/// Unassigned in WinUser.h: tapping it means nothing to any application, yet
+/// it still separates a modifier's press from its release.
+const VK_MASK: u16 = 0xE8;
 
 /// The rest of the extended keys this backend can produce, from
 /// WinUser.h. The file codes virtual keys as plain numbers, like the
@@ -373,6 +379,74 @@ pub(super) fn post_scroll(delta: ScrollDelta) {
     }
 }
 
+/// Inject one batch of whole notches through `delivery` in a single
+/// `SendInput` call, so no other input lands between the lane's modifier
+/// presses and their release. A batch cut short is followed by the releases
+/// it still owes.
+pub(super) fn post_scroll_via(delivery: ScrollDelivery, notches: i32) {
+    let buf = compat_steps(delivery, notches, held_modifiers());
+    let steps = buf.as_slice();
+    let sent = send_steps(steps);
+    if sent < steps.len() {
+        // SendInput stops at the first event it cannot insert, which can leave
+        // the lane's modifiers down with no release behind them.
+        let owed = unreleased_steps(steps, sent);
+        let owed = owed.as_slice();
+        if !owed.is_empty() && send_steps(owed) < owed.len() {
+            tracing::warn!(
+                ?delivery,
+                "a delivery lane's modifiers may still be held down"
+            );
+        }
+    }
+}
+
+/// Inject `steps` in one `SendInput` call and return how many it accepted.
+fn send_steps(steps: &[CompatStep]) -> usize {
+    if steps.is_empty() {
+        return 0;
+    }
+    let mut inputs = [mouse_input(0, 0); MAX_STEPS];
+    for (input, step) in inputs.iter_mut().zip(steps) {
+        *input = compat_input(*step);
+    }
+    send_inputs(&inputs[..steps.len()])
+}
+
+fn compat_input(step: CompatStep) -> INPUT {
+    match step {
+        CompatStep::KeyDown(key) => key_input(Key::plain(compat_virtual_key(key)), false),
+        CompatStep::KeyUp(key) => key_input(Key::plain(compat_virtual_key(key)), true),
+        CompatStep::Wheel(distance) => mouse_input(MOUSEEVENTF_WHEEL, distance),
+        CompatStep::HorizontalWheel(distance) => mouse_input(MOUSEEVENTF_HWHEEL, distance),
+    }
+}
+
+const fn compat_virtual_key(key: CompatKey) -> u16 {
+    match key {
+        CompatKey::Shift => VK_SHIFT,
+        CompatKey::Control => VK_CONTROL,
+        CompatKey::Alt => VK_MENU,
+        CompatKey::Mask => VK_MASK,
+    }
+}
+
+/// The lane modifiers down right now, whether physically or by other
+/// synthetic input.
+fn held_modifiers() -> KeyModifiers {
+    KeyModifiers {
+        shift: key_is_down(VK_SHIFT),
+        control: key_is_down(VK_CONTROL),
+        option: key_is_down(VK_MENU),
+        ..KeyModifiers::default()
+    }
+}
+
+fn key_is_down(vk: u16) -> bool {
+    // SAFETY: GetAsyncKeyState takes the key code by value; no preconditions.
+    (unsafe { GetAsyncKeyState(i32::from(vk)) }) < 0
+}
+
 pub(super) fn press_combo(combo: &KeyCombo) {
     let Some(key) = Key::for_usage(combo.key(), ForegroundLayout::current()) else {
         tracing::warn!(
@@ -445,17 +519,19 @@ fn held_key(key: HeldKey, layout: ForegroundLayout) -> Option<Key> {
     }
 }
 
-fn send_inputs(inputs: &[INPUT]) {
+/// Inject `inputs` in order and return how many `SendInput` accepted: the
+/// leading events it inserted before stopping.
+fn send_inputs(inputs: &[INPUT]) -> usize {
     let Ok(input_count) = u32::try_from(inputs.len()) else {
         tracing::warn!(
             requested = inputs.len(),
             "too many SendInput events requested"
         );
-        return;
+        return 0;
     };
     let Ok(input_size) = i32::try_from(size_of::<INPUT>()) else {
         tracing::warn!("INPUT size does not fit the Win32 SendInput contract");
-        return;
+        return 0;
     };
     // SAFETY: inputs.as_ptr()/input_count describe a valid initialized INPUT slice; SendInput copies it and returns the count injected.
     let sent = unsafe { SendInput(input_count, inputs.as_ptr(), input_size) };
@@ -466,6 +542,7 @@ fn send_inputs(inputs: &[INPUT]) {
             "SendInput accepted fewer events than requested"
         );
     }
+    usize::try_from(sent).unwrap_or_default()
 }
 
 fn key_input(key: Key, key_up: bool) -> INPUT {
@@ -522,11 +599,13 @@ mod tests {
         UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP,
     };
 
+    use super::super::compat::{CompatKey, CompatStep};
     use super::{
-        ForegroundLayout, HeldKey, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
-        KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, Key, VK_BROWSER_BACK, VK_BROWSER_FORWARD,
-        VK_DELETE, VK_DOWN, VK_END, VK_HOME, VK_INSERT, VK_LEFT, VK_LWIN, VK_NEXT, VK_PRIOR,
-        VK_RIGHT, VK_SHIFT, VK_UP, combo, held_key, is_extended_key, key_input, send_inputs,
+        ForegroundLayout, HeldKey, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT,
+        KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, Key, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_WHEEL,
+        VK_BROWSER_BACK, VK_BROWSER_FORWARD, VK_DELETE, VK_DOWN, VK_END, VK_HOME, VK_INSERT,
+        VK_LEFT, VK_LWIN, VK_NEXT, VK_PRIOR, VK_RIGHT, VK_SHIFT, VK_UP, combo, compat_input,
+        held_key, is_extended_key, key_input, send_inputs,
     };
 
     fn usage(label: &str) -> KeyboardUsage {
@@ -1068,6 +1147,50 @@ mod tests {
             arrow.scan,
             u32::from(layout.scan_code(VK_RIGHT)),
             "the arrow has to carry its scan code"
+        );
+    }
+
+    #[test]
+    fn lane_steps_become_the_matching_send_input_events() {
+        let key = |input: INPUT| {
+            assert_eq!(input.r#type, INPUT_KEYBOARD);
+            // SAFETY: `ki` is the active union field of an INPUT_KEYBOARD event.
+            let key = unsafe { input.Anonymous.ki };
+            (key.wVk, key.wScan, key.dwFlags & KEYEVENTF_KEYUP != 0)
+        };
+        assert_eq!(
+            key(compat_input(CompatStep::KeyDown(CompatKey::Shift))),
+            (0x10, 0, false)
+        );
+        assert_eq!(
+            key(compat_input(CompatStep::KeyUp(CompatKey::Control))),
+            (0x11, 0, true)
+        );
+        assert_eq!(
+            key(compat_input(CompatStep::KeyDown(CompatKey::Alt))),
+            (0x12, 0, false)
+        );
+        assert_eq!(
+            key(compat_input(CompatStep::KeyUp(CompatKey::Mask))),
+            (0xE8, 0, true)
+        );
+
+        let wheel = |input: INPUT| {
+            assert_eq!(input.r#type, INPUT_MOUSE);
+            // SAFETY: `mi` is the active union field of an INPUT_MOUSE event.
+            let mouse = unsafe { input.Anonymous.mi };
+            (
+                mouse.dwFlags,
+                i32::from_ne_bytes(mouse.mouseData.to_ne_bytes()),
+            )
+        };
+        assert_eq!(
+            wheel(compat_input(CompatStep::Wheel(-120))),
+            (MOUSEEVENTF_WHEEL, -120)
+        );
+        assert_eq!(
+            wheel(compat_input(CompatStep::HorizontalWheel(240))),
+            (MOUSEEVENTF_HWHEEL, 240)
         );
     }
 }

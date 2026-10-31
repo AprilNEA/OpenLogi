@@ -38,6 +38,47 @@ fn assert_delta(actual: WheelDelta, expected: WheelDelta) {
 }
 
 #[test]
+fn canceling_a_session_stops_both_wheels_and_preserves_its_successor() {
+    let base = Instant::now();
+    let old = HidppSessionId::with_epoch("mouse-a", 7);
+    let successor = HidppSessionId::with_epoch("mouse-a", 8);
+    let mut engine = ScrollEngine::default();
+    let mut frames = Vec::new();
+    let mut emit = |frame| frames.push(frame);
+    engine.impulse(
+        ScrollSource::HidppMainWheel(old.clone()),
+        wheel(0.0, 2.0),
+        base,
+        &mut emit,
+    );
+    engine.phased_impulse(
+        ScrollSource::Hidpp(old.clone()),
+        wheel(1.0, 0.0),
+        base,
+        &mut emit,
+    );
+    engine.impulse(
+        ScrollSource::HidppMainWheel(successor),
+        wheel(0.0, 3.0),
+        base,
+        &mut emit,
+    );
+
+    engine.cancel_session(&old, &mut emit);
+    engine.advance_due(base + PHASED_IDLE, &mut emit);
+
+    assert_delta(cumulative(&frames), wheel(1.0, 3.0));
+    assert_eq!(frames.last().unwrap().phase, SmoothScrollPhase::Ended);
+    assert!(
+        frames
+            .iter()
+            .all(|frame| frame.phase != SmoothScrollPhase::Cancelled),
+        "the successor keeps the output stream alive"
+    );
+    assert_eq!(engine.next_deadline(), None);
+}
+
+#[test]
 fn synthetic_ratchet_trace_follows_cubic_smoothstep_and_finishes_exactly() {
     let base = Instant::now();
     let mut engine = ScrollEngine::default();
@@ -639,5 +680,79 @@ fn smooth_output_inside_an_open_phased_gesture_stays_phased() {
     assert!(
         frames.iter().all(|f| f.phased),
         "the stream keeps the kind it opened with, so the gesture never changes kind"
+    );
+}
+
+#[test]
+fn delivery_notches_leave_only_as_whole_notches() {
+    let base = Instant::now();
+    let mut notches = NotchAccumulator::default();
+    assert_eq!(notches.push(ScrollDelivery::ShiftWheel, 1.0, base), 1);
+    assert_eq!(notches.push(ScrollDelivery::ShiftWheel, -2.0, base), -2);
+
+    // One diverted MX Master 4 increment is 20/120 of a notch.
+    let mut notches = NotchAccumulator::default();
+    let increment = 20.0 / 120.0;
+    let emitted: Vec<i32> = (0..6)
+        .map(|_| notches.push(ScrollDelivery::CtrlWheel, increment, base))
+        .collect();
+    assert_eq!(emitted, [0, 0, 0, 0, 0, 1]);
+    assert_eq!(notches.push(ScrollDelivery::CtrlWheel, increment, base), 0);
+}
+
+#[test]
+fn delivery_notches_forget_a_partial_notch_after_idle() {
+    let base = Instant::now();
+    let mut notches = NotchAccumulator::default();
+    let increment = 20.0 / 120.0;
+    for _ in 0..5 {
+        assert_eq!(notches.push(ScrollDelivery::ShiftWheel, increment, base), 0);
+    }
+    let late = base + NOTCH_IDLE + Duration::from_millis(1);
+    assert_eq!(
+        notches.push(ScrollDelivery::ShiftWheel, increment, late),
+        0,
+        "the five increments before the idle gap no longer count"
+    );
+    for _ in 0..4 {
+        assert_eq!(notches.push(ScrollDelivery::ShiftWheel, increment, late), 0);
+    }
+    assert_eq!(notches.push(ScrollDelivery::ShiftWheel, increment, late), 1);
+}
+
+#[test]
+fn delivery_notches_restart_on_reversal_and_lane_change() {
+    let base = Instant::now();
+    let mut notches = NotchAccumulator::default();
+    assert_eq!(notches.push(ScrollDelivery::ShiftWheel, 0.75, base), 0);
+    assert_eq!(
+        notches.push(ScrollDelivery::ShiftWheel, -0.5, base),
+        0,
+        "a reversal discards the partial notch instead of cancelling against it"
+    );
+    assert_eq!(notches.push(ScrollDelivery::ShiftWheel, -0.5, base), -1);
+
+    assert_eq!(notches.push(ScrollDelivery::ShiftWheel, 0.75, base), 0);
+    assert_eq!(
+        notches.push(ScrollDelivery::AltWheel, 0.5, base),
+        0,
+        "another lane starts from zero"
+    );
+    assert_eq!(notches.push(ScrollDelivery::AltWheel, 0.5, base), 1);
+
+    assert_eq!(notches.push(ScrollDelivery::AltWheel, 0.75, base), 0);
+    notches.reset();
+    assert_eq!(notches.push(ScrollDelivery::AltWheel, 0.5, base), 0);
+}
+
+#[test]
+fn delivery_notches_cap_one_input_and_drop_the_excess() {
+    let base = Instant::now();
+    let mut notches = NotchAccumulator::default();
+    assert_eq!(notches.push(ScrollDelivery::VerticalWheel, 50.0, base), 20);
+    assert_eq!(notches.push(ScrollDelivery::VerticalWheel, 0.5, base), 0);
+    assert_eq!(
+        notches.push(ScrollDelivery::VerticalWheel, -50.5, base),
+        -20
     );
 }

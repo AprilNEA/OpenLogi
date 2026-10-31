@@ -2,7 +2,9 @@ use openlogi_core::binding::{
     Action, ActionRingIcon, ButtonId, GestureDirection, KNOWN_CONTROLS, KeyCombo,
 };
 
-use crate::features::mouse::thumbwheel::ThumbwheelPreset;
+use crate::features::mouse::thumbwheel::{
+    ThumbwheelPreset, scroll_method_description_key, scroll_method_translation_key,
+};
 use crate::ui::action::localized_action_label;
 
 /// Typed dynamic keys are the part catalog parity cannot inspect: a typo in
@@ -55,6 +57,14 @@ fn typed_translation_keys_resolve() {
             covered(preset.translation_key()),
             "no catalog key for {preset:?}"
         );
+    }
+    for delivery in openlogi_core::scroll::ScrollDelivery::ALL {
+        for key in [
+            scroll_method_translation_key(delivery),
+            scroll_method_description_key(delivery),
+        ] {
+            assert!(covered(key), "no catalog key {key} for {delivery:?}");
+        }
     }
 }
 

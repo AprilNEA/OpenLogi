@@ -42,7 +42,7 @@ pub use openlogi_core::scroll::ScrollDelta;
 mod pointer;
 pub use pointer::{
     PointerContext, PointerTarget, pointer_context, pointer_context_supported,
-    pointer_target_is_focused,
+    pointer_over_focused_process, pointer_root_window, pointer_target_is_focused,
 };
 
 /// Logitech's USB/Bluetooth vendor id (`0x046D`), widened from

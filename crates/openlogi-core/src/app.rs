@@ -133,9 +133,12 @@ fn entry_for<V>(
     })
 }
 
-/// The `exe:<filename>` selector of a Windows executable path, or `None` for
-/// an identifier that names no executable.
-fn executable_selector(app: &str) -> Option<String> {
+/// The `exe:<filename>` key [`overlay_for`] falls back to for `app`, or `None`
+/// when the identifier names no executable. An editor that stores a per-app
+/// entry under the stable selector writes this key, so it is the one the
+/// matcher derives.
+#[must_use]
+pub fn executable_selector(app: &str) -> Option<String> {
     let (_, executable_name) = app.rsplit_once(['\\', '/'])?;
     Path::new(executable_name)
         .extension()
@@ -403,5 +406,28 @@ mod tests {
             Some("com.example.Native")
         );
         assert_eq!(profile_key_for(&map, &table, "com.example.Elsewhere"), None);
+    }
+
+    #[test]
+    fn the_executable_selector_is_the_key_the_fallback_matches() {
+        for path in [
+            r"C:\Program Files\ShareX\ShareX.EXE",
+            "/c/program files/sharex/sharex.exe",
+        ] {
+            assert_eq!(
+                executable_selector(path).as_deref(),
+                Some("exe:sharex.exe"),
+                "{path}"
+            );
+        }
+        // An `exe:` key is already a selector, not a path to derive one from.
+        for app in [
+            "exe:sharex.exe",
+            "com.example.exe",
+            r"c:\tools\code.exe.bak",
+            "",
+        ] {
+            assert_eq!(executable_selector(app), None, "{app}");
+        }
     }
 }

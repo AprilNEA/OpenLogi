@@ -9,10 +9,11 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use openlogi_core::config::VerticalScrollSensitivity;
-use openlogi_core::scroll::ScrollDelta;
+use openlogi_core::scroll::{ScrollDelivery, ScrollDelta};
+use openlogi_hook::PointerTarget;
 use tracing::warn;
 
-use super::{ScrollEngine, ScrollFrame, ScrollSource, WheelDelta};
+use super::{NotchAccumulator, ScrollEngine, ScrollFrame, ScrollSource, WheelDelta};
 use crate::runtime::{HidppSessionId, receive_command};
 
 /// OS-hook callbacks must fail open rather than wait for the worker.
@@ -101,6 +102,15 @@ enum ScrollOutputMode {
     Eased {
         at: Instant,
     },
+    /// A horizontal tick for an application's delivery lane, emitted as whole
+    /// notches and never smoothed: an animated Ctrl+wheel lane would zoom once
+    /// per frame. `window` is the root window the lane was resolved for, or
+    /// `None` when it was resolved for the focused application instead.
+    Deliver {
+        via: ScrollDelivery,
+        window: Option<u64>,
+        at: Instant,
+    },
     Direct,
 }
 
@@ -136,6 +146,7 @@ impl ScrollInput {
     fn output_under(&self, smoothing: bool) -> ScrollOutputMode {
         match (self.output, &self.source) {
             (ScrollOutputMode::Eased { at }, _) => ScrollOutputMode::Eased { at },
+            (ScrollOutputMode::Deliver { .. }, _) => self.output,
             (
                 ScrollOutputMode::Smooth { at } | ScrollOutputMode::Phased { at },
                 ScrollSource::Hidpp(_),
@@ -152,7 +163,7 @@ impl ScrollInput {
 
 enum ScrollCommand {
     Input(ScrollInput),
-    CancelSource(ScrollSource),
+    CancelSession(HidppSessionId),
     Wake,
 }
 
@@ -207,13 +218,11 @@ impl OverflowCancellations {
 
     fn accepts(&self, input: &ScrollInput) -> bool {
         input.generation == self.generation
-            && match &input.source {
-                ScrollSource::OsHook(_) => true,
-                ScrollSource::Hidpp(session) => self
-                    .sessions
+            && input.source.hidpp_session().is_none_or(|session| {
+                self.sessions
                     .get(session.device_key())
-                    .is_none_or(|cancelled_epoch| session.epoch() > *cancelled_epoch),
-            }
+                    .is_none_or(|cancelled_epoch| session.epoch() > *cancelled_epoch)
+            })
     }
 }
 
@@ -315,11 +324,74 @@ impl ScrollInputHandle {
         };
         let queued = self.accepting.load(Ordering::Acquire)
             && self.try_enqueue(
-                ScrollSource::Hidpp(session.clone()),
+                ScrollSource::HidppMainWheel(session.clone()),
                 scaled,
                 ScrollOutputMode::Eased { at: Instant::now() },
             );
         if queued { Ok(()) } else { Err(scaled.into()) }
+    }
+
+    /// Queue one native horizontal wheel tick from the current OS-hook thread
+    /// for delivery through `via`.
+    ///
+    /// `target` is the pointer window `via` was resolved for; once the pointer
+    /// has left it or its application is unfocused, the worker emits the tick
+    /// as a plain horizontal wheel instead. With no target (the focused policy)
+    /// or an unidentified one, `via` is the focused application's, so the
+    /// pointer must be over that application instead. Vertical distance, pixel
+    /// input, a desktop target, a full queue, or an unavailable worker are
+    /// rejected so the callback fails open.
+    #[must_use]
+    pub fn try_hook_deliver(
+        &self,
+        delta: ScrollDelta,
+        via: ScrollDelivery,
+        target: Option<PointerTarget>,
+    ) -> bool {
+        self.try_deliver(ScrollSource::current_hook(), delta, via, target)
+    }
+
+    /// Queue one diverted horizontal thumb-wheel impulse for delivery through
+    /// `via`, as [`Self::try_hook_deliver`] does for the OS hook. A rejection
+    /// leaves the already-diverted caller to its ordinary scroll output.
+    #[must_use]
+    pub(crate) fn try_hidpp_deliver(
+        &self,
+        session: &HidppSessionId,
+        delta: ScrollDelta,
+        via: ScrollDelivery,
+        target: Option<PointerTarget>,
+    ) -> bool {
+        self.try_deliver(ScrollSource::Hidpp(session.clone()), delta, via, target)
+    }
+
+    fn try_deliver(
+        &self,
+        source: ScrollSource,
+        delta: ScrollDelta,
+        via: ScrollDelivery,
+        target: Option<PointerTarget>,
+    ) -> bool {
+        if !self.accepting.load(Ordering::Acquire) {
+            return false;
+        }
+        let Ok(impulse) = WheelDelta::try_from(delta) else {
+            return false;
+        };
+        if impulse.y != 0.0 {
+            return false;
+        }
+        let window = match target {
+            Some(PointerTarget::Window { window_id, .. }) => Some(window_id),
+            None | Some(PointerTarget::Unavailable) => None,
+            Some(PointerTarget::Desktop | PointerTarget::Unsupported) => return false,
+        };
+        let output = ScrollOutputMode::Deliver {
+            via,
+            window,
+            at: Instant::now(),
+        };
+        self.try_enqueue(source, impulse, output)
     }
 
     fn try_enqueue(
@@ -355,10 +427,9 @@ impl ScrollInputHandle {
     /// Cancel output belonging to one HID++ capture-session incarnation.
     pub(crate) fn cancel_hidpp_session(&self, session: &HidppSessionId) {
         let generation = self.generation.load(Ordering::Acquire);
-        let source = ScrollSource::Hidpp(session.clone());
         match self
             .commands
-            .try_send(ScrollCommand::CancelSource(source.clone()))
+            .try_send(ScrollCommand::CancelSession(session.clone()))
         {
             Ok(()) | Err(mpsc::TrySendError::Disconnected(_)) => {}
             Err(mpsc::TrySendError::Full(_)) => {
@@ -391,6 +462,19 @@ impl ScrollInputHandle {
     }
 }
 
+/// Output for [`ScrollOutputMode::Deliver`] input.
+pub(super) struct DeliveryOutput<W, F, E> {
+    /// The root window now under the pointer, in [`PointerTarget::Window`]'s
+    /// `window_id` terms.
+    pub(super) pointer_root_window: W,
+    /// Whether the pointer is now over the focused application. Keyboard
+    /// modifiers go to the foreground thread, even under the pointer policy.
+    pub(super) pointer_over_focused_app: F,
+    /// Inject whole horizontal notches, positive scrolling right, through a
+    /// delivery lane.
+    pub(super) emit: E,
+}
+
 /// Unique owner of the scroll output worker and its graceful shutdown.
 pub struct ScrollRuntime {
     input: ScrollInputHandle,
@@ -401,13 +485,27 @@ pub struct ScrollRuntime {
 impl ScrollRuntime {
     /// Start the dedicated output worker using the live scroll settings.
     pub fn spawn(preferences: Arc<ScrollPreferences>) -> io::Result<Self> {
-        Self::spawn_with(preferences, ScrollFrame::post, WheelDelta::post)
+        Self::spawn_with(
+            preferences,
+            ScrollFrame::post,
+            WheelDelta::post,
+            DeliveryOutput {
+                pointer_root_window: openlogi_hook::pointer_root_window,
+                pointer_over_focused_app: openlogi_hook::pointer_over_focused_process,
+                emit: openlogi_inject::post_scroll_via,
+            },
+        )
     }
 
     pub(super) fn spawn_with(
         preferences: Arc<ScrollPreferences>,
         mut emit_smooth: impl FnMut(ScrollFrame) + Send + 'static,
         mut emit_direct: impl FnMut(WheelDelta) + Send + 'static,
+        mut delivery: DeliveryOutput<
+            impl FnMut() -> Option<u64> + Send + 'static,
+            impl FnMut() -> bool + Send + 'static,
+            impl FnMut(ScrollDelivery, i32) + Send + 'static,
+        >,
     ) -> io::Result<Self> {
         let (commands, command_rx) = mpsc::sync_channel(INPUT_QUEUE_CAPACITY);
         let (controls, control_rx) = mpsc::channel();
@@ -429,6 +527,7 @@ impl ScrollRuntime {
                     &preferences,
                     &mut emit_smooth,
                     &mut emit_direct,
+                    &mut delivery,
                 );
             })?;
         Ok(Self {
@@ -491,8 +590,14 @@ fn run_worker(
     preferences: &ScrollPreferences,
     emit_smooth: &mut impl FnMut(ScrollFrame),
     emit_direct: &mut impl FnMut(WheelDelta),
+    delivery: &mut DeliveryOutput<
+        impl FnMut() -> Option<u64>,
+        impl FnMut() -> bool,
+        impl FnMut(ScrollDelivery, i32),
+    >,
 ) {
     let mut engine = ScrollEngine::default();
+    let mut notches = NotchAccumulator::default();
     let mut observed_smoothing = preferences.smooth_scroll_enabled();
     // An overflow-cancelled incarnation stays tombstoned so accepted input that
     // was already queued when control overtook the saturated queue is ignored.
@@ -511,9 +616,11 @@ fn run_worker(
                         && cancellations.advance_to(shared_generation.load(Ordering::Acquire))
                     {
                         engine.cancel_all(emit_smooth);
+                        notches.reset();
                     }
                     if cancellations.cancel(&session, cancelled_generation) {
-                        engine.cancel_source(&ScrollSource::Hidpp(session), emit_smooth);
+                        engine.cancel_session(&session, emit_smooth);
+                        notches.reset();
                     }
                 }
                 ScrollControl::Shutdown(request) => {
@@ -538,8 +645,10 @@ fn run_worker(
             // can no longer protect anything. A delayed old-generation control
             // is also ignored above instead of recreating it.
             engine.cancel_all(emit_smooth);
+            notches.reset();
         } else if toggled {
             engine.cancel_all(emit_smooth);
+            notches.reset();
         }
 
         match command {
@@ -551,14 +660,40 @@ fn run_worker(
                     ScrollOutputMode::Phased { at } => {
                         engine.phased_impulse(input.source, input.impulse, at, emit_smooth);
                     }
+                    ScrollOutputMode::Deliver { via, window, at } => {
+                        // A lane closes the HID++ thumb wheel's previous
+                        // horizontal motion. Its main wheel has a separate
+                        // source, so easing continues, as it does for the OS
+                        // hook's main wheel.
+                        if matches!(input.source, ScrollSource::Hidpp(_)) {
+                            engine.cancel_source(&input.source, emit_smooth);
+                        }
+                        let fresh = (delivery.pointer_over_focused_app)()
+                            && window.is_none_or(|window| {
+                                (delivery.pointer_root_window)() == Some(window)
+                            });
+                        if fresh {
+                            let due = notches.push(via, input.impulse.x, at);
+                            if due != 0 {
+                                (delivery.emit)(via, due);
+                            }
+                        } else {
+                            // The pointer is not over the application this
+                            // lane belongs to; that application's modifiers
+                            // would misfire there, so it gets a plain wheel.
+                            notches.reset();
+                            emit_direct(input.impulse);
+                        }
+                    }
                     ScrollOutputMode::Direct => {
                         engine.cancel_source(&input.source, emit_smooth);
                         emit_direct(input.impulse);
                     }
                 }
             }
-            Ok(ScrollCommand::CancelSource(source)) => {
-                engine.cancel_source(&source, emit_smooth);
+            Ok(ScrollCommand::CancelSession(session)) => {
+                engine.cancel_session(&session, emit_smooth);
+                notches.reset();
             }
             Ok(ScrollCommand::Input(_) | ScrollCommand::Wake) => {}
             Err(mpsc::RecvTimeoutError::Timeout) => {
@@ -586,6 +721,16 @@ mod tests {
             smooth_scroll,
             self::sensitivity(sensitivity),
         ))
+    }
+
+    type NoDelivery = DeliveryOutput<fn() -> Option<u64>, fn() -> bool, fn(ScrollDelivery, i32)>;
+
+    fn no_delivery() -> NoDelivery {
+        DeliveryOutput {
+            pointer_root_window: || None,
+            pointer_over_focused_app: || false,
+            emit: |_, _| panic!("no delivery-lane input was submitted"),
+        }
     }
 
     fn standalone_input(
@@ -752,6 +897,7 @@ mod tests {
                     .expect("test frame receiver remains open");
             },
             |_| {},
+            no_delivery(),
         )
         .expect("spawn scroll worker");
         let input = runtime.input();
@@ -787,6 +933,7 @@ mod tests {
                     .expect("test frame receiver remains open");
             },
             |_| {},
+            no_delivery(),
         )
         .expect("spawn scroll worker");
         let session = HidppSessionId::with_epoch("mouse-a", 1);
@@ -825,6 +972,7 @@ mod tests {
                     .expect("test frame receiver remains open");
             },
             |_| {},
+            no_delivery(),
         )
         .expect("spawn scroll worker");
         let input = runtime.input();
@@ -879,6 +1027,7 @@ mod tests {
                         .expect("test frame receiver remains open");
                 },
                 &mut |_| panic!("horizontal HID++ input must carry scroll phases"),
+                &mut no_delivery(),
             );
         });
 
@@ -956,6 +1105,7 @@ mod tests {
                         .expect("test frame receiver remains open");
                 },
                 &mut |_| panic!("a horizontal HID++ tick must keep its scroll phases"),
+                &mut no_delivery(),
             );
         });
 
@@ -1076,6 +1226,7 @@ mod tests {
             &preferences,
             &mut |frame| frames.push(frame),
             &mut |delta| direct.push(delta),
+            &mut no_delivery(),
         );
 
         assert!(
@@ -1115,13 +1266,34 @@ mod tests {
         let session = HidppSessionId::with_epoch("mouse-a", 7);
         input.cancel_hidpp_session(&session);
 
-        let ScrollCommand::CancelSource(ScrollSource::Hidpp(cancelled)) =
-            commands.recv().expect("queued cancellation")
+        let ScrollCommand::CancelSession(cancelled) = commands.recv().expect("queued cancellation")
         else {
             panic!("expected HID++ source cancellation");
         };
         assert_eq!(cancelled, session);
         assert_eq!(input.generation.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn overflow_cancellation_rejects_both_wheels_but_accepts_the_successor() {
+        let (input, receiver, _controls) = standalone_input(3, preferences(true, 14));
+        let old = HidppSessionId::with_epoch("mouse-a", 7);
+        let successor = HidppSessionId::with_epoch("mouse-a", 8);
+        assert!(input.try_hidpp_scroll(&old, ScrollDelta::wheel_ticks(1.0, 0.0)));
+        assert_eq!(
+            input.try_hidpp_wheel_scroll(&old, ScrollDelta::wheel_ticks(0.0, 1.0)),
+            Ok(())
+        );
+        assert_eq!(
+            input.try_hidpp_wheel_scroll(&successor, ScrollDelta::wheel_ticks(0.0, 1.0)),
+            Ok(())
+        );
+
+        let mut cancellations = OverflowCancellations::new(0);
+        assert!(cancellations.cancel(&old, 0));
+        assert!(!cancellations.accepts(&queued_input(&receiver)));
+        assert!(!cancellations.accepts(&queued_input(&receiver)));
+        assert!(cancellations.accepts(&queued_input(&receiver)));
     }
 
     #[test]
@@ -1152,6 +1324,7 @@ mod tests {
                     emitted.send(frame).expect("frame receiver remains open");
                 },
                 &mut |_| {},
+                &mut no_delivery(),
             );
         });
 
@@ -1243,6 +1416,7 @@ mod tests {
                 &preferences,
                 &mut |frame| emitted.send(frame).expect("frame receiver remains open"),
                 &mut |_| {},
+                &mut no_delivery(),
             );
         });
 
@@ -1343,6 +1517,7 @@ mod tests {
                 }
                 emitted.push(delta);
             },
+            &mut no_delivery(),
         );
 
         assert_eq!(
@@ -1354,8 +1529,9 @@ mod tests {
 
     #[test]
     fn idle_worker_shutdown_wakes_after_publishing_its_request() {
-        let mut runtime = ScrollRuntime::spawn_with(preferences(false, 14), |_| {}, |_| {})
-            .expect("spawn scroll worker");
+        let mut runtime =
+            ScrollRuntime::spawn_with(preferences(false, 14), |_| {}, |_| {}, no_delivery())
+                .expect("spawn scroll worker");
         assert!(runtime.shutdown_with_timeout(Duration::from_millis(100)));
     }
 
@@ -1375,6 +1551,7 @@ mod tests {
                     .send(Ok(delta))
                     .expect("test output receiver remains open");
             },
+            no_delivery(),
         )
         .expect("spawn scroll worker");
         assert!(
@@ -1404,6 +1581,7 @@ mod tests {
                     .expect("test frame receiver remains open");
             },
             |_| {},
+            no_delivery(),
         )
         .expect("spawn scroll worker");
         let input = runtime.input();
@@ -1428,5 +1606,466 @@ mod tests {
             assert_eq!(phase, openlogi_inject::SmoothScrollPhase::Changed);
         }
         runtime.shutdown();
+    }
+
+    fn window(window_id: u64) -> PointerTarget {
+        PointerTarget::Window {
+            process_id: 41,
+            window_id,
+        }
+    }
+
+    #[test]
+    fn delivery_submission_accepts_only_horizontal_wheel_ticks_and_fails_open_when_full() {
+        let (input, receiver, _controls) = standalone_input(1, preferences(true, 14));
+        for delta in [
+            ScrollDelta::wheel_ticks(0.0, 1.0),
+            ScrollDelta::wheel_ticks(1.0, 1.0),
+            ScrollDelta::wheel_ticks(0.0, 0.0),
+            ScrollDelta::pixels(1.0, 0.0),
+        ] {
+            assert!(
+                !input.try_hook_deliver(delta, ScrollDelivery::ShiftWheel, Some(window(7))),
+                "{delta:?}"
+            );
+        }
+        let tick = ScrollDelta::wheel_ticks(1.0, 0.0);
+        assert!(input.try_hook_deliver(tick, ScrollDelivery::ShiftWheel, Some(window(7))));
+        assert!(
+            !input.try_hook_deliver(tick, ScrollDelivery::ShiftWheel, Some(window(7))),
+            "a full queue fails open"
+        );
+
+        let queued = queued_input(&receiver);
+        for smoothing in [true, false] {
+            assert!(
+                matches!(
+                    queued.output_under(smoothing),
+                    ScrollOutputMode::Deliver {
+                        via: ScrollDelivery::ShiftWheel,
+                        window: Some(7),
+                        ..
+                    }
+                ),
+                "smoothing never claims a delivery-lane tick"
+            );
+        }
+    }
+
+    #[test]
+    fn hidpp_delivery_keeps_its_session_and_rechecks_unidentified_targets_against_focus() {
+        let (input, receiver, _controls) = standalone_input(1, preferences(false, 14));
+        let session = HidppSessionId::with_epoch("mouse-a", 3);
+        let tick = ScrollDelta::wheel_ticks(-0.5, 0.0);
+        assert!(
+            !input.try_hidpp_deliver(
+                &session,
+                tick,
+                ScrollDelivery::CtrlWheel,
+                Some(PointerTarget::Desktop),
+            ),
+            "no lane is resolved for the desktop"
+        );
+        assert!(input.try_hidpp_deliver(
+            &session,
+            tick,
+            ScrollDelivery::CtrlWheel,
+            Some(PointerTarget::Unavailable),
+        ));
+
+        let queued = queued_input(&receiver);
+        assert_eq!(queued.source, ScrollSource::Hidpp(session));
+        assert!(
+            matches!(
+                queued.output,
+                ScrollOutputMode::Deliver {
+                    via: ScrollDelivery::CtrlWheel,
+                    window: None,
+                    ..
+                }
+            ),
+            "an unidentified pointer selected the focused application's lane"
+        );
+    }
+
+    #[derive(Debug, PartialEq)]
+    enum Emitted {
+        Smooth(ScrollFrame),
+        Direct(WheelDelta),
+        Lane(ScrollDelivery, i32),
+    }
+
+    #[test]
+    fn canceled_session_does_not_lend_its_partial_notch_to_its_successor() {
+        for overflow in [false, true] {
+            let old = HidppSessionId::with_epoch("mouse-a", 7);
+            let successor = HidppSessionId::with_epoch("mouse-a", 8);
+            let at = Instant::now();
+            let tick = |session, x| {
+                ScrollCommand::Input(ScrollInput {
+                    generation: 0,
+                    source: ScrollSource::Hidpp(session),
+                    impulse: WheelDelta { x, y: 0.0 },
+                    output: ScrollOutputMode::Deliver {
+                        via: ScrollDelivery::CtrlWheel,
+                        window: Some(7),
+                        at,
+                    },
+                })
+            };
+            let boundary = if overflow {
+                ScrollCommand::Wake
+            } else {
+                ScrollCommand::CancelSession(old.clone())
+            };
+            let mut script = [tick(old.clone(), 0.6), boundary, tick(successor, 0.4)]
+                .into_iter()
+                .enumerate();
+            let (controls, control_rx) = mpsc::channel();
+            let mut emitted = Vec::new();
+
+            run_worker(
+                |_| {
+                    let Some((index, command)) = script.next() else {
+                        return Err(mpsc::RecvTimeoutError::Disconnected);
+                    };
+                    if overflow && index == 1 {
+                        controls
+                            .send(ScrollControl::CancelOverflowSession {
+                                session: old.clone(),
+                                generation: 0,
+                            })
+                            .expect("control receiver remains open");
+                    }
+                    Ok(command)
+                },
+                &control_rx,
+                &AtomicU64::new(0),
+                &preferences(false, 14),
+                &mut |_| panic!("delivery must not be smoothed"),
+                &mut |_| panic!("pointer stays over the delivery window"),
+                &mut DeliveryOutput {
+                    pointer_root_window: || Some(7),
+                    pointer_over_focused_app: || true,
+                    emit: |via, notches| emitted.push((via, notches)),
+                },
+            );
+
+            assert!(
+                emitted.is_empty(),
+                "a canceled 0.6 notch must not combine with its successor's 0.4: overflow={overflow}, {emitted:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn delivery_residue_obeys_global_resets_and_ignores_stale_controls() {
+        #[derive(Clone, Copy, Debug)]
+        enum Boundary {
+            Unchanged,
+            Hooks,
+            Smoothing,
+            StaleOverflow,
+        }
+
+        for boundary in [
+            Boundary::Unchanged,
+            Boundary::Hooks,
+            Boundary::Smoothing,
+            Boundary::StaleOverflow,
+        ] {
+            let session = HidppSessionId::with_epoch("mouse-a", 8);
+            let at = Instant::now();
+            let generation = AtomicU64::new(1);
+            let preferences = preferences(false, 14);
+            let (controls, control_rx) = mpsc::channel();
+            let mut script = [Some(0.6), None, Some(0.4)].into_iter();
+            let mut emitted = Vec::new();
+
+            run_worker(
+                |_| {
+                    let Some(ticks) = script.next() else {
+                        return Err(mpsc::RecvTimeoutError::Disconnected);
+                    };
+                    let Some(x) = ticks else {
+                        match boundary {
+                            Boundary::Unchanged => {}
+                            Boundary::Hooks => {
+                                generation.fetch_add(1, Ordering::AcqRel);
+                            }
+                            Boundary::Smoothing => {
+                                preferences.publish(true, sensitivity(14));
+                            }
+                            Boundary::StaleOverflow => controls
+                                .send(ScrollControl::CancelOverflowSession {
+                                    session: session.clone(),
+                                    generation: 0,
+                                })
+                                .expect("control receiver remains open"),
+                        }
+                        return Ok(ScrollCommand::Wake);
+                    };
+                    Ok(ScrollCommand::Input(ScrollInput {
+                        generation: generation.load(Ordering::Acquire),
+                        source: ScrollSource::Hidpp(session.clone()),
+                        impulse: WheelDelta { x, y: 0.0 },
+                        output: ScrollOutputMode::Deliver {
+                            via: ScrollDelivery::CtrlWheel,
+                            window: Some(7),
+                            at,
+                        },
+                    }))
+                },
+                &control_rx,
+                &generation,
+                &preferences,
+                &mut |_| panic!("delivery must not be smoothed"),
+                &mut |_| panic!("pointer stays over the delivery window"),
+                &mut DeliveryOutput {
+                    pointer_root_window: || Some(7),
+                    pointer_over_focused_app: || true,
+                    emit: |via, notches| emitted.push((via, notches)),
+                },
+            );
+
+            if matches!(boundary, Boundary::Unchanged | Boundary::StaleOverflow) {
+                assert_eq!(emitted, [(ScrollDelivery::CtrlWheel, 1)], "{boundary:?}");
+            } else {
+                assert!(emitted.is_empty(), "{boundary:?}: {emitted:?}");
+            }
+        }
+    }
+
+    /// A worker whose every output lands on one channel, with the pointer
+    /// fixed over `root_window`, inside or outside the focused application.
+    fn recording_runtime(
+        smooth_scroll: bool,
+        root_window: Option<u64>,
+        over_focused_app: bool,
+    ) -> (ScrollRuntime, mpsc::Receiver<Emitted>) {
+        let (outputs, received) = mpsc::channel();
+        let smooth = outputs.clone();
+        let direct = outputs.clone();
+        let runtime = ScrollRuntime::spawn_with(
+            preferences(smooth_scroll, 14),
+            move |frame| {
+                smooth
+                    .send(Emitted::Smooth(frame))
+                    .expect("test output receiver remains open");
+            },
+            move |delta| {
+                direct
+                    .send(Emitted::Direct(delta))
+                    .expect("test output receiver remains open");
+            },
+            DeliveryOutput {
+                pointer_root_window: move || root_window,
+                pointer_over_focused_app: move || over_focused_app,
+                emit: move |via, notches| {
+                    outputs
+                        .send(Emitted::Lane(via, notches))
+                        .expect("test output receiver remains open");
+                },
+            },
+        )
+        .expect("spawn scroll worker");
+        (runtime, received)
+    }
+
+    fn next(received: &mpsc::Receiver<Emitted>) -> Emitted {
+        received
+            .recv_timeout(Duration::from_secs(1))
+            .expect("worker output")
+    }
+
+    #[test]
+    fn review_pointer_lanes_are_plain_over_an_unfocused_application() {
+        for via in [
+            ScrollDelivery::ShiftWheel,
+            ScrollDelivery::CtrlShiftWheel,
+            ScrollDelivery::AltWheel,
+            ScrollDelivery::CtrlWheel,
+            ScrollDelivery::VerticalWheel,
+        ] {
+            let (mut runtime, received) = recording_runtime(false, Some(7), false);
+            assert!(runtime.input().try_hook_deliver(
+                ScrollDelta::wheel_ticks(1.0, 0.0),
+                via,
+                Some(window(7)),
+            ));
+            assert_eq!(
+                next(&received),
+                Emitted::Direct(WheelDelta { x: 1.0, y: 0.0 }),
+                "an unfocused pointer application must keep the plain wheel: {via:?}"
+            );
+            runtime.shutdown();
+        }
+    }
+
+    #[test]
+    fn delivery_ticks_bypass_smoothing_while_the_pointer_stays() {
+        let (mut runtime, received) = recording_runtime(true, Some(7), true);
+        let input = runtime.input();
+        assert!(input.try_hook_deliver(
+            ScrollDelta::wheel_ticks(1.0, 0.0),
+            ScrollDelivery::ShiftWheel,
+            Some(window(7)),
+        ));
+        assert!(input.try_hook_deliver(
+            ScrollDelta::wheel_ticks(-2.0, 0.0),
+            ScrollDelivery::ShiftWheel,
+            None,
+        ));
+
+        assert_eq!(
+            next(&received),
+            Emitted::Lane(ScrollDelivery::ShiftWheel, 1)
+        );
+        assert_eq!(
+            next(&received),
+            Emitted::Lane(ScrollDelivery::ShiftWheel, -2)
+        );
+        runtime.shutdown();
+        assert!(received.try_recv().is_err(), "nothing was smoothed");
+    }
+
+    #[test]
+    fn delivery_ticks_become_a_plain_wheel_once_the_pointer_leaves() {
+        let (mut runtime, received) = recording_runtime(false, Some(8), true);
+        let input = runtime.input();
+        let half = ScrollDelta::wheel_ticks(0.5, 0.0);
+        assert!(input.try_hook_deliver(half, ScrollDelivery::CtrlShiftWheel, Some(window(7))));
+        assert!(input.try_hook_deliver(half, ScrollDelivery::CtrlShiftWheel, Some(window(7))));
+        // A focused-policy lane follows the focused application instead.
+        assert!(input.try_hook_deliver(
+            ScrollDelta::wheel_ticks(1.0, 0.0),
+            ScrollDelivery::CtrlShiftWheel,
+            None,
+        ));
+
+        let plain = Emitted::Direct(WheelDelta { x: 0.5, y: 0.0 });
+        assert_eq!(next(&received), plain);
+        assert_eq!(next(&received), plain);
+        assert_eq!(
+            next(&received),
+            Emitted::Lane(ScrollDelivery::CtrlShiftWheel, 1),
+            "ticks sent as a plain wheel never count toward a lane notch"
+        );
+        runtime.shutdown();
+
+        let (mut runtime, received) = recording_runtime(false, None, true);
+        let input = runtime.input();
+        assert!(input.try_hook_deliver(half, ScrollDelivery::CtrlShiftWheel, Some(window(7))));
+        assert_eq!(
+            next(&received),
+            plain,
+            "an unreadable pointer is not the lane's window"
+        );
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn a_lane_resolved_for_the_focused_app_is_plain_elsewhere() {
+        let (mut runtime, received) = recording_runtime(false, Some(7), false);
+        let input = runtime.input();
+        let tick = ScrollDelta::wheel_ticks(1.0, 0.0);
+        for target in [None, Some(PointerTarget::Unavailable)] {
+            assert!(input.try_hook_deliver(tick, ScrollDelivery::CtrlWheel, target));
+            assert_eq!(
+                next(&received),
+                Emitted::Direct(WheelDelta { x: 1.0, y: 0.0 }),
+                "the pointer is over another application: {target:?}"
+            );
+        }
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn a_lane_tick_leaves_the_hooks_smooth_vertical_motion_running() {
+        let (mut runtime, received) = recording_runtime(true, Some(7), true);
+        let input = runtime.input();
+        assert!(input.try_hook_scroll(ScrollDelta::wheel_ticks(0.0, 1.0)));
+        assert!(input.try_hook_deliver(
+            ScrollDelta::wheel_ticks(1.0, 0.0),
+            ScrollDelivery::ShiftWheel,
+            Some(window(7)),
+        ));
+
+        let mut vertical = 0.0;
+        let mut lanes = Vec::new();
+        loop {
+            match next(&received) {
+                Emitted::Smooth(frame) => {
+                    assert_ne!(
+                        frame.phase,
+                        openlogi_inject::SmoothScrollPhase::Cancelled,
+                        "the lane tick cut the vertical motion short"
+                    );
+                    vertical += frame.delta.y;
+                    if frame.phase == openlogi_inject::SmoothScrollPhase::Ended {
+                        break;
+                    }
+                }
+                Emitted::Lane(via, notches) => lanes.push((via, notches)),
+                Emitted::Direct(delta) => panic!("unexpected plain wheel {delta:?}"),
+            }
+        }
+        runtime.shutdown();
+
+        assert_eq!(lanes, [(ScrollDelivery::ShiftWheel, 1)]);
+        let target = sensitivity(14).scroll_multiplier();
+        assert!(
+            (vertical - target).abs() < 1.0e-9,
+            "the vertical motion reached {vertical}, not {target}"
+        );
+    }
+
+    #[test]
+    fn a_lane_tick_leaves_the_same_sessions_diverted_main_wheel_running() {
+        let (mut runtime, received) = recording_runtime(false, Some(7), true);
+        let input = runtime.input();
+        let session = HidppSessionId::with_epoch("mouse-a", 3);
+        assert_eq!(
+            input.try_hidpp_wheel_scroll(&session, ScrollDelta::wheel_ticks(0.0, 1.0)),
+            Ok(())
+        );
+        let Emitted::Smooth(first) = next(&received) else {
+            panic!("the diverted main wheel must begin before the lane tick");
+        };
+        assert_eq!(first.phase, openlogi_inject::SmoothScrollPhase::Began);
+        assert!(input.try_hidpp_deliver(
+            &session,
+            ScrollDelta::wheel_ticks(1.0, 0.0),
+            ScrollDelivery::CtrlWheel,
+            Some(window(7)),
+        ));
+
+        let mut vertical = first.delta.y;
+        let mut lanes = Vec::new();
+        loop {
+            match next(&received) {
+                Emitted::Smooth(frame) => {
+                    assert_ne!(
+                        frame.phase,
+                        openlogi_inject::SmoothScrollPhase::Cancelled,
+                        "the thumb-wheel lane canceled the same session's main wheel"
+                    );
+                    vertical += frame.delta.y;
+                    if frame.phase == openlogi_inject::SmoothScrollPhase::Ended {
+                        break;
+                    }
+                }
+                Emitted::Lane(via, notches) => lanes.push((via, notches)),
+                Emitted::Direct(delta) => panic!("unexpected plain wheel {delta:?}"),
+            }
+        }
+        runtime.shutdown();
+
+        assert_eq!(lanes, [(ScrollDelivery::CtrlWheel, 1)]);
+        let target = sensitivity(14).scroll_multiplier();
+        assert!(
+            (vertical - target).abs() < 1.0e-9,
+            "the diverted main wheel reached {vertical}, not {target}"
+        );
     }
 }

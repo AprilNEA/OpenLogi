@@ -20,7 +20,7 @@ use openlogi_hid::{
     PendingCaptureRestore, run_keyboard_capture_session,
 };
 use tokio::sync::{mpsc, oneshot, watch};
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 use super::capture_manager::{self, CaptureManager, ManagerInputs, PendingRestore};
 use super::capture_session::{
@@ -30,7 +30,7 @@ use super::retry::RETRY_DELAY;
 use super::shutdown::{ManagerCompletion, WatcherHandle};
 use crate::hardware::DeviceAccess;
 use crate::receiver_access::{ReceiverRequestState, SessionReceiverLease};
-use crate::runtime::{ActionDispatcher, HidppSessionId};
+use crate::runtime::{ActionDispatcher, ActionName, HidppSessionId};
 
 /// Everything the watcher needs to capture one keyboard: where it is, which
 /// `0x1b04` controls to divert (only keys carrying a real binding), and the
@@ -159,7 +159,7 @@ fn dispatch_input(
         CapturedInput::ButtonDown(button) => {
             let binding = bindings.bindings.get(&button);
             if let Some(binding) = binding {
-                info!(button = %button, action = %binding.click_action().label(), "keyboard key → handling binding");
+                debug!(button = %button, action = %ActionName(&binding.click_action()), "keyboard key → handling binding");
             } else {
                 debug!(?button, "keyboard key with no binding — ignored");
             }

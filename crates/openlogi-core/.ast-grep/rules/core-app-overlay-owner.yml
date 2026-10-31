@@ -4,13 +4,14 @@
 # identifier (app/aliases.rs). Every per-app map (button overrides, Actions
 # Ring layouts) resolves through overlay_for / profile_key_for, so one selector
 # means one thing everywhere. The module also owns the `app:<alias>` key
-# format. An editor's exact-key lookup (`per_app_overrides`, and the ring's
-# `ActionRingConfig::profile_layout`) is a different question and is not
-# matched here.
+# format. An editor that writes a stable executable selector takes it from
+# `executable_selector`, the fallback's own key. An editor's exact-key lookup
+# (`per_app_overrides`, and the ring's `ActionRingConfig::profile_layout`) is a
+# different question and is not matched here.
 id: core-app-overlay-owner
 language: rust
 severity: error
-message: Matching a per-app key against the foreground identifier is openlogi_core::app's (overlay_for, profile_key_for, AppAliases); call it instead of building an `exe:` or `app:` key, parsing an `app:` key, or indexing the ring's per_app map by the raw identifier here.
+message: Matching a per-app key against the foreground identifier is openlogi_core::app's (overlay_for, profile_key_for, executable_selector, AppAliases); call it instead of building an `exe:` or `app:` key, parsing an `app:` key, or indexing the ring's per_app map by the raw identifier here.
 note: |
   action_ring.per_app looked the identifier up verbatim while
   per_app_bindings fell back to `exe:<filename>` (#643), so a Windows Store

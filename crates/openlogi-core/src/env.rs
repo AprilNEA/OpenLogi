@@ -15,8 +15,16 @@ pub const PROFILE: &str = "OPENLOGI_PROFILE";
 /// syntax (`hidpp=trace`, `openlogi_agent=debug,info`, …).
 pub const LOG: &str = "OPENLOGI_LOG";
 
-/// What every process logs when [`LOG`] is unset.
-pub const LOG_DEFAULT: &str = "info";
+/// What the agent, the CLI, and the mock agent log when [`LOG`] is unset or
+/// does not parse. tarpc opens an `info` span per RPC and warns whenever a
+/// peer drops its connection — every GUI or overlay quit — so only its errors
+/// get through.
+pub const LOG_DEFAULT: &str = "info,tarpc=error";
+
+/// What the GUI and the overlay log when [`LOG`] is unset or does not parse:
+/// only what went wrong. Their log files are read when a bug report asks for
+/// them, and a line per window or IPC event would bury the one that matters.
+pub const LOG_DEFAULT_QUIET: &str = "warn,tarpc=error";
 
 /// An asset mirror that overrides the configured source, for the GUI's asset
 /// sync and the CLI's `assets sync`.

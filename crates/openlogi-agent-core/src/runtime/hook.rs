@@ -16,13 +16,14 @@ use openlogi_core::binding::{
     Action, Binding, ButtonId, GestureDirection, SwipeAccumulator, default_binding,
 };
 use openlogi_core::config::KeyTrigger;
+use openlogi_core::scroll::ScrollDelivery;
 use openlogi_hook::{
     EventDevice, EventDisposition, Hook, HookEvent, KeyEvent, MouseEvent, source_is_remappable,
 };
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use super::scroll::ScrollInputHandle;
-use super::{ActionDispatchTarget, ActionDispatcher, PressToken};
+use super::{ActionDispatchTarget, ActionDispatcher, ActionName, PressToken, ReportThrottle};
 use crate::event_monitor::SharedEventMonitor;
 pub(crate) use diverted::DivertedButtons;
 
@@ -42,6 +43,13 @@ pub struct HookMaps {
     pub(crate) pointer_target: Option<openlogi_hook::PointerTarget>,
     /// Device whose binding maps this snapshot contains.
     pub(crate) selected_device: Option<String>,
+    /// How horizontal wheel ticks reach the application this snapshot was
+    /// resolved for.
+    #[cfg_attr(
+        not(any(target_os = "windows", test)),
+        expect(dead_code, reason = "read only by the Windows native-wheel path")
+    )]
+    pub(crate) scroll_delivery: ScrollDelivery,
     /// Per-device `0x2150 default_dir`, learned by HID++ capture sessions:
     /// `true` means a positive native horizontal delta is physical forward/up.
     /// Entries survive map rebuilds because they are hardware observations,
@@ -208,6 +216,9 @@ thread_local! {
     /// key-down events are auto-repeat, not replacement presses; their first
     /// matching key-up ends the lifecycle.
     static HELD_KEYS: RefCell<HashSet<u16>> = RefCell::new(HashSet::new());
+    /// Drops to a full action queue: while the worker is stuck, every bound
+    /// input meets one, so they are counted and reported once per interval.
+    static QUEUE_FULL: RefCell<ReportThrottle> = RefCell::new(ReportThrottle::default());
 }
 
 /// Whether a button event's physical source may be remapped/suppressed.
@@ -259,7 +270,12 @@ fn try_queue_action(
     target: ActionDispatchTarget,
 ) -> bool {
     if tx.try_send((action, target)).is_err() {
-        warn!("action queue full — dropping bound action to keep the input hook live");
+        if let Some(dropped) = QUEUE_FULL.with_borrow_mut(|full| full.occur(Instant::now())) {
+            warn!(
+                dropped,
+                "action queue full — dropping bound actions to keep the input hook live"
+            );
+        }
         false
     } else {
         true
@@ -332,7 +348,7 @@ fn handle_button(
                     .ok()
                     .map(|m| resolve_gesture_click(&m.gestures, id));
                 if let Some(action) = action {
-                    info!(button = %id, action = %action.label(), "gesture click → executing bound action");
+                    debug!(button = %id, action = %ActionName(&action), "gesture click → executing bound action");
                     dispatcher.try_dispatch_while_pressed(&press, &action);
                 }
             }
@@ -353,7 +369,7 @@ fn handle_button(
     if binding_is_native_click(id, &binding) {
         return SUPPRESSED_PRESSES.with_borrow_mut(|s| remapped_press_disposition(id, false, s));
     }
-    info!(button = %id, action = %binding.click_action().label(), "button → handling binding");
+    debug!(button = %id, action = %ActionName(&binding.click_action()), "button → handling binding");
     let queued = dispatcher
         .try_hook_button_down(id, Some(&binding), action_target)
         .is_some();
@@ -438,7 +454,7 @@ fn handle_moved(
                 .unwrap_or_else(|| resolve_gesture_click(&m.gestures, button))
         });
         if let Some(action) = action {
-            info!(button = %button, ?dir, action = %action.label(), "gesture swipe → executing bound action");
+            debug!(button = %button, ?dir, action = %ActionName(&action), "gesture swipe → executing bound action");
             dispatcher.try_dispatch_while_pressed(&press, &action);
         }
     }
@@ -479,7 +495,7 @@ fn handle_key(
         return EventDisposition::PassThrough;
     };
 
-    info!(keycode, action = %action.label(), "key → executing bound action");
+    debug!(keycode, action = %ActionName(&action), "key → executing bound action");
     let action_target = capture_target();
     let queued = if action.is_held() {
         let queued = dispatcher.try_hook_key_down(keycode, &action, action_target);
@@ -550,21 +566,30 @@ pub fn start(
                 } => {
                     #[cfg(target_os = "windows")]
                     if delta.y() == 0.0
-                        && let Some((button, action, target)) =
-                            hooks.try_read().ok().and_then(|maps| {
-                                rebound_thumbwheel_action(&maps, delta.x())
-                                    .map(|(button, action)| (button, action, maps.pointer_target))
-                            })
+                        && let Some((route, target)) = hooks
+                            .try_read()
+                            .ok()
+                            .map(|maps| (native_hwheel_route(&maps, delta), maps.pointer_target))
                     {
-                        info!(button = %button, action = %action.label(), "native thumb wheel → executing bound action");
-                        return queued_event_disposition(try_queue_action(
-                            &action_tx,
-                            action,
-                            ActionDispatchTarget::for_pointer(
-                                target,
-                                openlogi_hook::frontmost_safari_pid,
-                            ),
-                        ));
+                        match route {
+                            NativeWheelRoute::Rebound(button, action) => {
+                                debug!(button = %button, action = %ActionName(&action), "native thumb wheel → executing bound action");
+                                return queued_event_disposition(try_queue_action(
+                                    &action_tx,
+                                    action,
+                                    ActionDispatchTarget::for_pointer(
+                                        target,
+                                        openlogi_hook::frontmost_safari_pid,
+                                    ),
+                                ));
+                            }
+                            NativeWheelRoute::Deliver(via) => {
+                                return queued_event_disposition(
+                                    scroll.try_hook_deliver(delta, via, target),
+                                );
+                            }
+                            NativeWheelRoute::PassThrough => {}
+                        }
                     }
                     if scroll_source_may_intercept(from_trackpad, device.as_ref()) {
                         return queued_event_disposition(scroll.try_hook_scroll(delta));
@@ -595,6 +620,38 @@ pub fn start(
             warn!(error = %e, "could not install OS input hook — events will not be captured");
             None
         }
+    }
+}
+
+/// What the Windows hook does with one native wheel event before the ordinary
+/// wheel path sees it.
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug, PartialEq)]
+enum NativeWheelRoute {
+    /// A rebound thumb-wheel direction fires its action.
+    Rebound(ButtonId, Action),
+    /// The application's delivery lane carries the horizontal tick.
+    Deliver(ScrollDelivery),
+    /// The ordinary wheel path handles the event.
+    PassThrough,
+}
+
+/// Route one native wheel event: a rebound thumb-wheel direction wins, then a
+/// non-native delivery for a purely horizontal tick. A lane needs no learned
+/// polarity: it carries the native sign, which is the horizontal direction the
+/// default thumb-wheel bindings already mean.
+#[cfg(any(target_os = "windows", test))]
+fn native_hwheel_route(maps: &HookMaps, delta: openlogi_hook::ScrollDelta) -> NativeWheelRoute {
+    if delta.y() != 0.0 {
+        return NativeWheelRoute::PassThrough;
+    }
+    if let Some((button, action)) = rebound_thumbwheel_action(maps, delta.x()) {
+        return NativeWheelRoute::Rebound(button, action);
+    }
+    if delta.x() != 0.0 && !maps.scroll_delivery.is_native() {
+        NativeWheelRoute::Deliver(maps.scroll_delivery)
+    } else {
+        NativeWheelRoute::PassThrough
     }
 }
 

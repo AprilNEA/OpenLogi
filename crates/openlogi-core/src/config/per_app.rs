@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 use super::Config;
 use crate::app::{overlay_for, profile_key_for};
 use crate::binding::{Action, Binding, ButtonId};
+use crate::scroll::ScrollDelivery;
 
 impl Config {
     /// Resolve the effective binding map for `device_key`, overlaying the
@@ -107,6 +108,16 @@ impl Config {
         if let Some(device) = self.devices.get_mut(device_key) {
             device.per_app_bindings.remove(app);
         }
+    }
+
+    /// How horizontal scrolling reaches `app`, matched against
+    /// [`Self::thumbwheel_apps`] the way button overrides are. No application,
+    /// no matching rule, or a rule without a delivery keeps the native wheel.
+    #[must_use]
+    pub fn scroll_delivery(&self, app: Option<&str>) -> ScrollDelivery {
+        app.and_then(|app| overlay_for(&self.thumbwheel_apps, &self.apps, app))
+            .and_then(|rule| rule.delivery)
+            .unwrap_or_default()
     }
 
     /// Whether `device_key` has a non-empty per-app binding overlay for the

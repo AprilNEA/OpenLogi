@@ -46,6 +46,10 @@ fn press_shifted_symbol(cx: &mut VisualTestContext, key: &str) {
     cx.update(|window, cx| window.draw(cx).clear(cx));
 }
 
+fn open_list(view: &Entity<MouseModelView>, cx: &mut VisualTestContext) -> InspectorList {
+    view.read_with(cx, |view, _| view.open_list)
+}
+
 fn assert_forward_binding(cx: &mut VisualTestContext, expected: &Action) {
     cx.update(|_, cx| {
         assert_eq!(
@@ -117,7 +121,7 @@ fn action_picker_renders_after_opening_through_the_inspector(cx: &mut TestAppCon
 
     click_picker_control(cx, "label-card-Button(Forward)");
     click_picker_control(cx, "inspector-current-action");
-    view.read_with(cx, |view, _| assert!(view.action_picker_open));
+    assert_eq!(open_list(&view, cx), InspectorList::Actions);
     assert!(cx.debug_bounds("inspector-action-Copy").is_some());
 
     click_picker_control(cx, "inspector-action-custom-shortcut-add");
@@ -132,7 +136,7 @@ fn action_picker_renders_after_opening_through_the_inspector(cx: &mut TestAppCon
 
     click_picker_control(cx, "inspector-action-custom-application-add");
     view.read_with(cx, |view, _| {
-        assert!(view.action_picker_open);
+        assert_eq!(view.open_list, InspectorList::Actions);
         assert_eq!(view.invalid_drafts.shortcut, Some(Unrecognized));
         assert!(view.invalid_drafts.application);
     });
@@ -158,7 +162,7 @@ fn action_picker_renders_after_opening_through_the_inspector(cx: &mut TestAppCon
             .is_some()
     );
     click_picker_control(cx, "inspector-action-custom-shortcut-add");
-    view.read_with(cx, |view, _| assert!(!view.action_picker_open));
+    assert_eq!(open_list(&view, cx), InspectorList::Closed);
     assert_forward_binding(cx, &Action::CustomShortcut("Cmd+K".parse().unwrap()));
 
     click_picker_control(cx, "inspector-current-action");
@@ -174,7 +178,7 @@ fn action_picker_renders_after_opening_through_the_inspector(cx: &mut TestAppCon
     click_picker_control(cx, "inspector-action-custom-application-input");
     cx.simulate_input("/Applications/Calculator.app");
     click_picker_control(cx, "inspector-action-custom-application-add");
-    view.read_with(cx, |view, _| assert!(!view.action_picker_open));
+    assert_eq!(open_list(&view, cx), InspectorList::Closed);
     cx.update(|_, cx| {
         let Action::OpenApplication(target) =
             &AppState::try_read(cx).unwrap().button_bindings()[&ButtonId::Forward]
@@ -192,7 +196,7 @@ fn action_picker_renders_after_opening_through_the_inspector(cx: &mut TestAppCon
     click_picker_control(cx, "inspector-action-custom-shortcut-input");
     cx.simulate_input("Cmd+K");
     click_picker_control(cx, "inspector-action-custom-shortcut-add");
-    view.read_with(cx, |view, _| assert!(!view.action_picker_open));
+    assert_eq!(open_list(&view, cx), InspectorList::Closed);
     assert_forward_binding(cx, &Action::HoldShortcut("Cmd+K".parse().unwrap()));
 
     click_picker_control(cx, "inspector-current-action");
@@ -208,7 +212,7 @@ fn action_picker_renders_after_opening_through_the_inspector(cx: &mut TestAppCon
     cx.simulate_input("Copy");
     cx.update(|window, cx| window.draw(cx).clear(cx));
     click_picker_control(cx, "inspector-action-Copy");
-    view.read_with(cx, |view, _| assert!(!view.action_picker_open));
+    assert_eq!(open_list(&view, cx), InspectorList::Closed);
     assert_forward_binding(cx, &Action::Copy);
 
     drop(view);
@@ -254,7 +258,11 @@ fn record_fills_the_custom_shortcut_from_the_next_key_press(cx: &mut TestAppCont
             .is_none()
     );
     view.read_with(cx, |view, _| {
-        assert!(view.action_picker_open, "recording alone commits nothing");
+        assert_eq!(
+            view.open_list,
+            InspectorList::Actions,
+            "recording alone commits nothing"
+        );
     });
     assert_forward_binding(cx, &default_binding(ButtonId::Forward));
 
@@ -302,7 +310,7 @@ fn record_fills_the_custom_shortcut_from_the_next_key_press(cx: &mut TestAppCont
     assert_eq!(shortcut_text(cx), "Ctrl+Shift+PageUp");
 
     click_picker_control(cx, "inspector-action-custom-shortcut-add");
-    view.read_with(cx, |view, _| assert!(!view.action_picker_open));
+    assert_eq!(open_list(&view, cx), InspectorList::Closed);
     assert_forward_binding(
         cx,
         &Action::CustomShortcut("Ctrl+Shift+PageUp".parse().unwrap()),
@@ -330,7 +338,7 @@ fn the_action_picker_binds_a_button_to_a_shell_command(cx: &mut TestAppContext) 
 
     click_picker_control(cx, "inspector-action-custom-command-add");
     view.read_with(cx, |view, _| {
-        assert!(view.action_picker_open);
+        assert_eq!(view.open_list, InspectorList::Actions);
         assert_eq!(
             view.invalid_drafts,
             InvalidDrafts {
@@ -354,7 +362,7 @@ fn the_action_picker_binds_a_button_to_a_shell_command(cx: &mut TestAppContext) 
             .is_none()
     );
     click_picker_control(cx, "inspector-action-custom-command-add");
-    view.read_with(cx, |view, _| assert!(!view.action_picker_open));
+    assert_eq!(open_list(&view, cx), InspectorList::Closed);
     assert_forward_binding(cx, &Action::RunShellCommand("snipaste snip".into()));
 
     click_picker_control(cx, "inspector-current-action");
@@ -400,9 +408,10 @@ fn a_selected_gesture_can_render_in_the_binding_inspector(cx: &mut TestAppContex
                 press_force: None,
                 extra_actions: &[],
                 hidden_actions: &[],
+                scroll_method: None,
             },
             ActionPickerContext {
-                open: true,
+                list: InspectorList::Actions,
                 search: &view.action_search,
                 shortcut_input: &view.custom_shortcut_input,
                 application_input: &view.custom_application_input,
@@ -431,11 +440,11 @@ fn selecting_another_control_closes_the_action_picker(cx: &mut TestAppContext) {
 
     view.update(cx, |view, _| {
         view.selected = Some(MouseControlId::Button(ButtonId::Back));
-        view.action_picker_open = true;
+        view.open_list = InspectorList::Actions;
 
         view.select(MouseControlId::Button(ButtonId::Forward));
 
-        assert!(!view.action_picker_open);
+        assert_eq!(view.open_list, InspectorList::Closed);
     });
     drop(view);
     cx.update(|window, _| window.remove_window());
@@ -757,7 +766,7 @@ fn an_inherited_gesture_button_offers_the_held_actions(cx: &mut TestAppContext) 
             state.set_editing_app(Some("com.apple.Safari".into()))
         });
     });
-    view.update(cx, |view, _| view.action_picker_open = true);
+    view.update(cx, |view, _| view.open_list = InspectorList::Actions);
     cx.update(|window, cx| window.draw(cx).clear(cx));
 
     assert!(cx.debug_bounds("inspector-gesture-override-Copy").is_some());
@@ -765,6 +774,105 @@ fn an_inherited_gesture_button_offers_the_held_actions(cx: &mut TestAppContext) 
         cx.debug_bounds("inspector-gesture-override-DpiShift")
             .is_some()
     );
+    drop(view);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+}
+
+/// One row per method, by the `inspector-scroll-method-{ScrollDelivery:?}`
+/// selector, in `ScrollDelivery::ALL` order.
+const SCROLL_METHOD_ROWS: [&str; 6] = [
+    "inspector-scroll-method-Native",
+    "inspector-scroll-method-ShiftWheel",
+    "inspector-scroll-method-CtrlShiftWheel",
+    "inspector-scroll-method-AltWheel",
+    "inspector-scroll-method-VerticalWheel",
+    "inspector-scroll-method-CtrlWheel",
+];
+
+#[gpui::test]
+fn the_scroll_method_picker_lists_every_method_and_applies_only_on_click(cx: &mut TestAppContext) {
+    use openlogi_core::scroll::ScrollDelivery;
+
+    use crate::features::mouse::thumbwheel::SCROLL_METHODS_SUPPORTED;
+
+    const EXCEL: &str = r"c:\program files\microsoft office\root\office16\excel.exe";
+    let delivery = |cx: &mut VisualTestContext| {
+        cx.update(|_, cx| {
+            AppState::try_read(cx)
+                .unwrap()
+                .editing_scroll_method()
+                .map(|choice| choice.current)
+        })
+    };
+
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    cx.update(gpui_component::init);
+    cx.update(|cx| {
+        let state = cx.new(|_| crate::state::tests::state_with_a_known_mouse());
+        AppState::set_global(state, cx);
+        AppState::apply(cx, |state| state.set_editing_app(Some(EXCEL.into())));
+    });
+    let (view, cx) = cx.add_window_view(MouseModelView::new);
+    cx.simulate_resize(size(px(1200.), px(1400.)));
+    // The first frame adopts the device, which clears any selection.
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    view.update(cx, |view, _| {
+        view.select(MouseControlId::ThumbwheelRotation);
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(
+        cx.debug_bounds("inspector-current-thumbwheel-preset")
+            .is_some()
+    );
+
+    if SCROLL_METHODS_SUPPORTED {
+        assert_eq!(delivery(cx), Some(ScrollDelivery::Native));
+        assert!(
+            cx.debug_bounds(SCROLL_METHOD_ROWS[1]).is_none(),
+            "the list starts closed"
+        );
+
+        click_picker_control(cx, "inspector-current-thumbwheel-preset");
+        click_picker_control(cx, "inspector-scroll-method");
+        assert_eq!(
+            open_list(&view, cx),
+            InspectorList::ScrollMethods,
+            "opening the methods closes the preset list"
+        );
+        for row in SCROLL_METHOD_ROWS {
+            assert!(cx.debug_bounds(row).is_some(), "{row} is offered");
+        }
+        assert_eq!(
+            delivery(cx),
+            Some(ScrollDelivery::Native),
+            "showing the suggestion applies nothing"
+        );
+
+        click_picker_control(cx, "inspector-scroll-method-suggested");
+        assert_eq!(delivery(cx), Some(ScrollDelivery::CtrlShiftWheel));
+        assert_eq!(open_list(&view, cx), InspectorList::Closed);
+        assert!(
+            cx.debug_bounds("inspector-scroll-method-suggested")
+                .is_none(),
+            "the applied suggestion is no longer offered"
+        );
+
+        click_picker_control(cx, "inspector-scroll-method");
+        click_picker_control(cx, SCROLL_METHOD_ROWS[0]);
+        assert_eq!(delivery(cx), Some(ScrollDelivery::Native));
+        assert!(
+            cx.debug_bounds("inspector-scroll-method-suggested")
+                .is_some()
+        );
+    } else {
+        assert!(
+            cx.debug_bounds("inspector-scroll-method").is_none(),
+            "the native wheel is the only method this platform delivers"
+        );
+    }
+
     drop(view);
     cx.update(|window, _| window.remove_window());
     cx.run_until_parked();

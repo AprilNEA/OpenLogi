@@ -7,7 +7,8 @@
 //! event, and to [`windows`], which owns the windows themselves.
 
 // Without this Windows runs the exe as a console app and pops a terminal
-// window behind the UI. Debug builds keep the console so logs stay visible.
+// window behind the UI. Debug builds keep the console so logs stay visible;
+// release builds log only to the file `init_tracing` opens.
 #![cfg_attr(
     all(target_os = "windows", not(debug_assertions)),
     windows_subsystem = "windows"
@@ -174,5 +175,5 @@ fn main() -> Result<()> {
 }
 
 fn init_tracing() {
-    openlogi_core::logging::init_stderr();
+    openlogi_core::logging::init_with_log_file("gui");
 }

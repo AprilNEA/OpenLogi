@@ -16,7 +16,10 @@ use openlogi_core::binding::KeyboardUsage;
 use openlogi_core::binding::{Action, HeldKeys, KeyCombo};
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use openlogi_core::binding::{Script, WorkflowStep};
-use openlogi_core::scroll::ScrollDelta;
+use openlogi_core::scroll::{ScrollDelivery, ScrollDelta};
+
+#[cfg(any(target_os = "windows", test))]
+mod compat;
 
 #[cfg(target_os = "macos")]
 mod macos;
@@ -608,6 +611,27 @@ pub fn post_scroll(delta: ScrollDelta) {
         }
         _ => {
             let _ = delta;
+        }
+    }
+}
+
+/// Synthesise `notches` whole horizontal wheel notches, positive scrolling
+/// right, through an application's delivery lane.
+///
+/// Windows injects the lane's modifier-and-wheel sequence as one atomic batch.
+/// Elsewhere the delivery is ignored and the notches are posted as the
+/// ordinary horizontal wheel.
+pub fn post_scroll_via(delivery: ScrollDelivery, notches: i32) {
+    if notches == 0 {
+        return;
+    }
+    cfg_select! {
+        target_os = "windows" => {
+            windows::post_scroll_via(delivery, notches);
+        }
+        _ => {
+            let _ = delivery;
+            post_scroll(ScrollDelta::wheel_ticks(f64::from(notches), 0.0));
         }
     }
 }

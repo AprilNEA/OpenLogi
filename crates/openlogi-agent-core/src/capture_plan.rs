@@ -17,6 +17,7 @@ use openlogi_core::binding::{
 use openlogi_core::bindings::{button_bindings_for, hidpp_gesture_maps_for, oshook_gestures_for};
 use openlogi_core::config::{Config, OnboardMemory, ThumbwheelSensitivity};
 use openlogi_core::device_order::PhysicalDeviceKey;
+use openlogi_core::scroll::ScrollDelivery;
 use openlogi_hid::DeviceRoute;
 use openlogi_hid::reprog_controls::DPI_MODE_SHIFT_CIDS;
 use openlogi_hid::session::gesture::{
@@ -81,6 +82,10 @@ pub struct DispatchPlan {
     pub pointer_target: Option<openlogi_hook::PointerTarget>,
     /// Bindings used while G-Shift is held.
     pub shift_bindings: BTreeMap<ButtonId, Binding>,
+    /// How horizontal thumb-wheel scrolling reaches the application these
+    /// bindings were resolved for. Dispatch-only: it never changes what the
+    /// session diverts.
+    pub scroll_delivery: ScrollDelivery,
 }
 
 /// One device's independently versioned hardware target and dispatch plan.
@@ -393,6 +398,7 @@ pub fn plan_for_device(
             invert_wheel: false,
             pointer_target: None,
             shift_bindings: shift_bindings_for(config, config_key),
+            scroll_delivery: config.scroll_delivery(app),
         },
     }
 }
@@ -1225,5 +1231,47 @@ mod tests {
         } else {
             assert!(plan.dispatch.side_gesture_bindings.is_empty());
         }
+    }
+
+    #[test]
+    fn a_delivery_rule_changes_dispatch_but_never_the_capture_target() {
+        use openlogi_core::config::ThumbwheelAppRule;
+
+        let mut listed = Config::default();
+        listed.thumbwheel_apps.insert(
+            "exe:excel.exe".to_string(),
+            ThumbwheelAppRule {
+                delivery: Some(ScrollDelivery::CtrlShiftWheel),
+            },
+        );
+        let excel = Some(r"c:\program files\microsoft office\root\office16\excel.exe");
+        let plain = plan_for_device(&Config::default(), "2b042", route(), excel, 0, true);
+        let delivered = plan_for_device(&listed, "2b042", route(), excel, 0, true);
+        let elsewhere = plan_for_device(
+            &listed,
+            "2b042",
+            route(),
+            Some(r"c:\windows\notepad.exe"),
+            0,
+            true,
+        );
+
+        assert_eq!(
+            delivered.target, plain.target,
+            "a listed application never re-arms the session"
+        );
+        assert_eq!(delivered.target, elsewhere.target);
+        assert_eq!(
+            delivered.dispatch.scroll_delivery,
+            ScrollDelivery::CtrlShiftWheel
+        );
+        assert_eq!(elsewhere.dispatch.scroll_delivery, ScrollDelivery::Native);
+        assert_eq!(
+            DispatchPlan {
+                scroll_delivery: ScrollDelivery::Native,
+                ..delivered.dispatch
+            },
+            plain.dispatch
+        );
     }
 }

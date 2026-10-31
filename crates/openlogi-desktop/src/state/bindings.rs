@@ -6,10 +6,14 @@ use openlogi_core::binding::{
     Action, Binding, ButtonId, GestureDirection, LongPressBinding, WheelHoldBinding,
 };
 use openlogi_core::bindings::{bindings_for, hidpp_gesture_maps_for, oshook_gestures_for};
-use openlogi_core::config::{Config, KeyTrigger};
+use openlogi_core::config::{Config, KeyTrigger, ThumbwheelAppRule};
+use openlogi_core::scroll::ScrollDelivery;
 use tracing::debug;
 
-use crate::features::mouse::thumbwheel::{ThumbwheelPair, ThumbwheelPreset};
+use crate::features::mouse::thumbwheel::{
+    SCROLL_METHODS_SUPPORTED, ScrollMethodChoice, ThumbwheelPair, ThumbwheelPreset,
+    scroll_method_apps, scroll_method_delivery, scroll_method_selector, suggested_scroll_method,
+};
 use crate::state::devices::DeviceRecord;
 
 use super::events::StateEvents;
@@ -160,6 +164,66 @@ pub enum BindingLayer {
     Normal,
     /// The bindings used while G-Shift is held.
     GShift,
+}
+
+/// Point `app`'s `[thumbwheel_apps]` rule at `delivery` under its `exe:`
+/// selector. Native drops the rule unless a broader rule needs an explicit
+/// native override. Returns whether the config changed.
+///
+/// A rule keyed by the exact identifier outranks the selector when the agent
+/// matches it, so one left by a hand edit is cleared rather than left to
+/// override the choice. An alias edits its current platform's identifiers;
+/// the portable alias rule itself stays intact.
+pub(super) fn set_app_scroll_delivery(
+    config: &mut Config,
+    app: &str,
+    delivery: ScrollDelivery,
+) -> bool {
+    let apps: Vec<String> = scroll_method_apps(config, app)
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    let selectors: BTreeSet<String> = apps.iter().map(|app| scroll_method_selector(app)).collect();
+    let mut changed = false;
+    for selector in selectors {
+        for app in apps
+            .iter()
+            .filter(|app| **app != selector && scroll_method_selector(app) == selector)
+        {
+            changed |= clear_scroll_delivery(&mut config.thumbwheel_apps, app);
+        }
+        let previous = config.thumbwheel_apps.get(&selector).cloned();
+        if delivery.is_native() {
+            clear_scroll_delivery(&mut config.thumbwheel_apps, &selector);
+        }
+        if !delivery.is_native()
+            || apps.iter().any(|app| {
+                scroll_method_selector(app) == selector
+                    && !config.scroll_delivery(Some(app)).is_native()
+            })
+        {
+            config
+                .thumbwheel_apps
+                .entry(selector.clone())
+                .or_default()
+                .delivery = Some(delivery);
+        }
+        changed |= config.thumbwheel_apps.get(&selector) != previous.as_ref();
+    }
+    changed
+}
+
+/// Drop `key`'s delivery, and its rule once that leaves nothing in it.
+fn clear_scroll_delivery(rules: &mut BTreeMap<String, ThumbwheelAppRule>, key: &str) -> bool {
+    let Some(rule) = rules.get_mut(key) else {
+        return false;
+    };
+    let cleared = rule.delivery.take().is_some();
+    if *rule == ThumbwheelAppRule::default() {
+        rules.remove(key);
+        return true;
+    }
+    cleared
 }
 
 impl AppState {
@@ -378,22 +442,25 @@ impl AppState {
         StateEvent::BindingsChanged(key.clone()).into()
     }
 
-    /// Delete both per-app configuration sections in one save/reload. A failed
-    /// save restores both sections and leaves both editor selections intact.
+    /// Delete both per-app configuration sections, and the application's
+    /// scroll method, in one save/reload. A failed save restores all of them
+    /// and leaves both editor selections intact.
     pub fn remove_all_app_profiles(&mut self, key: &DeviceKey, app: &str) -> StateEvents {
         let changed = self.config.edit(|config| {
+            let scroll = SCROLL_METHODS_SUPPORTED
+                && set_app_scroll_delivery(config, app, ScrollDelivery::Native);
             let Some(device) = config.devices.get_mut(key.as_str()) else {
-                return false;
+                return scroll;
             };
             let buttons = device.per_app_bindings.remove(app).is_some();
             let ring = device.action_ring.per_app.remove(app).is_some();
-            buttons || ring
+            buttons || ring || scroll
         });
         if changed && !self.persist_and_reload("all application profiles") {
             return StateEvent::BindingsChanged(key.clone()).into();
         }
 
-        // Both saved sections are gone, so the scoped removals only close their
+        // Every saved section is gone, so the scoped removals only close their
         // matching editors; neither writes or reloads an already absent profile.
         let events = self.remove_app_profile(key, app);
         let _ = self.remove_action_ring_profile(key, app);
@@ -414,17 +481,24 @@ impl AppState {
         StateEvent::BindingsChanged(key.clone()).into()
     }
 
+    /// Clear `app`'s button profile on `key`, with the scroll method its
+    /// thumb-wheel inspector shows, though every mouse shares that.
     fn clear_app_profile(&mut self, key: &str, app: &str) -> bool {
         if !self
             .config
             .app_profiles(key)
             .any(|candidate| candidate == app)
+            && !self.app_has_scroll_method(app)
         {
             // An application selected but never edited is window-local only.
             return true;
         }
-        self.config
-            .edit(|config| config.remove_app_profile(key, app));
+        self.config.edit(|config| {
+            config.remove_app_profile(key, app);
+            if SCROLL_METHODS_SUPPORTED {
+                set_app_scroll_delivery(config, app, ScrollDelivery::Native);
+            }
+        });
         let saved = self.persist_and_reload("per-app profile");
         self.refresh_binding_projections();
         saved
@@ -469,6 +543,49 @@ impl AppState {
             return events;
         }
         self.persist_and_reload("thumb-wheel binding");
+        events
+    }
+
+    /// How horizontal scrolling reaches the open per-app profile's
+    /// application, with any built-in suggestion for it. `None` in the global
+    /// profile and on platforms that keep the native wheel.
+    #[must_use]
+    pub fn editing_scroll_method(&self) -> Option<ScrollMethodChoice> {
+        if !SCROLL_METHODS_SUPPORTED {
+            return None;
+        }
+        let app = self.editing_app()?;
+        Some(ScrollMethodChoice {
+            current: scroll_method_delivery(&self.config, app),
+            suggestion: suggested_scroll_method(app),
+        })
+    }
+
+    /// Whether `app` has a horizontal scroll method other than the native
+    /// wheel, which resetting or removing its button profile also clears.
+    #[must_use]
+    pub fn app_has_scroll_method(&self, app: &str) -> bool {
+        SCROLL_METHODS_SUPPORTED && !scroll_method_delivery(&self.config, app).is_native()
+    }
+
+    /// Set how horizontal scrolling reaches the open per-app profile's
+    /// application — for every mouse, since the rule is per application — and
+    /// have the agent reload it. A no-op in the global profile.
+    pub fn commit_scroll_delivery(&mut self, delivery: ScrollDelivery) -> StateEvents {
+        let events = self.for_current_device(StateEvent::BindingsChanged);
+        let Some(app) = self.editing_app().map(str::to_string) else {
+            debug!(
+                ?delivery,
+                "no per-app profile open — scroll method edit ignored"
+            );
+            return events;
+        };
+        if self
+            .config
+            .edit(|config| set_app_scroll_delivery(config, &app, delivery))
+        {
+            self.persist_and_reload("thumb-wheel scroll method");
+        }
         events
     }
     /// Records (or, with `action = None`, clears) the F-key `trigger` binding

@@ -3,8 +3,165 @@
 //! Configuration remains backward-compatible: the picker writes the existing
 //! `ThumbwheelScrollDown` and `ThumbwheelScrollUp` entries. This module only
 //! groups exact pairs into the presets displayed by the mouse diagram.
+//!
+//! It also presents the per-application horizontal scroll methods of the
+//! `[thumbwheel_apps]` table, with the built-in suggestions offered for them.
 
+use openlogi_core::app::{executable_selector, profile_applies_to};
 use openlogi_core::binding::Action;
+use openlogi_core::config::Config;
+use openlogi_core::scroll::ScrollDelivery;
+
+/// Whether the agent delivers horizontal scrolling by method on this platform.
+/// The other backends ignore `[thumbwheel_apps]` and keep the native wheel, so
+/// no picker is offered there.
+pub(crate) const SCROLL_METHODS_SUPPORTED: bool = cfg!(target_os = "windows");
+
+/// A horizontal scroll method the inspector offers for one application. Only
+/// the user's click applies it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ScrollMethodSuggestion {
+    pub delivery: ScrollDelivery,
+    /// Reports disagree on whether the method works in every version, so the
+    /// inspector asks the user to check it.
+    pub needs_verification: bool,
+}
+
+/// Applications known to ignore the native horizontal wheel, by the selector
+/// [`scroll_method_selector`] derives.
+const SUGGESTED_SCROLL_METHODS: &[(&str, ScrollMethodSuggestion)] = &[
+    (
+        "exe:excel.exe",
+        ScrollMethodSuggestion {
+            delivery: ScrollDelivery::CtrlShiftWheel,
+            needs_verification: true,
+        },
+    ),
+    (
+        "exe:adobe premiere pro.exe",
+        ScrollMethodSuggestion {
+            delivery: ScrollDelivery::VerticalWheel,
+            needs_verification: false,
+        },
+    ),
+    (
+        "exe:javaw.exe",
+        ScrollMethodSuggestion {
+            delivery: ScrollDelivery::ShiftWheel,
+            needs_verification: false,
+        },
+    ),
+    (
+        "exe:java.exe",
+        ScrollMethodSuggestion {
+            delivery: ScrollDelivery::ShiftWheel,
+            needs_verification: false,
+        },
+    ),
+];
+
+/// The open per-app profile's horizontal scroll method, as the inspector
+/// presents it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ScrollMethodChoice {
+    pub current: ScrollDelivery,
+    pub suggestion: Option<ScrollMethodSuggestion>,
+}
+
+/// The `[thumbwheel_apps]` key the GUI writes for `app`: its `exe:` selector,
+/// which survives versioned install directories. An identifier that names no
+/// executable is already a selector and keys its own rule.
+pub(crate) fn scroll_method_selector(app: &str) -> String {
+    executable_selector(app).unwrap_or_else(|| app.to_string())
+}
+
+/// Runtime identifiers represented by an editor key. An `exe:` key also
+/// covers known install paths, whose exact rules or aliases can outrank it.
+/// Portable aliases expand only to this platform's identifiers.
+pub(crate) fn scroll_method_apps<'a>(config: &'a Config, app: &'a str) -> Vec<&'a str> {
+    let identifiers = config.apps.for_profile_key(app).map_or_else(
+        || vec![app],
+        |(_, alias)| {
+            alias
+                .identifiers_here()
+                .iter()
+                .map(String::as_str)
+                .collect()
+        },
+    );
+    identifiers
+        .into_iter()
+        .flat_map(|identifier| {
+            config
+                .thumbwheel_apps
+                .keys()
+                .map(String::as_str)
+                .chain(
+                    config
+                        .apps
+                        .iter()
+                        .flat_map(|(_, alias)| alias.identifiers_here().iter().map(String::as_str)),
+                )
+                .filter(move |candidate| {
+                    *candidate != identifier
+                        && executable_selector(candidate).is_some()
+                        && profile_applies_to(identifier, &config.apps, candidate)
+                })
+                .chain(std::iter::once(identifier))
+        })
+        .collect()
+}
+
+/// Effective non-native delivery for an editor key, including aliases and
+/// known install paths. Concrete identifiers use the agent's matcher directly.
+pub(crate) fn scroll_method_delivery(config: &Config, app: &str) -> ScrollDelivery {
+    scroll_method_apps(config, app)
+        .into_iter()
+        .map(|app| config.scroll_delivery(Some(app)))
+        .find(|delivery| !delivery.is_native())
+        .unwrap_or_default()
+}
+
+/// Whether an editor key represents an application the rule can apply to.
+/// Effective delivery still comes from the agent's precedence matcher.
+pub(crate) fn scroll_rule_applies(app: &str, rule: &str, config: &Config) -> bool {
+    scroll_method_apps(config, app)
+        .into_iter()
+        .any(|app| profile_applies_to(rule, &config.apps, app))
+}
+
+/// The built-in method suggested for `app`, if it is a known application.
+pub(crate) fn suggested_scroll_method(app: &str) -> Option<ScrollMethodSuggestion> {
+    let selector = scroll_method_selector(app);
+    SUGGESTED_SCROLL_METHODS
+        .iter()
+        .find(|(known, _)| *known == selector)
+        .map(|(_, suggestion)| *suggestion)
+}
+
+#[must_use]
+pub(crate) const fn scroll_method_translation_key(delivery: ScrollDelivery) -> &'static str {
+    match delivery {
+        ScrollDelivery::Native => "pointer.scroll_method_native",
+        ScrollDelivery::ShiftWheel => "pointer.scroll_method_shift_wheel",
+        ScrollDelivery::CtrlShiftWheel => "pointer.scroll_method_ctrl_shift_wheel",
+        ScrollDelivery::AltWheel => "pointer.scroll_method_alt_wheel",
+        ScrollDelivery::VerticalWheel => "pointer.scroll_method_vertical_wheel",
+        ScrollDelivery::CtrlWheel => "pointer.scroll_method_ctrl_wheel",
+    }
+}
+
+#[must_use]
+pub(crate) const fn scroll_method_description_key(delivery: ScrollDelivery) -> &'static str {
+    match delivery {
+        ScrollDelivery::Native => "pointer.scroll_method_native_description",
+        ScrollDelivery::ShiftWheel => "pointer.scroll_method_shift_wheel_description",
+        ScrollDelivery::CtrlShiftWheel => "pointer.scroll_method_ctrl_shift_wheel_description",
+        ScrollDelivery::AltWheel => "pointer.scroll_method_alt_wheel_description",
+        ScrollDelivery::VerticalWheel => "pointer.scroll_method_vertical_wheel_description",
+        ScrollDelivery::CtrlWheel => "pointer.scroll_method_ctrl_wheel_description",
+    }
+}
 
 /// Actions fired when the thumb wheel moves backward/down and forward/up.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -245,6 +402,96 @@ mod tests {
             None,
             "mixed actions are custom"
         );
+    }
+
+    #[test]
+    fn scroll_method_rules_are_keyed_by_executable_name() {
+        assert_eq!(
+            scroll_method_selector(r"c:\program files\microsoft office\root\office16\excel.exe"),
+            "exe:excel.exe"
+        );
+        // A hand-authored profile key is already a selector.
+        assert_eq!(scroll_method_selector("exe:excel.exe"), "exe:excel.exe");
+    }
+
+    #[test]
+    fn a_rule_applies_under_its_exact_key_or_the_executable_selector() {
+        let config = Config::ephemeral();
+        let excel = r"c:\program files\microsoft office\root\office16\excel.exe";
+        assert!(scroll_rule_applies(excel, "exe:excel.exe", &config));
+        assert!(scroll_rule_applies(excel, excel, &config));
+        assert!(scroll_rule_applies(
+            "exe:excel.exe",
+            "exe:excel.exe",
+            &config
+        ));
+        assert!(
+            !scroll_rule_applies("exe:excel.exe", excel, &config),
+            "a selector names no install path"
+        );
+        assert!(!scroll_rule_applies(excel, "exe:winword.exe", &config));
+    }
+
+    #[test]
+    fn suggestions_follow_the_executable_wherever_it_is_installed() {
+        assert_eq!(
+            suggested_scroll_method(r"C:\Program Files\Microsoft Office\root\Office16\EXCEL.EXE"),
+            Some(ScrollMethodSuggestion {
+                delivery: ScrollDelivery::CtrlShiftWheel,
+                needs_verification: true,
+            }),
+            "Excel's method is offered, flagged for the user to verify"
+        );
+        for (app, delivery) in [
+            (
+                r"c:\program files\adobe\adobe premiere pro 2025\adobe premiere pro.exe",
+                ScrollDelivery::VerticalWheel,
+            ),
+            (
+                r"c:\program files\java\jdk-21\bin\javaw.exe",
+                ScrollDelivery::ShiftWheel,
+            ),
+            (
+                r"c:\program files\java\jdk-21\bin\java.exe",
+                ScrollDelivery::ShiftWheel,
+            ),
+            ("exe:javaw.exe", ScrollDelivery::ShiftWheel),
+        ] {
+            assert_eq!(
+                suggested_scroll_method(app),
+                Some(ScrollMethodSuggestion {
+                    delivery,
+                    needs_verification: false,
+                }),
+                "{app}"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_applications_and_lookalikes_get_no_suggestion() {
+        for app in [
+            r"c:\program files\google\chrome\application\chrome.exe",
+            r"c:\tools\excel.exe.bak",
+            "excel.exe",
+            "com.microsoft.Excel",
+            "",
+        ] {
+            assert_eq!(suggested_scroll_method(app), None, "{app}");
+        }
+    }
+
+    #[test]
+    fn every_suggestion_is_reachable_and_changes_something() {
+        for (selector, suggestion) in SUGGESTED_SCROLL_METHODS {
+            // The derived selector is lower-cased, so any other key never matches.
+            assert_eq!(*selector, selector.to_ascii_lowercase());
+            assert!(selector.starts_with("exe:"), "{selector}");
+            assert!(
+                !suggestion.delivery.is_native(),
+                "{selector}: suggesting the default offers nothing"
+            );
+        }
     }
 
     #[test]

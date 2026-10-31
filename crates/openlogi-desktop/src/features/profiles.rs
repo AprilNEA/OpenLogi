@@ -318,7 +318,10 @@ pub(crate) fn profile_canvas_status(cx: &App) -> Option<gpui::Div> {
     }
     let editing_app = state.editing_app().map(|app| profile_name(state, app));
     let override_count = state.editing_app_overrides().map_or(0, BTreeMap::len);
-    let summary = profile_summary(editing_app.as_deref(), override_count);
+    let scroll_method = state
+        .editing_scroll_method()
+        .is_some_and(|choice| !choice.current.is_native());
+    let summary = profile_summary(editing_app.as_deref(), override_count, scroll_method);
     let active = state
         .active_profile_name()
         .map_or_else(|| tr!("common.default"), gpui::SharedString::from);
@@ -342,11 +345,19 @@ pub(crate) fn profile_canvas_status(cx: &App) -> Option<gpui::Div> {
     )
 }
 
-fn profile_summary(editing_app: Option<&str>, override_count: usize) -> gpui::SharedString {
+fn profile_summary(
+    editing_app: Option<&str>,
+    override_count: usize,
+    scroll_method: bool,
+) -> gpui::SharedString {
     let Some(app) = editing_app else {
         return tr!("profiles.default_bindings_description");
     };
     match override_count {
+        0 if scroll_method => tr!(
+            "profiles.app_profile_scroll_method_only",
+            app => app
+        ),
         0 => tr!(
             "profiles.app_profile_no_overrides",
             app => app
@@ -393,6 +404,10 @@ impl ProfileCommand {
         let app = profile.app.clone();
         let name = profile.name.clone();
         let reset = matches!(self, Self::ResetButtons | Self::ResetRing);
+        // Clearing the button profile clears the app's scroll method too,
+        // which every mouse shares.
+        let scroll_method =
+            AppState::try_read(cx).is_some_and(|state| state.app_has_scroll_method(&app));
         window.open_alert_dialog(cx, move |alert, _, _| {
             let key = key.clone();
             let app = app.clone();
@@ -403,12 +418,21 @@ impl ProfileCommand {
             } else {
                 tr!("profiles.remove_profile_question", app => name.clone())
             };
-            let description = match self {
-                Self::ResetButtons => tr!("profiles.reset_buttons_description"),
-                Self::RemoveButtons => tr!("profiles.remove_buttons_description"),
-                Self::ResetRing => tr!("profiles.reset_ring_description"),
-                Self::RemoveRing => tr!("profiles.remove_ring_description"),
-                Self::RemoveAll => tr!("profiles.remove_all_profiles_description"),
+            let description = match (self, scroll_method) {
+                (Self::ResetButtons, false) => tr!("profiles.reset_buttons_description"),
+                (Self::ResetButtons, true) => {
+                    tr!("profiles.reset_buttons_and_scroll_method_description")
+                }
+                (Self::RemoveButtons, false) => tr!("profiles.remove_buttons_description"),
+                (Self::RemoveButtons, true) => {
+                    tr!("profiles.remove_buttons_and_scroll_method_description")
+                }
+                (Self::ResetRing, _) => tr!("profiles.reset_ring_description"),
+                (Self::RemoveRing, _) => tr!("profiles.remove_ring_description"),
+                (Self::RemoveAll, false) => tr!("profiles.remove_all_profiles_description"),
+                (Self::RemoveAll, true) => {
+                    tr!("profiles.remove_all_profiles_and_scroll_method_description")
+                }
             };
             alert
                 .title(question)
