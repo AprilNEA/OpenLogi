@@ -162,6 +162,10 @@ Common device fields are:
   paths retain their original spelling and case. The Buttons panel edits these
   under its Profile selector. After bringing an application to the foreground,
   choose it from Recent applications to use the identifier the agent observed.
+  On Windows the GUI saves a new profile under `exe:<filename>.exe`, so it
+  keeps applying after an update or a move to another folder or drive. To
+  target one installation only, write its exact lower-cased path by hand; the
+  exact path wins over `exe:`.
   Identifiers differ between platforms, so a profile keyed by one of them does
   not match on another. Key the profile `app:<alias>` instead to share it
   across platforms (see [Application aliases](#application-aliases)). An

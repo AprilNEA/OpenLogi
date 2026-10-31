@@ -114,6 +114,28 @@ pub fn profile_applies_to(key: &str, aliases: &AppAliases, app: &str) -> bool {
     .is_some()
 }
 
+/// The key a new per-app profile for the foreground identifier `app` is saved
+/// under, so every editor that creates a profile keys it the same way.
+///
+/// On Windows that is the `exe:<filename>` selector of an executable path.
+/// Self-updating and Store applications install each version under a new
+/// directory, and portable copies move between drives, so only the file name
+/// keeps naming the application. The exact path stays available to
+/// hand-written config, where it still wins over `exe:` (see [`overlay_for`]).
+/// On the other platforms, and for an identifier that names no executable, the
+/// key is `app` itself.
+#[must_use]
+pub fn new_profile_key(app: &str) -> String {
+    new_profile_key_on(AppPlatform::CURRENT, app)
+}
+
+fn new_profile_key_on(platform: AppPlatform, app: &str) -> String {
+    match platform {
+        AppPlatform::Windows => executable_selector(app).unwrap_or_else(|| app.to_owned()),
+        AppPlatform::MacOs | AppPlatform::Linux => app.to_owned(),
+    }
+}
+
 /// The first entry `lookup` finds, trying the selectors for `app` from the
 /// most specific: `app`, its `exe:<filename>`, then the `app:<alias>` of the
 /// alias that lists `app`, then of the alias that lists its `exe:<filename>`.
@@ -403,5 +425,52 @@ mod tests {
             Some("com.example.Native")
         );
         assert_eq!(profile_key_for(&map, &table, "com.example.Elsewhere"), None);
+    }
+
+    #[test]
+    fn a_new_windows_profile_is_keyed_by_the_executable_name() {
+        for (app, key) in [
+            (
+                r"c:\program files\windows nt\accessories\wordpad.exe",
+                "exe:wordpad.exe",
+            ),
+            (r"D:\Portable\Tool\Tool.EXE", "exe:tool.exe"),
+            ("/c/portable/tool/tool.exe", "exe:tool.exe"),
+            // Already a selector, or names no executable: kept as it is.
+            ("exe:tool.exe", "exe:tool.exe"),
+            (r"c:\tools\tool.exe.bak", r"c:\tools\tool.exe.bak"),
+            ("tool.exe", "tool.exe"),
+        ] {
+            assert_eq!(new_profile_key_on(AppPlatform::Windows, app), key, "{app}");
+        }
+    }
+
+    #[test]
+    fn a_new_profile_elsewhere_keeps_the_identifier() {
+        for platform in [AppPlatform::MacOs, AppPlatform::Linux] {
+            for app in ["com.example.Editor", "/opt/wine/tool.exe", "Firefox"] {
+                assert_eq!(new_profile_key_on(platform, app), app, "{platform:?} {app}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_new_profile_applies_to_the_application_it_was_created_for() {
+        for platform in AppPlatform::ALL {
+            for app in [
+                r"c:\program files\sharex\sharex.exe",
+                "com.example.Editor",
+                "/opt/wine/tool.exe",
+                "Firefox",
+            ] {
+                let key = new_profile_key_on(platform, app);
+                let map = overlays(&[key.as_str()]);
+                assert_eq!(
+                    resolved(&map, &no_aliases(), platform, app),
+                    Some("overlay"),
+                    "{platform:?} {app} -> {key}"
+                );
+            }
+        }
     }
 }
