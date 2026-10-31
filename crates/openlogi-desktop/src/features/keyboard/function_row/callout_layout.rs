@@ -57,9 +57,17 @@ pub(super) struct CalloutLayout {
     pub(super) pane_w: f32,
 }
 
+/// Where a key's card goes: in the band above the board or in a column
+/// beside it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Band {
     Top,
+    Beside(Column),
+}
+
+/// Which edge of the board a column of cards sits beside.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Column {
     Left,
     Right,
 }
@@ -69,7 +77,7 @@ enum Band {
 /// it.
 pub(super) fn callout_layout(markers: &[(f32, f32)], img_w: f32, img_h: f32) -> CalloutLayout {
     let bands = bands(markers);
-    let image_left = if bands.contains(&Band::Left) {
+    let image_left = if bands.contains(&Band::Beside(Column::Left)) {
         SIDE_BAND_W
     } else {
         0.
@@ -96,20 +104,10 @@ pub(super) fn callout_layout(markers: &[(f32, f32)], img_w: f32, img_h: f32) -> 
     let in_band =
         |band: Band| -> Vec<usize> { (0..markers.len()).filter(|&i| bands[i] == band).collect() };
     place_band_cards(&mut layout, in_band(Band::Top), &keys);
-    place_side_cards(
-        &mut layout,
-        in_band(Band::Right),
-        &keys,
-        (image_left + img_w + SIDE_GAP, 1.),
-        img_h,
-    );
-    place_side_cards(
-        &mut layout,
-        in_band(Band::Left),
-        &keys,
-        (image_left - SIDE_GAP, -1.),
-        img_h,
-    );
+    for column in [Column::Right, Column::Left] {
+        let beside = in_band(Band::Beside(column));
+        place_side_cards(&mut layout, beside, &keys, column, img_w, img_h);
+    }
     layout
 }
 
@@ -117,9 +115,9 @@ pub(super) fn callout_layout(markers: &[(f32, f32)], img_w: f32, img_h: f32) -> 
 /// board: one band per side that has a key down its edge.
 pub(super) fn side_bands_width(markers: &[(f32, f32)]) -> f32 {
     let bands = bands(markers);
-    [Band::Left, Band::Right]
+    [Column::Left, Column::Right]
         .into_iter()
-        .filter(|band| bands.contains(band))
+        .filter(|&column| bands.contains(&Band::Beside(column)))
         .map(|_| SIDE_BAND_W)
         .sum()
 }
@@ -137,9 +135,9 @@ fn bands(markers: &[(f32, f32)]) -> Vec<Band> {
             if y - top_row < ROW_BAND {
                 Band::Top
             } else if x >= 1. - SIDE_COLUMN {
-                Band::Right
+                Band::Beside(Column::Right)
             } else if x <= SIDE_COLUMN {
-                Band::Left
+                Band::Beside(Column::Left)
             } else {
                 Band::Top
             }
@@ -189,16 +187,22 @@ fn place_band_cards(layout: &mut CalloutLayout, mut top: Vec<usize>, keys: &[(f3
     }
 }
 
-/// A column of cards beside the board, each level with its key where there is
-/// room. `edge` is the cards' board-facing edge and `toward` points from the
-/// board out to them (`1.` right, `-1.` left).
+/// A column of cards beside the board's `column` edge, each level with its
+/// key where there is room.
 fn place_side_cards(
     layout: &mut CalloutLayout,
     mut beside: Vec<usize>,
     keys: &[(f32, f32)],
-    (edge, toward): (f32, f32),
+    column: Column,
+    img_w: f32,
     img_h: f32,
 ) {
+    // The cards' board-facing edge, and the direction from the board out to
+    // them.
+    let (edge, outward) = match column {
+        Column::Right => (layout.image_left + img_w + SIDE_GAP, 1.),
+        Column::Left => (layout.image_left - SIDE_GAP, -1.),
+    };
     beside.sort_by(|&a, &b| keys[a].1.total_cmp(&keys[b].1));
     let ys: Vec<f32> = beside.iter().map(|&i| keys[i].1).collect();
     let centres = spread_in_order(
@@ -210,10 +214,9 @@ fn place_side_cards(
     for (&i, cy) in beside.iter().zip(centres) {
         let (kx, ky) = keys[i];
         layout.cards[i] = CardRect {
-            left: if toward > 0. {
-                edge
-            } else {
-                edge - SIDE_CARD_W
+            left: match column {
+                Column::Right => edge,
+                Column::Left => edge - SIDE_CARD_W,
             },
             top: cy - KEY_CALLOUT_H / 2.,
             width: SIDE_CARD_W,
@@ -222,14 +225,13 @@ fn place_side_cards(
         layout.leaders[i] = if rise < 0.5 {
             vec![(edge, cy), (kx, ky)]
         } else {
-            let run_end = edge - toward * SIDE_STUB;
-            let run_start = run_end - toward * rise;
+            let run_end = edge - outward * SIDE_STUB;
+            let run_start = run_end - outward * rise;
             // A key too close to the card steepens the run rather than
             // starting it behind the key.
-            let run_start = if toward > 0. {
-                run_start.max(kx)
-            } else {
-                run_start.min(kx)
+            let run_start = match column {
+                Column::Right => run_start.max(kx),
+                Column::Left => run_start.min(kx),
             };
             vec![(edge, cy), (run_end, cy), (run_start, ky), (kx, ky)]
         };
