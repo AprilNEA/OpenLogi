@@ -19,10 +19,10 @@ use openlogi_core::config::KeyTrigger;
 use openlogi_hook::{
     EventDevice, EventDisposition, Hook, HookEvent, KeyEvent, MouseEvent, source_is_remappable,
 };
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use super::scroll::ScrollInputHandle;
-use super::{ActionDispatchTarget, ActionDispatcher, PressToken};
+use super::{ActionDispatchTarget, ActionDispatcher, ActionName, PressToken, ReportThrottle};
 use crate::event_monitor::SharedEventMonitor;
 pub(crate) use diverted::DivertedButtons;
 
@@ -208,6 +208,9 @@ thread_local! {
     /// key-down events are auto-repeat, not replacement presses; their first
     /// matching key-up ends the lifecycle.
     static HELD_KEYS: RefCell<HashSet<u16>> = RefCell::new(HashSet::new());
+    /// Drops to a full action queue: while the worker is stuck, every bound
+    /// input meets one, so they are counted and reported once per interval.
+    static QUEUE_FULL: RefCell<ReportThrottle> = RefCell::new(ReportThrottle::default());
 }
 
 /// Whether a button event's physical source may be remapped/suppressed.
@@ -259,7 +262,12 @@ fn try_queue_action(
     target: ActionDispatchTarget,
 ) -> bool {
     if tx.try_send((action, target)).is_err() {
-        warn!("action queue full — dropping bound action to keep the input hook live");
+        if let Some(dropped) = QUEUE_FULL.with_borrow_mut(|full| full.occur(Instant::now())) {
+            warn!(
+                dropped,
+                "action queue full — dropping bound actions to keep the input hook live"
+            );
+        }
         false
     } else {
         true
@@ -332,7 +340,7 @@ fn handle_button(
                     .ok()
                     .map(|m| resolve_gesture_click(&m.gestures, id));
                 if let Some(action) = action {
-                    info!(button = %id, action = %action.label(), "gesture click → executing bound action");
+                    debug!(button = %id, action = %ActionName(&action), "gesture click → executing bound action");
                     dispatcher.try_dispatch_while_pressed(&press, &action);
                 }
             }
@@ -353,7 +361,7 @@ fn handle_button(
     if binding_is_native_click(id, &binding) {
         return SUPPRESSED_PRESSES.with_borrow_mut(|s| remapped_press_disposition(id, false, s));
     }
-    info!(button = %id, action = %binding.click_action().label(), "button → handling binding");
+    debug!(button = %id, action = %ActionName(&binding.click_action()), "button → handling binding");
     let queued = dispatcher
         .try_hook_button_down(id, Some(&binding), action_target)
         .is_some();
@@ -438,7 +446,7 @@ fn handle_moved(
                 .unwrap_or_else(|| resolve_gesture_click(&m.gestures, button))
         });
         if let Some(action) = action {
-            info!(button = %button, ?dir, action = %action.label(), "gesture swipe → executing bound action");
+            debug!(button = %button, ?dir, action = %ActionName(&action), "gesture swipe → executing bound action");
             dispatcher.try_dispatch_while_pressed(&press, &action);
         }
     }
@@ -479,7 +487,7 @@ fn handle_key(
         return EventDisposition::PassThrough;
     };
 
-    info!(keycode, action = %action.label(), "key → executing bound action");
+    debug!(keycode, action = %ActionName(&action), "key → executing bound action");
     let action_target = capture_target();
     let queued = if action.is_held() {
         let queued = dispatcher.try_hook_key_down(keycode, &action, action_target);
@@ -556,7 +564,7 @@ pub fn start(
                                     .map(|(button, action)| (button, action, maps.pointer_target))
                             })
                     {
-                        info!(button = %button, action = %action.label(), "native thumb wheel → executing bound action");
+                        debug!(button = %button, action = %ActionName(&action), "native thumb wheel → executing bound action");
                         return queued_event_disposition(try_queue_action(
                             &action_tx,
                             action,
