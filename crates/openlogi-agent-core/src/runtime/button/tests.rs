@@ -554,7 +554,12 @@ fn invalidation_rejects_old_tokens_and_cancels_active_presses() {
         ButtonRuntimeEvent::Started(_)
     ));
 
+    assert!(input.is_current(&token), "a fresh press is current");
     input.invalidate_all();
+    assert!(
+        !input.is_current(&token),
+        "an invalidation ends the press for output that bypasses the worker"
+    );
     assert!(!input.try_trigger_while_pressed(&token, &Action::Copy));
     // The dispatcher posts a held-wheel scroll only for an accepted token.
     assert!(!input.try_wheel_while_pressed(&token));
