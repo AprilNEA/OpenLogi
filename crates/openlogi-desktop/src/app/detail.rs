@@ -31,6 +31,7 @@ use crate::features::lighting::standalone::LightPanel;
 use crate::features::lighting::visual as light_visual;
 use crate::features::mouse::view::MouseModelView;
 use crate::features::pointer::dpi::DpiPanel;
+use crate::features::pointer::scroll_speed::ScrollSpeedPanel;
 use crate::features::pointer::smartshift::SmartShiftPanel;
 use crate::features::profiles::{
     AppCatalogPicker, ProfileIconCache, action_ring_profile_scope_bar, button_profile_scope_bar,
@@ -100,6 +101,7 @@ pub(super) struct DetailPanels<'a> {
     pub disable_keys_panel: &'a gpui::Entity<DisableKeysPanel>,
     pub dpi_panel: &'a gpui::Entity<DpiPanel>,
     pub smartshift_panel: &'a gpui::Entity<SmartShiftPanel>,
+    pub scroll_speed_panel: &'a gpui::Entity<ScrollSpeedPanel>,
     pub lighting_panel: &'a gpui::Entity<LightingPanel>,
     pub camera_preview: &'a gpui::Entity<CameraPreview>,
     pub camera_controls: &'a gpui::Entity<CameraControlsPanel>,
@@ -131,9 +133,13 @@ pub(super) fn detail_content(
         DetailTab::Keys => {
             keys_tab(panels.keyboard_model, profile_icons, app_catalog, cx).into_any_element()
         }
-        DetailTab::Pointer => {
-            pointer_tab(panels.dpi_panel, panels.smartshift_panel, cx).into_any_element()
-        }
+        DetailTab::Pointer => pointer_tab(
+            panels.dpi_panel,
+            panels.smartshift_panel,
+            panels.scroll_speed_panel,
+            cx,
+        )
+        .into_any_element(),
         DetailTab::Lighting => lighting_tab(panels.lighting_panel).into_any_element(),
         DetailTab::Camera => {
             camera_tab(panels.camera_preview, panels.camera_controls).into_any_element()
@@ -384,6 +390,7 @@ fn action_ring_tab(
 fn pointer_tab(
     dpi_panel: &gpui::Entity<DpiPanel>,
     smartshift_panel: &gpui::Entity<SmartShiftPanel>,
+    scroll_speed_panel: &gpui::Entity<ScrollSpeedPanel>,
     cx: &mut Context<AppView>,
 ) -> impl IntoElement {
     let pal = theme::palette(cx);
@@ -414,7 +421,7 @@ fn pointer_tab(
                 div()
                     .min_w(POINTER_CARD_MIN_W)
                     .flex_1()
-                    .child(scrolling_card(pal, cx)),
+                    .child(scrolling_card(pal, scroll_speed_panel, cx)),
             )
             .children(onboard_card(pal, cx).map(pointer_grid_card)),
     )
@@ -580,10 +587,15 @@ fn inversion_description(supported: bool, is_software: bool) -> gpui::SharedStri
     }
 }
 
-/// Scrolling card: per-device inversion, wheel-resolution and smooth-wheel controls.
-/// Pure config — no hardware read — so it is a plain settings block rather than
-/// an `Entity` panel like DPI / SmartShift.
-fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
+/// Scrolling card: per-device inversion, wheel-resolution and smooth-wheel controls,
+/// then per-device scroll speed. Pure config — no hardware read — so it is a
+/// plain settings block rather than an `Entity` panel like DPI / SmartShift; only
+/// the speed slider, which must keep its drag state, is an entity.
+fn scrolling_card(
+    pal: Palette,
+    scroll_speed_panel: &gpui::Entity<ScrollSpeedPanel>,
+    cx: &mut Context<AppView>,
+) -> impl IntoElement {
     let ScrollingFacts {
         inverted,
         inversion_supported,
@@ -676,7 +688,8 @@ fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
             .gap_4()
             .child(inversion_row)
             .child(resolution_row)
-            .child(smooth_wheel_row(pal, smooth_wheel, hires)),
+            .child(smooth_wheel_row(pal, smooth_wheel, hires))
+            .child(scroll_speed_panel.clone()),
     )
 }
 

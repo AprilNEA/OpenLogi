@@ -108,7 +108,9 @@ impl EventDevice {
 /// every pointer this hook captures — the hook attributes events to a device,
 /// but nothing maps an OS event source back to the config key the setting is
 /// stored under, so a second Logitech mouse would follow the first. Documented
-/// rather than silently per-device.
+/// rather than silently per-device. Vertical scroll sensitivity has the same
+/// attribution limit: the agent publishes the selected device's value for all
+/// captured mouse wheels.
 static INVERT_SCROLL: AtomicBool = AtomicBool::new(false);
 
 /// Whether this platform can invert the wheel in software.

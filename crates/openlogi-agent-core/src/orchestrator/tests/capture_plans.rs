@@ -837,3 +837,47 @@ fn two_mouse_hidpp_plans_are_device_scoped_while_hook_fallback_is_selected_devic
         "the passive Windows fallback is one selected-device map, not a per-source map"
     );
 }
+
+#[test]
+fn selected_device_scroll_sensitivity_is_published_and_falls_back() {
+    let mut config = Config::default();
+    let default = VerticalScrollSensitivity::try_new(25).unwrap();
+    let custom = VerticalScrollSensitivity::try_new(60).unwrap();
+    config.app_settings.vertical_scroll_sensitivity = default;
+    config.set_device_vertical_scroll_sensitivity("a", Some(custom));
+    let mut orch = orchestrator(config);
+    orch.devices = vec![dev("a", 1, true), dev("b", 2, true)];
+    orch.current = 0;
+    orch.rebuild();
+    assert_eq!(
+        orch.shared.scroll_preferences.vertical_sensitivity(),
+        custom
+    );
+    orch.current = 1;
+    orch.rebuild();
+    assert_eq!(
+        orch.shared.scroll_preferences.vertical_sensitivity(),
+        default
+    );
+    let mut next = orch.config.clone();
+    next.app_settings.vertical_scroll_sensitivity = VerticalScrollSensitivity::try_new(30).unwrap();
+    next.set_selected_device(Some("a".to_string()));
+    orch.reload_config(next);
+    assert_eq!(
+        orch.shared.scroll_preferences.vertical_sensitivity(),
+        custom
+    );
+    let mut next = orch.config.clone();
+    next.set_device_vertical_scroll_sensitivity("a", None);
+    orch.reload_config(next);
+    assert_eq!(
+        orch.shared.scroll_preferences.vertical_sensitivity(),
+        VerticalScrollSensitivity::try_new(30).unwrap()
+    );
+    orch.devices.clear();
+    orch.rebuild();
+    assert_eq!(
+        orch.shared.scroll_preferences.vertical_sensitivity(),
+        VerticalScrollSensitivity::try_new(30).unwrap()
+    );
+}

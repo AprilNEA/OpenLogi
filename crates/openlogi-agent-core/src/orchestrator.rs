@@ -1014,6 +1014,13 @@ impl Orchestrator {
         let key = self.current_key();
         self.publish_hook_maps(self.hook_maps_for(key));
         self.publish_scroll_inversion(key);
+        self.shared.scroll_preferences.publish(
+            self.config.app_settings.smooth_scroll,
+            key.map_or(
+                self.config.app_settings.vertical_scroll_sensitivity,
+                |key| self.config.vertical_scroll_sensitivity(key),
+            ),
+        );
         self.publish_device_runtime();
     }
 
@@ -2059,15 +2066,11 @@ impl Orchestrator {
         let previous_lights = self.effective_online_lights();
         let previous = std::mem::replace(&mut self.config, config);
         self.forget_saved_light_changes(&previous, source);
-        // Parameter-only edits must not erase a transient manual choice while
-        // the light remains camera-linked. Changing the policy invalidates it.
-        self.shared.scroll_preferences.publish(
-            self.config.app_settings.smooth_scroll,
-            self.config.app_settings.vertical_scroll_sensitivity,
-        );
         openlogi_inject::set_desktop_switch(desktop_switch(&self.config.app_settings));
         self.observable
             .set_launch_at_login(self.config.app_settings.launch_at_login);
+        // Parameter-only edits must not erase a transient manual choice while
+        // the light remains camera-linked. Changing the policy invalidates it.
         let retained_overrides: HashSet<String> = self
             .manual_light_overrides
             .keys()

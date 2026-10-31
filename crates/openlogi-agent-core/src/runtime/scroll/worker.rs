@@ -34,6 +34,8 @@ struct ScrollPreferenceSnapshot {
 /// The smooth-scroll flag occupies the high bit and the validated `1..=100`
 /// sensitivity occupies the low seven bits. One byte therefore publishes a
 /// consistent settings snapshot instead of two independently changing values.
+/// The OS hook cannot map wheel events to config keys, so vertical sensitivity
+/// follows the selected device and applies to captured mouse wheels globally.
 pub struct ScrollPreferences {
     encoded: AtomicU8,
 }

@@ -546,3 +546,25 @@ fn gshift_is_held_only_by_a_plain_binding() {
     cfg.set_binding("g502", ButtonId::Forward, Binding::Single(Action::GShift));
     assert!(cfg.uses_gshift("g502"));
 }
+
+#[test]
+fn vertical_scroll_override_falls_back_roundtrips_and_clears() {
+    let mut cfg = Config::default();
+    let first = VerticalScrollSensitivity::try_new(23).unwrap();
+    let second = VerticalScrollSensitivity::try_new(37).unwrap();
+    cfg.app_settings.vertical_scroll_sensitivity = first;
+    assert_eq!(cfg.vertical_scroll_sensitivity("mouse"), first);
+    cfg.set_device_vertical_scroll_sensitivity("mouse", Some(second));
+    let mut cfg = write_and_read(&cfg);
+    assert_eq!(cfg.vertical_scroll_sensitivity("mouse"), second);
+    assert_eq!(cfg.vertical_scroll_sensitivity("other"), first);
+    cfg.app_settings.vertical_scroll_sensitivity = VerticalScrollSensitivity::DEFAULT;
+    assert_eq!(cfg.vertical_scroll_sensitivity("mouse"), second);
+    cfg.set_device_vertical_scroll_sensitivity("mouse", None);
+    assert_eq!(
+        write_and_read(&cfg).vertical_scroll_sensitivity("mouse"),
+        VerticalScrollSensitivity::DEFAULT
+    );
+    let toml = toml::to_string_pretty(&cfg).unwrap();
+    assert!(!toml.contains("vertical_scroll_sensitivity"), "{toml}");
+}

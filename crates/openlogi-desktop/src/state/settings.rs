@@ -273,6 +273,54 @@ impl AppState {
         events
     }
 
+    /// The effective vertical scroll sensitivity for a device.
+    #[must_use]
+    pub fn device_vertical_scroll_sensitivity(&self, key: &str) -> VerticalScrollSensitivity {
+        self.config.vertical_scroll_sensitivity(key)
+    }
+
+    /// Whether a device has its own vertical scroll sensitivity.
+    #[must_use]
+    pub fn has_device_vertical_scroll_sensitivity(&self, key: &str) -> bool {
+        self.config
+            .devices
+            .get(key)
+            .is_some_and(|device| device.vertical_scroll_sensitivity.is_some())
+    }
+
+    /// Number of saved devices with a vertical scroll sensitivity override, including offline devices.
+    #[must_use]
+    pub fn vertical_scroll_override_count(&self) -> usize {
+        self.config
+            .devices
+            .values()
+            .filter(|device| device.vertical_scroll_sensitivity.is_some())
+            .count()
+    }
+
+    /// Persist a device's vertical sensitivity; choosing the General value clears the override.
+    pub fn commit_device_vertical_scroll_sensitivity(
+        &mut self,
+        key: &DeviceKey,
+        sensitivity: VerticalScrollSensitivity,
+    ) -> StateEvents {
+        let events = StateEvent::DeviceConfigChanged(key.clone()).into();
+        let key = key.as_str();
+        let override_value = (sensitivity != self.config.app_settings.vertical_scroll_sensitivity)
+            .then_some(sensitivity);
+        let stored = self
+            .config
+            .devices
+            .get(key)
+            .and_then(|device| device.vertical_scroll_sensitivity);
+        if stored != override_value {
+            self.config
+                .edit(|config| config.set_device_vertical_scroll_sensitivity(key, override_value));
+            self.persist_and_reload("device vertical scroll sensitivity");
+        }
+        events
+    }
+
     /// Set the app-wide default thumb-wheel sensitivity and persist it —
     /// devices without a per-device override follow it through the reloaded
     /// capture plans. An already-set value writes nothing and is still

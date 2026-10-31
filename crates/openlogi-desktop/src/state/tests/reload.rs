@@ -384,3 +384,42 @@ fn an_update_channel_pick_adds_only_its_line_to_a_user_file() {
         Some(UpdateChannel::Beta)
     );
 }
+
+#[test]
+fn device_vertical_sensitivity_clears_on_general_and_rolls_back_failed_save() {
+    let resolver = AssetResolver::new();
+    let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = AppState::new(Sources::in_memory(Config::ephemeral(), &resolver, commands));
+    let key = DeviceKey::from("mouse");
+    let custom = VerticalScrollSensitivity::try_new(30).unwrap();
+    let general = VerticalScrollSensitivity::try_new(40).unwrap();
+    let _ = state.commit_device_vertical_scroll_sensitivity(&key, custom);
+    assert_eq!(
+        state.device_vertical_scroll_sensitivity(key.as_str()),
+        custom
+    );
+    assert_eq!(state.vertical_scroll_override_count(), 1);
+    let _ = state.commit_vertical_scroll_sensitivity(general);
+    assert_eq!(
+        state.device_vertical_scroll_sensitivity(key.as_str()),
+        custom
+    );
+    let _ = state.commit_device_vertical_scroll_sensitivity(&key, general);
+    assert!(!state.has_device_vertical_scroll_sensitivity(key.as_str()));
+    assert_eq!(
+        state.device_vertical_scroll_sensitivity(key.as_str()),
+        general
+    );
+
+    let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut sources = Sources::in_memory(Config::ephemeral(), &resolver, commands);
+    sources.persistence = ConfigPersistence::ReadOnly("read-only test".into());
+    let mut readonly = AppState::new(sources);
+    let _ = readonly.commit_device_vertical_scroll_sensitivity(&key, custom);
+    assert!(!readonly.has_device_vertical_scroll_sensitivity(key.as_str()));
+    assert_eq!(
+        readonly.device_vertical_scroll_sensitivity(key.as_str()),
+        VerticalScrollSensitivity::DEFAULT
+    );
+    assert!(readonly.config_issue().is_some());
+}
