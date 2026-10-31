@@ -2,7 +2,7 @@ use gpui::{Entity, KeyDownEvent, Keystroke, Modifiers, TestAppContext, VisualTes
 use openlogi_core::binding::default_binding;
 use openlogi_core::config::Config;
 
-use super::ShortcutError::{ShiftedSymbol, Unrecognized};
+use super::ShortcutError::{NotPressableHere, ShiftedSymbol, Unrecognized};
 use super::*;
 use crate::services::assets::AssetResolver;
 use crate::services::i18n::LOCALE_LOCK;
@@ -136,6 +136,43 @@ fn cards_that_reach_past_a_shrunk_model_stay_on_the_canvas(cx: &mut TestAppConte
             inside,
             "{selector}: card {card:?} leaves the canvas {canvas:?}"
         );
+    }
+
+    drop(view);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+}
+
+/// #1654: a typed F21–F24 binds on Windows and Linux. macOS has no key codes
+/// past F20, so Add refuses it there with an error of its own.
+#[gpui::test]
+fn typed_f21_binds_except_on_macos(cx: &mut TestAppContext) {
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    cx.update(gpui_component::init);
+    install_app_state(cx);
+    let (view, cx) = cx.add_window_view(MouseModelView::new);
+    cx.simulate_resize(size(px(1200.), px(1000.)));
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+
+    click_picker_control(cx, "label-card-Button(Forward)");
+    click_picker_control(cx, "inspector-current-action");
+    click_picker_control(cx, "inspector-action-custom-shortcut-input");
+    cx.simulate_input("Ctrl+F21");
+    click_picker_control(cx, "inspector-action-custom-shortcut-add");
+    if cfg!(target_os = "macos") {
+        view.read_with(cx, |view, _| {
+            assert!(view.action_picker_open);
+            assert_eq!(view.invalid_drafts.shortcut, Some(NotPressableHere));
+        });
+        assert!(
+            cx.debug_bounds("inspector-action-custom-shortcut-error")
+                .is_some()
+        );
+        assert_forward_binding(cx, &default_binding(ButtonId::Forward));
+    } else {
+        view.read_with(cx, |view, _| assert!(!view.action_picker_open));
+        assert_forward_binding(cx, &Action::CustomShortcut("Ctrl+F21".parse().unwrap()));
     }
 
     drop(view);

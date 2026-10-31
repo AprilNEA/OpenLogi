@@ -1,0 +1,24 @@
+# Owner: openlogi_core::binding::KeyCombo::parse_here — the parse of a shortcut
+# a user enters, which also refuses a key this platform cannot press.
+id: core-key-combo-entry-owner
+language: rust
+severity: error
+message: Parse a shortcut the user enters with openlogi_core::binding::KeyCombo::parse_here, which also refuses a key this platform cannot press; the FromStr parse accepts every key everywhere.
+note: |
+  The FromStr parse accepts F21–F24 on every platform so a config loads
+  wherever it is read, but macOS cannot press them (#1654). The custom
+  shortcut field, Record and the Actions Ring editor each parsed the text
+  themselves, so each would have had to repeat the platform rule. See
+  "Single source of truth" in AGENTS.md.
+files:
+  - crates/openlogi-desktop/src/**/*.rs
+ignores:
+  - crates/openlogi-desktop/src/**/tests.rs
+  - crates/openlogi-desktop/src/**/tests/**
+rule:
+  any:
+    - pattern: $SRC.parse::<$TY>()
+    - pattern: $TY::from_str($$$ARGS)
+constraints:
+  TY:
+    regex: 'KeyCombo$'

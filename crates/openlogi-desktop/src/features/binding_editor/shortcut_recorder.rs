@@ -14,7 +14,8 @@ pub(crate) enum Recording {
     /// The recording stopped without a chord: Escape without modifiers, or
     /// focus left the recording area.
     Cancelled,
-    /// A key a custom shortcut cannot send, such as a media key.
+    /// A key a custom shortcut cannot send, such as a media key, or one this
+    /// platform cannot press ([`KeyCombo::parse_here`]).
     Unsupported,
     /// Shift with a digit or symbol key, such as Shift+]. GPUI reports such
     /// a press as the character it types, without Shift (`}` for Shift+]),
@@ -80,10 +81,7 @@ impl From<&Keystroke> for Recording {
             tokens.push("Shift");
         }
         tokens.push(&keystroke.key);
-        tokens
-            .join("+")
-            .parse::<KeyCombo>()
-            .map_or(Self::Unsupported, Self::Chord)
+        KeyCombo::parse_here(&tokens.join("+")).map_or(Self::Unsupported, Self::Chord)
     }
 }
 
