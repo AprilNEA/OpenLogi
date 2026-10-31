@@ -201,16 +201,18 @@ async fn find_windows_short_collection(
     // request to a collection no other OS uses for HID++ — the likely reason
     // the headset never enumerated on Windows (#1957), while Linux, which
     // treats the interface as long-only, reads its battery.
-    if super::is_long_only_collection(long_info.usage_page, long_info.usage_id) {
+    let Some((short_page, short_usage)) =
+        super::short_collection(long_info.usage_page, long_info.usage_id)
+    else {
         return Ok(None);
-    }
+    };
     let Some(long_key) = grouping_key(long_info) else {
         return Ok(None);
     };
     let all: Vec<async_hid::Device> = HID_BACKEND.enumerate().await?.collect().await;
     Ok(all.into_iter().find(|d| {
-        d.usage_page == 0xff00
-            && d.usage_id == 0x0001
+        d.usage_page == short_page
+            && d.usage_id == short_usage
             && grouping_key(d).as_deref() == Some(long_key.as_str())
     }))
 }

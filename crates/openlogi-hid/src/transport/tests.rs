@@ -5,6 +5,7 @@ fn matches_usb_ble_and_keyboard_hidpp_collections() {
     assert!(is_hidpp_long_collection(0xff00, 0x0002)); // USB / receiver / BT-classic
     assert!(is_hidpp_long_collection(0xff43, 0x0202)); // BLE-direct (Lift, Signature)
     assert!(is_hidpp_long_collection(0xff43, 0x0602)); // wired G-series keyboard (G513)
+    assert!(is_hidpp_long_collection(0xff43, 0x0302)); // PRO X3 SUPERSTRIKE (wired / c54f)
     assert!(!is_hidpp_long_collection(0x0001, 0x0002)); // generic-desktop mouse
     assert!(!is_hidpp_long_collection(0xff43, 0x0002)); // page right, usage wrong
 }
@@ -22,7 +23,18 @@ fn only_ble_collection_is_long_only() {
     assert!(is_long_only_collection(0xff43, 0x0202)); // BLE-direct → short-unsupported
     assert!(!is_long_only_collection(0xff00, 0x0002)); // USB / receiver carries both reports
     assert!(!is_long_only_collection(0xff43, 0x0602)); // wired G-series keyboard carries both
+    assert!(!is_long_only_collection(0xff43, 0x0302)); // PRO X3 SUPERSTRIKE carries both
     assert!(!is_long_only_collection(0x0001, 0x0002)); // not a HID++ collection at all
+}
+
+#[test]
+fn each_collection_names_its_own_short_sibling() {
+    assert_eq!(short_collection(0xff00, 0x0002), Some((0xff00, 0x0001)));
+    assert_eq!(short_collection(0xff43, 0x0602), Some((0xff00, 0x0001)));
+    // PRO X3 SUPERSTRIKE: its short collection is on the same 0xFF43 page.
+    assert_eq!(short_collection(0xff43, 0x0302), Some((0xff43, 0x0301)));
+    assert_eq!(short_collection(0xff43, 0x0202), None); // long-only
+    assert_eq!(short_collection(0x0001, 0x0002), None); // not a HID++ collection
 }
 
 #[test]
