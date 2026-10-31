@@ -73,7 +73,7 @@ Läuft auf macOS, Linux und Windows.
 Was OpenLogi kann und Options+ nicht:
 
 - **Leichtgewichtig bleiben.** Natives Rust + GPUI.
-- **Auf Linux laufen.** Linux ist in OpenLogi eine vollwertige Plattform.
+- **Unter Linux ausführen.** Linux ist in OpenLogi eine vollwertige Plattform.
 - **Gesten auf unterstützten Tasten.** Weise unterstützten Bedienelementen Gestenaktionen zu — oder schalte Gesten ganz ab.
 - **Konfiguration im Klartext.** Alles steckt in einer TOML-Datei, die sich beliebig zwischen Rechnern synchronisieren lässt.
 - **Skriptbar.** Neben der GUI gibt es eine echte CLI: eine JSON-[Automatisierungs-API](USAGE.md#automation-api) für DPI, SmartShift, Fn-Sperre und Abfragerate, dazu Hardware-Diagnosen.
