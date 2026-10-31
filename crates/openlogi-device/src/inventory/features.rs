@@ -1154,7 +1154,12 @@ mod tests {
             let features = [0x0001_u16, 0x4531];
             match (request[2], request[3] >> 4) {
                 (0, 1) => response[4] = 4,
-                (0, 0) => response[4] = 1,
+                // Root getFeature: index 1 at FeatureSet version 1. A
+                // version 0 table carries no entry versions.
+                (0, 0) => {
+                    response[4] = 1;
+                    response[6] = 1;
+                }
                 (1, 0) => response[4] = 2,
                 (1, 1) => {
                     let id = features[usize::from(request[4]) - 1];
