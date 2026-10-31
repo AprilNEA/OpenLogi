@@ -85,6 +85,7 @@ mod easy_switch;
 mod events;
 mod fn_lock;
 mod force_sensing;
+mod host_switch;
 mod inventory;
 mod light;
 mod lighting;
