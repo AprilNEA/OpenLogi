@@ -27,14 +27,9 @@ impl DecodeEvent for ThumbwheelEvent {
             return None;
         }
 
-        Some(ThumbwheelEvent::StatusUpdate(ThumbwheelStatusUpdate {
-            rotation: i16::from_be_bytes([payload[0], payload[1]]),
-            time_elapsed: u16::from_be_bytes([payload[2], payload[3]]),
-            rotation_status: ThumbwheelRotationStatus::from(payload[4]),
-            touch: payload[5] & (1 << 1) != 0,
-            proxy: payload[5] & (1 << 2) != 0,
-            single_tap: payload[5] & (1 << 3) != 0,
-        }))
+        Some(ThumbwheelEvent::StatusUpdate(
+            ThumbwheelStatusUpdate::from_payload(payload),
+        ))
     }
 }
 
@@ -249,6 +244,22 @@ pub struct ThumbwheelStatusUpdate {
     /// This is only set if the device supports single-tap detection as reported
     /// by [`ThumbwheelCapabilities::SINGLE_TAP`].
     pub single_tap: bool,
+}
+
+impl ThumbwheelStatusUpdate {
+    /// Decodes the payload of a `thumbwheelEvent` report, for a caller that
+    /// reads the channel's reports itself instead of listening to the feature.
+    #[must_use]
+    pub fn from_payload(payload: &[u8; 16]) -> Self {
+        Self {
+            rotation: i16::from_be_bytes([payload[0], payload[1]]),
+            time_elapsed: u16::from_be_bytes([payload[2], payload[3]]),
+            rotation_status: ThumbwheelRotationStatus::from(payload[4]),
+            touch: payload[5] & (1 << 1) != 0,
+            proxy: payload[5] & (1 << 2) != 0,
+            single_tap: payload[5] & (1 << 3) != 0,
+        }
+    }
 }
 
 /// Represents a thumbwheel rotation status as reported in
