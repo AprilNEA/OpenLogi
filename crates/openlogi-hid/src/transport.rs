@@ -223,6 +223,13 @@ use windows::normalize_collection_path;
 /// - `0xFF43 / 0x0602` — wired G-series gaming keyboards (e.g. the G513): a
 ///   distinct vendor collection on the same `0xFF43` page. Carries both report
 ///   widths, so it is not long-only.
+/// - `0xFF43 / 0x0702` — wired USB microphones (e.g. the Yeti X, `046d:0aaf`).
+///   The HID++ interface splits its reports into sibling collections on
+///   `0xFF43`: `0x0701` short, `0x0702` long, `0x0704` very long. The node
+///   macOS and Linux open is the whole interface, which carries the short
+///   report too, so it is not long-only. Windows pairs a short sibling only on
+///   `0xFF00 / 0x0001`, so there the channel reports no short endpoint and the
+///   `hidpp` channel widens shorts to long.
 ///
 /// `long_only` marks a transport that exposes *only* the long report — no
 /// short-report (`0x10`) collection — so short HID++ requests must be
@@ -236,10 +243,11 @@ use windows::normalize_collection_path;
 /// Filtering on these pairs gives us one HID node per physical HID++ device on
 /// every supported OS, without reading report descriptors (`async-hid 0.4`
 /// only exposes those on Linux).
-const HIDPP_LONG_COLLECTIONS: [(u16, u16, bool); 3] = [
+const HIDPP_LONG_COLLECTIONS: [(u16, u16, bool); 4] = [
     (0xff00, 0x0002, false),
     (0xff43, 0x0202, true),
     (0xff43, 0x0602, false),
+    (0xff43, 0x0702, false),
 ];
 
 /// Whether `(usage_page, usage_id)` is one of the HID++ long-report collections.

@@ -5,8 +5,20 @@ fn matches_usb_ble_and_keyboard_hidpp_collections() {
     assert!(is_hidpp_long_collection(0xff00, 0x0002)); // USB / receiver / BT-classic
     assert!(is_hidpp_long_collection(0xff43, 0x0202)); // BLE-direct (Lift, Signature)
     assert!(is_hidpp_long_collection(0xff43, 0x0602)); // wired G-series keyboard (G513)
+    assert!(is_hidpp_long_collection(0xff43, 0x0702)); // wired USB microphone (Yeti X)
     assert!(!is_hidpp_long_collection(0x0001, 0x0002)); // generic-desktop mouse
     assert!(!is_hidpp_long_collection(0xff43, 0x0002)); // page right, usage wrong
+}
+
+#[test]
+fn yeti_x_matches_only_its_long_collection() {
+    // Yeti X (046d:0aaf) interface 3, from its report descriptor (#786): three
+    // HID++ collections on 0xFF43 plus a vendor 0xFFFF collection. Only the
+    // long one may match, so the interface yields one HID++ node.
+    assert!(is_hidpp_candidate(0x046d, 0x0aaf, 0xff43, 0x0702, false)); // long, id 0x11
+    assert!(!is_hidpp_candidate(0x046d, 0x0aaf, 0xff43, 0x0701, false)); // short, id 0x10
+    assert!(!is_hidpp_candidate(0x046d, 0x0aaf, 0xff43, 0x0704, false)); // very long, id 0x12
+    assert!(!is_hidpp_candidate(0x046d, 0x0aaf, 0xffff, 0x0001, false)); // vendor, id 0x01
 }
 
 #[test]
@@ -22,6 +34,7 @@ fn only_ble_collection_is_long_only() {
     assert!(is_long_only_collection(0xff43, 0x0202)); // BLE-direct → short-unsupported
     assert!(!is_long_only_collection(0xff00, 0x0002)); // USB / receiver carries both reports
     assert!(!is_long_only_collection(0xff43, 0x0602)); // wired G-series keyboard carries both
+    assert!(!is_long_only_collection(0xff43, 0x0702)); // Yeti X interface carries the short report
     assert!(!is_long_only_collection(0x0001, 0x0002)); // not a HID++ collection at all
 }
 
