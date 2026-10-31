@@ -7,8 +7,9 @@ use openlogi_assets::ImageEntry;
 use openlogi_core::binding::{ButtonId, GamingLayout};
 
 use super::hotspots::{Hotspot, MOUSE_MODEL_SIZE, MouseControlId};
-use super::leader_lines::{self, Label, Side, spread_in_order};
+use super::leader_lines::{self, Label, Side};
 use crate::services::assets::{ResolvedAsset, SIDE_VIEW_KEY};
+use crate::ui::callouts::{self, spread_in_order};
 
 const FRONT_VIEW_KEY: &str = "device_image";
 
@@ -392,7 +393,7 @@ fn side_leaders_cross(
     routes.iter().enumerate().any(|(a, route)| {
         routes[a + 1..]
             .iter()
-            .any(|other| leader_lines::routes_cross(route, other))
+            .any(|other| callouts::routes_cross(route, other))
     })
 }
 
@@ -708,7 +709,7 @@ mod tests {
             for (a, route) in routes.iter().enumerate() {
                 for other in &routes[a + 1..] {
                     assert!(
-                        !leader_lines::routes_cross(route, other),
+                        !callouts::routes_cross(route, other),
                         "leaders cross on {side:?}: {route:?} / {other:?}"
                     );
                 }

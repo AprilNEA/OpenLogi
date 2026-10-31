@@ -9,7 +9,7 @@
 //! cross.
 
 use super::{CALLOUT_BAND_H, KEY_CALLOUT_H, KEY_CALLOUT_TOP_LOWER, KEY_CALLOUT_TOP_UPPER};
-use crate::features::mouse::leader_lines::spread_in_order;
+use crate::ui::callouts::spread_in_order;
 
 /// Narrowest a band card gets on a crowded row.
 const KEY_CALLOUT_MIN_W: f32 = 44.;
