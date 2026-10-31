@@ -12,7 +12,9 @@ use gpui_component::{
     Disableable as _, Icon, IconName, Selectable as _, Sizable as _, button::Button, h_flex,
     input::InputState, scroll::ScrollableElement as _, v_flex,
 };
-use openlogi_core::binding::{Action, ButtonId, GestureDirection, default_binding};
+use openlogi_core::binding::{
+    Action, ButtonId, GamingLayout, GestureDirection, default_binding, default_binding_on,
+};
 
 use super::force_sensing::{PressForce, force_sensing_row};
 use super::hotspots::MouseControlId;
@@ -34,6 +36,9 @@ pub(super) struct BindingInspectorData<'a> {
     pub selected: Option<MouseControlId>,
     pub gesture_direction: Option<GestureDirection>,
     pub bindings: &'a BTreeMap<ButtonId, Action>,
+    /// The device's G-series layout, which names the stock functions of its
+    /// G buttons. `None` for a device without one.
+    pub layout: Option<&'a GamingLayout>,
     pub gesture_maps: &'a BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
     pub dpi_gestures: bool,
     /// The device reports raw wheel on Back/Forward, so holding one can
@@ -205,7 +210,7 @@ fn button_inspector(
         .bindings
         .get(&button)
         .cloned()
-        .unwrap_or_else(|| default_binding(button));
+        .unwrap_or_else(|| default_binding_on(data.layout, button));
     let observer = picker.view.clone();
     let on_pick: PickFn = Rc::new(move |action, _window, cx| {
         AppState::apply(cx, |state| state.commit_binding(button, action));
@@ -301,7 +306,8 @@ fn button_status(
     data: &BindingInspectorData<'_>,
     overridden: bool,
 ) -> gpui::SharedString {
-    let default = *action == default_binding(button) && !data.wheel_hold.contains(&button);
+    let default =
+        *action == default_binding_on(data.layout, button) && !data.wheel_hold.contains(&button);
     match (data.editing_app, overridden, default) {
         (Some(app), true, _) => tr!("actions.overridden_in_app", app => app.to_string()),
         (Some(_), false, _) => tr!("profiles.inherited_from_default"),
@@ -1047,6 +1053,7 @@ mod tests {
             selected: Some(MouseControlId::Button(ButtonId::Back)),
             gesture_direction: None,
             bindings,
+            layout: None,
             gesture_maps,
             dpi_gestures: false,
             extra_actions: &[],
@@ -1057,6 +1064,23 @@ mod tests {
             overridden: None,
             press_force: None,
         }
+    }
+
+    #[test]
+    fn a_g_button_on_its_stock_function_reads_as_the_device_default() {
+        let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
+        let (bindings, gesture_maps, held) = (BTreeMap::new(), BTreeMap::new(), BTreeSet::new());
+        let mut data = global_profile(&bindings, &gesture_maps, &held);
+        data.layout = Some(&openlogi_core::binding::G502_LIGHTSPEED);
+        assert_eq!(
+            button_status(ButtonId::G6, &Action::DpiShift, &data, false),
+            tr!("pointer.device_default")
+        );
+        data.layout = None;
+        assert_eq!(
+            button_status(ButtonId::G6, &Action::DpiShift, &data, false),
+            tr!("profiles.customized")
+        );
     }
 
     #[test]

@@ -39,8 +39,8 @@ use tracing::{debug, info, warn};
 
 use crate::action_ring::ActionRingSessionSpec;
 use crate::capture_plan::{
-    CapturePublication, SharedCapturePlans, hidpp_side_gesture_maps_for, plan_for_device,
-    shift_bindings_for,
+    CapturePublication, PlanDevice, SharedCapturePlans, hidpp_side_gesture_maps_for,
+    plan_for_device, shift_bindings_for,
 };
 use crate::hardware::{
     DeviceAccess, DeviceOp, HardwareContext, KeptOsLayouts, VolatileMouseSettings, WriteOrder,
@@ -779,7 +779,9 @@ impl Orchestrator {
             return HookMaps::default();
         }
         let (app, pointer_target) = self.mouse_context();
-        let mut bindings = button_bindings_for(&self.config, key, app);
+        // The OS hook only sees standard HID buttons, whose defaults no
+        // G-series layout changes, so this map needs no layout.
+        let mut bindings = button_bindings_for(&self.config, key, app, None);
         let mut gestures = oshook_gestures_for(&self.config, key, app);
         if cfg!(target_os = "macos")
             && let Some(key) = key
@@ -886,6 +888,7 @@ impl Orchestrator {
                     &self.config,
                     Some(&dev.config_key),
                     self.current_app.as_deref(),
+                    None,
                 );
                 let divert = keyboard_divert_set(bindings.keys().copied());
                 KeyboardCandidate {
@@ -1096,11 +1099,15 @@ impl Orchestrator {
             } else {
                 self.mouse_context()
             };
+            let layout = GamingLayout::for_model_key(&dev.model_key);
             let mut plan = plan_for_device(
                 &self.config,
-                physical_key,
-                &dev.config_key,
-                route,
+                PlanDevice {
+                    physical_key,
+                    config_key: &dev.config_key,
+                    route,
+                    layout,
+                },
                 app,
                 rearm_generation,
                 self.os_mouse_hook_available,
@@ -1109,8 +1116,7 @@ impl Orchestrator {
             plan.dispatch.invert_wheel = wheel_inverted(&self.config, dev);
             plan.target.spec.divert_main_wheel =
                 main_wheel_divert(&self.config, dev, self.os_mouse_hook_available);
-            let mut plan =
-                plan.with_onboard(&self.config, GamingLayout::for_model_key(&dev.model_key));
+            let mut plan = plan.with_onboard(&self.config, layout);
             if let Some(keyboard) = keyboard
                 .as_ref()
                 .filter(|keyboard| keyboard.route == plan.target.route)
