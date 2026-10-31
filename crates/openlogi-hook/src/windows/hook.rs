@@ -32,6 +32,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 use openlogi_core::config::FunctionKey;
 
 use super::cursor::{MonitorDpi, PhysicalCursorPosition};
+use super::process_image;
 use super::worker::{WorkerEvent, WorkerPhase, WorkerStatus};
 use crate::{
     ButtonId, CursorPosition, EventDisposition, ForegroundApp, HookBackend, HookError, HookEvent,
@@ -42,6 +43,19 @@ const WHEEL_DELTA: f64 = 120.0;
 
 /// Shared profile identity for both foreground and pointer-owned processes.
 pub(super) fn application_for_process(pid: u32) -> Option<ForegroundApp> {
+    // A process may deny `OpenProcess`; the kernel still reports its image.
+    let path = opened_image_path(pid).or_else(|| process_image::image_path(pid))?;
+    let display_name = std::path::Path::new(&path)
+        .file_stem()
+        .map_or_else(|| path.clone(), |stem| stem.to_string_lossy().into_owned());
+    Some(ForegroundApp {
+        id: path.to_lowercase(),
+        display_name,
+    })
+}
+
+/// The image path of `pid`, read through a process handle.
+fn opened_image_path(pid: u32) -> Option<String> {
     // SAFETY: OpenProcess accepts a PID by value; a successful handle is owned here.
     let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
     if process.is_null() {
@@ -56,14 +70,7 @@ pub(super) fn application_for_process(pid: u32) -> Option<ForegroundApp> {
     if ok == 0 || len == 0 {
         return None;
     }
-    let path = String::from_utf16_lossy(&buf[..len as usize]);
-    let display_name = std::path::Path::new(&path)
-        .file_stem()
-        .map_or_else(|| path.clone(), |stem| stem.to_string_lossy().into_owned());
-    Some(ForegroundApp {
-        id: path.to_lowercase(),
-        display_name,
-    })
+    Some(String::from_utf16_lossy(&buf[..len as usize]))
 }
 
 thread_local! {
