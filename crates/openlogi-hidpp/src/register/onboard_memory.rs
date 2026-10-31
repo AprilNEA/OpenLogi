@@ -1,12 +1,14 @@
 //! The onboard memory of HID++ 1.0 gaming mice (G500, G700, G9), read
-//! through register `0xA2`.
+//! through register `0xA2` and written through [`MemoryWriter`].
 //!
 //! Reverse engineered; follows libratbag's `hidpp10_read_memory` and
 //! `hidpp10_read_page` (`src/hidpp10.c`, MIT). Memory is split into
-//! [`PAGE_SIZE`]-byte pages: page 0 is RAM, page 1 holds the
+//! [`PAGE_SIZE`]-byte pages: page [`RAM_PAGE`] is RAM, page 1 holds the
 //! [`directory::ProfileDirectory`], and pages 2 to [`LAST_PAGE`] are flash,
 //! where the profiles live (for the G700, [`g700::G700Profile`]). Every
-//! page ends in a CRC over the rest of it, stored big-endian.
+//! page ends in a CRC over the rest of it, stored big-endian. A device may
+//! have fewer pages than libratbag addresses: a G700 refuses to read pages
+//! 27 to 31.
 //!
 //! A read is a short `GET_LONG_REGISTER` to `0xA2` naming a page and an
 //! offset within it in 16-bit words; the long reply carries the sixteen bytes
@@ -14,6 +16,13 @@
 
 pub mod directory;
 pub mod g700;
+mod hot;
+mod write;
+
+pub use write::{
+    Half, MemoryWriter, PageImage, PageState, PageWriteError, Refusal, StepError, UnrestorablePage,
+    WriteStep,
+};
 
 use crate::{channel::HidppChannel, protocol::v10::Hidpp10Error};
 
@@ -26,8 +35,20 @@ pub const PAGE_SIZE: usize = 512;
 /// The highest page number libratbag addresses on any of these mice.
 pub const LAST_PAGE: u8 = 31;
 
+/// The RAM page. Writes to flash are staged here; it is never a write
+/// target itself.
+pub const RAM_PAGE: u8 = 0;
+
 /// The bytes one [`read_memory`] call returns.
 pub const READ_CHUNK: usize = 16;
+
+/// Writes reach flash through RAM half a page at a time.
+const HALF_PAGE: usize = PAGE_SIZE / 2;
+
+/// [`HALF_PAGE`] as the big-endian `u16` the write commands carry.
+const HALF_PAGE_LEN: u16 = 0x100;
+
+const _: () = assert!(HALF_PAGE_LEN as usize == HALF_PAGE);
 
 /// Where the page CRC sits: the last two bytes.
 const CRC_OFFSET: usize = PAGE_SIZE - 2;
@@ -47,10 +68,25 @@ impl Page {
         Self { bytes }
     }
 
+    /// A page of erased flash: every byte `0xFF`, the CRC bytes too.
+    #[must_use]
+    pub fn erased() -> Self {
+        Self {
+            bytes: [0xff; PAGE_SIZE],
+        }
+    }
+
     /// The page's bytes, CRC included.
     #[must_use]
     pub fn as_bytes(&self) -> &[u8; PAGE_SIZE] {
         &self.bytes
+    }
+
+    /// Whether the page is erased flash, as [`Self::erased`] makes. An erased
+    /// page carries no CRC: `0xFFFF` is not the CRC of 510 `0xFF` bytes.
+    #[must_use]
+    pub fn is_erased(&self) -> bool {
+        self.bytes.iter().all(|&byte| byte == 0xff)
     }
 
     /// The CRC the page carries in its last two bytes.
@@ -162,6 +198,18 @@ mod tests {
         },
         protocol::v10::{ErrorType, Hidpp10Error, MessageType},
     };
+
+    #[test]
+    fn an_erased_page_is_all_ff_and_carries_no_valid_crc() {
+        let erased = Page::erased();
+        assert!(erased.is_erased());
+        assert!(!erased.has_valid_crc());
+
+        let mut written = erased.clone();
+        written.update_crc();
+        assert!(!written.is_erased(), "a CRC makes it a written page");
+        assert!(written.has_valid_crc());
+    }
 
     #[test]
     fn crc_matches_the_ccitt_false_check_value() {

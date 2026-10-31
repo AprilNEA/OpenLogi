@@ -27,8 +27,10 @@ use std::num::NonZeroU16;
 use bitflags::bitflags;
 use num_enum::{FromPrimitive, IntoPrimitive};
 
-use super::{Page, directory::ProfileDirectory};
-use crate::{protocol::v10::Hidpp10Error, register::report_rate::ReportInterval};
+use super::{MemoryWriter, Page, directory::ProfileDirectory};
+use crate::{
+    channel::HidppChannel, protocol::v10::Hidpp10Error, register::report_rate::ReportInterval,
+};
 
 /// How many profiles the G700 keeps.
 pub const PROFILE_COUNT: usize = 5;
@@ -443,6 +445,13 @@ impl G700Profile {
 #[must_use]
 pub fn parse_directory(page: &Page) -> ProfileDirectory {
     ProfileDirectory::parse(page, PROFILE_COUNT)
+}
+
+/// A [`MemoryWriter`] for the G700 at `device_index`, with the G700's
+/// [`PROFILE_COUNT`].
+#[must_use]
+pub fn memory_writer(chan: &HidppChannel, device_index: u8) -> MemoryWriter<'_> {
+    MemoryWriter::new(chan, device_index, PROFILE_COUNT)
 }
 
 #[cfg(test)]

@@ -3,8 +3,10 @@
 //! The G500, G700 and G9 keep up to five profiles in onboard flash (see
 //! [`super::onboard_memory`]) and play the one this register selects. The
 //! layout is reverse engineered and follows libratbag's
-//! `hidpp10_get_current_profile` (`src/hidpp10.c`, MIT): the first byte says
-//! how the profile is addressed, the other two carry the address.
+//! `hidpp10_get_current_profile` and `hidpp10_set_internal_current_profile`
+//! (`src/hidpp10.c`, MIT): the first byte says how the profile is addressed,
+//! the other two carry the address. Reads and writes use the same three
+//! bytes.
 
 use crate::{channel::HidppChannel, protocol::v10::Hidpp10Error};
 
@@ -81,11 +83,24 @@ pub async fn read_current_profile(
         .try_into()
 }
 
+/// Makes the device at `device_index` play `profile`, with a short
+/// `SET_REGISTER`. The device does not check an index against its directory;
+/// libratbag refuses one past its profile count before sending, and so
+/// should a caller.
+pub async fn write_current_profile(
+    chan: &HidppChannel,
+    device_index: u8,
+    profile: CurrentProfile,
+) -> Result<(), Hidpp10Error> {
+    chan.write_register(device_index, REGISTER, profile.to_register())
+        .await
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
-    use super::{CurrentProfile, read_current_profile};
+    use super::{CurrentProfile, read_current_profile, write_current_profile};
     use crate::{
         channel::{
             HidppMessage,
@@ -161,6 +176,60 @@ mod tests {
             assert!(matches!(
                 read_current_profile(&channel, 1).await,
                 Err(Hidpp10Error::RegisterAccess(ErrorType::InvalidAddress))
+            ));
+        });
+    }
+
+    #[test]
+    fn selects_a_profile_with_a_short_set_register() {
+        futures::executor::block_on(async {
+            let (raw, handle) = MockRawHidChannel::new();
+            let channel = Arc::new(channel_with_reader(raw).await);
+            for _ in 0..2 {
+                handle.queue_response(HidppMessage::Short([
+                    1,
+                    MessageType::SetRegister.into(),
+                    0x0f,
+                    0x00,
+                    0x00,
+                    0x00,
+                ]));
+            }
+
+            write_current_profile(&channel, 1, CurrentProfile::Factory)
+                .await
+                .unwrap();
+            write_current_profile(&channel, 1, CurrentProfile::Index(2))
+                .await
+                .unwrap();
+
+            assert_eq!(
+                handle.written_reports(),
+                [
+                    [0x10, 1, 0x80, 0x0f, 0xff, 0x00, 0x00],
+                    [0x10, 1, 0x80, 0x0f, 0x00, 0x02, 0x00],
+                ]
+            );
+        });
+    }
+
+    #[test]
+    fn a_refused_selection_is_an_error() {
+        futures::executor::block_on(async {
+            let (raw, handle) = MockRawHidChannel::new();
+            let channel = Arc::new(channel_with_reader(raw).await);
+            handle.queue_response(HidppMessage::Short([
+                1,
+                MessageType::Error.into(),
+                MessageType::SetRegister.into(),
+                0x0f,
+                ErrorType::InvalidValue.into(),
+                0x00,
+            ]));
+
+            assert!(matches!(
+                write_current_profile(&channel, 1, CurrentProfile::Index(7)).await,
+                Err(Hidpp10Error::RegisterAccess(ErrorType::InvalidValue))
             ));
         });
     }

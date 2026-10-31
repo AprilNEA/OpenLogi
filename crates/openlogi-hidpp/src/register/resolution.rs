@@ -4,7 +4,8 @@
 //! Reverse engineered; follows libratbag's `hidpp10_get_current_resolution`
 //! and `hidpp10_set_current_resolution` (`src/hidpp10.c`, MIT). The register
 //! is read with a short `GET_LONG_REGISTER` request and answered with a long
-//! report whose first four bytes are the X and Y values, little-endian. The
+//! report whose first four bytes are the X and Y values, little-endian, and
+//! written with a long `SET_LONG_REGISTER` carrying the same four bytes. The
 //! G9 uses a short form instead, which this module does not cover.
 //!
 //! The values are raw sensor-table steps, not DPI: the conversion is the
@@ -58,11 +59,22 @@ pub async fn read_current_resolution(
         .map(Resolution::from_register)
 }
 
+/// Makes the device at `device_index` run at `resolution`. It lasts until the
+/// device switches DPI mode or profile; the onboard profile is not changed.
+pub async fn write_current_resolution(
+    chan: &HidppChannel,
+    device_index: u8,
+    resolution: Resolution,
+) -> Result<(), Hidpp10Error> {
+    chan.write_long_register(device_index, REGISTER, resolution.to_register())
+        .await
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
-    use super::{Resolution, read_current_resolution};
+    use super::{Resolution, read_current_resolution, write_current_resolution};
     use crate::{
         channel::{
             HidppMessage,
@@ -104,6 +116,31 @@ mod tests {
                 [0x10, 1, 0x83, 0x63, 0, 0, 0],
                 "the request is a short report even though the reply is long"
             );
+        });
+    }
+
+    #[test]
+    fn writes_through_a_long_set_long_request() {
+        futures::executor::block_on(async {
+            let (raw, handle) = MockRawHidChannel::new();
+            let channel = Arc::new(channel_with_reader(raw).await);
+            // The device acknowledges a long write with a short report.
+            handle.queue_response(HidppMessage::Short([
+                1,
+                MessageType::SetLongRegister.into(),
+                0x63,
+                0x00,
+                0x00,
+                0x00,
+            ]));
+
+            write_current_resolution(&channel, 1, Resolution { x: 0x24, y: 0x0145 })
+                .await
+                .unwrap();
+
+            let mut expected = vec![0x11, 1, 0x82, 0x63, 0x24, 0x00, 0x45, 0x01];
+            expected.resize(20, 0);
+            assert_eq!(handle.written_reports(), [expected]);
         });
     }
 }

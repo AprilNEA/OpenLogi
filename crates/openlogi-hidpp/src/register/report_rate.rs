@@ -2,9 +2,12 @@
 //!
 //! Reverse engineered; follows libratbag's `hidpp10_get_usb_refresh_rate`
 //! (`src/hidpp10.c`, MIT). The first byte is the interval between reports in
-//! milliseconds. The onboard profiles of the G500, G700 and G9 store the
-//! same byte (see [`super::onboard_memory::g700::G700Profile`]), so both
-//! decode through [`ReportInterval`].
+//! milliseconds. libratbag's `hidpp10_set_usb_refresh_rate` sends its value
+//! with `GET_REGISTER`, so it never changes the rate; [`write_report_interval`]
+//! sends the same byte with `SET_REGISTER`. The onboard profiles of the G500,
+//! G700 and G9 store the same byte (see
+//! [`super::onboard_memory::g700::G700Profile`]), so both decode through
+//! [`ReportInterval`].
 
 use std::num::NonZeroU8;
 
@@ -58,11 +61,23 @@ pub async fn read_report_interval(
     ReportInterval::try_from(millis)
 }
 
+/// Sets the report interval of the device at `device_index` with a short
+/// `SET_REGISTER`. The rate lasts until the device switches profiles, which
+/// each carry a rate of their own.
+pub async fn write_report_interval(
+    chan: &HidppChannel,
+    device_index: u8,
+    interval: ReportInterval,
+) -> Result<(), Hidpp10Error> {
+    chan.write_register(device_index, REGISTER, interval.to_register())
+        .await
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
-    use super::{ReportInterval, read_report_interval};
+    use super::{ReportInterval, read_report_interval, write_report_interval};
     use crate::{
         channel::{
             HidppMessage,
@@ -105,6 +120,32 @@ mod tests {
             let interval = read_report_interval(&channel, 1).await.unwrap();
             assert_eq!(interval.millis(), 4);
             assert_eq!(interval.rate_hz(), 250);
+        });
+    }
+
+    #[test]
+    fn writes_the_interval_with_set_register_not_get() {
+        futures::executor::block_on(async {
+            let (raw, handle) = MockRawHidChannel::new();
+            let channel = Arc::new(channel_with_reader(raw).await);
+            handle.queue_response(HidppMessage::Short([
+                1,
+                MessageType::SetRegister.into(),
+                0x64,
+                0x00,
+                0x00,
+                0x00,
+            ]));
+
+            write_report_interval(&channel, 1, ReportInterval::try_from(2).unwrap())
+                .await
+                .unwrap();
+
+            assert_eq!(
+                handle.written_reports(),
+                [[0x10, 1, 0x80, 0x64, 0x02, 0x00, 0x00]],
+                "sub id 0x80, where libratbag's setter sends 0x81"
+            );
         });
     }
 }
