@@ -222,6 +222,19 @@ crates/
   openlogi-overlay/ the `openlogi-overlay` binary — the cursor-centred Actions Ring
 ```
 
+### Offscreen native UI captures (macOS)
+
+The opt-in `native-ui-qa` feature renders the normal mouse editor through GPUI's offscreen Metal renderer with an ephemeral device fixture, in-memory configuration and no host asset inputs. It does not connect to an agent or enumerate hardware. Captures cover the global gesture editor with the bundled OpenLogi light and dark themes and production text-contrast normalization; they do not verify hardware behavior or per-app gestures.
+
+Build and invoke the binary directly so the development bundle runner does not launch app helpers:
+
+```sh
+cargo build -p openlogi-desktop --features native-ui-qa
+OPENLOGI_QA_OUTPUT=/tmp/openlogi-native-qa target/debug/openlogi-desktop
+```
+
+The output directory is required. The feature exits after writing `mouse-gestures-light.png` and `mouse-gestures-dark.png`; it fails clearly on platforms without the macOS Metal renderer. Build without the feature to run the normal app.
+
 ## Agent guidance
 
 Shared rules have one tracked source: [`.agents/rules/`](../.agents/rules/).
