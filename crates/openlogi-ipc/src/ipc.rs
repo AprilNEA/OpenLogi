@@ -162,7 +162,9 @@ pub use succession::Identity;
 ///      them — an image written to one of the MX Creative Keypad's LCD keys;
 ///      `Action::{PreviousKeypadPage, NextKeypadPage}` appended after the
 ///      G-series actions, and `ButtonId` grid keys gain page-qualified names
-///      (`page2:gridMiddle`) — the keypad's binding pages.
+///      (`page2:gridMiddle`) — the keypad's binding pages. `KeyboardUsage`
+///      accepts F21–F24 (`0x70`–`0x73`), so a `KeyCombo` can carry a usage a
+///      v42 agent rejects.
 pub const PROTOCOL_VERSION: u32 = 43;
 
 /// Environment variable through which the agent hands a supervised helper the

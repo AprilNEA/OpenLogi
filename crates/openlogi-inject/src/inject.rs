@@ -713,7 +713,7 @@ fn hid_usage_to_windows(usage: u8) -> Option<u16> {
         0x1e..=0x26 => Some(u16::from(b'1' + usage - 0x1e)),
         0x27 => Some(u16::from(b'0')),
         0x3a..=0x45 => Some(0x70 + u16::from(usage - 0x3a)),
-        0x68..=0x6f => Some(0x7c + u16::from(usage - 0x68)),
+        0x68..=0x73 => Some(0x7c + u16::from(usage - 0x68)),
         0x28 => Some(0x0d),
         0x29 => Some(0x1b),
         0x2a => Some(0x08),
@@ -1217,6 +1217,8 @@ mod tests {
         assert_eq!(hid_usage_to_windows(0x1e), Some(0x31)); // 1
         assert_eq!(hid_usage_to_windows(0x3a), Some(0x70)); // F1
         assert_eq!(hid_usage_to_windows(0x6f), Some(0x83)); // F20
+        assert_eq!(hid_usage_to_windows(0x70), Some(0x84)); // F21
+        assert_eq!(hid_usage_to_windows(0x73), Some(0x87)); // F24
         assert_eq!(hid_usage_to_windows(0x50), Some(0x25)); // Left
         assert_eq!(hid_usage_to_windows(0x2c), Some(0x20)); // Space
         assert_eq!(hid_usage_to_windows(0x33), Some(0xba)); // Semicolon

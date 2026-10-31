@@ -175,10 +175,17 @@ mod tests {
     use super::{hid_usage_to_macos, keys, macos_to_hid_usage, pressed_usage, read_by_macos};
     use crate::inject::macos::keyboard_layout::typing_keys;
 
+    /// A usage has a macOS keycode exactly when core says this platform can
+    /// press it, so the editors refuse every key this table cannot press:
+    /// F21–F24, past `kVK_F20`, the last function key HIToolbox defines.
     #[test]
     fn every_shortcut_usage_round_trips() {
         for code in 0..=u8::MAX {
-            if KeyboardUsage::try_new(code).is_err() {
+            let Ok(usage) = KeyboardUsage::try_new(code) else {
+                continue;
+            };
+            if !usage.is_pressable_here() {
+                assert_eq!(hid_usage_to_macos(code), None, "usage {code:#04x}");
                 continue;
             }
             let vk = hid_usage_to_macos(code)

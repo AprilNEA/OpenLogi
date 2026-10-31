@@ -557,6 +557,7 @@ const KEY_CAPABILITIES: &[KeyCode] = &[
     KeyCode::KEY_F9,  KeyCode::KEY_F10, KeyCode::KEY_F11, KeyCode::KEY_F12,
     KeyCode::KEY_F13, KeyCode::KEY_F14, KeyCode::KEY_F15, KeyCode::KEY_F16,
     KeyCode::KEY_F17, KeyCode::KEY_F18, KeyCode::KEY_F19, KeyCode::KEY_F20,
+    KeyCode::KEY_F21, KeyCode::KEY_F22, KeyCode::KEY_F23, KeyCode::KEY_F24,
     // System
     KeyCode::KEY_SYSRQ,
     // Multimedia
@@ -822,7 +823,7 @@ fn hid_usage_to_linux(usage: u8) -> Option<KeyCode> {
         KeyCode::KEY_9,
         KeyCode::KEY_0,
     ];
-    const FUNCTIONS: [KeyCode; 20] = [
+    const FUNCTIONS: [KeyCode; 24] = [
         KeyCode::KEY_F1,
         KeyCode::KEY_F2,
         KeyCode::KEY_F3,
@@ -843,12 +844,16 @@ fn hid_usage_to_linux(usage: u8) -> Option<KeyCode> {
         KeyCode::KEY_F18,
         KeyCode::KEY_F19,
         KeyCode::KEY_F20,
+        KeyCode::KEY_F21,
+        KeyCode::KEY_F22,
+        KeyCode::KEY_F23,
+        KeyCode::KEY_F24,
     ];
     match usage {
         0x04..=0x1d => LETTERS.get(usize::from(usage - 0x04)).copied(),
         0x1e..=0x27 => DIGITS.get(usize::from(usage - 0x1e)).copied(),
         0x3a..=0x45 => FUNCTIONS.get(usize::from(usage - 0x3a)).copied(),
-        0x68..=0x6f => FUNCTIONS.get(usize::from(usage - 0x68 + 12)).copied(),
+        0x68..=0x73 => FUNCTIONS.get(usize::from(usage - 0x68 + 12)).copied(),
         0x28 => Some(KeyCode::KEY_ENTER),
         0x29 => Some(KeyCode::KEY_ESC),
         0x2a => Some(KeyCode::KEY_BACKSPACE),
@@ -1254,6 +1259,8 @@ mod tests {
         assert_eq!(hid_usage_to_linux(0x50), Some(KeyCode::KEY_LEFT));
         assert_eq!(hid_usage_to_linux(0x3a), Some(KeyCode::KEY_F1));
         assert_eq!(hid_usage_to_linux(0x6f), Some(KeyCode::KEY_F20));
+        assert_eq!(hid_usage_to_linux(0x70), Some(KeyCode::KEY_F21));
+        assert_eq!(hid_usage_to_linux(0x73), Some(KeyCode::KEY_F24));
         assert_eq!(hid_usage_to_linux(0x46), Some(KeyCode::KEY_SYSRQ));
         assert_eq!(hid_usage_to_linux(0x49), Some(KeyCode::KEY_INSERT));
         assert_eq!(hid_usage_to_linux(0xff), None);

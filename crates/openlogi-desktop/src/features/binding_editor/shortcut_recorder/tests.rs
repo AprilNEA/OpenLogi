@@ -63,7 +63,7 @@ fn a_key_press_records_its_modifiers_and_key() {
 fn escape_alone_cancels_and_a_key_a_shortcut_cannot_send_is_unsupported() {
     assert_eq!(record("escape"), Recording::Cancelled);
     assert_eq!(record("shift-escape"), chord("Shift+Escape"));
-    assert_eq!(record("f21"), Recording::Unsupported);
+    assert_eq!(record("f25"), Recording::Unsupported);
 }
 
 /// #2121: Cmd+Shift+] arrives as Cmd+`}` on US layouts, and Cmd+Shift+7 as

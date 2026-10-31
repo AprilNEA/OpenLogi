@@ -305,7 +305,7 @@ fn record_fills_the_custom_shortcut_from_the_next_key_press(cx: &mut TestAppCont
     );
 
     click_picker_control(cx, "inspector-action-custom-shortcut-record");
-    press(cx, "f21");
+    press(cx, "f25");
     view.read_with(cx, |view, _| {
         assert_eq!(view.invalid_drafts.shortcut, Some(Unrecognized));
     });

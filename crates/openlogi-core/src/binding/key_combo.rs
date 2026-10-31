@@ -58,6 +58,17 @@ impl KeyboardUsage {
         }
     }
 
+    /// Whether this platform can press the key.
+    ///
+    /// Windows and Linux press every usage a shortcut can name. macOS has no
+    /// key codes past F20 (`kVK_F20` is the last one in HIToolbox), so F21–F24
+    /// parse on every platform, which keeps a config loadable wherever it is
+    /// read, but press only on the other two.
+    #[must_use]
+    pub const fn is_pressable_here(self) -> bool {
+        !(cfg!(target_os = "macos") && matches!(self.code(), 0x70..=0x73))
+    }
+
     fn label(self) -> String {
         let code = self.into_inner();
         match code {
@@ -92,7 +103,7 @@ impl KeyboardUsage {
             0x50 => "Left".to_string(),
             0x51 => "Down".to_string(),
             0x52 => "Up".to_string(),
-            0x68..=0x6f => format!("F{}", code - 0x68 + 13),
+            0x68..=0x73 => format!("F{}", code - 0x68 + 13),
             _ => format!("Usage 0x{code:02X}"),
         }
     }
@@ -110,7 +121,7 @@ pub struct KeyboardUsageError(pub u8);
 const fn validate_keyboard_usage(value: &u8) -> Result<(), KeyboardUsageError> {
     if matches!(
         value,
-        0x04..=0x31 | 0x33..=0x38 | 0x3a..=0x46 | 0x49..=0x52 | 0x68..=0x6f
+        0x04..=0x31 | 0x33..=0x38 | 0x3a..=0x46 | 0x49..=0x52 | 0x68..=0x73
     ) {
         Ok(())
     } else {
@@ -190,6 +201,27 @@ impl<'de> Deserialize<'de> for KeyCombo {
 }
 
 impl KeyCombo {
+    /// Parse a chord the user enters on this host, and reject one whose key
+    /// this platform cannot press ([`KeyboardUsage::is_pressable_here`]).
+    ///
+    /// Shortcut editors call this instead of [`str::parse`]. The `FromStr`
+    /// parse accepts every key on every platform, so a saved config loads
+    /// wherever it is read.
+    ///
+    /// # Errors
+    ///
+    /// Every error the `FromStr` parse returns, and
+    /// [`KeyComboParseError::NotPressableHere`] for a key this platform
+    /// cannot press.
+    pub fn parse_here(input: &str) -> Result<Self, KeyComboParseError> {
+        let combo = input.parse::<Self>()?;
+        if combo.key.is_pressable_here() {
+            Ok(combo)
+        } else {
+            Err(KeyComboParseError::NotPressableHere(combo.key))
+        }
+    }
+
     /// USB HID keyboard usage for the ordinary key.
     #[must_use]
     pub const fn key(&self) -> KeyboardUsage {
@@ -287,6 +319,9 @@ pub enum KeyComboParseError {
     /// Serialized modifier bits contain an unknown flag.
     #[error("unsupported shortcut modifier bits: {0:#04x}")]
     InvalidModifiers(u8),
+    /// The key is valid, but this platform cannot press it: F21–F24 on macOS.
+    #[error("this platform cannot press {}", .0.label())]
+    NotPressableHere(KeyboardUsage),
 }
 
 impl FromStr for KeyCombo {
@@ -359,7 +394,7 @@ fn parse_key(token: &str) -> Result<KeyboardUsage, KeyComboParseError> {
     {
         match number {
             1..=12 => 0x3a + number - 1,
-            13..=20 => 0x68 + number - 13,
+            13..=24 => 0x68 + number - 13,
             _ => return Err(KeyComboParseError::UnknownToken(token.to_string())),
         }
     } else {
@@ -499,6 +534,40 @@ mod tests {
             .expect("valid shortcut failed");
         assert!(combo.has_option());
         assert_eq!(combo.rendered_label(), "Alt+PrintScreen");
+    }
+
+    /// F13–F24 parse on every platform, so a config loads wherever it is
+    /// read. Editors use `parse_here`, which refuses F21–F24 on macOS: it has
+    /// no key codes past F20 (#1654).
+    #[test]
+    fn f13_to_f24_parse_everywhere_and_f21_to_f24_press_off_macos() {
+        for (number, code) in (13..=24).zip(0x68..=0x73_u8) {
+            let name = format!("F{number}");
+            let combo = name.parse::<KeyCombo>().expect("F13-F24 must parse");
+            assert_eq!(combo.key().code(), code, "{name}");
+            assert_eq!(combo.rendered_label(), name);
+            let pressable = number <= 20 || !cfg!(target_os = "macos");
+            assert_eq!(combo.key().is_pressable_here(), pressable, "{name}");
+            let typed = format!("Shift+{name}");
+            assert_eq!(
+                KeyCombo::parse_here(&typed),
+                if pressable {
+                    Ok(typed.parse::<KeyCombo>().expect("valid shortcut failed"))
+                } else {
+                    Err(KeyComboParseError::NotPressableHere(combo.key()))
+                },
+                "{typed}"
+            );
+        }
+        for name in ["F0", "F25"] {
+            assert!(
+                matches!(
+                    KeyCombo::parse_here(name),
+                    Err(KeyComboParseError::UnknownToken(_))
+                ),
+                "{name}"
+            );
+        }
     }
 
     /// Every usage the validator accepts renders a label the parser reads
