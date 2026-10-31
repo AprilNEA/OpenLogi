@@ -1,6 +1,7 @@
 //! Logitech receiver identities.
 
 use crate::LOGITECH_VENDOR_ID;
+use crate::g700::G700_RECEIVER_PRODUCT_ID;
 
 /// Logitech receiver product family, independent of its wire protocol.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -64,9 +65,13 @@ pub const RECEIVERS: &[ReceiverDescriptor] = &[
     // limited to 2 paired devices — cross-checked against Solaar's
     // NANO_RECEIVER_C534.
     ReceiverDescriptor::logitech(0xc534, ReceiverBrand::Nano, ReceiverProtocol::Unifying),
-    // Nano receiver bundled with the G700 (WPID 0x1023) — cross-checked
-    // against Solaar's NANO_RECEIVER_C531.
-    ReceiverDescriptor::logitech(0xc531, ReceiverBrand::Nano, ReceiverProtocol::Unifying),
+    // Nano receiver bundled with the G700 — cross-checked against Solaar's
+    // NANO_RECEIVER_C531.
+    ReceiverDescriptor::logitech(
+        G700_RECEIVER_PRODUCT_ID,
+        ReceiverBrand::Nano,
+        ReceiverProtocol::Unifying,
+    ),
     // Nano receiver bundled with the G602.
     ReceiverDescriptor::logitech(0xc537, ReceiverBrand::Nano, ReceiverProtocol::Unifying),
     // Receiver bundled with the Spotlight presentation remote (WPID 0x405c),

@@ -13,6 +13,7 @@ openlogi diag controls        # dump reprogrammable controls and capability flag
 openlogi diag hidpp --feature 0x1b05 --call 0   # call one HID++ 2.0 feature function with raw parameters
 openlogi diag mouse-buttons   # print the 0x8110 slot each G-series mouse button sends
 openlogi diag zones --device G515   # light each 0x8081 keyboard zone alone and record its key
+openlogi diag g700 dump --out g700.json   # read a G700's onboard profiles and back up its memory
 openlogi diag dpi             # read → write → read-back → restore DPI (smoke test)
 openlogi diag pointer-speed             # test 0x2205 pointer scaling and attempt to restore it
 openlogi diag smartshift                # toggle SmartShift and restore (smoke test)
@@ -33,6 +34,7 @@ Running `openlogi` with no subcommand defaults to `list`. Set
 `openlogi diag zones` lights each HID++ `0x8081` zone of a keyboard alone, in zone-id order, and asks which key lit. Type the key and press Enter; Enter alone records that nothing visible lit, `:b` goes back one zone, and `:q` or the end of input stops; any other answer, a single `q` or `<` included, is a key label. The answers go to `--output FILE` (default `zones.tsv`) as tab-separated zone ids and keys, saved after every answer; a destination that cannot be written stops the walk at the first answer. `--color RRGGBB` sets the lit colour (default white). With an `0x8071` effect engine the walk takes software control of the lighting and hands it back at the end, so the keyboard returns to its own effect. Ctrl-C skips the hand-back; switch the keyboard off and on, or reconnect it, to return it to its own effect, or stop with `:q` instead. The command refuses to run while the OpenLogi agent runs.
 
 `openlogi diag host-switch` asks the running agent to move one device to another Easy-Switch channel through HID++ `0x1814`. `--host` is zero-based, so `--host 1` is channel 2. `--device NAME` must match exactly one online device; a unique exact name wins over longer matches. The agent refuses a channel the device does not have and a channel the device reports as unpaired, before anything is written. Success means the agent sent the switch. It does not confirm that the device arrived, because the device then leaves this computer's radio link.
+`openlogi diag g700 dump` finds a Logitech G700 behind its own Nano receiver (`c531`) or on its cable, prints its active settings and onboard profiles, and with `--out FILE` saves every onboard memory page to a JSON backup. It sends only register reads; it never changes the mouse. It takes ten to twenty seconds, during which other OpenLogi processes defer their register reads on that receiver.
 
 ## Keyboard backlight
 

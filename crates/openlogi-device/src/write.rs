@@ -29,6 +29,7 @@ mod easy_switch;
 mod error;
 mod fn_lock;
 mod force_sensing;
+mod g700;
 mod haptic;
 mod hires_wheel;
 mod key_display;
@@ -66,6 +67,7 @@ pub use easy_switch::{
 pub use error::{HidppFeatureErrorKind, HidppOperation, WriteError};
 pub use fn_lock::{get_fn_lock, get_fn_lock_on, set_fn_lock, set_fn_lock_on};
 pub use force_sensing::{get_force_sensing_on, set_force_sensing_on};
+pub use g700::{G700MemoryDump, PageRead, read_g700_memory};
 pub use haptic::{
     HapticRestore, HapticRestoreOutcome, ensure_haptics_armed_on, play_haptic, play_haptic_on,
     restore_haptics_on,

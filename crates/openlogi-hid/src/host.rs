@@ -26,9 +26,9 @@ use openlogi_device::inventory::hid_only::HidOnlyProduct;
 use openlogi_device::inventory::{Enumerator, InventoryError};
 use openlogi_device::pairing::PairingReceiver;
 use openlogi_device::write::{
-    self as device, Dpi, DpiInfo, FeatureEntry, FirmwareEntity, HapticWaveform, LightingMethod,
-    LitraModel, PointerScaling, ReprogControlEntry, ScrollResolution, ScrollWheelMode,
-    SidetoneLevel,
+    self as device, Dpi, DpiInfo, FeatureEntry, FirmwareEntity, G700MemoryDump, HapticWaveform,
+    LightingMethod, LitraModel, PointerScaling, ReprogControlEntry, ScrollResolution,
+    ScrollWheelMode, SidetoneLevel,
 };
 use openlogi_device::{ButtonSpyError, ButtonSpyWatch, LightWatch};
 use openlogi_device::{DeviceIoGate, DeviceIoSignal, DeviceRoute};
@@ -163,6 +163,12 @@ pub async fn set_scroll_wheel_mode(
 /// Read the onboard memory of the device on `route`.
 pub async fn get_onboard(route: &DeviceRoute) -> Result<OnboardState, WriteError> {
     device::get_onboard(&*native_backend(), route).await
+}
+
+/// Find a G700 on this host and dump its settings registers and every
+/// onboard memory page; read-only.
+pub async fn read_g700_memory() -> Result<G700MemoryDump, WriteError> {
+    device::read_g700_memory(&*native_backend()).await
 }
 
 /// Read the HID++ `0x8110` slot mapping of the mouse `route` reaches and
