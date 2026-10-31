@@ -1,0 +1,20 @@
+# Owner: openlogi_core::device::PairedDevice::model_key — a paired device's
+# model key, with its `wpid<xxxx>` / `slot<n>` fallback for a device that
+# reports no model info — and PairedDevice::wpid_of_model_key, which reads
+# the wpid back.
+id: core-paired-model-key-owner
+language: rust
+severity: error
+message: PairedDevice::model_key() (openlogi-core device.rs) names a paired device's model, falling back to `wpid<xxxx>` or `slot<n>`; call it, or PairedDevice::wpid_of_model_key() to read one back, instead of writing or splitting those keys here.
+note: |
+  The settings app built the fallback key by hand, and the agent needs the
+  same key for a HID++ 1.0 device so both resolve one config entry. See
+  "Single source of truth" in AGENTS.md.
+files:
+  - crates/**/*.rs
+  - xtask/**/*.rs
+ignores:
+  - crates/openlogi-core/**
+rule:
+  kind: string_literal
+  regex: '^"(wpid(\{|"$)|slot\{)'
