@@ -64,6 +64,9 @@ pub const RECEIVERS: &[ReceiverDescriptor] = &[
     // limited to 2 paired devices — cross-checked against Solaar's
     // NANO_RECEIVER_C534.
     ReceiverDescriptor::logitech(0xc534, ReceiverBrand::Nano, ReceiverProtocol::Unifying),
+    // Nano receiver bundled with the G700 (WPID 0x1023) — cross-checked
+    // against Solaar's NANO_RECEIVER_C531.
+    ReceiverDescriptor::logitech(0xc531, ReceiverBrand::Nano, ReceiverProtocol::Unifying),
     // Nano receiver bundled with the G602.
     ReceiverDescriptor::logitech(0xc537, ReceiverBrand::Nano, ReceiverProtocol::Unifying),
     // Receiver bundled with the Spotlight presentation remote (WPID 0x405c),
@@ -195,6 +198,14 @@ mod tests {
     #[test]
     fn spotlight_receiver_is_nano_over_unifying_protocol() {
         let receiver = find_receiver(LOGITECH_VENDOR_ID, 0xc53e).expect("c53e receiver");
+
+        assert_eq!(receiver.brand, ReceiverBrand::Nano);
+        assert_eq!(receiver.protocol, ReceiverProtocol::Unifying);
+    }
+
+    #[test]
+    fn g700_nano_receiver_is_nano_over_unifying_protocol() {
+        let receiver = find_receiver(LOGITECH_VENDOR_ID, 0xc531).expect("c531 receiver");
 
         assert_eq!(receiver.brand, ReceiverBrand::Nano);
         assert_eq!(receiver.protocol, ReceiverProtocol::Unifying);
