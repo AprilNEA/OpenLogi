@@ -348,6 +348,12 @@ smooth_wheel = "Плавное колесо"
 smooth_wheel_description = "OpenLogi получает каждый шаг колеса этой мыши и прокручивает плавно, даже когда «Плавная прокрутка» выключена."
 smooth_wheel_unsupported = "Это устройство не поддерживает плавное колесо."
 smooth_wheel_other_connection = "Устройство поддерживает плавное колесо при другом типе подключения, но не при текущем."
+clicks = "Нажатия"
+click_debounce = "Игнорировать дребезг кнопки"
+click_debounce_description = "Для изношенной кнопки, которая превращает один щелчок в два. OpenLogi игнорирует нажатие, пришедшее так скоро после отпускания."
+click_debounce_window = "Окно"
+click_debounce_window_description = "Более длинное окно отсекает больше дребезга, но может пропустить очень быстрый двойной щелчок."
+click_debounce_ms = "%{ms} ms"
 smartshift = "SmartShift"
 
 [actions]

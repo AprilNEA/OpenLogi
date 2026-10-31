@@ -49,6 +49,7 @@ mod asset_targets;
 mod backlight;
 mod bindings;
 mod camera;
+mod click_debounce;
 pub(crate) mod device_list;
 mod device_names;
 mod dpi;

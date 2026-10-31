@@ -348,6 +348,12 @@ smooth_wheel = "Rotellina fluida"
 smooth_wheel_description = "OpenLogi riceve ogni passo della rotellina di questo mouse e scorre in modo fluido, anche con Scorrimento fluido disattivato."
 smooth_wheel_unsupported = "Questo dispositivo non supporta la rotellina fluida."
 smooth_wheel_other_connection = "Il dispositivo supporta la rotellina fluida con la connessione alternativa, ma non con questa."
+clicks = "Clic"
+click_debounce = "Ignora i rimbalzi del tasto"
+click_debounce_description = "Per un tasto usurato che trasforma un clic in due. OpenLogi ignora una pressione che arriva così poco dopo il rilascio."
+click_debounce_window = "Intervallo"
+click_debounce_window_description = "Un intervallo più lungo filtra più rimbalzi, ma può ignorare un doppio clic molto rapido."
+click_debounce_ms = "%{ms} ms"
 smartshift = "SmartShift"
 
 [actions]

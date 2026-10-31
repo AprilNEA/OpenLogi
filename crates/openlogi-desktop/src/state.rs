@@ -74,6 +74,7 @@ mod backlight;
 mod bindings;
 pub use bindings::BindingLayer;
 mod camera;
+mod click_debounce;
 mod config;
 mod device_key;
 mod device_session;

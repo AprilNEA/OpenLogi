@@ -133,6 +133,23 @@ Common device fields are:
   Scrolling card offers it as **Smooth wheel** when the current connection has
   `0x2121`; a smooth wheel turned on over another connection can still be turned
   off there. Absent or `false` leaves the wheel native
+- `click_debounce_ms`, from `10` through `100`: filters switch bounce from a
+  worn button that turns one click into two. The agent drops a press that
+  arrives sooner than this many milliseconds after the same button's release,
+  together with that press's release. It never delays a click, and it never
+  drops the release of a press it passed, so a bounce in the middle of a drag
+  still ends the drag. It filters only the clicks the OS input hook sees from
+  this device, so it needs the hook's input access and `capture_mouse_events`
+  on, and it does not see a button that a HID++ capture session diverts. The
+  hook knows a device only by the vendor and product ids of its events: on
+  macOS a receiver's clicks carry the receiver's ids, and two mice of one model
+  carry the same ids. When another online device that can click shares those
+  ids and has no window, the agent does not filter them, so a device that did
+  not opt in never loses a click. Keyboards do not count. When every such
+  device has a window, they share the longest. Windows ignores the field,
+  because its hook cannot tell which device sent a click. The desktop's
+  **Clicks** card offers 15, 30, and 60 ms. Absent leaves every click
+  unfiltered; a value outside the range is a load error
 - `bindings`: a button maps to one action, an independent short/long action
   pair, or a gesture-direction map.
   `Thumbwheel` is the thumb wheel's capacitive tap — it has no GUI control and

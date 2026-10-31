@@ -348,6 +348,12 @@ smooth_wheel = "Vloeiend wiel"
 smooth_wheel_description = "OpenLogi ontvangt elke stap van het wiel van deze muis en scrolt vloeiend, ook als Vloeiend scrollen uit staat."
 smooth_wheel_unsupported = "Dit apparaat ondersteunt geen vloeiend wiel."
 smooth_wheel_other_connection = "Dit apparaat ondersteunt een vloeiend wiel via de andere verbinding, maar niet via deze."
+clicks = "Klikken"
+click_debounce = "Contactdender negeren"
+click_debounce_description = "Voor een versleten knop die van één klik twee maakt. OpenLogi negeert een druk die zo kort na het loslaten komt."
+click_debounce_window = "Venster"
+click_debounce_window_description = "Een langer venster vangt meer dender op, maar kan een zeer snelle dubbelklik negeren."
+click_debounce_ms = "%{ms} ms"
 smartshift = "SmartShift"
 
 [actions]

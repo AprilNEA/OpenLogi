@@ -348,6 +348,12 @@ smooth_wheel = "スムーズホイール"
 smooth_wheel_description = "このマウスのホイールの1段ごとの入力をOpenLogiが受け取り、スムーズスクロールがオフでも滑らかにスクロールします。"
 smooth_wheel_unsupported = "このデバイスはスムーズホイールに対応していません。"
 smooth_wheel_other_connection = "別の接続方式ではスムーズホイールに対応していますが、現在の接続では利用できません。"
+clicks = "クリック"
+click_debounce = "チャタリングを無視"
+click_debounce_description = "摩耗したボタンが 1 回のクリックを 2 回にしてしまう場合に使います。OpenLogi は、ボタンを離してからこの時間内の押下を無視します。"
+click_debounce_window = "無視する時間"
+click_debounce_window_description = "時間を長くするとより多くのチャタリングを防げますが、非常に速いダブルクリックを取りこぼすことがあります。"
+click_debounce_ms = "%{ms} ms"
 smartshift = "SmartShift"
 
 [actions]
