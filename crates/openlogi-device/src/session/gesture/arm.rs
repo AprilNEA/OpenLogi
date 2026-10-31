@@ -139,10 +139,6 @@ impl ArmedControls {
             onboard,
             ..
         } = self;
-        let reporting = reporting
-            .into_iter()
-            .map(|armed| armed.kernel_diversion_on(retired.route()))
-            .collect();
         let reprog =
             reprog.and_then(|controls| ReprogRestore::new(controls.feature_index(), reporting));
         PendingCaptureRestore::new(

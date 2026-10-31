@@ -231,15 +231,22 @@ async fn restore_hands_the_wheel_back_to_the_firmware() {
     );
 }
 
-/// Linux 7.3+ diverts the Bluetooth M650's Back at connect, so the teardown of
-/// a session armed on that route hands the diversion back instead of clearing
-/// it (#2163). Elsewhere the restore clears it, as for any found diversion.
-#[tokio::test]
-async fn teardown_keeps_the_kernels_m650_back_diversion() {
-    let route = DeviceRoute::Direct {
+/// The Bluetooth Signature M650's direct route, where Linux 7.3+ diverts
+/// Back/Forward itself.
+fn m650_route() -> DeviceRoute {
+    DeviceRoute::Direct {
         vendor_id: 0x046d,
         product_id: 0xb02a,
-    };
+    }
+}
+
+/// Arm Back on a Bluetooth M650 that answers Back as already diverted, as
+/// Linux 7.3+ leaves it at connect, and take the restore the session owes.
+async fn arm_kernel_diverted_m650_back() -> (
+    PendingCaptureRestore,
+    Arc<HidppChannel>,
+    crate::replay::ReplayChannelHandle,
+) {
     let (raw, handle) = wheel_hold_device(DIVERTABLE, false, 0x01);
     let channel = scripted_channel(raw).await;
     let device = Device::new(channel.clone(), 0xff).await.unwrap();
@@ -251,15 +258,24 @@ async fn teardown_keeps_the_kernels_m650_back_diversion() {
     arm_controls_into(&device, &channel, 0xff, &spec, &mut armed)
         .await
         .unwrap();
+    let pending = armed
+        .into_pending(&SharedChannel::new(channel.clone(), m650_route()))
+        .expect("a diverted control must be owed a restore");
+    (pending, channel, handle)
+}
+
+/// Linux 7.3+ diverts the Bluetooth M650's Back at connect, so the teardown of
+/// a session armed on that route hands the diversion back instead of clearing
+/// it (#2163). Elsewhere the restore clears it, as for any found diversion.
+#[tokio::test]
+async fn teardown_keeps_the_kernels_m650_back_diversion() {
+    let (pending, channel, handle) = arm_kernel_diverted_m650_back().await;
     let registry = ChannelRegistry::default();
     registry.replace_node(
         NodeId::from("mouse-node".to_owned()),
-        [route.clone()],
-        channel.clone(),
+        [m650_route()],
+        channel,
     );
-    let pending = armed
-        .into_pending(&SharedChannel::new(channel, route))
-        .expect("a diverted control must be owed a restore");
     assert!(matches!(
         pending.allow_current_channel().retry(&registry).await,
         CaptureSessionOutcome::Restored
@@ -274,5 +290,31 @@ async fn teardown_keeps_the_kernels_m650_back_diversion() {
     assert_eq!(
         reporting_writes(&handle),
         [(BACK, 0x23, 0x00), (BACK, restore, 0x00)]
+    );
+}
+
+/// A handoff restores through the route the M650 moved to. The kernel does not
+/// listen to a diverted Back there, so the diversion found on the Bluetooth
+/// route is cleared on every host, as for any leftover (#2163).
+#[tokio::test]
+async fn handoff_clears_the_m650_back_diversion_on_the_successor_route() {
+    let (pending, channel, handle) = arm_kernel_diverted_m650_back().await;
+    let successor = DeviceRoute::Bolt {
+        receiver_uid: "receiver-a".to_owned(),
+        slot: 1,
+    };
+    let registry = ChannelRegistry::default();
+    registry.replace_node(
+        NodeId::from("receiver-a-node".to_owned()),
+        [successor.clone()],
+        channel,
+    );
+    assert!(matches!(
+        pending.retry_via(successor, &registry).await,
+        CaptureSessionOutcome::Restored
+    ));
+    assert_eq!(
+        reporting_writes(&handle),
+        [(BACK, 0x23, 0x00), (BACK, 0x22, 0x00)]
     );
 }

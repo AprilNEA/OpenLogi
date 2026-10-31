@@ -136,16 +136,23 @@ impl ArmedReporting {
         }
     }
 
-    /// Keep a diversion found at arming on `route` when the host kernel owns
-    /// it. Linux 7.3+ `hid-logitech-hidpp` diverts the Bluetooth Signature
-    /// M650's Back/Forward at connect and maps the diverted reports to
+    /// Keep a diversion found at arming when the restore writes through
+    /// `route` and the host kernel owns the control there. Linux 7.3+
+    /// `hid-logitech-hidpp` diverts the Bluetooth Signature M650's
+    /// Back/Forward at connect and maps the diverted reports to
     /// `BTN_BACK`/`BTN_FORWARD`, because the native reports have broken
     /// timing. Clearing that diversion would undo the kernel's fix until the
     /// mouse reconnects. Elsewhere a found diversion is a leftover with no
     /// listener, so [`Self::undivert_change`] still clears it.
+    ///
+    /// `route` is the route the restore writes through, not the one capture
+    /// armed on: a handoff restores through the device's new route, where the
+    /// kernel may not listen. Keyboard keys are never the kernel's.
     pub(crate) fn kernel_diversion_on(self, route: &DeviceRoute) -> Self {
         Self {
-            restore_as_found: self.original.diverted && kernel_diverts(route, self.cid),
+            restore_as_found: self.original.diverted
+                && matches!(self.policy, ReprogRestorePolicy::Pointer(_))
+                && kernel_diverts(route, self.cid),
             ..self
         }
     }
@@ -323,6 +330,7 @@ impl RestorePlan for CaptureRestorePlan {
             let controls =
                 ReprogControlsV4::new(channel.clone(), device_index, reprog.feature_index);
             for &reporting in &reprog.controls {
+                let reporting = reporting.kernel_diversion_on(current.route());
                 restored &= restore_reporting(&controls, reporting, "captured control").await;
             }
         }
