@@ -242,15 +242,15 @@ pub(super) fn build_device_list(
                 unit_id,
             );
             let identity = RouteIdentity::from_parts(serial_number.as_deref(), unit_id);
+            let identity_hint = identity.resolve_hint();
             let (config_key, persistent) = config
-                .resolve_device_key(&stable_id, paired.online.then_some(&identity))
+                .resolve_device_key(&stable_id, identity_hint)
                 .map_or_else(
                     || (stable_id.runtime_key(), false),
                     |key| (key.into_string(), true),
                 );
             let canonical_key =
-                canonical_device_key(&stable_id, paired.online.then_some(&identity))
-                    .map(PhysicalDeviceKey::into_string);
+                canonical_device_key(&stable_id, identity_hint).map(PhysicalDeviceKey::into_string);
             let route_key = stable_id.route_key();
 
             let display_name = asset
@@ -327,8 +327,9 @@ pub(super) fn build_device_list(
 /// unit id, and with the same serial from the probe cache. Shown as is, one
 /// keyboard becomes three cards. The card that stays is the online slot, else
 /// the slot whose key is the device's own identity (the one that owns its
-/// settings), else a slot whose key holds saved settings, else the lowest
-/// slot; the other offline slots become its
+/// settings), else a slot whose key holds saved settings, else a route already
+/// present in that device's `config.links` (Easy-Switch host preference,
+/// #1560), else the lowest slot; the other offline slots become its
 /// [`DeviceRecord::stale_pairings`]. An online duplicate is never folded: a
 /// live link is not a leftover. Slots on different receivers stay separate
 /// cards, since a second receiver can be a deliberate Easy-Switch host.
@@ -365,6 +366,9 @@ fn collapse_duplicate_pairings(list: &mut Vec<DeviceRecord>, config: &Config) ->
                     .devices
                     .get(&record.config_key)
                     .is_some_and(DeviceConfig::holds_settings),
+                // Linked route beats bare lowest-slot when every sibling is
+                // offline (#1560 Easy-Switch host preference).
+                route_in_device_links(config, record),
                 std::cmp::Reverse(record.slot),
             )
         }) else {
@@ -488,14 +492,15 @@ fn append_standalone(
             device.unit_id,
         );
         let identity = RouteIdentity::from_parts(device.serial_number.as_deref(), device.unit_id);
+        let identity_hint = identity.resolve_hint();
         let (config_key, persistent) = config
-            .resolve_device_key(&stable_id, device.online.then_some(&identity))
+            .resolve_device_key(&stable_id, identity_hint)
             .map_or_else(
                 || (stable_id.runtime_key(), false),
                 |key| (key.into_string(), true),
             );
-        let canonical_key = canonical_device_key(&stable_id, device.online.then_some(&identity))
-            .map(PhysicalDeviceKey::into_string);
+        let canonical_key =
+            canonical_device_key(&stable_id, identity_hint).map(PhysicalDeviceKey::into_string);
         let route_key = stable_id.route_key();
         let asset = device
             .registry_model_id
@@ -591,6 +596,12 @@ fn append_offline_known<'a>(
         if is_legacy_model_key && blocked_legacy_models.contains(&model_key) {
             continue;
         }
+        // Easy-Switch / KVM: a live folded `serial:`/`unit:` card already
+        // represents this receiver slot — do not resurrect the pre-identity
+        // route key as a second (chip) gallery card.
+        if known_route_covered_by_live(list, key, &model_key) {
+            continue;
+        }
         let record = offline_record(key, identity, resolver);
         let wire_pid = record_wire_pid(&record);
         if is_legacy_model_key
@@ -610,7 +621,7 @@ fn append_offline_known<'a>(
 }
 
 /// The receiver UID embedded in a `receiver:<uid>:slot:<n>` config key.
-fn receiver_uid_of(key: &str) -> Option<String> {
+pub(super) fn receiver_uid_of(key: &str) -> Option<String> {
     key.strip_prefix("receiver:")
         .and_then(|rest| rest.split(':').next())
         .map(str::to_ascii_lowercase)
@@ -653,6 +664,35 @@ fn entry_is_unreachable(key: &str, config: &Config, present_receivers: &HashSet<
         .filter_map(receiver_uid_of)
         .peekable();
     receiver_uids.peek().is_some() && receiver_uids.all(|uid| !present_receivers.contains(&uid))
+}
+
+/// A live identity-keyed Bolt card already covers this persisted `receiver:`
+/// known entry (same receiver + model) — used so append_offline_known does not
+/// resurrect Easy-Switch route ghosts beside a folded serial/unit card.
+fn known_route_covered_by_live(
+    list: &[DeviceRecord],
+    known_key: &str,
+    known_model_key: &str,
+) -> bool {
+    let Some(uid) = receiver_uid_of(known_key) else {
+        return false;
+    };
+    list.iter().any(|live| {
+        let id_key = live.config_key.as_str();
+        if !(id_key.starts_with("serial:") || id_key.starts_with("unit:")) {
+            return false;
+        }
+        if live.model_key != known_model_key {
+            return false;
+        }
+        match &live.route {
+            Some(DeviceRoute::Bolt { receiver_uid, .. }) => {
+                receiver_uid.eq_ignore_ascii_case(&uid)
+            }
+            _ => receiver_uid_of(&live.route_key)
+                .is_some_and(|live_uid| live_uid.eq_ignore_ascii_case(&uid)),
+        }
+    })
 }
 
 /// The record's wire product id, used to suppress legacy same-model duplicate
@@ -819,9 +859,12 @@ pub(super) fn adopt_transient_record(known: &DeviceRecord, live: DeviceRecord) -
 /// headline case (cable live, receiver asleep), wrong for an already-adopted
 /// but disconnected Bluetooth-direct node beside a live receiver link.
 ///
-/// Between two records of equal liveness the later one in sort order wins, as
-/// it always has.
+/// Between two online records the later one in iteration order wins. Between
+/// two offline records (Easy-Switch sibling slots sharing a serial, #1560),
+/// prefer a route already present in that device's `config.links`, else the
+/// lowest slot number — matching the agent's fold.
 pub(super) fn fold_by_inventory_key(
+    config: &Config,
     list: impl IntoIterator<Item = DeviceRecord>,
 ) -> BTreeMap<String, DeviceRecord> {
     let mut by_key: BTreeMap<String, DeviceRecord> = BTreeMap::new();
@@ -832,7 +875,7 @@ pub(super) fn fold_by_inventory_key(
             }
             Entry::Occupied(mut slot) => {
                 let mut record = record;
-                if record.online || !slot.get().online {
+                if prefer_folded_record(config, &record, slot.get()) {
                     let mut stale = std::mem::take(&mut slot.get_mut().stale_pairings);
                     stale.append(&mut record.stale_pairings);
                     record.stale_pairings = stale;
@@ -846,6 +889,40 @@ pub(super) fn fold_by_inventory_key(
         }
     }
     by_key
+}
+
+fn prefer_folded_record(
+    config: &Config,
+    candidate: &DeviceRecord,
+    incumbent: &DeviceRecord,
+) -> bool {
+    match (candidate.online, incumbent.online) {
+        (false, true) => false,
+        // Online candidate wins; both online keeps insertion order ("later wins").
+        (true, _) => true,
+        (false, false) => prefer_offline_record(config, candidate, incumbent),
+    }
+}
+
+fn prefer_offline_record(
+    config: &Config,
+    candidate: &DeviceRecord,
+    incumbent: &DeviceRecord,
+) -> bool {
+    let candidate_linked = route_in_device_links(config, candidate);
+    let incumbent_linked = route_in_device_links(config, incumbent);
+    match (candidate_linked, incumbent_linked) {
+        (true, false) => true,
+        (false, true) => false,
+        _ => candidate.slot < incumbent.slot,
+    }
+}
+
+fn route_in_device_links(config: &Config, record: &DeviceRecord) -> bool {
+    let Some(entry) = config.devices.get(record.config_key.as_str()) else {
+        return false;
+    };
+    entry.links.contains_key(record.route_key.as_str())
 }
 
 /// Order the gallery by physical route. HID enumeration order can change as
