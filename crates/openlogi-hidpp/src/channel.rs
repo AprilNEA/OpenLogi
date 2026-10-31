@@ -93,6 +93,16 @@ pub const SEND_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 /// with [`AbandonedReply::AdoptIdentical`].
 pub const STALE_REPLY_GRACE: Duration = Duration::from_secs(1);
 
+/// The read loop's pause after one failed `read_report`. Each further failure
+/// in a row doubles it, up to [`READ_RETRY_DELAY_MAX`]; a successful read
+/// starts over.
+const READ_RETRY_DELAY_MIN: Duration = Duration::from_millis(1);
+
+/// The longest pause between reads while the transport keeps failing. It
+/// bounds both the wakeups an error that never clears costs and the latency
+/// the first report after a cleared one can pay.
+const READ_RETRY_DELAY_MAX: Duration = Duration::from_millis(100);
+
 /// What a request does about a reply still owed to an abandoned request with
 /// the same header — see [`STALE_REPLY_GRACE`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -114,16 +124,47 @@ pub enum AbandonedReply {
 
 type MessageListener = Arc<dyn Fn(HidppMessage, bool) + Send + Sync + 'static>;
 
+/// The registered message listeners, and the list the read loop dispatches
+/// from.
+///
+/// The list is rebuilt on every registration change rather than collected per
+/// report, so dispatching a report costs a reference-count bump, not an
+/// allocation. The read loop still calls listeners without holding the lock.
+#[derive(Default)]
+struct MessageListeners {
+    by_handle: HashMap<u32, MessageListener>,
+    dispatch: Arc<[MessageListener]>,
+}
+
+impl MessageListeners {
+    fn insert(&mut self, hdl: u32, listener: MessageListener) {
+        self.by_handle.insert(hdl, listener);
+        self.rebuild_dispatch();
+    }
+
+    fn remove(&mut self, hdl: u32) -> bool {
+        let removed = self.by_handle.remove(&hdl).is_some();
+        if removed {
+            self.rebuild_dispatch();
+        }
+        removed
+    }
+
+    fn rebuild_dispatch(&mut self) {
+        self.dispatch = self.by_handle.values().cloned().collect();
+    }
+}
+
 /// Removes a HID++ message listener when dropped.
 pub struct MessageListenerGuard {
-    message_listeners: Weak<Mutex<HashMap<u32, MessageListener>>>,
+    message_listeners: Weak<Mutex<MessageListeners>>,
     hdl: u32,
 }
 
 impl Drop for MessageListenerGuard {
     fn drop(&mut self) {
         if let Some(message_listeners) = self.message_listeners.upgrade() {
-            lock(&message_listeners).remove(&self.hdl);
+            lock(&message_listeners).remove(self.hdl);
         }
     }
 }
@@ -262,7 +303,7 @@ pub struct HidppChannel {
 
     /// Registered listeners that will receive notifications about incoming
     /// messages.
-    message_listeners: Arc<Mutex<HashMap<u32, MessageListener>>>,
+    message_listeners: Arc<Mutex<MessageListeners>>,
 
     /// The handle assigned to the next registered message listener.
     ///
@@ -341,7 +382,7 @@ impl HidppChannel {
 
         let raw_channel_rc = Arc::new(raw);
         let pending_messages_rc = Arc::new(Mutex::new(PendingQueue::default()));
-        let message_listeners_rc = Arc::new(Mutex::new(HashMap::<u32, MessageListener>::new()));
+        let message_listeners_rc = Arc::new(Mutex::new(MessageListeners::default()));
 
         let (close_sender, close_receiver) = oneshot::channel::<()>();
 
@@ -714,7 +755,7 @@ impl HidppChannel {
     ///
     /// Returns whether a listener was found using the given handle.
     pub fn remove_msg_listener(&self, hdl: u32) -> bool {
-        lock(&self.message_listeners).remove(&hdl).is_some()
+        lock(&self.message_listeners).remove(hdl)
     }
 }
 
@@ -723,15 +764,18 @@ impl HidppChannel {
 ///
 /// Runs on the channel's dedicated read thread. `read_report` is always raced
 /// against `close` so a transport that parks forever on a dead device still
-/// lets the channel shut down — see [`RawHidChannel::read_report`].
+/// lets the channel shut down — see [`RawHidChannel::read_report`]. So is the
+/// pause after a failed read, which grows while failures repeat (see
+/// [`read_retry_delay`]) so an error that never clears cannot spin a core.
 async fn read_loop(
     raw_channel: &dyn RawHidChannel,
     pending_messages: &Mutex<PendingQueue>,
-    message_listeners: &Mutex<HashMap<u32, MessageListener>>,
+    message_listeners: &Mutex<MessageListeners>,
     observer: Option<&dyn ChannelObserver>,
     mut close: oneshot::Receiver<()>,
 ) {
     let mut buf = [0u8; MAX_REPORT_LENGTH];
+    let mut consecutive_errors: u32 = 0;
 
     loop {
         let res = select! {
@@ -740,12 +784,20 @@ async fn read_loop(
         };
 
         let len = match res {
-            Ok(len) => len,
+            Ok(len) => {
+                consecutive_errors = 0;
+                len
+            }
             Err(error) => {
+                consecutive_errors = consecutive_errors.saturating_add(1);
+                let delay = read_retry_delay(consecutive_errors);
                 // A silently erroring handle is indistinguishable from a deaf
                 // one without this line.
-                trace!(?error, "read_report error");
-                continue;
+                trace!(?error, consecutive_errors, ?delay, "read_report error");
+                select! {
+                    _ = close => break,
+                    () = futures_timer::Delay::new(delay).fuse() => continue,
+                }
             }
         };
 
@@ -825,11 +877,22 @@ async fn read_loop(
             "raw report received"
         );
 
-        // Collected before dispatch so a listener may add or remove listeners
-        // without deadlocking on the lock it is being called under.
-        let listeners: Vec<_> = lock(message_listeners).values().cloned().collect();
-        for listener in listeners {
+        // Dispatched from a snapshot, not under the lock, so a listener may
+        // add or remove listeners without deadlocking on the lock it would be
+        // called under.
+        let listeners = Arc::clone(&lock(message_listeners).dispatch);
+        for listener in listeners.iter() {
             listener(msg, matched_id.is_some());
         }
     }
+}
+
+/// The read loop's pause before re-reading after `consecutive_errors` failed
+/// reads in a row: [`READ_RETRY_DELAY_MIN`], doubled per further failure and
+/// capped at [`READ_RETRY_DELAY_MAX`].
+fn read_retry_delay(consecutive_errors: u32) -> Duration {
+    let doublings = consecutive_errors.saturating_sub(1).min(u32::BITS - 1);
+    READ_RETRY_DELAY_MIN
+        .saturating_mul(1 << doublings)
+        .min(READ_RETRY_DELAY_MAX)
 }
