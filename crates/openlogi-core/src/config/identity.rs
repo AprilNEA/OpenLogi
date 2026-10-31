@@ -316,6 +316,7 @@ pub(super) fn fold(device: &mut DeviceConfig, mut legacy: DeviceConfig, route_ke
     fold_option_field!(camera_controls);
     fold_option_field!(camera_profile);
     fold_option_field!(thumbwheel_sensitivity);
+    fold_option_field!(vertical_scroll_sensitivity);
     fold_option_field!(fn_lock);
     fold_option_field!(keep_os_layout);
     fold_option_field!(onboard_memory);
@@ -676,6 +677,26 @@ mod tests {
             identity: DeviceIdentity::Unit([0; 4]),
         };
         assert_eq!(config.resolve_device_key(&anonymous, None), None);
+    }
+
+    #[test]
+    fn folding_preserves_vertical_scroll_override_and_prefers_canonical_conflicts() {
+        use crate::config::VerticalScrollSensitivity;
+        for canonical_value in [None, Some(VerticalScrollSensitivity::try_new(60).unwrap())] {
+            let legacy_value = VerticalScrollSensitivity::try_new(30).unwrap();
+            let mut config = Config::default();
+            config.set_device_vertical_scroll_sensitivity(
+                "receiver:82839805:slot:1",
+                Some(legacy_value),
+            );
+            config.set_device_vertical_scroll_sensitivity("unit:6be9d300", canonical_value);
+            let canonical = PhysicalDeviceKey::parse("unit:6be9d300").unwrap();
+            assert!(config.adopt_route(&canonical, "receiver:82839805:slot:1", None));
+            assert_eq!(
+                config.devices["unit:6be9d300"].vertical_scroll_sensitivity,
+                canonical_value.or(Some(legacy_value))
+            );
+        }
     }
 
     #[test]

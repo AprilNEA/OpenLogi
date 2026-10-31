@@ -129,6 +129,8 @@ fn persisted_numeric_contracts_reject_unsafe_values() {
         "schema_version = 6\n[app_settings]\nvertical_scroll_sensitivity = 101\n",
         "schema_version = 6\n[app_settings]\nvertical_scroll_sensitivity = -2147483648\n",
         "schema_version = 6\n[devices.mouse]\nthumbwheel_sensitivity = -1\n",
+        "schema_version = 6\n[devices.mouse]\nvertical_scroll_sensitivity = 0\n",
+        "schema_version = 6\n[devices.mouse]\nvertical_scroll_sensitivity = 101\n",
         "schema_version = 6\n[devices.mouse]\ndpi = 65536\n",
         "schema_version = 6\n[devices.mouse]\ndpi_presets = [800, 70000]\n",
     ] {

@@ -30,6 +30,8 @@ custom_name = "Office mouse"
 dpi = 1600
 dpi_presets = [800, 1600, 3200]
 thumbwheel_sensitivity = 20
+# Omit to follow the General default. Captured wheels use the selected mouse's value.
+vertical_scroll_sensitivity = 25
 invert_scroll = false
 scroll_resolution = "high"
 # Ease this mouse's main wheel in software (needs Accessibility on macOS).

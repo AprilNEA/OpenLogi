@@ -116,6 +116,10 @@ Common device fields are:
 
 - `custom_name`, `enabled`, `dpi`, `dpi_presets`, thumb-wheel sensitivity,
   scroll inversion, and scroll resolution
+- `vertical_scroll_sensitivity`, an optional `1`–`100` override for the
+  app-wide default. Omit it to follow Settings → General. The OS hook cannot
+  map wheel events to device config keys, so captured wheels use the selected
+  mouse's effective sensitivity, even when more than one mouse is connected
 - `smooth_wheel` for mice with a HID++ `0x2121` wheel: `true` smooths that
   mouse's main wheel in software, as Logi Options+ "Smooth scrolling" does,
   whatever `smooth_scroll` says. The agent switches the wheel to diverted

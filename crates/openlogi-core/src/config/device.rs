@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use super::button_map::{deserialize_button_map, deserialize_button_maps_by_app};
 use super::settings::{
     CameraControls, GestureOwner, LightSettings, Lighting, OnboardMemory, ScrollResolution,
-    SmartShift, ThumbwheelSensitivity, deserialize_gesture_owner,
+    SmartShift, ThumbwheelSensitivity, VerticalScrollSensitivity, deserialize_gesture_owner,
 };
 use crate::binding::{Action, ActionRingConfig, Binding, ButtonId, GestureDirection, KeypadPage};
 use crate::device::{Capabilities, DeviceKind, DeviceModelInfo, LightCapabilities};
@@ -296,6 +296,9 @@ pub struct DeviceConfig {
     /// [`AppSettings::thumbwheel_sensitivity`](crate::config::AppSettings::thumbwheel_sensitivity).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thumbwheel_sensitivity: Option<ThumbwheelSensitivity>,
+    /// Per-device vertical scroll sensitivity; `None` follows the app-wide default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vertical_scroll_sensitivity: Option<VerticalScrollSensitivity>,
     /// Invert this device's scroll-wheel direction relative to the OS setting
     /// (issue #126): on, a wheel tick scrolls the opposite way, so a user who
     /// keeps macOS "natural scrolling" for the trackpad can have a traditional
@@ -473,6 +476,7 @@ impl Default for DeviceConfig {
             camera_profiles: BTreeMap::new(),
             camera_profile: None,
             thumbwheel_sensitivity: None,
+            vertical_scroll_sensitivity: None,
             invert_scroll: false,
             scroll_resolution: None,
             smooth_wheel: false,
@@ -609,6 +613,8 @@ struct RawDeviceConfig {
     #[serde(default)]
     thumbwheel_sensitivity: Option<ThumbwheelSensitivity>,
     #[serde(default)]
+    vertical_scroll_sensitivity: Option<VerticalScrollSensitivity>,
+    #[serde(default)]
     invert_scroll: bool,
     #[serde(default)]
     scroll_resolution: Option<ScrollResolution>,
@@ -688,6 +694,7 @@ impl From<RawDeviceConfig> for DeviceConfig {
             camera_profiles: raw.camera_profiles,
             camera_profile: raw.camera_profile,
             thumbwheel_sensitivity: raw.thumbwheel_sensitivity,
+            vertical_scroll_sensitivity: raw.vertical_scroll_sensitivity,
             invert_scroll: raw.invert_scroll,
             scroll_resolution: raw.scroll_resolution,
             smooth_wheel: raw.smooth_wheel,

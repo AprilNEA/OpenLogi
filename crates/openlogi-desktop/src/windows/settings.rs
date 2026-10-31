@@ -180,6 +180,7 @@ impl SettingsView {
                     | StateEvent::InventoryChanged
                     | StateEvent::CameraPermissionChanged
                     | StateEvent::SettingsChanged
+                    | StateEvent::DeviceConfigChanged(_)
                     | StateEvent::LanguageChanged
             ) {
                 // A settings change may have run the opportunistic

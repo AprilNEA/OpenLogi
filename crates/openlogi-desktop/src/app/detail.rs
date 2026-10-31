@@ -588,7 +588,7 @@ fn inversion_description(supported: bool, is_software: bool) -> gpui::SharedStri
 }
 
 /// Scrolling card: per-device inversion, wheel-resolution and smooth-wheel controls,
-/// then the app-wide scroll speed. Pure config — no hardware read — so it is a
+/// then per-device scroll speed. Pure config — no hardware read — so it is a
 /// plain settings block rather than an `Entity` panel like DPI / SmartShift; only
 /// the speed slider, which must keep its drag state, is an entity.
 fn scrolling_card(

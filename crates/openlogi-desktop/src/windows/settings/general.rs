@@ -209,11 +209,19 @@ fn thumbwheel_sensitivity_field(slider: &Entity<SliderState>, cx: &mut App) -> g
 
 fn vertical_scroll_sensitivity_field(slider: &Entity<SliderState>, cx: &mut App) -> gpui::Div {
     let value = VerticalScrollSensitivity::from_rounded(slider.read(cx).value().start());
+    let count = AppState::try_read(cx).map_or(0, AppState::vertical_scroll_override_count);
+    let pal = theme::palette(cx);
     sensitivity_field(
         slider,
         value.to_string(),
         value == VerticalScrollSensitivity::DEFAULT,
         cx,
+    )
+    .child(
+        div()
+            .text_caption()
+            .text_color(pal.text_muted)
+            .child(tr!("pointer.vertical_scroll_override_count", count => count)),
     )
 }
 
