@@ -93,37 +93,38 @@ impl SpaceShortcut {
                 tracing::warn!("could not build the Space shortcut's key events");
                 return false;
             };
-            post_edges(edges);
+            for edge in edges {
+                if !super::virtual_keyboard::edge(edge.virtual_key, edge.phase) {
+                    edge.event.post(CGEventTapLocation::HID);
+                }
+            }
             true
         })
     }
 }
 
-/// Type `virtual_key` under `flags` around whatever modifiers held chords
-/// keep down, in the shape a physical keyboard sends (see [`keystroke`]).
+/// Type `virtual_key` under `flags` as `CGEvent`s, around whatever modifiers
+/// held chords keep down, in the shape a physical keyboard sends (see
+/// [`keystroke`]).
 ///
-/// This is the fallback for a key press the virtual HID keyboard does not
-/// carry. A key event that only carries the modifier flags can leave those
+/// This is the fallback for a key press the virtual HID keyboard declined.
+/// A key event that only carries the modifier flags can leave those
 /// modifiers down: Command stays held, and an App Switcher that Command-Tab
 /// opened never closes (#2178).
+///
+/// No edge is offered to the virtual keyboard again. It declines a press of
+/// a key a held chord keeps down on it, but would accept that key's up edge
+/// and release the key under the chord.
 pub(super) fn post_keystroke(virtual_key: u16, flags: CGEventFlags) {
     super::super::with_held_modifiers(|held| {
         let Some(edges) = keystroke(virtual_key, flags, held) else {
             tracing::warn!(virtual_key, "could not build the shortcut's key events");
             return;
         };
-        post_edges(edges);
-    });
-}
-
-/// Post each edge through the virtual HID keyboard when it carries the edge,
-/// as a held chord's edges do, and as its `CGEvent` otherwise.
-fn post_edges(edges: Vec<KeyEdge>) {
-    for edge in edges {
-        if !super::virtual_keyboard::edge(edge.virtual_key, edge.phase) {
+        for edge in edges {
             edge.event.post(CGEventTapLocation::HID);
         }
-    }
+    });
 }
 
 /// One key edge of a keystroke, with the `CGEvent` that posts it when the
