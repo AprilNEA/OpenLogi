@@ -404,6 +404,24 @@ dash -n packaging/linux/install.sh
 dash packaging/linux/tests/install-smoke.sh
 ```
 
+The desktop app's Linux update path follows the same contract. The engine's
+`latest.json` carries no Linux asset, so on Linux the app checks GitHub
+Releases itself (`platform::updater::linux::release_check`): `stable` reads
+`/releases/latest`, and `beta` takes the highest version among the recent
+releases, prereleases included. When [installation-source
+detection](#installation-source-detection) reports a dpkg, rpm or pacman
+package, an explicit **Install Update** click downloads
+`openlogi-v<version>-linux-<arch>.<format>` with its `.minisig` and
+`SHA256SUMS`, refuses any release not strictly newer than the running one,
+verifies the checksum and the minisign signature in-process against the
+build's embedded `OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY`, and requires the signed
+trusted comment to name that exact file. A build without the key offers no
+**Install Update** and shows the package-manager hint instead.
+It then runs `/usr/bin/pkexec` with `/usr/bin/apt-get`, `/usr/bin/rpm` or
+`/usr/bin/pacman` at those fixed paths, never resolved through `PATH`.
+`openlogi_core::linux_package` owns the arch tag and the package file name for
+both this lookup and `xtask linux package`.
+
 The Nix package uses the same shared resources and is declared in
 `packaging/linux/package.nix`; see the Nix package section above for its build
 commands.
@@ -416,8 +434,14 @@ The desktop app probes once in the background and publishes the typed
 Settings → Updates displays the result as **Installation source**, separately
 from the update download source. An open window refreshes when detection
 completes or the interface language changes.
-This is an ownership snapshot, not download provenance or an update policy;
-the updater does not yet change behavior based on it.
+This is an ownership snapshot, not download provenance. On Linux it gates the
+in-app package update: Settings → Updates offers **Install Update** (a
+root install through `pkexec`) only for `Detected(LinuxPackage(_))`, and only
+in a build that embeds the update signing key
+(`platform::updater::linux::installable_package`). Nix, `Unknown` and a
+still-`Detecting` probe get the release check and a hint to update through the
+package manager instead, never the install button. See the Linux packaging
+section.
 
 - **Homebrew:** matches the installed receipt and Caskroom app back-link to
   the running bundle, distinguishing `openlogi` from `openlogi@latest`. It

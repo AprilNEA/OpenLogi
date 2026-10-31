@@ -26,6 +26,7 @@ pub mod device_order;
 pub mod diagnostics;
 pub mod env;
 pub mod hid;
+pub mod linux_package;
 #[cfg(feature = "locale")]
 pub mod locale;
 #[cfg(feature = "logging")]
