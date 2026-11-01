@@ -602,6 +602,48 @@ mod tests {
         );
     }
 
+    /// The G502 X LIGHTSPEED has the sniper on slot 4 and Forward on slot 5.
+    /// `HostMode::mapping` turns `Native` into the button's own HID number
+    /// (Forward is 5) and `Captured` into 0; the `openlogi-device` spy tests
+    /// prove that step, this one proves the layout feeds it that order.
+    #[test]
+    fn g502_x_host_mode_puts_the_sniper_on_slot_four_and_forward_on_slot_five() {
+        let layout = &openlogi_core::binding::G502_X_LIGHTSPEED;
+        let mut cfg = Config::default();
+        cfg.set_binding("g502x", ButtonId::G9, Binding::Single(Action::Copy));
+        let plan = super::plan_for_device(
+            &cfg,
+            super::PlanDevice {
+                physical_key: PhysicalDeviceKey::parse("receiver:cafe:slot:2")
+                    .expect("fixture should be a physical key"),
+                config_key: "g502x",
+                route: route(),
+                layout: Some(layout),
+            },
+            None,
+            0,
+            true,
+        )
+        .with_onboard(&cfg, Some(layout));
+        let slots = host_slots(&plan).expect("rebinding G9 enters host mode");
+        assert_eq!(
+            slots,
+            [
+                (ButtonId::LeftClick, SlotRoute::Native),
+                (ButtonId::RightClick, SlotRoute::Native),
+                (ButtonId::MiddleClick, SlotRoute::Native),
+                (ButtonId::Back, SlotRoute::Native),
+                (ButtonId::G6, SlotRoute::Captured),
+                (ButtonId::Forward, SlotRoute::Native),
+                (ButtonId::WheelTiltLeft, SlotRoute::Captured),
+                (ButtonId::WheelTiltRight, SlotRoute::Captured),
+                (ButtonId::G9, SlotRoute::Captured),
+                (ButtonId::G8, SlotRoute::Captured),
+                (ButtonId::G7, SlotRoute::Captured),
+            ]
+        );
+    }
+
     #[test]
     fn an_untouched_g_button_keeps_its_stock_action_in_host_mode() {
         let mut cfg = Config::default();

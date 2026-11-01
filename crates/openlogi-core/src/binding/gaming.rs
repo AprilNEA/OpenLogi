@@ -1,5 +1,7 @@
 //! `0x8110` button layouts of G-series mice, dumped from real hardware.
-//! Slot `n` is spy bit `n` and asset slot `g{n + 1}`.
+//! Slot `n` is spy bit `n` and asset slot number `n + 1` (marker `g{n + 1}`).
+//! That number indexes the artwork only; it is not a label printed on the
+//! mouse, and it need not match the [`ButtonId`] on the slot.
 
 use super::action::Action;
 use super::button::ButtonId;
@@ -84,6 +86,39 @@ pub const G502_LIGHTSPEED: GamingLayout = GamingLayout {
     stock_dpi_presets: &[400, 800, 1600, 3200, 6400],
 };
 
+/// G502 X LIGHTSPEED (wpid `0x409f`, `0x8110` slot table measured on real
+/// hardware).
+///
+/// The table was measured on model key `0409f`. `1409f` is the same model
+/// with extended id 1, seen in a comment on issue #730; it shares this layout
+/// but was not measured.
+///
+/// The sniper button sits on slot 4 and the forward thumb button on slot 5,
+/// the reverse of the G502 LIGHTSPEED. The two buttons beside the left click
+/// are `G8` (front) and `G7` (rear).
+///
+/// `stock_dpi_presets` were read from the mouse's ROM profile 1 over `0x8100`,
+/// not from a manual; the default index is the third level (1600).
+pub const G502_X_LIGHTSPEED: GamingLayout = GamingLayout {
+    model_keys: &["0409f", "1409f"],
+    slots: &[
+        Slot::native(ButtonId::LeftClick),
+        Slot::native(ButtonId::RightClick),
+        Slot::native(ButtonId::MiddleClick),
+        Slot::native(ButtonId::Back),
+        Slot::stock(ButtonId::G6, Action::DpiShift),
+        Slot::native(ButtonId::Forward),
+        Slot::silent(ButtonId::WheelTiltLeft),
+        Slot::silent(ButtonId::WheelTiltRight),
+        // Behind the wheel; cycles the onboard profiles, which has no host
+        // equivalent.
+        Slot::stock(ButtonId::G9, Action::None),
+        Slot::stock(ButtonId::G8, Action::NextDpiPreset),
+        Slot::stock(ButtonId::G7, Action::PreviousDpiPreset),
+    ],
+    stock_dpi_presets: &[800, 1200, 1600, 2400, 3200],
+};
+
 /// A gaming mouse whose layout nobody has dumped. Its first five slots are
 /// the standard HID buttons, which the OS input hook remaps without host
 /// mode. G6 and up differ per model and are not guessed.
@@ -102,7 +137,7 @@ pub const STANDARD_BUTTONS: GamingLayout = GamingLayout {
     stock_dpi_presets: &[],
 };
 
-const LAYOUTS: &[&GamingLayout] = &[&G502_LIGHTSPEED];
+const LAYOUTS: &[&GamingLayout] = &[&G502_LIGHTSPEED, &G502_X_LIGHTSPEED];
 
 /// Whether a device is a G-series mouse, and which buttons it offers. The
 /// agent, the tabs and the Buttons panel all ask this one verdict.
@@ -158,7 +193,8 @@ impl GamingLayout {
         u8::try_from(slot).ok()
     }
 
-    /// The button printed `G{number}`.
+    /// The button on asset slot `number`, which is spy slot + 1. The number
+    /// indexes the artwork; it is not a label printed on the mouse.
     #[must_use]
     pub fn button_for_g_number(&self, number: u8) -> Option<ButtonId> {
         let slot = usize::from(number.checked_sub(1)?);
@@ -209,11 +245,11 @@ mod tests {
             "a dumped model answers before it is probed"
         );
         assert_eq!(
-            GamingButtons::for_device("0409f", Some(&gaming)),
+            GamingButtons::for_device("04099", Some(&gaming)),
             Some(GamingButtons::Standard)
         );
         assert_eq!(GamingButtons::Standard.layout(), &STANDARD_BUTTONS);
-        assert_eq!(GamingButtons::for_device("0409f", None), None);
+        assert_eq!(GamingButtons::for_device("04099", None), None);
         assert_eq!(GamingButtons::for_device("2b042", Some(&mx)), None);
     }
 
@@ -232,6 +268,68 @@ mod tests {
         assert!(!layout.remappable().any(|b| b == ButtonId::LeftClick));
         assert!(layout.needs_host_mode(ButtonId::G7));
         assert!(!layout.needs_host_mode(ButtonId::Back));
+    }
+
+    #[test]
+    fn g502_x_lightspeed_slots_match_the_hardware_dump() {
+        let expected = [
+            ButtonId::LeftClick,
+            ButtonId::RightClick,
+            ButtonId::MiddleClick,
+            ButtonId::Back,
+            ButtonId::G6,
+            ButtonId::Forward,
+            ButtonId::WheelTiltLeft,
+            ButtonId::WheelTiltRight,
+            ButtonId::G9,
+            ButtonId::G8,
+            ButtonId::G7,
+        ];
+        for key in ["0409f", "1409f"] {
+            let layout = GamingLayout::for_model_key(key);
+            assert_eq!(layout, Some(&G502_X_LIGHTSPEED), "{key}");
+        }
+        let layout = &G502_X_LIGHTSPEED;
+        for (n, button) in (1u8..).zip(expected) {
+            assert_eq!(layout.button_for_g_number(n), Some(button), "slot {n}");
+        }
+        assert_eq!(layout.button_for_g_number(12), None);
+        assert_eq!(layout.slot_of(ButtonId::G6), Some(4), "sniper");
+        assert_eq!(layout.slot_of(ButtonId::Forward), Some(5));
+    }
+
+    #[test]
+    fn g502_x_lightspeed_keeps_its_stock_functions() {
+        let layout = &G502_X_LIGHTSPEED;
+        assert_eq!(layout.stock_action(ButtonId::G6), Some(Action::DpiShift));
+        assert_eq!(layout.stock_action(ButtonId::G9), Some(Action::None));
+        assert_eq!(
+            layout.stock_action(ButtonId::G8),
+            Some(Action::NextDpiPreset)
+        );
+        assert_eq!(
+            layout.stock_action(ButtonId::G7),
+            Some(Action::PreviousDpiPreset)
+        );
+        for button in [ButtonId::WheelTiltLeft, ButtonId::WheelTiltRight] {
+            assert_eq!(layout.stock_action(button), None);
+            assert!(layout.needs_host_mode(button));
+        }
+        for button in [
+            ButtonId::LeftClick,
+            ButtonId::RightClick,
+            ButtonId::MiddleClick,
+            ButtonId::Back,
+            ButtonId::Forward,
+        ] {
+            assert!(!layout.needs_host_mode(button), "{button:?}");
+        }
+    }
+
+    #[test]
+    fn other_g502_x_variants_stay_unmapped() {
+        assert_eq!(GamingLayout::for_model_key("04099"), None);
+        assert_eq!(GamingLayout::for_model_key("040b2"), None);
     }
 
     #[test]
