@@ -19,8 +19,6 @@ use crate::{DesktopPoint, DisplayBounds, KeyModifiers, PointerState, WarpError};
 pub(crate) struct Probe {
     conn: RustConnection,
     root: Window,
-    /// The whole root window, reported when RandR lists no monitors.
-    root_bounds: DisplayBounds,
 }
 
 impl Probe {
@@ -32,19 +30,8 @@ impl Probe {
         let (conn, screen) = RustConnection::connect(None)
             .map_err(|error| debug!(%error, "X11 is unavailable for the Flow pointer probe"))
             .ok()?;
-        let root_screen = conn.setup().roots.get(screen)?;
-        let root = root_screen.root;
-        let root_bounds = DisplayBounds {
-            x: 0.0,
-            y: 0.0,
-            width: f64::from(root_screen.width_in_pixels),
-            height: f64::from(root_screen.height_in_pixels),
-        };
-        Some(Self {
-            conn,
-            root,
-            root_bounds,
-        })
+        let root = conn.setup().roots.get(screen)?.root;
+        Some(Self { conn, root })
     }
 
     pub(crate) fn state(&mut self) -> Option<PointerState> {
@@ -67,8 +54,27 @@ impl Probe {
     pub(crate) fn displays(&mut self) -> Vec<DisplayBounds> {
         match self.monitors() {
             Some(monitors) if !monitors.is_empty() => monitors,
-            _ => vec![self.root_bounds],
+            _ => self.root_bounds().into_iter().collect(),
         }
+    }
+
+    /// The whole root window as it is now, for a server whose RandR lists no
+    /// monitors. The connection setup's size is a snapshot from connecting,
+    /// and a resolution change resizes the root after it.
+    fn root_bounds(&self) -> Option<DisplayBounds> {
+        let geometry = self
+            .conn
+            .get_geometry(self.root)
+            .ok()?
+            .reply()
+            .map_err(|error| debug!(%error, "GetGeometry of the root window failed"))
+            .ok()?;
+        Some(DisplayBounds {
+            x: 0.0,
+            y: 0.0,
+            width: f64::from(geometry.width),
+            height: f64::from(geometry.height),
+        })
     }
 
     /// The active monitors from RandR 1.5. `None` when the server lacks the
