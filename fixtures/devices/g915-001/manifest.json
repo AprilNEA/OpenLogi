@@ -12,14 +12,6 @@
       }
     },
     {
-      "name": "firmware-entities",
-      "channel": "target",
-      "relationship": {
-        "kind": "device",
-        "device": "device-1"
-      }
-    },
-    {
       "name": "reprogrammable-controls",
       "channel": "target",
       "relationship": {
@@ -112,14 +104,6 @@
             {
               "location": {
                 "asset": "cassette",
-                "case": "firmware-entities",
-                "channel": "target"
-              },
-              "count": 1
-            },
-            {
-              "location": {
-                "asset": "cassette",
                 "case": "raw-battery",
                 "channel": "target"
               },
@@ -193,14 +177,6 @@
               "location": {
                 "asset": "profile",
                 "field": "device_unit_id"
-              },
-              "count": 1
-            },
-            {
-              "location": {
-                "asset": "cassette",
-                "case": "firmware-entities",
-                "channel": "target"
               },
               "count": 1
             }
