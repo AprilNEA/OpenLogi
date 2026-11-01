@@ -146,6 +146,7 @@ fn input_monitoring_item() -> SettingItem {
                 Some(_) => PermissionStatus::Denied,
                 None => PermissionStatus::Unknown,
             };
+            let denied = badge == PermissionStatus::Denied;
             let field = gpui_component::v_flex().gap_1().child(permission_field(
                 "perm-input-monitoring",
                 badge,
@@ -153,13 +154,21 @@ fn input_monitoring_item() -> SettingItem {
                 cx,
             ));
             let pal = theme::palette(cx);
-            if stalled {
-                field.child(
-                    div()
-                        .text_caption()
-                        .text_color(pal.text_muted)
-                        .child(tr!("permissions.input_monitoring_granted_but_unavailable")),
-                )
+            let hint = if stalled {
+                Some(tr!("permissions.input_monitoring_granted_but_unavailable"))
+            } else if denied {
+                // The background agent reads the devices, so the grant has to
+                // name it; one given to OpenLogi itself or to Terminal does
+                // not reach it (#1851). Denied also covers an enabled entry
+                // the agent cannot use: a stale one, or a grant made after
+                // launch whose automatic relaunch was refused
+                // (`InputMonitoring::NeedsRelaunch`). The hint covers both.
+                Some(tr!("permissions.input_monitoring_agent_instructions"))
+            } else {
+                None
+            };
+            if let Some(text) = hint {
+                field.child(div().text_caption().text_color(pal.text_muted).child(text))
             } else {
                 field
             }
