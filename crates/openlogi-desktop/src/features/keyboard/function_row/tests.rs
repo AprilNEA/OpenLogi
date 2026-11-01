@@ -354,6 +354,7 @@ fn control_slots_read_row_by_row_and_name_unknown_controls_by_number() {
 fn control_slots_dedupe_repeats_and_skip_easy_switch() {
     let mut asset = asset_with_controls(&[(0x010a, 53.5, 13.8), (0x010a, 53.5, 13.8)]);
     asset.metadata.images.push(ImageEntry {
+        input_regions: Vec::new(),
         key: "device_easyswitch_image".to_string(),
         origin: Origin {
             width: 1872,
@@ -378,6 +379,7 @@ fn control_slots_dedupe_repeats_and_skip_easy_switch() {
 fn control_slots_dedupe_across_image_groups_keeping_the_keys_image_position() {
     let mut asset = asset_with_controls(&[(0x010a, 53.5, 13.8), (0x0141, 30.0, 13.8)]);
     asset.metadata.images.push(ImageEntry {
+        input_regions: Vec::new(),
         key: "device_buttons_image".to_string(),
         origin: Origin {
             width: 1872,
@@ -634,6 +636,7 @@ fn legacy_asset(
         glow: None,
         metadata: Metadata {
             images: vec![ImageEntry {
+                input_regions: Vec::new(),
                 key: "device_image".to_string(),
                 origin: Origin {
                     width: origin.0,
@@ -669,6 +672,7 @@ fn asset_with_controls(controls: &[(u16, f32, f32)]) -> ResolvedAsset {
         glow: None,
         metadata: Metadata {
             images: vec![ImageEntry {
+                input_regions: Vec::new(),
                 key: "device_keys_image".to_string(),
                 origin: Origin {
                     width: 1872,
@@ -720,6 +724,7 @@ fn keypad_marker_asset() -> ResolvedAsset {
         glow: None,
         metadata: Metadata {
             images: vec![ImageEntry {
+                input_regions: Vec::new(),
                 key: "device_keys_image".to_string(),
                 origin: Origin {
                     width: 935,
@@ -969,4 +974,57 @@ fn switching_the_app_profile_drops_a_draft_for_the_old_one(cx: &mut gpui::TestAp
             assert_eq!(view.selected_key, Some(0));
         });
     });
+}
+
+/// A G915 X-shaped asset: `depot`, and a circle region at `(100, 200)` for each
+/// of `cids`, on the 2048×644 render.
+fn region_asset(depot: &str, cids: impl Iterator<Item = u16>) -> ResolvedAsset {
+    let regions: Vec<String> = cids
+        .map(|cid| {
+            format!(
+                r#"{{"renderings":[{{"circle":{{"cx":100,"cy":200}}}}],"inputs":[{{"cid":{cid}}}]}}"#
+            )
+        })
+        .collect();
+    let image = serde_json::from_str(&format!(
+        r#"{{"key":"device_image","origin":{{"width":2048,"height":644}},"inputRegions":[{}]}}"#,
+        regions.join(",")
+    ))
+    .expect("region image parses");
+    let mut asset = asset_with_controls(&[]);
+    asset.depot = depot.to_string();
+    asset.metadata.images = vec![image];
+    asset
+}
+
+const G915_X_CIDS: [u16; 22] = [
+    332, 246, 239, 240, 241, 242, 243, 244, 245, 333, 334, 335, 336, 399, 400, 401, 402, 403, 404,
+    405, 406, 407,
+];
+
+#[test]
+fn g915_x_names_its_g_keys_and_places_them_from_the_depot() {
+    let asset = region_asset("g915_x_ls", G915_X_CIDS.into_iter());
+    let slots = key_slots(Some(&asset), None);
+    assert_eq!(slots.len(), FUNCTION_KEYS.len());
+    assert_eq!(slots[0].legend, "Esc");
+    assert_eq!(slots[13].legend, "G1");
+    assert_eq!(slots[21].legend, "G9");
+    assert!(matches!(slots[21].target, KeyTarget::FunctionKey(ref t) if t.to_string() == "f21"));
+    assert_approx_eq(slots[21].point.x_frac, 100.0 / 2048.0);
+    assert_approx_eq(slots[21].point.y_frac, 200.0 / 644.0);
+}
+
+#[test]
+fn another_depot_with_the_same_regions_keeps_the_f_row() {
+    let asset = region_asset("g513", G915_X_CIDS.into_iter());
+    let slots = key_slots(Some(&asset), None);
+    assert_eq!(slots[13].legend, "F13");
+}
+
+#[test]
+fn a_g915_x_depot_missing_a_key_falls_back_to_the_f_row() {
+    let asset = region_asset("g915_x_ls", G915_X_CIDS.into_iter().skip(1));
+    let slots = key_slots(Some(&asset), None);
+    assert_eq!(slots[13].legend, "F13");
 }
