@@ -63,6 +63,16 @@ impl ButtonOutput for NativeButtonOutput {
     }
 }
 
+/// The mouse button a press of `action` holds until the press ends.
+///
+/// A single-action mouse binding mirrors the physical down and up edges.
+pub(super) fn held_mouse_button(action: &Action) -> Option<MouseButton> {
+    match action.effect() {
+        Effect::Click(button) => Some(button),
+        _ => None,
+    }
+}
+
 /// One physical press owns at most one held output.
 enum HeldAction<B: ButtonOutput> {
     Chord(B::Chord),
@@ -96,7 +106,7 @@ impl<B: ButtonOutput> HeldActions<B> {
         action: &Action,
         target: ActionDispatchTarget,
     ) -> bool {
-        if let Effect::Click(button) = action.effect() {
+        if let Some(button) = held_mouse_button(action) {
             if target.resolve(action).is_some() {
                 self.start_mouse(press, button);
             }
