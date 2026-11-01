@@ -10,7 +10,7 @@ use std::{
     io,
     net::SocketAddr,
     sync::{
-        Arc,
+        Arc, Mutex, PoisonError,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -311,7 +311,7 @@ async fn establish(
             read_timeout: shared.limits.stream_read_timeout,
         },
         negotiated,
-        _candidate_lease: candidate_lease,
+        candidate_lease: Mutex::new(candidate_lease),
     })
 }
 
@@ -329,7 +329,9 @@ pub struct FlowConnection {
     peer_hello: proto::Hello,
     inbound: InboundPolicy,
     negotiated: Negotiated,
-    _candidate_lease: Option<CandidateLease>,
+    /// The pairing slot an untrusted connection holds until it is promoted
+    /// or dropped.
+    candidate_lease: Mutex<Option<CandidateLease>>,
 }
 
 /// Validation state shared by a connection and the streams it accepts.
@@ -400,7 +402,8 @@ impl FlowConnection {
     }
 
     /// Promotes an untrusted connection after its own pairing ceremony
-    /// persisted this peer key.
+    /// persisted this peer key, and frees the pairing slot for the next
+    /// unknown peer while this connection stays open.
     ///
     /// A ceremony from another connection is refused even for the same peer:
     /// its code was derived from a different `Hello` transcript.
@@ -416,6 +419,10 @@ impl FlowConnection {
             return Err(TransportError::PairingNotComplete);
         }
         self.inbound.trusted.store(true, Ordering::Release);
+        self.candidate_lease
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
         Ok(())
     }
 

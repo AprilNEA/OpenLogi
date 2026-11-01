@@ -465,7 +465,9 @@ async fn promotion_frees_the_pairing_slot_and_keeps_the_connection() -> TestResu
     let (_second_side, _second_accepted) = dial(&second, &acceptor).await?;
     assert_eq!(pairing_trust.pairing_candidate(), Some(second.public_key()));
     assert_eq!(accepted.trust(), SessionTrust::Trusted);
-    assert!(accepted.close_reason().is_none());
+    first_side.send_datagram(&message_envelope(FrameKind::Ping, &proto::Ping::default())?)?;
+    let ping = tokio::time::timeout(Duration::from_secs(5), accepted.read_datagram()).await??;
+    assert_eq!(ping.kind, FrameKind::Ping);
     Ok(())
 }
 

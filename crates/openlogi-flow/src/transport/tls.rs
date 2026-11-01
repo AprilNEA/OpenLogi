@@ -144,9 +144,10 @@ struct CandidateSlot {
 /// Pairing mode is explicit. TLS admits unknown keys as untrusted, but only
 /// one connection at a time may hold the pairing slot, and only after its
 /// handshake and `Hello` exchange completed ([`CandidateLease`]). The slot is
-/// released when that connection drops, so failed or abandoned dials never
-/// lock pairing out. Persisting a key belongs to the pairing state machine
-/// after user confirmation.
+/// released when that connection is promoted after pairing or drops, so
+/// neither a paired session nor a failed or abandoned dial locks pairing out.
+/// Persisting a key belongs to the pairing state machine after user
+/// confirmation.
 #[derive(Clone, Debug)]
 pub struct PeerTrust(Arc<TrustState>);
 
