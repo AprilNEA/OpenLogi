@@ -35,9 +35,12 @@ pub(super) fn configured_wheel_mode(
     WheelModeChange::new(resolution, inverted)
 }
 
-/// The main-wheel divert `dev`'s capture session arms for smooth scrolling,
-/// carrying the wheel settings [`configured_wheel_mode`] would otherwise
-/// write; `None` leaves the wheel native.
+/// The main-wheel divert `dev`'s capture session arms for smooth scrolling;
+/// `None` leaves the wheel native. It always asks for high resolution: the
+/// scroll model integrates the wheel's finest steps and a low-resolution
+/// report would quantise its input, whatever resolution the user configured
+/// for the native wheel. The native inversion is carried as configured
+/// ([`configured_wheel_mode`] would otherwise write it).
 ///
 /// Diverting needs the device's opt-in, its `0x2121` wheel, and an agent that
 /// may post the scrolling in the wheel's place: the mouse hook running (on
@@ -56,9 +59,9 @@ pub(super) fn main_wheel_divert(
     if !wanted {
         return None;
     }
-    let (resolution, inverted) = wheel_settings(config, dev)?;
+    let (_, inverted) = wheel_settings(config, dev)?;
     Some(MainWheelDivert {
-        resolution,
+        resolution: Some(ScrollResolution::High),
         inverted,
     })
 }

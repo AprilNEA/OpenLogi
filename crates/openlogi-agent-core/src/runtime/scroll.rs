@@ -1,12 +1,17 @@
 //! Traditional wheel output owned by one dedicated worker.
 //!
 //! Hook callbacks submit typed wheel impulses through [`ScrollInputHandle`]
-//! without blocking. The worker either scales and emits them directly,
-//! evaluates finite smooth motion from absolute timestamps, or, with smoothing
-//! off, wraps a diverted horizontal wheel in a phased gesture. Pixel-precise
-//! input never enters this runtime, so native trackpad and continuous wheel
-//! streams cannot be mixed with wheel ticks.
+//! without blocking. The main wheel (hook ticks with smoothing on, or a
+//! diverted HID++ wheel) goes through `lo_model::LoWheelModel`, which turns
+//! every report into exactly one immediate, phaseless pixel event shaped only
+//! by an EMA-driven gain: no timer, easing or momentum. Everything else is
+//! scaled and emitted directly, evaluated as finite smooth motion from
+//! absolute timestamps (the thumb wheel and a hook's horizontal ticks), or,
+//! with smoothing off, a diverted horizontal wheel is wrapped in a phased
+//! gesture. Pixel-precise input never enters this runtime, so native trackpad
+//! and continuous wheel streams cannot be mixed with wheel ticks.
 
+mod lo_model;
 mod worker;
 
 pub use worker::{ScrollInputHandle, ScrollPreferences, ScrollRuntime};
@@ -123,6 +128,21 @@ impl ScrollFrame {
         } else {
             openlogi_inject::post_smooth_scroll(self.delta.into(), self.phase);
         }
+    }
+}
+
+/// One main-wheel event from the wheel model: whole pixels plus the line
+/// delta that goes beside them. A separate type from `ScrollFrame` because
+/// it has no phase and no tick distance: it is posted as is.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct WheelPixels {
+    pixels: i32,
+    line_delta: f64,
+}
+
+impl WheelPixels {
+    fn post(self) {
+        openlogi_inject::post_wheel_pixels(self.pixels, self.line_delta);
     }
 }
 
