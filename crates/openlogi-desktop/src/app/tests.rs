@@ -997,6 +997,41 @@ fn record(kind: DeviceKind, capabilities: Option<Capabilities>) -> DeviceRecord 
     }
 }
 
+/// An `svg` without its own text color paints nothing, which left the list
+/// row's transport glyph blank. Every transport must carry the corner color.
+#[gpui::test]
+fn home_transport_icon_paints_in_its_transport_color(cx: &mut gpui::TestAppContext) {
+    use gpui::{Hsla, Styled as _, rgb};
+
+    use super::home::transport_icon;
+    use crate::ui::theme;
+
+    cx.update(gpui_component::init);
+    let pal = cx.update(|cx| theme::palette(cx));
+    let routed = |route| DeviceRecord {
+        route: Some(route),
+        ..record(DeviceKind::Mouse, None)
+    };
+    let bolt = routed(DeviceRoute::Bolt {
+        receiver_uid: "r".into(),
+        slot: 1,
+    });
+    let bluetooth = routed(DeviceRoute::Direct {
+        vendor_id: 0x046d,
+        product_id: 0xb034,
+    });
+    let camera = record(DeviceKind::Camera, None);
+    let expected: [(&DeviceRecord, Hsla); 3] = [
+        (&bolt, rgb(theme::STATUS_CONNECTED).into()),
+        (&bluetooth, rgb(theme::ACCENT_BLUE).into()),
+        (&camera, pal.text_muted),
+    ];
+    for (record, color) in expected {
+        let mut icon = transport_icon(record, None, pal);
+        assert_eq!(icon.style().text.color, Some(color), "{:?}", record.kind);
+    }
+}
+
 #[test]
 fn gallery_order_moves_connected_devices_first_stably() {
     let mut records = vec![
