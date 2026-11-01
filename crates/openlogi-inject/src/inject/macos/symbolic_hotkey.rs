@@ -154,7 +154,10 @@ impl KeyEdge {
 /// WindowServer matches a synthesized symbolic hotkey only in this shape: a
 /// key event that merely carries the modifier flags is ignored, as is an
 /// arrow key without the numeric-pad flag every Apple keyboard sets on it
-/// (#1653).
+/// (#1653). Apple keyboards also set the Fn flag on an arrow key, and the
+/// default Mission Control and Spaces records include it, so an arrow key
+/// gets both flags. A custom shortcut carries no Fn bit of its own, and
+/// without it ⌃← does not move a Space (#2178).
 fn keystroke(virtual_key: u16, flags: CGEventFlags, held: HeldModifiers) -> Option<Vec<KeyEdge>> {
     let pressed: Vec<HeldKey> = MODIFIER_KEYS
         .iter()
@@ -170,7 +173,7 @@ fn keystroke(virtual_key: u16, flags: CGEventFlags, held: HeldModifiers) -> Opti
         .iter()
         .fold(flags, |rest, &(flag, _)| rest.difference(flag));
     if ARROW_KEYS.contains(&virtual_key) {
-        key_flags |= CGEventFlags::CGEventFlagNumericPad;
+        key_flags |= CGEventFlags::CGEventFlagNumericPad | CGEventFlags::CGEventFlagSecondaryFn;
     }
 
     let mut modifiers = held;
@@ -404,6 +407,22 @@ mod tests {
                 (0x3b, Flags, CONTROL),
                 (0x7c, Down, CONTROL | FN | PAD),
                 (0x7c, Up, CONTROL | FN | PAD),
+                (0x3b, Flags, NONE),
+            ]
+        );
+    }
+
+    /// A custom ⌃← shortcut carries no Fn bit, but its arrow must be flagged
+    /// as the Spaces record expects, or the Space does not move (#2178).
+    #[test]
+    fn a_custom_arrow_shortcut_flags_the_arrow_like_a_keyboard() {
+        let events = keystroke(0x7b, CONTROL, HeldModifiers::default()).expect("keyboard events");
+        assert_eq!(
+            edges(&events),
+            [
+                (0x3b, Flags, CONTROL),
+                (0x7b, Down, CONTROL | FN | PAD),
+                (0x7b, Up, CONTROL | FN | PAD),
                 (0x3b, Flags, NONE),
             ]
         );
