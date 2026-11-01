@@ -1001,3 +1001,51 @@ fn a_key_shows_its_press_action_or_nothing_when_unbound() {
         assert_eq!(binding.key_action(), shown, "{binding:?}");
     }
 }
+
+#[test]
+fn binding_multi_click_roundtrips_without_overlapping_other_table_shapes() {
+    let binding = Binding::MultiClick(MultiClickBinding::new(
+        Action::BrowserBack,
+        Action::MissionControl,
+    ));
+    let back = binding_roundtrip(BTreeMap::from([(ButtonId::Back, binding.clone())]));
+    assert_eq!(back[&ButtonId::Back], binding);
+
+    let toml = toml::to_string_pretty(&BindingWrapper { bindings: back }).expect("serialize");
+    assert!(toml.contains("click = \"BrowserBack\""));
+    assert!(toml.contains("double = \"MissionControl\""));
+    assert!(!toml.contains("MultiClick"));
+}
+
+#[test]
+fn binding_multi_click_requires_exact_click_and_double_fields() {
+    let missing_double = "[bindings.Back]\nclick = \"Copy\"";
+    toml::from_str::<BindingWrapper>(missing_double).expect_err("a multi-click needs its double");
+
+    let missing_click = "[bindings.Back]\ndouble = \"Copy\"";
+    toml::from_str::<BindingWrapper>(missing_click).expect_err("a multi-click needs its click");
+
+    let unknown = "[bindings.Back]\nclick = \"Copy\"\ndouble = \"Paste\"\ntriple = \"Undo\"";
+    toml::from_str::<BindingWrapper>(unknown).expect_err("a multi-click rejects unknown fields");
+
+    let mixed =
+        "[bindings.Back]\nclick = \"Copy\"\ndouble = \"Paste\"\nwheel = \"HorizontalScroll\"";
+    toml::from_str::<BindingWrapper>(mixed)
+        .expect_err("a table that is two shapes at once is no binding");
+}
+
+#[test]
+fn multi_click_clicks_with_its_click_action_and_has_no_directions() {
+    let mut binding = Binding::MultiClick(MultiClickBinding::new(Action::Copy, Action::Paste));
+    assert!(!binding.is_gesture());
+    assert!(!binding.is_wheel_hold());
+    assert_eq!(binding.click_action(), Action::Copy);
+    assert_eq!(binding.direction_action(GestureDirection::Click), None);
+
+    binding.upgrade_to_gesture();
+    assert_eq!(
+        binding,
+        Binding::Gesture(BTreeMap::from([(GestureDirection::Click, Action::Copy)])),
+        "gesture mode keeps the single click and drops the double"
+    );
+}

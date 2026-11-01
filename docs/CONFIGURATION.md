@@ -44,7 +44,7 @@ header before parsing its fields. A v9 file without the policy still loads.
 
 ## Shape
 
-`schema_version` is required and currently `10`. `selected_device` is an
+`schema_version` is required and currently `11`. `selected_device` is an
 optional physical device key.
 
 `[app_settings]` contains application-wide preferences:
@@ -483,10 +483,21 @@ report an instantaneous button pulse falls back to `short`. `long` may itself
 be a `HoldShortcut`, in which case its chord stays down from the 500 ms
 threshold until the physical release.
 
-Long-press pairs currently apply to global device `bindings` and are authored
-in TOML. The GUI presents their `short` action; changing that button in the GUI
-replaces the whole pair with the selected single action. `per_app_bindings` and
-`keyboard.bindings` remain single-action maps.
+A `{ click = ..., double = ... }` binding tells a single click from a double
+click. A press does not fire on its own: if a second press follows within 300 ms
+of the first release, `double` fires when that second press is released and
+`click` never runs; otherwise `click` fires when the 300 ms have passed. Every
+single click on such a button is therefore delayed by that window. If capture
+is interrupted, the binding changes, or the agent shuts down while the button
+is waiting, neither action fires. A source that can only report an
+instantaneous button pulse counts each pulse as one complete click. A
+`HoldShortcut` as `click` or `double` is tapped, since the physical button is
+already up by then.
+
+Long-press and double-click pairs currently apply to global device `bindings`
+and are authored in TOML. The GUI presents their `short` (or `click`) action;
+changing that button in the GUI keeps a double-click pair's `double`.
+`per_app_bindings` and `keyboard.bindings` remain single-action maps.
 
 A wheel-hold binding on `Back` or `Forward` turns the main scroll wheel into a
 virtual thumb wheel while the button is held, as Logi Options+ offers on mice

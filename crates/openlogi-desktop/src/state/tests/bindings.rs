@@ -1,7 +1,7 @@
 //! Button, thumb-wheel, gesture and Actions Ring edits, global and per-app.
 
 use super::*;
-use openlogi_core::binding::LongPressBinding;
+use openlogi_core::binding::{LongPressBinding, MultiClickBinding};
 
 #[test]
 fn picking_a_short_action_preserves_the_long_press_binding() {
@@ -580,4 +580,34 @@ fn gesture_maps_cover_every_gesture_mode_button() {
         maps.contains_key(&ButtonId::Back),
         "a promoted OS-hook button gets its own menu simultaneously"
     );
+}
+
+#[test]
+fn picking_a_click_action_preserves_the_double_click_action() {
+    let mut config = Config::ephemeral();
+    config.set_binding(
+        KNOWN_MOUSE_KEY,
+        ButtonId::Back,
+        Binding::MultiClick(MultiClickBinding::new(Action::Copy, Action::MissionControl)),
+    );
+    let resolver = AssetResolver::new();
+    let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = AppState::new(Sources {
+        inventories: &[direct_inventory([0xa3, 0x93, 0xca, 0xe0])],
+        ..Sources::in_memory(config, &resolver, commands)
+    });
+
+    let _ = state.commit_binding(ButtonId::Back, Action::Paste);
+
+    assert_eq!(
+        state
+            .config
+            .stored_bindings(KNOWN_MOUSE_KEY)
+            .get(&ButtonId::Back),
+        Some(&Binding::MultiClick(MultiClickBinding::new(
+            Action::Paste,
+            Action::MissionControl
+        )))
+    );
+    assert_eq!(state.button_bindings()[&ButtonId::Back], Action::Paste);
 }

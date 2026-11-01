@@ -59,6 +59,11 @@ use crate::binding::{Binding, ButtonId, GestureDirection};
 /// persisted shape or enum vocabulary changes; readers inspect this value
 /// before consuming the rest of the file.
 ///
+/// v11 adds `{ click = ..., double = ... }` multi-click button bindings.
+/// Nothing older needs migrating; the bump makes a v10 build refuse a file
+/// that may hold one at the version check, instead of failing on the binding
+/// shape.
+///
 /// v10 adds per-device [`DeviceConfig::disabled_keys`]. Older files omit the
 /// setting and leave the firmware unmanaged. The bump makes a v9 build reject
 /// a file that stores the field at the version check instead of failing after
@@ -117,7 +122,7 @@ use crate::binding::{Binding, ButtonId, GestureDirection};
 /// next save; [`Config::load_from_path`] accepts supported versions `1` through
 /// [`SCHEMA_VERSION`] so an invalid or forward file fails loudly instead of
 /// silently losing bindings.
-pub const SCHEMA_VERSION: u32 = 10;
+pub const SCHEMA_VERSION: u32 = 11;
 
 /// Top-level config document.
 #[derive(Debug, Clone, Serialize, Deserialize)]
