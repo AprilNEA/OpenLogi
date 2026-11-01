@@ -153,7 +153,7 @@ mod hub {
 
     /// The link of the camera at `interface_path`.
     fn link_of(interface_path: &str) -> Option<UsbLink> {
-        let (hub, port) = hub_port(interface_path)?;
+        let (hub, port) = hub_port(interface_path).ok()?;
         link_from(hub.speed(port)?, hub.superspeed_flags(port))
     }
 
@@ -162,13 +162,13 @@ mod hub {
     ///
     /// # Errors
     /// [`ControlError::NotFound`] when the camera's hub or port cannot be
-    /// found, [`ControlError::NeedsElevation`] when the hub refuses the
-    /// request, and [`ControlError::Io`] for any other failure. The hub
-    /// driver answers a caller without administrator rights with
-    /// access-denied, not-supported or general-failure, depending on the
-    /// Windows release, so all three ask for elevation.
+    /// found, [`ControlError::NeedsElevation`] when the hub refuses to open
+    /// or refuses the request, and [`ControlError::Io`] for any other
+    /// failure. The hub driver answers a caller without administrator rights
+    /// with access-denied, not-supported or general-failure, depending on
+    /// the Windows release, so all three ask for elevation.
     pub(crate) fn cycle_port(interface_path: &str) -> Result<(), ControlError> {
-        let (hub, port) = hub_port(interface_path).ok_or(ControlError::NotFound)?;
+        let (hub, port) = hub_port(interface_path)?;
         hub.cycle(port).map_err(|error| {
             let refused = [ERROR_ACCESS_DENIED, ERROR_NOT_SUPPORTED, ERROR_GEN_FAILURE]
                 .map(WIN32_ERROR::to_hresult)
@@ -183,7 +183,26 @@ mod hub {
 
     /// The open hub the camera at `interface_path` is attached to, and the
     /// port number it sits on.
-    fn hub_port(interface_path: &str) -> Option<(Hub, u32)> {
+    ///
+    /// # Errors
+    /// [`ControlError::NotFound`] when the hub or port cannot be found or
+    /// opened, and [`ControlError::NeedsElevation`] when opening the hub is
+    /// access-denied, so the caller can retry with administrator rights.
+    fn hub_port(interface_path: &str) -> Result<(Hub, u32), ControlError> {
+        let (path, port) = hub_path_port(interface_path).ok_or(ControlError::NotFound)?;
+        let hub = Hub::open(&path).map_err(|error| {
+            if error.code() == ERROR_ACCESS_DENIED.to_hresult() {
+                ControlError::NeedsElevation
+            } else {
+                ControlError::NotFound
+            }
+        })?;
+        Ok((hub, port))
+    }
+
+    /// The interface path (NUL-terminated) of the hub the camera at
+    /// `interface_path` is attached to, and the port number it sits on.
+    fn hub_path_port(interface_path: &str) -> Option<(Vec<u16>, u32)> {
         let id = instance_id(interface_path)?;
         let node = dev_node(&id)?;
         let device = if is_function(&id) {
@@ -191,9 +210,7 @@ mod hub {
         } else {
             node
         };
-        let port = port_number(device)?;
-        let hub = Hub::open(&hub_interface(parent(device)?)?)?;
-        Some((hub, port))
+        Some((hub_interface(parent(device)?)?, port_number(device)?))
     }
 
     /// The Configuration Manager's handle for the present device `id`.
@@ -304,7 +321,7 @@ mod hub {
 
     impl Hub {
         /// Open the hub at `interface_path` (NUL-terminated) to query it.
-        fn open(interface_path: &[u16]) -> Option<Self> {
+        fn open(interface_path: &[u16]) -> windows::core::Result<Self> {
             // SAFETY: `interface_path` is NUL-terminated and outlives the call.
             // A hub is opened for a query only: write access is what its
             // IOCTLs ask for, shared, and nothing is written to it.
@@ -319,7 +336,6 @@ mod hub {
                     None,
                 )
             }
-            .ok()
             .map(Self)
         }
 

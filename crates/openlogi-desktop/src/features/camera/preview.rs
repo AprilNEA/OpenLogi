@@ -213,6 +213,16 @@ impl CameraPreview {
         cx.notify();
     }
 
+    /// Reopen the stream on `target` after that camera reconnected. The old
+    /// stream lost the device and reports nothing, so it would show a frozen
+    /// frame; a reopen that comes too early fails and retries like any start.
+    pub fn reopen_after_reconnect(&mut self, target: &str, cx: &mut Context<Self>) {
+        if matches!(&self.lifecycle, PreviewLifecycle::Streaming { target: open, .. } if open == target)
+        {
+            self.restart(target.to_owned(), cx);
+        }
+    }
+
     /// Free the frame on screen and its GPU texture at once — not in `render`,
     /// which stops running the moment the preview leaves the screen.
     fn drop_frame(&mut self, cx: &mut Context<Self>) {

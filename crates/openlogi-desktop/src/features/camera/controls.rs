@@ -15,8 +15,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    App, AppContext as _, Context, IntoElement, ParentElement, Render, SharedString, Styled,
-    Subscription, Task, Window, div, px,
+    App, AppContext as _, Context, EventEmitter, IntoElement, ParentElement, Render, SharedString,
+    Styled, Subscription, Task, Window, div, px,
 };
 use gpui_component::{WindowExt as _, dialog::DialogButtonProps, input::InputState, v_flex};
 use openlogi_camera::{AutoToggle, CameraControl, ControlRange};
@@ -78,6 +78,11 @@ struct BuiltinProfile {
     id: &'static str,
     values: &'static [(CameraControl, f32)],
 }
+
+/// The camera with this unique id dropped off the bus and came back, so any
+/// stream open on it is dead. Sent after a microphone switch reconnects it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CameraReconnected(pub String);
 
 pub struct CameraControlsPanel {
     hw: Arc<Hardware>,
@@ -512,23 +517,36 @@ impl CameraControlsPanel {
         let want = !on;
         let hw = self.hw.clone();
         let task = cx.spawn(async move |panel, cx| {
+            let switching = uid.clone();
             let switched = cx
                 .background_executor()
-                .spawn(async move { hw.switch_microphone(&uid, want) })
+                .spawn(async move { hw.switch_microphone(&switching, want) })
                 .await;
             panel
-                .update(cx, |panel, cx| panel.finish_microphone(want, switched, cx))
+                .update(cx, |panel, cx| {
+                    panel.finish_microphone(uid, want, switched, cx);
+                })
                 .ok();
         });
         self.microphone_status = MicrophoneStatus::Switching { _task: task };
         cx.notify();
     }
 
-    /// Show how a switch to `on` ended. A camera that reconnected leaves the
-    /// device list and comes back, which rebuilds the panel from the hardware.
-    fn finish_microphone(&mut self, on: bool, switched: Switched, cx: &mut Context<Self>) {
+    /// Show how a switch of camera `uid` to `on` ended. A reconnect is
+    /// announced, because a disconnect this short can pass between camera
+    /// scans and leave the preview on a dead stream.
+    fn finish_microphone(
+        &mut self,
+        uid: String,
+        on: bool,
+        switched: Switched,
+        cx: &mut Context<Self>,
+    ) {
         if switched != Switched::Failed {
             self.microphone = Some(on);
+        }
+        if switched == Switched::Reconnected {
+            cx.emit(CameraReconnected(uid));
         }
         self.microphone_status = MicrophoneStatus::Done(switched);
         cx.notify();
@@ -780,6 +798,8 @@ impl CameraControlsPanel {
         cx.notify();
     }
 }
+
+impl EventEmitter<CameraReconnected> for CameraControlsPanel {}
 
 impl Render for CameraControlsPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {

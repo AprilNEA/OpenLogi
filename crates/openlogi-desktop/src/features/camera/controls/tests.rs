@@ -1,4 +1,6 @@
+use std::cell::RefCell;
 use std::collections::VecDeque;
+use std::rc::Rc;
 use std::sync::Mutex;
 
 use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext, point, size};
@@ -113,6 +115,25 @@ fn brio(brightness: i32, exposure: i32, exposure_auto: bool) -> CameraState {
         )],
         microphone: None,
     }
+}
+
+/// Every camera the panel announces as reconnected, while the returned
+/// subscription lives.
+fn heard_reconnects(
+    view: &Entity<CameraControlsPanel>,
+    cx: &mut VisualTestContext,
+) -> (Rc<RefCell<Vec<String>>>, Subscription) {
+    let heard = Rc::new(RefCell::new(Vec::new()));
+    let sink = heard.clone();
+    let subscription = cx.update(|_, cx| {
+        cx.subscribe(
+            view,
+            move |_, CameraReconnected(uid): &CameraReconnected, _| {
+                sink.borrow_mut().push(uid.clone());
+            },
+        )
+    });
+    (heard, subscription)
 }
 
 fn panel(
@@ -467,6 +488,7 @@ fn a_microphone_switch_stores_it_then_reconnects(cx: &mut TestAppContext) {
     draw(&view, cx);
     cx.run_until_parked();
     view.read_with(cx, |panel, _| assert_eq!(panel.microphone, Some(false)));
+    let (heard, _subscription) = heard_reconnects(&view, cx);
 
     view.update(cx, CameraControlsPanel::toggle_microphone);
     cx.run_until_parked();
@@ -483,6 +505,11 @@ fn a_microphone_switch_stores_it_then_reconnects(cx: &mut TestAppContext) {
             MicrophoneStatus::Done(Switched::Reconnected)
         ));
     });
+    assert_eq!(
+        *heard.borrow(),
+        [UID.to_string()],
+        "the reconnect is announced so the preview can reopen its stream"
+    );
 }
 
 /// A camera the panel cannot reconnect (no elevation, or the user declined
@@ -495,6 +522,7 @@ fn a_camera_that_cannot_reconnect_asks_for_a_replug(cx: &mut TestAppContext) {
     let (view, cx) = panel(cx, uvc.clone());
     draw(&view, cx);
     cx.run_until_parked();
+    let (heard, _subscription) = heard_reconnects(&view, cx);
 
     view.update(cx, CameraControlsPanel::toggle_microphone);
     cx.run_until_parked();
@@ -506,6 +534,10 @@ fn a_camera_that_cannot_reconnect_asks_for_a_replug(cx: &mut TestAppContext) {
             MicrophoneStatus::Done(Switched::NeedsReplug)
         ));
     });
+    assert!(
+        heard.borrow().is_empty(),
+        "a camera that stayed on the bus kept its stream"
+    );
 }
 
 #[test]

@@ -1284,3 +1284,26 @@ fn the_notice_stays_when_the_camera_fails_to_open(cx: &mut TestAppContext) {
 
     assert!(link_notice(&view, cx).is_some());
 }
+
+/// A reconnect kills the stream without an error, so the preview reopens it
+/// once the camera has let go. A reconnect of another camera changes nothing.
+#[gpui::test]
+fn a_reconnect_reopens_the_stream_on_that_camera_only(cx: &mut TestAppContext) {
+    let (view, capture, _key) = camera_preview(cx);
+    select_camera(&view, cx);
+
+    view.update(cx, |view, cx| view.reopen_after_reconnect("cam-2", cx));
+    advance(cx, RELEASE_DELAY);
+    assert_eq!(events(&capture), ["open cam-1"]);
+
+    view.update(cx, |view, cx| view.reopen_after_reconnect(CAMERA_ID, cx));
+    view.read_with(cx, |view, _| {
+        assert!(matches!(
+            &view.lifecycle,
+            PreviewLifecycle::Restarting { .. }
+        ));
+    });
+    advance(cx, RELEASE_DELAY);
+    assert_eq!(events(&capture), ["open cam-1", "drop cam-1", "open cam-1"]);
+    assert_eq!(running_mode(&view, cx), Some(default_mode()));
+}
