@@ -1032,6 +1032,72 @@ fn home_transport_icon_paints_in_its_transport_color(cx: &mut gpui::TestAppConte
     }
 }
 
+/// Every Home grid card takes one column's width, so a short last row lines
+/// up under the rows above instead of stretching its cards.
+#[gpui::test]
+fn home_grid_cards_share_one_column_width(cx: &mut gpui::TestAppContext) {
+    use gpui::{AppContext as _, px, size};
+    use gpui_component::Root;
+
+    use super::AppView;
+    use crate::services::{assets::AssetResolver, i18n::LOCALE_LOCK};
+    use crate::state::tests::direct_inventory;
+    use crate::state::{AgentLink, AppState, Sources};
+
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    cx.update(gpui_component::init);
+    cx.update(|cx| {
+        let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let resolver = AssetResolver::new();
+        let inventories: Vec<_> = (1..=5)
+            .map(|unit| direct_inventory([0xa3, 0x93, 0xca, unit]))
+            .collect();
+        let state = cx.new(|_| {
+            let mut state = AppState::new(Sources {
+                inventories: &inventories,
+                ..Sources::in_memory(
+                    openlogi_core::config::Config::ephemeral(),
+                    &resolver,
+                    commands,
+                )
+            });
+            let _ = state.set_agent_link(AgentLink::Ready(status_with(
+                openlogi_ipc::SecureInput::Off,
+            )));
+            state
+        });
+        AppState::set_global(state, cx);
+    });
+    let (_, cx) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| AppView::new(window, cx));
+        Root::new(view, window, cx)
+    });
+
+    // Three columns leave two cards on the last row; two leave one.
+    for (width, columns) in [(1280., 3), (760., 2)] {
+        cx.simulate_resize(size(px(width), px(900.)));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let cards = [
+            "home-grid-card-0",
+            "home-grid-card-1",
+            "home-grid-card-2",
+            "home-grid-card-3",
+            "home-grid-card-4",
+        ]
+        .map(|card| cx.debug_bounds(card).expect("the grid shows five cards"));
+        for (position, card) in cards.iter().enumerate() {
+            let column = cards[position % columns];
+            assert_eq!(
+                (card.left(), card.size.width),
+                (column.left(), column.size.width),
+                "card {position} in a {width}px window"
+            );
+        }
+        assert_eq!(cards[columns - 1].top(), cards[0].top());
+        assert!(cards[columns].top() > cards[0].top());
+    }
+}
+
 #[test]
 fn gallery_order_moves_connected_devices_first_stably() {
     let mut records = vec![

@@ -1,9 +1,9 @@
 //! Switchable grid, list, and carousel layouts for the Home device gallery.
 
 use gpui::{
-    AnyElement, Context, ElementId, InteractiveElement, IntoElement, ParentElement, Rems,
-    SharedString, StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px,
-    rems, rgb,
+    AnyElement, Context, ElementId, InteractiveElement, IntoElement, ParentElement, Pixels, Rems,
+    SharedString, StatefulInteractiveElement as _, Styled, Window, div,
+    prelude::FluentBuilder as _, px, rems, rgb,
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
@@ -72,19 +72,21 @@ pub(super) fn device_view_switcher(
 
 /// Gap between gallery cards.
 const GALLERY_GAP: Rems = rems(1.);
+/// Inset of the grid from the window edges.
+const GALLERY_PAD: Rems = rems(1.5);
+/// Most cards a grid row holds; a wider window centres the grid instead.
+const GALLERY_MAX_COLUMNS: u16 = 3;
 /// Fixed carousel width: three cards plus navigation fit the default window.
 const CAROUSEL_CARD_W: Rems = rems(21.25);
-/// Maximum width of the grid: three cards at their maximum width plus gaps.
-const GALLERY_MAX_W: Rems = rems(77.9375);
 
 /// Render the persisted Home layout. All three modes share ordering, metadata,
 /// accessibility, and active-device semantics; only spatial density changes.
-pub(in crate::app) fn device_gallery(cx: &mut Context<AppView>) -> AnyElement {
+pub(in crate::app) fn device_gallery(window: &Window, cx: &mut Context<AppView>) -> AnyElement {
     let mode = AppState::try_read(cx).map_or(DeviceViewMode::Grid, |state| {
         state.app_settings().device_view_mode
     });
     match mode {
-        DeviceViewMode::Grid => device_grid(cx).into_any_element(),
+        DeviceViewMode::Grid => device_grid(window, cx).into_any_element(),
         DeviceViewMode::List => device_list(cx).into_any_element(),
         DeviceViewMode::Carousel => device_carousel(cx).into_any_element(),
     }
@@ -98,18 +100,40 @@ pub(in crate::app) fn ordered_device_indices(records: &[DeviceRecord]) -> Vec<us
     indices
 }
 
-fn device_grid(cx: &mut Context<AppView>) -> impl IntoElement {
+/// Columns of the Home grid across `width`: as many minimum-width cards as
+/// fit, capped at [`GALLERY_MAX_COLUMNS`], and never none.
+fn grid_columns(width: Pixels, rem: Pixels) -> u16 {
+    let card = theme::GALLERY_CARD_MIN_W.to_pixels(rem);
+    let gap = GALLERY_GAP.to_pixels(rem);
+    (2..=GALLERY_MAX_COLUMNS)
+        .rev()
+        .find(|&n| card * f32::from(n) + gap * f32::from(n - 1) <= width)
+        .unwrap_or(1)
+}
+
+/// Equal-width columns for every row, so a short last row lines up under the
+/// rows above instead of stretching its cards. The column count follows the
+/// window, which the gallery spans; the grid stops growing once its cards
+/// reach their maximum width.
+fn device_grid(window: &Window, cx: &mut Context<AppView>) -> impl IntoElement {
     let view = cx.entity();
     let pal = theme::palette(cx);
+    let rem = window.rem_size();
+    let columns = grid_columns(
+        window.viewport_size().width - GALLERY_PAD.to_pixels(rem) * 2.,
+        rem,
+    );
+    let max_w = rems(
+        f32::from(columns) * theme::GALLERY_CARD_MAX_W.0 + f32::from(columns - 1) * GALLERY_GAP.0,
+    );
     let cards = AppState::try_read(cx).map_or_else(Vec::new, |state| {
         let active_idx = state.selected_device_index().unwrap_or(0);
         ordered_device_indices(state.devices())
             .into_iter()
-            .map(|idx| {
+            .enumerate()
+            .map(|(position, idx)| {
                 device_card_element(state, idx, active_idx, view.clone(), pal)
-                    .min_w(theme::GALLERY_CARD_MIN_W)
-                    .max_w(theme::GALLERY_CARD_MAX_W)
-                    .flex_1()
+                    .debug_selector(move || format!("home-grid-card-{position}"))
                     .context_menu(device_menu(&state.devices()[idx]))
             })
             .collect()
@@ -121,13 +145,13 @@ fn device_grid(cx: &mut Context<AppView>) -> impl IntoElement {
         .min_h_0()
         .items_center()
         .overflow_y_scrollbar()
-        .p_6()
+        .p(GALLERY_PAD)
         .child(
-            h_flex()
+            div()
+                .grid()
+                .grid_cols(columns)
                 .w_full()
-                .max_w(GALLERY_MAX_W)
-                .items_stretch()
-                .flex_wrap()
+                .max_w(max_w)
                 .gap(GALLERY_GAP)
                 .children(cards),
         )

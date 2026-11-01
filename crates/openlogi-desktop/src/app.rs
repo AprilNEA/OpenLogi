@@ -738,7 +738,7 @@ impl AppView {
             (
                 home::home_header(cx).into_any_element(),
                 if has_device {
-                    home::device_gallery(cx).into_any_element()
+                    home::device_gallery(window, cx).into_any_element()
                 } else {
                     match status.inventory {
                         InventoryHealth::Scanning => home::device_scanning_state(cx),
