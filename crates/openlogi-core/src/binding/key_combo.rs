@@ -8,6 +8,38 @@ use thiserror::Error;
 
 use super::modifiers::Modifiers;
 
+/// HID keyboard modifier bits (usage page `0x07`, `0xE0`–`0xE7`): the left
+/// key of each pair, and both keys.
+const HID_LEFT_CTRL: u8 = 0x01;
+const HID_LEFT_SHIFT: u8 = 0x02;
+const HID_LEFT_ALT: u8 = 0x04;
+const HID_LEFT_GUI: u8 = 0x08;
+const HID_CTRL: u8 = HID_LEFT_CTRL | 0x10;
+const HID_SHIFT: u8 = HID_LEFT_SHIFT | 0x20;
+const HID_ALT: u8 = HID_LEFT_ALT | 0x40;
+const HID_GUI: u8 = HID_LEFT_GUI | 0x80;
+
+/// The host a chord's HID modifier keys are meant for. A [`KeyCombo`]'s
+/// Command is the host's primary modifier — the GUI key on macOS, Control
+/// elsewhere — so a chord a device sends as raw HID keys reads differently
+/// per host.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ModifierHost {
+    /// Command is the GUI key.
+    MacOs,
+    /// Command is Control.
+    Other,
+}
+
+impl ModifierHost {
+    /// The host this build runs on.
+    pub const CURRENT: Self = if cfg!(target_os = "macos") {
+        Self::MacOs
+    } else {
+        Self::Other
+    };
+}
+
 /// USB HID keyboard usage supported by custom shortcuts.
 ///
 /// Persisting a standard HID usage keeps the config independent of macOS
@@ -236,6 +268,62 @@ impl KeyCombo {
     #[must_use]
     pub const fn modifiers(&self) -> Modifiers {
         self.modifiers
+    }
+
+    /// The chord as a HID keyboard modifier byte for `host`, each modifier
+    /// as its left key.
+    #[must_use]
+    pub const fn hid_modifiers(&self, host: ModifierHost) -> u8 {
+        let mut bits = 0;
+        if self.has_command() {
+            bits |= match host {
+                ModifierHost::MacOs => HID_LEFT_GUI,
+                ModifierHost::Other => HID_LEFT_CTRL,
+            };
+        }
+        if self.has_super() {
+            bits |= HID_LEFT_GUI;
+        }
+        if self.has_control() {
+            bits |= HID_LEFT_CTRL;
+        }
+        if self.has_option() {
+            bits |= HID_LEFT_ALT;
+        }
+        if self.has_shift() {
+            bits |= HID_LEFT_SHIFT;
+        }
+        bits
+    }
+
+    /// The chord a device sends as HID modifier byte `modifiers` and `key`,
+    /// as `host` reads it: either key of a pair counts, and the GUI key is
+    /// Command on macOS and Super elsewhere. The inverse of
+    /// [`Self::hid_modifiers`] up to which spelling of the primary modifier
+    /// a chord uses: on Linux, Command+C writes as Control+C and reads back
+    /// so.
+    #[must_use]
+    pub const fn from_hid(modifiers: u8, key: KeyboardUsage, host: ModifierHost) -> Self {
+        let mut bits = Modifiers::empty();
+        if modifiers & HID_GUI != 0 {
+            bits = bits.union(match host {
+                ModifierHost::MacOs => Modifiers::COMMAND,
+                ModifierHost::Other => Modifiers::SUPER,
+            });
+        }
+        if modifiers & HID_CTRL != 0 {
+            bits = bits.union(Modifiers::CONTROL);
+        }
+        if modifiers & HID_ALT != 0 {
+            bits = bits.union(Modifiers::OPTION);
+        }
+        if modifiers & HID_SHIFT != 0 {
+            bits = bits.union(Modifiers::SHIFT);
+        }
+        Self {
+            modifiers: bits,
+            key,
+        }
     }
 
     /// Canonical user-facing chord label.

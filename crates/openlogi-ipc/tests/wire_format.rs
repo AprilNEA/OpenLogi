@@ -34,8 +34,9 @@ use std::fmt::Write;
 use bincode::Options;
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{
-    Action, ActionRingIcon, ActionRingSize, ActionRingSlot, ButtonId, GKey, GKeyProfile, GKeySlot,
-    GridKey, GridSlot, KeyCombo, KeypadPage, ModeKey,
+    Action, ActionRingIcon, ActionRingSize, ActionRingSlot, ButtonId, FlashBinding,
+    FlashBindingsState, FlashFunction, FlashWrite, GKey, GKeyProfile, GKeySlot, GridKey, GridSlot,
+    KeyCombo, KeypadPage, ModeKey, MouseButtonNumber,
 };
 use openlogi_core::config::{
     ConfigRevision, FlowPeerName, FlowPublicKey, Lighting, ScrollResolution,
@@ -119,7 +120,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// unreleased version and leave this pin alone (`crates/openlogi-ipc/AGENTS.md`).
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 46);
+    assert_eq!(PROTOCOL_VERSION, 47);
 }
 
 #[test]
@@ -975,6 +976,7 @@ fn device_inventory() {
                 m_keys: false,
                 macro_record: false,
                 change_host: false,
+                flash_bindings: false,
             }),
             settings_revision: 7,
             hidpp10: false,
@@ -982,7 +984,7 @@ fn device_inventory() {
     }];
     assert_wire(
         &inventory,
-        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b00001010150020001030106323134304c5a0102030400010100fb34b0fb8240000b01010100000101010101000101010101010100000001000000000700",
+        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b00001010150020001030106323134304c5a0102030400010100fb34b0fb8240000b0101010000010101010100010101010101010000000100000000000700",
     );
 }
 
@@ -1010,6 +1012,51 @@ fn onboard_state() {
         },
         "0001050105010553746f636b01",
     );
+}
+
+#[test]
+fn flash_bindings_state() {
+    let sixteen = MouseButtonNumber::try_new(16).expect("a mouse button number");
+    assert_wire(
+        &AgentRequest::ReadFlashBindings {
+            route: DeviceRoute::Unifying {
+                receiver_uid: "C531".into(),
+                slot: 1,
+            },
+        },
+        "3a01044335333101",
+    );
+    assert_wire(
+        &FlashBindingsState {
+            profile: Some(0),
+            slots: vec![
+                FlashBinding::MouseButtons(0x0001),
+                FlashBinding::Key {
+                    modifiers: 0x05,
+                    usage: 0x06,
+                },
+                FlashBinding::Consumer(0x00e9),
+                FlashBinding::Function(FlashFunction::ResolutionUp),
+                FlashBinding::Function(FlashFunction::Other(0x0099)),
+                FlashBinding::Disabled,
+                FlashBinding::Macro {
+                    page: 6,
+                    word_offset: 0x10,
+                },
+                FlashBinding::Raw([0x8f, 0x01, 0x02]),
+            ],
+            routed: BTreeMap::from([(sixteen, ButtonId::G6)]),
+            unrouted: vec![ButtonId::G11],
+            write: FlashWrite::Failed("gone".into()),
+        },
+        "010008000101050602e90303030b9904050610068f0102011002473601034731310304676f6e65",
+    );
+    assert_wire(&FlashWrite::Writing, "02");
+    assert_wire(&Action::ShowBatteryLevel, "41");
+    assert_wire(&Action::CycleOnboardProfiles, "44");
+    assert_wire(&Action::MouseButton(sixteen), "4510");
+    assert_wire(&ButtonId::G10, "03473130");
+    assert_wire(&ButtonId::Numbered(sixteen), "08427574746f6e3136");
 }
 
 #[test]

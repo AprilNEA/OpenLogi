@@ -1,9 +1,10 @@
-//! G-series onboard memory.
+//! G-series onboard memory, and the bindings a G700 holds in its flash.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::App;
-use openlogi_core::binding::{GamingButtons, GamingLayout};
+use openlogi_core::binding::{FlashBindingsState, GamingButtons, GamingLayout};
 use openlogi_core::config::OnboardMemory;
 use openlogi_core::hid::{OnboardMode, OnboardState};
 
@@ -35,6 +36,55 @@ impl AppState {
                 GamingButtons::for_device(&record.model_key, record.capabilities.as_ref())
             })
             .map(GamingButtons::layout)
+    }
+
+    /// The layout of the selected mouse if its flash holds its bindings
+    /// (the G700): the agent writes them there.
+    #[must_use]
+    pub fn current_flash_layout(&self) -> Option<&'static GamingLayout> {
+        self.current_record()
+            .and_then(|record| {
+                GamingButtons::for_device(&record.model_key, record.capabilities.as_ref())
+            })
+            .and_then(GamingButtons::flash_layout)
+    }
+
+    /// What the selected flash-bindings mouse holds, as the agent last read
+    /// or wrote it, and where a write stands; `None` until read.
+    #[must_use]
+    pub fn current_flash_bindings(&self) -> Option<Arc<FlashBindingsState>> {
+        let key = self.current_record()?.device_key();
+        match self.pointer.reads.flash_bindings_load(&key)? {
+            Load::Ready(reading) => Some(Arc::clone(reading)),
+            _ => None,
+        }
+    }
+
+    /// Read the selected flash-bindings mouse again once the agent has had
+    /// time to take a binding change, which it then writes to the flash; the
+    /// read repeats itself while that write is queued or running.
+    pub(crate) fn refresh_flash_bindings_later(cx: &mut App) {
+        const WAITS: [Duration; 2] = [Duration::from_millis(500), Duration::from_millis(1500)];
+        Self::update(cx, |state, cx| {
+            let Some(key) = state
+                .current_record()
+                .filter(|_| state.current_flash_layout().is_some())
+                .map(DeviceRecord::device_key)
+            else {
+                return;
+            };
+            cx.spawn(async move |state, cx| {
+                for wait in WAITS {
+                    cx.background_executor().timer(wait).await;
+                    state
+                        .update(cx, |state, _| {
+                            state.pointer.reads.refresh_flash_bindings(&key);
+                        })
+                        .ok();
+                }
+            })
+            .detach();
+        });
     }
 
     #[must_use]
@@ -128,6 +178,21 @@ impl AppState {
             })
             .detach();
         });
+    }
+
+    pub(super) fn load_current_flash_bindings(&mut self, cx: &mut gpui::Context<Self>) {
+        if self.current_flash_layout().is_none() {
+            return;
+        }
+        let Some((key, route)) = self
+            .current_record()
+            .and_then(|record| Some((record.device_key(), record.route.clone()?)))
+        else {
+            return;
+        };
+        self.pointer
+            .reads
+            .ensure_flash_bindings(key, route, self.ipc_sender(), cx);
     }
 
     pub(super) fn load_current_onboard(&mut self, cx: &mut gpui::Context<Self>) {

@@ -57,7 +57,7 @@ use openlogi_agent_core::backlight_overlay::BacklightOverlayManager;
 use openlogi_agent_core::lock_keys::LockKeyIndicator;
 use openlogi_agent_core::notices::{LowBatteryWatch, NoticeBoard};
 use openlogi_core::app::ForegroundApp;
-use openlogi_core::binding::ActionRingSlot;
+use openlogi_core::binding::{ActionRingSlot, FlashBindingsState, G700, GamingButtons};
 use openlogi_core::config::{AppSettings, Config, Lighting};
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceInventory, DeviceKind, LockKey,
@@ -1179,6 +1179,34 @@ impl Agent for MockAgent {
         info!(%route, "read_onboard (no onboard memory in the mock)");
         Err(WriteError::FeatureUnsupported {
             feature_hex: 0x8100,
+        })
+    }
+
+    async fn read_flash_bindings(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<FlashBindingsState, WriteError> {
+        let state = self.state.lock().await;
+        let flash_held = state.render_inventory().iter().any(|inventory| {
+            inventory
+                .paired
+                .iter()
+                .zip(slot_routes(inventory))
+                .any(|(device, slot_route)| {
+                    slot_route.as_ref() == Some(&route)
+                        && GamingButtons::flash_layout_for(device.capabilities.as_ref()).is_some()
+                })
+        });
+        info!(%route, flash_held, "read_flash_bindings");
+        if !flash_held {
+            return Err(WriteError::DeviceNotFound);
+        }
+        // The mock writes no flash: the mouse holds its factory bindings.
+        Ok(FlashBindingsState {
+            profile: Some(0),
+            slots: G700.flash_defaults.to_vec(),
+            ..FlashBindingsState::default()
         })
     }
 

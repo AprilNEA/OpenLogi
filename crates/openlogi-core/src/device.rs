@@ -247,6 +247,13 @@ pub struct Capabilities {
     /// identity.
     #[serde(default)]
     pub change_host: bool,
+    /// Button bindings held in HID++ 1.0 onboard-profile flash, which the
+    /// agent rewrites (the G700). Measured by the device layer from the
+    /// mouse's registers, never from a feature table. Consumers ask
+    /// [`GamingButtons::for_device`](crate::binding::GamingButtons::for_device).
+    /// Appended: crosses the IPC and the persisted identity.
+    #[serde(default)]
+    pub flash_bindings: bool,
 }
 
 impl Capabilities {
@@ -307,6 +314,7 @@ impl Capabilities {
             m_keys: ids.contains(&0x8020),
             macro_record: ids.contains(&0x8030),
             change_host: ids.contains(&0x1814),
+            flash_bindings: false,
         }
     }
 
@@ -937,6 +945,7 @@ mod tests {
                     m_keys: false,
                     macro_record: false,
                     change_host: false,
+                    flash_bindings: false,
                 }),
                 settings_revision: 0,
                 hidpp10: false,
@@ -1066,6 +1075,7 @@ mod tests {
                 m_keys: false,
                 macro_record: false,
                 change_host: false,
+                flash_bindings: false,
             }
         );
         assert!(!Capabilities::from_feature_ids(&[0x0003, 0x1b04]).thumbwheel);
@@ -1099,6 +1109,7 @@ mod tests {
                 m_keys: false,
                 macro_record: false,
                 change_host: false,
+                flash_bindings: false,
             }
         );
         // A G713: the gaming-key features and onboard profiles, no

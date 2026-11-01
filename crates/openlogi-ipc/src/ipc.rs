@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use openlogi_core::app::ForegroundApp;
-use openlogi_core::binding::{ActionRingIcon, ActionRingSize, ActionRingSlot};
+use openlogi_core::binding::{ActionRingIcon, ActionRingSize, ActionRingSlot, FlashBindingsState};
 use openlogi_core::config::{ConfigRevision, FlowPeerName, FlowPublicKey, Lighting};
 use openlogi_core::device::{
     BatteryInfo, ChangedOnLight, DeviceInventory, DeviceKind, LightState, LockKey, StandaloneDevice,
@@ -194,7 +194,12 @@ pub use succession::Identity;
 ///      and `ActionRingIcon::{Channel1, Channel2, Channel3}` appended after
 ///      them — a device's move to another Easy-Switch channel, bound to a
 ///      button or an Actions Ring slot.
-pub const PROTOCOL_VERSION: u32 = 46;
+/// v47: `Capabilities::flash_bindings` appended — the G700's flash-held
+///      bindings. `Action::{ShowBatteryLevel, NextOnboardProfile,
+///      PreviousOnboardProfile, CycleOnboardProfiles, MouseButton}` appended
+///      after the Easy-Switch actions. `ButtonId` gains the `G10`, `G11` and
+///      `ButtonN` names. `Agent::read_flash_bindings` appended.
+pub const PROTOCOL_VERSION: u32 = 47;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -1263,4 +1268,11 @@ pub trait Agent {
     /// held trigger cancels instead of choosing the slot last reported by
     /// [`Agent::action_ring_hover`].
     async fn action_ring_unhover(session_id: u64) -> Result<(), ActionRingCommandError>;
+
+    /// The button bindings a mouse holds in its onboard flash (the G700),
+    /// as the agent last read or wrote them, and where the write of a
+    /// configuration change stands. Answers from the agent's own record
+    /// without device I/O; a route that is no such mouse is
+    /// [`WriteError::DeviceNotFound`].
+    async fn read_flash_bindings(route: DeviceRoute) -> Result<FlashBindingsState, WriteError>;
 }

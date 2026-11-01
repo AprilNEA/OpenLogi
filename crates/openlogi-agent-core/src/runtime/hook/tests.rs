@@ -1251,3 +1251,164 @@ fn a_re_press_ends_a_lost_hold_before_its_motion_commits_a_phantom_swipe() {
     assert_eq!(back(false), EventDisposition::Suppress);
     assert!(owner.shutdown());
 }
+
+fn g700_receiver() -> EventDevice {
+    EventDevice {
+        vendor_id: Some(0x046d),
+        product_id: Some(0xc531),
+        product_name: Some("Logitech USB Receiver".into()),
+    }
+}
+
+fn agent_button(number: u8) -> ButtonId {
+    ButtonId::Numbered(MouseButtonNumber::try_new(number).expect("a mouse button number"))
+}
+
+/// A G700 whose flash routes G6 to agent button 16, while the selected
+/// device's maps (another mouse's) bind Back.
+fn g700_maps() -> SharedHookMaps {
+    let sixteen = MouseButtonNumber::try_new(16).expect("a mouse button number");
+    Arc::new(RwLock::new(HookMaps {
+        bindings: BTreeMap::from([(ButtonId::Back, Action::NextTab.into())]),
+        flash_slot_bindings: BTreeMap::from([
+            (ButtonId::G6, Action::Copy.into()),
+            (ButtonId::Back, Action::Paste.into()),
+        ]),
+        flash_routes: BTreeMap::from([(sixteen, ButtonId::G6)]),
+        ..HookMaps::default()
+    }))
+}
+
+#[test]
+fn a_routed_agent_button_of_the_g700_runs_its_slots_binding() {
+    use super::super::button::ButtonRuntimeEvent;
+    let (dispatcher, mut owner, events) = test_dispatcher();
+    let hooks = g700_maps();
+    let g700 = g700_receiver();
+    assert_eq!(
+        handle_button(
+            agent_button(16),
+            true,
+            Some(&g700),
+            &hooks,
+            &dispatcher,
+            || None
+        ),
+        EventDisposition::Suppress
+    );
+    let ButtonRuntimeEvent::Started(press) =
+        events.recv_timeout(Duration::from_secs(1)).expect("down")
+    else {
+        panic!("started");
+    };
+    assert_eq!(press.start_action(), Some(&Action::Copy));
+    assert_eq!(
+        handle_button(
+            agent_button(16),
+            false,
+            Some(&g700),
+            &hooks,
+            &dispatcher,
+            || None
+        ),
+        EventDisposition::Suppress
+    );
+    assert!(matches!(
+        events.recv_timeout(Duration::from_secs(1)).expect("up"),
+        ButtonRuntimeEvent::Ended { .. }
+    ));
+    assert!(owner.shutdown());
+}
+
+/// Everything else the G700 reports is what its flash made of the press:
+/// Back and Forward (buttons 6 and 7 included, which evdev reports as the
+/// same codes) and agent buttons nothing routes pass through untouched, and
+/// the selected device's Back binding is not applied to them.
+#[test]
+fn the_g700s_other_buttons_pass_through() {
+    let (dispatcher, mut owner, events) = test_dispatcher();
+    let hooks = g700_maps();
+    let g700 = g700_receiver();
+    for id in [
+        ButtonId::Back,
+        ButtonId::Forward,
+        ButtonId::MiddleClick,
+        agent_button(15),
+        agent_button(9),
+    ] {
+        for pressed in [true, false] {
+            assert_eq!(
+                handle_button(id, pressed, Some(&g700), &hooks, &dispatcher, || None),
+                EventDisposition::PassThrough,
+                "{id:?} pressed {pressed}"
+            );
+        }
+    }
+    assert!(
+        events.recv_timeout(Duration::from_millis(200)).is_err(),
+        "no G700 button but a routed one dispatches"
+    );
+    assert!(owner.shutdown());
+}
+
+/// The routes are the G700's alone: another mouse reporting a button past
+/// eight is not dispatched, and its Back still follows the selected maps.
+#[test]
+fn agent_buttons_of_another_mouse_are_not_routed() {
+    let (dispatcher, mut owner, events) = test_dispatcher();
+    let hooks = g700_maps();
+    let other = EventDevice {
+        vendor_id: Some(0x046d),
+        product_id: Some(0xc548),
+        product_name: Some("Logitech USB Receiver".into()),
+    };
+    assert_eq!(
+        handle_button(
+            agent_button(16),
+            true,
+            Some(&other),
+            &hooks,
+            &dispatcher,
+            || None
+        ),
+        EventDisposition::PassThrough
+    );
+    assert!(events.recv_timeout(Duration::from_millis(200)).is_err());
+    assert_eq!(
+        handle_button(
+            ButtonId::Back,
+            true,
+            Some(&other),
+            &hooks,
+            &dispatcher,
+            || None
+        ),
+        EventDisposition::Suppress,
+        "another mouse keeps the selected device's remap"
+    );
+    assert!(owner.shutdown());
+}
+
+/// A route that names a slot the configuration no longer binds fails open.
+#[test]
+fn a_routed_button_without_a_binding_passes_through() {
+    let (dispatcher, mut owner, events) = test_dispatcher();
+    let hooks = g700_maps();
+    hooks.write().expect("maps").flash_slot_bindings.clear();
+    let g700 = g700_receiver();
+    for pressed in [true, false] {
+        assert_eq!(
+            handle_button(
+                agent_button(16),
+                pressed,
+                Some(&g700),
+                &hooks,
+                &dispatcher,
+                || None
+            ),
+            EventDisposition::PassThrough
+        );
+    }
+    assert!(events.recv_timeout(Duration::from_millis(200)).is_err());
+    assert!(owner.shutdown());
+}

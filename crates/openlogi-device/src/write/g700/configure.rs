@@ -616,7 +616,11 @@ fn applied<T: PartialEq>(
 /// would carry the shifted bytes to flash with a fresh CRC that hides them.
 /// A valid CRC vouches for the bytes; without one the page must read the
 /// same twice.
-async fn read_trusted(chan: &HidppChannel, device_index: u8, page: u8) -> Result<Page, G700Error> {
+pub(super) async fn read_trusted(
+    chan: &HidppChannel,
+    device_index: u8,
+    page: u8,
+) -> Result<Page, G700Error> {
     let first = read(chan, device_index, page).await?;
     if first.has_valid_crc() || read(chan, device_index, page).await? == first {
         Ok(first)
@@ -625,7 +629,11 @@ async fn read_trusted(chan: &HidppChannel, device_index: u8, page: u8) -> Result
     }
 }
 
-async fn read(chan: &HidppChannel, device_index: u8, page: u8) -> Result<Page, G700Error> {
+pub(super) async fn read(
+    chan: &HidppChannel,
+    device_index: u8,
+    page: u8,
+) -> Result<Page, G700Error> {
     read_page(chan, device_index, page)
         .await
         .map_err(|source| G700Error::PageRead { page, source })

@@ -25,6 +25,7 @@ use hidpp::{
     },
     register::{
         battery::{self as register_battery, BatteryRegister},
+        current_profile::read_current_profile,
         report_rate::read_report_interval,
         resolution::read_current_resolution,
     },
@@ -653,9 +654,10 @@ async fn probe_hidpp10(
 
 /// What a G700 can be configured to do, read off the registers that drive
 /// it: the DPI from the current-resolution register `0x63`, the report rate
-/// from `0x64`. Its buttons live in its onboard profiles, which no capability
-/// here covers yet. A register the mouse refuses is absent; one it does not
-/// answer fails the probe, so a guess is never memoized.
+/// from `0x64`, and the button bindings of its onboard profiles from the
+/// current-profile register `0x0F`, which says which profile holds them. A
+/// register the mouse refuses is absent; one it does not answer fails the
+/// probe, so a guess is never memoized.
 async fn g700_capabilities(channel: &HidppChannel, slot: u8) -> Result<Capabilities, Hidpp10Error> {
     fn answered<T>(read: Result<T, Hidpp10Error>) -> Result<bool, Hidpp10Error> {
         match read {
@@ -667,6 +669,7 @@ async fn g700_capabilities(channel: &HidppChannel, slot: u8) -> Result<Capabilit
     Ok(Capabilities {
         pointer: answered(read_current_resolution(channel, slot).await)?,
         report_rate: answered(read_report_interval(channel, slot).await)?,
+        flash_bindings: answered(read_current_profile(channel, slot).await)?,
         ..Capabilities::default()
     })
 }

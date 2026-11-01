@@ -1,7 +1,7 @@
 //! The Logitech G700: reaching it, dumping its settings registers and
 //! onboard memory, and writing them (see `configure`), plus the live DPI and
 //! report-rate settings the generic DPI and report-rate entry points route
-//! here (see `live`).
+//! here (see `live`), and its button bindings (see `bindings`).
 //!
 //! The G700 is a HID++ 1.0 mouse: no feature table, settings at fixed
 //! registers, five profiles in onboard flash. It is found like every other
@@ -12,6 +12,7 @@
 //! Decoding is left to the codecs in [`hidpp::register`], which callers
 //! reach as [`crate::g700`]; every request goes through this module.
 
+mod bindings;
 mod configure;
 mod live;
 
@@ -42,6 +43,7 @@ use crate::host_lock::ReceiverRegisterPhase;
 
 use super::WriteError;
 
+pub use bindings::{G700BindingsSync, sync_g700_bindings_on};
 pub use configure::{
     BackupOrigin, G700Error, G700Register, ProfileDpiChange, ProfileDpiWrite, ProfileRateChange,
     ProfileRateWrite, RestoreOutcome, RestoredPage, restore_g700_pages, set_g700_current_profile,
@@ -535,6 +537,7 @@ mod tests {
                     model_info: None,
                     capabilities: None,
                     settings_revision: 0,
+                    hidpp10: false,
                 })
                 .collect(),
         }

@@ -70,11 +70,11 @@ pub use fn_lock::{get_fn_lock, get_fn_lock_on, set_fn_lock, set_fn_lock_on};
 pub use force_sensing::{get_force_sensing_on, set_force_sensing_on};
 pub(crate) use g700::wired_device_index as g700_wired_device_index;
 pub use g700::{
-    BackupOrigin, G700Error, G700Identity, G700MemoryDump, G700Register, PageRead,
-    ProfileDpiChange, ProfileDpiWrite, ProfileRateChange, ProfileRateWrite, RestoreOutcome,
-    RestoredPage, find_g700_route, read_g700_memory, restore_g700_pages, set_g700_current_profile,
-    set_g700_profile_dpi, set_g700_profile_report_interval, set_g700_report_interval,
-    set_g700_resolution,
+    BackupOrigin, G700BindingsSync, G700Error, G700Identity, G700MemoryDump, G700Register,
+    PageRead, ProfileDpiChange, ProfileDpiWrite, ProfileRateChange, ProfileRateWrite,
+    RestoreOutcome, RestoredPage, find_g700_route, read_g700_memory, restore_g700_pages,
+    set_g700_current_profile, set_g700_profile_dpi, set_g700_profile_report_interval,
+    set_g700_report_interval, set_g700_resolution, sync_g700_bindings_on,
 };
 pub use haptic::{
     HapticRestore, HapticRestoreOutcome, ensure_haptics_armed_on, play_haptic, play_haptic_on,

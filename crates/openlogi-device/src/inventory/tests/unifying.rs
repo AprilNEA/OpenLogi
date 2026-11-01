@@ -499,11 +499,13 @@ fn g700_registers(request: &[u8], device: u8) -> Option<Vec<u8>> {
     }
 }
 
-/// The capabilities a G700 measures to: its DPI and its report rate.
+/// The capabilities a G700 measures to: its DPI, its report rate and the
+/// bindings of its onboard profiles.
 fn g700_capabilities() -> Capabilities {
     Capabilities {
         pointer: true,
         report_rate: true,
+        flash_bindings: true,
         ..Capabilities::default()
     }
 }

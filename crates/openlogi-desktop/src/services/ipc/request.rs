@@ -16,6 +16,7 @@
 
 use std::future::Future;
 
+use openlogi_core::binding::FlashBindingsState;
 use openlogi_core::config::{ConfigRevision, Lighting};
 use openlogi_core::hid::{
     BacklightChange, BacklightState, DeviceRoute, DisableKeysMask, DisableKeysState, Dpi, DpiInfo,
@@ -691,6 +692,25 @@ impl Request for ReadOnboard {
     }
 }
 
+pub struct ReadFlashBindings {
+    pub route: DeviceRoute,
+    pub reply: oneshot::Sender<Result<FlashBindingsState, WriteError>>,
+}
+
+impl Request for ReadFlashBindings {
+    type Answer = Result<FlashBindingsState, WriteError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .read_flash_bindings(context::current(), self.route.clone())
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, _: &UpdateSender) {
+        let _ = self.reply.send(or_unavailable(outcome));
+    }
+}
+
 /// Have the agent re-read the `config.toml` the GUI just saved
 /// ([`openlogi_ipc::Agent::reload_saved_config`]).
 ///
@@ -1166,6 +1186,7 @@ commands! {
     ReadDisableKeys,
     SetDisableKeys,
     ReadOnboard,
+    ReadFlashBindings,
     ReloadConfig,
     RequestAccessibilityPrompt,
     RetryConnection,

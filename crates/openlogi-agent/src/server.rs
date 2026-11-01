@@ -19,7 +19,7 @@ use openlogi_agent_core::event_monitor::SharedEventMonitor;
 use openlogi_agent_core::observable::ObservableState;
 use openlogi_agent_core::orchestrator::{self, Orchestrator, SharedHandles};
 use openlogi_agent_core::runtime::ActionDispatcher;
-use openlogi_core::binding::ActionRingSlot;
+use openlogi_core::binding::{ActionRingSlot, FlashBindingsState};
 use openlogi_core::config::{ConfigFile, ConfigRevision, Lighting};
 use openlogi_core::device::DeviceInventory;
 use openlogi_hid::{
@@ -301,6 +301,14 @@ impl Agent for AgentServer {
                 openlogi_hid::get_onboard_on(&c).await
             })
             .await
+    }
+
+    async fn read_flash_bindings(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<FlashBindingsState, WriteError> {
+        self.orchestrator.lock().await.read_flash_bindings(&route)
     }
 
     async fn request_accessibility_prompt(self, _: Context) {

@@ -323,6 +323,13 @@ impl Armed {
                 .await;
         }
 
+        running
+            .shared
+            .flash_writes
+            .start(openlogi_agent_core::flash_writes::G700FlashExecutor {
+                device: running.shared.device_access(),
+                hook_maps: running.shared.hook_maps.clone(),
+            });
         // HID++ watchers need no Accessibility — start them up front.
         running.restart_hidpp_watchers();
         running.shared.flow.arm();
@@ -736,6 +743,9 @@ impl Running {
                 // No session arms until the agent stays, see
                 // `restart_hidpp_watchers`.
                 self.ring_haptics.finish().await;
+                // A flash write cut off by the drain would leave the mouse on
+                // its factory profile: let the one in progress end first.
+                self.shared.flash_writes.hold().await;
                 self.hidpp_watchers
                     .begin_replacement(Replacement { path, retry });
             }
@@ -756,8 +766,10 @@ impl Running {
 
     fn restart_hidpp_watchers(&mut self) {
         // The agent stays — at startup, or after a replacement that did not
-        // happen — so ring sessions arm the haptic engine again.
+        // happen — so ring sessions arm the haptic engine again, and flash
+        // writes may start.
         self.ring_haptics.resume();
+        self.shared.flash_writes.resume();
         self.hidpp_watchers =
             WatcherFleet::Running(startup::spawn_hidpp_watchers(&self.shared, &self.inputs));
     }
@@ -811,7 +823,8 @@ impl Running {
     }
 
     /// Hand back the haptic enable an open Actions Ring session may owe,
-    /// drain the HID++ fleet, release the hook, and end the process.
+    /// wait for a flash write in progress, drain the HID++ fleet, release the
+    /// hook, and end the process.
     ///
     /// Leaving ends the ring session whether or not a successor follows, and
     /// a successor knows nothing of the enable. The restore runs first, while
@@ -824,6 +837,9 @@ impl Running {
         // Flow holds receiver leases and device I/O, so it stops first.
         self.shared.flow.shutdown().await;
         self.ring_haptics.finish().await;
+        // Before the channels close: a flash page rewrite cut short leaves
+        // the mouse on its factory profile.
+        self.shared.flash_writes.shutdown().await;
         std::mem::replace(&mut self.hidpp_watchers, WatcherFleet::Inactive)
             .stop_for_exit()
             .await;

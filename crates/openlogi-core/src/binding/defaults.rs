@@ -82,7 +82,12 @@ pub fn default_binding(button: ButtonId) -> Action {
             clippy::match_same_arms,
             reason = "the layout owns a G button's default; unrelated to the keyboard arm"
         )]
-        ButtonId::G6 | ButtonId::G7 | ButtonId::G8 | ButtonId::G9 => Action::None,
+        ButtonId::G6
+        | ButtonId::G7
+        | ButtonId::G8
+        | ButtonId::G9
+        | ButtonId::G10
+        | ButtonId::G11 => Action::None,
         // Keyboard keys stay on their native firmware function until the user
         // explicitly binds them; an unbound key is never diverted, so a
         // `None` default keeps the projection total without capturing anything.
@@ -91,9 +96,13 @@ pub fn default_binding(button: ButtonId) -> Action {
         // and seed the same inert default.
         // A G-series keyboard's gaming keys run nothing until bound: the
         // whole cluster is taken only on the user's explicit opt-in.
-        ButtonId::Control(_) | ButtonId::Grid(_) | ButtonId::GKey(_) | ButtonId::ModeKey(_) => {
-            Action::None
-        }
+        // A numbered button is passed through unless a flash mouse's agent
+        // button binds it, so it seeds nothing either.
+        ButtonId::Numbered(_)
+        | ButtonId::Control(_)
+        | ButtonId::Grid(_)
+        | ButtonId::GKey(_)
+        | ButtonId::ModeKey(_) => Action::None,
     }
 }
 

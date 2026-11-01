@@ -34,6 +34,7 @@ pub use devices::DeviceRecord;
 pub(crate) use devices::{Link, Presence};
 pub(crate) use easy_switch::HostRenameRefusal;
 pub(crate) use events::{StateEvent, StateEvents};
+pub(crate) use flash_view::{FlashStatus, FlashView, SlotNote, picker_extras};
 pub(crate) use flow::{
     FlowDeviceRow, FlowHealth, FlowHost, FlowIssue, FlowPairingRefusal, FlowReadiness,
 };
@@ -41,8 +42,8 @@ pub(crate) use gaming_keys::GamingKeys;
 pub use light::LightCommandStatus;
 pub(crate) use load::Load;
 pub use load::{
-    BacklightLoad, DisableKeysLoad, DpiLoad, EasySwitchLoad, FnLockLoad, ForceSensingLoad,
-    OnboardLoad, PointerSpeedLoad, ReportRateLoad, SidetoneLoad, SmartShiftLoad,
+    BacklightLoad, DisableKeysLoad, DpiLoad, EasySwitchLoad, FlashBindingsLoad, FnLockLoad,
+    ForceSensingLoad, OnboardLoad, PointerSpeedLoad, ReportRateLoad, SidetoneLoad, SmartShiftLoad,
 };
 
 /// Result of confirming a SmartShift write by reading the value back.
@@ -91,6 +92,7 @@ mod disable_keys;
 mod dpi;
 mod easy_switch;
 mod events;
+mod flash_view;
 mod flow;
 mod fn_lock;
 mod force_sensing;
@@ -265,6 +267,7 @@ impl AppState {
             state.load_current_easy_switch(cx);
             state.load_current_disable_keys(cx);
             state.load_current_onboard(cx);
+            state.load_current_flash_bindings(cx);
         });
     }
 

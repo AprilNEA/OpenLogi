@@ -7,7 +7,8 @@ severity: error
 message: Whether a device is a G-series mouse comes from GamingButtons::for_device. Call it instead of reading the gaming capability flags here.
 note: |
   The agent, the tab list and the Buttons panel each derived "G-series" from
-  the 0x8100/0x8110 flags, in two different formulas. See "Single source of
+  the 0x8100/0x8110 flags, in two different formulas. A mouse whose flash
+  holds its bindings is GamingButtons::Flash, asked the same way. See "Single source of
   truth" in AGENTS.md.
 files:
   - crates/**/*.rs
@@ -20,3 +21,5 @@ rule:
   any:
     - pattern: $A.onboard_profiles || $B.button_spy
     - pattern: $A.button_spy || $B.onboard_profiles
+    # The flash-bindings mouse (G700) is a verdict of its own.
+    - pattern: $A.flash_bindings

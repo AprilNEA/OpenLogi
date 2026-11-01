@@ -571,6 +571,7 @@ fn a_selected_gesture_can_render_in_the_binding_inspector(cx: &mut TestAppContex
                 press_force: None,
                 extra_actions: &[],
                 hidden_actions: &[],
+                flash: None,
             },
             ActionPickerContext {
                 open: true,

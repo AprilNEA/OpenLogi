@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use super::application_target::ApplicationTarget;
 use super::category::Category;
+use super::flash::MouseButtonNumber;
 use super::key_combo::KeyCombo;
 use super::modifiers::BareModifiers;
 
@@ -264,6 +265,26 @@ pub enum Action {
     EasySwitchChannel2,
     /// Move the device to its third Easy-Switch channel.
     EasySwitchChannel3,
+    /// Show the battery level on the mouse's own DPI LEDs. A firmware
+    /// function of mice that keep their bindings in onboard flash (see
+    /// [`FlashBinding`](super::FlashBinding)); nothing on the host can run
+    /// it, so it does nothing bound anywhere else.
+    ShowBatteryLevel,
+    /// Play the next onboard profile, stopping at the last. A flash-only
+    /// firmware function, like [`Action::ShowBatteryLevel`].
+    NextOnboardProfile,
+    /// Play the previous onboard profile, stopping at the first. A
+    /// flash-only firmware function, like [`Action::ShowBatteryLevel`].
+    PreviousOnboardProfile,
+    /// Play the next onboard profile, wrapping from the last to the first. A
+    /// flash-only firmware function, like [`Action::ShowBatteryLevel`].
+    CycleOnboardProfiles,
+    /// Press the mouse button the HID report numbers `n`, as the mouse itself
+    /// reports it. Buttons 1 to 5 have actions of their own
+    /// ([`Action::LeftClick`] … [`Action::MouseForward`]), which a flash
+    /// binding of those buttons reads back as. Written to a mouse's onboard
+    /// flash only; the host injects nothing for it elsewhere.
+    MouseButton(MouseButtonNumber),
 }
 
 /// Which of a held chord's keys stay down for the lifetime of the press.
@@ -331,6 +352,9 @@ macro_rules! for_each_unit_action {
             MouseBack "Back (Button 4)" "actions.back_button_4" Mouse MouseBack,
             MouseForward "Forward (Button 5)" "actions.forward_button_5" Mouse MouseForward,
             GShift "G-Shift (Hold)" "actions.g_shift_hold" Mouse Layers not_pickable,
+            NextOnboardProfile "Next Onboard Profile" "actions.next_onboard_profile" Mouse ArrowUp not_pickable,
+            PreviousOnboardProfile "Previous Onboard Profile" "actions.previous_onboard_profile" Mouse ArrowDown not_pickable,
+            CycleOnboardProfiles "Cycle Onboard Profiles" "actions.cycle_onboard_profiles" Mouse Refresh not_pickable,
             // Editing
             Copy "Copy" "common.copy" Editing Copy,
             Paste "Paste" "common.paste" Editing Paste,
@@ -368,6 +392,7 @@ macro_rules! for_each_unit_action {
             EasySwitchChannel1 "Easy-Switch Channel 1" "actions.easy_switch_channel_1" System Channel1,
             EasySwitchChannel2 "Easy-Switch Channel 2" "actions.easy_switch_channel_2" System Channel2,
             EasySwitchChannel3 "Easy-Switch Channel 3" "actions.easy_switch_channel_3" System Channel3,
+            ShowBatteryLevel "Show Battery Level" "actions.show_battery_level" System Gauge not_pickable,
             // Media
             PlayPause "Play / Pause" "actions.play_pause" Media Play,
             NextTrack "Next Track" "actions.next_track" Media NextTrack,
@@ -409,6 +434,7 @@ macro_rules! derive_action_core {
                 match self {
                     $( Action::$variant => $label.into(), )*
                     Action::SetDpiPreset(i) => format!("DPI Preset {}", i + 1),
+                    Action::MouseButton(number) => format!("Mouse Button {number}"),
                     Action::CustomShortcut(combo) => combo.rendered_label(),
                     Action::TypeText(s) => format!("Type \"{s}\""),
                     Action::RunAppleScript(_) => "Run AppleScript".into(),
@@ -436,6 +462,7 @@ macro_rules! derive_action_core {
                 match self {
                     $( Action::$variant => Some($translation_key), )*
                     Action::SetDpiPreset(_)
+                    | Action::MouseButton(_)
                     | Action::CustomShortcut(_)
                     | Action::TypeText(_)
                     | Action::RunAppleScript(_)
@@ -477,6 +504,7 @@ macro_rules! derive_action_core {
                     | Action::TapKeyHoldingModifiers(_)
                     | Action::HoldModifier(_) => Category::Editing,
                     Action::SetDpiPreset(_) => Category::Dpi,
+                    Action::MouseButton(_) => Category::Mouse,
                     Action::OpenApplication(_) => Category::System,
                 }
             }

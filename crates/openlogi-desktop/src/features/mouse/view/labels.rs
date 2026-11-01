@@ -185,6 +185,15 @@ pub(super) struct BindingLabel {
 }
 
 impl BindingLabel {
+    /// A label for what a mouse holds in its own flash that no action names:
+    /// a macro or a function OpenLogi does not know.
+    pub(super) fn held_on_mouse(text: gpui::SharedString) -> Self {
+        Self {
+            text,
+            icon: Some("action-icons/list-checks.svg"),
+        }
+    }
+
     /// The card's value row: the leading action icon, the binding text, and
     /// the trailing chevron, all tinted with `color`. The text wraps to
     /// `value_lines` lines, the last ending in an ellipsis if it still does

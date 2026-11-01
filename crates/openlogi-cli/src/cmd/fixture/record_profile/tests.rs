@@ -179,6 +179,14 @@ impl Agent for TestAgent {
         unreachable!("profile capture does not read onboard memory")
     }
 
+    async fn read_flash_bindings(
+        self,
+        _: TarpcContext,
+        _route: DeviceRoute,
+    ) -> Result<openlogi_core::binding::FlashBindingsState, WriteError> {
+        unreachable!("profile capture does not read flash bindings")
+    }
+
     async fn unpair_device(
         self,
         _: TarpcContext,

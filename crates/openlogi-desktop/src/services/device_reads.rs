@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{Context, Subscription};
+use openlogi_core::binding::{FlashBindingsState, FlashWrite};
 use openlogi_core::hid::{
     BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
     ForceSensingInfo, OnboardState, PointerSpeed, ReportRateInfo, SidetoneLevel, SmartShiftStatus,
@@ -20,13 +21,13 @@ use swr_gpui::Query;
 use tokio::sync::mpsc;
 
 use super::ipc::{
-    Command, ReadBacklight, ReadDpi, ReadEasySwitchHosts, ReadFnLock, ReadForceSensing,
-    ReadOnboard, ReadPointerSpeed, ReadReportRate, ReadSidetone, ReadSmartShift,
+    Command, ReadBacklight, ReadDpi, ReadEasySwitchHosts, ReadFlashBindings, ReadFnLock,
+    ReadForceSensing, ReadOnboard, ReadPointerSpeed, ReadReportRate, ReadSidetone, ReadSmartShift,
 };
 use crate::state::{
-    AppState, BacklightLoad, DeviceKey, DpiLoad, EasySwitchLoad, FnLockLoad, ForceSensingLoad,
-    HostRenameRefusal, Load, OnboardLoad, PointerSpeedLoad, ReportRateLoad, SidetoneLoad,
-    SmartShiftLoad, StateEvent,
+    AppState, BacklightLoad, DeviceKey, DpiLoad, EasySwitchLoad, FlashBindingsLoad, FnLockLoad,
+    ForceSensingLoad, HostRenameRefusal, Load, OnboardLoad, PointerSpeedLoad, ReportRateLoad,
+    SidetoneLoad, SmartShiftLoad, StateEvent,
 };
 
 const ROOT: &str = "device-read";
@@ -40,6 +41,11 @@ const FORCE_SENSING: &str = "force-sensing";
 const BACKLIGHT: &str = "backlight";
 const EASY_SWITCH: &str = "easy-switch";
 const ONBOARD: &str = "onboard";
+const FLASH_BINDINGS: &str = "flash-bindings";
+
+/// How often a flash-bindings read is repeated while a write of the mouse's
+/// flash is queued or running, so the panel sees it end.
+const FLASH_WRITE_POLL: Duration = Duration::from_millis(600);
 
 /// Preserve the old budget: one initial attempt and two retries.
 const READ_RETRY_POLICY: RetryPolicy = RetryPolicy {
@@ -89,6 +95,7 @@ pub(crate) struct DeviceReads {
     host_renames: BTreeMap<DeviceKey, HostRenames>,
     next_host_rename: u64,
     onboard: BTreeMap<DeviceKey, DeviceRead<OnboardState>>,
+    flash_slots: BTreeMap<DeviceKey, DeviceRead<FlashBindingsState>>,
 }
 
 /// The Easy-Switch host renames sent to one device that have not been
@@ -446,6 +453,99 @@ impl DeviceReads {
                 _observer: observer,
             },
         );
+    }
+
+    /// Read the bindings a flash-bindings mouse (the G700) holds, and keep
+    /// reading while a write of its flash is queued or running.
+    pub(crate) fn ensure_flash_bindings(
+        &mut self,
+        key: DeviceKey,
+        route: DeviceRoute,
+        commands: mpsc::UnboundedSender<Command>,
+        cx: &mut Context<AppState>,
+    ) {
+        if self
+            .flash_slots
+            .get(&key)
+            .is_some_and(|read| read.route == route)
+        {
+            return;
+        }
+        self.remove_flash_bindings(&key);
+        let Some((client, runtime)) = self.cache() else {
+            return;
+        };
+        let flight = self.take_flight();
+        let fetch_route = route.clone();
+        let fetcher = Retry::new(
+            runtime,
+            move |_| {
+                let commands = commands.clone();
+                let route = fetch_route.clone();
+                read_ipc(
+                    move |reply| ReadFlashBindings { route, reply }.into(),
+                    commands,
+                )
+            },
+            READ_RETRY_POLICY,
+        )
+        .retry_if(|error| !fn_lock_error_is_permanent(error));
+        let handle = client.subscribe(
+            query_key(FLASH_BINDINGS, &key),
+            fetcher,
+            QueryOptions::immutable(),
+        );
+        read_through(&client, FLASH_BINDINGS, &key, &handle);
+        let query = Query::new(&client, handle, cx);
+        let load = project_load(query.read(cx), fn_lock_error_is_permanent);
+        let observed_key = key.clone();
+        let observer = cx.observe(query.state(), move |state, query_state, cx| {
+            let load = project_load(query_state.read(cx), fn_lock_error_is_permanent);
+            let writing = matches!(
+                &load,
+                Load::Ready(reading)
+                    if matches!(reading.write, FlashWrite::Pending | FlashWrite::Writing)
+            );
+            if state
+                .device_reads_mut()
+                .update_flash_bindings(&observed_key, flight, load)
+            {
+                cx.emit(StateEvent::BindingsChanged(observed_key.clone()));
+            }
+            if writing {
+                let key = observed_key.clone();
+                cx.spawn(async move |state, cx| {
+                    cx.background_executor().timer(FLASH_WRITE_POLL).await;
+                    state
+                        .update(cx, |state, _| {
+                            state.device_reads_mut().refresh_flash_bindings(&key);
+                        })
+                        .ok();
+                })
+                .detach();
+            }
+        });
+        self.flash_slots.insert(
+            key,
+            DeviceRead {
+                route,
+                flight,
+                load,
+                query,
+                _observer: observer,
+            },
+        );
+    }
+
+    pub(crate) fn refresh_flash_bindings(&mut self, key: &DeviceKey) {
+        if let Some(read) = self.flash_slots.get_mut(key) {
+            read.query.revalidate();
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn flash_bindings_load(&self, key: &DeviceKey) -> Option<&FlashBindingsLoad> {
+        self.flash_slots.get(key).map(|read| &read.load)
     }
 
     pub(crate) fn refresh_onboard(&mut self, key: &DeviceKey) {
@@ -1443,6 +1543,7 @@ impl DeviceReads {
         self.remove_backlight(key);
         self.remove_easy_switch(key);
         self.remove_onboard(key);
+        self.remove_flash_bindings(key);
     }
 
     pub(crate) fn remove_dpi(&mut self, key: &DeviceKey) {
@@ -1456,6 +1557,13 @@ impl DeviceReads {
         if let Some(read) = self.smartshift.remove(key) {
             drop(read);
             self.clear::<SmartShiftStatus>(SMARTSHIFT, key);
+        }
+    }
+
+    fn remove_flash_bindings(&mut self, key: &DeviceKey) {
+        if let Some(read) = self.flash_slots.remove(key) {
+            drop(read);
+            self.clear::<FlashBindingsState>(FLASH_BINDINGS, key);
         }
     }
 
@@ -1531,6 +1639,7 @@ impl DeviceReads {
             .chain(self.backlight.keys())
             .chain(self.easy_switch.keys())
             .chain(self.onboard.keys())
+            .chain(self.flash_slots.keys())
             .filter(|key| !present(key.as_str()))
             .cloned()
             .collect();
@@ -1696,6 +1805,26 @@ impl DeviceReads {
                 Load::Ready(renames.shown(hosts))
             }
             (load, _) => load,
+        };
+        if read.load == load {
+            return false;
+        }
+        read.load = load;
+        true
+    }
+
+    fn update_flash_bindings(
+        &mut self,
+        key: &DeviceKey,
+        flight: u64,
+        load: FlashBindingsLoad,
+    ) -> bool {
+        let Some(read) = self
+            .flash_slots
+            .get_mut(key)
+            .filter(|read| read.flight == flight)
+        else {
+            return false;
         };
         if read.load == load {
             return false;

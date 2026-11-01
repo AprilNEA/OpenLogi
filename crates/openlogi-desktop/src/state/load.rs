@@ -71,3 +71,4 @@ pub type EasySwitchLoad = Load<Arc<EasySwitchHosts>>;
 pub type DisableKeysLoad = Load<Arc<DisableKeysState>>;
 
 pub type OnboardLoad = Load<Arc<OnboardState>>;
+pub type FlashBindingsLoad = Load<Arc<openlogi_core::binding::FlashBindingsState>>;

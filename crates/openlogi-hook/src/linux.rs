@@ -50,6 +50,7 @@ use evdev::{
     AbsoluteAxisCode, AttributeSetRef, Device, EventSummary, EventType, InputEvent, KeyCode,
     PropType, RelativeAxisCode,
 };
+use openlogi_core::binding::MouseButtonNumber;
 use openlogi_inject::uinput;
 use tracing::{debug, error, warn};
 use x11rb::protocol::xproto::ConnectionExt as _;
@@ -498,9 +499,23 @@ fn key_to_button(key: KeyCode) -> Option<ButtonId> {
         KeyCode::BTN_FORWARD | KeyCode::BTN_EXTRA => Some(ButtonId::Forward),
         // BTN_TASK is the closest generic match for a mode/DPI toggle button.
         KeyCode::BTN_TASK => Some(ButtonId::DpiToggle),
+        // HID buttons 9 to 16 land on the unnamed codes past BTN_TASK. The
+        // agent catches only those a flash-bindings mouse presses for an
+        // action of its own; every other one passes through.
+        key if NUMBERED_BUTTON_CODES.contains(&key.code()) => {
+            let number = key.code() - NUMBERED_BUTTON_CODES.start() + 9;
+            u8::try_from(number)
+                .ok()
+                .and_then(|number| MouseButtonNumber::try_new(number).ok())
+                .map(ButtonId::Numbered)
+        }
         _ => None,
     }
 }
+
+/// The evdev codes of HID mouse buttons 9 to 16: `BTN_MOUSE + 8` up to the
+/// last code before `BTN_JOYSTICK`, as `hid-input` numbers a mouse's buttons.
+const NUMBERED_BUTTON_CODES: std::ops::RangeInclusive<u16> = 0x118..=0x11f;
 
 /// Run one event past the callback and return what to forward to the desktop
 /// for it, if anything. On a hi-res device, wheel events reach it only
@@ -719,6 +734,22 @@ mod tests {
                 "key_to_button({key:?}) should be {expected:?}"
             );
         }
+    }
+
+    #[test]
+    fn key_to_button_numbers_buttons_nine_to_sixteen() {
+        let numbered = |n| ButtonId::Numbered(MouseButtonNumber::try_new(n).unwrap());
+        assert_eq!(key_to_button(KeyCode::new(0x118)), Some(numbered(9)));
+        assert_eq!(key_to_button(KeyCode::new(0x11f)), Some(numbered(16)));
+        assert_eq!(
+            key_to_button(KeyCode::BTN_TRIGGER),
+            None,
+            "joystick buttons are not mouse buttons"
+        );
+        // Buttons 6 and 7 keep their back/forward meaning: a flash mouse's
+        // own buttons pass through as the flash makes them.
+        assert_eq!(key_to_button(KeyCode::BTN_FORWARD), Some(ButtonId::Forward));
+        assert_eq!(key_to_button(KeyCode::BTN_BACK), Some(ButtonId::Back));
     }
 
     #[test]

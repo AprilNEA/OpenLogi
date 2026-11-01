@@ -79,6 +79,10 @@ pub(super) fn gaming_fallback_hotspot(button: ButtonId) -> Option<Hotspot> {
         ButtonId::G7 => (100., 60., 50., 50.),
         ButtonId::G8 => (100., 120., 50., 50.),
         ButtonId::G9 => (185., 215., 50., 40.),
+        // The G700's two extra thumb buttons. Schematic, like the rest of
+        // the silhouette: no rendered asset places them yet.
+        ButtonId::G10 => (0., 150., 40., 50.),
+        ButtonId::G11 => (100., 180., 50., 40.),
         _ => return None,
     };
     Some(Hotspot {

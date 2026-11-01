@@ -80,9 +80,24 @@ pub fn is_g700(vendor_id: u16, product_id: u16, device_index: u8) -> bool {
     g700_link(vendor_id, product_id).is_some_and(|link| link.addresses_g700(device_index))
 }
 
+/// Whether OS input from `vendor_id:product_id` is the G700's pointer
+/// stream: its own Nano receiver's mouse interface, the device node the
+/// kernel's receiver driver makes for the paired mouse (on Linux,
+/// `hid-logitech-dj` names it by the wireless product id), or the mouse on
+/// its cable. Only the first and last are certain; the driver's node is
+/// libratbag's and Solaar's id for the mouse, unverified as an input id.
+#[must_use]
+pub fn is_g700_input(vendor_id: u16, product_id: u16) -> bool {
+    vendor_id == LOGITECH_VENDOR_ID
+        && matches!(
+            product_id,
+            G700_RECEIVER_PRODUCT_ID | G700_WIRELESS_PRODUCT_ID | G700_WIRED_PRODUCT_ID
+        )
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{G700Link, g700_link, is_g700};
+    use super::{G700Link, g700_link, is_g700, is_g700_input};
     use crate::LOGITECH_VENDOR_ID;
 
     #[test]
@@ -104,6 +119,22 @@ mod tests {
             !is_g700(LOGITECH_VENDOR_ID, 0xc531, 0xff),
             "the receiver itself"
         );
+    }
+
+    #[test]
+    fn g700_input_is_its_receiver_its_paired_node_or_its_cable() {
+        for product_id in [0xc531, 0x1023, 0xc06b] {
+            assert!(
+                is_g700_input(LOGITECH_VENDOR_ID, product_id),
+                "{product_id:04x}"
+            );
+        }
+        assert!(
+            !is_g700_input(LOGITECH_VENDOR_ID, 0xc52b),
+            "a Unifying receiver"
+        );
+        assert!(!is_g700_input(LOGITECH_VENDOR_ID, 0x4082), "another mouse");
+        assert!(!is_g700_input(0x1234, 0xc531), "another vendor");
     }
 
     #[test]

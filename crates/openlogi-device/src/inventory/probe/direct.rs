@@ -93,8 +93,10 @@ pub(super) async fn probe_direct(
     // A HID++ 1.0 answer settles the node as surely as a completed walk: the
     // device answered, in a protocol this path does not list (#2161). Taking
     // it for a transient failure retires and reopens the channel every few
-    // passes for as long as the device stays plugged in (#2432).
-    if probe.is_hidpp10() {
+    // passes for as long as the device stays plugged in (#2432). A G700 on its
+    // cable is the exception: it is probed through its registers, which give
+    // it capabilities of its own.
+    if probe.is_hidpp10() && registers.is_none() {
         debug!(
             vid = format_args!("{:04x}", info.vendor_id),
             pid = format_args!("{:04x}", info.product_id),

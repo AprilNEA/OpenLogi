@@ -68,7 +68,7 @@ pub(crate) fn action_icon_path(action: &Action) -> &'static str {
     match action {
         Action::None => "action-icons/ban.svg",
         Action::LeftClick | Action::RightClick => "action-icons/mouse-pointer-click.svg",
-        Action::MiddleClick => "action-icons/mouse.svg",
+        Action::MiddleClick | Action::MouseButton(_) => "action-icons/mouse.svg",
         Action::MouseBack => "action-icons/circle-arrow-left.svg",
         Action::MouseForward => "action-icons/circle-arrow-right.svg",
         Action::Copy => "action-icons/copy.svg",
@@ -106,12 +106,16 @@ pub(crate) fn action_icon_path(action: &Action) -> &'static str {
         | Action::SetDpiPreset(_)
         | Action::TogglePrecisionMode
         | Action::DpiShift => "action-icons/gauge.svg",
-        Action::ToggleSmartShift => "action-icons/refresh-cw.svg",
+        Action::ToggleSmartShift | Action::CycleOnboardProfiles => "action-icons/refresh-cw.svg",
         Action::EasySwitchChannel1 => "action-icons/square-1.svg",
         Action::EasySwitchChannel2 => "action-icons/square-2.svg",
         Action::EasySwitchChannel3 => "action-icons/square-3.svg",
-        Action::ScrollUp | Action::NextDpiPreset => "action-icons/chevrons-up.svg",
-        Action::ScrollDown | Action::PreviousDpiPreset => "action-icons/chevrons-down.svg",
+        Action::ScrollUp | Action::NextDpiPreset | Action::NextOnboardProfile => {
+            "action-icons/chevrons-up.svg"
+        }
+        Action::ScrollDown | Action::PreviousDpiPreset | Action::PreviousOnboardProfile => {
+            "action-icons/chevrons-down.svg"
+        }
         Action::HorizontalScrollLeft => "action-icons/chevrons-left.svg",
         Action::HorizontalScrollRight => "action-icons/chevrons-right.svg",
         Action::CustomShortcut(_)
@@ -120,6 +124,7 @@ pub(crate) fn action_icon_path(action: &Action) -> &'static str {
         | Action::HoldModifier(_)
         | Action::TypeText(_) => "action-icons/keyboard.svg",
         Action::RunAppleScript(_) | Action::RunShellCommand(_) => "action-icons/terminal.svg",
+        Action::ShowBatteryLevel => "action-icons/battery-low.svg",
     }
 }
 

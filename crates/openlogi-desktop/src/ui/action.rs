@@ -35,6 +35,9 @@ pub(crate) fn localized_action_label(action: &Action) -> SharedString {
         Action::Workflow(steps) => {
             tr!("actions.workflow_step_count_plural", count => steps.len().to_string())
         }
+        Action::MouseButton(number) => {
+            tr!("actions.mouse_button_number", number => number.to_string())
+        }
         Action::OpenApplication(target) => {
             tr!("actions.open_named_target", name => target.display_name())
         }
