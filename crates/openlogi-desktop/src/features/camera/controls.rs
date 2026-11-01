@@ -598,10 +598,15 @@ impl CameraControlsPanel {
                 ));
             }
             for slider in &self.sliders {
+                // A look preset leaves the camera's discrete settings —
+                // mains frequency, low-light boost, framing — as they are.
                 let fallback = if builtin.id != "default"
                     && matches!(
                         slider.control,
-                        CameraControl::PowerLineFrequency | CameraControl::LowLightCompensation
+                        CameraControl::PowerLineFrequency
+                            | CameraControl::LowLightCompensation
+                            | CameraControl::FieldOfView
+                            | CameraControl::ShowMode
                     ) {
                     slider.value(cx)
                 } else {

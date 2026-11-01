@@ -13,15 +13,25 @@
 //! OS capture id ([`Camera::unique_id`]); when it embeds a real USB serial
 //! (not a parent-generated instance id) that serial is preferred for the
 //! port-stable [`Camera::config_key`].
+//!
+//! Vendor Extension Unit controls (field of view, Show Mode) have no
+//! DirectShow interface. The UVC driver exposes each Extension Unit as a
+//! kernel-streaming topology node instead, reached through `IKsControl` with
+//! the unit's GUID as the property set and the selector as the property id.
 
 #![expect(
     unsafe_code,
-    reason = "DirectShow COM (device enumeration + IAMVideoProcAmp / IAMCameraControl)"
+    reason = "DirectShow and kernel-streaming COM (device enumeration, IAMVideoProcAmp / IAMCameraControl, IKsControl)"
 )]
 
 use std::marker::PhantomData;
 
 use windows::Win32::Media::DirectShow::{IAMCameraControl, IAMVideoProcAmp, IBaseFilter};
+use windows::Win32::Media::KernelStreaming::{
+    IKsControl, IKsTopologyInfo, KSIDENTIFIER, KSIDENTIFIER_0, KSIDENTIFIER_0_0,
+    KSNODETYPE_DEV_SPECIFIC, KSP_NODE, KSPROPERTY_TYPE_GET, KSPROPERTY_TYPE_SET,
+    KSPROPERTY_TYPE_TOPOLOGY,
+};
 use windows::Win32::System::Com::StructuredStorage::IPropertyBag;
 use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance, IEnumMoniker, IMoniker};
 use windows::Win32::System::Variant::{VARIANT, VT_BSTR};
@@ -32,6 +42,7 @@ use crate::com_windows::ComApartment;
 use crate::controls::{
     AutoState, AutoToggle, CameraControl, CameraState, ControlError, ControlRange,
 };
+use crate::extension_unit::ExtensionControl;
 
 /// CLSID_SystemDeviceEnum — the DirectShow device-category enumerator.
 const CLSID_SYSTEM_DEVICE_ENUM: GUID = GUID::from_u128(0x62be5d10_60eb_11d0_bd3b_00a0c911ce86);
@@ -60,11 +71,13 @@ const CC_FOCUS: i32 = 6;
 const FLAG_AUTO: i32 = 0x1;
 const FLAG_MANUAL: i32 = 0x2;
 
-/// Which DirectShow interface carries a control, plus its property id.
+/// Which interface carries a control, plus its property id.
 #[derive(Clone, Copy)]
 enum Prop {
     VideoProcAmp(i32),
     CameraControl(i32),
+    /// A vendor Extension Unit control, reached over kernel streaming.
+    Extension(ExtensionControl),
     Unsupported,
 }
 
@@ -85,6 +98,9 @@ impl CameraControl {
             Self::BacklightCompensation => Prop::VideoProcAmp(VPA_BACKLIGHT_COMPENSATION),
             Self::WhiteBalance => Prop::VideoProcAmp(VPA_WHITE_BALANCE),
             Self::Tint => Prop::VideoProcAmp(VPA_HUE),
+            Self::FieldOfView | Self::ShowMode => {
+                self.extension().map_or(Prop::Unsupported, Prop::Extension)
+            }
         }
     }
 }
@@ -233,6 +249,10 @@ pub fn apply_settings(
 struct Device<'a> {
     proc_amp: Option<IAMVideoProcAmp>,
     camera_control: Option<IAMCameraControl>,
+    /// Property access to the Extension Unit nodes, and the node list to find
+    /// them in.
+    ks_control: Option<IKsControl>,
+    topology: Option<IKsTopologyInfo>,
     _com: PhantomData<&'a ComApartment>,
 }
 
@@ -252,6 +272,8 @@ impl<'a> Device<'a> {
             return Ok(Self {
                 proc_amp: filter.cast().ok(),
                 camera_control: filter.cast().ok(),
+                ks_control: filter.cast().ok(),
+                topology: filter.cast().ok(),
                 _com: PhantomData,
             });
         }
@@ -265,6 +287,11 @@ impl<'a> Device<'a> {
         unsafe {
             match prop {
                 Prop::Unsupported => return Err(ControlError::Unsupported),
+                // No auto mode, so no capability flags.
+                Prop::Extension(control) => {
+                    let (_, current) = self.extension_get(control)?;
+                    return Ok((control.range(current)?, 0));
+                }
                 Prop::VideoProcAmp(id) => self
                     .proc_amp
                     .as_ref()
@@ -312,6 +339,10 @@ impl<'a> Device<'a> {
         unsafe {
             match prop {
                 Prop::Unsupported => return Err(ControlError::Unsupported),
+                Prop::Extension(control) => {
+                    let (_, current) = self.extension_get(control)?;
+                    return Ok((i32::from(current), 0));
+                }
                 Prop::VideoProcAmp(id) => self
                     .proc_amp
                     .as_ref()
@@ -339,6 +370,7 @@ impl<'a> Device<'a> {
         unsafe {
             match prop {
                 Prop::Unsupported => return Err(ControlError::Unsupported),
+                Prop::Extension(control) => return self.extension_set(control, value),
                 Prop::VideoProcAmp(id) => self
                     .proc_amp
                     .as_ref()
@@ -358,6 +390,85 @@ impl<'a> Device<'a> {
     fn set_auto(&self, prop: Prop, on: bool) -> Result<(), ControlError> {
         let value = self.get(prop).map_or(0, |(v, _)| v);
         self.set(prop, value, if on { FLAG_AUTO } else { FLAG_MANUAL })
+    }
+
+    /// Find the topology node of the Extension Unit that carries `control`,
+    /// and read the control's current value from it.
+    ///
+    /// The UVC driver lists every Extension Unit as a device-specific node,
+    /// and nothing in the node list says which GUID a node has. The node that
+    /// answers a one-byte GET in the control's property set is the unit.
+    fn extension_get(&self, control: ExtensionControl) -> Result<(u32, u8), ControlError> {
+        let topology = self.topology.as_ref().ok_or(ControlError::Unsupported)?;
+        // SAFETY: documented IKsTopologyInfo call on the bound filter.
+        let nodes = unsafe { topology.NumNodes() }.map_err(|_| ControlError::Unsupported)?;
+        for node in 0..nodes {
+            // SAFETY: as above; `node` is below the count the filter reported.
+            if unsafe { topology.get_NodeType(node) }.ok() != Some(KSNODETYPE_DEV_SPECIFIC) {
+                continue;
+            }
+            let mut value = [0u8; 1];
+            if self.extension_property(control, node, KSPROPERTY_TYPE_GET, &mut value) == Some(1) {
+                return Ok((node, value[0]));
+            }
+        }
+        Err(ControlError::Unsupported)
+    }
+
+    /// Write `value` to the Extension Unit node that carries `control`. The
+    /// current value must be in the table's set, as a read requires, so a
+    /// caller that skipped the read cannot write a control the camera uses
+    /// differently.
+    fn extension_set(&self, control: ExtensionControl, value: i32) -> Result<(), ControlError> {
+        let mut byte = [control.encode(value)?];
+        let (node, current) = self.extension_get(control)?;
+        control.range(current)?;
+        self.extension_property(control, node, KSPROPERTY_TYPE_SET, &mut byte)
+            .map(drop)
+            .ok_or(ControlError::Unsupported)
+    }
+
+    /// One property request on Extension Unit `node`, reading into or
+    /// writing from `data`. Returns the byte count the driver reports, or
+    /// `None` when it refuses the request.
+    fn extension_property(
+        &self,
+        control: ExtensionControl,
+        node: u32,
+        flags: u32,
+        data: &mut [u8; 1],
+    ) -> Option<u32> {
+        let ks_control = self.ks_control.as_ref()?;
+        let property = KSP_NODE {
+            Property: KSIDENTIFIER {
+                Anonymous: KSIDENTIFIER_0 {
+                    Anonymous: KSIDENTIFIER_0_0 {
+                        Set: GUID::from_u128(control.guid.to_u128()),
+                        Id: u32::from(control.selector),
+                        Flags: flags | KSPROPERTY_TYPE_TOPOLOGY,
+                    },
+                },
+            },
+            NodeId: node,
+            Reserved: 0,
+        };
+        let property_len = u32::try_from(size_of::<KSP_NODE>()).ok()?;
+        let data_len = u32::try_from(data.len()).ok()?;
+        let mut returned = 0u32;
+        // SAFETY: `property` is a complete KSP_NODE that outlives the call and
+        // `property_len` is its size; `data` stays borrowed and writable for
+        // `data_len` bytes, and `returned` is a live out-param.
+        unsafe {
+            ks_control.KsProperty(
+                (&raw const property).cast(),
+                property_len,
+                data.as_mut_ptr().cast(),
+                data_len,
+                &raw mut returned,
+            )
+        }
+        .ok()?;
+        Some(returned)
     }
 }
 

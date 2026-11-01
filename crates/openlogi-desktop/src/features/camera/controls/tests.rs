@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::sync::Mutex;
 
-use gpui::{Entity, TestAppContext, VisualTestContext, point, size};
+use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext, point, size};
 use openlogi_camera::{AutoState, Camera, CameraState, ControlError};
 use openlogi_core::config::Config;
 
@@ -102,6 +102,22 @@ fn panel(
     cx: &mut TestAppContext,
     uvc: Arc<FakeUvc>,
 ) -> (Entity<CameraControlsPanel>, &mut VisualTestContext) {
+    select_camera(cx);
+    let view = cx.new(|cx| CameraControlsPanel::with_uvc(uvc, cx));
+    (view, cx.add_empty_window())
+}
+
+/// The panel as a window's root, so clicks reach its rows.
+fn windowed(
+    cx: &mut TestAppContext,
+    uvc: Arc<FakeUvc>,
+) -> (Entity<CameraControlsPanel>, &mut VisualTestContext) {
+    select_camera(cx);
+    cx.add_window_view(|_, cx| CameraControlsPanel::with_uvc(uvc, cx))
+}
+
+/// Make the test camera the selected device.
+fn select_camera(cx: &mut TestAppContext) {
     cx.update(gpui_component::init);
     cx.update(|cx| {
         let camera = Camera {
@@ -125,8 +141,6 @@ fn panel(
         });
         AppState::set_global(state, cx);
     });
-    let view = cx.new(|cx| CameraControlsPanel::with_uvc(uvc, cx));
-    (view, cx.add_empty_window())
 }
 
 fn draw(view: &Entity<CameraControlsPanel>, cx: &mut VisualTestContext) {
@@ -308,6 +322,113 @@ fn a_failed_write_rebuilds_from_a_fresh_background_read(cx: &mut TestAppContext)
     draw(&view, cx);
     cx.run_until_parked();
     assert_eq!(shown(&view, cx)[2], ("ExposureAuto".into(), 0));
+}
+
+/// A Brio 500-class state: brightness, plus the field of view set to its
+/// narrowest step.
+fn framed(field_of_view: i32) -> CameraState {
+    CameraState {
+        controls: vec![
+            (CameraControl::Brightness, range(0, 255, 140)),
+            (
+                CameraControl::FieldOfView,
+                ControlRange {
+                    min: 0,
+                    max: 2,
+                    default: 0,
+                    current: field_of_view,
+                    value_mask: None,
+                },
+            ),
+        ],
+        autos: Vec::new(),
+    }
+}
+
+/// A look preset changes the picture, not the framing: it keeps the field of
+/// view the user picked, while Default puts it back to the camera's default.
+#[gpui::test]
+fn a_look_preset_keeps_the_field_of_view_and_default_resets_it(cx: &mut TestAppContext) {
+    let uvc = Arc::new(FakeUvc::default());
+    uvc.queue(framed(2));
+    let (view, cx) = panel(cx, uvc.clone());
+    draw(&view, cx);
+    cx.run_until_parked();
+
+    cx.update(|window, cx| {
+        view.update(cx, |panel, cx| panel.apply_profile("streaming", window, cx));
+    });
+    let streaming = uvc.calls().last().cloned().unwrap_or_default();
+    assert!(
+        streaming.contains("(FieldOfView, 2)"),
+        "streaming kept the framing: {streaming}"
+    );
+
+    cx.update(|window, cx| {
+        view.update(cx, |panel, cx| panel.apply_profile("default", window, cx));
+    });
+    let default = uvc.calls().last().cloned().unwrap_or_default();
+    assert!(
+        default.contains("(FieldOfView, 0)"),
+        "default reset the framing: {default}"
+    );
+}
+
+/// A camera with every chip row: anti-flicker and field of view as choices,
+/// low light and Show Mode as on/off toggles.
+fn chips() -> CameraState {
+    let mut state = framed(0);
+    state.controls.extend([
+        (CameraControl::PowerLineFrequency, range(0, 3, 1)),
+        (CameraControl::LowLightCompensation, range(0, 1, 0)),
+        (CameraControl::ShowMode, range(0, 1, 0)),
+    ]);
+    state
+}
+
+/// The chip rows share their code, so each click must write its own control:
+/// it sends that control and value, and the row shows the chip it picked.
+#[gpui::test]
+fn a_chip_click_writes_its_own_control(cx: &mut TestAppContext) {
+    let uvc = Arc::new(FakeUvc::default());
+    uvc.queue(chips());
+    let (view, cx) = windowed(cx, uvc.clone());
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    cx.run_until_parked();
+
+    for (selector, write) in [
+        ("camera-choice-field_of_view-2", "set FieldOfView 2"),
+        (
+            "camera-choice-power_line_frequency-2",
+            "set PowerLineFrequency 2",
+        ),
+        (
+            "camera-toggle-low_light_compensation",
+            "set LowLightCompensation 1",
+        ),
+        ("camera-toggle-show_mode", "set ShowMode 1"),
+    ] {
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let chip = cx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} is drawn"));
+        cx.simulate_click(chip.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(uvc.calls().last().map(String::as_str), Some(write));
+    }
+
+    let shown = shown(&view, cx);
+    for (control, value) in [
+        ("FieldOfView", 2),
+        ("PowerLineFrequency", 2),
+        ("LowLightCompensation", 1),
+        ("ShowMode", 1),
+    ] {
+        assert!(
+            shown.contains(&(control.to_string(), value)),
+            "{control} shows {value}: {shown:?}"
+        );
+    }
 }
 
 #[test]
