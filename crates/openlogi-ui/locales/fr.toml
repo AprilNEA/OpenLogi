@@ -564,6 +564,7 @@ bluetooth_permission_description = "Permet à OpenLogi d’utiliser CoreBluetoot
 camera_permission_description = "Votre webcam Logitech apparaît sur la page principale. Autorisez l’accès pour voir son aperçu en direct ; la vidéo ne quitte jamais votre Mac."
 linux_input_access_denied_description = "OpenLogi doit pouvoir écrire dans /dev/uinput pour réaffecter les boutons et lire et écrire dans /dev/hidraw* pour communiquer via HID++. Installez les règles udev d’OpenLogi. Consultez le guide d’installation Linux."
 linux_input_access_unknown_description = "Aucun appareil Logitech détecté. Connectez-en un ou vérifiez que les règles udev hidraw sont installées."
+linux_input_access_guide = "Voir le guide"
 
 [agent]
 scanning_for_devices = "Recherche d’appareils…"

@@ -564,6 +564,7 @@ bluetooth_permission_description = "Дозволяє OpenLogi використо
 camera_permission_description = "Ваша вебкамера Logitech показується на головній сторінці. Надайте доступ, щоб бачити перегляд у реальному часі. Відео ніколи не залишає ваш Mac."
 linux_input_access_denied_description = "Для перепризначення кнопок OpenLogi потрібен доступ на запис до /dev/uinput, а для обміну даними HID++ потрібен доступ на читання й запис до /dev/hidraw*. Установіть правила udev для OpenLogi. Докладні відомості наведено в настанові зі встановлення в Linux."
 linux_input_access_unknown_description = "Пристроїв Logitech не виявлено. Під'єднайте пристрій або перевірте, чи встановлено правила udev для hidraw."
+linux_input_access_guide = "Переглянути інструкцію"
 
 [agent]
 scanning_for_devices = "Сканування пристроїв…"

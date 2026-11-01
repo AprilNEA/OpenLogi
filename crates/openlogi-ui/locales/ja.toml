@@ -564,6 +564,7 @@ bluetooth_permission_description = "OpenLogi が CoreBluetooth を使用でき�
 camera_permission_description = "Logitech のウェブカメラはメインページに表示されます。アクセスを許可するとライブプレビューを確認できます。映像が Mac の外に出ることはありません。"
 linux_input_access_denied_description = "ボタンの再割り当てには /dev/uinput への書き込み権限、HID++ 通信には /dev/hidraw* への読み書き権限が必要です。OpenLogi の udev ルールをインストールしてください。詳しくは Linux のインストールガイドを参照してください。"
 linux_input_access_unknown_description = "Logitech デバイスが検出されませんでした。デバイスを接続するか、hidraw の udev ルールがインストールされていることを確認してください。"
+linux_input_access_guide = "ガイドを表示"
 
 [agent]
 scanning_for_devices = "デバイスを検索中…"

@@ -194,7 +194,7 @@ pub(super) fn cache_size_description() -> SharedString {
 }
 
 /// A small bordered text button matching the permission rows' "Open" control.
-fn action_button(
+pub(super) fn action_button(
     id: &'static str,
     label: SharedString,
     pal: Palette,

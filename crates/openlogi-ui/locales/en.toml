@@ -562,8 +562,9 @@ input_monitoring_permission_description = "Needed to read HID++ data, including 
 input_monitoring_granted_but_unavailable = "Permission granted, but OpenLogi still cannot open devices. Another app may hold them: quit Logi Options+, or turn off Modify events in Karabiner-Elements. Otherwise, log out of macOS and back in."
 bluetooth_permission_description = "Allows OpenLogi to use CoreBluetooth. It is not required for HID access."
 camera_permission_description = "Grant access to preview your Logitech webcam on the main page. Video never leaves your Mac."
-linux_input_access_denied_description = "OpenLogi needs read/write access to /dev/uinput for button remapping, read/write access to /dev/hidraw* for HID++ communication, and read access to your mouse's /dev/input/event* node for the button hook. Rules left by another Logitech manager often cover the first two but not the third. Install the OpenLogi udev rules to grant access. See the Linux installation guide."
+linux_input_access_denied_description = "OpenLogi needs read/write access to /dev/uinput for button remapping, read/write access to /dev/hidraw* for HID++ communication, and read access to your mouse's /dev/input/event* node for the button hook. Rules left by another Logitech manager often cover the first two but not the third. Install the OpenLogi udev rules to grant access."
 linux_input_access_unknown_description = "No Logitech device was detected. Connect a device or verify that the hidraw udev rules are installed."
+linux_input_access_guide = "View guide"
 
 [agent]
 scanning_for_devices = "Scanning for devices…"

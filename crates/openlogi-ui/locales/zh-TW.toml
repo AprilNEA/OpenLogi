@@ -564,6 +564,7 @@ bluetooth_permission_description = "允許 OpenLogi 使用 CoreBluetooth（HID �
 camera_permission_description = "您的 Logitech 網路攝影機會顯示在主頁面上。授予存取權限即可查看即時預覽，影像絕不會離開您的 Mac。"
 linux_input_access_denied_description = "OpenLogi 需要 /dev/uinput 寫入權限以重新對應按鍵，也需要 /dev/hidraw* 讀寫權限以進行 HID++ 通訊。請安裝 OpenLogi udev 規則以授予權限，詳情請參閱 Linux 安裝指南。"
 linux_input_access_unknown_description = "未偵測到 Logitech 裝置。請連接裝置，或確認已安裝 hidraw udev 規則。"
+linux_input_access_guide = "檢視指南"
 
 [agent]
 scanning_for_devices = "正在掃描裝置…"

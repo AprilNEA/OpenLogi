@@ -564,6 +564,7 @@ bluetooth_permission_description = "OpenLogi'nin CoreBluetooth kullanmasına izi
 camera_permission_description = "Logitech web kameranızı ana sayfada önizlemek için erişim verin. Video Mac'inizden asla çıkmaz."
 linux_input_access_denied_description = "OpenLogi, düğmeleri yeniden eşlemek için /dev/uinput dosyasına yazma; HID++ iletişimi için /dev/hidraw* dosyalarına okuma ve yazma erişimi gerektirir. Erişim vermek için OpenLogi udev kurallarını yükleyin. Linux kurulum kılavuzuna bakın."
 linux_input_access_unknown_description = "Logitech cihazı algılanmadı. Bir cihaz bağlayın veya hidraw udev kurallarının yüklü olduğunu doğrulayın."
+linux_input_access_guide = "Kılavuzu görüntüle"
 
 [agent]
 scanning_for_devices = "Cihazlar taranıyor…"

@@ -564,6 +564,7 @@ bluetooth_permission_description = "OpenLogi가 CoreBluetooth를 사용할 수 �
 camera_permission_description = "메인 페이지에서 Logitech 웹캠을 미리 보려면 접근을 허용하세요. 영상은 Mac 외부로 전송되지 않습니다."
 linux_input_access_denied_description = "버튼 재매핑에는 /dev/uinput 쓰기 권한이, HID++ 통신에는 /dev/hidraw* 읽기/쓰기 권한이 필요합니다. OpenLogi udev 규칙을 설치하세요. 자세한 내용은 Linux 설치 안내서를 참조하세요."
 linux_input_access_unknown_description = "Logitech 기기가 감지되지 않았습니다. 기기를 연결하거나 hidraw udev 규칙이 설치되어 있는지 확인하세요."
+linux_input_access_guide = "가이드 보기"
 
 [agent]
 scanning_for_devices = "기기 검색 중…"

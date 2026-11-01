@@ -564,6 +564,7 @@ bluetooth_permission_description = "允许 OpenLogi 使用 CoreBluetooth（HID �
 camera_permission_description = "Logitech 网络摄像头会显示在主页面上。授予访问权限即可查看实时预览，视频不会离开本机。"
 linux_input_access_denied_description = "OpenLogi 需要 /dev/uinput 的写入权限以重映射按键，以及 /dev/hidraw* 的读写权限以进行 HID++ 通信。请安装 OpenLogi udev 规则以授予访问权限，详情请参阅 Linux 安装指南。"
 linux_input_access_unknown_description = "未检测到 Logitech 设备。请连接设备，或确认已安装 hidraw udev 规则。"
+linux_input_access_guide = "查看指南"
 
 [agent]
 scanning_for_devices = "正在扫描设备…"
