@@ -244,7 +244,16 @@ fn invalid_flow_values_are_rejected() {
         (
             "non-physical device key",
             VALID.replacen("key = \"unit:0f1e2d3c\"", "key = \"\"", 1),
-            "is not a physical device key",
+            "is not a device identity key",
+        ),
+        (
+            "receiver route key",
+            VALID.replacen(
+                "key = \"unit:0f1e2d3c\"",
+                "key = \"receiver:aabbccdd:slot:1\"",
+                1,
+            ),
+            "is not a device identity key",
         ),
     ]);
 }

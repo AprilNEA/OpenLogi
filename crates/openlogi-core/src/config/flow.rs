@@ -40,8 +40,10 @@ pub enum FlowConfigError {
         max = FlowHostSlot::MAX_HOSTS
     )]
     SlotOutOfRange(u8),
-    /// A device key does not identify one physical device.
-    #[error("Flow device key {0:?} is not a physical device key")]
+    /// A device key does not name the device by its own identity.
+    #[error(
+        "Flow device key {0:?} is not a device identity key: use the device's \"serial:\" or \"unit:\" key"
+    )]
     InvalidDeviceKey(String),
     /// Two peers share a name.
     #[error("Flow peer name {0} is used twice")]
@@ -448,6 +450,9 @@ pub enum FlowEdge {
 ///
 /// Persisted as `key` plus `peer_channels`, a map from `self` and peer names
 /// to slots. Every value has a `self` slot and uses each slot at most once.
+/// The key is the device's identity key, `serial:` or `unit:`: peers name a
+/// device by its identity, and a route key such as `receiver:<uid>:slot:<n>`
+/// cannot be matched against one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "FlowDeviceWire", into = "FlowDeviceWire")]
 pub struct FlowDevice {
@@ -457,12 +462,16 @@ pub struct FlowDevice {
 }
 
 impl FlowDevice {
-    /// Validates that this machine and each peer use distinct slots.
+    /// Validates that `key` is an identity key and that this machine and each
+    /// peer use distinct slots.
     pub fn new(
         key: PhysicalDeviceKey,
         self_slot: FlowHostSlot,
         peer_slots: BTreeMap<FlowPeerName, FlowHostSlot>,
     ) -> Result<Self, FlowConfigError> {
+        if !key.is_identity() {
+            return Err(FlowConfigError::InvalidDeviceKey(key.into_string()));
+        }
         let mut used = BTreeSet::from([self_slot]);
         if let Some(slot) = peer_slots.values().find(|slot| !used.insert(**slot)) {
             return Err(FlowConfigError::DuplicateSlot {
@@ -477,7 +486,7 @@ impl FlowDevice {
         })
     }
 
-    /// Stable physical-device config key, such as `"unit:0f1e2d3c"`.
+    /// The device's identity key, such as `"unit:0f1e2d3c"`.
     #[must_use]
     pub const fn key(&self) -> &PhysicalDeviceKey {
         &self.key

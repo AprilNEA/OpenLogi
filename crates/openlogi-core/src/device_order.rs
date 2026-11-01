@@ -269,6 +269,13 @@ impl PhysicalDeviceKey {
         }
     }
 
+    /// Whether this key names the device by its own identity, `serial:` or
+    /// `unit:`, rather than by a route that reaches it.
+    #[must_use]
+    pub fn is_identity(&self) -> bool {
+        identity_fragment_is_physical(&self.0)
+    }
+
     /// Whether `value` is a structurally valid runtime key whose only device
     /// identity is the all-zero unit id.
     #[must_use]
