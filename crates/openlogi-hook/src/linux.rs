@@ -30,6 +30,7 @@
 mod foreground;
 pub(crate) mod pointer;
 mod supervisor;
+mod wheel_debounce;
 #[cfg(test)]
 mod xvfb;
 
@@ -39,6 +40,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
+use std::time::Instant;
 
 use evdev::uinput::VirtualDevice;
 use evdev::{
@@ -57,6 +59,7 @@ use foreground::{FRONTMOST, X11Source};
 pub(crate) use foreground::{
     ForegroundApplicationObserver, watch_frontmost_application_activations,
 };
+use wheel_debounce::WheelDebounce;
 
 /// Hi-res scroll resolution: 120 units per standard wheel tick, matching the
 /// Linux kernel's `REL_WHEEL_HI_RES` convention and Windows HID semantics.
@@ -551,6 +554,9 @@ fn device_thread(
     // Events that will be re-injected at the next SYN_REPORT.
     let mut pending: Vec<evdev::InputEvent> = Vec::new();
     let mut companions = LowResCompanions::default();
+    // libinput skips its wheel debouncing on the uinput pass-through device,
+    // so the hook applies it before the callback sees the wheel.
+    let mut wheel = WheelDebounce::default();
     // Software scroll inversion, read once per report so a hi-res event and its
     // low-res companion never disagree if the setting flips mid-report.
     let mut report_inverted: Option<bool> = None;
@@ -572,6 +578,7 @@ fn device_thread(
                 break;
             }
         };
+        let now = Instant::now();
 
         for event in events {
             if let EventSummary::Synchronization(..) = event.destructure() {
@@ -607,6 +614,11 @@ fn device_thread(
                     companions.hold(event);
                     continue;
                 }
+                let Some(event) = wheel.filter(event, now) else {
+                    // Held back as wheel jitter. Its low-res companion, if
+                    // any, is dropped with it.
+                    continue;
+                };
                 let is_vertical_wheel = matches!(
                     event.destructure(),
                     EventSummary::RelativeAxis(
