@@ -27,7 +27,10 @@ use openlogi_flow::{
         PeerTrust,
     },
 };
-use tokio::sync::Barrier;
+use tokio::{
+    net::UdpSocket,
+    sync::{Barrier, mpsc, watch},
+};
 
 type TestResult<T = ()> = Result<T, Box<dyn StdError + Send + Sync>>;
 
@@ -118,6 +121,49 @@ async fn a_stalled_source_does_not_hold_back_a_working_address() -> TestResult {
     wait_for_state(handle, LinkState::Connected).await?;
     let connection = wait_for_connection(handle).await?;
     assert_eq!(connection.direction(), ConnectionDirection::Outgoing);
+    Ok(())
+}
+
+/// Two addresses of one peer both finish TLS; the dialer must run `Hello` on
+/// one only. The peer counts a connection only after its `Hello`, so a dialer
+/// that completed both would keep one connection while the peer kept the
+/// other.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn racing_addresses_complete_only_one_hello() -> TestResult {
+    let dialer_identity = MachineIdentity::generate()?;
+    let acceptor_identity = MachineIdentity::generate()?;
+    let dialer = endpoint(&dialer_identity, acceptor_identity.public_key())?;
+    let acceptor = endpoint(&acceptor_identity, dialer_identity.public_key())?;
+    // Two equally slow paths finish TLS together, so a dialer that sent
+    // `Hello` on both would have both counted before it kept either.
+    let target = acceptor.local_addr()?;
+    let source: Arc<dyn CandidateSource> = Arc::new(ManualCandidateSource::new([
+        relay_to(target).await?.to_string(),
+        relay_to(target).await?.to_string(),
+    ]));
+    let manager = SessionManager::start(
+        Arc::clone(&dialer),
+        [PeerConfig {
+            public_key: acceptor_identity.public_key(),
+            sources: vec![source],
+        }],
+        Arc::new(CountingProvider::new(1)),
+        test_policy(),
+    )?;
+
+    // Take both dials before either handshake runs, so both reach TLS.
+    let first = tokio::time::timeout(Duration::from_secs(3), acceptor.accept_incoming()).await??;
+    let second = tokio::time::timeout(Duration::from_secs(3), acceptor.accept_incoming()).await??;
+    let (first, second) = tokio::join!(first.establish(), second.establish());
+    let kept: Vec<FlowConnection> = [first, second].into_iter().flatten().collect();
+    assert_eq!(kept.len(), 1, "the peer completed more than one connection");
+
+    let handle = manager
+        .peer(acceptor_identity.public_key())
+        .ok_or("manager omitted its peer handle")?;
+    let connection = wait_for_connection(handle).await?;
+    assert_eq!(connection.direction(), ConnectionDirection::Outgoing);
+    manager.shutdown().await;
     Ok(())
 }
 
@@ -329,6 +375,62 @@ fn endpoint(identity: &MachineIdentity, peer_key: PublicKey) -> TestResult<Arc<F
             ..Default::default()
         },
     )?))
+}
+
+/// Another address for `target`: forwards datagrams between one client and
+/// `target`, each 20 ms late and in order.
+async fn relay_to(target: SocketAddr) -> TestResult<SocketAddr> {
+    let front = Arc::new(UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await?);
+    let back = Arc::new(UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await?);
+    back.connect(target).await?;
+    let address = front.local_addr()?;
+    let (client_tx, client_rx) = watch::channel(None);
+    let to_target = delayed_sender(Arc::clone(&back), move |socket, datagram| async move {
+        socket.send(&datagram).await
+    });
+    let to_client = delayed_sender(Arc::clone(&front), move |socket, datagram| {
+        let client = *client_rx.borrow();
+        async move {
+            match client {
+                Some(client) => socket.send_to(&datagram, client).await,
+                None => Ok(0),
+            }
+        }
+    });
+    tokio::spawn(async move {
+        let mut buffer = vec![0; 65_535];
+        while let Ok((len, client)) = front.recv_from(&mut buffer).await {
+            client_tx.send_replace(Some(client));
+            let _ = to_target.send((tokio::time::Instant::now(), buffer[..len].to_vec()));
+        }
+    });
+    tokio::spawn(async move {
+        let mut buffer = vec![0; 65_535];
+        while let Ok(len) = back.recv(&mut buffer).await {
+            let _ = to_client.send((tokio::time::Instant::now(), buffer[..len].to_vec()));
+        }
+    });
+    Ok(address)
+}
+
+/// Sends each queued datagram 20 ms after it was queued, in queue order.
+fn delayed_sender<Forward, Forwarded>(
+    socket: Arc<UdpSocket>,
+    send: Forward,
+) -> mpsc::UnboundedSender<(tokio::time::Instant, Vec<u8>)>
+where
+    Forward: Fn(Arc<UdpSocket>, Vec<u8>) -> Forwarded + Send + 'static,
+    Forwarded: Future<Output = std::io::Result<usize>> + Send,
+{
+    const LATENCY: Duration = Duration::from_millis(20);
+    let (queue, mut queued) = mpsc::unbounded_channel::<(tokio::time::Instant, Vec<u8>)>();
+    tokio::spawn(async move {
+        while let Some((received, datagram)) = queued.recv().await {
+            tokio::time::sleep_until(received + LATENCY).await;
+            let _ = send(Arc::clone(&socket), datagram).await;
+        }
+    });
+    queue
 }
 
 fn peer_with_address(public_key: PublicKey, address: SocketAddr) -> PeerConfig {

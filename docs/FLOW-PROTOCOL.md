@@ -22,6 +22,9 @@ bottom.
 - One connection per peer pair. Either side may initiate; if two connections
   race (simultaneous dial), the side with the lexicographically smaller
   public key closes its *outgoing* connection and keeps the incoming one.
+  A dialer may race the TLS handshake to several addresses of one peer, but
+  sends `Hello` on only the first that authenticates and closes the others,
+  so the peer completes the same connection the dialer keeps.
 - **Control stream**: the connection initiator opens one bidirectional
   stream immediately; each side writes exactly one `Hello` frame and reads
   the peer's. This stream carries nothing else and stays open for the

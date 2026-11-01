@@ -497,8 +497,12 @@ async fn acquire_connection(
     }
 }
 
-/// Dials every candidate address as soon as its source answers and returns
-/// the first connection that authenticates as `peer`.
+/// Dials every candidate address as soon as its source answers, and
+/// establishes the first dial that authenticates as `peer`.
+///
+/// Only that dial exchanges `Hello`; the others are dropped first. The peer
+/// counts a connection only after its `Hello`, so both ends keep this one
+/// instead of each keeping whichever address finished first for it.
 async fn dial_candidates(
     endpoint: &Arc<FlowEndpoint>,
     peer: &PeerConfig,
@@ -506,7 +510,7 @@ async fn dial_candidates(
     let mut candidates = CandidateStream::new(&peer.sources, peer.public_key);
     let mut looking = true;
     let mut attempts = JoinSet::new();
-    loop {
+    let dialed = loop {
         tokio::select! {
             batch = candidates.next(), if looking => {
                 let Some(addresses) = batch else {
@@ -515,20 +519,21 @@ async fn dial_candidates(
                 };
                 for address in addresses {
                     let endpoint = Arc::clone(endpoint);
-                    attempts.spawn(async move { endpoint.connect(address).await });
+                    attempts.spawn(async move { endpoint.dial(address).await });
                 }
             }
             Some(result) = attempts.join_next() => {
-                if let Ok(Ok(connection)) = result {
-                    if connection.peer_key() == peer.public_key {
-                        return Some(Arc::new(connection));
-                    }
-                    connection.close();
+                if let Ok(Ok(dialed)) = result
+                    && dialed.peer_key() == peer.public_key
+                {
+                    break dialed;
                 }
             }
             else => return None,
         }
-    }
+    };
+    drop(attempts);
+    dialed.establish().await.ok().map(Arc::new)
 }
 
 enum WaitOutcome {

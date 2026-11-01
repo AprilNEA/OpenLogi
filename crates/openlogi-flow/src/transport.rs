@@ -135,14 +135,27 @@ impl FlowEndpoint {
     /// Dials and performs the control-stream Hello exchange within the
     /// handshake deadline.
     pub async fn connect(&self, address: SocketAddr) -> Result<FlowConnection, TransportError> {
+        self.dial(address).await?.establish().await
+    }
+
+    /// Dials and runs only TLS, within the handshake deadline.
+    ///
+    /// The peer counts a connection once its `Hello` exchange completes. A
+    /// caller that races several addresses of one peer establishes one
+    /// winner and drops the rest, so both ends keep the same connection.
+    pub async fn dial(&self, address: SocketAddr) -> Result<DialedConnection, TransportError> {
+        let deadline = Instant::now() + self.shared.limits.handshake_timeout;
         let connecting = self.endpoint.connect(address, "openlogi-flow")?;
-        let shared = &self.shared;
-        timeout(shared.limits.handshake_timeout, async move {
-            let connection = connecting.await?;
-            establish(shared, connection, ConnectionDirection::Outgoing).await
+        let connection = timeout_at(deadline, connecting)
+            .await
+            .map_err(|_| TransportError::HandshakeTimeout)??;
+        let peer_key = connection_peer_key(&connection)?;
+        Ok(DialedConnection {
+            connection,
+            peer_key,
+            deadline,
+            shared: Arc::clone(&self.shared),
         })
-        .await
-        .map_err(|_| TransportError::HandshakeTimeout)?
     }
 
     /// Waits for the next inbound dial without spending a handshake on it.
@@ -174,6 +187,42 @@ impl FlowEndpoint {
     pub async fn close(self) {
         self.endpoint.close(VarInt::from_u32(0), b"endpoint closed");
         self.endpoint.wait_idle().await;
+    }
+}
+
+/// An outgoing connection that finished TLS and has not exchanged `Hello`.
+///
+/// Dropping it closes the connection before the peer counts it.
+#[derive(Debug)]
+pub struct DialedConnection {
+    connection: Connection,
+    peer_key: PublicKey,
+    deadline: Instant,
+    shared: Arc<EndpointShared>,
+}
+
+impl DialedConnection {
+    /// Returns the peer key TLS authenticated.
+    #[must_use]
+    pub const fn peer_key(&self) -> PublicKey {
+        self.peer_key
+    }
+
+    /// Runs the `Hello` exchange within the rest of the dial's handshake
+    /// deadline.
+    pub async fn establish(self) -> Result<FlowConnection, TransportError> {
+        let Self {
+            connection,
+            deadline,
+            shared,
+            ..
+        } = self;
+        timeout_at(
+            deadline,
+            establish(&shared, connection, ConnectionDirection::Outgoing),
+        )
+        .await
+        .map_err(|_| TransportError::HandshakeTimeout)?
     }
 }
 
