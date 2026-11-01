@@ -553,6 +553,9 @@ impl UsbDevice {
         let entity = self.entity(unit)?;
         if let Unit::Extension(extension) = unit {
             let mut buf = [extension.encode(value)?];
+            // The checks a read makes, so a caller that skipped the read cannot
+            // write a control the camera reports differently from the table.
+            self.extension_range(control, extension)?;
             return self.transfer(RT_SET, UVC_SET_CUR, selector, entity, &mut buf);
         }
         if let Payload::PanTilt(axis) = payload {

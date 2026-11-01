@@ -120,11 +120,13 @@ impl ExtensionUnits {
         control.range(current[0])
     }
 
-    /// Write a vendor control's value.
+    /// Write a vendor control's value, after the checks [`Self::range`] makes,
+    /// so a caller that skipped the read cannot write a control the camera
+    /// reports differently from the table.
     ///
     /// # Errors
-    /// [`ControlError::Unsupported`] when the camera lacks the control, or the
-    /// value is outside the table's set.
+    /// [`ControlError::Unsupported`] when the camera lacks the control or
+    /// reports it differently, or the value is outside the table's set.
     pub(super) fn write(
         &self,
         device: &Device,
@@ -132,6 +134,7 @@ impl ExtensionUnits {
         value: i32,
     ) -> Result<(), ControlError> {
         let mut byte = [control.encode(value)?];
+        self.range(device, control)?;
         let unit = self.unit(control)?;
         query(device, unit, control.selector, UVC_SET_CUR, &mut byte)
     }

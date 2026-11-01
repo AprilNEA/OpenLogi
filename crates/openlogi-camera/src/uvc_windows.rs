@@ -415,10 +415,14 @@ impl<'a> Device<'a> {
         Err(ControlError::Unsupported)
     }
 
-    /// Write `value` to the Extension Unit node that carries `control`.
+    /// Write `value` to the Extension Unit node that carries `control`. The
+    /// current value must be in the table's set, as a read requires, so a
+    /// caller that skipped the read cannot write a control the camera uses
+    /// differently.
     fn extension_set(&self, control: ExtensionControl, value: i32) -> Result<(), ControlError> {
         let mut byte = [control.encode(value)?];
-        let (node, _) = self.extension_get(control)?;
+        let (node, current) = self.extension_get(control)?;
+        control.range(current)?;
         self.extension_property(control, node, KSPROPERTY_TYPE_SET, &mut byte)
             .map(drop)
             .ok_or(ControlError::Unsupported)
