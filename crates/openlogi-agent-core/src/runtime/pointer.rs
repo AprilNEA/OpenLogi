@@ -134,9 +134,10 @@ impl ActionDispatchTarget {
             return None;
         };
         Some(match (route, target) {
-            // Focused mode sends Safari navigation to the frontmost Safari.
-            (PointerRoute::Focus, _) => {
-                frontmost_safari_pid().map_or(Self::Keyboard, Self::SafariProcess)
+            // The Safari that was frontmost at the press, as focused mode
+            // captures it.
+            (PointerRoute::Focus, _) | (PointerRoute::Selected, PointerTarget::Unavailable) => {
+                fallback_safari_pid.map_or(Self::Keyboard, Self::SafariProcess)
             }
             // Safari's existing AX implementation uses AXFocusedWindow. It is
             // admitted only after the exact hovered window passed the focus
@@ -147,9 +148,6 @@ impl ActionDispatchTarget {
                 } else {
                     Self::Keyboard
                 }
-            }
-            (PointerRoute::Selected, PointerTarget::Unavailable) => {
-                fallback_safari_pid.map_or(Self::Keyboard, Self::SafariProcess)
             }
             (PointerRoute::Selected, _) => Self::Keyboard,
         })
@@ -373,15 +371,19 @@ mod tests {
     }
 
     #[test]
-    fn shared_browser_navigation_goes_to_the_frontmost_safari_as_focused_mode_does() {
-        let resolve = |target, frontmost| {
-            ActionDispatchTarget::for_pointer(Some(press(target, FocusBinding::Shared)), || None)
-                .resolve_with(
-                    &Action::BrowserBack,
-                    || target,
-                    |_| panic!("a shared binding needs no focus check"),
-                    || frontmost,
-                )
+    fn shared_browser_navigation_goes_to_the_safari_frontmost_at_the_press() {
+        // Focus can change before a long press fires. Focused mode keeps the
+        // Safari captured at the press, so a shared binding does too.
+        let resolve = |target, at_press| {
+            ActionDispatchTarget::for_pointer(Some(press(target, FocusBinding::Shared)), || {
+                at_press
+            })
+            .resolve_with(
+                &Action::BrowserBack,
+                || target,
+                |_| panic!("a shared binding needs no focus check"),
+                || Some(999),
+            )
         };
         for target in [PointerTarget::Desktop, BROWSER] {
             assert_eq!(

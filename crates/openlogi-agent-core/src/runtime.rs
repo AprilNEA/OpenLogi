@@ -92,8 +92,9 @@ pub(crate) enum ActionDispatchTarget {
     /// The pointer context that selected the binding. Validated off the tap
     /// before output. Keystrokes from a binding that the focused application
     /// shares go where focused mode sends them. Other keystrokes need the
-    /// identified hovered window to have focus. An unidentified target
-    /// retains the focused fallback captured with the press.
+    /// identified hovered window to have focus. A shared binding and an
+    /// unidentified target retain the frontmost Safari captured with the
+    /// press, as focused mode does.
     Pointer {
         target: openlogi_hook::PointerTarget,
         focus: FocusBinding,
@@ -110,10 +111,15 @@ impl ActionDispatchTarget {
         press: Option<PointerPress>,
         capture_safari_pid: impl FnOnce() -> Option<i32>,
     ) -> Self {
-        let safari_pid = match press.map(|press| press.target) {
-            None | Some(openlogi_hook::PointerTarget::Unavailable) => capture_safari_pid(),
-            Some(_) => None,
-        };
+        // Focused mode, a shared binding, and an unidentified target send
+        // Safari navigation where focus is at the press.
+        let safari_pid = press
+            .is_none_or(|press| {
+                press.target == openlogi_hook::PointerTarget::Unavailable
+                    || press.focus == FocusBinding::Shared
+            })
+            .then(capture_safari_pid)
+            .flatten();
         match press {
             Some(PointerPress { target, focus }) => Self::Pointer {
                 target,
