@@ -17,8 +17,9 @@ use std::{
 };
 
 use buffa::Message;
-use quinn::{Connection, Endpoint, RecvStream, SendStream, VarInt};
+use quinn::{Connection, Endpoint, EndpointConfig, RecvStream, SendStream, VarInt};
 use rustls::pki_types::CertificateDer;
+use socket2::{Domain, Protocol, Socket, Type};
 use thiserror::Error;
 use tokio::time::{Instant, timeout, timeout_at};
 
@@ -89,6 +90,10 @@ impl FlowEndpoint {
     /// `hello` is the template for every connection. Its `public_key` must be
     /// this identity's key and its `session_nonce` must be empty: the endpoint
     /// draws a fresh nonce for each connection.
+    ///
+    /// The IPv6 wildcard (`[::]`) binds dual-stack, so the one endpoint also
+    /// accepts and dials IPv4 peers; Windows makes an IPv6 socket IPv6-only
+    /// unless told otherwise.
     pub fn bind(
         address: SocketAddr,
         identity: MachineIdentity,
@@ -108,7 +113,25 @@ impl FlowEndpoint {
     ) -> Result<Self, TransportError> {
         validate_local_hello(&hello, identity.public_key())?;
         let (server_config, client_config) = quic_configs(&identity, trust.clone())?;
-        let mut endpoint = Endpoint::server(server_config, address)?;
+        let socket = Socket::new(
+            Domain::for_address(address),
+            Type::DGRAM,
+            Some(Protocol::UDP),
+        )?;
+        // Only the wildcard can take both families: Windows refuses to bind a
+        // specific IPv6 address, `::1` say, that is not IPv6-only.
+        if address.is_ipv6() && address.ip().is_unspecified() {
+            socket.set_only_v6(false)?;
+        }
+        socket.bind(&address.into())?;
+        let runtime = quinn::default_runtime()
+            .ok_or_else(|| io::Error::other("no async runtime for the Flow endpoint"))?;
+        let mut endpoint = Endpoint::new(
+            EndpointConfig::default(),
+            Some(server_config),
+            socket.into(),
+            runtime,
+        )?;
         endpoint.set_default_client_config(client_config);
         Ok(Self {
             endpoint,

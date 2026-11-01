@@ -7,7 +7,8 @@
 //! queues frames for the peer writers. A configuration change ends the
 //! generation and starts a new one.
 
-use std::net::{Ipv4Addr, SocketAddr};
+use std::io;
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -29,7 +30,7 @@ use openlogi_flow::transport::{
 use thiserror::Error;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use super::devices::InventoryDevice;
 use super::identity::{self, IdentityLoadError};
@@ -182,7 +183,7 @@ impl FlowRuntime {
             start,
             Binding {
                 identity,
-                address: SocketAddr::from((Ipv4Addr::UNSPECIFIED, DEFAULT_PORT)),
+                address: SocketAddr::from((Ipv6Addr::UNSPECIFIED, DEFAULT_PORT)),
                 mdns: true,
                 probe: true,
             },
@@ -208,7 +209,7 @@ impl FlowRuntime {
             .iter()
             .map(|peer| PublicKey::new(*peer.public_key.as_bytes()))
             .collect();
-        let endpoint = Arc::new(FlowEndpoint::bind(
+        let endpoint = Arc::new(bind(
             address,
             identity,
             PeerTrust::pinned(peer_keys.iter().copied()),
@@ -341,6 +342,32 @@ fn peer_config(
     PeerConfig {
         public_key: key,
         sources,
+    }
+}
+
+/// Bind `address`. The IPv6 wildcard binds dual-stack, so a peer reachable
+/// only over IPv6 connects too; on a host without IPv6 it falls back to the
+/// IPv4 wildcard on the same port.
+fn bind(
+    address: SocketAddr,
+    identity: MachineIdentity,
+    trust: PeerTrust,
+    hello: proto::Hello,
+) -> Result<FlowEndpoint, TransportError> {
+    match FlowEndpoint::bind(address, identity.clone(), trust.clone(), hello.clone()) {
+        Err(TransportError::Io(error))
+            if address.ip() == Ipv6Addr::UNSPECIFIED
+                && error.kind() != io::ErrorKind::AddrInUse =>
+        {
+            debug!(%error, "Flow cannot listen on IPv6 here; listening on IPv4 only");
+            FlowEndpoint::bind(
+                SocketAddr::from((Ipv4Addr::UNSPECIFIED, address.port())),
+                identity,
+                trust,
+                hello,
+            )
+        }
+        result => result,
     }
 }
 
