@@ -71,10 +71,14 @@ optional physical device key.
   surface uses the focused application's profile rather than the desktop's;
   with no focused application there is no such profile and the global bindings
   apply, as in focused mode. OpenLogi never activates a background window to
-  send a shortcut: over an identified window or the desktop, mouse
-  bindings that produce keystrokes or run workflows are skipped unless the
-  hovered window is focused. Global actions such as desktop switching can run
-  without changing application focus.
+  send a shortcut. Over an identified window or the desktop, a button that the
+  focused application binds the same way produces its keystrokes or runs its
+  workflow as focused mode does, in the focused application; a global hotkey
+  therefore works anywhere. A button that the hovered target binds
+  differently, through a per-app profile on either side, produces keystrokes
+  or runs workflows only while the hovered window is focused, and is skipped
+  otherwise. Global actions such as desktop switching can run without changing
+  application focus.
 - `low_battery_notifications` (default `true`): the agent shows a notice at the
   bottom of the screen when a connected device's battery runs low. Low means
   20% or less while the device is not charging, or a low or critical level from
