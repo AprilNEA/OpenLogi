@@ -13,15 +13,15 @@ use crate::ui::callouts::spread_in_order;
 
 /// Narrowest a band card gets on a crowded row.
 const KEY_CALLOUT_MIN_W: f32 = 44.;
-/// Widest a band card gets on a roomy row.
-const KEY_CALLOUT_MAX_W: f32 = 112.;
+/// Widest a band card gets on a roomy row: a card holds one icon.
+const KEY_CALLOUT_MAX_W: f32 = 48.;
 /// Free space on each side of a leader that drops between two lower cards.
 const LEADER_CLEARANCE: f32 = 7.;
 /// How far below the lower lane a leader may start its 45° run toward a key
 /// it does not sit straight above.
 const RUN_GAP: f32 = 6.;
-/// Width of a card beside the board.
-const SIDE_CARD_W: f32 = 128.;
+/// Width of a card beside the board, the same as a band card on a roomy row.
+const SIDE_CARD_W: f32 = KEY_CALLOUT_MAX_W;
 /// Space between the board render and a card beside it.
 const SIDE_GAP: f32 = 24.;
 /// Width a band of cards beside the board adds to the pane.

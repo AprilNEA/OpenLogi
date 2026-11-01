@@ -326,7 +326,7 @@ impl RenderOnce for PhotoKey {
         let outer = PHOTO_RING_GAP + PHOTO_RING_W;
         let left = self.slot.x_frac * self.render.0 - shape.w / 2. - outer;
         let top = self.slot.y_frac * self.render.1 - shape.h / 2. - outer;
-        let tooltip: SharedString = format!("{} · {}", self.slot.label, self.slot.binding).into();
+        let tooltip = self.slot.summary();
         let ring = match state {
             KeyState::Selected => rgb(ACCENT_BLUE).into(),
             KeyState::Hovered => hsla(0., 0., 1., 0.55),
@@ -458,7 +458,7 @@ impl RenderOnce for KeyCap {
         let tooltip = self.slot.label.clone();
         let legend = self.slot.label;
         let binding = self.slot.binding;
-        let binding_icon = self.slot.binding_icon;
+        let binding_icon = self.slot.bound.then_some(self.slot.binding_icon);
         let left = self.slot.x_frac * w - cap_w / 2.;
         let top = self.slot.y_frac * h - cap_h / 2.;
         let view_hover = self.view.clone();

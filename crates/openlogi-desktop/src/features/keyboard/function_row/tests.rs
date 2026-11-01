@@ -462,7 +462,7 @@ fn render_size_follows_the_png_aspect_up_to_the_width_cap() {
     assert!((h - 700. * 1600. / 2760.).abs() < 0.01);
 
     // A short viewport shrinks the render instead of overflowing it.
-    let (w, h) = keyboard_render_size(Some(&g513), 500., KEYBOARD_W);
+    let (w, h) = keyboard_render_size(Some(&g513), 450., KEYBOARD_W);
     assert_approx_eq(h, KEYBOARD_MIN_IMG_H);
     assert!((w - KEYBOARD_MIN_IMG_H * 2760. / 1600.).abs() < 0.01);
 
@@ -483,17 +483,18 @@ fn card_box(card: &CardRect, margin: f32) -> (f32, f32, f32, f32) {
 }
 
 #[test]
-fn side_cards_take_their_room_from_the_render_not_from_the_window() {
-    let side = 152.;
-    // Without cards beside the board nothing changes.
-    assert_approx_eq(keyboard_max_width(800., 0.), KEYBOARD_W);
-    // A roomy window keeps the full render beside the band.
-    assert_approx_eq(keyboard_max_width(1400., side), KEYBOARD_W);
-    // Where the render alone fitted, the render shrinks so the pane still fits.
-    let w = keyboard_max_width(1000., side);
-    assert_approx_eq(w + side, 1000. - KEYS_HORIZONTAL_RESERVE);
-    // Where it did not, the pane stays as wide as the render alone was.
-    assert_approx_eq(keyboard_max_width(800., side) + side, KEYBOARD_W);
+fn the_board_keeps_the_inspector_beside_it_while_the_window_has_room() {
+    let side = 72.;
+    // A roomy window keeps the full pane beside the inspector; cards beside
+    // the board take their room from the render, never from the inspector.
+    assert_approx_eq(keyboard_max_width(1400., 0.), KEYBOARD_W);
+    assert_approx_eq(keyboard_max_width(1400., side) + side, KEYBOARD_W);
+    // Narrower, the render shrinks so the pane and the inspector still fit.
+    let w = keyboard_max_width(1100., side);
+    assert_approx_eq(w + side + INSPECTOR_W, 1100. - KEYS_HORIZONTAL_RESERVE);
+    // Too narrow for a usable board beside it, the inspector wraps under
+    // the board, which keeps its full width.
+    assert_approx_eq(keyboard_max_width(1000., side) + side, KEYBOARD_W);
 }
 
 /// Points sampled along each leader segment when checking it against cards.
@@ -574,7 +575,6 @@ fn cards_sit_straight_above_or_beside_their_keys_when_there_is_room() {
             "card {i} is not above its key"
         );
         assert_eq!(layout.leaders[i].len(), 2, "leader {i} is not straight");
-        assert!(card.width > 60., "cards use the room two pitches give");
     }
     for i in top_xs.len()..markers.len() {
         assert!(
@@ -768,40 +768,11 @@ fn an_open_application_binding_selects_its_power_user_row() {
     ));
 }
 
-/// An unbound keyboard key does what it always did — "Off" read as though
-/// every key were switched off. Only a keypad grid key, which has no
-/// function of its own, is off until something is bound to it.
-#[test]
-fn an_unbound_key_reads_as_its_native_function() {
-    let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
-    rust_i18n::set_locale("en");
-    let f1 = key_slots(None, None)[1].target.clone();
-
-    assert_eq!(unbound_binding(&f1), "Native function");
-    assert_eq!(
-        unbound_binding(&KeyTarget::Control(ButtonId::control(0x000a))),
-        "Native function"
-    );
-    assert_eq!(unbound_binding(&KeyTarget::grid(GridKey::TopLeft)), "Off");
-}
-
-#[gpui::test]
-fn open_application_editor_binds_the_selected_key(cx: &mut gpui::TestAppContext) {
-    use crate::services::i18n::LOCALE_LOCK;
-    use gpui::{Modifiers, VisualTestContext, size};
-    use openlogi_core::binding::ApplicationTarget;
-
-    fn click(cx: &mut VisualTestContext, selector: &'static str) {
-        let bounds = cx.debug_bounds(selector).expect(selector);
-        cx.simulate_click(bounds.center(), Modifiers::default());
-        cx.update(|window, cx| window.draw(cx).clear(cx));
-    }
-    fn f1_binding(cx: &mut VisualTestContext, trigger: &KeyTarget) -> Option<Action> {
-        cx.update(|_, cx| bound_action(AppState::try_read(cx).unwrap(), trigger))
-    }
-
-    let _locale = LOCALE_LOCK.lock().unwrap();
-    rust_i18n::set_locale("en");
+/// The Keys tab body in a main-window-sized window, with no device: the
+/// fallback F-row, motion reduced so a frame shows the settled layout.
+fn keys_tab(
+    cx: &mut gpui::TestAppContext,
+) -> (Entity<FunctionRowView>, &mut gpui::VisualTestContext) {
     cx.update(|cx| {
         gpui_component::init(cx);
         cx.set_reduce_motion(true);
@@ -817,14 +788,98 @@ fn open_application_editor_binds_the_selected_key(cx: &mut gpui::TestAppContext)
         AppState::set_global(state, cx);
     });
     let (view, cx) = cx.add_window_view(|_, cx| FunctionRowView::new(cx));
-    cx.simulate_resize(size(px(1200.), px(900.)));
+    cx.simulate_resize(gpui::size(px(1280.), px(820.)));
+    redraw(cx);
+    (view, cx)
+}
+
+fn redraw(cx: &mut gpui::VisualTestContext) {
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+}
+
+/// Selecting a key swaps the inspector's overview for that key's panel in
+/// place: the board under the pointer stays where it was (it used to slide
+/// half a panel to the left, out from under the click).
+#[gpui::test]
+fn selecting_a_key_leaves_the_board_where_it_was(cx: &mut gpui::TestAppContext) {
+    let (view, cx) = keys_tab(cx);
+    let f1 = cx.debug_bounds("key-target-1").expect("F1 is on the board");
+    assert!(cx.debug_bounds("key-overview").is_some());
+
+    cx.simulate_click(f1.center(), gpui::Modifiers::default());
+    redraw(cx);
+
+    view.read_with(cx, |view, _| assert_eq!(view.selected_key, Some(1)));
+    assert!(
+        cx.debug_bounds("key-panel-native").is_some(),
+        "panel is open"
+    );
+    assert!(cx.debug_bounds("key-overview").is_none());
+    assert_eq!(cx.debug_bounds("key-target-1"), Some(f1));
+}
+
+/// With no key selected the inspector lists every key by name; a row
+/// highlights its key on the board and opens it like a click on the key.
+#[gpui::test]
+fn an_overview_row_points_at_its_key_and_opens_it(cx: &mut gpui::TestAppContext) {
+    let (view, cx) = keys_tab(cx);
+    let row = cx.debug_bounds("key-overview-row-3").expect("F3 is listed");
+
+    cx.simulate_mouse_move(row.center(), None, gpui::Modifiers::default());
+    redraw(cx);
+    view.read_with(cx, |view, _| assert_eq!(view.hovered_key, Some(3)));
+
+    cx.simulate_click(row.center(), gpui::Modifiers::default());
+    redraw(cx);
+    view.read_with(cx, |view, _| {
+        assert_eq!(view.selected_key, Some(3));
+        // The row left with the overview; nothing stays hovered behind it.
+        assert_eq!(view.hovered_key, None);
+    });
+}
+
+/// An unbound keyboard key does what it always did — "Off" read as though
+/// every key were switched off. Only a keypad grid key, which has no
+/// function of its own, is off until something is bound to it.
+#[test]
+fn an_unbound_key_reads_as_its_native_function() {
+    let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    let f1 = key_slots(None, None)[1].target.clone();
+
+    assert_eq!(unbound_binding(&f1).0, "Native function");
+    assert_eq!(
+        unbound_binding(&KeyTarget::Control(ButtonId::control(0x000a))).0,
+        "Native function"
+    );
+    assert_eq!(unbound_binding(&KeyTarget::grid(GridKey::TopLeft)).0, "Off");
+}
+
+#[gpui::test]
+fn open_application_editor_binds_the_selected_key(cx: &mut gpui::TestAppContext) {
+    use crate::services::i18n::LOCALE_LOCK;
+    use gpui::{Modifiers, VisualTestContext};
+    use openlogi_core::binding::ApplicationTarget;
+
+    fn click(cx: &mut VisualTestContext, selector: &'static str) {
+        let bounds = cx.debug_bounds(selector).expect(selector);
+        cx.simulate_click(bounds.center(), Modifiers::default());
+        redraw(cx);
+    }
+    fn f1_binding(cx: &mut VisualTestContext, trigger: &KeyTarget) -> Option<Action> {
+        cx.update(|_, cx| bound_action(AppState::try_read(cx).unwrap(), trigger))
+    }
+
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    let (view, cx) = keys_tab(cx);
     // Slot 1 of the fallback F-row is F1.
     let f1 = key_slots(None, None)[1].target.clone();
     view.update(cx, |view, cx| {
         view.select_key(Some(1), cx);
         view.open_editor(PowerUserKind::OpenApplication, cx);
     });
-    cx.update(|window, cx| window.draw(cx).clear(cx));
+    redraw(cx);
 
     // A blank path is rejected in place and binds nothing.
     click(cx, "key-editor-custom-application-add");
@@ -854,7 +909,7 @@ fn open_application_editor_binds_the_selected_key(cx: &mut gpui::TestAppContext)
     view.update(cx, |view, cx| {
         view.open_editor(PowerUserKind::OpenApplication, cx);
     });
-    cx.update(|window, cx| window.draw(cx).clear(cx));
+    redraw(cx);
     view.read_with(cx, |view, cx| {
         assert_eq!(
             view.text_state().expect("editor input").read(cx).value(),
