@@ -1,4 +1,5 @@
 use openlogi_core::device::DeviceKind;
+use openlogi_core::device_order::PhysicalDeviceKey;
 use openlogi_flow::generated as proto;
 use openlogi_flow::identity::CanonicalDeviceIdentifier;
 
@@ -126,4 +127,45 @@ fn announce_reports_the_self_slot_and_held_lists_online_devices() {
         Some(MOUSE)
     );
     assert_eq!(devices.held().len(), 1);
+}
+
+#[test]
+fn find_unlisted_keys_a_peer_identity_like_the_inventory() {
+    const SERIAL_MOUSE: &str = "serial:2c1a";
+    let config = config(vec![
+        configured(SERIAL_MOUSE, Some(1)),
+        configured(KEYBOARD, Some(1)),
+        configured(PRESENTER, Some(1)),
+    ]);
+    let devices = LocalDevices::join(
+        &config,
+        &[record(PRESENTER, DeviceKind::Presenter, 0x0c, false)],
+    );
+
+    // The inventory folds a serial's case into its key; the wire does not.
+    let by_serial = proto::DeviceIdentity {
+        ids: vec![
+            CanonicalDeviceIdentifier::serial("2C1A").into(),
+            CanonicalDeviceIdentifier::unit_id(0x99).into(),
+        ],
+        ..Default::default()
+    };
+    assert_eq!(
+        devices
+            .find_unlisted(&by_serial)
+            .map(PhysicalDeviceKey::as_str),
+        Some(SERIAL_MOUSE)
+    );
+    assert_eq!(
+        devices
+            .find_unlisted(&unit_identity(0x0b))
+            .map(PhysicalDeviceKey::as_str),
+        Some(KEYBOARD)
+    );
+    assert!(
+        devices.find_unlisted(&unit_identity(0x0c)).is_none(),
+        "the presenter is listed"
+    );
+    assert!(devices.find_unlisted(&unit_identity(0x0d)).is_none());
+    assert_eq!(keys(&devices), [PRESENTER]);
 }

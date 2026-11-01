@@ -3,10 +3,12 @@
 //! The orchestrator publishes every inventory device that has a physical key,
 //! online or not. [`LocalDevices::join`] keeps the ones the Flow configuration
 //! names. An offline device stays in the view because its transition to
-//! online is the receiver's evidence that a handoff arrived.
+//! online is the receiver's evidence that a handoff arrived. A configured
+//! device the inventory does not list at all, such as a Bluetooth device
+//! connected to another computer, can still be named by a peer's request.
 use openlogi_core::config::{FlowConfig, FlowDevice, FlowHostSlot, FlowPeerName};
 use openlogi_core::device::DeviceKind;
-use openlogi_core::device_order::PhysicalDeviceKey;
+use openlogi_core::device_order::{DeviceIdentity, PhysicalDeviceKey};
 use openlogi_flow::generated as proto;
 use openlogi_flow::identity::{CanonicalDeviceIdentifier, same_device};
 use openlogi_hid::DeviceRoute;
@@ -71,49 +73,56 @@ pub(crate) struct OutgoingDevice {
     pub(crate) identity: proto::DeviceIdentity,
 }
 
-/// The configured Flow devices present in the inventory, in handoff order:
-/// pointing devices first, keyboards last.
+/// The configured Flow devices, split by whether the inventory lists them.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct LocalDevices(Vec<LocalDevice>);
+pub(crate) struct LocalDevices {
+    /// The devices the inventory lists, in handoff order: pointing devices
+    /// first, keyboards last.
+    listed: Vec<LocalDevice>,
+    /// The keys of the configured devices the inventory does not list.
+    unlisted: Vec<PhysicalDeviceKey>,
+}
 
 impl LocalDevices {
-    /// Join the configured devices with the inventory. A configured device that
-    /// the inventory does not list, or that has neither a serial nor a unit id,
-    /// cannot take part and is left out.
+    /// Join the configured devices with the inventory. A listed device that
+    /// has neither a serial nor a unit id cannot take part and is left out.
     pub(crate) fn join(config: &FlowConfig, inventory: &[InventoryDevice]) -> Self {
-        let mut devices: Vec<LocalDevice> = config
-            .devices()
-            .iter()
-            .filter_map(|configured| {
-                let record = inventory
-                    .iter()
-                    .find(|record| record.key == *configured.key())?;
-                let identity = identity(configured.key(), record)?;
-                Some(LocalDevice {
+        let mut listed = Vec::new();
+        let mut unlisted = Vec::new();
+        for configured in config.devices() {
+            let Some(record) = inventory
+                .iter()
+                .find(|record| record.key == *configured.key())
+            else {
+                unlisted.push(configured.key().clone());
+                continue;
+            };
+            if let Some(identity) = identity(configured.key(), record) {
+                listed.push(LocalDevice {
                     config: configured.clone(),
                     identity,
                     route: record.route.clone(),
                     kind: record.kind,
                     online: record.online,
-                })
-            })
-            .collect();
-        devices.sort_by(|a, b| {
+                });
+            }
+        }
+        listed.sort_by(|a, b| {
             handoff_rank(a.kind)
                 .cmp(&handoff_rank(b.kind))
                 .then_with(|| a.key().cmp(b.key()))
         });
-        Self(devices)
+        Self { listed, unlisted }
     }
 
-    /// Every joined device, in handoff order.
+    /// Every listed device, in handoff order.
     pub(crate) fn iter(&self) -> impl Iterator<Item = &LocalDevice> {
-        self.0.iter()
+        self.listed.iter()
     }
 
     /// The online devices that can be sent to `peer`, in handoff order.
     pub(crate) fn outgoing(&self, peer: &FlowPeerName) -> Vec<OutgoingDevice> {
-        self.0
+        self.listed
             .iter()
             .filter(|device| device.online)
             .filter_map(|device| {
@@ -126,19 +135,50 @@ impl LocalDevices {
             .collect()
     }
 
-    /// The local device a peer's identity denotes. A malformed identity
+    /// The listed device a peer's identity denotes. A malformed identity
     /// matches nothing.
     pub(crate) fn find(&self, identity: &proto::DeviceIdentity) -> Option<&LocalDevice> {
-        self.0
+        self.listed
             .iter()
             .find(|device| same_device(identity, &device.identity).unwrap_or(false))
+    }
+
+    /// The key of the configured, unlisted device a peer's identity denotes.
+    ///
+    /// Such a device has no identity here yet: after a restart a Unifying
+    /// device away on another computer has no cached probe, and a Bluetooth
+    /// device connected to another computer is not enumerated at all. Each of
+    /// the peer's serial and unit id is keyed the way the orchestrator keys an
+    /// inventory device, and matched against the configured keys. A malformed
+    /// identity matches nothing.
+    pub(crate) fn find_unlisted(
+        &self,
+        identity: &proto::DeviceIdentity,
+    ) -> Option<&PhysicalDeviceKey> {
+        let mut keys = Vec::with_capacity(identity.ids.len());
+        for id in &identity.ids {
+            let key = match CanonicalDeviceIdentifier::try_from(id).ok()? {
+                CanonicalDeviceIdentifier::Serial(serial) => {
+                    DeviceIdentity::from_parts(Some(&serial), [0; 4])
+                }
+                CanonicalDeviceIdentifier::UnitId(unit) => {
+                    DeviceIdentity::from_parts(None, unit.to_be_bytes())
+                }
+                CanonicalDeviceIdentifier::BluetoothAddress(_) => continue,
+            }
+            .config_key();
+            keys.extend(key);
+        }
+        self.unlisted
+            .iter()
+            .find(|unlisted| keys.iter().any(|key| key == unlisted.as_str()))
     }
 
     /// The `AnnounceDevices` whole-state notification at `revision`.
     pub(crate) fn announce(&self, revision: u64) -> proto::AnnounceDevices {
         proto::AnnounceDevices {
             devices: self
-                .0
+                .listed
                 .iter()
                 .map(|device| {
                     let mut view = proto::DeviceView {
@@ -160,7 +200,7 @@ impl LocalDevices {
 
     /// The identities of the devices this host currently holds.
     pub(crate) fn held(&self) -> Vec<proto::DeviceIdentity> {
-        self.0
+        self.listed
             .iter()
             .filter(|device| device.online)
             .map(|device| device.identity.clone())

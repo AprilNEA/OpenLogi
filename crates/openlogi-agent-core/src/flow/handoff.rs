@@ -67,7 +67,6 @@ struct PendingIncoming {
 struct PendingDevice {
     key: PhysicalDeviceKey,
     identity: proto::DeviceIdentity,
-    pointing: bool,
     arrived_after: Option<Duration>,
 }
 
@@ -173,28 +172,31 @@ impl IncomingLedger {
 
         let mut matched: Vec<PendingDevice> = Vec::with_capacity(request.devices.len());
         for requested in &request.devices {
-            let Some(local) = devices.find(requested) else {
+            let (key, identity) = if let Some(local) = devices.find(requested) {
+                if local.is_online() {
+                    return rejected(
+                        proto::HandoffRejectReason::NotReady,
+                        "a requested device is already connected here",
+                    );
+                }
+                (local.key(), local.identity())
+            } else if let Some(key) = devices.find_unlisted(requested) {
+                (key, requested)
+            } else {
                 return rejected(
                     proto::HandoffRejectReason::UnknownDevice,
                     "a requested device is not configured here",
                 );
             };
-            if local.is_online() {
-                return rejected(
-                    proto::HandoffRejectReason::NotReady,
-                    "a requested device is already connected here",
-                );
-            }
-            if matched.iter().any(|device| device.key == *local.key()) {
+            if matched.iter().any(|device| device.key == *key) {
                 return rejected(
                     proto::HandoffRejectReason::UnknownDevice,
                     "the request names one device twice",
                 );
             }
             matched.push(PendingDevice {
-                key: local.key().clone(),
-                identity: local.identity().clone(),
-                pointing: local.is_pointing(),
+                key: key.clone(),
+                identity: identity.clone(),
                 arrived_after: None,
             });
         }
@@ -223,15 +225,19 @@ impl IncomingLedger {
         };
         let mut entry = None;
         for expected in &mut pending.devices {
-            if expected.arrived_after.is_some()
-                || !devices
-                    .iter()
-                    .any(|device| *device.key() == expected.key && device.is_online())
-            {
+            if expected.arrived_after.is_some() {
                 continue;
             }
+            let Some(arrived) = devices
+                .iter()
+                .find(|device| *device.key() == expected.key && device.is_online())
+            else {
+                continue;
+            };
             expected.arrived_after = Some(now.saturating_duration_since(pending.accepted_at));
-            if expected.pointing && !pending.entry_placed {
+            // The kind of a device armed before the inventory listed it is
+            // known only now.
+            if arrived.is_pointing() && !pending.entry_placed {
                 pending.entry_placed = true;
                 entry = Some(pending.entry.clone());
             }

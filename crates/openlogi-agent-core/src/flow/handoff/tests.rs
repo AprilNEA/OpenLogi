@@ -337,3 +337,51 @@ fn entry_point_enters_the_receiver_through_the_opposite_side() {
         assert!((velocity.y + 3.0).abs() < f64::EPSILON);
     }
 }
+
+/// After an agent restart a Unifying device away on the sender has no cached
+/// probe, and a Bluetooth device connected to the sender is not enumerated
+/// here at all: the inventory lists neither until it connects. A request
+/// for such a configured device still arms, and its arrival completes it.
+#[test]
+fn a_configured_device_the_inventory_does_not_list_yet_can_arrive() {
+    let config = config(vec![configured(MOUSE, Some(1))]);
+    let mut ledger = IncomingLedger::default();
+    let t0 = Instant::now();
+
+    let decision = ledger.arm(
+        SENDER,
+        &request(5, &[0x0a]),
+        &LocalDevices::join(&config, &[]),
+        true,
+        t0,
+    );
+    assert!(matches!(decision, ArmDecision::Armed(_)), "{decision:?}");
+
+    let arrived = LocalDevices::join(&config, &[record(MOUSE, DeviceKind::Mouse, 0x0a, true)]);
+    let observed = ledger.observe(&arrived, t0 + ms(80));
+    assert!(
+        observed.entry.is_some(),
+        "the arriving mouse places the cursor"
+    );
+    let done = observed.completed.expect("the only device arrived");
+    assert_eq!(outcome(&done), proto::HandoffOutcome::Arrived);
+    assert_eq!(
+        done.result.arrivals[0]
+            .device
+            .as_option()
+            .map(|device| device.ids.clone()),
+        Some(unit_identity(0x0a).ids)
+    );
+
+    let unconfigured = ledger.arm(
+        SENDER,
+        &request(6, &[0x0b]),
+        &LocalDevices::join(&config, &[]),
+        true,
+        t0,
+    );
+    assert_eq!(
+        reject_reason(&unconfigured),
+        proto::HandoffRejectReason::UnknownDevice
+    );
+}
