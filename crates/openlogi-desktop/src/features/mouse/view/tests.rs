@@ -1,4 +1,6 @@
-use gpui::{Entity, KeyDownEvent, Keystroke, Modifiers, TestAppContext, VisualTestContext, size};
+use gpui_kit::{
+    Entity, KeyDownEvent, Keystroke, Modifiers, TestAppContext, VisualTestContext, size,
+};
 use openlogi_core::binding::default_binding;
 use openlogi_core::config::Config;
 
@@ -58,7 +60,7 @@ fn assert_forward_binding(cx: &mut VisualTestContext, expected: &Action) {
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn long_bindings_stay_inside_their_label_card(cx: &mut TestAppContext) {
     // #1401: the card's Button base centres its children on the cross axis,
     // so without `items_stretch` the value row keeps its natural width and
@@ -70,7 +72,7 @@ fn long_bindings_stay_inside_their_label_card(cx: &mut TestAppContext) {
     // would have made this a false pass.
     let _locale = LOCALE_LOCK.lock().unwrap();
     rust_i18n::set_locale("en");
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     install_app_state(cx);
     let (view, cx) = cx.add_window_view(MouseModelView::new);
     // Wide enough for labels on both sides (`model_layout` hides them under 960).
@@ -109,9 +111,9 @@ fn long_bindings_stay_inside_their_label_card(cx: &mut TestAppContext) {
 /// until its five cards no longer fit beside it. The canvas grows to hold the
 /// ones that reach past the model, rather than leaving them over its edge
 /// where the clipped tab can cut them off.
-#[gpui::test]
+#[gpui_kit::test]
 fn cards_that_reach_past_a_shrunk_model_stay_on_the_canvas(cx: &mut TestAppContext) {
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     install_app_state(cx);
     let (view, cx) = cx.add_window_view(MouseModelView::new);
     cx.simulate_resize(size(px(960.), px(680.)));
@@ -143,11 +145,11 @@ fn cards_that_reach_past_a_shrunk_model_stay_on_the_canvas(cx: &mut TestAppConte
     cx.run_until_parked();
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn action_picker_renders_after_opening_through_the_inspector(cx: &mut TestAppContext) {
     let _locale = LOCALE_LOCK.lock().unwrap();
     rust_i18n::set_locale("en");
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     install_app_state(cx);
     let (view, cx) = cx.add_window_view(MouseModelView::new);
     cx.simulate_resize(size(px(1200.), px(1000.)));
@@ -256,11 +258,11 @@ fn action_picker_renders_after_opening_through_the_inspector(cx: &mut TestAppCon
 
 /// #2117: Record fills the custom shortcut field from the next key press, and
 /// Add commits the field as before.
-#[gpui::test]
+#[gpui_kit::test]
 fn record_fills_the_custom_shortcut_from_the_next_key_press(cx: &mut TestAppContext) {
     let _locale = LOCALE_LOCK.lock().unwrap();
     rust_i18n::set_locale("en");
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     install_app_state(cx);
     let (view, cx) = cx.add_window_view(MouseModelView::new);
     cx.simulate_resize(size(px(1200.), px(1000.)));
@@ -353,11 +355,11 @@ fn record_fills_the_custom_shortcut_from_the_next_key_press(cx: &mut TestAppCont
 
 /// #2122: a mouse button can be bound to a shell command from the picker, the
 /// way the Actions Ring and keyboard editors already allow.
-#[gpui::test]
+#[gpui_kit::test]
 fn the_action_picker_binds_a_button_to_a_shell_command(cx: &mut TestAppContext) {
     let _locale = LOCALE_LOCK.lock().unwrap();
     rust_i18n::set_locale("en");
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     install_app_state(cx);
     let (view, cx) = cx.add_window_view(MouseModelView::new);
     cx.simulate_resize(size(px(1200.), px(1000.)));
@@ -405,9 +407,9 @@ fn the_action_picker_binds_a_button_to_a_shell_command(cx: &mut TestAppContext) 
     cx.run_until_parked();
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn a_selected_gesture_can_render_in_the_binding_inspector(cx: &mut TestAppContext) {
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     install_app_state(cx);
     let (view, cx) = cx.add_window_view(MouseModelView::new);
     cx.run_until_parked();
@@ -461,9 +463,9 @@ fn a_selected_gesture_can_render_in_the_binding_inspector(cx: &mut TestAppContex
     cx.run_until_parked();
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn selecting_another_control_closes_the_action_picker(cx: &mut TestAppContext) {
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     install_app_state(cx);
     let (view, cx) = cx.add_window_view(MouseModelView::new);
     cx.run_until_parked();
@@ -481,9 +483,9 @@ fn selecting_another_control_closes_the_action_picker(cx: &mut TestAppContext) {
     cx.run_until_parked();
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn clearing_custom_action_drafts_resets_text_and_invalid_state(cx: &mut TestAppContext) {
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     install_app_state(cx);
     let (view, cx) = cx.add_window_view(MouseModelView::new);
     cx.run_until_parked();
@@ -577,7 +579,7 @@ fn wheel_hold_view(
     config: Config,
     button: ButtonId,
 ) -> (Entity<MouseModelView>, &mut VisualTestContext) {
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     cx.update(|cx| {
         let resolver = AssetResolver::new();
         let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -611,7 +613,7 @@ fn holds_the_wheel(cx: &mut VisualTestContext, button: ButtonId) -> bool {
     })
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn the_wheel_hold_switch_turns_holding_back_into_sideways_scrolling(cx: &mut TestAppContext) {
     let _locale = LOCALE_LOCK.lock().unwrap();
     rust_i18n::set_locale("en");
@@ -641,7 +643,7 @@ fn the_wheel_hold_switch_turns_holding_back_into_sideways_scrolling(cx: &mut Tes
     cx.run_until_parked();
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn a_mouse_without_raw_wheel_offers_no_wheel_hold(cx: &mut TestAppContext) {
     let _locale = LOCALE_LOCK.lock().unwrap();
     rust_i18n::set_locale("en");
@@ -655,7 +657,7 @@ fn a_mouse_without_raw_wheel_offers_no_wheel_hold(cx: &mut TestAppContext) {
     cx.run_until_parked();
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn a_carried_over_wheel_hold_can_still_be_turned_off(cx: &mut TestAppContext) {
     let _locale = LOCALE_LOCK.lock().unwrap();
     rust_i18n::set_locale("en");
@@ -683,7 +685,7 @@ fn a_carried_over_wheel_hold_can_still_be_turned_off(cx: &mut TestAppContext) {
     cx.run_until_parked();
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn an_app_profile_explains_that_an_action_replaces_wheel_hold(cx: &mut TestAppContext) {
     let _locale = LOCALE_LOCK.lock().unwrap();
     rust_i18n::set_locale("en");
@@ -742,7 +744,7 @@ fn in_gesture_mode(cx: &mut VisualTestContext, button: ButtonId) -> bool {
     })
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn a_gesture_button_offers_wheel_hold_and_leaves_gestures_for_it(cx: &mut TestAppContext) {
     let _locale = LOCALE_LOCK.lock().unwrap();
     rust_i18n::set_locale("en");
@@ -776,7 +778,7 @@ fn a_gesture_button_offers_wheel_hold_and_leaves_gestures_for_it(cx: &mut TestAp
     cx.run_until_parked();
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn a_gesture_button_without_raw_wheel_offers_no_wheel_hold(cx: &mut TestAppContext) {
     let _locale = LOCALE_LOCK.lock().unwrap();
     rust_i18n::set_locale("en");
@@ -799,7 +801,7 @@ fn a_gesture_button_without_raw_wheel_offers_no_wheel_hold(cx: &mut TestAppConte
 
 /// An app profile replaces a gesture button's gestures with a button binding,
 /// which gets a release, so its picker offers the held actions too.
-#[gpui::test]
+#[gpui_kit::test]
 fn an_inherited_gesture_button_offers_the_held_actions(cx: &mut TestAppContext) {
     let _locale = LOCALE_LOCK.lock().unwrap();
     rust_i18n::set_locale("en");

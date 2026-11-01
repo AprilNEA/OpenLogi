@@ -33,7 +33,7 @@ pub(super) fn about_page(view: Entity<SettingsView>, copied: bool) -> SettingPag
 
 /// The About hero row: logo, wordmark, the clickable build line, and the link /
 /// diagnostics buttons.
-fn about_hero(view: &Entity<SettingsView>, copied: bool, cx: &mut App) -> gpui::Div {
+fn about_hero(view: &Entity<SettingsView>, copied: bool, cx: &mut App) -> gpui_kit::Div {
     let pal = crate::ui::theme::palette(cx);
     let diag_label = if copied {
         tr!("common.copied")
@@ -115,7 +115,7 @@ fn copy_diagnostics_action(
     view: &Entity<SettingsView>,
     label: SharedString,
     cx: &App,
-) -> gpui::Div {
+) -> gpui_kit::Div {
     let border = crate::ui::theme::palette(cx).border;
     let view = view.clone();
 
@@ -127,7 +127,7 @@ fn copy_diagnostics_action(
                 .ghost()
                 .small()
                 .flex_none()
-                .min_w(gpui::rems(8.5))
+                .min_w(gpui_kit::rems(8.5))
                 .icon(IconName::Copy)
                 .label(label)
                 .on_click(move |_, _, cx| {
@@ -158,7 +158,7 @@ fn copy_diagnostics_action(
 }
 
 /// The config-file location row with a reveal-in-file-manager button.
-fn about_config(cx: &App) -> gpui::Div {
+fn about_config(cx: &App) -> gpui_kit::Div {
     let pal = crate::ui::theme::palette(cx);
     let path = openlogi_core::paths::config_path()
         .map(|p| p.display().to_string())

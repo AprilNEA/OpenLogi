@@ -2,14 +2,14 @@
 //! pre-connection / unreachable / outdated-build frames rendered in place of
 //! the real UI, and an attention bar shown only when action is required.
 
-use gpui::{App, Div, IntoElement, ParentElement, SharedString, Styled, div, px, rgb};
-use gpui_component::{
+use gpui_kit::component::{
     Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     spinner::Spinner,
     v_flex,
 };
+use gpui_kit::{App, Div, IntoElement, ParentElement, SharedString, Styled, div, px, rgb};
 use openlogi_ipc::{AgentStatus, SecureInput};
 
 use crate::app::menu::open_config_folder;
@@ -103,7 +103,7 @@ pub(super) fn outdated_gui_body(cx: &App) -> Div {
 
 /// Fail-closed frame for config load/save/conflict/reload failures.
 pub(super) fn config_issue_body(message: SharedString, cx: &App) -> Div {
-    use gpui::InteractiveElement as _;
+    use gpui_kit::InteractiveElement as _;
 
     notice_body(tr!("device.configuration"), message, cx)
         .size_full()
@@ -187,7 +187,7 @@ pub(super) fn attention_footer(attention: Attention, cx: &App) -> impl IntoEleme
 /// Why key bindings are not firing. Nothing to click: Secure Event Input ends
 /// when the app that turned it on turns it off.
 fn secure_input_status(app: Option<SharedString>, pal: Palette) -> impl IntoElement {
-    use gpui::InteractiveElement as _;
+    use gpui_kit::InteractiveElement as _;
 
     let message = match app {
         Some(app) => tr!("keyboard.secure_input_pauses_remapping_for_app", app => app),
@@ -218,8 +218,8 @@ fn accessibility_status(pal: Palette) -> impl IntoElement {
     // Scoped here rather than at module level: these traits' only user is this
     // macOS-gated affordance (`.hover()` + `.on_click()`), so an ungated import
     // would be unused — and a hard error under `-D warnings` — on Linux/Windows.
-    use gpui::InteractiveElement as _;
-    use gpui_base::Button as BaseButton;
+    use gpui_kit::InteractiveElement as _;
+    use gpui_kit::base::Button as BaseButton;
 
     BaseButton::new("footer-accessibility")
         .accessibility_label(tr!("permissions.accessibility_not_granted_click_to_grant"))

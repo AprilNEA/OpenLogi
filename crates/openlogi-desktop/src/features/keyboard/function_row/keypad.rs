@@ -6,16 +6,16 @@
 //! Selection, hover, and the config panel are the parent view's; these only
 //! draw the keypad and report clicks and hovers back to it.
 
-use gpui::{
+use gpui_kit::component::button::{Button, ButtonGroup, ButtonVariant, ButtonVariants as _};
+use gpui_kit::component::dialog::DialogButtonProps;
+use gpui_kit::component::tooltip::Tooltip;
+use gpui_kit::component::{
+    Disableable as _, Icon, IconName, Selectable as _, Sizable as _, WindowExt as _, h_flex, v_flex,
+};
+use gpui_kit::{
     App, Entity, FontWeight, InteractiveElement, IntoElement, ParentElement, RenderOnce,
     SharedString, StatefulInteractiveElement as _, Styled, Window, div, hsla,
     prelude::FluentBuilder as _, px, rgb, svg,
-};
-use gpui_component::button::{Button, ButtonGroup, ButtonVariant, ButtonVariants as _};
-use gpui_component::dialog::DialogButtonProps;
-use gpui_component::tooltip::Tooltip;
-use gpui_component::{
-    Disableable as _, Icon, IconName, Selectable as _, Sizable as _, WindowExt as _, h_flex, v_flex,
 };
 use openlogi_core::binding::{Cid, GridKey, KeypadPage};
 
@@ -376,7 +376,7 @@ fn lcd_face(
     binding: SharedString,
     key: KeyShape,
     state: KeyState,
-) -> gpui::Div {
+) -> gpui_kit::Div {
     let glyph = key.w * LCD_GLYPH_FRAC;
     let [tl, tr, br, bl] = key.radii.map(px);
     let face = v_flex()

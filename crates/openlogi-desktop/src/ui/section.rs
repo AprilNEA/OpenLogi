@@ -13,7 +13,7 @@
 //! returns a [`Div`] so each caller still places it: a popover list insets its
 //! heading to match its rows, a panel lets it sit flush.
 
-use gpui::{Div, ParentElement, SharedString, Styled, div};
+use gpui_kit::{Div, ParentElement, SharedString, Styled, div};
 
 use crate::ui::theme::{Palette, Typography as _};
 

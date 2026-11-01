@@ -7,13 +7,13 @@ use super::super::thumbwheel::ThumbwheelPreset;
 use crate::features::binding_editor::{GESTURE_BUTTON_ICON, action_icon_path};
 use crate::ui::action::localized_action_label;
 use crate::ui::theme::{self, ACCENT_BLUE, Typography as _};
-use gpui::{
+use gpui_kit::base::Button as BaseButton;
+use gpui_kit::component::{Icon, IconName, h_flex};
+use gpui_kit::{
     App, ElementId, Entity, Hsla, InteractiveElement, IntoElement, ParentElement, RenderOnce,
     StatefulInteractiveElement as _, Styled, Window, div, prelude::FluentBuilder as _, px, rgb,
     svg,
 };
-use gpui_base::Button as BaseButton;
-use gpui_component::{Icon, IconName, h_flex};
 use openlogi_core::binding::{Action, ButtonId, default_binding};
 
 use super::{LABEL_W, ModelRect, MouseModelView, SIDE_GAP, set_control_hovered};
@@ -28,7 +28,7 @@ pub(super) fn label_control(
     model: ModelRect,
     selected: bool,
     view: &Entity<MouseModelView>,
-) -> gpui::Div {
+) -> gpui_kit::Div {
     let x = match label.side {
         Side::Left => model.left - SIDE_GAP - LABEL_W,
         Side::Right => model.left + model.width + SIDE_GAP,
@@ -54,7 +54,7 @@ pub(super) fn label_control(
 }
 
 pub(super) struct BindingLabel {
-    text: gpui::SharedString,
+    text: gpui_kit::SharedString,
     /// Vendored action-icon asset path (see [`action_icon_path`]) for the
     /// card's leading glyph. Every constructor currently supplies one; the
     /// `Option` is the seam for icon-less bindings.
@@ -64,7 +64,7 @@ pub(super) struct BindingLabel {
 impl BindingLabel {
     /// The card's value row: the leading action icon, the binding text, and
     /// the trailing chevron, all tinted with `color`.
-    fn row(self, color: Hsla, pal: theme::Palette) -> gpui::Div {
+    fn row(self, color: Hsla, pal: theme::Palette) -> gpui_kit::Div {
         h_flex()
             .items_center()
             .gap_2()

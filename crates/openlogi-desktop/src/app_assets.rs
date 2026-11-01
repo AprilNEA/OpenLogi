@@ -7,7 +7,7 @@
 
 use std::borrow::Cow;
 
-use gpui::{AssetSource, Result, SharedString};
+use gpui_kit::{AssetSource, Result, SharedString};
 use openlogi_ui::action_icons::ActionIcons;
 
 /// Asset path [`AppAssets`] resolves to the embedded app logo.
@@ -31,11 +31,11 @@ impl AssetSource for AppAssets {
         if let Some(bytes) = ActionIcons.load(path)? {
             return Ok(Some(bytes));
         }
-        gpui_kit_assets::Assets.load(path)
+        gpui_kit::assets::Assets.load(path)
     }
 
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
-        gpui_kit_assets::Assets.list(path)
+        gpui_kit::assets::Assets.list(path)
     }
 }
 

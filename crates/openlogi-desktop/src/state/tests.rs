@@ -21,7 +21,7 @@ use openlogi_core::hid::{
     SmartShiftStatus, SmartShiftThreshold, WriteError,
 };
 
-use gpui::AppContext as _;
+use gpui_kit::AppContext as _;
 use openlogi_core::app::ForegroundApp;
 use openlogi_fixture::{CANONICAL_DEVICE_PROFILE_JSON, DeviceProfile, ProfileSupport};
 use openlogi_ipc::{AgentSnapshot, AgentStatus, ForegroundApps, InventoryHealth, PROTOCOL_VERSION};

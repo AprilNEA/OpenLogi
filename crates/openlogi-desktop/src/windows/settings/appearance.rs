@@ -1,7 +1,7 @@
 //! Appearance settings page: mode, theme grid, radius, scale, language.
 
 use super::language::{LanguageOption, language_select_field};
-use gpui::{ElementId, img};
+use gpui_kit::{ElementId, img};
 use openlogi_core::config::AppIcon;
 
 use super::{
@@ -122,7 +122,7 @@ fn set_scale(cx: &mut App, scale: UiScale) {
 
 /// The Light / Dark / Follow-system appearance picker — three macOS-style
 /// preview thumbnails, each with a radio + label, mirroring System Settings.
-fn mode_segment(cx: &App) -> gpui::Div {
+fn mode_segment(cx: &App) -> gpui_kit::Div {
     let pal = theme::palette(cx);
     let current = appearance_of(cx);
     let accent = cx.theme().primary;
@@ -229,7 +229,7 @@ fn mode_card(
 /// The app-icon picker: one card per icon, each showing a render of the
 /// compiled icon rather than its artwork, so the choice looks like what macOS
 /// will draw.
-fn icon_picker(cx: &App) -> gpui::Div {
+fn icon_picker(cx: &App) -> gpui_kit::Div {
     let pal = theme::palette(cx);
     let current =
         AppState::try_read(cx).map_or_else(AppIcon::default, |state| state.app_settings().app_icon);
@@ -418,7 +418,7 @@ fn theme_picker(
     theme_search: &Entity<InputState>,
     filter: ThemeFilter,
     cx: &App,
-) -> gpui::Div {
+) -> gpui_kit::Div {
     let pal = theme::palette(cx);
     let active = cx.theme().theme_name().clone();
     let query = theme_search.read(cx).value().trim().to_lowercase();
@@ -572,7 +572,7 @@ fn theme_card(
             }
         })
         .focus_visible(move |style| style.border_color(swatch.primary).shadow_sm())
-        .active(gpui::Styled::shadow_2xs)
+        .active(gpui_kit::Styled::shadow_2xs)
         .child(
             v_flex()
                 .h(px(54.))

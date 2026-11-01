@@ -280,7 +280,7 @@ pub enum AssetCommand {
 /// main loop, mirroring how the Add Device window drives pairing.
 pub struct AssetControl(pub tokio::sync::mpsc::UnboundedSender<AssetCommand>);
 
-impl gpui::Global for AssetControl {}
+impl gpui_kit::Global for AssetControl {}
 
 /// The source one sync session should use: an `OPENLOGI_ASSETS` override wins,
 /// otherwise the user's saved preference.

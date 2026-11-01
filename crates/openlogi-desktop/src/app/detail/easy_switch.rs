@@ -12,13 +12,13 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use gpui::{
-    AnyElement, App, AppContext as _, InteractiveElement as _, IntoElement, ParentElement as _,
-    SharedString, Styled as _, Window, div, prelude::FluentBuilder as _, px,
-};
-use gpui_component::{
+use gpui_kit::component::{
     Disableable as _, Icon, IconName, WindowExt as _, button::Button, h_flex, input::InputState,
     v_flex,
+};
+use gpui_kit::{
+    AnyElement, App, AppContext as _, InteractiveElement as _, IntoElement, ParentElement as _,
+    SharedString, Styled as _, Window, div, prelude::FluentBuilder as _, px,
 };
 use openlogi_core::hid::{EasySwitchHosts, EasySwitchSlot, HostConnection, WriteError};
 
@@ -306,7 +306,7 @@ fn open_rename_dialog(window: &mut Window, cx: &mut App, key: DeviceKey, slot: &
 
 /// The field's text without NULs, which a device name cannot hold and no
 /// keyboard types.
-fn typed(input: &gpui::Entity<InputState>, cx: &App) -> String {
+fn typed(input: &gpui_kit::Entity<InputState>, cx: &App) -> String {
     without_nul(&input.read(cx).value())
 }
 
@@ -320,7 +320,7 @@ fn without_nul(value: &str) -> String {
 mod tests {
     use std::sync::Arc;
 
-    use gpui::{
+    use gpui_kit::{
         AppContext as _, Context, IntoElement, Modifiers, ParentElement as _, Render, Styled as _,
         TestAppContext, VisualTestContext, Window, div, px, size,
     };
@@ -402,15 +402,15 @@ mod tests {
         cx: &mut TestAppContext,
         hosts: EasySwitchHosts,
         refusal: Option<HostRenameRefusal>,
-    ) -> &mut gpui::VisualTestContext {
-        cx.update(gpui_component::init);
+    ) -> &mut gpui_kit::VisualTestContext {
+        cx.update(gpui_kit::init);
         let (_view, cx) = cx.add_window_view(|_, _| CardHost(hosts, refusal));
         cx.simulate_resize(size(px(800.), px(600.)));
         cx.update(|window, cx| window.draw(cx).clear(cx));
         cx
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn every_channel_gets_a_row_and_paired_ones_keep_their_rename_inside(cx: &mut TestAppContext) {
         let _locale = LOCALE_LOCK.lock().unwrap();
         rust_i18n::set_locale("fi");
@@ -442,7 +442,7 @@ mod tests {
         assert!(cx.debug_bounds("easy-switch-refusal").is_none());
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn a_device_that_cannot_rename_offers_no_rename(cx: &mut TestAppContext) {
         let _locale = LOCALE_LOCK.lock().unwrap();
         rust_i18n::set_locale("en");
@@ -454,7 +454,7 @@ mod tests {
         }
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn a_refused_rename_is_explained_under_the_channels(cx: &mut TestAppContext) {
         let _locale = LOCALE_LOCK.lock().unwrap();
         rust_i18n::set_locale("en");
@@ -467,25 +467,22 @@ mod tests {
         assert!(cx.debug_bounds("easy-switch-refusal").is_some());
     }
 
-    /// Paints the dialog layer the way the app's root view does.
+    /// Empty content under the Kit root's dialog layer.
     struct DialogHost;
 
     impl Render for DialogHost {
-        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            div()
-                .size_full()
-                .children(gpui_component::Root::render_dialog_layer(window, cx))
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full()
         }
     }
 
-    /// The card of a device that is `reachable` or not, over the dialog layer,
-    /// so its renames can open their dialog.
+    /// A device card inside the Kit root, so its renames can open a dialog.
     struct RootedCard {
         reachable: bool,
     }
 
     impl Render for RootedCard {
-        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             let facts = EasySwitchFacts {
                 key: DeviceKey::from("direct:046d:b35b:unit:a393cae0"),
                 load: Load::Ready(Arc::new(hosts(true))),
@@ -495,7 +492,6 @@ mod tests {
             div()
                 .size_full()
                 .children(easy_switch_card(Some(facts), theme::palette(cx)))
-                .children(gpui_component::Root::render_dialog_layer(window, cx))
         }
     }
 
@@ -513,7 +509,7 @@ mod tests {
         view: impl FnOnce() -> V + 'static,
     ) -> &mut VisualTestContext {
         cx.update(|cx| {
-            gpui_component::init(cx);
+            gpui_kit::init(cx);
             cx.set_reduce_motion(true);
             let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
             let resolver = AssetResolver::new();
@@ -524,7 +520,7 @@ mod tests {
         });
         let (_, cx) = cx.add_window_view(|window, cx| {
             let view = cx.new(|_| view());
-            gpui_component::Root::new(view, window, cx)
+            gpui_kit::component::Root::new(view, window, cx)
         });
         cx.simulate_resize(size(px(800.), px(600.)));
         cx
@@ -543,7 +539,7 @@ mod tests {
         redraw(cx);
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn the_rename_dialog_saves_only_a_name_that_fits_and_cancels(cx: &mut TestAppContext) {
         let _locale = LOCALE_LOCK.lock().unwrap();
         rust_i18n::set_locale("en");
@@ -593,25 +589,25 @@ mod tests {
         cx.debug_bounds("host-name-caption").is_some()
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn a_reachable_device_s_rename_opens_its_dialog(cx: &mut TestAppContext) {
         assert!(rename_opens(cx, true));
     }
 
     /// An offline device keeps its rows from the last reading, with the
     /// rename there but disabled.
-    #[gpui::test]
+    #[gpui_kit::test]
     fn an_offline_device_s_rename_is_disabled(cx: &mut TestAppContext) {
         assert!(!rename_opens(cx, false));
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn the_card_is_hidden_without_channels_a_hosts_feature_or_a_reading_to_show(
         cx: &mut TestAppContext,
     ) {
         let _locale = LOCALE_LOCK.lock().unwrap();
         rust_i18n::set_locale("en");
-        cx.update(gpui_component::init);
+        cx.update(gpui_kit::init);
         cx.update(|cx| {
             let pal = theme::palette(cx);
             let card = |load, reachable| {

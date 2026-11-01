@@ -19,7 +19,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui::{AsyncApp, Task};
+use gpui_kit::{AsyncApp, Task};
 use openlogi_assets::AssetRegistry;
 use openlogi_core::config::AssetSourcePreference;
 use swr_core::{

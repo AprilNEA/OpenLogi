@@ -1,18 +1,18 @@
 //! Switchable grid, list, and carousel layouts for the Home device gallery.
 
-use gpui::{
-    AnyElement, Context, ElementId, InteractiveElement, IntoElement, ParentElement, Rems,
-    SharedString, StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px,
-    rems, rgb,
-};
-use gpui_base::Button as BaseButton;
-use gpui_component::{
+use gpui_kit::base::Button as BaseButton;
+use gpui_kit::component::{
     IconName, Sizable as _,
     button::{Toggle, ToggleVariants as _},
     h_flex,
     menu::ContextMenuExt as _,
     scroll::ScrollableElement as _,
     v_flex,
+};
+use gpui_kit::{
+    AnyElement, Context, ElementId, InteractiveElement, IntoElement, ParentElement, Rems,
+    SharedString, StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px,
+    rems, rgb,
 };
 use openlogi_core::config::DeviceViewMode;
 use openlogi_core::device::DeviceKind;
@@ -28,7 +28,7 @@ use crate::ui::theme::{self, ContentWidth, Palette, Typography as _};
 
 pub(super) fn device_view_switcher(
     current: DeviceViewMode,
-    view: gpui::Entity<AppView>,
+    view: gpui_kit::Entity<AppView>,
 ) -> impl IntoElement {
     let toggle =
         move |id: &'static str, icon: IconName, tooltip: SharedString, mode: DeviceViewMode| {
@@ -209,7 +209,7 @@ fn device_card_element(
     state: &AppState,
     idx: usize,
     active_idx: usize,
-    view: gpui::Entity<AppView>,
+    view: gpui_kit::Entity<AppView>,
     pal: Palette,
 ) -> BaseButton {
     let record = &state.devices()[idx];
@@ -230,7 +230,7 @@ fn device_card_element(
         light_settings,
         pal,
     )
-    .active(gpui::Styled::shadow_2xs)
+    .active(gpui_kit::Styled::shadow_2xs)
     .accessibility_label(record.display_name.clone())
     .aria_description(device_accessibility_description(record))
     .aria_selected(active)
@@ -248,7 +248,7 @@ fn device_list_row(
     state: &AppState,
     idx: usize,
     active_idx: usize,
-    view: gpui::Entity<AppView>,
+    view: gpui_kit::Entity<AppView>,
     pal: Palette,
 ) -> BaseButton {
     let record = &state.devices()[idx];
@@ -335,7 +335,7 @@ fn device_list_row(
                     this.child(device_menu_button(record, pal))
                 }),
         )
-        .active(gpui::Styled::shadow_2xs)
+        .active(gpui_kit::Styled::shadow_2xs)
         .accessibility_label(record.display_name.clone())
         .aria_description(device_accessibility_description(record))
         .aria_selected(active)

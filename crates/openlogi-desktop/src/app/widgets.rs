@@ -2,13 +2,13 @@
 //! panel chrome, status pills, and the header buttons that appear on both
 //! screens.
 
-use gpui::{
-    Context, IntoElement, ParentElement, SharedString, Styled, div, prelude::FluentBuilder as _,
-};
-use gpui_component::{
+use gpui_kit::component::{
     IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
+};
+use gpui_kit::{
+    Context, IntoElement, ParentElement, SharedString, Styled, div, prelude::FluentBuilder as _,
 };
 use openlogi_core::device::DeviceKind;
 use openlogi_core::hid::{DeviceRoute, ReceiverBrand};
@@ -100,7 +100,7 @@ pub(super) fn sidebar_action(
     id: &'static str,
     icon: IconName,
     label: SharedString,
-    handler: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
+    handler: impl Fn(&gpui_kit::ClickEvent, &mut gpui_kit::Window, &mut gpui_kit::App) + 'static,
 ) -> impl IntoElement {
     control_button(id)
         .icon(icon)

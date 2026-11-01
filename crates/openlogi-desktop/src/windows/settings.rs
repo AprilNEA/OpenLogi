@@ -11,13 +11,7 @@
 // `.on_click` / track-focus methods need them on every platform.
 pub(super) use std::rc::Rc;
 
-pub(super) use gpui::{
-    App, AppContext, Axis, ClipboardItem, Context, Entity, FocusHandle, FontWeight, Hsla,
-    InteractiveElement, IntoElement, ParentElement, Render, SharedString, Size,
-    StatefulInteractiveElement, Styled, Subscription, Window, div, img, prelude::FluentBuilder, px,
-    rgb,
-};
-pub(super) use gpui_component::{
+pub(super) use gpui_kit::component::{
     ActiveTheme, Disableable, Icon, IconName, IndexPath, Selectable, Sizable, TITLE_BAR_HEIGHT,
     Theme, ThemeColor, ThemeMode, ThemeRegistry,
     button::{Button, ButtonGroup, ButtonVariants},
@@ -30,6 +24,12 @@ pub(super) use gpui_component::{
     tag::Tag,
     theme::ThemeConfig,
     v_flex,
+};
+pub(super) use gpui_kit::{
+    App, AppContext, Axis, ClipboardItem, Context, Entity, FocusHandle, FontWeight, Hsla,
+    InteractiveElement, IntoElement, ParentElement, Render, SharedString, Size,
+    StatefulInteractiveElement, Styled, Subscription, Window, div, img, prelude::FluentBuilder, px,
+    rgb,
 };
 pub(super) use gpui_updater::{UpdateStatus, Updater};
 pub(super) use openlogi_core::brand::{HELP_URL, RELEASES_URL, REPO_URL};
@@ -154,7 +154,7 @@ pub struct SettingsView {
     /// Settings window is open. Dropping it with the view stops polling, which
     /// lets the agent's idle janitor turn monitoring back off.
     #[cfg(all(target_os = "macos", debug_assertions))]
-    _monitor_task: gpui::Task<()>,
+    _monitor_task: gpui_kit::Task<()>,
 }
 
 impl SettingsView {

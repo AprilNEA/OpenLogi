@@ -100,7 +100,7 @@ fn answer_speed_read(
 
 /// Install `state` with live swr-backed reads, as the app does, and have it
 /// read the selected mouse.
-pub(crate) fn install(state: AppState, cx: &mut gpui::TestAppContext) {
+pub(crate) fn install(state: AppState, cx: &mut gpui_kit::TestAppContext) {
     cx.update(|cx| {
         let runtime: Arc<dyn swr_core::Runtime> = Arc::new(swr_gpui::GpuiRuntime::new(cx));
         let client = swr_core::SwrClient::builder().build(runtime.clone());
@@ -115,7 +115,7 @@ pub(crate) fn install(state: AppState, cx: &mut gpui::TestAppContext) {
     cx.run_until_parked();
 }
 
-fn shown(cx: &gpui::TestAppContext) -> Option<PointerSpeed> {
+fn shown(cx: &gpui_kit::TestAppContext) -> Option<PointerSpeed> {
     cx.read(|cx| {
         AppState::try_read(cx)
             .expect("state installed")
@@ -123,7 +123,7 @@ fn shown(cx: &gpui::TestAppContext) -> Option<PointerSpeed> {
     })
 }
 
-fn current_load(cx: &gpui::TestAppContext) -> PointerSpeedLoad {
+fn current_load(cx: &gpui_kit::TestAppContext) -> PointerSpeedLoad {
     cx.read(|cx| {
         AppState::try_read(cx)
             .expect("state installed")
@@ -131,7 +131,7 @@ fn current_load(cx: &gpui::TestAppContext) -> PointerSpeedLoad {
     })
 }
 
-fn refused(cx: &gpui::TestAppContext) -> bool {
+fn refused(cx: &gpui_kit::TestAppContext) -> bool {
     cx.read(|cx| {
         AppState::try_read(cx)
             .expect("state installed")
@@ -141,7 +141,7 @@ fn refused(cx: &gpui::TestAppContext) -> bool {
 
 /// Deliver the agent's answer to a pointer-speed write for `key`.
 fn answer_write(
-    cx: &mut gpui::TestAppContext,
+    cx: &mut gpui_kit::TestAppContext,
     key: &DeviceKey,
     result: Result<PointerSpeed, WriteError>,
 ) {
@@ -154,8 +154,8 @@ fn answer_write(
     cx.run_until_parked();
 }
 
-#[gpui::test]
-fn a_mouse_with_no_saved_speed_shows_its_reading(cx: &mut gpui::TestAppContext) {
+#[gpui_kit::test]
+fn a_mouse_with_no_saved_speed_shows_its_reading(cx: &mut gpui_kit::TestAppContext) {
     let (state, mut receiver) = mouse_state(true, Config::ephemeral());
     install(state, cx);
     assert_eq!(shown(cx), None, "nothing to show before the read lands");
@@ -168,8 +168,8 @@ fn a_mouse_with_no_saved_speed_shows_its_reading(cx: &mut gpui::TestAppContext) 
 
 /// Precision mode moves the pointer at the slowest speed, which the mouse
 /// reads back. The slider still shows the speed precision mode returns to.
-#[gpui::test]
-fn the_saved_speed_shows_over_a_precision_mode_reading(cx: &mut gpui::TestAppContext) {
+#[gpui_kit::test]
+fn the_saved_speed_shows_over_a_precision_mode_reading(cx: &mut gpui_kit::TestAppContext) {
     let mut config = Config::ephemeral();
     config.set_pointer_speed(KNOWN_MOUSE_KEY, speed(0x0180));
     let (state, mut receiver) = mouse_state(true, config);
@@ -182,8 +182,8 @@ fn the_saved_speed_shows_over_a_precision_mode_reading(cx: &mut gpui::TestAppCon
     assert_eq!(shown(cx), Some(speed(0x0180)));
 }
 
-#[gpui::test]
-fn the_mouses_answer_lands_and_a_refusal_reads_it_again(cx: &mut gpui::TestAppContext) {
+#[gpui_kit::test]
+fn the_mouses_answer_lands_and_a_refusal_reads_it_again(cx: &mut gpui_kit::TestAppContext) {
     let (state, mut receiver) = mouse_state(true, Config::ephemeral());
     let key = state.current_record().expect("mouse").device_key();
     install(state, cx);
@@ -215,8 +215,10 @@ fn the_mouses_answer_lands_and_a_refusal_reads_it_again(cx: &mut gpui::TestAppCo
 /// The slider keeps the saved speed after a refusal, so the state marks the
 /// mouse while it reads another speed. Until the re-read lands, the last
 /// reading stands, as for every swr read.
-#[gpui::test]
-fn a_refused_write_is_marked_while_the_mouse_reads_another_speed(cx: &mut gpui::TestAppContext) {
+#[gpui_kit::test]
+fn a_refused_write_is_marked_while_the_mouse_reads_another_speed(
+    cx: &mut gpui_kit::TestAppContext,
+) {
     let mut config = Config::ephemeral();
     config.set_pointer_speed(KNOWN_MOUSE_KEY, speed(0x0180));
     let (state, mut receiver) = mouse_state(true, config);
@@ -249,8 +251,8 @@ fn a_refused_write_is_marked_while_the_mouse_reads_another_speed(cx: &mut gpui::
 
 /// With nothing saved the slider shows the reading, so a refusal needs no
 /// mark: the slider moves back to the mouse's own speed.
-#[gpui::test]
-fn a_refusal_is_not_marked_when_nothing_is_saved(cx: &mut gpui::TestAppContext) {
+#[gpui_kit::test]
+fn a_refusal_is_not_marked_when_nothing_is_saved(cx: &mut gpui_kit::TestAppContext) {
     let (state, mut receiver) = mouse_state(true, Config::ephemeral());
     let key = state.current_record().expect("mouse").device_key();
     install(state, cx);
@@ -277,7 +279,7 @@ fn mouse_on_receiver(online: bool) -> DeviceInventory {
 }
 
 /// Deliver an inventory snapshot to the installed state.
-fn refresh(cx: &mut gpui::TestAppContext, inventory: DeviceInventory) {
+fn refresh(cx: &mut gpui_kit::TestAppContext, inventory: DeviceInventory) {
     cx.update(|cx| {
         AppState::update(cx, |state, _| {
             let resolver = AssetResolver::new();
@@ -290,8 +292,8 @@ fn refresh(cx: &mut gpui::TestAppContext, inventory: DeviceInventory) {
 /// The agent writes the saved speed again when the mouse reconnects on the
 /// same slot. The refusal then no longer stands, and the mouse is read
 /// again.
-#[gpui::test]
-fn a_reconnect_clears_a_refusal_and_reads_the_mouse_again(cx: &mut gpui::TestAppContext) {
+#[gpui_kit::test]
+fn a_reconnect_clears_a_refusal_and_reads_the_mouse_again(cx: &mut gpui_kit::TestAppContext) {
     let mut config = Config::ephemeral();
     config.set_pointer_speed(KNOWN_MOUSE_KEY, speed(0x0180));
     let resolver = AssetResolver::new();

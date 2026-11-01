@@ -138,7 +138,7 @@ fn hosts_reads(commands: &[Command]) -> usize {
 
 /// Install `state` with live swr-backed reads, as the app does, and have it
 /// read the selected device.
-fn install(state: AppState, cx: &mut gpui::TestAppContext) {
+fn install(state: AppState, cx: &mut gpui_kit::TestAppContext) {
     cx.update(|cx| {
         let runtime: Arc<dyn swr_core::Runtime> = Arc::new(swr_gpui::GpuiRuntime::new(cx));
         let client = swr_core::SwrClient::builder().build(runtime.clone());
@@ -156,7 +156,7 @@ fn install(state: AppState, cx: &mut gpui::TestAppContext) {
 /// Install a keyboard whose Easy-Switch read answered `reading`; returns its
 /// key and the route it was read on.
 fn installed_and_read(
-    cx: &mut gpui::TestAppContext,
+    cx: &mut gpui_kit::TestAppContext,
     receiver: &mut tokio::sync::mpsc::UnboundedReceiver<Command>,
     state: AppState,
     reading: EasySwitchHosts,
@@ -169,7 +169,7 @@ fn installed_and_read(
     (key, route)
 }
 
-fn rename(cx: &mut gpui::TestAppContext, key: &DeviceKey, slot: u8, name: &str) -> StateEvents {
+fn rename(cx: &mut gpui_kit::TestAppContext, key: &DeviceKey, slot: u8, name: &str) -> StateEvents {
     cx.update(|cx| {
         AppState::update(cx, |state, _| {
             state.rename_easy_switch_host(key, slot, name)
@@ -178,7 +178,7 @@ fn rename(cx: &mut gpui::TestAppContext, key: &DeviceKey, slot: u8, name: &str) 
 }
 
 fn renamed(
-    cx: &mut gpui::TestAppContext,
+    cx: &mut gpui_kit::TestAppContext,
     key: &DeviceKey,
     route: &DeviceRoute,
     write: u64,
@@ -191,7 +191,7 @@ fn renamed(
     })
 }
 
-fn current_load(cx: &gpui::TestAppContext) -> EasySwitchLoad {
+fn current_load(cx: &gpui_kit::TestAppContext) -> EasySwitchLoad {
     cx.read(|cx| {
         AppState::try_read(cx)
             .expect("state installed")
@@ -199,7 +199,7 @@ fn current_load(cx: &gpui::TestAppContext) -> EasySwitchLoad {
     })
 }
 
-fn current_refusal(cx: &gpui::TestAppContext) -> Option<HostRenameRefusal> {
+fn current_refusal(cx: &gpui_kit::TestAppContext) -> Option<HostRenameRefusal> {
     cx.read(|cx| {
         AppState::try_read(cx)
             .expect("state installed")
@@ -232,8 +232,8 @@ fn a_rename_target_is_a_name_the_slot_takes_and_does_not_already_show() {
     assert_eq!(rename_target(&fixed, 0, "Desk"), None);
 }
 
-#[gpui::test]
-fn a_device_without_easy_switch_is_never_asked_for_its_hosts(cx: &mut gpui::TestAppContext) {
+#[gpui_kit::test]
+fn a_device_without_easy_switch_is_never_asked_for_its_hosts(cx: &mut gpui_kit::TestAppContext) {
     let (state, mut receiver) = keyboard_state(false);
     let key = state.current_record().expect("keyboard").device_key();
     install(state, cx);
@@ -254,9 +254,9 @@ fn a_rename_before_the_device_was_read_writes_nothing() {
     assert!(writes(drain(&mut receiver)).is_empty());
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn a_rename_shows_at_once_and_writes_the_device_without_touching_the_config(
-    cx: &mut gpui::TestAppContext,
+    cx: &mut gpui_kit::TestAppContext,
 ) {
     let (state, mut receiver) = keyboard_state(true);
     let (key, route) = installed_and_read(cx, &mut receiver, state, hosts());
@@ -284,8 +284,8 @@ fn a_rename_shows_at_once_and_writes_the_device_without_touching_the_config(
     assert_eq!(current_refusal(cx), None);
 }
 
-#[gpui::test]
-fn a_rename_the_reading_does_not_take_writes_nothing(cx: &mut gpui::TestAppContext) {
+#[gpui_kit::test]
+fn a_rename_the_reading_does_not_take_writes_nothing(cx: &mut gpui_kit::TestAppContext) {
     let (state, mut receiver) = keyboard_state(true);
     let (key, _route) = installed_and_read(cx, &mut receiver, state, hosts());
     for (slot, name) in [
@@ -315,9 +315,9 @@ fn a_rename_the_reading_does_not_take_writes_nothing(cx: &mut gpui::TestAppConte
 /// A receiver keyboard that falls asleep, leaves range or is switched to
 /// another computer keeps its route but answers nothing: its last reading
 /// stays on the card, and a rename is not sent until it is back.
-#[gpui::test]
+#[gpui_kit::test]
 fn an_offline_receiver_device_keeps_its_channels_and_takes_no_rename(
-    cx: &mut gpui::TestAppContext,
+    cx: &mut gpui_kit::TestAppContext,
 ) {
     let resolver = AssetResolver::new();
     let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -326,7 +326,7 @@ fn an_offline_receiver_device_keeps_its_channels_and_takes_no_rename(
         ..Sources::in_memory(Config::ephemeral(), &resolver, commands)
     });
     let (key, route) = installed_and_read(cx, &mut receiver, state, hosts());
-    let reachable = |cx: &gpui::TestAppContext| {
+    let reachable = |cx: &gpui_kit::TestAppContext| {
         cx.read(|cx| {
             AppState::try_read(cx)
                 .expect("state installed")
@@ -349,8 +349,8 @@ fn an_offline_receiver_device_keeps_its_channels_and_takes_no_rename(
 /// A dialog opened for one keyboard and saved after another was selected
 /// must not write either: the rename names a device that is not on screen,
 /// and its reading is on its own connection, not the selected one's.
-#[gpui::test]
-fn a_rename_for_a_device_no_longer_selected_writes_nothing(cx: &mut gpui::TestAppContext) {
+#[gpui_kit::test]
+fn a_rename_for_a_device_no_longer_selected_writes_nothing(cx: &mut gpui_kit::TestAppContext) {
     let resolver = AssetResolver::new();
     let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
     let mut other_keyboard = keyboard_inventory(true);
@@ -392,9 +392,9 @@ fn a_rename_for_a_device_no_longer_selected_writes_nothing(cx: &mut gpui::TestAp
     assert_eq!(current_load(cx), Load::Ready(Arc::new(hosts())));
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn the_read_back_replaces_the_shown_name_and_a_refusal_is_kept_and_re_reads(
-    cx: &mut gpui::TestAppContext,
+    cx: &mut gpui_kit::TestAppContext,
 ) {
     let (state, mut receiver) = keyboard_state(true);
     let (key, route) = installed_and_read(cx, &mut receiver, state, hosts());
@@ -460,8 +460,8 @@ fn an_answer_no_read_is_on_is_dropped() {
 /// The cache is keyed by the device, not its connection: a rename answered
 /// over the cable after the device moved onto its receiver must leave the
 /// receiver read on screen.
-#[gpui::test]
-fn a_rename_answered_after_a_route_change_is_dropped(cx: &mut gpui::TestAppContext) {
+#[gpui_kit::test]
+fn a_rename_answered_after_a_route_change_is_dropped(cx: &mut gpui_kit::TestAppContext) {
     let (state, mut receiver) = keyboard_state(true);
     let (key, cable) = installed_and_read(cx, &mut receiver, state, hosts());
     let _ = rename(cx, &key, 0, "Desk");
@@ -510,7 +510,7 @@ fn a_rename_answered_after_a_route_change_is_dropped(cx: &mut gpui::TestAppConte
 /// device's reads again, as between an inventory change and the reads it
 /// leads to. Whatever the refresh itself queued is dropped.
 fn refresh(
-    cx: &mut gpui::TestAppContext,
+    cx: &mut gpui_kit::TestAppContext,
     receiver: &mut tokio::sync::mpsc::UnboundedReceiver<Command>,
     inventory: DeviceInventory,
 ) -> Option<DeviceRoute> {
@@ -530,9 +530,9 @@ fn refresh(
 /// Moving the device drops the reading it had over the cable; until its
 /// receiver connection is read, there is nothing to show a rename on or match
 /// its answer to.
-#[gpui::test]
+#[gpui_kit::test]
 fn a_rename_before_the_read_follows_the_device_to_its_new_connection_writes_nothing(
-    cx: &mut gpui::TestAppContext,
+    cx: &mut gpui_kit::TestAppContext,
 ) {
     let (state, mut receiver) = keyboard_state(true);
     let (key, cable) = installed_and_read(cx, &mut receiver, state, hosts());
@@ -546,8 +546,8 @@ fn a_rename_before_the_read_follows_the_device_to_its_new_connection_writes_noth
 
 /// A device re-probed without `0x1815` keeps its old reading cached, but
 /// takes no rename on it.
-#[gpui::test]
-fn a_device_that_stops_reporting_easy_switch_takes_no_rename(cx: &mut gpui::TestAppContext) {
+#[gpui_kit::test]
+fn a_device_that_stops_reporting_easy_switch_takes_no_rename(cx: &mut gpui_kit::TestAppContext) {
     let (state, mut receiver) = keyboard_state(true);
     let (key, cable) = installed_and_read(cx, &mut receiver, state, hosts());
     assert_eq!(
@@ -561,8 +561,8 @@ fn a_device_that_stops_reporting_easy_switch_takes_no_rename(cx: &mut gpui::Test
 
 /// Two quick renames: the first one's answer arrives while the second is
 /// still being written. The card keeps showing the second.
-#[gpui::test]
-fn an_earlier_answer_keeps_a_later_rename_shown(cx: &mut gpui::TestAppContext) {
+#[gpui_kit::test]
+fn an_earlier_answer_keeps_a_later_rename_shown(cx: &mut gpui_kit::TestAppContext) {
     let (state, mut receiver) = keyboard_state(true);
     let (key, route) = installed_and_read(cx, &mut receiver, state, hosts());
     let _ = rename(cx, &key, 0, "Desk");
@@ -581,8 +581,8 @@ fn an_earlier_answer_keeps_a_later_rename_shown(cx: &mut gpui::TestAppContext) {
 
 /// The agent answers renames in the order they were sent; one that arrives
 /// after a newer rename's answer anyway says nothing new and is dropped.
-#[gpui::test]
-fn an_answer_older_than_one_already_taken_is_dropped(cx: &mut gpui::TestAppContext) {
+#[gpui_kit::test]
+fn an_answer_older_than_one_already_taken_is_dropped(cx: &mut gpui_kit::TestAppContext) {
     let (state, mut receiver) = keyboard_state(true);
     let (key, route) = installed_and_read(cx, &mut receiver, state, hosts());
     let _ = rename(cx, &key, 0, "Desk");
@@ -605,8 +605,8 @@ fn an_answer_older_than_one_already_taken_is_dropped(cx: &mut gpui::TestAppConte
 
 /// The re-read a refused rename starts can answer before a later rename has
 /// landed. The later name stays shown until its own answer arrives.
-#[gpui::test]
-fn a_re_read_while_a_rename_is_unanswered_keeps_it_shown(cx: &mut gpui::TestAppContext) {
+#[gpui_kit::test]
+fn a_re_read_while_a_rename_is_unanswered_keeps_it_shown(cx: &mut gpui_kit::TestAppContext) {
     let (state, mut receiver) = keyboard_state(true);
     let (key, route) = installed_and_read(cx, &mut receiver, state, hosts());
     let _ = rename(cx, &key, 0, "Desk");

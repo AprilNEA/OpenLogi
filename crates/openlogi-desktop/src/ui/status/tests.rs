@@ -3,11 +3,11 @@ use std::{
     rc::Rc,
 };
 
-use gpui::{
+use gpui_kit::component::{Disableable as _, Theme, ThemeMode, v_flex};
+use gpui_kit::{
     Context, Hsla, InteractiveElement as _, IntoElement, KeyDownEvent, KeyUpEvent, Keystroke,
     Modifiers, Render, TestAppContext, Window, canvas,
 };
-use gpui_component::{Disableable as _, Theme, ThemeMode, v_flex};
 
 use super::*;
 use crate::ui::theme;
@@ -45,9 +45,9 @@ impl Render for StyleHarness {
     }
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn retry_retains_button_disabled_foreground_in_both_themes(cx: &mut TestAppContext) {
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     cx.update(theme::register_builtin_themes);
     let colors = Rc::new(RefCell::new(Vec::new()));
     let (_, visual) = cx.add_window_view({
@@ -93,9 +93,9 @@ impl Render for InteractionHarness {
     }
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn retry_activates_once_per_enter_or_space_and_is_inert_when_disabled(cx: &mut TestAppContext) {
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     let activations = Rc::new(Cell::new(0));
     let (view, visual) = cx.add_window_view({
         let activations = activations.clone();

@@ -121,7 +121,7 @@ fn backlight_reads(commands: &[Command]) -> usize {
 
 /// Install `state` with live swr-backed reads, as the app does, and have it
 /// read the selected device.
-fn install(state: AppState, cx: &mut gpui::TestAppContext) {
+fn install(state: AppState, cx: &mut gpui_kit::TestAppContext) {
     cx.update(|cx| {
         let runtime: Arc<dyn swr_core::Runtime> = Arc::new(swr_gpui::GpuiRuntime::new(cx));
         let client = swr_core::SwrClient::builder().build(runtime.clone());
@@ -139,7 +139,7 @@ fn install(state: AppState, cx: &mut gpui::TestAppContext) {
 /// Install a keyboard whose backlight read answered `reading`; returns its
 /// key and the route it was read on.
 fn installed_and_read(
-    cx: &mut gpui::TestAppContext,
+    cx: &mut gpui_kit::TestAppContext,
     receiver: &mut tokio::sync::mpsc::UnboundedReceiver<Command>,
     state: AppState,
     reading: BacklightState,
@@ -152,12 +152,12 @@ fn installed_and_read(
     (key, route)
 }
 
-fn commit(cx: &mut gpui::TestAppContext, change: BacklightChange) -> StateEvents {
+fn commit(cx: &mut gpui_kit::TestAppContext, change: BacklightChange) -> StateEvents {
     cx.update(|cx| AppState::update(cx, |state, _| state.commit_backlight(change)))
 }
 
 fn written(
-    cx: &mut gpui::TestAppContext,
+    cx: &mut gpui_kit::TestAppContext,
     key: &DeviceKey,
     route: &DeviceRoute,
     write: u64,
@@ -170,7 +170,7 @@ fn written(
     })
 }
 
-fn current_load(cx: &gpui::TestAppContext) -> BacklightLoad {
+fn current_load(cx: &gpui_kit::TestAppContext) -> BacklightLoad {
     cx.read(|cx| {
         AppState::try_read(cx)
             .expect("state installed")
@@ -220,9 +220,9 @@ fn a_change_targets_a_reading_that_accepts_it_and_is_altered_by_it() {
     }
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn a_change_shows_at_once_and_writes_the_keyboard_without_touching_the_config(
-    cx: &mut gpui::TestAppContext,
+    cx: &mut gpui_kit::TestAppContext,
 ) {
     let (state, mut receiver) = keyboard_state(true);
     let (key, route) = installed_and_read(cx, &mut receiver, state, lit());
@@ -252,8 +252,8 @@ fn a_change_shows_at_once_and_writes_the_keyboard_without_touching_the_config(
     assert_eq!(*written_key, key);
 }
 
-#[gpui::test]
-fn a_change_the_reading_does_not_accept_writes_nothing(cx: &mut gpui::TestAppContext) {
+#[gpui_kit::test]
+fn a_change_the_reading_does_not_accept_writes_nothing(cx: &mut gpui_kit::TestAppContext) {
     let (state, mut receiver) = keyboard_state(true);
     let reading = BacklightState {
         controls: lit().controls & !BacklightControls::AUTOMATIC,
@@ -278,8 +278,10 @@ fn a_change_is_inert_on_a_device_without_the_control() {
     assert!(drain(&mut receiver).is_empty());
 }
 
-#[gpui::test]
-fn a_device_without_the_control_is_never_asked_for_its_backlight(cx: &mut gpui::TestAppContext) {
+#[gpui_kit::test]
+fn a_device_without_the_control_is_never_asked_for_its_backlight(
+    cx: &mut gpui_kit::TestAppContext,
+) {
     let (state, mut receiver) = keyboard_state(false);
     install(state, cx);
 
@@ -299,8 +301,8 @@ fn a_change_before_the_keyboard_was_read_writes_nothing() {
     assert!(drain(&mut receiver).is_empty());
 }
 
-#[gpui::test]
-fn the_read_back_replaces_the_prediction_and_a_refusal_re_reads(cx: &mut gpui::TestAppContext) {
+#[gpui_kit::test]
+fn the_read_back_replaces_the_prediction_and_a_refusal_re_reads(cx: &mut gpui_kit::TestAppContext) {
     let (state, mut receiver) = keyboard_state(true);
     let (key, route) = installed_and_read(cx, &mut receiver, state, lit());
     let _ = commit(cx, BacklightChange::Automatic(false));
@@ -356,8 +358,8 @@ fn an_answer_no_read_is_on_is_dropped() {
 /// The cache is keyed by the keyboard, not its connection: a write answered
 /// over the cable after the keyboard moved onto its receiver must leave the
 /// receiver read on screen.
-#[gpui::test]
-fn a_write_answered_after_a_route_change_is_dropped(cx: &mut gpui::TestAppContext) {
+#[gpui_kit::test]
+fn a_write_answered_after_a_route_change_is_dropped(cx: &mut gpui_kit::TestAppContext) {
     let (state, mut receiver) = keyboard_state(true);
     let (key, cable) = installed_and_read(cx, &mut receiver, state, lit());
     let _ = commit(cx, BacklightChange::Level(4));
@@ -424,8 +426,8 @@ fn a_write_answered_after_a_route_change_is_dropped(cx: &mut gpui::TestAppContex
 /// The keyboard changes its backlight itself — its keys, the light sensor —
 /// and says so with a `0x1982` info broadcast, which the agent counts in
 /// `settings_revision`. The panel re-reads instead of showing the old level.
-#[gpui::test]
-fn a_change_the_keyboard_reports_re_reads_the_backlight(cx: &mut gpui::TestAppContext) {
+#[gpui_kit::test]
+fn a_change_the_keyboard_reports_re_reads_the_backlight(cx: &mut gpui_kit::TestAppContext) {
     let (state, mut receiver) = keyboard_state(true);
     let (_key, route) = installed_and_read(cx, &mut receiver, state, lit());
 
@@ -454,9 +456,9 @@ fn a_change_the_keyboard_reports_re_reads_the_backlight(cx: &mut gpui::TestAppCo
 /// still being written. The panel keeps showing the second, so a third click
 /// back to the first level is a change to write, not a click on what is
 /// already shown.
-#[gpui::test]
+#[gpui_kit::test]
 fn an_earlier_answer_keeps_a_later_click_shown_and_the_next_one_written(
-    cx: &mut gpui::TestAppContext,
+    cx: &mut gpui_kit::TestAppContext,
 ) {
     let (state, mut receiver) = keyboard_state(true);
     let (key, route) = installed_and_read(cx, &mut receiver, state, lit());
@@ -488,8 +490,8 @@ fn an_earlier_answer_keeps_a_later_click_shown_and_the_next_one_written(
 
 /// The agent answers changes in the order they were sent; one that arrives
 /// after a newer change's answer anyway says nothing new and is dropped.
-#[gpui::test]
-fn an_answer_older_than_one_already_taken_is_dropped(cx: &mut gpui::TestAppContext) {
+#[gpui_kit::test]
+fn an_answer_older_than_one_already_taken_is_dropped(cx: &mut gpui_kit::TestAppContext) {
     let (state, mut receiver) = keyboard_state(true);
     let (key, route) = installed_and_read(cx, &mut receiver, state, lit());
     let at = |level| lit().changed(BacklightChange::Level(level));
@@ -510,8 +512,10 @@ fn an_answer_older_than_one_already_taken_is_dropped(cx: &mut gpui::TestAppConte
 /// A re-read the keyboard's own broadcast started can answer with a reading
 /// taken before an unanswered change landed. The change stays shown until
 /// its own answer arrives.
-#[gpui::test]
-fn a_re_read_while_a_change_is_unanswered_keeps_the_change_shown(cx: &mut gpui::TestAppContext) {
+#[gpui_kit::test]
+fn a_re_read_while_a_change_is_unanswered_keeps_the_change_shown(
+    cx: &mut gpui_kit::TestAppContext,
+) {
     let (state, mut receiver) = keyboard_state(true);
     let (key, route) = installed_and_read(cx, &mut receiver, state, lit());
     let raised = lit().changed(BacklightChange::Level(4));
@@ -540,8 +544,8 @@ fn a_re_read_while_a_change_is_unanswered_keeps_the_change_shown(cx: &mut gpui::
 /// The answer to a change is what the keyboard holds, even when that is not
 /// what the change asked for — its battery saving may have dimmed it since.
 /// An answered change is no longer applied over it.
-#[gpui::test]
-fn the_answer_to_a_change_shows_what_the_keyboard_holds(cx: &mut gpui::TestAppContext) {
+#[gpui_kit::test]
+fn the_answer_to_a_change_shows_what_the_keyboard_holds(cx: &mut gpui_kit::TestAppContext) {
     let (state, mut receiver) = keyboard_state(true);
     let (key, route) = installed_and_read(cx, &mut receiver, state, lit());
     let _ = commit(cx, BacklightChange::Level(4));

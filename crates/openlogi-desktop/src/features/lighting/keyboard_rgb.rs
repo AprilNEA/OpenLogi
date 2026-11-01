@@ -5,12 +5,12 @@
 //! keyboard through `openlogi_agent_core::hardware::set_lighting_in_background`
 //! (the agent, over IPC — the GUI has no device I/O of its own).
 
-use gpui::{
+use gpui_kit::base::Button as BaseButton;
+use gpui_kit::component::{Selectable as _, h_flex, slider::Slider, v_flex};
+use gpui_kit::{
     Context, InteractiveElement, IntoElement, ParentElement, Render, Role,
     StatefulInteractiveElement as _, Styled, Subscription, Toggled, Window, div, px, rgb,
 };
-use gpui_base::Button as BaseButton;
-use gpui_component::{Selectable as _, h_flex, slider::Slider, v_flex};
 use openlogi_core::color::Rgb;
 use openlogi_core::config::Lighting;
 

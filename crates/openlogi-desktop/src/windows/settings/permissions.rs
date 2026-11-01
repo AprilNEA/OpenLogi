@@ -10,7 +10,7 @@ use super::{
 };
 use crate::ui::theme::Typography as _;
 #[cfg(target_os = "macos")]
-use gpui_base::Button as BaseButton;
+use gpui_kit::base::Button as BaseButton;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use openlogi_permissions as permissions;
 
@@ -83,7 +83,7 @@ pub(super) fn permissions_page(has_camera: bool) -> SettingPage {
             SettingField::render(move |_, _, cx| {
                 let pal = theme::palette(cx);
                 let status = permissions::input_device_access();
-                let field = gpui_component::v_flex()
+                let field = gpui_kit::component::v_flex()
                     .gap_1()
                     .child(status_badge(status, pal));
                 let hint = match status {
@@ -129,12 +129,14 @@ fn input_monitoring_item() -> SettingItem {
                 Some(_) => PermissionStatus::Denied,
                 None => PermissionStatus::Unknown,
             };
-            let field = gpui_component::v_flex().gap_1().child(permission_field(
-                "perm-input-monitoring",
-                badge,
-                Permission::InputMonitoring,
-                cx,
-            ));
+            let field = gpui_kit::component::v_flex()
+                .gap_1()
+                .child(permission_field(
+                    "perm-input-monitoring",
+                    badge,
+                    Permission::InputMonitoring,
+                    cx,
+                ));
             let pal = theme::palette(cx);
             if stalled {
                 field.child(
@@ -168,7 +170,7 @@ fn permission_item(
 
 /// A readable status word with colour retained as a supplemental marker.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-fn status_badge(status: PermissionStatus, pal: Palette) -> gpui::Div {
+fn status_badge(status: PermissionStatus, pal: Palette) -> gpui_kit::Div {
     let (label, color) = match status {
         PermissionStatus::Granted => (tr!("permissions.granted"), theme::STATUS_CONNECTED),
         PermissionStatus::Denied => (tr!("permissions.not_granted"), theme::STATUS_CONNECTING),
@@ -178,7 +180,7 @@ fn status_badge(status: PermissionStatus, pal: Palette) -> gpui::Div {
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-fn badge(label: SharedString, color: u32, pal: Palette) -> gpui::Div {
+fn badge(label: SharedString, color: u32, pal: Palette) -> gpui_kit::Div {
     h_flex()
         .items_center()
         .gap_1()
@@ -195,7 +197,7 @@ fn permission_field(
     status: PermissionStatus,
     permission: Permission,
     cx: &App,
-) -> gpui::Div {
+) -> gpui_kit::Div {
     let pal = theme::palette(cx);
     // "Not determined" means never requested — Bluetooth deliberately never is
     // (BLE mice go through IOHIDManager) — so don't label it "Unknown".

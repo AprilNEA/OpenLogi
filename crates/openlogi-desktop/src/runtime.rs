@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui::{AppContext as _, AsyncApp, Task};
+use gpui_kit::{AppContext as _, AsyncApp, Task};
 use openlogi_camera::Camera;
 use openlogi_core::brand::DeeplinkCommand;
 use openlogi_core::config::{AssetSourcePreference, Config};
@@ -36,7 +36,7 @@ const CAMERA_SCAN_PERIOD: Duration = Duration::from_secs(2);
 fn apply_saved_config_reload(
     context: ipc::ConfigReloadContext,
     result: Result<openlogi_ipc::SavedConfigVerdict, openlogi_ipc::ConfigReloadError>,
-    cx: &mut gpui::App,
+    cx: &mut gpui_kit::App,
 ) {
     AppState::apply(cx, |state| match context {
         ipc::ConfigReloadContext::General => state.apply_saved_config_reload_result(result),
@@ -50,7 +50,7 @@ fn apply_saved_config_reload(
 }
 
 /// Deliver a plain config-load result to the general configuration state.
-fn apply_config_load(result: Result<(), openlogi_ipc::ConfigReloadError>, cx: &mut gpui::App) {
+fn apply_config_load(result: Result<(), openlogi_ipc::ConfigReloadError>, cx: &mut gpui_kit::App) {
     AppState::apply(cx, |state| state.apply_config_reload_result(result));
 }
 
@@ -70,7 +70,7 @@ pub(crate) struct Startup {
 
 /// Start the event loop. Returns once it is spawned; the task runs for the life
 /// of the process.
-pub(crate) fn spawn(startup: Startup, cx: &mut gpui::App) {
+pub(crate) fn spawn(startup: Startup, cx: &mut gpui_kit::App) {
     cx.spawn(async move |cx| {
         let Startup {
             config,
@@ -206,7 +206,7 @@ pub(crate) fn spawn(startup: Startup, cx: &mut gpui::App) {
 /// not delay first paint); skipped for dev profiles, whose registration
 /// stays an explicit toggle.
 #[cfg(target_os = "macos")]
-fn ensure_registration_at_startup(cx: &mut gpui::AsyncApp) {
+fn ensure_registration_at_startup(cx: &mut gpui_kit::AsyncApp) {
     if openlogi_core::paths::is_dev_profile() {
         return;
     }
@@ -667,7 +667,7 @@ fn camera_targets(cams: &[Camera]) -> impl Iterator<Item = AssetTarget> + '_ {
 /// Update [`AppState`]'s agent link, refreshing the windows only when it
 /// actually changed (the IPC client may repeat a notice across reconnect
 /// episodes).
-fn set_agent_link(link: state::AgentLink, cx: &mut gpui::App) {
+fn set_agent_link(link: state::AgentLink, cx: &mut gpui_kit::App) {
     AppState::apply(cx, |state| state.set_agent_link(link));
 }
 

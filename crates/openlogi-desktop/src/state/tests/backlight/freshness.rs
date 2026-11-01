@@ -10,7 +10,7 @@ fn dark() -> BacklightState {
     }
 }
 
-fn snapshot(cx: &mut gpui::TestAppContext, inventory: Vec<DeviceInventory>) {
+fn snapshot(cx: &mut gpui_kit::TestAppContext, inventory: Vec<DeviceInventory>) {
     let snapshot = AgentSnapshot {
         status: AgentStatus {
             accessibility_granted: true,
@@ -40,7 +40,7 @@ fn snapshot(cx: &mut gpui::TestAppContext, inventory: Vec<DeviceInventory>) {
     cx.run_until_parked();
 }
 
-fn changed(cx: &mut gpui::TestAppContext, revision: u64) {
+fn changed(cx: &mut gpui_kit::TestAppContext, revision: u64) {
     let mut inventory = keyboard_inventory(true);
     inventory.paired[0].settings_revision = revision;
     snapshot(cx, vec![inventory]);
@@ -59,8 +59,10 @@ fn take_read(receiver: &mut tokio::sync::mpsc::UnboundedReceiver<Command>) -> Re
     read
 }
 
-#[gpui::test]
-fn external_off_on_refreshes_the_open_panel_without_another_write(cx: &mut gpui::TestAppContext) {
+#[gpui_kit::test]
+fn external_off_on_refreshes_the_open_panel_without_another_write(
+    cx: &mut gpui_kit::TestAppContext,
+) {
     let (state, mut receiver) = keyboard_state(true);
     let (_, route) = installed_and_read(cx, &mut receiver, state, lit());
     for (revision, reading) in [(1, dark()), (2, lit())] {
@@ -75,8 +77,8 @@ fn external_off_on_refreshes_the_open_panel_without_another_write(cx: &mut gpui:
     }
 }
 
-#[gpui::test]
-fn external_revision_discards_a_read_started_before_the_write(cx: &mut gpui::TestAppContext) {
+#[gpui_kit::test]
+fn external_revision_discards_a_read_started_before_the_write(cx: &mut gpui_kit::TestAppContext) {
     let (state, mut receiver) = keyboard_state(true);
     install(state, cx);
     let earlier = take_read(&mut receiver);
@@ -93,8 +95,8 @@ fn external_revision_discards_a_read_started_before_the_write(cx: &mut gpui::Tes
     assert_eq!(current_load(cx), Load::Ready(Arc::new(dark())));
 }
 
-#[gpui::test]
-fn delayed_local_reply_cannot_hide_a_newer_external_write(cx: &mut gpui::TestAppContext) {
+#[gpui_kit::test]
+fn delayed_local_reply_cannot_hide_a_newer_external_write(cx: &mut gpui_kit::TestAppContext) {
     let (state, mut receiver) = keyboard_state(true);
     let (key, route) = installed_and_read(cx, &mut receiver, state, dark());
     let _ = commit(cx, BacklightChange::Enabled(true));
@@ -114,8 +116,8 @@ fn delayed_local_reply_cannot_hide_a_newer_external_write(cx: &mut gpui::TestApp
     assert!(writes(drain(&mut receiver)).is_empty());
 }
 
-#[gpui::test]
-fn revision_during_local_writes_reconciles_after_the_last_reply(cx: &mut gpui::TestAppContext) {
+#[gpui_kit::test]
+fn revision_during_local_writes_reconciles_after_the_last_reply(cx: &mut gpui_kit::TestAppContext) {
     let (state, mut receiver) = keyboard_state(true);
     let (key, route) = installed_and_read(cx, &mut receiver, state, dark());
     let _ = commit(cx, BacklightChange::Enabled(true));
@@ -141,8 +143,10 @@ fn revision_during_local_writes_reconciles_after_the_last_reply(cx: &mut gpui::T
     assert_eq!(current_load(cx), Load::Ready(Arc::new(dark())));
 }
 
-#[gpui::test]
-fn another_keyboard_revision_does_not_refresh_the_selected_keyboard(cx: &mut gpui::TestAppContext) {
+#[gpui_kit::test]
+fn another_keyboard_revision_does_not_refresh_the_selected_keyboard(
+    cx: &mut gpui_kit::TestAppContext,
+) {
     let (state, mut receiver) = keyboard_state(true);
     installed_and_read(cx, &mut receiver, state, lit());
     let mut other = direct_inventory([1, 2, 3, 4]);
@@ -155,8 +159,10 @@ fn another_keyboard_revision_does_not_refresh_the_selected_keyboard(cx: &mut gpu
     assert_eq!(current_load(cx), Load::Ready(Arc::new(lit())));
 }
 
-#[gpui::test]
-fn late_read_on_replaced_route_does_not_overwrite_current_backlight(cx: &mut gpui::TestAppContext) {
+#[gpui_kit::test]
+fn late_read_on_replaced_route_does_not_overwrite_current_backlight(
+    cx: &mut gpui_kit::TestAppContext,
+) {
     let (state, mut receiver) = keyboard_state(true);
     install(state, cx);
     let old = take_read(&mut receiver);
@@ -168,8 +174,10 @@ fn late_read_on_replaced_route_does_not_overwrite_current_backlight(cx: &mut gpu
     assert_eq!(current_load(cx), Load::Ready(Arc::new(dark())));
 }
 
-#[gpui::test]
-fn replaced_route_discards_deferred_freshness_and_old_local_reply(cx: &mut gpui::TestAppContext) {
+#[gpui_kit::test]
+fn replaced_route_discards_deferred_freshness_and_old_local_reply(
+    cx: &mut gpui_kit::TestAppContext,
+) {
     let (state, mut receiver) = keyboard_state(true);
     let (key, old_route) = installed_and_read(cx, &mut receiver, state, dark());
     let _ = commit(cx, BacklightChange::Enabled(true));
@@ -193,8 +201,8 @@ fn replaced_route_discards_deferred_freshness_and_old_local_reply(cx: &mut gpui:
     assert_eq!(backlight_reads(&drain(&mut receiver)), 0);
 }
 
-#[gpui::test]
-fn failed_external_refresh_uses_the_existing_retry_budget(cx: &mut gpui::TestAppContext) {
+#[gpui_kit::test]
+fn failed_external_refresh_uses_the_existing_retry_budget(cx: &mut gpui_kit::TestAppContext) {
     let (state, mut receiver) = keyboard_state(true);
     installed_and_read(cx, &mut receiver, state, lit());
     changed(cx, 1);

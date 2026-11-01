@@ -1,6 +1,6 @@
 use std::{collections::BTreeSet, sync::Arc};
 
-use gpui::{
+use gpui_kit::{
     AppContext as _, Entity, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, TestAppContext, point,
     px,
 };
@@ -118,7 +118,7 @@ fn answer_initial_read(
     other_requests
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn general_external_reload_requires_latest_revision_receipt_then_fresh_read(
     cx: &mut TestAppContext,
 ) {
@@ -240,9 +240,9 @@ fn answer_post_receipt_read(
     cx.run_until_parked();
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn general_refresh_failure_offers_a_working_reload_retry(cx: &mut TestAppContext) {
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     cx.update(theme::register_builtin_themes);
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join(openlogi_core::paths::CONFIG_FILE);
@@ -309,11 +309,11 @@ fn general_refresh_failure_offers_a_working_reload_retry(cx: &mut TestAppContext
     assert!(visual.debug_bounds("disable-keys-reload-retry").is_none());
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn unavailable_agent_recovery_uses_the_current_language(cx: &mut TestAppContext) {
     let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
     let _restore = RestoreLocale(rust_i18n::locale().to_string());
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     cx.update(theme::register_builtin_themes);
     let mut receiver = install_keyboard(cx);
     let _other_requests = answer_initial_read(&mut receiver, cx);
@@ -400,9 +400,9 @@ impl Render for OfflineLoadHarness {
     }
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn offline_unknown_and_loading_do_not_present_an_endless_spinner(cx: &mut TestAppContext) {
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     cx.update(theme::register_builtin_themes);
     for load in [DisableKeysLoad::Unknown, DisableKeysLoad::Loading] {
         let (_, visual) = cx.add_window_view(|_, _| OfflineLoadHarness { load });
@@ -416,12 +416,12 @@ fn offline_unknown_and_loading_do_not_present_an_endless_spinner(cx: &mut TestAp
     }
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn switch_focus_is_stable_but_not_shared_between_devices(cx: &mut TestAppContext) {
     let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
     let _restore = RestoreLocale(rust_i18n::locale().to_string());
     rust_i18n::set_locale("en");
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     cx.update(theme::register_builtin_themes);
     let _receiver = install_keyboard(cx);
     let (view, visual) = cx.add_window_view(|_, _| LoadHarness {
@@ -506,9 +506,9 @@ fn all_recovery_errors_have_russian_product_messages() {
     }
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn disabled_switch_does_not_write_or_take_focus(cx: &mut TestAppContext) {
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     cx.update(theme::register_builtin_themes);
     let mut receiver = install_keyboard(cx);
     let _other_requests = answer_initial_read(&mut receiver, cx);
@@ -588,8 +588,8 @@ impl Render for PanelHarness {
     }
 }
 
-fn exercise_save_retry(cx: &mut TestAppContext, keypress: Option<&str>) {
-    cx.update(gpui_component::init);
+fn exercise_save_retry(cx: &mut TestAppContext, keypress: Option<&'static str>) {
+    cx.update(gpui_kit::init);
     cx.update(theme::register_builtin_themes);
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join(openlogi_core::paths::CONFIG_FILE);
@@ -677,24 +677,24 @@ fn exercise_save_retry(cx: &mut TestAppContext, keypress: Option<&str>) {
     );
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn save_retry_click_preserves_external_binding_without_second_write(cx: &mut TestAppContext) {
     exercise_save_retry(cx, None);
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn save_retry_enter_preserves_external_binding_without_second_write(cx: &mut TestAppContext) {
     exercise_save_retry(cx, Some("enter"));
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn save_retry_space_preserves_external_binding_without_second_write(cx: &mut TestAppContext) {
     exercise_save_retry(cx, Some("space"));
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn shared_reload_retry_is_inert_offline_and_retries_only_reload(cx: &mut TestAppContext) {
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     cx.update(theme::register_builtin_themes);
     let mut receiver = install_keyboard(cx);
     let _other_requests = answer_initial_read(&mut receiver, cx);
@@ -759,12 +759,12 @@ fn shared_reload_retry_is_inert_offline_and_retries_only_reload(cx: &mut TestApp
     );
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn shared_read_retry_is_localized_and_restarts_the_failed_read(cx: &mut TestAppContext) {
     let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
     let _restore = RestoreLocale(rust_i18n::locale().to_string());
     rust_i18n::set_locale("ru");
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     cx.update(theme::register_builtin_themes);
     let mut receiver = install_keyboard(cx);
     let mut unrelated = Vec::new();
@@ -809,12 +809,12 @@ fn shared_read_retry_is_localized_and_restarts_the_failed_read(cx: &mut TestAppC
     assert!(receiver.try_recv().is_err());
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn unsupported_read_has_localized_status_without_retry(cx: &mut TestAppContext) {
     let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
     let _restore = RestoreLocale(rust_i18n::locale().to_string());
     rust_i18n::set_locale("ru");
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     cx.update(theme::register_builtin_themes);
     let mut receiver = install_keyboard(cx);
     let mut unrelated = Vec::new();

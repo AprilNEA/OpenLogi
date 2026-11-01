@@ -1,6 +1,6 @@
 //! Display helpers for the shared action vocabulary.
 
-use gpui::SharedString;
+use gpui_kit::SharedString;
 use openlogi_core::binding::Action;
 
 /// Localized label for an action, including its dynamic payload.

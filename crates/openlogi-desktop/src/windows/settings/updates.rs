@@ -8,8 +8,8 @@ use super::{
 };
 use crate::platform::installation::{HomebrewCask, Installation, InstallationSource, LinuxPackage};
 use crate::ui::theme::Typography as _;
-use gpui_base::Link;
-use gpui_component::ActiveTheme as _;
+use gpui_kit::base::Link;
+use gpui_kit::component::ActiveTheme as _;
 use openlogi_core::update_feed::UpdateChannel;
 
 /// The Updates page: a hero card with the running build, its update status, and
@@ -66,11 +66,15 @@ pub(super) fn updates_page(updater: Entity<Updater>) -> SettingPage {
         ))
         .gap_2()
         .footer(|_, cx| {
-            div()
-                .text_caption()
-                .text_color(crate::ui::theme::palette(cx).text_muted)
-                .debug_selector(|| "update-connection-policy".into())
-                .child(tr!("updates.update_connection_policy"))
+            // Kit aligns footers with the surface edge; this note follows the
+            // filled group's setting labels and their standard content inset.
+            div().px_4().child(
+                div()
+                    .text_caption()
+                    .text_color(crate::ui::theme::palette(cx).text_muted)
+                    .debug_selector(|| "update-connection-policy".into())
+                    .child(tr!("updates.update_connection_policy")),
+            )
         });
     SettingPage::new(tr!("updates.updates"))
         .icon(IconName::ArrowDown)
@@ -83,7 +87,7 @@ pub(super) fn updates_page(updater: Entity<Updater>) -> SettingPage {
 
 /// The Updates hero row: logo, name + version, a status pill, the live status
 /// message (or channel), and the one contextual action button.
-fn update_hero(updater: &Entity<Updater>, cx: &mut App) -> gpui::Div {
+fn update_hero(updater: &Entity<Updater>, cx: &mut App) -> gpui_kit::Div {
     let pal = crate::ui::theme::palette(cx);
     let status = updater.read(cx).status().clone();
     let channel = crate::platform::updater::channel_in_use(cx);
@@ -191,7 +195,7 @@ fn update_hero(updater: &Entity<Updater>, cx: &mut App) -> gpui::Div {
 }
 
 /// The hero line's name for the channel this launch follows.
-fn channel_label(channel: UpdateChannel) -> gpui::SharedString {
+fn channel_label(channel: UpdateChannel) -> gpui_kit::SharedString {
     match channel {
         UpdateChannel::Stable => tr!("updates.stable_channel"),
         UpdateChannel::Beta => tr!("updates.beta_channel"),
@@ -226,11 +230,11 @@ fn channel_segment(cx: &App) -> ButtonGroup {
 }
 
 /// Read the published snapshot only; rendering must never probe the filesystem.
-fn installation_value(cx: &App) -> gpui::Stateful<gpui::Div> {
+fn installation_value(cx: &App) -> gpui_kit::Stateful<gpui_kit::Div> {
     let label = installation_label(*cx.global::<Installation>());
     div()
         .id("installation-source")
-        .role(gpui::Role::Status)
+        .role(gpui_kit::Role::Status)
         .aria_label(label.clone())
         .text_right()
         .text_sm()
@@ -239,7 +243,7 @@ fn installation_value(cx: &App) -> gpui::Stateful<gpui::Div> {
         .child(label)
 }
 
-fn installation_label(installation: Installation) -> gpui::SharedString {
+fn installation_label(installation: Installation) -> gpui_kit::SharedString {
     match installation {
         Installation::Detecting => tr!("updates.installation_detecting"),
         Installation::Detected(source) => match source {
@@ -282,16 +286,16 @@ fn release_link(cx: &App) -> Link {
         .focus_visible(move |style| style.bg(focus_color).text_color(pal.page))
         .debug_selector(|| "update-source-link".into())
         .child(div().underline().child("GitHub Releases"))
-        .child(gpui_component::Icon::new(IconName::ExternalLink).size_3p5())
+        .child(gpui_kit::component::Icon::new(IconName::ExternalLink).size_3p5())
 }
 
 #[cfg(test)]
 mod tests {
     use std::{cell::Cell, rc::Rc};
 
-    use gpui::{
+    use gpui_kit::{
         AppContext as _, Context, IntoElement, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers,
-        ParentElement as _, Render, ScrollDelta, ScrollWheelEvent, Styled as _, TestAppContext,
+        ParentElement as _, Render, ScrollDelta, ScrollEvent, Styled as _, TestAppContext,
         VisualTestContext, Window, div, point,
     };
     use openlogi_core::config::{Config, UiScale};
@@ -345,12 +349,12 @@ mod tests {
         rust_i18n::set_locale("en");
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn installation_completion_refreshes_open_settings(cx: &mut TestAppContext) {
         let _locale = LOCALE_LOCK.lock().unwrap();
         rust_i18n::set_locale("en");
         cx.update(|cx| {
-            gpui_component::init(cx);
+            gpui_kit::init(cx);
             crate::ui::theme::register_builtin_themes(cx);
             let (commands, _) = tokio::sync::mpsc::unbounded_channel();
             let state = cx.new(|_| {
@@ -364,10 +368,10 @@ mod tests {
             cx.set_global(Installation::Detecting);
         });
         let mut view = None;
-        let handle = cx.open_window(gpui::size(px(920.), px(640.)), |window, cx| {
+        let handle = cx.open_window(gpui_kit::size(px(920.), px(640.)), |window, cx| {
             let settings = cx.new(|cx| SettingsView::new(SettingsPage::Updates, window, cx));
             view = Some(settings.clone());
-            gpui_component::Root::new(settings, window, cx)
+            gpui_kit::component::Root::new(settings, window, cx)
         });
         let view = view.unwrap();
         let mut visual = VisualTestContext::from_window(handle.into(), cx);
@@ -420,7 +424,7 @@ mod tests {
 
     /// Pointer clicks and Enter or Space on a focused button each pick their
     /// channel. Clicking the channel the settings already follow records it.
-    #[gpui::test]
+    #[gpui_kit::test]
     fn channel_buttons_commit_by_pointer_and_keyboard(cx: &mut TestAppContext) {
         struct Harness;
         impl Render for Harness {
@@ -436,7 +440,7 @@ mod tests {
                     .update_channel
             })
         }
-        fn press(visual: &mut VisualTestContext, key: &str) {
+        fn press(visual: &mut VisualTestContext, key: &'static str) {
             let keystroke = Keystroke::parse(key).unwrap();
             visual.simulate_event(KeyDownEvent {
                 keystroke: keystroke.clone(),
@@ -449,7 +453,7 @@ mod tests {
         let _locale = LOCALE_LOCK.lock().unwrap();
         rust_i18n::set_locale("en");
         cx.update(|cx| {
-            gpui_component::init(cx);
+            gpui_kit::init(cx);
             crate::ui::theme::register_builtin_themes(cx);
             let (commands, _) = tokio::sync::mpsc::unbounded_channel();
             let state = cx.new(|_| {
@@ -461,9 +465,9 @@ mod tests {
             });
             AppState::set_global(state, cx);
         });
-        let handle = cx.open_window(gpui::size(px(400.), px(120.)), |window, cx| {
+        let handle = cx.open_window(gpui_kit::size(px(400.), px(120.)), |window, cx| {
             let harness = cx.new(|_| Harness);
-            gpui_component::Root::new(harness, window, cx)
+            gpui_kit::component::Root::new(harness, window, cx)
         });
         let mut visual = VisualTestContext::from_window(handle.into(), cx);
         visual.update(|window, cx| window.draw(cx).clear(cx));
@@ -512,7 +516,7 @@ mod tests {
     /// groups it draws, and the second scroll uses those heights.
     fn scroll_to_sources(visual: &mut VisualTestContext) {
         for _ in 0..2 {
-            visual.simulate_event(ScrollWheelEvent {
+            visual.simulate_event(ScrollEvent {
                 position: point(px(700.), px(500.)),
                 delta: ScrollDelta::Pixels(point(px(0.), px(-1000.))),
                 ..Default::default()
@@ -536,7 +540,7 @@ mod tests {
         visual.update(|window, cx| {
             // Source fields are primary row text, not captions. Native
             // SettingItem owns both labels, including their size and weight.
-            let expected_size = Some(gpui::rems(0.875).into());
+            let expected_size = Some(gpui_kit::rems(0.875).into());
             assert_eq!(installation_value(cx).style().text.font_size, expected_size);
             assert_eq!(release_link(cx).style().text.font_size, expected_size);
             let scale = window.scale_factor();

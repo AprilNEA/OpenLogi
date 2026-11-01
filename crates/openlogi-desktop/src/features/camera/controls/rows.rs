@@ -3,13 +3,13 @@
 use crate::state::AppState;
 use crate::ui::components::ProfileTab;
 use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
-use gpui::{
+use gpui_kit::base::Button as BaseButton;
+use gpui_kit::component::{IconName, Selectable as _, h_flex, slider::Slider};
+use gpui_kit::{
     ClickEvent, Context, ElementId, InteractiveElement, MouseButton, MouseDownEvent, ParentElement,
     Role, SharedString, StatefulInteractiveElement as _, Styled, Toggled, div,
     prelude::FluentBuilder as _, px, rgb,
 };
-use gpui_base::Button as BaseButton;
-use gpui_component::{IconName, Selectable as _, h_flex, slider::Slider};
 use openlogi_camera::CameraControl;
 
 use super::{BUILTIN_PROFILES, CameraControlsPanel, ControlSlider};
@@ -35,7 +35,7 @@ pub(super) fn section_indices(sliders: &[ControlSlider], lens: bool) -> Vec<usiz
 }
 
 /// The one-click profile chips: built-ins, saved customs, then Save.
-pub(super) fn profiles_row(key: &str, cx: &mut Context<CameraControlsPanel>) -> gpui::Div {
+pub(super) fn profiles_row(key: &str, cx: &mut Context<CameraControlsPanel>) -> gpui_kit::Div {
     let state = AppState::try_read(cx);
     let active = state.and_then(|s| s.camera_active_profile(key));
     let customs: Vec<String> = state
@@ -86,7 +86,7 @@ pub(super) fn control_row(
     panel: &CameraControlsPanel,
     ix: usize,
     cx: &Context<CameraControlsPanel>,
-) -> gpui::Stateful<gpui::Div> {
+) -> gpui_kit::Stateful<gpui_kit::Div> {
     let pal = theme::palette(cx);
     let slider = &panel.sliders[ix];
     if slider.control == CameraControl::PowerLineFrequency
@@ -202,7 +202,7 @@ fn frequency_row(
     ix: usize,
     cx: &Context<CameraControlsPanel>,
     pal: Palette,
-) -> gpui::Stateful<gpui::Div> {
+) -> gpui_kit::Stateful<gpui_kit::Div> {
     let slider = &panel.sliders[ix];
     let current = slider.value(cx);
     let mut choices = h_flex().flex_1().justify_end().gap_1();
@@ -279,7 +279,7 @@ fn binary_control_row(
     ix: usize,
     cx: &Context<CameraControlsPanel>,
     pal: Palette,
-) -> gpui::Stateful<gpui::Div> {
+) -> gpui_kit::Stateful<gpui_kit::Div> {
     let slider = &panel.sliders[ix];
     let on = slider.value(cx) != 0;
     let accent = rgb(ACCENT_BLUE);
@@ -340,7 +340,7 @@ fn binary_control_row(
         )
 }
 
-pub(super) fn reset_button(cx: &mut Context<CameraControlsPanel>) -> gpui::Div {
+pub(super) fn reset_button(cx: &mut Context<CameraControlsPanel>) -> gpui_kit::Div {
     let pal = theme::palette(cx);
     h_flex().w_full().justify_end().child(
         BaseButton::new("camera-controls-reset")
@@ -362,7 +362,7 @@ pub(super) fn reset_button(cx: &mut Context<CameraControlsPanel>) -> gpui::Div {
     )
 }
 
-fn chip_hover_fill(selected: bool, pal: Palette) -> gpui::Hsla {
+fn chip_hover_fill(selected: bool, pal: Palette) -> gpui_kit::Hsla {
     if selected {
         theme::accent_tint_hover()
     } else {

@@ -1,7 +1,7 @@
 //! SmartShift optimistic writes and post-write confirmation. Device reads are
 //! swr-backed queries owned by the device-read service.
 
-use gpui::{App, Context};
+use gpui_kit::{App, Context};
 use openlogi_core::config::{SMARTSHIFT_AUTO_DISENGAGE_DEFAULT, SmartShift};
 use openlogi_core::hid::{DeviceRoute, SmartShiftAutoDisengage, SmartShiftStatus};
 use tracing::debug;

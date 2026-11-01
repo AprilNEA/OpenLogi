@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use gpui::App;
+use gpui_kit::App;
 use openlogi_core::binding::{GamingButtons, GamingLayout};
 use openlogi_core::config::OnboardMemory;
 use openlogi_core::hid::{OnboardMode, OnboardState};
@@ -130,7 +130,7 @@ impl AppState {
         });
     }
 
-    pub(super) fn load_current_onboard(&mut self, cx: &mut gpui::Context<Self>) {
+    pub(super) fn load_current_onboard(&mut self, cx: &mut gpui_kit::Context<Self>) {
         let Some((key, route)) = self
             .current_record()
             .filter(|record| {

@@ -1,6 +1,6 @@
 use std::{cell::Cell, rc::Rc};
 
-use gpui::{
+use gpui_kit::{
     AppContext as _, Context, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, Render,
     TestAppContext, point,
 };
@@ -95,7 +95,7 @@ impl Render for ProfileTabHarness {
     }
 }
 
-fn activate_key(cx: &mut gpui::VisualTestContext, key: &str) {
+fn activate_key(cx: &mut gpui_kit::VisualTestContext, key: &'static str) {
     let keystroke = Keystroke::parse(key).unwrap();
     cx.simulate_event(KeyDownEvent {
         keystroke: keystroke.clone(),
@@ -105,9 +105,9 @@ fn activate_key(cx: &mut gpui::VisualTestContext, key: &str) {
     cx.simulate_event(KeyUpEvent { keystroke });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn toggle_is_tab_focusable_and_reports_controlled_next_state(cx: &mut TestAppContext) {
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     let changes = Rc::new(Cell::new(None));
     let parent_clicks = Rc::new(Cell::new(0));
     let (view, cx) = cx.add_window_view({
@@ -140,9 +140,9 @@ fn toggle_is_tab_focusable_and_reports_controlled_next_state(cx: &mut TestAppCon
     assert_eq!(changes.get(), Some(false));
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn disabled_toggle_is_inert_and_blocks_its_parent(cx: &mut TestAppContext) {
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     let changes = Rc::new(Cell::new(None));
     let parent_clicks = Rc::new(Cell::new(0));
     let (_, cx) = cx.add_window_view({
@@ -169,9 +169,9 @@ fn disabled_toggle_is_inert_and_blocks_its_parent(cx: &mut TestAppContext) {
     assert_eq!(parent_clicks.get(), 0);
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn menu_row_is_tab_focusable_and_keyboard_activatable(cx: &mut TestAppContext) {
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     let activations = Rc::new(Cell::new(0));
     let (_, cx) = cx.add_window_view({
         let activations = activations.clone();
@@ -192,16 +192,16 @@ fn menu_row_is_tab_focusable_and_keyboard_activatable(cx: &mut TestAppContext) {
 /// The guard is the point: `set_placeholder` notifies unconditionally, so
 /// an unguarded per-render restamp would re-render forever. Same text must
 /// not notify; a changed text must land.
-#[gpui::test]
+#[gpui_kit::test]
 fn localize_placeholder_restamps_only_on_change(cx: &mut TestAppContext) {
     struct Blank;
     impl Render for Blank {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            gpui::Empty
+            gpui_kit::Empty
         }
     }
 
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     let (_, cx) = cx.add_window_view(|_, _| Blank);
     let input = cx.update(|window, cx| cx.new(|cx| InputState::new(window, cx).placeholder("old")));
     let notifies = Rc::new(Cell::new(0_usize));
@@ -222,9 +222,9 @@ fn localize_placeholder_restamps_only_on_change(cx: &mut TestAppContext) {
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn profile_tab_and_delete_are_separate_keyboard_targets(cx: &mut TestAppContext) {
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     let applications = Rc::new(Cell::new(0));
     let deletions = Rc::new(Cell::new(0));
     let (_, cx) = cx.add_window_view({
@@ -252,9 +252,9 @@ fn profile_tab_and_delete_are_separate_keyboard_targets(cx: &mut TestAppContext)
     assert_eq!(deletions.get(), 2);
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn preset_chip_children_are_separate_keyboard_targets(cx: &mut TestAppContext) {
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     let applications = Rc::new(Cell::new(0));
     let removals = Rc::new(Cell::new(0));
     let (_, cx) = cx.add_window_view({
@@ -285,9 +285,9 @@ fn preset_chip_children_are_separate_keyboard_targets(cx: &mut TestAppContext) {
 /// #2046: a stock selected `Button` differs from its neighbours only by the
 /// theme's pressed fill, about 1.07:1 on the light theme. A pill carries the
 /// accent mark instead, and only while there is something to choose.
-#[gpui::test]
+#[gpui_kit::test]
 fn only_an_enabled_selected_pill_carries_the_accent_mark(cx: &mut TestAppContext) {
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     let pal = cx.update(|cx| theme::palette(cx));
     let mark = |selected: bool, disabled: bool| {
         let mut button = Pill::new("pill", "5 min")

@@ -36,13 +36,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui::{
+use gpui_kit::base::Button as BaseButton;
+use gpui_kit::component::v_flex;
+use gpui_kit::{
     App, AppContext as _, Context, Entity, InteractiveElement, IntoElement, ParentElement, Rems,
     Render, RenderImage, SharedString, Styled, Subscription, Task, Window, div, img,
     prelude::FluentBuilder as _, rems,
 };
-use gpui_base::Button as BaseButton;
-use gpui_component::v_flex;
 use image::{Frame as ImageFrame, RgbaImage};
 use openlogi_camera::{CameraAuthorization, CaptureError, Frame, StreamMode, StreamModes, UsbLink};
 
@@ -502,7 +502,7 @@ impl Render for CameraPreview {
 
 impl CameraPreview {
     /// The [`Self::link_notice`] as it appears under the preview.
-    fn show_link_notice(&self, pal: Palette) -> Option<gpui::Div> {
+    fn show_link_notice(&self, pal: Palette) -> Option<gpui_kit::Div> {
         self.link_notice().map(|notice| {
             div()
                 .w(PREVIEW_W)
@@ -576,7 +576,7 @@ fn build_image(frame: Frame) -> Option<Arc<RenderImage>> {
     Some(Arc::new(RenderImage::new(vec![ImageFrame::new(buffer)])))
 }
 
-fn note(text: impl Into<SharedString>, pal: Palette) -> gpui::Div {
+fn note(text: impl Into<SharedString>, pal: Palette) -> gpui_kit::Div {
     div()
         .max_w_full()
         .px_4()

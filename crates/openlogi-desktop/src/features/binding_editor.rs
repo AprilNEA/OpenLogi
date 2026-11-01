@@ -2,13 +2,13 @@
 
 use std::rc::Rc;
 
-use gpui::{
+use gpui_kit::component::{
+    Icon, IconName, Selectable as _, button::Button, h_flex, input::InputState, v_flex,
+};
+use gpui_kit::{
     App, Entity, InteractiveElement, IntoElement, ParentElement, Role,
     StatefulInteractiveElement as _, Styled, Window, div, prelude::FluentBuilder as _, px, rgb,
     svg,
-};
-use gpui_component::{
-    Icon, IconName, Selectable as _, button::Button, h_flex, input::InputState, v_flex,
 };
 use openlogi_core::binding::{Action, ApplicationTarget, Category, GestureDirection};
 
@@ -124,7 +124,7 @@ pub(crate) fn action_rows(
     current: Option<&Action>,
     on_pick: &PickFn,
     pal: Palette,
-) -> Vec<gpui::Div> {
+) -> Vec<gpui_kit::Div> {
     action_rows_matching(id_prefix, current, "", on_pick, pal)
 }
 
@@ -135,7 +135,7 @@ pub(crate) fn action_rows_matching(
     query: &str,
     on_pick: &PickFn,
     pal: Palette,
-) -> Vec<gpui::Div> {
+) -> Vec<gpui_kit::Div> {
     action_rows_with(
         id_prefix,
         current,
@@ -160,7 +160,7 @@ pub(crate) fn action_rows_with(
     offer: ActionOffer<'_>,
     on_pick: &PickFn,
     pal: Palette,
-) -> Vec<gpui::Div> {
+) -> Vec<gpui_kit::Div> {
     let query = query.trim().to_lowercase();
     let mut catalog_index = 0usize;
     let mut sections = Vec::new();
@@ -244,7 +244,7 @@ pub(crate) fn action_rows_with(
 }
 
 /// Shared card surface for compact binding panels and menus.
-pub(crate) fn compact_panel(pal: Palette) -> gpui::Div {
+pub(crate) fn compact_panel(pal: Palette) -> gpui_kit::Div {
     v_flex()
         .bg(pal.panel)
         .border_1()
@@ -255,12 +255,15 @@ pub(crate) fn compact_panel(pal: Palette) -> gpui::Div {
 }
 
 /// A group heading inset to line up with the rows under it.
-pub(crate) fn editor_section(label: impl Into<gpui::SharedString>, pal: Palette) -> gpui::Div {
+pub(crate) fn editor_section(
+    label: impl Into<gpui_kit::SharedString>,
+    pal: Palette,
+) -> gpui_kit::Div {
     section_label(label, pal).w_full().px_2().pt_2().pb_0p5()
 }
 
 /// Compact editor title.
-pub(crate) fn title(text: impl Into<gpui::SharedString>, pal: Palette) -> impl IntoElement {
+pub(crate) fn title(text: impl Into<gpui_kit::SharedString>, pal: Palette) -> impl IntoElement {
     div()
         .px_2()
         .pb_1()
@@ -357,7 +360,7 @@ fn run_command_action(command: String) -> Option<Action> {
 fn add_field_editor(
     id_prefix: &'static str,
     field: &'static str,
-    heading: gpui::SharedString,
+    heading: gpui_kit::SharedString,
     input: &Entity<InputState>,
     invalid: bool,
     on_add: impl Fn(String, &mut Window, &mut App) + 'static,
@@ -429,7 +432,7 @@ mod tests {
     /// which hold the only references to the keyboard and terminal glyphs.
     #[test]
     fn every_reachable_action_icon_is_embedded() {
-        use gpui::AssetSource as _;
+        use gpui_kit::AssetSource as _;
         use openlogi_core::binding::ApplicationTarget;
         use openlogi_ui::action_icons::ActionIcons;
 

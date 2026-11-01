@@ -7,8 +7,8 @@
 //! goes through [`AppState::commit_report_rate`], which persists it and writes
 //! the mouse; the read-back then replaces the optimistic pick.
 
-use gpui::{AnyElement, App, IntoElement, ParentElement, Styled, div};
-use gpui_component::{Disableable as _, Selectable as _, h_flex, v_flex};
+use gpui_kit::component::{Disableable as _, Selectable as _, h_flex, v_flex};
+use gpui_kit::{AnyElement, App, IntoElement, ParentElement, Styled, div};
 use openlogi_core::hid::ReportRate;
 
 use crate::state::{AppState, DeviceKey, ReportRateLoad};

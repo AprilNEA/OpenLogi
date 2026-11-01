@@ -10,8 +10,8 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
-use gpui::{App, AppContext as _, Context, Entity, Subscription, Window};
-use gpui_component::slider::{SliderEvent, SliderState};
+use gpui_kit::component::slider::{SliderEvent, SliderState};
+use gpui_kit::{App, AppContext as _, Context, Entity, Subscription, Window};
 use openlogi_core::config::{ThumbwheelSensitivity, VerticalScrollSensitivity};
 use openlogi_core::hid::{Dpi, PointerSpeed, SmartShiftThreshold, TunableTorque};
 
@@ -320,8 +320,8 @@ mod tests {
     use std::cell::RefCell;
     use std::rc::Rc;
 
-    use gpui::{Context, Empty, IntoElement, Render, TestAppContext, Window};
-    use gpui_component::slider::SliderEvent;
+    use gpui_kit::component::slider::SliderEvent;
+    use gpui_kit::{Context, Empty, IntoElement, Render, TestAppContext, Window};
 
     use super::{CommitSlider, SliderRange, Thumb};
 
@@ -425,7 +425,7 @@ mod tests {
         }
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn a_drag_previews_every_frame_and_commits_once_on_release(cx: &mut TestAppContext) {
         let (owner, cx) = cx.add_window_view(|_, cx| Owner::new(cx));
         let slider = owner.read_with(cx, |owner, _| owner.slider.slider().clone());
@@ -454,7 +454,7 @@ mod tests {
     /// The write behind a release can be refused or rolled back. The thumb
     /// then has to return to the value that is actually committed instead of
     /// resting on the one that was dropped.
-    #[gpui::test]
+    #[gpui_kit::test]
     fn a_rejected_release_is_reseated_on_the_committed_value(cx: &mut TestAppContext) {
         let (owner, cx) = cx.add_window_view(|_, cx| Owner::new(cx));
         let slider = owner.read_with(cx, |owner, _| owner.slider.slider().clone());
@@ -474,13 +474,13 @@ mod tests {
     /// A device's supported values can be coarser than the slider's step. A
     /// thumb dropped between two of them already shows the committed one and
     /// must stay where the user left it.
-    #[gpui::test]
+    #[gpui_kit::test]
     fn a_thumb_between_two_stops_only_moves_when_the_committed_stop_changes(
         cx: &mut TestAppContext,
     ) {
         let (owner, cx) = cx.add_window_view(|_, cx| Owner::new(cx));
         let nearest_ten = |value: u8| (value + 5) / 10 * 10;
-        let sync = |committed, cx: &mut gpui::VisualTestContext| {
+        let sync = |committed, cx: &mut gpui_kit::VisualTestContext| {
             cx.update(|window, cx| {
                 owner.update(cx, |owner, cx| {
                     owner

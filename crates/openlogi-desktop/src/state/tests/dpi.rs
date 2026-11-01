@@ -287,7 +287,7 @@ fn answer_dpi_read(
 fn install(
     state: AppState,
     receiver: &mut tokio::sync::mpsc::UnboundedReceiver<Command>,
-    cx: &mut gpui::TestAppContext,
+    cx: &mut gpui_kit::TestAppContext,
 ) -> DeviceRoute {
     cx.update(|cx| {
         let runtime: Arc<dyn swr_core::Runtime> = Arc::new(swr_gpui::GpuiRuntime::new(cx));
@@ -309,7 +309,7 @@ fn install(
 /// Commit `dpi` on the installed state, answer the write with `result`, and
 /// return the reading the state then holds.
 fn commit_and_answer(
-    cx: &mut gpui::TestAppContext,
+    cx: &mut gpui_kit::TestAppContext,
     receiver: &mut tokio::sync::mpsc::UnboundedReceiver<Command>,
     dpi: Dpi,
     result: Result<(), WriteError>,
@@ -325,7 +325,7 @@ fn commit_and_answer(
     reading(cx)
 }
 
-fn reading(cx: &gpui::TestAppContext) -> Option<Dpi> {
+fn reading(cx: &gpui_kit::TestAppContext) -> Option<Dpi> {
     cx.read(|cx| {
         let state = AppState::try_read(cx).expect("state installed");
         match state.dpi_load_for(&mouse_key(state)) {
@@ -335,7 +335,7 @@ fn reading(cx: &gpui::TestAppContext) -> Option<Dpi> {
     })
 }
 
-fn shown_and_saved(cx: &gpui::TestAppContext) -> (Dpi, Dpi, Option<Dpi>) {
+fn shown_and_saved(cx: &gpui_kit::TestAppContext) -> (Dpi, Dpi, Option<Dpi>) {
     cx.read(|cx| {
         let state = AppState::try_read(cx).expect("state installed");
         (
@@ -346,8 +346,8 @@ fn shown_and_saved(cx: &gpui::TestAppContext) -> (Dpi, Dpi, Option<Dpi>) {
     })
 }
 
-#[gpui::test]
-fn a_dpi_the_mouse_took_becomes_its_reading(cx: &mut gpui::TestAppContext) {
+#[gpui_kit::test]
+fn a_dpi_the_mouse_took_becomes_its_reading(cx: &mut gpui_kit::TestAppContext) {
     let (state, mut receiver) = mouse_with_a_saved_dpi();
     install(state, &mut receiver, cx);
 
@@ -361,8 +361,10 @@ fn a_dpi_the_mouse_took_becomes_its_reading(cx: &mut gpui::TestAppContext) {
     );
 }
 
-#[gpui::test]
-fn a_dpi_the_mouse_did_not_apply_leaves_its_actual_dpi_everywhere(cx: &mut gpui::TestAppContext) {
+#[gpui_kit::test]
+fn a_dpi_the_mouse_did_not_apply_leaves_its_actual_dpi_everywhere(
+    cx: &mut gpui_kit::TestAppContext,
+) {
     let (state, mut receiver) = mouse_with_a_saved_dpi();
     install(state, &mut receiver, cx);
     let requested = Dpi::new(1600);
@@ -379,8 +381,8 @@ fn a_dpi_the_mouse_did_not_apply_leaves_its_actual_dpi_everywhere(cx: &mut gpui:
     assert_eq!(shown_and_saved(cx), (actual, actual, Some(SAVED)));
 }
 
-#[gpui::test]
-fn a_write_that_did_not_reach_the_mouse_reads_it_again(cx: &mut gpui::TestAppContext) {
+#[gpui_kit::test]
+fn a_write_that_did_not_reach_the_mouse_reads_it_again(cx: &mut gpui_kit::TestAppContext) {
     let (state, mut receiver) = mouse_with_a_saved_dpi();
     let route = install(state, &mut receiver, cx);
 

@@ -4,10 +4,10 @@
 //! the protocol-neutral generated visual and never borrow another model's
 //! image or diffuser geometry.
 
-use gpui::{
+use gpui_kit::component::{Icon, IconName};
+use gpui_kit::{
     BoxShadow, ParentElement, Styled, div, hsla, img, point, prelude::FluentBuilder as _, px,
 };
-use gpui_component::{Icon, IconName};
 use openlogi_core::config::LightSettings;
 
 use crate::services::assets::ResolvedAsset;
@@ -28,7 +28,7 @@ pub(crate) fn gallery(
     view: LightView,
     settings: LightSettings,
     pal: Palette,
-) -> gpui::Div {
+) -> gpui_kit::Div {
     visual_container()
         .when_some(asset, |container, asset| {
             container.child(product_image(asset, 210., 180., view.online))
@@ -44,7 +44,7 @@ pub(crate) fn detail(
     view: LightView,
     settings: LightSettings,
     pal: Palette,
-) -> gpui::Div {
+) -> gpui_kit::Div {
     visual_container()
         .flex_1()
         .min_w(px(440.))
@@ -62,7 +62,7 @@ pub(crate) fn detail(
         })
 }
 
-fn product_image(asset: &ResolvedAsset, width: f32, height: f32, online: bool) -> gpui::Div {
+fn product_image(asset: &ResolvedAsset, width: f32, height: f32, online: bool) -> gpui_kit::Div {
     let image_opacity = if online { 1. } else { 0.5 };
     div()
         .relative()
@@ -79,7 +79,7 @@ fn product_image(asset: &ResolvedAsset, width: f32, height: f32, online: bool) -
         .child(img(asset.image_path.clone()).max_w_full().max_h_full())
 }
 
-fn visual_container() -> gpui::Div {
+fn visual_container() -> gpui_kit::Div {
     div()
         .relative()
         .w_full()
@@ -94,7 +94,7 @@ fn generated_visual(
     view: LightView,
     settings: LightSettings,
     pal: Palette,
-) -> gpui::Div {
+) -> gpui_kit::Div {
     let LightView { online, enabled } = view;
     let powered = online && enabled;
     let glow = light_color(settings.temperature_kelvin.unwrap_or(4600));
@@ -160,7 +160,7 @@ fn generated_visual(
         )
 }
 
-fn light_color(kelvin: u16) -> gpui::Hsla {
+fn light_color(kelvin: u16) -> gpui_kit::Hsla {
     let normalized = (f32::from(kelvin.clamp(2700, 6500)) - 2700.) / 3800.;
     let hue = 0.09 + normalized * 0.05;
     let saturation = 0.9 - normalized * 0.48;

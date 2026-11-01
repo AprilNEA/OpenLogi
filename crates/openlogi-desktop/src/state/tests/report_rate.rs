@@ -171,7 +171,7 @@ fn answer_rate_read(
 
 /// Install `state` with live swr-backed reads, as the app does, and have it
 /// read the selected mouse.
-fn install(state: AppState, cx: &mut gpui::TestAppContext) {
+fn install(state: AppState, cx: &mut gpui_kit::TestAppContext) {
     cx.update(|cx| {
         let runtime: Arc<dyn swr_core::Runtime> = Arc::new(swr_gpui::GpuiRuntime::new(cx));
         let client = swr_core::SwrClient::builder().build(runtime.clone());
@@ -188,7 +188,7 @@ fn install(state: AppState, cx: &mut gpui::TestAppContext) {
 
 /// Hand the mouse's answer to the state and return what it announced.
 fn written(
-    cx: &mut gpui::TestAppContext,
+    cx: &mut gpui_kit::TestAppContext,
     key: &DeviceKey,
     route: &DeviceRoute,
     result: Result<ReportRateInfo, WriteError>,
@@ -200,7 +200,7 @@ fn written(
     })
 }
 
-fn current_load(cx: &gpui::TestAppContext) -> ReportRateLoad {
+fn current_load(cx: &gpui_kit::TestAppContext) -> ReportRateLoad {
     cx.read(|cx| {
         AppState::try_read(cx)
             .expect("state installed")
@@ -208,8 +208,8 @@ fn current_load(cx: &gpui::TestAppContext) -> ReportRateLoad {
     })
 }
 
-#[gpui::test]
-fn the_mouses_answer_repaints_the_pointer_card_either_way(cx: &mut gpui::TestAppContext) {
+#[gpui_kit::test]
+fn the_mouses_answer_repaints_the_pointer_card_either_way(cx: &mut gpui_kit::TestAppContext) {
     let (state, mut receiver) = mouse_state(true);
     let key = state.current_record().expect("mouse").device_key();
     install(state, cx);
@@ -252,9 +252,9 @@ fn an_answer_no_read_is_on_is_dropped() {
 /// The rate cache is keyed by the mouse, not its connection. A write the
 /// mouse answered over its cable after it had moved onto its receiver must
 /// leave the receiver connection's own reading on screen.
-#[gpui::test]
+#[gpui_kit::test]
 fn a_write_answered_after_a_route_change_keeps_the_new_connections_rates(
-    cx: &mut gpui::TestAppContext,
+    cx: &mut gpui_kit::TestAppContext,
 ) {
     let (state, mut receiver) = mouse_state(true);
     let key = state.current_record().expect("mouse").device_key();

@@ -6,11 +6,11 @@ use crate::ui::components::Toggle;
 
 use super::visual::LightView;
 use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
-use gpui::{
+use gpui_kit::component::{Icon, IconName, Selectable as _, h_flex, slider::Slider, v_flex};
+use gpui_kit::{
     BoxShadow, Context, Hsla, IntoElement, ParentElement, Render, Styled, Subscription, Window,
     div, hsla, point, prelude::FluentBuilder as _, px, rgb,
 };
-use gpui_component::{Icon, IconName, Selectable as _, h_flex, slider::Slider, v_flex};
 use openlogi_core::{
     config::LightSettings,
     device::{LightCapabilities, LightValueRange, LightValueUnit},
@@ -358,7 +358,7 @@ fn light_status(view: LightView, pal: Palette) -> impl IntoElement {
 }
 
 fn control_well(
-    title: gpui::SharedString,
+    title: gpui_kit::SharedString,
     value: String,
     endpoints: (String, String),
     slider: impl IntoElement,
@@ -380,7 +380,7 @@ fn control_well(
                     div()
                         .text_body()
                         .text_color(rgb(ACCENT_BLUE))
-                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .font_weight(gpui_kit::FontWeight::MEDIUM)
                         .child(value),
                 ),
         )

@@ -768,10 +768,10 @@ fn an_open_application_binding_selects_its_power_user_row() {
     ));
 }
 
-#[gpui::test]
-fn open_application_editor_binds_the_selected_key(cx: &mut gpui::TestAppContext) {
+#[gpui_kit::test]
+fn open_application_editor_binds_the_selected_key(cx: &mut gpui_kit::TestAppContext) {
     use crate::services::i18n::LOCALE_LOCK;
-    use gpui::{Modifiers, VisualTestContext, size};
+    use gpui_kit::{Modifiers, VisualTestContext, size};
     use openlogi_core::binding::ApplicationTarget;
 
     fn click(cx: &mut VisualTestContext, selector: &'static str) {
@@ -786,7 +786,7 @@ fn open_application_editor_binds_the_selected_key(cx: &mut gpui::TestAppContext)
     let _locale = LOCALE_LOCK.lock().unwrap();
     rust_i18n::set_locale("en");
     cx.update(|cx| {
-        gpui_component::init(cx);
+        gpui_kit::init(cx);
         cx.set_reduce_motion(true);
         let resolver = crate::services::assets::AssetResolver::new();
         let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -892,7 +892,7 @@ fn only_grid_targets_move_to_the_edited_page() {
 }
 
 /// A key-row view whose workflow editor has a draft open on keypad page 2.
-fn view_with_a_draft_on_page_two(cx: &mut gpui::TestAppContext) -> Entity<FunctionRowView> {
+fn view_with_a_draft_on_page_two(cx: &mut gpui_kit::TestAppContext) -> Entity<FunctionRowView> {
     use crate::services::assets::AssetResolver;
     use crate::state::Sources;
 
@@ -918,8 +918,8 @@ fn view_with_a_draft_on_page_two(cx: &mut gpui::TestAppContext) -> Entity<Functi
     })
 }
 
-#[gpui::test]
-fn turning_the_page_drops_a_draft_for_the_old_page(cx: &mut gpui::TestAppContext) {
+#[gpui_kit::test]
+fn turning_the_page_drops_a_draft_for_the_old_page(cx: &mut gpui_kit::TestAppContext) {
     let view = view_with_a_draft_on_page_two(cx);
     cx.update(|cx| {
         view.update(cx, |view, cx| {
@@ -930,8 +930,8 @@ fn turning_the_page_drops_a_draft_for_the_old_page(cx: &mut gpui::TestAppContext
     });
 }
 
-#[gpui::test]
-fn removing_the_edited_page_drops_its_draft(cx: &mut gpui::TestAppContext) {
+#[gpui_kit::test]
+fn removing_the_edited_page_drops_its_draft(cx: &mut gpui_kit::TestAppContext) {
     let view = view_with_a_draft_on_page_two(cx);
     cx.update(|cx| {
         view.update(cx, |view, _| {
@@ -944,8 +944,8 @@ fn removing_the_edited_page_drops_its_draft(cx: &mut gpui::TestAppContext) {
     });
 }
 
-#[gpui::test]
-fn switching_the_app_profile_drops_a_draft_for_the_old_one(cx: &mut gpui::TestAppContext) {
+#[gpui_kit::test]
+fn switching_the_app_profile_drops_a_draft_for_the_old_one(cx: &mut gpui_kit::TestAppContext) {
     let (state, _commands) = crate::state::tests::keypad_pages::keypad_state();
     cx.update(|cx| {
         let state = cx.new(|_| state);

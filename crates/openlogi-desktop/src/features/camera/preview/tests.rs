@@ -1,8 +1,8 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use gpui::{Entity, TestAppContext, VisualTestContext, point, px, size};
-use gpui_component::select::SelectEvent;
+use gpui_kit::component::select::SelectEvent;
+use gpui_kit::{Entity, TestAppContext, VisualTestContext, point, px, size};
 use openlogi_camera::{Camera, CaptureError, UsbSpeed};
 use openlogi_core::config::Config;
 
@@ -115,7 +115,7 @@ impl Drop for FakeStream {
 }
 
 fn preview(cx: &mut TestAppContext) -> (Entity<CameraPreview>, Rc<FakeCapture>) {
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     cx.update(|cx| {
         let resolver = AssetResolver::new();
         let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -148,7 +148,7 @@ fn draw(view: &Entity<CameraPreview>, cx: &mut VisualTestContext) {
     );
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn permission_event_starts_the_waiting_target_exactly_once(cx: &mut TestAppContext) {
     let (view, capture) = preview(cx);
     view.update(cx, |view, cx| {
@@ -176,7 +176,7 @@ fn permission_event_starts_the_waiting_target_exactly_once(cx: &mut TestAppConte
     assert_eq!(*capture.events.borrow(), ["open a"]);
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn permission_on_render_starts_only_the_current_waiting_target(cx: &mut TestAppContext) {
     let (view, capture) = preview(cx);
     view.update(cx, |view, cx| {
@@ -192,7 +192,7 @@ fn permission_on_render_starts_only_the_current_waiting_target(cx: &mut TestAppC
     assert_eq!(*capture.events.borrow(), ["open current"]);
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn stopping_while_waiting_does_not_open_after_a_late_grant(cx: &mut TestAppContext) {
     let (view, capture) = preview(cx);
     view.update(cx, |view, cx| {
@@ -208,7 +208,7 @@ fn stopping_while_waiting_does_not_open_after_a_late_grant(cx: &mut TestAppConte
     assert!(capture.events.borrow().is_empty());
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn failed_start_does_not_retry_on_same_target_renders_or_permission_events(
     cx: &mut TestAppContext,
 ) {
@@ -238,7 +238,7 @@ fn failed_start_does_not_retry_on_same_target_renders_or_permission_events(
     assert_eq!(*capture.events.borrow(), ["open a", "open a"]);
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn retries_wait_two_seconds_update_the_error_and_stop_after_success(cx: &mut TestAppContext) {
     let (view, capture) = preview(cx);
     capture.granted.set(true);
@@ -288,7 +288,7 @@ fn retries_wait_two_seconds_update_the_error_and_stop_after_success(cx: &mut Tes
     assert_eq!(capture.events.borrow().len(), 3, "success cancels retries");
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn retry_deadlines_belong_to_the_selected_target_and_cancel_on_stop_or_drop(
     cx: &mut TestAppContext,
 ) {
@@ -329,7 +329,7 @@ fn retry_deadlines_belong_to_the_selected_target_and_cancel_on_stop_or_drop(
     );
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn a_retry_waits_for_revoked_access_before_opening_again(cx: &mut TestAppContext) {
     let (view, capture) = preview(cx);
     capture.granted.set(true);
@@ -360,7 +360,7 @@ fn a_retry_waits_for_revoked_access_before_opening_again(cx: &mut TestAppContext
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn switching_stopping_and_dropping_release_streams_and_cancel_repaint_pumps(
     cx: &mut TestAppContext,
 ) {
@@ -404,7 +404,7 @@ fn switching_stopping_and_dropping_release_streams_and_cancel_repaint_pumps(
     );
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn repaint_notifies_only_for_an_unrendered_generation(cx: &mut TestAppContext) {
     let (view, capture) = preview(cx);
     capture.granted.set(true);
@@ -432,7 +432,7 @@ fn repaint_notifies_only_for_an_unrendered_generation(cx: &mut TestAppContext) {
     );
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn textures_follow_frame_generation_and_are_released_without_another_render(
     cx: &mut TestAppContext,
 ) {
@@ -545,7 +545,7 @@ fn streamcam_modes() -> StreamModes {
 /// device, and over a capture that grants access and offers the StreamCam's
 /// modes. Also returns the camera's config key, where its mode is saved.
 fn camera_preview(cx: &mut TestAppContext) -> (Entity<CameraPreview>, Rc<FakeCapture>, String) {
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     let key = cx.update(|cx| {
         let resolver = AssetResolver::new();
         let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -603,7 +603,7 @@ fn rows_shown(view: &Entity<CameraPreview>, cx: &mut TestAppContext) -> bool {
     cx.update(|cx| view.read(cx).mode_choice(cx).is_some())
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn a_stream_opens_at_the_saved_mode(cx: &mut TestAppContext) {
     let (view, capture, key) = camera_preview(cx);
     pick(cx, &key, mode(1920, 1080, 60));
@@ -632,7 +632,7 @@ fn choice(view: &Entity<CameraPreview>, cx: &mut TestAppContext) -> (StreamModes
     })
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn with_nothing_saved_a_stream_asks_for_no_mode_and_runs_at_the_default(cx: &mut TestAppContext) {
     let (view, capture, _key) = camera_preview(cx);
 
@@ -642,7 +642,7 @@ fn with_nothing_saved_a_stream_asks_for_no_mode_and_runs_at_the_default(cx: &mut
     assert_eq!(running_mode(&view, cx), Some(default_mode()));
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn a_saved_mode_the_camera_does_not_offer_is_left_to_the_backend_to_replace(
     cx: &mut TestAppContext,
 ) {
@@ -665,7 +665,7 @@ fn a_saved_mode_the_camera_does_not_offer_is_left_to_the_backend_to_replace(
     assert_eq!(choice(&view, cx).1, default_mode());
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn modes_that_are_only_known_once_the_camera_is_open_are_shown_after_it_opens(
     cx: &mut TestAppContext,
 ) {
@@ -686,7 +686,7 @@ fn modes_that_are_only_known_once_the_camera_is_open_are_shown_after_it_opens(
     assert_eq!(running_mode(&view, cx), Some(mode(1920, 1080, 60)));
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn modes_that_changed_since_the_last_open_are_the_ones_shown(cx: &mut TestAppContext) {
     let (view, capture, key) = camera_preview(cx);
     *capture.offered_on_open.borrow_mut() = Some(streamcam_modes());
@@ -705,7 +705,7 @@ fn modes_that_changed_since_the_last_open_are_the_ones_shown(cx: &mut TestAppCon
     assert_eq!(running_mode(&view, cx), Some(mode(1280, 720, 10)));
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn the_modes_are_read_after_the_open_even_when_it_fails(cx: &mut TestAppContext) {
     let (view, capture, key) = camera_preview(cx);
     *capture.offered_on_open.borrow_mut() = Some(streamcam_modes());
@@ -721,7 +721,7 @@ fn the_modes_are_read_after_the_open_even_when_it_fails(cx: &mut TestAppContext)
     );
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn a_target_that_is_not_the_selected_camera_asks_for_no_mode_and_shows_no_rows(
     cx: &mut TestAppContext,
 ) {
@@ -743,7 +743,7 @@ fn a_target_that_is_not_the_selected_camera_asks_for_no_mode_and_shows_no_rows(
     );
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn choosing_another_mode_reopens_the_stream_after_the_camera_lets_go(cx: &mut TestAppContext) {
     let (view, capture, key) = camera_preview(cx);
     select_camera(&view, cx);
@@ -776,7 +776,7 @@ fn choosing_another_mode_reopens_the_stream_after_the_camera_lets_go(cx: &mut Te
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn a_pick_during_the_wait_replaces_the_one_before_it(cx: &mut TestAppContext) {
     let (view, capture, key) = camera_preview(cx);
     select_camera(&view, cx);
@@ -798,7 +798,7 @@ fn a_pick_during_the_wait_replaces_the_one_before_it(cx: &mut TestAppContext) {
     );
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn choosing_the_mode_already_running_does_not_reopen(cx: &mut TestAppContext) {
     let (view, capture, key) = camera_preview(cx);
     select_camera(&view, cx);
@@ -811,7 +811,7 @@ fn choosing_the_mode_already_running_does_not_reopen(cx: &mut TestAppContext) {
     assert_eq!(events(&capture), ["open cam-1"]);
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn an_unrelated_camera_change_does_not_reopen(cx: &mut TestAppContext) {
     let (view, capture, key) = camera_preview(cx);
     select_camera(&view, cx);
@@ -826,7 +826,7 @@ fn an_unrelated_camera_change_does_not_reopen(cx: &mut TestAppContext) {
     assert_eq!(events(&capture), ["open cam-1"]);
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn a_backend_that_lists_no_modes_never_reopens_and_shows_no_rows(cx: &mut TestAppContext) {
     let (view, capture, key) = camera_preview(cx);
     *capture.modes.borrow_mut() = StreamModes::default();
@@ -840,7 +840,7 @@ fn a_backend_that_lists_no_modes_never_reopens_and_shows_no_rows(cx: &mut TestAp
     assert!(!rows_shown(&view, cx));
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn the_rows_show_when_the_camera_lists_modes_and_follow_the_stream(cx: &mut TestAppContext) {
     let (view, _capture, key) = camera_preview(cx);
     assert!(
@@ -864,7 +864,7 @@ fn the_rows_show_when_the_camera_lists_modes_and_follow_the_stream(cx: &mut Test
     );
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn the_rows_stay_when_a_mode_fails_to_open_so_another_can_be_picked(cx: &mut TestAppContext) {
     let (view, capture, key) = camera_preview(cx);
     pick(cx, &key, mode(1920, 1080, 60));
@@ -895,7 +895,7 @@ fn the_rows_stay_when_a_mode_fails_to_open_so_another_can_be_picked(cx: &mut Tes
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn leaving_during_a_reopen_cancels_it(cx: &mut TestAppContext) {
     let (view, capture, key) = camera_preview(cx);
     select_camera(&view, cx);
@@ -910,7 +910,7 @@ fn leaving_during_a_reopen_cancels_it(cx: &mut TestAppContext) {
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn a_reopen_waits_for_revoked_access_instead_of_opening(cx: &mut TestAppContext) {
     let (view, capture, key) = camera_preview(cx);
     select_camera(&view, cx);
@@ -937,7 +937,7 @@ fn frame_on_screen(cx: &mut TestAppContext) -> (Entity<CameraPreview>, Rc<FakeCa
     (view, capture, key)
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn a_reopen_keeps_the_last_frame_on_screen(cx: &mut TestAppContext) {
     let (view, _capture, key) = frame_on_screen(cx);
 
@@ -955,7 +955,7 @@ fn a_reopen_keeps_the_last_frame_on_screen(cx: &mut TestAppContext) {
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn a_reopen_that_fails_drops_the_frame_so_the_error_shows(cx: &mut TestAppContext) {
     let (view, capture, key) = frame_on_screen(cx);
 
@@ -975,7 +975,7 @@ fn a_reopen_that_fails_drops_the_frame_so_the_error_shows(cx: &mut TestAppContex
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn a_reopen_that_finds_access_gone_drops_the_frame(cx: &mut TestAppContext) {
     let (view, capture, key) = frame_on_screen(cx);
 
@@ -1001,7 +1001,7 @@ fn cx_pick(cx: &mut VisualTestContext, key: &str, mode: StreamMode) {
     cx.run_until_parked();
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn the_dropdowns_render_without_a_stream_frame(cx: &mut TestAppContext) {
     // Smoke: the dropdowns are built from the saved mode and the camera's list,
     // in every lifecycle state that shows them.
@@ -1013,7 +1013,7 @@ fn the_dropdowns_render_without_a_stream_frame(cx: &mut TestAppContext) {
     draw(&view, window);
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn the_link_notice_renders_with_and_without_the_dropdowns(cx: &mut TestAppContext) {
     // Smoke: the notice sits in the same column as the dropdowns, so it must
     // draw whether or not the camera lists modes.
@@ -1080,7 +1080,7 @@ fn confirm_rate(view: &Entity<CameraPreview>, cx: &mut VisualTestContext, fps: u
     cx.run_until_parked();
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn the_dropdowns_show_the_mode_the_stream_resolves_to(cx: &mut TestAppContext) {
     let (view, _capture, key) = camera_preview(cx);
     select_camera(&view, cx);
@@ -1108,7 +1108,7 @@ fn the_dropdowns_show_the_mode_the_stream_resolves_to(cx: &mut TestAppContext) {
     assert_eq!(dropdowns(&view, window), (Some((1280, 720)), Some(30)));
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn picking_a_size_keeps_the_rate_when_the_new_size_offers_it(cx: &mut TestAppContext) {
     let (view, _capture, key) = camera_preview(cx);
     select_camera(&view, cx);
@@ -1121,7 +1121,7 @@ fn picking_a_size_keeps_the_rate_when_the_new_size_offers_it(cx: &mut TestAppCon
     assert_eq!(saved(window, &key), Some(mode(1280, 720, 60)));
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn picking_a_size_takes_the_nearest_rate_when_it_does_not_offer_the_current_one(
     cx: &mut TestAppContext,
 ) {
@@ -1146,7 +1146,7 @@ fn picking_a_size_takes_the_nearest_rate_when_it_does_not_offer_the_current_one(
     );
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn picking_a_rate_keeps_the_size(cx: &mut TestAppContext) {
     let (view, _capture, key) = camera_preview(cx);
     select_camera(&view, cx);
@@ -1159,7 +1159,7 @@ fn picking_a_rate_keeps_the_size(cx: &mut TestAppContext) {
     assert_eq!(saved(window, &key), Some(mode(1920, 1080, 30)));
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn a_pick_the_camera_does_not_offer_is_not_saved(cx: &mut TestAppContext) {
     let (view, _capture, key) = camera_preview(cx);
     select_camera(&view, cx);
@@ -1173,7 +1173,7 @@ fn a_pick_the_camera_does_not_offer_is_not_saved(cx: &mut TestAppContext) {
     assert_eq!(saved(window, &key), None);
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn a_dropdown_a_refused_pick_left_behind_is_put_back(cx: &mut TestAppContext) {
     let (view, _capture, key) = camera_preview(cx);
     select_camera(&view, cx);
@@ -1208,7 +1208,7 @@ fn link_notice(view: &Entity<CameraPreview>, cx: &mut TestAppContext) -> Option<
     })
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn a_camera_on_a_slower_link_than_it_supports_says_so(cx: &mut TestAppContext) {
     let (view, capture, _key) = camera_preview(cx);
     capture
@@ -1230,7 +1230,7 @@ fn a_camera_on_a_slower_link_than_it_supports_says_so(cx: &mut TestAppContext) {
     );
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn a_link_that_is_no_limit_says_nothing(cx: &mut TestAppContext) {
     let (view, capture, _key) = camera_preview(cx);
     let no_limit = [
@@ -1247,7 +1247,7 @@ fn a_link_that_is_no_limit_says_nothing(cx: &mut TestAppContext) {
     }
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn the_notice_goes_with_the_camera_and_follows_the_next_open(cx: &mut TestAppContext) {
     let (view, capture, _key) = camera_preview(cx);
     capture
@@ -1271,7 +1271,7 @@ fn the_notice_goes_with_the_camera_and_follows_the_next_open(cx: &mut TestAppCon
     assert_eq!(link_notice(&view, cx), None);
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn the_notice_stays_when_the_camera_fails_to_open(cx: &mut TestAppContext) {
     // A link too slow for the chosen mode is a plausible reason to fail.
     let (view, capture, _key) = camera_preview(cx);

@@ -1,10 +1,10 @@
 //! Device-panel controls for HID++ `0x4521 DisableKeys`.
 
-use gpui::{
+use gpui_kit::component::{Disableable as _, Icon, h_flex, switch::Switch, v_flex};
+use gpui_kit::{
     Context, ElementId, InteractiveElement as _, IntoElement, ParentElement, Render, Styled,
     Subscription, Window, div, prelude::FluentBuilder as _,
 };
-use gpui_component::{Disableable as _, Icon, h_flex, switch::Switch, v_flex};
 use openlogi_core::config::DisableKey;
 use openlogi_core::hid::DisableKeysMask;
 
@@ -31,7 +31,7 @@ impl DisableKeysPanel {
         }
     }
 
-    fn content(pal: Palette, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn content(pal: Palette, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let Some(state) = AppState::try_read(cx) else {
             return status_line(tr!("keyboard.loading_disabled_key_state"), pal).into_any_element();
         };
@@ -73,7 +73,7 @@ fn recovery_content(
     online: bool,
     key: &DeviceKey,
     pal: Palette,
-) -> Option<gpui::AnyElement> {
+) -> Option<gpui_kit::AnyElement> {
     match persistence {
         DisableKeysPersistenceStatus::AppliedNotSaved { .. } => Some(
             v_flex()
@@ -131,7 +131,7 @@ fn config_recovery_content(
     reconciliation: &ConfigReconciliation,
     recovery: ReloadRecovery<'_>,
     pal: Palette,
-) -> Option<gpui::AnyElement> {
+) -> Option<gpui_kit::AnyElement> {
     match reconciliation {
         ConfigReconciliation::Confirmed => None,
         ConfigReconciliation::Awaiting(_) => {
@@ -146,10 +146,10 @@ fn config_recovery_content(
 }
 
 fn reload_recovery_content(
-    message: gpui::SharedString,
+    message: gpui_kit::SharedString,
     recovery: ReloadRecovery<'_>,
     pal: Palette,
-) -> gpui::AnyElement {
+) -> gpui_kit::AnyElement {
     v_flex()
         .gap_2()
         .child(status_line(message, pal))
@@ -176,7 +176,7 @@ fn load_content(
     error: Option<DisableKeysError>,
     key: &DeviceKey,
     pal: Palette,
-) -> gpui::AnyElement {
+) -> gpui_kit::AnyElement {
     match load {
         DisableKeysLoad::Unknown | DisableKeysLoad::Loading if !online => {
             status_line(tr!("device.offline"), pal)
@@ -278,7 +278,7 @@ fn device_control_id(key: &DeviceKey, control: &'static str) -> ElementId {
         .into()
 }
 
-fn recovery_error_text(error: DisableKeysError) -> gpui::SharedString {
+fn recovery_error_text(error: DisableKeysError) -> gpui_kit::SharedString {
     match error {
         DisableKeysError::AgentUnavailable => tr!("keyboard.disable_keys_agent_unavailable"),
         DisableKeysError::ConnectionChanged => tr!("keyboard.disable_keys_connection_changed"),
@@ -289,7 +289,7 @@ fn recovery_error_text(error: DisableKeysError) -> gpui::SharedString {
     }
 }
 
-fn key_label(key: DisableKey) -> gpui::SharedString {
+fn key_label(key: DisableKey) -> gpui_kit::SharedString {
     match key {
         DisableKey::CapsLock => tr!("keyboard.caps_lock"),
         DisableKey::NumLock => tr!("keyboard.num_lock"),
@@ -302,7 +302,7 @@ fn key_label(key: DisableKey) -> gpui::SharedString {
 
 /// Screen-reader name of a key's switch. The switch is on when the key is
 /// disabled, so the name states the action instead of only the key.
-fn switch_label(key: DisableKey) -> gpui::SharedString {
+fn switch_label(key: DisableKey) -> gpui_kit::SharedString {
     tr!("keyboard.disable_key_switch", name => key_label(key).to_string())
 }
 

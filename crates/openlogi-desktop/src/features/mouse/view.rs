@@ -1,17 +1,17 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use gpui::{
+use gpui_kit::base::Button as BaseButton;
+use gpui_kit::component::{
+    h_flex,
+    input::{InputEvent, InputState},
+    v_flex,
+};
+use gpui_kit::{
     AnyElement, App, AppContext as _, Context, ElementId, Entity, FocusHandle, Focusable, Hsla,
     InteractiveElement, IntoElement, ParentElement, Render, RenderOnce,
     StatefulInteractiveElement as _, Styled, Subscription, Window, canvas, div, hsla, img,
     prelude::FluentBuilder as _, px, rgb,
-};
-use gpui_base::Button as BaseButton;
-use gpui_component::{
-    h_flex,
-    input::{InputEvent, InputState},
-    v_flex,
 };
 use openlogi_core::binding::{Action, ButtonId, GamingLayout, GestureDirection};
 
@@ -564,12 +564,12 @@ impl Render for MouseModelView {
 /// the model's top or bottom still land inside the canvas, which grows to
 /// `canvas_h` to hold them, with the model `mouse_top` down from its top.
 fn model_canvas(
-    band: gpui::Div,
+    band: gpui_kit::Div,
     canvas_w: f32,
     canvas_h: f32,
     mouse_top: f32,
     mouse_h: f32,
-) -> gpui::Div {
+) -> gpui_kit::Div {
     div()
         .relative()
         .w(px(canvas_w))
@@ -586,7 +586,7 @@ fn model_canvas(
 
 fn workspace_layout(
     canvas: impl IntoElement,
-    profile_status: Option<gpui::Div>,
+    profile_status: Option<gpui_kit::Div>,
     inspector: impl IntoElement,
     focus_handle: &FocusHandle,
 ) -> impl IntoElement {
@@ -750,7 +750,7 @@ fn leader_canvas(
             paint_leader_lines(
                 bounds,
                 LeaderGeometry {
-                    mouse_origin: gpui::point(px(mouse_left), px(0.)),
+                    mouse_origin: gpui_kit::point(px(mouse_left), px(0.)),
                     mouse_w,
                     card_edge_inset: CARD_EDGE_INSET,
                 },
@@ -903,7 +903,7 @@ fn hotspot_control(
     active: Option<MouseControlId>,
     selected: bool,
     view: &Entity<MouseModelView>,
-) -> gpui::Div {
+) -> gpui_kit::Div {
     let view = view.clone();
     let trigger = HotspotTrigger {
         id: ("hotspot-trigger", idx).into(),
@@ -958,12 +958,12 @@ impl RenderOnce for HotspotTrigger {
                     .rounded_full()
                     .border_1()
                     .border_color(if highlighted {
-                        gpui::Hsla::from(rgb(ACCENT_BLUE))
+                        gpui_kit::Hsla::from(rgb(ACCENT_BLUE))
                     } else {
                         hsla(0., 0., 0.95, 0.85)
                     })
                     .bg(if highlighted {
-                        gpui::Hsla::from(rgb(ACCENT_BLUE))
+                        gpui_kit::Hsla::from(rgb(ACCENT_BLUE))
                     } else {
                         hsla(0., 0., 0.18, 0.85)
                     }),

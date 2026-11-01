@@ -3,7 +3,7 @@
 //! Values name their size at OpenLogi's 16 px baseline and resolve to rems, so
 //! the existing interface-scale setting changes text and spacing together.
 
-use gpui::{Rems, rems};
+use gpui_kit::{Rems, rems};
 
 const BASE_REM_SIZE_IN_PX: f32 = 16.;
 
@@ -40,7 +40,7 @@ impl DynamicSpacing {
 
 #[cfg(test)]
 mod tests {
-    use gpui::px;
+    use gpui_kit::px;
 
     use super::*;
 

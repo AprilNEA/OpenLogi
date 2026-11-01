@@ -7,7 +7,7 @@
 //! reconnect. Only a write the device took is saved. After any other answer
 //! the editor shows the DPI the device reports, or the last one it reported.
 
-use gpui::Context;
+use gpui_kit::Context;
 use openlogi_core::hid::{Dpi, DpiCapabilities, WriteError};
 use tracing::{debug, warn};
 

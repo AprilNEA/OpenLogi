@@ -8,16 +8,16 @@
 //! reports). Capability discovery runs in the background and the UI only
 //! exposes exact device-supported values once the list is known.
 
-use gpui::{
-    AnyElement, Context, Entity, IntoElement, ParentElement, Render, Styled, Subscription, Window,
-    div, px,
-};
-use gpui_component::{
+use gpui_kit::component::{
     Icon, IconName, Selectable as _, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     slider::{Slider, SliderState},
     v_flex,
+};
+use gpui_kit::{
+    AnyElement, Context, Entity, IntoElement, ParentElement, Render, Styled, Subscription, Window,
+    div, px,
 };
 use openlogi_core::hid::{Dpi, DpiCapabilities};
 use tracing::debug;

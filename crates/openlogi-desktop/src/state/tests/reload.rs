@@ -300,8 +300,8 @@ fn lock_key_notifications_persist_and_reload_only_when_changed() {
 /// already being updated"), which crashed 0.8.0 on every language change —
 /// announcing the switch must defer the rebuild until the update returns the
 /// lease.
-#[gpui::test]
-fn language_switch_rebuilds_menus_after_the_state_update(cx: &mut gpui::TestAppContext) {
+#[gpui_kit::test]
+fn language_switch_rebuilds_menus_after_the_state_update(cx: &mut gpui_kit::TestAppContext) {
     let _locale = crate::services::i18n::LOCALE_LOCK.lock();
     let resolver = AssetResolver::new();
     let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();

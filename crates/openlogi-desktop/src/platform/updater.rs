@@ -38,7 +38,7 @@
 //! checkbox for the same preference, so a change made there is adopted back
 //! into the config instead of being overwritten at the next launch.
 
-use gpui::{App, AppContext as _, Context, Entity, Global, Subscription};
+use gpui_kit::{App, AppContext as _, Context, Entity, Global, Subscription};
 use gpui_updater::{
     EngineConfig, StaticManifestSource, UpdateStatus, Updater, Verification, Version,
 };
@@ -342,7 +342,7 @@ fn adopt_sparkle_auto_install(updater: &Entity<Updater>, configured: bool, cx: &
 
 #[cfg(test)]
 mod tests {
-    use gpui::TestAppContext;
+    use gpui_kit::TestAppContext;
     use openlogi_core::config::Config;
 
     use super::*;
@@ -395,7 +395,7 @@ mod tests {
     /// A test binary is no `.app` bundle, so it exercises the path every
     /// non-release build takes: no Sparkle, the engine, and settings that
     /// still reach the config.
-    #[gpui::test]
+    #[gpui_kit::test]
     fn without_an_embedded_sparkle_the_engine_runs_and_settings_still_commit(
         cx: &mut TestAppContext,
     ) {
@@ -432,7 +432,7 @@ mod tests {
 
     /// A channel picked after launch is committed, but this launch's updater
     /// keeps the channel it started on.
-    #[gpui::test]
+    #[gpui_kit::test]
     fn a_picked_channel_commits_and_applies_at_the_next_launch(cx: &mut TestAppContext) {
         cx.update(|cx| {
             let (commands, _) = tokio::sync::mpsc::unbounded_channel();
@@ -470,7 +470,7 @@ mod tests {
 
     /// A save the config refuses keeps the configured value; that retained
     /// value is what `set_auto_install_updates` mirrors into Sparkle afterwards.
-    #[gpui::test]
+    #[gpui_kit::test]
     fn a_refused_save_keeps_the_configured_auto_install(cx: &mut TestAppContext) {
         cx.update(|cx| {
             let (commands, _) = tokio::sync::mpsc::unbounded_channel();

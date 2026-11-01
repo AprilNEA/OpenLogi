@@ -15,7 +15,7 @@
 
 use std::collections::BTreeMap;
 
-use gpui::{App, Context, Entity, Global};
+use gpui_kit::{App, Context, Entity, Global};
 use openlogi_core::app::{AppAliases, ForegroundApp, profile_applies_to};
 use openlogi_core::binding::GamingLayout;
 use openlogi_core::config::Config;
@@ -208,7 +208,7 @@ pub struct AppState {
     /// entity owns it because permission can resolve after the initiating view
     /// or window closes; dropping the entity at process shutdown cancels it.
     #[cfg(target_os = "macos")]
-    camera_permission_poll: Option<gpui::Task<()>>,
+    camera_permission_poll: Option<gpui_kit::Task<()>>,
 }
 
 impl AppState {
