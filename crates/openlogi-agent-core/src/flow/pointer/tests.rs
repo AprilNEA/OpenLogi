@@ -15,6 +15,9 @@ use crate::flow::edge::{ArmedSides, DesktopPoint, EdgeSide};
 #[derive(Default)]
 struct FakeState {
     position: (f64, f64),
+    /// A position the desktop shows only after the next read, as when the
+    /// hook reports motion before the desktop applies it.
+    catch_up: Option<(f64, f64)>,
     control: bool,
     displays: Vec<DisplayBounds>,
     warps: Vec<(f64, f64)>,
@@ -67,11 +70,15 @@ impl Fake {
 
 impl Pointer for Fake {
     fn state(&mut self) -> Option<PointerState> {
-        let state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let position = state.position;
+        if let Some(caught_up) = state.catch_up.take() {
+            state.position = caught_up;
+        }
         Some(PointerState {
             position: HookPoint {
-                x: state.position.0,
-                y: state.position.1,
+                x: position.0,
+                y: position.1,
             },
             modifiers: KeyModifiers {
                 control: state.control,
@@ -306,6 +313,40 @@ fn a_cursor_resting_on_the_edge_crosses_after_one_wake() {
         assert!(
             started.elapsed() < Duration::from_secs(2),
             "no crossing after a 250 ms dwell without further motion"
+        );
+        std::thread::sleep(ms(10));
+    };
+    assert_eq!(crossing.side, EdgeSide::Right);
+    thread.stop();
+}
+
+/// The hook reports motion before the desktop applies it, so the read that
+/// motion wakes can still see the old position. The thread must read again
+/// once the motion stops, or a cursor that stops on the edge never crosses.
+#[test]
+fn the_thread_reads_again_after_motion_stops() {
+    let fake = Fake::with_displays(ONE_DISPLAY);
+    fake.at(50.0, 50.0, false);
+    let (sender, mut crossings) = mpsc::channel(1);
+    let connect = {
+        let fake = fake.clone();
+        move || Some(fake)
+    };
+    let thread = PointerThread::spawn_with(connect, sender).expect("spawn the pointer thread");
+    thread.configure(right_edge(false));
+    // Let the thread take the settings before the one motion it sees.
+    std::thread::sleep(ms(100));
+    fake.update(|state| state.catch_up = Some((99.5, 50.0)));
+    thread.waker().moved();
+
+    let started = Instant::now();
+    let crossing = loop {
+        if let Ok(crossing) = crossings.try_recv() {
+            break crossing;
+        }
+        assert!(
+            started.elapsed() < GEOMETRY_REFRESH,
+            "no crossing after the last motion landed on the edge"
         );
         std::thread::sleep(ms(10));
     };

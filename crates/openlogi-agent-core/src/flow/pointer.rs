@@ -3,9 +3,11 @@
 //! The OS hook callback must never wait, so it only marks the pointer as
 //! moved and wakes this thread through a [`PointerWaker`]. The thread then
 //! reads one pointer state per wake, feeds the edge detector, and reports each
-//! crossing to the Flow runtime without waiting for it. A cursor resting on
-//! an edge sends no motion, so the thread also wakes itself when a pending
-//! dwell is due. Every
+//! crossing to the Flow runtime without waiting for it. The hook reports
+//! motion before the desktop applies it, so the thread reads once more
+//! [`MOTION_SETTLE`] after the last motion. A cursor resting on an edge sends
+//! no motion, so the thread also wakes itself when a pending dwell is due.
+//! Every
 //! [`GEOMETRY_REFRESH`] it reads the display layout again and replaces the
 //! edges only when the layout changed. It also places the cursor when a
 //! handoff arrives, so one thread reads and moves the cursor in one coordinate
@@ -30,6 +32,11 @@ use super::edge::{
 
 /// How often the thread reads the display layout again.
 pub(crate) const GEOMETRY_REFRESH: Duration = Duration::from_secs(2);
+/// How long after the last motion the thread reads the pointer once more.
+/// The hook reports motion before the desktop applies it, and on Linux before
+/// it sends the movement back through uinput, so the read a motion wakes can
+/// see the old position. This read sees where the cursor stopped.
+const MOTION_SETTLE: Duration = Duration::from_millis(50);
 /// How far inside the display an arriving cursor lands. It exceeds the
 /// detector's 1 px contact tolerance, so an arrival cannot cross straight back.
 const ENTRY_INSET: f64 = 2.0;
@@ -203,6 +210,7 @@ fn run<P: Pointer>(
 ) {
     let epoch = Instant::now();
     let mut state = PointerLoop::new(pointer, Duration::ZERO);
+    let mut settle_at = None;
     loop {
         loop {
             match commands.try_recv() {
@@ -214,10 +222,19 @@ fn run<P: Pointer>(
         }
         let now = epoch.elapsed();
         state.refresh(now);
+        let motion = moved.swap(false, Ordering::AcqRel);
+        let settled = settle_at.is_some_and(|due| due <= now);
+        // Each motion pushes the follow-up read back, so a burst of motion
+        // ends with one read after the desktop has caught up.
+        if motion {
+            settle_at = Some(now + MOTION_SETTLE);
+        } else if settled {
+            settle_at = None;
+        }
         // A cursor resting on an edge sends no motion, so a due dwell is
         // sampled without one.
         let dwell_due = state.dwell_deadline().is_some_and(|due| due <= now);
-        if (moved.swap(false, Ordering::AcqRel) || dwell_due)
+        if (motion || settled || dwell_due)
             && let Some(crossing) = state.sample(now)
             && crossings.try_send(crossing).is_err()
         {
@@ -225,10 +242,10 @@ fn run<P: Pointer>(
         }
         // A wake that lands between the swap and the park leaves a token, so
         // the park returns at once.
-        let next_refresh = state.next_refresh();
-        let wake_at = state
-            .dwell_deadline()
-            .map_or(next_refresh, |due| due.min(next_refresh));
+        let wake_at = [state.dwell_deadline(), settle_at]
+            .into_iter()
+            .flatten()
+            .fold(state.next_refresh(), Duration::min);
         thread::park_timeout(wake_at.saturating_sub(epoch.elapsed()));
     }
 }
