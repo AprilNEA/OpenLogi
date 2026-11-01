@@ -7,7 +7,7 @@
 //! through the device's own HID++ diversion — the only path that reaches a
 //! media or shortcut key, which the OS hook never sees. A keyboard depot
 //! without such markers (the G513 family's pixel-marker files, or no depot
-//! at all) falls back to the OS-hook F-row: Esc and F1–F19 as
+//! at all) falls back to the OS-hook F-row: Esc and F1–F21 as
 //! [`KeyTarget::FunctionKey`], placed by the legacy pixel markers or by even
 //! spacing. A keypad is never that keyboard — it carries no F-row at all.
 //! Where its depot marks the grid keys — by the `_g<index>` suffix, since
@@ -43,6 +43,38 @@ const FRONT_MARKER_Y_OFFSET_FRAC: f32 = 0.023;
 /// Even-spacing fallback band (fractions of image width) when no metadata.
 pub(super) const EVEN_SPACING_START: f32 = 0.04;
 pub(super) const EVEN_SPACING_END: f32 = 0.96;
+
+/// The G915 X depot: no assignments, but a region for every key.
+const G915_X_DEPOT: &str = "g915_x_ls";
+/// The image whose `inputRegions` place those keys.
+const REGION_IMAGE: &str = "device_image";
+/// The G915 X's OS-hook keys, by the control ID its depot's regions use. G1–G9
+/// are the left column, then the four round buttons on top; out of the box
+/// they send F13–F21 (measured on the keyboard, not read from the depot).
+const G915_X_KEYS: [(u16, FunctionKey, Option<&str>); 22] = [
+    (332, FunctionKey::Esc, None),
+    (246, FunctionKey::F1, None),
+    (239, FunctionKey::F2, None),
+    (240, FunctionKey::F3, None),
+    (241, FunctionKey::F4, None),
+    (242, FunctionKey::F5, None),
+    (243, FunctionKey::F6, None),
+    (244, FunctionKey::F7, None),
+    (245, FunctionKey::F8, None),
+    (333, FunctionKey::F9, None),
+    (334, FunctionKey::F10, None),
+    (335, FunctionKey::F11, None),
+    (336, FunctionKey::F12, None),
+    (399, FunctionKey::F13, Some("G1")),
+    (400, FunctionKey::F14, Some("G2")),
+    (401, FunctionKey::F15, Some("G3")),
+    (402, FunctionKey::F16, Some("G4")),
+    (403, FunctionKey::F17, Some("G5")),
+    (404, FunctionKey::F18, Some("G6")),
+    (405, FunctionKey::F19, Some("G7")),
+    (406, FunctionKey::F20, Some("G8")),
+    (407, FunctionKey::F21, Some("G9")),
+];
 
 /// The metadata image entries that carry remappable-key markers. The
 /// Easy-Switch host keys live under their own entry and are deliberately not
@@ -168,6 +200,9 @@ pub(super) fn key_surface(
         if keypad.is_some() {
             return stock_keypad_slots(asset)
                 .map_or_else(|| KeySurface::Keypad(keypad_slots()), KeySurface::Photo);
+        }
+        if let Some(slots) = g915_x_slots(asset) {
+            return KeySurface::Photo(slots);
         }
         if let Some(points) = legacy_pixel_key_points(asset) {
             return KeySurface::Photo(function_key_slots(points));
@@ -448,16 +483,57 @@ fn marker_slots(asset: &ResolvedAsset, keypad: Option<&KeypadDescriptor>) -> Vec
     slots
 }
 
+/// The G915 X's keys where its depot draws them. `None` for any other depot,
+/// or one missing a key, which then takes the usual fallback.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "render dimensions are far below f32's exact-integer range"
+)]
+fn g915_x_slots(asset: &ResolvedAsset) -> Option<Vec<KeySlotLayout>> {
+    if asset.depot != G915_X_DEPOT {
+        return None;
+    }
+    let image = asset
+        .metadata
+        .images
+        .iter()
+        .find(|image| image.key == REGION_IMAGE)?;
+    let (width, height) = (image.origin.width as f32, image.origin.height as f32);
+    G915_X_KEYS
+        .into_iter()
+        .map(|(cid, key, legend)| {
+            let center = image
+                .input_regions
+                .iter()
+                .find(|region| region.control_id() == Some(cid))?
+                .center()?;
+            Some(KeySlotLayout {
+                target: function_key_target(key),
+                legend: legend.unwrap_or_else(|| key.label()).to_owned(),
+                point: KeyPoint {
+                    x_frac: center.x / width,
+                    y_frac: center.y / height,
+                },
+            })
+        })
+        .collect()
+}
+
+/// The unmodified trigger of `key`.
+fn function_key_target(key: FunctionKey) -> KeyTarget {
+    KeyTarget::FunctionKey(KeyTrigger {
+        keycode: key.keycode(),
+        modifiers: KeyModifiers::default(),
+    })
+}
+
 /// Esc and F1–Fn over `points`, one per point.
 fn function_key_slots(points: Vec<KeyPoint>) -> Vec<KeySlotLayout> {
     FunctionKey::ALL
         .into_iter()
         .zip(points)
         .map(|(key, point)| KeySlotLayout {
-            target: KeyTarget::FunctionKey(KeyTrigger {
-                keycode: key.keycode(),
-                modifiers: KeyModifiers::default(),
-            }),
+            target: function_key_target(key),
             legend: key.label().to_owned(),
             point,
         })

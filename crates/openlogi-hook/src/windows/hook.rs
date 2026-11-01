@@ -560,7 +560,7 @@ unsafe fn key_hook_data(lparam: LPARAM) -> Option<KBDLLHOOKSTRUCT> {
 
 /// Translate a `WH_KEYBOARD_LL` message into a [`KeyEvent`]. Returns `None`
 /// for injected input (our own `SendInput` synthesis must not re-enter the
-/// remapper) and for keys outside the remapper's Esc/F1–F19 vocabulary, which
+/// remapper) and for keys outside the remapper's Esc/F1–F21 vocabulary, which
 /// pass through without ever reaching the callback.
 #[expect(
     clippy::cast_possible_truncation,
@@ -590,7 +590,7 @@ fn translate_key(
 
 /// Map a Windows virtual-key code to the macOS keycode [`KeyEvent`] carries
 /// on every platform — [`FunctionKey`]'s — or `None` for keys outside the
-/// Esc/F1–F19 set. Windows numbers `VK_F1`.. consecutively.
+/// Esc/F1–F21 set. Windows numbers `VK_F1`.. consecutively.
 fn mac_keycode(vk: u32) -> Option<u16> {
     let vk = u16::try_from(vk).ok()?;
     let key = if vk == VK_ESCAPE {
@@ -693,13 +693,13 @@ mod tests {
             Some(FunctionKey::F1.keycode())
         );
         assert_eq!(
-            mac_keycode(u32::from(VK_F1 + 18)),
-            Some(FunctionKey::F19.keycode())
+            mac_keycode(u32::from(VK_F1 + 20)),
+            Some(FunctionKey::F21.keycode())
         );
         assert_eq!(
-            mac_keycode(u32::from(VK_F1 + 19)),
+            mac_keycode(u32::from(VK_F1 + 21)),
             None,
-            "F20 is off the row"
+            "F22 is off the row"
         );
         assert_eq!(mac_keycode(u32::from(VK_F1 - 1)), None);
     }
@@ -753,7 +753,7 @@ mod tests {
         assert!(translate_key(WM_KEYDOWN as WPARAM, data, KeyModifiers::default()).is_none());
     }
 
-    /// Ordinary typing keys are outside the Esc/F1–F19 vocabulary and must
+    /// Ordinary typing keys are outside the Esc/F1–F21 vocabulary and must
     /// never reach the callback — their raw VK codes would otherwise collide
     /// with the macOS keycode space (e.g. VK 0x41 'A' vs kVK 0x41 keypad-.).
     #[test]
@@ -761,8 +761,8 @@ mod tests {
         let mods = KeyModifiers::default();
         // 'A'
         assert!(translate_key(WM_KEYDOWN as WPARAM, key(0x41), mods).is_none());
-        // VK_F20, one past the modeled range.
-        assert!(translate_key(WM_KEYDOWN as WPARAM, key(VK_F1 + 19), mods).is_none());
+        // VK_F22, one past the modeled range.
+        assert!(translate_key(WM_KEYDOWN as WPARAM, key(VK_F1 + 21), mods).is_none());
     }
 
     /// Wheel-forward (away from the user) must produce a positive `delta_y`, the

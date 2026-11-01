@@ -56,6 +56,77 @@ pub struct ImageEntry {
     pub origin: Origin,
     #[serde(default)]
     pub assignments: Vec<Assignment>,
+    /// Every key's shape on the render, in `origin` pixels. Light-up keyboard
+    /// depots carry it on `device_image`, even with no assignments.
+    #[serde(rename = "inputRegions", default)]
+    pub input_regions: Vec<InputRegion>,
+}
+
+/// One key's place on a keyboard render.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct InputRegion {
+    #[serde(default)]
+    renderings: Vec<RegionRendering>,
+    #[serde(default)]
+    inputs: Vec<RegionInput>,
+}
+
+impl InputRegion {
+    /// The HID++ control ID of the key this region draws.
+    #[must_use]
+    pub fn control_id(&self) -> Option<u16> {
+        self.inputs.iter().find_map(|input| input.cid)
+    }
+
+    /// The centre of the key in `origin` pixels. `None` for a shape with no
+    /// simple centre, such as an ISO Enter's outline.
+    #[must_use]
+    pub fn center(&self) -> Option<Point> {
+        self.renderings.iter().find_map(RegionRendering::center)
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+struct RegionInput {
+    #[serde(default)]
+    cid: Option<u16>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+struct RegionRendering {
+    #[serde(default)]
+    rect: Option<RegionRect>,
+    #[serde(default)]
+    circle: Option<RegionCircle>,
+}
+
+impl RegionRendering {
+    fn center(&self) -> Option<Point> {
+        let from_rect = self.rect.map(|rect| Point {
+            x: rect.x + rect.width / 2.0,
+            y: rect.y + rect.height / 2.0,
+        });
+        from_rect.or_else(|| {
+            self.circle.map(|circle| Point {
+                x: circle.cx,
+                y: circle.cy,
+            })
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+struct RegionRect {
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+struct RegionCircle {
+    cx: f32,
+    cy: f32,
 }
 
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
@@ -164,6 +235,29 @@ impl Metadata {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn input_regions_give_a_control_and_a_centre() {
+        let image: super::ImageEntry = serde_json::from_str(
+            r#"{"key":"device_image","origin":{"width":2048,"height":644},"inputRegions":[
+                {"renderings":[{"type":"rect","rect":{"x":44,"y":225,"width":74,"height":74}}],
+                 "inputs":[{"cid":399,"category":"KEYBOARD_KEY"}]},
+                {"renderings":[{"type":"circle","circle":{"cx":328,"cy":59,"r":30}}],
+                 "inputs":[{"cid":404}]},
+                {"renderings":[{"type":"path","d":"M 1 2 Z"}],"inputs":[{"cid":341}]}
+            ]}"#,
+        )
+        .expect("regions parse");
+        let [rect, circle, path] = image.input_regions.as_slice() else {
+            panic!("three regions");
+        };
+        assert_eq!(rect.control_id(), Some(399));
+        assert_eq!(rect.center(), Some(super::Point { x: 81.0, y: 262.0 }));
+        assert_eq!(circle.control_id(), Some(404));
+        assert_eq!(circle.center(), Some(super::Point { x: 328.0, y: 59.0 }));
+        assert_eq!(path.control_id(), Some(341));
+        assert_eq!(path.center(), None);
+    }
+
     use super::Metadata;
 
     /// Older keyboard depots (G513) identify assignments by `slotId` only —

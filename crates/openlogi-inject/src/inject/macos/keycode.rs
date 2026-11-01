@@ -91,7 +91,6 @@ const KEYS: &[(u8, u16)] = &[
     (0x50, 0x7b), // Left Arrow
     (0x51, 0x7d), // Down Arrow
     (0x52, 0x7e), // Up Arrow
-    (0x6f, 0x5a), // F20, one past the row `FunctionKey` covers
     (0x64, 0x0a), // ISO § (Non-US \ and |)
     (0x89, 0x5d), // JIS ¥ (International 3)
     (0x87, 0x5e), // JIS _ (International 1)
@@ -142,13 +141,13 @@ pub(super) fn macos_to_hid_usage(vk: u16) -> Option<u8> {
         })
 }
 
-/// The top-row key with HID usage `usage`: Escape, then F1–F12 and F13–F19,
+/// The top-row key with HID usage `usage`: Escape, then F1–F12 and F13–F21,
 /// which the HID usage table numbers in two separate runs.
 fn function_key(usage: u8) -> Option<FunctionKey> {
     match usage {
         ESCAPE => Some(FunctionKey::Esc),
         0x3a..=0x45 => FunctionKey::nth_f(u16::from(usage - 0x3a + 1)),
-        0x68..=0x6e => FunctionKey::nth_f(u16::from(usage - 0x68 + 13)),
+        0x68..=0x70 => FunctionKey::nth_f(u16::from(usage - 0x68 + 13)),
         _ => None,
     }
 }
@@ -160,7 +159,7 @@ fn function_key_usage(key: FunctionKey) -> Option<u8> {
     match n {
         0 => Some(ESCAPE),
         1..=12 => Some(0x3a + n - 1),
-        13..=19 => Some(0x68 + n - 13),
+        13..=21 => Some(0x68 + n - 13),
         _ => None,
     }
 }
@@ -225,6 +224,7 @@ mod tests {
         assert_eq!(macos_to_hid_usage(FunctionKey::F12.keycode()), Some(0x45));
         assert_eq!(macos_to_hid_usage(FunctionKey::F13.keycode()), Some(0x68));
         assert_eq!(macos_to_hid_usage(FunctionKey::F19.keycode()), Some(0x6e));
+        assert_eq!(macos_to_hid_usage(FunctionKey::F20.keycode()), Some(0x6f));
     }
 
     /// A usage or keycode entered twice, or one shadowing a top-row keycode,
