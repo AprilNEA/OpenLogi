@@ -19,13 +19,19 @@ use evdev::{AttributeSet, EventType, InputEvent, KeyCode, RelativeAxisCode};
 use zbus::blocking::Connection as DbusConn;
 
 use openlogi_core::binding::{
-    Action, Effect, KeyCombo, MediaKey, MouseButton, NativeAction, Shortcut,
+    Action, Effect, KeyCombo, MediaKey, MouseButton, NativeAction, Shortcut, ZoomDirection,
 };
 use openlogi_core::scroll::ScrollDelta;
 
-use super::{HeldKey, KeyPhase, QuantizedScroll, ScrollQuantizer};
+use super::zoom_notch::ZoomNotchRegistry;
+use super::{HeldKey, KeyPhase, QuantizedScroll, ScrollQuantizer, ZOOM_PER_NOTCH, ZoomSource};
 
 const HIGH_RES_UNITS_PER_TICK: f64 = 120.0;
+
+/// [`HIGH_RES_UNITS_PER_TICK`] as the whole axis value one notch carries, for
+/// the integer paths that never deal in fractions. Pinned to the float by
+/// `the_hi_res_notch_matches_the_quantizer_unit`.
+const HIGH_RES_UNITS_PER_NOTCH: i32 = 120;
 
 #[derive(Default)]
 struct ScrollOutput {
@@ -47,6 +53,15 @@ pub(super) fn execute(action: &Action) {
         Effect::Shortcut(shortcut) => press_combo(&combo(shortcut)),
         Effect::Key(combo) | Effect::HeldKey(combo) => press_combo(combo),
         Effect::Scroll { dx, dy } => dispatch_scroll(dx, dy),
+        // A button is its own zoom source: it must not spend progress the
+        // wheel made, nor leave any behind for the wheel to trip over.
+        Effect::Zoom(direction) => post_zoom(
+            match direction {
+                ZoomDirection::In => ZOOM_PER_NOTCH,
+                ZoomDirection::Out => -ZOOM_PER_NOTCH,
+            },
+            ZoomSource::Button,
+        ),
         Effect::Media(key) => dispatch_media(key),
         Effect::Native(native) => dispatch_native(action, native),
         Effect::Script(script) => super::dispatch_script(script),
@@ -478,6 +493,61 @@ fn desktop_is_gnome(current_desktop: impl AsRef<str>) -> bool {
     current_desktop.as_ref().to_lowercase().contains("gnome")
 }
 
+static ZOOM_NOTCHES: LazyLock<Mutex<ZoomNotchRegistry>> =
+    LazyLock::new(|| Mutex::new(ZoomNotchRegistry::new()));
+
+/// Apply continuous magnification as Ctrl-held wheel notches.
+///
+/// Toolkits and browsers on X11 and Wayland alike zoom on Ctrl+wheel, and the
+/// modifier comes from the keyboard state the compositor tracks — a `uinput`
+/// wheel event carries no flags of its own — so `KEY_LEFTCTRL` is genuinely
+/// pressed around the notches. The hold goes through
+/// [`with_transient_modifiers`](super::with_transient_modifiers) rather than
+/// emitting the edges
+/// here: a held shortcut may already own Ctrl, and releasing it after a notch
+/// would break that chord. Ownership also makes the hold span the whole run of
+/// notches instead of being retaken for each one.
+///
+/// A notch is the smallest step available here, so fractional magnification is
+/// accumulated until it is worth one; otherwise a high-resolution wheel would
+/// round every step to zero and never zoom.
+pub(super) fn post_zoom(magnification: f64, source: ZoomSource<'_>) {
+    let notches = {
+        let Ok(mut pending) = ZOOM_NOTCHES.lock() else {
+            tracing::warn!("Linux zoom remainder mutex poisoned");
+            return;
+        };
+        pending.take(source, magnification, ZOOM_PER_NOTCH, Instant::now())
+    };
+    let count = notches.unsigned_abs();
+    let value = if notches.is_negative() { -1 } else { 1 };
+    if count == 0 {
+        return;
+    }
+    super::with_transient_modifiers(&[HeldKey::Control], || {
+        for _ in 0..count {
+            emit(&zoom_notch_events(value));
+        }
+    });
+}
+
+/// One whole wheel notch on both axes in a single `SYN_REPORT` frame.
+///
+/// Deliberately bypasses [`post_scroll`]: its quantizers carry a fractional
+/// remainder across calls, and a zoom notch is already whole by the time it
+/// gets here, so borrowing that remainder would let a pending scroll turn one
+/// notch into two or none.
+fn zoom_notch_events(value: i32) -> Vec<InputEvent> {
+    vec![
+        rel_ev(
+            RelativeAxisCode::REL_WHEEL_HI_RES,
+            value * HIGH_RES_UNITS_PER_NOTCH,
+        ),
+        rel_ev(RelativeAxisCode::REL_WHEEL, value),
+        syn(),
+    ]
+}
+
 /// Synthesise one scroll tick in direction `(dx, dy)`. Unit direction
 /// (-1/0/1) scaled by the fixed relative-axis magnitude the four
 /// `Scroll*`/`HorizontalScroll*` actions have always used.
@@ -628,8 +698,11 @@ fn rel_ev(axis: RelativeAxisCode, value: i32) -> InputEvent {
 /// release, which matches what the kernel `uinput` docs show and avoids
 /// toolkits treating a zero-duration event as invalid.
 fn press_key(mods: &[KeyCode], key: KeyCode) {
-    emit(&key_phase_events(mods, key, KeyPhase::Down));
-    emit(&key_phase_events(mods, key, KeyPhase::Up));
+    super::with_owned_modifiers(|owned| {
+        let mods = super::unowned_modifiers(mods, owned, held_keycode);
+        emit(&key_phase_events(&mods, key, KeyPhase::Down));
+        emit(&key_phase_events(&mods, key, KeyPhase::Up));
+    });
 }
 
 /// Build one `SYN_REPORT` frame. Down order is modifiers then key; up order
@@ -1176,11 +1249,11 @@ mod tests {
     use openlogi_core::binding::{KeyCombo, KeyboardUsage, NativeAction, Shortcut};
 
     use super::{
-        HELPER_PREFIXES, KEY_CAPABILITIES, ScrollOutput, action_scroll, capture_region_mods, combo,
-        generic_linux_lock_fallback_chord, hid_usage_to_linux, hyprland_helper,
-        hyprland_lock_fallback_chord, hyprland_lock_helper, hyprland_session_from_signature,
-        key_ev, key_phase_events, modifiers_to_keycodes, rel_ev, resolve_allowlisted_under,
-        scroll_events, syn, wait_with_retry,
+        HELPER_PREFIXES, HIGH_RES_UNITS_PER_NOTCH, HIGH_RES_UNITS_PER_TICK, KEY_CAPABILITIES,
+        ScrollOutput, action_scroll, capture_region_mods, combo, generic_linux_lock_fallback_chord,
+        hid_usage_to_linux, hyprland_helper, hyprland_lock_fallback_chord, hyprland_lock_helper,
+        hyprland_session_from_signature, key_ev, key_phase_events, modifiers_to_keycodes, rel_ev,
+        resolve_allowlisted_under, scroll_events, syn, wait_with_retry,
     };
     use crate::inject::KeyPhase;
 
@@ -1204,6 +1277,17 @@ mod tests {
                 key_ev(KeyCode::KEY_LEFTCTRL, 0),
                 syn(),
             ]
+        );
+    }
+
+    /// The zoom path counts whole notches in `i32` and the scroll quantizer
+    /// counts the same unit in `f64`; this catches the two drifting apart.
+    #[test]
+    fn the_hi_res_notch_matches_the_quantizer_unit() {
+        assert_eq!(
+            f64::from(HIGH_RES_UNITS_PER_NOTCH),
+            HIGH_RES_UNITS_PER_TICK,
+            "the integer notch and the quantizer unit must stay in step"
         );
     }
 

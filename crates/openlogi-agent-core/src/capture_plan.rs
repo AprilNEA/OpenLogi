@@ -82,6 +82,9 @@ pub struct DispatchPlan {
     /// or the app-wide default), carried with each report of its diverted
     /// main wheel.
     pub momentum: MomentumScrolling,
+    /// This device's effective zoom sensitivity (device override or the
+    /// app-wide default), scaling a wheel bound to zoom.
+    pub zoom_sensitivity: ThumbwheelSensitivity,
     /// Pointer context used to select these mouse bindings; absent for the
     /// explicitly focused policy and keyboard input.
     pub(crate) pointer: Option<PointerSelection>,
@@ -409,6 +412,7 @@ pub fn plan_for_device(
             .is_some_and(|binding| binding.click_action() != default_binding(*button))
     });
     let thumbwheel_sensitivity = config.thumbwheel_sensitivity(config_key);
+    let zoom_sensitivity = config.zoom_sensitivity(config_key);
     DeviceCapturePlan {
         target: CaptureTarget {
             physical_key,
@@ -439,6 +443,7 @@ pub fn plan_for_device(
             thumbwheel_sensitivity,
             invert_wheel: false,
             momentum: config.momentum_scrolling(config_key),
+            zoom_sensitivity,
             pointer: None,
             shift_bindings: shift_bindings_for(config, config_key),
         },

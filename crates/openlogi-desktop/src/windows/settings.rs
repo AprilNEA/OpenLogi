@@ -124,6 +124,7 @@ pub struct SettingsView {
     language_select: Entity<SelectState<Vec<language::LanguageOption>>>,
     asset_source_select: Entity<SelectState<Vec<assets::AssetSourceOption>>>,
     thumbwheel_sensitivity: CommitSlider<ThumbwheelSensitivity>,
+    zoom_sensitivity: CommitSlider<ThumbwheelSensitivity>,
     vertical_scroll_sensitivity: CommitSlider<VerticalScrollSensitivity>,
     /// The General page's momentum-scrolling card: the app-wide default.
     momentum_panel: Entity<MomentumPanel>,
@@ -221,6 +222,7 @@ impl SettingsView {
             .detach();
 
         let thumbwheel_sensitivity = Self::thumbwheel_sensitivity_slider(cx);
+        let zoom_sensitivity = Self::zoom_sensitivity_slider(cx);
         let vertical_scroll_sensitivity = Self::vertical_scroll_sensitivity_slider(cx);
         let momentum_panel = cx.new(|cx| MomentumPanel::new(MomentumScope::General, cx));
 
@@ -265,6 +267,7 @@ impl SettingsView {
             language_select,
             asset_source_select,
             thumbwheel_sensitivity,
+            zoom_sensitivity,
             vertical_scroll_sensitivity,
             momentum_panel,
             updater,
@@ -308,6 +311,23 @@ impl SettingsView {
             cx,
             |_, sensitivity, cx| {
                 AppState::apply(cx, |state| state.commit_thumbwheel_sensitivity(sensitivity));
+            },
+        )
+    }
+
+    /// The app-wide zoom sensitivity slider, committed once it is released.
+    /// Separate from the thumb-wheel slider because scroll speed and zoom speed
+    /// are independent feels that one control cannot express.
+    fn zoom_sensitivity_slider(cx: &mut Context<Self>) -> CommitSlider<ThumbwheelSensitivity> {
+        let current = AppState::try_read(cx).map_or(ThumbwheelSensitivity::DEFAULT, |state| {
+            state.app_settings().zoom_sensitivity
+        });
+        CommitSlider::new(
+            SliderRange::new(ThumbwheelSensitivity::MIN, ThumbwheelSensitivity::MAX),
+            current,
+            cx,
+            |_, sensitivity, cx| {
+                AppState::apply(cx, |state| state.commit_zoom_sensitivity(sensitivity));
             },
         )
     }
@@ -425,13 +445,15 @@ impl Render for SettingsView {
         // these independently owned sliders so neither can keep presenting the
         // rejected value after that rollback.
         if let Some(settings) = AppState::try_read(cx).map(AppState::app_settings) {
-            let (vertical_scroll, thumbwheel) = (
+            let (vertical_scroll, thumbwheel, zoom) = (
                 settings.vertical_scroll_sensitivity,
                 settings.thumbwheel_sensitivity,
+                settings.zoom_sensitivity,
             );
             self.vertical_scroll_sensitivity
                 .sync(vertical_scroll, window, cx);
             self.thumbwheel_sensitivity.sync(thumbwheel, window, cx);
+            self.zoom_sensitivity.sync(zoom, window, cx);
         }
         let pal = theme::palette(cx);
         let view = cx.entity();
@@ -456,6 +478,7 @@ impl Render for SettingsView {
                 general::SensitivitySliders {
                     vertical_scroll: self.vertical_scroll_sensitivity.slider().clone(),
                     thumbwheel: self.thumbwheel_sensitivity.slider().clone(),
+                    zoom: self.zoom_sensitivity.slider().clone(),
                 },
                 self.momentum_panel.clone(),
                 self.registration_status,

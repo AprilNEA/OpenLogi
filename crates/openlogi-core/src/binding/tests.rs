@@ -493,6 +493,8 @@ fn persisted_action_variant_names_are_stable() {
         "VolumeDown",
         "VolumeUp",
         "Workflow",
+        "ZoomIn",
+        "ZoomOut",
     ];
     expected.sort_unstable();
     assert_eq!(actual, expected);
@@ -1000,4 +1002,12 @@ fn a_key_shows_its_press_action_or_nothing_when_unbound() {
     for (binding, shown) in cases {
         assert_eq!(binding.key_action(), shown, "{binding:?}");
     }
+}
+
+#[test]
+fn zoom_actions_lower_to_their_own_effect_not_a_scroll() {
+    // A backend has to hold the platform's zoom modifier around the tick, so
+    // zoom must not arrive as a plain `Effect::Scroll` it would inject bare.
+    assert_eq!(Action::ZoomIn.effect(), Effect::Zoom(ZoomDirection::In));
+    assert_eq!(Action::ZoomOut.effect(), Effect::Zoom(ZoomDirection::Out));
 }

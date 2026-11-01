@@ -165,7 +165,9 @@ pub use succession::Identity;
 ///      (`page2:gridMiddle`) — the keypad's binding pages. `PairedDevice::hidpp10`
 ///      appended, so the GUI can tell a HID++ 1.0 device from one it never
 ///      probed.
-pub const PROTOCOL_VERSION: u32 = 43;
+/// v44: `Action::{ZoomIn, ZoomOut}` and `ActionRingIcon::{ZoomIn, ZoomOut}`
+///      appended, for a wheel or button bound to continuous zoom.
+pub const PROTOCOL_VERSION: u32 = 44;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
