@@ -151,10 +151,8 @@ fn listen(cb: Callback, stop: &AtomicBool) {
     // function unschedules before it returns.
     unsafe {
         manager.set_device_matching(Some(matching.as_opaque()));
-        manager.register_input_value_callback(
-            Some(on_value),
-            (&raw const listener).cast_mut().cast(),
-        );
+        manager
+            .register_input_value_callback(Some(on_value), (&raw const listener).cast_mut().cast());
         manager.schedule_with_run_loop(&run_loop, mode);
     }
     let opened = manager.open(kIOHIDOptionsTypeNone);
@@ -220,8 +218,14 @@ mod tests {
     #[test]
     fn a_press_and_release_give_one_edge_each() {
         let mut edges = KeyEdges::default();
-        assert_eq!(edges.observe(KEYBOARD_PAGE, F21_USAGE, 1), Some((F21, true)));
-        assert_eq!(edges.observe(KEYBOARD_PAGE, F21_USAGE, 0), Some((F21, false)));
+        assert_eq!(
+            edges.observe(KEYBOARD_PAGE, F21_USAGE, 1),
+            Some((F21, true))
+        );
+        assert_eq!(
+            edges.observe(KEYBOARD_PAGE, F21_USAGE, 0),
+            Some((F21, false))
+        );
     }
 
     #[test]
@@ -235,7 +239,10 @@ mod tests {
 
     #[test]
     fn a_release_with_no_press_is_ignored() {
-        assert_eq!(KeyEdges::default().observe(KEYBOARD_PAGE, F21_USAGE, 0), None);
+        assert_eq!(
+            KeyEdges::default().observe(KEYBOARD_PAGE, F21_USAGE, 0),
+            None
+        );
     }
 
     #[test]
