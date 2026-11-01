@@ -1,4 +1,52 @@
 {
+  "g915-001": {
+    "cases": ["backlight-state", "dpi-info", "feature-table", "raw-battery", "reprogrammable-controls", "smartshift-status", "wheel-mode"],
+    "features": [
+      [0, 1, 0],
+      [1, 1, 0],
+      [3, 4, 0],
+      [5, 0, 0],
+      [7499, 0, 0],
+      [32, 0, 0],
+      [7, 0, 0],
+      [4097, 3, 0],
+      [6164, 1, 0],
+      [6165, 1, 0],
+      [32881, 0, 0],
+      [32897, 2, 0],
+      [6916, 4, 0],
+      [7104, 1, 0],
+      [16640, 0, 0],
+      [17698, 0, 0],
+      [17728, 0, 0],
+      [32784, 0, 0],
+      [32800, 0, 0],
+      [32816, 0, 0],
+      [32832, 0, 0],
+      [33024, 0, 0],
+      [32864, 0, 0],
+      [194, 0, 0],
+      [208, 3, 0],
+      [6146, 0, 96],
+      [6147, 0, 96],
+      [6150, 8, 96],
+      [6163, 0, 96],
+      [6149, 0, 96],
+      [6192, 0, 96],
+      [6288, 9, 96],
+      [6289, 9, 96],
+      [6305, 0, 96],
+      [7680, 0, 64],
+      [7856, 0, 96],
+      [6241, 0, 96],
+      [6320, 0, 96]
+    ],
+    "controls": [
+      [209, 174, 96],
+      [210, 175, 96]
+    ],
+    "raw_battery": "0x1001 BatteryVoltage: voltage_mv=4088 critical=false status=Discharging"
+  },
   "mx-anywhere-3s-001": {
     "cases": ["backlight-state", "dpi-info", "feature-table", "raw-battery", "reprogrammable-controls", "smartshift-status", "wheel-mode"],
     "features": [
