@@ -1,12 +1,8 @@
 //! The device-detail screen: the header (back + name + section tabs), and the
 //! section bodies (Buttons, Keys, Pointer, Lighting, Camera, Device).
 
-use gpui::{
-    Context, InteractiveElement, IntoElement, ParentElement, Rems, Role, SharedString,
-    StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px, rems,
-};
-use gpui_base::Button as BaseButton;
-use gpui_component::{
+use gpui_kit::base::Button as BaseButton;
+use gpui_kit::component::{
     Disableable as _, Icon, IconName, Selectable as _, Sizable as _,
     button::{Button, ButtonGroup},
     description_list::{DescriptionItem, DescriptionList},
@@ -15,6 +11,10 @@ use gpui_component::{
     switch::Switch,
     tag::Tag,
     v_flex,
+};
+use gpui_kit::{
+    Context, InteractiveElement, IntoElement, ParentElement, Rems, Role, SharedString,
+    StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px, rems,
 };
 use openlogi_core::config::{OnboardMemory, ScrollResolution};
 use openlogi_core::device::DeviceKind;
@@ -96,17 +96,17 @@ pub(super) fn detail_header(
 
 /// Long-lived child panels rendered by the device workspace.
 pub(super) struct DetailPanels<'a> {
-    pub mouse_model: &'a gpui::Entity<MouseModelView>,
-    pub action_ring: &'a gpui::Entity<ActionRingPanel>,
-    pub keyboard_model: &'a gpui::Entity<FunctionRowView>,
-    pub disable_keys_panel: &'a gpui::Entity<DisableKeysPanel>,
-    pub dpi_panel: &'a gpui::Entity<DpiPanel>,
-    pub smartshift_panel: &'a gpui::Entity<SmartShiftPanel>,
-    pub momentum_panel: &'a gpui::Entity<MomentumPanel>,
-    pub lighting_panel: &'a gpui::Entity<LightingPanel>,
-    pub camera_preview: &'a gpui::Entity<CameraPreview>,
-    pub camera_controls: &'a gpui::Entity<CameraControlsPanel>,
-    pub light_panel: &'a gpui::Entity<LightPanel>,
+    pub mouse_model: &'a gpui_kit::Entity<MouseModelView>,
+    pub action_ring: &'a gpui_kit::Entity<ActionRingPanel>,
+    pub keyboard_model: &'a gpui_kit::Entity<FunctionRowView>,
+    pub disable_keys_panel: &'a gpui_kit::Entity<DisableKeysPanel>,
+    pub dpi_panel: &'a gpui_kit::Entity<DpiPanel>,
+    pub smartshift_panel: &'a gpui_kit::Entity<SmartShiftPanel>,
+    pub momentum_panel: &'a gpui_kit::Entity<MomentumPanel>,
+    pub lighting_panel: &'a gpui_kit::Entity<LightingPanel>,
+    pub camera_preview: &'a gpui_kit::Entity<CameraPreview>,
+    pub camera_controls: &'a gpui_kit::Entity<CameraControlsPanel>,
+    pub light_panel: &'a gpui_kit::Entity<LightPanel>,
 }
 
 /// The device-detail workspace below the identity bar: stable navigation rail
@@ -115,7 +115,7 @@ pub(super) struct DetailPanels<'a> {
 pub(super) fn detail_content(
     panels: &DetailPanels<'_>,
     profile_icons: &ProfileIconCache,
-    app_catalog: &gpui::Entity<AppCatalogPicker>,
+    app_catalog: &gpui_kit::Entity<AppCatalogPicker>,
     tabs: &[DetailTab],
     active: DetailTab,
     cx: &mut Context<AppView>,
@@ -270,9 +270,9 @@ fn detail_tab_icon(tab: DetailTab) -> &'static str {
 /// Buttons tab: profile context above the selectable device canvas and fixed
 /// binding inspector.
 fn buttons_tab(
-    mouse_model: &gpui::Entity<MouseModelView>,
+    mouse_model: &gpui_kit::Entity<MouseModelView>,
     profile_icons: &ProfileIconCache,
-    app_catalog: &gpui::Entity<AppCatalogPicker>,
+    app_catalog: &gpui_kit::Entity<AppCatalogPicker>,
     cx: &mut Context<AppView>,
 ) -> impl IntoElement {
     v_flex()
@@ -333,7 +333,7 @@ fn gshift_layer_bar(cx: &mut Context<AppView>) -> Option<impl IntoElement> {
 fn tab_body(
     width: ContentWidth,
     content: impl IntoElement,
-) -> gpui_component::scroll::Scrollable<gpui::Div> {
+) -> gpui_kit::component::scroll::Scrollable<gpui_kit::Div> {
     v_flex()
         .flex_1()
         .w_full()
@@ -348,9 +348,9 @@ fn tab_body(
 /// bind per app profile, so it gets the Buttons tab's profile selector; a
 /// keyboard's F-row binds globally and a selector there would mislead.
 fn keys_tab(
-    keyboard_model: &gpui::Entity<FunctionRowView>,
+    keyboard_model: &gpui_kit::Entity<FunctionRowView>,
     profile_icons: &ProfileIconCache,
-    app_catalog: &gpui::Entity<AppCatalogPicker>,
+    app_catalog: &gpui_kit::Entity<AppCatalogPicker>,
     cx: &mut Context<AppView>,
 ) -> impl IntoElement {
     let keypad = AppState::try_read(cx)
@@ -367,9 +367,9 @@ fn keys_tab(
 }
 
 fn action_ring_tab(
-    panel: &gpui::Entity<ActionRingPanel>,
+    panel: &gpui_kit::Entity<ActionRingPanel>,
     profile_icons: &ProfileIconCache,
-    app_catalog: &gpui::Entity<AppCatalogPicker>,
+    app_catalog: &gpui_kit::Entity<AppCatalogPicker>,
     cx: &mut Context<AppView>,
 ) -> impl IntoElement {
     v_flex()
@@ -390,9 +390,9 @@ fn action_ring_tab(
 /// window's 720 px minimum width, so these short controls don't force a
 /// vertical scroll.
 fn pointer_tab(
-    dpi_panel: &gpui::Entity<DpiPanel>,
-    smartshift_panel: &gpui::Entity<SmartShiftPanel>,
-    momentum_panel: &gpui::Entity<MomentumPanel>,
+    dpi_panel: &gpui_kit::Entity<DpiPanel>,
+    smartshift_panel: &gpui_kit::Entity<SmartShiftPanel>,
+    momentum_panel: &gpui_kit::Entity<MomentumPanel>,
     cx: &mut Context<AppView>,
 ) -> impl IntoElement {
     let pal = theme::palette(cx);
@@ -596,7 +596,7 @@ enum HiresWheel {
 /// device can be in — and the middle one has to say so: a device whose
 /// firmware has no invert bit is reversed by OpenLogi's own capture layer,
 /// which is a different guarantee from the device doing it itself.
-fn inversion_description(supported: bool, is_software: bool) -> gpui::SharedString {
+fn inversion_description(supported: bool, is_software: bool) -> gpui_kit::SharedString {
     match (supported, is_software) {
         (false, _) => tr!("pointer.scroll_inversion_unsupported"),
         (true, false) => tr!("pointer.scroll_direction_description"),
@@ -734,7 +734,7 @@ fn smooth_wheel_row(pal: Palette, smooth_wheel: bool, hires: HiresWheel) -> impl
 
 /// The smooth-wheel row's caption: what the switch does when this link has
 /// `0x2121`, otherwise why it can't be turned on here.
-fn smooth_wheel_caption(hires: HiresWheel) -> gpui::SharedString {
+fn smooth_wheel_caption(hires: HiresWheel) -> gpui_kit::SharedString {
     match hires {
         HiresWheel::Here => tr!("pointer.smooth_wheel_description"),
         HiresWheel::Elsewhere => tr!("pointer.smooth_wheel_other_connection"),
@@ -781,7 +781,7 @@ fn wheel_resolution_control(selected: Option<ScrollResolution>, enabled: bool) -
 /// Lighting tab: the RGB controls (swatches, on/off, brightness) in a titled
 /// card. Shown when the device reports a lighting capability — see
 /// [`DetailTab::tabs_for`].
-fn lighting_tab(lighting_panel: &gpui::Entity<LightingPanel>) -> impl IntoElement {
+fn lighting_tab(lighting_panel: &gpui_kit::Entity<LightingPanel>) -> impl IntoElement {
     tab_body(
         ContentWidth::Small,
         PanelCard::new(
@@ -796,12 +796,12 @@ fn lighting_tab(lighting_panel: &gpui::Entity<LightingPanel>) -> impl IntoElemen
 /// each in a titled card. Side by side at the default window width so every
 /// control is visible without scrolling; the cards wrap to a stacked column
 /// when the window is too narrow. The preview drives the capture session via
-/// [`CameraPreview::set_target`] (called from `AppView`'s [`Render::render`](gpui::Render::render));
+/// [`CameraPreview::set_target`] (called from `AppView`'s [`Render::render`](gpui_kit::Render::render));
 /// the controls
 /// panel reads/writes UVC settings directly on the device.
 fn camera_tab(
-    camera_preview: &gpui::Entity<CameraPreview>,
-    camera_controls: &gpui::Entity<CameraControlsPanel>,
+    camera_preview: &gpui_kit::Entity<CameraPreview>,
+    camera_controls: &gpui_kit::Entity<CameraControlsPanel>,
 ) -> impl IntoElement {
     tab_body(
         ContentWidth::DoubleExtraLarge,
@@ -836,7 +836,7 @@ fn camera_tab(
 
 /// Standalone-light controls in a separate panel from HID++ keyboard RGB.
 fn light_tab(
-    light_panel: &gpui::Entity<LightPanel>,
+    light_panel: &gpui_kit::Entity<LightPanel>,
     cx: &mut Context<AppView>,
 ) -> impl IntoElement {
     let pal = theme::palette(cx);
@@ -887,7 +887,7 @@ fn light_tab(
 
 /// Device tab: device details and configuration cards stacked.
 fn device_tab(
-    disable_keys_panel: &gpui::Entity<DisableKeysPanel>,
+    disable_keys_panel: &gpui_kit::Entity<DisableKeysPanel>,
     cx: &mut Context<AppView>,
 ) -> impl IntoElement {
     let pal = theme::palette(cx);
@@ -1215,13 +1215,13 @@ fn elided_key(key: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use gpui::{
+    use gpui_kit::{
         Context, IntoElement, ParentElement as _, Render, Styled as _, TestAppContext, Window, div,
         px, size,
     };
 
-    use gpui::{AppContext as _, Modifiers, VisualTestContext};
-    use gpui_component::WindowExt;
+    use gpui_kit::component::WindowExt;
+    use gpui_kit::{AppContext as _, Modifiers, VisualTestContext};
     use openlogi_core::config::{Config, MomentumScrolling};
 
     use super::{
@@ -1259,14 +1259,14 @@ mod tests {
         }
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn a_long_device_enabled_caption_keeps_the_switch_in_the_row(cx: &mut TestAppContext) {
         // French carries the longest `native_controls_when_disabled` caption.
         // Without a shrinkable caption column the switch is pushed past the
         // row's right edge, out of the Configuration card.
         let _locale = LOCALE_LOCK.lock().unwrap();
         rust_i18n::set_locale("fr");
-        cx.update(gpui_component::init);
+        cx.update(gpui_kit::init);
         let (_view, cx) = cx.add_window_view(|_, _| DeviceEnabledRowHost);
         cx.simulate_resize(size(px(800.), px(600.)));
         cx.update(|window, cx| window.draw(cx).clear(cx));
@@ -1314,7 +1314,7 @@ mod tests {
         link_hires: bool,
         config: Config,
     ) -> &mut VisualTestContext {
-        cx.update(gpui_component::init);
+        cx.update(gpui_kit::init);
         cx.update(|cx| {
             let resolver = AssetResolver::new();
             let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -1335,7 +1335,7 @@ mod tests {
         // Rooted, so the row's confirmation dialog has somewhere to open.
         let (_view, cx) = cx.add_window_view(move |window, cx| {
             let host = cx.new(|_| SmoothWheelRowHost { hires });
-            gpui_component::Root::new(host, window, cx)
+            gpui_kit::component::Root::new(host, window, cx)
         });
         cx.simulate_resize(size(px(800.), px(600.)));
         cx.update(|window, cx| window.draw(cx).clear(cx));
@@ -1358,7 +1358,7 @@ mod tests {
         })
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn the_smooth_wheel_switch_turns_the_setting_on_and_off(cx: &mut TestAppContext) {
         // Greek carries the longest caption; it must wrap rather than push the
         // switch out of the card.
@@ -1385,7 +1385,7 @@ mod tests {
 
     /// The row itself refuses the click: the record still measures `0x2121`,
     /// so a switch drawn enabled by mistake would get past the state guard.
-    #[gpui::test]
+    #[gpui_kit::test]
     fn an_unavailable_smooth_wheel_switch_changes_nothing(cx: &mut TestAppContext) {
         let _locale = LOCALE_LOCK.lock().unwrap();
         rust_i18n::set_locale("en");
@@ -1395,7 +1395,7 @@ mod tests {
     }
 
     /// Likewise when only another link of the device has `0x2121`.
-    #[gpui::test]
+    #[gpui_kit::test]
     fn a_switch_whose_wheel_is_on_another_link_changes_nothing(cx: &mut TestAppContext) {
         let _locale = LOCALE_LOCK.lock().unwrap();
         rust_i18n::set_locale("en");
@@ -1404,7 +1404,7 @@ mod tests {
         assert!(!smooth_wheel_on(cx));
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn a_smooth_wheel_set_on_another_link_can_be_turned_off_here(cx: &mut TestAppContext) {
         let _locale = LOCALE_LOCK.lock().unwrap();
         rust_i18n::set_locale("en");
@@ -1419,7 +1419,7 @@ mod tests {
     /// With the glide on, turning the smooth wheel off asks first instead of
     /// switching it off under the glide. What confirming does is
     /// `commit_glide_with_smooth_wheel`'s state test.
-    #[gpui::test]
+    #[gpui_kit::test]
     fn turning_off_the_smooth_wheel_under_the_glide_asks_first(cx: &mut TestAppContext) {
         let _locale = LOCALE_LOCK.lock().unwrap();
         rust_i18n::set_locale("en");

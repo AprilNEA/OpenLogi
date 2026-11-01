@@ -15,15 +15,15 @@
 //! Unifying just opens a lock and waits for the next device to link, so it
 //! jumps straight from *searching* to *paired*.
 
-use gpui::{
+use gpui_kit::base::Button as BaseButton;
+use gpui_kit::component::{
+    button::{Button, ButtonVariants as _},
+    h_flex, v_flex,
+};
+use gpui_kit::{
     App, Context, FocusHandle, FontWeight, Global, InteractiveElement, IntoElement,
     ParentElement as _, Render, SharedString, Size, StatefulInteractiveElement as _, Styled as _,
     Subscription, Window, div, prelude::FluentBuilder as _, px, svg,
-};
-use gpui_base::Button as BaseButton;
-use gpui_component::{
-    button::{Button, ButtonVariants as _},
-    h_flex, v_flex,
 };
 use openlogi_core::device::ReceiverInfo;
 use openlogi_core::hid::{Click, PasskeyMethod, ReceiverSelector, find_receiver};
@@ -228,7 +228,7 @@ impl AddDeviceView {
         }
     }
 
-    fn receiver_picker(pal: Palette, cx: &mut Context<Self>) -> gpui::Div {
+    fn receiver_picker(pal: Palette, cx: &mut Context<Self>) -> gpui_kit::Div {
         let receivers: Vec<_> = AppState::try_read(cx)
             .filter(|state| state.agent_status().is_some())
             .into_iter()
@@ -521,7 +521,7 @@ fn passkey_panel(method: &PasskeyMethod, pal: Palette) -> impl IntoElement {
 }
 
 /// Click glyph with explicit text color so GPUI's SVG renderer paints its path.
-fn click_icon_svg(click: Click, pal: Palette) -> gpui::Svg {
+fn click_icon_svg(click: Click, pal: Palette) -> gpui_kit::Svg {
     svg()
         .path(click_icon(click))
         .size_6()

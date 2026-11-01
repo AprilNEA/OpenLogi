@@ -14,11 +14,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui::{
+use gpui_kit::component::{WindowExt as _, dialog::DialogButtonProps, input::InputState, v_flex};
+use gpui_kit::{
     App, AppContext as _, Context, IntoElement, ParentElement, Render, SharedString, Styled,
     Subscription, Task, Window, div, px,
 };
-use gpui_component::{WindowExt as _, dialog::DialogButtonProps, input::InputState, v_flex};
 use openlogi_camera::{AutoToggle, CameraControl, ControlRange};
 use openlogi_core::config::CameraControls;
 use tracing::debug;

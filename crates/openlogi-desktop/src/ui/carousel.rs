@@ -4,7 +4,7 @@
 //! they overflow. Selecting an item scrolls it into view; arrows navigate the
 //! controlled selection.
 //!
-//! Controlled, in the same spirit as [`gpui_component::tab::TabBar`]: the caller
+//! Controlled, in the same spirit as [`gpui_kit::component::tab::TabBar`]: the caller
 //! owns the selected index ([`Carousel::selected`]) and item count
 //! ([`Carousel::len`]), supplies items through [`Carousel::render_item`] (invoked
 //! per slot with whether it is selected), and reacts to
@@ -20,15 +20,15 @@
 
 use std::rc::Rc;
 
-use gpui::{
-    AnyElement, App, ElementId, InteractiveElement as _, IntoElement, ParentElement as _, Rems,
-    RenderOnce, ScrollHandle, StatefulInteractiveElement as _, Styled, Window, div,
-    prelude::FluentBuilder as _, rems,
-};
-use gpui_component::{
+use gpui_kit::component::{
     Disableable as _, IconName, Sizable as _, Size,
     button::{Button, ButtonVariants as _},
     h_flex, v_flex,
+};
+use gpui_kit::{
+    AnyElement, App, ElementId, InteractiveElement as _, IntoElement, ParentElement as _, Rems,
+    RenderOnce, ScrollHandle, StatefulInteractiveElement as _, Styled, Window, div,
+    prelude::FluentBuilder as _, rems,
 };
 
 type SelectHandler = Rc<dyn Fn(&usize, &mut Window, &mut App) + 'static>;
@@ -223,7 +223,7 @@ fn arrow(
 mod tests {
     use std::{cell::RefCell, rc::Rc};
 
-    use gpui::{Context, KeyDownEvent, KeyUpEvent, Keystroke, Render, TestAppContext, div, px};
+    use gpui_kit::{Context, KeyDownEvent, KeyUpEvent, Keystroke, Render, TestAppContext, div, px};
 
     use super::*;
 
@@ -254,7 +254,7 @@ mod tests {
         }
     }
 
-    fn activate_key(cx: &mut gpui::VisualTestContext, key: &str) {
+    fn activate_key(cx: &mut gpui_kit::VisualTestContext, key: &'static str) {
         let keystroke = Keystroke::parse(key).unwrap();
         cx.simulate_event(KeyDownEvent {
             keystroke: keystroke.clone(),
@@ -264,9 +264,9 @@ mod tests {
         cx.simulate_event(KeyUpEvent { keystroke });
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn carousel_arrows_are_controlled_and_instance_local(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
+        cx.update(gpui_kit::init);
         let selections = Rc::new(RefCell::new(Vec::new()));
         let (_, cx) = cx.add_window_view({
             let selections = selections.clone();
@@ -286,9 +286,9 @@ mod tests {
         assert_eq!(&*selections.borrow(), &[(0, 0), (0, 2), (1, 0)]);
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn carousel_clamps_selection_before_navigating(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
+        cx.update(gpui_kit::init);
         let selections = Rc::new(RefCell::new(Vec::new()));
         let (_, cx) = cx.add_window_view({
             let selections = selections.clone();

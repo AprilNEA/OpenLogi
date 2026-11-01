@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui::{Context, Subscription};
+use gpui_kit::{Context, Subscription};
 use openlogi_core::hid::{
     BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
     ForceSensingInfo, OnboardState, PointerSpeed, ReportRateInfo, SmartShiftStatus, WriteError,

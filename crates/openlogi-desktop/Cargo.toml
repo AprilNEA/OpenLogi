@@ -25,11 +25,7 @@ openlogi-assets = { path = "../openlogi-assets" }
 openlogi-ipc = { path = "../openlogi-ipc" }
 openlogi-permissions = { path = "../openlogi-permissions" }
 tarpc = { workspace = true }
-gpui = { workspace = true }
-gpui_platform = { workspace = true }
-gpui-component = { workspace = true }
-gpui-base = { workspace = true }
-gpui-kit-assets = { workspace = true }
+gpui-kit = { workspace = true }
 swr-core = { workspace = true }
 swr-gpui = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "process"] }
@@ -78,7 +74,7 @@ workspace = true
 
 [dev-dependencies]
 openlogi-ipc = { path = "../openlogi-ipc", features = ["test-support"] }
-gpui = { workspace = true, features = ["test-support"] }
+gpui-kit = { workspace = true, features = ["test-support"] }
 openlogi-device = { path = "../openlogi-device" }
 openlogi-fixture = { workspace = true, features = ["fs"] }
 tempfile = "3.27.0"

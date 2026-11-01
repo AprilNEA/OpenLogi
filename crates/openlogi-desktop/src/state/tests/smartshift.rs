@@ -165,7 +165,7 @@ fn answer_smartshift_read(
 
 /// Install `state` with live swr-backed reads, as the app does, and have it
 /// read the selected mouse.
-fn install(state: AppState, cx: &mut gpui::TestAppContext) {
+fn install(state: AppState, cx: &mut gpui_kit::TestAppContext) {
     cx.update(|cx| {
         let runtime: Arc<dyn swr_core::Runtime> = Arc::new(swr_gpui::GpuiRuntime::new(cx));
         let client = swr_core::SwrClient::builder().build(runtime.clone());
@@ -180,7 +180,7 @@ fn install(state: AppState, cx: &mut gpui::TestAppContext) {
     cx.run_until_parked();
 }
 
-fn smartshift_load(cx: &gpui::TestAppContext, key: &DeviceKey) -> SmartShiftLoad {
+fn smartshift_load(cx: &gpui_kit::TestAppContext, key: &DeviceKey) -> SmartShiftLoad {
     cx.read(|cx| {
         AppState::try_read(cx)
             .expect("state installed")
@@ -192,8 +192,8 @@ fn smartshift_load(cx: &gpui::TestAppContext, key: &DeviceKey) -> SmartShiftLoad
 /// reports it with a `0x2121` ratchet switch, which the agent counts in
 /// `settings_revision`. The SmartShift card re-reads instead of showing the
 /// old mode.
-#[gpui::test]
-fn a_mode_change_the_mouse_reports_re_reads_smartshift(cx: &mut gpui::TestAppContext) {
+#[gpui_kit::test]
+fn a_mode_change_the_mouse_reports_re_reads_smartshift(cx: &mut gpui_kit::TestAppContext) {
     let unit_id = [0xa3, 0x93, 0xca, 0xe0];
     let resolver = AssetResolver::new();
     let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -226,8 +226,8 @@ fn a_mode_change_the_mouse_reports_re_reads_smartshift(cx: &mut gpui::TestAppCon
 /// The mouse can change its mode while a SmartShift read is still out. That
 /// read may carry the old mode, so the change starts a new read instead of
 /// waiting for it, and a late answer to the old read does not win.
-#[gpui::test]
-fn a_mode_change_during_a_read_starts_a_new_read(cx: &mut gpui::TestAppContext) {
+#[gpui_kit::test]
+fn a_mode_change_during_a_read_starts_a_new_read(cx: &mut gpui_kit::TestAppContext) {
     let unit_id = [0xa3, 0x93, 0xca, 0xe0];
     let resolver = AssetResolver::new();
     let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();

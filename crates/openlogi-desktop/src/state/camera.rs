@@ -13,7 +13,7 @@ impl AppState {
     /// entity's lifetime. Repeated requests reuse an active poll; a completed
     /// poll may be replaced if authorization is still undetermined.
     #[cfg(target_os = "macos")]
-    pub(crate) fn request_camera_access(cx: &mut gpui::App) {
+    pub(crate) fn request_camera_access(cx: &mut gpui_kit::App) {
         use std::time::Duration;
 
         const TICK: Duration = Duration::from_millis(250);

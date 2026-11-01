@@ -11,14 +11,14 @@
 //! over each render through [`ModePicker::show`], which only touches a select
 //! whose contents actually differ.
 
-use gpui::{
-    AnyElement, AppContext as _, Context, Entity, IntoElement, ParentElement, Render, SharedString,
-    Styled, Subscription, Window, div, px,
-};
-use gpui_component::{
+use gpui_kit::component::{
     h_flex,
     select::{SelectEvent, SelectItem, SelectState},
     v_flex,
+};
+use gpui_kit::{
+    AnyElement, AppContext as _, Context, Entity, IntoElement, ParentElement, Render, SharedString,
+    Styled, Subscription, Window, div, px,
 };
 use openlogi_camera::{StreamMode, StreamModes};
 

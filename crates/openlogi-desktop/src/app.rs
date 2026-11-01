@@ -1,13 +1,13 @@
-use gpui::{
+use gpui_kit::base::Button as BaseButton;
+use gpui_kit::component::{
+    Icon, IconName, TitleBar,
+    button::{Button, ButtonVariants as _},
+    v_flex,
+};
+use gpui_kit::{
     App, AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement,
     MouseButton, NavigationDirection, ParentElement, Render, Styled, Subscription, Window, div,
     prelude::FluentBuilder as _, rgb,
-};
-use gpui_base::Button as BaseButton;
-use gpui_component::{
-    Icon, IconName, Root, TitleBar,
-    button::{Button, ButtonVariants as _},
-    v_flex,
 };
 use openlogi_core::binding::GamingButtons;
 use openlogi_core::device::DeviceKind;
@@ -196,7 +196,7 @@ impl DetailTab {
             .unwrap_or(Self::Device)
     }
 
-    fn label(self) -> gpui::SharedString {
+    fn label(self) -> gpui_kit::SharedString {
         match self {
             Self::Buttons => tr!("device.buttons"),
             Self::ActionsRing => tr!("action_ring.actions_ring"),
@@ -454,7 +454,7 @@ impl AppView {
     /// the OS still sees it), and the contextual [`NavigateBack`] action, bound
     /// to Alt+Left (what a rebound BrowserBack action injects on Linux and what
     /// keyboard users expect).
-    fn with_back_navigation(root: gpui::Div, cx: &mut Context<Self>) -> gpui::Div {
+    fn with_back_navigation(root: gpui_kit::Div, cx: &mut Context<Self>) -> gpui_kit::Div {
         root.on_mouse_down(
             MouseButton::Navigate(NavigationDirection::Back),
             cx.listener(|this, _, _, cx| {
@@ -568,16 +568,7 @@ fn app_title_bar(cx: &App) -> impl IntoElement {
 
 impl Render for AppView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let content = self.render_content(window, cx);
-        // Root owns overlay state but the application must mount its layers.
-        // Keep them present across connecting, permission, and error screens too.
-        div()
-            .relative()
-            .size_full()
-            .child(content)
-            .children(Root::render_sheet_layer(window, cx))
-            .children(Root::render_dialog_layer(window, cx))
-            .children(Root::render_notification_layer(window, cx))
+        self.render_content(window, cx)
     }
 }
 
@@ -586,7 +577,11 @@ impl AppView {
         clippy::too_many_lines,
         reason = "root view assembles every screen branch inline"
     )]
-    fn render_content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn render_content(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
         theme::apply_ui_scale(window, cx);
         let pal = theme::palette(cx);
 
@@ -616,7 +611,7 @@ impl AppView {
         let config_issue = AppState::try_global(cx)
             .map(|state| state.read(cx))
             .and_then(AppState::config_issue)
-            .map(gpui::SharedString::from);
+            .map(gpui_kit::SharedString::from);
         self.config_issue_visible = config_issue.is_some();
         if let Some(issue) = config_issue {
             window.set_window_title("OpenLogi");

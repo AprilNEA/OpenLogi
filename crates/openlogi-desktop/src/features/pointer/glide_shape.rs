@@ -7,11 +7,11 @@
 
 use std::time::Duration;
 
-use gpui::{
+use gpui_kit::component::{Selectable as _, h_flex, v_flex};
+use gpui_kit::{
     Bounds, Hsla, IntoElement, ParentElement, PathBuilder, Pixels, SharedString, Styled, Window,
     canvas, div, point, px, rgb,
 };
-use gpui_component::{Selectable as _, h_flex, v_flex};
 use openlogi_core::config::{GlideShape, MomentumParams, MomentumScrolling as M};
 use openlogi_core::scroll::GlideCurve;
 
@@ -124,7 +124,7 @@ fn paint_curve(
     let inset = px(4.);
     let plot = Bounds {
         origin: point(bounds.origin.x + inset, bounds.origin.y + inset),
-        size: gpui::size(
+        size: gpui_kit::size(
             bounds.size.width - inset * 2.,
             bounds.size.height - inset * 2.,
         ),

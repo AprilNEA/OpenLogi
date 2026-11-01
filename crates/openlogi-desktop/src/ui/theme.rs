@@ -12,10 +12,12 @@
 //!   own widgets — which is what keeps a popover from rendering white under
 //!   an otherwise dark UI (see `main.rs`'s appearance wiring).
 
+use gpui_kit::component::{ActiveTheme as _, Theme, ThemeMode, ThemeRegistry};
 #[cfg(test)]
-use gpui::rgb;
-use gpui::{App, FontWeight, Hsla, Pixels, Rems, Rgba, Styled, Window, hsla, px, relative, rems};
-use gpui_component::{ActiveTheme as _, Theme, ThemeMode, ThemeRegistry};
+use gpui_kit::rgb;
+use gpui_kit::{
+    App, FontWeight, Hsla, Pixels, Rems, Rgba, Styled, Window, hsla, px, relative, rems,
+};
 use openlogi_core::config::{Appearance, UiScale};
 
 use crate::state::AppState;
@@ -250,7 +252,7 @@ pub const OPENLOGI_LIGHT: &str = "OpenLogi Light";
 pub const OPENLOGI_DARK: &str = "OpenLogi Dark";
 
 /// Register every bundled theme into the [`ThemeRegistry`]. Call once at
-/// startup, after `gpui_component::init` (which seeds the registry global). Our
+/// startup, after `gpui_kit::init` (which seeds the registry global). Our
 /// brand theme loads first; the upstream themes follow.
 pub fn register_builtin_themes(cx: &mut App) {
     let registry = ThemeRegistry::global_mut(cx);
@@ -464,10 +466,10 @@ impl<E: Styled> Typography for E {}
 mod tests {
     use super::*;
 
-    #[gpui::test]
-    fn bundled_theme_picker_keeps_upstream_and_openlogi_themes(cx: &mut gpui::TestAppContext) {
+    #[gpui_kit::test]
+    fn bundled_theme_picker_keeps_upstream_and_openlogi_themes(cx: &mut gpui_kit::TestAppContext) {
         cx.update(|cx| {
-            gpui_component::init(cx);
+            gpui_kit::init(cx);
             register_builtin_themes(cx);
             let themes = ThemeRegistry::global(cx).themes();
             for name in [

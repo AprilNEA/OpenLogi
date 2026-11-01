@@ -4,11 +4,11 @@
 //! this component so charge thresholds, status labels, and the cold-start
 //! charging state stay visually consistent.
 
-use gpui::{
+use gpui_kit::component::h_flex;
+use gpui_kit::{
     App, BorderStyle, Bounds, Corners, FontWeight, Hsla, IntoElement, ParentElement, PathBuilder,
     RenderOnce, Styled, Window, canvas, point, prelude::FluentBuilder as _, px, quad, rgb, size,
 };
-use gpui_component::h_flex;
 use openlogi_core::device::{BatteryInfo, BatteryLevel, BatteryStatus};
 
 use super::theme::{self, Palette, Typography as _};
@@ -114,7 +114,7 @@ fn inline_readout(battery: &BatteryInfo, pal: Palette) -> impl IntoElement {
         .text_caption()
         .child(battery_glyph(battery, pal, GlyphSize::Compact, pal.page))
         .child(
-            gpui::div()
+            gpui_kit::div()
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(pal.text_primary)
                 .child(value_label(battery)),
@@ -146,13 +146,13 @@ fn status_readout(battery: &BatteryInfo, online: bool, pal: Palette) -> impl Int
         .text_caption()
         .child(battery_glyph(battery, pal, GlyphSize::Compact, pal.panel))
         .child(
-            gpui::div()
+            gpui_kit::div()
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(pal.text_primary)
                 .child(value_label(battery)),
         )
         .when_some(context_label(battery, online), |row, label| {
-            row.child(gpui::div().text_color(pal.text_muted).child(label))
+            row.child(gpui_kit::div().text_color(pal.text_muted).child(label))
         })
 }
 
@@ -163,13 +163,13 @@ fn summary_readout(battery: &BatteryInfo, pal: Palette) -> impl IntoElement {
         .gap_4()
         .child(battery_glyph(battery, pal, GlyphSize::Summary, pal.panel))
         .child(
-            gpui::div()
+            gpui_kit::div()
                 .text_heading()
                 .text_color(pal.text_primary)
                 .child(value_label(battery)),
         )
         .child(
-            gpui::div()
+            gpui_kit::div()
                 .text_caption()
                 .text_color(pal.text_muted)
                 .child(summary_label(battery)),
@@ -198,7 +198,7 @@ pub(crate) fn value_label(battery: &BatteryInfo) -> String {
 
 /// The status word shown beside [`value_label`], unless it would only
 /// repeat it (a level-only "Full" device that reports a full status).
-fn secondary_label(battery: &BatteryInfo) -> Option<gpui::SharedString> {
+fn secondary_label(battery: &BatteryInfo) -> Option<gpui_kit::SharedString> {
     let label = match battery.status {
         BatteryStatus::Charging | BatteryStatus::ChargingSlow => Some(tr!("device.charging")),
         BatteryStatus::Full => Some(tr!("device.full")),
@@ -228,7 +228,7 @@ fn context_label(battery: &BatteryInfo, online: bool) -> Option<String> {
     }
 }
 
-fn summary_label(battery: &BatteryInfo) -> gpui::SharedString {
+fn summary_label(battery: &BatteryInfo) -> gpui_kit::SharedString {
     if battery_charging_no_reading(battery) {
         return tr!("device.battery");
     }
@@ -355,7 +355,7 @@ fn battery_glyph(
     .h(px(height))
 }
 
-fn paint_battery(bounds: Bounds<gpui::Pixels>, paint: GlyphPaint, window: &mut Window) {
+fn paint_battery(bounds: Bounds<gpui_kit::Pixels>, paint: GlyphPaint, window: &mut Window) {
     let width = f32::from(bounds.size.width);
     let height = f32::from(bounds.size.height);
     let large = height > 14.;
@@ -441,7 +441,7 @@ fn mark_color(paint: GlyphPaint) -> Hsla {
     }
 }
 
-fn paint_charging_mark(body: Bounds<gpui::Pixels>, color: Hsla, window: &mut Window) {
+fn paint_charging_mark(body: Bounds<gpui_kit::Pixels>, color: Hsla, window: &mut Window) {
     let center_x = f32::from(body.origin.x) + f32::from(body.size.width) / 2.;
     let center_y = f32::from(body.origin.y) + f32::from(body.size.height) / 2.;
     let mark_height = f32::from(body.size.height) * 0.76;
@@ -481,7 +481,7 @@ fn paint_charging_mark(body: Bounds<gpui::Pixels>, color: Hsla, window: &mut Win
     }
 }
 
-fn paint_error_mark(body: Bounds<gpui::Pixels>, color: Hsla, window: &mut Window) {
+fn paint_error_mark(body: Bounds<gpui_kit::Pixels>, color: Hsla, window: &mut Window) {
     let center_x = f32::from(body.origin.x) + f32::from(body.size.width) / 2.;
     let center_y = f32::from(body.origin.y) + f32::from(body.size.height) / 2.;
     let height = f32::from(body.size.height);

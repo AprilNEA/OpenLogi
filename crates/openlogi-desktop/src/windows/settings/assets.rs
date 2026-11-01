@@ -1,7 +1,7 @@
 //! Assets (device-image cache) settings page.
 
 use crate::ui::theme::Typography as _;
-use gpui_base::Button as BaseButton;
+use gpui_kit::base::Button as BaseButton;
 use std::time::Duration;
 
 use crate::ui::components::control_select;

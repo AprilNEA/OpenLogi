@@ -6,7 +6,7 @@
 //! thicker line; the other controls keep muted lines so their mapping remains
 //! visible.
 
-use gpui::{Bounds, PathBuilder, Pixels, Point, Window, hsla, point, px, rgb};
+use gpui_kit::{Bounds, PathBuilder, Pixels, Point, Window, hsla, point, px, rgb};
 
 use super::hotspots::{Hotspot, MouseControlId};
 use crate::ui::theme::ACCENT_BLUE;

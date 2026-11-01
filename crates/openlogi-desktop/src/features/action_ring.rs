@@ -3,15 +3,15 @@
 mod action_icons;
 mod editor;
 
-use gpui::{
+use gpui_kit::base::Button as BaseButton;
+use gpui_kit::component::{
+    Icon, IconName, Selectable as _, button::Button, h_flex, input::InputState, tooltip::Tooltip,
+    v_flex,
+};
+use gpui_kit::{
     App, AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement,
     ParentElement, Render, ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled,
     Subscription, Window, div, prelude::FluentBuilder as _, px, rgb, svg,
-};
-use gpui_base::Button as BaseButton;
-use gpui_component::{
-    Icon, IconName, Selectable as _, button::Button, h_flex, input::InputState, tooltip::Tooltip,
-    v_flex,
 };
 use openlogi_core::binding::{
     ActionRingConfig, ActionRingEntry, ActionRingIcon, ActionRingLayout, ActionRingSlot,

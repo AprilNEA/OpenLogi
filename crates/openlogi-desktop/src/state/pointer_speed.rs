@@ -168,7 +168,7 @@ impl AppState {
         self.pointer.reads.refresh_pointer_speed(key);
     }
 
-    pub(super) fn load_current_pointer_speed(&mut self, cx: &mut gpui::Context<Self>) {
+    pub(super) fn load_current_pointer_speed(&mut self, cx: &mut gpui_kit::Context<Self>) {
         let Some((key, route)) = self
             .current_record()
             .filter(|record| scales_pointer(record))

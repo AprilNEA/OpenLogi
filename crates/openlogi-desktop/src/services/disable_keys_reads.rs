@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui::{Context, Subscription};
+use gpui_kit::{Context, Subscription};
 use openlogi_core::hid::{DeviceRoute, DisableKeysState, WriteError};
 use swr_core::{QueryOptions, QueryState, Retry, RetryPolicy, Runtime, SwrClient};
 use swr_gpui::Query;

@@ -7,11 +7,11 @@
 //! which shows the change at once and lets the keyboard's read-back replace
 //! it.
 
-use gpui::{
+use gpui_kit::component::{Disableable as _, Icon, IconName, Selectable as _, h_flex, v_flex};
+use gpui_kit::{
     AnyElement, App, InteractiveElement as _, IntoElement, ParentElement as _, Styled as _, div,
     prelude::FluentBuilder as _,
 };
-use gpui_component::{Disableable as _, Icon, IconName, Selectable as _, h_flex, v_flex};
 use openlogi_core::hid::{
     BacklightChange, BacklightControls, BacklightDuration, BacklightState, BacklightStatus,
 };
@@ -131,7 +131,7 @@ fn backlight_rows(state: BacklightState, steps: DurationSteps, pal: Palette) -> 
 
 /// Why the keys are dark when the firmware, not the user, turned them off;
 /// otherwise where the setting lives.
-fn lit_caption(state: BacklightState) -> gpui::SharedString {
+fn lit_caption(state: BacklightState) -> gpui_kit::SharedString {
     match state.status {
         _ if !state.enabled => tr!("device.light_the_keys_description"),
         BacklightStatus::DisabledByCriticalBattery => tr!("device.backlight_off_battery"),
@@ -255,7 +255,7 @@ fn duration_pills(state: BacklightState, steps: &[u16]) -> impl IntoElement {
 /// A step label: seconds under a minute, otherwise minutes or hours. Never
 /// built by concatenating a translated unit onto a number the other way
 /// around — each shape is its own catalog string.
-fn duration_label(seconds: u16) -> gpui::SharedString {
+fn duration_label(seconds: u16) -> gpui_kit::SharedString {
     if seconds < 60 {
         tr!("device.backlight_duration_seconds", seconds => seconds)
     } else if seconds.is_multiple_of(3_600) {
@@ -273,7 +273,7 @@ fn duration_label(seconds: u16) -> gpui::SharedString {
 
 /// The usual explanation, or the seconds the keyboard actually stored when
 /// they are not one of the steps this row is showing.
-fn duration_caption(state: BacklightState, steps: DurationSteps) -> gpui::SharedString {
+fn duration_caption(state: BacklightState, steps: DurationSteps) -> gpui_kit::SharedString {
     match state.duration {
         Some(timer) if !steps.contains(timer.seconds()) => tr!(
             "device.backlight_duration_other",
@@ -291,7 +291,7 @@ fn commit(cx: &mut App, change: BacklightChange) {
 mod tests {
     use std::sync::Arc;
 
-    use gpui::{
+    use gpui_kit::{
         Context, IntoElement, ParentElement as _, Render, Styled as _, TestAppContext, Window, div,
         px, size,
     };
@@ -351,15 +351,15 @@ mod tests {
         }
     }
 
-    fn draw(cx: &mut TestAppContext, state: BacklightState) -> &mut gpui::VisualTestContext {
-        cx.update(gpui_component::init);
+    fn draw(cx: &mut TestAppContext, state: BacklightState) -> &mut gpui_kit::VisualTestContext {
+        cx.update(gpui_kit::init);
         let (_view, cx) = cx.add_window_view(|_, _| CardHost(state));
         cx.simulate_resize(size(px(800.), px(600.)));
         cx.update(|window, cx| window.draw(cx).clear(cx));
         cx
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn every_offered_control_gets_a_row_that_keeps_its_toggle_inside(cx: &mut TestAppContext) {
         // Finnish carries the longest backlight captions.
         let _locale = LOCALE_LOCK.lock().unwrap();
@@ -403,7 +403,7 @@ mod tests {
         }
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn a_keyboard_offering_only_on_off_gets_only_that_row(cx: &mut TestAppContext) {
         let _locale = LOCALE_LOCK.lock().unwrap();
         rust_i18n::set_locale("en");

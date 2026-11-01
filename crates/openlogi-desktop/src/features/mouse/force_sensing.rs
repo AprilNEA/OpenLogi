@@ -10,15 +10,15 @@
 //! While the reading is on its way, the row says so in place of the slider,
 //! as the pointer-speed row does.
 
-use gpui::{
-    AnyElement, App, Context, InteractiveElement, IntoElement, ParentElement, Styled, Window, div,
-};
-use gpui_component::{
+use gpui_kit::component::{
     Disableable as _, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     slider::Slider,
     v_flex,
+};
+use gpui_kit::{
+    AnyElement, App, Context, InteractiveElement, IntoElement, ParentElement, Styled, Window, div,
 };
 use openlogi_core::binding::ButtonId;
 use openlogi_core::hid::ForceSensingInfo;
@@ -249,8 +249,8 @@ pub(super) fn force_sensing_row(press_force: PressForce<'_>, pal: Palette) -> An
 
 #[cfg(test)]
 mod tests {
-    use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext, px, size};
-    use gpui_component::slider::{SliderEvent, SliderState};
+    use gpui_kit::component::slider::{SliderEvent, SliderState};
+    use gpui_kit::{Entity, Modifiers, TestAppContext, VisualTestContext, px, size};
     use openlogi_core::binding::ButtonId;
     use openlogi_core::config::Config;
     use openlogi_core::hid::ForceSensingInfo;
@@ -273,7 +273,7 @@ mod tests {
         &mut VisualTestContext,
         UnboundedReceiver<Command>,
     ) {
-        cx.update(gpui_component::init);
+        cx.update(gpui_kit::init);
         let (state, mut receiver) = mouse_state(true, Config::ephemeral());
         install(state, cx);
         answer_force_read(&mut receiver, reading);
@@ -304,7 +304,7 @@ mod tests {
         })
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn the_slider_rests_on_the_devices_force_and_a_release_writes_it(cx: &mut TestAppContext) {
         let (panel, cx, mut receiver) = panel(PANEL, cx);
         let slider = slider(&panel, cx).expect("a changeable force shows the slider");
@@ -326,7 +326,7 @@ mod tests {
         assert_eq!(force_writes(&mut receiver), [6000]);
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn the_row_is_hidden_while_the_device_does_not_let_the_force_change(cx: &mut TestAppContext) {
         let (panel, cx, _receiver) = panel(
             ForceSensingInfo {
@@ -339,7 +339,7 @@ mod tests {
         assert!(slider(&panel, cx).is_none());
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn a_device_reading_that_moves_reseats_the_thumb(cx: &mut TestAppContext) {
         let (panel, cx, mut receiver) = panel(PANEL, cx);
         let key = cx.update(|_, cx| {
@@ -378,7 +378,7 @@ mod tests {
         });
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn only_the_haptic_panel_in_the_default_profile_shows_the_row(cx: &mut TestAppContext) {
         let (panel, cx, _receiver) = panel(PANEL, cx);
         assert!(
@@ -423,7 +423,7 @@ mod tests {
             .collect()
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn the_reset_button_writes_the_devices_default(cx: &mut TestAppContext) {
         let _locale = LOCALE_LOCK.lock().unwrap();
         rust_i18n::set_locale("en");
@@ -441,7 +441,7 @@ mod tests {
         assert_eq!(force_writes(&mut receiver), [PANEL.default]);
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn the_reset_button_does_nothing_at_the_default(cx: &mut TestAppContext) {
         let _locale = LOCALE_LOCK.lock().unwrap();
         rust_i18n::set_locale("en");
@@ -456,7 +456,7 @@ mod tests {
         );
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn the_gesture_inspector_shows_the_row_too(cx: &mut TestAppContext) {
         let (panel, cx, _receiver) = panel(PANEL, cx);
         cx.update(|_, cx| {
@@ -478,9 +478,9 @@ mod tests {
         assert!(slider(&panel, cx).is_some());
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn a_mouse_without_a_force_sensing_button_shows_no_row(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
+        cx.update(gpui_kit::init);
         let (state, _receiver) = mouse_state(false, Config::ephemeral());
         install(state, cx);
         let (panel, cx) = cx.add_window_view(MouseModelView::new);

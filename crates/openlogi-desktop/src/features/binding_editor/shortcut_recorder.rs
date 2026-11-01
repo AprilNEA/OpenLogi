@@ -1,6 +1,6 @@
 //! Records a custom shortcut from the next key the user presses.
 
-use gpui::{Context, FocusHandle, Keystroke, Modifiers, Subscription, Window};
+use gpui_kit::{Context, FocusHandle, Keystroke, Modifiers, Subscription, Window};
 use openlogi_core::binding::KeyCombo;
 
 #[cfg(test)]

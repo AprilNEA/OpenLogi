@@ -6,8 +6,8 @@
 //! rendering of those rows so they read identically across panels; only the
 //! retry action differs, injected by the caller.
 
-use gpui::{App, ElementId, ParentElement, SharedString, Styled, div, px};
-use gpui_component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::{App, ElementId, ParentElement, SharedString, Styled, div, px};
 
 use crate::ui::theme::{Palette, Typography as _};
 
@@ -17,7 +17,7 @@ const ROW_H: f32 = 28.;
 
 /// A muted, non-interactive status line — "Reading…", "offline", "unsupported".
 /// The text is pre-localized by the caller (panels hold their own `tr!` keys).
-pub fn status_line(text: impl Into<SharedString>, pal: Palette) -> gpui::Div {
+pub fn status_line(text: impl Into<SharedString>, pal: Palette) -> gpui_kit::Div {
     div()
         .h(px(ROW_H))
         .text_body()

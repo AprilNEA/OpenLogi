@@ -1,16 +1,16 @@
 //! Reusable profile tabs and feature-independent controls.
 
-use gpui::{
-    App, Entity, InteractiveElement, IntoElement, ParentElement, RenderOnce, Role,
-    StatefulInteractiveElement as _, Styled, Window, div, img, prelude::FluentBuilder as _, px,
-};
-use gpui_base::Button as BaseButton;
-use gpui_component::{
+use gpui_kit::base::Button as BaseButton;
+use gpui_kit::component::{
     IconName, Sizable as _,
     button::ButtonVariants as _,
     h_flex,
     menu::{DropdownMenu as _, PopupMenuItem},
     spinner::Spinner,
+};
+use gpui_kit::{
+    App, Entity, InteractiveElement, IntoElement, ParentElement, RenderOnce, Role,
+    StatefulInteractiveElement as _, Styled, Window, div, img, prelude::FluentBuilder as _, px,
 };
 
 use super::catalog::{AppCatalogPicker, ApplicationIconState, ProfileIconCache};
@@ -152,9 +152,9 @@ fn profile_scope_content(shell: ProfileScopeShell, pal: Palette) -> impl IntoEle
 }
 
 fn profile_tab(
-    id: impl Into<gpui::ElementId>,
-    label: impl Into<gpui::SharedString>,
-    leading: Option<gpui::Div>,
+    id: impl Into<gpui_kit::ElementId>,
+    label: impl Into<gpui_kit::SharedString>,
+    leading: Option<gpui_kit::Div>,
     selected: bool,
     pal: Palette,
 ) -> BaseButton {
@@ -198,7 +198,7 @@ pub(super) fn application_mark(
     name: &str,
     edge: f32,
     pal: Palette,
-) -> gpui::Div {
+) -> gpui_kit::Div {
     let slot = h_flex()
         .size(px(edge))
         .flex_none()
@@ -240,7 +240,7 @@ fn profile_options_menu(
         .ghost()
         .label(tr!("profiles.profile_options"))
         .icon(IconName::ChevronDown)
-        .dropdown_menu_with_anchor(gpui::Anchor::TopRight, move |menu, _, _| {
+        .dropdown_menu_with_anchor(gpui_kit::Anchor::TopRight, move |menu, _, _| {
             let reset_profile = profile.clone();
             let reset_actions = actions.clone();
             let all_profile = profile.clone();

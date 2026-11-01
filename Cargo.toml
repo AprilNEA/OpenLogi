@@ -93,29 +93,14 @@ axwatch = "0.1"
 
 # Version-aligned GPUI snapshots. Keep the core and platform on one release so
 # the desktop, overlay, and their integrations share the same GPUI types.
-gpui = { package = "gpui-pre", version = "=0.3.4" }
-gpui_platform = { package = "gpui-pre-platform", version = "=0.3.4", features = ["font-kit", "x11", "wayland"] }
-# Keep the Kit crates on one release checkout: build.rs embeds the upstream
-# themes, which are not included in the published component/assets packages.
-gpui-component = { git = "https://github.com/longbridge/gpui-kit", tag = "v0.6.1" }
-# The unstyled interaction primitives behind gpui-component. Desktop uses its
-# semantic Button for custom-painted controls that must retain native keyboard
-# and accessibility behavior without inheriting widget chrome.
-gpui-base = { git = "https://github.com/longbridge/gpui-kit", tag = "v0.6.1" }
-# The icon names and embedded SVGs must agree with the component release.
-gpui-kit-assets = { git = "https://github.com/longbridge/gpui-kit", tag = "v0.6.1" }
+gpui = { package = "gpui-pre", version = "=0.3.10" }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.10", features = ["font-kit", "x11", "wayland"] }
+# Keep Kit on a release checkout: build.rs embeds its repository-level themes.
+# Use the default upstream GPUI backend, without the experimental gpui-fast feature.
+gpui-kit = { git = "https://github.com/longbridge/gpui-kit", tag = "v0.8.1" }
 
 swr-core = "0.1"
 swr-gpui = { package = "swr-gpui-pre", version = "0.1" }
-
-# Backport GroupBox/SettingGroup::footer to v0.6.1 without upgrading GPUI.
-# Remove when adopting an upstream release with the footer API. Keep all Kit
-# crates on this revision, including the theme source in packaging/linux/package.nix.
-[patch."https://github.com/longbridge/gpui-kit"]
-gpui-component = { git = "https://github.com/AprilNEA/gpui-kit", rev = "1ac69bd51f744f3664361d9abd609bfc16de489f" }
-gpui-base = { git = "https://github.com/AprilNEA/gpui-kit", rev = "1ac69bd51f744f3664361d9abd609bfc16de489f" }
-gpui-kit-assets = { git = "https://github.com/AprilNEA/gpui-kit", rev = "1ac69bd51f744f3664361d9abd609bfc16de489f" }
-gpui-component-macros = { git = "https://github.com/AprilNEA/gpui-kit", rev = "1ac69bd51f744f3664361d9abd609bfc16de489f" }
 
 [workspace.lints.rust]
 # Denied workspace-wide, but `deny` (not `forbid`) so a crate that genuinely

@@ -42,7 +42,7 @@ pub(super) fn diagnostics_page() -> SettingPage {
 /// Live status: the curated known-conflict check over the current event taps
 /// (see [`current_taps`]), plus (debug) the full tap list. Re-rendered whenever
 /// the window repaints.
-fn input_conflict_field(cx: &mut App) -> gpui::Div {
+fn input_conflict_field(cx: &mut App) -> gpui_kit::Div {
     let pal = crate::ui::theme::palette(cx);
     let taps = current_taps(cx);
 

@@ -89,7 +89,7 @@ fn the_write(commands: &[Command]) -> u64 {
 
 /// Release the slider at `force` and return the number of the write it sent.
 fn release(
-    cx: &mut gpui::TestAppContext,
+    cx: &mut gpui_kit::TestAppContext,
     receiver: &mut tokio::sync::mpsc::UnboundedReceiver<Command>,
     force: u16,
 ) -> u64 {
@@ -107,7 +107,7 @@ fn reloads(commands: &[Command]) -> usize {
 /// Install a mouse with a force-sensing button whose read answers `reading`.
 fn installed(
     reading: ForceSensingInfo,
-    cx: &mut gpui::TestAppContext,
+    cx: &mut gpui_kit::TestAppContext,
 ) -> (DeviceKey, tokio::sync::mpsc::UnboundedReceiver<Command>) {
     let (state, mut receiver) = mouse_state(true, Config::ephemeral());
     let key = state.current_record().expect("mouse").device_key();
@@ -117,24 +117,26 @@ fn installed(
     (key, receiver)
 }
 
-fn with_state<R>(cx: &mut gpui::TestAppContext, f: impl FnOnce(&mut AppState) -> R) -> R {
+fn with_state<R>(cx: &mut gpui_kit::TestAppContext, f: impl FnOnce(&mut AppState) -> R) -> R {
     cx.update(|cx| AppState::update(cx, |state, _| f(state)))
 }
 
-fn current_load(cx: &mut gpui::TestAppContext) -> ForceSensingLoad {
+fn current_load(cx: &mut gpui_kit::TestAppContext) -> ForceSensingLoad {
     with_state(cx, |state| state.current_force_sensing_load())
 }
 
-fn saved(cx: &mut gpui::TestAppContext) -> Option<u16> {
+fn saved(cx: &mut gpui_kit::TestAppContext) -> Option<u16> {
     with_state(cx, |state| state.config.force_sensing(KNOWN_MOUSE_KEY))
 }
 
-fn refused(cx: &mut gpui::TestAppContext) -> bool {
+fn refused(cx: &mut gpui_kit::TestAppContext) -> bool {
     with_state(cx, |state| state.current_force_sensing_refused())
 }
 
-#[gpui::test]
-fn a_release_writes_the_device_and_saves_the_force_it_reads_back(cx: &mut gpui::TestAppContext) {
+#[gpui_kit::test]
+fn a_release_writes_the_device_and_saves_the_force_it_reads_back(
+    cx: &mut gpui_kit::TestAppContext,
+) {
     let (key, mut receiver) = installed(PANEL, cx);
 
     let events = with_state(cx, |state| state.commit_force_sensing(6000));
@@ -178,8 +180,8 @@ fn a_release_writes_the_device_and_saves_the_force_it_reads_back(cx: &mut gpui::
     );
 }
 
-#[gpui::test]
-fn a_release_is_clamped_into_the_range_the_device_reported(cx: &mut gpui::TestAppContext) {
+#[gpui_kit::test]
+fn a_release_is_clamped_into_the_range_the_device_reported(cx: &mut gpui_kit::TestAppContext) {
     let (_, mut receiver) = installed(PANEL, cx);
 
     let _ = with_state(cx, |state| state.commit_force_sensing(u16::MAX));
@@ -192,9 +194,9 @@ fn a_release_is_clamped_into_the_range_the_device_reported(cx: &mut gpui::TestAp
     assert_eq!(writes, [PANEL.max, PANEL.min]);
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn a_release_is_inert_while_the_device_does_not_let_the_force_change(
-    cx: &mut gpui::TestAppContext,
+    cx: &mut gpui_kit::TestAppContext,
 ) {
     let (_, mut receiver) = installed(
         ForceSensingInfo {
@@ -222,8 +224,8 @@ fn a_device_without_a_force_sensing_button_is_neither_read_nor_written() {
     assert_eq!(state.config.force_sensing(KNOWN_MOUSE_KEY), None);
 }
 
-#[gpui::test]
-fn a_refusal_reads_the_device_again_and_saves_nothing(cx: &mut gpui::TestAppContext) {
+#[gpui_kit::test]
+fn a_refusal_reads_the_device_again_and_saves_nothing(cx: &mut gpui_kit::TestAppContext) {
     let (key, mut receiver) = installed(PANEL, cx);
     let write = release(cx, &mut receiver, 6000);
 
@@ -263,9 +265,9 @@ fn a_refusal_reads_the_device_again_and_saves_nothing(cx: &mut gpui::TestAppCont
 /// The agent answers a write a newer one superseded before its turn with a
 /// plain read. That answer must neither save nor move the slider off the
 /// newer release; only the newest write's answer counts.
-#[gpui::test]
+#[gpui_kit::test]
 fn an_answer_to_a_superseded_write_neither_saves_nor_moves_the_slider(
-    cx: &mut gpui::TestAppContext,
+    cx: &mut gpui_kit::TestAppContext,
 ) {
     let (key, mut receiver) = installed(PANEL, cx);
     let older = release(cx, &mut receiver, 6000);
@@ -324,8 +326,8 @@ fn an_answer_to_a_superseded_write_neither_saves_nor_moves_the_slider(
 /// The newest write itself can be superseded at the agent, by the reconnect
 /// or config-reload write. Its answer then reads a force nobody asked the
 /// slider for: shown, because it is the device's, but not saved.
-#[gpui::test]
-fn a_newest_answer_reading_another_force_is_shown_but_not_saved(cx: &mut gpui::TestAppContext) {
+#[gpui_kit::test]
+fn a_newest_answer_reading_another_force_is_shown_but_not_saved(cx: &mut gpui_kit::TestAppContext) {
     let (key, mut receiver) = installed(PANEL, cx);
     let write = release(cx, &mut receiver, 6000);
 
@@ -344,8 +346,8 @@ fn a_newest_answer_reading_another_force_is_shown_but_not_saved(cx: &mut gpui::T
 
 /// The agent writes the saved force again when the device reconnects, so a
 /// refusal no longer stands and the device is read again.
-#[gpui::test]
-fn a_reconnect_clears_a_refusal_and_reads_the_device_again(cx: &mut gpui::TestAppContext) {
+#[gpui_kit::test]
+fn a_reconnect_clears_a_refusal_and_reads_the_device_again(cx: &mut gpui_kit::TestAppContext) {
     let on_receiver = |online: bool| {
         let mut inventory = mouse_inventory(true);
         inventory.receiver = ReceiverInfo {
@@ -358,7 +360,7 @@ fn a_reconnect_clears_a_refusal_and_reads_the_device_again(cx: &mut gpui::TestAp
         inventory.paired[0].online = online;
         inventory
     };
-    let refresh = |cx: &mut gpui::TestAppContext, inventory: DeviceInventory| {
+    let refresh = |cx: &mut gpui_kit::TestAppContext, inventory: DeviceInventory| {
         with_state(cx, |state| {
             let resolver = AssetResolver::new();
             let _ = state.refresh_inventories(&[inventory], &[], &resolver, &[]);
@@ -399,8 +401,8 @@ fn a_reconnect_clears_a_refusal_and_reads_the_device_again(cx: &mut gpui::TestAp
     );
 }
 
-#[gpui::test]
-fn a_reset_writes_the_default_the_device_reported(cx: &mut gpui::TestAppContext) {
+#[gpui_kit::test]
+fn a_reset_writes_the_default_the_device_reported(cx: &mut gpui_kit::TestAppContext) {
     let moved = ForceSensingInfo {
         current: 6000,
         ..PANEL
@@ -439,8 +441,10 @@ fn a_reset_writes_the_default_the_device_reported(cx: &mut gpui::TestAppContext)
     );
 }
 
-#[gpui::test]
-fn nothing_resets_at_the_default_or_without_a_changeable_reading(cx: &mut gpui::TestAppContext) {
+#[gpui_kit::test]
+fn nothing_resets_at_the_default_or_without_a_changeable_reading(
+    cx: &mut gpui_kit::TestAppContext,
+) {
     let (_, mut receiver) = installed(PANEL, cx);
     assert_eq!(
         with_state(cx, |state| state.current_force_sensing_reset()),
@@ -464,8 +468,8 @@ fn nothing_resets_at_the_default_or_without_a_changeable_reading(cx: &mut gpui::
     assert!(force_writes(&drain(&mut receiver)).is_empty());
 }
 
-#[gpui::test]
-fn nothing_resets_while_the_reading_is_on_its_way(cx: &mut gpui::TestAppContext) {
+#[gpui_kit::test]
+fn nothing_resets_while_the_reading_is_on_its_way(cx: &mut gpui_kit::TestAppContext) {
     let (state, mut receiver) = mouse_state(true, Config::ephemeral());
     install(state, cx);
     assert!(matches!(current_load(cx), Load::Loading | Load::Unknown));

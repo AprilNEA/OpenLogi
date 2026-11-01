@@ -23,16 +23,16 @@ use crate::features::binding_editor::{
 use crate::state::AppState;
 use crate::ui::components::{MenuRow, control_input};
 use crate::ui::theme::{self, Palette, Typography as _};
-use gpui::{
-    App, Entity, FontWeight, IntoElement, ParentElement, RenderOnce,
-    StatefulInteractiveElement as _, Styled, Window, div, px, svg,
-};
-use gpui_component::{
+use gpui_kit::component::{
     Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants},
     h_flex,
     input::InputState,
     v_flex,
+};
+use gpui_kit::{
+    App, Entity, FontWeight, IntoElement, ParentElement, RenderOnce,
+    StatefulInteractiveElement as _, Styled, Window, div, px, svg,
 };
 use openlogi_core::binding::{Action, KeyCombo, WorkflowStep};
 
@@ -58,7 +58,7 @@ impl PowerUserKind {
     }
 }
 
-pub(crate) fn text_editor_placeholder(kind: PowerUserKind) -> gpui::SharedString {
+pub(crate) fn text_editor_placeholder(kind: PowerUserKind) -> gpui_kit::SharedString {
     match kind {
         PowerUserKind::OpenApplication => tr!("action_ring.application_folder_path_or_url"),
         PowerUserKind::TypeText => tr!("actions.type_text_placeholder"),
@@ -96,7 +96,7 @@ pub fn editor_card(
     application_invalid: bool,
     view: &Entity<FunctionRowView>,
     pal: Palette,
-) -> gpui::Div {
+) -> gpui_kit::Div {
     match kind {
         PowerUserKind::Workflow => workflow_editor_card(target, workflow_draft, view, pal),
         _ => match text_state {
@@ -119,7 +119,7 @@ fn text_editor_card(
     text_state: Entity<InputState>,
     view: &Entity<FunctionRowView>,
     pal: Palette,
-) -> gpui::Div {
+) -> gpui_kit::Div {
     let heading = tr!(kind.heading_key());
     let key_name = target.label();
 
@@ -147,7 +147,7 @@ fn application_editor_card(
     invalid: bool,
     view: &Entity<FunctionRowView>,
     pal: Palette,
-) -> gpui::Div {
+) -> gpui_kit::Div {
     let heading = tr!(PowerUserKind::OpenApplication.heading_key());
     let key_name = target.label();
     let view_pick = view.clone();
@@ -257,7 +257,7 @@ fn workflow_editor_card(
     steps: Vec<WorkflowStep>,
     view: &Entity<FunctionRowView>,
     pal: Palette,
-) -> gpui::Div {
+) -> gpui_kit::Div {
     let key_name = target.label();
 
     let rows = steps
@@ -328,7 +328,7 @@ struct WorkflowStepRow {
 
 impl RenderOnce for WorkflowStepRow {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let (type_label, glyph): (gpui::SharedString, &'static str) = match &self.step {
+        let (type_label, glyph): (gpui_kit::SharedString, &'static str) = match &self.step {
             WorkflowStep::TypeText(_) => (
                 tr!("actions.workflow_step_type_text"),
                 "action-icons/keyboard.svg",

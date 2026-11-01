@@ -9,7 +9,8 @@
 //! On Linux/Windows the menus + key bindings are stored but never surfaced
 //! in a top-of-screen bar — calling `install` there is a harmless no-op.
 
-use gpui::{App, KeyBinding, Menu, MenuItem, OsAction, actions};
+use gpui_kit::component::input;
+use gpui_kit::{App, KeyBinding, Menu, MenuItem, OsAction, actions};
 use openlogi_core::brand::{HELP_URL, RELEASES_URL, REPO_URL};
 use url::Url;
 
@@ -90,12 +91,12 @@ pub fn install(cx: &mut App) {
 
     cx.bind_keys([
         KeyBinding::new("cmd-q", Quit, None),
-        KeyBinding::new("cmd-z", gpui_component::input::Undo, None),
-        KeyBinding::new("cmd-shift-z", gpui_component::input::Redo, None),
-        KeyBinding::new("cmd-x", gpui_component::input::Cut, None),
-        KeyBinding::new("cmd-c", gpui_component::input::Copy, None),
-        KeyBinding::new("cmd-v", gpui_component::input::Paste, None),
-        KeyBinding::new("cmd-a", gpui_component::input::SelectAll, None),
+        KeyBinding::new("cmd-z", input::Undo, None),
+        KeyBinding::new("cmd-shift-z", input::Redo, None),
+        KeyBinding::new("cmd-x", input::Cut, None),
+        KeyBinding::new("cmd-c", input::Copy, None),
+        KeyBinding::new("cmd-v", input::Paste, None),
+        KeyBinding::new("cmd-a", input::SelectAll, None),
         #[cfg(target_os = "macos")]
         KeyBinding::new("cmd-h", Hide, None),
         #[cfg(target_os = "macos")]
@@ -143,7 +144,7 @@ fn menus(cx: &App) -> Vec<Menu> {
                 #[cfg(target_os = "macos")]
                 MenuItem::separator(),
                 #[cfg(target_os = "macos")]
-                MenuItem::os_submenu(tr!("app.services"), gpui::SystemMenuType::Services),
+                MenuItem::os_submenu(tr!("app.services"), gpui_kit::SystemMenuType::Services),
                 #[cfg(target_os = "macos")]
                 MenuItem::separator(),
                 #[cfg(target_os = "macos")]
@@ -161,32 +162,16 @@ fn menus(cx: &App) -> Vec<Menu> {
             name: tr!("common.edit"),
             disabled: false,
             items: vec![
-                MenuItem::os_action(
-                    tr!("common.undo"),
-                    gpui_component::input::Undo,
-                    OsAction::Undo,
-                ),
-                MenuItem::os_action(
-                    tr!("common.redo"),
-                    gpui_component::input::Redo,
-                    OsAction::Redo,
-                ),
+                MenuItem::os_action(tr!("common.undo"), input::Undo, OsAction::Undo),
+                MenuItem::os_action(tr!("common.redo"), input::Redo, OsAction::Redo),
                 MenuItem::separator(),
-                MenuItem::os_action(tr!("common.cut"), gpui_component::input::Cut, OsAction::Cut),
-                MenuItem::os_action(
-                    tr!("common.copy"),
-                    gpui_component::input::Copy,
-                    OsAction::Copy,
-                ),
-                MenuItem::os_action(
-                    tr!("common.paste"),
-                    gpui_component::input::Paste,
-                    OsAction::Paste,
-                ),
+                MenuItem::os_action(tr!("common.cut"), input::Cut, OsAction::Cut),
+                MenuItem::os_action(tr!("common.copy"), input::Copy, OsAction::Copy),
+                MenuItem::os_action(tr!("common.paste"), input::Paste, OsAction::Paste),
                 MenuItem::separator(),
                 MenuItem::os_action(
                     tr!("common.select_all"),
-                    gpui_component::input::SelectAll,
+                    input::SelectAll,
                     OsAction::SelectAll,
                 ),
             ],
@@ -245,12 +230,13 @@ fn device_menu_items(cx: &App) -> Vec<MenuItem> {
                     Some(battery) => format!("{} · {}", record.display_name, value_label(battery)),
                     None => record.display_name.clone(),
                 };
-                items.push(MenuItem::action(title, gpui::NoAction).disabled(true));
+                items.push(MenuItem::action(title, gpui_kit::NoAction).disabled(true));
             }
         }
         _ => {
             items.push(
-                MenuItem::action(tr!("device.no_devices_connected"), gpui::NoAction).disabled(true),
+                MenuItem::action(tr!("device.no_devices_connected"), gpui_kit::NoAction)
+                    .disabled(true),
             );
         }
     }

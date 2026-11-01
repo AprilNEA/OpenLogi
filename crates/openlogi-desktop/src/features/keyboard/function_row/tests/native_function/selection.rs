@@ -4,8 +4,10 @@ use super::*;
 
 const APP: &str = "com.example.Editor";
 
-fn inspector(cx: &mut gpui::TestAppContext) -> (&mut gpui::VisualTestContext, tempfile::TempDir) {
-    cx.update(gpui_component::init);
+fn inspector(
+    cx: &mut gpui_kit::TestAppContext,
+) -> (&mut gpui_kit::VisualTestContext, tempfile::TempDir) {
+    cx.update(gpui_kit::init);
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join(openlogi_core::paths::CONFIG_FILE);
     let (mut config, mut file) = ConfigFile::load_from_path(&path).unwrap();
@@ -24,17 +26,17 @@ fn inspector(cx: &mut gpui::TestAppContext) -> (&mut gpui::VisualTestContext, te
     (cx, dir)
 }
 
-fn redraw(cx: &mut gpui::VisualTestContext) {
+fn redraw(cx: &mut gpui_kit::VisualTestContext) {
     cx.update(|window, cx| window.draw(cx).clear(cx));
 }
 
-fn click(cx: &mut gpui::VisualTestContext, selector: &'static str) {
+fn click(cx: &mut gpui_kit::VisualTestContext, selector: &'static str) {
     let bounds = cx.debug_bounds(selector).expect("action row is rendered");
-    cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+    cx.simulate_click(bounds.center(), gpui_kit::Modifiers::default());
     redraw(cx);
 }
 
-fn assert_copy_selection(cx: &mut gpui::VisualTestContext, inherited: bool) {
+fn assert_copy_selection(cx: &mut gpui_kit::VisualTestContext, inherited: bool) {
     assert_eq!(
         cx.debug_bounds("key-panel-native-check").is_some(),
         inherited
@@ -58,15 +60,17 @@ fn assert_copy_selection(cx: &mut gpui::VisualTestContext, inherited: bool) {
     });
 }
 
-#[gpui::test]
-fn keyboard_native_inherited_copy_has_only_the_default_checkmark(cx: &mut gpui::TestAppContext) {
+#[gpui_kit::test]
+fn keyboard_native_inherited_copy_has_only_the_default_checkmark(
+    cx: &mut gpui_kit::TestAppContext,
+) {
     let (cx, _dir) = inspector(cx);
     assert_copy_selection(cx, true);
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn keyboard_native_inherited_copy_can_be_explicitly_selected_and_cleared(
-    cx: &mut gpui::TestAppContext,
+    cx: &mut gpui_kit::TestAppContext,
 ) {
     let (cx, dir) = inspector(cx);
     click(cx, "panel-action-Copy");
@@ -99,8 +103,8 @@ fn keyboard_native_inherited_copy_can_be_explicitly_selected_and_cleared(
     );
 }
 
-#[gpui::test]
-fn keyboard_native_device_default_copy_is_selected_and_clears(cx: &mut gpui::TestAppContext) {
+#[gpui_kit::test]
+fn keyboard_native_device_default_copy_is_selected_and_clears(cx: &mut gpui_kit::TestAppContext) {
     let (cx, _dir) = inspector(cx);
     cx.update(|_, cx| AppState::apply(cx, |state| state.set_editing_app(None)));
     redraw(cx);

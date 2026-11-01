@@ -22,12 +22,12 @@ pub mod update_consent;
 mod tests;
 
 use crate::ui::theme::Typography as _;
-use gpui::{
+use gpui_kit::component::{ActiveTheme as _, Root, TitleBar};
+use gpui_kit::{
     App, AppContext as _, Bounds, Context, Decorations, Global, IntoElement, ParentElement as _,
     Pixels, Point, Render, SharedString, Size, Styled as _, Subscription, TitlebarOptions, Window,
     WindowBounds, WindowHandle, WindowOptions, div, px,
 };
-use gpui_component::{ActiveTheme as _, Root, TitleBar};
 use openlogi_core::brand::APP_ID;
 use tracing::warn;
 
@@ -209,7 +209,7 @@ pub fn open_or_focus<V: AuxWindow + 'static>(
     slot: impl Fn(&mut WindowRegistry) -> &mut Option<WindowHandle<Root>>,
     title: impl Into<SharedString>,
     size: Size<Pixels>,
-    build_view: impl FnOnce(&mut gpui::Window, &mut Context<V>) -> V + 'static,
+    build_view: impl FnOnce(&mut gpui_kit::Window, &mut Context<V>) -> V + 'static,
     cx: &mut App,
 ) {
     let title = title.into();

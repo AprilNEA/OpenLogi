@@ -3,14 +3,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
-use gpui::{
-    Context, Entity, FocusHandle, InteractiveElement, IntoElement, ParentElement, Role,
-    StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px, rgb, svg,
-};
-use gpui_base::Button as BaseButton;
-use gpui_component::{
+use gpui_kit::base::Button as BaseButton;
+use gpui_kit::component::{
     Disableable as _, Icon, IconName, Selectable as _, Sizable as _, button::Button, h_flex,
     input::InputState, scroll::ScrollableElement as _, v_flex,
+};
+use gpui_kit::{
+    Context, Entity, FocusHandle, InteractiveElement, IntoElement, ParentElement, Role,
+    StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px, rgb, svg,
 };
 use openlogi_core::binding::{
     Action, ButtonId, GamingLayout, GestureDirection, default_binding, default_binding_on,
@@ -115,7 +115,7 @@ pub(super) fn binding_inspector(
     data: BindingInspectorData<'_>,
     picker: ActionPickerContext<'_>,
     cx: &Context<MouseModelView>,
-) -> gpui::Div {
+) -> gpui_kit::Div {
     let pal = theme::palette(cx);
     let body = match data.selected {
         None => empty_inspector(
@@ -152,7 +152,7 @@ pub(super) fn binding_inspector(
         )
 }
 
-fn empty_inspector(app: Option<&str>, override_count: usize, pal: Palette) -> gpui::Div {
+fn empty_inspector(app: Option<&str>, override_count: usize, pal: Palette) -> gpui_kit::Div {
     let summary = match (app, override_count) {
         (Some(app), 0) => tr!(
             "profiles.app_profile_no_overrides",
@@ -189,7 +189,7 @@ fn button_inspector(
     picker: ActionPickerContext<'_>,
     pal: Palette,
     cx: &Context<MouseModelView>,
-) -> gpui::Div {
+) -> gpui_kit::Div {
     let gesture_map = data.gesture_maps.get(&button);
     let overridden = data
         .overridden
@@ -305,7 +305,7 @@ fn button_status(
     action: &Action,
     data: &BindingInspectorData<'_>,
     overridden: bool,
-) -> gpui::SharedString {
+) -> gpui_kit::SharedString {
     let default =
         *action == default_binding_on(data.layout, button) && !data.wheel_hold.contains(&button);
     match (data.editing_app, overridden, default) {
@@ -325,7 +325,7 @@ fn wheel_hold_section(
     overridden: bool,
     view: &Entity<MouseModelView>,
     pal: Palette,
-) -> Option<gpui::AnyElement> {
+) -> Option<gpui_kit::AnyElement> {
     let enabled = data.wheel_hold.contains(&button);
     match data.editing_app {
         None if button.supports_wheel_hold() && (data.virtual_thumbwheel || enabled) => {
@@ -387,7 +387,7 @@ fn inherited_gesture_inspector(
     picker: ActionPickerContext<'_>,
     pal: Palette,
     cx: &Context<MouseModelView>,
-) -> gpui::Div {
+) -> gpui_kit::Div {
     let observer = picker.view.clone();
     let on_pick: PickFn = Rc::new(move |action, _window, cx| {
         AppState::apply(cx, |state| state.commit_binding(button, action));
@@ -447,7 +447,7 @@ fn gesture_inspector(
     picker: ActionPickerContext<'_>,
     pal: Palette,
     cx: &Context<MouseModelView>,
-) -> gpui::Div {
+) -> gpui_kit::Div {
     let direction = data.gesture_direction.unwrap_or(GestureDirection::Click);
     // Gesture mode never holds the wheel, so the switch here is off and only
     // turning it on is useful, which needs measured raw wheel.
@@ -598,7 +598,7 @@ fn thumbwheel_inspector(
     overridden: Option<&BTreeMap<ButtonId, Action>>,
     picker: ActionPickerContext<'_>,
     pal: Palette,
-) -> gpui::Div {
+) -> gpui_kit::Div {
     let backward = bindings
         .get(&ButtonId::ThumbwheelScrollDown)
         .cloned()
@@ -701,8 +701,8 @@ fn thumbwheel_inspector(
 }
 
 fn inspector_heading(
-    title: gpui::SharedString,
-    status: Option<gpui::SharedString>,
+    title: gpui_kit::SharedString,
+    status: Option<gpui_kit::SharedString>,
     pal: Palette,
 ) -> impl IntoElement {
     v_flex()
@@ -744,9 +744,9 @@ fn gesture_summary_card(picker: ActionPickerContext<'_>, pal: Palette) -> impl I
 
 fn selection_card(
     id: &'static str,
-    caption: gpui::SharedString,
+    caption: gpui_kit::SharedString,
     icon: &'static str,
-    value: gpui::SharedString,
+    value: gpui_kit::SharedString,
     picker: ActionPickerContext<'_>,
     pal: Palette,
 ) -> impl IntoElement {

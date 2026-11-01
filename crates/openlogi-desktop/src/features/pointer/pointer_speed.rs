@@ -9,10 +9,10 @@
 //! the mouse. When the mouse refuses the write, a note under the slider says
 //! so, because the slider keeps showing the saved speed.
 
-use gpui::{
+use gpui_kit::component::{h_flex, slider::Slider, v_flex};
+use gpui_kit::{
     AnyElement, App, Context, InteractiveElement, IntoElement, ParentElement, Styled, Window, div,
 };
-use gpui_component::{h_flex, slider::Slider, v_flex};
 use openlogi_core::hid::PointerSpeed;
 
 use crate::state::{AppState, DeviceKey, PointerSpeedLoad};

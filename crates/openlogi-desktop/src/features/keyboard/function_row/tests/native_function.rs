@@ -39,9 +39,9 @@ impl Render for CalculatorInspector {
     }
 }
 
-#[gpui::test]
-fn keyboard_native_row_click_removes_the_persisted_binding(cx: &mut gpui::TestAppContext) {
-    cx.update(gpui_component::init);
+#[gpui_kit::test]
+fn keyboard_native_row_click_removes_the_persisted_binding(cx: &mut gpui_kit::TestAppContext) {
+    cx.update(gpui_kit::init);
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join(openlogi_core::paths::CONFIG_FILE);
     let (mut config, mut file) = ConfigFile::load_from_path(&path).unwrap();
@@ -60,7 +60,7 @@ fn keyboard_native_row_click_removes_the_persisted_binding(cx: &mut gpui::TestAp
         .debug_bounds("key-panel-native")
         .expect("native row is rendered");
 
-    cx.simulate_click(row.center(), gpui::Modifiers::default());
+    cx.simulate_click(row.center(), gpui_kit::Modifiers::default());
     cx.update(|window, cx| window.draw(cx).clear(cx));
 
     assert!(

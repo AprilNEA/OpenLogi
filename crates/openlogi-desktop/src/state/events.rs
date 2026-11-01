@@ -8,7 +8,7 @@
 //! events it renders and [`AppState::repaint_on`] decides whether one of them
 //! is about the device on screen.
 
-use gpui::{App, Context, EventEmitter, Subscription};
+use gpui_kit::{App, Context, EventEmitter, Subscription};
 
 use super::AppState;
 use super::device_key::DeviceKey;

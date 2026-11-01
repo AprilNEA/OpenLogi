@@ -11,7 +11,7 @@ use crate::app;
 use crate::windows;
 
 /// Run one `openlogi://` command.
-pub fn dispatch(command: DeeplinkCommand, cx: &mut gpui::App) {
+pub fn dispatch(command: DeeplinkCommand, cx: &mut gpui_kit::App) {
     use DeeplinkCommand as Cmd;
     match command {
         // Flag the IPC client before quitting, or its unreachable→spawn

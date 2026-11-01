@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::sync::Mutex;
 
-use gpui::{Entity, TestAppContext, VisualTestContext, point, size};
+use gpui_kit::{Entity, TestAppContext, VisualTestContext, point, size};
 use openlogi_camera::{AutoState, Camera, CameraState, ControlError};
 use openlogi_core::config::Config;
 
@@ -102,7 +102,7 @@ fn panel(
     cx: &mut TestAppContext,
     uvc: Arc<FakeUvc>,
 ) -> (Entity<CameraControlsPanel>, &mut VisualTestContext) {
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     cx.update(|cx| {
         let camera = Camera {
             name: "Logitech BRIO".to_string(),
@@ -155,7 +155,7 @@ fn save(cx: &mut VisualTestContext, f: impl FnOnce(&mut AppState)) {
     cx.update(|_, cx| AppState::update(cx, |state, _| f(state)));
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn the_read_runs_off_render_and_seeds_the_rows_from_the_published_state(cx: &mut TestAppContext) {
     let uvc = Arc::new(FakeUvc::default());
     uvc.queue(brio(140, 300, false));
@@ -181,7 +181,7 @@ fn the_read_runs_off_render_and_seeds_the_rows_from_the_published_state(cx: &mut
     assert_eq!(uvc.calls().len(), 1, "a built panel does not re-read");
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn saved_settings_are_reapplied_and_an_armed_auto_keeps_its_value(cx: &mut TestAppContext) {
     let uvc = Arc::new(FakeUvc::default());
     uvc.queue(brio(140, 300, false));
@@ -220,7 +220,7 @@ fn saved_settings_are_reapplied_and_an_armed_auto_keeps_its_value(cx: &mut TestA
     assert_eq!(shown(&view, cx)[2], ("ExposureAuto".into(), 0));
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn a_rejected_batch_rereads_the_device_and_drops_the_active_profile(cx: &mut TestAppContext) {
     let uvc = Arc::new(FakeUvc::default());
     uvc.queue(brio(140, 300, false));
@@ -251,7 +251,7 @@ fn a_rejected_batch_rereads_the_device_and_drops_the_active_profile(cx: &mut Tes
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn an_unknown_state_after_a_rejected_batch_builds_nothing_and_retries(cx: &mut TestAppContext) {
     let uvc = Arc::new(FakeUvc::default());
     uvc.queue(brio(140, 300, false));
@@ -290,7 +290,7 @@ fn an_unknown_state_after_a_rejected_batch_builds_nothing_and_retries(cx: &mut T
     assert_eq!(shown(&view, cx)[0], ("Brightness".into(), 90));
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn a_failed_write_rebuilds_from_a_fresh_background_read(cx: &mut TestAppContext) {
     let uvc = Arc::new(FakeUvc::default());
     uvc.queue(brio(140, 300, true));

@@ -12,12 +12,12 @@
 //! the current value through the agent when selection/inventory lifecycle
 //! events make a device active; this view only consumes the resulting cache.
 
-use gpui::prelude::FluentBuilder as _;
-use gpui::{
+use gpui_kit::component::{Disableable as _, Selectable as _, h_flex, slider::Slider, v_flex};
+use gpui_kit::prelude::FluentBuilder as _;
+use gpui_kit::{
     AnyElement, App, Context, IntoElement, ParentElement, Render, SharedString, Styled,
     Subscription, Window, div, px, rgb,
 };
-use gpui_component::{Disableable as _, Selectable as _, h_flex, slider::Slider, v_flex};
 use openlogi_core::config::{
     SMARTSHIFT_AUTO_DISENGAGE_DEFAULT, SMARTSHIFT_MIN_AUTO_DISENGAGE, ThumbwheelSensitivity,
 };
@@ -138,7 +138,7 @@ impl SmartShiftPanel {
         status: SmartShiftStatus,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> gpui::Div {
+    ) -> gpui_kit::Div {
         let pal = theme::palette(cx);
         let mode = status.mode;
         let permanent = status.auto_disengage.is_permanent();
@@ -245,7 +245,7 @@ impl SmartShiftPanel {
         ratchet: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Option<gpui::Div> {
+    ) -> Option<gpui_kit::Div> {
         let pal = theme::palette(cx);
         let committed_torque = status.tunable_torque?;
         self.torque.sync(committed_torque, window, cx);
@@ -286,7 +286,11 @@ impl SmartShiftPanel {
     /// The per-device thumb-wheel sensitivity row: label, live value, slider.
     /// Reads the selected device's effective value and re-seats the thumb on a
     /// device switch / external config change, never mid-drag.
-    fn wheel_sensitivity_row(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::Div {
+    fn wheel_sensitivity_row(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::Div {
         let pal = theme::palette(cx);
         let committed = AppState::try_read(cx)
             .and_then(|state| {
@@ -400,7 +404,7 @@ fn permanent_row(
     restore_threshold: SmartShiftThreshold,
     status: SmartShiftStatus,
     pal: Palette,
-) -> gpui::Div {
+) -> gpui_kit::Div {
     h_flex()
         .justify_between()
         .items_center()
@@ -451,7 +455,7 @@ fn mode_pill(label: SharedString, selected: bool, status: SmartShiftStatus) -> i
 }
 
 /// A greyed bar standing in for the slider when sensitivity isn't adjustable.
-fn disabled_track(pal: Palette) -> gpui::Div {
+fn disabled_track(pal: Palette) -> gpui_kit::Div {
     div().w_full().h(px(6.)).rounded_full().bg(pal.border)
 }
 

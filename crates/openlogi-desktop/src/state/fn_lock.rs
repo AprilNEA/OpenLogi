@@ -127,7 +127,7 @@ impl AppState {
         StateEvent::FnLockChanged(key.clone()).into()
     }
 
-    pub(super) fn load_current_fn_lock(&mut self, cx: &mut gpui::Context<Self>) {
+    pub(super) fn load_current_fn_lock(&mut self, cx: &mut gpui_kit::Context<Self>) {
         let Some((key, route)) = self
             .current_record()
             .filter(|record| {

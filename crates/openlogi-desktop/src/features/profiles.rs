@@ -7,8 +7,10 @@ mod shell;
 use std::collections::{BTreeMap, HashSet};
 use std::rc::Rc;
 
-use gpui::{App, Entity, ParentElement, Styled, Window, div};
-use gpui_component::{WindowExt as _, button::ButtonVariant, dialog::DialogButtonProps, h_flex};
+use gpui_kit::component::{
+    WindowExt as _, button::ButtonVariant, dialog::DialogButtonProps, h_flex,
+};
+use gpui_kit::{App, Entity, ParentElement, Styled, Window, div};
 use openlogi_core::app::{AppAliases, profile_key_for};
 
 pub(crate) use self::catalog::{AppCatalogPicker, ProfileIconCache};
@@ -310,7 +312,7 @@ fn profile_scope_model(
 }
 
 /// Profile inheritance and active-app context shown above the device canvas.
-pub(crate) fn profile_canvas_status(cx: &App) -> Option<gpui::Div> {
+pub(crate) fn profile_canvas_status(cx: &App) -> Option<gpui_kit::Div> {
     let pal = theme::palette(cx);
     let state = AppState::try_read(cx)?;
     if !state.current_device_is_persistent() {
@@ -321,7 +323,7 @@ pub(crate) fn profile_canvas_status(cx: &App) -> Option<gpui::Div> {
     let summary = profile_summary(editing_app.as_deref(), override_count);
     let active = state
         .active_profile_name()
-        .map_or_else(|| tr!("common.default"), gpui::SharedString::from);
+        .map_or_else(|| tr!("common.default"), gpui_kit::SharedString::from);
 
     Some(
         h_flex()
@@ -342,7 +344,7 @@ pub(crate) fn profile_canvas_status(cx: &App) -> Option<gpui::Div> {
     )
 }
 
-fn profile_summary(editing_app: Option<&str>, override_count: usize) -> gpui::SharedString {
+fn profile_summary(editing_app: Option<&str>, override_count: usize) -> gpui_kit::SharedString {
     let Some(app) = editing_app else {
         return tr!("profiles.default_bindings_description");
     };

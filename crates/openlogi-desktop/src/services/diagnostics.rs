@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use gpui::App;
+use gpui_kit::App;
 use openlogi_core::device::{DeviceInventory, DeviceModelInfo, ModelTransport, PairedDevice};
 use openlogi_core::diagnostics::{
     AppInfo, AssetInfo, AssetSource, ConnectionKind, DeviceDiag, DiagnosticsReport, InventoryState,
