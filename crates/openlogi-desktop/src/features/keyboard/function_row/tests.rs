@@ -976,13 +976,14 @@ fn switching_the_app_profile_drops_a_draft_for_the_old_one(cx: &mut gpui::TestAp
     });
 }
 
-/// A G915 X-shaped asset: `depot`, and a circle region at `(100, 200)` for each
-/// of `cids`, on the 2048×644 render.
+/// A G915 X-shaped asset: `depot`, and a circle region for each of `cids` on
+/// the 2048×644 render, centred at `(cid, 2 * cid % 644)`.
 fn region_asset(depot: &str, cids: impl Iterator<Item = u16>) -> ResolvedAsset {
     let regions: Vec<String> = cids
         .map(|cid| {
             format!(
-                r#"{{"renderings":[{{"circle":{{"cx":100,"cy":200}}}}],"inputs":[{{"cid":{cid}}}]}}"#
+                r#"{{"renderings":[{{"circle":{{"cx":{cid},"cy":{}}}}}],"inputs":[{{"cid":{cid}}}]}}"#,
+                u32::from(cid) * 2 % 644
             )
         })
         .collect();
@@ -1011,8 +1012,10 @@ fn g915_x_names_its_g_keys_and_places_them_from_the_depot() {
     assert_eq!(slots[13].legend, "G1");
     assert_eq!(slots[21].legend, "G9");
     assert!(matches!(slots[21].target, KeyTarget::FunctionKey(ref t) if t.to_string() == "f21"));
-    assert_approx_eq(slots[21].point.x_frac, 100.0 / 2048.0);
-    assert_approx_eq(slots[21].point.y_frac, 200.0 / 644.0);
+    for (slot, cid) in slots.iter().zip(G915_X_CIDS) {
+        assert_approx_eq(slot.point.x_frac, f32::from(cid) / 2048.0);
+        assert_approx_eq(slot.point.y_frac, f32::from(cid * 2 % 644) / 644.0);
+    }
 }
 
 #[test]
