@@ -51,6 +51,7 @@ pub(crate) fn target_table(cx: &mut App) -> impl IntoElement {
                     .rounded(pal.control_radius)
                     .child(TableBody::new().children(targets.into_iter().map(|target| {
                         let target_key = target.key.clone();
+                        let accessible_name = target.name.clone();
                         let toggle_id = format!("host-switch-target-{}", target.key);
                         TableRow::new()
                             .child(
@@ -82,6 +83,7 @@ pub(crate) fn target_table(cx: &mut App) -> impl IntoElement {
                                         })
                                         .child(
                                             Toggle::new(toggle_id)
+                                                .accessibility_label(accessible_name)
                                                 .selected(target.selected)
                                                 .on_change(move |selected, _window, cx| {
                                                     let selected = *selected;
