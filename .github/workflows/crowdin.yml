@@ -92,6 +92,11 @@ jobs:
           CROWDIN_PROJECT_ID: ${{ env.CROWDIN_PROJECT_ID }}
           CROWDIN_PERSONAL_TOKEN: ${{ env.CROWDIN_PERSONAL_TOKEN }}
 
+      # The Crowdin Docker action runs as root, so every catalog it downloads
+      # is root-owned (0644) and the runner user cannot rewrite it.
+      - name: Reclaim downloaded catalogs
+        run: sudo chown -R "$(id -u):$(id -g)" crates/openlogi-ui/locales
+
       - name: Merge Crowdin export into complete catalogs
         run: |
           set -euo pipefail
