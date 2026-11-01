@@ -64,8 +64,8 @@ use openlogi_core::single_instance::{self, InstanceError, Role};
 use openlogi_fixture::{DeviceProfile, FixtureError, ProfileDeviceSettings, ProfileSetting};
 use openlogi_hid::{
     BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
-    ForceSensingInfo, LightCommand, PasskeyMethod, PointerSpeed, ReceiverSelector, ReportRate,
-    ReportRateInfo, ScrollWheelMode, SmartShiftStatus, WriteError,
+    ForceSensingInfo, LightCommand, OnboardState, PasskeyMethod, PointerSpeed, ReceiverSelector,
+    ReportRate, ReportRateInfo, ScrollWheelMode, SmartShiftStatus, WriteError,
 };
 use openlogi_ipc::transport;
 use openlogi_ipc::{
@@ -790,6 +790,7 @@ impl State {
             model_info: None,
             capabilities: Some(Capabilities::default()),
             settings_revision: 0,
+            hidpp10: false,
         });
         self.profile
             .settings
@@ -1157,6 +1158,17 @@ impl Agent for MockAgent {
         stored.fn_lock = fn_lock;
         info!(%route, fn_lock, "set_fn_lock");
         Ok(*stored)
+    }
+
+    async fn read_onboard(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<OnboardState, WriteError> {
+        info!(%route, "read_onboard (no onboard memory in the mock)");
+        Err(WriteError::FeatureUnsupported {
+            feature_hex: 0x8100,
+        })
     }
 
     async fn unpair_device(self, _: Context, route: DeviceRoute) -> Result<(), PairingFailure> {

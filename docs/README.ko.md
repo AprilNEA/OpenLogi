@@ -171,6 +171,7 @@ OpenLogi는 되고 Options+는 안 되는 것들:
 
 > [!IMPORTANT]
 > 먼저 **Logi Options+**(Linux에서는 Solaar도)를 종료하세요. 하나의 수신기는 한 번에 하나의 애플리케이션만 소유할 수 있습니다.
+> macOS에서는 **Karabiner-Elements**도 수정 대상인 Bluetooth 키보드를 독점합니다. Karabiner-Elements → Settings → Devices에서 해당 키보드의 **Modify events**를 끄세요.
 
 | 플랫폼 | 시스템 | 아키텍처 |
 | --- | --- | --- |
@@ -212,7 +213,13 @@ OpenLogi를 열고 macOS가 요청하면 **손쉬운 사용**과 **입력 모니
 curl -fsSL https://github.com/AprilNEA/OpenLogi/releases/latest/download/install.sh | sh
 ```
 
-실행 전에 스크립트를 확인하는 방법과 Flatpak, NixOS, systemd가 없는 배포판에 대해서는 [INSTALL-linux.md](INSTALL-linux.md)를 참고하세요.
+Arch Linux에서는 AUR 패키지 [`openlogi`](https://aur.archlinux.org/packages/openlogi)가 릴리스를 소스에서 빌드합니다:
+
+```sh
+yay -S openlogi
+```
+
+실행 전에 스크립트를 확인하는 방법과 AUR 패키지, Flatpak, NixOS, systemd가 없는 배포판에 대해서는 [INSTALL-linux.md](INSTALL-linux.md)를 참고하세요.
 
 ### Windows
 

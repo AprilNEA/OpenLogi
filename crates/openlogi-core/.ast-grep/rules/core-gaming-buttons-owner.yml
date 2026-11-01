@@ -1,0 +1,22 @@
+# Owner: openlogi-core's binding::GamingButtons::for_device — whether a device
+# is a G-series mouse and which buttons it offers. The agent's spy-only check,
+# the detail tabs and the Buttons panel all ask it.
+id: core-gaming-buttons-owner
+language: rust
+severity: error
+message: Whether a device is a G-series mouse comes from GamingButtons::for_device. Call it instead of reading the gaming capability flags here.
+note: |
+  The agent, the tab list and the Buttons panel each derived "G-series" from
+  the 0x8100/0x8110 flags, in two different formulas. See "Single source of
+  truth" in AGENTS.md.
+files:
+  - crates/**/*.rs
+ignores:
+  - crates/openlogi-core/src/device.rs
+  - crates/openlogi-core/src/binding/gaming.rs
+  - "**/tests.rs"
+  - "**/tests/**"
+rule:
+  any:
+    - pattern: $A.onboard_profiles || $B.button_spy
+    - pattern: $A.button_spy || $B.onboard_profiles

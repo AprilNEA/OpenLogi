@@ -557,6 +557,9 @@ impl InventoryWorker {
                 }
                 tokio::time::sleep(SYSTEM_RESUME_SETTLE).await;
             }
+            ReconcileTrigger::DeadChannel => {
+                info!("capture reported a dead channel — replacing it");
+            }
             ReconcileTrigger::Initial
             | ReconcileTrigger::RepairRetry
             | ReconcileTrigger::SettingsConfirmation
@@ -667,6 +670,9 @@ impl InventoryWorker {
                 },
                 Some(source) = self.hid_events.recv() => {
                     break ReconcileTrigger::HidEvent(source);
+                }
+                () = self.enumerator.dead_channel_reported() => {
+                    break ReconcileTrigger::DeadChannel;
                 }
                 allowed = self.device_io.changed() => {
                     if allowed == Some(false) && self.device_io.wait_until_allowed().await {
@@ -876,24 +882,52 @@ mod tests {
 
     #[test]
     fn reconnect_intent_keeps_its_short_budget_after_a_failed_scan() {
-        let mut state = WatchState::default();
-        state.observe_trigger(ReconcileTrigger::HidEvent(
-            HidppEventSource::WirelessDeviceStatus,
-        ));
-        assert!(state.classify(Err(enumerate_failed())).is_none());
-        state.observe_trigger(ReconcileTrigger::RepairRetry);
-        assert_matches!(
-            state.classify(Ok((vec![], vec![]))),
-            Some(InventoryEvent::Snapshot {
-                reapply_volatile: Some(ReapplyReason::Reconnect),
-                ..
-            })
-        );
+        for trigger in [
+            ReconcileTrigger::HidEvent(HidppEventSource::WirelessDeviceStatus),
+            ReconcileTrigger::DeadChannel,
+        ] {
+            let mut state = WatchState::default();
+            state.observe_trigger(trigger);
+            assert!(state.classify(Err(enumerate_failed())).is_none());
+            state.observe_trigger(ReconcileTrigger::RepairRetry);
+            assert_matches!(
+                state.classify(Ok((vec![], vec![]))),
+                Some(InventoryEvent::Snapshot {
+                    reapply_volatile: Some(ReapplyReason::Reconnect),
+                    ..
+                })
+            );
+            // A discarded snapshot must retain intent until publication.
+            state.observe_trigger(ReconcileTrigger::RecoveryScan);
+            assert_matches!(
+                state.classify(Ok((vec![], vec![]))),
+                Some(InventoryEvent::Snapshot {
+                    reapply_volatile: Some(ReapplyReason::Reconnect),
+                    ..
+                })
+            );
+            state.snapshot_published();
+            assert_matches!(
+                state.classify(Ok((vec![], vec![]))),
+                Some(InventoryEvent::Snapshot {
+                    reapply_volatile: None,
+                    ..
+                })
+            );
+        }
     }
 
     #[test]
     fn reconnect_never_shrinks_a_latched_resume_budget() {
         for triggers in [
+            [
+                ReconcileTrigger::SystemResume,
+                ReconcileTrigger::DeadChannel,
+            ],
+            [
+                ReconcileTrigger::DeadChannel,
+                ReconcileTrigger::SystemResume,
+            ],
             [
                 ReconcileTrigger::SystemResume,
                 ReconcileTrigger::HidEvent(HidppEventSource::WirelessDeviceStatus),

@@ -1,9 +1,83 @@
 //! What a config reload or an app switch publishes to the hook and the capture managers.
 
+use std::collections::BTreeSet;
+
 use openlogi_core::device_order::PhysicalDeviceKey;
 use openlogi_hid::reprog_controls::BACK_CIDS;
 
 use super::*;
+use crate::runtime::PointerSelection;
+
+#[test]
+fn a_new_route_does_not_rearm_an_existing_capture() {
+    let mut orch = orchestrator(Config::default());
+    let old = direct_inventory(Some("old"), [1, 2, 3, 4]);
+    let mut new = direct_inventory(Some("new"), [5, 6, 7, 8]);
+    new.receiver.product_id = 0xb042;
+    orch.refresh_inventory(std::slice::from_ref(&old), &[], false);
+    let before = orch.shared.capture_plans.borrow().plans()[0].target.clone();
+    orch.refresh_inventory(&[old, new], &[], false);
+    let plans = orch.shared.capture_plans.borrow();
+    let retained = plans
+        .plans()
+        .iter()
+        .find(|plan| plan.target.route == before.route)
+        .unwrap();
+    assert_eq!(
+        retained.target, before,
+        "discovery on another route must not send the existing capture into native teardown"
+    );
+}
+
+#[test]
+fn settings_reapply_after_a_node_change_does_not_rearm_other_captures() {
+    let mut orch = orchestrator(Config::default());
+    let inventory = direct_inventory(Some("old"), [1, 2, 3, 4]);
+    orch.refresh_inventory(std::slice::from_ref(&inventory), &[], false);
+    let before = orch.shared.capture_plans.borrow().clone();
+    orch.reapply_volatile_on_next_refresh();
+    orch.refresh_inventory(std::slice::from_ref(&inventory), &[], false);
+    assert_eq!(
+        orch.shared.capture_plans.borrow().as_ref(),
+        before.as_ref(),
+        "general settings reapply must not retire an unrelated capture on node changes"
+    );
+}
+
+#[test]
+fn a_device_wake_does_not_rearm_other_routes_but_system_resume_does() {
+    for resume_first in [false, true] {
+        let mut orch = orchestrator(Config::default());
+        let old = direct_inventory(Some("old"), [1, 2, 3, 4]);
+        let mut other = direct_inventory(Some("other"), [5, 6, 7, 8]);
+        other.receiver.product_id = 0xb042;
+        let devices = [old, other];
+        orch.refresh_inventory(&devices, &[], false);
+        let before = orch.shared.capture_plans.borrow().clone();
+        orch.reapply_reconnected_on_next_refresh();
+        orch.refresh_inventory(&devices, &[], false);
+        assert_eq!(
+            orch.shared.capture_plans.borrow().as_ref(),
+            before.as_ref(),
+            "a session owns its wireless wake rearm; an identity-free notification must not cycle every capture"
+        );
+        if resume_first {
+            orch.reapply_after_system_resume();
+            orch.reapply_reconnected_on_next_refresh();
+        } else {
+            orch.reapply_reconnected_on_next_refresh();
+            orch.reapply_after_system_resume();
+        }
+        orch.refresh_inventory(&devices, &[], false);
+        let resumed = orch.shared.capture_plans.borrow();
+        for (old, new) in before.plans().iter().zip(resumed.plans()) {
+            assert_ne!(
+                old.target.rearm_generation, new.target.rearm_generation,
+                "a system wake must retain its request to rearm every online route"
+            );
+        }
+    }
+}
 
 #[test]
 fn config_reload_publishes_scroll_preferences_without_restarting_the_hook() {
@@ -115,6 +189,7 @@ fn published_plans_divert_the_main_wheel_only_while_the_hook_runs() {
         Some(openlogi_hid::session::gesture::MainWheelDivert {
             resolution: None,
             inverted: None,
+            high_resolution: false,
         })
     );
     orch.set_os_mouse_hook_available(false);
@@ -201,7 +276,10 @@ fn pointer_profiles_switch_to_desktop_without_changing_keyboard_focus() {
             maps.bindings[&ButtonId::Back].click_action(),
             Action::PreviousDesktop
         );
-        assert_eq!(maps.pointer_target, Some(PointerTarget::Desktop));
+        assert_eq!(
+            maps.pointer.as_ref().map(PointerSelection::target),
+            Some(PointerTarget::Desktop)
+        );
     }
     let published = orch.shared.capture_plans.borrow();
     let keyboard = published
@@ -213,7 +291,7 @@ fn pointer_profiles_switch_to_desktop_without_changing_keyboard_focus() {
         keyboard.dispatch.bindings[&ButtonId::Back].click_action(),
         Action::Copy
     );
-    assert_eq!(keyboard.dispatch.pointer_target, None);
+    assert_eq!(keyboard.dispatch.pointer, None);
     drop(published);
     assert_eq!(orch.current_app.as_deref(), Some("browser"));
 
@@ -222,13 +300,67 @@ fn pointer_profiles_switch_to_desktop_without_changing_keyboard_focus() {
     orch.reload_config(config);
     assert_eq!(published_back_binding(&orch), Some(Action::BrowserBack));
     assert_eq!(
-        orch.shared
-            .hook_maps
-            .read()
-            .expect("hook maps")
-            .pointer_target,
+        orch.shared.hook_maps.read().expect("hook maps").pointer,
         None
     );
+}
+
+#[test]
+fn pointer_selection_names_the_buttons_bound_unlike_the_focused_app() {
+    use openlogi_hook::{PointerContext, PointerTarget};
+
+    use crate::runtime::FocusBinding;
+    // #2214: over the desktop or an unfocused window, a press sends its
+    // keystrokes only when the focused app binds the button the same way.
+    let mut config = Config::default();
+    config.set_binding("a", ButtonId::Back, Binding::Single(Action::Copy));
+    config.set_per_app_binding("a", "editor", ButtonId::Forward, Some(Action::Undo));
+    config.set_per_app_binding("a", "browser", ButtonId::Forward, Some(Action::Undo));
+    config.set_per_app_binding("a", "browser", ButtonId::Back, Some(Action::BrowserBack));
+    let mut orch = orchestrator(config);
+    orch.devices = vec![dev("a", 1, true)];
+    let unlike_focus = |orch: &Orchestrator| {
+        let hook = orch.shared.hook_maps.read().expect("maps").pointer.clone();
+        let plan = orch
+            .shared
+            .capture_plans
+            .borrow()
+            .plans()
+            .first()
+            .expect("mouse plan")
+            .dispatch
+            .pointer
+            .clone();
+        assert_eq!(hook, plan, "OS hook and HID++ share one mouse context");
+        let selection = hook.expect("pointer mode");
+        [ButtonId::Back, ButtonId::Forward]
+            .into_iter()
+            .filter(|&button| selection.press(button).focus == FocusBinding::Distinct)
+            .collect::<BTreeSet<_>>()
+    };
+    orch.set_current_app(Some(ForegroundApp::unnamed("finder".into())));
+    orch.set_pointer_context(PointerContext {
+        app: None,
+        target: PointerTarget::Desktop,
+    });
+    // Neither the desktop nor Finder has a profile.
+    assert_eq!(unlike_focus(&orch), BTreeSet::new());
+    // The editor overrides Forward only. Back's global binding is still shared.
+    orch.set_current_app(Some(ForegroundApp::unnamed("editor".into())));
+    assert_eq!(unlike_focus(&orch), BTreeSet::from([ButtonId::Forward]));
+    // Over a browser window, Forward is overridden the same way as in the
+    // focused editor. Only Back differs.
+    orch.set_pointer_context(PointerContext {
+        app: Some(ForegroundApp::unnamed("browser".into())),
+        target: PointerTarget::Window {
+            process_id: 41,
+            window_id: 7,
+        },
+    });
+    assert_eq!(unlike_focus(&orch), BTreeSet::from([ButtonId::Back]));
+    // Focus moves into the hovered app.
+    orch.set_current_app(Some(ForegroundApp::unnamed("browser".into())));
+    assert_eq!(unlike_focus(&orch), BTreeSet::new());
 }
 
 #[test]
@@ -245,7 +377,7 @@ fn unidentified_pointer_context_uses_the_focused_profile_never_the_desktop() {
     orch.devices = vec![dev("a", 1, true)];
     orch.set_current_app(Some(ForegroundApp::unnamed("browser".into())));
     let published_pointer_target = |orch: &Orchestrator| {
-        let hook = orch.shared.hook_maps.read().expect("maps").pointer_target;
+        let hook = orch.shared.hook_maps.read().expect("maps").pointer.clone();
         let plan = orch
             .shared
             .capture_plans
@@ -254,9 +386,10 @@ fn unidentified_pointer_context_uses_the_focused_profile_never_the_desktop() {
             .first()
             .expect("mouse plan")
             .dispatch
-            .pointer_target;
+            .pointer
+            .clone();
         assert_eq!(hook, plan, "OS hook and HID++ share one mouse context");
-        hook
+        hook.as_ref().map(PointerSelection::target)
     };
     assert!(orch.set_pointer_context(PointerContext {
         app: None,
@@ -329,7 +462,13 @@ fn unidentified_pointer_context_without_a_focused_app_uses_the_global_bindings()
     });
     assert_eq!(published_back_binding(&orch), Some(Action::PreviousDesktop));
     assert_eq!(
-        orch.shared.hook_maps.read().expect("maps").pointer_target,
+        orch.shared
+            .hook_maps
+            .read()
+            .expect("maps")
+            .pointer
+            .as_ref()
+            .map(PointerSelection::target),
         Some(PointerTarget::Unavailable)
     );
 
@@ -341,14 +480,11 @@ fn unidentified_pointer_context_without_a_focused_app_uses_the_global_bindings()
     orch.set_current_app(None);
     orch.rebuild();
     assert_eq!(published_back_binding(&orch), Some(Action::PreviousDesktop));
-    assert_eq!(
-        orch.shared.hook_maps.read().expect("maps").pointer_target,
-        None
-    );
+    assert_eq!(orch.shared.hook_maps.read().expect("maps").pointer, None);
 }
 
 #[test]
-fn hook_maps_publish_selection_and_preserve_learned_thumbwheel_polarity() {
+fn hook_maps_publish_selection_and_preserve_capture_observations() {
     let mut orch = orchestrator(Config::default());
     orch.devices = vec![dev("a", 1, true)];
     orch.rebuild();
@@ -356,8 +492,7 @@ fn hook_maps_publish_selection_and_preserve_learned_thumbwheel_polarity() {
     {
         let mut maps = orch.shared.hook_maps.write().expect("hook maps");
         assert_eq!(maps.selected_device.as_deref(), Some("a"));
-        maps.thumbwheel_positive_is_forward
-            .insert("a".to_owned(), true);
+        maps.shift_held.insert("a".to_owned());
     }
 
     // Config/app rebuilds replace binding maps but hardware observations must
@@ -365,7 +500,7 @@ fn hook_maps_publish_selection_and_preserve_learned_thumbwheel_polarity() {
     orch.reload_config(Config::default());
     let maps = orch.shared.hook_maps.read().expect("hook maps");
     assert_eq!(maps.selected_device.as_deref(), Some("a"));
-    assert_eq!(maps.thumbwheel_positive_is_forward.get("a"), Some(&true));
+    assert!(maps.shift_held.contains("a"));
 }
 
 fn assert_side_gesture_capture_follows_platform_ownership_and_hook_availability(button: ButtonId) {
@@ -432,6 +567,25 @@ fn assert_side_gesture_capture_follows_platform_ownership_and_hook_availability(
         !side_gesture_is_requested(&orch),
         "revoking the movement hook must restore native HID++ controls"
     );
+}
+
+/// macOS hands Back/Forward gestures to HID++ raw XY, which a spy-only mouse
+/// cannot report, so its gestures must stay in the hook's maps.
+#[test]
+fn a_spy_only_mouse_keeps_its_side_gestures_in_the_os_hook() {
+    let mut config = Config::default();
+    config.set_gesture_mode("0407f", ButtonId::Back, true);
+    let mut orch = orchestrator(config);
+    orch.devices = vec![dev("0407f", 1, true)];
+    orch.rebuild();
+    orch.set_os_mouse_hook_available(true);
+
+    let hook_maps = orch
+        .shared
+        .hook_maps
+        .read()
+        .expect("hook maps should not be poisoned");
+    assert!(hook_maps.gestures.contains_key(&ButtonId::Back));
 }
 
 #[test]
@@ -509,9 +663,7 @@ fn a_control_the_keyboard_session_owns_leaves_the_keyboard_capture_plan() {
     orch.devices = vec![keyboard];
     orch.rebuild();
 
-    let spec = orch
-        .keyboard_spec_for()
-        .expect("the bound key publishes a spec");
+    let spec = sole_keyboard_spec(&orch).expect("the bound key publishes a spec");
     assert_eq!(
         spec.wanted.keys().copied().collect::<Vec<_>>(),
         [multiplatform_back]
@@ -549,7 +701,7 @@ fn a_back_binding_alone_keeps_its_whole_family_on_a_keyboard() {
     orch.devices = vec![keyboard];
     orch.rebuild();
 
-    assert!(orch.keyboard_spec_for().is_none());
+    assert!(sole_keyboard_spec(&orch).is_none());
     let published = orch.shared.capture_plans.borrow();
     let diverted: Vec<u16> = published.plans()[0]
         .target
@@ -563,6 +715,79 @@ fn a_back_binding_alone_keeps_its_whole_family_on_a_keyboard() {
     }
 }
 
+/// A keyboard that binds a key only for one app keeps its capture session
+/// while other apps are in front, with nothing diverted. A focus change then
+/// changes the divert set of the same target in place, instead of arming the
+/// keyboard from scratch (#2140).
+#[test]
+fn a_per_app_only_key_keeps_the_keyboard_session_with_nothing_diverted() {
+    const KEY: u16 = 0x00e7;
+    let mut config = Config::default();
+    config.set_per_app_binding("kbd", "editor", ButtonId::control(KEY), Some(Action::Copy));
+    let mut orch = orchestrator(config);
+    let mut keyboard = dev("kbd", 2, true);
+    keyboard.kind = DeviceKind::Keyboard;
+    orch.devices = vec![keyboard];
+    orch.rebuild();
+    let elsewhere = sole_keyboard_spec(&orch).expect("a per-app key holds the session");
+    assert!(elsewhere.wanted.is_empty(), "{:#06x?}", elsewhere.wanted);
+
+    orch.set_current_app(Some(ForegroundApp::unnamed("editor".into())));
+    let in_editor = sole_keyboard_spec(&orch).expect("spec");
+    assert_eq!(in_editor.route, elsewhere.route);
+    assert_eq!(
+        in_editor.wanted.into_iter().collect::<Vec<_>>(),
+        [(KEY, ButtonId::control(KEY))]
+    );
+}
+/// On a route two inventory entries share, a keyboard that binds keys only
+/// for another app never takes the session from a keyboard whose bindings
+/// apply now, even when it comes first in inventory order. On routes of
+/// their own, each holds a session.
+#[test]
+fn a_keyboard_with_current_bindings_wins_over_a_per_app_only_one() {
+    let mut config = Config::default();
+    config.set_per_app_binding(
+        "editor-only",
+        "editor",
+        ButtonId::control(0x00e7),
+        Some(Action::Copy),
+    );
+    config.set_binding(
+        "everywhere",
+        ButtonId::control(0x00e8),
+        Binding::Single(Action::Paste),
+    );
+    let mut orch = orchestrator(config);
+    let keyboards = || {
+        [("editor-only", 2), ("everywhere", 3)].map(|(key, index)| {
+            let mut keyboard = dev(key, index, true);
+            keyboard.kind = DeviceKind::Keyboard;
+            keyboard
+        })
+    };
+    orch.devices = keyboards().into();
+    orch.rebuild();
+    assert_eq!(
+        orch.keyboard_specs_for()
+            .into_iter()
+            .map(|spec| (spec.config_key, spec.wanted.is_empty()))
+            .collect::<Vec<_>>(),
+        [
+            ("editor-only".to_owned(), true),
+            ("everywhere".to_owned(), false)
+        ]
+    );
+
+    let mut sharing = keyboards();
+    sharing[1].route = sharing[0].route.clone();
+    orch.devices = sharing.into();
+    orch.rebuild();
+    assert_eq!(
+        sole_keyboard_spec(&orch).expect("spec").config_key,
+        "everywhere"
+    );
+}
 #[test]
 fn a_disabled_mouse_keeps_its_latest_route_for_restore() {
     let mut config = Config::default();

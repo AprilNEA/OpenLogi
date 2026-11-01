@@ -45,19 +45,24 @@ jobs:
           sudo apt-get install -y \
             libudev-dev pkg-config gcc g++ clang libssl-dev libzstd-dev
       # GITHUB_TOKEN pushes do not trigger downstream workflows.
+      - name: Load the automation 1Password Environment
+        uses: AprilNEA/actions/op-environment@3ffb3374a171f06ccfd28fcebc687c9f58516e9b # v1.0.0
+        with:
+          service-account-token: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          environment-id: ${{ vars.OP_AUTOMATION_ENVIRONMENT_ID }}
       - name: Mint GitHub App token
         id: app-token
-        uses: ./.github/actions/github-app-token-from-1password
+        uses: AprilNEA/actions/github-app-token@3ffb3374a171f06ccfd28fcebc687c9f58516e9b # v1.0.0
         with:
-          op-service-account-token: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
-          op-github-app-item: ${{ secrets.OP_GITHUB_APP_ITEM }}
+          client-id: ${{ env.GITHUB_APP_ID }}
+          private-key: ${{ env.GITHUB_APP_PRIVATE_KEY }}
       - name: Run release-plz (release-pr)
         uses: release-plz/action@v0.5
         with:
           command: release-pr
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
-          CARGO_REGISTRY_TOKEN: ${{ steps.app-token.outputs.cargo-registry-token }}
+          CARGO_REGISTRY_TOKEN: ${{ env.CARGO_REGISTRY_TOKEN }}
       # release-plz skips release=false app crates; git-cliff covers the whole repo.
       - name: Find current release PR
         id: open_release_pr
@@ -194,13 +199,19 @@ jobs:
       - name: Verify publish closure
         if: steps.release_commit.outputs.skip != 'true'
         run: cargo xtask release check-publish
+      - name: Load the automation 1Password Environment
+        if: steps.release_commit.outputs.skip != 'true'
+        uses: AprilNEA/actions/op-environment@3ffb3374a171f06ccfd28fcebc687c9f58516e9b # v1.0.0
+        with:
+          service-account-token: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          environment-id: ${{ vars.OP_AUTOMATION_ENVIRONMENT_ID }}
       - name: Mint GitHub App token
         if: steps.release_commit.outputs.skip != 'true'
         id: app-token
-        uses: ./.github/actions/github-app-token-from-1password
+        uses: AprilNEA/actions/github-app-token@3ffb3374a171f06ccfd28fcebc687c9f58516e9b # v1.0.0
         with:
-          op-service-account-token: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
-          op-github-app-item: ${{ secrets.OP_GITHUB_APP_ITEM }}
+          client-id: ${{ env.GITHUB_APP_ID }}
+          private-key: ${{ env.GITHUB_APP_PRIVATE_KEY }}
       - name: Run release-plz (release)
         if: steps.release_commit.outputs.skip != 'true'
         uses: release-plz/action@v0.5
@@ -208,4 +219,4 @@ jobs:
           command: release
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
-          CARGO_REGISTRY_TOKEN: ${{ steps.app-token.outputs.cargo-registry-token }}
+          CARGO_REGISTRY_TOKEN: ${{ env.CARGO_REGISTRY_TOKEN }}

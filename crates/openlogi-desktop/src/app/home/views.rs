@@ -1,14 +1,14 @@
 //! Switchable grid, list, and carousel layouts for the Home device gallery.
 
 use gpui::{
-    AnyElement, Context, ElementId, InteractiveElement, IntoElement, ParentElement, Rems,
-    SharedString, StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px,
-    rems, rgb,
+    AnyElement, App, Context, ElementId, InteractiveElement, IntoElement, ParentElement, Pixels,
+    Rems, RenderOnce, SharedString, StatefulInteractiveElement as _, Styled, Window, div,
+    prelude::FluentBuilder as _, px, rems, rgb,
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
-    IconName, Sizable as _,
-    button::{Toggle, ToggleVariants as _},
+    IconName, Selectable as _, Sizable as _,
+    button::{Button, ButtonGroup},
     h_flex,
     menu::ContextMenuExt as _,
     scroll::ScrollableElement as _,
@@ -24,67 +24,93 @@ use super::{
 use crate::state::{AppState, DeviceRecord};
 use crate::ui::battery::{BatteryIndicator, battery_charging_no_reading, value_label};
 use crate::ui::carousel::Carousel;
-use crate::ui::theme::{self, ContentWidth, Palette, Typography as _};
+use crate::ui::theme::{self, ContentWidth, Palette, SelectableStyle as _, Typography as _};
 
 pub(super) fn device_view_switcher(
     current: DeviceViewMode,
     view: gpui::Entity<AppView>,
 ) -> impl IntoElement {
-    let toggle =
-        move |id: &'static str, icon: IconName, tooltip: SharedString, mode: DeviceViewMode| {
-            let view = view.clone();
-            Toggle::new(id)
-                .icon(icon)
-                .tooltip(tooltip)
-                .checked(current == mode)
+    /// Grid / list / carousel as one segmented control. The chosen segment
+    /// takes `SelectableStyle::selected_segment` like the app's other
+    /// segmented controls, which reads the theme at render time. Not a stock
+    /// `Toggle`: it hovers with the fill it marks its checked state with, so a
+    /// hovered mode would look selected too.
+    #[derive(IntoElement)]
+    struct Switcher {
+        current: DeviceViewMode,
+        view: gpui::Entity<AppView>,
+    }
+
+    impl RenderOnce for Switcher {
+        fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+            const MODES: [DeviceViewMode; 3] = [
+                DeviceViewMode::Grid,
+                DeviceViewMode::List,
+                DeviceViewMode::Carousel,
+            ];
+            let Self { current, view } = self;
+            let segment = |mode: DeviceViewMode| {
+                let (id, icon, tooltip) = match mode {
+                    DeviceViewMode::Grid => (
+                        "device-view-grid",
+                        IconName::LayoutDashboard,
+                        tr!("common.grid"),
+                    ),
+                    DeviceViewMode::List => {
+                        ("device-view-list", IconName::Menu, tr!("common.list"))
+                    }
+                    DeviceViewMode::Carousel => (
+                        "device-view-carousel",
+                        IconName::GalleryVerticalEnd,
+                        tr!("common.carousel"),
+                    ),
+                };
+                let selected = current == mode;
+                Button::new(id)
+                    .icon(icon)
+                    .accessibility_label(tooltip.clone())
+                    .tooltip(tooltip)
+                    .selected(selected)
+                    .selected_segment(selected, cx)
+            };
+
+            ButtonGroup::new("device-view")
                 .outline()
                 .small()
-                .on_click(move |checked, _, cx| {
-                    if !checked {
+                .children(MODES.map(segment))
+                .on_click(move |clicks, _, cx| {
+                    let Some(&mode) = clicks.first().and_then(|&index| MODES.get(index)) else {
+                        return;
+                    };
+                    if mode == current {
                         return;
                     }
                     AppState::apply(cx, |state| state.commit_device_view_mode(mode));
                     view.update(cx, |_, cx| cx.notify());
                 })
-        };
+        }
+    }
 
-    h_flex().gap_1().children([
-        toggle(
-            "device-view-grid",
-            IconName::LayoutDashboard,
-            tr!("common.grid"),
-            DeviceViewMode::Grid,
-        ),
-        toggle(
-            "device-view-list",
-            IconName::Menu,
-            tr!("common.list"),
-            DeviceViewMode::List,
-        ),
-        toggle(
-            "device-view-carousel",
-            IconName::GalleryVerticalEnd,
-            tr!("common.carousel"),
-            DeviceViewMode::Carousel,
-        ),
-    ])
+    Switcher { current, view }
 }
 
 /// Gap between gallery cards.
 const GALLERY_GAP: Rems = rems(1.);
+/// Inset of the grid from the window edges.
+const GALLERY_PAD: Rems = rems(1.5);
+/// Most cards a grid row holds; a wider window centres the grid instead.
+const GALLERY_MAX_COLUMNS: u16 = 3;
 /// Fixed carousel width: three cards plus navigation fit the default window.
 const CAROUSEL_CARD_W: Rems = rems(21.25);
-/// Maximum width of the grid: three cards at their maximum width plus gaps.
-const GALLERY_MAX_W: Rems = rems(77.9375);
 
 /// Render the persisted Home layout. All three modes share ordering, metadata,
 /// accessibility, and active-device semantics; only spatial density changes.
-pub(in crate::app) fn device_gallery(cx: &mut Context<AppView>) -> AnyElement {
+pub(in crate::app) fn device_gallery(window: &Window, cx: &mut Context<AppView>) -> AnyElement {
     let mode = AppState::try_read(cx).map_or(DeviceViewMode::Grid, |state| {
         state.app_settings().device_view_mode
     });
     match mode {
-        DeviceViewMode::Grid => device_grid(cx).into_any_element(),
+        DeviceViewMode::Grid => device_grid(window, cx).into_any_element(),
         DeviceViewMode::List => device_list(cx).into_any_element(),
         DeviceViewMode::Carousel => device_carousel(cx).into_any_element(),
     }
@@ -98,18 +124,40 @@ pub(in crate::app) fn ordered_device_indices(records: &[DeviceRecord]) -> Vec<us
     indices
 }
 
-fn device_grid(cx: &mut Context<AppView>) -> impl IntoElement {
+/// Columns of the Home grid across `width`: as many minimum-width cards as
+/// fit, capped at [`GALLERY_MAX_COLUMNS`], and never none.
+fn grid_columns(width: Pixels, rem: Pixels) -> u16 {
+    let card = theme::GALLERY_CARD_MIN_W.to_pixels(rem);
+    let gap = GALLERY_GAP.to_pixels(rem);
+    (2..=GALLERY_MAX_COLUMNS)
+        .rev()
+        .find(|&n| card * f32::from(n) + gap * f32::from(n - 1) <= width)
+        .unwrap_or(1)
+}
+
+/// Equal-width columns for every row, so a short last row lines up under the
+/// rows above instead of stretching its cards. The column count follows the
+/// window, which the gallery spans; the grid stops growing once its cards
+/// reach their maximum width.
+fn device_grid(window: &Window, cx: &mut Context<AppView>) -> impl IntoElement {
     let view = cx.entity();
     let pal = theme::palette(cx);
+    let rem = window.rem_size();
+    let columns = grid_columns(
+        window.viewport_size().width - GALLERY_PAD.to_pixels(rem) * 2.,
+        rem,
+    );
+    let max_w = rems(
+        f32::from(columns) * theme::GALLERY_CARD_MAX_W.0 + f32::from(columns - 1) * GALLERY_GAP.0,
+    );
     let cards = AppState::try_read(cx).map_or_else(Vec::new, |state| {
         let active_idx = state.selected_device_index().unwrap_or(0);
         ordered_device_indices(state.devices())
             .into_iter()
-            .map(|idx| {
+            .enumerate()
+            .map(|(position, idx)| {
                 device_card_element(state, idx, active_idx, view.clone(), pal)
-                    .min_w(theme::GALLERY_CARD_MIN_W)
-                    .max_w(theme::GALLERY_CARD_MAX_W)
-                    .flex_1()
+                    .debug_selector(move || format!("home-grid-card-{position}"))
                     .context_menu(device_menu(&state.devices()[idx]))
             })
             .collect()
@@ -121,13 +169,13 @@ fn device_grid(cx: &mut Context<AppView>) -> impl IntoElement {
         .min_h_0()
         .items_center()
         .overflow_y_scrollbar()
-        .p_6()
+        .p(GALLERY_PAD)
         .child(
-            h_flex()
+            div()
+                .grid()
+                .grid_cols(columns)
                 .w_full()
-                .max_w(GALLERY_MAX_W)
-                .items_stretch()
-                .flex_wrap()
+                .max_w(max_w)
                 .gap(GALLERY_GAP)
                 .children(cards),
         )
@@ -177,7 +225,9 @@ fn device_carousel(cx: &mut Context<AppView>) -> impl IntoElement {
     let render_order = order.clone();
     let select_order = order.clone();
 
-    v_flex().flex_1().w_full().min_h_0().child(
+    // Top-aligned like the grid: the row's own vertical padding brings the
+    // cards level with the grid's inset.
+    v_flex().flex_1().w_full().min_h_0().pt_2().child(
         Carousel::new("device-carousel", CAROUSEL_CARD_W)
             .len(order.len())
             .selected(selected)

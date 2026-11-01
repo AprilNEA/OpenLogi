@@ -100,13 +100,19 @@ jobs:
           RELEASE_SHA: ${{ steps.release_pr.outputs.sha }}
         run: cargo xtask release next-beta --release-ref "$RELEASE_SHA"
 
+      - name: Load the automation 1Password Environment
+        if: ${{ !inputs.dry_run }}
+        uses: AprilNEA/actions/op-environment@3ffb3374a171f06ccfd28fcebc687c9f58516e9b # v1.0.0
+        with:
+          service-account-token: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          environment-id: ${{ vars.OP_AUTOMATION_ENVIRONMENT_ID }}
       - name: Mint GitHub App token
         if: ${{ !inputs.dry_run }}
         id: app-token
-        uses: ./.github/actions/github-app-token-from-1password
+        uses: AprilNEA/actions/github-app-token@3ffb3374a171f06ccfd28fcebc687c9f58516e9b # v1.0.0
         with:
-          op-service-account-token: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
-          op-github-app-item: ${{ secrets.OP_GITHUB_APP_ITEM }}
+          client-id: ${{ env.GITHUB_APP_ID }}
+          private-key: ${{ env.GITHUB_APP_PRIVATE_KEY }}
 
       # The App's token, not GITHUB_TOKEN: a tag GITHUB_TOKEN pushes starts no
       # workflow, and release.yml must run on it.

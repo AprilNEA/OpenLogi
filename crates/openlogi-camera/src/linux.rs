@@ -11,11 +11,13 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use v4l::fraction::Fraction;
 use v4l::frameinterval::FrameIntervalEnum;
 use v4l::video::Capture;
 use v4l::{Device, FourCC};
 
-use crate::Camera;
+use crate::stream_mode::whole_fps;
+use crate::{Camera, StreamMode, StreamModes};
 
 /// Where the kernel lists V4L2 nodes, one directory per `/dev/video*`.
 const SYSFS_V4L: &str = "/sys/class/video4linux";
@@ -277,48 +279,98 @@ fn max_format(device: &Device) -> (Option<(u32, u32)>, Option<u32>) {
         return (None, None);
     };
 
-    let mut max_resolution: Option<(u32, u32)> = None;
-    let mut max_fps: Option<u32> = None;
+    let sizes: Vec<SizeRates> = formats
+        .iter()
+        .flat_map(|format| sizes_with_rates(device, format.fourcc))
+        .collect();
+    summarize(&sizes)
+}
 
-    for format in formats {
-        let Ok(sizes) = device.enum_framesizes(format.fourcc) else {
-            continue;
-        };
-        for size in sizes {
-            for discrete in size.size.to_discrete() {
-                let candidate = (discrete.width, discrete.height);
-                if max_resolution.is_none_or(|(w, h)| {
-                    u64::from(candidate.0) * u64::from(candidate.1) > u64::from(w) * u64::from(h)
-                }) {
-                    max_resolution = Some(candidate);
-                }
-                if let Some(fps) = max_discrete_fps(device, format.fourcc, candidate) {
-                    max_fps = Some(max_fps.map_or(fps, |best: u32| best.max(fps)));
-                }
-            }
-        }
-    }
+/// A discrete frame size and the discrete rates the driver offers at it.
+/// `rates` is empty when the driver reports only a stepwise or continuous
+/// interval range for the size.
+struct SizeRates {
+    size: (u32, u32),
+    rates: Vec<u32>,
+}
 
+/// Largest frame size, and highest rate offered at any size. The first of two
+/// equally large sizes wins, so enumeration order stays the tiebreak.
+fn summarize(sizes: &[SizeRates]) -> (Option<(u32, u32)>, Option<u32>) {
+    let max_resolution = sizes
+        .iter()
+        .map(|entry| entry.size)
+        .fold(None, |best, size| match best {
+            Some(current) if resolution_area(size) <= resolution_area(current) => Some(current),
+            _ => Some(size),
+        });
+    let max_fps = sizes
+        .iter()
+        .flat_map(|entry| entry.rates.iter().copied())
+        .max();
     (max_resolution, max_fps)
 }
 
-/// Highest discrete frame rate the driver offers for one format and size.
-///
-/// Intervals are periods (seconds per frame), so the highest rate is the
-/// smallest interval. Stepwise/continuous ranges are skipped — they describe a
-/// span rather than an offered rate — as are zero-numerator entries, which
-/// would divide by zero.
-fn max_discrete_fps(device: &Device, fourcc: FourCC, size: (u32, u32)) -> Option<u32> {
-    let intervals = device.enum_frameintervals(fourcc, size.0, size.1).ok()?;
-    intervals
+/// Every discrete frame size the driver offers for `fourcc`, with the discrete
+/// rates at each. Stepwise and continuous *sizes* are skipped — they describe a
+/// span rather than an offered size.
+fn sizes_with_rates(device: &Device, fourcc: FourCC) -> Vec<SizeRates> {
+    device
+        .enum_framesizes(fourcc)
         .into_iter()
-        .filter_map(|interval| match interval.interval {
-            FrameIntervalEnum::Discrete(fraction) if fraction.numerator > 0 => {
-                Some(fraction.denominator / fraction.numerator)
+        .flatten()
+        .flat_map(|size| size.size.to_discrete())
+        .map(|discrete| {
+            let size = (discrete.width, discrete.height);
+            SizeRates {
+                size,
+                rates: discrete_rates(device, fourcc, size),
             }
-            _ => None,
         })
-        .max()
+        .collect()
+}
+
+/// The discrete frame rates the driver offers for one format and size.
+/// Stepwise/continuous ranges are skipped, as are intervals [`fps_of`] cannot
+/// turn into a rate.
+fn discrete_rates(device: &Device, fourcc: FourCC, size: (u32, u32)) -> Vec<u32> {
+    device
+        .enum_frameintervals(fourcc, size.0, size.1)
+        .into_iter()
+        .flatten()
+        .filter_map(|interval| match interval.interval {
+            FrameIntervalEnum::Discrete(fraction) => fps_of(fraction),
+            FrameIntervalEnum::Stepwise(_) => None,
+        })
+        .collect()
+}
+
+/// Every [`StreamMode`] the driver offers for `fourcc` — the list a user picks
+/// a resolution and a frame rate from. Sizes with no discrete rate are left
+/// out: there is no rate to ask the camera for.
+pub(crate) fn stream_modes(device: &Device, fourcc: FourCC) -> StreamModes {
+    StreamModes::new(sizes_with_rates(device, fourcc).into_iter().flat_map(
+        |SizeRates {
+             size: (width, height),
+             rates,
+         }| {
+            rates
+                .into_iter()
+                .map(move |fps| StreamMode { width, height, fps })
+        },
+    ))
+}
+
+/// Whole frames per second for a V4L2 frame interval.
+///
+/// Intervals are periods (seconds per frame), and the camera's own are rounded
+/// the way its firmware rounds them — `333333/10000000` is a 30 fps camera —
+/// so the rate is rounded to the nearest whole number, not truncated. `None`
+/// for a zero interval (it would divide by zero) or one too slow to round to a
+/// frame per second.
+pub(crate) fn fps_of(interval: Fraction) -> Option<u32> {
+    // A period of `n / d` seconds per frame is `d / n` frames per second.
+    whole_fps(interval.denominator, interval.numerator)
 }
 
 /// Read a sysfs attribute, trimming the trailing newline the kernel appends.
@@ -466,5 +518,87 @@ mod tests {
         ]);
 
         assert_eq!(cameras, vec![color]);
+    }
+
+    fn size_rates(width: u32, height: u32, rates: &[u32]) -> SizeRates {
+        SizeRates {
+            size: (width, height),
+            rates: rates.to_vec(),
+        }
+    }
+
+    #[test]
+    fn fps_of_reads_a_clean_interval() {
+        assert_eq!(fps_of(Fraction::new(1, 30)), Some(30));
+        assert_eq!(fps_of(Fraction::new(1, 60)), Some(60));
+    }
+
+    #[test]
+    fn fps_of_rounds_the_intervals_cameras_actually_report() {
+        // UVC intervals are in 100 ns units and rarely divide evenly. A 30 fps
+        // camera may report 333333 (just under a third of a second) or 333334
+        // (just over it); the latter is 29.99994 fps, which the truncating
+        // `den / num` this replaced would have listed as 29.
+        assert_eq!(fps_of(Fraction::new(333_333, 10_000_000)), Some(30));
+        assert_eq!(fps_of(Fraction::new(333_334, 10_000_000)), Some(30));
+        assert_eq!(fps_of(Fraction::new(166_666, 10_000_000)), Some(60));
+        assert_eq!(fps_of(Fraction::new(400_000, 10_000_000)), Some(25));
+    }
+
+    #[test]
+    fn fps_of_keeps_slow_rates_that_round_to_a_whole_frame() {
+        // 7.5 fps (1333333 / 1e7) is a real UVC rate; it rounds to 8, not 0.
+        assert_eq!(fps_of(Fraction::new(1_333_333, 10_000_000)), Some(8));
+    }
+
+    #[test]
+    fn fps_of_rejects_intervals_that_are_not_a_rate() {
+        assert_eq!(fps_of(Fraction::new(0, 10_000_000)), None);
+        assert_eq!(fps_of(Fraction::new(0, 0)), None);
+        // Slower than one frame per two seconds rounds to zero fps.
+        assert_eq!(fps_of(Fraction::new(3, 1)), None);
+    }
+
+    #[test]
+    fn fps_of_does_not_overflow_on_extreme_fractions() {
+        // The rounding add happens in u64, so a hostile driver can't make it
+        // wrap (or panic in debug builds).
+        assert_eq!(fps_of(Fraction::new(u32::MAX, u32::MAX)), Some(1));
+        assert_eq!(fps_of(Fraction::new(u32::MAX, 1)), None);
+    }
+
+    #[test]
+    fn summarize_picks_the_largest_size_and_the_fastest_rate() {
+        let sizes = [
+            size_rates(640, 480, &[30, 15]),
+            size_rates(1920, 1080, &[30]),
+            size_rates(1280, 720, &[60, 30]),
+        ];
+
+        // The fastest rate is at 720p, not at the largest size.
+        assert_eq!(summarize(&sizes), (Some((1920, 1080)), Some(60)));
+    }
+
+    #[test]
+    fn summarize_keeps_the_first_of_two_equally_large_sizes() {
+        // 1280x720 and 960x960 are both 921 600 px.
+        let sizes = [size_rates(1280, 720, &[30]), size_rates(960, 960, &[30])];
+        assert_eq!(summarize(&sizes).0, Some((1280, 720)));
+
+        let reversed = [size_rates(960, 960, &[30]), size_rates(1280, 720, &[30])];
+        assert_eq!(summarize(&reversed).0, Some((960, 960)));
+    }
+
+    #[test]
+    fn summarize_reports_no_rate_when_no_size_has_a_discrete_one() {
+        // Stepwise/continuous intervals leave `rates` empty: the size still
+        // counts, the rate stays unknown.
+        let sizes = [size_rates(1920, 1080, &[])];
+        assert_eq!(summarize(&sizes), (Some((1920, 1080)), None));
+    }
+
+    #[test]
+    fn summarize_of_nothing_is_nothing() {
+        assert_eq!(summarize(&[]), (None, None));
     }
 }

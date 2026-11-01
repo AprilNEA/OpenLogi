@@ -1,6 +1,7 @@
 //! Regression tests for OS-hook state and dispatch policy.
 
 use super::*;
+use crate::runtime::FocusBinding;
 use openlogi_core::binding::{GESTURE_SWIPE_THRESHOLD, LongPressBinding};
 use openlogi_core::config::KeyModifiers;
 
@@ -52,7 +53,7 @@ fn test_dispatcher() -> (
                 device_io: openlogi_hid::device_io_channel().1,
                 transport_turns: crate::hardware::TransportTurns::default(),
             },
-            action_ring,
+            requests: action_ring,
         },
         buttons: owner.input(),
     };
@@ -232,8 +233,50 @@ fn queued_key_action_retains_its_press_time_target() {
     );
     assert_eq!(
         queued.recv().expect("action should be queued"),
-        (Action::BrowserBack, target)
+        (Action::BrowserBack, target, PressControl::Key(keycode))
     );
+    assert!(owner.shutdown());
+}
+
+/// A held action needs the key's release, which the one-shot action queue
+/// never delivers.
+#[test]
+fn dpi_shift_on_a_key_runs_as_a_held_press() {
+    use super::super::button::ButtonRuntimeEvent;
+
+    let (dispatcher, mut owner, events) = test_dispatcher();
+    let keycode = 0x7a;
+    let modifiers = KeyModifiers::default();
+    let bindings = Arc::new(RwLock::new(BTreeMap::from([(
+        KeyTrigger { keycode, modifiers },
+        Action::DpiShift,
+    )])));
+    let (actions, queued) = mpsc::sync_channel(1);
+    let key = |pressed| {
+        handle_key(
+            KeyEvent {
+                keycode,
+                pressed,
+                modifiers,
+            },
+            &bindings,
+            &actions,
+            &dispatcher,
+            ActionDispatchTarget::capture,
+        )
+    };
+
+    assert_eq!(key(true), EventDisposition::Suppress);
+    queued.try_recv().unwrap_err();
+    assert!(matches!(
+        events.recv_timeout(Duration::from_secs(1)),
+        Ok(ButtonRuntimeEvent::Started(_))
+    ));
+    assert_eq!(key(false), EventDisposition::Suppress);
+    assert!(matches!(
+        events.recv_timeout(Duration::from_secs(1)),
+        Ok(ButtonRuntimeEvent::Ended { .. })
+    ));
     assert!(owner.shutdown());
 }
 
@@ -245,7 +288,10 @@ fn mouse_press_uses_the_target_published_with_its_binding_not_frontmost_safari()
     let (dispatcher, mut owner, events) = test_dispatcher();
     let hooks = Arc::new(RwLock::new(HookMaps {
         bindings: BTreeMap::from([(ButtonId::Back, Action::PreviousDesktop.into())]),
-        pointer_target: Some(PointerTarget::Desktop),
+        pointer: Some(PointerSelection::new(
+            PointerTarget::Desktop,
+            BTreeSet::from([ButtonId::Back]),
+        )),
         ..HookMaps::default()
     }));
     let mouse = EventDevice {
@@ -273,6 +319,7 @@ fn mouse_press_uses_the_target_published_with_its_binding_not_frontmost_safari()
         press.target(),
         ActionDispatchTarget::Pointer {
             target: PointerTarget::Desktop,
+            focus: FocusBinding::Distinct,
             fallback_safari_pid: None,
         }
     );
@@ -334,6 +381,35 @@ fn mouse_press_uses_the_target_published_with_its_binding_not_frontmost_safari()
 }
 
 #[test]
+fn pointer_press_judges_the_binding_layer_that_the_press_reads() {
+    use openlogi_hook::PointerTarget;
+
+    let mut maps = HookMaps {
+        bindings: BTreeMap::from([(ButtonId::Back, Action::BrowserBack.into())]),
+        shift_bindings: BTreeMap::from([(ButtonId::Back, Action::Copy.into())]),
+        selected_device: Some("mouse".into()),
+        pointer: Some(PointerSelection::new(
+            PointerTarget::Desktop,
+            BTreeSet::from([ButtonId::Back]),
+        )),
+        ..HookMaps::default()
+    };
+    let focus = |maps: &HookMaps, id| maps.pointer_press(id).map(|press| press.focus);
+    assert_eq!(focus(&maps, ButtonId::Back), Some(FocusBinding::Distinct));
+    assert_eq!(focus(&maps, ButtonId::Forward), Some(FocusBinding::Shared));
+    // No app profile changes the G-Shift layer, so focus shares its binding
+    // even where the base layer differs.
+    maps.shift_held.insert("mouse".into());
+    assert_eq!(
+        maps.press_binding(ButtonId::Back).0,
+        Some(Action::Copy.into())
+    );
+    assert_eq!(focus(&maps, ButtonId::Back), Some(FocusBinding::Shared));
+    maps.pointer = None;
+    assert_eq!(maps.pointer_press(ButtonId::Back), None);
+}
+
+#[test]
 fn queued_unidentified_pointer_action_retains_its_press_time_target() {
     use super::super::button::ButtonRuntimeEvent;
     use openlogi_hook::PointerTarget;
@@ -354,7 +430,10 @@ fn queued_unidentified_pointer_action_retains_its_press_time_target() {
         let (dispatcher, mut owner, events) = test_dispatcher();
         let hooks = Arc::new(RwLock::new(HookMaps {
             bindings: BTreeMap::from([(ButtonId::Back, Action::BrowserBack.into())]),
-            pointer_target: Some(PointerTarget::Unavailable),
+            pointer: Some(PointerSelection::new(
+                PointerTarget::Unavailable,
+                BTreeSet::new(),
+            )),
             ..HookMaps::default()
         }));
         let focused_safari = Cell::new(pressed_safari);
@@ -489,80 +568,6 @@ fn scroll_interception_uses_the_button_source_safety_policy_and_skips_trackpads(
 }
 
 #[test]
-fn rebound_horizontal_wheel_maps_to_thumbwheel_directions() {
-    let maps = HookMaps {
-        bindings: BTreeMap::from([
-            (ButtonId::ThumbwheelScrollUp, Action::NextTab.into()),
-            (ButtonId::ThumbwheelScrollDown, Action::PrevTab.into()),
-        ]),
-        ..HookMaps::default()
-    };
-    assert_eq!(
-        rebound_thumbwheel_action(&maps, 1.0),
-        Some((ButtonId::ThumbwheelScrollDown, Action::PrevTab))
-    );
-    assert_eq!(
-        rebound_thumbwheel_action(&maps, -1.0),
-        Some((ButtonId::ThumbwheelScrollUp, Action::NextTab))
-    );
-    assert_eq!(rebound_thumbwheel_action(&maps, 0.0), None);
-}
-
-#[test]
-fn rebound_horizontal_wheel_uses_the_selected_devices_polarity() {
-    let maps = HookMaps {
-        bindings: BTreeMap::from([
-            (ButtonId::ThumbwheelScrollUp, Action::NextTab.into()),
-            (ButtonId::ThumbwheelScrollDown, Action::PrevTab.into()),
-        ]),
-        selected_device: Some("mx3".to_owned()),
-        thumbwheel_positive_is_forward: BTreeMap::from([("mx3".to_owned(), true)]),
-        ..HookMaps::default()
-    };
-    assert_eq!(
-        rebound_thumbwheel_action(&maps, 1.0),
-        Some((ButtonId::ThumbwheelScrollUp, Action::NextTab))
-    );
-    assert_eq!(
-        rebound_thumbwheel_action(&maps, -1.0),
-        Some((ButtonId::ThumbwheelScrollDown, Action::PrevTab))
-    );
-}
-
-#[test]
-fn rebound_horizontal_wheel_does_not_guess_a_selected_devices_polarity() {
-    let maps = HookMaps {
-        bindings: BTreeMap::from([
-            (ButtonId::ThumbwheelScrollUp, Action::NextTab.into()),
-            (ButtonId::ThumbwheelScrollDown, Action::PrevTab.into()),
-        ]),
-        selected_device: Some("not-learned-yet".to_owned()),
-        ..HookMaps::default()
-    };
-    assert_eq!(rebound_thumbwheel_action(&maps, 1.0), None);
-    assert_eq!(rebound_thumbwheel_action(&maps, -1.0), None);
-}
-
-#[test]
-fn native_thumbwheel_scroll_stays_os_native() {
-    let maps = HookMaps {
-        bindings: BTreeMap::from([
-            (
-                ButtonId::ThumbwheelScrollUp,
-                default_binding(ButtonId::ThumbwheelScrollUp).into(),
-            ),
-            (
-                ButtonId::ThumbwheelScrollDown,
-                default_binding(ButtonId::ThumbwheelScrollDown).into(),
-            ),
-        ]),
-        ..HookMaps::default()
-    };
-    assert_eq!(rebound_thumbwheel_action(&maps, 1.0), None);
-    assert_eq!(rebound_thumbwheel_action(&maps, -1.0), None);
-}
-
-#[test]
 fn long_press_never_passes_through_as_a_native_click() {
     let binding = Binding::LongPress(LongPressBinding::new(
         default_binding(ButtonId::Back),
@@ -587,4 +592,218 @@ fn resolve_gesture_click_falls_back_when_click_is_absent() {
         resolve_gesture_click(&empty, ButtonId::Forward),
         default_binding(ButtonId::Forward)
     );
+}
+
+#[test]
+fn held_gshift_replaces_a_gesture_button_with_its_shifted_binding() {
+    let mut maps = HookMaps {
+        selected_device: Some("g502".into()),
+        ..HookMaps::default()
+    };
+    maps.gestures.insert(ButtonId::Back, BTreeMap::new());
+    maps.shift_bindings
+        .insert(ButtonId::Back, Binding::Single(Action::Copy));
+
+    let (binding, is_gesture) = maps.press_binding(ButtonId::Back);
+    assert!(is_gesture && binding.is_none());
+
+    maps.shift_held.insert("g502".into());
+    let (binding, is_gesture) = maps.press_binding(ButtonId::Back);
+    assert!(!is_gesture);
+    assert_eq!(binding, Some(Binding::Single(Action::Copy)));
+
+    // A button with no shifted binding keeps its gestures under G-Shift.
+    maps.gestures.insert(ButtonId::Forward, BTreeMap::new());
+    assert!(maps.press_binding(ButtonId::Forward).1);
+}
+
+/// A Signature M650 L connected over Bluetooth, as evdev reports it (#2158).
+fn m650_bluetooth() -> EventDevice {
+    EventDevice {
+        vendor_id: Some(0x046d),
+        product_id: Some(0xb02a),
+        product_name: Some("Signature M650 L Mouse".into()),
+    }
+}
+
+fn m650_route() -> openlogi_hid::DeviceRoute {
+    openlogi_hid::DeviceRoute::Direct {
+        vendor_id: 0x046d,
+        product_id: 0xb02a,
+    }
+}
+
+fn m650_session(epoch: u64) -> crate::runtime::HidppSessionId {
+    crate::runtime::HidppSessionId::with_epoch("m650", epoch)
+}
+
+#[test]
+fn a_diverted_button_is_owned_only_on_its_own_direct_device() {
+    let mut diverted = DivertedButtons::default();
+    diverted.record(&m650_session(7), &m650_route(), ButtonId::Back);
+    assert!(diverted.owns(&m650_bluetooth(), ButtonId::Back));
+    assert!(
+        !diverted.owns(&m650_bluetooth(), ButtonId::Forward),
+        "only what the session diverted"
+    );
+    let other_mouse = EventDevice {
+        product_id: Some(0xb034),
+        ..m650_bluetooth()
+    };
+    assert!(
+        !diverted.owns(&other_mouse, ButtonId::Back),
+        "another mouse's Back is a real press"
+    );
+    assert!(
+        !diverted.owns(&EventDevice::default(), ButtonId::Back),
+        "an unattributed source is never an echo"
+    );
+}
+
+#[test]
+fn receiver_routes_and_hidpp_only_buttons_are_not_recorded() {
+    let mut diverted = DivertedButtons::default();
+    let bolt = openlogi_hid::DeviceRoute::Bolt {
+        receiver_uid: "C0FFEE".into(),
+        slot: 1,
+    };
+    diverted.record(&m650_session(7), &bolt, ButtonId::Back);
+    diverted.record(&m650_session(7), &m650_route(), ButtonId::DpiToggle);
+    assert!(
+        !diverted.owns(&m650_bluetooth(), ButtonId::Back),
+        "a receiver route names no OS input identity"
+    );
+    assert!(!diverted.owns(&m650_bluetooth(), ButtonId::DpiToggle));
+}
+
+#[test]
+fn releasing_a_stale_epoch_keeps_its_successors_diversion() {
+    let mut diverted = DivertedButtons::default();
+    diverted.record(&m650_session(7), &m650_route(), ButtonId::Back);
+    diverted.record(&m650_session(8), &m650_route(), ButtonId::Back);
+    diverted.release(&m650_session(7));
+    assert!(diverted.owns(&m650_bluetooth(), ButtonId::Back));
+    diverted.release(&m650_session(8));
+    assert!(!diverted.owns(&m650_bluetooth(), ButtonId::Back));
+}
+
+/// #2158: Linux 7.3 re-reports a Back the M650's capture session diverted as
+/// an evdev press. The session dispatches it, so the hook must drop both
+/// edges instead of running the binding a second time.
+#[test]
+fn an_echo_of_a_hidpp_diverted_press_is_dropped_on_both_edges() {
+    use super::super::button::ButtonRuntimeEvent;
+    let (dispatcher, mut owner, events) = test_dispatcher();
+    let mut maps = HookMaps {
+        bindings: BTreeMap::from([(ButtonId::Back, Action::NextTab.into())]),
+        ..HookMaps::default()
+    };
+    maps.diverted_buttons
+        .record(&m650_session(7), &m650_route(), ButtonId::Back);
+    let hooks = Arc::new(RwLock::new(maps));
+    let m650 = m650_bluetooth();
+    for pressed in [true, false] {
+        assert_eq!(
+            handle_button(
+                ButtonId::Back,
+                pressed,
+                Some(&m650),
+                &hooks,
+                &dispatcher,
+                || None
+            ),
+            EventDisposition::Suppress,
+            "pressed {pressed}"
+        );
+    }
+    assert!(
+        events.recv_timeout(Duration::from_millis(200)).is_err(),
+        "the capture session dispatches this press, not the hook"
+    );
+
+    let other_mouse = EventDevice {
+        product_id: Some(0xb034),
+        ..m650_bluetooth()
+    };
+    assert_eq!(
+        handle_button(
+            ButtonId::Back,
+            true,
+            Some(&other_mouse),
+            &hooks,
+            &dispatcher,
+            || None
+        ),
+        EventDisposition::Suppress
+    );
+    let ButtonRuntimeEvent::Started(press) =
+        events.recv_timeout(Duration::from_secs(1)).expect("down")
+    else {
+        panic!("started");
+    };
+    assert_eq!(press.start_action(), Some(&Action::NextTab));
+    assert_eq!(
+        handle_button(
+            ButtonId::Back,
+            false,
+            Some(&other_mouse),
+            &hooks,
+            &dispatcher,
+            || None
+        ),
+        EventDisposition::Suppress
+    );
+    assert!(matches!(
+        events.recv_timeout(Duration::from_secs(1)).expect("up"),
+        ButtonRuntimeEvent::Ended { .. }
+    ));
+    assert!(owner.shutdown());
+}
+
+/// A release follows its press: an echo whose session ends mid-press still
+/// has its release dropped, rather than a stray native Back release reaching
+/// the desktop.
+#[test]
+fn an_echoed_press_keeps_its_release_after_the_session_ends() {
+    let (dispatcher, mut owner, events) = test_dispatcher();
+    let mut maps = HookMaps {
+        bindings: BTreeMap::from([(ButtonId::Back, Action::NextTab.into())]),
+        ..HookMaps::default()
+    };
+    maps.diverted_buttons
+        .record(&m650_session(7), &m650_route(), ButtonId::Back);
+    let hooks = Arc::new(RwLock::new(maps));
+    let m650 = m650_bluetooth();
+    assert_eq!(
+        handle_button(
+            ButtonId::Back,
+            true,
+            Some(&m650),
+            &hooks,
+            &dispatcher,
+            || None
+        ),
+        EventDisposition::Suppress
+    );
+    hooks
+        .write()
+        .expect("maps")
+        .diverted_buttons
+        .release(&m650_session(7));
+    assert_eq!(
+        handle_button(
+            ButtonId::Back,
+            false,
+            Some(&m650),
+            &hooks,
+            &dispatcher,
+            || None
+        ),
+        EventDisposition::Suppress
+    );
+    assert!(
+        events.recv_timeout(Duration::from_millis(200)).is_err(),
+        "neither edge reached the button runtime"
+    );
+    assert!(owner.shutdown());
 }

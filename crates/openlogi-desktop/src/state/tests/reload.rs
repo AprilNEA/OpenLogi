@@ -161,6 +161,65 @@ fn smooth_scroll_change_reloads_the_agent_once() {
 }
 
 #[test]
+fn momentum_scrolling_change_reloads_the_agent_once() {
+    let resolver = AssetResolver::new();
+    let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = AppState::new(Sources::in_memory(Config::ephemeral(), &resolver, commands));
+    assert!(
+        !state.app_settings().momentum_scrolling.enabled,
+        "off unless turned on"
+    );
+
+    let momentum = openlogi_core::config::MomentumScrolling {
+        enabled: true,
+        ..state.app_settings().momentum_scrolling
+    };
+    let _ = state.commit_momentum_scrolling(momentum);
+
+    assert!(state.app_settings().momentum_scrolling.enabled);
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(crate::services::ipc::Command::ReloadConfig(_))
+    ));
+
+    let _ = state.commit_momentum_scrolling(momentum);
+    assert!(receiver.try_recv().is_err());
+}
+
+/// A device's own momentum settings survive a change to Settings → General,
+/// and choosing the General value clears them.
+#[test]
+fn a_device_momentum_override_clears_when_it_matches_general() {
+    let resolver = AssetResolver::new();
+    let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = AppState::new(Sources::in_memory(Config::ephemeral(), &resolver, commands));
+    let key = DeviceKey::from("mouse");
+    let own = openlogi_core::config::MomentumScrolling {
+        enabled: true,
+        ..state.app_settings().momentum_scrolling
+    };
+    let _ = state.commit_device_momentum_scrolling(&key, own);
+    assert!(state.has_device_momentum_scrolling(key.as_str()));
+    assert_eq!(state.device_momentum_scrolling(key.as_str()), own);
+    assert_eq!(state.momentum_override_count(), 1);
+    assert!(
+        !state.app_settings().momentum_scrolling.enabled,
+        "Settings → General is untouched"
+    );
+
+    let general = openlogi_core::config::MomentumScrolling {
+        glide_ms: 800,
+        ..state.app_settings().momentum_scrolling
+    };
+    let _ = state.commit_momentum_scrolling(general);
+    assert_eq!(state.device_momentum_scrolling(key.as_str()), own);
+    let _ = state.commit_device_momentum_scrolling(&key, general);
+    assert!(!state.has_device_momentum_scrolling(key.as_str()));
+    assert_eq!(state.momentum_override_count(), 0);
+    assert_eq!(state.device_momentum_scrolling(key.as_str()), general);
+}
+
+#[test]
 fn turning_off_low_battery_notifications_reloads_the_agent_once() {
     let resolver = AssetResolver::new();
     let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();

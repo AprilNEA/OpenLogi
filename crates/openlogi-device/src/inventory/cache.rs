@@ -6,9 +6,11 @@ use openlogi_core::device::{BatteryInfo, BatteryLevel, BatteryStatus};
 
 use super::events::{EventFeatureIndices, EventSubscriptionHandle};
 use super::features::{
-    BatteryProbe, BatteryRead, ProbedFeatures, Refresh, probe_features, read_battery,
+    BatteryProbe, BatteryRead, ProbedFeatures, ProbedProtocol, Refresh, Refreshed, probe_features,
+    read_battery, refresh_features,
 };
 use crate::backend::NodeId;
+use crate::host_lock::ReceiverRegisterPhase;
 
 /// How long a device's probe is reused before a fresh read.
 /// The expensive part of a probe (the `enumerate_features` feature-table walk)
@@ -20,6 +22,17 @@ use crate::backend::NodeId;
 /// Elapsed time rather than scan count preserves cache freshness now that
 /// event-driven scans are intentionally irregular.
 pub(super) const REFRESH_INTERVAL: Duration = Duration::from_secs(30);
+
+/// How long a due refresh may re-read a known device after the device answered
+/// its ping (see [`refresh_features`]).
+///
+/// Cutting the re-read short costs only a deferred self-heal, because the cache
+/// already holds the data. The budget must end inside the direct probe's own
+/// budget, with room for the ping before it and the battery and lock-key reads
+/// after it. A probe cut off by the direct budget counts as a failure, and two
+/// failures retire the channel. A receiver slot cut off here gets the same
+/// cached data as one cut off by its own slot budget.
+pub(super) const REFRESH_WALK_BUDGET: Duration = Duration::from_secs(8);
 
 /// Stable identity used to memoize a device's probe across `enumerate` ticks.
 /// Keyed on the device's *own* identity (never its slot) so a re-paired or
@@ -52,7 +65,7 @@ pub(super) struct Cached {
     /// Which battery feature this device exposes and its runtime index, captured
     /// by the full probe. Lets cache hits re-read the volatile battery in one
     /// round-trip — no `Device::new` ping, no table walk. `None` when the device
-    /// exposes neither `0x1004` nor the legacy `0x1000`.
+    /// exposes no battery source [`BatteryProbe`] knows.
     pub(super) battery: Option<BatteryProbe>,
     /// Event-capable feature indexes found by the same immutable table walk.
     pub(super) events: EventFeatureIndices,
@@ -116,9 +129,10 @@ async fn refresh_battery(
     channel: &Arc<HidppChannel>,
     index: u8,
     probe: BatteryProbe,
+    registers: Option<&ReceiverRegisterPhase>,
     previous: Option<&ProbedFeatures>,
 ) -> (Option<BatteryInfo>, bool) {
-    match read_battery(channel, index, probe).await {
+    match read_battery(channel, index, probe, registers).await {
         BatteryRead::Reading(battery) => (
             Some(hold_percentage_while_charging(
                 battery,
@@ -161,6 +175,18 @@ pub(super) fn seen(id: Option<CacheKey>) -> CacheOutcome {
     id.map_or(CacheOutcome::Unkeyed, CacheOutcome::Seen)
 }
 
+/// The device a probe addresses, and the register access its caller holds.
+#[derive(Clone, Copy)]
+pub(super) struct ProbeTarget<'a> {
+    /// A receiver slot, or `0xff` for a direct device.
+    pub(super) index: u8,
+    /// The receiver's register phase, when the caller holds it for the whole
+    /// probe. A HID++ 1.0 device's registers are read only under it, because
+    /// their replies carry no software id. Only the Unifying slot walk holds
+    /// it that long.
+    pub(super) registers: Option<&'a ReceiverRegisterPhase>,
+}
+
 /// Whether `cached` is stale enough that the device should be re-probed.
 pub(super) fn is_stale(cached: &Cached, now: Instant) -> bool {
     super::probe_cache_is_stale(cached.probed_at, now)
@@ -172,13 +198,18 @@ pub(super) fn is_stale(cached: &Cached, now: Instant) -> bool {
 /// with no cache yields a default probe. Returns the probe plus its cache
 /// contribution (only a *successful* probe is cached).
 ///
+/// A stale entry's re-probe is a [`refresh_features`]. If the device answers
+/// its ping, the last-known data is a live answer even when the re-read does
+/// not finish. Only a device that does not answer the ping gets a stand-in
+/// marked [`Refresh::Failed`].
+///
 /// Also keeps the device's lock-key state for the on-screen indicator: an
 /// online device has it read once per connection, after its feature indexes
 /// are registered; an offline one has it forgotten (see
 /// [`EventSubscriptionHandle::sync_lock_keys`]).
 pub(super) async fn probe_or_reuse(
     channel: &Arc<HidppChannel>,
-    index: u8,
+    target: ProbeTarget<'_>,
     id: Option<CacheKey>,
     cached: Option<&Cached>,
     online: bool,
@@ -186,9 +217,11 @@ pub(super) async fn probe_or_reuse(
     subscriptions: Option<&EventSubscriptionHandle>,
 ) -> (ProbedFeatures, CacheOutcome) {
     let probed =
-        probe_or_reuse_registered(channel, index, id, cached, online, now, subscriptions).await;
+        probe_or_reuse_registered(channel, target, id, cached, online, now, subscriptions).await;
     if let Some(subscriptions) = subscriptions {
-        subscriptions.sync_lock_keys(channel, index, online).await;
+        subscriptions
+            .sync_lock_keys(channel, target.index, online)
+            .await;
     }
     probed
 }
@@ -196,25 +229,51 @@ pub(super) async fn probe_or_reuse(
 /// [`probe_or_reuse`] without the lock-key state.
 async fn probe_or_reuse_registered(
     channel: &Arc<HidppChannel>,
-    index: u8,
+    target: ProbeTarget<'_>,
     id: Option<CacheKey>,
     cached: Option<&Cached>,
     online: bool,
     now: Instant,
     subscriptions: Option<&EventSubscriptionHandle>,
 ) -> (ProbedFeatures, CacheOutcome) {
+    let ProbeTarget { index, registers } = target;
     if let (Some(cached), Some(subscriptions)) = (cached, subscriptions) {
         subscriptions.register_device(index, cached.events);
     }
     if online && cached.is_none_or(|c| is_stale(c, now)) {
-        let (mut fresh, battery, events) = probe_features(channel, index, subscriptions).await;
+        let probed = match cached {
+            None => probe_features(channel, index, subscriptions, registers).await,
+            // The ping tells a re-read that did not finish apart from a
+            // device that does not answer (#2107). Neither early return
+            // re-reads the battery: the link just failed to carry the ping
+            // or the walk.
+            Some(c) => match refresh_features(
+                channel,
+                index,
+                subscriptions,
+                registers,
+                REFRESH_WALK_BUDGET,
+            )
+            .await
+            {
+                Refreshed::Answered(Some(probed)) => probed,
+                Refreshed::Answered(None) => return (c.probe.clone(), seen(id)),
+                Refreshed::Unreachable => return (unreachable_stand_in(c), seen(id)),
+            },
+        };
+        let (mut fresh, battery, events) = probed;
         if let Some(probe) = battery {
-            (fresh.battery, fresh.unlinked) =
-                refresh_battery(channel, index, probe, cached.map(|known| &known.probe)).await;
+            (fresh.battery, fresh.unlinked) = refresh_battery(
+                channel,
+                index,
+                probe,
+                registers,
+                cached.map(|known| &known.probe),
+            )
+            .await;
         }
-        // `capabilities` is `Some` exactly when the feature-table walk succeeded;
-        // only then is the probe worth caching.
-        if fresh.capabilities.is_some() {
+        // Only a completed probe is worth caching.
+        if fresh.completed() {
             if let Some(c) = cached {
                 backfill_identity(&mut fresh, &c.probe);
             }
@@ -230,7 +289,7 @@ async fn probe_or_reuse_registered(
             // the GUI for `REFRESH_INTERVAL`. A previous complete walk
             // outranks this partial one, so defer to it and re-probe next
             // reconciliation.
-            if fresh.capabilities_incomplete {
+            if fresh.capabilities_incomplete() {
                 if let Some(c) = cached {
                     keep_known_capabilities(&mut fresh, &c.probe);
                 }
@@ -250,16 +309,11 @@ async fn probe_or_reuse_registered(
             };
         }
         // Re-probe failed: don't cache the failure. Fall back to the last-known
-        // data so a transient glitch doesn't drop the device or its battery,
-        // but mark it as a stand-in: read as a live answer, it would report an
-        // unreachable device healthy.
-        // No battery re-read either — the device just proved unresponsive.
+        // data so a transient glitch doesn't drop the device or its battery.
+        // A known device reaches this point only after it answered its ping,
+        // so the last-known data still answers for it now.
         return match cached {
-            Some(c) => {
-                let mut last_known = c.probe.clone();
-                last_known.refresh = Refresh::Failed;
-                (last_known, seen(id))
-            }
+            Some(c) => (c.probe.clone(), seen(id)),
             None => (fresh, seen(id)),
         };
     }
@@ -276,13 +330,22 @@ async fn probe_or_reuse_registered(
             {
                 let mut entry = c.clone();
                 (entry.probe.battery, entry.probe.unlinked) =
-                    refresh_battery(channel, index, probe, Some(&c.probe)).await;
+                    refresh_battery(channel, index, probe, registers, Some(&c.probe)).await;
                 return (entry.probe.clone(), CacheOutcome::Update(key, entry));
             }
             (c.probe.clone(), seen(id))
         }
         None => (ProbedFeatures::default(), seen(id)),
     }
+}
+
+/// The last-known data standing in for a known device that did not answer its
+/// refresh ping. It is marked so that no caller reads it as a live answer,
+/// which would report an unreachable device healthy.
+fn unreachable_stand_in(cached: &Cached) -> ProbedFeatures {
+    let mut last_known = cached.probe.clone();
+    last_known.refresh = Refresh::Failed;
+    last_known
 }
 
 /// Carry a previous *complete* capability walk forward over one that a lost
@@ -294,8 +357,18 @@ async fn probe_or_reuse_registered(
 /// feature vanish. A probe whose capability reads all succeeded is returned
 /// untouched, including one that legitimately lost a capability.
 pub(super) fn keep_known_capabilities(fresh: &mut ProbedFeatures, cached: &ProbedFeatures) {
-    if fresh.capabilities_incomplete && cached.capabilities.is_some() {
-        fresh.capabilities.clone_from(&cached.capabilities);
+    if let (
+        ProbedProtocol::Hidpp20 {
+            capabilities,
+            incomplete: true,
+        },
+        ProbedProtocol::Hidpp20 {
+            capabilities: known,
+            ..
+        },
+    ) = (&mut fresh.protocol, cached.protocol)
+    {
+        *capabilities = known;
     }
 }
 
@@ -446,21 +519,39 @@ mod hold_tests {
     }
 
     #[test]
-    fn a_level_only_unified_reading_passes_through_while_charging() {
+    fn a_level_only_reading_passes_through_while_charging() {
+        // `0x1004` without state of charge and the HID++ 1.0 `0x07` register
+        // report a level and never a percentage, so there is none to hold.
         let level_only = BatteryProbe::Unified {
             index: 0,
             state_of_charge: false,
         };
-        let fresh = BatteryInfo {
+        for probe in [level_only, BatteryProbe::StatusRegister] {
+            let fresh = BatteryInfo {
+                percentage: None,
+                level: BatteryLevel::Low,
+                status: BatteryStatus::Charging,
+            };
+            let live = hold_percentage_while_charging(
+                fresh.clone(),
+                Some(&battery(None, BatteryStatus::Discharging)),
+                probe,
+            );
+            assert_eq!(live, fresh, "{probe:?}");
+        }
+
+        // A `0x07` charging report without a level stays unknown rather than
+        // borrowing the last level.
+        let no_level = BatteryInfo {
             percentage: None,
-            level: BatteryLevel::Low,
+            level: BatteryLevel::Unknown,
             status: BatteryStatus::Charging,
         };
         let live = hold_percentage_while_charging(
-            fresh.clone(),
+            no_level.clone(),
             Some(&battery(None, BatteryStatus::Discharging)),
-            level_only,
+            BatteryProbe::StatusRegister,
         );
-        assert_eq!(live, fresh);
+        assert_eq!(live, no_level);
     }
 }

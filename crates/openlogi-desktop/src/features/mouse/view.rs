@@ -3,48 +3,77 @@ use std::sync::Arc;
 
 use gpui::{
     AnyElement, App, AppContext as _, Context, ElementId, Entity, FocusHandle, Focusable, Hsla,
-    InteractiveElement, IntoElement, ParentElement, Render, RenderOnce,
+    InteractiveElement, IntoElement, ParentElement, Pixels, Render, RenderOnce, SharedString, Size,
     StatefulInteractiveElement as _, Styled, Subscription, Window, canvas, div, hsla, img,
-    prelude::FluentBuilder as _, px, rgb,
+    prelude::FluentBuilder as _, px, rgb, size,
 };
-use gpui_base::Button as BaseButton;
+use gpui_base::{Button as BaseButton, ElementExt as _};
 use gpui_component::{
     h_flex,
     input::{InputEvent, InputState},
     v_flex,
 };
-use openlogi_core::binding::{Action, ButtonId, GestureDirection};
+use openlogi_core::binding::{Action, ButtonId, GamingLayout, GestureDirection};
 
 use super::force_sensing::{ForceSensingFacts, ForceSensingSlider, PressForce};
 use super::geometry::{
-    LabelDistribution, asset_dimensions_for_png, asset_has_button_labels, asset_hotspots_for_png,
-    default_labels, labels_from_hotspots,
+    LABEL_H, LabelDistribution, asset_dimensions_for_png, asset_has_button_labels,
+    asset_hotspots_for_png, fallback_hotspots, labels_fit, labels_from_hotspots, side_view_width,
 };
-use super::hotspots::{Hotspot, MOUSE_MODEL_SIZE, MouseControlId, default_hotspots};
+use super::hotspots::{Hotspot, MOUSE_MODEL_SIZE, MouseControlId};
 use super::inspector::{
-    ActionPickerContext, BindingInspectorData, ShortcutMode, binding_inspector,
+    ActionPickerContext, BindingInspectorData, InvalidDrafts, ShortcutError, ShortcutMode,
+    binding_inspector,
 };
 use super::leader_lines::{Geometry as LeaderGeometry, Label, paint as paint_leader_lines};
 use crate::app::{glow_canvas, keyboard_glow};
+use crate::features::binding_editor::{Recording, RecordsShortcut, ShortcutRecorder};
+use crate::features::keyboard::editors::{PowerUserKind, text_editor_placeholder};
 use crate::features::profiles::{profile_canvas_status, profile_name};
 use crate::services::assets::{GlowGeometry, ResolvedAsset};
-use crate::state::{AppState, DeviceKey, DeviceRecord, StateEvent};
+use crate::state::{AppState, BindingLayer, DeviceKey, DeviceRecord, StateEvent};
 use crate::ui::theme::{self, ACCENT_BLUE};
 
 const SIDE_GAP: f32 = 24.;
-const LABEL_W: f32 = 156.;
-const LABEL_GUTTER: f32 = LABEL_W + SIDE_GAP;
+/// The narrowest a label card gets, however short its values.
+const LABEL_MIN_W: f32 = 156.;
+/// Below this content width the labels all go on the left: two columns of
+/// cards would squeeze the render.
 const TWO_SIDED_LABEL_MIN_W: f32 = 700.;
+/// The narrowest the render gets to make room for cards wide enough for
+/// their values.
+const MODEL_MIN_IMAGE_W: f32 = 240.;
+/// The widest a label card gets: two columns of them in the widest content
+/// still leave the render [`MODEL_MIN_IMAGE_W`]. A value longer than its card
+/// wraps instead.
+const LABEL_MAX_W: f32 = (MODEL_CONTENT_MAX_W - MODEL_MIN_IMAGE_W) / 2. - SIDE_GAP;
+const _: () = assert!(
+    TWO_SIDED_LABEL_MIN_W >= 2. * (LABEL_MIN_W + SIDE_GAP) + MODEL_MIN_IMAGE_W,
+    "two columns of the narrowest cards must leave the render its minimum width"
+);
 
 const CARD_EDGE_INSET: f32 = SIDE_GAP;
 
 const HOTSPOT_DOT: f32 = 12.;
+/// Left out for a device without an Actions Ring tab.
+const NO_ACTIONS_RING: &[Action] = &[Action::ShowActionsRing];
+
+/// The held actions, which only a button press can run.
+fn held_actions(offer_gshift: bool) -> &'static [Action] {
+    const ACTIONS: [Action; 2] = [Action::DpiShift, Action::GShift];
+    if offer_gshift {
+        &ACTIONS
+    } else {
+        &ACTIONS[..1]
+    }
+}
+
 /// Vertical space occupied by the device bar, profile context, and canvas
-/// padding. Normal operation no longer reserves a footer.
+/// padding: the estimate of the canvas area until it is first measured.
 const MODEL_VERTICAL_RESERVE: f32 = 154.;
 
 mod labels;
-use labels::{binding_label_for_control, label_control};
+use labels::{CardSize, ValueMetrics, binding_label_for_control, label_control};
 /// Floor for the scaled model height. Below this the evenly-slotted side labels
 /// (≈[`LABEL_H`](super::geometry::LABEL_H) each) start to overlap; the window's minimum height is sized to
 /// keep the viewport above [`MODEL_VERTICAL_RESERVE`] + this.
@@ -53,7 +82,8 @@ const MODEL_MIN_H: f32 = 360.;
 /// Max width the model (side gutter + image) may occupy, matching the
 /// `buttons_tab` content cap so a wide keyboard image never overflows the panel.
 const MODEL_CONTENT_MAX_W: f32 = 760.;
-/// Horizontal chrome the model can't draw into (the buttons-tab padding).
+/// Horizontal chrome the model can't draw into (the buttons-tab padding): the
+/// estimate of the canvas area until it is first measured.
 const MODEL_HORIZONTAL_RESERVE: f32 =
     crate::ui::theme::DETAIL_RAIL_W + super::inspector::INSPECTOR_W + 48.;
 /// Floor for the model's available width on a narrow window.
@@ -61,6 +91,7 @@ const MODEL_MIN_CONTENT_W: f32 = 200.;
 
 struct MouseWorkspaceData<'a> {
     asset: Option<&'a ResolvedAsset>,
+    layout: Option<&'static GamingLayout>,
     active: Option<MouseControlId>,
     bindings: &'a BTreeMap<ButtonId, Action>,
     gesture_maps: &'a BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
@@ -71,6 +102,10 @@ struct MouseWorkspaceData<'a> {
     wheel_hold: &'a BTreeSet<ButtonId>,
     editing_app: Option<String>,
     overridden: Option<&'a BTreeMap<ButtonId, Action>>,
+    /// Actions the picker offers beyond the catalog.
+    extra_actions: &'static [Action],
+    /// Catalog actions the picker leaves out.
+    hidden_actions: &'static [Action],
 }
 
 impl<'a> MouseWorkspaceData<'a> {
@@ -79,6 +114,7 @@ impl<'a> MouseWorkspaceData<'a> {
             asset: state
                 .current_record()
                 .and_then(|record| record.asset.as_ref()),
+            layout: state.current_button_layout(),
             active: state
                 .active_button()
                 .map(MouseControlId::from_active_button),
@@ -100,8 +136,24 @@ impl<'a> MouseWorkspaceData<'a> {
                 .and_then(|record| record.capabilities)
                 .is_some_and(|capabilities| capabilities.virtual_thumbwheel),
             wheel_hold: state.wheel_hold_buttons(),
-            editing_app: state.editing_app().map(|app| profile_name(state, app)),
+            editing_app: if state.binding_layer() == BindingLayer::GShift {
+                Some(tr!("actions.g_shift").to_string())
+            } else {
+                state.editing_app().map(|app| profile_name(state, app))
+            },
             overridden: state.editing_app_overrides(),
+            extra_actions: held_actions(
+                state.current_gaming_layout().is_some()
+                    && state.binding_layer() == BindingLayer::Normal,
+            ),
+            hidden_actions: if state
+                .current_record()
+                .is_none_or(crate::app::offers_actions_ring)
+            {
+                &[]
+            } else {
+                NO_ACTIONS_RING
+            },
         })
     }
 
@@ -112,6 +164,7 @@ impl<'a> MouseWorkspaceData<'a> {
         static NO_WHEEL_HOLD: BTreeSet<ButtonId> = BTreeSet::new();
         Self {
             asset: None,
+            layout: None,
             active: None,
             bindings: &NO_BINDINGS,
             gesture_maps: &NO_GESTURE_MAPS,
@@ -122,6 +175,8 @@ impl<'a> MouseWorkspaceData<'a> {
             wheel_hold: &NO_WHEEL_HOLD,
             editing_app: None,
             overridden: None,
+            extra_actions: &[],
+            hidden_actions: &[],
         }
     }
 }
@@ -138,13 +193,20 @@ pub struct MouseModelView {
     action_search: Entity<InputState>,
     pub(super) custom_shortcut_input: Entity<InputState>,
     pub(super) custom_application_input: Entity<InputState>,
-    /// Whether the last "Add" attempt on the corresponding custom editor
-    /// failed to parse, so its caption can show an inline error.
-    pub(super) custom_shortcut_invalid: bool,
+    pub(super) custom_command_input: Entity<InputState>,
+    /// Which custom editors' last "Add" attempt failed to parse, so their
+    /// captions can show an inline error.
+    pub(super) invalid_drafts: InvalidDrafts,
     pub(super) shortcut_mode: ShortcutMode,
-    pub(super) custom_application_invalid: bool,
+    /// The custom shortcut recording in progress, if any.
+    shortcut_recorder: Option<ShortcutRecorder>,
+    /// The Record button's area; a recording lasts while focus stays in it.
+    shortcut_record_focus: FocusHandle,
     /// The press-force slider while the haptic panel's inspector shows it.
     pub(super) force_sensing: Option<ForceSensingSlider>,
+    /// The canvas area as last laid out, which the model and its cards fit
+    /// inside. `None` until the first frame measures it.
+    canvas_room: Option<Size<Pixels>>,
     _state_obs: Subscription,
 }
 
@@ -165,7 +227,7 @@ impl MouseModelView {
         });
         cx.subscribe(&custom_shortcut_input, |view, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
-                view.custom_shortcut_invalid = false;
+                view.invalid_drafts.shortcut = None;
                 cx.notify();
             }
         })
@@ -178,11 +240,22 @@ impl MouseModelView {
             &custom_application_input,
             |view, _, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::Change) {
-                    view.custom_application_invalid = false;
+                    view.invalid_drafts.application = false;
                     cx.notify();
                 }
             },
         )
+        .detach();
+        let custom_command_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(text_editor_placeholder(PowerUserKind::RunShellCommand))
+        });
+        cx.subscribe(&custom_command_input, |view, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                view.invalid_drafts.command = false;
+                cx.notify();
+            }
+        })
         .detach();
         let state_obs = AppState::repaint_on(cx, |event| {
             matches!(
@@ -203,17 +276,20 @@ impl MouseModelView {
             action_search,
             custom_shortcut_input,
             custom_application_input,
-            custom_shortcut_invalid: false,
+            custom_command_input,
+            invalid_drafts: InvalidDrafts::default(),
             shortcut_mode: ShortcutMode::Tap,
-            custom_application_invalid: false,
+            shortcut_recorder: None,
+            shortcut_record_focus: cx.focus_handle(),
             force_sensing: None,
+            canvas_room: None,
             _state_obs: state_obs,
         }
     }
 
-    /// Clear both custom-action drafts (text and any invalid state) — called
-    /// whenever the picker opens for a new target, so a shortcut or
-    /// application typed for one button doesn't reappear for another.
+    /// Clear every custom-action draft (text and any invalid state) — called
+    /// whenever the picker opens for a new target, so a shortcut, application
+    /// or command typed for one button doesn't reappear for another.
     pub(super) fn clear_custom_action_drafts(
         &mut self,
         window: &mut Window,
@@ -223,9 +299,11 @@ impl MouseModelView {
             .update(cx, |input, cx| input.set_value("", window, cx));
         self.custom_application_input
             .update(cx, |input, cx| input.set_value("", window, cx));
-        self.custom_shortcut_invalid = false;
-        self.custom_application_invalid = false;
+        self.custom_command_input
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        self.invalid_drafts = InvalidDrafts::default();
         self.shortcut_mode = ShortcutMode::Tap;
+        self.shortcut_recorder = None;
     }
 
     /// Set (or clear, with `None`) the activated gesture direction. Callers must
@@ -233,14 +311,47 @@ impl MouseModelView {
     pub(crate) fn set_gesture_selected_dir(&mut self, dir: Option<GestureDirection>) {
         self.gesture_active_dir = dir;
         self.action_picker_open = false;
+        self.shortcut_recorder = None;
     }
 
     pub(super) fn toggle_action_picker(&mut self) {
         self.action_picker_open = !self.action_picker_open;
+        self.shortcut_recorder = None;
     }
 
     pub(super) fn close_action_picker(&mut self) {
         self.action_picker_open = false;
+        self.shortcut_recorder = None;
+    }
+
+    /// Start recording the custom shortcut, or stop the recording in
+    /// progress.
+    pub(super) fn toggle_shortcut_recording(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.shortcut_recorder.take().is_none() {
+            let area = self.shortcut_record_focus.clone();
+            self.shortcut_recorder = Some(ShortcutRecorder::start(&area, window, cx));
+        }
+        cx.notify();
+    }
+
+    /// The action picker's state, as the inspector reads it.
+    fn action_picker_context<'a>(&'a self, view: &'a Entity<Self>) -> ActionPickerContext<'a> {
+        ActionPickerContext {
+            open: self.action_picker_open,
+            search: &self.action_search,
+            shortcut_input: &self.custom_shortcut_input,
+            application_input: &self.custom_application_input,
+            command_input: &self.custom_command_input,
+            shortcut_mode: self.shortcut_mode,
+            shortcut_recording: self.shortcut_recorder.is_some(),
+            shortcut_record_focus: &self.shortcut_record_focus,
+            invalid: self.invalid_drafts,
+            view,
+        }
     }
 
     fn reset_for_device(&mut self, device_key: Option<DeviceKey>) {
@@ -252,6 +363,50 @@ impl MouseModelView {
         self.selected = None;
         self.gesture_active_dir = None;
         self.action_picker_open = false;
+        self.shortcut_recorder = None;
+    }
+
+    /// Keep the canvas area measured in the last frame, and lay the model out
+    /// again when it changed.
+    fn set_canvas_room(&mut self, room: Size<Pixels>, cx: &mut Context<Self>) {
+        if self.canvas_room != Some(room) {
+            self.canvas_room = Some(room);
+            cx.notify();
+        }
+    }
+
+    /// Lay the model and its cards out in the canvas area as last measured,
+    /// or before the first measurement, the viewport less the chrome around
+    /// the tab. The cards are sized for what `value` says each control does.
+    fn fitted_layout(
+        &self,
+        asset: Option<&ResolvedAsset>,
+        layout: Option<&GamingLayout>,
+        thumbwheel: bool,
+        value: impl Fn(MouseControlId) -> SharedString,
+        window: &Window,
+    ) -> ModelLayout {
+        let viewport = window.viewport_size();
+        let room = self.canvas_room.unwrap_or_else(|| {
+            size(
+                viewport.width - px(MODEL_HORIZONTAL_RESERVE),
+                viewport.height - px(MODEL_VERTICAL_RESERVE),
+            )
+        });
+        let values = ValueMetrics::measure(
+            model_hotspots(asset, layout, thumbwheel, MOUSE_MODEL_SIZE)
+                .into_iter()
+                .map(|hotspot| value(hotspot.id)),
+            window,
+        );
+        model_layout(
+            asset,
+            layout,
+            size(f32::from(room.width), f32::from(room.height)),
+            f32::from(viewport.width),
+            thumbwheel,
+            values,
+        )
     }
 
     pub(super) fn select(&mut self, control: MouseControlId) {
@@ -259,6 +414,7 @@ impl MouseModelView {
             self.selected = Some(control);
             self.gesture_active_dir = None;
             self.action_picker_open = false;
+            self.shortcut_recorder = None;
         }
     }
 }
@@ -328,12 +484,43 @@ impl MouseModelView {
     }
 }
 
+impl RecordsShortcut for MouseModelView {
+    /// A recorded chord fills the shortcut field, and Add commits it in the
+    /// chosen mode. A key the recorder cannot turn into a chord shows the
+    /// field's error and leaves the field as it was.
+    fn shortcut_recorded(
+        &mut self,
+        recording: Recording,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.shortcut_recorder = None;
+        match recording {
+            Recording::Chord(combo) => {
+                self.custom_shortcut_input.update(cx, |input, cx| {
+                    input.set_value(combo.rendered_label(), window, cx);
+                });
+                self.invalid_drafts.shortcut = None;
+            }
+            Recording::Cancelled => {}
+            Recording::Unsupported => {
+                self.invalid_drafts.shortcut = Some(ShortcutError::Unrecognized);
+            }
+            Recording::ShiftedSymbol => {
+                self.invalid_drafts.shortcut = Some(ShortcutError::ShiftedSymbol);
+            }
+        }
+        cx.notify();
+    }
+}
+
 impl Render for MouseModelView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.localize_action_picker_inputs(window, cx);
         let force_sensing = self.sync_selection(window, cx);
         let MouseWorkspaceData {
             asset,
+            layout,
             active,
             bindings,
             gesture_maps,
@@ -344,6 +531,8 @@ impl Render for MouseModelView {
             wheel_hold,
             editing_app,
             overridden,
+            extra_actions,
+            hidden_actions,
         } = MouseWorkspaceData::read(cx).unwrap_or_else(MouseWorkspaceData::empty);
 
         let gesture_buttons: Vec<ButtonId> = gesture_maps
@@ -355,17 +544,18 @@ impl Render for MouseModelView {
             })
             .collect();
 
-        let viewport_h = f32::from(window.viewport_size().height);
-        let viewport_w = f32::from(window.viewport_size().width);
+        let value = |control| binding_label_for_control(control, bindings, &gesture_buttons).text;
         let ModelLayout {
             canvas_w,
+            canvas_h,
+            mouse_top,
             mouse_left,
             mouse_w,
             mouse_h,
+            card,
             hotspots,
             labels,
-        } = model_layout(asset, viewport_w, viewport_h, thumbwheel);
-        let canvas_h = mouse_h;
+        } = self.fitted_layout(asset, layout, thumbwheel, value, window);
 
         let highlight = self.hovered.or(active).or(self.selected);
         let view = cx.entity();
@@ -380,6 +570,7 @@ impl Render for MouseModelView {
             left: mouse_left,
             width: mouse_w,
             height: mouse_h,
+            card,
         };
         let hotspots_layer = hotspots_layer(
             &hotspots_outer,
@@ -389,10 +580,7 @@ impl Render for MouseModelView {
             self.selected,
             &view,
         );
-        let canvas = div()
-            .relative()
-            .w(px(canvas_w))
-            .h(px(canvas_h))
+        let model_band = div()
             .child(breathing_art)
             .child(leader_canvas)
             .children(labels_outer.iter().enumerate().map(|(idx, label)| {
@@ -408,12 +596,14 @@ impl Render for MouseModelView {
                 )
             }))
             .child(hotspots_layer);
+        let canvas = model_canvas(model_band, canvas_w, canvas_h, mouse_top, mouse_h);
 
         let inspector = binding_inspector(
             BindingInspectorData {
                 selected: self.selected,
                 gesture_direction: self.gesture_active_dir,
                 bindings,
+                layout,
                 gesture_maps,
                 dpi_gestures,
                 virtual_thumbwheel,
@@ -421,28 +611,49 @@ impl Render for MouseModelView {
                 editing_app: editing_app.as_deref(),
                 overridden,
                 press_force: PressForce::of(force_sensing.as_ref(), self.force_sensing.as_ref()),
+                extra_actions,
+                hidden_actions,
             },
-            ActionPickerContext {
-                open: self.action_picker_open,
-                search: &self.action_search,
-                shortcut_input: &self.custom_shortcut_input,
-                application_input: &self.custom_application_input,
-                shortcut_invalid: self.custom_shortcut_invalid,
-                shortcut_mode: self.shortcut_mode,
-                application_invalid: self.custom_application_invalid,
-                view: &view,
-            },
+            self.action_picker_context(&view),
             cx,
         );
-        workspace_layout(canvas, profile_status, inspector, &self.focus_handle)
+        workspace_layout(canvas, profile_status, inspector, &self.focus_handle, view)
     }
 }
 
+/// The canvas around `band`, which holds the model and its cards laid out
+/// against the model's own `mouse_h`. The cards a crowded side pushes past
+/// the model's top or bottom still land inside the canvas, which grows to
+/// `canvas_h` to hold them, with the model `mouse_top` down from its top.
+fn model_canvas(
+    band: gpui::Div,
+    canvas_w: f32,
+    canvas_h: f32,
+    mouse_top: f32,
+    mouse_h: f32,
+) -> gpui::Div {
+    div()
+        .relative()
+        .w(px(canvas_w))
+        .h(px(canvas_h))
+        .debug_selector(|| "mouse-canvas".into())
+        .child(
+            band.absolute()
+                .top(px(mouse_top))
+                .left(px(0.))
+                .w(px(canvas_w))
+                .h(px(mouse_h)),
+        )
+}
+
+/// The canvas area beside the inspector. Its content box is the room the
+/// model fits: measured here and handed back to `view` for the next layout.
 fn workspace_layout(
     canvas: impl IntoElement,
     profile_status: Option<gpui::Div>,
     inspector: impl IntoElement,
     focus_handle: &FocusHandle,
+    view: Entity<MouseModelView>,
 ) -> impl IntoElement {
     h_flex()
         .flex_1()
@@ -464,11 +675,21 @@ fn workspace_layout(
                         .min_h_0()
                         .w_full()
                         .overflow_hidden()
-                        .flex()
-                        .items_center()
-                        .justify_center()
                         .p_4()
-                        .child(canvas),
+                        .child(
+                            div()
+                                .size_full()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .debug_selector(|| "mouse-canvas-room".into())
+                                .child(canvas)
+                                .on_prepaint(move |bounds, _window, cx| {
+                                    view.update(cx, |view, cx| {
+                                        view.set_canvas_room(bounds.size, cx);
+                                    });
+                                }),
+                        ),
                 ),
         )
         .child(inspector)
@@ -476,73 +697,156 @@ fn workspace_layout(
 
 struct ModelLayout {
     canvas_w: f32,
+    /// The model's height plus whatever the cards reach past it.
+    canvas_h: f32,
+    /// How far the model sits below the canvas top: how far the cards reach
+    /// above it.
+    mouse_top: f32,
     mouse_left: f32,
     mouse_w: f32,
     mouse_h: f32,
+    card: CardSize,
     hotspots: Vec<Hotspot>,
     labels: Vec<Label>,
 }
 
-/// Scale the model to fit the content area in both axes. A tall mouse is bound
-/// by the viewport height; a wide keyboard is bound by the available width and
-/// drops the label gutter so it remains centred.
+/// Lay the model and its label cards out inside `room`, the canvas area. The
+/// cards are as wide as their widest value needs (see [`label_columns`]); the
+/// model takes the rest and is scaled to fit it in both axes. A tall mouse is
+/// bound by the room's height; a wide keyboard is bound by its width and drops
+/// the label gutter so it remains centred.
 fn model_layout(
     asset: Option<&ResolvedAsset>,
+    layout: Option<&GamingLayout>,
+    room: Size<f32>,
     viewport_w: f32,
-    viewport_h: f32,
     thumbwheel: bool,
+    values: ValueMetrics,
 ) -> ModelLayout {
-    let target_h = (viewport_h - MODEL_VERTICAL_RESERVE).clamp(MODEL_MIN_H, MOUSE_MODEL_SIZE.1);
-    let has_labels = asset.is_none_or(asset_has_button_labels) && viewport_w >= 960.;
-    let content_w =
-        (viewport_w - MODEL_HORIZONTAL_RESERVE).clamp(MODEL_MIN_CONTENT_W, MODEL_CONTENT_MAX_W);
-    let label_distribution = if has_labels && content_w >= TWO_SIDED_LABEL_MIN_W {
-        LabelDistribution::BothSides
-    } else {
-        LabelDistribution::LeftOnly
-    };
-    let left_gutter = if has_labels { LABEL_GUTTER } else { 0. };
-    let right_gutter = if label_distribution == LabelDistribution::BothSides {
-        LABEL_GUTTER
+    let target_h = room.height.clamp(MODEL_MIN_H, MOUSE_MODEL_SIZE.1);
+    // The cards may use the room's whole height, not just the model's: a
+    // narrow window shrinks the model by its width and leaves room beside it.
+    let room_h = room.height.max(MODEL_MIN_H);
+    let has_labels =
+        asset.is_none_or(|asset| asset_has_button_labels(asset, layout)) && viewport_w >= 960.;
+    let content_w = room.width.clamp(MODEL_MIN_CONTENT_W, MODEL_CONTENT_MAX_W);
+    let (label_distribution, card_w) = label_columns(content_w, values.widest + values.chrome_w);
+    let gutter = card_w + SIDE_GAP;
+    let left_gutter = if has_labels { gutter } else { 0. };
+    let right_gutter = if has_labels && label_distribution == LabelDistribution::BothSides {
+        gutter
     } else {
         0.
     };
     let max_image_w = (content_w - left_gutter - right_gutter).max(MODEL_MIN_CONTENT_W / 2.);
-    let (mouse_w, mouse_h, hotspots, mut labels) =
-        scaled_model(asset, target_h, max_image_w, thumbwheel, label_distribution);
-    if !has_labels {
-        labels.clear();
-    }
+    let (mouse_w, mouse_h) = model_size(asset, target_h, max_image_w);
+    let hotspots = model_hotspots(asset, layout, thumbwheel, (mouse_w, mouse_h));
+    let card = card_size(card_w, values, hotspots.len(), label_distribution, room_h);
+    let labels = if has_labels {
+        labels_from_hotspots(
+            &hotspots,
+            mouse_w,
+            mouse_h,
+            room_h,
+            label_distribution,
+            card.h,
+        )
+    } else {
+        Vec::new()
+    };
+    let cards_top = labels
+        .iter()
+        .map(|label| label.y - card.h / 2.)
+        .fold(0., f32::min);
+    let cards_bottom = labels
+        .iter()
+        .map(|label| label.y + card.h / 2.)
+        .fold(mouse_h, f32::max);
 
     ModelLayout {
         canvas_w: left_gutter + mouse_w + right_gutter,
+        canvas_h: cards_bottom - cards_top,
+        mouse_top: -cards_top,
         mouse_left: left_gutter,
         mouse_w,
         mouse_h,
+        card,
         hotspots,
         labels,
     }
 }
 
-/// Model geometry fit inside a `max_w` × `target_h` box. With a real asset the
-/// hotspots and labels are recomputed from the scaled dimensions; the synthetic
-/// silhouette's authored coordinates are scaled by the same factor. Returns
-/// `(mouse_w, mouse_h, hotspots, labels)`.
-fn scaled_model(
-    asset: Option<&ResolvedAsset>,
-    target_h: f32,
-    max_w: f32,
-    thumbwheel: bool,
-    label_distribution: LabelDistribution,
-) -> (f32, f32, Vec<Hotspot>, Vec<Label>) {
+/// Which sides the label cards take in `content_w`, and how wide they are:
+/// `needed_w`, what the widest value needs on one line, kept between
+/// [`LABEL_MIN_W`] and [`LABEL_MAX_W`] and narrow enough to leave the render
+/// [`MODEL_MIN_IMAGE_W`].
+fn label_columns(content_w: f32, needed_w: f32) -> (LabelDistribution, f32) {
+    let (distribution, columns) = if content_w >= TWO_SIDED_LABEL_MIN_W {
+        (LabelDistribution::BothSides, 2.)
+    } else {
+        (LabelDistribution::LeftOnly, 1.)
+    };
+    let room_w = (content_w - MODEL_MIN_IMAGE_W) / columns - SIDE_GAP;
+    (
+        distribution,
+        needed_w.min(room_w).clamp(LABEL_MIN_W, LABEL_MAX_W),
+    )
+}
+
+/// The cards `card_w` wide: one value line when the widest value fits it,
+/// otherwise two, as long as `count` cards that tall still fit `room_h`
+/// with their gaps. Past that the value keeps one line and its ellipsis.
+fn card_size(
+    card_w: f32,
+    values: ValueMetrics,
+    count: usize,
+    distribution: LabelDistribution,
+    room_h: f32,
+) -> CardSize {
+    let one_line = CardSize {
+        w: card_w,
+        h: LABEL_H,
+        value_lines: 1,
+    };
+    let two_lines = CardSize {
+        h: LABEL_H + values.line_h,
+        value_lines: 2,
+        ..one_line
+    };
+    if values.widest > card_w - values.chrome_w
+        && labels_fit(count, distribution, two_lines.h, room_h)
+    {
+        two_lines
+    } else {
+        one_line
+    }
+}
+
+/// The model's size fit inside a `max_w` × `target_h` box at the render's
+/// aspect, or the synthetic silhouette's when there is no render.
+fn model_size(asset: Option<&ResolvedAsset>, target_h: f32, max_w: f32) -> (f32, f32) {
     if let Some(a) = asset {
-        let (w, h) = asset_dimensions_for_png(a, target_h, max_w);
-        let hotspots = asset_hotspots_for_png(a, w, h);
-        let labels = labels_from_hotspots(&hotspots, h, label_distribution);
-        (w, h, hotspots, labels)
+        asset_dimensions_for_png(a, target_h, max_w)
     } else {
         let scale = (target_h / MOUSE_MODEL_SIZE.1).min(max_w / MOUSE_MODEL_SIZE.0);
-        let hotspots = default_hotspots(thumbwheel)
+        (MOUSE_MODEL_SIZE.0 * scale, MOUSE_MODEL_SIZE.1 * scale)
+    }
+}
+
+/// The model's hotspots at its `(w, h)` size (see [`model_size`]). A render
+/// recomputes them from its markers; the synthetic silhouette's authored
+/// coordinates are scaled to that size.
+fn model_hotspots(
+    asset: Option<&ResolvedAsset>,
+    layout: Option<&GamingLayout>,
+    thumbwheel: bool,
+    (w, h): (f32, f32),
+) -> Vec<Hotspot> {
+    if let Some(a) = asset {
+        asset_hotspots_for_png(a, layout, w, h)
+    } else {
+        let scale = w / MOUSE_MODEL_SIZE.0;
+        fallback_hotspots(layout, thumbwheel)
             .into_iter()
             .map(|hs| Hotspot {
                 x: hs.x * scale,
@@ -551,20 +855,7 @@ fn scaled_model(
                 h: hs.h * scale,
                 ..hs
             })
-            .collect();
-        let labels = default_labels(thumbwheel, label_distribution)
-            .into_iter()
-            .map(|l| Label {
-                y: l.y * scale,
-                ..l
-            })
-            .collect();
-        (
-            MOUSE_MODEL_SIZE.0 * scale,
-            MOUSE_MODEL_SIZE.1 * scale,
-            hotspots,
-            labels,
-        )
+            .collect()
     }
 }
 
@@ -604,10 +895,19 @@ fn breathing_art(
     glow: Option<(Arc<GlowGeometry>, Hsla)>,
 ) -> impl IntoElement {
     let device_art: AnyElement = match asset {
-        Some(a) => img(a.image_path.clone())
-            .w(px(mouse_w))
-            .h(px(mouse_h))
-            .into_any_element(),
+        Some(a) => {
+            let side_w = side_view_width(a, mouse_h);
+            h_flex()
+                .when_some(a.side_view.as_ref(), |this, side| {
+                    this.child(img(side.image_path.clone()).w(px(side_w)).h(px(mouse_h)))
+                })
+                .child(
+                    img(a.image_path.clone())
+                        .w(px(mouse_w - side_w))
+                        .h(px(mouse_h)),
+                )
+                .into_any_element()
+        }
         None => Silhouette {
             w: mouse_w,
             h: mouse_h,
@@ -630,11 +930,13 @@ fn breathing_art(
         .child(device_art)
 }
 
+/// The model's place in the canvas, and the size of the cards beside it.
 #[derive(Clone, Copy)]
 struct ModelRect {
     left: f32,
     width: f32,
     height: f32,
+    card: CardSize,
 }
 
 fn hotspots_layer(

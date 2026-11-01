@@ -1,8 +1,8 @@
 {
   "uuid": "openlogi-frontmost@openlogi.dev",
   "name": "OpenLogi Frontmost Window",
-  "description": "Exposes the focused window's WM_CLASS over D-Bus so OpenLogi can switch per-app mouse profiles on GNOME Wayland. Read-only; no UI, no window contents.",
+  "description": "Supports per-app OpenLogi profiles on GNOME Wayland and keeps the Actions Ring positioned correctly by excluding it from window animations. No window contents or input are read.",
   "shell-version": ["45", "46", "47", "48", "49", "50"],
   "url": "https://github.com/AprilNEA/OpenLogi",
-  "version": 2
+  "version": 3
 }

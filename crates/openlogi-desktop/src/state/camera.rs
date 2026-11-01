@@ -1,6 +1,9 @@
 //! Webcam control state and camera profiles.
 
-use openlogi_camera::CameraControl;
+use std::num::NonZeroU32;
+
+use openlogi_camera::{CameraControl, StreamMode};
+use openlogi_core::config::CameraStreamMode;
 
 use super::events::StateEvents;
 use super::{AppState, StateEvent};
@@ -96,6 +99,48 @@ impl AppState {
         self.commit_camera_entry(config_key, toggle.name(), i32::from(on));
         StateEvent::CameraChanged.into()
     }
+    /// The resolution and frame rate saved for `config_key`'s live preview, or
+    /// `None` when none is saved.
+    ///
+    /// Not checked against what the camera offers: that needs the device, so
+    /// the backend resolves a stale choice to the camera's default instead.
+    #[must_use]
+    pub fn camera_stream_mode(&self, config_key: &str) -> Option<StreamMode> {
+        let saved = self.config.camera_stream_mode(config_key)?;
+        Some(StreamMode {
+            width: saved.width.get(),
+            height: saved.height.get(),
+            fps: saved.fps.get(),
+        })
+    }
+
+    /// Persist the resolution and frame rate for `config_key`'s live preview,
+    /// which opens its stream at it. It shapes the preview alone: other
+    /// applications negotiate their own. No agent IPC, like the controls: the
+    /// preview is driven from the GUI. Saved apart from the UVC controls, so
+    /// camera profiles neither capture nor apply it.
+    ///
+    /// Announces nothing when `mode` is already saved, so picking the selected
+    /// option again does not restart the stream, and nothing for a mode with a
+    /// zero in it, which no camera offers.
+    pub fn commit_camera_stream_mode(&mut self, config_key: &str, mode: StreamMode) -> StateEvents {
+        if self.camera_stream_mode(config_key) == Some(mode) {
+            return StateEvents::none();
+        }
+        let (Some(width), Some(height), Some(fps)) = (
+            NonZeroU32::new(mode.width),
+            NonZeroU32::new(mode.height),
+            NonZeroU32::new(mode.fps),
+        ) else {
+            return StateEvents::none();
+        };
+        let saved = CameraStreamMode { width, height, fps };
+        self.config
+            .edit(|config| config.set_camera_stream_mode(config_key, saved));
+        self.persist_config("camera stream mode");
+        StateEvent::CameraChanged.into()
+    }
+
     /// Persist a batch of auto toggles and control values for `config_key` as
     /// one announced change — what a reset or an applied profile writes.
     pub fn commit_camera_settings(

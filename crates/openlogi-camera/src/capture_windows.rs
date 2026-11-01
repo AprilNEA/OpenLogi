@@ -10,6 +10,13 @@
 //! Dropping the [`CameraStream`] stops the thread, which releases the device
 //! (camera LED off).
 //!
+//! A preview streams at the [`StreamMode`] it is handed, when the camera offers
+//! it: the reader selects the native media type that offers it, which is what
+//! switches the camera to that size and rate. What the camera offers is read
+//! from its native media types by that same open, and kept for
+//! [`stream_modes`]. The mode belongs to the preview alone — other
+//! applications negotiate their own when they open the camera.
+//!
 //! There is no per-app consent prompt to drive here: desktop apps see the
 //! camera unless the system-wide privacy toggle blocks them, which surfaces
 //! as an activation error — reported as [`CaptureError::AccessDenied`].
@@ -24,15 +31,16 @@
     reason = "Media Foundation COM (device activation + IMFSourceReader sample loop)"
 )]
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError, mpsc};
 use std::time::{Duration, Instant};
 
 use windows::Win32::Media::MediaFoundation::{
-    IMFActivate, IMFMediaSource, IMFMediaType, IMFSample, IMFSourceReader,
-    MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE, MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID,
+    IMFActivate, IMFMediaSource, IMFSample, IMFSourceReader, MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE,
+    MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID,
     MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK, MF_E_HW_MFT_FAILED_START_STREAMING,
-    MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE,
+    MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE,
     MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, MF_SOURCE_READER_FIRST_VIDEO_STREAM,
     MF_SOURCE_READERF_ENDOFSTREAM, MF_SOURCE_READERF_ERROR, MFCreateAttributes, MFCreateMediaType,
     MFCreateSourceReaderFromMediaSource, MFEnumDeviceSources, MFMediaType_Video,
@@ -42,11 +50,9 @@ use windows::Win32::System::Com::CoTaskMemFree;
 
 pub use crate::capture_types::{CaptureError, Frame};
 use crate::com_windows::{ComApartment, MediaFoundation};
-
-/// The preview's target frame width: matches the macOS backend's 720p preset —
-/// Retina-sharp in the 480pt preview box without 1080p copy/upload cost. The
-/// native format closest to this width wins.
-const TARGET_WIDTH: u32 = 1280;
+use crate::mf_formats::{self, NativeFormat};
+use crate::stream_mode::whole_fps;
+use crate::{StreamMode, StreamModes};
 
 /// How long [`start_stream`] waits for setup and the first stored frame,
 /// including any skipped samples. Retries do not reset this budget.
@@ -132,13 +138,21 @@ impl Drop for CameraStream {
 /// Returns only after a decoded frame has been stored. Later read failures
 /// can still end the stream; startup does not guarantee continued delivery.
 ///
+/// The stream opens at `mode` when the camera offers it, and otherwise at the
+/// camera's default mode (the one nearest 1280×720 at 30 fps); `None` asks for
+/// that default. A camera that offers no mode streams at the media type Media
+/// Foundation picks. What it offered is kept for [`stream_modes`].
+///
 /// # Errors
 /// [`CaptureError::NotFound`] for an unknown id, [`CaptureError::AccessDenied`]
 /// when the system privacy toggle blocks cameras,
 /// [`CaptureError::ResourcesUnavailable`] when hardware resources are unavailable,
 /// [`CaptureError::Timeout`] when setup and the first frame exceed five seconds,
 /// or [`CaptureError::Setup`] on other Media Foundation errors.
-pub fn start_stream(unique_id: &str) -> Result<CameraStream, CaptureError> {
+pub fn start_stream(
+    unique_id: &str,
+    mode: Option<StreamMode>,
+) -> Result<CameraStream, CaptureError> {
     let shared = Arc::new(Shared {
         latest: Mutex::new(None),
         generation: AtomicU64::new(0),
@@ -149,7 +163,7 @@ pub fn start_stream(unique_id: &str) -> Result<CameraStream, CaptureError> {
     let id = unique_id.to_string();
     let reader = std::thread::Builder::new()
         .name("openlogi-camera-reader".into())
-        .spawn(move || reader_thread(&id, &thread_shared, &setup_tx))
+        .spawn(move || reader_thread(&id, mode, &thread_shared, &setup_tx))
         .map_err(|e| CaptureError::Setup(e.to_string()))?;
 
     match setup_rx.recv_timeout(SETUP_TIMEOUT) {
@@ -173,7 +187,7 @@ pub fn start_stream(unique_id: &str) -> Result<CameraStream, CaptureError> {
 /// # Errors
 /// As [`start_stream`], plus [`CaptureError::Timeout`] when no frame arrives.
 pub fn capture_frame(unique_id: &str, timeout: Duration) -> Result<Frame, CaptureError> {
-    let stream = start_stream(unique_id)?;
+    let stream = start_stream(unique_id, None)?;
     let deadline = Instant::now() + timeout;
     loop {
         if let Some(frame) = stream.take_frame() {
@@ -203,13 +217,50 @@ pub fn camera_authorization() -> crate::CameraAuthorization {
 /// No-op: Windows has no consent prompt to trigger for desktop apps.
 pub fn request_camera_access() {}
 
+/// What each camera's native media types offered the last time it was opened,
+/// by `unique_id`.
+///
+/// Reading them takes the camera's media source, which a UI thread must not
+/// wait for and which the open reads anyway on its way to selecting from them.
+/// So the open is what fills this: it forgets the camera's entry first and
+/// keeps the new one once the types are read, which leaves an entry only for a
+/// camera whose latest open got that far, and never one a camera that came
+/// back on a slower port would be read from.
+static MODES: LazyLock<Mutex<HashMap<String, StreamModes>>> = LazyLock::new(Mutex::default);
+
+/// Held only to read or swap one entry, never across Media Foundation calls.
+fn known_modes() -> MutexGuard<'static, HashMap<String, StreamModes>> {
+    MODES.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The modes the camera with `unique_id` offered when it was last opened.
+///
+/// Read from the camera's native media types, limited to the pixel formats the
+/// preview converts to RGB32 — a type Media Foundation cannot convert would
+/// fail to open, so it is not offered. Listing them takes the camera's media
+/// source, so this never does: it answers from what the latest open read, and
+/// a camera that has not been opened, or whose latest open failed before it
+/// read them, lists none. Ask after [`start_stream`], whose open is what reads
+/// them.
+///
+/// # Errors
+/// Never fails on this platform; the signature matches the other backends'.
+pub fn stream_modes(unique_id: &str) -> Result<StreamModes, CaptureError> {
+    Ok(known_modes().get(unique_id).cloned().unwrap_or_default())
+}
+
 /// The reader thread: builds the Media Foundation graph, reports the outcome
 /// through `setup`, then pulls and decodes samples until told to stop.
 ///
 /// This is an ordinary application thread pulling samples synchronously, not
 /// one of Media Foundation's work queues — the one thread kind on which the
 /// platform calls, and so the guards below, would be illegal.
-fn reader_thread(unique_id: &str, shared: &Shared, setup: &mpsc::Sender<Result<(), CaptureError>>) {
+fn reader_thread(
+    unique_id: &str,
+    mode: Option<StreamMode>,
+    shared: &Shared,
+    setup: &mpsc::Sender<Result<(), CaptureError>>,
+) {
     // Declared before anything COM so it drops last: every Media Foundation
     // interface built below is a COM object, and releasing one after its
     // apartment closed is exactly the bug these guards exist to prevent.
@@ -232,7 +283,7 @@ fn reader_thread(unique_id: &str, shared: &Shared, setup: &mpsc::Sender<Result<(
     // platform guard drops at the end of the function.
     let opened = cancellation
         .checkpoint()
-        .and_then(|()| open_reader(&media_foundation, unique_id, &cancellation));
+        .and_then(|()| open_reader(&media_foundation, unique_id, mode, &cancellation));
     match opened {
         Ok((reader, stride_hint)) => {
             pump_frames(shared, setup, || read_sample(&reader, shared, stride_hint));
@@ -360,90 +411,46 @@ struct StrideHint {
 }
 
 /// Build the source reader for `unique_id`: activate the matching device,
-/// pick the native format closest to [`TARGET_WIDTH`], and negotiate RGB32
-/// output (Media Foundation inserts the decoder/converter).
+/// select the native type that offers `mode`, and negotiate RGB32 output
+/// (Media Foundation inserts the decoder/converter).
 fn open_reader(
     platform: &MediaFoundation<'_>,
     unique_id: &str,
+    mode: Option<StreamMode>,
     cancellation: &SetupCancellation<'_>,
 ) -> Result<(IMFSourceReader, StrideHint), CaptureError> {
-    // SAFETY: the `platform` borrow is the precondition every call below needs
-    // — Media Foundation started, inside an apartment — and the caller holds
-    // both guards for longer than the returned reader.
-    // `MFCreateAttributes` writes its +1 `IMFAttributes` into the local
-    // `Option`, which is checked before use; that attribute set, the reader, the
-    // media types the enumeration keeps and the output type are all refcounted
-    // wrappers released when they drop. Each method call runs on this thread
-    // against a live interface, and the reader is handed back to the very thread
-    // that will pull samples from it.
+    // What this camera offered before says nothing about what it offers now.
+    known_modes().remove(unique_id);
+    let reader = create_reader(platform, unique_id, cancellation)?;
+    let stream = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0.cast_unsigned();
+
+    // The list the mode is selected from is the one `stream_modes` answers
+    // with once this open is done.
+    let formats = native_formats(&reader, cancellation)?;
+    known_modes().insert(unique_id.to_owned(), mf_formats::offered(&formats));
+
+    // SAFETY: each call below runs on this thread against the live `reader`
+    // (and the media types it hands out), which is refcounted and released on
+    // drop; the platform borrow in `create_reader` is the precondition that
+    // keeps Media Foundation started, and the caller holds both guards for
+    // longer than the reader this returns.
     unsafe {
-        let mut reader_attrs = None;
-        MFCreateAttributes(&raw mut reader_attrs, 1).map_err(setup_err)?;
-        let reader_attrs = reader_attrs.ok_or_else(|| setup_err("MFCreateAttributes"))?;
-        reader_attrs
-            .SetUINT32(&MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, 1)
-            .map_err(setup_err)?;
-        cancellation.checkpoint()?;
-
-        let source = activate_source(platform, unique_id, cancellation)?;
-        if let Err(error) = cancellation.checkpoint() {
-            shutdown_source(&source);
-            return Err(error);
-        }
-        let reader = match MFCreateSourceReaderFromMediaSource(&source, &reader_attrs) {
-            Ok(reader) => reader,
-            Err(error) => {
-                // No source reader exists to perform its documented source
-                // shutdown on drop, so balance the successful activation here.
-                shutdown_source(&source);
-                return Err(capture_err(&error));
-            }
-        };
-        cancellation.checkpoint()?;
-
-        // Prefer the native type closest to the preview's target width, so a
-        // 4K-capable camera doesn't stream (and we don't convert) 8x the
-        // pixels the preview can show. Only formats the reader's (legacy)
-        // processor can convert to RGB32 count — a compressed 720p mode it
-        // can't decode would fail below, while a convertible mode at another
-        // 16:9 size still previews fine.
-        let stream = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0.cast_unsigned();
-        let mut best: Option<(u32, IMFMediaType)> = None;
-        let mut index = 0u32;
-        loop {
-            cancellation.checkpoint()?;
-            let Ok(native) = reader.GetNativeMediaType(stream, index) else {
-                break;
-            };
-            index += 1;
-            let convertible = native.GetGUID(&MF_MT_SUBTYPE).is_ok_and(|subtype| {
-                [
-                    MFVideoFormat_NV12,
-                    MFVideoFormat_YUY2,
-                    MFVideoFormat_RGB24,
-                    MFVideoFormat_RGB32,
-                ]
-                .contains(&subtype)
-            });
-            if !convertible {
-                continue;
-            }
-            if let Ok(size) = native.GetUINT64(&MF_MT_FRAME_SIZE) {
-                let width = (size >> 32) as u32;
-                let score = width.abs_diff(TARGET_WIDTH);
-                if best.as_ref().is_none_or(|(s, _)| score < *s) {
-                    best = Some((score, native));
-                }
-            }
-        }
-        cancellation.checkpoint()?;
-        // Selecting the native type switches the device to that mode — a size
-        // hint on the RGB32 output type alone is quietly dropped (the legacy
-        // processor converts but never scales), leaving whatever mode the
-        // device was in.
-        if let Some((_, native)) = &best {
+        // Selecting the native type switches the device to that size and rate
+        // — a size hint on the RGB32 output type alone is quietly dropped (the
+        // legacy processor converts but never scales), leaving whatever mode
+        // the device was in. A camera that lists no mode is left in that mode.
+        if let Some(format) = mf_formats::choose(&formats, mode) {
+            tracing::debug!(
+                width = format.width,
+                height = format.height,
+                fps = format.fps,
+                "camera preview mode"
+            );
+            let native = reader
+                .GetNativeMediaType(stream, format.index)
+                .map_err(setup_err)?;
             reader
-                .SetCurrentMediaType(stream, None, native)
+                .SetCurrentMediaType(stream, None, &native)
                 .map_err(setup_err)?;
             cancellation.checkpoint()?;
         }
@@ -479,6 +486,102 @@ fn open_reader(
             },
         ))
     }
+}
+
+/// Activate the device `unique_id` names and put a source reader on it, with
+/// Media Foundation's video processing enabled so it can convert what the
+/// camera sends to RGB32.
+fn create_reader(
+    platform: &MediaFoundation<'_>,
+    unique_id: &str,
+    cancellation: &SetupCancellation<'_>,
+) -> Result<IMFSourceReader, CaptureError> {
+    // SAFETY: the `platform` borrow is the precondition every call below needs
+    // — Media Foundation started, inside an apartment — and the caller holds
+    // both guards for longer than the returned reader.
+    // `MFCreateAttributes` writes its +1 `IMFAttributes` into the local
+    // `Option`, which is checked before use; that attribute set and the reader
+    // are refcounted wrappers released when they drop. Each method call runs on
+    // this thread against a live interface, and the reader is handed back to
+    // the very thread that will use it.
+    unsafe {
+        let mut reader_attrs = None;
+        MFCreateAttributes(&raw mut reader_attrs, 1).map_err(setup_err)?;
+        let reader_attrs = reader_attrs.ok_or_else(|| setup_err("MFCreateAttributes"))?;
+        reader_attrs
+            .SetUINT32(&MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, 1)
+            .map_err(setup_err)?;
+        cancellation.checkpoint()?;
+
+        let source = activate_source(platform, unique_id, cancellation)?;
+        if let Err(error) = cancellation.checkpoint() {
+            shutdown_source(&source);
+            return Err(error);
+        }
+        let reader = match MFCreateSourceReaderFromMediaSource(&source, &reader_attrs) {
+            Ok(reader) => reader,
+            Err(error) => {
+                // No source reader exists to perform its documented source
+                // shutdown on drop, so balance the successful activation here.
+                shutdown_source(&source);
+                return Err(capture_err(&error));
+            }
+        };
+        cancellation.checkpoint()?;
+        Ok(reader)
+    }
+}
+
+/// The native media types `reader` lists that it can convert to RGB32, in the
+/// driver's order. A compressed type it cannot decode would fail to open, so
+/// it is not on the list, while a convertible one at another size still
+/// previews fine.
+fn native_formats(
+    reader: &IMFSourceReader,
+    cancellation: &SetupCancellation<'_>,
+) -> Result<Vec<NativeFormat>, CaptureError> {
+    let stream = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0.cast_unsigned();
+    let mut formats = Vec::new();
+    for index in 0u32.. {
+        cancellation.checkpoint()?;
+        // SAFETY: a documented read of the reader's type table, on the thread
+        // that owns it. The first index with no type ends the list.
+        let Ok(native) = (unsafe { reader.GetNativeMediaType(stream, index) }) else {
+            break;
+        };
+        // SAFETY: documented attribute reads on the type just returned.
+        let (subtype, size, rate) = unsafe {
+            (
+                native.GetGUID(&MF_MT_SUBTYPE),
+                native.GetUINT64(&MF_MT_FRAME_SIZE),
+                native.GetUINT64(&MF_MT_FRAME_RATE),
+            )
+        };
+        let convertible = subtype.is_ok_and(|subtype| {
+            [
+                MFVideoFormat_NV12,
+                MFVideoFormat_YUY2,
+                MFVideoFormat_RGB24,
+                MFVideoFormat_RGB32,
+            ]
+            .contains(&subtype)
+        });
+        let Ok(size) = size else { continue };
+        if !convertible {
+            continue;
+        }
+        // Both attributes pack two `u32`s, the high word first.
+        formats.push(NativeFormat {
+            index,
+            width: (size >> 32) as u32,
+            height: (size & 0xFFFF_FFFF) as u32,
+            fps: rate
+                .ok()
+                .and_then(|packed| whole_fps((packed >> 32) as u32, (packed & 0xFFFF_FFFF) as u32))
+                .unwrap_or(0),
+        });
+    }
+    Ok(formats)
 }
 
 /// Activate the video-capture device whose Media Foundation symbolic link

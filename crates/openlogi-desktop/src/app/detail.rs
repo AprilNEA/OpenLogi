@@ -2,20 +2,20 @@
 //! section bodies (Buttons, Keys, Pointer, Lighting, Camera, Device).
 
 use gpui::{
-    Context, InteractiveElement, IntoElement, ParentElement, Rems, Role,
+    Context, InteractiveElement, IntoElement, ParentElement, Rems, Role, SharedString,
     StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px, rems,
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
-    Disableable as _, Icon, IconName, Selectable as _,
+    Disableable as _, Icon, IconName, Selectable as _, Sizable as _,
     button::{Button, ButtonGroup},
     description_list::{DescriptionItem, DescriptionList},
     h_flex,
     scroll::ScrollableElement as _,
-    switch::Switch,
+    tag::Tag,
     v_flex,
 };
-use openlogi_core::config::ScrollResolution;
+use openlogi_core::config::{OnboardMemory, ScrollResolution};
 use openlogi_core::device::DeviceKind;
 
 use super::widgets::{back_button, connection_summary, kind_label, sidebar_action, status_badge};
@@ -31,11 +31,12 @@ use crate::features::lighting::standalone::LightPanel;
 use crate::features::lighting::visual as light_visual;
 use crate::features::mouse::view::MouseModelView;
 use crate::features::pointer::dpi::DpiPanel;
+use crate::features::pointer::momentum::{MomentumPanel, confirm_turning_off_with_smooth_wheel};
 use crate::features::pointer::smartshift::SmartShiftPanel;
 use crate::features::profiles::{
     AppCatalogPicker, ProfileIconCache, action_ring_profile_scope_bar, button_profile_scope_bar,
 };
-use crate::state::{AppState, DeviceRecord, StateEvents};
+use crate::state::{AppState, BindingLayer, DeviceRecord, Load, StateEvents};
 use crate::ui::battery::BatteryIndicator;
 use crate::ui::components::{PanelCard, Toggle, toggle_row};
 use crate::ui::theme::{
@@ -45,7 +46,9 @@ use crate::ui::theme::{
 mod backlight;
 mod easy_switch;
 
-const CAMERA_PREVIEW_W: Rems = rems(32.125);
+/// The preview plus the card's padding and its 1 px border. The border stays
+/// one pixel at every interface scale, so keep a little slack for it below 100 %.
+const CAMERA_PREVIEW_W: Rems = rems(32.25);
 const CAMERA_CONTROLS_W: Rems = rems(31.25);
 const LIGHT_CONTROLS_W: Rems = rems(25.);
 const LIGHT_CONTROLS_MIN_W: Rems = rems(22.5);
@@ -98,6 +101,7 @@ pub(super) struct DetailPanels<'a> {
     pub disable_keys_panel: &'a gpui::Entity<DisableKeysPanel>,
     pub dpi_panel: &'a gpui::Entity<DpiPanel>,
     pub smartshift_panel: &'a gpui::Entity<SmartShiftPanel>,
+    pub momentum_panel: &'a gpui::Entity<MomentumPanel>,
     pub lighting_panel: &'a gpui::Entity<LightingPanel>,
     pub camera_preview: &'a gpui::Entity<CameraPreview>,
     pub camera_controls: &'a gpui::Entity<CameraControlsPanel>,
@@ -126,10 +130,16 @@ pub(super) fn detail_content(
         DetailTab::ActionsRing => {
             action_ring_tab(panels.action_ring, profile_icons, app_catalog, cx).into_any_element()
         }
-        DetailTab::Keys => keys_tab(panels.keyboard_model).into_any_element(),
-        DetailTab::Pointer => {
-            pointer_tab(panels.dpi_panel, panels.smartshift_panel, cx).into_any_element()
+        DetailTab::Keys => {
+            keys_tab(panels.keyboard_model, profile_icons, app_catalog, cx).into_any_element()
         }
+        DetailTab::Pointer => pointer_tab(
+            panels.dpi_panel,
+            panels.smartshift_panel,
+            panels.momentum_panel,
+            cx,
+        )
+        .into_any_element(),
         DetailTab::Lighting => lighting_tab(panels.lighting_panel).into_any_element(),
         DetailTab::Camera => {
             camera_tab(panels.camera_preview, panels.camera_controls).into_any_element()
@@ -193,6 +203,7 @@ fn detail_navigation(
         .children(tabs.iter().copied().enumerate().map(|(index, tab)| {
             let selected = tab == active;
             BaseButton::new(("detail-navigation", index))
+                .debug_selector(move || format!("detail-navigation-{tab:?}"))
                 .role(Role::Tab)
                 .selected(selected)
                 .accessibility_label(tab.label())
@@ -236,6 +247,9 @@ fn detail_navigation(
                 .child(tab.label())
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.active_tab = tab;
+                    if tab == DetailTab::Pointer {
+                        AppState::refresh_onboard(cx);
+                    }
                     cx.notify();
                 }))
         }))
@@ -266,10 +280,62 @@ fn buttons_tab(
         .w_full()
         .min_h_0()
         .children(button_profile_scope_bar(profile_icons, app_catalog, cx))
+        .children(gshift_layer_bar(cx))
         .child(mouse_model.clone())
 }
 
+fn gshift_layer_bar(cx: &mut Context<AppView>) -> Option<impl IntoElement> {
+    let pal = theme::palette(cx);
+    let state = AppState::try_read(cx)?;
+    if state.current_gaming_layout().is_none() || !state.current_device_is_persistent() {
+        return None;
+    }
+    let gshift = state.binding_layer() == BindingLayer::GShift;
+    Some(
+        h_flex()
+            .w_full()
+            .px_5()
+            .pt_3()
+            .gap_3()
+            .items_center()
+            .child(
+                div()
+                    .text_caption()
+                    .text_color(pal.text_muted)
+                    .child(tr!("actions.g_shift_layer_description")),
+            )
+            .child(
+                ButtonGroup::new("gshift-layer")
+                    .small()
+                    .outline()
+                    .child(
+                        Button::new("gshift-layer-normal")
+                            .label(tr!("actions.g_shift_normal"))
+                            .selected(!gshift),
+                    )
+                    .child(
+                        Button::new("gshift-layer-shift")
+                            .label(tr!("actions.g_shift"))
+                            .selected(gshift),
+                    )
+                    .on_click(|indices, _window, cx| {
+                        let layer = if indices.first() == Some(&1) {
+                            BindingLayer::GShift
+                        } else {
+                            BindingLayer::Normal
+                        };
+                        AppState::apply(cx, |state| state.set_binding_layer(layer));
+                    }),
+            ),
+    )
+}
+
+/// `tab`'s scrolling body. A `Scrollable` keys its scroll position by call
+/// site, and this one call site serves every tab, so the id carries the tab:
+/// each tab gets its own position, dropped while the tab is hidden, and opens
+/// at its top instead of at the offset another tab was scrolled to.
 fn tab_body(
+    tab: DetailTab,
     width: ContentWidth,
     content: impl IntoElement,
 ) -> gpui_component::scroll::Scrollable<gpui::Div> {
@@ -279,13 +345,39 @@ fn tab_body(
         .min_h_0()
         .items_center()
         .overflow_y_scrollbar()
+        .id(("detail-tab-body", tab as usize))
+        .debug_selector(|| "detail-tab-body".into())
         .p(SCREEN_PAD.rems())
         .child(div().w_full().max_w(width.rems()).child(content))
 }
 
-/// Keys tab: the function-row remapper for a keyboard.
-fn keys_tab(keyboard_model: &gpui::Entity<FunctionRowView>) -> impl IntoElement {
-    tab_body(ContentWidth::DoubleExtraLarge, keyboard_model.clone()).justify_center()
+/// Keys tab: the function-row remapper for a keyboard. A keypad's keys all
+/// bind per app profile, so it gets the Buttons tab's profile selector; a
+/// keyboard's F-row binds globally and a selector there would mislead.
+fn keys_tab(
+    keyboard_model: &gpui::Entity<FunctionRowView>,
+    profile_icons: &ProfileIconCache,
+    app_catalog: &gpui::Entity<AppCatalogPicker>,
+    cx: &mut Context<AppView>,
+) -> impl IntoElement {
+    let keypad = AppState::try_read(cx)
+        .and_then(AppState::current_keypad)
+        .is_some();
+    v_flex()
+        .flex_1()
+        .w_full()
+        .min_h_0()
+        .when(keypad, |tab| {
+            tab.children(button_profile_scope_bar(profile_icons, app_catalog, cx))
+        })
+        .child(
+            tab_body(
+                DetailTab::Keys,
+                ContentWidth::DoubleExtraLarge,
+                keyboard_model.clone(),
+            )
+            .justify_center(),
+        )
 }
 
 fn action_ring_tab(
@@ -303,20 +395,27 @@ fn action_ring_tab(
             app_catalog,
             cx,
         ))
-        .child(tab_body(ContentWidth::Medium, panel.clone()))
+        .child(tab_body(
+            DetailTab::ActionsRing,
+            ContentWidth::Medium,
+            panel.clone(),
+        ))
 }
 
 /// Pointer tab: the DPI panel, the SmartShift wheel controls, and the
-/// scroll-wheel preferences, each in a titled card. Use a responsive two-column
-/// grid that still fits the window's 720 px minimum width, so these short
-/// controls don't force a vertical scroll.
+/// scroll-wheel preferences, each in a titled card, then momentum scrolling
+/// across the bottom. Use a responsive two-column grid that still fits the
+/// window's 720 px minimum width, so these short controls don't force a
+/// vertical scroll.
 fn pointer_tab(
     dpi_panel: &gpui::Entity<DpiPanel>,
     smartshift_panel: &gpui::Entity<SmartShiftPanel>,
+    momentum_panel: &gpui::Entity<MomentumPanel>,
     cx: &mut Context<AppView>,
 ) -> impl IntoElement {
     let pal = theme::palette(cx);
     tab_body(
+        DetailTab::Pointer,
         ContentWidth::Large,
         h_flex()
             .w_full()
@@ -344,8 +443,128 @@ fn pointer_tab(
                     .min_w(POINTER_CARD_MIN_W)
                     .flex_1()
                     .child(scrolling_card(pal, cx)),
+            )
+            .children(onboard_card(pal, cx).map(pointer_grid_card))
+            // Full width, so it always starts its own row at the bottom.
+            .child(
+                div().w_full().child(
+                    PanelCard::new(
+                        tr!("pointer.momentum_title"),
+                        Icon::empty().path("action-icons/mouse.svg"),
+                        momentum_panel.clone().into_any_element(),
+                    )
+                    .title_suffix(
+                        Tag::secondary()
+                            .small()
+                            .child(tr!("pointer.momentum_macos_only")),
+                    ),
+                ),
             ),
     )
+}
+
+fn onboard_card(pal: Palette, cx: &mut Context<AppView>) -> Option<impl IntoElement> {
+    let state = AppState::try_read(cx)?;
+    if !state.current_onboard_supported() {
+        return None;
+    }
+    let reading = match state.current_onboard_load() {
+        Load::Ready(reading) => Some(reading),
+        _ => None,
+    };
+    let memory = state.current_onboard_active();
+    let host = memory == Some(OnboardMemory::Off);
+    // The agent takes control only of a model whose buttons it knows.
+    let openlogi = state.current_gaming_layout().map(|_| {
+        (
+            OnboardMemory::Off,
+            tr!("pointer.onboard_openlogi").to_string(),
+        )
+    });
+    let profiles = reading.as_ref().map_or_else(Vec::new, |r| {
+        r.profiles
+            .iter()
+            .filter(|p| p.enabled)
+            .map(|p| {
+                let label = p.name.clone().unwrap_or_else(|| {
+                    tr!("pointer.onboard_profile_number", number => p.index.to_string()).to_string()
+                });
+                (OnboardMemory::Profile(p.index), label)
+            })
+            .collect()
+    });
+
+    let memory_description = if host {
+        tr!("pointer.onboard_host_description")
+    } else {
+        tr!("pointer.onboard_profile_description")
+    };
+    Some(
+        PanelCard::new(
+            tr!("pointer.onboard_memory"),
+            Icon::empty().path("action-icons/mouse.svg"),
+            v_flex().gap_4().child(setting_row(
+                tr!("pointer.onboard_active"),
+                memory_description,
+                onboard_memory_control(memory, openlogi.into_iter().chain(profiles).collect()),
+                pal,
+            )),
+        )
+        .fill(),
+    )
+}
+
+fn setting_row(
+    title: impl Into<SharedString>,
+    description: impl Into<SharedString>,
+    control: impl IntoElement,
+    pal: Palette,
+) -> impl IntoElement {
+    v_flex()
+        .gap_2()
+        .child(
+            v_flex()
+                .child(
+                    div()
+                        .text_body()
+                        .text_color(pal.text_primary)
+                        .child(title.into()),
+                )
+                .child(
+                    div()
+                        .text_caption()
+                        .text_color(pal.text_muted)
+                        .child(description.into()),
+                ),
+        )
+        .child(control)
+}
+
+fn onboard_memory_control(
+    selected: Option<OnboardMemory>,
+    choices: Vec<(OnboardMemory, String)>,
+) -> impl IntoElement {
+    let values: Vec<OnboardMemory> = choices.iter().map(|(value, _)| *value).collect();
+    choices
+        .into_iter()
+        .enumerate()
+        .fold(
+            ButtonGroup::new("onboard-memory").w_full().outline(),
+            |group, (index, (value, label))| {
+                group.child(
+                    Button::new(("onboard-memory", index))
+                        .flex_1()
+                        .label(label)
+                        .selected(selected == Some(value)),
+                )
+            },
+        )
+        .on_click(move |indices, _window, cx| {
+            if let Some(value) = indices.first().and_then(|i| values.get(*i)) {
+                AppState::apply(cx, |state| state.commit_onboard_memory(*value));
+                AppState::refresh_onboard_later(cx);
+            }
+        })
 }
 
 fn pointer_grid_card(card: impl IntoElement) -> impl IntoElement {
@@ -435,6 +654,8 @@ fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
         .gap_4()
         .child(
             v_flex()
+                .flex_1()
+                .min_w_0()
                 .child(
                     div()
                         .text_body()
@@ -490,6 +711,7 @@ fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
         .child(wheel_resolution_control(
             resolution,
             hires == HiresWheel::Here,
+            cx,
         ));
     PanelCard::new(
         tr!("pointer.scrolling"),
@@ -505,7 +727,8 @@ fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
 /// The scrolling card's smooth-wheel switch. It follows the wheel-resolution
 /// control's reasons for being unavailable, since both need `0x2121` on this
 /// link. A smooth wheel that is already on stays switchable, so a setting made
-/// on another link can always be turned off from here.
+/// on another link can always be turned off from here. With Glide on free
+/// spin on, turning it off asks to turn both off.
 fn smooth_wheel_row(pal: Palette, smooth_wheel: bool, hires: HiresWheel) -> impl IntoElement {
     let available = hires == HiresWheel::Here || smooth_wheel;
     toggle_row(
@@ -517,8 +740,14 @@ fn smooth_wheel_row(pal: Palette, smooth_wheel: bool, hires: HiresWheel) -> impl
             .selected(smooth_wheel)
             .disabled(!available)
             .label((!available).then(|| tr!("common.unavailable")))
-            .on_change(|enabled, _window, cx| {
-                AppState::apply(cx, |state| state.commit_smooth_wheel(*enabled));
+            .on_change(|enabled, window, cx| {
+                let gliding = AppState::try_read(cx)
+                    .is_some_and(|state| state.current_momentum_scrolling().enabled);
+                if !*enabled && gliding {
+                    confirm_turning_off_with_smooth_wheel(window, cx);
+                } else {
+                    AppState::apply(cx, |state| state.commit_smooth_wheel(*enabled));
+                }
             }),
     )
 }
@@ -533,7 +762,13 @@ fn smooth_wheel_caption(hires: HiresWheel) -> gpui::SharedString {
     }
 }
 
-fn wheel_resolution_control(selected: Option<ScrollResolution>, enabled: bool) -> impl IntoElement {
+fn wheel_resolution_control(
+    selected: Option<ScrollResolution>,
+    enabled: bool,
+    cx: &gpui::App,
+) -> impl IntoElement {
+    use crate::ui::theme::SelectableStyle as _;
+
     let values = [
         None,
         Some(ScrollResolution::Low),
@@ -547,19 +782,22 @@ fn wheel_resolution_control(selected: Option<ScrollResolution>, enabled: bool) -
             Button::new("wheel-resolution-default")
                 .flex_1()
                 .label(tr!("pointer.device_default"))
-                .selected(selected.is_none()),
+                .selected(selected.is_none())
+                .selected_segment(enabled && selected.is_none(), cx),
         )
         .child(
             Button::new("wheel-resolution-low")
                 .flex_1()
                 .label(tr!("pointer.standard"))
-                .selected(selected == Some(ScrollResolution::Low)),
+                .selected(selected == Some(ScrollResolution::Low))
+                .selected_segment(enabled && selected == Some(ScrollResolution::Low), cx),
         )
         .child(
             Button::new("wheel-resolution-high")
                 .flex_1()
                 .label(tr!("pointer.high_resolution"))
-                .selected(selected == Some(ScrollResolution::High)),
+                .selected(selected == Some(ScrollResolution::High))
+                .selected_segment(enabled && selected == Some(ScrollResolution::High), cx),
         )
         .on_click(move |indices, _window, cx| {
             let Some(value) = indices.first().and_then(|index| values.get(*index)) else {
@@ -569,14 +807,16 @@ fn wheel_resolution_control(selected: Option<ScrollResolution>, enabled: bool) -
         })
 }
 
-/// Lighting tab: the RGB controls (swatches, on/off, brightness) in a titled
-/// card. Shown when the device reports a lighting capability — see
-/// [`DetailTab::tabs_for`].
+/// Lighting tab: the RGB controls (swatches, on/off, brightness) in an
+/// untitled card — the rail already names the page "Lighting", so a card
+/// title would only repeat it. Shown when the device reports a lighting
+/// capability — see [`DetailTab::tabs_for`].
 fn lighting_tab(lighting_panel: &gpui::Entity<LightingPanel>) -> impl IntoElement {
     tab_body(
+        DetailTab::Lighting,
         ContentWidth::Small,
         PanelCard::new(
-            tr!("device.lighting"),
+            SharedString::default(),
             Icon::new(IconName::Palette),
             lighting_panel.clone().into_any_element(),
         ),
@@ -595,6 +835,7 @@ fn camera_tab(
     camera_controls: &gpui::Entity<CameraControlsPanel>,
 ) -> impl IntoElement {
     tab_body(
+        DetailTab::Camera,
         ContentWidth::DoubleExtraLarge,
         h_flex()
             .w_full()
@@ -651,6 +892,7 @@ fn light_tab(
         },
     );
     tab_body(
+        DetailTab::Light,
         ContentWidth::ExtraLarge,
         h_flex()
             .w_full()
@@ -690,6 +932,7 @@ fn device_tab(
         .and_then(|record| record.capabilities)
         .is_some_and(|capabilities| capabilities.disable_keys);
     tab_body(
+        DetailTab::Device,
         ContentWidth::Small,
         v_flex()
             .w_full()
@@ -805,7 +1048,7 @@ fn device_details_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElem
                     .when_some(record.battery.as_ref(), |this, battery| {
                         this.child(BatteryIndicator::summary(battery))
                     })
-                    .child(device_description_list(record))
+                    .child(device_description_list(record, pal))
                     .into_any_element()
             },
         );
@@ -846,26 +1089,15 @@ fn configuration_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoEleme
     let content = v_flex()
         .gap_3()
         .child(device_enabled_row(device_enabled, pal))
-        .child(
-            DescriptionList::new()
-                .columns(1)
-                // Keep long translated labels intact as the interface scale increases.
-                .label_width(rems(12.))
-                .bordered(false)
-                .child(DescriptionItem::new(tr!("profiles.active_profile")).value(app_profile))
-                .child(
-                    DescriptionItem::new(tr!("profiles.button_bindings"))
-                        .value(binding_count.to_string()),
-                )
-                .child(
-                    DescriptionItem::new(tr!("profiles.gesture_bindings"))
-                        .value(gesture_count.to_string()),
-                )
-                .child(
-                    DescriptionItem::new(tr!("pointer.dpi_presets"))
-                        .value(preset_count.to_string()),
-                ),
-        )
+        .child(detail_list(
+            [
+                (tr!("profiles.active_profile"), app_profile),
+                (tr!("profiles.button_bindings"), binding_count.to_string()),
+                (tr!("profiles.gesture_bindings"), gesture_count.to_string()),
+                (tr!("pointer.dpi_presets"), preset_count.to_string()),
+            ],
+            pal,
+        ))
         .child(
             h_flex()
                 .gap_2()
@@ -891,46 +1123,28 @@ fn configuration_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoEleme
     )
 }
 
-/// "Manage this device" label, caption, and switch. The caption column shrinks
-/// so a long translation wraps instead of pushing the switch out of the card.
+/// "Manage this device": the device-wide switch, labelled On/Off like every
+/// other setting toggle.
 fn device_enabled_row(device_enabled: bool, pal: Palette) -> impl IntoElement {
-    h_flex()
-        .debug_selector(|| "device-enabled-row".into())
-        .justify_between()
-        .items_center()
-        .gap_4()
-        .child(
-            v_flex()
-                .flex_1()
-                .min_w_0()
-                .child(div().text_body().child(tr!("device.manage_this_device")))
-                .child(
-                    div()
-                        .text_caption()
-                        .text_color(pal.text_muted)
-                        .child(tr!("actions.native_controls_when_disabled")),
-                ),
-        )
-        .child(
-            div()
-                .debug_selector(|| "device-enabled-switch".into())
-                .flex_shrink_0()
-                .child(
-                    Switch::new("device-enabled")
-                        .checked(device_enabled)
-                        .on_click(|checked, _window, cx| {
-                            let enabled = *checked;
-                            AppState::apply(cx, |state| {
-                                state
-                                    .current_record()
-                                    .map(DeviceRecord::device_key)
-                                    .map_or_else(StateEvents::none, |key| {
-                                        state.commit_device_enabled(&key, enabled)
-                                    })
-                            });
-                        }),
-                ),
-        )
+    toggle_row(
+        "device-enabled-row",
+        pal,
+        tr!("device.manage_this_device"),
+        tr!("actions.native_controls_when_disabled"),
+        Toggle::new("device-enabled")
+            .selected(device_enabled)
+            .on_change(|enabled, _window, cx| {
+                let enabled = *enabled;
+                AppState::apply(cx, |state| {
+                    state
+                        .current_record()
+                        .map(DeviceRecord::device_key)
+                        .map_or_else(StateEvents::none, |key| {
+                            state.commit_device_enabled(&key, enabled)
+                        })
+                });
+            }),
+    )
 }
 
 fn device_summary(
@@ -964,7 +1178,7 @@ fn device_summary(
         .child(status_badge(online, pal))
 }
 
-fn device_description_list(record: DeviceRecord) -> impl IntoElement {
+fn device_description_list(record: DeviceRecord, pal: Palette) -> impl IntoElement {
     // Cameras are plain UVC over the cable — no HID++ route, and their slot is
     // a synthetic 0 that would only mislead next to real receiver slots.
     let is_camera = matches!(record.kind, DeviceKind::Camera);
@@ -973,18 +1187,45 @@ fn device_description_list(record: DeviceRecord) -> impl IntoElement {
     } else {
         connection_summary(&record)
     };
-    let mut items = vec![DescriptionItem::new(tr!("device.connection")).value(connection)];
-    items
-        .push(DescriptionItem::new(tr!("device.device_key")).value(elided_key(&record.config_key)));
+    let mut rows = vec![
+        (tr!("device.connection"), connection),
+        (tr!("device.device_key"), elided_key(&record.config_key)),
+    ];
     if let Some(serial) = record.serial_number {
-        items.push(DescriptionItem::new(tr!("device.serial")).value(serial));
+        rows.push((tr!("device.serial"), serial));
     }
+    detail_list(rows, pal)
+}
 
+/// The Device tab's label/value lists. Label and value share the body size,
+/// so each row reads on one baseline; the muted label carries the hierarchy.
+/// The label column is in rems: a fixed 100 px cut "Geräteschlüssel" and
+/// longer translations into their values (#1856), and rems keep them intact
+/// as the interface scale grows.
+fn detail_list(
+    rows: impl IntoIterator<Item = (SharedString, String)>,
+    pal: Palette,
+) -> impl IntoElement {
     DescriptionList::new()
         .columns(1)
-        .label_width(px(100.))
+        .label_width(rems(12.))
         .bordered(false)
-        .children(items)
+        .children(rows.into_iter().map(|(label, value)| {
+            DescriptionItem::new(
+                div()
+                    .text_body()
+                    .text_color(pal.text_muted)
+                    .child(label)
+                    .into_any_element(),
+            )
+            .value(
+                div()
+                    .text_body()
+                    .text_color(pal.text_primary)
+                    .child(value)
+                    .into_any_element(),
+            )
+        }))
 }
 
 /// Show long machine keys (a camera's config key embeds the OS device path)
@@ -1010,7 +1251,8 @@ mod tests {
     };
 
     use gpui::{AppContext as _, Modifiers, VisualTestContext};
-    use openlogi_core::config::Config;
+    use gpui_component::WindowExt;
+    use openlogi_core::config::{Config, MomentumScrolling};
 
     use super::{
         HiresWheel, device_enabled_row, elided_key, smooth_wheel_caption, smooth_wheel_row,
@@ -1020,6 +1262,21 @@ mod tests {
     use crate::state::tests::{KNOWN_MOUSE_KEY, direct_inventory};
     use crate::state::{AppState, Sources};
     use crate::ui::theme;
+
+    #[test]
+    fn camera_preview_fits_its_card_at_every_interface_scale() {
+        for scale in openlogi_core::config::UiScale::ALL {
+            let rem = theme::rem_size(scale);
+            let column = super::CAMERA_PREVIEW_W.to_pixels(rem);
+            let card = crate::features::camera::preview::PREVIEW_W.to_pixels(rem)
+                + theme::CARD_PAD.rems().to_pixels(rem) * 2.
+                + px(2.);
+            assert!(
+                card <= column,
+                "{scale:?}: card {card:?} > column {column:?}"
+            );
+        }
+    }
 
     /// Hosts the row at a card-like width so a long caption has to wrap.
     struct DeviceEnabledRowHost;
@@ -1048,7 +1305,7 @@ mod tests {
             .debug_bounds("device-enabled-row")
             .expect("the row renders");
         let switch = cx
-            .debug_bounds("device-enabled-switch")
+            .debug_bounds("device-enabled-row-control")
             .expect("the row renders its switch");
         assert!(
             row.size.width <= px(360.),
@@ -1105,7 +1362,11 @@ mod tests {
             });
             AppState::set_global(state, cx);
         });
-        let (_view, cx) = cx.add_window_view(move |_, _| SmoothWheelRowHost { hires });
+        // Rooted, so the row's confirmation dialog has somewhere to open.
+        let (_view, cx) = cx.add_window_view(move |window, cx| {
+            let host = cx.new(|_| SmoothWheelRowHost { hires });
+            gpui_component::Root::new(host, window, cx)
+        });
         cx.simulate_resize(size(px(800.), px(600.)));
         cx.update(|window, cx| window.draw(cx).clear(cx));
         cx
@@ -1183,6 +1444,37 @@ mod tests {
         assert!(smooth_wheel_on(cx));
         click_switch(cx);
         assert!(!smooth_wheel_on(cx));
+    }
+
+    /// With the glide on, turning the smooth wheel off asks first instead of
+    /// switching it off under the glide. What confirming does is
+    /// `commit_glide_with_smooth_wheel`'s state test.
+    #[gpui::test]
+    fn turning_off_the_smooth_wheel_under_the_glide_asks_first(cx: &mut TestAppContext) {
+        let _locale = LOCALE_LOCK.lock().unwrap();
+        rust_i18n::set_locale("en");
+        let mut config = Config::ephemeral();
+        config.set_smooth_wheel(KNOWN_MOUSE_KEY, true);
+        config.set_device_momentum_scrolling(
+            KNOWN_MOUSE_KEY,
+            Some(MomentumScrolling {
+                enabled: true,
+                ..MomentumScrolling::default()
+            }),
+        );
+        let cx = smooth_wheel_row_view(cx, HiresWheel::Here, true, config);
+        let gliding = |cx: &mut VisualTestContext| {
+            cx.update(|_, cx| {
+                AppState::try_read(cx)
+                    .expect("state is installed")
+                    .current_momentum_scrolling()
+                    .enabled
+            })
+        };
+
+        click_switch(cx);
+        assert!(cx.update(WindowExt::has_active_dialog), "it asks");
+        assert!(smooth_wheel_on(cx) && gliding(cx), "asked, not changed");
     }
 
     #[test]

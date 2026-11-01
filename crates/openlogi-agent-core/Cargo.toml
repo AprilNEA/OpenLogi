@@ -17,7 +17,16 @@ openlogi-inject = { path = "../openlogi-inject" }
 openlogi-hid = { path = "../openlogi-hid" }
 openlogi-hook = { path = "../openlogi-hook" }
 openlogi-ipc = { path = "../openlogi-ipc" }
+# The embedded action icons only — not the GPUI asset source.
+openlogi-ui = { path = "../openlogi-ui", default-features = false }
 futures-lite = { workspace = true }
+# The keypad LCD watcher's doubling retry delay.
+backon = { workspace = true }
+# Keypad LCD tiles: rasterize an action icon's SVG and encode it as the JPEG
+# the keypad's image write carries. resvg matches the version gpui links.
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
+resvg = { version = "0.46", default-features = false }
+thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 
@@ -29,4 +38,6 @@ openlogi-device = { path = "../openlogi-device", features = ["test-support"] }
 # Only to advance virtual time in the DeviceOp/timed timeout test without a
 # real multi-second sleep.
 openlogi-fixture = { workspace = true, features = ["fs"] }
+# Keypad identities the orchestrator tests stand a wired keypad up from.
+openlogi-device-registry = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }

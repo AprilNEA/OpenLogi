@@ -10,11 +10,11 @@ use std::collections::HashSet;
 
 use super::{
     Camera, Capabilities, DeviceIdentity, DeviceKind, DeviceModelInfo, DeviceRecord,
-    DeviceTransports, append_offline_known, build_device_list, direct_key_prefix, effective_kind,
-    fold_by_inventory_key, offline_record, pick_initial_device,
+    DeviceTransports, adopt_transient_record, append_offline_known, build_device_list,
+    direct_key_prefix, effective_kind, fold_by_inventory_key, offline_record, pick_initial_device,
 };
 use crate::state::inventory::adopt_routes;
-use openlogi_core::hid::{DeviceRoute, Dpi};
+use openlogi_core::hid::{DeviceRoute, Dpi, ReceiverBrand};
 
 fn paired_device_no_model_info(slot: u8, wpid: Option<u16>) -> PairedDevice {
     PairedDevice {
@@ -27,6 +27,7 @@ fn paired_device_no_model_info(slot: u8, wpid: Option<u16>) -> PairedDevice {
         model_info: None,
         capabilities: None,
         settings_revision: 0,
+        hidpp10: false,
     }
 }
 
@@ -60,6 +61,7 @@ fn direct_inventory(model_info: DeviceModelInfo) -> DeviceInventory {
             model_info: Some(model_info),
             capabilities: Some(Capabilities::presumed_from_kind(DeviceKind::Mouse)),
             settings_revision: 0,
+            hidpp10: false,
         }],
     }
 }
@@ -92,6 +94,7 @@ fn receiver_inventory() -> DeviceInventory {
             }),
             capabilities: Some(Capabilities::presumed_from_kind(DeviceKind::Mouse)),
             settings_revision: 0,
+            hidpp10: false,
         }],
     }
 }
@@ -125,6 +128,7 @@ fn cabled_inventory() -> DeviceInventory {
             }),
             capabilities: Some(Capabilities::presumed_from_kind(DeviceKind::Mouse)),
             settings_revision: 0,
+            hidpp10: false,
         }],
     }
 }
@@ -153,6 +157,49 @@ fn one_mouse_on_two_routes_is_one_record() {
     assert_eq!(records[0].config_key, "unit:6be9d300");
 }
 
+#[test]
+fn records_keep_the_registered_receiver_family() {
+    for (product_id, expected) in [
+        (0xc52b, ReceiverBrand::Unifying),
+        (0xc537, ReceiverBrand::Nano),
+        (0xc547, ReceiverBrand::Lightspeed),
+        (0xc548, ReceiverBrand::Bolt),
+    ] {
+        let mut inventory = inventory_with(vec![paired_device_no_model_info(1, None)]);
+        inventory.receiver.product_id = product_id;
+        let records = records_from(&Config::default(), &[inventory]);
+
+        assert_eq!(records[0].receiver_brand, Some(expected));
+    }
+}
+
+/// The family names the receiver behind the route, so an adopted card takes
+/// it from the live sighting together with the route: a mouse last seen on a
+/// Lightspeed receiver and now on its cable has no receiver family.
+#[test]
+fn an_adopted_card_takes_its_receiver_family_from_the_live_route() {
+    let mut known = online_record("unit:6be9d300");
+    known.route = Some(DeviceRoute::Unifying {
+        receiver_uid: "DA2699E1".to_string(),
+        slot: 1,
+    });
+    known.receiver_brand = Some(ReceiverBrand::Lightspeed);
+    let cable = DeviceRoute::Direct {
+        vendor_id: 0x046d,
+        product_id: 0xc08d,
+    };
+    let mut live = online_record("direct:046d:c08d:6be9d300");
+    live.route = Some(cable.clone());
+
+    let adopted = adopt_transient_record(&known, live);
+
+    assert_eq!(adopted.route, Some(cable));
+    assert_eq!(
+        adopted.receiver_brand, None,
+        "a cable has no receiver family"
+    );
+}
+
 fn online_record(key: &str) -> DeviceRecord {
     DeviceRecord {
         config_key: key.to_string(),
@@ -170,9 +217,11 @@ fn online_record(key: &str) -> DeviceRecord {
         driver_id: None,
         registry_model_id: None,
         route: None,
+        receiver_brand: None,
         capture_id: None,
         kind: DeviceKind::Mouse,
         capabilities: Some(Capabilities::presumed_from_kind(DeviceKind::Mouse)),
+        hidpp10: false,
         light_capabilities: None,
         slot: 1,
         online: true,
@@ -314,6 +363,8 @@ fn mouse_identity(name: &str) -> DeviceIdentity {
             pointer_scaling: false,
             force_sensing: false,
             disable_keys: false,
+            onboard_profiles: false,
+            button_spy: false,
         },
         light_capabilities: None,
         model_info: None,

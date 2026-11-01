@@ -95,6 +95,28 @@ impl Assignment {
         let (_, cid) = self.slot_id.rsplit_once("_c")?;
         cid.parse().ok()
     }
+
+    /// The G-number in a G-series slot id (`g502wireless_g7_m1` → 7). These
+    /// depots place markers in pixels, not percent.
+    #[must_use]
+    pub fn g_number(&self) -> Option<u8> {
+        let (rest, mode) = self.slot_id.rsplit_once('_')?;
+        mode.strip_prefix('m')?.parse::<u8>().ok()?;
+        rest.rsplit_once("_g")?.1.parse().ok()
+    }
+
+    /// The keypad grid key Logi's slot identifier encodes: the row-major
+    /// wire index after the trailing `_g`, as in `mx-keys-c354_g5` for the
+    /// middle key of the 3×3 grid (1 = top-left). Grid keys report through
+    /// the vendor report, not `0x1b04` controls, so no Logitech depot
+    /// carries this suffix — only OpenLogi-authored depots do. Which
+    /// indices exist is the keypad model's decision, so the decode returns
+    /// the raw number and the consumer validates it.
+    #[must_use]
+    pub fn grid_index(&self) -> Option<u8> {
+        let (_, index) = self.slot_id.rsplit_once("_g")?;
+        index.parse().ok()
+    }
 }
 
 #[derive(Debug, Deserialize, Clone, Copy, Default, PartialEq)]
@@ -122,6 +144,12 @@ impl Metadata {
         self.images.first().map(|i| i.origin)
     }
 
+    /// The image entry for `key`.
+    #[must_use]
+    pub fn image(&self, key: &str) -> Option<&ImageEntry> {
+        self.images.iter().find(|i| i.key == key)
+    }
+
     /// Raw assignment iterator over the `device_buttons_image` entry.
     /// Slot-name → application-button mapping is intentionally left to
     /// the consumer (the GUI owns the ButtonId enum).
@@ -142,6 +170,21 @@ mod tests {
     /// no `slotName` — and add fields like `assignmentOffset`. Parsing must
     /// not fail wholesale: the renderer still needs `origin`, and unknown
     /// slot names already degrade to "no hotspot" in the consumer.
+    #[test]
+    fn gaming_slot_ids_decode_their_g_number() {
+        let slot = |id: &str| super::Assignment {
+            slot_id: id.into(),
+            slot_name: String::new(),
+            marker: super::Point::default(),
+            label: super::Direction::default(),
+        };
+        assert_eq!(slot("g502wireless_g7_m1").g_number(), Some(7));
+        assert_eq!(slot("g502wireless_g11_m1").g_number(), Some(11));
+        assert_eq!(slot("g513_g1_m1").g_number(), Some(1));
+        assert_eq!(slot("mx-keys-mini-2b369_c266").g_number(), None);
+        assert_eq!(slot("g502wireless_g7").g_number(), None);
+    }
+
     #[test]
     fn slot_ids_decode_their_control_id() {
         let json = r#"{
@@ -166,6 +209,34 @@ mod tests {
             .map(super::Assignment::control_id)
             .collect();
         assert_eq!(cids, vec![Some(0x010a), None, None]);
+    }
+
+    /// The `_g<index>` suffix OpenLogi-authored depots use for keypad grid
+    /// keys. The legacy G513 macro slot name also contains `_g` but never
+    /// decodes: the suffix must end the slot ID, not sit in its middle.
+    #[test]
+    fn slot_ids_decode_their_grid_index() {
+        let json = r#"{
+          "images": [
+            {
+              "key": "device_keys_image",
+              "origin": { "width": 935, "height": 1105 },
+              "assignments": [
+                { "slotId": "mx-creative-keypad-c354_g1", "marker": { "x": 24.87, "y": 20.77 } },
+                { "slotId": "mx-creative-keypad-c354_g9", "marker": { "x": 75.73, "y": 63.84 } },
+                { "slotId": "mx-creative-keypad-c354_c417", "marker": { "x": 25.2, "y": 82.0 } },
+                { "slotId": "g513_g1_m1", "marker": { "x": 370, "y": 300 } }
+              ]
+            }
+          ]
+        }"#;
+        let meta: Metadata = serde_json::from_str(json).expect("parses");
+        let indices: Vec<Option<u8>> = meta.images[0]
+            .assignments
+            .iter()
+            .map(super::Assignment::grid_index)
+            .collect();
+        assert_eq!(indices, vec![Some(1), Some(9), None, None]);
     }
 
     #[test]

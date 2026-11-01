@@ -1,0 +1,41 @@
+# Owner: keypad_vendor — the MX Creative Keypad's vendor-channel framing
+# (report IDs 0x13/0x14, channel `ff 02`, function byte).
+id: device-keypad-vendor-framing-owner
+language: rust
+severity: error
+message: Frame and match MX Creative Keypad vendor reports through openlogi-device's keypad_vendor; do not re-spell report 0x13/0x14 or the `ff 02` channel.
+note: |
+  The grid-key decoder and the LCD image write each spelled the channel once —
+  one as literal bytes, one as constants — so a framing fix in one would have
+  silently missed the other. Hardware-captured bytes in tests are exempt.
+files:
+  - crates/openlogi-device/src/**/*.rs
+  - crates/openlogi-hid/src/**/*.rs
+  - crates/openlogi-agent-core/src/**/*.rs
+ignores:
+  - crates/openlogi-device/src/keypad_vendor.rs
+  - crates/openlogi-device/src/keypad_vendor/**
+  - crates/**/tests.rs
+  - crates/**/tests/**
+  - crates/**/*_tests.rs
+rule:
+  all:
+    - any:
+        - all:
+            - kind: binary_expression
+            - regex: '(\[0\]|first\(\))\s*==\s*(Some\(&)?0x1[34]\b'
+        - all:
+            - any:
+                - kind: array_expression
+                - kind: slice_pattern
+            - regex: '^\[\s*0x1[34]\s*,\s*0xff\s*,\s*0x02\b'
+        - all:
+            - any:
+                - kind: array_expression
+                - kind: slice_pattern
+            - regex: '^\[\s*0xff\s*,\s*0x02\s*(,\s*0x(00|2b)\s*)?\]$'
+    - not:
+        inside:
+          kind: mod_item
+          regex: '^mod tests\b'
+          stopBy: end

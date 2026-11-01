@@ -22,8 +22,9 @@ devenv shell -- cargo run -p xtask -- <command>
 - `macos dmg` — package an existing app bundle into the branded DMG.
 - `macos package` — build the app bundle, embed Sparkle when given its public key,
   optionally sign it, then create the branded DMG.
-- `linux package` — build release binaries and package `.deb`, `.rpm`, and
-  `.pkg.tar.zst` artifacts with nfpm.
+- `linux package` — build release binaries, package `.deb`, `.rpm`, and
+  `.pkg.tar.zst` artifacts with nfpm, then re-encode the `.deb` data member as
+  xz and the Arch package as zstd with a long window.
 - `lint sweep-allows [--out <path>]` — remove each `#[allow]` in turn, run
   clippy, and record which of its lints fire on this host.
 - `lint merge-allows <reports…>` — join the per-host reports and fail on a lint
@@ -101,9 +102,10 @@ either is renewed:
 1. In the Apple Developer portal, create a Developer ID profile for the
    `org.openlogi.agent` App ID with the current Developer ID Application
    certificate. The App ID must keep the HID Virtual Device capability.
-2. Put the profile's base64 in the `APPLE_AGENT_PROVISIONING_PROFILE` field of
-   the 1Password item that `OP_APPLE_SECRET_ITEM` names.
-3. If the certificate was renewed, update the same item too, because CI
+2. Put the profile's base64 in the `APPLE_AGENT_PROVISIONING_PROFILE` variable
+   of the `OpenLogi Release` 1Password Environment (`docs/DEVELOPMENT.md`,
+   "Release secrets").
+3. If the certificate was renewed, update the same Environment too, because CI
    imports the certificate separately: `APPLE_CERTIFICATE` (the base64 of the
    new certificate and private key, exported as PKCS#12),
    `APPLE_CERTIFICATE_PASSWORD`, and `APPLE_SIGNING_IDENTITY` if the identity
@@ -199,7 +201,10 @@ xtask/
       linux.rs               # Linux domain entry
       linux/
         package.rs
-        package/tests.rs
+        package/
+          payload.rs         # re-encoding the .deb and Arch payloads nfpm writes
+          payload/tests.rs
+          tests.rs
       lint.rs                # lint hygiene one clippy run cannot check
       lint/
         allow_sites.rs       # where each `#[allow]` is, and the edit removing it

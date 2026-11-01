@@ -38,6 +38,7 @@ pub(super) use openlogi_core::config::{
 };
 
 pub(super) use crate::app::menu::{CloseWindow, Minimize, Zoom};
+use crate::features::pointer::momentum::{MomentumPanel, MomentumScope};
 pub(super) use crate::services::assets::sync::{AssetCommand, AssetControl};
 pub(super) use crate::state::{AppState, StateEvent};
 use crate::ui::commit_slider::{CommitSlider, SliderRange};
@@ -72,6 +73,9 @@ pub enum SettingsPage {
     #[default]
     General,
     Updates,
+    /// Where Linux shows input-device access, which the agent needs to run.
+    #[cfg(target_os = "linux")]
+    Permissions,
     About,
 }
 
@@ -81,6 +85,8 @@ impl SettingsPage {
         match self {
             Self::General => 0,
             Self::Updates => 1,
+            #[cfg(target_os = "linux")]
+            Self::Permissions => 2,
             // One lower on Windows: the Permissions page isn't registered
             // there (see the `mod permissions` cfg).
             Self::About => {
@@ -124,6 +130,8 @@ pub struct SettingsView {
     asset_source_select: Entity<SelectState<Vec<assets::AssetSourceOption>>>,
     thumbwheel_sensitivity: CommitSlider<ThumbwheelSensitivity>,
     vertical_scroll_sensitivity: CommitSlider<VerticalScrollSensitivity>,
+    /// The General page's momentum-scrolling card: the app-wide default.
+    momentum_panel: Entity<MomentumPanel>,
     /// Shared app-wide updater, surfaced on the Updates page. A launch-time
     /// check result is already visible when the window opens.
     updater: Entity<Updater>,
@@ -219,6 +227,7 @@ impl SettingsView {
 
         let thumbwheel_sensitivity = Self::thumbwheel_sensitivity_slider(cx);
         let vertical_scroll_sensitivity = Self::vertical_scroll_sensitivity_slider(cx);
+        let momentum_panel = cx.new(|cx| MomentumPanel::new(MomentumScope::General, cx));
 
         // Poll the agent's live event monitor while this window is open. The task
         // is held in the view, so closing Settings drops it, polling stops, and
@@ -262,6 +271,7 @@ impl SettingsView {
             asset_source_select,
             thumbwheel_sensitivity,
             vertical_scroll_sensitivity,
+            momentum_panel,
             updater,
             updater_obs,
             copied: false,
@@ -452,6 +462,7 @@ impl Render for SettingsView {
                     vertical_scroll: self.vertical_scroll_sensitivity.slider().clone(),
                     thumbwheel: self.thumbwheel_sensitivity.slider().clone(),
                 },
+                self.momentum_panel.clone(),
                 self.registration_status,
             ))
             .page(updates::updates_page(self.updater.clone()));

@@ -1,10 +1,10 @@
 use super::home::{connection_icon_path, ordered_device_indices};
-use super::{Capabilities, DetailTab, DeviceKind, DeviceRecord};
+use super::{DetailTab, DeviceKind, DeviceRecord};
 use crate::services::assets::ResolvedAsset;
 use crate::ui::battery::battery_charging_no_reading;
 use openlogi_core::device::{
-    BatteryInfo, BatteryLevel, BatteryStatus, DeviceModelInfo, DeviceTransports, LightCapabilities,
-    LightValueRange, LightValueUnit,
+    BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceModelInfo, DeviceTransports,
+    LightCapabilities, LightValueRange, LightValueUnit,
 };
 use openlogi_core::hid::DeviceRoute;
 
@@ -61,6 +61,8 @@ fn config_error_folder_button_opens_from_the_active_window(cx: &mut gpui::TestAp
 
 #[gpui::test]
 fn main_window_renders_profile_confirmation_dialogs(cx: &mut gpui::TestAppContext) {
+    use std::{cell::Cell, rc::Rc};
+
     use gpui::{AppContext as _, InteractiveElement as _, ParentElement as _, div};
     use gpui_component::{Root, WindowExt as _};
 
@@ -85,15 +87,20 @@ fn main_window_renders_profile_confirmation_dialogs(cx: &mut gpui::TestAppContex
         let view = cx.new(|cx| AppView::new(window, cx));
         Root::new(view, window, cx)
     });
+    let dialog_renders = Rc::new(Cell::new(0));
     cx.update(|window, cx| {
-        window.open_alert_dialog(cx, |alert, _, _| {
+        let renders = dialog_renders.clone();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            renders.set(renders.get() + 1);
             alert.confirm().title(
                 div()
                     .debug_selector(|| "profile-confirmation".into())
                     .child("Remove Safari profile?"),
             )
         });
+        dialog_renders.set(0);
         window.draw(cx).clear(cx);
+        assert_eq!(dialog_renders.get(), 1, "mount the dialog once per frame");
     });
     assert!(
         cx.debug_bounds("profile-confirmation").is_some(),
@@ -165,54 +172,36 @@ fn the_device_rename_dialog_offers_save_and_cancel(cx: &mut gpui::TestAppContext
     );
 }
 
-/// The Pointer tab's Scrolling card carries the smooth-wheel switch, shows the
-/// saved setting (a smooth wheel turned on earlier switches off) and knows this
-/// link has `0x2121` (so it switches back on).
-#[gpui::test]
-fn the_pointer_tab_offers_the_smooth_wheel(cx: &mut gpui::TestAppContext) {
+/// Open the main window on the detail screen of `inventory`'s first device,
+/// past the connecting frame and the accessibility gate, and return its root
+/// view. Callers hold `LOCALE_LOCK`.
+fn open_device_detail(
+    cx: &mut gpui::TestAppContext,
+    inventory: openlogi_core::device::DeviceInventory,
+    config: openlogi_core::config::Config,
+) -> (gpui::Entity<super::AppView>, &mut gpui::VisualTestContext) {
     use std::{cell::RefCell, rc::Rc};
 
-    use gpui::{AppContext as _, Modifiers, px, size};
+    use gpui::AppContext as _;
     use gpui_component::Root;
 
     use super::AppView;
-    use crate::services::{assets::AssetResolver, i18n::LOCALE_LOCK};
-    use crate::state::tests::{KNOWN_MOUSE_KEY, direct_inventory};
+    use crate::services::assets::AssetResolver;
     use crate::state::{AgentLink, AppState, Sources};
-    use openlogi_ipc::{AgentStatus, InventoryHealth, PROTOCOL_VERSION};
 
-    let _locale = LOCALE_LOCK.lock().unwrap();
     rust_i18n::set_locale("en");
     cx.update(gpui_component::init);
     cx.update(|cx| {
         let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
         let resolver = AssetResolver::new();
-        let mut inventory = direct_inventory([0xa3, 0x93, 0xca, 0xe0]);
-        inventory.paired[0]
-            .capabilities
-            .as_mut()
-            .expect("the fixture mouse has capabilities")
-            .hires_wheel = true;
-        let mut config = openlogi_core::config::Config::ephemeral();
-        config.set_smooth_wheel(KNOWN_MOUSE_KEY, true);
         let state = cx.new(|_| {
             let mut state = AppState::new(Sources {
                 inventories: &[inventory],
                 ..Sources::in_memory(config, &resolver, commands)
             });
-            // Past the connecting frame and the accessibility gate.
-            let _ = state.set_agent_link(AgentLink::Ready(AgentStatus {
-                accessibility_granted: true,
-                hook_installed: true,
-                launch_at_login: false,
-                inventory: InventoryHealth::Ready,
-                protocol_version: PROTOCOL_VERSION,
-                agent_version: "smooth-wheel-test".to_string(),
-                input_monitoring_granted: true,
-                hid_open_failures: false,
-                secure_input: openlogi_ipc::SecureInput::Off,
-                virtual_keyboard: openlogi_ipc::VirtualKeyboardStatus::Unsupported,
-            }));
+            let _ = state.set_agent_link(AgentLink::Ready(status_with(
+                openlogi_ipc::SecureInput::Off,
+            )));
             state
         });
         AppState::set_global(state, cx);
@@ -228,15 +217,42 @@ fn the_pointer_tab_offers_the_smooth_wheel(cx: &mut gpui::TestAppContext) {
         .borrow_mut()
         .take()
         .expect("the window hosts the app view");
-    cx.simulate_resize(size(px(1280.), px(900.)));
     cx.update(|window, cx| {
         let record_key = AppState::try_read(cx)
             .expect("state is installed")
             .devices()[0]
             .record_key()
             .clone();
+        app_view.update(cx, |view, cx| view.open_device(record_key, cx));
+        window.draw(cx).clear(cx);
+    });
+    (app_view, cx)
+}
+
+/// The Pointer tab's Scrolling card carries the smooth-wheel switch, shows the
+/// saved setting (a smooth wheel turned on earlier switches off) and knows this
+/// link has `0x2121` (so it switches back on).
+#[gpui::test]
+fn the_pointer_tab_offers_the_smooth_wheel(cx: &mut gpui::TestAppContext) {
+    use gpui::{Modifiers, px, size};
+
+    use crate::services::i18n::LOCALE_LOCK;
+    use crate::state::AppState;
+    use crate::state::tests::{KNOWN_MOUSE_KEY, direct_inventory};
+
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    let mut inventory = direct_inventory([0xa3, 0x93, 0xca, 0xe0]);
+    inventory.paired[0]
+        .capabilities
+        .as_mut()
+        .expect("the fixture mouse has capabilities")
+        .hires_wheel = true;
+    let mut config = openlogi_core::config::Config::ephemeral();
+    config.set_smooth_wheel(KNOWN_MOUSE_KEY, true);
+    let (app_view, cx) = open_device_detail(cx, inventory, config);
+    cx.simulate_resize(size(px(1280.), px(900.)));
+    cx.update(|window, cx| {
         app_view.update(cx, |view, cx| {
-            view.open_device(record_key, cx);
             view.active_tab = DetailTab::Pointer;
             cx.notify();
         });
@@ -262,6 +278,57 @@ fn the_pointer_tab_offers_the_smooth_wheel(cx: &mut gpui::TestAppContext) {
     assert!(
         click_and_read(),
         "this link has 0x2121, so it turns back on"
+    );
+}
+
+/// Each detail tab opens at its top. One call site builds every tab's
+/// scrolling body, so with a shared scroll position the Actions Ring opened
+/// as far down as the Pointer tab had been scrolled, its title hidden under
+/// the profile bar.
+#[gpui::test]
+fn a_tab_opens_at_its_top_after_another_tab_scrolled(cx: &mut gpui::TestAppContext) {
+    use gpui::{Bounds, Modifiers, Pixels, ScrollDelta, ScrollWheelEvent, point, px, size};
+
+    use crate::services::i18n::LOCALE_LOCK;
+    use crate::state::tests::direct_inventory;
+
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    let (_view, cx) = open_device_detail(
+        cx,
+        direct_inventory([0xa3, 0x93, 0xca, 0xe0]),
+        openlogi_core::config::Config::ephemeral(),
+    );
+    // Short enough that both tabs scroll: a tab that fits clamps any offset
+    // to zero and would hide a shared one.
+    cx.simulate_resize(size(px(1280.), px(600.)));
+    let open_tab = |cx: &mut gpui::VisualTestContext, rail: &'static str| -> Bounds<Pixels> {
+        let item = cx.debug_bounds(rail).expect("the rail lists the tab");
+        cx.simulate_click(item.center(), Modifiers::none());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.debug_bounds("detail-tab-body")
+            .expect("the tab has a scrolling body")
+    };
+
+    let ring_top = open_tab(cx, "detail-navigation-ActionsRing").top();
+    let pointer = open_tab(cx, "detail-navigation-Pointer");
+    cx.simulate_event(ScrollWheelEvent {
+        position: point(pointer.left() + px(8.), px(300.)),
+        delta: ScrollDelta::Pixels(point(px(0.), px(-5000.))),
+        ..Default::default()
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    let scrolled = cx
+        .debug_bounds("detail-tab-body")
+        .expect("the Pointer tab still shows");
+    assert!(
+        scrolled.top() < pointer.top(),
+        "the Pointer tab scrolled: {scrolled:?} from {pointer:?}"
+    );
+
+    assert_eq!(
+        open_tab(cx, "detail-navigation-ActionsRing").top(),
+        ring_top,
+        "the Actions Ring opens at its top"
     );
 }
 
@@ -551,6 +618,7 @@ fn disconnected_gaming_keyboards_keep_the_observed_usb_icon() {
                 model_info: Some(model),
                 capabilities: Some(Capabilities::presumed_from_kind(DeviceKind::Keyboard)),
                 settings_revision: 0,
+                hidpp10: false,
             }],
         };
         let resolver = AssetResolver::new();
@@ -733,6 +801,7 @@ fn keyboard_inventory_for_mode(
                 ..Capabilities::default()
             }),
             settings_revision: 0,
+            hidpp10: false,
         }],
     }
 }
@@ -974,15 +1043,118 @@ fn record(kind: DeviceKind, capabilities: Option<Capabilities>) -> DeviceRecord 
         driver_id: None,
         registry_model_id: None,
         route: None,
+        receiver_brand: None,
         capture_id: None,
         kind,
         capabilities,
+        hidpp10: false,
         light_capabilities: None,
         slot: 1,
         online: true,
         battery: None,
         settings_revision: 0,
         stale_pairings: Vec::new(),
+    }
+}
+
+/// An `svg` without its own text color paints nothing, which left the list
+/// row's transport glyph blank. Every transport must carry the corner color.
+#[gpui::test]
+fn home_transport_icon_paints_in_its_transport_color(cx: &mut gpui::TestAppContext) {
+    use gpui::{Hsla, Styled as _, rgb};
+
+    use super::home::transport_icon;
+    use crate::ui::theme;
+
+    cx.update(gpui_component::init);
+    let pal = cx.update(|cx| theme::palette(cx));
+    let routed = |route| DeviceRecord {
+        route: Some(route),
+        ..record(DeviceKind::Mouse, None)
+    };
+    let bolt = routed(DeviceRoute::Bolt {
+        receiver_uid: "r".into(),
+        slot: 1,
+    });
+    let bluetooth = routed(DeviceRoute::Direct {
+        vendor_id: 0x046d,
+        product_id: 0xb034,
+    });
+    let camera = record(DeviceKind::Camera, None);
+    let expected: [(&DeviceRecord, Hsla); 3] = [
+        (&bolt, rgb(theme::STATUS_CONNECTED).into()),
+        (&bluetooth, rgb(theme::ACCENT_BLUE).into()),
+        (&camera, pal.text_muted),
+    ];
+    for (record, color) in expected {
+        let mut icon = transport_icon(record, None, pal);
+        assert_eq!(icon.style().text.color, Some(color), "{:?}", record.kind);
+    }
+}
+
+/// Every Home grid card takes one column's width, so a short last row lines
+/// up under the rows above instead of stretching its cards.
+#[gpui::test]
+fn home_grid_cards_share_one_column_width(cx: &mut gpui::TestAppContext) {
+    use gpui::{AppContext as _, px, size};
+    use gpui_component::Root;
+
+    use super::AppView;
+    use crate::services::{assets::AssetResolver, i18n::LOCALE_LOCK};
+    use crate::state::tests::direct_inventory;
+    use crate::state::{AgentLink, AppState, Sources};
+
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    cx.update(gpui_component::init);
+    cx.update(|cx| {
+        let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let resolver = AssetResolver::new();
+        let inventories: Vec<_> = (1..=5)
+            .map(|unit| direct_inventory([0xa3, 0x93, 0xca, unit]))
+            .collect();
+        let state = cx.new(|_| {
+            let mut state = AppState::new(Sources {
+                inventories: &inventories,
+                ..Sources::in_memory(
+                    openlogi_core::config::Config::ephemeral(),
+                    &resolver,
+                    commands,
+                )
+            });
+            let _ = state.set_agent_link(AgentLink::Ready(status_with(
+                openlogi_ipc::SecureInput::Off,
+            )));
+            state
+        });
+        AppState::set_global(state, cx);
+    });
+    let (_, cx) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| AppView::new(window, cx));
+        Root::new(view, window, cx)
+    });
+
+    // Three columns leave two cards on the last row; two leave one.
+    for (width, columns) in [(1280., 3), (760., 2)] {
+        cx.simulate_resize(size(px(width), px(900.)));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let cards = [
+            "home-grid-card-0",
+            "home-grid-card-1",
+            "home-grid-card-2",
+            "home-grid-card-3",
+            "home-grid-card-4",
+        ]
+        .map(|card| cx.debug_bounds(card).expect("the grid shows five cards"));
+        for (position, card) in cards.iter().enumerate() {
+            let column = cards[position % columns];
+            assert_eq!(
+                (card.left(), card.size.width),
+                (column.left(), column.size.width),
+                "card {position} in a {width}px window"
+            );
+        }
+        assert_eq!(cards[columns - 1].top(), cards[0].top());
+        assert!(cards[columns].top() > cards[0].top());
     }
 }
 
@@ -1027,6 +1199,8 @@ fn tabs_prefer_buttons_when_a_keyboard_kind_measures_a_pointer() {
         pointer_scaling: false,
         force_sensing: false,
         disable_keys: false,
+        onboard_profiles: false,
+        button_spy: false,
     });
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
     assert!(
@@ -1063,6 +1237,8 @@ fn tabs_follow_capabilities_not_kind() {
         pointer_scaling: false,
         force_sensing: false,
         disable_keys: false,
+        onboard_profiles: false,
+        button_spy: false,
     });
     // After 0x0005 kind-correction the record has kind=Mouse, not Keyboard.
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Mouse, caps));
@@ -1146,6 +1322,8 @@ fn keyboard_without_asset_hides_buttons_tab() {
         pointer_scaling: false,
         force_sensing: false,
         disable_keys: false,
+        onboard_profiles: false,
+        button_spy: false,
     });
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
     assert!(
@@ -1176,6 +1354,8 @@ fn keyboard_with_buttons_shows_keys_tab() {
         pointer_scaling: false,
         force_sensing: false,
         disable_keys: false,
+        onboard_profiles: false,
+        button_spy: false,
     });
     let keyboard = record(DeviceKind::Keyboard, caps);
     let tabs = DetailTab::tabs_for(&keyboard);
@@ -1187,6 +1367,22 @@ fn keyboard_with_buttons_shows_keys_tab() {
     // Keys stays the keyboard's opening tab: adding the ring editor must not
     // reassign `default_for` away from the main keyboard screen.
     assert_eq!(DetailTab::default_for(&keyboard), DetailTab::Keys);
+}
+
+/// A numpad is keyboard-like: the MX Creative Keypad (kind Numpad, buttons
+/// measured from its 0x1b04 table) shows Keys with neither the mouse Buttons
+/// panel nor Pointer.
+#[test]
+fn numpad_with_buttons_shows_keys_tab() {
+    let caps = Some(Capabilities {
+        buttons: true,
+        pointer: false,
+        ..Capabilities::default()
+    });
+    let tabs = DetailTab::tabs_for(&record(DeviceKind::Numpad, caps));
+    assert!(tabs.contains(&DetailTab::Keys), "numpad lost its Keys tab");
+    assert!(!tabs.contains(&DetailTab::Buttons));
+    assert!(!tabs.contains(&DetailTab::Pointer));
 }
 
 /// A sleeping keyboard whose slot was never probed has no capability data,
@@ -1205,6 +1401,7 @@ fn keyboard_with_a_depot_but_no_capabilities_shows_keys_tab() {
         metadata: openlogi_assets::Metadata::default(),
         png_width: 1872,
         png_height: 728,
+        side_view: None,
     });
     assert!(DetailTab::tabs_for(&keyboard).contains(&DetailTab::Keys));
     assert!(!DetailTab::tabs_for(&record(DeviceKind::Keyboard, None)).contains(&DetailTab::Keys));
@@ -1249,6 +1446,26 @@ fn unprobed_mouse_falls_back_to_presumed_capabilities() {
     assert!(!tabs.contains(&DetailTab::Lighting));
 }
 
+/// A HID++ 1.0 device has no feature table, and OpenLogi writes none of its
+/// registers. It keeps the Buttons tab, which the OS hook drives, but gets no
+/// Pointer or Lighting tab whose controls would have no effect (#2161).
+#[test]
+fn hidpp10_device_gets_only_host_side_tabs() {
+    let trackball = DeviceRecord {
+        hidpp10: true,
+        ..record(DeviceKind::Trackball, None)
+    };
+    let tabs = DetailTab::tabs_for(&trackball);
+    assert!(tabs.contains(&DetailTab::Buttons));
+    assert!(!tabs.contains(&DetailTab::Pointer));
+
+    let keyboard = DeviceRecord {
+        hidpp10: true,
+        ..record(DeviceKind::Keyboard, None)
+    };
+    assert!(!DetailTab::tabs_for(&keyboard).contains(&DetailTab::Lighting));
+}
+
 /// An unprobed, unidentified device presumes nothing — only the info tab,
 /// rather than guessing wrong panels (the old Unknown+Direct→lighting bug).
 #[test]
@@ -1263,6 +1480,8 @@ mod corpus;
 /// device's Easy-Switch channel; a direct device has no slot to name.
 #[test]
 fn receiver_slot_is_named_only_for_receiver_routes() {
+    use openlogi_core::hid::ReceiverBrand;
+
     use super::widgets::{connection_summary, receiver_slot_label};
     use crate::services::i18n::LOCALE_LOCK;
 
@@ -1276,6 +1495,21 @@ fn receiver_slot_is_named_only_for_receiver_routes() {
     bolt.slot = 4;
     assert_eq!(receiver_slot_label(&bolt).as_deref(), Some("Slot 4"));
     assert_eq!(connection_summary(&bolt), "Bolt receiver · Slot 4");
+
+    let mut compatible = bolt.clone();
+    compatible.route = Some(DeviceRoute::Unifying {
+        receiver_uid: "OL-RECEIVER-UID-0001".to_string(),
+        slot: 4,
+    });
+    for (brand, label) in [
+        (ReceiverBrand::Unifying, "Unifying receiver"),
+        (ReceiverBrand::Nano, "Nano receiver"),
+        (ReceiverBrand::Lightspeed, "Lightspeed receiver"),
+    ] {
+        compatible.receiver_brand = Some(brand);
+        assert_eq!(receiver_slot_label(&compatible).as_deref(), Some("Slot 4"));
+        assert_eq!(connection_summary(&compatible), format!("{label} · Slot 4"));
+    }
 
     let mut direct = record(DeviceKind::Mouse, None);
     direct.route = Some(DeviceRoute::Direct {
@@ -1468,4 +1702,126 @@ fn a_key_binding_edit_repaints_the_secure_input_notice(cx: &mut gpui::TestAppCon
         "clearing the last key repaints the window"
     );
     assert!(!secure_input_notice_drawn(cx));
+}
+
+/// A lost agent first marks the window's last state as reconnecting. Once it
+/// is unreachable, the notice replaces only the content: the header keeps
+/// Settings usable, Add Device stays shut, and Retry asks the IPC client to
+/// try again now.
+#[gpui::test]
+fn an_unreachable_agent_keeps_the_header_and_offers_retry(cx: &mut gpui::TestAppContext) {
+    use gpui::{AppContext as _, Modifiers};
+    use gpui_component::Root;
+    use openlogi_ipc::SecureInput;
+
+    use super::AppView;
+    use crate::services::ipc::Command;
+    use crate::services::{assets::AssetResolver, i18n::LOCALE_LOCK};
+    use crate::state::{AgentLink, AppState, Sources};
+
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    cx.update(gpui_component::init);
+    let (commands, mut sent) = tokio::sync::mpsc::unbounded_channel();
+    cx.update(|cx| {
+        let resolver = AssetResolver::new();
+        let state = cx.new(|_| {
+            let mut state = AppState::new(Sources::in_memory(
+                openlogi_core::config::Config::ephemeral(),
+                &resolver,
+                commands,
+            ));
+            let _ = state.set_agent_link(AgentLink::Ready(status_with(SecureInput::Off)));
+            state
+        });
+        AppState::set_global(state, cx);
+    });
+    let (_, cx) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| AppView::new(window, cx));
+        Root::new(view, window, cx)
+    });
+    let draw = |cx: &mut gpui::VisualTestContext| cx.update(|window, cx| window.draw(cx).clear(cx));
+
+    draw(cx);
+    assert!(cx.debug_bounds("agent-reconnecting").is_none());
+    cx.update(|_, cx| AppState::apply(cx, AppState::agent_link_lost));
+    draw(cx);
+    assert!(
+        cx.debug_bounds("agent-reconnecting").is_some(),
+        "a lost agent's last state is not presented as live"
+    );
+
+    cx.update(|_, cx| {
+        AppState::apply(cx, |state| {
+            state.set_agent_link(AgentLink::Unreachable { retrying: false })
+        });
+    });
+    draw(cx);
+    assert!(
+        cx.debug_bounds("home-settings").is_some(),
+        "the header stays, so Settings stays reachable without a menu bar"
+    );
+    let add_device = cx
+        .debug_bounds("header-add-device")
+        .expect("the header keeps Add Device");
+    let windows = cx.update(|_, cx| cx.windows().len());
+    cx.simulate_click(add_device.center(), Modifiers::none());
+    assert_eq!(
+        cx.update(|_, cx| cx.windows().len()),
+        windows,
+        "pairing needs the agent, so Add Device opens nothing"
+    );
+
+    let retry = cx
+        .debug_bounds("agent-retry")
+        .expect("the notice offers Retry");
+    while sent.try_recv().is_ok() {}
+    cx.simulate_click(retry.center(), Modifiers::none());
+    assert!(matches!(sent.try_recv(), Ok(Command::RetryConnection(_))));
+    assert_eq!(
+        cx.update(|_, cx| AppState::try_read(cx).unwrap().agent_link().clone()),
+        AgentLink::Unreachable { retrying: true },
+        "the notice shows the attempt until the IPC client answers it"
+    );
+}
+
+/// A G-series mouse carries the gaming control tables and no `0x1b04`. The
+/// OS hook still remaps its middle/back/forward, so it gets the Buttons panel,
+/// with or without a layout for the model (#392, #730, #877). It gets no
+/// Actions Ring, so its buttons are not offered one either.
+#[test]
+fn a_mouse_without_reprogcontrols_gets_buttons_but_no_ring() {
+    let caps = Some(Capabilities::from_feature_ids(&[0x2201, 0x8100, 0x8110]));
+    let unknown_model = record(DeviceKind::Mouse, caps);
+    let g502 = DeviceRecord {
+        model_key: "0407f".to_string(),
+        ..record(DeviceKind::Mouse, caps)
+    };
+    for mouse in [unknown_model, g502] {
+        let tabs = DetailTab::tabs_for(&mouse);
+        assert!(tabs.contains(&DetailTab::Buttons));
+        assert!(!tabs.contains(&DetailTab::ActionsRing));
+        assert!(!super::offers_actions_ring(&mouse));
+        assert!(tabs.contains(&DetailTab::Pointer));
+    }
+}
+
+/// The function-row remapper has no OS-hook fallback: it diverts every key
+/// over `0x1b04`. A gaming keyboard has the gaming tables and no
+/// ReprogControls, so Keys would open a panel whose capture session cannot
+/// start. The feature list is a real G713 dump (#886).
+#[test]
+fn a_gaming_keyboard_gets_no_keys_or_mouse_tabs() {
+    let g713 = Capabilities::from_feature_ids(&[
+        0x0000, 0x0001, 0x0003, 0x0005, 0x0020, 0x8071, 0x8081, 0x1bc0, 0x40a3, 0x4522, 0x4540,
+        0x8010, 0x8040, 0x8100, 0x8060, 0x00c2, 0x00d0,
+    ]);
+    assert_eq!(
+        openlogi_core::binding::GamingButtons::for_device("0c339", Some(&g713)),
+        Some(openlogi_core::binding::GamingButtons::Standard)
+    );
+    let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, Some(g713)));
+    assert!(!tabs.contains(&DetailTab::Keys));
+    assert!(!tabs.contains(&DetailTab::Buttons) && !tabs.contains(&DetailTab::ActionsRing));
+    assert!(tabs.contains(&DetailTab::Lighting));
 }

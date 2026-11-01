@@ -1,0 +1,209 @@
+{
+  "schema_version": 1,
+  "id": "mx-master-3-001-profile",
+  "name": "MX Master 3",
+  "inventories": [
+    {
+      "receiver": {
+        "name": "MX Master 3",
+        "vendor_id": 1133,
+        "product_id": 45091,
+        "unique_id": null
+      },
+      "paired": [
+        {
+          "slot": 255,
+          "codename": "Wireless Mouse MX Master 3",
+          "wpid": null,
+          "kind": "mouse",
+          "online": true,
+          "battery": {
+            "percentage": 20,
+            "level": "low",
+            "status": "charging"
+          },
+          "model_info": {
+            "entity_count": 3,
+            "serial_number": null,
+            "unit_id": [
+              79,
+              76,
+              68,
+              1
+            ],
+            "transports": {
+              "usb": false,
+              "equad": true,
+              "btle": true,
+              "bluetooth": false
+            },
+            "model_ids": [
+              45091,
+              16514,
+              0
+            ],
+            "extended_model_id": 0
+          },
+          "capabilities": {
+            "buttons": true,
+            "pointer": true,
+            "lighting": false,
+            "scroll_inversion": true,
+            "hires_wheel": true,
+            "thumbwheel": true,
+            "haptic_feedback": false,
+            "haptic_panel": false,
+            "dpi_gestures": true,
+            "fn_lock": false,
+            "os_layout": false,
+            "report_rate": false,
+            "backlight": false,
+            "easy_switch": false,
+            "virtual_thumbwheel": false,
+            "pointer_scaling": false,
+            "force_sensing": false,
+            "disable_keys": false
+          },
+          "settings_revision": 0
+        }
+      ]
+    }
+  ],
+  "standalone": [],
+  "settings": [
+    {
+      "route": {
+        "Direct": {
+          "vendor_id": 1133,
+          "product_id": 45091
+        }
+      },
+      "dpi": {
+        "support": "supported",
+        "value": {
+          "current": 1000,
+          "capabilities": {
+            "values": [
+              200,
+              250,
+              300,
+              350,
+              400,
+              450,
+              500,
+              550,
+              600,
+              650,
+              700,
+              750,
+              800,
+              850,
+              900,
+              950,
+              1000,
+              1050,
+              1100,
+              1150,
+              1200,
+              1250,
+              1300,
+              1350,
+              1400,
+              1450,
+              1500,
+              1550,
+              1600,
+              1650,
+              1700,
+              1750,
+              1800,
+              1850,
+              1900,
+              1950,
+              2000,
+              2050,
+              2100,
+              2150,
+              2200,
+              2250,
+              2300,
+              2350,
+              2400,
+              2450,
+              2500,
+              2550,
+              2600,
+              2650,
+              2700,
+              2750,
+              2800,
+              2850,
+              2900,
+              2950,
+              3000,
+              3050,
+              3100,
+              3150,
+              3200,
+              3250,
+              3300,
+              3350,
+              3400,
+              3450,
+              3500,
+              3550,
+              3600,
+              3650,
+              3700,
+              3750,
+              3800,
+              3850,
+              3900,
+              3950,
+              4000
+            ]
+          }
+        }
+      },
+      "smartshift": {
+        "support": "supported",
+        "value": {
+          "mode": "Free",
+          "auto_disengage": 10,
+          "tunable_torque": 0
+        }
+      },
+      "wheel": {
+        "support": "supported",
+        "value": {
+          "resolution": "low",
+          "inverted": false,
+          "target": "native"
+        }
+      },
+      "backlight": {
+        "support": "unsupported"
+      },
+      "fn_lock": {
+        "support": "unsupported"
+      },
+      "report_rate": {
+        "support": "unsupported"
+      },
+      "easy_switch": {
+        "support": "unsupported"
+      },
+      "pointer_speed": {
+        "support": "unsupported"
+      },
+      "force_sensing": {
+        "support": "unsupported"
+      },
+      "disable_keys": {
+        "support": "unsupported"
+      },
+      "lighting": "unsupported",
+      "light": "unsupported"
+    }
+  ]
+}

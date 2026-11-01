@@ -7,13 +7,15 @@
 use std::collections::BTreeMap;
 
 use crate::binding::{
-    Action, Binding, ButtonId, GestureDirection, default_binding, default_binding_for,
+    Action, Binding, ButtonId, Cid, GamingLayout, GestureDirection, KeypadPage,
+    default_binding_for, default_binding_on,
 };
 use crate::config::Config;
 
 /// Effective per-button single-action map for the device `config_key`, with
 /// `app_bundle`'s per-app overlay applied. Unset buttons fall back to
-/// [`default_binding`].
+/// [`default_binding_on`] with the device's `layout`, which is `None` for a
+/// device without a dumped G-series layout.
 ///
 /// This projection is for one-shot consumers such as thumb-wheel rotation and
 /// the GUI. Lifecycle-aware button paths use [`button_bindings_for`] so a long
@@ -25,8 +27,9 @@ pub fn bindings_for(
     config: &Config,
     config_key: Option<&str>,
     app_bundle: Option<&str>,
+    layout: Option<&GamingLayout>,
 ) -> BTreeMap<ButtonId, Action> {
-    button_bindings_for(config, config_key, app_bundle)
+    button_bindings_for(config, config_key, app_bundle, layout)
         .into_iter()
         .map(|(button, binding)| (button, binding.click_action()))
         .collect()
@@ -36,29 +39,76 @@ pub fn bindings_for(
 ///
 /// Unlike [`bindings_for`], this preserves threshold-based long presses. A
 /// sparse gesture map receives only its missing `Click` default so it keeps its
-/// gesture identity while retaining the same plain-click fallback.
+/// gesture identity while retaining the same plain-click fallback. Unset
+/// buttons fall back to [`default_binding_on`] with `layout`, as in
+/// [`bindings_for`].
 #[must_use]
 pub fn button_bindings_for(
     config: &Config,
     config_key: Option<&str>,
     app_bundle: Option<&str>,
+    layout: Option<&GamingLayout>,
 ) -> BTreeMap<ButtonId, Binding> {
     let stored = config_key
         .map(|key| config.effective_bindings(key, app_bundle))
         .unwrap_or_default();
     let mut bindings: BTreeMap<ButtonId, Binding> = ButtonId::ALL
         .iter()
+        .chain(&ButtonId::G_BUTTONS)
         .copied()
-        .map(|button| (button, Binding::Single(default_binding(button))))
+        .map(|button| (button, Binding::Single(default_binding_on(layout, button))))
         .collect();
+    if config_key.is_some_and(|key| config.keypad_pages(key) > KeypadPage::FIRST) {
+        bindings.extend(keypad_paging_defaults());
+    }
     for (button, mut binding) in stored {
         if let Binding::Gesture(map) = &mut binding {
             map.entry(GestureDirection::Click)
-                .or_insert_with(|| default_binding(button));
+                .or_insert_with(|| default_binding_on(layout, button));
         }
         bindings.insert(button, binding);
     }
     bindings
+}
+
+/// The page actions a multi-page keypad's paging buttons start out bound to.
+///
+/// Seeded only once a device has more than one page — the page count is a
+/// per-device config fact, so no device kind or model stands in for it. With
+/// one page there is nothing to page through and the buttons stay native;
+/// seeding them for every device would make every keyboard look bound and
+/// start a capture session for it.
+fn keypad_paging_defaults() -> [(ButtonId, Binding); 2] {
+    let [left, right] = Cid::PAGING;
+    [
+        (
+            ButtonId::Control(left),
+            Binding::Single(Action::PreviousKeypadPage),
+        ),
+        (
+            ButtonId::Control(right),
+            Binding::Single(Action::NextKeypadPage),
+        ),
+    ]
+}
+
+/// The bindings a keypad dispatches while it is on `page`: every grid slot on
+/// `page` is moved onto its physical key ([`ButtonId::grid`], the identity a
+/// capture session reports a press as), slots on other pages are dropped, and
+/// every other button passes through.
+#[must_use]
+pub fn bindings_on_page(
+    bindings: &BTreeMap<ButtonId, Binding>,
+    page: KeypadPage,
+) -> BTreeMap<ButtonId, Binding> {
+    bindings
+        .iter()
+        .filter_map(|(button, binding)| match button.grid_slot() {
+            None => Some((*button, binding.clone())),
+            Some(slot) if slot.page == page => Some((ButtonId::grid(slot.key), binding.clone())),
+            Some(_) => None,
+        })
+        .collect()
 }
 
 /// Per-direction maps for every HID++ gesture source (DPI/ModeShift, the
@@ -147,6 +197,24 @@ mod tests {
     use crate::binding::{LongPressBinding, default_gesture_binding};
 
     use super::*;
+    use crate::binding::default_binding;
+
+    #[test]
+    fn an_unset_g_button_projects_its_layouts_stock_function() {
+        use crate::binding::G502_LIGHTSPEED;
+        let mut cfg = Config::default();
+        cfg.set_binding("0407f", ButtonId::G7, Binding::Single(Action::None));
+        let g502 = bindings_for(&cfg, Some("0407f"), None, Some(&G502_LIGHTSPEED));
+        assert_eq!(g502.get(&ButtonId::G6), Some(&Action::DpiShift));
+        assert_eq!(
+            g502.get(&ButtonId::G7),
+            Some(&Action::None),
+            "a stored binding wins over the stock function"
+        );
+        assert_eq!(g502.get(&ButtonId::G8), Some(&Action::NextDpiPreset));
+        let unknown = bindings_for(&cfg, Some("0407f"), None, None);
+        assert_eq!(unknown.get(&ButtonId::G6), Some(&Action::None));
+    }
 
     #[test]
     fn click_less_gesture_keeps_default_click_in_projection() {
@@ -158,7 +226,7 @@ mod tests {
         map.insert(GestureDirection::Up, Action::Copy);
         cfg.set_binding("2b042", ButtonId::GestureButton, Binding::Gesture(map));
 
-        let projected = bindings_for(&cfg, Some("2b042"), None);
+        let projected = bindings_for(&cfg, Some("2b042"), None, None);
         assert_eq!(
             projected.get(&ButtonId::GestureButton),
             Some(&default_binding(ButtonId::GestureButton)),
@@ -172,9 +240,9 @@ mod tests {
         let binding = Binding::LongPress(LongPressBinding::new(Action::Copy, Action::Paste));
         cfg.set_binding("2b042", ButtonId::Back, binding.clone());
 
-        let lifecycle = button_bindings_for(&cfg, Some("2b042"), None);
+        let lifecycle = button_bindings_for(&cfg, Some("2b042"), None, None);
         assert_eq!(lifecycle.get(&ButtonId::Back), Some(&binding));
-        let actions = bindings_for(&cfg, Some("2b042"), None);
+        let actions = bindings_for(&cfg, Some("2b042"), None, None);
         assert_eq!(actions.get(&ButtonId::Back), Some(&Action::Copy));
     }
 
@@ -191,7 +259,7 @@ mod tests {
             Action::VolumeUp.into(),
         );
 
-        let projected = bindings_for(&cfg, Some("2b034"), None);
+        let projected = bindings_for(&cfg, Some("2b034"), None, None);
         assert_eq!(projected.get(&ButtonId::Thumbwheel), Some(&Action::None));
     }
 
@@ -200,7 +268,7 @@ mod tests {
         let mut cfg = Config::default();
         cfg.set_binding("2b034", ButtonId::Thumbwheel, Action::AppExpose.into());
 
-        let projected = bindings_for(&cfg, Some("2b034"), None);
+        let projected = bindings_for(&cfg, Some("2b034"), None, None);
         assert_eq!(
             projected.get(&ButtonId::Thumbwheel),
             Some(&Action::AppExpose)
@@ -215,7 +283,7 @@ mod tests {
         map.insert(GestureDirection::Click, Action::Paste);
         cfg.set_binding("2b042", ButtonId::GestureButton, Binding::Gesture(map));
 
-        let projected = bindings_for(&cfg, Some("2b042"), None);
+        let projected = bindings_for(&cfg, Some("2b042"), None, None);
         assert_eq!(
             projected.get(&ButtonId::GestureButton),
             Some(&Action::Paste)
@@ -374,7 +442,8 @@ mod tests {
                     expected
                 );
                 assert_eq!(
-                    bindings_for(&cfg, Some("2b042"), Some("com.example.Editor")).get(&button),
+                    bindings_for(&cfg, Some("2b042"), Some("com.example.Editor"), None)
+                        .get(&button),
                     Some(&action)
                 );
                 assert_eq!(hidpp_gesture_maps_for(&cfg, Some("2b042"), None), global);
@@ -412,5 +481,128 @@ mod tests {
             hidpp_gesture_maps_for(&cfg, Some("2b042"), None).is_empty(),
             "a demoted dedicated button must dispatch nothing over HID++"
         );
+    }
+
+    fn slot(page: u8, key: crate::binding::GridKey) -> ButtonId {
+        ButtonId::Grid(crate::binding::GridSlot {
+            page: KeypadPage::new(page).unwrap(),
+            key,
+        })
+    }
+
+    /// The page buttons page only on a keypad that has pages to page
+    /// through; a stored binding still wins over the seed.
+    #[test]
+    fn paging_buttons_seed_page_actions_only_with_more_than_one_page() {
+        let left = ButtonId::Control(Cid::LEFT_PAGING);
+        let right = ButtonId::Control(Cid::RIGHT_PAGING);
+        let mut cfg = Config::default();
+        let single = button_bindings_for(&cfg, Some("keypad"), None, None);
+        assert!(!single.contains_key(&left) && !single.contains_key(&right));
+
+        cfg.set_keypad_pages("keypad", KeypadPage::new(2).unwrap());
+        let paged = button_bindings_for(&cfg, Some("keypad"), None, None);
+        assert_eq!(paged[&left], Binding::Single(Action::PreviousKeypadPage));
+        assert_eq!(paged[&right], Binding::Single(Action::NextKeypadPage));
+        // Another device is untouched by this one's pages.
+        assert!(!button_bindings_for(&cfg, Some("other"), None, None).contains_key(&left));
+
+        cfg.set_binding("keypad", right, Binding::Single(Action::Copy));
+        let rebound = button_bindings_for(&cfg, Some("keypad"), None, None);
+        assert_eq!(rebound[&right], Binding::Single(Action::Copy));
+        assert_eq!(rebound[&left], Binding::Single(Action::PreviousKeypadPage));
+    }
+
+    #[test]
+    fn a_page_resolves_onto_the_physical_keys() {
+        use crate::binding::GridKey;
+        let bindings = BTreeMap::from([
+            (slot(1, GridKey::Middle), Binding::Single(Action::Copy)),
+            (slot(2, GridKey::Middle), Binding::Single(Action::Paste)),
+            (slot(2, GridKey::TopLeft), Binding::Single(Action::Undo)),
+            (ButtonId::MiddleClick, Binding::Single(Action::Redo)),
+        ]);
+
+        let second = bindings_on_page(&bindings, KeypadPage::new(2).unwrap());
+        assert_eq!(
+            second,
+            BTreeMap::from([
+                (
+                    ButtonId::grid(GridKey::Middle),
+                    Binding::Single(Action::Paste)
+                ),
+                (
+                    ButtonId::grid(GridKey::TopLeft),
+                    Binding::Single(Action::Undo)
+                ),
+                (ButtonId::MiddleClick, Binding::Single(Action::Redo)),
+            ])
+        );
+        // A page with nothing bound leaves only the non-grid buttons.
+        let third = bindings_on_page(&bindings, KeypadPage::new(3).unwrap());
+        assert_eq!(third.len(), 1);
+    }
+
+    /// Shrinking drops the removed pages' grid bindings everywhere they are
+    /// stored, so re-adding a page starts it empty.
+    #[test]
+    fn shrinking_pages_drops_their_bindings() {
+        use crate::binding::GridKey;
+        let mut cfg = Config::default();
+        cfg.set_keypad_pages("keypad", KeypadPage::new(3).unwrap());
+        cfg.set_binding(
+            "keypad",
+            slot(1, GridKey::Middle),
+            Binding::Single(Action::Copy),
+        );
+        cfg.set_binding(
+            "keypad",
+            slot(3, GridKey::Middle),
+            Binding::Single(Action::Paste),
+        );
+        cfg.devices
+            .get_mut("keypad")
+            .unwrap()
+            .per_app_bindings
+            .insert(
+                "app".into(),
+                BTreeMap::from([(slot(3, GridKey::TopLeft), Action::Cut)]),
+            );
+
+        cfg.set_keypad_pages("keypad", KeypadPage::new(2).unwrap());
+
+        assert_eq!(cfg.keypad_pages("keypad"), KeypadPage::new(2).unwrap());
+        let device = &cfg.devices["keypad"];
+        assert!(device.bindings.contains_key(&slot(1, GridKey::Middle)));
+        assert!(!device.bindings.contains_key(&slot(3, GridKey::Middle)));
+        assert!(device.per_app_bindings["app"].is_empty());
+    }
+
+    /// A page binds keys when any profile binds one there — an app profile's
+    /// key alone is enough, since shrinking drops it too.
+    #[test]
+    fn a_page_binds_keys_through_any_profile() {
+        use crate::binding::GridKey;
+        let page = |number| KeypadPage::new(number).unwrap();
+        let mut cfg = Config::default();
+        cfg.set_keypad_pages("keypad", page(3));
+        assert!(!cfg.keypad_page_binds("keypad", page(2)));
+        assert!(!cfg.keypad_page_binds("unknown", page(1)));
+
+        cfg.set_binding(
+            "keypad",
+            slot(2, GridKey::Middle),
+            Binding::Single(Action::Copy),
+        );
+        cfg.set_per_app_binding(
+            "keypad",
+            "app",
+            slot(3, GridKey::TopLeft),
+            Some(Action::Cut),
+        );
+
+        assert!(cfg.keypad_page_binds("keypad", page(2)));
+        assert!(cfg.keypad_page_binds("keypad", page(3)));
+        assert!(!cfg.keypad_page_binds("keypad", page(1)));
     }
 }
