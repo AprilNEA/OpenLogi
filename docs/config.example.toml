@@ -21,6 +21,8 @@ ui_scale = "normal"
 device_view_mode = "grid"
 # macOS only: "openlogi" (the signed icon) or "prism".
 app_icon = "openlogi"
+# Briefly show a keyboard's new backlight level on screen (default true).
+backlight_notifications = true
 # macOS only: Previous / Next Desktop slide like a three-finger swipe (default
 # true); false switches at once.
 animate_desktop_switch = true

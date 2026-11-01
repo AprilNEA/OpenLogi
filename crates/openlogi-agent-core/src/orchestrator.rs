@@ -40,6 +40,7 @@ use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
 use crate::action_ring::ActionRingSessionSpec;
+use crate::backlight_overlay::BacklightOverlayManager;
 use crate::capture_plan::{
     CapturePublication, PlanDevice, SharedCapturePlans, buttons_unlike_focus,
     hidpp_side_gesture_maps_for, plan_for_device, shift_bindings_for,
@@ -1493,6 +1494,20 @@ impl Orchestrator {
             .announce(change, &self.config.app_settings)
         {
             debug!(?change, "showing a lock key");
+        }
+    }
+
+    /// Show a keyboard's new backlight level on `overlay`, unless the user
+    /// turned the indicator off.
+    pub fn announce_backlight(
+        &self,
+        overlay: &BacklightOverlayManager,
+        current_level: u8,
+        levels: u8,
+        visible: bool,
+    ) {
+        if overlay.announce(current_level, levels, visible, &self.config.app_settings) {
+            debug!(current_level, levels, "showing a backlight level");
         }
     }
 
