@@ -722,6 +722,7 @@ camera_light_auto_description = "카메라를 하나라도 사용 중이면 조�
 [action_ring]
 actions_ring = "액션 링"
 action_ring_description = "포인터 주위에 표시할 8개의 동작을 설정합니다."
+enable_ring = "Show ring on button press"
 open_at_the_current_cursor_position = "현재 포인터 위치에서 엽니다."
 haptic_feedback = "햅틱 피드백"
 action_ring_haptic_description = "가리키거나 실행할 때 피드백을 재생합니다."
@@ -749,6 +750,14 @@ shortcut_e_g_cmd_plus_shift_plus_p = "단축키(예: Cmd+Shift+P)"
 application_folder_path_or_url = "앱, 폴더 경로 또는 URL"
 open_application_or_folder = "앱 또는 폴더 열기"
 custom_action_invalid_input = "Couldn't recognize that input."
+top_slot = "Top slot"
+top_right_slot = "Top-right slot"
+right_slot = "Right slot"
+bottom_right_slot = "Bottom-right slot"
+bottom_slot = "Bottom slot"
+bottom_left_slot = "Bottom-left slot"
+left_slot = "Left slot"
+top_left_slot = "Top-left slot"
 
 [keyboard]
 disabled_keys = "비활성화된 키"

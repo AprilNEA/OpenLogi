@@ -722,6 +722,7 @@ camera_light_auto_description = "Вмикати це світло, поки ви
 [action_ring]
 actions_ring = "Кільце дій"
 action_ring_description = "Налаштуйте вісім дій, що показуються навколо курсора."
+enable_ring = "Show ring on button press"
 open_at_the_current_cursor_position = "Відкривати в поточній позиції курсора."
 haptic_feedback = "Тактильний відгук"
 action_ring_haptic_description = "Відтворювати відгук під час наведення та активації."
@@ -749,6 +750,14 @@ shortcut_e_g_cmd_plus_shift_plus_p = "Сполучення клавіш, нап�
 application_folder_path_or_url = "Програма, шлях до папки або URL"
 open_application_or_folder = "Відкрити програму або папку"
 custom_action_invalid_input = "Couldn't recognize that input."
+top_slot = "Top slot"
+top_right_slot = "Top-right slot"
+right_slot = "Right slot"
+bottom_right_slot = "Bottom-right slot"
+bottom_slot = "Bottom slot"
+bottom_left_slot = "Bottom-left slot"
+left_slot = "Left slot"
+top_left_slot = "Top-left slot"
 
 [keyboard]
 disabled_keys = "Вимкнені клавіші"

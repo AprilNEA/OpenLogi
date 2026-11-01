@@ -71,11 +71,7 @@ pub(super) fn action_library(
                     h_flex()
                         .items_center()
                         .justify_between()
-                        .child(
-                            div()
-                                .text_subheading()
-                                .child(tr!("action_ring.actions_ring")),
-                        )
+                        .child(div().text_subheading().child(slot_title(slot)))
                         .child(
                             Button::new("ring-clear-slot")
                                 .compact()
@@ -142,6 +138,20 @@ pub(super) fn action_library(
                 .pb_2()
                 .child(shortcut_editor(slot, shortcut_input, pal)),
         )
+}
+
+/// The card title: the ring position being edited.
+fn slot_title(slot: ActionRingSlot) -> gpui::SharedString {
+    match slot {
+        ActionRingSlot::Top => tr!("action_ring.top_slot"),
+        ActionRingSlot::TopRight => tr!("action_ring.top_right_slot"),
+        ActionRingSlot::Right => tr!("action_ring.right_slot"),
+        ActionRingSlot::BottomRight => tr!("action_ring.bottom_right_slot"),
+        ActionRingSlot::Bottom => tr!("action_ring.bottom_slot"),
+        ActionRingSlot::BottomLeft => tr!("action_ring.bottom_left_slot"),
+        ActionRingSlot::Left => tr!("action_ring.left_slot"),
+        ActionRingSlot::TopLeft => tr!("action_ring.top_left_slot"),
+    }
 }
 
 fn action_rows_scroller(

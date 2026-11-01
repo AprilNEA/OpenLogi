@@ -722,6 +722,7 @@ camera_light_auto_description = "Accendi questa luce quando una fotocamera è in
 [action_ring]
 actions_ring = "Anello azioni"
 action_ring_description = "Configura le otto azioni mostrate attorno al puntatore."
+enable_ring = "Show ring on button press"
 open_at_the_current_cursor_position = "Apri nella posizione attuale del puntatore."
 haptic_feedback = "Feedback aptico"
 action_ring_haptic_description = "Riproduci un feedback al passaggio e all’attivazione."
@@ -749,6 +750,14 @@ shortcut_e_g_cmd_plus_shift_plus_p = "Scorciatoia, ad es. Cmd+Shift+P"
 application_folder_path_or_url = "Applicazione, percorso cartella o URL"
 open_application_or_folder = "Apri applicazione o cartella"
 custom_action_invalid_input = "Couldn't recognize that input."
+top_slot = "Top slot"
+top_right_slot = "Top-right slot"
+right_slot = "Right slot"
+bottom_right_slot = "Bottom-right slot"
+bottom_slot = "Bottom slot"
+bottom_left_slot = "Bottom-left slot"
+left_slot = "Left slot"
+top_left_slot = "Top-left slot"
 
 [keyboard]
 disabled_keys = "Tasti disattivati"

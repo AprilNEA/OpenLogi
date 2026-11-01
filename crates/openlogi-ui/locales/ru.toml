@@ -722,6 +722,7 @@ camera_light_auto_description = "Включать свет при использ
 [action_ring]
 actions_ring = "Кольцо действий"
 action_ring_description = "Настройте восемь действий, отображаемых вокруг указателя."
+enable_ring = "Show ring on button press"
 open_at_the_current_cursor_position = "Открывать в текущем положении указателя."
 haptic_feedback = "Тактильная отдача"
 action_ring_haptic_description = "Воспроизводить отклик при наведении и активации."
@@ -749,6 +750,14 @@ shortcut_e_g_cmd_plus_shift_plus_p = "Сочетание, например Cmd+S
 application_folder_path_or_url = "Приложение, путь к папке или URL"
 open_application_or_folder = "Открыть приложение или папку"
 custom_action_invalid_input = "Couldn't recognize that input."
+top_slot = "Top slot"
+top_right_slot = "Top-right slot"
+right_slot = "Right slot"
+bottom_right_slot = "Bottom-right slot"
+bottom_slot = "Bottom slot"
+bottom_left_slot = "Bottom-left slot"
+left_slot = "Left slot"
+top_left_slot = "Top-left slot"
 
 [keyboard]
 disabled_keys = "Отключённые клавиши"

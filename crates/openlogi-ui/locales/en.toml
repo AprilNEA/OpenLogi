@@ -722,6 +722,7 @@ camera_light_auto_description = "Turn the light on when any camera is in use and
 [action_ring]
 actions_ring = "Actions Ring"
 action_ring_description = "Configure the eight actions shown around the cursor."
+enable_ring = "Show ring on button press"
 open_at_the_current_cursor_position = "Open at the current cursor position."
 haptic_feedback = "Haptic feedback"
 action_ring_haptic_description = "Use haptic feedback when you hover over or activate an action."
@@ -749,6 +750,14 @@ shortcut_e_g_cmd_plus_shift_plus_p = "Shortcut, e.g., Cmd+Shift+P"
 application_folder_path_or_url = "Application or folder path, or URL"
 open_application_or_folder = "Open application or folder"
 custom_action_invalid_input = "Couldn't recognize that input."
+top_slot = "Top slot"
+top_right_slot = "Top-right slot"
+right_slot = "Right slot"
+bottom_right_slot = "Bottom-right slot"
+bottom_slot = "Bottom slot"
+bottom_left_slot = "Bottom-left slot"
+left_slot = "Left slot"
+top_left_slot = "Top-left slot"
 
 [keyboard]
 disabled_keys = "Disabled keys"

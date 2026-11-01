@@ -154,7 +154,7 @@ impl Render for ActionRingPanel {
             .child(toggle_row(
                 "ring-enabled-row",
                 pal,
-                tr!("action_ring.actions_ring"),
+                tr!("action_ring.enable_ring"),
                 tr!("action_ring.open_at_the_current_cursor_position"),
                 Toggle::new("ring-enabled-toggle")
                     .selected(ring.enabled)

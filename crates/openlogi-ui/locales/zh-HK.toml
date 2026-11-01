@@ -722,6 +722,7 @@ camera_light_auto_description = "任何攝影機使用時開燈，所有攝影�
 [action_ring]
 actions_ring = "動作環"
 action_ring_description = "設定顯示在指標周圍的八個動作。"
+enable_ring = "Show ring on button press"
 open_at_the_current_cursor_position = "在指標目前位置開啟。"
 haptic_feedback = "觸覺回饋"
 action_ring_haptic_description = "懸停和啟用時提供觸覺回饋。"
@@ -749,6 +750,14 @@ shortcut_e_g_cmd_plus_shift_plus_p = "快速鍵，例如 Cmd+Shift+P"
 application_folder_path_or_url = "應用程式、資料夾路徑或 URL"
 open_application_or_folder = "開啟應用程式或資料夾"
 custom_action_invalid_input = "Couldn't recognize that input."
+top_slot = "Top slot"
+top_right_slot = "Top-right slot"
+right_slot = "Right slot"
+bottom_right_slot = "Bottom-right slot"
+bottom_slot = "Bottom slot"
+bottom_left_slot = "Bottom-left slot"
+left_slot = "Left slot"
+top_left_slot = "Top-left slot"
 
 [keyboard]
 disabled_keys = "停用按鍵"
