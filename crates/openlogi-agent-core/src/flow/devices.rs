@@ -91,12 +91,18 @@ impl LocalDevices {
         let mut unlisted = Vec::new();
         for configured in config.devices() {
             // The inventory keys a device by its serial when it has one, but
-            // the configuration may name the same device by its unit id.
-            let Some(record) = inventory.iter().find(|record| {
-                record.key == *configured.key()
-                    || identity_keys(record.serial.as_deref(), record.unit_id)
-                        .any(|key| key == configured.key().as_str())
-            }) else {
+            // the configuration may name the same device by its unit id. A
+            // device seen on two routes, such as a receiver and Bluetooth, has
+            // a record for each; the online, addressable one is the device.
+            let Some(record) = inventory
+                .iter()
+                .filter(|record| {
+                    record.key == *configured.key()
+                        || identity_keys(record.serial.as_deref(), record.unit_id)
+                            .any(|key| key == configured.key().as_str())
+                })
+                .min_by_key(|record| (!record.online, record.route.is_none()))
+            else {
                 unlisted.push(configured.key().clone());
                 continue;
             };

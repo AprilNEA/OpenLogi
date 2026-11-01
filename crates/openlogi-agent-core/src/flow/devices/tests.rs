@@ -2,6 +2,7 @@ use openlogi_core::device::DeviceKind;
 use openlogi_core::device_order::PhysicalDeviceKey;
 use openlogi_flow::generated as proto;
 use openlogi_flow::identity::CanonicalDeviceIdentifier;
+use openlogi_hid::DeviceRoute;
 
 use super::LocalDevices;
 use crate::flow::test_support::{
@@ -142,6 +143,28 @@ fn join_matches_a_configured_unit_id_on_a_device_keyed_by_its_serial() {
 
     assert_eq!(keys(&devices), [MOUSE]);
     assert_eq!(devices.outgoing(&peer()).len(), 1);
+}
+
+/// A mouse paired to a receiver and connected over Bluetooth has a record for
+/// each route. The online, addressable one is the device Flow moves.
+#[test]
+fn join_prefers_the_online_record_of_a_device_seen_on_two_routes() {
+    let config = config(vec![configured(MOUSE, Some(1))]);
+    let mut receiver = record(MOUSE, DeviceKind::Mouse, 0x0a, false);
+    receiver.serial = Some("2c1a".to_owned());
+    let mut bluetooth = record(MOUSE, DeviceKind::Mouse, 0x0a, true);
+    bluetooth.serial = Some("2c1a".to_owned());
+    bluetooth.route = Some(DeviceRoute::Direct {
+        vendor_id: 0x046d,
+        product_id: 0xb023,
+    });
+
+    let devices = LocalDevices::join(&config, &[receiver, bluetooth.clone()]);
+
+    assert_eq!(keys(&devices), [MOUSE]);
+    let outgoing = devices.outgoing(&peer());
+    assert_eq!(outgoing.len(), 1);
+    assert_eq!(Some(outgoing[0].route.clone()), bluetooth.route);
 }
 
 #[test]
