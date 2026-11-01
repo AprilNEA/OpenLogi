@@ -182,15 +182,17 @@ fn print_empty_notes(status: Option<&AgentStatus>, hid_only: &[HidOnlyProduct]) 
 
 /// What a listed HID-only product means on this host.
 ///
-/// On Windows the usual cause is a HID++ collection whose driver failed to
-/// start (#2188): the device still works as a plain mouse or keyboard, and
-/// Device Manager shows the collection with an error.
+/// On Windows the usual cause is a vendor-defined collection whose driver
+/// failed to start (#2188): the device still works as a plain mouse or
+/// keyboard, and Device Manager shows the collection with an error. The same
+/// fix applies to a standalone product such as the G600, whose own
+/// collection is vendor-defined too.
 fn hid_only_note() -> &'static str {
     if cfg!(windows) {
         "Windows lists the devices above without a HID++ collection. If one works with \
-         G HUB or Options+ on another PC, its HID++ collection failed to start here: in \
-         Device Manager, uninstall its \"HID-compliant vendor-defined device\" entries, \
-         then replug it."
+         G HUB or Options+ on another PC, a vendor-defined collection failed to start \
+         here: in Device Manager, uninstall its \"HID-compliant vendor-defined device\" \
+         entries, then replug it."
     } else {
         "The OS lists the devices above, but none of them exposes a HID++ interface, so \
          OpenLogi cannot configure them."

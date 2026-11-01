@@ -28,6 +28,11 @@ pub struct HidOnlyProduct {
 ///
 /// Products a standalone driver claims (Litra, G600, gaming headsets) are not
 /// listed: they need no HID++ node.
+///
+/// A standalone driver claims a product through one of its collections. When
+/// that collection is missing too (a G600 whose vendor-defined collection
+/// failed to start), the product is listed: its plain collections are all the
+/// host offers, and the fix is the same as for a HID++ product.
 pub async fn enumerate_hid_only(
     backend: &dyn HidBackend,
 ) -> Result<Vec<HidOnlyProduct>, InventoryError> {
@@ -146,6 +151,29 @@ mod tests {
             ),
         ];
         assert_eq!(hid_only_products(&all, &[]), Vec::new());
+    }
+
+    #[test]
+    fn a_standalone_product_without_its_claimed_collection_is_listed() {
+        let all = vec![
+            node(
+                0x046d,
+                0xc24a,
+                (0x0001, 0x0002),
+                "Logitech Gaming Mouse G600",
+            ),
+            node(
+                0x046d,
+                0xc24a,
+                (0x0001, 0x0006),
+                "Logitech Gaming Mouse G600",
+            ),
+        ];
+        let ids: Vec<u16> = hid_only_products(&all, &[])
+            .into_iter()
+            .map(|product| product.product_id)
+            .collect();
+        assert_eq!(ids, vec![0xc24a]);
     }
 
     #[test]
