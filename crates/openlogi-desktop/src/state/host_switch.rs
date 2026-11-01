@@ -15,10 +15,13 @@ pub(crate) struct HostSwitchTarget {
     pub(crate) selected: bool,
 }
 
+/// Switching needs only `0x1814 ChangeHost`: the engine reads `0x1815
+/// HostsInfo` slot names when a device has them and otherwise moves it to the
+/// keyboard's slot number.
 fn supports_host_switch(record: &DeviceRecord) -> bool {
     record
         .capabilities
-        .is_some_and(|capabilities| capabilities.easy_switch)
+        .is_some_and(|capabilities| capabilities.change_host)
 }
 
 impl DeviceRecord {
@@ -120,14 +123,19 @@ mod tests {
         ReceiverInfo,
     };
 
+    const CHANGE_HOST: u16 = 0x1814;
+    const HOSTS_INFO: u16 = 0x1815;
+
     fn inventory(
         name: &str,
         kind: DeviceKind,
         unit_id: [u8; 4],
-        host_switch: bool,
+        host_features: &[u16],
     ) -> DeviceInventory {
+        let measured = Capabilities::from_feature_ids(host_features);
         let mut capabilities = Capabilities::presumed_from_kind(kind);
-        capabilities.easy_switch = host_switch;
+        capabilities.easy_switch = measured.easy_switch;
+        capabilities.change_host = measured.change_host;
         DeviceInventory {
             receiver: ReceiverInfo {
                 name: format!("{name} receiver"),
@@ -157,10 +165,39 @@ mod tests {
     }
 
     fn state() -> (AppState, tokio::sync::mpsc::UnboundedReceiver<Command>) {
+        state_with_keyboard(&[CHANGE_HOST, HOSTS_INFO])
+    }
+
+    fn state_with_keyboard(
+        keyboard_features: &[u16],
+    ) -> (AppState, tokio::sync::mpsc::UnboundedReceiver<Command>) {
         let inventories = [
-            inventory("MX Keys", DeviceKind::Keyboard, [1, 2, 3, 4], true),
-            inventory("MX Master", DeviceKind::Mouse, [5, 6, 7, 8], true),
-            inventory("Basic Mouse", DeviceKind::Mouse, [9, 10, 11, 12], false),
+            inventory(
+                "MX Keys",
+                DeviceKind::Keyboard,
+                [1, 2, 3, 4],
+                keyboard_features,
+            ),
+            inventory(
+                "MX Master",
+                DeviceKind::Mouse,
+                [5, 6, 7, 8],
+                &[CHANGE_HOST, HOSTS_INFO],
+            ),
+            inventory("Basic Mouse", DeviceKind::Mouse, [9, 10, 11, 12], &[]),
+            // The MX Master 3 has ChangeHost but no HostsInfo.
+            inventory(
+                "MX Master 3",
+                DeviceKind::Mouse,
+                [13, 14, 15, 16],
+                &[CHANGE_HOST],
+            ),
+            inventory(
+                "Names Only",
+                DeviceKind::Mouse,
+                [17, 18, 19, 20],
+                &[HOSTS_INFO],
+            ),
         ];
         let mut config = Config::ephemeral();
         config.set_selected_device(Some("unit:01020304".to_string()));
@@ -178,18 +215,35 @@ mod tests {
     }
 
     #[test]
-    fn only_easy_switch_pointing_devices_are_offered() {
+    fn only_change_host_pointing_devices_are_offered() {
         let (state, _receiver) = state();
 
         assert_eq!(
             state.current_host_switch_targets(),
-            [HostSwitchTarget {
-                key: "unit:05060708".to_string(),
-                name: "MX Master".to_string(),
-                online: true,
-                selected: false,
-            }]
+            [
+                HostSwitchTarget {
+                    key: "unit:05060708".to_string(),
+                    name: "MX Master".to_string(),
+                    online: true,
+                    selected: false,
+                },
+                HostSwitchTarget {
+                    key: "unit:0d0e0f10".to_string(),
+                    name: "MX Master 3".to_string(),
+                    online: true,
+                    selected: false,
+                },
+            ]
         );
+    }
+
+    #[test]
+    fn a_keyboard_needs_change_host_but_not_hosts_info() {
+        let (state, _receiver) = state_with_keyboard(&[CHANGE_HOST]);
+        assert!(!state.current_host_switch_targets().is_empty());
+
+        let (state, _receiver) = state_with_keyboard(&[HOSTS_INFO]);
+        assert!(state.current_host_switch_targets().is_empty());
     }
 
     #[test]

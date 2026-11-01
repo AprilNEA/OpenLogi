@@ -152,6 +152,7 @@ mod tests {
                 }),
                 capabilities: Some(Capabilities {
                     easy_switch: true,
+                    change_host: true,
                     ..Capabilities::presumed_from_kind(kind)
                 }),
                 settings_revision: 0,
