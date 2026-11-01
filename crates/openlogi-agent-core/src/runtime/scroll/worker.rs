@@ -2,13 +2,13 @@
 
 use std::collections::HashMap;
 use std::io;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use openlogi_core::config::{MomentumParams, MomentumScrolling, VerticalScrollSensitivity};
+use openlogi_core::config::{MomentumParams, VerticalScrollSensitivity};
 use openlogi_core::scroll::ScrollDelta;
 use tracing::warn;
 
@@ -36,11 +36,6 @@ struct ScrollPreferenceSnapshot {
 /// consistent settings snapshot instead of two independently changing values.
 pub struct ScrollPreferences {
     encoded: AtomicU8,
-    /// Momentum scrolling, resolved (`None` while off) and read by the
-    /// worker once per turn. Independent of `encoded`: it only shapes the
-    /// diverted main wheel's output, so no joint snapshot with the smoothing
-    /// switch is needed.
-    momentum: Mutex<Option<MomentumParams>>,
 }
 
 impl ScrollPreferences {
@@ -49,19 +44,7 @@ impl ScrollPreferences {
     pub fn new(smooth_scroll: bool, vertical_sensitivity: VerticalScrollSensitivity) -> Self {
         Self {
             encoded: AtomicU8::new(Self::encode(smooth_scroll, vertical_sensitivity)),
-            momentum: Mutex::new(MomentumScrolling::default().resolve()),
         }
-    }
-
-    /// Publish the momentum-scrolling settings, resolved once here.
-    pub fn publish_momentum(&self, momentum: MomentumScrolling) {
-        *self.momentum.lock().unwrap_or_else(PoisonError::into_inner) = momentum.resolve();
-    }
-
-    /// The current momentum-scrolling settings; `None` while it is off.
-    #[must_use]
-    pub fn momentum(&self) -> Option<MomentumParams> {
-        *self.momentum.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Publish both settings as one snapshot.
@@ -120,6 +103,9 @@ enum ScrollOutputMode {
         /// The raw signed wheel notches before sensitivity scaling, which
         /// momentum scrolling's free-spin detector measures speed in.
         notches: f64,
+        /// The momentum-scrolling settings of the wheel's device, resolved;
+        /// `None` while momentum scrolling is off for it.
+        momentum: Option<MomentumParams>,
     },
     Direct,
 }
@@ -155,7 +141,18 @@ impl ScrollInput {
     /// recognizers need.
     fn output_under(&self, smoothing: bool) -> ScrollOutputMode {
         match (self.output, &self.source) {
-            (ScrollOutputMode::Eased { at, notches }, _) => ScrollOutputMode::Eased { at, notches },
+            (
+                ScrollOutputMode::Eased {
+                    at,
+                    notches,
+                    momentum,
+                },
+                _,
+            ) => ScrollOutputMode::Eased {
+                at,
+                notches,
+                momentum,
+            },
             (
                 ScrollOutputMode::Smooth { at } | ScrollOutputMode::Phased { at },
                 ScrollSource::Hidpp(..),
@@ -317,7 +314,8 @@ impl ScrollInputHandle {
     /// Always eased, whatever the app-wide smoothing setting says: the
     /// device's own smooth-wheel switch is what diverted the wheel. The
     /// vertical distance is scaled by the main-wheel sensitivity, as the hook
-    /// scales a native wheel.
+    /// scales a native wheel. `momentum` is the device's resolved
+    /// momentum-scrolling settings, `None` while it is off for the device.
     ///
     /// # Errors
     ///
@@ -330,6 +328,7 @@ impl ScrollInputHandle {
         &self,
         session: &HidppSessionId,
         delta: ScrollDelta,
+        momentum: Option<MomentumParams>,
     ) -> Result<(), ScrollDelta> {
         let Ok(impulse) = WheelDelta::try_from(delta) else {
             return Err(delta);
@@ -345,6 +344,7 @@ impl ScrollInputHandle {
                 ScrollOutputMode::Eased {
                     at: Instant::now(),
                     notches: impulse.y,
+                    momentum,
                 },
             );
         if queued { Ok(()) } else { Err(scaled.into()) }
@@ -557,7 +557,6 @@ fn run_worker(
         // new setting after receiving, so a toggle cancels the previous gesture
         // before the first input under the new setting starts another one.
         let smoothing = preferences.smooth_scroll_enabled();
-        engine.set_momentum(preferences.momentum());
         let toggled = smoothing != observed_smoothing;
         observed_smoothing = smoothing;
         if cancellations.advance_to(shared_generation.load(Ordering::Acquire)) {
@@ -576,8 +575,19 @@ fn run_worker(
                     ScrollOutputMode::Smooth { at } => {
                         engine.impulse(input.source, input.impulse, at, emit_smooth);
                     }
-                    ScrollOutputMode::Eased { at, notches } => {
-                        engine.wheel_impulse(input.source, input.impulse, notches, at, emit_smooth);
+                    ScrollOutputMode::Eased {
+                        at,
+                        notches,
+                        momentum,
+                    } => {
+                        engine.wheel_impulse(
+                            input.source,
+                            input.impulse,
+                            notches,
+                            momentum,
+                            at,
+                            emit_smooth,
+                        );
                     }
                     ScrollOutputMode::Phased { at } => {
                         engine.phased_impulse(input.source, input.impulse, at, emit_smooth);
@@ -726,7 +736,7 @@ mod tests {
             let (input, receiver, _controls) = standalone_input(1, preferences(smoothing, 7));
             let session = HidppSessionId::with_epoch("mouse-a", 7);
             assert_eq!(
-                input.try_hidpp_wheel_scroll(&session, ScrollDelta::wheel_ticks(0.0, 2.0)),
+                input.try_hidpp_wheel_scroll(&session, ScrollDelta::wheel_ticks(0.0, 2.0), None),
                 Ok(())
             );
             let queued = queued_input(&receiver);
@@ -743,6 +753,30 @@ mod tests {
         }
     }
 
+    /// A diverted main wheel's input carries its device's momentum settings
+    /// to the worker, so each mouse glides by its own.
+    #[test]
+    fn a_diverted_main_wheel_carries_its_devices_momentum_settings() {
+        let (input, receiver, _controls) = standalone_input(1, preferences(true, 14));
+        let session = HidppSessionId::with_epoch("mouse-a", 7);
+        let on = openlogi_core::config::MomentumScrolling {
+            enabled: true,
+            ..Default::default()
+        }
+        .resolve();
+        assert!(on.is_some(), "sanity: an enabled setting resolves");
+        for momentum in [on, None] {
+            input
+                .try_hidpp_wheel_scroll(&session, ScrollDelta::wheel_ticks(0.0, 1.0), momentum)
+                .expect("the main wheel's tick is queued");
+            let queued = queued_input(&receiver);
+            assert!(matches!(
+                queued.output_under(true),
+                ScrollOutputMode::Eased { momentum: carried, .. } if carried == momentum
+            ));
+        }
+    }
+
     /// What the runtime cannot ease comes back as given; what it cannot
     /// queue comes back scaled, so the caller's direct injection scrolls as
     /// far as the eased output would have.
@@ -751,22 +785,28 @@ mod tests {
         let (input, receiver, _controls) = standalone_input(1, preferences(true, 7));
         let session = HidppSessionId::with_epoch("mouse-a", 7);
         let pixels = ScrollDelta::pixels(0.0, 1.0);
-        assert_eq!(input.try_hidpp_wheel_scroll(&session, pixels), Err(pixels));
+        assert_eq!(
+            input.try_hidpp_wheel_scroll(&session, pixels, None),
+            Err(pixels)
+        );
         let zero = ScrollDelta::wheel_ticks(0.0, 0.0);
-        assert_eq!(input.try_hidpp_wheel_scroll(&session, zero), Err(zero));
+        assert_eq!(
+            input.try_hidpp_wheel_scroll(&session, zero, None),
+            Err(zero)
+        );
 
         let tick = ScrollDelta::wheel_ticks(0.0, 2.0);
         let scaled = ScrollDelta::wheel_ticks(0.0, 1.0);
-        assert_eq!(input.try_hidpp_wheel_scroll(&session, tick), Ok(()));
+        assert_eq!(input.try_hidpp_wheel_scroll(&session, tick, None), Ok(()));
         assert_eq!(
-            input.try_hidpp_wheel_scroll(&session, tick),
+            input.try_hidpp_wheel_scroll(&session, tick, None),
             Err(scaled),
             "a full queue hands back the scaled distance"
         );
         queued_input(&receiver);
         input.accepting.store(false, Ordering::Release);
         assert_eq!(
-            input.try_hidpp_wheel_scroll(&session, tick),
+            input.try_hidpp_wheel_scroll(&session, tick, None),
             Err(scaled),
             "a stopped runtime hands back the scaled distance"
         );
@@ -1151,7 +1191,7 @@ mod tests {
         let session = HidppSessionId::with_epoch("mouse-a", 7);
         assert!(input.try_hidpp_scroll(&session, ScrollDelta::wheel_ticks(1.0, 0.0)));
         input
-            .try_hidpp_wheel_scroll(&session, ScrollDelta::wheel_ticks(0.0, 1.0))
+            .try_hidpp_wheel_scroll(&session, ScrollDelta::wheel_ticks(0.0, 1.0), None)
             .expect("the main wheel's tick is queued");
         let source = |command| match command {
             Ok(ScrollCommand::Input(input)) => input.source,

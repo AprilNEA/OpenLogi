@@ -26,6 +26,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use openlogi_core::binding::ButtonId;
+use openlogi_core::config::MomentumParams;
 use openlogi_core::device_order::PhysicalDeviceKey;
 use openlogi_core::scroll::ScrollDelta;
 use openlogi_hid::{
@@ -88,9 +89,15 @@ impl GestureOutputs {
         }
     }
 
-    /// Post a diverted main wheel's scroll, eased by the scroll runtime.
-    fn post_main_wheel_scroll(&self, session: &HidppSessionId, delta: ScrollDelta) {
-        if let Err(direct) = self.scroll.try_hidpp_wheel_scroll(session, delta) {
+    /// Post a diverted main wheel's scroll, eased by the scroll runtime
+    /// under its device's resolved momentum-scrolling settings.
+    fn post_main_wheel_scroll(
+        &self,
+        session: &HidppSessionId,
+        delta: ScrollDelta,
+        momentum: Option<MomentumParams>,
+    ) {
+        if let Err(direct) = self.scroll.try_hidpp_wheel_scroll(session, delta, momentum) {
             // As for `post_scroll`: the wheel no longer scrolls by itself.
             // `direct` is already scaled by the wheel's sensitivity.
             openlogi_inject::post_scroll(direct);
@@ -296,6 +303,7 @@ fn same_bindings(a: &DispatchPlan, b: &DispatchPlan) -> bool {
         side_gesture_bindings,
         thumbwheel_sensitivity,
         invert_wheel,
+        momentum,
         pointer: _,
         shift_bindings,
     } = a;
@@ -305,6 +313,7 @@ fn same_bindings(a: &DispatchPlan, b: &DispatchPlan) -> bool {
         && *side_gesture_bindings == b.side_gesture_bindings
         && *thumbwheel_sensitivity == b.thumbwheel_sensitivity
         && *invert_wheel == b.invert_wheel
+        && *momentum == b.momentum
         && *shift_bindings == b.shift_bindings
 }
 

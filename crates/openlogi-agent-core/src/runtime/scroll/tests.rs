@@ -1,7 +1,9 @@
 //! Synthetic motion-model traces. These values are algorithm fixtures, not
 //! measurements captured from physical hardware.
 
-use openlogi_core::config::{GlideShape, MomentumScrolling};
+use std::ops::{Deref, DerefMut};
+
+use openlogi_core::config::{GlideShape, MomentumParams, MomentumScrolling};
 
 use super::*;
 
@@ -656,17 +658,55 @@ fn smooth_output_inside_an_open_phased_gesture_stays_phased() {
     );
 }
 
-/// An engine with momentum scrolling on at its default settings.
-fn momentum_engine() -> ScrollEngine {
-    let mut engine = ScrollEngine::default();
-    engine.set_momentum(
-        MomentumScrolling {
-            enabled: true,
-            ..MomentumScrolling::default()
+/// An engine whose smoothed main wheels all report one mouse's
+/// momentum-scrolling settings, as the dispatcher passes them for it.
+struct MomentumEngine {
+    engine: ScrollEngine,
+    momentum: Option<MomentumParams>,
+}
+
+impl MomentumEngine {
+    fn new(momentum: MomentumScrolling) -> Self {
+        Self {
+            engine: ScrollEngine::default(),
+            momentum: momentum.resolve(),
         }
-        .resolve(),
-    );
-    engine
+    }
+
+    /// One main-wheel impulse under this engine's settings.
+    fn wheel_impulse(
+        &mut self,
+        source: ScrollSource,
+        impulse: WheelDelta,
+        notches: f64,
+        at: Instant,
+        emit: &mut impl FnMut(ScrollFrame),
+    ) {
+        self.engine
+            .wheel_impulse(source, impulse, notches, self.momentum, at, emit);
+    }
+}
+
+impl Deref for MomentumEngine {
+    type Target = ScrollEngine;
+
+    fn deref(&self) -> &ScrollEngine {
+        &self.engine
+    }
+}
+
+impl DerefMut for MomentumEngine {
+    fn deref_mut(&mut self) -> &mut ScrollEngine {
+        &mut self.engine
+    }
+}
+
+/// An engine with momentum scrolling on at its default settings.
+fn momentum_engine() -> MomentumEngine {
+    MomentumEngine::new(MomentumScrolling {
+        enabled: true,
+        ..MomentumScrolling::default()
+    })
 }
 
 #[test]
@@ -674,15 +714,11 @@ fn wheel_output_preserves_the_configured_distance_per_notch() {
     let defaults = MomentumScrolling::default();
     let baseline = f64::from(defaults.pixels_per_notch);
     for distance in [16_u16, defaults.pixels_per_notch, 52] {
-        let mut engine = ScrollEngine::default();
-        engine.set_momentum(
-            MomentumScrolling {
-                enabled: true,
-                pixels_per_notch: distance,
-                ..defaults
-            }
-            .resolve(),
-        );
+        let mut engine = MomentumEngine::new(MomentumScrolling {
+            enabled: true,
+            pixels_per_notch: distance,
+            ..defaults
+        });
         let start = Instant::now();
         let mut frames = Vec::new();
         engine.wheel_impulse(
@@ -717,7 +753,7 @@ fn in_ticks(frame: &ScrollFrame) -> f64 {
 /// poll at `speed(t)` notches/s for `duration`, advancing due frames every
 /// millisecond. Answers the instant after the last report.
 fn drive_wheel(
-    engine: &mut ScrollEngine,
+    engine: &mut MomentumEngine,
     source: &ScrollSource,
     start: Instant,
     speed: impl Fn(f64) -> f64,
@@ -731,7 +767,7 @@ fn drive_wheel(
 /// arrive the way dispatch hands them over: raw notches and the scaled
 /// impulse both signed in the scroll direction, here at 2× sensitivity.
 fn drive_wheel_toward(
-    engine: &mut ScrollEngine,
+    engine: &mut MomentumEngine,
     source: &ScrollSource,
     start: Instant,
     direction: f64,
@@ -847,7 +883,7 @@ fn a_free_spin_scrolls_by_momentum_and_a_finger_stop_ends_it_at_once() {
 /// other wheel, however fast it spins.
 #[test]
 fn momentum_scrolling_off_eases_every_tick_in_ticks() {
-    let mut engine = ScrollEngine::default();
+    let mut engine = MomentumEngine::new(MomentumScrolling::default());
     let mut frames = Vec::new();
     drive_wheel(
         &mut engine,
@@ -902,14 +938,7 @@ fn wheel_delta(notches: f64) -> WheelDelta {
 /// once and goes back, without lurching back and forth.
 #[test]
 fn a_confirmed_reversal_turns_the_page_around_once() {
-    let mut engine = ScrollEngine::default();
-    engine.set_momentum(
-        MomentumScrolling {
-            enabled: true,
-            ..MomentumScrolling::default()
-        }
-        .resolve(),
-    );
+    let mut engine = momentum_engine();
     let source = hidpp_source("mouse", 1);
     let start = Instant::now();
     // Ratchet ticks one way, then the other way soon after.
@@ -1185,15 +1214,13 @@ fn a_reversal_during_a_glide_ends_it_and_scrolls_back() {
 }
 
 /// An engine with momentum scrolling on, `change` applied to its defaults.
-fn momentum_engine_with(change: impl FnOnce(&mut MomentumScrolling)) -> ScrollEngine {
+fn momentum_engine_with(change: impl FnOnce(&mut MomentumScrolling)) -> MomentumEngine {
     let mut momentum = MomentumScrolling {
         enabled: true,
         ..MomentumScrolling::default()
     };
     change(&mut momentum);
-    let mut engine = ScrollEngine::default();
-    engine.set_momentum(momentum.resolve());
-    engine
+    MomentumEngine::new(momentum)
 }
 
 /// Run the engine's frames on from `from` for `duration`, a millisecond at a
@@ -1399,7 +1426,7 @@ fn spins_glide_no_faster_than_the_max_speed_and_repeats_three_times_it() {
 /// (`None` while no glide runs), as `reports` of `(µs, notches)` drive the
 /// engine.
 fn glide_speeds(
-    engine: &mut ScrollEngine,
+    engine: &mut MomentumEngine,
     reports: &[(Duration, f64)],
 ) -> Vec<Option<(f64, Instant)>> {
     let source = hidpp_source("mouse", 1);
@@ -1782,4 +1809,30 @@ fn slow_strokes_after_a_spent_glide_and_a_catch_still_scroll() {
         (scrolled - 5.0).abs() < 1e-6,
         "only {scrolled} of 5 slow notches scrolled after the catch"
     );
+}
+
+/// Each wheel follows the settings its own reports carry: a mouse with
+/// momentum scrolling off keeps easing in ticks beside one that glides.
+#[test]
+fn each_wheel_follows_its_own_devices_momentum_settings() {
+    let mut engine = ScrollEngine::default();
+    let gliding = hidpp_source("mouse", 1);
+    let plain = hidpp_source("other", 1);
+    let on = MomentumScrolling {
+        enabled: true,
+        ..MomentumScrolling::default()
+    }
+    .resolve();
+    let start = Instant::now();
+    let mut frames = Vec::new();
+    engine.wheel_impulse(gliding.clone(), wheel(0.0, 1.0), 1.0, on, start, &mut |f| {
+        frames.push(f);
+    });
+    engine.wheel_impulse(plain.clone(), wheel(0.0, 1.0), 1.0, None, start, &mut |f| {
+        frames.push(f);
+    });
+    assert!(engine.wheels.contains_key(&gliding));
+    assert!(!engine.wheels.contains_key(&plain));
+    assert!(engine.pixels_for(&gliding).is_some());
+    assert_eq!(engine.pixels_for(&plain), None);
 }

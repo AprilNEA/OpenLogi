@@ -15,7 +15,7 @@ use openlogi_core::binding::{
     Action, Binding, ButtonId, GamingLayout, GestureDirection, default_binding,
 };
 use openlogi_core::bindings::{button_bindings_for, hidpp_gesture_maps_for, oshook_gestures_for};
-use openlogi_core::config::{Config, OnboardMemory, ThumbwheelSensitivity};
+use openlogi_core::config::{Config, MomentumScrolling, OnboardMemory, ThumbwheelSensitivity};
 use openlogi_core::device_order::PhysicalDeviceKey;
 use openlogi_hid::DeviceRoute;
 use openlogi_hid::reprog_controls::DPI_MODE_SHIFT_CIDS;
@@ -78,6 +78,10 @@ pub struct DispatchPlan {
     /// which [`plan_for_device`] cannot see: the orchestrator fills it in,
     /// as it does `pointer`.
     pub invert_wheel: bool,
+    /// This device's effective momentum-scrolling settings (device override
+    /// or the app-wide default), carried with each report of its diverted
+    /// main wheel.
+    pub momentum: MomentumScrolling,
     /// Pointer context used to select these mouse bindings; absent for the
     /// explicitly focused policy and keyboard input.
     pub(crate) pointer: Option<PointerSelection>,
@@ -434,6 +438,7 @@ pub fn plan_for_device(
             side_gesture_bindings,
             thumbwheel_sensitivity,
             invert_wheel: false,
+            momentum: config.momentum_scrolling(config_key),
             pointer: None,
             shift_bindings: shift_bindings_for(config, config_key),
         },
@@ -477,6 +482,26 @@ mod tests {
         plan.target.spec.divert_main_wheel = None;
         assert!(!CapturePublication::from_plans(vec![plan]).diverts_main_wheel(&route()));
         assert!(!CapturePublication::default().diverts_main_wheel(&route()));
+    }
+
+    /// A device's dispatch carries its own momentum-scrolling settings, and
+    /// a device without them the app-wide default.
+    #[test]
+    fn the_dispatch_carries_the_devices_momentum_settings() {
+        let mut config = Config::default();
+        config.app_settings.momentum_scrolling.enabled = true;
+        let own = MomentumScrolling {
+            glide_ms: 800,
+            ..MomentumScrolling::default()
+        };
+        config.set_device_momentum_scrolling("mouse", Some(own));
+        let momentum = |key| {
+            plan_for_device(&config, key, route(), None, 0, true)
+                .dispatch
+                .momentum
+        };
+        assert_eq!(momentum("mouse"), own);
+        assert_eq!(momentum("other"), config.app_settings.momentum_scrolling);
     }
 
     fn plan_for_device(

@@ -469,25 +469,35 @@ struct ScrollEngine {
     /// which map a source can enter, and a preference change cancels both.
     phased: HashMap<ScrollSource, Instant>,
     output: OutputStream,
-    /// Momentum scrolling's settings; `None` while it is off.
-    momentum: Option<MomentumParams>,
-    /// Smoothed main wheels under momentum scrolling, each with its
-    /// free-spin detector and, while it glides, its glide.
+    /// Smoothed main wheels under momentum scrolling, each with its device's
+    /// settings, its free-spin detector and, while it glides, its glide.
     wheels: HashMap<ScrollSource, WheelState>,
 }
 
 /// One smoothed main wheel's momentum-scrolling state.
-#[derive(Default)]
 struct WheelState {
+    /// The momentum-scrolling settings of the device this wheel belongs to,
+    /// as its latest report carried them.
+    momentum: MomentumParams,
     spring_back: ReverseLock<WheelTick>,
     detector: FreeSpinDetector,
     glide: GlideState,
-    /// Spins chained onto the glide, like repeated Magic Mouse swipes: each
+    /// Spins chained onto the glide, like repeated trackpad flicks: each
     /// one speeds it up ([`glide::chain_boost`]).
     chain: u32,
 }
 
 impl WheelState {
+    fn new(momentum: MomentumParams) -> Self {
+        Self {
+            momentum,
+            spring_back: ReverseLock::default(),
+            detector: FreeSpinDetector::default(),
+            glide: GlideState::default(),
+            chain: 0,
+        }
+    }
+
     /// The running glide, if any.
     fn gliding(&self) -> Option<&Glide> {
         match &self.glide {
@@ -739,27 +749,19 @@ impl Flick {
 }
 
 impl ScrollEngine {
-    /// Apply momentum-scrolling settings. Turning it off drops every glide
-    /// and wheel state, so the wheel eases exactly as any other from the next
-    /// tick on.
-    fn set_momentum(&mut self, momentum: Option<MomentumParams>) {
-        if momentum.is_none() {
-            self.wheels.clear();
-        }
-        self.momentum = momentum;
-    }
-
     /// Pixels per tick `source`'s frames are posted in: momentum scrolling's
     /// smoothed wheels scroll in pixels, every other source in ticks.
     fn pixels_for(&self, source: &ScrollSource) -> Option<f64> {
-        self.momentum
-            .filter(|_| self.wheels.contains_key(source))
-            .map(|momentum| momentum.pixels_per_notch())
+        self.wheels
+            .get(source)
+            .map(|state| state.momentum.pixels_per_notch())
     }
 
     /// One smoothed main-wheel impulse of `notches` raw wheel notches.
     ///
-    /// Without momentum scrolling it eases as any impulse does. With it, a
+    /// `momentum` is the settings of the wheel's device, `None` while momentum
+    /// scrolling is off for it. Without momentum scrolling it eases as any
+    /// impulse does, and the wheel's glide state is dropped. With it, a
     /// single step back right after a finger stops a free spin is held as a
     /// possible spring-back, ratchet scrolling still eases, and once the
     /// detector sees a free spin the page glides off at the wheel's speed
@@ -769,14 +771,26 @@ impl ScrollEngine {
         source: ScrollSource,
         impulse: WheelDelta,
         notches: f64,
+        momentum: Option<MomentumParams>,
         at: Instant,
         emit: &mut impl FnMut(ScrollFrame),
     ) {
-        let Some(momentum) = self.momentum.filter(|_| notches != 0.0) else {
+        let Some(momentum) = momentum else {
+            // Off for this wheel's device: it eases exactly as any other
+            // wheel from this tick on.
+            self.wheels.remove(&source);
             self.impulse(source, impulse, at, emit);
             return;
         };
-        let state = self.wheels.entry(source.clone()).or_default();
+        if notches == 0.0 {
+            self.impulse(source, impulse, at, emit);
+            return;
+        }
+        let state = self
+            .wheels
+            .entry(source.clone())
+            .and_modify(|state| state.momentum = momentum)
+            .or_insert_with(|| WheelState::new(momentum));
         // Only a free-spinning wheel springs back as a finger stops it: a
         // step back while ratcheting is the user's correction.
         let lock = if state.detector.phase() == WheelPhase::Ratchet {
@@ -811,7 +825,10 @@ impl ScrollEngine {
         momentum: MomentumParams,
         emit: &mut impl FnMut(ScrollFrame),
     ) {
-        let state = self.wheels.entry(source.clone()).or_default();
+        let state = self
+            .wheels
+            .entry(source.clone())
+            .or_insert_with(|| WheelState::new(momentum));
         let phase = state.detector.report(at, notches);
         // A push the detector reads as a finger driving the wheel, landing on
         // a glide still going strong the same way, is a repeated spin: keep
@@ -856,7 +873,7 @@ impl ScrollEngine {
                 let pace = glide::pace(wheel_speed, sensitivity, &momentum);
                 let launch = glide::launch_speed(wheel_speed, sensitivity, &momentum);
                 // A spin soon after the last glide ended, the same way, is a
-                // repeat like a Magic Mouse's repeated swipes: it builds on
+                // repeat like repeated flicks on a trackpad: it builds on
                 // the chain instead of starting over, and never glides slower
                 // than the glide it caught.
                 let repeat = last.filter(|last| {
@@ -921,20 +938,18 @@ impl ScrollEngine {
     /// Emit due glide frames, end the glides that ran their course or whose
     /// wheel a finger stopped, and watch spent spins for their stop.
     fn advance_glides(&mut self, at: Instant, emit: &mut impl FnMut(ScrollFrame)) {
-        let Some(momentum) = self.momentum else {
-            return;
-        };
         let ticking: Vec<ScrollSource> = self
             .wheels
             .iter()
             .filter(|(_, state)| state.glide.next_tick().is_some())
             .map(|(source, _)| source.clone())
             .collect();
-        let per_tick = momentum.pixels_per_notch();
         for source in ticking {
             let Some(state) = self.wheels.get_mut(&source) else {
                 continue;
             };
+            let momentum = state.momentum;
+            let per_tick = momentum.pixels_per_notch();
             if let GlideState::Spent { last, next_check } = state.glide {
                 if at >= next_check {
                     state.glide = match state.detector.tick(at) {

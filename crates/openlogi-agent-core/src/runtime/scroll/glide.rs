@@ -58,7 +58,7 @@ pub(super) fn launch_speed(wheel_speed: f64, sensitivity: f64, params: &Momentum
 }
 
 /// The speed-up after `chain` repeated spins, each multiplying the glide by
-/// the repeat speed-up — like repeated Magic Mouse swipes — up to
+/// the repeat speed-up — like repeated trackpad flicks — up to
 /// [`MAX_CHAIN_BOOST`]. It multiplies on top of the max glide speed, which
 /// caps one spin, so repeating always has room to speed the page up.
 pub(super) fn chain_boost(params: &MomentumParams, chain: u32) -> f64 {

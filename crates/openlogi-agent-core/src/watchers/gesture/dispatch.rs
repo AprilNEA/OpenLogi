@@ -300,6 +300,7 @@ impl InputDispatcher {
                     plan.invert_wheel,
                     openlogi_inject::natural_scrolling(),
                 ),
+                plan.momentum.resolve(),
             ),
             CapturedInput::ThumbwheelDirection { .. } => {
                 unreachable!("thumb-wheel direction reports return before dispatch")
