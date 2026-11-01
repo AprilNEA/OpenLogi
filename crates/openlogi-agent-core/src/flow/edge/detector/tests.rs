@@ -437,3 +437,45 @@ fn a_clock_step_back_neither_counts_as_dwell_nor_panics() {
             .is_some()
     );
 }
+
+/// A right edge exposed only above a second display that starts at its
+/// bottom end: the row where they meet leads into that display, so a fast
+/// approach there stays on this computer, while one a row higher crosses.
+#[test]
+fn the_point_where_an_exposed_edge_meets_a_display_does_not_cross() {
+    let edges = ExposedEdges::from_displays(&[
+        rect(0.0, 0.0, 100.0, 100.0),
+        rect(100.0, 50.0, 100.0, 50.0),
+    ]);
+    let detector = || {
+        EdgeDetector::new(
+            edges.clone(),
+            ArmedSides::from_sides([EdgeSide::Right]),
+            EdgeDetectorParams::default(),
+        )
+    };
+
+    let mut shared_row = detector();
+    assert!(
+        shared_row
+            .update(point(89.0, 50.0), Duration::ZERO)
+            .is_none()
+    );
+    assert!(
+        shared_row
+            .update(point(99.0, 50.0), Duration::from_millis(10))
+            .is_none(),
+        "y = 50 belongs to the second display"
+    );
+
+    let mut row_above = detector();
+    assert!(
+        row_above
+            .update(point(89.0, 49.0), Duration::ZERO)
+            .is_none()
+    );
+    let crossing = row_above
+        .update(point(99.0, 49.0), Duration::from_millis(10))
+        .expect("the exposed part of the edge crosses");
+    assert_eq!(crossing.side, EdgeSide::Right);
+}

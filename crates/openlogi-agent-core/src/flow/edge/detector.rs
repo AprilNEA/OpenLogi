@@ -417,11 +417,14 @@ fn normal_coordinate(segment: EdgeSegment, position: DesktopPoint) -> f64 {
     }
 }
 
+/// Whether `position` touches `segment`: within `tolerance` across it and in
+/// its half-open span along it. The end is excluded because the point there
+/// leads into the display that ends the exposed stretch, or lies off this one.
 fn contains_with_tolerance(segment: EdgeSegment, position: DesktopPoint, tolerance: f64) -> bool {
     let along = along_coordinate(segment, position);
     (normal_coordinate(segment, position) - segment.coordinate()).abs() <= tolerance
         && along >= segment.start()
-        && along <= segment.end()
+        && along < segment.end()
 }
 
 fn distance_to(segment: EdgeSegment, position: DesktopPoint) -> f64 {

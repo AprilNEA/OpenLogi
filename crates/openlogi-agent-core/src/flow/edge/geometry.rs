@@ -109,7 +109,8 @@ impl EdgeSegment {
         self.start
     }
 
-    /// Inclusive upper coordinate along the edge.
+    /// Exclusive upper coordinate along the edge: displays are half-open, so
+    /// the point there belongs to the next display or lies off this one.
     #[must_use]
     pub const fn end(self) -> f64 {
         self.end
