@@ -1,7 +1,7 @@
 use super::EdgeSide;
 
-/// A display rectangle in global logical (DIP) pixels, where x grows rightward
-/// and y downward.
+/// A display rectangle in the global desktop coordinate space (see the
+/// module docs), where x grows rightward and y downward.
 ///
 /// Construction guarantees finite bounds and a positive size, including the
 /// computed far edges, so every edge derived from it is finite.
