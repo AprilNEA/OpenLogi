@@ -539,6 +539,8 @@ mod tests {
             let colors = &theme["colors"];
             for (foreground, background) in [
                 ("accent.foreground", "accent.background"),
+                // A Select dropdown's highlighted row draws `foreground` on `accent`.
+                ("foreground", "accent.background"),
                 ("primary.foreground", "primary.background"),
                 ("danger.foreground", "danger.background"),
                 ("info.foreground", "info.background"),

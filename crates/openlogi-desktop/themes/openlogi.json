@@ -134,7 +134,7 @@
         "description_list_label.foreground": "#f5f5f5",
         "drag_border": "#3b82f6",
         "drop_target.background": "#3b82f619",
-        "foreground": "#e8e8ec",
+        "foreground": "#f0f0f3",
         "info.background": "#22d3ee",
         "info.foreground": "#1a1a1d",
         "input.border": "#2f2f2f",
