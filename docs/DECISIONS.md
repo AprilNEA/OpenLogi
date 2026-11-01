@@ -4,6 +4,37 @@ Durable "why we did it this way" records that are not obvious from the code.
 Add a dated entry when a non-obvious architectural or dependency decision is
 made or revisited.
 
+## 2026-11: Release builds optimise for size
+
+`[profile.release]` sets `opt-level = "s"`. Every download carries four
+binaries, and at the default `3` a quarter of their size buys speed that no
+measured path needs.
+
+| v0.8.20, Linux x86_64 | `opt-level = 3` | `"s"` |
+|---|---|---|
+| Four binaries, stripped | 98.8 MB | 73.8 MB (−25%) |
+| Same four, gzip -6 / xz -9e | 41.3 / 19.7 MB | 31.3 / 15.5 MB (−24% / −21%) |
+| Agent: decode and accumulate one gesture report | 55 ns | 68 ns |
+| GUI: CPU of its own threads over 150 window resizes, median of 6 | 445 ms | 435 ms |
+| GUI: peak resident memory, median of 6 | 214 MB | 210 MB |
+
+- **The agent's cost is out of sight.** It is 13 ns slower per HID++ report.
+  At 1000 reports a second that is 13 µs of CPU each second, against 1 ms
+  between reports.
+- **The GUI showed no difference.** The figures come from software rendering
+  (llvmpipe), where Mesa's threads take most of the CPU. The GUI's own
+  threads were within the 10 ms timer resolution of each other.
+- **Not `"z"`.** It is 7% smaller again, but it also stops loop vectorisation,
+  and nothing was measured with it.
+- **One crate can go back.** If a profile shows time on a hot path in one
+  crate, `[profile.release.package.<name>] opt-level = 3` restores it there.
+
+Measured with release builds of the v0.8.20 tag, one with each setting. The
+agent figure is a temporary benchmark of `decode_event` and
+`CaptureAccum::on_event` over 4 million reports; both builds produced the same
+gesture output. Not measured: macOS and Windows, a GPU-backed GUI, and the
+overlay's animation.
+
 ## 2026-10: Backlight writes invalidate other clients' device readings
 
 A successful CLI backlight write could leave the already-open GUI showing the

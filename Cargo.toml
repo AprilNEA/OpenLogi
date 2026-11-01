@@ -180,6 +180,10 @@ opt-level = 3
 opt-level = 3
 
 [profile.release]
+# Size over speed. The four shipped binaries come out 25% smaller (v0.8.20,
+# Linux x86_64: 98.8 → 73.8 MB), and no measured path got slower in a way a
+# user can see. The numbers and when to revisit: docs/DECISIONS.md, 2026-11.
+opt-level = "s"
 lto = "fat"
 codegen-units = 1
 strip = "symbols"
