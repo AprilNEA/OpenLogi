@@ -90,10 +90,13 @@ impl LocalDevices {
         let mut listed = Vec::new();
         let mut unlisted = Vec::new();
         for configured in config.devices() {
-            let Some(record) = inventory
-                .iter()
-                .find(|record| record.key == *configured.key())
-            else {
+            // The inventory keys a device by its serial when it has one, but
+            // the configuration may name the same device by its unit id.
+            let Some(record) = inventory.iter().find(|record| {
+                record.key == *configured.key()
+                    || identity_keys(record.serial.as_deref(), record.unit_id)
+                        .any(|key| key == configured.key().as_str())
+            }) else {
                 unlisted.push(configured.key().clone());
                 continue;
             };
@@ -157,17 +160,11 @@ impl LocalDevices {
     ) -> Option<&PhysicalDeviceKey> {
         let mut keys = Vec::with_capacity(identity.ids.len());
         for id in &identity.ids {
-            let key = match CanonicalDeviceIdentifier::try_from(id).ok()? {
-                CanonicalDeviceIdentifier::Serial(serial) => {
-                    DeviceIdentity::from_parts(Some(&serial), [0; 4])
-                }
-                CanonicalDeviceIdentifier::UnitId(unit) => {
-                    DeviceIdentity::from_parts(None, unit.to_be_bytes())
-                }
+            keys.extend(match CanonicalDeviceIdentifier::try_from(id).ok()? {
+                CanonicalDeviceIdentifier::Serial(serial) => identity_keys(Some(&serial), [0; 4]),
+                CanonicalDeviceIdentifier::UnitId(unit) => identity_keys(None, unit.to_be_bytes()),
                 CanonicalDeviceIdentifier::BluetoothAddress(_) => continue,
-            }
-            .config_key();
-            keys.extend(key);
+            });
         }
         self.unlisted
             .iter()
@@ -206,6 +203,18 @@ impl LocalDevices {
             .map(|device| device.identity.clone())
             .collect()
     }
+}
+
+/// The configuration keys that name a device with `serial` or `unit_id`, one
+/// for each identifier it has, keyed the way the orchestrator keys an
+/// inventory device.
+fn identity_keys(serial: Option<&str>, unit_id: [u8; 4]) -> impl Iterator<Item = String> + use<> {
+    [
+        serial.and_then(|serial| DeviceIdentity::from_parts(Some(serial), [0; 4]).config_key()),
+        DeviceIdentity::from_parts(None, unit_id).config_key(),
+    ]
+    .into_iter()
+    .flatten()
 }
 
 /// The identity peers correlate the device by. `None` when the inventory has

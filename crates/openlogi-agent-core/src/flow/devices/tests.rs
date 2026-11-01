@@ -129,6 +129,21 @@ fn announce_reports_the_self_slot_and_held_lists_online_devices() {
     assert_eq!(devices.held().len(), 1);
 }
 
+/// The inventory keys a device with a serial by that serial, but a device
+/// configured by its unit id is the same device.
+#[test]
+fn join_matches_a_configured_unit_id_on_a_device_keyed_by_its_serial() {
+    let config = config(vec![configured(MOUSE, Some(1))]);
+    let mut mouse = record(MOUSE, DeviceKind::Mouse, 0x0a, true);
+    mouse.serial = Some("2C1A".to_owned());
+    mouse.key = PhysicalDeviceKey::parse("serial:2c1a").expect("a serial key");
+
+    let devices = LocalDevices::join(&config, &[mouse]);
+
+    assert_eq!(keys(&devices), [MOUSE]);
+    assert_eq!(devices.outgoing(&peer()).len(), 1);
+}
+
 #[test]
 fn find_unlisted_keys_a_peer_identity_like_the_inventory() {
     const SERIAL_MOUSE: &str = "serial:2c1a";
