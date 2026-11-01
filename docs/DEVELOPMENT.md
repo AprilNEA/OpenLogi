@@ -679,7 +679,7 @@ cargo run -p xtask -- release channels \
 
 A stable release's item also offers Sparkle deltas from the three newest
 earlier stable releases that embed Sparkle (0.8.14 and later). A beta's item
-offers none, so a beta update downloads the full DMG. The macOS build leg
+offers none, so a beta update downloads the full update. The macOS build leg
 makes the deltas right after it staples the DMG, because Sparkle's
 `BinaryDelta` runs only on macOS:
 
@@ -693,13 +693,29 @@ It downloads each earlier DMG from the GitHub Release, applies the new delta
 to that app, and keeps the delta only when the result matches the new app file
 for file. It writes `<dmg>.from-<version>.sparkle.delta` and a `.json` next to
 it; `release appcast` reads that metadata and signs the delta. A delta that
-cannot be made is a warning, and the feed still offers the full DMG. The deltas
-go to `/releases/<tag>/` with the DMGs; their metadata stays out of R2.
+cannot be made is a warning, and the feed still offers the full update. The
+deltas go to `/releases/<tag>/` with the DMGs; their metadata stays out of R2.
 
 Sparkle applies a download as a delta only when its file name ends in
 `.delta`. With any other name it cannot unarchive the file and downloads the
-full DMG instead. 0.8.16 and 0.8.17 shipped `.sparkle-delta` names, so no
+full update instead. 0.8.16 and 0.8.17 shipped `.sparkle-delta` names, so no
 client used those deltas.
+
+The full update is a `.tar.xz` of the stapled DMG's app, 38% smaller than the
+DMG. The macOS build leg makes it after the deltas:
+
+```sh
+cargo run -p xtask -- release sparkle-archive \
+  --dmg dist/OpenLogi-v0.2.0-macos-arm64.dmg
+```
+
+It extracts the archive with `/usr/bin/tar -zxC`, as Sparkle does, and keeps
+it only when the app passes `codesign --verify --deep --strict` and matches the
+DMG's app file for file. It writes `OpenLogi-<tag>-macos-<arch>.tar.xz` next
+to the DMG, and `release appcast` offers it in place of the DMG. An archive
+that cannot be made is a warning, and the feed then offers the DMG. The archive
+goes to `/releases/<tag>/` on R2 only; the GitHub Release and `latest.json`
+keep the DMG.
 
 ### Release versions
 

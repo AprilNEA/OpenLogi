@@ -425,7 +425,7 @@ jobs:
       # macOS. The deltas come from the stapled DMG, which holds the exact app
       # users install, and each one is applied and compared before it is kept.
       # One that cannot be made is a warning: the feed still offers the full
-      # DMG, so it costs a larger download, never an update.
+      # update, so it costs a larger download, never an update.
       - name: Make Sparkle deltas
         if: ${{ inputs.sign && github.ref_type == 'tag' }}
         env:
@@ -436,13 +436,27 @@ jobs:
             --dmg "dist/OpenLogi-${GITHUB_REF_NAME}-macos-${{ matrix.arch }}.dmg" \
             --tag "$GITHUB_REF_NAME"
 
+      # Sparkle's full update: the stapled DMG's app as a .tar.xz, 38% smaller
+      # than the DMG, which stays the first-install download. It is extracted
+      # the way Sparkle extracts it and checked against the app before it is
+      # kept. One that cannot be made is a warning, and the feed then offers
+      # the DMG. A beta, which gets no deltas, takes this too.
+      - name: Make Sparkle full-update archive
+        if: ${{ inputs.sign && github.ref_type == 'tag' }}
+        run: |
+          set -euo pipefail
+          cargo run -p xtask -- release sparkle-archive \
+            --dmg "dist/OpenLogi-${GITHUB_REF_NAME}-macos-${{ matrix.arch }}.dmg"
+
       - uses: actions/upload-artifact@v7
         with:
           name: OpenLogi-macos-dmg-${{ matrix.arch }}
-          # The deltas travel with their DMG; `release appcast` reads the
-          # metadata next to each one in the publish job.
+          # The archive and the deltas travel with their DMG; `release
+          # appcast` finds the archive by name and reads the metadata next to
+          # each delta in the publish job.
           path: |
             dist/*.dmg
+            dist/*.tar.xz
             dist/*.sparkle.delta
             dist/*.sparkle.delta.json
           # 'warn' (the default) would let an empty-dist job stay green while

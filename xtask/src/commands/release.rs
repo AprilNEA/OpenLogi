@@ -5,6 +5,7 @@ pub(crate) mod check_publish;
 pub(crate) mod checkout_version_bump;
 pub(crate) mod latest_json;
 pub(crate) mod next_beta;
+pub(crate) mod sparkle_archive;
 pub(crate) mod sparkle_deltas;
 pub(crate) mod stamp_version;
 pub(crate) mod version;
@@ -29,6 +30,8 @@ pub(crate) enum Command {
     /// Name the beta tag to cut on HEAD, checked as `version` checks the
     /// pushed tag.
     NextBeta(next_beta::Args),
+    /// Make the verified `.tar.xz` Sparkle offers as the full update from a stapled DMG.
+    SparkleArchive(sparkle_archive::Args),
     /// Make verified Sparkle deltas from the newest earlier releases to a stapled DMG.
     SparkleDeltas(sparkle_deltas::Args),
     /// Give the workspace a release's version before it builds: a beta's own
@@ -48,6 +51,7 @@ pub(crate) fn run(command: Command) -> Result<()> {
         Command::CheckoutVersionBump => checkout_version_bump::run(),
         Command::LatestJson(args) => latest_json::run(&args),
         Command::NextBeta(args) => next_beta::run(&args),
+        Command::SparkleArchive(args) => sparkle_archive::run(&args),
         Command::SparkleDeltas(args) => sparkle_deltas::run(&args),
         Command::StampVersion(args) => stamp_version::run(&args),
         Command::Version(args) => version::run(&args),

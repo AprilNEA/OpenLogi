@@ -4,6 +4,25 @@ Durable "why we did it this way" records that are not obvious from the code.
 Add a dated entry when a non-obvious architectural or dependency decision is
 made or revisited.
 
+## 2026-11: Sparkle's full update is a `.tar.xz` of the DMG's app
+
+The appcast offered the DMG as the full update. A DMG compresses each chunk
+on its own, and an update needs only the app, so the item now offers a
+`.tar.xz` of the app in the stapled DMG: 14.17 MB against 22.83 MB for v0.8.20
+arm64. The DMG stays the download for a first install, on the GitHub Release
+and in `latest.json`.
+
+- **Made from the stapled DMG, checked as Sparkle opens it.**
+  `release sparkle-archive` copies the app out with `ditto`, as the deltas do,
+  and tars it with the system bsdtar, without extended attributes, ACLs or
+  AppleDouble files. It keeps the archive only after `/usr/bin/tar -zxC`, the
+  command Sparkle runs on it, rebuilds an app that passes
+  `codesign --verify --deep --strict` and matches the DMG's app file for file.
+- **The DMG is the fallback, not an error.** An archive that cannot be made is
+  a warning, and `release appcast` then offers the DMG, as before. A missing
+  archive costs a larger download and never an update, the same rule as for
+  a missing delta.
+
 ## 2026-10: Backlight writes invalidate other clients' device readings
 
 A successful CLI backlight write could leave the already-open GUI showing the

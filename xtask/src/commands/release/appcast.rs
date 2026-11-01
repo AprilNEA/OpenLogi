@@ -1,7 +1,9 @@
 //! A release's Sparkle feed record: one single-item appcast per macOS
-//! architecture, offering that architecture's notarized DMG of this release,
-//! signed with Sparkle's EdDSA key, plus the deltas `release sparkle-deltas`
-//! made from earlier releases. A beta's item carries `sparkle:channel`.
+//! architecture, offering the app from that architecture's notarized DMG of
+//! this release as the `.tar.xz` `release sparkle-archive` made (or the DMG
+//! itself when there is none), signed with Sparkle's EdDSA key, plus the
+//! deltas `release sparkle-deltas` made from earlier releases. A beta's item
+//! carries `sparkle:channel`.
 //!
 //! Runs in the publish job after the DMGs are stapled — stapling rewrites the
 //! file, so a signature made before it would not match what users download.
@@ -25,6 +27,8 @@ use time::{OffsetDateTime, format_description::well_known::Rfc2822};
 use crate::support::release_tag::{BUILD_VERSION_ENV, BuildVersion, ReleaseTag};
 use crate::support::update_feed::{self, MacArch};
 
+use super::sparkle_archive;
+
 /// The base64 private key: the 32-byte seed Sparkle's `generate_keys -x`
 /// exports. Read only from the environment, so it never shows up in a
 /// process listing.
@@ -32,8 +36,9 @@ const PRIVATE_KEY_ENV: &str = "OPENLOGI_SPARKLE_PRIVATE_ED_KEY";
 
 #[derive(Parser)]
 pub(crate) struct Args {
-    /// Directory holding the stapled `…-macos-<arch>.dmg` release artifacts
-    /// and the `<dmg>.from-<version>.sparkle.delta` files made from them.
+    /// Directory holding the stapled `…-macos-<arch>.dmg` release artifacts,
+    /// and the `…-macos-<arch>.tar.xz` archives and
+    /// `<dmg>.from-<version>.sparkle.delta` files made from them.
     #[arg(long, default_value = "dist")]
     dist: PathBuf,
     /// Root of the tree to upload to the update host. The `appcast-<arch>.xml`
@@ -121,8 +126,13 @@ fn write_appcasts(args: &Args, private_key: &str) -> Result<()> {
     let mut records = Vec::new();
     for (arch, dmg) in release_dmgs(&args.dist)? {
         let name = file_name(&dmg)?;
-        let enclosure = Enclosure::for_file(&dmg, format!("{release_base}/{name}"), Some(&key))
-            .with_context(|| format!("could not sign {}", dmg.display()))?;
+        let full = full_update(&dmg)?;
+        let enclosure = Enclosure::for_file(
+            &full,
+            format!("{release_base}/{}", file_name(&full)?),
+            Some(&key),
+        )
+        .with_context(|| format!("could not sign {}", full.display()))?;
         let mut item = item(&release, enclosure);
         for delta in release_deltas(&args.dist, name, &bundle_version)? {
             let url = format!("{release_base}/{}", file_name(&delta.path)?);
@@ -214,6 +224,22 @@ fn release_dmgs(dist: &Path) -> Result<Vec<(MacArch, PathBuf)>> {
     }
     dmgs.sort_by_key(|(arch, _)| MacArch::VARIANTS.iter().position(|a| a == arch));
     Ok(dmgs)
+}
+
+/// What Sparkle downloads for a full update to `dmg`: the `.tar.xz` `release
+/// sparkle-archive` made next to it, or the DMG when there is none. The
+/// archive is checked against the DMG's app when it is made, so either one
+/// installs the same bundle.
+fn full_update(dmg: &Path) -> Result<PathBuf> {
+    let archive = dmg.with_file_name(sparkle_archive::archive_name(file_name(dmg)?)?);
+    if archive.is_file() {
+        return Ok(archive);
+    }
+    println!(
+        "::notice::no {} next to the DMG, so its feed offers the DMG as the full update",
+        file_name(&archive)?
+    );
+    Ok(dmg.to_path_buf())
 }
 
 /// The Sparkle deltas in `dist` that update to the DMG named `dmg`, in file

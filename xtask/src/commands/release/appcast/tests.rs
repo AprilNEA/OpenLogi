@@ -371,6 +371,86 @@ fn each_feed_offers_its_architectures_dmg_signed_with_the_embedded_key() {
 }
 
 #[test]
+fn a_sparkle_archive_next_to_its_dmg_is_the_full_update() {
+    let dist = release_dist();
+    let out = tempfile::tempdir().unwrap();
+    let arm = "OpenLogi-v0.8.15-macos-arm64.dmg";
+    touch(
+        dist.path(),
+        "OpenLogi-v0.8.15-macos-arm64.tar.xz",
+        b"arm archive",
+    );
+    let from_14 = delta(dist.path(), arm, "0.8.14", "0.8.15", b"delta from 14");
+    write_appcasts(
+        &args(dist.path(), out.path(), "v0.8.15", PUBLIC_KEY),
+        PRIVATE_KEY,
+    )
+    .unwrap();
+
+    let key = signing_key(PRIVATE_KEY).unwrap();
+    let records = out.path().join("releases/v0.8.15/feed");
+    let enclosure_of = |arch: MacArch| {
+        let xml = fs_err::read_to_string(records.join(arch.appcast_file_name())).unwrap();
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        let item = child(child(doc.root_element(), None, "channel"), None, "item");
+        let enclosure = child(item, None, "enclosure");
+        let deltas = item
+            .descendants()
+            .filter(|n| n.has_tag_name((SPARKLE_NS, "deltas")))
+            .flat_map(|n| n.children())
+            .filter_map(|n| n.attribute("url").map(str::to_owned))
+            .collect::<Vec<_>>();
+        (
+            [
+                enclosure.attribute("url").map(str::to_owned),
+                enclosure.attribute("type").map(str::to_owned),
+                enclosure.attribute("length").map(str::to_owned),
+                enclosure
+                    .attribute((SPARKLE_NS, "edSignature"))
+                    .map(str::to_owned),
+            ],
+            deltas,
+        )
+    };
+
+    // arm64 has an archive: it replaces the DMG, and the deltas named for
+    // the DMG stay.
+    let (arm_enclosure, arm_deltas) = enclosure_of(MacArch::Arm64);
+    assert_eq!(
+        arm_enclosure,
+        [
+            Some(
+                "https://updates.example/releases/v0.8.15/OpenLogi-v0.8.15-macos-arm64.tar.xz"
+                    .into()
+            ),
+            Some("application/x-xz".into()),
+            Some(b"arm archive".len().to_string()),
+            Some(key.sign_bytes(b"arm archive")),
+        ]
+    );
+    assert_eq!(
+        arm_deltas,
+        [format!(
+            "https://updates.example/releases/v0.8.15/{from_14}"
+        )]
+    );
+
+    // x86_64 has none: its feed offers the DMG, as before.
+    let (intel_enclosure, _) = enclosure_of(MacArch::X86_64);
+    assert_eq!(
+        intel_enclosure,
+        [
+            Some(
+                "https://updates.example/releases/v0.8.15/OpenLogi-v0.8.15-macos-x86_64.dmg".into()
+            ),
+            Some("application/x-apple-diskimage".into()),
+            Some(b"intel dmg".len().to_string()),
+            Some(key.sign_bytes(b"intel dmg")),
+        ]
+    );
+}
+
+#[test]
 fn deltas_go_into_their_architectures_feed_signed() {
     let dist = release_dist();
     let out = tempfile::tempdir().unwrap();

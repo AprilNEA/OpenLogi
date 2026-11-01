@@ -37,9 +37,10 @@ devenv shell -- cargo run -p xtask -- <command>
   introduced the current workspace version.
 - `release latest-json` — write a release's static updater manifest into its
   feed record.
-- `release appcast` — sign the macOS DMGs and their Sparkle deltas with
-  Sparkle's EdDSA key and write one single-item appcast per architecture into
-  the release's feed record.
+- `release appcast` — sign each macOS full update (the `.tar.xz` next to its
+  DMG, or the DMG when there is none) and its Sparkle deltas with Sparkle's
+  EdDSA key and write one single-item appcast per architecture into the
+  release's feed record.
 - `release channels` — compose every channel's `latest.json` and appcasts
   from the release records on the update host, and print what each channel
   offers as GitHub Actions outputs.
@@ -49,6 +50,9 @@ devenv shell -- cargo run -p xtask -- <command>
   `release version` checks the pushed tag. It reads committed files, not the
   working tree, and needs the whole history and every `v*` tag; it refuses a
   shallow repository. The prerelease workflow runs it and creates the tag.
+- `release sparkle-archive` — make the `.tar.xz` Sparkle downloads as a full
+  update from a stapled DMG's app, checked the way Sparkle extracts it. The
+  DMG stays the first-install download.
 - `release sparkle-deltas` — make verified Sparkle deltas from the newest
   earlier stable releases to a stable release's stapled DMG, with the metadata
   `release appcast` reads. A beta gets none.
@@ -227,6 +231,8 @@ xtask/
         latest_json/tests.rs
         next_beta.rs         # the beta tag the prerelease workflow cuts
         next_beta/tests.rs
+        sparkle_archive.rs   # the full-update .tar.xz, made from the stapled DMG
+        sparkle_archive/tests.rs
         sparkle_deltas.rs
         sparkle_deltas/tests.rs
         stamp_version.rs     # a beta's version, written into the workspace
