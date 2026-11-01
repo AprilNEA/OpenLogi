@@ -152,9 +152,6 @@ impl HookBackend for Backend {
 
     /// Signal the run loop to stop and join the background thread.
     fn stop(inner: HookInner) {
-        if let Some(hid_keys) = inner.hid_keys {
-            hid_keys.stop();
-        }
         // Latch stop before waking either thread. The lifecycle watchdog stays
         // armed across the blocking join and accepts only `ThreadExited` as proof
         // that explicit shutdown completed.
@@ -167,6 +164,10 @@ impl HookBackend for Backend {
         inner.lifecycle_watchdog.thread().unpark();
         if let Err(e) = inner.lifecycle_watchdog.join() {
             error!("hook lifecycle watchdog panicked on shutdown: {e:?}");
+        }
+        // Last: the tap's teardown must never wait on this listener.
+        if let Some(hid_keys) = inner.hid_keys {
+            hid_keys.stop();
         }
     }
 
