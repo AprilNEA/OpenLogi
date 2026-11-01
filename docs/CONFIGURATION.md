@@ -217,7 +217,8 @@ Common device fields are:
   in the settings app
 - `host_switch_targets` for keyboards with Easy-Switch keys (HID++ `0x1814`):
   the config keys of the mice and other devices that move with the keyboard
-  when it switches hosts. A linked device moves to its slot whose host name
+  when it switches hosts. The desktop app edits the list from the keyboard's
+  Device tab (**Switch together**). A linked device moves to its slot whose host name
   (HID++ `0x1815`) matches the keyboard's new slot, and otherwise to the slot
   with the same number. The agent also writes the linked device's `0x1814`
   cookies, so that Logi Options+ on the keyboard's other hosts moves the same

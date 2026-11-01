@@ -223,6 +223,12 @@ pub struct Capabilities {
     /// HID++ `0x8110` button spy.
     #[serde(default)]
     pub button_spy: bool,
+    /// The device can be moved to another Easy-Switch host slot — HID++
+    /// `0x1814 ChangeHost`. Unlike [`Self::easy_switch`], it does not need
+    /// the slots' names. Appended: crosses the IPC and the persisted
+    /// identity.
+    #[serde(default)]
+    pub change_host: bool,
 }
 
 impl Capabilities {
@@ -278,6 +284,7 @@ impl Capabilities {
             disable_keys: ids.contains(&0x4521),
             onboard_profiles: ids.contains(&0x8100),
             button_spy: ids.contains(&0x8110),
+            change_host: ids.contains(&0x1814),
         }
     }
 
@@ -803,6 +810,7 @@ mod tests {
                     disable_keys: false,
                     onboard_profiles: false,
                     button_spy: false,
+                    change_host: false,
                 }),
                 settings_revision: 0,
             }],
@@ -926,6 +934,7 @@ mod tests {
                 disable_keys: false,
                 onboard_profiles: false,
                 button_spy: false,
+                change_host: false,
             }
         );
         assert!(!Capabilities::from_feature_ids(&[0x0003, 0x1b04]).thumbwheel);
@@ -954,6 +963,7 @@ mod tests {
                 disable_keys: false,
                 onboard_profiles: false,
                 button_spy: false,
+                change_host: false,
             }
         );
         // No driving features → nothing offered.
@@ -975,6 +985,9 @@ mod tests {
         // alone switches channels but cannot name them.
         assert!(Capabilities::from_feature_ids(&[0x0001, 0x1815]).easy_switch);
         assert!(!Capabilities::from_feature_ids(&[0x0001, 0x1814]).easy_switch);
+        // 0x1814 ChangeHost moves the device between slots without 0x1815.
+        assert!(Capabilities::from_feature_ids(&[0x0001, 0x1814]).change_host);
+        assert!(!Capabilities::from_feature_ids(&[0x0001, 0x1815]).change_host);
         // 0x2205 sets the speed only where no DPI feature does (M590, MX
         // Ergo); a mouse with both keeps its DPI control.
         let scaled = Capabilities::from_feature_ids(&[0x0001, 0x2205]);

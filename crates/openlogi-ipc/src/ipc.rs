@@ -163,6 +163,8 @@ pub use succession::Identity;
 ///      `Action::{PreviousKeypadPage, NextKeypadPage}` appended after the
 ///      G-series actions, and `ButtonId` grid keys gain page-qualified names
 ///      (`page2:gridMiddle`) — the keypad's binding pages.
+///      `Capabilities::change_host` appended after them — `0x1814`
+///      ChangeHost without `0x1815` HostsInfo.
 pub const PROTOCOL_VERSION: u32 = 43;
 
 /// Environment variable through which the agent hands a supervised helper the

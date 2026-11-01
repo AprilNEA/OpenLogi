@@ -104,6 +104,7 @@ pub(crate) struct Toggle {
     disabled: bool,
     size: Size,
     label: Option<SharedString>,
+    accessibility_label: Option<SharedString>,
     icon: Option<IconName>,
     min_width: Option<Pixels>,
     on_change: Option<SwitchHandler>,
@@ -119,6 +120,7 @@ impl Toggle {
             disabled: false,
             size: Size::Small,
             label: None,
+            accessibility_label: None,
             icon: None,
             min_width: None,
             on_change: None,
@@ -128,6 +130,14 @@ impl Toggle {
     #[must_use]
     pub(crate) fn label(mut self, label: impl Into<Option<SharedString>>) -> Self {
         self.label = label.into();
+        self
+    }
+
+    /// The name a screen reader announces, when the switch's subject is shown
+    /// beside it rather than in its On/Off label.
+    #[must_use]
+    pub(crate) fn accessibility_label(mut self, label: impl Into<SharedString>) -> Self {
+        self.accessibility_label = Some(label.into());
         self
     }
 
@@ -193,6 +203,9 @@ impl RenderOnce for Toggle {
             .with_size(self.size)
             .label(label)
             .color(rgb(ACCENT_BLUE));
+        if let Some(name) = self.accessibility_label {
+            toggle = toggle.accessibility_label(name);
+        }
         if let Some(handler) = self.on_change {
             toggle = toggle.on_click(move |selected, window, cx| handler(selected, window, cx));
         }

@@ -641,6 +641,7 @@ mod tests {
                         disable_keys: false,
                         onboard_profiles: false,
                         button_spy: false,
+                        change_host: false,
                     }),
                     dpi: Some("1600 dpi (range 200–8000, 5 steps)".to_string()),
                     config_key: "4082d".to_string(),
