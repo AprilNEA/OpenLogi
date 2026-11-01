@@ -30,7 +30,7 @@
 mod foreground;
 pub(crate) mod pointer;
 mod supervisor;
-mod wheel_debounce;
+mod wheel;
 #[cfg(test)]
 mod xvfb;
 
@@ -40,7 +40,6 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
-use std::time::Instant;
 
 use evdev::uinput::VirtualDevice;
 use evdev::{
@@ -59,7 +58,7 @@ use foreground::{FRONTMOST, X11Source};
 pub(crate) use foreground::{
     ForegroundApplicationObserver, watch_frontmost_application_activations,
 };
-use wheel_debounce::WheelDebounce;
+use wheel::{PassThroughWheel, WheelEvent};
 
 /// Hi-res scroll resolution: 120 units per standard wheel tick, matching the
 /// Linux kernel's `REL_WHEEL_HI_RES` convention and Windows HID semantics.
@@ -423,65 +422,9 @@ fn key_to_button(key: KeyCode) -> Option<ButtonId> {
     }
 }
 
-/// Low-res wheel events (`REL_WHEEL`/`REL_HWHEEL`) held back for one report.
-///
-/// A hi-res device emits both a hi-res and a low-res event per notch. libinput
-/// ignores the low-res one when the hi-res one is present, but desktops that
-/// read the *discrete* axis value (mutter 42) derive it from the low-res count,
-/// so a pass-through that drops it scrolls nothing. The low-res event is
-/// therefore forwarded exactly when the hi-res event on the same axis was; when
-/// the hi-res one was suppressed, the action injector re-emits both and a
-/// forwarded companion would double the scroll distance.
-#[derive(Default)]
-struct LowResCompanions {
-    held: Vec<evdev::InputEvent>,
-    vertical_forwarded: bool,
-    horizontal_forwarded: bool,
-}
-
-impl LowResCompanions {
-    fn is_low_res(axis: RelativeAxisCode) -> bool {
-        matches!(
-            axis,
-            RelativeAxisCode::REL_WHEEL | RelativeAxisCode::REL_HWHEEL
-        )
-    }
-
-    fn hold(&mut self, event: evdev::InputEvent) {
-        self.held.push(event);
-    }
-
-    /// Record that the hi-res event for `axis` is being passed through.
-    fn hires_forwarded(&mut self, axis: RelativeAxisCode) {
-        match axis {
-            RelativeAxisCode::REL_WHEEL_HI_RES => self.vertical_forwarded = true,
-            RelativeAxisCode::REL_HWHEEL_HI_RES => self.horizontal_forwarded = true,
-            _ => {}
-        }
-    }
-
-    /// Move the companions whose hi-res event was forwarded into `pending` and
-    /// reset for the next report. `inverted` applies software scroll inversion
-    /// to the low-res vertical companion too, so it agrees with its hi-res
-    /// event for clients that read the discrete axis.
-    fn release_into(&mut self, pending: &mut Vec<evdev::InputEvent>, inverted: bool) {
-        for event in self.held.drain(..) {
-            let forwarded = match RelativeAxisCode(event.code()) {
-                RelativeAxisCode::REL_WHEEL => self.vertical_forwarded,
-                RelativeAxisCode::REL_HWHEEL => self.horizontal_forwarded,
-                _ => false,
-            };
-            if forwarded {
-                pending.push(invert_wheel(event, inverted));
-            }
-        }
-        self.vertical_forwarded = false;
-        self.horizontal_forwarded = false;
-    }
-}
-
 /// Run one event past the callback and return what to forward to the desktop
-/// for it, if anything. Held low-res companions never get here.
+/// for it, if anything. On a hi-res device, wheel events reach it only
+/// through [`PassThroughWheel`], and low-res counts never do.
 ///
 /// `invert` is the report's software-inversion setting, already narrowed by
 /// the caller to vertical wheel events. Through [`Delivery`] the callback
@@ -553,10 +496,9 @@ fn device_thread(
     let stop_fd = stop_rx.as_raw_fd();
     // Events that will be re-injected at the next SYN_REPORT.
     let mut pending: Vec<evdev::InputEvent> = Vec::new();
-    let mut companions = LowResCompanions::default();
     // libinput skips its wheel debouncing on the uinput pass-through device,
     // so the hook applies it before the callback sees the wheel.
-    let mut wheel = WheelDebounce::default();
+    let mut wheel = PassThroughWheel::default();
     // Software scroll inversion, read once per report so a hi-res event and its
     // low-res companion never disagree if the setting flips mid-report.
     let mut report_inverted: Option<bool> = None;
@@ -578,7 +520,6 @@ fn device_thread(
                 break;
             }
         };
-        let now = Instant::now();
 
         for event in events {
             if let EventSummary::Synchronization(..) = event.destructure() {
@@ -588,7 +529,7 @@ fn device_thread(
                 let inverted = report_inverted
                     .take()
                     .unwrap_or_else(crate::scroll_inversion);
-                companions.release_into(&mut pending, inverted);
+                wheel.end_report(&mut pending, inverted);
                 if !pending.is_empty() {
                     if let Err(e) = virtual_device.emit(&pending) {
                         // The physical device is grabbed, so these pass-through
@@ -605,19 +546,28 @@ fn device_thread(
                     pending.clear();
                 }
             } else {
-                if hires_scroll
-                    && let EventSummary::RelativeAxis(_, axis, _) = event.destructure()
-                    && LowResCompanions::is_low_res(axis)
-                {
-                    // Redundant for the callback; whether it reaches the desktop
-                    // depends on what happens to the hi-res event in this report.
-                    companions.hold(event);
-                    continue;
-                }
-                let Some(event) = wheel.filter(event, now) else {
-                    // Held back as wheel jitter. Its low-res companion, if
-                    // any, is dropped with it.
-                    continue;
+                let wheel_event = if hires_scroll {
+                    WheelEvent::try_from(event).ok()
+                } else {
+                    None
+                };
+                let mut released = None;
+                let event = match wheel_event {
+                    Some(WheelEvent::LowRes(axis, value)) => {
+                        // Redundant for the callback. It goes out with the
+                        // hi-res movement on its axis, or not at all.
+                        wheel.low_res(axis, value);
+                        continue;
+                    }
+                    Some(WheelEvent::HiRes(axis, value)) => {
+                        let Some(event) = wheel.hi_res(axis, value, event.timestamp()) else {
+                            // Held back while the wheel is at rest.
+                            continue;
+                        };
+                        released = Some(axis);
+                        event
+                    }
+                    None => event,
                 };
                 let is_vertical_wheel = matches!(
                     event.destructure(),
@@ -630,8 +580,8 @@ fn device_thread(
                 let invert = is_vertical_wheel
                     && *report_inverted.get_or_insert_with(crate::scroll_inversion);
                 if let Some(forwarded) = dispatch(event, hires_scroll, invert, &source, &*cb) {
-                    if let EventSummary::RelativeAxis(_, axis, _) = event.destructure() {
-                        companions.hires_forwarded(axis);
+                    if let Some(axis) = released {
+                        wheel.forwarded(axis);
                     }
                     pending.push(forwarded);
                 }
@@ -840,57 +790,6 @@ mod tests {
     fn translate_low_res_hwheel_skipped_when_hires_active() {
         let event = InputEvent::new(EventType::RELATIVE.0, RelativeAxisCode::REL_HWHEEL.0, 1);
         assert!(translate(&event, true).is_none());
-    }
-
-    // ── LowResCompanions ─────────────────────────────────────────────────────
-
-    fn rel(axis: RelativeAxisCode, value: i32) -> InputEvent {
-        InputEvent::new(EventType::RELATIVE.0, axis.0, value)
-    }
-
-    fn pending_codes(pending: &[InputEvent]) -> Vec<u16> {
-        pending.iter().map(InputEvent::code).collect()
-    }
-
-    #[test]
-    fn low_res_wheel_forwarded_when_hires_forwarded() {
-        let mut companions = LowResCompanions::default();
-        let mut pending = Vec::new();
-        companions.hold(rel(RelativeAxisCode::REL_WHEEL, -1));
-        companions.hires_forwarded(RelativeAxisCode::REL_WHEEL_HI_RES);
-        companions.release_into(&mut pending, false);
-        assert_eq!(pending_codes(&pending), [RelativeAxisCode::REL_WHEEL.0]);
-    }
-
-    #[test]
-    fn low_res_wheel_dropped_when_hires_suppressed() {
-        let mut companions = LowResCompanions::default();
-        let mut pending = Vec::new();
-        companions.hold(rel(RelativeAxisCode::REL_WHEEL, -1));
-        companions.release_into(&mut pending, false);
-        assert!(pending.is_empty());
-    }
-
-    #[test]
-    fn low_res_axes_are_matched_independently() {
-        let mut companions = LowResCompanions::default();
-        let mut pending = Vec::new();
-        companions.hold(rel(RelativeAxisCode::REL_WHEEL, 1));
-        companions.hold(rel(RelativeAxisCode::REL_HWHEEL, 1));
-        companions.hires_forwarded(RelativeAxisCode::REL_HWHEEL_HI_RES);
-        companions.release_into(&mut pending, false);
-        assert_eq!(pending_codes(&pending), [RelativeAxisCode::REL_HWHEEL.0]);
-    }
-
-    #[test]
-    fn forwarded_state_does_not_leak_into_next_report() {
-        let mut companions = LowResCompanions::default();
-        let mut pending = Vec::new();
-        companions.hires_forwarded(RelativeAxisCode::REL_WHEEL_HI_RES);
-        companions.release_into(&mut pending, false);
-        companions.hold(rel(RelativeAxisCode::REL_WHEEL, 1));
-        companions.release_into(&mut pending, false);
-        assert!(pending.is_empty());
     }
 
     #[test]
@@ -1175,20 +1074,6 @@ mod scroll_inversion_tests {
         ] {
             assert_eq!(value_of(invert_wheel(rel(axis, 7), true)), 7);
         }
-    }
-
-    /// A forwarded low-res companion is negated with its hi-res event, so a
-    /// client reading the discrete axis scrolls the same way as one reading
-    /// the hi-res axis.
-    #[test]
-    fn inversion_negates_the_released_low_res_companion() {
-        let mut companions = LowResCompanions::default();
-        companions.hold(rel(RelativeAxisCode::REL_WHEEL, 1));
-        companions.hires_forwarded(RelativeAxisCode::REL_WHEEL_HI_RES);
-        let mut pending = Vec::new();
-        companions.release_into(&mut pending, true);
-        assert_eq!(pending.len(), 1);
-        assert_eq!(value_of(pending[0]), -1);
     }
 
     /// `i32::MIN` has no positive counterpart; saturating keeps the scroll
