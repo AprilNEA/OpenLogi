@@ -241,6 +241,7 @@ fn choice_row(
         let accessibility_label = label.clone();
         chips = chips.child(
             BaseButton::new(("camera-choice", choice))
+                .debug_selector(move || format!("camera-choice-{}-{value}", control.name()))
                 .role(Role::RadioButton)
                 .selected(active)
                 .accessibility_label(accessibility_label)
@@ -325,6 +326,7 @@ fn binary_control_row(
         .child(div().flex_1())
         .child(
             BaseButton::new(("camera-toggle", ix))
+                .debug_selector(move || format!("camera-toggle-{}", control.name()))
                 .role(Role::CheckBox)
                 .selected(on)
                 .accessibility_label(slider.label.clone())
