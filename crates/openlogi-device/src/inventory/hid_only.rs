@@ -2,7 +2,7 @@
 //!
 //! An empty HID++ inventory has two different causes: no Logitech hardware at
 //! all, or hardware whose HID++ interface the host does not expose. A wired
-//! G502 HERO on Windows whose vendor-defined collections failed to start
+//! G502 HERO on Windows whose vendor-defined collections were disabled
 //! (#2188) still moves the cursor through its mouse collection, so the host
 //! lists the product while `enumerate_hidpp` returns nothing. Naming that
 //! product is what tells the user the problem is on the host side.
@@ -30,9 +30,9 @@ pub struct HidOnlyProduct {
 /// listed: they need no HID++ node.
 ///
 /// A standalone driver claims a product through one of its collections. When
-/// that collection is missing too (a G600 whose vendor-defined collection
-/// failed to start), the product is listed: its plain collections are all the
-/// host offers, and the fix is the same as for a HID++ product.
+/// that collection is missing too (a G600 whose vendor-defined collection is
+/// disabled or failed to start), the product is listed: its plain collections
+/// are all the host offers, and the fix is the same as for a HID++ product.
 pub async fn enumerate_hid_only(
     backend: &dyn HidBackend,
 ) -> Result<Vec<HidOnlyProduct>, InventoryError> {
@@ -92,7 +92,7 @@ mod tests {
 
     /// The nodes the Windows PC in #2188 listed for its G502 HERO: the mouse,
     /// keyboard, consumer and system collections, with both vendor-defined
-    /// collections failed and therefore absent.
+    /// collections disabled (`CM_PROB_DISABLED`) and therefore absent.
     fn g502_without_vendor_collections() -> Vec<NodeInfo> {
         [
             (0x000c, 0x0001),
