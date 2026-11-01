@@ -321,6 +321,11 @@ opening or merging PRs, publishing, or approving/rerunning workflows.
 - Issues use the bug/feature/device forms and the `type:`/`area:`/`platform:`/`needs:`/
   `status:` label families. Deferred or out-of-scope work becomes a linked issue, not a
   TODO comment.
+- Discussions route by category: Q&A for usage questions (mark the reply that solves
+  it), Ideas for feature wishes, General for the rest. The forms in
+  `.github/DISCUSSION_TEMPLATE/` carry this routing; device requests go to the device
+  issue form. When an issue tracks a discussion, link it and close the discussion as a
+  duplicate. Close a discussion whose request has shipped as resolved.
 
 ### Adopting contributor PRs
 
