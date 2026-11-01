@@ -264,6 +264,14 @@ pub struct AppSettings {
     /// only diverted from native scrolling once this leaves the default.
     #[serde(default)]
     pub thumbwheel_sensitivity: ThumbwheelSensitivity,
+    /// Gesture responsiveness. Controls both the hold duration before a gesture
+    /// commits and the travel distance threshold required for directional recognition.
+    #[serde(default)]
+    pub gesture_sensitivity: GestureSensitivity,
+    /// Gesture axis bias. Controls directional balance between horizontal (Left/Right)
+    /// and vertical (Up/Down) swipe recognition on a `-50..=50` scale.
+    #[serde(default)]
+    pub gesture_axis_bias: GestureAxisBias,
     /// Light/dark appearance preference. Defaults to following the OS.
     #[serde(default)]
     pub appearance: Appearance,
@@ -467,6 +475,190 @@ impl From<ThumbwheelSensitivity> for i32 {
     }
 }
 
+const GESTURE_SENSITIVITY_MIN: u8 = 1;
+const GESTURE_SENSITIVITY_MAX: u8 = 100;
+const GESTURE_SENSITIVITY_DEFAULT: u8 = 50;
+
+/// Gesture responsiveness on OpenLogi's `1..=100` scale, `50` by default.
+///
+/// A plain value: [`SwipeThresholds`](crate::binding::SwipeThresholds) maps it to the
+/// hold duration and travel a swipe needs, and [`Self::DEFAULT`] maps to the
+/// built-in swipe constants exactly.
+#[nutype(
+    const_fn,
+    validate(
+        greater_or_equal = GESTURE_SENSITIVITY_MIN,
+        less_or_equal = GESTURE_SENSITIVITY_MAX
+    ),
+    derive(
+        Debug,
+        Clone,
+        Copy,
+        PartialEq,
+        Eq,
+        PartialOrd,
+        Ord,
+        TryFrom,
+        Into,
+        Display,
+        Serialize,
+        Deserialize
+    )
+)]
+pub struct GestureSensitivity(u8);
+
+impl GestureSensitivity {
+    /// Lowest selectable sensitivity.
+    pub const MIN: Self = match Self::try_new(GESTURE_SENSITIVITY_MIN) {
+        Ok(value) => value,
+        Err(_) => panic!("valid minimum gesture sensitivity"),
+    };
+    /// Highest selectable sensitivity.
+    pub const MAX: Self = match Self::try_new(GESTURE_SENSITIVITY_MAX) {
+        Ok(value) => value,
+        Err(_) => panic!("valid maximum gesture sensitivity"),
+    };
+    /// Out-of-the-box sensitivity: the built-in swipe timing and travel.
+    pub const DEFAULT: Self = match Self::try_new(GESTURE_SENSITIVITY_DEFAULT) {
+        Ok(value) => value,
+        Err(_) => panic!("valid default gesture sensitivity"),
+    };
+
+    /// Round and clamp a floating-point slider value into the valid range.
+    #[must_use]
+    pub fn from_rounded(value: f32) -> Self {
+        let value = if value.is_nan() {
+            f32::from(GESTURE_SENSITIVITY_DEFAULT)
+        } else {
+            value
+        };
+        let raw = value
+            .clamp(
+                f32::from(GESTURE_SENSITIVITY_MIN),
+                f32::from(GESTURE_SENSITIVITY_MAX),
+            )
+            .round()
+            .saturating_as::<u8>();
+        let Ok(value) = Self::try_new(raw) else {
+            unreachable!("clamped gesture sensitivity is always valid");
+        };
+        value
+    }
+}
+
+impl Default for GestureSensitivity {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+impl From<GestureSensitivity> for f32 {
+    fn from(sensitivity: GestureSensitivity) -> Self {
+        Self::from(sensitivity.into_inner())
+    }
+}
+
+impl From<GestureSensitivity> for i32 {
+    fn from(sensitivity: GestureSensitivity) -> Self {
+        Self::from(sensitivity.into_inner())
+    }
+}
+
+const AXIS_BIAS_MIN: i8 = -50;
+const AXIS_BIAS_MAX: i8 = 50;
+const AXIS_BIAS_DEFAULT: i8 = 0;
+
+/// Directional balance between horizontal and vertical gesture swipes on OpenLogi's
+/// `-50..=50` scale. A plain value: [`SwipeThresholds`](crate::binding::SwipeThresholds)
+/// turns it into per-axis travel and straightness limits.
+///
+/// - `-50`: Strongly prioritizes horizontal swipes (easier Left/Right, stricter Up/Down).
+/// - `0` (default): Neutral 1:1 balance.
+/// - `50`: Strongly prioritizes vertical swipes (easier Up/Down, stricter Left/Right).
+#[nutype(
+    const_fn,
+    validate(greater_or_equal = AXIS_BIAS_MIN, less_or_equal = AXIS_BIAS_MAX),
+    derive(
+        Debug,
+        Clone,
+        Copy,
+        PartialEq,
+        Eq,
+        PartialOrd,
+        Ord,
+        TryFrom,
+        Into,
+        Display,
+        Serialize,
+        Deserialize
+    )
+)]
+pub struct GestureAxisBias(i8);
+
+impl GestureAxisBias {
+    /// Lowest selectable axis bias (strongly favors horizontal swipes).
+    pub const MIN: Self = match Self::try_new(AXIS_BIAS_MIN) {
+        Ok(value) => value,
+        Err(_) => panic!("valid minimum gesture axis bias"),
+    };
+    /// Highest selectable axis bias (strongly favors vertical swipes).
+    pub const MAX: Self = match Self::try_new(AXIS_BIAS_MAX) {
+        Ok(value) => value,
+        Err(_) => panic!("valid maximum gesture axis bias"),
+    };
+    /// Neutral balance (1:1 equal weighting).
+    pub const DEFAULT: Self = match Self::try_new(AXIS_BIAS_DEFAULT) {
+        Ok(value) => value,
+        Err(_) => panic!("valid default gesture axis bias"),
+    };
+
+    /// Round and clamp a floating-point slider value into the valid range.
+    #[must_use]
+    pub fn from_rounded(value: f32) -> Self {
+        let raw = rounded_axis_bias(value);
+        let Ok(value) = Self::try_new(raw) else {
+            unreachable!("clamped gesture axis bias is always valid");
+        };
+        value
+    }
+}
+
+impl Default for GestureAxisBias {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+impl From<GestureAxisBias> for f32 {
+    fn from(bias: GestureAxisBias) -> Self {
+        Self::from(bias.into_inner())
+    }
+}
+
+impl From<GestureAxisBias> for i32 {
+    fn from(bias: GestureAxisBias) -> Self {
+        Self::from(bias.into_inner())
+    }
+}
+
+fn rounded_axis_bias(value: f32) -> i8 {
+    let value = if value.is_nan() {
+        f32::from(AXIS_BIAS_DEFAULT)
+    } else {
+        value
+    };
+    let rounded = value
+        .clamp(f32::from(AXIS_BIAS_MIN), f32::from(AXIS_BIAS_MAX))
+        .round();
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "value is clamped to [AXIS_BIAS_MIN, AXIS_BIAS_MAX] which fits in i8"
+    )]
+    {
+        rounded as i8
+    }
+}
+
 fn rounded_sensitivity(value: f32) -> u8 {
     let value = if value.is_nan() {
         f32::from(SENSITIVITY_MIN)
@@ -504,6 +696,8 @@ impl Default for AppSettings {
             asset_source: AssetSourcePreference::Automatic,
             language: None,
             thumbwheel_sensitivity: ThumbwheelSensitivity::DEFAULT,
+            gesture_sensitivity: GestureSensitivity::DEFAULT,
+            gesture_axis_bias: GestureAxisBias::DEFAULT,
             appearance: Appearance::System,
             ui_scale: UiScale::Normal,
             device_view_mode: DeviceViewMode::Grid,
@@ -914,6 +1108,41 @@ mod tests {
         assert_eq!(
             VerticalScrollSensitivity::from_rounded(f32::INFINITY),
             VerticalScrollSensitivity::MAX
+        );
+    }
+
+    #[test]
+    fn floating_gesture_sensitivity_rounds_and_saturates_into_the_domain() {
+        assert_eq!(u8::from(GestureSensitivity::from_rounded(49.6)), 50);
+        assert_eq!(
+            GestureSensitivity::from_rounded(f32::NAN),
+            GestureSensitivity::DEFAULT
+        );
+        assert_eq!(
+            GestureSensitivity::from_rounded(f32::NEG_INFINITY),
+            GestureSensitivity::MIN
+        );
+        assert_eq!(
+            GestureSensitivity::from_rounded(f32::INFINITY),
+            GestureSensitivity::MAX
+        );
+    }
+
+    #[test]
+    fn floating_gesture_axis_bias_rounds_and_saturates_into_the_domain() {
+        assert_eq!(i8::from(GestureAxisBias::from_rounded(24.6)), 25);
+        assert_eq!(i8::from(GestureAxisBias::from_rounded(-24.6)), -25);
+        assert_eq!(
+            GestureAxisBias::from_rounded(f32::NAN),
+            GestureAxisBias::DEFAULT
+        );
+        assert_eq!(
+            GestureAxisBias::from_rounded(f32::NEG_INFINITY),
+            GestureAxisBias::MIN
+        );
+        assert_eq!(
+            GestureAxisBias::from_rounded(f32::INFINITY),
+            GestureAxisBias::MAX
         );
     }
 }

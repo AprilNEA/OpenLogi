@@ -8,8 +8,9 @@ use serde::{Deserialize, Serialize};
 
 use super::button_map::{deserialize_button_map, deserialize_button_maps_by_app};
 use super::settings::{
-    CameraControls, CameraStreamMode, GestureOwner, LightSettings, Lighting, OnboardMemory,
-    ScrollResolution, SmartShift, ThumbwheelSensitivity, deserialize_gesture_owner,
+    CameraControls, CameraStreamMode, GestureAxisBias, GestureOwner, GestureSensitivity,
+    LightSettings, Lighting, OnboardMemory, ScrollResolution, SmartShift, ThumbwheelSensitivity,
+    deserialize_gesture_owner,
 };
 use crate::binding::{Action, ActionRingConfig, Binding, ButtonId, GestureDirection, KeypadPage};
 use crate::device::{Capabilities, DeviceKind, DeviceModelInfo, LightCapabilities};
@@ -301,6 +302,16 @@ pub struct DeviceConfig {
     /// [`AppSettings::thumbwheel_sensitivity`](crate::config::AppSettings::thumbwheel_sensitivity).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thumbwheel_sensitivity: Option<ThumbwheelSensitivity>,
+    /// Per-device gesture sensitivity override. `None` falls back to the
+    /// app-wide
+    /// [`AppSettings::gesture_sensitivity`](crate::config::AppSettings::gesture_sensitivity).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gesture_sensitivity: Option<GestureSensitivity>,
+    /// Per-device gesture axis bias override. `None` falls back to the
+    /// app-wide
+    /// [`AppSettings::gesture_axis_bias`](crate::config::AppSettings::gesture_axis_bias).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gesture_axis_bias: Option<GestureAxisBias>,
     /// Invert this device's scroll-wheel direction relative to the OS setting
     /// (issue #126): on, a wheel tick scrolls the opposite way, so a user who
     /// keeps macOS "natural scrolling" for the trackpad can have a traditional
@@ -479,6 +490,8 @@ impl Default for DeviceConfig {
             camera_profile: None,
             camera_stream_mode: None,
             thumbwheel_sensitivity: None,
+            gesture_sensitivity: None,
+            gesture_axis_bias: None,
             invert_scroll: false,
             scroll_resolution: None,
             smooth_wheel: false,
@@ -617,6 +630,10 @@ struct RawDeviceConfig {
     #[serde(default)]
     thumbwheel_sensitivity: Option<ThumbwheelSensitivity>,
     #[serde(default)]
+    gesture_sensitivity: Option<GestureSensitivity>,
+    #[serde(default)]
+    gesture_axis_bias: Option<GestureAxisBias>,
+    #[serde(default)]
     invert_scroll: bool,
     #[serde(default)]
     scroll_resolution: Option<ScrollResolution>,
@@ -697,6 +714,8 @@ impl From<RawDeviceConfig> for DeviceConfig {
             camera_profile: raw.camera_profile,
             camera_stream_mode: raw.camera_stream_mode,
             thumbwheel_sensitivity: raw.thumbwheel_sensitivity,
+            gesture_sensitivity: raw.gesture_sensitivity,
+            gesture_axis_bias: raw.gesture_axis_bias,
             invert_scroll: raw.invert_scroll,
             scroll_resolution: raw.scroll_resolution,
             smooth_wheel: raw.smooth_wheel,

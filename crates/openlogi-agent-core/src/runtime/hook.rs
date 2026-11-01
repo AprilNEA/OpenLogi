@@ -13,7 +13,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use openlogi_core::binding::{
-    Action, Binding, ButtonId, GestureDirection, SwipeAccumulator, default_binding,
+    Action, Binding, ButtonId, GestureDirection, SwipeAccumulator, SwipeThresholds, default_binding,
 };
 use openlogi_core::config::KeyTrigger;
 use openlogi_hook::{
@@ -39,6 +39,9 @@ pub struct HookMaps {
     /// gesture mode), so a hold+swipe resolves to a bound action. HID++
     /// gesture sources use the gesture watcher's separate map instead.
     pub gestures: BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
+    /// The hold gate and classification limits OS-hook swipes commit under,
+    /// from the selected device's gesture sensitivity and axis bias.
+    pub gesture_thresholds: SwipeThresholds,
     /// The pointer identity that selected this snapshot, or focused policy.
     pub(crate) pointer_target: Option<openlogi_hook::PointerTarget>,
     /// Device whose binding maps this snapshot contains.
@@ -145,13 +148,13 @@ impl HoldState {
     }
 
     /// Store the token returned by the accepted lifecycle `Down`.
-    fn begin(&mut self, button: ButtonId, press: PressToken) {
+    fn begin(&mut self, button: ButtonId, press: PressToken, thresholds: SwipeThresholds) {
         self.current = Some(GestureHold {
             button,
             started_at: Instant::now(),
             press,
         });
-        self.swipe.begin();
+        self.swipe.begin_with_config(thresholds);
     }
 
     /// Feed a pointer-move delta into the active hold, tagging a committed swipe
@@ -320,7 +323,10 @@ fn handle_button(
                 dispatcher.cancel_stale_hook_press(stale);
             }
             if let Some(press) = dispatcher.try_hook_button_down(id, None, action_target) {
-                HOLD.with_borrow_mut(|h| h.begin(id, press));
+                let thresholds = hooks
+                    .try_read()
+                    .map_or(SwipeThresholds::DEFAULT, |m| m.gesture_thresholds);
+                HOLD.with_borrow_mut(|h| h.begin(id, press, thresholds));
                 return EventDisposition::Suppress;
             }
             return SUPPRESSED_PRESSES

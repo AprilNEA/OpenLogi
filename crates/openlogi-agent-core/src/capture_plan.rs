@@ -381,6 +381,7 @@ pub fn plan_for_device(
                 // its current link, so the orchestrator fills it in.
                 divert_main_wheel: None,
                 onboard: None,
+                gesture_thresholds: config.gesture_thresholds(config_key),
             },
             rearm_generation,
         },

@@ -8,6 +8,7 @@ use openlogi_core::config::ScrollResolution;
 
 use super::*;
 use crate::replay::ReplayChannelHandle;
+use openlogi_core::binding::SwipeThresholds;
 
 /// Feature index [`wheel_device`] answers for `0x2121`.
 const HIRES: u8 = 3;
@@ -359,7 +360,7 @@ fn movement(high_res: bool, vertical: i16, horizontal: i16) -> v20::Message {
 async fn movement_reports_reach_the_dispatcher_as_main_wheel_input() {
     let armed = arm(0, 0, SetReply::Apply, &spec(None, None)).await;
     armed.result.unwrap();
-    let capture = GestureCapture::new(armed.controls);
+    let capture = GestureCapture::new(armed.controls, SwipeThresholds::DEFAULT);
     let (sink, mut inputs) = mpsc::unbounded_channel();
     let handler = capture.report_handler(0xff, sink);
     handler(&movement(true, 16, 0));
