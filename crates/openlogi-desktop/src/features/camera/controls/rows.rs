@@ -28,6 +28,8 @@ pub(super) fn section_indices(sliders: &[ControlSlider], lens: bool) -> Vec<usiz
                     | CameraControl::Tilt
                     | CameraControl::Focus
                     | CameraControl::Exposure
+                    | CameraControl::FieldOfView
+                    | CameraControl::ShowMode
             ) == lens
         })
         .map(|(ix, _)| ix)
@@ -89,15 +91,13 @@ pub(super) fn control_row(
 ) -> gpui::Stateful<gpui::Div> {
     let pal = theme::palette(cx);
     let slider = &panel.sliders[ix];
-    if slider.control == CameraControl::PowerLineFrequency
-        && [1, 2, 3]
-            .into_iter()
-            .any(|value| slider.range.supports(value))
-    {
-        return frequency_row(panel, ix, cx, pal);
+    if let Some(choices) = choices(slider) {
+        return choice_row(panel, ix, choices, cx, pal);
     }
-    if slider.control == CameraControl::LowLightCompensation
-        && slider.range.min == 0
+    if matches!(
+        slider.control,
+        CameraControl::LowLightCompensation | CameraControl::ShowMode
+    ) && slider.range.min == 0
         && slider.range.max == 1
     {
         return binary_control_row(panel, ix, cx, pal);
@@ -197,28 +197,50 @@ pub(super) fn control_row(
     row
 }
 
-fn frequency_row(
+/// The labelled values a control offers as chips instead of a slider, keeping
+/// only the ones the camera supports. `None` for a slider control, or when the
+/// camera supports none of the values.
+fn choices(slider: &ControlSlider) -> Option<Vec<(i32, SharedString)>> {
+    let all: [(i32, SharedString); 3] = match slider.control {
+        CameraControl::PowerLineFrequency => [
+            (1, SharedString::from("50 Hz")),
+            (2, SharedString::from("60 Hz")),
+            (3, tr!("common.auto")),
+        ],
+        // 0 is the widest framing (90° on the Brio 500), 2 the narrowest.
+        CameraControl::FieldOfView => [
+            (0, tr!("camera.field_of_view_wide")),
+            (1, tr!("camera.field_of_view_medium")),
+            (2, tr!("camera.field_of_view_narrow")),
+        ],
+        _ => return None,
+    };
+    let offered: Vec<(i32, SharedString)> = all
+        .into_iter()
+        .filter(|(value, _)| slider.range.supports(*value))
+        .collect();
+    (!offered.is_empty()).then_some(offered)
+}
+
+/// One control line whose values are a few named choices (anti-flicker, field
+/// of view): the label, then one radio chip per choice.
+fn choice_row(
     panel: &CameraControlsPanel,
     ix: usize,
+    choices: Vec<(i32, SharedString)>,
     cx: &Context<CameraControlsPanel>,
     pal: Palette,
 ) -> gpui::Stateful<gpui::Div> {
     let slider = &panel.sliders[ix];
+    let control = slider.control;
     let current = slider.value(cx);
-    let mut choices = h_flex().flex_1().justify_end().gap_1();
-    for (value, id, label) in [
-        (1, 1_u32, SharedString::from("50 Hz")),
-        (2, 2_u32, SharedString::from("60 Hz")),
-        (3, 3_u32, tr!("common.auto")),
-    ]
-    .into_iter()
-    .filter(|(value, _, _)| slider.range.supports(*value))
-    {
+    let mut chips = h_flex().flex_1().justify_end().gap_1();
+    for (choice, (value, label)) in choices.into_iter().enumerate() {
         let active = value == current;
         let accent = rgb(ACCENT_BLUE);
         let accessibility_label = label.clone();
-        choices = choices.child(
-            BaseButton::new(("camera-frequency", id))
+        chips = chips.child(
+            BaseButton::new(("camera-choice", choice))
                 .role(Role::RadioButton)
                 .selected(active)
                 .accessibility_label(accessibility_label)
@@ -252,7 +274,7 @@ fn frequency_row(
                         return;
                     };
                     panel.sliders[ix].seat(value, window, cx);
-                    panel.commit_release(CameraControl::PowerLineFrequency, &uid, &key, value, cx);
+                    panel.commit_release(control, &uid, &key, value, cx);
                 })),
         );
     }
@@ -271,9 +293,11 @@ fn frequency_row(
                 .text_color(pal.text_muted)
                 .child(slider.label.clone()),
         )
-        .child(choices)
+        .child(chips)
 }
 
+/// One on/off control line (low-light compensation, Show Mode): the label,
+/// then a single On/Off chip.
 fn binary_control_row(
     panel: &CameraControlsPanel,
     ix: usize,
@@ -281,6 +305,7 @@ fn binary_control_row(
     pal: Palette,
 ) -> gpui::Stateful<gpui::Div> {
     let slider = &panel.sliders[ix];
+    let control = slider.control;
     let on = slider.value(cx) != 0;
     let accent = rgb(ACCENT_BLUE);
     h_flex()
@@ -299,10 +324,10 @@ fn binary_control_row(
         )
         .child(div().flex_1())
         .child(
-            BaseButton::new("camera-low-light")
+            BaseButton::new(("camera-toggle", ix))
                 .role(Role::CheckBox)
                 .selected(on)
-                .accessibility_label(tr!("camera.low_light_compensation"))
+                .accessibility_label(slider.label.clone())
                 .aria_toggled(if on { Toggled::True } else { Toggled::False })
                 .px_1p5()
                 .py_0p5()
@@ -329,13 +354,7 @@ fn binary_control_row(
                     };
                     let value = i32::from(!on);
                     panel.sliders[ix].seat(value, window, cx);
-                    panel.commit_release(
-                        CameraControl::LowLightCompensation,
-                        &uid,
-                        &key,
-                        value,
-                        cx,
-                    );
+                    panel.commit_release(control, &uid, &key, value, cx);
                 })),
         )
 }
@@ -387,6 +406,8 @@ pub(super) fn control_label(control: CameraControl) -> SharedString {
         CameraControl::Exposure => tr!("camera.exposure"),
         CameraControl::PowerLineFrequency => tr!("camera.anti_flicker"),
         CameraControl::LowLightCompensation => tr!("camera.low_light_compensation"),
+        CameraControl::FieldOfView => tr!("camera.field_of_view"),
+        CameraControl::ShowMode => tr!("camera.show_mode"),
         CameraControl::Brightness => tr!("camera.brightness"),
         CameraControl::Contrast => tr!("camera.contrast"),
         CameraControl::Saturation => tr!("camera.saturation"),

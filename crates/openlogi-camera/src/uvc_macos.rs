@@ -10,8 +10,8 @@
 //! Flow: match the USB device by vendor/product id (disambiguating on the
 //! AVFoundation `unique_id`'s location id when several identical cameras are
 //! attached), open it via the IOKit `IOUSBDeviceInterface` plug-in, parse the
-//! configuration descriptor for the VideoControl interface number and the
-//! Processing-Unit id, then issue UVC `GET_*`/`SET_CUR` requests.
+//! configuration descriptor for the VideoControl topology (see
+//! [`crate::uvc_descriptor`]), then issue UVC `GET_*`/`SET_CUR` requests.
 //!
 //! The IOKit handles themselves live in [`iokit`], which owns every `unsafe`
 //! block in this backend and hands the descriptor up as a plain `&[u8]`.
@@ -30,12 +30,17 @@ use objc2_io_kit::IOUSBDevRequest;
 
 use iokit::{IoObject, SeizedDevice, UsbInterface};
 
+use crate::extension_unit::ExtensionControl;
+use crate::uvc_descriptor::{VcTopology, scan_descriptors};
+
 /// Which UVC entity a control request addresses: the Camera Terminal (lens:
-/// zoom/focus/exposure) or the Processing Unit (image: brightness/…).
+/// zoom/focus/exposure), the Processing Unit (image: brightness/…), or a
+/// vendor Extension Unit (framing: field of view/…).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Unit {
     CameraTerminal,
     Processing,
+    Extension(ExtensionControl),
 }
 
 pub use crate::controls::{
@@ -120,10 +125,18 @@ struct ControlSpec {
 
 impl CameraControl {
     /// UVC entity, control selector (Camera Terminal §A.9.4, Processing Unit
-    /// §A.9.5), and wire payload type for this control.
+    /// §A.9.5, or the vendor's Extension Unit table), and wire payload type for
+    /// this control.
     const fn spec(self) -> ControlSpec {
         use Payload::{I16, PanTilt, U8, U16, U32};
         use Unit::{CameraTerminal, Processing};
+        if let Some(extension) = self.extension() {
+            return ControlSpec {
+                unit: Unit::Extension(extension),
+                selector: extension.selector as u16,
+                payload: U8,
+            };
+        }
         let (unit, selector, payload) = match self {
             Self::Zoom => (CameraTerminal, 0x0B, U16), // CT_ZOOM_ABSOLUTE_CONTROL
             // Both halves of CT_PANTILT_ABSOLUTE_CONTROL.
@@ -142,6 +155,9 @@ impl CameraControl {
             Self::BacklightCompensation => (Processing, 0x01, U16),
             Self::WhiteBalance => (Processing, 0x0A, U16), // PU_WHITE_BALANCE_TEMPERATURE_CONTROL
             Self::Tint => (Processing, 0x06, I16),         // PU_HUE_CONTROL
+            // `extension()` is `Some` for exactly these, so the early return
+            // above already answered them.
+            Self::FieldOfView | Self::ShowMode => unreachable!(),
         };
         ControlSpec {
             unit,
@@ -176,19 +192,14 @@ const UVC_SET_CUR: u8 = 0x01;
 const UVC_GET_CUR: u8 = 0x81;
 const UVC_GET_MIN: u8 = 0x82;
 const UVC_GET_MAX: u8 = 0x83;
+const UVC_GET_LEN: u8 = 0x85;
+const UVC_GET_INFO: u8 = 0x86;
 const UVC_GET_DEF: u8 = 0x87;
+/// `GET_INFO` bits: the control answers `GET_*` and accepts `SET_CUR`.
+const INFO_GET_SET: u8 = 0x03;
 // bmRequestType: class request to an interface recipient. Bit 7 = data direction.
 const RT_GET: u8 = 0xA1; // device-to-host | class | interface
 const RT_SET: u8 = 0x21; // host-to-device | class | interface
-
-const CC_VIDEO: u8 = 0x0E;
-const SC_VIDEOCONTROL: u8 = 0x01;
-const DESC_INTERFACE: u8 = 0x04;
-const DESC_CS_INTERFACE: u8 = 0x24;
-const VC_INPUT_TERMINAL: u8 = 0x02;
-const VC_PROCESSING_UNIT: u8 = 0x05;
-/// wTerminalType for a camera sensor input terminal (ITT_CAMERA).
-const ITT_CAMERA: u16 = 0x0201;
 
 // UVC AE-mode bitmap bits (CT_AE_MODE_CONTROL): everything except fully
 // manual counts as "auto" for the toggle.
@@ -377,12 +388,7 @@ fn registry_location_and_serial(
 /// released when [`iokit::SeizedDevice`] drops.
 struct UsbDevice {
     device: SeizedDevice,
-    vc_interface: u8,
-    /// Processing-Unit id (image controls).
-    unit_id: u8,
-    /// Camera (input) Terminal id (lens controls); `None` when the descriptor
-    /// lists no camera terminal — lens controls then report `Unsupported`.
-    terminal_id: Option<u8>,
+    topology: VcTopology,
 }
 
 impl UsbDevice {
@@ -443,29 +449,56 @@ impl UsbDevice {
         let device = interface.seize()?;
         let topology = video_control_topology(&device)?;
         Some(Opened {
-            device: Self {
-                device,
-                vc_interface: topology.vc_interface,
-                unit_id: topology.processing_unit,
-                terminal_id: topology.camera_terminal,
-            },
+            device: Self { device, topology },
             matched_location,
         })
     }
 
     /// The entity id addressed for `unit`, or `Unsupported` when the camera's
-    /// descriptor lists no camera terminal.
+    /// descriptor lists no camera terminal, or no Extension Unit that carries
+    /// the control.
     fn entity(&self, unit: Unit) -> Result<u8, ControlError> {
         match unit {
-            Unit::Processing => Ok(self.unit_id),
-            Unit::CameraTerminal => self.terminal_id.ok_or(ControlError::Unsupported),
+            Unit::Processing => Ok(self.topology.processing_unit),
+            Unit::CameraTerminal => self
+                .topology
+                .camera_terminal
+                .ok_or(ControlError::Unsupported),
+            Unit::Extension(extension) => self
+                .topology
+                .extension_unit(extension)
+                .ok_or(ControlError::Unsupported),
         }
+    }
+
+    /// Read a vendor control's range. The camera must report the one-byte,
+    /// readable and writable control the table describes; its MIN/MAX are not
+    /// asked, because the table owns the value set.
+    fn extension_range(
+        &self,
+        control: CameraControl,
+        extension: ExtensionControl,
+    ) -> Result<ControlRange, ControlError> {
+        let entity = self.entity(Unit::Extension(extension))?;
+        let selector = u16::from(extension.selector);
+        let mut len = [0u8; 2];
+        self.transfer(RT_GET, UVC_GET_LEN, selector, entity, &mut len)?;
+        let mut info = [0u8; 1];
+        self.transfer(RT_GET, UVC_GET_INFO, selector, entity, &mut info)?;
+        if u16::from_le_bytes(len) != 1 || info[0] & INFO_GET_SET != INFO_GET_SET {
+            return Err(ControlError::Unsupported);
+        }
+        let current = self.get(control, UVC_GET_CUR)?;
+        extension.range(u8::try_from(current).map_err(|_| ControlError::Unsupported)?)
     }
 
     /// Read one control's complete range. Boolean AE priority controls need
     /// synthetic bounds because UVC cameras commonly implement only GET_CUR;
     /// without GET_DEF, the live value is the only safe reset target.
     fn range(&self, control: CameraControl) -> Result<ControlRange, ControlError> {
+        if let Some(extension) = control.extension() {
+            return self.extension_range(control, extension);
+        }
         if control == CameraControl::LowLightCompensation {
             let current = self.get(control, UVC_GET_CUR)?;
             return Ok(ControlRange {
@@ -518,6 +551,10 @@ impl UsbDevice {
             payload,
         } = control.spec();
         let entity = self.entity(unit)?;
+        if let Unit::Extension(extension) = unit {
+            let mut buf = [extension.encode(value)?];
+            return self.transfer(RT_SET, UVC_SET_CUR, selector, entity, &mut buf);
+        }
         if let Payload::PanTilt(axis) = payload {
             // The two axes share one control, so a write must carry both words:
             // read the live pair, replace this axis, send it back. A failed read
@@ -584,7 +621,7 @@ impl UsbDevice {
             bmRequestType: request_type,
             bRequest: request,
             wValue: selector << 8,
-            wIndex: (u16::from(entity) << 8) | u16::from(self.vc_interface),
+            wIndex: (u16::from(entity) << 8) | u16::from(self.topology.vc_interface),
             #[expect(
                 clippy::cast_possible_truncation,
                 reason = "`data` is a UVC control payload — at most the 4 bytes a `ControlSpec` declares"
@@ -614,99 +651,18 @@ impl Opened {
     }
 }
 
-/// The VideoControl entities a control request can address, parsed from the
-/// configuration descriptor.
-#[derive(Debug, PartialEq, Eq)]
-struct VcTopology {
-    vc_interface: u8,
-    processing_unit: u8,
-    camera_terminal: Option<u8>,
-}
-
-/// Parse the device's configuration descriptors for the VideoControl interface
-/// number, the Processing-Unit id, and the camera (input) terminal id.
+/// Parse the device's configuration descriptors for its VideoControl topology.
 fn video_control_topology(device: &SeizedDevice) -> Option<VcTopology> {
     (0..device.configuration_count()?)
         .filter_map(|index| device.configuration_descriptor(index))
         .find_map(scan_descriptors)
 }
 
-/// The VideoControl interface the descriptor walk is currently inside, and the
-/// entities seen in it so far.
-///
-/// A class-specific descriptor belongs to the interface it follows, so this is
-/// dropped on leaving the block: VideoStreaming reuses descriptor type `0x24`
-/// with its own subtype numbering, in which `0x05` is a frame descriptor rather
-/// than a Processing Unit and `0x02` an output header rather than an input
-/// terminal. Tracking the block — instead of a bare "have we seen a
-/// VideoControl interface" flag — is what keeps a frame index from being read
-/// as a Processing-Unit id on a camera whose VideoControl block has none.
-struct VcBlock {
-    interface: u8,
-    camera_terminal: Option<u8>,
-}
-
-/// Walk a configuration-descriptor blob, collecting the first VideoControl
-/// interface's Processing-Unit and camera-terminal entity ids.
-///
-/// The walk stops at the first descriptor whose `bLength` is nonsense or would
-/// run past the blob, so a malformed descriptor truncates the scan rather than
-/// misreading the bytes after it.
-fn scan_descriptors(blob: &[u8]) -> Option<VcTopology> {
-    let mut rest = blob;
-    let mut block: Option<VcBlock> = None;
-    while rest.len() >= 2 {
-        let len = usize::from(rest[0]);
-        let dtype = rest[1];
-        if len < 2 || len > rest.len() {
-            break;
-        }
-        let (descriptor, tail) = rest.split_at(len);
-        rest = tail;
-
-        if dtype == DESC_INTERFACE {
-            // bInterfaceNumber, bInterfaceClass and bInterfaceSubClass sit at
-            // offsets 2, 5 and 6 of an interface descriptor.
-            block = match (descriptor.get(2), descriptor.get(5), descriptor.get(6)) {
-                (Some(&interface), Some(&class), Some(&subclass))
-                    if class == CC_VIDEO && subclass == SC_VIDEOCONTROL =>
-                {
-                    Some(VcBlock {
-                        interface,
-                        camera_terminal: None,
-                    })
-                }
-                _ => None,
-            };
-        } else if dtype == DESC_CS_INTERFACE
-            && let Some(block) = block.as_mut()
-            && let (Some(&subtype), Some(&entity)) = (descriptor.get(2), descriptor.get(3))
-        {
-            // bUnitID / bTerminalID sit at offset 3 in both descriptors; an
-            // input terminal's wTerminalType (offsets 4..6) must be the camera
-            // sensor — skip composite/other input terminals.
-            if subtype == VC_INPUT_TERMINAL && descriptor.len() >= 8 {
-                let terminal_type = u16::from(descriptor[4]) | (u16::from(descriptor[5]) << 8);
-                if terminal_type == ITT_CAMERA && block.camera_terminal.is_none() {
-                    block.camera_terminal = Some(entity);
-                }
-            } else if subtype == VC_PROCESSING_UNIT {
-                return Some(VcTopology {
-                    vc_interface: block.interface,
-                    processing_unit: entity,
-                    camera_terminal: block.camera_terminal,
-                });
-            }
-        }
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        Axis, CameraControl, ITT_CAMERA, PAN_TILT_LEN, Payload, Unit, VcTopology, location_hint,
-        pan_tilt_half, patch_pan_tilt, scan_descriptors,
+        Axis, CameraControl, PAN_TILT_LEN, Payload, Unit, location_hint, pan_tilt_half,
+        patch_pan_tilt,
     };
 
     /// `dwPanAbsolute` = 1, `dwTiltAbsolute` = 2.
@@ -816,109 +772,5 @@ mod tests {
         assert_eq!(location_hint("0x46d0893"), None);
         assert_eq!(location_hint("46d0893"), None);
         assert_eq!(location_hint(""), None);
-    }
-
-    /// A 9-byte interface descriptor with the given number/class/subclass.
-    fn interface(number: u8, class: u8, subclass: u8) -> Vec<u8> {
-        vec![9, 0x04, number, 0, 0, class, subclass, 0, 0]
-    }
-
-    /// An 8-byte VC_INPUT_TERMINAL descriptor for `entity`.
-    fn input_terminal(entity: u8, terminal_type: u16) -> Vec<u8> {
-        let [type_lo, type_hi] = terminal_type.to_le_bytes();
-        vec![8, 0x24, 0x02, entity, type_lo, type_hi, 0, 0]
-    }
-
-    /// A minimal VC_PROCESSING_UNIT descriptor for `entity`.
-    fn processing_unit(entity: u8) -> Vec<u8> {
-        vec![4, 0x24, 0x05, entity]
-    }
-
-    #[test]
-    fn finds_the_processing_unit_behind_a_videocontrol_interface() {
-        let blob: Vec<u8> = [
-            vec![9, 0x02, 0, 0, 0, 0, 0, 0, 0], // configuration header
-            interface(3, 0x0E, 0x01),           // VideoControl
-            input_terminal(1, ITT_CAMERA),
-            processing_unit(2),
-        ]
-        .concat();
-        assert_eq!(
-            scan_descriptors(&blob),
-            Some(VcTopology {
-                vc_interface: 3,
-                processing_unit: 2,
-                camera_terminal: Some(1),
-            })
-        );
-    }
-
-    /// Composite/other input terminals are not the camera sensor, so lens
-    /// controls must report unsupported rather than address the wrong entity.
-    #[test]
-    fn a_non_camera_input_terminal_leaves_lens_controls_unsupported() {
-        let blob: Vec<u8> = [
-            interface(0, 0x0E, 0x01),
-            input_terminal(1, 0x0401), // ITT_MEDIA_TRANSPORT_INPUT
-            processing_unit(5),
-        ]
-        .concat();
-        assert_eq!(
-            scan_descriptors(&blob),
-            Some(VcTopology {
-                vc_interface: 0,
-                processing_unit: 5,
-                camera_terminal: None,
-            })
-        );
-    }
-
-    /// Class-specific descriptors before any VideoControl interface belong to
-    /// some other function and must not be read as UVC entities.
-    #[test]
-    fn class_descriptors_outside_a_videocontrol_interface_are_ignored() {
-        let blob: Vec<u8> = [
-            interface(0, 0x01, 0x01), // audio
-            processing_unit(9),
-        ]
-        .concat();
-        assert_eq!(scan_descriptors(&blob), None);
-    }
-
-    /// …and neither do the ones *after* it. VideoStreaming reuses descriptor
-    /// type 0x24 with its own subtype numbering, where 0x05 is
-    /// VS_FRAME_UNCOMPRESSED rather than VC_PROCESSING_UNIT. A camera whose
-    /// VideoControl block has no Processing Unit must report none, not the
-    /// first frame descriptor's bFrameIndex — which would send every image
-    /// control to whatever entity happens to share that id.
-    #[test]
-    fn a_videostreaming_frame_descriptor_is_not_a_processing_unit() {
-        // A real VS_FRAME_UNCOMPRESSED: 30 bytes, descriptor type 0x24 like a
-        // VideoControl unit, subtype 0x05, and bFrameIndex sitting exactly
-        // where a unit keeps its bUnitID.
-        let mut vs_frame = vec![0u8; 30];
-        vs_frame[0] = 30;
-        vs_frame[1] = 0x24;
-        vs_frame[2] = 0x05;
-        vs_frame[3] = 1;
-        let blob: Vec<u8> = [
-            interface(0, 0x0E, 0x01), // VideoControl — no processing unit
-            input_terminal(1, ITT_CAMERA),
-            interface(1, 0x0E, 0x02), // VideoStreaming
-            vs_frame,
-        ]
-        .concat();
-        assert_eq!(scan_descriptors(&blob), None);
-    }
-
-    /// A descriptor whose bLength overruns the blob truncates the walk instead
-    /// of reading past it — and a zero length must not loop forever.
-    #[test]
-    fn malformed_lengths_stop_the_walk() {
-        let overrun: Vec<u8> = [interface(0, 0x0E, 0x01), vec![64, 0x24, 0x05, 7]].concat();
-        assert_eq!(scan_descriptors(&overrun), None);
-
-        let zero_length: Vec<u8> = [interface(0, 0x0E, 0x01), vec![0, 0x24]].concat();
-        assert_eq!(scan_descriptors(&zero_length), None);
     }
 }

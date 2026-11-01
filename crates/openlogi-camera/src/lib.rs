@@ -62,6 +62,11 @@ pub use capture_macos::{
     request_camera_access, start_stream, stream_modes,
 };
 
+#[cfg(any(test, target_os = "macos", target_os = "windows", target_os = "linux"))]
+mod extension_unit;
+#[cfg(any(test, target_os = "macos", target_os = "linux"))]
+mod uvc_descriptor;
+
 #[cfg(target_os = "windows")]
 mod com_windows;
 
