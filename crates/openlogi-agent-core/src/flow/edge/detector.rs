@@ -209,6 +209,26 @@ impl EdgeDetector {
         self.contact = None;
     }
 
+    /// When a sample at the cursor's current position could next report the
+    /// contact in progress: the later of its dwell's end and the cooldown's.
+    ///
+    /// A cursor resting on an edge produces no motion, so a caller that
+    /// samples on motion must also sample at this time. `None` while no
+    /// contact is in progress or the detector is latched.
+    #[must_use]
+    pub fn dwell_deadline(&self) -> Option<Duration> {
+        if self.latched {
+            return None;
+        }
+        let dwell = self
+            .contact?
+            .started_at
+            .saturating_add(self.params.dwell_time);
+        Some(self.last_crossing.map_or(dwell, |last_crossing| {
+            dwell.max(last_crossing.saturating_add(self.params.cooldown))
+        }))
+    }
+
     /// Consume one cursor sample and return at most one crossing.
     ///
     /// At a corner, an existing contact remains selected. A new contact chooses

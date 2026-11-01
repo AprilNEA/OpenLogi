@@ -3,7 +3,9 @@
 //! The OS hook callback must never wait, so it only marks the pointer as
 //! moved and wakes this thread through a [`PointerWaker`]. The thread then
 //! reads one pointer state per wake, feeds the edge detector, and reports each
-//! crossing to the Flow runtime without waiting for it. Every
+//! crossing to the Flow runtime without waiting for it. A cursor resting on
+//! an edge sends no motion, so the thread also wakes itself when a pending
+//! dwell is due. Every
 //! [`GEOMETRY_REFRESH`] it reads the display layout again and replaces the
 //! edges only when the layout changed. It also places the cursor when a
 //! handoff arrives, so one thread reads and moves the cursor in one coordinate
@@ -212,7 +214,10 @@ fn run<P: Pointer>(
         }
         let now = epoch.elapsed();
         state.refresh(now);
-        if moved.swap(false, Ordering::AcqRel)
+        // A cursor resting on an edge sends no motion, so a due dwell is
+        // sampled without one.
+        let dwell_due = state.dwell_deadline().is_some_and(|due| due <= now);
+        if (moved.swap(false, Ordering::AcqRel) || dwell_due)
             && let Some(crossing) = state.sample(now)
             && crossings.try_send(crossing).is_err()
         {
@@ -220,7 +225,11 @@ fn run<P: Pointer>(
         }
         // A wake that lands between the swap and the park leaves a token, so
         // the park returns at once.
-        thread::park_timeout(state.next_refresh().saturating_sub(epoch.elapsed()));
+        let next_refresh = state.next_refresh();
+        let wake_at = state
+            .dwell_deadline()
+            .map_or(next_refresh, |due| due.min(next_refresh));
+        thread::park_timeout(wake_at.saturating_sub(epoch.elapsed()));
     }
 }
 
@@ -262,6 +271,11 @@ impl<P: Pointer> PointerLoop<P> {
         self.next_refresh
     }
 
+    /// When the detector's contact in progress is next due a sample.
+    fn dwell_deadline(&self) -> Option<Duration> {
+        self.detector.dwell_deadline()
+    }
+
     /// Read the display layout again when the refresh is due.
     fn refresh(&mut self, now: Duration) {
         if now < self.next_refresh {
@@ -283,7 +297,12 @@ impl<P: Pointer> PointerLoop<P> {
         if self.settings.sides == ArmedSides::NONE {
             return None;
         }
-        let state = self.pointer.state()?;
+        let Some(state) = self.pointer.state() else {
+            // Without a position the approach cannot continue, and a pending
+            // dwell must not keep the thread waking for it.
+            self.detector.set_edges(self.edges.clone());
+            return None;
+        };
         let open = !self.settings.require_modifier || state.modifiers.control;
         let was_open = std::mem::replace(&mut self.gate_open, open);
         if !open {

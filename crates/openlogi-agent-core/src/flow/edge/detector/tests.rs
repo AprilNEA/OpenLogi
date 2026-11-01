@@ -479,3 +479,38 @@ fn the_point_where_an_exposed_edge_meets_a_display_does_not_cross() {
         .expect("the exposed part of the edge crosses");
     assert_eq!(crossing.side, EdgeSide::Right);
 }
+
+#[test]
+fn dwell_deadline_names_when_a_resting_cursor_can_cross() {
+    let edges = ExposedEdges::from_displays(&[rect(0.0, 0.0, 100.0, 100.0)]);
+    let mut detector = EdgeDetector::new(edges, ArmedSides::ALL, dwell_params());
+    assert_eq!(detector.dwell_deadline(), None, "no contact yet");
+
+    assert!(detector.update(point(0.0, 50.0), Duration::ZERO).is_none());
+    assert_eq!(detector.dwell_deadline(), Some(Duration::from_millis(100)));
+    assert!(
+        detector
+            .update(point(0.0, 50.0), Duration::from_millis(100))
+            .is_some()
+    );
+    assert_eq!(detector.dwell_deadline(), None, "latched");
+
+    // Re-armed and back on the edge at 350 ms: the dwell ends at 450 ms, but
+    // the cooldown from the crossing at 100 ms runs to 600 ms.
+    assert!(
+        detector
+            .update(point(20.0, 50.0), Duration::from_millis(300))
+            .is_none()
+    );
+    assert!(
+        detector
+            .update(point(0.0, 50.0), Duration::from_millis(350))
+            .is_none()
+    );
+    assert_eq!(detector.dwell_deadline(), Some(Duration::from_millis(600)));
+    assert!(
+        detector
+            .update(point(0.0, 50.0), Duration::from_millis(600))
+            .is_some()
+    );
+}

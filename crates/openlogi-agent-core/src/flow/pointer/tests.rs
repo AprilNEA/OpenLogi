@@ -281,6 +281,38 @@ fn the_thread_reports_a_dwell_crossing_and_stops_on_request() {
     );
 }
 
+/// A slow approach that stops on the edge sends no more motion, so the
+/// thread itself must look again once the dwell is due.
+#[test]
+fn a_cursor_resting_on_the_edge_crosses_after_one_wake() {
+    let fake = Fake::with_displays(ONE_DISPLAY);
+    fake.at(99.5, 50.0, false);
+    let (sender, mut crossings) = mpsc::channel(1);
+    let connect = {
+        let fake = fake.clone();
+        move || Some(fake)
+    };
+    let thread = PointerThread::spawn_with(connect, sender).expect("spawn the pointer thread");
+    thread.configure(right_edge(false));
+    // Let the thread take the settings before the one motion it sees.
+    std::thread::sleep(ms(100));
+    thread.waker().moved();
+
+    let started = Instant::now();
+    let crossing = loop {
+        if let Ok(crossing) = crossings.try_recv() {
+            break crossing;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "no crossing after a 250 ms dwell without further motion"
+        );
+        std::thread::sleep(ms(10));
+    };
+    assert_eq!(crossing.side, EdgeSide::Right);
+    thread.stop();
+}
+
 #[test]
 fn a_thread_without_a_pointer_exits_and_ignores_commands() {
     let (sender, _crossings) = mpsc::channel(1);
