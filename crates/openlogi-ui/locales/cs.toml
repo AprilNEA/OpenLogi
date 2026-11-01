@@ -504,6 +504,7 @@ open_named_target = "Otevřít %{name}"
 [pairing]
 choose_receiver = "Vyberte přijímač"
 choose_receiver_hint = "Přepněte zařízení do režimu párování a pak vyberte jeho přijímač Bolt nebo Unifying, aby začalo hledání."
+pair_a_device = "Spárovat zařízení"
 connect_receiver = "Pro spárování zařízení připojte přijímač Bolt nebo Unifying."
 receiver_unavailable = "%{name} se zatím nepodařilo rozpoznat. OpenLogi to automaticky zkusí znovu."
 change_receiver = "Změnit přijímač"

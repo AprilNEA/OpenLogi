@@ -1,4 +1,4 @@
-use gpui::{AppContext as _, AssetSource, Modifiers, TestAppContext};
+use gpui::{AppContext as _, AssetSource, Bounds, Modifiers, TestAppContext, point, size};
 use openlogi_core::config::Config;
 use openlogi_core::device::DeviceInventory;
 use openlogi_ipc::{AgentSnapshot, AgentStatus, ForegroundApps, InventoryHealth, PROTOCOL_VERSION};
@@ -366,6 +366,56 @@ fn opening_waits_for_a_receiver_choice(cx: &mut TestAppContext) {
     assert!(
         commands.try_recv().is_err(),
         "opening Add Device must not pair on the first enumerated receiver"
+    );
+}
+
+#[gpui::test]
+fn cancel_stays_in_the_bottom_bar_below_a_long_device_list(cx: &mut TestAppContext) {
+    cx.update(gpui_component::init);
+    cx.update(theme::register_builtin_themes);
+    let mut commands = cx.update(install_state);
+    let devices = (0..12u8)
+        .map(|n| FoundDevice {
+            address: [0, 0, 0, 0, 0, n],
+            name: format!("Keyboard {n}"),
+        })
+        .collect();
+    cx.update(|cx| apply_state(cx, Some(PairingPhase::Found(devices))));
+    let (_, cx) = cx.add_window_view(AddDeviceView::new);
+    let viewport = Bounds::new(point(px(0.), px(0.)), size(px(520.), px(400.)));
+    cx.simulate_resize(viewport.size);
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+
+    let cancel = cx
+        .debug_bounds("pairing-cancel")
+        .expect("a running search offers Cancel");
+    assert!(
+        viewport.contains(&cancel.origin) && viewport.contains(&cancel.bottom_right()),
+        "the list must scroll above Cancel, not push it off {viewport:?}: {cancel:?}"
+    );
+    assert!(
+        cancel.left() > viewport.center().x && cancel.size.width < viewport.size.width / 4.,
+        "Cancel is a right-aligned secondary button, not a full-width bar: {cancel:?}"
+    );
+    cx.simulate_click(cancel.center(), Modifiers::default());
+    assert!(matches!(commands.try_recv(), Ok(Command::CancelPairing(_))));
+}
+
+#[gpui::test]
+fn cancel_before_choosing_a_receiver_closes_the_window(cx: &mut TestAppContext) {
+    cx.update(gpui_component::init);
+    cx.update(theme::register_builtin_themes);
+    let mut commands = cx.update(install_state);
+    let (_, visual) = cx.add_window_view(AddDeviceView::new);
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    let cancel = visual
+        .debug_bounds("pairing-cancel")
+        .expect("the receiver picker offers Cancel");
+    visual.simulate_click(cancel.center(), Modifiers::default());
+    assert!(cx.windows().is_empty(), "Cancel closes the picker's window");
+    assert!(
+        commands.try_recv().is_err(),
+        "with no session there is nothing for the agent to cancel"
     );
 }
 

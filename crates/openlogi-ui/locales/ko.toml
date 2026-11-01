@@ -504,6 +504,7 @@ open_named_target = "%{name} 열기"
 [pairing]
 choose_receiver = "Choose a receiver"
 choose_receiver_hint = "Put the device in pairing mode, then choose its Bolt or Unifying receiver to start searching."
+pair_a_device = "기기 페어링"
 connect_receiver = "Connect a Bolt or Unifying receiver to pair a device."
 receiver_unavailable = "%{name} could not be identified yet. OpenLogi will retry automatically."
 change_receiver = "Change receiver"
