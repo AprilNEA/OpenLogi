@@ -126,7 +126,9 @@ fn online_candidates(inventory: &DeviceInventory) -> Vec<Candidate> {
 /// When several names contain it, the one whose whole name equals `query`
 /// wins, so "MX Master 3S" still picks that mouse beside an "MX Master 3S for
 /// Mac". Any other ambiguity is an error that lists the matches: a diag that
-/// writes to a device must not pick one of them by enumeration order.
+/// writes to a device must not pick one of them by enumeration order. So is a
+/// chosen route that another online device shares: two Bluetooth-direct
+/// devices with one vendor/product id have one route, whatever their names.
 fn select_named_device(devices: &[Candidate], query: &str) -> Result<(DeviceRoute, String)> {
     let needle = query.to_lowercase();
     let matches: Vec<&Candidate> = devices
@@ -144,15 +146,29 @@ fn select_named_device(devices: &[Candidate], query: &str) -> Result<(DeviceRout
             }
         }
     };
+    let sharing: Vec<&Candidate> = devices.iter().filter(|c| c.route == chosen.route).collect();
+    if sharing.len() > 1 {
+        let list = candidate_list(&sharing);
+        return Err(anyhow!(
+            "several online devices share the route {}:\n{list}\n  \
+             it cannot address `{}` alone; no operation was attempted.",
+            chosen.route,
+            chosen.name
+        ));
+    }
     Ok((chosen.route.clone(), chosen.name.clone()))
 }
 
-fn ambiguous_err(matches: &[&Candidate], query: &str) -> anyhow::Error {
-    let list = matches
+fn candidate_list(candidates: &[&Candidate]) -> String {
+    candidates
         .iter()
         .map(|c| format!("    - {} ({})", c.name, c.route))
         .collect::<Vec<_>>()
-        .join("\n");
+        .join("\n")
+}
+
+fn ambiguous_err(matches: &[&Candidate], query: &str) -> anyhow::Error {
+    let list = candidate_list(matches);
     anyhow!(
         "several online devices match `--device {query}`:\n{list}\n  \
          pass a longer or exact name to choose one."
@@ -252,11 +268,11 @@ mod tests {
         Candidate, no_match_err, online_candidates, select_inventory_device, select_named_device,
     };
 
-    fn candidate(name: &str) -> Candidate {
+    fn candidate(name: &str, product_id: u16) -> Candidate {
         Candidate {
             route: DeviceRoute::Direct {
                 vendor_id: 0x046d,
-                product_id: 0xc539,
+                product_id,
             },
             name: name.to_string(),
         }
@@ -283,7 +299,10 @@ mod tests {
 
     #[test]
     fn unmatched_query_names_the_query_and_lists_online_devices() {
-        let devices = vec![candidate("MX Master 3S"), candidate("G Pro")];
+        let devices = vec![
+            candidate("MX Master 3S", 0xb034),
+            candidate("G Pro", 0xc094),
+        ];
         let err = no_match_err(&devices, Some("keyboard")).to_string();
 
         assert!(err.contains("no online device matches `--device keyboard`"));
@@ -293,7 +312,7 @@ mod tests {
 
     #[test]
     fn no_query_suggests_the_device_flag_and_lists_online_devices() {
-        let devices = vec![candidate("MX Master 3S")];
+        let devices = vec![candidate("MX Master 3S", 0xb034)];
         let err = no_match_err(&devices, None).to_string();
 
         assert!(err.contains("could not pick a device automatically"));
@@ -303,7 +322,10 @@ mod tests {
 
     #[test]
     fn ambiguous_query_is_refused_and_lists_the_matches() {
-        let devices = vec![candidate("MX Master 3S"), candidate("MX Mechanical")];
+        let devices = vec![
+            candidate("MX Master 3S", 0xb034),
+            candidate("MX Mechanical", 0xb366),
+        ];
 
         let err = select_named_device(&devices, "mx")
             .expect_err("two substring matches must be refused")
@@ -316,7 +338,10 @@ mod tests {
 
     #[test]
     fn a_unique_exact_name_wins_over_longer_matches() {
-        let devices = vec![candidate("MX Master 3S for Mac"), candidate("MX Master 3S")];
+        let devices = vec![
+            candidate("MX Master 3S for Mac", 0xb043),
+            candidate("MX Master 3S", 0xb034),
+        ];
 
         let (_, name) =
             select_named_device(&devices, "mx master 3s").expect("the exact name is chosen");
@@ -326,10 +351,34 @@ mod tests {
 
     #[test]
     fn identical_names_stay_ambiguous() {
-        let devices = vec![candidate("MX Master 3S"), candidate("MX Master 3S")];
+        let devices = vec![
+            candidate("MX Master 3S", 0xb034),
+            candidate("MX Master 3S", 0xb043),
+        ];
 
         select_named_device(&devices, "MX Master 3S")
             .expect_err("two devices with one name must be refused");
+    }
+
+    #[test]
+    fn a_unique_name_on_a_shared_route_is_refused() {
+        // Two Bluetooth-direct devices with one vendor/product id share a
+        // route, so the agent could act on either of them.
+        let devices = vec![
+            candidate("MX Master 3S", 0xb034),
+            candidate("MX Master 3S (work)", 0xb034),
+            candidate("G Pro", 0xc094),
+        ];
+
+        let err = select_named_device(&devices, "(work)")
+            .expect_err("a route two devices share must be refused")
+            .to_string();
+
+        assert!(err.contains("several online devices share the route"));
+        assert!(err.contains("MX Master 3S (work)"));
+        assert!(!err.contains("G Pro"));
+        let (_, name) = select_named_device(&devices, "g pro").expect("a route of its own");
+        assert_eq!(name, "G Pro");
     }
 
     #[test]
