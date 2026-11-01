@@ -348,6 +348,12 @@ smooth_wheel = "Плаўнае кола"
 smooth_wheel_description = "OpenLogi атрымлівае кожны крок кола гэтай мышы і пракручвае плаўна, нават калі «Плаўная пракрутка» выключана."
 smooth_wheel_unsupported = "Гэта прылада не падтрымлівае плаўнае кола."
 smooth_wheel_other_connection = "Гэта прылада падтрымлівае плаўнае кола на іншым падключэнні, але не на гэтым."
+clicks = "Пстрычкі"
+click_debounce = "Ігнараваць дрыжанне кантактаў"
+click_debounce_description = "Для зношанай кнопкі, якая ператварае адну пстрычку ў дзве. OpenLogi ігнаруе націск, які прыходзіць так хутка пасля адпускання."
+click_debounce_window = "Акно"
+click_debounce_window_description = "Даўжэйшае акно адсейвае больш дрыжання, але можа прапусціць вельмі хуткую падвойную пстрычку."
+click_debounce_ms = "%{ms} ms"
 smartshift = "SmartShift"
 
 [actions]

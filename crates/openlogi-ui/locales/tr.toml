@@ -348,6 +348,12 @@ smooth_wheel = "Yumuşak tekerlek"
 smooth_wheel_description = "OpenLogi bu farenin tekerleğinin her adımını alır ve Yumuşak kaydırma kapalı olsa bile yumuşak kaydırır."
 smooth_wheel_unsupported = "Bu cihaz yumuşak tekerleği desteklemiyor."
 smooth_wheel_other_connection = "Bu cihaz diğer bağlantısında yumuşak tekerleği destekliyor, ancak bu bağlantıda desteklemiyor."
+clicks = "Tıklamalar"
+click_debounce = "Düğme sıçramasını yoksay"
+click_debounce_description = "Tek tıklamayı ikiye çeviren yıpranmış bir düğme için. OpenLogi, bırakmadan bu kadar kısa süre sonra gelen basışı yoksayar."
+click_debounce_window = "Pencere"
+click_debounce_window_description = "Daha uzun bir pencere daha fazla sıçramayı yakalar ancak çok hızlı bir çift tıklamayı yutabilir."
+click_debounce_ms = "%{ms} ms"
 smartshift = "SmartShift"
 
 [actions]

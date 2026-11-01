@@ -348,6 +348,12 @@ smooth_wheel = "Rueda suave"
 smooth_wheel_description = "OpenLogi recibe cada paso de la rueda de este ratón y desplaza con suavidad, incluso con Desplazamiento suave desactivado."
 smooth_wheel_unsupported = "Este dispositivo no admite la rueda suave."
 smooth_wheel_other_connection = "Este dispositivo admite la rueda suave en su otra conexión, pero no en esta."
+clicks = "Clics"
+click_debounce = "Ignorar rebotes del botón"
+click_debounce_description = "Para un botón desgastado que convierte un clic en dos. OpenLogi ignora una pulsación que llega tan poco después de soltarlo."
+click_debounce_window = "Intervalo"
+click_debounce_window_description = "Un intervalo más largo filtra más rebotes, pero puede ignorar un doble clic muy rápido."
+click_debounce_ms = "%{ms} ms"
 smartshift = "SmartShift"
 
 [actions]

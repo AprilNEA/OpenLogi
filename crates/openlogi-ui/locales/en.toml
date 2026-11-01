@@ -348,6 +348,12 @@ smooth_wheel = "Smooth wheel"
 smooth_wheel_description = "OpenLogi receives every step of this mouse's wheel and scrolls it smoothly, even with Smooth scrolling turned off."
 smooth_wheel_unsupported = "This device does not support a smooth wheel."
 smooth_wheel_other_connection = "This device supports a smooth wheel on its other connection, but not this one."
+clicks = "Clicks"
+click_debounce = "Ignore switch bounce"
+click_debounce_description = "For a worn button that turns one click into two. OpenLogi ignores a press that comes this soon after the release."
+click_debounce_window = "Window"
+click_debounce_window_description = "A longer window catches more bounce but can swallow a very fast double-click."
+click_debounce_ms = "%{ms} ms"
 smartshift = "SmartShift"
 
 [actions]

@@ -467,6 +467,62 @@ impl From<ThumbwheelSensitivity> for i32 {
     }
 }
 
+const CLICK_DEBOUNCE_MIN_MS: u8 = 10;
+const CLICK_DEBOUNCE_MAX_MS: u8 = 100;
+const CLICK_DEBOUNCE_DEFAULT_MS: u8 = 30;
+
+/// The shortest gap, in milliseconds, between a button's release and its next
+/// press that a device's click filter accepts as a new click (#2182).
+///
+/// A worn switch bounces: one physical click reaches the host as press,
+/// release, press, release within a few milliseconds, and the OS reads a
+/// double-click. A press that follows the same button's release by less than
+/// this window is that bounce. A deliberate double-click leaves a longer gap,
+/// so the window stays well under the OS double-click interval.
+#[nutype(
+    const_fn,
+    validate(
+        greater_or_equal = CLICK_DEBOUNCE_MIN_MS,
+        less_or_equal = CLICK_DEBOUNCE_MAX_MS
+    ),
+    derive(
+        Debug,
+        Clone,
+        Copy,
+        PartialEq,
+        Eq,
+        PartialOrd,
+        Ord,
+        TryFrom,
+        Into,
+        Display,
+        Serialize,
+        Deserialize
+    )
+)]
+pub struct ClickDebounce(u8);
+
+impl ClickDebounce {
+    /// The window the filter uses when the user turns it on. The bounce
+    /// reported in #2182 settles within 20 ms; this leaves a margin above it.
+    pub const DEFAULT: Self = match Self::try_new(CLICK_DEBOUNCE_DEFAULT_MS) {
+        Ok(value) => value,
+        Err(_) => panic!("valid default click-debounce window"),
+    };
+
+    /// The window as a duration.
+    #[must_use]
+    pub fn duration(self) -> std::time::Duration {
+        std::time::Duration::from_millis(u64::from(self.into_inner()))
+    }
+}
+
+impl Default for ClickDebounce {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
 fn rounded_sensitivity(value: f32) -> u8 {
     let value = if value.is_nan() {
         f32::from(SENSITIVITY_MIN)

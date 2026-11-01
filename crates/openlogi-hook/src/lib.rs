@@ -79,6 +79,14 @@ pub struct EventDevice {
 }
 
 impl EventDevice {
+    /// Whether the platform reported exactly these vendor and product ids for
+    /// the event. An identity without ids matches nothing.
+    #[must_use]
+    pub fn has_ids(&self, vendor_id: u16, product_id: u16) -> bool {
+        self.vendor_id == Some(u32::from(vendor_id))
+            && self.product_id == Some(u32::from(product_id))
+    }
+
     /// Whether this looks like a trackpad/touchpad (must never be remapped).
     #[must_use]
     pub fn is_trackpad_like(&self) -> bool {
@@ -128,6 +136,16 @@ static INVERT_SCROLL: AtomicBool = AtomicBool::new(false);
 /// the configured mouse. Applying it to every wheel event would reverse a
 /// precision touchpad too, which is the one thing this setting must not do.
 pub const SOFTWARE_SCROLL_INVERSION: bool = !cfg!(target_os = "windows");
+
+/// Whether the hook names the device behind each button event, so a
+/// per-device button filter such as click debounce (#2182) can be confined to
+/// the configured mouse.
+///
+/// Windows is `false` for the reason [`SOFTWARE_SCROLL_INVERSION`] is:
+/// `WH_MOUSE_LL` cannot say which device a click came from
+/// ([`MouseEvent::Button`] always carries `device: None` there), so the
+/// filter would reach every mouse and touchpad on the host.
+pub const BUTTON_SOURCES_ATTRIBUTED: bool = !cfg!(target_os = "windows");
 
 /// Turn software scroll inversion on or off for the captured pointers.
 ///

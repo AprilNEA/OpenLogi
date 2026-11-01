@@ -53,7 +53,7 @@ use crate::observable::ObservableState;
 use crate::pointer_speed::{AppWrite, ReloadChange, SavedSpeed, SpeedMouse, SpeedWrite};
 use crate::receiver_access::ReceiverAccess;
 use crate::runtime::PageTurn;
-use crate::runtime::hook::{HookMaps, SharedHookMaps};
+use crate::runtime::hook::{DebouncedSources, HookMaps, InputSource, SharedHookMaps};
 use crate::runtime::scroll::ScrollPreferences;
 use crate::watchers::host_switch::{HostSwitchLink, HostSwitchLinks};
 use crate::watchers::inventory::InventoryRefresh;
@@ -108,9 +108,29 @@ struct AgentDevice {
     codename: Option<String>,
     /// The device's latest battery reading, `None` when it has none.
     battery: Option<BatteryInfo>,
+    /// The ids the OS input hook reports for this device's button events,
+    /// for its click-debounce window (#2182). Empty for a standalone device,
+    /// which has no buttons the hook sees.
+    input_sources: Vec<InputSource>,
 }
 
 impl AgentDevice {
+    /// Whether the OS hook can see button events from this device. Only a
+    /// kind that never points is ruled out, and only when the device reports
+    /// no pointer sensor: a device whose kind HID++ reported wrongly still
+    /// counts (#1699), and so does an unknown one.
+    fn may_send_clicks(&self) -> bool {
+        let never_points = matches!(
+            self.kind,
+            DeviceKind::Keyboard
+                | DeviceKind::Numpad
+                | DeviceKind::Headset
+                | DeviceKind::Camera
+                | DeviceKind::Light
+        );
+        !never_points || self.capabilities.is_some_and(|caps| caps.pointer)
+    }
+
     /// A reload may adopt the remembered route into a physical key without
     /// another inventory pass. Resolve against the supplied config, not the
     /// key cached when this inventory record was built.
@@ -839,6 +859,55 @@ impl Orchestrator {
         }
     }
 
+    /// The input sources whose clicks the OS hook filters (#2182). Every
+    /// online device claims its sources: an enabled device with its
+    /// click-debounce window, and any other device that can click without
+    /// one, so ids it shares with a filtered device stay unfiltered. Empty
+    /// where the hook cannot attribute a button event to a device.
+    fn click_debounce_sources(&self) -> DebouncedSources {
+        if !openlogi_hook::BUTTON_SOURCES_ATTRIBUTED {
+            return DebouncedSources::default();
+        }
+        self.devices
+            .iter()
+            .filter(|device| device.online)
+            .filter_map(|device| {
+                let window = self
+                    .config
+                    .device_enabled(&device.config_key)
+                    .then(|| self.config.click_debounce(&device.config_key))
+                    .flatten();
+                (window.is_some() || device.may_send_clicks()).then_some((device, window))
+            })
+            .flat_map(|(device, window)| {
+                device
+                    .input_sources
+                    .iter()
+                    .map(move |&source| (source, window))
+            })
+            .collect()
+    }
+    /// Publish [`Self::click_debounce_sources`] into the hook maps. The
+    /// inventory fast path calls this on every tick, so the write lock is
+    /// taken only when the sources changed: the hook callback fails open
+    /// while it cannot read the maps.
+    fn publish_click_debounce(&self) {
+        let sources = self.click_debounce_sources();
+        let unchanged = self
+            .shared
+            .hook_maps
+            .read()
+            .is_ok_and(|maps| maps.click_debounce == sources);
+        if unchanged {
+            return;
+        }
+        match self.shared.hook_maps.write() {
+            Ok(mut maps) => maps.click_debounce = sources,
+            Err(error) => {
+                warn!(%error, lock = "hook_maps", "lock poisoned — keeping stale value");
+            }
+        }
+    }
     /// Whether `key` is a G-series mouse: one with a layout, or any other
     /// without ReprogControls. It has no `0x1b04` raw XY, so its gesture
     /// buttons stay with the OS hook.
@@ -863,6 +932,9 @@ impl Orchestrator {
                     std::mem::take(&mut current.thumbwheel_positive_is_forward);
                 maps.shift_held = std::mem::take(&mut current.shift_held);
                 maps.diverted_buttons = std::mem::take(&mut current.diverted_buttons);
+                // Derived from the device set, and refreshed by
+                // `publish_click_debounce` with the rest of the device runtime.
+                maps.click_debounce = std::mem::take(&mut current.click_debounce);
                 *current = maps;
             }
             Err(error) => {
@@ -1056,6 +1128,7 @@ impl Orchestrator {
     /// its DPI-cycle slot.
     fn publish_device_runtime(&self) {
         self.publish_capture_plans();
+        self.publish_click_debounce();
         self.rebuild_dpi_cycles(self.current_key());
         self.publish_pointer_speeds(self.current_key());
         // Keyboard F-key bindings are global (not per-device), so they key off

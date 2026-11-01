@@ -14,6 +14,7 @@ use openlogi_hid::{DIRECT_DEVICE_INDEX, DeviceRoute, Dpi, LeadCookie, ReportRate
 use super::AgentDevice;
 use crate::hardware::WheelModeChange;
 use crate::pointer_speed::SavedSpeed;
+use crate::runtime::hook::InputSource;
 use crate::watchers::host_switch::HostSwitchLink;
 
 /// Resolve the two independently-gated HiResWheel settings for one device
@@ -234,6 +235,7 @@ pub(super) fn build_devices(
                 settings_revision: paired.settings_revision,
                 codename: paired.codename.clone(),
                 battery: paired.battery.clone(),
+                input_sources: InputSource::of_pairing(&inv.receiver, paired.wpid),
             });
         }
     }
@@ -267,6 +269,7 @@ pub(super) fn build_devices(
             // Its name is its display name, and it reports no battery.
             codename: None,
             battery: None,
+            input_sources: Vec::new(),
         });
     }
     // Order by the same canonical key the GUI carousel uses, so the

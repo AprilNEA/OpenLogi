@@ -348,6 +348,12 @@ smooth_wheel = "平滑滾輪"
 smooth_wheel_description = "OpenLogi 接收這隻滑鼠滾輪的每一格並平滑捲動，關閉平滑捲動設定時也有效。"
 smooth_wheel_unsupported = "此裝置不支援平滑滾輪。"
 smooth_wheel_other_connection = "此裝置使用另一種連線時支援平滑滾輪，但目前連線不支援。"
+clicks = "點按"
+click_debounce = "忽略按鍵彈跳"
+click_debounce_description = "用於把一次點按變成兩次的老化按鍵。放開後在這段時間內的按下會被 OpenLogi 忽略。"
+click_debounce_window = "忽略時間"
+click_debounce_window_description = "時間越長，過濾的彈跳越多，但可能吃掉很快的連按兩下。"
+click_debounce_ms = "%{ms} ms"
 smartshift = "SmartShift"
 
 [actions]

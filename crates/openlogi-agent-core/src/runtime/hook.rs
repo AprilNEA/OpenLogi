@@ -3,6 +3,7 @@
 //! Installs the platform hook lazily, reads atomically published button maps,
 //! and converts callback-thread mouse/key input into the shared action runtime.
 
+mod debounce;
 mod diverted;
 
 use std::cell::RefCell;
@@ -25,6 +26,8 @@ use super::button::PressControl;
 use super::scroll::ScrollInputHandle;
 use super::{ActionDispatchTarget, ActionDispatcher, PressToken, log_bound_action};
 use crate::event_monitor::SharedEventMonitor;
+use debounce::ClickDebouncer;
+pub(crate) use debounce::{DebouncedSources, InputSource};
 pub(crate) use diverted::DivertedButtons;
 
 /// The button maps and selected-device thumb-wheel polarity the OS-hook callback
@@ -58,6 +61,12 @@ pub struct HookMaps {
     /// Devices with a G-Shift button held, set by HID++ capture. Survives map
     /// rebuilds like the thumb-wheel polarity.
     pub(crate) shift_held: BTreeSet<String>,
+    /// The input sources of every online, enabled device with a click-debounce
+    /// window (#2182). Unlike the binding maps it covers all devices, not the
+    /// selected one: it filters a hardware fault, which does not follow the
+    /// device the settings window shows. Published with the device runtime,
+    /// so a device that wakes gets its filter back.
+    pub(crate) click_debounce: DebouncedSources,
 }
 
 impl HookMaps {
@@ -205,6 +214,8 @@ thread_local! {
     /// Presses dropped as echoes of a HID++-diverted control. Their release
     /// is dropped too, even if the capture session ends in between.
     static ECHOED_PRESSES: RefCell<HashSet<ButtonId>> = RefCell::new(HashSet::new());
+    /// Click-debounce state of the buttons this thread has seen (#2182).
+    static DEBOUNCE: RefCell<ClickDebouncer> = RefCell::new(ClickDebouncer::default());
     /// Function keys whose held action owns an accepted lifecycle. Repeated
     /// key-down events are auto-repeat, not replacement presses; their first
     /// matching key-up ends the lifecycle.
@@ -268,6 +279,24 @@ fn try_queue_action(
     } else {
         true
     }
+}
+
+/// Drop switch bounce before remapping sees the edge (#2182). Only a known
+/// Logitech, non-trackpad source can be filtered, as only one can be
+/// remapped; [`ClickDebouncer`] then filters only the sources a device with a
+/// window named. Fails open when the maps are being rebuilt.
+fn debounce_button(
+    id: ButtonId,
+    pressed: bool,
+    device: Option<&EventDevice>,
+    hooks: &SharedHookMaps,
+) -> EventDisposition {
+    if !device.is_some_and(|source| source_is_remappable(Some(source))) {
+        return EventDisposition::PassThrough;
+    }
+    let maps = hooks.try_read().ok();
+    let sources = maps.as_deref().map(|maps| &maps.click_debounce);
+    DEBOUNCE.with_borrow_mut(|filter| filter.filter(sources, device, id, pressed, Instant::now()))
 }
 
 /// Remap path for Middle/Back/Forward. Must stay lock-light and non-blocking.
@@ -526,14 +555,21 @@ pub fn start(
                     id,
                     pressed,
                     device,
-                } => handle_button(
-                    id,
-                    pressed,
-                    device.as_ref(),
-                    &hooks,
-                    &dispatcher,
-                    openlogi_hook::frontmost_safari_pid,
-                ),
+                } => {
+                    if debounce_button(id, pressed, device.as_ref(), &hooks)
+                        == EventDisposition::Suppress
+                    {
+                        return EventDisposition::Suppress;
+                    }
+                    handle_button(
+                        id,
+                        pressed,
+                        device.as_ref(),
+                        &hooks,
+                        &dispatcher,
+                        openlogi_hook::frontmost_safari_pid,
+                    )
+                }
                 MouseEvent::Moved { delta_x, delta_y } => {
                     handle_moved(delta_x, delta_y, &hooks, &dispatcher)
                 }

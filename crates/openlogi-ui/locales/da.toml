@@ -348,6 +348,12 @@ smooth_wheel = "Jævnt hjul"
 smooth_wheel_description = "OpenLogi modtager hvert trin fra musens hjul og ruller jævnt, også når Jævn rulning er slået fra."
 smooth_wheel_unsupported = "Denne enhed understøtter ikke jævnt hjul."
 smooth_wheel_other_connection = "Enheden understøtter jævnt hjul via sin anden forbindelse, men ikke denne."
+clicks = "Klik"
+click_debounce = "Ignorer kontaktprel"
+click_debounce_description = "Til en slidt knap, der gør ét klik til to. OpenLogi ignorerer et tryk, der kommer så kort efter, at knappen er sluppet."
+click_debounce_window = "Vindue"
+click_debounce_window_description = "Et længere vindue fanger mere prel, men kan sluge et meget hurtigt dobbeltklik."
+click_debounce_ms = "%{ms} ms"
 smartshift = "SmartShift"
 
 [actions]

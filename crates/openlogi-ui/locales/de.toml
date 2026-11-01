@@ -348,6 +348,12 @@ smooth_wheel = "Weiches Mausrad"
 smooth_wheel_description = "OpenLogi empfängt jeden Schritt des Mausrads und scrollt weich, auch wenn „Weiches Scrollen“ ausgeschaltet ist."
 smooth_wheel_unsupported = "Dieses Gerät unterstützt kein weiches Mausrad."
 smooth_wheel_other_connection = "Dieses Gerät unterstützt das weiche Mausrad über seine andere Verbindung, aber nicht über diese."
+clicks = "Klicks"
+click_debounce = "Tastenprellen ignorieren"
+click_debounce_description = "Für eine abgenutzte Taste, die aus einem Klick zwei macht. OpenLogi ignoriert einen Druck, der so kurz nach dem Loslassen kommt."
+click_debounce_window = "Zeitfenster"
+click_debounce_window_description = "Ein längeres Fenster fängt mehr Prellen ab, kann aber einen sehr schnellen Doppelklick verschlucken."
+click_debounce_ms = "%{ms} ms"
 smartshift = "SmartShift"
 
 [actions]

@@ -348,6 +348,12 @@ smooth_wheel = "Ομαλός τροχός"
 smooth_wheel_description = "Το OpenLogi λαμβάνει κάθε βήμα του τροχού αυτού του ποντικιού και κάνει ομαλή κύλιση, ακόμη κι όταν η Ομαλή κύλιση είναι απενεργοποιημένη."
 smooth_wheel_unsupported = "Αυτή η συσκευή δεν υποστηρίζει ομαλό τροχό."
 smooth_wheel_other_connection = "Η συσκευή υποστηρίζει ομαλό τροχό στην άλλη σύνδεσή της, όχι όμως σε αυτή."
+clicks = "Κλικ"
+click_debounce = "Παράβλεψη αναπήδησης κουμπιού"
+click_debounce_description = "Για φθαρμένο κουμπί που κάνει ένα κλικ δύο. Το OpenLogi αγνοεί ένα πάτημα που έρχεται τόσο σύντομα μετά την απελευθέρωση."
+click_debounce_window = "Παράθυρο"
+click_debounce_window_description = "Ένα μεγαλύτερο παράθυρο φιλτράρει περισσότερες αναπηδήσεις, αλλά μπορεί να χάσει ένα πολύ γρήγορο διπλό κλικ."
+click_debounce_ms = "%{ms} ms"
 smartshift = "SmartShift"
 
 [actions]

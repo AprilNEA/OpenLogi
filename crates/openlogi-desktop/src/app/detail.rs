@@ -15,7 +15,7 @@ use gpui_component::{
     switch::Switch,
     v_flex,
 };
-use openlogi_core::config::{OnboardMemory, ScrollResolution};
+use openlogi_core::config::{ClickDebounce, OnboardMemory, ScrollResolution};
 use openlogi_core::device::DeviceKind;
 
 use super::widgets::{back_button, connection_summary, kind_label, sidebar_action, status_badge};
@@ -416,8 +416,83 @@ fn pointer_tab(
                     .flex_1()
                     .child(scrolling_card(pal, cx)),
             )
+            .children(clicks_card(pal, cx).map(pointer_grid_card))
             .children(onboard_card(pal, cx).map(pointer_grid_card)),
     )
+}
+
+/// The windows the clicks card offers, in milliseconds. A config may hold any
+/// value in [`ClickDebounce`]'s range; one outside these selects no button.
+const CLICK_DEBOUNCE_CHOICES_MS: [u8; 3] = [15, 30, 60];
+
+/// Clicks card: the per-device click filter for a worn switch that turns one
+/// click into two (#2182). Pure config, like the scrolling card. Absent where
+/// the agent cannot tell which device sent a click.
+fn clicks_card(pal: Palette, cx: &mut Context<AppView>) -> Option<impl IntoElement> {
+    if !AppState::click_debounce_available() {
+        return None;
+    }
+    // A device without a persistent key cannot store a window yet, so the
+    // switch would not stay on.
+    let state = AppState::try_read(cx)?;
+    if !state.current_device_is_persistent() {
+        return None;
+    }
+    let current = state.current_click_debounce();
+    let filter_row = toggle_row(
+        "click-debounce-row",
+        pal,
+        tr!("pointer.click_debounce"),
+        tr!("pointer.click_debounce_description"),
+        Toggle::new("click-debounce-toggle")
+            .selected(current.is_some())
+            .on_change(|enabled, _window, cx| {
+                let window = (*enabled).then_some(ClickDebounce::DEFAULT);
+                AppState::apply(cx, |state| state.commit_click_debounce(window));
+            }),
+    );
+    let window_row = setting_row(
+        tr!("pointer.click_debounce_window"),
+        tr!("pointer.click_debounce_window_description"),
+        click_debounce_window_control(current),
+        pal,
+    );
+    Some(
+        PanelCard::new(
+            tr!("pointer.clicks"),
+            Icon::empty().path("action-icons/mouse-pointer-click.svg"),
+            v_flex().gap_4().child(filter_row).child(window_row),
+        )
+        .fill(),
+    )
+}
+
+/// The clicks card's window choices, disabled while the filter is off.
+fn click_debounce_window_control(selected: Option<ClickDebounce>) -> impl IntoElement {
+    let values: Vec<ClickDebounce> = CLICK_DEBOUNCE_CHOICES_MS
+        .into_iter()
+        .filter_map(|ms| ClickDebounce::try_new(ms).ok())
+        .collect();
+    let group = values.iter().enumerate().fold(
+        ButtonGroup::new("click-debounce-window")
+            .w_full()
+            .outline()
+            .disabled(selected.is_none()),
+        |group, (index, value)| {
+            group.child(
+                Button::new(("click-debounce-window", index))
+                    .flex_1()
+                    .label(tr!("pointer.click_debounce_ms", ms => value.to_string()))
+                    .selected(selected == Some(*value)),
+            )
+        },
+    );
+    group.on_click(move |indices, _window, cx| {
+        if let Some(value) = indices.first().and_then(|index| values.get(*index)) {
+            let value = *value;
+            AppState::apply(cx, |state| state.commit_click_debounce(Some(value)));
+        }
+    })
 }
 
 fn onboard_card(pal: Palette, cx: &mut Context<AppView>) -> Option<impl IntoElement> {

@@ -348,6 +348,12 @@ smooth_wheel = "Płynne kółko"
 smooth_wheel_description = "OpenLogi odbiera każdy krok kółka tej myszy i przewija płynnie, nawet gdy Płynne przewijanie jest wyłączone."
 smooth_wheel_unsupported = "To urządzenie nie obsługuje płynnego kółka."
 smooth_wheel_other_connection = "To urządzenie obsługuje płynne kółko przy innym rodzaju połączenia, ale nie przy tym."
+clicks = "Kliknięcia"
+click_debounce = "Ignoruj drgania przycisku"
+click_debounce_description = "Dla zużytego przycisku, który zamienia jedno kliknięcie w dwa. OpenLogi ignoruje naciśnięcie, które pojawia się tak szybko po zwolnieniu."
+click_debounce_window = "Okno"
+click_debounce_window_description = "Dłuższe okno odfiltrowuje więcej drgań, ale może pominąć bardzo szybkie dwukrotne kliknięcie."
+click_debounce_ms = "%{ms} ms"
 smartshift = "SmartShift"
 
 [actions]

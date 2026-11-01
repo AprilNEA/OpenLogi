@@ -45,8 +45,7 @@ impl DirectDevice {
     /// Whether `source` is this device's OS input source. Two connected units
     /// of one model report the same ids, so they cannot be told apart here.
     fn is_source_of(self, source: &EventDevice) -> bool {
-        source.vendor_id == Some(u32::from(self.vendor_id))
-            && source.product_id == Some(u32::from(self.product_id))
+        source.has_ids(self.vendor_id, self.product_id)
     }
 }
 

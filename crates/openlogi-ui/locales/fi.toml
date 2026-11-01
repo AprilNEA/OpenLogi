@@ -348,6 +348,12 @@ smooth_wheel = "Tasainen rulla"
 smooth_wheel_description = "OpenLogi vastaanottaa hiiren rullan jokaisen askeleen ja vierittää tasaisesti, vaikka Tasainen vieritys olisi pois päältä."
 smooth_wheel_unsupported = "Tämä laite ei tue tasaista rullaa."
 smooth_wheel_other_connection = "Laite tukee tasaista rullaa toisella yhteydellään, mutta ei tällä."
+clicks = "Napsautukset"
+click_debounce = "Ohita painikkeen värähtely"
+click_debounce_description = "Kuluneelle painikkeelle, joka tekee yhdestä napsautuksesta kaksi. OpenLogi ohittaa painalluksen, joka tulee näin pian vapautuksen jälkeen."
+click_debounce_window = "Aikaikkuna"
+click_debounce_window_description = "Pidempi ikkuna suodattaa enemmän värähtelyä, mutta voi ohittaa hyvin nopean kaksoisnapsautuksen."
+click_debounce_ms = "%{ms} ms"
 smartshift = "SmartShift"
 
 [actions]
