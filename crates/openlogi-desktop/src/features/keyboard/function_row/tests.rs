@@ -768,6 +768,23 @@ fn an_open_application_binding_selects_its_power_user_row() {
     ));
 }
 
+/// An unbound keyboard key does what it always did — "Off" read as though
+/// every key were switched off. Only a keypad grid key, which has no
+/// function of its own, is off until something is bound to it.
+#[test]
+fn an_unbound_key_reads_as_its_native_function() {
+    let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    let f1 = key_slots(None, None)[1].target.clone();
+
+    assert_eq!(unbound_binding(&f1), "Native function");
+    assert_eq!(
+        unbound_binding(&KeyTarget::Control(ButtonId::control(0x000a))),
+        "Native function"
+    );
+    assert_eq!(unbound_binding(&KeyTarget::grid(GridKey::TopLeft)), "Off");
+}
+
 #[gpui::test]
 fn open_application_editor_binds_the_selected_key(cx: &mut gpui::TestAppContext) {
     use crate::services::i18n::LOCALE_LOCK;

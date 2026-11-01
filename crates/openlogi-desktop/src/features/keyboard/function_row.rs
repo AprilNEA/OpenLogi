@@ -501,7 +501,9 @@ fn key_slots_from_layouts(
                 label: layout.legend.into(),
                 x_frac: layout.point.x_frac,
                 y_frac: layout.point.y_frac,
-                binding: binding_label(bound.as_ref()),
+                binding: bound
+                    .as_ref()
+                    .map_or_else(|| unbound_binding(&layout.target), localized_action_label),
                 binding_icon: bound.as_ref().map(action_icon_path),
                 lcd_icon: bound
                     .as_ref()
@@ -872,10 +874,14 @@ fn key_click_target(
         })
 }
 
-fn binding_label(action: Option<&Action>) -> gpui::SharedString {
-    match action {
-        Some(action) => localized_action_label(action),
-        None => tr!("common.off"),
+/// What an unbound key does, as its binding line reads: a keyboard key keeps
+/// its own function, the way the panel's Native function row puts it — not
+/// "Off", which reads as if every key were switched off; a keypad grid key
+/// has no function of its own and does nothing until something is bound.
+fn unbound_binding(target: &KeyTarget) -> SharedString {
+    match target {
+        KeyTarget::Grid(_) => tr!("common.off"),
+        KeyTarget::Control(_) | KeyTarget::FunctionKey(_) => tr!("keyboard.native_function"),
     }
 }
 
