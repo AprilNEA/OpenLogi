@@ -1,0 +1,27 @@
+# Owner: openlogi-desktop's platform::updater::running_version — the running
+# build's version as the semver every update decision compares a release
+# against: the engine's config, the Linux release check, and the Linux
+# install's newer-than gate.
+id: gui-running-version-owner
+language: rust
+severity: error
+message: The running build's update version comes from platform::updater::running_version. Call it instead of parsing CARGO_PKG_VERSION here.
+note: |
+  The engine updater, the Linux release check, and the Linux install each
+  parsed CARGO_PKG_VERSION themselves. See "Single source of truth" in
+  AGENTS.md.
+files:
+  - crates/openlogi-desktop/src/**/*.rs
+ignores:
+  - "**/tests.rs"
+  - "**/tests/**"
+rule:
+  all:
+    - pattern: $TYPE::parse(env!("CARGO_PKG_VERSION"))
+    - not:
+        inside:
+          kind: function_item
+          stopBy: end
+          has:
+            field: name
+            regex: '^running_version$'

@@ -48,6 +48,8 @@ use openlogi_core::update_feed::UpdateChannel;
 
 use crate::state::AppState;
 
+pub mod linux;
+
 /// The update host, embedded at build time by the release workflow. A build
 /// without one reads the official host. So does a build with an empty one,
 /// which is what an unsigned CI build gets.
@@ -136,21 +138,27 @@ fn engine_updater(channel: UpdateChannel, cx: &mut Context<Updater>) -> Updater 
         .os(std::env::consts::OS)
         .arch(release_arch())
         .format(release_format());
-    #[expect(
-        clippy::expect_used,
-        reason = "CARGO_PKG_VERSION is cargo-provided and always valid semver"
-    )]
-    let version = Version::parse(env!("CARGO_PKG_VERSION")).expect("valid embedded version");
-    let mut config = EngineConfig::new(version).verification(Verification::Strict);
+    let mut config = EngineConfig::new(running_version()).verification(Verification::Strict);
     if let Some(key) = minisign_public_key() {
         config = config.minisign_public_key(key);
     }
     Updater::new(source, config, cx)
 }
 
+/// The version of this running build, which every update decision compares
+/// a release against.
+#[expect(
+    clippy::expect_used,
+    reason = "CARGO_PKG_VERSION is cargo-provided and always valid semver"
+)]
+pub(crate) fn running_version() -> Version {
+    Version::parse(env!("CARGO_PKG_VERSION")).expect("valid embedded version")
+}
+
 /// The embedded minisign public key, trimmed, or `None` when the build did not
-/// bake one in.
-fn minisign_public_key() -> Option<&'static str> {
+/// bake one in. The one trust anchor for every update this app installs: the
+/// engine's artifacts and the Linux packages alike.
+pub(crate) fn minisign_public_key() -> Option<&'static str> {
     MINISIGN_PUBLIC_KEY
         .map(str::trim)
         .filter(|key| !key.is_empty())
@@ -231,6 +239,7 @@ pub fn install(cx: &mut App, settings: &AppSettings) {
 
     if settings.check_for_updates {
         start_background_check(&updater, settings.auto_install_updates, cx);
+        linux::check_in_background(cx);
     }
     cx.set_global(SharedUpdater(updater));
 }
@@ -250,6 +259,7 @@ pub(crate) fn check_in_background(cx: &mut App) {
     let auto_install =
         AppState::try_read(cx).is_some_and(|state| state.app_settings().auto_install_updates);
     start_background_check(&updater, auto_install, cx);
+    linux::check_in_background(cx);
 }
 
 fn start_background_check(updater: &Entity<Updater>, auto_install: bool, cx: &mut App) {

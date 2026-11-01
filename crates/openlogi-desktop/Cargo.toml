@@ -37,6 +37,12 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# Verifies Linux package update signatures in-app (already in the graph via
+# gpui-updater-core).
+minisign-verify = "0.2"
+sha2 = { workspace = true }
+tempfile = "3.27.0"
+ureq = { workspace = true }
 image = { version = "0.25", default-features = false, features = ["png"] }
 rust-i18n = "4"
 # The raw, un-negotiated system locale for the diagnostics report; locale
@@ -81,7 +87,6 @@ openlogi-ipc = { path = "../openlogi-ipc", features = ["test-support"] }
 gpui = { workspace = true, features = ["test-support"] }
 openlogi-device = { path = "../openlogi-device" }
 openlogi-fixture = { workspace = true, features = ["fs"] }
-tempfile = "3.27.0"
 tokio = { workspace = true, features = ["test-util"] }
 
 [package.metadata.bundle]
