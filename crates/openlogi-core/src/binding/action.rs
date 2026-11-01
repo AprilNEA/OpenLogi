@@ -234,6 +234,10 @@ pub enum Action {
     /// Move the pressing keypad to its next binding page, wrapping from the
     /// last page to page 1. Appended — variant order is wire format.
     NextKeypadPage,
+    /// Zoom the content under the pointer the way a trackpad's two-finger
+    /// double-tap does (macOS Smart Zoom, in Safari, Preview, Photos and other
+    /// apps that implement it). macOS-only; skipped on other platforms.
+    SmartZoom,
 }
 
 /// Which of a held chord's keys stay down for the lifetime of the press.
@@ -326,6 +330,7 @@ macro_rules! for_each_unit_action {
             NextDesktop "Next Desktop" "actions.next_desktop" Navigation NextDesktop,
             ShowDesktop "Show Desktop" "actions.show_desktop" Navigation Monitor,
             LaunchpadShow "Launchpad" "actions.launchpad" Navigation Applications,
+            SmartZoom "Smart Zoom" "actions.smart_zoom" Navigation Search,
             // System
             None "Do Nothing" "pointer.do_nothing" System Ban,
             LockScreen "Lock Screen" "actions.lock_screen" System Lock,

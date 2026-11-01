@@ -257,6 +257,10 @@ fn dispatch_native(native: NativeAction) {
         NativeAction::Sleep => {
             tracing::debug!("Sleep has no Windows synthesis yet — action skipped");
         }
+        // Smart Zoom is a trackpad gesture with no Windows equivalent.
+        NativeAction::SmartZoom => {
+            tracing::debug!("SmartZoom has no Windows equivalent — action skipped");
+        }
     }
 }
 

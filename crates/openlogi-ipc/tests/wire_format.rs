@@ -1198,6 +1198,7 @@ fn pointer_speed_and_precision_mode() {
     );
     // Appended at the end of `Action`, so every earlier index is unchanged.
     assert_wire(&Action::TogglePrecisionMode, "36");
+    assert_wire(&Action::SmartZoom, "3d");
 }
 
 /// The press force of a force-sensing button (the MX Master 4's Haptic Sense
