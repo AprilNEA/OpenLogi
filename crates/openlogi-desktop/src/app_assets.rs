@@ -13,10 +13,16 @@ use openlogi_ui::action_icons::ActionIcons;
 /// Asset path [`AppAssets`] resolves to the embedded app logo.
 pub const LOGO: &str = "openlogi.png";
 
-/// The 1024×1024 app icon, embedded into the binary.
+/// The 512×512 export of the app icon, embedded into the binary.
+///
+/// Not the 1024×1024 master: GPUI draws an image by sampling its
+/// full-resolution texture bilinearly, without mipmaps, so a source many times
+/// larger than the drawn size aliases rather than looking sharper. The largest
+/// draw is the 96 pt About logo, 288 px at 3×; 512 px covers that and keeps
+/// 0.5 MB out of the binary.
 const LOGO_BYTES: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../design/icon/openlogi.png"
+    "/../../design/icon/openlogi-512.png"
 ));
 
 /// GPUI asset source: the app logo, the shared ring glyphs, then
