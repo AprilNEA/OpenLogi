@@ -106,6 +106,44 @@ fn long_bindings_stay_inside_their_label_card(cx: &mut TestAppContext) {
     cx.run_until_parked();
 }
 
+/// At the smallest window with cards the synthetic model shrinks by its width
+/// until its five cards no longer fit beside it. The canvas grows to hold the
+/// ones that reach past the model, rather than leaving them over its edge
+/// where the clipped tab can cut them off.
+#[gpui::test]
+fn cards_that_reach_past_a_shrunk_model_stay_on_the_canvas(cx: &mut TestAppContext) {
+    cx.update(gpui_component::init);
+    install_app_state(cx);
+    let (view, cx) = cx.add_window_view(MouseModelView::new);
+    cx.simulate_resize(size(px(960.), px(680.)));
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+
+    let canvas = cx
+        .debug_bounds("mouse-canvas")
+        .expect("the model canvas renders");
+    for selector in [
+        "label-card-Button(MiddleClick)",
+        "label-card-Button(Back)",
+        "label-card-Button(DpiToggle)",
+        "label-card-Button(Forward)",
+        "label-card-Button(GestureButton)",
+    ] {
+        let card = cx.debug_bounds(selector).expect(selector);
+        let inside = card.top() >= canvas.top() - px(0.5)
+            && card.bottom() <= canvas.bottom() + px(0.5)
+            && card.left() >= canvas.left() - px(0.5)
+            && card.right() <= canvas.right() + px(0.5);
+        assert!(
+            inside,
+            "{selector}: card {card:?} leaves the canvas {canvas:?}"
+        );
+    }
+
+    drop(view);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+}
+
 #[gpui::test]
 fn action_picker_renders_after_opening_through_the_inspector(cx: &mut TestAppContext) {
     let _locale = LOCALE_LOCK.lock().unwrap();
@@ -392,6 +430,7 @@ fn a_selected_gesture_can_render_in_the_binding_inspector(cx: &mut TestAppContex
                 selected: Some(MouseControlId::Button(ButtonId::MiddleClick)),
                 gesture_direction: Some(GestureDirection::Up),
                 bindings: &bindings,
+                layout: None,
                 gesture_maps: &gesture_maps,
                 dpi_gestures: false,
                 virtual_thumbwheel: false,
@@ -495,9 +534,24 @@ fn active_thumbwheel_directions_highlight_the_paired_control() {
 
 #[test]
 fn fallback_model_only_adds_thumbwheel_when_capability_is_measured() {
-    let (_, _, without, _) =
-        scaled_model(None, None, 560., 420., false, LabelDistribution::LeftOnly);
-    let (_, _, with, _) = scaled_model(None, None, 560., 420., true, LabelDistribution::LeftOnly);
+    let (_, _, without, _) = scaled_model(
+        None,
+        None,
+        560.,
+        560.,
+        420.,
+        false,
+        LabelDistribution::LeftOnly,
+    );
+    let (_, _, with, _) = scaled_model(
+        None,
+        None,
+        560.,
+        560.,
+        420.,
+        true,
+        LabelDistribution::LeftOnly,
+    );
     assert_eq!(
         without
             .iter()
@@ -769,4 +823,57 @@ fn an_inherited_gesture_button_offers_the_held_actions(cx: &mut TestAppContext) 
     drop(view);
     cx.update(|window, _| window.remove_window());
     cx.run_until_parked();
+}
+
+/// The smallest window with cards shrinks a G502's fallback model by its
+/// width to about 315 px, short of what its nine cards on one side need.
+/// They reach past the model into the tab's height, closing their gaps,
+/// instead of running off the canvas.
+#[test]
+fn a_crowded_side_keeps_every_card_on_the_canvas() {
+    let viewport_h = 680.;
+    let g502 = GamingLayout::for_model_key("0407f");
+    let viewport_w = theme::standard_detail_content_width(960.);
+    let layout = model_layout(None, g502, viewport_w, viewport_h, false);
+    assert_eq!(layout.labels.len(), 9);
+    assert!(layout.mouse_h < 9. * LABEL_H, "model {}", layout.mouse_h);
+    assert!(layout.canvas_h <= viewport_h - MODEL_VERTICAL_RESERVE + 0.01);
+    let mut ys: Vec<f32> = layout.labels.iter().map(|label| label.y).collect();
+    ys.sort_by(f32::total_cmp);
+    for y in &ys {
+        let top = layout.mouse_top + y - LABEL_H / 2.;
+        assert!(
+            top >= -0.01 && top + LABEL_H <= layout.canvas_h + 0.01,
+            "card off the canvas: {ys:?} in {}",
+            layout.canvas_h
+        );
+    }
+    for pair in ys.windows(2) {
+        assert!(pair[1] - pair[0] >= LABEL_H - 0.01, "cards overlap: {ys:?}");
+    }
+}
+
+/// The fallback silhouette shrinks on a small window, but its cards keep
+/// their height, so they must be placed at the scaled size, not scaled after.
+#[test]
+fn a_shrunk_fallback_model_keeps_its_cards_apart() {
+    let target_h = MOUSE_MODEL_SIZE.1 * 0.776;
+    let (_, h, _, labels) = scaled_model(
+        None,
+        None,
+        target_h,
+        target_h,
+        1000.,
+        false,
+        LabelDistribution::LeftOnly,
+    );
+    assert!((h - target_h).abs() < 0.01);
+    let mut ys: Vec<f32> = labels.iter().map(|label| label.y).collect();
+    ys.sort_by(f32::total_cmp);
+    for pair in ys.windows(2) {
+        assert!(
+            pair[1] - pair[0] >= super::super::geometry::LABEL_H,
+            "cards overlap: {ys:?}"
+        );
+    }
 }

@@ -101,9 +101,10 @@ either is renewed:
 1. In the Apple Developer portal, create a Developer ID profile for the
    `org.openlogi.agent` App ID with the current Developer ID Application
    certificate. The App ID must keep the HID Virtual Device capability.
-2. Put the profile's base64 in the `APPLE_AGENT_PROVISIONING_PROFILE` field of
-   the 1Password item that `OP_APPLE_SECRET_ITEM` names.
-3. If the certificate was renewed, update the same item too, because CI
+2. Put the profile's base64 in the `APPLE_AGENT_PROVISIONING_PROFILE` variable
+   of the `OpenLogi Release` 1Password Environment (`docs/DEVELOPMENT.md`,
+   "Release secrets").
+3. If the certificate was renewed, update the same Environment too, because CI
    imports the certificate separately: `APPLE_CERTIFICATE` (the base64 of the
    new certificate and private key, exported as PKCS#12),
    `APPLE_CERTIFICATE_PASSWORD`, and `APPLE_SIGNING_IDENTITY` if the identity

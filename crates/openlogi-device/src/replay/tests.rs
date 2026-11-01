@@ -765,6 +765,7 @@ fn direct_probe_fixture() -> SyntheticFixture {
                     ..Capabilities::default()
                 }),
                 settings_revision: 0,
+                hidpp10: false,
             }],
         }],
         standalone: Vec::new(),
@@ -841,6 +842,7 @@ fn receiver_dpi_fixture() -> SyntheticFixture {
                     ..Capabilities::default()
                 }),
                 settings_revision: 0,
+                hidpp10: false,
             }],
         }],
         standalone: Vec::new(),

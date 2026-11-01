@@ -1,10 +1,10 @@
 use super::home::{connection_icon_path, ordered_device_indices};
-use super::{Capabilities, DetailTab, DeviceKind, DeviceRecord};
+use super::{DetailTab, DeviceKind, DeviceRecord};
 use crate::services::assets::ResolvedAsset;
 use crate::ui::battery::battery_charging_no_reading;
 use openlogi_core::device::{
-    BatteryInfo, BatteryLevel, BatteryStatus, DeviceModelInfo, DeviceTransports, LightCapabilities,
-    LightValueRange, LightValueUnit,
+    BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceModelInfo, DeviceTransports,
+    LightCapabilities, LightValueRange, LightValueUnit,
 };
 use openlogi_core::hid::DeviceRoute;
 
@@ -558,6 +558,7 @@ fn disconnected_gaming_keyboards_keep_the_observed_usb_icon() {
                 model_info: Some(model),
                 capabilities: Some(Capabilities::presumed_from_kind(DeviceKind::Keyboard)),
                 settings_revision: 0,
+                hidpp10: false,
             }],
         };
         let resolver = AssetResolver::new();
@@ -740,6 +741,7 @@ fn keyboard_inventory_for_mode(
                 ..Capabilities::default()
             }),
             settings_revision: 0,
+            hidpp10: false,
         }],
     }
 }
@@ -985,6 +987,7 @@ fn record(kind: DeviceKind, capabilities: Option<Capabilities>) -> DeviceRecord 
         capture_id: None,
         kind,
         capabilities,
+        hidpp10: false,
         light_capabilities: None,
         slot: 1,
         online: true,
@@ -1205,6 +1208,22 @@ fn keyboard_with_buttons_shows_keys_tab() {
     assert_eq!(DetailTab::default_for(&keyboard), DetailTab::Keys);
 }
 
+/// A numpad is keyboard-like: the MX Creative Keypad (kind Numpad, buttons
+/// measured from its 0x1b04 table) shows Keys with neither the mouse Buttons
+/// panel nor Pointer.
+#[test]
+fn numpad_with_buttons_shows_keys_tab() {
+    let caps = Some(Capabilities {
+        buttons: true,
+        pointer: false,
+        ..Capabilities::default()
+    });
+    let tabs = DetailTab::tabs_for(&record(DeviceKind::Numpad, caps));
+    assert!(tabs.contains(&DetailTab::Keys), "numpad lost its Keys tab");
+    assert!(!tabs.contains(&DetailTab::Buttons));
+    assert!(!tabs.contains(&DetailTab::Pointer));
+}
+
 /// A sleeping keyboard whose slot was never probed has no capability data,
 /// but a resolved depot already says which controls it has: the Keys tab
 /// shows them so bindings can be set before the keyboard wakes.
@@ -1264,6 +1283,26 @@ fn unprobed_mouse_falls_back_to_presumed_capabilities() {
     assert!(tabs.contains(&DetailTab::Buttons));
     assert!(tabs.contains(&DetailTab::Pointer));
     assert!(!tabs.contains(&DetailTab::Lighting));
+}
+
+/// A HID++ 1.0 device has no feature table, and OpenLogi writes none of its
+/// registers. It keeps the Buttons tab, which the OS hook drives, but gets no
+/// Pointer or Lighting tab whose controls would have no effect (#2161).
+#[test]
+fn hidpp10_device_gets_only_host_side_tabs() {
+    let trackball = DeviceRecord {
+        hidpp10: true,
+        ..record(DeviceKind::Trackball, None)
+    };
+    let tabs = DetailTab::tabs_for(&trackball);
+    assert!(tabs.contains(&DetailTab::Buttons));
+    assert!(!tabs.contains(&DetailTab::Pointer));
+
+    let keyboard = DeviceRecord {
+        hidpp10: true,
+        ..record(DeviceKind::Keyboard, None)
+    };
+    assert!(!DetailTab::tabs_for(&keyboard).contains(&DetailTab::Lighting));
 }
 
 /// An unprobed, unidentified device presumes nothing — only the info tab,

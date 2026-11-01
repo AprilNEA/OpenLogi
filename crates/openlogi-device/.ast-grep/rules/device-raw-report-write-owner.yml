@@ -1,0 +1,24 @@
+# Owner: openlogi_device::write::write_whole_raw_report — a raw report write,
+# its timeout classification, and its short-write check.
+id: device-raw-report-write-owner
+language: rust
+severity: error
+message: Write raw reports through openlogi-device's write::write_whole_raw_report; it owns the timeout classification and the short-write check.
+note: |
+  The per-key lighting frame and the keypad image write each mapped the
+  channel's timeout and checked the written byte count on their own, differing
+  only in the operation they named. See "Single source of truth" in AGENTS.md.
+files:
+  - crates/openlogi-device/src/**/*.rs
+ignores:
+  - crates/openlogi-device/src/write.rs
+  - crates/**/tests.rs
+  - crates/**/tests/**
+rule:
+  kind: call_expression
+  has:
+    field: function
+    kind: field_expression
+    has:
+      field: field
+      regex: '^write_raw_report$'

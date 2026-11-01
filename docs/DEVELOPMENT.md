@@ -507,8 +507,45 @@ Sparkle that fails to load fall back to the engine and `latest.json`.
 Sparkle read only that manifest, and they update into a Sparkle bundle through
 it.
 
-Configure the R2/update settings in one 1Password item referenced by the GitHub
-secret `OP_R2_SECRET_ITEM`. The item must contain:
+### Release secrets: 1Password Environments and the `release` environment
+
+Every workflow reads its credentials from 1Password through
+`.github/actions/op-environment`, which runs `op run --environment` with a
+service-account token and exposes the Environment's variables as masked step
+outputs. Two [1Password Environments](https://developer.1password.com/environments)
+hold them, each read by a service account scoped to that Environment alone, so
+the vaults the items used to live in no longer matter:
+
+| 1Password Environment | Variables | Service account token lives in | Read by |
+|---|---|---|---|
+| `OpenLogi Automation` | `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `CARGO_REGISTRY_TOKEN`, `CROWDIN_PROJECT_ID`, `CROWDIN_PERSONAL_TOKEN` | repository secret `OP_SERVICE_ACCOUNT_TOKEN` | release-plz, the beta cut, Crowdin, the flake update, and the release workflow's installer-site / homebrew-tap dispatches, from any branch |
+| `OpenLogi Release` | the `APPLE_*`, `AZURE_*`, `OPENLOGI_UPDATE_*`, `OPENLOGI_SPARKLE_*` and `CLOUDFLARE_R2_*` variables listed below | **`release` GitHub environment** secret `OP_SERVICE_ACCOUNT_TOKEN` | the signing jobs in `build.yml` (`macos`, `windows`, `windows-msi`) when `sign` is set, and `release.yml`'s `publish` job |
+
+The Environment IDs are not secrets; they are the repository variables
+`OP_AUTOMATION_ENVIRONMENT_ID` and `OP_RELEASE_ENVIRONMENT_ID`. A GitHub
+environment secret shadows the repository secret of the same name, so a job
+sees the release token only inside the `release` GitHub environment, and a job
+outside it that asks for the release Environment fails in `op run` with the
+automation token. The `release` GitHub environment admits only `v*` tag refs
+and requires a review, so a branch dispatch with `sign` fails before any
+secret is read, and each tag run pauses twice for approval: once when the
+build legs reach the environment, once when `publish` does. The Azure
+federated credential is bound to the environment
+(`repo:AprilNEA/OpenLogi:environment:release`), which is why the Windows jobs
+were in it first.
+
+`op-environment` declares the union of both Environments' variables as its
+outputs; a variable the loaded Environment lacks is an empty output, and each
+job's validation step names the missing one. Add a new variable to that
+`outputs:` block and to the Environment, and nothing else.
+
+The `OpenLogi Release` Environment must contain the Apple signing values
+`xtask/README.md` describes (`APPLE_SIGNING_IDENTITY`, `APPLE_CERTIFICATE`,
+`APPLE_CERTIFICATE_PASSWORD`, `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID`,
+`APPLE_AGENT_PROVISIONING_PROFILE`), the Azure Artifact Signing values
+(`AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`,
+`AZURE_SIGNING_ENDPOINT`, `AZURE_SIGNING_ACCOUNT`, `AZURE_CERT_PROFILE`), and
+the R2/update settings:
 
 - `OPENLOGI_UPDATE_BASE_URL` — public HTTPS base URL, for example
   `https://updates.openlogi.org`.
@@ -807,9 +844,10 @@ Each run:
    kept; headers / `_version` preserved).
 6. Opens/updates `crowdin/i18n` only when the working tree still differs.
 
-Like the release workflow, the job reads its credentials from one 1Password
-item referenced by the GitHub secret `OP_CROWDIN_SECRET_ITEM`. The item must
-contain:
+Like the release workflow, the job reads its credentials through
+`.github/actions/op-environment`, from the `OpenLogi Automation` 1Password
+Environment (see [Release secrets](#release-secrets-1password-environments-and-the-release-environment)),
+which must contain:
 
 - `CROWDIN_PROJECT_ID` — the numeric Crowdin project id.
 - `CROWDIN_PERSONAL_TOKEN` — a Crowdin API token with access to the project.
@@ -824,7 +862,7 @@ OpenLogi project:
 
 Missing or invalid credentials fail the workflow. Translation PRs run the
 normal CI checks, including the locale key parity test (every catalog must match
-`en.toml` key-for-key). The workflow uses the existing `OP_GITHUB_APP_ITEM` to
+`en.toml` key-for-key). The workflow uses the GitHub App from the same Environment to
 mint a short-lived token for pushing its translation branch and opening the PR;
 the default `GITHUB_TOKEN` remains read-only. Checkout runs with
 `persist-credentials: false` and the origin remote is rewritten to the app token

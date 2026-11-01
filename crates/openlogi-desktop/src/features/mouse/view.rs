@@ -17,8 +17,8 @@ use openlogi_core::binding::{Action, ButtonId, GamingLayout, GestureDirection};
 
 use super::force_sensing::{ForceSensingFacts, ForceSensingSlider, PressForce};
 use super::geometry::{
-    LabelDistribution, asset_dimensions_for_png, asset_has_button_labels, asset_hotspots_for_png,
-    default_labels, fallback_hotspots, labels_from_hotspots, side_view_width,
+    LABEL_H, LabelDistribution, asset_dimensions_for_png, asset_has_button_labels,
+    asset_hotspots_for_png, fallback_hotspots, labels_from_hotspots, side_view_width,
 };
 use super::hotspots::{Hotspot, MOUSE_MODEL_SIZE, MouseControlId};
 use super::inspector::{
@@ -487,16 +487,17 @@ impl Render for MouseModelView {
             .collect();
 
         let viewport_h = f32::from(window.viewport_size().height);
-        let viewport_w = content_width(window);
+        let viewport_w = theme::detail_content_width(window);
         let ModelLayout {
             canvas_w,
+            canvas_h,
+            mouse_top,
             mouse_left,
             mouse_w,
             mouse_h,
             hotspots,
             labels,
         } = model_layout(asset, layout, viewport_w, viewport_h, thumbwheel);
-        let canvas_h = mouse_h;
 
         let highlight = self.hovered.or(active).or(self.selected);
         let view = cx.entity();
@@ -520,10 +521,7 @@ impl Render for MouseModelView {
             self.selected,
             &view,
         );
-        let canvas = div()
-            .relative()
-            .w(px(canvas_w))
-            .h(px(canvas_h))
+        let model_band = div()
             .child(breathing_art)
             .child(leader_canvas)
             .children(labels_outer.iter().enumerate().map(|(idx, label)| {
@@ -539,12 +537,14 @@ impl Render for MouseModelView {
                 )
             }))
             .child(hotspots_layer);
+        let canvas = model_canvas(model_band, canvas_w, canvas_h, mouse_top, mouse_h);
 
         let inspector = binding_inspector(
             BindingInspectorData {
                 selected: self.selected,
                 gesture_direction: self.gesture_active_dir,
                 bindings,
+                layout,
                 gesture_maps,
                 dpi_gestures,
                 virtual_thumbwheel,
@@ -560,6 +560,31 @@ impl Render for MouseModelView {
         );
         workspace_layout(canvas, profile_status, inspector, &self.focus_handle)
     }
+}
+
+/// The canvas around `band`, which holds the model and its cards laid out
+/// against the model's own `mouse_h`. The cards a crowded side pushes past
+/// the model's top or bottom still land inside the canvas, which grows to
+/// `canvas_h` to hold them, with the model `mouse_top` down from its top.
+fn model_canvas(
+    band: gpui::Div,
+    canvas_w: f32,
+    canvas_h: f32,
+    mouse_top: f32,
+    mouse_h: f32,
+) -> gpui::Div {
+    div()
+        .relative()
+        .w(px(canvas_w))
+        .h(px(canvas_h))
+        .debug_selector(|| "mouse-canvas".into())
+        .child(
+            band.absolute()
+                .top(px(mouse_top))
+                .left(px(0.))
+                .w(px(canvas_w))
+                .h(px(mouse_h)),
+        )
 }
 
 fn workspace_layout(
@@ -600,18 +625,16 @@ fn workspace_layout(
 
 struct ModelLayout {
     canvas_w: f32,
+    /// The model's height plus whatever the cards reach past it.
+    canvas_h: f32,
+    /// How far the model sits below the canvas top: how far the cards reach
+    /// above it.
+    mouse_top: f32,
     mouse_left: f32,
     mouse_w: f32,
     mouse_h: f32,
     hotspots: Vec<Hotspot>,
     labels: Vec<Label>,
-}
-
-/// The window width beside the navigation rail. The rail is in rems, so it
-/// widens with the interface scale; take its pixel width at this window's rem.
-fn content_width(window: &Window) -> f32 {
-    let rail_w = theme::DETAIL_RAIL_W.to_pixels(window.rem_size());
-    f32::from(window.viewport_size().width - rail_w)
 }
 
 /// Scale the model to fit the content area in both axes. A tall mouse is bound
@@ -626,6 +649,9 @@ fn model_layout(
     thumbwheel: bool,
 ) -> ModelLayout {
     let target_h = (viewport_h - MODEL_VERTICAL_RESERVE).clamp(MODEL_MIN_H, MOUSE_MODEL_SIZE.1);
+    // The cards may use the tab's whole height, not just the model's: a
+    // narrow window shrinks the model by its width and leaves room beside it.
+    let room_h = (viewport_h - MODEL_VERTICAL_RESERVE).max(MODEL_MIN_H);
     let has_labels = asset.is_none_or(|asset| asset_has_button_labels(asset, layout))
         && viewport_w >= MODEL_LABELS_MIN_W;
     let content_w =
@@ -646,6 +672,7 @@ fn model_layout(
         asset,
         layout,
         target_h,
+        room_h,
         max_image_w,
         thumbwheel,
         label_distribution,
@@ -653,9 +680,19 @@ fn model_layout(
     if !has_labels {
         labels.clear();
     }
+    let cards_top = labels
+        .iter()
+        .map(|label| label.y - LABEL_H / 2.)
+        .fold(0., f32::min);
+    let cards_bottom = labels
+        .iter()
+        .map(|label| label.y + LABEL_H / 2.)
+        .fold(mouse_h, f32::max);
 
     ModelLayout {
         canvas_w: left_gutter + mouse_w + right_gutter,
+        canvas_h: cards_bottom - cards_top,
+        mouse_top: -cards_top,
         mouse_left: left_gutter,
         mouse_w,
         mouse_h,
@@ -666,12 +703,14 @@ fn model_layout(
 
 /// Model geometry fit inside a `max_w` × `target_h` box. With a real asset the
 /// hotspots and labels are recomputed from the scaled dimensions; the synthetic
-/// silhouette's authored coordinates are scaled by the same factor. Returns
+/// silhouette's authored coordinates are scaled by the same factor. The labels
+/// may use `room_h` (see [`labels_from_hotspots`]). Returns
 /// `(mouse_w, mouse_h, hotspots, labels)`.
 fn scaled_model(
     asset: Option<&ResolvedAsset>,
     layout: Option<&GamingLayout>,
     target_h: f32,
+    room_h: f32,
     max_w: f32,
     thumbwheel: bool,
     label_distribution: LabelDistribution,
@@ -679,11 +718,12 @@ fn scaled_model(
     if let Some(a) = asset {
         let (w, h) = asset_dimensions_for_png(a, target_h, max_w);
         let hotspots = asset_hotspots_for_png(a, layout, w, h);
-        let labels = labels_from_hotspots(&hotspots, h, label_distribution);
+        let labels = labels_from_hotspots(&hotspots, w, h, room_h, label_distribution);
         (w, h, hotspots, labels)
     } else {
         let scale = (target_h / MOUSE_MODEL_SIZE.1).min(max_w / MOUSE_MODEL_SIZE.0);
-        let hotspots = fallback_hotspots(layout, thumbwheel)
+        let (w, h) = (MOUSE_MODEL_SIZE.0 * scale, MOUSE_MODEL_SIZE.1 * scale);
+        let hotspots: Vec<Hotspot> = fallback_hotspots(layout, thumbwheel)
             .into_iter()
             .map(|hs| Hotspot {
                 x: hs.x * scale,
@@ -693,19 +733,10 @@ fn scaled_model(
                 ..hs
             })
             .collect();
-        let labels = default_labels(layout, thumbwheel, label_distribution)
-            .into_iter()
-            .map(|l| Label {
-                y: l.y * scale,
-                ..l
-            })
-            .collect();
-        (
-            MOUSE_MODEL_SIZE.0 * scale,
-            MOUSE_MODEL_SIZE.1 * scale,
-            hotspots,
-            labels,
-        )
+        // Placed at the scaled size, like an asset's: the cards keep their
+        // height however small the silhouette gets.
+        let labels = labels_from_hotspots(&hotspots, w, h, room_h, label_distribution);
+        (w, h, hotspots, labels)
     }
 }
 

@@ -15,10 +15,12 @@ const DIVERTABLE: u16 = 0x0020;
 const DIVERTABLE_RAW_WHEEL: u16 = 0x0820;
 
 /// A mouse whose only `0x1b04` control is Back with `flags`, plus a `0x2121`
-/// wheel with multiplier 8 when `hires`. `setCidReporting` writes are echoed.
+/// wheel with multiplier 8 when `hires`. `getCidReporting` answers `found`
+/// as the reporting flags; `setCidReporting` writes are echoed.
 fn wheel_hold_device(
     flags: u16,
     hires: bool,
+    found: u8,
 ) -> (ScriptedRawHidChannel, crate::replay::ReplayChannelHandle) {
     ScriptedRawHidChannel::with_dynamic_responder(move |request| {
         let mut response = vec![0; 20];
@@ -38,7 +40,10 @@ fn wheel_hold_device(
                 response[8] = low;
                 response[12] = high;
             }
-            (REPROG, 2) => response[4..6].copy_from_slice(&BACK.to_be_bytes()),
+            (REPROG, 2) => {
+                response[4..6].copy_from_slice(&BACK.to_be_bytes());
+                response[6] = found;
+            }
             (REPROG, 3) => return Some(request.to_vec()),
             (HIRES, 0) if hires => response[4] = 8,
             _ => panic!("unexpected capture request: {request:02x?}"),
@@ -90,7 +95,7 @@ async fn arm_spec(
     Arc<HidppChannel>,
     crate::replay::ReplayChannelHandle,
 ) {
-    let (raw, handle) = wheel_hold_device(flags, hires);
+    let (raw, handle) = wheel_hold_device(flags, hires, 0);
     let channel = scripted_channel(raw).await;
     let device = Device::new(channel.clone(), 0xff).await.unwrap();
     let mut armed = ArmedControls::default();
@@ -223,5 +228,93 @@ async fn restore_hands_the_wheel_back_to_the_firmware() {
     assert_eq!(
         reporting_writes(&handle),
         [(BACK, 0x23, 0x0c), (BACK, 0x22, 0x08)]
+    );
+}
+
+/// The Bluetooth Signature M650's direct route, where Linux 7.3+ diverts
+/// Back/Forward itself.
+fn m650_route() -> DeviceRoute {
+    DeviceRoute::Direct {
+        vendor_id: 0x046d,
+        product_id: 0xb02a,
+    }
+}
+
+/// Arm Back on a Bluetooth M650 that answers Back as already diverted, as
+/// Linux 7.3+ leaves it at connect, and take the restore the session owes.
+async fn arm_kernel_diverted_m650_back() -> (
+    PendingCaptureRestore,
+    Arc<HidppChannel>,
+    crate::replay::ReplayChannelHandle,
+) {
+    let (raw, handle) = wheel_hold_device(DIVERTABLE, false, 0x01);
+    let channel = scripted_channel(raw).await;
+    let device = Device::new(channel.clone(), 0xff).await.unwrap();
+    let spec = CaptureSpec {
+        divert_buttons: vec![(BACK, ButtonId::Back)],
+        ..CaptureSpec::default()
+    };
+    let mut armed = ArmedControls::default();
+    arm_controls_into(&device, &channel, 0xff, &spec, &mut armed)
+        .await
+        .unwrap();
+    let pending = armed
+        .into_pending(&SharedChannel::new(channel.clone(), m650_route()))
+        .expect("a diverted control must be owed a restore");
+    (pending, channel, handle)
+}
+
+/// Linux 7.3+ diverts the Bluetooth M650's Back at connect, so the teardown of
+/// a session armed on that route hands the diversion back instead of clearing
+/// it (#2163). Elsewhere the restore clears it, as for any found diversion.
+#[tokio::test]
+async fn teardown_keeps_the_kernels_m650_back_diversion() {
+    let (pending, channel, handle) = arm_kernel_diverted_m650_back().await;
+    let registry = ChannelRegistry::default();
+    registry.replace_node(
+        NodeId::from("mouse-node".to_owned()),
+        [m650_route()],
+        channel,
+    );
+    assert!(matches!(
+        pending.allow_current_channel().retry(&registry).await,
+        CaptureSessionOutcome::Restored
+    ));
+    // Armed diverted (`0x23`); restored diverted again on Linux, cleared
+    // (`0x22`) elsewhere.
+    let restore = if cfg!(target_os = "linux") {
+        0x23
+    } else {
+        0x22
+    };
+    assert_eq!(
+        reporting_writes(&handle),
+        [(BACK, 0x23, 0x00), (BACK, restore, 0x00)]
+    );
+}
+
+/// A handoff restores through the route the M650 moved to. The kernel does not
+/// listen to a diverted Back there, so the diversion found on the Bluetooth
+/// route is cleared on every host, as for any leftover (#2163).
+#[tokio::test]
+async fn handoff_clears_the_m650_back_diversion_on_the_successor_route() {
+    let (pending, channel, handle) = arm_kernel_diverted_m650_back().await;
+    let successor = DeviceRoute::Bolt {
+        receiver_uid: "receiver-a".to_owned(),
+        slot: 1,
+    };
+    let registry = ChannelRegistry::default();
+    registry.replace_node(
+        NodeId::from("receiver-a-node".to_owned()),
+        [successor.clone()],
+        channel,
+    );
+    assert!(matches!(
+        pending.retry_via(successor, &registry).await,
+        CaptureSessionOutcome::Restored
+    ));
+    assert_eq!(
+        reporting_writes(&handle),
+        [(BACK, 0x23, 0x00), (BACK, 0x22, 0x00)]
     );
 }

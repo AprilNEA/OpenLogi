@@ -20,6 +20,8 @@
 use std::fmt;
 
 pub use openlogi_device_registry::LOGITECH_VENDOR_ID;
+pub use openlogi_device_registry::keypad::KeypadDescriptor;
+use openlogi_device_registry::keypad::find_keypad;
 pub use openlogi_device_registry::receiver::{
     RECEIVERS, ReceiverBrand, ReceiverDescriptor, ReceiverProtocol, find_receiver,
 };
@@ -161,6 +163,24 @@ impl DeviceRoute {
             Self::Bolt { slot, .. } | Self::Unifying { slot, .. } => *slot,
             Self::Direct { .. } | Self::RawHid { .. } => DIRECT_DEVICE_INDEX,
         }
+    }
+
+    /// The known keypad this route reaches, or `None` for any other device.
+    ///
+    /// Only a direct route carries the USB identity the keypad registry is
+    /// keyed by, and the keypads it lists are wired-only. Everything that
+    /// needs "is this that keypad" — its LCD keys, its key grid — asks here
+    /// rather than matching a route against the registry itself.
+    #[must_use]
+    pub fn keypad(&self) -> Option<&'static KeypadDescriptor> {
+        let Self::Direct {
+            vendor_id,
+            product_id,
+        } = self
+        else {
+            return None;
+        };
+        find_keypad(*vendor_id, *product_id)
     }
 
     /// Build the route that reaches a paired device from a receiver inventory.
@@ -333,5 +353,29 @@ mod tests {
             slot: 3,
         };
         assert_eq!(r.to_string(), "slot 3 on receiver AABBCC");
+    }
+
+    #[test]
+    fn only_a_direct_route_to_a_known_keypad_reaches_one() {
+        let keypad = DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xc354,
+        };
+        assert_eq!(
+            keypad.keypad().map(|keypad| keypad.name),
+            Some("MX Creative Keypad")
+        );
+        // Another wired Logitech device, and the same product ID through a
+        // receiver slot, are not that keypad.
+        let other = DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xc548,
+        };
+        assert_eq!(other.keypad(), None);
+        let paired = DeviceRoute::Bolt {
+            receiver_uid: "ABCD".into(),
+            slot: 1,
+        };
+        assert_eq!(paired.keypad(), None);
     }
 }

@@ -417,6 +417,7 @@ pub(in crate::inventory) fn assemble_unifying_device(
     settings_revision: u64,
 ) -> PairedDevice {
     let capabilities = probe.capabilities();
+    let hidpp10 = probe.is_hidpp10();
     PairedDevice {
         slot,
         codename,
@@ -427,6 +428,7 @@ pub(in crate::inventory) fn assemble_unifying_device(
         model_info: probe.model_info,
         capabilities,
         settings_revision,
+        hidpp10,
     }
 }
 

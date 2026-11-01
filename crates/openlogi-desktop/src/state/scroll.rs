@@ -2,7 +2,7 @@
 
 use tracing::debug;
 
-use openlogi_core::config::Config;
+use openlogi_core::config::{Config, MomentumScrolling};
 
 use crate::state::devices::DeviceRecord;
 
@@ -150,6 +150,44 @@ impl AppState {
             .and_then(DeviceRecord::persistent_config_key)
             .is_some_and(|key| self.config.smooth_wheel(key))
     }
+
+    /// The active device's effective momentum-scrolling settings: its own,
+    /// else Settings → General's, which also answer when no persistent device
+    /// is selected.
+    #[must_use]
+    pub fn current_momentum_scrolling(&self) -> MomentumScrolling {
+        self.current_record()
+            .and_then(DeviceRecord::persistent_config_key)
+            .map_or(self.config.app_settings.momentum_scrolling, |key| {
+                self.device_momentum_scrolling(key)
+            })
+    }
+
+    /// Whether the active device has its own momentum-scrolling settings.
+    #[must_use]
+    pub fn current_has_momentum_override(&self) -> bool {
+        self.current_record()
+            .and_then(DeviceRecord::persistent_config_key)
+            .is_some_and(|key| self.has_device_momentum_scrolling(key))
+    }
+
+    /// Persist the active device's own momentum-scrolling settings; settings
+    /// equal to Settings → General's clear its override. Without a persistent
+    /// device selected nothing is saved.
+    pub fn commit_current_momentum_scrolling(
+        &mut self,
+        momentum: MomentumScrolling,
+    ) -> StateEvents {
+        let Some(key) = self
+            .current_record()
+            .filter(|record| record.is_persistent())
+            .map(DeviceRecord::device_key)
+        else {
+            debug!("no persistent device key — momentum scrolling change ignored");
+            return self.for_current_device(StateEvent::DeviceConfigChanged);
+        };
+        self.commit_device_momentum_scrolling(&key, momentum)
+    }
     /// Turn the active device's smooth wheel on or off, persist it, and reload
     /// the agent so it diverts the wheel or hands it back. Turning it on needs
     /// `0x2121 HiResWheel` on the current link; turning it off stays possible
@@ -175,6 +213,45 @@ impl AppState {
         self.config
             .edit(|config| config.set_smooth_wheel(&key, enabled));
         self.persist_and_reload("smooth wheel");
+        events
+    }
+
+    /// Turn the active device's Glide on free spin and smooth wheel on or off
+    /// together — the glide only works on a smoothed wheel — with one save
+    /// and one agent reload. Turning them on needs `0x2121 HiResWheel` on the
+    /// current link; without it nothing changes. The glide switch is this
+    /// device's own: its override is cleared when the result matches
+    /// Settings → General, and other mice keep theirs.
+    pub fn commit_glide_with_smooth_wheel(&mut self, enabled: bool) -> StateEvents {
+        let events = self.for_current_device(StateEvent::DeviceConfigChanged);
+        if enabled && !self.current_hires_wheel_supported() {
+            debug!("smooth wheel requires HiResWheel on this link");
+            return events;
+        }
+        let Some(key) = self
+            .current_record()
+            .and_then(DeviceRecord::persistent_config_key)
+            .map(str::to_string)
+        else {
+            debug!("no persistent device key — glide and smooth-wheel change ignored");
+            return events;
+        };
+        let momentum = MomentumScrolling {
+            enabled,
+            ..self.config.momentum_scrolling(&key)
+        };
+        if self.config.smooth_wheel(&key) == enabled
+            && self.config.momentum_scrolling(&key).enabled == enabled
+        {
+            return events;
+        }
+        let override_value =
+            (momentum != self.config.app_settings.momentum_scrolling).then_some(momentum);
+        self.config.edit(|config| {
+            config.set_smooth_wheel(&key, enabled);
+            config.set_device_momentum_scrolling(&key, override_value);
+        });
+        self.persist_and_reload("glide and smooth wheel");
         events
     }
 }
@@ -228,6 +305,7 @@ mod tests {
                 capture_id: None,
                 kind: DeviceKind::Mouse,
                 capabilities: None,
+                hidpp10: false,
                 light_capabilities: None,
                 slot: 1,
                 online: true,

@@ -132,6 +132,7 @@ fn spec(resolution: Option<ScrollResolution>, inverted: Option<bool>) -> Capture
         divert_main_wheel: Some(MainWheelDivert {
             resolution,
             inverted,
+            high_resolution: false,
         }),
         ..CaptureSpec::default()
     }
@@ -479,5 +480,56 @@ async fn rearm_after_wake_diverts_the_wheel_again() {
     assert_eq!(
         *armed.mode.lock().unwrap(),
         [DIVERTED | HIGH_RES, PRIORITY, RATE]
+    );
+}
+
+/// Diverted for smoothing, the wheel reports fractions of a notch; handed
+/// back, it gets its native resolution again, so the OS never sees
+/// high-resolution reports it would read as whole notches.
+#[tokio::test]
+async fn a_high_resolution_divert_restores_the_native_resolution() {
+    let mut spec = spec(None, None);
+    if let Some(divert) = spec.divert_main_wheel.as_mut() {
+        divert.high_resolution = true;
+    }
+    let armed = arm(0, 0, SetReply::Apply, &spec).await;
+    armed.result.as_ref().unwrap();
+    let wheel = armed.controls.main_wheel.as_ref().expect("armed");
+    assert_eq!(wheel.per_notch.get(), 8);
+    let handle = restore(armed).await;
+    assert_eq!(
+        mode_writes(&handle),
+        [[DIVERTED | HIGH_RES, PRIORITY, RATE], [0, PRIORITY, RATE]]
+    );
+}
+
+/// A wheel an earlier agent left diverted in high resolution is handed back
+/// in low resolution: its leftover resolution is not its native one.
+#[tokio::test]
+async fn a_wheel_left_diverted_in_high_resolution_is_handed_back_low() {
+    let mut spec = spec(None, None);
+    if let Some(divert) = spec.divert_main_wheel.as_mut() {
+        divert.high_resolution = true;
+    }
+    let armed = arm(0, DIVERTED | HIGH_RES, SetReply::Apply, &spec).await;
+    armed.result.as_ref().unwrap();
+    let handle = restore(armed).await;
+    // Arming finds the wheel already in its mode and writes nothing.
+    assert_eq!(mode_writes(&handle), [[0, PRIORITY, RATE]]);
+}
+
+/// A configured native resolution wins over the device's own on hand-back.
+#[tokio::test]
+async fn a_high_resolution_divert_hands_back_the_configured_resolution() {
+    let mut spec = spec(Some(ScrollResolution::Low), None);
+    if let Some(divert) = spec.divert_main_wheel.as_mut() {
+        divert.high_resolution = true;
+    }
+    let armed = arm(0, HIGH_RES, SetReply::Apply, &spec).await;
+    armed.result.as_ref().unwrap();
+    let handle = restore(armed).await;
+    assert_eq!(
+        mode_writes(&handle),
+        [[DIVERTED | HIGH_RES, PRIORITY, RATE], [0, PRIORITY, RATE]]
     );
 }

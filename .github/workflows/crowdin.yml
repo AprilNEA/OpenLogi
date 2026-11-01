@@ -42,7 +42,7 @@ jobs:
         uses: ./.github/actions/github-app-token-from-1password
         with:
           op-service-account-token: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
-          op-github-app-item: ${{ secrets.OP_GITHUB_APP_ITEM }}
+          op-environment-id: ${{ vars.OP_AUTOMATION_ENVIRONMENT_ID }}
 
       - name: Configure git for App token
         env:
@@ -53,13 +53,10 @@ jobs:
 
       - name: Load Crowdin credentials from 1Password
         id: crowdin_config
-        uses: 1password/load-secrets-action@70062d7a876d3eb6334754fa26efd2fbd90c32f2 # v5.0.1
+        uses: ./.github/actions/op-environment
         with:
-          export-env: false
-        env:
-          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
-          CROWDIN_PROJECT_ID: ${{ secrets.OP_CROWDIN_SECRET_ITEM }}/CROWDIN_PROJECT_ID
-          CROWDIN_PERSONAL_TOKEN: ${{ secrets.OP_CROWDIN_SECRET_ITEM }}/CROWDIN_PERSONAL_TOKEN
+          service-account-token: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          environment-id: ${{ vars.OP_AUTOMATION_ENVIRONMENT_ID }}
 
       - name: Self-test locale merge script
         run: python3 .github/scripts/i18n/merge_crowdin_download.py --self-test

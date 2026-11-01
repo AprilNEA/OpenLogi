@@ -14,6 +14,13 @@
 //! them the device's own `0x1b04` table reports as divertable, so a key
 //! OpenLogi has no catalog row for is captured exactly like a known one.
 //!
+//! A keypad's grid keys join the same session through the channel's raw-report
+//! listener: the MX Creative Keypad reports them
+//! on a vendor report sharing its HID++ node, which never parses as a message,
+//! so they cannot ride diversion. They are observed, never armed — the session
+//! writes nothing on their behalf, and only the indices named in
+//! [`KeyboardWanted::grid`] emit edges.
+//!
 //! Diversion works on the key's *control* — the printed media/shortcut
 //! function — so it fires when Fn-lock is off (or via Fn+key when it is on).
 //! The plain F1–F12 codes of an Fn-locked row travel the ordinary HID keyboard
@@ -26,6 +33,8 @@ use hidpp::protocol::v20;
 use openlogi_core::binding::ButtonId;
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, info, warn};
+
+use crate::keypad_vendor::{VendorFunction, input_payload};
 
 use super::capture::{
     ArmedCapture, CaptureHost, Liveness, ReportingChangeStream, open_device, run_capture,
@@ -69,19 +78,34 @@ pub fn is_reserved_keyboard_control(cid: u16) -> bool {
     RESERVED_KEYBOARD_CONTROLS.contains(&cid)
 }
 
+/// Which keys the keyboard session captures, by the plane each one reports
+/// on. Both maps dispatch the edges they emit as the [`ButtonId`] the caller
+/// chose.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct KeyboardWanted {
+    /// `0x1b04` controls to divert, keyed by control ID. Controls the device
+    /// doesn't expose (or can't divert) are skipped with a debug log, so a
+    /// partially-supported keyboard degrades per key rather than failing whole.
+    pub controls: BTreeMap<u16, ButtonId>,
+    /// Keypad grid keys to observe, keyed by the wire index the vendor report
+    /// carries (the numbering [`openlogi_core::binding::GridKey`] pins).
+    /// Arming them writes nothing to the device.
+    pub grid: BTreeMap<u8, ButtonId>,
+}
+
 /// Capture the requested keyboard controls on `route` until `host.shutdown`
 /// resolves, forwarding [`CapturedInput::ButtonDown`] and
 /// [`CapturedInput::ButtonUp`] edges to `host.sink`.
 ///
-/// `wanted` maps `0x1b04` control IDs to the [`ButtonId`] they dispatch as —
-/// the caller publishes only the keys that carry a real binding, possibly
-/// none. The session follows every new value in place: it hands back the
-/// keys that left the set, diverts the keys that joined it, and does not
-/// write a key that stays. A per-app binding change therefore costs a few
+/// `wanted` names the keys to capture as a [`KeyboardWanted`]: `0x1b04`
+/// controls to divert and keypad grid keys to observe, each mapped to the
+/// [`ButtonId`] its edges dispatch as. The caller publishes only the keys
+/// that carry a real binding, possibly none. The session follows every new
+/// value in place: it hands back the controls that left the set, diverts the
+/// controls that joined it, and does not write a control that stays; grid
+/// keys need no write at all. A per-app binding change therefore costs a few
 /// writes instead of a full re-arm, during which every key would run its
-/// native function (#2140). Controls the device doesn't expose (or can't
-/// divert) are skipped with a debug log, so a partially-supported keyboard
-/// degrades per key rather than failing whole.
+/// native function (#2140).
 ///
 /// Runs on the exact channel currently published by `host.registry`. A
 /// registry miss returns [`CaptureError::DeviceNotFound`] without falling back
@@ -89,7 +113,7 @@ pub fn is_reserved_keyboard_control(cid: u16) -> bool {
 /// inventory publication.
 pub async fn run_keyboard_capture_session(
     route: DeviceRoute,
-    wanted: watch::Receiver<BTreeMap<u16, ButtonId>>,
+    wanted: watch::Receiver<KeyboardWanted>,
     host: CaptureHost<'_>,
 ) -> Result<CaptureSessionOutcome, CaptureSessionFailure> {
     let shared = host.channel_for(&route)?;
@@ -104,7 +128,7 @@ pub async fn run_keyboard_capture_session(
 /// opaque restore capability for the manager to retain and retry.
 async fn arm_keyboard(
     shared: &SharedChannel,
-    wanted: watch::Receiver<BTreeMap<u16, ButtonId>>,
+    wanted: watch::Receiver<KeyboardWanted>,
     registry: &ChannelRegistry,
 ) -> Result<ArmedKeys, CaptureSessionFailure> {
     let device = open_device(shared).await?;
@@ -128,10 +152,11 @@ async fn arm_keyboard(
         table,
         reporting: Vec::new(),
         keys: Arc::default(),
+        grid: Arc::default(),
         reporting_changes,
         wanted,
     };
-    // Arming is the first change, from no key diverted to the wanted set.
+    // Arming is the first change, from no key captured to the wanted set.
     if let Err(error) = armed.retarget().await {
         let pending = armed.into_pending(shared);
         return Err(rollback_start(error, pending, registry).await);
@@ -243,6 +268,81 @@ fn can_divert(cid: u16, table: &[CtrlIdInfo]) -> bool {
     divertable
 }
 
+/// Marks a grid-key frame's payload as the held-id list.
+const GRID_ID_LIST: u8 = 0x01;
+
+/// Decode one keypad grid-key vendor PDU into the ids it reports held.
+///
+/// The MX Creative Keypad's framing, hardware-verified 2026-10: a 32-byte
+/// report `13 ff 02 00 [seq] 01 [id, …]` (channel framing owned by
+/// [`crate::keypad_vendor`]) whose NUL-terminated payload lists
+/// every grid key held *now* — a press names the key, the release that
+/// follows names none, and a chord names every held key in one frame. `seq`
+/// is a rolling counter (`c0`…`cf` on a live capture) that carries no edge
+/// of its own; the reference decoder (`node-logitech-mx-creative-console`)
+/// reads the payload the same way. Both payload selectors are pinned (`00`
+/// sub-report, `01` id-list marker). Anything else on the node — HID++
+/// replies, drawing acks, other vendor traffic — decodes to `None`; the
+/// index table itself is owned by [`openlogi_core::binding::GridKey`], so
+/// this decodes a frame, not identity.
+fn grid_key_frame(bytes: &[u8]) -> Option<impl Iterator<Item = u8> + '_> {
+    match input_payload(bytes, VendorFunction::GridKeys)? {
+        [_seq, GRID_ID_LIST, ids @ ..] if !ids.is_empty() => {
+            Some(ids.iter().copied().take_while(|id| *id != 0))
+        }
+        _ => None,
+    }
+}
+
+/// Diff one grid-key vendor frame's held set against `down` into edges: a
+/// bound key the frame newly holds goes down, a held one it no longer names
+/// comes up, releases first. Repeated frames change nothing, and unbound
+/// indices never enter the state, so their firmware function is all they do.
+fn emit_grid_edges(
+    down: &mut BTreeSet<u8>,
+    bytes: &[u8],
+    grid: &BTreeMap<u8, ButtonId>,
+    sink: &mpsc::UnboundedSender<CapturedInput>,
+) {
+    let Some(ids) = grid_key_frame(bytes) else {
+        return;
+    };
+    let held: BTreeSet<u8> = ids.filter(|id| grid.contains_key(id)).collect();
+    for index in down.difference(&held) {
+        let _ = sink.send(CapturedInput::ButtonUp(grid[index]));
+    }
+    for index in held.difference(down) {
+        let _ = sink.send(CapturedInput::ButtonDown(grid[index]));
+    }
+    *down = held;
+}
+
+/// The keypad grid keys a session dispatches, and which of them are held.
+/// The raw-report handler reads it on the channel's read thread while a
+/// wanted-set change updates it, so it is shared like [`DivertedKeys`]. No
+/// firmware state is owned here — these keys report whatever the binding does.
+#[derive(Debug, Default)]
+struct GridKeys {
+    /// Bound grid keys, keyed by the wire index.
+    buttons: BTreeMap<u8, ButtonId>,
+    /// The bound grid keys physically held, as of the last frame.
+    held: BTreeSet<u8>,
+}
+
+impl GridKeys {
+    /// Diff one vendor frame into edges (see [`emit_grid_edges`]).
+    fn report(&mut self, bytes: &[u8], sink: &mpsc::UnboundedSender<CapturedInput>) {
+        emit_grid_edges(&mut self.held, bytes, &self.buttons, sink);
+    }
+
+    /// Dispatch `wanted` from now on. A held key that left the set is
+    /// forgotten without a release edge, as [`DivertedKeys::remove`] does.
+    fn follow(&mut self, wanted: &BTreeMap<u8, ButtonId>) {
+        self.buttons.clone_from(wanted);
+        self.held.retain(|index| wanted.contains_key(index));
+    }
+}
+
 struct ArmedKeys {
     controls: ReprogControlsV4,
     /// The keyboard's `0x1b04` control table, read once at arming, so a
@@ -253,12 +353,14 @@ struct ArmedKeys {
     reporting: Vec<ArmedReporting>,
     /// What the report handler dispatches.
     keys: Arc<Mutex<DivertedKeys>>,
+    /// What the raw-report handler dispatches.
+    grid: Arc<Mutex<GridKeys>>,
     /// Other clients' reporting changes on `controls`, until the running
     /// session takes them.
     reporting_changes: Option<ReportingChangeStream>,
-    /// The keys the owner wants diverted. [`ArmedCapture::retarget`] marks a
+    /// The keys the owner wants captured. [`ArmedCapture::retarget`] marks a
     /// value seen when it applies it.
-    wanted: watch::Receiver<BTreeMap<u16, ButtonId>>,
+    wanted: watch::Receiver<KeyboardWanted>,
 }
 
 impl ArmedKeys {
@@ -266,6 +368,11 @@ impl ArmedKeys {
     /// critical section is panic-free, so the data is consistent.
     fn keys(&self) -> MutexGuard<'_, DivertedKeys> {
         self.keys.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The grid dispatch state, recovered like [`Self::keys`].
+    fn grid(&self) -> MutexGuard<'_, GridKeys> {
+        self.grid.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Hand back the keys `change` drops, then divert the keys it adds.
@@ -310,6 +417,7 @@ impl ArmedCapture for ArmedKeys {
         info!(
             index = device_index,
             keys = self.keys().buttons.len(),
+            grid_keys = self.grid().buttons.len(),
             wake_rearm,
             "keyboard key capture active"
         );
@@ -333,6 +441,20 @@ impl ArmedCapture for ArmedKeys {
             keys.lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .report(&cids, &sink);
+        }
+    }
+
+    fn raw_report_handler(
+        &self,
+        _device_index: u8,
+        sink: mpsc::UnboundedSender<CapturedInput>,
+    ) -> impl Fn(&[u8]) + Send + Sync + 'static {
+        let grid = Arc::clone(&self.grid);
+        move |bytes| {
+            // Recovered like the control handler's guard above.
+            grid.lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .report(bytes, &sink);
         }
     }
 
@@ -365,7 +487,8 @@ impl ArmedCapture for ArmedKeys {
 
     async fn retarget(&mut self) -> Result<(), CaptureError> {
         let wanted = self.wanted.borrow_and_update().clone();
-        let change = DivertChange::between(&self.keys().buttons, &wanted, &self.table);
+        self.grid().follow(&wanted.grid);
+        let change = DivertChange::between(&self.keys().buttons, &wanted.controls, &self.table);
         if !change.writes_nothing() {
             debug!(
                 hand_back = change.hand_back.len(),
@@ -401,7 +524,7 @@ impl ArmedCapture for ArmedKeys {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use openlogi_core::binding::KNOWN_CONTROLS;
+    use openlogi_core::binding::{GridKey, KNOWN_CONTROLS};
 
     /// The keyboard catalog names keys; the mouse capture path owns the
     /// standard-button, gesture-source and DPI-shift control families. One
@@ -531,5 +654,149 @@ mod tests {
             DivertChange::between(&keys(&[0x00e7, 0x00e8]), &keys(&[]), &table).hand_back,
             [0x00e7, 0x00e8]
         );
+    }
+
+    /// A grid PDU as the keypad sends it: `13 ff 02 00 [seq] 01 [id, …]`
+    /// padded to the 32 bytes the node carries.
+    fn grid_pdu(seq: u8, ids: &[u8]) -> Vec<u8> {
+        let mut pdu = vec![0x13, 0xff, 0x02, 0x00, seq, 0x01];
+        pdu.extend_from_slice(ids);
+        pdu.resize(32, 0);
+        pdu
+    }
+
+    fn frame_ids(bytes: &[u8]) -> Option<Vec<u8>> {
+        grid_key_frame(bytes).map(Iterator::collect)
+    }
+
+    fn drain(inputs: &mut mpsc::UnboundedReceiver<CapturedInput>) -> Vec<CapturedInput> {
+        std::iter::from_fn(|| inputs.try_recv().ok()).collect()
+    }
+
+    #[test]
+    fn grid_frames_decode_the_held_ids() {
+        // Captured on the keypad: key 8 pressed, then released.
+        assert_eq!(frame_ids(&grid_pdu(0xc8, &[8])), Some(vec![8]));
+        assert_eq!(frame_ids(&grid_pdu(0xc9, &[])), Some(vec![]));
+        // An HID++ long report sharing the node, and a truncated frame.
+        assert_eq!(frame_ids(&[0x11, 0xff, 0x04, 0x1a, 0x0b, 0xb8, 0, 0]), None);
+        assert_eq!(frame_ids(&[0x13, 0xff, 0x02, 0x00, 0x01]), None);
+    }
+
+    #[test]
+    fn grid_frames_reject_wrong_payload_selectors() {
+        // The `13 ff 02` prefix alone must not decode: the LCD image-write
+        // ack (`13 ff 02 2b c1 00 01`) and drawing-style acks name what
+        // would be a valid key byte.
+        let mut ack = vec![0x13, 0xff, 0x02, 0x2b, 0xc1, 0x00, 0x01];
+        ack.resize(32, 0);
+        assert_eq!(frame_ids(&ack), None);
+        // And a frame with the id-list marker replaced also decodes to nothing.
+        assert_eq!(frame_ids(&[0x13, 0xff, 0x02, 0x00, 0x01, 0x02, 0x05]), None);
+    }
+
+    /// The live sequence: a press frame names the key and the release frame
+    /// names none, whatever the rolling counter's parity — the counter wraps
+    /// from `cf` to `c0` mid-capture, and a press lands on even and odd
+    /// values alike.
+    #[test]
+    fn a_press_and_its_empty_release_frame_make_one_edge_pair() {
+        let grid = BTreeMap::from([
+            (8, ButtonId::grid(GridKey::BottomMiddle)),
+            (9, ButtonId::grid(GridKey::BottomRight)),
+        ]);
+        let (sink, mut inputs) = mpsc::unbounded_channel();
+        let mut down = BTreeSet::new();
+
+        for (seq, ids) in [(0xce, &[8][..]), (0xcf, &[]), (0xc0, &[9]), (0xc1, &[])] {
+            emit_grid_edges(&mut down, &grid_pdu(seq, ids), &grid, &sink);
+        }
+
+        assert_eq!(
+            drain(&mut inputs),
+            vec![
+                CapturedInput::ButtonDown(ButtonId::grid(GridKey::BottomMiddle)),
+                CapturedInput::ButtonUp(ButtonId::grid(GridKey::BottomMiddle)),
+                CapturedInput::ButtonDown(ButtonId::grid(GridKey::BottomRight)),
+                CapturedInput::ButtonUp(ButtonId::grid(GridKey::BottomRight)),
+            ]
+        );
+        assert_eq!(down, BTreeSet::default());
+    }
+
+    #[test]
+    fn grid_edges_are_balanced_and_ignore_unbound_keys() {
+        let grid = BTreeMap::from([(2, ButtonId::grid(GridKey::TopMiddle))]);
+        let (sink, mut inputs) = mpsc::unbounded_channel();
+        let mut down = BTreeSet::new();
+
+        // A repeated frame must not double the edge, and an unbound key —
+        // alone or held with a bound one — must not touch the state.
+        emit_grid_edges(&mut down, &grid_pdu(0x01, &[2]), &grid, &sink);
+        emit_grid_edges(&mut down, &grid_pdu(0x02, &[2]), &grid, &sink);
+        emit_grid_edges(&mut down, &grid_pdu(0x03, &[2, 7]), &grid, &sink);
+        emit_grid_edges(&mut down, &grid_pdu(0x04, &[7]), &grid, &sink);
+        emit_grid_edges(&mut down, &grid_pdu(0x05, &[]), &grid, &sink);
+
+        assert_eq!(
+            drain(&mut inputs),
+            vec![
+                CapturedInput::ButtonDown(ButtonId::grid(GridKey::TopMiddle)),
+                CapturedInput::ButtonUp(ButtonId::grid(GridKey::TopMiddle)),
+            ]
+        );
+        assert_eq!(down, BTreeSet::default());
+    }
+
+    /// A grid key that leaves the wanted set while held is forgotten: its
+    /// release frame emits nothing, and a key that stays keeps its state.
+    #[test]
+    fn a_grid_key_removed_while_held_emits_no_release() {
+        let mut grid = GridKeys::default();
+        grid.follow(&BTreeMap::from([
+            (2, ButtonId::grid(GridKey::TopMiddle)),
+            (3, ButtonId::grid(GridKey::TopRight)),
+        ]));
+        let (sink, mut inputs) = mpsc::unbounded_channel();
+
+        grid.report(&grid_pdu(0x01, &[2, 3]), &sink);
+        grid.follow(&BTreeMap::from([(3, ButtonId::grid(GridKey::TopRight))]));
+        grid.report(&grid_pdu(0x02, &[]), &sink);
+
+        assert_eq!(
+            drain(&mut inputs),
+            vec![
+                CapturedInput::ButtonDown(ButtonId::grid(GridKey::TopMiddle)),
+                CapturedInput::ButtonDown(ButtonId::grid(GridKey::TopRight)),
+                CapturedInput::ButtonUp(ButtonId::grid(GridKey::TopRight)),
+            ]
+        );
+        assert_eq!(grid.held, BTreeSet::default());
+    }
+
+    #[test]
+    fn grid_chords_emit_one_balanced_edge_pair_per_key() {
+        let grid = BTreeMap::from([
+            (3, ButtonId::grid(GridKey::TopRight)),
+            (8, ButtonId::grid(GridKey::BottomMiddle)),
+        ]);
+        let (sink, mut inputs) = mpsc::unbounded_channel();
+        let mut down = BTreeSet::new();
+
+        // Press both as a chord, release 3 while 8 stays held, then release 8.
+        emit_grid_edges(&mut down, &grid_pdu(0x01, &[3, 8]), &grid, &sink);
+        emit_grid_edges(&mut down, &grid_pdu(0x02, &[8]), &grid, &sink);
+        emit_grid_edges(&mut down, &grid_pdu(0x03, &[]), &grid, &sink);
+
+        assert_eq!(
+            drain(&mut inputs),
+            vec![
+                CapturedInput::ButtonDown(ButtonId::grid(GridKey::TopRight)),
+                CapturedInput::ButtonDown(ButtonId::grid(GridKey::BottomMiddle)),
+                CapturedInput::ButtonUp(ButtonId::grid(GridKey::TopRight)),
+                CapturedInput::ButtonUp(ButtonId::grid(GridKey::BottomMiddle)),
+            ]
+        );
+        assert_eq!(down, BTreeSet::default());
     }
 }

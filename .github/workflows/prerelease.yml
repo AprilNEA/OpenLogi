@@ -106,7 +106,7 @@ jobs:
         uses: ./.github/actions/github-app-token-from-1password
         with:
           op-service-account-token: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
-          op-github-app-item: ${{ secrets.OP_GITHUB_APP_ITEM }}
+          op-environment-id: ${{ vars.OP_AUTOMATION_ENVIRONMENT_ID }}
 
       # The App's token, not GITHUB_TOKEN: a tag GITHUB_TOKEN pushes starts no
       # workflow, and release.yml must run on it.

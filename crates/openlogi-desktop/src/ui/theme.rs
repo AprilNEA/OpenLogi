@@ -32,6 +32,18 @@ pub const HEADER_H: Rems = rems(4.);
 pub const FOOTER_H: Rems = rems(2.5);
 /// Device-detail navigation rail width (168 px).
 pub const DETAIL_RAIL_W: Rems = rems(10.5);
+/// The device-detail tab body's width: the window beside [`DETAIL_RAIL_W`],
+/// taken at this window's rem so it follows the interface scale.
+pub fn detail_content_width(window: &Window) -> f32 {
+    let rail_w = DETAIL_RAIL_W.to_pixels(window.rem_size());
+    f32::from(window.viewport_size().width - rail_w)
+}
+
+/// [`detail_content_width`] of a `window_w` px window at the standard scale.
+#[cfg(test)]
+pub(crate) fn standard_detail_content_width(window_w: f32) -> f32 {
+    window_w - f32::from(DETAIL_RAIL_W.to_pixels(px(BASE_REM_SIZE)))
+}
 /// Height of standalone form controls: buttons, text inputs, tabs (30 px).
 /// gpui-component's `.small()` maps to a 24 px `h_6`, which reads undersized
 /// against this control rhythm — small controls pin the height
@@ -101,6 +113,12 @@ pub const PHOTO_MARK_FILL: Hsla = hsla(0., 0., 0.18, 0.85);
 /// The glow of a lit key light, shown on its emblem. It depicts the physical
 /// light, so it stays warm under every theme.
 pub const WARM_LIGHT: Hsla = hsla(0.105, 0.9, 0.66, 1.);
+
+/// The screen of an LCD key, drawn as the device shows it. It depicts the
+/// hardware, so it stays black under every theme.
+pub const LCD_SCREEN: Hsla = hsla(0., 0., 0., 1.);
+/// The white an LCD key draws its glyph and caption in on [`LCD_SCREEN`].
+pub const LCD_INK: Hsla = hsla(0., 0., 1., 1.);
 
 /// The colours of the Appearance page's light / dark mode thumbnails. They
 /// depict each mode, so they stay fixed whatever theme is active.

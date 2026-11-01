@@ -158,7 +158,13 @@ pub use succession::Identity;
 ///      `PreviousDpiPreset`, `DpiShift` and `GShift` actions,
 ///      `Agent::read_onboard`, `HidppOperation::ReadOnboard` and
 ///      `PairingFailure::ReceiverFull` appended — G-series onboard memory,
-///      host mode and G-Shift.
+///      host mode and G-Shift. `HidppOperation::WriteKeyImage` appended after
+///      them — an image written to one of the MX Creative Keypad's LCD keys;
+///      `Action::{PreviousKeypadPage, NextKeypadPage}` appended after the
+///      G-series actions, and `ButtonId` grid keys gain page-qualified names
+///      (`page2:gridMiddle`) — the keypad's binding pages. `PairedDevice::hidpp10`
+///      appended, so the GUI can tell a HID++ 1.0 device from one it never
+///      probed.
 pub const PROTOCOL_VERSION: u32 = 43;
 
 /// Environment variable through which the agent hands a supervised helper the

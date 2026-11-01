@@ -1,7 +1,7 @@
 //! G-series host mode: captured buttons are muted in the `0x8110` mapping and
 //! dispatched from spy reports.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use hidpp::{
     channel::HidppChannel,
@@ -69,7 +69,8 @@ impl HostMode {
     }
 }
 
-// Checked on a G502 LIGHTSPEED: only these send anything natively.
+// Checked on a G502 LIGHTSPEED: only these send anything natively. Other
+// models' factory tables are unverified.
 fn native_hid_button(button: ButtonId) -> u8 {
     match button {
         ButtonId::LeftClick => 1,
@@ -93,6 +94,10 @@ enum ArmedMode {
         spy_index: u8,
         host: HostMode,
         captured: Vec<(u8, ButtonId)>,
+        /// The mapping read on the way into host mode, written back on the
+        /// way out. Behind a `Mutex` because a rearm, which takes `&self`,
+        /// replaces it when a power cycle put the mouse back onboard.
+        baseline: Mutex<Option<Vec<u8>>>,
     },
     Profile(ProfileIndex),
 }
@@ -111,9 +116,17 @@ impl ArmedOnboard {
 
     pub(super) fn restore(&self) -> Option<SpyRestore> {
         match &self.mode {
-            ArmedMode::Host { spy_index, .. } => Some(SpyRestore {
+            ArmedMode::Host {
+                spy_index,
+                baseline,
+                ..
+            } => Some(SpyRestore {
                 onboard_index: self.onboard_index,
                 spy_index: *spy_index,
+                baseline: baseline
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .clone(),
             }),
             ArmedMode::Profile(_) => None,
         }
@@ -127,8 +140,11 @@ impl ArmedOnboard {
         let onboard = self.onboard();
         let result = match &self.mode {
             ArmedMode::Host {
-                spy_index, host, ..
-            } => self.apply_host(&onboard, *spy_index, host).await,
+                spy_index,
+                host,
+                baseline,
+                ..
+            } => self.apply_host(&onboard, *spy_index, host, baseline).await,
             ArmedMode::Profile(index) => apply_profile(&onboard, *index)
                 .await
                 .map_err(CaptureError::from),
@@ -152,9 +168,13 @@ impl ArmedOnboard {
         onboard: &OnboardProfilesFeature,
         spy_index: u8,
         host: &HostMode,
+        baseline: &Mutex<Option<Vec<u8>>>,
     ) -> Result<(), CaptureError> {
-        onboard.set_mode(OnboardMode::Host).await?;
         let spy = MouseButtonSpyFeature::new(Arc::clone(&self.chan), self.device_index, spy_index);
+        if let Some(found) = read_baseline(onboard, &spy, &host.mapping()).await {
+            *baseline.lock().unwrap_or_else(PoisonError::into_inner) = Some(found);
+        }
+        onboard.set_mode(OnboardMode::Host).await?;
         spy.set_mapping(&host.mapping()).await?;
         spy.start_spy().await?;
         if let Some(rate) = host.report_rate {
@@ -171,11 +191,118 @@ impl ArmedOnboard {
     }
 }
 
+/// The mapping to put back when this mouse leaves host mode, read before it
+/// enters: reverse-engineered, the mouse keeps a mapping written in host mode
+/// after returning to onboard mode, until a power cycle (measured on a
+/// G502 X). The table belongs to the mouse and is not always the identity: a
+/// G903's shipped profile reads `01 02 03 00 ..` (#2178), a G502 X's `01..0b`.
+///
+/// Only a mouse found onboard has one to give, and a read works there on both
+/// models. In host mode the table is this session's own or a crash's leftover,
+/// so a rearm keeps the baseline it holds and a first arm goes without: the
+/// accepted cost is a crashed session's mouse staying muted until a power
+/// cycle. Onboard proves no power cycle either, because the mouse keeps the
+/// table host mode wrote: a read equal to `ours`, what this session writes, is
+/// treated the same way. Any other table replaces the baseline.
+///
+/// Read over the mouse's whole slot count, because the write pads to sixteen
+/// with zeros. An empty read is a mouse with no slots: returned as it is, so
+/// the exit knows nothing is owed, and never written. Any failure warns and
+/// yields `None`: a mapping that cannot be restored costs less than a mouse
+/// that cannot arm.
+async fn read_baseline(
+    onboard: &OnboardProfilesFeature,
+    spy: &MouseButtonSpyFeature,
+    ours: &[u8],
+) -> Option<Vec<u8>> {
+    match onboard.get_mode().await {
+        Ok(OnboardMode::Onboard) => {}
+        Ok(OnboardMode::Host) => {
+            debug!("mouse already in host mode: its 0x8110 mapping is not a baseline");
+            return None;
+        }
+        Err(error) => {
+            warn!(?error, "reading the onboard mode before host mode failed");
+            return None;
+        }
+    }
+    let read = match spy.get_button_count().await {
+        Ok(count) => spy.get_mapping(count).await,
+        Err(error) => Err(error),
+    };
+    match read {
+        Ok(found) if !found.is_empty() && is_ours(&found, ours) => {
+            warn!("0x8110 mapping found onboard is the one host mode writes: not a baseline");
+            None
+        }
+        Ok(found) => Some(found),
+        Err(error) => {
+            warn!(?error, "reading the 0x8110 button mapping failed");
+            None
+        }
+    }
+}
+
+/// Whether `found` is what writing `ours` left on the mouse: the write pads
+/// with zeros. A mouse whose real table happens to match loses nothing, since
+/// its table then needs no restoring.
+fn is_ours(found: &[u8], ours: &[u8]) -> bool {
+    let mut written = ours.to_vec();
+    written.resize(found.len(), 0);
+    found == written
+}
+
+/// How leaving host mode went: the two writes are independent, because a
+/// failed mapping write must not strand the mouse in host mode.
+struct HostExit {
+    /// The mapping write succeeded, or had nothing to write.
+    mapped: bool,
+    /// The mode write.
+    left: Result<(), Hidpp20Error>,
+}
+
+/// Write `baseline` back, then leave host mode. The mapping goes first, while
+/// the mouse is still in host mode (observed on a G502 X: outside host mode
+/// the write errors). Without a baseline no mapping is written: inventing one
+/// could switch on slots the mouse had off. An empty baseline is a mouse with
+/// no slots, which has nothing to restore.
+async fn leave_host_mode(
+    onboard: &OnboardProfilesFeature,
+    spy: &MouseButtonSpyFeature,
+    baseline: Option<&[u8]>,
+) -> HostExit {
+    let mapped = match baseline {
+        Some([]) => true,
+        Some(mapping) => {
+            let written = spy.set_mapping(mapping).await;
+            if let Err(error) = &written {
+                warn!(?error, "restoring the 0x8110 button mapping failed");
+            }
+            written.is_ok()
+        }
+        None => {
+            warn!("no 0x8110 baseline: the button mapping could not be restored");
+            true
+        }
+    };
+    let left = onboard.set_mode(OnboardMode::Onboard).await;
+    if let Err(error) = &left {
+        warn!(?error, "leaving G-series host mode failed");
+    }
+    HostExit { mapped, left }
+}
+
+/// Select onboard profile `index`, leaving host mode if the mouse is in it.
+/// A session restores its own mapping before a successor arms, so host mode
+/// here is another program's, or that of a session that died or a previous
+/// run: there is no baseline, and the mapping stays as it is until a power
+/// cycle.
 async fn apply_profile(
     onboard: &OnboardProfilesFeature,
     index: ProfileIndex,
 ) -> Result<(), Hidpp20Error> {
     if onboard.get_mode().await? != OnboardMode::Onboard {
+        warn!("found in host mode: the 0x8110 button mapping could not be restored");
         onboard.set_mode(OnboardMode::Onboard).await?;
     }
     if onboard.get_current_profile().await? != Some(index.get()) {
@@ -208,6 +335,7 @@ pub(super) async fn arm_onboard(
                 spy_index: spy_info.index,
                 captured: host.captured().collect(),
                 host: host.clone(),
+                baseline: Mutex::new(None),
             }
         }
     };
@@ -223,11 +351,16 @@ pub(super) async fn arm_onboard(
             spy_index,
             host,
             captured,
+            baseline,
         } => {
-            state.apply_host(&onboard, *spy_index, host).await?;
+            state
+                .apply_host(&onboard, *spy_index, host, baseline)
+                .await?;
             info!(captured = captured.len(), "G-series host mode active");
         }
-        ArmedMode::Profile(index) => apply_profile(&onboard, *index).await?,
+        ArmedMode::Profile(index) => {
+            apply_profile(&onboard, *index).await?;
+        }
     }
     Ok(())
 }
@@ -236,9 +369,16 @@ pub(super) async fn arm_onboard(
 pub(crate) struct SpyRestore {
     onboard_index: u8,
     spy_index: u8,
+    /// The mapping to write back, if one was read.
+    baseline: Option<Vec<u8>>,
 }
 
 impl SpyRestore {
+    /// Stop the spy, write the baseline back and leave host mode.
+    ///
+    /// `false` keeps the restore owed. A mouse found onboard completes it
+    /// without a write, so a mapping-only failure, which still left host mode,
+    /// stays stale until a power cycle: the retry has nothing it can do.
     pub(crate) async fn restore_on(&self, chan: &Arc<HidppChannel>, device_index: u8) -> bool {
         let spy = MouseButtonSpyFeature::new(Arc::clone(chan), device_index, self.spy_index);
         let onboard =
@@ -246,13 +386,13 @@ impl SpyRestore {
         if let Err(error) = spy.stop_spy().await {
             debug!(?error, "stopping 0x8110 spy failed");
         }
-        match onboard.set_mode(OnboardMode::Onboard).await {
-            Ok(()) => true,
-            Err(error) => {
-                warn!(?error, "leaving G-series host mode failed");
-                false
-            }
+        // A mouse already onboard (host mode never took) refuses the mapping
+        // write, which would leave this restore owed forever.
+        if matches!(onboard.get_mode().await, Ok(OnboardMode::Onboard)) {
+            return true;
         }
+        let exit = leave_host_mode(&onboard, &spy, self.baseline.as_deref()).await;
+        exit.mapped && exit.left.is_ok()
     }
 }
 
@@ -345,6 +485,26 @@ mod tests {
             host().captured().collect::<Vec<_>>(),
             [(3, ButtonId::Back), (5, ButtonId::G6)]
         );
+    }
+
+    /// The G502 X LIGHTSPEED puts the sniper on slot 4 and Forward on slot 5;
+    /// the mapping follows the button, not the slot index. Built by hand
+    /// because the layout lives in `openlogi-core`'s gaming table.
+    #[test]
+    fn mapping_sends_forward_from_slot_five_and_nothing_for_a_captured_slot_four() {
+        let host = HostMode {
+            slots: vec![
+                (ButtonId::LeftClick, SlotRoute::Native),
+                (ButtonId::RightClick, SlotRoute::Native),
+                (ButtonId::MiddleClick, SlotRoute::Native),
+                (ButtonId::Back, SlotRoute::Native),
+                (ButtonId::G6, SlotRoute::Captured),
+                (ButtonId::Forward, SlotRoute::Native),
+            ],
+            report_rate: None,
+        };
+        assert_eq!(host.mapping(), [1, 2, 3, 4, 0, 5]);
+        assert_eq!(host.captured().collect::<Vec<_>>(), [(4, ButtonId::G6)]);
     }
 
     #[test]

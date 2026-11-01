@@ -22,10 +22,13 @@ owns the layer. `crates/openlogi-hid/AGENTS.md` points back here.
   string, and `openlogi_core::device::DeviceKind`) — the same small integers mean
   different things in each. Never cross them by raw value; convert at the boundary.
   `kind` is identity-only. Capability decisions use a live feature-table probe or the
-  last-good capabilities retained by the cache. The sole kind-derived fallback is
-  `Capabilities::presumed_from_kind` for a device with no measured capabilities: one
-  never probed and currently offline, or a HID++ 1.0 device, which has no feature
-  table. Keep it centralized and do not add new `kind` gates.
+  last-good capabilities retained by the cache. The only kind-derived fallbacks, for
+  a device with no measured capabilities, live in `openlogi-core`:
+  `Capabilities::presumed_from_kind` for one never probed and currently offline, and
+  `Capabilities::presumed_for_hidpp10` for a HID++ 1.0 device (marked
+  `PairedDevice::hidpp10`). That device has no feature table, and OpenLogi writes none
+  of its registers, so it keeps only its host-side buttons. Do not add new `kind`
+  gates.
 - The Agent's persistent enumerator is event-first: OS hotplug and HID++ lifecycle
   notifications are identity-free hints that request authoritative full
   re-enumeration. A named low-frequency recovery scan covers missed/unsupported events

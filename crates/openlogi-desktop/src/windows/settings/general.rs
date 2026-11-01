@@ -9,6 +9,7 @@ use crate::ui::theme::Typography as _;
 use gpui_component::radio::{Radio, RadioGroup};
 use openlogi_core::config::MouseProfileTarget;
 
+use crate::features::pointer::momentum::MomentumPanel;
 use crate::platform::registration::ServiceStatus;
 
 /// The page's two sensitivity sliders, named so a call site cannot swap two
@@ -20,6 +21,7 @@ pub(super) struct SensitivitySliders {
 
 pub(super) fn general_page(
     sliders: SensitivitySliders,
+    momentum: Entity<MomentumPanel>,
     registration_status: ServiceStatus,
 ) -> SettingPage {
     let SensitivitySliders {
@@ -92,10 +94,17 @@ pub(super) fn general_page(
         .item(low_battery_notifications_item())
         .item(lock_key_notifications_item());
 
+    // Momentum scrolling's app-wide default. A mouse can set its own on its
+    // Pointer tab; the card counts those.
+    let momentum_group = SettingGroup::new()
+        .title(tr!("pointer.momentum_title"))
+        .description(tr!("pointer.momentum_general_description"))
+        .item(SettingItem::render(move |_, _, _| momentum.clone()));
     SettingPage::new(tr!("app.general"))
         .icon(IconName::Settings)
         .resettable(false)
         .group(group)
+        .group(momentum_group)
 }
 
 fn mouse_profile_target_item() -> SettingItem {

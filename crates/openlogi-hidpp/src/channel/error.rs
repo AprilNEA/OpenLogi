@@ -27,8 +27,8 @@ pub enum ChannelError {
     #[error("the channel does not support the given HID++ message type")]
     MessageTypeNotSupported,
 
-    /// Indicates that a raw output report was empty or exceeded 64 bytes.
-    #[error("raw HID reports must contain 1..=64 bytes, got {0}")]
+    /// Indicates that a raw output report was empty or exceeded 4095 bytes.
+    #[error("raw HID reports must contain 1..=4095 bytes, got {0}")]
     InvalidRawReportLength(usize),
 
     /// Indicates that no response was received following a request.

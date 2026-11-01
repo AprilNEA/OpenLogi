@@ -249,6 +249,7 @@ pub(crate) struct PanelCard {
     icon: Icon,
     content: AnyElement,
     fill: bool,
+    title_suffix: Option<AnyElement>,
 }
 
 impl PanelCard {
@@ -262,7 +263,15 @@ impl PanelCard {
             icon,
             content: content.into_any_element(),
             fill: false,
+            title_suffix: None,
         }
+    }
+
+    /// Show `suffix` beside the title, such as a status tag.
+    #[must_use]
+    pub(crate) fn title_suffix(mut self, suffix: impl IntoElement) -> Self {
+        self.title_suffix = Some(suffix.into_any_element());
+        self
     }
 
     #[must_use]
@@ -295,7 +304,8 @@ impl RenderOnce for PanelCard {
                                 .gap_2()
                                 .text_color(pal.text_primary)
                                 .child(self.icon.size_4().text_color(pal.text_muted))
-                                .child(div().text_subheading().child(self.title)),
+                                .child(div().text_subheading().child(self.title))
+                                .children(self.title_suffix),
                         )
                     })
                     .child(self.content),

@@ -17,6 +17,7 @@ use std::collections::BTreeMap;
 
 use gpui::{App, Context, Entity, Global};
 use openlogi_core::app::{AppAliases, ForegroundApp, profile_applies_to};
+use openlogi_core::binding::GamingLayout;
 use openlogi_core::config::Config;
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_core::hid::{Dpi, SmartShiftStatus};
@@ -294,11 +295,11 @@ impl AppState {
         let identities_changed =
             config.edit(|config| inventory::persist_identities(config, &device_list));
         let current_device = pick_initial_device(&device_list, config.selected_device());
+        let current_record = device_list.get(current_device);
         let bindings = BindingState::new(
             &config,
-            device_list
-                .get(current_device)
-                .and_then(DeviceRecord::persistent_config_key),
+            current_record.and_then(DeviceRecord::persistent_config_key),
+            current_record.and_then(|record| GamingLayout::for_model_key(&record.model_key)),
         );
         let mut state = Self {
             config,

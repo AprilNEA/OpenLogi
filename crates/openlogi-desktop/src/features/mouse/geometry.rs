@@ -7,8 +7,9 @@ use openlogi_assets::ImageEntry;
 use openlogi_core::binding::{ButtonId, GamingLayout};
 
 use super::hotspots::{Hotspot, MOUSE_MODEL_SIZE, MouseControlId};
-use super::leader_lines::{Label, Side};
+use super::leader_lines::{self, Label, Side};
 use crate::services::assets::{ResolvedAsset, SIDE_VIEW_KEY};
+use crate::ui::callouts::{self, spread_in_order};
 
 const FRONT_VIEW_KEY: &str = "device_image";
 
@@ -25,9 +26,8 @@ const ORIGIN_HEIGHT_TOLERANCE: f32 = 0.05;
 /// without allowing them to overlap at the minimum model height.
 pub(super) const LABEL_H: f32 = 56.;
 
-/// Empty space between the grouped Back and Forward cards when the viewport
-/// has enough room to pull them closer than the regular even spacing.
-const NAVIGATION_GROUP_GAP: f32 = 16.;
+/// Empty space kept between two neighbouring label cards on one side.
+const LABEL_GAP: f32 = 12.;
 
 /// Whether label cards occupy one or both sides of the device render.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -245,18 +245,26 @@ fn main_view_hotspots(asset: &ResolvedAsset, mouse_w: f32, mouse_h: f32) -> Vec<
     hotspots
 }
 
-/// Lay labels out evenly down one or both sides of the mouse. A two-sided
-/// layout sends the leftmost half of the hotspots left and the rightmost half
-/// right, then orders each side by hotspot height. Back and Forward stay
-/// adjacent when both are on the same side because they form one navigation
-/// pair, even when another marker sits between them.
-#[expect(
-    clippy::cast_precision_loss,
-    reason = "hotspot count is bounded by ButtonId variants — well under f32 mantissa"
-)]
+/// Lay the labels down one or both sides of the mouse, each level with its
+/// control where there is room. A two-sided layout sends the leftmost half of
+/// the hotspots left and the rightmost half right, then orders each side by
+/// hotspot height. Cards that would overlap are pushed apart as little as
+/// possible without changing that order (see [`spread_in_order`]).
+///
+/// Back and Forward stay adjacent when both are on the same side because they
+/// form one navigation pair, even when another marker sits between them. That
+/// grouping is kept only while every leader on the side can still reach its
+/// card without crossing another; otherwise the side falls back to plain
+/// height order, which never crosses.
+///
+/// `room_h` is the height the cards may use, centred on the model and at
+/// least `mouse_h`: a model shrunk to fit a narrow window leaves height
+/// beside it that a crowded side needs (see [`place_side`]).
 pub fn labels_from_hotspots(
     hotspots: &[Hotspot],
+    mouse_w: f32,
     mouse_h: f32,
+    room_h: f32,
     distribution: LabelDistribution,
 ) -> Vec<Label> {
     if hotspots.is_empty() {
@@ -284,55 +292,107 @@ pub fn labels_from_hotspots(
     }
 
     for side in [Side::Left, Side::Right] {
-        let mut vertical_order: Vec<usize> = labels
+        let on_side: Vec<usize> = labels
             .iter()
             .enumerate()
             .filter_map(|(index, label)| (label.side == side).then_some(index))
             .collect();
-        vertical_order.sort_by(|&a, &b| hotspots[a].center().1.total_cmp(&hotspots[b].center().1));
-        let back = vertical_order
-            .iter()
-            .position(|&index| labels[index].id == ButtonId::Back.into());
-        let forward = vertical_order
-            .iter()
-            .position(|&index| labels[index].id == ButtonId::Forward.into());
-        let navigation_pair = if let (Some(back), Some(forward)) = (back, forward) {
-            let first = back.min(forward);
-            let second = back.max(forward);
-            if second > first + 1 {
-                let navigation_button = vertical_order.remove(second);
-                vertical_order.insert(first + 1, navigation_button);
-            }
-            Some((vertical_order[first], vertical_order[first + 1]))
-        } else {
-            None
-        };
-        let step = mouse_h / (vertical_order.len() as f32 + 1.);
-        for (slot, index) in vertical_order.into_iter().enumerate() {
-            labels[index].y = step * (slot as f32 + 1.);
-        }
-        if let Some((first, second)) = navigation_pair {
-            let grouped_step = step.min(LABEL_H + NAVIGATION_GROUP_GAP);
-            let adjustment = (step - grouped_step) / 2.;
-            labels[first].y += adjustment;
-            labels[second].y -= adjustment;
+        let by_height = height_order(hotspots, &on_side);
+        let grouped = with_navigation_pair(by_height.clone(), &labels);
+        place_side(&mut labels, hotspots, &grouped, mouse_h, room_h);
+        if side_leaders_cross(hotspots, &labels, &grouped, mouse_w) {
+            place_side(&mut labels, hotspots, &by_height, mouse_h, room_h);
         }
     }
 
     labels
 }
 
-/// Label positions for the synthetic fallback silhouette.
-pub fn default_labels(
-    layout: Option<&GamingLayout>,
-    thumbwheel: bool,
-    distribution: LabelDistribution,
-) -> Vec<Label> {
-    labels_from_hotspots(
-        &fallback_hotspots(layout, thumbwheel),
-        MOUSE_MODEL_SIZE.1,
-        distribution,
-    )
+/// One side's labels top to bottom by hotspot height.
+fn height_order(hotspots: &[Hotspot], on_side: &[usize]) -> Vec<usize> {
+    let mut order = on_side.to_vec();
+    order.sort_by(|&a, &b| hotspots[a].center().1.total_cmp(&hotspots[b].center().1));
+    order
+}
+
+/// `order` with Back and Forward pulled together: the lower of the two moves
+/// up to sit right after the higher when other cards sit between them.
+fn with_navigation_pair(mut order: Vec<usize>, labels: &[Label]) -> Vec<usize> {
+    let back = order
+        .iter()
+        .position(|&index| labels[index].id == ButtonId::Back.into());
+    let forward = order
+        .iter()
+        .position(|&index| labels[index].id == ButtonId::Forward.into());
+    if let (Some(back), Some(forward)) = (back, forward) {
+        let first = back.min(forward);
+        let second = back.max(forward);
+        if second > first + 1 {
+            let navigation_button = order.remove(second);
+            order.insert(first + 1, navigation_button);
+        }
+    }
+    order
+}
+
+/// Put `order`'s cards as close to their hotspots' heights as the card
+/// height and the gap between cards allow. A side that does not fit the
+/// model's height reaches past its top and bottom into `room_h`, only as far
+/// as it needs; one that does not fit `room_h` either closes its gaps, so
+/// every card stays on screen.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "a side holds a handful of cards — well within f32 mantissa"
+)]
+fn place_side(
+    labels: &mut [Label],
+    hotspots: &[Hotspot],
+    order: &[usize],
+    mouse_h: f32,
+    room_h: f32,
+) {
+    let ideal: Vec<f32> = order.iter().map(|&i| hotspots[i].center().1).collect();
+    let pitch = LABEL_H + LABEL_GAP;
+    let span = order.len().saturating_sub(1) as f32 * pitch;
+    let overhang = ((span - (mouse_h - LABEL_H)) / 2.).clamp(0., ((room_h - mouse_h) / 2.).max(0.));
+    let lo = LABEL_H / 2. - overhang;
+    let hi = mouse_h - LABEL_H / 2. + overhang;
+    let spacing = match order.len() {
+        0 | 1 => pitch,
+        count => pitch.min((hi - lo) / (count - 1) as f32),
+    };
+    let ys = spread_in_order(&ideal, spacing, lo, hi);
+    for (&index, y) in order.iter().zip(ys) {
+        labels[index].y = y;
+    }
+}
+
+/// Whether any two leaders of `order` cross. Only the part over the model
+/// and the first [`leader_lines::STUB`] of the gutter can cross; past that
+/// every leader runs straight at its own card's height.
+fn side_leaders_cross(
+    hotspots: &[Hotspot],
+    labels: &[Label],
+    order: &[usize],
+    mouse_w: f32,
+) -> bool {
+    let routes: Vec<Vec<(f32, f32)>> = order
+        .iter()
+        .map(|&i| {
+            leader_lines::route(
+                hotspots[i].center(),
+                labels[i].side,
+                labels[i].y,
+                mouse_w,
+                leader_lines::STUB,
+            )
+        })
+        .collect();
+    routes.iter().enumerate().any(|(a, route)| {
+        routes[a + 1..]
+            .iter()
+            .any(|other| callouts::routes_cross(route, other))
+    })
 }
 
 /// The fallback silhouette's hotspots for a device without an image. A
@@ -408,6 +468,22 @@ mod tests {
 
     use super::*;
     use crate::features::mouse::hotspots::default_hotspots;
+
+    /// Label positions for the synthetic fallback silhouette at its authored
+    /// size.
+    fn default_labels(
+        layout: Option<&GamingLayout>,
+        thumbwheel: bool,
+        distribution: LabelDistribution,
+    ) -> Vec<Label> {
+        labels_from_hotspots(
+            &fallback_hotspots(layout, thumbwheel),
+            MOUSE_MODEL_SIZE.0,
+            MOUSE_MODEL_SIZE.1,
+            MOUSE_MODEL_SIZE.1,
+            distribution,
+        )
+    }
 
     fn g502_asset() -> ResolvedAsset {
         let metadata: openlogi_assets::Metadata = serde_json::from_str(
@@ -590,68 +666,197 @@ mod tests {
         }
     }
 
-    #[test]
-    fn labels_track_hotspots_and_avoid_crossing() {
-        let hotspots = default_hotspots(true);
-        let labels =
-            labels_from_hotspots(&hotspots, MOUSE_MODEL_SIZE.1, LabelDistribution::LeftOnly);
-        assert_eq!(labels.len(), hotspots.len());
+    fn hotspot(id: impl Into<MouseControlId>, x: f32, y: f32) -> Hotspot {
+        Hotspot {
+            id: id.into(),
+            x,
+            y,
+            w: 10.,
+            h: 10.,
+        }
+    }
 
-        let mut ys: Vec<f32> = labels.iter().map(|l| l.y).collect();
-        ys.sort_by(f32::total_cmp);
-        ys.dedup();
-        assert_eq!(ys.len(), labels.len(), "each label gets a distinct slot");
+    fn label_for(labels: &[Label], id: impl Into<MouseControlId>) -> Label {
+        let id = id.into();
+        *labels.iter().find(|label| label.id == id).expect("label")
+    }
+
+    /// Every side keeps its cards apart and its leaders uncrossed.
+    fn assert_clean_layout(hotspots: &[Hotspot], labels: &[Label], mouse_w: f32) {
+        for side in [Side::Left, Side::Right] {
+            let mut ys: Vec<f32> = labels
+                .iter()
+                .filter(|label| label.side == side)
+                .map(|label| label.y)
+                .collect();
+            ys.sort_by(f32::total_cmp);
+            for pair in ys.windows(2) {
+                assert!(
+                    pair[1] - pair[0] >= LABEL_H + LABEL_GAP - 0.01,
+                    "cards overlap on {side:?}: {ys:?}"
+                );
+            }
+            let routes: Vec<_> = hotspots
+                .iter()
+                .zip(labels)
+                .filter(|(_, label)| label.side == side)
+                .map(|(hotspot, label)| {
+                    leader_lines::route(hotspot.center(), side, label.y, mouse_w, 24.)
+                })
+                .collect();
+            for (a, route) in routes.iter().enumerate() {
+                for other in &routes[a + 1..] {
+                    assert!(
+                        !callouts::routes_cross(route, other),
+                        "leaders cross on {side:?}: {route:?} / {other:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
-    fn navigation_labels_stay_together_when_haptic_marker_sits_between() {
+    fn labels_sit_level_with_their_controls_when_there_is_room() {
         let hotspots = [
-            Hotspot {
-                id: ButtonId::Forward.into(),
-                x: 0.,
-                y: 100.,
-                w: 10.,
-                h: 10.,
-            },
-            Hotspot {
-                id: ButtonId::HapticPanel.into(),
-                x: 0.,
-                y: 200.,
-                w: 10.,
-                h: 10.,
-            },
-            Hotspot {
-                id: ButtonId::Back.into(),
-                x: 0.,
-                y: 300.,
-                w: 10.,
-                h: 10.,
-            },
+            hotspot(ButtonId::MiddleClick, 200., 95.),
+            hotspot(ButtonId::DpiToggle, 220., 295.),
         ];
+        let labels = labels_from_hotspots(
+            &hotspots,
+            MOUSE_MODEL_SIZE.0,
+            MOUSE_MODEL_SIZE.1,
+            MOUSE_MODEL_SIZE.1,
+            LabelDistribution::LeftOnly,
+        );
+        assert_eq!(label_for(&labels, ButtonId::MiddleClick).y, 100.);
+        assert_eq!(label_for(&labels, ButtonId::DpiToggle).y, 300.);
+    }
 
-        let mut labels =
-            labels_from_hotspots(&hotspots, MOUSE_MODEL_SIZE.1, LabelDistribution::LeftOnly);
+    /// The room beside the model is only for a side that does not fit it.
+    #[test]
+    fn a_side_that_fits_the_model_ignores_the_room_beside_it() {
+        let hotspots = [
+            hotspot(ButtonId::MiddleClick, 200., 5.),
+            hotspot(ButtonId::Forward, 200., 195.),
+            hotspot(ButtonId::Back, 220., 215.),
+        ];
+        let at = |room_h| -> Vec<f32> {
+            labels_from_hotspots(
+                &hotspots,
+                MOUSE_MODEL_SIZE.0,
+                MOUSE_MODEL_SIZE.1,
+                room_h,
+                LabelDistribution::LeftOnly,
+            )
+            .iter()
+            .map(|label| label.y)
+            .collect()
+        };
+        assert_eq!(at(MOUSE_MODEL_SIZE.1), at(MOUSE_MODEL_SIZE.1 + 300.));
+    }
+
+    #[test]
+    fn crowded_labels_spread_evenly_around_their_controls() {
+        let hotspots = [
+            hotspot(ButtonId::Forward, 200., 195.),
+            hotspot(ButtonId::Back, 220., 215.),
+        ];
+        let labels = labels_from_hotspots(
+            &hotspots,
+            MOUSE_MODEL_SIZE.0,
+            MOUSE_MODEL_SIZE.1,
+            MOUSE_MODEL_SIZE.1,
+            LabelDistribution::LeftOnly,
+        );
+        let forward = label_for(&labels, ButtonId::Forward).y;
+        let back = label_for(&labels, ButtonId::Back).y;
+        assert!((back - forward - (LABEL_H + LABEL_GAP)).abs() < 0.01);
+        assert!((f32::midpoint(forward, back) - 210.).abs() < 0.01);
+    }
+
+    #[test]
+    fn labels_track_hotspots_and_avoid_crossing() {
+        for distribution in [LabelDistribution::LeftOnly, LabelDistribution::BothSides] {
+            let hotspots = default_hotspots(true);
+            let labels = labels_from_hotspots(
+                &hotspots,
+                MOUSE_MODEL_SIZE.0,
+                MOUSE_MODEL_SIZE.1,
+                MOUSE_MODEL_SIZE.1,
+                distribution,
+            );
+            assert_eq!(labels.len(), hotspots.len());
+            assert_clean_layout(&hotspots, &labels, MOUSE_MODEL_SIZE.0);
+        }
+    }
+
+    /// The MX Master 3's gesture button sits under the thumb, level with
+    /// Back. Back's leader runs above it, so the navigation pair stays
+    /// together without a crossing.
+    #[test]
+    fn navigation_labels_stay_together_when_a_marker_beside_them_sits_between() {
+        let hotspots = [
+            hotspot(ButtonId::Forward, 200., 100.),
+            hotspot(ButtonId::GestureButton, 40., 280.),
+            hotspot(ButtonId::Back, 200., 300.),
+        ];
+        let mut labels = labels_from_hotspots(
+            &hotspots,
+            MOUSE_MODEL_SIZE.0,
+            MOUSE_MODEL_SIZE.1,
+            MOUSE_MODEL_SIZE.1,
+            LabelDistribution::LeftOnly,
+        );
+        assert_clean_layout(&hotspots, &labels, MOUSE_MODEL_SIZE.0);
         labels.sort_by(|a, b| a.y.total_cmp(&b.y));
-
         assert_eq!(
             labels.iter().map(|label| label.id).collect::<Vec<_>>(),
             [
                 MouseControlId::Button(ButtonId::Forward),
                 MouseControlId::Button(ButtonId::Back),
-                MouseControlId::Button(ButtonId::HapticPanel),
+                MouseControlId::Button(ButtonId::GestureButton),
             ]
         );
-        let navigation_gap = labels[1].y - labels[0].y;
-        let haptic_gap = labels[2].y - labels[1].y;
-        assert!(navigation_gap < haptic_gap);
-        assert!(navigation_gap >= LABEL_H);
+    }
+
+    /// A marker in line with the pair would force Back's leader across its
+    /// own, so the side keeps plain height order instead.
+    #[test]
+    fn a_marker_in_line_with_the_navigation_pair_keeps_height_order() {
+        let hotspots = [
+            hotspot(ButtonId::Forward, 0., 100.),
+            hotspot(ButtonId::HapticPanel, 0., 200.),
+            hotspot(ButtonId::Back, 0., 300.),
+        ];
+        let mut labels = labels_from_hotspots(
+            &hotspots,
+            MOUSE_MODEL_SIZE.0,
+            MOUSE_MODEL_SIZE.1,
+            MOUSE_MODEL_SIZE.1,
+            LabelDistribution::LeftOnly,
+        );
+        assert_clean_layout(&hotspots, &labels, MOUSE_MODEL_SIZE.0);
+        labels.sort_by(|a, b| a.y.total_cmp(&b.y));
+        assert_eq!(
+            labels.iter().map(|label| label.id).collect::<Vec<_>>(),
+            [
+                MouseControlId::Button(ButtonId::Forward),
+                MouseControlId::Button(ButtonId::HapticPanel),
+                MouseControlId::Button(ButtonId::Back),
+            ]
+        );
     }
 
     #[test]
     fn a_two_sided_layout_uses_both_sides() {
         let hotspots = default_hotspots(true);
-        let labels =
-            labels_from_hotspots(&hotspots, MOUSE_MODEL_SIZE.1, LabelDistribution::BothSides);
+        let labels = labels_from_hotspots(
+            &hotspots,
+            MOUSE_MODEL_SIZE.0,
+            MOUSE_MODEL_SIZE.1,
+            MOUSE_MODEL_SIZE.1,
+            LabelDistribution::BothSides,
+        );
 
         assert!(labels.iter().any(|label| label.side == Side::Left));
         assert!(labels.iter().any(|label| label.side == Side::Right));

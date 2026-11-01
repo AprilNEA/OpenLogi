@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.20] - 2026-11-01
+
+### Added
+
+- *(camera)* pick the preview's resolution and frame rate on all platforms ([#2185](https://github.com/AprilNEA/OpenLogi/pull/2185))
+- *(device)* support the MX Creative Keypad's LCD keys and binding pages ([#1873](https://github.com/AprilNEA/OpenLogi/pull/1873))
+- *(cli)* add diag mouse-buttons to read 0x8110 slots ([#2179](https://github.com/AprilNEA/OpenLogi/pull/2179))
+- *(device)* add G502 LIGHTSPEED support ([#1729](https://github.com/AprilNEA/OpenLogi/pull/1729))
+- *(device)* identify HID++ 1.0 devices behind a Unifying receiver ([#1750](https://github.com/AprilNEA/OpenLogi/pull/1750))
+
+### Changed
+
+- *(agent)* log hook-captured actions from the workers, not the tap callback ([#2116](https://github.com/AprilNEA/OpenLogi/pull/2116))
+
+### Fixed
+
+- *(desktop)* show only host-side tabs for a hid++ 1.0 device ([#2209](https://github.com/AprilNEA/OpenLogi/pull/2209))
+- *(device)* keep the linux kernel's m650 side-button diversion on teardown ([#2164](https://github.com/AprilNEA/OpenLogi/pull/2164))
+- *(desktop)* place callouts where their controls are so leaders never cross ([#2145](https://github.com/AprilNEA/OpenLogi/pull/2145))
+- *(macos)* press shortcut modifiers as keys on the CGEvent fallback ([#2205](https://github.com/AprilNEA/OpenLogi/pull/2205))
+- *(device)* skip a refused root row in the feature dump ([#2206](https://github.com/AprilNEA/OpenLogi/pull/2206))
+- *(hidpp)* decode unifying device kinds with the hid++ 1.0 type table ([#2203](https://github.com/AprilNEA/OpenLogi/pull/2203))
+- *(device)* keep a direct channel that answers its refresh ping ([#2193](https://github.com/AprilNEA/OpenLogi/pull/2193))
+- *(desktop)* refuse shift with a symbol key when recording a shortcut ([#2181](https://github.com/AprilNEA/OpenLogi/pull/2181))
+- *(windows)* offer to launch openlogi when the msi finishes ([#2176](https://github.com/AprilNEA/OpenLogi/pull/2176))
+- *(gui)* name Karabiner-Elements in the stalled Input Monitoring note ([#2175](https://github.com/AprilNEA/OpenLogi/pull/2175))
+- *(gui)* fit new windows to the display work area ([#2172](https://github.com/AprilNEA/OpenLogi/pull/2172))
+- *(hid)* name Karabiner-Elements when a granted device open fails ([#2173](https://github.com/AprilNEA/OpenLogi/pull/2173))
+- *(device)* deliver the click of a gesture source without raw xy ([#2168](https://github.com/AprilNEA/OpenLogi/pull/2168))
+- *(gui)* name nano and lightspeed receivers by their own family ([#1228](https://github.com/AprilNEA/OpenLogi/pull/1228))
+- *(device,agent)* drop the linux kernel's echo of a diverted button ([#2160](https://github.com/AprilNEA/OpenLogi/pull/2160))
+- *(windows)* mark extended virtual keys with KEYEVENTF_EXTENDEDKEY ([#1958](https://github.com/AprilNEA/OpenLogi/pull/1958))
+- *(overlay)* keep the macos actions ring from taking key focus ([#2152](https://github.com/AprilNEA/OpenLogi/pull/2152))
+
 ## [0.8.19] - 2026-10-29
 
 ### Added

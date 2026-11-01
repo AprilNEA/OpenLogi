@@ -1,0 +1,147 @@
+name: Load a 1Password Environment
+description: >-
+  Read a 1Password Environment with `op run --environment` and expose the
+  variables it holds as masked step outputs. Replaces secret references to
+  items: the service account is scoped to the Environment, not to a vault.
+
+inputs:
+  service-account-token:
+    description: 1Password service account token with read access to the Environment.
+    required: true
+  environment-id:
+    description: >-
+      ID of the 1Password Environment (1Password app → Developer → View
+      Environments → Manage environment → Copy environment ID). Not a secret.
+    required: true
+
+# Composite outputs are declared statically, so this is the union of every
+# variable a workflow reads from either Environment. A variable the loaded
+# Environment lacks is an empty output; the caller's validation step names
+# the missing one, which an action that fails on the first missing variable
+# could not.
+outputs:
+  # Release Environment: Apple signing and notarization.
+  APPLE_SIGNING_IDENTITY:
+    description: Apple signing and notarization, from the release Environment.
+    value: ${{ steps.read.outputs.APPLE_SIGNING_IDENTITY }}
+  APPLE_CERTIFICATE:
+    description: Apple signing and notarization, from the release Environment.
+    value: ${{ steps.read.outputs.APPLE_CERTIFICATE }}
+  APPLE_CERTIFICATE_PASSWORD:
+    description: Apple signing and notarization, from the release Environment.
+    value: ${{ steps.read.outputs.APPLE_CERTIFICATE_PASSWORD }}
+  APPLE_ID:
+    description: Apple signing and notarization, from the release Environment.
+    value: ${{ steps.read.outputs.APPLE_ID }}
+  APPLE_PASSWORD:
+    description: Apple signing and notarization, from the release Environment.
+    value: ${{ steps.read.outputs.APPLE_PASSWORD }}
+  APPLE_TEAM_ID:
+    description: Apple signing and notarization, from the release Environment.
+    value: ${{ steps.read.outputs.APPLE_TEAM_ID }}
+  APPLE_AGENT_PROVISIONING_PROFILE:
+    description: Apple signing and notarization, from the release Environment.
+    value: ${{ steps.read.outputs.APPLE_AGENT_PROVISIONING_PROFILE }}
+  # Release Environment: Azure Artifact Signing.
+  AZURE_CLIENT_ID:
+    description: Azure Artifact Signing, from the release Environment.
+    value: ${{ steps.read.outputs.AZURE_CLIENT_ID }}
+  AZURE_TENANT_ID:
+    description: Azure Artifact Signing, from the release Environment.
+    value: ${{ steps.read.outputs.AZURE_TENANT_ID }}
+  AZURE_SUBSCRIPTION_ID:
+    description: Azure Artifact Signing, from the release Environment.
+    value: ${{ steps.read.outputs.AZURE_SUBSCRIPTION_ID }}
+  AZURE_SIGNING_ENDPOINT:
+    description: Azure Artifact Signing, from the release Environment.
+    value: ${{ steps.read.outputs.AZURE_SIGNING_ENDPOINT }}
+  AZURE_SIGNING_ACCOUNT:
+    description: Azure Artifact Signing, from the release Environment.
+    value: ${{ steps.read.outputs.AZURE_SIGNING_ACCOUNT }}
+  AZURE_CERT_PROFILE:
+    description: Azure Artifact Signing, from the release Environment.
+    value: ${{ steps.read.outputs.AZURE_CERT_PROFILE }}
+  # Release Environment: updater keys and R2 publishing.
+  OPENLOGI_UPDATE_BASE_URL:
+    description: Updater keys and R2 publishing, from the release Environment.
+    value: ${{ steps.read.outputs.OPENLOGI_UPDATE_BASE_URL }}
+  OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY:
+    description: Updater keys and R2 publishing, from the release Environment.
+    value: ${{ steps.read.outputs.OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY }}
+  OPENLOGI_UPDATE_MINISIGN_SECRET_KEY:
+    description: Updater keys and R2 publishing, from the release Environment.
+    value: ${{ steps.read.outputs.OPENLOGI_UPDATE_MINISIGN_SECRET_KEY }}
+  OPENLOGI_SPARKLE_PUBLIC_ED_KEY:
+    description: Updater keys and R2 publishing, from the release Environment.
+    value: ${{ steps.read.outputs.OPENLOGI_SPARKLE_PUBLIC_ED_KEY }}
+  OPENLOGI_SPARKLE_PRIVATE_ED_KEY:
+    description: Updater keys and R2 publishing, from the release Environment.
+    value: ${{ steps.read.outputs.OPENLOGI_SPARKLE_PRIVATE_ED_KEY }}
+  CLOUDFLARE_R2_ACCOUNT_ID:
+    description: Updater keys and R2 publishing, from the release Environment.
+    value: ${{ steps.read.outputs.CLOUDFLARE_R2_ACCOUNT_ID }}
+  CLOUDFLARE_R2_BUCKET:
+    description: Updater keys and R2 publishing, from the release Environment.
+    value: ${{ steps.read.outputs.CLOUDFLARE_R2_BUCKET }}
+  CLOUDFLARE_R2_ACCESS_KEY_ID:
+    description: Updater keys and R2 publishing, from the release Environment.
+    value: ${{ steps.read.outputs.CLOUDFLARE_R2_ACCESS_KEY_ID }}
+  CLOUDFLARE_R2_SECRET_ACCESS_KEY:
+    description: Updater keys and R2 publishing, from the release Environment.
+    value: ${{ steps.read.outputs.CLOUDFLARE_R2_SECRET_ACCESS_KEY }}
+  # Automation Environment: the GitHub App and the crates.io token.
+  GITHUB_APP_ID:
+    description: The GitHub App and the crates.io token, from the automation Environment.
+    value: ${{ steps.read.outputs.GITHUB_APP_ID }}
+  GITHUB_APP_PRIVATE_KEY:
+    description: The GitHub App and the crates.io token, from the automation Environment.
+    value: ${{ steps.read.outputs.GITHUB_APP_PRIVATE_KEY }}
+  CARGO_REGISTRY_TOKEN:
+    description: The GitHub App and the crates.io token, from the automation Environment.
+    value: ${{ steps.read.outputs.CARGO_REGISTRY_TOKEN }}
+  # Automation Environment: Crowdin.
+  CROWDIN_PROJECT_ID:
+    description: Crowdin, from the automation Environment.
+    value: ${{ steps.read.outputs.CROWDIN_PROJECT_ID }}
+  CROWDIN_PERSONAL_TOKEN:
+    description: Crowdin, from the automation Environment.
+    value: ${{ steps.read.outputs.CROWDIN_PERSONAL_TOKEN }}
+
+runs:
+  using: composite
+  steps:
+    # Pinned to an immutable commit: this step runs with the service-account
+    # token, so a repointed mutable tag must not be able to swap the code.
+    # `op run --environment` is stable from 2.41.0.
+    - name: Install 1Password CLI
+      uses: 1password/install-cli-action@1a3160d5e9de1ae0803eaa08a88746f5ae3daa50 # v4.1.0
+      with:
+        version: 2.41.1
+
+    # `op run` masks concealed values on the child's stdout, which would also
+    # rewrite the `::add-mask::` lines export.sh prints into
+    # `::add-mask::<concealed>` and leave the real values unmasked in later
+    # logs. So masking is turned off here and done by hand, line by line,
+    # before each value is written; the script prints nothing else. The child
+    # inherits this process's environment too, so the exported names are
+    # unset first: only what the Environment provides reaches the outputs.
+    - name: Read the Environment
+      id: read
+      shell: bash
+      env:
+        OP_SERVICE_ACCOUNT_TOKEN: ${{ inputs.service-account-token }}
+        OP_ENVIRONMENT_ID: ${{ inputs.environment-id }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        : "${OP_ENVIRONMENT_ID:?Set the OP_*_ENVIRONMENT_ID repository variable}"
+        : "${OP_SERVICE_ACCOUNT_TOKEN:?The 1Password service account token is empty}"
+        # The output names, parsed from this file's `outputs:` block so a
+        # variable added there is exported without a second list.
+        OP_EXPORT_NAMES="$(awk '/^outputs:/ { in_outputs = 1; next }
+                                /^[^ #]/ { in_outputs = 0 }
+                                in_outputs && /^  [A-Z][A-Z0-9_]*:$/ { sub(/^  /, ""); sub(/:$/, ""); print }' \
+                           "$ACTION_PATH/action.yml")"
+        for name in $OP_EXPORT_NAMES; do unset "$name"; done
+        export OP_EXPORT_NAMES
+        op run --no-masking --environment "$OP_ENVIRONMENT_ID" -- bash "$ACTION_PATH/export.sh"

@@ -50,7 +50,7 @@ jobs:
         uses: ./.github/actions/github-app-token-from-1password
         with:
           op-service-account-token: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
-          op-github-app-item: ${{ secrets.OP_GITHUB_APP_ITEM }}
+          op-environment-id: ${{ vars.OP_AUTOMATION_ENVIRONMENT_ID }}
       - name: Run release-plz (release-pr)
         uses: release-plz/action@v0.5
         with:
@@ -200,7 +200,7 @@ jobs:
         uses: ./.github/actions/github-app-token-from-1password
         with:
           op-service-account-token: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
-          op-github-app-item: ${{ secrets.OP_GITHUB_APP_ITEM }}
+          op-environment-id: ${{ vars.OP_AUTOMATION_ENVIRONMENT_ID }}
       - name: Run release-plz (release)
         if: steps.release_commit.outputs.skip != 'true'
         uses: release-plz/action@v0.5

@@ -32,6 +32,7 @@ fn receiver_inventory() -> DeviceInventory {
             }),
             capabilities: Some(Capabilities::presumed_from_kind(DeviceKind::Mouse)),
             settings_revision: 0,
+            hidpp10: false,
         }],
     }
 }
@@ -726,6 +727,7 @@ fn keyboard_pairings(slots: &[u8], online_slot: Option<u8>) -> DeviceInventory {
                 }),
                 capabilities: Some(Capabilities::presumed_from_kind(DeviceKind::Keyboard)),
                 settings_revision: 0,
+                hidpp10: false,
             })
             .collect(),
     }

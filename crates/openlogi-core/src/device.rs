@@ -63,6 +63,15 @@ pub enum DeviceKind {
 }
 
 impl DeviceKind {
+    /// Whether this kind binds keys, not pointer buttons: keyboards and
+    /// standalone numpads. Such a device gets the Keys panel, its bindings
+    /// resolve against the foreground app rather than the app under the
+    /// pointer, and the agent captures it on the keyboard input plane.
+    #[must_use]
+    pub const fn is_keyboard_family(self) -> bool {
+        matches!(self, Self::Keyboard | Self::Numpad)
+    }
+
     /// Parse the OpenLogi asset registry's `type` string into a [`DeviceKind`].
     ///
     /// The registry field is free-form and case-inconsistent (both `"mouse"`
@@ -289,7 +298,26 @@ impl Capabilities {
                 lighting: true,
                 ..Self::default()
             },
+            // A numpad's controls are HID++ buttons (page buttons / grid keys)
+            // — keep its Keys panel configurable before the first probe.
+            DeviceKind::Numpad => Self {
+                buttons: true,
+                ..Self::default()
+            },
             _ => Self::default(),
+        }
+    }
+
+    /// The capabilities presumed for a HID++ 1.0 device, which has no feature
+    /// table. OpenLogi writes none of its registers, so only what the host
+    /// does for it is presumed: a mouse or trackball keeps the buttons that
+    /// the OS hook remaps. A DPI or lighting control would have no effect, so
+    /// neither is presumed (#2161).
+    #[must_use]
+    pub fn presumed_for_hidpp10(kind: DeviceKind) -> Self {
+        Self {
+            buttons: Self::presumed_from_kind(kind).buttons,
+            ..Self::default()
         }
     }
 }
@@ -582,8 +610,10 @@ pub struct PairedDevice {
     /// expose the feature. Drives asset-registry lookups in the GUI.
     pub model_info: Option<DeviceModelInfo>,
     /// Configuration capabilities derived from the device's HID++ feature
-    /// table. `None` for devices we couldn't probe (offline / unreachable);
-    /// the GUI then falls back to [`Capabilities::presumed_from_kind`].
+    /// table. `None` for devices we couldn't probe (offline / unreachable)
+    /// and for a HID++ 1.0 device, which has no table. The GUI then falls
+    /// back to [`Capabilities::presumed_from_kind`], or to
+    /// [`Capabilities::presumed_for_hidpp10`] when [`Self::hidpp10`] is set.
     pub capabilities: Option<Capabilities>,
     /// Moves each time the device itself reports changing a setting — the
     /// user toggling Fn lock on the keyboard, or a DPI button changing the
@@ -596,6 +626,14 @@ pub struct PairedDevice {
     /// the IPC encoding is positional and always carries it.
     #[serde(default)]
     pub settings_revision: u64,
+    /// The device answered as HID++ 1.0. It has no feature table, so
+    /// [`Self::capabilities`] stays `None` even after a completed probe.
+    /// `false` when no probe has completed yet.
+    ///
+    /// Appended. `default` keeps device fixtures recorded before it loading;
+    /// the IPC encoding is positional and always carries it.
+    #[serde(default)]
+    pub hidpp10: bool,
 }
 
 /// Address of a standalone raw-HID interface.
@@ -790,6 +828,7 @@ mod tests {
                     button_spy: false,
                 }),
                 settings_revision: 0,
+                hidpp10: false,
             }],
         }
     }
@@ -1052,9 +1091,35 @@ mod tests {
         assert!(mouse.buttons && mouse.pointer && !mouse.lighting);
         assert!(!mouse.thumbwheel);
         assert!(Capabilities::presumed_from_kind(DeviceKind::Keyboard).lighting);
+        // An unprobed numpad keeps its Keys panel: its controls are HID++
+        // buttons, so buttons=true — and it has nothing else to presume.
+        let numpad = Capabilities::presumed_from_kind(DeviceKind::Numpad);
+        assert!(numpad.buttons);
+        assert!(!numpad.pointer && !numpad.lighting);
         // An unidentified device presumes nothing — it must be measured.
         assert_eq!(
             Capabilities::presumed_from_kind(DeviceKind::Unknown),
+            Capabilities::default()
+        );
+    }
+
+    #[test]
+    fn a_hidpp10_device_is_presumed_only_host_side_buttons() {
+        use super::Capabilities;
+        let buttons_only = Capabilities {
+            buttons: true,
+            ..Capabilities::default()
+        };
+        assert_eq!(
+            Capabilities::presumed_for_hidpp10(DeviceKind::Trackball),
+            buttons_only
+        );
+        assert_eq!(
+            Capabilities::presumed_for_hidpp10(DeviceKind::Mouse),
+            buttons_only
+        );
+        assert_eq!(
+            Capabilities::presumed_for_hidpp10(DeviceKind::Keyboard),
             Capabilities::default()
         );
     }
@@ -1098,6 +1163,19 @@ mod tests {
                 !cfg!(target_os = "macos"),
                 "{key:?}"
             );
+        }
+    }
+
+    #[test]
+    fn only_keyboards_and_numpads_are_keyboard_family() {
+        assert!(DeviceKind::Keyboard.is_keyboard_family());
+        assert!(DeviceKind::Numpad.is_keyboard_family());
+        for kind in [
+            DeviceKind::Mouse,
+            DeviceKind::Trackball,
+            DeviceKind::Unknown,
+        ] {
+            assert!(!kind.is_keyboard_family(), "{kind:?}");
         }
     }
 }
