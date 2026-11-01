@@ -456,8 +456,9 @@ An outgoing transfer (`flow/runtime/sender.rs`) has two phases:
    I/O is allowed, and prepare each device's switch (1 s each). The peer hears
    nothing until this phase succeeds.
 2. **Negotiation.** Send the request (2 s). After an accept, start a write
-   only while the first half of the peer's arm window is open; each write has
-   a 1 s deadline. Release the lease after the writes. When no write started,
+   only while the first half of the peer's arm window is open, counted from
+   when the request was sent, because the peer may open its window as soon
+   as the request arrives; each write has a 1 s deadline. Release the lease after the writes. When no write started,
    cancel the transfer; otherwise wait for the peer's result.
 
 One transfer runs at a time, in either direction.

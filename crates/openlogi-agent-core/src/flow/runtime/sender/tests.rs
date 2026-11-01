@@ -123,6 +123,15 @@ async fn answer(
     peer: &FlowConnection,
     answer: impl FnOnce(&proto::HandoffRequest) -> Envelope,
 ) -> proto::HandoffRequest {
+    answer_after(peer, Duration::ZERO, answer).await
+}
+
+/// Answer the peer's next request with `answer`, `delay` after it arrives.
+async fn answer_after(
+    peer: &FlowConnection,
+    delay: Duration,
+    answer: impl FnOnce(&proto::HandoffRequest) -> Envelope,
+) -> proto::HandoffRequest {
     let event = tokio::time::timeout(WAIT, peer.accept_rpc())
         .await
         .expect("a request arrives in time")
@@ -134,6 +143,7 @@ async fn answer(
         .request()
         .decode(InboundRole::Request)
         .expect("decode the request");
+    tokio::time::sleep(delay).await;
     rpc.respond(answer(&request)).await.expect("respond");
     request
 }
@@ -226,14 +236,33 @@ async fn a_rejected_transfer_writes_nothing() {
 #[tokio::test]
 async fn no_write_starts_after_the_write_window() {
     let pair = pair().await;
-    // The first write takes 50 ms; the 20 ms window closes after 10 ms.
-    let run = start(&pair, 9, Duration::from_millis(50), false);
-    answer(&pair.peer, |request| accept(request.transfer_id, 20)).await;
+    // The first write takes 300 ms; writes may start for 200 ms after the
+    // request.
+    let run = start(&pair, 9, Duration::from_millis(300), false);
+    answer(&pair.peer, |request| accept(request.transfer_id, 400)).await;
     run.result.send(arrived(9)).expect("the sender waits");
 
     let (report, started) = report(run.report, &run.started).await;
     assert_eq!(report, SendReport::Finished(arrived(9)));
     assert_eq!(started, 1);
+}
+
+#[tokio::test]
+async fn a_slow_accept_leaves_no_time_to_write() {
+    let pair = pair().await;
+    // The peer's 400 ms window may open when the request arrives, so its
+    // accept 300 ms later is past the 200 ms in which a write may start.
+    let run = start(&pair, 13, Duration::ZERO, false);
+    answer_after(&pair.peer, Duration::from_millis(300), |request| {
+        accept(request.transfer_id, 400)
+    })
+    .await;
+
+    let cancel = next_cancel(&pair.peer).await;
+    assert_eq!(cancel.transfer_id, 13);
+    let (report, started) = report(run.report, &run.started).await;
+    assert!(matches!(report, SendReport::Cancelled(_)), "{report:?}");
+    assert_eq!(started, 0);
 }
 
 #[tokio::test]

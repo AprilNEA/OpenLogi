@@ -174,6 +174,7 @@ pub(super) async fn negotiate<S: Switch>(
         ..Default::default()
     };
     *request.entry.get_or_insert_default() = entry;
+    let requested_at = Instant::now();
     let accept = match call(&connection, &request).await {
         Ok(Answer::Accept(accept)) if accept.transfer_id == transfer_id => accept,
         Ok(Answer::Reject(reason)) => return SendReport::Rejected(reason),
@@ -192,7 +193,7 @@ pub(super) async fn negotiate<S: Switch>(
         return await_result(result, accepted_at + NETWORK_SLACK, stop).await;
     }
 
-    let schedule = SwitchSchedule::new(accepted_at, &accept);
+    let schedule = SwitchSchedule::new(requested_at, accepted_at, &accept);
     let mut outcomes = Vec::with_capacity(switches.len());
     let mut stopping = false;
     for (_, switch) in switches {

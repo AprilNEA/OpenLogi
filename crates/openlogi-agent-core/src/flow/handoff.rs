@@ -19,8 +19,9 @@
 //!
 //! Sender rules:
 //! - Every switch write must start before [`SwitchSchedule::may_write`] turns
-//!   false: half the receiver's window after the accept, so the device lands
-//!   while the receiver still watches.
+//!   false: half the receiver's window after the request was sent, so the
+//!   device lands while the receiver still watches. The receiver's window may
+//!   open as soon as the request arrives, however long its accept takes.
 //! - Once any write was attempted the sender must not cancel. The device may
 //!   already be on its way, and the receiver reports the outcome.
 use std::collections::{HashMap, VecDeque};
@@ -352,12 +353,22 @@ pub(crate) struct SwitchSchedule {
 }
 
 impl SwitchSchedule {
-    /// The deadlines that follow from `accept`, seen at `accepted_at`. The
-    /// peer's window is capped at [`MAX_ARM_TIMEOUT`].
-    pub(crate) fn new(accepted_at: Instant, accept: &proto::HandoffAccept) -> Self {
+    /// The deadlines that follow from `accept`, for a request sent at
+    /// `requested_at` and accepted at `accepted_at`. The peer's window is
+    /// capped at [`MAX_ARM_TIMEOUT`].
+    ///
+    /// The peer opened its window somewhere between the two instants. Writes
+    /// count from the earliest, so a slow accept shortens the write window
+    /// instead of moving it past the peer's; giving up counts from the
+    /// latest.
+    pub(crate) fn new(
+        requested_at: Instant,
+        accepted_at: Instant,
+        accept: &proto::HandoffAccept,
+    ) -> Self {
         let window = Duration::from_millis(u64::from(accept.arm_timeout_ms)).min(MAX_ARM_TIMEOUT);
         Self {
-            write_deadline: accepted_at + window / 2,
+            write_deadline: requested_at + window / 2,
             give_up: accepted_at + window + NETWORK_SLACK,
         }
     }

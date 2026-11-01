@@ -282,17 +282,27 @@ fn sender_writes_only_in_the_first_half_of_a_capped_window() {
         ..Default::default()
     };
 
-    let schedule = SwitchSchedule::new(t0, &accept(3000));
+    let schedule = SwitchSchedule::new(t0, t0, &accept(3000));
     assert!(schedule.may_write(t0 + ms(1499)));
     assert!(!schedule.may_write(t0 + ms(1500)));
     assert_eq!(schedule.give_up(), t0 + ms(5000));
 
-    let capped = SwitchSchedule::new(t0, &accept(u32::MAX));
+    let capped = SwitchSchedule::new(t0, t0, &accept(u32::MAX));
     assert!(capped.may_write(t0 + ms(4999)));
     assert!(!capped.may_write(t0 + ms(5000)));
     assert_eq!(capped.give_up(), t0 + ms(12_000));
 
-    assert!(!SwitchSchedule::new(t0, &accept(0)).may_write(t0));
+    assert!(!SwitchSchedule::new(t0, t0, &accept(0)).may_write(t0));
+
+    // The peer may have opened its window as soon as the request arrived,
+    // so an accept that took 1.2 s leaves 0.3 s to start a write, and none
+    // once the accept took longer than half the window.
+    let slow = SwitchSchedule::new(t0, t0 + ms(1200), &accept(3000));
+    assert!(slow.may_write(t0 + ms(1200)));
+    assert!(!slow.may_write(t0 + ms(1500)));
+    assert_eq!(slow.give_up(), t0 + ms(6200));
+    let late = SwitchSchedule::new(t0, t0 + ms(1600), &accept(3000));
+    assert!(!late.may_write(t0 + ms(1600)));
 }
 
 #[test]
