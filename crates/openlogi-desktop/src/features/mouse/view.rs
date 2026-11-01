@@ -3,11 +3,11 @@ use std::sync::Arc;
 
 use gpui::{
     AnyElement, App, AppContext as _, Context, ElementId, Entity, FocusHandle, Focusable, Hsla,
-    InteractiveElement, IntoElement, ParentElement, Render, RenderOnce,
+    InteractiveElement, IntoElement, ParentElement, Pixels, Render, RenderOnce, SharedString, Size,
     StatefulInteractiveElement as _, Styled, Subscription, Window, canvas, div, hsla, img,
-    prelude::FluentBuilder as _, px, rgb,
+    prelude::FluentBuilder as _, px, rgb, size,
 };
-use gpui_base::Button as BaseButton;
+use gpui_base::{Button as BaseButton, ElementExt as _};
 use gpui_component::{
     h_flex,
     input::{InputEvent, InputState},
@@ -18,7 +18,7 @@ use openlogi_core::binding::{Action, ButtonId, GamingLayout, GestureDirection};
 use super::force_sensing::{ForceSensingFacts, ForceSensingSlider, PressForce};
 use super::geometry::{
     LABEL_H, LabelDistribution, asset_dimensions_for_png, asset_has_button_labels,
-    asset_hotspots_for_png, fallback_hotspots, labels_from_hotspots, side_view_width,
+    asset_hotspots_for_png, fallback_hotspots, labels_fit, labels_from_hotspots, side_view_width,
 };
 use super::hotspots::{Hotspot, MOUSE_MODEL_SIZE, MouseControlId};
 use super::inspector::{
@@ -35,9 +35,22 @@ use crate::state::{AppState, BindingLayer, DeviceKey, DeviceRecord, StateEvent};
 use crate::ui::theme::{self, ACCENT_BLUE};
 
 const SIDE_GAP: f32 = 24.;
-const LABEL_W: f32 = 156.;
-const LABEL_GUTTER: f32 = LABEL_W + SIDE_GAP;
+/// The narrowest a label card gets, however short its values.
+const LABEL_MIN_W: f32 = 156.;
+/// Below this content width the labels all go on the left: two columns of
+/// cards would squeeze the render.
 const TWO_SIDED_LABEL_MIN_W: f32 = 700.;
+/// The narrowest the render gets to make room for cards wide enough for
+/// their values.
+const MODEL_MIN_IMAGE_W: f32 = 240.;
+/// The widest a label card gets: two columns of them in the widest content
+/// still leave the render [`MODEL_MIN_IMAGE_W`]. A value longer than its card
+/// wraps instead.
+const LABEL_MAX_W: f32 = (MODEL_CONTENT_MAX_W - MODEL_MIN_IMAGE_W) / 2. - SIDE_GAP;
+const _: () = assert!(
+    TWO_SIDED_LABEL_MIN_W >= 2. * (LABEL_MIN_W + SIDE_GAP) + MODEL_MIN_IMAGE_W,
+    "two columns of the narrowest cards must leave the render its minimum width"
+);
 
 const CARD_EDGE_INSET: f32 = SIDE_GAP;
 
@@ -56,11 +69,11 @@ fn held_actions(offer_gshift: bool) -> &'static [Action] {
 }
 
 /// Vertical space occupied by the device bar, profile context, and canvas
-/// padding. Normal operation no longer reserves a footer.
+/// padding: the estimate of the canvas area until it is first measured.
 const MODEL_VERTICAL_RESERVE: f32 = 154.;
 
 mod labels;
-use labels::{binding_label_for_control, label_control};
+use labels::{CardSize, ValueMetrics, binding_label_for_control, label_control};
 /// Floor for the scaled model height. Below this the evenly-slotted side labels
 /// (≈[`LABEL_H`](super::geometry::LABEL_H) each) start to overlap; the window's minimum height is sized to
 /// keep the viewport above [`MODEL_VERTICAL_RESERVE`] + this.
@@ -69,7 +82,8 @@ const MODEL_MIN_H: f32 = 360.;
 /// Max width the model (side gutter + image) may occupy, matching the
 /// `buttons_tab` content cap so a wide keyboard image never overflows the panel.
 const MODEL_CONTENT_MAX_W: f32 = 760.;
-/// Horizontal chrome the model can't draw into (the buttons-tab padding).
+/// Horizontal chrome the model can't draw into (the buttons-tab padding): the
+/// estimate of the canvas area until it is first measured.
 const MODEL_HORIZONTAL_RESERVE: f32 =
     crate::ui::theme::DETAIL_RAIL_W + super::inspector::INSPECTOR_W + 48.;
 /// Floor for the model's available width on a narrow window.
@@ -190,6 +204,9 @@ pub struct MouseModelView {
     shortcut_record_focus: FocusHandle,
     /// The press-force slider while the haptic panel's inspector shows it.
     pub(super) force_sensing: Option<ForceSensingSlider>,
+    /// The canvas area as last laid out, which the model and its cards fit
+    /// inside. `None` until the first frame measures it.
+    canvas_room: Option<Size<Pixels>>,
     _state_obs: Subscription,
 }
 
@@ -265,6 +282,7 @@ impl MouseModelView {
             shortcut_recorder: None,
             shortcut_record_focus: cx.focus_handle(),
             force_sensing: None,
+            canvas_room: None,
             _state_obs: state_obs,
         }
     }
@@ -346,6 +364,49 @@ impl MouseModelView {
         self.gesture_active_dir = None;
         self.action_picker_open = false;
         self.shortcut_recorder = None;
+    }
+
+    /// Keep the canvas area measured in the last frame, and lay the model out
+    /// again when it changed.
+    fn set_canvas_room(&mut self, room: Size<Pixels>, cx: &mut Context<Self>) {
+        if self.canvas_room != Some(room) {
+            self.canvas_room = Some(room);
+            cx.notify();
+        }
+    }
+
+    /// Lay the model and its cards out in the canvas area as last measured,
+    /// or before the first measurement, the viewport less the chrome around
+    /// the tab. The cards are sized for what `value` says each control does.
+    fn fitted_layout(
+        &self,
+        asset: Option<&ResolvedAsset>,
+        layout: Option<&GamingLayout>,
+        thumbwheel: bool,
+        value: impl Fn(MouseControlId) -> SharedString,
+        window: &Window,
+    ) -> ModelLayout {
+        let viewport = window.viewport_size();
+        let room = self.canvas_room.unwrap_or_else(|| {
+            size(
+                viewport.width - px(MODEL_HORIZONTAL_RESERVE),
+                viewport.height - px(MODEL_VERTICAL_RESERVE),
+            )
+        });
+        let values = ValueMetrics::measure(
+            model_hotspots(asset, layout, thumbwheel, MOUSE_MODEL_SIZE)
+                .into_iter()
+                .map(|hotspot| value(hotspot.id)),
+            window,
+        );
+        model_layout(
+            asset,
+            layout,
+            size(f32::from(room.width), f32::from(room.height)),
+            f32::from(viewport.width),
+            thumbwheel,
+            values,
+        )
     }
 
     pub(super) fn select(&mut self, control: MouseControlId) {
@@ -483,8 +544,7 @@ impl Render for MouseModelView {
             })
             .collect();
 
-        let viewport_h = f32::from(window.viewport_size().height);
-        let viewport_w = f32::from(window.viewport_size().width);
+        let value = |control| binding_label_for_control(control, bindings, &gesture_buttons).text;
         let ModelLayout {
             canvas_w,
             canvas_h,
@@ -492,9 +552,10 @@ impl Render for MouseModelView {
             mouse_left,
             mouse_w,
             mouse_h,
+            card,
             hotspots,
             labels,
-        } = model_layout(asset, layout, viewport_w, viewport_h, thumbwheel);
+        } = self.fitted_layout(asset, layout, thumbwheel, value, window);
 
         let highlight = self.hovered.or(active).or(self.selected);
         let view = cx.entity();
@@ -509,6 +570,7 @@ impl Render for MouseModelView {
             left: mouse_left,
             width: mouse_w,
             height: mouse_h,
+            card,
         };
         let hotspots_layer = hotspots_layer(
             &hotspots_outer,
@@ -555,7 +617,7 @@ impl Render for MouseModelView {
             self.action_picker_context(&view),
             cx,
         );
-        workspace_layout(canvas, profile_status, inspector, &self.focus_handle)
+        workspace_layout(canvas, profile_status, inspector, &self.focus_handle, view)
     }
 }
 
@@ -584,11 +646,14 @@ fn model_canvas(
         )
 }
 
+/// The canvas area beside the inspector. Its content box is the room the
+/// model fits: measured here and handed back to `view` for the next layout.
 fn workspace_layout(
     canvas: impl IntoElement,
     profile_status: Option<gpui::Div>,
     inspector: impl IntoElement,
     focus_handle: &FocusHandle,
+    view: Entity<MouseModelView>,
 ) -> impl IntoElement {
     h_flex()
         .flex_1()
@@ -610,11 +675,21 @@ fn workspace_layout(
                         .min_h_0()
                         .w_full()
                         .overflow_hidden()
-                        .flex()
-                        .items_center()
-                        .justify_center()
                         .p_4()
-                        .child(canvas),
+                        .child(
+                            div()
+                                .size_full()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .debug_selector(|| "mouse-canvas-room".into())
+                                .child(canvas)
+                                .on_prepaint(move |bounds, _window, cx| {
+                                    view.update(cx, |view, cx| {
+                                        view.set_canvas_room(bounds.size, cx);
+                                    });
+                                }),
+                        ),
                 ),
         )
         .child(inspector)
@@ -630,59 +705,62 @@ struct ModelLayout {
     mouse_left: f32,
     mouse_w: f32,
     mouse_h: f32,
+    card: CardSize,
     hotspots: Vec<Hotspot>,
     labels: Vec<Label>,
 }
 
-/// Scale the model to fit the content area in both axes. A tall mouse is bound
-/// by the viewport height; a wide keyboard is bound by the available width and
-/// drops the label gutter so it remains centred.
+/// Lay the model and its label cards out inside `room`, the canvas area. The
+/// cards are as wide as their widest value needs (see [`label_columns`]); the
+/// model takes the rest and is scaled to fit it in both axes. A tall mouse is
+/// bound by the room's height; a wide keyboard is bound by its width and drops
+/// the label gutter so it remains centred.
 fn model_layout(
     asset: Option<&ResolvedAsset>,
     layout: Option<&GamingLayout>,
+    room: Size<f32>,
     viewport_w: f32,
-    viewport_h: f32,
     thumbwheel: bool,
+    values: ValueMetrics,
 ) -> ModelLayout {
-    let target_h = (viewport_h - MODEL_VERTICAL_RESERVE).clamp(MODEL_MIN_H, MOUSE_MODEL_SIZE.1);
-    // The cards may use the tab's whole height, not just the model's: a
+    let target_h = room.height.clamp(MODEL_MIN_H, MOUSE_MODEL_SIZE.1);
+    // The cards may use the room's whole height, not just the model's: a
     // narrow window shrinks the model by its width and leaves room beside it.
-    let room_h = (viewport_h - MODEL_VERTICAL_RESERVE).max(MODEL_MIN_H);
+    let room_h = room.height.max(MODEL_MIN_H);
     let has_labels =
         asset.is_none_or(|asset| asset_has_button_labels(asset, layout)) && viewport_w >= 960.;
-    let content_w =
-        (viewport_w - MODEL_HORIZONTAL_RESERVE).clamp(MODEL_MIN_CONTENT_W, MODEL_CONTENT_MAX_W);
-    let label_distribution = if has_labels && content_w >= TWO_SIDED_LABEL_MIN_W {
-        LabelDistribution::BothSides
-    } else {
-        LabelDistribution::LeftOnly
-    };
-    let left_gutter = if has_labels { LABEL_GUTTER } else { 0. };
-    let right_gutter = if label_distribution == LabelDistribution::BothSides {
-        LABEL_GUTTER
+    let content_w = room.width.clamp(MODEL_MIN_CONTENT_W, MODEL_CONTENT_MAX_W);
+    let (label_distribution, card_w) = label_columns(content_w, values.widest + values.chrome_w);
+    let gutter = card_w + SIDE_GAP;
+    let left_gutter = if has_labels { gutter } else { 0. };
+    let right_gutter = if has_labels && label_distribution == LabelDistribution::BothSides {
+        gutter
     } else {
         0.
     };
     let max_image_w = (content_w - left_gutter - right_gutter).max(MODEL_MIN_CONTENT_W / 2.);
-    let (mouse_w, mouse_h, hotspots, mut labels) = scaled_model(
-        asset,
-        layout,
-        target_h,
-        room_h,
-        max_image_w,
-        thumbwheel,
-        label_distribution,
-    );
-    if !has_labels {
-        labels.clear();
-    }
+    let (mouse_w, mouse_h) = model_size(asset, target_h, max_image_w);
+    let hotspots = model_hotspots(asset, layout, thumbwheel, (mouse_w, mouse_h));
+    let card = card_size(card_w, values, hotspots.len(), label_distribution, room_h);
+    let labels = if has_labels {
+        labels_from_hotspots(
+            &hotspots,
+            mouse_w,
+            mouse_h,
+            room_h,
+            label_distribution,
+            card.h,
+        )
+    } else {
+        Vec::new()
+    };
     let cards_top = labels
         .iter()
-        .map(|label| label.y - LABEL_H / 2.)
+        .map(|label| label.y - card.h / 2.)
         .fold(0., f32::min);
     let cards_bottom = labels
         .iter()
-        .map(|label| label.y + LABEL_H / 2.)
+        .map(|label| label.y + card.h / 2.)
         .fold(mouse_h, f32::max);
 
     ModelLayout {
@@ -692,34 +770,83 @@ fn model_layout(
         mouse_left: left_gutter,
         mouse_w,
         mouse_h,
+        card,
         hotspots,
         labels,
     }
 }
 
-/// Model geometry fit inside a `max_w` × `target_h` box. With a real asset the
-/// hotspots and labels are recomputed from the scaled dimensions; the synthetic
-/// silhouette's authored coordinates are scaled by the same factor. The labels
-/// may use `room_h` (see [`labels_from_hotspots`]). Returns
-/// `(mouse_w, mouse_h, hotspots, labels)`.
-fn scaled_model(
-    asset: Option<&ResolvedAsset>,
-    layout: Option<&GamingLayout>,
-    target_h: f32,
+/// Which sides the label cards take in `content_w`, and how wide they are:
+/// `needed_w`, what the widest value needs on one line, kept between
+/// [`LABEL_MIN_W`] and [`LABEL_MAX_W`] and narrow enough to leave the render
+/// [`MODEL_MIN_IMAGE_W`].
+fn label_columns(content_w: f32, needed_w: f32) -> (LabelDistribution, f32) {
+    let (distribution, columns) = if content_w >= TWO_SIDED_LABEL_MIN_W {
+        (LabelDistribution::BothSides, 2.)
+    } else {
+        (LabelDistribution::LeftOnly, 1.)
+    };
+    let room_w = (content_w - MODEL_MIN_IMAGE_W) / columns - SIDE_GAP;
+    (
+        distribution,
+        needed_w.min(room_w).clamp(LABEL_MIN_W, LABEL_MAX_W),
+    )
+}
+
+/// The cards `card_w` wide: one value line when the widest value fits it,
+/// otherwise two, as long as `count` cards that tall still fit `room_h`
+/// with their gaps. Past that the value keeps one line and its ellipsis.
+fn card_size(
+    card_w: f32,
+    values: ValueMetrics,
+    count: usize,
+    distribution: LabelDistribution,
     room_h: f32,
-    max_w: f32,
-    thumbwheel: bool,
-    label_distribution: LabelDistribution,
-) -> (f32, f32, Vec<Hotspot>, Vec<Label>) {
+) -> CardSize {
+    let one_line = CardSize {
+        w: card_w,
+        h: LABEL_H,
+        value_lines: 1,
+    };
+    let two_lines = CardSize {
+        h: LABEL_H + values.line_h,
+        value_lines: 2,
+        ..one_line
+    };
+    if values.widest > card_w - values.chrome_w
+        && labels_fit(count, distribution, two_lines.h, room_h)
+    {
+        two_lines
+    } else {
+        one_line
+    }
+}
+
+/// The model's size fit inside a `max_w` × `target_h` box at the render's
+/// aspect, or the synthetic silhouette's when there is no render.
+fn model_size(asset: Option<&ResolvedAsset>, target_h: f32, max_w: f32) -> (f32, f32) {
     if let Some(a) = asset {
-        let (w, h) = asset_dimensions_for_png(a, target_h, max_w);
-        let hotspots = asset_hotspots_for_png(a, layout, w, h);
-        let labels = labels_from_hotspots(&hotspots, w, h, room_h, label_distribution);
-        (w, h, hotspots, labels)
+        asset_dimensions_for_png(a, target_h, max_w)
     } else {
         let scale = (target_h / MOUSE_MODEL_SIZE.1).min(max_w / MOUSE_MODEL_SIZE.0);
-        let (w, h) = (MOUSE_MODEL_SIZE.0 * scale, MOUSE_MODEL_SIZE.1 * scale);
-        let hotspots: Vec<Hotspot> = fallback_hotspots(layout, thumbwheel)
+        (MOUSE_MODEL_SIZE.0 * scale, MOUSE_MODEL_SIZE.1 * scale)
+    }
+}
+
+/// The model's hotspots at its `(w, h)` size (see [`model_size`]). A render
+/// recomputes them from its markers; the synthetic silhouette's authored
+/// coordinates are scaled to that size.
+fn model_hotspots(
+    asset: Option<&ResolvedAsset>,
+    layout: Option<&GamingLayout>,
+    thumbwheel: bool,
+    (w, h): (f32, f32),
+) -> Vec<Hotspot> {
+    if let Some(a) = asset {
+        asset_hotspots_for_png(a, layout, w, h)
+    } else {
+        let scale = w / MOUSE_MODEL_SIZE.0;
+        fallback_hotspots(layout, thumbwheel)
             .into_iter()
             .map(|hs| Hotspot {
                 x: hs.x * scale,
@@ -728,11 +855,7 @@ fn scaled_model(
                 h: hs.h * scale,
                 ..hs
             })
-            .collect();
-        // Placed at the scaled size, like an asset's: the cards keep their
-        // height however small the silhouette gets.
-        let labels = labels_from_hotspots(&hotspots, w, h, room_h, label_distribution);
-        (w, h, hotspots, labels)
+            .collect()
     }
 }
 
@@ -807,11 +930,13 @@ fn breathing_art(
         .child(device_art)
 }
 
+/// The model's place in the canvas, and the size of the cards beside it.
 #[derive(Clone, Copy)]
 struct ModelRect {
     left: f32,
     width: f32,
     height: f32,
+    card: CardSize,
 }
 
 fn hotspots_layer(

@@ -22,8 +22,9 @@ const ASSET_HOTSPOT: f32 = 56.;
 /// whole `origin` block as a stale placeholder and stops cropping by it.
 const ORIGIN_HEIGHT_TOLERANCE: f32 = 0.05;
 
-/// Height of a side-label card. The layout needs it to group related cards
-/// without allowing them to overlap at the minimum model height.
+/// Height of a side-label card whose value fits on one line. The layout
+/// needs it to group related cards without allowing them to overlap at the
+/// minimum model height.
 pub(super) const LABEL_H: f32 = 56.;
 
 /// Empty space kept between two neighbouring label cards on one side.
@@ -259,13 +260,15 @@ fn main_view_hotspots(asset: &ResolvedAsset, mouse_w: f32, mouse_h: f32) -> Vec<
 ///
 /// `room_h` is the height the cards may use, centred on the model and at
 /// least `mouse_h`: a model shrunk to fit a narrow window leaves height
-/// beside it that a crowded side needs (see [`place_side`]).
+/// beside it that a crowded side needs (see [`place_side`]). Every card is
+/// `card_h` tall.
 pub fn labels_from_hotspots(
     hotspots: &[Hotspot],
     mouse_w: f32,
     mouse_h: f32,
     room_h: f32,
     distribution: LabelDistribution,
+    card_h: f32,
 ) -> Vec<Label> {
     if hotspots.is_empty() {
         return Vec::new();
@@ -285,7 +288,7 @@ pub fn labels_from_hotspots(
             .sort_by(|&a, &b| hotspots[a].center().0.total_cmp(&hotspots[b].center().0));
         for index in horizontal_order
             .into_iter()
-            .skip(hotspots.len().div_ceil(2))
+            .skip(left_side_count(hotspots.len(), distribution))
         {
             labels[index].side = Side::Right;
         }
@@ -299,13 +302,33 @@ pub fn labels_from_hotspots(
             .collect();
         let by_height = height_order(hotspots, &on_side);
         let grouped = with_navigation_pair(by_height.clone(), &labels);
-        place_side(&mut labels, hotspots, &grouped, mouse_h, room_h);
+        place_side(&mut labels, hotspots, &grouped, mouse_h, room_h, card_h);
         if side_leaders_cross(hotspots, &labels, &grouped, mouse_w) {
-            place_side(&mut labels, hotspots, &by_height, mouse_h, room_h);
+            place_side(&mut labels, hotspots, &by_height, mouse_h, room_h, card_h);
         }
     }
 
     labels
+}
+
+/// How many of `count` labels go on the left: all of them, or the leftmost
+/// half (rounded up) when both sides hold labels. The left is the busier side.
+fn left_side_count(count: usize, distribution: LabelDistribution) -> usize {
+    match distribution {
+        LabelDistribution::LeftOnly => count,
+        LabelDistribution::BothSides => count.div_ceil(2),
+    }
+}
+
+/// Whether `count` labels of `card_h` fit `room_h` with every gap between
+/// them kept, on their busier side.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "a side holds a handful of cards — well within f32 mantissa"
+)]
+pub fn labels_fit(count: usize, distribution: LabelDistribution, card_h: f32, room_h: f32) -> bool {
+    let side = left_side_count(count, distribution) as f32;
+    side * card_h + (side - 1.).max(0.) * LABEL_GAP <= room_h
 }
 
 /// One side's labels top to bottom by hotspot height.
@@ -336,9 +359,9 @@ fn with_navigation_pair(mut order: Vec<usize>, labels: &[Label]) -> Vec<usize> {
 }
 
 /// Put `order`'s cards as close to their hotspots' heights as the card
-/// height and the gap between cards allow. A side that does not fit the
-/// model's height reaches past its top and bottom into `room_h`, only as far
-/// as it needs; one that does not fit `room_h` either closes its gaps, so
+/// height `card_h` and the gap between cards allow. A side that does not fit
+/// the model's height reaches past its top and bottom into `room_h`, only as
+/// far as it needs; one that does not fit `room_h` either closes its gaps, so
 /// every card stays on screen.
 #[expect(
     clippy::cast_precision_loss,
@@ -350,13 +373,14 @@ fn place_side(
     order: &[usize],
     mouse_h: f32,
     room_h: f32,
+    card_h: f32,
 ) {
     let ideal: Vec<f32> = order.iter().map(|&i| hotspots[i].center().1).collect();
-    let pitch = LABEL_H + LABEL_GAP;
+    let pitch = card_h + LABEL_GAP;
     let span = order.len().saturating_sub(1) as f32 * pitch;
-    let overhang = ((span - (mouse_h - LABEL_H)) / 2.).clamp(0., ((room_h - mouse_h) / 2.).max(0.));
-    let lo = LABEL_H / 2. - overhang;
-    let hi = mouse_h - LABEL_H / 2. + overhang;
+    let overhang = ((span - (mouse_h - card_h)) / 2.).clamp(0., ((room_h - mouse_h) / 2.).max(0.));
+    let lo = card_h / 2. - overhang;
+    let hi = mouse_h - card_h / 2. + overhang;
     let spacing = match order.len() {
         0 | 1 => pitch,
         count => pitch.min((hi - lo) / (count - 1) as f32),
@@ -482,6 +506,7 @@ mod tests {
             MOUSE_MODEL_SIZE.1,
             MOUSE_MODEL_SIZE.1,
             distribution,
+            LABEL_H,
         )
     }
 
@@ -727,6 +752,7 @@ mod tests {
             MOUSE_MODEL_SIZE.1,
             MOUSE_MODEL_SIZE.1,
             LabelDistribution::LeftOnly,
+            LABEL_H,
         );
         assert_eq!(label_for(&labels, ButtonId::MiddleClick).y, 100.);
         assert_eq!(label_for(&labels, ButtonId::DpiToggle).y, 300.);
@@ -747,6 +773,7 @@ mod tests {
                 MOUSE_MODEL_SIZE.1,
                 room_h,
                 LabelDistribution::LeftOnly,
+                LABEL_H,
             )
             .iter()
             .map(|label| label.y)
@@ -767,6 +794,7 @@ mod tests {
             MOUSE_MODEL_SIZE.1,
             MOUSE_MODEL_SIZE.1,
             LabelDistribution::LeftOnly,
+            LABEL_H,
         );
         let forward = label_for(&labels, ButtonId::Forward).y;
         let back = label_for(&labels, ButtonId::Back).y;
@@ -784,6 +812,7 @@ mod tests {
                 MOUSE_MODEL_SIZE.1,
                 MOUSE_MODEL_SIZE.1,
                 distribution,
+                LABEL_H,
             );
             assert_eq!(labels.len(), hotspots.len());
             assert_clean_layout(&hotspots, &labels, MOUSE_MODEL_SIZE.0);
@@ -806,6 +835,7 @@ mod tests {
             MOUSE_MODEL_SIZE.1,
             MOUSE_MODEL_SIZE.1,
             LabelDistribution::LeftOnly,
+            LABEL_H,
         );
         assert_clean_layout(&hotspots, &labels, MOUSE_MODEL_SIZE.0);
         labels.sort_by(|a, b| a.y.total_cmp(&b.y));
@@ -834,6 +864,7 @@ mod tests {
             MOUSE_MODEL_SIZE.1,
             MOUSE_MODEL_SIZE.1,
             LabelDistribution::LeftOnly,
+            LABEL_H,
         );
         assert_clean_layout(&hotspots, &labels, MOUSE_MODEL_SIZE.0);
         labels.sort_by(|a, b| a.y.total_cmp(&b.y));
@@ -856,6 +887,7 @@ mod tests {
             MOUSE_MODEL_SIZE.1,
             MOUSE_MODEL_SIZE.1,
             LabelDistribution::BothSides,
+            LABEL_H,
         );
 
         assert!(labels.iter().any(|label| label.side == Side::Left));
