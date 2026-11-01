@@ -13,11 +13,13 @@ use openlogi_flow::transport::{
 use openlogi_hid::HostSwitchError;
 use tokio::sync::{oneshot, watch};
 
-use super::{Negotiation, SendReport, Switch, acquire_and_prepare, negotiate, new_transfer_id};
+use super::{
+    Negotiation, SendReport, Switch, acquire_and_prepare, negotiate, new_transfer_id, prepare_all,
+};
 use crate::flow::devices::LocalDevices;
 use crate::flow::runtime::hello;
 use crate::flow::test_support::{
-    MOUSE, config, configured, no_hardware, peer, record, unit_identity,
+    KEYBOARD, MOUSE, config, configured, no_hardware, peer, record, unit_identity,
 };
 
 const WAIT: Duration = Duration::from_secs(5);
@@ -323,7 +325,7 @@ async fn the_hardware_phase_needs_open_device_io_and_a_prepared_device() {
     let unprepared = acquire_and_prepare(&hardware, &devices).await.err();
     assert_eq!(
         unprepared,
-        Some(SendReport::NotStarted("no device could be prepared"))
+        Some(SendReport::NotStarted("a device could not be prepared"))
     );
 
     assert!(signal.suspend());
@@ -332,6 +334,51 @@ async fn the_hardware_phase_needs_open_device_io_and_a_prepared_device() {
         suspended,
         Some(SendReport::NotStarted("device I/O is suspended"))
     );
+}
+
+#[tokio::test]
+async fn one_device_that_cannot_switch_keeps_every_device_here() {
+    let config = config(vec![
+        configured(MOUSE, Some(1)),
+        configured(KEYBOARD, Some(1)),
+    ]);
+    let records = [
+        record(MOUSE, DeviceKind::Mouse, 0x0a, true),
+        record(KEYBOARD, DeviceKind::Keyboard, 0x0b, true),
+    ];
+    let devices = LocalDevices::join(&config, &records).outgoing(&peer());
+    assert_eq!(devices.len(), 2);
+    let started = Arc::new(AtomicUsize::new(0));
+    let switch = || FakeSwitch {
+        started: Arc::clone(&started),
+        delay: Duration::ZERO,
+    };
+
+    // The mouse prepares; the keyboard's slot for the peer is empty.
+    let split = prepare_all(&devices, |device| {
+        let prepared = if device.identity == devices[0].identity {
+            Ok(Some(switch()))
+        } else {
+            Err(HostSwitchError::HostSlotEmpty { host: 1 })
+        };
+        std::future::ready(prepared)
+    })
+    .await
+    .err();
+    assert_eq!(
+        split,
+        Some(SendReport::NotStarted("a device could not be prepared"))
+    );
+
+    // A device already on the peer's slot needs no write.
+    let moved = prepare_all(&devices, |device| {
+        let prepared = (device.identity == devices[0].identity).then(switch);
+        std::future::ready(Ok(prepared))
+    })
+    .await
+    .expect("the mouse still needs its switch");
+    assert_eq!(moved.len(), 1);
+    assert_eq!(moved[0].0, devices[0].identity);
 }
 
 #[test]

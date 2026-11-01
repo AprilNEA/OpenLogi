@@ -113,32 +113,48 @@ pub(super) async fn acquire_and_prepare(
     if !hardware.device_io.allows_io() {
         return Err(SendReport::NotStarted("device I/O is suspended"));
     }
+    let switches = prepare_all(devices, |device| async move {
+        let switch =
+            prepare_host_switch(&hardware.channel_pool, &device.route, device.slot.get()).await?;
+        Ok(switch.is_required().then_some(switch))
+    })
+    .await?;
+    Ok((lease, switches))
+}
+
+/// Prepare every device's switch, or none. `prepare` answers `None` for a
+/// device already on the peer's slot.
+///
+/// A device that cannot switch keeps the whole transfer here: the request
+/// would list only the others, so the peer would report a complete transfer
+/// while a keyboard stayed behind its mouse.
+async fn prepare_all<'a, S, Prepare, Prepared>(
+    devices: &'a [OutgoingDevice],
+    prepare: Prepare,
+) -> Result<Vec<(proto::DeviceIdentity, S)>, SendReport>
+where
+    Prepare: Fn(&'a OutgoingDevice) -> Prepared,
+    Prepared: Future<Output = Result<Option<S>, HostSwitchError>>,
+{
     let mut switches = Vec::with_capacity(devices.len());
     for device in devices {
-        let prepared = tokio::time::timeout(
-            PREPARE_TIMEOUT,
-            prepare_host_switch(&hardware.channel_pool, &device.route, device.slot.get()),
-        )
-        .await;
-        match prepared {
-            Ok(Ok(switch)) if switch.is_required() => {
-                switches.push((device.identity.clone(), switch));
-            }
-            Ok(Ok(_)) => {
-                debug!(route = %device.route, "device already on the peer's slot");
-            }
+        match tokio::time::timeout(PREPARE_TIMEOUT, prepare(device)).await {
+            Ok(Ok(Some(switch))) => switches.push((device.identity.clone(), switch)),
+            Ok(Ok(None)) => debug!(route = %device.route, "device already on the peer's slot"),
             Ok(Err(error)) => {
-                warn!(%error, route = %device.route, "cannot prepare the Flow switch");
+                warn!(%error, route = %device.route, "cannot prepare the Flow switch; no device moves");
+                return Err(SendReport::NotStarted("a device could not be prepared"));
             }
             Err(_) => {
-                warn!(route = %device.route, "preparing the Flow switch timed out");
+                warn!(route = %device.route, "preparing the Flow switch timed out; no device moves");
+                return Err(SendReport::NotStarted("a device could not be prepared"));
             }
         }
     }
     if switches.is_empty() {
-        return Err(SendReport::NotStarted("no device could be prepared"));
+        return Err(SendReport::NotStarted("every device is on the peer's slot"));
     }
-    Ok((lease, switches))
+    Ok(switches)
 }
 
 async fn acquire(access: &ReceiverAccess) -> Option<ExclusiveReceiverLease> {

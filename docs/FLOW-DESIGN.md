@@ -453,8 +453,9 @@ channels, and every network read and write has a deadline.
 An outgoing transfer (`flow/runtime/sender.rs`) has two phases:
 
 1. **Hardware.** Take the exclusive receiver lease (2 s), check that device
-   I/O is allowed, and prepare each device's switch (1 s each). The peer hears
-   nothing until this phase succeeds.
+   I/O is allowed, and prepare each device's switch (1 s each). If any device
+   cannot switch, no device moves, so a keyboard never stays behind its
+   mouse. The peer hears nothing until this phase succeeds.
 2. **Negotiation.** Send the request (2 s). After an accept, start a write
    only while the first half of the peer's arm window is open, counted from
    when the request was sent, because the peer may open its window as soon
