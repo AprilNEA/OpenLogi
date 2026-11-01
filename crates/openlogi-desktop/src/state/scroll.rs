@@ -159,7 +159,7 @@ impl AppState {
         self.current_record()
             .and_then(DeviceRecord::persistent_config_key)
             .map_or(self.config.app_settings.momentum_scrolling, |key| {
-                self.config.momentum_scrolling(key)
+                self.device_momentum_scrolling(key)
             })
     }
 
