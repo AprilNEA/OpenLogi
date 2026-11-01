@@ -725,6 +725,7 @@ colour_temperature = "Teplota barev"
 applying_light_setting = "Používání nastavení světla…"
 auto_on_with_camera = "Automaticky zapínat s kamerou"
 camera_light_auto_description = "Zapnout světlo, když se používá některá kamera, a vypnout ho, když jsou všechny kamery neaktivní."
+keyboard_lighting_description = "Platí, dokud běží OpenLogi; do klávesnice se neukládá."
 
 [action_ring]
 actions_ring = "Kruh akcí"

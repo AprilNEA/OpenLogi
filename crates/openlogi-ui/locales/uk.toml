@@ -725,6 +725,7 @@ colour_temperature = "Температура кольору"
 applying_light_setting = "Застосування налаштування світла…"
 auto_on_with_camera = "Автоувімкнення разом із камерою"
 camera_light_auto_description = "Вмикати це світло, поки використовується будь-яка камера, і вимикати, коли камери зупиняються."
+keyboard_lighting_description = "Застосовується OpenLogi, поки він працює, і не зберігається в клавіатурі."
 
 [action_ring]
 actions_ring = "Кільце дій"

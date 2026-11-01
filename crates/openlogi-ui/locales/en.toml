@@ -725,6 +725,7 @@ colour_temperature = "Color temperature"
 applying_light_setting = "Applying light setting…"
 auto_on_with_camera = "Auto-on with camera"
 camera_light_auto_description = "Turn the light on when any camera is in use and off when all cameras are inactive."
+keyboard_lighting_description = "Applied by OpenLogi while it runs, not saved on the keyboard."
 
 [action_ring]
 actions_ring = "Actions Ring"

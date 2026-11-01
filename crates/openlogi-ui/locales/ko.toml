@@ -725,6 +725,7 @@ colour_temperature = "색온도"
 applying_light_setting = "조명 설정 적용 중…"
 auto_on_with_camera = "카메라 사용 시 자동 켜기"
 camera_light_auto_description = "카메라를 하나라도 사용 중이면 조명을 켜고 모든 카메라가 비활성 상태이면 끕니다."
+keyboard_lighting_description = "OpenLogi가 실행 중일 때 적용되며 키보드에는 저장되지 않습니다."
 
 [action_ring]
 actions_ring = "액션 링"

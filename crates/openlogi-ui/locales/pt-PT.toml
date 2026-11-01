@@ -725,6 +725,7 @@ colour_temperature = "Temperatura da cor"
 applying_light_setting = "A aplicar a definição da luz…"
 auto_on_with_camera = "Acender com a câmara"
 camera_light_auto_description = "Acenda a luz enquanto uma câmara estiver em uso e apague-a quando nenhuma estiver ativa."
+keyboard_lighting_description = "Aplicada pelo OpenLogi enquanto está em execução, sem ser guardada no teclado."
 
 [action_ring]
 actions_ring = "Anel de ações"

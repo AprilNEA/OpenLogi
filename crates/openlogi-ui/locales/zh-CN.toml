@@ -725,6 +725,7 @@ colour_temperature = "色温"
 applying_light_setting = "正在应用灯光设置…"
 auto_on_with_camera = "随摄像头自动开启"
 camera_light_auto_description = "任意摄像头使用时开灯，所有摄像头均未使用时关灯。"
+keyboard_lighting_description = "由 OpenLogi 在运行时应用，不保存在键盘中。"
 
 [action_ring]
 actions_ring = "操作环"

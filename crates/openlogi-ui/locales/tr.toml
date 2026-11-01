@@ -725,6 +725,7 @@ colour_temperature = "Renk sıcaklığı"
 applying_light_setting = "Işık ayarı uygulanıyor…"
 auto_on_with_camera = "Kamerayla otomatik aç"
 camera_light_auto_description = "Herhangi bir kamera kullanılırken bu ışık açılır, kameralar durunca kapatılır."
+keyboard_lighting_description = "OpenLogi çalıştığı sürece uygulanır, klavyeye kaydedilmez."
 
 [action_ring]
 actions_ring = "Eylem Halkası"

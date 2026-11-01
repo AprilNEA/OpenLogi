@@ -725,6 +725,7 @@ colour_temperature = "Θερμοκρασία χρώματος"
 applying_light_setting = "Εφαρμογή ρύθμισης φωτισμού…"
 auto_on_with_camera = "Αυτόματη ενεργοποίηση με την κάμερα"
 camera_light_auto_description = "Ανάβει το φως όταν χρησιμοποιείται κάποια κάμερα και το σβήνει όταν καμία δεν είναι ενεργή."
+keyboard_lighting_description = "Εφαρμόζεται από το OpenLogi όσο εκτελείται και δεν αποθηκεύεται στο πληκτρολόγιο."
 
 [action_ring]
 actions_ring = "Δακτύλιος ενεργειών"

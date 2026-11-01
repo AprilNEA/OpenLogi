@@ -725,6 +725,7 @@ colour_temperature = "Farvetemperatur"
 applying_light_setting = "Anvender lysindstilling…"
 auto_on_with_camera = "Tænd automatisk med kameraet"
 camera_light_auto_description = "Tænd lyset, når et kamera er i brug, og sluk det, når ingen kameraer er aktive."
+keyboard_lighting_description = "Anvendes af OpenLogi, mens det kører, og gemmes ikke på tastaturet."
 
 [action_ring]
 actions_ring = "Handlingsring"
