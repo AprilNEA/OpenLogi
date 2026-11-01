@@ -18,6 +18,7 @@
 //! control id; [`extension`] reaches them by unit id and selector instead.
 
 mod extension;
+mod usbfs;
 
 use v4l::Device;
 use v4l::control::{Control, Description, Flags, Value};
@@ -25,6 +26,7 @@ use v4l::control::{Control, Description, Flags, Value};
 use crate::controls::{
     AutoState, AutoToggle, CameraControl, CameraState, ControlError, ControlRange,
 };
+use crate::extension_unit::BUILT_IN_MICROPHONE;
 use crate::linux;
 use extension::ExtensionUnits;
 
@@ -158,7 +160,40 @@ pub fn read_camera_state(unique_id: &str) -> Result<CameraState, ControlError> {
         })
         .collect();
 
-    Ok(CameraState { controls, autos })
+    let microphone = extensions
+        .range(&device, BUILT_IN_MICROPHONE)
+        .ok()
+        .map(|range| range.current != 0);
+    Ok(CameraState {
+        controls,
+        autos,
+        microphone,
+    })
+}
+
+/// Switch the camera's built-in microphone on or off.
+///
+/// The camera stores the switch and acts on it the next time it enumerates;
+/// [`reconnect`] makes that happen now.
+///
+/// # Errors
+/// [`ControlError::NotFound`] when no node matches `unique_id`, and
+/// [`ControlError::Unsupported`] for a camera without the switch.
+pub fn set_microphone(unique_id: &str, on: bool) -> Result<(), ControlError> {
+    let device = open(unique_id)?;
+    ExtensionUnits::of(unique_id).write(&device, BUILT_IN_MICROPHONE, i32::from(on))
+}
+
+/// Have the camera drop off the bus and enumerate again, as a replug would,
+/// by resetting it through usbfs.
+///
+/// # Errors
+/// [`ControlError::NeedsElevation`] without write access to the camera's
+/// usbfs node (root only, by default), and [`ControlError::NotFound`] when no
+/// node matches `unique_id`.
+pub fn reconnect(unique_id: &str) -> Result<(), ControlError> {
+    let (bus, address) = linux::usb_address(unique_id).ok_or(ControlError::NotFound)?;
+    usbfs::reset(&usbfs::node(bus, address))
 }
 
 /// Write one control value.

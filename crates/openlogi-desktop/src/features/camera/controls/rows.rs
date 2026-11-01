@@ -1,4 +1,4 @@
-//! The rows the camera controls panel renders: the profile chips, one slider or chip row per control, and the reset button.
+//! The rows the camera controls panel renders: the profile chips, one slider or chip row per control, the microphone switch, and the reset button.
 
 use crate::state::AppState;
 use crate::ui::components::ProfileTab;
@@ -9,10 +9,11 @@ use gpui::{
     prelude::FluentBuilder as _, px, rgb,
 };
 use gpui_base::Button as BaseButton;
-use gpui_component::{IconName, Selectable as _, h_flex, slider::Slider};
+use gpui_component::{IconName, Selectable as _, h_flex, slider::Slider, v_flex};
 use openlogi_camera::CameraControl;
 
-use super::{BUILTIN_PROFILES, CameraControlsPanel, ControlSlider};
+use super::hardware::Switched;
+use super::{BUILTIN_PROFILES, CameraControlsPanel, ControlSlider, MicrophoneStatus};
 
 /// Indices of the lens (camera-terminal) or image (processing-unit) sliders,
 /// preserving [`CameraControl::ALL`] order.
@@ -359,6 +360,79 @@ fn binary_control_row(
                     panel.commit_release(control, &uid, &key, value, cx);
                 })),
         )
+}
+
+/// The built-in microphone line: the label, then an On/Off chip, and under it
+/// what a switch in flight, or the last one, means for the user. The camera
+/// acts on the switch only when it reconnects, so the note says when that is
+/// still to happen.
+pub(super) fn microphone_row(
+    panel: &CameraControlsPanel,
+    on: bool,
+    cx: &Context<CameraControlsPanel>,
+) -> gpui::Div {
+    let pal = theme::palette(cx);
+    let label = tr!("camera.microphone");
+    let accent = rgb(ACCENT_BLUE);
+    let note = match panel.microphone_status {
+        MicrophoneStatus::Switching { .. } => Some(tr!("camera.microphone_switching")),
+        MicrophoneStatus::Done(Switched::NeedsReplug) => Some(tr!("camera.microphone_replug")),
+        MicrophoneStatus::Done(Switched::Failed) => Some(tr!("camera.microphone_failed")),
+        MicrophoneStatus::Idle | MicrophoneStatus::Done(Switched::Reconnected) => None,
+    };
+    let switching = matches!(panel.microphone_status, MicrophoneStatus::Switching { .. });
+    let row = h_flex()
+        .w_full()
+        .gap_3()
+        .items_center()
+        .child(
+            div()
+                .w(px(96.))
+                .flex_shrink_0()
+                .truncate()
+                .text_body()
+                .text_color(pal.text_muted)
+                .child(label.clone()),
+        )
+        .child(div().flex_1())
+        .child(
+            BaseButton::new("camera-microphone")
+                .role(Role::CheckBox)
+                .selected(on)
+                .accessibility_label(label)
+                .aria_toggled(if on { Toggled::True } else { Toggled::False })
+                .px_1p5()
+                .py_0p5()
+                .rounded_full()
+                .border_1()
+                .border_color(if on { accent.into() } else { pal.border })
+                .text_caption()
+                .text_color(if on { pal.text_primary } else { pal.text_muted })
+                .bg(if on {
+                    theme::accent_tint()
+                } else {
+                    pal.control
+                })
+                // Dimmed while a switch runs; a click then does nothing.
+                .when(switching, |chip| chip.opacity(0.55))
+                .hover(move |s| s.bg(chip_hover_fill(on, pal)))
+                .focus_visible(move |s| s.bg(chip_hover_fill(on, pal)))
+                .child(if on {
+                    tr!("common.on")
+                } else {
+                    tr!("common.off")
+                })
+                .on_click(cx.listener(|panel, _: &ClickEvent, _window, cx| {
+                    panel.toggle_microphone(cx);
+                })),
+        );
+    v_flex()
+        .w_full()
+        .gap_1()
+        .child(row)
+        .when_some(note, |column, note| {
+            column.child(div().text_caption().text_color(pal.text_muted).child(note))
+        })
 }
 
 pub(super) fn reset_button(cx: &mut Context<CameraControlsPanel>) -> gpui::Div {

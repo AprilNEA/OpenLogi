@@ -5,8 +5,8 @@
 //! (Google Meet, Zoom, OBS) see them too.
 
 use anyhow::{Result, anyhow};
-use clap::{Args, Subcommand};
-use openlogi_camera::{AutoToggle, CameraControl};
+use clap::{Args, Subcommand, ValueEnum};
+use openlogi_camera::{AutoToggle, CameraControl, ControlError};
 
 #[derive(Debug, Args)]
 pub struct CameraArgs {
@@ -33,6 +33,25 @@ pub enum CameraCmd {
         control: String,
         value: i32,
     },
+    /// Switch the built-in microphone on or off. The camera stores the
+    /// switch and acts on it when it next enumerates, so this reconnects it
+    /// unless told not to.
+    Microphone {
+        state: Switch,
+        /// Store the switch only; it takes effect at the next replug.
+        #[arg(long)]
+        no_reconnect: bool,
+    },
+    /// Make the camera drop off the bus and enumerate again, as a replug
+    /// would. Needs root on Linux and an administrator on Windows.
+    Reconnect,
+}
+
+/// The two positions of a camera switch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum Switch {
+    On,
+    Off,
 }
 
 pub fn run(args: CameraArgs) -> Result<()> {
@@ -68,6 +87,9 @@ pub fn run(args: CameraArgs) -> Result<()> {
                             st.default
                         );
                     }
+                    if let Some(on) = state.microphone {
+                        println!("  microphone: {}", if on { "on" } else { "off" });
+                    }
                 }
                 Ok(_) => println!("  (no adjustable controls, or camera not found)"),
                 Err(e) => println!("  {e}"),
@@ -84,8 +106,35 @@ pub fn run(args: CameraArgs) -> Result<()> {
                 println!("set {} = {value}", control.name());
             }
         }
+        CameraCmd::Microphone {
+            state,
+            no_reconnect,
+        } => {
+            let on = state == Switch::On;
+            openlogi_camera::set_microphone(&uid, on).map_err(|e| anyhow!("{e}"))?;
+            println!("stored microphone = {}", if on { "on" } else { "off" });
+            if !no_reconnect {
+                reconnect(&uid)?;
+            }
+        }
+        CameraCmd::Reconnect => reconnect(&uid)?,
     }
     Ok(())
+}
+
+/// Reconnect the camera, and say how to get there when this process may not.
+fn reconnect(uid: &str) -> Result<()> {
+    match openlogi_camera::reconnect(uid) {
+        Ok(()) => {
+            println!("reconnected {uid}");
+            Ok(())
+        }
+        Err(ControlError::NeedsElevation) => Err(anyhow!(
+            "reconnecting the camera needs root (Linux) or an administrator (Windows): \
+             rerun `openlogi camera reconnect` that way, or unplug the camera and plug it back in"
+        )),
+        Err(e) => Err(anyhow!("{e}")),
+    }
 }
 
 fn parse_control(raw: &str) -> Result<CameraControl> {

@@ -82,14 +82,16 @@ pub use capture_windows::{
 mod uvc_macos;
 #[cfg(target_os = "macos")]
 pub use uvc_macos::{
-    apply_settings, control_range, control_ranges, read_camera_state, set_auto, set_control,
+    apply_settings, control_range, control_ranges, read_camera_state, reconnect, set_auto,
+    set_control, set_microphone,
 };
 
 #[cfg(target_os = "windows")]
 mod uvc_windows;
 #[cfg(target_os = "windows")]
 pub use uvc_windows::{
-    apply_settings, control_range, control_ranges, read_camera_state, set_auto, set_control,
+    apply_settings, control_range, control_ranges, read_camera_state, reconnect, set_auto,
+    set_control, set_microphone,
 };
 
 #[cfg(target_os = "linux")]
@@ -107,7 +109,8 @@ pub use capture_linux::{
 mod uvc_linux;
 #[cfg(target_os = "linux")]
 pub use uvc_linux::{
-    apply_settings, control_range, control_ranges, read_camera_state, set_auto, set_control,
+    apply_settings, control_range, control_ranges, read_camera_state, reconnect, set_auto,
+    set_control, set_microphone,
 };
 
 #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
@@ -211,10 +214,19 @@ mod uvc {
     ) -> Result<(), ControlError> {
         Err(ControlError::Unsupported)
     }
+    /// Stub: no UVC backend on this platform.
+    pub fn set_microphone(_id: &str, _on: bool) -> Result<(), ControlError> {
+        Err(ControlError::Unsupported)
+    }
+    /// Stub: no UVC backend on this platform.
+    pub fn reconnect(_id: &str) -> Result<(), ControlError> {
+        Err(ControlError::Unsupported)
+    }
 }
 #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 pub use uvc::{
-    apply_settings, control_range, control_ranges, read_camera_state, set_auto, set_control,
+    apply_settings, control_range, control_ranges, read_camera_state, reconnect, set_auto,
+    set_control, set_microphone,
 };
 
 /// The modes the camera with `unique_id` can stream at, for the pixel format

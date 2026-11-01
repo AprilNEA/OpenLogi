@@ -1,4 +1,6 @@
+use std::cell::RefCell;
 use std::collections::VecDeque;
+use std::rc::Rc;
 use std::sync::Mutex;
 
 use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext, point, size};
@@ -13,11 +15,13 @@ const UID: &str = "0x1123000046d0893";
 const KEY: &str = "camera:046d:0893";
 
 /// Scripted UVC: each read pops the next queued state (an empty queue reads
-/// as an unplugged camera); `reject` fails every batched write.
+/// as an unplugged camera); `reject` fails every batched write; a set
+/// `unreconnectable` is what every reconnect answers.
 #[derive(Default)]
 struct FakeUvc {
     reads: Mutex<VecDeque<CameraState>>,
     reject: Mutex<bool>,
+    unreconnectable: Mutex<Option<ControlError>>,
     calls: Mutex<Vec<String>>,
 }
 
@@ -69,6 +73,20 @@ impl Uvc for FakeUvc {
             .push(format!("set {control:?} {value}"));
         Ok(())
     }
+
+    fn set_microphone(&self, _uid: &str, on: bool) -> Result<(), ControlError> {
+        self.calls.lock().unwrap().push(format!("microphone {on}"));
+        Ok(())
+    }
+
+    fn reconnect(&self, uid: &str) -> Result<(), ControlError> {
+        self.calls.lock().unwrap().push(format!("reconnect {uid}"));
+        self.unreconnectable
+            .lock()
+            .unwrap()
+            .clone()
+            .map_or(Ok(()), Err)
+    }
 }
 
 fn range(min: i32, max: i32, current: i32) -> ControlRange {
@@ -95,7 +113,27 @@ fn brio(brightness: i32, exposure: i32, exposure_auto: bool) -> CameraState {
                 default: true,
             },
         )],
+        microphone: None,
     }
+}
+
+/// Every camera the panel announces as reconnected, while the returned
+/// subscription lives.
+fn heard_reconnects(
+    view: &Entity<CameraControlsPanel>,
+    cx: &mut VisualTestContext,
+) -> (Rc<RefCell<Vec<String>>>, Subscription) {
+    let heard = Rc::new(RefCell::new(Vec::new()));
+    let sink = heard.clone();
+    let subscription = cx.update(|_, cx| {
+        cx.subscribe(
+            view,
+            move |_, CameraReconnected(uid): &CameraReconnected, _| {
+                sink.borrow_mut().push(uid.clone());
+            },
+        )
+    });
+    (heard, subscription)
 }
 
 fn panel(
@@ -342,6 +380,7 @@ fn framed(field_of_view: i32) -> CameraState {
             ),
         ],
         autos: Vec::new(),
+        microphone: None,
     }
 }
 
@@ -429,6 +468,76 @@ fn a_chip_click_writes_its_own_control(cx: &mut TestAppContext) {
             "{control} shows {value}: {shown:?}"
         );
     }
+}
+
+/// A Brio with its built-in microphone switched off.
+fn muted() -> CameraState {
+    CameraState {
+        microphone: Some(false),
+        ..brio(128, 500, true)
+    }
+}
+
+/// Switching the microphone stores the switch, then reconnects the camera so
+/// the switch is in effect; the row shows the new position with no note.
+#[gpui::test]
+fn a_microphone_switch_stores_it_then_reconnects(cx: &mut TestAppContext) {
+    let uvc = Arc::new(FakeUvc::default());
+    uvc.queue(muted());
+    let (view, cx) = panel(cx, uvc.clone());
+    draw(&view, cx);
+    cx.run_until_parked();
+    view.read_with(cx, |panel, _| assert_eq!(panel.microphone, Some(false)));
+    let (heard, _subscription) = heard_reconnects(&view, cx);
+
+    view.update(cx, CameraControlsPanel::toggle_microphone);
+    cx.run_until_parked();
+
+    let calls = uvc.calls();
+    assert_eq!(
+        calls[calls.len() - 2..],
+        ["microphone true".to_string(), format!("reconnect {UID}")]
+    );
+    view.read_with(cx, |panel, _| {
+        assert_eq!(panel.microphone, Some(true));
+        assert!(matches!(
+            panel.microphone_status,
+            MicrophoneStatus::Done(Switched::Reconnected)
+        ));
+    });
+    assert_eq!(
+        *heard.borrow(),
+        [UID.to_string()],
+        "the reconnect is announced so the preview can reopen its stream"
+    );
+}
+
+/// A camera the panel cannot reconnect (no elevation, or the user declined
+/// it) still holds the new switch, so the row shows it and asks for a replug.
+#[gpui::test]
+fn a_camera_that_cannot_reconnect_asks_for_a_replug(cx: &mut TestAppContext) {
+    let uvc = Arc::new(FakeUvc::default());
+    *uvc.unreconnectable.lock().unwrap() = Some(ControlError::NeedsElevation);
+    uvc.queue(muted());
+    let (view, cx) = panel(cx, uvc.clone());
+    draw(&view, cx);
+    cx.run_until_parked();
+    let (heard, _subscription) = heard_reconnects(&view, cx);
+
+    view.update(cx, CameraControlsPanel::toggle_microphone);
+    cx.run_until_parked();
+
+    view.read_with(cx, |panel, _| {
+        assert_eq!(panel.microphone, Some(true));
+        assert!(matches!(
+            panel.microphone_status,
+            MicrophoneStatus::Done(Switched::NeedsReplug)
+        ));
+    });
+    assert!(
+        heard.borrow().is_empty(),
+        "a camera that stayed on the bus kept its stream"
+    );
 }
 
 #[test]

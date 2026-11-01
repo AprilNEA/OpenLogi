@@ -14,7 +14,7 @@
 
 #![expect(
     unsafe_code,
-    reason = "IOKit USB plug-in (IOUSBDeviceInterface182) FFI for UVC control transfers"
+    reason = "IOKit USB plug-in (IOUSBDeviceInterface187) FFI for UVC control transfers"
 )]
 
 use std::ffi::c_void;
@@ -27,7 +27,7 @@ use objc2_io_kit::{
     IOCFPlugInInterface, IOCreatePlugInInterfaceForService, IODestroyPlugInInterface,
     IOIteratorNext, IOObjectRelease, IORegistryEntryCreateCFProperty, IOServiceGetMatchingServices,
     IOServiceMatching, IOUSBConfigurationDescriptor, IOUSBConfigurationDescriptorPtr,
-    IOUSBDevRequest, IOUSBDevRequestTO, IOUSBDeviceInterface182, io_iterator_t, io_object_t,
+    IOUSBDevRequest, IOUSBDevRequestTO, IOUSBDeviceInterface187, io_iterator_t, io_object_t,
     kIOMainPortDefault, kIOUSBPipeStalled,
 };
 
@@ -129,10 +129,11 @@ const USB_DEVICE_USER_CLIENT_TYPE_ID: [u8; 16] = [
 const CF_PLUGIN_INTERFACE_ID: [u8; 16] = [
     0xc2, 0x44, 0xe8, 0x58, 0x10, 0x9c, 0x11, 0xd4, 0x91, 0xd4, 0x00, 0x50, 0xe4, 0xc6, 0x42, 0x6f,
 ];
-/// `kIOUSBDeviceInterfaceID182` — the first revision exposing
-/// `USBDeviceOpenSeize`, and the vtable [`IOUSBDeviceInterface182`] describes.
-const USB_DEVICE_INTERFACE_ID_182: [u8; 16] = [
-    0x15, 0x2f, 0xc4, 0x96, 0x48, 0x91, 0x11, 0xd5, 0x9d, 0x52, 0x00, 0x0a, 0x27, 0x80, 0x1e, 0x86,
+/// `kIOUSBDeviceInterfaceID187` — the first revision exposing
+/// `USBDeviceReEnumerate`, and the vtable [`IOUSBDeviceInterface187`] describes.
+/// It extends revision 182, which brought `USBDeviceOpenSeize`, field for field.
+const USB_DEVICE_INTERFACE_ID_187: [u8; 16] = [
+    0x3c, 0x9e, 0xe1, 0xeb, 0x24, 0x02, 0x11, 0xb2, 0x8e, 0x7e, 0x00, 0x0a, 0x27, 0x80, 0x1e, 0x86,
 ];
 
 /// The constant CFUUID for `b`, which CoreFoundation spells one byte per
@@ -144,19 +145,19 @@ fn uuid(b: [u8; 16]) -> Option<CFRetained<CFUUID>> {
     )
 }
 
-/// A retained `IOUSBDeviceInterface182`, released on drop.
+/// A retained `IOUSBDeviceInterface187`, released on drop.
 ///
 /// The device is not open yet: this is the interface IOKit's USB plug-in hands
 /// back, and it answers the read-only queries (vendor id, location id) on its
 /// own. Opening it for control transfers is [`UsbInterface::seize`].
-pub(super) struct UsbInterface(NonNull<*mut IOUSBDeviceInterface182>);
+pub(super) struct UsbInterface(NonNull<*mut IOUSBDeviceInterface187>);
 
 impl UsbInterface {
     /// Ask IOKit's USB plug-in for `service`'s device interface.
     pub(super) fn open(service: &IoObject) -> Option<Self> {
         let user_client = uuid(USB_DEVICE_USER_CLIENT_TYPE_ID)?;
         let plugin_type = uuid(CF_PLUGIN_INTERFACE_ID)?;
-        let device_type = uuid(USB_DEVICE_INTERFACE_ID_182)?;
+        let device_type = uuid(USB_DEVICE_INTERFACE_ID_187)?;
         let mut plugin: *mut *mut IOCFPlugInInterface = ptr::null_mut();
         let mut score = 0i32;
 
@@ -181,7 +182,7 @@ impl UsbInterface {
         // every path below — including a missing `QueryInterface` slot. Per the
         // IOKit plug-in ABI the interface pointer itself is the `this`
         // argument, and `device` is a live local the query writes. The
-        // interface it yields for `kIOUSBDeviceInterfaceID182` carries its own
+        // interface it yields for `kIOUSBDeviceInterfaceID187` carries its own
         // reference, so it stays valid once the plug-in is gone.
         let device = unsafe {
             let mut device: *mut c_void = ptr::null_mut();
@@ -198,11 +199,11 @@ impl UsbInterface {
             }
             device
         };
-        NonNull::new(device.cast::<*mut IOUSBDeviceInterface182>()).map(Self)
+        NonNull::new(device.cast::<*mut IOUSBDeviceInterface187>()).map(Self)
     }
 
     /// The vtable IOKit installed for this interface.
-    fn vtable(&self) -> &IOUSBDeviceInterface182 {
+    fn vtable(&self) -> &IOUSBDeviceInterface187 {
         // SAFETY: `self.0` is the interface pointer IOKit returned — valid
         // until `Release`, which only `Drop` calls — and a COM-style interface
         // pointer points at its own vtable.
@@ -386,6 +387,22 @@ impl SeizedDevice {
             (total >= size_of::<IOUSBConfigurationDescriptor>())
                 .then(|| std::slice::from_raw_parts(header.as_ptr().cast::<u8>(), total))
         }
+    }
+
+    /// Have IOKit drop the device and enumerate it again, as if it had been
+    /// unplugged and plugged back in. A camera reads its stored switches, such
+    /// as the built-in microphone, only when it enumerates.
+    ///
+    /// The open this holds goes stale with the device, so it is consumed.
+    pub(super) fn re_enumerate(self) -> bool {
+        let Some(re_enumerate) = self.0.vtable().USBDeviceReEnumerate else {
+            return false;
+        };
+        // SAFETY: the device is open for exclusive access, which
+        // `USBDeviceReEnumerate` requires; the options word is reserved and
+        // must be zero. The close in `Drop` then answers `kIOReturnNoDevice`,
+        // which is harmless.
+        unsafe { re_enumerate(self.0.this(), 0) == SUCCESS }
     }
 }
 

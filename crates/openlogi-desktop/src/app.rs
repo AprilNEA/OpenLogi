@@ -16,7 +16,7 @@ use tracing::info;
 
 use self::menu::{APP_KEY_CONTEXT, CloseWindow, Minimize, NavigateBack, Zoom};
 use crate::features::action_ring::ActionRingPanel;
-use crate::features::camera::controls::CameraControlsPanel;
+use crate::features::camera::controls::{CameraControlsPanel, CameraReconnected};
 use crate::features::camera::preview::CameraPreview;
 use crate::features::keyboard::disable_keys::DisableKeysPanel;
 use crate::features::keyboard::function_row::FunctionRowView;
@@ -228,6 +228,9 @@ pub struct AppView {
     app_catalog: Entity<AppCatalogPicker>,
     /// Redraw the profile picker after discovery, filtering, or expansion changes.
     _app_catalog_obs: Subscription,
+    /// Reopens the camera preview after the controls panel reconnects the
+    /// camera, which kills the stream without telling the preview.
+    _camera_reconnect_obs: Subscription,
     appearance_obs: Option<Subscription>,
     /// Invalidates the root only for semantic state changes its current route
     /// reads; feature entities subscribe to their own events directly.
@@ -307,6 +310,13 @@ impl AppView {
         let lighting_panel = cx.new(LightingPanel::new);
         let camera_preview = cx.new(CameraPreview::new);
         let camera_controls = cx.new(CameraControlsPanel::new);
+        let camera_reconnect_obs = cx.subscribe(
+            &camera_controls,
+            |view, _, CameraReconnected(uid): &CameraReconnected, cx| {
+                view.camera_preview
+                    .update(cx, |preview, cx| preview.reopen_after_reconnect(uid, cx));
+            },
+        );
         let light_panel = cx.new(LightPanel::new);
         let profile_icons = ProfileIconCache::default();
         let app_catalog = cx.new(|cx| AppCatalogPicker::new(profile_icons.clone(), window, cx));
@@ -334,6 +344,7 @@ impl AppView {
             profile_icons,
             app_catalog,
             _app_catalog_obs: app_catalog_obs,
+            _camera_reconnect_obs: camera_reconnect_obs,
             appearance_obs: None,
             state_obs,
             removal_obs,

@@ -122,6 +122,10 @@ pub struct AutoState {
 pub struct CameraState {
     pub controls: Vec<(CameraControl, ControlRange)>,
     pub autos: Vec<(AutoToggle, AutoState)>,
+    /// The built-in microphone switch the camera stores, when it has one.
+    /// This is the stored setting: after a change it differs from what the
+    /// host sees until the camera reconnects (see `reconnect`).
+    pub microphone: Option<bool>,
 }
 
 /// The device's reported range and current value for a control.
@@ -190,4 +194,9 @@ pub enum ControlError {
     /// A platform API call failed (open, bind, or the control transfer).
     #[error("platform error: {0}")]
     Io(String),
+    /// The operation needs rights this process does not have: reconnecting a
+    /// camera on Linux (write access to its usbfs node) and Windows (an
+    /// administrator's hub request). The caller can retry it elevated.
+    #[error("needs administrator rights")]
+    NeedsElevation,
 }
