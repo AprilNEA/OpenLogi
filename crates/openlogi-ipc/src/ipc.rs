@@ -165,7 +165,10 @@ pub use succession::Identity;
 ///      (`page2:gridMiddle`) — the keypad's binding pages. `PairedDevice::hidpp10`
 ///      appended, so the GUI can tell a HID++ 1.0 device from one it never
 ///      probed.
-pub const PROTOCOL_VERSION: u32 = 43;
+/// v44: `Agent::switch_host`, `WriteError::HostOutOfRange` and
+///      `HidppOperation::ChangeHost` appended — software-initiated `0x1814`
+///      host switching of one device.
+pub const PROTOCOL_VERSION: u32 = 44;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -972,4 +975,15 @@ pub trait Agent {
 
     /// Read a G-series mouse's onboard memory.
     async fn read_onboard(route: DeviceRoute) -> Result<OnboardState, WriteError>;
+
+    /// Switch the device on `route` to the zero-based Easy-Switch slot `host`
+    /// through HID++ `0x1814 ChangeHost`.
+    ///
+    /// The agent refuses a slot beyond the device's channel count with
+    /// [`WriteError::HostOutOfRange`], and a slot `0x1815 HostsInfo` reports
+    /// as unpaired with [`WriteError::HostSlotEmpty`]; nothing is written
+    /// then. `Ok` means the device already used `host` or the fire-and-forget
+    /// write was issued. It does not mean the device arrived: once the write
+    /// takes effect, its radio link has left this computer.
+    async fn switch_host(route: DeviceRoute, host: u8) -> Result<(), WriteError>;
 }

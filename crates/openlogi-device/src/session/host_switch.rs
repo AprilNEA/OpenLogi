@@ -40,6 +40,7 @@ use hidpp::{
     },
     protocol::v20,
 };
+use openlogi_core::hid::{HidppOperation, WriteError};
 use thiserror::Error;
 use tokio::{
     sync::{mpsc, oneshot},
@@ -89,6 +90,11 @@ const HOST_TASK_IDS: [(reprog_controls::TaskId, u8); 3] = [
     (reprog_controls::task_ids::HOST_SWITCH_CHANNEL_3, 2),
 ];
 const HIDPP_OPERATION_TIMEOUT: Duration = Duration::from_secs(5);
+/// The whole advisory `HostsInfo` check in [`host_slot_is_empty`]. Its two
+/// reads are optional, so they must not use up the budget of the switch they
+/// guard: the agent gives a whole `switch_host` 5 s, and Flow 1 s to prepare
+/// each device.
+const HOSTS_INFO_BUDGET: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ReportingMode {
@@ -119,6 +125,9 @@ pub enum HostSwitchError {
     /// A required HID++ operation failed.
     #[error("HID++ protocol error: {0}")]
     Hidpp(String),
+    /// The device does not expose the ChangeHost feature.
+    #[error("device does not expose HID++ ChangeHost feature 0x1814")]
+    FeatureUnsupported,
     /// A required HID++ operation did not complete within its budget.
     #[error("HID++ operation timed out while {operation}")]
     TimedOut {
@@ -136,11 +145,50 @@ pub enum HostSwitchError {
         /// The zero-based host slot that has no pairing.
         host: u8,
     },
+    /// The requested host does not exist on this device.
+    #[error("host {host} is outside device host count {host_count}")]
+    HostOutOfRange {
+        /// The zero-based host slot that was requested.
+        host: u8,
+        /// Number of host slots reported by the device.
+        host_count: u8,
+    },
 }
 
 impl From<IoSuspended> for HostSwitchError {
     fn from(error: IoSuspended) -> Self {
         Self::Hid(error.into())
+    }
+}
+
+/// Carries a host-switch failure across the IPC boundary in the vocabulary
+/// the other Easy-Switch commands already use.
+///
+/// The impl lives here for the same reason as `From<BackendError>`: the
+/// orphan rule allows one home, and `openlogi-core` must not depend on this
+/// crate. A timeout keeps only the coarse [`HidppOperation::ChangeHost`],
+/// because [`WriteError::RequestTimedOut`] names operations, not steps.
+impl From<HostSwitchError> for WriteError {
+    fn from(error: HostSwitchError) -> Self {
+        match error {
+            HostSwitchError::Hid(error) => error.into(),
+            HostSwitchError::KeyboardNotFound | HostSwitchError::TargetNotFound => {
+                Self::DeviceNotFound
+            }
+            HostSwitchError::Hidpp(message) => Self::Hidpp(message),
+            HostSwitchError::FeatureUnsupported => Self::FeatureUnsupported {
+                feature_hex: ChangeHostFeature::ID,
+            },
+            HostSwitchError::TimedOut { .. } => Self::RequestTimedOut {
+                operation: HidppOperation::ChangeHost,
+            },
+            error @ HostSwitchError::UnsupportedKeyboard => Self::Hidpp(error.to_string()),
+            HostSwitchError::HostSlotEmpty { host } => Self::HostSlotEmpty { slot: host },
+            HostSwitchError::HostOutOfRange { host, host_count } => Self::HostOutOfRange {
+                slot: host,
+                host_count,
+            },
+        }
     }
 }
 
@@ -913,6 +961,27 @@ pub async fn switch_linked_hosts(
     Ok(changed)
 }
 
+/// Switch one device on an already-open shared channel to the zero-based `host`.
+///
+/// The device's reported host count is validated before writing, and a slot
+/// that `HostsInfo` reports as truly empty is refused (see
+/// `host_slot_is_empty`). A `true` result means the fire-and-forget write was
+/// issued; it cannot confirm that the device arrived at the destination,
+/// because the device leaves this channel as soon as the write takes effect.
+/// `false` means the device already reported `host` as current, so no write
+/// was needed.
+///
+/// # Errors
+///
+/// [`HostSwitchError::FeatureUnsupported`] without `0x1814`,
+/// [`HostSwitchError::HostOutOfRange`] for a slot beyond the device's host
+/// count, [`HostSwitchError::HostSlotEmpty`] for an unpaired slot, and the
+/// transport or timeout variants when the device does not answer.
+pub async fn switch_host_on(shared: &SharedChannel, host: u8) -> Result<bool, HostSwitchError> {
+    let change = prepare_host_change_on(shared.channel(), shared.device_index(), host).await?;
+    apply_host_change(change).await
+}
+
 async fn arm_host_controls_inner(
     controls: &ReprogControlsV4,
     armed: &mut Vec<ArmedControl>,
@@ -1050,6 +1119,20 @@ async fn prepare_host_change(
     prepare_follower_change(channel, target.device_index(), keyboard_hosts, host).await
 }
 
+/// [`prepare_host_change_with`] for the device at `device_index` on `channel`.
+async fn prepare_host_change_on(
+    channel: &Arc<HidppChannel>,
+    device_index: u8,
+    host: u8,
+) -> Result<PreparedHostChange, HostSwitchError> {
+    let mut device = timed_hidpp(
+        "opening host-change device",
+        Device::new(Arc::clone(channel), device_index),
+    )
+    .await?;
+    prepare_host_change_with(&mut device, device_index, host).await
+}
+
 /// Read-only checks before `device` moves to `host`: the host is in range,
 /// and the device does not report it as an empty slot.
 async fn prepare_host_change_with(
@@ -1062,7 +1145,7 @@ async fn prepare_host_change_with(
         device.root().get_feature(ChangeHostFeature::ID),
     )
     .await?
-    .ok_or_else(|| HostSwitchError::Hidpp("ChangeHost is unsupported".into()))?;
+    .ok_or(HostSwitchError::FeatureUnsupported)?;
     let change_host = device.add_feature::<ChangeHostFeature>(info.index);
     let state = timed_hidpp("reading current host", change_host.get_host_info()).await?;
     let required = host_change_required(state.current_host, state.host_count, host)?;
@@ -1140,7 +1223,22 @@ where
 /// `name_len` is independent evidence the slot has a stored pairing, so it
 /// overrides an `Empty` status; only a slot with both `Empty` and no name is
 /// treated as truly empty.
+///
+/// A device that does not answer within [`HOSTS_INFO_BUDGET`] has not said
+/// the slot is empty either.
 async fn host_slot_is_empty(device: &mut Device, host: u8) -> bool {
+    timeout(HOSTS_INFO_BUDGET, slot_reported_empty(device, host))
+        .await
+        .unwrap_or_else(|_| {
+            debug!(
+                host,
+                "host slot status did not arrive in time; treating the slot as usable"
+            );
+            false
+        })
+}
+
+async fn slot_reported_empty(device: &mut Device, host: u8) -> bool {
     let feature = timed_hidpp(
         "locating hosts-info feature",
         device.root().get_feature(HostsInfoFeature::ID),
@@ -1175,9 +1273,10 @@ fn host_change_required(
     requested_host: u8,
 ) -> Result<bool, HostSwitchError> {
     if requested_host >= host_count {
-        return Err(HostSwitchError::Hidpp(format!(
-            "host {requested_host} is outside device host count {host_count}"
-        )));
+        return Err(HostSwitchError::HostOutOfRange {
+            host: requested_host,
+            host_count,
+        });
     }
     Ok(current_host != requested_host)
 }

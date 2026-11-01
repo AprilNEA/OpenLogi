@@ -440,6 +440,17 @@ impl Agent for AgentServer {
             .rename_easy_switch_host(&route, slot, name)
             .await
     }
+
+    async fn switch_host(self, _: Context, route: DeviceRoute, host: u8) -> Result<(), WriteError> {
+        self.shared
+            .device(&route)
+            .run(HidppOperation::ChangeHost, |c| async move {
+                let changed = openlogi_hid::switch_host_on(&c, host).await?;
+                info!(%route, host, changed, "switch_host");
+                Ok(())
+            })
+            .await
+    }
     async fn reload_saved_config(
         self,
         _: Context,
