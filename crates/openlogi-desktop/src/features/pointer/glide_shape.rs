@@ -15,7 +15,7 @@ use gpui_component::{Selectable as _, h_flex, v_flex};
 use openlogi_core::config::{GlideShape, MomentumParams, MomentumScrolling as M};
 use openlogi_core::scroll::GlideCurve;
 
-use super::momentum::commit;
+use super::momentum::{MomentumScope, commit};
 use crate::ui::choice_card::ChoiceCard;
 use crate::ui::section::section_label;
 use crate::ui::theme::{ACCENT_BLUE, Palette, Typography as _};
@@ -167,6 +167,7 @@ fn shape_hint(shape: GlideShape) -> SharedString {
 /// One shape's tile: its curve over its name and hint, ringed in the accent
 /// colour while it is the `current` shape. Clicking it picks the shape.
 fn tile(
+    scope: MomentumScope,
     shape: GlideShape,
     current: GlideShape,
     params: &MomentumParams,
@@ -211,12 +212,13 @@ fn tile(
                     .child(shape_hint(shape)),
             ),
     )
-    .on_click(move |_, _, cx| commit(cx, |m| m.glide_shape = shape))
+    .on_click(move |_, _, cx| commit(cx, scope, |m| m.glide_shape = shape))
 }
 
 /// The picker: its label and `current` shape, what it does, and the tiles
-/// drawn under `params`.
+/// drawn under `params`. A tile commits its shape to `scope`'s settings.
 pub(super) fn glide_shape_picker(
+    scope: MomentumScope,
     current: GlideShape,
     params: &MomentumParams,
     pal: Palette,
@@ -246,7 +248,7 @@ pub(super) fn glide_shape_picker(
             h_flex()
                 .gap_3()
                 .items_stretch()
-                .children(GlideShape::ALL.map(|shape| tile(shape, current, params, pal))),
+                .children(GlideShape::ALL.map(|shape| tile(scope, shape, current, params, pal))),
         )
 }
 

@@ -722,7 +722,7 @@ fn smooth_wheel_row(pal: Palette, smooth_wheel: bool, hires: HiresWheel) -> impl
             .label((!available).then(|| tr!("common.unavailable")))
             .on_change(|enabled, window, cx| {
                 let gliding = AppState::try_read(cx)
-                    .is_some_and(|state| state.app_settings().momentum_scrolling.enabled);
+                    .is_some_and(|state| state.current_momentum_scrolling().enabled);
                 if !*enabled && gliding {
                     confirm_turning_off_with_smooth_wheel(window, cx);
                 } else {
@@ -1222,7 +1222,7 @@ mod tests {
 
     use gpui::{AppContext as _, Modifiers, VisualTestContext};
     use gpui_component::WindowExt;
-    use openlogi_core::config::Config;
+    use openlogi_core::config::{Config, MomentumScrolling};
 
     use super::{
         HiresWheel, device_enabled_row, elided_key, smooth_wheel_caption, smooth_wheel_row,
@@ -1425,14 +1425,19 @@ mod tests {
         rust_i18n::set_locale("en");
         let mut config = Config::ephemeral();
         config.set_smooth_wheel(KNOWN_MOUSE_KEY, true);
-        config.app_settings.momentum_scrolling.enabled = true;
+        config.set_device_momentum_scrolling(
+            KNOWN_MOUSE_KEY,
+            Some(MomentumScrolling {
+                enabled: true,
+                ..MomentumScrolling::default()
+            }),
+        );
         let cx = smooth_wheel_row_view(cx, HiresWheel::Here, true, config);
         let gliding = |cx: &mut VisualTestContext| {
             cx.update(|_, cx| {
                 AppState::try_read(cx)
                     .expect("state is installed")
-                    .app_settings()
-                    .momentum_scrolling
+                    .current_momentum_scrolling()
                     .enabled
             })
         };

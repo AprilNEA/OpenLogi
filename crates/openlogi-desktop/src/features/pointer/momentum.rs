@@ -1,14 +1,16 @@
-//! Magic Mouse–style momentum scrolling for the Pointer tab.
+//! Momentum scrolling, for Settings → General and the Pointer tab.
 //!
 //! One switch turns it on; only then do its settings show: the distance a
 //! wheel notch scrolls, then the glide — its shape, picked from curve tiles
 //! ([`glide_shape`](super::glide_shape)), and its max speed, length and
 //! repeat speed-up. Each slider has seven distinct stops — the default in the
 //! middle — its value, and a one-line explanation; a button puts them all
-//! back to their defaults. The settings are app-wide ([`MomentumScrolling`])
-//! and take effect on any mouse whose Smooth wheel is on: turning the glide
-//! on offers to turn on the selected mouse's Smooth wheel too, and the card
-//! says so when it is off.
+//! back to their defaults. The settings ([`MomentumScrolling`]) take effect on
+//! a mouse whose Smooth wheel is on. Settings → General edits the app-wide
+//! default and counts the mice with their own; the Pointer tab edits the
+//! selected mouse's own, says whether it has any, and offers to go back to
+//! the default. There, turning the glide on offers to turn on the mouse's
+//! Smooth wheel too, and the card says so when it is off.
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -16,7 +18,7 @@ use gpui::{
     Window, div, px, relative, rgb,
 };
 use gpui_component::WindowExt as _;
-use gpui_component::button::Button;
+use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::dialog::DialogButtonProps;
 use gpui_component::slider::{Slider, SliderState};
 use gpui_component::{Disableable as _, Selectable as _, Sizable as _, h_flex, v_flex};
@@ -105,6 +107,15 @@ impl MomentumSetting {
     }
 }
 
+/// Which momentum settings a [`MomentumPanel`] edits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MomentumScope {
+    /// The app-wide default, in Settings → General.
+    General,
+    /// The selected mouse's own, on its Pointer tab.
+    SelectedDevice,
+}
+
 /// One setting and its slider.
 struct Setting {
     setting: MomentumSetting,
@@ -112,13 +123,17 @@ struct Setting {
 }
 
 impl Setting {
-    fn new(setting: MomentumSetting, cx: &mut Context<MomentumPanel>) -> Self {
+    fn new(
+        setting: MomentumSetting,
+        scope: MomentumScope,
+        cx: &mut Context<MomentumPanel>,
+    ) -> Self {
         let stops = setting.stops();
         let slider = CommitSlider::new(
             SliderRange::new(0_u8, LAST_STOP),
             nearest_stop(stops, setting.get(&MomentumScrolling::default())),
             cx,
-            move |_, index, cx| commit(cx, |m| setting.set(m, stop_value(stops, index))),
+            move |_, index, cx| commit(cx, scope, |m| setting.set(m, stop_value(stops, index))),
         );
         Self { setting, slider }
     }
@@ -156,6 +171,7 @@ impl Setting {
 }
 
 pub struct MomentumPanel {
+    scope: MomentumScope,
     pixels_per_notch: Setting,
     max_glide_speed: Setting,
     glide_length: Setting,
@@ -163,17 +179,62 @@ pub struct MomentumPanel {
     _state_obs: Subscription,
 }
 
-/// Commit the momentum settings with `change` applied.
-pub(super) fn commit(cx: &mut App, change: impl FnOnce(&mut MomentumScrolling)) {
-    AppState::apply(cx, |state| {
-        let mut momentum = state.app_settings().momentum_scrolling;
-        change(&mut momentum);
-        state.commit_momentum_scrolling(momentum)
+/// Commit `scope`'s momentum settings with `change` applied.
+pub(super) fn commit(
+    cx: &mut App,
+    scope: MomentumScope,
+    change: impl FnOnce(&mut MomentumScrolling),
+) {
+    AppState::apply(cx, |state| match scope {
+        MomentumScope::General => {
+            let mut momentum = state.app_settings().momentum_scrolling;
+            change(&mut momentum);
+            state.commit_momentum_scrolling(momentum)
+        }
+        MomentumScope::SelectedDevice => {
+            let mut momentum = state.current_momentum_scrolling();
+            change(&mut momentum);
+            state.commit_current_momentum_scrolling(momentum)
+        }
     });
 }
 
+/// What a [`MomentumPanel`] renders from, read once per frame.
+#[derive(Clone, Copy, Debug, Default)]
+struct Snapshot {
+    /// The settings the panel edits.
+    momentum: MomentumScrolling,
+    /// Settings → General's settings.
+    general: MomentumScrolling,
+    /// Whether the selected mouse has its own settings.
+    has_override: bool,
+    /// How many saved mice have their own settings.
+    override_count: usize,
+    /// Whether the selected mouse's Smooth wheel is on.
+    smooth_wheel: bool,
+    /// Whether this link can smooth the selected mouse's wheel.
+    can_smooth: bool,
+}
+
+impl Snapshot {
+    fn read(state: &AppState, scope: MomentumScope) -> Self {
+        let general = state.app_settings().momentum_scrolling;
+        Self {
+            momentum: match scope {
+                MomentumScope::General => general,
+                MomentumScope::SelectedDevice => state.current_momentum_scrolling(),
+            },
+            general,
+            has_override: state.current_has_momentum_override(),
+            override_count: state.momentum_override_count(),
+            smooth_wheel: state.current_smooth_wheel(),
+            can_smooth: state.current_hires_wheel_supported(),
+        }
+    }
+}
+
 impl MomentumPanel {
-    pub fn new(cx: &mut Context<Self>) -> Self {
+    pub fn new(scope: MomentumScope, cx: &mut Context<Self>) -> Self {
         let state_obs = AppState::repaint_on(cx, |event| {
             matches!(
                 event,
@@ -181,10 +242,11 @@ impl MomentumPanel {
             )
         });
         Self {
-            pixels_per_notch: Setting::new(MomentumSetting::PixelsPerNotch, cx),
-            max_glide_speed: Setting::new(MomentumSetting::MaxGlideSpeed, cx),
-            glide_length: Setting::new(MomentumSetting::GlideLength, cx),
-            repeat_boost: Setting::new(MomentumSetting::RepeatBoost, cx),
+            scope,
+            pixels_per_notch: Setting::new(MomentumSetting::PixelsPerNotch, scope, cx),
+            max_glide_speed: Setting::new(MomentumSetting::MaxGlideSpeed, scope, cx),
+            glide_length: Setting::new(MomentumSetting::GlideLength, scope, cx),
+            repeat_boost: Setting::new(MomentumSetting::RepeatBoost, scope, cx),
             _state_obs: state_obs,
         }
     }
@@ -218,6 +280,7 @@ impl MomentumPanel {
             ))
             .child(group_heading(tr!("pointer.momentum_section_glide"), pal))
             .child(glide_shape_picker(
+                self.scope,
                 momentum.glide_shape,
                 &shown.params(),
                 pal,
@@ -247,7 +310,11 @@ impl MomentumPanel {
                 tr!("pointer.momentum_repeat_boost_description"),
                 self.repeat_boost.slider.slider(),
             ))
-            .child(h_flex().justify_end().child(reset_button(momentum)))
+            .child(
+                h_flex()
+                    .justify_end()
+                    .child(reset_button(self.scope, momentum)),
+            )
     }
 }
 
@@ -264,19 +331,14 @@ fn group_heading(label: SharedString, pal: Palette) -> impl IntoElement {
 impl Render for MomentumPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let pal = theme::palette(cx);
-        let (momentum, smooth_wheel, can_smooth) = AppState::try_read(cx).map_or_else(
-            || (MomentumScrolling::default(), true, false),
-            |state| {
-                (
-                    state.app_settings().momentum_scrolling,
-                    state.current_smooth_wheel(),
-                    state.current_hires_wheel_supported(),
-                )
-            },
-        );
-        // The glide needs this mouse's Smooth wheel: turning it on asks to
-        // turn that on too, where this link can.
-        let offer_smooth_wheel = !smooth_wheel && can_smooth;
+        let scope = self.scope;
+        let shown = AppState::try_read(cx)
+            .map_or_else(Snapshot::default, |state| Snapshot::read(state, scope));
+        let momentum = shown.momentum;
+        // On a mouse's tab the glide needs its Smooth wheel: turning it on
+        // asks to turn that on too, where this link can.
+        let on_device = scope == MomentumScope::SelectedDevice;
+        let offer_smooth_wheel = on_device && !shown.smooth_wheel && shown.can_smooth;
         let settings = momentum
             .enabled
             .then(|| self.settings(pal, momentum, window, cx));
@@ -294,19 +356,62 @@ impl Render for MomentumPanel {
                         if *enabled && offer_smooth_wheel {
                             confirm_turning_on_with_smooth_wheel(window, cx);
                         } else {
-                            commit(cx, |m| m.enabled = *enabled);
+                            commit(cx, scope, |m| m.enabled = *enabled);
                         }
                     }),
             ))
-            .when(momentum.enabled && !smooth_wheel, |this| {
-                this.child(
-                    div()
-                        .text_caption()
-                        .text_color(pal.text_muted)
-                        .child(tr!("pointer.momentum_needs_smooth_wheel")),
-                )
-            })
+            .child(scope_line(scope, shown, pal))
+            .when(
+                on_device && momentum.enabled && !shown.smooth_wheel,
+                |this| {
+                    this.child(
+                        div()
+                            .text_caption()
+                            .text_color(pal.text_muted)
+                            .child(tr!("pointer.momentum_needs_smooth_wheel")),
+                    )
+                },
+            )
             .children(settings)
+    }
+}
+
+/// Where the panel's settings come from. On a mouse's tab: whether the mouse
+/// has its own, with a button back to Settings → General's, or follows
+/// them. In Settings → General: how many mice have their own.
+fn scope_line(scope: MomentumScope, shown: Snapshot, pal: Palette) -> impl IntoElement {
+    let caption = |text: SharedString| div().text_caption().text_color(pal.text_muted).child(text);
+    match scope {
+        MomentumScope::SelectedDevice if shown.has_override => {
+            let custom = if shown.general.enabled {
+                tr!("pointer.momentum_custom_general_on")
+            } else {
+                tr!("pointer.momentum_custom_general_off")
+            };
+            h_flex()
+                .gap_2()
+                .items_center()
+                .justify_between()
+                .child(caption(custom))
+                .child(
+                    Button::new("momentum-use-general")
+                        .ghost()
+                        .small()
+                        .label(tr!("pointer.momentum_use_general"))
+                        .on_click(|_, _, cx| {
+                            AppState::apply(cx, |state| {
+                                let general = state.app_settings().momentum_scrolling;
+                                state.commit_current_momentum_scrolling(general)
+                            });
+                        }),
+                )
+        }
+        MomentumScope::SelectedDevice => {
+            h_flex().child(caption(tr!("pointer.momentum_follows_general")))
+        }
+        MomentumScope::General => h_flex().child(caption(
+            tr!("pointer.momentum_override_count", count => shown.override_count),
+        )),
     }
 }
 
@@ -350,9 +455,9 @@ pub(crate) fn confirm_turning_off_with_smooth_wheel(window: &mut Window, cx: &mu
     });
 }
 
-/// Puts every setting back to its default, leaving the switch as it is.
-/// Disabled while they already are.
-fn reset_button(momentum: MomentumScrolling) -> impl IntoElement {
+/// Puts every setting in `scope` back to its default, leaving the switch as
+/// it is. Disabled while they already are.
+fn reset_button(scope: MomentumScope, momentum: MomentumScrolling) -> impl IntoElement {
     let defaults = MomentumScrolling {
         enabled: momentum.enabled,
         ..MomentumScrolling::default()
@@ -362,7 +467,7 @@ fn reset_button(momentum: MomentumScrolling) -> impl IntoElement {
         .small()
         .label(tr!("pointer.momentum_reset"))
         .disabled(momentum == defaults)
-        .on_click(move |_, _, cx| commit(cx, |m| *m = defaults))
+        .on_click(move |_, _, cx| commit(cx, scope, |m| *m = defaults))
 }
 
 /// A setting's label and live value, its slider over the seven stops with a
@@ -420,7 +525,12 @@ fn stop_marks(pal: Palette) -> impl IntoElement {
 
 #[cfg(test)]
 mod tests {
+    use gpui::{AppContext as _, TestAppContext};
+    use openlogi_core::config::Config;
+
     use super::*;
+    use crate::services::assets::AssetResolver;
+    use crate::state::{Sources, tests::direct_inventory};
 
     /// The middle stop, where every default sits.
     const MIDDLE_STOP: u8 = LAST_STOP / 2;
@@ -466,5 +576,51 @@ mod tests {
         assert_eq!(nearest_stop(&REPEAT_BOOSTS, 145), 4);
         assert_eq!(nearest_stop(&MAX_GLIDE_SPEEDS, 0), 0);
         assert_eq!(nearest_stop(&MAX_GLIDE_SPEEDS, u16::MAX), LAST_STOP);
+    }
+
+    /// Each scope commits to its own settings: Settings → General to the
+    /// app-wide default, the Pointer tab to the selected mouse's override.
+    #[gpui::test]
+    fn each_scope_commits_its_own_settings(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        cx.update(|cx| {
+            let resolver = AssetResolver::new();
+            let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+            let inventories = [direct_inventory([1, 2, 3, 4])];
+            let state = cx.new(|_| {
+                AppState::new(Sources {
+                    inventories: &inventories,
+                    ..Sources::in_memory(Config::ephemeral(), &resolver, commands)
+                })
+            });
+            AppState::set_global(state, cx);
+        });
+        let (_panel, cx) =
+            cx.add_window_view(|_, cx| MomentumPanel::new(MomentumScope::SelectedDevice, cx));
+
+        cx.update(|_, cx| commit(cx, MomentumScope::SelectedDevice, |m| m.glide_ms = 1200));
+        // The card now says the mouse has its own settings, with a way back.
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.update(|_, cx| {
+            let state = AppState::try_read(cx).expect("state is installed");
+            assert!(state.current_has_momentum_override());
+            assert_eq!(state.current_momentum_scrolling().glide_ms, 1200);
+            assert_eq!(
+                state.app_settings().momentum_scrolling,
+                MomentumScrolling::default()
+            );
+        });
+
+        cx.update(|_, cx| commit(cx, MomentumScope::General, |m| m.glide_ms = 150));
+        cx.update(|_, cx| {
+            let state = AppState::try_read(cx).expect("state is installed");
+            assert_eq!(state.app_settings().momentum_scrolling.glide_ms, 150);
+            assert_eq!(
+                state.current_momentum_scrolling().glide_ms,
+                1200,
+                "the mouse keeps its own"
+            );
+            assert_eq!(state.momentum_override_count(), 1);
+        });
     }
 }
