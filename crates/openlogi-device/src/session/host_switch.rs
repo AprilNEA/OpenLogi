@@ -90,6 +90,11 @@ const HOST_TASK_IDS: [(reprog_controls::TaskId, u8); 3] = [
     (reprog_controls::task_ids::HOST_SWITCH_CHANNEL_3, 2),
 ];
 const HIDPP_OPERATION_TIMEOUT: Duration = Duration::from_secs(5);
+/// The whole advisory `HostsInfo` check in [`host_slot_is_empty`]. Its two
+/// reads are optional, so they must not use up the budget of the switch they
+/// guard: the agent gives a whole `switch_host` 5 s, and Flow 1 s to prepare
+/// each device.
+const HOSTS_INFO_BUDGET: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ReportingMode {
@@ -1218,7 +1223,22 @@ where
 /// `name_len` is independent evidence the slot has a stored pairing, so it
 /// overrides an `Empty` status; only a slot with both `Empty` and no name is
 /// treated as truly empty.
+///
+/// A device that does not answer within [`HOSTS_INFO_BUDGET`] has not said
+/// the slot is empty either.
 async fn host_slot_is_empty(device: &mut Device, host: u8) -> bool {
+    timeout(HOSTS_INFO_BUDGET, slot_reported_empty(device, host))
+        .await
+        .unwrap_or_else(|_| {
+            debug!(
+                host,
+                "host slot status did not arrive in time; treating the slot as usable"
+            );
+            false
+        })
+}
+
+async fn slot_reported_empty(device: &mut Device, host: u8) -> bool {
     let feature = timed_hidpp(
         "locating hosts-info feature",
         device.root().get_feature(HostsInfoFeature::ID),

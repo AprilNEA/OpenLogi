@@ -46,6 +46,8 @@ enum SlotStatus {
     LookupErrors,
     /// Implements the feature but errors on the status read.
     ReadErrors,
+    /// Implements the feature but never answers the status read.
+    ReadIgnored,
     /// Reports `status == Empty` for every slot, including paired ones, but
     /// still reports a nonzero friendly-name length for them — the MX
     /// Vertical quirk from #1709.
@@ -98,6 +100,7 @@ fn scripted_keyboard(request: &[u8], slot_status: SlotStatus) -> Option<Vec<u8>>
                     SlotStatus::LookupErrors => return Some(feature_error(request, BUSY)),
                     SlotStatus::Reported
                     | SlotStatus::ReadErrors
+                    | SlotStatus::ReadIgnored
                     | SlotStatus::StuckEmptyButNamed => HOSTS_INFO_INDEX,
                 },
                 _ => 0x00,
@@ -107,8 +110,10 @@ fn scripted_keyboard(request: &[u8], slot_status: SlotStatus) -> Option<Vec<u8>>
         (CHANGE_HOST_INDEX, 0x00) => payload[..2].copy_from_slice(&[3, 0]),
         // HostsInfo getHostInfo: echo the slot, then its pairing status.
         (HOSTS_INFO_INDEX, 0x01) => {
-            if slot_status == SlotStatus::ReadErrors {
-                return Some(feature_error(request, BUSY));
+            match slot_status {
+                SlotStatus::ReadErrors => return Some(feature_error(request, BUSY)),
+                SlotStatus::ReadIgnored => return None,
+                _ => {}
             }
             payload[0] = request[4];
             if slot_status == SlotStatus::StuckEmptyButNamed {
@@ -288,6 +293,27 @@ async fn an_unreadable_slot_status_does_not_block_the_switch() {
         .expect("an errored status read must not abort the switch");
 
     assert!(change.required);
+}
+
+#[tokio::test]
+async fn an_unanswered_slot_status_does_not_use_up_the_switch_budget() {
+    // A device that answers ChangeHost but ignores the HostsInfo read must
+    // still be switched within Flow's 1 s per-device preparation, and long
+    // before the agent's 5 s budget for the whole switch_host.
+    let channel =
+        scripted_channel(|request| scripted_keyboard(request, SlotStatus::ReadIgnored)).await;
+    let started = tokio::time::Instant::now();
+
+    let change = prepare_host_change_on(&channel, 1, 2)
+        .await
+        .expect("an unanswered status read must not abort the switch");
+
+    assert!(change.required);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(1),
+        "the advisory read took {:?}",
+        started.elapsed()
+    );
 }
 
 #[tokio::test]
