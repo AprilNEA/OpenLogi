@@ -458,6 +458,72 @@ fn outcomes_cannot_start_or_overwrite_a_session() {
     );
 }
 
+/// Both users confirm at once: the responder answers the initiator's confirm
+/// with `PAIRED` before the responder's own confirm reaches the initiator.
+#[test]
+fn a_paired_outcome_may_overtake_the_peer_confirm() {
+    let now = Instant::now();
+    let (mut initiator, mut responder) = prompted_pair(now, None);
+    let mut initiator_store = MemoryStore::default();
+    let mut responder_store = MemoryStore::default();
+    initiator.confirm_local(now, &mut initiator_store).unwrap();
+    responder.confirm_local(now, &mut responder_store).unwrap();
+    let outcome = responder
+        .receive_confirm(now, &mut responder_store)
+        .unwrap();
+    assert_eq!(outcome.result.as_known(), Some(proto::PairResult::Paired));
+
+    initiator.receive_outcome(&outcome).unwrap();
+    assert!(
+        matches!(initiator.state(), PairingState::Prompted { .. }),
+        "completion waits for the peer's own confirm"
+    );
+    assert!(initiator_store.0.is_empty());
+
+    let late = initiator
+        .receive_confirm(now, &mut initiator_store)
+        .unwrap();
+    assert_eq!(late.result.as_known(), Some(proto::PairResult::Paired));
+    assert_eq!(initiator.state(), PairingState::Paired);
+    assert_eq!(initiator_store.0, [RESPONDER_KEY]);
+}
+
+/// The peer confirms while its `PENDING_LOCAL` answer to the initiator's
+/// confirm is still in flight; the late answer must not undo the pairing.
+#[test]
+fn a_pending_outcome_may_arrive_after_pairing() {
+    let now = Instant::now();
+    let (mut initiator, mut responder) = prompted_pair(now, None);
+    let mut initiator_store = MemoryStore::default();
+    let mut responder_store = MemoryStore::default();
+    initiator.confirm_local(now, &mut initiator_store).unwrap();
+    let pending = responder
+        .receive_confirm(now, &mut responder_store)
+        .unwrap();
+    responder.confirm_local(now, &mut responder_store).unwrap();
+    initiator
+        .receive_confirm(now, &mut initiator_store)
+        .unwrap();
+    assert_eq!(initiator.state(), PairingState::Paired);
+
+    initiator.receive_outcome(&pending).unwrap();
+    assert_eq!(initiator.state(), PairingState::Paired);
+    assert_eq!(initiator_store.0, [RESPONDER_KEY]);
+}
+
+#[test]
+fn a_paired_outcome_before_the_local_confirm_is_invalid() {
+    let now = Instant::now();
+    let (mut initiator, _) = prompted_pair(now, None);
+    assert!(matches!(
+        initiator.receive_outcome(&pair_outcome(proto::PairResult::Paired)),
+        Err(PairingError::InvalidTransition(PairingState::Prompted {
+            local_confirmed: false,
+            ..
+        }))
+    ));
+}
+
 #[test]
 fn repeated_peer_confirm_replays_terminal_outcome() {
     let now = Instant::now();

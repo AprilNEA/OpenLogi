@@ -434,6 +434,42 @@ async fn pairing_slot_is_claimed_only_by_completed_handshakes() -> TestResult {
 }
 
 #[tokio::test]
+async fn promotion_frees_the_pairing_slot_and_keeps_the_connection() -> TestResult {
+    let pairing_identity = MachineIdentity::generate()?;
+    let pairing_trust = PeerTrust::pairing([]);
+    let acceptor = Arc::new(FlowEndpoint::bind(
+        localhost(),
+        pairing_identity.clone(),
+        pairing_trust.clone(),
+        hello(&pairing_identity, (1, 1)),
+    )?);
+    let candidate = || -> TestResult<Arc<FlowEndpoint>> {
+        let identity = MachineIdentity::generate()?;
+        Ok(Arc::new(FlowEndpoint::bind(
+            localhost(),
+            identity.clone(),
+            PeerTrust::pairing([]),
+            hello(&identity, (1, 1)),
+        )?))
+    };
+
+    let first = candidate()?;
+    let (first_side, accepted) = dial(&first, &acceptor).await?;
+    let (first_session, accepted_session) = pair_in_memory(&first_side, &accepted)?;
+    first_side.promote_after_pairing(&first_session)?;
+    accepted.promote_after_pairing(&accepted_session)?;
+    assert_eq!(accepted.trust(), SessionTrust::Trusted);
+    assert_eq!(pairing_trust.pairing_candidate(), None);
+
+    let second = candidate()?;
+    let (_second_side, _second_accepted) = dial(&second, &acceptor).await?;
+    assert_eq!(pairing_trust.pairing_candidate(), Some(second.public_key()));
+    assert_eq!(accepted.trust(), SessionTrust::Trusted);
+    assert!(accepted.close_reason().is_none());
+    Ok(())
+}
+
+#[tokio::test]
 async fn rpc_stream_that_never_finishes_times_out() -> TestResult {
     let pair = ConnectedPair::trusted_with_limits(EndpointLimits {
         stream_read_timeout: Duration::from_millis(200),

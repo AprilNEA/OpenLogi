@@ -445,15 +445,20 @@ impl PairingSession {
     }
 
     /// Applies a peer-provided `PairOutcome` after validating its open enum.
+    ///
+    /// The two confirms cross on the wire, so a valid ceremony can deliver
+    /// either reply late: `PAIRED` while the peer's own `PairConfirm` is still
+    /// in flight, or `PENDING_LOCAL` after that confirm already completed the
+    /// pairing here. Neither moves the state: completion still needs the
+    /// peer's confirm, and a completed pairing stays complete.
     pub fn receive_outcome(&mut self, outcome: &proto::PairOutcome) -> Result<(), PairingError> {
         match outcome.result.as_known() {
-            Some(proto::PairResult::Paired) => {
-                if matches!(self.phase, Phase::Paired) {
-                    Ok(())
-                } else {
-                    Err(PairingError::InvalidTransition(self.state()))
-                }
-            }
+            Some(proto::PairResult::Paired) => match self.phase {
+                Phase::Paired => Ok(()),
+                Phase::Prompted(prompted) if prompted.local_confirmed => Ok(()),
+                _ => Err(PairingError::InvalidTransition(self.state())),
+            },
+            Some(proto::PairResult::PendingLocal) if matches!(self.phase, Phase::Paired) => Ok(()),
             Some(proto::PairResult::PendingLocal) => self.ensure_prompted(),
             Some(proto::PairResult::Rejected) => {
                 self.ensure_prompted()?;
