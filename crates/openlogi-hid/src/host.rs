@@ -22,6 +22,7 @@ use openlogi_core::hid::smartshift::{
 use openlogi_device::ChannelPool;
 use openlogi_device::backend::{HidBackend, HotplugStream};
 use openlogi_device::backlight::{BacklightChange, BacklightState};
+use openlogi_device::inventory::hid_only::HidOnlyProduct;
 use openlogi_device::inventory::{Enumerator, InventoryError};
 use openlogi_device::pairing::PairingReceiver;
 use openlogi_device::write::{
@@ -306,6 +307,11 @@ pub fn channel_pool() -> ChannelPool {
 /// Enumerate this host's recognized standalone devices.
 pub async fn enumerate_standalone() -> Result<Vec<StandaloneDevice>, InventoryError> {
     openlogi_device::inventory::standalone::enumerate_standalone(&*native_backend()).await
+}
+
+/// List the Logitech products this host shows while it offers no HID++ node.
+pub async fn enumerate_hid_only() -> Result<Vec<HidOnlyProduct>, InventoryError> {
+    openlogi_device::inventory::hid_only::enumerate_hid_only(&*native_backend()).await
 }
 
 /// Subscribe to this host's HID hotplug events.

@@ -32,12 +32,13 @@ pub use hidpp::feature::FeatureType;
 pub use hidpp::feature::device_information::DeviceEntityType;
 pub use host::{
     apply_litra, channel_pool, dump_features, dump_firmware_entities, dump_reprog_controls,
-    enumerate, enumerate_standalone, get_backlight, get_dpi, get_dpi_info, get_onboard,
-    get_pointer_scaling, get_scroll_wheel_mode, get_smartshift_status, list_pairing_receivers,
-    play_haptic, read_battery_raw, read_litra_state, set_dpi, set_fn_lock, set_keyboard_color,
-    set_keyboard_color_with, set_pointer_scaling, set_scroll_inversion, set_scroll_resolution,
-    set_scroll_wheel_mode, set_smartshift, set_smartshift_sensitivity, set_smartshift_torque,
-    toggle_smartshift, update_backlight, watch_button_spy, watch_hotplug, watch_litra,
+    enumerate, enumerate_hid_only, enumerate_standalone, get_backlight, get_dpi, get_dpi_info,
+    get_onboard, get_pointer_scaling, get_scroll_wheel_mode, get_smartshift_status,
+    list_pairing_receivers, play_haptic, read_battery_raw, read_litra_state, set_dpi, set_fn_lock,
+    set_keyboard_color, set_keyboard_color_with, set_pointer_scaling, set_scroll_inversion,
+    set_scroll_resolution, set_scroll_wheel_mode, set_smartshift, set_smartshift_sensitivity,
+    set_smartshift_torque, toggle_smartshift, update_backlight, watch_button_spy, watch_hotplug,
+    watch_litra,
 };
 pub use lighting::{set_keyboard_color_on, set_keyboard_color_with_on};
 pub use probe_cache::FileProbeCacheStore;
