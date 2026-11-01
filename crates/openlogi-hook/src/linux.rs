@@ -27,6 +27,7 @@
     reason = "the wake pipes, the /dev/input watch, and the Wayland toplevel listener call libc directly"
 )]
 
+mod button_debounce;
 mod foreground;
 pub(crate) mod pointer;
 mod supervisor;
@@ -35,11 +36,13 @@ mod wheel;
 mod xvfb;
 
 use std::io;
+use std::ops::ControlFlow;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
+use std::time::{Duration, Instant, SystemTime};
 
 use evdev::uinput::VirtualDevice;
 use evdev::{
@@ -54,6 +57,7 @@ use crate::{
     ButtonId, CursorPosition, Delivery, EventDevice, EventDisposition, ForegroundApp, HookBackend,
     HookError, HookEvent, LOGITECH_VENDOR_ID, MouseEvent,
 };
+use button_debounce::{ButtonChange, ButtonDebounce};
 use foreground::{FRONTMOST, X11Source};
 pub(crate) use foreground::{
     ForegroundApplicationObserver, watch_frontmost_application_activations,
@@ -276,11 +280,20 @@ fn build_virtual_device(device: &Device) -> io::Result<evdev::uinput::VirtualDev
     builder.build()
 }
 
-/// Block until `device_fd` has data or `stop_fd` is readable.
-///
-/// Returns `true` when the device is ready to read, `false` on stop signal or
-/// unrecoverable poll error.
-fn wait_readable(device_fd: i32, stop_fd: i32) -> bool {
+/// What woke a device thread.
+#[derive(Debug, PartialEq, Eq)]
+enum Wake {
+    /// The device has events to read.
+    Readable,
+    /// The deadline passed with nothing to read.
+    Deadline,
+    /// A stop signal, or an error that ends the thread.
+    Stop,
+}
+
+/// Block until `device_fd` has data, `stop_fd` is readable, or `deadline`
+/// passes. Without a deadline, wait for one of the two descriptors only.
+fn wait(device_fd: i32, stop_fd: i32, deadline: Option<Instant>) -> Wake {
     const ERR_FLAGS: libc::c_short = libc::POLLERR | libc::POLLHUP | libc::POLLNVAL;
     let mut fds = [
         libc::pollfd {
@@ -295,15 +308,21 @@ fn wait_readable(device_fd: i32, stop_fd: i32) -> bool {
         },
     ];
     loop {
+        let timeout = deadline.map_or(-1, |at| {
+            poll_timeout(at.saturating_duration_since(Instant::now()))
+        });
         // SAFETY: fds is a valid two-element pollfd array.
-        let ret = unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) };
+        let ret = unsafe { libc::poll(fds.as_mut_ptr(), 2, timeout) };
         if ret < 0 {
             let err = io::Error::last_os_error();
             if err.kind() == io::ErrorKind::Interrupted {
                 continue; // interrupted by signal — retry
             }
             error!("poll() failed: {err}");
-            return false;
+            return Wake::Stop;
+        }
+        if ret == 0 {
+            return Wake::Deadline;
         }
         // An error/hangup on either fd (e.g. the grabbed device was unplugged →
         // POLLHUP) leaves it permanently "ready", so without this check neither
@@ -311,17 +330,77 @@ fn wait_readable(device_fd: i32, stop_fd: i32) -> bool {
         // so the caller exits the thread and releases the grab.
         if fds[0].revents & ERR_FLAGS != 0 {
             warn!("hooked device closed or errored; stopping its thread");
-            return false;
+            return Wake::Stop;
         }
         if fds[1].revents & ERR_FLAGS != 0 {
-            return false; // stop pipe closed → shut down
+            return Wake::Stop; // stop pipe closed → shut down
         }
         if fds[1].revents & libc::POLLIN != 0 {
-            return false; // stop signal
+            return Wake::Stop; // stop signal
         }
         if fds[0].revents & libc::POLLIN != 0 {
-            return true; // device has data
+            return Wake::Readable; // device has data
         }
+    }
+}
+
+/// `poll`'s timeout for `left`, rounded up to whole milliseconds so the
+/// thread never wakes before a deadline.
+fn poll_timeout(left: Duration) -> libc::c_int {
+    libc::c_int::try_from(left.as_nanos().div_ceil(1_000_000)).unwrap_or(libc::c_int::MAX)
+}
+
+/// When a report happened, on the clock of `read_at`, the moment it was
+/// read. `wall_at` is the wall clock at that moment, the clock of the
+/// kernel's `report` timestamp.
+///
+/// A report is timed by how long before the read it happened, so reports
+/// that queue up behind a slow thread keep their spacing, within one read
+/// and across reads: the button debouncer does not take a bounce read late
+/// for a click, nor a double click read late for a bounce. The debouncer
+/// itself runs on the monotonic clock, so a step of the wall clock mistimes
+/// at most the reports of one read. A timestamp after `wall_at`, as after
+/// the wall clock stepped back, counts as read at `read_at`.
+fn report_time(read_at: Instant, wall_at: SystemTime, report: SystemTime) -> Instant {
+    let age = wall_at.duration_since(report).unwrap_or_default();
+    read_at.checked_sub(age).unwrap_or(read_at)
+}
+
+/// Re-inject `pending` as one report, if it holds anything, and clear it.
+///
+/// The physical device is grabbed, so these pass-through events can't reach
+/// the desktop any other way. A uinput emit failure means the virtual device
+/// is broken, so it breaks: the thread stops, and dropping the grab restores
+/// normal input, rather than silently dropping events on every report.
+fn emit_report(
+    virtual_device: &mut VirtualDevice,
+    pending: &mut Vec<InputEvent>,
+    path: &std::path::Path,
+) -> ControlFlow<()> {
+    if pending.is_empty() {
+        return ControlFlow::Continue(());
+    }
+    if let Err(e) = virtual_device.emit(pending) {
+        error!(
+            "uinput emit failed on {}: {e} — stopping hook for this device",
+            path.display()
+        );
+        return ControlFlow::Break(());
+    }
+    pending.clear();
+    ControlFlow::Continue(())
+}
+
+/// Hand debounced button changes to the callback, queueing those it
+/// forwards for the pass-through report.
+fn deliver_buttons(
+    changes: impl IntoIterator<Item = ButtonChange>,
+    source: &EventDevice,
+    cb: &dyn Fn(HookEvent) -> EventDisposition,
+    pending: &mut Vec<InputEvent>,
+) {
+    for change in changes {
+        pending.extend(dispatch(change.into(), false, false, source, cb));
     }
 }
 
@@ -457,6 +536,19 @@ fn dispatch(
     }
 }
 
+/// The device a grabbed mouse's events name as their source.
+///
+/// Ids only. Every hooked device is a Logitech relative-pointer mouse (see
+/// `find_mouse_devices`), and without a name `source_is_remappable` stays
+/// true for all of them, as it was before button events named a device.
+fn event_source(device: &Device) -> EventDevice {
+    EventDevice {
+        vendor_id: Some(u32::from(device.input_id().vendor())),
+        product_id: Some(u32::from(device.input_id().product())),
+        product_name: None,
+    }
+}
+
 #[expect(
     clippy::needless_pass_by_value,
     reason = "path/cb/stop/stop_rx are moved into the spawned thread and must not be refs"
@@ -483,14 +575,7 @@ fn device_thread(
     let hires_scroll = device
         .supported_relative_axes()
         .is_some_and(|axes| axes.contains(RelativeAxisCode::REL_WHEEL_HI_RES));
-    // Ids only. Every hooked device is a Logitech relative-pointer mouse (see
-    // `find_mouse_devices`), and without a name `source_is_remappable` stays
-    // true for all of them, as it was before button events named a device.
-    let source = EventDevice {
-        vendor_id: Some(u32::from(device.input_id().vendor())),
-        product_id: Some(u32::from(device.input_id().product())),
-        product_name: None,
-    };
+    let source = event_source(&device);
 
     let device_fd = device.as_raw_fd();
     let stop_fd = stop_rx.as_raw_fd();
@@ -499,6 +584,8 @@ fn device_thread(
     // libinput skips its wheel debouncing on the uinput pass-through device,
     // so the hook applies it before the callback sees the wheel.
     let mut wheel = PassThroughWheel::default();
+    // The same for its button debouncing, before the callback sees a button.
+    let mut buttons = ButtonDebounce::for_device(&device.input_id());
     // Software scroll inversion, read once per report so a hi-res event and its
     // low-res companion never disagree if the setting flips mid-report.
     let mut report_inverted: Option<bool> = None;
@@ -509,20 +596,33 @@ fn device_thread(
         if stop.load(Ordering::Relaxed) {
             break;
         }
-        if !wait_readable(device_fd, stop_fd) {
-            break;
+        match wait(device_fd, stop_fd, buttons.deadline()) {
+            Wake::Readable => {}
+            Wake::Deadline => {
+                // A held button change is due, and no report came to carry it.
+                deliver_buttons(buttons.expire(Instant::now()), &source, &*cb, &mut pending);
+                if emit_report(&mut virtual_device, &mut pending, &path).is_break() {
+                    break;
+                }
+                continue;
+            }
+            Wake::Stop => break,
         }
 
-        let events = match device.fetch_events() {
-            Ok(iter) => iter,
+        let events: Vec<InputEvent> = match device.fetch_events() {
+            Ok(iter) => iter.collect(),
             Err(e) => {
                 error!("read error on {}: {e}", path.display());
                 break;
             }
         };
+        // Both clocks at the read, to time each report by its kernel timestamp.
+        let (read_at, wall_at) = (Instant::now(), SystemTime::now());
 
         for event in events {
             if let EventSummary::Synchronization(..) = event.destructure() {
+                let now = report_time(read_at, wall_at, event.timestamp());
+                deliver_buttons(buttons.end_report(now), &source, &*cb, &mut pending);
                 // Flush the report. `emit()` appends its own SYN_REPORT, so the
                 // incoming sync event is dropped rather than re-emitted — pushing
                 // it would send a redundant second SYN_REPORT.
@@ -530,27 +630,14 @@ fn device_thread(
                     .take()
                     .unwrap_or_else(crate::scroll_inversion);
                 wheel.end_report(&mut pending, inverted);
-                if !pending.is_empty() {
-                    if let Err(e) = virtual_device.emit(&pending) {
-                        // The physical device is grabbed, so these pass-through
-                        // events can't reach the desktop any other way. A uinput
-                        // emit failure means the virtual device is broken, so
-                        // stop here — dropping the grab restores normal input —
-                        // rather than silently dropping events on every report.
-                        error!(
-                            "uinput emit failed on {}: {e} — stopping hook for this device",
-                            path.display()
-                        );
-                        break 'read;
-                    }
-                    pending.clear();
+                if emit_report(&mut virtual_device, &mut pending, &path).is_break() {
+                    break 'read;
                 }
+            } else if let Ok(change) = ButtonChange::try_from(event) {
+                // Debounced with the rest of its report, when the report ends.
+                buttons.changed(change);
             } else {
-                let wheel_event = if hires_scroll {
-                    WheelEvent::try_from(event).ok()
-                } else {
-                    None
-                };
+                let wheel_event = WheelEvent::try_from(event).ok().filter(|_| hires_scroll);
                 let mut released = None;
                 let event = match wheel_event {
                     Some(WheelEvent::LowRes(axis, value)) => {
@@ -589,6 +676,15 @@ fn device_thread(
         }
     }
 
+    // A release held as a possible bounce is still the user's: deliver it
+    // before the grab goes, so a remapped button is not left held. What
+    // `pending` still holds is a report that failed to emit or never ended,
+    // and the thread stops either way, so an emit failure only adds to the log.
+    if let Some(change) = buttons.release_held(Instant::now()) {
+        pending.clear();
+        deliver_buttons([change], &source, &*cb, &mut pending);
+        let _ = emit_report(&mut virtual_device, &mut pending, &path);
+    }
     debug!("hook stopped on {}", path.display());
     // Dropping `device` releases the exclusive grab, restoring normal input delivery.
 }
@@ -790,6 +886,95 @@ mod tests {
     fn translate_low_res_hwheel_skipped_when_hires_active() {
         let event = InputEvent::new(EventType::RELATIVE.0, RelativeAxisCode::REL_HWHEEL.0, 1);
         assert!(translate(&event, true).is_none());
+    }
+
+    // ── waking and report times ──────────────────────────────────────────────
+
+    /// A device thread wakes at a button deadline even with nothing to read,
+    /// not before it, and still wakes for data and for a stop.
+    #[test]
+    fn wait_wakes_at_the_deadline_for_data_and_for_a_stop() {
+        let (device_rx, device_tx) = create_pipe().expect("device pipe");
+        let (stop_rx, stop_tx) = create_pipe().expect("stop pipe");
+        let (device_fd, stop_fd) = (device_rx.as_raw_fd(), stop_rx.as_raw_fd());
+
+        let deadline = Instant::now() + Duration::from_millis(5);
+        assert_eq!(wait(device_fd, stop_fd, Some(deadline)), Wake::Deadline);
+        assert!(Instant::now() >= deadline);
+
+        signal_pipe(&device_tx);
+        let far = Instant::now() + Duration::from_secs(60);
+        assert_eq!(wait(device_fd, stop_fd, Some(far)), Wake::Readable);
+        assert_eq!(wait(device_fd, stop_fd, None), Wake::Readable);
+
+        signal_pipe(&stop_tx);
+        assert_eq!(wait(device_fd, stop_fd, Some(far)), Wake::Stop);
+    }
+
+    #[test]
+    fn poll_timeout_rounds_up_to_whole_milliseconds() {
+        assert_eq!(poll_timeout(Duration::ZERO), 0);
+        assert_eq!(poll_timeout(Duration::from_nanos(1)), 1);
+        assert_eq!(poll_timeout(Duration::from_millis(25)), 25);
+        assert_eq!(poll_timeout(Duration::from_micros(25_001)), 26);
+        assert_eq!(poll_timeout(Duration::MAX), libc::c_int::MAX);
+    }
+
+    /// A report is timed by how long before the read it happened, so reports
+    /// read late, together or not, keep their spacing. A timestamp after the
+    /// read, as after the wall clock stepped back, counts as read at the read.
+    #[test]
+    fn report_time_counts_back_from_the_read() {
+        let read_at = Instant::now();
+        let wall_at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        let ms = Duration::from_millis;
+        assert_eq!(report_time(read_at, wall_at, wall_at), read_at);
+        assert_eq!(
+            report_time(read_at, wall_at, wall_at.checked_sub(ms(40)).unwrap()),
+            read_at.checked_sub(ms(40)).unwrap()
+        );
+        assert_eq!(report_time(read_at, wall_at, wall_at + ms(40)), read_at);
+    }
+
+    /// A bounce that queues up while the thread is held up is still a bounce:
+    /// its reports are timed when they happened, not when they were read.
+    #[test]
+    fn a_bounce_read_late_is_still_filtered() {
+        use evdev::{BusType, InputId};
+
+        let press = ButtonChange {
+            button: KeyCode::BTN_LEFT,
+            pressed: true,
+        };
+        let release = ButtonChange {
+            pressed: false,
+            ..press
+        };
+        let ms = Duration::from_millis;
+        let start = Instant::now();
+        let wall = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        let mut buttons =
+            ButtonDebounce::for_device(&InputId::new(BusType::BUS_USB, 0x046D, 0xB034, 0));
+
+        buttons.changed(press);
+        assert_eq!(buttons.end_report(report_time(start, wall, wall)), [press]);
+
+        // The release at 1 ms and the press at 2 ms are read at 100 ms.
+        let (read_at, wall_at) = (start + ms(100), wall + ms(100));
+        buttons.changed(release);
+        assert!(
+            buttons
+                .end_report(report_time(read_at, wall_at, wall + ms(1)))
+                .is_empty()
+        );
+        buttons.changed(press);
+        assert!(
+            buttons
+                .end_report(report_time(read_at, wall_at, wall + ms(2)))
+                .is_empty()
+        );
+        assert!(buttons.expire(read_at).is_empty());
+        assert_eq!(buttons.deadline(), None);
     }
 
     #[test]
