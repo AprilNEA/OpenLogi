@@ -667,16 +667,15 @@ fn filter_chip(
         .px_3()
         .py_1()
         .rounded_full()
-        .border_1()
+        .selected_border(selected, pal)
+        .selected_fill(selected)
         .text_caption()
         .cursor_pointer()
         .map(|this| {
             if selected {
-                this.border_color(pal.text_primary)
-                    .text_color(pal.text_primary)
+                this.text_color(pal.text_primary)
             } else {
-                this.border_color(pal.border)
-                    .text_color(pal.text_muted)
+                this.text_color(pal.text_muted)
                     .hover(|h| h.border_color(pal.text_muted))
                     .focus_visible(|h| h.border_color(pal.text_muted))
             }
