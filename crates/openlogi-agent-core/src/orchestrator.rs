@@ -869,15 +869,12 @@ impl Orchestrator {
     }
 
     /// Publish hook maps while preserving what hardware capture sessions
-    /// reported: thumb-wheel polarities, diverted buttons and held G-Shift
-    /// buttons. Selection, polarity, and bindings share the one lock the
-    /// callback reads, so a device switch cannot combine facts from two
-    /// devices.
+    /// reported: diverted buttons and held G-Shift buttons. Selection,
+    /// capture state, and bindings share the one lock the callback reads, so
+    /// a device switch cannot combine facts from two devices.
     fn publish_hook_maps(&self, mut maps: HookMaps) {
         match self.shared.hook_maps.write() {
             Ok(mut current) => {
-                maps.thumbwheel_positive_is_forward =
-                    std::mem::take(&mut current.thumbwheel_positive_is_forward);
                 maps.shift_held = std::mem::take(&mut current.shift_held);
                 maps.diverted_buttons = std::mem::take(&mut current.diverted_buttons);
                 *current = maps;

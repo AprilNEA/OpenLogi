@@ -484,7 +484,7 @@ fn unidentified_pointer_context_without_a_focused_app_uses_the_global_bindings()
 }
 
 #[test]
-fn hook_maps_publish_selection_and_preserve_learned_thumbwheel_polarity() {
+fn hook_maps_publish_selection_and_preserve_capture_observations() {
     let mut orch = orchestrator(Config::default());
     orch.devices = vec![dev("a", 1, true)];
     orch.rebuild();
@@ -492,8 +492,7 @@ fn hook_maps_publish_selection_and_preserve_learned_thumbwheel_polarity() {
     {
         let mut maps = orch.shared.hook_maps.write().expect("hook maps");
         assert_eq!(maps.selected_device.as_deref(), Some("a"));
-        maps.thumbwheel_positive_is_forward
-            .insert("a".to_owned(), true);
+        maps.shift_held.insert("a".to_owned());
     }
 
     // Config/app rebuilds replace binding maps but hardware observations must
@@ -501,7 +500,7 @@ fn hook_maps_publish_selection_and_preserve_learned_thumbwheel_polarity() {
     orch.reload_config(Config::default());
     let maps = orch.shared.hook_maps.read().expect("hook maps");
     assert_eq!(maps.selected_device.as_deref(), Some("a"));
-    assert_eq!(maps.thumbwheel_positive_is_forward.get("a"), Some(&true));
+    assert!(maps.shift_held.contains("a"));
 }
 
 fn assert_side_gesture_capture_follows_platform_ownership_and_hook_availability(button: ButtonId) {

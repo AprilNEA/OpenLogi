@@ -30,10 +30,10 @@ use super::{
 use crate::event_monitor::SharedEventMonitor;
 pub(crate) use diverted::DivertedButtons;
 
-/// The button maps and selected-device thumb-wheel polarity the OS-hook callback
-/// reads, kept behind ONE lock so a config rebuild publishes one coherent
-/// snapshot. A callback during a device/app switch can never combine one
-/// device's bindings with another device's direction convention.
+/// The button maps and HID++ capture observations the OS-hook callback reads,
+/// kept behind ONE lock so a config rebuild publishes one coherent snapshot. A
+/// callback during a device/app switch can never combine one device's bindings
+/// with another device's capture state.
 #[derive(Default)]
 pub struct HookMaps {
     /// Per-button immediate or threshold binding — the non-gesture dispatch path.
@@ -47,20 +47,15 @@ pub struct HookMaps {
     pub(crate) pointer: Option<PointerSelection>,
     /// Device whose binding maps this snapshot contains.
     pub(crate) selected_device: Option<String>,
-    /// Per-device `0x2150 default_dir`, learned by HID++ capture sessions:
-    /// `true` means a positive native horizontal delta is physical forward/up.
-    /// Entries survive map rebuilds because they are hardware observations,
-    /// not configuration.
-    pub(crate) thumbwheel_positive_is_forward: BTreeMap<String, bool>,
     /// OS-hook buttons that live HID++ capture sessions have diverted on
-    /// directly connected devices, reported by the sessions themselves. Like
-    /// the thumb-wheel polarities, these are hardware observations and
-    /// survive map rebuilds.
+    /// directly connected devices, reported by the sessions themselves. These
+    /// are hardware observations, not configuration, so they survive map
+    /// rebuilds.
     pub(crate) diverted_buttons: DivertedButtons,
     /// The selected device's G-Shift bindings.
     pub(crate) shift_bindings: BTreeMap<ButtonId, Binding>,
     /// Devices with a G-Shift button held, set by HID++ capture. Survives map
-    /// rebuilds like the thumb-wheel polarity.
+    /// rebuilds like `diverted_buttons`.
     pub(crate) shift_held: BTreeSet<String>,
 }
 
@@ -569,31 +564,12 @@ pub fn start(
                     from_trackpad,
                     device,
                 } => {
-                    #[cfg(target_os = "windows")]
-                    if delta.y() == 0.0
-                        && let Some((button, action, pointer)) =
-                            hooks.try_read().ok().and_then(|maps| {
-                                rebound_thumbwheel_action(&maps, delta.x()).map(
-                                    |(button, action)| {
-                                        let pointer = maps
-                                            .pointer
-                                            .as_ref()
-                                            .map(|pointer| pointer.press(button));
-                                        (button, action, pointer)
-                                    },
-                                )
-                            })
-                    {
-                        return queued_event_disposition(try_queue_action(
-                            &action_tx,
-                            action,
-                            ActionDispatchTarget::for_pointer(
-                                pointer,
-                                openlogi_hook::frontmost_safari_pid,
-                            ),
-                            PressControl::Button(button),
-                        ));
-                    }
+                    // No thumb-wheel binding is resolved here. A rebound thumb
+                    // wheel is diverted over `0x2150`, so its HID++ capture
+                    // session dispatches it and the wheel sends no native
+                    // ticks. A native horizontal tick therefore comes from
+                    // another source, such as a touchpad pan or RDP input
+                    // (#2242, #1708), which the hook cannot attribute.
                     if scroll_source_may_intercept(from_trackpad, device.as_ref()) {
                         return queued_event_disposition(scroll.try_hook_scroll(delta));
                     }
@@ -624,36 +600,6 @@ pub fn start(
             None
         }
     }
-}
-
-/// Resolve a native horizontal-wheel tick to a rebound thumb-wheel action.
-/// The built-in horizontal-scroll defaults intentionally return `None` so the
-/// physical wheel stays native unless the user changed that direction. On
-/// devices exposing `0x2150`, the learned `default_dir` determines which
-/// physical direction the native delta represents. A selected device whose
-/// polarity has not arrived yet fails open instead of guessing the opposite
-/// action; only the legacy no-device-context path retains the MX Master 2S
-/// fallback (positive is physical backward/down).
-#[cfg(any(target_os = "windows", test))]
-fn rebound_thumbwheel_action(maps: &HookMaps, delta_x: f64) -> Option<(ButtonId, Action)> {
-    let positive_is_forward = match maps.selected_device.as_deref() {
-        Some(key) => maps.thumbwheel_positive_is_forward.get(key).copied()?,
-        None => false,
-    };
-    let forward = if delta_x > 0.0 {
-        positive_is_forward
-    } else if delta_x < 0.0 {
-        !positive_is_forward
-    } else {
-        return None;
-    };
-    let button = if forward {
-        ButtonId::ThumbwheelScrollUp
-    } else {
-        ButtonId::ThumbwheelScrollDown
-    };
-    let action = maps.bindings.get(&button)?.click_action();
-    (action != default_binding(button)).then_some((button, action))
 }
 
 /// The action a gesture button's plain (no-swipe) click should fire: its
