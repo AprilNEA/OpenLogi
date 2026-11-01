@@ -711,6 +711,7 @@ fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
         .child(wheel_resolution_control(
             resolution,
             hires == HiresWheel::Here,
+            cx,
         ));
     PanelCard::new(
         tr!("pointer.scrolling"),
@@ -761,7 +762,13 @@ fn smooth_wheel_caption(hires: HiresWheel) -> gpui::SharedString {
     }
 }
 
-fn wheel_resolution_control(selected: Option<ScrollResolution>, enabled: bool) -> impl IntoElement {
+fn wheel_resolution_control(
+    selected: Option<ScrollResolution>,
+    enabled: bool,
+    cx: &gpui::App,
+) -> impl IntoElement {
+    use crate::ui::theme::SelectableStyle as _;
+
     let values = [
         None,
         Some(ScrollResolution::Low),
@@ -775,19 +782,22 @@ fn wheel_resolution_control(selected: Option<ScrollResolution>, enabled: bool) -
             Button::new("wheel-resolution-default")
                 .flex_1()
                 .label(tr!("pointer.device_default"))
-                .selected(selected.is_none()),
+                .selected(selected.is_none())
+                .selected_segment(enabled && selected.is_none(), cx),
         )
         .child(
             Button::new("wheel-resolution-low")
                 .flex_1()
                 .label(tr!("pointer.standard"))
-                .selected(selected == Some(ScrollResolution::Low)),
+                .selected(selected == Some(ScrollResolution::Low))
+                .selected_segment(enabled && selected == Some(ScrollResolution::Low), cx),
         )
         .child(
             Button::new("wheel-resolution-high")
                 .flex_1()
                 .label(tr!("pointer.high_resolution"))
-                .selected(selected == Some(ScrollResolution::High)),
+                .selected(selected == Some(ScrollResolution::High))
+                .selected_segment(enabled && selected == Some(ScrollResolution::High), cx),
         )
         .on_click(move |indices, _window, cx| {
             let Some(value) = indices.first().and_then(|index| values.get(*index)) else {
