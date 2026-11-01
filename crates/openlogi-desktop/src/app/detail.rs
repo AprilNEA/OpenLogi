@@ -1038,7 +1038,7 @@ fn device_details_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElem
                     .when_some(record.battery.as_ref(), |this, battery| {
                         this.child(BatteryIndicator::summary(battery))
                     })
-                    .child(device_description_list(record))
+                    .child(device_description_list(record, pal))
                     .into_any_element()
             },
         );
@@ -1079,26 +1079,15 @@ fn configuration_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoEleme
     let content = v_flex()
         .gap_3()
         .child(device_enabled_row(device_enabled, pal))
-        .child(
-            DescriptionList::new()
-                .columns(1)
-                // Keep long translated labels intact as the interface scale increases.
-                .label_width(rems(12.))
-                .bordered(false)
-                .child(DescriptionItem::new(tr!("profiles.active_profile")).value(app_profile))
-                .child(
-                    DescriptionItem::new(tr!("profiles.button_bindings"))
-                        .value(binding_count.to_string()),
-                )
-                .child(
-                    DescriptionItem::new(tr!("profiles.gesture_bindings"))
-                        .value(gesture_count.to_string()),
-                )
-                .child(
-                    DescriptionItem::new(tr!("pointer.dpi_presets"))
-                        .value(preset_count.to_string()),
-                ),
-        )
+        .child(detail_list(
+            [
+                (tr!("profiles.active_profile"), app_profile),
+                (tr!("profiles.button_bindings"), binding_count.to_string()),
+                (tr!("profiles.gesture_bindings"), gesture_count.to_string()),
+                (tr!("pointer.dpi_presets"), preset_count.to_string()),
+            ],
+            pal,
+        ))
         .child(
             h_flex()
                 .gap_2()
@@ -1197,7 +1186,7 @@ fn device_summary(
         .child(status_badge(online, pal))
 }
 
-fn device_description_list(record: DeviceRecord) -> impl IntoElement {
+fn device_description_list(record: DeviceRecord, pal: Palette) -> impl IntoElement {
     // Cameras are plain UVC over the cable — no HID++ route, and their slot is
     // a synthetic 0 that would only mislead next to real receiver slots.
     let is_camera = matches!(record.kind, DeviceKind::Camera);
@@ -1206,20 +1195,45 @@ fn device_description_list(record: DeviceRecord) -> impl IntoElement {
     } else {
         connection_summary(&record)
     };
-    let mut items = vec![DescriptionItem::new(tr!("device.connection")).value(connection)];
-    items
-        .push(DescriptionItem::new(tr!("device.device_key")).value(elided_key(&record.config_key)));
+    let mut rows = vec![
+        (tr!("device.connection"), connection),
+        (tr!("device.device_key"), elided_key(&record.config_key)),
+    ];
     if let Some(serial) = record.serial_number {
-        items.push(DescriptionItem::new(tr!("device.serial")).value(serial));
+        rows.push((tr!("device.serial"), serial));
     }
+    detail_list(rows, pal)
+}
 
+/// The Device tab's label/value lists. Label and value share the body size,
+/// so each row reads on one baseline; the muted label carries the hierarchy.
+/// The label column is in rems: a fixed 100 px cut "Geräteschlüssel" and
+/// longer translations into their values (#1856), and rems keep them intact
+/// as the interface scale grows.
+fn detail_list(
+    rows: impl IntoIterator<Item = (SharedString, String)>,
+    pal: Palette,
+) -> impl IntoElement {
     DescriptionList::new()
         .columns(1)
-        // Match the configuration card: a fixed 100 px cut "Geräteschlüssel"
-        // and longer translations into their values (#1856).
         .label_width(rems(12.))
         .bordered(false)
-        .children(items)
+        .children(rows.into_iter().map(|(label, value)| {
+            DescriptionItem::new(
+                div()
+                    .text_body()
+                    .text_color(pal.text_muted)
+                    .child(label)
+                    .into_any_element(),
+            )
+            .value(
+                div()
+                    .text_body()
+                    .text_color(pal.text_primary)
+                    .child(value)
+                    .into_any_element(),
+            )
+        }))
 }
 
 /// Show long machine keys (a camera's config key embeds the OS device path)
