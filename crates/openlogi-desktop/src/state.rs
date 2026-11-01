@@ -34,7 +34,7 @@ pub use light::LightCommandStatus;
 pub(crate) use load::Load;
 pub use load::{
     BacklightLoad, DisableKeysLoad, DpiLoad, EasySwitchLoad, FnLockLoad, ForceSensingLoad,
-    PointerSpeedLoad, ReportRateLoad, SmartShiftLoad,
+    OnboardLoad, PointerSpeedLoad, ReportRateLoad, SmartShiftLoad,
 };
 
 /// Result of confirming a SmartShift write by reading the value back.
@@ -72,6 +72,7 @@ mod action_ring;
 mod agent;
 mod backlight;
 mod bindings;
+pub use bindings::BindingLayer;
 mod camera;
 mod config;
 mod device_key;
@@ -88,6 +89,7 @@ mod inventory;
 mod light;
 mod lighting;
 mod load;
+mod onboard;
 mod os_layout;
 mod pointer;
 mod pointer_speed;
@@ -249,6 +251,7 @@ impl AppState {
             state.load_current_backlight(cx);
             state.load_current_easy_switch(cx);
             state.load_current_disable_keys(cx);
+            state.load_current_onboard(cx);
         });
     }
 

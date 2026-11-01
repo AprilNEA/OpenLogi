@@ -1,0 +1,25 @@
+# Owner: openlogi-desktop's windows::WindowFit — where a new window opens and
+# how far it may shrink: its authored size and floor fitted to the primary
+# display's work area, less room for the native frame, and centred in it.
+# Every window takes its bounds and floor from WindowOptions::from(WindowFit),
+# so none opens with its titlebar or lower edge off-screen.
+id: gui-window-fit-owner
+language: rust
+severity: error
+message: Open windows with WindowOptions::from(windows::WindowFit::on_primary_display(..)) instead of building their bounds here; it fits the size and floor to the display's work area.
+note: |
+  The main, auxiliary and gallery windows each centred a fixed size on the
+  full display with Bounds::centered and kept a fixed floor. A 1920x1080
+  laptop at 150 % scaling has a 1280x680 logical work area, so the 1280x820
+  main window opened with its titlebar above the screen and a floor it could
+  not shrink to (#2169). See "Single source of truth" in AGENTS.md.
+files:
+  - crates/openlogi-desktop/src/**/*.rs
+ignores:
+  - crates/openlogi-desktop/src/windows.rs
+  - "**/tests.rs"
+  - "**/tests/**"
+rule:
+  any:
+    - pattern: Bounds::centered($$$ARGS)
+    - pattern: WindowBounds::Windowed($$$ARGS)

@@ -10,8 +10,9 @@ use super::{
     settings_moved, stable_id, wheel_inverted,
 };
 use crate::hardware::WheelModeChange;
+use crate::watchers::keyboard::KeyboardSpec;
 use openlogi_core::app::ForegroundApp;
-use openlogi_core::binding::{Action, Binding, ButtonId};
+use openlogi_core::binding::{Action, Binding, ButtonId, GridKey};
 use openlogi_core::config::{
     Config, DeviceConfig, DisableKey, LightSettings, LinkConfig, ScrollResolution,
     VerticalScrollSensitivity,
@@ -69,6 +70,16 @@ fn dev(key: &str, slot: u8, online: bool) -> AgentDevice {
         codename: None,
         battery: None,
     }
+}
+
+/// The one keyboard spec `orch` publishes, or `None` when it publishes none.
+fn sole_keyboard_spec(orch: &Orchestrator) -> Option<KeyboardSpec> {
+    let mut specs = orch.keyboard_specs_for();
+    assert!(
+        specs.len() <= 1,
+        "expected at most one keyboard spec: {specs:?}"
+    );
+    specs.pop()
 }
 
 fn direct_inventory(serial_number: Option<&str>, unit_id: [u8; 4]) -> DeviceInventory {

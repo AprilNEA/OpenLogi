@@ -309,6 +309,29 @@ mod tests {
     }
 
     #[test]
+    fn mouse_buttons_listens_a_minute_unless_told_otherwise() {
+        let parse = |extra: &[&str]| {
+            let args = ["openlogi", "diag", "mouse-buttons"].iter().chain(extra);
+            match Cli::try_parse_from(args)
+                .expect("valid mouse-buttons invocation parses")
+                .cmd
+                .expect("subcommand present")
+            {
+                Command::Diag(DiagCmd::MouseButtons(args)) => args,
+                other => panic!("expected Diag(MouseButtons), got {other:?}"),
+            }
+        };
+
+        let defaults = parse(&[]);
+        assert_eq!(defaults.duration, 60);
+        assert!(defaults.device.is_none());
+
+        let chosen = parse(&["--device", "G903", "--duration", "180"]);
+        assert_eq!(chosen.device.as_deref(), Some("G903"));
+        assert_eq!(chosen.duration, 180);
+    }
+
+    #[test]
     fn fixture_record_case_parses_every_read_only_operation() {
         let operations = [
             ("feature-table", FixtureOperation::FeatureTable),

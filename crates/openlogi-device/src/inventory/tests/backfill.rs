@@ -8,23 +8,30 @@ use super::*;
 #[test]
 fn an_incomplete_capability_walk_keeps_the_last_complete_answer() {
     let mut fresh = probed(None, false);
-    fresh.capabilities_incomplete = true;
-    fresh.capabilities = Some(Capabilities::default());
-    let mut cached = probed(None, false);
-    cached.capabilities = Some(Capabilities {
+    fresh.protocol = ProbedProtocol::Hidpp20 {
+        capabilities: Capabilities::default(),
+        incomplete: true,
+    };
+    let known = Capabilities {
         haptic_panel: true,
         dpi_gestures: true,
         ..Capabilities::default()
-    });
+    };
+    let mut cached = probed(None, false);
+    cached.protocol = ProbedProtocol::Hidpp20 {
+        capabilities: known,
+        incomplete: false,
+    };
 
     keep_known_capabilities(&mut fresh, &cached);
 
     assert_eq!(
-        fresh.capabilities, cached.capabilities,
+        fresh.capabilities(),
+        Some(known),
         "the last complete control walk must survive a lost reply"
     );
     assert!(
-        fresh.capabilities_incomplete,
+        fresh.capabilities_incomplete(),
         "the failed probe still needs repair"
     );
 }
@@ -32,18 +39,25 @@ fn an_incomplete_capability_walk_keeps_the_last_complete_answer() {
 /// A device that genuinely lost a capability must still be able to say so.
 #[test]
 fn a_complete_capability_walk_is_left_alone() {
+    let complete = ProbedProtocol::Hidpp20 {
+        capabilities: Capabilities::default(),
+        incomplete: false,
+    };
     let mut fresh = probed(None, false);
-    fresh.capabilities = Some(Capabilities::default());
+    fresh.protocol = complete;
     let mut cached = probed(None, false);
-    cached.capabilities = Some(Capabilities {
-        haptic_panel: true,
-        dpi_gestures: true,
-        ..Capabilities::default()
-    });
+    cached.protocol = ProbedProtocol::Hidpp20 {
+        capabilities: Capabilities {
+            haptic_panel: true,
+            dpi_gestures: true,
+            ..Capabilities::default()
+        },
+        incomplete: false,
+    };
 
     keep_known_capabilities(&mut fresh, &cached);
 
-    assert_eq!(fresh.capabilities, Some(Capabilities::default()));
+    assert_eq!(fresh.protocol, complete);
 }
 
 #[test]

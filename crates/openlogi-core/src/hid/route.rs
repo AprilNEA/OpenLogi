@@ -20,6 +20,8 @@
 use std::fmt;
 
 pub use openlogi_device_registry::LOGITECH_VENDOR_ID;
+pub use openlogi_device_registry::keypad::KeypadDescriptor;
+use openlogi_device_registry::keypad::find_keypad;
 pub use openlogi_device_registry::receiver::{
     RECEIVERS, ReceiverBrand, ReceiverDescriptor, ReceiverProtocol, find_receiver,
 };
@@ -103,12 +105,11 @@ pub fn is_receiver_pid(product_id: u16) -> bool {
 /// but are surfaced under their own name.
 #[must_use]
 pub fn receiver_display_name(product_id: u16) -> &'static str {
-    if find_receiver(LOGITECH_VENDOR_ID, product_id)
-        .is_some_and(|receiver| receiver.brand == ReceiverBrand::Lightspeed)
-    {
-        "Lightspeed Receiver"
-    } else {
-        "Unifying Receiver"
+    match find_receiver(LOGITECH_VENDOR_ID, product_id).map(|receiver| receiver.brand) {
+        Some(ReceiverBrand::Bolt) => "Logi Bolt Receiver",
+        Some(ReceiverBrand::Nano) => "Nano Receiver",
+        Some(ReceiverBrand::Lightspeed) => "Lightspeed Receiver",
+        Some(ReceiverBrand::Unifying) | None => "Unifying Receiver",
     }
 }
 
@@ -162,6 +163,24 @@ impl DeviceRoute {
             Self::Bolt { slot, .. } | Self::Unifying { slot, .. } => *slot,
             Self::Direct { .. } | Self::RawHid { .. } => DIRECT_DEVICE_INDEX,
         }
+    }
+
+    /// The known keypad this route reaches, or `None` for any other device.
+    ///
+    /// Only a direct route carries the USB identity the keypad registry is
+    /// keyed by, and the keypads it lists are wired-only. Everything that
+    /// needs "is this that keypad" — its LCD keys, its key grid — asks here
+    /// rather than matching a route against the registry itself.
+    #[must_use]
+    pub fn keypad(&self) -> Option<&'static KeypadDescriptor> {
+        let Self::Direct {
+            vendor_id,
+            product_id,
+        } = self
+        else {
+            return None;
+        };
+        find_keypad(*vendor_id, *product_id)
     }
 
     /// Build the route that reaches a paired device from a receiver inventory.
@@ -275,7 +294,7 @@ mod tests {
     }
 
     #[test]
-    fn lightspeed_receiver_has_its_own_display_name() {
+    fn receiver_families_have_their_own_display_names() {
         // 0xc539 is the receiver bundled with the G502 LIGHTSPEED and the
         // G Pro Wireless. It routes through the Unifying code path, but it is
         // Lightspeed hardware and says so in its own USB product string, so it
@@ -285,6 +304,8 @@ mod tests {
         assert_eq!(receiver_display_name(0xc53f), "Lightspeed Receiver");
         assert_eq!(receiver_display_name(0xc547), "Lightspeed Receiver");
         assert_eq!(receiver_display_name(0xc54d), "Lightspeed Receiver");
+        assert_eq!(receiver_display_name(0xc537), "Nano Receiver");
+        assert_eq!(receiver_display_name(0xc548), "Logi Bolt Receiver");
         assert_eq!(receiver_display_name(0xc52b), "Unifying Receiver");
         assert_eq!(receiver_display_name(0xc532), "Unifying Receiver");
     }
@@ -332,5 +353,29 @@ mod tests {
             slot: 3,
         };
         assert_eq!(r.to_string(), "slot 3 on receiver AABBCC");
+    }
+
+    #[test]
+    fn only_a_direct_route_to_a_known_keypad_reaches_one() {
+        let keypad = DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xc354,
+        };
+        assert_eq!(
+            keypad.keypad().map(|keypad| keypad.name),
+            Some("MX Creative Keypad")
+        );
+        // Another wired Logitech device, and the same product ID through a
+        // receiver slot, are not that keypad.
+        let other = DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xc548,
+        };
+        assert_eq!(other.keypad(), None);
+        let paired = DeviceRoute::Bolt {
+            receiver_uid: "ABCD".into(),
+            slot: 1,
+        };
+        assert_eq!(paired.keypad(), None);
     }
 }

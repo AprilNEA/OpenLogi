@@ -1,4 +1,5 @@
-//! Pure probe-classification cases — no device nodes involved.
+//! Probe-classification cases, plus the uinput open mode on scratch files —
+//! no device nodes involved.
 
 use crate::PermissionStatus;
 use crate::linux::{EventProbe, HidrawProbe, Probes};
@@ -32,9 +33,9 @@ fn every_probe_combination_maps_to_its_verdict() {
         (false, NoHidraw, EventDenied, Denied),
         (false, NoHidraw, NoEvent, Denied),
     ];
-    for (uinput_writable, hidraw, event, expected) in cases {
+    for (uinput_read_write, hidraw, event, expected) in cases {
         let probes = Probes {
-            uinput_writable,
+            uinput_read_write,
             hidraw,
             event,
         };
@@ -228,5 +229,62 @@ mod event_node_selection {
             ..PHYSICAL
         };
         assert_eq!(classify(&[PHYSICAL, mouse0]), EventProbe::Readable);
+    }
+}
+
+/// #1414: another package's rule set `/dev/uinput` to `0620`, so the `uaccess`
+/// ACL granted write alone. Device creation opens the node read/write and
+/// failed there, while a write-only probe still reported access.
+mod uinput_node {
+    use std::fs::{self, File, Permissions};
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
+
+    use crate::linux::probe_uinput_at;
+
+    /// A scratch file that stands in for `/dev/uinput`, removed on drop.
+    struct Node(PathBuf);
+
+    impl Node {
+        fn path(name: &str) -> PathBuf {
+            std::env::temp_dir().join(format!(
+                "openlogi-uinput-probe-{}-{name}",
+                std::process::id()
+            ))
+        }
+
+        fn with_mode(name: &str, mode: u32) -> Self {
+            let path = Self::path(name);
+            fs::write(&path, b"").unwrap();
+            fs::set_permissions(&path, Permissions::from_mode(mode)).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for Node {
+        fn drop(&mut self) {
+            fs::remove_file(&self.0).ok();
+        }
+    }
+
+    #[test]
+    fn a_write_only_node_is_not_accessible() {
+        let node = Node::with_mode("write-only", 0o200);
+        // Root ignores the mode bits, so it has no write-only node to probe.
+        if File::open(&node.0).is_ok() {
+            return;
+        }
+        assert!(!probe_uinput_at(&node.0));
+    }
+
+    #[test]
+    fn a_read_write_node_is_accessible() {
+        let node = Node::with_mode("read-write", 0o600);
+        assert!(probe_uinput_at(&node.0));
+    }
+
+    #[test]
+    fn a_missing_node_is_not_accessible() {
+        assert!(!probe_uinput_at(&Node::path("missing")));
     }
 }

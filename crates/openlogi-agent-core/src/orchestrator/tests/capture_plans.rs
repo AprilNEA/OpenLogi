@@ -505,6 +505,25 @@ fn assert_side_gesture_capture_follows_platform_ownership_and_hook_availability(
     );
 }
 
+/// macOS hands Back/Forward gestures to HID++ raw XY, which a spy-only mouse
+/// cannot report, so its gestures must stay in the hook's maps.
+#[test]
+fn a_spy_only_mouse_keeps_its_side_gestures_in_the_os_hook() {
+    let mut config = Config::default();
+    config.set_gesture_mode("0407f", ButtonId::Back, true);
+    let mut orch = orchestrator(config);
+    orch.devices = vec![dev("0407f", 1, true)];
+    orch.rebuild();
+    orch.set_os_mouse_hook_available(true);
+
+    let hook_maps = orch
+        .shared
+        .hook_maps
+        .read()
+        .expect("hook maps should not be poisoned");
+    assert!(hook_maps.gestures.contains_key(&ButtonId::Back));
+}
+
 #[test]
 fn side_gesture_capture_follows_platform_ownership_and_hook_availability() {
     assert_side_gesture_capture_follows_platform_ownership_and_hook_availability(ButtonId::Forward);
@@ -580,9 +599,7 @@ fn a_control_the_keyboard_session_owns_leaves_the_keyboard_capture_plan() {
     orch.devices = vec![keyboard];
     orch.rebuild();
 
-    let spec = orch
-        .keyboard_spec_for()
-        .expect("the bound key publishes a spec");
+    let spec = sole_keyboard_spec(&orch).expect("the bound key publishes a spec");
     assert_eq!(
         spec.wanted.keys().copied().collect::<Vec<_>>(),
         [multiplatform_back]
@@ -620,7 +637,7 @@ fn a_back_binding_alone_keeps_its_whole_family_on_a_keyboard() {
     orch.devices = vec![keyboard];
     orch.rebuild();
 
-    assert!(orch.keyboard_spec_for().is_none());
+    assert!(sole_keyboard_spec(&orch).is_none());
     let published = orch.shared.capture_plans.borrow();
     let diverted: Vec<u16> = published.plans()[0]
         .target
@@ -634,6 +651,79 @@ fn a_back_binding_alone_keeps_its_whole_family_on_a_keyboard() {
     }
 }
 
+/// A keyboard that binds a key only for one app keeps its capture session
+/// while other apps are in front, with nothing diverted. A focus change then
+/// changes the divert set of the same target in place, instead of arming the
+/// keyboard from scratch (#2140).
+#[test]
+fn a_per_app_only_key_keeps_the_keyboard_session_with_nothing_diverted() {
+    const KEY: u16 = 0x00e7;
+    let mut config = Config::default();
+    config.set_per_app_binding("kbd", "editor", ButtonId::control(KEY), Some(Action::Copy));
+    let mut orch = orchestrator(config);
+    let mut keyboard = dev("kbd", 2, true);
+    keyboard.kind = DeviceKind::Keyboard;
+    orch.devices = vec![keyboard];
+    orch.rebuild();
+    let elsewhere = sole_keyboard_spec(&orch).expect("a per-app key holds the session");
+    assert!(elsewhere.wanted.is_empty(), "{:#06x?}", elsewhere.wanted);
+
+    orch.set_current_app(Some(ForegroundApp::unnamed("editor".into())));
+    let in_editor = sole_keyboard_spec(&orch).expect("spec");
+    assert_eq!(in_editor.route, elsewhere.route);
+    assert_eq!(
+        in_editor.wanted.into_iter().collect::<Vec<_>>(),
+        [(KEY, ButtonId::control(KEY))]
+    );
+}
+/// On a route two inventory entries share, a keyboard that binds keys only
+/// for another app never takes the session from a keyboard whose bindings
+/// apply now, even when it comes first in inventory order. On routes of
+/// their own, each holds a session.
+#[test]
+fn a_keyboard_with_current_bindings_wins_over_a_per_app_only_one() {
+    let mut config = Config::default();
+    config.set_per_app_binding(
+        "editor-only",
+        "editor",
+        ButtonId::control(0x00e7),
+        Some(Action::Copy),
+    );
+    config.set_binding(
+        "everywhere",
+        ButtonId::control(0x00e8),
+        Binding::Single(Action::Paste),
+    );
+    let mut orch = orchestrator(config);
+    let keyboards = || {
+        [("editor-only", 2), ("everywhere", 3)].map(|(key, index)| {
+            let mut keyboard = dev(key, index, true);
+            keyboard.kind = DeviceKind::Keyboard;
+            keyboard
+        })
+    };
+    orch.devices = keyboards().into();
+    orch.rebuild();
+    assert_eq!(
+        orch.keyboard_specs_for()
+            .into_iter()
+            .map(|spec| (spec.config_key, spec.wanted.is_empty()))
+            .collect::<Vec<_>>(),
+        [
+            ("editor-only".to_owned(), true),
+            ("everywhere".to_owned(), false)
+        ]
+    );
+
+    let mut sharing = keyboards();
+    sharing[1].route = sharing[0].route.clone();
+    orch.devices = sharing.into();
+    orch.rebuild();
+    assert_eq!(
+        sole_keyboard_spec(&orch).expect("spec").config_key,
+        "everywhere"
+    );
+}
 #[test]
 fn a_disabled_mouse_keeps_its_latest_route_for_restore() {
     let mut config = Config::default();

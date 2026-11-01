@@ -30,10 +30,10 @@ pub async fn run(_args: FeaturesArgs) -> Result<()> {
             match openlogi_hid::dump_features(&route).await {
                 Ok(entries) => {
                     println!("  {:>4}  {:>6}  {:<4}  flags", "idx", "id", "ver");
-                    for (idx, entry) in entries.iter().enumerate() {
+                    for entry in &entries {
                         println!(
                             "  {:>4}  0x{:04x}  v{:<3}  {}",
-                            idx,
+                            entry.index,
                             entry.id,
                             entry.version,
                             FeatureFlagsDisplay(entry.typ)

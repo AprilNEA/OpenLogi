@@ -11,7 +11,7 @@ use gpui_component::{
     h_flex,
 };
 use openlogi_core::device::DeviceKind;
-use openlogi_core::hid::DeviceRoute;
+use openlogi_core::hid::{DeviceRoute, ReceiverBrand};
 
 use super::AppView;
 use crate::state::{AppState, DeviceRecord};
@@ -109,10 +109,19 @@ pub(super) fn sidebar_action(
         .flex_1()
 }
 
-pub(super) fn route_label(route: Option<&DeviceRoute>) -> String {
+pub(super) fn route_label(
+    route: Option<&DeviceRoute>,
+    receiver_brand: Option<ReceiverBrand>,
+) -> String {
     match route {
         Some(DeviceRoute::Bolt { .. }) => tr!("device.bolt_receiver").to_string(),
-        Some(DeviceRoute::Unifying { .. }) => tr!("device.unifying_receiver").to_string(),
+        Some(DeviceRoute::Unifying { .. }) => match receiver_brand {
+            Some(ReceiverBrand::Nano) => tr!("device.nano_receiver").to_string(),
+            Some(ReceiverBrand::Lightspeed) => tr!("device.lightspeed_receiver").to_string(),
+            Some(ReceiverBrand::Bolt | ReceiverBrand::Unifying) | None => {
+                tr!("device.unifying_receiver").to_string()
+            }
+        },
         Some(DeviceRoute::Direct { .. } | DeviceRoute::RawHid { .. }) => {
             tr!("device.direct_connection").to_string()
         }
@@ -136,7 +145,7 @@ pub(super) fn receiver_slot_label(record: &DeviceRecord) -> Option<SharedString>
 /// How a device is reached, in words: the transport, plus the receiver slot
 /// when there is one ("Bolt receiver · Slot 4").
 pub(super) fn connection_summary(record: &DeviceRecord) -> String {
-    let route = route_label(record.route.as_ref());
+    let route = route_label(record.route.as_ref(), record.receiver_brand);
     match receiver_slot_label(record) {
         Some(slot) => format!("{route} · {slot}"),
         None => route,

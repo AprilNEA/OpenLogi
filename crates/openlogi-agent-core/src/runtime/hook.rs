@@ -3,8 +3,10 @@
 //! Installs the platform hook lazily, reads atomically published button maps,
 //! and converts callback-thread mouse/key input into the shared action runtime.
 
+mod diverted;
+
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::mpsc;
 use std::sync::{Arc, RwLock};
 use std::thread;
@@ -17,11 +19,13 @@ use openlogi_core::config::{GestureAxisBias, GestureSensitivity, KeyTrigger};
 use openlogi_hook::{
     EventDevice, EventDisposition, Hook, HookEvent, KeyEvent, MouseEvent, source_is_remappable,
 };
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
+use super::button::PressControl;
 use super::scroll::ScrollInputHandle;
-use super::{ActionDispatchTarget, ActionDispatcher, PressToken};
+use super::{ActionDispatchTarget, ActionDispatcher, PressToken, log_bound_action};
 use crate::event_monitor::SharedEventMonitor;
+pub(crate) use diverted::DivertedButtons;
 
 /// The button maps and selected-device thumb-wheel polarity the OS-hook callback
 /// reads, kept behind ONE lock so a config rebuild publishes one coherent
@@ -42,16 +46,40 @@ pub struct HookMaps {
     /// The pointer identity that selected this snapshot, or focused policy.
     pub(crate) pointer_target: Option<openlogi_hook::PointerTarget>,
     /// Device whose binding maps this snapshot contains.
-    #[cfg_attr(
-        not(any(target_os = "windows", test)),
-        expect(dead_code, reason = "read only by the Windows native-wheel fallback")
-    )]
     pub(crate) selected_device: Option<String>,
     /// Per-device `0x2150 default_dir`, learned by HID++ capture sessions:
     /// `true` means a positive native horizontal delta is physical forward/up.
     /// Entries survive map rebuilds because they are hardware observations,
     /// not configuration.
     pub(crate) thumbwheel_positive_is_forward: BTreeMap<String, bool>,
+    /// OS-hook buttons that live HID++ capture sessions have diverted on
+    /// directly connected devices, reported by the sessions themselves. Like
+    /// the thumb-wheel polarities, these are hardware observations and
+    /// survive map rebuilds.
+    pub(crate) diverted_buttons: DivertedButtons,
+    /// The selected device's G-Shift bindings.
+    pub(crate) shift_bindings: BTreeMap<ButtonId, Binding>,
+    /// Devices with a G-Shift button held, set by HID++ capture. Survives map
+    /// rebuilds like the thumb-wheel polarity.
+    pub(crate) shift_held: BTreeSet<String>,
+}
+
+impl HookMaps {
+    /// The binding for `id` and whether it is a gesture button, honouring a
+    /// held G-Shift layer, which replaces gestures for the press.
+    fn press_binding(&self, id: ButtonId) -> (Option<Binding>, bool) {
+        let shifted = self
+            .selected_device
+            .as_ref()
+            .is_some_and(|device| self.shift_held.contains(device));
+        if shifted && let Some(binding) = self.shift_bindings.get(&id) {
+            return (Some(binding.clone()), false);
+        }
+        (
+            self.bindings.get(&id).cloned(),
+            self.gestures.contains_key(&id),
+        )
+    }
 }
 
 /// Shared, atomically-published [`HookMaps`], threaded between the config owner
@@ -187,6 +215,9 @@ thread_local! {
     /// Accepted non-gesture presses retain their edge disposition even when
     /// moving the pointer changes the binding before physical release.
     static SUPPRESSED_PRESSES: RefCell<HashSet<ButtonId>> = RefCell::new(HashSet::new());
+    /// Presses dropped as echoes of a HID++-diverted control. Their release
+    /// is dropped too, even if the capture session ends in between.
+    static ECHOED_PRESSES: RefCell<HashSet<ButtonId>> = RefCell::new(HashSet::new());
     /// Function keys whose held action owns an accepted lifecycle. Repeated
     /// key-down events are auto-repeat, not replacement presses; their first
     /// matching key-up ends the lifecycle.
@@ -219,15 +250,17 @@ fn scroll_source_may_intercept(from_trackpad: bool, device: Option<&EventDevice>
     !from_trackpad && button_source_may_remap(device)
 }
 
-/// Off-thread worker for bound actions so the tap callback never injects input.
-type QueuedAction = (Action, ActionDispatchTarget);
+/// Off-thread worker for bound actions so the tap callback never injects input
+/// or writes a log line. The control is carried only for that log line.
+type QueuedAction = (Action, ActionDispatchTarget, PressControl);
 
 fn spawn_action_worker(dispatcher: ActionDispatcher) -> mpsc::SyncSender<QueuedAction> {
     let (tx, rx) = mpsc::sync_channel::<QueuedAction>(64);
     let _ = thread::Builder::new()
         .name("openlogi-action".into())
         .spawn(move || {
-            while let Ok((action, target)) = rx.recv() {
+            while let Ok((action, target, control)) = rx.recv() {
+                log_bound_action(&control, &action);
                 dispatcher.executor.dispatch_to(&action, None, target);
             }
         });
@@ -240,8 +273,9 @@ fn try_queue_action(
     tx: &mpsc::SyncSender<QueuedAction>,
     action: Action,
     target: ActionDispatchTarget,
+    control: PressControl,
 ) -> bool {
-    if tx.try_send((action, target)).is_err() {
+    if tx.try_send((action, target, control)).is_err() {
         warn!("action queue full — dropping bound action to keep the input hook live");
         false
     } else {
@@ -264,14 +298,26 @@ fn handle_button(
     }
     // `try_read` only: a blocking read on the tap thread freezes every pointer
     // event while a config rebuild holds the write lock. Fail open if unavailable.
-    let (binding, is_gesture, pointer_target) =
-        hooks.try_read().map_or((None, false, None), |maps| {
+    let (binding, is_gesture, pointer_target, diverted) =
+        hooks.try_read().map_or((None, false, None, false), |maps| {
+            let (binding, is_gesture) = maps.press_binding(id);
             (
-                maps.bindings.get(&id).cloned(),
-                maps.gestures.contains_key(&id),
+                binding,
+                is_gesture,
                 maps.pointer_target,
+                device.is_some_and(|source| maps.diverted_buttons.owns(source, id)),
             )
         });
+    let echoed = ECHOED_PRESSES.with_borrow_mut(|echoes| {
+        if pressed {
+            echoed_press(id, diverted, echoes)
+        } else {
+            echoes.remove(&id)
+        }
+    });
+    if echoed {
+        return EventDisposition::Suppress;
+    }
     let action_target = if pressed {
         ActionDispatchTarget::for_pointer(pointer_target, capture_safari_pid)
     } else {
@@ -307,7 +353,6 @@ fn handle_button(
                     .ok()
                     .map(|m| resolve_gesture_click(&m.gestures, id));
                 if let Some(action) = action {
-                    info!(button = %id, action = %action.label(), "gesture click → executing bound action");
                     dispatcher.try_dispatch_while_pressed(&press, &action);
                 }
             }
@@ -328,7 +373,6 @@ fn handle_button(
     if binding_is_native_click(id, &binding) {
         return SUPPRESSED_PRESSES.with_borrow_mut(|s| remapped_press_disposition(id, false, s));
     }
-    info!(button = %id, action = %binding.click_action().label(), "button → handling binding");
     let queued = dispatcher
         .try_hook_button_down(id, Some(&binding), action_target)
         .is_some();
@@ -341,6 +385,22 @@ fn handle_button(
 /// click, which stays native when that is the button's own action.
 fn binding_is_native_click(id: ButtonId, binding: &Binding) -> bool {
     !matches!(binding, Binding::LongPress(_)) && is_native_click(id, &binding.click_action())
+}
+
+/// Whether a press is the OS copy of a control a HID++ capture session has
+/// diverted on the same device, remembering the answer for its release.
+///
+/// The session dispatches that press, so the hook must not dispatch it again
+/// (#2158). It must not pass it through either: diversion already took the
+/// control out of the native report, so this copy reaching the desktop would
+/// be a second, unbound press.
+fn echoed_press(id: ButtonId, diverted: bool, echoes: &mut HashSet<ButtonId>) -> bool {
+    if diverted {
+        echoes.insert(id);
+    } else {
+        echoes.remove(&id);
+    }
+    diverted
 }
 
 /// Press of a remapped single-action button: suppress when the action was
@@ -397,7 +457,7 @@ fn handle_moved(
                 .unwrap_or_else(|| resolve_gesture_click(&m.gestures, button))
         });
         if let Some(action) = action {
-            info!(button = %button, ?dir, action = %action.label(), "gesture swipe → executing bound action");
+            debug!(button = %button, ?dir, "gesture swipe committed");
             dispatcher.try_dispatch_while_pressed(&press, &action);
         }
     }
@@ -438,9 +498,8 @@ fn handle_key(
         return EventDisposition::PassThrough;
     };
 
-    info!(keycode, action = %action.label(), "key → executing bound action");
     let action_target = capture_target();
-    let queued = if action.held_chord().is_some() {
+    let queued = if action.is_held() {
         let queued = dispatcher.try_hook_key_down(keycode, &action, action_target);
         if queued {
             HELD_KEYS.with_borrow_mut(|keys| {
@@ -449,7 +508,7 @@ fn handle_key(
         }
         queued
     } else {
-        try_queue_action(action_tx, action, action_target)
+        try_queue_action(action_tx, action, action_target, PressControl::Key(keycode))
     };
     queued_event_disposition(queued)
 }
@@ -515,7 +574,6 @@ pub fn start(
                                     .map(|(button, action)| (button, action, maps.pointer_target))
                             })
                     {
-                        info!(button = %button, action = %action.label(), "native thumb wheel → executing bound action");
                         return queued_event_disposition(try_queue_action(
                             &action_tx,
                             action,
@@ -523,6 +581,7 @@ pub fn start(
                                 target,
                                 openlogi_hook::frontmost_safari_pid,
                             ),
+                            PressControl::Button(button),
                         ));
                     }
                     if scroll_source_may_intercept(from_trackpad, device.as_ref()) {

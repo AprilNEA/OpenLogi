@@ -170,6 +170,7 @@
 
 > [!IMPORTANT]
 > Сначала закройте **Logi Options+** (а в Linux — и Solaar). Приёмник может принадлежать только одному приложению одновременно.
+> В macOS **Karabiner-Elements** тоже блокирует Bluetooth-клавиатуру, которую изменяет. Отключите **Modify events** для этой клавиатуры в Karabiner-Elements → Settings → Devices.
 
 | Платформа | Система | Архитектура |
 | --- | --- | --- |
