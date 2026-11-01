@@ -14,13 +14,13 @@
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, Context, Entity, IntoElement, ParentElement, Render, SharedString, Styled, Subscription,
-    Window, div, px, relative, rgb,
+    App, Context, IntoElement, ParentElement, Render, SharedString, Styled, Subscription, Window,
+    div, px, relative,
 };
 use gpui_component::WindowExt as _;
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::dialog::DialogButtonProps;
-use gpui_component::slider::{Slider, SliderState};
+use gpui_component::slider::Slider;
 use gpui_component::{Disableable as _, Selectable as _, Sizable as _, h_flex, v_flex};
 use openlogi_core::config::MomentumScrolling;
 
@@ -28,8 +28,8 @@ use super::glide_shape::glide_shape_picker;
 use crate::state::{AppState, StateEvent};
 use crate::ui::commit_slider::{CommitSlider, SliderRange};
 use crate::ui::components::{Toggle, toggle_row};
-use crate::ui::section::section_label;
-use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
+use crate::ui::slider_row::SliderRow;
+use crate::ui::theme::{self, Palette, Typography as _};
 
 /// Stops on every setting's slider.
 const STOPS: usize = 7;
@@ -103,6 +103,17 @@ impl MomentumSetting {
             Self::MaxGlideSpeed => momentum.max_glide_speed = value,
             Self::GlideLength => momentum.glide_ms = value,
             Self::RepeatBoost => momentum.repeat_boost = value,
+        }
+    }
+
+    /// `value` as the setting's row shows it.
+    fn format(self, value: u16) -> String {
+        match self {
+            Self::PixelsPerNotch => format!("{value} px"),
+            Self::MaxGlideSpeed => format!("{value} px/s"),
+            Self::GlideLength => format!("{value} ms"),
+            Self::RepeatBoost if value <= 100 => tr!("common.off").to_string(),
+            Self::RepeatBoost => format!("×{}", f64::from(value) / 100.0),
         }
     }
 }
@@ -274,9 +285,9 @@ impl MomentumPanel {
             .child(slider_row(
                 pal,
                 tr!("pointer.momentum_pixels_per_notch"),
-                format!("{} px", shown.pixels_per_notch),
                 tr!("pointer.momentum_pixels_per_notch_description"),
-                self.pixels_per_notch.slider.slider(),
+                &self.pixels_per_notch,
+                shown.pixels_per_notch,
             ))
             .child(group_heading(tr!("pointer.momentum_section_glide"), pal))
             .child(glide_shape_picker(
@@ -288,27 +299,23 @@ impl MomentumPanel {
             .child(slider_row(
                 pal,
                 tr!("pointer.momentum_max_glide_speed"),
-                format!("{} px/s", shown.max_glide_speed),
                 tr!("pointer.momentum_max_glide_speed_description"),
-                self.max_glide_speed.slider.slider(),
+                &self.max_glide_speed,
+                shown.max_glide_speed,
             ))
             .child(slider_row(
                 pal,
                 tr!("pointer.momentum_glide_length"),
-                format!("{} ms", shown.glide_ms),
                 tr!("pointer.momentum_glide_length_description"),
-                self.glide_length.slider.slider(),
+                &self.glide_length,
+                shown.glide_ms,
             ))
             .child(slider_row(
                 pal,
                 tr!("pointer.momentum_repeat_boost"),
-                if shown.repeat_boost <= 100 {
-                    tr!("common.off").to_string()
-                } else {
-                    format!("×{}", f64::from(shown.repeat_boost) / 100.0)
-                },
                 tr!("pointer.momentum_repeat_boost_description"),
-                self.repeat_boost.slider.slider(),
+                &self.repeat_boost,
+                shown.repeat_boost,
             ))
             .child(
                 h_flex()
@@ -470,37 +477,28 @@ fn reset_button(scope: MomentumScope, momentum: MomentumScrolling) -> impl IntoE
         .on_click(move |_, _, cx| commit(cx, scope, |m| *m = defaults))
 }
 
-/// A setting's label and live value, its slider over the seven stops with a
-/// mark under each, and what it does.
+/// A setting's label, live value and what it does, then its slider over the
+/// seven stops with a mark under each.
 fn slider_row(
     pal: Palette,
     label: SharedString,
-    value: String,
     description: SharedString,
-    slider: &Entity<SliderState>,
-) -> impl IntoElement {
-    v_flex()
-        .gap_2()
-        .child(
-            h_flex()
-                .justify_between()
-                .items_baseline()
-                .gap_4()
-                .child(section_label(label, pal))
-                .child(div().text_body().text_color(rgb(ACCENT_BLUE)).child(value)),
-        )
-        .child(
-            v_flex()
-                .gap_1()
-                .child(Slider::new(slider).horizontal())
-                .child(stop_marks(pal)),
-        )
-        .child(
-            div()
-                .text_caption()
-                .text_color(pal.text_muted)
-                .child(description),
-        )
+    setting: &Setting,
+    value: u16,
+) -> SliderRow {
+    let kind = setting.setting;
+    SliderRow::new(
+        label,
+        v_flex()
+            .gap_1()
+            .child(Slider::new(setting.slider.slider()).horizontal())
+            .child(stop_marks(pal)),
+    )
+    .value(
+        kind.format(value),
+        kind.stops().iter().map(|&stop| kind.format(stop)),
+    )
+    .description(description)
 }
 
 /// A mark under each of the slider's stops. The slider centres its thumb on

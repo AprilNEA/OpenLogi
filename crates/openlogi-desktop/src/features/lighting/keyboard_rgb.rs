@@ -17,6 +17,7 @@ use openlogi_core::config::Lighting;
 use crate::state::{AppState, StateEvent};
 use crate::ui::commit_slider::{CommitSlider, SliderRange};
 use crate::ui::components::Toggle;
+use crate::ui::slider_row::SliderRow;
 use crate::ui::theme::{self, Palette, Typography as _};
 
 const SWATCH: f32 = 28.;
@@ -111,23 +112,15 @@ impl Render for LightingPanel {
             )
             .child(h_flex().gap_2().flex_wrap().children(swatches))
             .child(
-                h_flex()
-                    .justify_between()
-                    .items_baseline()
-                    .child(
-                        div()
-                            .text_caption()
-                            .text_color(pal.text_muted)
-                            .child(tr!("camera.brightness")),
-                    )
-                    .child(
-                        div()
-                            .text_caption()
-                            .text_color(pal.text_primary)
-                            .child(format!("{}%", self.brightness.shown(lighting.brightness))),
-                    ),
+                SliderRow::new(
+                    tr!("camera.brightness"),
+                    Slider::new(self.brightness.slider()).horizontal(),
+                )
+                .value(
+                    format!("{}%", self.brightness.shown(lighting.brightness)),
+                    ["100%"],
+                ),
             )
-            .child(Slider::new(self.brightness.slider()).horizontal())
     }
 }
 

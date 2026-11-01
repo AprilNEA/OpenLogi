@@ -2,9 +2,11 @@
 
 use super::{
     App, AppState, Entity, FluentBuilder, IconName, InteractiveElement, ParentElement,
-    SettingField, SettingGroup, SettingItem, SettingPage, Slider, SliderState, Styled,
-    ThumbwheelSensitivity, VerticalScrollSensitivity, div, h_flex, px, theme, v_flex,
+    SettingField, SettingGroup, SettingItem, SettingPage, SharedString, Slider, SliderState,
+    Styled, ThumbwheelSensitivity, VerticalScrollSensitivity, theme,
 };
+use crate::ui::commit_slider::SliderUnit;
+use crate::ui::slider_row::SliderRow;
 use crate::ui::theme::Typography as _;
 use gpui_base::Button as BaseButton;
 use gpui_component::radio::{Radio, RadioGroup};
@@ -32,22 +34,20 @@ pub(super) fn general_page(
     let group = SettingGroup::new()
         .item(mouse_profile_target_item())
         .item(smooth_scrolling_item())
-        .item(
-            SettingItem::new(
-                tr!("pointer.vertical_scroll_sensitivity"),
-                SettingField::render(move |_, _, cx| {
-                    vertical_scroll_sensitivity_field(&vertical_scroll, cx)
-                }),
-            )
-            .description(tr!("pointer.vertical_scroll_sensitivity_description")),
-        )
-        .item(
-            SettingItem::new(
-                tr!("pointer.thumb_wheel_sensitivity"),
-                SettingField::render(move |_, _, cx| thumbwheel_sensitivity_field(&thumbwheel, cx)),
-            )
-            .description(tr!("pointer.thumbwheel_sensitivity_description")),
-        );
+        .item(sensitivity_item(
+            tr!("pointer.vertical_scroll_sensitivity"),
+            tr!("pointer.vertical_scroll_sensitivity_description"),
+            vertical_scroll,
+            VerticalScrollSensitivity::MAX,
+            VerticalScrollSensitivity::DEFAULT,
+        ))
+        .item(sensitivity_item(
+            tr!("pointer.thumb_wheel_sensitivity"),
+            tr!("pointer.thumbwheel_sensitivity_description"),
+            thumbwheel,
+            ThumbwheelSensitivity::MAX,
+            ThumbwheelSensitivity::DEFAULT,
+        ));
     // Only macOS animates a desktop switch, so only macOS shows the switch.
     // `cfg!` keeps the item and its setter compiled, and used, everywhere.
     let group = if cfg!(target_os = "macos") {
@@ -206,58 +206,28 @@ fn lock_key_notifications_item() -> SettingItem {
     })
 }
 
-fn thumbwheel_sensitivity_field(slider: &Entity<SliderState>, cx: &mut App) -> gpui::Div {
-    let value = ThumbwheelSensitivity::from_rounded(slider.read(cx).value().start());
-    sensitivity_field(
-        slider,
-        value.to_string(),
-        value == ThumbwheelSensitivity::DEFAULT,
-        cx,
-    )
-}
-
-fn vertical_scroll_sensitivity_field(slider: &Entity<SliderState>, cx: &mut App) -> gpui::Div {
-    let value = VerticalScrollSensitivity::from_rounded(slider.read(cx).value().start());
-    sensitivity_field(
-        slider,
-        value.to_string(),
-        value == VerticalScrollSensitivity::DEFAULT,
-        cx,
-    )
-}
-
-fn sensitivity_field(
-    slider: &Entity<SliderState>,
-    value: String,
-    is_default: bool,
-    cx: &mut App,
-) -> gpui::Div {
-    let pal = theme::palette(cx);
-    v_flex()
-        .flex_shrink_0()
-        .gap_1()
-        .child(
-            h_flex()
-                .items_center()
-                .gap_3()
-                .child(div().w(px(180.)).child(Slider::new(slider)))
-                .child(
-                    div()
-                        .w(px(72.))
-                        .text_body()
-                        .text_color(pal.text_muted)
-                        .child(value),
-                ),
-        )
-        .when(is_default, |this| {
-            this.child(
-                div()
-                    .text_caption()
-                    .text_color(pal.text_muted)
-                    .whitespace_nowrap()
-                    .child(format!("({})", rust_i18n::t!("common.default"))),
-            )
-        })
+/// A sensitivity slider laid out as the device pages lay theirs out — label
+/// and value on one line, the slider across the row — with "Default" beside
+/// the value while it rests there. A custom item has no title of its own, so
+/// its title and description are its search keywords.
+fn sensitivity_item<T: SliderUnit + std::fmt::Display>(
+    title: SharedString,
+    description: SharedString,
+    slider: Entity<SliderState>,
+    max: T,
+    default: T,
+) -> SettingItem {
+    SettingItem::render({
+        let (title, description) = (title.clone(), description.clone());
+        move |_, _, cx| {
+            let value = T::from_slider(slider.read(cx).value().start());
+            SliderRow::new(title.clone(), Slider::new(&slider).horizontal())
+                .value(value.to_string(), [max.to_string()])
+                .when(value == default, |row| row.marker(tr!("common.default")))
+                .description(description.clone())
+        }
+    })
+    .keywords([title, description])
 }
 
 /// The launch-at-login switch — a persisted config value the agent reads
@@ -316,7 +286,7 @@ mod tests {
     use crate::state::{ConfigPersistence, Sources};
     use crate::windows::{WindowRegistry, settings};
     use gpui::{
-        AppContext as _, Bounds, Modifiers, TestAppContext, VisualTestContext, point, size,
+        AppContext as _, Bounds, Modifiers, TestAppContext, VisualTestContext, point, px, size,
     };
     use openlogi_core::config::{Config, UiScale};
 

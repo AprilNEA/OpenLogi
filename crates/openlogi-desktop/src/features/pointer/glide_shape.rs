@@ -17,7 +17,7 @@ use openlogi_core::scroll::GlideCurve;
 
 use super::momentum::{MomentumScope, commit};
 use crate::ui::choice_card::ChoiceCard;
-use crate::ui::section::section_label;
+use crate::ui::slider_row::SliderRow;
 use crate::ui::theme::{ACCENT_BLUE, Palette, Typography as _};
 
 /// Points each curve is drawn through.
@@ -216,40 +216,23 @@ fn tile(
 }
 
 /// The picker: its label and `current` shape, what it does, and the tiles
-/// drawn under `params`. A tile commits its shape to `scope`'s settings.
+/// drawn under `params`, laid out like the slider rows around it. A tile
+/// commits its shape to `scope`'s settings.
 pub(super) fn glide_shape_picker(
     scope: MomentumScope,
     current: GlideShape,
     params: &MomentumParams,
     pal: Palette,
 ) -> impl IntoElement {
-    v_flex()
-        .gap_2()
-        .child(
-            h_flex()
-                .justify_between()
-                .items_baseline()
-                .gap_4()
-                .child(section_label(tr!("pointer.momentum_glide_shape"), pal))
-                .child(
-                    div()
-                        .text_body()
-                        .text_color(rgb(ACCENT_BLUE))
-                        .child(shape_name(current)),
-                ),
-        )
-        .child(
-            div()
-                .text_caption()
-                .text_color(pal.text_muted)
-                .child(tr!("pointer.momentum_glide_shape_description")),
-        )
-        .child(
-            h_flex()
-                .gap_3()
-                .items_stretch()
-                .children(GlideShape::ALL.map(|shape| tile(scope, shape, current, params, pal))),
-        )
+    SliderRow::new(
+        tr!("pointer.momentum_glide_shape"),
+        h_flex()
+            .gap_3()
+            .items_stretch()
+            .children(GlideShape::ALL.map(|shape| tile(scope, shape, current, params, pal))),
+    )
+    .value(shape_name(current), GlideShape::ALL.map(shape_name))
+    .description(tr!("pointer.momentum_glide_shape_description"))
 }
 
 #[cfg(test)]
