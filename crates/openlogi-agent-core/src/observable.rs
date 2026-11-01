@@ -24,9 +24,9 @@ use openlogi_core::brand::is_openlogi_foreground_id;
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_hook::Hook;
 use openlogi_ipc::{
-    AgentSnapshot, AgentStatus, ForegroundApps, FoundDevice, Generation, InventoryHealth,
-    OBSERVE_HOLD, Observation, ObservedLight, PROTOCOL_VERSION, PairingPhase, RECENT_APPS,
-    SecureInput, VirtualKeyboardStatus,
+    AgentSnapshot, AgentStatus, FlowStatus, ForegroundApps, FoundDevice, Generation,
+    InventoryHealth, OBSERVE_HOLD, Observation, ObservedLight, PROTOCOL_VERSION, PairingPhase,
+    RECENT_APPS, SecureInput, VirtualKeyboardStatus,
 };
 use tokio::sync::watch;
 
@@ -79,6 +79,7 @@ impl ObservableState {
                 pairing: None,
                 foreground: ForegroundApps::default(),
                 lights: Vec::new(),
+                flow: FlowStatus::default(),
             },
         });
         Self {
@@ -197,6 +198,18 @@ impl ObservableState {
                 return false;
             }
             snapshot.lights = lights;
+            true
+        });
+    }
+
+    /// Publish whether Flow is enabled and each configured peer's link state.
+    /// The same state twice notifies nobody.
+    pub fn set_flow(&self, flow: FlowStatus) {
+        self.update(|snapshot| {
+            if snapshot.flow == flow {
+                return false;
+            }
+            snapshot.flow = flow;
             true
         });
     }

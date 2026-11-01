@@ -35,6 +35,7 @@ mod device_list;
 mod device_settings;
 mod disable_keys_native_write;
 mod disabled_keys;
+mod flow;
 mod light_changes;
 mod light_reload;
 mod lock_keys;

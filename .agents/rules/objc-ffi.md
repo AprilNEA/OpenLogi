@@ -38,6 +38,7 @@ files; **keep this table in sync when you add or move one**:
 | `openlogi-hid/src/permissions.rs` | `IOHIDCheckAccess` / `IOHIDRequestAccess` (the prompting half of Input Monitoring) |
 | `openlogi-hook/src/macos.rs` | the CGEventTap (on `core-graphics`, see below), the Accessibility-trust check/prompt, the off-tap `NSWorkspace` frontmost-app read, and the `CGGetEventTapList` enumeration |
 | `openlogi-hook/src/macos/foreground.rs` | the `NSWorkspace` activation observer, the `NSRunningApplication` conversion behind every frontmost-app read, and the Safari PID snapshot |
+| `openlogi-hook/src/macos/probe.rs` | Flow's pointer probe: the modifier read (`CGEventSourceFlagsState`), `CGGetActiveDisplayList` / `CGDisplayBounds`, and the `CGWarpMouseCursorPosition` warp |
 | `openlogi-hook/src/macos/secure_input.rs` | the Secure Event Input read: `IsSecureEventInputEnabled` (hand-declared, see below) and the `kCGSSessionSecureInputPID` entry of `CGSessionCopyCurrentDictionary`, named through `foreground.rs`'s `NSRunningApplication` conversion |
 | `openlogi-hook/src/macos/sender.rs` | the HID sender-id lookup and the IOKit registry walk that resolves it to a device |
 | `openlogi-inject/src/inject/macos.rs` | CGEvent key and click synthesis, media-key `NSEvent`s |
@@ -273,6 +274,8 @@ under a `SAFETY` comment. Where it currently lives on macOS:
 - `hook/macos/secure_input.rs` — the `CGSession` dictionary cast.
 - `hook/macos/sender.rs` — the sender-id `extern` calls and the IOKit registry
   walk, including the Create-rule `CFString` / `CFNumber` wraps.
+- `hook/macos/probe.rs` — the `CGGetActiveDisplayList` out-pointers; the rest of
+  Flow's pointer probe is safe `objc2-core-graphics`.
 - `inject/macos/ax.rs` — AX attribute-copy out-pointers and the unchecked
   `AXChildren` element type; each child is downcast before use.
 - `inject/macos/browser.rs` — typed AX creation, `AXPress`, and

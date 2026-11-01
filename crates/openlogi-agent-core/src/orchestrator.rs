@@ -44,6 +44,7 @@ use crate::capture_plan::{
     CapturePublication, PlanDevice, SharedCapturePlans, buttons_unlike_focus,
     hidpp_side_gesture_maps_for, plan_for_device, shift_bindings_for,
 };
+use crate::flow::{FlowController, InventoryDevice};
 use crate::hardware::{
     DeviceAccess, DeviceOp, HardwareContext, KeptOsLayouts, VolatileMouseSettings, WriteOrder,
     show_precision_led, write_pointer_speed_in_background,
@@ -167,6 +168,9 @@ pub struct SharedHandles {
     /// Receiver access shared by HID++ sessions and pairing. Pairing/host
     /// transitions are exclusive; capture sessions share under read leases.
     pub receiver_access: ReceiverAccess,
+    /// Flow peers, edge detection, and device handoff. Dormant until the
+    /// agent arms it.
+    pub flow: FlowController,
     /// Per-transport turns for agent-owned HID requests. Shared by every
     /// device access built from these handles, so two slots of one receiver
     /// queue behind each other before either starts its response timeout.
@@ -681,6 +685,14 @@ impl Orchestrator {
         let (host_switch_links_tx, host_switch_links) = watch::channel(Arc::new(Vec::new()));
         let (watched_lights_tx, watched_lights) = watch::channel(Arc::new(Vec::new()));
         openlogi_inject::set_desktop_switch(desktop_switch(&config.app_settings));
+        let receiver_access = ReceiverAccess::default();
+        let flow = FlowController::new(
+            &config.flow,
+            Arc::clone(&observable),
+            hardware.channel_pool(),
+            receiver_access.clone(),
+            hardware.device_io(),
+        );
         let shared = SharedHandles {
             device_io: hardware.device_io(),
             channel_pool: hardware.channel_pool(),
@@ -699,7 +711,8 @@ impl Orchestrator {
             keyboard_channel: Arc::new(RwLock::new(None)),
             key_display_specs,
             capture_rearm_generation: Arc::new(AtomicU64::new(0)),
-            receiver_access: ReceiverAccess::default(),
+            receiver_access,
+            flow,
             transport_turns: crate::hardware::TransportTurns::default(),
             host_switch_links,
             watched_lights,
@@ -1089,6 +1102,7 @@ impl Orchestrator {
         publish_arc_if_changed(&self.watched_lights_tx, self.watched_lights());
         self.publish_lights();
         publish_arc_if_changed(&self.key_display_specs_tx, self.key_display_specs_for());
+        self.publish_flow();
     }
 
     /// What each online, enabled keypad's LCD keys should show: the glyph of
@@ -1122,6 +1136,33 @@ impl Orchestrator {
                 })
             })
             .collect()
+    }
+
+    /// Hand Flow its configuration and the devices it may move. Both
+    /// updates are no-ops when nothing changed.
+    fn publish_flow(&self) {
+        self.shared.flow.update_config(&self.config.flow);
+        self.shared.flow.update_devices(
+            self.devices
+                .iter()
+                .filter_map(Self::flow_inventory_device)
+                .collect(),
+        );
+    }
+
+    /// One device as Flow sees it, keyed like [`Self::capture_identity`].
+    fn flow_inventory_device(dev: &AgentDevice) -> Option<InventoryDevice> {
+        let identity = DeviceIdentity::from_parts(dev.serial.as_deref(), dev.unit_id);
+        let key = canonical_device_key(&stable_id(dev), Some(&identity))
+            .or_else(|| PhysicalDeviceKey::parse(&dev.config_key))?;
+        Some(InventoryDevice {
+            key,
+            route: dev.route.clone(),
+            serial: dev.serial.clone(),
+            unit_id: dev.unit_id,
+            kind: dev.kind,
+            online: dev.online,
+        })
     }
 
     fn publish_capture_plans(&self) {
