@@ -375,17 +375,13 @@ mod tests {
     #[test]
     fn shared_browser_navigation_goes_to_the_frontmost_safari_as_focused_mode_does() {
         let resolve = |target, frontmost| {
-            ActionDispatchTarget::Pointer {
-                target,
-                focus: FocusBinding::Shared,
-                fallback_safari_pid: None,
-            }
-            .resolve_with(
-                &Action::BrowserBack,
-                || target,
-                |_| panic!("a shared binding needs no focus check"),
-                || frontmost,
-            )
+            ActionDispatchTarget::for_pointer(Some(press(target, FocusBinding::Shared)), || None)
+                .resolve_with(
+                    &Action::BrowserBack,
+                    || target,
+                    |_| panic!("a shared binding needs no focus check"),
+                    || frontmost,
+                )
         };
         for target in [PointerTarget::Desktop, BROWSER] {
             assert_eq!(
@@ -398,11 +394,10 @@ mod tests {
 
     #[test]
     fn distinct_binding_over_the_desktop_is_skipped() {
-        let resolved = ActionDispatchTarget::Pointer {
-            target: PointerTarget::Desktop,
-            focus: FocusBinding::Distinct,
-            fallback_safari_pid: None,
-        }
+        let resolved = ActionDispatchTarget::for_pointer(
+            Some(PointerPress::distinct(PointerTarget::Desktop)),
+            || panic!("an identified target needs no focused fallback"),
+        )
         .resolve_with(
             &Action::BrowserBack,
             || PointerTarget::Desktop,
