@@ -518,6 +518,7 @@ mod tests {
             let name = theme["name"].as_str().unwrap_or("unnamed theme");
             let colors = &theme["colors"];
             for (foreground, background) in [
+                ("accent.foreground", "accent.background"),
                 ("primary.foreground", "primary.background"),
                 ("danger.foreground", "danger.background"),
                 ("info.foreground", "info.background"),
