@@ -25,8 +25,8 @@ use objc2_core_foundation::{
 };
 use objc2_core_graphics::{CGEventSource, CGEventSourceStateID};
 use objc2_io_kit::{
-    IOHIDAccessType, IOHIDCheckAccess, IOHIDManager, IOHIDRequestType, IOHIDValue, IOReturn,
-    kIOHIDOptionsTypeNone, kIOReturnSuccess,
+    IOHIDAccessType, IOHIDCheckAccess, IOHIDDevice, IOHIDManager, IOHIDRequestType, IOHIDValue,
+    IOReturn, kIOHIDOptionsTypeNone, kIOReturnSuccess,
 };
 use openlogi_core::config::FunctionKey;
 use tracing::{error, warn};
@@ -69,6 +69,11 @@ impl KeyEdges {
         self.f21_held = pressed;
         Some((FunctionKey::F21.keycode(), pressed))
     }
+
+    /// The release a removed keyboard will never send, if a key is held.
+    fn device_removed(&mut self) -> Option<(u16, bool)> {
+        std::mem::take(&mut self.f21_held).then_some((FunctionKey::F21.keycode(), false))
+    }
 }
 
 /// What the HID callback reads, owned by the listener thread.
@@ -101,16 +106,37 @@ unsafe extern "C-unwind" fn on_value(
         element.usage(),
         value.integer_value(),
     );
-    let Some((keycode, pressed)) = edge else {
-        return;
-    };
-    let event = HookEvent::Key(KeyEvent {
-        keycode,
-        pressed,
-        modifiers: current_modifiers(),
-    });
-    if catch_unwind(AssertUnwindSafe(|| (listener.cb)(event))).is_err() {
-        error!("hook callback panicked on a HID key event");
+    if let Some(edge) = edge {
+        listener.deliver(edge);
+    }
+}
+
+/// Releases a key held on a keyboard that just went away.
+unsafe extern "C-unwind" fn on_device_removed(
+    context: *mut c_void,
+    _result: IOReturn,
+    _sender: *mut c_void,
+    _device: NonNull<IOHIDDevice>,
+) {
+    // SAFETY: as in `on_value`.
+    let listener = unsafe { &*context.cast::<Listener>() };
+    let edge = listener.edges.borrow_mut().device_removed();
+    if let Some(edge) = edge {
+        listener.deliver(edge);
+    }
+}
+
+impl Listener {
+    /// Hands one key edge to the hook callback, which must not unwind into IOKit.
+    fn deliver(&self, (keycode, pressed): (u16, bool)) {
+        let event = HookEvent::Key(KeyEvent {
+            keycode,
+            pressed,
+            modifiers: current_modifiers(),
+        });
+        if catch_unwind(AssertUnwindSafe(|| (self.cb)(event))).is_err() {
+            error!("hook callback panicked on a HID key event");
+        }
     }
 }
 
@@ -153,6 +179,10 @@ fn listen(cb: Callback, stop: &AtomicBool) {
         manager.set_device_matching(Some(matching.as_opaque()));
         manager
             .register_input_value_callback(Some(on_value), (&raw const listener).cast_mut().cast());
+        manager.register_device_removal_callback(
+            Some(on_device_removed),
+            (&raw const listener).cast_mut().cast(),
+        );
         manager.schedule_with_run_loop(&run_loop, mode);
     }
     let opened = manager.open(kIOHIDOptionsTypeNone);
@@ -235,6 +265,24 @@ mod tests {
         assert_eq!(edges.observe(KEYBOARD_PAGE, F21_USAGE, 1), None);
         edges.observe(KEYBOARD_PAGE, F21_USAGE, 0);
         assert_eq!(edges.observe(KEYBOARD_PAGE, F21_USAGE, 0), None);
+    }
+
+    #[test]
+    fn removing_a_keyboard_releases_a_held_key_once() {
+        let mut edges = KeyEdges::default();
+        edges.observe(KEYBOARD_PAGE, F21_USAGE, 1);
+        assert_eq!(edges.device_removed(), Some((F21, false)));
+        assert_eq!(edges.device_removed(), None);
+        // The next press after a reconnect is a real press.
+        assert_eq!(
+            edges.observe(KEYBOARD_PAGE, F21_USAGE, 1),
+            Some((F21, true))
+        );
+    }
+
+    #[test]
+    fn removing_a_keyboard_with_nothing_held_does_nothing() {
+        assert_eq!(KeyEdges::default().device_removed(), None);
     }
 
     #[test]
