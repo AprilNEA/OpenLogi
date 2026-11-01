@@ -1,0 +1,20 @@
+# Owner: openlogi_inject::inject::SharedOutputOwners — physical output
+# reference counts for held chords and held mouse buttons.
+id: inject-shared-output-owners
+language: rust
+severity: error
+message: Use inject::SharedOutputOwners for shared physical-output reference counts instead of adding another owners HashMap.
+note: |
+  Held chords and held mouse buttons share the same first-owner-down and
+  final-owner-up algorithm. The generic owner in inject.rs preserves that
+  lifecycle across both output types.
+files:
+  - crates/openlogi-inject/src/**/*.rs
+rule:
+  all:
+    - kind: field_declaration
+    - regex: '^owners\s*:\s*HashMap<.+,\s*usize>$'
+    - not:
+        inside:
+          pattern: 'struct SharedOutputOwners<$TYPE> { $$$FIELDS }'
+          stopBy: end

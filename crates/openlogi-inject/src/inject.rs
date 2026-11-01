@@ -13,7 +13,7 @@ use std::sync::{LazyLock, Mutex, PoisonError};
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use openlogi_core::binding::KeyboardUsage;
-use openlogi_core::binding::{Action, HeldKeys, KeyCombo};
+use openlogi_core::binding::{Action, HeldKeys, KeyCombo, MouseButton};
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use openlogi_core::binding::{Script, WorkflowStep};
 use openlogi_core::scroll::ScrollDelta;
@@ -123,11 +123,92 @@ impl HeldModifiers {
     }
 }
 
+/// The native edges caused by one shared-output ownership transition.
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+#[derive(Debug, PartialEq, Eq)]
+struct OwnerTransition<T> {
+    up: Vec<T>,
+    down: Vec<T>,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+impl<T> Default for OwnerTransition<T> {
+    fn default() -> Self {
+        Self {
+            up: Vec::new(),
+            down: Vec::new(),
+        }
+    }
+}
+
+/// Reference counts for physical outputs shared by independent owners.
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+struct SharedOutputOwners<T> {
+    owners: HashMap<T, usize>,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+impl<T> Default for SharedOutputOwners<T> {
+    fn default() -> Self {
+        Self {
+            owners: HashMap::new(),
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+impl<T> SharedOutputOwners<T>
+where
+    T: Copy + Eq + std::hash::Hash,
+{
+    fn transition(&mut self, released: &[T], pressed: &[T]) -> OwnerTransition<T> {
+        let before = self.owners.clone();
+
+        for output in released {
+            match self.owners.get_mut(output) {
+                Some(owners) if *owners > 1 => *owners -= 1,
+                Some(_) => {
+                    self.owners.remove(output);
+                }
+                None => {}
+            }
+        }
+        for output in pressed {
+            *self.owners.entry(*output).or_default() += 1;
+        }
+
+        OwnerTransition {
+            up: released
+                .iter()
+                .copied()
+                .filter(|output| before.contains_key(output) && !self.owners.contains_key(output))
+                .collect(),
+            down: pressed
+                .iter()
+                .copied()
+                .filter(|output| !before.contains_key(output) && self.owners.contains_key(output))
+                .collect(),
+        }
+    }
+
+    fn contains(&self, output: T) -> bool {
+        self.owners.contains_key(&output)
+    }
+
+    /// A tap cannot lift a physical output another lifecycle still owns.
+    fn tap_unowned(&self, output: T, post: impl FnOnce()) {
+        if self.contains(output) {
+            return;
+        }
+        post();
+    }
+}
+
 /// Reference counts for physical keyboard outputs across active chords.
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 #[derive(Default)]
 struct HeldOutput {
-    owners: HashMap<HeldKey, usize>,
+    owners: SharedOutputOwners<HeldKey>,
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
@@ -142,33 +223,14 @@ impl HeldOutput {
         });
         let released = released.map_or_else(Vec::new, |(combo, keys)| held_keys(combo, keys));
         let pressed = pressed.map_or_else(Vec::new, |(combo, keys)| held_keys(combo, keys));
-        let before = self.owners.clone();
-
-        for key in &released {
-            match self.owners.get_mut(key) {
-                Some(owners) if *owners > 1 => *owners -= 1,
-                Some(_) => {
-                    self.owners.remove(key);
-                }
-                None => {}
-            }
-        }
-        for key in &pressed {
-            *self.owners.entry(*key).or_default() += 1;
-        }
+        let transition = self.owners.transition(&released, &pressed);
 
         HoldTransition {
-            up: released
-                .into_iter()
-                .filter(|key| before.contains_key(key) && !self.owners.contains_key(key))
-                .collect(),
-            down: pressed
-                .into_iter()
-                .filter(|key| !before.contains_key(key) && self.owners.contains_key(key))
-                .collect(),
+            up: transition.up,
+            down: transition.down,
             // A modifiers-only hold never owns its ordinary key, so an owner
             // here is another hold keeping that key down. Leave it alone.
-            tap: tapped.filter(|key| !self.owners.contains_key(key)),
+            tap: tapped.filter(|key| !self.owners.contains(*key)),
         }
     }
 
@@ -181,7 +243,7 @@ impl HeldOutput {
             HeldKey::Shift,
             HeldKey::Alt,
         ] {
-            modifiers.set(key, self.owners.contains_key(&key));
+            modifiers.set(key, self.owners.contains(key));
         }
         modifiers
     }
@@ -190,6 +252,11 @@ impl HeldOutput {
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 static HELD_OUTPUT: LazyLock<Mutex<HeldOutput>> =
     LazyLock::new(|| Mutex::new(HeldOutput::default()));
+
+/// Shared physical mouse-button ownership across active press lifecycles.
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+static HELD_MOUSE_BUTTONS: LazyLock<Mutex<SharedOutputOwners<MouseButton>>> =
+    LazyLock::new(|| Mutex::new(SharedOutputOwners::default()));
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 fn held_keys(combo: &KeyCombo, held: HeldKeys) -> Vec<HeldKey> {
@@ -414,6 +481,30 @@ impl Drop for HeldChord {
     }
 }
 
+/// One synthetic held mouse button, released exactly once when dropped.
+///
+/// Keep this value with the physical press lifecycle. Replacing its button
+/// preserves an unchanged button's physical state. Cancellation, shutdown,
+/// and unwinding release the current button through [`Drop`].
+#[must_use = "dropping the held mouse button immediately releases its synthetic output"]
+pub struct HeldMouseButton {
+    button: MouseButton,
+}
+
+impl HeldMouseButton {
+    /// Replace this held button without releasing it when `button` is unchanged.
+    pub fn replace(&mut self, button: MouseButton) {
+        let old = std::mem::replace(&mut self.button, button);
+        hold_mouse_transition(Some(old), Some(self.button));
+    }
+}
+
+impl Drop for HeldMouseButton {
+    fn drop(&mut self) {
+        hold_mouse_transition(Some(self.button), None);
+    }
+}
+
 /// Synthesise the down edge of `combo` and return its release owner.
 ///
 /// `keys` selects which of the chord's keys stay down: [`HeldKeys::WholeChord`]
@@ -432,6 +523,18 @@ pub fn press_hold(combo: &KeyCombo, keys: HeldKeys) -> HeldChord {
         keys,
     };
     hold_transition(None, Some((&held.combo, held.keys)));
+    held
+}
+
+/// Synthesise the down edge of `button` and return its release owner.
+///
+/// Keep the returned [`HeldMouseButton`] until the physical press ends. Prefer
+/// [`execute`] when the caller does not own a matching terminal event.
+pub fn press_hold_mouse(button: MouseButton) -> HeldMouseButton {
+    // Construct the owner before posting the edge so unwinding from the
+    // platform backend still balances any ownership transition it completed.
+    let held = HeldMouseButton { button };
+    hold_mouse_transition(None, Some(held.button));
     held
 }
 
@@ -486,6 +589,31 @@ fn hold_transition(
             );
         }
     }
+}
+
+fn hold_mouse_transition(released: Option<MouseButton>, pressed: Option<MouseButton>) {
+    cfg_select! {
+        any(target_os = "macos", target_os = "linux", target_os = "windows") => {
+            let mut output = HELD_MOUSE_BUTTONS
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let transition = output.transition(released.as_slice(), pressed.as_slice());
+            platform::hold_mouse_buttons(&transition.up, KeyPhase::Up);
+            platform::hold_mouse_buttons(&transition.down, KeyPhase::Down);
+        }
+        _ => {
+            tracing::warn!("held mouse output unsupported on this platform");
+        }
+    }
+}
+
+/// Keep a one-shot click balanced, without releasing a lifecycle-owned drag.
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+fn click_mouse(button: MouseButton) {
+    let output = HELD_MOUSE_BUTTONS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    output.tap_unowned(button, || platform::click_mouse(button));
 }
 
 /// Run `post` with the synthetic modifiers held chords keep down, under the
@@ -746,500 +874,4 @@ fn hid_usage_to_windows(usage: u8) -> Option<u16> {
 }
 
 #[cfg(test)]
-mod tests {
-    use openlogi_core::scroll::ScrollDelta;
-
-    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-    use openlogi_core::binding::{HeldKeys, KeyCombo};
-
-    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-    use super::{HeldKey, HeldOutput, HoldTransition};
-    use super::{QuantizedScroll, ScrollQuantizer};
-
-    /// Synthetic high-resolution input: eight eighth-ticks must total exactly
-    /// one Windows/Linux wheel detent (120 raw units). This is deterministic
-    /// model data, not a hardware capture.
-    #[test]
-    fn fractional_frames_preserve_cumulative_wheel_distance() {
-        let mut quantizer = ScrollQuantizer::default();
-        let total = (0..8)
-            .map(|_| {
-                quantizer
-                    .quantize(ScrollDelta::wheel_ticks(0.0, 0.125), 120.0)
-                    .y
-            })
-            .sum::<i32>();
-        assert_eq!(total, 120);
-    }
-
-    #[test]
-    fn opposing_fractional_input_cancels_without_rounding_drift() {
-        let mut quantizer = ScrollQuantizer::default();
-        let forward = quantizer.quantize(ScrollDelta::wheel_ticks(0.25, 0.0), 120.0);
-        let backward = quantizer.quantize(ScrollDelta::wheel_ticks(-0.25, 0.0), 120.0);
-        assert_eq!(forward, QuantizedScroll { x: 30, y: 0 });
-        assert_eq!(backward, QuantizedScroll { x: -30, y: 0 });
-    }
-
-    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-    fn combo(label: &str) -> KeyCombo {
-        label.parse().expect("test shortcut must be valid")
-    }
-
-    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-    #[test]
-    fn shared_control_stays_down_until_its_last_chord_ends() {
-        let control_a = combo("Ctrl+A");
-        let control_b = combo("Ctrl+B");
-        let mut output = HeldOutput::default();
-
-        assert_eq!(
-            output.transition(None, Some((&control_a, HeldKeys::WholeChord))),
-            HoldTransition {
-                up: vec![],
-                down: vec![HeldKey::Control, HeldKey::Key(control_a.key())],
-                tap: None,
-            }
-        );
-        assert_eq!(
-            output.transition(None, Some((&control_b, HeldKeys::WholeChord))),
-            HoldTransition {
-                up: vec![],
-                down: vec![HeldKey::Key(control_b.key())],
-                tap: None,
-            }
-        );
-        assert_eq!(
-            output.transition(Some((&control_a, HeldKeys::WholeChord)), None),
-            HoldTransition {
-                up: vec![HeldKey::Key(control_a.key())],
-                down: vec![],
-                tap: None,
-            }
-        );
-        assert_eq!(
-            output.transition(Some((&control_b, HeldKeys::WholeChord)), None),
-            HoldTransition {
-                up: vec![HeldKey::Control, HeldKey::Key(control_b.key())],
-                down: vec![],
-                tap: None,
-            }
-        );
-    }
-
-    /// macOS presses F13 for Print Screen, so a Print Screen hold and an F13
-    /// hold own one key: the first release leaves F13 down for the other.
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn print_screen_and_f13_holds_share_one_key() {
-        let print_screen = combo("PrintScreen");
-        let f13 = combo("F13");
-        let mut output = HeldOutput::default();
-
-        assert_eq!(
-            output.transition(None, Some((&print_screen, HeldKeys::WholeChord))),
-            HoldTransition {
-                up: vec![],
-                down: vec![HeldKey::Key(f13.key())],
-                tap: None,
-            }
-        );
-        assert_eq!(
-            output.transition(None, Some((&f13, HeldKeys::WholeChord))),
-            HoldTransition::default()
-        );
-        assert_eq!(
-            output.transition(Some((&print_screen, HeldKeys::WholeChord)), None),
-            HoldTransition::default()
-        );
-        assert_eq!(
-            output.transition(Some((&f13, HeldKeys::WholeChord)), None),
-            HoldTransition {
-                up: vec![HeldKey::Key(f13.key())],
-                down: vec![],
-                tap: None,
-            }
-        );
-    }
-
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
-    #[test]
-    fn command_and_control_share_one_physical_output() {
-        let command_a = combo("Cmd+A");
-        let control_b = combo("Ctrl+B");
-        let mut output = HeldOutput::default();
-
-        output.transition(None, Some((&command_a, HeldKeys::WholeChord)));
-        assert_eq!(
-            output.transition(None, Some((&control_b, HeldKeys::WholeChord))),
-            HoldTransition {
-                up: vec![],
-                down: vec![HeldKey::Key(control_b.key())],
-                tap: None,
-            }
-        );
-        assert_eq!(
-            output.transition(Some((&command_a, HeldKeys::WholeChord)), None),
-            HoldTransition {
-                up: vec![HeldKey::Key(command_a.key())],
-                down: vec![],
-                tap: None,
-            }
-        );
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn command_and_control_are_distinct_physical_outputs() {
-        let command_a = combo("Cmd+A");
-        let control_b = combo("Ctrl+B");
-        let mut output = HeldOutput::default();
-
-        output.transition(None, Some((&command_a, HeldKeys::WholeChord)));
-        assert_eq!(
-            output.transition(None, Some((&control_b, HeldKeys::WholeChord))),
-            HoldTransition {
-                up: vec![],
-                down: vec![HeldKey::Control, HeldKey::Key(control_b.key())],
-                tap: None,
-            }
-        );
-        assert_eq!(
-            output.transition(Some((&command_a, HeldKeys::WholeChord)), None),
-            HoldTransition {
-                up: vec![HeldKey::Command, HeldKey::Key(command_a.key())],
-                down: vec![],
-                tap: None,
-            }
-        );
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn super_and_command_share_one_physical_output() {
-        let super_a = combo("Super+A");
-        let command_b = combo("Cmd+B");
-        let mut output = HeldOutput::default();
-
-        assert_eq!(
-            output.transition(None, Some((&super_a, HeldKeys::WholeChord))),
-            HoldTransition {
-                up: vec![],
-                down: vec![HeldKey::Command, HeldKey::Key(super_a.key())],
-                tap: None,
-            }
-        );
-        assert_eq!(
-            output.transition(None, Some((&command_b, HeldKeys::WholeChord))),
-            HoldTransition {
-                up: vec![],
-                down: vec![HeldKey::Key(command_b.key())],
-                tap: None,
-            }
-        );
-        assert_eq!(
-            output.transition(Some((&super_a, HeldKeys::WholeChord)), None),
-            HoldTransition {
-                up: vec![HeldKey::Key(super_a.key())],
-                down: vec![],
-                tap: None,
-            }
-        );
-        assert_eq!(
-            output.transition(Some((&command_b, HeldKeys::WholeChord)), None),
-            HoldTransition {
-                up: vec![HeldKey::Command, HeldKey::Key(command_b.key())],
-                down: vec![],
-                tap: None,
-            }
-        );
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn super_plus_command_owns_the_physical_key_once() {
-        let chord = combo("Cmd+Super+A");
-        assert_eq!(
-            super::held_keys(&chord, HeldKeys::WholeChord),
-            vec![HeldKey::Command, HeldKey::Key(chord.key())]
-        );
-    }
-
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
-    #[test]
-    fn super_is_distinct_from_control() {
-        let super_a = combo("Super+A");
-        let command_b = combo("Cmd+B");
-        let mut output = HeldOutput::default();
-
-        assert_eq!(
-            output.transition(None, Some((&super_a, HeldKeys::WholeChord))),
-            HoldTransition {
-                up: vec![],
-                down: vec![HeldKey::Super, HeldKey::Key(super_a.key())],
-                tap: None,
-            }
-        );
-        assert_eq!(
-            output.transition(None, Some((&command_b, HeldKeys::WholeChord))),
-            HoldTransition {
-                up: vec![],
-                down: vec![HeldKey::Control, HeldKey::Key(command_b.key())],
-                tap: None,
-            }
-        );
-        assert_eq!(
-            output.transition(Some((&super_a, HeldKeys::WholeChord)), None),
-            HoldTransition {
-                up: vec![HeldKey::Super, HeldKey::Key(super_a.key())],
-                down: vec![],
-                tap: None,
-            }
-        );
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn shared_command_stays_down_until_its_last_chord_ends() {
-        let command_a = combo("Cmd+A");
-        let command_b = combo("Cmd+B");
-        let mut output = HeldOutput::default();
-
-        output.transition(None, Some((&command_a, HeldKeys::WholeChord)));
-        assert_eq!(
-            output.transition(None, Some((&command_b, HeldKeys::WholeChord))),
-            HoldTransition {
-                up: vec![],
-                down: vec![HeldKey::Key(command_b.key())],
-                tap: None,
-            }
-        );
-        assert_eq!(
-            output.transition(Some((&command_a, HeldKeys::WholeChord)), None),
-            HoldTransition {
-                up: vec![HeldKey::Key(command_a.key())],
-                down: vec![],
-                tap: None,
-            }
-        );
-        assert_eq!(
-            output.transition(Some((&command_b, HeldKeys::WholeChord)), None),
-            HoldTransition {
-                up: vec![HeldKey::Command, HeldKey::Key(command_b.key())],
-                down: vec![],
-                tap: None,
-            }
-        );
-    }
-
-    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-    #[test]
-    fn a_modifiers_only_hold_never_owns_its_ordinary_key() {
-        let control_tab = combo("Ctrl+Tab");
-        let mut output = HeldOutput::default();
-
-        // The ordinary key is absent from both edges: it is tapped once as the
-        // hold starts, not held, so it never enters the ownership map.
-        assert_eq!(
-            output.transition(None, Some((&control_tab, HeldKeys::ModifiersOnly))),
-            HoldTransition {
-                up: vec![],
-                down: vec![HeldKey::Control],
-                tap: Some(HeldKey::Key(control_tab.key())),
-            }
-        );
-        assert_eq!(
-            output.transition(Some((&control_tab, HeldKeys::ModifiersOnly)), None),
-            HoldTransition {
-                up: vec![HeldKey::Control],
-                down: vec![],
-                tap: None,
-            }
-        );
-    }
-
-    /// A whole-chord hold of the same chord must keep holding the ordinary
-    /// key: this is the difference the two actions exist to express.
-    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-    #[test]
-    fn a_whole_chord_hold_of_the_same_chord_still_owns_its_ordinary_key() {
-        let control_tab = combo("Ctrl+Tab");
-        let mut output = HeldOutput::default();
-
-        assert_eq!(
-            output.transition(None, Some((&control_tab, HeldKeys::WholeChord))),
-            HoldTransition {
-                up: vec![],
-                down: vec![HeldKey::Control, HeldKey::Key(control_tab.key())],
-                tap: None,
-            }
-        );
-    }
-
-    /// Two buttons, one ordinary key: a whole-chord hold keeps Tab down, so a
-    /// modifiers-only hold that starts meanwhile must not tap it. The tap's up
-    /// edge would release Tab under the first hold, which still owns it until
-    /// its own release.
-    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-    #[test]
-    fn a_modifiers_only_hold_skips_its_tap_while_another_hold_owns_the_key() {
-        let shift_tab = combo("Shift+Tab");
-        let alt_tab = combo("Alt+Tab");
-        let tab = HeldKey::Key(alt_tab.key());
-        let mut output = HeldOutput::default();
-
-        output.transition(None, Some((&shift_tab, HeldKeys::WholeChord)));
-        assert_eq!(
-            output.transition(None, Some((&alt_tab, HeldKeys::ModifiersOnly))),
-            HoldTransition {
-                up: vec![],
-                down: vec![HeldKey::Alt],
-                tap: None,
-            }
-        );
-        assert_eq!(
-            output.transition(Some((&alt_tab, HeldKeys::ModifiersOnly)), None),
-            HoldTransition {
-                up: vec![HeldKey::Alt],
-                down: vec![],
-                tap: None,
-            }
-        );
-        assert_eq!(
-            output.transition(Some((&shift_tab, HeldKeys::WholeChord)), None),
-            HoldTransition {
-                up: vec![HeldKey::Shift, tab],
-                down: vec![],
-                tap: None,
-            }
-        );
-        // With the owner gone, the next modifiers-only hold taps again.
-        assert_eq!(
-            output.transition(None, Some((&alt_tab, HeldKeys::ModifiersOnly))),
-            HoldTransition {
-                up: vec![],
-                down: vec![HeldKey::Alt],
-                tap: Some(tab),
-            }
-        );
-    }
-
-    /// The skip is about ownership, not about another hold merely existing:
-    /// a modifiers-only hold owns no ordinary key, so a second one still taps,
-    /// and a whole-chord hold that starts meanwhile still presses and owns Tab.
-    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-    #[test]
-    fn a_modifiers_only_hold_never_blocks_another_hold_of_the_same_key() {
-        let alt_tab = combo("Alt+Tab");
-        let shift_tab = combo("Shift+Tab");
-        let tab = HeldKey::Key(alt_tab.key());
-        let mut output = HeldOutput::default();
-
-        output.transition(None, Some((&alt_tab, HeldKeys::ModifiersOnly)));
-        assert_eq!(
-            output.transition(None, Some((&shift_tab, HeldKeys::ModifiersOnly))),
-            HoldTransition {
-                up: vec![],
-                down: vec![HeldKey::Shift],
-                tap: Some(tab),
-            }
-        );
-        output.transition(Some((&shift_tab, HeldKeys::ModifiersOnly)), None);
-        assert_eq!(
-            output.transition(None, Some((&shift_tab, HeldKeys::WholeChord))),
-            HoldTransition {
-                up: vec![],
-                down: vec![HeldKey::Shift, tab],
-                tap: None,
-            }
-        );
-        assert_eq!(
-            output.transition(Some((&shift_tab, HeldKeys::WholeChord)), None),
-            HoldTransition {
-                up: vec![HeldKey::Shift, tab],
-                down: vec![],
-                tap: None,
-            }
-        );
-    }
-
-    /// A press whose whole-chord hold is replaced by a modifiers-only one of
-    /// the same key releases the key first, so the replacement owns no
-    /// conflict and taps as a fresh hold does.
-    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-    #[test]
-    fn replacing_a_whole_chord_hold_frees_the_key_for_the_tap() {
-        let shift_tab = combo("Shift+Tab");
-        let alt_tab = combo("Alt+Tab");
-        let tab = HeldKey::Key(alt_tab.key());
-        let mut output = HeldOutput::default();
-
-        output.transition(None, Some((&shift_tab, HeldKeys::WholeChord)));
-        assert_eq!(
-            output.transition(
-                Some((&shift_tab, HeldKeys::WholeChord)),
-                Some((&alt_tab, HeldKeys::ModifiersOnly))
-            ),
-            HoldTransition {
-                up: vec![HeldKey::Shift, tab],
-                down: vec![HeldKey::Alt],
-                tap: Some(tab),
-            }
-        );
-    }
-
-    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-    #[test]
-    fn replacement_preserves_shared_physical_outputs() {
-        let old = combo("Ctrl+A");
-        let new = combo("Ctrl+B");
-        let mut output = HeldOutput::default();
-
-        output.transition(None, Some((&old, HeldKeys::WholeChord)));
-        assert_eq!(
-            output.transition(
-                Some((&old, HeldKeys::WholeChord)),
-                Some((&new, HeldKeys::WholeChord))
-            ),
-            HoldTransition {
-                up: vec![HeldKey::Key(old.key())],
-                down: vec![HeldKey::Key(new.key())],
-                tap: None,
-            }
-        );
-    }
-
-    #[test]
-    fn hid_usages_map_across_windows_key_categories() {
-        use super::hid_usage_to_windows;
-
-        assert_eq!(hid_usage_to_windows(0x04), Some(0x41)); // A
-        assert_eq!(hid_usage_to_windows(0x1e), Some(0x31)); // 1
-        assert_eq!(hid_usage_to_windows(0x3a), Some(0x70)); // F1
-        assert_eq!(hid_usage_to_windows(0x6f), Some(0x83)); // F20
-        assert_eq!(hid_usage_to_windows(0x50), Some(0x25)); // Left
-        assert_eq!(hid_usage_to_windows(0x2c), Some(0x20)); // Space
-        assert_eq!(hid_usage_to_windows(0x33), Some(0xba)); // Semicolon
-        assert_eq!(hid_usage_to_windows(0x46), Some(0x2c)); // VK_SNAPSHOT
-        assert_eq!(hid_usage_to_windows(0x49), Some(0x2d)); // Insert
-        assert_eq!(hid_usage_to_windows(0xff), None);
-    }
-
-    /// Every key a custom shortcut can name has a Windows virtual key, or the
-    /// Windows backend drops the binding instead of pressing it.
-    #[test]
-    fn every_shortcut_usage_has_a_windows_virtual_key() {
-        use openlogi_core::binding::KeyboardUsage;
-
-        use super::hid_usage_to_windows;
-
-        for code in 0..=u8::MAX {
-            if KeyboardUsage::try_new(code).is_ok() {
-                assert!(
-                    hid_usage_to_windows(code).is_some(),
-                    "usage {code:#04x} has no Windows virtual key"
-                );
-            }
-        }
-    }
-}
+mod tests;

@@ -18,6 +18,7 @@ use openlogi_core::binding::{Action, Binding, ButtonId, LONG_PRESS_THRESHOLD};
 use tracing::warn;
 
 use super::ActionDispatchTarget;
+use super::held::held_mouse_button;
 
 /// OS-hook callbacks must fail open rather than block.
 const EVENT_QUEUE_CAPACITY: usize = 128;
@@ -237,6 +238,24 @@ impl PressBehavior {
         }
     }
 
+    /// Whether the press follows the pointer when the hovered window changes,
+    /// instead of ending with its old target.
+    ///
+    /// A gesture hold holds no output, and its own swipe may be what changed
+    /// the hovered window (Next Desktop). A held mouse button is a drag. The
+    /// OS routes a drag to the window that received its down edge, so leaving
+    /// that window must not release the button.
+    fn follows_pointer(&self) -> bool {
+        match self {
+            Self::LifecycleOnly => true,
+            Self::Immediate(action) => held_mouse_button(action).is_some(),
+            Self::LongPressPending { .. }
+            | Self::LongPressFired
+            | Self::WheelHoldPending { .. }
+            | Self::WheelHoldScrolled => false,
+        }
+    }
+
     fn release_action(&self) -> Option<&Action> {
         match self {
             Self::LongPressPending { short, .. } => Some(short),
@@ -422,12 +441,11 @@ impl ButtonState {
     }
 
     fn cancel_pointer_except(&mut self, current: openlogi_hook::PointerTarget) -> Vec<ActivePress> {
-        // A lifecycle-only press (a gesture hold) holds no output, and its own
-        // swipe may be what changed the hovered window (Next Desktop). Follow
-        // the pointer instead of canceling, so one hold can chain swipes; the
-        // press-time focus fallback stays with it.
+        // A gesture hold can chain swipes, and a held mouse button can drag
+        // across windows. Follow the pointer instead of canceling them; the
+        // press-time focus fallback stays with the press.
         for press in self.active.values_mut() {
-            if press.behavior == PressBehavior::LifecycleOnly
+            if press.behavior.follows_pointer()
                 && let ActionDispatchTarget::Pointer { target, .. } = &mut press.target
             {
                 *target = current;
