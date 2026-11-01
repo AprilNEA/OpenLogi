@@ -485,6 +485,12 @@ fn verify_setting_routes(
                 );
             }
             DeviceRoute::Direct { .. } => {}
+            DeviceRoute::Hidpp20Receiver { .. } => {
+                return Err(FixtureError::invalid(
+                    "fixture settings route",
+                    "HID++ 2.0 receiver routes have no fixture representation yet",
+                ));
+            }
         }
     }
     Ok(())
