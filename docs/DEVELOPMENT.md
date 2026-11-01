@@ -509,10 +509,15 @@ it.
 
 ### Release secrets: 1Password Environments and the `release` environment
 
-Every workflow reads its credentials from 1Password through
-`.github/actions/op-environment`, which runs `op run --environment` with a
-service-account token and exposes the Environment's variables as masked step
-outputs. Two [1Password Environments](https://developer.1password.com/environments)
+Every workflow reads its credentials from 1Password through the shared
+[`AprilNEA/actions/op-environment`](https://github.com/AprilNEA/actions)
+action, which runs `op run --environment` with a service-account token and
+exports the Environment's variables, masked, to the job's later steps
+(`GITHUB_ENV`, so a step reads `$APPLE_ID` or `${{ env.APPLE_ID }}`). GitHub
+App tokens are then minted by its sibling `github-app-token` from
+`env.GITHUB_APP_ID` / `env.GITHUB_APP_PRIVATE_KEY`. Both are pinned by commit
+SHA with the version as a comment, like every action that handles a secret.
+Two [1Password Environments](https://developer.1password.com/environments)
 hold them, each read by a service account scoped to that Environment alone, so
 the vaults the items used to live in no longer matter:
 
@@ -534,10 +539,11 @@ federated credential is bound to the environment
 (`repo:AprilNEA/OpenLogi:environment:release`), which is why the Windows jobs
 were in it first.
 
-`op-environment` declares the union of both Environments' variables as its
-outputs; a variable the loaded Environment lacks is an empty output, and each
-job's validation step names the missing one. Add a new variable to that
-`outputs:` block and to the Environment, and nothing else.
+`op-environment` exports whatever the Environment holds, so a new variable
+needs no workflow change beyond its consumer; a variable the Environment
+lacks is simply unset, and each job's validation step names the missing one.
+Everything exported is visible to every later step of that job, third-party
+actions included, which is one more reason the two Environments stay apart.
 
 The `OpenLogi Release` Environment must contain the Apple signing values
 `xtask/README.md` describes (`APPLE_SIGNING_IDENTITY`, `APPLE_CERTIFICATE`,
@@ -845,7 +851,7 @@ Each run:
 6. Opens/updates `crowdin/i18n` only when the working tree still differs.
 
 Like the release workflow, the job reads its credentials through
-`.github/actions/op-environment`, from the `OpenLogi Automation` 1Password
+`AprilNEA/actions/op-environment`, from the `OpenLogi Automation` 1Password
 Environment (see [Release secrets](#release-secrets-1password-environments-and-the-release-environment)),
 which must contain:
 
