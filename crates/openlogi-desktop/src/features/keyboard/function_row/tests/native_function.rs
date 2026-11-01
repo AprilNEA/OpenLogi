@@ -29,7 +29,9 @@ impl Render for CalculatorInspector {
                     x_frac: 0.5,
                     y_frac: 0.1,
                     binding: "Copy".into(),
-                    binding_icon: None,
+                    binding_icon: action_icon_path(&Action::Copy),
+                    bound: true,
+                    lcd_icon: None,
                 }],
                 &self.view,
                 cx,
@@ -75,17 +77,6 @@ fn keyboard_native_row_click_removes_the_persisted_binding(cx: &mut gpui::TestAp
     });
     let commands: Vec<_> = std::iter::from_fn(|| receiver.try_recv().ok()).collect();
     assert!(matches!(commands.as_slice(), [Command::ReloadConfig(_)]));
-}
-
-/// The callout of a key without an assignment must not read "Off": the key
-/// still does what is printed on it, and "Do Nothing" is what suppresses it.
-#[test]
-fn an_unassigned_key_names_its_native_function() {
-    let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
-    rust_i18n::set_locale("en");
-
-    assert_eq!(binding_label(None).as_ref(), "Native function");
-    assert_eq!(binding_label(Some(&Action::None)).as_ref(), "Do Nothing");
 }
 
 fn keyboard_state(

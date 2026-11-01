@@ -10,6 +10,7 @@ openlogi list                 # paired devices: slot, codename, kind, online, ba
 openlogi assets sync          # pre-fetch device renders from the fastest available mirror
 openlogi diag features        # dump every HID++ feature the active device reports
 openlogi diag controls        # dump reprogrammable controls and capability flags
+openlogi diag mouse-buttons   # print the 0x8110 slot each G-series mouse button sends
 openlogi diag dpi             # read → write → read-back → restore DPI (smoke test)
 openlogi diag pointer-speed             # test 0x2205 pointer scaling and attempt to restore it
 openlogi diag smartshift                # toggle SmartShift and restore (smoke test)
@@ -21,6 +22,8 @@ Running `openlogi` with no subcommand defaults to `list`. Set
 `OPENLOGI_LOG=debug` for verbose tracing in the CLI, GUI, or agent.
 
 `openlogi diag pointer-speed` temporarily changes the selected device's pointer scaling. The command attempts to restore and verify the original scaling even when the test write fails. `--device NAME` selects a device; `--target RAW` sets the temporary 8.8 fixed-point value (`256` is 1×). By default, the command halves the current value, or doubles it when the raw value is `1`. Firmware may accept extreme values without clipping. A restoration error means the original speed could not be confirmed.
+
+`openlogi diag mouse-buttons` starts the HID++ `0x8110` button spy of a G-series mouse and prints the held slots on every press and release, with the G number G HUB shows for each slot. This is the slot order a new model's button layout needs. In onboard mode the active profile drives the buttons, and a button it leaves unbound may report nothing, so the command puts a mouse with `0x8100` in host mode for the watch, where every slot reports and each slot sends the HID button the printed mapping gives it (`0` sends nothing). It listens for `--duration SECS` (default 60), then stops the spy and restores onboard mode. Ctrl-C skips the restore; switch the mouse off and on to leave host mode. The command refuses to run while the OpenLogi agent runs, because the agent arms host mode itself. It also refuses a mouse already in host mode, or one whose mode it cannot read, because G HUB or another program owns the spy then. A mouse left in host mode by an interrupted watch, or by a program that quit without restoring it, leaves host mode only when it is switched off and on.
 
 ## Keyboard backlight
 

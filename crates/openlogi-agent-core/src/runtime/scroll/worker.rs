@@ -8,11 +8,11 @@ use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use openlogi_core::config::VerticalScrollSensitivity;
+use openlogi_core::config::{MomentumParams, VerticalScrollSensitivity};
 use openlogi_core::scroll::ScrollDelta;
 use tracing::warn;
 
-use super::{ScrollEngine, ScrollFrame, ScrollSource, WheelDelta};
+use super::{HidppWheel, ScrollEngine, ScrollFrame, ScrollSource, WheelDelta};
 use crate::runtime::{HidppSessionId, receive_command};
 
 /// OS-hook callbacks must fail open rather than wait for the worker.
@@ -100,6 +100,12 @@ enum ScrollOutputMode {
     /// whose own per-device switch asked for smoothing by diverting it.
     Eased {
         at: Instant,
+        /// The raw signed wheel notches before sensitivity scaling, which
+        /// momentum scrolling's free-spin detector measures speed in.
+        notches: f64,
+        /// The momentum-scrolling settings of the wheel's device, resolved;
+        /// `None` while momentum scrolling is off for it.
+        momentum: Option<MomentumParams>,
     },
     Direct,
 }
@@ -135,10 +141,21 @@ impl ScrollInput {
     /// recognizers need.
     fn output_under(&self, smoothing: bool) -> ScrollOutputMode {
         match (self.output, &self.source) {
-            (ScrollOutputMode::Eased { at }, _) => ScrollOutputMode::Eased { at },
+            (
+                ScrollOutputMode::Eased {
+                    at,
+                    notches,
+                    momentum,
+                },
+                _,
+            ) => ScrollOutputMode::Eased {
+                at,
+                notches,
+                momentum,
+            },
             (
                 ScrollOutputMode::Smooth { at } | ScrollOutputMode::Phased { at },
-                ScrollSource::Hidpp(_),
+                ScrollSource::Hidpp(..),
             ) => ScrollOutputMode::hidpp(smoothing, self.impulse, at)
                 .unwrap_or(ScrollOutputMode::Direct),
             (
@@ -152,7 +169,8 @@ impl ScrollInput {
 
 enum ScrollCommand {
     Input(ScrollInput),
-    CancelSource(ScrollSource),
+    /// Cancel both wheels of a HID++ capture session.
+    CancelSession(HidppSessionId),
     Wake,
 }
 
@@ -209,7 +227,7 @@ impl OverflowCancellations {
         input.generation == self.generation
             && match &input.source {
                 ScrollSource::OsHook(_) => true,
-                ScrollSource::Hidpp(session) => self
+                ScrollSource::Hidpp(session, _) => self
                     .sessions
                     .get(session.device_key())
                     .is_none_or(|cancelled_epoch| session.epoch() > *cancelled_epoch),
@@ -284,7 +302,11 @@ impl ScrollInputHandle {
         ) else {
             return false;
         };
-        self.try_enqueue(ScrollSource::Hidpp(session.clone()), impulse, output)
+        self.try_enqueue(
+            ScrollSource::Hidpp(session.clone(), HidppWheel::Thumb),
+            impulse,
+            output,
+        )
     }
 
     /// Queue one diverted main-wheel impulse from an active HID++ session.
@@ -292,7 +314,8 @@ impl ScrollInputHandle {
     /// Always eased, whatever the app-wide smoothing setting says: the
     /// device's own smooth-wheel switch is what diverted the wheel. The
     /// vertical distance is scaled by the main-wheel sensitivity, as the hook
-    /// scales a native wheel.
+    /// scales a native wheel. `momentum` is the device's resolved
+    /// momentum-scrolling settings, `None` while it is off for the device.
     ///
     /// # Errors
     ///
@@ -305,6 +328,7 @@ impl ScrollInputHandle {
         &self,
         session: &HidppSessionId,
         delta: ScrollDelta,
+        momentum: Option<MomentumParams>,
     ) -> Result<(), ScrollDelta> {
         let Ok(impulse) = WheelDelta::try_from(delta) else {
             return Err(delta);
@@ -315,9 +339,13 @@ impl ScrollInputHandle {
         };
         let queued = self.accepting.load(Ordering::Acquire)
             && self.try_enqueue(
-                ScrollSource::Hidpp(session.clone()),
+                ScrollSource::Hidpp(session.clone(), HidppWheel::Main),
                 scaled,
-                ScrollOutputMode::Eased { at: Instant::now() },
+                ScrollOutputMode::Eased {
+                    at: Instant::now(),
+                    notches: impulse.y,
+                    momentum,
+                },
             );
         if queued { Ok(()) } else { Err(scaled.into()) }
     }
@@ -355,10 +383,9 @@ impl ScrollInputHandle {
     /// Cancel output belonging to one HID++ capture-session incarnation.
     pub(crate) fn cancel_hidpp_session(&self, session: &HidppSessionId) {
         let generation = self.generation.load(Ordering::Acquire);
-        let source = ScrollSource::Hidpp(session.clone());
         match self
             .commands
-            .try_send(ScrollCommand::CancelSource(source.clone()))
+            .try_send(ScrollCommand::CancelSession(session.clone()))
         {
             Ok(()) | Err(mpsc::TrySendError::Disconnected(_)) => {}
             Err(mpsc::TrySendError::Full(_)) => {
@@ -513,7 +540,7 @@ fn run_worker(
                         engine.cancel_all(emit_smooth);
                     }
                     if cancellations.cancel(&session, cancelled_generation) {
-                        engine.cancel_source(&ScrollSource::Hidpp(session), emit_smooth);
+                        engine.cancel_session(&session, emit_smooth);
                     }
                 }
                 ScrollControl::Shutdown(request) => {
@@ -545,8 +572,22 @@ fn run_worker(
         match command {
             Ok(ScrollCommand::Input(input)) if cancellations.accepts(&input) => {
                 match input.output_under(smoothing) {
-                    ScrollOutputMode::Smooth { at } | ScrollOutputMode::Eased { at } => {
+                    ScrollOutputMode::Smooth { at } => {
                         engine.impulse(input.source, input.impulse, at, emit_smooth);
+                    }
+                    ScrollOutputMode::Eased {
+                        at,
+                        notches,
+                        momentum,
+                    } => {
+                        engine.wheel_impulse(
+                            input.source,
+                            input.impulse,
+                            notches,
+                            momentum,
+                            at,
+                            emit_smooth,
+                        );
                     }
                     ScrollOutputMode::Phased { at } => {
                         engine.phased_impulse(input.source, input.impulse, at, emit_smooth);
@@ -557,8 +598,8 @@ fn run_worker(
                     }
                 }
             }
-            Ok(ScrollCommand::CancelSource(source)) => {
-                engine.cancel_source(&source, emit_smooth);
+            Ok(ScrollCommand::CancelSession(session)) => {
+                engine.cancel_session(&session, emit_smooth);
             }
             Ok(ScrollCommand::Input(_) | ScrollCommand::Wake) => {}
             Err(mpsc::RecvTimeoutError::Timeout) => {
@@ -695,7 +736,7 @@ mod tests {
             let (input, receiver, _controls) = standalone_input(1, preferences(smoothing, 7));
             let session = HidppSessionId::with_epoch("mouse-a", 7);
             assert_eq!(
-                input.try_hidpp_wheel_scroll(&session, ScrollDelta::wheel_ticks(0.0, 2.0)),
+                input.try_hidpp_wheel_scroll(&session, ScrollDelta::wheel_ticks(0.0, 2.0), None),
                 Ok(())
             );
             let queued = queued_input(&receiver);
@@ -712,6 +753,30 @@ mod tests {
         }
     }
 
+    /// A diverted main wheel's input carries its device's momentum settings
+    /// to the worker, so each mouse glides by its own.
+    #[test]
+    fn a_diverted_main_wheel_carries_its_devices_momentum_settings() {
+        let (input, receiver, _controls) = standalone_input(1, preferences(true, 14));
+        let session = HidppSessionId::with_epoch("mouse-a", 7);
+        let on = openlogi_core::config::MomentumScrolling {
+            enabled: true,
+            ..Default::default()
+        }
+        .resolve();
+        assert!(on.is_some(), "sanity: an enabled setting resolves");
+        for momentum in [on, None] {
+            input
+                .try_hidpp_wheel_scroll(&session, ScrollDelta::wheel_ticks(0.0, 1.0), momentum)
+                .expect("the main wheel's tick is queued");
+            let queued = queued_input(&receiver);
+            assert!(matches!(
+                queued.output_under(true),
+                ScrollOutputMode::Eased { momentum: carried, .. } if carried == momentum
+            ));
+        }
+    }
+
     /// What the runtime cannot ease comes back as given; what it cannot
     /// queue comes back scaled, so the caller's direct injection scrolls as
     /// far as the eased output would have.
@@ -720,22 +785,28 @@ mod tests {
         let (input, receiver, _controls) = standalone_input(1, preferences(true, 7));
         let session = HidppSessionId::with_epoch("mouse-a", 7);
         let pixels = ScrollDelta::pixels(0.0, 1.0);
-        assert_eq!(input.try_hidpp_wheel_scroll(&session, pixels), Err(pixels));
+        assert_eq!(
+            input.try_hidpp_wheel_scroll(&session, pixels, None),
+            Err(pixels)
+        );
         let zero = ScrollDelta::wheel_ticks(0.0, 0.0);
-        assert_eq!(input.try_hidpp_wheel_scroll(&session, zero), Err(zero));
+        assert_eq!(
+            input.try_hidpp_wheel_scroll(&session, zero, None),
+            Err(zero)
+        );
 
         let tick = ScrollDelta::wheel_ticks(0.0, 2.0);
         let scaled = ScrollDelta::wheel_ticks(0.0, 1.0);
-        assert_eq!(input.try_hidpp_wheel_scroll(&session, tick), Ok(()));
+        assert_eq!(input.try_hidpp_wheel_scroll(&session, tick, None), Ok(()));
         assert_eq!(
-            input.try_hidpp_wheel_scroll(&session, tick),
+            input.try_hidpp_wheel_scroll(&session, tick, None),
             Err(scaled),
             "a full queue hands back the scaled distance"
         );
         queued_input(&receiver);
         input.accepting.store(false, Ordering::Release);
         assert_eq!(
-            input.try_hidpp_wheel_scroll(&session, tick),
+            input.try_hidpp_wheel_scroll(&session, tick, None),
             Err(scaled),
             "a stopped runtime hands back the scaled distance"
         );
@@ -1006,7 +1077,8 @@ mod tests {
     #[test]
     fn stale_input_is_reclassified_as_if_submitted_now() {
         let at = Instant::now();
-        let hidpp = ScrollSource::Hidpp(HidppSessionId::with_epoch("mouse-a", 1));
+        let hidpp =
+            ScrollSource::Hidpp(HidppSessionId::with_epoch("mouse-a", 1), HidppWheel::Thumb);
         let hook = ScrollSource::current_hook();
         let input = |source: &ScrollSource, x, y, output| ScrollInput {
             generation: 0,
@@ -1109,14 +1181,35 @@ mod tests {
         assert!(matches!(queued.output, ScrollOutputMode::Smooth { .. }));
     }
 
+    /// The thumb wheel and the diverted main wheel of one session are
+    /// separate sources, so one's momentum and easing never reach the
+    /// other's motion — and both belong to the session its cancellation
+    /// ends.
+    #[test]
+    fn the_main_and_thumb_wheels_are_separate_sources_of_one_session() {
+        let (input, commands, _controls) = standalone_input(2, preferences(true, 14));
+        let session = HidppSessionId::with_epoch("mouse-a", 7);
+        assert!(input.try_hidpp_scroll(&session, ScrollDelta::wheel_ticks(1.0, 0.0)));
+        input
+            .try_hidpp_wheel_scroll(&session, ScrollDelta::wheel_ticks(0.0, 1.0), None)
+            .expect("the main wheel's tick is queued");
+        let source = |command| match command {
+            Ok(ScrollCommand::Input(input)) => input.source,
+            _ => panic!("expected queued input"),
+        };
+        let thumb = source(commands.recv());
+        let main = source(commands.recv());
+        assert_ne!(thumb, main);
+        assert!(thumb.in_session(&session) && main.in_session(&session));
+    }
+
     #[test]
     fn hidpp_cancellation_targets_its_session() {
         let (input, commands, _controls) = standalone_input(1, preferences(true, 14));
         let session = HidppSessionId::with_epoch("mouse-a", 7);
         input.cancel_hidpp_session(&session);
 
-        let ScrollCommand::CancelSource(ScrollSource::Hidpp(cancelled)) =
-            commands.recv().expect("queued cancellation")
+        let ScrollCommand::CancelSession(cancelled) = commands.recv().expect("queued cancellation")
         else {
             panic!("expected HID++ source cancellation");
         };
@@ -1194,7 +1287,7 @@ mod tests {
         let successor = HidppSessionId::with_epoch("mouse-a", 8);
         let input = |session: &HidppSessionId, generation| ScrollInput {
             generation,
-            source: ScrollSource::Hidpp(session.clone()),
+            source: ScrollSource::Hidpp(session.clone(), HidppWheel::Thumb),
             impulse: WheelDelta { x: 0.0, y: 1.0 },
             output: ScrollOutputMode::Direct,
         };
@@ -1249,7 +1342,7 @@ mod tests {
         commands
             .send(ScrollCommand::Input(ScrollInput {
                 generation: 1,
-                source: ScrollSource::Hidpp(session.clone()),
+                source: ScrollSource::Hidpp(session.clone(), HidppWheel::Thumb),
                 impulse: WheelDelta { x: 0.0, y: 1.0 },
                 output: ScrollOutputMode::Smooth { at: Instant::now() },
             }))
@@ -1303,7 +1396,7 @@ mod tests {
         let direct = |session: &HidppSessionId, generation, y| {
             Ok(ScrollCommand::Input(ScrollInput {
                 generation,
-                source: ScrollSource::Hidpp(session.clone()),
+                source: ScrollSource::Hidpp(session.clone(), HidppWheel::Thumb),
                 impulse: WheelDelta { x: 0.0, y },
                 output: ScrollOutputMode::Direct,
             }))

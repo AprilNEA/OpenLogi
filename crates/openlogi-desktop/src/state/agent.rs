@@ -152,6 +152,27 @@ impl AppState {
             _ => None,
         }
     }
+    /// The IPC client lost its connection to the agent. A window showing a
+    /// live agent keeps its last status but marks it as reconnecting; any
+    /// other link has no live state to mark.
+    pub fn agent_link_lost(&mut self) -> StateEvents {
+        match &self.agent.link {
+            AgentLink::Ready(status) => {
+                let status = status.clone();
+                self.set_agent_link(AgentLink::Reconnecting(status))
+            }
+            _ => StateEvents::none(),
+        }
+    }
+    /// Ask the IPC client to try the agent now — connecting, and launching it
+    /// if needed — and show the attempt until a snapshot or a fresh
+    /// unreachable verdict answers it.
+    pub fn retry_agent_connection(&mut self) -> StateEvents {
+        if !self.send_ipc(crate::services::ipc::RetryConnection) {
+            return StateEvents::none();
+        }
+        self.set_agent_link(AgentLink::Unreachable { retrying: true })
+    }
     /// Replace the link, reporting it only when it actually changed — most
     /// observed snapshots leave the link as it was, and those must not refresh
     /// the window.

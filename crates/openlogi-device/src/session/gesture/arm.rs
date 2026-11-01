@@ -12,9 +12,9 @@ use hidpp::{channel::HidppChannel, device::Device};
 use openlogi_core::binding::ButtonId;
 use tracing::{debug, info, warn};
 
+use super::CaptureSpec;
 use super::main_wheel::{self, ArmedMainWheel, MainWheelDivert};
 use super::spy::{self, ArmedOnboard};
-use super::{CaptureSpec, CapturedInput};
 use crate::reprog_controls::{self, ReprogControlsV4};
 use crate::session::capture::{ReportingChangeStream, open_device, subscribe_reporting_changes};
 use crate::session::capture_restore::{
@@ -91,14 +91,6 @@ impl ArmedThumbwheel {
 }
 
 impl ArmedControls {
-    /// Build the one-time polarity fact learned while arming the thumb wheel.
-    pub(super) fn thumbwheel_direction(&self) -> Option<CapturedInput> {
-        let positive_is_forward = self.thumb.as_ref()?.info.positive_is_forward();
-        Some(CapturedInput::ThumbwheelDirection {
-            positive_is_forward,
-        })
-    }
-
     /// Every button whose presses this session now reports, each once: the
     /// plain, wheel-hold, and raw-XY button diversions arming actually wrote.
     /// A requested control the device does not expose, or cannot divert, is
@@ -147,7 +139,7 @@ impl ArmedControls {
             thumb.as_ref().map(|thumb| thumb.restore),
             main_wheel
                 .as_ref()
-                .map(|wheel| HiResWheelRestore::new(wheel.feature_index)),
+                .map(|wheel| HiResWheelRestore::new(wheel.feature_index, wheel.restore_resolution)),
             onboard.as_ref().and_then(ArmedOnboard::restore),
         )
     }
@@ -409,7 +401,7 @@ async fn arm_main_wheel(
             // A refused write may still have moved the target, and an echo
             // mismatch says it did something else: hand the wheel back.
             warn!(?error, "main wheel refused the divert — handing it back");
-            main_wheel::undivert(&wheel.feature).await?;
+            main_wheel::undivert(&wheel.feature, wheel.restore_resolution).await?;
             armed.main_wheel = None;
             Ok(())
         }

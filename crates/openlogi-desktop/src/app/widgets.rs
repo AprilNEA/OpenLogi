@@ -3,10 +3,11 @@
 //! screens.
 
 use gpui::{
-    Context, IntoElement, ParentElement, SharedString, Styled, div, prelude::FluentBuilder as _,
+    App, Context, InteractiveElement as _, IntoElement, ParentElement, RenderOnce, SharedString,
+    Styled, Window, div, prelude::FluentBuilder as _,
 };
 use gpui_component::{
-    IconName, Sizable as _,
+    Disableable as _, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
 };
@@ -38,18 +39,37 @@ pub(super) fn settings_button() -> impl IntoElement {
         .icon(IconName::Settings)
         .label(tr!("app.settings"))
         .tooltip(tr!("app.settings"))
+        .debug_selector(|| "home-settings".into())
         .on_click(|_, _, cx| crate::windows::settings::open(cx))
 }
 
 /// Primary action that opens the pairing window. The empty state carries its
 /// own equivalent CTA, so this never floats alone in an empty header.
 pub(super) fn add_device_button() -> impl IntoElement {
-    Button::new("header-add-device")
-        .primary()
-        .icon(IconName::Plus)
-        .label(tr!("pairing.add_device"))
-        .tooltip(tr!("pairing.add_device"))
-        .on_click(|_, _, cx| crate::windows::add_device::open(cx))
+    AddDeviceButton
+}
+
+/// [`add_device_button`]: pairing runs in the agent, so without a live
+/// connection the button is disabled and its tooltip says why.
+#[derive(IntoElement)]
+struct AddDeviceButton;
+
+impl RenderOnce for AddDeviceButton {
+    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        let connected = AppState::try_read(cx).is_some_and(|state| state.agent_status().is_some());
+        Button::new("header-add-device")
+            .primary()
+            .icon(IconName::Plus)
+            .label(tr!("pairing.add_device"))
+            .disabled(!connected)
+            .tooltip(if connected {
+                tr!("pairing.add_device")
+            } else {
+                tr!("pairing.pairing_agent_not_ready")
+            })
+            .debug_selector(|| "header-add-device".into())
+            .on_click(|_, _, cx| crate::windows::add_device::open(cx))
+    }
 }
 
 pub(super) fn main_window_title(show_device: bool, cx: &Context<AppView>) -> SharedString {

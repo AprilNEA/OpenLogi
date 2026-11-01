@@ -6,6 +6,8 @@ use xshell::{Shell, cmd};
 
 use crate::support::fs::{absolutize, ensure_command, ensure_file, repo_root};
 
+mod payload;
+
 #[derive(Parser)]
 pub(crate) struct Args {
     /// Output directory for .deb, .rpm, and .pkg.tar.zst packages (default: target/release).
@@ -63,15 +65,46 @@ pub(crate) fn run(args: &Args) -> Result<()> {
     };
 
     let version = env!("CARGO_PKG_VERSION");
+    fs_err::create_dir_all(&output)?;
+    // nfpm names each package itself. Writing it alone into a fresh directory
+    // makes the file it wrote the only one there, whatever an earlier run left
+    // in `output`, and keeps a half-rewritten package out of `output`.
+    let staging = tempfile::tempdir_in(&output)?;
     for packager in ["deb", "rpm", "archlinux"] {
         println!("==> nfpm {packager} ({pkg_arch})");
+        let staged = staging.path().join(packager);
+        fs_err::create_dir(&staged)?;
         cmd!(
             sh,
-            "nfpm package --packager {packager} --config {config} --target {output}"
+            "nfpm package --packager {packager} --config {config} --target {staged}"
         )
         .env("VERSION", nfpm_version(packager, version))
         .env("PKG_ARCH", pkg_arch)
         .run()?;
+        let written = fs_err::read_dir(&staged)?
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect::<std::io::Result<Vec<_>>>()?;
+        let [package] = written.as_slice() else {
+            bail!(
+                "expected nfpm to write one {packager} package, found {}",
+                written.len()
+            );
+        };
+        match packager {
+            "deb" => {
+                println!("==> recompress {} (xz)", package.display());
+                payload::recompress_deb(package)?;
+            }
+            "archlinux" => {
+                println!("==> recompress {} (zstd, long window)", package.display());
+                payload::recompress_arch(package)?;
+            }
+            _ => {}
+        }
+        let name = package
+            .file_name()
+            .context("nfpm wrote a package without a file name")?;
+        fs_err::rename(package, output.join(name))?;
     }
     check_arch_pkgver(&sh, &output, &nfpm_version("archlinux", version))?;
 

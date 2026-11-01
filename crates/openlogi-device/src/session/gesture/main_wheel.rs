@@ -32,6 +32,11 @@ pub struct MainWheelDivert {
     /// (it has no effect on diverted reports); `None` keeps the device's
     /// current flag. Ignored on a wheel without the invert capability.
     pub inverted: Option<bool>,
+    /// Report in high resolution while diverted, so the agent sees fractions
+    /// of a notch. Handing the wheel back restores the resolution native
+    /// reporting gets: `resolution`, else the device's own. Ignored on a
+    /// wheel without a high-resolution multiplier.
+    pub high_resolution: bool,
 }
 
 /// The diverted main wheel of an armed session.
@@ -43,6 +48,9 @@ pub(super) struct ArmedMainWheel {
     divert: MainWheelDivert,
     /// Units a high-resolution report carries per notch.
     pub(super) per_notch: NonZeroU8,
+    /// The resolution to restore when the wheel is handed back, when the
+    /// divert switches it to high for its own reports.
+    pub(super) restore_resolution: Option<WheelResolution>,
 }
 
 impl ArmedMainWheel {
@@ -59,11 +67,22 @@ impl ArmedMainWheel {
         let divert = MainWheelDivert {
             resolution: requested.resolution,
             inverted: requested.inverted.filter(|_| capabilities.has_invert),
+            high_resolution: requested.high_resolution && capabilities.multiplier > 1,
+        };
+        let restore_resolution = if divert.high_resolution {
+            let native = match divert.resolution {
+                Some(resolution) => hidpp_resolution(resolution),
+                None => native_resolution(feature.get_wheel_mode().await?),
+            };
+            Some(native)
+        } else {
+            None
         };
         Ok(Self {
             feature,
             feature_index,
             divert,
+            restore_resolution,
             // A wheel reporting no multiplier cannot report in high
             // resolution; one unit per notch keeps its reports exact anyway.
             per_notch: NonZeroU8::new(capabilities.multiplier).unwrap_or(NonZeroU8::MIN),
@@ -93,32 +112,58 @@ pub(super) async fn divert(
 }
 
 /// Hand `feature`'s movement reports back to native HID: read-modify-write the
-/// target only, so the resolution and inversion arming left stay in place.
-/// A wheel already reporting natively is left untouched.
-pub(crate) async fn undivert(feature: &HiResWheelFeature) -> Result<(), Hidpp20Error> {
+/// target, and the resolution when the divert switched it (`resolution`), so
+/// the inversion arming left stays in place. A wheel already reporting
+/// natively at that resolution is left untouched.
+pub(crate) async fn undivert(
+    feature: &HiResWheelFeature,
+    resolution: Option<WheelResolution>,
+) -> Result<(), Hidpp20Error> {
     let current = feature.get_wheel_mode().await?;
-    if current.target == WheelEventTarget::Native {
+    let resolution = resolution.unwrap_or(current.resolution);
+    if current.target == WheelEventTarget::Native && current.resolution == resolution {
         return Ok(());
     }
     let mut request = current;
     request.target = WheelEventTarget::Native;
+    request.resolution = resolution;
     let echo = feature.set_wheel_mode(request).await?;
     applied(echo, request)
+}
+
+/// The resolution native reporting had before this session, read from the
+/// wheel's `current` mode. A wheel found already diverted was left so by an
+/// agent that stopped without handing it back, at whatever resolution that
+/// divert chose, so its current resolution is not the native one. The
+/// hand-back then assumes low resolution, the mode a wheel scrolls in without
+/// host software, rather than keep the leftover.
+fn native_resolution(current: WheelMode) -> WheelResolution {
+    if current.target == WheelEventTarget::Diverted {
+        WheelResolution::Low
+    } else {
+        current.resolution
+    }
 }
 
 fn diverted_mode(current: WheelMode, divert: MainWheelDivert) -> WheelMode {
     let mut mode = current;
     mode.target = WheelEventTarget::Diverted;
-    if let Some(resolution) = divert.resolution {
-        mode.resolution = match resolution {
-            ScrollResolution::Low => WheelResolution::Low,
-            ScrollResolution::High => WheelResolution::High,
-        };
+    if divert.high_resolution {
+        mode.resolution = WheelResolution::High;
+    } else if let Some(resolution) = divert.resolution {
+        mode.resolution = hidpp_resolution(resolution);
     }
     if let Some(inverted) = divert.inverted {
         mode.inverted = inverted;
     }
     mode
+}
+
+fn hidpp_resolution(resolution: ScrollResolution) -> WheelResolution {
+    match resolution {
+        ScrollResolution::Low => WheelResolution::Low,
+        ScrollResolution::High => WheelResolution::High,
+    }
 }
 
 /// A mode write took effect only if the echo matches the request in the

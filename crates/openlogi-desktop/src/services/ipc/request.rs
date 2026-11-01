@@ -823,6 +823,23 @@ impl Request for RequestAccessibilityPrompt {
     fn deliver(self, _: Result<Self::Answer, Unavailable>, _: &UpdateSender) {}
 }
 
+/// Try the agent again now, at the user's request, instead of at the loop's
+/// own pace: connect at once and, if nothing answers, launch it without
+/// waiting out the spawn reflex. The observe loop handles it before dispatch
+/// (it starts a fresh outage); over a live connection there is nothing to
+/// retry, so running it asks the agent nothing.
+pub struct RetryConnection;
+
+impl Request for RetryConnection {
+    type Answer = ();
+
+    fn call(&self, _: &AgentClient) -> impl Future<Output = Result<Self::Answer, RpcError>> + Send {
+        std::future::ready(Ok(()))
+    }
+
+    fn deliver(self, _: Result<Self::Answer, Unavailable>, _: &UpdateSender) {}
+}
+
 /// An accepted pairing command needs no reply — its progress shows up in the
 /// observed state. A *rejected* one never becomes a session, and neither does
 /// one the agent never received, so the refusal is reported here or the
@@ -1010,6 +1027,7 @@ commands! {
     ReadOnboard,
     ReloadConfig,
     RequestAccessibilityPrompt,
+    RetryConnection,
     StartPairing,
     PairDevice,
     CancelPairing,

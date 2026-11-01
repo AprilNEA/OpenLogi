@@ -279,15 +279,17 @@ fn an_identical_re_ask_may_adopt_the_outstanding_reply_when_it_says_so() {
         handle.send_incoming(retry_reply).await;
         wait_for_event_count(&events, 2).await;
         assert_eq!(events.lock().unwrap()[1], (retry_reply, false));
+        // The reader discards the reply before it notifies listeners, so the
+        // header is already free here, well inside `STALE_REPLY_GRACE`.
+        assert_eq!(
+            stale_len(&channel),
+            0,
+            "the discarded reply kept the header"
+        );
         let other_reply = short_msg(0x13);
         handle.queue_response(other_reply);
-        for _ in 0..20 {
-            if handle.written_reports().len() == 3 {
-                break;
-            }
-            assert!(futures::poll!(other.as_mut()).is_pending());
-            futures_timer::Delay::new(Duration::from_millis(5)).await;
-        }
+        // Not polled for `Pending` first: one poll writes the request, and the
+        // reader can deliver the queued reply before that poll returns.
         assert_eq!(other.await.unwrap(), other_reply);
         assert_eq!(handle.written_reports().len(), 3);
         assert_pending_empty(&channel);

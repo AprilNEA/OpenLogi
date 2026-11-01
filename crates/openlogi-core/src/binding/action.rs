@@ -227,6 +227,13 @@ pub enum Action {
     DpiShift,
     /// G-Shift bindings for the other buttons while held.
     GShift,
+    /// Move the pressing keypad to its previous binding page, wrapping from
+    /// page 1 to the last. The agent owns the keypad's current page; on any
+    /// other device this does nothing. Appended — variant order is wire format.
+    PreviousKeypadPage,
+    /// Move the pressing keypad to its next binding page, wrapping from the
+    /// last page to page 1. Appended — variant order is wire format.
+    NextKeypadPage,
 }
 
 /// Which of a held chord's keys stay down for the lifetime of the press.
@@ -326,6 +333,8 @@ macro_rules! for_each_unit_action {
             CaptureRegion "Capture Region" "actions.capture_region" System Camera,
             Sleep "Sleep" "actions.sleep" System Monitor,
             ShowActionsRing "Actions Ring" "action_ring.actions_ring" System Grid,
+            PreviousKeypadPage "Previous Keypad Page" "actions.previous_keypad_page" System PreviousTab,
+            NextKeypadPage "Next Keypad Page" "actions.next_keypad_page" System NextTab,
             // Media
             PlayPause "Play / Pause" "actions.play_pause" Media Play,
             NextTrack "Next Track" "actions.next_track" Media NextTrack,

@@ -2,7 +2,8 @@
 
 use gpui::{
     Entity, InteractiveElement, IntoElement, ParentElement, Role, ScrollHandle,
-    StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px, rgb, svg,
+    StatefulInteractiveElement as _, Styled, div, linear_color_stop, linear_gradient,
+    prelude::FluentBuilder as _, px, rgb, svg,
 };
 use gpui_component::{
     Icon, IconName, Selectable as _, button::Button, h_flex, input::InputState,
@@ -20,6 +21,10 @@ use crate::state::AppState;
 use crate::ui::action::localized_action_label;
 use crate::ui::components::{MenuRow, control_input};
 use crate::ui::theme::{self, Palette, Typography as _};
+
+/// Height of the fade over the library's bottom edge. The library ends with
+/// as much padding, so its last row can scroll clear of the fade.
+const LIBRARY_FADE_H: f32 = 24.;
 
 /// The three single-field Power User inputs the ring's slot editor exposes.
 /// [`PowerUserKind::Workflow`] needs a multi-step list editor this panel
@@ -45,6 +50,7 @@ pub(super) fn action_library(
         .map_or_else(|| tr!("action_ring.empty_slot"), localized_action_label);
 
     v_flex()
+        .debug_selector(|| "ring-slot-editor".into())
         .flex_1()
         .min_w(px(280.0))
         .max_w(px(320.0))
@@ -65,11 +71,7 @@ pub(super) fn action_library(
                     h_flex()
                         .items_center()
                         .justify_between()
-                        .child(
-                            div()
-                                .text_subheading()
-                                .child(tr!("action_ring.actions_ring")),
-                        )
+                        .child(div().text_subheading().child(slot_title(slot)))
                         .child(
                             Button::new("ring-clear-slot")
                                 .compact()
@@ -87,6 +89,7 @@ pub(super) fn action_library(
         .child(action_rows_scroller(
             v_flex()
                 .p_1p5()
+                .pb(px(LIBRARY_FADE_H))
                 .when_some(current_action.as_ref(), |library, action| {
                     library.child(icon_editor(
                         slot,
@@ -95,7 +98,6 @@ pub(super) fn action_library(
                         pal,
                     ))
                 })
-                .child(shortcut_editor(slot, shortcut_input, pal))
                 .child(path_editor(slot, application_input, pal))
                 .child(text_action_editor(
                     slot,
@@ -123,10 +125,40 @@ pub(super) fn action_library(
                 ))
                 .children(action_sections(slot, current_action.as_ref(), pal)),
             library_scroll,
+            pal,
         ))
+        // Pinned below the scrolling library so the field and its Add button
+        // are never cut off by the card's height cap.
+        .child(
+            div()
+                .flex_none()
+                .border_t_1()
+                .border_color(pal.border)
+                .px_1p5()
+                .pb_2()
+                .child(shortcut_editor(slot, shortcut_input, pal)),
+        )
 }
 
-fn action_rows_scroller(content: impl IntoElement, scroll: &ScrollHandle) -> impl IntoElement {
+/// The card title: the ring position being edited.
+fn slot_title(slot: ActionRingSlot) -> gpui::SharedString {
+    match slot {
+        ActionRingSlot::Top => tr!("action_ring.top_slot"),
+        ActionRingSlot::TopRight => tr!("action_ring.top_right_slot"),
+        ActionRingSlot::Right => tr!("action_ring.right_slot"),
+        ActionRingSlot::BottomRight => tr!("action_ring.bottom_right_slot"),
+        ActionRingSlot::Bottom => tr!("action_ring.bottom_slot"),
+        ActionRingSlot::BottomLeft => tr!("action_ring.bottom_left_slot"),
+        ActionRingSlot::Left => tr!("action_ring.left_slot"),
+        ActionRingSlot::TopLeft => tr!("action_ring.top_left_slot"),
+    }
+}
+
+fn action_rows_scroller(
+    content: impl IntoElement,
+    scroll: &ScrollHandle,
+    pal: Palette,
+) -> impl IntoElement {
     div()
         .relative()
         .flex_1()
@@ -139,6 +171,21 @@ fn action_rows_scroller(content: impl IntoElement, scroll: &ScrollHandle) -> imp
                 .overflow_y_scroll()
                 .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
                 .child(content),
+        )
+        // Fade the cut-off bottom edge into the card so a partly visible row
+        // reads as more content below rather than a clipped control.
+        .child(
+            div()
+                .absolute()
+                .bottom_0()
+                .left_0()
+                .right_0()
+                .h(px(LIBRARY_FADE_H))
+                .bg(linear_gradient(
+                    180.,
+                    linear_color_stop(pal.panel.opacity(0.), 0.),
+                    linear_color_stop(pal.panel, 1.),
+                )),
         )
         .vertical_scrollbar(scroll)
 }
@@ -203,6 +250,7 @@ fn shortcut_editor(
 ) -> impl IntoElement {
     let submit_input = input.clone();
     v_flex()
+        .debug_selector(|| "ring-custom-shortcut".into())
         .gap_1()
         .child(editor_section(tr!("action_ring.custom_shortcut"), pal))
         .child(
@@ -397,11 +445,35 @@ fn commit_icon(slot: ActionRingSlot, icon: Option<ActionRingIcon>, cx: &mut gpui
 #[cfg(test)]
 mod tests {
     use gpui::{
-        Context, Render, ScrollDelta, ScrollHandle, ScrollWheelEvent, TestAppContext, Window,
-        point, px,
+        AppContext as _, Context, Render, ScrollDelta, ScrollHandle, ScrollWheelEvent,
+        TestAppContext, Window, point, px,
     };
 
     use super::*;
+
+    /// The slot editor as the panel lays it out, editing a slot that holds an
+    /// action so the icon grid is shown too.
+    struct SlotEditorView {
+        application: Entity<InputState>,
+        shortcut: Entity<InputState>,
+        power_user: PowerUserInputs,
+        library_scroll: ScrollHandle,
+    }
+
+    impl Render for SlotEditorView {
+        fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let cut = RingAction::new(Action::Cut).expect("Cut is a ring action");
+            h_flex().w(px(640.0)).items_start().child(action_library(
+                ActionRingSlot::Top,
+                Some(&ActionRingEntry::new(cut)),
+                &self.application,
+                &self.shortcut,
+                &self.power_user,
+                &self.library_scroll,
+                theme::palette(cx),
+            ))
+        }
+    }
 
     struct NestedScrollView {
         page_scroll: ScrollHandle,
@@ -409,7 +481,7 @@ mod tests {
     }
 
     impl Render for NestedScrollView {
-        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             div()
                 .id("page-scroll")
                 .w(px(160.0))
@@ -426,6 +498,7 @@ mod tests {
                                 .child(action_rows_scroller(
                                     div().h(px(240.0)),
                                     &self.sidebar_scroll,
+                                    theme::palette(cx),
                                 )),
                         )
                         .child(div().h(px(200.0))),
@@ -503,6 +576,50 @@ mod tests {
             .debug_bounds("scrollbar-overlay")
             .expect("scrollbar overlay should exist");
         assert_eq!(overlay_after_page_scroll.origin, point(px(0.0), px(-15.0)));
+    }
+
+    #[gpui::test]
+    fn custom_shortcut_stays_inside_the_slot_editor(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let library_scroll = ScrollHandle::new();
+        let (_, cx) = cx.add_window_view({
+            let library_scroll = library_scroll.clone();
+            move |window, cx| {
+                let mut input = || cx.new(|cx| InputState::new(window, cx));
+                SlotEditorView {
+                    application: input(),
+                    shortcut: input(),
+                    power_user: PowerUserInputs {
+                        type_text: input(),
+                        applescript: input(),
+                        shell_command: input(),
+                    },
+                    library_scroll,
+                }
+            }
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        let card = cx
+            .debug_bounds("ring-slot-editor")
+            .expect("the slot editor renders");
+        let shortcut = cx
+            .debug_bounds("ring-custom-shortcut")
+            .expect("the custom shortcut editor renders");
+        assert!(
+            shortcut.top() >= card.top() && shortcut.bottom() <= card.bottom(),
+            "custom shortcut {shortcut:?} is cut off by the slot editor {card:?}"
+        );
+
+        // Scrolling the library leaves the shortcut field where it was.
+        cx.simulate_event(ScrollWheelEvent {
+            position: card.center(),
+            delta: ScrollDelta::Pixels(point(px(0.0), px(-200.0))),
+            ..Default::default()
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(library_scroll.offset().y < px(0.0), "the library scrolls");
+        assert_eq!(cx.debug_bounds("ring-custom-shortcut"), Some(shortcut));
     }
 
     #[test]

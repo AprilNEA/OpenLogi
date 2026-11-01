@@ -99,3 +99,36 @@ fn with_no_device_selected_nothing_is_saved() {
     assert!(drain(&mut receiver).is_empty());
     assert!(state.config.devices.is_empty());
 }
+
+/// The glide only works on a smoothed wheel, so its dialogs turn both on or
+/// both off — in one save and one reload. Both are this mouse's own: the
+/// app-wide default stays as it is, and the override goes away once the
+/// mouse matches it again.
+#[test]
+fn the_glide_and_the_smooth_wheel_turn_on_and_off_together() {
+    let (mut state, mut receiver) = mouse_state(true);
+    let _ = state.commit_glide_with_smooth_wheel(true);
+    assert!(state.current_smooth_wheel());
+    assert!(state.current_momentum_scrolling().enabled);
+    assert!(state.current_has_momentum_override());
+    assert!(!state.app_settings().momentum_scrolling.enabled);
+    assert!(only_a_reload(&drain(&mut receiver)));
+
+    let _ = state.commit_glide_with_smooth_wheel(true);
+    assert!(drain(&mut receiver).is_empty(), "nothing left to change");
+
+    let _ = state.commit_glide_with_smooth_wheel(false);
+    assert!(!state.current_smooth_wheel());
+    assert!(!state.current_momentum_scrolling().enabled);
+    assert!(!state.current_has_momentum_override());
+    assert!(only_a_reload(&drain(&mut receiver)));
+}
+
+#[test]
+fn the_glide_is_not_turned_on_with_a_wheel_this_link_cannot_smooth() {
+    let (mut state, mut receiver) = mouse_state(false);
+    let _ = state.commit_glide_with_smooth_wheel(true);
+    assert!(!state.current_smooth_wheel());
+    assert!(!state.current_momentum_scrolling().enabled);
+    assert!(drain(&mut receiver).is_empty());
+}

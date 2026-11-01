@@ -33,8 +33,9 @@ pub(super) enum Link {
 /// Why there is no connection. The two differ in who else might act.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Outage {
-    /// No connection has ever existed — down since process start. Nobody else
-    /// is coming, so the spawn reflex fires at once.
+    /// No connection has ever existed — down since process start — or the
+    /// user asked to try again. Nobody else is coming, so the spawn reflex
+    /// fires at once.
     Cold,
     /// An established connection dropped. Launchd's respawn, the agent's
     /// self-exec, and the tray-Quit deep link all announce themselves within
@@ -56,10 +57,11 @@ pub(super) struct Down {
     told: Option<Notice>,
 }
 
-/// What the GUI can be told about an outage; see [`GuiUpdate::Unreachable`]
-/// and [`GuiUpdate::OutdatedGui`].
+/// What the GUI can be told about an outage; see [`GuiUpdate::Reconnecting`],
+/// [`GuiUpdate::Unreachable`] and [`GuiUpdate::OutdatedGui`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Notice {
+    Reconnecting,
     Unreachable,
     Outdated,
 }
@@ -99,18 +101,27 @@ impl Down {
         }
     }
 
-    /// The unreachable notice, after [`UNREACHABLE_AFTER`] of this outage.
+    /// What the GUI is owed about this outage at `now`. A lost connection is
+    /// announced at once, so the window stops presenting its last snapshot as
+    /// live; the unreachable notice follows after [`UNREACHABLE_AFTER`].
     /// Before that the agent may simply be starting — and a newer agent is
     /// not unreachable at all, so the relaunch notice stands while it is live.
-    pub(super) fn unreachable_notice(&mut self, now: Instant) -> Option<GuiUpdate> {
-        if self.agent_is_newer
-            || self.told == Some(Notice::Unreachable)
-            || now.saturating_duration_since(self.since) < UNREACHABLE_AFTER
-        {
+    pub(super) fn notice(&mut self, now: Instant) -> Option<GuiUpdate> {
+        if self.agent_is_newer {
             return None;
         }
-        self.told = Some(Notice::Unreachable);
-        Some(GuiUpdate::Unreachable)
+        if now.saturating_duration_since(self.since) >= UNREACHABLE_AFTER {
+            if self.told == Some(Notice::Unreachable) {
+                return None;
+            }
+            self.told = Some(Notice::Unreachable);
+            return Some(GuiUpdate::Unreachable);
+        }
+        if self.outage == Outage::Lost && self.told.is_none() {
+            self.told = Some(Notice::Reconnecting);
+            return Some(GuiUpdate::Reconnecting);
+        }
+        None
     }
 }
 
@@ -236,7 +247,7 @@ mod tests {
 
         assert!(down.connect_failed(&newer_agent()).is_some());
         assert!(
-            down.unreachable_notice(long_after).is_none(),
+            down.notice(long_after).is_none(),
             "the relaunch notice must not be overwritten while the newer agent is live"
         );
 
@@ -245,7 +256,7 @@ mod tests {
         // reason, not the first one.
         assert!(down.connect_failed(&socket_down()).is_none());
         assert!(matches!(
-            down.unreachable_notice(long_after),
+            down.notice(long_after),
             Some(GuiUpdate::Unreachable)
         ));
         assert!(matches!(
@@ -261,17 +272,36 @@ mod tests {
         let down = link.down_mut().expect("cold is down");
 
         assert!(
-            down.unreachable_notice(t0 + UNREACHABLE_AFTER.saturating_sub(Duration::from_secs(1)))
+            down.notice(t0 + UNREACHABLE_AFTER.saturating_sub(Duration::from_secs(1)))
                 .is_none()
         );
         assert!(matches!(
-            down.unreachable_notice(t0 + UNREACHABLE_AFTER),
+            down.notice(t0 + UNREACHABLE_AFTER),
             Some(GuiUpdate::Unreachable)
         ));
         assert!(
-            down.unreachable_notice(t0 + UNREACHABLE_AFTER + Duration::from_secs(1))
+            down.notice(t0 + UNREACHABLE_AFTER + Duration::from_secs(1))
                 .is_none()
         );
+    }
+
+    #[test]
+    fn a_lost_connection_is_announced_at_once_and_unreachable_later() {
+        let lost_at = Instant::now();
+        let mut down = Down::new(Outage::Lost, lost_at);
+
+        assert!(
+            matches!(down.notice(lost_at), Some(GuiUpdate::Reconnecting)),
+            "the window must stop presenting the last snapshot as live right away"
+        );
+        assert!(
+            down.notice(lost_at + Duration::from_secs(1)).is_none(),
+            "the loss is announced once, not on every reconnect attempt"
+        );
+        assert!(matches!(
+            down.notice(lost_at + UNREACHABLE_AFTER),
+            Some(GuiUpdate::Unreachable)
+        ));
     }
 
     #[tokio::test]

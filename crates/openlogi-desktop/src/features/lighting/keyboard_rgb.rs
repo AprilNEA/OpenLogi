@@ -7,7 +7,7 @@
 
 use gpui::{
     Context, InteractiveElement, IntoElement, ParentElement, Render, Role,
-    StatefulInteractiveElement as _, Styled, Subscription, Toggled, Window, div, px, rgb,
+    StatefulInteractiveElement as _, Styled, Subscription, Toggled, Window, px, rgb,
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{Selectable as _, h_flex, slider::Slider, v_flex};
@@ -16,8 +16,9 @@ use openlogi_core::config::Lighting;
 
 use crate::state::{AppState, StateEvent};
 use crate::ui::commit_slider::{CommitSlider, SliderRange};
-use crate::ui::components::Toggle;
-use crate::ui::theme::{self, Palette, Typography as _};
+use crate::ui::components::{Toggle, toggle_row};
+use crate::ui::slider_row::SliderRow;
+use crate::ui::theme::{self, Palette};
 
 const SWATCH: f32 = 28.;
 
@@ -87,47 +88,34 @@ impl Render for LightingPanel {
         v_flex()
             .gap_3()
             .w_full()
-            .child(
-                h_flex()
-                    .justify_between()
-                    .items_center()
-                    .child(
-                        div()
-                            .text_body()
-                            .text_color(pal.text_muted)
-                            .child(tr!("device.lighting")),
-                    )
-                    .child(
-                        Toggle::new("light-toggle")
-                            .selected(lighting.enabled)
-                            .on_change(|enabled, _window, cx| {
-                                AppState::apply(cx, |state| {
-                                    let mut next = state.lighting();
-                                    next.enabled = *enabled;
-                                    state.commit_lighting(next)
-                                });
-                            }),
-                    ),
-            )
+            // The tab and the card already say "Lighting"; the row names what
+            // the switch does to the keyboard instead.
+            .child(toggle_row(
+                "light-row",
+                pal,
+                tr!("device.light_the_keys"),
+                tr!("lighting.keyboard_lighting_description"),
+                Toggle::new("light-toggle")
+                    .selected(lighting.enabled)
+                    .on_change(|enabled, _window, cx| {
+                        AppState::apply(cx, |state| {
+                            let mut next = state.lighting();
+                            next.enabled = *enabled;
+                            state.commit_lighting(next)
+                        });
+                    }),
+            ))
             .child(h_flex().gap_2().flex_wrap().children(swatches))
             .child(
-                h_flex()
-                    .justify_between()
-                    .items_baseline()
-                    .child(
-                        div()
-                            .text_caption()
-                            .text_color(pal.text_muted)
-                            .child(tr!("camera.brightness")),
-                    )
-                    .child(
-                        div()
-                            .text_caption()
-                            .text_color(pal.text_primary)
-                            .child(format!("{}%", self.brightness.shown(lighting.brightness))),
-                    ),
+                SliderRow::new(
+                    tr!("camera.brightness"),
+                    Slider::new(self.brightness.slider()).horizontal(),
+                )
+                .value(
+                    format!("{}%", self.brightness.shown(lighting.brightness)),
+                    ["100%"],
+                ),
             )
-            .child(Slider::new(self.brightness.slider()).horizontal())
     }
 }
 

@@ -1,0 +1,26 @@
+# Owner: openlogi_core::device_order::DeviceStableId::direct_route_of_key —
+# the direct route a saved `direct:<vid>:<pid>` key names.
+id: core-direct-key-route-owner
+language: rust
+severity: error
+message: DeviceStableId::direct_route_of_key() (openlogi-core device_order.rs) reads the route a saved direct key names; call it instead of splitting `direct:` keys here.
+note: |
+  The settings app split a saved `links` key into vendor and product by hand
+  for an offline device's connection, and its offline keypad check needed the
+  same route. See "Single source of truth" in AGENTS.md.
+files:
+  - crates/**/*.rs
+  - xtask/**/*.rs
+ignores:
+  - crates/openlogi-core/**
+rule:
+  pattern: $KEY.strip_prefix("direct:")
+  not:
+    # A key's `direct:<vid>:<pid>` prefix with its identity kept is a key
+    # comparison, not a route.
+    inside:
+      kind: function_item
+      has:
+        field: name
+        regex: ^direct_key_prefix$
+      stopBy: end

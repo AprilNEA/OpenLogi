@@ -1,9 +1,63 @@
-//! [`WindowFit`] against the work areas real displays offer.
+//! Window sizing and singleton lifecycles.
 
-use gpui::{Bounds, Pixels, Size, point, px, size};
+use gpui::{AppContext as _, Bounds, Pixels, Size, TestAppContext, point, px, size};
 
 use super::main_window::{MIN_SIZE, PREFERRED_SIZE};
-use super::{FRAME_ALLOWANCE, WindowFit};
+use super::{FRAME_ALLOWANCE, WindowFit, WindowRegistry, settings};
+use crate::app::menu::{self, OpenAbout, OpenSettings};
+use crate::services::{assets::AssetResolver, i18n::LOCALE_LOCK};
+use crate::state::{AppState, Sources};
+use openlogi_core::config::Config;
+
+#[gpui::test]
+fn settings_commands_reuse_the_live_window_and_reopen_after_close(cx: &mut TestAppContext) {
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    cx.update(|cx| {
+        gpui_component::init(cx);
+        crate::ui::theme::register_builtin_themes(cx);
+        let (commands, _) = tokio::sync::mpsc::unbounded_channel();
+        let state = cx.new(|_| {
+            AppState::new(Sources::in_memory(
+                Config::ephemeral(),
+                &AssetResolver::new(),
+                commands,
+            ))
+        });
+        AppState::set_global(state, cx);
+        menu::install(cx);
+        settings::open(cx);
+    });
+    let settings = cx.update(|cx| cx.global::<WindowRegistry>().settings.unwrap());
+
+    for _ in 0..3 {
+        cx.dispatch_action(settings.into(), OpenSettings);
+        cx.dispatch_action(settings.into(), OpenAbout);
+        cx.update(|cx| {
+            assert_eq!(cx.windows(), vec![settings.into()]);
+            assert_eq!(cx.active_window(), Some(settings.into()));
+        });
+    }
+
+    let other = cx.open_window(size(px(400.), px(300.)), |_, _| gpui::Empty);
+    cx.update_window(other.into(), |_, window, _| window.activate_window())
+        .unwrap();
+    cx.update(|cx| assert_eq!(cx.active_window(), Some(other.into())));
+    cx.dispatch_action(other.into(), OpenSettings);
+    cx.update(|cx| {
+        assert_eq!(cx.windows().len(), 2);
+        assert_eq!(cx.active_window(), Some(settings.into()));
+    });
+
+    cx.update_window(settings.into(), |_, window, _| window.remove_window())
+        .unwrap();
+    cx.dispatch_action(other.into(), OpenSettings);
+    cx.update(|cx| {
+        let reopened = cx.global::<WindowRegistry>().settings.unwrap();
+        assert_ne!(reopened, settings);
+        assert_eq!(cx.windows().len(), 2);
+        assert_eq!(cx.active_window(), Some(reopened.into()));
+    });
+}
 
 /// The Settings window's authored size, which is also its floor.
 const SETTINGS: Size<Pixels> = Size {

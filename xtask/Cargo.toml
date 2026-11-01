@@ -13,18 +13,26 @@ publish = false
 anyhow = { workspace = true }
 # Clearing the custom icon a run of the app may have left on a bundle.
 appicon = { git = "https://github.com/AprilNEA/appicon", tag = "v0.1.1" }
+# `linux package` rewrites the `.deb` container (an ar archive) around its
+# recompressed data member.
+ar = "0.9.0"
 # Sparkle's keys are base64 (the bundle checks the embedded public key).
 base64 = "0.22.1"
 clap = { workspace = true }
 comfy-table = { version = "8.0.0", default-features = false }
+# Reading the gzip data member nfpm writes into a `.deb`.
+flate2 = "1.1.9"
 fs-err = "3.3.0"
 # The release side of gpui-updater: the Sparkle appcast (with its deltas),
 # EdDSA signing, and verified Sparkle deltas made with Sparkle's BinaryDelta.
 gpui-updater-release = { version = "0.4.4", default-features = false }
+# Writing the `.deb` data member as xz. `static` builds the bundled xz, so the
+# lockfile pins the encoder; without `bindgen` the build needs no libclang.
+liblzma = { version = "0.4.9", default-features = false, features = ["static"] }
 # For `brand`: the bundle-identifier family stamped into every Info.plist and
 # advertised by the update manifest. The app reads the same constants at
 # runtime, so what packaging builds and what the app claims cannot diverge.
-openlogi-core = { version = "0.8.19", path = "../crates/openlogi-core" }
+openlogi-core = { version = "0.8.20", path = "../crates/openlogi-core" }
 path-absolutize = "3.1.1"
 plist = "1.10.0"
 # For `lint sweep-allows`: parsing each `allow` attribute the lexical scan finds,
@@ -46,6 +54,9 @@ toml.workspace = true
 toml_edit = "0.22"
 which = "8.0.4"
 xshell = "0.2.7"
+# Re-encoding the Arch package with a long window; `zstdmt` spreads the
+# level-19 encode over every core without changing its output size.
+zstd = { version = "0.14.3", default-features = false, features = ["zstdmt"] }
 
 [lints]
 workspace = true

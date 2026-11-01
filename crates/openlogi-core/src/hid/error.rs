@@ -336,6 +336,9 @@ pub enum HidppOperation {
     WriteDisableKeys,
     /// Read onboard memory. Appended last — variant order is wire format.
     ReadOnboard,
+    /// Write an image to a keypad's LCD key over the vendor image report.
+    /// Appended last — variant order is wire format.
+    WriteKeyImage,
 }
 
 /// HID++ feature error kind in a serializable wire-safe form.

@@ -27,11 +27,25 @@ use objc2_io_kit::{
     IOCFPlugInInterface, IOCreatePlugInInterfaceForService, IODestroyPlugInInterface,
     IOIteratorNext, IOObjectRelease, IORegistryEntryCreateCFProperty, IOServiceGetMatchingServices,
     IOServiceMatching, IOUSBConfigurationDescriptor, IOUSBConfigurationDescriptorPtr,
-    IOUSBDevRequest, IOUSBDeviceInterface182, io_iterator_t, io_object_t, kIOMainPortDefault,
+    IOUSBDevRequest, IOUSBDevRequestTO, IOUSBDeviceInterface182, io_iterator_t, io_object_t,
+    kIOMainPortDefault, kIOUSBPipeStalled,
 };
 
 /// `kIOReturnSuccess`, which shares its value with `KERN_SUCCESS` and `S_OK`.
 const SUCCESS: i32 = 0;
+
+/// `bmRequestType` of a standard request that reads from the device itself.
+const REQUEST_TYPE_STANDARD_IN: u8 = 0x80;
+/// `bRequest` of `GET_DESCRIPTOR`.
+const REQUEST_GET_DESCRIPTOR: u8 = 0x06;
+/// `wValue` that selects descriptor index 0 of the BOS type (0x0F).
+const DESCRIPTOR_BOS: u16 = 0x0F00;
+/// Room for a BOS descriptor. They are a few tens of bytes; a device that
+/// declares more is read as far as this goes.
+const BOS_CAPACITY: u16 = 256;
+/// How long the device gets to answer the BOS request, in milliseconds. Bounded
+/// because it runs during enumeration, which holds up every control seize.
+const BOS_TIMEOUT_MS: u32 = 250;
 
 /// A reference to an IOKit object this process owns, released on drop.
 ///
@@ -230,6 +244,81 @@ impl UsbInterface {
             return None;
         }
         Some(SeizedDevice(self))
+    }
+
+    /// Ask the device for its BOS descriptor.
+    ///
+    /// Over a shared open, not [`Self::seize`]: a plain open leaves the kernel
+    /// video driver attached, so a camera that is streaming keeps streaming,
+    /// and the read is all this needs.
+    pub(super) fn bos_descriptor(&self) -> BosRead {
+        let Some(_shared) = SharedOpen::new(self) else {
+            return BosRead::Unreachable;
+        };
+        let Some(request) = self.vtable().DeviceRequestTO else {
+            return BosRead::Unreachable;
+        };
+        let mut buffer = vec![0u8; usize::from(BOS_CAPACITY)];
+        let mut transfer = IOUSBDevRequestTO {
+            bmRequestType: REQUEST_TYPE_STANDARD_IN,
+            bRequest: REQUEST_GET_DESCRIPTOR,
+            wValue: DESCRIPTOR_BOS,
+            wIndex: 0,
+            wLength: BOS_CAPACITY,
+            pData: buffer.as_mut_ptr().cast(),
+            wLenDone: 0,
+            noDataTimeout: BOS_TIMEOUT_MS,
+            completionTimeout: BOS_TIMEOUT_MS,
+        };
+        // SAFETY: the device is open for the whole call (`_shared` holds it),
+        // `request` is this interface's own vtable entry called with the
+        // interface as `this`, and it reads `transfer` and writes at most
+        // `wLength` bytes through `pData` — which is `buffer`'s whole length,
+        // and both are live locals.
+        let rc = unsafe { request(self.this(), &raw mut transfer) };
+        match rc {
+            SUCCESS => {
+                let received = usize::try_from(transfer.wLenDone).unwrap_or(buffer.len());
+                buffer.truncate(received);
+                BosRead::Descriptor(buffer)
+            }
+            // A device that predates the BOS descriptor stalls the request.
+            stalled if stalled == kIOUSBPipeStalled.cast_signed() => BosRead::Absent,
+            _ => BosRead::Unreachable,
+        }
+    }
+}
+
+/// What asking a device for its BOS descriptor came back with.
+pub(super) enum BosRead {
+    /// The descriptor, as the device sent it.
+    Descriptor(Vec<u8>),
+    /// The device answered that it has none: it is plainly a USB 2.0 device.
+    Absent,
+    /// The device could not be asked — it would not open, or the transfer
+    /// failed or timed out — so a later attempt may still get an answer.
+    Unreachable,
+}
+
+/// A [`UsbInterface`] opened without seizing, closed on drop.
+struct SharedOpen<'a>(&'a UsbInterface);
+
+impl<'a> SharedOpen<'a> {
+    fn new(interface: &'a UsbInterface) -> Option<Self> {
+        let open = interface.vtable().USBDeviceOpen?;
+        // SAFETY: as [`UsbInterface::vendor_id`]; takes no out-parameter.
+        (unsafe { open(interface.this()) } == SUCCESS).then_some(Self(interface))
+    }
+}
+
+impl Drop for SharedOpen<'_> {
+    fn drop(&mut self) {
+        let Some(close) = self.0.vtable().USBDeviceClose else {
+            return;
+        };
+        // SAFETY: this balances the `USBDeviceOpen` that built `self`, and
+        // `Drop` runs exactly once.
+        unsafe { close(self.0.this()) };
     }
 }
 
