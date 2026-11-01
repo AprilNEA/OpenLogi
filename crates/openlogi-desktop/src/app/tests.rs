@@ -1704,6 +1704,87 @@ fn a_key_binding_edit_repaints_the_secure_input_notice(cx: &mut gpui::TestAppCon
     assert!(!secure_input_notice_drawn(cx));
 }
 
+/// A lost agent first marks the window's last state as reconnecting. Once it
+/// is unreachable, the notice replaces only the content: the header keeps
+/// Settings usable, Add Device stays shut, and Retry asks the IPC client to
+/// try again now.
+#[gpui::test]
+fn an_unreachable_agent_keeps_the_header_and_offers_retry(cx: &mut gpui::TestAppContext) {
+    use gpui::{AppContext as _, Modifiers};
+    use gpui_component::Root;
+    use openlogi_ipc::SecureInput;
+
+    use super::AppView;
+    use crate::services::ipc::Command;
+    use crate::services::{assets::AssetResolver, i18n::LOCALE_LOCK};
+    use crate::state::{AgentLink, AppState, Sources};
+
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    cx.update(gpui_component::init);
+    let (commands, mut sent) = tokio::sync::mpsc::unbounded_channel();
+    cx.update(|cx| {
+        let resolver = AssetResolver::new();
+        let state = cx.new(|_| {
+            let mut state = AppState::new(Sources::in_memory(
+                openlogi_core::config::Config::ephemeral(),
+                &resolver,
+                commands,
+            ));
+            let _ = state.set_agent_link(AgentLink::Ready(status_with(SecureInput::Off)));
+            state
+        });
+        AppState::set_global(state, cx);
+    });
+    let (_, cx) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| AppView::new(window, cx));
+        Root::new(view, window, cx)
+    });
+    let draw = |cx: &mut gpui::VisualTestContext| cx.update(|window, cx| window.draw(cx).clear(cx));
+
+    draw(cx);
+    assert!(cx.debug_bounds("agent-reconnecting").is_none());
+    cx.update(|_, cx| AppState::apply(cx, AppState::agent_link_lost));
+    draw(cx);
+    assert!(
+        cx.debug_bounds("agent-reconnecting").is_some(),
+        "a lost agent's last state is not presented as live"
+    );
+
+    cx.update(|_, cx| {
+        AppState::apply(cx, |state| {
+            state.set_agent_link(AgentLink::Unreachable { retrying: false })
+        });
+    });
+    draw(cx);
+    assert!(
+        cx.debug_bounds("home-settings").is_some(),
+        "the header stays, so Settings stays reachable without a menu bar"
+    );
+    let add_device = cx
+        .debug_bounds("header-add-device")
+        .expect("the header keeps Add Device");
+    let windows = cx.update(|_, cx| cx.windows().len());
+    cx.simulate_click(add_device.center(), Modifiers::none());
+    assert_eq!(
+        cx.update(|_, cx| cx.windows().len()),
+        windows,
+        "pairing needs the agent, so Add Device opens nothing"
+    );
+
+    let retry = cx
+        .debug_bounds("agent-retry")
+        .expect("the notice offers Retry");
+    while sent.try_recv().is_ok() {}
+    cx.simulate_click(retry.center(), Modifiers::none());
+    assert!(matches!(sent.try_recv(), Ok(Command::RetryConnection(_))));
+    assert_eq!(
+        cx.update(|_, cx| AppState::try_read(cx).unwrap().agent_link().clone()),
+        AgentLink::Unreachable { retrying: true },
+        "the notice shows the attempt until the IPC client answers it"
+    );
+}
+
 /// A G-series mouse carries the gaming control tables and no `0x1b04`. The
 /// OS hook still remaps its middle/back/forward, so it gets the Buttons panel,
 /// with or without a layout for the model (#392, #730, #877). It gets no

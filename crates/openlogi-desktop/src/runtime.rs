@@ -161,7 +161,9 @@ pub(crate) fn spawn(startup: Startup, cx: &mut gpui::App) {
                     let Some(update) = update else {
                         ipc_open = false;
                         warn!("IPC update channel closed — agent state unavailable");
-                        cx.update(|cx| set_agent_link(state::AgentLink::Unreachable, cx));
+                        cx.update(|cx| {
+                            set_agent_link(state::AgentLink::Unreachable { retrying: false }, cx);
+                        });
                         continue;
                     };
                     rt.on_agent_update(update, cx);
@@ -289,8 +291,13 @@ impl Runtime {
                 self.apply_snapshot(&snapshot, cx);
                 self.snapshot = Some(snapshot);
             }
+            ipc::GuiUpdate::Reconnecting => {
+                cx.update(|cx| AppState::apply(cx, AppState::agent_link_lost));
+            }
             ipc::GuiUpdate::Unreachable => {
-                cx.update(|cx| set_agent_link(state::AgentLink::Unreachable, cx));
+                cx.update(|cx| {
+                    set_agent_link(state::AgentLink::Unreachable { retrying: false }, cx);
+                });
             }
             ipc::GuiUpdate::OutdatedGui => {
                 cx.update(|cx| set_agent_link(state::AgentLink::OutdatedGui, cx));

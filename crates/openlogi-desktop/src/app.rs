@@ -635,20 +635,27 @@ impl AppView {
         let link = AppState::try_global(cx)
             .map(|state| state.read(cx))
             .map_or(AgentLink::Connecting, |s| s.agent_link().clone());
-        let status = match link {
+        // A lost connection keeps the last status on screen, marked as not
+        // live by the reconnecting bar; an unreachable agent replaces only the
+        // content, so the header's Settings stays reachable.
+        let (status, reconnecting) = match link {
             AgentLink::Connecting => {
                 window.set_window_title("OpenLogi");
                 return root.child(status::connecting_body(cx)).into_any_element();
             }
-            AgentLink::Unreachable => {
+            AgentLink::Unreachable { retrying } => {
                 window.set_window_title("OpenLogi");
-                return root.child(status::unreachable_body(cx)).into_any_element();
+                return root
+                    .child(home::home_header(cx))
+                    .child(status::unreachable_body(retrying, cx))
+                    .into_any_element();
             }
             AgentLink::OutdatedGui => {
                 window.set_window_title("OpenLogi");
                 return root.child(status::outdated_gui_body(cx)).into_any_element();
             }
-            AgentLink::Ready(status) => status,
+            AgentLink::Reconnecting(status) => (status, true),
+            AgentLink::Ready(status) => (status, false),
         };
 
         let granted = status.accessibility_granted;
@@ -752,7 +759,11 @@ impl AppView {
 
         let has_key_bindings =
             AppState::try_read(cx).is_some_and(|state| !state.keyboard_bindings().is_empty());
-        let attention = status::Attention::for_status(&status, has_key_bindings);
+        let attention = if reconnecting {
+            Some(status::Attention::Reconnecting)
+        } else {
+            status::Attention::for_status(&status, has_key_bindings)
+        };
         root.child(header_el)
             .child(content_el)
             .when_some(attention, |this, attention| {

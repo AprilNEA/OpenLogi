@@ -1,6 +1,7 @@
 //! Whole-window and contextual chrome for the agent-connection lifecycle: the
-//! pre-connection / unreachable / outdated-build frames rendered in place of
-//! the real UI, and an attention bar shown only when action is required.
+//! pre-connection / outdated-build frames rendered in place of the real UI,
+//! the unreachable frame rendered in place of its content, and an attention
+//! bar shown only while something needs saying.
 
 use gpui::{App, Div, IntoElement, ParentElement, SharedString, Styled, div, px, rgb};
 use gpui_component::{
@@ -13,6 +14,7 @@ use gpui_component::{
 use openlogi_ipc::{AgentStatus, SecureInput};
 
 use crate::app::menu::open_config_folder;
+use crate::state::AppState;
 use crate::ui::theme::{self, ContentWidth, FOOTER_H, Palette, Typography as _};
 
 /// Centered spinner over a muted one-line caption — the quiet "still working"
@@ -64,22 +66,74 @@ pub(super) fn notice_body(headline: SharedString, caption: SharedString, cx: &Ap
 /// Whole-window placeholder shown from window-open until the agent's first
 /// IPC snapshot lands — normally a fraction of a second. Deliberately
 /// neutral: no chrome, no claims about permissions or devices. If the agent
-/// stays unreachable, the IPC client downgrades the link and
-/// [`unreachable_body`] replaces this frame.
+/// stays unreachable, the IPC client downgrades the link and the Home header
+/// over [`unreachable_body`] replaces this frame.
 pub(super) fn connecting_body(cx: &App) -> Div {
     loading_body(tr!("agent.connecting_to_the_background_service"), cx).size_full()
 }
 
-/// Whole-window frame once the agent has been unreachable well past startup:
-/// the spinner would be a lie at this point. Polling (and the spawn retry)
-/// keeps running underneath, and the first snapshot swaps the real UI back in.
-pub(super) fn unreachable_body(cx: &App) -> Div {
+/// Content frame once the agent has been unreachable well past startup or a
+/// loss: a spinner would be a lie at this point. It sits under the Home header,
+/// so Settings — where the usual causes are checked — stays reachable even
+/// where there is no menu bar. Polling (and the spawn retry) keeps running
+/// underneath, Retry cuts its wait short, and the first snapshot swaps the
+/// real UI back in. `retrying` while a retry is under way: only then does the
+/// frame animate, and the IPC client answers every retry within its
+/// unreachable window.
+pub(super) fn unreachable_body(retrying: bool, cx: &App) -> Div {
+    use gpui::InteractiveElement as _;
+
     notice_body(
         tr!("agent.cant_reach_the_background_service"),
-        tr!("agent.agent_connection_retry"),
+        unreachable_advice(),
         cx,
     )
-    .size_full()
+    .flex_1()
+    .w_full()
+    .min_h_0()
+    .child(
+        h_flex()
+            .gap_2()
+            .child(
+                Button::new("agent-open-settings")
+                    .label(tr!("agent.open_settings"))
+                    .on_click(|_, _, cx| open_agent_settings(cx)),
+            )
+            .child(
+                Button::new("agent-retry")
+                    .primary()
+                    .icon(IconName::RotateCw)
+                    .label(tr!("agent.retry_now"))
+                    .loading(retrying)
+                    .debug_selector(|| "agent-retry".into())
+                    .on_click(|_, _, cx| AppState::apply(cx, AppState::retry_agent_connection)),
+            ),
+    )
+}
+
+/// What to check before reinstalling: the usual reason the agent cannot run
+/// on this platform.
+fn unreachable_advice() -> SharedString {
+    if cfg!(target_os = "macos") {
+        tr!("agent.agent_unreachable_macos")
+    } else if cfg!(target_os = "linux") {
+        tr!("agent.agent_unreachable_linux")
+    } else {
+        tr!("agent.agent_unreachable_windows")
+    }
+}
+
+/// Open Settings where [`unreachable_advice`] points: input-device access on
+/// Linux's Permissions page; on macOS the General page, which shows when the
+/// login item is switched off.
+fn open_agent_settings(cx: &mut App) {
+    use crate::windows::settings::{SettingsPage, open_at};
+
+    #[cfg(target_os = "linux")]
+    let page = SettingsPage::Permissions;
+    #[cfg(not(target_os = "linux"))]
+    let page = SettingsPage::General;
+    open_at(page, cx);
 }
 
 /// Whole-window frame when the *agent* answered with a newer IPC protocol
@@ -128,6 +182,9 @@ pub(super) fn config_issue_body(message: SharedString, cx: &App) -> Div {
 /// What the attention bar shows. Normal operation shows nothing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum Attention {
+    /// The connection to the agent dropped and is being re-established, so
+    /// the window shows the agent's last state, not a live one.
+    Reconnecting,
     /// The user dismissed the permission gate while Accessibility is still
     /// unavailable.
     Accessibility,
@@ -167,7 +224,9 @@ impl Attention {
 }
 
 /// Contextual attention bar. Normal operation has no footer; this row appears
-/// only while an [`Attention`] applies.
+/// only while an [`Attention`] applies. The reconnecting spinner animates for
+/// as long as it shows, which is bounded: the IPC client either reconnects or
+/// declares the agent unreachable.
 pub(super) fn attention_footer(attention: Attention, cx: &App) -> impl IntoElement {
     let pal = theme::palette(cx);
     h_flex()
@@ -179,9 +238,28 @@ pub(super) fn attention_footer(attention: Attention, cx: &App) -> impl IntoEleme
         .border_t_1()
         .border_color(pal.border)
         .child(match attention {
+            Attention::Reconnecting => reconnecting_status(pal).into_any_element(),
             Attention::Accessibility => accessibility_status(pal).into_any_element(),
             Attention::SecureInput(app) => secure_input_status(app, pal).into_any_element(),
         })
+}
+
+/// The window's state is the agent's last, not a live one. Nothing to click:
+/// the IPC client is already reconnecting.
+fn reconnecting_status(pal: Palette) -> impl IntoElement {
+    use gpui::InteractiveElement as _;
+
+    h_flex()
+        .gap_2()
+        .items_center()
+        .text_caption()
+        .text_color(pal.text_primary)
+        .child(Spinner::new().xsmall().color(pal.text_muted))
+        .child(
+            div()
+                .debug_selector(|| "agent-reconnecting".into())
+                .child(tr!("agent.reconnecting_to_the_background_service")),
+        )
 }
 
 /// Why key bindings are not firing. Nothing to click: Secure Event Input ends

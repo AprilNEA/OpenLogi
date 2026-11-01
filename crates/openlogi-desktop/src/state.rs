@@ -159,11 +159,17 @@ pub enum AgentLink {
     /// devices" before the first snapshot flashed both at every
     /// already-set-up user (the original startup bug).
     Connecting,
-    /// Still no snapshot well past startup: the agent is genuinely
+    /// The connection to a running agent dropped and the IPC client is
+    /// reconnecting — an update's self-exec or a supervised restart is back
+    /// within seconds. Carries the agent's last status, so the window keeps
+    /// its screens but says the state is not live.
+    Reconnecting(openlogi_ipc::AgentStatus),
+    /// Still no snapshot well past startup or a loss: the agent is genuinely
     /// unreachable (binary missing, repeated spawn failures). Rendered as a
-    /// static error frame; polling continues and a snapshot upgrades this
-    /// back to [`Self::Ready`].
-    Unreachable,
+    /// static notice under the Home header; polling continues and a snapshot
+    /// upgrades this back to [`Self::Ready`]. `retrying` while an attempt the
+    /// user asked for is under way.
+    Unreachable { retrying: bool },
     /// The agent answered the handshake with a *newer* protocol than this
     /// process speaks — the app was updated on disk while this GUI stayed
     /// running. Only relaunching helps; without this state the window would
