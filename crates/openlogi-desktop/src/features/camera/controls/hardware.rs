@@ -26,6 +26,9 @@ pub(super) trait Uvc: Send + Sync {
         control: CameraControl,
         value: i32,
     ) -> Result<(), ControlError>;
+    fn set_microphone(&self, uid: &str, on: bool) -> Result<(), ControlError>;
+    /// Make the camera enumerate again, elevating when the OS requires it.
+    fn reconnect(&self, uid: &str) -> Result<(), ControlError>;
 }
 
 pub(super) struct SystemUvc;
@@ -52,13 +55,38 @@ impl Uvc for SystemUvc {
     ) -> Result<(), ControlError> {
         openlogi_camera::set_control(uid, control, value)
     }
+
+    fn set_microphone(&self, uid: &str, on: bool) -> Result<(), ControlError> {
+        openlogi_camera::set_microphone(uid, on)
+    }
+
+    fn reconnect(&self, uid: &str) -> Result<(), ControlError> {
+        match openlogi_camera::reconnect(uid) {
+            Err(ControlError::NeedsElevation) => crate::platform::elevation::reconnect_camera(uid),
+            done => done,
+        }
+    }
+}
+
+/// How a microphone switch ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Switched {
+    /// The camera stored the switch and reconnected, so it is in effect.
+    Reconnected,
+    /// The camera stored the switch but could not be reconnected: it takes
+    /// effect at the next replug.
+    NeedsReplug,
+    /// The camera did not take the switch.
+    Failed,
 }
 
 /// The panel's camera access. A background load holds its camera's lock from
 /// the first read through the re-apply, so a newer load of the same camera
 /// reads only after an older one finished writing. Edits never take a lock:
 /// a camera's edits open only once its newest load has landed, by when every
-/// older load of it is canceled and will not write.
+/// older load of it is canceled and will not write. The microphone switch is
+/// the exception: it reconnects the camera, so it holds the lock across the
+/// write and the reconnect, and a load reads the camera only after both.
 pub(super) struct Hardware {
     uvc: Arc<dyn Uvc>,
     locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
@@ -93,6 +121,25 @@ impl Hardware {
         value: i32,
     ) -> Result<(), ControlError> {
         self.uvc.set_control(uid, control, value)
+    }
+
+    /// Store the microphone switch, then reconnect the camera so it takes
+    /// effect. Holds the camera's lock so no load reads it mid-switch. May
+    /// wait on the OS's elevation prompt, so it runs off the UI thread.
+    pub(super) fn switch_microphone(&self, uid: &str, on: bool) -> Switched {
+        let camera = self.camera_lock(uid);
+        let _switching = camera.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Err(error) = self.uvc.set_microphone(uid, on) {
+            debug!(on, %error, "camera microphone write failed");
+            return Switched::Failed;
+        }
+        match self.uvc.reconnect(uid) {
+            Ok(()) => Switched::Reconnected,
+            Err(error) => {
+                debug!(%error, "camera reconnect failed");
+                Switched::NeedsReplug
+            }
+        }
     }
 }
 

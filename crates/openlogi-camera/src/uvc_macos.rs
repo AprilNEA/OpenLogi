@@ -30,7 +30,7 @@ use objc2_io_kit::IOUSBDevRequest;
 
 use iokit::{IoObject, SeizedDevice, UsbInterface};
 
-use crate::extension_unit::ExtensionControl;
+use crate::extension_unit::{BUILT_IN_MICROPHONE, ExtensionControl};
 use crate::uvc_descriptor::{VcTopology, scan_descriptors};
 
 /// Which UVC entity a control request addresses: the Camera Terminal (lens:
@@ -262,6 +262,10 @@ pub fn read_camera_state(unique_id: &str) -> Result<CameraState, ControlError> {
             state.autos.push((toggle, AutoState { current, default }));
         }
     }
+    state.microphone = dev
+        .extension_range(BUILT_IN_MICROPHONE)
+        .ok()
+        .map(|range| range.current != 0);
     Ok(state)
 }
 
@@ -319,6 +323,38 @@ pub fn apply_settings(
         }
     }
     first_err.map_or(Ok(()), Err)
+}
+
+/// Switch the camera's built-in microphone on or off.
+///
+/// The camera stores the switch and acts on it the next time it enumerates;
+/// [`reconnect`] makes that happen now.
+///
+/// # Errors
+/// As [`control_range`]; [`ControlError::Unsupported`] for a camera without
+/// the switch.
+pub fn set_microphone(unique_id: &str, on: bool) -> Result<(), ControlError> {
+    let _quiesce = quiesce();
+    let dev = UsbDevice::open_for(unique_id)?;
+    dev.extension_set(BUILT_IN_MICROPHONE, i32::from(on))
+}
+
+/// Have the camera drop off the bus and enumerate again, as a replug would.
+///
+/// macOS lets the process that seized the device ask for this, so it never
+/// needs elevation here.
+///
+/// # Errors
+/// [`ControlError::NotFound`] when no USB device matches, or
+/// [`ControlError::Io`] when IOKit refuses the request.
+pub fn reconnect(unique_id: &str) -> Result<(), ControlError> {
+    let _quiesce = quiesce();
+    let dev = UsbDevice::open_for(unique_id)?;
+    if dev.device.re_enumerate() {
+        Ok(())
+    } else {
+        Err(ControlError::Io("USBDeviceReEnumerate".to_string()))
+    }
 }
 
 // ── AVFoundation unique-id → USB location id ─────────────────────────────────
@@ -474,11 +510,7 @@ impl UsbDevice {
     /// Read a vendor control's range. The camera must report the one-byte,
     /// readable and writable control the table describes; its MIN/MAX are not
     /// asked, because the table owns the value set.
-    fn extension_range(
-        &self,
-        control: CameraControl,
-        extension: ExtensionControl,
-    ) -> Result<ControlRange, ControlError> {
+    fn extension_range(&self, extension: ExtensionControl) -> Result<ControlRange, ControlError> {
         let entity = self.entity(Unit::Extension(extension))?;
         let selector = u16::from(extension.selector);
         let mut len = [0u8; 2];
@@ -488,8 +520,24 @@ impl UsbDevice {
         if u16::from_le_bytes(len) != 1 || info[0] & INFO_GET_SET != INFO_GET_SET {
             return Err(ControlError::Unsupported);
         }
-        let current = self.get(control, UVC_GET_CUR)?;
-        extension.range(u8::try_from(current).map_err(|_| ControlError::Unsupported)?)
+        let mut current = [0u8; 1];
+        self.transfer(RT_GET, UVC_GET_CUR, selector, entity, &mut current)?;
+        extension.range(current[0])
+    }
+
+    /// Write `value` to a vendor control, once the camera has shown it carries
+    /// the control the table describes.
+    fn extension_set(&self, extension: ExtensionControl, value: i32) -> Result<(), ControlError> {
+        let mut buf = [extension.encode(value)?];
+        self.extension_range(extension)?;
+        let entity = self.entity(Unit::Extension(extension))?;
+        self.transfer(
+            RT_SET,
+            UVC_SET_CUR,
+            u16::from(extension.selector),
+            entity,
+            &mut buf,
+        )
     }
 
     /// Read one control's complete range. Boolean AE priority controls need
@@ -497,7 +545,7 @@ impl UsbDevice {
     /// without GET_DEF, the live value is the only safe reset target.
     fn range(&self, control: CameraControl) -> Result<ControlRange, ControlError> {
         if let Some(extension) = control.extension() {
-            return self.extension_range(control, extension);
+            return self.extension_range(extension);
         }
         if control == CameraControl::LowLightCompensation {
             let current = self.get(control, UVC_GET_CUR)?;
@@ -552,11 +600,7 @@ impl UsbDevice {
         } = control.spec();
         let entity = self.entity(unit)?;
         if let Unit::Extension(extension) = unit {
-            let mut buf = [extension.encode(value)?];
-            // The checks a read makes, so a caller that skipped the read cannot
-            // write a control the camera reports differently from the table.
-            self.extension_range(control, extension)?;
-            return self.transfer(RT_SET, UVC_SET_CUR, selector, entity, &mut buf);
+            return self.extension_set(extension, value);
         }
         if let Payload::PanTilt(axis) = payload {
             // The two axes share one control, so a write must carry both words:

@@ -5754,6 +5754,7 @@ dependencies = [
  "tracing",
  "url",
  "walkdir",
+ "windows 0.61.3",
  "winreg",
 ]
 

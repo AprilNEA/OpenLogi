@@ -92,14 +92,14 @@ fn is_function(instance_id: &str) -> bool {
 }
 
 #[cfg(target_os = "windows")]
-pub(crate) use hub::observe_links;
+pub(crate) use hub::{cycle_port, observe_links};
 
 /// Everything that talks to Windows. The pure decisions above stay testable
 /// without it.
 #[cfg(target_os = "windows")]
 #[expect(
     unsafe_code,
-    reason = "Configuration Manager and USB hub IOCTL calls to read a camera's link"
+    reason = "Configuration Manager and USB hub IOCTL calls to read a camera's link and cycle its port"
 )]
 mod hub {
     use std::mem::size_of;
@@ -112,10 +112,14 @@ mod hub {
     };
     use windows::Win32::Devices::Usb::{
         DeviceConnected, GUID_DEVINTERFACE_USB_HUB, IOCTL_USB_GET_NODE_CONNECTION_INFORMATION_EX,
-        IOCTL_USB_GET_NODE_CONNECTION_INFORMATION_EX_V2, USB_NODE_CONNECTION_INFORMATION_EX,
+        IOCTL_USB_GET_NODE_CONNECTION_INFORMATION_EX_V2, IOCTL_USB_HUB_CYCLE_PORT,
+        USB_CYCLE_PORT_PARAMS, USB_NODE_CONNECTION_INFORMATION_EX,
         USB_NODE_CONNECTION_INFORMATION_EX_V2, USB_PIPE_INFO, USB_PROTOCOLS,
     };
-    use windows::Win32::Foundation::{CloseHandle, GENERIC_WRITE, HANDLE};
+    use windows::Win32::Foundation::{
+        CloseHandle, E_INVALIDARG, ERROR_ACCESS_DENIED, ERROR_GEN_FAILURE, ERROR_NOT_SUPPORTED,
+        GENERIC_WRITE, HANDLE, WIN32_ERROR,
+    };
     use windows::Win32::Storage::FileSystem::{
         CreateFileW, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_WRITE, OPEN_EXISTING,
     };
@@ -124,6 +128,7 @@ mod hub {
 
     use super::{instance_id, is_function, link_from};
     use crate::Camera;
+    use crate::controls::ControlError;
     use crate::usb_link::{UsbLink, remember_links};
 
     /// `USB_PROTOCOLS.Usb300`: the caller understands the V2 answer.
@@ -148,6 +153,37 @@ mod hub {
 
     /// The link of the camera at `interface_path`.
     fn link_of(interface_path: &str) -> Option<UsbLink> {
+        let (hub, port) = hub_port(interface_path)?;
+        link_from(hub.speed(port)?, hub.superspeed_flags(port))
+    }
+
+    /// Have the hub drop the camera at `interface_path` off its port and
+    /// enumerate it again, as a replug would.
+    ///
+    /// # Errors
+    /// [`ControlError::NotFound`] when the camera's hub or port cannot be
+    /// found, [`ControlError::NeedsElevation`] when the hub refuses the
+    /// request, and [`ControlError::Io`] for any other failure. The hub
+    /// driver answers a caller without administrator rights with
+    /// access-denied, not-supported or general-failure, depending on the
+    /// Windows release, so all three ask for elevation.
+    pub(crate) fn cycle_port(interface_path: &str) -> Result<(), ControlError> {
+        let (hub, port) = hub_port(interface_path).ok_or(ControlError::NotFound)?;
+        hub.cycle(port).map_err(|error| {
+            let refused = [ERROR_ACCESS_DENIED, ERROR_NOT_SUPPORTED, ERROR_GEN_FAILURE]
+                .map(WIN32_ERROR::to_hresult)
+                .contains(&error.code());
+            if refused {
+                ControlError::NeedsElevation
+            } else {
+                ControlError::Io(error.to_string())
+            }
+        })
+    }
+
+    /// The open hub the camera at `interface_path` is attached to, and the
+    /// port number it sits on.
+    fn hub_port(interface_path: &str) -> Option<(Hub, u32)> {
         let id = instance_id(interface_path)?;
         let node = dev_node(&id)?;
         let device = if is_function(&id) {
@@ -157,7 +193,7 @@ mod hub {
         };
         let port = port_number(device)?;
         let hub = Hub::open(&hub_interface(parent(device)?)?)?;
-        link_from(hub.speed(port)?, hub.superspeed_flags(port))
+        Some((hub, port))
     }
 
     /// The Configuration Manager's handle for the present device `id`.
@@ -330,10 +366,27 @@ mod hub {
             Some(unsafe { connection.Flags.ul })
         }
 
-        /// One synchronous IOCTL with `record` as both its input and its
-        /// output, the shape both connection queries take.
+        /// Cycle `port`: the hub turns the port off and on, and the device
+        /// there enumerates again.
+        fn cycle(&self, port: u32) -> windows::core::Result<()> {
+            let mut params = USB_CYCLE_PORT_PARAMS {
+                ConnectionIndex: port,
+                StatusReturned: 0,
+            };
+            self.request(IOCTL_USB_HUB_CYCLE_PORT, &raw mut params)
+        }
+
+        /// [`Self::request`] for the connection queries, which only need to
+        /// know whether the hub answered.
         fn query<T>(&self, code: u32, record: *mut T) -> Option<()> {
-            let len = u32::try_from(size_of::<T>()).ok()?;
+            self.request(code, record).ok()
+        }
+
+        /// One synchronous IOCTL with `record` as both its input and its
+        /// output, the shape every hub request here takes.
+        fn request<T>(&self, code: u32, record: *mut T) -> windows::core::Result<()> {
+            let len = u32::try_from(size_of::<T>())
+                .map_err(|_| windows::core::Error::from(E_INVALIDARG))?;
             let mut returned = 0u32;
             // SAFETY: `record` points at a live `T` of `len` bytes, valid for
             // the hub to read and write; `returned` is a valid out-pointer; no
@@ -350,7 +403,6 @@ mod hub {
                     None,
                 )
             }
-            .ok()
         }
     }
 

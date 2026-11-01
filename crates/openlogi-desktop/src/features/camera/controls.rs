@@ -33,9 +33,10 @@ mod hardware;
 mod rows;
 #[cfg(test)]
 mod tests;
-use hardware::{Cancel, Hardware, Loaded, Saved, SystemUvc, Uvc};
+use hardware::{Cancel, Hardware, Loaded, Saved, Switched, SystemUvc, Uvc};
 use rows::{
-    control_label, control_row, from_slider, profiles_row, reset_button, section_indices, to_slider,
+    control_label, control_row, from_slider, microphone_row, profiles_row, reset_button,
+    section_indices, to_slider,
 };
 
 /// How long to wait before reading a camera again after it could not be read.
@@ -89,6 +90,10 @@ pub struct CameraControlsPanel {
     pending: Option<Pending>,
     sliders: Vec<ControlSlider>,
     autos: Vec<AutoRow>,
+    /// The built-in microphone switch the camera stores; `None` for a camera
+    /// without one. Not a profile or reset target: it is a device setting.
+    microphone: Option<bool>,
+    microphone_status: MicrophoneStatus,
     #[expect(dead_code, reason = "held to keep the AppState subscription alive")]
     state_obs: Subscription,
 }
@@ -126,6 +131,18 @@ struct AutoRow {
     default: bool,
 }
 
+/// Where the microphone switch stands.
+enum MicrophoneStatus {
+    Idle,
+    /// A switch runs on the background executor. Replacing it drops the task,
+    /// so a switch for a camera the panel left never lands.
+    Switching {
+        _task: Task<()>,
+    },
+    /// How the last switch ended.
+    Done(Switched),
+}
+
 /// A camera the panel is loading, or waiting to retry. Replacing it drops the
 /// task, so a superseded load never lands.
 struct Pending {
@@ -157,6 +174,8 @@ impl CameraControlsPanel {
             pending: None,
             sliders: Vec::new(),
             autos: Vec::new(),
+            microphone: None,
+            microphone_status: MicrophoneStatus::Idle,
             state_obs,
         }
     }
@@ -190,6 +209,8 @@ impl CameraControlsPanel {
         self.uid = None;
         self.sliders.clear();
         self.autos.clear();
+        self.microphone = None;
+        self.microphone_status = MicrophoneStatus::Idle;
         // Port-bound keys from older builds → stable serial key, once per open.
         // Config only, and silent: this runs from render.
         AppState::update(cx, |state, _| {
@@ -261,6 +282,7 @@ impl CameraControlsPanel {
             cx.notify();
             return;
         };
+        self.microphone = state.microphone;
         for (toggle, st) in state.autos {
             self.autos.push(AutoRow {
                 toggle,
@@ -474,6 +496,41 @@ impl CameraControlsPanel {
         self.autos[ix].on = on;
         AppState::apply(cx, |state| state.commit_camera_auto(&key, toggle, on));
         self.sync_active_custom(cx);
+        cx.notify();
+    }
+
+    /// Flip the built-in microphone switch: store it on the camera, then
+    /// reconnect the camera so it takes effect. Runs off the UI thread,
+    /// because the reconnect may wait on the OS's elevation prompt.
+    fn toggle_microphone(&mut self, cx: &mut Context<Self>) {
+        let (Some(uid), Some(on)) = (self.uid.clone(), self.microphone) else {
+            return;
+        };
+        if matches!(self.microphone_status, MicrophoneStatus::Switching { .. }) {
+            return;
+        }
+        let want = !on;
+        let hw = self.hw.clone();
+        let task = cx.spawn(async move |panel, cx| {
+            let switched = cx
+                .background_executor()
+                .spawn(async move { hw.switch_microphone(&uid, want) })
+                .await;
+            panel
+                .update(cx, |panel, cx| panel.finish_microphone(want, switched, cx))
+                .ok();
+        });
+        self.microphone_status = MicrophoneStatus::Switching { _task: task };
+        cx.notify();
+    }
+
+    /// Show how a switch to `on` ended. A camera that reconnected leaves the
+    /// device list and comes back, which rebuilds the panel from the hardware.
+    fn finish_microphone(&mut self, on: bool, switched: Switched, cx: &mut Context<Self>) {
+        if switched != Switched::Failed {
+            self.microphone = Some(on);
+        }
+        self.microphone_status = MicrophoneStatus::Done(switched);
         cx.notify();
     }
 
@@ -733,6 +790,8 @@ impl Render for CameraControlsPanel {
             self.pending = None;
             self.sliders.clear();
             self.autos.clear();
+            self.microphone = None;
+            self.microphone_status = MicrophoneStatus::Idle;
             return div();
         };
         self.ensure_built(&key, &uid, cx);
@@ -762,6 +821,11 @@ impl Render for CameraControlsPanel {
         }
         for ix in image {
             panel = panel.child(control_row(self, ix, cx));
+        }
+        if let Some(on) = self.microphone {
+            panel = panel
+                .child(section_label(tr!("camera.audio"), pal).mt_1())
+                .child(microphone_row(self, on, cx));
         }
         panel.child(reset_button(cx))
     }

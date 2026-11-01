@@ -56,6 +56,28 @@ impl ExtensionGuid {
 const LOGITECH_VIDEO_PIPE: ExtensionGuid =
     ExtensionGuid::from_u128(0x49E4_0215_F434_47FE_B158_0E88_5023_E51B);
 
+/// Logitech's peripheral Extension Unit (libwebcam's
+/// `UVC_GUID_LOGITECH_PERIPHERAL`), which carries switches for the parts of
+/// the camera around the image sensor.
+const LOGITECH_PERIPHERAL: ExtensionGuid =
+    ExtensionGuid::from_u128(0xFFE5_2D21_8030_4E2C_82D9_F587_D005_40BD);
+
+/// The built-in microphone switch in the peripheral unit: 0 off, 1 on.
+///
+/// The camera keeps the switch in its firmware and acts on it only when it
+/// next enumerates: it then leaves out, or brings back, its USB audio
+/// interface. A write therefore changes nothing the host sees until the camera
+/// reconnects, which [`crate::reconnect`] brings about. The selector is the
+/// one the C920e takes (soyersoyer/cameractrls#39); the Brio 500 shows the
+/// same write-then-re-enumerate behavior (#1222). It is not a
+/// [`CameraControl`], so presets and resets never write it.
+pub(crate) const BUILT_IN_MICROPHONE: ExtensionControl = ExtensionControl {
+    guid: LOGITECH_PERIPHERAL,
+    selector: 0x10,
+    max: 1,
+    default: 1,
+};
+
 /// One vendor control's complete wire description: the unit's GUID, the
 /// selector inside it, and the values the control takes. Every one of these
 /// is a single unsigned byte numbered from 0 to `max`.
@@ -142,7 +164,7 @@ impl CameraControl {
 
 #[cfg(test)]
 mod tests {
-    use super::{ExtensionGuid, LOGITECH_VIDEO_PIPE};
+    use super::{BUILT_IN_MICROPHONE, ExtensionGuid, LOGITECH_PERIPHERAL, LOGITECH_VIDEO_PIPE};
     use crate::controls::{CameraControl, ControlError};
 
     /// libwebcam's `UVC_GUID_LOGITECH_PERIPHERAL`, as a descriptor carries it,
@@ -156,6 +178,10 @@ mod tests {
         assert_eq!(
             ExtensionGuid::from_descriptor(descriptor).to_u128(),
             0xffe5_2d21_8030_4e2c_82d9_f587_d005_40bd
+        );
+        assert_eq!(
+            ExtensionGuid::from_descriptor(descriptor),
+            LOGITECH_PERIPHERAL
         );
     }
 
@@ -217,5 +243,18 @@ mod tests {
         let show_mode = CameraControl::ShowMode.extension().expect("vendor control");
         assert!(matches!(show_mode.range(2), Err(ControlError::Unsupported)));
         assert_eq!(show_mode.range(1).expect("1 is on").current, 1);
+    }
+
+    /// The microphone switch is a plain on/off byte in the peripheral unit,
+    /// on by default as the camera ships.
+    #[test]
+    fn the_microphone_switch_is_one_byte_on_or_off() {
+        assert_eq!(BUILT_IN_MICROPHONE.guid, LOGITECH_PERIPHERAL);
+        assert_eq!(BUILT_IN_MICROPHONE.selector, 0x10);
+        assert_eq!(BUILT_IN_MICROPHONE.range(0).expect("0 is off").default, 1);
+        assert!(matches!(
+            BUILT_IN_MICROPHONE.encode(2),
+            Err(ControlError::Unsupported)
+        ));
     }
 }

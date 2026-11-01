@@ -152,6 +152,7 @@ Per-application profiles switch with the focused app. An `[apps]` alias lets one
 - On macOS and Windows, a camera on a slower USB link than it supports (a USB 2 port, hub, or cable) is flagged, since it lists fewer resolutions and frame rates than it can deliver on USB 3
 - Zoom, pan, tilt, focus, exposure, white balance, and every other UVC control, written to the hardware so Meet, Zoom, and OBS see the change
 - Logitech's own controls where the camera has them, such as field of view and Show Mode on the Brio 500
+- Switch a camera's built-in microphone on or off; OpenLogi reconnects the camera so the change takes effect (Linux and Windows ask for administrator rights for that)
 - Built-in Default / Streaming / Video call profiles plus your own snapshots, kept per camera
 
 Feature coverage depends on what each device reports; the app shows only the controls a device supports.

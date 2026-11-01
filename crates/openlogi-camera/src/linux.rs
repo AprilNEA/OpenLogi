@@ -92,6 +92,20 @@ pub(crate) fn usb_descriptors(unique_id: &str) -> Option<Vec<u8>> {
     fs::read(node_for(unique_id)?.usb_device.join("descriptors")).ok()
 }
 
+/// The bus number and device address of the USB device behind the node
+/// `unique_id` names, as sysfs reports them in `busnum` and `devnum`.
+pub(crate) fn usb_address(unique_id: &str) -> Option<(u16, u16)> {
+    let device = node_for(unique_id)?.usb_device;
+    let read = |name: &str| -> Option<u16> {
+        fs::read_to_string(device.join(name))
+            .ok()?
+            .trim()
+            .parse()
+            .ok()
+    };
+    Some((read("busnum")?, read("devnum")?))
+}
+
 /// The node a [`Camera::unique_id`] names, compared after canonicalizing.
 fn node_for(unique_id: &str) -> Option<Node> {
     let target = fs::canonicalize(unique_id).ok()?;

@@ -42,7 +42,7 @@ use crate::com_windows::ComApartment;
 use crate::controls::{
     AutoState, AutoToggle, CameraControl, CameraState, ControlError, ControlRange,
 };
-use crate::extension_unit::ExtensionControl;
+use crate::extension_unit::{BUILT_IN_MICROPHONE, ExtensionControl};
 
 /// CLSID_SystemDeviceEnum — the DirectShow device-category enumerator.
 const CLSID_SYSTEM_DEVICE_ENUM: GUID = GUID::from_u128(0x62be5d10_60eb_11d0_bd3b_00a0c911ce86);
@@ -184,7 +184,36 @@ pub fn read_camera_state(unique_id: &str) -> Result<CameraState, ControlError> {
             ));
         }
     }
+    state.microphone = dev
+        .extension_get(BUILT_IN_MICROPHONE)
+        .and_then(|(_, current)| BUILT_IN_MICROPHONE.range(current))
+        .ok()
+        .map(|range| range.current != 0);
     Ok(state)
+}
+
+/// Switch the camera's built-in microphone on or off.
+///
+/// The camera stores the switch and acts on it the next time it enumerates;
+/// [`reconnect`] makes that happen now.
+///
+/// # Errors
+/// As [`control_range`]; [`ControlError::Unsupported`] for a camera without
+/// the switch.
+pub fn set_microphone(unique_id: &str, on: bool) -> Result<(), ControlError> {
+    let com = ComApartment::enter();
+    let dev = Device::open(&com, unique_id)?;
+    dev.extension_set(BUILT_IN_MICROPHONE, i32::from(on))
+}
+
+/// Have the camera drop off the bus and enumerate again, as a replug would,
+/// by cycling its hub port.
+///
+/// # Errors
+/// [`ControlError::NeedsElevation`] when the process is not elevated, and
+/// [`ControlError::NotFound`] when the camera's hub port cannot be found.
+pub fn reconnect(unique_id: &str) -> Result<(), ControlError> {
+    crate::usb_windows::cycle_port(unique_id)
 }
 
 /// Write a control's current value (switching that property to manual).
