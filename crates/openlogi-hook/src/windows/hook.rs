@@ -761,8 +761,8 @@ mod tests {
         let mods = KeyModifiers::default();
         // 'A'
         assert!(translate_key(WM_KEYDOWN as WPARAM, key(0x41), mods).is_none());
-        // VK_F20, one past the modeled range.
-        assert!(translate_key(WM_KEYDOWN as WPARAM, key(VK_F1 + 19), mods).is_none());
+        // VK_F21, one past the modeled range.
+        assert!(translate_key(WM_KEYDOWN as WPARAM, key(VK_F1 + 20), mods).is_none());
     }
 
     /// Wheel-forward (away from the user) must produce a positive `delta_y`, the
