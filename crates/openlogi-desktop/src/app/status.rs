@@ -2,7 +2,7 @@
 //! pre-connection / unreachable / outdated-build frames rendered in place of
 //! the real UI, and an attention bar shown only when action is required.
 
-use gpui::{App, Div, IntoElement, ParentElement, SharedString, Styled, div, px, rgb};
+use gpui::{App, Div, IntoElement, ParentElement, SharedString, Styled, div};
 use gpui_component::{
     Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
@@ -48,7 +48,7 @@ pub(super) fn notice_body(headline: SharedString, caption: SharedString, cx: &Ap
         .child(
             Icon::new(IconName::TriangleAlert)
                 .size_8()
-                .text_color(rgb(theme::STATUS_CONNECTING)),
+                .text_color(pal.warning),
         )
         .child(div().text_title().child(headline))
         .child(
@@ -171,7 +171,7 @@ impl Attention {
 pub(super) fn attention_footer(attention: Attention, cx: &App) -> impl IntoElement {
     let pal = theme::palette(cx);
     h_flex()
-        .h(px(FOOTER_H))
+        .h(FOOTER_H)
         .flex_shrink_0()
         .w_full()
         .px_5()
@@ -198,12 +198,7 @@ fn secure_input_status(app: Option<SharedString>, pal: Palette) -> impl IntoElem
         .items_center()
         .text_caption()
         .text_color(pal.text_primary)
-        .child(
-            div()
-                .size_1p5()
-                .rounded_full()
-                .bg(rgb(theme::STATUS_CONNECTING)),
-        )
+        .child(div().size_1p5().rounded_full().bg(pal.warning))
         .child(
             div()
                 .debug_selector(|| "secure-input-notice".into())
@@ -211,34 +206,29 @@ fn secure_input_status(app: Option<SharedString>, pal: Palette) -> impl IntoElem
         )
 }
 
-/// Accessibility affordance that requests the grant on click (the native
-/// prompt + System Settings, via [`super::request_accessibility`]).
+/// Accessibility affordance: the missing grant, and a button that requests it
+/// (the native prompt + System Settings, via [`super::request_accessibility`]).
 #[cfg(target_os = "macos")]
 fn accessibility_status(pal: Palette) -> impl IntoElement {
-    // Scoped here rather than at module level: these traits' only user is this
-    // macOS-gated affordance (`.hover()` + `.on_click()`), so an ungated import
-    // would be unused — and a hard error under `-D warnings` — on Linux/Windows.
-    use gpui::InteractiveElement as _;
-    use gpui_base::Button as BaseButton;
+    use gpui_component::{
+        Sizable as _,
+        button::{Button, ButtonVariants as _},
+    };
 
-    BaseButton::new("footer-accessibility")
-        .accessibility_label(tr!("permissions.accessibility_not_granted_click_to_grant"))
-        .flex()
+    h_flex()
         .gap_2()
         .items_center()
         .text_caption()
         .text_color(pal.text_primary)
-        .cursor_pointer()
-        .hover(|style| style.text_color(pal.text_muted))
-        .focus_visible(|style| style.text_color(pal.text_muted))
+        .child(div().size_1p5().rounded_full().bg(pal.warning))
+        .child(tr!("permissions.accessibility_not_granted_click_to_grant"))
         .child(
-            div()
-                .size_1p5()
-                .rounded_full()
-                .bg(rgb(theme::STATUS_CONNECTING)),
+            Button::new("footer-accessibility")
+                .ghost()
+                .xsmall()
+                .label(tr!("permissions.grant"))
+                .on_click(|_, _, cx| super::request_accessibility(cx)),
         )
-        .child(div().child(tr!("permissions.accessibility_not_granted_click_to_grant")))
-        .on_click(|_, _, cx| super::request_accessibility(cx))
 }
 
 #[cfg(not(target_os = "macos"))]

@@ -13,7 +13,7 @@ use crate::state::{
     DisableKeysPersistenceStatus, StateEvent,
 };
 use crate::ui::components::PanelCard;
-use crate::ui::status::{retry_line, status_line};
+use crate::ui::status::{retry_button, retry_line, status_line};
 use crate::ui::theme::{self, Palette, Typography as _};
 
 /// Long-lived Disable Keys panel in the generic Device tab.
@@ -83,7 +83,7 @@ fn recovery_content(
                     pal,
                 ))
                 .child(
-                    retry_line(
+                    retry_button(
                         device_control_id(key, "save-retry"),
                         tr!("keyboard.save_retry"),
                         {
@@ -154,7 +154,7 @@ fn reload_recovery_content(
         .gap_2()
         .child(status_line(message, pal))
         .child(
-            retry_line(
+            retry_button(
                 device_control_id(recovery.key, "reload-retry"),
                 tr!("keyboard.reload_retry"),
                 {

@@ -26,7 +26,10 @@ use super::choice_card::ChoiceCard;
 use super::commit_slider::{CommitSlider, SliderRange};
 use super::components::{MenuRow, PanelCard, Pill, PresetChip, ProfileTab, Toggle, toggle_row};
 use super::status::{retry_line, status_line};
-use super::theme::{self, ContentWidth, OPENLOGI_DARK, OPENLOGI_LIGHT, Palette, Typography as _};
+use super::theme::{
+    self, ContentWidth, OPENLOGI_DARK, OPENLOGI_LIGHT, Palette, SelectableStyle as _,
+    Typography as _,
+};
 
 const TITLE: &str = "OpenLogi Component Gallery";
 
@@ -215,10 +218,14 @@ impl ComponentGallery {
                 v_flex()
                     .gap_2()
                     .child(status_line("Reading…", pal))
-                    .child(retry_line("gallery-retry", "Retry", |_| {}))
+                    .child(retry_line("gallery-retry", "Couldn't read DPI.", |_| {}))
                     .child(
-                        retry_line("gallery-retry-disabled", "Retry (offline)", |_| {})
-                            .disabled(true),
+                        retry_line(
+                            "gallery-retry-disabled",
+                            "Couldn't read DPI (offline).",
+                            |_| {},
+                        )
+                        .disabled(true),
                     ),
                 pal,
             ))
@@ -389,7 +396,9 @@ impl ComponentGallery {
                     BaseButton::new("gallery-preset-remove")
                         .accessibility_label("Remove preset")
                         .px_1()
+                        .rounded(pal.radius_full)
                         .text_color(pal.text_muted)
+                        .focus_visible(move |style| style.focus_ring(pal))
                         .child(Icon::new(IconName::Close).size_3()),
                 ),
             pal,
@@ -519,15 +528,12 @@ impl ComponentGallery {
                         .p_3()
                         .rounded(pal.card_radius)
                         .border_1()
-                        .border_color(if selected {
-                            theme::accent()
-                        } else {
-                            pal.border
-                        })
+                        .border_color(if selected { pal.accent } else { pal.border })
                         .bg(pal.control)
                         .items_center()
                         .justify_center()
                         .text_body()
+                        .focus_visible(move |style| style.focus_ring(pal))
                         .child(format!("Card {}", index + 1))
                         .on_click(move |_, _, cx| {
                             view.update(cx, |this, cx| {
@@ -604,13 +610,13 @@ fn choice_card(id: &'static str, label: &'static str, selected: bool, pal: Palet
         .rounded(pal.control_radius)
         .border_1()
         .border_color(if selected {
-            theme::accent()
+            pal.accent
         } else {
             pal.border
         })
         .bg(pal.control)
         .hover(move |style| style.bg(pal.control_hover))
-        .focus_visible(move |style| style.border_color(theme::accent()))
+        .focus_visible(move |style| style.focus_ring(pal))
         .gap_1()
         // A preview strip above the label: the stacked shape the settings
         // pickers rely on.

@@ -3,7 +3,7 @@
 
 use gpui::{
     Context, InteractiveElement, IntoElement, ParentElement, Rems, Role, SharedString,
-    StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px, rems,
+    StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, rems,
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
@@ -41,7 +41,8 @@ use crate::state::{AppState, BindingLayer, DeviceRecord, Load, StateEvents};
 use crate::ui::battery::BatteryIndicator;
 use crate::ui::components::{PanelCard, Toggle, toggle_row};
 use crate::ui::theme::{
-    self, ContentWidth, DETAIL_RAIL_W, HEADER_H, Palette, SCREEN_PAD, Typography as _,
+    self, ContentWidth, DETAIL_RAIL_W, HEADER_H, Palette, SCREEN_PAD, SelectableStyle as _,
+    Typography as _,
 };
 
 mod backlight;
@@ -72,7 +73,7 @@ pub(super) fn detail_header(
         .and_then(|r| r.battery.as_ref())
         .map(BatteryIndicator::inline);
     h_flex()
-        .h(px(HEADER_H))
+        .h(HEADER_H)
         .flex_shrink_0()
         .w_full()
         .px_5()
@@ -84,7 +85,7 @@ pub(super) fn detail_header(
         .child(
             div()
                 .min_w_0()
-                .max_w(px(220.))
+                .max_w(rems(13.75))
                 .truncate()
                 .text_heading()
                 .child(name),
@@ -193,7 +194,7 @@ fn detail_navigation(
 ) -> impl IntoElement {
     let pal = theme::palette(cx);
     v_flex()
-        .w(px(DETAIL_RAIL_W))
+        .w(DETAIL_RAIL_W)
         .h_full()
         .flex_shrink_0()
         .gap_1()
@@ -216,28 +217,21 @@ fn detail_navigation(
                 .px_3()
                 .py_2()
                 .rounded(pal.control_radius)
-                .cursor_pointer()
                 .text_body()
                 .text_color(if selected {
                     pal.text_primary
                 } else {
                     pal.text_muted
                 })
-                .when(selected, |row| row.bg(crate::ui::theme::accent_tint()))
+                .when(selected, |row| row.bg(pal.accent_tint))
                 .hover(move |row| {
                     row.bg(if selected {
-                        crate::ui::theme::accent_tint_hover()
+                        pal.accent_tint_hover
                     } else {
                         pal.control_hover
                     })
                 })
-                .focus_visible(move |row| {
-                    row.bg(if selected {
-                        crate::ui::theme::accent_tint_hover()
-                    } else {
-                        pal.control_hover
-                    })
-                })
+                .focus_visible(move |style| style.focus_ring(pal))
                 .child(
                     Icon::empty()
                         .path(detail_tab_icon(tab))

@@ -15,7 +15,7 @@
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, Context, Entity, IntoElement, ParentElement, Render, SharedString, Styled, Subscription,
-    Window, div, px, relative, rgb,
+    Window, div, px, relative,
 };
 use gpui_component::WindowExt as _;
 use gpui_component::button::{Button, ButtonVariants as _};
@@ -29,7 +29,7 @@ use crate::state::{AppState, StateEvent};
 use crate::ui::commit_slider::{CommitSlider, SliderRange};
 use crate::ui::components::{Toggle, toggle_row};
 use crate::ui::section::section_label;
-use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
+use crate::ui::theme::{self, Palette, Typography as _};
 
 /// Stops on every setting's slider.
 const STOPS: usize = 7;
@@ -487,7 +487,7 @@ fn slider_row(
                 .items_baseline()
                 .gap_4()
                 .child(section_label(label, pal))
-                .child(div().text_body().text_color(rgb(ACCENT_BLUE)).child(value)),
+                .child(div().text_body().text_color(pal.accent).child(value)),
         )
         .child(
             v_flex()

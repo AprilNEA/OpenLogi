@@ -1,0 +1,30 @@
+# Owner: openlogi-desktop's ui::theme::Palette — card_radius, control_radius,
+# and radius_full, all derived from the theme radius the Appearance page
+# controls.
+id: gui-theme-radius-owner
+language: rust
+severity: error
+message: Round chrome with a Palette radius (card_radius, control_radius, radius_full) instead of a fixed size; the Appearance corner setting owns it.
+note: |
+  Callouts, image placeholders, the camera preview, and the round icon
+  buttons used rounded_md() or a literal px radius, which ignore the
+  Appearance corner setting, so they stayed round after a user chose square
+  corners. An illustration whose shape is the drawing itself (the fallback
+  mouse silhouette, an app icon's squircle) may keep a fixed radius: give it a
+  comment saying why, then `// ast-grep-ignore: gui-theme-radius-owner`
+  directly above it.
+files:
+  - crates/openlogi-desktop/src/**/*.rs
+ignores:
+  - "**/tests.rs"
+  - "**/tests/**"
+rule:
+  any:
+    - pattern: $E.rounded_xs()
+    - pattern: $E.rounded_sm()
+    - pattern: $E.rounded_md()
+    - pattern: $E.rounded_lg()
+    - pattern: $E.rounded_xl()
+    - pattern: $E.rounded_2xl()
+    - pattern: $E.rounded_3xl()
+    - pattern: $E.rounded(px($$$))

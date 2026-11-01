@@ -168,27 +168,20 @@ fn profile_tab(
         .flex_none()
         .items_center()
         .gap_1p5()
-        .h(px(theme::CONTROL_H))
+        .h(theme::CONTROL_H)
         .px_2p5()
         .rounded(pal.control_radius)
-        .cursor_pointer()
         .text_body()
         .text_color(pal.text_primary)
-        .selected_fill(selected)
+        .selected_fill(selected, pal)
         .hover(move |tab| {
             tab.bg(if selected {
-                theme::accent_tint_hover()
+                pal.accent_tint_hover
             } else {
                 pal.control_hover
             })
         })
-        .focus_visible(move |tab| {
-            tab.bg(if selected {
-                theme::accent_tint_hover()
-            } else {
-                pal.control_hover
-            })
-        })
+        .focus_visible(move |style| style.focus_ring(pal))
         .children(leading)
         .child(label)
 }
@@ -216,6 +209,8 @@ pub(super) fn application_mark(
                 .chars()
                 .find(|character| !character.is_whitespace())
                 .map_or_else(|| "?".to_string(), |character| character.to_string());
+            // An app icon's squircle keeps its proportion at every size and theme.
+            // ast-grep-ignore: gui-theme-radius-owner
             slot.rounded(px(edge / 4.))
                 .bg(pal.muted)
                 .map(|tile| {

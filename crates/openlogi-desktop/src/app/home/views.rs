@@ -3,7 +3,7 @@
 use gpui::{
     AnyElement, Context, ElementId, InteractiveElement, IntoElement, ParentElement, Rems,
     SharedString, StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px,
-    rems, rgb,
+    rems,
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
@@ -24,7 +24,7 @@ use super::{
 use crate::state::{AppState, DeviceRecord};
 use crate::ui::battery::{BatteryIndicator, battery_charging_no_reading, value_label};
 use crate::ui::carousel::Carousel;
-use crate::ui::theme::{self, ContentWidth, Palette, Typography as _};
+use crate::ui::theme::{self, ContentWidth, Palette, SelectableStyle as _, Typography as _};
 
 pub(super) fn device_view_switcher(
     current: DeviceViewMode,
@@ -234,9 +234,8 @@ fn device_card_element(
     .accessibility_label(record.display_name.clone())
     .aria_description(device_accessibility_description(record))
     .aria_selected(active)
-    .cursor_pointer()
-    .hover(move |card| card.border_color(rgb(theme::ACCENT_BLUE)).shadow_sm())
-    .focus_visible(move |card| card.border_color(rgb(theme::ACCENT_BLUE)).shadow_sm())
+    .hover(move |card| card.border_color(pal.accent).shadow_sm())
+    .focus_visible(move |style| style.focus_ring(pal))
     .on_click(move |_, _, cx| {
         view.update(cx, |this, cx| {
             this.open_device(record_key.clone(), cx);
@@ -270,7 +269,7 @@ fn device_list_row(
         .py_2()
         .rounded(pal.card_radius)
         .border_1()
-        .border_color(device_ring(enabled))
+        .border_color(device_ring(enabled, pal))
         .bg(pal.panel)
         .shadow_xs()
         .child(
@@ -339,9 +338,8 @@ fn device_list_row(
         .accessibility_label(record.display_name.clone())
         .aria_description(device_accessibility_description(record))
         .aria_selected(active)
-        .cursor_pointer()
-        .hover(move |row| row.border_color(rgb(theme::ACCENT_BLUE)).shadow_sm())
-        .focus_visible(move |row| row.border_color(rgb(theme::ACCENT_BLUE)).shadow_sm())
+        .hover(move |row| row.border_color(pal.accent).shadow_sm())
+        .focus_visible(move |style| style.focus_ring(pal))
         .on_click(move |_, _, cx| {
             view.update(cx, |this, cx| {
                 this.open_device(record_key.clone(), cx);

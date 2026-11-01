@@ -5,10 +5,10 @@ use crate::ui::commit_slider::{CommitSlider, SliderRange};
 use crate::ui::components::Toggle;
 
 use super::visual::LightView;
-use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
+use crate::ui::theme::{self, Palette, Typography as _};
 use gpui::{
     BoxShadow, Context, Hsla, IntoElement, ParentElement, Render, Styled, Subscription, Window,
-    div, hsla, point, prelude::FluentBuilder as _, px, rgb,
+    div, point, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{Icon, IconName, Selectable as _, h_flex, slider::Slider, v_flex};
 use openlogi_core::{
@@ -252,16 +252,13 @@ fn light_hero(device_name: &str, view: LightView, pal: Palette) -> impl IntoElem
 }
 
 fn light_emblem(enabled: bool, pal: Palette) -> impl IntoElement {
+    let warm = theme::WARM_LIGHT;
     let halo = if enabled {
-        hsla(0.105, 0.9, 0.66, 0.22)
+        warm.opacity(0.22)
     } else {
         pal.muted
     };
-    let icon_color: Hsla = if enabled {
-        hsla(0.105, 0.9, 0.66, 1.)
-    } else {
-        pal.text_muted
-    };
+    let icon_color: Hsla = if enabled { warm } else { pal.text_muted };
     let icon = if enabled {
         IconName::Sun
     } else {
@@ -279,13 +276,13 @@ fn light_emblem(enabled: bool, pal: Palette) -> impl IntoElement {
         .bg(halo)
         .border_1()
         .border_color(if enabled {
-            hsla(0.105, 0.9, 0.66, 0.35)
+            warm.opacity(0.35)
         } else {
             pal.border
         })
         .when(enabled, |this| {
             this.shadow(vec![BoxShadow {
-                color: hsla(0.105, 0.9, 0.66, 0.25),
+                color: warm.opacity(0.25),
                 offset: point(px(0.), px(0.)),
                 blur_radius: px(18.),
                 spread_radius: px(1.),
@@ -342,18 +339,18 @@ fn camera_automation(current: LightSettings, pal: Palette) -> impl IntoElement {
 fn light_status(view: LightView, pal: Palette) -> impl IntoElement {
     let LightView { online, enabled } = view;
     let (label, color) = if !online {
-        (tr!("device.offline"), theme::STATUS_OFFLINE)
+        (tr!("device.offline"), pal.text_muted)
     } else if enabled {
-        (tr!("common.on"), theme::STATUS_CONNECTED)
+        (tr!("common.on"), pal.success)
     } else {
-        (tr!("common.off"), theme::STATUS_OFFLINE)
+        (tr!("common.off"), pal.text_muted)
     };
     h_flex()
         .gap_1p5()
         .items_center()
         .text_caption()
         .text_color(pal.text_muted)
-        .child(div().size_1p5().rounded_full().bg(rgb(color)))
+        .child(div().size_1p5().rounded_full().bg(color))
         .child(label)
 }
 
@@ -379,7 +376,7 @@ fn control_well(
                 .child(
                     div()
                         .text_body()
-                        .text_color(rgb(ACCENT_BLUE))
+                        .text_color(pal.accent)
                         .font_weight(gpui::FontWeight::MEDIUM)
                         .child(value),
                 ),
@@ -422,12 +419,9 @@ fn light_command_status(status: LightCommandStatus, pal: Palette) -> impl IntoEl
         ),
         LightCommandStatus::Failed(error) => (
             format!("{}: {error}", tr!("common.unavailable")),
-            Hsla::from(rgb(theme::STATUS_OFFLINE)),
+            pal.text_muted,
         ),
-        LightCommandStatus::Offline => (
-            tr!("device.offline").to_string(),
-            Hsla::from(rgb(theme::STATUS_OFFLINE)),
-        ),
+        LightCommandStatus::Offline => (tr!("device.offline").to_string(), pal.text_muted),
     };
     h_flex()
         .gap_1p5()

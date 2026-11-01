@@ -1,12 +1,11 @@
 //! General settings page.
 
 use super::{
-    App, AppState, Entity, FluentBuilder, IconName, InteractiveElement, ParentElement,
+    App, AppState, Button, Entity, FluentBuilder, IconName, InteractiveElement, ParentElement,
     SettingField, SettingGroup, SettingItem, SettingPage, Slider, SliderState, Styled,
     ThumbwheelSensitivity, VerticalScrollSensitivity, div, h_flex, px, theme, v_flex,
 };
 use crate::ui::theme::Typography as _;
-use gpui_base::Button as BaseButton;
 use gpui_component::radio::{Radio, RadioGroup};
 use openlogi_core::config::MouseProfileTarget;
 
@@ -284,28 +283,17 @@ fn launch_at_login_item() -> SettingItem {
 fn login_item_approval_notice() -> SettingItem {
     SettingItem::new(
         tr!("app.login_item_disabled_in_system_settings"),
-        SettingField::render(|_, _, cx| open_login_items_button(cx)),
+        SettingField::render(|_, _, _| open_login_items_button()),
     )
     .description(tr!("app.login_item_disabled_description"))
 }
 
 /// Deep link to System Settings › Login Items — the only place that can
 /// re-enable a service switched off there.
-fn open_login_items_button(cx: &App) -> BaseButton {
-    let pal = theme::palette(cx);
-    BaseButton::new("open-login-items")
-        .accessibility_label(tr!("app.open_login_items"))
-        .px_2()
-        .py_1()
-        .rounded(pal.control_radius)
-        .border_1()
-        .border_color(pal.border)
-        .text_caption()
-        .cursor_pointer()
-        .bg(pal.control)
-        .hover(move |s| s.bg(pal.control_hover))
-        .focus_visible(move |s| s.bg(pal.control_hover))
-        .child(tr!("app.open_login_items"))
+fn open_login_items_button() -> Button {
+    Button::new("open-login-items")
+        .outline()
+        .label(tr!("app.open_login_items"))
         .on_click(|_, _, _| crate::platform::registration::open_login_items_settings())
 }
 

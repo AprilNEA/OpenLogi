@@ -13,7 +13,7 @@
 
 use gpui::{
     AnyElement, AppContext as _, Context, Entity, IntoElement, ParentElement, Render, SharedString,
-    Styled, Subscription, Window, div, px,
+    Styled, Subscription, Window, div,
 };
 use gpui_component::{
     h_flex,
@@ -233,7 +233,7 @@ impl Render for ModePicker {
                 .child(
                     div()
                         .w_full()
-                        .h(px(theme::CONTROL_H))
+                        .h(theme::CONTROL_H)
                         .child(select),
                 )
         };

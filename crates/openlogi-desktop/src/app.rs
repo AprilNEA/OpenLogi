@@ -1,11 +1,10 @@
 use gpui::{
     App, AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement,
     MouseButton, NavigationDirection, ParentElement, Render, Styled, Subscription, Window, div,
-    prelude::FluentBuilder as _, rgb,
+    prelude::FluentBuilder as _,
 };
-use gpui_base::Button as BaseButton;
 use gpui_component::{
-    Icon, IconName, Root, TitleBar,
+    Icon, IconName, Root, Sizable as _, TitleBar,
     button::{Button, ButtonVariants as _},
     v_flex,
 };
@@ -483,7 +482,7 @@ impl AppView {
             .child(
                 Icon::new(IconName::TriangleAlert)
                     .size_8()
-                    .text_color(rgb(theme::STATUS_CONNECTING)),
+                    .text_color(pal.warning),
             )
             .child(
                 div()
@@ -518,14 +517,10 @@ impl AppView {
                     .child(tr!("permissions.permission_applies_without_restart")),
             )
             .child(
-                BaseButton::new("skip-accessibility")
-                    .accessibility_label(tr!("permissions.not_now_use_dpi_and_other_features_only"))
-                    .text_caption()
-                    .text_color(pal.text_muted)
-                    .cursor_pointer()
-                    .hover(|s| s.text_color(pal.text_primary))
-                    .focus_visible(|s| s.text_color(pal.text_primary))
-                    .child(tr!("permissions.not_now_use_dpi_and_other_features_only"))
+                Button::new("skip-accessibility")
+                    .ghost()
+                    .small()
+                    .label(tr!("permissions.not_now_use_dpi_and_other_features_only"))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.accessibility_dismissed = true;
                         cx.notify();

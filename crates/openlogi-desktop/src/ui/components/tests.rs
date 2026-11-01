@@ -300,7 +300,7 @@ fn only_an_enabled_selected_pill_carries_the_accent_mark(cx: &mut TestAppContext
 
     assert_eq!(
         mark(true, false),
-        (Some(theme::accent()), Some(theme::accent_tint().into())),
+        (Some(pal.accent), Some(pal.accent_tint.into())),
         "the selected pill takes the accent border and fill",
     );
     assert_eq!(

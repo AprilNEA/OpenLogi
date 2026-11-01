@@ -485,15 +485,16 @@ fn card_box(card: &CardRect, margin: f32) -> (f32, f32, f32, f32) {
 #[test]
 fn side_cards_take_their_room_from_the_render_not_from_the_window() {
     let side = 152.;
+    let window = theme::standard_detail_content_width;
     // Without cards beside the board nothing changes.
-    assert_approx_eq(keyboard_max_width(800., 0.), KEYBOARD_W);
+    assert_approx_eq(keyboard_max_width(window(800.), 0.), KEYBOARD_W);
     // A roomy window keeps the full render beside the band.
-    assert_approx_eq(keyboard_max_width(1400., side), KEYBOARD_W);
+    assert_approx_eq(keyboard_max_width(window(1400.), side), KEYBOARD_W);
     // Where the render alone fitted, the render shrinks so the pane still fits.
-    let w = keyboard_max_width(1000., side);
-    assert_approx_eq(w + side, 1000. - KEYS_HORIZONTAL_RESERVE);
+    let w = keyboard_max_width(window(1000.), side);
+    assert_approx_eq(w + side, window(1000.) - KEYS_HORIZONTAL_RESERVE);
     // Where it did not, the pane stays as wide as the render alone was.
-    assert_approx_eq(keyboard_max_width(800., side) + side, KEYBOARD_W);
+    assert_approx_eq(keyboard_max_width(window(800.), side) + side, KEYBOARD_W);
 }
 
 /// Points sampled along each leader segment when checking it against cards.

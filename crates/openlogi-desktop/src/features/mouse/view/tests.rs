@@ -73,7 +73,8 @@ fn long_bindings_stay_inside_their_label_card(cx: &mut TestAppContext) {
     cx.update(gpui_component::init);
     install_app_state(cx);
     let (view, cx) = cx.add_window_view(MouseModelView::new);
-    // Wide enough for labels on both sides (`model_layout` hides them under 960).
+    // Wide enough for labels on both sides (`model_layout` hides them below a
+    // 960 px window at the standard scale).
     cx.simulate_resize(size(px(1200.), px(800.)));
     cx.update(|window, cx| window.draw(cx).clear(cx));
 
@@ -832,7 +833,8 @@ fn an_inherited_gesture_button_offers_the_held_actions(cx: &mut TestAppContext) 
 fn a_crowded_side_keeps_every_card_on_the_canvas() {
     let viewport_h = 680.;
     let g502 = GamingLayout::for_model_key("0407f");
-    let layout = model_layout(None, g502, 960., viewport_h, false);
+    let viewport_w = theme::standard_detail_content_width(960.);
+    let layout = model_layout(None, g502, viewport_w, viewport_h, false);
     assert_eq!(layout.labels.len(), 9);
     assert!(layout.mouse_h < 9. * LABEL_H, "model {}", layout.mouse_h);
     assert!(layout.canvas_h <= viewport_h - MODEL_VERTICAL_RESERVE + 0.01);

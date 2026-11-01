@@ -2,14 +2,14 @@
 //!
 //! Each polyline is hotspot-centre → 45° run to the card's height → straight
 //! into the card, like a routed trace. A card level with its control gets a
-//! single straight line. The control being interacted with gets a blue,
+//! single straight line. The control being interacted with gets an accent,
 //! thicker line; the other controls keep muted lines so their mapping remains
 //! visible.
 
-use gpui::{Bounds, PathBuilder, Pixels, Point, Window, hsla, point, px, rgb};
+use gpui::{Bounds, PathBuilder, Pixels, Point, Window, point, px};
 
 use super::hotspots::{Hotspot, MouseControlId};
-use crate::ui::theme::ACCENT_BLUE;
+use crate::ui::theme::Palette;
 
 /// How far past the silhouette a leader's 45° run may reach. Kept small
 /// enough to fit inside the gap between mouse and card so the run never ends
@@ -55,6 +55,7 @@ pub fn paint(
     hotspots: &[Hotspot],
     labels: &[Label],
     highlighted: Option<MouseControlId>,
+    pal: Palette,
     window: &mut Window,
 ) {
     for label in labels {
@@ -67,6 +68,7 @@ pub fn paint(
             *hotspot,
             *label,
             highlighted == Some(label.id),
+            pal,
             window,
         );
     }
@@ -78,6 +80,7 @@ fn paint_one(
     hotspot: Hotspot,
     label: Label,
     highlight: bool,
+    pal: Palette,
     window: &mut Window,
 ) {
     let Geometry {
@@ -110,11 +113,11 @@ fn paint_one(
 
     if let Ok(built) = path.build() {
         if highlight {
-            window.paint_path(built, rgb(ACCENT_BLUE));
+            window.paint_path(built, pal.accent);
         } else {
-            // Muted gray — readable against the dark background without
+            // Faint muted ink — readable on either appearance without
             // competing with the highlighted line.
-            window.paint_path(built, hsla(0., 0., 0.55, 0.35));
+            window.paint_path(built, pal.text_muted.opacity(0.35));
         }
     }
 }

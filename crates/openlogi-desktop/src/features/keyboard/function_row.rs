@@ -29,8 +29,8 @@ use std::sync::Arc;
 use gpui::{
     AnyElement, App, AppContext as _, Bounds, Context, Entity, FontWeight, Hsla,
     InteractiveElement, IntoElement, ParentElement, PathBuilder, Render, RenderOnce, Role,
-    SharedString, StatefulInteractiveElement as _, Styled, Subscription, Window, canvas, div, hsla,
-    point, prelude::FluentBuilder as _, px, rgb, svg,
+    SharedString, StatefulInteractiveElement as _, Styled, Subscription, Window, canvas, div,
+    point, prelude::FluentBuilder as _, px, svg,
 };
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{Selectable as _, h_flex, input::InputState, v_flex};
@@ -50,7 +50,7 @@ use crate::services::assets::{GlowGeometry, ResolvedAsset};
 use crate::state::{AppState, DeviceKey, DeviceRecord, StateEvent, StateEvents};
 use crate::ui::action::localized_action_label;
 use crate::ui::components::MenuRow;
-use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
+use crate::ui::theme::{self, Palette, Typography as _};
 use gpui::ease_in_out;
 use gpui::{Animation, AnimationExt, img};
 
@@ -79,9 +79,9 @@ const CALLOUT_BAND_H: f32 = 118.;
 /// padding, footer) — the viewport height minus this and the callout band is
 /// what the render may occupy before it scales down to fit.
 const KEYS_VERTICAL_RESERVE: f32 = 224.;
-/// Horizontal chrome around the Keys tab body: the device rail and the tab's
-/// padding.
-const KEYS_HORIZONTAL_RESERVE: f32 = crate::ui::theme::DETAIL_RAIL_W + 48.;
+/// Horizontal padding around the Keys tab body, inside the width beside the
+/// device rail.
+const KEYS_HORIZONTAL_RESERVE: f32 = 48.;
 /// Floor on the render height so a tiny window still shows a usable model.
 const KEYBOARD_MIN_IMG_H: f32 = 160.;
 const KEY_CALLOUT_H: f32 = 48.;
@@ -319,7 +319,10 @@ impl Render for FunctionRowView {
             keyboard_render_size(
                 asset,
                 viewport_h,
-                keyboard_max_width(f32::from(viewport.width), side_bands_width(&markers)),
+                keyboard_max_width(
+                    theme::detail_content_width(window),
+                    side_bands_width(&markers),
+                ),
             )
         };
 
@@ -415,7 +418,7 @@ fn binding_line(
                     .size(px(9.))
                     .flex_none()
                     .text_color(if highlighted {
-                        rgb(ACCENT_BLUE).into()
+                        pal.accent
                     } else {
                         pal.text_muted
                     }),
@@ -429,7 +432,7 @@ fn binding_line(
                 .whitespace_nowrap()
                 .text_caption()
                 .text_color(if highlighted {
-                    rgb(ACCENT_BLUE).into()
+                    pal.text_primary
                 } else {
                     pal.text_muted
                 })
@@ -719,7 +722,7 @@ impl RenderOnce for KeyboardPane {
                     .h(px(img_h))
                     .children(self.slots.into_iter().map(|slot| {
                     let highlighted = key_is_highlighted(slot.idx, selected, hovered);
-                    key_click_target(slot, highlighted, (img_w, img_h), &view_clone)
+                    key_click_target(slot, highlighted, (img_w, img_h), &view_clone, pal)
                 })),
             )
     }
@@ -762,22 +765,21 @@ impl RenderOnce for KeyCallout {
             .justify_center()
             .items_center()
             .gap(px(1.))
-            .rounded_md()
+            .rounded(pal.control_radius)
             .border_1()
             .border_color(if highlighted {
-                rgb(ACCENT_BLUE).into()
+                pal.accent
             } else {
                 pal.border
             })
             .bg(if highlighted {
-                theme::accent_tint()
+                pal.accent_tint
             } else {
                 pal.control
             })
-            .cursor_pointer()
             .hover(move |s| {
                 s.bg(if highlighted {
-                    theme::accent_tint_hover()
+                    pal.accent_tint_hover
                 } else {
                     pal.control_hover
                 })
@@ -789,11 +791,7 @@ impl RenderOnce for KeyCallout {
                     .text_ellipsis()
                     .text_caption()
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(if highlighted {
-                        rgb(ACCENT_BLUE).into()
-                    } else {
-                        pal.text_primary
-                    })
+                    .text_color(pal.text_primary)
                     .child(self.slot.label.clone()),
             )
             .child(binding_line(
@@ -820,6 +818,7 @@ fn key_click_target(
     highlighted: bool,
     (img_w, img_h): (f32, f32),
     view: &Entity<FunctionRowView>,
+    pal: Palette,
 ) -> impl IntoElement {
     let idx = slot.idx;
     let x_frac = slot.x_frac;
@@ -839,7 +838,6 @@ fn key_click_target(
         .flex()
         .items_center()
         .justify_center()
-        .cursor_pointer()
         .when(highlighted, |el| {
             el.child(
                 div()
@@ -854,13 +852,13 @@ fn key_click_target(
                             .h(px(KEY_HOTSPOT_DOT))
                             .rounded_full()
                             .border_1()
-                            .border_color(gpui::Hsla::from(rgb(ACCENT_BLUE)))
-                            .bg(gpui::Hsla::from(rgb(ACCENT_BLUE))),
+                            .border_color(pal.accent)
+                            .bg(pal.accent),
                     )
                     .rounded_full()
                     .border_1()
-                    .border_color(theme::accent_tint_hover())
-                    .bg(theme::accent_tint()),
+                    .border_color(pal.accent_tint_hover)
+                    .bg(pal.accent_tint),
             )
         })
         .on_hover(move |hovered, _window, cx| {
@@ -888,9 +886,10 @@ fn keyboard_leader_canvas(
     let leaders = layout.leaders.clone();
     canvas(
         move |_bounds, _, _| (leaders, selected, hovered),
-        move |bounds, payload, window, _app| {
+        move |bounds, payload, window, cx| {
             let (leaders, selected, hovered) = payload;
-            paint_keyboard_leaders(bounds, &leaders, selected, hovered, window);
+            let pal = theme::palette(cx);
+            paint_keyboard_leaders(bounds, &leaders, selected, hovered, pal, window);
         },
     )
     .absolute()
@@ -904,6 +903,7 @@ fn paint_keyboard_leaders(
     leaders: &[Vec<(f32, f32)>],
     selected: Option<usize>,
     hovered: Option<usize>,
+    pal: Palette,
     window: &mut Window,
 ) {
     for (idx, corners) in leaders.iter().enumerate() {
@@ -919,9 +919,9 @@ fn paint_keyboard_leaders(
         }
         if let Ok(path) = path.build() {
             if highlighted {
-                window.paint_path(path, rgb(ACCENT_BLUE));
+                window.paint_path(path, pal.accent);
             } else {
-                window.paint_path(path, hsla(0., 0., 0.55, 0.35));
+                window.paint_path(path, pal.text_muted.opacity(0.35));
             }
         }
     }
@@ -1040,7 +1040,7 @@ impl FunctionRowView {
                                 .child(
                                     gpui_component::Icon::new(gpui_component::IconName::Check)
                                         .size_3()
-                                        .text_color(rgb(ACCENT_BLUE)),
+                                        .text_color(pal.accent),
                                 ),
                         )
                     })
@@ -1151,7 +1151,7 @@ fn panel_action_rows(
                             s.child(
                                 gpui_component::Icon::new(gpui_component::IconName::Check)
                                     .size_3()
-                                    .text_color(rgb(ACCENT_BLUE)),
+                                    .text_color(pal.accent),
                             )
                         })
                         .on_click(move |_ev, _window, cx| {
@@ -1198,7 +1198,7 @@ fn image_or_fallback(
         Some(_) | None => div()
             .w(px(img_w))
             .h(px(160.))
-            .rounded_md()
+            .rounded(pal.card_radius)
             .border_1()
             .border_color(pal.border)
             .bg(pal.panel)

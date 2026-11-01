@@ -4,8 +4,7 @@ use std::rc::Rc;
 
 use gpui::{
     App, Entity, InteractiveElement, IntoElement, ParentElement, Role,
-    StatefulInteractiveElement as _, Styled, Window, div, prelude::FluentBuilder as _, px, rgb,
-    svg,
+    StatefulInteractiveElement as _, Styled, Window, div, prelude::FluentBuilder as _, px, svg,
 };
 use gpui_component::{
     Icon, IconName, Selectable as _, button::Button, h_flex, input::InputState, v_flex,
@@ -16,7 +15,7 @@ pub(crate) use self::shortcut_recorder::{Recording, RecordsShortcut, ShortcutRec
 use crate::ui::action::localized_action_label;
 use crate::ui::components::{MenuRow, control_input};
 use crate::ui::section::section_label;
-use crate::ui::theme::{ACCENT_BLUE, Palette, Typography as _};
+use crate::ui::theme::{Palette, Typography as _};
 
 mod shortcut_recorder;
 
@@ -230,9 +229,7 @@ pub(crate) fn action_rows_with(
                                     .flex_none()
                                     .size_3()
                                     .child(
-                                        Icon::new(IconName::Check)
-                                            .size_3()
-                                            .text_color(rgb(ACCENT_BLUE)),
+                                        Icon::new(IconName::Check).size_3().text_color(pal.accent),
                                     ),
                             )
                         })
@@ -393,7 +390,7 @@ fn add_field_editor(
                 div()
                     .debug_selector(move || format!("{id_prefix}-custom-{field}-error"))
                     .text_caption()
-                    .text_color(rgb(0x00ef_4444))
+                    .text_color(pal.danger)
                     .child(tr!("action_ring.custom_action_invalid_input")),
             )
         })

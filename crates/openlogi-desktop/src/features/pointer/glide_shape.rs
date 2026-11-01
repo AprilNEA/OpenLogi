@@ -8,8 +8,8 @@
 use std::time::Duration;
 
 use gpui::{
-    Bounds, Hsla, IntoElement, ParentElement, PathBuilder, Pixels, SharedString, Styled, Window,
-    canvas, div, point, px, rgb,
+    Bounds, Hsla, InteractiveElement as _, IntoElement, ParentElement, PathBuilder, Pixels,
+    SharedString, Styled, Window, canvas, div, point, px,
 };
 use gpui_component::{Selectable as _, h_flex, v_flex};
 use openlogi_core::config::{GlideShape, MomentumParams, MomentumScrolling as M};
@@ -18,7 +18,7 @@ use openlogi_core::scroll::GlideCurve;
 use super::momentum::{MomentumScope, commit};
 use crate::ui::choice_card::ChoiceCard;
 use crate::ui::section::section_label;
-use crate::ui::theme::{ACCENT_BLUE, Palette, Typography as _};
+use crate::ui::theme::{Palette, SelectableStyle as _, Typography as _};
 
 /// Points each curve is drawn through.
 const SAMPLES: u16 = 48;
@@ -174,8 +174,11 @@ fn tile(
     pal: Palette,
 ) -> ChoiceCard {
     let selected = shape == current;
-    let accent = Hsla::from(rgb(ACCENT_BLUE));
-    let color = if selected { accent } else { pal.text_primary };
+    let color = if selected {
+        pal.accent
+    } else {
+        pal.text_primary
+    };
     let geometry = geometry(shape, params);
     let name = shape_name(shape);
     ChoiceCard::new(
@@ -189,8 +192,8 @@ fn tile(
     .p_3()
     .rounded(pal.card_radius)
     .border_1()
-    .border_color(if selected { accent } else { pal.border })
-    .cursor_pointer()
+    .border_color(if selected { pal.accent } else { pal.border })
+    .focus_visible(move |style| style.focus_ring(pal))
     .child(
         div().h(px(PLOT_HEIGHT)).w_full().child(
             canvas(
@@ -234,7 +237,7 @@ pub(super) fn glide_shape_picker(
                 .child(
                     div()
                         .text_body()
-                        .text_color(rgb(ACCENT_BLUE))
+                        .text_color(pal.accent)
                         .child(shape_name(current)),
                 ),
         )

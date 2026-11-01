@@ -6,7 +6,7 @@ mod editor;
 use gpui::{
     App, AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement,
     ParentElement, Render, ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled,
-    Subscription, Window, div, prelude::FluentBuilder as _, px, rgb, svg,
+    Subscription, Window, div, prelude::FluentBuilder as _, px, svg,
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
@@ -23,7 +23,7 @@ use self::editor::{PowerUserInputs, action_library};
 use crate::features::keyboard::editors::{PowerUserKind, text_editor_placeholder};
 use crate::state::{AppState, StateEvent, StateEvents};
 use crate::ui::action::localized_action_label;
-use crate::ui::theme::{self, Palette, Typography as _};
+use crate::ui::theme::{self, Palette, SelectableStyle as _, Typography as _};
 
 /// Stateful Actions Ring editor. Ring configuration itself lives in
 /// [`AppState`]; this entity owns selection and editor input state.
@@ -134,9 +134,12 @@ impl Render for ActionRingPanel {
                             .child(tr!("action_ring.action_ring_description")),
                     ),
             )
+            // The preview keeps its pixel geometry while the library scales
+            // with the interface, so on a narrow tab the library wraps below.
             .child(
                 h_flex()
                     .w_full()
+                    .flex_wrap()
                     .items_start()
                     .justify_center()
                     .gap_4()
@@ -344,13 +347,9 @@ fn slot_button(
         .justify_center()
         .rounded_full()
         .border_2()
-        .border_color(if selected {
-            rgb(theme::ACCENT_BLUE).into()
-        } else {
-            pal.border
-        })
+        .border_color(if selected { pal.accent } else { pal.border })
         .bg(if selected {
-            theme::accent_tint()
+            pal.accent_tint
         } else {
             pal.control
         })
@@ -359,7 +358,6 @@ fn slot_button(
         } else {
             pal.text_muted
         })
-        .cursor_pointer()
         .accessibility_label(accessible_label)
         .tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx))
         .when_some(icon_path, |button, path| {
@@ -374,20 +372,12 @@ fn slot_button(
         })
         .hover(move |button| {
             button.bg(if selected {
-                theme::accent_tint_hover()
+                pal.accent_tint_hover
             } else {
                 pal.control_hover
             })
         })
-        .focus_visible(move |button| {
-            button
-                .border_color(rgb(theme::ACCENT_BLUE))
-                .bg(if selected {
-                    theme::accent_tint_hover()
-                } else {
-                    pal.control_hover
-                })
-        })
+        .focus_visible(move |style| style.focus_ring(pal))
         .on_click(move |_, _, cx| {
             selected_view.update(cx, |panel, cx| {
                 panel.selected_slot = slot;
@@ -395,3 +385,6 @@ fn slot_button(
             });
         })
 }
+
+#[cfg(test)]
+mod tests;

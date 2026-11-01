@@ -8,8 +8,8 @@
 
 use gpui::{
     App, Entity, FontWeight, InteractiveElement, IntoElement, ParentElement, RenderOnce,
-    SharedString, StatefulInteractiveElement as _, Styled, Window, div, hsla,
-    prelude::FluentBuilder as _, px, rgb, svg,
+    SharedString, StatefulInteractiveElement as _, Styled, Window, div,
+    prelude::FluentBuilder as _, px, svg, transparent_black,
 };
 use gpui_component::button::{Button, ButtonGroup, ButtonVariant, ButtonVariants as _};
 use gpui_component::dialog::DialogButtonProps;
@@ -30,7 +30,7 @@ use super::{
 use crate::features::mouse::geometry::asset_dimensions_for_png;
 use crate::services::assets::ResolvedAsset;
 use crate::state::AppState;
-use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
+use crate::ui::theme::{self, Palette, Typography as _};
 
 /// A keypad's last binding page — the one the page bar can remove.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -319,7 +319,7 @@ struct PhotoKey {
 }
 
 impl RenderOnce for PhotoKey {
-    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let shape = self.shape;
         let idx = self.slot.idx;
         let state = self.state;
@@ -328,9 +328,9 @@ impl RenderOnce for PhotoKey {
         let top = self.slot.y_frac * self.render.1 - shape.h / 2. - outer;
         let tooltip: SharedString = format!("{} · {}", self.slot.label, self.slot.binding).into();
         let ring = match state {
-            KeyState::Selected => rgb(ACCENT_BLUE).into(),
-            KeyState::Hovered => hsla(0., 0., 1., 0.55),
-            KeyState::Rest => hsla(0., 0., 0., 0.),
+            KeyState::Selected => theme::palette(cx).accent,
+            KeyState::Hovered => theme::PHOTO_MARK_RIM,
+            KeyState::Rest => transparent_black(),
         };
         let face = matches!(self.slot.target, KeyTarget::Grid(_))
             .then(|| lcd_face(self.slot.lcd_icon, self.slot.binding.clone(), shape, state));
@@ -354,7 +354,6 @@ impl RenderOnce for PhotoKey {
             .rounded_bl(bl)
             .border(px(PHOTO_RING_W))
             .border_color(ring)
-            .cursor_pointer()
             .children(face)
             .on_hover(move |hovered, _window, cx| {
                 let next = (*hovered).then_some(idx);
@@ -388,7 +387,7 @@ fn lcd_face(
         .rounded_tr(tr)
         .rounded_br(br)
         .rounded_bl(bl)
-        .bg(hsla(0., 0., 0., 1.))
+        .bg(theme::LCD_SCREEN)
         .overflow_hidden();
     match icon {
         Some(icon) => face
@@ -397,7 +396,7 @@ fn lcd_face(
                     .path(icon)
                     .size(px(glyph))
                     .flex_none()
-                    .text_color(hsla(0., 0., 1., 1.)),
+                    .text_color(theme::LCD_INK),
             )
             .child(
                 div()
@@ -406,14 +405,14 @@ fn lcd_face(
                     .whitespace_nowrap()
                     .text_ellipsis()
                     .text_caption()
-                    .text_color(hsla(0., 0., 1., 0.72))
+                    .text_color(theme::LCD_INK.opacity(0.72))
                     .child(binding),
             ),
         None => face.when(state != KeyState::Rest, |face| {
             face.child(
                 Icon::new(IconName::Plus)
                     .size(px(glyph * 0.6))
-                    .text_color(hsla(0., 0., 1., 0.45)),
+                    .text_color(theme::LCD_INK.opacity(0.45)),
             )
         }),
     }
@@ -477,22 +476,17 @@ impl RenderOnce for KeyCap {
             .items_center()
             .justify_center()
             .gap(px(1.))
-            .rounded_md()
+            .rounded(pal.control_radius)
             .border_1()
-            .border_color(if highlighted {
-                rgb(ACCENT_BLUE).into()
-            } else {
-                pal.border
-            })
+            .border_color(if highlighted { pal.accent } else { pal.border })
             .bg(if highlighted {
-                theme::accent_tint()
+                pal.accent_tint
             } else {
                 pal.control
             })
-            .cursor_pointer()
             .hover(move |s| {
                 s.bg(if highlighted {
-                    theme::accent_tint_hover()
+                    pal.accent_tint_hover
                 } else {
                     pal.control_hover
                 })
@@ -505,11 +499,7 @@ impl RenderOnce for KeyCap {
                     .text_ellipsis()
                     .text_base()
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(if highlighted {
-                        rgb(ACCENT_BLUE).into()
-                    } else {
-                        pal.text_primary
-                    })
+                    .text_color(pal.text_primary)
                     .child(match glyph {
                         Some(glyph) => glyph.to_string(),
                         None => legend.to_string(),

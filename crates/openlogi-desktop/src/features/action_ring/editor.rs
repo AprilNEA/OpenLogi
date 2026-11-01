@@ -2,7 +2,7 @@
 
 use gpui::{
     Entity, InteractiveElement, IntoElement, ParentElement, Role, ScrollHandle,
-    StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px, rgb, svg,
+    StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px, rems, svg,
 };
 use gpui_component::{
     Icon, IconName, Selectable as _, button::Button, h_flex, input::InputState,
@@ -19,7 +19,7 @@ use crate::features::keyboard::editors::PowerUserKind;
 use crate::state::AppState;
 use crate::ui::action::localized_action_label;
 use crate::ui::components::{MenuRow, control_input};
-use crate::ui::theme::{self, Palette, Typography as _};
+use crate::ui::theme::{Palette, Typography as _};
 
 /// The three single-field Power User inputs the ring's slot editor exposes.
 /// [`PowerUserKind::Workflow`] needs a multi-step list editor this panel
@@ -45,10 +45,11 @@ pub(super) fn action_library(
         .map_or_else(|| tr!("action_ring.empty_slot"), localized_action_label);
 
     v_flex()
+        .debug_selector(|| "ring-action-library-card".into())
         .flex_1()
-        .min_w(px(280.0))
-        .max_w(px(320.0))
-        .h(px(420.0))
+        .min_w(rems(17.5))
+        .max_w(rems(20.))
+        .h(rems(26.25))
         .overflow_hidden()
         .rounded(pal.card_radius)
         .border_1()
@@ -190,7 +191,7 @@ fn icon_button(
 ) -> Button {
     Button::new(id)
         .size(px(32.0))
-        .rounded(px(16.0))
+        .rounded(pal.radius_full)
         .selected(selected)
         .icon(Icon::empty().path(path).text_color(pal.text_muted))
         .tooltip(label)
@@ -347,11 +348,7 @@ fn action_sections(
                             .child(label),
                     )
                     .when(selected, |row| {
-                        row.child(
-                            Icon::new(IconName::Check)
-                                .size_3()
-                                .text_color(rgb(theme::ACCENT_BLUE)),
-                        )
+                        row.child(Icon::new(IconName::Check).size_3().text_color(pal.accent))
                     })
                     .on_click(move |_, _, cx| {
                         commit_action(slot, action_to_commit.clone(), cx);

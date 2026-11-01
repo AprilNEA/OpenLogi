@@ -9,12 +9,12 @@ use super::{
     IconName, InputState, InteractiveElement, IntoElement, Palette, ParentElement, Rc, SelectState,
     Selectable, SettingField, SettingGroup, SettingItem, SettingPage, SettingsView, SharedString,
     StatefulInteractiveElement, Styled, Theme, ThemeColor, ThemeConfig, ThemeFilter, ThemeMode,
-    ThemeRegistry, UiScale, div, h_flex, px, rgb, theme, v_flex,
+    ThemeRegistry, UiScale, div, h_flex, px, theme, v_flex,
 };
 use crate::platform::app_icon::AppIconExt as _;
 use crate::ui::choice_card::ChoiceCard;
 use crate::ui::components::control_input;
-use crate::ui::theme::Typography as _;
+use crate::ui::theme::{SelectableStyle as _, Typography as _};
 
 /// The Appearance page: light/dark mode, the theme grid, corner radius, and the
 /// interface language. Every theme here re-skins the whole app — the bespoke
@@ -213,8 +213,7 @@ fn mode_card(
         .selected(selected)
         .gap(px(6.))
         .items_center()
-        .cursor_pointer()
-        .focus_visible(move |style| style.text_color(pal.text_primary))
+        .focus_visible(move |style| style.focus_ring(pal))
         .child(thumb)
         .child(
             h_flex()
@@ -248,8 +247,7 @@ fn icon_card(icon: AppIcon, selected: bool, accent: Hsla, pal: Palette) -> impl 
         .selected(selected)
         .gap(px(6.))
         .items_center()
-        .cursor_pointer()
-        .focus_visible(move |style| style.text_color(pal.text_primary))
+        .focus_visible(move |style| style.focus_ring(pal))
         .child(
             div()
                 .size(px(80.))
@@ -285,25 +283,20 @@ fn icon_label(icon: AppIcon) -> SharedString {
 }
 
 /// A miniature window-on-desktop at a fixed 100×60, used inside a mode card.
-/// Painted with fixed scheme colours (representing light vs dark) so the
-/// thumbnails read the same under any active theme.
+/// Painted with [`theme::ModePreview`]'s fixed colours so the thumbnails show
+/// light versus dark the same way under any active theme.
 fn mini_window(dark: bool) -> impl IntoElement {
-    let (wallpaper, window, bar, line) = if dark {
-        (
-            rgb(0x26_262b),
-            rgb(0x1b_1b1e),
-            rgb(0x3a_3a42),
-            rgb(0x3b_82f6),
-        )
+    let theme::ModePreview {
+        wallpaper,
+        window,
+        bar,
+        line,
+    } = if dark {
+        theme::ModePreview::DARK
     } else {
-        (
-            rgb(0xdf_e4ec),
-            rgb(0xff_ffff),
-            rgb(0xcc_d2db),
-            rgb(0x3b_82f6),
-        )
+        theme::ModePreview::LIGHT
     };
-    let dot = |c: u32| div().size(px(3.)).rounded_full().bg(rgb(c));
+    let dot = |c: Hsla| div().size(px(3.)).rounded_full().bg(c);
     div()
         .w(px(100.))
         .h(px(60.))
@@ -311,6 +304,9 @@ fn mini_window(dark: bool) -> impl IntoElement {
         .bg(wallpaper)
         .p(px(7.))
         .child(
+            // The thumbnail draws a macOS window, whose corners do not follow
+            // the app's radius setting.
+            // ast-grep-ignore: gui-theme-radius-owner
             v_flex()
                 .size_full()
                 .rounded(px(4.))
@@ -324,9 +320,9 @@ fn mini_window(dark: bool) -> impl IntoElement {
                         .gap(px(2.))
                         .px(px(4.))
                         .bg(bar)
-                        .child(dot(0xff_5f57))
-                        .child(dot(0xfe_bc2e))
-                        .child(dot(0x28_c840)),
+                        .child(dot(theme::ModePreview::TRAFFIC_LIGHTS[0]))
+                        .child(dot(theme::ModePreview::TRAFFIC_LIGHTS[1]))
+                        .child(dot(theme::ModePreview::TRAFFIC_LIGHTS[2])),
                 )
                 .child(
                     v_flex()
@@ -562,7 +558,6 @@ fn theme_card(
         .border_color(if selected { swatch.primary } else { pal.border })
         .bg(pal.panel)
         .shadow_xs()
-        .cursor_pointer()
         .hover(move |style| {
             let style = style.shadow_sm();
             if selected {
@@ -571,7 +566,7 @@ fn theme_card(
                 style.border_color(pal.text_muted)
             }
         })
-        .focus_visible(move |style| style.border_color(swatch.primary).shadow_sm())
+        .focus_visible(move |style| style.focus_ring(pal))
         .active(gpui::Styled::shadow_2xs)
         .child(
             v_flex()
@@ -665,7 +660,7 @@ fn filter_chip(
         .rounded_full()
         .border_1()
         .text_caption()
-        .cursor_pointer()
+        .focus_visible(move |style| style.focus_ring(pal))
         .map(|this| {
             if selected {
                 this.border_color(pal.text_primary)
@@ -674,7 +669,6 @@ fn filter_chip(
                 this.border_color(pal.border)
                     .text_color(pal.text_muted)
                     .hover(|h| h.border_color(pal.text_muted))
-                    .focus_visible(|h| h.border_color(pal.text_muted))
             }
         })
         .child(label)

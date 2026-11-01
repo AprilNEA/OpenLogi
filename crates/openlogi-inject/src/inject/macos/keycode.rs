@@ -26,9 +26,10 @@ const F13: u8 = 0x68;
 
 /// Every key outside the top row: `(HID usage, macOS virtual keycode)`.
 ///
-/// Besides the keys a [`KeyboardUsage`] can name, it carries the rest of the keys a synthesized edge presses: the
-/// ISO and JIS typing keys a keyboard layout can place a shortcut's character
-/// on, and the left modifiers a held chord holds.
+/// Besides the keys a [`KeyboardUsage`] can name, it carries the rest of the
+/// keys a synthesized edge presses: the ISO and JIS typing keys a keyboard
+/// layout can place a shortcut's character on, and the left modifiers a held
+/// chord holds.
 const KEYS: &[(u8, u16)] = &[
     (0x04, 0x00), // A
     (0x05, 0x0b), // B
