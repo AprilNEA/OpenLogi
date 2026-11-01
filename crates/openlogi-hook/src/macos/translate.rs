@@ -115,7 +115,7 @@ fn resolve_button_source(
 /// Map the macOS modifier flags on a `CGEvent` to our [`KeyModifiers`].
 /// `SecondaryFn` is deliberately ignored: it is firmware-internal and
 /// unreliable as a trigger (function-key-remapper spec, Appendix A).
-fn modifiers_from_flags(flags: CGEventFlags) -> KeyModifiers {
+pub(super) fn modifiers_from_flags(flags: CGEventFlags) -> KeyModifiers {
     KeyModifiers {
         shift: flags.contains(CGEventFlags::CGEventFlagShift),
         control: flags.contains(CGEventFlags::CGEventFlagControl),
