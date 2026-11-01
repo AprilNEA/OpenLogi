@@ -22,8 +22,9 @@ devenv shell -- cargo run -p xtask -- <command>
 - `macos dmg` — package an existing app bundle into the branded DMG.
 - `macos package` — build the app bundle, embed Sparkle when given its public key,
   optionally sign it, then create the branded DMG.
-- `linux package` — build release binaries and package `.deb`, `.rpm`, and
-  `.pkg.tar.zst` artifacts with nfpm.
+- `linux package` — build release binaries, package `.deb`, `.rpm`, and
+  `.pkg.tar.zst` artifacts with nfpm, then re-encode the `.deb` data member as
+  xz and the Arch package as zstd with a long window.
 - `lint sweep-allows [--out <path>]` — remove each `#[allow]` in turn, run
   clippy, and record which of its lints fire on this host.
 - `lint merge-allows <reports…>` — join the per-host reports and fail on a lint
@@ -200,7 +201,10 @@ xtask/
       linux.rs               # Linux domain entry
       linux/
         package.rs
-        package/tests.rs
+        package/
+          payload.rs         # re-encoding the .deb and Arch payloads nfpm writes
+          payload/tests.rs
+          tests.rs
       lint.rs                # lint hygiene one clippy run cannot check
       lint/
         allow_sites.rs       # where each `#[allow]` is, and the edit removing it

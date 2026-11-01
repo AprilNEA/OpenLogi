@@ -382,6 +382,15 @@ cargo run -p xtask -- linux package
 The package contents (binaries, udev rules, systemd user unit, desktop entry,
 icon) are declared in `packaging/linux/nfpm.yaml`.
 
+After nfpm, `linux package` re-encodes two of the packages: the `.deb` data
+member becomes `data.tar.xz` (xz level 9), and the `.pkg.tar.zst` becomes a
+level-19 zstd frame with a 128 MiB window. The four binaries share most of
+their code, and only a window that spans the whole tar finds it; this halves
+both packages. Leave `deb.compression` unset in `nfpm.yaml`, because the
+rewrite expects nfpm's gzip data member. The `.rpm` keeps nfpm's compression.
+The two encodes add about three minutes per architecture (164 s on a 6-core
+x86_64 machine).
+
 `packaging/linux/install.sh` is a POSIX `/bin/sh` frontend for those release
 packages, not a second package lifecycle. Its online mode maps the host and
 package manager to the release naming contract

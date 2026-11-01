@@ -161,6 +161,15 @@ debug = "limited"
 [profile.dev.package."*"]
 debug = false
 
+# `cargo xtask linux package` runs a dev build and spends most of its time in
+# these two C codecs, re-encoding ~100 MB per package (xtask only). Unoptimised,
+# they made the run take 285 s instead of 178 s.
+[profile.dev.package.liblzma-sys]
+opt-level = 3
+
+[profile.dev.package.zstd-sys]
+opt-level = 3
+
 [profile.release]
 lto = "fat"
 codegen-units = 1
