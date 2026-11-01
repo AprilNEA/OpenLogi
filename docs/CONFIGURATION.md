@@ -61,8 +61,9 @@ optional physical device key.
 - `vertical_scroll_sensitivity`, from `1` through `100` (`14` is 1×);
   continuous trackpad input remains native
 - `thumbwheel_sensitivity`, from `1` through `100` (`14` is 1×)
-- `[app_settings.momentum_scrolling]` (off by default) is Magic Mouse-style
-  gliding for a mouse whose `smooth_wheel` is on. When SmartShift lets the wheel
+- `[app_settings.momentum_scrolling]` (off by default) is momentum scrolling
+  for every mouse whose `smooth_wheel` is on; a device's own
+  `momentum_scrolling` table overrides it. When SmartShift lets the wheel
   spin freely, the page glides off at the speed it was spun, slows along the
   chosen shape, and stops the moment a finger stops the wheel. Ratchet scrolling
   keeps its steps. A glide's speed is `(1 − t/T)^p` of its start speed over
@@ -159,6 +160,10 @@ Common device fields are:
   Scrolling card offers it as **Smooth wheel** when the current connection has
   `0x2121`; a smooth wheel turned on over another connection can still be turned
   off there. Absent or `false` leaves the wheel native
+- `momentum_scrolling`: this mouse's own momentum scrolling, the same keys as
+  `[app_settings.momentum_scrolling]`. Absent, the mouse follows the app-wide
+  table. The desktop's Pointer tab writes it, and removes it when the mouse is
+  set back to the Settings › General value
 - `bindings`: a button maps to one action, an independent short/long action
   pair, or a gesture-direction map.
   `Thumbwheel` is the thumb wheel's capacitive tap — it has no GUI control and

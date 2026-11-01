@@ -1,4 +1,4 @@
-//! Per-device settings: DPI and its presets, SmartShift, scroll inversion and resolution, the smooth wheel, keeping the OS layout, the report rate, the camera preview's mode, and the stored bindings.
+//! Per-device settings: DPI and its presets, SmartShift, scroll inversion and resolution, the smooth wheel and its momentum scrolling, keeping the OS layout, the report rate, the camera preview's mode, and the stored bindings.
 
 use super::*;
 use std::collections::BTreeSet;
@@ -118,6 +118,51 @@ fn a_smooth_wheel_opt_in_survives_route_adoption() {
         "sanity: the route entry folded"
     );
     assert!(config.smooth_wheel("unit:4f4c4403"));
+}
+
+#[test]
+fn momentum_scrolling_overrides_per_device_and_falls_back_to_the_app_wide_value() {
+    use crate::config::MomentumScrolling;
+    let mut cfg = Config::default();
+    cfg.app_settings.momentum_scrolling.enabled = true;
+    assert_eq!(
+        cfg.momentum_scrolling("mouse"),
+        cfg.app_settings.momentum_scrolling
+    );
+    let own = MomentumScrolling {
+        enabled: false,
+        glide_ms: 800,
+        ..MomentumScrolling::default()
+    };
+    cfg.set_device_momentum_scrolling("mouse", Some(own));
+    let restored = write_and_read(&cfg);
+    assert_eq!(restored.momentum_scrolling("mouse"), own);
+    assert!(
+        restored.momentum_scrolling("absent").enabled,
+        "a device without an override follows the app-wide value"
+    );
+    cfg.set_device_momentum_scrolling("mouse", None);
+    let body = toml::to_string_pretty(&cfg).expect("serialize");
+    assert!(
+        !body.contains("[devices.mouse.momentum_scrolling]"),
+        "a cleared override is omitted: {body}"
+    );
+    assert!(write_and_read(&cfg).momentum_scrolling("mouse").enabled);
+}
+
+#[test]
+fn a_momentum_override_survives_route_adoption() {
+    use crate::config::MomentumScrolling;
+    let route = "receiver:82839805:slot:2";
+    let mut config = Config::default();
+    let own = MomentumScrolling {
+        enabled: true,
+        ..MomentumScrolling::default()
+    };
+    config.set_device_momentum_scrolling(route, Some(own));
+    let canonical = crate::device_order::PhysicalDeviceKey::parse("unit:4f4c4403").expect("valid");
+    assert!(config.adopt_route(&canonical, route, None));
+    assert_eq!(config.momentum_scrolling("unit:4f4c4403"), own);
 }
 
 #[test]

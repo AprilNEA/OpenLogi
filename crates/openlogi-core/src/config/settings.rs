@@ -231,7 +231,10 @@ pub struct AppSettings {
     /// continuous pixel input is never scaled.
     #[serde(default)]
     pub vertical_scroll_sensitivity: VerticalScrollSensitivity,
-    /// Magic Mouse–style momentum for a smoothed main wheel. Off by default.
+    /// Momentum scrolling for a smoothed main wheel: the default for every
+    /// mouse, which a device's
+    /// [`DeviceConfig::momentum_scrolling`](crate::config::DeviceConfig::momentum_scrolling)
+    /// overrides. Off by default.
     #[serde(default)]
     pub momentum_scrolling: MomentumScrolling,
     /// Which app icon the user picked. Applied at launch, and whenever it
@@ -524,8 +527,8 @@ impl Default for AppSettings {
     }
 }
 
-/// Magic Mouse–style momentum scrolling for a mouse whose main wheel OpenLogi
-/// smooths (its per-device Smooth wheel switch).
+/// Momentum scrolling for a mouse whose main wheel OpenLogi smooths (its
+/// per-device Smooth wheel switch).
 ///
 /// Once SmartShift lets the wheel spin freely, the page glides off at the
 /// speed the wheel was spun, slows along the chosen [`GlideShape`], and stops

@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 
 use super::button_map::{deserialize_button_map, deserialize_button_maps_by_app};
 use super::settings::{
-    CameraControls, CameraStreamMode, GestureOwner, LightSettings, Lighting, OnboardMemory,
-    ScrollResolution, SmartShift, ThumbwheelSensitivity, deserialize_gesture_owner,
+    CameraControls, CameraStreamMode, GestureOwner, LightSettings, Lighting, MomentumScrolling,
+    OnboardMemory, ScrollResolution, SmartShift, ThumbwheelSensitivity, deserialize_gesture_owner,
 };
 use crate::binding::{Action, ActionRingConfig, Binding, ButtonId, GestureDirection, KeypadPage};
 use crate::device::{Capabilities, DeviceKind, DeviceModelInfo, LightCapabilities};
@@ -321,6 +321,12 @@ pub struct DeviceConfig {
     /// native, and is omitted from `config.toml`.
     #[serde(default, skip_serializing_if = "is_false")]
     pub smooth_wheel: bool,
+    /// Per-device momentum-scrolling override for the smoothed main wheel.
+    /// `None` falls back to the app-wide
+    /// [`AppSettings::momentum_scrolling`](crate::config::AppSettings::momentum_scrolling).
+    /// The GUI clears it when the device is set back to the app-wide value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub momentum_scrolling: Option<MomentumScrolling>,
     /// Physical config keys of pointing devices that follow this keyboard's
     /// host switch channel. The relationship is keyboard-initiated: pressing
     /// one of this device's host keys switches every listed target first, then
@@ -482,6 +488,7 @@ impl Default for DeviceConfig {
             invert_scroll: false,
             scroll_resolution: None,
             smooth_wheel: false,
+            momentum_scrolling: None,
             host_switch_targets: Vec::new(),
             fn_lock: None,
             keep_os_layout: None,
@@ -623,6 +630,8 @@ struct RawDeviceConfig {
     #[serde(default)]
     smooth_wheel: bool,
     #[serde(default)]
+    momentum_scrolling: Option<MomentumScrolling>,
+    #[serde(default)]
     host_switch_targets: Vec<String>,
     #[serde(default)]
     fn_lock: Option<bool>,
@@ -700,6 +709,7 @@ impl From<RawDeviceConfig> for DeviceConfig {
             invert_scroll: raw.invert_scroll,
             scroll_resolution: raw.scroll_resolution,
             smooth_wheel: raw.smooth_wheel,
+            momentum_scrolling: raw.momentum_scrolling,
             host_switch_targets: raw.host_switch_targets,
             fn_lock: raw.fn_lock,
             keep_os_layout: raw.keep_os_layout,
