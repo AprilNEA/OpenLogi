@@ -782,6 +782,7 @@ fn scroll_actions_lower_to_unit_direction() {
 fn button_ids_persist_as_their_config_names() {
     let mut bindings = BTreeMap::new();
     bindings.insert(ButtonId::MiddleClick, Binding::Single(Action::Copy));
+    bindings.insert(ButtonId::Zoom, Binding::Single(Action::MiddleClick));
     bindings.insert(
         ButtonId::control(0x010a),
         Binding::Single(Action::Screenshot),
@@ -793,6 +794,7 @@ fn button_ids_persist_as_their_config_names() {
     .expect("serialize");
 
     assert!(toml.contains("MiddleClick = \"Copy\""), "{toml}");
+    assert!(toml.contains("Zoom = \"MiddleClick\""), "{toml}");
     assert!(toml.contains("KeyScreenCapture = \"Screenshot\""), "{toml}");
     assert!(toml.contains("\"control:0x01f3\" = \"Paste\""), "{toml}");
     assert_eq!(binding_roundtrip(bindings.clone()), bindings);

@@ -84,6 +84,11 @@ pub enum ButtonId {
     G8,
     /// G-series button G9.
     G9,
+    /// The Performance MX's zoom button, below Back and Forward. It reports
+    /// as an unnamed evdev code with no HID++ control behind it, so only the
+    /// Linux OS hook sees it, and only on a device whose button table names it
+    /// (see `openlogi-hook`'s Linux `key_to_button`).
+    Zoom,
     /// A key on a keypad's 3×3 LCD grid, on one of the keypad's binding pages.
     /// These keys report through a vendor report rather than `0x1b04`, so they
     /// have no control ID and no divertable state: bound or not, they emit
@@ -108,7 +113,7 @@ impl ButtonId {
     /// order — the iteration source for default-binding seeding and the
     /// popover trigger list. Keyboard controls are deliberately absent: an
     /// unbound key is never diverted, so there is nothing to seed.
-    pub const ALL: [ButtonId; 13] = [
+    pub const ALL: [ButtonId; 14] = [
         ButtonId::LeftClick,
         ButtonId::RightClick,
         ButtonId::MiddleClick,
@@ -116,6 +121,7 @@ impl ButtonId {
         ButtonId::WheelTiltRight,
         ButtonId::Back,
         ButtonId::Forward,
+        ButtonId::Zoom,
         ButtonId::DpiToggle,
         ButtonId::Thumbwheel,
         ButtonId::ThumbwheelScrollUp,
@@ -162,17 +168,33 @@ impl ButtonId {
     }
 
     /// Whether this button is one the OS hook (macOS `CGEventTap` / Linux evdev)
-    /// remaps: Middle, Back, or Forward. The primary L/R clicks always pass
-    /// through (suppressing them would brick the mouse), and the DPI / thumb /
-    /// dedicated gesture controls aren't visible to the OS hook at all (they're
-    /// captured over HID++). Stored gesture bindings also project through this
-    /// set, including Middle Click gestures.
+    /// remaps: Middle, Back, Forward, or Zoom. The primary L/R clicks always
+    /// pass through (suppressing them would brick the mouse), and the DPI /
+    /// thumb / dedicated gesture controls aren't visible to the OS hook at all
+    /// (they're captured over HID++). Zoom has no HID++ control, so the hook is
+    /// its only path. Stored gesture bindings also project through this set,
+    /// including Middle Click gestures.
     #[must_use]
     pub fn is_os_hook_button(self) -> bool {
         matches!(
             self,
-            ButtonId::MiddleClick | ButtonId::Back | ButtonId::Forward
+            ButtonId::MiddleClick | ButtonId::Back | ButtonId::Forward | ButtonId::Zoom
         )
+    }
+
+    /// Whether the OS hook acts on this button when it reports one: the
+    /// [`is_os_hook_button`](Self::is_os_hook_button) set plus
+    /// [`ButtonId::GestureButton`]. The hook reports the gesture button only
+    /// from a device whose Linux button table maps a native button to it (the
+    /// Performance MX's thumb rest), and a HID++ capture session that diverted
+    /// it on that device still owns it there.
+    ///
+    /// The gesture button stays out of `is_os_hook_button` on purpose. Capture
+    /// plans read that set to leave a control native under the capture opt-out,
+    /// and an MX Master's gesture button must stay on HID++.
+    #[must_use]
+    pub fn may_reach_os_hook(self) -> bool {
+        self.is_os_hook_button() || self == ButtonId::GestureButton
     }
 
     /// Whether this button may use the OS hook's hold-and-swipe gesture path.
@@ -223,7 +245,7 @@ impl ButtonId {
     /// string form read this one table; `unit_name` is a match without a
     /// wildcard over the unit variants, so a new variant that is missing here
     /// fails to compile rather than failing to parse.
-    const UNIT_NAMES: [(ButtonId, &'static str); 17] = [
+    const UNIT_NAMES: [(ButtonId, &'static str); 18] = [
         (ButtonId::LeftClick, "LeftClick"),
         (ButtonId::RightClick, "RightClick"),
         (ButtonId::MiddleClick, "MiddleClick"),
@@ -241,6 +263,7 @@ impl ButtonId {
         (ButtonId::G7, "G7"),
         (ButtonId::G8, "G8"),
         (ButtonId::G9, "G9"),
+        (ButtonId::Zoom, "Zoom"),
     ];
 
     /// The name a mouse button is persisted under. Keyboard controls have no
@@ -264,6 +287,7 @@ impl ButtonId {
             ButtonId::G7 => Self::UNIT_NAMES[14].1,
             ButtonId::G8 => Self::UNIT_NAMES[15].1,
             ButtonId::G9 => Self::UNIT_NAMES[16].1,
+            ButtonId::Zoom => Self::UNIT_NAMES[17].1,
             // Grid keys and keyboard controls have no fixed name in this
             // table; see [`GridKey::config_name`] and [`Cid::config_name`].
             ButtonId::Grid(_) | ButtonId::Control(_) => return None,
@@ -301,6 +325,7 @@ impl ButtonId {
             ButtonId::G7 => "G7",
             ButtonId::G8 => "G8",
             ButtonId::G9 => "G9",
+            ButtonId::Zoom => "Zoom",
             ButtonId::Grid(slot) => return slot.label(),
             ButtonId::Control(cid) => return cid.label(),
         })
@@ -327,6 +352,7 @@ impl ButtonId {
             ButtonId::G7 => "actions.g7",
             ButtonId::G8 => "actions.g8",
             ButtonId::G9 => "actions.g9",
+            ButtonId::Zoom => "actions.zoom",
             // The page is context the caller shows beside the key, not part
             // of the key's name.
             ButtonId::Grid(slot) => slot.key.translation_key(),

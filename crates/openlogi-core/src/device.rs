@@ -636,6 +636,32 @@ pub struct PairedDevice {
     pub hidpp10: bool,
 }
 
+/// The prefix of a [`PairedDevice::model_key`] that falls back to the wpid.
+const WPID_MODEL_KEY_PREFIX: &str = "wpid";
+
+impl PairedDevice {
+    /// The key the device's model is known by: [`DeviceModelInfo::model_key`]
+    /// once the HID++ 2.0 DeviceInformation read has resolved, else
+    /// `wpid<xxxx>` from the receiver's pairing info, else `slot<n>`. A HID++
+    /// 1.0 device reports no model info, so it always takes a fallback. The
+    /// agent and the settings app both name a device by this key.
+    #[must_use]
+    pub fn model_key(&self) -> String {
+        match (&self.model_info, self.wpid) {
+            (Some(model), _) => model.model_key(),
+            (None, Some(wpid)) => format!("{WPID_MODEL_KEY_PREFIX}{wpid:04x}"),
+            (None, None) => format!("slot{}", self.slot),
+        }
+    }
+
+    /// The hex wpid a `wpid<xxxx>` [`Self::model_key`] carries, as it was
+    /// written; `None` for any other model key.
+    #[must_use]
+    pub fn wpid_of_model_key(model_key: &str) -> Option<&str> {
+        model_key.strip_prefix(WPID_MODEL_KEY_PREFIX)
+    }
+}
+
 /// Address of a standalone raw-HID interface.
 ///
 /// The identity is an opaque transport-generated string. It is deliberately
@@ -1122,6 +1148,24 @@ mod tests {
             Capabilities::presumed_for_hidpp10(DeviceKind::Keyboard),
             Capabilities::default()
         );
+    }
+
+    #[test]
+    fn a_paired_device_without_model_info_is_named_by_its_wpid_then_its_slot() {
+        let mut paired = inventory(2, Some(0x101a), 100).paired.remove(0);
+        assert_eq!(paired.model_key(), "2b023", "model info wins over the wpid");
+        assert_eq!(PairedDevice::wpid_of_model_key(&paired.model_key()), None);
+
+        paired.model_info = None;
+        assert_eq!(paired.model_key(), "wpid101a");
+        assert_eq!(
+            PairedDevice::wpid_of_model_key(&paired.model_key()),
+            Some("101a")
+        );
+
+        paired.wpid = None;
+        assert_eq!(paired.model_key(), "slot2");
+        assert_eq!(PairedDevice::wpid_of_model_key(&paired.model_key()), None);
     }
 
     #[test]

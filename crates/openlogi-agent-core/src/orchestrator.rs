@@ -18,7 +18,9 @@ use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{
     ActionRingIcon, Binding, ButtonId, GamingButtons, GamingLayout, GridKey, KeypadPage,
 };
-use openlogi_core::bindings::{bindings_on_page, button_bindings_for, oshook_gestures_for};
+use openlogi_core::bindings::{
+    bindings_on_page, button_bindings_for, hidpp_gesture_maps_for, oshook_gestures_for,
+};
 use openlogi_core::config::{
     AppSettings, Config, ConfigRevision, LightSettings, MouseProfileTarget, canonical_device_key,
 };
@@ -108,6 +110,11 @@ struct AgentDevice {
     codename: Option<String>,
     /// The device's latest battery reading, `None` when it has none.
     battery: Option<BatteryInfo>,
+    /// [`PairedDevice::hidpp10`](openlogi_core::device::PairedDevice::hidpp10):
+    /// the device answered as HID++ 1.0. It has no `0x1b04` controls for a
+    /// capture session to divert, so only the OS hook remaps its buttons
+    /// (#2161).
+    hidpp10: bool,
 }
 
 impl AgentDevice {
@@ -827,6 +834,16 @@ impl Orchestrator {
         // G-series layout changes, so this map needs no layout.
         let mut bindings = button_bindings_for(&self.config, key, app, None);
         let mut gestures = oshook_gestures_for(&self.config, key, app);
+        // The hook reports the gesture button only from a device whose Linux
+        // button table maps a native button to it, and runs its map there the
+        // way a HID++ capture would. It joins here, not in
+        // `oshook_gestures_for`: capture plans read that projection to leave a
+        // control undiverted, and an MX Master's gesture button stays on HID++.
+        if let Some(map) =
+            hidpp_gesture_maps_for(&self.config, key, app).remove(&ButtonId::GestureButton)
+        {
+            gestures.insert(ButtonId::GestureButton, map);
+        }
         if cfg!(target_os = "macos")
             && let Some(key) = key
             && !self.is_spy_only(key)
@@ -1230,6 +1247,13 @@ impl Orchestrator {
         let mut plans = Vec::new();
         let mut routes = BTreeMap::new();
         for dev in &self.devices {
+            // A HID++ 1.0 device has no `0x1b04` controls: a capture session
+            // would fail its HID++ 2.0 ping and re-arm every second. The OS
+            // hook owns its buttons, and with nothing diverted there is no
+            // restore for its route to follow.
+            if dev.hidpp10 {
+                continue;
+            }
             let Some((physical_key, route)) = Self::capture_identity(dev) else {
                 continue;
             };

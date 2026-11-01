@@ -69,6 +69,7 @@ fn dev(key: &str, slot: u8, online: bool) -> AgentDevice {
         settings_revision: 0,
         codename: None,
         battery: None,
+        hidpp10: false,
     }
 }
 

@@ -108,7 +108,8 @@ pub type SharedHookMaps = Arc<RwLock<HookMaps>>;
 /// (keycode + modifiers).
 pub type SharedKeyboardBindings = Arc<RwLock<BTreeMap<KeyTrigger, Action>>>;
 
-/// Tracks which OS-hook gesture button (Middle/Back/Forward) is mid-hold and defers the
+/// Tracks which OS-hook gesture button (Middle/Back/Forward, or the gesture
+/// button where the hook reports it) is mid-hold and defers the
 /// swipe detection itself to a shared [`SwipeAccumulator`], which commits a swipe
 /// *mid-motion* like the HID++ gesture-button path in `openlogi-hid`. This wrapper
 /// adds only the button identity the accumulator doesn't track; a press that
@@ -300,7 +301,7 @@ fn handle_button(
     capture_safari_pid: impl FnOnce() -> Option<i32>,
 ) -> EventDisposition {
     // Primary L/R always pass through (suppressing them would brick the mouse).
-    if !id.is_os_hook_button() || !button_source_may_remap(device) {
+    if !id.may_reach_os_hook() || !button_source_may_remap(device) {
         return EventDisposition::PassThrough;
     }
     // `try_read` only: a blocking read on the tap thread freezes every pointer
@@ -676,7 +677,9 @@ fn resolve_gesture_click(
 /// to the very click (or extra-button press) it already produces. In that case
 /// the hook should pass the event through to the OS rather than suppress and
 /// re-synthesise it. For Back/Forward this keeps the genuine hardware button
-/// 4/5 intact instead of round-tripping it through synthesis.
+/// 4/5 intact instead of round-tripping it through synthesis. Zoom has no
+/// host action to name, so its `None` seed stands for its own press, the way
+/// `None` leaves a HID++ control undiverted.
 fn is_native_click(id: ButtonId, action: &Action) -> bool {
     matches!(
         (id, action),
@@ -685,6 +688,7 @@ fn is_native_click(id: ButtonId, action: &Action) -> bool {
             | (ButtonId::MiddleClick, Action::MiddleClick)
             | (ButtonId::Back, Action::MouseBack)
             | (ButtonId::Forward, Action::MouseForward)
+            | (ButtonId::Zoom, Action::None)
     )
 }
 
