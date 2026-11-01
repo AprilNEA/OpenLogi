@@ -72,7 +72,7 @@ impl ArmedMainWheel {
         let restore_resolution = if divert.high_resolution {
             let native = match divert.resolution {
                 Some(resolution) => hidpp_resolution(resolution),
-                None => feature.get_wheel_mode().await?.resolution,
+                None => native_resolution(feature.get_wheel_mode().await?),
             };
             Some(native)
         } else {
@@ -129,6 +129,20 @@ pub(crate) async fn undivert(
     request.resolution = resolution;
     let echo = feature.set_wheel_mode(request).await?;
     applied(echo, request)
+}
+
+/// The resolution native reporting had before this session, read from the
+/// wheel's `current` mode. A wheel found already diverted was left so by an
+/// agent that stopped without handing it back, at whatever resolution that
+/// divert chose, so its current resolution is not the native one. The
+/// hand-back then assumes low resolution, the mode a wheel scrolls in without
+/// host software, rather than keep the leftover.
+fn native_resolution(current: WheelMode) -> WheelResolution {
+    if current.target == WheelEventTarget::Diverted {
+        WheelResolution::Low
+    } else {
+        current.resolution
+    }
 }
 
 fn diverted_mode(current: WheelMode, divert: MainWheelDivert) -> WheelMode {

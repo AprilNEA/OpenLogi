@@ -503,6 +503,21 @@ async fn a_high_resolution_divert_restores_the_native_resolution() {
     );
 }
 
+/// A wheel an earlier agent left diverted in high resolution is handed back
+/// in low resolution: its leftover resolution is not its native one.
+#[tokio::test]
+async fn a_wheel_left_diverted_in_high_resolution_is_handed_back_low() {
+    let mut spec = spec(None, None);
+    if let Some(divert) = spec.divert_main_wheel.as_mut() {
+        divert.high_resolution = true;
+    }
+    let armed = arm(0, DIVERTED | HIGH_RES, SetReply::Apply, &spec).await;
+    armed.result.as_ref().unwrap();
+    let handle = restore(armed).await;
+    // Arming finds the wheel already in its mode and writes nothing.
+    assert_eq!(mode_writes(&handle), [[0, PRIORITY, RATE]]);
+}
+
 /// A configured native resolution wins over the device's own on hand-back.
 #[tokio::test]
 async fn a_high_resolution_divert_hands_back_the_configured_resolution() {
