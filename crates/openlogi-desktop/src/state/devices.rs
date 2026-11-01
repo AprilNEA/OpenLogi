@@ -304,11 +304,9 @@ pub(super) fn build_device_list(
                     // timed out. Surface the device anyway using the wpid (or slot
                     // as a last-resort model key) so it appears in the gallery
                     // with a stable display fallback.
-                    let key = paired.wpid.map_or_else(
-                        || format!("slot{}", paired.slot),
-                        |w| format!("wpid{w:04x}"),
-                    );
-                    (key, None, None, paired.codename.clone(), None, [0u8; 4])
+                    let key = unmodelled_model_key(paired);
+                    let asset = resolver.resolve_local_model(&key);
+                    (key, asset, None, paired.codename.clone(), None, [0u8; 4])
                 };
             let stable_id = DeviceStableId::from_parts(
                 route.as_ref(),
@@ -742,6 +740,15 @@ pub(super) fn record_wire_pid(record: &DeviceRecord) -> Option<String> {
             .strip_prefix("wpid")
             .map(str::to_ascii_lowercase),
     }
+}
+
+/// The model key of a paired device without HID++ 2.0 model info: its
+/// wpid, or its slot when the receiver reports none.
+fn unmodelled_model_key(paired: &openlogi_core::device::PairedDevice) -> String {
+    paired.wpid.map_or_else(
+        || format!("slot{}", paired.slot),
+        |w| format!("wpid{w:04x}"),
+    )
 }
 
 /// Synthesize an offline placeholder from a persisted [`DeviceIdentity`].

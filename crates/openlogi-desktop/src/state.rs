@@ -42,8 +42,9 @@ pub(crate) use gaming_keys::GamingKeys;
 pub use light::LightCommandStatus;
 pub(crate) use load::Load;
 pub use load::{
-    BacklightLoad, DisableKeysLoad, DpiLoad, EasySwitchLoad, FlashBindingsLoad, FnLockLoad,
-    ForceSensingLoad, OnboardLoad, PointerSpeedLoad, ReportRateLoad, SidetoneLoad, SmartShiftLoad,
+    BacklightLoad, DisableKeysLoad, DpiLoad, EasySwitchLoad, FlashBindingsLoad, FlashProfilesLoad,
+    FnLockLoad, ForceSensingLoad, OnboardLoad, PointerSpeedLoad, ReportRateLoad, SidetoneLoad,
+    SmartShiftLoad,
 };
 
 /// Result of confirming a SmartShift write by reading the value back.
@@ -268,6 +269,7 @@ impl AppState {
             state.load_current_disable_keys(cx);
             state.load_current_onboard(cx);
             state.load_current_flash_bindings(cx);
+            state.load_current_flash_profiles(cx);
         });
     }
 

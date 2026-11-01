@@ -71,10 +71,35 @@ impl AppState {
         self.persist_and_reload("DPI presets");
         events
     }
+    /// Replace the selected device's DPI presets from a view: a flash mouse
+    /// keeps them as its played profile's DPI modes, written by the agent
+    /// (an empty list or one longer than the profile holds is dropped — the
+    /// editor offers neither); every other device keeps them in
+    /// configuration through [`Self::commit_dpi_presets`].
+    pub(crate) fn edit_dpi_presets(cx: &mut gpui::App, presets: Vec<Dpi>) {
+        let flash_slots = Self::try_read(cx).and_then(Self::current_flash_dpi_slots);
+        match flash_slots {
+            Some(slots) if presets.is_empty() || presets.len() > slots => {
+                debug!(
+                    count = presets.len(),
+                    slots, "flash DPI modes out of range — edit dropped"
+                );
+            }
+            Some(_) => Self::edit_flash_profiles(
+                cx,
+                openlogi_core::hid::FlashProfileEdit::DpiModes(presets),
+            ),
+            None => Self::apply(cx, |state| state.commit_dpi_presets(presets)),
+        }
+    }
     /// Read the DPI preset list for the active device, or an empty `Vec`
-    /// when no device is selected. UI helper.
+    /// when no device is selected: a flash mouse's played profile modes,
+    /// else the configured presets. UI helper.
     #[must_use]
     pub fn dpi_presets(&self) -> Vec<Dpi> {
+        if let Some(modes) = self.current_flash_dpi_modes() {
+            return modes;
+        }
         self.current_record()
             .and_then(DeviceRecord::persistent_config_key)
             .map_or_else(Default::default, |key| self.config.dpi_presets(key))

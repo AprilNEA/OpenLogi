@@ -20,8 +20,9 @@ use openlogi_core::binding::FlashBindingsState;
 use openlogi_core::config::{ConfigRevision, Lighting};
 use openlogi_core::hid::{
     BacklightChange, BacklightState, DeviceRoute, DisableKeysMask, DisableKeysState, Dpi, DpiInfo,
-    EasySwitchHosts, FnLockState, ForceSensingInfo, LightCommand, OnboardState, PointerSpeed,
-    ReceiverSelector, ReportRate, ReportRateInfo, SidetoneLevel, SmartShiftStatus, WriteError,
+    EasySwitchHosts, FlashProfileEdit, FlashProfiles, FnLockState, ForceSensingInfo, LightCommand,
+    OnboardState, PointerSpeed, ReceiverSelector, ReportRate, ReportRateInfo, SidetoneLevel,
+    SmartShiftStatus, WriteError,
 };
 use openlogi_ipc::{
     AgentClient, ChosenLight, ConfigReloadError, FlowPairTarget, FlowPairingCommandError,
@@ -711,6 +712,47 @@ impl Request for ReadFlashBindings {
     }
 }
 
+pub struct ReadFlashProfiles {
+    pub route: DeviceRoute,
+    pub reply: oneshot::Sender<Result<FlashProfiles, WriteError>>,
+}
+
+impl Request for ReadFlashProfiles {
+    type Answer = Result<FlashProfiles, WriteError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .read_flash_profiles(context::current(), self.route.clone())
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, _: &UpdateSender) {
+        let _ = self.reply.send(or_unavailable(outcome));
+    }
+}
+
+/// Change a flash mouse's onboard profiles; the reply is the agent's
+/// verdict on the edit, which for a flash write means it was queued.
+pub struct EditFlashProfiles {
+    pub route: DeviceRoute,
+    pub edit: FlashProfileEdit,
+    pub reply: oneshot::Sender<Result<(), WriteError>>,
+}
+
+impl Request for EditFlashProfiles {
+    type Answer = Result<(), WriteError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .edit_flash_profiles(context::current(), self.route.clone(), self.edit.clone())
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, _: &UpdateSender) {
+        let _ = self.reply.send(or_unavailable(outcome));
+    }
+}
+
 /// Have the agent re-read the `config.toml` the GUI just saved
 /// ([`openlogi_ipc::Agent::reload_saved_config`]).
 ///
@@ -1187,6 +1229,8 @@ commands! {
     SetDisableKeys,
     ReadOnboard,
     ReadFlashBindings,
+    ReadFlashProfiles,
+    EditFlashProfiles,
     ReloadConfig,
     RequestAccessibilityPrompt,
     RetryConnection,

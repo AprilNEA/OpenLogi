@@ -548,31 +548,72 @@ fn a_backup_page_with_a_bad_crc_cannot_be_restored() {
 }
 
 #[test]
-fn a_directory_write_selects_the_first_profile_when_the_played_one_is_gone() {
+fn a_directory_write_plays_the_profile_the_caller_names() {
     futures::executor::block_on(async {
         let (channel, handle, sim) = device(g700_like()).await;
         let directory = ProfileDirectory::parse(&directory_page(&[2, 3]), 5);
 
-        writer(&channel).write_directory(&directory).await.unwrap();
+        writer(&channel)
+            .write_directory(&directory, CurrentProfile::Index(1))
+            .await
+            .unwrap();
 
         let mut frames = write_sequence(1, &directory.to_page());
-        frames.push(select([0x00, 0x00, 0x00]));
+        frames.push(select([0x00, 0x01, 0x00]));
         assert_eq!(handle.written_reports(), frames);
         let sim = sim.lock().unwrap();
         assert_eq!(sim.pages[1], *directory_page(&[2, 3]).as_bytes());
-        assert_eq!(sim.current, [0x00, 0x00, 0x00], "index 2 no longer exists");
+        assert_eq!(sim.current, [0x00, 0x01, 0x00]);
     });
 }
 
 #[test]
-fn a_directory_write_keeps_a_profile_that_is_still_listed() {
+fn a_directory_write_may_keep_the_played_index() {
     futures::executor::block_on(async {
         let (channel, _handle, sim) = device(g700_like()).await;
         let directory = ProfileDirectory::parse(&directory_page(&[2, 3, 4, 6]), 5);
 
-        writer(&channel).write_directory(&directory).await.unwrap();
+        writer(&channel)
+            .write_directory(&directory, CurrentProfile::Index(2))
+            .await
+            .unwrap();
 
         assert_eq!(sim.lock().unwrap().current, [0x00, 0x02, 0x00]);
+    });
+}
+
+#[test]
+fn a_directory_without_profiles_or_play_target_is_refused_without_a_frame() {
+    futures::executor::block_on(async {
+        let (channel, handle, sim) = device(g700_like()).await;
+        let empty = ProfileDirectory::parse(&directory_page(&[]), 5);
+        let two = ProfileDirectory::parse(&directory_page(&[2, 3]), 5);
+
+        let cases = [
+            (&empty, CurrentProfile::Index(0), Refusal::NoProfiles),
+            (&two, CurrentProfile::Index(2), Refusal::PlayNotListed),
+            (&two, CurrentProfile::Factory, Refusal::PlayNotListed),
+            (
+                &two,
+                CurrentProfile::Address { page: 4, offset: 0 },
+                Refusal::PlayNotListed,
+            ),
+        ];
+        for (directory, play, expected) in cases {
+            let error = writer(&channel)
+                .write_directory(directory, play)
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(error, PageWriteError::Refused { page: 1, reason } if reason == expected),
+                "{play:?}: {error:?}"
+            );
+        }
+        assert!(handle.written_reports().is_empty());
+        assert_eq!(
+            sim.lock().unwrap().pages[1],
+            *directory_page(&[2, 3, 4]).as_bytes()
+        );
     });
 }
 

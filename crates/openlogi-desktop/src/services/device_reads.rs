@@ -9,9 +9,9 @@ use std::time::Duration;
 use gpui::{Context, Subscription};
 use openlogi_core::binding::{FlashBindingsState, FlashWrite};
 use openlogi_core::hid::{
-    BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
-    ForceSensingInfo, OnboardState, PointerSpeed, ReportRateInfo, SidetoneLevel, SmartShiftStatus,
-    WriteError,
+    BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FlashProfiles,
+    FnLockState, ForceSensingInfo, OnboardState, PointerSpeed, ProfileIndex, ReportRateInfo,
+    SidetoneLevel, SmartShiftStatus, WriteError,
 };
 use swr_core::{
     MaybeSend, MaybeSync, QueryHandle, QueryOptions, QueryState, Retry, RetryPolicy, Runtime,
@@ -21,13 +21,14 @@ use swr_gpui::Query;
 use tokio::sync::mpsc;
 
 use super::ipc::{
-    Command, ReadBacklight, ReadDpi, ReadEasySwitchHosts, ReadFlashBindings, ReadFnLock,
-    ReadForceSensing, ReadOnboard, ReadPointerSpeed, ReadReportRate, ReadSidetone, ReadSmartShift,
+    Command, ReadBacklight, ReadDpi, ReadEasySwitchHosts, ReadFlashBindings, ReadFlashProfiles,
+    ReadFnLock, ReadForceSensing, ReadOnboard, ReadPointerSpeed, ReadReportRate, ReadSidetone,
+    ReadSmartShift,
 };
 use crate::state::{
-    AppState, BacklightLoad, DeviceKey, DpiLoad, EasySwitchLoad, FlashBindingsLoad, FnLockLoad,
-    ForceSensingLoad, HostRenameRefusal, Load, OnboardLoad, PointerSpeedLoad, ReportRateLoad,
-    SidetoneLoad, SmartShiftLoad, StateEvent,
+    AppState, BacklightLoad, DeviceKey, DpiLoad, EasySwitchLoad, FlashBindingsLoad,
+    FlashProfilesLoad, FnLockLoad, ForceSensingLoad, HostRenameRefusal, Load, OnboardLoad,
+    PointerSpeedLoad, ReportRateLoad, SidetoneLoad, SmartShiftLoad, StateEvent,
 };
 
 const ROOT: &str = "device-read";
@@ -42,6 +43,7 @@ const BACKLIGHT: &str = "backlight";
 const EASY_SWITCH: &str = "easy-switch";
 const ONBOARD: &str = "onboard";
 const FLASH_BINDINGS: &str = "flash-bindings";
+const FLASH_PROFILES: &str = "flash-profiles";
 
 /// How often a flash-bindings read is repeated while a write of the mouse's
 /// flash is queued or running, so the panel sees it end.
@@ -96,6 +98,18 @@ pub(crate) struct DeviceReads {
     next_host_rename: u64,
     onboard: BTreeMap<DeviceKey, DeviceRead<OnboardState>>,
     flash_slots: BTreeMap<DeviceKey, DeviceRead<FlashBindingsState>>,
+    flash_profiles: BTreeMap<DeviceKey, DeviceRead<FlashProfiles>>,
+    /// The flash mice a re-read of whose profiles is scheduled while their
+    /// flash write runs: one at a time, however often the query reports.
+    flash_polls: BTreeSet<DeviceKey>,
+}
+
+/// The profile a flash mouse plays, as a reading of its profiles found it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PlayedFlashProfile {
+    /// Its factory profile, which the directory does not list.
+    Factory,
+    Listed(ProfileIndex),
 }
 
 /// The Easy-Switch host renames sent to one device that have not been
@@ -535,6 +549,123 @@ impl DeviceReads {
                 _observer: observer,
             },
         );
+    }
+
+    /// Read the onboard profiles of a flash mouse (the G700) from it, and
+    /// keep reading while a write of its flash is queued or running. A
+    /// reading that finds it playing another profile than the last one
+    /// re-reads everything that profile decides: the bindings, the DPI and
+    /// the report rate.
+    pub(crate) fn ensure_flash_profiles(
+        &mut self,
+        key: DeviceKey,
+        route: DeviceRoute,
+        commands: mpsc::UnboundedSender<Command>,
+        cx: &mut Context<AppState>,
+    ) {
+        if self
+            .flash_profiles
+            .get(&key)
+            .is_some_and(|read| read.route == route)
+        {
+            return;
+        }
+        self.remove_flash_profiles(&key);
+        let Some((client, runtime)) = self.cache() else {
+            return;
+        };
+        let flight = self.take_flight();
+        let fetch_route = route.clone();
+        let fetcher = Retry::new(
+            runtime,
+            move |_| {
+                let commands = commands.clone();
+                let route = fetch_route.clone();
+                read_ipc(
+                    move |reply| ReadFlashProfiles { route, reply }.into(),
+                    commands,
+                )
+            },
+            READ_RETRY_POLICY,
+        )
+        .retry_if(|error| !fn_lock_error_is_permanent(error));
+        let handle = client.subscribe(
+            query_key(FLASH_PROFILES, &key),
+            fetcher,
+            QueryOptions::immutable(),
+        );
+        read_through(&client, FLASH_PROFILES, &key, &handle);
+        let query = Query::new(&client, handle, cx);
+        let load = project_load(query.read(cx), fn_lock_error_is_permanent);
+        let observed_key = key.clone();
+        let observer = cx.observe(query.state(), move |state, query_state, cx| {
+            let load = project_load(query_state.read(cx), fn_lock_error_is_permanent);
+            let writing = matches!(
+                &load,
+                Load::Ready(reading)
+                    if matches!(reading.write, FlashWrite::Pending | FlashWrite::Writing)
+            );
+            let reads = state.device_reads_mut();
+            let played_before = reads.played_flash_profile(&observed_key);
+            if reads.update_flash_profiles(&observed_key, flight, load) {
+                let played = reads.played_flash_profile(&observed_key);
+                if played_before.is_some() && played != played_before {
+                    reads.refresh_flash_bindings(&observed_key);
+                    reads.retry_dpi(&observed_key);
+                    reads.retry_report_rate(&observed_key);
+                }
+                cx.emit(StateEvent::OnboardChanged(observed_key.clone()));
+            }
+            if writing && reads.flash_polls.insert(observed_key.clone()) {
+                let key = observed_key.clone();
+                cx.spawn(async move |state, cx| {
+                    cx.background_executor().timer(FLASH_WRITE_POLL).await;
+                    state
+                        .update(cx, |state, _| {
+                            let reads = state.device_reads_mut();
+                            reads.flash_polls.remove(&key);
+                            reads.refresh_flash_profiles(&key);
+                        })
+                        .ok();
+                })
+                .detach();
+            }
+        });
+        self.flash_profiles.insert(
+            key,
+            DeviceRead {
+                route,
+                flight,
+                load,
+                query,
+                _observer: observer,
+            },
+        );
+    }
+
+    pub(crate) fn refresh_flash_profiles(&mut self, key: &DeviceKey) {
+        if let Some(read) = self.flash_profiles.get_mut(key) {
+            read.query.revalidate();
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn flash_profiles_load(&self, key: &DeviceKey) -> Option<&FlashProfilesLoad> {
+        self.flash_profiles.get(key).map(|read| &read.load)
+    }
+
+    /// The profile `key`'s last profiles reading found it playing; `None`
+    /// before one.
+    fn played_flash_profile(&self, key: &DeviceKey) -> Option<PlayedFlashProfile> {
+        match self.flash_profiles_load(key)? {
+            Load::Ready(reading) => Some(
+                reading
+                    .onboard
+                    .active_profile
+                    .map_or(PlayedFlashProfile::Factory, PlayedFlashProfile::Listed),
+            ),
+            _ => None,
+        }
     }
 
     pub(crate) fn refresh_flash_bindings(&mut self, key: &DeviceKey) {
@@ -1544,6 +1675,7 @@ impl DeviceReads {
         self.remove_easy_switch(key);
         self.remove_onboard(key);
         self.remove_flash_bindings(key);
+        self.remove_flash_profiles(key);
     }
 
     pub(crate) fn remove_dpi(&mut self, key: &DeviceKey) {
@@ -1564,6 +1696,13 @@ impl DeviceReads {
         if let Some(read) = self.flash_slots.remove(key) {
             drop(read);
             self.clear::<FlashBindingsState>(FLASH_BINDINGS, key);
+        }
+    }
+
+    fn remove_flash_profiles(&mut self, key: &DeviceKey) {
+        if let Some(read) = self.flash_profiles.remove(key) {
+            drop(read);
+            self.clear::<FlashProfiles>(FLASH_PROFILES, key);
         }
     }
 
@@ -1640,6 +1779,7 @@ impl DeviceReads {
             .chain(self.easy_switch.keys())
             .chain(self.onboard.keys())
             .chain(self.flash_slots.keys())
+            .chain(self.flash_profiles.keys())
             .filter(|key| !present(key.as_str()))
             .cloned()
             .collect();
@@ -1821,6 +1961,26 @@ impl DeviceReads {
     ) -> bool {
         let Some(read) = self
             .flash_slots
+            .get_mut(key)
+            .filter(|read| read.flight == flight)
+        else {
+            return false;
+        };
+        if read.load == load {
+            return false;
+        }
+        read.load = load;
+        true
+    }
+
+    fn update_flash_profiles(
+        &mut self,
+        key: &DeviceKey,
+        flight: u64,
+        load: FlashProfilesLoad,
+    ) -> bool {
+        let Some(read) = self
+            .flash_profiles
             .get_mut(key)
             .filter(|read| read.flight == flight)
         else {

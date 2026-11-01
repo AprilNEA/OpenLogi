@@ -204,6 +204,14 @@ pub enum Refusal {
     /// it.
     #[error("it is neither the directory, a page the directory lists, nor erased")]
     UnknownContent,
+    /// The directory lists no profile, which would leave the device nothing
+    /// to play but its factory profile.
+    #[error("the directory would list no profile")]
+    NoProfiles,
+    /// The profile the device is to play once the directory is written is
+    /// not one the directory lists.
+    #[error("the profile to play afterwards is not one the directory lists")]
+    PlayNotListed,
 }
 
 /// The step of a page write that failed.
@@ -511,18 +519,50 @@ impl<'a> MemoryWriter<'a> {
             page,
             &Image::Written(Box::new(content)),
             Guard::KnownContent,
+            None,
         )
         .await
     }
 
-    /// Writes `directory` to the directory page. When it no longer holds the
-    /// profile the device played, its first profile is selected instead, or
-    /// the factory profile when it lists none.
+    /// Writes `directory` to the directory page and then makes the device
+    /// play `play`, which must be a profile `directory` lists: an edit that
+    /// moves entries changes what an index names, so only the caller knows
+    /// which profile the device should end up on. A directory that lists no
+    /// profile, or a `play` it does not list, is refused before any frame
+    /// is sent. A failure before the erase selects the previous profile
+    /// again, under the old directory, which is intact.
     pub async fn write_directory(
         &self,
         directory: &ProfileDirectory,
+        play: CurrentProfile,
     ) -> Result<(), PageWriteError> {
-        self.write_page(DIRECTORY_PAGE, &directory.to_page()).await
+        let refused = |reason| PageWriteError::Refused {
+            page: DIRECTORY_PAGE,
+            reason,
+        };
+        let entries = directory.entries();
+        if entries.is_empty() {
+            return Err(refused(Refusal::NoProfiles));
+        }
+        let listed = match play {
+            CurrentProfile::Index(index) => usize::from(index) < entries.len(),
+            CurrentProfile::Address { page, offset } => entries
+                .iter()
+                .any(|entry| entry.page == page && entry.offset == offset),
+            CurrentProfile::Factory => false,
+        };
+        if !listed {
+            return Err(refused(Refusal::PlayNotListed));
+        }
+        let mut content = directory.to_page();
+        content.update_crc();
+        self.put(
+            DIRECTORY_PAGE,
+            &Image::Written(Box::new(content)),
+            Guard::KnownContent,
+            Some(play),
+        )
+        .await
     }
 
     /// Puts a backed-up page back: an erase alone for erased flash, a write
@@ -530,10 +570,19 @@ impl<'a> MemoryWriter<'a> {
     /// page the device reads may be restored, so a backup of this same
     /// device is the only fit source.
     pub async fn restore_page(&self, page: u8, image: &PageImage) -> Result<(), PageWriteError> {
-        self.put(page, &image.0, Guard::AnyPage).await
+        self.put(page, &image.0, Guard::AnyPage, None).await
     }
 
-    async fn put(&self, page: u8, image: &Image, guard: Guard) -> Result<(), PageWriteError> {
+    /// Writes `image` to `page`, then selects `play`, or — without one — the
+    /// profile the device played before (see [`reselection`] for the
+    /// directory).
+    async fn put(
+        &self,
+        page: u8,
+        image: &Image,
+        guard: Guard,
+        play: Option<CurrentProfile>,
+    ) -> Result<(), PageWriteError> {
         if page == RAM_PAGE {
             return Err(PageWriteError::Refused {
                 page,
@@ -613,13 +662,13 @@ impl<'a> MemoryWriter<'a> {
             return Err(PageWriteError::Mismatch { page, offset });
         }
 
-        let profile = if page == DIRECTORY_PAGE {
-            reselection(
+        let profile = match play {
+            Some(play) => play,
+            None if page == DIRECTORY_PAGE => reselection(
                 previous,
                 &ProfileDirectory::parse(&expected, self.profile_count),
-            )
-        } else {
-            previous
+            ),
+            None => previous,
         };
         if profile != CurrentProfile::Factory {
             write_current_profile(self.chan, self.device_index, profile)

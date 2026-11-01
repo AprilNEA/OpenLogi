@@ -15,13 +15,14 @@ use hidpp::{
         onboard_memory::{
             Page, PageImage, PageWriteError, RAM_PAGE, UnrestorablePage,
             directory::DIRECTORY_PAGE,
-            g700::{self, DPI_MODE_COUNT, DpiMode, G700Profile, dpi_from_raw},
+            g700::{self, DPI_MODE_COUNT, DpiMode, G700Profile, NameError, dpi_from_raw},
             read_page,
         },
         report_rate::{ReportInterval, read_report_interval, write_report_interval},
         resolution::{Resolution, read_current_resolution, write_current_resolution},
     },
 };
+use openlogi_core::hid::Dpi;
 use thiserror::Error;
 
 use super::{G700Identity, G700Link, read_identity};
@@ -157,6 +158,43 @@ pub enum G700Error {
         /// The interval.
         millis: u8,
     },
+    /// A profile name the name field cannot hold.
+    #[error("the profile name cannot be stored: {0}")]
+    InvalidName(#[source] NameError),
+    /// A profile keeps one to five DPI modes.
+    #[error("a profile keeps one to {DPI_MODE_COUNT} DPI modes, not {count}")]
+    DpiModeCount {
+        /// How many were asked for.
+        count: usize,
+    },
+    /// A DPI no step of the sensor table runs at.
+    #[error("{dpi} dpi is not a step of the G700's sensor table")]
+    DpiNotInTable {
+        /// The DPI.
+        dpi: Dpi,
+    },
+    /// The edit needs the profile the mouse plays, and it plays its factory
+    /// profile.
+    #[error("the mouse plays its factory profile")]
+    NoPlayedProfile,
+    /// Selecting a profile is a register write, not a flash edit.
+    #[error("selecting a profile is not a flash edit")]
+    NotAFlashEdit,
+    /// The edit would disable the last enabled profile.
+    #[error("the last enabled profile cannot be disabled")]
+    LastProfile,
+    /// The page holds no profile that can be listed again.
+    #[error("page {page} holds no profile that can be enabled")]
+    NotAStoredProfile {
+        /// The page.
+        page: u8,
+    },
+    /// Every directory slot is taken.
+    #[error("all profile slots are taken")]
+    DirectoryFull,
+    /// No erased page is left for a new profile.
+    #[error("no free memory page is left for a new profile")]
+    NoFreePage,
     /// A page differs from its backup, and the backup cannot be put back.
     #[error("page {page} differs from the backup, whose copy cannot be restored: {source}")]
     Unrestorable {
@@ -166,6 +204,17 @@ pub enum G700Error {
         #[source]
         source: UnrestorablePage,
     },
+}
+
+impl From<G700Error> for WriteError {
+    /// The error as the IPC carries it: the device's own error as it is,
+    /// anything else by its message.
+    fn from(error: G700Error) -> Self {
+        match error {
+            G700Error::Device(error) => error,
+            other => Self::Hidpp(other.to_string()),
+        }
+    }
 }
 
 /// What a restore did to one page.
@@ -574,7 +623,7 @@ pub async fn set_g700_current_profile(
     set_current_profile_on(link.chan(), link.device_index(), profile).await
 }
 
-async fn set_current_profile_on(
+pub(super) async fn set_current_profile_on(
     chan: &HidppChannel,
     device_index: u8,
     profile: CurrentProfile,

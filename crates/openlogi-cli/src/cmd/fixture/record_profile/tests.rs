@@ -187,6 +187,23 @@ impl Agent for TestAgent {
         unreachable!("profile capture does not read flash bindings")
     }
 
+    async fn read_flash_profiles(
+        self,
+        _: TarpcContext,
+        _route: DeviceRoute,
+    ) -> Result<openlogi_core::hid::FlashProfiles, WriteError> {
+        unreachable!("profile capture does not read flash profiles")
+    }
+
+    async fn edit_flash_profiles(
+        self,
+        _: TarpcContext,
+        _route: DeviceRoute,
+        _edit: openlogi_core::hid::FlashProfileEdit,
+    ) -> Result<(), WriteError> {
+        unreachable!("profile capture is read-only")
+    }
+
     async fn unpair_device(
         self,
         _: TarpcContext,

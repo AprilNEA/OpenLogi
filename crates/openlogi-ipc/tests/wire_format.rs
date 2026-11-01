@@ -48,8 +48,9 @@ use openlogi_core::device::{
 };
 use openlogi_core::hid::{
     BacklightChange, BacklightControls, BacklightDuration, BacklightMode, BacklightState,
-    BacklightStatus, Click, DeviceRoute, DisableKeysMask, DisableKeysState, Dpi, DpiCapabilities,
-    DpiInfo, EasySwitchHosts, EasySwitchSlot, FnLockState, ForceSensingInfo, HidppFeatureErrorKind,
+    BacklightStatus, Click, DeviceRoute, DisableKeysMask, DisableKeysState, DisabledProfile, Dpi,
+    DpiCapabilities, DpiInfo, EasySwitchHosts, EasySwitchSlot, FlashProfileEdit,
+    FlashProfileSettings, FlashProfiles, FnLockState, ForceSensingInfo, HidppFeatureErrorKind,
     HidppOperation, HostConnection, HostOsInfo, HostOsKind, LightCommand, OnboardMode,
     OnboardProfile, OnboardState, PasskeyMethod, ProfileIndex, ReceiverSelector, ReportRate,
     ReportRateInfo, ScrollReportingTarget, ScrollWheelMode, SidetoneLevel, SmartShiftAutoDisengage,
@@ -1560,5 +1561,71 @@ fn disable_keys_requests_are_appended() {
             desired: DisableKeysMask::CAPS_LOCK,
         },
         "2d000846303044434146450101",
+    );
+}
+
+#[test]
+fn flash_profiles() {
+    let route = DeviceRoute::Unifying {
+        receiver_uid: "C531".into(),
+        slot: 1,
+    };
+    let first = ProfileIndex::new(1).expect("profile 1");
+    assert_wire(
+        &AgentRequest::ReadFlashProfiles {
+            route: route.clone(),
+        },
+        "3b01044335333101",
+    );
+    assert_wire(
+        &AgentRequest::EditFlashProfiles {
+            route,
+            edit: FlashProfileEdit::Rename {
+                profile: first,
+                name: "Игры".into(),
+            },
+        },
+        "3c01044335333101030108d098d0b3d180d18b",
+    );
+    assert_wire(
+        &FlashProfiles {
+            onboard: OnboardState {
+                mode: OnboardMode::Onboard,
+                active_profile: Some(first),
+                profiles: vec![
+                    OnboardProfile {
+                        index: first,
+                        name: Some("\u{1f}@>D8;L 1".into()),
+                        enabled: true,
+                    },
+                    OnboardProfile {
+                        index: ProfileIndex::new(2).expect("profile 2"),
+                        name: None,
+                        enabled: false,
+                    },
+                ],
+            },
+            active: Some(FlashProfileSettings {
+                dpi_modes: vec![Some(Dpi::new(850)), None],
+                default_mode: Some(0),
+                report_rate: Some(ReportRate::new(250)),
+            }),
+            disabled: vec![DisabledProfile {
+                page: 8,
+                name: None,
+            }],
+            can_create: true,
+            write: FlashWrite::Pending,
+        },
+        "000101020101091f403e44383b4c203101020000010201fb520300010001fa0108000101",
+    );
+    assert_wire(&HidppOperation::SelectOnboardProfile, "21");
+    assert_wire(&FlashProfileEdit::Activate(first), "0001");
+    assert_wire(&FlashProfileEdit::Enable { page: 8 }, "0108");
+    assert_wire(&FlashProfileEdit::Disable(first), "0201");
+    assert_wire(&FlashProfileEdit::Duplicate(first), "0401");
+    assert_wire(
+        &FlashProfileEdit::DpiModes(vec![Dpi::new(400), Dpi::new(5700)]),
+        "0502fb9001fb4416",
     );
 }

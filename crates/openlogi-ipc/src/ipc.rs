@@ -20,9 +20,9 @@ use openlogi_core::device::{
 };
 use openlogi_core::hid::{
     BacklightChange, BacklightState, DeviceRoute, DisableKeysMask, DisableKeysState, Dpi, DpiInfo,
-    EasySwitchHosts, FnLockState, ForceSensingInfo, LightCommand, OnboardState, PairingError,
-    PasskeyMethod, PointerSpeed, ReceiverSelector, ReportRate, ReportRateInfo, ScrollWheelMode,
-    SidetoneLevel, SmartShiftStatus, WriteError,
+    EasySwitchHosts, FlashProfileEdit, FlashProfiles, FnLockState, ForceSensingInfo, LightCommand,
+    OnboardState, PairingError, PasskeyMethod, PointerSpeed, ReceiverSelector, ReportRate,
+    ReportRateInfo, ScrollWheelMode, SidetoneLevel, SmartShiftStatus, WriteError,
 };
 use serde::{Deserialize, Serialize};
 pub use succession::Identity;
@@ -198,7 +198,11 @@ pub use succession::Identity;
 ///      bindings. `Action::{ShowBatteryLevel, NextOnboardProfile,
 ///      PreviousOnboardProfile, CycleOnboardProfiles, MouseButton}` appended
 ///      after the Easy-Switch actions. `ButtonId` gains the `G10`, `G11` and
-///      `ButtonN` names. `Agent::read_flash_bindings` appended.
+///      `ButtonN` names. `Agent::read_flash_bindings` appended, then
+///      `Agent::read_flash_profiles` and `Agent::edit_flash_profiles` with
+///      [`FlashProfiles`] and [`FlashProfileEdit`] — the G700's onboard
+///      profiles and their DPI modes, edited in its flash.
+///      `HidppOperation::SelectOnboardProfile` appended after `WriteSidetone`.
 pub const PROTOCOL_VERSION: u32 = 47;
 
 /// Environment variable through which the agent hands a supervised helper the
@@ -1275,4 +1279,19 @@ pub trait Agent {
     /// without device I/O; a route that is no such mouse is
     /// [`WriteError::DeviceNotFound`].
     async fn read_flash_bindings(route: DeviceRoute) -> Result<FlashBindingsState, WriteError>;
+
+    /// The onboard profiles of a mouse whose flash is the source of truth
+    /// for its settings (the G700), read from the mouse, with where its
+    /// queued flash writes stand. A route that is no such mouse is
+    /// [`WriteError::DeviceNotFound`].
+    async fn read_flash_profiles(route: DeviceRoute) -> Result<FlashProfiles, WriteError>;
+
+    /// Change a flash mouse's onboard profiles. Selecting a profile is
+    /// written before this returns; every other edit is checked, queued
+    /// with the mouse's other flash writes and run to its end afterwards —
+    /// [`FlashProfiles::write`] says how it went.
+    async fn edit_flash_profiles(
+        route: DeviceRoute,
+        edit: FlashProfileEdit,
+    ) -> Result<(), WriteError>;
 }

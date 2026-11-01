@@ -247,9 +247,11 @@ pub struct Capabilities {
     /// identity.
     #[serde(default)]
     pub change_host: bool,
-    /// Button bindings held in HID++ 1.0 onboard-profile flash, which the
-    /// agent rewrites (the G700). Measured by the device layer from the
-    /// mouse's registers, never from a feature table. Consumers ask
+    /// Settings held in HID++ 1.0 onboard-profile flash, which the agent
+    /// rewrites (the G700): the button bindings, the profiles themselves,
+    /// and each profile's DPI modes and report rate. The mouse is their
+    /// source of truth. Measured by the device layer from the mouse's
+    /// registers, never from a feature table. Layout consumers ask
     /// [`GamingButtons::for_device`](crate::binding::GamingButtons::for_device).
     /// Appended: crosses the IPC and the persisted identity.
     #[serde(default)]

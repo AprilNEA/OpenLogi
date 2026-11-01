@@ -10,8 +10,8 @@ use std::sync::LazyLock;
 
 use openlogi_core::binding::flash::{MOUSE_ONLY_FUNCTIONS, flash_intents};
 use openlogi_core::binding::{
-    Action, ButtonId, FlashBinding, FlashBindingsState, FlashWrite, GamingLayout, ModifierHost,
-    MouseButtonNumber, Slot, SlotIntent,
+    Action, ButtonId, FlashBinding, FlashBindingsState, FlashHost, FlashWrite, GamingLayout,
+    MouseButtonNumber, RefusedSlot, Slot, SlotIntent,
 };
 use openlogi_core::config::Config;
 
@@ -32,6 +32,13 @@ pub(crate) enum SlotNote {
     Macro,
     /// The mouse holds a binding OpenLogi cannot name.
     Unknown,
+    /// The configured action is one only OpenLogi runs, and this is a
+    /// primary button, which keeps its click on the mouse instead.
+    PrimaryKept,
+    /// The configured action is one only OpenLogi runs, and this platform's
+    /// input hook cannot see the button the mouse would press for it, so
+    /// the slot keeps what the mouse holds.
+    Unavailable,
 }
 
 /// Where the mouse's flash stands, for the panel's status line.
@@ -51,6 +58,9 @@ pub(crate) struct FlashView {
     pub shown: BTreeMap<ButtonId, Action>,
     pub notes: BTreeMap<ButtonId, SlotNote>,
     pub status: Option<FlashStatus>,
+    /// What each slot does as the layout ships it, where an action names it:
+    /// what "reset to default" binds.
+    pub defaults: BTreeMap<ButtonId, Action>,
 }
 
 impl AppState {
@@ -68,7 +78,7 @@ impl AppState {
             key,
             layout,
             state.as_deref(),
-            ModifierHost::CURRENT,
+            FlashHost::CURRENT,
         ))
     }
 }
@@ -81,9 +91,17 @@ fn flash_view(
     key: Option<&str>,
     layout: &GamingLayout,
     state: Option<&FlashBindingsState>,
-    host: ModifierHost,
+    host: FlashHost,
 ) -> FlashView {
-    let mut view = FlashView::default();
+    let mut view = FlashView {
+        defaults: layout
+            .slots
+            .iter()
+            .zip(layout.flash_defaults)
+            .filter_map(|(slot, binding)| Some((slot.button, binding.action(host.modifiers)?)))
+            .collect(),
+        ..FlashView::default()
+    };
     let intents = key.map_or_else(
         || vec![SlotIntent::Keep; layout.slots.len()],
         |key| flash_intents(config, key, layout, host),
@@ -93,7 +111,9 @@ fn flash_view(
         let note = match intent {
             SlotIntent::Native(_) => Some(SlotNote::OnMouse),
             SlotIntent::Agent => Some(agent_note(button, state)),
-            SlotIntent::Keep => held.map(|held| match held.action(host) {
+            SlotIntent::Refused(RefusedSlot::PrimaryButton) => Some(SlotNote::PrimaryKept),
+            SlotIntent::Refused(RefusedSlot::HookBlind) => Some(SlotNote::Unavailable),
+            SlotIntent::Keep => held.map(|held| match held.action(host.modifiers) {
                 Some(action) => {
                     view.shown.insert(button, action);
                     SlotNote::OnMouse
@@ -157,6 +177,11 @@ mod tests {
 
     const KEY: &str = "receiver:C531:slot:1";
 
+    const LINUX: FlashHost = FlashHost {
+        modifiers: openlogi_core::binding::ModifierHost::Other,
+        hook: openlogi_core::binding::AgentButtonHook::Sees,
+    };
+
     fn number(n: u8) -> MouseButtonNumber {
         MouseButtonNumber::try_new(n).expect("a mouse button number")
     }
@@ -189,13 +214,7 @@ mod tests {
             word_offset: 0,
         };
         state.slots[10] = FlashBinding::Function(FlashFunction::Other(0x99));
-        let view = flash_view(
-            &config(&[]),
-            Some(KEY),
-            &G700,
-            Some(&state),
-            ModifierHost::Other,
-        );
+        let view = flash_view(&config(&[]), Some(KEY), &G700, Some(&state), LINUX);
         assert_eq!(
             view.shown.get(&ButtonId::G6),
             Some(&Action::MouseButton(number(6)))
@@ -205,6 +224,12 @@ mod tests {
             Some(&Action::ShowBatteryLevel)
         );
         assert_eq!(view.notes.get(&ButtonId::G6), Some(&SlotNote::OnMouse));
+        assert_eq!(
+            view.defaults.get(&ButtonId::G11),
+            Some(&Action::CycleOnboardProfiles),
+            "the layout default is known even where the mouse holds a macro"
+        );
+        assert_eq!(view.defaults.len(), G700.slots.len());
         assert_eq!(view.notes.get(&ButtonId::G10), Some(&SlotNote::Macro));
         assert_eq!(view.notes.get(&ButtonId::G11), Some(&SlotNote::Unknown));
         assert!(!view.shown.contains_key(&ButtonId::G10));
@@ -221,7 +246,7 @@ mod tests {
             (ButtonId::G7, Action::Copy),
             (ButtonId::G8, Action::Paste),
         ]);
-        let view = flash_view(&config, Some(KEY), &G700, Some(&state), ModifierHost::Other);
+        let view = flash_view(&config, Some(KEY), &G700, Some(&state), LINUX);
         assert_eq!(view.notes.get(&ButtonId::G6), Some(&SlotNote::OnMouse));
         assert_eq!(
             view.notes.get(&ButtonId::G7),
@@ -235,13 +260,36 @@ mod tests {
     }
 
     #[test]
+    fn refused_slots_say_why_the_mouse_keeps_them() {
+        let config = config(&[
+            (ButtonId::LeftClick, Action::Copy),
+            (ButtonId::G7, Action::Copy),
+        ]);
+        let windows = FlashHost {
+            hook: openlogi_core::binding::AgentButtonHook::Blind,
+            ..LINUX
+        };
+        let view = flash_view(&config, Some(KEY), &G700, Some(&factory_state()), windows);
+        assert_eq!(
+            view.notes.get(&ButtonId::LeftClick),
+            Some(&SlotNote::PrimaryKept)
+        );
+        assert_eq!(view.notes.get(&ButtonId::G7), Some(&SlotNote::Unavailable));
+        let view = flash_view(&config, Some(KEY), &G700, Some(&factory_state()), LINUX);
+        assert_eq!(
+            view.notes.get(&ButtonId::G7),
+            Some(&SlotNote::ByOpenLogi(None))
+        );
+    }
+
+    #[test]
     fn nothing_is_claimed_before_the_agent_answers() {
         let view = flash_view(
             &config(&[(ButtonId::G7, Action::Copy)]),
             Some(KEY),
             &G700,
             None,
-            ModifierHost::Other,
+            LINUX,
         );
         assert!(view.shown.is_empty());
         assert_eq!(
@@ -259,14 +307,7 @@ mod tests {
                 profile,
                 ..factory_state()
             };
-            flash_view(
-                &config(&[]),
-                Some(KEY),
-                &G700,
-                Some(&state),
-                ModifierHost::Other,
-            )
-            .status
+            flash_view(&config(&[]), Some(KEY), &G700, Some(&state), LINUX).status
         };
         assert_eq!(
             status(FlashWrite::Pending, Some(0)),

@@ -71,13 +71,14 @@ use request::LinkLost;
 #[cfg(all(target_os = "macos", debug_assertions))]
 pub use request::PollEventMonitor;
 pub use request::{
-    CancelFlowPairing, CancelPairing, Command, ConfirmFlowPairing, LoadConfig, PairDevice,
-    PairFlowPeer, ReadBacklight, ReadDisableKeys, ReadDpi, ReadEasySwitchHosts, ReadFlashBindings,
-    ReadFnLock, ReadForceSensing, ReadOnboard, ReadPointerSpeed, ReadReportRate, ReadSidetone,
-    ReadSmartShift, ReloadConfig, RenameEasySwitchHost, RequestAccessibilityPrompt,
-    RetryConnection, SetBacklight, SetDisableKeys, SetDpi, SetFnLock, SetForceSensing, SetLight,
-    SetLightManualPower, SetLighting, SetPointerSpeed, SetReportRate, SetSidetone, SetSmartShift,
-    StartFlowPairing, StartPairing, StopFlowPairing, UnpairDevice,
+    CancelFlowPairing, CancelPairing, Command, ConfirmFlowPairing, EditFlashProfiles, LoadConfig,
+    PairDevice, PairFlowPeer, ReadBacklight, ReadDisableKeys, ReadDpi, ReadEasySwitchHosts,
+    ReadFlashBindings, ReadFlashProfiles, ReadFnLock, ReadForceSensing, ReadOnboard,
+    ReadPointerSpeed, ReadReportRate, ReadSidetone, ReadSmartShift, ReloadConfig,
+    RenameEasySwitchHost, RequestAccessibilityPrompt, RetryConnection, SetBacklight,
+    SetDisableKeys, SetDpi, SetFnLock, SetForceSensing, SetLight, SetLightManualPower, SetLighting,
+    SetPointerSpeed, SetReportRate, SetSidetone, SetSmartShift, StartFlowPairing, StartPairing,
+    StopFlowPairing, UnpairDevice,
 };
 
 /// Complete identity of one Disable Keys write/reload transaction.

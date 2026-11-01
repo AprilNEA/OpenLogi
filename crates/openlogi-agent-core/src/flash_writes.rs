@@ -17,13 +17,15 @@
 //! The decisions live in [`FlashQueue`], a sans-I/O object driven with an
 //! explicit `now`; the task around it only sleeps, runs jobs and publishes.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use openlogi_core::binding::{FlashBindingsState, FlashPlan, FlashWrite, SlotIntent};
-use openlogi_hid::DeviceRoute;
+use openlogi_core::binding::flash::release_cleared_slots;
+use openlogi_core::binding::{FlashBindingsState, FlashPlan, FlashWrite, G700, SlotIntent};
+use openlogi_core::hid::{FlashProfileEdit, ReportRate};
+use openlogi_hid::{DeviceRoute, G700DpiSave, G700Job};
 use tokio::sync::{Notify, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
@@ -45,12 +47,83 @@ pub const DEBOUNCE: Duration = Duration::from_millis(1200);
 /// leaving cuts no page short.
 pub const SETTLE_BUDGET: Duration = Duration::from_secs(30);
 
-/// What a job brings the device's flash to: the latest state the
-/// configuration asks of it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// How long a failed job waits before its one retry. A G700 behind a busy
+/// or flaky receiver fails a request now and then; a second try a moment
+/// later usually goes through, and a second failure is left to the next
+/// configuration change or reconnect (see [`FlashWrites::failed`]).
+pub const RETRY_DELAY: Duration = Duration::from_secs(2);
+
+/// What one request asks of a device's flash. Requests for one device merge
+/// while they wait ([`Self::merge`]), and the job that runs brings the flash
+/// to all of them at once.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FlashJob {
-    /// What the configuration wants of each button slot, in layout order.
-    pub bindings: Vec<SlotIntent>,
+    /// What the configuration wants of each button slot, in layout order;
+    /// `None` keeps what the device was last asked.
+    pub bindings: Option<Vec<SlotIntent>>,
+    /// Profile edits, in the order asked.
+    pub edits: VecDeque<FlashProfileEdit>,
+    /// A live DPI change to save to the played profile.
+    pub dpi: Option<G700DpiSave>,
+    /// A live report rate to save to the played profile.
+    pub rate: Option<ReportRate>,
+}
+
+impl FlashJob {
+    /// Bring the button slots to `intents`.
+    #[must_use]
+    pub fn bindings(intents: Vec<SlotIntent>) -> Self {
+        Self {
+            bindings: Some(intents),
+            ..Self::default()
+        }
+    }
+
+    /// Apply one profile edit.
+    #[must_use]
+    pub fn edit(edit: FlashProfileEdit) -> Self {
+        Self {
+            edits: VecDeque::from([edit]),
+            ..Self::default()
+        }
+    }
+
+    /// Save a live DPI change.
+    #[must_use]
+    pub fn dpi(save: G700DpiSave) -> Self {
+        Self {
+            dpi: Some(save),
+            ..Self::default()
+        }
+    }
+
+    /// Save a live report rate.
+    #[must_use]
+    pub fn rate(rate: ReportRate) -> Self {
+        Self {
+            rate: Some(rate),
+            ..Self::default()
+        }
+    }
+
+    /// Fold `later` into this request: its bindings and rate replace these,
+    /// its edits follow these, and a DPI save keeps this one's starting
+    /// value with its own result — the mode the mouse was in before the
+    /// first change is the one that takes the last.
+    pub fn merge(&mut self, later: Self) {
+        if later.bindings.is_some() {
+            self.bindings = later.bindings;
+        }
+        self.edits.extend(later.edits);
+        self.dpi = match (self.dpi, later.dpi) {
+            (Some(first), Some(last)) => Some(G700DpiSave {
+                from: first.from,
+                to: last.to,
+            }),
+            (first, last) => last.or(first),
+        };
+        self.rate = later.rate.or(self.rate);
+    }
 }
 
 /// What a finished job found on the device and left there.
@@ -68,10 +141,12 @@ pub struct FlashOutcome {
 pub trait FlashExecutor: Send + Sync + 'static {
     /// Bring `route`'s flash to what `job` asks, to the end, and report what
     /// it holds now, or why that failed.
+    /// Profile edits are removed from `job` as they complete, so a job that
+    /// failed holds the edit that failed first.
     fn execute(
         &self,
         route: &DeviceRoute,
-        job: &FlashJob,
+        job: &mut G700Job,
     ) -> impl Future<Output = Result<FlashOutcome, String>> + Send;
 }
 
@@ -86,18 +161,35 @@ pub struct G700FlashExecutor {
 }
 
 impl FlashExecutor for G700FlashExecutor {
-    async fn execute(&self, route: &DeviceRoute, job: &FlashJob) -> Result<FlashOutcome, String> {
+    async fn execute(
+        &self,
+        route: &DeviceRoute,
+        job: &mut G700Job,
+    ) -> Result<FlashOutcome, String> {
+        // A slot the agent ran on the last write that the configuration has
+        // since cleared goes back to its default instead of pressing an
+        // agent button nothing catches any more.
+        let routed = match self.hook_maps.read() {
+            Ok(maps) => maps.flash_routes.clone(),
+            Err(error) => {
+                warn!(%error, lock = "hook_maps", "lock poisoned — no cleared slot released");
+                std::collections::BTreeMap::new()
+            }
+        };
+        job.bindings = release_cleared_slots(&G700, &job.bindings, &routed);
+        // Boxed: a sync reads and writes several pages, and its state
+        // machine is too large to keep on the caller's stack.
         let synced = self
             .device
             .op(route)
             .run_to_completion(|shared| async move {
-                openlogi_hid::sync_g700_bindings_on(&shared, &job.bindings).await
+                Box::pin(openlogi_hid::sync_g700_on(&shared, job)).await
             })
             .await
             .map_err(|error| error.to_string())?
             .map_err(|error| error.to_string())?;
         if synced.written {
-            info!(profile = ?synced.profile, "the G700's button bindings are written");
+            info!(profile = ?synced.profile, "the G700's flash is written");
         }
         match self.hook_maps.write() {
             Ok(mut maps) => maps.flash_routes.clone_from(&synced.plan.routed),
@@ -120,25 +212,35 @@ struct Queued {
 }
 
 /// The queue's decisions: which job runs next and when, one at a time, the
-/// latest request per device replacing the one before it.
+/// requests per device merging into one.
 #[derive(Debug, Default)]
 pub struct FlashQueue {
     queued: HashMap<DeviceRoute, Queued>,
     running: Option<DeviceRoute>,
+    /// The bindings each device was last asked for, which a job of a
+    /// request that names none syncs to.
+    intents: HashMap<DeviceRoute, Vec<SlotIntent>>,
 }
 
 impl FlashQueue {
     /// Ask that `route` be brought to `job`, [`DEBOUNCE`] from `now` unless
-    /// another request for it follows. The latest request replaces a queued
-    /// one; one asked while the device's job runs waits for that job.
+    /// another request for it follows. A request merges into a queued one
+    /// ([`FlashJob::merge`]); one asked while the device's job runs waits
+    /// for that job.
     pub fn request(&mut self, route: DeviceRoute, job: FlashJob, now: Instant) {
-        self.queued.insert(
-            route,
-            Queued {
-                job,
-                due: now + DEBOUNCE,
-            },
-        );
+        if let Some(intents) = &job.bindings {
+            self.intents.insert(route.clone(), intents.clone());
+        }
+        let due = now + DEBOUNCE;
+        match self.queued.get_mut(&route) {
+            Some(queued) => {
+                queued.job.merge(job);
+                queued.due = due;
+            }
+            None => {
+                self.queued.insert(route, Queued { job, due });
+            }
+        }
     }
 
     /// When the next job may start: `None` while one runs or nothing waits.
@@ -151,7 +253,7 @@ impl FlashQueue {
     }
 
     /// Start the job that is due first at `now`, if any and if none runs.
-    pub fn start_due(&mut self, now: Instant) -> Option<(DeviceRoute, FlashJob)> {
+    pub fn start_due(&mut self, now: Instant) -> Option<(DeviceRoute, G700Job)> {
         if self.running.is_some() {
             return None;
         }
@@ -161,9 +263,25 @@ impl FlashQueue {
             .filter(|(_, queued)| queued.due <= now)
             .min_by_key(|(_, queued)| queued.due)
             .map(|(route, _)| route.clone())?;
-        let queued = self.queued.remove(&route)?;
+        let FlashJob {
+            bindings,
+            edits,
+            dpi,
+            rate,
+        } = self.queued.remove(&route)?.job;
+        let bindings = bindings
+            .or_else(|| self.intents.get(&route).cloned())
+            .unwrap_or_default();
         self.running = Some(route.clone());
-        Some((route, queued.job))
+        Some((
+            route,
+            G700Job {
+                edits,
+                dpi,
+                rate,
+                bindings,
+            },
+        ))
     }
 
     /// The running job ended.
@@ -286,6 +404,32 @@ impl FlashWrites {
         }
     }
 
+    /// Whether `route`'s last job failed, its retry too: the next request
+    /// of the configuration's bindings should be made even if they did not
+    /// change.
+    #[must_use]
+    pub fn failed(&self, route: &DeviceRoute) -> bool {
+        matches!(
+            self.shared.book().settled.get(route),
+            Some(Settled::Failed { .. })
+        )
+    }
+
+    /// The directory index of the profile `route` played when its last job
+    /// ended — `Some(None)` for its factory profile — or `None` while no job
+    /// has found out, or one is queued or running that will.
+    #[must_use]
+    pub fn played(&self, route: &DeviceRoute) -> Option<Option<u8>> {
+        let book = self.shared.book();
+        if book.queue.write_of(route).is_some() {
+            return None;
+        }
+        match book.settled.get(route)? {
+            Settled::Done(outcome) => Some(outcome.profile),
+            Settled::Failed { last, .. } => last.as_ref().map(|outcome| outcome.profile),
+        }
+    }
+
     /// Start the task on the current runtime with `executor`. A second call
     /// is ignored.
     pub fn start<E: FlashExecutor>(&self, executor: E) {
@@ -354,6 +498,45 @@ impl FlashWrites {
     }
 }
 
+/// Runs `job` and, should it fail, once more after [`RETRY_DELAY`] unless
+/// the agent is leaving. A profile edit that failed is not tried again — it
+/// may have half happened, and the edits after it were asked of a state it
+/// did not reach — so the retry carries the job's remaining state: the
+/// pointer saves and the bindings. Its error is still the one reported.
+///
+/// The record is [`Settled`]: a failure keeps what the last attempt found,
+/// if it got that far.
+async fn run_with_retry<E: FlashExecutor>(
+    shared: &Shared,
+    executor: &E,
+    route: &DeviceRoute,
+    job: &mut G700Job,
+) -> Settled {
+    let error = match executor.execute(route, job).await {
+        Ok(outcome) => return Settled::Done(outcome),
+        Err(error) => error,
+    };
+    let failed_edit = !job.edits.is_empty();
+    if failed_edit {
+        warn!(%error, dropped = job.edits.len(), "a profile edit failed — not retried");
+        job.edits.clear();
+    } else {
+        warn!(%error, "flash write failed — retrying once");
+    }
+    tokio::time::sleep(RETRY_DELAY).await;
+    if shared.book().closing {
+        return Settled::Failed { error, last: None };
+    }
+    match executor.execute(route, job).await {
+        Ok(outcome) if failed_edit => Settled::Failed {
+            error,
+            last: Some(outcome),
+        },
+        Ok(outcome) => Settled::Done(outcome),
+        Err(error) => Settled::Failed { error, last: None },
+    }
+}
+
 /// The task: wait for a due job, run it to its end, publish, repeat.
 async fn run<E: FlashExecutor>(shared: Arc<Shared>, executor: E) {
     loop {
@@ -372,23 +555,26 @@ async fn run<E: FlashExecutor>(shared: Arc<Shared>, executor: E) {
             }
         };
         match next {
-            Ok((route, job)) => {
+            Ok((route, mut job)) => {
                 // Awaited here, in the task's own body: nothing selects
                 // against it, so nothing can drop it before it ends.
-                let result = executor.execute(&route, &job).await;
+                let attempt = run_with_retry(&shared, &executor, &route, &mut job).await;
                 let mut book = shared.book();
                 book.queue.finish();
-                let last = match book.settled.remove(&route) {
+                let previous = match book.settled.remove(&route) {
                     Some(Settled::Done(outcome)) => Some(outcome),
                     Some(Settled::Failed { last, .. }) => last,
                     None => None,
                 };
-                let settled = match result {
-                    Ok(outcome) => Settled::Done(outcome),
-                    Err(error) => {
+                let settled = match attempt {
+                    Settled::Failed { error, last } => {
                         warn!(%error, "flash write failed");
-                        Settled::Failed { error, last }
+                        Settled::Failed {
+                            error,
+                            last: last.or(previous),
+                        }
                     }
+                    done @ Settled::Done(_) => done,
                 };
                 book.settled.insert(route, settled);
                 shared.running.send_replace(false);

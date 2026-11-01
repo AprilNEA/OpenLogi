@@ -72,3 +72,6 @@ pub type DisableKeysLoad = Load<Arc<DisableKeysState>>;
 
 pub type OnboardLoad = Load<Arc<OnboardState>>;
 pub type FlashBindingsLoad = Load<Arc<openlogi_core::binding::FlashBindingsState>>;
+/// Per-device onboard profiles of a mouse whose flash is the source of
+/// truth (the G700), as the agent read them from the mouse.
+pub type FlashProfilesLoad = Load<Arc<openlogi_core::hid::FlashProfiles>>;

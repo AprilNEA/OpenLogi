@@ -242,6 +242,7 @@ fn button_inspector(
         ))
         .child(current_action_card(&action, picker, pal))
         .children(flash_note_row(button, data.flash, pal))
+        .children(flash_reset_row(button, &action, data, picker.view))
         .children(flash_status_row(data.flash, pal))
         .children(wheel_hold_section(
             button,
@@ -325,6 +326,8 @@ fn flash_note_row(button: ButtonId, flash: Option<&FlashView>, pal: Palette) -> 
         SlotNote::NoFreeButton => tr!("actions.flash_no_free_button"),
         SlotNote::Macro => tr!("actions.flash_macro"),
         SlotNote::Unknown => tr!("actions.flash_unknown"),
+        SlotNote::PrimaryKept => tr!("actions.flash_primary_kept"),
+        SlotNote::Unavailable => tr!("actions.flash_unavailable_here"),
     };
     Some(
         div()
@@ -332,6 +335,39 @@ fn flash_note_row(button: ButtonId, flash: Option<&FlashView>, pal: Palette) -> 
             .text_body()
             .text_color(pal.text_muted)
             .child(text),
+    )
+}
+
+/// "Reset to default" for a flash slot that does something else than its
+/// layout default: it binds the default, which the agent writes back to the
+/// mouse — clearing the slot would leave the mouse as it is.
+fn flash_reset_row(
+    button: ButtonId,
+    action: &Action,
+    data: &BindingInspectorData<'_>,
+    view: &Entity<MouseModelView>,
+) -> Option<impl IntoElement> {
+    if data.editing_app.is_some() {
+        return None;
+    }
+    let default = data.flash?.defaults.get(&button)?.clone();
+    if *action == default {
+        return None;
+    }
+    let observer = view.clone();
+    Some(
+        control_button("inspector-flash-reset")
+            .w_full()
+            .icon(IconName::Undo)
+            .label(tr!("actions.flash_reset_to_default"))
+            .on_click(move |_, _, cx| {
+                AppState::apply(cx, |state| state.commit_binding(button, default.clone()));
+                AppState::refresh_flash_bindings_later(cx);
+                observer.update(cx, |view, cx| {
+                    view.close_action_picker();
+                    cx.notify();
+                });
+            }),
     )
 }
 

@@ -60,7 +60,8 @@ const BINDING_SIZE: usize = 3;
 const METADATA_OFFSET: usize = 0x4a;
 const METADATA_MARKER: &[u8; 5] = b"LGS02";
 const NAME_OFFSET: usize = METADATA_OFFSET + METADATA_MARKER.len();
-const NAME_UNITS: usize = 23;
+/// How many UTF-16 code units a profile name holds.
+pub const NAME_UNITS: usize = 23;
 const MACRO_NAMES_OFFSET: usize = NAME_OFFSET + NAME_UNITS * 2;
 const MACRO_NAME_UNITS: usize = 17;
 
@@ -412,6 +413,23 @@ impl G700Profile {
             .then(|| self.utf16_field(NAME_OFFSET, NAME_UNITS))
     }
 
+    /// Replaces the profile's name with `name`, stored as UTF-16LE in the
+    /// [`NAME_UNITS`] units of the name field, the units after it zeroed as
+    /// the names the dumped profiles carry are. Only the name field
+    /// changes; the macro names after it stay.
+    pub fn set_name(&mut self, name: &str) -> Result<(), NameError> {
+        let units = encode_name(name)?;
+        if !self.has_metadata() {
+            return Err(NameError::NoMetadata);
+        }
+        let field = &mut self.page.bytes[NAME_OFFSET..NAME_OFFSET + NAME_UNITS * 2];
+        field.fill(0);
+        for (bytes, unit) in field.as_chunks_mut::<2>().0.iter_mut().zip(units) {
+            *bytes = unit.to_le_bytes();
+        }
+        Ok(())
+    }
+
     /// The name of macro slot `slot` (`0..`[`MACRO_NAME_COUNT`]), or `None`
     /// without the metadata marker or for a slot out of range.
     #[must_use]
@@ -440,6 +458,37 @@ impl G700Profile {
     }
 }
 
+/// Why [`G700Profile::set_name`] refused a name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, thiserror::Error)]
+pub enum NameError {
+    /// The name needs more UTF-16 code units than the field holds.
+    #[error("the name needs {units} UTF-16 units; a profile name holds {NAME_UNITS}")]
+    TooLong {
+        /// The units it needs.
+        units: usize,
+    },
+    /// The name holds a NUL character, which would end it early.
+    #[error("the name holds a NUL character")]
+    Nul,
+    /// The profile carries no metadata block, so it has no name field.
+    #[error("the profile has no metadata block to hold a name")]
+    NoMetadata,
+}
+
+/// `name` as the UTF-16 units [`G700Profile::set_name`] stores, or why it
+/// cannot be stored. Checks only the name, so a caller can refuse it before
+/// any page is read.
+pub fn encode_name(name: &str) -> Result<Vec<u16>, NameError> {
+    if name.contains('\0') {
+        return Err(NameError::Nul);
+    }
+    let units: Vec<u16> = name.encode_utf16().collect();
+    if units.len() > NAME_UNITS {
+        return Err(NameError::TooLong { units: units.len() });
+    }
+    Ok(units)
+}
+
 /// The G700's profile directory: [`ProfileDirectory::parse`] with the G700's
 /// [`PROFILE_COUNT`].
 #[must_use]
@@ -460,7 +509,7 @@ mod tests {
 
     use super::{
         BUTTON_COUNT, Binding, ButtonMask, DPI_RAW_MAX, DpiLed, DpiMode, G700Profile, KeyModifiers,
-        MacroPointer, Special, dpi_from_raw, raw_from_dpi,
+        MacroPointer, NAME_UNITS, NameError, Special, dpi_from_raw, raw_from_dpi,
     };
     use crate::register::onboard_memory::{PAGE_SIZE, Page};
 
@@ -580,6 +629,70 @@ mod tests {
         assert!(!profile.has_metadata());
         assert_eq!(profile.name(), None);
         assert_eq!(profile.macro_name(0), None);
+    }
+
+    #[test]
+    fn a_rename_changes_the_name_field_alone() {
+        let page = synthetic_profile_page();
+        let mut profile = G700Profile::parse(&page);
+
+        profile.set_name("Игры 🎮").unwrap();
+
+        let renamed = profile.to_page();
+        assert_eq!(
+            G700Profile::parse(&renamed).name().as_deref(),
+            Some("Игры 🎮")
+        );
+        let field = 0x4f..0x4f + NAME_UNITS * 2;
+        let units = "Игры 🎮".encode_utf16().count();
+        assert!(
+            renamed.as_bytes()[0x4f + units * 2..field.end]
+                .iter()
+                .all(|&b| b == 0),
+            "the rest of the field is zeroed"
+        );
+        for (offset, (a, b)) in page.as_bytes().iter().zip(renamed.as_bytes()).enumerate() {
+            if !field.contains(&offset) {
+                assert_eq!(a, b, "byte {offset:#x} is outside the name field");
+            }
+        }
+    }
+
+    #[test]
+    fn a_name_of_exactly_the_field_size_fits_and_one_more_does_not() {
+        let mut profile = G700Profile::parse(&synthetic_profile_page());
+        let full = "x".repeat(NAME_UNITS);
+        profile.set_name(&full).unwrap();
+        assert_eq!(profile.name().as_deref(), Some(full.as_str()));
+        assert_eq!(
+            profile.set_name(&"x".repeat(NAME_UNITS + 1)),
+            Err(NameError::TooLong {
+                units: NAME_UNITS + 1
+            })
+        );
+        // A character outside the BMP takes two units.
+        assert_eq!(
+            profile.set_name(&format!("{}🎮", "x".repeat(NAME_UNITS - 1))),
+            Err(NameError::TooLong {
+                units: NAME_UNITS + 1
+            })
+        );
+        assert_eq!(profile.set_name("a\0b"), Err(NameError::Nul));
+        assert_eq!(
+            profile.name().as_deref(),
+            Some(full.as_str()),
+            "refusals change nothing"
+        );
+    }
+
+    #[test]
+    fn a_profile_without_metadata_cannot_be_renamed() {
+        let mut bytes = *synthetic_profile_page().as_bytes();
+        bytes[0x4a] = b'X';
+        let page = Page::from_bytes(bytes);
+        let mut profile = G700Profile::parse(&page);
+        assert_eq!(profile.set_name("A"), Err(NameError::NoMetadata));
+        assert_eq!(profile.to_page(), page);
     }
 
     #[test]

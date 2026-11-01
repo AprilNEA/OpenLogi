@@ -1,7 +1,9 @@
 //! The Logitech G700: reaching it, dumping its settings registers and
 //! onboard memory, and writing them (see `configure`), plus the live DPI and
 //! report-rate settings the generic DPI and report-rate entry points route
-//! here (see `live`), and its button bindings (see `bindings`).
+//! here (see `live`), its onboard profiles and the flash job that keeps the
+//! played one's pointer settings and button bindings (see `profiles`), and
+//! the conversion of those bindings (see `bindings`).
 //!
 //! The G700 is a HID++ 1.0 mouse: no feature table, settings at fixed
 //! registers, five profiles in onboard flash. It is found like every other
@@ -15,6 +17,9 @@
 mod bindings;
 mod configure;
 mod live;
+mod profiles;
+#[cfg(test)]
+mod sim;
 
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
@@ -43,7 +48,6 @@ use crate::host_lock::ReceiverRegisterPhase;
 
 use super::WriteError;
 
-pub use bindings::{G700BindingsSync, sync_g700_bindings_on};
 pub use configure::{
     BackupOrigin, G700Error, G700Register, ProfileDpiChange, ProfileDpiWrite, ProfileRateChange,
     ProfileRateWrite, RestoreOutcome, RestoredPage, restore_g700_pages, set_g700_current_profile,
@@ -53,6 +57,10 @@ pub use configure::{
 pub(crate) use live::{
     dpi_info as g700_dpi_info, report_rate_info as g700_report_rate_info,
     set_dpi_target as set_g700_dpi_target, set_report_rate as set_g700_report_rate,
+};
+pub use profiles::{
+    DpiSave, G700Job, G700Sync, PROFILE_PAGES, activate_g700_profile_on, check_g700_edit,
+    read_g700_played_profile_on, read_g700_profiles_on, sync_g700_on,
 };
 
 /// One page read of a [`G700MemoryDump`].

@@ -16,8 +16,14 @@ fn route(slot: u8) -> DeviceRoute {
 }
 
 fn job(intents: &[SlotIntent]) -> FlashJob {
-    FlashJob {
+    FlashJob::bindings(intents.to_vec())
+}
+
+/// The job that starts for a request of `intents` alone.
+fn ready(intents: &[SlotIntent]) -> G700Job {
+    G700Job {
         bindings: intents.to_vec(),
+        ..G700Job::default()
     }
 }
 
@@ -43,7 +49,7 @@ fn a_request_waits_out_the_debounce() {
     assert_eq!(queue.write_of(&route(1)), Some(FlashWrite::Pending));
     assert_eq!(
         queue.start_due(now + DEBOUNCE),
-        Some((route(1), job(&[SlotIntent::Agent])))
+        Some((route(1), ready(&[SlotIntent::Agent])))
     );
     assert_eq!(queue.write_of(&route(1)), Some(FlashWrite::Writing));
 }
@@ -62,7 +68,7 @@ fn a_burst_writes_the_latest_request_once_after_the_last() {
     );
     assert_eq!(
         queue.start_due(later + DEBOUNCE),
-        Some((route(1), job(&[SlotIntent::Keep])))
+        Some((route(1), ready(&[SlotIntent::Keep])))
     );
     queue.finish();
     assert_eq!(queue.next_due(), None);
@@ -101,7 +107,7 @@ fn a_request_during_its_devices_job_waits_for_it() {
     assert_eq!(queue.write_of(&route(1)), Some(FlashWrite::Pending));
     assert_eq!(
         queue.start_due(now + DEBOUNCE * 2),
-        Some((route(1), job(&[SlotIntent::Keep])))
+        Some((route(1), ready(&[SlotIntent::Keep])))
     );
 }
 
@@ -129,8 +135,12 @@ struct Gate {
     finished: Arc<AtomicUsize>,
     running: Arc<AtomicUsize>,
     permits: Arc<Semaphore>,
-    jobs: Arc<Mutex<Vec<(DeviceRoute, FlashJob)>>>,
-    fail: bool,
+    jobs: Arc<Mutex<Vec<(DeviceRoute, G700Job)>>>,
+    /// How many of the next jobs fail.
+    failures: Arc<AtomicUsize>,
+    /// Whether a failing job fails at its first profile edit, leaving it in
+    /// the job.
+    fail_at_edit: bool,
 }
 
 impl Gate {
@@ -141,17 +151,28 @@ impl Gate {
             running: Arc::default(),
             permits: Arc::new(Semaphore::new(0)),
             jobs: Arc::default(),
-            fail: false,
+            failures: Arc::default(),
+            fail_at_edit: false,
         }
     }
 
-    fn jobs(&self) -> Vec<(DeviceRoute, FlashJob)> {
+    fn failing(failures: usize) -> Self {
+        let gate = Self::new();
+        gate.failures.store(failures, Ordering::SeqCst);
+        gate
+    }
+
+    fn jobs(&self) -> Vec<(DeviceRoute, G700Job)> {
         self.jobs.lock().expect("jobs").clone()
     }
 }
 
 impl FlashExecutor for Gate {
-    async fn execute(&self, route: &DeviceRoute, job: &FlashJob) -> Result<FlashOutcome, String> {
+    async fn execute(
+        &self,
+        route: &DeviceRoute,
+        job: &mut G700Job,
+    ) -> Result<FlashOutcome, String> {
         self.started.fetch_add(1, Ordering::SeqCst);
         assert_eq!(
             self.running.fetch_add(1, Ordering::SeqCst),
@@ -165,9 +186,19 @@ impl FlashExecutor for Gate {
         self.permits.acquire().await.expect("permits").forget();
         self.running.fetch_sub(1, Ordering::SeqCst);
         self.finished.fetch_add(1, Ordering::SeqCst);
-        if self.fail {
+        let failing = self
+            .failures
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                left.checked_sub(1)
+            })
+            .is_ok();
+        if failing {
+            if !self.fail_at_edit {
+                job.edits.clear();
+            }
             Err("the mouse stopped answering".into())
         } else {
+            job.edits.clear();
             Ok(outcome(1))
         }
     }
@@ -248,9 +279,12 @@ async fn writes_are_serialised_and_coalesced() {
     assert_eq!(
         gate.jobs(),
         [
-            (route(1), job(&[SlotIntent::Agent])),
-            (route(2), job(&[SlotIntent::Agent])),
-            (route(1), job(&[SlotIntent::Native(FlashBinding::Disabled)])),
+            (route(1), ready(&[SlotIntent::Agent])),
+            (route(2), ready(&[SlotIntent::Agent])),
+            (
+                route(1),
+                ready(&[SlotIntent::Native(FlashBinding::Disabled)])
+            ),
         ],
         "the superseded edit is never written"
     );
@@ -293,10 +327,9 @@ async fn shutdown_waits_for_the_running_write() {
 /// A failed write is reported, keeps what the last good one found, and a
 /// later request replaces the failure with its own state.
 #[tokio::test(start_paused = true)]
-async fn a_failure_is_reported_until_the_next_request() {
+async fn a_failure_is_retried_once_then_reported_until_the_next_request() {
     let writes = FlashWrites::default();
-    let mut gate = Gate::new();
-    gate.fail = true;
+    let gate = Gate::failing(2);
     writes.start(gate.clone());
     writes.request(route(1), job(&[SlotIntent::Agent]));
     tokio::time::sleep(DEBOUNCE).await;
@@ -305,11 +338,119 @@ async fn a_failure_is_reported_until_the_next_request() {
     settle().await;
     assert_eq!(
         writes.state(&route(1)).write,
+        FlashWrite::Writing,
+        "the retry is still to come"
+    );
+    tokio::time::sleep(RETRY_DELAY).await;
+    settle().await;
+    gate.permits.add_permits(1);
+    settle().await;
+    assert_eq!(gate.started.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        writes.state(&route(1)).write,
         FlashWrite::Failed("the mouse stopped answering".into())
     );
+    assert!(writes.failed(&route(1)));
     writes.request(route(1), job(&[SlotIntent::Agent]));
     assert_eq!(writes.state(&route(1)).write, FlashWrite::Pending);
     writes.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_retry_that_succeeds_clears_the_failure() {
+    let writes = FlashWrites::default();
+    let gate = Gate::failing(1);
+    writes.start(gate.clone());
+    writes.request(route(1), job(&[SlotIntent::Agent]));
+    tokio::time::sleep(DEBOUNCE).await;
+    settle().await;
+    gate.permits.add_permits(2);
+    settle().await;
+    tokio::time::sleep(RETRY_DELAY).await;
+    settle().await;
+    assert_eq!(gate.started.load(Ordering::SeqCst), 2);
+    let state = writes.state(&route(1));
+    assert_eq!(state.write, FlashWrite::Idle);
+    assert_eq!(state.profile, Some(1));
+    assert!(!writes.failed(&route(1)));
+    assert_eq!(writes.played(&route(1)), Some(Some(1)));
+    writes.shutdown().await;
+}
+
+/// A profile edit that failed may have half happened, so the retry carries
+/// the rest of the job without it, and its error stays reported.
+#[tokio::test(start_paused = true)]
+async fn a_failed_edit_is_not_retried_but_the_rest_of_the_job_is() {
+    let writes = FlashWrites::default();
+    let mut gate = Gate::failing(1);
+    gate.fail_at_edit = true;
+    writes.start(gate.clone());
+    let profile = openlogi_core::hid::ProfileIndex::new(1).expect("profile 1");
+    writes.request(route(1), job(&[SlotIntent::Agent]));
+    writes.request(
+        route(1),
+        FlashJob::edit(FlashProfileEdit::Duplicate(profile)),
+    );
+    tokio::time::sleep(DEBOUNCE).await;
+    settle().await;
+    gate.permits.add_permits(2);
+    settle().await;
+    tokio::time::sleep(RETRY_DELAY).await;
+    settle().await;
+    let jobs = gate.jobs();
+    assert_eq!(jobs.len(), 2);
+    assert_eq!(
+        jobs[0].1.edits.len(),
+        1,
+        "the first attempt carries the edit"
+    );
+    assert!(jobs[1].1.edits.is_empty(), "the retry does not");
+    assert_eq!(jobs[1].1.bindings, [SlotIntent::Agent]);
+    let state = writes.state(&route(1));
+    assert_eq!(
+        state.write,
+        FlashWrite::Failed("the mouse stopped answering".into())
+    );
+    assert_eq!(state.profile, Some(1), "what the retry found is kept");
+    writes.shutdown().await;
+}
+
+#[test]
+fn requests_merge_while_they_wait() {
+    let now = Instant::now();
+    let mut queue = FlashQueue::default();
+    let profile = openlogi_core::hid::ProfileIndex::new(2).expect("profile 2");
+    let save = |from, to| G700DpiSave {
+        from: openlogi_core::hid::Dpi::new(from),
+        to: openlogi_core::hid::Dpi::new(to),
+    };
+    queue.request(route(1), job(&[SlotIntent::Agent]), now);
+    queue.request(route(1), FlashJob::dpi(save(800, 1000)), now);
+    queue.request(
+        route(1),
+        FlashJob::edit(FlashProfileEdit::Disable(profile)),
+        now,
+    );
+    queue.request(route(1), FlashJob::dpi(save(1000, 1200)), now);
+    queue.request(route(1), FlashJob::rate(ReportRate::new(500)), now);
+    queue.request(route(1), FlashJob::rate(ReportRate::new(1000)), now);
+
+    let (_, started) = queue.start_due(now + DEBOUNCE).expect("due");
+
+    assert_eq!(
+        started,
+        G700Job {
+            edits: VecDeque::from([FlashProfileEdit::Disable(profile)]),
+            dpi: Some(save(800, 1200)),
+            rate: Some(ReportRate::new(1000)),
+            bindings: vec![SlotIntent::Agent],
+        }
+    );
+    queue.finish();
+    // A request that names no bindings syncs the ones last asked.
+    queue.request(route(1), FlashJob::default(), now);
+    let (_, resync) = queue.start_due(now + DEBOUNCE).expect("due");
+    assert_eq!(resync, ready(&[SlotIntent::Agent]));
 }
 
 /// A replacement holds the task: it waits for the write in progress, starts

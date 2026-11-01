@@ -650,7 +650,11 @@ fn held_on_mouse_label(flash: Option<&FlashView>, control: MouseControlId) -> Op
     let text = match flash?.notes.get(&control.button()?)? {
         SlotNote::Macro => tr!("actions.flash_macro_label"),
         SlotNote::Unknown => tr!("actions.flash_unknown_label"),
-        SlotNote::OnMouse | SlotNote::ByOpenLogi(_) | SlotNote::NoFreeButton => return None,
+        SlotNote::OnMouse
+        | SlotNote::ByOpenLogi(_)
+        | SlotNote::NoFreeButton
+        | SlotNote::PrimaryKept
+        | SlotNote::Unavailable => return None,
     };
     Some(BindingLabel::held_on_mouse(text))
 }

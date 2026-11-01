@@ -314,6 +314,57 @@ fn host_runs(action: &Action) -> bool {
     !(MOUSE_ONLY_FUNCTIONS.contains(action) || matches!(action, Action::MouseButton(_)))
 }
 
+/// Whether a host's OS input hook sees the [`AGENT_BUTTONS`], so the agent
+/// can run what a slot routed to one asks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum AgentButtonHook {
+    /// It sees them: evdev on Linux reports `BTN_` codes up to button 16,
+    /// a macOS event tap numbers every other-mouse button.
+    Sees,
+    /// It does not: the Windows low-level mouse hook reports the two X
+    /// buttons and nothing past them.
+    Blind,
+}
+
+impl AgentButtonHook {
+    /// The hook this build runs.
+    pub const CURRENT: Self = if cfg!(target_os = "windows") {
+        Self::Blind
+    } else {
+        Self::Sees
+    };
+}
+
+/// What [`flash_intents`] needs to know of the host: how it reads modifier
+/// keys, and whether its hook sees the agent buttons.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct FlashHost {
+    /// How chords are written for the host.
+    pub modifiers: ModifierHost,
+    /// Whether its hook sees the agent buttons.
+    pub hook: AgentButtonHook,
+}
+
+impl FlashHost {
+    /// The host this build runs on.
+    pub const CURRENT: Self = Self {
+        modifiers: ModifierHost::CURRENT,
+        hook: AgentButtonHook::CURRENT,
+    };
+}
+
+/// Why a slot whose action only the agent can run is not given to it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum RefusedSlot {
+    /// The slot is a primary button. Handed to the agent it would press an
+    /// agent button, and the mouse would have no left or right click while
+    /// no agent runs, so it plays its layout default instead.
+    PrimaryButton,
+    /// This host's hook cannot see agent buttons ([`AgentButtonHook::Blind`]),
+    /// so nothing would run the action; the slot keeps what the mouse holds.
+    HookBlind,
+}
+
 /// What the configuration wants of one flash slot.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum SlotIntent {
@@ -323,10 +374,17 @@ pub enum SlotIntent {
     Native(FlashBinding),
     /// The agent runs it: the slot presses one of the [`AGENT_BUTTONS`].
     Agent,
+    /// The agent would run it but may not ([`RefusedSlot`]).
+    Refused(RefusedSlot),
 }
 
+/// The slots the agent may never take: without it the mouse must still
+/// click.
+const PRIMARY_SLOTS: [ButtonId; 2] = [ButtonId::LeftClick, ButtonId::RightClick];
+
 /// What `config` wants of each slot of `layout` on the device `key`, in slot
-/// order, with chords written for `host`.
+/// order, for `host`: chords written for its modifier keys, and no slot
+/// handed to an agent its hook cannot see ([`RefusedSlot::HookBlind`]).
 ///
 /// A slot with no stored binding is left as the mouse holds it. A stored
 /// single action the mouse can run goes to the flash, unless an app profile
@@ -335,14 +393,16 @@ pub enum SlotIntent {
 /// other binding (an action only the host runs, a long press, a gesture) is
 /// the agent's. An app override of a slot with no stored binding, or of one
 /// bound to a function only the mouse runs, has nothing to run in the
-/// other apps and is not applied.
+/// other apps and is not applied. A primary button is never handed to the
+/// agent ([`RefusedSlot::PrimaryButton`]).
 #[must_use]
 pub fn flash_intents(
     config: &Config,
     key: &str,
     layout: &GamingLayout,
-    host: ModifierHost,
+    flash_host: FlashHost,
 ) -> Vec<SlotIntent> {
+    let host = flash_host.modifiers;
     let device = config.devices.get(key);
     let app_overridden = |button: ButtonId| {
         device.is_some_and(|device| {
@@ -352,6 +412,15 @@ pub fn flash_intents(
                 .any(|bindings| bindings.contains_key(&button))
         })
     };
+    let agent_for = |button: ButtonId| {
+        if PRIMARY_SLOTS.contains(&button) {
+            SlotIntent::Refused(RefusedSlot::PrimaryButton)
+        } else if flash_host.hook == AgentButtonHook::Blind {
+            SlotIntent::Refused(RefusedSlot::HookBlind)
+        } else {
+            SlotIntent::Agent
+        }
+    };
     layout
         .slots
         .iter()
@@ -359,13 +428,50 @@ pub fn flash_intents(
             |&Slot { button, .. }| match device.and_then(|device| device.bindings.get(&button)) {
                 None => SlotIntent::Keep,
                 Some(Binding::Single(action)) => match FlashBinding::of_action(action, host) {
-                    Some(_) if app_overridden(button) && host_runs(action) => SlotIntent::Agent,
+                    Some(native) if app_overridden(button) && host_runs(action) => {
+                        // A primary button the agent may not take keeps its
+                        // native action everywhere rather than losing it.
+                        match agent_for(button) {
+                            SlotIntent::Refused(RefusedSlot::PrimaryButton) => {
+                                SlotIntent::Native(native)
+                            }
+                            intent => intent,
+                        }
+                    }
                     Some(native) => SlotIntent::Native(native),
-                    None => SlotIntent::Agent,
+                    None => agent_for(button),
                 },
-                Some(_) => SlotIntent::Agent,
+                Some(_) => agent_for(button),
             },
         )
+        .collect()
+}
+
+/// `intents` with every slot that pressed an agent button on the last write
+/// (`routed`) but now asks nothing ([`SlotIntent::Keep`]) sent back to
+/// `layout`'s default: kept as it is, the slot would press an agent button
+/// the hook no longer catches, and do nothing. Only the last write's routing
+/// tells such a slot from one whose profile presses that button on purpose,
+/// as a profile made by another tool can.
+#[must_use]
+pub fn release_cleared_slots(
+    layout: &GamingLayout,
+    intents: &[SlotIntent],
+    routed: &BTreeMap<MouseButtonNumber, ButtonId>,
+) -> Vec<SlotIntent> {
+    layout
+        .slots
+        .iter()
+        .zip(intents)
+        .enumerate()
+        .map(|(slot, (button, intent))| {
+            let cleared =
+                *intent == SlotIntent::Keep && routed.values().any(|b| *b == button.button);
+            match layout.flash_defaults.get(slot) {
+                Some(default) if cleared => SlotIntent::Native(*default),
+                _ => intent.clone(),
+            }
+        })
         .collect()
 }
 
@@ -399,9 +505,15 @@ pub fn plan_flash_bindings(
     intents: &[SlotIntent],
 ) -> FlashPlan {
     let mut bindings = current.to_vec();
-    for (binding, intent) in bindings.iter_mut().zip(intents) {
-        if let SlotIntent::Native(native) = intent {
-            *binding = *native;
+    for (slot, (binding, intent)) in bindings.iter_mut().zip(intents).enumerate() {
+        match intent {
+            SlotIntent::Native(native) => *binding = *native,
+            SlotIntent::Refused(RefusedSlot::PrimaryButton) => {
+                if let Some(default) = layout.flash_defaults.get(slot) {
+                    *binding = *default;
+                }
+            }
+            SlotIntent::Keep | SlotIntent::Agent | SlotIntent::Refused(RefusedSlot::HookBlind) => {}
         }
     }
     let agent_slots: Vec<usize> = intents

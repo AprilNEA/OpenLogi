@@ -36,7 +36,10 @@ pub use error::{HidppFeatureErrorKind, HidppOperation, WriteError};
 pub use fn_lock::FnLockState;
 pub use force_sensing::ForceSensingInfo;
 pub use light::{LightCommand, commands_for_light_settings};
-pub use onboard::{OnboardMode, OnboardProfile, OnboardState, ProfileIndex};
+pub use onboard::{
+    DisabledProfile, FLASH_PROFILE_NAME_UNITS, FlashProfileEdit, FlashProfileSettings,
+    FlashProfiles, OnboardMode, OnboardProfile, OnboardState, ProfileIndex,
+};
 pub use pairing::{Click, PairingError, PasskeyMethod, ReceiverSelector};
 pub use pointer_speed::PointerSpeed;
 pub use report_rate::{ReportRate, ReportRateInfo};

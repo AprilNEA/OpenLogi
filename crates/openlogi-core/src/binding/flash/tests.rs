@@ -1,8 +1,14 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::*;
 use crate::binding::{G700, GamingButtons, LongPressBinding};
 use crate::device::Capabilities;
+
+/// A host whose hook sees the agent buttons and whose Command is Control.
+const LINUX: FlashHost = FlashHost {
+    modifiers: ModifierHost::Other,
+    hook: AgentButtonHook::Sees,
+};
 
 fn button(n: u8) -> MouseButtonNumber {
     MouseButtonNumber::try_new(n).unwrap()
@@ -440,7 +446,7 @@ fn intents_follow_the_stored_bindings() {
         Some(Action::Copy),
     );
 
-    let intents = flash_intents(&config, key, &G700, ModifierHost::Other);
+    let intents = flash_intents(&config, key, &G700, LINUX);
 
     let at = |button: ButtonId| &intents[usize::from(G700.slot_of(button).unwrap())];
     assert_eq!(
@@ -474,7 +480,7 @@ fn intents_follow_the_stored_bindings() {
     assert_eq!(at(ButtonId::LeftClick), &SlotIntent::Keep);
     assert_eq!(intents.len(), G700.slots.len());
     assert!(
-        flash_intents(&config, "unknown", &G700, ModifierHost::Other)
+        flash_intents(&config, "unknown", &G700, LINUX)
             .iter()
             .all(|intent| *intent == SlotIntent::Keep)
     );
@@ -566,4 +572,97 @@ fn a_numbered_button_round_trips_through_its_config_name() {
     "Button0".parse::<ButtonId>().expect_err("before one");
     assert_eq!(numbered.to_string(), "Button 12");
     assert!(!numbered.is_os_hook_button(), "the hook passes it through");
+}
+
+#[test]
+fn a_primary_button_is_never_handed_to_the_agent() {
+    let key = "receiver:C531:slot:1";
+    let mut config = Config::default();
+    config.set_binding(key, ButtonId::LeftClick, Binding::Single(Action::Copy));
+    config.set_binding(
+        key,
+        ButtonId::RightClick,
+        Binding::Single(Action::MiddleClick),
+    );
+    config.set_per_app_binding(
+        key,
+        "org.mozilla.firefox",
+        ButtonId::RightClick,
+        Some(Action::Copy),
+    );
+
+    let intents = flash_intents(&config, key, &G700, LINUX);
+
+    assert_eq!(
+        intents[0],
+        SlotIntent::Refused(RefusedSlot::PrimaryButton),
+        "a host action on the left button is refused"
+    );
+    assert_eq!(
+        intents[1],
+        SlotIntent::Native(FlashBinding::MouseButtons(0x0004)),
+        "a native action stays native even with an app override"
+    );
+    // A profile whose left slot presses an agent button (a hand-edited
+    // configuration of an earlier build) gets its left click back.
+    let mut held = dumped_profile();
+    held[0] = FlashBinding::MouseButtons(button(16).mask());
+    let plan = plan_flash_bindings(&G700, &held, &BTreeSet::new(), &intents);
+    assert_eq!(plan.bindings[0], G700.flash_defaults[0]);
+    assert!(plan.routed.is_empty());
+}
+
+#[test]
+fn a_hook_that_cannot_see_agent_buttons_leaves_agent_slots_as_they_are() {
+    let key = "receiver:C531:slot:1";
+    let mut config = Config::default();
+    config.set_binding(key, ButtonId::G7, Binding::Single(Action::Copy));
+    config.set_binding(key, ButtonId::G6, Binding::Single(Action::MiddleClick));
+    let windows = FlashHost {
+        modifiers: ModifierHost::Other,
+        hook: AgentButtonHook::Blind,
+    };
+
+    let intents = flash_intents(&config, key, &G700, windows);
+
+    let g7 = usize::from(G700.slot_of(ButtonId::G7).unwrap());
+    let g6 = usize::from(G700.slot_of(ButtonId::G6).unwrap());
+    assert_eq!(intents[g7], SlotIntent::Refused(RefusedSlot::HookBlind));
+    assert_eq!(
+        intents[g6],
+        SlotIntent::Native(FlashBinding::MouseButtons(0x0004)),
+        "native actions still go to the flash"
+    );
+    let held = dumped_profile();
+    let plan = plan_flash_bindings(&G700, &held, &BTreeSet::new(), &intents);
+    assert_eq!(plan.bindings[g7], held[g7], "the slot keeps its binding");
+    assert!(plan.routed.is_empty() && plan.unrouted.is_empty());
+    assert_eq!(
+        flash_intents(&config, key, &G700, LINUX)[g7],
+        SlotIntent::Agent
+    );
+}
+
+#[test]
+fn a_cleared_agent_slot_goes_back_to_its_default() {
+    let g7 = usize::from(G700.slot_of(ButtonId::G7).unwrap());
+    let g8 = usize::from(G700.slot_of(ButtonId::G8).unwrap());
+    let routed = BTreeMap::from([(button(16), ButtonId::G7), (button(15), ButtonId::G8)]);
+    let mut wanted = vec![SlotIntent::Keep; G700.slots.len()];
+    wanted[g8] = SlotIntent::Agent;
+
+    let released = release_cleared_slots(&G700, &wanted, &routed);
+
+    assert_eq!(released[g7], SlotIntent::Native(G700.flash_defaults[g7]));
+    assert_eq!(released[g8], SlotIntent::Agent, "still configured");
+    for (slot, intent) in released.iter().enumerate() {
+        if slot != g7 {
+            assert_eq!(*intent, wanted[slot], "slot {slot}");
+        }
+    }
+    assert_eq!(
+        release_cleared_slots(&G700, &wanted, &BTreeMap::new()),
+        wanted,
+        "without a record of the last write nothing is released"
+    );
 }

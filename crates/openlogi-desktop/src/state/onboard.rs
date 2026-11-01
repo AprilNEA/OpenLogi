@@ -6,10 +6,12 @@ use std::time::Duration;
 use gpui::App;
 use openlogi_core::binding::{FlashBindingsState, GamingButtons, GamingLayout};
 use openlogi_core::config::OnboardMemory;
-use openlogi_core::hid::{OnboardMode, OnboardState};
+use openlogi_core::hid::{Dpi, FlashProfileEdit, FlashProfiles, OnboardMode, OnboardState};
+use tracing::{debug, warn};
 
+use super::device_key::DeviceKey;
 use super::events::StateEvents;
-use super::load::{Load, OnboardLoad};
+use super::load::{FlashProfilesLoad, Load, OnboardLoad};
 use super::{AppState, StateEvent};
 use crate::state::devices::DeviceRecord;
 
@@ -85,6 +87,133 @@ impl AppState {
             })
             .detach();
         });
+    }
+
+    /// Whether the selected mouse keeps its settings in flash profiles
+    /// OpenLogi edits (the G700).
+    #[must_use]
+    pub fn current_flash_profiles_supported(&self) -> bool {
+        self.current_flash_layout().is_some()
+    }
+
+    #[must_use]
+    pub fn current_flash_profiles_load(&self) -> FlashProfilesLoad {
+        self.current_record()
+            .and_then(|record| self.pointer.reads.flash_profiles_load(&record.device_key()))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// The selected flash mouse's profiles as last read, if they were.
+    #[must_use]
+    pub fn current_flash_profiles(&self) -> Option<Arc<FlashProfiles>> {
+        match self.current_flash_profiles_load() {
+            Load::Ready(reading) => Some(reading),
+            _ => None,
+        }
+    }
+
+    /// Read the selected flash mouse's profiles again — the "click to retry"
+    /// affordance on a failed reading.
+    pub(crate) fn retry_flash_profiles_read(&mut self, key: &DeviceKey) -> StateEvents {
+        self.pointer.reads.refresh_flash_profiles(key);
+        StateEvent::OnboardChanged(key.clone()).into()
+    }
+
+    /// Why the agent refused the last profile edit asked of the selected
+    /// flash mouse.
+    #[must_use]
+    pub fn current_flash_edit_refusal(&self) -> Option<&str> {
+        let key = self.current_record()?.device_key();
+        self.pointer
+            .flash_edit_refusals
+            .get(&key)
+            .map(String::as_str)
+    }
+
+    /// The DPI presets the selected flash mouse plays: its played profile's
+    /// modes, in order. `None` for any other device, whose presets live in
+    /// configuration.
+    #[must_use]
+    pub(crate) fn current_flash_dpi_modes(&self) -> Option<Vec<Dpi>> {
+        if !self.current_flash_profiles_supported() {
+            return None;
+        }
+        Some(
+            self.current_flash_profiles()
+                .and_then(|profiles| {
+                    profiles
+                        .active
+                        .as_ref()
+                        .map(openlogi_core::hid::FlashProfileSettings::enabled_dpi_modes)
+                })
+                .unwrap_or_default(),
+        )
+    }
+
+    /// How many DPI modes the selected flash mouse's played profile holds,
+    /// once its profiles are read. `None` for any other device.
+    #[must_use]
+    pub(crate) fn current_flash_dpi_slots(&self) -> Option<usize> {
+        let profiles = self.current_flash_profiles()?;
+        Some(profiles.active.as_ref()?.dpi_modes.len())
+    }
+
+    /// Ask the agent to apply `edit` to the selected flash mouse, then read
+    /// its profiles again as the edit lands: once the answer is in, and again
+    /// while a flash write it queued runs.
+    pub(crate) fn edit_flash_profiles(cx: &mut App, edit: FlashProfileEdit) {
+        Self::update(cx, |state, cx| {
+            let Some((key, route)) = state
+                .current_record()
+                .filter(|_| state.current_flash_profiles_supported())
+                .and_then(|record| Some((record.device_key(), record.route.clone()?)))
+            else {
+                debug!("no reachable flash mouse selected — profile edit dropped");
+                return;
+            };
+            state.pointer.flash_edit_refusals.remove(&key);
+            let (reply, answer) = tokio::sync::oneshot::channel();
+            if !state.send_ipc(crate::services::ipc::EditFlashProfiles { route, edit, reply }) {
+                return;
+            }
+            cx.spawn(async move |state, cx| {
+                let result = answer
+                    .await
+                    .unwrap_or(Err(openlogi_core::hid::WriteError::AgentUnavailable));
+                state
+                    .update(cx, |state, cx| {
+                        if let Err(error) = result {
+                            warn!(%error, "the agent refused a profile edit");
+                            state
+                                .pointer
+                                .flash_edit_refusals
+                                .insert(key.clone(), error.to_string());
+                        }
+                        let reads = &mut state.pointer.reads;
+                        reads.refresh_flash_profiles(&key);
+                        reads.refresh_flash_bindings(&key);
+                        cx.emit(StateEvent::OnboardChanged(key));
+                    })
+                    .ok();
+            })
+            .detach();
+        });
+    }
+
+    pub(super) fn load_current_flash_profiles(&mut self, cx: &mut gpui::Context<Self>) {
+        if !self.current_flash_profiles_supported() {
+            return;
+        }
+        let Some((key, route)) = self
+            .current_record()
+            .and_then(|record| Some((record.device_key(), record.route.clone()?)))
+        else {
+            return;
+        };
+        self.pointer
+            .reads
+            .ensure_flash_profiles(key, route, self.ipc_sender(), cx);
     }
 
     #[must_use]

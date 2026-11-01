@@ -21,6 +21,7 @@
 
 mod glow;
 mod images;
+mod local;
 mod paths;
 pub(crate) mod queries;
 pub mod sync;
@@ -212,6 +213,8 @@ enum AssetKey {
         depot: String,
         registry_model_id: String,
     },
+    /// A depot OpenLogi ships for a model the index lacks.
+    Local { depot: &'static str },
 }
 
 pub struct AssetResolver {
@@ -219,6 +222,8 @@ pub struct AssetResolver {
     /// release builds never touch the user cache; the user cache comes
     /// second so what [`sync`] writes is visible to the next resolver.
     read_roots: Vec<PathBuf>,
+    /// Where the depots OpenLogi ships itself are read from (see [`local`]).
+    local_roots: Vec<PathBuf>,
     /// Where [`sync`] is allowed to write. Always the per-user dir — the
     /// bundle is read-only inside the signed `.app`.
     write_root: PathBuf,
@@ -246,6 +251,7 @@ impl AssetResolver {
         let index = load_index(&read_roots);
         Self {
             read_roots,
+            local_roots: local::local_roots(),
             write_root,
             has_bundle,
             index,
@@ -317,6 +323,17 @@ impl AssetResolver {
         )
     }
 
+    /// Resolve a device the asset index cannot match — a HID++ 1.0 mouse,
+    /// which reports no model info — from the depots OpenLogi ships, by its
+    /// device-list model key. `None` when no local depot serves the key or
+    /// its files are not on disk.
+    pub fn resolve_local_model(&self, model_key: &str) -> Option<ResolvedAsset> {
+        let (depot, entry) = local::local_entry(model_key)?;
+        self.remembered(AssetKey::Local { depot }, || {
+            Self::load_files_in(&self.local_roots, depot, &entry, 0)
+        })
+    }
+
     /// `load`'s asset for `key`, from memory once it has been found.
     ///
     /// Only finds are remembered. A miss costs a few `stat` calls, and asking
@@ -344,7 +361,17 @@ impl AssetResolver {
         entry: &DeviceEntry,
         extended_model_id: u8,
     ) -> Option<ResolvedAsset> {
-        for root in &self.read_roots {
+        Self::load_files_in(&self.read_roots, depot, entry, extended_model_id)
+    }
+
+    /// [`Self::load_files`] over `roots`.
+    fn load_files_in(
+        roots: &[PathBuf],
+        depot: &str,
+        entry: &DeviceEntry,
+        extended_model_id: u8,
+    ) -> Option<ResolvedAsset> {
+        for root in roots {
             let Ok(dir) = safe_component_path(root, depot, "asset depot") else {
                 warn!(
                     depot,
