@@ -369,6 +369,10 @@ impl InputDispatcher {
         ) {
             WheelOutput::Idle => {}
             WheelOutput::Scroll(delta) => {
+                let delta = thumbwheel_scroll(
+                    delta,
+                    cfg!(target_os = "macos") && !openlogi_inject::natural_scrolling(),
+                );
                 debug!(key, ?button, action = %action.label(), ?delta, "thumb wheel → scroll");
                 self.outputs.post_scroll(session, delta);
             }
@@ -383,6 +387,20 @@ impl InputDispatcher {
                 }
             }
         }
+    }
+}
+
+/// The scroll a diverted thumb wheel posts for its binding. The default
+/// bindings describe the wheel's native horizontal scroll with macOS natural
+/// scrolling on, since macOS reverses the wheel's own events for it but not
+/// the ones OpenLogi posts. With it off (`native_reversed`) the native wheel
+/// scrolls the other way, and the posted horizontal scroll follows it, so the
+/// default bindings still match the native wheel and their reversal reverses it.
+fn thumbwheel_scroll(delta: ScrollDelta, native_reversed: bool) -> ScrollDelta {
+    if native_reversed {
+        delta.negate_x()
+    } else {
+        delta
     }
 }
 
