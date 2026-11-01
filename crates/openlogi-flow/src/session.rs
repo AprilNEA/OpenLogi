@@ -22,7 +22,7 @@ use tokio::{
 };
 
 use crate::{
-    discovery::{CandidateSource, collect_candidates},
+    discovery::{CandidateSource, CandidateStream},
     frame::{FrameKind, InboundRole},
     generated as proto,
     sas::PublicKey,
@@ -497,27 +497,38 @@ async fn acquire_connection(
     }
 }
 
+/// Dials every candidate address as soon as its source answers and returns
+/// the first connection that authenticates as `peer`.
 async fn dial_candidates(
     endpoint: &Arc<FlowEndpoint>,
     peer: &PeerConfig,
 ) -> Option<Arc<FlowConnection>> {
-    let addresses = collect_candidates(&peer.sources, peer.public_key)
-        .await
-        .ok()?;
+    let mut candidates = CandidateStream::new(&peer.sources, peer.public_key);
+    let mut looking = true;
     let mut attempts = JoinSet::new();
-    for address in addresses {
-        let endpoint = Arc::clone(endpoint);
-        attempts.spawn(async move { endpoint.connect(address).await });
-    }
-    while let Some(result) = attempts.join_next().await {
-        if let Ok(Ok(connection)) = result {
-            if connection.peer_key() == peer.public_key {
-                return Some(Arc::new(connection));
+    loop {
+        tokio::select! {
+            batch = candidates.next(), if looking => {
+                let Some(addresses) = batch else {
+                    looking = false;
+                    continue;
+                };
+                for address in addresses {
+                    let endpoint = Arc::clone(endpoint);
+                    attempts.spawn(async move { endpoint.connect(address).await });
+                }
             }
-            connection.close();
+            Some(result) = attempts.join_next() => {
+                if let Ok(Ok(connection)) = result {
+                    if connection.peer_key() == peer.public_key {
+                        return Some(Arc::new(connection));
+                    }
+                    connection.close();
+                }
+            }
+            else => return None,
         }
     }
-    None
 }
 
 enum WaitOutcome {

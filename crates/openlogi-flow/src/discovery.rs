@@ -13,12 +13,13 @@ use std::{
     net::{IpAddr, SocketAddr, SocketAddrV4, SocketAddrV6},
     pin::Pin,
     sync::{Arc, RwLock},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use mdns_sd::{ScopedIp, ServiceDaemon, ServiceEvent, ServiceInfo, TxtProperties};
 use thiserror::Error;
 use tokio::task::{JoinHandle, JoinSet};
+use tokio::time::timeout;
 
 use crate::sas::PublicKey;
 
@@ -45,40 +46,65 @@ pub trait CandidateSource: Send + Sync {
     fn candidates(&self, peer_key: PublicKey) -> CandidateFuture<'_>;
 }
 
-/// Merges all candidate sources concurrently and removes duplicate addresses.
+/// How long one candidate source may take to answer.
 ///
-/// A failed source does not hide addresses returned by another source. An
-/// error is returned only when every source failed to produce an address.
-pub async fn collect_candidates(
-    sources: &[Arc<dyn CandidateSource>],
-    peer_key: PublicKey,
-) -> Result<Vec<SocketAddr>, DiscoveryError> {
-    let mut tasks = JoinSet::new();
-    for source in sources {
-        let source = Arc::clone(source);
-        tasks.spawn(async move { source.candidates(peer_key).await });
-    }
+/// A source that misses it is dropped for this dial attempt, so a stalled
+/// lookup cannot keep a dialer waiting; the next attempt asks again.
+pub const SOURCE_TIMEOUT: Duration = Duration::from_secs(5);
 
-    let mut addresses = BTreeSet::new();
-    let mut first_error = None;
-    while let Some(result) = tasks.join_next().await {
-        match result {
-            Ok(Ok(candidates)) => addresses.extend(candidates),
-            Ok(Err(error)) => {
-                first_error.get_or_insert(error);
-            }
-            Err(error) => {
-                first_error.get_or_insert_with(|| DiscoveryError::SourceTask(error.to_string()));
-            }
+/// How long [`ManualCandidateSource`] waits for one hostname to resolve.
+///
+/// Shorter than [`SOURCE_TIMEOUT`], so a stalled hostname gives up before its
+/// source does and the source still answers with its other addresses.
+pub const RESOLVE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Polls candidate sources concurrently and yields each source's addresses
+/// as soon as that source answers.
+///
+/// A dialer can try the first answer while slower sources are still looking.
+/// An address is yielded once even when several sources return it. A failed
+/// source, or one that misses [`SOURCE_TIMEOUT`], yields nothing and does not
+/// hide another source's addresses.
+#[derive(Debug)]
+pub struct CandidateStream {
+    lookups: JoinSet<Result<Result<Vec<SocketAddr>, DiscoveryError>, tokio::time::error::Elapsed>>,
+    seen: BTreeSet<SocketAddr>,
+}
+
+impl CandidateStream {
+    /// Starts every source's lookup for `peer_key`.
+    #[must_use]
+    pub fn new(sources: &[Arc<dyn CandidateSource>], peer_key: PublicKey) -> Self {
+        let mut lookups = JoinSet::new();
+        for source in sources {
+            let source = Arc::clone(source);
+            lookups
+                .spawn(async move { timeout(SOURCE_TIMEOUT, source.candidates(peer_key)).await });
+        }
+        Self {
+            lookups,
+            seen: BTreeSet::new(),
         }
     }
 
-    if addresses.is_empty()
-        && let Some(error) = first_error
-    {
-        Err(error)
-    } else {
-        Ok(addresses.into_iter().collect())
+    /// Returns the next source's addresses that were not yielded before, or
+    /// `None` once every source answered, failed, or timed out.
+    ///
+    /// Cancel-safe: a call dropped before it returns loses no answer.
+    pub async fn next(&mut self) -> Option<Vec<SocketAddr>> {
+        while let Some(lookup) = self.lookups.join_next().await {
+            let Ok(Ok(Ok(addresses))) = lookup else {
+                continue;
+            };
+            let fresh: Vec<_> = addresses
+                .into_iter()
+                .filter(|address| self.seen.insert(*address))
+                .collect();
+            if !fresh.is_empty() {
+                return Some(fresh);
+            }
+        }
+        None
     }
 }
 
@@ -86,6 +112,8 @@ pub async fn collect_candidates(
 ///
 /// Bare values use [`DEFAULT_PORT`]. Resolution uses Tokio's OS-resolver
 /// adapter, so DNS, `/etc/hosts`, and overlay-network magic DNS all apply.
+/// Each hostname gets [`RESOLVE_TIMEOUT`]; one that misses it is left out, so
+/// it cannot hold back the source's other addresses.
 #[derive(Clone, Debug)]
 pub struct ManualCandidateSource {
     addresses: Arc<[String]>,
@@ -123,7 +151,14 @@ impl CandidateSource for ManualCandidateSource {
             for address in self.addresses.iter() {
                 let address = address.clone();
                 let default_port = self.default_port;
-                tasks.spawn(async move { resolve_manual_address(&address, default_port).await });
+                tasks.spawn(async move {
+                    let resolved = timeout(
+                        RESOLVE_TIMEOUT,
+                        resolve_manual_address(&address, default_port),
+                    )
+                    .await;
+                    resolved.unwrap_or(Err(DiscoveryError::ResolveTimedOut(address)))
+                });
             }
 
             let mut resolved = BTreeSet::new();
@@ -406,6 +441,9 @@ pub enum DiscoveryError {
         /// OS resolver failure.
         source: io::Error,
     },
+    /// A manual hostname did not resolve within [`RESOLVE_TIMEOUT`].
+    #[error("resolving manual address {0} timed out")]
+    ResolveTimedOut(String),
     /// A manual address has an invalid or ambiguous shape.
     #[error("invalid manual address {0}")]
     InvalidManualAddress(String),
@@ -683,14 +721,48 @@ mod tests {
             }),
         ];
 
-        let collected =
-            tokio::spawn(
-                async move { collect_candidates(&sources, PublicKey::new([1; 32])).await },
-            );
+        let collected = tokio::spawn(async move {
+            let mut stream = CandidateStream::new(&sources, PublicKey::new([1; 32]));
+            let mut collected = Vec::new();
+            while let Some(batch) = stream.next().await {
+                collected.extend(batch);
+            }
+            collected
+        });
         tokio::time::timeout(Duration::from_secs(1), barrier.wait())
             .await
             .unwrap();
-        assert_eq!(collected.await.unwrap().unwrap(), [repeated, unique]);
+        let mut collected = collected.await.unwrap();
+        collected.sort_unstable();
+        assert_eq!(collected, [repeated, unique]);
+    }
+
+    /// A lookup that never answers, like a hostname whose DNS stalls.
+    struct StalledSource;
+
+    impl CandidateSource for StalledSource {
+        fn candidates(&self, _peer_key: PublicKey) -> CandidateFuture<'_> {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_source_neither_delays_nor_outlives_the_others() {
+        let ready = "127.0.0.1:4000".parse().unwrap();
+        let sources: Vec<Arc<dyn CandidateSource>> = vec![
+            Arc::new(StalledSource),
+            Arc::new(FakeSource {
+                barrier: Arc::new(Barrier::new(1)),
+                result: Ok(vec![ready]),
+            }),
+        ];
+        let mut stream = CandidateStream::new(&sources, PublicKey::new([1; 32]));
+        let started = tokio::time::Instant::now();
+
+        assert_eq!(stream.next().await, Some(vec![ready]));
+        assert_eq!(started.elapsed(), Duration::ZERO);
+        assert_eq!(stream.next().await, None);
+        assert_eq!(started.elapsed(), SOURCE_TIMEOUT);
     }
 
     #[tokio::test]

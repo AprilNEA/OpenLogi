@@ -81,6 +81,46 @@ impl CandidateSource for BarrierSource {
     }
 }
 
+/// A source whose lookup never answers, like a hostname whose DNS stalls.
+struct StalledSource;
+
+impl CandidateSource for StalledSource {
+    fn candidates(&self, _peer_key: PublicKey) -> CandidateFuture<'_> {
+        Box::pin(std::future::pending())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stalled_source_does_not_hold_back_a_working_address() -> TestResult {
+    let first_identity = MachineIdentity::generate()?;
+    let second_identity = MachineIdentity::generate()?;
+    let first = endpoint(&first_identity, second_identity.public_key())?;
+    let second = endpoint(&second_identity, first_identity.public_key())?;
+    let mut peer = peer_with_address(second_identity.public_key(), second.local_addr()?);
+    peer.sources.insert(0, Arc::new(StalledSource));
+
+    let first_manager = SessionManager::start(
+        Arc::clone(&first),
+        [peer],
+        Arc::new(CountingProvider::new(1)),
+        test_policy(),
+    )?;
+    let _second_manager = SessionManager::start(
+        Arc::clone(&second),
+        [incoming_only_peer(first_identity.public_key())],
+        Arc::new(CountingProvider::new(2)),
+        test_policy(),
+    )?;
+    let handle = first_manager
+        .peer(second_identity.public_key())
+        .ok_or("manager omitted its peer handle")?;
+
+    wait_for_state(handle, LinkState::Connected).await?;
+    let connection = wait_for_connection(handle).await?;
+    assert_eq!(connection.direction(), ConnectionDirection::Outgoing);
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn managers_establish_a_session_and_send_trusted_initial_state() -> TestResult {
     let first_identity = MachineIdentity::generate()?;
