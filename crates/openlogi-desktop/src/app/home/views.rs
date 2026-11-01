@@ -201,7 +201,9 @@ fn device_carousel(cx: &mut Context<AppView>) -> impl IntoElement {
     let render_order = order.clone();
     let select_order = order.clone();
 
-    v_flex().flex_1().w_full().min_h_0().child(
+    // Top-aligned like the grid: the row's own vertical padding brings the
+    // cards level with the grid's inset.
+    v_flex().flex_1().w_full().min_h_0().pt_2().child(
         Carousel::new("device-carousel", CAROUSEL_CARD_W)
             .len(order.len())
             .selected(selected)

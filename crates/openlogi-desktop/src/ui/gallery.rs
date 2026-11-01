@@ -503,10 +503,12 @@ impl ComponentGallery {
             PanelCard::new(
             "Carousel",
             Icon::new(IconName::GalleryVerticalEnd).text_color(pal.text_muted),
-            div().w_full().h(rems(13.)).child(
+            // Enough cards to overflow, so the faded edge shows on the panel.
+            div().w_full().child(
                 Carousel::new("gallery-carousel", rems(12.))
-                    .len(4)
+                    .len(6)
                     .selected(selected)
+                    .surface(pal.panel)
                     .render_item(move |index, selected, _, cx| {
                         let pal = theme::palette(cx);
                         let view = view.clone();
