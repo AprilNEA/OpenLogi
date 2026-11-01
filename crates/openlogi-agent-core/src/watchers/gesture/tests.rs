@@ -1002,7 +1002,10 @@ async fn a_pointer_only_plan_refresh_keeps_a_held_gesture() {
     // The swipe switched desktops, leaving the pointer over another window
     // (#1634): the republished plan differs only in its pointer target.
     let mut moved = held;
-    moved.dispatch.pointer_target = Some(openlogi_hook::PointerTarget::Desktop);
+    moved.dispatch.pointer = Some(crate::runtime::PointerSelection::new(
+        openlogi_hook::PointerTarget::Desktop,
+        std::collections::BTreeSet::new(),
+    ));
     reconcile_session(
         &mut session,
         Some((&moved.target, &moved.dispatch)),

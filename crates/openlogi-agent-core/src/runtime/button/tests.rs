@@ -5,6 +5,7 @@ use std::time::Instant;
 use openlogi_core::binding::{LongPressBinding, WheelHoldBinding};
 
 use super::*;
+use crate::runtime::PointerPress;
 
 fn hook_press(id: u64, button: ButtonId) -> ActivePress {
     ActivePress {
@@ -333,7 +334,12 @@ fn hook_actions_retain_the_press_time_target_across_focus_changes() {
 
 #[test]
 fn hidpp_edges_and_pulses_retain_their_press_time_targets() {
-    for pointer in [None, Some(openlogi_hook::PointerTarget::Unavailable)] {
+    for pointer in [
+        None,
+        Some(PointerPress::distinct(
+            openlogi_hook::PointerTarget::Unavailable,
+        )),
+    ] {
         let (sent, received) = mpsc::channel();
         let mut owner = ButtonRuntimeOwner::spawn(move |event| {
             sent.send(event)
@@ -393,14 +399,14 @@ fn pointer_change_cancels_old_target_but_preserves_keyboard_and_new_target() {
             .try_hook_down_with_target(
                 ButtonId::Back,
                 Some(&bound),
-                ActionDispatchTarget::for_pointer(Some(old), || Some(417)),
+                ActionDispatchTarget::for_pointer(Some(PointerPress::distinct(old)), || Some(417)),
             )
             .expect("old down");
         let new_press = input
             .try_hook_down_with_target(
                 ButtonId::Forward,
                 None,
-                ActionDispatchTarget::for_pointer(Some(current), || {
+                ActionDispatchTarget::for_pointer(Some(PointerPress::distinct(current)), || {
                     panic!("identified target must not capture focus")
                 }),
             )
@@ -450,7 +456,7 @@ fn pointer_change_retargets_a_gesture_hold_instead_of_canceling_it() {
         .try_hook_down_with_target(
             ButtonId::GestureButton,
             None,
-            ActionDispatchTarget::for_pointer(Some(old), || None),
+            ActionDispatchTarget::for_pointer(Some(PointerPress::distinct(old)), || None),
         )
         .expect("gesture down");
     assert!(matches!(

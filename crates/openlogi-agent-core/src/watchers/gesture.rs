@@ -287,7 +287,7 @@ fn wanted_sessions(
 }
 
 /// Whether two dispatch plans resolve every input to the same action, differing
-/// at most in the hovered window they were selected for.
+/// at most in the pointer context they were selected for.
 fn same_bindings(a: &DispatchPlan, b: &DispatchPlan) -> bool {
     let DispatchPlan {
         config_key,
@@ -296,7 +296,7 @@ fn same_bindings(a: &DispatchPlan, b: &DispatchPlan) -> bool {
         side_gesture_bindings,
         thumbwheel_sensitivity,
         invert_wheel,
-        pointer_target: _,
+        pointer: _,
         shift_bindings,
     } = a;
     *config_key == b.config_key

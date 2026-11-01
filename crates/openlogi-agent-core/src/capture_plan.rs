@@ -8,7 +8,7 @@
 //! plan of the session it arrived on, never against a global selected-device
 //! map.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use openlogi_core::binding::{
@@ -24,6 +24,8 @@ use openlogi_hid::session::gesture::{
     SlotRoute,
 };
 use tokio::sync::watch;
+
+use crate::runtime::PointerSelection;
 
 /// Hardware identity of one HID++ capture session.
 ///
@@ -74,11 +76,11 @@ pub struct DispatchPlan {
     /// it as Logi Options+ does. Read from the
     /// inversion source the main wheel uses on the device's current link,
     /// which [`plan_for_device`] cannot see: the orchestrator fills it in,
-    /// as it does [`Self::pointer_target`].
+    /// as it does `pointer`.
     pub invert_wheel: bool,
-    /// Pointer identity used to select these mouse bindings; absent for the
+    /// Pointer context used to select these mouse bindings; absent for the
     /// explicitly focused policy and keyboard input.
-    pub pointer_target: Option<openlogi_hook::PointerTarget>,
+    pub(crate) pointer: Option<PointerSelection>,
     /// Bindings used while G-Shift is held.
     pub shift_bindings: BTreeMap<ButtonId, Binding>,
 }
@@ -252,6 +254,32 @@ pub(crate) fn hidpp_side_gesture_maps_for(
         .collect()
 }
 
+/// Buttons that `config_key` binds unlike the `focused` application while
+/// the pointer selects the bindings of `hovered`.
+///
+/// A per-app override replaces a whole button
+/// ([`Config::effective_bindings`]). Every action that another button
+/// resolves to, whether tap, hold, or swipe, is therefore the one that the
+/// focused application gets.
+#[must_use]
+pub(crate) fn buttons_unlike_focus(
+    config: &Config,
+    config_key: Option<&str>,
+    hovered: Option<&str>,
+    focused: Option<&str>,
+) -> BTreeSet<ButtonId> {
+    let Some(key) = config_key.filter(|_| hovered != focused) else {
+        return BTreeSet::new();
+    };
+    let here = config.effective_bindings(key, hovered);
+    let there = config.effective_bindings(key, focused);
+    here.keys()
+        .chain(there.keys())
+        .filter(|button| here.get(button) != there.get(button))
+        .copied()
+        .collect()
+}
+
 /// `config_key`'s G-Shift layer as bindings.
 pub(crate) fn shift_bindings_for(config: &Config, config_key: &str) -> BTreeMap<ButtonId, Binding> {
     config
@@ -406,7 +434,7 @@ pub fn plan_for_device(
             side_gesture_bindings,
             thumbwheel_sensitivity,
             invert_wheel: false,
-            pointer_target: None,
+            pointer: None,
             shift_bindings: shift_bindings_for(config, config_key),
         },
     }

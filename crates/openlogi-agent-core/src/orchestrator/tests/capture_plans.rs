@@ -1,9 +1,12 @@
 //! What a config reload or an app switch publishes to the hook and the capture managers.
 
+use std::collections::BTreeSet;
+
 use openlogi_core::device_order::PhysicalDeviceKey;
 use openlogi_hid::reprog_controls::BACK_CIDS;
 
 use super::*;
+use crate::runtime::PointerSelection;
 
 #[test]
 fn a_new_route_does_not_rearm_an_existing_capture() {
@@ -272,7 +275,10 @@ fn pointer_profiles_switch_to_desktop_without_changing_keyboard_focus() {
             maps.bindings[&ButtonId::Back].click_action(),
             Action::PreviousDesktop
         );
-        assert_eq!(maps.pointer_target, Some(PointerTarget::Desktop));
+        assert_eq!(
+            maps.pointer.as_ref().map(PointerSelection::target),
+            Some(PointerTarget::Desktop)
+        );
     }
     let published = orch.shared.capture_plans.borrow();
     let keyboard = published
@@ -284,7 +290,7 @@ fn pointer_profiles_switch_to_desktop_without_changing_keyboard_focus() {
         keyboard.dispatch.bindings[&ButtonId::Back].click_action(),
         Action::Copy
     );
-    assert_eq!(keyboard.dispatch.pointer_target, None);
+    assert_eq!(keyboard.dispatch.pointer, None);
     drop(published);
     assert_eq!(orch.current_app.as_deref(), Some("browser"));
 
@@ -293,13 +299,67 @@ fn pointer_profiles_switch_to_desktop_without_changing_keyboard_focus() {
     orch.reload_config(config);
     assert_eq!(published_back_binding(&orch), Some(Action::BrowserBack));
     assert_eq!(
-        orch.shared
-            .hook_maps
-            .read()
-            .expect("hook maps")
-            .pointer_target,
+        orch.shared.hook_maps.read().expect("hook maps").pointer,
         None
     );
+}
+
+#[test]
+fn pointer_selection_names_the_buttons_bound_unlike_the_focused_app() {
+    use openlogi_hook::{PointerContext, PointerTarget};
+
+    use crate::runtime::FocusBinding;
+    // #2214: over the desktop or an unfocused window, a press sends its
+    // keystrokes only when the focused app binds the button the same way.
+    let mut config = Config::default();
+    config.set_binding("a", ButtonId::Back, Binding::Single(Action::Copy));
+    config.set_per_app_binding("a", "editor", ButtonId::Forward, Some(Action::Undo));
+    config.set_per_app_binding("a", "browser", ButtonId::Forward, Some(Action::Undo));
+    config.set_per_app_binding("a", "browser", ButtonId::Back, Some(Action::BrowserBack));
+    let mut orch = orchestrator(config);
+    orch.devices = vec![dev("a", 1, true)];
+    let unlike_focus = |orch: &Orchestrator| {
+        let hook = orch.shared.hook_maps.read().expect("maps").pointer.clone();
+        let plan = orch
+            .shared
+            .capture_plans
+            .borrow()
+            .plans()
+            .first()
+            .expect("mouse plan")
+            .dispatch
+            .pointer
+            .clone();
+        assert_eq!(hook, plan, "OS hook and HID++ share one mouse context");
+        let selection = hook.expect("pointer mode");
+        [ButtonId::Back, ButtonId::Forward]
+            .into_iter()
+            .filter(|&button| selection.press(button).focus == FocusBinding::Distinct)
+            .collect::<BTreeSet<_>>()
+    };
+    orch.set_current_app(Some(ForegroundApp::unnamed("finder".into())));
+    orch.set_pointer_context(PointerContext {
+        app: None,
+        target: PointerTarget::Desktop,
+    });
+    // Neither the desktop nor Finder has a profile.
+    assert_eq!(unlike_focus(&orch), BTreeSet::new());
+    // The editor overrides Forward only. Back's global binding is still shared.
+    orch.set_current_app(Some(ForegroundApp::unnamed("editor".into())));
+    assert_eq!(unlike_focus(&orch), BTreeSet::from([ButtonId::Forward]));
+    // Over a browser window, Forward is overridden the same way as in the
+    // focused editor. Only Back differs.
+    orch.set_pointer_context(PointerContext {
+        app: Some(ForegroundApp::unnamed("browser".into())),
+        target: PointerTarget::Window {
+            process_id: 41,
+            window_id: 7,
+        },
+    });
+    assert_eq!(unlike_focus(&orch), BTreeSet::from([ButtonId::Back]));
+    // Focus moves into the hovered app.
+    orch.set_current_app(Some(ForegroundApp::unnamed("browser".into())));
+    assert_eq!(unlike_focus(&orch), BTreeSet::new());
 }
 
 #[test]
@@ -316,7 +376,7 @@ fn unidentified_pointer_context_uses_the_focused_profile_never_the_desktop() {
     orch.devices = vec![dev("a", 1, true)];
     orch.set_current_app(Some(ForegroundApp::unnamed("browser".into())));
     let published_pointer_target = |orch: &Orchestrator| {
-        let hook = orch.shared.hook_maps.read().expect("maps").pointer_target;
+        let hook = orch.shared.hook_maps.read().expect("maps").pointer.clone();
         let plan = orch
             .shared
             .capture_plans
@@ -325,9 +385,10 @@ fn unidentified_pointer_context_uses_the_focused_profile_never_the_desktop() {
             .first()
             .expect("mouse plan")
             .dispatch
-            .pointer_target;
+            .pointer
+            .clone();
         assert_eq!(hook, plan, "OS hook and HID++ share one mouse context");
-        hook
+        hook.as_ref().map(PointerSelection::target)
     };
     assert!(orch.set_pointer_context(PointerContext {
         app: None,
@@ -400,7 +461,13 @@ fn unidentified_pointer_context_without_a_focused_app_uses_the_global_bindings()
     });
     assert_eq!(published_back_binding(&orch), Some(Action::PreviousDesktop));
     assert_eq!(
-        orch.shared.hook_maps.read().expect("maps").pointer_target,
+        orch.shared
+            .hook_maps
+            .read()
+            .expect("maps")
+            .pointer
+            .as_ref()
+            .map(PointerSelection::target),
         Some(PointerTarget::Unavailable)
     );
 
@@ -412,10 +479,7 @@ fn unidentified_pointer_context_without_a_focused_app_uses_the_global_bindings()
     orch.set_current_app(None);
     orch.rebuild();
     assert_eq!(published_back_binding(&orch), Some(Action::PreviousDesktop));
-    assert_eq!(
-        orch.shared.hook_maps.read().expect("maps").pointer_target,
-        None
-    );
+    assert_eq!(orch.shared.hook_maps.read().expect("maps").pointer, None);
 }
 
 #[test]

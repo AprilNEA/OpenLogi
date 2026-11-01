@@ -1,6 +1,7 @@
 //! Regression tests for OS-hook state and dispatch policy.
 
 use super::*;
+use crate::runtime::FocusBinding;
 use openlogi_core::binding::{GESTURE_SWIPE_THRESHOLD, LongPressBinding};
 use openlogi_core::config::KeyModifiers;
 
@@ -287,7 +288,10 @@ fn mouse_press_uses_the_target_published_with_its_binding_not_frontmost_safari()
     let (dispatcher, mut owner, events) = test_dispatcher();
     let hooks = Arc::new(RwLock::new(HookMaps {
         bindings: BTreeMap::from([(ButtonId::Back, Action::PreviousDesktop.into())]),
-        pointer_target: Some(PointerTarget::Desktop),
+        pointer: Some(PointerSelection::new(
+            PointerTarget::Desktop,
+            BTreeSet::from([ButtonId::Back]),
+        )),
         ..HookMaps::default()
     }));
     let mouse = EventDevice {
@@ -315,6 +319,7 @@ fn mouse_press_uses_the_target_published_with_its_binding_not_frontmost_safari()
         press.target(),
         ActionDispatchTarget::Pointer {
             target: PointerTarget::Desktop,
+            focus: FocusBinding::Distinct,
             fallback_safari_pid: None,
         }
     );
@@ -376,6 +381,35 @@ fn mouse_press_uses_the_target_published_with_its_binding_not_frontmost_safari()
 }
 
 #[test]
+fn pointer_press_judges_the_binding_layer_that_the_press_reads() {
+    use openlogi_hook::PointerTarget;
+
+    let mut maps = HookMaps {
+        bindings: BTreeMap::from([(ButtonId::Back, Action::BrowserBack.into())]),
+        shift_bindings: BTreeMap::from([(ButtonId::Back, Action::Copy.into())]),
+        selected_device: Some("mouse".into()),
+        pointer: Some(PointerSelection::new(
+            PointerTarget::Desktop,
+            BTreeSet::from([ButtonId::Back]),
+        )),
+        ..HookMaps::default()
+    };
+    let focus = |maps: &HookMaps, id| maps.pointer_press(id).map(|press| press.focus);
+    assert_eq!(focus(&maps, ButtonId::Back), Some(FocusBinding::Distinct));
+    assert_eq!(focus(&maps, ButtonId::Forward), Some(FocusBinding::Shared));
+    // No app profile changes the G-Shift layer, so focus shares its binding
+    // even where the base layer differs.
+    maps.shift_held.insert("mouse".into());
+    assert_eq!(
+        maps.press_binding(ButtonId::Back).0,
+        Some(Action::Copy.into())
+    );
+    assert_eq!(focus(&maps, ButtonId::Back), Some(FocusBinding::Shared));
+    maps.pointer = None;
+    assert_eq!(maps.pointer_press(ButtonId::Back), None);
+}
+
+#[test]
 fn queued_unidentified_pointer_action_retains_its_press_time_target() {
     use super::super::button::ButtonRuntimeEvent;
     use openlogi_hook::PointerTarget;
@@ -396,7 +430,10 @@ fn queued_unidentified_pointer_action_retains_its_press_time_target() {
         let (dispatcher, mut owner, events) = test_dispatcher();
         let hooks = Arc::new(RwLock::new(HookMaps {
             bindings: BTreeMap::from([(ButtonId::Back, Action::BrowserBack.into())]),
-            pointer_target: Some(PointerTarget::Unavailable),
+            pointer: Some(PointerSelection::new(
+                PointerTarget::Unavailable,
+                BTreeSet::new(),
+            )),
             ..HookMaps::default()
         }));
         let focused_safari = Cell::new(pressed_safari);

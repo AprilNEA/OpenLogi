@@ -41,8 +41,8 @@ use tracing::{debug, info, warn};
 
 use crate::action_ring::ActionRingSessionSpec;
 use crate::capture_plan::{
-    CapturePublication, PlanDevice, SharedCapturePlans, hidpp_side_gesture_maps_for,
-    plan_for_device, shift_bindings_for,
+    CapturePublication, PlanDevice, SharedCapturePlans, buttons_unlike_focus,
+    hidpp_side_gesture_maps_for, plan_for_device, shift_bindings_for,
 };
 use crate::hardware::{
     DeviceAccess, DeviceOp, HardwareContext, KeptOsLayouts, VolatileMouseSettings, WriteOrder,
@@ -52,9 +52,9 @@ use crate::notices::LowBatteryWatch;
 use crate::observable::ObservableState;
 use crate::pointer_speed::{AppWrite, ReloadChange, SavedSpeed, SpeedMouse, SpeedWrite};
 use crate::receiver_access::ReceiverAccess;
-use crate::runtime::PageTurn;
 use crate::runtime::hook::{HookMaps, SharedHookMaps};
 use crate::runtime::scroll::ScrollPreferences;
+use crate::runtime::{PageTurn, PointerSelection};
 use crate::watchers::host_switch::{HostSwitchLink, HostSwitchLinks};
 use crate::watchers::inventory::InventoryRefresh;
 use crate::watchers::key_display::{KeyDisplaySpec, KeyFace, SharedKeyDisplaySpecs};
@@ -794,6 +794,22 @@ impl Orchestrator {
         (app, Some(target))
     }
 
+    /// The pointer context for `key`'s bindings resolved for `app`. It names
+    /// the buttons that the focused application binds otherwise, so a press of
+    /// any other button may send its keystrokes as focused mode does.
+    fn pointer_selection(
+        &self,
+        key: Option<&str>,
+        app: Option<&str>,
+        target: Option<openlogi_hook::PointerTarget>,
+    ) -> Option<PointerSelection> {
+        target.map(|target| {
+            let unlike_focus =
+                buttons_unlike_focus(&self.config, key, app, self.current_app.as_deref());
+            PointerSelection::new(target, unlike_focus)
+        })
+    }
+
     /// Build the OS-hook callback's maps for `key` and its mouse context. Both hook
     /// sub-maps are app-scoped (a per-app override can demote the gesture owner),
     /// so they're built together here and published under one lock — keeping
@@ -806,6 +822,7 @@ impl Orchestrator {
             return HookMaps::default();
         }
         let (app, pointer_target) = self.mouse_context();
+        let pointer = self.pointer_selection(key, app, pointer_target);
         // The OS hook only sees standard HID buttons, whose defaults no
         // G-series layout changes, so this map needs no layout.
         let mut bindings = button_bindings_for(&self.config, key, app, None);
@@ -832,7 +849,7 @@ impl Orchestrator {
         HookMaps {
             bindings,
             gestures,
-            pointer_target,
+            pointer,
             selected_device: key.map(str::to_owned),
             shift_bindings,
             ..HookMaps::default()
@@ -1245,7 +1262,8 @@ impl Orchestrator {
                 rearm_generation,
                 self.os_mouse_hook_available,
             );
-            plan.dispatch.pointer_target = pointer_target;
+            plan.dispatch.pointer =
+                self.pointer_selection(Some(&dev.config_key), app, pointer_target);
             plan.dispatch.invert_wheel = wheel_inverted(&self.config, dev);
             plan.target.spec.divert_main_wheel =
                 main_wheel_divert(&self.config, dev, self.os_mouse_hook_available);
