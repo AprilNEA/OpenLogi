@@ -469,6 +469,7 @@ flash_factory_profile = "Fare, değiştirilemeyen fabrika profilini kullanıyor.
 flash_primary_kept = "Sol ve sağ düğmeler tıklamalarını farede tutar, böylece fare onları asla kaybetmez."
 flash_unavailable_here = "Bu sistemde OpenLogi farenin yedek düğmelerinde eylem çalıştıramaz; bu yüzden düğme farenin sakladığını korur."
 flash_reset_to_default = "Varsayılana sıfırla"
+flash_profile_buttons = "Fare profili — her birinin kendi düğmeleri var"
 g_shift = "G-Shift"
 g_shift_hold = "G-Shift (basılı tut)"
 g_shift_normal = "Normal"

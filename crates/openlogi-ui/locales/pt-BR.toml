@@ -469,6 +469,7 @@ flash_factory_profile = "O mouse usa o perfil de fábrica, que não pode ser alt
 flash_primary_kept = "Os botões esquerdo e direito mantêm o clique no mouse, então o mouse nunca os perde."
 flash_unavailable_here = "O OpenLogi não consegue executar ações nos botões extras do mouse neste sistema, então este botão mantém o que o mouse guarda."
 flash_reset_to_default = "Restaurar padrão"
+flash_profile_buttons = "Perfil do mouse — cada um tem seus próprios botões"
 g_shift = "G-Shift"
 g_shift_hold = "G-Shift (segurar)"
 g_shift_normal = "Normal"

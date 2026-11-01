@@ -469,6 +469,7 @@ flash_factory_profile = "Myš používá tovární profil, který nelze měnit. 
 flash_primary_kept = "Levé a pravé tlačítko si v myši ponechávají kliknutí, takže je myš nikdy neztratí."
 flash_unavailable_here = "OpenLogi v tomto systému nemůže spouštět akce na záložních tlačítkách myši, proto toto tlačítko zachovává to, co je uloženo v myši."
 flash_reset_to_default = "Obnovit výchozí"
+flash_profile_buttons = "Profil myši — každý má svá tlačítka"
 g_shift = "G-Shift"
 g_shift_hold = "G-Shift (držet)"
 g_shift_normal = "Normální"

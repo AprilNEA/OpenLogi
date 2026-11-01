@@ -469,6 +469,7 @@ flash_factory_profile = "Musen bruger sin fabriksprofil, som ikke kan ændres. S
 flash_primary_kept = "Venstre og højre knap beholder deres klik på musen, så musen aldrig mister dem."
 flash_unavailable_here = "OpenLogi kan ikke køre handlinger på musens ekstra knapper på dette system, så denne knap beholder det, musen indeholder."
 flash_reset_to_default = "Nulstil til standard"
+flash_profile_buttons = "Museprofil — hver har sine egne knapper"
 g_shift = "G-Shift"
 g_shift_hold = "G-Shift (hold)"
 g_shift_normal = "Normal"

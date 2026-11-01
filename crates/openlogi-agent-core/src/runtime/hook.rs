@@ -62,21 +62,34 @@ pub struct HookMaps {
     /// Devices with a G-Shift button held, set by HID++ capture. Survives map
     /// rebuilds like `diverted_buttons`.
     pub(crate) shift_held: BTreeSet<String>,
-    /// The bindings of the slots of a flash-bindings mouse (the G700), for
-    /// the app in front. Configuration, rebuilt with the rest.
-    pub(crate) flash_slot_bindings: BTreeMap<ButtonId, Binding>,
-    /// The agent button each agent-run slot of that mouse presses, as the
+    /// The bindings of the slots of each onboard profile of a
+    /// flash-bindings mouse (the G700), by the profile's flash page, for the
+    /// app in front. Configuration, rebuilt with the rest.
+    pub(crate) flash_slot_bindings: BTreeMap<u8, BTreeMap<ButtonId, Binding>>,
+    /// The profile slot each agent button of that mouse stands for, as the
     /// flash-write task last found or wrote its flash. A hardware
     /// observation, so it survives map rebuilds.
-    pub(crate) flash_routes: BTreeMap<MouseButtonNumber, ButtonId>,
+    pub(crate) flash_routes: BTreeMap<MouseButtonNumber, FlashRoute>,
+}
+
+/// The slot of one onboard profile an agent button stands for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct FlashRoute {
+    /// The flash page of the profile.
+    pub(crate) page: u8,
+    /// The slot's button.
+    pub(crate) slot: ButtonId,
 }
 
 impl HookMaps {
-    /// The binding of the slot that presses agent button `number` on a
-    /// flash-bindings mouse, if the flash routes one there.
+    /// The binding of the profile slot that presses agent button `number`
+    /// on a flash-bindings mouse, if the flash routes one there.
     fn flash_binding(&self, number: MouseButtonNumber) -> Option<Binding> {
-        let slot = self.flash_routes.get(&number)?;
-        self.flash_slot_bindings.get(slot).cloned()
+        let route = self.flash_routes.get(&number)?;
+        self.flash_slot_bindings
+            .get(&route.page)?
+            .get(&route.slot)
+            .cloned()
     }
 
     /// The held G-Shift layer's binding for `id`, which replaces the

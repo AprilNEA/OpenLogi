@@ -126,6 +126,20 @@ pub struct FlashProfiles {
     /// Where the latest queued flash write stands — profile edits, DPI and
     /// report-rate saves and button bindings share it.
     pub write: FlashWrite,
+    /// The flash page each listed profile is stored on, in directory order:
+    /// the identity a profile's OpenLogi configuration is kept under
+    /// ([`Config::flash_profile_config`](crate::config::Config::flash_profile_config)).
+    pub pages: Vec<u8>,
+}
+
+impl FlashProfiles {
+    /// The page `profile` is stored on, if it is listed.
+    #[must_use]
+    pub fn page_of(&self, profile: ProfileIndex) -> Option<u8> {
+        self.pages
+            .get(usize::from(profile.get().get() - 1))
+            .copied()
+    }
 }
 
 impl FlashProfiles {

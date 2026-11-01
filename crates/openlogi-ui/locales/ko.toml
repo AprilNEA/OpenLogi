@@ -469,6 +469,7 @@ flash_factory_profile = "마우스가 변경할 수 없는 공장 출하 프로�
 flash_primary_kept = "왼쪽·오른쪽 버튼은 클릭 기능을 마우스에 유지하므로 마우스가 이 기능을 잃지 않습니다."
 flash_unavailable_here = "이 시스템에서는 OpenLogi가 마우스의 여분 버튼에서 동작을 실행할 수 없으므로, 이 버튼은 마우스에 저장된 기능을 유지합니다."
 flash_reset_to_default = "기본값으로 재설정"
+flash_profile_buttons = "마우스 프로필 — 프로필마다 버튼이 따로 있습니다"
 g_shift = "G-Shift"
 g_shift_hold = "G-Shift(누르고 있기)"
 g_shift_normal = "일반"

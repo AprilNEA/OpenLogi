@@ -73,8 +73,12 @@ impl AppState {
             .current_record()
             .and_then(DeviceRecord::persistent_config_key);
         let state = self.current_flash_bindings();
+        // The played profile's own configuration, whichever the entry holds.
+        let profile = key
+            .zip(state.as_ref().and_then(|state| state.page))
+            .map(|(key, page)| self.config.flash_profile_config(key, page));
         Some(flash_view(
-            &self.config,
+            profile.as_ref().unwrap_or(&self.config),
             key,
             layout,
             state.as_deref(),

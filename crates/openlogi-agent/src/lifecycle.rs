@@ -51,6 +51,11 @@ use crate::startup::{self, Core, InputServices};
 use crate::virtual_keyboard::VirtualKeyboard;
 use crate::{autostart, overlay, server};
 
+/// The file, under the state directory, recording what the agent last wrote
+/// to each onboard profile of a flash mouse (the G700): which profiles'
+/// configuration it applied, and the agent buttons it gave their slots.
+const FLASH_RECORDS_FILE: &str = "flash-profiles.json";
+
 /// How long a dormant agent waits before leaving — generous next to the
 /// seconds a kickstarting GUI needs, and the window costs only an idle
 /// process that has opened no device and prompted for nothing.
@@ -323,6 +328,16 @@ impl Armed {
                 .await;
         }
 
+        match openlogi_core::paths::state_dir() {
+            Ok(directory) => running
+                .shared
+                .flash_writes
+                .keep_records_in(directory.join(FLASH_RECORDS_FILE)),
+            Err(error) => warn!(
+                %error,
+                "no state directory — flash writes are recorded for this run only"
+            ),
+        }
         running
             .shared
             .flash_writes

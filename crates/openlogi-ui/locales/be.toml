@@ -469,6 +469,7 @@ flash_factory_profile = "Мыш працуе на заводскім профі�
 flash_primary_kept = "Левая і правая кнопкі захоўваюць націск у мышы, каб мыш іх ніколі не губляла."
 flash_unavailable_here = "У гэтай сістэме OpenLogi не можа выконваць дзеянні на запасных кнопках мышы, таму кнопка пакідае тое, што запісана ў мышы."
 flash_reset_to_default = "Скінуць да прадвызначанага"
+flash_profile_buttons = "Профіль мышы — у кожнага свае кнопкі"
 g_shift = "G-Shift"
 g_shift_hold = "G-Shift (утрымліваць)"
 g_shift_normal = "Звычайны"

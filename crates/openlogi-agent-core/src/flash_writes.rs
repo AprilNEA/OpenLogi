@@ -14,16 +14,27 @@
 //! device, so a burst of edits ([`FlashWrites::request`] per change) writes
 //! the mouse once, [`DEBOUNCE`] after the last of them.
 //!
+//! Each onboard profile keeps its own bindings: a job writes only the
+//! profile the mouse plays, and only when that profile's configuration
+//! changed since the agent last applied it ([`records`]). A profile switch
+//! writes nothing; it only tells the hook which agent buttons the played
+//! profile holds.
+//!
 //! The decisions live in [`FlashQueue`], a sans-I/O object driven with an
 //! explicit `now`; the task around it only sleeps, runs jobs and publishes.
 
-use std::collections::{HashMap, VecDeque};
+pub mod records;
+
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::future::Future;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use openlogi_core::binding::flash::release_cleared_slots;
-use openlogi_core::binding::{FlashBindingsState, FlashPlan, FlashWrite, G700, SlotIntent};
+use openlogi_core::binding::{
+    FlashBindingsState, FlashPlan, FlashSync, FlashWrite, MouseButtonNumber, ProfileRequest,
+    SlotIntent,
+};
 use openlogi_core::hid::{FlashProfileEdit, ReportRate};
 use openlogi_hid::{DeviceRoute, G700DpiSave, G700Job};
 use tokio::sync::{Notify, watch};
@@ -31,8 +42,9 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tracing::{info, warn};
 
+use self::records::FlashRecords;
 use crate::hardware::DeviceAccess;
-use crate::runtime::hook::SharedHookMaps;
+use crate::runtime::hook::{FlashRoute, SharedHookMaps};
 
 /// How long a request waits for the next before its job starts.
 pub const DEBOUNCE: Duration = Duration::from_millis(1200);
@@ -53,14 +65,26 @@ pub const SETTLE_BUDGET: Duration = Duration::from_secs(30);
 /// configuration change or reconnect (see [`FlashWrites::failed`]).
 pub const RETRY_DELAY: Duration = Duration::from_secs(2);
 
+/// What a flash mouse's configuration asks of the buttons of each of its
+/// onboard profiles.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FlashBindingsRequest {
+    /// The configuration entry the mouse is stored under, which the record
+    /// of the agent's own writes is kept by.
+    pub owner: String,
+    /// What each profile's configuration wants of its slots, in layout
+    /// order, by the flash page the profile is stored on.
+    pub pages: BTreeMap<u8, Vec<SlotIntent>>,
+}
+
 /// What one request asks of a device's flash. Requests for one device merge
 /// while they wait ([`Self::merge`]), and the job that runs brings the flash
 /// to all of them at once.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FlashJob {
-    /// What the configuration wants of each button slot, in layout order;
-    /// `None` keeps what the device was last asked.
-    pub bindings: Option<Vec<SlotIntent>>,
+    /// What the configuration wants of each profile's button slots; `None`
+    /// keeps what the device was last asked.
+    pub bindings: Option<FlashBindingsRequest>,
     /// Profile edits, in the order asked.
     pub edits: VecDeque<FlashProfileEdit>,
     /// A live DPI change to save to the played profile.
@@ -70,11 +94,11 @@ pub struct FlashJob {
 }
 
 impl FlashJob {
-    /// Bring the button slots to `intents`.
+    /// Bring each profile's button slots to what `request` asks.
     #[must_use]
-    pub fn bindings(intents: Vec<SlotIntent>) -> Self {
+    pub fn bindings(request: FlashBindingsRequest) -> Self {
         Self {
-            bindings: Some(intents),
+            bindings: Some(request),
             ..Self::default()
         }
     }
@@ -132,6 +156,9 @@ pub struct FlashOutcome {
     /// The directory index of the profile the mouse plays; `None` for its
     /// factory profile, which holds no bindings.
     pub profile: Option<u8>,
+    /// The flash page of that profile; `None` exactly when
+    /// [`Self::profile`] is.
+    pub page: Option<u8>,
     /// Where the played profile's bindings are now.
     pub plan: FlashPlan,
 }
@@ -152,7 +179,12 @@ pub trait FlashExecutor: Send + Sync + 'static {
 
 /// The production executor: syncs a G700's bindings over the agent's own
 /// channels, under the receiver lease and the transport's turn but no
-/// deadline, and hands the hook the agent buttons the flash now presses.
+/// deadline, and hands the hook the agent buttons the flash now presses —
+/// the played profile's, and those the agent gave every other profile, so a
+/// profile switch on the mouse that nothing has noticed yet still finds its
+/// buttons routed. Agent buttons are distinct across profiles
+/// ([`openlogi_core::binding::flash::plan_flash_bindings`]), so each names
+/// one slot of one profile.
 pub struct G700FlashExecutor {
     /// The channels every device write goes through.
     pub device: DeviceAccess,
@@ -166,17 +198,7 @@ impl FlashExecutor for G700FlashExecutor {
         route: &DeviceRoute,
         job: &mut G700Job,
     ) -> Result<FlashOutcome, String> {
-        // A slot the agent ran on the last write that the configuration has
-        // since cleared goes back to its default instead of pressing an
-        // agent button nothing catches any more.
-        let routed = match self.hook_maps.read() {
-            Ok(maps) => maps.flash_routes.clone(),
-            Err(error) => {
-                warn!(%error, lock = "hook_maps", "lock poisoned — no cleared slot released");
-                std::collections::BTreeMap::new()
-            }
-        };
-        job.bindings = release_cleared_slots(&G700, &job.bindings, &routed);
+        let requests = job.bindings.clone();
         // Boxed: a sync reads and writes several pages, and its state
         // machine is too large to keep on the caller's stack.
         let synced = self
@@ -189,19 +211,50 @@ impl FlashExecutor for G700FlashExecutor {
             .map_err(|error| error.to_string())?
             .map_err(|error| error.to_string())?;
         if synced.written {
-            info!(profile = ?synced.profile, "the G700's flash is written");
+            info!(profile = ?synced.profile, page = ?synced.page, "the G700's flash is written");
         }
+        let routes = hook_routes(&requests, synced.page, &synced.plan);
         match self.hook_maps.write() {
-            Ok(mut maps) => maps.flash_routes.clone_from(&synced.plan.routed),
+            Ok(mut maps) => maps.flash_routes = routes,
             Err(error) => {
                 warn!(%error, lock = "hook_maps", "lock poisoned — agent buttons not published");
             }
         }
         Ok(FlashOutcome {
             profile: synced.profile,
+            page: synced.page,
             plan: synced.plan,
         })
     }
+}
+
+/// The agent buttons the hook routes after a job that found the mouse on
+/// `played`: those the agent gave the other profiles, then the played
+/// profile's as it holds them now, which win a button both press — a copy
+/// of a profile not yet written on its own.
+fn hook_routes(
+    requests: &BTreeMap<u8, ProfileRequest>,
+    played: Option<u8>,
+    plan: &FlashPlan,
+) -> BTreeMap<MouseButtonNumber, FlashRoute> {
+    let mut routes: BTreeMap<_, _> = requests
+        .iter()
+        .filter(|(page, _)| Some(**page) != played)
+        .flat_map(|(&page, request)| {
+            request
+                .owned
+                .iter()
+                .map(move |(&button, &slot)| (button, FlashRoute { page, slot }))
+        })
+        .collect();
+    if let Some(page) = played {
+        routes.extend(
+            plan.routed
+                .iter()
+                .map(|(&button, &slot)| (button, FlashRoute { page, slot })),
+        );
+    }
+    routes
 }
 
 /// One queued request: the job and when it may start.
@@ -219,7 +272,10 @@ pub struct FlashQueue {
     running: Option<DeviceRoute>,
     /// The bindings each device was last asked for, which a job of a
     /// request that names none syncs to.
-    intents: HashMap<DeviceRoute, Vec<SlotIntent>>,
+    asked: HashMap<DeviceRoute, FlashBindingsRequest>,
+    /// What the agent last applied to each profile, which decides what a
+    /// job may write.
+    records: FlashRecords,
 }
 
 impl FlashQueue {
@@ -228,8 +284,8 @@ impl FlashQueue {
     /// ([`FlashJob::merge`]); one asked while the device's job runs waits
     /// for that job.
     pub fn request(&mut self, route: DeviceRoute, job: FlashJob, now: Instant) {
-        if let Some(intents) = &job.bindings {
-            self.intents.insert(route.clone(), intents.clone());
+        if let Some(request) = &job.bindings {
+            self.asked.insert(route.clone(), request.clone());
         }
         let due = now + DEBOUNCE;
         match self.queued.get_mut(&route) {
@@ -270,7 +326,8 @@ impl FlashQueue {
             rate,
         } = self.queued.remove(&route)?.job;
         let bindings = bindings
-            .or_else(|| self.intents.get(&route).cloned())
+            .or_else(|| self.asked.get(&route).cloned())
+            .map(|asked| self.records.requests(&asked.owner, &asked.pages))
             .unwrap_or_default();
         self.running = Some(route.clone());
         Some((
@@ -287,6 +344,38 @@ impl FlashQueue {
     /// The running job ended.
     pub fn finish(&mut self) {
         self.running = None;
+    }
+
+    /// Record what `job`, run for `route`, applied: the played profile it
+    /// found (`outcome`) holds what its configuration asked, if the job was
+    /// to write it. Returns whether the record changed.
+    pub fn record(&mut self, route: &DeviceRoute, job: &G700Job, outcome: &FlashOutcome) -> bool {
+        let Some(owner) = self.asked.get(route).map(|asked| asked.owner.clone()) else {
+            return false;
+        };
+        let Some(page) = outcome.page else {
+            return false;
+        };
+        match job.bindings.get(&page) {
+            Some(request) if request.sync == FlashSync::Write => self.records.apply(
+                &owner,
+                page,
+                request.intents.clone(),
+                outcome.plan.routed.clone(),
+            ),
+            _ => false,
+        }
+    }
+
+    /// Start from the record `records`, as read back from its file.
+    pub fn restore_records(&mut self, records: FlashRecords) {
+        self.records = records;
+    }
+
+    /// What the agent last applied to each profile.
+    #[must_use]
+    pub fn records(&self) -> &FlashRecords {
+        &self.records
     }
 
     /// Where `route`'s write stands as far as the queue knows: pending,
@@ -328,6 +417,8 @@ struct Book {
     /// No job starts while held: a replacement is draining the channels.
     held: bool,
     closing: bool,
+    /// Where the queue's record of applied profiles is kept between runs.
+    records_file: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -365,6 +456,20 @@ pub struct FlashWrites {
 }
 
 impl FlashWrites {
+    /// Keep the record of what each profile was last brought to in `path`,
+    /// starting from what it holds. A record that does not read is
+    /// replaced: the next change of each profile's configuration writes it
+    /// again, and its agent buttons are only taken back once known.
+    pub fn keep_records_in(&self, path: PathBuf) {
+        let records = FlashRecords::load(&path).unwrap_or_else(|error| {
+            warn!(%error, path = %path.display(), "the flash write record did not read — starting afresh");
+            FlashRecords::default()
+        });
+        let mut book = self.shared.book();
+        book.queue.restore_records(records);
+        book.records_file = Some(path);
+    }
+
     /// Ask that `route`'s flash be brought to `job` (see [`FlashQueue::request`]).
     /// Refused once the agent is leaving.
     pub fn request(&self, route: DeviceRoute, job: FlashJob) {
@@ -401,6 +506,7 @@ impl FlashWrites {
             routed: outcome.plan.routed,
             unrouted: outcome.plan.unrouted,
             write,
+            page: outcome.page,
         }
     }
 
@@ -561,6 +667,16 @@ async fn run<E: FlashExecutor>(shared: Arc<Shared>, executor: E) {
                 let attempt = run_with_retry(&shared, &executor, &route, &mut job).await;
                 let mut book = shared.book();
                 book.queue.finish();
+                let recorded = match &attempt {
+                    Settled::Done(outcome) => book.queue.record(&route, &job, outcome),
+                    Settled::Failed { .. } => false,
+                };
+                if recorded
+                    && let Some(path) = &book.records_file
+                    && let Err(error) = book.queue.records().save(path)
+                {
+                    warn!(%error, path = %path.display(), "the flash write record was not saved");
+                }
                 let previous = match book.settled.remove(&route) {
                     Some(Settled::Done(outcome)) => Some(outcome),
                     Some(Settled::Failed { last, .. }) => last,

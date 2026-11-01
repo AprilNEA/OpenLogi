@@ -1,6 +1,8 @@
 //! The mice whose onboard flash holds their button bindings (the G700): which
-//! are present, what the configuration asks their flash to hold, and the
-//! bindings the hook runs for the slots the agent takes.
+//! are present, what the configuration of each of their onboard profiles
+//! asks the flash to hold, and the bindings the hook runs for the slots the
+//! agent takes. Each profile has a configuration of its own, kept by its
+//! flash page (`openlogi_core::config::Config::flash_profile_config`).
 //!
 //! What goes to the flash and what to the agent is
 //! `openlogi_core::binding::flash`'s decision; the writes are
@@ -22,7 +24,7 @@ use openlogi_hid::{DeviceRoute, G700DpiSave, HidppOperation, WriteError};
 
 use super::devices::paired_config_key;
 use super::{InventoryState, Orchestrator, SharedHandles};
-use crate::flash_writes::FlashJob;
+use crate::flash_writes::{FlashBindingsRequest, FlashJob};
 
 /// One mouse whose flash holds its bindings.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -79,37 +81,39 @@ impl Orchestrator {
     }
 
     /// Ask the flash-write task to bring each online, enabled flash mouse to
-    /// what the configuration wants of it, when that changed since the last
-    /// request or the mouse came back. A mouse that leaves, sleeps or is
-    /// disabled is forgotten, so its return syncs it again: the flash may
-    /// have been rewritten elsewhere meanwhile.
+    /// what the configuration of each of its profiles wants, when that
+    /// changed since the last request or the mouse came back. A mouse that
+    /// leaves, sleeps or is disabled is forgotten, so its return syncs it
+    /// again — which reads its played profile and writes it only if its
+    /// configuration changed since the agent last applied it.
     fn request_flash_writes(&mut self) {
         let wanted: HashMap<DeviceRoute, _> = self
             .flash_devices
             .iter()
             .filter(|device| device.online && self.config.device_enabled(&device.config_key))
             .map(|device| {
-                let intents = flash_intents(
-                    &self.config,
-                    &device.config_key,
-                    device.layout,
-                    FlashHost::CURRENT,
-                );
-                (device.route.clone(), (device.layout, intents))
+                let pages = flash_profile_intents(&self.config, device);
+                let request = FlashBindingsRequest {
+                    owner: device.config_key.clone(),
+                    pages,
+                };
+                (device.route.clone(), (device.layout, request))
             })
             .collect();
         let mut requested = HashMap::with_capacity(wanted.len());
-        for (route, (layout, intents)) in wanted {
-            let changed = self.flash_requested.get(&route) != Some(&intents);
+        for (route, (layout, request)) in wanted {
+            let changed = self.flash_requested.get(&route) != Some(&request);
             if changed || self.shared.flash_writes.failed(&route) {
                 if changed {
-                    log_refused_slots(layout, &intents);
+                    for intents in request.pages.values() {
+                        log_refused_slots(layout, intents);
+                    }
                 }
                 self.shared
                     .flash_writes
-                    .request(route.clone(), FlashJob::bindings(intents.clone()));
+                    .request(route.clone(), FlashJob::bindings(request.clone()));
             }
-            requested.insert(route, intents);
+            requested.insert(route, request);
         }
         self.flash_requested = requested;
     }
@@ -125,9 +129,10 @@ impl Orchestrator {
     /// Note that `route` plays the profile at directory index `played`
     /// (`None`: its factory profile), as a read of it just found. When that
     /// is not the profile its last flash job left it on — a profile button
-    /// on the mouse, or a selection from the settings app — its bindings are
-    /// synced again, as on its return: the hook's agent buttons and the
-    /// Buttons panel follow the profile it plays.
+    /// on the mouse, or a selection from the settings app — the job runs
+    /// again: it reads the new profile, whose own configuration it writes
+    /// only if that changed since it was last applied, and the hook's agent
+    /// buttons and the Buttons panel follow the profile it plays.
     pub fn note_played_profile(&self, route: &DeviceRoute, played: Option<u8>) {
         if !self.is_flash_device(route) {
             return;
@@ -165,10 +170,11 @@ impl Orchestrator {
         Ok(self.shared.flash_writes.state(route))
     }
 
-    /// The bindings the hook runs for the agent-run slots of the first
-    /// online, enabled flash mouse, for the app in front. The hook cannot
-    /// tell two such mice apart, so a second one shares the first's.
-    pub(super) fn flash_hook_bindings(&self) -> BTreeMap<ButtonId, Binding> {
+    /// The bindings the hook runs for the agent-run slots of each profile
+    /// of the first online, enabled flash mouse, by the profile's flash
+    /// page, for the app in front. The hook cannot tell two such mice
+    /// apart, so a second one shares the first's.
+    pub(super) fn flash_hook_bindings(&self) -> BTreeMap<u8, BTreeMap<ButtonId, Binding>> {
         let Some(device) = self
             .flash_devices
             .iter()
@@ -177,20 +183,24 @@ impl Orchestrator {
             return BTreeMap::new();
         };
         let (app, _) = self.mouse_context();
-        let mut bindings = button_bindings_for(
-            &self.config,
-            Some(&device.config_key),
-            app,
-            Some(device.layout),
-        );
-        bindings.retain(|button, _| {
-            device
-                .layout
-                .slots
-                .iter()
-                .any(|slot| slot.button == *button)
-        });
-        bindings
+        let key = device.config_key.as_str();
+        self.config
+            .flash_profile_pages(key)
+            .into_iter()
+            .map(|page| {
+                let profile = self.config.flash_profile_config(key, page);
+                let mut bindings =
+                    button_bindings_for(&profile, Some(key), app, Some(device.layout));
+                bindings.retain(|button, _| {
+                    device
+                        .layout
+                        .slots
+                        .iter()
+                        .any(|slot| slot.button == *button)
+                });
+                (page, bindings)
+            })
+            .collect()
     }
 }
 
@@ -289,6 +299,21 @@ impl SharedHandles {
         self.flash_writes
             .request(route.clone(), FlashJob::rate(rate));
     }
+}
+
+/// What the configuration of each onboard profile of `device` wants of its
+/// slots, by the profile's flash page.
+fn flash_profile_intents(config: &Config, device: &FlashDevice) -> BTreeMap<u8, Vec<SlotIntent>> {
+    let key = device.config_key.as_str();
+    config
+        .flash_profile_pages(key)
+        .into_iter()
+        .map(|page| {
+            let profile = config.flash_profile_config(key, page);
+            let intents = flash_intents(&profile, key, device.layout, FlashHost::CURRENT);
+            (page, intents)
+        })
+        .collect()
 }
 
 /// Logs each slot whose configured action the agent may not run, once per

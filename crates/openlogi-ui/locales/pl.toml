@@ -469,6 +469,7 @@ flash_factory_profile = "Mysz używa profilu fabrycznego, którego nie można zm
 flash_primary_kept = "Lewy i prawy przycisk zachowują kliknięcie w myszy, więc mysz nigdy ich nie traci."
 flash_unavailable_here = "W tym systemie OpenLogi nie może wykonywać akcji na zapasowych przyciskach myszy, więc ten przycisk zachowuje to, co jest zapisane w myszy."
 flash_reset_to_default = "Przywróć domyślne"
+flash_profile_buttons = "Profil myszy — każdy ma własne przyciski"
 g_shift = "G-Shift"
 g_shift_hold = "G-Shift (przytrzymaj)"
 g_shift_normal = "Normalny"

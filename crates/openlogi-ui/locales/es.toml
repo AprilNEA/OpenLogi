@@ -469,6 +469,7 @@ flash_factory_profile = "El ratón usa su perfil de fábrica, que no se puede ca
 flash_primary_kept = "Los botones izquierdo y derecho conservan su clic en el ratón, así que el ratón nunca los pierde."
 flash_unavailable_here = "OpenLogi no puede ejecutar acciones en los botones auxiliares del ratón en este sistema, así que este botón conserva lo que guarda el ratón."
 flash_reset_to_default = "Restablecer valores predeterminados"
+flash_profile_buttons = "Perfil del ratón: cada uno tiene sus propios botones"
 g_shift = "G-Shift"
 g_shift_hold = "G-Shift (mantener)"
 g_shift_normal = "Normal"

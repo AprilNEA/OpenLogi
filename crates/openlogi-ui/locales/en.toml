@@ -469,6 +469,7 @@ flash_factory_profile = "The mouse plays its factory profile, which can't be cha
 flash_primary_kept = "The left and right buttons keep their click on the mouse, so the mouse never loses them."
 flash_unavailable_here = "OpenLogi can't run actions on the mouse's spare buttons on this system, so this button keeps what the mouse holds."
 flash_reset_to_default = "Reset to Default"
+flash_profile_buttons = "Mouse profile — each keeps its own buttons"
 g_shift = "G-Shift"
 g_shift_hold = "G-Shift (Hold)"
 g_shift_normal = "Normal"

@@ -354,7 +354,7 @@ impl FlashHost {
 }
 
 /// Why a slot whose action only the agent can run is not given to it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum RefusedSlot {
     /// The slot is a primary button. Handed to the agent it would press an
     /// agent button, and the mouse would have no left or right click while
@@ -366,7 +366,7 @@ pub enum RefusedSlot {
 }
 
 /// What the configuration wants of one flash slot.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SlotIntent {
     /// Nothing: the slot keeps whatever the mouse holds, macro or not.
     Keep,
@@ -447,34 +447,6 @@ pub fn flash_intents(
         .collect()
 }
 
-/// `intents` with every slot that pressed an agent button on the last write
-/// (`routed`) but now asks nothing ([`SlotIntent::Keep`]) sent back to
-/// `layout`'s default: kept as it is, the slot would press an agent button
-/// the hook no longer catches, and do nothing. Only the last write's routing
-/// tells such a slot from one whose profile presses that button on purpose,
-/// as a profile made by another tool can.
-#[must_use]
-pub fn release_cleared_slots(
-    layout: &GamingLayout,
-    intents: &[SlotIntent],
-    routed: &BTreeMap<MouseButtonNumber, ButtonId>,
-) -> Vec<SlotIntent> {
-    layout
-        .slots
-        .iter()
-        .zip(intents)
-        .enumerate()
-        .map(|(slot, (button, intent))| {
-            let cleared =
-                *intent == SlotIntent::Keep && routed.values().any(|b| *b == button.button);
-            match layout.flash_defaults.get(slot) {
-                Some(default) if cleared => SlotIntent::Native(*default),
-                _ => intent.clone(),
-            }
-        })
-        .collect()
-}
-
 /// Where a profile's bindings go: what [`plan_flash_bindings`] decided.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub struct FlashPlan {
@@ -487,33 +459,95 @@ pub struct FlashPlan {
     pub unrouted: Vec<ButtonId>,
 }
 
+/// Whether a sync may change a profile's bindings.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum FlashSync {
+    /// The profile's configuration is what the agent last brought it to:
+    /// the flash stays as it is, whatever another tool made of it, and the
+    /// plan only reads which agent buttons it holds for the agent-run slots.
+    #[default]
+    Observe,
+    /// The profile's configuration changed since: the plan lays out what it
+    /// asks, to be written where it differs from the flash.
+    Write,
+}
+
+/// What one onboard profile of a flash mouse is asked to hold, with what the
+/// agent knows of it: the request [`plan_flash_bindings`] lays out.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct ProfileRequest {
+    /// What the profile's configuration wants of each slot, in slot order.
+    pub intents: Vec<SlotIntent>,
+    /// The agent buttons the agent itself gave the profile's slots when it
+    /// last wrote them, and each slot's button: the only presses of an
+    /// [`AGENT_BUTTONS`] button the agent may take back. A profile another
+    /// tool made can press those buttons on purpose.
+    pub owned: BTreeMap<MouseButtonNumber, ButtonId>,
+    /// Whether the plan may change the profile.
+    pub sync: FlashSync,
+}
+
+impl ProfileRequest {
+    /// Lay out `intents`, with nothing owned.
+    #[must_use]
+    pub fn write(intents: Vec<SlotIntent>) -> Self {
+        Self {
+            intents,
+            owned: BTreeMap::new(),
+            sync: FlashSync::Write,
+        }
+    }
+}
+
 /// Lay out the bindings of one profile of a mouse with `layout`, which
-/// holds `current` now, so that it does what `intents` ask.
+/// holds `current` now, so that it does what `request` asks.
 ///
-/// A slot the agent runs presses an [`AGENT_BUTTONS`] button nothing else
-/// presses: no other slot of the profile, and none of `reserved`, the
-/// buttons the mouse's other profiles press, so the hook never takes a
-/// button some profile means natively. A slot that already presses a free
-/// agent button keeps it, so a write moves no assignment that need not
-/// move; the rest take the highest free one. Slots past the shorter of
-/// `current` and `intents` are left as they are.
+/// Observed ([`FlashSync::Observe`]), the profile keeps `current`, and an
+/// agent-run slot is routed to the agent button it already presses, if any.
+///
+/// Written ([`FlashSync::Write`]), a slot the agent runs presses an
+/// [`AGENT_BUTTONS`] button nothing else presses: no other slot of the
+/// profile, and none of `reserved`, the buttons the mouse's other profiles
+/// press, so the hook never takes a button some profile means natively and
+/// each agent button names one slot of one profile. A button of
+/// [`ProfileRequest::owned`] stays this profile's even where a copy of it
+/// presses it too. A slot that already presses a free agent button keeps it,
+/// so a write moves no assignment that need not move; the rest take the
+/// highest free one. A slot the configuration no longer names that still
+/// presses the agent button the agent gave it goes back to `layout`'s
+/// default: kept, it would press a button the hook no longer catches.
+/// Slots past the shorter of `current` and the intents are left as they
+/// are.
 #[must_use]
 pub fn plan_flash_bindings(
     layout: &GamingLayout,
     current: &[FlashBinding],
     reserved: &BTreeSet<MouseButtonNumber>,
-    intents: &[SlotIntent],
+    request: &ProfileRequest,
 ) -> FlashPlan {
+    let intents = &request.intents;
+    if request.sync == FlashSync::Observe {
+        return observed_plan(layout, current, intents);
+    }
     let mut bindings = current.to_vec();
     for (slot, (binding, intent)) in bindings.iter_mut().zip(intents).enumerate() {
+        let default = layout.flash_defaults.get(slot);
         match intent {
             SlotIntent::Native(native) => *binding = *native,
             SlotIntent::Refused(RefusedSlot::PrimaryButton) => {
-                if let Some(default) = layout.flash_defaults.get(slot) {
+                if let Some(default) = default {
                     *binding = *default;
                 }
             }
-            SlotIntent::Keep | SlotIntent::Agent | SlotIntent::Refused(RefusedSlot::HookBlind) => {}
+            SlotIntent::Keep => {
+                let released = binding.single_button().is_some_and(|button| {
+                    request.owned.get(&button) == layout.slots.get(slot).map(|slot| &slot.button)
+                });
+                if released && let Some(default) = default {
+                    *binding = *default;
+                }
+            }
+            SlotIntent::Agent | SlotIntent::Refused(RefusedSlot::HookBlind) => {}
         }
     }
     let agent_slots: Vec<usize> = intents
@@ -522,7 +556,11 @@ pub fn plan_flash_bindings(
         .enumerate()
         .filter_map(|(slot, intent)| (*intent == SlotIntent::Agent).then_some(slot))
         .collect();
-    let mut taken: BTreeSet<MouseButtonNumber> = reserved.clone();
+    let mut taken: BTreeSet<MouseButtonNumber> = reserved
+        .iter()
+        .filter(|button| !request.owned.contains_key(button))
+        .copied()
+        .collect();
     taken.extend(
         bindings
             .iter()
@@ -565,6 +603,36 @@ pub fn plan_flash_bindings(
     }
 }
 
+/// The plan that leaves `current` as it is: each agent-run slot that
+/// presses one agent button, and no other slot presses it, is routed there.
+fn observed_plan(
+    layout: &GamingLayout,
+    current: &[FlashBinding],
+    intents: &[SlotIntent],
+) -> FlashPlan {
+    let presses = |button: MouseButtonNumber| {
+        current
+            .iter()
+            .filter(|binding| binding.buttons().any(|b| b == button))
+            .count()
+    };
+    let routed = current
+        .iter()
+        .zip(intents)
+        .zip(layout.slots)
+        .filter(|((_, intent), _)| **intent == SlotIntent::Agent)
+        .filter_map(|((binding, _), slot)| {
+            let button = binding.single_button()?;
+            (is_agent_button(button) && presses(button) == 1).then_some((button, slot.button))
+        })
+        .collect();
+    FlashPlan {
+        bindings: current.to_vec(),
+        routed,
+        unrouted: Vec::new(),
+    }
+}
+
 /// Where a write of a mouse's flash bindings stands.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub enum FlashWrite {
@@ -594,6 +662,11 @@ pub struct FlashBindingsState {
     pub unrouted: Vec<ButtonId>,
     /// Where the write of a configuration change stands.
     pub write: FlashWrite,
+    /// The memory page of the played profile: what its OpenLogi
+    /// configuration is stored under
+    /// ([`Config::flash_profile_config`](crate::config::Config::flash_profile_config)).
+    /// `None` exactly when [`Self::profile`] is.
+    pub page: Option<u8>,
 }
 
 impl FlashBindingsState {

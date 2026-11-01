@@ -44,7 +44,8 @@ pub use defaults::{
 pub use effect::{Effect, MediaKey, MouseButton, NativeAction, Script, Shortcut};
 pub use flash::{
     AgentButtonHook, FlashBinding, FlashBindingsState, FlashFunction, FlashHost, FlashPlan,
-    FlashWrite, MouseButtonNumber, MouseButtonNumberError, RefusedSlot, SlotIntent,
+    FlashSync, FlashWrite, MouseButtonNumber, MouseButtonNumberError, ProfileRequest, RefusedSlot,
+    SlotIntent,
 };
 pub use g_keys::{GKey, GKeyProfile, GKeySlot, ModeKey};
 pub use gaming::{

@@ -26,7 +26,7 @@
 //! first and the directory last, never writes one that lists no profile,
 //! and names the profile the mouse plays afterwards, which it reads back.
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use hidpp::register::{
     current_profile::{CurrentProfile, read_current_profile},
@@ -43,7 +43,7 @@ use hidpp::register::{
     resolution::{Resolution, read_current_resolution, write_current_resolution},
 };
 use openlogi_core::binding::flash::plan_flash_bindings;
-use openlogi_core::binding::{FlashBinding, FlashPlan, FlashWrite, G700, SlotIntent};
+use openlogi_core::binding::{FlashBinding, FlashPlan, FlashWrite, G700, ProfileRequest};
 use openlogi_core::hid::{
     DisabledProfile, Dpi, FlashProfileEdit, FlashProfileSettings, FlashProfiles, OnboardMode,
     OnboardProfile, OnboardState, ProfileIndex, ReportRate,
@@ -88,7 +88,9 @@ pub struct DpiSave {
 
 /// What one flash job brings a G700 to, applied in this order: the profile
 /// edits, then the played profile's DPI and report-rate saves together with
-/// its button bindings, in one page write.
+/// its button bindings, in one page write. Only the played profile's
+/// bindings are ever written: each profile keeps its own, and one the mouse
+/// does not play waits until it does.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct G700Job {
     /// Profile edits, oldest first. Each is removed once it is done, so a
@@ -100,8 +102,10 @@ pub struct G700Job {
     pub dpi: Option<DpiSave>,
     /// The report rate to save to the played profile.
     pub rate: Option<ReportRate>,
-    /// What the configuration wants of each button slot.
-    pub bindings: Vec<SlotIntent>,
+    /// What each profile's configuration asks of its buttons, by the flash
+    /// page the profile is stored on. A page with no request — no OpenLogi
+    /// configuration — keeps its bindings as they are.
+    pub bindings: BTreeMap<u8, ProfileRequest>,
 }
 
 /// What a [`sync_g700_on`] found and did.
@@ -111,6 +115,9 @@ pub struct G700Sync {
     /// plays its factory profile, which has no page to hold bindings, so its
     /// bindings and pointer settings were neither read nor written.
     pub profile: Option<u8>,
+    /// The flash page of that profile; `None` exactly when
+    /// [`Self::profile`] is.
+    pub page: Option<u8>,
     /// Where the played profile's bindings went, as they are on the mouse
     /// now: written when [`Self::written`], else as read.
     pub plan: FlashPlan,
@@ -336,6 +343,7 @@ pub async fn read_g700_profiles_on(shared: &SharedChannel) -> Result<FlashProfil
         disabled,
         can_create,
         write: FlashWrite::Idle,
+        pages: entries.iter().map(|entry| entry.page).collect(),
     })
 }
 
@@ -407,6 +415,7 @@ pub async fn sync_g700_on(
     let Some(played) = played_entry(current, entries) else {
         return Ok(G700Sync {
             profile: None,
+            page: None,
             plan: FlashPlan::default(),
             written,
         });
@@ -425,7 +434,8 @@ pub async fn sync_g700_on(
                 .flat_map(|binding| flash_binding(*binding).buttons()),
         );
     }
-    let plan = plan_flash_bindings(&G700, &held, &reserved, &job.bindings);
+    let request = job.bindings.get(&entry.page).cloned().unwrap_or_default();
+    let plan = plan_flash_bindings(&G700, &held, &reserved, &request);
     for (slot, binding) in profile.bindings.iter_mut().zip(&plan.bindings) {
         *slot = wire_binding(*binding);
     }
@@ -464,6 +474,7 @@ pub async fn sync_g700_on(
     job.rate = None;
     Ok(G700Sync {
         profile: u8::try_from(played).ok(),
+        page: Some(entry.page),
         plan,
         written,
     })

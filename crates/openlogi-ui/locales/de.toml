@@ -469,6 +469,7 @@ flash_factory_profile = "Die Maus nutzt ihr Werksprofil, das sich nicht ändern 
 flash_primary_kept = "Die linke und die rechte Taste behalten ihren Klick auf der Maus, damit die Maus sie nie verliert."
 flash_unavailable_here = "OpenLogi kann auf diesem System keine Aktionen auf den Reservetasten der Maus ausführen, daher behält diese Taste, was die Maus gespeichert hat."
 flash_reset_to_default = "Auf Standard zurücksetzen"
+flash_profile_buttons = "Mausprofil – jedes hat eigene Tasten"
 g_shift = "G-Shift"
 g_shift_hold = "G-Shift (halten)"
 g_shift_normal = "Normal"

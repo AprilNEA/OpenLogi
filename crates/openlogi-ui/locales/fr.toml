@@ -469,6 +469,7 @@ flash_factory_profile = "La souris utilise son profil d'usine, qui ne peut pas �
 flash_primary_kept = "Les boutons gauche et droit conservent leur clic sur la souris, afin qu'elle ne les perde jamais."
 flash_unavailable_here = "OpenLogi ne peut pas exécuter d'actions sur les boutons supplémentaires de la souris sur ce système, donc ce bouton conserve ce que la souris contient."
 flash_reset_to_default = "Rétablir par défaut"
+flash_profile_buttons = "Profil de la souris — chacun a ses propres boutons"
 g_shift = "G-Shift"
 g_shift_hold = "G-Shift (maintenir)"
 g_shift_normal = "Normal"

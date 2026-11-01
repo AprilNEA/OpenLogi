@@ -768,7 +768,7 @@ pub struct Orchestrator {
     flash_devices: Vec<flash::FlashDevice>,
     /// What each online flash mouse was last asked to hold, so a rebuild
     /// asks again only for a change or a mouse that came back.
-    flash_requested: HashMap<DeviceRoute, Vec<openlogi_core::binding::SlotIntent>>,
+    flash_requested: HashMap<DeviceRoute, crate::flash_writes::FlashBindingsRequest>,
 }
 
 /// See [`Orchestrator::inventory`] (the field) — the agent-side superset of

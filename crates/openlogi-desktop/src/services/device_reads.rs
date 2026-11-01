@@ -520,10 +520,18 @@ impl DeviceReads {
                 Load::Ready(reading)
                     if matches!(reading.write, FlashWrite::Pending | FlashWrite::Writing)
             );
+            let page = match &load {
+                Load::Ready(reading) => reading.page,
+                _ => None,
+            };
             if state
                 .device_reads_mut()
                 .update_flash_bindings(&observed_key, flight, load)
             {
+                // The Buttons panel edits the profile the mouse plays.
+                if let Some(page) = page {
+                    state.follow_flash_profile(&observed_key, page);
+                }
                 cx.emit(StateEvent::BindingsChanged(observed_key.clone()));
             }
             if writing {
@@ -605,6 +613,9 @@ impl DeviceReads {
                 Load::Ready(reading)
                     if matches!(reading.write, FlashWrite::Pending | FlashWrite::Writing)
             );
+            if let Load::Ready(reading) = &load {
+                state.settle_flash_copy(&observed_key, reading);
+            }
             let reads = state.device_reads_mut();
             let played_before = reads.played_flash_profile(&observed_key);
             if reads.update_flash_profiles(&observed_key, flight, load) {

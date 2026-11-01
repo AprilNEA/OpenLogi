@@ -469,6 +469,7 @@ flash_factory_profile = "鼠标正在使用无法更改的出厂配置文件。�
 flash_primary_kept = "左键和右键的点击功能保留在鼠标上，因此鼠标不会丢失它们。"
 flash_unavailable_here = "在此系统上，OpenLogi 无法在鼠标的备用按键上运行操作，因此该按键保留鼠标中已存储的功能。"
 flash_reset_to_default = "恢复默认"
+flash_profile_buttons = "鼠标配置文件——每个都有自己的按键"
 g_shift = "G-Shift"
 g_shift_hold = "G-Shift（按住）"
 g_shift_normal = "普通"

@@ -203,6 +203,8 @@ pub use succession::Identity;
 ///      [`FlashProfiles`] and [`FlashProfileEdit`] — the G700's onboard
 ///      profiles and their DPI modes, edited in its flash.
 ///      `HidppOperation::SelectOnboardProfile` appended after `WriteSidetone`.
+///      `FlashBindingsState::page` and `FlashProfiles::pages` appended — the
+///      flash page each profile's own bindings are kept under.
 pub const PROTOCOL_VERSION: u32 = 47;
 
 /// Environment variable through which the agent hands a supervised helper the

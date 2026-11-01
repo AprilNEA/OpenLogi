@@ -469,6 +469,7 @@ flash_factory_profile = "滑鼠正在使用無法變更的原廠設定檔。請�
 flash_primary_kept = "左鍵和右鍵的點擊功能保留在滑鼠上，因此滑鼠不會遺失它們。"
 flash_unavailable_here = "在此系統上，OpenLogi 無法在滑鼠的備用按鍵上執行動作，因此該按鍵保留滑鼠中已儲存的功能。"
 flash_reset_to_default = "還原預設值"
+flash_profile_buttons = "滑鼠設定檔——每個都有自己的按鍵"
 g_shift = "G-Shift"
 g_shift_hold = "G-Shift（按住）"
 g_shift_normal = "一般"

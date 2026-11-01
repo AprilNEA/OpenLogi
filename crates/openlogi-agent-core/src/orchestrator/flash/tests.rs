@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use openlogi_core::binding::{Action, Binding, ButtonId, FlashWrite, G700, SlotIntent};
-use openlogi_core::config::{Config, DeviceConfig};
+use openlogi_core::config::Config;
 use openlogi_core::device::{
     Capabilities, DeviceInventory, DeviceKind, PairedDevice, ReceiverInfo,
 };
@@ -48,11 +48,20 @@ fn g700_key() -> String {
         .config_key
 }
 
+/// The page of the profile the settings app edits in these tests.
+const EDITED: u8 = 4;
+/// The page of another profile, whose G6 pastes.
+const OTHER: u8 = 2;
+
+/// `button` bound to `action` in the profile on [`EDITED`], and G6 to Paste
+/// in the one on [`OTHER`].
 fn config_binding(button: ButtonId, action: Action) -> Config {
     let mut config = Config::default();
-    let mut device = DeviceConfig::default();
-    device.bindings.insert(button, Binding::Single(action));
-    config.devices.insert(g700_key(), device);
+    let key = g700_key();
+    config.select_flash_profile(&key, OTHER);
+    config.set_binding(&key, ButtonId::G6, Binding::Single(Action::Paste));
+    config.select_flash_profile(&key, EDITED);
+    config.set_binding(&key, button, Binding::Single(action));
     config
 }
 
@@ -86,28 +95,39 @@ fn an_online_g700_is_asked_for_its_configured_bindings_once() {
         FlashWrite::Pending
     );
     let asked = orch.flash_requested.get(&route).cloned().expect("asked");
+    assert_eq!(asked.owner, g700_key());
     assert_eq!(
-        asked[G700.slot_of(ButtonId::G6).map(usize::from).expect("slot")],
-        SlotIntent::Agent
+        asked.pages.keys().copied().collect::<Vec<_>>(),
+        [OTHER, EDITED]
     );
-    assert!(
-        asked
-            .iter()
-            .enumerate()
-            .all(|(slot, intent)| slot == 5 || *intent == SlotIntent::Keep),
-        "{asked:?}"
-    );
+    let g6 = G700.slot_of(ButtonId::G6).map(usize::from).expect("slot");
+    for (page, intents) in &asked.pages {
+        assert_eq!(intents[g6], SlotIntent::Agent, "page {page}");
+        assert!(
+            intents
+                .iter()
+                .enumerate()
+                .all(|(slot, intent)| slot == g6 || *intent == SlotIntent::Keep),
+            "{intents:?}"
+        );
+    }
     orch.refresh_inventory(&[g700_inventory(true)], &[], false);
     assert_eq!(orch.flash_requested.get(&route), Some(&asked));
 
     let maps = orch.shared.hook_maps.read().expect("maps");
     assert_eq!(
-        maps.flash_slot_bindings.get(&ButtonId::G6),
+        maps.flash_slot_bindings[&EDITED].get(&ButtonId::G6),
         Some(&Binding::Single(Action::Copy))
+    );
+    assert_eq!(
+        maps.flash_slot_bindings[&OTHER].get(&ButtonId::G6),
+        Some(&Binding::Single(Action::Paste)),
+        "each profile runs its own binding"
     );
     assert!(
         maps.flash_slot_bindings
-            .keys()
+            .values()
+            .flat_map(|bindings| bindings.keys())
             .all(|button| G700.slots.iter().any(|slot| slot.button == *button)),
         "only the G700's own slots"
     );
@@ -140,10 +160,28 @@ fn a_config_change_asks_the_flash_again() {
     let route = route(&orch);
     orch.reload_config(config_binding(ButtonId::G6, Action::None));
     let slot = usize::from(G700.slot_of(ButtonId::G6).expect("slot"));
-    assert!(matches!(
-        orch.flash_requested[&route][slot],
-        SlotIntent::Native(_)
-    ));
+    let pages = &orch.flash_requested[&route].pages;
+    assert!(matches!(pages[&EDITED][slot], SlotIntent::Native(_)));
+    assert_eq!(
+        pages[&OTHER][slot],
+        SlotIntent::Agent,
+        "the other profile is as it was"
+    );
+}
+
+#[test]
+fn selecting_another_profile_to_edit_asks_the_flash_nothing() {
+    let mut orch = orchestrator(config_binding(ButtonId::G6, Action::Copy));
+    orch.refresh_inventory(&[g700_inventory(true)], &[], false);
+    let route = route(&orch);
+    let asked = orch.flash_requested[&route].clone();
+    let mut config = config_binding(ButtonId::G6, Action::Copy);
+    assert!(config.select_flash_profile(&g700_key(), OTHER));
+    orch.reload_config(config);
+    assert_eq!(
+        orch.flash_requested[&route], asked,
+        "the same profiles ask the same"
+    );
 }
 
 #[test]

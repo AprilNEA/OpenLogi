@@ -3,7 +3,7 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use openlogi_core::binding::{FlashBinding, MouseButtonNumber};
+use openlogi_core::binding::{ButtonId, FlashBinding, G700, MouseButtonNumber};
 use tokio::sync::Semaphore;
 
 use super::*;
@@ -15,28 +15,239 @@ fn route(slot: u8) -> DeviceRoute {
     }
 }
 
-fn job(intents: &[SlotIntent]) -> FlashJob {
-    FlashJob::bindings(intents.to_vec())
+/// The configuration entry of the mouse in these tests.
+const OWNER: &str = "receiver:c531:slot:1";
+/// The page of the profile the mouse plays.
+const PLAYED: u8 = 4;
+
+fn sixteen() -> MouseButtonNumber {
+    MouseButtonNumber::try_new(16).expect("a mouse button number")
 }
 
-/// The job that starts for a request of `intents` alone.
+/// A request of `intents` for the played profile.
+fn job(intents: &[SlotIntent]) -> FlashJob {
+    job_of(OWNER, intents)
+}
+
+/// A request of `intents` for the played profile of `owner`'s mouse.
+fn job_of(owner: &str, intents: &[SlotIntent]) -> FlashJob {
+    FlashJob::bindings(FlashBindingsRequest {
+        owner: owner.into(),
+        pages: BTreeMap::from([(PLAYED, intents.to_vec())]),
+    })
+}
+
+/// What the played profile is asked to do when nothing was applied to it
+/// before: written if it asks anything.
+fn first(intents: &[SlotIntent]) -> ProfileRequest {
+    ProfileRequest {
+        intents: intents.to_vec(),
+        owned: BTreeMap::new(),
+        sync: if intents.iter().all(|i| *i == SlotIntent::Keep) {
+            FlashSync::Observe
+        } else {
+            FlashSync::Write
+        },
+    }
+}
+
+/// The job that starts for a first request of `intents` alone.
 fn ready(intents: &[SlotIntent]) -> G700Job {
     G700Job {
-        bindings: intents.to_vec(),
+        bindings: BTreeMap::from([(PLAYED, first(intents))]),
         ..G700Job::default()
     }
 }
 
+/// What a job finds on the played profile: G6 on agent button 16.
 fn outcome(profile: u8) -> FlashOutcome {
-    let sixteen = MouseButtonNumber::try_new(16).expect("a mouse button number");
     FlashOutcome {
         profile: Some(profile),
+        page: Some(PLAYED),
         plan: FlashPlan {
-            bindings: vec![FlashBinding::MouseButtons(sixteen.mask())],
-            routed: [(sixteen, openlogi_core::binding::ButtonId::G6)].into(),
+            bindings: vec![FlashBinding::MouseButtons(sixteen().mask())],
+            routed: [(sixteen(), ButtonId::G6)].into(),
             unrouted: Vec::new(),
         },
     }
+}
+
+/// Run the due job of `queue` to an end that found [`outcome`].
+fn run_due(queue: &mut FlashQueue, now: Instant) -> G700Job {
+    let (route, job) = queue.start_due(now).expect("a due job");
+    queue.finish();
+    queue.record(&route, &job, &outcome(1));
+    job
+}
+
+#[test]
+fn a_profile_is_written_once_for_each_change_of_its_configuration() {
+    let now = Instant::now();
+    let due = now + DEBOUNCE;
+    let mut queue = FlashQueue::default();
+    queue.request(route(1), job(&[SlotIntent::Agent]), now);
+    let written = run_due(&mut queue, due);
+    assert_eq!(written.bindings[&PLAYED].sync, FlashSync::Write);
+
+    // A profile switch, a reconnect: the same configuration is only read.
+    queue.request(route(1), FlashJob::default(), now);
+    let observed = run_due(&mut queue, due);
+    assert_eq!(observed.bindings[&PLAYED].sync, FlashSync::Observe);
+    assert_eq!(
+        observed.bindings[&PLAYED].owned,
+        BTreeMap::from([(sixteen(), ButtonId::G6)]),
+        "the agent knows the button it gave"
+    );
+    queue.request(route(1), job(&[SlotIntent::Agent]), now);
+    assert_eq!(
+        run_due(&mut queue, due).bindings[&PLAYED].sync,
+        FlashSync::Observe
+    );
+
+    // Clearing the slot writes the profile, owning its button.
+    queue.request(route(1), job(&[SlotIntent::Keep]), now);
+    let cleared = run_due(&mut queue, due);
+    assert_eq!(cleared.bindings[&PLAYED].sync, FlashSync::Write);
+    assert_eq!(
+        cleared.bindings[&PLAYED].owned.get(&sixteen()),
+        Some(&ButtonId::G6)
+    );
+}
+
+#[test]
+fn a_profile_whose_configuration_is_gone_is_written_back_to_keep() {
+    let now = Instant::now();
+    let due = now + DEBOUNCE;
+    let mut queue = FlashQueue::default();
+    queue.request(route(1), job(&[SlotIntent::Agent]), now);
+    run_due(&mut queue, due);
+    queue.request(
+        route(1),
+        FlashJob::bindings(FlashBindingsRequest {
+            owner: OWNER.into(),
+            pages: BTreeMap::new(),
+        }),
+        now,
+    );
+    let (_, job) = queue.start_due(due).expect("due");
+    let request = &job.bindings[&PLAYED];
+    assert_eq!(request.sync, FlashSync::Write);
+    assert_eq!(request.intents, vec![SlotIntent::Keep; G700.slots.len()]);
+    assert_eq!(request.owned.get(&sixteen()), Some(&ButtonId::G6));
+}
+
+#[test]
+fn only_a_written_profile_is_recorded() {
+    let now = Instant::now();
+    let due = now + DEBOUNCE;
+    let mut queue = FlashQueue::default();
+    // Page 2 changed, but the mouse plays page 4, unchanged.
+    queue.request(
+        route(1),
+        FlashJob::bindings(FlashBindingsRequest {
+            owner: OWNER.into(),
+            pages: BTreeMap::from([
+                (2, vec![SlotIntent::Agent]),
+                (PLAYED, vec![SlotIntent::Keep]),
+            ]),
+        }),
+        now,
+    );
+    let job = run_due(&mut queue, due);
+    assert_eq!(job.bindings[&2].sync, FlashSync::Write);
+    assert_eq!(
+        queue.records().applied(OWNER, PLAYED),
+        None,
+        "observed only"
+    );
+    assert_eq!(queue.records().applied(OWNER, 2), None, "never played");
+    // Page 2 still asks to be written when it plays.
+    queue.request(route(1), FlashJob::default(), now);
+    let (_, job) = queue.start_due(due).expect("due");
+    assert_eq!(job.bindings[&2].sync, FlashSync::Write);
+}
+
+#[test]
+fn the_hook_routes_every_profiles_agent_buttons_the_played_one_winning() {
+    let number = |n| MouseButtonNumber::try_new(n).expect("a mouse button number");
+    let requests = BTreeMap::from([
+        (
+            2,
+            ProfileRequest {
+                owned: BTreeMap::from([(number(15), ButtonId::G7), (number(16), ButtonId::G6)]),
+                ..ProfileRequest::default()
+            },
+        ),
+        (
+            PLAYED,
+            ProfileRequest {
+                owned: BTreeMap::from([(number(14), ButtonId::G8)]),
+                ..ProfileRequest::default()
+            },
+        ),
+    ]);
+    let routes = hook_routes(&requests, Some(PLAYED), &outcome(1).plan);
+    assert_eq!(
+        routes,
+        BTreeMap::from([
+            (
+                number(15),
+                FlashRoute {
+                    page: 2,
+                    slot: ButtonId::G7
+                }
+            ),
+            (
+                number(16),
+                FlashRoute {
+                    page: PLAYED,
+                    slot: ButtonId::G6
+                }
+            ),
+        ]),
+        "the played profile's record gives way to what it holds now"
+    );
+}
+
+/// The record outlives the agent: a new one that reads it back knows the
+/// configuration was applied and which agent buttons are its own.
+#[tokio::test(start_paused = true)]
+async fn a_restarted_agent_knows_its_own_agent_buttons() {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let path = directory.path().join("flash.json");
+    let writes = FlashWrites::default();
+    writes.keep_records_in(path.clone());
+    let gate = Gate::new();
+    writes.start(gate.clone());
+    writes.request(route(1), job(&[SlotIntent::Agent]));
+    tokio::time::sleep(DEBOUNCE).await;
+    settle().await;
+    gate.permits.add_permits(1);
+    settle().await;
+    writes.shutdown().await;
+
+    let restarted = FlashWrites::default();
+    restarted.keep_records_in(path);
+    let gate = Gate::new();
+    restarted.start(gate.clone());
+    // The configuration as it was: only read.
+    restarted.request(route(1), job(&[SlotIntent::Agent]));
+    tokio::time::sleep(DEBOUNCE).await;
+    settle().await;
+    gate.permits.add_permits(1);
+    settle().await;
+    // The slot cleared: its button is known to be the agent's.
+    restarted.request(route(1), job(&[SlotIntent::Keep]));
+    tokio::time::sleep(DEBOUNCE).await;
+    settle().await;
+    gate.permits.add_permits(1);
+    settle().await;
+    let jobs = gate.jobs();
+    assert_eq!(jobs[0].1.bindings[&PLAYED].sync, FlashSync::Observe);
+    let cleared = &jobs[1].1.bindings[&PLAYED];
+    assert_eq!(cleared.sync, FlashSync::Write);
+    assert_eq!(cleared.owned, BTreeMap::from([(sixteen(), ButtonId::G6)]));
+    restarted.shutdown().await;
 }
 
 #[test]
@@ -260,7 +471,7 @@ async fn writes_are_serialised_and_coalesced() {
     writes.start(gate.clone());
     writes.request(route(1), job(&[SlotIntent::Agent]));
     tokio::time::sleep(Duration::from_millis(1)).await;
-    writes.request(route(2), job(&[SlotIntent::Agent]));
+    writes.request(route(2), job_of("another mouse", &[SlotIntent::Agent]));
     tokio::time::sleep(DEBOUNCE).await;
     settle().await;
     assert_eq!(gate.started.load(Ordering::SeqCst), 1);
@@ -283,7 +494,16 @@ async fn writes_are_serialised_and_coalesced() {
             (route(2), ready(&[SlotIntent::Agent])),
             (
                 route(1),
-                ready(&[SlotIntent::Native(FlashBinding::Disabled)])
+                G700Job {
+                    bindings: BTreeMap::from([(
+                        PLAYED,
+                        ProfileRequest {
+                            owned: BTreeMap::from([(sixteen(), ButtonId::G6)]),
+                            ..first(&[SlotIntent::Native(FlashBinding::Disabled)])
+                        }
+                    )]),
+                    ..G700Job::default()
+                }
             ),
         ],
         "the superseded edit is never written"
@@ -405,7 +625,7 @@ async fn a_failed_edit_is_not_retried_but_the_rest_of_the_job_is() {
         "the first attempt carries the edit"
     );
     assert!(jobs[1].1.edits.is_empty(), "the retry does not");
-    assert_eq!(jobs[1].1.bindings, [SlotIntent::Agent]);
+    assert_eq!(jobs[1].1.bindings, ready(&[SlotIntent::Agent]).bindings);
     let state = writes.state(&route(1));
     assert_eq!(
         state.write,
@@ -443,7 +663,7 @@ fn requests_merge_while_they_wait() {
             edits: VecDeque::from([FlashProfileEdit::Disable(profile)]),
             dpi: Some(save(800, 1200)),
             rate: Some(ReportRate::new(1000)),
-            bindings: vec![SlotIntent::Agent],
+            bindings: ready(&[SlotIntent::Agent]).bindings,
         }
     );
     queue.finish();

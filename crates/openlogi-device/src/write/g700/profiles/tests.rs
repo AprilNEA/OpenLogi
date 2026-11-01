@@ -5,7 +5,9 @@ use hidpp::register::onboard_memory::{
     PAGE_SIZE, Page,
     g700::{Binding, G700Profile, KeyModifiers, parse_directory, raw_from_dpi},
 };
-use openlogi_core::binding::{ButtonId, FlashBinding, G700, MouseButtonNumber, SlotIntent};
+use openlogi_core::binding::{
+    ButtonId, FlashBinding, FlashSync, G700, MouseButtonNumber, ProfileRequest, SlotIntent,
+};
 use openlogi_core::hid::{Dpi, FlashProfileEdit, ProfileIndex, ReportRate};
 
 use super::super::sim::{
@@ -20,9 +22,25 @@ use crate::channel::route::DeviceRoute;
 use crate::channel::scripted::{ScriptedRawHidChannel, ScriptedRawHidHandle, scripted_channel};
 use crate::write::g700::G700Error;
 
+/// The page the dumped mouse plays (its third profile).
+const PLAYED_PAGE: u8 = 4;
+
+/// Sync with `bindings` asked of the played profile, its configuration
+/// changed.
 async fn sync_bindings(
     shared: &SharedChannel,
     bindings: Vec<SlotIntent>,
+) -> Result<G700Sync, G700Error> {
+    sync_requests(
+        shared,
+        BTreeMap::from([(PLAYED_PAGE, ProfileRequest::write(bindings))]),
+    )
+    .await
+}
+
+async fn sync_requests(
+    shared: &SharedChannel,
+    bindings: BTreeMap<u8, ProfileRequest>,
 ) -> Result<G700Sync, G700Error> {
     sync_g700_on(
         shared,
@@ -168,6 +186,95 @@ async fn a_changed_slot_is_written_to_the_played_profile_and_routed() {
     .unwrap();
     assert!(!again.written);
     assert_eq!(again.plan.routed, sync.plan.routed);
+}
+
+#[tokio::test]
+async fn an_unchanged_profile_is_only_read_even_where_its_flash_differs() {
+    let mut flash = dumped();
+    let mut played = G700Profile::parse(&Page::from_bytes(flash.pages[4])).bindings;
+    played[5] = button(16);
+    flash.pages[4] = profile_page(played);
+    let (shared, handle, flash) = g700(flash).await;
+    let before = flash.lock().unwrap().pages.clone();
+    let chord = FlashBinding::Key {
+        modifiers: 0x05,
+        usage: 0x06,
+    };
+    let observed = ProfileRequest {
+        sync: FlashSync::Observe,
+        ..ProfileRequest::write(intents(&[
+            (ButtonId::G6, SlotIntent::Agent),
+            (ButtonId::G7, SlotIntent::Native(chord)),
+        ]))
+    };
+
+    let sync = sync_requests(&shared, BTreeMap::from([(PLAYED_PAGE, observed)]))
+        .await
+        .unwrap();
+
+    assert!(!sync.written, "a profile switch writes nothing");
+    assert_eq!(sync.page, Some(PLAYED_PAGE));
+    assert_eq!(
+        sync.plan.routed,
+        BTreeMap::from([(number(16), ButtonId::G6)])
+    );
+    assert_eq!(flash.lock().unwrap().pages, before);
+    assert!(only_reads(&handle));
+}
+
+#[tokio::test]
+async fn a_changed_profile_the_mouse_does_not_play_waits_and_others_are_untouched() {
+    let (shared, handle, flash) = g700(dumped()).await;
+    let before = flash.lock().unwrap().pages.clone();
+    // Page 2's configuration changed; the mouse plays page 4, which has its
+    // own, unchanged.
+    let requests = BTreeMap::from([
+        (
+            2,
+            ProfileRequest::write(intents(&[(ButtonId::G6, SlotIntent::Agent)])),
+        ),
+        (
+            PLAYED_PAGE,
+            ProfileRequest {
+                sync: FlashSync::Observe,
+                ..ProfileRequest::write(intents(&[(ButtonId::G7, SlotIntent::Agent)]))
+            },
+        ),
+    ]);
+
+    let sync = sync_requests(&shared, requests).await.unwrap();
+
+    assert!(!sync.written);
+    assert!(sync.plan.routed.is_empty());
+    assert_eq!(flash.lock().unwrap().pages, before);
+    assert!(only_reads(&handle));
+
+    // Editing the played profile writes its page and no other.
+    let sync = sync_requests(
+        &shared,
+        BTreeMap::from([
+            (
+                2,
+                ProfileRequest::write(intents(&[(ButtonId::G6, SlotIntent::Agent)])),
+            ),
+            (
+                PLAYED_PAGE,
+                ProfileRequest::write(intents(&[(ButtonId::G7, SlotIntent::Agent)])),
+            ),
+        ]),
+    )
+    .await
+    .unwrap();
+    assert!(sync.written);
+    assert_eq!(erased_pages(&handle), [PLAYED_PAGE]);
+    assert_eq!(
+        sync.plan.routed,
+        BTreeMap::from([(number(16), ButtonId::G7)])
+    );
+    let after = flash.lock().unwrap().pages.clone();
+    for number in [2, 3] {
+        assert_eq!(after[number], before[number], "page {number}");
+    }
 }
 
 #[tokio::test]

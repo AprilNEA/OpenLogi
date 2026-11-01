@@ -4,7 +4,10 @@
 //! Its data is the user's mouse as dumped on 2026-10-31: three enabled
 //! profiles, two of them named by a tool that kept only the low byte of each
 //! UTF-16 unit (so they read `"\u{1f}@>D8;L 1"`), the third played, its
-//! DPI modes, rates and bindings, and a full battery. Edits change this
+//! DPI modes, rates and bindings, and a full battery. Each profile binds its
+//! buttons differently, as each profile of a G700 keeps its own: the first
+//! as the factory ships it, the second as another tool set it up (G6 a
+//! chord, G9 and G10 on buttons 10 and 11), the third as dumped. Edits change this
 //! state the way the agent's flash writes change the mouse — a copy lands on
 //! the first free profile page, a disabled profile keeps its page — and the
 //! write reports [`FlashWrite::Writing`] for a moment, as a page rewrite
@@ -76,6 +79,14 @@ impl MockG700 {
     /// The mouse as dumped.
     pub(super) fn dumped() -> Self {
         let first = G700.flash_defaults.to_vec();
+        let mut second = first.clone();
+        // Ctrl+C on G6; G9 and G10 press buttons 10 and 11.
+        second[5] = FlashBinding::Key {
+            modifiers: 0x01,
+            usage: 0x06,
+        };
+        second[8] = button(10);
+        second[9] = button(11);
         let mut third = first.clone();
         third[3..7].copy_from_slice(&[button(7), button(6), button(4), button(5)]);
         third[8] = button(11);
@@ -88,7 +99,7 @@ impl MockG700 {
                     dpi_modes: dpi_modes(&[400, 800, 1200, 1600, 3200]),
                     default_mode: 0x82,
                     rate: ReportRate::new(500),
-                    bindings: first.clone(),
+                    bindings: first,
                 },
                 Profile {
                     page: 3,
@@ -96,7 +107,7 @@ impl MockG700 {
                     dpi_modes: dpi_modes(&[400, 1600]),
                     default_mode: 1,
                     rate: ReportRate::new(1000),
-                    bindings: first,
+                    bindings: second,
                 },
                 Profile {
                     page: 4,
@@ -218,6 +229,7 @@ impl MockG700 {
             profile: u8::try_from(self.played).ok(),
             slots: self.played_profile().bindings.clone(),
             write: self.write_state(now),
+            page: Some(self.played_profile().page),
             ..FlashBindingsState::default()
         }
     }
@@ -259,6 +271,7 @@ impl MockG700 {
                 .collect(),
             can_create: self.free_page().is_some(),
             write: self.write_state(now),
+            pages: self.listed.iter().map(|profile| profile.page).collect(),
         }
     }
 
@@ -429,6 +442,25 @@ mod tests {
         assert!(listing.can_create && listing.disabled.is_empty());
         assert_eq!(listing.write, FlashWrite::Idle);
         assert_eq!(mouse.bindings(NOW).slots[8], button(11));
+        assert_eq!(listing.pages, [2, 3, 4]);
+        assert_eq!(mouse.bindings(NOW).page, Some(4));
+    }
+
+    #[test]
+    fn each_profile_binds_its_own_buttons() {
+        let mut mouse = MockG700::dumped();
+        let mut seen = Vec::new();
+        for n in 1..=3 {
+            mouse
+                .edit(FlashProfileEdit::Activate(profile(n)), NOW)
+                .expect("selected");
+            let state = mouse.bindings(NOW);
+            assert_eq!(state.page, Some(n + 1));
+            seen.push(state.slots);
+        }
+        assert_ne!(seen[0], seen[1]);
+        assert_ne!(seen[1], seen[2]);
+        assert_ne!(seen[0], seen[2]);
     }
 
     #[test]

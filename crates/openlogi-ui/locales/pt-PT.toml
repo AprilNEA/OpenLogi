@@ -469,6 +469,7 @@ flash_factory_profile = "O rato usa o perfil de fábrica, que não pode ser alte
 flash_primary_kept = "Os botões esquerdo e direito mantêm o clique no rato, para que o rato nunca os perca."
 flash_unavailable_here = "O OpenLogi não consegue executar ações nos botões extra do rato neste sistema, por isso este botão mantém o que o rato guarda."
 flash_reset_to_default = "Repor predefinição"
+flash_profile_buttons = "Perfil do rato — cada um tem os seus próprios botões"
 g_shift = "G-Shift"
 g_shift_hold = "G-Shift (manter)"
 g_shift_normal = "Normal"

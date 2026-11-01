@@ -33,6 +33,10 @@ pub(super) struct PointerState {
     /// mouse, until the next edit; a refusal met while writing shows in its
     /// profiles reading instead.
     pub(super) flash_edit_refusals: HashMap<DeviceKey, String>,
+    /// A profile copy asked of each flash mouse whose new page is not seen
+    /// yet: the copy takes the source profile's OpenLogi bindings once it
+    /// lands.
+    pub(super) flash_copies: HashMap<DeviceKey, super::onboard::PendingCopy>,
 }
 
 impl Default for PointerState {
@@ -46,6 +50,7 @@ impl Default for PointerState {
             refused_pointer_speeds: HashSet::new(),
             refused_force_sensing: HashSet::new(),
             flash_edit_refusals: HashMap::new(),
+            flash_copies: HashMap::new(),
             pending_force_sensing_writes: HashMap::new(),
             next_force_sensing_write: 0,
         }

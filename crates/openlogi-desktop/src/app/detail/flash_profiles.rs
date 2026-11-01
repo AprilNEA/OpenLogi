@@ -99,6 +99,49 @@ pub(super) fn flash_profiles_card(
     )
 }
 
+/// The Buttons tab's line for a mouse whose flash keeps its buttons per
+/// profile: the profile the panel edits — the one the mouse plays — with the
+/// same switch as the profiles card, so another profile's buttons are one
+/// click away. `None` for any other mouse, or before its profiles read.
+pub(super) fn flash_profile_bar(cx: &App) -> Option<AnyElement> {
+    let state = AppState::try_read(cx)?;
+    if !state.current_flash_profiles_supported() {
+        return None;
+    }
+    let profiles = state.current_flash_profiles()?;
+    let reachable = state.current_record()?.route.is_some();
+    let pal = theme::palette(cx);
+    let enabled: Vec<&OnboardProfile> = profiles
+        .onboard
+        .profiles
+        .iter()
+        .filter(|p| p.enabled)
+        .collect();
+    let switch = active_control(
+        profiles.onboard.active_profile,
+        &enabled,
+        editable(&profiles, reachable),
+    )
+    .into_any_element();
+    Some(
+        h_flex()
+            .w_full()
+            .px_5()
+            .pt_3()
+            .gap_3()
+            .items_center()
+            .debug_selector(|| "flash-profile-bar".into())
+            .child(
+                div()
+                    .text_caption()
+                    .text_color(pal.text_muted)
+                    .child(tr!("actions.flash_profile_buttons")),
+            )
+            .child(div().flex_1().min_w_0().child(switch))
+            .into_any_element(),
+    )
+}
+
 /// The mouse is busy with a flash write, or cannot be reached: no edit is
 /// offered until it is free again.
 fn editable(profiles: &FlashProfiles, reachable: bool) -> bool {

@@ -282,6 +282,21 @@ fn dumped_profile() -> Vec<FlashBinding> {
     ]
 }
 
+/// Lay out `intents` for writing, with nothing owned.
+fn lay_out(
+    layout: &GamingLayout,
+    current: &[FlashBinding],
+    reserved: &BTreeSet<MouseButtonNumber>,
+    intents: &[SlotIntent],
+) -> FlashPlan {
+    plan_flash_bindings(
+        layout,
+        current,
+        reserved,
+        &ProfileRequest::write(intents.to_vec()),
+    )
+}
+
 fn intents(changes: &[(usize, SlotIntent)]) -> Vec<SlotIntent> {
     let mut intents = vec![SlotIntent::Keep; 13];
     for (slot, intent) in changes {
@@ -293,7 +308,7 @@ fn intents(changes: &[(usize, SlotIntent)]) -> Vec<SlotIntent> {
 #[test]
 fn keeping_every_slot_changes_nothing() {
     let current = dumped_profile();
-    let plan = plan_flash_bindings(&G700, &current, &BTreeSet::new(), &intents(&[]));
+    let plan = lay_out(&G700, &current, &BTreeSet::new(), &intents(&[]));
     assert_eq!(plan.bindings, current);
     assert!(plan.routed.is_empty() && plan.unrouted.is_empty());
 }
@@ -301,7 +316,7 @@ fn keeping_every_slot_changes_nothing() {
 #[test]
 fn agent_slots_take_the_highest_free_buttons_the_profile_leaves() {
     let current = dumped_profile();
-    let plan = plan_flash_bindings(
+    let plan = lay_out(
         &G700,
         &current,
         &BTreeSet::new(),
@@ -335,7 +350,7 @@ fn agent_buttons_never_collide_with_buttons_any_profile_presses() {
         .into_iter()
         .map(|slot| (slot, SlotIntent::Agent))
         .collect();
-    let plan = plan_flash_bindings(&G700, &current, &reserved, &intents(&all_agent));
+    let plan = lay_out(&G700, &current, &reserved, &intents(&all_agent));
     let natively_pressed: BTreeSet<MouseButtonNumber> = [button(16), button(15), button(14)].into();
     assert_eq!(plan.routed.len(), 5, "9 to 13 are all that is free");
     assert!(plan.routed.keys().all(|b| !natively_pressed.contains(b)));
@@ -363,7 +378,7 @@ fn agent_buttons_never_collide_with_buttons_any_profile_presses() {
 fn a_slot_keeps_the_agent_button_it_already_presses() {
     let mut current = dumped_profile();
     current[6] = FlashBinding::MouseButtons(button(12).mask());
-    let plan = plan_flash_bindings(
+    let plan = lay_out(
         &G700,
         &current,
         &BTreeSet::new(),
@@ -379,7 +394,7 @@ fn a_native_agent_button_elsewhere_takes_it_from_the_slot_that_held_it() {
     let mut current = dumped_profile();
     current[5] = FlashBinding::MouseButtons(button(16).mask());
     // Slot 6 now presses 16 natively; slot 5 must move.
-    let plan = plan_flash_bindings(
+    let plan = lay_out(
         &G700,
         &current,
         &BTreeSet::new(),
@@ -401,10 +416,10 @@ fn a_macro_slot_is_kept_unless_the_configuration_names_the_slot() {
     };
     current[5] = macro_binding;
     current[6] = FlashBinding::Raw([0x85, 0, 1]);
-    let plan = plan_flash_bindings(&G700, &current, &BTreeSet::new(), &intents(&[]));
+    let plan = lay_out(&G700, &current, &BTreeSet::new(), &intents(&[]));
     assert_eq!(plan.bindings[5], macro_binding);
     assert_eq!(plan.bindings[6], FlashBinding::Raw([0x85, 0, 1]));
-    let plan = plan_flash_bindings(
+    let plan = lay_out(
         &G700,
         &current,
         &BTreeSet::new(),
@@ -607,7 +622,7 @@ fn a_primary_button_is_never_handed_to_the_agent() {
     // configuration of an earlier build) gets its left click back.
     let mut held = dumped_profile();
     held[0] = FlashBinding::MouseButtons(button(16).mask());
-    let plan = plan_flash_bindings(&G700, &held, &BTreeSet::new(), &intents);
+    let plan = lay_out(&G700, &held, &BTreeSet::new(), &intents);
     assert_eq!(plan.bindings[0], G700.flash_defaults[0]);
     assert!(plan.routed.is_empty());
 }
@@ -634,7 +649,7 @@ fn a_hook_that_cannot_see_agent_buttons_leaves_agent_slots_as_they_are() {
         "native actions still go to the flash"
     );
     let held = dumped_profile();
-    let plan = plan_flash_bindings(&G700, &held, &BTreeSet::new(), &intents);
+    let plan = lay_out(&G700, &held, &BTreeSet::new(), &intents);
     assert_eq!(plan.bindings[g7], held[g7], "the slot keeps its binding");
     assert!(plan.routed.is_empty() && plan.unrouted.is_empty());
     assert_eq!(
@@ -644,25 +659,87 @@ fn a_hook_that_cannot_see_agent_buttons_leaves_agent_slots_as_they_are() {
 }
 
 #[test]
-fn a_cleared_agent_slot_goes_back_to_its_default() {
+fn a_cleared_slot_goes_back_to_its_default_only_on_the_button_the_agent_gave_it() {
     let g7 = usize::from(G700.slot_of(ButtonId::G7).unwrap());
     let g8 = usize::from(G700.slot_of(ButtonId::G8).unwrap());
-    let routed = BTreeMap::from([(button(16), ButtonId::G7), (button(15), ButtonId::G8)]);
+    let g9 = usize::from(G700.slot_of(ButtonId::G9).unwrap());
+    let mut held = dumped_profile();
+    held[g7] = FlashBinding::MouseButtons(button(16).mask());
+    held[g8] = FlashBinding::MouseButtons(button(15).mask());
+    // Another tool made G9 press 14 on purpose.
+    held[g9] = FlashBinding::MouseButtons(button(14).mask());
     let mut wanted = vec![SlotIntent::Keep; G700.slots.len()];
     wanted[g8] = SlotIntent::Agent;
+    let request = ProfileRequest {
+        intents: wanted,
+        owned: BTreeMap::from([(button(16), ButtonId::G7), (button(15), ButtonId::G8)]),
+        sync: FlashSync::Write,
+    };
 
-    let released = release_cleared_slots(&G700, &wanted, &routed);
+    let plan = plan_flash_bindings(&G700, &held, &BTreeSet::new(), &request);
 
-    assert_eq!(released[g7], SlotIntent::Native(G700.flash_defaults[g7]));
-    assert_eq!(released[g8], SlotIntent::Agent, "still configured");
-    for (slot, intent) in released.iter().enumerate() {
-        if slot != g7 {
-            assert_eq!(*intent, wanted[slot], "slot {slot}");
-        }
-    }
+    assert_eq!(plan.bindings[g7], G700.flash_defaults[g7], "released");
+    assert_eq!(plan.bindings[g8], held[g8], "still configured, keeps 15");
+    assert_eq!(plan.bindings[g9], held[g9], "not the agent's: kept");
+    assert_eq!(plan.routed, BTreeMap::from([(button(15), ButtonId::G8)]));
+
+    let unowned = ProfileRequest {
+        owned: BTreeMap::new(),
+        ..request
+    };
+    let plan = plan_flash_bindings(&G700, &held, &BTreeSet::new(), &unowned);
     assert_eq!(
-        release_cleared_slots(&G700, &wanted, &BTreeMap::new()),
-        wanted,
-        "without a record of the last write nothing is released"
+        plan.bindings[g7], held[g7],
+        "without a record nothing is released"
+    );
+}
+
+#[test]
+fn an_observed_profile_keeps_its_flash_and_routes_what_it_holds() {
+    let g6 = usize::from(G700.slot_of(ButtonId::G6).unwrap());
+    let g7 = usize::from(G700.slot_of(ButtonId::G7).unwrap());
+    let mut held = dumped_profile();
+    held[g6] = FlashBinding::MouseButtons(button(16).mask());
+    let mut wanted = vec![SlotIntent::Keep; G700.slots.len()];
+    wanted[g6] = SlotIntent::Agent;
+    wanted[g7] = SlotIntent::Agent;
+    wanted[0] = SlotIntent::Native(FlashBinding::MouseButtons(0x0002));
+    let request = ProfileRequest {
+        intents: wanted,
+        owned: BTreeMap::new(),
+        sync: FlashSync::Observe,
+    };
+
+    let plan = plan_flash_bindings(&G700, &held, &BTreeSet::from([button(16)]), &request);
+
+    assert_eq!(plan.bindings, held, "nothing changes");
+    assert_eq!(plan.routed, BTreeMap::from([(button(16), ButtonId::G6)]));
+    assert!(plan.unrouted.is_empty());
+}
+
+#[test]
+fn an_owned_button_stays_with_its_profile_where_a_copy_presses_it_too() {
+    let g6 = usize::from(G700.slot_of(ButtonId::G6).unwrap());
+    let mut held = dumped_profile();
+    held[g6] = FlashBinding::MouseButtons(button(16).mask());
+    let mut wanted = vec![SlotIntent::Keep; G700.slots.len()];
+    wanted[g6] = SlotIntent::Agent;
+    // The copy on another page presses 16 as well.
+    let reserved = BTreeSet::from([button(16)]);
+    let owner = ProfileRequest {
+        intents: wanted.clone(),
+        owned: BTreeMap::from([(button(16), ButtonId::G6)]),
+        sync: FlashSync::Write,
+    };
+    let plan = plan_flash_bindings(&G700, &held, &reserved, &owner);
+    assert_eq!(plan.bindings[g6], held[g6]);
+    assert_eq!(plan.routed, BTreeMap::from([(button(16), ButtonId::G6)]));
+
+    let copy = ProfileRequest::write(wanted);
+    let plan = plan_flash_bindings(&G700, &held, &reserved, &copy);
+    assert_eq!(
+        plan.routed,
+        BTreeMap::from([(button(15), ButtonId::G6)]),
+        "the copy moves"
     );
 }

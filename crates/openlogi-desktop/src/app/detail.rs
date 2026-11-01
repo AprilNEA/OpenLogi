@@ -282,6 +282,7 @@ fn buttons_tab(
         .w_full()
         .min_w_0()
         .min_h_0()
+        .children(flash_profiles::flash_profile_bar(cx))
         .children(button_profile_scope_bar(profile_icons, app_catalog, cx))
         .children(gshift_layer_bar(cx))
         .child(mouse_model.clone())

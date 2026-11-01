@@ -17,6 +17,7 @@ mod device;
 mod edit;
 #[cfg(feature = "fs")]
 mod file;
+mod flash_profile;
 mod flow;
 mod function_key;
 mod gestures;
@@ -44,6 +45,7 @@ use file::resolve_symlinks;
 pub use file::{ConfigError, ConfigFile};
 #[cfg(all(test, feature = "fs"))]
 use file::{backup_existing_config, config_backup_path};
+pub use flash_profile::FlashProfileBindings;
 pub use flow::{
     FlowConfig, FlowConfigError, FlowConfigParts, FlowDevice, FlowEdge, FlowHostSlot, FlowLayout,
     FlowPeer, FlowPeerName, FlowPublicKey, SELF_CHANNEL,

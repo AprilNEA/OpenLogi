@@ -469,6 +469,7 @@ flash_factory_profile = "マウスは変更できない工場出荷時のプロ�
 flash_primary_kept = "左右のボタンはクリック機能をマウス側に保持するため、マウスが失うことはありません。"
 flash_unavailable_here = "このシステムでは OpenLogi がマウスの予備ボタンでアクションを実行できないため、このボタンはマウスに保存されている内容のままになります。"
 flash_reset_to_default = "デフォルトに戻す"
+flash_profile_buttons = "マウスのプロファイル — ボタン設定はプロファイルごと"
 g_shift = "G-Shift"
 g_shift_hold = "G-Shift（長押し）"
 g_shift_normal = "通常"

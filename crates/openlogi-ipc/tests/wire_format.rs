@@ -1049,8 +1049,9 @@ fn flash_bindings_state() {
             routed: BTreeMap::from([(sixteen, ButtonId::G6)]),
             unrouted: vec![ButtonId::G11],
             write: FlashWrite::Failed("gone".into()),
+            page: Some(4),
         },
-        "010008000101050602e90303030b9904050610068f0102011002473601034731310304676f6e65",
+        "010008000101050602e90303030b9904050610068f0102011002473601034731310304676f6e650104",
     );
     assert_wire(&FlashWrite::Writing, "02");
     assert_wire(&Action::ShowBatteryLevel, "41");
@@ -1616,8 +1617,9 @@ fn flash_profiles() {
             }],
             can_create: true,
             write: FlashWrite::Pending,
+            pages: vec![2],
         },
-        "000101020101091f403e44383b4c203101020000010201fb520300010001fa0108000101",
+        "000101020101091f403e44383b4c203101020000010201fb520300010001fa01080001010102",
     );
     assert_wire(&HidppOperation::SelectOnboardProfile, "21");
     assert_wire(&FlashProfileEdit::Activate(first), "0001");

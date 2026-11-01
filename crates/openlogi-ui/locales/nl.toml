@@ -469,6 +469,7 @@ flash_factory_profile = "De muis gebruikt zijn fabrieksprofiel, dat niet kan wor
 flash_primary_kept = "De linker- en rechterknop behouden hun klik op de muis, zodat de muis ze nooit kwijtraakt."
 flash_unavailable_here = "OpenLogi kan op dit systeem geen acties uitvoeren op de reserveknoppen van de muis, dus deze knop behoudt wat de muis heeft opgeslagen."
 flash_reset_to_default = "Standaard herstellen"
+flash_profile_buttons = "Muisprofiel — elk heeft eigen knoppen"
 g_shift = "G-Shift"
 g_shift_hold = "G-Shift (ingedrukt houden)"
 g_shift_normal = "Normaal"

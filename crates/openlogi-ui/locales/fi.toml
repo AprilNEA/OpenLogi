@@ -469,6 +469,7 @@ flash_factory_profile = "Hiiri käyttää tehdasprofiiliaan, jota ei voi muuttaa
 flash_primary_kept = "Vasen ja oikea painike säilyttävät napsautuksensa hiiressä, joten hiiri ei koskaan menetä niitä."
 flash_unavailable_here = "OpenLogi ei voi suorittaa toimintoja hiiren varapainikkeilla tässä järjestelmässä, joten painike säilyttää sen, minkä hiiri sisältää."
 flash_reset_to_default = "Palauta oletus"
+flash_profile_buttons = "Hiiren profiili – jokaisella omat painikkeet"
 g_shift = "G-Shift"
 g_shift_hold = "G-Shift (pidä pohjassa)"
 g_shift_normal = "Normaali"

@@ -52,6 +52,7 @@ fn profiles(write: FlashWrite) -> FlashProfiles {
         }],
         can_create: true,
         write,
+        pages: vec![2, 3, 4],
     }
 }
 

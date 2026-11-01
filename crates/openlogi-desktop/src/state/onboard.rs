@@ -4,9 +4,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::App;
-use openlogi_core::binding::{FlashBindingsState, GamingButtons, GamingLayout};
+use openlogi_core::binding::{FlashBindingsState, FlashWrite, GamingButtons, GamingLayout};
 use openlogi_core::config::OnboardMemory;
-use openlogi_core::hid::{Dpi, FlashProfileEdit, FlashProfiles, OnboardMode, OnboardState};
+use openlogi_core::hid::{
+    Dpi, FlashProfileEdit, FlashProfiles, OnboardMode, OnboardState, ProfileIndex,
+};
 use tracing::{debug, warn};
 
 use super::device_key::DeviceKey;
@@ -14,6 +16,44 @@ use super::events::StateEvents;
 use super::load::{FlashProfilesLoad, Load, OnboardLoad};
 use super::{AppState, StateEvent};
 use crate::state::devices::DeviceRecord;
+
+/// A copy of a flash profile asked of the mouse, until its new page shows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PendingCopy {
+    /// The page of the profile copied.
+    from: u8,
+    /// The pages listed and stored unlisted when the copy was asked: the
+    /// copy lands on none of them, but on an erased page.
+    known: Vec<u8>,
+}
+
+impl PendingCopy {
+    /// The copy asked of `profile` on the mouse whose profiles read `profiles`.
+    pub(super) fn of(profiles: &FlashProfiles, profile: ProfileIndex) -> Option<Self> {
+        Some(Self {
+            from: profiles.page_of(profile)?,
+            known: profiles
+                .pages
+                .iter()
+                .copied()
+                .chain(profiles.disabled.iter().map(|disabled| disabled.page))
+                .collect(),
+        })
+    }
+
+    /// The page the copy landed on, as `profiles` lists it: a page listed
+    /// now that was neither listed nor stored before.
+    fn landed(&self, profiles: &FlashProfiles) -> Option<u8> {
+        let mut new = profiles
+            .pages
+            .iter()
+            .filter(|page| !self.known.contains(page));
+        match (new.next(), new.next()) {
+            (Some(&page), None) => Some(page),
+            _ => None,
+        }
+    }
+}
 
 impl AppState {
     #[must_use]
@@ -173,6 +213,18 @@ impl AppState {
                 return;
             };
             state.pointer.flash_edit_refusals.remove(&key);
+            // A copy takes its source's OpenLogi bindings once it lands; any
+            // other edit leaves no copy waiting.
+            let copy = match &edit {
+                FlashProfileEdit::Duplicate(profile) => state
+                    .current_flash_profiles()
+                    .and_then(|profiles| PendingCopy::of(&profiles, *profile)),
+                _ => None,
+            };
+            match copy {
+                Some(copy) => state.pointer.flash_copies.insert(key.clone(), copy),
+                None => state.pointer.flash_copies.remove(&key),
+            };
             let (reply, answer) = tokio::sync::oneshot::channel();
             if !state.send_ipc(crate::services::ipc::EditFlashProfiles { route, edit, reply }) {
                 return;
@@ -185,6 +237,7 @@ impl AppState {
                     .update(cx, |state, cx| {
                         if let Err(error) = result {
                             warn!(%error, "the agent refused a profile edit");
+                            state.pointer.flash_copies.remove(&key);
                             state
                                 .pointer
                                 .flash_edit_refusals
@@ -199,6 +252,71 @@ impl AppState {
             })
             .detach();
         });
+    }
+
+    /// Make the profile on `page`, which the flash mouse `key` was just
+    /// found playing, the one whose bindings the Buttons panel edits
+    /// ([`openlogi_core::config::Config::select_flash_profile`]). Returns
+    /// whether the edited profile changed.
+    pub(crate) fn follow_flash_profile(&mut self, key: &DeviceKey, page: u8) -> bool {
+        let Some(config_key) = self.flash_config_key(key) else {
+            return false;
+        };
+        let selected = self
+            .config
+            .devices
+            .get(&config_key)
+            .and_then(|device| device.flash_page);
+        if selected == Some(page) {
+            return false;
+        }
+        self.config
+            .edit(|config| config.select_flash_profile(&config_key, page));
+        self.refresh_binding_projections();
+        self.persist_and_reload("flash profile selection");
+        true
+    }
+
+    /// Give a profile copy that landed, as `profiles` — the mouse `key`'s
+    /// latest reading — shows it, the OpenLogi bindings of the profile it
+    /// copied. A copy whose write failed is forgotten; one still writing
+    /// waits.
+    pub(crate) fn settle_flash_copy(&mut self, key: &DeviceKey, profiles: &FlashProfiles) {
+        let Some(copy) = self.pointer.flash_copies.get(key) else {
+            return;
+        };
+        match &profiles.write {
+            FlashWrite::Pending | FlashWrite::Writing => return,
+            FlashWrite::Failed(_) => {
+                self.pointer.flash_copies.remove(key);
+                return;
+            }
+            FlashWrite::Idle => {}
+        }
+        let Some(to) = copy.landed(profiles) else {
+            return;
+        };
+        let from = copy.from;
+        self.pointer.flash_copies.remove(key);
+        let Some(config_key) = self.flash_config_key(key) else {
+            return;
+        };
+        if self
+            .config
+            .edit(|config| config.copy_flash_profile(&config_key, from, to))
+        {
+            self.persist_and_reload("flash profile copy");
+        }
+    }
+
+    /// The configuration key of the flash mouse `key`, when settings may be
+    /// stored for it.
+    fn flash_config_key(&self, key: &DeviceKey) -> Option<String> {
+        self.devices()
+            .iter()
+            .find(|record| record.device_key() == *key)
+            .and_then(DeviceRecord::persistent_config_key)
+            .map(str::to_owned)
     }
 
     pub(super) fn load_current_flash_profiles(&mut self, cx: &mut gpui::Context<Self>) {

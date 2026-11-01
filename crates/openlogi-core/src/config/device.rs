@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use super::button_map::{deserialize_button_map, deserialize_button_maps_by_app};
+use super::flash_profile::FlashProfileBindings;
 use super::settings::{
     CameraControls, CameraStreamMode, GKeyOwner, GamingKeyMode, GestureOwner, LightSettings,
     Lighting, MomentumScrolling, OnboardMemory, ScrollResolution, SmartShift,
@@ -413,6 +414,15 @@ pub struct DeviceConfig {
     /// keyboard.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub g_key_profile_names: BTreeMap<GKeyProfile, String>,
+    /// For a mouse whose flash keeps its bindings per onboard profile: the
+    /// flash page of the profile [`Self::bindings`] and
+    /// [`Self::per_app_bindings`] belong to (see
+    /// [`Config::select_flash_profile`](crate::config::Config::select_flash_profile)).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flash_page: Option<u8>,
+    /// The bindings of that mouse's other onboard profiles, by page.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub flash_profiles: Vec<FlashProfileBindings>,
 }
 
 impl DeviceConfig {
@@ -527,6 +537,8 @@ impl Default for DeviceConfig {
             g_key_owner: GKeyOwner::Keyboard,
             gaming_key_mode: GamingKeyMode::Profiles,
             g_key_profile_names: BTreeMap::new(),
+            flash_page: None,
+            flash_profiles: Vec::new(),
         }
     }
 }
@@ -703,6 +715,9 @@ struct RawDeviceConfig {
     gaming_key_mode: GamingKeyMode,
     #[serde(default)]
     g_key_profile_names: BTreeMap<GKeyProfile, String>,
+    flash_page: Option<u8>,
+    #[serde(default)]
+    flash_profiles: Vec<FlashProfileBindings>,
     #[serde(default = "default_true")]
     enabled: bool,
     #[serde(default)]
@@ -777,6 +792,8 @@ impl From<RawDeviceConfig> for DeviceConfig {
             g_key_owner: raw.g_key_owner,
             gaming_key_mode: raw.gaming_key_mode,
             g_key_profile_names: raw.g_key_profile_names,
+            flash_page: raw.flash_page,
+            flash_profiles: raw.flash_profiles,
         }
     }
 }

@@ -1264,19 +1264,77 @@ fn agent_button(number: u8) -> ButtonId {
     ButtonId::Numbered(MouseButtonNumber::try_new(number).expect("a mouse button number"))
 }
 
-/// A G700 whose flash routes G6 to agent button 16, while the selected
+/// A G700 whose played profile (page 4) routes G6 to agent button 16 and
+/// whose profile on page 2 routes its own G6 to 14, while the selected
 /// device's maps (another mouse's) bind Back.
 fn g700_maps() -> SharedHookMaps {
-    let sixteen = MouseButtonNumber::try_new(16).expect("a mouse button number");
+    let number = |n| MouseButtonNumber::try_new(n).expect("a mouse button number");
     Arc::new(RwLock::new(HookMaps {
         bindings: BTreeMap::from([(ButtonId::Back, Action::NextTab.into())]),
         flash_slot_bindings: BTreeMap::from([
-            (ButtonId::G6, Action::Copy.into()),
-            (ButtonId::Back, Action::Paste.into()),
+            (
+                4,
+                BTreeMap::from([
+                    (ButtonId::G6, Action::Copy.into()),
+                    (ButtonId::Back, Action::Paste.into()),
+                ]),
+            ),
+            (2, BTreeMap::from([(ButtonId::G6, Action::Undo.into())])),
         ]),
-        flash_routes: BTreeMap::from([(sixteen, ButtonId::G6)]),
+        flash_routes: BTreeMap::from([
+            (
+                number(16),
+                FlashRoute {
+                    page: 4,
+                    slot: ButtonId::G6,
+                },
+            ),
+            (
+                number(14),
+                FlashRoute {
+                    page: 2,
+                    slot: ButtonId::G6,
+                },
+            ),
+        ]),
         ..HookMaps::default()
     }))
+}
+
+/// Each profile's agent buttons run that profile's binding of the slot,
+/// whichever profile the agent last saw the mouse play.
+#[test]
+fn an_agent_button_runs_the_binding_of_its_own_profile() {
+    use super::super::button::ButtonRuntimeEvent;
+    let (dispatcher, mut owner, events) = test_dispatcher();
+    let hooks = g700_maps();
+    let g700 = g700_receiver();
+    assert_eq!(
+        handle_button(
+            agent_button(14),
+            true,
+            Some(&g700),
+            &hooks,
+            &dispatcher,
+            || None
+        ),
+        EventDisposition::Suppress
+    );
+    let ButtonRuntimeEvent::Started(press) =
+        events.recv_timeout(Duration::from_secs(1)).expect("down")
+    else {
+        panic!("started");
+    };
+    assert_eq!(press.start_action(), Some(&Action::Undo));
+    handle_button(
+        agent_button(14),
+        false,
+        Some(&g700),
+        &hooks,
+        &dispatcher,
+        || None,
+    );
+    assert!(owner.shutdown());
 }
 
 #[test]
