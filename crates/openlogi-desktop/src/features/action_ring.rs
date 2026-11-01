@@ -134,9 +134,12 @@ impl Render for ActionRingPanel {
                             .child(tr!("action_ring.action_ring_description")),
                     ),
             )
+            // The preview keeps its pixel geometry while the library scales
+            // with the interface, so on a narrow tab the library wraps below.
             .child(
                 h_flex()
                     .w_full()
+                    .flex_wrap()
                     .items_start()
                     .justify_center()
                     .gap_4()
@@ -382,3 +385,6 @@ fn slot_button(
             });
         })
 }
+
+#[cfg(test)]
+mod tests;

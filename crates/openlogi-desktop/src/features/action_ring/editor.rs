@@ -45,6 +45,7 @@ pub(super) fn action_library(
         .map_or_else(|| tr!("action_ring.empty_slot"), localized_action_label);
 
     v_flex()
+        .debug_selector(|| "ring-action-library-card".into())
         .flex_1()
         .min_w(rems(17.5))
         .max_w(rems(20.))
