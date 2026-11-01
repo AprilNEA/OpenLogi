@@ -10,7 +10,7 @@ use openlogi_flow::transport::{
     FlowConnection, FlowEndpoint, MachineIdentity, NotificationEvent, PeerTrust, RpcEvent,
     message_envelope,
 };
-use openlogi_hid::HostSwitchError;
+use openlogi_hid::{DeviceIoSignal, HostSwitchError, device_io_channel};
 use tokio::sync::{oneshot, watch};
 
 use super::{
@@ -80,6 +80,8 @@ async fn pair() -> Pair {
 
 struct Run {
     started: Arc<AtomicUsize>,
+    /// Controls the device-I/O gate the writes check; it starts open.
+    io: DeviceIoSignal,
     result: oneshot::Sender<proto::HandoffResult>,
     stop: watch::Sender<bool>,
     report: tokio::task::JoinHandle<SendReport>,
@@ -91,6 +93,7 @@ fn start(pair: &Pair, transfer_id: u64, delay: Duration, stopped: bool) -> Run {
     let started = Arc::new(AtomicUsize::new(0));
     let (result, result_rx) = oneshot::channel();
     let (stop, stop_rx) = watch::channel(stopped);
+    let (io, device_io) = device_io_channel();
     let switch = || FakeSwitch {
         started: Arc::clone(&started),
         delay,
@@ -111,9 +114,11 @@ fn start(pair: &Pair, transfer_id: u64, delay: Duration, stopped: bool) -> Run {
         ],
         result: result_rx,
         stop: stop_rx,
+        device_io,
     };
     Run {
         started,
+        io,
         result,
         stop,
         report: tokio::spawn(negotiate(negotiation, ())),
@@ -296,6 +301,26 @@ async fn stopping_before_the_writes_cancels_with_shutdown() {
     assert_eq!(
         report,
         SendReport::Cancelled(proto::HandoffCancelReason::Shutdown)
+    );
+    assert_eq!(started, 0);
+}
+
+/// Sleep or a user switch can suspend device I/O while the request waits for
+/// its answer. No write may start then, and the peer is told to disarm.
+#[tokio::test]
+async fn device_io_suspended_before_the_writes_cancels_without_writing() {
+    let pair = pair().await;
+    let run = start(&pair, 14, Duration::ZERO, false);
+    assert!(run.io.suspend(), "the gate starts open");
+    answer(&pair.peer, |request| accept(request.transfer_id, 5_000)).await;
+
+    let cancel = next_cancel(&pair.peer).await;
+    assert_eq!(cancel.transfer_id, 14);
+    assert_eq!(cancel.reason, proto::HandoffCancelReason::SwitchFailed);
+    let (report, started) = report(run.report, &run.started).await;
+    assert_eq!(
+        report,
+        SendReport::Cancelled(proto::HandoffCancelReason::SwitchFailed)
     );
     assert_eq!(started, 0);
 }

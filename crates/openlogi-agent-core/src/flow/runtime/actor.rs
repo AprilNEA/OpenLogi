@@ -283,6 +283,7 @@ impl Actor {
                         switches,
                         result: result_rx,
                         stop,
+                        device_io: hardware.device_io.clone(),
                     };
                     sender::negotiate(negotiation, lease).await
                 }

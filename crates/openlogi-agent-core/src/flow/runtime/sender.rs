@@ -4,9 +4,9 @@
 //! takes the exclusive receiver lease within [`LEASE_BUDGET`] and prepares
 //! each device's switch, so every read happens before the peer hears of the
 //! transfer. The negotiation phase sends the request, writes the prepared
-//! switches while the accept's write window is open, releases the lease, and
-//! then either cancels the transfer (no write started) or waits for the
-//! peer's result. Every step has a deadline.
+//! switches while the accept's write window is open and device I/O is
+//! allowed, releases the lease, and then either cancels the transfer (no
+//! write started) or waits for the peer's result. Every step has a deadline.
 
 use std::future::Future;
 use std::hash::{BuildHasher as _, RandomState};
@@ -93,6 +93,8 @@ pub(super) struct Negotiation<S> {
     /// Fed by the actor when the peer's result arrives.
     pub(super) result: oneshot::Receiver<proto::HandoffResult>,
     pub(super) stop: watch::Receiver<bool>,
+    /// Closed while the agent suspends device I/O.
+    pub(super) device_io: DeviceIoGate,
 }
 
 /// Take the lease and prepare the switches. The lease is held until the
@@ -179,6 +181,7 @@ pub(super) async fn negotiate<S: Switch>(
         switches,
         result,
         mut stop,
+        device_io,
     } = negotiation;
     let mut request = proto::HandoffRequest {
         transfer_id,
@@ -214,7 +217,10 @@ pub(super) async fn negotiate<S: Switch>(
     let mut stopping = false;
     for (_, switch) in switches {
         stopping = stopping || *stop.borrow_and_update();
-        if stopping || !schedule.may_write(Instant::now()) {
+        // The request's round trip can outlast an open gate. The transport
+        // would refuse the write, but a refused write counts as started and
+        // leaves the peer waiting out its window instead of disarming.
+        if stopping || !device_io.allows_io() || !schedule.may_write(Instant::now()) {
             outcomes.push(SwitchOutcome::NotWritten);
             continue;
         }
