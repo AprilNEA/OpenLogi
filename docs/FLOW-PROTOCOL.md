@@ -147,8 +147,11 @@ A (initiator)                       B (responder)
   does not open the commitment, B answers `Error INVALID` and aborts with
   reason `CODE_MISMATCH`.
 - A side may show the code only after the reveal step: B after the
-  commitment check, A after `PairRevealed`. A `PairConfirm` that arrives
-  earlier is a protocol error.
+  commitment check, A after `PairRevealed`. A `PairConfirm` that reaches B
+  before its commitment check is a protocol error. B's `PairConfirm` may
+  reach A before `PairRevealed`, because the two travel on different
+  streams: A keeps it and answers `PENDING_LOCAL`, and still shows the code
+  and confirms only after `PairRevealed`.
 - Completion condition: a side considers pairing complete when it has both
   **sent and received** a `PairConfirm`; it persists the peer's key and
   answers/expects `PairOutcome{PAIRED}`.

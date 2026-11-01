@@ -270,12 +270,60 @@ fn steps_out_of_order_are_invalid() {
     );
     initiator.receive_prompted(&prompted, now).unwrap();
     assert!(matches!(
-        initiator.receive_confirm(now, &mut store),
+        initiator.confirm_local(now, &mut store),
         Err(PairingError::InvalidTransition(
             PairingState::AwaitingRevealed { .. }
         ))
     ));
     assert!(store.0.is_empty());
+}
+
+/// The responder confirms as soon as it shows its code; its `PairConfirm`
+/// overtakes the `PairRevealed` answer on another stream.
+#[test]
+fn a_peer_confirm_may_overtake_pair_revealed() {
+    let now = Instant::now();
+    let (mut initiator, mut responder) = sessions();
+    let mut initiator_store = MemoryStore::default();
+    let mut responder_store = MemoryStore::default();
+    let start = initiator.start(INITIATOR_NONCE).unwrap();
+    let prompted = responder
+        .receive_start(&start, RESPONDER_NONCE, now, None)
+        .unwrap();
+    let reveal = initiator.receive_prompted(&prompted, now).unwrap();
+    responder.receive_reveal(&reveal, now).unwrap();
+    responder.confirm_local(now, &mut responder_store).unwrap();
+
+    let early = initiator
+        .receive_confirm(now, &mut initiator_store)
+        .unwrap();
+    assert_eq!(
+        early.result.as_known(),
+        Some(proto::PairResult::PendingLocal)
+    );
+    assert!(matches!(
+        initiator.state(),
+        PairingState::AwaitingRevealed { .. }
+    ));
+    assert_eq!(initiator.sas_code(), None, "no code before PairRevealed");
+    assert!(matches!(
+        initiator.confirm_local(now, &mut initiator_store),
+        Err(PairingError::InvalidTransition(_))
+    ));
+    assert!(initiator_store.0.is_empty());
+
+    initiator.receive_revealed(now).unwrap();
+    assert!(matches!(
+        initiator.state(),
+        PairingState::Prompted {
+            local_confirmed: false,
+            peer_confirmed: true,
+            ..
+        }
+    ));
+    let result = initiator.confirm_local(now, &mut initiator_store).unwrap();
+    assert_eq!(result, proto::PairResult::Paired);
+    assert_eq!(initiator_store.0, [RESPONDER_KEY]);
 }
 
 #[test]

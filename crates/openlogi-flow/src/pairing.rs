@@ -202,6 +202,8 @@ enum Phase {
     AwaitingRevealed {
         code: SasCode,
         deadline: Deadline,
+        /// The responder's `PairConfirm` overtook its `PairRevealed`.
+        peer_confirmed: bool,
     },
     Prompted(Prompted),
     Paired,
@@ -370,6 +372,7 @@ impl PairingSession {
         self.phase = Phase::AwaitingRevealed {
             code,
             deadline: Deadline::new(now, timeout),
+            peer_confirmed: false,
         };
         Ok(proto::PairReveal {
             nonce: nonce.as_bytes().to_vec(),
@@ -410,15 +413,26 @@ impl PairingSession {
     }
 
     /// Handles `PairRevealed` on the initiator; the code may now be shown.
+    ///
+    /// A peer confirmation that arrived first is kept, so the local confirm
+    /// completes the pairing.
     pub fn receive_revealed(&mut self, now: Instant) -> Result<(), PairingError> {
-        let Phase::AwaitingRevealed { code, deadline } = self.phase else {
+        let Phase::AwaitingRevealed {
+            code,
+            deadline,
+            peer_confirmed,
+        } = self.phase
+        else {
             return Err(PairingError::InvalidTransition(self.state()));
         };
         if deadline.expired(now) {
             self.terminal(Phase::TimedOut);
             return Err(PairingError::InvalidTransition(self.state()));
         }
-        self.phase = Phase::Prompted(Prompted::new(code, deadline));
+        self.phase = Phase::Prompted(Prompted {
+            peer_confirmed,
+            ..Prompted::new(code, deadline)
+        });
         Ok(())
     }
 
@@ -435,6 +449,12 @@ impl PairingSession {
     }
 
     /// Handles a peer `PairConfirm` and returns its idempotent RPC outcome.
+    ///
+    /// The responder may confirm as soon as it shows its code, and its
+    /// `PairConfirm` travels on another stream than its `PairRevealed`, so it
+    /// can reach the initiator first. That confirmation is kept and answered
+    /// `PENDING_LOCAL`; this side still cannot confirm or trust the peer
+    /// before `PairRevealed`.
     pub fn receive_confirm(
         &mut self,
         now: Instant,
@@ -556,6 +576,18 @@ impl PairingSession {
             match self.phase {
                 Phase::Rejected => return Ok(proto::PairResult::Rejected),
                 Phase::TimedOut => return Ok(proto::PairResult::Timeout),
+                Phase::AwaitingRevealed { deadline, .. } if deadline.expired(now) => {
+                    self.terminal(Phase::TimedOut);
+                    return Ok(proto::PairResult::Timeout);
+                }
+                Phase::AwaitingRevealed { code, deadline, .. } => {
+                    self.phase = Phase::AwaitingRevealed {
+                        code,
+                        deadline,
+                        peer_confirmed: true,
+                    };
+                    return Ok(proto::PairResult::PendingLocal);
+                }
                 _ => {}
             }
         }
