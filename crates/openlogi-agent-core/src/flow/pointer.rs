@@ -368,8 +368,9 @@ fn exposed_edges(displays: &[DisplayBounds]) -> ExposedEdges {
 ///
 /// `t` is mapped with the detector's rule: a proportion of the side's
 /// cumulative exposed length, in [`ExposedEdges::for_side`] order. The point
-/// lands [`ENTRY_INSET`] inside the display, and before the exclusive end of
-/// its segment.
+/// lands [`ENTRY_INSET`] inside the display and at least as far from either
+/// end of its segment, so it touches no edge: at a corner, the neighboring
+/// edge could otherwise start a dwell toward another peer.
 fn entry_position(edges: &ExposedEdges, entry: &proto::EntryPoint) -> Option<DesktopPoint> {
     let side = match entry.side.as_known()? {
         proto::Side::Left => EdgeSide::Left,
@@ -401,9 +402,11 @@ fn entry_position(edges: &ExposedEdges, entry: &proto::EntryPoint) -> Option<Des
         }
         remaining -= length;
     }
-    let along = (chosen.start() + offset)
-        .min(chosen.end() - 1.0)
-        .max(chosen.start());
+    let along = if chosen.end() - chosen.start() > 2.0 * ENTRY_INSET {
+        (chosen.start() + offset).clamp(chosen.start() + ENTRY_INSET, chosen.end() - ENTRY_INSET)
+    } else {
+        f64::midpoint(chosen.start(), chosen.end())
+    };
     let across = match side {
         EdgeSide::Left | EdgeSide::Top => chosen.coordinate() + ENTRY_INSET,
         EdgeSide::Right | EdgeSide::Bottom => chosen.coordinate() - ENTRY_INSET,

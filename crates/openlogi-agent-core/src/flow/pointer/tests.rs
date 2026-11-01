@@ -163,7 +163,7 @@ fn entry_lands_inside_the_display_at_the_cumulative_position() {
     assert_point(
         entry_position(&edges, &entry(proto::Side::Right, 1.0)),
         98.0,
-        99.0,
+        98.0,
     );
     assert_point(
         entry_position(&edges, &entry(proto::Side::Left, 0.5)),
@@ -178,7 +178,7 @@ fn entry_lands_inside_the_display_at_the_cumulative_position() {
     );
     assert_point(
         entry_position(&edges, &entry(proto::Side::Bottom, 0.0)),
-        0.0,
+        2.0,
         98.0,
     );
 
@@ -250,6 +250,31 @@ fn place_moves_the_cursor_to_the_entry_point() {
     state.place(&entry(proto::Side::Left, 0.5));
     state.place(&entry(proto::Side::Unspecified, 0.5));
     assert_eq!(fake.warps(), [(2.0, 50.0)]);
+}
+
+/// An arrival at a corner must not touch the neighboring edge: sliding along
+/// it would start a dwell and send the devices on to another peer.
+#[test]
+fn a_corner_arrival_does_not_touch_the_neighboring_edge() {
+    let fake = Fake::with_displays(ONE_DISPLAY);
+    let mut state = PointerLoop::new(fake.clone(), Duration::ZERO);
+    state.configure(PointerSettings {
+        sides: ArmedSides::from_sides([EdgeSide::Top, EdgeSide::Bottom]),
+        require_modifier: false,
+    });
+
+    for (t, start) in [(0.0, ms(0)), (1.0, ms(1_000))] {
+        state.place(&entry(proto::Side::Left, t));
+        let (x, y) = *fake.warps().last().expect("the cursor was placed");
+        fake.at(x, y, false);
+        assert!(state.sample(start).is_none());
+        // The user moves along the entry edge, parallel to the neighbor.
+        fake.at(x + 5.0, y, false);
+        assert!(
+            state.sample(start + ms(300)).is_none(),
+            "an arrival at t = {t} landed on a neighboring edge at ({x}, {y})"
+        );
+    }
 }
 
 #[test]
