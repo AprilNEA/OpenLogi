@@ -463,15 +463,16 @@ pub struct FlowDevice {
 
 impl FlowDevice {
     /// Validates that `key` is an identity key and that this machine and each
-    /// peer use distinct slots.
+    /// peer use distinct slots. The key is stored in the inventory's
+    /// lowercase form, so it matches the device in any case it was written.
     pub fn new(
         key: PhysicalDeviceKey,
         self_slot: FlowHostSlot,
         peer_slots: BTreeMap<FlowPeerName, FlowHostSlot>,
     ) -> Result<Self, FlowConfigError> {
-        if !key.is_identity() {
+        let Some(key) = key.to_identity() else {
             return Err(FlowConfigError::InvalidDeviceKey(key.into_string()));
-        }
+        };
         let mut used = BTreeSet::from([self_slot]);
         if let Some(slot) = peer_slots.values().find(|slot| !used.insert(**slot)) {
             return Err(FlowConfigError::DuplicateSlot {

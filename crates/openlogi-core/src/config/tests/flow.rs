@@ -73,6 +73,20 @@ fn full_flow_section_roundtrips() {
     assert_eq!(&reparsed.flow, flow);
 }
 
+/// The inventory keys a device in lowercase, so a device key in another case
+/// is stored the way the inventory writes it.
+#[test]
+fn device_keys_are_stored_in_lowercase() {
+    for (written, stored) in [
+        ("unit:0F1E2D3C", "unit:0f1e2d3c"),
+        ("serial:AB12cd", "serial:ab12cd"),
+    ] {
+        let config = parse(&VALID.replacen("unit:0f1e2d3c", written, 1))
+            .unwrap_or_else(|error| panic!("{written} must load: {error}"));
+        assert_eq!(config.flow.devices()[0].key().as_str(), stored);
+    }
+}
+
 #[test]
 fn empty_flow_section_uses_defaults() {
     for flow in ["", "\n[flow]\n"] {
@@ -310,6 +324,13 @@ fn inconsistent_flow_references_are_rejected() {
             "duplicate device",
             format!(
                 "{VALID}\n[[flow.devices]]\nkey = \"unit:0f1e2d3c\"\npeer_channels = {{ self = 0 }}\n"
+            ),
+            "is configured twice",
+        ),
+        (
+            "duplicate device in another case",
+            format!(
+                "{VALID}\n[[flow.devices]]\nkey = \"unit:0F1E2D3C\"\npeer_channels = {{ self = 0 }}\n"
             ),
             "is configured twice",
         ),
