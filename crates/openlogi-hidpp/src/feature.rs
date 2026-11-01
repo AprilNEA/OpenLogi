@@ -397,6 +397,16 @@ pub(crate) fn inbound_report(
     }
 }
 
+/// Decodes a name read in chunks (`0x0005`, `0x0007`), dropping the zero
+/// padding of the last chunk.
+///
+/// Takes the chunks already joined: a multi-byte UTF-8 character can straddle
+/// two of them, so decoding each chunk on its own would reject a valid name.
+pub(crate) fn decode_chunked_name(bytes: Vec<u8>) -> Result<String, Hidpp20Error> {
+    let string = String::from_utf8(bytes).map_err(|_| Hidpp20Error::UnsupportedResponse)?;
+    Ok(string.trim_end_matches(char::from(0)).to_string())
+}
+
 bitflags::bitflags! {
     /// A bitfield describing some properties of a feature.
     ///
