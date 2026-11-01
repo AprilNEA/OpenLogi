@@ -1,9 +1,9 @@
-# Owner: openlogi_core::config::FunctionKey — the Esc/F1–F20 row: its macOS
+# Owner: openlogi_core::config::FunctionKey — the Esc/F1–F21 row: its macOS
 # keycodes, its trigger names, and the legends on the keys.
 id: core-function-key-owner
 language: rust
 severity: error
-message: The Esc/F1–F20 keycode table is openlogi_core::config::FunctionKey's (keycode, from_keycode, name, label, nth_f, ALL); ask it instead of listing the keycodes here.
+message: The Esc/F1–F21 keycode table is openlogi_core::config::FunctionKey's (keycode, from_keycode, name, label, nth_f, ALL); ask it instead of listing the keycodes here.
 note: |
   The run 0x7A, 0x78, 0x63 … was once written out in the Windows hook, the
   macOS injector and the GUI's key inspector as well as twice in core, with one

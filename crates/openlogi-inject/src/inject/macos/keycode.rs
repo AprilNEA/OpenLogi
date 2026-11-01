@@ -141,13 +141,13 @@ pub(super) fn macos_to_hid_usage(vk: u16) -> Option<u8> {
         })
 }
 
-/// The top-row key with HID usage `usage`: Escape, then F1–F12 and F13–F20,
+/// The top-row key with HID usage `usage`: Escape, then F1–F12 and F13–F21,
 /// which the HID usage table numbers in two separate runs.
 fn function_key(usage: u8) -> Option<FunctionKey> {
     match usage {
         ESCAPE => Some(FunctionKey::Esc),
         0x3a..=0x45 => FunctionKey::nth_f(u16::from(usage - 0x3a + 1)),
-        0x68..=0x6f => FunctionKey::nth_f(u16::from(usage - 0x68 + 13)),
+        0x68..=0x70 => FunctionKey::nth_f(u16::from(usage - 0x68 + 13)),
         _ => None,
     }
 }
@@ -159,7 +159,7 @@ fn function_key_usage(key: FunctionKey) -> Option<u8> {
     match n {
         0 => Some(ESCAPE),
         1..=12 => Some(0x3a + n - 1),
-        13..=20 => Some(0x68 + n - 13),
+        13..=21 => Some(0x68 + n - 13),
         _ => None,
     }
 }

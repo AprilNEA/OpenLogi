@@ -1,4 +1,4 @@
-//! The programmable top row: Esc, then F1–F20.
+//! The programmable top row: Esc, then F1–F21.
 //!
 //! These are the only keys a [`KeyTrigger`](super::KeyTrigger) can name, and
 //! every process that touches one speaks the same three vocabularies for
@@ -52,11 +52,13 @@ pub enum FunctionKey {
     F19,
     /// F20.
     F20,
+    /// F21. macOS has no `kVK_*` for it, so its keycode is OpenLogi's own.
+    F21,
 }
 
 impl FunctionKey {
     /// Every key, in the order the row is laid out.
-    pub const ALL: [Self; 21] = [
+    pub const ALL: [Self; 22] = [
         Self::Esc,
         Self::F1,
         Self::F2,
@@ -78,6 +80,7 @@ impl FunctionKey {
         Self::F18,
         Self::F19,
         Self::F20,
+        Self::F21,
     ];
 
     /// The macOS virtual keycode (`kVK_*`). Key events and triggers carry this
@@ -107,6 +110,9 @@ impl FunctionKey {
             Self::F18 => 0x4F,
             Self::F19 => 0x50,
             Self::F20 => 0x5A,
+            // Past the 7-bit `kVK_*` range, so it can never collide with a key
+            // the OS reports.
+            Self::F21 => 0x100,
         }
     }
 
@@ -116,7 +122,7 @@ impl FunctionKey {
         Self::ALL.into_iter().find(|key| key.keycode() == keycode)
     }
 
-    /// The name a trigger is written with: `esc`, `f1` … `f20`.
+    /// The name a trigger is written with: `esc`, `f1` … `f21`.
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
@@ -141,6 +147,7 @@ impl FunctionKey {
             Self::F18 => "f18",
             Self::F19 => "f19",
             Self::F20 => "f20",
+            Self::F21 => "f21",
         }
     }
 
@@ -152,7 +159,7 @@ impl FunctionKey {
             .find(|key| key.name().eq_ignore_ascii_case(name))
     }
 
-    /// The legend printed on the key: `Esc`, `F1` … `F20`.
+    /// The legend printed on the key: `Esc`, `F1` … `F21`.
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
@@ -177,11 +184,12 @@ impl FunctionKey {
             Self::F18 => "F18",
             Self::F19 => "F19",
             Self::F20 => "F20",
+            Self::F21 => "F21",
         }
     }
 
     /// The `n`th F key, counting from 1 — how a platform whose own keycodes
-    /// number the F keys consecutively finds the key it saw. `None` past F20.
+    /// number the F keys consecutively finds the key it saw. `None` past F21.
     #[must_use]
     pub fn nth_f(n: u16) -> Option<Self> {
         match n {
@@ -211,18 +219,18 @@ mod tests {
     }
 
     #[test]
-    fn the_nth_f_key_counts_from_one_and_stops_at_f20() {
+    fn the_nth_f_key_counts_from_one_and_stops_at_f21() {
         assert_eq!(FunctionKey::nth_f(0), None, "Esc is not an F key");
         assert_eq!(FunctionKey::nth_f(1), Some(FunctionKey::F1));
-        assert_eq!(FunctionKey::nth_f(20), Some(FunctionKey::F20));
-        assert_eq!(FunctionKey::nth_f(21), None);
+        assert_eq!(FunctionKey::nth_f(21), Some(FunctionKey::F21));
+        assert_eq!(FunctionKey::nth_f(22), None);
     }
 
     #[test]
     fn names_parse_case_insensitively() {
         assert_eq!(FunctionKey::from_name("F12"), Some(FunctionKey::F12));
         assert_eq!(FunctionKey::from_name("Esc"), Some(FunctionKey::Esc));
-        assert_eq!(FunctionKey::from_name("F20"), Some(FunctionKey::F20));
-        assert_eq!(FunctionKey::from_name("f21"), None);
+        assert_eq!(FunctionKey::from_name("F21"), Some(FunctionKey::F21));
+        assert_eq!(FunctionKey::from_name("f22"), None);
     }
 }

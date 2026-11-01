@@ -19,8 +19,8 @@ fn mx_keypad() -> Option<&'static KeypadDescriptor> {
     .keypad()
 }
 
-/// The F-row the fallback shows: Esc then F1–F20.
-const FUNCTION_KEYS: [FunctionKey; 21] = FunctionKey::ALL;
+/// The F-row the fallback shows: Esc then F1–F21.
+const FUNCTION_KEYS: [FunctionKey; 22] = FunctionKey::ALL;
 
 fn key_points(asset: Option<&ResolvedAsset>) -> Vec<KeyPoint> {
     key_slots(asset, None)
@@ -59,12 +59,12 @@ fn hover_or_selection_highlights_a_key() {
 }
 
 #[test]
-fn function_row_covers_esc_through_f20() {
+fn function_row_covers_esc_through_f21() {
     let labels: Vec<&str> = FUNCTION_KEYS.iter().map(|key| key.label()).collect();
 
-    assert_eq!(FUNCTION_KEYS.len(), 21);
+    assert_eq!(FUNCTION_KEYS.len(), 22);
     assert_eq!(labels.first(), Some(&"Esc"));
-    assert_eq!(labels.last(), Some(&"F20"));
+    assert_eq!(labels.last(), Some(&"F21"));
     assert!(labels.contains(&"F13"));
     assert!(labels.contains(&"F19"));
 }
@@ -73,7 +73,7 @@ fn function_row_covers_esc_through_f20() {
 fn fallback_key_positions_cover_the_full_top_row() {
     let positions = key_x_fractions(None);
 
-    assert_eq!(positions.len(), 21);
+    assert_eq!(positions.len(), 22);
     assert_eq!(positions.first().copied(), Some(EVEN_SPACING_START));
     assert_eq!(positions.last().copied(), Some(EVEN_SPACING_END));
     // Without markers the tab falls back to the OS-hook F-row.
@@ -444,7 +444,7 @@ fn pixel_markers_for_a_different_render_fall_back_to_even_spacing() {
 
     assert_eq!(points.len(), FUNCTION_KEYS.len());
     assert_approx_eq(points[0].x_frac, EVEN_SPACING_START);
-    assert_approx_eq(points[20].x_frac, EVEN_SPACING_END);
+    assert_approx_eq(points[21].x_frac, EVEN_SPACING_END);
 }
 
 #[test]

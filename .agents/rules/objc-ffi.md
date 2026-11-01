@@ -38,6 +38,7 @@ files; **keep this table in sync when you add or move one**:
 | `openlogi-hid/src/permissions.rs` | `IOHIDCheckAccess` / `IOHIDRequestAccess` (the prompting half of Input Monitoring) |
 | `openlogi-hook/src/macos.rs` | the CGEventTap (on `core-graphics`, see below), the Accessibility-trust check/prompt, the off-tap `NSWorkspace` frontmost-app read, and the `CGGetEventTapList` enumeration |
 | `openlogi-hook/src/macos/foreground.rs` | the `NSWorkspace` activation observer, the `NSRunningApplication` conversion behind every frontmost-app read, and the Safari PID snapshot |
+| `openlogi-hook/src/macos/hid_keys.rs` | the listen-only `IOHIDManager` for keys macOS gives no keycode to (F21), on its own run-loop thread, gated on `IOHIDCheckAccess` |
 | `openlogi-hook/src/macos/secure_input.rs` | the Secure Event Input read: `IsSecureEventInputEnabled` (hand-declared, see below) and the `kCGSSessionSecureInputPID` entry of `CGSessionCopyCurrentDictionary`, named through `foreground.rs`'s `NSRunningApplication` conversion |
 | `openlogi-hook/src/macos/sender.rs` | the HID sender-id lookup and the IOKit registry walk that resolves it to a device |
 | `openlogi-inject/src/inject/macos.rs` | CGEvent key and click synthesis, media-key `NSEvent`s |

@@ -41,7 +41,7 @@ impl KeyModifiers {
 /// A keyboard trigger: a keycode plus an optional modifier mask. The parse
 /// format is `[mod+]+key`, e.g. `"f1"`, `"shift+cmd+f5"`. Modifier names:
 /// `shift`, `control` (alias `ctrl`), `option` (alias `alt`), `command`
-/// (alias `cmd`). Key names are [`FunctionKey`]'s: `esc`, `f1`..`f20`.
+/// (alias `cmd`). Key names are [`FunctionKey`]'s: `esc`, `f1`..`f21`.
 ///
 /// Serializes as its string form (via `Display`) so it can be a TOML map key:
 /// `[keyboard.bindings]` keys are `"f1"`, `"shift+f2"`, etc.

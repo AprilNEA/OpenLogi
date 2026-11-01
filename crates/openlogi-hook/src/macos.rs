@@ -6,6 +6,7 @@
 
 mod foreground;
 mod grant;
+mod hid_keys;
 pub(crate) mod pointer;
 mod secure_input;
 mod sender;
@@ -58,6 +59,8 @@ pub(crate) struct HookInner {
     /// shutdown signal. The independent lifecycle watchdog keeps observing
     /// that latch until the tap thread proves the tap is gone.
     signals: Arc<WatchdogSignals>,
+    /// `None` when Input Monitoring is missing: everything else still works.
+    hid_keys: Option<hid_keys::HidKeyListener>,
 }
 
 // SAFETY: CFRunLoop is a Core Foundation ref-counted object. The CF
@@ -98,6 +101,7 @@ impl HookBackend for Backend {
         // Wrap in Arc so the closure handed to CGEventTap::new captures it by
         // clone rather than by move — avoids a second Box allocation.
         let cb: Arc<dyn Fn(HookEvent) -> EventDisposition + Send + Sync> = Arc::new(cb);
+        let hid_keys_cb = Arc::clone(&cb);
 
         let signals = Arc::new(WatchdogSignals::default());
         let lifecycle_watchdog = spawn_lifecycle_watchdog(Arc::clone(&signals))?;
@@ -142,11 +146,15 @@ impl HookBackend for Backend {
             lifecycle_watchdog,
             run_loop,
             signals,
+            hid_keys: hid_keys::HidKeyListener::spawn(hid_keys_cb),
         })
     }
 
     /// Signal the run loop to stop and join the background thread.
     fn stop(inner: HookInner) {
+        if let Some(hid_keys) = inner.hid_keys {
+            hid_keys.stop();
+        }
         // Latch stop before waking either thread. The lifecycle watchdog stays
         // armed across the blocking join and accepts only `ThreadExited` as proof
         // that explicit shutdown completed.
