@@ -204,6 +204,7 @@ fn detail_navigation(
         .children(tabs.iter().copied().enumerate().map(|(index, tab)| {
             let selected = tab == active;
             BaseButton::new(("detail-navigation", index))
+                .debug_selector(move || format!("detail-navigation-{tab:?}"))
                 .role(Role::Tab)
                 .selected(selected)
                 .accessibility_label(tab.label())
@@ -330,7 +331,12 @@ fn gshift_layer_bar(cx: &mut Context<AppView>) -> Option<impl IntoElement> {
     )
 }
 
+/// `tab`'s scrolling body. A `Scrollable` keys its scroll position by call
+/// site, and this one call site serves every tab, so the id carries the tab:
+/// each tab gets its own position, dropped while the tab is hidden, and opens
+/// at its top instead of at the offset another tab was scrolled to.
 fn tab_body(
+    tab: DetailTab,
     width: ContentWidth,
     content: impl IntoElement,
 ) -> gpui_component::scroll::Scrollable<gpui::Div> {
@@ -340,6 +346,8 @@ fn tab_body(
         .min_h_0()
         .items_center()
         .overflow_y_scrollbar()
+        .id(("detail-tab-body", tab as usize))
+        .debug_selector(|| "detail-tab-body".into())
         .p(SCREEN_PAD.rems())
         .child(div().w_full().max_w(width.rems()).child(content))
 }
@@ -363,7 +371,14 @@ fn keys_tab(
         .when(keypad, |tab| {
             tab.children(button_profile_scope_bar(profile_icons, app_catalog, cx))
         })
-        .child(tab_body(ContentWidth::DoubleExtraLarge, keyboard_model.clone()).justify_center())
+        .child(
+            tab_body(
+                DetailTab::Keys,
+                ContentWidth::DoubleExtraLarge,
+                keyboard_model.clone(),
+            )
+            .justify_center(),
+        )
 }
 
 fn action_ring_tab(
@@ -381,7 +396,11 @@ fn action_ring_tab(
             app_catalog,
             cx,
         ))
-        .child(tab_body(ContentWidth::Medium, panel.clone()))
+        .child(tab_body(
+            DetailTab::ActionsRing,
+            ContentWidth::Medium,
+            panel.clone(),
+        ))
 }
 
 /// Pointer tab: the DPI panel, the SmartShift wheel controls, and the
@@ -397,6 +416,7 @@ fn pointer_tab(
 ) -> impl IntoElement {
     let pal = theme::palette(cx);
     tab_body(
+        DetailTab::Pointer,
         ContentWidth::Large,
         h_flex()
             .w_full()
@@ -783,6 +803,7 @@ fn wheel_resolution_control(selected: Option<ScrollResolution>, enabled: bool) -
 /// [`DetailTab::tabs_for`].
 fn lighting_tab(lighting_panel: &gpui::Entity<LightingPanel>) -> impl IntoElement {
     tab_body(
+        DetailTab::Lighting,
         ContentWidth::Small,
         PanelCard::new(
             tr!("device.lighting"),
@@ -804,6 +825,7 @@ fn camera_tab(
     camera_controls: &gpui::Entity<CameraControlsPanel>,
 ) -> impl IntoElement {
     tab_body(
+        DetailTab::Camera,
         ContentWidth::DoubleExtraLarge,
         h_flex()
             .w_full()
@@ -860,6 +882,7 @@ fn light_tab(
         },
     );
     tab_body(
+        DetailTab::Light,
         ContentWidth::ExtraLarge,
         h_flex()
             .w_full()
@@ -899,6 +922,7 @@ fn device_tab(
         .and_then(|record| record.capabilities)
         .is_some_and(|capabilities| capabilities.disable_keys);
     tab_body(
+        DetailTab::Device,
         ContentWidth::Small,
         v_flex()
             .w_full()

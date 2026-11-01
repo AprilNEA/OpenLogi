@@ -172,54 +172,36 @@ fn the_device_rename_dialog_offers_save_and_cancel(cx: &mut gpui::TestAppContext
     );
 }
 
-/// The Pointer tab's Scrolling card carries the smooth-wheel switch, shows the
-/// saved setting (a smooth wheel turned on earlier switches off) and knows this
-/// link has `0x2121` (so it switches back on).
-#[gpui::test]
-fn the_pointer_tab_offers_the_smooth_wheel(cx: &mut gpui::TestAppContext) {
+/// Open the main window on the detail screen of `inventory`'s first device,
+/// past the connecting frame and the accessibility gate, and return its root
+/// view. Callers hold `LOCALE_LOCK`.
+fn open_device_detail(
+    cx: &mut gpui::TestAppContext,
+    inventory: openlogi_core::device::DeviceInventory,
+    config: openlogi_core::config::Config,
+) -> (gpui::Entity<super::AppView>, &mut gpui::VisualTestContext) {
     use std::{cell::RefCell, rc::Rc};
 
-    use gpui::{AppContext as _, Modifiers, px, size};
+    use gpui::AppContext as _;
     use gpui_component::Root;
 
     use super::AppView;
-    use crate::services::{assets::AssetResolver, i18n::LOCALE_LOCK};
-    use crate::state::tests::{KNOWN_MOUSE_KEY, direct_inventory};
+    use crate::services::assets::AssetResolver;
     use crate::state::{AgentLink, AppState, Sources};
-    use openlogi_ipc::{AgentStatus, InventoryHealth, PROTOCOL_VERSION};
 
-    let _locale = LOCALE_LOCK.lock().unwrap();
     rust_i18n::set_locale("en");
     cx.update(gpui_component::init);
     cx.update(|cx| {
         let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
         let resolver = AssetResolver::new();
-        let mut inventory = direct_inventory([0xa3, 0x93, 0xca, 0xe0]);
-        inventory.paired[0]
-            .capabilities
-            .as_mut()
-            .expect("the fixture mouse has capabilities")
-            .hires_wheel = true;
-        let mut config = openlogi_core::config::Config::ephemeral();
-        config.set_smooth_wheel(KNOWN_MOUSE_KEY, true);
         let state = cx.new(|_| {
             let mut state = AppState::new(Sources {
                 inventories: &[inventory],
                 ..Sources::in_memory(config, &resolver, commands)
             });
-            // Past the connecting frame and the accessibility gate.
-            let _ = state.set_agent_link(AgentLink::Ready(AgentStatus {
-                accessibility_granted: true,
-                hook_installed: true,
-                launch_at_login: false,
-                inventory: InventoryHealth::Ready,
-                protocol_version: PROTOCOL_VERSION,
-                agent_version: "smooth-wheel-test".to_string(),
-                input_monitoring_granted: true,
-                hid_open_failures: false,
-                secure_input: openlogi_ipc::SecureInput::Off,
-                virtual_keyboard: openlogi_ipc::VirtualKeyboardStatus::Unsupported,
-            }));
+            let _ = state.set_agent_link(AgentLink::Ready(status_with(
+                openlogi_ipc::SecureInput::Off,
+            )));
             state
         });
         AppState::set_global(state, cx);
@@ -235,15 +217,42 @@ fn the_pointer_tab_offers_the_smooth_wheel(cx: &mut gpui::TestAppContext) {
         .borrow_mut()
         .take()
         .expect("the window hosts the app view");
-    cx.simulate_resize(size(px(1280.), px(900.)));
     cx.update(|window, cx| {
         let record_key = AppState::try_read(cx)
             .expect("state is installed")
             .devices()[0]
             .record_key()
             .clone();
+        app_view.update(cx, |view, cx| view.open_device(record_key, cx));
+        window.draw(cx).clear(cx);
+    });
+    (app_view, cx)
+}
+
+/// The Pointer tab's Scrolling card carries the smooth-wheel switch, shows the
+/// saved setting (a smooth wheel turned on earlier switches off) and knows this
+/// link has `0x2121` (so it switches back on).
+#[gpui::test]
+fn the_pointer_tab_offers_the_smooth_wheel(cx: &mut gpui::TestAppContext) {
+    use gpui::{Modifiers, px, size};
+
+    use crate::services::i18n::LOCALE_LOCK;
+    use crate::state::AppState;
+    use crate::state::tests::{KNOWN_MOUSE_KEY, direct_inventory};
+
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    let mut inventory = direct_inventory([0xa3, 0x93, 0xca, 0xe0]);
+    inventory.paired[0]
+        .capabilities
+        .as_mut()
+        .expect("the fixture mouse has capabilities")
+        .hires_wheel = true;
+    let mut config = openlogi_core::config::Config::ephemeral();
+    config.set_smooth_wheel(KNOWN_MOUSE_KEY, true);
+    let (app_view, cx) = open_device_detail(cx, inventory, config);
+    cx.simulate_resize(size(px(1280.), px(900.)));
+    cx.update(|window, cx| {
         app_view.update(cx, |view, cx| {
-            view.open_device(record_key, cx);
             view.active_tab = DetailTab::Pointer;
             cx.notify();
         });
@@ -269,6 +278,57 @@ fn the_pointer_tab_offers_the_smooth_wheel(cx: &mut gpui::TestAppContext) {
     assert!(
         click_and_read(),
         "this link has 0x2121, so it turns back on"
+    );
+}
+
+/// Each detail tab opens at its top. One call site builds every tab's
+/// scrolling body, so with a shared scroll position the Actions Ring opened
+/// as far down as the Pointer tab had been scrolled, its title hidden under
+/// the profile bar.
+#[gpui::test]
+fn a_tab_opens_at_its_top_after_another_tab_scrolled(cx: &mut gpui::TestAppContext) {
+    use gpui::{Bounds, Modifiers, Pixels, ScrollDelta, ScrollWheelEvent, point, px, size};
+
+    use crate::services::i18n::LOCALE_LOCK;
+    use crate::state::tests::direct_inventory;
+
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    let (_view, cx) = open_device_detail(
+        cx,
+        direct_inventory([0xa3, 0x93, 0xca, 0xe0]),
+        openlogi_core::config::Config::ephemeral(),
+    );
+    // Short enough that both tabs scroll: a tab that fits clamps any offset
+    // to zero and would hide a shared one.
+    cx.simulate_resize(size(px(1280.), px(600.)));
+    let open_tab = |cx: &mut gpui::VisualTestContext, rail: &'static str| -> Bounds<Pixels> {
+        let item = cx.debug_bounds(rail).expect("the rail lists the tab");
+        cx.simulate_click(item.center(), Modifiers::none());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.debug_bounds("detail-tab-body")
+            .expect("the tab has a scrolling body")
+    };
+
+    let ring_top = open_tab(cx, "detail-navigation-ActionsRing").top();
+    let pointer = open_tab(cx, "detail-navigation-Pointer");
+    cx.simulate_event(ScrollWheelEvent {
+        position: point(pointer.left() + px(8.), px(300.)),
+        delta: ScrollDelta::Pixels(point(px(0.), px(-5000.))),
+        ..Default::default()
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    let scrolled = cx
+        .debug_bounds("detail-tab-body")
+        .expect("the Pointer tab still shows");
+    assert!(
+        scrolled.top() < pointer.top(),
+        "the Pointer tab scrolled: {scrolled:?} from {pointer:?}"
+    );
+
+    assert_eq!(
+        open_tab(cx, "detail-navigation-ActionsRing").top(),
+        ring_top,
+        "the Actions Ring opens at its top"
     );
 }
 
