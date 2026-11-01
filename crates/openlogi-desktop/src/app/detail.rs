@@ -12,7 +12,6 @@ use gpui_component::{
     description_list::{DescriptionItem, DescriptionList},
     h_flex,
     scroll::ScrollableElement as _,
-    switch::Switch,
     tag::Tag,
     v_flex,
 };
@@ -1113,46 +1112,28 @@ fn configuration_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoEleme
     )
 }
 
-/// "Manage this device" label, caption, and switch. The caption column shrinks
-/// so a long translation wraps instead of pushing the switch out of the card.
+/// "Manage this device": the device-wide switch, labelled On/Off like every
+/// other setting toggle.
 fn device_enabled_row(device_enabled: bool, pal: Palette) -> impl IntoElement {
-    h_flex()
-        .debug_selector(|| "device-enabled-row".into())
-        .justify_between()
-        .items_center()
-        .gap_4()
-        .child(
-            v_flex()
-                .flex_1()
-                .min_w_0()
-                .child(div().text_body().child(tr!("device.manage_this_device")))
-                .child(
-                    div()
-                        .text_caption()
-                        .text_color(pal.text_muted)
-                        .child(tr!("actions.native_controls_when_disabled")),
-                ),
-        )
-        .child(
-            div()
-                .debug_selector(|| "device-enabled-switch".into())
-                .flex_shrink_0()
-                .child(
-                    Switch::new("device-enabled")
-                        .checked(device_enabled)
-                        .on_click(|checked, _window, cx| {
-                            let enabled = *checked;
-                            AppState::apply(cx, |state| {
-                                state
-                                    .current_record()
-                                    .map(DeviceRecord::device_key)
-                                    .map_or_else(StateEvents::none, |key| {
-                                        state.commit_device_enabled(&key, enabled)
-                                    })
-                            });
-                        }),
-                ),
-        )
+    toggle_row(
+        "device-enabled-row",
+        pal,
+        tr!("device.manage_this_device"),
+        tr!("actions.native_controls_when_disabled"),
+        Toggle::new("device-enabled")
+            .selected(device_enabled)
+            .on_change(|enabled, _window, cx| {
+                let enabled = *enabled;
+                AppState::apply(cx, |state| {
+                    state
+                        .current_record()
+                        .map(DeviceRecord::device_key)
+                        .map_or_else(StateEvents::none, |key| {
+                            state.commit_device_enabled(&key, enabled)
+                        })
+                });
+            }),
+    )
 }
 
 fn device_summary(
@@ -1313,7 +1294,7 @@ mod tests {
             .debug_bounds("device-enabled-row")
             .expect("the row renders");
         let switch = cx
-            .debug_bounds("device-enabled-switch")
+            .debug_bounds("device-enabled-row-control")
             .expect("the row renders its switch");
         assert!(
             row.size.width <= px(360.),
