@@ -59,7 +59,8 @@ use super::features::{BatteryProbe, ProbedFeatures};
 /// v19 folds `capabilities` and `capabilities_incomplete` into `protocol`,
 /// which also records HID++ 1.0, and adds the HID++ 1.0 battery registers to
 /// `BatteryProbe`.
-const SCHEMA_VERSION: u32 = 19;
+/// v20 adds the `Capabilities::change_host` flag (`0x1814` host switching).
+const SCHEMA_VERSION: u32 = 20;
 
 impl ProbeCacheError {
     /// Report why a store could not keep a snapshot.

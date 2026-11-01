@@ -33,6 +33,7 @@ fn device_identity_roundtrips_and_is_iterable() {
             disable_keys: false,
             onboard_profiles: false,
             button_spy: false,
+            change_host: false,
         },
         light_capabilities: None,
         driver_id: None,
