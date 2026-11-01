@@ -2,7 +2,7 @@
 
 use super::*;
 use openlogi_core::binding::{GESTURE_SWIPE_THRESHOLD, LongPressBinding};
-use openlogi_core::config::{GestureAxisBias, GestureSensitivity, KeyModifiers};
+use openlogi_core::config::KeyModifiers;
 
 fn token(id: u64, button: ButtonId) -> PressToken {
     PressToken::hook_for_test(id, button)
@@ -67,12 +67,7 @@ fn test_dispatcher() -> (
 fn accumulate_tags_a_committed_swipe_with_the_held_press() {
     let mut hold = HoldState::default();
     let press = token(1, ButtonId::Back);
-    hold.begin(
-        ButtonId::Back,
-        press.clone(),
-        GestureSensitivity::DEFAULT,
-        GestureAxisBias::DEFAULT,
-    );
+    hold.begin(ButtonId::Back, press.clone(), SwipeThresholds::DEFAULT);
     hold.swipe.backdate_hold_for_test();
 
     assert_eq!(
@@ -88,6 +83,23 @@ fn accumulate_tags_a_committed_swipe_with_the_held_press() {
 }
 
 #[test]
+fn a_hold_applies_the_thresholds_it_began_with() {
+    // 60 units is a swipe at the default travel but short of the least
+    // sensitive setting's 80, so this hold releases as a click.
+    let mut hold = HoldState::default();
+    let press = token(1, ButtonId::Back);
+    let least_sensitive = SwipeThresholds::from((
+        openlogi_core::config::GestureSensitivity::MIN,
+        openlogi_core::config::GestureAxisBias::DEFAULT,
+    ));
+    hold.begin(ButtonId::Back, press.clone(), least_sensitive);
+    hold.swipe.backdate_hold_for_test();
+
+    assert_eq!(hold.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0), None);
+    assert_eq!(hold.end(ButtonId::Back), Some((press, true)));
+}
+
+#[test]
 fn a_same_button_repress_restarts_the_stale_hold() {
     let mut hold = HoldState::default();
     let old = token(1, ButtonId::Back);
@@ -95,12 +107,7 @@ fn a_same_button_repress_restarts_the_stale_hold() {
         hold.prepare_begin(ButtonId::Back),
         HoldAdmission::Begin
     ));
-    hold.begin(
-        ButtonId::Back,
-        old,
-        GestureSensitivity::DEFAULT,
-        GestureAxisBias::DEFAULT,
-    );
+    hold.begin(ButtonId::Back, old, SwipeThresholds::DEFAULT);
 
     let replacement = token(2, ButtonId::Back);
     assert!(
@@ -110,8 +117,7 @@ fn a_same_button_repress_restarts_the_stale_hold() {
     hold.begin(
         ButtonId::Back,
         replacement.clone(),
-        GestureSensitivity::DEFAULT,
-        GestureAxisBias::DEFAULT,
+        SwipeThresholds::DEFAULT,
     );
     hold.swipe.backdate_hold_for_test();
     assert_eq!(
@@ -126,8 +132,7 @@ fn an_aged_hold_yields_to_a_new_buttons_press() {
     hold.begin(
         ButtonId::Back,
         token(1, ButtonId::Back),
-        GestureSensitivity::DEFAULT,
-        GestureAxisBias::DEFAULT,
+        SwipeThresholds::DEFAULT,
     );
     hold.backdate_for_test();
 
@@ -139,8 +144,7 @@ fn an_aged_hold_yields_to_a_new_buttons_press() {
     hold.begin(
         ButtonId::Forward,
         replacement.clone(),
-        GestureSensitivity::DEFAULT,
-        GestureAxisBias::DEFAULT,
+        SwipeThresholds::DEFAULT,
     );
     hold.swipe.backdate_hold_for_test();
     assert_eq!(
@@ -153,12 +157,7 @@ fn an_aged_hold_yields_to_a_new_buttons_press() {
 fn begin_is_first_wins_while_a_hold_is_active() {
     let mut hold = HoldState::default();
     let first = token(1, ButtonId::Back);
-    hold.begin(
-        ButtonId::Back,
-        first.clone(),
-        GestureSensitivity::DEFAULT,
-        GestureAxisBias::DEFAULT,
-    );
+    hold.begin(ButtonId::Back, first.clone(), SwipeThresholds::DEFAULT);
     hold.swipe.backdate_hold_for_test();
     assert!(
         matches!(hold.prepare_begin(ButtonId::Forward), HoldAdmission::Refuse),
@@ -177,12 +176,7 @@ fn begin_is_first_wins_while_a_hold_is_active() {
 fn end_matches_the_held_button_and_returns_its_token() {
     let mut hold = HoldState::default();
     let press = token(1, ButtonId::Back);
-    hold.begin(
-        ButtonId::Back,
-        press.clone(),
-        GestureSensitivity::DEFAULT,
-        GestureAxisBias::DEFAULT,
-    );
+    hold.begin(ButtonId::Back, press.clone(), SwipeThresholds::DEFAULT);
     assert_eq!(hold.end(ButtonId::Forward), None);
     assert_eq!(hold.end(ButtonId::Back), Some((press, true)));
 }

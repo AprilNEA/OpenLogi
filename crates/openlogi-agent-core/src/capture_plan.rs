@@ -380,9 +380,8 @@ pub fn plan_for_device(
                 // Needs the device's wheel capabilities and the settings of
                 // its current link, so the orchestrator fills it in.
                 divert_main_wheel: None,
-                gesture_sensitivity: config.gesture_sensitivity(config_key),
-                gesture_axis_bias: config.gesture_axis_bias(config_key),
                 onboard: None,
+                gesture_thresholds: config.gesture_thresholds(config_key),
             },
             rearm_generation,
         },

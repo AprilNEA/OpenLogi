@@ -15,7 +15,7 @@ use super::{
 };
 use crate::binding::{
     Action, ActionRingConfig, ActionRingIcon, ActionRingSlot, Binding, ButtonId, GamingLayout,
-    KeypadPage, RingAction, default_binding,
+    KeypadPage, RingAction, SwipeThresholds, default_binding,
 };
 use crate::hid::{Dpi, PointerSpeed, ReportRate};
 
@@ -659,6 +659,16 @@ impl Config {
             .entry(device_key.to_string())
             .or_default()
             .gesture_sensitivity = sensitivity;
+    }
+
+    /// The swipe thresholds `device_key`'s effective gesture sensitivity and
+    /// axis bias resolve to.
+    #[must_use]
+    pub fn gesture_thresholds(&self, device_key: &str) -> SwipeThresholds {
+        SwipeThresholds::from((
+            self.gesture_sensitivity(device_key),
+            self.gesture_axis_bias(device_key),
+        ))
     }
 
     /// The effective gesture axis bias for `device_key`: the device's

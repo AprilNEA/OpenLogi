@@ -41,8 +41,8 @@ pub use gaming::{G502_LIGHTSPEED, GamingButtons, GamingLayout, STANDARD_BUTTONS}
 pub use gesture::GestureDirection;
 pub use key_combo::{KeyCombo, KeyComboParseError, KeyboardUsage, KeyboardUsageError};
 pub use swipe::{
-    GESTURE_CONTACT_SETTLE, GESTURE_HOLD_FOR_SWIPE, GESTURE_REARM_PAUSE, GESTURE_REPEAT_DISTANCE,
-    GESTURE_SWIPE_DEADZONE, GESTURE_SWIPE_THRESHOLD, GestureTrace, RawMotionSample,
-    SwipeAccumulator, detect_swipe,
+    AxisLimit, GESTURE_HOLD_FOR_SWIPE, GESTURE_REARM_PAUSE, GESTURE_REPEAT_DISTANCE,
+    GESTURE_SWIPE_CONE_PCT, GESTURE_SWIPE_DEADZONE, GESTURE_SWIPE_THRESHOLD, SwipeAccumulator,
+    SwipeThresholds, detect_swipe,
 };
 pub use value::{Binding, HeldWheel, LONG_PRESS_THRESHOLD, LongPressBinding, WheelHoldBinding};

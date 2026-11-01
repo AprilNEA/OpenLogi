@@ -31,6 +31,7 @@ use crate::features::lighting::standalone::LightPanel;
 use crate::features::lighting::visual as light_visual;
 use crate::features::mouse::view::MouseModelView;
 use crate::features::pointer::dpi::DpiPanel;
+use crate::features::pointer::gestures::GesturePanel;
 use crate::features::pointer::smartshift::SmartShiftPanel;
 use crate::features::profiles::{
     AppCatalogPicker, ProfileIconCache, action_ring_profile_scope_bar, button_profile_scope_bar,
@@ -100,6 +101,7 @@ pub(super) struct DetailPanels<'a> {
     pub disable_keys_panel: &'a gpui::Entity<DisableKeysPanel>,
     pub dpi_panel: &'a gpui::Entity<DpiPanel>,
     pub smartshift_panel: &'a gpui::Entity<SmartShiftPanel>,
+    pub gesture_panel: &'a gpui::Entity<GesturePanel>,
     pub lighting_panel: &'a gpui::Entity<LightingPanel>,
     pub camera_preview: &'a gpui::Entity<CameraPreview>,
     pub camera_controls: &'a gpui::Entity<CameraControlsPanel>,
@@ -131,9 +133,13 @@ pub(super) fn detail_content(
         DetailTab::Keys => {
             keys_tab(panels.keyboard_model, profile_icons, app_catalog, cx).into_any_element()
         }
-        DetailTab::Pointer => {
-            pointer_tab(panels.dpi_panel, panels.smartshift_panel, cx).into_any_element()
-        }
+        DetailTab::Pointer => pointer_tab(
+            panels.dpi_panel,
+            panels.smartshift_panel,
+            panels.gesture_panel,
+            cx,
+        )
+        .into_any_element(),
         DetailTab::Lighting => lighting_tab(panels.lighting_panel).into_any_element(),
         DetailTab::Camera => {
             camera_tab(panels.camera_preview, panels.camera_controls).into_any_element()
@@ -377,13 +383,14 @@ fn action_ring_tab(
         .child(tab_body(ContentWidth::Medium, panel.clone()))
 }
 
-/// Pointer tab: the DPI panel, the SmartShift wheel controls, and the
-/// scroll-wheel preferences, each in a titled card. Use a responsive two-column
+/// Pointer tab: the DPI panel, the SmartShift wheel controls, the gesture
+/// tuning, and the scroll-wheel preferences, each in a titled card. Use a responsive two-column
 /// grid that still fits the window's 720 px minimum width, so these short
 /// controls don't force a vertical scroll.
 fn pointer_tab(
     dpi_panel: &gpui::Entity<DpiPanel>,
     smartshift_panel: &gpui::Entity<SmartShiftPanel>,
+    gesture_panel: &gpui::Entity<GesturePanel>,
     cx: &mut Context<AppView>,
 ) -> impl IntoElement {
     let pal = theme::palette(cx);
@@ -407,6 +414,14 @@ fn pointer_tab(
                     tr!("pointer.smartshift"),
                     Icon::empty().path("action-icons/refresh-cw.svg"),
                     smartshift_panel.clone().into_any_element(),
+                )
+                .fill(),
+            ))
+            .child(pointer_grid_card(
+                PanelCard::new(
+                    tr!("actions.gestures"),
+                    Icon::empty().path("action-icons/move.svg"),
+                    gesture_panel.clone().into_any_element(),
                 )
                 .fill(),
             ))

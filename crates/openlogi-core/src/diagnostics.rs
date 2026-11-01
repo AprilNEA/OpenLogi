@@ -568,7 +568,7 @@ mod tests {
             check_for_updates: Some(false),
             update_channel: Some(UpdateChannel::Stable),
             thumbwheel_sensitivity: Some(0),
-            gesture_sensitivity: Some(14),
+            gesture_sensitivity: Some(50),
             gesture_axis_bias: Some(0),
             config_schema_version: Some(2),
             configured_device_count: Some(3),

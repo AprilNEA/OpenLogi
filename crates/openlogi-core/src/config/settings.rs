@@ -475,13 +475,21 @@ impl From<ThumbwheelSensitivity> for i32 {
     }
 }
 
-/// Gesture responsiveness on OpenLogi's `1..=100` scale.
+const GESTURE_SENSITIVITY_MIN: u8 = 1;
+const GESTURE_SENSITIVITY_MAX: u8 = 100;
+const GESTURE_SENSITIVITY_DEFAULT: u8 = 50;
+
+/// Gesture responsiveness on OpenLogi's `1..=100` scale, `50` by default.
 ///
-/// Controls both the hold duration required before a gesture can commit and
-/// the distance threshold needed for directional swipe recognition.
+/// A plain value: [`SwipeThresholds`](crate::binding::SwipeThresholds) maps it to the
+/// hold duration and travel a swipe needs, and [`Self::DEFAULT`] maps to the
+/// built-in swipe constants exactly.
 #[nutype(
     const_fn,
-    validate(greater_or_equal = SENSITIVITY_MIN, less_or_equal = SENSITIVITY_MAX),
+    validate(
+        greater_or_equal = GESTURE_SENSITIVITY_MIN,
+        less_or_equal = GESTURE_SENSITIVITY_MAX
+    ),
     derive(
         Debug,
         Clone,
@@ -501,17 +509,17 @@ pub struct GestureSensitivity(u8);
 
 impl GestureSensitivity {
     /// Lowest selectable sensitivity.
-    pub const MIN: Self = match Self::try_new(SENSITIVITY_MIN) {
+    pub const MIN: Self = match Self::try_new(GESTURE_SENSITIVITY_MIN) {
         Ok(value) => value,
         Err(_) => panic!("valid minimum gesture sensitivity"),
     };
     /// Highest selectable sensitivity.
-    pub const MAX: Self = match Self::try_new(SENSITIVITY_MAX) {
+    pub const MAX: Self = match Self::try_new(GESTURE_SENSITIVITY_MAX) {
         Ok(value) => value,
         Err(_) => panic!("valid maximum gesture sensitivity"),
     };
-    /// Out-of-the-box sensitivity. Matches Logitech Options+ defaults (160ms hold, 50-count threshold).
-    pub const DEFAULT: Self = match Self::try_new(SENSITIVITY_DEFAULT) {
+    /// Out-of-the-box sensitivity: the built-in swipe timing and travel.
+    pub const DEFAULT: Self = match Self::try_new(GESTURE_SENSITIVITY_DEFAULT) {
         Ok(value) => value,
         Err(_) => panic!("valid default gesture sensitivity"),
     };
@@ -519,61 +527,22 @@ impl GestureSensitivity {
     /// Round and clamp a floating-point slider value into the valid range.
     #[must_use]
     pub fn from_rounded(value: f32) -> Self {
-        let raw = rounded_sensitivity(value);
+        let value = if value.is_nan() {
+            f32::from(GESTURE_SENSITIVITY_DEFAULT)
+        } else {
+            value
+        };
+        let raw = value
+            .clamp(
+                f32::from(GESTURE_SENSITIVITY_MIN),
+                f32::from(GESTURE_SENSITIVITY_MAX),
+            )
+            .round()
+            .saturating_as::<u8>();
         let Ok(value) = Self::try_new(raw) else {
             unreachable!("clamped gesture sensitivity is always valid");
         };
         value
-    }
-
-    /// Minimum time a gesture button must be held before a swipe can commit.
-    ///
-    /// Piecewise linear scaling:
-    /// - 1 => 250ms
-    /// - 14 (default) => 160ms
-    /// - 100 => 35ms (safety floor preventing accidental swipe triggers during normal clicks)
-    #[must_use]
-    pub fn hold_duration(self) -> std::time::Duration {
-        let raw = self.into_inner();
-        let millis = if raw <= SENSITIVITY_DEFAULT {
-            250 - (u64::from(raw - SENSITIVITY_MIN) * 90)
-                / u64::from(SENSITIVITY_DEFAULT - SENSITIVITY_MIN)
-        } else {
-            160 - (u64::from(raw - SENSITIVITY_DEFAULT) * 125)
-                / u64::from(SENSITIVITY_MAX - SENSITIVITY_DEFAULT)
-        };
-        std::time::Duration::from_millis(millis)
-    }
-
-    /// Dominant-axis travel in raw-XY counts before a held gesture commits.
-    ///
-    /// Piecewise linear scaling:
-    /// - 1 => 80 counts
-    /// - 14 (default) => 50 counts
-    /// - 100 => 20 counts
-    #[must_use]
-    pub fn travel_threshold(self) -> i32 {
-        let raw = self.into_inner();
-        if raw <= SENSITIVITY_DEFAULT {
-            80 - (i32::from(raw - SENSITIVITY_MIN) * 30)
-                / i32::from(SENSITIVITY_DEFAULT - SENSITIVITY_MIN)
-        } else {
-            50 - (i32::from(raw - SENSITIVITY_DEFAULT) * 30)
-                / i32::from(SENSITIVITY_MAX - SENSITIVITY_DEFAULT)
-        }
-    }
-
-    /// Directional deadzone (cross-axis limit) for gesture classification.
-    #[must_use]
-    pub fn deadzone(self) -> i32 {
-        (self.travel_threshold() / 2).max(8)
-    }
-
-    /// Velocity bypass threshold in raw-XY counts. If movement exceeds this threshold,
-    /// a swipe commits immediately without waiting for `hold_duration` to elapse.
-    #[must_use]
-    pub fn velocity_bypass_threshold(self) -> i32 {
-        (self.travel_threshold() * 5 / 2).max(self.travel_threshold() + 10)
     }
 }
 
@@ -600,7 +569,8 @@ const AXIS_BIAS_MAX: i8 = 50;
 const AXIS_BIAS_DEFAULT: i8 = 0;
 
 /// Directional balance between horizontal and vertical gesture swipes on OpenLogi's
-/// `-50..=50` scale.
+/// `-50..=50` scale. A plain value: [`SwipeThresholds`](crate::binding::SwipeThresholds)
+/// turns it into per-axis travel and straightness limits.
 ///
 /// - `-50`: Strongly prioritizes horizontal swipes (easier Left/Right, stricter Up/Down).
 /// - `0` (default): Neutral 1:1 balance.
@@ -650,31 +620,6 @@ impl GestureAxisBias {
             unreachable!("clamped gesture axis bias is always valid");
         };
         value
-    }
-
-    /// Scaling parameters for horizontal and vertical thresholds and cones.
-    ///
-    /// Returns `(horizontal_threshold, vertical_threshold, horizontal_cone_pct, vertical_cone_pct)`
-    /// based on base threshold and deadzone.
-    #[must_use]
-    pub fn scale_thresholds(self, base_threshold: i32, deadzone: i32) -> (i32, i32, i32, i32) {
-        let _ = deadzone;
-        let bias = i32::from(self.into_inner()); // -50..=50
-        // Bias < 0: favors horizontal (lower h_thresh, wider h_cone, higher v_thresh, narrower v_cone)
-        // Bias > 0: favors vertical (lower v_thresh, wider v_cone, higher h_thresh, narrower h_cone)
-        let (h_factor, v_factor) = if bias < 0 {
-            (100 + bias / 2, 100 - bias)
-        } else {
-            (100 + bias, 100 - bias / 2)
-        };
-
-        let h_threshold = (base_threshold.saturating_mul(h_factor) / 100).max(15);
-        let v_threshold = (base_threshold.saturating_mul(v_factor) / 100).max(15);
-
-        let h_cone = (45 - bias / 3).clamp(25, 65);
-        let v_cone = (45 + bias / 3).clamp(25, 65);
-
-        (h_threshold, v_threshold, h_cone, v_cone)
     }
 }
 
@@ -1171,7 +1116,7 @@ mod tests {
         assert_eq!(u8::from(GestureSensitivity::from_rounded(49.6)), 50);
         assert_eq!(
             GestureSensitivity::from_rounded(f32::NAN),
-            GestureSensitivity::MIN
+            GestureSensitivity::DEFAULT
         );
         assert_eq!(
             GestureSensitivity::from_rounded(f32::NEG_INFINITY),
@@ -1181,30 +1126,6 @@ mod tests {
             GestureSensitivity::from_rounded(f32::INFINITY),
             GestureSensitivity::MAX
         );
-    }
-
-    #[test]
-    fn gesture_sensitivity_scaling_parameters() {
-        let min = GestureSensitivity::MIN;
-        assert_eq!(min.hold_duration(), std::time::Duration::from_millis(250));
-        assert_eq!(min.travel_threshold(), 80);
-        assert_eq!(min.deadzone(), 40);
-        assert_eq!(min.velocity_bypass_threshold(), 200);
-
-        let default_sens = GestureSensitivity::DEFAULT;
-        assert_eq!(
-            default_sens.hold_duration(),
-            std::time::Duration::from_millis(160)
-        );
-        assert_eq!(default_sens.travel_threshold(), 50);
-        assert_eq!(default_sens.deadzone(), 25);
-        assert_eq!(default_sens.velocity_bypass_threshold(), 125);
-
-        let max = GestureSensitivity::MAX;
-        assert_eq!(max.hold_duration(), std::time::Duration::from_millis(35));
-        assert_eq!(max.travel_threshold(), 20);
-        assert_eq!(max.deadzone(), 10);
-        assert_eq!(max.velocity_bypass_threshold(), 50);
     }
 
     #[test]
@@ -1223,29 +1144,5 @@ mod tests {
             GestureAxisBias::from_rounded(f32::INFINITY),
             GestureAxisBias::MAX
         );
-    }
-
-    #[test]
-    fn gesture_axis_bias_scaling() {
-        let neutral = GestureAxisBias::DEFAULT;
-        let (h_th, v_th, h_cone, v_cone) = neutral.scale_thresholds(50, 25);
-        assert_eq!(h_th, 50);
-        assert_eq!(v_th, 50);
-        assert_eq!(h_cone, 45);
-        assert_eq!(v_cone, 45);
-
-        let favor_h = GestureAxisBias::MIN; // -50
-        let (h_th_min, v_th_min, h_cone_min, v_cone_min) = favor_h.scale_thresholds(50, 25);
-        assert_eq!(h_th_min, 37); // 50 * (100 - 25) / 100
-        assert_eq!(v_th_min, 75); // 50 * (100 + 50) / 100
-        assert_eq!(h_cone_min, 61); // 45 - (-16) = 61
-        assert_eq!(v_cone_min, 29); // 45 + (-16) = 29
-
-        let favor_v = GestureAxisBias::MAX; // 50
-        let (h_th_max, v_th_max, h_cone_max, v_cone_max) = favor_v.scale_thresholds(50, 25);
-        assert_eq!(h_th_max, 75); // 50 * (100 + 50) / 100
-        assert_eq!(v_th_max, 37); // 50 * (100 - 25) / 100
-        assert_eq!(h_cone_max, 29);
-        assert_eq!(v_cone_max, 61);
     }
 }

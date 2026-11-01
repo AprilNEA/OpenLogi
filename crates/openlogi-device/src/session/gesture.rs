@@ -33,8 +33,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use hidpp::feature::hires_wheel::{self, HiResWheelEvent};
 use hidpp::protocol::v20;
-use openlogi_core::binding::{ButtonId, GestureDirection, GestureTrace};
-use openlogi_core::config::{GestureAxisBias, GestureSensitivity};
+use openlogi_core::binding::{ButtonId, GestureDirection, SwipeThresholds};
 use tokio::sync::mpsc;
 use tracing::{debug, info};
 
@@ -43,7 +42,7 @@ use crate::channel::route::DeviceRoute;
 
 pub use super::capture::CaptureHost;
 use super::capture::{ArmedCapture, Liveness, ReportingChangeStream, run_capture};
-use accum::{CaptureAccum, capture_accum_for};
+use accum::CaptureAccum;
 pub(crate) use arm::enumerate_controls;
 use arm::{ArmedControls, ArmedThumbwheel, arm_controls};
 pub use main_wheel::MainWheelDivert;
@@ -60,12 +59,12 @@ use crate::reprog_controls::{self, ReprogControlsV4};
 use crate::thumbwheel::{self, RotationStatus, WheelResolution};
 
 /// One input captured from the active device.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CapturedInput {
     /// A completed swipe (or tap click) from a diverted gesture source,
     /// tagged with the source control so dispatch resolves it against that
-    /// button's own direction map, along with the raw motion trace if available.
-    Gesture(ButtonId, GestureDirection, Option<GestureTrace>),
+    /// button's own direction map.
+    Gesture(ButtonId, GestureDirection),
     /// A diverted button's physical down edge.
     ButtonDown(ButtonId),
     /// Thumb-wheel rotation to re-synthesise on the configured scroll axis.
@@ -202,10 +201,6 @@ pub struct CaptureSpec {
     /// [`DIVERTABLE_STANDARD_BUTTONS`] and non-gesturing
     /// [`GESTURE_SOURCE_BUTTONS`] whose binding leaves the default.
     pub divert_buttons: Vec<(u16, ButtonId)>,
-    /// Configured gesture sensitivity for hold duration and swipe distance.
-    pub gesture_sensitivity: GestureSensitivity,
-    /// Configured gesture axis bias for horizontal vs vertical balance.
-    pub gesture_axis_bias: GestureAxisBias,
     /// Standard-button CIDs bound to wheel-hold. A control advertising
     /// raw-wheel support is diverted with it, so the main wheel reports to the
     /// agent while the button is held; any other divertable control is
@@ -217,6 +212,9 @@ pub struct CaptureSpec {
     pub divert_main_wheel: Option<MainWheelDivert>,
     /// G-series host mode or onboard profile.
     pub onboard: Option<OnboardTarget>,
+    /// The hold gate and classification limits gesture swipes commit under,
+    /// from the device's gesture sensitivity and axis bias.
+    pub gesture_thresholds: SwipeThresholds,
 }
 
 /// Capture the controls selected by `spec` on `route` until `host.shutdown`
@@ -261,7 +259,12 @@ pub async fn run_capture_session(
     {
         let _ = host.sink.send(CapturedInput::HostModeEntered);
     }
-    Ok(run_capture(shared, GestureCapture::new(armed, &spec), host).await)
+    Ok(run_capture(
+        shared,
+        GestureCapture::new(armed, spec.gesture_thresholds),
+        host,
+    )
+    .await)
 }
 
 /// Gesture capture as [`run_capture`] drives it: the armed controls, and the
@@ -278,10 +281,10 @@ struct GestureCapture {
 }
 
 impl GestureCapture {
-    fn new(armed: ArmedControls, spec: &CaptureSpec) -> Self {
+    fn new(armed: ArmedControls, thresholds: SwipeThresholds) -> Self {
         Self {
             armed,
-            accum: Arc::new(Mutex::new(capture_accum_for(spec))),
+            accum: Arc::new(Mutex::new(CaptureAccum::new(thresholds))),
             thumb_status: Arc::new(Mutex::new(RotationStatus::Inactive)),
             spy_edges: Arc::default(),
         }
@@ -415,10 +418,9 @@ impl ArmedCapture for GestureCapture {
     }
 
     fn reset_input_state(&self) {
-        self.accum
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .reset_preserving_config();
+        let mut accum = self.accum.lock().unwrap_or_else(PoisonError::into_inner);
+        *accum = CaptureAccum::new(accum.thresholds());
+        drop(accum);
         // A power cycle ends any roll in progress; carrying it over would
         // swallow the first tap after the reconnect.
         *self
