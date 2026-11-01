@@ -7,7 +7,7 @@
 //! through the device's own HID++ diversion — the only path that reaches a
 //! media or shortcut key, which the OS hook never sees. A keyboard depot
 //! without such markers (the G513 family's pixel-marker files, or no depot
-//! at all) falls back to the OS-hook F-row: Esc and F1–F19 as
+//! at all) falls back to the OS-hook F-row: Esc and F1–F20 as
 //! [`KeyTarget::FunctionKey`], placed by the legacy pixel markers or by even
 //! spacing. A keypad is never that keyboard — it carries no F-row at all.
 //! Where its depot marks the grid keys — by the `_g<index>` suffix, since

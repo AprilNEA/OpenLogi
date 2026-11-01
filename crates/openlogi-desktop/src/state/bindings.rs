@@ -44,7 +44,7 @@ pub(super) struct BindingState {
     /// Device-global like the gesture maps: a per-app entry holds one
     /// `Action`, so wheel-hold lives only in the global profile.
     wheel_hold_buttons: BTreeSet<ButtonId>,
-    /// Global keyboard F-key bindings (Esc + F1-F19).
+    /// Global keyboard F-key bindings (Esc + F1-F20).
     keyboard_bindings: BTreeMap<KeyTrigger, Action>,
 }
 
