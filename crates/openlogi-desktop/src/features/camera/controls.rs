@@ -35,7 +35,8 @@ mod rows;
 mod tests;
 use hardware::{Cancel, Hardware, Loaded, Saved, SystemUvc, Uvc};
 use rows::{
-    control_label, control_row, from_slider, profiles_row, reset_button, section_indices, to_slider,
+    control_grid, control_label, from_slider, profiles_row, reset_button, section_indices,
+    to_slider,
 };
 
 /// How long to wait before reading a camera again after it could not be read.
@@ -749,14 +750,14 @@ impl Render for CameraControlsPanel {
         if !lens.is_empty() && !image.is_empty() {
             panel = panel.child(section_label(tr!("camera.lens"), pal).mt_1());
         }
-        for ix in lens {
-            panel = panel.child(control_row(self, ix, cx));
+        if !lens.is_empty() {
+            panel = panel.child(control_grid(self, lens, cx));
         }
         if !image.is_empty() && self.sliders.len() != image.len() {
             panel = panel.child(section_label(tr!("camera.image"), pal).mt_1());
         }
-        for ix in image {
-            panel = panel.child(control_row(self, ix, cx));
+        if !image.is_empty() {
+            panel = panel.child(control_grid(self, image, cx));
         }
         panel.child(reset_button(cx))
     }

@@ -28,7 +28,10 @@ use super::commit_slider::{CommitSlider, SliderRange};
 use super::components::{MenuRow, PanelCard, Pill, PresetChip, ProfileTab, Toggle, toggle_row};
 use super::slider_row::{SliderRow, disabled_track};
 use super::status::{retry_line, status_line};
-use super::theme::{self, ContentWidth, OPENLOGI_DARK, OPENLOGI_LIGHT, Palette, Typography as _};
+use super::theme::{
+    self, ContentWidth, OPENLOGI_DARK, OPENLOGI_LIGHT, Palette, SelectableStyle as _,
+    Typography as _,
+};
 
 const TITLE: &str = "OpenLogi Component Gallery";
 
@@ -109,6 +112,8 @@ struct ComponentGallery {
     row_slider: CommitSlider<u8>,
     row_committed: u8,
     compact_slider: CommitSlider<u8>,
+    entry_slider: CommitSlider<u8>,
+    entry_auto: bool,
 }
 
 /// Where the gallery's slider row starts, and what it marks as the default.
@@ -130,6 +135,13 @@ impl ComponentGallery {
             |this: &mut Self, value, _| this.row_committed = value,
         );
         let compact_slider = CommitSlider::new(SliderRange::new(1, 20), 10, cx, |_, _, _| {});
+        // A release takes the value over from Auto, as on the camera page.
+        let entry_slider = CommitSlider::new(
+            SliderRange::new(0, 255),
+            128,
+            cx,
+            |this: &mut Self, _, _| this.entry_auto = false,
+        );
         Self {
             mode: ThemeMode::Light,
             scale: UiScale::Normal,
@@ -145,6 +157,8 @@ impl ComponentGallery {
             row_slider,
             row_committed: ROW_DEFAULT,
             compact_slider,
+            entry_slider,
+            entry_auto: true,
         }
     }
 
@@ -496,6 +510,7 @@ impl ComponentGallery {
                         .description("Applies in ratchet mode only.")
                         .disabled(true),
                 )
+                .child(self.entry_row(pal, cx))
                 .child(
                     SliderRow::new(
                         "Compact, for Settings",
@@ -510,6 +525,49 @@ impl ComponentGallery {
                 ),
             pal,
         )
+    }
+
+    /// A value typed in exactly, with a chip before it that hands the value
+    /// to the device, as on the camera page.
+    fn entry_row(&self, pal: Palette, cx: &mut Context<Self>) -> SliderRow {
+        let auto = self.entry_auto;
+        SliderRow::new(
+            "Value entry",
+            div()
+                .w_full()
+                .when(auto, |track| track.opacity(0.55))
+                .child(Slider::new(self.entry_slider.slider()).horizontal()),
+        )
+        .value(self.entry_slider.value(cx).to_string(), ["0", "255"])
+        .marker(
+            BaseButton::new("gallery-row-auto")
+                .role(Role::CheckBox)
+                .selected(auto)
+                .accessibility_label("Auto")
+                .px_1p5()
+                .py_0p5()
+                .rounded_full()
+                .bg(pal.control)
+                .selected_border(auto, pal)
+                .selected_fill(auto)
+                .text_caption()
+                .text_color(if auto {
+                    pal.text_primary
+                } else {
+                    pal.text_muted
+                })
+                .hover(move |style| style.bg(pal.control_hover))
+                .focus_visible(move |style| style.focus_ring(pal))
+                .child("Auto")
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.entry_auto = !this.entry_auto;
+                    cx.notify();
+                })),
+        )
+        .value_entry("gallery-row-entry", "Set value", |_, _, _| {})
+        .description("The value opens an exact entry; Auto mutes it until the thumb moves.")
+        .hint(format!("0–255 · {}", if auto { "auto" } else { "manual" }))
+        .disabled(auto)
     }
 
     fn battery_panel(pal: Palette) -> gpui::Div {

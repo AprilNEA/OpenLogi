@@ -13,12 +13,14 @@
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, Div, FontFeatures, InteractiveElement as _, IntoElement, ParentElement,
-    RenderOnce, SharedString, Styled, Window, div, prelude::FluentBuilder as _, px, rems,
+    AnyElement, App, ClickEvent, Div, ElementId, FontFeatures, InteractiveElement as _,
+    IntoElement, ParentElement, RenderOnce, SharedString, Styled, Window, div,
+    prelude::FluentBuilder as _, px, rems,
 };
+use gpui_kit::base::Button as BaseButton;
 use gpui_kit::component::{h_flex, v_flex};
 
-use super::theme::{self, Palette, Typography as _};
+use super::theme::{self, FocusRingStyle as _, Palette, Typography as _};
 
 /// Selects a row's value column in GPUI tests.
 const VALUE_SELECTOR: &str = "slider-row-value";
@@ -30,7 +32,9 @@ pub(crate) struct SliderRow {
     control: AnyElement,
     value: Option<SharedString>,
     widest: Vec<SharedString>,
-    marker: Option<SharedString>,
+    marker: Option<AnyElement>,
+    /// The button the value becomes when it can be typed in exactly.
+    entry: Option<BaseButton>,
     description: Option<SharedString>,
     hint: Option<AnyElement>,
     disabled: bool,
@@ -49,6 +53,7 @@ impl SliderRow {
             value: None,
             widest: Vec::new(),
             marker: None,
+            entry: None,
             description: None,
             hint: None,
             disabled: false,
@@ -71,12 +76,32 @@ impl SliderRow {
         self
     }
 
-    /// A muted word just before the value, at its size, such as "Default".
-    /// It sits beside the value rather than at a fixed place, so it suits a
-    /// marker shown for one value at a time.
+    /// What sits just before the value, muted and at its size: a word such as
+    /// "Default", shown for one value at a time, or a small control that
+    /// decides where the value comes from, such as a camera's Auto chip.
     #[must_use]
-    pub(crate) fn marker(mut self, marker: impl Into<SharedString>) -> Self {
-        self.marker = Some(marker.into());
+    pub(crate) fn marker(mut self, marker: impl IntoElement) -> Self {
+        self.marker = Some(marker.into_any_element());
+        self
+    }
+
+    /// Let the value be typed in exactly, for a range too fine to hit with
+    /// the thumb: the value becomes an outlined button, named `label` for
+    /// assistive technology, that runs `on_click` to open the entry. It is
+    /// outlined like a field rather than coloured like a link, since it opens
+    /// an editor in the app.
+    #[must_use]
+    pub(crate) fn value_entry(
+        mut self,
+        id: impl Into<ElementId>,
+        label: impl Into<SharedString>,
+        on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.entry = Some(
+            BaseButton::new(id)
+                .accessibility_label(label)
+                .on_click(on_click),
+        );
         self
     }
 
@@ -141,10 +166,20 @@ impl RenderOnce for SliderRow {
             }
         });
         let value = self.value.map(|value| {
-            let marker = self
-                .marker
-                .map(|marker| div().text_color(pal.text_muted).child(marker));
-            value_column(marker, value, self.widest)
+            let number = number(value, self.widest);
+            let number = match self.entry {
+                Some(button) => entry_button(button, number, pal).into_any_element(),
+                None => number.into_any_element(),
+            };
+            h_flex()
+                .debug_selector(|| VALUE_SELECTOR.into())
+                .flex_shrink_0()
+                .gap_1p5()
+                .children(
+                    self.marker
+                        .map(|marker| div().text_color(pal.text_muted).child(marker)),
+                )
+                .child(number)
         });
         v_flex()
             .w_full()
@@ -176,22 +211,35 @@ impl RenderOnce for SliderRow {
     }
 }
 
-/// The value, after its marker, right-aligned over invisible zero-height
-/// copies of the widest values, which hold the column at their width without
-/// adding a line.
-fn value_column(marker: Option<Div>, value: SharedString, widest: Vec<SharedString>) -> Div {
+/// The value, right-aligned in tabular figures over invisible zero-height
+/// copies of the widest values, which hold it at their width without adding
+/// a line.
+fn number(value: SharedString, widest: Vec<SharedString>) -> Div {
     v_flex()
-        .debug_selector(|| VALUE_SELECTOR.into())
-        .flex_shrink_0()
         .items_end()
         .whitespace_nowrap()
         .font_features(FontFeatures(Arc::new(vec![("tnum".into(), 1)])))
-        .child(h_flex().gap_1p5().children(marker).child(value))
+        .child(value)
         .children(
             widest
                 .into_iter()
                 .map(|text| div().h_0().overflow_hidden().invisible().child(text)),
         )
+}
+
+/// The value as the button that opens its exact entry: outlined like the
+/// other in-app controls, in the value's own colour.
+fn entry_button(button: BaseButton, number: Div, pal: Palette) -> BaseButton {
+    button
+        .px_1p5()
+        .py_0p5()
+        .rounded(pal.control_radius)
+        .border_1()
+        .border_color(pal.border)
+        .bg(pal.control)
+        .hover(move |style| style.bg(pal.control_hover))
+        .focus_visible(move |style| style.focus_ring(pal))
+        .child(number)
 }
 
 /// What a row shows in place of its slider while the setting does not apply:
@@ -202,54 +250,98 @@ pub(crate) fn disabled_track(pal: Palette) -> Div {
 
 #[cfg(test)]
 mod tests {
-    use gpui::{Bounds, Context, Pixels, Render, TestAppContext, VisualTestContext};
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    use gpui::{Bounds, Context, Modifiers, Pixels, Render, TestAppContext, VisualTestContext};
 
     use super::*;
 
     struct Row {
         value: &'static str,
         widest: &'static [&'static str],
+        /// Counts the clicks on a value that can be typed in.
+        entry: Option<Rc<Cell<u32>>>,
     }
 
     impl Render for Row {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let entry = self.entry.clone();
             div().w(px(320.)).child(
                 SliderRow::new("Speed", div().h(px(6.)))
                     .description("How fast the pointer moves.")
-                    .value(self.value, self.widest.iter().copied()),
+                    .value(self.value, self.widest.iter().copied())
+                    .when_some(entry, |row, clicks| {
+                        row.value_entry("speed-entry", "Set speed", move |_, _, _| {
+                            clicks.set(clicks.get() + 1);
+                        })
+                    }),
             )
         }
     }
 
-    fn value_bounds(row: Row, cx: &mut TestAppContext) -> Bounds<Pixels> {
+    fn value_bounds(row: Row, cx: &mut TestAppContext) -> (Bounds<Pixels>, &mut VisualTestContext) {
         let (_, cx) = cx.add_window_view(|_, _| row);
         cx.update(|window, cx| window.draw(cx).clear(cx));
-        VisualTestContext::debug_bounds(cx, VALUE_SELECTOR).expect("the value column is drawn")
+        let bounds = cx
+            .debug_bounds(VALUE_SELECTOR)
+            .expect("the value column is drawn");
+        (bounds, cx)
     }
 
     /// A short value keeps the column as wide as the widest one, and the
     /// copies that hold it there add no height, so dragging the thumb moves
-    /// neither the label nor the slider.
+    /// neither the label nor the slider — whether the value is plain text or
+    /// a button that opens its exact entry.
     #[gpui::test]
     fn the_value_column_keeps_the_widest_values_width_on_one_line(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
-        let widest = value_bounds(
-            Row {
-                value: "100",
-                widest: &[],
-            },
-            cx,
-        );
-        let short = value_bounds(
+        for entry in [None, Some(Rc::default())] {
+            let (widest, _) = value_bounds(
+                Row {
+                    value: "100",
+                    widest: &[],
+                    entry: entry.clone(),
+                },
+                cx,
+            );
+            let (short, _) = value_bounds(
+                Row {
+                    value: "5",
+                    widest: &["1", "100"],
+                    entry,
+                },
+                cx,
+            );
+
+            assert!(widest.size.width > Pixels::ZERO);
+            assert_eq!(short.size, widest.size);
+            assert_eq!(short.right(), widest.right());
+        }
+    }
+
+    /// A value that can be typed in opens its entry when clicked anywhere
+    /// across the column, not only on its digits.
+    #[gpui::test]
+    fn a_click_on_a_typed_value_opens_its_entry(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let clicks = Rc::new(Cell::new(0));
+        let (bounds, cx) = value_bounds(
             Row {
                 value: "5",
-                widest: &["1", "100"],
+                widest: &["100"],
+                entry: Some(clicks.clone()),
             },
             cx,
         );
 
-        assert!(widest.size.width > Pixels::ZERO);
-        assert_eq!(short.size, widest.size);
-        assert_eq!(short.right(), widest.right());
+        cx.simulate_click(bounds.center(), Modifiers::default());
+        assert_eq!(clicks.get(), 1);
+        // The left edge is the widest value's, clear of the short one.
+        cx.simulate_click(
+            bounds.left_center() + gpui::point(px(3.), px(0.)),
+            Modifiers::default(),
+        );
+        assert_eq!(clicks.get(), 2);
     }
 }
