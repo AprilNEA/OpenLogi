@@ -16,7 +16,7 @@
 use gpui::rgb;
 use gpui::{App, FontWeight, Hsla, Pixels, Rems, Rgba, Styled, Window, hsla, px, relative, rems};
 use gpui_component::{ActiveTheme as _, Theme, ThemeMode, ThemeRegistry};
-use openlogi_core::config::{Appearance, UiScale};
+use openlogi_core::config::{AppSettings, Appearance, UiScale};
 
 use crate::state::AppState;
 
@@ -295,18 +295,9 @@ pub fn apply_ui_scale(window: &mut Window, cx: &App) {
 /// appearance is read directly and it repaints; pass `None` from a settings
 /// edit (no window in hand) — every open window is refreshed instead.
 pub fn apply_from_settings(window: Option<&mut Window>, cx: &mut App) {
-    let (appearance, light_name, dark_name, radius) = AppState::try_read(cx).map_or_else(
-        || (Appearance::default(), None, None, None),
-        |state| {
-            let s = state.app_settings();
-            (
-                s.appearance,
-                s.theme_light.clone(),
-                s.theme_dark.clone(),
-                s.ui_radius,
-            )
-        },
-    );
+    let settings = AppState::try_read(cx)
+        .map_or_else(AppSettings::default, |state| state.app_settings().clone());
+    let appearance = settings.appearance;
 
     // Sync the native window chrome (titlebar) to the pref first, so the
     // `System` branch below reads the *real* OS appearance rather than a stale
@@ -324,6 +315,23 @@ pub fn apply_from_settings(window: Option<&mut Window>, cx: &mut App) {
         .as_ref()
         .map_or_else(|| cx.window_appearance(), |w| w.appearance());
 
+    let mode = match appearance {
+        Appearance::System => ThemeMode::from(os_appearance),
+        Appearance::Light => ThemeMode::Light,
+        Appearance::Dark => ThemeMode::Dark,
+    };
+    apply_theme_tokens(mode, window, &settings, cx);
+}
+
+/// Apply named theme slots, contrast and radius without reading user state or
+/// changing native application appearance. Production and offscreen QA share
+/// this token policy; the caller owns the explicit appearance mode.
+pub(crate) fn apply_theme_tokens(
+    mode: ThemeMode,
+    window: Option<&mut Window>,
+    settings: &AppSettings,
+    cx: &mut App,
+) {
     // Pull the chosen configs out of the registry before borrowing the Theme
     // mutably (both live as globals).
     let (light, dark) = {
@@ -333,8 +341,8 @@ pub fn apply_from_settings(window: Option<&mut Window>, cx: &mut App) {
                 .or_else(|| registry.themes().get(fallback).cloned())
         };
         (
-            pick(light_name.as_deref(), OPENLOGI_LIGHT),
-            pick(dark_name.as_deref(), OPENLOGI_DARK),
+            pick(settings.theme_light.as_deref(), OPENLOGI_LIGHT),
+            pick(settings.theme_dark.as_deref(), OPENLOGI_DARK),
         )
     };
     {
@@ -347,16 +355,11 @@ pub fn apply_from_settings(window: Option<&mut Window>, cx: &mut App) {
         }
     }
 
-    let mode = match appearance {
-        Appearance::System => ThemeMode::from(os_appearance),
-        Appearance::Light => ThemeMode::Light,
-        Appearance::Dark => ThemeMode::Dark,
-    };
     Theme::change(mode, window, cx);
 
     let theme = Theme::global_mut(cx);
     normalize_theme_text_contrast(theme);
-    if let Some(radius) = radius {
+    if let Some(radius) = settings.ui_radius {
         theme.radius = px(f32::from(radius));
     }
     // Theme tokens are app-global and consumed by every open window.
@@ -497,6 +500,36 @@ mod tests {
                 "Catppuccin Mocha",
             ] {
                 assert!(themes.contains_key(name), "missing bundled theme: {name}");
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn token_application_preserves_named_themes_radius_and_contrast(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            register_builtin_themes(cx);
+            let settings = AppSettings {
+                theme_light: Some("Catppuccin Latte".into()),
+                theme_dark: Some("Catppuccin Mocha".into()),
+                ui_radius: Some(9),
+                ..AppSettings::default()
+            };
+            for (mode, name) in [
+                (ThemeMode::Light, "Catppuccin Latte"),
+                (ThemeMode::Dark, "Catppuccin Mocha"),
+            ] {
+                apply_theme_tokens(mode, None, &settings, cx);
+                let theme = Theme::global(cx);
+                assert_eq!(theme.theme_name(), name);
+                assert_eq!(theme.radius, px(9.));
+                assert!(
+                    minimum_text_contrast(
+                        theme.muted_foreground,
+                        theme.background,
+                        theme.group_box
+                    ) >= MIN_TEXT_CONTRAST
+                );
             }
         });
     }
