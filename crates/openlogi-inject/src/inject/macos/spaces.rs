@@ -35,11 +35,12 @@ use objc2_foundation::{
 
 use super::super::DesktopSwitch;
 use super::super::space_switch::{
-    self, Backend, Direction, Failure, Lease, Pace, PostGate, SlideFrame, SlidePhase, SpaceState,
+    self, Backend, Direction, Failure, Lease, Pace, PostGate, SlideFrame, SlidePhase, Slot,
+    SpaceState,
 };
 use super::{app_services, app_services_symbol};
 
-static BUSY: AtomicBool = AtomicBool::new(false);
+static BUSY: Slot = Slot::new();
 /// Whether a switch slides. The host publishes the user's choice here
 /// through [`set_desktop_switch`]; until it does, switches stay instant.
 static SLIDE: AtomicBool = AtomicBool::new(false);
@@ -64,14 +65,17 @@ pub(super) fn next_desktop() {
 }
 
 fn start(direction: Direction) {
-    let Some(lease) = Lease::acquire(&BUSY) else {
-        tracing::debug!(?direction, "Space switch already pending — skipped");
-        return;
-    };
     // Capture the display before scheduling. A moved cursor must not retarget
     // a delayed action to another monitor; `post` checks it again.
     let Some(display_id) = cursor_display() else {
         tracing::warn!(?direction, "Space switch: cursor display unavailable");
+        return;
+    };
+    let Some(lease) = Lease::acquire(&BUSY, display_id) else {
+        tracing::debug!(
+            ?direction,
+            "Space switch busy on another display or stuck, skipped"
+        );
         return;
     };
     // Read once: a setting changed mid-switch applies to the next one.

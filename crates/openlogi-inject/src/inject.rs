@@ -279,15 +279,18 @@ fn run_workflow(steps: &[WorkflowStep]) {
 /// `SetDpiPreset`, `ToggleSmartShift`) have no CGEvent equivalent and are
 /// handled at the hook/HID layer, logging a trace here.
 ///
-/// macOS `PreviousDesktop` / `NextDesktop` send a DockSwipe without modifying
-/// system shortcuts: two frames that switch at once, or, with
-/// [`DesktopSwitch::Animated`], a timed series of frames the Dock slides along
+/// macOS `PreviousDesktop` / `NextDesktop` switch without modifying system
+/// shortcuts: a two-frame DockSwipe that switches at once, or, with
+/// [`DesktopSwitch::Animated`], the user's own "Move left/right a space"
+/// shortcut, falling back to a timed series of frames the Dock slides along
 /// (see [`set_desktop_switch`]). This call waits for posting (or
 /// cancellation), including every frame of a slide, preserving event order
 /// for sequential callers, but not for the Dock's animation to end.
 /// A dedicated worker confirms the pointer display's Space; the process must
-/// remain alive to receive that diagnostic. Overlapping switches are skipped,
-/// not queued. Call from an action worker, never an input-tap callback.
+/// remain alive to receive that diagnostic. A switch requested while another
+/// on the same display is under way first waits for that one to reach its
+/// Space, so presses in a row all switch, in order. One requested for another
+/// display is skipped. Call from an action worker, never an input-tap callback.
 /// Worker preparation has a two-second cancellation deadline; a canceled
 /// worker cannot post later and retains its busy slot until it exits. Initial
 /// cursor capture and committed native post calls are not interruptible: this

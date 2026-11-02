@@ -1,11 +1,14 @@
 //! Space-switch transaction policy, independent of macOS FFI for regression tests.
 
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, mpsc};
 use std::time::{Duration, Instant};
 
 const PREPARATION_TIMEOUT: Duration = Duration::from_secs(2);
 const CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(2);
+/// A request waits at most as long as the switch under way may take; one
+/// that outlasts both of its deadlines is stuck.
+const WAIT_TIMEOUT: Duration = PREPARATION_TIMEOUT.saturating_add(CONFIRMATION_TIMEOUT);
 
 /// Logi Options+ 2.8 drives its three-finger horizontal swipe from a timer of
 /// this period (`injectionPeriodInMs`, 16.6 ms), one frame per tick.
@@ -342,21 +345,57 @@ pub(super) fn run(
     }
 }
 
-/// Single in-flight transaction; no queue of relative actions that can run
-/// later on a different display. The owned lease also releases on spawn failure.
-pub(super) struct Lease<'a>(&'a AtomicBool);
+/// The display whose switch is under way, if any. Its [`Lease`] is single
+/// in-flight; no queue of relative actions can run later on a different
+/// display.
+pub(super) struct Slot {
+    display: Mutex<Option<u32>>,
+    freed: Condvar,
+}
+
+impl Slot {
+    pub(super) const fn new() -> Self {
+        Self {
+            display: Mutex::new(None),
+            freed: Condvar::new(),
+        }
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Option<u32>> {
+        self.display.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// The right to switch one display. The owned lease also releases on spawn
+/// failure.
+pub(super) struct Lease<'a>(&'a Slot);
 
 impl<'a> Lease<'a> {
-    pub(super) fn acquire(busy: &'a AtomicBool) -> Option<Self> {
-        busy.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .ok()
-            .map(|_| Self(busy))
+    /// The slot for `display`. A request for the display being switched waits
+    /// for that switch to end, so presses in a row switch in order, each
+    /// after the one before reaches its Space. A request for another display,
+    /// or one that outwaits a stuck switch, is skipped.
+    pub(super) fn acquire(slot: &'a Slot, display: u32) -> Option<Self> {
+        Self::acquire_within(slot, display, WAIT_TIMEOUT)
+    }
+
+    fn acquire_within(slot: &'a Slot, display: u32, patience: Duration) -> Option<Self> {
+        let (mut held, _) = slot
+            .freed
+            .wait_timeout_while(slot.lock(), patience, |held| *held == Some(display))
+            .unwrap_or_else(PoisonError::into_inner);
+        if held.is_some() {
+            return None;
+        }
+        *held = Some(display);
+        Some(Self(slot))
     }
 }
 
 impl Drop for Lease<'_> {
     fn drop(&mut self) {
-        self.0.store(false, Ordering::Release);
+        *self.0.lock() = None;
+        self.0.freed.notify_all();
     }
 }
 

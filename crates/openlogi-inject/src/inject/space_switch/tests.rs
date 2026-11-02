@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::rc::Rc;
+use std::sync::atomic::AtomicBool;
 
 use super::*;
 
@@ -185,13 +186,37 @@ fn native_failure_stops_without_keyboard_fallback() {
     assert!(backend.posts.is_empty());
 }
 
+const DISPLAY: u32 = 1;
+const OTHER_DISPLAY: u32 = 2;
+
 #[test]
 fn only_one_transaction_can_run_and_drop_releases_the_slot() {
-    let busy = AtomicBool::new(false);
-    let lease = Lease::acquire(&busy).unwrap();
-    assert!(Lease::acquire(&busy).is_none());
+    let slot = Slot::new();
+    let lease = Lease::acquire(&slot, DISPLAY).unwrap();
+    // Another display is skipped at once, without waiting.
+    assert!(Lease::acquire(&slot, OTHER_DISPLAY).is_none());
     drop(lease);
-    assert!(Lease::acquire(&busy).is_some());
+    assert!(Lease::acquire(&slot, OTHER_DISPLAY).is_some());
+}
+
+#[test]
+fn a_request_for_the_display_being_switched_waits_for_its_switch() {
+    let slot = Slot::new();
+    let lease = Lease::acquire(&slot, DISPLAY).unwrap();
+    // A switch that outlasts the wait is stuck: the request is skipped.
+    assert!(Lease::acquire_within(&slot, DISPLAY, Duration::ZERO).is_none());
+    let released = AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        let next = scope.spawn(|| {
+            let lease = Lease::acquire(&slot, DISPLAY);
+            // However the threads interleave, the slot is free only once the
+            // switch under way has ended.
+            (lease.is_some(), released.load(Ordering::SeqCst))
+        });
+        released.store(true, Ordering::SeqCst);
+        drop(lease);
+        assert_eq!(next.join().unwrap(), (true, true));
+    });
 }
 
 #[test]
@@ -236,8 +261,8 @@ fn early_exit_releases_the_caller_without_acknowledging_a_post() {
 
 #[test]
 fn preparation_timeout_cancels_late_output_but_keeps_the_worker_lease() {
-    let busy = AtomicBool::new(false);
-    let lease = Lease::acquire(&busy).unwrap();
+    let slot = Slot::new();
+    let lease = Lease::acquire(&slot, DISPLAY).unwrap();
     let deadline = Instant::now() + Duration::from_secs(60);
     let (gate, wait) = PostGate::new(deadline);
     let (resume, blocked) = mpsc::channel();
@@ -251,13 +276,13 @@ fn preparation_timeout_cancels_late_output_but_keeps_the_worker_lease() {
         });
         // Advance the waiter's clock to its deadline while preparation is held.
         assert_eq!(wait.wait(deadline), Err(Failure::TimedOut));
-        assert!(Lease::acquire(&busy).is_none());
+        assert!(Lease::acquire_within(&slot, DISPLAY, Duration::ZERO).is_none());
         // Later actions can proceed now. Releasing the stalled preparation
         // must never let that stale request emit either swipe phase.
         resume.send(()).unwrap();
         assert_eq!(worker.join().unwrap(), (vec![], Err(Failure::TimedOut)));
     });
-    assert!(Lease::acquire(&busy).is_some());
+    assert!(Lease::acquire(&slot, OTHER_DISPLAY).is_some());
 }
 
 #[test]
