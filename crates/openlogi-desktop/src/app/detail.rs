@@ -883,7 +883,8 @@ fn camera_tab(
     )
 }
 
-/// Standalone-light controls in a separate panel from HID++ keyboard RGB.
+/// Standalone-light controls in a separate panel from HID++ keyboard RGB. The
+/// controls card is untitled for the same reason as [`lighting_tab`]'s.
 fn light_tab(
     light_panel: &gpui::Entity<LightPanel>,
     cx: &mut Context<AppView>,
@@ -927,7 +928,7 @@ fn light_tab(
                     .w(LIGHT_CONTROLS_W)
                     .min_w(LIGHT_CONTROLS_MIN_W)
                     .child(PanelCard::new(
-                        tr!("device.lighting"),
+                        SharedString::default(),
                         Icon::new(IconName::Sun),
                         light_panel.clone().into_any_element(),
                     )),
