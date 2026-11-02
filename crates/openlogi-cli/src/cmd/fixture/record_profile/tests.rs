@@ -20,10 +20,10 @@ use openlogi_fixture::{
 use openlogi_ipc::client::ProtocolSkew;
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentStatus, BacklightObservation,
-    ClientKind, ConfigReloadError, FlowStatus, ForegroundApps, Generation, Identity,
-    InventoryHealth, LockKeyObservation, MonitorEvent, NoticeObservation, Observation,
-    PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingPhase, PairingUpdate,
-    RingObservation, SavedConfig, SavedConfigVerdict,
+    ClientKind, ConfigReloadError, FlowIdentity, FlowPairTarget, FlowPairingCommandError,
+    FlowStatus, ForegroundApps, Generation, Identity, InventoryHealth, LockKeyObservation,
+    MonitorEvent, NoticeObservation, Observation, PROTOCOL_VERSION, PairingCommandError,
+    PairingFailure, PairingPhase, PairingUpdate, RingObservation, SavedConfig, SavedConfigVerdict,
 };
 use tarpc::client::RpcError;
 use tarpc::context::Context as TarpcContext;
@@ -418,6 +418,37 @@ impl Agent for TestAgent {
         _host: u8,
     ) -> Result<(), WriteError> {
         unreachable!("profile capture must never switch a host")
+    }
+
+    async fn read_flow_identity(
+        self,
+        _: TarpcContext,
+    ) -> Result<FlowIdentity, FlowPairingCommandError> {
+        unreachable!("profile capture does not read the Flow identity")
+    }
+
+    async fn start_flow_pairing(self, _: TarpcContext) -> Result<(), FlowPairingCommandError> {
+        unreachable!("profile capture must never pair a computer")
+    }
+
+    async fn pair_flow_peer(
+        self,
+        _: TarpcContext,
+        _target: FlowPairTarget,
+    ) -> Result<(), FlowPairingCommandError> {
+        unreachable!("profile capture must never pair a computer")
+    }
+
+    async fn confirm_flow_pairing(self, _: TarpcContext) -> Result<(), FlowPairingCommandError> {
+        unreachable!("profile capture must never pair a computer")
+    }
+
+    async fn cancel_flow_pairing(self, _: TarpcContext) -> Result<(), FlowPairingCommandError> {
+        unreachable!("profile capture must never pair a computer")
+    }
+
+    async fn stop_flow_pairing(self, _: TarpcContext) {
+        unreachable!("profile capture must never pair a computer")
     }
     async fn reload_saved_config(
         self,

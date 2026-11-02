@@ -9,7 +9,7 @@ use openlogi_flow::generated as proto;
 use openlogi_flow::sas::PublicKey;
 use openlogi_flow::session::{LinkState, PeerSessionHandle, SessionManager, TrustedInitialState};
 use openlogi_flow::transport::{IncomingRpc, TransportError, error_envelope, message_envelope};
-use openlogi_ipc::{FlowLinkState, FlowPeerStatus, FlowStatus};
+use openlogi_ipc::{FlowLinkState, FlowPeerStatus};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
@@ -485,10 +485,9 @@ impl Actor {
     }
 
     fn publish_status(&self) {
-        self.observable.set_flow(FlowStatus {
-            enabled: self.config.enabled,
-            peers: self
-                .peers
+        self.observable.set_flow_peers(
+            self.config.enabled,
+            self.peers
                 .iter()
                 .map(|peer| FlowPeerStatus {
                     name: peer.name.clone(),
@@ -500,7 +499,7 @@ impl Actor {
                     },
                 })
                 .collect(),
-        });
+        );
     }
 }
 

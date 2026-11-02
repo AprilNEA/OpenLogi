@@ -56,11 +56,13 @@ use openlogi_core::hid::{
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, ActionRingPresentation, AgentRequest,
     AgentResponse, AgentSnapshot, AgentStatus, BacklightObservation, ChosenLight, ClientKind,
-    ConfigReloadError, FlowLinkState, FlowPeerStatus, FlowStatus, ForegroundApps, FoundDevice,
-    Identity, InventoryHealth, LockKeyChange, LockKeyObservation, MonitorEvent, Notice, NoticeKind,
-    NoticeObservation, Observation, ObservedLight, PROTOCOL_VERSION, PairingCommandError,
-    PairingFailure, PairingPhase, PairingUpdate, RingObservation, SavedConfig, SavedConfigVerdict,
-    SecureInput, VirtualKeyboardStatus,
+    ConfigReloadError, FlowIdentity, FlowLinkState, FlowPairTarget, FlowPairingCommandError,
+    FlowPairingFailure, FlowPairingPeer, FlowPairingPhase, FlowPeerStatus, FlowPlatform,
+    FlowStatus, ForegroundApps, FoundDevice, Identity, InventoryHealth, LockKeyChange,
+    LockKeyObservation, MonitorEvent, Notice, NoticeKind, NoticeObservation, Observation,
+    ObservedLight, PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingPhase,
+    PairingUpdate, RingObservation, SavedConfig, SavedConfigVerdict, SecureInput,
+    VirtualKeyboardStatus,
 };
 use succession::{Compat, Run};
 
@@ -661,7 +663,7 @@ fn agent_snapshot() {
     };
     assert_wire(
         &snapshot,
-        "010001010705302e362e3601000000000000000000000000",
+        "010001010705302e362e360100000000000000000000000000",
     );
 
     // The observation is the snapshot with its generation in front.
@@ -671,7 +673,7 @@ fn agent_snapshot() {
     };
     assert_wire(
         &observed,
-        "03010001010705302e362e3601000000000000000000000000",
+        "03010001010705302e362e360100000000000000000000000000",
     );
 }
 
@@ -682,7 +684,7 @@ fn flow_status() {
     assert_wire(&FlowLinkState::Connected, "00");
     assert_wire(&FlowLinkState::Degraded, "01");
     assert_wire(&FlowLinkState::Lost, "02");
-    assert_wire(&FlowStatus::default(), "0000");
+    assert_wire(&FlowStatus::default(), "000000");
     assert_wire(
         &FlowStatus {
             enabled: true,
@@ -691,10 +693,121 @@ fn flow_status() {
                 public_key: FlowPublicKey::from_bytes([0xab; 32]),
                 state: FlowLinkState::Degraded,
             }],
+            pairing: Some(FlowPairingPhase::Searching),
         },
         "0101046465736b48656432353531393a\
          61626162616261626162616261626162616261626162616261626162616261626162616261626162\
-         61626162616261626162616261626162616261626162616201",
+         616261626162616261626162616261626162616261626162010100",
+    );
+}
+
+/// Flow pairing: the six methods append after `set_sidetone`, and every
+/// phase, failure, and command error is wire format.
+#[test]
+fn flow_pairing() {
+    let key = FlowPublicKey::from_bytes([0xcd; 32]);
+    let key_hex = "48656432353531393a".to_owned() + &"6364".repeat(32);
+    let peer = FlowPairingPeer {
+        name: "iMac".into(),
+        public_key: key,
+        platform: FlowPlatform::Macos,
+    };
+    let peer_hex = format!("04694d6163{key_hex}01");
+
+    assert_wire(&AgentRequest::ReadFlowIdentity {}, "33");
+    assert_wire(&AgentRequest::StartFlowPairing {}, "34");
+    assert_wire(
+        &AgentRequest::PairFlowPeer {
+            target: FlowPairTarget::Nearby(key),
+        },
+        &format!("3500{key_hex}"),
+    );
+    assert_wire(
+        &AgentRequest::PairFlowPeer {
+            target: FlowPairTarget::Address("10.0.0.7".into()),
+        },
+        "35010831302e302e302e37",
+    );
+    assert_wire(&AgentRequest::ConfirmFlowPairing {}, "36");
+    assert_wire(&AgentRequest::CancelFlowPairing {}, "37");
+    assert_wire(&AgentRequest::StopFlowPairing {}, "38");
+
+    assert_wire(
+        &FlowIdentity {
+            machine_name: "desk".into(),
+            public_key: key,
+        },
+        &format!("046465736b{key_hex}"),
+    );
+    assert_wire(&FlowPlatform::Unknown, "00");
+    assert_wire(&FlowPlatform::Linux, "03");
+
+    assert_wire(&FlowPairingPhase::Searching, "00");
+    assert_wire(
+        &FlowPairingPhase::Found(vec![peer.clone()]),
+        &format!("0101{peer_hex}"),
+    );
+    assert_wire(&FlowPairingPhase::Connecting { peer: None }, "0200");
+    assert_wire(
+        &FlowPairingPhase::ShowingCode {
+            peer: peer.clone(),
+            code: "418672".into(),
+        },
+        &format!("03{peer_hex}06343138363732"),
+    );
+    assert_wire(
+        &FlowPairingPhase::WaitingForPeer {
+            peer: peer.clone(),
+            code: "418672".into(),
+        },
+        &format!("04{peer_hex}06343138363732"),
+    );
+    assert_wire(
+        &FlowPairingPhase::Paired {
+            peer: peer.clone(),
+            name: FlowPeerName::new("iMac").expect("valid peer name"),
+        },
+        &format!("05{peer_hex}04694d6163"),
+    );
+    assert_wire(
+        &FlowPairingPhase::Failed {
+            peer: Some(peer),
+            reason: FlowPairingFailure::PeerCancelled,
+        },
+        &format!("0601{peer_hex}00"),
+    );
+
+    for (index, reason) in [
+        FlowPairingFailure::PeerCancelled,
+        FlowPairingFailure::CodeMismatch,
+        FlowPairingFailure::TimedOut,
+        FlowPairingFailure::Unreachable,
+        FlowPairingFailure::PeerBusy,
+        FlowPairingFailure::IncompatibleVersion,
+        FlowPairingFailure::ConnectionLost,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_wire(&reason, &format!("{index:02x}"));
+    }
+    assert_wire(
+        &FlowPairingFailure::SaveFailed {
+            message: "full".into(),
+        },
+        "070466756c6c",
+    );
+
+    let refused = |error: FlowPairingCommandError| Err::<(), _>(error);
+    assert_wire(&refused(FlowPairingCommandError::NotStarted), "0100");
+    assert_wire(&refused(FlowPairingCommandError::Busy), "0101");
+    assert_wire(&refused(FlowPairingCommandError::UnknownPeer), "0102");
+    assert_wire(&refused(FlowPairingCommandError::NothingToConfirm), "0103");
+    assert_wire(
+        &refused(FlowPairingCommandError::Unavailable {
+            message: "port".into(),
+        }),
+        "010404706f7274",
     );
 }
 

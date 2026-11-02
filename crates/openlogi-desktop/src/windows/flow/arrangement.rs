@@ -10,7 +10,11 @@ use gpui::{
     div, prelude::FluentBuilder as _, px,
 };
 use gpui_base::Button as BaseButton;
-use gpui_component::{Icon, h_flex, v_flex};
+use gpui_component::{
+    Icon, Sizable as _,
+    button::{Button, ButtonVariants as _},
+    h_flex, v_flex,
+};
 use openlogi_core::config::{FlowEdge, FlowPeerName};
 
 use super::{FlowModel, FlowView, PeerModel, link_dot, link_label};
@@ -104,7 +108,7 @@ pub(super) fn canvas(
         }
     }
     if model.peers.is_empty() {
-        grid = grid.child(empty_state(pal));
+        grid = grid.child(empty_state(pal, cx));
     }
 
     let chips: Vec<_> = unplaced
@@ -159,7 +163,7 @@ pub(super) fn canvas(
 }
 
 /// With no peer, the row under this computer says how one gets here.
-fn empty_state(pal: Palette) -> impl IntoElement {
+fn empty_state(pal: Palette, cx: &Context<FlowView>) -> impl IntoElement {
     let (_, y) = origin(Some(FlowEdge::Bottom));
     v_flex()
         .absolute()
@@ -175,6 +179,16 @@ fn empty_state(pal: Palette) -> impl IntoElement {
                 .text_caption()
                 .text_color(pal.text_muted)
                 .child(tr!("flow.empty_body")),
+        )
+        .child(
+            div().pt_2().child(
+                Button::new("flow-add-empty")
+                    .primary()
+                    .small()
+                    .label(tr!("flow.add"))
+                    .debug_selector(|| "flow-add-empty".into())
+                    .on_click(cx.listener(|this, _, window, cx| this.open_pairing(window, cx))),
+            ),
         )
 }
 

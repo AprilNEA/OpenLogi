@@ -31,7 +31,9 @@ pub(crate) use device_session::ObservedConnection;
 pub use devices::DeviceRecord;
 pub(crate) use easy_switch::HostRenameRefusal;
 pub(crate) use events::{StateEvent, StateEvents};
-pub(crate) use flow::{FlowDeviceRow, FlowHealth, FlowHost, FlowIssue, FlowReadiness};
+pub(crate) use flow::{
+    FlowDeviceRow, FlowHealth, FlowHost, FlowIssue, FlowPairingRefusal, FlowReadiness,
+};
 pub use light::LightCommandStatus;
 pub(crate) use load::Load;
 pub use load::{

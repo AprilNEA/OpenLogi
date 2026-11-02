@@ -24,9 +24,9 @@ use openlogi_core::brand::is_openlogi_foreground_id;
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_hook::Hook;
 use openlogi_ipc::{
-    AgentSnapshot, AgentStatus, FlowStatus, ForegroundApps, FoundDevice, Generation,
-    InventoryHealth, OBSERVE_HOLD, Observation, ObservedLight, PROTOCOL_VERSION, PairingPhase,
-    RECENT_APPS, SecureInput, VirtualKeyboardStatus,
+    AgentSnapshot, AgentStatus, FlowPairingPhase, FlowPeerStatus, FlowStatus, ForegroundApps,
+    FoundDevice, Generation, InventoryHealth, OBSERVE_HOLD, Observation, ObservedLight,
+    PROTOCOL_VERSION, PairingPhase, RECENT_APPS, SecureInput, VirtualKeyboardStatus,
 };
 use tokio::sync::watch;
 
@@ -202,14 +202,27 @@ impl ObservableState {
         });
     }
 
-    /// Publish whether Flow is enabled and each configured peer's link state.
-    /// The same state twice notifies nobody.
-    pub fn set_flow(&self, flow: FlowStatus) {
+    /// Publish whether Flow is enabled and each configured peer's link state,
+    /// leaving the pairing session alone. The same state twice notifies
+    /// nobody.
+    pub fn set_flow_peers(&self, enabled: bool, peers: Vec<FlowPeerStatus>) {
         self.update(|snapshot| {
-            if snapshot.flow == flow {
+            if snapshot.flow.enabled == enabled && snapshot.flow.peers == peers {
                 return false;
             }
-            snapshot.flow = flow;
+            snapshot.flow.enabled = enabled;
+            snapshot.flow.peers = peers;
+            true
+        });
+    }
+
+    /// Publish where Flow pairing stands, or `None` while it is closed.
+    pub fn set_flow_pairing(&self, pairing: Option<FlowPairingPhase>) {
+        self.update(|snapshot| {
+            if snapshot.flow.pairing == pairing {
+                return false;
+            }
+            snapshot.flow.pairing = pairing;
             true
         });
     }
