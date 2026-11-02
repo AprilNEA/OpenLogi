@@ -142,12 +142,24 @@ impl Render for ActionRingPanel {
                     ),
             )
             .child(
+                // The editor wraps below the ring when the window is too narrow
+                // for both, rather than clipping them. The ring's own switches
+                // sit under it, beside the taller editor, so the page fits one
+                // screen at the larger interface scales.
                 h_flex()
                     .w_full()
+                    .flex_wrap()
                     .items_start()
                     .justify_center()
                     .gap_4()
-                    .child(ring_preview(&layout, self.selected_slot, &view, pal))
+                    .child(
+                        v_flex()
+                            .flex_none()
+                            .w(px(PREVIEW_SIZE))
+                            .gap_4()
+                            .child(ring_preview(&layout, self.selected_slot, &view, pal))
+                            .child(ring_switches(&ring, haptics_supported, pal, cx)),
+                    )
                     .child(action_library(
                         self.selected_slot,
                         layout.slots.get(&self.selected_slot),
@@ -158,38 +170,50 @@ impl Render for ActionRingPanel {
                         pal,
                     )),
             )
-            .child(toggle_row(
-                "ring-enabled-row",
+    }
+}
+
+/// The settings that apply to the whole ring: whether a button press opens
+/// it, its size, and its haptics on a device that has them.
+fn ring_switches(
+    ring: &ActionRingConfig,
+    haptics_supported: bool,
+    pal: Palette,
+    cx: &App,
+) -> impl IntoElement {
+    v_flex()
+        .gap_3()
+        .child(toggle_row(
+            "ring-enabled-row",
+            pal,
+            tr!("action_ring.enable_ring"),
+            tr!("action_ring.open_at_the_current_cursor_position"),
+            Toggle::new("ring-enabled-toggle")
+                .selected(ring.enabled)
+                .on_change(|enabled, _, cx| {
+                    AppState::apply(cx, |state| state.commit_action_ring_enabled(*enabled));
+                }),
+        ))
+        .child(toggle_row(
+            "ring-size-row",
+            pal,
+            tr!("action_ring.ring_size"),
+            tr!("action_ring.ring_size_description"),
+            size_segment(ring.size, cx),
+        ))
+        .when(haptics_supported, |switches| {
+            switches.child(toggle_row(
+                "ring-haptics-row",
                 pal,
-                tr!("action_ring.enable_ring"),
-                tr!("action_ring.open_at_the_current_cursor_position"),
-                Toggle::new("ring-enabled-toggle")
-                    .selected(ring.enabled)
-                    .on_change(|enabled, _, cx| {
-                        AppState::apply(cx, |state| state.commit_action_ring_enabled(*enabled));
+                tr!("action_ring.haptic_feedback"),
+                tr!("action_ring.action_ring_haptic_description"),
+                Toggle::new("ring-haptics-toggle")
+                    .selected(ring.haptics)
+                    .on_change(|haptics, _, cx| {
+                        AppState::apply(cx, |state| state.commit_action_ring_haptics(*haptics));
                     }),
             ))
-            .child(toggle_row(
-                "ring-size-row",
-                pal,
-                tr!("action_ring.ring_size"),
-                tr!("action_ring.ring_size_description"),
-                size_segment(ring.size, cx),
-            ))
-            .when(haptics_supported, |panel| {
-                panel.child(toggle_row(
-                    "ring-haptics-row",
-                    pal,
-                    tr!("action_ring.haptic_feedback"),
-                    tr!("action_ring.action_ring_haptic_description"),
-                    Toggle::new("ring-haptics-toggle")
-                        .selected(ring.haptics)
-                        .on_change(|haptics, _, cx| {
-                            AppState::apply(cx, |state| state.commit_action_ring_haptics(*haptics));
-                        }),
-                ))
-            })
-    }
+        })
 }
 
 fn action_ring_editor_state(cx: &Context<ActionRingPanel>) -> (ActionRingConfig, ActionRingLayout) {
