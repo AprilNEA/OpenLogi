@@ -144,7 +144,13 @@ fn unused_name(wanted: &str, saved: &[FlowPeer]) -> FlowPeerName {
 fn address_hint(address: &str) -> Option<String> {
     let address = address.trim();
     if let Ok(socket) = address.parse::<SocketAddr>() {
-        return Some(socket.ip().to_string());
+        return Some(match socket {
+            // A link-local address reaches the peer only through its interface.
+            SocketAddr::V6(socket) if socket.scope_id() != 0 => {
+                format!("[{}%{}]", socket.ip(), socket.scope_id())
+            }
+            socket => socket.ip().to_string(),
+        });
     }
     let host = match address.rsplit_once(':') {
         Some((host, port)) if !host.contains(':') && port.parse::<u16>().is_ok() => host,
@@ -153,6 +159,7 @@ fn address_hint(address: &str) -> Option<String> {
     let host = host
         .strip_prefix('[')
         .and_then(|host| host.strip_suffix(']'))
+        .filter(|host| !host.contains('%'))
         .unwrap_or(host);
     (!host.is_empty()).then(|| host.to_owned())
 }
@@ -266,6 +273,8 @@ mod tests {
             ("[fd00::7]:42425", Some("fd00::7")),
             ("[fd00::7]", Some("fd00::7")),
             ("fd00::7", Some("fd00::7")),
+            ("[fe80::1234%3]:42425", Some("[fe80::1234%3]")),
+            ("[fe80::1234%3]", Some("[fe80::1234%3]")),
             ("", None),
         ];
         for (typed, host) in cases {

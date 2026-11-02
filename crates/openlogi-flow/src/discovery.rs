@@ -693,10 +693,14 @@ async fn resolve_manual_address(
         .strip_prefix('[')
         .and_then(|address| address.strip_suffix(']'))
     {
-        let ip = bracketed
-            .parse::<IpAddr>()
-            .map_err(|_| DiscoveryError::InvalidManualAddress(address.to_owned()))?;
-        return Ok(vec![SocketAddr::new(ip, default_port)]);
+        let socket = match bracketed.parse::<IpAddr>() {
+            Ok(ip) => SocketAddr::new(ip, default_port),
+            // An IPv6 address with its interface scope, such as `[fe80::1%3]`.
+            Err(_) => format!("{address}:{default_port}")
+                .parse()
+                .map_err(|_| DiscoveryError::InvalidManualAddress(address.to_owned()))?,
+        };
+        return Ok(vec![socket]);
     }
 
     let colon_count = address.bytes().filter(|byte| *byte == b':').count();
@@ -927,8 +931,10 @@ mod tests {
 
     #[tokio::test]
     async fn manual_addresses_use_default_and_explicit_ports() {
-        let source =
-            ManualCandidateSource::with_port(["127.0.0.1", "127.0.0.1:5000", "[::1]"], 4000);
+        let source = ManualCandidateSource::with_port(
+            ["127.0.0.1", "127.0.0.1:5000", "[::1]", "[fe80::1%3]"],
+            4000,
+        );
         let addresses = source.candidates(PublicKey::new([0; 32])).await.unwrap();
         assert_eq!(
             addresses.into_iter().collect::<BTreeSet<_>>(),
@@ -936,6 +942,7 @@ mod tests {
                 "127.0.0.1:4000".parse().unwrap(),
                 "127.0.0.1:5000".parse().unwrap(),
                 "[::1]:4000".parse().unwrap(),
+                SocketAddr::V6(SocketAddrV6::new("fe80::1".parse().unwrap(), 4000, 0, 3)),
             ])
         );
     }
