@@ -16,12 +16,14 @@ use std::{
     time::{Duration, Instant},
 };
 
+use buffa::EnumValue;
 use mdns_sd::{ScopedIp, ServiceDaemon, ServiceEvent, ServiceInfo, TxtProperties};
 use thiserror::Error;
+use tokio::sync::watch;
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::timeout;
 
-use crate::sas::PublicKey;
+use crate::{generated as proto, sas::PublicKey};
 
 /// DNS-SD service type advertised by Flow peers.
 pub const SERVICE_TYPE: &str = "_openlogi-flow._udp.local.";
@@ -31,9 +33,27 @@ pub const SERVICE_TYPE: &str = "_openlogi-flow._udp.local.";
 /// unprivileged, memorable default and is not part of the frozen wire format.
 pub const DEFAULT_PORT: u16 = 42_424;
 
+/// DNS-SD service type a peer advertises only while its user has pairing
+/// open.
+///
+/// Separate from [`SERVICE_TYPE`] so that a session never dials a pairing
+/// endpoint for a pinned peer, and a pairing list never shows a machine that
+/// is not pairing.
+pub const PAIRING_SERVICE_TYPE: &str = "_openlogi-pair._udp.local.";
+/// UDP port a pairing endpoint binds when it is free, and the port a manual
+/// pairing address that omits one uses.
+///
+/// mDNS candidates always use their SRV record's port instead.
+pub const PAIRING_PORT: u16 = 42_425;
+
 const TXT_PUBLIC_KEY: &str = "pk";
 const TXT_PROTO_MIN: &str = "proto_min";
 const TXT_PROTO_MAX: &str = "proto_max";
+const TXT_NAME: &str = "name";
+const TXT_PLATFORM: &str = "platform";
+/// Longest machine name a pairing record carries, in bytes. One TXT entry,
+/// `name=` included, holds at most 255.
+const MAX_TXT_NAME: usize = 200;
 const MAX_MDNS_SERVICES: usize = 256;
 
 /// Future returned by a dynamically dispatched [`CandidateSource`].
@@ -282,6 +302,164 @@ impl MdnsRecord {
     }
 }
 
+/// What a machine with pairing open advertises about itself.
+///
+/// The name and platform are what the machine says about itself, for display
+/// only. The key is a dial hint until mutual TLS proves it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PairingAdvert {
+    /// Advertised identity and protocol range.
+    pub record: MdnsRecord,
+    /// The machine's name, as its `Hello` carries it.
+    pub machine_name: String,
+    /// The machine's platform, as its `Hello` carries it.
+    pub platform: proto::Platform,
+}
+
+impl PairingAdvert {
+    fn properties(&self) -> HashMap<String, String> {
+        let mut properties = self.record.properties();
+        properties.insert(
+            TXT_NAME.to_owned(),
+            truncated(&self.machine_name, MAX_TXT_NAME).to_owned(),
+        );
+        properties.insert(
+            TXT_PLATFORM.to_owned(),
+            EnumValue::from(self.platform).to_i32().to_string(),
+        );
+        properties
+    }
+
+    fn from_txt(properties: &TxtProperties) -> Result<Self, DiscoveryError> {
+        let platform = properties
+            .get_property_val_str(TXT_PLATFORM)
+            .and_then(|value| value.parse::<i32>().ok())
+            .and_then(|value| EnumValue::<proto::Platform>::from(value).as_known())
+            .unwrap_or(proto::Platform::Unspecified);
+        Ok(Self {
+            record: MdnsRecord::from_txt(properties)?,
+            machine_name: properties
+                .get_property_val_str(TXT_NAME)
+                .unwrap_or_default()
+                .to_owned(),
+            platform,
+        })
+    }
+}
+
+/// The longest prefix of `text` that fits in `max` bytes.
+fn truncated(text: &str, max: usize) -> &str {
+    let mut end = text.len().min(max);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
+/// A machine found with pairing open, and where to dial it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PairingCandidate {
+    /// What the machine advertises about itself.
+    pub advert: PairingAdvert,
+    /// Its pairing endpoint's addresses. Hints only.
+    pub addresses: Vec<SocketAddr>,
+}
+
+/// A browser for machines with pairing open.
+///
+/// Records outside the local protocol range are left out. A machine leaves
+/// the list when it withdraws its advertisement or the record expires.
+pub struct PairingBrowser {
+    daemon: ServiceDaemon,
+    candidates: watch::Receiver<Vec<PairingCandidate>>,
+    browser: JoinHandle<()>,
+}
+
+impl fmt::Debug for PairingBrowser {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PairingBrowser")
+            .field("candidates", &*self.candidates.borrow())
+            .finish_non_exhaustive()
+    }
+}
+
+impl PairingBrowser {
+    /// Starts browsing for compatible machines with pairing open.
+    pub fn browse(local_min: u32, local_max: u32) -> Result<Self, DiscoveryError> {
+        if local_min == 0 || local_min > local_max {
+            return Err(DiscoveryError::InvalidProtocolRange {
+                proto_min: local_min,
+                proto_max: local_max,
+            });
+        }
+        let daemon = ServiceDaemon::new()?;
+        let receiver = daemon.browse(PAIRING_SERVICE_TYPE)?;
+        let (sender, candidates) = watch::channel(Vec::new());
+        let browser = tokio::spawn(async move {
+            // In the order each service was first resolved.
+            let mut found: Vec<(String, PairingCandidate)> = Vec::new();
+            while let Ok(event) = receiver.recv_async().await {
+                let (fullname, candidate) = match event {
+                    ServiceEvent::ServiceResolved(service) => {
+                        let candidate = PairingAdvert::from_txt(service.get_properties())
+                            .ok()
+                            .filter(|advert| {
+                                service.get_port() != 0
+                                    && advert.record.overlaps(local_min, local_max)
+                            })
+                            .map(|advert| PairingCandidate {
+                                advert,
+                                addresses: resolved_addresses(&service).into_iter().collect(),
+                            });
+                        (service.get_fullname().to_owned(), candidate)
+                    }
+                    ServiceEvent::ServiceRemoved(_, fullname) => (fullname, None),
+                    _ => continue,
+                };
+                let known = found.iter().position(|(name, _)| *name == fullname);
+                match (known, candidate) {
+                    (Some(index), Some(candidate)) => found[index].1 = candidate,
+                    (None, Some(candidate)) if found.len() < MAX_MDNS_SERVICES => {
+                        found.push((fullname, candidate));
+                    }
+                    (Some(index), None) => {
+                        found.remove(index);
+                    }
+                    _ => continue,
+                }
+                sender.send_if_modified(|current| {
+                    let next: Vec<_> = found.iter().map(|(_, found)| found.clone()).collect();
+                    if *current == next {
+                        return false;
+                    }
+                    *current = next;
+                    true
+                });
+            }
+        });
+        Ok(Self {
+            daemon,
+            candidates,
+            browser,
+        })
+    }
+
+    /// The machines found so far, updated as they come and go.
+    #[must_use]
+    pub fn subscribe(&self) -> watch::Receiver<Vec<PairingCandidate>> {
+        self.candidates.clone()
+    }
+}
+
+impl Drop for PairingBrowser {
+    fn drop(&mut self) {
+        self.browser.abort();
+        let _ = self.daemon.stop_browse(PAIRING_SERVICE_TYPE);
+        let _ = self.daemon.shutdown();
+    }
+}
+
 /// An active advertisement of this machine's Flow endpoint.
 pub struct MdnsAdvertiser {
     daemon: ServiceDaemon,
@@ -300,18 +478,46 @@ impl fmt::Debug for MdnsAdvertiser {
 impl MdnsAdvertiser {
     /// Registers an automatically address-tracked Flow service.
     pub fn start(record: MdnsRecord, port: u16) -> Result<Self, DiscoveryError> {
-        let daemon = ServiceDaemon::new()?;
-        let key = public_key_hex(record.public_key);
-        let short_key = &key[..16];
-        let instance_name = format!("openlogi-flow-{short_key}");
-        let hostname = format!("openlogi-flow-{short_key}.local.");
-        let service = ServiceInfo::new(
+        Self::register(
             SERVICE_TYPE,
+            "openlogi-flow",
+            record.public_key,
+            record.properties(),
+            port,
+        )
+    }
+
+    /// Registers this machine's pairing endpoint under
+    /// [`PAIRING_SERVICE_TYPE`] while its user has pairing open.
+    pub fn start_pairing(advert: &PairingAdvert, port: u16) -> Result<Self, DiscoveryError> {
+        Self::register(
+            PAIRING_SERVICE_TYPE,
+            "openlogi-pair",
+            advert.record.public_key,
+            advert.properties(),
+            port,
+        )
+    }
+
+    fn register(
+        service_type: &str,
+        prefix: &str,
+        public_key: PublicKey,
+        properties: HashMap<String, String>,
+        port: u16,
+    ) -> Result<Self, DiscoveryError> {
+        let daemon = ServiceDaemon::new()?;
+        let key = public_key_hex(public_key);
+        let short_key = &key[..16];
+        let instance_name = format!("{prefix}-{short_key}");
+        let hostname = format!("{prefix}-{short_key}.local.");
+        let service = ServiceInfo::new(
+            service_type,
             &instance_name,
             &hostname,
             (),
             port,
-            record.properties(),
+            properties,
         )?
         .enable_addr_auto();
         let fullname = service.get_fullname().to_owned();
@@ -535,8 +741,22 @@ fn update_resolved_service(
     if service.get_port() == 0 || !record.overlaps(local_min, local_max) {
         return;
     }
+    let addresses = resolved_addresses(service);
+    insert_discovered_service(
+        &mut services,
+        service.get_fullname().to_owned(),
+        DiscoveredService {
+            record,
+            addresses,
+            last_resolved: Instant::now(),
+        },
+    );
+}
+
+/// The resolved service's addresses, each with its SRV port.
+fn resolved_addresses(service: &mdns_sd::ResolvedService) -> BTreeSet<SocketAddr> {
     let port = service.get_port();
-    let addresses = service
+    service
         .get_addresses()
         .iter()
         .filter_map(|address| match address {
@@ -549,16 +769,7 @@ fn update_resolved_service(
             ))),
             _ => None,
         })
-        .collect();
-    insert_discovered_service(
-        &mut services,
-        service.get_fullname().to_owned(),
-        DiscoveredService {
-            record,
-            addresses,
-            last_resolved: Instant::now(),
-        },
-    );
+        .collect()
 }
 
 fn insert_discovered_service(
@@ -656,6 +867,30 @@ mod tests {
         let record = MdnsRecord::new(PublicKey::new([1; 32]), 2, 4).unwrap();
         assert!(record.overlaps(1, 2));
         assert!(!record.overlaps(5, 6));
+    }
+
+    /// A long multi-byte name is cut at a character boundary that fits one
+    /// TXT entry, and the platform survives the record.
+    #[test]
+    fn pairing_advert_round_trips_through_its_txt_record() {
+        let advert = PairingAdvert {
+            record: MdnsRecord::new(PublicKey::new([0xab; 32]), 1, 1).unwrap(),
+            machine_name: "客厅".repeat(40),
+            platform: proto::Platform::LinuxWayland,
+        };
+        let service = ServiceInfo::new(
+            PAIRING_SERVICE_TYPE,
+            "test",
+            "test.local.",
+            (),
+            PAIRING_PORT,
+            advert.properties(),
+        )
+        .unwrap();
+        let parsed = PairingAdvert::from_txt(service.get_properties()).unwrap();
+        assert_eq!(parsed.record, advert.record);
+        assert_eq!(parsed.platform, proto::Platform::LinuxWayland);
+        assert_eq!(parsed.machine_name, "客厅".repeat(33));
     }
 
     #[test]
