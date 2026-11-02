@@ -7,13 +7,13 @@
 //! publish job's `release appcast` needs is written next to it.
 //!
 //! A delta that cannot be made is a warning, not a failure. The feed still
-//! offers the full DMG, which every installed app can take, so a missing delta
-//! costs one larger download and never an update. This holds for the shared
+//! offers the full update, which every installed app can take, so a missing
+//! delta costs one larger download and never an update. This holds for the shared
 //! setup too (listing releases, fetching Sparkle, reading the new DMG): only
 //! arguments that cannot name a release DMG fail the command.
 //!
 //! Only stable releases get deltas, made from earlier stable releases. A beta
-//! gets none, so a beta update always downloads the full DMG.
+//! gets none, so a beta update always downloads the full update.
 
 use std::path::{Path, PathBuf};
 
@@ -45,7 +45,7 @@ pub(crate) struct Args {
     tag: String,
     /// How many of the newest earlier releases get a delta. Sparkle offers a
     /// delta only to an app at exactly its base version, so older apps take
-    /// the full DMG.
+    /// the full update.
     #[arg(long, default_value_t = 3)]
     count: usize,
     /// Repository whose GitHub Releases hold the earlier DMGs.
@@ -70,7 +70,7 @@ pub(crate) fn run(args: &Args) -> Result<()> {
     let tag = ReleaseTag::parse(&args.tag)?;
     if tag.channel() != UpdateChannel::Stable {
         println!(
-            "::notice::no Sparkle deltas for {tag}: only stable releases get them, so a {} update downloads the full DMG",
+            "::notice::no Sparkle deltas for {tag}: only stable releases get them, so a {} update downloads the full update",
             tag.channel().as_str()
         );
         return Ok(());
