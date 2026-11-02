@@ -12,13 +12,13 @@
 
 use gpui::{
     AnyElement, App, Context, InteractiveElement, IntoElement, ParentElement, Styled, Window, div,
+    prelude::FluentBuilder as _,
 };
 use gpui_kit::component::{
     Disableable as _, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     slider::Slider,
-    v_flex,
 };
 use openlogi_core::binding::ButtonId;
 use openlogi_core::hid::ForceSensingInfo;
@@ -26,6 +26,7 @@ use openlogi_core::hid::ForceSensingInfo;
 use super::hotspots::MouseControlId;
 use crate::state::{AppState, DeviceKey, ForceSensingLoad};
 use crate::ui::commit_slider::{CommitSlider, SliderRange};
+use crate::ui::slider_row::SliderRow;
 use crate::ui::status::{retry_line, status_line};
 use crate::ui::theme::{Palette, Typography as _};
 
@@ -174,12 +175,13 @@ fn reset_button(resettable: bool) -> impl IntoElement {
 
 /// The row: the title and what the setting does, then the slider between
 /// its "Light" and "Firm" ends, a status line while the reading is on its
-/// way, or a retry line when the read failed. A hairline above it parts the
-/// device-wide setting from the button's bindings.
+/// way, or a retry line when the read failed, laid out as every slider
+/// setting is. A hairline above it parts the device-wide setting from the
+/// button's bindings.
 pub(super) fn force_sensing_row(press_force: PressForce<'_>, pal: Palette) -> AnyElement {
     let PressForce { facts, slider } = press_force;
     let key = facts.key.clone();
-    let body = match (slider, &facts.load) {
+    let control = match (slider, &facts.load) {
         (Some(slider), _) => h_flex()
             .w_full()
             .items_center()
@@ -219,31 +221,23 @@ pub(super) fn force_sensing_row(press_force: PressForce<'_>, pal: Palette) -> An
             | ForceSensingLoad::Unsupported(_),
         ) => status_line(tr!("pointer.reading_press_force"), pal).into_any_element(),
     };
-    v_flex()
+    div()
         .debug_selector(|| "force-sensing-row".into())
-        .gap_2()
         .w_full()
         .pt_3()
         .border_t_1()
         .border_color(pal.border)
         .child(
-            v_flex()
-                .child(div().text_body().child(tr!("pointer.press_force")))
-                .child(
-                    div()
-                        .text_caption()
-                        .text_color(pal.text_muted)
-                        .child(tr!("pointer.press_force_description")),
-                ),
+            SliderRow::new(tr!("pointer.press_force"), control)
+                .description(tr!("pointer.press_force_description"))
+                .when(facts.refused, |row| {
+                    row.hint(
+                        div()
+                            .debug_selector(|| "force-sensing-refusal".into())
+                            .child(tr!("pointer.press_force_not_applied")),
+                    )
+                }),
         )
-        .child(body)
-        .children(facts.refused.then(|| {
-            div()
-                .debug_selector(|| "force-sensing-refusal".into())
-                .text_caption()
-                .text_color(pal.text_muted)
-                .child(tr!("pointer.press_force_not_applied"))
-        }))
         .into_any_element()
 }
 
