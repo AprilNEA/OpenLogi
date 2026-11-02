@@ -44,7 +44,7 @@ use std::time::{Duration, Instant};
 
 use openlogi_core::hid::{
     BacklightState, DeviceRoute, DisableKeysState, Dpi, EasySwitchHosts, FnLockState,
-    ForceSensingInfo, LightCommand, PointerSpeed, ReportRateInfo, WriteError,
+    ForceSensingInfo, LightCommand, PointerSpeed, ReportRateInfo, SidetoneLevel, WriteError,
 };
 use openlogi_ipc::client::{self, ConnectError};
 use openlogi_ipc::{
@@ -54,7 +54,7 @@ use tarpc::client::RpcError;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
-use crate::state::DeviceKey;
+use crate::state::{DeviceKey, FlowPairingRefusal};
 
 mod launch;
 mod link;
@@ -69,12 +69,13 @@ use request::LinkLost;
 #[cfg(all(target_os = "macos", debug_assertions))]
 pub use request::PollEventMonitor;
 pub use request::{
-    CancelPairing, Command, LoadConfig, PairDevice, ReadBacklight, ReadDisableKeys, ReadDpi,
-    ReadEasySwitchHosts, ReadFnLock, ReadForceSensing, ReadOnboard, ReadPointerSpeed,
-    ReadReportRate, ReadSmartShift, ReloadConfig, RenameEasySwitchHost, RequestAccessibilityPrompt,
-    RetryConnection, SetBacklight, SetDisableKeys, SetDpi, SetFnLock, SetForceSensing, SetLight,
-    SetLightManualPower, SetLighting, SetPointerSpeed, SetReportRate, SetSmartShift, StartPairing,
-    UnpairDevice,
+    CancelFlowPairing, CancelPairing, Command, ConfirmFlowPairing, LoadConfig, PairDevice,
+    PairFlowPeer, ReadBacklight, ReadDisableKeys, ReadDpi, ReadEasySwitchHosts, ReadFnLock,
+    ReadForceSensing, ReadOnboard, ReadPointerSpeed, ReadReportRate, ReadSidetone, ReadSmartShift,
+    ReloadConfig, RenameEasySwitchHost, RequestAccessibilityPrompt, RetryConnection, SetBacklight,
+    SetDisableKeys, SetDpi, SetFnLock, SetForceSensing, SetLight, SetLightManualPower, SetLighting,
+    SetPointerSpeed, SetReportRate, SetSidetone, SetSmartShift, StartFlowPairing, StartPairing,
+    StopFlowPairing, UnpairDevice,
 };
 
 /// Complete identity of one Disable Keys write/reload transaction.
@@ -105,7 +106,7 @@ const RECONNECT_DELAY: Duration = Duration::from_millis(250);
 /// What the client thread tells the GPUI loop.
 pub enum GuiUpdate {
     /// The agent's state, as of a generation this client had not seen.
-    Snapshot(AgentSnapshot),
+    Snapshot(Box<AgentSnapshot>),
     /// An established connection dropped. The agent may only be restarting —
     /// an update's self-exec, a supervised respawn — so the window keeps its
     /// last snapshot but stops presenting it as live. Sent once per lost
@@ -185,6 +186,14 @@ pub enum GuiUpdate {
         /// The read-back, or why the write did not land.
         result: Result<PointerSpeed, WriteError>,
     },
+    /// What a headset confirms after a sidetone write the GUI asked for: the
+    /// level it took, or the typed refusal. Answers [`SetSidetone`].
+    SidetoneWritten {
+        /// The headset that was written.
+        key: DeviceKey,
+        /// The confirmed level, or why the write did not land.
+        result: Result<SidetoneLevel, WriteError>,
+    },
     /// What a force-sensing button reports after a press-force write the GUI
     /// asked for: the force it took, or the typed refusal. Answers
     /// [`SetForceSensing`].
@@ -233,6 +242,9 @@ pub enum GuiUpdate {
     PairingUndeliverable(PairingFailure),
     /// Cancellation completed and the receiver is available for a new choice.
     PairingCancelled,
+    /// The agent did not take a Flow pairing command, or could not be
+    /// reached for it.
+    FlowPairingRefused(FlowPairingRefusal),
     /// Whether the receiver let a pairing go. Answers [`UnpairDevice`].
     DeviceUnpaired {
         /// The pairing the receiver was asked to drop.
@@ -347,7 +359,7 @@ async fn observe_loop(
         };
         match woken {
             Woken::Observed(Ok(Some(snapshot))) => {
-                let _ = update_tx.send(GuiUpdate::Snapshot(*snapshot));
+                let _ = update_tx.send(GuiUpdate::Snapshot(snapshot));
             }
             // The agent's heartbeat, or a stale reply: the window is current.
             Woken::Observed(Ok(None)) => {}
@@ -1406,7 +1418,7 @@ mod tests {
                 let mut seen = Vec::new();
                 while seen.len() < 2 {
                     if let Some(GuiUpdate::Snapshot(snapshot)) = updates.recv().await {
-                        seen.push(snapshot);
+                        seen.push(*snapshot);
                     }
                 }
                 seen

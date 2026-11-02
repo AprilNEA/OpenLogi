@@ -2,17 +2,18 @@
 //! follow the pointer to each one, and whether Flow can switch now.
 //!
 //! Every change goes through [`AppState`]'s `commit_flow_*` methods into
-//! `[flow]`; each peer's link state comes from the agent's snapshot. Peers are
-//! paired outside this window for now: they come from `config.toml`.
+//! `[flow]`; each peer's link state comes from the agent's snapshot. A new
+//! peer is paired from the Add Computer dialog.
 
 mod arrangement;
 mod inspector;
+mod pairing;
 #[cfg(test)]
 mod tests;
 
 use gpui::{
-    App, Context, FocusHandle, Hsla, InteractiveElement as _, IntoElement, ParentElement as _,
-    Render, SharedString, Size, Styled as _, Subscription, Window, div,
+    App, Context, Entity, FocusHandle, Hsla, InteractiveElement as _, IntoElement,
+    ParentElement as _, Render, SharedString, Size, Styled as _, Subscription, Window, div,
     prelude::FluentBuilder as _, px, rgb,
 };
 use gpui_component::Selectable as _;
@@ -107,31 +108,47 @@ pub struct FlowView {
     focus_handle: FocusHandle,
     /// The computer the inspector shows.
     selected: FlowHost,
+    /// The Add Computer dialog's form, while the dialog is open.
+    pairing: Option<Entity<pairing::PairingForm>>,
     appearance_obs: Option<Subscription>,
     #[expect(dead_code, reason = "held to repaint on Flow and agent changes")]
     state_obs: Subscription,
+    #[expect(dead_code, reason = "held to stop pairing when the window goes")]
+    release_obs: Subscription,
 }
 
 impl FlowView {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
-        let state_obs = cx.subscribe(&AppState::global(cx), |_, _, event: &StateEvent, cx| {
-            if matches!(
-                event,
-                StateEvent::FlowChanged
-                    | StateEvent::AgentChanged
-                    | StateEvent::InventoryChanged
-                    | StateEvent::SettingsChanged
-            ) {
-                cx.notify();
-            }
-        });
+        let state_obs = cx.subscribe_in(
+            &AppState::global(cx),
+            window,
+            |this, _, event: &StateEvent, window, cx| {
+                if matches!(event, StateEvent::FlowChanged) {
+                    this.follow_pairing(window, cx);
+                }
+                if matches!(
+                    event,
+                    StateEvent::FlowChanged
+                        | StateEvent::AgentChanged
+                        | StateEvent::InventoryChanged
+                        | StateEvent::SettingsChanged
+                ) {
+                    cx.notify();
+                }
+            },
+        );
+        // Pairing is open only while its dialog is; the window closing takes
+        // the dialog with it.
+        let release_obs = cx.on_release(Self::end_pairing);
         Self {
             focus_handle,
             selected: FlowHost::This,
+            pairing: None,
             appearance_obs: None,
             state_obs,
+            release_obs,
         }
     }
 
@@ -173,7 +190,7 @@ impl Render for FlowView {
                 this.child(windows::aux_title_bar(window_title(), cx))
             })
             .when_some(model, |this, model| {
-                this.child(toolbar(&model, pal)).child(
+                this.child(toolbar(&model, pal, cx)).child(
                     h_flex()
                         .flex_1()
                         .min_h_0()
@@ -194,8 +211,9 @@ impl Render for FlowView {
     }
 }
 
-/// The switch that turns Flow on, and its status in one line.
-fn toolbar(model: &FlowModel, pal: Palette) -> impl IntoElement {
+/// The switch that turns Flow on, its status in one line, and the way to add
+/// another computer.
+fn toolbar(model: &FlowModel, pal: Palette, cx: &Context<FlowView>) -> impl IntoElement {
     h_flex()
         .flex_none()
         .h(px(52.))
@@ -227,6 +245,16 @@ fn toolbar(model: &FlowModel, pal: Palette) -> impl IntoElement {
                     row.child(dot(color, false))
                 })
                 .child(status_text(&model.readiness)),
+        )
+        .child(div().flex_1())
+        .child(
+            Button::new("flow-add")
+                .outline()
+                .small()
+                .icon(IconName::Plus)
+                .label(tr!("flow.add"))
+                .debug_selector(|| "flow-add".into())
+                .on_click(cx.listener(|this, _, window, cx| this.open_pairing(window, cx))),
         )
 }
 

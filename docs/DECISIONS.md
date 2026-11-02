@@ -36,6 +36,43 @@ the agent: two Next Desktop presses 140 ms apart changed Space after 1.0 s
 and 2.0 s, two Previous Desktop presses likewise, each confirmed. Not
 verified inside the agent app.
 
+## 2026-11: The agent saves a paired Flow computer in `config.toml`
+
+Until now the agent only read `config.toml`; the GUI and `openlogi api` wrote
+it. Flow pairing makes the agent write it, in one place: once both users
+confirmed the code, the agent saves the other computer's public key as a
+`[[flow.peers]]` entry, then reloads the file as it does after a GUI save.
+
+- **The agent, because the ceremony is the agent's.** `openlogi-flow`'s
+  `PairingSession` counts a pairing as complete only after its
+  `PeerKeyStore` saved the key, and only then answers the other computer
+  `PAIRED`. The GUI is an IPC client that can close at any moment. Sending
+  the key to the GUI to save would let a closed window leave the other
+  computer trusting this one while this one does not trust it back.
+- **The same writer as everyone else.** The store goes through
+  `ConfigFile::save`: it checks that the file did not change since it was
+  read, holds the lock, and replaces the file atomically. When another writer
+  changed the file, it reads it again and adds the peer to the new contents;
+  when another writer holds the lock, it waits 20 ms. It gives up after five
+  tries and the pairing fails as `SaveFailed`.
+- **It only adds.** A new key gets an entry with a unique name and no screen
+  edge; the user places the computer in the GUI. A key already saved keeps its
+  entry and name and gains the typed address, if any. Nothing is removed or
+  renamed.
+- **The GUI must read the file again after `Paired`.** A `ConfigFile` it read
+  before the pairing is now stale, so its next save reports a conflict, as it
+  would after a hand edit.
+
+Pairing runs on an endpoint of its own (port 42425, mDNS service
+`_openlogi-pair._udp`) only while the GUI's pairing window keeps it open. It
+trusts no key, so it carries nothing but the ceremony; the Flow runtime's
+endpoint keeps trusting only the pinned keys.
+
+Verified by loopback tests in which two agent pairing endpoints pair through
+real QUIC and save each other in their own config files, and by store tests
+that merge into an existing file. No pairing between two real computers has
+been run yet.
+
 ## 2026-11: Flow is set up in its own window, opened from the device list
 
 Flow is configured in a standalone window, as Settings and Add Device are. A

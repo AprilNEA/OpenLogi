@@ -25,14 +25,15 @@ use openlogi_hid::{
     BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
     ForceSensingInfo, HapticRestore, HapticRestoreOutcome, HapticWaveform, HidppOperation,
     LightCommand, OnboardState, PointerSpeed, ReceiverSelector, ReportRate, ReportRateInfo,
-    ScrollWheelMode, SmartShiftStatus, WriteError,
+    ScrollWheelMode, SidetoneLevel, SmartShiftStatus, WriteError,
 };
 use openlogi_ipc::transport;
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus,
-    BacklightObservation, ClientKind, ConfigReloadError, Generation, Identity, LockKeyObservation,
-    MonitorEvent, NoticeObservation, Observation, PROTOCOL_VERSION, PairingCommandError,
-    PairingFailure, PairingUpdate, RingObservation, SavedConfig, SavedConfigVerdict,
+    BacklightObservation, ClientKind, ConfigReloadError, FlowIdentity, FlowPairTarget,
+    FlowPairingCommandError, Generation, Identity, LockKeyObservation, MonitorEvent,
+    NoticeObservation, Observation, PROTOCOL_VERSION, PairingCommandError, PairingFailure,
+    PairingUpdate, RingObservation, SavedConfig, SavedConfigVerdict,
 };
 use succession::Compat;
 
@@ -468,6 +469,28 @@ impl Agent for AgentServer {
         Ok(saved_config_verdict(&saved, revision))
     }
 
+    async fn read_sidetone(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<SidetoneLevel, WriteError> {
+        self.shared
+            .device(&route)
+            .run(HidppOperation::ReadSidetone, |c| async move {
+                openlogi_hid::get_sidetone_on(&c).await
+            })
+            .await
+    }
+
+    async fn set_sidetone(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        level: SidetoneLevel,
+    ) -> Result<SidetoneLevel, WriteError> {
+        self.shared.set_sidetone(&route, level).await
+    }
+
     async fn observe_notices(self, _: Context, since: Generation) -> NoticeObservation {
         self.observable.notices().observe(since).await
     }
@@ -581,6 +604,34 @@ impl Agent for AgentServer {
     async fn action_ring_cancel(self, _: Context, session_id: u64) {
         self.action_ring.cancel(session_id);
         self.ring_haptics.end_session(session_id);
+    }
+
+    async fn read_flow_identity(self, _: Context) -> Result<FlowIdentity, FlowPairingCommandError> {
+        self.shared.flow.pairing().identity().await
+    }
+
+    async fn start_flow_pairing(self, _: Context) -> Result<(), FlowPairingCommandError> {
+        self.shared.flow.pairing().start().await
+    }
+
+    async fn pair_flow_peer(
+        self,
+        _: Context,
+        target: FlowPairTarget,
+    ) -> Result<(), FlowPairingCommandError> {
+        self.shared.flow.pairing().pair(target).await
+    }
+
+    async fn confirm_flow_pairing(self, _: Context) -> Result<(), FlowPairingCommandError> {
+        self.shared.flow.pairing().confirm().await
+    }
+
+    async fn cancel_flow_pairing(self, _: Context) -> Result<(), FlowPairingCommandError> {
+        self.shared.flow.pairing().cancel().await
+    }
+
+    async fn stop_flow_pairing(self, _: Context) {
+        self.shared.flow.pairing().stop().await;
     }
 }
 
@@ -1086,6 +1137,7 @@ impl RingHapticPlayer {
 /// `main` holds the single-instance lock (`agent.lock`), so no other live agent
 /// owns this socket and any leftover is from a dead instance.
 pub async fn run(server: AgentServer) {
+    tokio::spawn(reload_after_flow_pairing(server.clone()));
     let listener = match transport::bind() {
         Ok(listener) => listener,
         Err(e) => {
@@ -1112,6 +1164,16 @@ pub async fn run(server: AgentServer) {
                     tokio::spawn(response);
                 }),
         );
+    }
+}
+
+/// Reload `config.toml` each time Flow pairing saved a peer in it, so the
+/// peer reaches Flow and the snapshot the way a saved edit would.
+async fn reload_after_flow_pairing(server: AgentServer) {
+    let mut saved = server.shared.flow.pairing().saved();
+    while saved.changed().await.is_ok() {
+        // A failed reload logged why and kept the config it had.
+        let _ = server.reload(None).await;
     }
 }
 

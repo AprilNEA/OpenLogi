@@ -22,6 +22,7 @@ pub mod lighting;
 pub mod mouse_buttons;
 pub mod onboard;
 pub mod pointer_speed;
+pub mod sidetone;
 pub mod smartshift;
 pub mod wheel;
 
@@ -49,6 +50,8 @@ pub enum DiagCmd {
     MouseButtons(mouse_buttons::MouseButtonsArgs),
     /// Switch a multi-host device through the running agent (HID++ 0x1814).
     HostSwitch(host_switch::HostSwitchArgs),
+    /// Read a headset's HID++ 0x8300 sidetone level, or set it.
+    Sidetone(sidetone::SidetoneArgs),
 }
 
 impl DiagCmd {
@@ -70,6 +73,7 @@ impl DiagCmd {
             Self::Onboard(args) => onboard::run(args).await,
             Self::MouseButtons(args) => mouse_buttons::run(args).await,
             Self::HostSwitch(args) => host_switch::run(args).await,
+            Self::Sidetone(args) => sidetone::run(args).await,
         }
     }
 
