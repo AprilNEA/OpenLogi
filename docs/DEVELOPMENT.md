@@ -117,6 +117,13 @@ Packaged local dev bundles (`cargo run` and
 GUI and agent from sharing the installed production app's Accessibility grant,
 single-instance lock, config, or IPC socket.
 
+Linux has no bundle to carry that channel, so `.cargo/run-linux.sh` sets
+`OPENLOGI_PROFILE=dev` for `cargo run` of `openlogi`, `openlogi-desktop`,
+`openlogi-agent`, and `openlogi-overlay` (tests and other binaries pass
+through), so a dev run never takes over the installed agent's socket, lock, or
+config. Pass `OPENLOGI_PROFILE=prod` to run a build against the production
+profile on purpose.
+
 Those identifiers are a channel, not a guess from the build type:
 `macos bundle` takes `--channel dev|production` (dev by default) and verifies
 what it stamped, and `macos dmg` refuses a non-production bundle once it is
