@@ -211,6 +211,65 @@ Gallery mode opens one isolated window and bypasses the normal single-instance,
 config, agent, asset-sync, and updater startup paths. The environment variable is
 ignored by release builds.
 
+### Headless rendering in a sandbox
+
+An Amp orb has no physical display, but its Desktop tab runs a labwc Wayland
+compositor with one 1280×720 output (`HEADLESS-1`) and Xwayland on `:0`. The
+mock agent and the GUI can run there, and screenshots and input work through
+Wayland tools. `.agents/setup` installs them: `grim` captures the output, `wtype`
+types, and `wlrctl` moves, clicks, and scrolls the pointer and lists windows.
+Debian 12 has no `wlrctl` package, so setup builds v0.2.2 from source into
+`/usr/local/bin` and keeps its build dependencies installed. `ydotool` needs
+`/dev/uinput`, which only root can open in an orb, and `xdotool` cannot drive
+Wayland windows.
+
+[`.agents/scripts/orb-gui.sh`](../.agents/scripts/orb-gui.sh) wraps the steps
+below:
+
+```sh
+.agents/scripts/orb-gui.sh start                 # Desktop, build, mock and GUI
+.agents/scripts/orb-gui.sh start --fixture fixtures/devices/mx-master-3s-001/profile.json
+OPENLOGI_COMPONENT_GALLERY=1 .agents/scripts/orb-gui.sh restart   # gallery
+.agents/scripts/orb-gui.sh move 640 400          # hover
+.agents/scripts/orb-gui.sh click 1058 58         # Settings on the device list
+.agents/scripts/orb-gui.sh run wtype 'search text'
+.agents/scripts/orb-gui.sh run wlrctl pointer scroll 5
+.agents/scripts/orb-gui.sh shot /tmp/settings.png
+.agents/scripts/orb-gui.sh stop
+```
+
+What it does, and what to keep if you run the steps by hand:
+
+- `amp orb desktop ensure` starts the Desktop and writes its environment to
+  `~/.cache/amp/desktop/environment`: `WAYLAND_DISPLAY=wayland-0`,
+  `XDG_RUNTIME_DIR=~/.cache/amp/desktop/runtime`, and `DISPLAY=:0`. Source that
+  file before running any of the tools above.
+- The Desktop also opens a maximized Chrome. The script minimizes it with
+  `wlrctl toplevel minimize app_id:google-chrome`, so agent-browser can still use it.
+- Launch the GUI with `WAYLAND_DISPLAY` set. Under the X11 backend GPUI runs, but
+  its window never reaches a `grim` capture.
+- The mock and the GUI must see the same `XDG_RUNTIME_DIR`: the dev IPC socket is
+  `$XDG_RUNTIME_DIR/openlogi-dev/agent.sock`. Start the mock first, wait for the
+  socket, then start the GUI with `OPENLOGI_DEV_AGENT=0`.
+- Run both as orb services (`amp orb service start <name> --command …`), never
+  with `nohup`, `&`, or tmux: those processes die when the Amp CLI restarts. The
+  script names them `openlogi-mock` and `openlogi-gui`; read their output with
+  `amp orb service logs <name>`. After a code change, rebuild, then stop and start
+  `openlogi-gui` (`orb-gui.sh restart`).
+- The first launch opens a "Check for updates?" window over the device list.
+  `start` presses Tab and Return to answer Not now, which records the answer in
+  the dev config.
+- `wlrctl pointer move` is relative. For absolute coordinates, move by
+  `-10000 -10000` to pin the pointer at the top-left corner first.
+- The pointer stays where the last command left it, so captures keep its hover
+  state. `shot` waits half a second for GPUI to repaint after the last input.
+- `view_media` is rate-limited. To inspect many captures, join them first, for
+  example `magick a.png b.png +append -resize 50% ab.png`.
+
+The Desktop renders at scale 1, so captures are 1280×720 at 1×. Mock success in
+an orb proves rendering and IPC-driven state only, not HID writes, permissions,
+input hooks, or the macOS build.
+
 ## Project layout
 
 ```

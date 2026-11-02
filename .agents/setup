@@ -4,6 +4,38 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
+# Prints each argument that dpkg does not report as installed.
+missing_packages() {
+  local package
+  for package in "$@"; do
+    if ! dpkg-query -W -f='${db:Status-Status}' "$package" 2>/dev/null | grep -Fqx installed; then
+      printf '%s\n' "$package"
+    fi
+  done
+}
+
+# Sets `sudo` to the command prefix for root-only steps, or exits when none works.
+require_root() {
+  if ((EUID == 0)); then
+    sudo=()
+  elif command -v sudo >/dev/null 2>&1 && sudo -n true; then
+    sudo=(sudo -n)
+  else
+    echo "Passwordless sudo is required to install: $*" >&2
+    exit 1
+  fi
+}
+
+apt_updated=0
+apt_install() {
+  require_root "$@"
+  if ((! apt_updated)); then
+    "${sudo[@]}" apt-get update
+    apt_updated=1
+  fi
+  "${sudo[@]}" env DEBIAN_FRONTEND=noninteractive apt-get install -y "$@"
+}
+
 step_started=$SECONDS
 echo "==> Checking Linux build dependencies"
 packages=(
@@ -19,27 +51,49 @@ packages=(
   libzstd-dev
   pkg-config
 )
-missing_packages=()
-for package in "${packages[@]}"; do
-  if ! dpkg-query -W -f='${db:Status-Status}' "$package" 2>/dev/null | grep -Fqx installed; then
-    missing_packages+=("$package")
-  fi
-done
-
-if ((${#missing_packages[@]})); then
-  if ((EUID == 0)); then
-    sudo=()
-  elif command -v sudo >/dev/null 2>&1 && sudo -n true; then
-    sudo=(sudo -n)
-  else
-    echo "Passwordless sudo is required to install: ${missing_packages[*]}" >&2
-    exit 1
-  fi
-
-  "${sudo[@]}" apt-get update
-  "${sudo[@]}" env DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing_packages[@]}"
+mapfile -t missing < <(missing_packages "${packages[@]}")
+if ((${#missing[@]})); then
+  apt_install "${missing[@]}"
 else
   echo "    Linux build dependencies are already installed"
+fi
+echo "    completed in $((SECONDS - step_started))s"
+
+# The orb Desktop is a Wayland compositor. grim captures it, wtype types into it,
+# and wlrctl moves and clicks the pointer. See "Headless rendering in a sandbox"
+# in docs/DEVELOPMENT.md and .agents/scripts/orb-gui.sh.
+step_started=$SECONDS
+echo "==> Checking orb Desktop capture tools"
+if [[ "$(uname -s)" != Linux ]] || ! command -v apt-get >/dev/null 2>&1; then
+  echo "    skipped: this step needs apt-get on Linux"
+else
+  wlrctl_bin=/usr/local/bin/wlrctl
+  wlrctl_version=v0.2.2
+  packages=(grim wtype)
+  if [[ ! -x $wlrctl_bin ]]; then
+    # Debian 12 has no wlrctl package. Its build dependencies stay installed:
+    # they are small, and removing them would only make a rebuild reinstall them.
+    packages+=(meson ninja-build libxkbcommon-dev)
+  fi
+  mapfile -t missing < <(missing_packages "${packages[@]}")
+  if ((${#missing[@]})); then
+    apt_install "${missing[@]}"
+  fi
+
+  if [[ ! -x $wlrctl_bin ]]; then
+    wlrctl_src="$(mktemp -d)"
+    git -c advice.detachedHead=false clone --quiet --depth 1 \
+      --branch "$wlrctl_version" https://git.sr.ht/~brocellous/wlrctl "$wlrctl_src"
+    meson setup "$wlrctl_src/build" "$wlrctl_src" \
+      -Dman-pages=disabled -Dzsh-completions=false >/dev/null
+    ninja -C "$wlrctl_src/build" >/dev/null
+    require_root wlrctl
+    "${sudo[@]}" install -m 0755 "$wlrctl_src/build/wlrctl" "$wlrctl_bin"
+    rm -rf "$wlrctl_src"
+    echo "    installed wlrctl $wlrctl_version to $wlrctl_bin"
+  elif ((! ${#missing[@]})); then
+    echo "    grim, wtype, and wlrctl are already installed"
+  fi
 fi
 echo "    completed in $((SECONDS - step_started))s"
 
