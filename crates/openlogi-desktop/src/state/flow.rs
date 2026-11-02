@@ -42,8 +42,9 @@ pub(crate) struct FlowDeviceRow {
     pub(crate) config: Option<FlowDevice>,
     /// Awake on this computer with a route, so a handoff can include it now.
     pub(crate) online: bool,
-    /// `false` when the device is known to have no Easy-Switch: the agent
-    /// cannot prepare its switch, and refuses the whole transfer then.
+    /// `false` for a HID++ 1.0 device, which has no host change (`0x1814`):
+    /// the agent cannot prepare its switch, and refuses the whole transfer
+    /// then. A device without the hosts list (`0x1815`) still switches.
     pub(crate) switchable: bool,
 }
 
@@ -363,9 +364,9 @@ impl AppState {
     }
 
     /// The devices the Flow window lists, in the device list's order, then
-    /// configured devices this computer has never seen. A device known to
-    /// have no Easy-Switch is listed only while `[flow.devices]` names it, so
-    /// it can be set to Off.
+    /// configured devices this computer has never seen. A device that cannot
+    /// switch is listed only while `[flow.devices]` names it, so it can be set
+    /// to Off.
     #[must_use]
     pub(crate) fn flow_devices(&self) -> Vec<FlowDeviceRow> {
         let configured = self.config.flow.devices();
@@ -397,10 +398,7 @@ impl AppState {
             // A device reached on two routes has a record for each; like the
             // agent, the online, addressable one decides.
             let online = record.online && record.route.is_some();
-            let switchable = !record.hidpp10
-                && record
-                    .capabilities
-                    .is_none_or(|capabilities| capabilities.easy_switch);
+            let switchable = !record.hidpp10;
             if let Some(row) = rows.iter_mut().find(|row| row.key == key) {
                 row.online |= online;
                 row.switchable &= switchable;

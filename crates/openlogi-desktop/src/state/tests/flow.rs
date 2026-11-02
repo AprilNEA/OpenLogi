@@ -336,16 +336,18 @@ fn a_route_needs_an_online_device_and_none_that_cannot_switch() {
     );
 }
 
-/// The fixture mouse on its cable, with or without Easy-Switch and a serial,
-/// and `flow`.
-fn mouse_state(easy_switch: bool, serial: Option<&str>, flow: FlowConfig) -> AppState {
+/// The fixture mouse on its cable, answering as HID++ 1.0 or not, with or
+/// without a serial, and `flow`. Like the MX Master 3, it has no hosts list
+/// (`0x1815`).
+fn mouse_state(hidpp10: bool, serial: Option<&str>, flow: FlowConfig) -> AppState {
     let mut inventory = direct_inventory([0xa3, 0x93, 0xca, 0xe0]);
     let mouse = &mut inventory.paired[0];
+    mouse.hidpp10 = hidpp10;
     mouse
         .capabilities
         .as_mut()
         .expect("the fixture device has capabilities")
-        .easy_switch = easy_switch;
+        .easy_switch = false;
     mouse
         .model_info
         .as_mut()
@@ -361,20 +363,22 @@ fn mouse_state(easy_switch: bool, serial: Option<&str>, flow: FlowConfig) -> App
     })
 }
 
+/// Switching needs host change (`0x1814`), which every HID++ 2.0 device
+/// with Easy-Switch has; only a HID++ 1.0 device cannot switch.
 #[test]
-fn a_device_without_easy_switch_is_offered_only_to_be_turned_off() {
-    let rows = mouse_state(true, None, config(Vec::new())).flow_devices();
-    assert_eq!(rows.len(), 1);
+fn a_device_that_cannot_switch_is_offered_only_to_be_turned_off() {
+    let rows = mouse_state(false, None, config(Vec::new())).flow_devices();
+    assert_eq!(rows.len(), 1, "no hosts list does not hide the device");
     assert!(rows[0].switchable && rows[0].online);
 
     assert!(
-        mouse_state(false, None, config(Vec::new()))
+        mouse_state(true, None, config(Vec::new()))
             .flow_devices()
             .is_empty()
     );
 
     let configured = mouse_state(
-        false,
+        true,
         None,
         config(vec![device("unit:a393cae0", 0, &[("work", 1)])]),
     );
@@ -397,7 +401,7 @@ fn a_device_without_easy_switch_is_offered_only_to_be_turned_off() {
 #[test]
 fn a_device_named_by_its_unit_id_is_found_when_listed_by_its_serial() {
     let state = mouse_state(
-        true,
+        false,
         Some("2214LZ0ABCD8"),
         config(vec![device("unit:a393cae0", 0, &[("work", 1)])]),
     );
