@@ -10,6 +10,7 @@ use crate::ui::slider_row::SliderRow;
 use crate::ui::theme::FocusRingStyle as _;
 use crate::ui::theme::Typography as _;
 use gpui_kit::base::Button as BaseButton;
+use gpui_kit::component::Sizable as _;
 use gpui_kit::component::radio::{Radio, RadioGroup};
 use openlogi_core::config::MouseProfileTarget;
 
@@ -119,11 +120,13 @@ fn mouse_profile_target_item() -> SettingItem {
             RadioGroup::vertical("mouse-profile-target")
                 .child(
                     Radio::new("mouse-profile-pointer")
+                        .small()
                         .label(tr!("pointer.mouse_profile_pointer"))
                         .debug_selector(|| "mouse-profile-pointer".into()),
                 )
                 .child(
                     Radio::new("mouse-profile-focused")
+                        .small()
                         .label(tr!("pointer.mouse_profile_focused"))
                         .debug_selector(|| "mouse-profile-focused".into()),
                 )
