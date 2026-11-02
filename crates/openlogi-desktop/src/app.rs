@@ -88,10 +88,9 @@ enum DetailTab {
     Camera,
     /// Standalone light controls driven by a raw-HID device driver.
     Light,
-    /// Headset audio — sidetone.
+    /// Audio — a headset's sidetone, or a USB microphone's gain, mute,
+    /// headphones and monitoring.
     Audio,
-    /// USB microphone controls (gain, mute, headphones, monitoring).
-    Microphone,
     /// Device info and configuration.
     Device,
 }
@@ -190,13 +189,11 @@ impl DetailTab {
         if record.light_capabilities.is_some() {
             tabs.push(Self::Light);
         }
-        if caps.sidetone {
+        // A headset measures its sidetone over HID++. A microphone is a USB
+        // audio device with no HID++ capabilities; its controls come from the
+        // agent's audio-stack reading. Both are set on the one Audio tab.
+        if caps.sidetone || matches!(record.kind, DeviceKind::Microphone) {
             tabs.push(Self::Audio);
-        }
-        // A microphone is a USB audio device with no HID++ capabilities; its
-        // controls come from the agent's audio-stack reading.
-        if matches!(record.kind, DeviceKind::Microphone) {
-            tabs.push(Self::Microphone);
         }
         tabs.push(Self::Device);
         tabs
@@ -219,7 +216,6 @@ impl DetailTab {
             Self::Lighting | Self::Light => tr!("device.lighting"),
             Self::Camera => tr!("camera.camera"),
             Self::Audio => tr!("device.audio"),
-            Self::Microphone => tr!("device.microphone"),
             Self::Device => tr!("device.device"),
         }
     }

@@ -1508,12 +1508,16 @@ fn a_sidetone_headset_opens_on_the_audio_tab() {
     assert_eq!(DetailTab::default_for(&headset), DetailTab::Audio);
 }
 
+/// A microphone has no HID++ capabilities; its controls share the Audio tab
+/// with a headset's sidetone, and it opens there.
 #[test]
-fn a_microphone_shows_its_controls_and_the_device_tab() {
+fn a_microphone_opens_on_the_audio_tab() {
+    let microphone = record(DeviceKind::Microphone, None);
     assert_eq!(
-        DetailTab::tabs_for(&record(DeviceKind::Microphone, None)),
-        vec![DetailTab::Microphone, DetailTab::Device]
+        DetailTab::tabs_for(&microphone),
+        vec![DetailTab::Audio, DetailTab::Device]
     );
+    assert_eq!(DetailTab::default_for(&microphone), DetailTab::Audio);
 }
 
 /// An unprobed (offline) device has no measured capabilities and falls back

@@ -127,6 +127,9 @@ pub(super) fn detail_content(
     let online = AppState::try_read(cx)
         .and_then(AppState::current_record)
         .is_some_and(|record| record.online);
+    let microphone = AppState::try_read(cx)
+        .and_then(AppState::current_record)
+        .is_some_and(|record| matches!(record.kind, DeviceKind::Microphone));
     let content = match active {
         DetailTab::Buttons => {
             buttons_tab(panels.mouse_model, profile_icons, app_catalog, cx).into_any_element()
@@ -149,8 +152,7 @@ pub(super) fn detail_content(
             camera_tab(panels.camera_preview, panels.camera_controls).into_any_element()
         }
         DetailTab::Light => light_tab(panels.light_panel, cx).into_any_element(),
-        DetailTab::Audio => audio_tab(panels.audio_panel).into_any_element(),
-        DetailTab::Microphone => microphone_tab(panels.microphone_panel).into_any_element(),
+        DetailTab::Audio => audio_tab(panels, microphone).into_any_element(),
         DetailTab::Device => device_tab(panels.disable_keys_panel, cx).into_any_element(),
     };
     let navigation = detail_navigation(tabs, active, cx);
@@ -270,7 +272,6 @@ fn detail_tab_icon(tab: DetailTab) -> &'static str {
         DetailTab::Lighting | DetailTab::Light => "action-icons/palette.svg",
         DetailTab::Camera => "action-icons/camera.svg",
         DetailTab::Audio => AUDIO_ICON,
-        DetailTab::Microphone => MICROPHONE_ICON,
         DetailTab::Device => "action-icons/settings.svg",
     }
 }
@@ -815,16 +816,32 @@ fn wheel_resolution_control(
         })
 }
 
-/// Audio tab: the headset's sidetone in one untitled card — the rail already
-/// names the page "Audio", as with Lighting.
-fn audio_tab(audio_panel: &gpui::Entity<AudioPanel>) -> impl IntoElement {
+/// Audio tab in one untitled card — the rail already names the page "Audio",
+/// as with Lighting. A headset's card holds its sidetone. A microphone's holds
+/// its controls, the hardware half of G HUB's microphone page, at the width
+/// of the light controls.
+fn audio_tab(panels: &DetailPanels<'_>, microphone: bool) -> impl IntoElement {
+    if microphone {
+        return tab_body(
+            DetailTab::Audio,
+            ContentWidth::ExtraLarge,
+            div()
+                .w(LIGHT_CONTROLS_W)
+                .min_w(LIGHT_CONTROLS_MIN_W)
+                .child(PanelCard::new(
+                    SharedString::default(),
+                    Icon::empty().path(MICROPHONE_ICON),
+                    panels.microphone_panel.clone().into_any_element(),
+                )),
+        );
+    }
     tab_body(
         DetailTab::Audio,
         ContentWidth::Small,
         PanelCard::new(
             SharedString::default(),
             Icon::empty().path(AUDIO_ICON),
-            audio_panel.clone().into_any_element(),
+            panels.audio_panel.clone().into_any_element(),
         ),
     )
 }
@@ -942,23 +959,6 @@ fn light_tab(
 
 /// The microphone glyph: Lucide's `mic`, which the bundled icon subset lacks.
 pub(super) const MICROPHONE_ICON: &str = "action-icons/mic.svg";
-
-/// Microphone controls, the hardware half of G HUB's microphone page, in one
-/// untitled card — the rail already names the page, as with Lighting.
-fn microphone_tab(microphone_panel: &gpui::Entity<MicrophonePanel>) -> impl IntoElement {
-    tab_body(
-        DetailTab::Microphone,
-        ContentWidth::ExtraLarge,
-        div()
-            .w(LIGHT_CONTROLS_W)
-            .min_w(LIGHT_CONTROLS_MIN_W)
-            .child(PanelCard::new(
-                SharedString::default(),
-                Icon::empty().path(MICROPHONE_ICON),
-                microphone_panel.clone().into_any_element(),
-            )),
-    )
-}
 
 /// Device tab: device details and configuration cards stacked.
 fn device_tab(
