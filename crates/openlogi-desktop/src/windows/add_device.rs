@@ -15,6 +15,8 @@
 //! Unifying just opens a lock and waits for the next device to link, so it
 //! jumps straight from *searching* to *paired*.
 
+use std::mem::Discriminant;
+
 use crate::ui::theme::FocusRingStyle as _;
 use gpui::{
     App, Context, ElementId, FocusHandle, FontWeight, Global, InteractiveElement, IntoElement,
@@ -205,6 +207,8 @@ fn cancel_search(cx: &mut App) {
 /// Standalone Add Device window root view.
 pub struct AddDeviceView {
     focus_handle: FocusHandle,
+    /// The step last shown, to tell a new step from an update within one.
+    step: Discriminant<PairingUi>,
     appearance_obs: Option<Subscription>,
     #[expect(dead_code, reason = "held to keep the PairingUi observer alive")]
     state_obs: Subscription,
@@ -219,7 +223,18 @@ impl AddDeviceView {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
-        let state_obs = cx.observe_global::<PairingUi>(|_, cx| cx.notify());
+        // A new step replaces the controls, usually including the one just
+        // clicked. Focus left on a control that is gone strands Tab, so the
+        // window takes focus back and Tab starts from the new step's first
+        // control.
+        let state_obs = cx.observe_global_in::<PairingUi>(window, |this, window, cx| {
+            let step = current_step(cx);
+            if step != this.step {
+                this.step = step;
+                this.focus_handle.focus(window, cx);
+            }
+            cx.notify();
+        });
         let inventory_obs = AppState::repaint_on(cx, |event| {
             matches!(
                 event,
@@ -228,6 +243,7 @@ impl AddDeviceView {
         });
         Self {
             focus_handle,
+            step: current_step(cx),
             appearance_obs: None,
             state_obs,
             inventory_obs,
@@ -272,6 +288,10 @@ impl AddDeviceView {
         }
         col
     }
+}
+
+fn current_step(cx: &App) -> Discriminant<PairingUi> {
+    std::mem::discriminant(cx.try_global::<PairingUi>().unwrap_or(&PairingUi::Idle))
 }
 
 fn receiver_element_id(receiver: &ReceiverInfo) -> String {

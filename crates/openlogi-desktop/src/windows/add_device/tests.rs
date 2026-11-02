@@ -515,6 +515,39 @@ fn change_receiver_clears_a_failure_without_an_agent_session(cx: &mut TestAppCon
     assert!(matches!(commands.try_recv(), Ok(Command::CancelPairing(_))));
 }
 
+/// Clicking a receiver focuses its row, and the next step removes that row.
+/// The window takes focus back, so Tab starts from the new step's first
+/// control instead of staying on a control that is gone.
+#[gpui::test]
+fn a_new_step_takes_focus_back_from_the_clicked_receiver(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    cx.update(theme::register_builtin_themes);
+    let mut commands = cx.update(install_state);
+    let bolt = receiver("Bolt", 0xc548, Some("00000000AAAABBBB"));
+    cx.update(|cx| {
+        AppState::update(cx, |state, cx| {
+            state
+                .apply_agent_snapshot(&snapshot(vec![bolt]), &AssetResolver::new(), &[])
+                .events
+                .emit(cx);
+        });
+    });
+    let (view, cx) = cx.add_window_view(AddDeviceView::new);
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    let choice = cx
+        .debug_bounds("pairing-receiver-c548-00000000AAAABBBB")
+        .expect("the receiver is selectable");
+    cx.simulate_click(choice.center(), Modifiers::default());
+    assert!(matches!(commands.try_recv(), Ok(Command::StartPairing(_))));
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    cx.update(|window, cx| {
+        assert!(
+            view.read(cx).focus_handle.is_focused(window),
+            "focus must not stay on the receiver row the search replaced"
+        );
+    });
+}
+
 #[test]
 fn mouse_pairing_click_icons_are_embedded() {
     for click in [Click::Left, Click::Right] {
