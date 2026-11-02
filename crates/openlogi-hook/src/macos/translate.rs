@@ -125,6 +125,19 @@ fn modifiers_from_flags(flags: CGEventFlags) -> KeyModifiers {
     }
 }
 
+/// The modifiers a `FlagsChanged` event leaves held, or `None` for any
+/// other event type and for one OpenLogi itself posted.
+pub(super) fn translate_modifiers(etype: CGEventType, event: &CGEvent) -> Option<KeyModifiers> {
+    if !matches!(etype, CGEventType::FlagsChanged)
+        || event.get_integer_value_field(EventField::EVENT_SOURCE_USER_DATA)
+            == openlogi_inject::SYNTHETIC_EVENT_USER_DATA
+        || from_virtual_keyboard(event)
+    {
+        return None;
+    }
+    Some(modifiers_from_flags(event.get_flags()))
+}
+
 /// Translate a keyboard `CGEvent` into a [`KeyEvent`]. Returns `None` for
 /// non-key event types (the mouse path handles those), for `FlagsChanged`
 /// (modifier state rides on the next key event via its flags; a standalone

@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 use openlogi_core::config::{EventHapticFeedback, EventHapticInput, EventHapticsConfig};
 use openlogi_core::scroll::ScrollDelta;
 use openlogi_hid::{DeviceRoute, HapticWaveform};
-use openlogi_hook::{ButtonId, EventDevice, KeyEvent, MouseEvent};
+use openlogi_hook::{ButtonId, EventDevice, KeyEvent, KeyModifiers, MouseEvent};
 use tokio::sync::{Notify, watch};
 
 /// The shortest gap between two wheel-detent plays.
@@ -590,9 +590,22 @@ impl EventHaptics {
     /// or cut, which the clipboard watch confirms ([`Self::copy_armed`]).
     /// Runs on the hook callback thread, so it never blocks.
     pub fn observe_key(&self, event: &KeyEvent) {
-        if !(event.pressed && event.modifiers.command) {
-            return;
+        if event.pressed && event.modifiers.command {
+            self.arm_copy();
         }
+    }
+
+    /// Note the held modifiers changing with no other key. The Command key
+    /// going down arms the copy watch before the key it combines with
+    /// reaches the app, so the watch reads the clipboard before any copy
+    /// lands. Runs on the hook callback thread, so it never blocks.
+    pub fn observe_modifiers(&self, modifiers: KeyModifiers) {
+        if modifiers.command {
+            self.arm_copy();
+        }
+    }
+
+    fn arm_copy(&self) {
         let copy_plays = self.inner.target.try_read().is_ok_and(|target| {
             target
                 .as_ref()
@@ -1427,6 +1440,24 @@ mod tests {
         haptics.observe_key(&command_c);
         assert!(haptics.copy_armed(Instant::now()));
         assert!(!haptics.copy_armed(Instant::now() + COPY_WINDOW));
+    }
+
+    #[test]
+    fn the_command_key_going_down_arms_the_copy_watch() {
+        let haptics = EventHaptics::default();
+        let mut target = target(direct(0xb042));
+        target.config.copy = EventHapticFeedback::SubtleCollision;
+        haptics.publish(Some(target));
+        haptics.observe_modifiers(KeyModifiers {
+            shift: true,
+            ..KeyModifiers::default()
+        });
+        assert!(!haptics.copy_armed(Instant::now()), "not Command");
+        haptics.observe_modifiers(KeyModifiers {
+            command: true,
+            ..KeyModifiers::default()
+        });
+        assert!(haptics.copy_armed(Instant::now()));
     }
 
     #[test]

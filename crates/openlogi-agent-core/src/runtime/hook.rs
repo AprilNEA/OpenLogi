@@ -592,6 +592,11 @@ pub fn start(
         // HoldShortcut enters the same down/up/cancel lifecycle as a mouse
         // button. The active set pairs key-up even if modifier state or config
         // changes while the key is down.
+        // Nothing binds a modifier alone; event haptics watch for Command.
+        HookEvent::Modifiers(modifiers) => {
+            haptics.observe_modifiers(modifiers);
+            EventDisposition::PassThrough
+        }
         HookEvent::Key(event) => {
             haptics.observe_key(&event);
             handle_key(

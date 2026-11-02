@@ -4,9 +4,10 @@
 //! The pasteboard announces nothing, so this polls its change count, and only
 //! within [`openlogi_agent_core::event_haptics::COPY_WINDOW`] of a
 //! Command-key press. The count it compares against is read as that press
-//! wakes the watch: the hook sees the key before the app it is meant for
-//! does, so a change made earlier — a clipboard manager's, say — is never
-//! taken for the press's copy.
+//! wakes the watch. The watch arms when the Command key itself goes down,
+//! before the key it combines with reaches the app, so the read lands before
+//! the copy does; a change made earlier — a clipboard manager's, say — is
+//! never taken for the press's copy.
 
 use std::time::{Duration, Instant};
 

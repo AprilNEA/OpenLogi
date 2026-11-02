@@ -305,6 +305,10 @@ pub enum HookEvent {
     Mouse(MouseEvent),
     /// Keyboard event (function-key remapper path).
     Key(KeyEvent),
+    /// The held modifiers changed with no other key: a modifier went down
+    /// or up. Only the macOS hook reports it (`FlagsChanged`), so a
+    /// Command-key press is seen before the key it combines with.
+    Modifiers(KeyModifiers),
 }
 
 /// An event captured at the OS layer.
