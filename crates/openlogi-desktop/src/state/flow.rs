@@ -40,6 +40,11 @@ pub(crate) struct FlowDeviceRow {
     pub(crate) current: Option<FlowHostSlot>,
     /// Its `[flow.devices]` entry, when it takes part in Flow.
     pub(crate) config: Option<FlowDevice>,
+    /// Awake on this computer with a route, so a handoff can include it now.
+    pub(crate) online: bool,
+    /// `false` when the device is known to have no Easy-Switch: the agent
+    /// cannot prepare its switch, and refuses the whole transfer then.
+    pub(crate) switchable: bool,
 }
 
 impl FlowDeviceRow {
@@ -91,6 +96,11 @@ pub(crate) enum FlowIssue {
         peer: FlowPeerName,
         link: Option<FlowLinkState>,
     },
+    /// A device with a channel for the peer cannot switch computers. While
+    /// it is online, no transfer to the peer can start.
+    CannotSwitch { device: String, peer: FlowPeerName },
+    /// None of the devices with a channel for the peer is online here.
+    DevicesAway(FlowPeerName),
     /// A device that takes part in Flow stays behind when the pointer moves
     /// to the peer.
     NotFollowing { device: String, peer: FlowPeerName },
@@ -105,13 +115,14 @@ pub(crate) struct FlowReadiness {
     pub(crate) issues: Vec<FlowIssue>,
 }
 
-/// Decide how ready `config` is. The agent arms an edge only for a connected
-/// peer and hands over only the devices with a channel for it, so that is
-/// what counts as reachable.
+/// Decide how ready `config` is, given the window's `devices`. The agent arms
+/// an edge only for a connected peer, and a crossing hands over the online
+/// devices with a channel for it, all or none: one that cannot switch keeps
+/// every device here. That is what counts as reachable.
 pub(crate) fn readiness(
     config: &FlowConfig,
     link: impl Fn(&str) -> Option<FlowLinkState>,
-    device_name: impl Fn(&PhysicalDeviceKey) -> String,
+    devices: &[FlowDeviceRow],
 ) -> FlowReadiness {
     let quiet = |health| FlowReadiness {
         health,
@@ -124,6 +135,10 @@ pub(crate) fn readiness(
     if config.peers().is_empty() {
         return quiet(FlowHealth::NoPeers);
     }
+    let row = |device: &FlowDevice| devices.iter().find(|row| &row.key == device.key());
+    let name_of = |device: &FlowDevice| {
+        row(device).map_or_else(|| device.key().as_str().to_owned(), |row| row.name.clone())
+    };
     let mut routes = Vec::new();
     let mut issues = Vec::new();
     for peer in config.peers() {
@@ -145,15 +160,31 @@ pub(crate) fn readiness(
             issues.push(FlowIssue::NoDevice(name.clone()));
             continue;
         }
-        match link(name.as_str()) {
-            Some(FlowLinkState::Connected) => routes.extend(edges.into_iter().cloned()),
-            state => issues.push(FlowIssue::Unreachable {
-                peer: name.clone(),
-                link: state,
-            }),
+        let stuck: Vec<&FlowDevice> = following
+            .iter()
+            .copied()
+            .filter(|device| row(device).is_some_and(|row| !row.switchable))
+            .collect();
+        issues.extend(stuck.iter().map(|device| FlowIssue::CannotSwitch {
+            device: name_of(device),
+            peer: name.clone(),
+        }));
+        let online = |device: &&FlowDevice| row(device).is_some_and(|row| row.online);
+        match (stuck.iter().any(online), following.iter().any(online)) {
+            // An online device that cannot switch keeps every device here;
+            // `CannotSwitch` already names it.
+            (true, _) => {}
+            (false, false) => issues.push(FlowIssue::DevicesAway(name.clone())),
+            (false, true) => match link(name.as_str()) {
+                Some(FlowLinkState::Connected) => routes.extend(edges.into_iter().cloned()),
+                state => issues.push(FlowIssue::Unreachable {
+                    peer: name.clone(),
+                    link: state,
+                }),
+            },
         }
         issues.extend(staying.into_iter().map(|device| FlowIssue::NotFollowing {
-            device: device_name(device.key()),
+            device: name_of(device),
             peer: name.clone(),
         }));
     }
@@ -168,13 +199,22 @@ pub(crate) fn readiness(
     }
 }
 
-/// `config` with `peer` on `edge`. A peer already there takes `peer`'s old
-/// edge, or leaves the arrangement when `peer` had none.
+/// `config` with `peer` on `edge` and on no other edge. Unchanged when `peer`
+/// is already on `edge`, so choosing the side it is on keeps every other side
+/// a hand-edited `[flow.layout]` gave it. A peer already on `edge` takes
+/// `peer`'s old edge, or leaves the arrangement when `peer` had none.
 pub(crate) fn placed(
     config: &FlowConfig,
     peer: &FlowPeerName,
     edge: FlowEdge,
 ) -> Result<FlowConfig, FlowConfigError> {
+    if config
+        .layout()
+        .iter()
+        .any(|layout| &layout.peer == peer && layout.edge == edge)
+    {
+        return Ok(config.clone());
+    }
     let mut parts = config.clone().into_parts();
     let previous = parts
         .layout
@@ -315,21 +355,17 @@ impl AppState {
     /// How ready Flow is to switch.
     #[must_use]
     pub(crate) fn flow_readiness(&self) -> FlowReadiness {
-        let devices = self.flow_devices();
         readiness(
             &self.config.flow,
             |peer| self.flow_link(peer),
-            |key| {
-                devices
-                    .iter()
-                    .find(|row| &row.key == key)
-                    .map_or_else(|| key.as_str().to_owned(), |row| row.name.clone())
-            },
+            &self.flow_devices(),
         )
     }
 
     /// The devices the Flow window lists, in the device list's order, then
-    /// configured devices this computer has never seen.
+    /// configured devices this computer has never seen. A device known to
+    /// have no Easy-Switch is listed only while `[flow.devices]` names it, so
+    /// it can be set to Off.
     #[must_use]
     pub(crate) fn flow_devices(&self) -> Vec<FlowDeviceRow> {
         let configured = self.config.flow.devices();
@@ -343,7 +379,16 @@ impl AppState {
             else {
                 continue;
             };
-            if rows.iter().any(|row| row.key == key) {
+            // A device reached on two routes has a record for each; like the
+            // agent, the online, addressable one decides.
+            let online = record.online && record.route.is_some();
+            let switchable = !record.hidpp10
+                && record
+                    .capabilities
+                    .is_none_or(|capabilities| capabilities.easy_switch);
+            if let Some(row) = rows.iter_mut().find(|row| row.key == key) {
+                row.online |= online;
+                row.switchable &= switchable;
                 continue;
             }
             let current = match self.pointer.reads.easy_switch_load(&record.device_key()) {
@@ -361,8 +406,11 @@ impl AppState {
                 name: record.display_name.clone(),
                 kind: Some(record.kind),
                 current,
+                online,
+                switchable,
             });
         }
+        rows.retain(|row| row.switchable || row.config.is_some());
         for device in configured {
             if !rows.iter().any(|row| &row.key == device.key()) {
                 rows.push(FlowDeviceRow {
@@ -371,6 +419,8 @@ impl AppState {
                     kind: None,
                     current: None,
                     config: Some(device.clone()),
+                    online: false,
+                    switchable: true,
                 });
             }
         }

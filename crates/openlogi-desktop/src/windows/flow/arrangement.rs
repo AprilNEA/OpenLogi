@@ -73,15 +73,16 @@ pub(super) fn canvas(
     cx: &mut Context<FlowView>,
 ) -> impl IntoElement {
     let dragging = cx.has_active_drag();
-    let placed: Vec<&PeerModel> = model
+    // A peer on several edges gets a tile on each, so none of them is hidden.
+    let placed: Vec<(&PeerModel, FlowEdge)> = model
         .peers
         .iter()
-        .filter(|peer| peer.edge.is_some())
+        .flat_map(|peer| peer.edges.iter().map(move |edge| (peer, *edge)))
         .collect();
     let unplaced: Vec<&PeerModel> = model
         .peers
         .iter()
-        .filter(|peer| peer.edge.is_none())
+        .filter(|peer| peer.edges.is_empty())
         .collect();
     let mut grid = div()
         .relative()
@@ -91,11 +92,11 @@ pub(super) fn canvas(
         .children(
             placed
                 .iter()
-                .filter_map(|peer| Some(edge_bar(peer.edge?, peer.armed, pal))),
+                .map(|(peer, edge)| edge_bar(*edge, peer.armed, pal)),
         );
     grid = grid.child(this_tile(*selected == FlowHost::This, pal, cx));
-    for peer in &placed {
-        grid = grid.child(peer_tile(peer, selected, pal, cx));
+    for (peer, edge) in &placed {
+        grid = grid.child(peer_tile(peer, *edge, selected, pal, cx));
     }
     if dragging {
         for edge in EDGES {
@@ -278,6 +279,7 @@ fn this_tile(selected: bool, pal: Palette, cx: &Context<FlowView>) -> BaseButton
 
 fn peer_tile(
     peer: &PeerModel,
+    edge: FlowEdge,
     selected: &FlowHost,
     pal: Palette,
     cx: &Context<FlowView>,
@@ -285,11 +287,10 @@ fn peer_tile(
     let is_selected = matches!(selected, FlowHost::Peer(name) if *name == peer.name);
     let quiet = !matches!(peer.link, Some(openlogi_ipc::FlowLinkState::Connected));
     let name = SharedString::from(peer.name.to_string());
-    let edge_word = peer.edge.map(super::edge_label).unwrap_or_default();
     let label = tr!(
         "flow.tile_label",
         name => name.to_string(),
-        edge => edge_word.to_string(),
+        edge => super::edge_label(edge).to_string(),
         status => link_label(peer.link).to_string(),
     );
     let host = FlowHost::Peer(peer.name.clone());
@@ -297,7 +298,7 @@ fn peer_tile(
         name: peer.name.clone(),
         pal,
     };
-    tile_frame(tile_id(&peer.name), label, peer.edge)
+    tile_frame(tile_id(peer, edge), label, Some(edge))
         .selected(is_selected)
         .on_click(cx.listener(move |this, _, _, cx| this.select(host.clone(), cx)))
         .on_drag(dragged, |dragged, _, _, cx| cx.new(|_| dragged.clone()))
@@ -320,8 +321,16 @@ fn peer_tile(
         )
 }
 
-pub(super) fn tile_id(peer: &FlowPeerName) -> SharedString {
-    SharedString::from(format!("flow-tile-{}", peer.as_str()))
+/// `flow-tile-<peer>` for the peer's first edge, which keeps the id and so
+/// the focus when the arrow keys move the peer; an extra edge of a
+/// hand-edited layout adds the edge.
+fn tile_id(peer: &PeerModel, edge: FlowEdge) -> SharedString {
+    let name = peer.name.as_str();
+    if peer.edges.first() == Some(&edge) {
+        SharedString::from(format!("flow-tile-{name}"))
+    } else {
+        SharedString::from(format!("flow-tile-{name}-{edge:?}"))
+    }
 }
 
 /// A peer with no edge yet, waiting under the arrangement.

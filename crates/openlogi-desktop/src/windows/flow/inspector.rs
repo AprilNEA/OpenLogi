@@ -99,6 +99,12 @@ fn peer_section(
         .child(
             section(tr!("flow.position"))
                 .child(edge_segment(peer, cx))
+                .when(peer.edges.len() > 1, |section| {
+                    section.child(caption(
+                        tr!("flow.position_several", name => name.to_string()),
+                        pal,
+                    ))
+                })
                 .child(caption(
                     tr!("flow.position_hint", name => name.to_string()),
                     pal,
@@ -126,7 +132,7 @@ fn edge_segment(peer: &PeerModel, cx: &App) -> ButtonGroup {
         .outline()
         .small()
         .children(EDGES.map(|edge| {
-            let chosen = peer.edge == Some(edge);
+            let chosen = peer.edges.contains(&edge);
             let name = peer.name.clone();
             let selector = format!("flow-edge-{edge:?}");
             Button::new(SharedString::from(selector.clone()))
@@ -161,6 +167,7 @@ fn device_row(device: &FlowDeviceRow, host: &FlowHost, pal: Palette, cx: &App) -
     // A peer row says which channel reaches this computer, the one the peer's
     // channel must differ from.
     let note = match (host, device.config.as_ref()) {
+        _ if !device.switchable => Some(tr!("flow.device_cannot_switch")),
         (FlowHost::Peer(_), Some(config)) => Some(tr!(
             "flow.self_channel_note",
             channel => (config.self_slot().get() + 1).to_string(),

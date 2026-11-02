@@ -61,7 +61,9 @@ struct FlowModel {
 
 struct PeerModel {
     name: FlowPeerName,
-    edge: Option<FlowEdge>,
+    /// Every edge that leads to the peer; the window makes one, but a
+    /// hand-edited `[flow.layout]` can name several.
+    edges: Vec<FlowEdge>,
     link: Option<FlowLinkState>,
     /// The agent arms this peer's edge: connected, with a device to hand over.
     armed: bool,
@@ -76,11 +78,12 @@ impl FlowModel {
             .iter()
             .map(|peer| PeerModel {
                 name: peer.name.clone(),
-                edge: config
+                edges: config
                     .layout()
                     .iter()
-                    .find(|layout| layout.peer == peer.name)
-                    .map(|layout| layout.edge),
+                    .filter(|layout| layout.peer == peer.name)
+                    .map(|layout| layout.edge)
+                    .collect(),
                 link: state.flow_link(peer.name.as_str()),
                 armed: config.enabled
                     && readiness.routes.iter().any(|route| route.peer == peer.name),
@@ -360,6 +363,12 @@ fn issue_text(issue: &FlowIssue) -> SharedString {
             Some(FlowLinkState::Lost) => tr!("flow.issue_offline", name => peer.to_string()),
             _ => tr!("flow.issue_unknown", name => peer.to_string()),
         },
+        FlowIssue::CannotSwitch { device, peer } => tr!(
+            "flow.issue_cannot_switch",
+            device => device.clone(),
+            name => peer.to_string(),
+        ),
+        FlowIssue::DevicesAway(peer) => tr!("flow.issue_devices_away", name => peer.to_string()),
         FlowIssue::NotFollowing { device, peer } => tr!(
             "flow.issue_not_following",
             device => device.clone(),
@@ -466,7 +475,7 @@ fn channel_segment(
                 .label(SharedString::from((index + 1).to_string()))
                 .selected(chosen)
                 .selected_segment(chosen, cx)
-                .disabled(!chosen && device.slot_taken(&host, slot))
+                .disabled(!chosen && (!device.switchable || device.slot_taken(&host, slot)))
                 .debug_selector(move || selector.to_string())
                 .on_click(move |_, _, cx| {
                     AppState::apply(cx, |state| {

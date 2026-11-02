@@ -9,8 +9,10 @@ use openlogi_core::config::{
 use openlogi_core::device_order::PhysicalDeviceKey;
 use openlogi_ipc::FlowLinkState;
 
+use crate::services::assets::AssetResolver;
 use crate::state::flow::{forgotten, placed, readiness, with_channel};
-use crate::state::{FlowHealth, FlowHost, FlowIssue};
+use crate::state::tests::direct_inventory;
+use crate::state::{AppState, FlowDeviceRow, FlowHealth, FlowHost, FlowIssue, Sources};
 
 fn name(name: &str) -> FlowPeerName {
     FlowPeerName::new(name).unwrap()
@@ -65,6 +67,19 @@ fn config(devices: Vec<FlowDevice>) -> FlowConfig {
     .unwrap()
 }
 
+/// How the window sees one device, for [`readiness`].
+fn row(device: &str, name: &str, online: bool, switchable: bool) -> FlowDeviceRow {
+    FlowDeviceRow {
+        key: key(device),
+        name: name.to_owned(),
+        kind: None,
+        current: None,
+        config: None,
+        online,
+        switchable,
+    }
+}
+
 fn edge_of(config: &FlowConfig, peer: &str) -> Option<FlowEdge> {
     config
         .layout()
@@ -85,6 +100,31 @@ fn a_peer_moved_onto_a_taken_edge_swaps_with_its_occupant() {
     assert_eq!(edge_of(&moved, "work"), None);
     assert_eq!(edge_of(&moved, "lab"), Some(FlowEdge::Right));
     assert_eq!(moved.layout().len(), 2);
+}
+
+#[test]
+fn choosing_a_side_a_peer_is_on_keeps_its_other_sides() {
+    // A hand-edited layout can give one peer two edges.
+    let mut parts = config(Vec::new()).into_parts();
+    parts.layout.push(FlowLayout {
+        edge: FlowEdge::Left,
+        peer: name("work"),
+    });
+    let two_sides = FlowConfig::try_from(parts).unwrap();
+
+    assert_eq!(
+        placed(&two_sides, &name("work"), FlowEdge::Left).unwrap(),
+        two_sides
+    );
+    let one_side = placed(&two_sides, &name("work"), FlowEdge::Bottom).unwrap();
+    let work: Vec<FlowEdge> = one_side
+        .layout()
+        .iter()
+        .filter(|layout| layout.peer.as_str() == "work")
+        .map(|layout| layout.edge)
+        .collect();
+    assert_eq!(work, [FlowEdge::Bottom]);
+    assert_eq!(edge_of(&one_side, "lab"), Some(FlowEdge::Top));
 }
 
 #[test]
@@ -174,12 +214,12 @@ fn readiness_names_what_keeps_each_peer_from_working() {
         "lab" => Some(FlowLinkState::Degraded),
         _ => None,
     };
-    let device_name = |key: &PhysicalDeviceKey| match key.as_str() {
-        "unit:0000beef" => "MX Keys".to_owned(),
-        other => other.to_owned(),
-    };
+    let devices = [
+        row("unit:a393cae0", "MX Master 3S", true, true),
+        row("unit:0000beef", "MX Keys", true, true),
+    ];
 
-    let ready = readiness(&flow, link, device_name);
+    let ready = readiness(&flow, link, &devices);
     assert_eq!(ready.health, FlowHealth::Ready);
     assert_eq!(
         ready.routes,
@@ -207,14 +247,14 @@ fn readiness_names_what_keeps_each_peer_from_working() {
     let blocked = readiness(
         &flow,
         |peer| (peer == "work").then_some(FlowLinkState::Lost),
-        |key| key.as_str().to_owned(),
+        &devices,
     );
     assert_eq!(blocked.health, FlowHealth::Blocked);
     assert!(blocked.routes.is_empty());
 
     // A placed peer no device follows is named before its link.
     assert_eq!(
-        readiness(&config(Vec::new()), link, device_name).issues,
+        readiness(&config(Vec::new()), link, &devices).issues,
         [
             FlowIssue::NoDevice(name("work")),
             FlowIssue::NoDevice(name("lab")),
@@ -225,5 +265,121 @@ fn readiness_names_what_keeps_each_peer_from_working() {
     let mut off = flow.into_parts();
     off.enabled = false;
     let off = FlowConfig::try_from(off).unwrap();
-    assert_eq!(readiness(&off, link, device_name).health, FlowHealth::Off);
+    assert_eq!(readiness(&off, link, &devices).health, FlowHealth::Off);
+}
+
+/// A crossing hands over only online devices, all or none: a peer whose
+/// devices are all away does nothing, and an online device that cannot
+/// switch keeps every device here.
+#[test]
+fn a_route_needs_an_online_device_and_none_that_cannot_switch() {
+    let flow = config(vec![
+        device("unit:a393cae0", 0, &[("work", 1)]),
+        device("unit:0000beef", 0, &[("work", 1)]),
+    ]);
+    let connected = |_: &str| Some(FlowLinkState::Connected);
+    let routes = |devices: &[FlowDeviceRow]| readiness(&flow, connected, devices).routes;
+    let work_issues = |devices: &[FlowDeviceRow]| {
+        readiness(&flow, connected, devices)
+            .issues
+            .into_iter()
+            .filter(|issue| !matches!(issue, FlowIssue::Unplaced(_) | FlowIssue::NoDevice(_)))
+            .collect::<Vec<_>>()
+    };
+    let work_route = [FlowLayout {
+        edge: FlowEdge::Right,
+        peer: name("work"),
+    }];
+
+    // One device asleep is enough to leave the other to hand over.
+    let one_awake = [
+        row("unit:a393cae0", "MX Master 3S", true, true),
+        row("unit:0000beef", "MX Keys", false, true),
+    ];
+    assert_eq!(routes(&one_awake), work_route);
+
+    let all_away = [
+        row("unit:a393cae0", "MX Master 3S", false, true),
+        row("unit:0000beef", "MX Keys", false, true),
+    ];
+    assert!(routes(&all_away).is_empty());
+    assert_eq!(
+        work_issues(&all_away),
+        [FlowIssue::DevicesAway(name("work"))]
+    );
+
+    let keys_cannot_switch = [
+        row("unit:a393cae0", "MX Master 3S", true, true),
+        row("unit:0000beef", "MX Keys", true, false),
+    ];
+    assert!(routes(&keys_cannot_switch).is_empty());
+    assert_eq!(
+        work_issues(&keys_cannot_switch),
+        [FlowIssue::CannotSwitch {
+            device: "MX Keys".to_owned(),
+            peer: name("work"),
+        }]
+    );
+
+    // Asleep, it is left out of the handover, but still named.
+    let asleep_cannot_switch = [
+        row("unit:a393cae0", "MX Master 3S", true, true),
+        row("unit:0000beef", "MX Keys", false, false),
+    ];
+    assert_eq!(routes(&asleep_cannot_switch), work_route);
+    assert_eq!(
+        work_issues(&asleep_cannot_switch),
+        [FlowIssue::CannotSwitch {
+            device: "MX Keys".to_owned(),
+            peer: name("work"),
+        }]
+    );
+}
+
+/// The fixture mouse on its cable, with or without Easy-Switch, and `flow`.
+fn mouse_state(easy_switch: bool, flow: FlowConfig) -> AppState {
+    let mut inventory = direct_inventory([0xa3, 0x93, 0xca, 0xe0]);
+    inventory.paired[0]
+        .capabilities
+        .as_mut()
+        .expect("the fixture device has capabilities")
+        .easy_switch = easy_switch;
+    let mut config = openlogi_core::config::Config::ephemeral();
+    config.flow = flow;
+    let resolver = AssetResolver::new();
+    let (commands, _) = tokio::sync::mpsc::unbounded_channel();
+    AppState::new(Sources {
+        inventories: &[inventory],
+        ..Sources::in_memory(config, &resolver, commands)
+    })
+}
+
+#[test]
+fn a_device_without_easy_switch_is_offered_only_to_be_turned_off() {
+    let rows = mouse_state(true, config(Vec::new())).flow_devices();
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].switchable && rows[0].online);
+
+    assert!(
+        mouse_state(false, config(Vec::new()))
+            .flow_devices()
+            .is_empty()
+    );
+
+    let configured = mouse_state(
+        false,
+        config(vec![device("unit:a393cae0", 0, &[("work", 1)])]),
+    );
+    let rows = configured.flow_devices();
+    assert_eq!(rows.len(), 1);
+    assert!(!rows[0].switchable);
+    assert!(
+        configured
+            .flow_readiness()
+            .issues
+            .contains(&FlowIssue::CannotSwitch {
+                device: rows[0].name.clone(),
+                peer: name("work"),
+            })
+    );
 }

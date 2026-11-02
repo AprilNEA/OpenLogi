@@ -74,7 +74,7 @@ fn snapshot() -> AgentSnapshot {
             secure_input: openlogi_ipc::SecureInput::Off,
             virtual_keyboard: openlogi_ipc::VirtualKeyboardStatus::Unsupported,
         },
-        inventory: vec![direct_inventory(MOUSE)],
+        inventory: vec![mouse()],
         standalone: vec![],
         camera_active: false,
         pairing: None,
@@ -96,6 +96,17 @@ fn snapshot() -> AgentSnapshot {
             ],
         },
     }
+}
+
+/// The fixture mouse, which has Easy-Switch.
+fn mouse() -> openlogi_core::device::DeviceInventory {
+    let mut inventory = direct_inventory(MOUSE);
+    inventory.paired[0]
+        .capabilities
+        .as_mut()
+        .expect("the fixture device has capabilities")
+        .easy_switch = true;
+    inventory
 }
 
 fn open_window(cx: &mut TestAppContext) -> &mut VisualTestContext {
