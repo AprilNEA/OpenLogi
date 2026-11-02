@@ -1,4 +1,4 @@
-//! Tests for the `0x8300` sidetone reads and writes.
+//! Tests for the sidetone reads and writes over `0x8300` and `0x0604`.
 
 use std::assert_matches;
 use std::sync::{Arc, Mutex};
@@ -128,4 +128,61 @@ async fn a_headset_without_the_feature_is_unsupported() {
             feature_hex: 0x8300
         })
     );
+}
+
+/// The `0x0604` feature index on a scripted headset without `0x8300`.
+const HEADSET_AUDIO_INDEX: u8 = 0x05;
+
+/// A headset with only `0x0604` at version 0: a read answers
+/// `[mic_count, mic_id, level]`, and a write carries `[mic_id, level, 0]`
+/// with no echo.
+fn headset_audio_respond(level: &Mutex<u8>, request: &[u8]) -> Option<Vec<u8>> {
+    if request.len() < 7 || !matches!(request[0], 0x10 | 0x11) {
+        return None;
+    }
+    let function = request[3] >> 4;
+    let mut payload = [0u8; 16];
+    match (request[2], function) {
+        (0x00, 0x01) => payload[0] = 4,
+        (0x00, 0x00) => {
+            if u16::from_be_bytes([request[4], request[5]]) == 0x0604 {
+                payload[0] = HEADSET_AUDIO_INDEX;
+            }
+        }
+        (HEADSET_AUDIO_INDEX, 0x00) => {
+            payload[0] = 1;
+            payload[1] = 1;
+            payload[2] = *level.lock().expect("level lock");
+        }
+        (HEADSET_AUDIO_INDEX, 0x01) => *level.lock().expect("level lock") = request[5],
+        _ => return None,
+    }
+    let mut response = vec![0u8; 20];
+    response[0] = 0x11;
+    response[1..4].copy_from_slice(&request[1..4]);
+    response[4..].copy_from_slice(&payload);
+    Some(response)
+}
+
+#[tokio::test]
+async fn a_headset_without_0x8300_uses_0x0604() {
+    let stored = Arc::new(Mutex::new(40u8));
+    let responder = Arc::clone(&stored);
+    let (raw, _handle) = ScriptedRawHidChannel::with_dynamic_responder(move |request| {
+        headset_audio_respond(&responder, request)
+    });
+    let route = DeviceRoute::Direct {
+        vendor_id: 0x046d,
+        product_id: 0x0ac4,
+    };
+    let shared = SharedChannel::new(scripted_channel(raw).await, route);
+
+    assert_eq!(get_sidetone_on(&shared).await.unwrap(), level(40));
+    assert_eq!(
+        set_sidetone_on(&shared, level(25)).await.unwrap(),
+        level(25),
+        "an acknowledged 0x0604 write confirms the requested level"
+    );
+    assert_eq!(*stored.lock().unwrap(), 25);
+    assert_eq!(get_sidetone_on(&shared).await.unwrap(), level(25));
 }

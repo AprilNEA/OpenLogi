@@ -1,4 +1,5 @@
-//! `openlogi diag sidetone` — read or set a headset's HID++ 0x8300 sidetone.
+//! `openlogi diag sidetone` — read or set a headset's HID++ 0x8300 or 0x0604
+//! sidetone.
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
@@ -20,7 +21,7 @@ pub struct SidetoneArgs {
 }
 
 pub async fn run(args: SidetoneArgs) -> Result<()> {
-    let (route, name) = select_device(args.device.as_deref(), &[0x8300]).await?;
+    let (route, name) = select_device(args.device.as_deref(), &[0x8300, 0x0604]).await?;
     println!("device: {name} ({route})");
 
     let before = openlogi_hid::get_sidetone(&route)
