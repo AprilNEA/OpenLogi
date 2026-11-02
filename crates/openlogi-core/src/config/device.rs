@@ -242,7 +242,9 @@ pub struct DeviceConfig {
     /// When the foreground app's id matches a key here, these bindings take
     /// precedence. Other buttons use `bindings`. Deliberately `Action`-valued
     /// (not `Binding`): a per-app override replaces the whole button with one
-    /// action, never a per-direction gesture overlay.
+    /// action, never a per-direction gesture overlay. The one exception is a
+    /// wheel-hold button, whose instantaneous override replaces only the
+    /// click ([`Config::effective_bindings`](crate::config::Config::effective_bindings)).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub per_app_bindings: BTreeMap<String, BTreeMap<ButtonId, Action>>,
     /// Host-rendered Actions Ring settings and complete per-application layouts.

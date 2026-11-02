@@ -352,6 +352,8 @@ impl AppState {
     /// In the global profile a long-press button keeps its long action and a
     /// wheel-hold button keeps holding the wheel: the picked action replaces
     /// only the short or click action.
+    /// In an app profile a wheel-hold button keeps holding the wheel as well,
+    /// unless the action is a Hold shortcut (`Config::effective_bindings`).
     ///
     /// Disk failures restore the persisted projection and surface a config
     /// error instead of crashing the UI thread.
@@ -373,9 +375,10 @@ impl AppState {
         let app = self.editing_app().map(str::to_string);
         let gshift = self.binding_layer() == BindingLayer::GShift;
         self.config.edit(|config| {
-            // A per-app entry is `Action`-valued, so an override always
-            // replaces the whole button — which is exactly what picking one
-            // action means, and why gesture mode is not offered in this scope.
+            // A per-app entry is `Action`-valued, so an override replaces the
+            // button's action, and gesture mode is not offered in this scope.
+            // Config::effective_bindings keeps a device's wheel hold around
+            // an instantaneous override.
             if let Some(app) = app {
                 config.set_per_app_binding(&key, &app, button, Some(action));
             } else if gshift {

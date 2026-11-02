@@ -230,26 +230,14 @@ fn button_inspector(
         .child(current_action_card(&action, picker, pal))
         .children(wheel_hold_section(
             button,
+            &action,
             data,
             overridden,
             picker.view,
             pal,
         ))
         .when(overridden, |panel| {
-            let observer = picker.view.clone();
-            panel.child(
-                control_button("inspector-use-default")
-                    .w_full()
-                    .icon(IconName::Undo)
-                    .label(tr!("profiles.use_the_default_profile"))
-                    .on_click(move |_, _, cx| {
-                        AppState::apply(cx, |state| state.clear_app_binding(button));
-                        observer.update(cx, |view, cx| {
-                            view.close_action_picker();
-                            cx.notify();
-                        });
-                    }),
-            )
+            panel.child(use_default_button(button, picker.view))
         })
         .when(can_enable_gestures(button, data.editing_app), |panel| {
             let observer = picker.view.clone();
@@ -316,11 +304,31 @@ fn button_status(
     }
 }
 
+/// In an app profile, removes the app's override so the button follows the
+/// default profile again.
+fn use_default_button(button: ButtonId, view: &Entity<MouseModelView>) -> impl IntoElement {
+    let observer = view.clone();
+    control_button("inspector-use-default")
+        .w_full()
+        .icon(IconName::Undo)
+        .label(tr!("profiles.use_the_default_profile"))
+        .on_click(move |_, _, cx| {
+            AppState::apply(cx, |state| state.clear_app_binding(button));
+            observer.update(cx, |view, cx| {
+                view.close_action_picker();
+                cx.notify();
+            });
+        })
+}
+
 /// Back/Forward's wheel-hold control: the switch in the global profile, or,
-/// in an app profile that has not overridden the button, a note that an
-/// action picked there replaces it.
+/// in an app profile, a note on what the device's wheel hold does there. An
+/// action picked in the app replaces only the click, so the button still
+/// scrolls sideways while held; a Hold shortcut replaces the whole button
+/// (`Config::effective_bindings`).
 fn wheel_hold_section(
     button: ButtonId,
+    action: &Action,
     data: &BindingInspectorData<'_>,
     overridden: bool,
     view: &Entity<MouseModelView>,
@@ -331,17 +339,30 @@ fn wheel_hold_section(
         None if button.supports_wheel_hold() && (data.virtual_thumbwheel || enabled) => {
             Some(wheel_hold_row(button, enabled, view, pal).into_any_element())
         }
-        Some(app) if enabled && !overridden => Some(
-            div()
-                .debug_selector(|| "inspector-wheel-hold-app-note".into())
-                .text_caption()
-                .text_color(pal.text_muted)
-                .child(tr!(
-                    "actions.app_profile_action_replaces_wheel_hold",
-                    app => app.to_string()
-                ))
-                .into_any_element(),
-        ),
+        Some(app) if enabled => {
+            let (selector, note) = if overridden && action.held_chord().is_some() {
+                (
+                    "inspector-wheel-hold-app-replaced-note",
+                    tr!(
+                        "actions.app_profile_hold_shortcut_replaces_wheel_hold",
+                        app => app.to_string()
+                    ),
+                )
+            } else {
+                (
+                    "inspector-wheel-hold-app-note",
+                    tr!("actions.app_profile_keeps_wheel_hold", app => app.to_string()),
+                )
+            };
+            Some(
+                div()
+                    .debug_selector(move || selector.into())
+                    .text_caption()
+                    .text_color(pal.text_muted)
+                    .child(note)
+                    .into_any_element(),
+            )
+        }
         _ => None,
     }
 }
