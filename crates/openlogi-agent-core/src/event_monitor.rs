@@ -5,13 +5,14 @@
 //! only a single relaxed atomic load per event while off (see the freeze-hazard
 //! note in `openlogi-hook`); it locks and pushes only once the GUI starts
 //! polling. The GUI enables monitoring implicitly by polling
-//! [`EventMonitor::poll`], and [`EventMonitor::run_idle_janitor`] turns it back
+//! [`EventMonitor::poll`], which also starts an idle janitor that turns it back
 //! off when polls stop — so a closed panel or a crashed GUI can't leave the
-//! callback doing buffer work forever.
+//! callback doing buffer work forever. The janitor exits with the monitor, so
+//! an agent nobody monitors runs no timer for it.
 
 use std::collections::VecDeque;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use openlogi_hook::MouseEvent;
@@ -52,6 +53,8 @@ impl MonitorState {
 pub struct EventMonitor {
     state: AtomicU8,
     buf: Mutex<VecDeque<MonitorEvent>>,
+    /// Whether an idle janitor task is running for this monitor.
+    janitor: AtomicBool,
 }
 
 impl Default for EventMonitor {
@@ -59,6 +62,7 @@ impl Default for EventMonitor {
         Self {
             state: AtomicU8::new(MonitorState::Disabled as u8),
             buf: Mutex::default(),
+            janitor: AtomicBool::new(false),
         }
     }
 }
@@ -106,15 +110,29 @@ impl EventMonitor {
         }
     }
 
-    /// Enable monitoring (idempotent) and drain everything buffered since the
-    /// last poll. Called from the IPC `poll_event_monitor` handler.
-    pub fn poll(&self) -> Vec<MonitorEvent> {
+    /// Enable monitoring (idempotent), start the idle janitor if none runs, and
+    /// drain everything buffered since the last poll. Called from the IPC
+    /// `poll_event_monitor` handler; outside a Tokio runtime no janitor starts.
+    pub fn poll(self: &SharedEventMonitor) -> Vec<MonitorEvent> {
         self.state
-            .store(MonitorState::Polled as u8, Ordering::Release);
+            .store(MonitorState::Polled as u8, Ordering::SeqCst);
+        self.ensure_janitor();
         self.buf
             .lock()
             .map(|mut buf| buf.drain(..).collect())
             .unwrap_or_default()
+    }
+
+    fn ensure_janitor(self: &SharedEventMonitor) {
+        if self.janitor.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => {
+                runtime.spawn(Arc::clone(self).run_idle_janitor());
+            }
+            Err(_) => self.janitor.store(false, Ordering::SeqCst),
+        }
     }
 
     fn idle_tick(&self) {
@@ -147,16 +165,13 @@ impl EventMonitor {
         }
     }
 
-    /// Auto-disable monitoring when the GUI stops polling. Runs for the life of
-    /// the agent: each tick, if monitoring is on but no poll arrived since the
-    /// previous tick, the GUI is gone — disable and free the buffer.
-    pub async fn run_idle_janitor(self: SharedEventMonitor) {
-        // `interval` fires its first tick immediately; `interval_at` delays the
-        // first check by a full `IDLE_CHECK_PERIOD`. That matters on an agent
-        // restart while monitoring was enabled: an immediate first tick would
-        // see `enabled == true` with no poll yet this window and disable before
-        // the reconnecting GUI repolls. Waiting one full window lets it poll
-        // first.
+    /// Auto-disable monitoring when the GUI stops polling: each tick, if no
+    /// poll arrived since the previous one, the GUI is gone — disable and free
+    /// the buffer, then exit. The next poll starts a fresh janitor.
+    async fn run_idle_janitor(self: SharedEventMonitor) {
+        // `interval` fires its first tick immediately; `interval_at` gives the
+        // poll that started this janitor a full `IDLE_CHECK_PERIOD` before the
+        // first check, the same window every later poll gets.
         let mut ticker = tokio::time::interval_at(
             tokio::time::Instant::now() + IDLE_CHECK_PERIOD,
             IDLE_CHECK_PERIOD,
@@ -164,6 +179,20 @@ impl EventMonitor {
         loop {
             ticker.tick().await;
             self.idle_tick();
+            if self.enabled() {
+                continue;
+            }
+            // Retire, unless a poll re-enabled monitoring after the tick
+            // disabled it. With every access here and in `poll` sequentially
+            // consistent, either that poll sees the cleared flag and starts a
+            // janitor, or this one sees its state and carries on — never
+            // neither.
+            self.janitor.store(false, Ordering::SeqCst);
+            if MonitorState::from_raw(self.state.load(Ordering::SeqCst)) == MonitorState::Disabled
+                || self.janitor.swap(true, Ordering::SeqCst)
+            {
+                return;
+            }
         }
     }
 }
@@ -175,7 +204,7 @@ mod tests {
 
     #[test]
     fn records_only_while_enabled_and_skips_moves() {
-        let m = EventMonitor::default();
+        let m = Arc::new(EventMonitor::default());
         // Off by default: a press before any poll is not buffered.
         m.record(&MouseEvent::Button {
             id: ButtonId::Back,
@@ -211,7 +240,7 @@ mod tests {
 
     #[test]
     fn bounded_buffer_drops_oldest() {
-        let m = EventMonitor::default();
+        let m = Arc::new(EventMonitor::default());
         m.poll(); // enable
         for _ in 0..(CAPACITY + 10) {
             m.record(&MouseEvent::Scroll {
@@ -225,7 +254,7 @@ mod tests {
 
     #[test]
     fn idle_lifecycle_requires_a_full_tick_without_a_poll_to_disable() {
-        let m = EventMonitor::default();
+        let m = Arc::new(EventMonitor::default());
         m.idle_tick();
         assert!(!m.enabled());
 
@@ -242,5 +271,28 @@ mod tests {
             !m.enabled(),
             "one whole interval without a poll disables it"
         );
+    }
+
+    /// The janitor runs only while monitoring is on: a poll starts it, an
+    /// interval without a poll disables monitoring and ends it, and the next
+    /// poll starts a fresh one.
+    #[tokio::test(start_paused = true)]
+    async fn janitor_runs_only_while_monitoring() {
+        let m = Arc::new(EventMonitor::default());
+        assert!(!m.janitor.load(Ordering::SeqCst), "no timer before a poll");
+
+        m.poll();
+        assert!(m.janitor.load(Ordering::SeqCst));
+        // Polled → Idle on the first tick, Idle → Disabled on the second.
+        tokio::time::sleep(IDLE_CHECK_PERIOD * 2 + Duration::from_millis(1)).await;
+        assert!(!m.enabled());
+        assert!(
+            !m.janitor.load(Ordering::SeqCst),
+            "the janitor exits with the monitor"
+        );
+
+        m.poll();
+        assert!(m.enabled());
+        assert!(m.janitor.load(Ordering::SeqCst), "a new poll restarts it");
     }
 }

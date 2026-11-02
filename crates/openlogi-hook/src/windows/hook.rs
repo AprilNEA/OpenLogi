@@ -9,7 +9,10 @@ use std::cell::Cell;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 
-use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, LPARAM, LRESULT, POINT, WPARAM};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, ERROR_INSUFFICIENT_BUFFER, GetLastError, HANDLE, LPARAM, LRESULT, MAX_PATH, POINT,
+    WPARAM,
+};
 use windows_sys::Win32::Graphics::Gdi::{MONITOR_DEFAULTTONEAREST, MonitorFromPoint};
 use windows_sys::Win32::System::Threading::{
     GetCurrentThreadId, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
@@ -32,6 +35,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 use openlogi_core::config::FunctionKey;
 
 use super::cursor::{MonitorDpi, PhysicalCursorPosition};
+use super::pointer::{MotionTracking, note_activity};
 use super::worker::{WorkerEvent, WorkerPhase, WorkerStatus};
 use crate::{
     ButtonId, CursorPosition, EventDisposition, ForegroundApp, HookBackend, HookError, HookEvent,
@@ -40,6 +44,9 @@ use crate::{
 
 const WHEEL_DELTA: f64 = 120.0;
 
+/// UTF-16 units in the longest image path Windows reports (a `\\?\` long path).
+const LONG_PATH_UNITS: usize = 32_768;
+
 /// Shared profile identity for both foreground and pointer-owned processes.
 pub(super) fn application_for_process(pid: u32) -> Option<ForegroundApp> {
     // SAFETY: OpenProcess accepts a PID by value; a successful handle is owned here.
@@ -47,16 +54,10 @@ pub(super) fn application_for_process(pid: u32) -> Option<ForegroundApp> {
     if process.is_null() {
         return None;
     }
-    let mut buf = vec![0u16; 32_768];
-    let mut len = 32_768;
-    // SAFETY: the owned handle is live and buf has len writable UTF-16 units.
-    let ok = unsafe { QueryFullProcessImageNameW(process, 0, buf.as_mut_ptr(), &raw mut len) };
-    // SAFETY: this locally owned handle is closed exactly once after the query.
+    let path = image_path(process);
+    // SAFETY: this locally owned handle is closed exactly once after the queries.
     unsafe { CloseHandle(process) };
-    if ok == 0 || len == 0 {
-        return None;
-    }
-    let path = String::from_utf16_lossy(&buf[..len as usize]);
+    let path = path?;
     let display_name = std::path::Path::new(&path)
         .file_stem()
         .map_or_else(|| path.clone(), |stem| stem.to_string_lossy().into_owned());
@@ -64,6 +65,37 @@ pub(super) fn application_for_process(pid: u32) -> Option<ForegroundApp> {
         id: path.to_lowercase(),
         display_name,
     })
+}
+
+/// The process image path, read into a `MAX_PATH` stack buffer first: only a
+/// longer path pays for the zeroed long-path heap buffer.
+fn image_path(process: HANDLE) -> Option<String> {
+    let mut short = [0u16; MAX_PATH as usize];
+    let mut long = Vec::new();
+    let path = match query_image_path(process, &mut short) {
+        Ok(len) => short.get(..len),
+        Err(ERROR_INSUFFICIENT_BUFFER) => {
+            long.resize(LONG_PATH_UNITS, 0);
+            query_image_path(process, &mut long)
+                .ok()
+                .and_then(|len| long.get(..len))
+        }
+        Err(_) => None,
+    }?;
+    (!path.is_empty()).then(|| String::from_utf16_lossy(path))
+}
+
+/// One `QueryFullProcessImageNameW` call into `buf`: the path's length in
+/// UTF-16 units, or the call's last-error code.
+fn query_image_path(process: HANDLE, buf: &mut [u16]) -> Result<usize, u32> {
+    let mut len = u32::try_from(buf.len()).unwrap_or(u32::MAX);
+    // SAFETY: `process` is a live handle with query access, and `len` never
+    // exceeds the UTF-16 units `buf` can hold.
+    if unsafe { QueryFullProcessImageNameW(process, 0, buf.as_mut_ptr(), &raw mut len) } == 0 {
+        // SAFETY: GetLastError immediately follows the failed query.
+        return Err(unsafe { GetLastError() });
+    }
+    Ok(len as usize)
 }
 
 thread_local! {
@@ -293,7 +325,9 @@ fn hook_thread(
 
     worker.transition(WorkerEvent::Started);
     let _ = ready.send(Ok(thread_id));
+    let motion = MotionTracking::start();
     let exit = message_loop(|_| false);
+    drop(motion);
 
     let failure = match exit {
         MessageLoopExit::Quit => {
@@ -375,6 +409,12 @@ fn call_next(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
 unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code != HC_ACTION.cast_signed() {
         return call_next(code, wparam, lparam);
+    }
+    // Wake the pointer-context watcher before any early return: injected input
+    // still moves the cursor, and a click can put a new window under a resting
+    // pointer. Only the wheel never changes which window is there.
+    if wparam != WM_MOUSEWHEEL as WPARAM && wparam != WM_MOUSEHWHEEL as WPARAM {
+        note_activity();
     }
 
     // SAFETY: `mouse_proc` is only installed as a WH_MOUSE_LL hook and this is
@@ -524,7 +564,7 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
     let Some(data) = (unsafe { key_hook_data(lparam) }) else {
         return call_next(code, wparam, lparam);
     };
-    let Some(event) = translate_key(wparam, data, current_modifiers()) else {
+    let Some(event) = translate_key(wparam, data, current_modifiers) else {
         return call_next(code, wparam, lparam);
     };
 
@@ -561,7 +601,9 @@ unsafe fn key_hook_data(lparam: LPARAM) -> Option<KBDLLHOOKSTRUCT> {
 /// Translate a `WH_KEYBOARD_LL` message into a [`KeyEvent`]. Returns `None`
 /// for injected input (our own `SendInput` synthesis must not re-enter the
 /// remapper) and for keys outside the remapper's Esc/F1–F19 vocabulary, which
-/// pass through without ever reaching the callback.
+/// pass through without ever reaching the callback. `modifiers` is read only
+/// for a key that survives both filters, so ordinary typing system-wide never
+/// pays for the `GetAsyncKeyState` snapshot.
 #[expect(
     clippy::cast_possible_truncation,
     reason = "WPARAM is pointer-sized by ABI but carries a 32-bit message id"
@@ -569,7 +611,7 @@ unsafe fn key_hook_data(lparam: LPARAM) -> Option<KBDLLHOOKSTRUCT> {
 fn translate_key(
     wparam: WPARAM,
     data: KBDLLHOOKSTRUCT,
-    modifiers: KeyModifiers,
+    modifiers: impl FnOnce() -> KeyModifiers,
 ) -> Option<KeyEvent> {
     if data.flags & LLKHF_INJECTED != 0 {
         return None;
@@ -584,7 +626,7 @@ fn translate_key(
     Some(KeyEvent {
         keycode: mac_keycode(data.vkCode)?,
         pressed,
-        modifiers,
+        modifiers: modifiers(),
     })
 }
 
@@ -708,7 +750,7 @@ mod tests {
     fn translate_key_maps_press_and_release() {
         let mods = KeyModifiers::default();
         // VK_F18 = VK_F1 + 17.
-        let down = translate_key(WM_KEYDOWN as WPARAM, key(VK_F1 + 17), mods);
+        let down = translate_key(WM_KEYDOWN as WPARAM, key(VK_F1 + 17), || mods);
         assert!(matches!(
             down,
             Some(KeyEvent {
@@ -717,7 +759,7 @@ mod tests {
                 ..
             })
         ));
-        let up = translate_key(WM_KEYUP as WPARAM, key(VK_F1 + 17), mods);
+        let up = translate_key(WM_KEYUP as WPARAM, key(VK_F1 + 17), || mods);
         assert!(matches!(up, Some(KeyEvent { pressed: false, .. })));
     }
 
@@ -729,7 +771,7 @@ mod tests {
             option: true,
             ..KeyModifiers::default()
         };
-        let down = translate_key(WM_SYSKEYDOWN as WPARAM, key(VK_F1), mods);
+        let down = translate_key(WM_SYSKEYDOWN as WPARAM, key(VK_F1), || mods);
         assert!(matches!(
             down,
             Some(KeyEvent {
@@ -738,7 +780,7 @@ mod tests {
                 ..
             })
         ));
-        let up = translate_key(WM_SYSKEYUP as WPARAM, key(VK_F1), mods);
+        let up = translate_key(WM_SYSKEYUP as WPARAM, key(VK_F1), || mods);
         assert!(matches!(up, Some(KeyEvent { pressed: false, .. })));
     }
 
@@ -750,7 +792,7 @@ mod tests {
             ..KBDLLHOOKSTRUCT::default()
         };
 
-        assert!(translate_key(WM_KEYDOWN as WPARAM, data, KeyModifiers::default()).is_none());
+        assert!(translate_key(WM_KEYDOWN as WPARAM, data, KeyModifiers::default).is_none());
     }
 
     /// Ordinary typing keys are outside the Esc/F1–F19 vocabulary and must
@@ -760,9 +802,47 @@ mod tests {
     fn translate_key_passes_unmapped_keys_through() {
         let mods = KeyModifiers::default();
         // 'A'
-        assert!(translate_key(WM_KEYDOWN as WPARAM, key(0x41), mods).is_none());
+        assert!(translate_key(WM_KEYDOWN as WPARAM, key(0x41), || mods).is_none());
         // VK_F20, one past the modeled range.
-        assert!(translate_key(WM_KEYDOWN as WPARAM, key(VK_F1 + 19), mods).is_none());
+        assert!(translate_key(WM_KEYDOWN as WPARAM, key(VK_F1 + 19), || mods).is_none());
+    }
+
+    /// The modifier snapshot is four `GetAsyncKeyState` calls; a key the
+    /// remapper ignores, typed anywhere on the system, must not take it.
+    #[test]
+    fn translate_key_reads_modifiers_only_for_remapped_keys() {
+        let reads = Cell::new(0);
+        let snapshot = || {
+            reads.set(reads.get() + 1);
+            KeyModifiers::default()
+        };
+        let injected = KBDLLHOOKSTRUCT {
+            flags: LLKHF_INJECTED,
+            ..key(VK_F1)
+        };
+        assert!(translate_key(WM_KEYDOWN as WPARAM, key(0x41), snapshot).is_none());
+        assert!(translate_key(WM_KEYDOWN as WPARAM, injected, snapshot).is_none());
+        assert_eq!(reads.get(), 0, "filtered keys never read modifiers");
+        assert!(translate_key(WM_KEYDOWN as WPARAM, key(VK_F1), snapshot).is_some());
+        assert_eq!(reads.get(), 1);
+    }
+
+    /// The stack buffer's overflow is what triggers the long-path retry, so a
+    /// too-short buffer must report exactly that error rather than a truncation.
+    #[test]
+    fn image_path_reads_this_process_and_flags_a_short_buffer() {
+        // SAFETY: GetCurrentProcess has no preconditions; its pseudo-handle
+        // needs no closing and carries full query access to this process.
+        let process = unsafe { windows_sys::Win32::System::Threading::GetCurrentProcess() };
+        assert_eq!(
+            query_image_path(process, &mut [0u16; 4]),
+            Err(ERROR_INSUFFICIENT_BUFFER)
+        );
+        let path = image_path(process).expect("this process has an image path");
+        assert!(
+            std::path::Path::new(&path).is_absolute(),
+            "a full image path, got {path}"
+        );
     }
 
     /// Wheel-forward (away from the user) must produce a positive `delta_y`, the

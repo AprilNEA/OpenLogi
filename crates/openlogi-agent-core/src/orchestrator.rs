@@ -767,6 +767,7 @@ impl Orchestrator {
         orch.rebuild();
         orch.observable
             .set_launch_at_login(orch.config.app_settings.launch_at_login);
+        crate::watchers::pointer::set_profile_target(orch.config.app_settings.mouse_profile_target);
         orch
     }
 
@@ -2181,6 +2182,9 @@ impl Orchestrator {
             &mut self.follower_cookies(),
         );
         self.write_follower_cookies(writes);
+        // Focused mode ignores pointer contexts, so the watcher parks; a
+        // switch back to pointer mode resumes it with an immediate query.
+        crate::watchers::pointer::set_profile_target(self.config.app_settings.mouse_profile_target);
         self.changed_lights(&previous_lights)
     }
 
