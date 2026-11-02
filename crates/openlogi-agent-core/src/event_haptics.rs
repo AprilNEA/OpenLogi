@@ -513,10 +513,29 @@ impl EventHaptics {
         event: &MouseEvent,
         source_admitted: impl Fn(Option<&EventDevice>) -> bool,
     ) {
-        let Ok(published) = self.inner.target.try_read() else {
-            return;
+        // A contended lock reads as no target: the event plays nothing.
+        let published = self.inner.target.try_read().ok();
+        let target = published.as_ref().and_then(|published| published.as_ref());
+        // The drag follows the left button whatever plays, so feedback turned
+        // on mid-press never acts on a press whose release it did not see.
+        let dropped = match event {
+            MouseEvent::Button {
+                id: ButtonId::LeftClick,
+                pressed,
+                device,
+            } => {
+                let ours = target.is_some_and(|target| {
+                    source_admitted(device.as_ref()) && is_target(&target.route, device.as_ref())
+                });
+                DRAG.with_borrow_mut(|drag| drag.button(*pressed, ours))
+            }
+            MouseEvent::CaptureInterrupted => {
+                DRAG.with_borrow_mut(DragTracker::cancel);
+                None
+            }
+            _ => None,
         };
-        let Some(target) = published.as_ref() else {
+        let Some(target) = target else {
             return;
         };
         let config = &target.config;
@@ -531,12 +550,11 @@ impl EventHaptics {
                 pressed,
                 device,
             } => {
-                let ours = from_target(device);
-                if *pressed && ours && config.button(*id).plays() {
+                if *pressed && config.button(*id).plays() && from_target(device) {
                     cues[0] = Some(EventCue::Button(*id));
                 }
-                if *id == ButtonId::LeftClick && config.drag.plays() {
-                    cues[1] = DRAG.with_borrow_mut(|drag| drag.button(*pressed, ours));
+                if config.drag.plays() {
+                    cues[1] = dropped;
                 }
             }
             MouseEvent::Moved { delta_x, delta_y } => {
@@ -548,7 +566,6 @@ impl EventHaptics {
                         .then_some(EventCue::DisplayCrossing);
                 }
             }
-            MouseEvent::CaptureInterrupted => DRAG.with_borrow_mut(DragTracker::cancel),
             MouseEvent::Scroll {
                 delta,
                 from_trackpad: false,
@@ -561,7 +578,7 @@ impl EventHaptics {
                     cues[1] = Some(EventCue::ThumbwheelStep);
                 }
             }
-            MouseEvent::Scroll { .. } => {}
+            MouseEvent::CaptureInterrupted | MouseEvent::Scroll { .. } => {}
         }
         drop(published);
         for cue in cues.into_iter().flatten() {
@@ -1229,6 +1246,24 @@ mod tests {
             played(&haptics),
             Some((HapticWaveform::DampCollision, EventCue::Drag))
         );
+    }
+
+    #[test]
+    fn a_release_while_drag_feedback_is_off_still_ends_the_press() {
+        let haptics = EventHaptics::default();
+        let mut on = target(direct(0xb042));
+        on.config.drag = EventHapticFeedback::DampCollision;
+        on.config.buttons.clear();
+        haptics.publish(Some(on.clone()));
+        haptics.observe(&press(ButtonId::LeftClick, None), |_| true);
+        let mut off = on.clone();
+        off.config.drag = EventHapticFeedback::Off;
+        haptics.publish(Some(off));
+        haptics.observe(&release(ButtonId::LeftClick), |_| true);
+        haptics.publish(None);
+        haptics.publish(Some(on));
+        haptics.observe(&moved(40, 40), |_| true);
+        assert_eq!(played(&haptics), None, "no button is held");
     }
 
     #[test]
