@@ -224,8 +224,9 @@ pub struct Capabilities {
     #[serde(default)]
     pub button_spy: bool,
     /// A headset's sidetone level can be read and changed — HID++ `0x8300
-    /// Sidetone`. Appended after `button_spy`: crosses the IPC and the
-    /// persisted identity.
+    /// Sidetone`, or `0x0604 HeadsetAudioSidetone` on the PRO X 2 LIGHTSPEED.
+    /// Appended after `button_spy`: crosses the IPC and the persisted
+    /// identity.
     #[serde(default)]
     pub sidetone: bool,
 }
@@ -283,7 +284,7 @@ impl Capabilities {
             disable_keys: ids.contains(&0x4521),
             onboard_profiles: ids.contains(&0x8100),
             button_spy: ids.contains(&0x8110),
-            sidetone: ids.contains(&0x8300),
+            sidetone: ids.contains(&0x8300) || ids.contains(&0x0604),
         }
     }
 

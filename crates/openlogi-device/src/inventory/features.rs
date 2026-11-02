@@ -10,6 +10,7 @@ use hidpp::{
         adc_measurement::{AdcMeasurement, AdcMeasurementFeature},
         battery_status::BatteryStatusFeature,
         battery_voltage::BatteryVoltageFeature,
+        centurion_battery_soc::{CenturionBatterySocFeature, CenturionChargingStatus},
         device_information::{DeviceInformationFeature, DeviceTransport},
         device_type_and_name::DeviceTypeAndNameFeature,
         disable_keys::DisableKeysFeature,
@@ -192,6 +193,9 @@ pub(super) enum BatteryProbe {
     StatusRegister,
     /// HID++ 1.0 register `0x0D`: a percentage.
     ChargeRegister,
+    /// Centurion `0x0104` at `index`: a percentage and a charging state, from
+    /// headsets such as the PRO X 2 LIGHTSPEED.
+    Centurion(u8),
 }
 
 /// Read just the battery by addressing its feature at the known runtime index,
@@ -274,6 +278,26 @@ pub(super) async fn read_battery(
             .await
             .ok()
             .map(charge_register_battery_info),
+        BatteryProbe::Centurion(feature_index) => {
+            let feature = CenturionBatterySocFeature::new(Arc::clone(channel), slot, feature_index);
+            feature
+                .get_battery_info()
+                .await
+                .ok()
+                .map(|info| BatteryInfo {
+                    percentage: Some(info.percentage),
+                    level: legacy_battery_level_from_percentage(info.percentage),
+                    status: match info.status {
+                        CenturionChargingStatus::Discharging => {
+                            openlogi_core::device::BatteryStatus::Discharging
+                        }
+                        CenturionChargingStatus::Recharging => {
+                            openlogi_core::device::BatteryStatus::Charging
+                        }
+                        CenturionChargingStatus::Full => openlogi_core::device::BatteryStatus::Full,
+                    },
+                })
+        }
     };
     reading.map_or(BatteryRead::Unavailable, BatteryRead::Reading)
 }
@@ -304,6 +328,9 @@ pub(super) fn battery_feature_index(ids: impl IntoIterator<Item = u16>) -> Optio
                 index,
                 state_of_charge: true,
             });
+        }
+        if id == CenturionBatterySocFeature::ID {
+            return Some(BatteryProbe::Centurion(index));
         }
         if id == BatteryStatusFeature::ID && legacy.is_none() {
             legacy = Some(BatteryProbe::Legacy {

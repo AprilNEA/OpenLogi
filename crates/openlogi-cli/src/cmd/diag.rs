@@ -50,7 +50,7 @@ pub enum DiagCmd {
     MouseButtons(mouse_buttons::MouseButtonsArgs),
     /// Switch a multi-host device through the running agent (HID++ 0x1814).
     HostSwitch(host_switch::HostSwitchArgs),
-    /// Read a headset's HID++ 0x8300 sidetone level, or set it.
+    /// Read a headset's HID++ 0x8300 or 0x0604 sidetone level, or set it.
     Sidetone(sidetone::SidetoneArgs),
 }
 

@@ -27,6 +27,11 @@ use crate::backend::{BackendError, HidBackend, NodeInfo};
 use crate::host_lock::{RECEIVER_REGISTER_TIMEOUT, lock_receiver_registers};
 use crate::write::WriteError;
 
+/// The PRO X 2 LIGHTSPEED receiver. It bridges HID++ to the headset in
+/// Centurion frames, and only it is known to carry Centurion `0x0104` and a
+/// `0x0604` at a fixed feature index.
+pub(crate) const PRO_X_2_PRODUCT_ID: u16 = 0x0af7;
+
 /// Enumerate HID++ candidates and open the channel that reaches `route`.
 ///
 /// For a Bolt route this is the receiver channel (the caller addresses the

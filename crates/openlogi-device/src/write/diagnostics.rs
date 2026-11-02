@@ -8,6 +8,7 @@ use hidpp::{
     feature::adc_measurement::AdcMeasurementFeature,
     feature::battery_status::BatteryStatusFeature,
     feature::battery_voltage::BatteryVoltageFeature,
+    feature::centurion_battery_soc::CenturionBatterySocFeature,
     feature::device_information::{
         DeviceEntityFirmwareInfo, DeviceEntityType, DeviceInformationFeature,
     },
@@ -17,7 +18,7 @@ use hidpp::{
 };
 
 use crate::backend::HidBackend;
-use crate::channel::route::DeviceRoute;
+use crate::channel::route::{DeviceRoute, PRO_X_2_PRODUCT_ID};
 use crate::reprog_controls::{self, CidFlags, CidInfo, ReprogControlsV4};
 use crate::write::{HidppOperation, WriteError, classify_hidpp_error, open_feature, with_route};
 
@@ -170,19 +171,22 @@ pub async fn dump_reprog_controls(
 }
 
 /// The battery features [`read_battery_raw`] reads, in the order it tries
-/// them: unified `0x1004`, legacy `0x1000`, voltage `0x1001`, then the `0x1F20`
-/// ADC. A device exposing none of them has no battery this command can read.
-pub const RAW_BATTERY_FEATURES: [u16; 4] = [
+/// them: unified `0x1004`, legacy `0x1000`, voltage `0x1001`, the `0x1F20`
+/// ADC, then, on the PRO X 2 LIGHTSPEED only, the Centurion `0x0104` state of
+/// charge. A device exposing none of them has no battery this command can
+/// read.
+pub const RAW_BATTERY_FEATURES: [u16; 5] = [
     UnifiedBatteryFeature::ID,
     BatteryStatusFeature::ID,
     BatteryVoltageFeature::ID,
     AdcMeasurementFeature::ID,
+    CenturionBatterySocFeature::ID,
 ];
 
 /// Diagnostic read of the device's raw battery report — the unified `0x1004`
 /// fields, the legacy `0x1000` `discharge_level`/`next_level`/`status`, the
-/// `0x1001` measured voltage and charging flags, or the `0x1F20` ADC voltage
-/// and charging state. For
+/// `0x1001` measured voltage and charging flags, the `0x1F20` ADC voltage
+/// and charging state, or the Centurion `0x0104` state of charge. For
 /// `openlogi diag battery`: surfaces exactly what the firmware reports so a
 /// claim like "MX2S shows 0% while charging" can be confirmed against the wire
 /// instead of guessed (the GUI only ever shows the mapped value).
@@ -266,6 +270,24 @@ pub(crate) async fn read_battery_raw_on_channel(
         Err(e) => return Err(e),
     }
 
+    // Only the PRO X 2 is known to carry Centurion `0x0104`, so other devices
+    // skip the lookup.
+    if channel.product_id == PRO_X_2_PRODUCT_ID {
+        match open_feature::<CenturionBatterySocFeature>(&mut device).await {
+            Ok(feature) => {
+                let info = feature
+                    .get_battery_info()
+                    .await
+                    .map_err(|e| WriteError::Hidpp(format!("{e:?}")))?;
+                return Ok(format!(
+                    "0x0104 CenturionBatterySoc: percentage={} status={:?}",
+                    info.percentage, info.status
+                ));
+            }
+            Err(WriteError::FeatureUnsupported { .. }) => {}
+            Err(e) => return Err(e),
+        }
+    }
     // Reached only when none of the read features is present; report the
     // preferred feature rather than implying 0x1F20 was specifically absent.
     Err(WriteError::FeatureUnsupported {
