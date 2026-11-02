@@ -4,6 +4,7 @@
 //! native hooks and message pumps are only compiled on Windows.
 
 mod cursor;
+mod process_image;
 mod worker;
 
 #[cfg(target_os = "windows")]
