@@ -54,7 +54,7 @@ use tarpc::client::RpcError;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
-use crate::state::DeviceKey;
+use crate::state::{DeviceKey, FlowPairingRefusal};
 
 mod launch;
 mod link;
@@ -69,11 +69,12 @@ use request::LinkLost;
 #[cfg(all(target_os = "macos", debug_assertions))]
 pub use request::PollEventMonitor;
 pub use request::{
-    CancelPairing, Command, LoadConfig, PairDevice, ReadBacklight, ReadDisableKeys, ReadDpi,
-    ReadEasySwitchHosts, ReadFnLock, ReadForceSensing, ReadOnboard, ReadPointerSpeed,
-    ReadReportRate, ReadSmartShift, ReloadConfig, RenameEasySwitchHost, RequestAccessibilityPrompt,
-    RetryConnection, SetBacklight, SetDisableKeys, SetDpi, SetFnLock, SetForceSensing, SetLight,
-    SetLightManualPower, SetLighting, SetPointerSpeed, SetReportRate, SetSmartShift, StartPairing,
+    CancelFlowPairing, CancelPairing, Command, ConfirmFlowPairing, LoadConfig, PairDevice,
+    PairFlowPeer, ReadBacklight, ReadDisableKeys, ReadDpi, ReadEasySwitchHosts, ReadFnLock,
+    ReadForceSensing, ReadOnboard, ReadPointerSpeed, ReadReportRate, ReadSmartShift, ReloadConfig,
+    RenameEasySwitchHost, RequestAccessibilityPrompt, RetryConnection, SetBacklight,
+    SetDisableKeys, SetDpi, SetFnLock, SetForceSensing, SetLight, SetLightManualPower, SetLighting,
+    SetPointerSpeed, SetReportRate, SetSmartShift, StartFlowPairing, StartPairing, StopFlowPairing,
     UnpairDevice,
 };
 
@@ -233,6 +234,9 @@ pub enum GuiUpdate {
     PairingUndeliverable(PairingFailure),
     /// Cancellation completed and the receiver is available for a new choice.
     PairingCancelled,
+    /// The agent did not take a Flow pairing command, or could not be
+    /// reached for it.
+    FlowPairingRefused(FlowPairingRefusal),
     /// Whether the receiver let a pairing go. Answers [`UnpairDevice`].
     DeviceUnpaired {
         /// The pairing the receiver was asked to drop.

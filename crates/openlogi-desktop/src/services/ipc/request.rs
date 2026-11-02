@@ -23,8 +23,8 @@ use openlogi_core::hid::{
     ReceiverSelector, ReportRate, ReportRateInfo, SmartShiftStatus, WriteError,
 };
 use openlogi_ipc::{
-    AgentClient, ChosenLight, ConfigReloadError, PairingCommandError, PairingFailure, SavedConfig,
-    SavedConfigVerdict,
+    AgentClient, ChosenLight, ConfigReloadError, FlowPairTarget, FlowPairingCommandError,
+    PairingCommandError, PairingFailure, SavedConfig, SavedConfigVerdict,
 };
 use tarpc::client::RpcError;
 use tarpc::context;
@@ -34,7 +34,7 @@ use tracing::{debug, warn};
 use super::{
     ConfigReloadContext, DisableKeysRequestContext, GuiUpdate, UnpairFailure, UnpairIntent,
 };
-use crate::state::DeviceKey;
+use crate::state::{DeviceKey, FlowPairingRefusal};
 
 /// The GPUI-bound update stream a request may deliver through.
 pub(super) type UpdateSender = mpsc::UnboundedSender<GuiUpdate>;
@@ -912,6 +912,100 @@ impl Request for CancelPairing {
     }
 }
 
+/// Report a Flow pairing command the agent did not take. Progress after an
+/// accepted command shows in the snapshot's `FlowStatus::pairing`, so an
+/// accepted one reports nothing.
+fn report_flow_pairing_refusal(
+    updates: &UpdateSender,
+    outcome: Result<Result<(), FlowPairingCommandError>, Unavailable>,
+) {
+    let refusal = match outcome {
+        Ok(Ok(())) => return,
+        Ok(Err(refused)) => FlowPairingRefusal::Refused(refused),
+        Err(Unavailable) => FlowPairingRefusal::AgentUnreachable,
+    };
+    let _ = updates.send(GuiUpdate::FlowPairingRefused(refusal));
+}
+
+/// Open Flow pairing, so this computer and the others with pairing open find
+/// each other.
+pub struct StartFlowPairing;
+
+impl Request for StartFlowPairing {
+    type Answer = Result<(), FlowPairingCommandError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client.start_flow_pairing(context::current()).await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
+        report_flow_pairing_refusal(updates, outcome);
+    }
+}
+
+/// Pair with a nearby computer or one at an address.
+pub struct PairFlowPeer {
+    pub target: FlowPairTarget,
+}
+
+impl Request for PairFlowPeer {
+    type Answer = Result<(), FlowPairingCommandError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .pair_flow_peer(context::current(), self.target.clone())
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
+        report_flow_pairing_refusal(updates, outcome);
+    }
+}
+
+/// The user saw the same code on both computers.
+pub struct ConfirmFlowPairing;
+
+impl Request for ConfirmFlowPairing {
+    type Answer = Result<(), FlowPairingCommandError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client.confirm_flow_pairing(context::current()).await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
+        report_flow_pairing_refusal(updates, outcome);
+    }
+}
+
+/// End the current Flow pairing attempt, or dismiss its result; pairing
+/// stays open.
+pub struct CancelFlowPairing;
+
+impl Request for CancelFlowPairing {
+    type Answer = Result<(), FlowPairingCommandError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client.cancel_flow_pairing(context::current()).await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
+        report_flow_pairing_refusal(updates, outcome);
+    }
+}
+
+/// Close Flow pairing. An unreachable agent has nothing open to close.
+pub struct StopFlowPairing;
+
+impl Request for StopFlowPairing {
+    type Answer = ();
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client.stop_flow_pairing(context::current()).await
+    }
+
+    fn deliver(self, _: Result<Self::Answer, Unavailable>, _: &UpdateSender) {}
+}
+
 /// Remove one pairing from its receiver, answered as
 /// [`GuiUpdate::DeviceUnpaired`] so local state changes only once the
 /// receiver has let the pairing go.
@@ -1032,6 +1126,11 @@ commands! {
     PairDevice,
     CancelPairing,
     UnpairDevice,
+    StartFlowPairing,
+    PairFlowPeer,
+    ConfirmFlowPairing,
+    CancelFlowPairing,
+    StopFlowPairing,
     #[cfg(all(target_os = "macos", debug_assertions))]
     PollEventMonitor,
 }

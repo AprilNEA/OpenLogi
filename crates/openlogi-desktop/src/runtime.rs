@@ -325,6 +325,9 @@ impl Runtime {
             ipc::GuiUpdate::PairingCancelled => {
                 cx.update(windows::add_device::apply_cancelled);
             }
+            ipc::GuiUpdate::FlowPairingRefused(refusal) => cx.update(|cx| {
+                AppState::apply(cx, |state| state.apply_flow_pairing_refusal(refusal));
+            }),
             ipc::GuiUpdate::ConfigLoadResult { result } => {
                 cx.update(|cx| apply_config_load(result, cx));
             }
