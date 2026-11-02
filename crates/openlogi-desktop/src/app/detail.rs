@@ -82,15 +82,16 @@ pub(super) fn detail_header(
         .border_b_1()
         .border_color(pal.border)
         .child(back_button(cx))
+        // The name takes the room the status leaves and truncates only when
+        // that runs out, at any interface scale.
         .child(
             div()
+                .flex_1()
                 .min_w_0()
-                .max_w(px(220.))
                 .truncate()
                 .text_heading()
                 .child(name),
         )
-        .child(div().flex_1())
         .children(battery)
         .when_some(online, |this, online| this.child(status_badge(online, pal)))
 }
