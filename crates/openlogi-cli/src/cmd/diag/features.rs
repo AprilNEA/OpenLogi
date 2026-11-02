@@ -8,6 +8,7 @@ use std::fmt;
 
 use anyhow::Result;
 use clap::Args;
+use openlogi_core::device::DeviceInventory;
 use openlogi_hid::{DeviceRoute, FeatureType, FirmwareEntity};
 
 #[derive(Debug, Args)]
@@ -15,49 +16,101 @@ pub struct FeaturesArgs {}
 
 pub async fn run(_args: FeaturesArgs) -> Result<()> {
     let inventories = openlogi_hid::enumerate().await?;
-    let mut any = false;
-    for inv in &inventories {
-        for paired in inv.paired.iter().filter(|p| p.online) {
-            any = true;
-            let route = DeviceRoute::for_slot(inv, paired.slot).unwrap_or(DeviceRoute::Direct {
-                vendor_id: inv.receiver.vendor_id,
-                product_id: inv.receiver.product_id,
-            });
-            match paired.codename.as_deref() {
-                Some(name) => println!("device: {name} ({route})"),
-                None => println!("device: Slot {} ({route})", paired.slot),
+    let sections = sections(&inventories);
+    for section in &sections {
+        let route = &section.route;
+        println!("device: {} ({route})", section.name);
+        match section.read {
+            Read::Tables => dump_tables(route).await,
+            Read::Hidpp10 => {
+                println!("  HID++ 1.0 device: no HID++ 2.0 feature table or firmware entities");
             }
-            match openlogi_hid::dump_features(&route).await {
-                Ok(entries) => {
-                    println!("  {:>4}  {:>6}  {:<4}  flags", "idx", "id", "ver");
-                    for entry in &entries {
-                        println!(
-                            "  {:>4}  0x{:04x}  v{:<3}  {}",
-                            entry.index,
-                            entry.id,
-                            entry.version,
-                            FeatureFlagsDisplay(entry.typ)
-                        );
-                    }
-                    println!("  ({} feature entries)\n", entries.len());
-                }
-                Err(e) => println!("  dump failed: {e:#}\n"),
-            }
-            match openlogi_hid::dump_firmware_entities(&route).await {
-                Ok(entries) => {
-                    for entry in &entries {
-                        println!("  {}", FirmwareEntityDisplay(entry));
-                    }
-                }
-                Err(e) => println!("  firmware dump failed: {e:#}"),
-            }
-            println!();
         }
+        println!();
     }
-    if !any {
+    if sections.is_empty() {
         println!("no online HID++ devices found");
     }
     Ok(())
+}
+
+/// One online paired device, and what `diag features` reads from it.
+#[derive(Debug, PartialEq, Eq)]
+struct Section {
+    /// The receiver's codename for the device, or `Slot <n>` without one.
+    name: String,
+    route: DeviceRoute,
+    read: Read,
+}
+
+/// What `diag features` reads from one device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Read {
+    /// The HID++ 2.0 feature table and the `0x0003` firmware entities.
+    Tables,
+    /// Neither: the inventory probe found the device answers as HID++ 1.0
+    /// ([`PairedDevice::hidpp10`]), which has no feature table. A dump would
+    /// fail with "did not respond to HID++" although the device answered
+    /// (#1554).
+    ///
+    /// [`PairedDevice::hidpp10`]: openlogi_core::device::PairedDevice::hidpp10
+    Hidpp10,
+}
+
+/// Every online paired device in `inventories`, in enumeration order.
+fn sections(inventories: &[DeviceInventory]) -> Vec<Section> {
+    inventories
+        .iter()
+        .flat_map(|inv| {
+            inv.paired
+                .iter()
+                .filter(|paired| paired.online)
+                .map(move |paired| Section {
+                    name: paired
+                        .codename
+                        .clone()
+                        .unwrap_or_else(|| format!("Slot {}", paired.slot)),
+                    route: DeviceRoute::for_slot(inv, paired.slot).unwrap_or(DeviceRoute::Direct {
+                        vendor_id: inv.receiver.vendor_id,
+                        product_id: inv.receiver.product_id,
+                    }),
+                    read: if paired.hidpp10 {
+                        Read::Hidpp10
+                    } else {
+                        Read::Tables
+                    },
+                })
+        })
+        .collect()
+}
+
+/// Print the feature table and the firmware entities of the device `route`
+/// reaches, or why each one failed.
+async fn dump_tables(route: &DeviceRoute) {
+    match openlogi_hid::dump_features(route).await {
+        Ok(entries) => {
+            println!("  {:>4}  {:>6}  {:<4}  flags", "idx", "id", "ver");
+            for entry in &entries {
+                println!(
+                    "  {:>4}  0x{:04x}  v{:<3}  {}",
+                    entry.index,
+                    entry.id,
+                    entry.version,
+                    FeatureFlagsDisplay(entry.typ)
+                );
+            }
+            println!("  ({} feature entries)\n", entries.len());
+        }
+        Err(e) => println!("  dump failed: {e:#}\n"),
+    }
+    match openlogi_hid::dump_firmware_entities(route).await {
+        Ok(entries) => {
+            for entry in &entries {
+                println!("  {}", FirmwareEntityDisplay(entry));
+            }
+        }
+        Err(e) => println!("  firmware dump failed: {e:#}"),
+    }
 }
 
 /// Every feature-type flag the device set, as a comma-separated list.
@@ -151,12 +204,13 @@ impl fmt::Display for FirmwareEntityDisplay<'_> {
 
 #[cfg(test)]
 mod tests {
+    use openlogi_core::device::{DeviceInventory, DeviceKind, PairedDevice, ReceiverInfo};
     use openlogi_hid::{
-        DeviceEntityType, FeatureType, FirmwareEntity, FirmwareEntityInfo, HidppOperation,
-        WriteError,
+        DeviceEntityType, DeviceRoute, FeatureType, FirmwareEntity, FirmwareEntityInfo,
+        HidppOperation, WriteError,
     };
 
-    use super::{FeatureFlagsDisplay, FirmwareEntityDisplay};
+    use super::{FeatureFlagsDisplay, FirmwareEntityDisplay, Read, Section, sections};
 
     fn entry() -> FirmwareEntity {
         FirmwareEntity::Readable {
@@ -308,6 +362,84 @@ mod tests {
         assert_eq!(
             FeatureFlagsDisplay(FeatureType::from_bits_retain(0b0000_0011)).to_string(),
             "unknown=0x03"
+        );
+    }
+
+    fn online(slot: u8) -> PairedDevice {
+        PairedDevice {
+            slot,
+            codename: None,
+            wpid: None,
+            kind: DeviceKind::Mouse,
+            online: true,
+            battery: None,
+            model_info: None,
+            capabilities: None,
+            settings_revision: 0,
+            hidpp10: false,
+        }
+    }
+
+    fn slot(slot: u8) -> DeviceRoute {
+        DeviceRoute::Unifying {
+            receiver_uid: "receiver-uid".into(),
+            slot,
+        }
+    }
+
+    /// The receiver in #1554: HID++ 1.0 mice in slots 1 and 3, a HID++ 2.0
+    /// keyboard in slot 2. Only the keyboard has tables to dump. Before, both
+    /// mice were dumped and reported "did not respond to HID++".
+    #[test]
+    fn a_hidpp10_device_is_reported_instead_of_dumped() {
+        let inventory = DeviceInventory {
+            receiver: ReceiverInfo {
+                name: "Unifying Receiver".into(),
+                vendor_id: 0x046d,
+                product_id: 0xc52b,
+                unique_id: Some("receiver-uid".into()),
+            },
+            paired: vec![
+                PairedDevice {
+                    codename: Some("M510".into()),
+                    hidpp10: true,
+                    ..online(1)
+                },
+                PairedDevice {
+                    codename: Some("K360".into()),
+                    kind: DeviceKind::Keyboard,
+                    ..online(2)
+                },
+                PairedDevice {
+                    hidpp10: true,
+                    ..online(3)
+                },
+                PairedDevice {
+                    online: false,
+                    ..online(4)
+                },
+            ],
+        };
+
+        assert_eq!(
+            sections(&[inventory]),
+            [
+                Section {
+                    name: "M510".into(),
+                    route: slot(1),
+                    read: Read::Hidpp10,
+                },
+                Section {
+                    name: "K360".into(),
+                    route: slot(2),
+                    read: Read::Tables,
+                },
+                Section {
+                    name: "Slot 3".into(),
+                    route: slot(3),
+                    read: Read::Hidpp10,
+                },
+            ]
         );
     }
 }

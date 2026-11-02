@@ -313,6 +313,7 @@ impl Armed {
 
         // HID++ watchers need no Accessibility — start them up front.
         running.restart_hidpp_watchers();
+        running.shared.flow.arm();
         let (mut watchers, inventory_refresh) = startup::spawn_state_watchers(&running.shared);
         let mut ring = running.inputs.ring.subscribe();
 
@@ -659,6 +660,7 @@ impl Running {
             self.inputs.dispatcher.clone(),
             self.inputs.scroll_input.clone(),
             Arc::clone(&self.event_monitor),
+            self.shared.flow.input(),
         )
     }
 
@@ -772,6 +774,8 @@ impl Running {
         reason: &str,
         tray_guard: Option<tokio::sync::oneshot::Sender<()>>,
     ) -> ! {
+        // Flow holds receiver leases and device I/O, so it stops first.
+        self.shared.flow.shutdown().await;
         self.ring_haptics.finish().await;
         std::mem::replace(&mut self.hidpp_watchers, WatcherFleet::Inactive)
             .stop_for_exit()

@@ -5,7 +5,7 @@
 
 use std::{
     error::Error as StdError,
-    net::{Ipv4Addr, SocketAddr},
+    net::{Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -139,6 +139,53 @@ async fn hello_negotiates_over_mutually_pinned_quic() -> TestResult {
     assert_eq!(pair.first.trust(), SessionTrust::Trusted);
     assert_eq!(pair.second.trust(), SessionTrust::Trusted);
     assert_eq!(pair.first.peer_key(), pair.first.peer_hello_key()?);
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_ipv6_wildcard_endpoint_takes_ipv4_and_ipv6_peers() -> TestResult {
+    let listener_identity = MachineIdentity::generate()?;
+    let v4_identity = MachineIdentity::generate()?;
+    let v6_identity = MachineIdentity::generate()?;
+    let listener = Arc::new(FlowEndpoint::bind(
+        SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0)),
+        listener_identity.clone(),
+        PeerTrust::pinned([v4_identity.public_key(), v6_identity.public_key()]),
+        hello(&listener_identity, (1, 1)),
+    )?);
+    let port = listener.local_addr()?.port();
+    for (identity, local, target) in [
+        (
+            &v4_identity,
+            localhost(),
+            SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
+        ),
+        (
+            &v6_identity,
+            SocketAddr::from((Ipv6Addr::LOCALHOST, 0)),
+            SocketAddr::from((Ipv6Addr::LOCALHOST, port)),
+        ),
+    ] {
+        let dialer = FlowEndpoint::bind(
+            local,
+            identity.clone(),
+            PeerTrust::pinned([listener_identity.public_key()]),
+            hello(identity, (1, 1)),
+        )?;
+        let acceptor = Arc::clone(&listener);
+        let accept = tokio::spawn(async move { acceptor.accept().await });
+        let connection = dialer.connect(target).await?;
+        accept.await??;
+        assert_eq!(connection.trust(), SessionTrust::Trusted);
+
+        // The same socket dials each family back.
+        let dialer = Arc::new(dialer);
+        let peer_address = dialer.local_addr()?;
+        let accept = tokio::spawn(async move { dialer.accept().await });
+        let connection = listener.connect(peer_address).await?;
+        accept.await??;
+        assert_eq!(connection.trust(), SessionTrust::Trusted);
+    }
     Ok(())
 }
 

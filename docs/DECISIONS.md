@@ -4,6 +4,34 @@ Durable "why we did it this way" records that are not obvious from the code.
 Add a dated entry when a non-obvious architectural or dependency decision is
 made or revisited.
 
+## 2026-11: Flow is set up in its own window, opened from the device list
+
+Flow is configured in a standalone window, as Settings and Add Device are. A
+Flow button in the main window's header, between the view switcher and
+Settings, opens it or focuses it. The button's dot repeats the window's
+status: green when at least one peer can be reached, amber when something
+blocks switching, none when Flow is off or nothing is paired. Its tooltip
+and accessible label say the same in words.
+
+The window puts the arrangement first: this computer in the centre, each peer
+on the edge `[flow.layout]` maps to it, moved by dragging or with the arrow
+keys. Under it, one sentence says which edge reaches which peer and what keeps
+the others from working. An inspector edits the selected peer: link state,
+edge, and each device's Easy-Switch channel on it. The window edits only this
+computer's edges; the way back is set on the peer.
+
+- **Not a Settings page** (as in #1882). Position becomes a "right of this
+  computer" select with no picture of the arrangement, and Flow's status
+  stays out of sight. Flow is an arrangement users come back to when a
+  machine moves or goes offline, not a preference they set once.
+- **Not a tab in the main window.** A Devices | Flow tab squeezes the canvas
+  into the device list's column and truncates names, and the home page stops
+  being the device list. A Flow tab per device (as in #1035) repeats one
+  per-computer arrangement on every device.
+
+The cost is a third top-level window. The header button is what makes it
+discoverable.
+
 ## 2026-10: Dock swipes post 1.25 progress per desktop and end at the hand's speed
 
 The live swipe of #1672 lagged the hand and jumped at every switch. Screen

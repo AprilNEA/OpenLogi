@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{ActionRingIcon, ActionRingSlot};
-use openlogi_core::config::{ConfigRevision, Lighting};
+use openlogi_core::config::{ConfigRevision, FlowPeerName, FlowPublicKey, Lighting};
 use openlogi_core::device::{
     BatteryInfo, ChangedOnLight, DeviceInventory, DeviceKind, LightState, LockKey, StandaloneDevice,
 };
@@ -165,7 +165,12 @@ pub use succession::Identity;
 ///      (`page2:gridMiddle`) — the keypad's binding pages. `PairedDevice::hidpp10`
 ///      appended, so the GUI can tell a HID++ 1.0 device from one it never
 ///      probed.
-pub const PROTOCOL_VERSION: u32 = 43;
+/// v44: `Agent::switch_host`, `WriteError::HostOutOfRange` and
+///      `HidppOperation::ChangeHost` appended — software-initiated `0x1814`
+///      host switching of one device. `AgentSnapshot::flow` appended —
+///      whether Flow is enabled, and the coarse link state of each
+///      configured peer.
+pub const PROTOCOL_VERSION: u32 = 44;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -287,6 +292,9 @@ pub struct AgentSnapshot {
     /// light reached only through its raw report reads nothing back and is
     /// not listed.
     pub lights: Vec<ObservedLight>,
+    /// Whether cross-machine Flow is enabled, and the coarse link state of
+    /// each configured peer. See [`FlowStatus`].
+    pub flow: FlowStatus,
 }
 
 /// A standalone light as it reported itself to the agent.
@@ -300,6 +308,44 @@ pub struct ObservedLight {
     /// Settings changed on the light itself that the saved settings do not
     /// hold yet. The agent already uses them; the GUI saves them.
     pub changed_on_light: ChangedOnLight,
+}
+
+/// Cross-machine Flow state at the snapshot's low update rate.
+///
+/// Ping sequence numbers, round-trip times, and last-seen timestamps stay out
+/// of IPC. They change every few seconds without changing what the UI shows,
+/// and each change would publish a new observation.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FlowStatus {
+    /// The loaded config enables Flow.
+    pub enabled: bool,
+    /// The configured peers, in config order.
+    pub peers: Vec<FlowPeerStatus>,
+}
+
+/// One configured Flow peer and the state of its session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FlowPeerStatus {
+    /// The peer's name in `[[flow.peers]]`.
+    pub name: FlowPeerName,
+    /// The peer's pinned identity key.
+    pub public_key: FlowPublicKey,
+    /// The state of the application session with the peer.
+    pub state: FlowLinkState,
+}
+
+/// The state of the application session with one Flow peer.
+///
+/// Append new variants only: the enum crosses the bincode IPC.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FlowLinkState {
+    /// QUIC and the Flow `Hello` exchange are complete, and the peer answers
+    /// pings.
+    Connected,
+    /// The QUIC connection stays open, but the peer's pongs are late.
+    Degraded,
+    /// No Flow connection to the peer exists.
+    Lost,
 }
 
 /// The controls of a standalone light that the user set in the GUI without
@@ -972,4 +1018,15 @@ pub trait Agent {
 
     /// Read a G-series mouse's onboard memory.
     async fn read_onboard(route: DeviceRoute) -> Result<OnboardState, WriteError>;
+
+    /// Switch the device on `route` to the zero-based Easy-Switch slot `host`
+    /// through HID++ `0x1814 ChangeHost`.
+    ///
+    /// The agent refuses a slot beyond the device's channel count with
+    /// [`WriteError::HostOutOfRange`], and a slot `0x1815 HostsInfo` reports
+    /// as unpaired with [`WriteError::HostSlotEmpty`]; nothing is written
+    /// then. `Ok` means the device already used `host` or the fire-and-forget
+    /// write was issued. It does not mean the device arrived: once the write
+    /// takes effect, its radio link has left this computer.
+    async fn switch_host(route: DeviceRoute, host: u8) -> Result<(), WriteError>;
 }

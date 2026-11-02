@@ -20,10 +20,10 @@ use openlogi_fixture::{
 use openlogi_ipc::client::ProtocolSkew;
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentStatus, BacklightObservation,
-    ClientKind, ConfigReloadError, ForegroundApps, Generation, Identity, InventoryHealth,
-    LockKeyObservation, MonitorEvent, NoticeObservation, Observation, PROTOCOL_VERSION,
-    PairingCommandError, PairingFailure, PairingPhase, PairingUpdate, RingObservation, SavedConfig,
-    SavedConfigVerdict,
+    ClientKind, ConfigReloadError, FlowStatus, ForegroundApps, Generation, Identity,
+    InventoryHealth, LockKeyObservation, MonitorEvent, NoticeObservation, Observation,
+    PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingPhase, PairingUpdate,
+    RingObservation, SavedConfig, SavedConfigVerdict,
 };
 use tarpc::client::RpcError;
 use tarpc::context::Context as TarpcContext;
@@ -409,6 +409,15 @@ impl Agent for TestAgent {
     ) -> Result<EasySwitchHosts, WriteError> {
         unreachable!("profile capture must never rename a host")
     }
+
+    async fn switch_host(
+        self,
+        _: TarpcContext,
+        _route: DeviceRoute,
+        _host: u8,
+    ) -> Result<(), WriteError> {
+        unreachable!("profile capture must never switch a host")
+    }
     async fn reload_saved_config(
         self,
         _: TarpcContext,
@@ -564,6 +573,7 @@ fn fixture_agent_with(edit: impl FnOnce(&mut DeviceProfile)) -> TestAgent {
             recent: Vec::new(),
         },
         lights: Vec::new(),
+        flow: FlowStatus::default(),
     };
     TestAgent::from_profile(profile, snapshot)
 }
@@ -591,8 +601,10 @@ fn assert_receiver_capture_observations(inspection: &TestAgent) {
             ReadFamily::Smartshift,
             ReadFamily::Wheel,
             // A mouse has no `0x1982`, so no backlight read is issued.
+            ReadFamily::EasySwitch,
             ReadFamily::Smartshift,
             ReadFamily::DisableKeys,
+            ReadFamily::EasySwitch,
         ]
     );
 }

@@ -612,7 +612,7 @@ fn current_modifiers() -> KeyModifiers {
     }
 }
 
-fn key_held(vk: VIRTUAL_KEY) -> bool {
+pub(super) fn key_held(vk: VIRTUAL_KEY) -> bool {
     // SAFETY: GetAsyncKeyState takes the key code by value; no preconditions.
     (unsafe { GetAsyncKeyState(i32::from(vk)) }) < 0
 }

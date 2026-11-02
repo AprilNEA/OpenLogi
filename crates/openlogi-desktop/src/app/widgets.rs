@@ -4,10 +4,10 @@
 
 use gpui::{
     App, Context, InteractiveElement as _, IntoElement, ParentElement, RenderOnce, SharedString,
-    Styled, Window, div, prelude::FluentBuilder as _,
+    Styled, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    Disableable as _, IconName, Sizable as _,
+    Disableable as _, Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
 };
@@ -41,6 +41,40 @@ pub(super) fn settings_button() -> impl IntoElement {
         .tooltip(tr!("app.settings"))
         .debug_selector(|| "home-settings".into())
         .on_click(|_, _, cx| crate::windows::settings::open(cx))
+}
+
+/// Opens the Flow window. Its dot repeats Flow's status — green when the
+/// pointer can cross to a peer, amber when something blocks it — and the
+/// tooltip and accessible label say it in words.
+pub(super) fn flow_button() -> impl IntoElement {
+    FlowButton
+}
+
+#[derive(IntoElement)]
+struct FlowButton;
+
+impl RenderOnce for FlowButton {
+    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        let readiness = AppState::try_read(cx).map(AppState::flow_readiness);
+        let status = readiness
+            .as_ref()
+            .map(crate::windows::flow::status_label)
+            .unwrap_or_default();
+        let color = readiness
+            .as_ref()
+            .and_then(|readiness| crate::windows::flow::health_color(readiness.health));
+        let label = tr!("flow.button_label", status => status.to_string());
+        Button::new("home-flow")
+            .outline()
+            .icon(Icon::empty().path("action-icons/arrow-left-right.svg"))
+            .label(tr!("flow.title"))
+            .when_some(color, |button, color| {
+                button.child(div().size(px(8.)).rounded_full().bg(color))
+            })
+            .tooltip(label)
+            .debug_selector(|| "home-flow".into())
+            .on_click(|_, _, cx| crate::windows::flow::open(cx))
+    }
 }
 
 /// Primary action that opens the pairing window. The empty state carries its

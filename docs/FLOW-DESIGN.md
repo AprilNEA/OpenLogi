@@ -131,7 +131,7 @@ architecture already guarantees (the agent owns all device I/O).
 | `HostsInfo` (`0x1815`) host slots/names | `crates/openlogi-hidpp/src/feature/hosts_info.rs` | done |
 | Keyboard→pointer host-switch links (keyboard-follow) | `crates/openlogi-device/src/session/host_switch.rs`, `crates/openlogi-agent-core/src/watchers/host_switch.rs` | done |
 | Global cursor position + mouse event stream | `crates/openlogi-hook` | done |
-| Cursor/synthesis injection (entry-point warp) | `crates/openlogi-inject` | done |
+| Pointer probe: cursor position, modifiers, display bounds, entry-point warp | `crates/openlogi-hook/src/probe.rs` | done |
 | Versioned local IPC with observation cells | `crates/openlogi-ipc`, `crates/openlogi-agent-core/src/observable.rs` | done |
 
 What is missing is the network layer and the orchestration on top.
@@ -407,19 +407,62 @@ append methods/fields, regenerate the golden tests.
 
 ## Edge detection
 
-Per-platform, in `openlogi-hook`'s existing cfg-gated style; the orchestrator
-consumes a platform-neutral "crossed edge E at normalized position p" event.
+Edge detection runs on a dedicated pointer thread
+(`openlogi-agent-core/src/flow/pointer.rs`). The OS hook callback only wakes
+the thread, so the callback never blocks. On each wake the thread samples one
+pointer state through `openlogi-hook`'s `PointerProbe` and feeds the edge
+detector, which reports "crossed edge E at normalized position t".
 
 - Geometry is **per-display exposed-edge segments**, never the union bounding
   rectangle of all displays (lan-mouse's macOS flaw). Edges adjacent to
-  another local display are not handoff edges.
-- macOS: cursor stream from the existing `CGEventTap` + display bounds via CG
-  APIs; display-reconfiguration callbacks refresh the geometry.
-- Windows: `WH_MOUSE_LL` positions + per-monitor rectangles.
-- Linux X11: cursor position polling/XInput + XRandR geometry.
+  another local display are not handoff edges. The thread reads the display
+  bounds again every 2 s and replaces the edges only when they changed.
+- Only the edges whose peer is connected are armed.
+- macOS: the HID system state gives the location and modifier flags; Core
+  Graphics gives the display bounds.
+- Windows: `GetCursorPos` and `GetAsyncKeyState`; per-monitor rectangles from
+  `EnumDisplayMonitors`, all in Win32 virtual-screen coordinates. This is not
+  the hook's `CursorPosition` space, which divides by each monitor's DPI scale.
+- Linux X11: `QueryPointer` and RandR monitors on the thread's own
+  connection.
 - Linux Wayland: no global cursor, but two proven routes exist (wlroots
   layer-shell 1 px edge surfaces + pointer constraints; InputCapture portal +
-  libei) — deferred to its own milestone, not excluded.
+  libei) — deferred to its own milestone, not excluded. The probe reports no
+  pointer there, so no edge fires. The runtime keeps running without the
+  pointer thread, and incoming handoffs still work.
+- The thread needs the OS mouse hook to wake it. With
+  `app_settings.capture_mouse_events = false`, or without Accessibility on
+  macOS, no edge fires; incoming handoffs still work.
+
+## Agent runtime
+
+`FlowController` (`openlogi-agent-core/src/flow/controller.rs`) lives in the
+agent's shared handles. The orchestrator pushes the `[flow]` section and the
+device inventory to it after every configuration or inventory change; equal
+values wake nobody. Once the agent arms, a supervisor runs at most one
+generation: it starts one when Flow is enabled and has a peer, and replaces
+it when the `[flow]` section changes. A generation that cannot start, for
+example because its port is taken, is retried after 30 s or on the next
+change. Agent shutdown stops Flow before the HID++ watchers.
+
+A generation (`flow/runtime.rs`) is one actor task that owns all mutable
+state: the peer links, the incoming transfer ledger, and the one outgoing
+transfer. Readers, writers, and transfer tasks talk to it through bounded
+channels, and every network read and write has a deadline.
+
+An outgoing transfer (`flow/runtime/sender.rs`) has two phases:
+
+1. **Hardware.** Take the exclusive receiver lease (2 s), check that device
+   I/O is allowed, and prepare each device's switch (1 s each). If any device
+   cannot switch, no device moves, so a keyboard never stays behind its
+   mouse. The peer hears nothing until this phase succeeds.
+2. **Negotiation.** Send the request (2 s). After an accept, start a write
+   only while the first half of the peer's arm window is open, counted from
+   when the request was sent, because the peer may open its window as soon
+   as the request arrives; each write has a 1 s deadline. Release the lease after the writes. When no write started,
+   cancel the transfer; otherwise wait for the peer's result.
+
+One transfer runs at a time, in either direction.
 
 ## Config sketch
 
@@ -445,8 +488,9 @@ key = "unit:0f1e2d3c"              # existing device identity key
 peer_channels = { self = 0, "work-laptop" = 1 }
 ```
 
-Exact shapes to be settled against `openlogi-core`'s config conventions when
-milestone 2 lands.
+`openlogi-core` validates this section when the configuration loads
+(`crates/openlogi-core/src/config/flow.rs`); the commented section in
+`docs/config.example.toml` is the reference.
 
 ## Milestones (demo-first)
 

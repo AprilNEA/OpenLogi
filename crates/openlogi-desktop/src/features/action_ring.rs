@@ -280,7 +280,7 @@ fn slot_button(
     let (left, top) = slot.placement(PREVIEW_SIZE, PREVIEW_RADIUS, PREVIEW_SLOT_SIZE);
     let label = entry.map_or_else(
         || tr!("action_ring.empty_slot").to_string(),
-        |entry| localized_action_label(entry.action()).to_string(),
+        |entry| entry_caption(entry).to_string(),
     );
     let icon_path = entry.map(|entry| {
         entry.custom_icon().map_or_else(
@@ -353,3 +353,16 @@ fn slot_button(
             });
         })
 }
+
+/// The name a populated slot shows in the preview: the label the user gave it,
+/// verbatim, or its action's localized name. The agent makes the same choice
+/// for the ring itself, so the preview and the ring name a slot alike.
+fn entry_caption(entry: &ActionRingEntry) -> SharedString {
+    entry.custom_label().map_or_else(
+        || localized_action_label(entry.action()),
+        |label| SharedString::from(label.to_owned()),
+    )
+}
+
+#[cfg(test)]
+mod tests;

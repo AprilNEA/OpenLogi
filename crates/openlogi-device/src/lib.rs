@@ -65,8 +65,9 @@ pub use session::gesture::{
 pub use session::host_switch::{
     FollowerLink, FollowerRelease, HostSwitchError, HostSwitchFollowUp, HostSwitchRestoreOutcome,
     HostSwitchSessionFailure, HostSwitchSessionOutcome, HostSwitchStopReason, LeadCookie,
-    PendingHostSwitchRestore, link_follower_cookies_on, release_follower_cookies_on,
-    run_host_switch_session, switch_linked_hosts,
+    PendingHostSwitchRestore, PreparedHostSwitch, link_follower_cookies_on, prepare_host_switch,
+    prepare_host_switch_on, release_follower_cookies_on, run_host_switch_session, switch_host_on,
+    switch_linked_hosts,
 };
 pub use session::keyboard::{
     KeyboardWanted, RESERVED_KEYBOARD_CONTROLS, is_reserved_keyboard_control,

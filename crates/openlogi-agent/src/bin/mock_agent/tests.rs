@@ -725,13 +725,13 @@ async fn easy_switch_names_are_kept_and_rejected_renames_change_nothing() {
         "a refused rename leaves the kept name in place"
     );
 
-    let keyboard = DeviceRoute::Bolt {
-        receiver_uid: RECEIVER_UID.to_string(),
-        slot: KEYBOARD_SLOT,
+    let direct_mouse = DeviceRoute::Direct {
+        vendor_id: 0x046d,
+        product_id: 0xb020,
     };
     assert_eq!(
         agent
-            .rename_easy_switch_host(tarpc::context::current(), keyboard, 0, "Desk".into())
+            .rename_easy_switch_host(tarpc::context::current(), direct_mouse, 0, "Desk".into())
             .await,
         Err(WriteError::FeatureUnsupported {
             feature_hex: 0x1815

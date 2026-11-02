@@ -167,6 +167,13 @@ fn indicator_and_session_commands_parse() {
             "advance 30",
             Some(Command::Advance(Duration::from_secs(30))),
         ),
+        (
+            "flow Work PC unstable",
+            Some(Command::FlowLink {
+                peer: "Work PC".to_owned(),
+                state: FlowLinkState::Degraded,
+            }),
+        ),
         ("disconnect", Some(Command::Disconnect)),
     ];
     for (line, expected) in cases {
