@@ -2,9 +2,20 @@
 
 use super::*;
 
+/// The shipped unit's name, as packaging installs it and users enable it.
+const UNIT_NAME: &str = "openlogi-agent.service";
+
+fn production() -> UnitSpec {
+    UnitSpec::new(Profile::Production)
+}
+
+fn dev() -> UnitSpec {
+    UnitSpec::new(Profile::Dev)
+}
+
 #[test]
 fn rendered_unit_targets_agent_and_restarts_on_failure() {
-    let body = render_unit("/usr/bin/openlogi-agent");
+    let body = production().render("/usr/bin/openlogi-agent");
     assert!(body.contains("ExecStart=/usr/bin/openlogi-agent"));
     assert!(body.contains("Restart=on-failure"));
     assert!(body.contains("WantedBy=graphical-session.target"));
@@ -13,7 +24,7 @@ fn rendered_unit_targets_agent_and_restarts_on_failure() {
 
 #[test]
 fn rendered_unit_is_valid_ini_with_all_three_sections() {
-    let body = render_unit("/usr/bin/openlogi-agent");
+    let body = production().render("/usr/bin/openlogi-agent");
     assert!(body.contains("[Unit]"));
     assert!(body.contains("[Service]"));
     assert!(body.contains("[Install]"));
@@ -65,9 +76,9 @@ fn systemctl_arguments_render_as_a_command_suffix() {
 fn unit_path_uses_home_fallback() {
     // When XDG_CONFIG_HOME is unset (or relative), falls back to $HOME/.config.
     // We can't mutate global env safely in a parallel test suite, so we test
-    // the logic indirectly: the path must end in the UNIT_NAME component.
+    // the logic indirectly: the path must end in this profile's unit name.
     let path = generated_unit_path().expect("generated_unit_path resolves with a valid HOME");
-    assert!(path.ends_with(UNIT_NAME));
+    assert!(path.ends_with(UnitSpec::current().name()));
     assert!(path.to_string_lossy().contains("systemd/user"));
 }
 
@@ -97,13 +108,13 @@ fn a_rendered_unit_is_recognised_as_ours_for_any_executable() {
         "/home/dev/OpenLogi/target/debug/openlogi-agent",
     ] {
         assert!(
-            is_generated_unit(&render_unit(exe)),
+            production().is_generated(&production().render(exe)),
             "{exe} should round-trip"
         );
     }
 }
 
-/// The escaped forms are the reason [`render_unit_with_exec`] exists: a
+/// The escaped forms are the reason [`UnitSpec::render_with_exec`] exists: a
 /// naive check that re-escapes the parsed value turns `%%` into `%%%%` and
 /// fails to recognise a unit this app wrote.
 #[test]
@@ -114,7 +125,7 @@ fn a_rendered_unit_is_recognised_as_ours_when_the_path_needs_escaping() {
         "/home/a b/openlogi-agent",
     ] {
         assert!(
-            is_generated_unit(&render_unit(exe)),
+            production().is_generated(&production().render(exe)),
             "{exe} should round-trip"
         );
     }
@@ -122,29 +133,35 @@ fn a_rendered_unit_is_recognised_as_ours_when_the_path_needs_escaping() {
 
 #[test]
 fn a_hand_edited_unit_is_not_ours() {
-    let base = render_unit("/usr/bin/openlogi-agent");
+    let base = production().render("/usr/bin/openlogi-agent");
 
     let with_extra = base.replace(
         "Restart=on-failure",
         "Environment=RUST_LOG=debug\nRestart=on-failure",
     );
     assert!(
-        !is_generated_unit(&with_extra),
+        !production().is_generated(&with_extra),
         "an added directive is theirs"
     );
 
     let changed = base.replace("RestartSec=5", "RestartSec=1");
-    assert!(!is_generated_unit(&changed), "a changed value is theirs");
+    assert!(
+        !production().is_generated(&changed),
+        "a changed value is theirs"
+    );
 
     let removed = base.replace("After=graphical-session.target\n", "");
     assert!(
-        !is_generated_unit(&removed),
+        !production().is_generated(&removed),
         "a dropped directive is theirs"
     );
 
-    assert!(!is_generated_unit(""), "an empty file has no ExecStart");
     assert!(
-        !is_generated_unit("[Service]\nExecStart=/bin/true\n"),
+        !production().is_generated(""),
+        "an empty file has no ExecStart"
+    );
+    assert!(
+        !production().is_generated("[Service]\nExecStart=/bin/true\n"),
         "an unrelated unit is theirs"
     );
 }
@@ -153,17 +170,17 @@ fn a_hand_edited_unit_is_not_ours() {
 /// file is the user's however much of it looks familiar.
 #[test]
 fn a_unit_with_two_exec_starts_is_not_ours() {
-    let doubled = render_unit("/usr/bin/openlogi-agent").replace(
+    let doubled = production().render("/usr/bin/openlogi-agent").replace(
         "Restart=on-failure",
         "ExecStart=/bin/true\nRestart=on-failure",
     );
     assert_eq!(exec_start_value(&doubled), None);
-    assert!(!is_generated_unit(&doubled));
+    assert!(!production().is_generated(&doubled));
 }
 
 #[test]
 fn exec_start_value_is_returned_still_escaped() {
-    let unit = render_unit("/opt/100%/bin/openlogi-agent");
+    let unit = production().render("/opt/100%/bin/openlogi-agent");
     assert_eq!(
         exec_start_value(&unit),
         Some("/opt/100%%/bin/openlogi-agent")
@@ -228,7 +245,7 @@ fn same_executable_resolves_symlinks() {
 /// binary — that is exactly when a generated unit is still needed.
 #[test]
 fn packaged_probe_ignores_a_unit_for_another_binary() {
-    let unit = render_unit("/usr/bin/some-other-agent");
+    let unit = production().render("/usr/bin/some-other-agent");
     let parsed = exec_start_value(&unit).map(unescape_systemd_exec);
     assert_eq!(parsed.as_deref(), Some("/usr/bin/some-other-agent"));
     assert!(!same_executable(
@@ -242,9 +259,9 @@ fn packaged_probe_ignores_a_unit_for_another_binary() {
 /// migration, the data-tier delete, and the decision to leave a file alone.
 #[test]
 fn a_unit_this_app_did_not_render_is_not_ours() {
-    let ours = render_unit("/usr/bin/openlogi-agent");
+    let ours = production().render("/usr/bin/openlogi-agent");
     assert!(
-        is_generated_unit(&ours),
+        production().is_generated(&ours),
         "our own rendering is not the user's"
     );
 
@@ -253,9 +270,86 @@ fn a_unit_this_app_did_not_render_is_not_ours() {
         "Environment=RUST_LOG=debug\nRestart=on-failure",
     );
     assert!(
-        !is_generated_unit(&theirs),
+        !production().is_generated(&theirs),
         "an edited unit belongs to whoever wrote it"
     );
+}
+
+/// Earlier versions wrote this exact template; a byte that changes here turns
+/// every unit they left behind into "not ours", stranding it in place.
+#[test]
+fn the_production_template_is_unchanged() {
+    assert_eq!(
+        production().render("/usr/bin/openlogi-agent"),
+        "[Unit]\n\
+         Description=OpenLogi background agent (Logitech HID++ device control)\n\
+         After=graphical-session.target\n\
+         \n\
+         [Service]\n\
+         Type=simple\n\
+         ExecStart=/usr/bin/openlogi-agent\n\
+         Restart=on-failure\n\
+         RestartSec=5\n\
+         \n\
+         [Install]\n\
+         WantedBy=graphical-session.target\n"
+    );
+}
+
+/// A dev unit started at login has nothing but its environment to tell the
+/// agent which profile it belongs to; without it the dev binary would run
+/// against the shipped agent's config, socket, and unit.
+#[test]
+fn a_dev_unit_has_its_own_name_and_pins_the_dev_profile() {
+    let unit = dev();
+    assert_eq!(unit.name(), "openlogi-agent-dev.service");
+    let body = unit.render("/home/dev/OpenLogi/target/debug/openlogi-agent");
+    assert!(
+        body.contains("\nEnvironment=OPENLOGI_PROFILE=dev\n"),
+        "{body}"
+    );
+    assert!(
+        !production()
+            .render("/usr/bin/openlogi-agent")
+            .contains("Environment=")
+    );
+}
+
+/// Each profile claims only what it rendered itself, for any executable path,
+/// escaped or not.
+#[test]
+fn each_profile_recognises_only_its_own_rendering() {
+    for exe in [
+        "/home/dev/OpenLogi/target/debug/openlogi-agent",
+        "/opt/100%/bin/openlogi-agent",
+        "/home/a b/openlogi-agent",
+    ] {
+        assert!(dev().is_generated(&dev().render(exe)), "{exe}");
+        assert!(!dev().is_generated(&production().render(exe)), "{exe}");
+        assert!(!production().is_generated(&dev().render(exe)), "{exe}");
+    }
+}
+
+/// A packaged unit launching the very binary a dev agent runs from still
+/// carries the shipped name; the dev lookup must not adopt and enable it.
+#[test]
+fn a_dev_agent_never_adopts_the_packaged_unit() {
+    let dir = TempDir::new("dev-packaged");
+    let system = dir.path("system");
+    std::fs::create_dir_all(&system).expect("system dir");
+    let ours = std::env::current_exe().expect("current exe");
+    std::fs::write(
+        system.join(UNIT_NAME),
+        production().render(&ours.to_string_lossy()),
+    )
+    .expect("packaged unit");
+
+    let dirs = [system.clone()];
+    assert_eq!(
+        packaged_unit_in(&dirs, UNIT_NAME, &ours),
+        Some(system.join(UNIT_NAME))
+    );
+    assert_eq!(packaged_unit_in(&dirs, dev().name(), &ours), None);
 }
 
 /// The marker is what distinguishes an enablement this app made from one the
@@ -414,13 +508,17 @@ fn only_the_effective_system_unit_is_considered() {
     std::fs::create_dir_all(&low).expect("low dir");
 
     let ours = std::env::current_exe().expect("current exe");
-    std::fs::write(low.join(UNIT_NAME), render_unit(&ours.to_string_lossy())).expect("low unit");
+    std::fs::write(
+        low.join(UNIT_NAME),
+        production().render(&ours.to_string_lossy()),
+    )
+    .expect("low unit");
 
     let dirs = [high.clone(), low.clone()];
 
     // Only the lower entry exists: it is the effective unit, and it matches.
     assert_eq!(
-        packaged_unit_in(&dirs, &ours).as_deref(),
+        packaged_unit_in(&dirs, UNIT_NAME, &ours).as_deref(),
         Some(low.join(UNIT_NAME).as_path()),
         "the sole existing unit is the effective one"
     );
@@ -428,20 +526,23 @@ fn only_the_effective_system_unit_is_considered() {
     // A higher-precedence unit for a different binary now shadows it.
     std::fs::write(
         high.join(UNIT_NAME),
-        render_unit("/usr/bin/some-other-agent"),
+        production().render("/usr/bin/some-other-agent"),
     )
     .expect("high unit");
     assert_eq!(
-        packaged_unit_in(&dirs, &ours),
+        packaged_unit_in(&dirs, UNIT_NAME, &ours),
         None,
         "a shadowed match must not be reported"
     );
 
     // The effective unit naming this binary is reported, shadowing or not.
-    std::fs::write(high.join(UNIT_NAME), render_unit(&ours.to_string_lossy()))
-        .expect("high unit rewritten");
+    std::fs::write(
+        high.join(UNIT_NAME),
+        production().render(&ours.to_string_lossy()),
+    )
+    .expect("high unit rewritten");
     assert_eq!(
-        packaged_unit_in(&dirs, &ours).as_deref(),
+        packaged_unit_in(&dirs, UNIT_NAME, &ours).as_deref(),
         Some(high.join(UNIT_NAME).as_path()),
         "the highest-precedence unit is the one reported"
     );
@@ -450,7 +551,7 @@ fn only_the_effective_system_unit_is_considered() {
     std::fs::remove_file(high.join(UNIT_NAME)).expect("remove high unit");
     std::os::unix::fs::symlink("/dev/null", high.join(UNIT_NAME)).expect("mask high unit");
     assert_eq!(
-        packaged_unit_in(&dirs, &ours),
+        packaged_unit_in(&dirs, UNIT_NAME, &ours),
         None,
         "a mask must stop lookup before the lower matching unit"
     );
@@ -458,12 +559,15 @@ fn only_the_effective_system_unit_is_considered() {
     // Empty unit files are the other form of systemd mask.
     std::fs::remove_file(high.join(UNIT_NAME)).expect("remove mask symlink");
     std::fs::write(high.join(UNIT_NAME), b"").expect("empty mask");
-    assert_eq!(packaged_unit_in(&dirs, &ours), None);
+    assert_eq!(packaged_unit_in(&dirs, UNIT_NAME, &ours), None);
 
     // A symlink to an actual unit remains a usable higher-precedence entry.
     std::fs::remove_file(high.join(UNIT_NAME)).expect("remove empty mask");
     std::os::unix::fs::symlink(low.join(UNIT_NAME), high.join(UNIT_NAME)).expect("link unit");
-    assert_eq!(packaged_unit_in(&dirs, &ours), Some(high.join(UNIT_NAME)));
+    assert_eq!(
+        packaged_unit_in(&dirs, UNIT_NAME, &ours),
+        Some(high.join(UNIT_NAME))
+    );
 }
 
 /// The load path is environment dependent, so it is read from systemd rather

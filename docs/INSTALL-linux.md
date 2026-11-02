@@ -320,6 +320,11 @@ OpenLogi never overwrites or deletes a unit it did not generate, at either
 location, and it only turns off an autostart it turned on. Enabling the service
 yourself with the command above keeps working regardless of the GUI toggle.
 
+A development build running under the dev profile (`OPENLOGI_PROFILE=dev`) uses
+its own `openlogi-agent-dev.service` instead, which pins that profile in its
+environment, so it never enables, disables, or shadows the installed agent's
+unit.
+
 ## Verify the installation
 
 ```sh
