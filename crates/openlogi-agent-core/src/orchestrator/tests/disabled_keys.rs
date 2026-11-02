@@ -872,7 +872,7 @@ async fn adopting_a_route_applies_changed_policy_without_another_inventory_pass(
     let shared = orchestrator.shared();
     let keyboard = Keyboard::publish_on(&shared, route.clone()).await;
     let canonical = PhysicalDeviceKey::parse("unit:01020304").expect("key");
-    assert!(config.adopt_route(&canonical, legacy, None));
+    assert!(config.adopt_route(&canonical, legacy, [0; 4], None));
     let (_, before_adoption) = shared
         .disabled_keys_order
         .policy(&route)
