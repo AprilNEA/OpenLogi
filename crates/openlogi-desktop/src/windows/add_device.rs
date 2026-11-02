@@ -468,6 +468,7 @@ fn action_bar(state: &PairingUi, target: Option<ReceiverSelector>) -> impl IntoE
         }
         PairingUi::Paired { .. } => bar.child(
             control_button("ad-done")
+                .primary()
                 .label(tr!("common.done"))
                 .on_click(|_, _, cx| cancel_search(cx)),
         ),
