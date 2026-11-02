@@ -5,14 +5,16 @@
 use std::sync::Arc;
 
 use hidpp::channel::HidppChannel;
-use openlogi_core::device::{DeviceInventory, PairedDevice, ReceiverInfo};
+use openlogi_core::device::{
+    DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports, PairedDevice, ReceiverInfo,
+};
 use tracing::debug;
 
 use super::{NodeProbe, PassContext, ProbeVerdict};
 use crate::backend::NodeInfo;
 use crate::channel::route::DIRECT_DEVICE_INDEX;
 use crate::inventory::cache::{CacheKey, CacheOutcome, ProbeTarget, probe_or_reuse, seen};
-use crate::inventory::features::Refresh;
+use crate::inventory::features::{ProbedFeatures, Refresh};
 use crate::inventory::mappings::{direct_identity_kind, resolve_device_kind};
 
 /// Prefer the device's own HID++ marketing name over the host HID collection
@@ -98,11 +100,11 @@ pub(super) async fn probe_direct(
     // whose headset is off.
     let is_peripheral =
         probe.battery.is_some() || probe.unlinked || caps.buttons || caps.pointer || caps.lighting;
-    // A walk that never completed says nothing about what this node is: the
-    // discriminator below would read "no battery, no config feature" off an
-    // empty probe and reject a real mouse as a receiver's secondary interface.
-    // Settle it as a transient failure and keep the node's cache entry, so the
-    // last-good inventory is replayed while the link recovers.
+    if info.product_id == PRO_X_2_PRODUCT_ID {
+        let settings_revision = pass.settings_revision(DIRECT_DEVICE_INDEX);
+        return assemble_centurion_headset_probe(info, probe, outcome, settings_revision);
+    }
+    // An incomplete walk is a transient failure, not evidence of a non-peripheral.
     if !walk_succeeded {
         debug!(
             vid = format_args!("{:04x}", info.vendor_id),
@@ -178,5 +180,123 @@ fn failed_probe(info: &NodeInfo) -> NodeProbe {
         inventory: None,
         verdict: ProbeVerdict::Failed,
         outcomes: vec![seen(Some(CacheKey::Direct(info.id.clone())))],
+    }
+}
+
+/// The PRO X 2 LIGHTSPEED's USB identity. Its receiver bridges HID++ to the
+/// headset over Centurion framing (see `openlogi-hid`'s transport).
+const PRO_X_2_PRODUCT_ID: u16 = 0x0af7;
+
+/// Assemble the inventory of a headset reached through Centurion bridging,
+/// such as the PRO X 2 LIGHTSPEED. The model falls back to the product ID
+/// when the probe read none; a model identifier is not a physical identity,
+/// so the unit ID stays zero.
+fn assemble_centurion_headset_probe(
+    info: &NodeInfo,
+    probe: ProbedFeatures,
+    outcome: CacheOutcome,
+    settings_revision: u64,
+) -> NodeProbe {
+    let capabilities = probe.capabilities();
+    let walk_succeeded = capabilities.is_some() && probe.refresh == Refresh::Answered;
+    let inventory = DeviceInventory {
+        receiver: ReceiverInfo {
+            name: "PRO X 2 LIGHTSPEED Wireless Gaming Headset".to_string(),
+            vendor_id: info.vendor_id,
+            product_id: info.product_id,
+            unique_id: None,
+        },
+        paired: vec![PairedDevice {
+            slot: DIRECT_DEVICE_INDEX,
+            codename: Some("PRO X 2 LIGHTSPEED".to_string()),
+            wpid: None,
+            kind: DeviceKind::Headset,
+            // The receiver is present; whether the headset answers is the
+            // battery feature's answer, as for other headset dongles.
+            online: !probe.unlinked,
+            battery: probe.battery,
+            model_info: probe.model_info.or(Some(DeviceModelInfo {
+                entity_count: 1,
+                serial_number: None,
+                unit_id: [0; 4],
+                transports: DeviceTransports {
+                    usb: true,
+                    equad: false,
+                    btle: false,
+                    bluetooth: false,
+                },
+                model_ids: [PRO_X_2_PRODUCT_ID, 0, 0],
+                extended_model_id: 0,
+            })),
+            capabilities,
+            settings_revision,
+            hidpp10: false,
+        }],
+    };
+    NodeProbe {
+        inventory: Some(inventory),
+        verdict: ProbeVerdict::healthy_when(walk_succeeded),
+        outcomes: vec![outcome],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use openlogi_core::device::Capabilities;
+
+    use super::*;
+    use crate::backend::NodeId;
+    use crate::inventory::features::ProbedProtocol;
+
+    fn info() -> NodeInfo {
+        NodeInfo {
+            id: NodeId::from("centurion-test".to_string()),
+            vendor_id: 0x046d,
+            product_id: PRO_X_2_PRODUCT_ID,
+            usage_page: 0xffa0,
+            usage_id: 1,
+            name: "PRO X 2".into(),
+            manufacturer: None,
+            serial_number: None,
+        }
+    }
+
+    #[test]
+    fn centurion_fallback_identifies_model_not_physical_unit() {
+        let probe = ProbedFeatures {
+            protocol: ProbedProtocol::Hidpp20 {
+                capabilities: Capabilities::default(),
+                incomplete: false,
+            },
+            ..ProbedFeatures::default()
+        };
+        let result = assemble_centurion_headset_probe(&info(), probe, CacheOutcome::Unkeyed, 0);
+        assert_eq!(result.verdict, ProbeVerdict::Healthy { complete: true });
+        let model = result
+            .inventory
+            .unwrap()
+            .paired
+            .remove(0)
+            .model_info
+            .unwrap();
+        assert_eq!(model.unit_id, [0; 4]);
+        assert_eq!(model.model_ids, [PRO_X_2_PRODUCT_ID, 0, 0]);
+
+        // A probe that never read the feature table fails, but keeps the
+        // model the device did report.
+        let reported = DeviceModelInfo {
+            unit_id: [1, 2, 3, 4],
+            ..model
+        };
+        let probe = ProbedFeatures {
+            model_info: Some(reported.clone()),
+            ..ProbedFeatures::default()
+        };
+        let result = assemble_centurion_headset_probe(&info(), probe, CacheOutcome::Unkeyed, 0);
+        assert_eq!(result.verdict, ProbeVerdict::Failed);
+        assert_eq!(
+            result.inventory.unwrap().paired[0].model_info,
+            Some(reported)
+        );
     }
 }

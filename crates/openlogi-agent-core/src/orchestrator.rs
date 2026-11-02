@@ -1301,6 +1301,10 @@ impl Orchestrator {
             if !self.config.device_enabled(&dev.config_key) {
                 continue;
             }
+            // A headset has no buttons or pointer to capture.
+            if dev.kind == DeviceKind::Headset {
+                continue;
+            }
             let rearm_generation = self
                 .capture_route_generations
                 .get(&route)

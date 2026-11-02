@@ -2,8 +2,8 @@
 //!
 //! Prints exactly what the firmware returns (unified `0x1004` fields, legacy
 //! `0x1000` `discharge_level`/`next_level`/`status`, the `0x1001` measured
-//! voltage and charging flags, or the `0x1F20` ADC voltage and charging state).
-//! Run it once on battery and
+//! voltage and charging flags, the `0x1F20` ADC voltage and charging state,
+//! or the Centurion `0x0104` fields). Run it once on battery and
 //! once with the charger plugged in to see how the device reports while charging
 //! — e.g. an MX2S returns `discharge_level=0` mid-charge, which is the device's
 //! own limitation, not a bug in the read path.
