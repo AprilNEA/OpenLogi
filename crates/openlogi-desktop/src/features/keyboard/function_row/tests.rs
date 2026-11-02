@@ -487,14 +487,14 @@ fn the_board_keeps_the_inspector_beside_it_while_the_window_has_room() {
     let side = 72.;
     // A roomy window keeps the full pane beside the inspector; cards beside
     // the board take their room from the render, never from the inspector.
-    assert_approx_eq(keyboard_max_width(1400., 0.), KEYBOARD_W);
-    assert_approx_eq(keyboard_max_width(1400., side) + side, KEYBOARD_W);
+    assert_approx_eq(keyboard_max_width(1400., 0., PANEL_W), KEYBOARD_W);
+    assert_approx_eq(keyboard_max_width(1400., side, PANEL_W) + side, KEYBOARD_W);
     // Narrower, the render shrinks so the pane and the inspector still fit.
-    let w = keyboard_max_width(1100., side);
+    let w = keyboard_max_width(1100., side, PANEL_W);
     assert_approx_eq(w + side + INSPECTOR_W, 1100. - KEYS_HORIZONTAL_RESERVE);
     // Too narrow for a usable board beside it, the inspector wraps under
     // the board, which keeps its full width.
-    assert_approx_eq(keyboard_max_width(1000., side) + side, KEYBOARD_W);
+    assert_approx_eq(keyboard_max_width(1000., side, PANEL_W) + side, KEYBOARD_W);
 }
 
 /// Points sampled along each leader segment when checking it against cards.
@@ -773,6 +773,16 @@ fn an_open_application_binding_selects_its_power_user_row() {
 fn keys_tab(
     cx: &mut gpui::TestAppContext,
 ) -> (Entity<FunctionRowView>, &mut gpui::VisualTestContext) {
+    install_state(cx);
+    let (view, cx) = cx.add_window_view(|_, cx| FunctionRowView::new(cx));
+    cx.simulate_resize(gpui::size(px(1280.), px(820.)));
+    settle(cx);
+    (view, cx)
+}
+
+/// An app with no devices and motion reduced, so a frame shows the settled
+/// layout.
+fn install_state(cx: &mut gpui::TestAppContext) {
     cx.update(|cx| {
         gpui_kit::init(cx);
         cx.set_reduce_motion(true);
@@ -787,14 +797,17 @@ fn keys_tab(
         });
         AppState::set_global(state, cx);
     });
-    let (view, cx) = cx.add_window_view(|_, cx| FunctionRowView::new(cx));
-    cx.simulate_resize(gpui::size(px(1280.), px(820.)));
-    redraw(cx);
-    (view, cx)
 }
 
 fn redraw(cx: &mut gpui::VisualTestContext) {
     cx.update(|window, cx| window.draw(cx).clear(cx));
+}
+
+/// Draw the frame that measures the room the window leaves the inspector
+/// column and what the key overview needs, then the frame laid out in it.
+fn settle(cx: &mut gpui::VisualTestContext) {
+    redraw(cx);
+    redraw(cx);
 }
 
 /// Selecting a key swaps the inspector's overview for that key's panel in
@@ -877,15 +890,17 @@ fn the_key_panel_list_scrolls_under_a_scrollbar(cx: &mut gpui::TestAppContext) {
     );
 }
 
-/// The key overview lists every key in the same column, so a keyboard with
-/// more keys than the column holds needs the same scrollbar. The scroll
-/// viewport must keep the rows' height: collapsed, it clips every row and no
-/// pointer reaches them. Scrolled to the end, the last key is in view and
-/// opens like any other row.
+/// The key overview lists every key in the same column. In a window too
+/// short for the column to grow to all of them, the list needs the same
+/// scrollbar. The scroll viewport must keep the rows' height: collapsed, it
+/// clips every row and no pointer reaches them. Scrolled to the end, the
+/// last key is in view and opens like any other row.
 #[gpui::test]
 fn the_key_overview_list_has_a_scrollbar(cx: &mut gpui::TestAppContext) {
     let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
     let (view, cx) = keys_tab(cx);
+    cx.simulate_resize(gpui::size(px(1280.), px(520.)));
+    settle(cx);
 
     let overview = cx.debug_bounds("key-overview").expect("overview is shown");
     let viewport = cx
@@ -903,6 +918,7 @@ fn the_key_overview_list_has_a_scrollbar(cx: &mut gpui::TestAppContext) {
         delta: gpui::ScrollDelta::Pixels(point(px(0.), px(-2000.))),
         ..Default::default()
     });
+    cx.run_until_parked();
     redraw(cx);
     let last = cx
         .debug_bounds("key-overview-row-19")
@@ -914,6 +930,141 @@ fn the_key_overview_list_has_a_scrollbar(cx: &mut gpui::TestAppContext) {
     cx.simulate_click(last.center(), gpui::Modifiers::default());
     redraw(cx);
     view.read_with(cx, |view, _| assert_eq!(view.selected_key, Some(19)));
+}
+
+/// The fallback F-row lists twenty keys, Esc and F1 to F19: more than the
+/// fixed 540 px column held, which cut F19 off. With room the column grows to
+/// show every row; in a window too short for that it stays inside the
+/// window, scrolls, and fades its cut-off edge, and the last row scrolls
+/// clear of the fade.
+#[gpui::test]
+fn the_key_overview_grows_to_its_rows_or_scrolls_within_the_window(cx: &mut gpui::TestAppContext) {
+    let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
+    let (_view, cx) = keys_tab(cx);
+    let card = cx.debug_bounds("key-overview").expect("the overview shows");
+    let last = cx
+        .debug_bounds("key-overview-row-19")
+        .expect("F19 is listed");
+    assert!(
+        last.bottom() <= card.bottom(),
+        "F19 {last:?} runs past the card {card:?}"
+    );
+    assert!(cx.debug_bounds("key-overview-fade").is_none());
+
+    cx.simulate_resize(gpui::size(px(1280.), px(520.)));
+    settle(cx);
+    let card = cx.debug_bounds("key-overview").expect("the overview shows");
+    assert!(
+        card.bottom() <= px(520.),
+        "the card {card:?} runs past the window"
+    );
+    let fade = cx
+        .debug_bounds("key-overview-fade")
+        .expect("the cut-off edge fades");
+    cx.simulate_event(gpui::ScrollEvent {
+        position: card.center(),
+        delta: gpui::ScrollDelta::Pixels(point(px(0.), px(-2000.))),
+        ..Default::default()
+    });
+    cx.run_until_parked();
+    redraw(cx);
+    let last = cx
+        .debug_bounds("key-overview-row-19")
+        .expect("F19 is listed");
+    assert!(
+        last.bottom() <= fade.top() + px(0.5),
+        "F19 {last:?} stays under the fade {fade:?}"
+    );
+}
+
+/// The overview of `slots` in a column as wide as [`inspector_width`] makes
+/// it, as the Keys tab lays it out.
+struct OverviewOf {
+    slots: Vec<KeySlot>,
+    keys: Entity<FunctionRowView>,
+}
+
+impl Render for OverviewOf {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let pal = theme::palette(cx);
+        let overview = key_overview(
+            &self.slots,
+            None,
+            &ScrollHandle::new(),
+            INSPECTOR_H,
+            &self.keys,
+            &pal,
+        );
+        InspectorRow::new(
+            div().into_any_element(),
+            Inspector::Overview(overview),
+            (inspector_width(&self.slots, window), INSPECTOR_H),
+        )
+    }
+}
+
+/// MX Keys' seventeen controls in Russian, the language with the longest
+/// key names, plus the longest name any shipped catalog has — the K380's
+/// "Клавиша переключения приложений (мультиплатформенная)". Every row shows
+/// its whole key name and binding: the column widens for them, and a name
+/// too long for its widest wraps onto a second line instead of losing its
+/// end (the column used to cut every one of these names off).
+#[gpui::test]
+fn every_key_name_shows_whole_in_the_longest_translation(cx: &mut gpui::TestAppContext) {
+    const CONTROLS: [u16; 18] = [
+        0x00c7, 0x00c8, 0x00e0, 0x00e1, 0x006e, 0x00e2, 0x00e3, 0x00e4, 0x00e5, 0x00e6, 0x00e7,
+        0x00e8, 0x00e9, 0x000a, 0x00bf, 0x00ea, 0x006f, 0x00ba,
+    ];
+    let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("ru");
+    let markers: Vec<(u16, f32, f32)> = CONTROLS
+        .iter()
+        .zip((0_u8..).map(f32::from))
+        .map(|(&cid, column)| (cid, 4. + 5. * column, 10.))
+        .collect();
+    let slots = key_slots_from_layouts(
+        key_surface(Some(&asset_with_controls(&markers)), None),
+        None,
+        KeypadPage::FIRST,
+    );
+    assert_eq!(slots.len(), CONTROLS.len());
+    install_state(cx);
+    let (_view, cx) = cx.add_window_view(|_, cx| OverviewOf {
+        slots: slots.clone(),
+        keys: cx.new(FunctionRowView::new),
+    });
+    cx.simulate_resize(gpui::size(px(1280.), px(820.)));
+    redraw(cx);
+
+    for slot in &slots {
+        let idx = slot.idx;
+        for (part, text) in [("name", &slot.label), ("binding", &slot.binding)] {
+            let shown = cx
+                .debug_bounds(format!("key-overview-{part}-{idx}").leak())
+                .expect("the row shows its texts");
+            // The lines the text wraps to at the width it was given.
+            let lines: u16 = cx.update(|window, _| {
+                window
+                    .text_system()
+                    .shape_text(
+                        text.clone(),
+                        px(12.),
+                        &[window.text_style().to_run(text.len())],
+                        Some(shown.size.width),
+                        None,
+                    )
+                    .expect("the text shapes")
+                    .iter()
+                    .map(|line| u16::try_from(line.wrap_boundaries().len()).unwrap() + 1)
+                    .sum()
+            });
+            assert!(
+                px(16.8) * f32::from(lines) <= shown.size.height + px(0.5),
+                "{text}: {lines} lines cut to {shown:?}"
+            );
+        }
+    }
+    rust_i18n::set_locale("en");
 }
 
 /// An unbound keyboard key does what it always did — "Off" read as though
