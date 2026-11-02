@@ -6354,6 +6354,8 @@ dependencies = [
  "opener",
  "openlogi-camera",
  "openlogi-core",
+ "tempfile",
+ "thiserror 2.0.18",
  "tracing",
 ]
 

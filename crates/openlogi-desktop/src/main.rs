@@ -55,6 +55,14 @@ use crate::state::ConfigPersistence;
 use crate::ui::theme;
 
 fn main() -> Result<()> {
+    // Settings → Permissions re-runs this executable through pkexec, as root,
+    // to install the udev rules. That process must do nothing else: no log
+    // files in root's home, no instance lock, no window.
+    #[cfg(target_os = "linux")]
+    if openlogi_permissions::udev::is_install_request(std::env::args_os()) {
+        return Ok(openlogi_permissions::udev::install_rules()?);
+    }
+
     init_tracing();
 
     #[cfg(debug_assertions)]
