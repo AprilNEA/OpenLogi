@@ -346,16 +346,25 @@ pub enum HidppOperation {
     /// Read HID++ `0x4521` capabilities/current disabled-key mask. Appended
     /// after the `0x19c0` operations — variant order is wire format.
     ReadDisableKeys,
-    /// Write and verify HID++ `0x4521` disabled-key mask. Appended last.
+    /// Write and verify HID++ `0x4521` disabled-key mask. Appended after
+    /// `ReadDisableKeys` — variant order is wire format.
     WriteDisableKeys,
-    /// Read onboard memory. Appended last — variant order is wire format.
+    /// Read onboard memory. Appended after `WriteDisableKeys` — variant order
+    /// is wire format.
     ReadOnboard,
     /// Write an image to a keypad's LCD key over the vendor image report.
     /// Appended last — variant order is wire format.
     WriteKeyImage,
     /// Switch a device to another Easy-Switch host through `0x1814
-    /// ChangeHost`. Appended last — variant order is wire format.
+    /// ChangeHost`. Appended after `WriteKeyImage` — variant order is wire
+    /// format.
     ChangeHost,
+    /// Read the `0x8300` sidetone level. Appended after `ChangeHost` —
+    /// variant order is wire format.
+    ReadSidetone,
+    /// Write the `0x8300` sidetone level. Appended last — variant order is
+    /// wire format.
+    WriteSidetone,
 }
 
 /// HID++ feature error kind in a serializable wire-safe form.
