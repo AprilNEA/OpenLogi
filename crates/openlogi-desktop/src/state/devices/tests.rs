@@ -9,7 +9,7 @@ use crate::services::i18n::LOCALE_LOCK;
 use std::collections::HashSet;
 
 use super::{
-    Camera, Capabilities, DeviceIdentity, DeviceKind, DeviceModelInfo, DeviceRecord,
+    Attachment, Camera, Capabilities, DeviceIdentity, DeviceKind, DeviceModelInfo, DeviceRecord,
     DeviceTransports, adopt_transient_record, append_offline_known, build_device_list,
     direct_key_prefix, effective_kind, fold_by_inventory_key, offline_record, pick_initial_device,
 };
@@ -171,6 +171,86 @@ fn records_keep_the_registered_receiver_family() {
 
         assert_eq!(records[0].receiver_brand, Some(expected));
     }
+}
+
+/// [`Attachment::of`] is the one mapping from a route and the brand of the
+/// receiver behind it to the family every view shows. A Bolt route is a Bolt
+/// receiver whatever the brand says; a Unifying route is the Nano or
+/// Lightspeed receiver it names, else a Unifying receiver.
+#[test]
+fn attachment_names_the_receiver_family_of_each_route() {
+    let brands = [
+        None,
+        Some(ReceiverBrand::Bolt),
+        Some(ReceiverBrand::Unifying),
+        Some(ReceiverBrand::Nano),
+        Some(ReceiverBrand::Lightspeed),
+    ];
+    let bolt = DeviceRoute::Bolt {
+        receiver_uid: "r".to_string(),
+        slot: 1,
+    };
+    let unifying = DeviceRoute::Unifying {
+        receiver_uid: "r".to_string(),
+        slot: 1,
+    };
+    let direct = DeviceRoute::Direct {
+        vendor_id: 0x046d,
+        product_id: 0xc08d,
+    };
+    let raw = DeviceRoute::RawHid {
+        vendor_id: 0x046d,
+        product_id: 0xc900,
+        usage_page: 0xff43,
+        usage_id: 0x0202,
+        identity: "litra".to_string(),
+    };
+    for (brand, unifying_family) in brands.into_iter().zip([
+        ReceiverBrand::Unifying,
+        ReceiverBrand::Unifying,
+        ReceiverBrand::Unifying,
+        ReceiverBrand::Nano,
+        ReceiverBrand::Lightspeed,
+    ]) {
+        assert_eq!(
+            Attachment::of(&bolt, brand),
+            Attachment::Receiver(ReceiverBrand::Bolt),
+            "Bolt route, brand {brand:?}"
+        );
+        assert_eq!(
+            Attachment::of(&unifying, brand),
+            Attachment::Receiver(unifying_family),
+            "Unifying route, brand {brand:?}"
+        );
+        assert_eq!(
+            Attachment::of(&direct, brand),
+            Attachment::Direct { product_id: 0xc08d },
+            "direct route, brand {brand:?}"
+        );
+        assert_eq!(
+            Attachment::of(&raw, brand),
+            Attachment::RawHid,
+            "raw-HID route, brand {brand:?}"
+        );
+    }
+}
+
+/// A record is attached through its live route, so a routeless record (an
+/// offline placeholder) has no attachment even when a brand was kept.
+#[test]
+fn a_record_is_attached_through_its_live_route() {
+    let mut record = online_record("unit:6be9d300");
+    record.receiver_brand = Some(ReceiverBrand::Lightspeed);
+    assert_eq!(record.attachment(), None);
+
+    record.route = Some(DeviceRoute::Unifying {
+        receiver_uid: "DA2699E1".to_string(),
+        slot: 1,
+    });
+    assert_eq!(
+        record.attachment(),
+        Some(Attachment::Receiver(ReceiverBrand::Lightspeed))
+    );
 }
 
 /// The family names the receiver behind the route, so an adopted card takes

@@ -1,12 +1,29 @@
-use super::home::{ConnectionGlyph, connection_glyph, ordered_device_indices};
+use super::home::{ConnectionGlyph, ordered_device_indices};
 use super::{DetailTab, DeviceKind, DeviceRecord};
 use crate::services::assets::ResolvedAsset;
+use crate::state::{Attachment, ObservedConnection};
 use crate::ui::battery::battery_charging_no_reading;
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceModelInfo, DeviceTransports,
     LightCapabilities, LightValueRange, LightValueUnit,
 };
 use openlogi_core::hid::{DeviceRoute, ReceiverBrand};
+
+/// The route and receiver brand every glyph case starts from, classified by
+/// [`Attachment::of`] first, as a card does through
+/// [`DeviceRecord::attachment`].
+fn connection_glyph(
+    route: Option<&DeviceRoute>,
+    brand: Option<ReceiverBrand>,
+    model: Option<&DeviceModelInfo>,
+    saved_transport: Option<ObservedConnection>,
+) -> ConnectionGlyph {
+    super::home::connection_glyph(
+        route.map(|route| Attachment::of(route, brand)),
+        model,
+        saved_transport,
+    )
+}
 
 #[gpui::test]
 fn config_error_folder_button_opens_from_the_active_window(cx: &mut gpui::TestAppContext) {
@@ -686,6 +703,76 @@ fn disconnected_gaming_keyboards_keep_the_observed_usb_icon() {
             .path(),
             "action-icons/usb.svg",
             "{name} must not acquire a Bluetooth icon when its USB node disappears"
+        );
+    }
+}
+
+/// A keyboard last seen on its receiver keeps that receiver's glyph once the
+/// receiver is unplugged and its card falls back to the observed connection:
+/// a Lightspeed or Nano receiver must not turn into the Unifying logo (the
+/// offline half of #2141).
+#[test]
+fn unplugged_receiver_keeps_its_family_glyph_on_the_offline_card() {
+    use openlogi_core::config::Config;
+    use openlogi_core::device::ModelTransport;
+
+    use crate::services::assets::AssetResolver;
+    use crate::state::{AppState, Sources};
+
+    let mut model = model_with_pids(
+        DeviceTransports {
+            equad: true,
+            usb: true,
+            ..DeviceTransports::default()
+        },
+        &[0x40b5, 0xc356],
+    );
+    model.unit_id = [1, 2, 3, 4];
+    let glyph_of = |state: &AppState| {
+        let record = state.current_record().expect("keyboard card");
+        (
+            record.online,
+            connection_glyph(
+                record.route.as_ref(),
+                record.receiver_brand,
+                record.model_info.as_ref(),
+                state.offline_connection(record),
+            ),
+        )
+    };
+    for (receiver_pid, glyph) in [
+        (0xc547, ConnectionGlyph::Dongle),   // Lightspeed
+        (0xc534, ConnectionGlyph::Dongle),   // Nano
+        (0xc52b, ConnectionGlyph::Unifying), // Unifying
+        (0xc548, ConnectionGlyph::Bolt),     // Bolt
+    ] {
+        let mut over_receiver = keyboard_inventory_for_mode(&model, ModelTransport::Equad, 0x40b5);
+        over_receiver.receiver.product_id = receiver_pid;
+        let resolver = AssetResolver::new();
+        let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = AppState::new(Sources::in_memory(Config::ephemeral(), &resolver, commands));
+        // The USB link is what keeps a card once the receiver is gone.
+        let over_usb = keyboard_inventory_for_mode(&model, ModelTransport::Usb, 0xc356);
+        let _ = state.refresh_inventories(std::slice::from_ref(&over_usb), &[], &resolver, &[]);
+        let _ =
+            state.refresh_inventories(std::slice::from_ref(&over_receiver), &[], &resolver, &[]);
+        assert_eq!(
+            glyph_of(&state),
+            (true, glyph),
+            "online behind receiver {receiver_pid:04x}"
+        );
+
+        let _ = state.refresh_inventories(&[], &[], &resolver, &[]);
+        assert!(
+            state
+                .current_record()
+                .is_some_and(|record| record.route.is_none()),
+            "the offline card has no writable route"
+        );
+        assert_eq!(
+            glyph_of(&state),
+            (false, glyph),
+            "unplugged receiver {receiver_pid:04x}"
         );
     }
 }

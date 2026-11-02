@@ -1,0 +1,30 @@
+# Owner: openlogi-desktop's state::devices::Attachment — how a device is
+# attached to the host as the GUI tells connections apart, including the family
+# of the receiver behind a receiver route. Views get it from
+# DeviceRecord::attachment(); state/devices.rs builds records and is the one
+# reader of DeviceRecord::receiver_brand. Tests may set and read the brand.
+id: gui-receiver-family-owner
+language: rust
+severity: error
+message: How a device is attached, receiver family included, comes from DeviceRecord::attachment(). Match on the Attachment instead of reading receiver_brand here.
+note: |
+  The card glyph, the connection label, and the Diagnostics report each nested
+  a match on receiver_brand inside their DeviceRoute::Unifying arm, and the
+  connection kept for an offline card used the protocol instead, so an
+  unplugged Lightspeed receiver drew the Unifying logo. See "Single source of
+  truth" in AGENTS.md.
+files:
+  - crates/openlogi-desktop/src/**/*.rs
+ignores:
+  - crates/openlogi-desktop/src/state/devices.rs
+  - "**/tests.rs"
+  - "**/tests/**"
+rule:
+  any:
+    # record.receiver_brand
+    - pattern: $RECORD.receiver_brand
+    # DeviceRecord { receiver_brand, .. } and DeviceRecord { receiver_brand: b, .. }
+    - kind: field_pattern
+      has:
+        field: name
+        regex: '^receiver_brand$'

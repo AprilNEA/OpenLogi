@@ -74,6 +74,7 @@ pub struct DeviceRecord {
     pub route: Option<DeviceRoute>,
     /// Marketed family of the receiver behind `route`, kept separate from the
     /// Unifying-compatible protocol used to address Nano and Lightspeed slots.
+    /// Views read it through [`Self::attachment`], never beside `route`.
     pub receiver_brand: Option<ReceiverBrand>,
     /// OS capture id for cameras (AVFoundation uniqueID / DirectShow path).
     /// Distinct from [`Self::config_key`], which prefers the port-stable USB
@@ -110,7 +111,65 @@ pub struct DeviceRecord {
     pub(crate) stale_pairings: Vec<DeviceRoute>,
 }
 
+/// What stands between a device and the host, as the GUI tells connections
+/// apart: the family of the receiver a device is paired through, or how it
+/// is attached without one.
+///
+/// The one place a [`DeviceRoute`] and the [`ReceiverBrand`] behind it
+/// become a receiver family. The card glyph, the connection label, the
+/// receiver slot, the observed connection kept for an offline card, and the
+/// Diagnostics report all match on it, so a new receiver route is classified
+/// here once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Attachment {
+    /// Paired through a receiver of this marketed family.
+    Receiver(ReceiverBrand),
+    /// Attached straight to the host over USB cable or Bluetooth.
+    Direct {
+        /// Product id of the HID node this session enumerated. For a
+        /// multi-transport device it names the transport that is live now.
+        product_id: u16,
+    },
+    /// A standalone raw-HID device, such as a Litra light.
+    RawHid,
+}
+
+impl Attachment {
+    /// How a device on `route` is attached, `brand` being the family of the
+    /// receiver the route goes through, if the registry knows it.
+    ///
+    /// A Unifying route also reaches Nano and Lightspeed receivers, which
+    /// speak the Unifying protocol but are not Unifying receivers. A Unifying
+    /// route with no registered brand is a Unifying receiver.
+    #[must_use]
+    pub(crate) fn of(route: &DeviceRoute, brand: Option<ReceiverBrand>) -> Self {
+        match route {
+            DeviceRoute::Bolt { .. } => Self::Receiver(ReceiverBrand::Bolt),
+            DeviceRoute::Unifying { .. } => Self::Receiver(match brand {
+                Some(brand @ (ReceiverBrand::Nano | ReceiverBrand::Lightspeed)) => brand,
+                Some(ReceiverBrand::Bolt | ReceiverBrand::Unifying) | None => {
+                    ReceiverBrand::Unifying
+                }
+            }),
+            DeviceRoute::Direct { product_id, .. } => Self::Direct {
+                product_id: *product_id,
+            },
+            DeviceRoute::RawHid { .. } => Self::RawHid,
+        }
+    }
+}
+
 impl DeviceRecord {
+    /// How this device is attached to the host ([`Attachment`]), or `None`
+    /// for a record with no live route: a camera, an offline placeholder, the
+    /// dev-only demo keyboard.
+    #[must_use]
+    pub(crate) fn attachment(&self) -> Option<Attachment> {
+        self.route
+            .as_ref()
+            .map(|route| Attachment::of(route, self.receiver_brand))
+    }
+
     /// [`Self::capabilities`], or the set presumed when none is measured:
     /// from the kind, or only the host-side set for a HID++ 1.0 device, whose
     /// DPI or lighting control would have no effect (#2161).

@@ -12,10 +12,10 @@ use gpui_component::{
     h_flex,
 };
 use openlogi_core::device::DeviceKind;
-use openlogi_core::hid::{DeviceRoute, ReceiverBrand};
+use openlogi_core::hid::ReceiverBrand;
 
 use super::AppView;
-use crate::state::{AppState, DeviceRecord};
+use crate::state::{AppState, Attachment, DeviceRecord};
 use crate::ui::components::control_button;
 use crate::ui::theme::{Palette, Typography as _};
 
@@ -163,20 +163,15 @@ pub(super) fn sidebar_action(
         .flex_1()
 }
 
-pub(super) fn route_label(
-    route: Option<&DeviceRoute>,
-    receiver_brand: Option<ReceiverBrand>,
-) -> String {
-    match route {
-        Some(DeviceRoute::Bolt { .. }) => tr!("device.bolt_receiver").to_string(),
-        Some(DeviceRoute::Unifying { .. }) => match receiver_brand {
-            Some(ReceiverBrand::Nano) => tr!("device.nano_receiver").to_string(),
-            Some(ReceiverBrand::Lightspeed) => tr!("device.lightspeed_receiver").to_string(),
-            Some(ReceiverBrand::Bolt | ReceiverBrand::Unifying) | None => {
-                tr!("device.unifying_receiver").to_string()
-            }
+pub(super) fn route_label(attachment: Option<Attachment>) -> String {
+    match attachment {
+        Some(Attachment::Receiver(family)) => match family {
+            ReceiverBrand::Bolt => tr!("device.bolt_receiver").to_string(),
+            ReceiverBrand::Unifying => tr!("device.unifying_receiver").to_string(),
+            ReceiverBrand::Nano => tr!("device.nano_receiver").to_string(),
+            ReceiverBrand::Lightspeed => tr!("device.lightspeed_receiver").to_string(),
         },
-        Some(DeviceRoute::Direct { .. } | DeviceRoute::RawHid { .. }) => {
+        Some(Attachment::Direct { .. } | Attachment::RawHid) => {
             tr!("device.direct_connection").to_string()
         }
         None => tr!("common.unavailable").to_string(),
@@ -189,17 +184,14 @@ pub(super) fn route_label(
 /// Called a slot, not a channel: a receiver slot is unrelated to the
 /// device's own Easy-Switch channel, and the two are easy to confuse.
 pub(super) fn receiver_slot_label(record: &DeviceRecord) -> Option<SharedString> {
-    matches!(
-        record.route,
-        Some(DeviceRoute::Bolt { .. } | DeviceRoute::Unifying { .. })
-    )
-    .then(|| tr!("device.receiver_slot_number", number => record.slot.to_string()))
+    matches!(record.attachment(), Some(Attachment::Receiver(_)))
+        .then(|| tr!("device.receiver_slot_number", number => record.slot.to_string()))
 }
 
 /// How a device is reached, in words: the transport, plus the receiver slot
 /// when there is one ("Bolt receiver · Slot 4").
 pub(super) fn connection_summary(record: &DeviceRecord) -> String {
-    let route = route_label(record.route.as_ref(), record.receiver_brand);
+    let route = route_label(record.attachment());
     match receiver_slot_label(record) {
         Some(slot) => format!("{route} · {slot}"),
         None => route,

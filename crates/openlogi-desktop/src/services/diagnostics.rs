@@ -8,12 +8,12 @@ use openlogi_core::diagnostics::{
     AppInfo, AssetInfo, AssetSource, ConnectionKind, DeviceDiag, DiagnosticsReport, InventoryState,
     ReceiverDiag, RenderState,
 };
-use openlogi_core::hid::{DeviceRoute, ReceiverBrand};
+use openlogi_core::hid::ReceiverBrand;
 use openlogi_core::update_feed::UpdateChannel;
 use openlogi_ipc::{InventoryHealth, PROTOCOL_VERSION, VirtualKeyboardStatus};
 
 use crate::services::assets::AssetResolver;
-use crate::state::{AppState, DpiLoad};
+use crate::state::{AppState, Attachment, DpiLoad};
 
 /// Build the report from the current app state, defaulting to an empty report before the entity is installed.
 #[must_use]
@@ -144,7 +144,7 @@ fn collect_devices(state: &AppState) -> Vec<DeviceDiag> {
                 display_name: record.display_name.clone(),
                 kind: record.kind,
                 codename: paired.and_then(|p| p.codename.clone()),
-                connection: connection_for(record.route.as_ref(), record.receiver_brand, model),
+                connection: connection_for(record.attachment(), model),
                 online: record.online,
                 battery: record.battery.clone(),
                 capabilities: record.capabilities,
@@ -177,9 +177,9 @@ fn find_paired<'a>(
     })
 }
 
-/// Refine the HID++ route into a user-facing connection type.
+/// Refine how a device is attached into a user-facing connection type.
 ///
-/// A `Direct` route carries the vendor/product id of the HID node this
+/// An [`Attachment::Direct`] carries the product id of the HID node this
 /// session actually enumerated, which — for a multi-transport device —
 /// pinpoints the transport that's live *right now* via
 /// [`DeviceModelInfo::transport_for_product_id`]. Falling back to the
@@ -187,21 +187,18 @@ fn find_paired<'a>(
 /// mislabels a USB-connected multi-transport device as Bluetooth, since a
 /// device that supports both always has both flags set: see issue #1218.
 fn connection_for(
-    route: Option<&DeviceRoute>,
-    receiver_brand: Option<ReceiverBrand>,
+    attachment: Option<Attachment>,
     model: Option<&DeviceModelInfo>,
 ) -> ConnectionKind {
-    match route {
-        Some(DeviceRoute::Bolt { .. }) => ConnectionKind::BoltReceiver,
-        Some(DeviceRoute::Unifying { .. }) => match receiver_brand {
-            Some(ReceiverBrand::Nano) => ConnectionKind::NanoReceiver,
-            Some(ReceiverBrand::Lightspeed) => ConnectionKind::LightspeedReceiver,
-            Some(ReceiverBrand::Bolt | ReceiverBrand::Unifying) | None => {
-                ConnectionKind::UnifyingReceiver
-            }
+    match attachment {
+        Some(Attachment::Receiver(family)) => match family {
+            ReceiverBrand::Bolt => ConnectionKind::BoltReceiver,
+            ReceiverBrand::Unifying => ConnectionKind::UnifyingReceiver,
+            ReceiverBrand::Nano => ConnectionKind::NanoReceiver,
+            ReceiverBrand::Lightspeed => ConnectionKind::LightspeedReceiver,
         },
-        Some(DeviceRoute::Direct { product_id, .. }) => {
-            match model.and_then(|m| m.transport_for_product_id(*product_id)) {
+        Some(Attachment::Direct { product_id }) => {
+            match model.and_then(|m| m.transport_for_product_id(product_id)) {
                 Some(ModelTransport::Bluetooth | ModelTransport::Btle) => {
                     ConnectionKind::BluetoothDirect
                 }
@@ -216,7 +213,7 @@ fn connection_for(
                 },
             }
         }
-        Some(DeviceRoute::RawHid { .. }) => ConnectionKind::Wired,
+        Some(Attachment::RawHid) => ConnectionKind::Wired,
         None => ConnectionKind::Unknown,
     }
 }
@@ -259,8 +256,20 @@ fn arch_label() -> &'static str {
 #[cfg(test)]
 mod connection_for_tests {
     use openlogi_core::device::DeviceTransports;
+    use openlogi_core::hid::DeviceRoute;
 
-    use super::{ConnectionKind, DeviceModelInfo, DeviceRoute, ReceiverBrand, connection_for};
+    use super::{Attachment, ConnectionKind, DeviceModelInfo, ReceiverBrand};
+
+    /// The route and receiver brand every case starts from, classified by
+    /// [`Attachment::of`] first, as `collect` does through
+    /// `DeviceRecord::attachment`.
+    fn connection_for(
+        route: Option<&DeviceRoute>,
+        brand: Option<ReceiverBrand>,
+        model: Option<&DeviceModelInfo>,
+    ) -> ConnectionKind {
+        super::connection_for(route.map(|route| Attachment::of(route, brand)), model)
+    }
 
     /// G915 X LS from issue #1218: reports all three transports (USB, eQuad,
     /// BTLE), model_ids packed BTLE/eQuad/USB per the ascending-bit-order
