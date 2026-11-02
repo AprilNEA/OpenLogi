@@ -37,8 +37,8 @@ const FLICK_SPEED: f64 = 2.5;
 const FLICK_MIN: f64 = 0.1;
 /// A motion gap this long means the hand stopped: the release carries no speed.
 const STALE_MOTION: Duration = Duration::from_millis(100);
-/// Reports closer together than this (the commit's own travel arriving with
-/// the commit) move the transition but are no speed sample.
+/// Reports closer together than this move the transition but are no speed
+/// sample: a gap that short measures the report timing, not the hand.
 const MIN_SPEED_SAMPLE: Duration = Duration::from_millis(2);
 /// Longest wait for a completed switch to land before the next transition
 /// starts anyway (the Dock may not report a change it did not make).
@@ -293,13 +293,16 @@ impl SpaceSwipes {
         let Some(t) = self.active.get_mut(&(session.clone(), button)) else {
             return Vec::new();
         };
-        t.fresh = false;
+        let commit_travel = std::mem::replace(&mut t.fresh, false);
         let delta = t.polarity * f64::from(dx) / travel;
         let elapsed = now.saturating_duration_since(t.moved_at);
         if elapsed >= STALE_MOTION {
             t.velocity = 0.0;
         }
-        if elapsed >= MIN_SPEED_SAMPLE {
+        // The commit's travel built up before the transition opened, over a
+        // time this gap does not measure: it moves the transition, but how
+        // fast the hand went is learnt from the reports after it.
+        if !commit_travel && elapsed >= MIN_SPEED_SAMPLE {
             t.velocity = 0.5 * t.velocity + 0.5 * delta / elapsed.as_secs_f64();
         }
         t.moved_at = now;

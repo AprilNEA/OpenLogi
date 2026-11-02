@@ -182,6 +182,19 @@ fn the_commit_travel_is_no_speed_sample() {
 }
 
 #[test]
+fn a_late_commit_travel_is_no_speed_sample_either() {
+    let mut swipes = swipes(PROMPT);
+    let start = Instant::now();
+    begin_right(&mut swipes, start);
+    // Reading the Space and posting `Began` took 10 ms, so the commit's travel
+    // arrives well past the speed-sample gap. It was accumulated at the hand's
+    // own pace, not in this gap: 100 units over 10 ms would read as a flick.
+    let _ = swipes.motion(&session(), BUTTON, 100, start + Duration::from_millis(10));
+    let frames = swipes.end(&session(), BUTTON, start + Duration::from_millis(14));
+    assert_eq!(phases(&frames), vec![SpaceSwipePhase::Cancelled]);
+}
+
+#[test]
 fn a_long_sweep_completes_one_switch_per_desktop_width_and_restarts_from_zero() {
     let mut swipes = swipes(PROMPT);
     let start = Instant::now();
