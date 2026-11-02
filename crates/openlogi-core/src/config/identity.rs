@@ -24,6 +24,24 @@ impl DeviceIdentity {
     }
 }
 
+impl PhysicalDeviceKey {
+    /// Whether this key names, by its own identity, a device that reports
+    /// `serial` or `unit_id`: the `serial:` or `unit:` key
+    /// [`DeviceIdentity::config_key`] writes for either one. A device that
+    /// reports both is named by both, so a hand-edited `unit:` key still finds
+    /// a device the inventory keys by its serial.
+    #[must_use]
+    pub fn names_identity(&self, serial: Option<&str>, unit_id: [u8; 4]) -> bool {
+        let serial =
+            serial.and_then(|serial| DeviceIdentity::from_parts(Some(serial), [0; 4]).config_key());
+        let unit = DeviceIdentity::from_parts(None, unit_id).config_key();
+        [serial, unit]
+            .into_iter()
+            .flatten()
+            .any(|key| key == self.as_str())
+    }
+}
+
 /// The key a device's settings ultimately belong under: its own identity when
 /// it reported one, else the route-derived key that is the best available
 /// stand-in.
