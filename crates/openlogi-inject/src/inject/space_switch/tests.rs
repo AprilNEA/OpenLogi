@@ -1,7 +1,6 @@
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::rc::Rc;
-use std::sync::atomic::AtomicBool;
 
 use super::*;
 
@@ -82,14 +81,14 @@ fn boundary_or_invalid_snapshot_never_posts() {
     for snapshot in [invalid, state(0), state(999)] {
         let mut backend = Fake::new([snapshot]);
         assert_eq!(
-            run(&mut backend, Direction::Next, PostGate::for_test()),
+            run(&mut backend, Direction::Next, PostGate::unobserved()),
             Err(Failure::Unavailable)
         );
         assert!(backend.posts.is_empty());
     }
     let mut backend = Fake::new([state(42)]);
     assert_eq!(
-        run(&mut backend, Direction::Next, PostGate::for_test()),
+        run(&mut backend, Direction::Next, PostGate::unobserved()),
         Ok(Outcome::Boundary)
     );
     assert!(backend.posts.is_empty());
@@ -100,7 +99,7 @@ fn synchronous_completion_before_wait_is_not_lost() {
     let mut backend = Fake::new([state(7), state(7), state(91)]);
     let events = Rc::clone(&backend.events);
     assert_eq!(
-        run(&mut backend, Direction::Previous, PostGate::for_test()),
+        run(&mut backend, Direction::Previous, PostGate::unobserved()),
         Ok(Outcome::Reached(91))
     );
     assert_eq!(*events.borrow(), ["state", "state", "post", "state"]);
@@ -112,7 +111,7 @@ fn synchronous_completion_before_wait_is_not_lost() {
 fn unrelated_notification_is_not_success_and_final_query_handles_missed_notification() {
     let mut backend = Fake::new([state(7), state(7), state(7), state(7), state(42)]);
     assert_eq!(
-        run(&mut backend, Direction::Next, PostGate::for_test()),
+        run(&mut backend, Direction::Next, PostGate::unobserved()),
         Ok(Outcome::Reached(42))
     );
     assert_eq!(backend.posts, [Direction::Next]);
@@ -123,7 +122,7 @@ fn unrelated_notification_is_not_success_and_final_query_handles_missed_notifica
 fn timeout_never_resends() {
     let mut backend = Fake::new([state(7), state(7), state(7), state(7), state(7)]);
     assert_eq!(
-        run(&mut backend, Direction::Next, PostGate::for_test()),
+        run(&mut backend, Direction::Next, PostGate::unobserved()),
         Err(Failure::TimedOut)
     );
     assert_eq!(backend.posts, [Direction::Next]);
@@ -133,14 +132,14 @@ fn timeout_never_resends() {
 fn preparation_race_or_pointer_move_prevents_injection() {
     let mut backend = Fake::new([state(7), state(91)]);
     assert_eq!(
-        run(&mut backend, Direction::Next, PostGate::for_test()),
+        run(&mut backend, Direction::Next, PostGate::unobserved()),
         Err(Failure::ContextChanged)
     );
     assert!(backend.posts.is_empty());
     let mut backend = Fake::new([state(7), state(7)]);
     backend.post_result = Err(Failure::ContextChanged);
     assert_eq!(
-        run(&mut backend, Direction::Next, PostGate::for_test()),
+        run(&mut backend, Direction::Next, PostGate::unobserved()),
         Err(Failure::ContextChanged)
     );
     let mut backend = Fake::new([state(7), state(7)]);
@@ -161,7 +160,7 @@ fn wrong_display_topology_change_or_opposite_switch_is_not_success() {
     for observed in [other, reordered, state(91)] {
         let mut backend = Fake::new([state(7), state(7), observed]);
         assert_eq!(
-            run(&mut backend, Direction::Next, PostGate::for_test()),
+            run(&mut backend, Direction::Next, PostGate::unobserved()),
             Err(Failure::ContextChanged)
         );
         assert_eq!(backend.posts.len(), 1);
@@ -173,14 +172,14 @@ fn native_failure_stops_without_keyboard_fallback() {
     let mut backend = Fake::new([state(7), state(7)]);
     backend.post_result = Err(Failure::PostFailed);
     assert_eq!(
-        run(&mut backend, Direction::Next, PostGate::for_test()),
+        run(&mut backend, Direction::Next, PostGate::unobserved()),
         Err(Failure::PostFailed)
     );
     assert!(backend.posts.is_empty());
     let mut backend = Fake::new([]);
     backend.states.push_back(Err(Failure::Unavailable));
     assert_eq!(
-        run(&mut backend, Direction::Next, PostGate::for_test()),
+        run(&mut backend, Direction::Next, PostGate::unobserved()),
         Err(Failure::Unavailable)
     );
     assert!(backend.posts.is_empty());
@@ -189,38 +188,92 @@ fn native_failure_stops_without_keyboard_fallback() {
 const DISPLAY: u32 = 1;
 const OTHER_DISPLAY: u32 = 2;
 
-#[test]
-fn only_one_transaction_can_run_and_drop_releases_the_slot() {
-    let slot = Slot::new();
-    let lease = Lease::acquire(&slot, DISPLAY).unwrap();
-    // Another display is skipped at once, without waiting.
-    assert!(Lease::acquire(&slot, OTHER_DISPLAY).is_none());
-    drop(lease);
-    assert!(Lease::acquire(&slot, OTHER_DISPLAY).is_some());
+fn start(queue: &Queue, display: u32) -> Run<'_> {
+    queue
+        .admit(display, Direction::Next)
+        .expect("no switch is under way")
+}
+
+fn press(queue: &Queue, display: u32, direction: Direction) -> Option<Busy> {
+    queue.admit(display, direction).err()
+}
+
+fn is_free(queue: &Queue) -> bool {
+    // Admitting starts a run that its drop ends again.
+    queue.admit(OTHER_DISPLAY, Direction::Next).is_ok()
 }
 
 #[test]
-fn a_request_for_the_display_being_switched_waits_for_its_switch() {
-    let slot = Slot::new();
-    let lease = Lease::acquire(&slot, DISPLAY).unwrap();
-    // The request waits out its whole patience instead of being skipped at
-    // once; a switch that outlasts it is stuck, and then it is skipped.
-    let patience = Duration::from_millis(50);
-    let asked = Instant::now();
-    assert!(Lease::acquire_within(&slot, DISPLAY, patience).is_none());
-    assert!(asked.elapsed() >= patience, "the request did not wait");
-    let released = AtomicBool::new(false);
-    std::thread::scope(|scope| {
-        let next = scope.spawn(|| {
-            let lease = Lease::acquire_within(&slot, DISPLAY, Duration::from_secs(60));
-            // However the threads interleave, the slot is free only once the
-            // switch under way has ended, and its end wakes a waiting request.
-            (lease.is_some(), released.load(Ordering::SeqCst))
-        });
-        released.store(true, Ordering::SeqCst);
-        drop(lease);
-        assert_eq!(next.join().unwrap(), (true, true));
-    });
+fn presses_during_a_switch_queue_on_its_display_and_skip_another() {
+    let queue = Queue::new();
+    let mut run = start(&queue, DISPLAY);
+    assert_eq!(press(&queue, DISPLAY, Direction::Next), Some(Busy::Queued));
+    assert_eq!(
+        press(&queue, OTHER_DISPLAY, Direction::Next),
+        Some(Busy::Skipped)
+    );
+    assert_eq!(press(&queue, DISPLAY, Direction::Next), Some(Busy::Queued));
+    assert_eq!(run.next(), Some(Direction::Next));
+    assert_eq!(run.next(), Some(Direction::Next));
+    assert_eq!(run.next(), None);
+    assert!(is_free(&queue), "the last step ends the run");
+}
+
+#[test]
+fn opposite_presses_cancel_out() {
+    let queue = Queue::new();
+    let mut run = start(&queue, DISPLAY);
+    for direction in [Direction::Previous, Direction::Previous, Direction::Next] {
+        assert_eq!(press(&queue, DISPLAY, direction), Some(Busy::Queued));
+    }
+    assert_eq!(run.next(), Some(Direction::Previous));
+    assert_eq!(run.next(), None);
+}
+
+#[test]
+fn an_ended_run_leaves_the_next_run_alone() {
+    let queue = Queue::new();
+    let mut ended = start(&queue, DISPLAY);
+    assert_eq!(ended.next(), None);
+    let mut later = start(&queue, DISPLAY);
+    assert_eq!(press(&queue, DISPLAY, Direction::Next), Some(Busy::Queued));
+    drop(ended);
+    assert_eq!(later.next(), Some(Direction::Next));
+}
+
+#[test]
+fn dropping_a_run_discards_its_queued_steps() {
+    let queue = Queue::new();
+    let run = start(&queue, DISPLAY);
+    assert_eq!(press(&queue, DISPLAY, Direction::Next), Some(Busy::Queued));
+    // Dropping the unstarted run is also what a failed thread spawn does.
+    drop(run);
+    assert!(is_free(&queue));
+}
+
+#[test]
+fn drain_takes_presses_that_arrive_during_each_switch_until_one_misses() {
+    let queue = Queue::new();
+    let mut switched = vec![];
+    start(&queue, DISPLAY).drain(
+        Direction::Next,
+        PostGate::unobserved(),
+        |direction, _gate| {
+            switched.push(direction);
+            if switched.len() == 1 {
+                // Two presses land while the first switch slides.
+                for _ in 0..2 {
+                    assert_eq!(press(&queue, DISPLAY, Direction::Next), Some(Busy::Queued));
+                }
+                return Ok(Outcome::Reached(42));
+            }
+            // Another lands during the second, which then misses its Space.
+            assert_eq!(press(&queue, DISPLAY, Direction::Next), Some(Busy::Queued));
+            Err(Failure::TimedOut)
+        },
+    );
+    assert_eq!(switched, [Direction::Next; 2]);
+    assert!(is_free(&queue), "a miss discards the steps left");
 }
 
 #[test]
@@ -264,15 +317,15 @@ fn early_exit_releases_the_caller_without_acknowledging_a_post() {
 }
 
 #[test]
-fn preparation_timeout_cancels_late_output_but_keeps_the_worker_lease() {
-    let slot = Slot::new();
-    let lease = Lease::acquire(&slot, DISPLAY).unwrap();
+fn preparation_timeout_cancels_late_output_but_keeps_the_worker_run() {
+    let queue = Queue::new();
+    let switches = start(&queue, DISPLAY);
     let deadline = Instant::now() + Duration::from_secs(60);
     let (gate, wait) = PostGate::new(deadline);
     let (resume, blocked) = mpsc::channel();
     std::thread::scope(|scope| {
         let worker = scope.spawn(move || {
-            let _lease = lease;
+            let _switches = switches;
             blocked.recv().unwrap();
             let mut backend = Fake::new([state(7), state(7)]);
             let result = run(&mut backend, Direction::Next, gate);
@@ -280,13 +333,16 @@ fn preparation_timeout_cancels_late_output_but_keeps_the_worker_lease() {
         });
         // Advance the waiter's clock to its deadline while preparation is held.
         assert_eq!(wait.wait(deadline), Err(Failure::TimedOut));
-        assert!(Lease::acquire_within(&slot, DISPLAY, Duration::ZERO).is_none());
+        assert_eq!(
+            press(&queue, OTHER_DISPLAY, Direction::Next),
+            Some(Busy::Skipped)
+        );
         // Later actions can proceed now. Releasing the stalled preparation
         // must never let that stale request emit either swipe phase.
         resume.send(()).unwrap();
         assert_eq!(worker.join().unwrap(), (vec![], Err(Failure::TimedOut)));
     });
-    assert!(Lease::acquire(&slot, OTHER_DISPLAY).is_some());
+    assert!(is_free(&queue));
 }
 
 #[test]

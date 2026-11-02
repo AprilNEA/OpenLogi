@@ -1,14 +1,11 @@
 //! Space-switch transaction policy, independent of macOS FFI for regression tests.
 
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, mpsc};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, mpsc};
 use std::time::{Duration, Instant};
 
 const PREPARATION_TIMEOUT: Duration = Duration::from_secs(2);
 const CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(2);
-/// A request waits at most as long as the switch under way may take; one
-/// that outlasts both of its deadlines is stuck.
-const WAIT_TIMEOUT: Duration = PREPARATION_TIMEOUT.saturating_add(CONFIRMATION_TIMEOUT);
 
 /// Logi Options+ 2.8 drives its three-finger horizontal swipe from a timer of
 /// this period (`injectionPeriodInMs`, 16.6 ms), one frame per tick.
@@ -27,11 +24,26 @@ pub(super) enum Direction {
 }
 
 impl Direction {
-    pub(super) fn sign(self) -> f64 {
+    /// One Space in this direction, counted toward Next.
+    const fn step(self) -> i32 {
         match self {
-            Self::Previous => -1.0,
-            Self::Next => 1.0,
+            Self::Previous => -1,
+            Self::Next => 1,
         }
+    }
+
+    /// The direction of a net count of [`Self::step`]s, or `None` when they
+    /// cancel out.
+    const fn toward(steps: i32) -> Option<Self> {
+        match steps {
+            1.. => Some(Self::Next),
+            ..0 => Some(Self::Previous),
+            0 => None,
+        }
+    }
+
+    pub(super) fn sign(self) -> f64 {
+        f64::from(self.step())
     }
 }
 
@@ -232,9 +244,16 @@ struct PostWait {
 }
 
 impl PostGate {
-    #[cfg(test)]
-    pub(super) fn for_test() -> Self {
-        Self::new(Instant::now() + PREPARATION_TIMEOUT).0
+    /// A gate no caller waits on, for a step queued behind a switch. Its
+    /// preparation keeps the same deadline, so a stalled query still cannot
+    /// post late.
+    pub(super) fn unobserved() -> Self {
+        Self::preparing().0
+    }
+
+    /// A gate whose preparation must commit within [`PREPARATION_TIMEOUT`].
+    fn preparing() -> (Self, PostWait) {
+        Self::new(Instant::now() + PREPARATION_TIMEOUT)
     }
 
     fn new(deadline: Instant) -> (Self, PostWait) {
@@ -295,9 +314,9 @@ impl PostWait {
 
 /// Bound preparation, not native event posting. Return after irrevocable
 /// cancellation, posting acknowledgement, or worker exit. Confirmation stays
-/// detached; a canceled but stuck worker retains its single-flight lease.
+/// detached; a canceled but stuck worker retains its [`Run`].
 pub(super) fn spawn_ordered(work: impl FnOnce(PostGate) + Send + 'static) -> Result<(), Failure> {
-    let (gate, wait) = PostGate::new(Instant::now() + PREPARATION_TIMEOUT);
+    let (gate, wait) = PostGate::preparing();
     std::thread::Builder::new()
         .name("openlogi-spaces".into())
         .spawn(move || work(gate))
@@ -345,57 +364,114 @@ pub(super) fn run(
     }
 }
 
-/// The display whose switch is under way, if any. Its [`Lease`] is single
-/// in-flight; no queue of relative actions can run later on a different
-/// display.
-pub(super) struct Slot {
-    display: Mutex<Option<u32>>,
-    freed: Condvar,
+/// One switch at a time, and the presses that arrive during it. A press for
+/// the display being switched is kept as a step and taken once the switch
+/// reaches its Space, so pressing three times moves three Spaces. A press
+/// for another display is skipped: no step can run later on a display the
+/// cursor has left. The caller never waits for a switch under way: the
+/// worker that executes a press also releases held chords.
+pub(super) struct Queue(Mutex<Option<Pending>>);
+
+/// The display a [`Run`] switches and the net steps still to take there,
+/// counted toward Next, so opposite presses cancel out.
+struct Pending {
+    display: u32,
+    steps: i32,
 }
 
-impl Slot {
+impl Pending {
+    fn take(&mut self) -> Option<Direction> {
+        let direction = Direction::toward(self.steps)?;
+        self.steps -= direction.step();
+        Some(direction)
+    }
+}
+
+/// Why a press started no switch of its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Busy {
+    /// A switch on the same display is under way: the press is a step after it.
+    Queued,
+    /// A switch on another display is under way: the press is dropped.
+    Skipped,
+}
+
+impl Queue {
     pub(super) const fn new() -> Self {
-        Self {
-            display: Mutex::new(None),
-            freed: Condvar::new(),
+        Self(Mutex::new(None))
+    }
+
+    /// A [`Run`] for `display` when no switch is under way. The caller
+    /// switches first and hands the run to the worker that takes its steps.
+    pub(super) fn admit(&self, display: u32, direction: Direction) -> Result<Run<'_>, Busy> {
+        let mut pending = self.lock();
+        match pending.as_mut() {
+            None => {
+                *pending = Some(Pending { display, steps: 0 });
+                Ok(Run {
+                    queue: self,
+                    ended: false,
+                })
+            }
+            Some(under_way) if under_way.display == display => {
+                under_way.steps += direction.step();
+                Err(Busy::Queued)
+            }
+            Some(_) => Err(Busy::Skipped),
         }
     }
 
-    fn lock(&self) -> MutexGuard<'_, Option<u32>> {
-        self.display.lock().unwrap_or_else(PoisonError::into_inner)
+    fn lock(&self) -> MutexGuard<'_, Option<Pending>> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
-/// The right to switch one display. The owned lease also releases on spawn
-/// failure.
-pub(super) struct Lease<'a>(&'a Slot);
+/// The right to switch the queue's display. It ends when a switch misses its
+/// Space or no step is left, and when dropped by a failed spawn or an
+/// unwinding worker. Steps not taken by then are discarded.
+#[must_use]
+pub(super) struct Run<'a> {
+    queue: &'a Queue,
+    ended: bool,
+}
 
-impl<'a> Lease<'a> {
-    /// The slot for `display`. A request for the display being switched waits
-    /// for that switch to end, so presses in a row switch in order, each
-    /// after the one before reaches its Space. A request for another display,
-    /// or one that outwaits a stuck switch, is skipped.
-    pub(super) fn acquire(slot: &'a Slot, display: u32) -> Option<Self> {
-        Self::acquire_within(slot, display, WAIT_TIMEOUT)
-    }
-
-    fn acquire_within(slot: &'a Slot, display: u32, patience: Duration) -> Option<Self> {
-        let (mut held, _) = slot
-            .freed
-            .wait_timeout_while(slot.lock(), patience, |held| *held == Some(display))
-            .unwrap_or_else(PoisonError::into_inner);
-        if held.is_some() {
-            return None;
+impl Run<'_> {
+    /// Switch `first`, then every step queued while a switch was under way,
+    /// until one does not reach its Space.
+    pub(super) fn drain(
+        mut self,
+        first: Direction,
+        gate: PostGate,
+        mut switch: impl FnMut(Direction, PostGate) -> Result<Outcome, Failure>,
+    ) {
+        let mut result = switch(first, gate);
+        while matches!(result, Ok(Outcome::Reached(_))) {
+            let Some(direction) = self.next() else {
+                return;
+            };
+            result = switch(direction, PostGate::unobserved());
         }
-        *held = Some(display);
-        Some(Self(slot))
+        // A miss: dropping the run discards the steps left.
+    }
+
+    /// The next step, or `None` after ending the run under the same lock, so
+    /// a press cannot slip in between the last step and the end.
+    fn next(&mut self) -> Option<Direction> {
+        let mut pending = self.queue.lock();
+        let step = pending.as_mut().and_then(Pending::take);
+        if step.is_none() {
+            *pending = None;
+            self.ended = true;
+        }
+        step
     }
 }
 
-impl Drop for Lease<'_> {
+impl Drop for Run<'_> {
     fn drop(&mut self) {
-        *self.0.lock() = None;
-        self.0.freed.notify_all();
+        if !self.ended {
+            *self.queue.lock() = None;
+        }
     }
 }
 

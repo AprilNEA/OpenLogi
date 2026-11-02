@@ -288,11 +288,12 @@ fn run_workflow(steps: &[WorkflowStep]) {
 /// for sequential callers, but not for the Dock's animation to end.
 /// A dedicated worker confirms the pointer display's Space; the process must
 /// remain alive to receive that diagnostic. A switch requested while another
-/// on the same display is under way first waits for that one to reach its
-/// Space, so presses in a row all switch, in order. One requested for another
-/// display is skipped. Call from an action worker, never an input-tap callback.
-/// Worker preparation has a two-second cancellation deadline; a canceled
-/// worker cannot post later and retains its busy slot until it exits. Initial
+/// on the same display is under way is queued: this call returns at once, and
+/// the worker takes it after the current one reaches its Space, so presses in
+/// a row all switch, but later actions can post first. One requested for
+/// another display is skipped. Call from an action worker, never an input-tap
+/// callback. Worker preparation has a two-second cancellation deadline; a
+/// canceled worker cannot post later and keeps the queue until it exits. Initial
 /// cursor capture and committed native post calls are not interruptible: this
 /// is not a hard wall-clock limit on `execute`.
 ///
