@@ -60,6 +60,8 @@ pub struct GamingLayout {
     pub model_keys: &'static [&'static str],
     /// The slots, in `0x8110` order.
     pub slots: &'static [Slot],
+    /// Standard buttons whose remapping must use device reports.
+    pub host_remap: &'static [ButtonId],
     /// Stock DPI levels, used until the user sets presets.
     pub stock_dpi_presets: &'static [u16],
 }
@@ -81,6 +83,7 @@ pub const G502_LIGHTSPEED: GamingLayout = GamingLayout {
         Slot::silent(ButtonId::WheelTiltRight),
         Slot::silent(ButtonId::WheelTiltLeft),
     ],
+    host_remap: &[],
     stock_dpi_presets: &[400, 800, 1600, 3200, 6400],
 };
 
@@ -99,10 +102,31 @@ pub const STANDARD_BUTTONS: GamingLayout = GamingLayout {
         Slot::native(ButtonId::Back),
         Slot::native(ButtonId::Forward),
     ],
+    host_remap: &[],
     stock_dpi_presets: &[],
 };
 
-const LAYOUTS: &[&GamingLayout] = &[&G502_LIGHTSPEED];
+/// G603 LIGHTSPEED (wpid `0x406c`), six slots reported by `0x8110`.
+/// Its model key uses the first advertised transport ID (BTLE `0xb01c`),
+/// even while connected through the LIGHTSPEED receiver.
+/// Real-device reports: middle `0x0004`, back `0x0008`, forward `0x0010`.
+/// macOS does not attribute its side-button CGEvents to the receiver.
+/// The DPI presets were read from its format-3 onboard profile.
+pub const G603_LIGHTSPEED: GamingLayout = GamingLayout {
+    model_keys: &["0b01c"],
+    slots: &[
+        Slot::native(ButtonId::LeftClick),
+        Slot::native(ButtonId::RightClick),
+        Slot::native(ButtonId::MiddleClick),
+        Slot::native(ButtonId::Back),
+        Slot::native(ButtonId::Forward),
+        Slot::silent(ButtonId::DpiToggle),
+    ],
+    host_remap: &[ButtonId::MiddleClick, ButtonId::Back, ButtonId::Forward],
+    stock_dpi_presets: &[400, 800, 1600, 3200],
+};
+
+const LAYOUTS: &[&GamingLayout] = &[&G502_LIGHTSPEED, &G603_LIGHTSPEED];
 
 /// Whether a device is a G-series mouse, and which buttons it offers. The
 /// agent, the tabs and the Buttons panel all ask this one verdict.
@@ -179,7 +203,7 @@ impl GamingLayout {
     /// Whether rebinding `button` needs host mode.
     #[must_use]
     pub fn needs_host_mode(&self, button: ButtonId) -> bool {
-        self.slot(button).is_some_and(|slot| slot.host_silent)
+        self.slot(button).is_some_and(|slot| slot.host_silent) || self.host_remap.contains(&button)
     }
 
     /// The stock function of `button` on this model, if it differs per
@@ -232,6 +256,29 @@ mod tests {
         assert!(!layout.remappable().any(|b| b == ButtonId::LeftClick));
         assert!(layout.needs_host_mode(ButtonId::G7));
         assert!(!layout.needs_host_mode(ButtonId::Back));
+    }
+
+    #[test]
+    fn g603_transport_table_resolves_the_receiver_layout() {
+        use crate::device::{DeviceModelInfo, DeviceTransports};
+        let model = DeviceModelInfo {
+            entity_count: 3,
+            serial_number: None,
+            unit_id: [0; 4],
+            transports: DeviceTransports {
+                usb: false,
+                equad: true,
+                btle: true,
+                bluetooth: false,
+            },
+            model_ids: [0xb01c, 0x406c, 0],
+            extended_model_id: 0,
+        };
+        let layout =
+            GamingLayout::for_model_key(&model.model_key()).expect("real G603 model table");
+        assert_eq!(layout.slot_of(ButtonId::Back), Some(3));
+        assert_eq!(layout.slot_of(ButtonId::Forward), Some(4));
+        assert_eq!(layout.slot_of(ButtonId::DpiToggle), Some(5));
     }
 
     #[test]

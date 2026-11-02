@@ -433,6 +433,7 @@ fn a_selected_gesture_can_render_in_the_binding_inspector(cx: &mut TestAppContex
                 layout: None,
                 gesture_maps: &gesture_maps,
                 dpi_gestures: false,
+                native_gestures: true,
                 virtual_thumbwheel: false,
                 wheel_hold: &BTreeSet::new(),
                 editing_app: None,
@@ -1016,4 +1017,72 @@ fn the_model_and_full_values_fit_the_canvas_area_below_the_chrome(cx: &mut TestA
     drop(view);
     cx.update(|window, _| window.remove_window());
     cx.run_until_parked();
+}
+
+/// G603 side presses cannot be attributed by the OS hook; a plain action
+/// remains editable, while the G502 keeps its native gesture entry point.
+fn check_gaming_side_buttons(cx: &mut TestAppContext, model_id: u16, gestures: bool) {
+    use openlogi_core::device::Capabilities;
+
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    cx.update(gpui_component::init);
+    cx.update(|cx| {
+        let resolver = AssetResolver::new();
+        let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut inventory = crate::state::tests::direct_inventory([0xa3, 0x93, 0xca, 0xe0]);
+        let model = inventory.paired[0].model_info.as_mut().unwrap();
+        model.model_ids = [model_id, 0, 0];
+        model.extended_model_id = 0;
+        inventory.paired[0].capabilities = Some(Capabilities::from_feature_ids(&[0x8100, 0x8110]));
+        let state = cx.new(|_| {
+            AppState::new(Sources {
+                inventories: &[inventory],
+                ..Sources::in_memory(Config::ephemeral(), &resolver, commands)
+            })
+        });
+        AppState::set_global(state, cx);
+    });
+    let (view, visual) = cx.add_window_view(MouseModelView::new);
+    visual.simulate_resize(size(px(1200.), px(1000.)));
+    for button in [ButtonId::Back, ButtonId::Forward] {
+        view.update(visual, |view, cx| {
+            view.select(MouseControlId::Button(button));
+            cx.notify();
+        });
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        assert_eq!(
+            visual.debug_bounds("inspector-use-gestures").is_some(),
+            gestures,
+            "model {model_id:04x}, button {button:?}, native support {}, in gesture mode {}",
+            visual.update(|_, cx| AppState::try_read(cx)
+                .unwrap()
+                .current_native_gesture_supported(button)),
+            in_gesture_mode(visual, button),
+        );
+        click_picker_control(visual, "inspector-current-action");
+        click_picker_control(visual, "inspector-action-Copy");
+        visual.update(|_, cx| {
+            assert_eq!(
+                AppState::try_read(cx)
+                    .unwrap()
+                    .button_bindings()
+                    .get(&button),
+                Some(&Action::Copy)
+            );
+        });
+    }
+    drop(view);
+    visual.update(|window, _| window.remove_window());
+    visual.run_until_parked();
+}
+
+#[gpui::test]
+fn g603_side_buttons_offer_actions_without_native_gestures(cx: &mut TestAppContext) {
+    check_gaming_side_buttons(cx, 0xb01c, false);
+}
+
+#[gpui::test]
+fn g502_side_buttons_keep_native_gestures(cx: &mut TestAppContext) {
+    check_gaming_side_buttons(cx, 0x407f, true);
 }

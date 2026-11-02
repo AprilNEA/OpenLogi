@@ -840,6 +840,19 @@ impl Orchestrator {
         // G-series layout changes, so this map needs no layout.
         let mut bindings = button_bindings_for(&self.config, key, app, None);
         let mut gestures = oshook_gestures_for(&self.config, key, app);
+        if let Some(layout) = key
+            .and_then(|key| self.devices.iter().find(|dev| dev.config_key == key))
+            .and_then(|dev| GamingLayout::for_model_key(&dev.model_key))
+        {
+            gestures.retain(|button, _| {
+                if layout.needs_host_mode(*button) {
+                    bindings.remove(button);
+                    false
+                } else {
+                    true
+                }
+            });
+        }
         if cfg!(target_os = "macos")
             && let Some(key) = key
             && !self.is_spy_only(key)

@@ -581,3 +581,14 @@ fn gesture_maps_cover_every_gesture_mode_button() {
         "a promoted OS-hook button gets its own menu simultaneously"
     );
 }
+
+#[test]
+fn g603_cannot_enable_senderless_side_gestures() {
+    let mut state = state_with_a_known_mouse();
+    state.devices.records[0].model_key = "0b01c".into();
+    for button in [ButtonId::Back, ButtonId::Forward] {
+        assert!(!state.current_native_gesture_supported(button));
+        let _ = state.commit_gesture_mode(button, true);
+        assert!(!state.config.is_gesture_mode(KNOWN_MOUSE_KEY, button));
+    }
+}

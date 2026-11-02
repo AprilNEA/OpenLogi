@@ -41,6 +41,7 @@ pub(super) struct BindingInspectorData<'a> {
     pub layout: Option<&'a GamingLayout>,
     pub gesture_maps: &'a BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
     pub dpi_gestures: bool,
+    pub native_gestures: bool,
     /// The device reports raw wheel on Back/Forward, so holding one can
     /// scroll sideways (`Capabilities::virtual_thumbwheel`).
     pub virtual_thumbwheel: bool,
@@ -251,33 +252,39 @@ fn button_inspector(
                     }),
             )
         })
-        .when(can_enable_gestures(button, data.editing_app), |panel| {
-            let observer = picker.view.clone();
-            let unavailable = button == ButtonId::DpiToggle && !data.dpi_gestures;
-            panel
-                .child(
-                    control_button("inspector-use-gestures")
-                        .w_full()
-                        .icon(Icon::empty().path(GESTURE_BUTTON_ICON))
-                        .label(tr!("actions.use_gestures"))
-                        .disabled(unavailable)
-                        .on_click(move |_, _, cx| {
-                            AppState::apply(cx, |state| state.commit_gesture_mode(button, true));
-                            observer.update(cx, |view, cx| {
-                                view.set_gesture_selected_dir(Some(GestureDirection::Click));
-                                cx.notify();
-                            });
-                        }),
-                )
-                .when(unavailable, |panel| {
-                    panel.child(
-                        div()
-                            .text_body()
-                            .text_color(pal.text_muted)
-                            .child(tr!("actions.dpi_gestures_unavailable")),
+        .when(
+            data.native_gestures && can_enable_gestures(button, data.editing_app),
+            |panel| {
+                let observer = picker.view.clone();
+                let unavailable = button == ButtonId::DpiToggle && !data.dpi_gestures;
+                panel
+                    .child(
+                        control_button("inspector-use-gestures")
+                            .debug_selector(|| "inspector-use-gestures".into())
+                            .w_full()
+                            .icon(Icon::empty().path(GESTURE_BUTTON_ICON))
+                            .label(tr!("actions.use_gestures"))
+                            .disabled(unavailable)
+                            .on_click(move |_, _, cx| {
+                                AppState::apply(cx, |state| {
+                                    state.commit_gesture_mode(button, true)
+                                });
+                                observer.update(cx, |view, cx| {
+                                    view.set_gesture_selected_dir(Some(GestureDirection::Click));
+                                    cx.notify();
+                                });
+                            }),
                     )
-                })
-        })
+                    .when(unavailable, |panel| {
+                        panel.child(
+                            div()
+                                .text_body()
+                                .text_color(pal.text_muted)
+                                .child(tr!("actions.dpi_gestures_unavailable")),
+                        )
+                    })
+            },
+        )
         .children(
             data.press_force
                 .map(|press_force| force_sensing_row(press_force, pal)),
@@ -1056,6 +1063,7 @@ mod tests {
             layout: None,
             gesture_maps,
             dpi_gestures: false,
+            native_gestures: true,
             extra_actions: &[],
             hidden_actions: &[],
             virtual_thumbwheel: true,

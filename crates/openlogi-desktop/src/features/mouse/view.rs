@@ -606,6 +606,7 @@ impl Render for MouseModelView {
                 layout,
                 gesture_maps,
                 dpi_gestures,
+                native_gestures: native_gestures_for(self.selected, cx),
                 virtual_thumbwheel,
                 wheel_hold,
                 editing_app: editing_app.as_deref(),
@@ -619,6 +620,15 @@ impl Render for MouseModelView {
         );
         workspace_layout(canvas, profile_status, inspector, &self.focus_handle, view)
     }
+}
+
+/// Whether the selected control has a native motion source for gestures.
+fn native_gestures_for(selected: Option<MouseControlId>, cx: &App) -> bool {
+    selected.is_some_and(|selected| match selected {
+        MouseControlId::Button(button) => AppState::try_read(cx)
+            .is_some_and(|state| state.current_native_gesture_supported(button)),
+        MouseControlId::ThumbwheelRotation => false,
+    })
 }
 
 /// The canvas around `band`, which holds the model and its cards laid out
