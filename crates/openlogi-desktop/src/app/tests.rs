@@ -1866,9 +1866,12 @@ fn the_flow_button_opens_one_flow_window(cx: &mut gpui::TestAppContext) {
     use openlogi_ipc::SecureInput;
 
     use super::AppView;
-    use crate::services::assets::AssetResolver;
+    use crate::services::{assets::AssetResolver, i18n::LOCALE_LOCK};
     use crate::state::{AgentLink, AppState, Sources};
 
+    // The click lands on the centre measured from the first draw; a locale
+    // switched by a parallel test re-lays the header out under it.
+    let _locale = LOCALE_LOCK.lock().unwrap();
     cx.update(|cx| {
         gpui_component::init(cx);
         crate::ui::theme::register_builtin_themes(cx);
