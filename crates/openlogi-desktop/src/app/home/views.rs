@@ -19,9 +19,11 @@ use openlogi_core::config::DeviceViewMode;
 use openlogi_core::device::DeviceKind;
 
 use super::{
-    AppView, connection_summary, connection_view, custom_model_subtitle, device_card, device_image,
-    device_menu, device_menu_button, device_ring, keyboard_glow, kind_badge,
+    AppView, Connectivity, battery_reading, connection_summary, connection_view,
+    custom_model_subtitle, device_card, device_image, device_menu, device_menu_button, device_ring,
+    keyboard_glow, kind_badge,
 };
+use crate::app::widgets::agent_live;
 use crate::state::{AppState, DeviceRecord};
 use crate::ui::battery::{BatteryIndicator, battery_charging_no_reading, value_label};
 use crate::ui::carousel::Carousel;
@@ -266,6 +268,7 @@ fn device_card_element(
     let record = &state.devices()[idx];
     let active = idx == active_idx;
     let record_key = record.record_key();
+    let connectivity = Connectivity::new(record.online, agent_live(state));
     let enabled = state.device_enabled(&record.config_key);
     let light_enabled =
         record.kind == DeviceKind::Light && state.light_enabled_for(&record.device_key());
@@ -274,6 +277,7 @@ fn device_card_element(
 
     device_card(
         record,
+        connectivity,
         state.offline_connection(record),
         enabled,
         glow,
@@ -283,7 +287,7 @@ fn device_card_element(
     )
     .active(gpui::Styled::shadow_2xs)
     .accessibility_label(record.display_name.clone())
-    .aria_description(device_accessibility_description(record))
+    .aria_description(device_accessibility_description(record, connectivity))
     .aria_selected(active)
     .cursor_pointer()
     .hover(move |card| card.border_color(rgb(theme::ACCENT_BLUE)).shadow_sm())
@@ -304,6 +308,7 @@ fn device_list_row(
 ) -> BaseButton {
     let record = &state.devices()[idx];
     let active = idx == active_idx;
+    let connectivity = Connectivity::new(record.online, agent_live(state));
     let enabled = state.device_enabled(&record.config_key);
     let light_enabled =
         record.kind == DeviceKind::Light && state.light_enabled_for(&record.device_key());
@@ -369,6 +374,7 @@ fn device_list_row(
                 })
                 .child(connection_view(
                     record,
+                    connectivity,
                     pal,
                     state.offline_connection(record),
                 )),
@@ -380,7 +386,10 @@ fn device_list_row(
                 .items_end()
                 .gap_2()
                 .when_some(record.battery.as_ref(), |this, battery| {
-                    this.child(BatteryIndicator::status(battery, record.online))
+                    this.child(battery_reading(
+                        BatteryIndicator::status(battery, record.online),
+                        connectivity,
+                    ))
                 })
                 .when(record.persistent, |this| {
                     this.child(device_menu_button(record, pal))
@@ -388,7 +397,7 @@ fn device_list_row(
         )
         .active(gpui::Styled::shadow_2xs)
         .accessibility_label(record.display_name.clone())
-        .aria_description(device_accessibility_description(record))
+        .aria_description(device_accessibility_description(record, connectivity))
         .aria_selected(active)
         .cursor_pointer()
         .hover(move |row| row.border_color(rgb(theme::ACCENT_BLUE)).shadow_sm())
@@ -400,12 +409,11 @@ fn device_list_row(
         })
 }
 
-fn device_accessibility_description(record: &DeviceRecord) -> SharedString {
-    let status = if record.online {
-        tr!("device.connected")
-    } else {
-        tr!("device.offline")
-    };
+fn device_accessibility_description(
+    record: &DeviceRecord,
+    connectivity: Connectivity,
+) -> SharedString {
+    let status = connectivity.label();
     let identity = if record.display_name == record.model_name {
         super::kind_label(record.kind)
     } else {
@@ -415,7 +423,7 @@ fn device_accessibility_description(record: &DeviceRecord) -> SharedString {
     if let Some(battery) = record.battery.as_ref() {
         let battery = if battery_charging_no_reading(battery) {
             tr!("device.charging").to_string()
-        } else if record.online {
+        } else if connectivity == Connectivity::Connected {
             format!("{} {}", tr!("device.battery"), value_label(battery))
         } else {
             format!(

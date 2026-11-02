@@ -1777,17 +1777,37 @@ fn a_key_binding_edit_repaints_the_secure_input_notice(cx: &mut gpui::TestAppCon
     assert!(!secure_input_notice_drawn(cx));
 }
 
-/// A lost agent first marks the window's last state as reconnecting. Once it
-/// is unreachable, the notice replaces only the content: the header keeps
-/// Settings usable, Add Device stays shut, and Retry asks the IPC client to
-/// try again now.
+/// Whether the menu bar's Add Device can be chosen.
+fn menu_offers_add_device(cx: &mut gpui::VisualTestContext) -> bool {
+    use gpui::OwnedMenuItem;
+
+    cx.update(|_, cx| {
+        let menus = cx.get_menus().expect("the menu bar is published");
+        let add_device = menus
+            .iter()
+            .flat_map(|menu| &menu.items)
+            .find_map(|item| match item {
+                OwnedMenuItem::Action {
+                    action, disabled, ..
+                } if action.partial_eq(&super::menu::OpenAddDevice) => Some(!*disabled),
+                _ => None,
+            });
+        add_device.expect("the Device menu lists Add Device")
+    })
+}
+
+/// A lost agent first marks the window's last state as reconnecting, and
+/// every Add Device entry shuts: the header's, the empty state's, and the
+/// menu bar's. Once it is unreachable, the notice replaces only the content:
+/// the header keeps Settings usable, and Retry asks the IPC client to try
+/// again now.
 #[gpui::test]
 fn an_unreachable_agent_keeps_the_header_and_offers_retry(cx: &mut gpui::TestAppContext) {
     use gpui::{AppContext as _, Modifiers};
     use gpui_kit::component::Root;
     use openlogi_ipc::SecureInput;
 
-    use super::AppView;
+    use super::{AppView, menu};
     use crate::services::ipc::Command;
     use crate::services::{assets::AssetResolver, i18n::LOCALE_LOCK};
     use crate::state::{AgentLink, AppState, Sources};
@@ -1808,6 +1828,7 @@ fn an_unreachable_agent_keeps_the_header_and_offers_retry(cx: &mut gpui::TestApp
             state
         });
         AppState::set_global(state, cx);
+        menu::install(cx);
     });
     let (_, cx) = cx.add_window_view(|window, cx| {
         let view = cx.new(|cx| AppView::new(window, cx));
@@ -1817,11 +1838,29 @@ fn an_unreachable_agent_keeps_the_header_and_offers_retry(cx: &mut gpui::TestApp
 
     draw(cx);
     assert!(cx.debug_bounds("agent-reconnecting").is_none());
+    assert!(
+        menu_offers_add_device(cx),
+        "a live agent pairs from the menu"
+    );
     cx.update(|_, cx| AppState::apply(cx, AppState::agent_link_lost));
     draw(cx);
     assert!(
         cx.debug_bounds("agent-reconnecting").is_some(),
         "a lost agent's last state is not presented as live"
+    );
+    let empty_add_device = cx
+        .debug_bounds("empty-add-device")
+        .expect("the empty state keeps its Add Device");
+    let windows = cx.update(|_, cx| cx.windows().len());
+    cx.simulate_click(empty_add_device.center(), Modifiers::none());
+    assert_eq!(
+        cx.update(|_, cx| cx.windows().len()),
+        windows,
+        "pairing needs the agent, so the empty state's Add Device opens nothing"
+    );
+    assert!(
+        !menu_offers_add_device(cx),
+        "nor does the menu bar's, which follows the link"
     );
 
     cx.update(|_, cx| {
@@ -1855,6 +1894,118 @@ fn an_unreachable_agent_keeps_the_header_and_offers_retry(cx: &mut gpui::TestApp
         cx.update(|_, cx| AppState::try_read(cx).unwrap().agent_link().clone()),
         AgentLink::Unreachable { retrying: true },
         "the notice shows the attempt until the IPC client answers it"
+    );
+
+    cx.update(|_, cx| {
+        AppState::apply(cx, |state| {
+            state.set_agent_link(AgentLink::Ready(status_with(SecureInput::Off)))
+        });
+    });
+    assert!(
+        menu_offers_add_device(cx),
+        "the agent's answer reopens pairing in the menu"
+    );
+}
+
+/// While the window reconnects, a device the agent last reported connected
+/// is shown as reconnecting — on its card in every Home layout and in the
+/// detail header — and one it reported offline stays offline.
+#[gpui::test]
+fn a_lost_agent_marks_connected_devices_as_reconnecting(cx: &mut gpui::TestAppContext) {
+    use std::{cell::RefCell, rc::Rc};
+
+    use gpui::{AppContext as _, Modifiers, px, size};
+    use gpui_kit::component::Root;
+    use openlogi_core::config::DeviceViewMode;
+
+    use super::AppView;
+    use crate::services::{assets::AssetResolver, i18n::LOCALE_LOCK};
+    use crate::state::tests::direct_inventory;
+    use crate::state::{AgentLink, AppState, Sources};
+
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    cx.update(gpui_kit::component::init);
+    cx.update(|cx| {
+        let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let resolver = AssetResolver::new();
+        let mut asleep = direct_inventory([0xa3, 0x93, 0xca, 0xe1]);
+        asleep.paired[0].online = false;
+        let inventories = [direct_inventory([0xa3, 0x93, 0xca, 0xe0]), asleep];
+        let state = cx.new(|_| {
+            let mut state = AppState::new(Sources {
+                inventories: &inventories,
+                ..Sources::in_memory(
+                    openlogi_core::config::Config::ephemeral(),
+                    &resolver,
+                    commands,
+                )
+            });
+            let _ = state.set_agent_link(AgentLink::Ready(status_with(
+                openlogi_ipc::SecureInput::Off,
+            )));
+            state
+        });
+        AppState::set_global(state, cx);
+    });
+    let hosted = Rc::new(RefCell::new(None));
+    let slot = Rc::clone(&hosted);
+    let (_, cx) = cx.add_window_view(move |window, cx| {
+        let view = cx.new(|cx| AppView::new(window, cx));
+        *slot.borrow_mut() = Some(view.clone());
+        Root::new(view, window, cx)
+    });
+    let app_view = hosted
+        .borrow_mut()
+        .take()
+        .expect("the window hosts the app");
+    cx.simulate_resize(size(px(1280.), px(900.)));
+    let draw = |cx: &mut gpui::VisualTestContext| cx.update(|window, cx| window.draw(cx).clear(cx));
+    let show = |cx: &mut gpui::VisualTestContext, mode: DeviceViewMode| {
+        cx.update(|_, cx| {
+            AppState::apply(cx, |state| state.commit_device_view_mode(mode));
+            app_view.update(cx, |_, cx| cx.notify());
+        });
+        draw(cx);
+    };
+
+    draw(cx);
+    assert!(
+        cx.debug_bounds("device-reconnecting").is_none(),
+        "a live agent confirms the device"
+    );
+    cx.update(|_, cx| AppState::apply(cx, AppState::agent_link_lost));
+    draw(cx);
+    let [live_card, _asleep_card] = ["home-grid-card-0", "home-grid-card-1"]
+        .map(|card| cx.debug_bounds(card).expect("the grid shows both devices"));
+    // The last marker painted wins the selector, and the offline card paints
+    // after the connected one: a marker on the first card proves the second
+    // carries none.
+    let marker = cx
+        .debug_bounds("device-reconnecting")
+        .expect("the grid card says it is reconnecting");
+    assert!(
+        live_card.contains(&marker.center()),
+        "{marker:?} in {live_card:?}"
+    );
+    for mode in [DeviceViewMode::List, DeviceViewMode::Carousel] {
+        show(cx, mode);
+        assert!(
+            cx.debug_bounds("device-reconnecting").is_some(),
+            "the {mode:?} layout says it is reconnecting"
+        );
+    }
+
+    show(cx, DeviceViewMode::Grid);
+    cx.simulate_click(live_card.center(), Modifiers::none());
+    draw(cx);
+    assert!(
+        cx.debug_bounds("home-grid-card-0").is_none(),
+        "the detail screen shows"
+    );
+    assert!(
+        cx.debug_bounds("device-reconnecting").is_some(),
+        "the detail header's pill says it is reconnecting"
     );
 }
 

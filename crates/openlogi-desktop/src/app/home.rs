@@ -34,7 +34,7 @@ use openlogi_ipc::PairingFailure;
 use super::AppView;
 use super::status::{loading_body, notice_body};
 use super::widgets::{
-    add_device_button, connection_summary, connectivity_dot, flow_button, kind_label,
+    Connectivity, add_device_button, connection_summary, connectivity_dot, flow_button, kind_label,
     receiver_slot_label, settings_button,
 };
 use crate::features::lighting::visual as light_visual;
@@ -84,7 +84,7 @@ pub(super) fn home_header(cx: &mut Context<AppView>) -> impl IntoElement {
         .child(views::device_view_switcher(current_mode, view))
         .child(flow_button())
         .child(settings_button())
-        .child(add_device_button())
+        .child(add_device_button("header-add-device"))
 }
 
 /// Opacity the lighting colour is painted at over the device image, in both the
@@ -160,8 +160,13 @@ pub(crate) fn glow_canvas(geom: Arc<GlowGeometry>, color: Hsla) -> impl IntoElem
 /// cards gain the same ring on hover or keyboard focus.
 /// Returns an unstyled semantic button so the gallery can add its activation
 /// handler without giving up keyboard behavior.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each argument is one fact the gallery reads from AppState for this card"
+)]
 fn device_card(
     record: &DeviceRecord,
+    connectivity: Connectivity,
     saved_transport: Option<ObservedConnection>,
     enabled: bool,
     glow: Option<(Arc<GlowGeometry>, Hsla)>,
@@ -211,7 +216,7 @@ fn device_card(
                         .absolute()
                         .top_0()
                         .left_0()
-                        .child(transport_glance(record, pal, saved_transport)),
+                        .child(transport_glance(record, connectivity, pal, saved_transport)),
                 )
                 .when_some(record.battery.as_ref(), |image, battery| {
                     image.child(
@@ -219,7 +224,7 @@ fn device_card(
                             .absolute()
                             .top_0()
                             .right_0()
-                            .child(battery_glance(battery, record)),
+                            .child(battery_glance(battery, record, connectivity)),
                     )
                 }),
         )
@@ -295,27 +300,25 @@ pub(super) fn transport_icon(
 }
 
 /// [`transport_icon`] in the card corner; the connectivity words ride its
-/// hover tip and the dimmed render already marks an offline card.
+/// hover tip and the dimmed render already marks an offline card. While the
+/// window reconnects, the reconnecting dot leads it, so a card the agent can
+/// no longer confirm does not pass for a live one.
 fn transport_glance(
     record: &DeviceRecord,
+    connectivity: Connectivity,
     pal: Palette,
     saved_transport: Option<ObservedConnection>,
 ) -> impl IntoElement {
-    let hint: SharedString = format!(
-        "{} · {}",
-        if record.online {
-            tr!("device.connected")
-        } else {
-            tr!("device.offline")
-        },
-        connection_summary(record)
-    )
-    .into();
+    let hint: SharedString =
+        format!("{} · {}", connectivity.label(), connection_summary(record)).into();
     h_flex()
         .id((ElementId::from("transport-glance"), record.record_key()))
         .flex_none()
         .items_center()
         .gap_1()
+        .when(connectivity == Connectivity::Reconnecting, |glance| {
+            glance.child(connectivity_dot(connectivity, pal))
+        })
         .child(transport_icon(record, saved_transport, pal).size_4())
         .when_some(receiver_slot_label(record), |glance, slot| {
             glance.child(div().text_caption().text_color(pal.text_muted).child(slot))
@@ -328,13 +331,28 @@ fn transport_glance(
 fn battery_glance(
     battery: &openlogi_core::device::BatteryInfo,
     record: &DeviceRecord,
+    connectivity: Connectivity,
 ) -> impl IntoElement {
-    let hint: SharedString = glance_hint(battery, record.online).into();
+    let hint: SharedString = glance_hint(battery, connectivity == Connectivity::Connected).into();
     div()
         .id((ElementId::from("battery-glance"), record.record_key()))
         .flex_none()
-        .child(BatteryIndicator::glance(battery))
+        .child(battery_reading(
+            BatteryIndicator::glance(battery),
+            connectivity,
+        ))
         .tooltip(move |window, cx| Tooltip::new(hint.clone()).build(window, cx))
+}
+
+/// A battery `reading` as the gallery may present it. While the window
+/// reconnects, the last reading stays there to read but dimmed: the agent no
+/// longer confirms it.
+fn battery_reading(reading: BatteryIndicator, connectivity: Connectivity) -> Div {
+    div()
+        .when(connectivity == Connectivity::Reconnecting, |dimmed| {
+            dimmed.opacity(0.5)
+        })
+        .child(reading)
 }
 
 fn device_ring(enabled: bool) -> Hsla {
@@ -598,6 +616,7 @@ pub(super) fn open_rename_dialog(
 
 fn connection_view(
     record: &DeviceRecord,
+    connectivity: Connectivity,
     pal: Palette,
     saved_transport: Option<ObservedConnection>,
 ) -> impl IntoElement {
@@ -608,12 +627,8 @@ fn connection_view(
         .items_center()
         .text_caption()
         .text_color(pal.text_muted)
-        .child(connectivity_dot(record.online, pal))
-        .child(if record.online {
-            tr!("device.connected")
-        } else {
-            tr!("device.offline")
-        })
+        .child(connectivity_dot(connectivity, pal))
+        .child(connectivity.label())
         .child("·")
         .child(transport_icon(record, saved_transport, pal).size_3())
         .child(div().min_w_0().truncate().child(connection_summary(record)))
@@ -811,13 +826,7 @@ pub(super) fn device_empty_state(cx: &App) -> Div {
                 .text_center()
                 .child(tr!("device.device_connection_help")),
         )
-        .child(
-            Button::new("empty-add-device")
-                .primary()
-                .icon(IconName::Plus)
-                .label(tr!("pairing.add_device"))
-                .on_click(|_, _, cx| crate::windows::add_device::open(cx)),
-        )
+        .child(add_device_button("empty-add-device"))
         .child(
             div()
                 .mt_1()

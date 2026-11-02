@@ -261,13 +261,17 @@ fn menus(cx: &App) -> Vec<Menu> {
 }
 
 fn device_menu_items(cx: &App) -> Vec<MenuItem> {
+    let state = AppState::try_read(cx);
+    // Pairing runs in the agent: like the window's Add Device buttons, the
+    // item waits for a live link. The menu follows the link because every
+    // `StateEvent::AgentChanged` republishes it.
+    let agent_live = state.is_some_and(super::widgets::agent_live);
     let mut items = vec![
-        MenuItem::action(tr!("pairing.add_device_dialog"), OpenAddDevice),
+        MenuItem::action(tr!("pairing.add_device_dialog"), OpenAddDevice).disabled(!agent_live),
         MenuItem::separator(),
     ];
 
-    let state = AppState::try_global(cx);
-    match state.as_ref().map(|state| state.read(cx)) {
+    match state {
         Some(state) if !state.devices().is_empty() => {
             for record in state.devices() {
                 let title = match &record.battery {
