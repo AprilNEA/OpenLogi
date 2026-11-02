@@ -32,7 +32,7 @@ use openlogi_ipc::{
 
 use super::FlowView;
 use crate::state::{AppState, FlowHost, FlowPairingRefusal};
-use crate::ui::components::control_input;
+use crate::ui::components::{control_input, localize_placeholder};
 use crate::ui::theme::{self, Palette, Typography as _};
 
 /// What the dialog keeps while it is open: the user's own choices.
@@ -101,7 +101,9 @@ impl FlowView {
         self.pairing = Some(form.clone());
         AppState::apply(cx, AppState::start_flow_pairing);
         let view = cx.entity().downgrade();
-        window.open_dialog(cx, move |dialog, _, cx| build(dialog, &form, &view, cx));
+        window.open_dialog(cx, move |dialog, window, cx| {
+            build(dialog, &form, &view, window, cx)
+        });
     }
 
     /// Follow the agent's pairing phase while the dialog is open: note that
@@ -251,8 +253,11 @@ fn build(
     dialog: Dialog,
     form: &Entity<PairingForm>,
     view: &WeakEntity<FlowView>,
+    window: &mut Window,
     cx: &mut App,
 ) -> Dialog {
+    let address = form.read(cx).address.clone();
+    localize_placeholder(&address, tr!("flow.pair_address_placeholder"), window, cx);
     let step = Step::read(form.read(cx), cx);
     let focus = form.read(cx).focus.clone();
     let pal = theme::palette(cx);
