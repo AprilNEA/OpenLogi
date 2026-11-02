@@ -16,6 +16,7 @@ openlogi-device = { path = "../openlogi-device", version = "0.8.20" }
 openlogi-fixture = { workspace = true, features = ["fs"] }
 openlogi-hid = { path = "../openlogi-hid", version = "0.8.20" }
 openlogi-camera = { path = "../openlogi-camera", version = "0.8.20" }
+openlogi-audio = { path = "../openlogi-audio", version = "0.8.20" }
 openlogi-assets = { path = "../openlogi-assets", version = "0.8.20" }
 openlogi-ipc = { path = "../openlogi-ipc", version = "0.8.20" }
 atomic-write-file = { workspace = true }

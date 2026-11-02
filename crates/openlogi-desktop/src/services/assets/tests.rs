@@ -338,6 +338,42 @@ fn resolves_standalone_registry_model_without_synthetic_hidpp_info() {
     assert_eq!((asset.png_width, asset.png_height), (396, 396));
 }
 
+/// G HUB's own depots key their manifest by the depot name, not the model ID
+/// the index lists (the Yeti's `yeti_classic` for model `0ab7`), and ship a
+/// capitalised `Front.png`. The render the depot sync fetched must resolve.
+#[test]
+fn resolves_a_standalone_render_the_manifest_keys_by_depot_name() {
+    let root = tempfile::tempdir().expect("create temp dir");
+    let depot = root.path().join("yeti_classic");
+    std::fs::create_dir_all(&depot).expect("create depot dir");
+    std::fs::write(
+        depot.join("manifest.json"),
+        r#"{"devices":[{"modelId":"yeti_classic","resources":[{"key":"device_image","src":"Front.png"}]}],"resources":[]}"#,
+    )
+    .expect("write manifest");
+    std::fs::write(depot.join("Front.png"), png_header(350, 350)).expect("write front");
+
+    let index = index_of(
+        "yeti_classic",
+        DeviceEntry {
+            model_id: "0ab7".into(),
+            model_ids: vec!["0ab7".into()],
+            display_name: "Yeti".into(),
+            kind: "MICROPHONE".into(),
+            asset_path: "v1/devices/yeti_classic/".into(),
+            files: vec![],
+        },
+    );
+    let resolver = resolver_over(&[root.path()], Some(index));
+
+    let asset = resolver
+        .resolve_registry_model("0ab7")
+        .expect("the depot-keyed render should resolve");
+    assert_eq!(asset.display_name, "Yeti");
+    assert_eq!(asset.kind, Some(DeviceKind::Microphone));
+    assert_eq!(asset.image_path, depot.join("Front.png"));
+}
+
 #[test]
 fn standalone_registry_lookup_does_not_cross_model_depots() {
     let root = tempfile::tempdir().expect("create temp dir");

@@ -30,6 +30,7 @@ use crate::features::keyboard::function_row::FunctionRowView;
 use crate::features::lighting::keyboard_rgb::LightingPanel;
 use crate::features::lighting::standalone::LightPanel;
 use crate::features::lighting::visual as light_visual;
+use crate::features::microphone::MicrophonePanel;
 use crate::features::mouse::view::MouseModelView;
 use crate::features::pointer::dpi::DpiPanel;
 use crate::features::pointer::momentum::{MomentumPanel, confirm_turning_off_with_smooth_wheel};
@@ -108,6 +109,7 @@ pub(super) struct DetailPanels<'a> {
     pub camera_controls: &'a gpui::Entity<CameraControlsPanel>,
     pub light_panel: &'a gpui::Entity<LightPanel>,
     pub audio_panel: &'a gpui::Entity<AudioPanel>,
+    pub microphone_panel: &'a gpui::Entity<MicrophonePanel>,
 }
 
 /// The device-detail workspace below the identity bar: stable navigation rail
@@ -125,6 +127,9 @@ pub(super) fn detail_content(
     let online = AppState::try_read(cx)
         .and_then(AppState::current_record)
         .is_some_and(|record| record.online);
+    let microphone = AppState::try_read(cx)
+        .and_then(AppState::current_record)
+        .is_some_and(|record| matches!(record.kind, DeviceKind::Microphone));
     let content = match active {
         DetailTab::Buttons => {
             buttons_tab(panels.mouse_model, profile_icons, app_catalog, cx).into_any_element()
@@ -147,7 +152,7 @@ pub(super) fn detail_content(
             camera_tab(panels.camera_preview, panels.camera_controls).into_any_element()
         }
         DetailTab::Light => light_tab(panels.light_panel, cx).into_any_element(),
-        DetailTab::Audio => audio_tab(panels.audio_panel).into_any_element(),
+        DetailTab::Audio => audio_tab(panels, microphone).into_any_element(),
         DetailTab::Device => device_tab(panels.disable_keys_panel, cx).into_any_element(),
     };
     let navigation = detail_navigation(tabs, active, cx);
@@ -811,16 +816,32 @@ fn wheel_resolution_control(
         })
 }
 
-/// Audio tab: the headset's sidetone in one untitled card — the rail already
-/// names the page "Audio", as with Lighting.
-fn audio_tab(audio_panel: &gpui::Entity<AudioPanel>) -> impl IntoElement {
+/// Audio tab in one untitled card — the rail already names the page "Audio",
+/// as with Lighting. A headset's card holds its sidetone. A microphone's holds
+/// its controls, the hardware half of G HUB's microphone page, at the width
+/// of the light controls.
+fn audio_tab(panels: &DetailPanels<'_>, microphone: bool) -> impl IntoElement {
+    if microphone {
+        return tab_body(
+            DetailTab::Audio,
+            ContentWidth::ExtraLarge,
+            div()
+                .w(LIGHT_CONTROLS_W)
+                .min_w(LIGHT_CONTROLS_MIN_W)
+                .child(PanelCard::new(
+                    SharedString::default(),
+                    Icon::empty().path(MICROPHONE_ICON),
+                    panels.microphone_panel.clone().into_any_element(),
+                )),
+        );
+    }
     tab_body(
         DetailTab::Audio,
         ContentWidth::Small,
         PanelCard::new(
             SharedString::default(),
             Icon::empty().path(AUDIO_ICON),
-            audio_panel.clone().into_any_element(),
+            panels.audio_panel.clone().into_any_element(),
         ),
     )
 }
@@ -935,6 +956,9 @@ fn light_tab(
             ),
     )
 }
+
+/// The microphone glyph: Lucide's `mic`, which the bundled icon subset lacks.
+pub(super) const MICROPHONE_ICON: &str = "action-icons/mic.svg";
 
 /// Device tab: device details and configuration cards stacked.
 fn device_tab(

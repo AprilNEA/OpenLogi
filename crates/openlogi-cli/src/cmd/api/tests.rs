@@ -65,6 +65,7 @@ fn snapshot() -> AgentSnapshot {
         },
         lights: Vec::new(),
         flow: FlowStatus::default(),
+        microphones: Vec::new(),
     }
 }
 

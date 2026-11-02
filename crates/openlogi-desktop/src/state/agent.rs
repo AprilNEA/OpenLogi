@@ -63,6 +63,8 @@ impl AppState {
         cameras: &[Camera],
     ) -> SnapshotChanges {
         let inventory_ready = snapshot.status.inventory == InventoryHealth::Ready;
+        // Before the rebuild below, which files a record per microphone.
+        let microphones = self.set_microphones(&snapshot.microphones);
         // Merge only completed enumerations. A scanning agent serves an empty
         // pre-enumeration list, which must not burn the GUI's miss grace or
         // replace the last known device set.
@@ -93,7 +95,8 @@ impl AppState {
                 .and(camera)
                 .and(foreground)
                 .and(lights)
-                .and(flow),
+                .and(flow)
+                .and(microphones),
         }
     }
 

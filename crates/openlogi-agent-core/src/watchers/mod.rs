@@ -14,6 +14,7 @@ pub mod inventory;
 pub mod key_display;
 pub mod keyboard;
 pub mod light;
+pub mod microphone;
 pub mod pairing;
 pub mod pointer;
 mod poll;

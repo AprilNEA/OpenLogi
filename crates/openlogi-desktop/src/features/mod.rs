@@ -6,6 +6,7 @@ pub(crate) mod binding_editor;
 pub mod camera;
 pub mod keyboard;
 pub mod lighting;
+pub mod microphone;
 pub mod mouse;
 pub mod pointer;
 pub mod profiles;

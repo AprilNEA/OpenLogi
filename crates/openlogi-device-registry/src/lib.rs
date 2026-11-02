@@ -16,6 +16,7 @@ pub mod g600;
 pub mod headset;
 pub mod keypad;
 pub mod litra;
+pub mod microphone;
 pub mod receiver;
 
 /// Logitech's USB/Bluetooth vendor ID.

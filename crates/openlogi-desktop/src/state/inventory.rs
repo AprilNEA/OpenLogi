@@ -66,7 +66,18 @@ impl AppState {
         resolver: &AssetResolver,
         cameras: &[openlogi_camera::Camera],
     ) -> StateEvents {
-        let new_list = build_device_list(inventories, standalone, resolver, &self.config, cameras);
+        let microphones = self.microphones().to_vec();
+        let rebuild = |config: &Config| {
+            build_device_list(
+                inventories,
+                standalone,
+                resolver,
+                config,
+                cameras,
+                &microphones,
+            )
+        };
+        let new_list = rebuild(&self.config);
         // Adoption runs before anything else touches the config. Only an
         // online record's identity was actually read this snapshot, so only an
         // online sighting can attribute its route to a device with confidence
@@ -92,7 +103,7 @@ impl AppState {
         // skips it — a grace-kept record is never online. That guard existing
         // for its own reason is what this rebuild silently depends on.
         let new_list = if adopted {
-            build_device_list(inventories, standalone, resolver, &self.config, cameras)
+            rebuild(&self.config)
         } else {
             new_list
         };
@@ -135,15 +146,7 @@ impl AppState {
             .as_deref()
             .and_then(|k| merged_list.iter().position(|r| r.inventory_key() == k))
             .unwrap_or(0);
-        let connected_keys = merged_list
-            .iter()
-            .map(|r| r.config_key.as_str())
-            .collect::<Vec<_>>();
-        debug!(
-            count = merged_list.len(),
-            ?connected_keys,
-            "inventory refreshed"
-        );
+        log_refreshed(&merged_list);
 
         // A device that came back on a different route must re-run its device
         // queries — their subscriptions targeted the now-dead route.
@@ -785,4 +788,17 @@ fn clear_inventory_misses(sessions: &mut BTreeMap<DeviceKey, DeviceSession>, key
     if let Some(entry) = sessions.get_mut(key) {
         entry.inventory_misses = 0;
     }
+}
+
+/// Log the size and config keys of a refreshed device list.
+fn log_refreshed(records: &[DeviceRecord]) {
+    let connected_keys = records
+        .iter()
+        .map(|r| r.config_key.as_str())
+        .collect::<Vec<_>>();
+    debug!(
+        count = records.len(),
+        ?connected_keys,
+        "inventory refreshed"
+    );
 }
