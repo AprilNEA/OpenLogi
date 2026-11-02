@@ -150,6 +150,9 @@ enum FrameKind {
     /// declares a trackpad gesture (rubber-band overscroll, and WebKit gesture
     /// latching that starves sites scrolling from JS wheel handlers).
     Glide,
+    /// A continuous trackpad magnification gesture (`delta.y` is the fractional
+    /// magnification delta) rather than scroll.
+    Magnify,
 }
 
 /// What a frame's `delta` counts.
@@ -174,6 +177,13 @@ impl ScrollFrame {
                 FrameKind::Eased
             },
             unit: FrameUnit::Ticks,
+        }
+    }
+
+    fn as_magnify(self) -> Self {
+        Self {
+            kind: FrameKind::Magnify,
+            ..self
         }
     }
 
@@ -216,6 +226,10 @@ impl ScrollFrame {
     }
 
     fn post(self) {
+        if self.kind == FrameKind::Magnify {
+            openlogi_inject::post_magnify(self.delta.y, self.phase);
+            return;
+        }
         if self.kind == FrameKind::Phased {
             openlogi_inject::post_phased_scroll(self.delta.into(), self.phase);
             return;

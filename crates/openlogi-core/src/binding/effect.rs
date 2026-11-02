@@ -135,6 +135,10 @@ pub enum Shortcut {
     PrevTab,
     /// Reload the current page.
     ReloadPage,
+    /// Zoom in (`Cmd+=` on macOS, `Ctrl+=` on Linux and Windows).
+    ZoomIn,
+    /// Zoom out (`Cmd+-` on macOS, `Ctrl+-` on Linux and Windows).
+    ZoomOut,
 }
 
 impl Shortcut {
@@ -246,6 +250,8 @@ impl Action {
             Action::NextTab => Effect::Shortcut(Shortcut::NextTab),
             Action::PrevTab => Effect::Shortcut(Shortcut::PrevTab),
             Action::ReloadPage => Effect::Shortcut(Shortcut::ReloadPage),
+            Action::ZoomIn => Effect::Shortcut(Shortcut::ZoomIn),
+            Action::ZoomOut => Effect::Shortcut(Shortcut::ZoomOut),
 
             Action::MissionControl => Effect::Native(NativeAction::MissionControl),
             Action::AppExpose => Effect::Native(NativeAction::AppExpose),

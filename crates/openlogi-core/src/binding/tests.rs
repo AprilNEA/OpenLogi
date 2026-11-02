@@ -493,6 +493,8 @@ fn persisted_action_variant_names_are_stable() {
         "VolumeDown",
         "VolumeUp",
         "Workflow",
+        "ZoomIn",
+        "ZoomOut",
     ];
     expected.sort_unstable();
     assert_eq!(actual, expected);
@@ -571,6 +573,8 @@ fn category_scroll_variants() {
     assert_eq!(Action::ScrollDown.category(), Category::Scroll);
     assert_eq!(Action::HorizontalScrollLeft.category(), Category::Scroll);
     assert_eq!(Action::HorizontalScrollRight.category(), Category::Scroll);
+    assert_eq!(Action::ZoomIn.category(), Category::Scroll);
+    assert_eq!(Action::ZoomOut.category(), Category::Scroll);
 }
 
 #[test]

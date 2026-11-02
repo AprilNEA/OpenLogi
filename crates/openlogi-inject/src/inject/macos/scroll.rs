@@ -19,6 +19,20 @@ static WHEEL_TICK_QUANTIZER: LazyLock<Mutex<ScrollQuantizer>> =
 const SCROLL_PHASE: u32 = 99; // kCGScrollWheelEventScrollPhase
 const MOMENTUM_PHASE: u32 = 123; // kCGScrollWheelEventMomentumPhase
 
+/// Private `CGEventType` for trackpad/HID gesture events (`NSEventTypeGesture`).
+const EVENT_TYPE_GESTURE: objc2_core_graphics::CGEventType = objc2_core_graphics::CGEventType(29);
+/// Gesture sub-type field (`kCGEventGestureHIDType`).
+const FIELD_GESTURE_HID_TYPE: objc2_core_graphics::CGEventField =
+    objc2_core_graphics::CGEventField(110);
+/// Zoom value double field (`kCGEventGestureZoomValue`), read by `-[NSEvent magnification]`.
+const FIELD_GESTURE_ZOOM_VALUE: objc2_core_graphics::CGEventField =
+    objc2_core_graphics::CGEventField(113);
+/// Gesture phase field (`kCGEventGesturePhase`), read by `-[NSEvent phase]`.
+const FIELD_GESTURE_PHASE: objc2_core_graphics::CGEventField =
+    objc2_core_graphics::CGEventField(132);
+/// `kIOHIDEventTypeZoom` — routes a type-29 gesture event to `magnifyWithEvent:`.
+const IOHID_EVENT_TYPE_ZOOM: i64 = 8;
+
 /// Post a synthetic scroll event for one tick in direction `(dx, dy)`. Unit
 /// direction (-1/0/1) scaled by the fixed "one tick" pixel magnitude the
 /// four `Scroll*`/`HorizontalScroll*` actions have always used.
@@ -75,6 +89,78 @@ pub(in crate::inject) fn post_smooth_scroll(delta: ScrollDelta, _phase: SmoothSc
 
 pub(in crate::inject) fn post_phased_scroll(delta: ScrollDelta, phase: SmoothScrollPhase) {
     post_continuous_scroll(delta, Some(phase));
+}
+
+/// Post one phase of a continuous trackpad-style magnification gesture.
+pub(in crate::inject) fn post_magnify(magnification: f64, phase: SmoothScrollPhase) {
+    use objc2_core_graphics::{CGEvent, CGEventTapLocation};
+
+    let Some(events) = magnify_events(magnification, phase) else {
+        tracing::warn!("post_magnify: failed to create magnification gesture event");
+        return;
+    };
+    for event in &events {
+        CGEvent::post(CGEventTapLocation::HIDEventTap, Some(event));
+    }
+}
+
+/// Build the hardware-shaped `NSEventTypeGesture` (`kIOHIDEventTypeZoom`)
+/// events for one runtime phase.
+///
+/// AppKit's `NSMagnificationGestureRecognizer` and `magnifyWithEvent:` latch
+/// on a zero-delta `Began` and apply scale deltas on `Changed`, so a non-zero
+/// `Began` or `Ended` frame splits into its boundary phase (`0.0`) paired with
+/// a `Changed` frame carrying `magnification`. Preparing the whole pair before
+/// posting prevents an allocation failure from leaving an unterminated gesture.
+fn magnify_events(
+    magnification: f64,
+    phase: SmoothScrollPhase,
+) -> Option<Vec<objc2_core_foundation::CFRetained<objc2_core_graphics::CGEvent>>> {
+    if !magnification.is_finite() {
+        return None;
+    }
+    match phase {
+        SmoothScrollPhase::Began if magnification != 0.0 => Some(vec![
+            magnify_event(0.0, SmoothScrollPhase::Began)?,
+            magnify_event(magnification, SmoothScrollPhase::Changed)?,
+        ]),
+        SmoothScrollPhase::Began => Some(vec![magnify_event(0.0, SmoothScrollPhase::Began)?]),
+        SmoothScrollPhase::Changed if magnification != 0.0 => Some(vec![magnify_event(
+            magnification,
+            SmoothScrollPhase::Changed,
+        )?]),
+        SmoothScrollPhase::Changed => Some(Vec::new()),
+        SmoothScrollPhase::Ended if magnification != 0.0 => Some(vec![
+            magnify_event(magnification, SmoothScrollPhase::Changed)?,
+            magnify_event(0.0, SmoothScrollPhase::Ended)?,
+        ]),
+        SmoothScrollPhase::Ended => Some(vec![magnify_event(0.0, SmoothScrollPhase::Ended)?]),
+        SmoothScrollPhase::Cancelled => {
+            Some(vec![magnify_event(0.0, SmoothScrollPhase::Cancelled)?])
+        }
+    }
+}
+
+/// Build (without posting) one tagged magnification `CGEvent`.
+fn magnify_event(
+    magnification: f64,
+    phase: SmoothScrollPhase,
+) -> Option<objc2_core_foundation::CFRetained<objc2_core_graphics::CGEvent>> {
+    use objc2_core_graphics::{CGEvent, CGEventField};
+
+    let event = CGEvent::new(None)?;
+    // Establish the gesture type before setting gesture-specific fields, as
+    // required by `CGEventSetIntegerValueField`'s contract.
+    CGEvent::set_type(Some(&event), EVENT_TYPE_GESTURE);
+    CGEvent::set_integer_value_field(Some(&event), FIELD_GESTURE_HID_TYPE, IOHID_EVENT_TYPE_ZOOM);
+    CGEvent::set_integer_value_field(Some(&event), FIELD_GESTURE_PHASE, scroll_phase_value(phase));
+    CGEvent::set_double_value_field(Some(&event), FIELD_GESTURE_ZOOM_VALUE, magnification);
+    CGEvent::set_integer_value_field(
+        Some(&event),
+        CGEventField::EventSourceUserData,
+        crate::SYNTHETIC_EVENT_USER_DATA,
+    );
+    Some(event)
 }
 
 /// Post one continuous pixel event, phaseless (`None`) or stamped with a
@@ -339,5 +425,64 @@ mod tests {
             event.get_double_value_field(EventField::SCROLL_WHEEL_EVENT_FIXED_POINT_DELTA_AXIS_2);
         assert!((y - 1.6).abs() < 1.0e-4, "{y}");
         assert!((x + 0.75).abs() < 1.0e-4, "{x}");
+    }
+
+    #[test]
+    fn magnify_events_populate_zoom_gesture_fields_and_balance_phases() {
+        use objc2_core_graphics::{CGEvent, CGEventField};
+
+        let began = magnify_events(0.05, SmoothScrollPhase::Began).expect("began magnify events");
+        assert_eq!(began.len(), 2);
+        assert_eq!(CGEvent::r#type(Some(&began[0])), EVENT_TYPE_GESTURE);
+        assert_eq!(
+            CGEvent::integer_value_field(Some(&began[0]), FIELD_GESTURE_HID_TYPE),
+            IOHID_EVENT_TYPE_ZOOM
+        );
+        assert_eq!(
+            CGEvent::integer_value_field(Some(&began[0]), FIELD_GESTURE_PHASE),
+            scroll_phase_value(SmoothScrollPhase::Began)
+        );
+        assert!(
+            CGEvent::double_value_field(Some(&began[0]), FIELD_GESTURE_ZOOM_VALUE).abs()
+                < f64::EPSILON
+        );
+        assert_eq!(
+            CGEvent::integer_value_field(Some(&began[1]), FIELD_GESTURE_PHASE),
+            scroll_phase_value(SmoothScrollPhase::Changed)
+        );
+        assert!(
+            (CGEvent::double_value_field(Some(&began[1]), FIELD_GESTURE_ZOOM_VALUE) - 0.05).abs()
+                < 1.0e-6
+        );
+
+        let ended = magnify_events(-0.025, SmoothScrollPhase::Ended).expect("ended magnify events");
+        assert_eq!(ended.len(), 2);
+        assert_eq!(
+            CGEvent::integer_value_field(Some(&ended[0]), FIELD_GESTURE_PHASE),
+            scroll_phase_value(SmoothScrollPhase::Changed)
+        );
+        assert!(
+            (CGEvent::double_value_field(Some(&ended[0]), FIELD_GESTURE_ZOOM_VALUE) + 0.025).abs()
+                < 1.0e-6
+        );
+        assert_eq!(
+            CGEvent::integer_value_field(Some(&ended[1]), FIELD_GESTURE_PHASE),
+            scroll_phase_value(SmoothScrollPhase::Ended)
+        );
+
+        let cancelled =
+            magnify_events(0.0, SmoothScrollPhase::Cancelled).expect("cancelled magnify events");
+        assert_eq!(cancelled.len(), 1);
+        assert_eq!(
+            CGEvent::integer_value_field(Some(&cancelled[0]), FIELD_GESTURE_PHASE),
+            scroll_phase_value(SmoothScrollPhase::Cancelled)
+        );
+
+        for event in began.iter().chain(&ended).chain(&cancelled) {
+            assert_eq!(
+                CGEvent::integer_value_field(Some(event), CGEventField::EventSourceUserData),
+                crate::SYNTHETIC_EVENT_USER_DATA
+            );
+        }
     }
 }
