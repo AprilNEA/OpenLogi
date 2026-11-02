@@ -1785,6 +1785,56 @@ fn an_unreachable_agent_keeps_the_header_and_offers_retry(cx: &mut gpui::TestApp
     );
 }
 
+/// The header's Flow button opens the Flow window once; pressing it again
+/// focuses that window instead of opening another.
+#[gpui::test]
+fn the_flow_button_opens_one_flow_window(cx: &mut gpui::TestAppContext) {
+    use gpui::{AppContext as _, Modifiers};
+    use gpui_component::Root;
+    use openlogi_ipc::SecureInput;
+
+    use super::AppView;
+    use crate::services::assets::AssetResolver;
+    use crate::state::{AgentLink, AppState, Sources};
+
+    cx.update(|cx| {
+        gpui_component::init(cx);
+        crate::ui::theme::register_builtin_themes(cx);
+        let (commands, _sent) = tokio::sync::mpsc::unbounded_channel();
+        let resolver = AssetResolver::new();
+        let state = cx.new(|_| {
+            let mut state = AppState::new(Sources::in_memory(
+                openlogi_core::config::Config::ephemeral(),
+                &resolver,
+                commands,
+            ));
+            let _ = state.set_agent_link(AgentLink::Ready(status_with(SecureInput::Off)));
+            state
+        });
+        AppState::set_global(state, cx);
+    });
+    let (_, cx) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| AppView::new(window, cx));
+        Root::new(view, window, cx)
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+
+    let button = cx
+        .debug_bounds("home-flow")
+        .expect("the header carries the Flow button");
+    let windows = cx.update(|_, cx| cx.windows().len());
+    cx.simulate_click(button.center(), Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(cx.update(|_, cx| cx.windows().len()), windows + 1);
+    cx.simulate_click(button.center(), Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(
+        cx.update(|_, cx| cx.windows().len()),
+        windows + 1,
+        "a second press focuses the open Flow window"
+    );
+}
+
 /// A G-series mouse carries the gaming control tables and no `0x1b04`. The
 /// OS hook still remaps its middle/back/forward, so it gets the Buttons panel,
 /// with or without a layout for the model (#392, #730, #877). It gets no
