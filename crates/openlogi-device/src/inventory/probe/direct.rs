@@ -12,7 +12,7 @@ use tracing::debug;
 
 use super::{NodeProbe, PassContext, ProbeVerdict};
 use crate::backend::NodeInfo;
-use crate::channel::route::DIRECT_DEVICE_INDEX;
+use crate::channel::route::{DIRECT_DEVICE_INDEX, PRO_X_2_PRODUCT_ID};
 use crate::inventory::cache::{CacheKey, CacheOutcome, ProbeTarget, probe_or_reuse, seen};
 use crate::inventory::features::{ProbedFeatures, Refresh};
 use crate::inventory::mappings::{direct_identity_kind, resolve_device_kind};
@@ -182,10 +182,6 @@ fn failed_probe(info: &NodeInfo) -> NodeProbe {
         outcomes: vec![seen(Some(CacheKey::Direct(info.id.clone())))],
     }
 }
-
-/// The PRO X 2 LIGHTSPEED's USB identity. Its receiver bridges HID++ to the
-/// headset over Centurion framing (see `openlogi-hid`'s transport).
-const PRO_X_2_PRODUCT_ID: u16 = 0x0af7;
 
 /// Assemble the inventory of a headset reached through Centurion bridging,
 /// such as the PRO X 2 LIGHTSPEED. The model falls back to the product ID

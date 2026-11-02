@@ -18,7 +18,7 @@ use hidpp::{
 };
 
 use crate::backend::HidBackend;
-use crate::channel::route::DeviceRoute;
+use crate::channel::route::{DeviceRoute, PRO_X_2_PRODUCT_ID};
 use crate::reprog_controls::{self, CidFlags, CidInfo, ReprogControlsV4};
 use crate::write::{HidppOperation, WriteError, classify_hidpp_error, open_feature, with_route};
 
@@ -172,8 +172,9 @@ pub async fn dump_reprog_controls(
 
 /// The battery features [`read_battery_raw`] reads, in the order it tries
 /// them: unified `0x1004`, legacy `0x1000`, voltage `0x1001`, the `0x1F20`
-/// ADC, then the Centurion `0x0104` state of charge. A device exposing none of
-/// them has no battery this command can read.
+/// ADC, then, on the PRO X 2 LIGHTSPEED only, the Centurion `0x0104` state of
+/// charge. A device exposing none of them has no battery this command can
+/// read.
 pub const RAW_BATTERY_FEATURES: [u16; 5] = [
     UnifiedBatteryFeature::ID,
     BatteryStatusFeature::ID,
@@ -269,19 +270,23 @@ pub(crate) async fn read_battery_raw_on_channel(
         Err(e) => return Err(e),
     }
 
-    match open_feature::<CenturionBatterySocFeature>(&mut device).await {
-        Ok(feature) => {
-            let info = feature
-                .get_battery_info()
-                .await
-                .map_err(|e| WriteError::Hidpp(format!("{e:?}")))?;
-            return Ok(format!(
-                "0x0104 CenturionBatterySoc: percentage={} status={:?}",
-                info.percentage, info.status
-            ));
+    // Only the PRO X 2 is known to carry Centurion `0x0104`, so other devices
+    // skip the lookup.
+    if channel.product_id == PRO_X_2_PRODUCT_ID {
+        match open_feature::<CenturionBatterySocFeature>(&mut device).await {
+            Ok(feature) => {
+                let info = feature
+                    .get_battery_info()
+                    .await
+                    .map_err(|e| WriteError::Hidpp(format!("{e:?}")))?;
+                return Ok(format!(
+                    "0x0104 CenturionBatterySoc: percentage={} status={:?}",
+                    info.percentage, info.status
+                ));
+            }
+            Err(WriteError::FeatureUnsupported { .. }) => {}
+            Err(e) => return Err(e),
         }
-        Err(WriteError::FeatureUnsupported { .. }) => {}
-        Err(e) => return Err(e),
     }
     // Reached only when none of the read features is present; report the
     // preferred feature rather than implying 0x1F20 was specifically absent.

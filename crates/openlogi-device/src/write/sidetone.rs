@@ -21,7 +21,7 @@ use super::{
 };
 use crate::SharedChannel;
 use crate::backend::HidBackend;
-use crate::channel::route::DeviceRoute;
+use crate::channel::route::{DeviceRoute, PRO_X_2_PRODUCT_ID};
 
 /// Read the sidetone level of the headset `route` reaches.
 pub async fn get_sidetone(
@@ -68,9 +68,8 @@ pub async fn set_sidetone_on(
     write(&control, index, level).await
 }
 
-/// The PRO X 2 LIGHTSPEED receiver. Behind its Centurion bridge, `0x0604`
-/// sits at a fixed feature index at version 0 (measured in #1285).
-const PRO_X_2_PRODUCT_ID: u16 = 0x0af7;
+/// Behind the PRO X 2's Centurion bridge, `0x0604` sits at this fixed
+/// feature index at version 0 (measured in #1285).
 const PRO_X_2_SIDETONE_INDEX: u8 = 7;
 
 /// The feature a headset sets its sidetone through.
