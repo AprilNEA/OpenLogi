@@ -175,7 +175,9 @@ A (initiator)                       B (responder)
   `8d89a09a832cc87779e32053024ef40dbe98bacaacefb05ff934eda83902b31f`,
   code `469603`.
 - Abort paths: `PairAbort{USER_CANCELLED | CODE_MISMATCH}` from either side;
-  `PairOutcome{TIMEOUT}` after `PairPrompted.timeout_ms` (default 120 s);
+  `PairOutcome{TIMEOUT}` after `PairPrompted.timeout_ms` (default 120 s), and
+  `PairAbort{TIMEOUT}` from a side whose deadline passed, so the other side
+  does not wait out its own;
   `PairOutcome{REJECTED}` if a user declines. All abort paths discard the
   pairing nonces and the code; retry starts a fresh connection with fresh
   nonces.
