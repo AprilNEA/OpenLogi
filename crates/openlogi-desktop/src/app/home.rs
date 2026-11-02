@@ -28,7 +28,7 @@ use gpui_component::{
 };
 use openlogi_core::config::{DeviceViewMode, LightSettings};
 use openlogi_core::device::{DeviceKind, DeviceModelInfo, ModelTransport};
-use openlogi_core::hid::{DeviceRoute, ReceiverProtocol};
+use openlogi_core::hid::{DeviceRoute, ReceiverBrand, ReceiverProtocol};
 use openlogi_ipc::PairingFailure;
 
 use super::AppView;
@@ -274,23 +274,24 @@ pub(super) fn transport_icon(
     saved_transport: Option<ObservedConnection>,
     pal: Palette,
 ) -> Svg {
-    let path = if matches!(record.kind, DeviceKind::Camera) {
-        "action-icons/usb.svg"
+    let glyph = if matches!(record.kind, DeviceKind::Camera) {
+        ConnectionGlyph::Cable
     } else {
-        connection_icon_path(
+        connection_glyph(
             record.route.as_ref(),
+            record.receiver_brand,
             record.model_info.as_ref(),
             saved_transport,
         )
     };
-    let color: Hsla = match path {
-        "action-icons/bluetooth.svg" => rgb(theme::ACCENT_BLUE).into(),
-        "action-icons/bolt.svg" | "action-icons/unifying.svg" => {
+    let color: Hsla = match glyph {
+        ConnectionGlyph::Bluetooth => rgb(theme::ACCENT_BLUE).into(),
+        ConnectionGlyph::Bolt | ConnectionGlyph::Unifying | ConnectionGlyph::Dongle => {
             rgb(theme::STATUS_CONNECTED).into()
         }
-        _ => pal.text_muted,
+        ConnectionGlyph::Cable | ConnectionGlyph::Unknown => pal.text_muted,
     };
-    svg().path(path).flex_none().text_color(color)
+    svg().path(glyph.path()).flex_none().text_color(color)
 }
 
 /// [`transport_icon`] in the card corner; the connectivity words ride its
@@ -664,8 +665,33 @@ fn device_image(
         .into_any_element()
 }
 
-/// Connection-type glyph for a gallery card: a dongle for receiver-paired
-/// devices, a USB mark for wired direct ones, a Bluetooth mark for the rest.
+/// How a card's device is connected, as the glyph that shows it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ConnectionGlyph {
+    Bluetooth,
+    Bolt,
+    Unifying,
+    /// A receiver with no logo of its own: Nano and Lightspeed.
+    Dongle,
+    Cable,
+    Unknown,
+}
+
+impl ConnectionGlyph {
+    pub(super) const fn path(self) -> &'static str {
+        match self {
+            Self::Bluetooth => "action-icons/bluetooth.svg",
+            Self::Bolt => "action-icons/bolt.svg",
+            Self::Unifying => "action-icons/unifying.svg",
+            Self::Dongle | Self::Cable => "action-icons/usb.svg",
+            Self::Unknown => "action-icons/circle-dot.svg",
+        }
+    }
+}
+
+/// Connection-type glyph for a gallery card: the receiver's logo for
+/// receiver-paired devices, a USB mark for wired direct ones, a Bluetooth
+/// mark for the rest.
 ///
 /// A `Direct` route carries the vendor/product id of the HID node this
 /// session actually enumerated, which — for a multi-transport device —
@@ -675,11 +701,12 @@ fn device_image(
 /// multi-transport device as Bluetooth — issue #1218).
 /// Offline cards retain the last observed mode, or an unambiguous recorded
 /// link after restart; radio support alone does not select Bluetooth.
-pub(super) fn connection_icon_path(
+pub(super) fn connection_glyph(
     route: Option<&DeviceRoute>,
+    receiver_brand: Option<ReceiverBrand>,
     model: Option<&DeviceModelInfo>,
     saved_transport: Option<ObservedConnection>,
-) -> &'static str {
+) -> ConnectionGlyph {
     let direct_transport = match route {
         Some(DeviceRoute::Direct { product_id, .. }) => {
             model.and_then(|m| m.transport_for_product_id(*product_id))
@@ -694,30 +721,33 @@ pub(super) fn connection_icon_path(
     };
     if let Some(transport) = direct_transport {
         return match transport {
-            ModelTransport::Equad | ModelTransport::Usb => "action-icons/usb.svg",
-            ModelTransport::Bluetooth | ModelTransport::Btle => "action-icons/bluetooth.svg",
+            ModelTransport::Equad | ModelTransport::Usb => ConnectionGlyph::Cable,
+            ModelTransport::Bluetooth | ModelTransport::Btle => ConnectionGlyph::Bluetooth,
         };
     }
 
     match (route, saved_transport) {
         (Some(DeviceRoute::Bolt { .. }), _)
         | (None, Some(ObservedConnection::Receiver(ReceiverProtocol::Bolt))) => {
-            "action-icons/bolt.svg"
+            ConnectionGlyph::Bolt
         }
-        // Nano and Lightspeed receivers share the Unifying icon until they
-        // have their own (#2165).
-        (Some(DeviceRoute::Unifying { .. }), _)
-        | (None, Some(ObservedConnection::Receiver(ReceiverProtocol::Unifying))) => {
-            "action-icons/unifying.svg"
+        // Nano and Lightspeed receivers speak the Unifying protocol but are
+        // not Unifying receivers.
+        (Some(DeviceRoute::Unifying { .. }), _) => match receiver_brand {
+            Some(ReceiverBrand::Nano | ReceiverBrand::Lightspeed) => ConnectionGlyph::Dongle,
+            Some(ReceiverBrand::Bolt | ReceiverBrand::Unifying) | None => ConnectionGlyph::Unifying,
+        },
+        (None, Some(ObservedConnection::Receiver(ReceiverProtocol::Unifying))) => {
+            ConnectionGlyph::Unifying
         }
         // An offline model's radio capabilities do not identify a connection.
         // Preserve the wired-only fallback; ambiguous offline links stay neutral.
         (Some(DeviceRoute::Direct { .. }) | None, _) => match model.map(|m| m.transports) {
-            Some(t) if (t.usb || t.equad) && !t.bluetooth && !t.btle => "action-icons/usb.svg",
-            _ if route.is_some() => "action-icons/bluetooth.svg",
-            _ => "action-icons/circle-dot.svg",
+            Some(t) if (t.usb || t.equad) && !t.bluetooth && !t.btle => ConnectionGlyph::Cable,
+            _ if route.is_some() => ConnectionGlyph::Bluetooth,
+            _ => ConnectionGlyph::Unknown,
         },
-        (Some(DeviceRoute::RawHid { .. }), _) => "action-icons/usb.svg",
+        (Some(DeviceRoute::RawHid { .. }), _) => ConnectionGlyph::Cable,
     }
 }
 
