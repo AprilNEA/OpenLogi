@@ -134,4 +134,20 @@ host_target="$(rustc -vV | sed -n 's/^host: //p')"
 cargo fetch --locked --target "$host_target"
 echo "    completed in $((SECONDS - step_started))s"
 
+# Amp orbs default to committing as `Amp <amp@ampcode.com>`, and the orb's global
+# prepare-commit-msg hook appends a Co-authored-by trailer. OpenLogi commits must
+# carry the human author and no AI attribution (see "Git & GitHub" in AGENTS.md).
+# Setup cannot choose an identity: its output is shared by everyone's orbs.
+if [[ "$(git config user.email || true)" == amp@ampcode.com ]]; then
+  cat <<'EOF'
+
+!!! Git identity is `Amp <amp@ampcode.com>`. Before committing, set the human
+!!! author with `git config user.name` and `git config user.email` in this
+!!! checkout (or choose a personal default with `manage_amp git_identity`), and
+!!! stop the orb hook's Co-authored-by trailer, which `--amend` re-adds:
+!!! git config core.hooksPath "$(git rev-parse --path-format=absolute --git-common-dir)/hooks"
+
+EOF
+fi
+
 echo "==> OpenLogi orb setup complete"
