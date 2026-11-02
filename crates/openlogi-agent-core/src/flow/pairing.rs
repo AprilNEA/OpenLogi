@@ -83,9 +83,17 @@ struct Inner {
     observable: Arc<ObservableState>,
     /// Counts the peers saved, so the agent reloads its config after each.
     saved: watch::Sender<u64>,
-    /// The task running pairing while it is open.
-    open: Mutex<Option<mpsc::Sender<Command>>>,
-    task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// The session pairing runs while it is open. One that closed itself
+    /// stays until pairing opens again or stops.
+    open: Mutex<Option<Open>>,
+}
+
+/// A pairing session: where its commands go and the task running it. Kept
+/// under one lock, so stopping waits for the session it stopped and opening
+/// binds the pairing port only once the last session freed it.
+struct Open {
+    commands: mpsc::Sender<Command>,
+    task: tokio::task::JoinHandle<()>,
 }
 
 /// Where and as whom pairing runs. Production binds the pairing port and
@@ -135,7 +143,6 @@ impl FlowPairing {
                 observable,
                 saved: watch::channel(0).0,
                 open: Mutex::new(None),
-                task: Mutex::new(None),
             }),
         }
     }
@@ -158,23 +165,24 @@ impl FlowPairing {
     /// Open pairing, or keep it open when it already is.
     pub async fn start(&self) -> Result<(), FlowPairingCommandError> {
         let mut open = self.inner.open.lock().await;
-        if let Some(commands) = open.as_ref()
-            && ask(commands, Command::Renew).await.is_ok()
+        if let Some(running) = open.as_ref()
+            && ask(&running.commands, Command::Renew).await.is_ok()
         {
             return Ok(());
+        }
+        if let Some(ended) = open.take() {
+            // It closed itself; wait until it has freed the pairing port.
+            let _ = ended.task.await;
         }
         let identity = self.load_identity().await?;
         let (session, commands) = Session::open(Arc::clone(&self.inner), identity)?;
         // Published before this returns, so the caller's next snapshot shows
         // pairing open.
         session.publish();
-        let mut task = self.inner.task.lock().await;
-        if let Some(previous) = task.take() {
-            // It ended on its own, so this returns at once.
-            let _ = previous.await;
-        }
-        *task = Some(tokio::spawn(session.run()));
-        *open = Some(commands);
+        *open = Some(Open {
+            commands,
+            task: tokio::spawn(session.run()),
+        });
         info!("Flow pairing opened");
         Ok(())
     }
@@ -197,14 +205,14 @@ impl FlowPairing {
     /// Close pairing, cancelling an attempt in progress, and wait until it
     /// has closed.
     pub async fn stop(&self) {
-        let commands = self.inner.open.lock().await.take();
-        if let Some(commands) = commands {
-            let _ = commands.send(Command::Stop).await;
-        }
-        let task = self.inner.task.lock().await.take();
-        if let Some(task) = task
-            && task.await.is_err()
-        {
+        // Held until the session closed: a `start` meanwhile waits, then
+        // opens a new one.
+        let mut open = self.inner.open.lock().await;
+        let Some(Open { commands, task }) = open.take() else {
+            return;
+        };
+        let _ = commands.send(Command::Stop).await;
+        if task.await.is_err() {
             warn!("the Flow pairing task panicked");
         }
     }
@@ -213,7 +221,13 @@ impl FlowPairing {
         &self,
         command: impl FnOnce(Reply) -> Command,
     ) -> Result<(), FlowPairingCommandError> {
-        let commands = self.inner.open.lock().await.clone();
+        let commands = self
+            .inner
+            .open
+            .lock()
+            .await
+            .as_ref()
+            .map(|open| open.commands.clone());
         match commands {
             Some(commands) => ask(&commands, command).await,
             None => Err(FlowPairingCommandError::NotStarted),
