@@ -31,6 +31,7 @@ pub(crate) use device_session::ObservedConnection;
 pub use devices::DeviceRecord;
 pub(crate) use easy_switch::HostRenameRefusal;
 pub(crate) use events::{StateEvent, StateEvents};
+pub(crate) use flow::{FlowDeviceRow, FlowHealth, FlowHost, FlowIssue, FlowReadiness};
 pub use light::LightCommandStatus;
 pub(crate) use load::Load;
 pub use load::{
@@ -84,6 +85,7 @@ mod disable_keys;
 mod dpi;
 mod easy_switch;
 mod events;
+mod flow;
 mod fn_lock;
 mod force_sensing;
 mod inventory;

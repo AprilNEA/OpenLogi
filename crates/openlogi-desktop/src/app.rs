@@ -389,6 +389,8 @@ impl AppView {
                 !on_home && self.active_tab == DetailTab::Pointer && is_current(key)
             }
             StateEvent::CameraChanged => on_home || self.active_tab == DetailTab::Light,
+            // The Home header's Flow button shows Flow's status.
+            StateEvent::FlowChanged => on_home,
             // Child entities own these surfaces and subscribe directly. A
             // language switch already refreshes every window, and the root
             // caches no localized text. A refused removal is a dialog,

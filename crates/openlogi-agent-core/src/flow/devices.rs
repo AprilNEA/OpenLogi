@@ -8,7 +8,7 @@
 //! connected to another computer, can still be named by a peer's request.
 use openlogi_core::config::{FlowConfig, FlowDevice, FlowHostSlot, FlowPeerName};
 use openlogi_core::device::DeviceKind;
-use openlogi_core::device_order::{DeviceIdentity, PhysicalDeviceKey};
+use openlogi_core::device_order::PhysicalDeviceKey;
 use openlogi_flow::generated as proto;
 use openlogi_flow::identity::{CanonicalDeviceIdentifier, same_device};
 use openlogi_hid::DeviceRoute;
@@ -98,8 +98,9 @@ impl LocalDevices {
                 .iter()
                 .filter(|record| {
                     record.key == *configured.key()
-                        || identity_keys(record.serial.as_deref(), record.unit_id)
-                            .any(|key| key == configured.key().as_str())
+                        || configured
+                            .key()
+                            .names_identity(record.serial.as_deref(), record.unit_id)
                 })
                 .min_by_key(|record| (!record.online, record.route.is_none()))
             else {
@@ -157,24 +158,25 @@ impl LocalDevices {
     /// Such a device has no identity here yet: after a restart a Unifying
     /// device away on another computer has no cached probe, and a Bluetooth
     /// device connected to another computer is not enumerated at all. Each of
-    /// the peer's serial and unit id is keyed the way the orchestrator keys an
-    /// inventory device, and matched against the configured keys. A malformed
-    /// identity matches nothing.
+    /// the peer's serial and unit id is matched against the configured keys
+    /// with [`PhysicalDeviceKey::names_identity`]. A malformed identity matches
+    /// nothing.
     pub(crate) fn find_unlisted(
         &self,
         identity: &proto::DeviceIdentity,
     ) -> Option<&PhysicalDeviceKey> {
-        let mut keys = Vec::with_capacity(identity.ids.len());
+        let mut ids = Vec::with_capacity(identity.ids.len());
         for id in &identity.ids {
-            keys.extend(match CanonicalDeviceIdentifier::try_from(id).ok()? {
-                CanonicalDeviceIdentifier::Serial(serial) => identity_keys(Some(&serial), [0; 4]),
-                CanonicalDeviceIdentifier::UnitId(unit) => identity_keys(None, unit.to_be_bytes()),
+            ids.push(match CanonicalDeviceIdentifier::try_from(id).ok()? {
+                CanonicalDeviceIdentifier::Serial(serial) => (Some(serial), [0; 4]),
+                CanonicalDeviceIdentifier::UnitId(unit) => (None, unit.to_be_bytes()),
                 CanonicalDeviceIdentifier::BluetoothAddress(_) => continue,
             });
         }
-        self.unlisted
-            .iter()
-            .find(|unlisted| keys.iter().any(|key| key == unlisted.as_str()))
+        self.unlisted.iter().find(|unlisted| {
+            ids.iter()
+                .any(|(serial, unit)| unlisted.names_identity(serial.as_deref(), *unit))
+        })
     }
 
     /// The `AnnounceDevices` whole-state notification at `revision`.
@@ -209,18 +211,6 @@ impl LocalDevices {
             .map(|device| device.identity.clone())
             .collect()
     }
-}
-
-/// The configuration keys that name a device with `serial` or `unit_id`, one
-/// for each identifier it has, keyed the way the orchestrator keys an
-/// inventory device.
-fn identity_keys(serial: Option<&str>, unit_id: [u8; 4]) -> impl Iterator<Item = String> + use<> {
-    [
-        serial.and_then(|serial| DeviceIdentity::from_parts(Some(serial), [0; 4]).config_key()),
-        DeviceIdentity::from_parts(None, unit_id).config_key(),
-    ]
-    .into_iter()
-    .flatten()
 }
 
 /// The identity peers correlate the device by. `None` when the inventory has
