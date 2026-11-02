@@ -8,16 +8,18 @@
 use std::cell::Cell;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
+use std::time::Duration;
 
 use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, LPARAM, LRESULT, POINT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{MONITOR_DEFAULTTONEAREST, MonitorFromPoint};
+use windows_sys::Win32::System::SystemInformation::GetTickCount;
 use windows_sys::Win32::System::Threading::{
     GetCurrentThreadId, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
 use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, VIRTUAL_KEY, VK_CONTROL, VK_ESCAPE, VK_F1, VK_LWIN, VK_MENU, VK_RWIN,
-    VK_SHIFT,
+    GetAsyncKeyState, GetLastInputInfo, LASTINPUTINFO, VIRTUAL_KEY, VK_CONTROL, VK_ESCAPE, VK_F1,
+    VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetCursorPos, GetForegroundWindow, GetMessageW,
@@ -32,6 +34,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 use openlogi_core::config::FunctionKey;
 
 use super::cursor::{MonitorDpi, PhysicalCursorPosition};
+use super::idle::TickCount;
 use super::worker::{WorkerEvent, WorkerPhase, WorkerStatus};
 use crate::{
     ButtonId, CursorPosition, EventDisposition, ForegroundApp, HookBackend, HookError, HookEvent,
@@ -203,6 +206,21 @@ impl HookBackend for Backend {
             y: point.y,
         };
         Some(physical.into_logical(dpi))
+    }
+
+    fn user_idle() -> Option<Duration> {
+        let mut info = LASTINPUTINFO {
+            cbSize: u32::try_from(size_of::<LASTINPUTINFO>()).ok()?,
+            dwTime: 0,
+        };
+        // SAFETY: `info` is a valid writable LASTINPUTINFO whose `cbSize` is set,
+        // as the call requires, for the duration of the call.
+        if unsafe { GetLastInputInfo(&raw mut info) } == 0 {
+            return None;
+        }
+        // SAFETY: GetTickCount takes no arguments and has no preconditions.
+        let now = TickCount(unsafe { GetTickCount() });
+        Some(now.duration_since(TickCount(info.dwTime)))
     }
 }
 

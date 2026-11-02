@@ -5,7 +5,9 @@
 //! resume, bounded repair, and settings confirmation are typed reasons to run
 //! one full authoritative reconciliation. A recovery scan runs inside the probe
 //! cache's freshness window because some firmware/hosts miss lifecycle events
-//! and legacy or voltage battery features have no broadcast API.
+//! and legacy or voltage battery features have no broadcast API. It waits while
+//! the user is away, because on Windows its HID++ traffic resets the idle clock
+//! that starts the screensaver and display sleep (#1667).
 
 use std::collections::{BTreeMap, HashSet};
 use std::future::pending;
@@ -613,6 +615,23 @@ impl InventoryWorker {
     }
 
     async fn next_trigger(&mut self) -> ReconcileTrigger {
+        loop {
+            let trigger = self.wait_for_trigger().await;
+            if trigger != ReconcileTrigger::RecoveryScan {
+                return trigger;
+            }
+            let user_idle = openlogi_hook::user_idle_time();
+            if !self
+                .schedule
+                .hold_recovery_while_away(Instant::now(), user_idle)
+            {
+                return trigger;
+            }
+            debug!(?user_idle, "user away — holding the recovery scan");
+        }
+    }
+
+    async fn wait_for_trigger(&mut self) -> ReconcileTrigger {
         let trigger = loop {
             let (deadline, purpose) = self.schedule.next_deadline();
             let sleep = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline));
