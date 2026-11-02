@@ -336,14 +336,21 @@ fn a_route_needs_an_online_device_and_none_that_cannot_switch() {
     );
 }
 
-/// The fixture mouse on its cable, with or without Easy-Switch, and `flow`.
-fn mouse_state(easy_switch: bool, flow: FlowConfig) -> AppState {
+/// The fixture mouse on its cable, with or without Easy-Switch and a serial,
+/// and `flow`.
+fn mouse_state(easy_switch: bool, serial: Option<&str>, flow: FlowConfig) -> AppState {
     let mut inventory = direct_inventory([0xa3, 0x93, 0xca, 0xe0]);
-    inventory.paired[0]
+    let mouse = &mut inventory.paired[0];
+    mouse
         .capabilities
         .as_mut()
         .expect("the fixture device has capabilities")
         .easy_switch = easy_switch;
+    mouse
+        .model_info
+        .as_mut()
+        .expect("the fixture device has model info")
+        .serial_number = serial.map(str::to_owned);
     let mut config = openlogi_core::config::Config::ephemeral();
     config.flow = flow;
     let resolver = AssetResolver::new();
@@ -356,18 +363,19 @@ fn mouse_state(easy_switch: bool, flow: FlowConfig) -> AppState {
 
 #[test]
 fn a_device_without_easy_switch_is_offered_only_to_be_turned_off() {
-    let rows = mouse_state(true, config(Vec::new())).flow_devices();
+    let rows = mouse_state(true, None, config(Vec::new())).flow_devices();
     assert_eq!(rows.len(), 1);
     assert!(rows[0].switchable && rows[0].online);
 
     assert!(
-        mouse_state(false, config(Vec::new()))
+        mouse_state(false, None, config(Vec::new()))
             .flow_devices()
             .is_empty()
     );
 
     let configured = mouse_state(
         false,
+        None,
         config(vec![device("unit:a393cae0", 0, &[("work", 1)])]),
     );
     let rows = configured.flow_devices();
@@ -381,5 +389,30 @@ fn a_device_without_easy_switch_is_offered_only_to_be_turned_off() {
                 device: rows[0].name.clone(),
                 peer: name("work"),
             })
+    );
+}
+
+/// The inventory keys a device that reports a serial by that serial, but
+/// `[flow.devices]` may name it by its unit id, as the agent accepts.
+#[test]
+fn a_device_named_by_its_unit_id_is_found_when_listed_by_its_serial() {
+    let state = mouse_state(
+        true,
+        Some("2214LZ0ABCD8"),
+        config(vec![device("unit:a393cae0", 0, &[("work", 1)])]),
+    );
+    let rows = state.flow_devices();
+    assert_eq!(
+        rows.len(),
+        1,
+        "one device, not a listed one and a configured one"
+    );
+    assert_eq!(rows[0].key, key("unit:a393cae0"));
+    assert!(rows[0].online && rows[0].config.is_some());
+    assert!(
+        !state
+            .flow_readiness()
+            .issues
+            .contains(&FlowIssue::DevicesAway(name("work")))
     );
 }

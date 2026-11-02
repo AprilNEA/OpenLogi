@@ -374,11 +374,26 @@ impl AppState {
             if !record.is_persistent() || !takes_part_in_flow(record.kind) {
                 continue;
             }
-            let Some(key) =
+            let Some(identity) =
                 PhysicalDeviceKey::parse(&record.config_key).and_then(|key| key.to_identity())
             else {
                 continue;
             };
+            // `[flow.devices]` may name the device by its other identifier, as
+            // the agent accepts; the row then carries that key, so edits and
+            // readiness find the entry.
+            let config = configured
+                .iter()
+                .find(|device| {
+                    device.key() == &identity
+                        || device
+                            .key()
+                            .names_identity(record.serial_number.as_deref(), record.unit_id)
+                })
+                .cloned();
+            let key = config
+                .as_ref()
+                .map_or(identity, |device| device.key().clone());
             // A device reached on two routes has a record for each; like the
             // agent, the online, addressable one decides.
             let online = record.online && record.route.is_some();
@@ -398,10 +413,7 @@ impl AppState {
                 _ => None,
             };
             rows.push(FlowDeviceRow {
-                config: configured
-                    .iter()
-                    .find(|device| device.key() == &key)
-                    .cloned(),
+                config,
                 key,
                 name: record.display_name.clone(),
                 kind: Some(record.kind),
