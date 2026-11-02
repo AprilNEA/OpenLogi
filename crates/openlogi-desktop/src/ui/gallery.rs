@@ -108,6 +108,7 @@ struct ComponentGallery {
     slider_committed: u8,
     row_slider: CommitSlider<u8>,
     row_committed: u8,
+    compact_slider: CommitSlider<u8>,
 }
 
 /// Where the gallery's slider row starts, and what it marks as the default.
@@ -128,6 +129,7 @@ impl ComponentGallery {
             cx,
             |this: &mut Self, value, _| this.row_committed = value,
         );
+        let compact_slider = CommitSlider::new(SliderRange::new(1, 20), 10, cx, |_, _, _| {});
         Self {
             mode: ThemeMode::Light,
             scale: UiScale::Normal,
@@ -142,6 +144,7 @@ impl ComponentGallery {
             slider_committed,
             row_slider,
             row_committed: ROW_DEFAULT,
+            compact_slider,
         }
     }
 
@@ -223,7 +226,7 @@ impl ComponentGallery {
             .child(self.preset_panel(pal, cx))
             .child(self.pill_panel(pal, cx))
             .child(self.slider_panel(pal))
-            .child(self.slider_row_panel(pal))
+            .child(self.slider_row_panel(pal, cx))
             .child(Self::battery_panel(pal))
             .child(gallery_panel(
                 "Status and retry",
@@ -467,7 +470,7 @@ impl ComponentGallery {
         )
     }
 
-    fn slider_row_panel(&self, pal: Palette) -> gpui::Div {
+    fn slider_row_panel(&self, pal: Palette, cx: &mut Context<Self>) -> gpui::Div {
         let shown = self.row_slider.shown(self.row_committed);
         gallery_panel(
             "SliderRow",
@@ -492,6 +495,18 @@ impl ComponentGallery {
                         .value("50%", ["100%"])
                         .description("Applies in ratchet mode only.")
                         .disabled(true),
+                )
+                .child(
+                    SliderRow::new(
+                        "Compact, for Settings",
+                        Slider::new(self.compact_slider.slider()).horizontal(),
+                    )
+                    .value(self.compact_slider.value(cx).to_string(), ["20"])
+                    .description(
+                        "The type step of the kit's SettingItem, so a row in a SettingGroup \
+                         matches the switches beside it.",
+                    )
+                    .compact(),
                 ),
             pal,
         )

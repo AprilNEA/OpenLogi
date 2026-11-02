@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use gpui::{
     AnyElement, App, Div, FontFeatures, InteractiveElement as _, IntoElement, ParentElement,
-    RenderOnce, SharedString, Styled, Window, div, px,
+    RenderOnce, SharedString, Styled, Window, div, prelude::FluentBuilder as _, px, rems,
 };
 use gpui_kit::component::{h_flex, v_flex};
 
@@ -34,6 +34,7 @@ pub(crate) struct SliderRow {
     description: Option<SharedString>,
     hint: Option<AnyElement>,
     disabled: bool,
+    compact: bool,
 }
 
 impl SliderRow {
@@ -51,6 +52,7 @@ impl SliderRow {
             description: None,
             hint: None,
             disabled: false,
+            compact: false,
         }
     }
 
@@ -98,6 +100,17 @@ impl SliderRow {
         self.disabled = disabled;
         self
     }
+
+    /// Set the label, value and description in the step gpui-component's
+    /// `SettingItem` gives its title and description, so a row in a Settings
+    /// `SettingGroup` matches the kit items beside it. The kit does not let
+    /// its items take the house type scale, so the row follows the kit there;
+    /// device pages keep the body step.
+    #[must_use]
+    pub(crate) fn compact(mut self) -> Self {
+        self.compact = true;
+        self
+    }
 }
 
 impl RenderOnce for SliderRow {
@@ -108,12 +121,25 @@ impl RenderOnce for SliderRow {
         } else {
             pal.text_primary
         };
+        let compact = self.compact;
         let caption = |content: AnyElement| {
             div()
                 .text_caption()
                 .text_color(pal.text_muted)
                 .child(content)
         };
+        let description = self.description.map(|description| {
+            if compact {
+                // The kit's description: its title's size, muted, at the
+                // line height the page gives it.
+                div()
+                    .text_sm()
+                    .text_color(pal.text_muted)
+                    .child(description)
+            } else {
+                caption(description.into_any_element())
+            }
+        });
         let value = self.value.map(|value| {
             let marker = self
                 .marker
@@ -131,15 +157,19 @@ impl RenderOnce for SliderRow {
                         h_flex()
                             .items_start()
                             .gap_4()
-                            .text_body()
+                            .map(|line| {
+                                if compact {
+                                    // The kit's title: its `Label` at `text_sm`.
+                                    line.text_sm().line_height(rems(1.25))
+                                } else {
+                                    line.text_body()
+                                }
+                            })
                             .text_color(text)
                             .child(div().flex_1().min_w_0().child(self.label))
                             .children(value),
                     )
-                    .children(
-                        self.description
-                            .map(|description| caption(description.into_any_element())),
-                    ),
+                    .children(description),
             )
             .child(self.control)
             .children(self.hint.map(caption))

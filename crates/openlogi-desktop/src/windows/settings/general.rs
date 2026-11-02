@@ -209,7 +209,8 @@ fn lock_key_notifications_item() -> SettingItem {
 
 /// A sensitivity slider laid out as the device pages lay theirs out — label
 /// and value on one line, the slider across the row — with "Default" beside
-/// the value while it rests there. A custom item has no title of its own, so
+/// the value while it rests there, in the kit items' type step so it matches
+/// the switches above and below it. A custom item has no title of its own, so
 /// its title and description are its search keywords.
 fn sensitivity_item<T: SliderUnit + std::fmt::Display>(
     title: SharedString,
@@ -226,6 +227,7 @@ fn sensitivity_item<T: SliderUnit + std::fmt::Display>(
                 .value(value.to_string(), [max.to_string()])
                 .when(value == default, |row| row.marker(tr!("common.default")))
                 .description(description.clone())
+                .compact()
         }
     })
     .keywords([title, description])
