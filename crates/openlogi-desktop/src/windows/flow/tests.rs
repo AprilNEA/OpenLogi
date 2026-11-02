@@ -94,6 +94,7 @@ fn snapshot() -> AgentSnapshot {
                     state: FlowLinkState::Lost,
                 },
             ],
+            pairing: None,
         },
     }
 }

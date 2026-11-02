@@ -30,9 +30,10 @@ use openlogi_hid::{
 use openlogi_ipc::transport;
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus,
-    BacklightObservation, ClientKind, ConfigReloadError, Generation, Identity, LockKeyObservation,
-    MonitorEvent, NoticeObservation, Observation, PROTOCOL_VERSION, PairingCommandError,
-    PairingFailure, PairingUpdate, RingObservation, SavedConfig, SavedConfigVerdict,
+    BacklightObservation, ClientKind, ConfigReloadError, FlowIdentity, FlowPairTarget,
+    FlowPairingCommandError, Generation, Identity, LockKeyObservation, MonitorEvent,
+    NoticeObservation, Observation, PROTOCOL_VERSION, PairingCommandError, PairingFailure,
+    PairingUpdate, RingObservation, SavedConfig, SavedConfigVerdict,
 };
 use succession::Compat;
 
@@ -582,6 +583,34 @@ impl Agent for AgentServer {
         self.action_ring.cancel(session_id);
         self.ring_haptics.end_session(session_id);
     }
+
+    async fn read_flow_identity(self, _: Context) -> Result<FlowIdentity, FlowPairingCommandError> {
+        self.shared.flow.pairing().identity().await
+    }
+
+    async fn start_flow_pairing(self, _: Context) -> Result<(), FlowPairingCommandError> {
+        self.shared.flow.pairing().start().await
+    }
+
+    async fn pair_flow_peer(
+        self,
+        _: Context,
+        target: FlowPairTarget,
+    ) -> Result<(), FlowPairingCommandError> {
+        self.shared.flow.pairing().pair(target).await
+    }
+
+    async fn confirm_flow_pairing(self, _: Context) -> Result<(), FlowPairingCommandError> {
+        self.shared.flow.pairing().confirm().await
+    }
+
+    async fn cancel_flow_pairing(self, _: Context) -> Result<(), FlowPairingCommandError> {
+        self.shared.flow.pairing().cancel().await
+    }
+
+    async fn stop_flow_pairing(self, _: Context) {
+        self.shared.flow.pairing().stop().await;
+    }
 }
 
 /// Coalescing Actions Ring haptic player: at most one waveform is in flight,
@@ -1086,6 +1115,7 @@ impl RingHapticPlayer {
 /// `main` holds the single-instance lock (`agent.lock`), so no other live agent
 /// owns this socket and any leftover is from a dead instance.
 pub async fn run(server: AgentServer) {
+    tokio::spawn(reload_after_flow_pairing(server.clone()));
     let listener = match transport::bind() {
         Ok(listener) => listener,
         Err(e) => {
@@ -1112,6 +1142,16 @@ pub async fn run(server: AgentServer) {
                     tokio::spawn(response);
                 }),
         );
+    }
+}
+
+/// Reload `config.toml` each time Flow pairing saved a peer in it, so the
+/// peer reaches Flow and the snapshot the way a saved edit would.
+async fn reload_after_flow_pairing(server: AgentServer) {
+    let mut saved = server.shared.flow.pairing().saved();
+    while saved.changed().await.is_ok() {
+        // A failed reload logged why and kept the config it had.
+        let _ = server.reload(None).await;
     }
 }
 

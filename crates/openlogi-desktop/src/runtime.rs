@@ -289,7 +289,7 @@ impl Runtime {
         match update {
             ipc::GuiUpdate::Snapshot(snapshot) => {
                 self.apply_snapshot(&snapshot, cx);
-                self.snapshot = Some(snapshot);
+                self.snapshot = Some(*snapshot);
             }
             ipc::GuiUpdate::Reconnecting => {
                 cx.update(|cx| AppState::apply(cx, AppState::agent_link_lost));

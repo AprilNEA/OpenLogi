@@ -10,10 +10,11 @@ use std::time::Duration;
 use openlogi_core::config::AppSettings;
 use openlogi_core::device::{BatteryInfo, BatteryStatus, LockKey};
 use openlogi_hid::{DeviceRoute, WriteError};
-use openlogi_ipc::{FlowLinkState, LockKeyChange, NoticeKind};
+use openlogi_ipc::{LockKeyChange, NoticeKind};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
+use super::flow::{self, FlowCommand};
 use super::{MockAgent, State, Target, battery_at};
 
 /// What `help` prints.
@@ -27,7 +28,13 @@ fail <n> clear                   answer reads and writes again
 lock caps|num|scroll on|off      a keyboard turns a lock key on or off
 backlight <level> <levels>       a keyboard reports its backlight level
 advance <seconds>                move frozen test time (--fixture runs only)
-flow <peer> connected|unstable|lost  report a Flow peer's link state
+flow link <peer> connected|unstable|lost
+                                 report a Flow peer's link state
+flow incoming                    a nearby computer starts Flow pairing with this one
+flow confirm                     the other computer's user confirms the code
+flow fail <reason>               fail the Flow pairing attempt; reasons:
+                                 cancel mismatch timeout unreachable busy version
+                                 lost save
 disconnect                       close every client connection
 help                             show this list";
 
@@ -65,8 +72,8 @@ pub(super) enum Command {
     Backlight { level: u8, levels: u8 },
     /// Move frozen test time forward.
     Advance(Duration),
-    /// Report the link to the Flow peer named `peer` as `state`.
-    FlowLink { peer: String, state: FlowLinkState },
+    /// Script a Flow peer's link or the other side of Flow pairing.
+    Flow(FlowCommand),
     /// Close every client connection, as an agent restart does.
     Disconnect,
 }
@@ -116,7 +123,7 @@ pub(super) fn parse(line: &str) -> Result<Option<Command>, String> {
                 .ok_or("advance needs a whole number of seconds")?;
             Command::Advance(Duration::from_secs(seconds))
         }
-        "flow" => parse_flow_link(&mut words)?,
+        "flow" => Command::Flow(flow::parse(&mut words)?),
         "disconnect" => Command::Disconnect,
         other => return Err(format!("unknown command `{other}`; type `help`")),
     };
@@ -196,25 +203,6 @@ fn parse_backlight<'a>(words: &mut impl Iterator<Item = &'a str>) -> Result<Comm
     Ok(Command::Backlight { level, levels })
 }
 
-/// `flow <peer> <state>`: a peer name may have spaces, so the state is the
-/// last word and the name is every word before it.
-fn parse_flow_link<'a>(words: &mut impl Iterator<Item = &'a str>) -> Result<Command, String> {
-    let mut rest: Vec<&str> = words.collect();
-    let state = match rest.pop() {
-        Some("connected") => FlowLinkState::Connected,
-        Some("unstable") => FlowLinkState::Degraded,
-        Some("lost") => FlowLinkState::Lost,
-        _ => return Err("flow needs a peer name and connected, unstable or lost".to_owned()),
-    };
-    if rest.is_empty() {
-        return Err("flow needs a peer name before the state".to_owned());
-    }
-    Ok(Command::FlowLink {
-        peer: rest.join(" "),
-        state,
-    })
-}
-
 impl MockAgent {
     /// Apply `command` under the user's `settings`, as the agent would apply
     /// the event it stands for. Answers what to tell the developer.
@@ -284,11 +272,7 @@ impl MockAgent {
                 state.clock.advance(duration)?;
                 Ok(format!("test time is {:?}", state.clock.elapsed()))
             }
-            Command::FlowLink { peer, state } => {
-                let report = format!("Flow peer {peer} reports {state:?}");
-                self.state.lock().await.flow_links.insert(peer, state);
-                Ok(report)
-            }
+            Command::Flow(command) => self.apply_flow(command).await,
             Command::Disconnect => {
                 let connections = self.disconnects.receiver_count();
                 self.disconnects.send_replace(());

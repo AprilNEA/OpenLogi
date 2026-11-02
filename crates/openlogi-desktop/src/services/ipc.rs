@@ -105,7 +105,7 @@ const RECONNECT_DELAY: Duration = Duration::from_millis(250);
 /// What the client thread tells the GPUI loop.
 pub enum GuiUpdate {
     /// The agent's state, as of a generation this client had not seen.
-    Snapshot(AgentSnapshot),
+    Snapshot(Box<AgentSnapshot>),
     /// An established connection dropped. The agent may only be restarting —
     /// an update's self-exec, a supervised respawn — so the window keeps its
     /// last snapshot but stops presenting it as live. Sent once per lost
@@ -347,7 +347,7 @@ async fn observe_loop(
         };
         match woken {
             Woken::Observed(Ok(Some(snapshot))) => {
-                let _ = update_tx.send(GuiUpdate::Snapshot(*snapshot));
+                let _ = update_tx.send(GuiUpdate::Snapshot(snapshot));
             }
             // The agent's heartbeat, or a stale reply: the window is current.
             Woken::Observed(Ok(None)) => {}
@@ -1406,7 +1406,7 @@ mod tests {
                 let mut seen = Vec::new();
                 while seen.len() < 2 {
                     if let Some(GuiUpdate::Snapshot(snapshot)) = updates.recv().await {
-                        seen.push(snapshot);
+                        seen.push(*snapshot);
                     }
                 }
                 seen
