@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use hidpp::{
-    channel::{ChannelError, HidppChannel},
+    channel::HidppChannel,
     device::Device,
     feature::{
         CreatableFeature,
@@ -24,7 +24,10 @@ use crate::SharedChannel;
 use crate::backend::HidBackend;
 use crate::channel::route::DeviceRoute;
 
-use super::{HidppOperation, WriteError, classify_hidpp_error, open_feature, with_route};
+use super::{
+    HidppOperation, WriteError, classify_hidpp_error, open_feature, with_route,
+    write_whole_raw_report,
+};
 
 mod rgb;
 
@@ -617,16 +620,7 @@ async fn set_color_per_key(
     };
 
     for report in per_key_frames(device_index, feature_index, r, g, b) {
-        let written = channel
-            .write_raw_report(&report)
-            .await
-            .map_err(classify_raw_lighting_error)?;
-        if written != report.len() {
-            return Err(WriteError::Hidpp(format!(
-                "raw lighting report wrote {written} of {} bytes",
-                report.len()
-            )));
-        }
+        write_whole_raw_report(channel, &report, HidppOperation::Lighting).await?;
     }
 
     RootFeature::new(Arc::clone(channel), device_index, 0)
@@ -713,15 +707,6 @@ fn per_key_header(device_index: u8, feature_index: u8, function: u8) -> v20::Mes
 /// Classify a HID++ error from the `PerKeyLighting` request path.
 fn classify_per_key_error(error: Hidpp20Error) -> WriteError {
     classify_hidpp_error(error, HidppOperation::Lighting, PER_KEY_LIGHTING_FEATURE)
-}
-
-fn classify_raw_lighting_error(error: ChannelError) -> WriteError {
-    match error {
-        ChannelError::Timeout => WriteError::RequestTimedOut {
-            operation: HidppOperation::Lighting,
-        },
-        other => WriteError::Hidpp(format!("{other:?}")),
-    }
 }
 
 /// Set a solid keyboard colour on an already-open [`SharedChannel`], using

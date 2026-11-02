@@ -116,3 +116,33 @@ fn a_raw_wheel_control_hands_the_wheel_back_on_restore() {
     // A wake rearm re-applies the mode it was armed with.
     assert_eq!(armed.divert_change().raw_wheel, Some(true));
 }
+
+/// Linux 7.3+ diverts the Bluetooth M650's Back/Forward itself and listens to
+/// them, so teardown hands back the diversion it found there (#2163). Every
+/// other route, control or found state keeps the clear-on-restore policy.
+#[test]
+fn restore_keeps_the_kernels_m650_side_button_diversion() {
+    let m650 = DeviceRoute::Direct {
+        vendor_id: 0x046d,
+        product_id: 0xb02a,
+    };
+    let other = DeviceRoute::Direct {
+        vendor_id: 0x046d,
+        product_id: 0xb034,
+    };
+    let restore = |cid, diverted, route: &DeviceRoute| {
+        ArmedReporting::pointer(cid, reporting(diverted, None), PointerDivert::Plain)
+            .kernel_diversion_on(route)
+            .undivert_change()
+    };
+
+    for cid in [0x0053, 0x0056] {
+        let kept = restore(cid, true, &m650);
+        assert_eq!(kept.diverted, Some(cfg!(target_os = "linux")), "{cid:#06x}");
+        assert_eq!(kept.raw_xy, Some(cfg!(target_os = "linux")), "{cid:#06x}");
+        assert_eq!(kept.raw_wheel, None, "{cid:#06x}");
+        assert_eq!(restore(cid, false, &m650).diverted, Some(false));
+        assert_eq!(restore(cid, true, &other).diverted, Some(false));
+    }
+    assert_eq!(restore(0x00c3, true, &m650).diverted, Some(false));
+}

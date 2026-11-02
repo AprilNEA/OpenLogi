@@ -15,8 +15,12 @@
 //!
 //! The IOKit handles themselves live in [`iokit`], which owns every `unsafe`
 //! block in this backend and hands the descriptor up as a plain `&[u8]`.
+//! What speed each camera's USB link runs at, as enumeration sees it, is
+//! [`link`]'s.
 
 mod iokit;
+mod link;
+pub(crate) use link::observe_links;
 
 use std::collections::HashMap;
 use std::ffi::c_void;
@@ -339,16 +343,12 @@ pub(crate) fn usb_serials_by_location() -> HashMap<u32, String> {
         })
 }
 
-/// Location id + USB serial from an `IOUSBDevice` service, without opening it.
-fn registry_location_and_serial(
-    service: &IoObject,
-    serial_key: &CFString,
-    location_key: &CFString,
-) -> Option<(u32, String)> {
-    // Prefer the USB device interface for the location (it is what the control
-    // path matches on); fall back to the registry number when the plug-in is
-    // busy.
-    let location = UsbInterface::open(service)
+/// An `IOUSBDevice` service's location id, without opening the device.
+///
+/// Prefers the USB device interface (it is what the control path matches on)
+/// and falls back to the registry number when the plug-in is busy.
+fn service_location(service: &IoObject, location_key: &CFString) -> Option<u32> {
+    UsbInterface::open(service)
         .and_then(|interface| interface.location_id())
         .or_else(|| {
             iokit::registry_property(service, location_key)?
@@ -356,7 +356,16 @@ fn registry_location_and_serial(
                 .ok()?
                 .as_i32()
                 .map(i32::cast_unsigned)
-        })?;
+        })
+}
+
+/// Location id + USB serial from an `IOUSBDevice` service, without opening it.
+fn registry_location_and_serial(
+    service: &IoObject,
+    serial_key: &CFString,
+    location_key: &CFString,
+) -> Option<(u32, String)> {
+    let location = service_location(service, location_key)?;
     let serial = iokit::registry_property(service, serial_key)?
         .downcast::<CFString>()
         .ok()?

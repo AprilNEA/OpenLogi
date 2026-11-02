@@ -12,10 +12,9 @@
 //! the current value through the agent when selection/inventory lifecycle
 //! events make a device active; this view only consumes the resulting cache.
 
-use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, Context, IntoElement, ParentElement, Render, SharedString, Styled,
-    Subscription, Window, div, px, rgb,
+    Subscription, Window,
 };
 use gpui_component::{Disableable as _, Selectable as _, h_flex, slider::Slider, v_flex};
 use openlogi_core::config::{
@@ -30,10 +29,11 @@ use crate::state::{
     StateEvents,
 };
 use crate::ui::commit_slider::{CommitSlider, SliderRange};
-use crate::ui::components::{Pill, Toggle};
+use crate::ui::components::{Pill, Toggle, toggle_row};
 use crate::ui::section::section_label;
+use crate::ui::slider_row::{SliderRow, disabled_track};
 use crate::ui::status::{retry_line, status_line};
-use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
+use crate::ui::theme::{self, Palette};
 
 /// Friendly slider range for the `autoDisengage` threshold. The wire field is
 /// `0x01`–`0xFE` (0.25 turn/s steps); the slider exposes the usable band
@@ -191,35 +191,19 @@ impl SmartShiftPanel {
                     )),
             );
 
-        let value_color = if sensitivity_enabled {
-            rgb(ACCENT_BLUE).into()
-        } else {
-            pal.text_muted
-        };
-        let sensitivity_row = v_flex()
-            .gap_2()
-            .child(
-                h_flex()
-                    .justify_between()
-                    .items_baseline()
-                    .child(section_label(tr!("pointer.sensitivity"), pal))
-                    .child(
-                        div()
-                            .text_body()
-                            .text_color(value_color)
-                            .child(format!("{display}")),
-                    ),
-            )
-            .when(sensitivity_enabled, |row| {
-                row.child(Slider::new(self.threshold.slider()).horizontal())
-            })
-            .when(!sensitivity_enabled, |row| row.child(disabled_track(pal)))
-            .child(
-                div()
-                    .text_caption()
-                    .text_color(pal.text_muted)
-                    .child(tr!("pointer.smartshift_sensitivity_description")),
-            );
+        let sensitivity_row = SliderRow::new(
+            tr!("pointer.sensitivity"),
+            if sensitivity_enabled {
+                Slider::new(self.threshold.slider())
+                    .horizontal()
+                    .into_any_element()
+            } else {
+                disabled_track(pal).into_any_element()
+            },
+        )
+        .value(display.to_string(), [THRESHOLD_MAX.to_string()])
+        .description(tr!("pointer.smartshift_sensitivity_description"))
+        .disabled(!sensitivity_enabled);
 
         let torque_row = self.torque_row(status, ratchet, window, cx);
         let wheel_row = self.wheel_sensitivity_row(window, cx);
@@ -245,49 +229,30 @@ impl SmartShiftPanel {
         ratchet: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Option<gpui::Div> {
+    ) -> Option<SliderRow> {
         let pal = theme::palette(cx);
         let committed_torque = status.tunable_torque?;
         self.torque.sync(committed_torque, window, cx);
         let display = self.torque.shown(committed_torque);
-        let torque_value_color = if ratchet {
-            rgb(ACCENT_BLUE).into()
+        let control = if ratchet {
+            Slider::new(self.torque.slider())
+                .horizontal()
+                .into_any_element()
         } else {
-            pal.text_muted
+            disabled_track(pal).into_any_element()
         };
         Some(
-            v_flex()
-                .gap_2()
-                .child(
-                    h_flex()
-                        .justify_between()
-                        .items_baseline()
-                        .child(section_label(tr!("pointer.scrolling_force"), pal))
-                        .child(
-                            div()
-                                .text_body()
-                                .text_color(torque_value_color)
-                                .child(format!("{display}%")),
-                        ),
-                )
-                .when(ratchet, |row| {
-                    row.child(Slider::new(self.torque.slider()).horizontal())
-                })
-                .when(!ratchet, |row| row.child(disabled_track(pal)))
-                .child(
-                    div()
-                        .text_caption()
-                        .text_color(pal.text_muted)
-                        .child(tr!("pointer.scrolling_force_description")),
-                ),
+            SliderRow::new(tr!("pointer.scrolling_force"), control)
+                .value(format!("{display}%"), [format!("{}%", TunableTorque::MAX)])
+                .description(tr!("pointer.scrolling_force_description"))
+                .disabled(!ratchet),
         )
     }
 
     /// The per-device thumb-wheel sensitivity row: label, live value, slider.
     /// Reads the selected device's effective value and re-seats the thumb on a
     /// device switch / external config change, never mid-drag.
-    fn wheel_sensitivity_row(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::Div {
-        let pal = theme::palette(cx);
+    fn wheel_sensitivity_row(&mut self, window: &mut Window, cx: &mut Context<Self>) -> SliderRow {
         let committed = AppState::try_read(cx)
             .and_then(|state| {
                 state
@@ -297,21 +262,14 @@ impl SmartShiftPanel {
             .unwrap_or(ThumbwheelSensitivity::DEFAULT);
         self.wheel_sensitivity.sync(committed, window, cx);
         let display = self.wheel_sensitivity.shown(committed);
-        v_flex()
-            .gap_2()
-            .child(
-                h_flex()
-                    .justify_between()
-                    .items_baseline()
-                    .child(section_label(tr!("pointer.thumb_wheel_sensitivity"), pal))
-                    .child(
-                        div()
-                            .text_body()
-                            .text_color(rgb(ACCENT_BLUE))
-                            .child(format!("{display}")),
-                    ),
-            )
-            .child(Slider::new(self.wheel_sensitivity.slider()).horizontal())
+        SliderRow::new(
+            tr!("pointer.thumb_wheel_sensitivity"),
+            Slider::new(self.wheel_sensitivity.slider()).horizontal(),
+        )
+        .value(
+            display.to_string(),
+            [ThumbwheelSensitivity::MAX.to_string()],
+        )
     }
 }
 
@@ -393,47 +351,38 @@ fn smartshift_write_feedback(
     }
 }
 
-/// The "Permanent ratchet" label + toggle row.
+/// The "Permanent ratchet" toggle row.
 fn permanent_row(
     permanent: bool,
     ratchet: bool,
     restore_threshold: SmartShiftThreshold,
     status: SmartShiftStatus,
     pal: Palette,
-) -> gpui::Div {
-    h_flex()
-        .justify_between()
-        .items_center()
-        .child(
-            v_flex()
-                .child(section_label(tr!("pointer.permanent_ratchet"), pal))
-                .child(
-                    div()
-                        .text_caption()
-                        .text_color(pal.text_muted)
-                        .child(tr!("pointer.never_auto_switch_to_free_spin")),
-                ),
-        )
-        .child(
-            Toggle::new("smartshift-permanent")
-                .selected(permanent)
-                .disabled(!ratchet)
-                .on_change(move |permanent, _window, cx| {
-                    let auto_disengage = if *permanent {
-                        SmartShiftAutoDisengage::Permanent
-                    } else {
-                        SmartShiftAutoDisengage::Threshold(restore_threshold)
-                    };
-                    AppState::update_smartshift(
-                        cx,
-                        SmartShiftStatus {
-                            mode: SmartShiftMode::Ratchet,
-                            auto_disengage,
-                            ..status
-                        },
-                    );
-                }),
-        )
+) -> impl IntoElement {
+    toggle_row(
+        "smartshift-permanent-row",
+        pal,
+        tr!("pointer.permanent_ratchet"),
+        tr!("pointer.never_auto_switch_to_free_spin"),
+        Toggle::new("smartshift-permanent")
+            .selected(permanent)
+            .disabled(!ratchet)
+            .on_change(move |permanent, _window, cx| {
+                let auto_disengage = if *permanent {
+                    SmartShiftAutoDisengage::Permanent
+                } else {
+                    SmartShiftAutoDisengage::Threshold(restore_threshold)
+                };
+                AppState::update_smartshift(
+                    cx,
+                    SmartShiftStatus {
+                        mode: SmartShiftMode::Ratchet,
+                        auto_disengage,
+                        ..status
+                    },
+                );
+            }),
+    )
 }
 
 /// One wheel-mode pill. Clicking it writes `target` while preserving the
@@ -448,11 +397,6 @@ fn mode_pill(label: SharedString, selected: bool, status: SmartShiftStatus) -> i
         .on_click(move |_event, _window, cx| {
             AppState::update_smartshift(cx, status);
         })
-}
-
-/// A greyed bar standing in for the slider when sensitivity isn't adjustable.
-fn disabled_track(pal: Palette) -> gpui::Div {
-    div().w_full().h(px(6.)).rounded_full().bg(pal.border)
 }
 
 /// Map a device-reported threshold into the slider's friendly band for display.

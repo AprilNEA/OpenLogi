@@ -6,8 +6,8 @@ use super::{AppState, StateEvent};
 use crate::platform::app_icon::AppIconExt as _;
 use gpui_component::ThemeMode;
 use openlogi_core::config::{
-    AppIcon, AppSettings, Appearance, AssetSourcePreference, DeviceViewMode, MouseProfileTarget,
-    ThumbwheelSensitivity, UiScale, VerticalScrollSensitivity,
+    AppIcon, AppSettings, Appearance, AssetSourcePreference, DeviceViewMode, MomentumScrolling,
+    MouseProfileTarget, ThumbwheelSensitivity, UiScale, VerticalScrollSensitivity,
 };
 use openlogi_core::update_feed::UpdateChannel;
 
@@ -315,6 +315,78 @@ impl AppState {
         self.persist_and_reload("smooth scroll");
         StateEvent::SettingsChanged.into()
     }
+    /// Persist the app-wide momentum-scrolling settings, the default for
+    /// every device without its own. The agent reads them on config reload,
+    /// and re-arms a smoothed wheel's capture when the switch flips. An
+    /// unchanged value writes nothing and is still reported; disk failures
+    /// restore the persisted value.
+    pub fn commit_momentum_scrolling(&mut self, momentum: MomentumScrolling) -> StateEvents {
+        if self.config.app_settings.momentum_scrolling == momentum {
+            return StateEvent::SettingsChanged.into();
+        }
+        self.config
+            .edit(|config| config.app_settings.momentum_scrolling = momentum);
+        self.persist_and_reload("momentum scrolling");
+        StateEvent::SettingsChanged.into()
+    }
+
+    /// The effective momentum-scrolling settings for `key` (its per-device
+    /// override, else the app-wide default).
+    #[must_use]
+    pub fn device_momentum_scrolling(&self, key: &str) -> MomentumScrolling {
+        self.config.momentum_scrolling(key)
+    }
+
+    /// Whether `key` has its own momentum-scrolling settings.
+    #[must_use]
+    pub fn has_device_momentum_scrolling(&self, key: &str) -> bool {
+        self.config
+            .devices
+            .get(key)
+            .is_some_and(|device| device.momentum_scrolling.is_some())
+    }
+
+    /// Number of saved devices with their own momentum-scrolling settings,
+    /// offline devices included.
+    #[must_use]
+    pub fn momentum_override_count(&self) -> usize {
+        self.config
+            .devices
+            .values()
+            .filter(|device| device.momentum_scrolling.is_some())
+            .count()
+    }
+
+    /// Set `key`'s own momentum-scrolling settings and persist them.
+    /// Settings equal to the app-wide ones *clear* the override, so the
+    /// device follows Settings → General again instead of pinning today's
+    /// values. The agent picks the change up through the reloaded capture
+    /// plans. A stored override that would not change writes nothing and is
+    /// still reported.
+    pub fn commit_device_momentum_scrolling(
+        &mut self,
+        key: &DeviceKey,
+        momentum: MomentumScrolling,
+    ) -> StateEvents {
+        let events = StateEvent::DeviceConfigChanged(key.clone()).into();
+        let key = key.as_str();
+        let override_value =
+            (momentum != self.config.app_settings.momentum_scrolling).then_some(momentum);
+        let stored = self
+            .config
+            .devices
+            .get(key)
+            .and_then(|device| device.momentum_scrolling);
+        if stored == override_value {
+            return events;
+        }
+        self.config.edit(|config| {
+            config.set_device_momentum_scrolling(key, override_value);
+        });
+        self.persist_and_reload("device momentum scrolling");
+        events
+    }
+
     /// Toggle the overlay's low-battery notices and persist it. The agent
     /// decides when a battery is low, so it reads the new value on config
     /// reload; while off it posts no notice. An already-set value writes

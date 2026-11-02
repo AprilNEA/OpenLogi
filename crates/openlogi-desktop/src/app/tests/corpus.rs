@@ -120,9 +120,20 @@ fn reviewed_detail_tabs(id: &str) -> Vec<DetailTab> {
         // A keyboard with HID++ controls and no pointer sensor gets Keys and
         // the ring editor. Its Fn lock, OS layout, backlight, Easy-Switch, and
         // disabled-key settings are cards on the Device tab, not extra tabs.
-        "mx-mechanical-mini-mac-001" => {
+        // The keypad (kind Numpad, a measured 0x1b04 table, no pointer
+        // sensor) is configured on Keys too, and a key can open the Actions
+        // Ring, so the ring editor follows it.
+        "mx-mechanical-mini-mac-001" | "mx-keys-s-001" | "mx-creative-keypad-001" => {
             vec![DetailTab::Keys, DetailTab::ActionsRing, DetailTab::Device]
         }
+        // The G915 is the same kind of keyboard, and its RGB effect engine
+        // (0x8071) and per-key lighting (0x8081) add the Lighting tab.
+        "g915-001" => vec![
+            DetailTab::Keys,
+            DetailTab::ActionsRing,
+            DetailTab::Lighting,
+            DetailTab::Device,
+        ],
         id => panic!("{id}: add reviewed desktop panel expectations"),
     }
 }

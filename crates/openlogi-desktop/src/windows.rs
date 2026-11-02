@@ -214,14 +214,16 @@ pub fn open_or_focus<V: AuxWindow + 'static>(
 ) {
     let title = title.into();
 
-    // Already open? Focus it and bail. A closed window leaves a stale handle
-    // whose `update` errors, falling through to a fresh open.
+    // An action dispatched from this window temporarily takes it out of GPUI's
+    // storage, so a failed update does not mean it closed. Check the live handles
+    // and activate after dispatch returns the borrowed window.
     let existing = *slot(cx.default_global::<WindowRegistry>());
     if let Some(handle) = existing
-        && handle
-            .update(cx, |_, window, _| window.activate_window())
-            .is_ok()
+        && cx.windows().contains(&handle.into())
     {
+        cx.defer(move |cx| {
+            let _ = handle.update(cx, |_, window, _| window.activate_window());
+        });
         return;
     }
 

@@ -22,6 +22,7 @@ use self::button::{
     ButtonInputHandle, ButtonRuntimeEvent, ButtonRuntimeOwner, EndReason, PressControl,
 };
 pub(crate) use self::button::{HidppSessionId, PressToken};
+pub(crate) use self::pointer::{FocusBinding, PointerPress, PointerSelection};
 use crate::dpi::DpiBeforeShift;
 use crate::hardware::{
     DeviceAccess, restore_dpi_in_background, step_dpi_in_background,
@@ -51,6 +52,35 @@ fn receive_command<T>(
     )
 }
 
+/// Which way a keypad page action turns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PageTurn {
+    /// [`Action::PreviousKeypadPage`].
+    Previous,
+    /// [`Action::NextKeypadPage`].
+    Next,
+}
+
+/// An action the agent itself carries out rather than the OS injector,
+/// handed from the dispatcher to the agent's lifecycle loop, which owns the
+/// state it changes. Each carries the config key of the device it was pressed
+/// on, when the source knows one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActionRequest {
+    /// Open the Actions Ring ([`Action::ShowActionsRing`]).
+    ShowActionsRing {
+        /// The pressing device.
+        device_key: Option<String>,
+    },
+    /// Turn the pressing keypad's binding page.
+    TurnKeypadPage {
+        /// The pressing device.
+        device_key: Option<String>,
+        /// Which way.
+        turn: PageTurn,
+    },
+}
+
 /// Application identity captured with a physical press and retained through
 /// asynchronous button dispatch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -60,11 +90,14 @@ pub(crate) enum ActionDispatchTarget {
     /// The ordinary browser-navigation shortcut target captured outside Safari.
     Keyboard,
     /// The pointer context that selected the binding. Validated off the tap
-    /// before output. An identified window or desktop is never substituted
-    /// with an unrelated foreground window; an unidentified target retains
-    /// the focused fallback captured with the press.
+    /// before output. Keystrokes from a binding that the focused application
+    /// shares go where focused mode sends them. Other keystrokes need the
+    /// identified hovered window to have focus. A shared binding and an
+    /// unidentified target retain the frontmost Safari captured with the
+    /// press, as focused mode does.
     Pointer {
         target: openlogi_hook::PointerTarget,
+        focus: FocusBinding,
         fallback_safari_pid: Option<i32>,
     },
 }
@@ -75,16 +108,22 @@ impl ActionDispatchTarget {
     }
 
     fn for_pointer(
-        target: Option<openlogi_hook::PointerTarget>,
+        press: Option<PointerPress>,
         capture_safari_pid: impl FnOnce() -> Option<i32>,
     ) -> Self {
-        let safari_pid = match target {
-            None | Some(openlogi_hook::PointerTarget::Unavailable) => capture_safari_pid(),
-            Some(_) => None,
-        };
-        match target {
-            Some(target) => Self::Pointer {
+        // Focused mode, a shared binding, and an unidentified target send
+        // Safari navigation where focus is at the press.
+        let safari_pid = press
+            .is_none_or(|press| {
+                press.target == openlogi_hook::PointerTarget::Unavailable
+                    || press.focus == FocusBinding::Shared
+            })
+            .then(capture_safari_pid)
+            .flatten();
+        match press {
+            Some(PointerPress { target, focus }) => Self::Pointer {
                 target,
+                focus,
                 fallback_safari_pid: safari_pid,
             },
             None => safari_pid.map_or(Self::Keyboard, Self::SafariProcess),
@@ -126,7 +165,32 @@ struct ActionExecutor {
     dpi_cycle: Arc<RwLock<DpiCycles>>,
     pointer_speeds: Arc<PointerSpeeds>,
     access: DeviceAccess,
-    action_ring: tokio::sync::mpsc::UnboundedSender<Option<String>>,
+    requests: tokio::sync::mpsc::UnboundedSender<ActionRequest>,
+}
+
+/// The request the agent handles itself for `action` pressed on
+/// `device_key`, or `None` for an action the executor runs.
+///
+/// The ring is drawn by OpenLogi at the cursor and acts on no window, so no
+/// pointer target gates it. It must not: while the ring is showing, the
+/// pointer is over the ring's own floating window, which classifies as
+/// `PointerTarget::Unavailable`, and a gated second trigger press could never
+/// close the ring. A keypad page turn acts on the keypad alone, so no window
+/// gates it either.
+fn agent_request(action: &Action, device_key: Option<&str>) -> Option<ActionRequest> {
+    let device_key = device_key.map(str::to_owned);
+    match action {
+        Action::ShowActionsRing => Some(ActionRequest::ShowActionsRing { device_key }),
+        Action::PreviousKeypadPage => Some(ActionRequest::TurnKeypadPage {
+            device_key,
+            turn: PageTurn::Previous,
+        }),
+        Action::NextKeypadPage => Some(ActionRequest::TurnKeypadPage {
+            device_key,
+            turn: PageTurn::Next,
+        }),
+        _ => None,
+    }
 }
 
 impl ActionExecutor {
@@ -296,18 +360,9 @@ impl ActionExecutor {
     }
 
     fn dispatch_to(&self, action: &Action, device_key: Option<&str>, target: ActionDispatchTarget) {
-        // The ring is drawn by OpenLogi at the cursor and acts on no window, so
-        // no pointer target gates it. It must not: while the ring is showing,
-        // the pointer is over the ring's own floating window, which classifies
-        // as `PointerTarget::Unavailable`, and a gated second trigger press
-        // could never close the ring.
-        if matches!(action, Action::ShowActionsRing) {
-            if self
-                .action_ring
-                .send(device_key.map(str::to_owned))
-                .is_err()
-            {
-                warn!("Actions Ring runtime unavailable — trigger ignored");
+        if let Some(request) = agent_request(action, device_key) {
+            if self.requests.send(request).is_err() {
+                warn!(action = %action.label(), "agent runtime unavailable — request ignored");
             }
             return;
         }
@@ -426,6 +481,21 @@ impl ActionExecutor {
                 action = %action.label(),
                 "no DPI presets configured for active device — press ignored"
             );
+        }
+    }
+}
+
+/// Log a bound action the OS input hook captured, from the worker that
+/// dispatches it. The hook's callback logs nothing on this path: the file
+/// appender's lock and its daily rollover must not run inside the callback
+/// the hook watchdog guards (#2096).
+fn log_bound_action(control: &PressControl, action: &Action) {
+    match control {
+        PressControl::Button(button) => {
+            info!(button = %button, action = %action.label(), "button → executing bound action");
+        }
+        PressControl::Key(keycode) => {
+            info!(keycode, action = %action.label(), "key → executing bound action");
         }
     }
 }
@@ -559,10 +629,16 @@ impl ButtonEventHandler {
         match event {
             ButtonRuntimeEvent::Started(press) => {
                 if let Some(action) = press.start_action() {
+                    if press.captured_by_os_hook() {
+                        log_bound_action(press.control(), action);
+                    }
                     self.start_action(press.token(), action, press.device_key(), press.target());
                 }
             }
             ButtonRuntimeEvent::Triggered { press, action } => {
+                if press.captured_by_os_hook() {
+                    log_bound_action(press.control(), &action);
+                }
                 self.start_action(press.token(), &action, press.device_key(), press.target());
             }
             ButtonRuntimeEvent::Ended { press, reason } => {
@@ -625,13 +701,13 @@ impl ActionRuntime {
         dpi_cycle: Arc<RwLock<DpiCycles>>,
         pointer_speeds: Arc<PointerSpeeds>,
         access: DeviceAccess,
-        action_ring: tokio::sync::mpsc::UnboundedSender<Option<String>>,
+        requests: tokio::sync::mpsc::UnboundedSender<ActionRequest>,
     ) -> io::Result<Self> {
         let executor = ActionExecutor {
             dpi_cycle,
             pointer_speeds,
             access,
-            action_ring,
+            requests,
         };
         let mut button_handler = ButtonEventHandler::new(executor.clone());
         let buttons = ButtonRuntimeOwner::spawn(move |event| button_handler.handle(event))?;
@@ -673,12 +749,12 @@ impl ActionDispatcher {
         &self,
         action: &Action,
         device_key: Option<&str>,
-        target: Option<openlogi_hook::PointerTarget>,
+        pointer: Option<PointerPress>,
     ) {
         self.executor.dispatch_to(
             action,
             device_key,
-            ActionDispatchTarget::for_pointer(target, openlogi_hook::frontmost_safari_pid),
+            ActionDispatchTarget::for_pointer(pointer, openlogi_hook::frontmost_safari_pid),
         );
     }
 
@@ -753,13 +829,13 @@ impl ActionDispatcher {
         session: &HidppSessionId,
         button: ButtonId,
         binding: Option<&Binding>,
-        pointer_target: Option<openlogi_hook::PointerTarget>,
+        pointer: Option<PointerPress>,
     ) -> Option<PressToken> {
         self.buttons.try_hidpp_down(
             session,
             button,
             binding,
-            ActionDispatchTarget::for_pointer(pointer_target, openlogi_hook::frontmost_safari_pid),
+            ActionDispatchTarget::for_pointer(pointer, openlogi_hook::frontmost_safari_pid),
         )
     }
 
@@ -775,13 +851,13 @@ impl ActionDispatcher {
         session: &HidppSessionId,
         button: ButtonId,
         binding: Option<&Binding>,
-        pointer_target: Option<openlogi_hook::PointerTarget>,
+        pointer: Option<PointerPress>,
     ) {
         self.buttons.try_hidpp_pulse(
             session,
             button,
             binding,
-            ActionDispatchTarget::for_pointer(pointer_target, openlogi_hook::frontmost_safari_pid),
+            ActionDispatchTarget::for_pointer(pointer, openlogi_hook::frontmost_safari_pid),
         );
     }
 
@@ -905,7 +981,7 @@ mod tests {
 
     fn executor_with(pointer_speeds: Arc<PointerSpeeds>) -> ActionExecutor {
         let (_signal, device_io) = openlogi_hid::device_io_channel();
-        let (action_ring, _ring_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (requests, _requests_rx) = tokio::sync::mpsc::unbounded_channel();
         ActionExecutor {
             dpi_cycle: Arc::default(),
             pointer_speeds,
@@ -916,7 +992,7 @@ mod tests {
                 device_io,
                 transport_turns: crate::hardware::TransportTurns::default(),
             },
-            action_ring,
+            requests,
         }
     }
 
@@ -1043,7 +1119,7 @@ mod tests {
         // own overlay window, which the pointer hit test reports as
         // unavailable.
         let (_signal, device_io) = openlogi_hid::device_io_channel();
-        let (action_ring, mut ring_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (requests, mut ring_rx) = tokio::sync::mpsc::unbounded_channel();
         let executor = ActionExecutor {
             dpi_cycle: Arc::default(),
             pointer_speeds: Arc::default(),
@@ -1054,20 +1130,68 @@ mod tests {
                 device_io,
                 transport_turns: crate::hardware::TransportTurns::default(),
             },
-            action_ring,
+            requests,
         };
 
         executor.dispatch_to(
             &Action::ShowActionsRing,
             Some("mouse"),
             ActionDispatchTarget::for_pointer(
-                Some(openlogi_hook::PointerTarget::Unavailable),
+                Some(PointerPress::distinct(
+                    openlogi_hook::PointerTarget::Unavailable,
+                )),
                 || None,
             ),
         );
 
-        assert_eq!(ring_rx.try_recv(), Ok(Some("mouse".to_owned())));
+        assert_eq!(
+            ring_rx.try_recv(),
+            Ok(ActionRequest::ShowActionsRing {
+                device_key: Some("mouse".to_owned())
+            })
+        );
     }
+    /// Page actions go to the agent, keyed by the pressing keypad, and — like
+    /// the ring — no pointer target gates them: the press acts on the keypad.
+    #[test]
+    fn page_actions_reach_the_agent_as_page_turns() {
+        let (_signal, device_io) = openlogi_hid::device_io_channel();
+        let (requests, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let executor = ActionExecutor {
+            dpi_cycle: Arc::default(),
+            pointer_speeds: Arc::default(),
+            access: DeviceAccess {
+                channel: openlogi_hid::CaptureChannelSlot::default(),
+                registry: openlogi_hid::ChannelRegistry::default(),
+                receiver_access: crate::receiver_access::ReceiverAccess::default(),
+                device_io,
+                transport_turns: crate::hardware::TransportTurns::default(),
+            },
+            requests,
+        };
+        let unavailable = || {
+            ActionDispatchTarget::for_pointer(
+                Some(PointerPress::distinct(
+                    openlogi_hook::PointerTarget::Unavailable,
+                )),
+                || None,
+            )
+        };
+
+        executor.dispatch_to(&Action::NextKeypadPage, Some("keypad"), unavailable());
+        executor.dispatch_to(&Action::PreviousKeypadPage, Some("keypad"), unavailable());
+
+        for turn in [PageTurn::Next, PageTurn::Previous] {
+            assert_eq!(
+                received.try_recv(),
+                Ok(ActionRequest::TurnKeypadPage {
+                    device_key: Some("keypad".to_owned()),
+                    turn,
+                })
+            );
+        }
+    }
+
     #[test]
     fn instantaneous_actions_do_not_enter_held_state() {
         let press = PressToken::hook_for_test(1, ButtonId::Back);

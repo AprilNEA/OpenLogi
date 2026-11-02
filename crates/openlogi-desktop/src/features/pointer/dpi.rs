@@ -27,6 +27,7 @@ use super::report_rate::{ReportRateFacts, report_rate_section};
 use crate::state::{AppState, DeviceKey, DpiLoad, StateEvent};
 use crate::ui::commit_slider::{CommitSlider, SliderRange};
 use crate::ui::components::PresetChip;
+use crate::ui::slider_row::SliderRow;
 use crate::ui::status::{retry_line, status_line};
 use crate::ui::theme::{self, Palette, Typography as _};
 
@@ -206,33 +207,20 @@ impl DpiPanel {
             snapshot.device_key.clone(),
             pal,
         );
+        // The column holds the device's highest DPI; until the range is read,
+        // the value shown is all there is to measure.
+        let widest = match &snapshot.status {
+            DpiLoad::Ready(info) => info.capabilities.max(),
+            _ => snapshot.dpi,
+        };
 
         v_flex()
             .gap_3()
             .w_full()
             .child(
-                h_flex()
-                    .justify_between()
-                    .items_baseline()
-                    .child(
-                        div()
-                            .text_body()
-                            .text_color(pal.text_muted)
-                            .child(tr!("pointer.dpi")),
-                    )
-                    .child(
-                        div()
-                            .text_body()
-                            .text_color(pal.text_primary)
-                            .child(format!("{}", snapshot.dpi)),
-                    ),
-            )
-            .child(slider)
-            .child(
-                div()
-                    .text_caption()
-                    .text_color(pal.text_muted)
-                    .child(range_label),
+                SliderRow::new(tr!("pointer.dpi"), slider)
+                    .value(snapshot.dpi.to_string(), [widest.to_string()])
+                    .hint(range_label),
             )
             .child(
                 v_flex()

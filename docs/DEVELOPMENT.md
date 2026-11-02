@@ -213,6 +213,7 @@ crates/
   openlogi-hid/     device discovery, HID++ reads/writes, and control capture over async-hid
   openlogi-assets/  device-render registry schema + cached HTTP fetch from OpenLogi asset mirrors
   openlogi-cli/     CLI implementation: command tree + `run()`, called by the `openlogi` binary
+  openlogi-flow/    Flow protobuf protocol, framing, pairing, identity, and QUIC transport
   openlogi-agent-core/  shared orchestration + the agent/GUI IPC contract
   openlogi-agent/   the `openlogi-agent` binary — background agent owning device I/O and the hook
   openlogi-hook/    OS mouse hook: macOS CGEventTap, Linux evdev/uinput, Windows WH_MOUSE_LL
@@ -321,6 +322,11 @@ opening or merging PRs, publishing, or approving/rerunning workflows.
 - Issues use the bug/feature/device forms and the `type:`/`area:`/`platform:`/`needs:`/
   `status:` label families. Deferred or out-of-scope work becomes a linked issue, not a
   TODO comment.
+- Discussions route by category: Q&A for usage questions (mark the reply that solves
+  it), Ideas for feature wishes, General for the rest. The forms in
+  `.github/DISCUSSION_TEMPLATE/` carry this routing; device requests go to the device
+  issue form. When an issue tracks a discussion, link it and close the discussion as a
+  duplicate. Close a discussion whose request has shipped as resolved.
 
 ### Adopting contributor PRs
 
@@ -381,6 +387,15 @@ cargo run -p xtask -- linux package
 
 The package contents (binaries, udev rules, systemd user unit, desktop entry,
 icon) are declared in `packaging/linux/nfpm.yaml`.
+
+After nfpm, `linux package` re-encodes two of the packages: the `.deb` data
+member becomes `data.tar.xz` (xz level 9), and the `.pkg.tar.zst` becomes a
+level-19 zstd frame with a 128 MiB window. The four binaries share most of
+their code, and only a window that spans the whole tar finds it; this halves
+both packages. Leave `deb.compression` unset in `nfpm.yaml`, because the
+rewrite expects nfpm's gzip data member. The `.rpm` keeps nfpm's compression.
+The two encodes add about three minutes per architecture (164 s on a 6-core
+x86_64 machine).
 
 `packaging/linux/install.sh` is a POSIX `/bin/sh` frontend for those release
 packages, not a second package lifecycle. Its online mode maps the host and
@@ -507,8 +522,51 @@ Sparkle that fails to load fall back to the engine and `latest.json`.
 Sparkle read only that manifest, and they update into a Sparkle bundle through
 it.
 
-Configure the R2/update settings in one 1Password item referenced by the GitHub
-secret `OP_R2_SECRET_ITEM`. The item must contain:
+### Release secrets: 1Password Environments and the `release` environment
+
+Every workflow reads its credentials from 1Password through the shared
+[`AprilNEA/actions/op-environment`](https://github.com/AprilNEA/actions)
+action, which runs `op run --environment` with a service-account token and
+exports the Environment's variables, masked, to the job's later steps
+(`GITHUB_ENV`, so a step reads `$APPLE_ID` or `${{ env.APPLE_ID }}`). GitHub
+App tokens are then minted by its sibling `github-app-token` from
+`env.GITHUB_APP_ID` / `env.GITHUB_APP_PRIVATE_KEY`. Both are pinned by commit
+SHA with the version as a comment, like every action that handles a secret.
+Two [1Password Environments](https://developer.1password.com/environments)
+hold them, each read by a service account scoped to that Environment alone, so
+the vaults the items used to live in no longer matter:
+
+| 1Password Environment | Variables | Service account token lives in | Read by |
+|---|---|---|---|
+| `OpenLogi Automation` | `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `CARGO_REGISTRY_TOKEN`, `CROWDIN_PROJECT_ID`, `CROWDIN_PERSONAL_TOKEN` | repository secret `OP_SERVICE_ACCOUNT_TOKEN` | release-plz, the beta cut, Crowdin, the flake update, and the release workflow's installer-site / homebrew-tap dispatches, from any branch |
+| `OpenLogi Release` | the `APPLE_*`, `AZURE_*`, `OPENLOGI_UPDATE_*`, `OPENLOGI_SPARKLE_*` and `CLOUDFLARE_R2_*` variables listed below | **`release` GitHub environment** secret `OP_SERVICE_ACCOUNT_TOKEN` | the signing jobs in `build.yml` (`macos`, `windows`, `windows-msi`) when `sign` is set, and `release.yml`'s `publish` job |
+
+The Environment IDs are not secrets; they are the repository variables
+`OP_AUTOMATION_ENVIRONMENT_ID` and `OP_RELEASE_ENVIRONMENT_ID`. A GitHub
+environment secret shadows the repository secret of the same name, so a job
+sees the release token only inside the `release` GitHub environment, and a job
+outside it that asks for the release Environment fails in `op run` with the
+automation token. The `release` GitHub environment admits only `v*` tag refs
+and requires a review, so a branch dispatch with `sign` fails before any
+secret is read, and each tag run pauses twice for approval: once when the
+build legs reach the environment, once when `publish` does. The Azure
+federated credential is bound to the environment
+(`repo:AprilNEA/OpenLogi:environment:release`), which is why the Windows jobs
+were in it first.
+
+`op-environment` exports whatever the Environment holds, so a new variable
+needs no workflow change beyond its consumer; a variable the Environment
+lacks is simply unset, and each job's validation step names the missing one.
+Everything exported is visible to every later step of that job, third-party
+actions included, which is one more reason the two Environments stay apart.
+
+The `OpenLogi Release` Environment must contain the Apple signing values
+`xtask/README.md` describes (`APPLE_SIGNING_IDENTITY`, `APPLE_CERTIFICATE`,
+`APPLE_CERTIFICATE_PASSWORD`, `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID`,
+`APPLE_AGENT_PROVISIONING_PROFILE`), the Azure Artifact Signing values
+(`AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`,
+`AZURE_SIGNING_ENDPOINT`, `AZURE_SIGNING_ACCOUNT`, `AZURE_CERT_PROFILE`), and
+the R2/update settings:
 
 - `OPENLOGI_UPDATE_BASE_URL` — public HTTPS base URL, for example
   `https://updates.openlogi.org`.
@@ -807,9 +865,10 @@ Each run:
    kept; headers / `_version` preserved).
 6. Opens/updates `crowdin/i18n` only when the working tree still differs.
 
-Like the release workflow, the job reads its credentials from one 1Password
-item referenced by the GitHub secret `OP_CROWDIN_SECRET_ITEM`. The item must
-contain:
+Like the release workflow, the job reads its credentials through
+`AprilNEA/actions/op-environment`, from the `OpenLogi Automation` 1Password
+Environment (see [Release secrets](#release-secrets-1password-environments-and-the-release-environment)),
+which must contain:
 
 - `CROWDIN_PROJECT_ID` — the numeric Crowdin project id.
 - `CROWDIN_PERSONAL_TOKEN` — a Crowdin API token with access to the project.
@@ -824,7 +883,7 @@ OpenLogi project:
 
 Missing or invalid credentials fail the workflow. Translation PRs run the
 normal CI checks, including the locale key parity test (every catalog must match
-`en.toml` key-for-key). The workflow uses the existing `OP_GITHUB_APP_ITEM` to
+`en.toml` key-for-key). The workflow uses the GitHub App from the same Environment to
 mint a short-lived token for pushing its translation branch and opening the PR;
 the default `GITHUB_TOKEN` remains read-only. Checkout runs with
 `persist-credentials: false` and the origin remote is rewritten to the app token

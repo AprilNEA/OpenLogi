@@ -25,6 +25,12 @@ app_icon = "openlogi"
 # true); false switches at once.
 animate_desktop_switch = true
 
+# Momentum scrolling for every mouse whose smooth_wheel is on. A device's own
+# momentum_scrolling table overrides it.
+[app_settings.momentum_scrolling]
+enabled = true
+glide_shape = "smooth"
+
 [devices."receiver:aabbccdd:slot:1"]
 custom_name = "Office mouse"
 dpi = 1600
@@ -88,6 +94,11 @@ brightness = 80
 mode = "ratchet"
 auto_disengage = 16
 tunable_torque = 50
+
+# This mouse glides longer than the app-wide default.
+[devices."receiver:aabbccdd:slot:1".momentum_scrolling]
+enabled = true
+glide_ms = 600
 
 # Put host-switch links on the keyboard's physical entry.
 [devices."receiver:aabbccdd:slot:2"]

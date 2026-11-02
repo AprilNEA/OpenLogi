@@ -60,6 +60,9 @@ pub(super) fn main_wheel_divert(
     Some(MainWheelDivert {
         resolution,
         inverted,
+        // Momentum scrolling measures the wheel's speed: fractions of a notch
+        // make its glide smooth and let a finger stop show sooner.
+        high_resolution: config.momentum_scrolling(&dev.config_key).enabled,
     })
 }
 

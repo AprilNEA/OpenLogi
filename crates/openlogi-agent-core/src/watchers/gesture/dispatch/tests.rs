@@ -151,12 +151,17 @@ fn shifted_presses_use_the_gshift_layer_and_fall_back_to_normal() {
     config.set_gshift_binding("g502", ButtonId::G8, Some(Action::Paste));
     let plan = crate::capture_plan::plan_for_device(
         &config,
-        openlogi_core::device_order::PhysicalDeviceKey::parse("receiver:cafe:slot:1")
+        crate::capture_plan::PlanDevice {
+            physical_key: openlogi_core::device_order::PhysicalDeviceKey::parse(
+                "receiver:cafe:slot:1",
+            )
             .expect("physical key"),
-        "g502",
-        openlogi_hid::DeviceRoute::Bolt {
-            receiver_uid: "cafe".into(),
-            slot: 1,
+            config_key: "g502",
+            route: openlogi_hid::DeviceRoute::Bolt {
+                receiver_uid: "cafe".into(),
+                slot: 1,
+            },
+            layout: Some(&openlogi_core::binding::G502_LIGHTSPEED),
         },
         None,
         0,

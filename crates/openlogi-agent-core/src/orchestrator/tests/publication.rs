@@ -127,10 +127,10 @@ fn equal_runtime_projection_does_not_wake_managers() {
     orch.devices = vec![dev("a", 1, true)];
     orch.rebuild();
     let mut capture_plans = orch.shared.capture_plans.clone();
-    let mut keyboard_spec = orch.shared.keyboard_spec.clone();
+    let mut keyboard_specs = orch.shared.keyboard_specs.clone();
     let mut host_switch_links = orch.shared.host_switch_links.clone();
     let _ = capture_plans.borrow_and_update();
-    let _ = keyboard_spec.borrow_and_update();
+    let _ = keyboard_specs.borrow_and_update();
     let _ = host_switch_links.borrow_and_update();
 
     orch.publish_device_runtime();
@@ -141,7 +141,7 @@ fn equal_runtime_projection_does_not_wake_managers() {
             .expect("publication remains open")
     );
     assert!(
-        !keyboard_spec
+        !keyboard_specs
             .has_changed()
             .expect("publication remains open")
     );

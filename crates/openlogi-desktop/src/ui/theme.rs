@@ -382,8 +382,10 @@ pub fn accent_tint_hover() -> Hsla {
 /// Chaining helpers expressing the single "selected" decision — accent border
 /// plus a faint accent fill — instead of every pill / chip / row hand-rolling
 /// the `if selected { accent } else { border }` ternary (which had drifted into
-/// three inconsistent dialects, one of them blue-on-white). Blanket-implemented
-/// for every [`Styled`] element, the way gpui-component extends styling.
+/// three inconsistent dialects, one of them blue-on-white). Segments of one
+/// joined control take [`SelectableStyle::selected_segment`] instead, since
+/// they have no border of their own to colour. Blanket-implemented for every
+/// [`Styled`] element, the way gpui-component extends styling.
 pub trait SelectableStyle: Styled + Sized {
     /// A 1px accent border when `selected`, the neutral hairline otherwise.
     #[must_use]
@@ -398,6 +400,22 @@ pub trait SelectableStyle: Styled + Sized {
     fn selected_fill(self, selected: bool) -> Self {
         if selected {
             self.bg(accent_tint())
+        } else {
+            self
+        }
+    }
+
+    /// The theme's solid `accent` fill and its foreground when `selected`: the
+    /// look gpui-component's `Toggle` takes when checked, for a `ButtonGroup`
+    /// segment, whose stock selected fill barely differs from its resting one.
+    /// Segments share their borders, so the fill alone marks the choice. Pass
+    /// `false` while the group is disabled: the stock disabled look replays
+    /// caller styles, and a disabled group has no choice to mark.
+    #[must_use]
+    fn selected_segment(self, selected: bool, cx: &App) -> Self {
+        if selected {
+            let theme = cx.theme();
+            self.bg(theme.accent).text_color(theme.accent_foreground)
         } else {
             self
         }
@@ -462,6 +480,8 @@ impl<E: Styled> Typography for E {}
 
 #[cfg(test)]
 mod tests {
+    use gpui_component::button::Button;
+
     use super::*;
 
     #[gpui::test]
@@ -518,6 +538,9 @@ mod tests {
             let name = theme["name"].as_str().unwrap_or("unnamed theme");
             let colors = &theme["colors"];
             for (foreground, background) in [
+                ("accent.foreground", "accent.background"),
+                // A Select dropdown's highlighted row draws `foreground` on `accent`.
+                ("foreground", "accent.background"),
                 ("primary.foreground", "primary.background"),
                 ("danger.foreground", "danger.background"),
                 ("info.foreground", "info.background"),
@@ -532,6 +555,71 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A segment marked by [`SelectableStyle::selected_segment`] must stand out
+    /// from the surfaces an unselected segment rests on by WCAG's 3:1 non-text
+    /// minimum, and keep its label readable, in both bundled OpenLogi themes.
+    /// The fill is the `accent` token gpui-component's `Toggle` paints when
+    /// checked, so this also holds the home view switcher to it (#2046).
+    #[gpui::test]
+    fn selected_segment_stands_out_in_both_openlogi_themes(cx: &mut gpui::TestAppContext) {
+        const MIN_NON_TEXT_CONTRAST: f32 = 3.;
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            register_builtin_themes(cx);
+            for (name, mode) in [
+                (OPENLOGI_LIGHT, ThemeMode::Light),
+                (OPENLOGI_DARK, ThemeMode::Dark),
+            ] {
+                let Some(config) = ThemeRegistry::global(cx).themes().get(name).cloned() else {
+                    panic!("missing bundled theme: {name}");
+                };
+                let theme = Theme::global_mut(cx);
+                if mode.is_dark() {
+                    theme.dark_theme = config;
+                } else {
+                    theme.light_theme = config;
+                }
+                Theme::change(mode, None, cx);
+
+                let mut unselected = Button::new("segment").selected_segment(false, cx);
+                assert!(
+                    unselected.style().background.is_none(),
+                    "{name}: an unselected segment keeps the stock fill"
+                );
+
+                let mut selected = Button::new("segment").selected_segment(true, cx);
+                let style = selected.style();
+                let Some(fill) = style
+                    .background
+                    .as_ref()
+                    .and_then(gpui::Fill::color)
+                    .and_then(|background| background.as_solid())
+                else {
+                    panic!("{name}: a selected segment should take a solid fill");
+                };
+                let Some(label) = style.text.color else {
+                    panic!("{name}: a selected segment should set its label colour");
+                };
+                assert!(
+                    contrast_ratio(label, fill) >= MIN_TEXT_CONTRAST,
+                    "{name}: the selected label is below {MIN_TEXT_CONTRAST}:1 on its fill"
+                );
+                let theme = cx.theme();
+                for (surface, resting) in [
+                    ("secondary", theme.secondary),
+                    ("background", theme.background),
+                ] {
+                    let ratio = contrast_ratio(fill, resting);
+                    assert!(
+                        ratio >= MIN_NON_TEXT_CONTRAST,
+                        "{name}: the selected fill is {ratio:.2}:1 on {surface}, \
+                         below {MIN_NON_TEXT_CONTRAST}:1"
+                    );
+                }
+            }
+        });
     }
 
     #[test]

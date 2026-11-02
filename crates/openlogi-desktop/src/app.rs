@@ -10,7 +10,7 @@ use gpui_component::{
     v_flex,
 };
 use openlogi_core::binding::GamingButtons;
-use openlogi_core::device::{Capabilities, DeviceKind};
+use openlogi_core::device::DeviceKind;
 use openlogi_ipc::InventoryHealth;
 use tracing::info;
 
@@ -24,6 +24,7 @@ use crate::features::lighting::keyboard_rgb::LightingPanel;
 use crate::features::lighting::standalone::LightPanel;
 use crate::features::mouse::view::MouseModelView;
 use crate::features::pointer::dpi::DpiPanel;
+use crate::features::pointer::momentum::{MomentumPanel, MomentumScope};
 use crate::features::pointer::smartshift::SmartShiftPanel;
 use crate::features::profiles::{AppCatalogPicker, ProfileIconCache};
 use crate::services::assets::user_cache_root;
@@ -104,15 +105,17 @@ impl DetailTab {
     /// device can do that thing, so a misclassified device can't lose its
     /// panels (issue #127). Devices we never probed (offline at startup) have no
     /// measured capabilities; we presume a set from their kind so a sleeping
-    /// mouse still shows its (host-side) button bindings.
+    /// mouse still shows its (host-side) button bindings. A HID++ 1.0 device
+    /// has no table at all; it is presumed only the host-side set, so it gets
+    /// no Pointer tab whose DPI control would have no effect (#2161).
     ///
     /// The Buttons panel renders a mouse-model silhouette with hotspots. It is
     /// only useful for pointer-type devices; keyboards get the Keys panel
     /// instead, even when they expose ReprogControls over HID++.
+    ///
+    /// [`Capabilities`]: openlogi_core::device::Capabilities
     fn tabs_for(record: &DeviceRecord) -> Vec<Self> {
-        let caps = record
-            .capabilities
-            .unwrap_or_else(|| Capabilities::presumed_from_kind(record.kind));
+        let caps = record.capabilities_or_presumed();
         // Buttons panel is a mouse-model silhouette — only for pointer devices.
         // Keyboards get the Keys panel instead, even when they expose ReprogControls.
         // `caps.pointer` (a measured HID++ DPI feature) settles it on its own
@@ -146,7 +149,7 @@ impl DetailTab {
         // rules out Keys even for a kind=Keyboard record — see
         // `can_show_mouse_model` above — so a misclassified mouse gets only
         // the Buttons panel, not both.
-        let shows_keys_tab = matches!(record.kind, DeviceKind::Keyboard)
+        let shows_keys_tab = record.kind.is_keyboard_family()
             && !caps.pointer
             && (caps.buttons || record.asset.is_some());
         // Keys goes first for a keyboard: it's the main screen for that device
@@ -216,6 +219,7 @@ pub struct AppView {
     disable_keys_panel: Entity<DisableKeysPanel>,
     dpi_panel: Entity<DpiPanel>,
     smartshift_panel: Entity<SmartShiftPanel>,
+    momentum_panel: Entity<MomentumPanel>,
     lighting_panel: Entity<LightingPanel>,
     camera_preview: Entity<CameraPreview>,
     camera_controls: Entity<CameraControlsPanel>,
@@ -299,6 +303,7 @@ impl AppView {
         let disable_keys_panel = cx.new(DisableKeysPanel::new);
         let dpi_panel = cx.new(DpiPanel::new);
         let smartshift_panel = cx.new(SmartShiftPanel::new);
+        let momentum_panel = cx.new(|cx| MomentumPanel::new(MomentumScope::SelectedDevice, cx));
         let lighting_panel = cx.new(LightingPanel::new);
         let camera_preview = cx.new(CameraPreview::new);
         let camera_controls = cx.new(CameraControlsPanel::new);
@@ -321,6 +326,7 @@ impl AppView {
             disable_keys_panel,
             dpi_panel,
             smartshift_panel,
+            momentum_panel,
             lighting_panel,
             camera_preview,
             camera_controls,
@@ -629,20 +635,27 @@ impl AppView {
         let link = AppState::try_global(cx)
             .map(|state| state.read(cx))
             .map_or(AgentLink::Connecting, |s| s.agent_link().clone());
-        let status = match link {
+        // A lost connection keeps the last status on screen, marked as not
+        // live by the reconnecting bar; an unreachable agent replaces only the
+        // content, so the header's Settings stays reachable.
+        let (status, reconnecting) = match link {
             AgentLink::Connecting => {
                 window.set_window_title("OpenLogi");
                 return root.child(status::connecting_body(cx)).into_any_element();
             }
-            AgentLink::Unreachable => {
+            AgentLink::Unreachable { retrying } => {
                 window.set_window_title("OpenLogi");
-                return root.child(status::unreachable_body(cx)).into_any_element();
+                return root
+                    .child(home::home_header(cx))
+                    .child(status::unreachable_body(retrying, cx))
+                    .into_any_element();
             }
             AgentLink::OutdatedGui => {
                 window.set_window_title("OpenLogi");
                 return root.child(status::outdated_gui_body(cx)).into_any_element();
             }
-            AgentLink::Ready(status) => status,
+            AgentLink::Reconnecting(status) => (status, true),
+            AgentLink::Ready(status) => (status, false),
         };
 
         let granted = status.accessibility_granted;
@@ -712,6 +725,7 @@ impl AppView {
                         disable_keys_panel: &self.disable_keys_panel,
                         dpi_panel: &self.dpi_panel,
                         smartshift_panel: &self.smartshift_panel,
+                        momentum_panel: &self.momentum_panel,
                         lighting_panel: &self.lighting_panel,
                         camera_preview: &self.camera_preview,
                         camera_controls: &self.camera_controls,
@@ -731,7 +745,7 @@ impl AppView {
             (
                 home::home_header(cx).into_any_element(),
                 if has_device {
-                    home::device_gallery(cx).into_any_element()
+                    home::device_gallery(window, cx).into_any_element()
                 } else {
                     match status.inventory {
                         InventoryHealth::Scanning => home::device_scanning_state(cx),
@@ -745,7 +759,11 @@ impl AppView {
 
         let has_key_bindings =
             AppState::try_read(cx).is_some_and(|state| !state.keyboard_bindings().is_empty());
-        let attention = status::Attention::for_status(&status, has_key_bindings);
+        let attention = if reconnecting {
+            Some(status::Attention::Reconnecting)
+        } else {
+            status::Attention::for_status(&status, has_key_bindings)
+        };
         root.child(header_el)
             .child(content_el)
             .when_some(attention, |this, attention| {

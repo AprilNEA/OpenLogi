@@ -47,6 +47,7 @@ pub(super) fn direct_fixture(open_outcome: OpenOutcome, probe_count: usize) -> D
                 ..Capabilities::default()
             }),
             settings_revision: 0,
+            hidpp10: false,
         }],
     };
     let mut exchanges = Vec::new();
@@ -326,6 +327,7 @@ pub(super) fn bolt_fixture(tag: &str, slots: &[BoltSlot], pass_count: usize) -> 
                     model_info: None,
                     capabilities: None,
                     settings_revision: 0,
+                    hidpp10: false,
                 })
                 .collect(),
         },

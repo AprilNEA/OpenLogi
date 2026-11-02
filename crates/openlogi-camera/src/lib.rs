@@ -16,6 +16,17 @@
 //! Windows matches it with Media Foundation capture and DirectShow controls;
 //! Linux uses V4L2 for both, through the kernel's `uvcvideo` driver. Other
 //! platforms return an empty list.
+//!
+//! Resolution and frame rate are negotiated per stream, so a choice shapes only
+//! the stream that makes it: see [`StreamMode`]. The Linux, macOS and Windows
+//! backends list and honour them; any other platform reports [`StreamModes`]
+//! empty and streams at its fixed preset.
+//!
+//! A camera lists only the modes its USB link has the bandwidth for, so one on
+//! a slow port or cable offers less than it can deliver. [`usb_link()`] says when
+//! that is the case, on the platforms that can tell (macOS and Windows).
+
+use std::time::Duration;
 
 use openlogi_device_registry::camera::find_unnamed_camera;
 use serde::Serialize;
@@ -26,6 +37,20 @@ pub use controls::{AutoState, AutoToggle, CameraControl, CameraState, ControlErr
 mod capture_types;
 pub use capture_types::{CaptureError, Frame};
 
+mod stream_mode;
+pub use stream_mode::{StreamMode, StreamModes};
+
+mod usb_link;
+pub use usb_link::{UsbLink, UsbSpeed, usb_link};
+
+// The pure parts of the Windows link and mode logic are compiled for tests on
+// every host, so their decisions are checked off Windows too.
+#[cfg(any(test, target_os = "windows"))]
+mod usb_windows;
+
+#[cfg(any(test, target_os = "windows"))]
+mod mf_formats;
+
 #[cfg(target_os = "macos")]
 mod macos;
 
@@ -34,7 +59,7 @@ mod capture_macos;
 #[cfg(target_os = "macos")]
 pub use capture_macos::{
     CameraStream, camera_access_granted, camera_authorization, capture_frame,
-    request_camera_access, start_stream,
+    request_camera_access, start_stream, stream_modes,
 };
 
 #[cfg(target_os = "windows")]
@@ -45,7 +70,7 @@ mod capture_windows;
 #[cfg(target_os = "windows")]
 pub use capture_windows::{
     CameraStream, camera_access_granted, camera_authorization, capture_frame,
-    request_camera_access, start_stream,
+    request_camera_access, start_stream, stream_modes,
 };
 
 #[cfg(target_os = "macos")]
@@ -70,7 +95,7 @@ mod capture_linux;
 #[cfg(target_os = "linux")]
 pub use capture_linux::{
     CameraStream, camera_access_granted, camera_authorization, capture_frame,
-    request_camera_access, start_stream,
+    request_camera_access, start_stream, stream_modes,
 };
 
 #[cfg(target_os = "linux")]
@@ -86,6 +111,7 @@ mod capture {
     use std::sync::Arc;
     use std::time::Duration;
 
+    use crate::StreamMode;
     use crate::capture_types::{CaptureError, Frame};
 
     /// Stub: returns [`CaptureError::Unsupported`] on this platform.
@@ -114,7 +140,10 @@ mod capture {
     }
 
     /// Stub: returns [`CaptureError::Unsupported`] on this platform.
-    pub fn start_stream(_unique_id: &str) -> Result<CameraStream, CaptureError> {
+    pub fn start_stream(
+        _unique_id: &str,
+        _mode: Option<StreamMode>,
+    ) -> Result<CameraStream, CaptureError> {
         Err(CaptureError::Unsupported)
     }
 
@@ -182,6 +211,44 @@ mod uvc {
 pub use uvc::{
     apply_settings, control_range, control_ranges, read_camera_state, set_auto, set_control,
 };
+
+/// The modes the camera with `unique_id` can stream at, for the pixel format
+/// this crate would stream it in.
+///
+/// Only the Linux, macOS and Windows backends can list them; here the list is
+/// always empty, which callers read as "nothing to choose" and hide mode
+/// selection. The stream itself runs at the backend's fixed preset, whatever
+/// `mode` [`start_stream`] is handed.
+///
+/// # Errors
+/// Never fails on this platform. (Elsewhere: see that platform's `stream_modes`.)
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+pub fn stream_modes(_unique_id: &str) -> Result<StreamModes, CaptureError> {
+    Ok(StreamModes::default())
+}
+
+/// How long a camera needs after its [`CameraStream`] is dropped before it can
+/// be opened again without the driver stalling the caller.
+///
+/// A V4L2 stream is torn down on its own thread and a UVC camera takes ~600 ms
+/// to give its bandwidth back, so reopening sooner makes `start_stream` wait
+/// on the driver. A caller that reopens on purpose (a mode change) waits this
+/// long on a timer instead of on its UI thread. Zero where there is nothing to
+/// wait out: macOS, whose `stopRunning` returns once the camera is released,
+/// Windows, whose reader releases the camera before the stream's drop returns
+/// (and a reopen that still meets a busy camera is retried by the caller), and
+/// platforms that list no [`StreamModes`], where nothing reopens on purpose.
+#[cfg(target_os = "linux")]
+pub const RELEASE_DELAY: Duration = capture_linux::RELEASE_DELAY;
+
+/// How long a camera needs after its [`CameraStream`] is dropped before it can
+/// be opened again without the driver stalling the caller.
+///
+/// Nothing to wait out here: dropping a stream on macOS or Windows releases
+/// the camera before the drop returns, and the other platforms list no
+/// [`StreamModes`], so nothing reopens a stream on purpose.
+#[cfg(not(target_os = "linux"))]
+pub const RELEASE_DELAY: Duration = Duration::ZERO;
 
 /// Logitech's USB vendor id. Reported in decimal (`1133`) inside an
 /// `AVCaptureDevice` modelID, and in hex (`046d`) most everywhere else.
@@ -307,7 +374,7 @@ fn enumerate_all() -> Vec<Camera> {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let serials = uvc_macos::usb_serials_by_location();
-    macos::enumerate()
+    let cameras: Vec<Camera> = macos::enumerate()
         .iter()
         .filter_map(|raw| {
             let mut camera = Camera::from_raw(&raw.name, &raw.unique_id, &raw.model_id)?;
@@ -322,12 +389,16 @@ fn enumerate_all() -> Vec<Camera> {
             }
             Some(camera)
         })
-        .collect()
+        .collect();
+    uvc_macos::observe_links(&cameras);
+    cameras
 }
 
 #[cfg(target_os = "windows")]
 fn enumerate_all() -> Vec<Camera> {
-    uvc_windows::enumerate()
+    let cameras = uvc_windows::enumerate();
+    usb_windows::observe_links(&cameras);
+    cameras
 }
 
 #[cfg(target_os = "linux")]

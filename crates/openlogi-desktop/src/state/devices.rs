@@ -7,12 +7,14 @@ use openlogi_camera::Camera;
 use openlogi_core::config::{Config, DeviceConfig, DeviceIdentity, canonical_device_key};
 use openlogi_core::device::{
     BatteryInfo, Capabilities, DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports,
-    LightCapabilities, StandaloneDevice, prettify_codename,
+    LightCapabilities, PairedDevice, StandaloneDevice, prettify_codename,
 };
 use openlogi_core::device_order::{
     DeviceIdentity as RouteIdentity, DeviceStableId, PhysicalDeviceKey,
 };
-use openlogi_core::hid::{DeviceRoute, LOGITECH_VENDOR_ID, ReceiverBrand, find_receiver};
+use openlogi_core::hid::{
+    DeviceRoute, KeypadDescriptor, LOGITECH_VENDOR_ID, ReceiverBrand, find_receiver,
+};
 use tracing::debug;
 
 use super::device_key::DeviceKey;
@@ -82,8 +84,14 @@ pub struct DeviceRecord {
     /// Continuity across sleep lives in the hid layer: its probe cache keeps
     /// serving the last-known capabilities for a known-but-offline device, so
     /// this is `None` only for a device never probed since the agent started —
-    /// and the UI then falls back to [`Capabilities::presumed_from_kind`].
+    /// and the UI then falls back to [`Self::capabilities_or_presumed`].
     pub capabilities: Option<Capabilities>,
+    /// The agent's [`PairedDevice::hidpp10`]: the device answered as HID++
+    /// 1.0, so [`Self::capabilities`] is `None` although it was probed.
+    /// `false` for a record with no HID++ device behind it.
+    ///
+    /// [`PairedDevice::hidpp10`]: openlogi_core::device::PairedDevice::hidpp10
+    pub hidpp10: bool,
     /// Capabilities for standalone non-HID++ controls such as Litra lights.
     pub light_capabilities: Option<LightCapabilities>,
     pub slot: u8,
@@ -103,6 +111,20 @@ pub struct DeviceRecord {
 }
 
 impl DeviceRecord {
+    /// [`Self::capabilities`], or the set presumed when none is measured:
+    /// from the kind, or only the host-side set for a HID++ 1.0 device, whose
+    /// DPI or lighting control would have no effect (#2161).
+    #[must_use]
+    pub fn capabilities_or_presumed(&self) -> Capabilities {
+        self.capabilities.unwrap_or_else(|| {
+            if self.hidpp10 {
+                Capabilities::presumed_for_hidpp10(self.kind)
+            } else {
+                Capabilities::presumed_from_kind(self.kind)
+            }
+        })
+    }
+
     /// Typed key for `AppState`'s per-device UI caches (DPI/SmartShift load
     /// state, standalone-light overrides, inventory-miss counters). Wraps
     /// [`Self::config_key`] — see [`DeviceKey`].
@@ -154,6 +176,28 @@ impl DeviceRecord {
 }
 
 impl super::AppState {
+    /// The known keypad the selected device is ([`DeviceRoute::keypad`]), or
+    /// `None` for any other device — a number pad among them: the keypad's
+    /// grid and paging keys are its identity fact, not every number pad's.
+    ///
+    /// Online, the live route answers. Offline there is none, so the routes
+    /// the saved entry's `links` record answer instead, and an unplugged
+    /// keypad keeps its keys and app profiles.
+    #[must_use]
+    pub fn current_keypad(&self) -> Option<&'static KeypadDescriptor> {
+        let record = self.current_record()?;
+        if let Some(route) = &record.route {
+            return route.keypad();
+        }
+        self.config
+            .devices
+            .get(&record.config_key)?
+            .links
+            .keys()
+            .filter_map(|key| DeviceStableId::direct_route_of_key(key))
+            .find_map(|route| route.keypad())
+    }
+
     /// Presentation-only connection mode last observed for an offline device.
     /// After restart, only a sole recorded link is unambiguous: the saved link
     /// index has no chronology. Never restore a hardware-write route from history.
@@ -174,16 +218,33 @@ impl super::AppState {
         if links.next().is_some() {
             return None;
         }
-        let (vendor, product) = link.strip_prefix("direct:")?.split_once(':')?;
-        if u16::from_str_radix(vendor, 16).ok()? != LOGITECH_VENDOR_ID {
+        let DeviceRoute::Direct {
+            vendor_id,
+            product_id,
+        } = DeviceStableId::direct_route_of_key(link)?
+        else {
+            return None;
+        };
+        if vendor_id != LOGITECH_VENDOR_ID {
             return None;
         }
         record
             .model_info
             .as_ref()?
-            .transport_for_product_id(u16::from_str_radix(product, 16).ok()?)
+            .transport_for_product_id(product_id)
             .map(ObservedConnection::Direct)
     }
+}
+
+/// The name a receiver-paired device is shown under: its asset's name, else
+/// its prettified codename, else its receiver slot number.
+fn paired_display_name(asset: Option<&ResolvedAsset>, paired: &PairedDevice) -> String {
+    asset
+        .map(|a| a.display_name.clone())
+        .or_else(|| paired.codename.as_deref().map(prettify_codename))
+        .unwrap_or_else(|| {
+            tr!("device.receiver_slot_number", number => paired.slot.to_string()).to_string()
+        })
 }
 
 /// Build the gallery's device list as the **union** of the live inventory and
@@ -253,14 +314,7 @@ pub(super) fn build_device_list(
                     .map(PhysicalDeviceKey::into_string);
             let route_key = stable_id.route_key();
 
-            let display_name = asset
-                .as_ref()
-                .map(|a| a.display_name.clone())
-                .or_else(|| paired.codename.as_deref().map(prettify_codename))
-                .unwrap_or_else(|| {
-                    tr!("device.receiver_slot_number", number => paired.slot.to_string())
-                        .to_string()
-                });
+            let display_name = paired_display_name(asset.as_ref(), paired);
             let kind = effective_kind(paired.kind, asset.as_ref().and_then(|a| a.kind));
             list.push(DeviceRecord {
                 config_key,
@@ -282,6 +336,7 @@ pub(super) fn build_device_list(
                 capture_id: None,
                 kind,
                 capabilities: paired.capabilities,
+                hidpp10: paired.hidpp10,
                 light_capabilities: None,
                 slot: paired.slot,
                 online: paired.online,
@@ -450,6 +505,7 @@ fn camera_record(camera: &Camera, resolver: &AssetResolver) -> DeviceRecord {
         capture_id: Some(camera.unique_id.clone()),
         kind: DeviceKind::Camera,
         capabilities: None,
+        hidpp10: false,
         light_capabilities: None,
         slot: 0,
         online: true,
@@ -530,6 +586,7 @@ fn append_standalone(
             capture_id: None,
             kind: device.kind,
             capabilities: device.capabilities,
+            hidpp10: false,
             light_capabilities: device.light_capabilities,
             slot: openlogi_core::hid::DIRECT_DEVICE_INDEX,
             online: device.online,
@@ -731,6 +788,7 @@ fn offline_record(
         capture_id: None,
         kind: identity.kind,
         capabilities: Some(identity.capabilities),
+        hidpp10: false,
         light_capabilities: identity.light_capabilities,
         slot: 0,
         online: false,
@@ -797,6 +855,7 @@ pub(super) fn adopt_transient_record(known: &DeviceRecord, live: DeviceRecord) -
             known.kind
         },
         capabilities: live.capabilities.or(known.capabilities),
+        hidpp10: live.hidpp10,
         light_capabilities: live.light_capabilities.or(known.light_capabilities),
         slot: live.slot,
         online: live.online,
@@ -899,6 +958,7 @@ fn demo_keyboard() -> DeviceRecord {
             lighting: true,
             ..Capabilities::default()
         }),
+        hidpp10: false,
         light_capabilities: None,
         slot: 0,
         online: true,
@@ -910,13 +970,15 @@ fn demo_keyboard() -> DeviceRecord {
 
 /// Last step of the device-kind precedence chain:
 ///
-/// > **asset registry** > HID++ `0x0005` > Bolt pairing register
+/// > **asset registry** > HID++ `0x0005` > register
 ///
-/// The two HID++ sources are already folded into `hid_kind` by
-/// `resolve_device_kind` (`crates/openlogi-hid/src/inventory/mappings.rs`); this applies
-/// the final override. Adding a kind source means slotting it into this one
-/// chain — here if it should beat the HID++ sources, in `resolve_device_kind`
-/// otherwise — and updating both docs.
+/// where *register* is the Bolt pairing register for receiver-attached
+/// devices and the curated identity registry (`direct_identity_kind`) on the
+/// direct path. The two HID++ sources are already folded into `hid_kind` by
+/// `resolve_device_kind` (`crates/openlogi-device/src/inventory/mappings.rs`);
+/// this applies the final override. Adding a kind source means slotting it
+/// into this one chain — here if it should beat the HID++ sources, in
+/// `resolve_device_kind` otherwise — and updating both docs.
 ///
 /// The registry type wins because it is per-model and human-maintained, so a
 /// device that matched a known depot is classified by what that model *is* —

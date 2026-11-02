@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use gpui::{
     Anchor, AnyElement, App, AppContext as _, Context, Div, ElementId, Hsla, InteractiveElement,
-    IntoElement, ParentElement, SharedString, StatefulInteractiveElement as _, Styled, Window,
+    IntoElement, ParentElement, SharedString, StatefulInteractiveElement as _, Styled, Svg, Window,
     canvas, div, fill, img, point, prelude::FluentBuilder as _, px, rgb, svg,
 };
 use gpui_base::Button as BaseButton;
@@ -264,14 +264,15 @@ fn device_card(
         )
 }
 
-/// Transport glyph in the card corner, colored by the transport itself —
-/// Bluetooth blue, receiver green, cable muted; the connectivity words ride
-/// its hover tip and the dimmed render already marks an offline card.
-fn transport_glance(
+/// The glyph of the transport `record` is reachable over, colored by the
+/// transport itself — Bluetooth blue, receiver green, cable muted — so the
+/// card corner and the list row read alike. An `svg` paints nothing without
+/// its own text color; it does not inherit one from its parent.
+pub(super) fn transport_icon(
     record: &DeviceRecord,
-    pal: Palette,
     saved_transport: Option<ObservedConnection>,
-) -> impl IntoElement {
+    pal: Palette,
+) -> Svg {
     let path = if matches!(record.kind, DeviceKind::Camera) {
         "action-icons/usb.svg"
     } else {
@@ -288,6 +289,16 @@ fn transport_glance(
         }
         _ => pal.text_muted,
     };
+    svg().path(path).flex_none().text_color(color)
+}
+
+/// [`transport_icon`] in the card corner; the connectivity words ride its
+/// hover tip and the dimmed render already marks an offline card.
+fn transport_glance(
+    record: &DeviceRecord,
+    pal: Palette,
+    saved_transport: Option<ObservedConnection>,
+) -> impl IntoElement {
     let hint: SharedString = format!(
         "{} · {}",
         if record.online {
@@ -303,7 +314,7 @@ fn transport_glance(
         .flex_none()
         .items_center()
         .gap_1()
-        .child(svg().path(path).size_4().flex_none().text_color(color))
+        .child(transport_icon(record, saved_transport, pal).size_4())
         .when_some(receiver_slot_label(record), |glance, slot| {
             glance.child(div().text_caption().text_color(pal.text_muted).child(slot))
         })
@@ -599,20 +610,7 @@ fn connection_view(
             tr!("device.offline")
         })
         .child("·")
-        .child(
-            svg()
-                .path(if matches!(record.kind, DeviceKind::Camera) {
-                    "action-icons/usb.svg"
-                } else {
-                    connection_icon_path(
-                        record.route.as_ref(),
-                        record.model_info.as_ref(),
-                        saved_transport,
-                    )
-                })
-                .size_3()
-                .flex_none(),
-        )
+        .child(transport_icon(record, saved_transport, pal).size_3())
         .child(div().min_w_0().truncate().child(connection_summary(record)))
 }
 

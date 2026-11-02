@@ -10,8 +10,7 @@ use gpui::{
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
-    Icon, IconName, Selectable as _, button::Button, h_flex, input::InputState, tooltip::Tooltip,
-    v_flex,
+    Icon, IconName, Selectable as _, h_flex, input::InputState, tooltip::Tooltip, v_flex,
 };
 use openlogi_core::binding::{
     ActionRingConfig, ActionRingEntry, ActionRingIcon, ActionRingLayout, ActionRingSlot,
@@ -21,8 +20,9 @@ use openlogi_ui::action_icons::RING_CANCEL_ICON;
 use self::action_icons::action_icon_path;
 use self::editor::{PowerUserInputs, action_library};
 use crate::features::keyboard::editors::{PowerUserKind, text_editor_placeholder};
-use crate::state::{AppState, StateEvent, StateEvents};
+use crate::state::{AppState, StateEvent};
 use crate::ui::action::localized_action_label;
+use crate::ui::components::{Toggle, toggle_row};
 use crate::ui::theme::{self, Palette, Typography as _};
 
 /// Stateful Actions Ring editor. Ring configuration itself lives in
@@ -151,57 +151,31 @@ impl Render for ActionRingPanel {
                         pal,
                     )),
             )
-            .child(enabled_row(ring.enabled, pal))
+            .child(toggle_row(
+                "ring-enabled-row",
+                pal,
+                tr!("action_ring.enable_ring"),
+                tr!("action_ring.open_at_the_current_cursor_position"),
+                Toggle::new("ring-enabled-toggle")
+                    .selected(ring.enabled)
+                    .on_change(|enabled, _, cx| {
+                        AppState::apply(cx, |state| state.commit_action_ring_enabled(*enabled));
+                    }),
+            ))
             .when(haptics_supported, |panel| {
-                panel.child(haptics_row(ring.haptics, pal))
+                panel.child(toggle_row(
+                    "ring-haptics-row",
+                    pal,
+                    tr!("action_ring.haptic_feedback"),
+                    tr!("action_ring.action_ring_haptic_description"),
+                    Toggle::new("ring-haptics-toggle")
+                        .selected(ring.haptics)
+                        .on_change(|haptics, _, cx| {
+                            AppState::apply(cx, |state| state.commit_action_ring_haptics(*haptics));
+                        }),
+                ))
             })
     }
-}
-
-/// The ring on/off toggle row.
-fn enabled_row(enabled: bool, pal: Palette) -> impl IntoElement {
-    h_flex()
-        .items_center()
-        .justify_between()
-        .gap_3()
-        .child(
-            v_flex()
-                .child(div().text_body().child(tr!("action_ring.actions_ring")))
-                .child(
-                    div()
-                        .text_caption()
-                        .text_color(pal.text_muted)
-                        .child(tr!("action_ring.open_at_the_current_cursor_position")),
-                ),
-        )
-        .child(toggle_button(
-            "ring-enabled",
-            enabled,
-            AppState::commit_action_ring_enabled,
-        ))
-}
-
-/// The haptic-feedback toggle row, shown only when the device supports it.
-fn haptics_row(haptics: bool, pal: Palette) -> impl IntoElement {
-    h_flex()
-        .items_center()
-        .justify_between()
-        .gap_3()
-        .child(
-            v_flex()
-                .child(div().text_body().child(tr!("action_ring.haptic_feedback")))
-                .child(
-                    div()
-                        .text_caption()
-                        .text_color(pal.text_muted)
-                        .child(tr!("action_ring.action_ring_haptic_description")),
-                ),
-        )
-        .child(toggle_button(
-            "ring-haptics",
-            haptics,
-            AppState::commit_action_ring_haptics,
-        ))
 }
 
 fn action_ring_editor_state(cx: &Context<ActionRingPanel>) -> (ActionRingConfig, ActionRingLayout) {
@@ -239,31 +213,10 @@ fn editor_input(
 
 fn current_device_supports_haptics(cx: &Context<ActionRingPanel>) -> bool {
     AppState::try_read(cx).is_some_and(|state| {
-        state.current_record().is_some_and(|record| {
-            record
-                .capabilities
-                .unwrap_or_else(|| {
-                    openlogi_core::device::Capabilities::presumed_from_kind(record.kind)
-                })
-                .haptic_feedback
-        })
+        state
+            .current_record()
+            .is_some_and(|record| record.capabilities_or_presumed().haptic_feedback)
     })
-}
-
-fn toggle_button(
-    id: &'static str,
-    enabled: bool,
-    commit: impl Fn(&mut AppState, bool) -> StateEvents + 'static,
-) -> Button {
-    Button::new(id)
-        .compact()
-        .label(if enabled {
-            tr!("common.on")
-        } else {
-            tr!("common.off")
-        })
-        .selected(enabled)
-        .on_click(move |_, _, cx| AppState::apply(cx, |state| commit(state, !enabled)))
 }
 
 const PREVIEW_SIZE: f32 = 320.0;

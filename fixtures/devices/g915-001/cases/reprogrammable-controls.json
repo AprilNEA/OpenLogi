@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "name": "reprogrammable-controls",
+  "channel": "target",
+  "report_support": "short_and_long",
+  "exchanges": [
+    {
+      "request_match": "exact",
+      "request": "10ff83b5030000",
+      "response": "11ff83b5034f4c5201080208ff00000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "10010010000000",
+      "response": "1101001004020000000000000000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "100100001b0400",
+      "response": "110100000c000400000000000000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "10010c00000000",
+      "response": "11010c0002000000000000000000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "11010c1000000000000000000000000000000000",
+      "response": "11010c1000d100ae600100000000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "11010c1001000000000000000000000000000000",
+      "response": "11010c1000d200af600200000000000000000000",
+      "required": true
+    }
+  ]
+}

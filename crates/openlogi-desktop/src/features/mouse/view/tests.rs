@@ -1,8 +1,10 @@
-use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext, size};
+use gpui::{Entity, KeyDownEvent, Keystroke, Modifiers, TestAppContext, VisualTestContext, size};
 use openlogi_core::binding::default_binding;
 use openlogi_core::config::Config;
 
+use super::ShortcutError::{ShiftedSymbol, Unrecognized};
 use super::*;
+use crate::features::mouse::leader_lines::Side;
 use crate::services::assets::AssetResolver;
 use crate::services::i18n::LOCALE_LOCK;
 use crate::state::Sources;
@@ -20,6 +22,28 @@ fn install_app_state(cx: &mut TestAppContext) {
 fn click_picker_control(cx: &mut VisualTestContext, selector: &'static str) {
     let bounds = cx.debug_bounds(selector).expect(selector);
     cx.simulate_click(bounds.center(), Modifiers::default());
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+}
+
+/// Press `key` with Cmd+Shift held, in the order GPUI's platforms report a
+/// shifted digit or symbol: a modifier change that holds Shift, then the
+/// shifted character without Shift (#2121).
+fn press_shifted_symbol(cx: &mut VisualTestContext, key: &str) {
+    let cmd = Modifiers {
+        platform: true,
+        ..Modifiers::default()
+    };
+    cx.simulate_modifiers_change(Modifiers { shift: true, ..cmd });
+    cx.simulate_event(KeyDownEvent {
+        keystroke: Keystroke {
+            modifiers: cmd,
+            key: key.into(),
+            key_char: None,
+        },
+        is_held: false,
+        prefer_character_input: false,
+    });
+    cx.simulate_modifiers_change(Modifiers::default());
     cx.update(|window, cx| window.draw(cx).clear(cx));
 }
 
@@ -82,6 +106,44 @@ fn long_bindings_stay_inside_their_label_card(cx: &mut TestAppContext) {
     cx.run_until_parked();
 }
 
+/// At the smallest window with cards the synthetic model shrinks by its width
+/// until its five cards no longer fit beside it. The canvas grows to hold the
+/// ones that reach past the model, rather than leaving them over its edge
+/// where the clipped tab can cut them off.
+#[gpui::test]
+fn cards_that_reach_past_a_shrunk_model_stay_on_the_canvas(cx: &mut TestAppContext) {
+    cx.update(gpui_component::init);
+    install_app_state(cx);
+    let (view, cx) = cx.add_window_view(MouseModelView::new);
+    cx.simulate_resize(size(px(960.), px(680.)));
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+
+    let canvas = cx
+        .debug_bounds("mouse-canvas")
+        .expect("the model canvas renders");
+    for selector in [
+        "label-card-Button(MiddleClick)",
+        "label-card-Button(Back)",
+        "label-card-Button(DpiToggle)",
+        "label-card-Button(Forward)",
+        "label-card-Button(GestureButton)",
+    ] {
+        let card = cx.debug_bounds(selector).expect(selector);
+        let inside = card.top() >= canvas.top() - px(0.5)
+            && card.bottom() <= canvas.bottom() + px(0.5)
+            && card.left() >= canvas.left() - px(0.5)
+            && card.right() <= canvas.right() + px(0.5);
+        assert!(
+            inside,
+            "{selector}: card {card:?} leaves the canvas {canvas:?}"
+        );
+    }
+
+    drop(view);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+}
+
 #[gpui::test]
 fn action_picker_renders_after_opening_through_the_inspector(cx: &mut TestAppContext) {
     let _locale = LOCALE_LOCK.lock().unwrap();
@@ -99,7 +161,7 @@ fn action_picker_renders_after_opening_through_the_inspector(cx: &mut TestAppCon
 
     click_picker_control(cx, "inspector-action-custom-shortcut-add");
     view.read_with(cx, |view, _| {
-        assert!(view.invalid_drafts.shortcut);
+        assert_eq!(view.invalid_drafts.shortcut, Some(Unrecognized));
         assert!(!view.invalid_drafts.application);
     });
     assert!(
@@ -110,7 +172,7 @@ fn action_picker_renders_after_opening_through_the_inspector(cx: &mut TestAppCon
     click_picker_control(cx, "inspector-action-custom-application-add");
     view.read_with(cx, |view, _| {
         assert!(view.action_picker_open);
-        assert!(view.invalid_drafts.shortcut);
+        assert_eq!(view.invalid_drafts.shortcut, Some(Unrecognized));
         assert!(view.invalid_drafts.application);
     });
     assert!(
@@ -123,7 +185,7 @@ fn action_picker_renders_after_opening_through_the_inspector(cx: &mut TestAppCon
     cx.simulate_input("Cmd+K");
     cx.update(|window, cx| window.draw(cx).clear(cx));
     view.read_with(cx, |view, _| {
-        assert!(!view.invalid_drafts.shortcut);
+        assert_eq!(view.invalid_drafts.shortcut, None);
         assert!(view.invalid_drafts.application);
     });
     assert!(
@@ -245,11 +307,23 @@ fn record_fills_the_custom_shortcut_from_the_next_key_press(cx: &mut TestAppCont
 
     click_picker_control(cx, "inspector-action-custom-shortcut-record");
     press(cx, "f21");
-    view.read_with(cx, |view, _| assert!(view.invalid_drafts.shortcut));
+    view.read_with(cx, |view, _| {
+        assert_eq!(view.invalid_drafts.shortcut, Some(Unrecognized));
+    });
     assert!(
         cx.debug_bounds("inspector-action-custom-shortcut-error")
             .is_some()
     );
+
+    // #2121: Cmd+Shift+] arrives as Cmd+`}`. Record refuses it and leaves
+    // the field as it was.
+    click_picker_control(cx, "inspector-action-custom-shortcut-record");
+    press_shifted_symbol(cx, "}");
+    view.read_with(cx, |view, _| {
+        assert_eq!(view.invalid_drafts.shortcut, Some(ShiftedSymbol));
+        assert!(view.shortcut_recorder.is_none());
+    });
+    assert_eq!(shortcut_text(cx), "Ctrl+Shift+PageUp");
 
     // Moving focus out of the Record area ends the recording, so the next
     // key press reaches the newly focused field (#2138 review).
@@ -356,6 +430,7 @@ fn a_selected_gesture_can_render_in_the_binding_inspector(cx: &mut TestAppContex
                 selected: Some(MouseControlId::Button(ButtonId::MiddleClick)),
                 gesture_direction: Some(GestureDirection::Up),
                 bindings: &bindings,
+                layout: None,
                 gesture_maps: &gesture_maps,
                 dpi_gestures: false,
                 virtual_thumbwheel: false,
@@ -423,7 +498,7 @@ fn clearing_custom_action_drafts_resets_text_and_invalid_state(cx: &mut TestAppC
             view.custom_command_input
                 .update(cx, |input, cx| input.set_value("echo hi", window, cx));
             view.invalid_drafts = InvalidDrafts {
-                shortcut: true,
+                shortcut: Some(ShiftedSymbol),
                 application: true,
                 command: true,
             };
@@ -459,9 +534,8 @@ fn active_thumbwheel_directions_highlight_the_paired_control() {
 
 #[test]
 fn fallback_model_only_adds_thumbwheel_when_capability_is_measured() {
-    let (_, _, without, _) =
-        scaled_model(None, None, 560., 420., false, LabelDistribution::LeftOnly);
-    let (_, _, with, _) = scaled_model(None, None, 560., 420., true, LabelDistribution::LeftOnly);
+    let without = model_hotspots(None, None, false, MOUSE_MODEL_SIZE);
+    let with = model_hotspots(None, None, true, MOUSE_MODEL_SIZE);
     assert_eq!(
         without
             .iter()
@@ -730,6 +804,215 @@ fn an_inherited_gesture_button_offers_the_held_actions(cx: &mut TestAppContext) 
         cx.debug_bounds("inspector-gesture-override-DpiShift")
             .is_some()
     );
+    drop(view);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+}
+
+/// Card metrics for values whose widest measures `widest` on one line, with
+/// the card chrome and line height the default rem size gives.
+fn values(widest: f32) -> ValueMetrics {
+    ValueMetrics {
+        widest,
+        chrome_w: 70.,
+        line_h: 22.,
+    }
+}
+
+/// Every card sits inside the canvas, apart from its neighbours.
+fn assert_cards_on_the_canvas(layout: &ModelLayout) {
+    let card_h = layout.card.h;
+    for side in [Side::Left, Side::Right] {
+        let mut ys: Vec<f32> = layout
+            .labels
+            .iter()
+            .filter(|label| label.side == side)
+            .map(|label| label.y)
+            .collect();
+        ys.sort_by(f32::total_cmp);
+        for y in &ys {
+            let top = layout.mouse_top + y - card_h / 2.;
+            assert!(
+                top >= -0.01 && top + card_h <= layout.canvas_h + 0.01,
+                "card off the canvas: {ys:?} in {}",
+                layout.canvas_h
+            );
+        }
+        for pair in ys.windows(2) {
+            assert!(pair[1] - pair[0] >= card_h - 0.01, "cards overlap: {ys:?}");
+        }
+    }
+}
+
+/// The smallest window with cards shrinks a G502's fallback model by its
+/// width to about 315 px, short of what its nine cards on one side need.
+/// They reach past the model into the tab's height, closing their gaps,
+/// instead of running off the canvas. Two-line cards would not fit at all,
+/// so a value too long for its card keeps one line.
+#[test]
+fn a_crowded_side_keeps_every_card_on_the_canvas() {
+    let room = size(416., 526.);
+    let g502 = GamingLayout::for_model_key("0407f");
+    for widest in [80., 400.] {
+        let layout = model_layout(None, g502, room, 960., false, values(widest));
+        assert_eq!(layout.labels.len(), 9);
+        assert_eq!(layout.card.value_lines, 1);
+        assert!(layout.mouse_h < 9. * LABEL_H, "model {}", layout.mouse_h);
+        assert!(layout.canvas_h <= room.height + 0.01);
+        assert_cards_on_the_canvas(&layout);
+    }
+}
+
+/// The fallback silhouette shrinks on a small window, but its cards keep
+/// their height, so they must be placed at the scaled size, not scaled after.
+#[test]
+fn a_shrunk_fallback_model_keeps_its_cards_apart() {
+    let target_h = MOUSE_MODEL_SIZE.1 * 0.776;
+    let layout = model_layout(
+        None,
+        None,
+        size(MODEL_CONTENT_MAX_W, target_h),
+        1200.,
+        false,
+        values(80.),
+    );
+    assert!((layout.mouse_h - target_h).abs() < 0.01);
+    assert_cards_on_the_canvas(&layout);
+}
+
+/// The canvas area of the default 1256 × 664 window, and the widest English
+/// default value there: "Forward (Button 5)" in the Linux UI font. Fixed
+/// 156 px cards cut every one of the MX Master's values off, and a model
+/// sized from the viewport ran past the area's bottom edge.
+const DEFAULT_ROOM: Size<f32> = Size {
+    width: 728.,
+    height: 482.,
+};
+const WIDEST_ENGLISH_VALUE: f32 = 143.;
+
+#[test]
+fn english_values_fit_on_one_line_beside_a_model_that_fits_the_room() {
+    let layout = model_layout(
+        None,
+        None,
+        DEFAULT_ROOM,
+        1256.,
+        true,
+        values(WIDEST_ENGLISH_VALUE),
+    );
+    assert_eq!(layout.labels.len(), 6);
+    assert!(layout.labels.iter().any(|label| label.side == Side::Left));
+    assert!(layout.labels.iter().any(|label| label.side == Side::Right));
+    assert_eq!(layout.card.value_lines, 1);
+    assert!(
+        layout.card.w - 70. >= WIDEST_ENGLISH_VALUE,
+        "card {} is too narrow for the value",
+        layout.card.w
+    );
+    assert!(
+        layout.canvas_w <= DEFAULT_ROOM.width + 0.01,
+        "{}",
+        layout.canvas_w
+    );
+    assert!(
+        layout.canvas_h <= DEFAULT_ROOM.height + 0.01,
+        "{}",
+        layout.canvas_h
+    );
+    assert_cards_on_the_canvas(&layout);
+}
+
+/// A value no card is wide enough for — "DPI-Voreinstellungen
+/// durchschalten" in German — wraps onto a second line in the widest card
+/// the room allows, and the taller cards still fit beside the model.
+#[test]
+fn a_value_too_long_for_the_widest_card_wraps_to_two_lines() {
+    let layout = model_layout(None, None, DEFAULT_ROOM, 1256., true, values(267.));
+    let two_sided_w = (DEFAULT_ROOM.width - MODEL_MIN_IMAGE_W) / 2. - SIDE_GAP;
+    assert!(
+        (layout.card.w - two_sided_w).abs() < 0.01,
+        "{}",
+        layout.card.w
+    );
+    assert_eq!(layout.card.value_lines, 2);
+    assert!((layout.card.h - (LABEL_H + 22.)).abs() < 0.01);
+    assert!(layout.labels.iter().any(|label| label.side == Side::Right));
+    assert!(
+        layout.canvas_w <= DEFAULT_ROOM.width + 0.01,
+        "{}",
+        layout.canvas_w
+    );
+    assert!(
+        layout.canvas_h <= DEFAULT_ROOM.height + 0.01,
+        "{}",
+        layout.canvas_h
+    );
+    assert_cards_on_the_canvas(&layout);
+}
+
+/// The mouse view below chrome taller than the fixed reserve it used to
+/// assume, as the app's header, profile bar and status line together are.
+struct UnderChrome {
+    model: Entity<MouseModelView>,
+}
+
+impl Render for UnderChrome {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        v_flex()
+            .size_full()
+            .child(div().flex_none().h(px(220.)))
+            .child(self.model.clone())
+    }
+}
+
+#[gpui::test]
+fn the_model_and_full_values_fit_the_canvas_area_below_the_chrome(cx: &mut TestAppContext) {
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    cx.update(gpui_component::init);
+    install_app_state(cx);
+    let (view, cx) = cx.add_window_view(|window, cx| UnderChrome {
+        model: cx.new(|cx| MouseModelView::new(window, cx)),
+    });
+    cx.simulate_resize(size(px(1256.), px(664.)));
+    // The first frame measures the canvas area; the second lays out in it.
+    for _ in 0..2 {
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+    }
+
+    let room = cx
+        .debug_bounds("mouse-canvas-room")
+        .expect("the canvas area renders");
+    let canvas = cx
+        .debug_bounds("mouse-canvas")
+        .expect("the model canvas renders");
+    assert!(
+        canvas.top() >= room.top() - px(0.5) && canvas.bottom() <= room.bottom() + px(0.5),
+        "canvas {canvas:?} runs past the area {room:?}"
+    );
+    for (selector, value) in [
+        ("label-value-text-Button(Forward)", "Forward (Button 5)"),
+        ("label-value-text-Button(Back)", "Back (Button 4)"),
+        ("label-value-text-Button(MiddleClick)", "Middle Click"),
+    ] {
+        let shown = cx.debug_bounds(selector).expect(selector);
+        let full = cx.update(|window, _| {
+            window
+                .text_system()
+                .shape_line(
+                    value.into(),
+                    px(15.),
+                    &[window.text_style().to_run(value.len())],
+                    None,
+                )
+                .width
+        });
+        assert!(
+            shown.size.width >= full - px(0.5) && shown.size.height < px(30.),
+            "{value}: shown in {shown:?}, needs {full:?} on one line"
+        );
+    }
+
     drop(view);
     cx.update(|window, _| window.remove_window());
     cx.run_until_parked();

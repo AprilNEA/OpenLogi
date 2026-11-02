@@ -81,6 +81,8 @@ body:
       label: How is the device connected?
       options:
         - Logi Bolt receiver
+        - Unifying receiver
+        - Lightspeed receiver
         - Bluetooth (direct, no receiver)
         - Wired (USB cable)
         - Other / not sure

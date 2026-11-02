@@ -27,6 +27,7 @@ fn paired_device_no_model_info(slot: u8, wpid: Option<u16>) -> PairedDevice {
         model_info: None,
         capabilities: None,
         settings_revision: 0,
+        hidpp10: false,
     }
 }
 
@@ -60,6 +61,7 @@ fn direct_inventory(model_info: DeviceModelInfo) -> DeviceInventory {
             model_info: Some(model_info),
             capabilities: Some(Capabilities::presumed_from_kind(DeviceKind::Mouse)),
             settings_revision: 0,
+            hidpp10: false,
         }],
     }
 }
@@ -92,6 +94,7 @@ fn receiver_inventory() -> DeviceInventory {
             }),
             capabilities: Some(Capabilities::presumed_from_kind(DeviceKind::Mouse)),
             settings_revision: 0,
+            hidpp10: false,
         }],
     }
 }
@@ -125,6 +128,7 @@ fn cabled_inventory() -> DeviceInventory {
             }),
             capabilities: Some(Capabilities::presumed_from_kind(DeviceKind::Mouse)),
             settings_revision: 0,
+            hidpp10: false,
         }],
     }
 }
@@ -217,6 +221,7 @@ fn online_record(key: &str) -> DeviceRecord {
         capture_id: None,
         kind: DeviceKind::Mouse,
         capabilities: Some(Capabilities::presumed_from_kind(DeviceKind::Mouse)),
+        hidpp10: false,
         light_capabilities: None,
         slot: 1,
         online: true,
