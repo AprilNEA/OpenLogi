@@ -44,7 +44,17 @@ impl FeatureSetFeature {
     /// the feature table.
     ///
     /// Feature index `0` for the root feature is not allowed.
-    pub async fn get_feature(&self, index: u8) -> Result<FeatureInformation, Hidpp20Error> {
+    ///
+    /// `feature_set_version` is the version the root feature reports for
+    /// FeatureSet itself. A version `0` reply has no version field, so
+    /// [`FeatureInformation::version`] reads as `0` whatever that byte holds.
+    /// The Yeti X answers as version `0` and leaves stale report data there
+    /// (#786).
+    pub async fn get_feature(
+        &self,
+        index: u8,
+        feature_set_version: u8,
+    ) -> Result<FeatureInformation, Hidpp20Error> {
         let payload = self
             .endpoint
             .call_with(1, [index, 0x00, 0x00], AbandonedReply::AdoptIdentical)
@@ -54,7 +64,11 @@ impl FeatureSetFeature {
         Ok(FeatureInformation {
             id: u16::from(payload[0]) << 8 | u16::from(payload[1]),
             typ: FeatureType::from_bits_retain(payload[2]),
-            version: payload[3],
+            version: if feature_set_version == 0 {
+                0
+            } else {
+                payload[3]
+            },
         })
     }
 }

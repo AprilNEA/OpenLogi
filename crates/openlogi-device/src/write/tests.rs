@@ -1810,31 +1810,41 @@ const FEATURE_SET_INDEX: u8 = 0x01;
 /// `ErrorType::InvalidArgument`, the Yeti X's answer for a feature-table index
 /// it does not list.
 const INVALID_ARGUMENT: u8 = 0x02;
+/// What the Yeti X leaves in the version byte of a `getFeatureID` reply: stale
+/// report data, `0x69` in one of the #786 runs. Its FeatureSet is version 0,
+/// which has no version field.
+const YETI_X_STALE_VERSION_BYTE: u8 = 0x69;
 /// The Yeti X feature table at indexes 1 to 8, as captured in #786.
 const YETI_X_FEATURES: [u16; 8] = [
     0x0001, 0x0003, 0x0005, 0x8070, 0x8330, 0x8350, 0x8360, 0x8370,
 ];
 
 /// A Yeti X (`046d:0aaf`) answering FeatureSet `getFeatureID` for indexes 1 to
-/// 8 and refusing index 0, the root, with `InvalidArgument` (#786). `refused`
-/// names one more index the device refuses, so a test can break the table
-/// elsewhere.
+/// 8 and refusing index 0, the root, with `InvalidArgument` (#786). Root
+/// reports FeatureSet as version 0, and every entry carries
+/// [`YETI_X_STALE_VERSION_BYTE`]. `refused` names one more index the device
+/// refuses, so a test can break the table elsewhere.
 fn yeti_x_feature_table(request: &[u8], refused: u8) -> Option<Vec<u8>> {
     if request.len() < 7 || !matches!(request[0], 0x10 | 0x11) {
         return None;
     }
     let mut payload = [0u8; 16];
-    match (request[2], request[3] >> 4) {
+    let long = match (request[2], request[3] >> 4) {
         // Root ping used by Device::new.
-        (0x00, 0x01) => payload[0] = 4,
-        // Root feature lookup.
+        (0x00, 0x01) => {
+            payload[0] = 4;
+            false
+        }
+        // Root feature lookup: FeatureSet at its index, type 0, version 0.
         (0x00, 0x00) => {
             let feature_id = u16::from_be_bytes([request[4], request[5]]);
             payload[0] = u8::from(feature_id == 0x0001) * FEATURE_SET_INDEX;
+            false
         }
         // getCount: the table without the root.
         (FEATURE_SET_INDEX, 0x00) => {
             payload[0] = u8::try_from(YETI_X_FEATURES.len()).expect("a u8 count");
+            false
         }
         // getFeatureID.
         (FEATURE_SET_INDEX, 0x01) => {
@@ -1847,13 +1857,14 @@ fn yeti_x_feature_table(request: &[u8], refused: u8) -> Option<Vec<u8>> {
                 return Some(feature_error(request, INVALID_ARGUMENT));
             };
             payload[..2].copy_from_slice(&feature_id.to_be_bytes());
+            payload[3] = YETI_X_STALE_VERSION_BYTE;
+            true
         }
         _ => return None,
-    }
+    };
 
-    let long = request[0] == 0x11;
     let mut response = vec![0u8; if long { 20 } else { 7 }];
-    response[0] = request[0];
+    response[0] = if long { 0x11 } else { 0x10 };
     response[1..4].copy_from_slice(&request[1..4]);
     let payload_len = response.len() - 4;
     response[4..].copy_from_slice(&payload[..payload_len]);
@@ -1861,18 +1872,21 @@ fn yeti_x_feature_table(request: &[u8], refused: u8) -> Option<Vec<u8>> {
 }
 
 #[tokio::test]
-async fn a_refused_root_index_leaves_out_only_the_root_row() {
+async fn a_yeti_x_dump_leaves_out_only_the_root_row_and_reads_no_version() {
     let (raw, _handle) =
         ScriptedRawHidChannel::with_dynamic_responder(|request| yeti_x_feature_table(request, 0));
     let channel = scripted_channel(raw).await;
     let entries = dump_features_on_channel(&channel, 0xff)
         .await
         .expect("a refused root row is not a failed dump");
-    let rows: Vec<(u8, u16)> = entries
+    let rows: Vec<(u8, u16, u8)> = entries
         .iter()
-        .map(|entry| (entry.index, entry.id))
+        .map(|entry| (entry.index, entry.id, entry.version))
         .collect();
-    let expected: Vec<(u8, u16)> = (1..).zip(YETI_X_FEATURES).collect();
+    let expected: Vec<(u8, u16, u8)> = (1..)
+        .zip(YETI_X_FEATURES)
+        .map(|(index, id)| (index, id, 0))
+        .collect();
     assert_eq!(rows, expected);
 }
 
