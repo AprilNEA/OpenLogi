@@ -112,6 +112,7 @@ rustPlatform.buildRustPackage {
     outputHashes = {
       "appicon-0.1.0" = "sha256-XY8NS2qrpPbUXZ3xCPGjZbbT0tSVpapbcTbgA2H5+/I=";
       "gpui-component-0.6.1" = gpuiComponentHash;
+      "calloop-wayland-source-0.4.1" = "sha256-t7IThoAeQt1pjmjP6FP+NMYk8JIVvVFCI9B8ZfUiRNI=";
     };
   };
 

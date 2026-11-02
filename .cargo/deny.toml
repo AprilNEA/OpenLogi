@@ -61,4 +61,5 @@ allow-git = [
     "https://github.com/AprilNEA/appicon",
     "https://github.com/AprilNEA/gpui-kit",
     "https://github.com/longbridge/gpui-kit",
+    "https://github.com/Smithay/calloop-wayland-source",
 ]
