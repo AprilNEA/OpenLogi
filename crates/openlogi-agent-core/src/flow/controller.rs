@@ -13,12 +13,13 @@ use std::time::Duration;
 
 use openlogi_core::config::FlowConfig;
 use openlogi_hid::{ChannelPool, DeviceIoGate};
-use openlogi_ipc::{FlowLinkState, FlowPeerStatus, FlowStatus};
+use openlogi_ipc::{FlowLinkState, FlowPeerStatus};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 use super::devices::InventoryDevice;
+use super::pairing::FlowPairing;
 use super::pointer::PointerWaker;
 use super::runtime::{FlowHardware, FlowRuntime, FlowStart};
 use crate::observable::ObservableState;
@@ -69,6 +70,7 @@ struct Inner {
     observable: Arc<ObservableState>,
     hardware: FlowHardware,
     supervisor: Mutex<Option<JoinHandle<()>>>,
+    pairing: FlowPairing,
 }
 
 impl FlowController {
@@ -91,6 +93,7 @@ impl FlowController {
                 inventory,
                 stop,
                 input: FlowInput::default(),
+                pairing: FlowPairing::new(Arc::clone(&observable)),
                 observable,
                 hardware: FlowHardware {
                     channel_pool,
@@ -106,6 +109,12 @@ impl FlowController {
     #[must_use]
     pub fn input(&self) -> FlowInput {
         self.inner.input.clone()
+    }
+
+    /// Pairing other computers, which the GUI opens while the user pairs.
+    #[must_use]
+    pub fn pairing(&self) -> &FlowPairing {
+        &self.inner.pairing
     }
 
     /// Use `config` from now on. A change restarts the running generation;
@@ -145,9 +154,11 @@ impl FlowController {
         *supervisor = Some(tokio::spawn(supervise(Arc::clone(&self.inner))));
     }
 
-    /// Stop the running generation and the supervisor, and wait for both.
+    /// Stop the running generation, the supervisor, and pairing, and wait
+    /// for all of them.
     pub async fn shutdown(&self) {
         self.inner.stop.send_replace(true);
+        self.inner.pairing.stop().await;
         let supervisor = self
             .inner
             .supervisor
@@ -234,9 +245,9 @@ async fn start(inner: &Inner, config: &Arc<FlowConfig>) -> Option<FlowRuntime> {
 
 /// Report the configured peers as unreachable while no generation runs.
 fn publish_dormant(observable: &ObservableState, config: &FlowConfig) {
-    observable.set_flow(FlowStatus {
-        enabled: config.enabled,
-        peers: config
+    observable.set_flow_peers(
+        config.enabled,
+        config
             .peers()
             .iter()
             .map(|peer| FlowPeerStatus {
@@ -245,5 +256,5 @@ fn publish_dormant(observable: &ObservableState, config: &FlowConfig) {
                 state: FlowLinkState::Lost,
             })
             .collect(),
-    });
+    );
 }

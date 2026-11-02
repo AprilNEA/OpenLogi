@@ -162,8 +162,12 @@ to start while it is running.
 
 The script covers an online mouse (DPI and SmartShift writes persist and read
 back, battery drains so poll-driven repaints are visible), an offline mouse, a
-lighting-capable keyboard, a directly-attached device, and a full Bolt pairing
-flow (discovery → passkey → paired). Its agent version carries a `-mock` suffix,
+lighting-capable keyboard, a directly-attached device, a full Bolt pairing
+flow (discovery → passkey → paired), and Flow pairing: two nearby computers
+appear, choosing one or typing any address shows the code `418672`, and the
+other computer's user confirms 3 s after you do. The paired computer is saved
+in the profile's `config.toml`, as the agent saves it, and the snapshot lists
+the peers saved there. Its agent version carries a `-mock` suffix,
 so a mock session is identifiable in the UI. It is a dev tool only and is never
 bundled.
 
@@ -178,6 +182,11 @@ offline 1            # it goes offline; reads and writes fail
 fail 3 error         # the keyboard stays online, but every request fails
 lock caps on         # the overlay shows the Caps Lock indicator
 backlight 2 4        # the overlay shows backlight level 2 of 4
+flow link Work PC unstable  # a saved Flow peer's link: connected, unstable, or lost
+flow incoming        # with Flow pairing open, a computer pairs with this one
+flow confirm         # the other computer's user confirms the code first
+flow fail timeout    # the attempt fails: cancel, mismatch, timeout, unreachable,
+                     # busy, version, lost, or save
 disconnect           # every client loses its connection and reconnects
 ```
 

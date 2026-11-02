@@ -657,6 +657,17 @@ impl FlowConnection {
             .close(VarInt::from_u32(0), b"Flow connection closed");
     }
 
+    /// Whether the peer closed this connection because another unknown peer
+    /// holds its pairing slot.
+    #[must_use]
+    pub fn closed_as_pairing_busy(&self) -> bool {
+        matches!(
+            self.connection.close_reason(),
+            Some(quinn::ConnectionError::ApplicationClosed(close))
+                if close.error_code == CLOSE_PAIRING_BUSY
+        )
+    }
+
     pub(crate) async fn wait_closed(&self) {
         let _ = self.connection.closed().await;
     }
@@ -1048,6 +1059,34 @@ pub enum TransportError {
     /// Another unknown peer holds the single pairing slot.
     #[error("another unknown peer is already pairing")]
     PairingBusy,
+}
+
+impl TransportError {
+    /// Whether the peer refused the dial before TLS, as an endpoint that is
+    /// busy with another peer does.
+    #[must_use]
+    pub fn is_refused(&self) -> bool {
+        matches!(
+            self,
+            Self::Connection(quinn::ConnectionError::ConnectionClosed(close))
+                if close.error_code == quinn::TransportErrorCode::CONNECTION_REFUSED
+        )
+    }
+
+    /// Whether this is the peer's `Hello` rejection for a disjoint protocol
+    /// range, or the local one.
+    #[must_use]
+    pub fn is_version_disjoint(&self) -> bool {
+        match self {
+            Self::HelloRejected(rejection) => {
+                rejection.reason() == proto::RejectReason::VersionDisjoint
+            }
+            Self::PeerHelloRejected(reason) => {
+                *reason == buffa::EnumValue::from(proto::RejectReason::VersionDisjoint).to_i32()
+            }
+            _ => false,
+        }
+    }
 }
 
 fn quic_configs(

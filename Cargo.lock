@@ -5822,6 +5822,7 @@ dependencies = [
  "axwatch",
  "backon",
  "futures-lite",
+ "gethostname",
  "image",
  "openlogi-core",
  "openlogi-device",

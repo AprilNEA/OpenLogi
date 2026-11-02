@@ -34,13 +34,16 @@
 //!   toggles behave like a live device.
 //! - `start_pairing` runs a scripted Bolt flow: discovery → passkey → paired,
 //!   and the paired keyboard joins the inventory.
+//! - `start_flow_pairing` runs a scripted Flow pairing: two nearby computers
+//!   appear, any of them or a typed address shows a code, and once both users
+//!   confirm, the peer is saved in `config.toml` as the agent saves it.
 //!
 //! While it runs, the mock reads one console command per stdin line (`help`
 //! lists them) and changes what it reports: a device's battery, link, or
 //! failing reads and writes; a lock-key or backlight indicator; frozen test
-//! time; or every client connection, dropped as an agent restart drops them.
+//! time; a Flow peer's link or the other side of Flow pairing; or every
+//! client connection, dropped as an agent restart drops them.
 
-use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -71,11 +74,11 @@ use openlogi_hid::{
 use openlogi_ipc::transport;
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus,
-    BacklightObservation, ClientKind, ConfigReloadError, FlowLinkState, FlowPeerStatus, FlowStatus,
-    ForegroundApps, FoundDevice, Generation, Identity, InventoryHealth, LockKeyChange,
-    LockKeyObservation, MonitorEvent, NoticeKind, NoticeObservation, OBSERVE_HOLD, Observation,
-    PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingPhase, PairingUpdate,
-    RingObservation, SavedConfig, SavedConfigVerdict,
+    BacklightObservation, ClientKind, ConfigReloadError, FlowIdentity, FlowPairTarget,
+    FlowPairingCommandError, ForegroundApps, FoundDevice, Generation, Identity, InventoryHealth,
+    LockKeyChange, LockKeyObservation, MonitorEvent, NoticeKind, NoticeObservation, OBSERVE_HOLD,
+    Observation, PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingPhase,
+    PairingUpdate, RingObservation, SavedConfig, SavedConfigVerdict,
 };
 use succession::Compat;
 use tarpc::context::Context;
@@ -86,6 +89,8 @@ use tracing::{info, warn};
 
 #[path = "mock_agent/control.rs"]
 mod control;
+#[path = "mock_agent/flow.rs"]
+mod flow;
 #[path = "mock_agent/profile.rs"]
 mod profile;
 
@@ -415,9 +420,7 @@ struct State {
     disable_keys_reads: u64,
     disable_keys_writes: u64,
     reload_calls: u64,
-    /// Link states the console set for Flow peers, by peer name. A peer the
-    /// console never named is connected.
-    flow_links: BTreeMap<String, FlowLinkState>,
+    flow: flow::MockFlow,
 }
 
 impl State {
@@ -456,7 +459,7 @@ impl State {
             disable_keys_reads: 0,
             disable_keys_writes: 0,
             reload_calls: 0,
-            flow_links: BTreeMap::new(),
+            flow: flow::MockFlow::default(),
         })
     }
 
@@ -985,36 +988,7 @@ fn snapshot_of(state: &State) -> AgentSnapshot {
         pairing: state.phase.clone(),
         foreground: state.foreground(),
         lights: Vec::new(),
-        flow: flow_status(&state.flow_links),
-    }
-}
-
-/// Flow as the agent reports it: the config file's peers, each connected
-/// unless the console set another state, and all lost while Flow is off, as
-/// the real agent reports a dormant Flow.
-fn flow_status(links: &BTreeMap<String, FlowLinkState>) -> FlowStatus {
-    let Ok(config) = Config::load_or_default() else {
-        return FlowStatus::default();
-    };
-    let flow = config.flow;
-    FlowStatus {
-        enabled: flow.enabled,
-        peers: flow
-            .peers()
-            .iter()
-            .map(|peer| FlowPeerStatus {
-                name: peer.name.clone(),
-                public_key: peer.public_key,
-                state: if flow.enabled {
-                    links
-                        .get(peer.name.as_str())
-                        .copied()
-                        .unwrap_or(FlowLinkState::Connected)
-                } else {
-                    FlowLinkState::Lost
-                },
-            })
-            .collect(),
+        flow: state.flow.status(),
     }
 }
 
@@ -1591,6 +1565,34 @@ impl Agent for MockAgent {
         validate_light_command(&state, &route, LightCommand::Power(enabled))?;
         info!(%route, enabled, "set_light_manual_power");
         Ok(())
+    }
+
+    async fn read_flow_identity(self, _: Context) -> Result<FlowIdentity, FlowPairingCommandError> {
+        Ok(Self::flow_identity())
+    }
+
+    async fn start_flow_pairing(self, _: Context) -> Result<(), FlowPairingCommandError> {
+        self.open_flow_pairing().await
+    }
+
+    async fn pair_flow_peer(
+        self,
+        _: Context,
+        target: FlowPairTarget,
+    ) -> Result<(), FlowPairingCommandError> {
+        self.pair_flow(target).await
+    }
+
+    async fn confirm_flow_pairing(self, _: Context) -> Result<(), FlowPairingCommandError> {
+        self.confirm_flow().await
+    }
+
+    async fn cancel_flow_pairing(self, _: Context) -> Result<(), FlowPairingCommandError> {
+        self.cancel_flow().await
+    }
+
+    async fn stop_flow_pairing(self, _: Context) {
+        self.stop_flow().await;
     }
 }
 
