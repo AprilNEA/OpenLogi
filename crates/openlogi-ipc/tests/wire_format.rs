@@ -50,7 +50,7 @@ use openlogi_core::hid::{
     DpiInfo, EasySwitchHosts, EasySwitchSlot, FnLockState, ForceSensingInfo, HidppFeatureErrorKind,
     HidppOperation, HostConnection, HostOsInfo, HostOsKind, LightCommand, OnboardMode,
     OnboardProfile, OnboardState, PasskeyMethod, ProfileIndex, ReceiverSelector, ReportRate,
-    ReportRateInfo, ScrollReportingTarget, ScrollWheelMode, SmartShiftAutoDisengage,
+    ReportRateInfo, ScrollReportingTarget, ScrollWheelMode, SidetoneLevel, SmartShiftAutoDisengage,
     SmartShiftMode, SmartShiftStatus, SmartShiftThreshold, TunableTorque, WriteError,
 };
 use openlogi_ipc::{
@@ -379,6 +379,32 @@ fn reload_saved_config() {
     );
 }
 
+/// The sidetone calls follow the saved-config verdict, and carry the level
+/// as one byte.
+#[test]
+fn sidetone_calls() {
+    let route = DeviceRoute::Direct {
+        vendor_id: 0x046d,
+        product_id: 0x0ac4,
+    };
+    let level = SidetoneLevel::try_new(40).expect("a level in range");
+    assert_wire(&HidppOperation::ReadSidetone, "1f");
+    assert_wire(&HidppOperation::WriteSidetone, "20");
+    assert_wire(&level, "28");
+    assert_wire(&Ok::<SidetoneLevel, WriteError>(level), "0028");
+    assert_wire(
+        &AgentRequest::ReadSidetone {
+            route: route.clone(),
+        },
+        "3102fb6d04fbc40a",
+    );
+    assert_wire(
+        &AgentRequest::SetSidetone { route, level },
+        "3202fb6d04fbc40a28",
+    );
+    assert_wire(&AgentResponse::SetSidetone(Ok(level)), "320028");
+}
+
 /// The overlay long-polls the backlight indicator by generation, like
 /// the other observe calls.
 #[test]
@@ -675,7 +701,7 @@ fn flow_status() {
     );
 }
 
-/// Flow pairing: the six methods append after `switch_host`, and every
+/// Flow pairing: the six methods append after `set_sidetone`, and every
 /// phase, failure, and command error is wire format.
 #[test]
 fn flow_pairing() {
@@ -688,23 +714,23 @@ fn flow_pairing() {
     };
     let peer_hex = format!("04694d6163{key_hex}01");
 
-    assert_wire(&AgentRequest::ReadFlowIdentity {}, "31");
-    assert_wire(&AgentRequest::StartFlowPairing {}, "32");
+    assert_wire(&AgentRequest::ReadFlowIdentity {}, "33");
+    assert_wire(&AgentRequest::StartFlowPairing {}, "34");
     assert_wire(
         &AgentRequest::PairFlowPeer {
             target: FlowPairTarget::Nearby(key),
         },
-        &format!("3300{key_hex}"),
+        &format!("3500{key_hex}"),
     );
     assert_wire(
         &AgentRequest::PairFlowPeer {
             target: FlowPairTarget::Address("10.0.0.7".into()),
         },
-        "33010831302e302e302e37",
+        "35010831302e302e302e37",
     );
-    assert_wire(&AgentRequest::ConfirmFlowPairing {}, "34");
-    assert_wire(&AgentRequest::CancelFlowPairing {}, "35");
-    assert_wire(&AgentRequest::StopFlowPairing {}, "36");
+    assert_wire(&AgentRequest::ConfirmFlowPairing {}, "36");
+    assert_wire(&AgentRequest::CancelFlowPairing {}, "37");
+    assert_wire(&AgentRequest::StopFlowPairing {}, "38");
 
     assert_wire(
         &FlowIdentity {
@@ -891,6 +917,7 @@ fn device_inventory() {
                 disable_keys: false,
                 onboard_profiles: false,
                 button_spy: false,
+                sidetone: true,
             }),
             settings_revision: 7,
             hidpp10: false,
@@ -898,7 +925,7 @@ fn device_inventory() {
     }];
     assert_wire(
         &inventory,
-        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b00001010150020001030106323134304c5a0102030400010100fb34b0fb8240000b0101010000010101010100010101010101010000000700",
+        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b00001010150020001030106323134304c5a0102030400010100fb34b0fb8240000b010101000001010101010001010101010101000000010700",
     );
 }
 

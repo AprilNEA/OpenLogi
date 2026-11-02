@@ -44,7 +44,7 @@ use std::time::{Duration, Instant};
 
 use openlogi_core::hid::{
     BacklightState, DeviceRoute, DisableKeysState, Dpi, EasySwitchHosts, FnLockState,
-    ForceSensingInfo, LightCommand, PointerSpeed, ReportRateInfo, WriteError,
+    ForceSensingInfo, LightCommand, PointerSpeed, ReportRateInfo, SidetoneLevel, WriteError,
 };
 use openlogi_ipc::client::{self, ConnectError};
 use openlogi_ipc::{
@@ -71,11 +71,11 @@ pub use request::PollEventMonitor;
 pub use request::{
     CancelFlowPairing, CancelPairing, Command, ConfirmFlowPairing, LoadConfig, PairDevice,
     PairFlowPeer, ReadBacklight, ReadDisableKeys, ReadDpi, ReadEasySwitchHosts, ReadFnLock,
-    ReadForceSensing, ReadOnboard, ReadPointerSpeed, ReadReportRate, ReadSmartShift, ReloadConfig,
-    RenameEasySwitchHost, RequestAccessibilityPrompt, RetryConnection, SetBacklight,
+    ReadForceSensing, ReadOnboard, ReadPointerSpeed, ReadReportRate, ReadSidetone, ReadSmartShift,
+    ReloadConfig, RenameEasySwitchHost, RequestAccessibilityPrompt, RetryConnection, SetBacklight,
     SetDisableKeys, SetDpi, SetFnLock, SetForceSensing, SetLight, SetLightManualPower, SetLighting,
-    SetPointerSpeed, SetReportRate, SetSmartShift, StartFlowPairing, StartPairing, StopFlowPairing,
-    UnpairDevice,
+    SetPointerSpeed, SetReportRate, SetSidetone, SetSmartShift, StartFlowPairing, StartPairing,
+    StopFlowPairing, UnpairDevice,
 };
 
 /// Complete identity of one Disable Keys write/reload transaction.
@@ -185,6 +185,14 @@ pub enum GuiUpdate {
         key: DeviceKey,
         /// The read-back, or why the write did not land.
         result: Result<PointerSpeed, WriteError>,
+    },
+    /// What a headset confirms after a sidetone write the GUI asked for: the
+    /// level it took, or the typed refusal. Answers [`SetSidetone`].
+    SidetoneWritten {
+        /// The headset that was written.
+        key: DeviceKey,
+        /// The confirmed level, or why the write did not land.
+        result: Result<SidetoneLevel, WriteError>,
     },
     /// What a force-sensing button reports after a press-force write the GUI
     /// asked for: the force it took, or the typed refusal. Answers
