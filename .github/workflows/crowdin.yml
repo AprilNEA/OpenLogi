@@ -56,8 +56,21 @@ jobs:
           set -euo pipefail
           git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
 
-      - name: Self-test locale merge script
-        run: python3 .github/scripts/i18n/merge_crowdin_download.py --self-test
+      - name: Self-test locale scripts
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/i18n/merge_crowdin_download.py --self-test
+          python3 .github/scripts/i18n/english_fill_in_report.py --self-test
+
+      # A backlog metric, never a gate: upload skips values equal to English
+      # (import_eq_suggestions off), so Crowdin shows these as untranslated.
+      - name: Report English fill-in
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/i18n/english_fill_in_report.py \
+            --locales crates/openlogi-ui/locales \
+            --en crates/openlogi-ui/locales/en.toml | tee -a "$GITHUB_STEP_SUMMARY"
 
       # Complete catalogs in git are the merge base. Crowdin download overwrites
       # the working tree; without a snapshot we cannot restore keys the export

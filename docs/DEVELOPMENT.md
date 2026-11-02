@@ -870,7 +870,8 @@ translations land in git.
 
 Each run:
 
-1. Snapshots every `locales/*.toml`.
+1. Snapshots every `locales/*.toml` and writes the per-locale count of values
+   equal to English to the job summary (a backlog metric; it never fails the job).
 2. Uploads `en.toml` **sources**.
 3. Uploads **per-language translations** already in git (`import_eq_suggestions`
    off so `value == English` is not stored as a finished translation).
@@ -909,4 +910,6 @@ Local helpers (with Crowdin credentials configured):
 devenv tasks run openlogi:i18n-upload    # en.toml sources + per-language translations
 devenv tasks run openlogi:i18n-download  # download + merge + i18n tests
 python3 .github/scripts/i18n/merge_crowdin_download.py --self-test
+python3 .github/scripts/i18n/english_fill_in_report.py \
+  --locales crates/openlogi-ui/locales --en crates/openlogi-ui/locales/en.toml
 ```
