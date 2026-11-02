@@ -570,6 +570,14 @@ camera_permission_description = "Giv adgang for at se dit Logitech-webkamera på
 linux_input_access_denied_description = "OpenLogi skal have skriveadgang til /dev/uinput for at ændre knaptildelinger og læse- og skriveadgang til /dev/hidraw* til HID++-kommunikation. Installer OpenLogis udev-regler for at give adgang. Se installationsvejledningen til Linux."
 linux_input_access_unknown_description = "Der blev ikke fundet en Logitech-enhed. Tilslut en enhed, eller kontrollér, at hidraw-udev-reglerne er installeret."
 linux_input_access_guide = "Vis vejledning"
+linux_grant_access = "Giv adgang…"
+linux_grant_waiting = "Venter på administratorgodkendelse…"
+linux_grant_cancelled = "Godkendelsen blev annulleret. Intet blev ændret."
+linux_grant_pkexec_missing = "pkexec er ikke installeret, så OpenLogi kan ikke bede om administratoradgang. Installer polkit, eller følg vejledningen."
+linux_grant_failed = "Kunne ikke installere udev-reglerne: %{reason}"
+linux_grant_still_missing = "udev-reglerne er installeret, men adgangen mangler stadig. Tilslut din Logitech-enhed igen, eller log ud og ind igen. Hvis det ikke hjælper, så følg vejledningen."
+linux_input_access_flatpak = "Denne Flatpak kan ikke installere udev-regler på værten. Kør denne kommando i en terminal, og tilslut derefter din Logitech-enhed igen:"
+linux_input_access_nixos = "På NixOS kommer udev-regler fra systemkonfigurationen. Angiv programs.openlogi.enable = true, og genopbyg derefter systemet."
 
 [agent]
 scanning_for_devices = "Søger efter enheder…"

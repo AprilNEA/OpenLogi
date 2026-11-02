@@ -570,6 +570,14 @@ camera_permission_description = "메인 페이지에서 Logitech 웹캠을 미�
 linux_input_access_denied_description = "버튼 재매핑에는 /dev/uinput 쓰기 권한이, HID++ 통신에는 /dev/hidraw* 읽기/쓰기 권한이 필요합니다. OpenLogi udev 규칙을 설치하세요. 자세한 내용은 Linux 설치 안내서를 참조하세요."
 linux_input_access_unknown_description = "Logitech 기기가 감지되지 않았습니다. 기기를 연결하거나 hidraw udev 규칙이 설치되어 있는지 확인하세요."
 linux_input_access_guide = "가이드 보기"
+linux_grant_access = "접근 허용…"
+linux_grant_waiting = "관리자 인증을 기다리는 중…"
+linux_grant_cancelled = "인증이 취소되었습니다. 변경된 내용은 없습니다."
+linux_grant_pkexec_missing = "pkexec가 설치되어 있지 않아 OpenLogi가 관리자 권한을 요청할 수 없습니다. polkit을 설치하거나 가이드를 따르세요."
+linux_grant_failed = "udev 규칙을 설치할 수 없습니다: %{reason}"
+linux_grant_still_missing = "udev 규칙은 설치되었지만 아직 접근 권한이 없습니다. Logitech 기기를 다시 연결하거나 로그아웃한 후 다시 로그인하세요. 그래도 해결되지 않으면 가이드를 따르세요."
+linux_input_access_flatpak = "Flatpak 버전은 호스트에 udev 규칙을 설치할 수 없습니다. 터미널에서 다음 명령을 실행한 다음 Logitech 기기를 다시 연결하세요:"
+linux_input_access_nixos = "NixOS에서는 udev 규칙이 시스템 구성에서 만들어집니다. programs.openlogi.enable = true를 설정한 다음 시스템을 다시 빌드하세요."
 
 [agent]
 scanning_for_devices = "기기 검색 중…"

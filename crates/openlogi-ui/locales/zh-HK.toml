@@ -570,6 +570,14 @@ camera_permission_description = "您的 Logitech 網絡攝影機會顯示在主�
 linux_input_access_denied_description = "OpenLogi 需要 /dev/uinput 寫入權限以重新對應按鍵，亦需要 /dev/hidraw* 讀寫權限以進行 HID++ 通訊。請安裝 OpenLogi udev 規則以授予權限，詳情請參閱 Linux 安裝指南。"
 linux_input_access_unknown_description = "未偵測到 Logitech 裝置。請連接裝置，或確認已安裝 hidraw udev 規則。"
 linux_input_access_guide = "檢視指南"
+linux_grant_access = "授予存取權限…"
+linux_grant_waiting = "正在等待管理員授權…"
+linux_grant_cancelled = "已取消授權，未作任何更改。"
+linux_grant_pkexec_missing = "未安裝 pkexec，OpenLogi 無法要求管理員權限。請安裝 polkit，或按照指南操作。"
+linux_grant_failed = "無法安裝 udev 規則：%{reason}"
+linux_grant_still_missing = "udev 規則已安裝，但仍未取得存取權限。請重新連接 Logitech 裝置，或登出後重新登入。如果仍然無效，請按照指南操作。"
+linux_input_access_flatpak = "Flatpak 版本無法在主機上安裝 udev 規則。請在終端機中執行以下指令，然後重新連接 Logitech 裝置："
+linux_input_access_nixos = "在 NixOS 上，udev 規則來自系統設定。請設定 programs.openlogi.enable = true，然後重新建置系統。"
 
 [agent]
 scanning_for_devices = "正在掃描裝置…"

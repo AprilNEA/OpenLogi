@@ -154,6 +154,10 @@ pub struct SettingsView {
     /// General page's "switched off in System Settings" notice while keeping
     /// the render path on this intentional cache.
     registration_status: crate::platform::registration::ServiceStatus,
+    /// The Permissions page's "Grant access…" run, which installs the udev
+    /// rules through pkexec.
+    #[cfg(target_os = "linux")]
+    input_access_grant: permissions::InputAccessGrant,
     /// Drives the debug live event monitor: polls the agent on a timer while the
     /// Settings window is open. Dropping it with the view stops polling, which
     /// lets the agent's idle janitor turn monitoring back off.
@@ -277,6 +281,8 @@ impl SettingsView {
             copied_gen: 0,
             asset_cache_desc: assets::cache_size_description(),
             registration_status: crate::platform::registration::status(),
+            #[cfg(target_os = "linux")]
+            input_access_grant: permissions::InputAccessGrant::default(),
             #[cfg(all(target_os = "macos", debug_assertions))]
             _monitor_task: monitor_task,
         }
@@ -468,7 +474,7 @@ impl Render for SettingsView {
         // Registered only where grants exist to manage — see the `mod
         // permissions` cfg for why Windows skips it.
         #[cfg(any(target_os = "macos", target_os = "linux"))]
-        let settings = settings.page(permissions::permissions_page(has_camera));
+        let settings = settings.page(permissions::permissions_page(view.clone(), has_camera));
         let settings = settings
             .page(appearance::appearance_page(
                 view.clone(),

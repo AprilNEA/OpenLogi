@@ -570,6 +570,14 @@ camera_permission_description = "Ваша вебкамера Logitech показ
 linux_input_access_denied_description = "Для перепризначення кнопок OpenLogi потрібен доступ на запис до /dev/uinput, а для обміну даними HID++ потрібен доступ на читання й запис до /dev/hidraw*. Установіть правила udev для OpenLogi. Докладні відомості наведено в настанові зі встановлення в Linux."
 linux_input_access_unknown_description = "Пристроїв Logitech не виявлено. Під'єднайте пристрій або перевірте, чи встановлено правила udev для hidraw."
 linux_input_access_guide = "Переглянути інструкцію"
+linux_grant_access = "Надати доступ…"
+linux_grant_waiting = "Очікування підтвердження адміністратора…"
+linux_grant_cancelled = "Авторизацію скасовано. Нічого не змінено."
+linux_grant_pkexec_missing = "pkexec не встановлено, тому OpenLogi не може запитати права адміністратора. Установіть polkit або скористайтеся інструкцією."
+linux_grant_failed = "Не вдалося встановити правила udev: %{reason}"
+linux_grant_still_missing = "Правила udev встановлено, але доступу досі немає. Перепідключіть пристрій Logitech або вийдіть із системи й увійдіть знову. Якщо це не допоможе, скористайтеся інструкцією."
+linux_input_access_flatpak = "Flatpak-версія не може встановити правила udev в основній системі. Виконайте цю команду в терміналі, а потім перепідключіть пристрій Logitech:"
+linux_input_access_nixos = "У NixOS правила udev беруться з конфігурації системи. Задайте programs.openlogi.enable = true і перезберіть систему."
 
 [agent]
 scanning_for_devices = "Сканування пристроїв…"

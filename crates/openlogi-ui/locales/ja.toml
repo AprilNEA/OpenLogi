@@ -570,6 +570,14 @@ camera_permission_description = "Logitech のウェブカメラはメインペ�
 linux_input_access_denied_description = "ボタンの再割り当てには /dev/uinput への書き込み権限、HID++ 通信には /dev/hidraw* への読み書き権限が必要です。OpenLogi の udev ルールをインストールしてください。詳しくは Linux のインストールガイドを参照してください。"
 linux_input_access_unknown_description = "Logitech デバイスが検出されませんでした。デバイスを接続するか、hidraw の udev ルールがインストールされていることを確認してください。"
 linux_input_access_guide = "ガイドを表示"
+linux_grant_access = "アクセスを許可…"
+linux_grant_waiting = "管理者の認証を待っています…"
+linux_grant_cancelled = "認証がキャンセルされました。何も変更されていません。"
+linux_grant_pkexec_missing = "pkexec がインストールされていないため、OpenLogi は管理者権限を要求できません。polkit をインストールするか、ガイドの手順に従ってください。"
+linux_grant_failed = "udev ルールをインストールできませんでした: %{reason}"
+linux_grant_still_missing = "udev ルールはインストールされましたが、まだアクセスできません。Logitech デバイスを接続し直すか、ログアウトして再度ログインしてください。解決しない場合は、ガイドの手順に従ってください。"
+linux_input_access_flatpak = "Flatpak 版はホストに udev ルールをインストールできません。ターミナルで次のコマンドを実行してから、Logitech デバイスを接続し直してください:"
+linux_input_access_nixos = "NixOS では、udev ルールはシステム構成から作成されます。programs.openlogi.enable = true を設定してから、システムを再構築してください。"
 
 [agent]
 scanning_for_devices = "デバイスを検索中…"

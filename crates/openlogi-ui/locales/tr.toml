@@ -570,6 +570,14 @@ camera_permission_description = "Logitech web kameranızı ana sayfada önizleme
 linux_input_access_denied_description = "OpenLogi, düğmeleri yeniden eşlemek için /dev/uinput dosyasına yazma; HID++ iletişimi için /dev/hidraw* dosyalarına okuma ve yazma erişimi gerektirir. Erişim vermek için OpenLogi udev kurallarını yükleyin. Linux kurulum kılavuzuna bakın."
 linux_input_access_unknown_description = "Logitech cihazı algılanmadı. Bir cihaz bağlayın veya hidraw udev kurallarının yüklü olduğunu doğrulayın."
 linux_input_access_guide = "Kılavuzu görüntüle"
+linux_grant_access = "Erişim ver…"
+linux_grant_waiting = "Yönetici yetkilendirmesi bekleniyor…"
+linux_grant_cancelled = "Yetkilendirme iptal edildi. Hiçbir şey değiştirilmedi."
+linux_grant_pkexec_missing = "pkexec yüklü değil, bu yüzden OpenLogi yönetici erişimi isteyemiyor. polkit'i yükleyin veya kılavuzu izleyin."
+linux_grant_failed = "udev kuralları yüklenemedi: %{reason}"
+linux_grant_still_missing = "udev kuralları yüklendi ancak erişim hâlâ yok. Logitech cihazınızı yeniden bağlayın ya da oturumu kapatıp yeniden açın. Bu işe yaramazsa kılavuzu izleyin."
+linux_input_access_flatpak = "Bu Flatpak, ana sisteme udev kuralları yükleyemez. Bu komutu bir terminalde çalıştırın, ardından Logitech cihazınızı yeniden bağlayın:"
+linux_input_access_nixos = "NixOS'ta udev kuralları sistem yapılandırmasından gelir. programs.openlogi.enable = true olarak ayarlayın, ardından sistemi yeniden derleyin."
 
 [agent]
 scanning_for_devices = "Cihazlar taranıyor…"

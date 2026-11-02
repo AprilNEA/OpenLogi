@@ -570,6 +570,14 @@ camera_permission_description = "Logitech 网络摄像头会显示在主页面�
 linux_input_access_denied_description = "OpenLogi 需要 /dev/uinput 的写入权限以重映射按键，以及 /dev/hidraw* 的读写权限以进行 HID++ 通信。请安装 OpenLogi udev 规则以授予访问权限，详情请参阅 Linux 安装指南。"
 linux_input_access_unknown_description = "未检测到 Logitech 设备。请连接设备，或确认已安装 hidraw udev 规则。"
 linux_input_access_guide = "查看指南"
+linux_grant_access = "授予访问权限…"
+linux_grant_waiting = "正在等待管理员授权…"
+linux_grant_cancelled = "已取消授权，未做任何更改。"
+linux_grant_pkexec_missing = "未安装 pkexec，OpenLogi 无法请求管理员权限。请安装 polkit，或按照指南操作。"
+linux_grant_failed = "无法安装 udev 规则：%{reason}"
+linux_grant_still_missing = "udev 规则已安装，但仍未获得访问权限。请重新连接 Logitech 设备，或注销后重新登录。如果仍无效，请按照指南操作。"
+linux_input_access_flatpak = "Flatpak 版本无法在主机上安装 udev 规则。请在终端中运行以下命令，然后重新连接 Logitech 设备："
+linux_input_access_nixos = "在 NixOS 上，udev 规则来自系统配置。请设置 programs.openlogi.enable = true，然后重新构建系统。"
 
 [agent]
 scanning_for_devices = "正在扫描设备…"

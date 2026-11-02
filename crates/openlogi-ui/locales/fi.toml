@@ -570,6 +570,14 @@ camera_permission_description = "Logitech-verkkokamerasi näkyy pääsivulla. My
 linux_input_access_denied_description = "OpenLogi tarvitsee kirjoitusoikeuden tiedostoon /dev/uinput painikkeiden uudelleenmääritystä varten sekä luku- ja kirjoitusoikeuden tiedostoihin /dev/hidraw* HID++-viestintää varten. Asenna OpenLogin udev-säännöt. Lisätietoja on Linux-asennusohjeessa."
 linux_input_access_unknown_description = "Logitech-laitetta ei havaittu. Liitä laite tai varmista, että hidraw-udev-säännöt on asennettu."
 linux_input_access_guide = "Näytä ohje"
+linux_grant_access = "Myönnä käyttöoikeus…"
+linux_grant_waiting = "Odotetaan järjestelmänvalvojan valtuutusta…"
+linux_grant_cancelled = "Valtuutus peruttiin. Mitään ei muutettu."
+linux_grant_pkexec_missing = "pkexec ei ole asennettuna, joten OpenLogi ei voi pyytää järjestelmänvalvojan oikeuksia. Asenna polkit tai seuraa ohjetta."
+linux_grant_failed = "udev-sääntöjen asentaminen epäonnistui: %{reason}"
+linux_grant_still_missing = "udev-säännöt on asennettu, mutta käyttöoikeus puuttuu yhä. Yhdistä Logitech-laite uudelleen tai kirjaudu ulos ja takaisin sisään. Jos se ei auta, seuraa ohjetta."
+linux_input_access_flatpak = "Tämä Flatpak ei voi asentaa udev-sääntöjä isäntäjärjestelmään. Suorita tämä komento päätteessä ja yhdistä sitten Logitech-laite uudelleen:"
+linux_input_access_nixos = "NixOS:ssä udev-säännöt tulevat järjestelmän määrityksistä. Aseta programs.openlogi.enable = true ja rakenna järjestelmä uudelleen."
 
 [agent]
 scanning_for_devices = "Etsitään laitteita…"
