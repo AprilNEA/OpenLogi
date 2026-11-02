@@ -75,6 +75,20 @@ impl Profile {
         }
     }
 
+    /// The systemd user unit this profile's agent autostarts through on Linux.
+    /// The dev variant carries the same `-dev` suffix as every other dev
+    /// identifier, so enabling or removing a dev unit can never touch the one
+    /// a package or `install.sh` set up for the shipped agent. The production
+    /// name is frozen: packaging installs it and users enable it by hand.
+    #[must_use]
+    pub fn agent_systemd_unit(self) -> String {
+        let stem = crate::brand::Helper::Agent.executable();
+        match self {
+            Self::Production => format!("{stem}.service"),
+            Self::Dev => format!("{}.service", crate::brand::dev_id(stem)),
+        }
+    }
+
     fn detect() -> Self {
         match std::env::var(crate::env::PROFILE) {
             Ok(value) if value == Self::Dev.env_value() => return Self::Dev,
@@ -296,6 +310,20 @@ mod tests {
             agent_socket_path_for(Profile::Production)
                 .expect("production socket")
                 .ends_with("openlogi/agent.sock")
+        );
+    }
+
+    /// The production name is what packaging installs and the install docs
+    /// tell users to enable; the dev one must differ from it.
+    #[test]
+    fn each_profile_names_its_own_systemd_unit() {
+        assert_eq!(
+            Profile::Production.agent_systemd_unit(),
+            "openlogi-agent.service"
+        );
+        assert_eq!(
+            Profile::Dev.agent_systemd_unit(),
+            "openlogi-agent-dev.service"
         );
     }
 }

@@ -10,6 +10,8 @@
 //! `$XDG_DATA_HOME/systemd/user/openlogi-agent.service` (default
 //! `~/.local/share/systemd/user/openlogi-agent.service`) is written/removed,
 //! then `systemctl --user daemon-reload` and `enable`/`disable` are called.
+//! A dev-profile agent uses `openlogi-agent-dev.service` throughout, so it
+//! never touches the shipped agent's autostart (see [`UnitSpec`]).
 //! That is the tier systemd reserves for units installed *on* a user's behalf;
 //! `$XDG_CONFIG_HOME/systemd/user` outranks it and belongs to the user, so a
 //! unit they author by hand always wins over this generated one.
@@ -33,7 +35,9 @@
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
+use openlogi_core::paths::Profile;
 use tracing::{debug, info, warn};
 
 /// Reconcile the agent's autostart state with `enabled`.
@@ -46,8 +50,89 @@ pub(super) fn reconcile(enabled: bool) {
     }
 }
 
-/// Name of the systemd user unit file.
-const UNIT_NAME: &str = "openlogi-agent.service";
+/// The systemd user unit one profile owns: its name and the template it is
+/// rendered from, fixed together.
+///
+/// A dev build must neither address the shipped unit — enabling, disabling, or
+/// removing it would take over the installed agent's autostart — nor render
+/// one that starts its agent under the production profile. The name keeps the
+/// first apart; for the second, the dev template pins the profile through the
+/// environment, since a unit launched at login has no other way to tell the
+/// process which profile it belongs to.
+struct UnitSpec {
+    profile: Profile,
+    name: String,
+}
+
+impl UnitSpec {
+    fn new(profile: Profile) -> Self {
+        Self {
+            profile,
+            name: profile.agent_systemd_unit(),
+        }
+    }
+
+    /// The unit of the profile this process runs under.
+    fn current() -> &'static Self {
+        static CURRENT: OnceLock<UnitSpec> = OnceLock::new();
+        CURRENT.get_or_init(|| Self::new(Profile::current()))
+    }
+
+    /// The unit file's name, also what `systemctl` is told to act on.
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Render the unit for the given executable path.
+    ///
+    /// `Restart=on-failure` mirrors the macOS `KeepAlive=SuccessfulExit:false`
+    /// semantics: the agent is respawned after a crash but a clean `exit(0)`
+    /// (e.g. the tray's Quit) stays stopped until the next login.
+    fn render(&self, exe: &str) -> String {
+        self.render_with_exec(&escape_systemd_exec(exe))
+    }
+
+    /// Render the unit around an `ExecStart` value that is **already escaped**.
+    ///
+    /// Split out so [`Self::is_generated`] can splice a file's own `ExecStart`
+    /// line back in verbatim: running [`escape_systemd_exec`] over an
+    /// already-escaped value would double `%%` into `%%%%`, and a unit this app
+    /// wrote would fail to match itself.
+    ///
+    /// The production template is the one every earlier version shipped, byte
+    /// for byte, so the units they wrote are still recognised as ours.
+    fn render_with_exec(&self, exec_start: &str) -> String {
+        let environment = match self.profile {
+            Profile::Production => String::new(),
+            Profile::Dev => format!(
+                "Environment={}={}\n",
+                openlogi_core::env::PROFILE,
+                Profile::Dev.env_value()
+            ),
+        };
+        format!(
+            "[Unit]\n\
+            Description=OpenLogi background agent (Logitech HID++ device control)\n\
+            After=graphical-session.target\n\
+            \n\
+            [Service]\n\
+            Type=simple\n\
+            {environment}\
+            ExecStart={exec_start}\n\
+            Restart=on-failure\n\
+            RestartSec=5\n\
+            \n\
+            [Install]\n\
+            WantedBy=graphical-session.target\n"
+        )
+    }
+
+    /// Whether `contents` is a unit this app rendered for this profile, for
+    /// *any* executable path.
+    fn is_generated(&self, contents: &str) -> bool {
+        exec_start_value(contents).is_some_and(|value| self.render_with_exec(value) == contents)
+    }
+}
 
 /// Unit directories to fall back on when systemd cannot be asked for the real
 /// load path, highest precedence first.
@@ -152,7 +237,7 @@ fn apply(enabled: bool) -> io::Result<()> {
     // never delete it; the toggle is honoured through enablement alone.
     if current
         .as_deref()
-        .is_some_and(|have| !is_generated_unit(have))
+        .is_some_and(|have| !UnitSpec::current().is_generated(have))
     {
         warn!(
             path = %path.display(),
@@ -178,7 +263,7 @@ fn apply(enabled: bool) -> io::Result<()> {
         return Ok(());
     }
 
-    let desired = enabled.then(|| render_unit(&exe.to_string_lossy()));
+    let desired = enabled.then(|| UnitSpec::current().render(&exe.to_string_lossy()));
     match (desired.as_deref(), current.as_deref()) {
         (Some(want), Some(have)) if want == have => {
             debug!(path = %path.display(), "systemd user unit already current");
@@ -236,7 +321,9 @@ fn enable_unit() {
     let Ok(marker) = enablement_marker_path() else {
         return;
     };
-    enable_unit_with(&marker, || run_systemctl(&["enable", UNIT_NAME]));
+    enable_unit_with(&marker, || {
+        run_systemctl(&["enable", UnitSpec::current().name()])
+    });
 }
 
 /// The ordering and rollback rules of [`enable_unit`], over an injectable
@@ -310,7 +397,7 @@ fn disable_unit_if_ours() {
         debug!("autostart enablement was not made by OpenLogi; leaving it alone");
         return;
     }
-    if !run_systemctl(&["disable", UNIT_NAME]) {
+    if !run_systemctl(&["disable", UnitSpec::current().name()]) {
         // Keep the marker so the next reconcile retries rather than stranding
         // an enablement this app is still responsible for.
         return;
@@ -319,7 +406,7 @@ fn disable_unit_if_ours() {
 }
 
 /// Path to the generated unit:
-/// `$XDG_DATA_HOME/systemd/user/openlogi-agent.service`
+/// `$XDG_DATA_HOME/systemd/user/<unit>`
 /// (default `~/.local/share/systemd/user/openlogi-agent.service`).
 ///
 /// The *data* tier, not `$XDG_CONFIG_HOME`: systemd ranks it below the user's
@@ -327,14 +414,20 @@ fn disable_unit_if_ours() {
 /// this generated one. `$XDG_CONFIG_HOME/systemd/user` belongs to them.
 fn generated_unit_path() -> io::Result<PathBuf> {
     let data_home = openlogi_core::paths::xdg_data_home().map_err(io::Error::other)?;
-    Ok(data_home.join("systemd").join("user").join(UNIT_NAME))
+    Ok(data_home
+        .join("systemd")
+        .join("user")
+        .join(UnitSpec::current().name()))
 }
 
 /// The location earlier versions wrote to, inside the user's own config tier.
 /// Read only, to clean up after them — never written.
 fn legacy_unit_path() -> io::Result<PathBuf> {
     let config_home = openlogi_core::paths::xdg_config_home().map_err(io::Error::other)?;
-    Ok(config_home.join("systemd").join("user").join(UNIT_NAME))
+    Ok(config_home
+        .join("systemd")
+        .join("user")
+        .join(UnitSpec::current().name()))
 }
 
 /// Remove the unit earlier versions wrote into `$XDG_CONFIG_HOME/systemd/user`.
@@ -356,7 +449,7 @@ fn migrate_legacy_unit() {
     let Ok(contents) = std::fs::read_to_string(&path) else {
         return;
     };
-    if !is_generated_unit(&contents) {
+    if !UnitSpec::current().is_generated(&contents) {
         warn!(
             path = %path.display(),
             "leaving a hand-edited systemd user unit in place; it takes precedence over OpenLogi's own",
@@ -376,15 +469,10 @@ fn migrate_legacy_unit() {
     }
 }
 
-/// Whether `contents` is a unit this app rendered, for *any* executable path.
-fn is_generated_unit(contents: &str) -> bool {
-    exec_start_value(contents).is_some_and(|value| render_unit_with_exec(value) == contents)
-}
-
 /// The verbatim, still-escaped value of the file's single `ExecStart=` line.
 ///
 /// `None` when there is no such line, or more than one — neither shape is
-/// something [`render_unit`] can produce.
+/// something [`UnitSpec::render`] can produce.
 fn exec_start_value(contents: &str) -> Option<&str> {
     let mut values = contents
         .lines()
@@ -399,20 +487,20 @@ fn exec_start_value(contents: &str) -> Option<&str> {
 /// is what makes autostart work for a build the packaged unit cannot describe,
 /// so in that case the normal write path must still run.
 fn packaged_unit_for(exe: &Path) -> Option<PathBuf> {
-    packaged_unit_in(&user_unit_dirs(), exe)
+    packaged_unit_in(&user_unit_dirs(), UnitSpec::current().name(), exe)
 }
 
 /// [`packaged_unit_for`] over an injectable set of directories, listed highest
-/// precedence first.
+/// precedence first, and the unit name to look for in them.
 ///
 /// Only the *effective* unit is considered — the first one that exists. A lower
 /// entry is never matched past a higher one that names a different executable,
 /// because systemd would resolve the name to that higher unit: enabling on the
 /// strength of a shadowed entry would start a binary this app never verified.
-fn packaged_unit_in(dirs: &[PathBuf], exe: &Path) -> Option<PathBuf> {
+fn packaged_unit_in(dirs: &[PathBuf], unit: &str, exe: &Path) -> Option<PathBuf> {
     let effective = dirs
         .iter()
-        .map(|dir| dir.join(UNIT_NAME))
+        .map(|dir| dir.join(unit))
         // A /dev/null mask exists but is not a regular file. It must block
         // lower entries just like an empty unit file does.
         .find(|path| path.exists())?;
@@ -463,7 +551,7 @@ fn remove_generated_unit() -> io::Result<()> {
     let Ok(contents) = std::fs::read_to_string(&path) else {
         return Ok(());
     };
-    if !is_generated_unit(&contents) {
+    if !UnitSpec::current().is_generated(&contents) {
         warn!(
             path = %path.display(),
             "leaving a systemd user unit this app did not write in place",
@@ -474,38 +562,6 @@ fn remove_generated_unit() -> io::Result<()> {
     info!(path = %path.display(), "removed the generated systemd user unit");
     run_systemctl(&["daemon-reload"]);
     Ok(())
-}
-
-/// Render the systemd user unit for the given executable path.
-///
-/// `Restart=on-failure` mirrors the macOS `KeepAlive=SuccessfulExit:false`
-/// semantics: the agent is respawned after a crash but a clean `exit(0)` (e.g.
-/// the tray's Quit) stays stopped until the next login.
-fn render_unit(exe: &str) -> String {
-    render_unit_with_exec(&escape_systemd_exec(exe))
-}
-
-/// Render the unit around an `ExecStart` value that is **already escaped**.
-///
-/// Split out so [`is_generated_unit`] can splice a file's own `ExecStart` line
-/// back in verbatim: running [`escape_systemd_exec`] over an already-escaped
-/// value would double `%%` into `%%%%`, and a unit this app wrote would fail to
-/// match itself.
-fn render_unit_with_exec(exec_start: &str) -> String {
-    format!(
-        "[Unit]\n\
-        Description=OpenLogi background agent (Logitech HID++ device control)\n\
-        After=graphical-session.target\n\
-        \n\
-        [Service]\n\
-        Type=simple\n\
-        ExecStart={exec_start}\n\
-        Restart=on-failure\n\
-        RestartSec=5\n\
-        \n\
-        [Install]\n\
-        WantedBy=graphical-session.target\n"
-    )
 }
 
 /// Escape a string for use as `ExecStart` in a systemd unit file.
