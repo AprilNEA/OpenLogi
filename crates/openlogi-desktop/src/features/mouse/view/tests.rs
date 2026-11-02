@@ -809,11 +809,12 @@ fn an_inherited_gesture_button_offers_the_held_actions(cx: &mut TestAppContext) 
     cx.run_until_parked();
 }
 
-/// Card metrics for values whose widest measures `widest` on one line, with
-/// the card chrome and line height the default rem size gives.
+/// Card metrics for values whose widest measures `widest` on one line and
+/// splits evenly onto more, with the card chrome and line height the default
+/// rem size gives.
 fn values(widest: f32) -> ValueMetrics {
     ValueMetrics {
-        widest,
+        fit_w: [widest, widest / 2., widest / 3.],
         chrome_w: 70.,
         line_h: 22.,
     }
@@ -942,6 +943,58 @@ fn a_value_too_long_for_the_widest_card_wraps_to_two_lines() {
         "{}",
         layout.canvas_w
     );
+    assert!(
+        layout.canvas_h <= DEFAULT_ROOM.height + 0.01,
+        "{}",
+        layout.canvas_h
+    );
+    assert_cards_on_the_canvas(&layout);
+}
+
+/// The MX Master's six values in Russian with its thumb wheel on the
+/// desktop preset: "Предыдущий / следующий рабочий стол", the longest value
+/// its controls show in any shipped catalog, wraps past two lines even in the
+/// widest card the default window allows. Its card takes a third line instead
+/// of cutting the value off, and the taller cards still fit beside the model.
+#[gpui::test]
+fn the_longest_translated_value_wraps_to_three_lines(cx: &mut TestAppContext) {
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("ru");
+    let longest = tr!("pointer.previous_next_desktop");
+    let shown = [
+        tr!("actions.middle_click"),
+        tr!("actions.back_button_4"),
+        tr!("actions.forward_button_5"),
+        tr!("pointer.cycle_dpi_presets"),
+        tr!("actions.five_directions"),
+        longest.clone(),
+    ];
+    let cx = cx.add_empty_window();
+    let (layout, lines_needed) = cx.update(|window, _| {
+        let values = ValueMetrics::measure(shown, window);
+        let layout = model_layout(None, None, DEFAULT_ROOM, 1256., true, values);
+        // How the value text wraps the longest value at the card's width.
+        let wrapped = window
+            .text_system()
+            .shape_text(
+                longest.clone(),
+                px(15.),
+                &[window.text_style().to_run(longest.len())],
+                Some(px(layout.card.w - values.chrome_w)),
+                None,
+            )
+            .expect("the value shapes");
+        let lines: usize = wrapped
+            .iter()
+            .map(|line| line.wrap_boundaries().len() + 1)
+            .sum();
+        (layout, lines)
+    });
+    rust_i18n::set_locale("en");
+
+    assert_eq!(lines_needed, 3, "the value no longer needs a third line");
+    assert_eq!(layout.card.value_lines, 3, "{:?}", layout.card);
+    assert_eq!(layout.labels.len(), 6);
     assert!(
         layout.canvas_h <= DEFAULT_ROOM.height + 0.01,
         "{}",
