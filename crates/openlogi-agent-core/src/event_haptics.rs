@@ -1218,7 +1218,7 @@ mod tests {
         haptics.observe(&scroll(-0.5), |_| true);
         assert_eq!(
             played(&haptics),
-            Some((HapticWaveform::DampCollision, EventCue::WheelDetent))
+            Some((HapticWaveform::WhisperCollision, EventCue::WheelDetent))
         );
     }
 
@@ -1352,7 +1352,7 @@ mod tests {
         haptics.observe_main_wheel("mouse", -3, per_notch);
         assert_eq!(
             played(&haptics),
-            Some((HapticWaveform::DampCollision, EventCue::WheelDetent))
+            Some((HapticWaveform::WhisperCollision, EventCue::WheelDetent))
         );
     }
 

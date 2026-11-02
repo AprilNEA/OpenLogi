@@ -135,8 +135,9 @@ pub struct EventHapticsConfig {
         deserialize_with = "deserialize_button_map"
     )]
     pub buttons: BTreeMap<ButtonId, EventHapticFeedback>,
-    /// What a main-wheel detent plays.
-    #[serde(default = "default_wheel")]
+    /// What a main-wheel detent plays. The faintest tap by default: a roll
+    /// plays many in a row.
+    #[serde(default = "default_whisper")]
     pub wheel: EventHapticFeedback,
     /// What a thumb-wheel step plays.
     #[serde(default = "default_subtle")]
@@ -146,7 +147,7 @@ pub struct EventHapticsConfig {
     pub gestures: EventHapticFeedback,
     /// What a SmartShift or DPI change plays. A DPI step plays once per
     /// preset position, so the count tells which preset is active.
-    #[serde(default = "default_wheel")]
+    #[serde(default = "default_damp")]
     pub mode_changes: EventHapticFeedback,
     /// What a volume step plays.
     #[serde(default = "default_whisper")]
@@ -171,10 +172,10 @@ impl Default for EventHapticsConfig {
         Self {
             enabled: false,
             buttons: default_buttons(),
-            wheel: default_wheel(),
+            wheel: default_whisper(),
             thumbwheel: default_subtle(),
             gestures: default_subtle(),
-            mode_changes: default_wheel(),
+            mode_changes: default_damp(),
             level_steps: default_whisper(),
             level_limits: default_sharp(),
             display_crossing: EventHapticFeedback::Off,
@@ -248,7 +249,7 @@ fn default_buttons() -> BTreeMap<ButtonId, EventHapticFeedback> {
         .collect()
 }
 
-fn default_wheel() -> EventHapticFeedback {
+fn default_damp() -> EventHapticFeedback {
     EventHapticFeedback::DampCollision
 }
 
@@ -279,7 +280,8 @@ mod tests {
             EventHapticFeedback::WhisperCollision
         );
         assert_eq!(config.button(ButtonId::Back), EventHapticFeedback::Off);
-        assert_eq!(config.wheel, EventHapticFeedback::DampCollision);
+        assert_eq!(config.wheel, EventHapticFeedback::WhisperCollision);
+        assert_eq!(config.mode_changes, EventHapticFeedback::DampCollision);
     }
 
     #[test]
