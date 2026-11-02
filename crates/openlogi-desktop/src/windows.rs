@@ -14,6 +14,7 @@
 //! lower edge off-screen.
 
 pub mod add_device;
+pub mod flow;
 pub mod main_window;
 pub mod settings;
 pub mod update_consent;
@@ -112,6 +113,7 @@ pub struct WindowRegistry {
     pub main: Option<WindowHandle<Root>>,
     pub settings: Option<WindowHandle<Root>>,
     pub add_device: Option<WindowHandle<Root>>,
+    pub flow: Option<WindowHandle<Root>>,
     pub update_consent: Option<WindowHandle<Root>>,
 }
 
@@ -183,6 +185,7 @@ pub fn retitle_open(cx: &mut App) {
     let retitles = [
         (registry.settings, settings::window_title()),
         (registry.add_device, add_device::window_title()),
+        (registry.flow, flow::window_title()),
     ];
     for (handle, title) in retitles {
         if let Some(handle) = handle {

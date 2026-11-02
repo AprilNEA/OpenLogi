@@ -601,8 +601,10 @@ fn assert_receiver_capture_observations(inspection: &TestAgent) {
             ReadFamily::Smartshift,
             ReadFamily::Wheel,
             // A mouse has no `0x1982`, so no backlight read is issued.
+            ReadFamily::EasySwitch,
             ReadFamily::Smartshift,
             ReadFamily::DisableKeys,
+            ReadFamily::EasySwitch,
         ]
     );
 }

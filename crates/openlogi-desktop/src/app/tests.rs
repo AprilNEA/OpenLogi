@@ -1,4 +1,4 @@
-use super::home::{connection_icon_path, ordered_device_indices};
+use super::home::{ConnectionGlyph, connection_glyph, ordered_device_indices};
 use super::{DetailTab, DeviceKind, DeviceRecord};
 use crate::services::assets::ResolvedAsset;
 use crate::ui::battery::battery_charging_no_reading;
@@ -6,7 +6,7 @@ use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceModelInfo, DeviceTransports,
     LightCapabilities, LightValueRange, LightValueUnit,
 };
-use openlogi_core::hid::DeviceRoute;
+use openlogi_core::hid::{DeviceRoute, ReceiverBrand};
 
 #[gpui::test]
 fn config_error_folder_button_opens_from_the_active_window(cx: &mut gpui::TestAppContext) {
@@ -374,7 +374,7 @@ fn charging_without_reading_suppresses_percentage() {
 /// Builds a [`DeviceModelInfo`] with `transports` and the packed per-transport
 /// PIDs a real device would report for them (ascending bit order: Bluetooth,
 /// BTLE, eQuad, USB — see [`DeviceModelInfo::model_ids`]), so tests can probe
-/// `connection_icon_path` with a `Direct` route's product id matching one of
+/// `connection_glyph` with a `Direct` route's product id matching one of
 /// the live slots.
 fn model_with_pids(transports: DeviceTransports, pids: &[u16]) -> DeviceModelInfo {
     let mut model_ids = [0u16; 3];
@@ -386,6 +386,28 @@ fn model_with_pids(transports: DeviceTransports, pids: &[u16]) -> DeviceModelInf
         transports,
         model_ids,
         extended_model_id: 0,
+    }
+}
+
+/// Nano and Lightspeed receivers ride the Unifying route but are not
+/// Unifying receivers, so they never wear the Unifying logo.
+#[test]
+fn nano_and_lightspeed_receivers_get_the_dongle_icon() {
+    let route = DeviceRoute::Unifying {
+        receiver_uid: "r".into(),
+        slot: 1,
+    };
+    for (brand, glyph) in [
+        (Some(ReceiverBrand::Lightspeed), ConnectionGlyph::Dongle),
+        (Some(ReceiverBrand::Nano), ConnectionGlyph::Dongle),
+        (Some(ReceiverBrand::Unifying), ConnectionGlyph::Unifying),
+        (None, ConnectionGlyph::Unifying),
+    ] {
+        assert_eq!(
+            connection_glyph(Some(&route), brand, None, None),
+            glyph,
+            "{brand:?}"
+        );
     }
 }
 
@@ -415,12 +437,12 @@ fn connection_icon_matches_route() {
         ..DeviceTransports::default()
     };
     assert_eq!(
-        connection_icon_path(Some(&bolt), None, None),
-        "action-icons/bolt.svg"
+        connection_glyph(Some(&bolt), None, None, None),
+        ConnectionGlyph::Bolt
     );
     assert_eq!(
-        connection_icon_path(Some(&uni), None, None),
-        "action-icons/unifying.svg"
+        connection_glyph(Some(&uni), None, None, None),
+        ConnectionGlyph::Unifying
     );
     // The matching USB PID selects the cable icon.
     let direct_wired_pid = DeviceRoute::Direct {
@@ -428,12 +450,13 @@ fn connection_icon_matches_route() {
         product_id: 0xb019,
     };
     assert_eq!(
-        connection_icon_path(
+        connection_glyph(
             Some(&direct_wired_pid),
+            None,
             Some(&model_with_pids(wired, &[0xb019])),
             None
         ),
-        "action-icons/usb.svg"
+        ConnectionGlyph::Cable
     );
     // eQuad is receiver-only, so an equad-only table on a *direct* route
     // still means a cable — not Bluetooth.
@@ -446,12 +469,13 @@ fn connection_icon_matches_route() {
         product_id: 0xb01a,
     };
     assert_eq!(
-        connection_icon_path(
+        connection_glyph(
             Some(&direct_equad_pid),
+            None,
             Some(&model_with_pids(equad_only, &[0xb01a])),
             None
         ),
-        "action-icons/usb.svg"
+        ConnectionGlyph::Cable
     );
     // An all-false table is "unknown", not "wired".
     let direct_unknown_pid = DeviceRoute::Direct {
@@ -459,40 +483,43 @@ fn connection_icon_matches_route() {
         product_id: 0xffff,
     };
     assert_eq!(
-        connection_icon_path(
+        connection_glyph(
             Some(&direct_unknown_pid),
+            None,
             Some(&model_with_pids(DeviceTransports::default(), &[])),
             None
         ),
-        "action-icons/bluetooth.svg"
+        ConnectionGlyph::Bluetooth
     );
     // Product id doesn't match a live slot (stale/unknown info): falls back
     // to guessing from the static flags, same as before this fix.
     assert_eq!(
-        connection_icon_path(
+        connection_glyph(
             Some(&direct_unknown_pid),
+            None,
             Some(&model_with_pids(bt, &[0xb019])),
             None
         ),
-        "action-icons/bluetooth.svg"
+        ConnectionGlyph::Bluetooth
     );
     assert_eq!(
-        connection_icon_path(
+        connection_glyph(
             Some(&direct_unknown_pid),
+            None,
             Some(&model_with_pids(btle, &[0xb01b])),
             None
         ),
-        "action-icons/bluetooth.svg"
+        ConnectionGlyph::Bluetooth
     );
     // Unknown transports (no 0x0003 snapshot) keep the old default.
     assert_eq!(
-        connection_icon_path(Some(&direct_unknown_pid), None, None),
-        "action-icons/bluetooth.svg"
+        connection_glyph(Some(&direct_unknown_pid), None, None, None),
+        ConnectionGlyph::Bluetooth
     );
     // No route and no model information means the default icon.
     assert_eq!(
-        connection_icon_path(None, None, None),
-        "action-icons/circle-dot.svg"
+        connection_glyph(None, None, None, None),
+        ConnectionGlyph::Unknown
     );
 }
 
@@ -533,11 +560,13 @@ fn connection_icon_preserves_saved_wired_device_without_live_route() {
     assert!(!record.online);
     assert!(record.route.is_none());
     assert_eq!(
-        connection_icon_path(
+        connection_glyph(
             record.route.as_ref(),
+            record.receiver_brand,
             record.model_info.as_ref(),
             state.offline_connection(record)
-        ),
+        )
+        .path(),
         "action-icons/usb.svg",
         "a saved wired-only keyboard must not acquire a Bluetooth icon while offline"
     );
@@ -567,13 +596,13 @@ fn connection_icon_follows_live_route_on_multi_transport_device() {
         product_id: 0xb38a,
     };
     assert_eq!(
-        connection_icon_path(Some(&usb_direct), Some(&model), None),
+        connection_glyph(Some(&usb_direct), None, Some(&model), None).path(),
         "action-icons/usb.svg",
         "plugged in over USB must show the USB glyph even though the same \
          device also supports Bluetooth/BTLE"
     );
     assert_eq!(
-        connection_icon_path(Some(&btle_direct), Some(&model), None),
+        connection_glyph(Some(&btle_direct), None, Some(&model), None).path(),
         "action-icons/bluetooth.svg",
         "the same device connected over BTLE must show the Bluetooth glyph"
     );
@@ -630,11 +659,13 @@ fn disconnected_gaming_keyboards_keep_the_observed_usb_icon() {
         let record = state.current_record().expect("connected keyboard");
         assert!(record.online);
         assert_eq!(
-            connection_icon_path(
+            connection_glyph(
                 record.route.as_ref(),
+                record.receiver_brand,
                 record.model_info.as_ref(),
                 state.offline_connection(record)
-            ),
+            )
+            .path(),
             "action-icons/usb.svg"
         );
 
@@ -646,11 +677,13 @@ fn disconnected_gaming_keyboards_keep_the_observed_usb_icon() {
             "offline writes must remain disabled"
         );
         assert_eq!(
-            connection_icon_path(
+            connection_glyph(
                 record.route.as_ref(),
+                record.receiver_brand,
                 record.model_info.as_ref(),
                 state.offline_connection(record)
-            ),
+            )
+            .path(),
             "action-icons/usb.svg",
             "{name} must not acquire a Bluetooth icon when its USB node disappears"
         );
@@ -669,7 +702,7 @@ fn disconnected_multi_transport_keyboard_without_history_is_unknown() {
         &[0xb38a, 0x40b5, 0xc356],
     );
     assert_eq!(
-        connection_icon_path(None, Some(&model), None),
+        connection_glyph(None, None, Some(&model), None).path(),
         "action-icons/circle-dot.svg"
     );
 }
@@ -729,11 +762,13 @@ fn disconnected_keyboard_icon_uses_only_unambiguous_saved_links() {
         assert!(!record.online);
         assert!(record.route.is_none());
         assert_eq!(
-            connection_icon_path(
+            connection_glyph(
                 record.route.as_ref(),
+                record.receiver_brand,
                 record.model_info.as_ref(),
                 state.offline_connection(record),
-            ),
+            )
+            .path(),
             *expected,
             "saved links: {links:?}"
         );
@@ -758,13 +793,15 @@ fn live_bluetooth_icon_does_not_use_a_saved_usb_transport() {
         product_id: 0xb389,
     };
     assert_eq!(
-        connection_icon_path(
+        connection_glyph(
             Some(&route),
+            None,
             Some(&model),
             Some(crate::state::ObservedConnection::Direct(
                 ModelTransport::Usb
             ))
-        ),
+        )
+        .path(),
         "action-icons/bluetooth.svg"
     );
 }
@@ -819,11 +856,13 @@ fn assert_keyboard_profile(state: &crate::state::AppState, key: &str, icon: &str
         Some(&Action::Screenshot)
     );
     assert_eq!(
-        connection_icon_path(
+        connection_glyph(
             record.route.as_ref(),
+            record.receiver_brand,
             record.model_info.as_ref(),
             state.offline_connection(record)
-        ),
+        )
+        .path(),
         icon,
     );
 }
@@ -1080,15 +1119,29 @@ fn home_transport_icon_paints_in_its_transport_color(cx: &mut gpui::TestAppConte
         vendor_id: 0x046d,
         product_id: 0xb034,
     });
+    let lightspeed = DeviceRecord {
+        receiver_brand: Some(ReceiverBrand::Lightspeed),
+        ..routed(DeviceRoute::Unifying {
+            receiver_uid: "r".into(),
+            slot: 1,
+        })
+    };
     let camera = record(DeviceKind::Camera, None);
-    let expected: [(&DeviceRecord, Hsla); 3] = [
+    let expected: [(&DeviceRecord, Hsla); 4] = [
         (&bolt, rgb(theme::STATUS_CONNECTED).into()),
+        (&lightspeed, rgb(theme::STATUS_CONNECTED).into()),
         (&bluetooth, rgb(theme::ACCENT_BLUE).into()),
         (&camera, pal.text_muted),
     ];
     for (record, color) in expected {
         let mut icon = transport_icon(record, None, pal);
-        assert_eq!(icon.style().text.color, Some(color), "{:?}", record.kind);
+        assert_eq!(
+            icon.style().text.color,
+            Some(color),
+            "{:?} {:?}",
+            record.kind,
+            record.route
+        );
     }
 }
 
@@ -1808,6 +1861,56 @@ fn an_unreachable_agent_keeps_the_header_and_offers_retry(cx: &mut gpui::TestApp
         cx.update(|_, cx| AppState::try_read(cx).unwrap().agent_link().clone()),
         AgentLink::Unreachable { retrying: true },
         "the notice shows the attempt until the IPC client answers it"
+    );
+}
+
+/// The header's Flow button opens the Flow window once; pressing it again
+/// focuses that window instead of opening another.
+#[gpui::test]
+fn the_flow_button_opens_one_flow_window(cx: &mut gpui::TestAppContext) {
+    use gpui::{AppContext as _, Modifiers};
+    use gpui_component::Root;
+    use openlogi_ipc::SecureInput;
+
+    use super::AppView;
+    use crate::services::assets::AssetResolver;
+    use crate::state::{AgentLink, AppState, Sources};
+
+    cx.update(|cx| {
+        gpui_component::init(cx);
+        crate::ui::theme::register_builtin_themes(cx);
+        let (commands, _sent) = tokio::sync::mpsc::unbounded_channel();
+        let resolver = AssetResolver::new();
+        let state = cx.new(|_| {
+            let mut state = AppState::new(Sources::in_memory(
+                openlogi_core::config::Config::ephemeral(),
+                &resolver,
+                commands,
+            ));
+            let _ = state.set_agent_link(AgentLink::Ready(status_with(SecureInput::Off)));
+            state
+        });
+        AppState::set_global(state, cx);
+    });
+    let (_, cx) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| AppView::new(window, cx));
+        Root::new(view, window, cx)
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+
+    let button = cx
+        .debug_bounds("home-flow")
+        .expect("the header carries the Flow button");
+    let windows = cx.update(|_, cx| cx.windows().len());
+    cx.simulate_click(button.center(), Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(cx.update(|_, cx| cx.windows().len()), windows + 1);
+    cx.simulate_click(button.center(), Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(
+        cx.update(|_, cx| cx.windows().len()),
+        windows + 1,
+        "a second press focuses the open Flow window"
     );
 }
 

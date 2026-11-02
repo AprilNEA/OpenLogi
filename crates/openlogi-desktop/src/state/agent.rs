@@ -2,7 +2,7 @@
 
 use openlogi_camera::Camera;
 use openlogi_core::device::DeviceInventory;
-use openlogi_ipc::{AgentSnapshot, ForegroundApps, InventoryHealth};
+use openlogi_ipc::{AgentSnapshot, FlowStatus, ForegroundApps, InventoryHealth};
 
 use super::events::StateEvents;
 use super::{AgentLink, AppState, StateEvent};
@@ -25,6 +25,8 @@ impl SnapshotChanges {
 pub(super) struct AgentSession {
     link: AgentLink,
     foreground: ForegroundApps,
+    /// Whether Flow runs and the link state of each configured peer.
+    pub(super) flow: FlowStatus,
     last_ready_inventory: Vec<DeviceInventory>,
     #[cfg(all(target_os = "macos", debug_assertions))]
     monitor_events: std::collections::VecDeque<openlogi_ipc::MonitorEvent>,
@@ -37,6 +39,7 @@ impl Default for AgentSession {
         Self {
             link: AgentLink::Connecting,
             foreground: ForegroundApps::default(),
+            flow: FlowStatus::default(),
             last_ready_inventory: Vec::new(),
             #[cfg(all(target_os = "macos", debug_assertions))]
             monitor_events: std::collections::VecDeque::new(),
@@ -81,10 +84,16 @@ impl AppState {
         let camera = self.set_camera_active(snapshot.camera_active);
         let foreground = self.set_foreground(snapshot.foreground.clone());
         let lights = self.adopt_changes_on_lights(&snapshot.lights);
+        let flow = self.set_flow_status(&snapshot.flow);
 
         SnapshotChanges {
             inventory_ready,
-            events: inventory.and(agent).and(camera).and(foreground).and(lights),
+            events: inventory
+                .and(agent)
+                .and(camera)
+                .and(foreground)
+                .and(lights)
+                .and(flow),
         }
     }
 
