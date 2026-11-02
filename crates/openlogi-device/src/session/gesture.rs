@@ -65,6 +65,29 @@ pub enum CapturedInput {
     /// tagged with the source control so dispatch resolves it against that
     /// button's own direction map.
     Gesture(ButtonId, GestureDirection),
+    /// One raw-XY report from a hold that has already committed a swipe, so
+    /// an interactive consumer (a live Space transition) can follow the hand.
+    /// One-shot consumers ignore it.
+    GestureMotion {
+        /// The held gesture source the motion belongs to.
+        button: ButtonId,
+        /// Horizontal raw-XY travel, `+x` right.
+        dx: i32,
+        /// Vertical raw-XY travel, `+y` down.
+        dy: i32,
+    },
+    /// The travel behind a fresh swipe commit, sent right after its
+    /// [`Self::Gesture`], so a live transition that commit opens starts where
+    /// the hand already is. A consumer already following the hold has seen
+    /// that travel as [`Self::GestureMotion`] and ignores it.
+    GestureCommitTravel {
+        /// The held gesture source the travel belongs to.
+        button: ButtonId,
+        /// Horizontal raw-XY travel, `+x` right.
+        dx: i32,
+        /// Vertical raw-XY travel, `+y` down.
+        dy: i32,
+    },
     /// A diverted button's physical down edge.
     ButtonDown(ButtonId),
     /// Thumb-wheel rotation to re-synthesise on the configured scroll axis.

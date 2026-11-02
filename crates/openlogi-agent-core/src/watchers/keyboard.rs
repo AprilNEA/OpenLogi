@@ -202,6 +202,8 @@ fn dispatch_input(
         }
         CapturedInput::Interrupted => dispatcher.cancel_hidpp_session(session),
         CapturedInput::Gesture(..)
+        | CapturedInput::GestureMotion { .. }
+        | CapturedInput::GestureCommitTravel { .. }
         | CapturedInput::Scroll { .. }
         | CapturedInput::ButtonDiverted(_)
         | CapturedInput::HeldWheel { .. }
