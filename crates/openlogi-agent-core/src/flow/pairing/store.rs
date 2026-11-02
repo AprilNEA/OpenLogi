@@ -158,7 +158,8 @@ fn address_hint(address: &str) -> Option<String> {
 }
 
 /// The ceremony's [`PeerKeyStore`]: saves the peer in `config.toml` when
-/// both users confirmed.
+/// both users confirmed. Saving blocks on the disk, so the session runs the
+/// steps that use this store on a blocking thread.
 pub(super) struct ConfigPeerStore {
     /// `None` saves to the user's config file.
     pub(super) path: Option<PathBuf>,

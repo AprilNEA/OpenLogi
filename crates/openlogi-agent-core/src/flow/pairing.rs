@@ -16,7 +16,8 @@
 //! One task owns everything while pairing is open. Network reads, calls, and
 //! dials run in tasks of the current attempt and report back through one
 //! queue, tagged with the attempt they belong to, so work of an attempt that
-//! ended is ignored.
+//! ended is ignored. The confirmation step that saves the peer runs on a
+//! blocking thread, and the task waits for it.
 
 mod store;
 #[cfg(test)]
@@ -35,7 +36,9 @@ use openlogi_flow::discovery::{
 };
 use openlogi_flow::frame::{Envelope, FrameKind, InboundRole};
 use openlogi_flow::generated as proto;
-use openlogi_flow::pairing::{PairingAbortReason, PairingError, PairingSession, PairingState};
+use openlogi_flow::pairing::{
+    PairingAbortReason, PairingError, PairingSession, PairingState, PersistPeerKeyError,
+};
 use openlogi_flow::sas::{PairingNonce, PublicKey};
 use openlogi_flow::transport::{
     FlowConnection, FlowEndpoint, IncomingConnection, IncomingRpc, MachineIdentity,
@@ -356,6 +359,39 @@ struct Link {
     confirming: bool,
 }
 
+impl Link {
+    /// Run a confirmation `step` of the ceremony on a blocking thread and
+    /// keep the session it leaves. The step that sees both users confirmed
+    /// saves the peer through `store`, which reads and writes `config.toml`;
+    /// the attempt waits for it, so pairing succeeds only once the peer is
+    /// saved. Answers the step's result and the name the peer was saved
+    /// under, if it was.
+    async fn confirm<T: Send + 'static>(
+        &mut self,
+        mut store: ConfigPeerStore,
+        step: impl FnOnce(&mut PairingSession, &mut ConfigPeerStore) -> Result<T, PairingError>
+        + Send
+        + 'static,
+    ) -> (Result<T, PairingError>, Option<FlowPeerName>) {
+        let mut session = self.session.clone();
+        let stepped = tokio::task::spawn_blocking(move || {
+            let result = step(&mut session, &mut store);
+            (session, result, store.saved)
+        })
+        .await;
+        match stepped {
+            Ok((session, result, saved)) => {
+                self.session = session;
+                (result, saved)
+            }
+            Err(error) => {
+                let error = PersistPeerKeyError::new(format!("the save task failed: {error}"));
+                (Err(PairingError::Persistence(error)), None)
+            }
+        }
+    }
+}
+
 /// Why an ended attempt still holds its connection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Ending {
@@ -568,10 +604,10 @@ impl Session {
             let deadline = self.attempt.as_ref().map(|attempt| attempt.deadline);
             tokio::select! {
                 command = self.commands.recv(), if !self.stopping => match command {
-                    Some(command) => self.command(command),
+                    Some(command) => self.command(command).await,
                     None => self.stop(),
                 },
-                Some(tagged) = self.event_queue.recv() => self.event(tagged),
+                Some(tagged) = self.event_queue.recv() => self.event(tagged).await,
                 incoming = endpoint.accept_incoming() => match incoming {
                     Ok(incoming) => self.incoming(incoming),
                     Err(_) => break,
@@ -636,7 +672,7 @@ impl Session {
         }
     }
 
-    fn command(&mut self, command: Command) {
+    async fn command(&mut self, command: Command) {
         let (reply, answer) = match command {
             Command::Renew(reply) => {
                 self.expires = Instant::now() + OPEN_FOR;
@@ -647,7 +683,7 @@ impl Session {
                 (reply, answer)
             }
             Command::Confirm(reply) => {
-                let answer = self.confirm();
+                let answer = self.confirm().await;
                 (reply, answer)
             }
             Command::Cancel(reply) => {
@@ -735,7 +771,7 @@ impl Session {
         self.attempt = Some(attempt);
     }
 
-    fn confirm(&mut self) -> Result<(), FlowPairingCommandError> {
+    async fn confirm(&mut self) -> Result<(), FlowPairingCommandError> {
         let path = self.inner.setup.config.clone();
         let Some(attempt) = self
             .attempt
@@ -744,7 +780,7 @@ impl Session {
         else {
             return Err(FlowPairingCommandError::NothingToConfirm);
         };
-        let mut store = ConfigPeerStore {
+        let store = ConfigPeerStore {
             path,
             name: attempt.peer_name(),
             address: attempt.address.clone(),
@@ -761,9 +797,12 @@ impl Session {
         }) else {
             return Err(FlowPairingCommandError::NothingToConfirm);
         };
-        let confirmed = link
-            .session
-            .confirm_local(std::time::Instant::now(), &mut store);
+        let now = std::time::Instant::now();
+        let (confirmed, saved) = link
+            .confirm(store, move |session, store| {
+                session.confirm_local(now, store)
+            })
+            .await;
         // An expired code confirms nothing, so the peer hears no
         // confirmation.
         let tell_peer = matches!(
@@ -782,7 +821,7 @@ impl Session {
             let confirm = message_envelope(FrameKind::PairConfirm, &proto::PairConfirm::default());
             attempt.call(&self.events, Call::Confirm, confirm);
         }
-        self.settle(store.saved);
+        self.settle(saved);
         Ok(())
     }
 
@@ -840,7 +879,7 @@ impl Session {
         self.fail(failure, Close::Abort(PairingAbortReason::Timeout));
     }
 
-    fn event(&mut self, tagged: Tagged) {
+    async fn event(&mut self, tagged: Tagged) {
         let Some(attempt) = self
             .attempt
             .as_mut()
@@ -851,7 +890,7 @@ impl Session {
         match tagged.event {
             Event::Connected(Ok(connection)) => self.connected(connection),
             Event::Connected(Err(failure)) => self.fail(failure, Close::Now),
-            Event::Request(rpc) => self.request(rpc),
+            Event::Request(rpc) => self.request(rpc).await,
             Event::Notification(notification) => self.notification(&notification),
             Event::Answered(call, answer) => self.answered(call, answer),
             Event::Closed => {
@@ -905,7 +944,7 @@ impl Session {
         }
     }
 
-    fn request(&mut self, rpc: IncomingRpc) {
+    async fn request(&mut self, rpc: IncomingRpc) {
         let (code_timeout_for_peer, path) = (
             self.inner.setup.code_timeout,
             self.inner.setup.config.clone(),
@@ -955,14 +994,18 @@ impl Session {
                 }
             }
             FrameKind::PairConfirm => {
-                let mut store = ConfigPeerStore {
+                let store = ConfigPeerStore {
                     path,
                     name,
                     address: attempt.address.clone(),
                     saved: None,
                 };
-                let outcome = link.session.receive_confirm(now, &mut store);
-                saved = store.saved;
+                let outcome;
+                (outcome, saved) = link
+                    .confirm(store, move |session, store| {
+                        session.receive_confirm(now, store)
+                    })
+                    .await;
                 match outcome {
                     Ok(outcome) => message_envelope(FrameKind::PairOutcome, &outcome),
                     Err(PairingError::Persistence(error)) => {
