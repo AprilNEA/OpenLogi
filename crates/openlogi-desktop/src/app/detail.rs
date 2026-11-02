@@ -277,6 +277,7 @@ fn buttons_tab(
     v_flex()
         .flex_1()
         .w_full()
+        .min_w_0()
         .min_h_0()
         .children(button_profile_scope_bar(profile_icons, app_catalog, cx))
         .children(gshift_layer_bar(cx))
@@ -341,6 +342,7 @@ fn tab_body(
     v_flex()
         .flex_1()
         .w_full()
+        .min_w_0()
         .min_h_0()
         .items_center()
         .overflow_y_scrollbar()
@@ -365,6 +367,7 @@ fn keys_tab(
     v_flex()
         .flex_1()
         .w_full()
+        .min_w_0()
         .min_h_0()
         .when(keypad, |tab| {
             tab.children(button_profile_scope_bar(profile_icons, app_catalog, cx))
@@ -388,6 +391,7 @@ fn action_ring_tab(
     v_flex()
         .flex_1()
         .w_full()
+        .min_w_0()
         .min_h_0()
         .children(action_ring_profile_scope_bar(
             profile_icons,
@@ -1289,6 +1293,48 @@ mod tests {
                 "{scale:?}: card {card:?} > column {column:?}"
             );
         }
+    }
+
+    /// The workspace row: the rail beside a tab body whose card holds a
+    /// caption long enough to wrap, as the Device tab's does.
+    struct TabBodyBesideRailHost;
+
+    impl Render for TabBodyBesideRailHost {
+        fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            gpui_kit::component::h_flex()
+                .size_full()
+                .child(div().w(px(super::DETAIL_RAIL_W)).flex_shrink_0())
+                .child(super::tab_body(
+                    super::DetailTab::Device,
+                    super::ContentWidth::Small,
+                    device_enabled_row(true, theme::palette(cx)),
+                ))
+        }
+    }
+
+    #[gpui::test]
+    fn a_tab_body_ends_inside_a_narrow_window(cx: &mut TestAppContext) {
+        // Without a zero minimum width the body took the whole row's width
+        // and ran its right side, past the rail's width, out of the window.
+        let _locale = LOCALE_LOCK.lock().unwrap();
+        rust_i18n::set_locale("en");
+        cx.update(gpui_kit::init);
+        let (_view, cx) = cx.add_window_view(|_, _| TabBodyBesideRailHost);
+        // The main window's minimum width.
+        let window_w = px(720.);
+        cx.simulate_resize(size(window_w, px(600.)));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        let body = cx
+            .debug_bounds("detail-tab-body")
+            .expect("the tab body renders");
+        let switch = cx
+            .debug_bounds("device-enabled-row-control")
+            .expect("the card renders its switch");
+        assert!(
+            body.right() <= window_w && switch.right() <= window_w,
+            "body {body:?} and switch {switch:?} must end inside the {window_w:?} window"
+        );
     }
 
     /// Hosts the row at a card-like width so a long caption has to wrap.
