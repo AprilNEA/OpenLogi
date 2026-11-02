@@ -1,6 +1,7 @@
 //! The Bolt receiver probe: slot completeness, and the register-phase wait against the I/O budget.
 
 use super::*;
+use hidpp::channel::RawHidChannel;
 
 fn paired_slots(probe: &NodeProbe) -> Vec<u8> {
     let Some(inventory) = probe.inventory.as_ref() else {
@@ -584,4 +585,97 @@ async fn a_lost_second_codename_chunk_keeps_the_probe_inside_its_budget() {
         inventory.paired[0].codename.as_deref(),
         Some("MX Anywhere 3")
     );
+}
+
+/// A transport whose every write the OS turns away, as macOS does while
+/// another process holds Secure Input (#1799). `reports_refusal` is whether
+/// the transport can tell the caller that is why.
+struct RefusingRawHidChannel {
+    inner: ScriptedRawHidChannel,
+    reports_refusal: bool,
+}
+
+#[hidpp::async_trait]
+impl RawHidChannel for RefusingRawHidChannel {
+    fn vendor_id(&self) -> u16 {
+        self.inner.vendor_id()
+    }
+
+    fn product_id(&self) -> u16 {
+        self.inner.product_id()
+    }
+
+    async fn write_report(
+        &self,
+        _src: &[u8],
+    ) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "kIOReturnNotPermitted 0xE00002E2",
+        )
+        .into())
+    }
+
+    async fn read_report(
+        &self,
+        buf: &mut [u8],
+    ) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+        self.inner.read_report(buf).await
+    }
+
+    fn writes_refused(&self) -> bool {
+        self.reports_refusal
+    }
+
+    fn supports_short_long_hidpp(&self) -> Option<(bool, bool)> {
+        self.inner.supports_short_long_hidpp()
+    }
+
+    async fn get_report_descriptor(
+        &self,
+        buf: &mut [u8],
+    ) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+        self.inner.get_report_descriptor(buf).await
+    }
+}
+
+async fn probe_through_refused_writes(tag: &str, reports_refusal: bool) -> NodeProbe {
+    let info = bolt_receiver_node(tag);
+    let timeouts = quick_timeouts();
+    let (raw, _handle) = ScriptedRawHidChannel::with_responder(bolt_receiver_with_a_silent_slot);
+    let channel = scripted_channel(RefusingRawHidChannel {
+        inner: raw.presenting_as(BOLT_RECEIVER_PID),
+        reports_refusal,
+    })
+    .await;
+    let cache = HashMap::new();
+    let pass = PassContext {
+        cache: &cache,
+        now: Instant::now(),
+        subscriptions: None,
+        timeouts: &timeouts,
+    };
+    probe_one(info, channel, pass).await
+}
+
+/// A probe the OS refused to send asked the node nothing, so it defers: the
+/// ledger replays the last-good inventory and never retires the channel for
+/// a spell that a reopened channel would sit through all the same (#1799).
+#[tokio::test]
+async fn a_probe_whose_writes_the_os_refuses_is_deferred() {
+    let probe = probe_through_refused_writes("writes-refused", true).await;
+
+    assert_eq!(probe.verdict, ProbeVerdict::Deferred);
+    assert!(probe.inventory.is_none());
+    assert!(probe.outcomes.is_empty());
+}
+
+/// The same failed writes from a transport that cannot name the refusal
+/// stay an ordinary failure, for the ledger to count toward retirement.
+#[tokio::test]
+async fn failed_writes_without_a_refusal_still_fail_the_probe() {
+    let probe = probe_through_refused_writes("writes-failed", false).await;
+
+    assert!(!probe.verdict.is_healthy());
+    assert_ne!(probe.verdict, ProbeVerdict::Deferred);
 }
