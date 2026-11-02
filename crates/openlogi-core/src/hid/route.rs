@@ -1,27 +1,33 @@
-//! How to reach a controllable HID++ device — addressing data only, no I/O.
+//! How to reach a controllable device — addressing data only, no I/O.
 //!
-//! Two addressing modes:
+//! Four addressing modes:
 //!
 //! - [`DeviceRoute::Bolt`] — a device paired to a Logi Bolt receiver, reached
 //!   through the receiver channel at a pairing slot.
+//! - [`DeviceRoute::Unifying`] — the same addressing through a Unifying
+//!   receiver, which speaks HID++ 1.0.
 //! - [`DeviceRoute::Direct`] — a device attached straight to the host over a
 //!   USB cable or Bluetooth, reached on its own channel at the HID++
 //!   self-index [`DIRECT_DEVICE_INDEX`].
+//! - [`DeviceRoute::RawHid`] — a standalone raw-HID device such as a Litra
+//!   light, which never reaches HID++ channel code.
 //!
-//! Opening the channel a route names is `openlogi_hid::channel::route::open_route_channel`
-//! — the one place both the write path and the capture session resolve a
-//! route to an open channel, so the Bolt-vs-direct branch lives in exactly
-//! one place.
+//! Opening the channel a HID++ route names is `open_route_channel` in
+//! `openlogi-device`'s `channel::route` — the one place both the write path
+//! and the capture session resolve a route to an open channel, so the
+//! receiver-vs-direct branch lives in exactly one place.
 
 use std::fmt;
 
 pub use openlogi_device_registry::LOGITECH_VENDOR_ID;
+pub use openlogi_device_registry::keypad::KeypadDescriptor;
+use openlogi_device_registry::keypad::find_keypad;
 pub use openlogi_device_registry::receiver::{
     RECEIVERS, ReceiverBrand, ReceiverDescriptor, ReceiverProtocol, find_receiver,
 };
 use serde::{Deserialize, Serialize};
 
-use crate::device::DeviceInventory;
+use crate::device::{DeviceInventory, RawDeviceAddress};
 
 /// HID++ device index that addresses a directly-attached device's own
 /// features (USB-cable or Bluetooth, no receiver indirection).
@@ -32,7 +38,7 @@ pub const DIRECT_DEVICE_INDEX: u8 = 0xff;
 /// Crosses the agent↔GUI IPC (every per-device RPC takes one), so variant and
 /// field order are wire format — changes require a `PROTOCOL_VERSION` bump
 /// (guarded by `openlogi-ipc/tests/wire_format.rs`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DeviceRoute {
     /// Paired to a Logi Bolt receiver. `receiver_uid` disambiguates multiple
     /// plugged-in receivers; `slot` is the device's pairing slot (1..=6).
@@ -99,12 +105,25 @@ pub fn is_receiver_pid(product_id: u16) -> bool {
 /// but are surfaced under their own name.
 #[must_use]
 pub fn receiver_display_name(product_id: u16) -> &'static str {
-    if find_receiver(LOGITECH_VENDOR_ID, product_id)
-        .is_some_and(|receiver| receiver.brand == ReceiverBrand::Lightspeed)
-    {
-        "Lightspeed Receiver"
-    } else {
-        "Unifying Receiver"
+    match find_receiver(LOGITECH_VENDOR_ID, product_id).map(|receiver| receiver.brand) {
+        Some(ReceiverBrand::Bolt) => "Logi Bolt Receiver",
+        Some(ReceiverBrand::Nano) => "Nano Receiver",
+        Some(ReceiverBrand::Lightspeed) => "Lightspeed Receiver",
+        Some(ReceiverBrand::Unifying) | None => "Unifying Receiver",
+    }
+}
+
+/// The route that reaches a standalone raw-HID interface: its address,
+/// field for field. The one place an address becomes a route.
+impl From<&RawDeviceAddress> for DeviceRoute {
+    fn from(address: &RawDeviceAddress) -> Self {
+        Self::RawHid {
+            vendor_id: address.vendor_id,
+            product_id: address.product_id,
+            usage_page: address.usage_page,
+            usage_id: address.usage_id,
+            identity: address.identity.clone(),
+        }
     }
 }
 
@@ -159,6 +178,24 @@ impl DeviceRoute {
         }
     }
 
+    /// The known keypad this route reaches, or `None` for any other device.
+    ///
+    /// Only a direct route carries the USB identity the keypad registry is
+    /// keyed by, and the keypads it lists are wired-only. Everything that
+    /// needs "is this that keypad" — its LCD keys, its key grid — asks here
+    /// rather than matching a route against the registry itself.
+    #[must_use]
+    pub fn keypad(&self) -> Option<&'static KeypadDescriptor> {
+        let Self::Direct {
+            vendor_id,
+            product_id,
+        } = self
+        else {
+            return None;
+        };
+        find_keypad(*vendor_id, *product_id)
+    }
+
     /// Build the route that reaches a paired device from a receiver inventory.
     ///
     /// Picks [`DeviceRoute::Unifying`] or [`DeviceRoute::Bolt`] based on the
@@ -171,7 +208,7 @@ impl DeviceRoute {
     /// (slot == [`DIRECT_DEVICE_INDEX`] with no receiver UID). Returns `None`
     /// when the receiver UID is unknown (writes are skipped, not mis-routed).
     #[must_use]
-    pub fn device_route_for(inv: &DeviceInventory, slot: u8) -> Option<Self> {
+    pub fn for_slot(inv: &DeviceInventory, slot: u8) -> Option<Self> {
         match &inv.receiver.unique_id {
             Some(uid) if speaks_unifying_protocol(inv.receiver.product_id) => {
                 Some(Self::Unifying {
@@ -253,9 +290,9 @@ mod tests {
     }
 
     #[test]
-    fn device_route_for_known_receiver_follows_its_protocol() {
+    fn for_slot_follows_a_known_receivers_protocol() {
         for receiver in RECEIVERS {
-            let route = DeviceRoute::device_route_for(&inv(receiver.product_id, Some("A1B2")), 2);
+            let route = DeviceRoute::for_slot(&inv(receiver.product_id, Some("A1B2")), 2);
             match receiver.protocol {
                 ReceiverProtocol::Bolt => assert_matches!(
                     route,
@@ -270,22 +307,25 @@ mod tests {
     }
 
     #[test]
-    fn lightspeed_receiver_has_its_own_display_name() {
+    fn receiver_families_have_their_own_display_names() {
         // 0xc539 is the receiver bundled with the G502 LIGHTSPEED and the
         // G Pro Wireless. It routes through the Unifying code path, but it is
         // Lightspeed hardware and says so in its own USB product string, so it
         // must not be surfaced as a Unifying receiver.
         assert_eq!(receiver_display_name(0xc539), "Lightspeed Receiver");
+        assert_eq!(receiver_display_name(0xc53a), "Lightspeed Receiver");
         assert_eq!(receiver_display_name(0xc53f), "Lightspeed Receiver");
         assert_eq!(receiver_display_name(0xc547), "Lightspeed Receiver");
         assert_eq!(receiver_display_name(0xc54d), "Lightspeed Receiver");
+        assert_eq!(receiver_display_name(0xc537), "Nano Receiver");
+        assert_eq!(receiver_display_name(0xc548), "Logi Bolt Receiver");
         assert_eq!(receiver_display_name(0xc52b), "Unifying Receiver");
         assert_eq!(receiver_display_name(0xc532), "Unifying Receiver");
     }
 
     #[test]
-    fn device_route_for_unknown_receiver_defaults_to_bolt() {
-        let route = DeviceRoute::device_route_for(&inv(0xc5ff, Some("UID")), 1);
+    fn for_slot_defaults_an_unknown_receiver_to_bolt() {
+        let route = DeviceRoute::for_slot(&inv(0xc5ff, Some("UID")), 1);
         assert_matches!(
             route,
             Some(DeviceRoute::Bolt { ref receiver_uid, slot: 1 }) if receiver_uid == "UID"
@@ -293,8 +333,8 @@ mod tests {
     }
 
     #[test]
-    fn device_route_for_direct_when_no_uid_and_direct_slot() {
-        let route = DeviceRoute::device_route_for(&inv(0xb025, None), DIRECT_DEVICE_INDEX);
+    fn for_slot_is_direct_without_a_uid_on_the_direct_slot() {
+        let route = DeviceRoute::for_slot(&inv(0xb025, None), DIRECT_DEVICE_INDEX);
         assert_matches!(
             route,
             Some(DeviceRoute::Direct {
@@ -305,8 +345,8 @@ mod tests {
     }
 
     #[test]
-    fn device_route_for_none_when_no_uid_and_non_direct_slot() {
-        let route = DeviceRoute::device_route_for(&inv(0xc52b, None), 1);
+    fn for_slot_is_none_without_a_uid_on_a_paired_slot() {
+        let route = DeviceRoute::for_slot(&inv(0xc52b, None), 1);
         assert!(route.is_none());
     }
 
@@ -326,5 +366,29 @@ mod tests {
             slot: 3,
         };
         assert_eq!(r.to_string(), "slot 3 on receiver AABBCC");
+    }
+
+    #[test]
+    fn only_a_direct_route_to_a_known_keypad_reaches_one() {
+        let keypad = DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xc354,
+        };
+        assert_eq!(
+            keypad.keypad().map(|keypad| keypad.name),
+            Some("MX Creative Keypad")
+        );
+        // Another wired Logitech device, and the same product ID through a
+        // receiver slot, are not that keypad.
+        let other = DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xc548,
+        };
+        assert_eq!(other.keypad(), None);
+        let paired = DeviceRoute::Bolt {
+            receiver_uid: "ABCD".into(),
+            slot: 1,
+        };
+        assert_eq!(paired.keypad(), None);
     }
 }

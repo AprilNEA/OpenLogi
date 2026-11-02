@@ -18,10 +18,11 @@ const FOOTER: &str = "\
 Env CI always sets: CARGO_TERM_COLOR=always CARGO_INCREMENTAL=0 RUSTFLAGS=-D warnings
 
 Other PR workflows, not part of `cargo xtask ci`:
-  Nix CI      nix fmt -- --check flake.nix devenv.nix packaging/linux/package.nix \\
-                packaging/linux/nixos-module.nix
-              nix flake check --all-systems --no-build --show-trace
-  devenv CI   nix fmt -- --check devenv.nix
+  Nix CI      (cd packaging && nix fmt -- --check flake.nix linux/package.nix \\
+                linux/nixos-module.nix ../flake.nix ../devenv.nix)
+              nix flake check ./packaging --all-systems --no-build --show-trace
+              nix flake check --all-systems --no-build --no-write-lock-file
+  devenv CI   (cd packaging && nix fmt -- --check ../devenv.nix)
               devenv --no-tui shell -- true
   Build       unsigned installers; only when touching xtask/packaging
 
@@ -31,7 +32,7 @@ Full map:       .claude/rules/ci.md
 
 /// Shown with an unknown job name.
 pub(crate) const JOB_NAMES_HELP: &str = "\
-Jobs: rustfmt typos publish-closure shell clippy msrv rustdoc tests cargo-deny clippy-windows
+Jobs: rustfmt typos publish-closure shell clippy msrv rustdoc tests cargo-deny clippy-windows clippy-macos
 Also: i18n wire
 The focused suites are not CI jobs of their own; they fail the test jobs.
 `cargo xtask ci --list` prints what each name runs.";

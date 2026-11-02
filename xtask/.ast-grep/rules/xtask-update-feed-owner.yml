@@ -1,0 +1,17 @@
+# Owner: xtask's `support::update_feed` — the variables the update host and
+# Sparkle's public key are read from, by packaging and by both release feeds.
+id: xtask-update-feed-owner
+language: rust
+severity: error
+message: The update-feed variables are xtask's update_feed::BASE_URL_ENV and update_feed::SPARKLE_PUBLIC_KEY_ENV (support::update_feed); use the constants instead of the literal here.
+note: |
+  `macos package`, `release latest-json` and `release appcast` each spelled
+  them. See "Single source of truth" in AGENTS.md.
+files:
+  - xtask/**/*.rs
+ignores:
+  - xtask/src/support/update_feed.rs
+rule:
+  any:
+    - pattern: '"OPENLOGI_UPDATE_BASE_URL"'
+    - pattern: '"OPENLOGI_SPARKLE_PUBLIC_ED_KEY"'

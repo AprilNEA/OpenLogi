@@ -1,0 +1,19 @@
+# Owner: write::register_feature validates direct lookup results for both
+# bounded and native-owned feature access before registering the wrapper.
+id: device-write-feature-registration-owner
+language: rust
+severity: error
+message: Use write::register_feature for generic feature registration so bounded and native-owned access share eligibility checks.
+files:
+  - crates/openlogi-device/src/write.rs
+  - crates/openlogi-device/src/write/**/*.rs
+rule:
+  all:
+    - pattern: $DEVICE.add_feature::<F>($$$ARGS)
+    - not:
+        inside:
+          kind: function_item
+          stopBy: end
+          has:
+            field: name
+            regex: '^register_feature$'

@@ -1,0 +1,30 @@
+# Owner: openlogi_core::update_feed — where each channel's feeds live on the
+# update host (`channels/<channel>/…`). Tests may pin the literal layout as an
+# oracle; production code asks update_feed.
+id: core-update-feed-layout-owner
+language: rust
+severity: error
+message: The update host's channel layout is openlogi_core::update_feed's (UpdateChannel::dir_url, UpdateChannel::manifest_url); ask it instead of spelling a channels/ path here.
+note: |
+  The app's manifest URL and xtask's Sparkle feed URL each spelled
+  `channels/stable/…`. See "Single source of truth" in AGENTS.md.
+files:
+  - crates/**/*.rs
+  - xtask/**/*.rs
+ignores:
+  - crates/openlogi-core/src/update_feed.rs
+  - "**/tests.rs"
+  - "**/tests/**"
+rule:
+  all:
+    - any:
+        - kind: string_literal
+        - kind: raw_string_literal
+    - regex: 'channels/'
+    - not:
+        inside:
+          kind: mod_item
+          stopBy: end
+          has:
+            field: name
+            regex: '^tests$'

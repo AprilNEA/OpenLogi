@@ -1,0 +1,12 @@
+# Device-setting feedback is rendered by ui::status, not by a private copy.
+id: gui-disable-keys-feedback-owner
+language: rust
+severity: error
+message: Use ui::status::status_line or retry_line for Disable Keys feedback.
+note: Keep typography and retry interaction consistent with other device panels.
+files:
+  - crates/openlogi-desktop/src/features/keyboard/disable_keys.rs
+rule:
+  any:
+    - pattern: $NODE.text_color($PAL.text_muted)
+    - pattern: Button::new($$$ARGS)

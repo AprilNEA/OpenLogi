@@ -1,0 +1,13 @@
+# Owner: inject::macos::spaces — DOCK_SWIPE_LAYOUT decides which Dock swipe event layout this macOS reads.
+id: inject-dock-swipe-layout-owner
+language: rust
+severity: error
+message: Read inject::macos::spaces::DOCK_SWIPE_LAYOUT instead of re-deriving the Dock swipe layout from the macOS version.
+files:
+  - crates/openlogi-inject/src/**/*.rs
+rule:
+  pattern: $RECV.operatingSystemVersion()
+  not:
+    inside:
+      stopBy: end
+      pattern: "static DOCK_SWIPE_LAYOUT: $TYPE = $VALUE;"

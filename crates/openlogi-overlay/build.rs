@@ -17,6 +17,12 @@ use std::path::PathBuf;
 use std::{env, fs};
 
 fn main() {
+    // `rust_i18n::i18n!` in `main.rs` reads `../openlogi-ui/locales` at macro
+    // expansion time, and Cargo does not track a proc macro's file reads. Without
+    // this, editing a catalog leaves the embedded translations stale until an
+    // unrelated change happens to recompile this crate.
+    println!("cargo:rerun-if-changed=../openlogi-ui/locales");
+
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }

@@ -50,9 +50,25 @@ pub(crate) fn replace_process(path: &Path) -> std::io::Error {
 /// make it lose the singleton-lock race and disappear.
 #[cfg(target_os = "macos")]
 pub(crate) fn schedule(path: &Path) -> std::io::Result<()> {
+    successor(path, std::process::id()).spawn().map(|_| ())
+}
+
+/// The shell that waits for `pid` to exit and then starts the agent at `path`.
+///
+/// The shell leads its own process group. Under launchd the agent leads the
+/// job's process group, and when the job's process exits launchd kills every
+/// process still in that group (launchd.plist(5), `AbandonProcessGroup`). A
+/// successor left in the agent's group dies with the agent it waits for, and
+/// `KeepAlive = {SuccessfulExit: false}` does not respawn the clean exit, so
+/// no agent runs until the GUI starts one (#1798).
+#[cfg(target_os = "macos")]
+fn successor(path: &Path, pid: u32) -> std::process::Command {
+    use std::os::unix::process::CommandExt as _;
+
     let mut command = std::process::Command::new("/bin/sh");
-    let pid = std::process::id().to_string();
-    if let Some(bundle) = helper_bundle(path) {
+    command.process_group(0);
+    let pid = pid.to_string();
+    if let Some(bundle) = openlogi_core::brand::helper_bundle_root(path) {
         command
             .arg("-c")
             .arg(
@@ -72,7 +88,7 @@ pub(crate) fn schedule(path: &Path) -> std::io::Result<()> {
             .arg(path)
             .args(std::env::args_os().skip(1));
     }
-    command.spawn().map(|_| ())
+    command
 }
 
 /// Schedule the macOS agent's required relaunch after Input Monitoring is
@@ -101,27 +117,46 @@ pub(crate) fn schedule_after_input_monitoring_grant() -> bool {
     }
 }
 
-/// The `.app` root of a packaged helper binary, `None` for a bare dev binary.
-#[cfg(target_os = "macos")]
-fn helper_bundle(path: &Path) -> Option<&Path> {
-    let bundle = path.ancestors().nth(3)?;
-    (bundle.extension()? == "app").then_some(bundle)
-}
-
-#[cfg(target_os = "macos")]
 #[cfg(test)]
+#[cfg(target_os = "macos")]
 mod tests {
-    #[test]
-    fn macos_helper_bundle_is_detected_from_packaged_binary_path() {
-        use super::helper_bundle;
-        use std::path::Path;
+    use std::path::Path;
+    use std::process::Command;
 
-        let binary = Path::new(
-            "/Applications/OpenLogi.app/Contents/Library/LoginItems/OpenLogi Agent.app/Contents/MacOS/openlogi-agent",
+    /// The process group that `ps` reports for `pid`.
+    fn process_group(pid: u32) -> u32 {
+        let output = Command::new("/bin/ps")
+            .args(["-o", "pgid=", "-p", &pid.to_string()])
+            .output()
+            .expect("run ps");
+        String::from_utf8(output.stdout)
+            .expect("ps prints ASCII")
+            .trim()
+            .parse()
+            .expect("ps prints one process group id")
+    }
+
+    /// launchd kills the exiting job's whole process group, so the successor
+    /// must not share the agent's group (#1798).
+    #[test]
+    fn the_successor_leaves_the_agents_process_group() {
+        // The shell waits for this live test process, so it stays in its wait
+        // loop and never starts the target.
+        let mut shell = super::successor(Path::new("/usr/bin/true"), std::process::id())
+            .spawn()
+            .expect("spawn the successor shell");
+        let shell_group = process_group(shell.id());
+        let own_group = process_group(std::process::id());
+        shell.kill().expect("stop the successor shell");
+        shell.wait().expect("reap the successor shell");
+        assert_eq!(
+            shell_group,
+            shell.id(),
+            "the successor leads its own process group"
         );
-        let bundle =
-            Path::new("/Applications/OpenLogi.app/Contents/Library/LoginItems/OpenLogi Agent.app");
-        assert_eq!(helper_bundle(binary), Some(bundle));
-        assert_eq!(helper_bundle(Path::new("/tmp/openlogi-agent")), None);
+        assert_ne!(
+            shell_group, own_group,
+            "the successor shares the process group of the agent it waits for"
+        );
     }
 }

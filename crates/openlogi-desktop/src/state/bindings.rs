@@ -1,24 +1,34 @@
 //! Mouse, gesture, and keyboard binding commits.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
-use gpui::App;
-use openlogi_core::binding::{Action, Binding, ButtonId, GestureDirection};
-use openlogi_core::bindings::{bindings_for, hidpp_gesture_maps_for, oshook_gestures_for};
+use openlogi_core::binding::{
+    Action, Binding, ButtonId, GamingLayout, GestureDirection, KeypadPage, LongPressBinding,
+    WheelHoldBinding,
+};
+use openlogi_core::bindings::{
+    bindings_for, button_bindings_for, hidpp_gesture_maps_for, oshook_gestures_for,
+};
 use openlogi_core::config::{Config, KeyTrigger};
 use tracing::debug;
 
 use crate::features::mouse::thumbwheel::{ThumbwheelPair, ThumbwheelPreset};
 use crate::state::devices::DeviceRecord;
 
-use super::{AppState, StateEvent};
+use super::events::StateEvents;
+use super::{AppState, DeviceKey, StateEvent};
 
-/// The per-app profile the binding panels are editing, and the device it was
-/// chosen for. Pairing them prevents a scope opened for one mouse from
-/// carrying over when selection moves to another.
+/// The per-app profile or G-Shift layer being edited, tied to the device it
+/// was opened for so it never carries over to another mouse.
 struct EditingScope {
-    device_key: String,
-    app: String,
+    persistent_key: String,
+    layer: Layer,
+}
+
+#[derive(PartialEq, Eq)]
+enum Layer {
+    App(String),
+    GShift,
 }
 
 /// Binding-editor state projected from the persisted configuration.
@@ -30,53 +40,105 @@ pub(super) struct BindingState {
     button_bindings: BTreeMap<ButtonId, Action>,
     /// Device-global per-direction gesture bindings.
     gesture_bindings: BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
+    /// Buttons whose hold turns the main wheel into a virtual thumb wheel.
+    /// Device-global like the gesture maps: a per-app entry holds one
+    /// `Action`, so wheel-hold lives only in the global profile.
+    wheel_hold_buttons: BTreeSet<ButtonId>,
     /// Global keyboard F-key bindings (Esc + F1-F19).
     keyboard_bindings: BTreeMap<KeyTrigger, Action>,
 }
 
 impl BindingState {
-    pub(super) fn new(config: &Config, persistent_key: Option<&str>) -> Self {
+    pub(super) fn new(
+        config: &Config,
+        persistent_key: Option<&str>,
+        layout: Option<&GamingLayout>,
+    ) -> Self {
         let mut state = Self {
             editing_scope: None,
             active_button: None,
             button_bindings: BTreeMap::new(),
             gesture_bindings: BTreeMap::new(),
+            wheel_hold_buttons: BTreeSet::new(),
             keyboard_bindings: config.keyboard.bindings.clone(),
         };
-        state.refresh_device(config, persistent_key);
+        state.refresh_device(config, persistent_key, layout);
         state
     }
 
-    fn editing_app<'a>(&'a self, persistent_key: Option<&str>) -> Option<&'a str> {
+    fn layer(&self, persistent_key: Option<&str>) -> Option<&Layer> {
         let key = persistent_key?;
         self.editing_scope
             .as_ref()
-            .filter(|scope| scope.device_key == key)
-            .map(|scope| scope.app.as_str())
+            .filter(|scope| scope.persistent_key == key)
+            .map(|scope| &scope.layer)
     }
 
-    fn set_editing_app(
+    fn editing_app<'a>(&'a self, persistent_key: Option<&str>) -> Option<&'a str> {
+        match self.layer(persistent_key)? {
+            Layer::App(app) => Some(app),
+            Layer::GShift => None,
+        }
+    }
+
+    fn editing_gshift(&self, persistent_key: Option<&str>) -> bool {
+        self.layer(persistent_key) == Some(&Layer::GShift)
+    }
+
+    fn set_layer(
         &mut self,
         config: &Config,
         persistent_key: Option<&str>,
-        app: Option<String>,
+        layout: Option<&GamingLayout>,
+        layer: Option<Layer>,
     ) {
-        self.editing_scope = app
-            .zip(persistent_key.map(str::to_string))
-            .map(|(app, device_key)| EditingScope { device_key, app });
-        self.refresh_device(config, persistent_key);
+        self.editing_scope =
+            layer
+                .zip(persistent_key.map(str::to_string))
+                .map(|(layer, persistent_key)| EditingScope {
+                    persistent_key,
+                    layer,
+                });
+        self.refresh_device(config, persistent_key, layout);
     }
 
-    fn refresh_device(&mut self, config: &Config, persistent_key: Option<&str>) {
-        let button_bindings =
-            bindings_for(config, persistent_key, self.editing_app(persistent_key));
+    /// Rebuild the projections for the device `persistent_key`, whose
+    /// G-series `layout` names the stock functions of its unset G buttons.
+    fn refresh_device(
+        &mut self,
+        config: &Config,
+        persistent_key: Option<&str>,
+        layout: Option<&GamingLayout>,
+    ) {
+        let mut button_bindings = bindings_for(
+            config,
+            persistent_key,
+            self.editing_app(persistent_key),
+            layout,
+        );
+        if self.editing_gshift(persistent_key)
+            && let Some(layer) = persistent_key.and_then(|key| config.gshift_overrides(key))
+        {
+            button_bindings.extend(layer.clone());
+        }
         let gesture_bindings = gesture_maps_for(config, persistent_key);
         self.button_bindings = button_bindings;
         self.gesture_bindings = gesture_bindings;
+        self.wheel_hold_buttons = persistent_key.map_or_else(BTreeSet::new, |key| {
+            ButtonId::ALL
+                .into_iter()
+                .filter(|button| config.is_wheel_hold(key, *button))
+                .collect()
+        });
     }
 
-    fn restore(&mut self, config: &Config, persistent_key: Option<&str>) {
-        self.refresh_device(config, persistent_key);
+    fn restore(
+        &mut self,
+        config: &Config,
+        persistent_key: Option<&str>,
+        layout: Option<&GamingLayout>,
+    ) {
+        self.refresh_device(config, persistent_key, layout);
         self.keyboard_bindings = config.keyboard.bindings.clone();
     }
 }
@@ -88,7 +150,7 @@ fn gesture_maps_for(
     let Some(key) = persistent_key else {
         return BTreeMap::new();
     };
-    let mut maps = hidpp_gesture_maps_for(config, Some(key));
+    let mut maps = hidpp_gesture_maps_for(config, Some(key), None);
     maps.extend(oshook_gestures_for(config, Some(key), None));
     maps
 }
@@ -120,6 +182,15 @@ pub(super) fn apply_thumbwheel_pair(
     true
 }
 
+/// Which bindings the mouse editor edits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BindingLayer {
+    /// The normal bindings, or an app profile's.
+    Normal,
+    /// The bindings used while G-Shift is held.
+    GShift,
+}
+
 impl AppState {
     /// The application whose profile the binding panels are editing, or `None`
     /// for the device's global profile.
@@ -134,13 +205,36 @@ impl AppState {
     /// Edit `app`'s profile for the active device, or its global profile with
     /// `None`. Re-derives the editor projections without persisting this
     /// window-local choice.
-    pub fn set_editing_app(&mut self, app: Option<String>) {
+    pub fn set_editing_app(&mut self, app: Option<String>) -> StateEvents {
+        self.set_editing_layer(app.map(Layer::App))
+    }
+
+    /// Which bindings the mouse editor edits.
+    #[must_use]
+    pub fn binding_layer(&self) -> BindingLayer {
+        if self.bindings.editing_gshift(
+            self.current_record()
+                .and_then(DeviceRecord::persistent_config_key),
+        ) {
+            BindingLayer::GShift
+        } else {
+            BindingLayer::Normal
+        }
+    }
+
+    pub fn set_binding_layer(&mut self, layer: BindingLayer) -> StateEvents {
+        self.set_editing_layer((layer == BindingLayer::GShift).then_some(Layer::GShift))
+    }
+
+    fn set_editing_layer(&mut self, layer: Option<Layer>) -> StateEvents {
         let key = self
             .current_record()
             .and_then(DeviceRecord::persistent_config_key)
             .map(str::to_string);
+        let layout = self.current_gaming_layout();
         self.bindings
-            .set_editing_app(&self.config, key.as_deref(), app);
+            .set_layer(&self.config, key.as_deref(), layout, layer);
+        self.for_current_device(StateEvent::BindingsChanged)
     }
 
     /// The hotspot most recently armed in the mouse editor.
@@ -161,10 +255,75 @@ impl AppState {
         &self.bindings.gesture_bindings
     }
 
+    /// The selected device's buttons that hold the wheel to scroll sideways.
+    /// Device-level like [`Self::gesture_bindings`], so it does not vary with
+    /// the profile this window has open.
+    #[must_use]
+    pub fn wheel_hold_buttons(&self) -> &BTreeSet<ButtonId> {
+        &self.bindings.wheel_hold_buttons
+    }
+
     /// Global keyboard F-key bindings.
     #[must_use]
     pub fn keyboard_bindings(&self) -> &BTreeMap<KeyTrigger, Action> {
         &self.bindings.keyboard_bindings
+    }
+
+    /// The last of the selected device's keypad binding pages — its page
+    /// count; one for any device that never had more.
+    #[must_use]
+    pub fn current_keypad_pages(&self) -> KeypadPage {
+        self.current_record()
+            .and_then(DeviceRecord::persistent_config_key)
+            .map_or(KeypadPage::FIRST, |key| self.config.keypad_pages(key))
+    }
+
+    /// What each of the selected keypad's grid keys shows in the open
+    /// profile ([`Binding::key_action`]) — the face the agent paints on its
+    /// LCD. A key that does nothing is absent.
+    ///
+    /// Unlike [`Self::button_bindings`], a long press with only its long arm
+    /// set shows that arm.
+    #[must_use]
+    pub fn keypad_key_actions(&self) -> BTreeMap<ButtonId, Action> {
+        let key = self
+            .current_record()
+            .and_then(DeviceRecord::persistent_config_key);
+        button_bindings_for(&self.config, key, self.editing_app(), None)
+            .into_iter()
+            .filter(|(button, _)| button.grid_slot().is_some())
+            .filter_map(|(button, binding)| Some((button, binding.key_action()?)))
+            .collect()
+    }
+
+    /// Whether the selected keypad binds any key on `page` in any profile —
+    /// what removing that page would drop.
+    #[must_use]
+    pub fn current_keypad_page_binds(&self, page: KeypadPage) -> bool {
+        self.current_record()
+            .and_then(DeviceRecord::persistent_config_key)
+            .is_some_and(|key| self.config.keypad_page_binds(key, page))
+    }
+
+    /// Give the selected keypad pages `1..=last`, persist it, and have the
+    /// agent reload. Shrinking drops the removed pages' grid bindings (see
+    /// [`Config::set_keypad_pages`]); the binding projection is refreshed so
+    /// the editor and the paging buttons' seeded actions follow at once.
+    pub fn commit_keypad_pages(&mut self, last: KeypadPage) -> StateEvents {
+        let events = self.for_current_device(StateEvent::BindingsChanged);
+        let Some(key) = self
+            .current_record()
+            .and_then(DeviceRecord::persistent_config_key)
+            .map(str::to_string)
+        else {
+            debug!("no persistent device key — keypad pages not stored");
+            return StateEvents::default();
+        };
+        self.config
+            .edit(|config| config.set_keypad_pages(&key, last));
+        self.refresh_binding_projections();
+        self.persist_and_reload("keypad pages");
+        events
     }
 
     pub(super) fn refresh_binding_projections(&mut self) {
@@ -172,7 +331,9 @@ impl AppState {
             .current_record()
             .and_then(DeviceRecord::persistent_config_key)
             .map(str::to_string);
-        self.bindings.refresh_device(&self.config, key.as_deref());
+        let layout = self.current_gaming_layout();
+        self.bindings
+            .refresh_device(&self.config, key.as_deref(), layout);
     }
 
     pub(super) fn restore_binding_projections(&mut self) {
@@ -180,27 +341,22 @@ impl AppState {
             .current_record()
             .and_then(DeviceRecord::persistent_config_key)
             .map(str::to_string);
-        self.bindings.restore(&self.config, key.as_deref());
-    }
-
-    /// Apply an active-device binding edit and notify every subscribed editor.
-    pub(crate) fn update_bindings(cx: &mut App, update: impl FnOnce(&mut Self)) {
-        Self::update(cx, |state, cx| {
-            let key = state.current_record().map(DeviceRecord::device_key);
-            update(state);
-            if let Some(key) = key {
-                cx.emit(StateEvent::BindingsChanged(key));
-            }
-        });
+        let layout = self.current_gaming_layout();
+        self.bindings.restore(&self.config, key.as_deref(), layout);
     }
 
     /// Update a single binding in memory, on disk, and in the shared hook
     /// map for the currently selected device — in whichever profile
     /// [`AppState::editing_app`] has open.
     ///
+    /// In the global profile a long-press button keeps its long action and a
+    /// wheel-hold button keeps holding the wheel: the picked action replaces
+    /// only the short or click action.
+    ///
     /// Disk failures restore the persisted projection and surface a config
     /// error instead of crashing the UI thread.
-    pub fn commit_binding(&mut self, button: ButtonId, action: Action) {
+    pub fn commit_binding(&mut self, button: ButtonId, action: Action) -> StateEvents {
+        let events = self.for_current_device(StateEvent::BindingsChanged);
         self.bindings.button_bindings.insert(button, action.clone());
 
         let Some(key) = self
@@ -212,69 +368,157 @@ impl AppState {
                 ?button,
                 "no persistent device key — binding kept in memory only"
             );
-            return;
+            return events;
         };
         let app = self.editing_app().map(str::to_string);
-        self.config.edit(|config| match app {
+        let gshift = self.binding_layer() == BindingLayer::GShift;
+        self.config.edit(|config| {
             // A per-app entry is `Action`-valued, so an override always
             // replaces the whole button — which is exactly what picking one
             // action means, and why gesture mode is not offered in this scope.
-            Some(app) => config.set_per_app_binding(&key, &app, button, Some(action)),
-            None => config.set_binding(&key, button, Binding::Single(action)),
+            if let Some(app) = app {
+                config.set_per_app_binding(&key, &app, button, Some(action));
+            } else if gshift {
+                config.set_gshift_binding(&key, button, Some(action));
+            } else {
+                let binding = match config.stored_bindings(&key).get(&button) {
+                    Some(Binding::LongPress(binding)) => {
+                        Binding::LongPress(LongPressBinding::new(action, binding.long().clone()))
+                    }
+                    Some(Binding::WheelHold(_)) => {
+                        Binding::WheelHold(WheelHoldBinding::horizontal_scroll(action))
+                    }
+                    _ => Binding::Single(action),
+                };
+                config.set_binding(&key, button, binding);
+            }
         });
         // The agent owns the hook; have it rebuild its live map from config.
         self.persist_and_reload("binding");
+        events
+    }
+
+    /// Remove the whole assignment in the open scope. The default scope
+    /// returns to the device's native/default behavior; an app scope inherits
+    /// the device default again. Unlike `Action::None`, this does not suppress
+    /// a keyboard control.
+    pub fn clear_binding(&mut self, button: ButtonId) -> StateEvents {
+        if self.editing_app().is_some() {
+            return self.clear_app_binding(button);
+        }
+        let events = self.for_current_device(StateEvent::BindingsChanged);
+        self.bindings.button_bindings.remove(&button);
+        let Some(key) = self
+            .current_record()
+            .and_then(DeviceRecord::persistent_config_key)
+            .map(str::to_string)
+        else {
+            return events;
+        };
+        self.config.edit(|config| {
+            if let Some(device) = config.devices.get_mut(&key) {
+                device.bindings.remove(&button);
+            }
+        });
+        self.refresh_binding_projections();
+        self.persist_and_reload("binding");
+        events
     }
 
     /// Drop `button`'s override in the open per-app profile, so it inherits the
     /// device's global binding again. A no-op in the global profile, which has
     /// nothing to inherit from.
-    pub fn clear_app_binding(&mut self, button: ButtonId) {
-        self.clear_app_bindings([button]);
+    pub fn clear_app_binding(&mut self, button: ButtonId) -> StateEvents {
+        self.clear_app_bindings([button])
     }
 
     /// Drop both halves of a thumb-wheel override together.
-    pub fn clear_app_thumbwheel(&mut self) {
-        self.clear_app_bindings([ButtonId::ThumbwheelScrollDown, ButtonId::ThumbwheelScrollUp]);
+    pub fn clear_app_thumbwheel(&mut self) -> StateEvents {
+        self.clear_app_bindings([ButtonId::ThumbwheelScrollDown, ButtonId::ThumbwheelScrollUp])
     }
 
-    fn clear_app_bindings(&mut self, buttons: impl IntoIterator<Item = ButtonId>) {
+    fn clear_app_bindings(&mut self, buttons: impl IntoIterator<Item = ButtonId>) -> StateEvents {
+        let events = self.for_current_device(StateEvent::BindingsChanged);
         let Some(key) = self
             .current_record()
             .and_then(DeviceRecord::persistent_config_key)
             .map(str::to_string)
         else {
-            return;
+            return events;
         };
-        let Some(app) = self.editing_app().map(str::to_string) else {
-            return;
-        };
+        let app = self.editing_app().map(str::to_string);
+        if app.is_none() && self.binding_layer() == BindingLayer::Normal {
+            return events;
+        }
         self.config.edit(|config| {
             for button in buttons {
-                config.set_per_app_binding(&key, &app, button, None);
+                match &app {
+                    Some(app) => config.set_per_app_binding(&key, app, button, None),
+                    None => config.set_gshift_binding(&key, button, None),
+                }
             }
         });
         self.refresh_binding_projections();
         self.persist_and_reload("per-app binding");
+        events
     }
 
-    /// Delete the open per-app profile outright and fall back to editing the
-    /// device's global bindings.
-    pub fn remove_editing_app_profile(&mut self) {
-        let Some(key) = self
-            .current_record()
-            .and_then(DeviceRecord::persistent_config_key)
-            .map(str::to_string)
-        else {
-            return;
-        };
-        let Some(app) = self.editing_app().map(str::to_string) else {
-            return;
-        };
+    /// Restore live default inheritance without leaving the application's editor.
+    pub fn reset_app_profile(&mut self, key: &DeviceKey, app: &str) -> StateEvents {
+        self.clear_app_profile(key.as_str(), app);
+        StateEvent::BindingsChanged(key.clone()).into()
+    }
+
+    /// Delete both per-app configuration sections in one save/reload. A failed
+    /// save restores both sections and leaves both editor selections intact.
+    pub fn remove_all_app_profiles(&mut self, key: &DeviceKey, app: &str) -> StateEvents {
+        let changed = self.config.edit(|config| {
+            let Some(device) = config.devices.get_mut(key.as_str()) else {
+                return false;
+            };
+            let buttons = device.per_app_bindings.remove(app).is_some();
+            let ring = device.action_ring.per_app.remove(app).is_some();
+            buttons || ring
+        });
+        if changed && !self.persist_and_reload("all application profiles") {
+            return StateEvent::BindingsChanged(key.clone()).into();
+        }
+
+        // Both saved sections are gone, so the scoped removals only close their
+        // matching editors; neither writes or reloads an already absent profile.
+        let events = self.remove_app_profile(key, app);
+        let _ = self.remove_action_ring_profile(key, app);
+        events
+    }
+
+    /// Remove the named profile, not whichever profile is selected when a
+    /// confirmation completes. Only leave its editor after a successful save.
+    pub fn remove_app_profile(&mut self, key: &DeviceKey, app: &str) -> StateEvents {
+        if self.clear_app_profile(key.as_str(), app)
+            && self.bindings.editing_scope.as_ref().is_some_and(|scope| {
+                scope.persistent_key == key.as_str() && scope.layer == Layer::App(app.into())
+            })
+        {
+            self.bindings.editing_scope = None;
+            self.refresh_binding_projections();
+        }
+        StateEvent::BindingsChanged(key.clone()).into()
+    }
+
+    fn clear_app_profile(&mut self, key: &str, app: &str) -> bool {
+        if !self
+            .config
+            .app_profiles(key)
+            .any(|candidate| candidate == app)
+        {
+            // An application selected but never edited is window-local only.
+            return true;
+        }
         self.config
-            .edit(|config| config.remove_app_profile(&key, &app));
-        self.set_editing_app(None);
-        self.persist_and_reload("per-app profile");
+            .edit(|config| config.remove_app_profile(key, app));
+        let saved = self.persist_and_reload("per-app profile");
+        self.refresh_binding_projections();
+        saved
     }
 
     /// The open per-app profile's overrides, so the panel can tell an override
@@ -285,13 +529,17 @@ impl AppState {
         let key = self
             .current_record()
             .and_then(DeviceRecord::persistent_config_key)?;
+        if self.binding_layer() == BindingLayer::GShift {
+            return self.config.gshift_overrides(key);
+        }
         self.editing_app()
             .and_then(|app| self.config.per_app_overrides(key, app))
     }
 
     /// Apply one paired thumb-wheel preset atomically. Both directional
     /// bindings are updated before the single config persistence/reload.
-    pub fn commit_thumbwheel_preset(&mut self, preset: ThumbwheelPreset) {
+    pub fn commit_thumbwheel_preset(&mut self, preset: ThumbwheelPreset) -> StateEvents {
+        let events = self.for_current_device(StateEvent::BindingsChanged);
         let pair = preset.pair();
         let key = self
             .current_record()
@@ -309,16 +557,23 @@ impl AppState {
         });
         if !changed {
             debug!("no persistent device key — thumb-wheel pair kept in memory only");
-            return;
+            return events;
         }
         self.persist_and_reload("thumb-wheel binding");
+        events
     }
     /// Records (or, with `action = None`, clears) the F-key `trigger` binding
     /// in the global `[keyboard]` map. Mirrors [`Self::commit_binding`] minus
-    /// the device key — keyboard bindings are device-agnostic, so there's no
-    /// `current_record()` dependency. The agent's `rebuild()` republishes its
-    /// shared keyboard map on `reload_config`, so this lands live.
-    pub fn commit_keyboard_binding(&mut self, trigger: KeyTrigger, action: Option<Action>) {
+    /// the device key — keyboard bindings are device-agnostic, so the write
+    /// happens with or without a selected device; only the event it reports is
+    /// addressed to the selected device, as every binding change's is. The
+    /// agent's `rebuild()` republishes its shared keyboard map on
+    /// `reload_config`, so this lands live.
+    pub fn commit_keyboard_binding(
+        &mut self,
+        trigger: KeyTrigger,
+        action: Option<Action>,
+    ) -> StateEvents {
         match action {
             Some(ref a) => {
                 self.bindings
@@ -332,6 +587,7 @@ impl AppState {
         self.config
             .edit(|config| config.set_keyboard_binding(trigger, action));
         self.persist_and_reload("keyboard binding");
+        self.for_current_device(StateEvent::BindingsChanged)
     }
     /// Per-direction maps for every gesture-mode button of the current device,
     /// keyed by button — what the runtime dispatches for it. HID++ sources come
@@ -381,13 +637,28 @@ impl AppState {
     /// Turn gesture mode on or off for one button of the current device —
     /// independently of every other button. Persists, tells the agent to
     /// rebuild, and refreshes the projected maps the UI reads.
-    pub fn commit_gesture_mode(&mut self, button: ButtonId, enabled: bool) {
+    pub fn commit_gesture_mode(&mut self, button: ButtonId, enabled: bool) -> StateEvents {
+        let events = self.for_current_device(StateEvent::BindingsChanged);
+        if enabled && !button.supports_gesture_mode() {
+            debug!(?button, "gesture mode is not supported for this control");
+            return events;
+        }
+        if enabled
+            && button == ButtonId::DpiToggle
+            && !self
+                .current_record()
+                .and_then(|record| record.capabilities)
+                .is_some_and(|caps| caps.dpi_gestures)
+        {
+            debug!("DPI gestures require measured raw-XY support");
+            return events;
+        }
         let Some(key) = self
             .current_record()
             .and_then(DeviceRecord::persistent_config_key)
             .map(str::to_string)
         else {
-            return;
+            return events;
         };
         // Gesture mode is a property of the device's global bindings — a
         // per-app entry holds one `Action` and has no per-direction shape to
@@ -396,16 +667,63 @@ impl AppState {
         // every app instead of the one on screen.
         if self.editing_app().is_some() {
             debug!(?button, "gesture mode is not editable in a per-app profile");
-            return;
+            return events;
         }
         if self.config.is_gesture_mode(&key, button) == enabled {
-            return;
+            return events;
         }
         self.config
             .edit(|config| config.set_gesture_mode(&key, button, enabled));
         // The mode change shuffles bindings between the single + gesture maps.
         self.refresh_binding_projections();
         self.persist_and_reload("gesture-mode change");
+        events
+    }
+
+    /// Turn wheel-hold on or off for one button of the current device:
+    /// holding it then turns the main wheel into a horizontal scroll, and a
+    /// press without scrolling still runs its action. Persists, tells the
+    /// agent to rebuild, and refreshes the projections the UI reads.
+    pub fn commit_wheel_hold(&mut self, button: ButtonId, enabled: bool) -> StateEvents {
+        let events = self.for_current_device(StateEvent::BindingsChanged);
+        if !button.supports_wheel_hold() {
+            debug!(?button, "wheel-hold is not supported for this control");
+            return events;
+        }
+        // Turning it off stays possible without the capability, so a binding
+        // carried over from another device can always be removed.
+        if enabled
+            && !self
+                .current_record()
+                .and_then(|record| record.capabilities)
+                .is_some_and(|caps| caps.virtual_thumbwheel)
+        {
+            debug!("wheel-hold requires measured raw-wheel support");
+            return events;
+        }
+        let Some(key) = self
+            .current_record()
+            .and_then(DeviceRecord::persistent_config_key)
+            .map(str::to_string)
+        else {
+            return events;
+        };
+        // Same backstop as `commit_gesture_mode`: a per-app entry holds one
+        // `Action`, so writing here would change every app instead of the one
+        // on screen.
+        if self.editing_app().is_some() {
+            debug!(?button, "wheel-hold is not editable in a per-app profile");
+            return events;
+        }
+        if self.config.is_wheel_hold(&key, button) == enabled {
+            return events;
+        }
+        self.config
+            .edit(|config| config.set_wheel_hold(&key, button, enabled));
+        // Leaving gesture mode moves the button between the projected maps.
+        self.refresh_binding_projections();
+        self.persist_and_reload("wheel-hold change");
+        events
     }
 
     /// Update one direction of `button`'s gesture binding in memory, on disk,
@@ -415,7 +733,8 @@ impl AppState {
         button: ButtonId,
         direction: GestureDirection,
         action: Action,
-    ) {
+    ) -> StateEvents {
+        let events = self.for_current_device(StateEvent::BindingsChanged);
         let Some(key) = self
             .current_record()
             .and_then(DeviceRecord::persistent_config_key)
@@ -426,8 +745,14 @@ impl AppState {
                 ?direction,
                 "no persistent device key — gesture binding edit ignored"
             );
-            return;
+            return events;
         };
+        let is_gesture_mode = self.config.is_gesture_mode(&key, button);
+        let is_stored_os_hook_gesture = button.is_os_hook_button() && is_gesture_mode;
+        if !button.supports_gesture_mode() && !is_stored_os_hook_gesture {
+            debug!(?button, "gestures are not supported for this control");
+            return events;
+        }
         // Same backstop as `commit_gesture_mode`: direction maps live only in
         // the global profile, so an edit arriving while a per-app one is open
         // would change every app instead of the one on screen.
@@ -437,18 +762,18 @@ impl AppState {
                 ?direction,
                 "gestures are not editable in a per-app profile"
             );
-            return;
+            return events;
         }
         // A stray edit on a button not in gesture mode must NOT silently
         // promote it (the gesture editor shouldn't be reachable in that
         // state): no-op instead.
-        if !self.config.is_gesture_mode(&key, button) {
+        if !is_gesture_mode {
             debug!(
                 ?button,
                 ?direction,
                 "button is not in gesture mode — ignoring gesture binding edit"
             );
-            return;
+            return events;
         }
         self.bindings
             .gesture_bindings
@@ -459,5 +784,6 @@ impl AppState {
             .edit(|config| config.set_gesture_direction(&key, button, direction, action));
         // The agent owns the gesture watcher; have it rebuild from config.
         self.persist_and_reload("gesture binding");
+        events
     }
 }

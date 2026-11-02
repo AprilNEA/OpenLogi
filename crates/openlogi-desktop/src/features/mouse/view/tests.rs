@@ -1,0 +1,1019 @@
+use gpui::{Entity, KeyDownEvent, Keystroke, Modifiers, TestAppContext, VisualTestContext, size};
+use openlogi_core::binding::default_binding;
+use openlogi_core::config::Config;
+
+use super::ShortcutError::{ShiftedSymbol, Unrecognized};
+use super::*;
+use crate::features::mouse::leader_lines::Side;
+use crate::services::assets::AssetResolver;
+use crate::services::i18n::LOCALE_LOCK;
+use crate::state::Sources;
+
+fn install_app_state(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        let resolver = AssetResolver::new();
+        let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let state =
+            cx.new(|_| AppState::new(Sources::in_memory(Config::ephemeral(), &resolver, commands)));
+        AppState::set_global(state, cx);
+    });
+}
+
+fn click_picker_control(cx: &mut VisualTestContext, selector: &'static str) {
+    let bounds = cx.debug_bounds(selector).expect(selector);
+    cx.simulate_click(bounds.center(), Modifiers::default());
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+}
+
+/// Press `key` with Cmd+Shift held, in the order GPUI's platforms report a
+/// shifted digit or symbol: a modifier change that holds Shift, then the
+/// shifted character without Shift (#2121).
+fn press_shifted_symbol(cx: &mut VisualTestContext, key: &str) {
+    let cmd = Modifiers {
+        platform: true,
+        ..Modifiers::default()
+    };
+    cx.simulate_modifiers_change(Modifiers { shift: true, ..cmd });
+    cx.simulate_event(KeyDownEvent {
+        keystroke: Keystroke {
+            modifiers: cmd,
+            key: key.into(),
+            key_char: None,
+        },
+        is_held: false,
+        prefer_character_input: false,
+    });
+    cx.simulate_modifiers_change(Modifiers::default());
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+}
+
+fn assert_forward_binding(cx: &mut VisualTestContext, expected: &Action) {
+    cx.update(|_, cx| {
+        assert_eq!(
+            AppState::try_read(cx)
+                .unwrap()
+                .button_bindings()
+                .get(&ButtonId::Forward),
+            Some(expected)
+        );
+    });
+}
+
+#[gpui::test]
+fn long_bindings_stay_inside_their_label_card(cx: &mut TestAppContext) {
+    // #1401: the card's Button base centres its children on the cross axis,
+    // so without `items_stretch` the value row keeps its natural width and
+    // overflows both edges once the binding name is wider than the card. The
+    // English defaults are enough to trip it under the test text system
+    // ("Forward (Button 5)" measures a 206px row over a 156px card). Pinned
+    // to English under the lock: another test in this binary leaves the
+    // process locale at zh-CN, whose labels are short enough to fit and
+    // would have made this a false pass.
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    cx.update(gpui_component::init);
+    install_app_state(cx);
+    let (view, cx) = cx.add_window_view(MouseModelView::new);
+    // Wide enough for labels on both sides (`model_layout` hides them under 960).
+    cx.simulate_resize(size(px(1200.), px(800.)));
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+
+    // Selectors are `label-card-{MouseControlId:?}` / `label-value-row-{MouseControlId:?}`.
+    for (card_selector, row_selector) in [
+        (
+            "label-card-Button(Forward)",
+            "label-value-row-Button(Forward)",
+        ),
+        (
+            "label-card-Button(MiddleClick)",
+            "label-value-row-Button(MiddleClick)",
+        ),
+    ] {
+        let card = cx
+            .debug_bounds(card_selector)
+            .expect("the synthetic model renders a label card for this control");
+        let row = cx
+            .debug_bounds(row_selector)
+            .expect("the label card renders its value row");
+        assert!(
+            card.contains(&row.origin) && card.contains(&row.bottom_right()),
+            "{row_selector}: value row {row:?} must sit inside its card {card:?}"
+        );
+    }
+
+    drop(view);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+}
+
+/// At the smallest window with cards the synthetic model shrinks by its width
+/// until its five cards no longer fit beside it. The canvas grows to hold the
+/// ones that reach past the model, rather than leaving them over its edge
+/// where the clipped tab can cut them off.
+#[gpui::test]
+fn cards_that_reach_past_a_shrunk_model_stay_on_the_canvas(cx: &mut TestAppContext) {
+    cx.update(gpui_component::init);
+    install_app_state(cx);
+    let (view, cx) = cx.add_window_view(MouseModelView::new);
+    cx.simulate_resize(size(px(960.), px(680.)));
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+
+    let canvas = cx
+        .debug_bounds("mouse-canvas")
+        .expect("the model canvas renders");
+    for selector in [
+        "label-card-Button(MiddleClick)",
+        "label-card-Button(Back)",
+        "label-card-Button(DpiToggle)",
+        "label-card-Button(Forward)",
+        "label-card-Button(GestureButton)",
+    ] {
+        let card = cx.debug_bounds(selector).expect(selector);
+        let inside = card.top() >= canvas.top() - px(0.5)
+            && card.bottom() <= canvas.bottom() + px(0.5)
+            && card.left() >= canvas.left() - px(0.5)
+            && card.right() <= canvas.right() + px(0.5);
+        assert!(
+            inside,
+            "{selector}: card {card:?} leaves the canvas {canvas:?}"
+        );
+    }
+
+    drop(view);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn action_picker_renders_after_opening_through_the_inspector(cx: &mut TestAppContext) {
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    cx.update(gpui_component::init);
+    install_app_state(cx);
+    let (view, cx) = cx.add_window_view(MouseModelView::new);
+    cx.simulate_resize(size(px(1200.), px(1000.)));
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+
+    click_picker_control(cx, "label-card-Button(Forward)");
+    click_picker_control(cx, "inspector-current-action");
+    view.read_with(cx, |view, _| assert!(view.action_picker_open));
+    assert!(cx.debug_bounds("inspector-action-Copy").is_some());
+
+    click_picker_control(cx, "inspector-action-custom-shortcut-add");
+    view.read_with(cx, |view, _| {
+        assert_eq!(view.invalid_drafts.shortcut, Some(Unrecognized));
+        assert!(!view.invalid_drafts.application);
+    });
+    assert!(
+        cx.debug_bounds("inspector-action-custom-shortcut-error")
+            .is_some()
+    );
+
+    click_picker_control(cx, "inspector-action-custom-application-add");
+    view.read_with(cx, |view, _| {
+        assert!(view.action_picker_open);
+        assert_eq!(view.invalid_drafts.shortcut, Some(Unrecognized));
+        assert!(view.invalid_drafts.application);
+    });
+    assert!(
+        cx.debug_bounds("inspector-action-custom-application-error")
+            .is_some()
+    );
+    assert_forward_binding(cx, &default_binding(ButtonId::Forward));
+
+    click_picker_control(cx, "inspector-action-custom-shortcut-input");
+    cx.simulate_input("Cmd+K");
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    view.read_with(cx, |view, _| {
+        assert_eq!(view.invalid_drafts.shortcut, None);
+        assert!(view.invalid_drafts.application);
+    });
+    assert!(
+        cx.debug_bounds("inspector-action-custom-shortcut-error")
+            .is_none()
+    );
+    assert!(
+        cx.debug_bounds("inspector-action-custom-application-error")
+            .is_some()
+    );
+    click_picker_control(cx, "inspector-action-custom-shortcut-add");
+    view.read_with(cx, |view, _| assert!(!view.action_picker_open));
+    assert_forward_binding(cx, &Action::CustomShortcut("Cmd+K".parse().unwrap()));
+
+    click_picker_control(cx, "inspector-current-action");
+    view.read_with(cx, |view, cx| {
+        assert_eq!(view.custom_shortcut_input.read(cx).value(), "");
+        assert_eq!(view.custom_application_input.read(cx).value(), "");
+        assert!(!view.invalid_drafts.application);
+    });
+    assert!(
+        cx.debug_bounds("inspector-action-custom-application-error")
+            .is_none()
+    );
+    click_picker_control(cx, "inspector-action-custom-application-input");
+    cx.simulate_input("/Applications/Calculator.app");
+    click_picker_control(cx, "inspector-action-custom-application-add");
+    view.read_with(cx, |view, _| assert!(!view.action_picker_open));
+    cx.update(|_, cx| {
+        let Action::OpenApplication(target) =
+            &AppState::try_read(cx).unwrap().button_bindings()[&ButtonId::Forward]
+        else {
+            panic!("the application editor must commit an application action");
+        };
+        assert_eq!(target.path(), "/Applications/Calculator.app");
+    });
+
+    click_picker_control(cx, "inspector-current-action");
+    click_picker_control(cx, "inspector-action-shortcut-hold");
+    view.read_with(cx, |view, _| {
+        assert_eq!(view.shortcut_mode, ShortcutMode::Hold);
+    });
+    click_picker_control(cx, "inspector-action-custom-shortcut-input");
+    cx.simulate_input("Cmd+K");
+    click_picker_control(cx, "inspector-action-custom-shortcut-add");
+    view.read_with(cx, |view, _| assert!(!view.action_picker_open));
+    assert_forward_binding(cx, &Action::HoldShortcut("Cmd+K".parse().unwrap()));
+
+    click_picker_control(cx, "inspector-current-action");
+    view.read_with(cx, |view, _| {
+        assert_eq!(view.shortcut_mode, ShortcutMode::Tap);
+    });
+    cx.update(|window, cx| {
+        view.read(cx)
+            .action_search
+            .focus_handle(cx)
+            .focus(window, cx);
+    });
+    cx.simulate_input("Copy");
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    click_picker_control(cx, "inspector-action-Copy");
+    view.read_with(cx, |view, _| assert!(!view.action_picker_open));
+    assert_forward_binding(cx, &Action::Copy);
+
+    drop(view);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+}
+
+/// #2117: Record fills the custom shortcut field from the next key press, and
+/// Add commits the field as before.
+#[gpui::test]
+fn record_fills_the_custom_shortcut_from_the_next_key_press(cx: &mut TestAppContext) {
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    cx.update(gpui_component::init);
+    install_app_state(cx);
+    let (view, cx) = cx.add_window_view(MouseModelView::new);
+    cx.simulate_resize(size(px(1200.), px(1000.)));
+    // Focus events, which end a recording, only fire in an active window.
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    click_picker_control(cx, "label-card-Button(Forward)");
+    click_picker_control(cx, "inspector-current-action");
+    let shortcut_text = |cx: &mut VisualTestContext| {
+        view.read_with(cx, |view, cx| {
+            view.custom_shortcut_input.read(cx).value().to_string()
+        })
+    };
+    let press = |cx: &mut VisualTestContext, keystroke: &str| {
+        cx.simulate_keystrokes(keystroke);
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+    };
+
+    click_picker_control(cx, "inspector-action-custom-shortcut-record");
+    assert!(
+        cx.debug_bounds("inspector-action-custom-shortcut-recording")
+            .is_some()
+    );
+    press(cx, "ctrl-shift-pageup");
+    assert_eq!(shortcut_text(cx), "Ctrl+Shift+PageUp");
+    assert!(
+        cx.debug_bounds("inspector-action-custom-shortcut-recording")
+            .is_none()
+    );
+    view.read_with(cx, |view, _| {
+        assert!(view.action_picker_open, "recording alone commits nothing");
+    });
+    assert_forward_binding(cx, &default_binding(ButtonId::Forward));
+
+    click_picker_control(cx, "inspector-action-custom-shortcut-record");
+    press(cx, "escape");
+    assert_eq!(shortcut_text(cx), "Ctrl+Shift+PageUp", "Escape cancels");
+    assert!(
+        cx.debug_bounds("inspector-action-custom-shortcut-recording")
+            .is_none()
+    );
+
+    click_picker_control(cx, "inspector-action-custom-shortcut-record");
+    press(cx, "f21");
+    view.read_with(cx, |view, _| {
+        assert_eq!(view.invalid_drafts.shortcut, Some(Unrecognized));
+    });
+    assert!(
+        cx.debug_bounds("inspector-action-custom-shortcut-error")
+            .is_some()
+    );
+
+    // #2121: Cmd+Shift+] arrives as Cmd+`}`. Record refuses it and leaves
+    // the field as it was.
+    click_picker_control(cx, "inspector-action-custom-shortcut-record");
+    press_shifted_symbol(cx, "}");
+    view.read_with(cx, |view, _| {
+        assert_eq!(view.invalid_drafts.shortcut, Some(ShiftedSymbol));
+        assert!(view.shortcut_recorder.is_none());
+    });
+    assert_eq!(shortcut_text(cx), "Ctrl+Shift+PageUp");
+
+    // Moving focus out of the Record area ends the recording, so the next
+    // key press reaches the newly focused field (#2138 review).
+    click_picker_control(cx, "inspector-action-custom-shortcut-record");
+    click_picker_control(cx, "inspector-action-custom-application-input");
+    view.read_with(cx, |view, _| assert!(view.shortcut_recorder.is_none()));
+    assert!(
+        cx.debug_bounds("inspector-action-custom-shortcut-recording")
+            .is_none()
+    );
+    cx.simulate_input("x");
+    view.read_with(cx, |view, cx| {
+        assert_eq!(view.custom_application_input.read(cx).value(), "x");
+    });
+    assert_eq!(shortcut_text(cx), "Ctrl+Shift+PageUp");
+
+    click_picker_control(cx, "inspector-action-custom-shortcut-add");
+    view.read_with(cx, |view, _| assert!(!view.action_picker_open));
+    assert_forward_binding(
+        cx,
+        &Action::CustomShortcut("Ctrl+Shift+PageUp".parse().unwrap()),
+    );
+
+    drop(view);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+}
+
+/// #2122: a mouse button can be bound to a shell command from the picker, the
+/// way the Actions Ring and keyboard editors already allow.
+#[gpui::test]
+fn the_action_picker_binds_a_button_to_a_shell_command(cx: &mut TestAppContext) {
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    cx.update(gpui_component::init);
+    install_app_state(cx);
+    let (view, cx) = cx.add_window_view(MouseModelView::new);
+    cx.simulate_resize(size(px(1200.), px(1000.)));
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+
+    click_picker_control(cx, "label-card-Button(Forward)");
+    click_picker_control(cx, "inspector-current-action");
+
+    click_picker_control(cx, "inspector-action-custom-command-add");
+    view.read_with(cx, |view, _| {
+        assert!(view.action_picker_open);
+        assert_eq!(
+            view.invalid_drafts,
+            InvalidDrafts {
+                command: true,
+                ..InvalidDrafts::default()
+            }
+        );
+    });
+    assert!(
+        cx.debug_bounds("inspector-action-custom-command-error")
+            .is_some()
+    );
+    assert_forward_binding(cx, &default_binding(ButtonId::Forward));
+
+    click_picker_control(cx, "inspector-action-custom-command-input");
+    cx.simulate_input("snipaste snip");
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    view.read_with(cx, |view, _| assert!(!view.invalid_drafts.command));
+    assert!(
+        cx.debug_bounds("inspector-action-custom-command-error")
+            .is_none()
+    );
+    click_picker_control(cx, "inspector-action-custom-command-add");
+    view.read_with(cx, |view, _| assert!(!view.action_picker_open));
+    assert_forward_binding(cx, &Action::RunShellCommand("snipaste snip".into()));
+
+    click_picker_control(cx, "inspector-current-action");
+    view.read_with(cx, |view, cx| {
+        assert_eq!(view.custom_command_input.read(cx).value(), "");
+    });
+
+    drop(view);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn a_selected_gesture_can_render_in_the_binding_inspector(cx: &mut TestAppContext) {
+    cx.update(gpui_component::init);
+    install_app_state(cx);
+    let (view, cx) = cx.add_window_view(MouseModelView::new);
+    cx.run_until_parked();
+
+    view.update(cx, |view, cx| {
+        view.set_gesture_selected_dir(Some(GestureDirection::Up));
+        let gesture_maps = BTreeMap::from([(
+            ButtonId::MiddleClick,
+            BTreeMap::from([(
+                GestureDirection::Click,
+                default_binding(ButtonId::MiddleClick),
+            )]),
+        )]);
+        let bindings = BTreeMap::new();
+        let entity = cx.entity();
+
+        binding_inspector(
+            BindingInspectorData {
+                selected: Some(MouseControlId::Button(ButtonId::MiddleClick)),
+                gesture_direction: Some(GestureDirection::Up),
+                bindings: &bindings,
+                layout: None,
+                gesture_maps: &gesture_maps,
+                dpi_gestures: false,
+                virtual_thumbwheel: false,
+                wheel_hold: &BTreeSet::new(),
+                editing_app: None,
+                overridden: None,
+                press_force: None,
+                extra_actions: &[],
+                hidden_actions: &[],
+            },
+            ActionPickerContext {
+                open: true,
+                search: &view.action_search,
+                shortcut_input: &view.custom_shortcut_input,
+                application_input: &view.custom_application_input,
+                command_input: &view.custom_command_input,
+                shortcut_mode: view.shortcut_mode,
+                shortcut_recording: false,
+                shortcut_record_focus: &view.shortcut_record_focus,
+                invalid: view.invalid_drafts,
+                view: &entity,
+            },
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    drop(view);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn selecting_another_control_closes_the_action_picker(cx: &mut TestAppContext) {
+    cx.update(gpui_component::init);
+    install_app_state(cx);
+    let (view, cx) = cx.add_window_view(MouseModelView::new);
+    cx.run_until_parked();
+
+    view.update(cx, |view, _| {
+        view.selected = Some(MouseControlId::Button(ButtonId::Back));
+        view.action_picker_open = true;
+
+        view.select(MouseControlId::Button(ButtonId::Forward));
+
+        assert!(!view.action_picker_open);
+    });
+    drop(view);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn clearing_custom_action_drafts_resets_text_and_invalid_state(cx: &mut TestAppContext) {
+    cx.update(gpui_component::init);
+    install_app_state(cx);
+    let (view, cx) = cx.add_window_view(MouseModelView::new);
+    cx.run_until_parked();
+
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| {
+            view.custom_shortcut_input
+                .update(cx, |input, cx| input.set_value("Cmd+K", window, cx));
+            view.custom_application_input
+                .update(cx, |input, cx| input.set_value("/bin/true", window, cx));
+            view.custom_command_input
+                .update(cx, |input, cx| input.set_value("echo hi", window, cx));
+            view.invalid_drafts = InvalidDrafts {
+                shortcut: Some(ShiftedSymbol),
+                application: true,
+                command: true,
+            };
+            view.shortcut_mode = ShortcutMode::Hold;
+
+            view.clear_custom_action_drafts(window, cx);
+        });
+    });
+
+    view.update(cx, |view, cx| {
+        assert_eq!(view.custom_shortcut_input.read(cx).value(), "");
+        assert_eq!(view.custom_application_input.read(cx).value(), "");
+        assert_eq!(view.custom_command_input.read(cx).value(), "");
+        assert_eq!(view.invalid_drafts, InvalidDrafts::default());
+        assert_eq!(view.shortcut_mode, ShortcutMode::Tap);
+    });
+    drop(view);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+}
+
+#[test]
+fn active_thumbwheel_directions_highlight_the_paired_control() {
+    assert_eq!(
+        MouseControlId::from_active_button(ButtonId::ThumbwheelScrollUp),
+        MouseControlId::ThumbwheelRotation
+    );
+    assert_eq!(
+        MouseControlId::from_active_button(ButtonId::ThumbwheelScrollDown),
+        MouseControlId::ThumbwheelRotation
+    );
+}
+
+#[test]
+fn fallback_model_only_adds_thumbwheel_when_capability_is_measured() {
+    let without = model_hotspots(None, None, false, MOUSE_MODEL_SIZE);
+    let with = model_hotspots(None, None, true, MOUSE_MODEL_SIZE);
+    assert_eq!(
+        without
+            .iter()
+            .filter(|hotspot| hotspot.id == MouseControlId::ThumbwheelRotation)
+            .count(),
+        0
+    );
+    assert_eq!(
+        with.iter()
+            .filter(|hotspot| hotspot.id == MouseControlId::ThumbwheelRotation)
+            .count(),
+        1
+    );
+}
+
+/// Installs the known mouse, with or without raw wheel on Back/Forward, and
+/// opens the mouse view on it with `button` selected. Callers hold
+/// `LOCALE_LOCK` in English: a locale change from another test between a
+/// click's mouse-down redraw and its mouse-up reflows the inspector, and the
+/// release then misses the switch.
+fn wheel_hold_view(
+    cx: &mut TestAppContext,
+    raw_wheel: bool,
+    config: Config,
+    button: ButtonId,
+) -> (Entity<MouseModelView>, &mut VisualTestContext) {
+    cx.update(gpui_component::init);
+    cx.update(|cx| {
+        let resolver = AssetResolver::new();
+        let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut inventory = crate::state::tests::direct_inventory([0xa3, 0x93, 0xca, 0xe0]);
+        inventory.paired[0]
+            .capabilities
+            .as_mut()
+            .expect("the fixture mouse has capabilities")
+            .virtual_thumbwheel = raw_wheel;
+        let state = cx.new(|_| {
+            AppState::new(Sources {
+                inventories: &[inventory],
+                ..Sources::in_memory(config, &resolver, commands)
+            })
+        });
+        AppState::set_global(state, cx);
+    });
+    let (view, cx) = cx.add_window_view(MouseModelView::new);
+    cx.simulate_resize(size(px(1200.), px(1000.)));
+    view.update(cx, |view, _| view.select(MouseControlId::Button(button)));
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    (view, cx)
+}
+
+fn holds_the_wheel(cx: &mut VisualTestContext, button: ButtonId) -> bool {
+    cx.update(|_, cx| {
+        AppState::try_read(cx)
+            .expect("state is installed")
+            .wheel_hold_buttons()
+            .contains(&button)
+    })
+}
+
+#[gpui::test]
+fn the_wheel_hold_switch_turns_holding_back_into_sideways_scrolling(cx: &mut TestAppContext) {
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    let (view, cx) = wheel_hold_view(cx, true, Config::ephemeral(), ButtonId::Back);
+    assert!(
+        cx.debug_bounds("inspector-wheel-hold-row").is_some(),
+        "Back offers the switch on a mouse that reports raw wheel"
+    );
+    assert!(!holds_the_wheel(cx, ButtonId::Back));
+
+    click_picker_control(cx, "inspector-wheel-hold-row-control");
+    assert!(holds_the_wheel(cx, ButtonId::Back));
+
+    click_picker_control(cx, "inspector-wheel-hold-row-control");
+    assert!(!holds_the_wheel(cx, ButtonId::Back));
+
+    view.update(cx, |view, _| {
+        view.select(MouseControlId::Button(ButtonId::MiddleClick));
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(
+        cx.debug_bounds("inspector-wheel-hold-row").is_none(),
+        "only Back and Forward can hold the wheel"
+    );
+    drop(view);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn a_mouse_without_raw_wheel_offers_no_wheel_hold(cx: &mut TestAppContext) {
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    let (view, cx) = wheel_hold_view(cx, false, Config::ephemeral(), ButtonId::Forward);
+    assert!(
+        cx.debug_bounds("inspector-wheel-hold-row").is_none(),
+        "no switch where holding cannot scroll"
+    );
+    drop(view);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn a_carried_over_wheel_hold_can_still_be_turned_off(cx: &mut TestAppContext) {
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    let mut config = Config::ephemeral();
+    config.set_wheel_hold(
+        crate::state::tests::KNOWN_MOUSE_KEY,
+        ButtonId::Forward,
+        true,
+    );
+    let (view, cx) = wheel_hold_view(cx, false, config, ButtonId::Forward);
+    assert!(
+        cx.debug_bounds("inspector-wheel-hold-row").is_some(),
+        "a setting from another mouse stays visible so it can be turned off"
+    );
+
+    click_picker_control(cx, "inspector-wheel-hold-row-control");
+
+    assert!(!holds_the_wheel(cx, ButtonId::Forward));
+    assert!(
+        cx.debug_bounds("inspector-wheel-hold-row").is_none(),
+        "once off, it cannot be turned back on here"
+    );
+    drop(view);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn an_app_profile_explains_that_an_action_replaces_wheel_hold(cx: &mut TestAppContext) {
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    let mut config = Config::ephemeral();
+    config.set_wheel_hold(crate::state::tests::KNOWN_MOUSE_KEY, ButtonId::Back, true);
+    let (view, cx) = wheel_hold_view(cx, true, config, ButtonId::Back);
+    assert!(cx.debug_bounds("inspector-wheel-hold-app-note").is_none());
+
+    cx.update(|_, cx| {
+        AppState::apply(cx, |state| {
+            state.set_editing_app(Some("com.apple.Safari".into()))
+        });
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+
+    assert!(
+        cx.debug_bounds("inspector-wheel-hold-row").is_none(),
+        "the switch is device-wide, so an app profile does not show it"
+    );
+    assert!(
+        cx.debug_bounds("inspector-wheel-hold-app-note").is_some(),
+        "the app profile says what picking an action does"
+    );
+    view.update(cx, |view, _| {
+        view.select(MouseControlId::Button(ButtonId::Forward));
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(
+        cx.debug_bounds("inspector-wheel-hold-app-note").is_none(),
+        "a button that does not hold the wheel has nothing to explain"
+    );
+    view.update(cx, |view, _| {
+        view.select(MouseControlId::Button(ButtonId::Back));
+    });
+    cx.update(|_, cx| {
+        AppState::apply(cx, |state| {
+            state.commit_binding(ButtonId::Back, Action::Copy)
+        });
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(
+        cx.debug_bounds("inspector-wheel-hold-app-note").is_none(),
+        "once the app overrides the button, its own action already applies"
+    );
+    drop(view);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+}
+
+fn in_gesture_mode(cx: &mut VisualTestContext, button: ButtonId) -> bool {
+    cx.update(|_, cx| {
+        AppState::try_read(cx)
+            .expect("state is installed")
+            .gesture_bindings()
+            .contains_key(&button)
+    })
+}
+
+#[gpui::test]
+fn a_gesture_button_offers_wheel_hold_and_leaves_gestures_for_it(cx: &mut TestAppContext) {
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    let mut config = Config::ephemeral();
+    config.set_gesture_mode(crate::state::tests::KNOWN_MOUSE_KEY, ButtonId::Back, true);
+    let (view, cx) = wheel_hold_view(cx, true, config, ButtonId::Back);
+    view.update(cx, |view, _| {
+        view.set_gesture_selected_dir(Some(GestureDirection::Up));
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(in_gesture_mode(cx, ButtonId::Back));
+    assert!(
+        cx.debug_bounds("inspector-wheel-hold-row").is_some(),
+        "the gesture inspector offers the switch too"
+    );
+
+    click_picker_control(cx, "inspector-wheel-hold-row-control");
+
+    assert!(holds_the_wheel(cx, ButtonId::Back));
+    assert!(
+        !in_gesture_mode(cx, ButtonId::Back),
+        "holding the wheel leaves gesture mode"
+    );
+    view.read_with(cx, |view, _| assert_eq!(view.gesture_active_dir, None));
+    assert!(
+        cx.debug_bounds("inspector-wheel-hold-row").is_some(),
+        "the single-action inspector shows the switch, now on"
+    );
+    drop(view);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn a_gesture_button_without_raw_wheel_offers_no_wheel_hold(cx: &mut TestAppContext) {
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    let mut config = Config::ephemeral();
+    config.set_gesture_mode(
+        crate::state::tests::KNOWN_MOUSE_KEY,
+        ButtonId::Forward,
+        true,
+    );
+    let (view, cx) = wheel_hold_view(cx, false, config, ButtonId::Forward);
+    assert!(in_gesture_mode(cx, ButtonId::Forward));
+    assert!(
+        cx.debug_bounds("inspector-wheel-hold-row").is_none(),
+        "no switch where holding cannot scroll"
+    );
+    drop(view);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+}
+
+/// An app profile replaces a gesture button's gestures with a button binding,
+/// which gets a release, so its picker offers the held actions too.
+#[gpui::test]
+fn an_inherited_gesture_button_offers_the_held_actions(cx: &mut TestAppContext) {
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    let mut config = Config::ephemeral();
+    config.set_gesture_mode(crate::state::tests::KNOWN_MOUSE_KEY, ButtonId::Back, true);
+    let (view, cx) = wheel_hold_view(cx, true, config, ButtonId::Back);
+    cx.update(|_, cx| {
+        AppState::apply(cx, |state| {
+            state.set_editing_app(Some("com.apple.Safari".into()))
+        });
+    });
+    view.update(cx, |view, _| view.action_picker_open = true);
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+
+    assert!(cx.debug_bounds("inspector-gesture-override-Copy").is_some());
+    assert!(
+        cx.debug_bounds("inspector-gesture-override-DpiShift")
+            .is_some()
+    );
+    drop(view);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+}
+
+/// Card metrics for values whose widest measures `widest` on one line, with
+/// the card chrome and line height the default rem size gives.
+fn values(widest: f32) -> ValueMetrics {
+    ValueMetrics {
+        widest,
+        chrome_w: 70.,
+        line_h: 22.,
+    }
+}
+
+/// Every card sits inside the canvas, apart from its neighbours.
+fn assert_cards_on_the_canvas(layout: &ModelLayout) {
+    let card_h = layout.card.h;
+    for side in [Side::Left, Side::Right] {
+        let mut ys: Vec<f32> = layout
+            .labels
+            .iter()
+            .filter(|label| label.side == side)
+            .map(|label| label.y)
+            .collect();
+        ys.sort_by(f32::total_cmp);
+        for y in &ys {
+            let top = layout.mouse_top + y - card_h / 2.;
+            assert!(
+                top >= -0.01 && top + card_h <= layout.canvas_h + 0.01,
+                "card off the canvas: {ys:?} in {}",
+                layout.canvas_h
+            );
+        }
+        for pair in ys.windows(2) {
+            assert!(pair[1] - pair[0] >= card_h - 0.01, "cards overlap: {ys:?}");
+        }
+    }
+}
+
+/// The smallest window with cards shrinks a G502's fallback model by its
+/// width to about 315 px, short of what its nine cards on one side need.
+/// They reach past the model into the tab's height, closing their gaps,
+/// instead of running off the canvas. Two-line cards would not fit at all,
+/// so a value too long for its card keeps one line.
+#[test]
+fn a_crowded_side_keeps_every_card_on_the_canvas() {
+    let room = size(416., 526.);
+    let g502 = GamingLayout::for_model_key("0407f");
+    for widest in [80., 400.] {
+        let layout = model_layout(None, g502, room, 960., false, values(widest));
+        assert_eq!(layout.labels.len(), 9);
+        assert_eq!(layout.card.value_lines, 1);
+        assert!(layout.mouse_h < 9. * LABEL_H, "model {}", layout.mouse_h);
+        assert!(layout.canvas_h <= room.height + 0.01);
+        assert_cards_on_the_canvas(&layout);
+    }
+}
+
+/// The fallback silhouette shrinks on a small window, but its cards keep
+/// their height, so they must be placed at the scaled size, not scaled after.
+#[test]
+fn a_shrunk_fallback_model_keeps_its_cards_apart() {
+    let target_h = MOUSE_MODEL_SIZE.1 * 0.776;
+    let layout = model_layout(
+        None,
+        None,
+        size(MODEL_CONTENT_MAX_W, target_h),
+        1200.,
+        false,
+        values(80.),
+    );
+    assert!((layout.mouse_h - target_h).abs() < 0.01);
+    assert_cards_on_the_canvas(&layout);
+}
+
+/// The canvas area of the default 1256 × 664 window, and the widest English
+/// default value there: "Forward (Button 5)" in the Linux UI font. Fixed
+/// 156 px cards cut every one of the MX Master's values off, and a model
+/// sized from the viewport ran past the area's bottom edge.
+const DEFAULT_ROOM: Size<f32> = Size {
+    width: 728.,
+    height: 482.,
+};
+const WIDEST_ENGLISH_VALUE: f32 = 143.;
+
+#[test]
+fn english_values_fit_on_one_line_beside_a_model_that_fits_the_room() {
+    let layout = model_layout(
+        None,
+        None,
+        DEFAULT_ROOM,
+        1256.,
+        true,
+        values(WIDEST_ENGLISH_VALUE),
+    );
+    assert_eq!(layout.labels.len(), 6);
+    assert!(layout.labels.iter().any(|label| label.side == Side::Left));
+    assert!(layout.labels.iter().any(|label| label.side == Side::Right));
+    assert_eq!(layout.card.value_lines, 1);
+    assert!(
+        layout.card.w - 70. >= WIDEST_ENGLISH_VALUE,
+        "card {} is too narrow for the value",
+        layout.card.w
+    );
+    assert!(
+        layout.canvas_w <= DEFAULT_ROOM.width + 0.01,
+        "{}",
+        layout.canvas_w
+    );
+    assert!(
+        layout.canvas_h <= DEFAULT_ROOM.height + 0.01,
+        "{}",
+        layout.canvas_h
+    );
+    assert_cards_on_the_canvas(&layout);
+}
+
+/// A value no card is wide enough for — "DPI-Voreinstellungen
+/// durchschalten" in German — wraps onto a second line in the widest card
+/// the room allows, and the taller cards still fit beside the model.
+#[test]
+fn a_value_too_long_for_the_widest_card_wraps_to_two_lines() {
+    let layout = model_layout(None, None, DEFAULT_ROOM, 1256., true, values(267.));
+    let two_sided_w = (DEFAULT_ROOM.width - MODEL_MIN_IMAGE_W) / 2. - SIDE_GAP;
+    assert!(
+        (layout.card.w - two_sided_w).abs() < 0.01,
+        "{}",
+        layout.card.w
+    );
+    assert_eq!(layout.card.value_lines, 2);
+    assert!((layout.card.h - (LABEL_H + 22.)).abs() < 0.01);
+    assert!(layout.labels.iter().any(|label| label.side == Side::Right));
+    assert!(
+        layout.canvas_w <= DEFAULT_ROOM.width + 0.01,
+        "{}",
+        layout.canvas_w
+    );
+    assert!(
+        layout.canvas_h <= DEFAULT_ROOM.height + 0.01,
+        "{}",
+        layout.canvas_h
+    );
+    assert_cards_on_the_canvas(&layout);
+}
+
+/// The mouse view below chrome taller than the fixed reserve it used to
+/// assume, as the app's header, profile bar and status line together are.
+struct UnderChrome {
+    model: Entity<MouseModelView>,
+}
+
+impl Render for UnderChrome {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        v_flex()
+            .size_full()
+            .child(div().flex_none().h(px(220.)))
+            .child(self.model.clone())
+    }
+}
+
+#[gpui::test]
+fn the_model_and_full_values_fit_the_canvas_area_below_the_chrome(cx: &mut TestAppContext) {
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    cx.update(gpui_component::init);
+    install_app_state(cx);
+    let (view, cx) = cx.add_window_view(|window, cx| UnderChrome {
+        model: cx.new(|cx| MouseModelView::new(window, cx)),
+    });
+    cx.simulate_resize(size(px(1256.), px(664.)));
+    // The first frame measures the canvas area; the second lays out in it.
+    for _ in 0..2 {
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+    }
+
+    let room = cx
+        .debug_bounds("mouse-canvas-room")
+        .expect("the canvas area renders");
+    let canvas = cx
+        .debug_bounds("mouse-canvas")
+        .expect("the model canvas renders");
+    assert!(
+        canvas.top() >= room.top() - px(0.5) && canvas.bottom() <= room.bottom() + px(0.5),
+        "canvas {canvas:?} runs past the area {room:?}"
+    );
+    for (selector, value) in [
+        ("label-value-text-Button(Forward)", "Forward (Button 5)"),
+        ("label-value-text-Button(Back)", "Back (Button 4)"),
+        ("label-value-text-Button(MiddleClick)", "Middle Click"),
+    ] {
+        let shown = cx.debug_bounds(selector).expect(selector);
+        let full = cx.update(|window, _| {
+            window
+                .text_system()
+                .shape_line(
+                    value.into(),
+                    px(15.),
+                    &[window.text_style().to_run(value.len())],
+                    None,
+                )
+                .width
+        });
+        assert!(
+            shown.size.width >= full - px(0.5) && shown.size.height < px(30.),
+            "{value}: shown in {shown:?}, needs {full:?} on one line"
+        );
+    }
+
+    drop(view);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+}

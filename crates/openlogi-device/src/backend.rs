@@ -133,6 +133,15 @@ pub type HotplugStream = Box<dyn Stream<Item = HotplugEvent> + Send + Unpin>;
 /// correlation. A few devices need a bare output report written with no reply
 /// expected — Logitech's Litra lights, driven over their own vendor protocol —
 /// and that is all this is for.
+// Not `expect`: the lint is raised inside `async_trait`'s expansion, which rustc
+// does not credit to an expectation. Clippy 1.99 flags the `#[must_use]` the
+// macro puts on each boxed future; rust-clippy#17547 (1.100) stops linting
+// macro-generated code.
+#[expect(clippy::allow_attributes, reason = "see above")]
+#[allow(
+    clippy::double_must_use,
+    reason = "raised on `async_trait`'s generated methods, not on this source"
+)]
 #[async_trait]
 pub trait RawWriter: Send + Sync {
     /// Write one output report, report id included as the first byte.
@@ -150,6 +159,15 @@ pub trait RawWriter: Send + Sync {
 /// Opening is only defined for a node a previous [`Self::enumerate`] reported:
 /// a backend may hold OS handles from that enumeration rather than re-finding
 /// the node, so an unknown [`NodeInfo`] is [`BackendError::Disconnected`].
+// Not `expect`: the lint is raised inside `async_trait`'s expansion, which rustc
+// does not credit to an expectation. Clippy 1.99 flags the `#[must_use]` the
+// macro puts on each boxed future; rust-clippy#17547 (1.100) stops linting
+// macro-generated code.
+#[expect(clippy::allow_attributes, reason = "see above")]
+#[allow(
+    clippy::double_must_use,
+    reason = "raised on `async_trait`'s generated methods, not on this source"
+)]
 #[async_trait]
 pub trait HidBackend: Send + Sync {
     /// Every HID node the host currently reports.

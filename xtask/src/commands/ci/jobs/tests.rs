@@ -25,23 +25,40 @@ fn workflow() -> Option<String> {
 
 /// The workflow with its line continuations joined back up and every run of
 /// whitespace collapsed, so a command it wraps for readability is one line
-/// again.
+/// again — under either line ending, since a Windows checkout hands this test
+/// the file with CRLF.
 fn workflow_commands(workflow: &str) -> String {
     workflow
-        .replace("\\\n", " ")
-        .split_whitespace()
+        .lines()
+        .map(|line| {
+            let line = line.trim_end();
+            line.strip_suffix('\\').unwrap_or(line)
+        })
+        .flat_map(str::split_whitespace)
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+#[test]
+fn wrapped_commands_join_under_either_line_ending() {
+    let joined = "cargo doc --workspace --exclude openlogi-ui";
+    for wrapped in [
+        "cargo doc --workspace \\\n    --exclude openlogi-ui\n",
+        "cargo doc --workspace \\\r\n    --exclude openlogi-ui\r\n",
+    ] {
+        assert_eq!(workflow_commands(wrapped), joined);
+    }
 }
 
 /// `ci.yml` is the pipeline's source of truth and this runner is a copy of it.
 /// A copy nothing checks is a copy that drifts.
 ///
 /// Only the jobs whose plan does not depend on the host are compared. The
-/// other six pick their invocation — or whether they can run at all — from
-/// what the machine has: `typos` needs typos-cli, `shell` needs shellcheck and
-/// shfmt, `msrv` a toolchain, `cargo-deny` either the binary or nix, `clippy
-/// (windows)` a cross std, `wasm` the wasm32 std. Each is documented as a proxy
+/// other seven pick their invocation — or whether they can run at all — from
+/// what the machine has: `typos` needs typos-cli and `ast-grep` its binary (CI
+/// runs both through actions), `shell` needs shellcheck and shfmt, `msrv` a
+/// toolchain, `cargo-deny` either the binary or nix, `clippy (windows)` a cross
+/// std, `wasm` the wasm32 std. Each is documented as a proxy
 /// for its CI job rather than a copy of it, and `wasm` gets
 /// [`wasm_checks_the_crates_ci_checks`] instead, which compares the crate list
 /// rather than a plan.
@@ -61,6 +78,8 @@ fn ci_yml_runs_what_this_runner_runs() {
         Job::Rustdoc,
         Job::TestsLinux,
         Job::TestsMacos,
+        Job::TestsWindows,
+        Job::ClippyMacos,
     ] {
         let host = *job.spec().hosts.first().expect("every job names a host");
         let plan = job.plan(&sh, host).expect("a plan");
@@ -95,6 +114,11 @@ fn wasm_checks_the_crates_ci_checks() {
     }
 }
 
+/// The job id and `name:` of the aggregate at the end of `ci.yml`: the one
+/// status check the master ruleset requires. It runs no command, so it has no
+/// [`Job`] and nothing to reproduce; what must not drift is its `needs`.
+const AGGREGATE_JOB: (&str, &str) = ("ci-results", "CI results");
+
 /// The other direction: a job added to `ci.yml` that this runner cannot even
 /// name is a job nobody can reproduce locally.
 #[test]
@@ -107,12 +131,53 @@ fn every_ci_yml_job_name_resolves() {
     let names: Vec<&str> = workflow
         .lines()
         .filter_map(|line| line.strip_prefix("    name: "))
+        .filter(|name| *name != AGGREGATE_JOB.1)
         .collect();
     assert!(!names.is_empty(), "found no job names in ci.yml");
     for name in names {
         assert!(
             Job::resolve(name).is_some(),
             "ci.yml has a job named {name} that `cargo xtask ci` cannot run"
+        );
+    }
+}
+
+/// The aggregate is the only check the master ruleset requires, so a job it
+/// does not `need` is a job whose failure cannot block a merge.
+#[test]
+fn ci_results_needs_every_job() {
+    let Some(workflow) = workflow() else {
+        return;
+    };
+    let (aggregate_id, _) = AGGREGATE_JOB;
+    // Job ids sit at one indent level under `jobs:` and end the line with a
+    // colon; every key inside a job is indented further.
+    let job_ids: Vec<&str> = workflow
+        .lines()
+        .skip_while(|line| *line != "jobs:")
+        .filter_map(|line| line.strip_prefix("  "))
+        .filter(|line| !line.starts_with(' ') && !line.starts_with('#'))
+        .filter_map(|line| line.strip_suffix(':'))
+        .filter(|id| *id != aggregate_id)
+        .collect();
+    assert!(job_ids.len() > 1, "found no job ids in ci.yml");
+
+    let mut lines = workflow.lines();
+    assert!(
+        lines.any(|line| line == format!("  {aggregate_id}:")),
+        "ci.yml has no `{aggregate_id}` job"
+    );
+    let needs: Vec<&str> = lines
+        .skip_while(|line| *line != "    needs:")
+        .skip(1)
+        .map_while(|line| line.strip_prefix("      - "))
+        .collect();
+    assert!(!needs.is_empty(), "`{aggregate_id}` lists no `needs`");
+
+    for id in job_ids {
+        assert!(
+            needs.contains(&id),
+            "`{aggregate_id}` does not need `{id}`, so that job cannot block a merge"
         );
     }
 }
@@ -163,10 +228,10 @@ fn matrix_leg_names_resolve() {
 }
 
 #[test]
-fn tests_names_both_test_jobs() {
+fn tests_names_every_test_job() {
     assert_eq!(
         Job::resolve("tests").as_deref(),
-        Some(&[Job::TestsLinux, Job::TestsMacos][..])
+        Some(&[Job::TestsLinux, Job::TestsMacos, Job::TestsWindows][..])
     );
 }
 
@@ -215,9 +280,12 @@ fn jobs_name_the_hosts_ci_gives_them() {
     let hosts = |job: Job| job.spec().hosts.to_vec();
     assert_eq!(hosts(Job::TestsLinux), vec![Host::Linux]);
     assert_eq!(hosts(Job::TestsMacos), vec![Host::Macos]);
+    assert_eq!(hosts(Job::TestsWindows), vec![Host::Windows]);
     // CI's msrv matrix is macos-latest + ubuntu-latest — there is no
     // Windows leg to reproduce.
     assert_eq!(hosts(Job::Msrv), vec![Host::Linux, Host::Macos]);
     // Natively on Windows, everywhere else as the cross-lint proxy.
     assert_eq!(hosts(Job::ClippyWindows), Host::ANY.to_vec());
+    // macos-latest only: nothing cross-lints the macOS cfg.
+    assert_eq!(hosts(Job::ClippyMacos), vec![Host::Macos]);
 }

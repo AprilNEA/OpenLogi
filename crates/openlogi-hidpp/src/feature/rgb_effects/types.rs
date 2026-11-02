@@ -319,10 +319,11 @@ pub struct RgbNvConfig {
     /// The capability state. The meaning varies per capability (commonly
     /// `0` = no change, `1` = enabled, `2` = disabled).
     pub state: u8,
-    /// First capability-specific parameter.
-    pub param1: u8,
-    /// Second capability-specific parameter.
-    pub param2: u8,
+    /// The six capability-specific parameters (reply bytes 4..10).
+    ///
+    /// Logi Options+ reads and writes all six. None is named here, so a write
+    /// built from a read hands every one back unchanged.
+    pub params: [u8; 6],
 }
 
 /// Power-mode configuration from

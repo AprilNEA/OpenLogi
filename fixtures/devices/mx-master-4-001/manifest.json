@@ -1,0 +1,193 @@
+{
+  "schema_version": 1,
+  "id": "mx-master-4-001",
+  "profile_id": "mx-master-4-001-profile",
+  "cases": [
+    {
+      "name": "feature-table",
+      "channel": "target",
+      "relationship": {
+        "kind": "device",
+        "device": "device-1"
+      }
+    },
+    {
+      "name": "reprogrammable-controls",
+      "channel": "target",
+      "relationship": {
+        "kind": "device",
+        "device": "device-1"
+      }
+    },
+    {
+      "name": "raw-battery",
+      "channel": "target",
+      "relationship": {
+        "kind": "device",
+        "device": "device-1"
+      }
+    },
+    {
+      "name": "dpi-info",
+      "channel": "target",
+      "relationship": {
+        "kind": "device",
+        "device": "device-1"
+      }
+    },
+    {
+      "name": "smartshift-status",
+      "channel": "target",
+      "relationship": {
+        "kind": "device",
+        "device": "device-1"
+      }
+    },
+    {
+      "name": "wheel-mode",
+      "channel": "target",
+      "relationship": {
+        "kind": "device",
+        "device": "device-1"
+      }
+    },
+    {
+      "name": "backlight-state",
+      "channel": "target",
+      "relationship": {
+        "kind": "device",
+        "device": "device-1"
+      }
+    }
+  ],
+  "identity_ledger": [
+    {
+      "principal": {
+        "kind": "receiver",
+        "id": "receiver-1"
+      },
+      "representations": [
+        {
+          "kind": "bolt_receiver_uid",
+          "value": "OL-BOLT-UID-0001",
+          "occurrences": [
+            {
+              "location": {
+                "asset": "profile",
+                "field": "receiver_identity"
+              },
+              "count": 1
+            },
+            {
+              "location": {
+                "asset": "profile",
+                "field": "receiver_route"
+              },
+              "count": 1
+            },
+            {
+              "location": {
+                "asset": "cassette",
+                "case": "backlight-state",
+                "channel": "target"
+              },
+              "count": 1
+            },
+            {
+              "location": {
+                "asset": "cassette",
+                "case": "dpi-info",
+                "channel": "target"
+              },
+              "count": 1
+            },
+            {
+              "location": {
+                "asset": "cassette",
+                "case": "feature-table",
+                "channel": "target"
+              },
+              "count": 1
+            },
+            {
+              "location": {
+                "asset": "cassette",
+                "case": "raw-battery",
+                "channel": "target"
+              },
+              "count": 1
+            },
+            {
+              "location": {
+                "asset": "cassette",
+                "case": "reprogrammable-controls",
+                "channel": "target"
+              },
+              "count": 1
+            },
+            {
+              "location": {
+                "asset": "cassette",
+                "case": "smartshift-status",
+                "channel": "target"
+              },
+              "count": 1
+            },
+            {
+              "location": {
+                "asset": "cassette",
+                "case": "wheel-mode",
+                "channel": "target"
+              },
+              "count": 1
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "principal": {
+        "kind": "device",
+        "id": "device-1",
+        "route": {
+          "kind": "bolt",
+          "receiver": "receiver-1",
+          "slot": 2
+        }
+      },
+      "representations": [
+        {
+          "kind": "device_unit_id",
+          "value": [
+            79,
+            76,
+            68,
+            1
+          ],
+          "occurrences": [
+            {
+              "location": {
+                "asset": "profile",
+                "field": "device_unit_id"
+              },
+              "count": 1
+            }
+          ]
+        },
+        {
+          "kind": "device_serial_number",
+          "value": "OL-SER-00001",
+          "occurrences": [
+            {
+              "location": {
+                "asset": "profile",
+                "field": "device_serial_number"
+              },
+              "count": 1
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

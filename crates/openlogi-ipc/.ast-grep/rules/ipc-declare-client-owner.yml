@@ -1,0 +1,15 @@
+# Owner: openlogi_ipc::client::connect_as — the declaration is the last step
+# of the handshake, after the versions are known to agree.
+id: ipc-declare-client-owner
+language: rust
+severity: error
+message: Declaring a client kind is part of the handshake in openlogi_ipc::client::connect_as, after the version check. Connect with connect_as(kind) instead of calling declare_client here.
+note: |
+  Declaring is what arms a dormant agent; a client that has not verified the
+  protocol must never do it. See "Single source of truth" in AGENTS.md.
+files:
+  - crates/**/*.rs
+ignores:
+  - crates/openlogi-ipc/**
+rule:
+  pattern: $CLIENT.declare_client($$$ARGS)

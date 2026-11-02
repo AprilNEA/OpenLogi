@@ -1,8 +1,9 @@
 //! Debug-only gallery for reviewing shared controls without app runtime state.
 
 use gpui::{
-    App, AppContext as _, Bounds, Context, InteractiveElement, IntoElement, ParentElement, Render,
-    Role, SharedString, Size, Styled, Window, WindowBounds, WindowOptions, div, px, rems,
+    App, AppContext as _, Context, InteractiveElement, IntoElement, ParentElement, Render, Role,
+    SharedString, Size, StatefulInteractiveElement as _, Styled, Window, WindowOptions, div,
+    prelude::FluentBuilder as _, px, rems,
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
@@ -11,6 +12,8 @@ use gpui_component::{
     button::{Button, ButtonVariants as _},
     h_flex,
     scroll::ScrollableElement as _,
+    slider::Slider,
+    tag::Tag,
     v_flex,
 };
 use openlogi_core::brand::APP_ID;
@@ -20,7 +23,10 @@ use openlogi_core::device::{BatteryInfo, BatteryLevel, BatteryStatus};
 use super::battery::BatteryIndicator;
 use super::carousel::Carousel;
 use super::choice_card::ChoiceCard;
-use super::components::{MenuRow, PanelCard, PresetChip, ProfileTab, Toggle};
+use super::commit_slider::{CommitSlider, SliderRange};
+use super::components::{MenuRow, PanelCard, Pill, PresetChip, ProfileTab, Toggle, toggle_row};
+use super::slider_row::{SliderRow, disabled_track};
+use super::status::{retry_line, status_line};
 use super::theme::{self, ContentWidth, OPENLOGI_DARK, OPENLOGI_LIGHT, Palette, Typography as _};
 
 const TITLE: &str = "OpenLogi Component Gallery";
@@ -40,13 +46,15 @@ pub(crate) fn run() {
         })
         .detach();
 
-        let bounds = Bounds::centered(None, Size::new(px(1100.), px(800.)), cx);
+        let fit = crate::windows::WindowFit::on_primary_display(
+            Size::new(px(1100.), px(800.)),
+            Size::new(px(760.), px(600.)),
+            cx,
+        );
         let options = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
-            window_min_size: Some(Size::new(px(760.), px(600.))),
             app_id: Some(APP_ID.into()),
             titlebar: Some(crate::windows::titlebar_options(TITLE)),
-            ..WindowOptions::default()
+            ..WindowOptions::from(fit)
         };
         let opened = cx.open_window(options, |window, cx| {
             theme::apply_scale(window, UiScale::Normal);
@@ -93,11 +101,32 @@ struct ComponentGallery {
     menu_selected: usize,
     profile_selected: usize,
     preset_selected: bool,
+    pill_selected: usize,
     carousel_selected: usize,
+    slider: CommitSlider<u8>,
+    slider_committed: u8,
+    row_slider: CommitSlider<u8>,
+    row_committed: u8,
 }
 
+/// Where the gallery's slider row starts, and what it marks as the default.
+const ROW_DEFAULT: u8 = 14;
+
 impl ComponentGallery {
-    fn new(_: &mut Context<Self>) -> Self {
+    fn new(cx: &mut Context<Self>) -> Self {
+        let slider_committed = 40;
+        let slider = CommitSlider::new(
+            SliderRange::new(0, 100),
+            slider_committed,
+            cx,
+            |this: &mut Self, value, _| this.slider_committed = value,
+        );
+        let row_slider = CommitSlider::new(
+            SliderRange::new(1, 100),
+            ROW_DEFAULT,
+            cx,
+            |this: &mut Self, value, _| this.row_committed = value,
+        );
         Self {
             mode: ThemeMode::Light,
             scale: UiScale::Normal,
@@ -106,7 +135,12 @@ impl ComponentGallery {
             menu_selected: 0,
             profile_selected: 1,
             preset_selected: true,
+            pill_selected: 1,
             carousel_selected: 1,
+            slider,
+            slider_committed,
+            row_slider,
+            row_committed: ROW_DEFAULT,
         }
     }
 
@@ -186,7 +220,23 @@ impl ComponentGallery {
             .child(self.menu_panel(pal, cx))
             .child(self.profile_panel(pal, cx))
             .child(self.preset_panel(pal, cx))
+            .child(self.pill_panel(pal, cx))
+            .child(self.slider_panel(pal))
+            .child(self.slider_row_panel(pal))
             .child(Self::battery_panel(pal))
+            .child(gallery_panel(
+                "Status and retry",
+                IconName::Settings,
+                v_flex()
+                    .gap_2()
+                    .child(status_line("Reading…", pal))
+                    .child(retry_line("gallery-retry", "Retry", |_| {}))
+                    .child(
+                        retry_line("gallery-retry-disabled", "Retry (offline)", |_| {})
+                            .disabled(true),
+                    ),
+                pal,
+            ))
     }
 
     fn choice_panel(&self, pal: Palette, cx: &mut Context<Self>) -> gpui::Div {
@@ -252,7 +302,22 @@ impl ComponentGallery {
                         .selected(true)
                         .label(Some(SharedString::from("Unavailable")))
                         .disabled(true),
-                ),
+                )
+                .child(toggle_row(
+                    "gallery-toggle-row",
+                    pal,
+                    SharedString::from("Setting"),
+                    SharedString::from(
+                        "The caption under the title says what the setting changes and wraps \
+                         instead of pushing the toggle out.",
+                    ),
+                    Toggle::new("gallery-toggle-row-control")
+                        .selected(self.toggle_selected)
+                        .on_change(cx.listener(|this, selected: &bool, _, cx| {
+                            this.toggle_selected = *selected;
+                            cx.notify();
+                        })),
+                )),
             pal,
         )
     }
@@ -266,6 +331,7 @@ impl ComponentGallery {
                 .child(
                     MenuRow::new("gallery-menu-primary")
                         .role(Role::MenuItem)
+                        .aria_label("Primary action")
                         .selected(self.menu_selected == 0)
                         .child("Primary action")
                         .child(Icon::new(IconName::ChevronRight).size_3())
@@ -277,6 +343,7 @@ impl ComponentGallery {
                 .child(
                     MenuRow::new("gallery-menu-secondary")
                         .role(Role::MenuItem)
+                        .aria_label("Secondary action")
                         .selected(self.menu_selected == 1)
                         .child("Secondary action")
                         .child(Icon::new(IconName::ChevronRight).size_3())
@@ -344,6 +411,91 @@ impl ComponentGallery {
         )
     }
 
+    fn pill_panel(&self, pal: Palette, cx: &mut Context<Self>) -> gpui::Div {
+        const STEPS: [&str; 3] = ["5 s", "10 s", "30 s"];
+        gallery_panel(
+            "Pill",
+            IconName::Sun,
+            v_flex()
+                .gap_2()
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .flex_wrap()
+                        .children(STEPS.into_iter().enumerate().map(|(index, label)| {
+                            Pill::new(("gallery-pill", index), label)
+                                .selected(self.pill_selected == index)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.pill_selected = index;
+                                    cx.notify();
+                                }))
+                        })),
+                )
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .flex_wrap()
+                        .children(STEPS.into_iter().enumerate().map(|(index, label)| {
+                            Pill::new(("gallery-pill-disabled", index), label)
+                                .selected(self.pill_selected == index)
+                                .disabled(true)
+                        })),
+                ),
+            pal,
+        )
+    }
+
+    fn slider_panel(&self, pal: Palette) -> gpui::Div {
+        gallery_panel(
+            "CommitSlider",
+            IconName::Sun,
+            v_flex()
+                .gap_2()
+                .child(Slider::new(self.slider.slider()).horizontal())
+                .child(
+                    div()
+                        .text_caption()
+                        .text_color(pal.text_muted)
+                        .child(format!(
+                            "Showing {} · committed {}",
+                            self.slider.shown(self.slider_committed),
+                            self.slider_committed
+                        )),
+                ),
+            pal,
+        )
+    }
+
+    fn slider_row_panel(&self, pal: Palette) -> gpui::Div {
+        let shown = self.row_slider.shown(self.row_committed);
+        gallery_panel(
+            "SliderRow",
+            IconName::Settings,
+            v_flex()
+                .gap_4()
+                .child(
+                    SliderRow::new(
+                        "Sensitivity",
+                        Slider::new(self.row_slider.slider()).horizontal(),
+                    )
+                    .value(shown.to_string(), ["100"])
+                    .when(shown == ROW_DEFAULT, |row| row.marker("Default"))
+                    .description(
+                        "The value column keeps the width of the widest value, so dragging \
+                         moves neither the number nor the label.",
+                    )
+                    .hint(format!("1–100 · committed {}", self.row_committed)),
+                )
+                .child(
+                    SliderRow::new("Scrolling force", disabled_track(pal))
+                        .value("50%", ["100%"])
+                        .description("Applies in ratchet mode only.")
+                        .disabled(true),
+                ),
+            pal,
+        )
+    }
+
     fn battery_panel(pal: Palette) -> gpui::Div {
         let battery = |percentage, level, status| BatteryInfo {
             percentage,
@@ -356,28 +508,32 @@ impl ComponentGallery {
             v_flex()
                 .gap_3()
                 .child(BatteryIndicator::summary(&battery(
-                    78,
+                    Some(78),
                     BatteryLevel::Good,
                     BatteryStatus::Discharging,
                 )))
                 .child(BatteryIndicator::status(
-                    &battery(100, BatteryLevel::Full, BatteryStatus::Full),
+                    &battery(Some(100), BatteryLevel::Full, BatteryStatus::Full),
                     true,
                 ))
                 .child(BatteryIndicator::status(
-                    &battery(42, BatteryLevel::Good, BatteryStatus::Charging),
+                    &battery(Some(42), BatteryLevel::Good, BatteryStatus::Charging),
                     true,
                 ))
                 .child(BatteryIndicator::status(
-                    &battery(0, BatteryLevel::Unknown, BatteryStatus::Charging),
+                    &battery(Some(0), BatteryLevel::Unknown, BatteryStatus::Charging),
                     true,
                 ))
                 .child(BatteryIndicator::status(
-                    &battery(14, BatteryLevel::Low, BatteryStatus::Discharging),
+                    &battery(Some(14), BatteryLevel::Low, BatteryStatus::Discharging),
                     false,
                 ))
+                .child(BatteryIndicator::status(
+                    &battery(None, BatteryLevel::Good, BatteryStatus::Discharging),
+                    true,
+                ))
                 .child(BatteryIndicator::summary(&battery(
-                    35,
+                    Some(35),
                     BatteryLevel::Unknown,
                     BatteryStatus::Error,
                 ))),
@@ -388,13 +544,16 @@ impl ComponentGallery {
     fn carousel(&self, pal: Palette, cx: &mut Context<Self>) -> impl IntoElement {
         let selected = self.carousel_selected;
         let view = cx.entity();
-        div().w_full().child(PanelCard::new(
+        div().w_full().child(
+            PanelCard::new(
             "Carousel",
             Icon::new(IconName::GalleryVerticalEnd).text_color(pal.text_muted),
-            div().w_full().h(rems(13.)).child(
+            // Enough cards to overflow, so the faded edge shows on the panel.
+            div().w_full().child(
                 Carousel::new("gallery-carousel", rems(12.))
-                    .len(4)
+                    .len(6)
                     .selected(selected)
+                    .surface(pal.panel)
                     .render_item(move |index, selected, _, cx| {
                         let pal = theme::palette(cx);
                         let view = view.clone();
@@ -430,7 +589,11 @@ impl ComponentGallery {
                         cx.notify();
                     })),
             ),
-        ))
+        )
+        // A title suffix, as the Pointer tab's momentum-scrolling card shows
+        // its platform notice.
+        .title_suffix(Tag::secondary().small().child("Tag")),
+        )
     }
 }
 
@@ -495,6 +658,10 @@ fn choice_card(id: &'static str, label: &'static str, selected: bool, pal: Palet
         .bg(pal.control)
         .hover(move |style| style.bg(pal.control_hover))
         .focus_visible(move |style| style.border_color(theme::accent()))
+        .gap_1()
+        // A preview strip above the label: the stacked shape the settings
+        // pickers rely on.
+        .child(div().h(px(6.)).rounded_full().bg(pal.border))
         .child(div().text_body().child(label))
 }
 

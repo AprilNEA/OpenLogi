@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "name": "reprogrammable-controls",
+  "channel": "target",
+  "report_support": "long_only",
+  "exchanges": [
+    {
+      "request_match": "hidpp20",
+      "request": "11ff001000000000000000000000000000000000",
+      "response": "11ff001004050000000000000000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "11ff00001b040000000000000000000000000000",
+      "response": "11ff00000a000500000000000000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "11ff0a0000000000000000000000000000000000",
+      "response": "11ff0a0007000000000000000000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "11ff0a1000000000000000000000000000000000",
+      "response": "11ff0a1000500038010001010400000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "11ff0a1001000000000000000000000000000000",
+      "response": "11ff0a1000510039010001010400000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "11ff0a1002000000000000000000000000000000",
+      "response": "11ff0a100052003a310002030500000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "11ff0a1003000000000000000000000000000000",
+      "response": "11ff0a100053003c310002030d00000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "11ff0a1004000000000000000000000000000000",
+      "response": "11ff0a100056003e310002030d00000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "11ff0a1005000000000000000000000000000000",
+      "response": "11ff0a1000c4009d310002030500000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "11ff0a1006000000000000000000000000000000",
+      "response": "11ff0a1000d700b4a00003000300000000000000",
+      "required": true
+    }
+  ]
+}

@@ -24,6 +24,24 @@ impl DeviceIdentity {
     }
 }
 
+impl PhysicalDeviceKey {
+    /// Whether this key names, by its own identity, a device that reports
+    /// `serial` or `unit_id`: the `serial:` or `unit:` key
+    /// [`DeviceIdentity::config_key`] writes for either one. A device that
+    /// reports both is named by both, so a hand-edited `unit:` key still finds
+    /// a device the inventory keys by its serial.
+    #[must_use]
+    pub fn names_identity(&self, serial: Option<&str>, unit_id: [u8; 4]) -> bool {
+        let serial =
+            serial.and_then(|serial| DeviceIdentity::from_parts(Some(serial), [0; 4]).config_key());
+        let unit = DeviceIdentity::from_parts(None, unit_id).config_key();
+        [serial, unit]
+            .into_iter()
+            .flatten()
+            .any(|key| key == self.as_str())
+    }
+}
+
 /// The key a device's settings ultimately belong under: its own identity when
 /// it reported one, else the route-derived key that is the best available
 /// stand-in.
@@ -289,6 +307,9 @@ pub(super) fn fold(device: &mut DeviceConfig, mut legacy: DeviceConfig, route_ke
     if device.invert_scroll != legacy.invert_scroll && legacy.invert_scroll {
         link.overrides.invert_scroll = Some(legacy.invert_scroll);
     }
+    // `smooth_wheel` is a bare opt-in with no per-link slot: for the same
+    // reason only a legacy `true` is evidence of a choice, so it carries over.
+    device.smooth_wheel |= legacy.smooth_wheel;
 
     // Scalar values with no per-link override slot: take the legacy value
     // when the canonical side is unset. A genuine disagreement keeps the
@@ -312,8 +333,16 @@ pub(super) fn fold(device: &mut DeviceConfig, mut legacy: DeviceConfig, route_ke
     fold_option_field!(light);
     fold_option_field!(camera_controls);
     fold_option_field!(camera_profile);
+    fold_option_field!(camera_stream_mode);
     fold_option_field!(thumbwheel_sensitivity);
+    fold_option_field!(momentum_scrolling);
     fold_option_field!(fn_lock);
+    fold_option_field!(keep_os_layout);
+    fold_option_field!(onboard_memory);
+    fold_option_field!(report_rate);
+    fold_option_field!(pointer_speed);
+    fold_option_field!(force_sensing);
+    fold_option_field!(disabled_keys);
     // The user-assigned alias. Without this a legacy entry carrying a name
     // folded into a canonical entry with none would drop it silently — the
     // one field here a user typed by hand, so the loss is the most visible.
@@ -343,6 +372,7 @@ pub(super) fn fold(device: &mut DeviceConfig, mut legacy: DeviceConfig, route_ke
     }
     fold_if_empty!(dpi_presets);
     fold_if_empty!(host_switch_targets);
+    fold_if_empty!(gshift_bindings);
 
     // `ActionRingConfig` has its own notion of "unset". Two configured rings
     // cannot be merged — the slots are positional — so the canonical one wins
@@ -948,6 +978,53 @@ mod tests {
             Some(LightSettings::default()),
             "the standalone-light setting is not silently discarded"
         );
+    }
+
+    #[test]
+    fn disabled_keys_adoption_preserves_all_policy_states() {
+        use crate::config::DisableKey;
+        use std::collections::BTreeSet;
+
+        let policies = [
+            None,
+            Some(BTreeSet::new()),
+            Some(BTreeSet::from([DisableKey::CapsLock])),
+            Some(BTreeSet::from([DisableKey::WindowsCommand])),
+        ];
+        for canonical_policy in &policies {
+            for legacy_policy in &policies {
+                let mut config = Config::default();
+                let route = "receiver:82839805:slot:1";
+                let canonical = PhysicalDeviceKey::parse("unit:6be9d300").expect("valid");
+                config.devices.insert(
+                    route.into(),
+                    DeviceConfig {
+                        disabled_keys: legacy_policy.clone(),
+                        ..DeviceConfig::default()
+                    },
+                );
+                config.devices.insert(
+                    canonical.as_str().into(),
+                    DeviceConfig {
+                        disabled_keys: canonical_policy.clone(),
+                        ..DeviceConfig::default()
+                    },
+                );
+
+                assert!(config.adopt_route(&canonical, route, None));
+                let expected = canonical_policy.as_ref().or(legacy_policy.as_ref());
+                assert_eq!(
+                    config.disabled_keys(canonical.as_str()),
+                    expected,
+                    "canonical={canonical_policy:?}, legacy={legacy_policy:?}"
+                );
+                assert!(!config.devices.contains_key(route));
+                assert!(!config.adopt_route(&canonical, route, None));
+                let restored: Config =
+                    toml::from_str(&toml::to_string(&config).expect("serialize")).expect("reload");
+                assert_eq!(restored.disabled_keys(canonical.as_str()), expected);
+            }
+        }
     }
 
     #[test]

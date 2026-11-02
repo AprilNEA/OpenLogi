@@ -1,16 +1,20 @@
-//! The vendored Actions Ring glyphs, as a GPUI [`AssetSource`].
+//! The vendored glyphs the overlay draws — Actions Ring slots and its
+//! notices — as a GPUI `AssetSource` and as plain bytes.
 //!
 //! Both frontends draw ring slots, so both need these bytes; nothing else in
 //! either app's artwork is shared, which is why this source serves *only*
 //! `action-icons/` and reports every other path as absent. A frontend needing
 //! more composes this with its own source rather than growing this one —
-//! anything added here is added to the overlay too.
+//! anything added here is added to the overlay too. The agent reads the same
+//! bytes through [`embedded_icon`] to draw keypad LCD keys.
 //!
 //! Embedding via `include_bytes!` means the paths resolve identically inside a
 //! packaged `.app` and from a dev build; a filesystem path would not.
 
+#[cfg(feature = "gpui")]
 use std::borrow::Cow;
 
+#[cfg(feature = "gpui")]
 use gpui::{AssetSource, Result, SharedString};
 
 /// Vendored [lucide](https://lucide.dev) icons (ISC license), embedded so they
@@ -26,9 +30,11 @@ use gpui::{AssetSource, Result, SharedString};
 /// preview of the same ring exactly.
 #[rustfmt::skip]
 const ACTION_ICONS: &[(&str, &[u8])] = &[
+    ("action-icons/arrow-left-right.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/arrow-left-right.svg"))),
     ("action-icons/arrow-left.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/arrow-left.svg"))),
     ("action-icons/arrow-right.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/arrow-right.svg"))),
     ("action-icons/ban.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/ban.svg"))),
+    ("action-icons/battery-low.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/battery-low.svg"))),
     ("action-icons/bell.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/bell.svg"))),
     ("action-icons/bluetooth.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/bluetooth.svg"))),
     ("action-icons/book-open.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/book-open.svg"))),
@@ -60,6 +66,7 @@ const ACTION_ICONS: &[(&str, &[u8])] = &[
     ("action-icons/list-checks.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/list-checks.svg"))),
     ("action-icons/lock.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/lock.svg"))),
     ("action-icons/monitor.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/monitor.svg"))),
+    ("action-icons/moon.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/moon.svg"))),
     ("action-icons/mouse-left.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/mouse-left.svg"))),
     ("action-icons/mouse-pointer-click.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/mouse-pointer-click.svg"))),
     ("action-icons/mouse-right.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/mouse-right.svg"))),
@@ -101,15 +108,30 @@ const ACTION_ICONS: &[(&str, &[u8])] = &[
 /// the same mark, so neither side names the asset itself.
 pub const RING_CANCEL_ICON: &str = "action-icons/x.svg";
 
+/// The glyph on the overlay's low-battery notice.
+pub const LOW_BATTERY_ICON: &str = "action-icons/battery-low.svg";
+
+/// The glyph on the overlay's lock-key indicator.
+pub const LOCK_KEY_ICON: &str = "action-icons/keyboard.svg";
+
+/// The embedded SVG for an `action-icons/…` asset path — the same path
+/// `ActionRingIcon::asset_path` names — or `None` for any other path.
+#[must_use]
+pub fn embedded_icon(path: &str) -> Option<&'static [u8]> {
+    ACTION_ICONS
+        .iter()
+        .find(|(candidate, _)| *candidate == path)
+        .map(|(_, bytes)| *bytes)
+}
+
 /// GPUI asset source for the embedded ring glyphs, and nothing else.
+#[cfg(feature = "gpui")]
 pub struct ActionIcons;
 
+#[cfg(feature = "gpui")]
 impl AssetSource for ActionIcons {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
-        Ok(ACTION_ICONS
-            .iter()
-            .find(|(candidate, _)| *candidate == path)
-            .map(|(_, bytes)| Cow::Borrowed(*bytes)))
+        Ok(embedded_icon(path).map(Cow::Borrowed))
     }
 
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
@@ -123,6 +145,9 @@ impl AssetSource for ActionIcons {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::path::Path;
+
     use openlogi_core::binding::ActionRingIcon;
 
     use super::*;
@@ -131,21 +156,67 @@ mod tests {
     fn the_shared_ring_cancel_icon_is_embedded() {
         // Both processes render this path; a rename that missed the array
         // would blank the overlay's cancel target rather than fail to build.
-        let loaded = ActionIcons.load(RING_CANCEL_ICON);
         assert!(
-            matches!(loaded, Ok(Some(_))),
+            embedded_icon(RING_CANCEL_ICON).is_some(),
             "{RING_CANCEL_ICON} is missing"
         );
     }
 
     #[test]
+    fn the_low_battery_notice_icon_is_embedded() {
+        let loaded = ActionIcons.load(LOW_BATTERY_ICON);
+        assert!(
+            matches!(loaded, Ok(Some(_))),
+            "{LOW_BATTERY_ICON} is missing"
+        );
+    }
+
+    #[test]
+    fn the_lock_key_indicator_icon_is_embedded() {
+        let loaded = ActionIcons.load(LOCK_KEY_ICON);
+        assert!(matches!(loaded, Ok(Some(_))), "{LOCK_KEY_ICON} is missing");
+    }
+
+    #[test]
     fn every_ring_gallery_icon_is_embedded() {
         for icon in ActionRingIcon::ALL {
-            let loaded = ActionIcons.load(icon.asset_path());
             assert!(
-                matches!(loaded, Ok(Some(_))),
+                embedded_icon(icon.asset_path()).is_some(),
                 "missing embedded asset for {icon:?}"
             );
         }
+    }
+
+    /// A glyph dropped into `action-icons/` but left out of [`ACTION_ICONS`]
+    /// resolves to no bytes, which GPUI draws as an empty slot rather than
+    /// reporting — the failure has no error path to catch it at runtime. The
+    /// button picker's `moon.svg` shipped that way from the day it was added.
+    #[test]
+    fn every_bundled_glyph_is_embedded() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("action-icons");
+        let entries = fs::read_dir(&dir).expect("action-icons/ is readable");
+        for entry in entries {
+            let name = entry.expect("readable directory entry").file_name();
+            let name = name.to_string_lossy();
+            if !name.ends_with(".svg") {
+                continue;
+            }
+            let path = format!("action-icons/{name}");
+            assert!(
+                embedded_icon(&path).is_some(),
+                "{path} is on disk but missing from ACTION_ICONS"
+            );
+        }
+    }
+
+    /// The GPUI source serves exactly the embedded table: a hit is the same
+    /// bytes, and a path outside `action-icons/` is absent rather than an
+    /// error, so a composed source falls through to the next one.
+    #[cfg(feature = "gpui")]
+    #[test]
+    fn the_asset_source_serves_the_embedded_bytes_and_nothing_else() {
+        let served = ActionIcons.load(RING_CANCEL_ICON).expect("load succeeds");
+        assert_eq!(served.as_deref(), embedded_icon(RING_CANCEL_ICON));
+        assert!(matches!(ActionIcons.load("logo.svg"), Ok(None)));
     }
 }

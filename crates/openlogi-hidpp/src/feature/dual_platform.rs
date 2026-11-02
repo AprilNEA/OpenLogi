@@ -13,6 +13,17 @@ use crate::{
     protocol::v20::Hidpp20Error,
 };
 
+/// `getPlatform`. Logi Options+ 2.8 (`Feature4530DualPlatform::GetPlatform`)
+/// and Solaar (`read_fnid=0x00`) both read with function 0.
+const FN_GET_PLATFORM: u8 = 0;
+
+/// `setPlatform`. Solaar writes with function 2, but Logi Options+ 2.8
+/// (`Feature4530DualPlatform::SetPlatform`) uses function 1, and no capture
+/// settles which is right. Function 2 stays: Options+ knows only these two
+/// functions, so if it is right, function 2 is out of range and the device
+/// answers with an error instead of taking a write.
+const FN_SET_PLATFORM: u8 = 2;
+
 /// The platform a [`DualPlatformFeature`] device is configured for.
 ///
 /// The selection is persistent and chosen by the user during pairing or by short
@@ -63,8 +74,11 @@ impl DecodeEvent for DualPlatformEvent {
 impl DualPlatformFeature {
     /// Retrieves the current platform setting.
     pub async fn get_platform(&self) -> Result<DualPlatformSelection, Hidpp20Error> {
-        // `getPlatform` is function 1 in this feature, not the usual 0.
-        let payload = self.endpoint.call(1, [0; 3]).await?.extend_payload();
+        let payload = self
+            .endpoint
+            .call(FN_GET_PLATFORM, [0; 3])
+            .await?
+            .extend_payload();
         DualPlatformSelection::try_from(payload[0]).map_err(|_| Hidpp20Error::UnsupportedResponse)
     }
 
@@ -77,7 +91,7 @@ impl DualPlatformFeature {
     ) -> Result<DualPlatformSelection, Hidpp20Error> {
         let payload = self
             .endpoint
-            .call(2, [platform.into(), 0, 0])
+            .call(FN_SET_PLATFORM, [platform.into(), 0, 0])
             .await?
             .extend_payload();
         DualPlatformSelection::try_from(payload[0]).map_err(|_| Hidpp20Error::UnsupportedResponse)
@@ -100,5 +114,46 @@ mod tests {
         );
         DualPlatformSelection::try_from(2).unwrap_err();
         assert_eq!(u8::from(DualPlatformSelection::AndroidOrWindows), 1);
+    }
+
+    #[test]
+    fn reads_the_platform_with_function_zero() {
+        // Function 1 is setPlatform in the Options+ function table, so a read
+        // sent there would switch the keyboard to the iOS/macOS layout.
+        use std::sync::Arc;
+
+        use super::{DualPlatformFeature, FN_GET_PLATFORM};
+        use crate::channel::mock::{MockRawHidChannel, channel_with_reader};
+        use crate::feature::CreatableFeature;
+        use crate::nibble::U4;
+        use crate::protocol::v20::{Message, MessageHeader};
+
+        futures::executor::block_on(async {
+            let (raw, handle) = MockRawHidChannel::new();
+            let channel = Arc::new(channel_with_reader(raw).await);
+            let feature = DualPlatformFeature::new(channel, 3, 8);
+            let header = MessageHeader {
+                device_index: 3,
+                feature_index: 8,
+                function_id: U4::from_lo(FN_GET_PLATFORM),
+                software_id: U4::from_lo(1),
+            };
+            let mut read = Box::pin(feature.get_platform());
+            assert!(futures::poll!(read.as_mut()).is_pending());
+
+            // Report: [id, device, feature, function|swid, payload...].
+            let [request] = &handle.written_reports()[..] else {
+                panic!("one request");
+            };
+            assert_eq!(request[3] >> 4, 0);
+            assert_eq!(request[4..7], [0, 0, 0]);
+
+            let mut payload = [0; 16];
+            payload[0] = 1;
+            handle
+                .send_incoming(Message::Long(header, payload).into())
+                .await;
+            assert_eq!(read.await.unwrap(), DualPlatformSelection::AndroidOrWindows);
+        });
     }
 }

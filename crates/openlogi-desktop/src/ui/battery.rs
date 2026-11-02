@@ -13,22 +13,34 @@ use openlogi_core::device::{BatteryInfo, BatteryLevel, BatteryStatus};
 
 use super::theme::{self, Palette, Typography as _};
 
-/// True when a charging device has not supplied a usable percentage yet.
-///
-/// Some devices cannot gauge charge while under load. On a cold start they
-/// report 0% until a later poll, which must not be presented as an empty or
-/// critically depleted battery.
-pub(crate) fn battery_charging_no_reading(battery: &BatteryInfo) -> bool {
-    is_charging(battery.status) && battery.percentage == 0
+/// What a battery reading can show.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ChargeReading {
+    /// A measured state of charge.
+    Percent(u8),
+    /// Only the firmware's coarse level: the device has no state-of-charge
+    /// gauge, so there is no percentage to show.
+    Level(BatteryLevel),
+    /// Neither a percentage nor a level yet.
+    NoReading,
 }
 
-/// Whether a discharging battery should draw the user's attention.
-pub(crate) fn battery_needs_attention(battery: &BatteryInfo) -> bool {
-    battery.percentage <= 20
-        && !matches!(
-            battery.status,
-            BatteryStatus::Charging | BatteryStatus::ChargingSlow | BatteryStatus::Full
-        )
+fn charge_reading(battery: &BatteryInfo) -> ChargeReading {
+    match battery.percentage {
+        // Some devices cannot gauge charge while under load. On a cold start
+        // they report 0% until a later poll, which must not be presented as
+        // an empty or critically depleted battery.
+        Some(0) if is_charging(battery.status) => ChargeReading::NoReading,
+        Some(percentage) => ChargeReading::Percent(percentage),
+        None if battery.level == BatteryLevel::Unknown => ChargeReading::NoReading,
+        None => ChargeReading::Level(battery.level),
+    }
+}
+
+/// True when a charging device has supplied neither a usable percentage nor
+/// a level yet, so "Charging" is all there is to say.
+pub(crate) fn battery_charging_no_reading(battery: &BatteryInfo) -> bool {
+    is_charging(battery.status) && charge_reading(battery) == ChargeReading::NoReading
 }
 
 /// A battery readout with presentations sized for each desktop context.
@@ -56,7 +68,7 @@ impl BatteryIndicator {
     }
 
     /// The tersest readout — glyph and value only — for a card corner whose
-    /// context rides a hover tip (see [`battery_context`]).
+    /// context rides a hover tip (see [`Self::status`]).
     pub(crate) fn glance(battery: &BatteryInfo) -> Self {
         Self {
             battery: battery.clone(),
@@ -105,7 +117,7 @@ fn inline_readout(battery: &BatteryInfo, pal: Palette) -> impl IntoElement {
             gpui::div()
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(pal.text_primary)
-                .child(value_label(battery)),
+                .child(ValueSlot::new(battery)),
         )
 }
 
@@ -137,7 +149,7 @@ fn status_readout(battery: &BatteryInfo, online: bool, pal: Palette) -> impl Int
             gpui::div()
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(pal.text_primary)
-                .child(value_label(battery)),
+                .child(ValueSlot::new(battery)),
         )
         .when_some(context_label(battery, online), |row, label| {
             row.child(gpui::div().text_color(pal.text_muted).child(label))
@@ -154,7 +166,7 @@ fn summary_readout(battery: &BatteryInfo, pal: Palette) -> impl IntoElement {
             gpui::div()
                 .text_heading()
                 .text_color(pal.text_primary)
-                .child(value_label(battery)),
+                .child(ValueSlot::new(battery)),
         )
         .child(
             gpui::div()
@@ -164,27 +176,84 @@ fn summary_readout(battery: &BatteryInfo, pal: Palette) -> impl IntoElement {
         )
 }
 
-fn value_label(battery: &BatteryInfo) -> String {
-    if battery_charging_no_reading(battery) {
-        tr!("device.charging").to_string()
-    } else {
-        format!("{}%", battery.percentage)
+/// [`value_label`] in a slot at least as wide as the widest percentage,
+/// right-aligned. A falling charge (74% → 71%, 10% → 9%) then moves neither
+/// the glyph before the value nor the words after it. The width is measured
+/// in the text style the slot renders in, so each presentation reserves its
+/// own.
+#[derive(IntoElement)]
+struct ValueSlot {
+    label: String,
+}
+
+impl ValueSlot {
+    fn new(battery: &BatteryInfo) -> Self {
+        Self {
+            label: value_label(battery),
+        }
     }
 }
 
-fn secondary_label(battery: &BatteryInfo) -> Option<gpui::SharedString> {
-    if battery_charging_no_reading(battery) {
-        None
-    } else {
-        match battery.status {
-            BatteryStatus::Charging | BatteryStatus::ChargingSlow => Some(tr!("device.charging")),
-            BatteryStatus::Full => Some(tr!("device.full")),
-            BatteryStatus::Error => Some(tr!("device.battery_error")),
-            BatteryStatus::Discharging | BatteryStatus::Unknown => {
-                battery_needs_attention(battery).then(|| tr!("device.low_battery"))
+impl RenderOnce for ValueSlot {
+    fn render(self, window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        let widest = gpui::SharedString::from(percent_label(100));
+        let style = window.text_style();
+        let run = style.to_run(widest.len());
+        let width = window
+            .text_system()
+            .shape_line(
+                widest,
+                style.font_size.to_pixels(window.rem_size()),
+                &[run],
+                None,
+            )
+            .width
+            // A text element lays out at its shaped width rounded up.
+            .ceil();
+        h_flex()
+            .flex_none()
+            .min_w(width)
+            .justify_end()
+            .child(self.label)
+    }
+}
+
+fn percent_label(percentage: u8) -> String {
+    format!("{percentage}%")
+}
+
+/// The headline value: the percentage, or the level's word for a device
+/// that reports no percentage.
+pub(crate) fn value_label(battery: &BatteryInfo) -> String {
+    match charge_reading(battery) {
+        ChargeReading::Percent(percentage) => percent_label(percentage),
+        ChargeReading::Level(BatteryLevel::Full) => tr!("device.full").to_string(),
+        ChargeReading::Level(BatteryLevel::Good) => tr!("device.battery_good").to_string(),
+        ChargeReading::Level(BatteryLevel::Low | BatteryLevel::Critical) => {
+            tr!("device.low_battery").to_string()
+        }
+        ChargeReading::Level(BatteryLevel::Unknown) | ChargeReading::NoReading => {
+            if is_charging(battery.status) {
+                tr!("device.charging").to_string()
+            } else {
+                "—".to_owned()
             }
         }
     }
+}
+
+/// The status word shown beside [`value_label`], unless it would only
+/// repeat it (a level-only "Full" device that reports a full status).
+fn secondary_label(battery: &BatteryInfo) -> Option<gpui::SharedString> {
+    let label = match battery.status {
+        BatteryStatus::Charging | BatteryStatus::ChargingSlow => Some(tr!("device.charging")),
+        BatteryStatus::Full => Some(tr!("device.full")),
+        BatteryStatus::Error => Some(tr!("device.battery_error")),
+        BatteryStatus::Discharging | BatteryStatus::Unknown => {
+            battery.needs_attention().then(|| tr!("device.low_battery"))
+        }
+    };
+    label.filter(|label| label.as_ref() != value_label(battery))
 }
 
 /// Everything a [`BatteryIndicator::glance`] does not show — the value plus
@@ -209,17 +278,23 @@ fn summary_label(battery: &BatteryInfo) -> gpui::SharedString {
     if battery_charging_no_reading(battery) {
         return tr!("device.battery");
     }
-    match battery.status {
+    let label = match battery.status {
         BatteryStatus::Charging | BatteryStatus::ChargingSlow => tr!("device.charging"),
         BatteryStatus::Full => tr!("device.full"),
         BatteryStatus::Error => tr!("device.battery_error"),
         BatteryStatus::Discharging | BatteryStatus::Unknown => {
-            if battery_needs_attention(battery) {
+            if battery.needs_attention() {
                 tr!("device.low_battery")
             } else {
                 tr!("device.battery")
             }
         }
+    };
+    // The caption names the reading; it must not repeat the headline.
+    if label.as_ref() == value_label(battery) {
+        tr!("device.battery")
+    } else {
+        label
     }
 }
 
@@ -241,7 +316,7 @@ fn battery_tone(battery: &BatteryInfo) -> BatteryTone {
         BatteryStatus::Discharging | BatteryStatus::Unknown => {
             if battery.level == BatteryLevel::Critical {
                 BatteryTone::Critical
-            } else if battery_needs_attention(battery) {
+            } else if battery.needs_attention() {
                 BatteryTone::Low
             } else {
                 BatteryTone::Normal
@@ -308,7 +383,7 @@ fn battery_glyph(
         }
     };
     let paint = GlyphPaint {
-        percentage: (!battery_charging_no_reading(battery)).then_some(battery.percentage),
+        percentage: glyph_fill(charge_reading(battery)),
         track: pal.muted,
         fill: color,
         outline: pal.text_muted.opacity(0.78),
@@ -482,6 +557,19 @@ fn paint_error_mark(body: Bounds<gpui::Pixels>, color: Hsla, window: &mut Window
     ));
 }
 
+/// How full to draw the glyph. A level-only device fills to a fixed point
+/// inside its level's band, so the glyph still reads at a glance.
+const fn glyph_fill(reading: ChargeReading) -> Option<u8> {
+    match reading {
+        ChargeReading::Percent(percentage) => Some(percentage),
+        ChargeReading::Level(BatteryLevel::Critical) => Some(10),
+        ChargeReading::Level(BatteryLevel::Low) => Some(25),
+        ChargeReading::Level(BatteryLevel::Good) => Some(70),
+        ChargeReading::Level(BatteryLevel::Full) => Some(100),
+        ChargeReading::Level(BatteryLevel::Unknown) | ChargeReading::NoReading => None,
+    }
+}
+
 const fn is_charging(status: BatteryStatus) -> bool {
     matches!(
         status,
@@ -491,7 +579,47 @@ const fn is_charging(status: BatteryStatus) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use gpui::InteractiveElement as _;
+
     use super::*;
+
+    /// Title-bar readouts at a one-, two- and three-digit charge, each in a
+    /// box as wide as its content.
+    struct InlineReadouts;
+
+    impl gpui::Render for InlineReadouts {
+        fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+            gpui_component::v_flex()
+                .items_start()
+                .children([9, 74, 100].map(|percentage| {
+                    gpui::div()
+                        .debug_selector(move || format!("inline-{percentage}"))
+                        .child(BatteryIndicator::inline(&BatteryInfo {
+                            percentage: Some(percentage),
+                            level: BatteryLevel::Good,
+                            status: BatteryStatus::Discharging,
+                        }))
+                }))
+        }
+    }
+
+    /// A falling charge must not resize the title-bar readout, or the glyph
+    /// beside it jumps whenever the digit count changes.
+    #[gpui::test]
+    fn the_inline_readout_keeps_its_width_as_the_charge_falls(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let (_, cx) = cx.add_window_view(|_, _| InlineReadouts);
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let width = |cx: &mut gpui::VisualTestContext, selector| {
+            cx.debug_bounds(selector)
+                .expect("the readout renders")
+                .size
+                .width
+        };
+        let full = width(cx, "inline-100");
+        assert_eq!(width(cx, "inline-74"), full);
+        assert_eq!(width(cx, "inline-9"), full);
+    }
 
     #[test]
     fn tone_respects_status_priority_and_discharge_thresholds() {
@@ -535,11 +663,120 @@ mod tests {
         ];
         for (percentage, level, status, expected) in cases {
             let battery = BatteryInfo {
-                percentage,
+                percentage: Some(percentage),
                 level,
                 status,
             };
             assert_eq!(battery_tone(&battery), expected);
         }
+    }
+
+    fn level_only(level: BatteryLevel, status: BatteryStatus) -> BatteryInfo {
+        BatteryInfo {
+            percentage: None,
+            level,
+            status,
+        }
+    }
+
+    #[test]
+    fn a_reading_without_a_percentage_falls_back_to_the_level() {
+        let cases = [
+            (
+                Some(0),
+                BatteryLevel::Good,
+                BatteryStatus::Charging,
+                ChargeReading::NoReading,
+            ),
+            (
+                Some(0),
+                BatteryLevel::Critical,
+                BatteryStatus::Discharging,
+                ChargeReading::Percent(0),
+            ),
+            (
+                Some(64),
+                BatteryLevel::Good,
+                BatteryStatus::Discharging,
+                ChargeReading::Percent(64),
+            ),
+            (
+                None,
+                BatteryLevel::Good,
+                BatteryStatus::Discharging,
+                ChargeReading::Level(BatteryLevel::Good),
+            ),
+            (
+                None,
+                BatteryLevel::Low,
+                BatteryStatus::Charging,
+                ChargeReading::Level(BatteryLevel::Low),
+            ),
+            (
+                None,
+                BatteryLevel::Unknown,
+                BatteryStatus::Charging,
+                ChargeReading::NoReading,
+            ),
+            (
+                None,
+                BatteryLevel::Unknown,
+                BatteryStatus::Unknown,
+                ChargeReading::NoReading,
+            ),
+        ];
+        for (percentage, level, status, expected) in cases {
+            let battery = BatteryInfo {
+                percentage,
+                level,
+                status,
+            };
+            assert_eq!(charge_reading(&battery), expected, "{battery:?}");
+        }
+    }
+
+    #[test]
+    fn a_level_only_battery_is_toned_by_its_level() {
+        assert_eq!(
+            battery_tone(&level_only(BatteryLevel::Critical, BatteryStatus::Charging)),
+            BatteryTone::Charging
+        );
+        assert_eq!(
+            battery_tone(&level_only(
+                BatteryLevel::Critical,
+                BatteryStatus::Discharging
+            )),
+            BatteryTone::Critical
+        );
+        assert_eq!(
+            battery_tone(&level_only(BatteryLevel::Low, BatteryStatus::Discharging)),
+            BatteryTone::Low
+        );
+        assert_eq!(
+            battery_tone(&level_only(BatteryLevel::Good, BatteryStatus::Discharging)),
+            BatteryTone::Normal
+        );
+    }
+
+    #[test]
+    fn a_level_only_glyph_fills_inside_its_level_band() {
+        assert_eq!(glyph_fill(ChargeReading::Percent(42)), Some(42));
+        assert_eq!(
+            glyph_fill(ChargeReading::Level(BatteryLevel::Critical)),
+            Some(10)
+        );
+        assert_eq!(
+            glyph_fill(ChargeReading::Level(BatteryLevel::Low)),
+            Some(25)
+        );
+        assert_eq!(
+            glyph_fill(ChargeReading::Level(BatteryLevel::Good)),
+            Some(70)
+        );
+        assert_eq!(
+            glyph_fill(ChargeReading::Level(BatteryLevel::Full)),
+            Some(100)
+        );
+        assert_eq!(glyph_fill(ChargeReading::NoReading), None);
     }
 }

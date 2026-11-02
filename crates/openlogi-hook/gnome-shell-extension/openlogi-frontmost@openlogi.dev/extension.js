@@ -5,12 +5,16 @@
 // uses this to drive per-app mouse-profile switching on GNOME Wayland, where
 // the focused window is otherwise not visible to ordinary clients.
 //
-// It reads only `global.display.focus_window.get_wm_class()` — no titles, no
-// window contents, no input. ESM module style; targets GNOME Shell 45+.
+// It also keeps Actions Ring surfaces out of GNOME's window animations so
+// their initial pointer coordinates stay valid. No titles, window contents,
+// or input are read. ESM module style; targets GNOME Shell 45+.
 
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
-import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
+import {Extension, InjectionManager} from 'resource:///org/gnome/shell/extensions/extension.js';
+import * as Main from 'resource:///org/gnome/shell/ui/main.js';
+
+import {withoutRingAnimation} from './ringAnimation.js';
 
 const DBUS_NAME = 'org.openlogi.Frontmost';
 const DBUS_PATH = '/org/openlogi/Frontmost';
@@ -39,9 +43,15 @@ export default class OpenLogiFrontmostExtension extends Extension {
         this._focusChangedId = global.display.connect(
             'notify::focus-window',
             () => this._emitFocusedWmClassChanged());
+
+        this._ringAnimations = new InjectionManager();
+        this._ringAnimations.overrideMethod(
+            Main.wm, '_shouldAnimateActor', withoutRingAnimation);
     }
 
     disable() {
+        this._ringAnimations?.clear();
+        this._ringAnimations = null;
         if (this._focusChangedId) {
             global.display.disconnect(this._focusChangedId);
             this._focusChangedId = 0;

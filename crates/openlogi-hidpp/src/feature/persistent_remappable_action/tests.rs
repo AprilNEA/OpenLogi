@@ -2,7 +2,10 @@
 
 use std::assert_matches;
 
-use super::{ActionId, HostMask, ModifierMask, PersistentAction, RemappableCapabilities};
+use super::{
+    ActionId, HostMask, ModifierMask, PersistentAction, PersistentActionStatus,
+    RemappableCapabilities,
+};
 use crate::feature::{hosts_info::HostIndex, reprog_controls::ControlId};
 
 #[test]
@@ -41,7 +44,8 @@ fn parses_persistent_action() {
     assert!(action.modifier_mask.contains(ModifierMask::LEFT_CTRL));
     assert!(action.modifier_mask.contains(ModifierMask::LEFT_GUI));
     assert!(!action.modifier_mask.contains(ModifierMask::RIGHT_ALT));
-    assert!(action.remapped);
+    assert!(action.is_remapped());
+    assert_eq!(action.status, PersistentActionStatus::REMAPPED);
 }
 
 #[test]
@@ -52,7 +56,7 @@ fn reports_default_mapping_as_not_remapped() {
 
     let action = PersistentAction::from_payload(&payload).unwrap();
     assert_eq!(action.action_id, ActionId::ExecuteInternalFunction);
-    assert!(!action.remapped);
+    assert!(!action.is_remapped());
 }
 
 #[test]
@@ -70,7 +74,8 @@ fn rejects_unknown_action_id() {
 fn maps_action_id_wire_values() {
     assert_eq!(ActionId::try_from(0x01u8).unwrap(), ActionId::SendKeyboard);
     assert_eq!(ActionId::try_from(0x09u8).unwrap(), ActionId::SendPowerKey);
-    ActionId::try_from(0x00u8).unwrap_err();
+    assert_eq!(ActionId::try_from(0x00u8).unwrap(), ActionId::Empty);
+    ActionId::try_from(0x0au8).unwrap_err();
     assert_eq!(u8::from(ActionId::SendConsumerControl), 0x07);
 }
 
@@ -78,4 +83,37 @@ fn maps_action_id_wire_values() {
 fn host_mask_bits() {
     let mask = HostMask::HOST_1 | HostMask::HOST_3;
     assert_eq!(mask.bits(), 0b101);
+}
+
+#[test]
+fn decodes_an_empty_action() {
+    // A control mapped to no output reports action 0 with a zero value and
+    // no modifiers. It must decode, not fail as an unknown action.
+    let mut payload = [0; 16];
+    payload[0..2].copy_from_slice(&0x0052u16.to_be_bytes()); // cid
+    payload[2] = 0x00; // host 1
+    payload[3] = 0x00; // Empty
+    payload[7] = 0x01; // remapped away from the default
+    let action = PersistentAction::from_payload(&payload).unwrap();
+    assert_eq!(action.cid, ControlId(0x0052));
+    assert_eq!(action.action_id, ActionId::Empty);
+    assert_eq!(action.value, 0);
+    assert_eq!(action.modifier_mask, ModifierMask::empty());
+    assert!(action.is_remapped());
+}
+
+#[test]
+fn keeps_every_status_bit() {
+    // Only bit 0 has a known meaning; the other bits must survive decoding.
+    let mut payload = [0; 16];
+    payload[3] = 0x07; // SendConsumerControl
+    payload[7] = 0b1010_0000;
+    let action = PersistentAction::from_payload(&payload).unwrap();
+    assert_eq!(action.status.bits(), 0b1010_0000);
+    assert!(!action.is_remapped());
+
+    payload[7] = 0b1000_0001;
+    let action = PersistentAction::from_payload(&payload).unwrap();
+    assert_eq!(action.status.bits(), 0b1000_0001);
+    assert!(action.is_remapped());
 }

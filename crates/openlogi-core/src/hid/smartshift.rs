@@ -216,13 +216,15 @@ impl<'de> Deserialize<'de> for SmartShiftAutoDisengage {
     }
 }
 
-/// A non-zero tunable-torque level reported by SmartShift Enhanced.
+/// A SmartShift Enhanced tunable-torque level, in percent of the wheel's
+/// maximum force.
 ///
-/// Devices without tunable-torque hardware represent that absence as zero;
-/// [`SmartShiftStatus`] exposes it as `None` instead.
+/// Zero is HID++'s write-only "do not change" sentinel and a status reply
+/// without a torque level, which [`SmartShiftStatus`] exposes as `None`.
+/// Logi Options+ and Solaar both bound the level to `1..=100`.
 #[nutype(
     const_fn,
-    validate(greater_or_equal = 1),
+    validate(greater_or_equal = 1, less_or_equal = 100),
     derive(
         Debug,
         Clone,
@@ -239,6 +241,41 @@ impl<'de> Deserialize<'de> for SmartShiftAutoDisengage {
     )
 )]
 pub struct TunableTorque(u8);
+
+impl TunableTorque {
+    /// Minimum percentage for the tunable torque / scrolling force slider.
+    pub const MIN: Self = match Self::try_new(1) {
+        Ok(v) => v,
+        Err(_) => panic!("valid minimum torque"),
+    };
+    /// Maximum percentage for the tunable torque / scrolling force slider.
+    pub const MAX: Self = match Self::try_new(100) {
+        Ok(v) => v,
+        Err(_) => panic!("valid maximum torque"),
+    };
+    /// Out-of-the-box default torque (50%).
+    pub const DEFAULT: Self = match Self::try_new(50) {
+        Ok(v) => v,
+        Err(_) => panic!("valid default torque"),
+    };
+
+    /// Round and clamp a floating-point control value into the user-facing percentage range (1..=100).
+    #[must_use]
+    pub fn from_rounded(value: f32) -> Self {
+        let value = if value.is_nan() { 50.0 } else { value };
+        let raw = value.clamp(1.0, 100.0).round().saturating_as::<u8>();
+        let Ok(value) = Self::try_new(raw) else {
+            unreachable!("clamped torque is always valid");
+        };
+        value
+    }
+}
+
+impl From<TunableTorque> for f32 {
+    fn from(torque: TunableTorque) -> Self {
+        Self::from(torque.into_inner())
+    }
+}
 
 impl From<TunableTorque> for NonZeroU8 {
     fn from(torque: TunableTorque) -> Self {
@@ -366,5 +403,27 @@ mod tests {
             u8::from(SmartShiftThreshold::from_rounded(f32::INFINITY)),
             254
         );
+    }
+
+    #[test]
+    fn tunable_torque_is_a_percentage() {
+        let Err(_) = TunableTorque::try_new(0) else {
+            panic!("zero is the write-only do-not-change sentinel");
+        };
+        assert_eq!(TunableTorque::try_new(1).map(u8::from), Ok(1));
+        assert_eq!(TunableTorque::try_new(100).map(u8::from), Ok(100));
+        let Err(_) = TunableTorque::try_new(101) else {
+            panic!("torque above 100% of the maximum force is not a level");
+        };
+    }
+
+    #[test]
+    fn floating_tunable_torque_rounds_and_saturates_into_the_domain() {
+        assert_eq!(u8::from(TunableTorque::from_rounded(49.6)), 50);
+        assert_eq!(u8::from(TunableTorque::from_rounded(f32::NAN)), 50);
+        assert_eq!(u8::from(TunableTorque::from_rounded(f32::NEG_INFINITY)), 1);
+        assert_eq!(u8::from(TunableTorque::from_rounded(f32::INFINITY)), 100);
+        assert_eq!(u8::from(TunableTorque::from_rounded(0.0)), 1);
+        assert_eq!(u8::from(TunableTorque::from_rounded(150.0)), 100);
     }
 }

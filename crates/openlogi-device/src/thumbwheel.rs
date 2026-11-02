@@ -9,11 +9,11 @@
 //! and re-synthesises horizontal scroll from the rotation deltas to keep
 //! scrolling working.
 //!
-//! `hidpp 0.2` ships no typed wrapper, so we re-implement the three functions
+//! `hidpp 0.2` ships no typed wrapper, so we re-implement the functions
 //! OpenLogi needs: `getThumbwheelInfo` (capabilities — notably whether the wheel
-//! reports a single tap), `setThumbwheelReporting` (enter/leave diverted mode),
-//! and decode the unsolicited `thumbwheelEvent`. Wire format from
-//! `x2150_thumbwheel_v0.pdf`.
+//! reports a single tap), `getThumbwheelStatus` (the reporting state to hand
+//! back), `setThumbwheelReporting` (enter/leave diverted mode), and decode the
+//! unsolicited `thumbwheelEvent`. Wire format from `x2150_thumbwheel_v0.pdf`.
 
 use std::sync::Arc;
 
@@ -29,6 +29,8 @@ pub const FEATURE_ID: u16 = 0x2150;
 
 /// `getThumbwheelInfo` function ID.
 const FN_GET_INFO: u8 = 0;
+/// `getThumbwheelStatus` function ID.
+const FN_GET_STATUS: u8 = 1;
 /// `setThumbwheelReporting` function ID.
 const FN_SET_REPORTING: u8 = 2;
 
@@ -39,6 +41,8 @@ const MODE_DIVERTED: u8 = 1;
 
 /// `c_single_tap` capability bit in `getThumbwheelInfo` byte 5.
 const CAP_SINGLE_TAP: u8 = 0x08;
+/// `invert` bit in `getThumbwheelStatus` byte 1.
+const STATUS_INVERTED: u8 = 0x01;
 /// `single_tap` bit in `thumbwheelEvent` byte 5.
 const EV_SINGLE_TAP: u8 = 0x08;
 /// `proxy` bit in `thumbwheelEvent` byte 5.
@@ -77,30 +81,43 @@ pub enum RotationStatus {
     Active,
     /// The roll ended: released, no touch.
     Stop,
+    /// A value the spec does not define, carrying the raw byte. It says
+    /// nothing about a roll: it neither delivers a tap nor ends a roll.
+    Other(u8),
 }
 
 impl RotationStatus {
-    /// Decode `thumbwheelEvent` byte 4. Values outside the four the spec
-    /// defines decode as [`RotationStatus::Inactive`] — a firmware that
-    /// reports something else has said nothing about a roll, and the caller
-    /// still has the report's own `rotation` to go on. Claiming a roll here
-    /// instead would let one unrecognised value make the tap permanently
-    /// undeliverable.
+    /// Decode `thumbwheelEvent` byte 4. A value outside the four the spec
+    /// defines stays [`RotationStatus::Other`], as in the typed `hidpp`
+    /// wrapper: reading it as `Inactive` would claim a settled wheel and let
+    /// the report's tap bit fire a bound action.
     #[must_use]
     fn from_byte(byte: u8) -> Self {
         match byte {
+            0 => Self::Inactive,
             1 => Self::Start,
             2 => Self::Active,
             3 => Self::Stop,
-            _ => Self::Inactive,
+            other => Self::Other(other),
         }
     }
 
-    /// Whether this report belongs to a roll — including its `Stop`, which
-    /// carries no rotation of its own but is still the roll's own contact.
+    /// Whether this report says the wheel is at rest, the only status on
+    /// which a tap bit is the user's own. A roll's reports, its `Stop`
+    /// included, carry the tap bit of the contact that rolled the wheel, and
+    /// an unrecognised status does not say the wheel is settled.
     #[must_use]
-    pub fn is_rolling(self) -> bool {
-        !matches!(self, Self::Inactive)
+    pub fn is_at_rest(self) -> bool {
+        matches!(self, Self::Inactive)
+    }
+
+    /// Whether the roll this report belongs to is still under way after it:
+    /// the roll began or continued here, and its `Stop` is still to come.
+    /// An unrecognised status leaves no roll open, so one such report cannot
+    /// hold back the next tap on a settled wheel.
+    #[must_use]
+    pub fn leaves_roll_open(self) -> bool {
+        matches!(self, Self::Start | Self::Active)
     }
 }
 
@@ -129,9 +146,9 @@ impl WheelResolution {
 
     /// Native scroll units one diverted increment is worth.
     ///
-    /// `1.0` when either resolution is missing — a wheel that did not answer
-    /// `getThumbwheelInfo` keeps the raw increment-per-unit behavior rather
-    /// than having its scroll silently scaled by a guess.
+    /// `1.0` when either resolution is zero — a wheel that reports no
+    /// resolution keeps the raw increment-per-unit behavior rather than
+    /// having its scroll silently scaled by a guess.
     #[must_use]
     pub fn native_per_increment(self) -> f64 {
         if self.native_res == 0 || self.diverted_res == 0 {
@@ -166,6 +183,67 @@ impl ThumbwheelInfo {
     pub fn positive_is_forward(self) -> bool {
         self.default_dir == 1
     }
+}
+
+/// Where the wheel's rotation reports go (`getThumbwheelStatus` byte 0).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReportingMode {
+    /// Native HID horizontal scroll.
+    Native,
+    /// HID++ `thumbwheelEvent` reports.
+    Diverted,
+}
+
+impl ReportingMode {
+    /// The `setThumbwheelReporting` byte 0 value for this mode.
+    fn to_byte(self) -> u8 {
+        match self {
+            Self::Native => MODE_NATIVE,
+            Self::Diverted => MODE_DIVERTED,
+        }
+    }
+}
+
+/// The reporting state returned by `getThumbwheelStatus`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThumbwheelStatus {
+    /// Current reporting mode.
+    pub mode: ReportingMode,
+    /// Rotation sign applied in that mode.
+    pub direction: WheelDirection,
+}
+
+impl ThumbwheelStatus {
+    fn from_payload(p: &[u8; 16]) -> Result<Self, Hidpp20Error> {
+        let mode = match p[0] {
+            MODE_NATIVE => ReportingMode::Native,
+            MODE_DIVERTED => ReportingMode::Diverted,
+            _ => return Err(Hidpp20Error::UnsupportedResponse),
+        };
+        Ok(Self {
+            mode,
+            direction: WheelDirection::from_inverted(p[1] & STATUS_INVERTED != 0),
+        })
+    }
+}
+
+/// The reporting state to hand back when undiverting a wheel whose status
+/// before diversion was `original`.
+///
+/// A diverter borrows the reporting state, so it returns the mode and the
+/// rotation sign it found. That includes a wheel found diverted: another
+/// HID++ client that diverted it keeps receiving its reports. Nothing on the
+/// wire tells such a client apart from a session that never tore down, so a
+/// diversion left over that way is handed back too, until the device
+/// reconnects and its firmware drops it. With no readable status there is
+/// nothing to return, and the wheel gets native reporting with the default
+/// sign.
+#[must_use]
+pub fn status_to_restore(original: Option<ThumbwheelStatus>) -> ThumbwheelStatus {
+    original.unwrap_or(ThumbwheelStatus {
+        mode: ReportingMode::Native,
+        direction: WheelDirection::Default,
+    })
 }
 
 /// A decoded `thumbwheelEvent`.
@@ -273,20 +351,33 @@ impl Thumbwheel {
         })
     }
 
+    /// Read the wheel's current reporting mode and rotation sign.
+    pub async fn get_status(&self) -> Result<ThumbwheelStatus, Hidpp20Error> {
+        ThumbwheelStatus::from_payload(&self.call(FN_GET_STATUS, [0; 16]).await?)
+    }
+
     /// Enter diverted reporting; wheel events then arrive on this feature
     /// index instead of moving the native scroll.
     pub async fn divert(&self, direction: WheelDirection) -> Result<(), Hidpp20Error> {
-        let mut params = [0u8; 16];
-        params[0] = MODE_DIVERTED;
-        params[1] = u8::from(direction == WheelDirection::Inverted);
-        self.call(FN_SET_REPORTING, params).await?;
-        Ok(())
+        self.set_reporting(ReportingMode::Diverted, direction).await
     }
 
-    /// Hand native scrolling back to the firmware.
-    pub async fn undivert(&self) -> Result<(), Hidpp20Error> {
+    /// Hand the wheel's reporting state back: write `status`, normally
+    /// [`status_to_restore`] of the status read before diverting.
+    /// `setThumbwheelReporting` always writes the mode and the rotation sign
+    /// together, so both come from `status`.
+    pub async fn restore(&self, status: ThumbwheelStatus) -> Result<(), Hidpp20Error> {
+        self.set_reporting(status.mode, status.direction).await
+    }
+
+    async fn set_reporting(
+        &self,
+        mode: ReportingMode,
+        direction: WheelDirection,
+    ) -> Result<(), Hidpp20Error> {
         let mut params = [0u8; 16];
-        params[0] = MODE_NATIVE;
+        params[0] = mode.to_byte();
+        params[1] = u8::from(direction == WheelDirection::Inverted);
         self.call(FN_SET_REPORTING, params).await?;
         Ok(())
     }
@@ -300,6 +391,16 @@ pub enum WheelDirection {
     Default,
     /// Invert the rotation sign.
     Inverted,
+}
+
+impl WheelDirection {
+    fn from_inverted(inverted: bool) -> Self {
+        if inverted {
+            Self::Inverted
+        } else {
+            Self::Default
+        }
+    }
 }
 
 #[cfg(test)]
@@ -349,10 +450,11 @@ mod tests {
         assert_eq!(status(1), RotationStatus::Start);
         assert_eq!(status(2), RotationStatus::Active);
         assert_eq!(status(3), RotationStatus::Stop);
+        assert_eq!(status(4), RotationStatus::Other(4));
         assert_eq!(
             status(0xff),
-            RotationStatus::Inactive,
-            "an unrecognised value must not make the tap permanently undeliverable"
+            RotationStatus::Other(0xff),
+            "an unrecognised value must not read as a settled wheel"
         );
     }
 
@@ -369,12 +471,15 @@ mod tests {
 
     /// The roll's own `Stop` reports no rotation — it is the release — so
     /// rotation alone cannot tell a settled wheel from one that just stopped.
+    /// An unrecognised status says neither.
     #[test]
-    fn a_stop_report_is_still_part_of_the_roll() {
-        assert!(RotationStatus::Stop.is_rolling());
-        assert!(RotationStatus::Start.is_rolling());
-        assert!(RotationStatus::Active.is_rolling());
-        assert!(!RotationStatus::Inactive.is_rolling());
+    fn only_an_inactive_report_is_at_rest() {
+        assert!(RotationStatus::Inactive.is_at_rest());
+        assert!(!RotationStatus::Start.is_at_rest());
+        assert!(!RotationStatus::Active.is_at_rest());
+        assert!(!RotationStatus::Stop.is_at_rest());
+        assert!(!RotationStatus::Other(4).is_at_rest());
+        assert!(!RotationStatus::Other(4).leaves_roll_open());
     }
 
     #[test]
@@ -384,5 +489,52 @@ mod tests {
         assert_eq!(decode_event(&event(0, 5, p), 2, 6), None);
         // Wrong feature index.
         assert_eq!(decode_event(&event(0, 0, p), 2, 9), None);
+    }
+
+    #[test]
+    fn decodes_reporting_status_and_rejects_unknown_modes() {
+        let status = |mode, flags| {
+            let mut p = [0u8; 16];
+            p[0] = mode;
+            p[1] = flags;
+            ThumbwheelStatus::from_payload(&p)
+        };
+        assert_eq!(
+            status(0, 0b001).unwrap(),
+            ThumbwheelStatus {
+                mode: ReportingMode::Native,
+                direction: WheelDirection::Inverted,
+            }
+        );
+        // touch (bit 1) and proxy (bit 2) do not read as inversion.
+        assert_eq!(
+            status(1, 0b110).unwrap(),
+            ThumbwheelStatus {
+                mode: ReportingMode::Diverted,
+                direction: WheelDirection::Default,
+            }
+        );
+        assert!(matches!(
+            status(2, 0),
+            Err(Hidpp20Error::UnsupportedResponse)
+        ));
+    }
+
+    #[test]
+    fn restore_returns_the_status_found_before_diverting() {
+        for mode in [ReportingMode::Native, ReportingMode::Diverted] {
+            for direction in [WheelDirection::Default, WheelDirection::Inverted] {
+                let original = ThumbwheelStatus { mode, direction };
+                assert_eq!(status_to_restore(Some(original)), original);
+            }
+        }
+        // Nothing was read, so nothing claims the wheel: native, default sign.
+        assert_eq!(
+            status_to_restore(None),
+            ThumbwheelStatus {
+                mode: ReportingMode::Native,
+                direction: WheelDirection::Default,
+            }
+        );
     }
 }

@@ -1,0 +1,40 @@
+id: workspace-no-inner-allow
+language: Rust
+severity: error
+message: >-
+  Module-wide `#![allow(…)]` is banned. Clippy's `allow_attributes` only sees
+  outer attributes, so this one goes quiet when it stops suppressing anything.
+  Owner: the workspace lint table in the root Cargo.toml (policy in
+  .agents/rules/rust.md, "`expect` by default, `allow` only when `expect` would
+  break").
+note: >-
+  Scope the suppression to the item that needs it and write
+  `#[expect(<lint>, reason = "…")]`. When `expect` cannot work (the two cases in
+  rust.md), use an outer `#[allow(<lint>, reason = "…")]` with
+  `#[expect(clippy::allow_attributes, reason = "see above")]`.
+# Structural, not textual: an `allow(` inside a string or a comment is no
+# suppression, and a comment between `allow` and `(` does not hide one.
+# `#![expect(…)]` reports itself when stale, so it stays legal.
+rule:
+  kind: inner_attribute_item
+  has:
+    kind: attribute
+    any:
+      # `#![allow(…)]`: the attribute's own path is `allow`.
+      - has:
+          kind: identifier
+          regex: ^allow$
+      # `#![cfg_attr(<pred>, …, allow(…))]`, nested `cfg_attr` included. A
+      # string is a `string_literal` with no identifiers in it, and the anchors
+      # keep `clippy::allow_attributes` out.
+      - all:
+          - has:
+              kind: identifier
+              regex: ^cfg_attr$
+          - has:
+              field: arguments
+              kind: token_tree
+              has:
+                kind: identifier
+                regex: ^allow$
+                stopBy: end

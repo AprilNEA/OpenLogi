@@ -10,9 +10,10 @@ use tokio::sync::mpsc;
 use crate::backend::{BackendError, HidBackend, HotplugEvent, HotplugStream, NodeId, NodeInfo};
 
 use super::ReplayError;
-use super::barrier::{ReplayResponseBarrier, ResponseGates};
+use super::barrier::{ReplayResponseBarrier, ResponseGates, WriteCompletionGates};
 use super::channel::{
-    CassetteState, ReplayCompletion, ReplayRawHidChannel, ReplayRawWriter, ReplayRawWriterHandle,
+    CassetteState, ReplayChannelParts, ReplayCompletion, ReplayRawHidChannel, ReplayRawWriter,
+    ReplayRawWriterHandle,
 };
 
 /// Whether an OS HID node appears in enumeration snapshots.
@@ -134,6 +135,7 @@ struct ChannelRuntime {
     connection: ChannelConnection,
     cassette: Arc<CassetteState>,
     response_gates: Arc<ResponseGates>,
+    write_completion_gates: Arc<WriteCompletionGates>,
     written: Arc<Mutex<Vec<Vec<u8>>>>,
     lifetimes: Vec<ChannelLifetime>,
     open_count: usize,
@@ -427,6 +429,7 @@ fn build_channels(
                     connection: channel.connection,
                     cassette: CassetteState::new(cassette)?,
                     response_gates: Arc::new(ResponseGates::default()),
+                    write_completion_gates: Arc::new(WriteCompletionGates::default()),
                     written: Arc::new(Mutex::new(Vec::new())),
                     lifetimes: Vec::new(),
                     open_count: 0,
@@ -613,15 +616,16 @@ impl HidBackend for ReplayBackend {
             let connected = Arc::new(AtomicBool::new(
                 channel.connection == ChannelConnection::Connected,
             ));
-            let raw = ReplayRawHidChannel::from_parts(
+            let raw = ReplayRawHidChannel::from_parts(ReplayChannelParts {
                 vendor_id,
                 product_id,
-                channel.report_support,
-                Arc::clone(&channel.cassette),
-                Arc::clone(&channel.written),
-                Arc::clone(&connected),
-                Arc::clone(&channel.response_gates),
-            );
+                report_support: channel.report_support,
+                cassette: Arc::clone(&channel.cassette),
+                written: Arc::clone(&channel.written),
+                connected: Arc::clone(&connected),
+                response_gates: Arc::clone(&channel.response_gates),
+                write_completion_gates: Arc::clone(&channel.write_completion_gates),
+            });
             channel.lifetimes.push(ChannelLifetime {
                 connected: Arc::downgrade(&connected),
                 incoming: raw.incoming_sender(),

@@ -11,26 +11,37 @@
 //! Streaming / Video call) plus user-saved customs, applied to the hardware in
 //! a single batched device-open.
 
+use std::sync::Arc;
+use std::time::Duration;
+
 use gpui::{
-    App, AppContext as _, ClickEvent, Context, ElementId, Entity, InteractiveElement, IntoElement,
-    MouseButton, MouseDownEvent, ParentElement, Render, Role, SharedString,
-    StatefulInteractiveElement as _, Styled, Subscription, Toggled, Window, div,
-    prelude::FluentBuilder as _, px, rgb,
+    App, AppContext as _, Context, IntoElement, ParentElement, Render, SharedString, Styled,
+    Subscription, Task, Window, div, px,
 };
-use gpui_base::Button as BaseButton;
-use gpui_component::{
-    IconName, Selectable as _, h_flex,
-    slider::{Slider, SliderEvent, SliderState},
-    v_flex,
-};
-use openlogi_camera::{AutoToggle, CameraControl, CameraState, ControlRange};
+use gpui_component::{WindowExt as _, dialog::DialogButtonProps, input::InputState, v_flex};
+use openlogi_camera::{AutoToggle, CameraControl, ControlRange};
 use openlogi_core::config::CameraControls;
 use tracing::debug;
 
 use crate::state::{AppState, StateEvent};
-use crate::ui::components::ProfileTab;
+use crate::ui::commit_slider::{CommitSlider, SliderRange};
+use crate::ui::components::control_input;
 use crate::ui::section::section_label;
-use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
+use crate::ui::theme::{self, Typography as _};
+
+mod hardware;
+mod rows;
+#[cfg(test)]
+mod tests;
+use hardware::{Cancel, Hardware, Loaded, Saved, SystemUvc, Uvc};
+use rows::{
+    control_label, control_row, from_slider, profiles_row, reset_button, section_indices, to_slider,
+};
+
+/// How long to wait before reading a camera again after it could not be read.
+/// A camera another application holds becomes free without an event to wait
+/// on; the retry only fires a read if the panel is still on screen.
+const RETRY_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Built-in profiles: `values` are fractions of each control's own range, so
 /// they scale to whatever the camera reports. Auto modes all engage — the
@@ -60,13 +71,6 @@ const BUILTIN_PROFILES: [BuiltinProfile; 3] = [
     },
 ];
 
-fn update_camera(cx: &mut App, update: impl FnOnce(&mut AppState)) {
-    AppState::update(cx, |state, cx| {
-        update(state);
-        cx.emit(StateEvent::CameraChanged);
-    });
-}
-
 /// One built-in profile: an id for persistence plus range-relative targets
 /// (an empty list means "device defaults for everything").
 struct BuiltinProfile {
@@ -75,10 +79,14 @@ struct BuiltinProfile {
 }
 
 pub struct CameraControlsPanel {
-    /// Persistence key (`camera:vid:pid:serial:…` or legacy `camera-<uid>`).
+    hw: Arc<Hardware>,
+    /// Persistence key (`camera:vid:pid:serial:…` or legacy `camera-<uid>`)
+    /// the rows were built for; `None` until a load lands.
     key: Option<String>,
     /// OS capture id used for UVC open/read/write (may change with USB port).
     uid: Option<String>,
+    /// The background read in flight, or the retry wait after one failed.
+    pending: Option<Pending>,
     sliders: Vec<ControlSlider>,
     autos: Vec<AutoRow>,
     #[expect(dead_code, reason = "held to keep the AppState subscription alive")]
@@ -89,9 +97,26 @@ struct ControlSlider {
     control: CameraControl,
     label: SharedString,
     range: ControlRange,
-    state: Entity<SliderState>,
-    #[expect(dead_code, reason = "held to keep the slider subscription alive")]
-    sub: Subscription,
+    slider: CommitSlider<i32>,
+}
+
+impl ControlSlider {
+    /// The control value under the thumb. The slider is this panel's record of
+    /// what the hardware holds, so every row and profile reads it from here.
+    fn value(&self, cx: &App) -> i32 {
+        self.slider.value(cx)
+    }
+
+    /// The control's bounds in the order a clamp needs them; a UVC driver may
+    /// report them reversed.
+    fn bounds(&self) -> SliderRange<i32> {
+        SliderRange::new(self.range.min, self.range.max)
+    }
+
+    /// Put the thumb on a value the hardware has just taken.
+    fn seat(&self, value: i32, window: &mut Window, cx: &mut App) {
+        self.slider.seat(value, window, cx);
+    }
 }
 
 /// Live UI state for one device-supported auto mode.
@@ -101,38 +126,35 @@ struct AutoRow {
     default: bool,
 }
 
-/// What [`CameraControlsPanel::ensure_built`] should build the panel from after
-/// re-asserting saved settings on the hardware.
-enum Reapplied {
-    /// Nothing needed writing, or the batch stuck — build from the desired
-    /// (saved-over-snapshot) state.
-    Clean,
-    /// The batch failed; build rows from this freshly-read live state.
-    Live(CameraState),
-    /// The batch failed and the confirming re-read failed too — the true
-    /// hardware state is unknown, so the caller must not cache a build.
-    Unknown,
+/// A camera the panel is loading, or waiting to retry. Replacing it drops the
+/// task, so a superseded load never lands.
+struct Pending {
+    key: String,
+    uid: String,
+    /// `true` while the read runs; `false` while waiting out [`RETRY_INTERVAL`].
+    reading: bool,
+    /// Stops a superseded load's re-apply from writing after newer edits.
+    _cancel: Cancel,
+    _task: Task<()>,
 }
 
 impl CameraControlsPanel {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let state_obs = cx.subscribe(
-            &AppState::global(cx),
-            |_panel, _, event: &StateEvent, cx| {
-                if matches!(
-                    event,
-                    StateEvent::InventoryChanged
-                        | StateEvent::DeviceSelected(_)
-                        | StateEvent::CameraChanged
-                        | StateEvent::CameraPermissionChanged
-                ) {
-                    cx.notify();
-                }
-            },
-        );
+        Self::with_uvc(Arc::new(SystemUvc), cx)
+    }
+
+    fn with_uvc(uvc: Arc<dyn Uvc>, cx: &mut Context<Self>) -> Self {
+        let state_obs = AppState::repaint_on(cx, |event| {
+            matches!(
+                event,
+                StateEvent::CameraChanged | StateEvent::CameraPermissionChanged
+            )
+        });
         Self {
+            hw: Arc::new(Hardware::new(uvc)),
             key: None,
             uid: None,
+            pending: None,
             sliders: Vec::new(),
             autos: Vec::new(),
             state_obs,
@@ -148,149 +170,110 @@ impl CameraControlsPanel {
         Some((record.config_key.clone(), record.capture_id.clone()?))
     }
 
-    /// Re-assert the saved auto/value differences on the hardware in one
-    /// device-open, reporting what the caller should build the panel from.
-    ///
-    /// `apply_settings` isn't atomic — it writes the auto mode, then the value —
-    /// so a rejected batch can leave the hardware between states, making the
-    /// pre-write snapshot untrustworthy. On failure we clear the active profile
-    /// (so a later edit's [`Self::sync_active_custom`] can't overwrite the saved
-    /// profile with fallback values) and re-read the device: [`Reapplied::Live`]
-    /// carries that truth for the caller to cache, while a re-read that also
-    /// fails yields [`Reapplied::Unknown`] — never the stale pre-write state.
-    fn reapply_saved(
-        key: &str,
-        uid: &str,
-        apply_autos: &[(AutoToggle, bool)],
-        apply_values: &[(CameraControl, i32)],
-        cx: &mut Context<Self>,
-    ) -> Reapplied {
-        if apply_autos.is_empty() && apply_values.is_empty() {
-            return Reapplied::Clean;
-        }
-        let Err(e) = openlogi_camera::apply_settings(uid, apply_autos, apply_values) else {
-            return Reapplied::Clean;
-        };
-        debug!(error = %e, "saved camera state reapply failed");
-        // This runs while building the panel. Do not emit back into this same
-        // view: if the confirming read also fails, an event-driven repaint
-        // would immediately retry forever instead of waiting for a real UI or
-        // inventory event.
-        AppState::update(cx, |state, _| {
-            state.set_camera_active_profile(key, None);
-        });
-        match openlogi_camera::read_camera_state(uid) {
-            Ok(live) => Reapplied::Live(live),
-            Err(e) => {
-                debug!(error = %e, "post-failure camera re-read failed");
-                Reapplied::Unknown
-            }
-        }
-    }
-
-    /// Build the sliders and auto rows for `key` from the device's reported
-    /// state, re-applying any saved values in one batched device write. Cheap
-    /// no-op when already built for this camera. `uid` is the OS capture id.
+    /// Start loading `key`'s rows unless they are built or already loading.
+    /// The parent renders this panel only while the camera is on screen, so
+    /// render is the lifecycle switch, as for the preview: the UVC read and the
+    /// saved-state re-apply run on the background executor, and the panel shows
+    /// nothing until [`Self::finish_load`] publishes the result.
     fn ensure_built(&mut self, key: &str, uid: &str, cx: &mut Context<Self>) {
         if self.key.as_deref() == Some(key) && self.uid.as_deref() == Some(uid) {
             return;
         }
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|p| p.key == key && p.uid == uid)
+        {
+            return;
+        }
+        self.key = None;
+        self.uid = None;
         self.sliders.clear();
         self.autos.clear();
         // Port-bound keys from older builds → stable serial key, once per open.
-        // This is part of render-time panel construction; emitting an event
-        // here would create a hot repaint loop while an unavailable camera
-        // keeps failing the state read below.
+        // Config only, and silent: this runs from render.
         AppState::update(cx, |state, _| {
             state.migrate_legacy_camera_key(key, uid);
         });
+        let saved = AppState::try_read(cx).map_or_else(Saved::default, |state| Saved {
+            autos: AutoToggle::ALL
+                .into_iter()
+                .filter_map(|t| state.camera_auto(key, t).map(|on| (t, on)))
+                .collect(),
+            values: CameraControl::ALL
+                .into_iter()
+                .filter_map(|c| state.camera_control(key, c).map(|v| (c, v)))
+                .collect(),
+        });
+        let hw = self.hw.clone();
+        let read_uid = uid.to_string();
+        let cancel = Cancel::default();
+        let canceled = cancel.flag();
+        let task = cx.spawn(async move |panel, cx| {
+            let loaded = cx
+                .background_executor()
+                .spawn(async move { hardware::load(&hw, &read_uid, &saved, &canceled) })
+                .await;
+            panel
+                .update(cx, |panel, cx| panel.finish_load(loaded, cx))
+                .ok();
+        });
+        self.pending = Some(Pending {
+            key: key.to_string(),
+            uid: uid.to_string(),
+            reading: true,
+            _cancel: cancel,
+            _task: task,
+        });
+    }
 
-        // One device-open reads every control and auto state. A failed read
-        // means the camera is unreachable (unplugged or seized by another app):
-        // leave `self.key` unset so the next render retries, instead of caching
-        // an empty panel that never rebuilds once the device returns.
-        let Ok(snap) = openlogi_camera::read_camera_state(uid) else {
-            debug!("camera state read failed; retrying next render");
-            self.key = None;
-            self.uid = None;
+    /// Build the rows from a finished load. An unreachable camera (unplugged,
+    /// or seized by another app) or an unknown post-failure state builds
+    /// nothing and schedules a retry, rather than caching an empty panel that
+    /// never rebuilds once the device returns.
+    fn finish_load(&mut self, loaded: Loaded, cx: &mut Context<Self>) {
+        let Some(Pending { key, uid, .. }) = self.pending.take() else {
             return;
         };
-        self.key = Some(key.to_string());
-        self.uid = Some(uid.to_string());
-
-        // Saved auto states win over the device's, then saved values win for
-        // controls whose auto is off; the differences push back in one open.
-        let mut desired_autos = Vec::new();
-        let mut apply_autos = Vec::new();
-        for (toggle, st) in &snap.autos {
-            let saved = AppState::try_read(cx).and_then(|s| s.camera_auto(key, *toggle));
-            let on = saved.unwrap_or(st.current);
-            if on != st.current {
-                apply_autos.push((*toggle, on));
-            }
-            desired_autos.push((*toggle, on, *st));
+        if loaded.reapply_failed {
+            // Clear the active profile so a later edit's
+            // [`Self::sync_active_custom`] can't overwrite the saved profile
+            // with values the hardware didn't take.
+            AppState::apply(cx, |state| state.commit_camera_active_profile(&key, None));
         }
-        let auto_desired = |control: CameraControl| {
-            let toggle = control.auto_toggle()?;
-            desired_autos
-                .iter()
-                .find(|(t, ..)| *t == toggle)
-                .map(|(_, on, _)| *on)
+        let Some(state) = loaded.state else {
+            let task = cx.spawn(async move |panel, cx| {
+                cx.background_executor().timer(RETRY_INTERVAL).await;
+                panel
+                    .update(cx, |panel, cx| {
+                        panel.pending = None;
+                        cx.notify();
+                    })
+                    .ok();
+            });
+            self.pending = Some(Pending {
+                key,
+                uid,
+                reading: false,
+                _cancel: Cancel::default(),
+                _task: task,
+            });
+            cx.notify();
+            return;
         };
-        let mut desired_values = Vec::new();
-        let mut apply_values = Vec::new();
-        for (control, range) in &snap.controls {
-            let saved = AppState::try_read(cx).and_then(|s| s.camera_control(key, *control));
-            let initial = saved.unwrap_or(range.current).clamp(range.min, range.max);
-            if saved.is_some()
-                && saved != Some(range.current)
-                && !auto_desired(*control).is_some_and(|on| on)
-            {
-                apply_values.push((*control, initial));
-            }
-            desired_values.push((*control, *range, initial));
-        }
-
-        // Saved state only sticks when the hardware takes it. On a rejected
-        // (non-atomic) batch, rebuild rows from the device's live state; if even
-        // that read fails, the hardware state is unknown — drop the key and let
-        // the next render retry rather than caching the stale pre-write values.
-        let live = match Self::reapply_saved(key, uid, &apply_autos, &apply_values, cx) {
-            Reapplied::Clean => None,
-            Reapplied::Live(state) => Some(state),
-            Reapplied::Unknown => {
-                self.key = None;
-                self.uid = None;
-                return;
-            }
-        };
-
-        for (toggle, on, st) in desired_autos {
-            let shown_on = match &live {
-                None => on,
-                Some(state) => state
-                    .autos
-                    .iter()
-                    .find(|(t, _)| *t == toggle)
-                    .map_or(st.current, |(_, s)| s.current),
-            };
+        for (toggle, st) in state.autos {
             self.autos.push(AutoRow {
                 toggle,
-                on: shown_on,
+                on: st.current,
                 default: st.default,
             });
         }
-        for (control, range, initial) in desired_values {
-            let shown = match &live {
-                None => initial,
-                Some(state) => state
-                    .controls
-                    .iter()
-                    .find(|(c, _)| *c == control)
-                    .map_or(range.current, |(_, r)| r.current),
-            };
-            self.push_control_slider(control, range, shown, uid, key, cx);
+        for (control, range) in state.controls {
+            self.push_control_slider(control, range, range.current, &uid, &key, cx);
         }
+        self.key = Some(key);
+        self.uid = Some(uid);
+        cx.notify();
     }
 
     /// Build one control's slider (seeded to `shown`), wire its release-writes
@@ -304,39 +287,25 @@ impl CameraControlsPanel {
         key: &str,
         cx: &mut Context<Self>,
     ) {
-        let state = cx.new(|_| {
-            let (lo, hi) = (to_slider(range.min), to_slider(range.max));
-            // `SliderState` defaults to [0, 100] and re-clamps its value on every
-            // builder call, panicking if min > max even transiently. A fully
-            // negative range (UVC exposure reports e.g. -11..-2) would make
-            // `.max(-2)` clamp against the default min of 0 — so set the min
-            // first for negative ranges, and the max first otherwise.
-            let bounded = if lo < 0.0 {
-                SliderState::new().min(lo).max(hi)
-            } else {
-                SliderState::new().max(hi).min(lo)
-            };
-            bounded.step(1.0).default_value(to_slider(shown))
-        });
         let uid_for_event = uid.to_string();
         let key_for_event = key.to_string();
-        let sub = cx.subscribe(&state, move |panel, _slider, event: &SliderEvent, cx| {
-            match event {
-                // Drag updates the label; the USB write lands once on release
-                // so we don't flood the camera with intermediate values.
-                SliderEvent::Change(_) => cx.notify(),
-                SliderEvent::Release(value) => {
-                    let v = from_slider(value.start());
-                    panel.commit_release(control, &uid_for_event, &key_for_event, v, cx);
-                }
-            }
-        });
+        // A drag updates the label; the USB write lands once on release so we
+        // don't flood the camera with intermediate values. UVC ranges can be
+        // entirely negative (exposure reports e.g. -11..-2), which
+        // `SliderRange` builds in the order `SliderState` tolerates.
+        let slider = CommitSlider::new(
+            SliderRange::new(range.min, range.max),
+            shown,
+            cx,
+            move |panel: &mut Self, v, cx| {
+                panel.commit_release(control, &uid_for_event, &key_for_event, v, cx);
+            },
+        );
         self.sliders.push(ControlSlider {
             control,
             label: control_label(control),
             range,
-            state,
-            sub,
+            slider,
         });
     }
 
@@ -351,16 +320,16 @@ impl CameraControlsPanel {
         key: &str,
         v: i32,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         let takeover = control.auto_toggle().and_then(|toggle| {
             let ix = self.autos.iter().position(|a| a.toggle == toggle && a.on)?;
             Some((toggle, ix))
         });
         let written = match takeover {
-            Some((toggle, _)) => {
-                openlogi_camera::apply_settings(uid, &[(toggle, false)], &[(control, v)])
-            }
-            None => openlogi_camera::set_control(uid, control, v),
+            Some((toggle, _)) => self
+                .hw
+                .apply_settings(uid, &[(toggle, false)], &[(control, v)]),
+            None => self.hw.set_control(uid, control, v),
         };
         if let Err(e) = written {
             debug!(?control, value = v, error = %e, "camera control write failed");
@@ -369,19 +338,104 @@ impl CameraControlsPanel {
             // before the value fails). Rebuild from live hardware so the panel
             // never shows a value the device didn't take.
             self.resync_after_failed_write(cx);
-            return;
+            return false;
         }
         if let Some((toggle, ix)) = takeover {
             self.autos[ix].on = false;
-            update_camera(cx, |state| {
-                state.commit_camera_auto(key, toggle, false);
-            });
+            AppState::apply(cx, |state| state.commit_camera_auto(key, toggle, false));
         }
-        update_camera(cx, |state| {
-            state.commit_camera_control(key, control, v);
-        });
+        AppState::apply(cx, |state| state.commit_camera_control(key, control, v));
         self.sync_active_custom(cx);
         cx.notify();
+        true
+    }
+
+    /// Show an exact-value editor for a control whose slider is awkward to
+    /// position precisely. The device's reported range remains authoritative:
+    /// unsupported values leave the dialog open rather than being rounded.
+    pub(super) fn open_value_dialog(
+        &mut self,
+        ix: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(slider) = self.sliders.get(ix) else {
+            return;
+        };
+        let control = slider.control;
+        let range = slider.range;
+        let current = slider.value(cx);
+        let label = slider.label.clone();
+        let input = cx.new(|cx| {
+            let mut input = InputState::new(window, cx);
+            input.set_value(current.to_string(), window, cx);
+            input
+        });
+        let panel = cx.entity();
+
+        window.open_dialog(cx, move |dialog, window, cx| {
+            input.update(cx, |input, cx| input.focus(window, cx));
+            dialog
+                .w(px(320.))
+                .title(tr!("camera.set_value_title", label => label.clone()))
+                .child(
+                    v_flex().gap_2().child(control_input(&input)).child(
+                        div()
+                            .text_caption()
+                            .text_color(theme::palette(cx).text_muted)
+                            .child(tr!(
+                                "camera.supported_range",
+                                min => range.min.to_string(),
+                                max => range.max.to_string()
+                            )),
+                    ),
+                )
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text(tr!("common.save"))
+                        .cancel_text(tr!("common.cancel"))
+                        .show_cancel(true),
+                )
+                .on_ok({
+                    let input = input.clone();
+                    let panel = panel.clone();
+                    move |_, window, cx| {
+                        let Ok(value) = input.read(cx).value().trim().parse::<i32>() else {
+                            return false;
+                        };
+                        panel.update(cx, |panel, cx| {
+                            panel.set_exact_value(ix, control, value, window, cx)
+                        })
+                    }
+                })
+        });
+    }
+
+    /// Write a typed value through the same path as a slider release, then
+    /// seat the thumb on it. Rejects values outside the device's range, and a
+    /// stale `ix` if the panel rebuilt while the dialog was open.
+    fn set_exact_value(
+        &mut self,
+        ix: usize,
+        control: CameraControl,
+        value: i32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let (Some(key), Some(uid)) = (self.key.clone(), self.uid.clone()) else {
+            return false;
+        };
+        match self.sliders.get(ix) {
+            Some(slider) if slider.control == control && slider.range.supports(value) => {}
+            _ => return false,
+        }
+        if !self.commit_release(control, &uid, &key, value, cx) {
+            return false;
+        }
+        if let Some(slider) = self.sliders.get(ix) {
+            slider.seat(value, window, cx);
+        }
+        true
     }
 
     /// The current auto state gating `control`, if the device has that toggle.
@@ -408,12 +462,9 @@ impl CameraControlsPanel {
                 .iter()
                 .find(|s| s.control.auto_toggle() == Some(toggle))
         {
-            values.push((
-                slider.control,
-                from_slider(slider.state.read(cx).value().start()),
-            ));
+            values.push((slider.control, slider.value(cx)));
         }
-        if let Err(e) = openlogi_camera::apply_settings(&uid, &[(toggle, on)], &values) {
+        if let Err(e) = self.hw.apply_settings(&uid, &[(toggle, on)], &values) {
             debug!(?toggle, on, error = %e, "camera auto write failed");
             // Turning auto off batches the slider value, so a partial write can
             // land the mode but not the value; resync from live hardware.
@@ -421,9 +472,7 @@ impl CameraControlsPanel {
             return;
         }
         self.autos[ix].on = on;
-        update_camera(cx, |state| {
-            state.commit_camera_auto(&key, toggle, on);
-        });
+        AppState::apply(cx, |state| state.commit_camera_auto(&key, toggle, on));
         self.sync_active_custom(cx);
         cx.notify();
     }
@@ -446,7 +495,7 @@ impl CameraControlsPanel {
             .iter()
             .map(|s| (s.control, s.range.default))
             .collect();
-        if let Err(e) = openlogi_camera::apply_settings(&uid, &autos, &values) {
+        if let Err(e) = self.hw.apply_settings(&uid, &autos, &values) {
             debug!(error = %e, "camera reset failed");
             // Partial writes may have landed; rebuild from live hardware
             // rather than persisting a mixed reset.
@@ -475,19 +524,10 @@ impl CameraControlsPanel {
         }
         for (control, value) in values {
             if let Some(slider) = self.sliders.iter().find(|s| s.control == *control) {
-                slider.state.clone().update(cx, |s, cx| {
-                    s.set_value(to_slider(*value), window, cx);
-                });
+                slider.seat(*value, window, cx);
             }
         }
-        update_camera(cx, |state| {
-            for (toggle, on) in autos {
-                state.commit_camera_auto(key, *toggle, *on);
-            }
-            for (control, value) in values {
-                state.commit_camera_control(key, *control, *value);
-            }
-        });
+        AppState::apply(cx, |state| state.commit_camera_settings(key, autos, values));
     }
 
     /// Reset one control to its device default — auto mode back to the
@@ -496,10 +536,7 @@ impl CameraControlsPanel {
         let (Some(key), Some(uid)) = (self.key.clone(), self.uid.clone()) else {
             return;
         };
-        let Some((control, default, state)) = self
-            .sliders
-            .get(ix)
-            .map(|s| (s.control, s.range.default, s.state.clone()))
+        let Some((control, default)) = self.sliders.get(ix).map(|s| (s.control, s.range.default))
         else {
             return;
         };
@@ -509,7 +546,7 @@ impl CameraControlsPanel {
             autos.push((toggle, self.autos[pos].default));
             Some(pos)
         });
-        if let Err(e) = openlogi_camera::apply_settings(&uid, &autos, &[(control, default)]) {
+        if let Err(e) = self.hw.apply_settings(&uid, &autos, &[(control, default)]) {
             debug!(?control, value = default, error = %e, "camera control reset failed");
             // Auto default + value default aren't atomic; resync from live
             // hardware so a partial reset can't desync the row.
@@ -519,15 +556,15 @@ impl CameraControlsPanel {
         if let Some(pos) = auto_pos {
             let (toggle, auto_default) = autos[0];
             self.autos[pos].on = auto_default;
-            update_camera(cx, |state| {
-                state.commit_camera_auto(&key, toggle, auto_default);
+            AppState::apply(cx, |state| {
+                state.commit_camera_auto(&key, toggle, auto_default)
             });
         }
-        state.update(cx, |slider, cx| {
-            slider.set_value(to_slider(default), window, cx);
-        });
-        update_camera(cx, |state| {
-            state.commit_camera_control(&key, control, default);
+        if let Some(slider) = self.sliders.get(ix) {
+            slider.seat(default, window, cx);
+        }
+        AppState::apply(cx, |state| {
+            state.commit_camera_control(&key, control, default)
         });
         self.sync_active_custom(cx);
         cx.notify();
@@ -566,7 +603,7 @@ impl CameraControlsPanel {
                         slider.control,
                         CameraControl::PowerLineFrequency | CameraControl::LowLightCompensation
                     ) {
-                    from_slider(slider.state.read(cx).value().start())
+                    slider.value(cx)
                 } else {
                     slider.range.default
                 };
@@ -578,10 +615,7 @@ impl CameraControlsPanel {
                         let span = to_slider(slider.range.max - slider.range.min);
                         slider.range.min + from_slider(span * pct)
                     });
-                values.push((
-                    slider.control,
-                    target.clamp(slider.range.min, slider.range.max),
-                ));
+                values.push((slider.control, slider.bounds().clamp(target)));
             }
         } else if let Some(snap) = custom.get(id) {
             for row in &self.autos {
@@ -590,17 +624,14 @@ impl CameraControlsPanel {
             }
             for slider in &self.sliders {
                 if let Some(v) = snap.0.get(slider.control.name()) {
-                    values.push((
-                        slider.control,
-                        (*v).clamp(slider.range.min, slider.range.max),
-                    ));
+                    values.push((slider.control, slider.bounds().clamp(*v)));
                 }
             }
         } else {
             return;
         }
 
-        if let Err(e) = openlogi_camera::apply_settings(&uid, &autos, &values) {
+        if let Err(e) = self.hw.apply_settings(&uid, &autos, &values) {
             debug!(profile = id, error = %e, "camera profile apply failed");
             // Some writes may have landed; resync from live state and drop the
             // active profile so a later edit can't persist a half-applied one.
@@ -608,8 +639,8 @@ impl CameraControlsPanel {
             return;
         }
         self.commit_batch(&key, &autos, &values, window, cx);
-        update_camera(cx, |state| {
-            state.set_camera_active_profile(&key, Some(id.to_string()));
+        AppState::apply(cx, |state| {
+            state.commit_camera_active_profile(&key, Some(id.to_string()))
         });
         cx.notify();
     }
@@ -618,10 +649,8 @@ impl CameraControlsPanel {
     fn snapshot(&self, cx: &Context<Self>) -> CameraControls {
         let mut snap = CameraControls::default();
         for slider in &self.sliders {
-            snap.0.insert(
-                slider.control.name().to_string(),
-                from_slider(slider.state.read(cx).value().start()),
-            );
+            snap.0
+                .insert(slider.control.name().to_string(), slider.value(cx));
         }
         for row in &self.autos {
             snap.0
@@ -638,14 +667,7 @@ impl CameraControlsPanel {
             return;
         };
         let snap = self.snapshot(cx);
-        update_camera(cx, |state| {
-            let Some(active) = state.camera_active_profile(&key) else {
-                return;
-            };
-            if state.camera_profiles(&key).contains_key(&active) {
-                state.save_camera_profile(&key, &active, snap);
-            }
-        });
+        AppState::apply(cx, |state| state.sync_active_camera_profile(&key, snap));
     }
 
     /// Recover after a batched device write failed partway through.
@@ -658,9 +680,7 @@ impl CameraControlsPanel {
     fn resync_after_failed_write(&mut self, cx: &mut Context<Self>) {
         self.uid = None;
         if let Some(key) = self.key.take() {
-            update_camera(cx, |state| {
-                state.set_camera_active_profile(&key, None);
-            });
+            AppState::apply(cx, |state| state.commit_camera_active_profile(&key, None));
         }
         cx.notify();
     }
@@ -672,7 +692,7 @@ impl CameraControlsPanel {
             return;
         };
         let snap = self.snapshot(cx);
-        update_camera(cx, |state| {
+        AppState::apply(cx, |state| {
             let existing = state.camera_profiles(&key);
             let mut n = existing.len() + 1;
             let mut name =
@@ -681,8 +701,9 @@ impl CameraControlsPanel {
                 n += 1;
                 name = tr!("actions.custom_profile_number", number => n.to_string()).to_string();
             }
-            state.save_camera_profile(&key, &name, snap);
-            state.set_camera_active_profile(&key, Some(name));
+            state
+                .save_camera_profile(&key, &name, snap)
+                .and(state.commit_camera_active_profile(&key, Some(name)))
         });
         cx.notify();
     }
@@ -693,9 +714,7 @@ impl CameraControlsPanel {
         let Some(key) = self.key.clone() else {
             return;
         };
-        update_camera(cx, |state| {
-            state.delete_camera_profile(&key, name);
-        });
+        AppState::apply(cx, |state| state.delete_camera_profile(&key, name));
         cx.notify();
     }
 }
@@ -706,12 +725,16 @@ impl Render for CameraControlsPanel {
         let Some((key, uid)) = Self::active_camera(cx) else {
             self.key = None;
             self.uid = None;
+            self.pending = None;
             self.sliders.clear();
             self.autos.clear();
             return div();
         };
         self.ensure_built(&key, &uid, cx);
 
+        if self.pending.as_ref().is_some_and(|p| p.reading) {
+            return div();
+        }
         if self.sliders.is_empty() {
             return div()
                 .text_body()
@@ -737,398 +760,4 @@ impl Render for CameraControlsPanel {
         }
         panel.child(reset_button(cx))
     }
-}
-
-/// Indices of the lens (camera-terminal) or image (processing-unit) sliders,
-/// preserving [`CameraControl::ALL`] order.
-fn section_indices(sliders: &[ControlSlider], lens: bool) -> Vec<usize> {
-    sliders
-        .iter()
-        .enumerate()
-        .filter(|(_, s)| {
-            matches!(
-                s.control,
-                CameraControl::Zoom | CameraControl::Focus | CameraControl::Exposure
-            ) == lens
-        })
-        .map(|(ix, _)| ix)
-        .collect()
-}
-
-/// The one-click profile chips: built-ins, saved customs, then Save.
-fn profiles_row(key: &str, cx: &mut Context<CameraControlsPanel>) -> gpui::Div {
-    let state = AppState::try_read(cx);
-    let active = state.and_then(|s| s.camera_active_profile(key));
-    let customs: Vec<String> = state
-        .map(|s| s.camera_profiles(key).keys().cloned().collect())
-        .unwrap_or_default();
-
-    let mut row = h_flex().flex_wrap().gap_1p5().items_center();
-    for (ix, builtin) in BUILTIN_PROFILES.iter().enumerate() {
-        let id = builtin.id;
-        row = row.child(
-            ProfileTab::new(("camera-profile-builtin", ix), builtin_label(id))
-                .selected(active.as_deref() == Some(id))
-                .on_click(cx.listener(move |panel, _: &ClickEvent, window, cx| {
-                    panel.apply_profile(id, window, cx);
-                })),
-        );
-    }
-    for (ix, name) in customs.into_iter().enumerate() {
-        let is_active = active.as_deref() == Some(name.as_str());
-        let apply_name = name.clone();
-        let delete_name = name.clone();
-        let on_apply = cx.listener(move |panel, _: &ClickEvent, window, cx| {
-            panel.apply_profile(&apply_name, window, cx);
-        });
-        let on_delete = cx.listener(move |panel, _: &ClickEvent, _window, cx| {
-            panel.delete_profile(&delete_name, cx);
-        });
-        row = row.child(
-            ProfileTab::new(("camera-profile-custom", ix), name)
-                .selected(is_active)
-                .on_click(on_apply)
-                .on_delete(("camera-profile-del", ix), on_delete),
-        );
-    }
-    row = row.child(
-        ProfileTab::new("camera-profile-save", tr!("common.new"))
-            .icon(IconName::Plus)
-            .on_click(cx.listener(|panel, _: &ClickEvent, _window, cx| {
-                panel.save_profile(cx);
-            })),
-    );
-    row
-}
-
-/// One compact control line: label · slider · live value (· Auto chip when the
-/// device pairs one). Double-click anywhere on the line resets that control.
-fn control_row(
-    panel: &CameraControlsPanel,
-    ix: usize,
-    cx: &Context<CameraControlsPanel>,
-) -> gpui::Stateful<gpui::Div> {
-    let pal = theme::palette(cx);
-    let slider = &panel.sliders[ix];
-    if slider.control == CameraControl::PowerLineFrequency
-        && [1, 2, 3]
-            .into_iter()
-            .any(|value| slider.range.supports(value))
-    {
-        return frequency_row(panel, ix, cx, pal);
-    }
-    if slider.control == CameraControl::LowLightCompensation
-        && slider.range.min == 0
-        && slider.range.max == 1
-    {
-        return binary_control_row(panel, ix, cx, pal);
-    }
-    let value = from_slider(slider.state.read(cx).value().start());
-    let auto_on = panel.auto_state_for(slider.control);
-    let dimmed = auto_on == Some(true);
-
-    let mut row = h_flex()
-        .id(("camera-control-row", ix))
-        .w_full()
-        .gap_3()
-        .items_center()
-        // Capture phase, so the double-click wins over the slider's own
-        // handlers: the thumb's mouse-down stops propagation (a bubbled click
-        // never fires), and a track click would jump the value and then
-        // re-commit it from its deferred Release event after the reset ran.
-        .capture_any_mouse_down(cx.listener(
-            move |panel, event: &MouseDownEvent, window, cx| {
-                if event.button == MouseButton::Left && event.click_count == 2 {
-                    cx.stop_propagation();
-                    panel.reset_control(ix, window, cx);
-                }
-            },
-        ))
-        .child(
-            div()
-                .w(px(96.))
-                .flex_shrink_0()
-                .truncate()
-                .text_body()
-                .text_color(pal.text_muted)
-                .child(slider.label.clone()),
-        )
-        .child(
-            div()
-                .flex_1()
-                // Dimmed while auto owns the value, but still draggable —
-                // grabbing the slider takes the control over to manual.
-                .when(dimmed, |s| s.opacity(0.55))
-                .child(Slider::new(&slider.state).horizontal()),
-        )
-        .child(
-            div()
-                .w(px(36.))
-                .flex_shrink_0()
-                .text_right()
-                .text_body()
-                .text_color(if dimmed {
-                    pal.text_muted
-                } else {
-                    rgb(ACCENT_BLUE).into()
-                })
-                .child(format!("{value}")),
-        );
-
-    // Every row carries the trailing Auto column — empty for controls without
-    // an auto mode — so the sliders and values align across the whole panel.
-    let mut auto_cell = div().w(px(46.)).flex_shrink_0().flex().justify_end();
-    if let Some(on) = auto_on
-        && let Some(toggle) = slider.control.auto_toggle()
-        && let Some(auto_ix) = panel.autos.iter().position(|a| a.toggle == toggle)
-    {
-        let accent = rgb(ACCENT_BLUE);
-        auto_cell = auto_cell.child(
-            BaseButton::new((ElementId::from("camera-control-auto"), toggle.name()))
-                .role(Role::CheckBox)
-                .selected(on)
-                .accessibility_label(tr!("common.auto"))
-                .aria_toggled(if on { Toggled::True } else { Toggled::False })
-                .px_1p5()
-                .py_0p5()
-                .rounded_full()
-                .border_1()
-                .border_color(if on { accent.into() } else { pal.border })
-                .text_caption()
-                .text_color(if on { pal.text_primary } else { pal.text_muted })
-                .bg(if on {
-                    theme::accent_tint()
-                } else {
-                    pal.control
-                })
-                .hover(move |s| s.bg(chip_hover_fill(on, pal)))
-                .focus_visible(move |s| s.bg(chip_hover_fill(on, pal)))
-                .child(tr!("common.auto"))
-                .on_click(cx.listener(move |panel, _: &ClickEvent, _window, cx| {
-                    panel.toggle_auto(auto_ix, cx);
-                })),
-        );
-    }
-    row = row.child(auto_cell);
-
-    row
-}
-
-fn frequency_row(
-    panel: &CameraControlsPanel,
-    ix: usize,
-    cx: &Context<CameraControlsPanel>,
-    pal: Palette,
-) -> gpui::Stateful<gpui::Div> {
-    let slider = &panel.sliders[ix];
-    let current = from_slider(slider.state.read(cx).value().start());
-    let mut choices = h_flex().flex_1().justify_end().gap_1();
-    for (value, id, label) in [
-        (1, 1_u32, SharedString::from("50 Hz")),
-        (2, 2_u32, SharedString::from("60 Hz")),
-        (3, 3_u32, tr!("common.auto")),
-    ]
-    .into_iter()
-    .filter(|(value, _, _)| slider.range.supports(*value))
-    {
-        let active = value == current;
-        let accent = rgb(ACCENT_BLUE);
-        let accessibility_label = label.clone();
-        choices = choices.child(
-            BaseButton::new(("camera-frequency", id))
-                .role(Role::RadioButton)
-                .selected(active)
-                .accessibility_label(accessibility_label)
-                .aria_toggled(if active {
-                    Toggled::True
-                } else {
-                    Toggled::False
-                })
-                .aria_selected(active)
-                .px_1p5()
-                .py_0p5()
-                .rounded_full()
-                .border_1()
-                .border_color(if active { accent.into() } else { pal.border })
-                .text_caption()
-                .text_color(if active {
-                    pal.text_primary
-                } else {
-                    pal.text_muted
-                })
-                .bg(if active {
-                    theme::accent_tint()
-                } else {
-                    pal.control
-                })
-                .hover(move |s| s.bg(chip_hover_fill(active, pal)))
-                .focus_visible(move |s| s.bg(chip_hover_fill(active, pal)))
-                .child(label)
-                .on_click(cx.listener(move |panel, _: &ClickEvent, window, cx| {
-                    let (Some(key), Some(uid)) = (panel.key.clone(), panel.uid.clone()) else {
-                        return;
-                    };
-                    panel.sliders[ix].state.clone().update(cx, |state, cx| {
-                        state.set_value(to_slider(value), window, cx);
-                    });
-                    panel.commit_release(CameraControl::PowerLineFrequency, &uid, &key, value, cx);
-                })),
-        );
-    }
-
-    h_flex()
-        .id(("camera-control-row", ix))
-        .w_full()
-        .gap_3()
-        .items_center()
-        .child(
-            div()
-                .w(px(96.))
-                .flex_shrink_0()
-                .truncate()
-                .text_body()
-                .text_color(pal.text_muted)
-                .child(slider.label.clone()),
-        )
-        .child(choices)
-}
-
-fn binary_control_row(
-    panel: &CameraControlsPanel,
-    ix: usize,
-    cx: &Context<CameraControlsPanel>,
-    pal: Palette,
-) -> gpui::Stateful<gpui::Div> {
-    let slider = &panel.sliders[ix];
-    let on = from_slider(slider.state.read(cx).value().start()) != 0;
-    let accent = rgb(ACCENT_BLUE);
-    h_flex()
-        .id(("camera-control-row", ix))
-        .w_full()
-        .gap_3()
-        .items_center()
-        .child(
-            div()
-                .w(px(96.))
-                .flex_shrink_0()
-                .truncate()
-                .text_body()
-                .text_color(pal.text_muted)
-                .child(slider.label.clone()),
-        )
-        .child(div().flex_1())
-        .child(
-            BaseButton::new("camera-low-light")
-                .role(Role::CheckBox)
-                .selected(on)
-                .accessibility_label(tr!("camera.low_light_compensation"))
-                .aria_toggled(if on { Toggled::True } else { Toggled::False })
-                .px_1p5()
-                .py_0p5()
-                .rounded_full()
-                .border_1()
-                .border_color(if on { accent.into() } else { pal.border })
-                .text_caption()
-                .text_color(if on { pal.text_primary } else { pal.text_muted })
-                .bg(if on {
-                    theme::accent_tint()
-                } else {
-                    pal.control
-                })
-                .hover(move |s| s.bg(chip_hover_fill(on, pal)))
-                .focus_visible(move |s| s.bg(chip_hover_fill(on, pal)))
-                .child(if on {
-                    tr!("common.on")
-                } else {
-                    tr!("common.off")
-                })
-                .on_click(cx.listener(move |panel, _: &ClickEvent, window, cx| {
-                    let (Some(key), Some(uid)) = (panel.key.clone(), panel.uid.clone()) else {
-                        return;
-                    };
-                    let value = i32::from(!on);
-                    panel.sliders[ix].state.clone().update(cx, |state, cx| {
-                        state.set_value(to_slider(value), window, cx);
-                    });
-                    panel.commit_release(
-                        CameraControl::LowLightCompensation,
-                        &uid,
-                        &key,
-                        value,
-                        cx,
-                    );
-                })),
-        )
-}
-
-fn reset_button(cx: &mut Context<CameraControlsPanel>) -> gpui::Div {
-    let pal = theme::palette(cx);
-    h_flex().w_full().justify_end().child(
-        BaseButton::new("camera-controls-reset")
-            .accessibility_label(tr!("camera.reset_to_defaults"))
-            .px_2p5()
-            .py_0p5()
-            .rounded_md()
-            .border_1()
-            .border_color(pal.border)
-            .bg(pal.control)
-            .hover(|s| s.bg(pal.control_hover))
-            .focus_visible(|s| s.bg(pal.control_hover))
-            .text_caption()
-            .text_color(pal.text_muted)
-            .child(tr!("camera.reset_to_defaults"))
-            .on_click(cx.listener(|panel, _: &ClickEvent, window, cx| {
-                panel.reset(window, cx);
-            })),
-    )
-}
-
-fn chip_hover_fill(selected: bool, pal: Palette) -> gpui::Hsla {
-    if selected {
-        theme::accent_tint_hover()
-    } else {
-        pal.control_hover
-    }
-}
-
-fn builtin_label(id: &str) -> SharedString {
-    match id {
-        "streaming" => tr!("camera.streaming"),
-        "video_call" => tr!("camera.video_call"),
-        _ => tr!("common.default"),
-    }
-}
-
-fn control_label(control: CameraControl) -> SharedString {
-    match control {
-        CameraControl::Zoom => tr!("common.zoom"),
-        CameraControl::Focus => tr!("camera.focus"),
-        CameraControl::Exposure => tr!("camera.exposure"),
-        CameraControl::PowerLineFrequency => tr!("camera.anti_flicker"),
-        CameraControl::LowLightCompensation => tr!("camera.low_light_compensation"),
-        CameraControl::Brightness => tr!("camera.brightness"),
-        CameraControl::Contrast => tr!("camera.contrast"),
-        CameraControl::Saturation => tr!("camera.saturation"),
-        CameraControl::Sharpness => tr!("camera.sharpness"),
-        CameraControl::WhiteBalance => tr!("camera.white_balance"),
-        CameraControl::Tint => tr!("camera.tint"),
-    }
-}
-
-/// A UVC control value as the GPUI slider wants it.
-#[expect(
-    clippy::cast_precision_loss,
-    reason = "a UVC control range is far below f32's exact integer range"
-)]
-fn to_slider(value: i32) -> f32 {
-    value as f32
-}
-
-/// Inverse of [`to_slider`].
-#[expect(
-    clippy::cast_possible_truncation,
-    reason = "the slider steps by 1 over the control's own i32 range"
-)]
-fn from_slider(value: f32) -> i32 {
-    value.round() as i32
 }

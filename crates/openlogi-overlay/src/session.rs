@@ -4,7 +4,7 @@
 
 use std::sync::{
     Arc, OnceLock,
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicU64, AtomicUsize, Ordering},
 };
 
 use anyhow::{Context as _, Result};
@@ -16,12 +16,16 @@ use tracing::warn;
 use crate::platform;
 use crate::ring::RingView;
 
-pub(crate) struct ClickAwaySession(AtomicU64);
+pub(crate) struct ClickAwaySession {
+    session_id: AtomicU64,
+    windows: AtomicUsize,
+}
 
-/// Publication guard tied to the lifetime of one ring view.
+/// Publication guard tied to one window of a ring.
 ///
-/// Dropping an older view cannot clear a replacement's session: teardown uses
-/// a compare-and-exchange against the id this guard published.
+/// Wayland opens one window per display, so one ring holds several guards. The
+/// session stays published until the last of them drops, and that drop
+/// compares the id it published so it cannot clear a ring that replaced it.
 #[must_use = "the guard must live as long as its ring view"]
 pub(crate) struct ShowingRing {
     live: Arc<ClickAwaySession>,
@@ -30,12 +34,19 @@ pub(crate) struct ShowingRing {
 
 impl ClickAwaySession {
     pub(crate) const fn new() -> Self {
-        Self(AtomicU64::new(0))
+        Self {
+            session_id: AtomicU64::new(0),
+            windows: AtomicUsize::new(0),
+        }
     }
 
-    /// Publish `session_id` until the returned ring-lifetime guard is dropped.
+    /// Publish `session_id` until the last guard opened for this ring is dropped.
     pub(crate) fn showing(self: &Arc<Self>, session_id: u64) -> ShowingRing {
-        self.0.store(session_id, Ordering::Release);
+        // Publish the id before the count so a reader cannot pair the previous ring with this window.
+        if self.session_id.load(Ordering::Acquire) != session_id {
+            self.session_id.store(session_id, Ordering::Release);
+        }
+        self.windows.fetch_add(1, Ordering::AcqRel);
         ShowingRing {
             live: Arc::clone(self),
             session_id,
@@ -45,7 +56,10 @@ impl ClickAwaySession {
     /// Session id at click time, or `None` when no ring is showing.
     #[must_use]
     fn observe(&self) -> Option<u64> {
-        match self.0.load(Ordering::Acquire) {
+        if self.windows.load(Ordering::Acquire) == 0 {
+            return None;
+        }
+        match self.session_id.load(Ordering::Acquire) {
             0 => None,
             session_id => Some(session_id),
         }
@@ -54,10 +68,14 @@ impl ClickAwaySession {
 
 impl Drop for ShowingRing {
     fn drop(&mut self) {
-        let _ =
-            self.live
-                .0
-                .compare_exchange(self.session_id, 0, Ordering::AcqRel, Ordering::Acquire);
+        if self.live.windows.fetch_sub(1, Ordering::AcqRel) == 1 {
+            let _ = self.live.session_id.compare_exchange(
+                self.session_id,
+                0,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            );
+        }
     }
 }
 
@@ -106,19 +124,64 @@ pub(crate) fn spawn_click_away_dismissal(cx: &mut gpui::App, live: Arc<ClickAway
 #[cfg(not(target_os = "macos"))]
 const fn drop_unused_click_away_monitor(_monitor: Option<platform::ClickAwayMonitor>) {}
 
-/// Cancel the open ring only if it is still the session the click named.
-pub(crate) fn dismiss_click_away(cx: &mut gpui::App, session_id: u64) {
+/// Close every window of `session_id` from a click handled by `current`.
+pub(crate) fn dismiss_from_window(cx: &mut gpui::App, current: &mut gpui::Window, session_id: u64) {
+    // `current` is checked out of the app while its click handler runs.
+    close_ring_windows(cx, session_id);
+    current.remove_window();
+}
+
+/// Close every window showing ring `session_id`, reporting whether any was.
+///
+/// A ring is one window per display on Wayland (see [`crate::ring`]), so
+/// closing "the" ring means closing all of them: the windows the cursor was
+/// not on are transparent, but they still cover their display and would go on
+/// swallowing input after the ring the user interacted with had gone. The
+/// session id is what keeps a late teardown — a timeout, a queued click — from
+/// closing a ring that opened after it.
+pub(crate) fn close_ring_windows(cx: &mut gpui::App, session_id: u64) -> bool {
+    let mut closed = false;
     for handle in cx.windows() {
         let Some(ring) = handle.downcast::<RingView>() else {
             continue;
         };
-        let _ = ring.update(cx, |view, window, _| {
-            if !click_away_targets(session_id, view.session_id()) {
-                return;
+        let removed = ring.update(cx, |view, window, _| {
+            if view.session_id() != session_id {
+                return false;
             }
-            view.cancel();
             window.remove_window();
+            true
         });
+        closed |= removed.unwrap_or(false);
+    }
+    closed
+}
+
+/// Close every ring window, whichever session it shows.
+///
+/// For when the agent names the ring that should be showing, or none: any
+/// other ring is stale. Only ring windows close, so a notice that is showing
+/// stays up while rings come and go.
+pub(crate) fn close_all_ring_windows(cx: &mut gpui::App) {
+    for handle in cx.windows() {
+        if let Some(ring) = handle.downcast::<RingView>() {
+            let _ = ring.update(cx, |_, window, _| window.remove_window());
+        }
+    }
+}
+
+/// Cancel the open ring only if it is still the session the click named.
+pub(crate) fn dismiss_click_away(cx: &mut gpui::App, session_id: u64) {
+    let target = cx.windows().into_iter().find_map(|handle| {
+        let ring = handle.downcast::<RingView>()?;
+        ring.update(cx, |view, _, _| {
+            click_away_targets(session_id, view.session_id()).then(|| view.cancel())
+        })
+        .ok()
+        .flatten()
+    });
+    if target.is_some() {
+        close_ring_windows(cx, session_id);
     }
 }
 
@@ -193,5 +256,41 @@ mod tests {
         let _showing = live.showing(7);
         let queued = live.observe().expect("a showing ring is observable");
         assert!(click_away_targets(queued, 7));
+    }
+
+    #[test]
+    fn a_ring_stays_observable_until_its_last_window_drops() {
+        let live = Arc::new(ClickAwaySession::new());
+        let first = live.showing(4);
+        let second = live.showing(4);
+        drop(first);
+        assert_eq!(live.observe(), Some(4));
+        drop(second);
+        assert_eq!(live.observe(), None);
+    }
+
+    #[test]
+    fn an_older_window_dropping_leaves_the_replacement_observable() {
+        let live = Arc::new(ClickAwaySession::new());
+        let older = live.showing(4);
+        let replacement = live.showing(5);
+        drop(older);
+        assert_eq!(live.observe(), Some(5));
+        drop(replacement);
+        assert_eq!(live.observe(), None);
+    }
+
+    #[test]
+    fn a_replacement_that_drops_first_does_not_stay_observable() {
+        let live = Arc::new(ClickAwaySession::new());
+        let older = live.showing(4);
+        let replacement = live.showing(5);
+        drop(replacement);
+        drop(older);
+        assert_eq!(
+            live.observe(),
+            None,
+            "every window has dropped, so no ring is showing"
+        );
     }
 }

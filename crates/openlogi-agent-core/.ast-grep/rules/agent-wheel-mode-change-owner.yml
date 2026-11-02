@@ -1,0 +1,27 @@
+# Owner: openlogi_agent_core::hardware::WheelModeChange — which of the native
+# HiResWheel writes a configured (resolution, inversion) pair turns into.
+# WheelModeChange::new makes the choice and apply_on performs it.
+id: agent-wheel-mode-change-owner
+language: rust
+severity: error
+message: The agent writes a native wheel mode through hardware::WheelModeChange (new, apply_on); do not pick between the set_scroll_*_on writes here.
+note: |
+  The volatile reapply and the wheel-mode writer each matched the same four
+  (resolution, inversion) cases onto the same three writes. See "Single source
+  of truth" in AGENTS.md.
+files:
+  - crates/openlogi-agent-core/**/*.rs
+  - crates/openlogi-agent/**/*.rs
+rule:
+  all:
+    - kind: call_expression
+    - has:
+        field: function
+        regex: 'set_scroll_(wheel_mode|resolution|inversion)_on$'
+    - not:
+        inside:
+          kind: impl_item
+          stopBy: end
+          has:
+            field: type
+            regex: '^WheelModeChange$'

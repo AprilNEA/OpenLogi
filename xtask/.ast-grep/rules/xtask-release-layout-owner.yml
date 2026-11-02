@@ -1,0 +1,31 @@
+# Owner: xtask's `support::update_feed` — where a release's files live on the
+# update host (`releases/<tag>/…`, with its feed record in `feed/`) and the
+# URL of its GitHub Release page. Tests may pin the literal layout as an
+# oracle; production code asks update_feed.
+id: xtask-release-layout-owner
+language: rust
+severity: error
+message: A release's place on the update host and its GitHub Release page are support::update_feed's (release_dir, release_url, record_dir, record_url, release_page_url); ask it instead of spelling the path here.
+note: |
+  `release latest-json` and `release appcast` each spelled
+  `{base}/releases/{tag}/…` and the GitHub Release page URL, and the feed
+  records add a third reader. See "Single source of truth" in AGENTS.md.
+files:
+  - xtask/**/*.rs
+ignores:
+  - xtask/src/support/update_feed.rs
+  - "**/tests.rs"
+  - "**/tests/**"
+rule:
+  all:
+    - any:
+        - kind: string_literal
+        - kind: raw_string_literal
+    - regex: '\}/releases/|^r?#*"releases/|/OpenLogi/releases/tag'
+    - not:
+        inside:
+          kind: mod_item
+          stopBy: end
+          has:
+            field: name
+            regex: '^tests$'

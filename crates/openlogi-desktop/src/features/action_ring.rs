@@ -10,8 +10,7 @@ use gpui::{
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
-    Icon, IconName, Selectable as _, button::Button, h_flex, input::InputState, tooltip::Tooltip,
-    v_flex,
+    Icon, IconName, Selectable as _, h_flex, input::InputState, tooltip::Tooltip, v_flex,
 };
 use openlogi_core::binding::{
     ActionRingConfig, ActionRingEntry, ActionRingIcon, ActionRingLayout, ActionRingSlot,
@@ -19,9 +18,11 @@ use openlogi_core::binding::{
 use openlogi_ui::action_icons::RING_CANCEL_ICON;
 
 use self::action_icons::action_icon_path;
-use self::editor::action_library;
-use crate::state::{AppState, DeviceRecord, StateEvent};
+use self::editor::{PowerUserInputs, action_library};
+use crate::features::keyboard::editors::{PowerUserKind, text_editor_placeholder};
+use crate::state::{AppState, StateEvent};
 use crate::ui::action::localized_action_label;
+use crate::ui::components::{Toggle, toggle_row};
 use crate::ui::theme::{self, Palette, Typography as _};
 
 /// Stateful Actions Ring editor. Ring configuration itself lives in
@@ -31,6 +32,9 @@ pub struct ActionRingPanel {
     selected_slot: ActionRingSlot,
     application_input: Option<Entity<InputState>>,
     shortcut_input: Option<Entity<InputState>>,
+    type_text_input: Option<Entity<InputState>>,
+    applescript_input: Option<Entity<InputState>>,
+    shell_command_input: Option<Entity<InputState>>,
     library_scroll: ScrollHandle,
     #[expect(dead_code, reason = "held to keep the AppState subscription alive")]
     state_obs: Subscription,
@@ -39,25 +43,47 @@ pub struct ActionRingPanel {
 impl ActionRingPanel {
     /// Create the editor and repaint it after any config/device change.
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let state_obs = cx.subscribe(&AppState::global(cx), |_, _, event: &StateEvent, cx| {
-            let relevant = match event {
-                StateEvent::InventoryChanged | StateEvent::DeviceSelected(_) => true,
-                StateEvent::BindingsChanged(key) => AppState::try_read(cx)
-                    .and_then(AppState::current_record)
-                    .is_some_and(|record| record.device_key() == *key),
-                _ => false,
-            };
-            if relevant {
-                cx.notify();
-            }
-        });
+        let state_obs =
+            AppState::repaint_on(cx, |event| matches!(event, StateEvent::BindingsChanged(_)));
         Self {
             focus_handle: cx.focus_handle(),
             selected_slot: ActionRingSlot::Top,
             application_input: None,
             shortcut_input: None,
+            type_text_input: None,
+            applescript_input: None,
+            shell_command_input: None,
             library_scroll: ScrollHandle::new(),
             state_obs,
+        }
+    }
+
+    /// Get-or-create the three Power User text inputs, split out of `render`
+    /// to keep it under clippy's line budget.
+    fn power_user_inputs(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> PowerUserInputs {
+        PowerUserInputs {
+            type_text: editor_input(
+                &mut self.type_text_input,
+                text_editor_placeholder(PowerUserKind::TypeText),
+                window,
+                cx,
+            ),
+            applescript: editor_input(
+                &mut self.applescript_input,
+                text_editor_placeholder(PowerUserKind::RunAppleScript),
+                window,
+                cx,
+            ),
+            shell_command: editor_input(
+                &mut self.shell_command_input,
+                text_editor_placeholder(PowerUserKind::RunShellCommand),
+                window,
+                cx,
+            ),
         }
     }
 }
@@ -85,6 +111,7 @@ impl Render for ActionRingPanel {
             window,
             cx,
         );
+        let power_user = self.power_user_inputs(window, cx);
         let view = cx.entity();
 
         v_flex()
@@ -119,57 +146,34 @@ impl Render for ActionRingPanel {
                         layout.slots.get(&self.selected_slot),
                         &application_input,
                         &shortcut_input,
+                        &power_user,
                         &self.library_scroll,
                         pal,
                     )),
             )
-            .child(
-                h_flex()
-                    .items_center()
-                    .justify_between()
-                    .gap_3()
-                    .child(
-                        v_flex()
-                            .child(div().text_body().child(tr!("action_ring.actions_ring")))
-                            .child(
-                                div()
-                                    .text_caption()
-                                    .text_color(pal.text_muted)
-                                    .child(tr!("action_ring.open_at_the_current_cursor_position")),
-                            ),
-                    )
-                    .child(toggle_button(
-                        "ring-enabled",
-                        ring.enabled,
-                        |state, enabled| {
-                            state.commit_action_ring_enabled(enabled);
-                        },
-                    )),
-            )
+            .child(toggle_row(
+                "ring-enabled-row",
+                pal,
+                tr!("action_ring.enable_ring"),
+                tr!("action_ring.open_at_the_current_cursor_position"),
+                Toggle::new("ring-enabled-toggle")
+                    .selected(ring.enabled)
+                    .on_change(|enabled, _, cx| {
+                        AppState::apply(cx, |state| state.commit_action_ring_enabled(*enabled));
+                    }),
+            ))
             .when(haptics_supported, |panel| {
-                panel.child(
-                    h_flex()
-                        .items_center()
-                        .justify_between()
-                        .gap_3()
-                        .child(
-                            v_flex()
-                                .child(div().text_body().child(tr!("action_ring.haptic_feedback")))
-                                .child(
-                                    div()
-                                        .text_caption()
-                                        .text_color(pal.text_muted)
-                                        .child(tr!("action_ring.action_ring_haptic_description")),
-                                ),
-                        )
-                        .child(toggle_button(
-                            "ring-haptics",
-                            ring.haptics,
-                            |state, enabled| {
-                                state.commit_action_ring_haptics(enabled);
-                            },
-                        )),
-                )
+                panel.child(toggle_row(
+                    "ring-haptics-row",
+                    pal,
+                    tr!("action_ring.haptic_feedback"),
+                    tr!("action_ring.action_ring_haptic_description"),
+                    Toggle::new("ring-haptics-toggle")
+                        .selected(ring.haptics)
+                        .on_change(|haptics, _, cx| {
+                            AppState::apply(cx, |state| state.commit_action_ring_haptics(*haptics));
+                        }),
+                ))
             })
     }
 }
@@ -209,39 +213,10 @@ fn editor_input(
 
 fn current_device_supports_haptics(cx: &Context<ActionRingPanel>) -> bool {
     AppState::try_read(cx).is_some_and(|state| {
-        state.current_record().is_some_and(|record| {
-            record
-                .capabilities
-                .unwrap_or_else(|| {
-                    openlogi_core::device::Capabilities::presumed_from_kind(record.kind)
-                })
-                .haptic_feedback
-        })
+        state
+            .current_record()
+            .is_some_and(|record| record.capabilities_or_presumed().haptic_feedback)
     })
-}
-
-fn toggle_button(
-    id: &'static str,
-    enabled: bool,
-    commit: impl Fn(&mut AppState, bool) + 'static,
-) -> Button {
-    Button::new(id)
-        .compact()
-        .label(if enabled {
-            tr!("common.on")
-        } else {
-            tr!("common.off")
-        })
-        .selected(enabled)
-        .on_click(move |_, _, cx| {
-            AppState::update(cx, |state, cx| {
-                let key = state.current_record().map(DeviceRecord::device_key);
-                commit(state, !enabled);
-                if let Some(key) = key {
-                    cx.emit(StateEvent::BindingsChanged(key));
-                }
-            });
-        })
 }
 
 const PREVIEW_SIZE: f32 = 320.0;
@@ -305,7 +280,7 @@ fn slot_button(
     let (left, top) = slot.placement(PREVIEW_SIZE, PREVIEW_RADIUS, PREVIEW_SLOT_SIZE);
     let label = entry.map_or_else(
         || tr!("action_ring.empty_slot").to_string(),
-        |entry| localized_action_label(entry.action()).to_string(),
+        |entry| entry_caption(entry).to_string(),
     );
     let icon_path = entry.map(|entry| {
         entry.custom_icon().map_or_else(
@@ -378,3 +353,16 @@ fn slot_button(
             });
         })
 }
+
+/// The name a populated slot shows in the preview: the label the user gave it,
+/// verbatim, or its action's localized name. The agent makes the same choice
+/// for the ring itself, so the preview and the ring name a slot alike.
+fn entry_caption(entry: &ActionRingEntry) -> SharedString {
+    entry.custom_label().map_or_else(
+        || localized_action_label(entry.action()),
+        |label| SharedString::from(label.to_owned()),
+    )
+}
+
+#[cfg(test)]
+mod tests;

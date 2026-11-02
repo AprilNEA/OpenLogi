@@ -479,3 +479,60 @@ fn long(device: u8, feature: u8, function: u8, payload: &[u8]) -> Vec<u8> {
     report.resize(20, 0);
     report
 }
+
+#[test]
+fn easy_switch_hosts_must_be_ordered_and_fit_their_slots() {
+    use openlogi_core::hid::{EasySwitchHosts, EasySwitchSlot, HostConnection};
+
+    let slot = |index, name: Option<&str>| EasySwitchSlot {
+        index,
+        paired: name.is_some(),
+        connection: HostConnection::Bluetooth,
+        name: name.map(str::to_owned),
+        name_max_len: 10,
+        os: None,
+    };
+    let valid = EasySwitchHosts {
+        current: Some(0),
+        slots: vec![slot(0, Some("Computer 1")), slot(1, None)],
+        can_rename: true,
+    };
+    let with_hosts = |hosts: EasySwitchHosts| {
+        let mut profile = canonical_profile();
+        profile.inventories[0]
+            .paired
+            .iter_mut()
+            .find(|device| device.slot == 1)
+            .and_then(|device| device.capabilities.as_mut())
+            .expect("slot 1 is probed")
+            .easy_switch = true;
+        profile.settings[0].easy_switch = ProfileSetting::Supported(hosts);
+        profile.validate()
+    };
+    with_hosts(valid.clone()).expect("ordered hosts that fit validate");
+
+    let mut cases = Vec::new();
+    let mut empty = valid.clone();
+    empty.slots.clear();
+    empty.current = None;
+    cases.push((empty, "has no host slots"));
+    let mut unordered = valid.clone();
+    unordered.slots.swap(0, 1);
+    cases.push((unordered, "numbered 0, 1, 2"));
+    let mut current = valid.clone();
+    current.current = Some(2);
+    cases.push((current, "current slot"));
+    let mut unpaired = valid.clone();
+    unpaired.slots[1].name = Some("Ghost".into());
+    cases.push((unpaired, "slot 1 has a name or OS but no computer"));
+    let mut long = valid.clone();
+    long.slots[0].name = Some("Computer 1 X".into());
+    cases.push((long, "slot 0 name does not fit its 10 bytes"));
+    let mut blank = valid;
+    blank.slots[0].name = Some(String::new());
+    cases.push((blank, "slot 0 name does not fit"));
+    for (hosts, reason) in cases {
+        let error = with_hosts(hosts).expect_err(reason);
+        assert!(error.to_string().contains(reason), "{error} lacks {reason}");
+    }
+}

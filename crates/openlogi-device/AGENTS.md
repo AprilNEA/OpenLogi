@@ -22,9 +22,13 @@ owns the layer. `crates/openlogi-hid/AGENTS.md` points back here.
   string, and `openlogi_core::device::DeviceKind`) — the same small integers mean
   different things in each. Never cross them by raw value; convert at the boundary.
   `kind` is identity-only. Capability decisions use a live feature-table probe or the
-  last-good capabilities retained by the cache. The sole kind-derived fallback is
-  `Capabilities::presumed_from_kind` for a device that has never been probed and is
-  currently offline; keep it centralized and do not add new `kind` gates.
+  last-good capabilities retained by the cache. The only kind-derived fallbacks, for
+  a device with no measured capabilities, live in `openlogi-core`:
+  `Capabilities::presumed_from_kind` for one never probed and currently offline, and
+  `Capabilities::presumed_for_hidpp10` for a HID++ 1.0 device (marked
+  `PairedDevice::hidpp10`). That device has no feature table, and OpenLogi writes none
+  of its registers, so it keeps only its host-side buttons. Do not add new `kind`
+  gates.
 - The Agent's persistent enumerator is event-first: OS hotplug and HID++ lifecycle
   notifications are identity-free hints that request authoritative full
   re-enumeration. A named low-frequency recovery scan covers missed/unsupported events
@@ -33,3 +37,9 @@ owns the layer. `crates/openlogi-hid/AGENTS.md` points back here.
   bounded repair, and channel retirement/reopen ordering — run the inventory/watcher
   tests and cover event bursts or loss, partial failure, and recovery, not just clean
   enumeration.
+  Setting broadcasts (`0x40a2`/`0x40a3` Fn inversion, `0x2202` DPI, `0x4531` platform
+  change, `0x8061` report rate, `0x1982` backlight info) also bump the device's `PairedDevice::settings_revision`, before the
+  re-enumeration they request, so clients re-read the setting. The revision is per
+  channel and survives re-probes; it must never trigger replaying persisted settings
+  onto the device. The one consumer that writes is keep-OS-layout (Options+ parity):
+  it re-reads the keyboard's platform and sets the host's only when they differ.

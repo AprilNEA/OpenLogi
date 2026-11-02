@@ -4,8 +4,9 @@ use std::collections::HashSet;
 
 use openlogi_core::device::{Capabilities, DeviceInventory, LightCapabilities, StandaloneDevice};
 use openlogi_core::hid::{
-    BacklightState, BacklightStatus, DIRECT_DEVICE_INDEX, DeviceRoute, DpiInfo, ScrollWheelMode,
-    SmartShiftStatus,
+    BacklightState, BacklightStatus, DIRECT_DEVICE_INDEX, DeviceRoute, DisableKeysState, DpiInfo,
+    EasySwitchHosts, FnLockState, ForceSensingInfo, PointerSpeed, ReportRateInfo, ScrollWheelMode,
+    SidetoneLevel, SmartShiftStatus,
 };
 use serde::{Deserialize, Deserializer, Serialize, de};
 use thiserror::Error;
@@ -139,6 +140,13 @@ pub enum ProfileSetting<T> {
 }
 
 impl<T> ProfileSetting<T> {
+    /// The absent-feature behavior; the serde default for settings appended
+    /// after schema v1 so older profiles keep loading.
+    #[must_use]
+    pub const fn unsupported() -> Self {
+        Self::Unsupported
+    }
+
     /// Whether the feature is present, independently of value availability.
     #[must_use]
     pub const fn supports_feature(&self) -> bool {
@@ -178,6 +186,33 @@ pub struct ProfileDeviceSettings {
     pub wheel: ProfileSetting<ScrollWheelMode>,
     /// Keyboard-backlight read state.
     pub backlight: ProfileSetting<BacklightState>,
+    /// Keyboard Fn-lock read state. Defaults to unsupported so profiles
+    /// recorded before it existed keep loading.
+    #[serde(default = "ProfileSetting::unsupported")]
+    pub fn_lock: ProfileSetting<FnLockState>,
+    /// Report-rate read state. Defaults to unsupported so profiles recorded
+    /// before it existed keep loading.
+    #[serde(default = "ProfileSetting::unsupported")]
+    pub report_rate: ProfileSetting<ReportRateInfo>,
+    /// Easy-Switch host-slot read state. Defaults to unsupported so profiles
+    /// recorded before it existed keep loading.
+    #[serde(default = "ProfileSetting::unsupported")]
+    pub easy_switch: ProfileSetting<EasySwitchHosts>,
+    /// Pointer-speed (`0x2205`) read state. Defaults to unsupported so
+    /// profiles recorded before it existed keep loading.
+    #[serde(default = "ProfileSetting::unsupported")]
+    pub pointer_speed: ProfileSetting<PointerSpeed>,
+    /// Force-sensing button (`0x19c0`) press-force read state. Defaults to
+    /// unsupported so profiles recorded before it existed keep loading.
+    #[serde(default = "ProfileSetting::unsupported")]
+    pub force_sensing: ProfileSetting<ForceSensingInfo>,
+    /// Fixed lock/system-key disabling read state.
+    #[serde(default = "ProfileSetting::unsupported")]
+    pub disable_keys: ProfileSetting<DisableKeysState>,
+    /// Headset sidetone (`0x8300`) read state. Defaults to unsupported so
+    /// profiles recorded before it existed keep loading.
+    #[serde(default = "ProfileSetting::unsupported")]
+    pub sidetone: ProfileSetting<SidetoneLevel>,
     /// RGB keyboard-lighting write support.
     pub lighting: ProfileSupport,
     /// Standalone-light command support.
@@ -234,7 +269,7 @@ impl ProfileValidation {
         self.validate_paired_devices(inventory)?;
         self.validate_inventory_identity(inventory)?;
         for device in &inventory.paired {
-            let Some(route) = DeviceRoute::device_route_for(inventory, device.slot) else {
+            let Some(route) = DeviceRoute::for_slot(inventory, device.slot) else {
                 return Err(FixtureError::invalid(
                     "device profile",
                     format!(
@@ -358,13 +393,7 @@ impl ProfileValidation {
         let owner = format!("standalone device {}", device.display_name);
         validate_unit_id(&mut self.unit_ids, device.unit_id, &owner)?;
         self.push_route(ProfileRouteFacts {
-            route: DeviceRoute::RawHid {
-                vendor_id: device.address.vendor_id,
-                product_id: device.address.product_id,
-                usage_page: device.address.usage_page,
-                usage_id: device.address.usage_id,
-                identity: device.address.identity.clone(),
-            },
+            route: device.route(),
             capabilities: device.capabilities,
             standalone: true,
             light_capabilities: device.light_capabilities,
@@ -436,7 +465,7 @@ fn validate_battery(
     receiver: &str,
     slot: u8,
 ) -> Result<(), FixtureError> {
-    if battery.is_some_and(|battery| battery.percentage > 100) {
+    if battery.is_some_and(|battery| battery.percentage.is_some_and(|p| p > 100)) {
         Err(FixtureError::invalid(
             "device profile",
             format!("slot {slot} on {receiver} has battery percentage above 100"),
@@ -461,6 +490,14 @@ fn validate_setting_values(settings: &ProfileDeviceSettings) -> Result<(), Fixtu
     if let Some(backlight) = settings.backlight.value() {
         validate_backlight(&settings.route, *backlight)?;
     }
+    if let Some(report_rate) = settings.report_rate.value() {
+        validate_report_rate(&settings.route, report_rate)?;
+    }
+    if let Some(hosts) = settings.easy_switch.value() {
+        validate_easy_switch(&settings.route, hosts)?;
+    }
+    // Disable Keys reads retain both raw masks, including unadvertised bits.
+    // Only a write is capability-bounded; fixture capture preserves the read.
     if settings.backlight.supports_feature() && settings.lighting.is_supported() {
         return Err(FixtureError::invalid(
             "device profile",
@@ -505,6 +542,86 @@ fn validate_dpi(route: &DeviceRoute, dpi: &DpiInfo) -> Result<(), FixtureError> 
     Ok(())
 }
 
+fn validate_report_rate(route: &DeviceRoute, info: &ReportRateInfo) -> Result<(), FixtureError> {
+    if info.supported.is_empty() {
+        return Err(FixtureError::invalid(
+            "device profile",
+            format!("route {route} has an empty report-rate list"),
+        ));
+    }
+    if info.supported.iter().any(|rate| u16::from(*rate) == 0) {
+        return Err(FixtureError::invalid(
+            "device profile",
+            format!("route {route} has a zero report rate"),
+        ));
+    }
+    if info
+        .supported
+        .array_windows::<2>()
+        .any(|[left, right]| left >= right)
+    {
+        return Err(FixtureError::invalid(
+            "device profile",
+            format!("route {route} report rates must be sorted and unique"),
+        ));
+    }
+    if !info.supports(info.current) {
+        return Err(FixtureError::invalid(
+            "device profile",
+            format!(
+                "route {route} current report rate {} is not supported",
+                info.current
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_easy_switch(route: &DeviceRoute, hosts: &EasySwitchHosts) -> Result<(), FixtureError> {
+    let invalid = |reason: String| {
+        Err(FixtureError::invalid(
+            "device profile",
+            format!("route {route} Easy-Switch {reason}"),
+        ))
+    };
+    if hosts.slots.is_empty() {
+        return invalid("has no host slots".to_owned());
+    }
+    if !hosts
+        .slots
+        .iter()
+        .zip(0u8..)
+        .all(|(slot, index)| slot.index == index)
+    {
+        return invalid("slots must be numbered 0, 1, 2, … in order".to_owned());
+    }
+    if hosts
+        .current
+        .is_some_and(|current| hosts.slot(current).is_none())
+    {
+        return invalid("current slot is not one of its slots".to_owned());
+    }
+    for slot in &hosts.slots {
+        if !slot.paired && (slot.name.is_some() || slot.os.is_some()) {
+            return invalid(format!(
+                "slot {} has a name or OS but no computer",
+                slot.index
+            ));
+        }
+        if let Some(name) = &slot.name
+            && (name.is_empty()
+                || name.contains('\0')
+                || name.len() > usize::from(slot.name_max_len))
+        {
+            return invalid(format!(
+                "slot {} name does not fit its {} bytes",
+                slot.index, slot.name_max_len
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_backlight(route: &DeviceRoute, backlight: BacklightState) -> Result<(), FixtureError> {
     if backlight.nb_levels == 0 {
         return Err(FixtureError::invalid(
@@ -540,6 +657,12 @@ fn validate_setting_support(
             || settings.smartshift.supports_feature()
             || settings.wheel.supports_feature()
             || settings.backlight.supports_feature()
+            || settings.report_rate.supports_feature()
+            || settings.easy_switch.supports_feature()
+            || settings.pointer_speed.supports_feature()
+            || settings.force_sensing.supports_feature()
+            || settings.disable_keys.supports_feature()
+            || settings.sidetone.supports_feature()
             || settings.lighting.is_supported()
         {
             return Err(FixtureError::invalid(
@@ -572,24 +695,57 @@ fn validate_setting_support(
             ));
         }
         if let Some(capabilities) = facts.capabilities {
-            validate_capability_support(
-                settings,
-                "DPI",
-                settings.dpi.supports_feature(),
-                capabilities.pointer,
-            )?;
-            validate_capability_support(
-                settings,
-                "wheel",
-                settings.wheel.supports_feature(),
-                capabilities.hires_wheel,
-            )?;
-            validate_capability_support(
-                settings,
-                "lighting",
-                settings.lighting.is_supported(),
-                capabilities.lighting,
-            )?;
+            let families = [
+                ("DPI", settings.dpi.supports_feature(), capabilities.pointer),
+                (
+                    "wheel",
+                    settings.wheel.supports_feature(),
+                    capabilities.hires_wheel,
+                ),
+                (
+                    "lighting",
+                    settings.lighting.is_supported(),
+                    capabilities.lighting,
+                ),
+                (
+                    "report rate",
+                    settings.report_rate.supports_feature(),
+                    capabilities.report_rate,
+                ),
+                (
+                    "backlight",
+                    settings.backlight.supports_feature(),
+                    capabilities.backlight,
+                ),
+                (
+                    "Easy-Switch",
+                    settings.easy_switch.supports_feature(),
+                    capabilities.easy_switch,
+                ),
+                (
+                    "pointer speed",
+                    settings.pointer_speed.supports_feature(),
+                    capabilities.pointer_scaling,
+                ),
+                (
+                    "press force",
+                    settings.force_sensing.supports_feature(),
+                    capabilities.force_sensing,
+                ),
+                (
+                    "Disable Keys",
+                    settings.disable_keys.supports_feature(),
+                    capabilities.disable_keys,
+                ),
+                (
+                    "sidetone",
+                    settings.sidetone.supports_feature(),
+                    capabilities.sidetone,
+                ),
+            ];
+            for (family, declared, advertised) in families {
+                validate_capability_support(settings, family, declared, advertised)?;
+            }
         }
     }
     Ok(())
@@ -850,7 +1006,11 @@ fn normalize_hidpp20(request: &[u8]) -> Vec<u8> {
     normalized
 }
 
-fn format_hex(report: &[u8]) -> String {
+/// A report as a cassette spells it: lowercase hex, two digits per byte, no
+/// separators. Replay diagnostics quote reports the same way, so a mismatch
+/// message can be pasted back against the cassette.
+#[must_use]
+pub fn format_hex(report: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut formatted = String::with_capacity(report.len() * 2);
     for &byte in report {
@@ -930,5 +1090,184 @@ mod optional_hex_report {
         Option::<String>::deserialize(deserializer)?
             .map(|encoded| parse_hex(&encoded).map_err(de::Error::custom))
             .transpose()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use openlogi_core::device::DeviceKind;
+    use openlogi_core::hid::{
+        BacklightControls, BacklightMode, BacklightState, BacklightStatus, DisableKeysMask,
+        DisableKeysState,
+    };
+
+    use crate::{CANONICAL_DEVICE_PROFILE_JSON, DeviceProfile, ProfileSetting, ProfileSupport};
+
+    #[test]
+    fn disable_keys_profile_preserves_unadvertised_raw_state() {
+        let mut profile: DeviceProfile =
+            serde_json::from_str(CANONICAL_DEVICE_PROFILE_JSON).expect("canonical profile");
+        let setting = profile
+            .settings
+            .iter_mut()
+            .find(|setting| setting.disable_keys.supports_feature())
+            .expect("canonical keyboard supports Disable Keys");
+        setting.disable_keys = ProfileSetting::Supported(DisableKeysState {
+            supported: DisableKeysMask::from_bits_retain(0xa1),
+            disabled: DisableKeysMask::from_bits_retain(0xe0),
+        });
+
+        profile.validate().expect("raw reads preserve both masks");
+        let restored: DeviceProfile =
+            serde_json::from_str(&serde_json::to_string(&profile).expect("serialize profile"))
+                .expect("deserialize profile");
+        restored.validate().expect("restored raw state validates");
+        assert_eq!(restored, profile);
+    }
+
+    #[test]
+    fn disable_keys_profile_still_requires_the_feature_capability() {
+        let mut profile: DeviceProfile =
+            serde_json::from_str(CANONICAL_DEVICE_PROFILE_JSON).expect("canonical profile");
+        let capabilities = profile
+            .inventories
+            .iter_mut()
+            .flat_map(|inventory| &mut inventory.paired)
+            .filter_map(|device| device.capabilities.as_mut())
+            .find(|capabilities| capabilities.disable_keys)
+            .expect("canonical keyboard supports Disable Keys");
+        capabilities.disable_keys = false;
+
+        let error = profile
+            .validate()
+            .expect_err("family mismatch remains invalid");
+        assert!(
+            error
+                .to_string()
+                .contains("Disable Keys support does not match")
+        );
+    }
+
+    /// A supported backlight on the canonical keyboard, with every offer on.
+    fn supported_backlight() -> BacklightState {
+        BacklightState {
+            enabled: true,
+            mode: BacklightMode::Automatic,
+            status: BacklightStatus::AlsAutomatic,
+            current_level: 3,
+            nb_levels: 8,
+            power_save: false,
+            duration: None,
+            controls: BacklightControls::AUTOMATIC
+                | BacklightControls::LEVEL
+                | BacklightControls::POWER_SAVE
+                | BacklightControls::DURATION,
+        }
+    }
+
+    /// Find which paired device the feature-bearing settings entry belongs to
+    /// (the canonical keyboard), indexed next to its settings entry.
+    fn keyboard_settings_index(profile: &DeviceProfile) -> (usize, usize) {
+        let settings_index = profile
+            .settings
+            .iter()
+            .position(|setting| setting.disable_keys.supports_feature())
+            .expect("canonical keyboard route");
+        let paired_index = profile
+            .inventories
+            .iter()
+            .position(|inventory| {
+                inventory
+                    .paired
+                    .iter()
+                    .any(|device| device.kind == DeviceKind::Keyboard)
+            })
+            .expect("canonical paired keyboard");
+        (settings_index, paired_index)
+    }
+
+    /// The canonical keyboard is an RGB device, and a profile may not expose
+    /// RGB lighting next to a backlight; backlight is the fixture under test,
+    /// so the lighting support moves aside.
+    fn dedicate_keyboard_to_backlight(profile: &mut DeviceProfile) -> (usize, usize) {
+        let (settings_index, paired_index) = keyboard_settings_index(profile);
+        profile.inventories[paired_index]
+            .paired
+            .iter_mut()
+            .find(|device| device.kind == DeviceKind::Keyboard)
+            .and_then(|device| device.capabilities.as_mut())
+            .expect("canonical keyboard has capabilities")
+            .lighting = false;
+        profile.settings[settings_index].lighting = ProfileSupport::Unsupported;
+        (settings_index, paired_index)
+    }
+
+    #[test]
+    fn backlight_profile_records_the_released_object_shape() {
+        let mut profile: DeviceProfile =
+            serde_json::from_str(CANONICAL_DEVICE_PROFILE_JSON).expect("canonical profile");
+        let (settings_index, paired_index) = dedicate_keyboard_to_backlight(&mut profile);
+        profile.inventories[paired_index]
+            .paired
+            .iter_mut()
+            .find(|device| device.kind == DeviceKind::Keyboard)
+            .and_then(|device| device.capabilities.as_mut())
+            .expect("canonical keyboard has capabilities")
+            .backlight = true;
+        profile.settings[settings_index].backlight =
+            ProfileSetting::Supported(supported_backlight());
+        profile.validate().expect("backlight setting validates");
+
+        let encoded = serde_json::to_string(&profile).expect("profile serializes");
+        assert!(
+            encoded.contains(
+                r#""controls":{"automatic":true,"level":true,"power_save":true,"duration":true}"#,
+            ),
+            "the controls must re-record as the released three-field object plus `duration`, got: {encoded}"
+        );
+    }
+
+    #[test]
+    fn a_profile_recorded_before_the_timer_shipped_still_loads() {
+        let mut profile: DeviceProfile =
+            serde_json::from_str(CANONICAL_DEVICE_PROFILE_JSON).expect("canonical profile");
+        let (settings_index, paired_index) = dedicate_keyboard_to_backlight(&mut profile);
+        profile.inventories[paired_index]
+            .paired
+            .iter_mut()
+            .find(|device| device.kind == DeviceKind::Keyboard)
+            .and_then(|device| device.capabilities.as_mut())
+            .expect("canonical keyboard has capabilities")
+            .backlight = true;
+        profile.settings[settings_index].backlight =
+            ProfileSetting::Supported(supported_backlight());
+        profile.validate().expect("backlight setting validates");
+
+        // A record from a released build carries no `duration` key: the
+        // timer has not shipped yet.
+        let encoded = serde_json::to_string(&profile).expect("profile serializes");
+        let mut record: serde_json::Value = serde_json::from_str(&encoded).expect("profile JSON");
+        record
+            .pointer_mut(&format!(
+                "/settings/{settings_index}/backlight/value/controls"
+            ))
+            .and_then(|controls| controls.as_object_mut())
+            .expect("recorded controls object")
+            .remove("duration");
+        let restored: DeviceProfile =
+            serde_json::from_value(record).expect("the profile without the timer key loads");
+        restored.validate().expect("restored profile validates");
+        assert_eq!(
+            restored.settings[settings_index]
+                .backlight
+                .value()
+                .map(|state| state.controls),
+            Some(
+                BacklightControls::AUTOMATIC
+                    | BacklightControls::LEVEL
+                    | BacklightControls::POWER_SAVE
+            ),
+            "the missing key reads as its default, like the old field did"
+        );
     }
 }

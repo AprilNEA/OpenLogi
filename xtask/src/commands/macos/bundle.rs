@@ -2,7 +2,9 @@
 
 mod embed;
 pub(crate) mod identity;
+mod provisioning;
 mod signing;
+pub(crate) mod sparkle;
 
 use std::env;
 use std::path::{Path, PathBuf};
@@ -15,14 +17,17 @@ use xshell::{Shell, cmd};
 use crate::icon::IconPipeline as _;
 use crate::icon::macos::AppBundle;
 use crate::support::fs::{command_exists, ensure_dir, repo_root};
-use crate::support::info_plist;
+use crate::support::info_plist::{self, BundleVersions};
+use crate::support::release_tag::BuildVersion;
+use crate::support::update_feed::{self, MacArch};
 use crate::support::xcode;
 use identity::{Channel, Component};
 
 // The rest of the macOS domain reaches these through `bundle::`, which is the
 // module that owns them conceptually even now that the code sits deeper.
-pub(super) use embed::{HELPERS, Helper, agent_service_label, write_agent_launch_plist};
-pub(super) use signing::quoted_identity;
+pub(super) use embed::{EmbeddedHelper, HELPERS, agent_service_label, write_agent_launch_plist};
+pub(super) use provisioning::{AGENT_PROFILE_ENV, AgentProfile};
+pub(super) use signing::{SIGN_IDENTITY_ENV, quoted_identity};
 
 #[derive(Clone, Copy, ValueEnum)]
 pub(crate) enum DistributionTarget {
@@ -39,27 +44,60 @@ impl DistributionTarget {
             Self::X8664 => "x86_64-apple-darwin",
         }
     }
+
+    /// The architecture a bundle for `target` runs on: the host's when no
+    /// target is given.
+    pub(crate) fn arch(target: Option<Self>) -> Result<MacArch> {
+        match target {
+            Some(Self::Aarch64) => Ok(MacArch::Arm64),
+            Some(Self::X8664) => Ok(MacArch::X86_64),
+            None => MacArch::host().context("no macOS release architecture for this host"),
+        }
+    }
 }
 
 /// Build `OpenLogi.app` wearing `channel`'s identity, signing it with whatever
 /// local identity is available (dev) or leaving it unsigned (production).
 pub(crate) fn run(channel: Channel) -> Result<()> {
-    run_with_channel(channel, None, None)
+    build_bundle(
+        channel,
+        None,
+        None,
+        None,
+        None,
+        &BundleVersions::of_build(None),
+    )
 }
 
 /// Build the bundle that ships: always the production identity, signed with the
-/// Developer ID identity when one is given.
+/// Developer ID identity when one is given, and updating through Sparkle when
+/// given its `feed`. The agent embeds `agent_profile` when one is given; the
+/// caller checks that a signing identity comes with it. Every bundle carries
+/// `build_version` as its `CFBundleVersion` when one is given.
 pub(crate) fn run_for_distribution(
     sign_identity: Option<&str>,
+    agent_profile: Option<&AgentProfile>,
     target: Option<DistributionTarget>,
+    feed: Option<&sparkle::Feed>,
+    build_version: Option<&BuildVersion>,
 ) -> Result<()> {
-    run_with_channel(Channel::Production, sign_identity, target)
+    build_bundle(
+        Channel::Production,
+        sign_identity,
+        agent_profile,
+        target,
+        feed,
+        &BundleVersions::of_build(build_version),
+    )
 }
 
-fn run_with_channel(
+fn build_bundle(
     channel: Channel,
     sign_identity: Option<&str>,
+    agent_profile: Option<&AgentProfile>,
     target: Option<DistributionTarget>,
+    feed: Option<&sparkle::Feed>,
+    versions: &BundleVersions,
 ) -> Result<()> {
     let root = repo_root()?;
     let sh = Shell::new()?;
@@ -113,11 +151,23 @@ fn run_with_channel(
     let app = root.join("target/release/bundle/osx/OpenLogi.app");
     move_to_canonical_path(&built_app, &app)?;
     AppBundle.install(&app)?;
-    embed::embed_helpers(&root, &release_dir, &app, channel)?;
+    // cargo-bundle writes the build's UTC timestamp as `CFBundleVersion`. The
+    // app carries its build version instead, like its helpers: Sparkle
+    // compares an appcast's `sparkle:version` against it.
+    info_plist::stamp_bundle_version(&app.join("Contents/Info.plist"), versions)?;
+    embed::embed_helpers(&root, &release_dir, &app, channel, versions)?;
     embed::write_agent_launch_plist(&app, channel)?;
     embed::embed_cli(&release_dir, &app)?;
     embed::verify_bundle_binaries(&app, channel)?;
     info_plist::stamp_privacy_usage_descriptions(&app)?;
+    info_plist::stamp_launch_services_keys(&app)?;
+    match feed {
+        Some(feed) => sparkle::embed(&root, &app, feed, versions)?,
+        None => println!(
+            "==> Sparkle: skipped (set {} to embed it; the app updates through its built-in engine)",
+            update_feed::SPARKLE_PUBLIC_KEY_ENV
+        ),
+    }
     // Identity first, then the checks, then signing — a signature seals the
     // `Info.plist` files, so nothing may rewrite them afterwards.
     identity::stamp(&app, channel, Component::VARIANTS)?;
@@ -126,10 +176,20 @@ fn run_with_channel(
     AppBundle.verify(&app)?;
     match (channel, sign_identity) {
         (Channel::Production, Some(identity)) => {
-            signing::sign_app_with_timestamp(identity, signing::TimestampMode::Secure, channel)?;
+            if agent_profile.is_none() {
+                println!(
+                    "==> agent provisioning profile: none (set {AGENT_PROFILE_ENV}; the agent types through CGEventPost)"
+                );
+            }
+            signing::sign_app_with_timestamp(
+                identity,
+                signing::TimestampMode::Secure,
+                channel,
+                agent_profile,
+            )?;
         }
         (Channel::Production, None) => {
-            println!("==> codesign: skipped (unsigned — set OPENLOGI_SIGN_IDENTITY to sign)");
+            println!("==> codesign: skipped (unsigned — set {SIGN_IDENTITY_ENV} to sign)");
         }
         (Channel::Dev, _) => signing::local_sign_app_if_available(channel)?,
     }

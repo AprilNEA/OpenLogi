@@ -1,0 +1,22 @@
+# Owner: openlogi-desktop's ui::commit_slider — how a settings slider is built
+# and wired: bounds set in the order SliderState tolerates (it panics when
+# min > max, even between two builder calls), one write on release, and the
+# thumb following the committed value but never mid-drag.
+id: gui-commit-slider-owner
+language: rust
+severity: error
+message: Build sliders with ui::commit_slider (CommitSlider::new over a SliderRange) instead of a raw SliderState here; it owns the bound order, write-on-release, and re-seating the thumb.
+note: |
+  Ten sites hand-rolled the same slider, last-value, pending-value and
+  subscription bundle, and they had drifted: the bound-order panic was
+  documented in two of them, and one Settings slider was re-seated after a
+  failed save while its sibling was not. See "Single source of truth" in
+  AGENTS.md.
+files:
+  - crates/openlogi-desktop/src/**/*.rs
+ignores:
+  - crates/openlogi-desktop/src/ui/commit_slider.rs
+  - "**/tests.rs"
+  - "**/tests/**"
+rule:
+  pattern: SliderState::new()

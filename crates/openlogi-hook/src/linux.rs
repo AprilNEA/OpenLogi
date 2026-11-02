@@ -12,6 +12,10 @@
 //! multitouch `EV_ABS` stream (and the input properties libinput keys
 //! behavior on) with no way to re-inject it — killing the built-in pointer.
 //!
+//! A supervisor thread owns the per-mouse threads and grabs a mouse again
+//! when its event node is re-created by a power cycle, a Bluetooth
+//! reconnect, or a resume (see [`supervisor`]).
+//!
 //! # Permissions
 //!
 //! The process needs read access to `/dev/input/eventN` (typically the `input`
@@ -20,60 +24,52 @@
 //! [`crate::HookError::Linux`].
 #![expect(
     unsafe_code,
-    reason = "the wake pipe and the Wayland toplevel listener call libc directly"
+    reason = "the wake pipes, the /dev/input watch, and the Wayland toplevel listener call libc directly"
 )]
 
-use std::collections::HashMap;
+mod button_debounce;
+mod foreground;
+pub(crate) mod pointer;
+pub(crate) mod probe;
+mod supervisor;
+mod wheel;
+#[cfg(test)]
+mod xvfb;
+
 use std::io;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::ops::ControlFlow;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::{
-    Arc, Condvar, LazyLock, Mutex, MutexGuard,
+    Arc,
     atomic::{AtomicBool, Ordering},
-    mpsc,
 };
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use evdev::uinput::VirtualDevice;
 use evdev::{
-    AbsoluteAxisCode, AttributeSetRef, Device, EventSummary, KeyCode, PropType, RelativeAxisCode,
+    AbsoluteAxisCode, AttributeSetRef, Device, EventSummary, EventType, InputEvent, KeyCode,
+    PropType, RelativeAxisCode,
 };
-use thiserror::Error;
+use openlogi_inject::uinput;
 use tracing::{debug, error, warn};
-use x11rb::connection::Connection as _;
-use x11rb::properties::WmClass;
-use x11rb::protocol::Event;
-use x11rb::protocol::xproto::{
-    Atom, AtomEnum, ChangeWindowAttributesAux, ConnectionExt as _, EventMask, Window,
-};
-use x11rb::rust_connection::RustConnection;
+use x11rb::protocol::xproto::ConnectionExt as _;
 
 use crate::{
-    ButtonId, CursorPosition, EventDisposition, ForegroundApp, HookBackend, HookError, HookEvent,
-    LOGITECH_VENDOR_ID, MouseEvent,
+    ButtonId, CursorPosition, Delivery, EventDevice, EventDisposition, ForegroundApp, HookBackend,
+    HookError, HookEvent, LOGITECH_VENDOR_ID, MouseEvent,
 };
-
-/// Prefix carried by every uinput device OpenLogi creates — the hook's
-/// pass-through mice ([`VIRTUAL_DEVICE_NAME`]) and openlogi-inject's
-/// "OpenLogi action injector" (which also advertises mouse buttons).
-/// Enumeration refuses anything with this prefix so the hook can never grab
-/// one of our own virtual devices.
-const OPENLOGI_DEVICE_PREFIX: &str = "OpenLogi ";
-
-/// Name stamped on every uinput pass-through device.
-const VIRTUAL_DEVICE_NAME: &str = "OpenLogi virtual mouse";
+use button_debounce::{ButtonChange, ButtonDebounce};
+use foreground::{FRONTMOST, X11Source};
+pub(crate) use foreground::{
+    ForegroundApplicationObserver, watch_frontmost_application_activations,
+};
+use wheel::{PassThroughWheel, WheelEvent};
 
 /// Hi-res scroll resolution: 120 units per standard wheel tick, matching the
 /// Linux kernel's `REL_WHEEL_HI_RES` convention and Windows HID semantics.
 const HIRES_UNITS_PER_TICK: f32 = 120.0;
 
-pub(crate) struct HookInner {
-    stop: Arc<AtomicBool>,
-    /// One pipe write-end per device thread; writing wakes the blocking poll.
-    stop_pipes: Vec<OwnedFd>,
-    threads: Vec<thread::JoinHandle<()>>,
-}
+pub(crate) struct HookInner(supervisor::Running);
 
 /// The Linux backend: one `evdev` reader thread per mouse, re-injecting
 /// pass-through events through a `uinput` device.
@@ -85,47 +81,20 @@ impl HookBackend for Backend {
     fn start(
         cb: impl Fn(HookEvent) -> EventDisposition + Send + Sync + 'static,
     ) -> Result<HookInner, HookError> {
-        let devices = find_mouse_devices();
-        if devices.is_empty() {
-            return Err(HookError::NoDeviceFound);
-        }
-
-        let stop = Arc::new(AtomicBool::new(false));
-        let cb: Arc<dyn Fn(HookEvent) -> EventDisposition + Send + Sync> = Arc::new(cb);
-        let mut threads: Vec<thread::JoinHandle<()>> = Vec::with_capacity(devices.len());
-        let mut stop_pipes: Vec<OwnedFd> = Vec::with_capacity(devices.len());
-
-        let result = (|| -> io::Result<()> {
-            for (path, device) in devices {
-                let virtual_device = build_virtual_device(&device)?;
-                let (rx, tx) = create_pipe()?;
-                let stop_clone = Arc::clone(&stop);
-                let cb_clone = Arc::clone(&cb);
-                let handle = thread::Builder::new()
-                    .name(format!("openlogi-hook:{}", path.display()))
-                    .spawn(move || {
-                        device_thread(path, device, virtual_device, cb_clone, stop_clone, rx);
-                    })?;
-                threads.push(handle);
-                stop_pipes.push(tx);
-            }
-            Ok(())
-        })();
-
-        if let Err(e) = result {
-            shutdown(&stop, &stop_pipes, threads);
-            return Err(HookError::Linux(e));
-        }
-
-        Ok(HookInner {
-            stop,
-            stop_pipes,
-            threads,
-        })
+        supervisor::start(Arc::new(cb)).map(HookInner)
     }
 
     fn stop(inner: HookInner) {
-        shutdown(&inner.stop, &inner.stop_pipes, inner.threads);
+        inner.0.stop();
+    }
+
+    /// Whether the supervisor still runs. A device thread ending with its
+    /// mouse does not stop the hook: the supervisor grabs the mouse again
+    /// when it comes back. Only a supervisor that exited — which then also
+    /// stopped every device thread — lets the agent retire and reinstall
+    /// the hook.
+    fn is_running(inner: &HookInner) -> bool {
+        inner.0.is_running()
     }
 
     /// Return the currently frontmost application, or `None` when unavailable.
@@ -152,19 +121,11 @@ impl HookBackend for Backend {
     }
 }
 
-fn shutdown(stop: &AtomicBool, pipes: &[OwnedFd], threads: Vec<thread::JoinHandle<()>>) {
-    stop.store(true, Ordering::Relaxed);
-    for fd in pipes {
-        signal_pipe(fd);
-    }
-    for handle in threads {
-        if let Err(e) = handle.join() {
-            error!("hook thread panicked on shutdown: {e:?}");
-        }
-    }
-}
-
 /// Write one wake-up byte to a pipe, retrying on EINTR.
+///
+/// `EPIPE` means the reading thread has already exited and closed its end,
+/// so there is nothing left to wake: a device thread whose mouse went away
+/// still gets a stop signal at shutdown.
 fn signal_pipe(fd: &OwnedFd) {
     loop {
         // SAFETY: fd is a valid open pipe write end; writing one byte is safe.
@@ -173,8 +134,10 @@ fn signal_pipe(fd: &OwnedFd) {
             return;
         }
         let err = io::Error::last_os_error();
-        if err.kind() == io::ErrorKind::Interrupted {
-            continue;
+        match err.kind() {
+            io::ErrorKind::Interrupted => continue,
+            io::ErrorKind::BrokenPipe => return,
+            _ => {}
         }
         error!("failed to signal hook thread pipe ({err}): hook thread may not wake");
         return;
@@ -261,9 +224,10 @@ fn is_hookable_mouse(
     props: &AttributeSetRef<PropType>,
     vendor_id: u32,
 ) -> bool {
-    // Never hook one of our own uinput devices (an unnamed device is fine —
-    // ours are always named).
-    if name.is_some_and(|n| n.starts_with(OPENLOGI_DEVICE_PREFIX)) {
+    // Never hook one of our own uinput devices: the pass-through mice and
+    // the action injector, which also advertises mouse buttons. An unnamed
+    // device is fine — ours are always named.
+    if name.is_some_and(uinput::is_own_device) {
         return false;
     }
     // OpenLogi only remaps Logitech hardware — never grab foreign vendors.
@@ -292,7 +256,15 @@ fn is_hookable_mouse(
 }
 
 fn build_virtual_device(device: &Device) -> io::Result<evdev::uinput::VirtualDevice> {
-    let builder = VirtualDevice::builder()?.name(VIRTUAL_DEVICE_NAME);
+    // Mirror the physical device's bus/vendor/product/version rather than
+    // uinput's default sample ID (0x1234/0x5678): libinput and desktop
+    // environments key per-device settings — pointer acceleration, scroll
+    // behavior, GNOME's remembered mouse speed — off the reported vendor and
+    // product ID. Leaving the sample ID in place made every re-injected mouse
+    // look identical and unrecognized, so those settings silently fell back
+    // to their defaults instead of the ones configured for this hardware
+    // (issue #1075).
+    let builder = uinput::builder(uinput::Device::PassThroughMouse)?.input_id(device.input_id());
 
     let builder = if let Some(keys) = device.supported_keys() {
         builder.with_keys(keys)?
@@ -309,11 +281,20 @@ fn build_virtual_device(device: &Device) -> io::Result<evdev::uinput::VirtualDev
     builder.build()
 }
 
-/// Block until `device_fd` has data or `stop_fd` is readable.
-///
-/// Returns `true` when the device is ready to read, `false` on stop signal or
-/// unrecoverable poll error.
-fn wait_readable(device_fd: i32, stop_fd: i32) -> bool {
+/// What woke a device thread.
+#[derive(Debug, PartialEq, Eq)]
+enum Wake {
+    /// The device has events to read.
+    Readable,
+    /// The deadline passed with nothing to read.
+    Deadline,
+    /// A stop signal, or an error that ends the thread.
+    Stop,
+}
+
+/// Block until `device_fd` has data, `stop_fd` is readable, or `deadline`
+/// passes. Without a deadline, wait for one of the two descriptors only.
+fn wait(device_fd: i32, stop_fd: i32, deadline: Option<Instant>) -> Wake {
     const ERR_FLAGS: libc::c_short = libc::POLLERR | libc::POLLHUP | libc::POLLNVAL;
     let mut fds = [
         libc::pollfd {
@@ -328,15 +309,21 @@ fn wait_readable(device_fd: i32, stop_fd: i32) -> bool {
         },
     ];
     loop {
+        let timeout = deadline.map_or(-1, |at| {
+            poll_timeout(at.saturating_duration_since(Instant::now()))
+        });
         // SAFETY: fds is a valid two-element pollfd array.
-        let ret = unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) };
+        let ret = unsafe { libc::poll(fds.as_mut_ptr(), 2, timeout) };
         if ret < 0 {
             let err = io::Error::last_os_error();
             if err.kind() == io::ErrorKind::Interrupted {
                 continue; // interrupted by signal — retry
             }
             error!("poll() failed: {err}");
-            return false;
+            return Wake::Stop;
+        }
+        if ret == 0 {
+            return Wake::Deadline;
         }
         // An error/hangup on either fd (e.g. the grabbed device was unplugged →
         // POLLHUP) leaves it permanently "ready", so without this check neither
@@ -344,17 +331,77 @@ fn wait_readable(device_fd: i32, stop_fd: i32) -> bool {
         // so the caller exits the thread and releases the grab.
         if fds[0].revents & ERR_FLAGS != 0 {
             warn!("hooked device closed or errored; stopping its thread");
-            return false;
+            return Wake::Stop;
         }
         if fds[1].revents & ERR_FLAGS != 0 {
-            return false; // stop pipe closed → shut down
+            return Wake::Stop; // stop pipe closed → shut down
         }
         if fds[1].revents & libc::POLLIN != 0 {
-            return false; // stop signal
+            return Wake::Stop; // stop signal
         }
         if fds[0].revents & libc::POLLIN != 0 {
-            return true; // device has data
+            return Wake::Readable; // device has data
         }
+    }
+}
+
+/// `poll`'s timeout for `left`, rounded up to whole milliseconds so the
+/// thread never wakes before a deadline.
+fn poll_timeout(left: Duration) -> libc::c_int {
+    libc::c_int::try_from(left.as_nanos().div_ceil(1_000_000)).unwrap_or(libc::c_int::MAX)
+}
+
+/// When a report happened, on the clock of `read_at`, the moment it was
+/// read. `wall_at` is the wall clock at that moment, the clock of the
+/// kernel's `report` timestamp.
+///
+/// A report is timed by how long before the read it happened, so reports
+/// that queue up behind a slow thread keep their spacing, within one read
+/// and across reads: the button debouncer does not take a bounce read late
+/// for a click, nor a double click read late for a bounce. The debouncer
+/// itself runs on the monotonic clock, so a step of the wall clock mistimes
+/// at most the reports of one read. A timestamp after `wall_at`, as after
+/// the wall clock stepped back, counts as read at `read_at`.
+fn report_time(read_at: Instant, wall_at: SystemTime, report: SystemTime) -> Instant {
+    let age = wall_at.duration_since(report).unwrap_or_default();
+    read_at.checked_sub(age).unwrap_or(read_at)
+}
+
+/// Re-inject `pending` as one report, if it holds anything, and clear it.
+///
+/// The physical device is grabbed, so these pass-through events can't reach
+/// the desktop any other way. A uinput emit failure means the virtual device
+/// is broken, so it breaks: the thread stops, and dropping the grab restores
+/// normal input, rather than silently dropping events on every report.
+fn emit_report(
+    virtual_device: &mut VirtualDevice,
+    pending: &mut Vec<InputEvent>,
+    path: &std::path::Path,
+) -> ControlFlow<()> {
+    if pending.is_empty() {
+        return ControlFlow::Continue(());
+    }
+    if let Err(e) = virtual_device.emit(pending) {
+        error!(
+            "uinput emit failed on {}: {e} — stopping hook for this device",
+            path.display()
+        );
+        return ControlFlow::Break(());
+    }
+    pending.clear();
+    ControlFlow::Continue(())
+}
+
+/// Hand debounced button changes to the callback, queueing those it
+/// forwards for the pass-through report.
+fn deliver_buttons(
+    changes: impl IntoIterator<Item = ButtonChange>,
+    source: &EventDevice,
+    cb: &dyn Fn(HookEvent) -> EventDisposition,
+    pending: &mut Vec<InputEvent>,
+) {
+    for change in changes {
+        pending.extend(dispatch(change.into(), false, false, source, cb));
     }
 }
 
@@ -372,8 +419,7 @@ fn translate(event: &evdev::InputEvent, hires_scroll: bool) -> Option<MouseEvent
     match event.destructure() {
         EventSummary::Key(_, key, value) => {
             let id = key_to_button(key)?;
-            // Device is already Logitech-only (see `is_hookable_mouse`); the
-            // agent runtime treats `device: None` as remappable on Linux.
+            // `dispatch` names the device the event was read from.
             Some(MouseEvent::Button {
                 id,
                 pressed: value != 0,
@@ -419,6 +465,28 @@ fn translate(event: &evdev::InputEvent, hires_scroll: bool) -> Option<MouseEvent
     }
 }
 
+/// Negate a vertical wheel event when software scroll inversion is on.
+///
+/// Applied at re-emission, on the original event, so the value written back is
+/// in the same evdev units the device produced — no conversion, no rounding.
+/// Both wheel axes carry vertical motion (`REL_WHEEL_HI_RES` on a hi-res
+/// wheel, `REL_WHEEL` otherwise); on a hi-res wheel the `REL_WHEEL`
+/// companion is negated as it is released, so both stay in agreement. Horizontal scrolling is left
+/// alone: the setting reverses the wheel, not the thumb wheel.
+fn invert_wheel(event: InputEvent, inverted: bool) -> InputEvent {
+    if !inverted {
+        return event;
+    }
+    match event.destructure() {
+        EventSummary::RelativeAxis(
+            _,
+            axis @ (RelativeAxisCode::REL_WHEEL | RelativeAxisCode::REL_WHEEL_HI_RES),
+            value,
+        ) => InputEvent::new(EventType::RELATIVE.0, axis.0, value.saturating_neg()),
+        _ => event,
+    }
+}
+
 fn key_to_button(key: KeyCode) -> Option<ButtonId> {
     match key {
         KeyCode::BTN_LEFT => Some(ButtonId::LeftClick),
@@ -431,6 +499,54 @@ fn key_to_button(key: KeyCode) -> Option<ButtonId> {
         // BTN_TASK is the closest generic match for a mode/DPI toggle button.
         KeyCode::BTN_TASK => Some(ButtonId::DpiToggle),
         _ => None,
+    }
+}
+
+/// Run one event past the callback and return what to forward to the desktop
+/// for it, if anything. On a hi-res device, wheel events reach it only
+/// through [`PassThroughWheel`], and low-res counts never do.
+///
+/// `invert` is the report's software-inversion setting, already narrowed by
+/// the caller to vertical wheel events. Through [`Delivery`] the callback
+/// sees the reversed delta, so a suppressed impulse the agent replays is
+/// reversed too (#1737), and a forwarded event is negated once on its way out.
+///
+/// A button event names `source`, the device it was read from, so the agent
+/// can tell it from the same button reported over HID++ (#2158).
+fn dispatch(
+    event: InputEvent,
+    hires_scroll: bool,
+    invert: bool,
+    source: &EventDevice,
+    cb: &dyn Fn(HookEvent) -> EventDisposition,
+) -> Option<InputEvent> {
+    let delivery = translate(&event, hires_scroll)
+        .map(|mut mouse| {
+            if let MouseEvent::Button { device, .. } = &mut mouse {
+                *device = Some(source.clone());
+            }
+            mouse
+        })
+        .map_or_else(
+            || Delivery::forwarded(invert),
+            |mouse| Delivery::run(HookEvent::Mouse(mouse), invert, cb),
+        );
+    match delivery.disposition {
+        EventDisposition::PassThrough => Some(invert_wheel(event, delivery.invert_native)),
+        EventDisposition::Suppress => None,
+    }
+}
+
+/// The device a grabbed mouse's events name as their source.
+///
+/// Ids only. Every hooked device is a Logitech relative-pointer mouse (see
+/// `find_mouse_devices`), and without a name `source_is_remappable` stays
+/// true for all of them, as it was before button events named a device.
+fn event_source(device: &Device) -> EventDevice {
+    EventDevice {
+        vendor_id: Some(u32::from(device.input_id().vendor())),
+        product_id: Some(u32::from(device.input_id().product())),
+        product_name: None,
     }
 }
 
@@ -460,11 +576,20 @@ fn device_thread(
     let hires_scroll = device
         .supported_relative_axes()
         .is_some_and(|axes| axes.contains(RelativeAxisCode::REL_WHEEL_HI_RES));
+    let source = event_source(&device);
 
     let device_fd = device.as_raw_fd();
     let stop_fd = stop_rx.as_raw_fd();
     // Events that will be re-injected at the next SYN_REPORT.
     let mut pending: Vec<evdev::InputEvent> = Vec::new();
+    // libinput skips its wheel debouncing on the uinput pass-through device,
+    // so the hook applies it before the callback sees the wheel.
+    let mut wheel = PassThroughWheel::default();
+    // The same for its button debouncing, before the callback sees a button.
+    let mut buttons = ButtonDebounce::for_device(&device.input_id());
+    // Software scroll inversion, read once per report so a hi-res event and its
+    // low-res companion never disagree if the setting flips mid-report.
+    let mut report_inverted: Option<bool> = None;
 
     debug!("hook started on {}", path.display());
 
@@ -472,1059 +597,106 @@ fn device_thread(
         if stop.load(Ordering::Relaxed) {
             break;
         }
-        if !wait_readable(device_fd, stop_fd) {
-            break;
+        match wait(device_fd, stop_fd, buttons.deadline()) {
+            Wake::Readable => {}
+            Wake::Deadline => {
+                // A held button change is due, and no report came to carry it.
+                deliver_buttons(buttons.expire(Instant::now()), &source, &*cb, &mut pending);
+                if emit_report(&mut virtual_device, &mut pending, &path).is_break() {
+                    break;
+                }
+                continue;
+            }
+            Wake::Stop => break,
         }
 
-        let events = match device.fetch_events() {
-            Ok(iter) => iter,
+        let events: Vec<InputEvent> = match device.fetch_events() {
+            Ok(iter) => iter.collect(),
             Err(e) => {
                 error!("read error on {}: {e}", path.display());
                 break;
             }
         };
+        // Both clocks at the read, to time each report by its kernel timestamp.
+        let (read_at, wall_at) = (Instant::now(), SystemTime::now());
 
         for event in events {
             if let EventSummary::Synchronization(..) = event.destructure() {
+                let now = report_time(read_at, wall_at, event.timestamp());
+                deliver_buttons(buttons.end_report(now), &source, &*cb, &mut pending);
                 // Flush the report. `emit()` appends its own SYN_REPORT, so the
                 // incoming sync event is dropped rather than re-emitted — pushing
                 // it would send a redundant second SYN_REPORT.
-                if !pending.is_empty() {
-                    if let Err(e) = virtual_device.emit(&pending) {
-                        // The physical device is grabbed, so these pass-through
-                        // events can't reach the desktop any other way. A uinput
-                        // emit failure means the virtual device is broken, so
-                        // stop here — dropping the grab restores normal input —
-                        // rather than silently dropping events on every report.
-                        error!(
-                            "uinput emit failed on {}: {e} — stopping hook for this device",
-                            path.display()
-                        );
-                        break 'read;
-                    }
-                    pending.clear();
+                let inverted = report_inverted
+                    .take()
+                    .unwrap_or_else(crate::scroll_inversion);
+                wheel.end_report(&mut pending, inverted);
+                if emit_report(&mut virtual_device, &mut pending, &path).is_break() {
+                    break 'read;
                 }
+            } else if let Ok(change) = ButtonChange::try_from(event) {
+                // Debounced with the rest of its report, when the report ends.
+                buttons.changed(change);
             } else {
-                let disposition = match translate(&event, hires_scroll) {
-                    Some(me) => cb(HookEvent::Mouse(me)),
-                    // Low-res companions (REL_WHEEL/REL_HWHEEL) must be suppressed when hi-res
-                    // is active — passing them through would double the scroll distance.
-                    None if hires_scroll
-                        && matches!(
-                            event.destructure(),
-                            EventSummary::RelativeAxis(
-                                _,
-                                RelativeAxisCode::REL_WHEEL | RelativeAxisCode::REL_HWHEEL,
-                                _
-                            )
-                        ) =>
-                    {
-                        EventDisposition::Suppress
+                let wheel_event = WheelEvent::try_from(event).ok().filter(|_| hires_scroll);
+                let mut released = None;
+                let event = match wheel_event {
+                    Some(WheelEvent::LowRes(axis, value)) => {
+                        // Redundant for the callback. It goes out with the
+                        // hi-res movement on its axis, or not at all.
+                        wheel.low_res(axis, value);
+                        continue;
                     }
-                    None => EventDisposition::PassThrough,
+                    Some(WheelEvent::HiRes(axis, value)) => {
+                        let Some(event) = wheel.hi_res(axis, value, event.timestamp()) else {
+                            // Held back while the wheel is at rest.
+                            continue;
+                        };
+                        released = Some(axis);
+                        event
+                    }
+                    None => event,
                 };
-                match disposition {
-                    EventDisposition::PassThrough => pending.push(event),
-                    EventDisposition::Suppress => {}
+                let is_vertical_wheel = matches!(
+                    event.destructure(),
+                    EventSummary::RelativeAxis(
+                        _,
+                        RelativeAxisCode::REL_WHEEL | RelativeAxisCode::REL_WHEEL_HI_RES,
+                        _
+                    )
+                );
+                let invert = is_vertical_wheel
+                    && *report_inverted.get_or_insert_with(crate::scroll_inversion);
+                if let Some(forwarded) = dispatch(event, hires_scroll, invert, &source, &*cb) {
+                    if let Some(axis) = released {
+                        wheel.forwarded(axis);
+                    }
+                    pending.push(forwarded);
                 }
             }
         }
     }
 
+    // A release held as a possible bounce is still the user's: deliver it
+    // before the grab goes, so a remapped button is not left held. What
+    // `pending` still holds is a report that failed to emit or never ended,
+    // and the thread stops either way, so an emit failure only adds to the log.
+    if let Some(change) = buttons.release_held(Instant::now()) {
+        pending.clear();
+        deliver_buttons([change], &source, &*cb, &mut pending);
+        let _ = emit_report(&mut virtual_device, &mut pending, &path);
+    }
     debug!("hook stopped on {}", path.display());
     // Dropping `device` releases the exclusive grab, restoring normal input delivery.
-}
-
-// ── foreground-application observation ──────────────────────────────────────
-
-mod gnome_shell;
-mod wlr_foreign_toplevel;
-
-/// A backend that reports which application is currently frontmost.
-///
-/// Implementations are display-server / desktop specific. The string returned
-/// by `frontmost_app_id` is compared against per-app profile keys by exact
-/// match (`openlogi_core::Config::effective_bindings`), so its exact form
-/// matters and is backend-specific. The X11 and gnome-shell backends both
-/// return the `WM_CLASS` class component (e.g. "Firefox"); the wlr backend
-/// returns the xdg-shell `app_id` (e.g. "org.mozilla.firefox"). These two
-/// namespaces do not map onto each other by any simple string rule, so a
-/// per-app profile created under wlroots will not match under GNOME/X11 and
-/// vice versa. This is a known limitation: reconciling it needs a canonical-id
-/// scheme or per-profile aliases rather than naive normalization, and is
-/// deliberately out of scope for the backends themselves. One selected source
-/// moves between the idle snapshot path and the observer worker; its transport
-/// is never duplicated or independently selected.
-trait FrontmostSource: Send {
-    /// Opaque identifier of the frontmost application, or `None` when there is
-    /// no frontmost window or it cannot be read.
-    fn frontmost_app_id(&mut self) -> Option<String>;
-
-    /// Subscribe natively, publish the subscribe-before-snapshot result and
-    /// subsequent changes, and run until `stop` is requested. The source is
-    /// returned so the idle snapshot path regains the same selected backend.
-    fn observe(self: Box<Self>, stop: StopToken, publish: PublishAppId)
-    -> Box<dyn FrontmostSource>;
-
-    /// Short backend identifier, for diagnostics / logging only.
-    fn name(&self) -> &'static str;
-}
-
-type PublishAppId = Arc<dyn Fn(Option<String>) + Send + Sync>;
-
-/// Delay between reconnect attempts after an already-selected native backend
-/// loses its transport. Normal delivery blocks on native events with no tick.
-pub(super) const RECONNECT_DELAY: Duration = Duration::from_secs(2);
-
-struct StopState {
-    requested: AtomicBool,
-    wait_lock: Mutex<()>,
-    changed: Condvar,
-}
-
-impl StopState {
-    fn new() -> Self {
-        Self {
-            requested: AtomicBool::new(false),
-            wait_lock: Mutex::new(()),
-            changed: Condvar::new(),
-        }
-    }
-
-    fn request(&self) {
-        if self.requested.swap(true, Ordering::AcqRel) {
-            return;
-        }
-        let _guard = lock_unpoisoned(&self.wait_lock);
-        self.changed.notify_all();
-    }
-
-    fn is_requested(&self) -> bool {
-        self.requested.load(Ordering::Acquire)
-    }
-
-    fn wait(&self) {
-        let guard = lock_unpoisoned(&self.wait_lock);
-        drop(
-            self.changed
-                .wait_while(guard, |()| !self.is_requested())
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-        );
-    }
-
-    fn wait_timeout(&self, timeout: Duration) -> bool {
-        if self.is_requested() {
-            return true;
-        }
-        let guard = lock_unpoisoned(&self.wait_lock);
-        let (_guard, _) = self
-            .changed
-            .wait_timeout_while(guard, timeout, |()| !self.is_requested())
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        self.is_requested()
-    }
-}
-
-struct StopControl {
-    state: Arc<StopState>,
-    wake: OwnedFd,
-}
-
-impl StopControl {
-    fn request(&self) {
-        self.state.request();
-        signal_pipe(&self.wake);
-    }
-}
-
-pub(super) struct StopToken {
-    state: Arc<StopState>,
-    wake: OwnedFd,
-}
-
-impl StopToken {
-    pub(super) fn is_requested(&self) -> bool {
-        self.state.is_requested()
-    }
-
-    pub(super) fn wait(&self) {
-        self.state.wait();
-    }
-
-    pub(super) fn wait_timeout(&self, timeout: Duration) -> bool {
-        self.state.wait_timeout(timeout)
-    }
-
-    pub(super) fn wake_fd(&self) -> RawFd {
-        self.wake.as_raw_fd()
-    }
-
-    fn state(&self) -> Arc<StopState> {
-        Arc::clone(&self.state)
-    }
-}
-
-fn stop_pair() -> io::Result<(StopControl, StopToken)> {
-    let (read, write) = create_pipe()?;
-    let state = Arc::new(StopState::new());
-    Ok((
-        StopControl {
-            state: Arc::clone(&state),
-            wake: write,
-        },
-        StopToken { state, wake: read },
-    ))
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub(super) enum PollResult {
-    SourceReady,
-    StopRequested,
-    DeadlineReached,
-    Error,
-}
-
-/// Wait for a native display fd, observer teardown, or an optional deadline.
-/// A deadline is used only for targeted reconnect/drain work; steady-state
-/// event delivery passes `None` and blocks indefinitely.
-pub(super) fn poll_source_or_stop(
-    source_fd: Option<RawFd>,
-    stop_fd: RawFd,
-    deadline: Option<Instant>,
-) -> PollResult {
-    let mut fds = [
-        libc::pollfd {
-            fd: stop_fd,
-            events: libc::POLLIN | libc::POLLERR | libc::POLLHUP,
-            revents: 0,
-        },
-        libc::pollfd {
-            fd: source_fd.unwrap_or(-1),
-            events: libc::POLLIN | libc::POLLERR | libc::POLLHUP,
-            revents: 0,
-        },
-    ];
-
-    loop {
-        let timeout = deadline.map_or(-1, |deadline| {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                0
-            } else {
-                i32::try_from(remaining.as_millis().max(1).min(i32::MAX as u128))
-                    .unwrap_or(i32::MAX)
-            }
-        });
-        // SAFETY: `fds` is a live two-element pollfd array for the whole call;
-        // poll writes only each element's `revents` field.
-        let result = unsafe { libc::poll(fds.as_mut_ptr(), 2, timeout) };
-        if result > 0 {
-            if fds[0].revents != 0 {
-                return PollResult::StopRequested;
-            }
-            if fds[1].revents != 0 {
-                return PollResult::SourceReady;
-            }
-            continue;
-        }
-        if result == 0 {
-            return PollResult::DeadlineReached;
-        }
-        let error = io::Error::last_os_error();
-        if error.kind() != io::ErrorKind::Interrupted {
-            debug!("frontmost: native event poll failed: {error}");
-            return PollResult::Error;
-        }
-    }
-}
-
-fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
-/// Frontmost backend backed by X11 `_NET_ACTIVE_WINDOW` + `WM_CLASS`.
-///
-/// Works on an X11 session, and on a Wayland session for XWayland windows;
-/// native Wayland windows are invisible through this path and yield `None`.
-struct X11Source {
-    conn: RustConnection,
-    root: Window,
-    net_active_window: Atom,
-}
-
-impl X11Source {
-    /// Connect to the X server and resolve the `_NET_ACTIVE_WINDOW` atom.
-    /// Returns `None` when no X display is reachable (a Wayland session without
-    /// XWayland, or `$DISPLAY` unset).
-    fn connect() -> Option<Self> {
-        let (conn, screen_num) = RustConnection::connect(None)
-            .map_err(|e| debug!("X11 not available, frontmost will return None: {e}"))
-            .ok()?;
-        let root = conn.setup().roots[screen_num].root;
-        let net_active_window = conn
-            .intern_atom(false, b"_NET_ACTIVE_WINDOW")
-            .ok()?
-            .reply()
-            .ok()?
-            .atom;
-        Some(Self {
-            conn,
-            root,
-            net_active_window,
-        })
-    }
-
-    fn subscribe(&self) -> bool {
-        self.set_event_mask(EventMask::PROPERTY_CHANGE)
-            .map_err(|e| debug!("frontmost: failed to subscribe to X11 root changes: {e}"))
-            .is_ok()
-    }
-
-    fn unsubscribe(&self) {
-        if let Err(error) = self.set_event_mask(EventMask::NO_EVENT) {
-            debug!("frontmost: failed to unsubscribe from X11 root changes: {error}");
-        }
-    }
-
-    fn set_event_mask(&self, event_mask: EventMask) -> Result<(), String> {
-        let cookie = self
-            .conn
-            .change_window_attributes(
-                self.root,
-                &ChangeWindowAttributesAux::new().event_mask(event_mask),
-            )
-            .map_err(|error| error.to_string())?;
-        cookie.check().map_err(|error| error.to_string())?;
-        self.conn.flush().map_err(|error| error.to_string())
-    }
-
-    fn run_until_stopped_or_disconnected(
-        &mut self,
-        stop: &StopToken,
-        publish: &PublishAppId,
-    ) -> bool {
-        if !self.subscribe() {
-            return false;
-        }
-
-        // The event mask is installed before this read, so a focus change can
-        // only be represented by the snapshot, a queued PropertyNotify, or both.
-        publish(self.frontmost_app_id());
-
-        loop {
-            match poll_source_or_stop(Some(self.conn.stream().as_raw_fd()), stop.wake_fd(), None) {
-                PollResult::StopRequested => {
-                    self.unsubscribe();
-                    return true;
-                }
-                PollResult::SourceReady => {}
-                PollResult::DeadlineReached => continue,
-                PollResult::Error => return false,
-            }
-
-            let mut active_window_changed = false;
-            loop {
-                match self.conn.poll_for_event() {
-                    Ok(Some(Event::PropertyNotify(event)))
-                        if event.window == self.root && event.atom == self.net_active_window =>
-                    {
-                        active_window_changed = true;
-                    }
-                    Ok(Some(_)) => {}
-                    Ok(None) => break,
-                    Err(error) => {
-                        debug!("frontmost: X11 connection lost: {error}");
-                        return false;
-                    }
-                }
-            }
-            if active_window_changed {
-                publish(self.frontmost_app_id());
-            }
-        }
-    }
-}
-
-impl FrontmostSource for X11Source {
-    fn frontmost_app_id(&mut self) -> Option<String> {
-        // _NET_ACTIVE_WINDOW on the root window holds the focused window's XID.
-        let window: Window = self
-            .conn
-            .get_property(
-                false,
-                self.root,
-                self.net_active_window,
-                AtomEnum::WINDOW,
-                0,
-                1,
-            )
-            .ok()?
-            .reply()
-            .ok()?
-            .value32()?
-            .next()?;
-        if window == 0 {
-            return None;
-        }
-
-        // WM_CLASS is instance_name\0class_name\0; the class component is more
-        // stable across window instances and is what profiles should key on
-        // (e.g. "Firefox", not "Navigator").
-        let wm = WmClass::get(&self.conn, window)
-            .ok()?
-            .reply_unchecked()
-            .ok()??;
-        std::str::from_utf8(wm.class())
-            .ok()
-            .filter(|s| !s.is_empty())
-            .map(str::to_owned)
-    }
-
-    fn observe(
-        mut self: Box<Self>,
-        stop: StopToken,
-        publish: PublishAppId,
-    ) -> Box<dyn FrontmostSource> {
-        loop {
-            if self.run_until_stopped_or_disconnected(&stop, &publish) {
-                return self;
-            }
-            publish(None);
-            if stop.wait_timeout(RECONNECT_DELAY) {
-                return self;
-            }
-            if let Some(reconnected) = Self::connect() {
-                debug!("frontmost: X11 connection restored");
-                *self = reconnected;
-            }
-        }
-    }
-
-    fn name(&self) -> &'static str {
-        "x11"
-    }
-}
-
-/// Fallback used when no backend is available (e.g. a pure Wayland session
-/// before any Wayland backend lands). Always reports `None`, so per-app
-/// profile switching simply no-ops rather than erroring.
-struct NullSource;
-
-impl FrontmostSource for NullSource {
-    fn frontmost_app_id(&mut self) -> Option<String> {
-        None
-    }
-
-    fn observe(
-        self: Box<Self>,
-        stop: StopToken,
-        publish: PublishAppId,
-    ) -> Box<dyn FrontmostSource> {
-        publish(None);
-        stop.wait();
-        self
-    }
-
-    fn name(&self) -> &'static str {
-        "null"
-    }
-}
-
-/// Coarse classification of the graphical session, used to order the frontmost
-/// backend candidates.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SessionKind {
-    X11,
-    Wayland,
-    Unknown,
-}
-
-/// Classify the session from the environment. `XDG_SESSION_TYPE` is
-/// authoritative when set to `x11` or `wayland`; otherwise fall back to the
-/// presence of `WAYLAND_DISPLAY` / `DISPLAY`.
-fn detect_session_kind() -> SessionKind {
-    if let Ok(kind) = std::env::var("XDG_SESSION_TYPE") {
-        match kind.as_str() {
-            "wayland" => return SessionKind::Wayland,
-            "x11" => return SessionKind::X11,
-            _ => {}
-        }
-    }
-    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
-        SessionKind::Wayland
-    } else if std::env::var_os("DISPLAY").is_some() {
-        SessionKind::X11
-    } else {
-        SessionKind::Unknown
-    }
-}
-
-/// A backend constructor: returns the backend if it can initialize on this
-/// system, or `None` to fall through to the next candidate.
-type Candidate = fn() -> Option<Box<dyn FrontmostSource>>;
-
-fn x11_candidate() -> Option<Box<dyn FrontmostSource>> {
-    X11Source::connect().map(|s| Box::new(s) as Box<dyn FrontmostSource>)
-}
-
-/// Wayland-native frontmost backends, in priority order: the wlroots
-/// foreign-toplevel protocol (sway, Hyprland, river, …) and the GNOME Shell
-/// D-Bus extension (Mutter). AT-SPI remains a future fallback. Compositors that
-/// support none of these fall through to the X11/XWayland path (which resolves
-/// XWayland windows, `None` for native Wayland apps).
-fn wayland_candidates() -> Vec<Candidate> {
-    vec![wlr_foreign_toplevel::candidate, gnome_shell::candidate]
-}
-
-/// Pick the frontmost backend for this session, trying each candidate in order
-/// and keeping the first that initializes. Called once, lazily, per process.
-fn detect_frontmost_source() -> Box<dyn FrontmostSource> {
-    let session = detect_session_kind();
-    debug!("frontmost: session kind = {session:?}");
-
-    let mut candidates: Vec<Candidate> = match session {
-        SessionKind::Wayland => wayland_candidates(),
-        SessionKind::X11 | SessionKind::Unknown => Vec::new(),
-    };
-    // X11 / XWayland: the primary path on an X11 session and the universal
-    // fallback everywhere else.
-    candidates.push(x11_candidate);
-
-    for candidate in candidates {
-        if let Some(source) = candidate() {
-            debug!("frontmost: using '{}' backend", source.name());
-            // On Wayland, landing on the X11 backend means no native Wayland
-            // frontmost source was available, so native Wayland windows will
-            // report None (only XWayland windows resolve). Hint at the fix.
-            if session == SessionKind::Wayland && source.name() == "x11" {
-                debug!(
-                    "frontmost: on Wayland but using the X11/XWayland backend; \
-                     native Wayland windows will report None. Install the OpenLogi \
-                     GNOME Shell extension (GNOME) or use a wlroots compositor."
-                );
-            }
-            return source;
-        }
-    }
-
-    debug!("frontmost: no usable backend; frontmost_app_id will return None");
-    Box::new(NullSource)
-}
-
-struct DeliveryState {
-    active: bool,
-    version: Option<u64>,
-}
-
-struct Subscriber {
-    callback: Box<dyn Fn(Option<ForegroundApp>) + Send + Sync>,
-    delivery: Mutex<DeliveryState>,
-}
-
-impl Subscriber {
-    fn new(callback: impl Fn(Option<ForegroundApp>) + Send + Sync + 'static) -> Self {
-        Self {
-            callback: Box::new(callback),
-            delivery: Mutex::new(DeliveryState {
-                active: true,
-                version: None,
-            }),
-        }
-    }
-
-    fn deliver(&self, version: u64, app: Option<ForegroundApp>) {
-        let mut delivery = lock_unpoisoned(&self.delivery);
-        if !delivery.active || delivery.version.is_some_and(|seen| seen >= version) {
-            return;
-        }
-        delivery.version = Some(version);
-        if catch_unwind(AssertUnwindSafe(|| (self.callback)(app))).is_err() {
-            error!("foreground-application callback panicked");
-        }
-    }
-
-    fn deactivate(&self) {
-        let mut delivery = lock_unpoisoned(&self.delivery);
-        delivery.active = false;
-    }
-}
-
-struct PublicationState {
-    active: bool,
-    initialized: bool,
-    version: u64,
-    current: Option<ForegroundApp>,
-    subscribers: HashMap<u64, Arc<Subscriber>>,
-}
-
-struct Publication {
-    state: Mutex<PublicationState>,
-}
-
-enum ActiveSnapshot {
-    Idle,
-    Active(Option<ForegroundApp>),
-}
-
-impl Publication {
-    fn new() -> Self {
-        Self {
-            state: Mutex::new(PublicationState {
-                active: false,
-                initialized: false,
-                version: 0,
-                current: None,
-                subscribers: HashMap::new(),
-            }),
-        }
-    }
-
-    fn begin(&self) {
-        let mut state = lock_unpoisoned(&self.state);
-        state.active = true;
-        state.initialized = false;
-        state.current = None;
-    }
-
-    fn finish(&self) {
-        let mut state = lock_unpoisoned(&self.state);
-        state.active = false;
-        state.initialized = false;
-        state.current = None;
-    }
-
-    fn subscribe(
-        &self,
-        id: u64,
-        subscriber: &Arc<Subscriber>,
-    ) -> Option<(u64, Option<ForegroundApp>)> {
-        let mut state = lock_unpoisoned(&self.state);
-        state.subscribers.insert(id, Arc::clone(subscriber));
-        state
-            .initialized
-            .then(|| (state.version, state.current.clone()))
-    }
-
-    fn unsubscribe(&self, id: u64) {
-        let subscriber = lock_unpoisoned(&self.state).subscribers.remove(&id);
-        if let Some(subscriber) = subscriber {
-            // Wait for an in-flight callback and make any publisher that cloned
-            // this subscriber before removal observe it as inactive.
-            subscriber.deactivate();
-        }
-    }
-
-    fn is_empty(&self) -> bool {
-        lock_unpoisoned(&self.state).subscribers.is_empty()
-    }
-
-    fn publish(&self, app_id: Option<String>) {
-        let app = app_id.map(ForegroundApp::unnamed);
-        let (version, subscribers) = {
-            let mut state = lock_unpoisoned(&self.state);
-            if state.initialized && state.current == app {
-                return;
-            }
-            state.initialized = true;
-            state.version += 1;
-            state.current.clone_from(&app);
-            (
-                state.version,
-                state.subscribers.values().cloned().collect::<Vec<_>>(),
-            )
-        };
-        for subscriber in subscribers {
-            subscriber.deliver(version, app.clone());
-        }
-    }
-
-    fn active_snapshot(&self) -> ActiveSnapshot {
-        let state = lock_unpoisoned(&self.state);
-        if state.active {
-            ActiveSnapshot::Active(state.current.clone())
-        } else {
-            ActiveSnapshot::Idle
-        }
-    }
-}
-
-struct ObserverWorker {
-    stop: StopControl,
-    thread: thread::JoinHandle<Box<dyn FrontmostSource>>,
-}
-
-type ObserverWorkerStart = (Box<dyn FrontmostSource>, StopToken, PublishAppId);
-
-#[derive(Debug, Error)]
-pub(crate) enum ForegroundApplicationObserverError {
-    #[error("could not create the Linux foreground observer stop pipe: {0}")]
-    StopPipe(io::Error),
-    #[error("could not spawn the Linux foreground observer thread: {0}")]
-    ThreadSpawn(io::Error),
-    #[error("the Linux foreground observer thread stopped during startup")]
-    WorkerStoppedDuringStartup,
-}
-
-struct FrontmostRuntime {
-    source: Option<Box<dyn FrontmostSource>>,
-    worker: Option<ObserverWorker>,
-    stopping: bool,
-    next_subscriber_id: u64,
-}
-
-struct FrontmostController {
-    runtime: Mutex<FrontmostRuntime>,
-    worker_stopped: Condvar,
-    publication: Arc<Publication>,
-}
-
-impl FrontmostController {
-    fn new(source: Box<dyn FrontmostSource>) -> Arc<Self> {
-        Arc::new(Self {
-            runtime: Mutex::new(FrontmostRuntime {
-                source: Some(source),
-                worker: None,
-                stopping: false,
-                next_subscriber_id: 0,
-            }),
-            worker_stopped: Condvar::new(),
-            publication: Arc::new(Publication::new()),
-        })
-    }
-
-    fn frontmost_app(&self) -> Option<ForegroundApp> {
-        match self.publication.active_snapshot() {
-            ActiveSnapshot::Active(app) => return app,
-            ActiveSnapshot::Idle => {}
-        }
-
-        let mut runtime = lock_unpoisoned(&self.runtime);
-        while runtime.stopping {
-            runtime = self
-                .worker_stopped
-                .wait(runtime)
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-        }
-        match self.publication.active_snapshot() {
-            ActiveSnapshot::Active(app) => app,
-            ActiveSnapshot::Idle => runtime
-                .source
-                .as_mut()
-                .and_then(|source| source.frontmost_app_id())
-                .map(ForegroundApp::unnamed),
-        }
-    }
-
-    fn watch(
-        self: &Arc<Self>,
-        callback: impl Fn(Option<ForegroundApp>) + Send + Sync + 'static,
-    ) -> Result<ForegroundApplicationObserver, ForegroundApplicationObserverError> {
-        let subscriber = Arc::new(Subscriber::new(callback));
-        let mut runtime = lock_unpoisoned(&self.runtime);
-        while runtime.stopping {
-            runtime = self
-                .worker_stopped
-                .wait(runtime)
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-        }
-
-        let id = runtime.next_subscriber_id;
-        runtime.next_subscriber_id += 1;
-        let initial = if runtime.worker.is_none() {
-            let (stop, stop_token) =
-                stop_pair().map_err(ForegroundApplicationObserverError::StopPipe)?;
-            let (start_tx, start_rx) = mpsc::sync_channel::<ObserverWorkerStart>(0);
-            let thread = thread::Builder::new()
-                .name("openlogi-frontmost".into())
-                .spawn(move || match start_rx.recv() {
-                    Ok((source, stop_token, publish)) => source.observe(stop_token, publish),
-                    Err(_) => Box::new(NullSource),
-                })
-                .map_err(ForegroundApplicationObserverError::ThreadSpawn)?;
-
-            self.publication.begin();
-            let initial = self.publication.subscribe(id, &subscriber);
-            let source = runtime
-                .source
-                .take()
-                .unwrap_or_else(|| Box::new(NullSource));
-            let publication = Arc::clone(&self.publication);
-            let publish: PublishAppId = Arc::new(move |app| publication.publish(app));
-            if let Err(error) = start_tx.send((source, stop_token, publish)) {
-                let (source, _, _) = error.0;
-                runtime.source = Some(source);
-                self.publication.unsubscribe(id);
-                self.publication.finish();
-                drop(runtime);
-                let _ = thread.join();
-                return Err(ForegroundApplicationObserverError::WorkerStoppedDuringStartup);
-            }
-            runtime.worker = Some(ObserverWorker { stop, thread });
-            initial
-        } else {
-            self.publication.subscribe(id, &subscriber)
-        };
-        drop(runtime);
-
-        // Do not call user code while holding the controller lock. If the
-        // worker published a newer version first, Subscriber::deliver ignores
-        // this older snapshot rather than reversing callback order.
-        if let Some((version, app)) = initial {
-            subscriber.deliver(version, app);
-        }
-
-        Ok(ForegroundApplicationObserver {
-            controller: Arc::clone(self),
-            subscriber_id: id,
-        })
-    }
-
-    fn check_health(&self) -> Result<(), &'static str> {
-        let runtime = lock_unpoisoned(&self.runtime);
-        if runtime
-            .worker
-            .as_ref()
-            .is_some_and(|worker| worker.thread.is_finished())
-        {
-            Err("Linux foreground observer worker stopped")
-        } else {
-            Ok(())
-        }
-    }
-
-    fn remove_observer(&self, id: u64) {
-        self.publication.unsubscribe(id);
-
-        let worker = {
-            let mut runtime = lock_unpoisoned(&self.runtime);
-            while runtime.stopping {
-                runtime = self
-                    .worker_stopped
-                    .wait(runtime)
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-            }
-            if !self.publication.is_empty() {
-                return;
-            }
-            let Some(worker) = runtime.worker.take() else {
-                return;
-            };
-            runtime.stopping = true;
-            worker
-        };
-
-        worker.stop.request();
-        let source = worker.thread.join().unwrap_or_else(|panic| {
-            error!("foreground-application worker panicked on shutdown: {panic:?}");
-            detect_frontmost_source()
-        });
-
-        let mut runtime = lock_unpoisoned(&self.runtime);
-        runtime.source = Some(source);
-        self.publication.finish();
-        runtime.stopping = false;
-        self.worker_stopped.notify_all();
-    }
-}
-
-static FRONTMOST: LazyLock<Arc<FrontmostController>> =
-    LazyLock::new(|| FrontmostController::new(detect_frontmost_source()));
-
-/// Linux-native foreground-application observer ownership.
-///
-/// Dropping the final handle synchronously unsubscribes from the selected
-/// backend, wakes and joins its worker, and returns the source to snapshot use.
-#[must_use]
-pub(crate) struct ForegroundApplicationObserver {
-    controller: Arc<FrontmostController>,
-    subscriber_id: u64,
-}
-
-impl ForegroundApplicationObserver {
-    pub(crate) fn check_health(&self) -> Result<(), &'static str> {
-        self.controller.check_health()
-    }
-}
-
-impl Drop for ForegroundApplicationObserver {
-    fn drop(&mut self) {
-        self.controller.remove_observer(self.subscriber_id);
-    }
-}
-
-/// Observe foreground-application changes from the selected native backend.
-pub(crate) fn watch_frontmost_application_activations(
-    callback: impl Fn(Option<ForegroundApp>) + Send + Sync + 'static,
-) -> Result<ForegroundApplicationObserver, ForegroundApplicationObserverError> {
-    FRONTMOST.watch(callback)
 }
 
 #[cfg(test)]
 mod tests {
     use std::assert_matches;
-    use std::sync::mpsc;
 
     use evdev::{EventType, InputEvent, KeyCode, RelativeAxisCode};
 
     use super::*;
-
-    struct FakeFrontmostSource {
-        stopped: Arc<AtomicBool>,
-    }
-
-    impl FrontmostSource for FakeFrontmostSource {
-        fn frontmost_app_id(&mut self) -> Option<String> {
-            Some("org.example.App".into())
-        }
-
-        fn observe(
-            self: Box<Self>,
-            stop: StopToken,
-            publish: PublishAppId,
-        ) -> Box<dyn FrontmostSource> {
-            publish(Some("org.example.App".into()));
-            stop.wait();
-            self.stopped.store(true, Ordering::Release);
-            self
-        }
-
-        fn name(&self) -> &'static str {
-            "fake"
-        }
-    }
-
-    #[test]
-    fn foreground_publication_suppresses_duplicates_and_contains_panics() {
-        let publication = Publication::new();
-        publication.begin();
-        let panic_once = Arc::new(AtomicBool::new(true));
-        let callback_panic_once = Arc::clone(&panic_once);
-        let panicking = Arc::new(Subscriber::new(move |_| {
-            assert!(
-                !callback_panic_once.swap(false, Ordering::AcqRel),
-                "contained callback panic"
-            );
-        }));
-        assert!(publication.subscribe(1, &panicking).is_none());
-
-        let received = Arc::new(Mutex::new(Vec::new()));
-        let callback_received = Arc::clone(&received);
-        let recording_subscriber = Arc::new(Subscriber::new(move |app| {
-            lock_unpoisoned(&callback_received).push(app.map(|app| app.id));
-        }));
-        assert!(publication.subscribe(2, &recording_subscriber).is_none());
-
-        publication.publish(Some("one".into()));
-        publication.publish(Some("one".into()));
-        publication.publish(Some("two".into()));
-        publication.publish(None);
-
-        assert_eq!(
-            *lock_unpoisoned(&received),
-            vec![Some("one".into()), Some("two".into()), None]
-        );
-        assert!(!panic_once.load(Ordering::Acquire));
-    }
-
-    #[test]
-    fn foreground_observer_drop_stops_joins_and_returns_source() {
-        let stopped = Arc::new(AtomicBool::new(false));
-        let controller = FrontmostController::new(Box::new(FakeFrontmostSource {
-            stopped: Arc::clone(&stopped),
-        }));
-        let (tx, rx) = mpsc::channel();
-        let observer = controller
-            .watch(move |app| {
-                tx.send(app).expect("test receiver remains alive");
-            })
-            .expect("observer starts");
-
-        let initial = rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("observer publishes its initial snapshot");
-        assert_eq!(
-            initial.map(|app| app.id).as_deref(),
-            Some("org.example.App")
-        );
-
-        drop(observer);
-        assert!(stopped.load(Ordering::Acquire));
-        assert_eq!(
-            controller.frontmost_app().map(|app| app.id).as_deref(),
-            Some("org.example.App")
-        );
-    }
-
-    #[test]
-    fn unsupported_foreground_source_publishes_none_and_stops_cleanly() {
-        let controller = FrontmostController::new(Box::new(NullSource));
-        let (tx, rx) = mpsc::channel();
-        let observer = controller
-            .watch(move |app| {
-                tx.send(app).expect("test receiver remains alive");
-            })
-            .expect("observer starts");
-
-        assert_eq!(
-            rx.recv_timeout(Duration::from_secs(1))
-                .expect("null source publishes an initial snapshot"),
-            None
-        );
-        drop(observer);
-        assert_eq!(controller.frontmost_app(), None);
-    }
-
-    #[test]
-    fn foreground_unsubscribe_waits_for_inflight_callback() {
-        let publication = Arc::new(Publication::new());
-        publication.begin();
-        let release = Arc::new((Mutex::new(false), Condvar::new()));
-        let callback_release = Arc::clone(&release);
-        let (entered_tx, entered_rx) = mpsc::channel();
-        let subscriber = Arc::new(Subscriber::new(move |_| {
-            entered_tx.send(()).expect("test receiver remains alive");
-            let (lock, changed) = &*callback_release;
-            let guard = lock_unpoisoned(lock);
-            drop(
-                changed
-                    .wait_while(guard, |released| !*released)
-                    .unwrap_or_else(std::sync::PoisonError::into_inner),
-            );
-        }));
-        assert!(publication.subscribe(1, &subscriber).is_none());
-
-        let publisher = Arc::clone(&publication);
-        let publish_thread = thread::spawn(move || publisher.publish(Some("one".into())));
-        entered_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("callback starts");
-
-        let unsubscriber = Arc::clone(&publication);
-        let (unsubscribed_tx, unsubscribed_rx) = mpsc::channel();
-        let unsubscribe_thread = thread::spawn(move || {
-            unsubscriber.unsubscribe(1);
-            unsubscribed_tx
-                .send(())
-                .expect("test receiver remains alive");
-        });
-        assert!(
-            unsubscribed_rx
-                .recv_timeout(Duration::from_millis(25))
-                .is_err(),
-            "unsubscribe returned while the callback was in flight"
-        );
-
-        let (lock, changed) = &*release;
-        *lock_unpoisoned(lock) = true;
-        changed.notify_all();
-        unsubscribed_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("unsubscribe returns after callback completion");
-        publish_thread.join().expect("publisher thread exits");
-        unsubscribe_thread.join().expect("unsubscribe thread exits");
-    }
 
     // ── key_to_button ────────────────────────────────────────────────────────
 
@@ -1717,6 +889,95 @@ mod tests {
         assert!(translate(&event, true).is_none());
     }
 
+    // ── waking and report times ──────────────────────────────────────────────
+
+    /// A device thread wakes at a button deadline even with nothing to read,
+    /// not before it, and still wakes for data and for a stop.
+    #[test]
+    fn wait_wakes_at_the_deadline_for_data_and_for_a_stop() {
+        let (device_rx, device_tx) = create_pipe().expect("device pipe");
+        let (stop_rx, stop_tx) = create_pipe().expect("stop pipe");
+        let (device_fd, stop_fd) = (device_rx.as_raw_fd(), stop_rx.as_raw_fd());
+
+        let deadline = Instant::now() + Duration::from_millis(5);
+        assert_eq!(wait(device_fd, stop_fd, Some(deadline)), Wake::Deadline);
+        assert!(Instant::now() >= deadline);
+
+        signal_pipe(&device_tx);
+        let far = Instant::now() + Duration::from_secs(60);
+        assert_eq!(wait(device_fd, stop_fd, Some(far)), Wake::Readable);
+        assert_eq!(wait(device_fd, stop_fd, None), Wake::Readable);
+
+        signal_pipe(&stop_tx);
+        assert_eq!(wait(device_fd, stop_fd, Some(far)), Wake::Stop);
+    }
+
+    #[test]
+    fn poll_timeout_rounds_up_to_whole_milliseconds() {
+        assert_eq!(poll_timeout(Duration::ZERO), 0);
+        assert_eq!(poll_timeout(Duration::from_nanos(1)), 1);
+        assert_eq!(poll_timeout(Duration::from_millis(25)), 25);
+        assert_eq!(poll_timeout(Duration::from_micros(25_001)), 26);
+        assert_eq!(poll_timeout(Duration::MAX), libc::c_int::MAX);
+    }
+
+    /// A report is timed by how long before the read it happened, so reports
+    /// read late, together or not, keep their spacing. A timestamp after the
+    /// read, as after the wall clock stepped back, counts as read at the read.
+    #[test]
+    fn report_time_counts_back_from_the_read() {
+        let read_at = Instant::now();
+        let wall_at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        let ms = Duration::from_millis;
+        assert_eq!(report_time(read_at, wall_at, wall_at), read_at);
+        assert_eq!(
+            report_time(read_at, wall_at, wall_at.checked_sub(ms(40)).unwrap()),
+            read_at.checked_sub(ms(40)).unwrap()
+        );
+        assert_eq!(report_time(read_at, wall_at, wall_at + ms(40)), read_at);
+    }
+
+    /// A bounce that queues up while the thread is held up is still a bounce:
+    /// its reports are timed when they happened, not when they were read.
+    #[test]
+    fn a_bounce_read_late_is_still_filtered() {
+        use evdev::{BusType, InputId};
+
+        let press = ButtonChange {
+            button: KeyCode::BTN_LEFT,
+            pressed: true,
+        };
+        let release = ButtonChange {
+            pressed: false,
+            ..press
+        };
+        let ms = Duration::from_millis;
+        let start = Instant::now();
+        let wall = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        let mut buttons =
+            ButtonDebounce::for_device(&InputId::new(BusType::BUS_USB, 0x046D, 0xB034, 0));
+
+        buttons.changed(press);
+        assert_eq!(buttons.end_report(report_time(start, wall, wall)), [press]);
+
+        // The release at 1 ms and the press at 2 ms are read at 100 ms.
+        let (read_at, wall_at) = (start + ms(100), wall + ms(100));
+        buttons.changed(release);
+        assert!(
+            buttons
+                .end_report(report_time(read_at, wall_at, wall + ms(1)))
+                .is_empty()
+        );
+        buttons.changed(press);
+        assert!(
+            buttons
+                .end_report(report_time(read_at, wall_at, wall + ms(2)))
+                .is_empty()
+        );
+        assert!(buttons.expire(read_at).is_empty());
+        assert_eq!(buttons.deadline(), None);
+    }
+
     #[test]
     fn translate_non_mouse_key_returns_none() {
         let event = InputEvent::new(EventType::KEY.0, KeyCode::KEY_A.0, 1);
@@ -1904,22 +1165,16 @@ mod tests {
 
     #[test]
     fn own_virtual_devices_are_not_hookable() {
-        // Both uinput devices OpenLogi creates carry the prefix; even with
-        // fully mouse-like capabilities they must never be grabbed.
-        for name in ["OpenLogi virtual mouse", "OpenLogi action injector"] {
+        // Even with fully mouse-like capabilities, a uinput device OpenLogi
+        // created must never be grabbed.
+        for device in [
+            uinput::Device::PassThroughMouse,
+            uinput::Device::ActionInjector,
+        ] {
             let mut caps = Caps::mouse();
-            caps.name = Some(name);
-            assert!(!caps.is_hookable(), "{name:?} must be excluded by prefix");
+            caps.name = Some(device.name());
+            assert!(!caps.is_hookable(), "{device:?} must be excluded");
         }
-    }
-
-    #[test]
-    fn virtual_device_name_carries_exclusion_prefix() {
-        assert!(
-            VIRTUAL_DEVICE_NAME.starts_with(OPENLOGI_DEVICE_PREFIX),
-            "renaming the virtual device away from the prefix would let the \
-             hook grab its own pass-through mice"
-        );
     }
 
     #[test]
@@ -1929,5 +1184,175 @@ mod tests {
         let mut caps = Caps::mouse();
         caps.abs = Some([AbsoluteAxisCode::ABS_MISC].into_iter().collect());
         assert!(caps.is_hookable());
+    }
+
+    // ── dispatch ─────────────────────────────────────────────────────────────
+
+    /// A button names the device it was read from (#2158), and that name
+    /// keeps every hooked device remappable, as an unnamed button was.
+    #[test]
+    fn dispatched_buttons_name_their_source_and_stay_remappable() {
+        let source = EventDevice {
+            vendor_id: Some(LOGITECH_VENDOR_ID),
+            product_id: Some(0xb02a),
+            product_name: None,
+        };
+        let seen = std::cell::RefCell::new(None);
+        let event = InputEvent::new(EventType::KEY.0, KeyCode::BTN_BACK.0, 1);
+        let forwarded = dispatch(event, false, false, &source, &|hook_event| {
+            if let HookEvent::Mouse(MouseEvent::Button { device, .. }) = hook_event {
+                *seen.borrow_mut() = device;
+            }
+            EventDisposition::Suppress
+        });
+        assert!(forwarded.is_none());
+        let device = seen.into_inner().expect("the button names its source");
+        assert_eq!(device, source);
+        assert!(crate::source_is_remappable(Some(&device)));
+    }
+}
+
+#[cfg(test)]
+mod scroll_inversion_tests {
+    use std::cell::Cell;
+
+    use super::*;
+    use crate::ScrollDelta;
+
+    fn rel(axis: RelativeAxisCode, value: i32) -> InputEvent {
+        InputEvent::new(EventType::RELATIVE.0, axis.0, value)
+    }
+
+    fn value_of(event: InputEvent) -> i32 {
+        event.value()
+    }
+
+    /// Both wheel axes are negated: a hi-res wheel reports `REL_WHEEL_HI_RES`
+    /// and a detented one `REL_WHEEL`, and the Signature M650 this was
+    /// verified against advertises both.
+    #[test]
+    fn inversion_negates_either_vertical_wheel_axis() {
+        for axis in [
+            RelativeAxisCode::REL_WHEEL,
+            RelativeAxisCode::REL_WHEEL_HI_RES,
+        ] {
+            assert_eq!(value_of(invert_wheel(rel(axis, 120), true)), -120);
+            assert_eq!(value_of(invert_wheel(rel(axis, -1), true)), 1);
+        }
+    }
+
+    /// Off is a pass-through, byte for byte — the setting must cost nothing
+    /// when it is not in use.
+    #[test]
+    fn inversion_off_leaves_the_wheel_alone() {
+        let event = rel(RelativeAxisCode::REL_WHEEL, 120);
+        assert_eq!(value_of(invert_wheel(event, false)), 120);
+    }
+
+    /// The setting reverses the wheel, not the thumb wheel or the pointer.
+    #[test]
+    fn inversion_leaves_horizontal_and_pointer_axes_alone() {
+        for axis in [
+            RelativeAxisCode::REL_HWHEEL,
+            RelativeAxisCode::REL_HWHEEL_HI_RES,
+            RelativeAxisCode::REL_X,
+            RelativeAxisCode::REL_Y,
+        ] {
+            assert_eq!(value_of(invert_wheel(rel(axis, 7), true)), 7);
+        }
+    }
+
+    /// `i32::MIN` has no positive counterpart; saturating keeps the scroll
+    /// pinned at the extreme instead of wrapping it back to the same sign.
+    #[test]
+    fn inversion_saturates_instead_of_wrapping() {
+        assert_eq!(
+            value_of(invert_wheel(
+                rel(RelativeAxisCode::REL_WHEEL, i32::MIN),
+                true
+            )),
+            i32::MAX
+        );
+    }
+
+    /// A detented notch and a hi-res one, each with the `hires_scroll` mode
+    /// its device runs in.
+    const NOTCHES: [(RelativeAxisCode, bool, i32); 2] = [
+        (RelativeAxisCode::REL_WHEEL, false, 1),
+        (RelativeAxisCode::REL_WHEEL_HI_RES, true, 120),
+    ];
+
+    /// Run a wheel event through [`dispatch`] with a callback that answers
+    /// `disposition`, returning the delta the callback saw and the value
+    /// forwarded to the desktop, if any.
+    fn dispatch_wheel(
+        event: InputEvent,
+        hires_scroll: bool,
+        invert: bool,
+        disposition: EventDisposition,
+    ) -> (Option<ScrollDelta>, Option<i32>) {
+        let seen = Cell::new(None);
+        let forwarded = dispatch(
+            event,
+            hires_scroll,
+            invert,
+            &EventDevice::default(),
+            &|hook_event| {
+                if let HookEvent::Mouse(MouseEvent::Scroll { delta, .. }) = hook_event {
+                    seen.set(Some(delta));
+                }
+                disposition
+            },
+        );
+        (seen.get(), forwarded.map(value_of))
+    }
+
+    /// The delta [`translate`] reads from an untouched wheel event.
+    fn wheel_delta(event: InputEvent, hires_scroll: bool) -> ScrollDelta {
+        match translate(&event, hires_scroll) {
+            Some(MouseEvent::Scroll { delta, .. }) => delta,
+            other => panic!("a wheel event translates to a scroll, got {other:?}"),
+        }
+    }
+
+    /// With inversion on, the callback sees the reversed delta whatever it
+    /// decides, so an impulse the agent suppresses and replays is reversed
+    /// too (#1737), and a forwarded event reaches the desktop negated exactly
+    /// once.
+    #[test]
+    fn inverted_wheel_reaches_the_callback_reversed_and_the_desktop_reversed_once() {
+        for (axis, hires_scroll, value) in NOTCHES {
+            let event = rel(axis, value);
+            let reversed = wheel_delta(event, hires_scroll).negate_y();
+            assert_eq!(
+                dispatch_wheel(event, hires_scroll, true, EventDisposition::PassThrough),
+                (Some(reversed), Some(-value)),
+                "{axis:?} passed through"
+            );
+            assert_eq!(
+                dispatch_wheel(event, hires_scroll, true, EventDisposition::Suppress),
+                (Some(reversed), None),
+                "{axis:?} suppressed"
+            );
+        }
+    }
+
+    /// With inversion off, neither the callback nor the desktop sees a change.
+    #[test]
+    fn wheel_is_left_alone_when_inversion_is_off() {
+        for (axis, hires_scroll, value) in NOTCHES {
+            let event = rel(axis, value);
+            let delta = wheel_delta(event, hires_scroll);
+            assert_eq!(
+                dispatch_wheel(event, hires_scroll, false, EventDisposition::PassThrough),
+                (Some(delta), Some(value)),
+                "{axis:?} passed through"
+            );
+            assert_eq!(
+                dispatch_wheel(event, hires_scroll, false, EventDisposition::Suppress),
+                (Some(delta), None),
+                "{axis:?} suppressed"
+            );
+        }
     }
 }

@@ -10,7 +10,7 @@ use crate::feature::DecodeEvent;
 pub enum ColorLedEffectsEvent {
     /// A period effect reached a synchronization point. Emitted once per period
     /// while sync events are enabled (see
-    /// [`setSwControl`](super::ColorLedEffectsFeature::set_sw_control)).
+    /// [`setSwControl`](super::ColorLedEffectsV1Feature::set_sw_control)).
     SyncEffect {
         /// Zone the event applies to; `0xff` means all zones.
         zone_index: u8,

@@ -1,0 +1,30 @@
+# Owner: openlogi_core::device::BatteryInfo::needs_attention — whether a
+# battery reading needs the user's attention (a discharging battery at 20% or
+# less, or a low/critical level on a device without a percentage). The
+# settings app's warning tone and caption and the agent's low-battery notice
+# all ask it, so a device the app shows as low is the device the overlay
+# announces.
+id: core-battery-attention-owner
+language: rust
+severity: error
+message: Whether a battery reading needs attention is openlogi_core::device::BatteryInfo::needs_attention's; call it instead of comparing a battery percentage or matching the low battery levels here.
+note: |
+  The rule lived in the settings app (ui/battery.rs) until the agent needed
+  it for its low-battery notice. A second threshold would let the overlay
+  announce a battery the app does not show as low, or stay quiet about one it
+  does. See "Single source of truth" in AGENTS.md.
+files:
+  - crates/**/*.rs
+ignores:
+  - crates/openlogi-core/src/device.rs
+  - "**/tests.rs"
+  - "**/tests/**"
+rule:
+  any:
+    - kind: macro_invocation
+      all:
+        - regex: '^matches!'
+        - regex: 'BatteryLevel::Low\b'
+        - regex: 'BatteryLevel::Critical\b'
+    - kind: binary_expression
+      regex: '\bpercentage\s*<=?\s*[0-9A-Z]'

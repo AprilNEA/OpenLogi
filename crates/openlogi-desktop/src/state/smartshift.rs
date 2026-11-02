@@ -2,11 +2,12 @@
 //! swr-backed queries owned by the device-read service.
 
 use gpui::{App, Context};
-use openlogi_core::hid::{DeviceRoute, SmartShiftStatus};
+use openlogi_core::config::{SMARTSHIFT_AUTO_DISENGAGE_DEFAULT, SmartShift};
+use openlogi_core::hid::{DeviceRoute, SmartShiftAutoDisengage, SmartShiftStatus};
 use tracing::debug;
 
 use super::device_key::DeviceKey;
-use super::devices::DeviceRecord;
+use super::events::StateEvents;
 use super::load::SmartShiftLoad;
 use super::{AppState, SmartShiftWriteStatus, StateEvent};
 
@@ -115,21 +116,21 @@ impl AppState {
         }
     }
 
-    pub(crate) fn retry_smartshift_read(cx: &mut App, key: DeviceKey) {
-        Self::update(cx, |state, cx| {
-            state.retry_smartshift(&key);
-            cx.emit(StateEvent::SmartShiftChanged(key));
-        });
+    /// Re-run `key`'s SmartShift read — the "click to retry" affordance on a
+    /// failed read or a failed write confirmation.
+    pub(crate) fn retry_smartshift_read(&mut self, key: &DeviceKey) -> StateEvents {
+        self.retry_smartshift(key);
+        StateEvent::SmartShiftChanged(key.clone()).into()
     }
 
+    /// Write `status` to the active device and start the read that confirms
+    /// it. Not an [`AppState::apply`] call because the confirming read is a
+    /// query subscription, which only the entity's own context can open.
     pub(crate) fn update_smartshift(cx: &mut App, status: SmartShiftStatus) {
         Self::update(cx, |state, cx| {
-            let key = state.current_record().map(DeviceRecord::device_key);
-            state.commit_smartshift(status);
+            let events = state.commit_smartshift(status);
             state.confirm_current_smartshift(cx);
-            if let Some(key) = key {
-                cx.emit(StateEvent::SmartShiftChanged(key));
-            }
+            events.emit(cx);
         });
     }
 
@@ -149,8 +150,14 @@ impl AppState {
             })
     }
 
-    pub(crate) fn smartshift_status_for(&self, key: &DeviceKey) -> SmartShiftLoad {
-        self.pointer.reads.smartshift_status(key)
+    /// What is known of `key`'s SmartShift config; [`SmartShiftLoad::Unknown`]
+    /// for a device nobody has queried.
+    pub(crate) fn smartshift_load_for(&self, key: &DeviceKey) -> SmartShiftLoad {
+        self.pointer
+            .reads
+            .smartshift_load(key)
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// Post-write confirmation status for the active device.
@@ -158,7 +165,7 @@ impl AppState {
     pub fn current_smartshift_write_status(&self) -> Option<SmartShiftWriteStatus> {
         self.current_record().and_then(|record| {
             self.devices
-                .runtime
+                .sessions
                 .get(&record.device_key())
                 .and_then(|entry| entry.smartshift.status())
         })
@@ -169,15 +176,19 @@ impl AppState {
     /// device and on a failed write confirmation.
     pub fn retry_smartshift(&mut self, key: &DeviceKey) {
         self.pointer.reads.retry_smartshift(key);
-        if let Some(entry) = self.devices.runtime.get_mut(key) {
+        if let Some(entry) = self.devices.sessions.get_mut(key) {
             entry.smartshift.reset();
         }
     }
     /// Apply a settled query to write-confirmation state if it still belongs to
-    /// the current write. The service's generation guard independently rejects
+    /// the current write. The service's flight guard independently rejects
     /// callbacks from queries replaced by a newer confirmation.
     pub(crate) fn apply_smartshift_read(&mut self, key: &DeviceKey, write_id: Option<u64>) {
-        let current_write = self.devices.runtime.get(key).map(|entry| &entry.smartshift);
+        let current_write = self
+            .devices
+            .sessions
+            .get(key)
+            .map(|entry| &entry.smartshift);
         if !smartshift_read_is_current(write_id, current_write) {
             debug!(key = %key, ?write_id, "stale SmartShift read result ignored");
             return;
@@ -187,7 +198,7 @@ impl AppState {
         };
         let expected = self
             .devices
-            .runtime
+            .sessions
             .get(key)
             .and_then(|entry| entry.smartshift.confirming_expected(write_id));
         let Some(expected) = expected else {
@@ -197,7 +208,7 @@ impl AppState {
             smartshift_write_outcome(expected, self.pointer.reads.smartshift_load(key))
         {
             self.devices
-                .runtime
+                .sessions
                 .entry(key.clone())
                 .or_default()
                 .smartshift = match outcome {
@@ -210,11 +221,14 @@ impl AppState {
     /// on a background thread), optimistically cache it, and persist it to
     /// `config.toml` — the values live in device RAM and reset on a power
     /// cycle (#189), so the agent re-applies them when the device reconnects.
-    /// No-op when no device is selected.
-    pub fn commit_smartshift(&mut self, status: SmartShiftStatus) {
+    /// A threshold the config cannot hold is replaced first (see
+    /// [`with_persistable_threshold`]). No-op when no device is selected.
+    pub fn commit_smartshift(&mut self, status: SmartShiftStatus) -> StateEvents {
+        let status = with_persistable_threshold(status);
+        let events = self.for_current_device(StateEvent::SmartShiftChanged);
         let Some(record) = self.current_record() else {
             debug!("no active device — SmartShift change ignored");
-            return;
+            return events;
         };
         let key = record.device_key();
         let persistent_key = record.persistent_config_key().map(str::to_string);
@@ -228,11 +242,11 @@ impl AppState {
                 );
             });
             if !self.persist_and_reload("SmartShift") {
-                return;
+                return events;
             }
         }
         if let Some(route) = route {
-            self.send_ipc(crate::services::ipc::Command::SetSmartShift(route, status));
+            self.send_ipc(crate::services::ipc::SetSmartShift { route, status });
         }
         // Reflect the write immediately so the panel doesn't flicker back to
         // the previous value before a re-read lands, but queue a confirming
@@ -246,7 +260,7 @@ impl AppState {
             self.pointer.next_smartshift_write_id =
                 self.pointer.next_smartshift_write_id.saturating_add(1);
             self.devices
-                .runtime
+                .sessions
                 .entry(key.clone())
                 .or_default()
                 .smartshift
@@ -254,8 +268,10 @@ impl AppState {
             write_id
         });
         if write_id.is_none() {
-            self.devices.runtime.entry(key).or_default().smartshift = SmartShiftDeviceState::Failed;
+            self.devices.sessions.entry(key).or_default().smartshift =
+                SmartShiftDeviceState::Failed;
         }
+        events
     }
     /// Take the active device's pending SmartShift confirm, if any. Returns
     /// the `(device key, route, write_id)` for a one-shot re-read that
@@ -267,7 +283,7 @@ impl AppState {
         let route = record.route.clone()?;
         let write_id = self
             .devices
-            .runtime
+            .sessions
             .get_mut(&key)?
             .smartshift
             .begin_confirmation()?;
@@ -275,7 +291,7 @@ impl AppState {
     }
     /// Mark a post-write confirmation as failed when its reply channel closes.
     pub fn fail_smartshift_confirm(&mut self, key: &DeviceKey, write_id: u64) {
-        if let Some(entry) = self.devices.runtime.get_mut(key) {
+        if let Some(entry) = self.devices.sessions.get_mut(key) {
             entry.smartshift.fail_confirmation(write_id);
         }
     }
@@ -285,6 +301,25 @@ impl AppState {
 pub(crate) enum ConfirmationOutcome {
     Confirmed,
     Failed,
+}
+
+/// `status` with an auto-disengage the config loader accepts.
+///
+/// Firmware can report a threshold below the configuration floor (an MX Master 3
+/// reports `4`, #2079). A write that keeps the read threshold — the free-spin
+/// pill, the torque slider — would then save a `config.toml` the next launch
+/// refuses to parse. Such a threshold becomes the default, the value the
+/// SmartShift panel already shows for it, before the write reaches the device,
+/// the cache, or the config.
+fn with_persistable_threshold(status: SmartShiftStatus) -> SmartShiftStatus {
+    if SmartShift::accepts_auto_disengage(status.auto_disengage) {
+        status
+    } else {
+        SmartShiftStatus {
+            auto_disengage: SmartShiftAutoDisengage::Threshold(SMARTSHIFT_AUTO_DISENGAGE_DEFAULT),
+            ..status
+        }
+    }
 }
 
 pub(crate) fn smartshift_write_outcome(

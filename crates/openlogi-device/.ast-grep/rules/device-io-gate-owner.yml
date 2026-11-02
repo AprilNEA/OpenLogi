@@ -1,0 +1,19 @@
+# Owner: openlogi_device::DeviceIoGate::ensure_allowed — whether host device
+# I/O may proceed right now, and the IoSuspended refusal that says it may not.
+id: device-io-gate-owner
+language: rust
+severity: error
+message: DeviceIoGate::ensure_allowed() decides and words the suspended-I/O refusal; call it and convert IoSuspended with `?` instead of building the error here.
+note: |
+  Six sites once checked allows_io() and built "host device I/O is suspended"
+  by hand: the capture and host-switch sessions as a BackendError, the host
+  transport as a BackendError and again as an io::Error. See "Single source of
+  truth" in AGENTS.md.
+files:
+  - crates/**/*.rs
+  - xtask/**/*.rs
+ignores:
+  - crates/openlogi-device/src/device_io.rs
+rule:
+  kind: string_literal
+  regex: '^"host device I/O is suspended"$'

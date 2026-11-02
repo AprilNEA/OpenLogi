@@ -1,0 +1,15 @@
+# Owner: the agent's read_backlight/set_backlight RPCs own runtime HID access.
+id: backlight-agent-owner
+language: rust
+severity: error
+message: Backlight control must use crate::agent and the existing read_backlight/set_backlight RPCs; direct HID access belongs to the agent, not this command.
+note: |
+  Opening a competing receiver connection from this command can misroute
+  operations or interrupt the running agent. Use openlogi_core for types.
+  Hardware diagnostics deliberately remain outside this command's scope.
+files:
+  - crates/openlogi-cli/src/cmd/backlight.rs
+  - crates/openlogi-cli/src/cmd/backlight/**/*.rs
+rule:
+  kind: identifier
+  regex: '^(openlogi_hid|openlogi_device|async_hid|hidpp|diag)$'

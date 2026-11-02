@@ -12,30 +12,28 @@
 //! the current value through the agent when selection/inventory lifecycle
 //! events make a device active; this view only consumes the resulting cache.
 
-use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, AppContext as _, Context, Entity, IntoElement, ParentElement, Render,
-    SharedString, Styled, Subscription, Window, div, px, rgb,
+    AnyElement, App, Context, IntoElement, ParentElement, Render, SharedString, Styled,
+    Subscription, Window,
 };
-use gpui_component::{
-    Disableable as _, Selectable as _,
-    button::Button,
-    h_flex,
-    slider::{Slider, SliderEvent, SliderState},
-    v_flex,
-};
+use gpui_component::{Disableable as _, Selectable as _, h_flex, slider::Slider, v_flex};
 use openlogi_core::config::{
     SMARTSHIFT_AUTO_DISENGAGE_DEFAULT, SMARTSHIFT_MIN_AUTO_DISENGAGE, ThumbwheelSensitivity,
 };
 use openlogi_core::hid::{
-    SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus, SmartShiftThreshold,
+    SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus, SmartShiftThreshold, TunableTorque,
 };
 
-use crate::state::{AppState, DeviceKey, SmartShiftLoad, SmartShiftWriteStatus, StateEvent};
-use crate::ui::components::Toggle;
+use crate::state::{
+    AppState, DeviceKey, DeviceRecord, SmartShiftLoad, SmartShiftWriteStatus, StateEvent,
+    StateEvents,
+};
+use crate::ui::commit_slider::{CommitSlider, SliderRange};
+use crate::ui::components::{Pill, Toggle, toggle_row};
 use crate::ui::section::section_label;
+use crate::ui::slider_row::{SliderRow, disabled_track};
 use crate::ui::status::{retry_line, status_line};
-use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
+use crate::ui::theme::{self, Palette};
 
 /// Friendly slider range for the `autoDisengage` threshold. The wire field is
 /// `0x01`–`0xFE` (0.25 turn/s steps); the slider exposes the usable band
@@ -43,7 +41,8 @@ use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
 /// Thresholds below the floor free-spin on everyday scrolling (#317), so the
 /// floor and default are shared with the `openlogi-core` config contract. A device
 /// reporting a value outside the band is normalised for display by
-/// [`clamp_threshold`]; it is only rewritten once the user drags the slider.
+/// [`clamp_threshold`]. The config cannot hold a value below the floor, so
+/// [`AppState::commit_smartshift`] also replaces one on the next write (#2079).
 const THRESHOLD_MIN: SmartShiftThreshold = SMARTSHIFT_MIN_AUTO_DISENGAGE;
 const THRESHOLD_MAX: SmartShiftThreshold = match SmartShiftThreshold::try_new(50) {
     Ok(value) => value,
@@ -53,120 +52,82 @@ const DEFAULT_THRESHOLD: SmartShiftThreshold = SMARTSHIFT_AUTO_DISENGAGE_DEFAULT
 
 pub struct SmartShiftPanel {
     /// The auto-disengage threshold slider. Always constructed (range is
-    /// builder-only); only *rendered* in ratchet, non-permanent mode.
-    threshold: Entity<SliderState>,
-    /// Last threshold pushed into the slider from the device, so toggling
-    /// "permanent" off restores it and an external change re-seats the thumb —
-    /// but an in-progress drag (tracked by `pending_threshold`) doesn't.
-    last_threshold: SmartShiftThreshold,
-    /// The live drag value, shown in the numeric label until release commits.
-    pending_threshold: Option<SmartShiftThreshold>,
-    _threshold_sub: Subscription,
+    /// builder-only); only *rendered* in ratchet, non-permanent mode. The
+    /// value it was last seated on is what toggling "permanent" off restores.
+    threshold: CommitSlider<SmartShiftThreshold>,
+    /// The tunable torque (scrolling force) slider. Rendered only when the
+    /// device supports tunable torque.
+    torque: CommitSlider<TunableTorque>,
     /// The per-device thumb-wheel sensitivity slider (device override; devices
     /// without one follow the app-wide default from Settings → General).
-    wheel_sensitivity: Entity<SliderState>,
-    /// Last committed sensitivity, to re-seat the thumb on a device switch.
-    last_wheel_sensitivity: ThumbwheelSensitivity,
-    /// Live drag value shown in the numeric label until release commits.
-    pending_wheel_sensitivity: Option<ThumbwheelSensitivity>,
-    _wheel_sensitivity_sub: Subscription,
+    wheel_sensitivity: CommitSlider<ThumbwheelSensitivity>,
     _state_obs: Subscription,
 }
 
 impl SmartShiftPanel {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let threshold = cx.new(|_| {
-            SliderState::new()
-                .max(f32::from(THRESHOLD_MAX))
-                .min(f32::from(THRESHOLD_MIN))
-                .step(1.)
-                .default_value(f32::from(DEFAULT_THRESHOLD))
-        });
         // Drive the device only on release (a drag would stream a write burst);
-        // Change just updates the numeric label.
-        let threshold_sub =
-            cx.subscribe(
-                &threshold,
-                |panel, _slider, event: &SliderEvent, cx| match event {
-                    SliderEvent::Change(value) => {
-                        panel.pending_threshold = Some(threshold_from_slider(value.start()));
-                        cx.notify();
-                    }
-                    SliderEvent::Release(value) => {
-                        let threshold = threshold_from_slider(value.start());
-                        panel.pending_threshold = None;
-                        panel.last_threshold = threshold;
-                        let status =
-                            AppState::try_read(cx).and_then(AppState::current_smartshift_ready);
-                        if let Some(status) = status {
-                            AppState::update_smartshift(
-                                cx,
-                                SmartShiftStatus {
-                                    mode: SmartShiftMode::Ratchet,
-                                    auto_disengage: SmartShiftAutoDisengage::Threshold(threshold),
-                                    ..status
-                                },
-                            );
-                        }
-                        cx.notify();
-                    }
-                },
-            );
-        let wheel_sensitivity = cx.new(|_| {
-            SliderState::new()
-                .min(f32::from(ThumbwheelSensitivity::MIN))
-                .max(f32::from(ThumbwheelSensitivity::MAX))
-                .step(1.)
-                .default_value(f32::from(ThumbwheelSensitivity::DEFAULT))
-        });
-        let wheel_sensitivity_sub = cx.subscribe(
-            &wheel_sensitivity,
-            |panel, _slider, event: &SliderEvent, cx| match event {
-                SliderEvent::Change(value) => {
-                    panel.pending_wheel_sensitivity =
-                        Some(ThumbwheelSensitivity::from_rounded(value.start()));
-                    cx.notify();
-                }
-                SliderEvent::Release(value) => {
-                    let sensitivity = ThumbwheelSensitivity::from_rounded(value.start());
-                    panel.pending_wheel_sensitivity = None;
-                    panel.last_wheel_sensitivity = sensitivity;
-                    AppState::update(cx, |state, cx| {
-                        let record = state
-                            .current_record()
-                            .map(|record| (record.config_key.clone(), record.device_key()));
-                        if let Some((config_key, event_key)) = record {
-                            state.set_device_thumbwheel_sensitivity(&config_key, sensitivity);
-                            cx.emit(StateEvent::DeviceConfigChanged(event_key));
-                        }
-                    });
-                    cx.notify();
+        // dragging just updates the numeric label.
+        let threshold = CommitSlider::new(
+            SliderRange::new(THRESHOLD_MIN, THRESHOLD_MAX),
+            DEFAULT_THRESHOLD,
+            cx,
+            |_, threshold, cx| {
+                let status = AppState::try_read(cx).and_then(AppState::current_smartshift_ready);
+                if let Some(status) = status {
+                    AppState::update_smartshift(
+                        cx,
+                        SmartShiftStatus {
+                            mode: SmartShiftMode::Ratchet,
+                            auto_disengage: SmartShiftAutoDisengage::Threshold(threshold),
+                            ..status
+                        },
+                    );
                 }
             },
         );
-        let state_obs = cx.subscribe(&AppState::global(cx), |_, _, event: &StateEvent, cx| {
-            let relevant = match event {
-                StateEvent::InventoryChanged | StateEvent::DeviceSelected(_) => true,
-                StateEvent::SmartShiftChanged(key) | StateEvent::DeviceConfigChanged(key) => {
-                    AppState::try_read(cx)
-                        .and_then(AppState::current_record)
-                        .is_some_and(|record| record.device_key() == *key)
+        let torque = CommitSlider::new(
+            SliderRange::new(TunableTorque::MIN, TunableTorque::MAX),
+            TunableTorque::DEFAULT,
+            cx,
+            |_, torque, cx| {
+                let status = AppState::try_read(cx).and_then(AppState::current_smartshift_ready);
+                if let Some(status) = status {
+                    AppState::update_smartshift(
+                        cx,
+                        SmartShiftStatus {
+                            tunable_torque: Some(torque),
+                            ..status
+                        },
+                    );
                 }
-                _ => false,
-            };
-            if relevant {
-                cx.notify();
-            }
+            },
+        );
+        let wheel_sensitivity = CommitSlider::new(
+            SliderRange::new(ThumbwheelSensitivity::MIN, ThumbwheelSensitivity::MAX),
+            ThumbwheelSensitivity::DEFAULT,
+            cx,
+            |_, sensitivity, cx| {
+                AppState::apply(cx, |state| {
+                    state
+                        .current_record()
+                        .map(DeviceRecord::device_key)
+                        .map_or_else(StateEvents::none, |key| {
+                            state.commit_device_thumbwheel_sensitivity(&key, sensitivity)
+                        })
+                });
+            },
+        );
+        let state_obs = AppState::repaint_on(cx, |event| {
+            matches!(
+                event,
+                StateEvent::SmartShiftChanged(_) | StateEvent::DeviceConfigChanged(_)
+            )
         });
         Self {
             threshold,
-            last_threshold: DEFAULT_THRESHOLD,
-            pending_threshold: None,
-            _threshold_sub: threshold_sub,
+            torque,
             wheel_sensitivity,
-            last_wheel_sensitivity: ThumbwheelSensitivity::DEFAULT,
-            pending_wheel_sensitivity: None,
-            _wheel_sensitivity_sub: wheel_sensitivity_sub,
             _state_obs: state_obs,
         }
     }
@@ -187,18 +148,16 @@ impl SmartShiftPanel {
         let committed = status
             .auto_disengage
             .threshold()
-            .map_or(self.last_threshold, clamp_threshold);
+            .map_or_else(|| self.threshold.seated(), clamp_threshold);
         // Re-seat the thumb on an external change (device re-read / mode switch),
-        // never mid-drag, and keep `last_threshold` tracking the real value so a
-        // permanent→off toggle can restore it.
-        if !permanent && self.pending_threshold.is_none() && committed != self.last_threshold {
-            self.last_threshold = committed;
-            self.threshold
-                .update(cx, |s, cx| s.set_value(f32::from(committed), window, cx));
+        // never mid-drag, so what it is seated on keeps tracking the real value
+        // and a permanent→off toggle can restore it.
+        if !permanent {
+            self.threshold.sync(committed, window, cx);
         }
-        let display = self.pending_threshold.unwrap_or(committed);
+        let display = self.threshold.shown(committed);
         let restore_threshold = if permanent {
-            self.last_threshold
+            self.threshold.seated()
         } else {
             committed
         };
@@ -232,38 +191,22 @@ impl SmartShiftPanel {
                     )),
             );
 
-        let value_color = if sensitivity_enabled {
-            rgb(ACCENT_BLUE).into()
-        } else {
-            pal.text_muted
-        };
-        let sensitivity_row = v_flex()
-            .gap_2()
-            .child(
-                h_flex()
-                    .justify_between()
-                    .items_baseline()
-                    .child(section_label(tr!("pointer.sensitivity"), pal))
-                    .child(
-                        div()
-                            .text_body()
-                            .text_color(value_color)
-                            .child(format!("{display}")),
-                    ),
-            )
-            .when(sensitivity_enabled, |row| {
-                row.child(Slider::new(&self.threshold).horizontal())
-            })
-            .when(!sensitivity_enabled, |row| row.child(disabled_track(pal)))
-            .child(
-                div()
-                    .text_caption()
-                    .text_color(pal.text_muted)
-                    .child(tr!("pointer.smartshift_sensitivity_description")),
-            );
+        let sensitivity_row = SliderRow::new(
+            tr!("pointer.sensitivity"),
+            if sensitivity_enabled {
+                Slider::new(self.threshold.slider())
+                    .horizontal()
+                    .into_any_element()
+            } else {
+                disabled_track(pal).into_any_element()
+            },
+        )
+        .value(display.to_string(), [THRESHOLD_MAX.to_string()])
+        .description(tr!("pointer.smartshift_sensitivity_description"))
+        .disabled(!sensitivity_enabled);
 
+        let torque_row = self.torque_row(status, ratchet, window, cx);
         let wheel_row = self.wheel_sensitivity_row(window, cx);
-
         let permanent_row = permanent_row(permanent, ratchet, restore_threshold, status, pal);
 
         v_flex()
@@ -271,17 +214,45 @@ impl SmartShiftPanel {
             .w_full()
             .child(mode_row)
             .child(sensitivity_row)
+            .children(torque_row)
             .child(permanent_row)
             .child(wheel_row)
     }
 }
 
 impl SmartShiftPanel {
+    /// The tunable-torque (scrolling force) row: label, live percentage, slider.
+    /// Rendered only when the device supports tunable torque hardware.
+    fn torque_row(
+        &mut self,
+        status: SmartShiftStatus,
+        ratchet: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<SliderRow> {
+        let pal = theme::palette(cx);
+        let committed_torque = status.tunable_torque?;
+        self.torque.sync(committed_torque, window, cx);
+        let display = self.torque.shown(committed_torque);
+        let control = if ratchet {
+            Slider::new(self.torque.slider())
+                .horizontal()
+                .into_any_element()
+        } else {
+            disabled_track(pal).into_any_element()
+        };
+        Some(
+            SliderRow::new(tr!("pointer.scrolling_force"), control)
+                .value(format!("{display}%"), [format!("{}%", TunableTorque::MAX)])
+                .description(tr!("pointer.scrolling_force_description"))
+                .disabled(!ratchet),
+        )
+    }
+
     /// The per-device thumb-wheel sensitivity row: label, live value, slider.
     /// Reads the selected device's effective value and re-seats the thumb on a
     /// device switch / external config change, never mid-drag.
-    fn wheel_sensitivity_row(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::Div {
-        let pal = theme::palette(cx);
+    fn wheel_sensitivity_row(&mut self, window: &mut Window, cx: &mut Context<Self>) -> SliderRow {
         let committed = AppState::try_read(cx)
             .and_then(|state| {
                 state
@@ -289,28 +260,16 @@ impl SmartShiftPanel {
                     .map(|r| state.device_thumbwheel_sensitivity(&r.config_key))
             })
             .unwrap_or(ThumbwheelSensitivity::DEFAULT);
-        if self.pending_wheel_sensitivity.is_none() && committed != self.last_wheel_sensitivity {
-            self.last_wheel_sensitivity = committed;
-            self.wheel_sensitivity.update(cx, |s, cx| {
-                s.set_value(f32::from(committed), window, cx);
-            });
-        }
-        let display = self.pending_wheel_sensitivity.unwrap_or(committed);
-        v_flex()
-            .gap_2()
-            .child(
-                h_flex()
-                    .justify_between()
-                    .items_baseline()
-                    .child(section_label(tr!("pointer.thumb_wheel_sensitivity"), pal))
-                    .child(
-                        div()
-                            .text_body()
-                            .text_color(rgb(ACCENT_BLUE))
-                            .child(format!("{display}")),
-                    ),
-            )
-            .child(Slider::new(&self.wheel_sensitivity).horizontal())
+        self.wheel_sensitivity.sync(committed, window, cx);
+        let display = self.wheel_sensitivity.shown(committed);
+        SliderRow::new(
+            tr!("pointer.thumb_wheel_sensitivity"),
+            Slider::new(self.wheel_sensitivity.slider()).horizontal(),
+        )
+        .value(
+            display.to_string(),
+            [ThumbwheelSensitivity::MAX.to_string()],
+        )
     }
 }
 
@@ -321,7 +280,7 @@ impl Render for SmartShiftPanel {
         let (key, status) = AppState::try_read(cx)
             .and_then(|state| {
                 let key = state.current_record()?.device_key();
-                Some((Some(key.clone()), state.smartshift_status_for(&key)))
+                Some((Some(key.clone()), state.smartshift_load_for(&key)))
             })
             .unwrap_or((None, SmartShiftLoad::Unknown));
         let write_status =
@@ -343,7 +302,6 @@ impl Render for SmartShiftPanel {
             SmartShiftLoad::Failed(_) => retry_line(
                 "smartshift-retry",
                 tr!("pointer.couldnt_read_smartshift_click_to_retry"),
-                pal,
                 retry_smartshift_closure(key.clone()),
             )
             .into_any_element(),
@@ -364,7 +322,7 @@ impl Render for SmartShiftPanel {
 fn retry_smartshift_closure(key: Option<DeviceKey>) -> impl Fn(&mut App) + 'static {
     move |cx| {
         if let Some(key) = &key {
-            AppState::retry_smartshift_read(cx, key.clone());
+            AppState::apply(cx, |state| state.retry_smartshift_read(key));
         }
     }
 }
@@ -385,7 +343,6 @@ fn smartshift_write_feedback(
             retry_line(
                 "smartshift-confirm-retry",
                 tr!("pointer.couldnt_read_smartshift_click_to_retry"),
-                pal,
                 retry_smartshift_closure(key),
             )
             .into_any_element(),
@@ -394,47 +351,38 @@ fn smartshift_write_feedback(
     }
 }
 
-/// The "Permanent ratchet" label + toggle row.
+/// The "Permanent ratchet" toggle row.
 fn permanent_row(
     permanent: bool,
     ratchet: bool,
     restore_threshold: SmartShiftThreshold,
     status: SmartShiftStatus,
     pal: Palette,
-) -> gpui::Div {
-    h_flex()
-        .justify_between()
-        .items_center()
-        .child(
-            v_flex()
-                .child(section_label(tr!("pointer.permanent_ratchet"), pal))
-                .child(
-                    div()
-                        .text_caption()
-                        .text_color(pal.text_muted)
-                        .child(tr!("pointer.never_auto_switch_to_free_spin")),
-                ),
-        )
-        .child(
-            Toggle::new("smartshift-permanent")
-                .selected(permanent)
-                .disabled(!ratchet)
-                .on_change(move |permanent, _window, cx| {
-                    let auto_disengage = if *permanent {
-                        SmartShiftAutoDisengage::Permanent
-                    } else {
-                        SmartShiftAutoDisengage::Threshold(restore_threshold)
-                    };
-                    AppState::update_smartshift(
-                        cx,
-                        SmartShiftStatus {
-                            mode: SmartShiftMode::Ratchet,
-                            auto_disengage,
-                            ..status
-                        },
-                    );
-                }),
-        )
+) -> impl IntoElement {
+    toggle_row(
+        "smartshift-permanent-row",
+        pal,
+        tr!("pointer.permanent_ratchet"),
+        tr!("pointer.never_auto_switch_to_free_spin"),
+        Toggle::new("smartshift-permanent")
+            .selected(permanent)
+            .disabled(!ratchet)
+            .on_change(move |permanent, _window, cx| {
+                let auto_disengage = if *permanent {
+                    SmartShiftAutoDisengage::Permanent
+                } else {
+                    SmartShiftAutoDisengage::Threshold(restore_threshold)
+                };
+                AppState::update_smartshift(
+                    cx,
+                    SmartShiftStatus {
+                        mode: SmartShiftMode::Ratchet,
+                        auto_disengage,
+                        ..status
+                    },
+                );
+            }),
+    )
 }
 
 /// One wheel-mode pill. Clicking it writes `target` while preserving the
@@ -444,23 +392,11 @@ fn mode_pill(label: SharedString, selected: bool, status: SmartShiftStatus) -> i
         SmartShiftMode::Free => "smartshift-mode-free",
         SmartShiftMode::Ratchet => "smartshift-mode-ratchet",
     };
-    Button::new(id)
-        .compact()
-        .label(label)
+    Pill::new(id, label)
         .selected(selected)
         .on_click(move |_event, _window, cx| {
             AppState::update_smartshift(cx, status);
         })
-}
-
-/// A greyed bar standing in for the slider when sensitivity isn't adjustable.
-fn disabled_track(pal: Palette) -> gpui::Div {
-    div().w_full().h(px(6.)).rounded_full().bg(pal.border)
-}
-
-/// Round + clamp a raw slider read into the friendly threshold range.
-fn threshold_from_slider(raw: f32) -> SmartShiftThreshold {
-    SmartShiftThreshold::from_rounded(raw).clamp(THRESHOLD_MIN, THRESHOLD_MAX)
 }
 
 /// Map a device-reported threshold into the slider's friendly band for display.
@@ -506,5 +442,14 @@ mod tests {
             clamp_threshold(SmartShiftThreshold::from_rounded(200.0)),
             THRESHOLD_MAX
         );
+    }
+
+    #[test]
+    fn tunable_torque_slider_conversion_and_bounds() {
+        use openlogi_core::hid::TunableTorque;
+
+        assert_eq!(TunableTorque::from_rounded(0.0), TunableTorque::MIN);
+        assert_eq!(TunableTorque::from_rounded(50.4), TunableTorque::DEFAULT);
+        assert_eq!(TunableTorque::from_rounded(150.0), TunableTorque::MAX);
     }
 }

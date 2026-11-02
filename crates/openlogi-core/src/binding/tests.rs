@@ -33,10 +33,23 @@ fn catalog_excludes_custom_shortcut() {
     let catalog = Action::catalog();
     for action in &catalog {
         assert!(
-            !matches!(action, Action::CustomShortcut(_) | Action::HoldShortcut(_)),
+            !matches!(
+                action,
+                Action::CustomShortcut(_)
+                    | Action::HoldShortcut(_)
+                    | Action::TapKeyHoldingModifiers(_)
+            ),
             "catalog must not contain recorded shortcut actions"
         );
     }
+}
+
+/// One-shot sources (Actions Ring slots, swipes) pick from the catalog and
+/// cannot deliver a release.
+#[test]
+fn catalog_excludes_actions_that_last_as_long_as_their_press() {
+    assert!(Action::catalog().iter().all(|action| !action.is_held()));
+    assert!(Action::DpiShift.is_held() && Action::GShift.is_held());
 }
 
 #[test]
@@ -46,9 +59,45 @@ fn hold_shortcut_has_distinct_lifecycle_semantics() {
 
     assert_eq!(held.label(), "Hold Alt+Space");
     assert_eq!(held.category(), Category::Editing);
-    assert_eq!(held.held_combo(), Some(&combo));
+    assert_eq!(held.held_chord(), Some((&combo, HeldKeys::WholeChord)));
     assert_matches!(held.effect(), Effect::HeldKey(actual) if actual == &combo);
-    assert_eq!(Action::CustomShortcut(combo).held_combo(), None);
+    assert_eq!(Action::CustomShortcut(combo).held_chord(), None);
+}
+
+/// The switcher case the other two shortcut actions cannot express: the
+/// modifiers are held for the press while the ordinary key is tapped once.
+#[test]
+fn tap_key_holding_modifiers_holds_only_the_modifiers() {
+    let combo: KeyCombo = "Cmd+Tab".parse().expect("valid shortcut failed");
+    let action = Action::TapKeyHoldingModifiers(combo.clone());
+
+    assert_eq!(action.label(), "Hold Cmd, tap Tab");
+    assert_eq!(action.category(), Category::Editing);
+    assert_eq!(action.held_chord(), Some((&combo, HeldKeys::ModifiersOnly)));
+
+    // Same chord, same one-shot fallback, different held set. The two actions
+    // are distinguishable only through `held_chord`.
+    assert_matches!(action.effect(), Effect::HeldKey(actual) if actual == &combo);
+    assert_eq!(
+        Action::HoldShortcut(combo)
+            .held_chord()
+            .map(|(_, keys)| keys),
+        Some(HeldKeys::WholeChord)
+    );
+}
+
+/// A chord with no modifier has nothing to hold, so its label drops the
+/// "Hold" half rather than rendering an empty one.
+#[test]
+fn tap_key_holding_modifiers_labels_a_bare_key_without_a_hold() {
+    let action = Action::TapKeyHoldingModifiers("F5".parse().expect("valid shortcut failed"));
+    assert_eq!(action.label(), "Tap F5");
+}
+
+#[test]
+fn tap_key_holding_modifiers_roundtrips_toml() {
+    let action = Action::TapKeyHoldingModifiers("Cmd+Tab".parse().expect("valid shortcut failed"));
+    assert_eq!(roundtrip(&action), action);
 }
 
 #[test]
@@ -149,7 +198,7 @@ fn actions_ring_is_available_to_normal_and_gesture_pickers() {
 
 /// On-disk shape: a `ButtonId` → [`Binding`] map, as `DeviceConfig.bindings`
 /// serializes it.
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct BindingWrapper {
     bindings: BTreeMap<ButtonId, Binding>,
 }
@@ -213,10 +262,54 @@ fn binding_long_press_roundtrips_without_overlapping_other_table_shapes() {
 #[test]
 fn binding_long_press_requires_exact_short_and_long_fields() {
     let missing_long = "[bindings.Back]\nshort = \"Copy\"";
-    assert!(toml::from_str::<BindingWrapper>(missing_long).is_err());
+    toml::from_str::<BindingWrapper>(missing_long).expect_err("a long press needs both halves");
 
     let unknown = "[bindings.Back]\nshort = \"Copy\"\nlong = \"Paste\"\nthreshold_ms = 900";
-    assert!(toml::from_str::<BindingWrapper>(unknown).is_err());
+    toml::from_str::<BindingWrapper>(unknown).expect_err("a long press rejects unknown fields");
+}
+
+#[test]
+fn binding_wheel_hold_roundtrips_without_overlapping_other_table_shapes() {
+    let binding = Binding::WheelHold(WheelHoldBinding::horizontal_scroll(Action::BrowserBack));
+    let back = binding_roundtrip(BTreeMap::from([(ButtonId::Back, binding.clone())]));
+    assert_eq!(back[&ButtonId::Back], binding);
+
+    let toml = toml::to_string_pretty(&BindingWrapper { bindings: back }).expect("serialize");
+    assert!(toml.contains("click = \"BrowserBack\""));
+    assert!(toml.contains("wheel = \"HorizontalScroll\""));
+    assert!(!toml.contains("WheelHold"));
+}
+
+#[test]
+fn binding_wheel_hold_requires_exact_click_and_wheel_fields() {
+    // Lowercase `click` is not the `Click` gesture direction: without `wheel`
+    // the table is no binding at all rather than a one-armed gesture map.
+    let missing_wheel = "[bindings.Back]\nclick = \"Copy\"";
+    toml::from_str::<BindingWrapper>(missing_wheel).expect_err("a wheel hold needs its wheel");
+
+    let unknown_wheel = "[bindings.Back]\nclick = \"Copy\"\nwheel = \"Zoom\"";
+    toml::from_str::<BindingWrapper>(unknown_wheel)
+        .expect_err("a wheel hold rejects a wheel behavior it does not know");
+
+    let unknown =
+        "[bindings.Back]\nclick = \"Copy\"\nwheel = \"HorizontalScroll\"\nlong = \"Paste\"";
+    toml::from_str::<BindingWrapper>(unknown).expect_err("a wheel hold rejects unknown fields");
+}
+
+#[test]
+fn wheel_hold_clicks_with_its_click_action_and_has_no_directions() {
+    let mut binding = Binding::WheelHold(WheelHoldBinding::horizontal_scroll(Action::Copy));
+    assert!(binding.is_wheel_hold());
+    assert!(!binding.is_gesture());
+    assert_eq!(binding.click_action(), Action::Copy);
+    assert_eq!(binding.direction_action(GestureDirection::Click), None);
+    assert!(!Binding::Single(Action::Copy).is_wheel_hold());
+
+    binding.upgrade_to_gesture();
+    assert_eq!(
+        binding,
+        Binding::Gesture(BTreeMap::from([(GestureDirection::Click, Action::Copy)]))
+    );
 }
 
 /// The untagged-routing safety guard. A TOML table keyed by ANY
@@ -296,11 +389,25 @@ fn all_catalog_variants_roundtrip_toml() {
     }
 }
 
+/// The variant name `action` is stored under in `config.toml`.
+fn persisted_name(action: Action) -> String {
+    match toml::Value::try_from(action).expect("serialize action") {
+        toml::Value::String(name) => name,
+        toml::Value::Table(table) if table.len() == 1 => table
+            .into_iter()
+            .next()
+            .map(|(key, _)| key)
+            .expect("one variant key"),
+        value => panic!("unexpected action shape: {value:?}"),
+    }
+}
+
 #[test]
 fn persisted_action_variant_names_are_stable() {
     let mut actions = Action::catalog();
     actions.extend([
         Action::SetDpiPreset(0),
+        Action::DpiShift,
         Action::CustomShortcut(
             "F1".parse()
                 .unwrap_or_else(|error| panic!("valid shortcut failed: {error}")),
@@ -317,21 +424,13 @@ fn persisted_action_variant_names_are_stable() {
             "F2".parse()
                 .unwrap_or_else(|error| panic!("valid shortcut failed: {error}")),
         ),
+        Action::TapKeyHoldingModifiers(
+            "Cmd+Tab"
+                .parse()
+                .unwrap_or_else(|error| panic!("valid shortcut failed: {error}")),
+        ),
     ]);
-    let mut actual: Vec<String> = actions
-        .into_iter()
-        .map(
-            |action| match toml::Value::try_from(action).expect("serialize action") {
-                toml::Value::String(name) => name,
-                toml::Value::Table(table) if table.len() == 1 => table
-                    .into_iter()
-                    .next()
-                    .map(|(key, _)| key)
-                    .expect("one variant key"),
-                value => panic!("unexpected action shape: {value:?}"),
-            },
-        )
-        .collect();
+    let mut actual: Vec<String> = actions.into_iter().map(persisted_name).collect();
     actual.sort();
     let mut expected = [
         "AppExpose",
@@ -343,6 +442,7 @@ fn persisted_action_variant_names_are_stable() {
         "CustomShortcut",
         "Cut",
         "CycleDpiPresets",
+        "DpiShift",
         "Find",
         "HorizontalScrollLeft",
         "HorizontalScrollRight",
@@ -357,6 +457,8 @@ fn persisted_action_variant_names_are_stable() {
         "MuteVolume",
         "NewTab",
         "NextDesktop",
+        "NextDpiPreset",
+        "NextKeypadPage",
         "NextTab",
         "NextTrack",
         "None",
@@ -366,6 +468,8 @@ fn persisted_action_variant_names_are_stable() {
         "PrevTab",
         "PrevTrack",
         "PreviousDesktop",
+        "PreviousDpiPreset",
+        "PreviousKeypadPage",
         "Redo",
         "ReloadPage",
         "ReopenTab",
@@ -381,6 +485,8 @@ fn persisted_action_variant_names_are_stable() {
         "ShowActionsRing",
         "ShowDesktop",
         "Sleep",
+        "TapKeyHoldingModifiers",
+        "TogglePrecisionMode",
         "ToggleSmartShift",
         "TypeText",
         "Undo",
@@ -522,6 +628,26 @@ fn haptic_panel_defaults_to_opening_the_actions_ring() {
 }
 
 #[test]
+fn gesture_mode_includes_middle_click_but_excludes_primary_clicks_and_wheel_motion() {
+    let supported: Vec<_> = ButtonId::ALL
+        .into_iter()
+        .filter(|button| button.supports_gesture_mode())
+        .collect();
+
+    assert_eq!(
+        supported,
+        vec![
+            ButtonId::MiddleClick,
+            ButtonId::Back,
+            ButtonId::Forward,
+            ButtonId::DpiToggle,
+            ButtonId::GestureButton,
+            ButtonId::HapticPanel,
+        ]
+    );
+}
+
+#[test]
 fn wheel_tilt_defaults_to_the_scroll_its_firmware_already_does() {
     // The seed has to match the native behavior on both sides: the capture
     // plan diverts a control only when its binding leaves the default, so any
@@ -593,6 +719,13 @@ fn power_user_and_device_side_actions_lower_to_the_expected_bucket() {
     );
     assert_matches!(hold_shortcut.effect(), Effect::HeldKey(_));
 
+    let tap_key_holding_modifiers = Action::TapKeyHoldingModifiers(
+        "Cmd+Tab"
+            .parse()
+            .unwrap_or_else(|error| panic!("valid shortcut failed: {error}")),
+    );
+    assert_matches!(tap_key_holding_modifiers.effect(), Effect::HeldKey(_));
+
     let type_text = Action::TypeText("hi".into());
     assert_matches!(type_text.effect(), Effect::Text("hi"));
 
@@ -641,4 +774,230 @@ fn scroll_actions_lower_to_unit_direction() {
         Action::HorizontalScrollRight.effect(),
         Effect::Scroll { dx: 1, dy: 0 }
     );
+}
+
+// ── ButtonId persistence ─────────────────────────────────────────────────
+
+#[test]
+fn button_ids_persist_as_their_config_names() {
+    let mut bindings = BTreeMap::new();
+    bindings.insert(ButtonId::MiddleClick, Binding::Single(Action::Copy));
+    bindings.insert(
+        ButtonId::control(0x010a),
+        Binding::Single(Action::Screenshot),
+    );
+    bindings.insert(ButtonId::control(0x01f3), Binding::Single(Action::Paste));
+    let toml = toml::to_string_pretty(&BindingWrapper {
+        bindings: bindings.clone(),
+    })
+    .expect("serialize");
+
+    assert!(toml.contains("MiddleClick = \"Copy\""), "{toml}");
+    assert!(toml.contains("KeyScreenCapture = \"Screenshot\""), "{toml}");
+    assert!(toml.contains("\"control:0x01f3\" = \"Paste\""), "{toml}");
+    assert_eq!(binding_roundtrip(bindings.clone()), bindings);
+}
+
+/// Grid keys persist by position name, and that table must be the same mapping
+/// the device layer reads the wire index through — both directions are locked.
+#[test]
+fn grid_keys_persist_by_position_name() {
+    let mut bindings = BTreeMap::new();
+    bindings.insert(
+        ButtonId::grid(GridKey::Middle),
+        Binding::Single(Action::Screenshot),
+    );
+    bindings.insert(
+        ButtonId::grid(GridKey::BottomRight),
+        Binding::Single(Action::Copy),
+    );
+    bindings.insert(
+        ButtonId::Grid(GridSlot {
+            page: KeypadPage::new(3).unwrap(),
+            key: GridKey::Middle,
+        }),
+        Binding::Single(Action::Paste),
+    );
+
+    let toml = toml::to_string_pretty(&BindingWrapper {
+        bindings: bindings.clone(),
+    })
+    .expect("serialize");
+    assert!(toml.contains("gridMiddle = \"Screenshot\""), "{toml}");
+    assert!(toml.contains("gridBottomRight = \"Copy\""), "{toml}");
+    assert!(toml.contains("\"page3:gridMiddle\" = \"Paste\""), "{toml}");
+    assert_eq!(binding_roundtrip(bindings.clone()), bindings);
+}
+
+/// Every slot has exactly one spelling: page 1 is the bare position name, so
+/// `page1:` is refused rather than aliased, and a page outside `2..=15`, a
+/// signed or empty number, or an unknown position names no button.
+#[test]
+fn grid_slot_names_have_one_spelling_each() {
+    for page in KeypadPage::MAX.through() {
+        for key in GridKey::ALL {
+            let button = ButtonId::Grid(GridSlot { page, key });
+            assert_eq!(
+                button.config_name().parse::<ButtonId>(),
+                Ok(button),
+                "{button:?}"
+            );
+        }
+    }
+    for refused in [
+        "page1:gridMiddle",
+        "page0:gridMiddle",
+        "page16:gridMiddle",
+        "page+2:gridMiddle",
+        "page:gridMiddle",
+        "page2:gridCentre",
+        "page2gridMiddle",
+    ] {
+        assert!(refused.parse::<ButtonId>().is_err(), "{refused}");
+    }
+}
+
+#[test]
+fn keypad_pages_wrap_within_the_last_page() {
+    let page = |n| KeypadPage::new(n).unwrap();
+    assert_eq!(page(1).next_within(page(3)), page(2));
+    assert_eq!(page(3).next_within(page(3)), page(1));
+    assert_eq!(page(1).previous_within(page(3)), page(3));
+    assert_eq!(page(2).previous_within(page(3)), page(1));
+    // One page: both directions stay put.
+    assert_eq!(page(1).next_within(page(1)), page(1));
+    assert_eq!(page(1).previous_within(page(1)), page(1));
+    // A page past a shrunken count re-enters the range at its nearest end.
+    assert_eq!(page(5).next_within(page(3)), page(1));
+    assert_eq!(page(5).previous_within(page(3)), page(3));
+    assert_eq!(page(4).through().count(), 4);
+}
+
+#[test]
+fn keypad_page_numbers_are_bounded_on_input() {
+    #[derive(Debug, Deserialize)]
+    struct Pages {
+        pages: KeypadPage,
+    }
+    assert!(KeypadPage::new(0).is_none());
+    assert!(KeypadPage::new(16).is_none());
+    assert_eq!(KeypadPage::MAX.number(), 15);
+    assert_eq!(
+        toml::from_str::<Pages>("pages = 4").unwrap().pages,
+        KeypadPage::new(4).unwrap()
+    );
+    toml::from_str::<Pages>("pages = 0").unwrap_err();
+    toml::from_str::<Pages>("pages = 16").unwrap_err();
+}
+
+/// The row-major pinning the grid-key probe's mapping run verified: the
+/// declaration order is the wire order, indexes are exactly `1..=9`, and the
+/// name table is injective so config bindings can be keyed by it.
+#[test]
+fn grid_key_index_mapping_is_row_major_and_total() {
+    let mut names = std::collections::HashSet::new();
+    for (position, key) in GridKey::ALL.iter().enumerate() {
+        let index = u8::try_from(position).expect("nine keys") + 1;
+        assert_eq!(key.index(), index, "{key:?} wire index");
+        assert_eq!(GridKey::from_index(index), Some(*key));
+        assert!(names.insert(key.config_name()), "duplicate name");
+        assert_eq!(GridKey::from_config_name(key.config_name()), Some(*key));
+    }
+    assert_eq!(GridKey::from_index(0), None);
+    assert_eq!(GridKey::from_index(10), None);
+}
+
+/// The GUI's keycap grid draws from `position`, so it must agree with the
+/// wire numbering: row-major, three by three, every cell used once.
+#[test]
+fn grid_key_positions_are_the_row_major_grid_the_device_reports() {
+    let mut cells = std::collections::HashSet::new();
+    for key in GridKey::ALL {
+        let position = key.position();
+        assert_eq!(
+            position.row * 3 + position.col,
+            u16::from(key.index()) - 1,
+            "{key:?} position"
+        );
+        cells.insert(position);
+    }
+    assert_eq!(cells.len(), 9, "the nine keys fill distinct cells");
+    let grid = openlogi_device_registry::keypad::MX_CREATIVE_KEYPAD_GRID;
+    assert!(cells.iter().all(|cell| grid.contains(*cell)));
+}
+
+#[test]
+fn the_original_key_names_still_load_as_controls() {
+    // Files written by 0.7–0.8.9 name keyboard keys with these variants; the
+    // catalog keeps every name so those files load unchanged.
+    let parsed: BindingWrapper = toml::from_str(
+        r#"
+        [bindings]
+        KeySearch = "MissionControl"
+        KeyDictation = "Copy"
+        KeyEmoji = "Copy"
+        KeyScreenCapture = "Sleep"
+        KeyMicMute = "Copy"
+        KeyPlayPause = "Copy"
+        KeyMute = "Copy"
+        KeyVolumeDown = "Copy"
+        KeyVolumeUp = "Copy"
+        "#,
+    )
+    .expect("legacy key names parse");
+    let keys: Vec<u16> = parsed
+        .bindings
+        .keys()
+        .map(|button| button.cid().expect("a keyboard key").raw())
+        .collect();
+    assert_eq!(
+        keys,
+        [
+            0x00d4, 0x00e5, 0x00e7, 0x00e8, 0x00e9, 0x0103, 0x0108, 0x010a, 0x011c
+        ]
+    );
+    assert_eq!(
+        parsed.bindings[&ButtonId::control(0x010a)],
+        Binding::Single(Action::Sleep)
+    );
+}
+
+#[test]
+fn unknown_button_names_are_rejected_not_ignored() {
+    toml::from_str::<BindingWrapper>("[bindings]\nKeyBogus = \"Copy\"\n")
+        .expect_err("an unknown button name must fail the whole map");
+    toml::from_str::<BindingWrapper>("[bindings]\n\"control:010a\" = \"Copy\"\n")
+        .expect_err("the numeric form requires the 0x prefix");
+    "Control(266)"
+        .parse::<ButtonId>()
+        .expect_err("the Rust debug shape is not a config name");
+}
+
+#[test]
+fn mouse_buttons_sort_ahead_of_every_keyboard_control() {
+    assert!(ButtonId::WheelTiltRight < ButtonId::control(0x0001));
+    assert!(ButtonId::control(0x00e5) < ButtonId::control(0x0141));
+    assert_eq!(ButtonId::control(0x010a).to_string(), "Screen Capture Key");
+    assert_eq!(ButtonId::control(0x01f3).to_string(), "Control 0x01f3");
+    // Every unit variant has a persisted name and round-trips through it.
+    for button in ButtonId::ALL {
+        assert_eq!(button.config_name().parse::<ButtonId>(), Ok(button));
+    }
+    assert_eq!(default_binding(ButtonId::control(0x01f3)), Action::None);
+}
+
+#[test]
+fn a_key_shows_its_press_action_or_nothing_when_unbound() {
+    let long_press = |short, long| Binding::LongPress(LongPressBinding::new(short, long));
+    let cases = [
+        (Binding::Single(Action::None), None),
+        (Binding::Single(Action::Copy), Some(Action::Copy)),
+        (long_press(Action::Copy, Action::Paste), Some(Action::Copy)),
+        (long_press(Action::None, Action::Paste), Some(Action::Paste)),
+        // A long press does something whatever its arms hold.
+        (long_press(Action::None, Action::None), Some(Action::None)),
+    ];
+    for (binding, shown) in cases {
+        assert_eq!(binding.key_action(), shown, "{binding:?}");
+    }
 }

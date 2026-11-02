@@ -9,4 +9,4 @@ enumeration grace — is [`crates/openlogi-device/AGENTS.md`](../openlogi-device
 read it before changing this crate. Serde types here ride the IPC wire
 ([`crates/openlogi-ipc/AGENTS.md`](../openlogi-ipc/AGENTS.md)), and the
 cfg-gated platform code falls under
-[`.claude/rules/cross-platform.md`](../../.claude/rules/cross-platform.md).
+[`.agents/rules/cross-platform.md`](../../.agents/rules/cross-platform.md).

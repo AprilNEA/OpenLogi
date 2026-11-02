@@ -15,10 +15,10 @@ use gpui_component::{
     v_flex,
 };
 
-use super::catalog::{AppCatalogPicker, AppIconState, ProfileIconCache};
+use super::catalog::{AppCatalogPicker, ApplicationIconState, ProfileIconCache};
 use super::shell::application_mark;
 use super::{AddAppChoices, CatalogPresentation, ProfileChoice, ProfileScopeActions};
-use crate::features::mouse::picker::{compact_panel, divider, title};
+use crate::features::binding_editor::{compact_panel, divider, title};
 use crate::ui::components::{MenuRow, control_button, control_input};
 use crate::ui::theme::{self, Palette, SelectableStyle as _, Typography as _};
 
@@ -83,7 +83,7 @@ fn add_app_content(
     let list_scroll = catalog_state.list_scroll();
     catalog.update(cx, |picker, cx| {
         for choice in &choices.recent {
-            picker.ensure_icon(&choice.app, cx);
+            picker.ensure_icon(&choice.icon, cx);
         }
     });
     let recent_rows = choices
@@ -92,7 +92,7 @@ fn add_app_content(
         .filter(|choice| profile_matches_query(choice, &query))
         .cloned()
         .map(|choice| {
-            let icon = icons.state(&choice.app);
+            let icon = icons.state(&choice.icon);
             application_row(id_base, choice, icon, actions.clone(), pal, popover.clone())
         })
         .collect::<Vec<_>>();
@@ -184,6 +184,7 @@ fn catalog_list(
 ) -> gpui::Div {
     let count = rows.len();
     div()
+        .relative()
         .h(px(application_list_height(count)))
         .w_full()
         .child(
@@ -193,8 +194,8 @@ fn catalog_list(
                         visible_range
                             .map(|index| {
                                 let choice = rows[index].clone();
-                                picker.ensure_icon(&choice.app, cx);
-                                let icon = picker.icon_state(&choice.app);
+                                picker.ensure_icon(&choice.icon, cx);
+                                let icon = picker.icon_state(&choice.icon);
                                 application_row(
                                     id_base,
                                     choice,
@@ -227,6 +228,7 @@ fn applications_toggle(
         .w_full()
         .flex()
         .items_center()
+        .justify_start()
         .gap_2()
         .px_2()
         .py_1p5()
@@ -285,15 +287,17 @@ fn profile_matches_query(choice: &ProfileChoice, query: &str) -> bool {
 fn application_row(
     id_base: &'static str,
     choice: ProfileChoice,
-    icon: AppIconState,
+    icon: ApplicationIconState,
     actions: ProfileScopeActions,
     pal: Palette,
     popover: WeakEntity<PopoverState>,
 ) -> gpui::Div {
     let app = choice.app.clone();
+    let aria_label = format!("{}: {}", choice.name, choice.app);
     div().h(px(APP_ROW_H)).child(
         MenuRow::new(format!("{id_base}:catalog-app:{}", choice.app))
             .role(Role::MenuItem)
+            .aria_label(aria_label)
             .child(
                 h_flex()
                     .min_w_0()
@@ -357,7 +361,7 @@ mod tests {
     use gpui_component::popover::Popover;
 
     use super::APP_ROW_H;
-    use crate::features::mouse::picker::compact_panel;
+    use crate::features::binding_editor::compact_panel;
     use crate::ui::components::MenuRow;
     use crate::ui::theme;
 

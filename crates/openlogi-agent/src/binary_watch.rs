@@ -43,7 +43,7 @@ use crate::shutdown::{ShutdownRequest, ShutdownRequestSender};
 
 /// How often to stat the executable: one `metadata` call per tick — noise next
 /// to the 2 s HID enumerate — while keeping the update-to-restart window short.
-const PERIOD: Duration = Duration::from_secs(10);
+const BINARY_CHECK_PERIOD: Duration = Duration::from_secs(10);
 
 /// What "the binary changed" means: a different size or mtime at the same
 /// path. Every real update path rewrites the file, so content hashing would
@@ -79,9 +79,10 @@ fn sight(path: &Path) -> Sighting {
 }
 
 /// How many consecutive ticks with nothing at our path mean the app is gone
-/// rather than being replaced. At [`PERIOD`] that is 30 s of absence — far
-/// longer than the unlink/write window of any install path, and short enough
-/// that an uninstall does not leave an armed event tap behind for long.
+/// rather than being replaced. At [`BINARY_CHECK_PERIOD`] that is 30 s of
+/// absence — far longer than the unlink/write window of any install path, and
+/// short enough that an uninstall does not leave an armed event tap behind for
+/// long.
 const MISSING_TICKS_UNTIL_GONE: u32 = 3;
 
 /// What one watch tick concluded.
@@ -195,7 +196,7 @@ pub fn spawn(requests: ShutdownRequestSender) {
         .name("openlogi-binary-watch".into())
         .spawn(move || {
             loop {
-                std::thread::sleep(PERIOD);
+                std::thread::sleep(BINARY_CHECK_PERIOD);
                 match watch.tick(baseline, sight(&path)) {
                     Tick::Watch => {}
                     Tick::Restart => {

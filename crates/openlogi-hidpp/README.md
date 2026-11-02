@@ -40,4 +40,15 @@ Each wrapper encodes/decodes the official wire format, models domain values with
 enums/bitflags/newtypes, returns `Hidpp20Error::UnsupportedResponse` for unknown
 wire values rather than guessing, and is unit-tested against the published spec.
 
+### Disable Keys integration
+
+`DisableKeys` (`0x4521`) is used beyond this protocol wrapper: OpenLogi's device
+layer reads the supported mask, preserves advertised unknown disabled bits, and
+confirms writes by reading them back. The agent serializes manual and lifecycle
+writes on the inventory-owned channel. The desktop's capability-gated Device
+card saves only confirmed known keys. See [Disabled keys configuration and
+recovery](../../docs/CONFIGURATION.md#disabled-keys) for supported controls,
+persistence, and reconnect behavior. `DisableKeysByUsage` is a separate feature;
+this card does not provide arbitrary key remapping.
+
 [`feature::registry`]: ./src/feature/registry.rs

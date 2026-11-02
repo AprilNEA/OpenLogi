@@ -1,0 +1,662 @@
+//! One device's stored settings, a field at a time: the getters and setters
+//! that address a [`DeviceConfig`](super::DeviceConfig) entry by its config key.
+//!
+//! A getter answers for a device with no entry the way a fresh entry would, and
+//! a setter creates the entry it needs. Settings with rules of their own live
+//! beside this file: gesture mode in [`gestures`](super::gestures),
+//! per-application profiles in [`per_app`](super::per_app).
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use super::{
+    CameraControls, CameraStreamMode, Config, DeviceIdentity, DisableKey, LightSettings, Lighting,
+    MomentumScrolling, OnboardMemory, ScrollResolution, SmartShift, ThumbwheelSensitivity,
+};
+use crate::binding::{
+    Action, ActionRingConfig, ActionRingIcon, ActionRingSlot, Binding, ButtonId, GamingLayout,
+    KeypadPage, RingAction, default_binding_on,
+};
+use crate::hid::{Dpi, PointerSpeed, ReportRate};
+
+impl Config {
+    /// The bindings stored for `device_key` as they were committed, or an
+    /// empty map when the device has none yet. The effective per-button map,
+    /// with defaults and the per-app overlay applied, is
+    /// [`crate::bindings::bindings_for`].
+    #[must_use]
+    pub fn stored_bindings(&self, device_key: &str) -> BTreeMap<ButtonId, Binding> {
+        self.devices
+            .get(device_key)
+            .map(|d| d.bindings.clone())
+            .unwrap_or_default()
+    }
+
+    /// Records `binding` for `button` on `device_key`, creating the device
+    /// entry if needed. Replaces the whole binding (use
+    /// [`Self::set_gesture_direction`] to edit one direction of a gesture
+    /// binding in place).
+    pub fn set_binding(&mut self, device_key: &str, button: ButtonId, binding: Binding) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .bindings
+            .insert(button, binding);
+    }
+
+    /// Actions Ring settings for `device_key`, falling back to defaults when
+    /// the device has no saved ring configuration.
+    #[must_use]
+    pub fn action_ring(&self, device_key: &str) -> ActionRingConfig {
+        self.devices
+            .get(device_key)
+            .map(|device| device.action_ring.clone())
+            .unwrap_or_default()
+    }
+
+    /// Enable or disable `device_key`'s Actions Ring.
+    pub fn set_action_ring_enabled(&mut self, device_key: &str, enabled: bool) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .action_ring
+            .enabled = enabled;
+    }
+
+    /// Enable or disable ring hover and activation haptics.
+    pub fn set_action_ring_haptics(&mut self, device_key: &str, enabled: bool) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .action_ring
+            .haptics = enabled;
+    }
+
+    /// Replace or clear one slot in the default Actions Ring layout.
+    pub fn set_action_ring_slot(
+        &mut self,
+        device_key: &str,
+        slot: ActionRingSlot,
+        action: Option<RingAction>,
+    ) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .action_ring
+            .default
+            .set_action(slot, action);
+    }
+
+    /// Set or restore the action-derived icon for one default ring slot.
+    pub fn set_action_ring_icon(
+        &mut self,
+        device_key: &str,
+        slot: ActionRingSlot,
+        icon: Option<ActionRingIcon>,
+    ) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .action_ring
+            .default
+            .set_icon(slot, icon);
+    }
+
+    /// The ordered DPI preset list for `device_key`, or an empty `Vec` if the
+    /// device has none configured yet.
+    #[must_use]
+    pub fn dpi_presets(&self, device_key: &str) -> Vec<Dpi> {
+        self.devices
+            .get(device_key)
+            .map(|d| d.dpi_presets.clone())
+            .unwrap_or_default()
+    }
+
+    /// Replace the DPI preset list for `device_key`. Pass an empty `Vec` to
+    /// clear (the device block is kept; the field is just omitted on save
+    /// thanks to `skip_serializing_if`).
+    pub fn set_dpi_presets(&mut self, device_key: &str, presets: Vec<Dpi>) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .dpi_presets = presets;
+    }
+
+    /// The last-known [`DeviceIdentity`] for `device_key`, or `None` if the
+    /// device has never been seen online (or was configured before identities
+    /// were recorded).
+    #[must_use]
+    pub fn device_identity(&self, device_key: &str) -> Option<&DeviceIdentity> {
+        self.devices
+            .get(device_key)
+            .and_then(|d| d.identity.as_ref())
+    }
+
+    /// Record (or refresh) the identity captured for `device_key` while it was
+    /// online, creating the device entry if needed.
+    pub fn set_device_identity(&mut self, device_key: &str, identity: DeviceIdentity) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .identity = Some(identity.without_unit_identifiers());
+    }
+
+    /// Drop everything recorded for `device_key` — identity, custom name, and
+    /// per-device settings. Returns whether an entry existed.
+    pub fn remove_device(&mut self, device_key: &str) -> bool {
+        self.devices.remove(device_key).is_some()
+    }
+
+    /// The user-assigned name for `device_key`, if one is configured.
+    #[must_use]
+    pub fn device_custom_name(&self, device_key: &str) -> Option<&str> {
+        self.devices
+            .get(device_key)
+            .and_then(|device| device.custom_name.as_deref())
+    }
+
+    /// Set the user-assigned name for `device_key`, or clear it to use the
+    /// hardware model name again.
+    pub fn set_device_custom_name(&mut self, device_key: &str, custom_name: Option<String>) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .custom_name = custom_name;
+    }
+
+    /// Iterate every device we've recorded an identity for, as
+    /// `(config_key, identity)`. Used to seed offline placeholder cards so a
+    /// known device stays visible (with its panels) before any live probe.
+    pub fn known_identities(&self) -> impl Iterator<Item = (&str, &DeviceIdentity)> {
+        self.devices
+            .iter()
+            .filter_map(|(k, d)| d.identity.as_ref().map(|i| (k.as_str(), i)))
+    }
+
+    /// The lighting config for `device_key`, or `None` if unset.
+    #[must_use]
+    pub fn lighting(&self, device_key: &str) -> Option<Lighting> {
+        self.devices
+            .get(device_key)
+            .and_then(|d| d.lighting.clone())
+    }
+
+    /// Replace the lighting config for `device_key`.
+    pub fn set_lighting(&mut self, device_key: &str, lighting: Lighting) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .lighting = Some(lighting);
+    }
+
+    /// The saved UVC image controls for `device_key`, or `None` if never set.
+    #[must_use]
+    pub fn camera_controls(&self, device_key: &str) -> Option<CameraControls> {
+        self.devices
+            .get(device_key)
+            .and_then(|d| d.camera_controls.clone())
+    }
+
+    /// Replace the saved UVC image controls for `device_key`.
+    pub fn set_camera_controls(&mut self, device_key: &str, controls: CameraControls) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .camera_controls = Some(controls);
+    }
+
+    /// The saved custom camera profiles for `device_key` (name → snapshot).
+    #[must_use]
+    pub fn camera_profiles(&self, device_key: &str) -> BTreeMap<String, CameraControls> {
+        self.devices
+            .get(device_key)
+            .map(|d| d.camera_profiles.clone())
+            .unwrap_or_default()
+    }
+
+    /// Save (or overwrite) a custom camera profile for `device_key`.
+    pub fn save_camera_profile(&mut self, device_key: &str, name: &str, snap: CameraControls) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .camera_profiles
+            .insert(name.to_string(), snap);
+    }
+
+    /// Delete a custom camera profile, clearing the active selection if it
+    /// named it. Unknown names are a no-op.
+    pub fn delete_camera_profile(&mut self, device_key: &str, name: &str) {
+        if let Some(device) = self.devices.get_mut(device_key) {
+            device.camera_profiles.remove(name);
+            if device.camera_profile.as_deref() == Some(name) {
+                device.camera_profile = None;
+            }
+        }
+    }
+
+    /// The last-applied camera profile name for `device_key`, if any.
+    #[must_use]
+    pub fn camera_active_profile(&self, device_key: &str) -> Option<String> {
+        self.devices
+            .get(device_key)
+            .and_then(|d| d.camera_profile.clone())
+    }
+
+    /// Record which camera profile `device_key` last applied.
+    pub fn set_camera_active_profile(&mut self, device_key: &str, name: Option<String>) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .camera_profile = name;
+    }
+
+    /// The frame size and rate saved for `device_key`'s live preview, or
+    /// `None` when the user never picked one.
+    #[must_use]
+    pub fn camera_stream_mode(&self, device_key: &str) -> Option<CameraStreamMode> {
+        self.devices
+            .get(device_key)
+            .and_then(|d| d.camera_stream_mode)
+    }
+
+    /// Record the frame size and rate `device_key`'s live preview opens at.
+    pub fn set_camera_stream_mode(&mut self, device_key: &str, mode: CameraStreamMode) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .camera_stream_mode = Some(mode);
+    }
+
+    /// The standalone-light config for `device_key`, or `None` if unset.
+    #[must_use]
+    pub fn light(&self, device_key: &str) -> Option<LightSettings> {
+        self.devices.get(device_key).and_then(|d| d.light)
+    }
+
+    /// Replace the standalone-light config for `device_key`.
+    pub fn set_light(&mut self, device_key: &str, light: LightSettings) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .light = Some(light);
+    }
+
+    /// The committed sensor DPI for `device_key`, or `None` if never set.
+    #[must_use]
+    pub fn dpi(&self, device_key: &str) -> Option<Dpi> {
+        self.devices.get(device_key).and_then(|d| d.dpi)
+    }
+
+    /// Record the committed sensor DPI for `device_key`, so the agent can
+    /// re-apply it when the device reconnects (#189).
+    pub fn set_dpi(&mut self, device_key: &str, dpi: Dpi) {
+        self.devices.entry(device_key.to_string()).or_default().dpi = Some(dpi);
+    }
+
+    /// Known keys managed for `device_key`, or `None` when OpenLogi should not
+    /// change the keyboard's current `DisableKeys` state.
+    #[must_use]
+    pub fn disabled_keys(&self, device_key: &str) -> Option<&BTreeSet<DisableKey>> {
+        self.devices
+            .get(device_key)
+            .and_then(|device| device.disabled_keys.as_ref())
+    }
+
+    /// Persist the complete desired known-key set for `device_key`.
+    pub fn set_disabled_keys(&mut self, device_key: &str, disabled_keys: BTreeSet<DisableKey>) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .disabled_keys = Some(disabled_keys);
+    }
+
+    /// Return `device_key` to unmanaged Disable Keys state.
+    pub fn clear_disabled_keys(&mut self, device_key: &str) {
+        if let Some(device) = self.devices.get_mut(device_key) {
+            device.disabled_keys = None;
+        }
+    }
+
+    /// The SmartShift wheel config for `device_key`, or `None` if never set.
+    #[must_use]
+    pub fn smartshift(&self, device_key: &str) -> Option<SmartShift> {
+        self.devices.get(device_key).and_then(|d| d.smartshift)
+    }
+
+    /// The persisted keyboard Fn-lock state for `device_key`, or `None` when
+    /// the user never set one (the keyboard keeps its own state).
+    #[must_use]
+    pub fn fn_lock(&self, device_key: &str) -> Option<bool> {
+        self.devices.get(device_key).and_then(|d| d.fn_lock)
+    }
+
+    /// Record the keyboard Fn-lock state for `device_key`; the agent writes
+    /// it on reload and re-applies it when the keyboard reconnects.
+    pub fn set_fn_lock(&mut self, device_key: &str, fn_lock: bool) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .fn_lock = Some(fn_lock);
+    }
+
+    /// Whether the agent keeps `device_key`'s key layout on the host OS. On
+    /// unless the user turned it off, as in Logi Options+.
+    #[must_use]
+    pub fn keep_os_layout(&self, device_key: &str) -> bool {
+        self.devices
+            .get(device_key)
+            .and_then(|d| d.keep_os_layout)
+            .unwrap_or(true)
+    }
+    /// Record whether the agent keeps `device_key`'s key layout on the host
+    /// OS.
+    pub fn set_keep_os_layout(&mut self, device_key: &str, keep: bool) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .keep_os_layout = Some(keep);
+    }
+
+    /// The stored onboard memory of `device_key`.
+    #[must_use]
+    pub fn onboard_memory(&self, device_key: &str) -> Option<OnboardMemory> {
+        self.devices.get(device_key).and_then(|d| d.onboard_memory)
+    }
+
+    /// Store the onboard memory of `device_key`.
+    pub fn set_onboard_memory(&mut self, device_key: &str, memory: Option<OnboardMemory>) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .onboard_memory = memory;
+    }
+
+    /// The persisted report rate for `device_key`, or `None` when the user
+    /// never chose one (the device keeps its own rate).
+    #[must_use]
+    pub fn report_rate(&self, device_key: &str) -> Option<ReportRate> {
+        self.devices.get(device_key).and_then(|d| d.report_rate)
+    }
+    /// Record the report rate for `device_key`; the agent re-applies it when
+    /// the device reconnects on a connection that lists it.
+    pub fn set_report_rate(&mut self, device_key: &str, rate: ReportRate) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .report_rate = Some(rate);
+    }
+
+    /// The persisted pointer speed for `device_key`, or `None` when the user
+    /// never chose one (the mouse keeps its own speed).
+    #[must_use]
+    pub fn pointer_speed(&self, device_key: &str) -> Option<PointerSpeed> {
+        self.devices.get(device_key).and_then(|d| d.pointer_speed)
+    }
+
+    /// Record the pointer speed for `device_key`; the agent re-applies it
+    /// when the mouse reconnects.
+    pub fn set_pointer_speed(&mut self, device_key: &str, speed: PointerSpeed) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .pointer_speed = Some(speed);
+    }
+
+    /// The persisted press force for `device_key`'s force-sensing button, or
+    /// `None` when the user never chose one (the device keeps its own force).
+    #[must_use]
+    pub fn force_sensing(&self, device_key: &str) -> Option<u16> {
+        self.devices.get(device_key).and_then(|d| d.force_sensing)
+    }
+
+    /// Record the press force for `device_key`'s force-sensing button; the
+    /// agent re-applies it, clamped into the device's range, when the device
+    /// reconnects.
+    pub fn set_force_sensing(&mut self, device_key: &str, force: u16) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .force_sensing = Some(force);
+    }
+
+    /// The G-Shift layer of `device_key`, if not empty.
+    #[must_use]
+    pub fn gshift_overrides(&self, device_key: &str) -> Option<&BTreeMap<ButtonId, Action>> {
+        self.devices
+            .get(device_key)
+            .map(|d| &d.gshift_bindings)
+            .filter(|bindings| !bindings.is_empty())
+    }
+
+    /// Set or clear a G-Shift binding.
+    pub fn set_gshift_binding(
+        &mut self,
+        device_key: &str,
+        button: ButtonId,
+        action: Option<Action>,
+    ) {
+        let bindings = &mut self
+            .devices
+            .entry(device_key.to_string())
+            .or_default()
+            .gshift_bindings;
+        match action {
+            Some(action) => bindings.insert(button, action),
+            None => bindings.remove(&button),
+        };
+    }
+
+    /// Whether `device_key` uses G-Shift.
+    #[must_use]
+    pub fn uses_gshift(&self, device_key: &str) -> bool {
+        self.devices.get(device_key).is_some_and(|device| {
+            !device.gshift_bindings.is_empty()
+                || device.bindings.values().any(Binding::is_gshift)
+                || device
+                    .per_app_bindings
+                    .values()
+                    .flat_map(BTreeMap::values)
+                    .any(|action| *action == Action::GShift)
+        })
+    }
+
+    /// The stored choice, else host mode when a setting needs it.
+    #[must_use]
+    pub fn effective_onboard_memory(
+        &self,
+        device_key: &str,
+        layout: Option<&GamingLayout>,
+    ) -> Option<OnboardMemory> {
+        let device = self.devices.get(device_key)?;
+        if device.onboard_memory.is_some() {
+            return device.onboard_memory;
+        }
+        let layout = layout?;
+        let customized = |button: &ButtonId, binding: &Binding| {
+            layout.needs_host_mode(*button)
+                && (!matches!(binding, Binding::Single(_))
+                    || binding.click_action() != default_binding_on(Some(layout), *button))
+        };
+        let needs_host = device.report_rate.is_some()
+            || self.uses_gshift(device_key)
+            || device
+                .bindings
+                .iter()
+                .any(|(b, binding)| customized(b, binding))
+            || device
+                .per_app_bindings
+                .values()
+                .flatten()
+                .any(|(b, action)| customized(b, &Binding::Single(action.clone())));
+        needs_host.then_some(OnboardMemory::Off)
+    }
+
+    /// Record the SmartShift wheel config for `device_key`, so the agent can
+    /// re-apply it when the device reconnects (#189).
+    pub fn set_smartshift(&mut self, device_key: &str, smartshift: SmartShift) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .smartshift = Some(smartshift);
+    }
+
+    /// Whether `device_key`'s scroll wheel is inverted (issue #126). `false`
+    /// (the native direction) for an unconfigured or absent device.
+    #[must_use]
+    pub fn invert_scroll(&self, device_key: &str) -> bool {
+        self.devices
+            .get(device_key)
+            .is_some_and(|d| d.invert_scroll)
+    }
+
+    /// Set whether `device_key`'s scroll wheel is inverted. The agent reads this
+    /// on the next `ReloadConfig` and applies it in the OS hook.
+    pub fn set_invert_scroll(&mut self, device_key: &str, invert: bool) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .invert_scroll = invert;
+    }
+
+    /// The configured wheel resolution for `device_key`, or `None` when
+    /// OpenLogi should leave the device's current resolution unchanged.
+    #[must_use]
+    pub fn scroll_resolution(&self, device_key: &str) -> Option<ScrollResolution> {
+        self.devices
+            .get(device_key)
+            .and_then(|device| device.scroll_resolution)
+    }
+
+    /// Set the wheel resolution OpenLogi should restore for `device_key`.
+    /// Passing `None` returns the device to its unmanaged default state.
+    pub fn set_scroll_resolution(
+        &mut self,
+        device_key: &str,
+        resolution: Option<ScrollResolution>,
+    ) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .scroll_resolution = resolution;
+    }
+
+    /// Whether OpenLogi manages `device_key` at all (capture + volatile
+    /// re-apply). Unconfigured devices are managed.
+    #[must_use]
+    pub fn device_enabled(&self, device_key: &str) -> bool {
+        self.devices.get(device_key).is_none_or(|d| d.enabled)
+    }
+
+    /// Enable or disable OpenLogi's management of `device_key`.
+    pub fn set_device_enabled(&mut self, device_key: &str, enabled: bool) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .enabled = enabled;
+    }
+
+    /// The last of `device_key`'s keypad binding pages — its page count.
+    /// One page for any device that never had more.
+    #[must_use]
+    pub fn keypad_pages(&self, device_key: &str) -> KeypadPage {
+        self.devices
+            .get(device_key)
+            .map_or(KeypadPage::FIRST, |device| device.keypad_pages)
+    }
+
+    /// Give `device_key` pages `1..=last`. Shrinking drops every grid binding
+    /// on a removed page — device-wide and in each per-app overlay — so a
+    /// page re-added later starts empty instead of resurrecting old keys.
+    pub fn set_keypad_pages(&mut self, device_key: &str, last: KeypadPage) {
+        let device = self.devices.entry(device_key.to_string()).or_default();
+        device.keypad_pages = last;
+        let kept = |button: &ButtonId| button.grid_slot().is_none_or(|slot| slot.page <= last);
+        device.bindings.retain(|button, _| kept(button));
+        device.disabled_gestures.retain(|button, _| kept(button));
+        for overlay in device.per_app_bindings.values_mut() {
+            overlay.retain(|button, _| kept(button));
+        }
+    }
+
+    /// Whether any grid key on `page` of `device_key` is bound — device-wide
+    /// or in any per-app overlay — i.e. whether shrinking past `page`
+    /// ([`Self::set_keypad_pages`]) would drop a binding.
+    #[must_use]
+    pub fn keypad_page_binds(&self, device_key: &str, page: KeypadPage) -> bool {
+        let Some(device) = self.devices.get(device_key) else {
+            return false;
+        };
+        let on_page = |button: &ButtonId| button.grid_slot().is_some_and(|slot| slot.page == page);
+        device
+            .bindings
+            .iter()
+            .any(|(button, binding)| on_page(button) && *binding != Binding::Single(Action::None))
+            || device
+                .per_app_bindings
+                .values()
+                .flatten()
+                .any(|(button, action)| on_page(button) && *action != Action::None)
+    }
+
+    /// The effective thumb-wheel sensitivity for `device_key`: the device's
+    /// override when set, else the app-wide default.
+    #[must_use]
+    pub fn thumbwheel_sensitivity(&self, device_key: &str) -> ThumbwheelSensitivity {
+        self.devices
+            .get(device_key)
+            .and_then(|d| d.thumbwheel_sensitivity)
+            .unwrap_or(self.app_settings.thumbwheel_sensitivity)
+    }
+
+    /// Set (or clear, with `None`) `device_key`'s thumb-wheel sensitivity
+    /// override.
+    pub fn set_device_thumbwheel_sensitivity(
+        &mut self,
+        device_key: &str,
+        sensitivity: Option<ThumbwheelSensitivity>,
+    ) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .thumbwheel_sensitivity = sensitivity;
+    }
+
+    /// The effective momentum-scrolling settings for `device_key`: the
+    /// device's override when set, else the app-wide default.
+    #[must_use]
+    pub fn momentum_scrolling(&self, device_key: &str) -> MomentumScrolling {
+        self.devices
+            .get(device_key)
+            .and_then(|d| d.momentum_scrolling)
+            .unwrap_or(self.app_settings.momentum_scrolling)
+    }
+
+    /// Set (or clear, with `None`) `device_key`'s momentum-scrolling
+    /// override.
+    pub fn set_device_momentum_scrolling(
+        &mut self,
+        device_key: &str,
+        momentum: Option<MomentumScrolling>,
+    ) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .momentum_scrolling = momentum;
+    }
+
+    /// Whether `device_key`'s main wheel is smoothed through its diverted
+    /// HID++ reports
+    /// ([`DeviceConfig::smooth_wheel`](super::DeviceConfig::smooth_wheel)).
+    /// Unconfigured devices keep a native wheel.
+    #[must_use]
+    pub fn smooth_wheel(&self, device_key: &str) -> bool {
+        self.devices.get(device_key).is_some_and(|d| d.smooth_wheel)
+    }
+
+    /// Turn `device_key`'s diverted smooth wheel on or off.
+    pub fn set_smooth_wheel(&mut self, device_key: &str, enabled: bool) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .smooth_wheel = enabled;
+    }
+}

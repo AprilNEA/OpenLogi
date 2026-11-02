@@ -2,7 +2,8 @@
 
 use gpui::{
     Entity, InteractiveElement, IntoElement, ParentElement, Role, ScrollHandle,
-    StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px, rgb, svg,
+    StatefulInteractiveElement as _, Styled, div, linear_color_stop, linear_gradient,
+    prelude::FluentBuilder as _, px, rgb, svg,
 };
 use gpui_component::{
     Icon, IconName, Selectable as _, button::Button, h_flex, input::InputState,
@@ -14,17 +15,32 @@ use openlogi_core::binding::{
 };
 
 use super::action_icons::action_icon_path;
-use crate::features::mouse::picker::editor_section;
-use crate::state::{AppState, DeviceRecord, StateEvent};
+use crate::features::binding_editor::editor_section;
+use crate::features::keyboard::editors::PowerUserKind;
+use crate::state::AppState;
 use crate::ui::action::localized_action_label;
 use crate::ui::components::{MenuRow, control_input};
 use crate::ui::theme::{self, Palette, Typography as _};
+
+/// Height of the fade over the library's bottom edge. The library ends with
+/// as much padding, so its last row can scroll clear of the fade.
+const LIBRARY_FADE_H: f32 = 24.;
+
+/// The three single-field Power User inputs the ring's slot editor exposes.
+/// [`PowerUserKind::Workflow`] needs a multi-step list editor this panel
+/// doesn't have yet, so it stays keyboard-only for now.
+pub(super) struct PowerUserInputs {
+    pub(super) type_text: Entity<InputState>,
+    pub(super) applescript: Entity<InputState>,
+    pub(super) shell_command: Entity<InputState>,
+}
 
 pub(super) fn action_library(
     slot: ActionRingSlot,
     current: Option<&ActionRingEntry>,
     application_input: &Entity<InputState>,
     shortcut_input: &Entity<InputState>,
+    power_user: &PowerUserInputs,
     library_scroll: &ScrollHandle,
     pal: Palette,
 ) -> impl IntoElement {
@@ -34,6 +50,7 @@ pub(super) fn action_library(
         .map_or_else(|| tr!("action_ring.empty_slot"), localized_action_label);
 
     v_flex()
+        .debug_selector(|| "ring-slot-editor".into())
         .flex_1()
         .min_w(px(280.0))
         .max_w(px(320.0))
@@ -54,11 +71,7 @@ pub(super) fn action_library(
                     h_flex()
                         .items_center()
                         .justify_between()
-                        .child(
-                            div()
-                                .text_subheading()
-                                .child(tr!("action_ring.actions_ring")),
-                        )
+                        .child(div().text_subheading().child(slot_title(slot)))
                         .child(
                             Button::new("ring-clear-slot")
                                 .compact()
@@ -76,6 +89,7 @@ pub(super) fn action_library(
         .child(action_rows_scroller(
             v_flex()
                 .p_1p5()
+                .pb(px(LIBRARY_FADE_H))
                 .when_some(current_action.as_ref(), |library, action| {
                     library.child(icon_editor(
                         slot,
@@ -84,23 +98,96 @@ pub(super) fn action_library(
                         pal,
                     ))
                 })
-                .child(shortcut_editor(slot, shortcut_input, pal))
                 .child(path_editor(slot, application_input, pal))
+                .child(text_action_editor(
+                    slot,
+                    PowerUserKind::TypeText,
+                    &power_user.type_text,
+                    pal,
+                ))
+                // RunAppleScript has no execution path outside macOS
+                // (`openlogi-inject`'s Linux/Windows backends only log a
+                // warning and do nothing) — hide the editor there instead of
+                // letting a binding be saved that silently never fires.
+                .when(cfg!(target_os = "macos"), |library| {
+                    library.child(text_action_editor(
+                        slot,
+                        PowerUserKind::RunAppleScript,
+                        &power_user.applescript,
+                        pal,
+                    ))
+                })
+                .child(text_action_editor(
+                    slot,
+                    PowerUserKind::RunShellCommand,
+                    &power_user.shell_command,
+                    pal,
+                ))
                 .children(action_sections(slot, current_action.as_ref(), pal)),
             library_scroll,
+            pal,
         ))
+        // Pinned below the scrolling library so the field and its Add button
+        // are never cut off by the card's height cap.
+        .child(
+            div()
+                .flex_none()
+                .border_t_1()
+                .border_color(pal.border)
+                .px_1p5()
+                .pb_2()
+                .child(shortcut_editor(slot, shortcut_input, pal)),
+        )
 }
 
-fn action_rows_scroller(content: impl IntoElement, scroll: &ScrollHandle) -> impl IntoElement {
+/// The card title: the ring position being edited.
+fn slot_title(slot: ActionRingSlot) -> gpui::SharedString {
+    match slot {
+        ActionRingSlot::Top => tr!("action_ring.top_slot"),
+        ActionRingSlot::TopRight => tr!("action_ring.top_right_slot"),
+        ActionRingSlot::Right => tr!("action_ring.right_slot"),
+        ActionRingSlot::BottomRight => tr!("action_ring.bottom_right_slot"),
+        ActionRingSlot::Bottom => tr!("action_ring.bottom_slot"),
+        ActionRingSlot::BottomLeft => tr!("action_ring.bottom_left_slot"),
+        ActionRingSlot::Left => tr!("action_ring.left_slot"),
+        ActionRingSlot::TopLeft => tr!("action_ring.top_left_slot"),
+    }
+}
+
+fn action_rows_scroller(
+    content: impl IntoElement,
+    scroll: &ScrollHandle,
+    pal: Palette,
+) -> impl IntoElement {
     div()
-        .id("ring-action-library")
+        .relative()
         .flex_1()
         .min_h_0()
-        .track_scroll(scroll)
-        .overflow_y_scroll()
-        .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+        .child(
+            div()
+                .id("ring-action-library")
+                .size_full()
+                .track_scroll(scroll)
+                .overflow_y_scroll()
+                .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+                .child(content),
+        )
+        // Fade the cut-off bottom edge into the card so a partly visible row
+        // reads as more content below rather than a clipped control.
+        .child(
+            div()
+                .absolute()
+                .bottom_0()
+                .left_0()
+                .right_0()
+                .h(px(LIBRARY_FADE_H))
+                .bg(linear_gradient(
+                    180.,
+                    linear_color_stop(pal.panel.opacity(0.), 0.),
+                    linear_color_stop(pal.panel, 1.),
+                )),
+        )
         .vertical_scrollbar(scroll)
-        .child(content)
 }
 
 fn icon_editor(
@@ -163,6 +250,7 @@ fn shortcut_editor(
 ) -> impl IntoElement {
     let submit_input = input.clone();
     v_flex()
+        .debug_selector(|| "ring-custom-shortcut".into())
         .gap_1()
         .child(editor_section(tr!("action_ring.custom_shortcut"), pal))
         .child(
@@ -217,6 +305,57 @@ fn path_editor(slot: ActionRingSlot, input: &Entity<InputState>, pal: Palette) -
                         }),
                 ),
         )
+}
+
+/// Single-field Power User editor shared by TypeText, RunAppleScript and
+/// RunShellCommand — each is one text field committed as its own [`Action`]
+/// variant, the same shape as [`shortcut_editor`]/[`path_editor`].
+fn text_action_editor(
+    slot: ActionRingSlot,
+    kind: PowerUserKind,
+    input: &Entity<InputState>,
+    pal: Palette,
+) -> impl IntoElement {
+    let submit_input = input.clone();
+    v_flex()
+        .gap_1()
+        .child(editor_section(tr!(kind.heading_key()), pal))
+        .child(
+            h_flex()
+                .gap_2()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(control_input(input).cleanable(true)),
+                )
+                .child(
+                    Button::new(("ring-add-power-user", kind as usize))
+                        .compact()
+                        .label(tr!("common.add"))
+                        .on_click(move |_, _, cx| {
+                            let text = submit_input.read(cx).value().to_string();
+                            if let Some(action) = power_user_action(kind, text) {
+                                commit_action(slot, action, cx);
+                            }
+                        }),
+                ),
+        )
+}
+
+/// Build the [`Action`] a Power User editor's text commits as, or `None` for
+/// empty input, [`PowerUserKind::Workflow`] (no single-field editor here), or
+/// [`PowerUserKind::OpenApplication`] (the ring has its own path editor).
+fn power_user_action(kind: PowerUserKind, text: String) -> Option<Action> {
+    if text.is_empty() {
+        return None;
+    }
+    match kind {
+        PowerUserKind::TypeText => Some(Action::TypeText(text)),
+        PowerUserKind::RunAppleScript => Some(Action::RunAppleScript(text)),
+        PowerUserKind::RunShellCommand => Some(Action::RunShellCommand(text)),
+        PowerUserKind::OpenApplication | PowerUserKind::Workflow => None,
+    }
 }
 
 fn action_sections(
@@ -296,33 +435,45 @@ fn commit_action(slot: ActionRingSlot, action: Action, cx: &mut gpui::App) {
 }
 
 fn commit_slot(slot: ActionRingSlot, action: Option<RingAction>, cx: &mut gpui::App) {
-    AppState::update(cx, |state, cx| {
-        let key = state.current_record().map(DeviceRecord::device_key);
-        state.commit_action_ring_slot(slot, action);
-        if let Some(key) = key {
-            cx.emit(StateEvent::BindingsChanged(key));
-        }
-    });
+    AppState::apply(cx, |state| state.commit_action_ring_slot(slot, action));
 }
 
 fn commit_icon(slot: ActionRingSlot, icon: Option<ActionRingIcon>, cx: &mut gpui::App) {
-    AppState::update(cx, |state, cx| {
-        let key = state.current_record().map(DeviceRecord::device_key);
-        state.commit_action_ring_icon(slot, icon);
-        if let Some(key) = key {
-            cx.emit(StateEvent::BindingsChanged(key));
-        }
-    });
+    AppState::apply(cx, |state| state.commit_action_ring_icon(slot, icon));
 }
 
 #[cfg(test)]
 mod tests {
     use gpui::{
-        Context, PlatformInput, Render, ScrollDelta, ScrollHandle, ScrollWheelEvent,
-        TestAppContext, Window, point, size,
+        AppContext as _, Context, Render, ScrollDelta, ScrollHandle, ScrollWheelEvent,
+        TestAppContext, Window, point, px,
     };
 
     use super::*;
+
+    /// The slot editor as the panel lays it out, editing a slot that holds an
+    /// action so the icon grid is shown too.
+    struct SlotEditorView {
+        application: Entity<InputState>,
+        shortcut: Entity<InputState>,
+        power_user: PowerUserInputs,
+        library_scroll: ScrollHandle,
+    }
+
+    impl Render for SlotEditorView {
+        fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let cut = RingAction::new(Action::Cut).expect("Cut is a ring action");
+            h_flex().w(px(640.0)).items_start().child(action_library(
+                ActionRingSlot::Top,
+                Some(&ActionRingEntry::new(cut)),
+                &self.application,
+                &self.shortcut,
+                &self.power_user,
+                &self.library_scroll,
+                theme::palette(cx),
+            ))
+        }
+    }
 
     struct NestedScrollView {
         page_scroll: ScrollHandle,
@@ -330,19 +481,26 @@ mod tests {
     }
 
     impl Render for NestedScrollView {
-        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             div()
                 .id("page-scroll")
-                .size_full()
+                .w(px(160.0))
+                .h(px(120.0))
                 .track_scroll(&self.page_scroll)
                 .overflow_y_scroll()
                 .child(
                     v_flex()
                         .h(px(300.0))
-                        .child(v_flex().h(px(100.0)).child(action_rows_scroller(
-                            div().h(px(240.0)),
-                            &self.sidebar_scroll,
-                        )))
+                        .child(
+                            v_flex()
+                                .w(px(160.0))
+                                .h(px(100.0))
+                                .child(action_rows_scroller(
+                                    div().h(px(240.0)),
+                                    &self.sidebar_scroll,
+                                    theme::palette(cx),
+                                )),
+                        )
                         .child(div().h(px(200.0))),
                 )
         }
@@ -353,7 +511,7 @@ mod tests {
         cx.update(gpui_component::init);
         let page_scroll = ScrollHandle::new();
         let sidebar_scroll = ScrollHandle::new();
-        let window = cx.open_window(size(px(160.0), px(120.0)), {
+        let (_, cx) = cx.add_window_view({
             let page_scroll = page_scroll.clone();
             let sidebar_scroll = sidebar_scroll.clone();
             move |_, _| NestedScrollView {
@@ -362,22 +520,106 @@ mod tests {
             }
         });
         cx.run_until_parked();
+        cx.update(|window, cx| drop(window.draw(cx)));
 
-        window
-            .update(cx, |_, window, cx| {
-                window.dispatch_event(
-                    PlatformInput::ScrollWheel(ScrollWheelEvent {
-                        position: point(px(80.0), px(50.0)),
-                        delta: ScrollDelta::Pixels(point(px(0.0), px(-20.0))),
-                        ..Default::default()
-                    }),
-                    cx,
-                );
-            })
-            .unwrap();
+        let overlay_before = cx
+            .debug_bounds("scrollbar-overlay")
+            .expect("scrollbar overlay should exist");
+        assert_eq!(overlay_before.origin, point(px(0.0), px(0.0)));
+        assert_eq!(overlay_before.size, gpui::size(px(160.0), px(100.0)));
 
+        // Scroll inside the sidebar scroller
+        cx.simulate_event(ScrollWheelEvent {
+            position: point(px(80.0), px(50.0)),
+            delta: ScrollDelta::Pixels(point(px(0.0), px(-20.0))),
+            ..Default::default()
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| drop(window.draw(cx)));
+
+        // Sidebar scrolled, page did not
         assert_eq!(sidebar_scroll.offset().y, px(-20.0));
         assert_eq!(page_scroll.offset().y, px(0.0));
+
+        // Scrollbar overlay stays anchored to the scroller viewport
+        let overlay_after_sidebar_scroll = cx
+            .debug_bounds("scrollbar-overlay")
+            .expect("scrollbar overlay should exist");
+        assert_eq!(overlay_after_sidebar_scroll.origin, point(px(0.0), px(0.0)));
+        assert_eq!(
+            overlay_after_sidebar_scroll.size,
+            gpui::size(px(160.0), px(100.0))
+        );
+
+        // Click near the bottom of the scrollbar track (x: 155px, y: 80px) to jump
+        cx.simulate_click(point(px(155.0), px(80.0)), gpui::Modifiers::default());
+        cx.run_until_parked();
+        cx.update(|window, cx| drop(window.draw(cx)));
+
+        // The sidebar scroller should have jumped further down
+        assert!(sidebar_scroll.offset().y < px(-20.0));
+        assert_eq!(page_scroll.offset().y, px(0.0));
+
+        // Now scroll the outer page from outside the sidebar (e.g. at y: 110px)
+        cx.simulate_event(ScrollWheelEvent {
+            position: point(px(10.0), px(110.0)),
+            delta: ScrollDelta::Pixels(point(px(0.0), px(-15.0))),
+            ..Default::default()
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| drop(window.draw(cx)));
+
+        assert_eq!(page_scroll.offset().y, px(-15.0));
+
+        // The sidebar's scrollbar overlay moves together with the sidebar inside the page
+        let overlay_after_page_scroll = cx
+            .debug_bounds("scrollbar-overlay")
+            .expect("scrollbar overlay should exist");
+        assert_eq!(overlay_after_page_scroll.origin, point(px(0.0), px(-15.0)));
+    }
+
+    #[gpui::test]
+    fn custom_shortcut_stays_inside_the_slot_editor(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let library_scroll = ScrollHandle::new();
+        let (_, cx) = cx.add_window_view({
+            let library_scroll = library_scroll.clone();
+            move |window, cx| {
+                let mut input = || cx.new(|cx| InputState::new(window, cx));
+                SlotEditorView {
+                    application: input(),
+                    shortcut: input(),
+                    power_user: PowerUserInputs {
+                        type_text: input(),
+                        applescript: input(),
+                        shell_command: input(),
+                    },
+                    library_scroll,
+                }
+            }
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        let card = cx
+            .debug_bounds("ring-slot-editor")
+            .expect("the slot editor renders");
+        let shortcut = cx
+            .debug_bounds("ring-custom-shortcut")
+            .expect("the custom shortcut editor renders");
+        assert!(
+            shortcut.top() >= card.top() && shortcut.bottom() <= card.bottom(),
+            "custom shortcut {shortcut:?} is cut off by the slot editor {card:?}"
+        );
+
+        // Scrolling the library leaves the shortcut field where it was.
+        cx.simulate_event(ScrollWheelEvent {
+            position: card.center(),
+            delta: ScrollDelta::Pixels(point(px(0.0), px(-200.0))),
+            ..Default::default()
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(library_scroll.offset().y < px(0.0), "the library scrolls");
+        assert_eq!(cx.debug_bounds("ring-custom-shortcut"), Some(shortcut));
     }
 
     #[test]
@@ -395,5 +637,33 @@ mod tests {
         assert!(actions.contains(&Action::MissionControl));
         assert!(!actions.contains(&Action::None));
         assert!(!actions.contains(&Action::ShowActionsRing));
+    }
+
+    #[test]
+    fn power_user_action_builds_the_matching_variant() {
+        assert_eq!(
+            power_user_action(PowerUserKind::TypeText, "hello".to_string()),
+            Some(Action::TypeText("hello".to_string()))
+        );
+        assert_eq!(
+            power_user_action(PowerUserKind::RunAppleScript, "beep".to_string()),
+            Some(Action::RunAppleScript("beep".to_string()))
+        );
+        assert_eq!(
+            power_user_action(PowerUserKind::RunShellCommand, "echo hi".to_string()),
+            Some(Action::RunShellCommand("echo hi".to_string()))
+        );
+    }
+
+    #[test]
+    fn power_user_action_rejects_empty_text_and_workflow() {
+        assert_eq!(
+            power_user_action(PowerUserKind::TypeText, String::new()),
+            None
+        );
+        assert_eq!(
+            power_user_action(PowerUserKind::Workflow, "irrelevant".to_string()),
+            None
+        );
     }
 }

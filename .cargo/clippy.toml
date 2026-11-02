@@ -1,0 +1,6 @@
+# Clippy finds this file through `CLIPPY_CONF_DIR` in .cargo/config.toml.
+#
+# Covers `#[cfg(test)]` modules and `#[test]` fns. A free helper in a `tests/`
+# integration file is neither, and still needs a local suppression.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true

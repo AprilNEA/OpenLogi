@@ -13,6 +13,17 @@ pub const LONG_REPORT_ID: u8 = 0x11;
 /// The length of long HID++ message reports (including report ID).
 pub const LONG_REPORT_LENGTH: usize = 20;
 
+/// Whether `report_id` is one of the two HID++ report IDs.
+///
+/// A HID node can carry another protocol on the same interface — a Unifying
+/// receiver on Linux also emits Logitech DJ reports (`0x20`/`0x21`) — so an
+/// incoming report with any other ID is foreign traffic rather than a broken
+/// HID++ report.
+#[must_use]
+pub const fn is_hidpp_report_id(report_id: u8) -> bool {
+    matches!(report_id, SHORT_REPORT_ID | LONG_REPORT_ID)
+}
+
 /// Represents an unversioned HID++ message.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum HidppMessage {
@@ -98,5 +109,19 @@ impl HidppMessage {
             }
             long @ Self::Long(_) => long,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LONG_REPORT_ID, SHORT_REPORT_ID, is_hidpp_report_id};
+
+    #[test]
+    fn only_hidpp_report_ids_are_hidpp() {
+        assert!(is_hidpp_report_id(SHORT_REPORT_ID));
+        assert!(is_hidpp_report_id(LONG_REPORT_ID));
+        // Logitech DJ short/long reports share the node on Linux.
+        assert!(!is_hidpp_report_id(0x20));
+        assert!(!is_hidpp_report_id(0x21));
     }
 }

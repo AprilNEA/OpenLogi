@@ -309,7 +309,7 @@ impl ZoneEffectInfo {
 }
 
 /// Software-control state, from
-/// [`getSwControl`](super::ColorLedEffectsFeature::get_sw_control).
+/// [`getSwControl`](super::ColorLedEffectsV1Feature::get_sw_control).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
@@ -382,7 +382,7 @@ impl ZoneEffect {
 }
 
 /// A non-volatile configuration entry, from
-/// [`getNvConfig`](super::ColorLedEffectsFeature::get_nv_config).
+/// [`getNvConfig`](super::ColorLedEffectsV1Feature::get_nv_config).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]

@@ -3,18 +3,19 @@
 //! screens.
 
 use gpui::{
-    Context, IntoElement, ParentElement, SharedString, Styled, div, prelude::FluentBuilder as _,
+    App, Context, InteractiveElement as _, IntoElement, ParentElement, RenderOnce, SharedString,
+    Styled, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    IconName, Sizable as _,
+    Disableable as _, Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
 };
 use openlogi_core::device::DeviceKind;
-use openlogi_core::hid::DeviceRoute;
+use openlogi_core::hid::{DeviceRoute, ReceiverBrand};
 
 use super::AppView;
-use crate::state::AppState;
+use crate::state::{AppState, DeviceRecord};
 use crate::ui::components::control_button;
 use crate::ui::theme::{Palette, Typography as _};
 
@@ -38,18 +39,71 @@ pub(super) fn settings_button() -> impl IntoElement {
         .icon(IconName::Settings)
         .label(tr!("app.settings"))
         .tooltip(tr!("app.settings"))
+        .debug_selector(|| "home-settings".into())
         .on_click(|_, _, cx| crate::windows::settings::open(cx))
+}
+
+/// Opens the Flow window. Its dot repeats Flow's status — green when the
+/// pointer can cross to a peer, amber when something blocks it — and the
+/// tooltip and accessible label say it in words.
+pub(super) fn flow_button() -> impl IntoElement {
+    FlowButton
+}
+
+#[derive(IntoElement)]
+struct FlowButton;
+
+impl RenderOnce for FlowButton {
+    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        let readiness = AppState::try_read(cx).map(AppState::flow_readiness);
+        let status = readiness
+            .as_ref()
+            .map(crate::windows::flow::status_label)
+            .unwrap_or_default();
+        let color = readiness
+            .as_ref()
+            .and_then(|readiness| crate::windows::flow::health_color(readiness.health));
+        let label = tr!("flow.button_label", status => status.to_string());
+        Button::new("home-flow")
+            .outline()
+            .icon(Icon::empty().path("action-icons/arrow-left-right.svg"))
+            .label(tr!("flow.title"))
+            .when_some(color, |button, color| {
+                button.child(div().size(px(8.)).rounded_full().bg(color))
+            })
+            .tooltip(label)
+            .debug_selector(|| "home-flow".into())
+            .on_click(|_, _, cx| crate::windows::flow::open(cx))
+    }
 }
 
 /// Primary action that opens the pairing window. The empty state carries its
 /// own equivalent CTA, so this never floats alone in an empty header.
 pub(super) fn add_device_button() -> impl IntoElement {
-    Button::new("header-add-device")
-        .primary()
-        .icon(IconName::Plus)
-        .label(tr!("pairing.add_device"))
-        .tooltip(tr!("pairing.add_device"))
-        .on_click(|_, _, cx| crate::windows::add_device::open(cx))
+    AddDeviceButton
+}
+
+/// [`add_device_button`]: pairing runs in the agent, so without a live
+/// connection the button is disabled and its tooltip says why.
+#[derive(IntoElement)]
+struct AddDeviceButton;
+
+impl RenderOnce for AddDeviceButton {
+    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        let connected = AppState::try_read(cx).is_some_and(|state| state.agent_status().is_some());
+        Button::new("header-add-device")
+            .primary()
+            .icon(IconName::Plus)
+            .label(tr!("pairing.add_device"))
+            .disabled(!connected)
+            .tooltip(if connected {
+                tr!("pairing.add_device")
+            } else {
+                tr!("pairing.pairing_agent_not_ready")
+            })
+            .debug_selector(|| "header-add-device".into())
+            .on_click(|_, _, cx| crate::windows::add_device::open(cx))
+    }
 }
 
 pub(super) fn main_window_title(show_device: bool, cx: &Context<AppView>) -> SharedString {
@@ -109,10 +163,19 @@ pub(super) fn sidebar_action(
         .flex_1()
 }
 
-pub(super) fn route_label(route: Option<&DeviceRoute>) -> String {
+pub(super) fn route_label(
+    route: Option<&DeviceRoute>,
+    receiver_brand: Option<ReceiverBrand>,
+) -> String {
     match route {
         Some(DeviceRoute::Bolt { .. }) => tr!("device.bolt_receiver").to_string(),
-        Some(DeviceRoute::Unifying { .. }) => tr!("device.unifying_receiver").to_string(),
+        Some(DeviceRoute::Unifying { .. }) => match receiver_brand {
+            Some(ReceiverBrand::Nano) => tr!("device.nano_receiver").to_string(),
+            Some(ReceiverBrand::Lightspeed) => tr!("device.lightspeed_receiver").to_string(),
+            Some(ReceiverBrand::Bolt | ReceiverBrand::Unifying) | None => {
+                tr!("device.unifying_receiver").to_string()
+            }
+        },
         Some(DeviceRoute::Direct { .. } | DeviceRoute::RawHid { .. }) => {
             tr!("device.direct_connection").to_string()
         }
@@ -120,21 +183,29 @@ pub(super) fn route_label(route: Option<&DeviceRoute>) -> String {
     }
 }
 
-pub(super) fn kind_label(kind: DeviceKind) -> String {
-    match kind {
-        DeviceKind::Mouse => tr!("device.mouse").to_string(),
-        DeviceKind::Keyboard => tr!("device.keyboard").to_string(),
-        DeviceKind::Numpad => tr!("device.numpad").to_string(),
-        DeviceKind::Presenter => tr!("device.presenter").to_string(),
-        DeviceKind::Remote => tr!("device.remote").to_string(),
-        DeviceKind::Trackball => tr!("device.trackball").to_string(),
-        DeviceKind::Touchpad => tr!("device.touchpad").to_string(),
-        DeviceKind::Tablet => tr!("device.tablet").to_string(),
-        DeviceKind::Gamepad => tr!("device.gamepad").to_string(),
-        DeviceKind::Joystick => tr!("device.joystick").to_string(),
-        DeviceKind::Headset => tr!("device.headset").to_string(),
-        DeviceKind::Camera => tr!("camera.camera").to_string(),
-        DeviceKind::Unknown => tr!("device.device").to_string(),
-        DeviceKind::Light => tr!("device.lighting").to_string(),
+/// The receiver pairing slot a device sits in — "Slot 4" — or `None` for a
+/// device with no receiver between it and the host.
+///
+/// Called a slot, not a channel: a receiver slot is unrelated to the
+/// device's own Easy-Switch channel, and the two are easy to confuse.
+pub(super) fn receiver_slot_label(record: &DeviceRecord) -> Option<SharedString> {
+    matches!(
+        record.route,
+        Some(DeviceRoute::Bolt { .. } | DeviceRoute::Unifying { .. })
+    )
+    .then(|| tr!("device.receiver_slot_number", number => record.slot.to_string()))
+}
+
+/// How a device is reached, in words: the transport, plus the receiver slot
+/// when there is one ("Bolt receiver · Slot 4").
+pub(super) fn connection_summary(record: &DeviceRecord) -> String {
+    let route = route_label(record.route.as_ref(), record.receiver_brand);
+    match receiver_slot_label(record) {
+        Some(slot) => format!("{route} · {slot}"),
+        None => route,
     }
+}
+
+pub(super) fn kind_label(kind: DeviceKind) -> String {
+    tr!(kind.translation_key()).to_string()
 }

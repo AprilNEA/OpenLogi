@@ -1,15 +1,17 @@
 use std::{
     fmt::{self, Write as _},
     process::ExitCode,
-    time::Duration,
 };
 
 use anyhow::{Context, Result};
 use clap::Args;
 use openlogi_camera::Camera;
-use openlogi_core::device::{BatteryInfo, DeviceInventory, DeviceModelInfo, PairedDevice};
-use openlogi_ipc::{AgentSnapshot, AgentStatus, ClientKind, PROTOCOL_VERSION, client};
-use tarpc::context;
+use openlogi_core::device::{
+    BatteryInfo, DeviceInventory, DeviceModelInfo, PairedDevice, StandaloneDevice,
+};
+use openlogi_hid::inventory::hid_only::HidOnlyProduct;
+use openlogi_ipc::client::ConnectError;
+use openlogi_ipc::{AgentSnapshot, AgentStatus};
 
 #[derive(Debug, Args)]
 pub struct ListArgs {}
@@ -18,7 +20,8 @@ pub struct ListArgs {}
 /// from the failure status a real enumeration error produces.
 const NOTHING_FOUND: u8 = 2;
 
-/// Print every connected receiver, paired device and Logitech webcam.
+/// Print every connected receiver, paired device, standalone raw-HID device
+/// and Logitech webcam.
 ///
 /// Reads the running agent's inventory when one is reachable — the agent is
 /// the process that actually holds device permissions, so its answer is the
@@ -27,13 +30,18 @@ const NOTHING_FOUND: u8 = 2;
 /// agent responds; the provenance goes to stderr so scripts keep parsing
 /// stdout.
 ///
-/// Returns the `NOTHING_FOUND` status when neither a HID++ device nor a webcam
-/// is present, so scripts can tell "no hardware" apart from a failed
+/// Returns the `NOTHING_FOUND` status when no HID++ device, standalone device
+/// or webcam is present, so scripts can tell "no hardware" apart from a failed
 /// enumeration.
 pub async fn run(_args: ListArgs) -> Result<ExitCode> {
-    let (inventories, agent_status) = if let Some(snapshot) = agent_snapshot().await {
+    let mut standalone_error = None;
+    let (inventories, standalone, agent_status) = if let Some(snapshot) = agent_snapshot().await {
         eprintln!("(inventory read from the running agent)");
-        (snapshot.inventory, Some(snapshot.status))
+        (
+            snapshot.inventory,
+            snapshot.standalone,
+            Some(snapshot.status),
+        )
     } else {
         eprintln!(
             "(no agent reachable — reading hardware directly; macOS judges this \
@@ -42,14 +50,32 @@ pub async fn run(_args: ListArgs) -> Result<ExitCode> {
         let inventories = openlogi_hid::enumerate()
             .await
             .context("failed to enumerate HID++ devices")?;
-        (inventories, None)
+        // A standalone scan failure must not hide the HID++ listing above.
+        let standalone = match openlogi_hid::enumerate_standalone().await {
+            Ok(devices) => devices,
+            Err(error) => {
+                eprintln!("(standalone device scan failed: {error})");
+                standalone_error = Some(error);
+                Vec::new()
+            }
+        };
+        (inventories, standalone, None)
     };
     let cameras = openlogi_camera::enumerate_cameras();
 
-    if inventories.is_empty() && cameras.is_empty() {
+    if inventories.is_empty() && standalone.is_empty() && cameras.is_empty() {
+        // An empty list after a failed scan is a failure, not "no hardware".
+        if let Some(error) = standalone_error {
+            return Err(error).context("failed to enumerate standalone HID devices");
+        }
         println!("No Logitech HID++ devices or webcams found.");
+        let hid_only = hid_only_products().await;
+        if !hid_only.is_empty() {
+            println!();
+            print_hid_only(&hid_only);
+        }
         println!();
-        print_empty_notes(agent_status.as_ref());
+        print_empty_notes(agent_status.as_ref(), &hid_only);
         return Ok(ExitCode::from(NOTHING_FOUND));
     }
 
@@ -60,8 +86,15 @@ pub async fn run(_args: ListArgs) -> Result<ExitCode> {
         print_inventory(inv);
     }
 
-    if !cameras.is_empty() {
+    if !standalone.is_empty() {
         if !inventories.is_empty() {
+            println!();
+        }
+        print_standalone(&standalone);
+    }
+
+    if !cameras.is_empty() {
+        if !inventories.is_empty() || !standalone.is_empty() {
             println!();
         }
         print_cameras(&cameras);
@@ -74,69 +107,149 @@ pub async fn run(_args: ListArgs) -> Result<ExitCode> {
 /// no agent listening, a hung handshake, a protocol mismatch, or a stalled
 /// snapshot call.
 async fn agent_snapshot() -> Option<AgentSnapshot> {
-    let conn = tokio::time::timeout(Duration::from_secs(2), client::connect())
+    let client = match crate::agent::connect().await {
+        Ok(client) => client,
+        Err(ConnectError::Skew(skew)) => {
+            eprintln!("note: {skew} — reading hardware directly");
+            return None;
+        }
+        Err(_) => return None,
+    };
+    crate::agent::snapshot(&client).await.ok()
+}
+
+/// The Logitech products this host lists without any HID++ node.
+///
+/// Read by this process even when the agent answered: it is a plain HID
+/// listing that opens no device. A failed scan loses only this hint, so it
+/// goes to stderr instead of failing the command.
+async fn hid_only_products() -> Vec<HidOnlyProduct> {
+    openlogi_hid::enumerate_hid_only()
         .await
-        .ok()?
-        .ok()?;
-    if conn.version != PROTOCOL_VERSION {
-        eprintln!(
-            "note: the agent speaks protocol v{}, this CLI expects v{PROTOCOL_VERSION} — \
-             reading hardware directly",
-            conn.version
-        );
-        return None;
-    }
-    // Identify as a CLI so a dormant agent (launch-at-login off, started at
-    // login) serves this query without arming its whole input stack.
-    tokio::time::timeout(
-        Duration::from_secs(2),
-        conn.client
-            .declare_client(context::current(), ClientKind::Cli),
-    )
-    .await
-    .ok()?
-    .ok()?;
-    tokio::time::timeout(
-        Duration::from_secs(5),
-        conn.client.snapshot(context::current()),
-    )
-    .await
-    .ok()?
-    .ok()
+        .unwrap_or_else(|error| {
+            eprintln!("(scan for devices without HID++ failed: {error})");
+            Vec::new()
+        })
 }
 
 /// Why the list is empty. With an agent status in hand the reason is known;
-/// without one, fall back to the generic checklist.
-fn print_empty_notes(status: Option<&AgentStatus>) {
+/// without one, fall back to the generic checklist. A listed HID-only product
+/// is a fact about the host, so its note comes first in every case.
+fn print_empty_notes(status: Option<&AgentStatus>, hid_only: &[HidOnlyProduct]) {
+    println!("Notes:");
+    if !hid_only.is_empty() {
+        println!("  - {}", hid_only_note());
+    }
     match status {
         Some(status) if !status.input_monitoring_granted => {
-            println!("Notes:");
             println!(
                 "  - The agent does not hold Input Monitoring. Grant it to OpenLogi Agent: \
                  System Settings → Privacy & Security → Input Monitoring (the + picker \
                  cannot browse into the app bundle — use Go to Folder)."
             );
         }
+        // Off macOS there is no Input Monitoring gate, so a failed open on
+        // Linux is almost always missing hidraw access, not a stale session.
+        Some(status) if status.hid_open_failures && cfg!(target_os = "linux") => {
+            println!(
+                "  - The agent's device opens keep failing. On Linux, HID++ access needs \
+                 OpenLogi's udev rules (shipped by the packages; for a source build see \
+                 docs/INSTALL-linux.md)."
+            );
+        }
         Some(status) if status.hid_open_failures => {
-            println!("Notes:");
             println!(
                 "  - Input Monitoring is granted, but the agent's device opens keep \
-                 failing — another app may hold the devices (quit Logi Options+), or \
-                 macOS is serving a stale permission session: log out and back in."
+                 failing — another app may hold the devices (quit Logi Options+; for a \
+                 Bluetooth keyboard, turn off \"Modify events\" for it in \
+                 Karabiner-Elements → Settings → Devices), or macOS is serving a stale \
+                 permission session: log out and back in."
             );
         }
         _ => {
-            println!("Notes:");
             println!("  - On macOS, quit Logi Options+ first — both apps fight over HID++ access.");
             println!(
                 "  - A Bluetooth-direct mouse (e.g. Lift, Signature) needs Input Monitoring \
                  permission: System Settings → Privacy & Security → Input Monitoring."
             );
             println!(
-                "  - hidpp 0.2 only recognises Logi Bolt receivers (PID 0xC548); other \
-                 receivers (Unifying) aren't surfaced yet."
+                "  - On Linux, HID++ access needs OpenLogi's udev rules (shipped by the \
+                 packages; for a source build see docs/INSTALL-linux.md)."
             );
         }
+    }
+}
+
+/// What a listed HID-only product means on this host.
+///
+/// On Windows the cause seen in #2188 is a disabled vendor-defined
+/// collection (`CM_PROB_DISABLED`): the device still works as a plain mouse
+/// or keyboard, and Device Manager shows the collection with an error. A
+/// collection whose driver failed to start looks the same and has the same
+/// fix. The fix also applies to a standalone product such as the G600, whose
+/// own collection is vendor-defined too.
+fn hid_only_note() -> &'static str {
+    if cfg!(windows) {
+        "Windows lists the devices above without a HID++ collection. If one works with \
+         G HUB or Options+ on another PC, its vendor-defined collections are disabled or \
+         failed to start here: in Device Manager, uninstall its \"HID-compliant \
+         vendor-defined device\" entries, then replug it."
+    } else {
+        "The OS lists the devices above, but none of them exposes a HID++ interface, so \
+         OpenLogi cannot configure them."
+    }
+}
+
+fn print_hid_only(products: &[HidOnlyProduct]) {
+    println!(
+        "Logitech devices without a HID++ interface ({})",
+        products.len()
+    );
+    let last = products.len() - 1;
+    for (i, product) in products.iter().enumerate() {
+        let prefix = if i == last { "  └─" } else { "  ├─" };
+        println!("{prefix} {}", HidOnlyDisplay(product));
+    }
+}
+
+struct HidOnlyDisplay<'a>(&'a HidOnlyProduct);
+
+impl fmt::Display for HidOnlyDisplay<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} (vid={:04x} pid={:04x})",
+            self.0.name,
+            openlogi_hid::LOGITECH_VENDOR_ID,
+            self.0.product_id
+        )
+    }
+}
+
+fn print_standalone(devices: &[StandaloneDevice]) {
+    println!("Standalone devices ({})", devices.len());
+    let last = devices.len() - 1;
+    for (i, device) in devices.iter().enumerate() {
+        let prefix = if i == last { "  └─" } else { "  ├─" };
+        println!("{prefix} {}", StandaloneDisplay(device));
+    }
+}
+
+struct StandaloneDisplay<'a>(&'a StandaloneDevice);
+
+impl fmt::Display for StandaloneDisplay<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let device = self.0;
+        let dot = if device.online { "●" } else { "○" };
+        write!(
+            f,
+            "{dot} {} ({}, vid={:04x} pid={:04x}, driver={})",
+            device.display_name,
+            LowercaseDebug(device.kind),
+            device.address.vendor_id,
+            device.address.product_id,
+            device.driver_id,
+        )
     }
 }
 
@@ -229,10 +342,14 @@ struct BatteryDisplay<'a>(&'a BatteryInfo);
 impl fmt::Display for BatteryDisplay<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let battery = self.0;
+        write!(f, "battery=")?;
+        // A device without a state-of-charge gauge reports only its level.
+        if let Some(percentage) = battery.percentage {
+            write!(f, "{percentage}% ")?;
+        }
         write!(
             f,
-            "battery={}% {} ({})",
-            battery.percentage,
+            "{} ({})",
             LowercaseDebug(battery.level),
             LowercaseDebug(battery.status)
         )
@@ -304,12 +421,55 @@ impl fmt::Write for LowercaseWriter<'_, '_> {
 
 #[cfg(test)]
 mod format_tests {
-    use openlogi_core::device::{BatteryLevel, BatteryStatus, DeviceKind, DeviceTransports};
+    use openlogi_core::device::{
+        BatteryLevel, BatteryStatus, DeviceKind, DeviceTransports, RawDeviceAddress,
+        StandaloneDevice,
+    };
 
     use super::{
-        BatteryDisplay, CameraCapabilitiesDisplay, DeviceModelDisplay, PairedDevice,
-        PairedDeviceDisplay,
+        BatteryDisplay, CameraCapabilitiesDisplay, DeviceModelDisplay, HidOnlyDisplay,
+        HidOnlyProduct, PairedDevice, PairedDeviceDisplay, StandaloneDisplay,
     };
+
+    #[test]
+    fn hid_only_product_shows_name_and_ids() {
+        let product = HidOnlyProduct {
+            product_id: 0xc08b,
+            name: "G502 HERO Gaming Mouse".into(),
+        };
+        assert_eq!(
+            HidOnlyDisplay(&product).to_string(),
+            "G502 HERO Gaming Mouse (vid=046d pid=c08b)"
+        );
+    }
+
+    #[test]
+    fn standalone_device_shows_name_kind_ids_and_driver() {
+        let device = StandaloneDevice {
+            address: RawDeviceAddress {
+                vendor_id: 0x046d,
+                product_id: 0xc24a,
+                usage_page: 0xff80,
+                usage_id: 0x0080,
+                identity: "id:node".into(),
+            },
+            display_name: "G600 Gaming Mouse".into(),
+            manufacturer: None,
+            serial_number: None,
+            unit_id: [0; 4],
+            kind: DeviceKind::Mouse,
+            online: true,
+            capabilities: None,
+            light_capabilities: None,
+            driver_id: "logitech-g600".into(),
+            registry_model_id: None,
+        };
+
+        assert_eq!(
+            StandaloneDisplay(&device).to_string(),
+            "● G600 Gaming Mouse (mouse, vid=046d pid=c24a, driver=logitech-g600)"
+        );
+    }
     use super::{BatteryInfo, DeviceModelInfo};
 
     fn base_device() -> PairedDevice {
@@ -322,6 +482,8 @@ mod format_tests {
             battery: None,
             model_info: None,
             capabilities: None,
+            settings_revision: 0,
+            hidpp10: false,
         }
     }
 
@@ -353,7 +515,7 @@ mod format_tests {
     fn battery_info_is_embedded_when_present() {
         let mut d = base_device();
         d.battery = Some(BatteryInfo {
-            percentage: 42,
+            percentage: Some(42),
             level: BatteryLevel::Low,
             status: BatteryStatus::Discharging,
         });
@@ -362,11 +524,21 @@ mod format_tests {
     }
 
     #[test]
+    fn a_level_only_battery_prints_no_percentage() {
+        let b = BatteryInfo {
+            percentage: None,
+            level: BatteryLevel::Good,
+            status: BatteryStatus::Discharging,
+        };
+        assert_eq!(BatteryDisplay(&b).to_string(), "battery=good (discharging)");
+    }
+
+    #[test]
     fn battery_status_debug_names_are_lowercased_verbatim() {
         // `ChargingSlow`'s Debug form has no separator; lowercasing alone
         // yields "chargingslow", not "charging_slow" or "charging slow".
         let b = BatteryInfo {
-            percentage: 10,
+            percentage: Some(10),
             level: BatteryLevel::Critical,
             status: BatteryStatus::ChargingSlow,
         };

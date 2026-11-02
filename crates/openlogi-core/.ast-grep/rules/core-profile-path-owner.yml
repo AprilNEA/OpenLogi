@@ -1,0 +1,21 @@
+# Owner: openlogi_core::paths — where a profile's files live. Tooling outside
+# a profile asks for that profile's paths (`config_dir_for`,
+# `agent_socket_path_for`) instead of rebuilding them from the XDG bases.
+id: core-profile-path-owner
+language: rust
+severity: error
+message: A profile's file and directory names are openlogi_core::paths' (CONFIG_FILE, config_dir_for, agent_socket_path_for, …); do not rebuild a path from its parts here.
+note: |
+  The dev agent's socket path was rebuilt by hand in xtask, without the
+  XDG_RUNTIME_DIR rule the agent itself applies. See "Single source of truth"
+  in AGENTS.md.
+files:
+  - crates/**/*.rs
+  - xtask/**/*.rs
+ignores:
+  - crates/openlogi-core/**
+rule:
+  any:
+    - pattern: '"agent.sock"'
+    - pattern: '"config.toml"'
+    - pattern: '"openlogi-dev"'

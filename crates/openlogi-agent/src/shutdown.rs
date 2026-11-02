@@ -10,6 +10,7 @@ use tracing::info;
 use tracing::warn;
 
 use crate::startup::InputServices;
+use crate::virtual_keyboard::VirtualKeyboard;
 
 /// A non-signal request for the process lifecycle owner.
 pub(crate) enum ShutdownRequest {
@@ -56,6 +57,10 @@ pub(crate) fn request_channel() -> (ShutdownRequestSender, ShutdownRequests) {
 /// process ends. There is deliberately no elapsed-time fallback: a timer
 /// cannot distinguish a dead core from legitimate firmware restoration and
 /// can preempt the exact cleanup this handoff exists to protect.
+///
+/// The fallback exit still does the one thing of the lifecycle's final exit
+/// that outlives the process: it forgets the armed login session, so a start
+/// after a Quit whose core had already died is a dormant one, not a re-arm.
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 pub(crate) fn request_tray_quit(
     requests: Option<&ShutdownRequestSender>,
@@ -75,6 +80,8 @@ pub(crate) fn request_tray_quit(
     } else {
         tracing::warn!("no live agent core to accept tray Quit — exiting directly");
     }
+    #[cfg(target_os = "macos")]
+    crate::lifecycle::armed_session::clear();
     #[expect(
         clippy::exit,
         reason = "fallback only: a missing or unwound core cannot return a status through an AppKit or win32 tray callback"
@@ -146,15 +153,21 @@ impl ShutdownSignals {
 /// Release the input hook, then end the process. The run loop is not the
 /// process — macOS keeps the AppKit tray loop on the main thread — so the
 /// exit has to be explicit, and it must run the hook's destructor.
+///
+/// On macOS the virtual keyboard goes last: the input workers may still
+/// release a held chord through it until they stop, and its destructor
+/// reports every remaining key released before it removes the device.
 pub(crate) fn release_hook_and_exit(
     hook: Option<Hook>,
     inputs: &mut InputServices,
+    virtual_keyboard: VirtualKeyboard,
     reason: &str,
     _tray_guard: Option<oneshot::Sender<()>>,
 ) -> ! {
     info!(reason, "releasing the input hook and exiting");
     drop(hook);
     inputs.shutdown();
+    virtual_keyboard.release();
     #[expect(
         clippy::exit,
         reason = "a signalled shutdown must end the process, and the loop that observed it runs off the main thread"

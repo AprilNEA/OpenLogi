@@ -43,7 +43,8 @@
             "hires_wheel": true,
             "thumbwheel": true,
             "haptic_feedback": true,
-            "haptic_panel": true
+            "haptic_panel": true,
+            "easy_switch": true
           }
         },
         {
@@ -88,7 +89,9 @@
             "hires_wheel": false,
             "thumbwheel": false,
             "haptic_feedback": false,
-            "haptic_panel": false
+            "haptic_panel": false,
+            "easy_switch": true,
+            "disable_keys": true
           }
         }
       ]
@@ -212,6 +215,47 @@
       "backlight": {
         "support": "unsupported"
       },
+      "easy_switch": {
+        "support": "supported",
+        "value": {
+          "current": 0,
+          "slots": [
+            {
+              "index": 0,
+              "paired": true,
+              "connection": "Bolt",
+              "name": "Computer 1",
+              "name_max_len": 24,
+              "os": {
+                "kind": "MacOs",
+                "major": 26,
+                "minor": 1,
+                "patch": 0
+              }
+            },
+            {
+              "index": 1,
+              "paired": true,
+              "connection": "Bluetooth",
+              "name": "Computer 2",
+              "name_max_len": 24,
+              "os": null
+            },
+            {
+              "index": 2,
+              "paired": false,
+              "connection": "Unknown",
+              "name": null,
+              "name_max_len": 24,
+              "os": null
+            }
+          ],
+          "can_rename": true
+        }
+      },
+      "disable_keys": {
+        "support": "unsupported"
+      },
       "lighting": "unsupported",
       "light": "unsupported"
     },
@@ -232,6 +276,9 @@
         "support": "unsupported"
       },
       "backlight": {
+        "support": "unsupported"
+      },
+      "disable_keys": {
         "support": "unsupported"
       },
       "lighting": "unsupported",
@@ -255,6 +302,51 @@
       },
       "backlight": {
         "support": "unsupported"
+      },
+      "easy_switch": {
+        "support": "supported",
+        "value": {
+          "current": 0,
+          "slots": [
+            {
+              "index": 0,
+              "paired": true,
+              "connection": "Bolt",
+              "name": "Computer 1",
+              "name_max_len": 24,
+              "os": {
+                "kind": "MacOs",
+                "major": 26,
+                "minor": 1,
+                "patch": 0
+              }
+            },
+            {
+              "index": 1,
+              "paired": true,
+              "connection": "Bluetooth",
+              "name": "Computer 2",
+              "name_max_len": 24,
+              "os": null
+            },
+            {
+              "index": 2,
+              "paired": false,
+              "connection": "Unknown",
+              "name": null,
+              "name_max_len": 24,
+              "os": null
+            }
+          ],
+          "can_rename": true
+        }
+      },
+      "disable_keys": {
+        "support": "supported",
+        "value": {
+          "supported": 177,
+          "disabled": 160
+        }
       },
       "lighting": "supported",
       "light": "unsupported"
@@ -284,6 +376,9 @@
       "backlight": {
         "support": "unsupported"
       },
+      "disable_keys": {
+        "support": "unsupported"
+      },
       "lighting": "unsupported",
       "light": "unsupported"
     },
@@ -307,6 +402,9 @@
         "support": "unsupported"
       },
       "backlight": {
+        "support": "unsupported"
+      },
+      "disable_keys": {
         "support": "unsupported"
       },
       "lighting": "unsupported",

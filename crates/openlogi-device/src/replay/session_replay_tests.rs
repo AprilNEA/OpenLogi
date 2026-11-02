@@ -1,154 +1,524 @@
+use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
+use openlogi_core::binding::ButtonId;
 use openlogi_core::hid::PairingError;
 use openlogi_fixture::{
     CassetteExchange, FIXTURE_SCHEMA_VERSION, HidCassette, ReportSupport, RequestMatch,
 };
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 
 use super::{
     ChannelConnection, NodePresence, OpenOutcome, RawWriterAvailability, ReplayBackend,
-    ReplayChannel, ReplayNode, ReplayTopology,
+    ReplayChannel, ReplayNode, ReplayResponseBarrier, ReplayTopology,
 };
 use crate::session::gesture::CaptureSpec;
 use crate::{
-    CaptureChannel, CaptureSessionOutcome, ChannelRegistry, DeviceRoute, Enumerator, NodeId,
-    NodeInfo, PairingCommand, PairingEvent, ReceiverSelector, device_io_channel, reprog_controls,
-    run_capture_session_with_registry_spec, run_pairing,
+    CaptureChannelSlot, CaptureHost, CaptureSessionFailure, CaptureSessionOutcome,
+    CaptureSessionStop, CapturedInput, ChannelRegistry, DeviceIoGate, DeviceIoSignal, DeviceRoute,
+    Enumerator, KeyboardWanted, NodeId, NodeInfo, PairingCommand, PairingEvent, ReceiverSelector,
+    SharedChannel, device_io_channel, reprog_controls, run_capture_session,
+    run_keyboard_capture_session, run_pairing,
 };
 
-const GESTURE_CHANNEL: &str = "gesture-capture-session";
+const CAPTURE_CHANNEL: &str = "capture-session";
 const PAIRING_CHANNEL: &str = "bolt-pairing-session";
 const DIRECT_PRODUCT_ID: u16 = 0xb35b;
 const BOLT_PRODUCT_ID: u16 = 0xc548;
 const REPROG_FEATURE_INDEX: u8 = 0x02;
 const GESTURE_CID: u16 = reprog_controls::GESTURE_BUTTON_CID;
+/// The Mute key (`0x1b04` control `0x00e7`).
+const KEYBOARD_CID: u16 = 0x00e7;
 const ORIGINAL_REMAP_CID: u16 = 0x0053;
+/// A `getCidInfo` capability pair (bytes 4 and 8): a mouse control that is
+/// reprogrammable and divertable, with raw XY.
+const GESTURE_CONTROL_FLAGS: (u8, u8) = (0x31, 0x01);
+/// A function-row control that is reprogrammable and divertable, no raw XY.
+const KEYBOARD_CONTROL_FLAGS: (u8, u8) = (0x32, 0x00);
+/// `setCidReporting` flags that arm gesture capture: divert and raw XY, both
+/// marked valid.
+const GESTURE_ARMED_FLAGS: u8 = 0x33;
+/// `setCidReporting` flags that arm keyboard capture: divert marked valid, raw
+/// XY untouched since keyboard controls do not support raw XY.
+const KEYBOARD_ARMED_FLAGS: u8 = 0x03;
+/// `setCidReporting` flags that hand a mouse control back: divert and raw XY both
+/// marked valid and off.
+const GESTURE_RESTORED_FLAGS: u8 = 0x22;
+/// `setCidReporting` flags that hand a keyboard control back: divert marked valid and off.
+const KEYBOARD_RESTORED_FLAGS: u8 = 0x02;
 
 #[tokio::test]
 async fn gesture_capture_replay_restores_original_reporting_on_normal_shutdown() {
-    let node_id = NodeId::from("gesture-capture-node".to_string());
-    let route = DeviceRoute::Direct {
-        vendor_id: crate::LOGITECH_VENDOR_ID,
-        product_id: DIRECT_PRODUCT_ID,
-    };
-    let backend = Arc::new(
-        ReplayBackend::new(
-            replay_topology(direct_gesture_node(node_id.clone()), GESTURE_CHANNEL),
-            vec![gesture_capture_cassette()],
-        )
-        .expect("gesture replay topology is valid"),
-    );
-    let registry = ChannelRegistry::default();
-    let mut enumerator = Enumerator::with_backend(backend.clone()).with_registry(registry.clone());
-
-    let inventory = enumerator
-        .enumerate()
-        .await
-        .expect("production feature probe succeeds");
-    assert_eq!(inventory.len(), 1);
-    let original_publication = registry
-        .lookup(&route)
-        .expect("the enumerator publishes the direct route");
-    assert!(registry.is_current(&original_publication));
-    assert_eq!(
-        backend
-            .channel_lifetime_count(GESTURE_CHANNEL)
-            .expect("known gesture channel"),
-        1
-    );
-
-    let armed = backend
-        .hold_next_response(
-            GESTURE_CHANNEL,
-            RequestMatch::Hidpp20,
-            &root_feature_lookup_request(0x1d4b),
-        )
-        .expect("wireless feature lookup can be held");
+    let replay = ArmedReplay::enumerate(capture_cassette(
+        "gesture capture normal shutdown",
+        GESTURE_CID,
+        GESTURE_CONTROL_FLAGS,
+        GESTURE_ARMED_FLAGS,
+        GESTURE_RESTORED_FLAGS,
+    ))
+    .await;
     let (sink, _captured) = mpsc::unbounded_channel();
-    let (shutdown, shutdown_rx) = oneshot::channel();
-    let channel_slot: CaptureChannel = Arc::new(RwLock::new(None));
-    let (_io_signal, io_gate) = device_io_channel();
-    let capture = run_capture_session_with_registry_spec(
-        route.clone(),
+    let (shutdown, host) = replay.host(sink);
+    let capture = run_capture_session(
+        replay.route.clone(),
         CaptureSpec {
             divert_gesture_sources: vec![GESTURE_CID],
             ..CaptureSpec::default()
         },
-        sink,
-        shutdown_rx,
-        Arc::clone(&channel_slot),
-        &registry,
-        io_gate,
+        host,
     );
-    let stop_after_arm = async {
-        armed.request_written().await;
-        let published = channel_slot
+
+    let (outcome, ()) = tokio::join!(capture, replay.stop_after_arm(shutdown));
+
+    replay.assert_restored(
+        outcome,
+        GESTURE_CID,
+        GESTURE_ARMED_FLAGS,
+        GESTURE_RESTORED_FLAGS,
+    );
+}
+
+/// Keyboard capture arms its own way — `0x1b04` diversion on the wanted
+/// controls only, without raw XY — and then runs the skeleton the gesture
+/// session runs, so it has to publish its channel before it monitors and hand
+/// the control back before it completes, exactly as that session does.
+#[tokio::test]
+async fn keyboard_capture_replay_restores_original_reporting_on_normal_shutdown() {
+    let replay = ArmedReplay::enumerate(capture_cassette(
+        "keyboard capture normal shutdown",
+        KEYBOARD_CID,
+        KEYBOARD_CONTROL_FLAGS,
+        KEYBOARD_ARMED_FLAGS,
+        KEYBOARD_RESTORED_FLAGS,
+    ))
+    .await;
+    let (sink, _captured) = mpsc::unbounded_channel();
+    let (shutdown, host) = replay.host(sink);
+    let capture = run_keyboard_capture_session(
+        replay.route.clone(),
+        watch::channel(keyboard_keys(&[KEYBOARD_CID])).1,
+        host,
+    );
+
+    let (outcome, ()) = tokio::join!(capture, replay.stop_after_arm(shutdown));
+
+    replay.assert_restored(
+        outcome,
+        KEYBOARD_CID,
+        KEYBOARD_ARMED_FLAGS,
+        KEYBOARD_RESTORED_FLAGS,
+    );
+}
+
+/// A per-app binding change retargets a running keyboard session in place
+/// (#2140). The session hands back only the key that left the set and
+/// diverts only the key that joined it. It does not read the control table
+/// again or write the key that stays, and teardown hands back exactly the
+/// keys diverted at that moment. The strict cassette fails on any other
+/// request.
+#[tokio::test]
+async fn keyboard_capture_replay_changes_the_diverted_keys_in_place() {
+    const STAYS: u16 = KEYBOARD_CID;
+    const LEAVES: u16 = 0x00e8;
+    const JOINS: u16 = 0x00e9;
+    let replay = ArmedReplay::enumerate(keyboard_cassette(
+        "keyboard capture changes its keys in place",
+        &[STAYS, LEAVES, JOINS],
+        vec![
+            reprog_reporting_state_exchange(STAYS),
+            reprog_reporting_change_exchange(STAYS, KEYBOARD_ARMED_FLAGS),
+            reprog_reporting_state_exchange(LEAVES),
+            reprog_reporting_change_exchange(LEAVES, KEYBOARD_ARMED_FLAGS),
+            root_feature_lookup_exchange(0x1d4b, 0, 0),
+            reprog_reporting_change_exchange(LEAVES, KEYBOARD_RESTORED_FLAGS),
+            reprog_reporting_state_exchange(JOINS),
+            reprog_reporting_change_exchange(JOINS, KEYBOARD_ARMED_FLAGS),
+            reprog_reporting_change_exchange(STAYS, KEYBOARD_RESTORED_FLAGS),
+            reprog_reporting_change_exchange(JOINS, KEYBOARD_RESTORED_FLAGS),
+        ],
+    ))
+    .await;
+    let outcome = replay
+        .retarget_keyboard_then_stop(&[STAYS, LEAVES], &[STAYS, JOINS], JOINS)
+        .await;
+    assert!(matches!(
+        outcome.expect("keyboard capture shuts down cleanly"),
+        CaptureSessionOutcome::Restored
+    ));
+    let completion = replay
+        .backend
+        .channel_completion(CAPTURE_CHANNEL)
+        .expect("known capture channel");
+    assert_eq!(
+        reporting_writes(&completion.written_reports),
+        [
+            (STAYS, KEYBOARD_ARMED_FLAGS),
+            (LEAVES, KEYBOARD_ARMED_FLAGS),
+            (LEAVES, KEYBOARD_RESTORED_FLAGS),
+            (JOINS, KEYBOARD_ARMED_FLAGS),
+            (STAYS, KEYBOARD_RESTORED_FLAGS),
+            (JOINS, KEYBOARD_RESTORED_FLAGS),
+        ]
+        .map(|(cid, flags)| reprog_reporting_change_payload(cid, flags).to_vec())
+    );
+    replay
+        .backend
+        .require_complete()
+        .expect("keyboard cassette is strictly consumed");
+}
+
+/// A keyboard that binds keys only for some apps holds its session with no
+/// key diverted, and diverts a key in place when the app in front binds it.
+#[tokio::test]
+async fn keyboard_capture_replay_diverts_a_key_into_an_empty_session() {
+    let replay = ArmedReplay::enumerate(keyboard_cassette(
+        "keyboard capture starts with no key diverted",
+        &[KEYBOARD_CID],
+        vec![
+            root_feature_lookup_exchange(0x1d4b, 0, 0),
+            reprog_reporting_state_exchange(KEYBOARD_CID),
+            reprog_reporting_change_exchange(KEYBOARD_CID, KEYBOARD_ARMED_FLAGS),
+            reprog_reporting_change_exchange(KEYBOARD_CID, KEYBOARD_RESTORED_FLAGS),
+        ],
+    ))
+    .await;
+    let outcome = replay
+        .retarget_keyboard_then_stop(&[], &[KEYBOARD_CID], KEYBOARD_CID)
+        .await;
+    replay.assert_restored(
+        outcome,
+        KEYBOARD_CID,
+        KEYBOARD_ARMED_FLAGS,
+        KEYBOARD_RESTORED_FLAGS,
+    );
+}
+
+/// A failed feature lookup is not evidence that wake reports are unsupported.
+/// End the epoch and restore its controls so the supervisor can retry instead
+/// of leaving a live session that cannot recover after the device's next nap.
+#[tokio::test]
+async fn capture_replay_failed_wake_discovery_restores_before_retry() {
+    for keyboard in [false, true] {
+        for timeout in [false, true] {
+            let (cid, control_flags, armed_flags, restored_flags) = if keyboard {
+                (
+                    KEYBOARD_CID,
+                    KEYBOARD_CONTROL_FLAGS,
+                    KEYBOARD_ARMED_FLAGS,
+                    KEYBOARD_RESTORED_FLAGS,
+                )
+            } else {
+                (
+                    GESTURE_CID,
+                    GESTURE_CONTROL_FLAGS,
+                    GESTURE_ARMED_FLAGS,
+                    GESTURE_RESTORED_FLAGS,
+                )
+            };
+            let mut cassette = capture_cassette(
+                "failed capture wake discovery",
+                cid,
+                control_flags,
+                armed_flags,
+                restored_flags,
+            );
+            let lookup = cassette
+                .exchanges
+                .iter_mut()
+                .find(|exchange| exchange.request == root_feature_lookup_request(0x1d4b))
+                .expect("capture probes the wake feature");
+            lookup.response = if timeout {
+                None
+            } else {
+                Some(crate::channel::scripted::feature_error(
+                    &lookup.request,
+                    0x09,
+                ))
+            };
+            let replay = ArmedReplay::enumerate(cassette).await;
+            let (sink, _captured) = mpsc::unbounded_channel();
+            let (_shutdown, host) = replay.host(sink);
+            replay.wireless_lookup.release();
+            let capture = async {
+                if keyboard {
+                    run_keyboard_capture_session(
+                        replay.route.clone(),
+                        watch::channel(keyboard_keys(&[cid])).1,
+                        host,
+                    )
+                    .await
+                } else {
+                    run_capture_session(
+                        replay.route.clone(),
+                        CaptureSpec {
+                            divert_gesture_sources: vec![cid],
+                            ..CaptureSpec::default()
+                        },
+                        host,
+                    )
+                    .await
+                }
+            };
+            let outcome = tokio::time::timeout(std::time::Duration::from_secs(10), capture)
+                .await
+                .expect("failed wake discovery must end capture without a shutdown request");
+            replay.assert_restored(outcome, cid, armed_flags, restored_flags);
+        }
+    }
+}
+
+#[tokio::test]
+async fn capture_replay_without_wake_feature_stays_active_until_shutdown() {
+    let replay = ArmedReplay::enumerate(capture_cassette(
+        "capture without a wake feature",
+        GESTURE_CID,
+        GESTURE_CONTROL_FLAGS,
+        GESTURE_ARMED_FLAGS,
+        GESTURE_RESTORED_FLAGS,
+    ))
+    .await;
+    let (sink, _captured) = mpsc::unbounded_channel();
+    let (shutdown, host) = replay.host(sink);
+    replay.wireless_lookup.release();
+    let capture = run_capture_session(
+        replay.route.clone(),
+        CaptureSpec {
+            divert_gesture_sources: vec![GESTURE_CID],
+            ..CaptureSpec::default()
+        },
+        host,
+    );
+    tokio::pin!(capture);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), &mut capture)
+            .await
+            .is_err(),
+        "a successful unsupported-feature response must not cause a restart loop"
+    );
+    assert!(replay.wireless_lookup.is_request_written());
+    shutdown
+        .send(CaptureSessionStop::Shutdown)
+        .expect("capture remains active");
+    replay.assert_restored(
+        capture.await,
+        GESTURE_CID,
+        GESTURE_ARMED_FLAGS,
+        GESTURE_RESTORED_FLAGS,
+    );
+}
+
+/// One replayed direct device, enumerated the production way, whose `0x1d4b`
+/// lookup is held so a capture session can be observed between arming and
+/// monitoring.
+struct ArmedReplay {
+    backend: Arc<ReplayBackend>,
+    registry: ChannelRegistry,
+    node_id: NodeId,
+    route: DeviceRoute,
+    original_publication: SharedChannel,
+    channel_slot: CaptureChannelSlot,
+    wireless_lookup: ReplayResponseBarrier,
+    /// Held so the gate stays open for the session's lifetime.
+    _io_signal: DeviceIoSignal,
+    io_gate: DeviceIoGate,
+}
+
+impl ArmedReplay {
+    async fn enumerate(cassette: HidCassette) -> Self {
+        let node_id = NodeId::from("capture-node".to_string());
+        let route = DeviceRoute::Direct {
+            vendor_id: crate::LOGITECH_VENDOR_ID,
+            product_id: DIRECT_PRODUCT_ID,
+        };
+        let backend = Arc::new(
+            ReplayBackend::new(
+                replay_topology(direct_capture_node(node_id.clone()), CAPTURE_CHANNEL),
+                vec![cassette],
+            )
+            .expect("capture replay topology is valid"),
+        );
+        let registry = ChannelRegistry::default();
+        let mut enumerator =
+            Enumerator::with_backend(backend.clone()).with_registry(registry.clone());
+
+        let inventory = enumerator
+            .enumerate()
+            .await
+            .expect("production feature probe succeeds");
+        assert_eq!(inventory.len(), 1);
+        let original_publication = registry
+            .lookup(&route)
+            .expect("the enumerator publishes the direct route");
+        assert!(registry.is_current(&original_publication));
+        assert_eq!(
+            backend
+                .channel_lifetime_count(CAPTURE_CHANNEL)
+                .expect("known capture channel"),
+            1
+        );
+
+        let wireless_lookup = backend
+            .hold_next_response(
+                CAPTURE_CHANNEL,
+                RequestMatch::Hidpp20,
+                &root_feature_lookup_request(0x1d4b),
+            )
+            .expect("wireless feature lookup can be held");
+        let (io_signal, io_gate) = device_io_channel();
+        Self {
+            backend,
+            registry,
+            node_id,
+            route,
+            original_publication,
+            channel_slot: Arc::new(RwLock::new(None)),
+            wireless_lookup,
+            _io_signal: io_signal,
+            io_gate,
+        }
+    }
+
+    /// The host handles one session runs against, and the sender that shuts
+    /// it down.
+    fn host(
+        &self,
+        sink: mpsc::UnboundedSender<CapturedInput>,
+    ) -> (oneshot::Sender<CaptureSessionStop>, CaptureHost<'_>) {
+        let (shutdown, shutdown_rx) = oneshot::channel();
+        let host = CaptureHost {
+            sink,
+            shutdown: shutdown_rx,
+            channel_slot: Arc::clone(&self.channel_slot),
+            registry: &self.registry,
+            device_io: self.io_gate.clone(),
+        };
+        (shutdown, host)
+    }
+
+    /// Once the session has armed and asked for `0x1d4b`, check that it has
+    /// published its channel, then shut it down and let the lookup answer.
+    async fn stop_after_arm(&self, shutdown: oneshot::Sender<CaptureSessionStop>) {
+        self.wireless_lookup.request_written().await;
+        let published = self
+            .channel_slot
             .read()
             .expect("capture channel slot is readable")
             .clone()
-            .expect("capture channel is published after arming");
-        assert!(registry.is_current(&published));
+            .expect("capture channel is published before the wireless lookup");
+        assert!(self.registry.is_current(&published));
         shutdown
-            .send(())
+            .send(CaptureSessionStop::Shutdown)
             .expect("capture session still owns its shutdown receiver");
-        armed.release();
-    };
+        self.wireless_lookup.release();
+    }
 
-    let (outcome, ()) = tokio::join!(capture, stop_after_arm);
-    assert!(matches!(
-        outcome.expect("capture session shuts down cleanly"),
-        CaptureSessionOutcome::Restored
-    ));
-    assert!(
-        channel_slot
-            .read()
-            .expect("capture channel slot is readable")
-            .is_none(),
-        "normal shutdown must clear the captured channel slot"
-    );
-    assert!(
-        registry.is_current(&original_publication),
-        "normal shutdown must restore through and retain the original publication"
-    );
-    assert_eq!(backend.open_count(&node_id).expect("known gesture node"), 1);
-    assert_eq!(
-        backend
-            .channel_lifetime_count(GESTURE_CHANNEL)
-            .expect("known gesture channel"),
-        1,
-        "capture must reuse the enumerator-owned channel"
-    );
+    /// Run a keyboard session over the keys `from`, ask for the keys `to`
+    /// once it monitors, and shut it down while the change's last write —
+    /// diverting `last_diverted` — waits for its response, so shutdown can
+    /// only land after the change.
+    async fn retarget_keyboard_then_stop(
+        &self,
+        from: &[u16],
+        to: &[u16],
+        last_diverted: u16,
+    ) -> Result<CaptureSessionOutcome, CaptureSessionFailure> {
+        let (wanted_tx, wanted) = watch::channel(keyboard_keys(from));
+        let (sink, _captured) = mpsc::unbounded_channel();
+        let (shutdown, host) = self.host(sink);
+        let last_write = self
+            .backend
+            .hold_next_response(
+                CAPTURE_CHANNEL,
+                RequestMatch::Hidpp20,
+                &reprog_reporting_change_request(last_diverted, KEYBOARD_ARMED_FLAGS),
+            )
+            .expect("the change's last write can be held");
+        let capture = run_keyboard_capture_session(self.route.clone(), wanted, host);
+        let change_then_stop = async {
+            self.wireless_lookup.request_written().await;
+            wanted_tx.send_replace(keyboard_keys(to));
+            self.wireless_lookup.release();
+            // A session that ends instead of changing never writes it.
+            tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                last_write.request_written(),
+            )
+            .await
+            .expect("the change diverts its last key");
+            shutdown
+                .send(CaptureSessionStop::Shutdown)
+                .expect("capture session still owns its shutdown receiver");
+            last_write.release();
+        };
+        let (outcome, ()) = tokio::join!(capture, change_then_stop);
+        outcome
+    }
 
-    assert_gesture_reporting_completion(&backend);
-}
+    /// A normal shutdown restored `cid`'s reporting through the channel the
+    /// enumerator owns, cleared the slot, and consumed the whole cassette.
+    fn assert_restored(
+        &self,
+        outcome: Result<CaptureSessionOutcome, CaptureSessionFailure>,
+        cid: u16,
+        armed_flags: u8,
+        restored_flags: u8,
+    ) {
+        assert!(matches!(
+            outcome.expect("capture session shuts down cleanly"),
+            CaptureSessionOutcome::Restored
+        ));
+        assert!(
+            self.channel_slot
+                .read()
+                .expect("capture channel slot is readable")
+                .is_none(),
+            "normal shutdown must clear the captured channel slot"
+        );
+        assert!(
+            self.registry.is_current(&self.original_publication),
+            "normal shutdown must restore through and retain the original publication"
+        );
+        assert_eq!(
+            self.backend
+                .open_count(&self.node_id)
+                .expect("known capture node"),
+            1
+        );
+        assert_eq!(
+            self.backend
+                .channel_lifetime_count(CAPTURE_CHANNEL)
+                .expect("known capture channel"),
+            1,
+            "capture must reuse the enumerator-owned channel"
+        );
 
-fn assert_gesture_reporting_completion(backend: &ReplayBackend) {
-    let completion = backend
-        .channel_completion(GESTURE_CHANNEL)
-        .expect("known gesture channel");
-    let reporting_writes: Vec<_> = completion
-        .written_reports
-        .iter()
-        .filter(|report| {
-            report[0] == 0x11 && report[2] == REPROG_FEATURE_INDEX && report[3] >> 4 == 3
-        })
-        .collect();
-    assert_eq!(reporting_writes.len(), 2);
-    assert_eq!(
-        &reporting_writes[0][4..],
-        &reprog_reporting_change_payload(0x33),
-        "arming sets diversion and raw-XY while preserving the original remap"
-    );
-    assert_eq!(
-        &reporting_writes[1][4..],
-        &reprog_reporting_change_payload(0x22),
-        "shutdown clears only diversion and raw-XY while preserving the original remap"
-    );
-    assert_eq!(completion.channel_open_count, 1);
-    backend
-        .require_complete()
-        .expect("gesture cassette is strictly consumed");
+        let completion = self
+            .backend
+            .channel_completion(CAPTURE_CHANNEL)
+            .expect("known capture channel");
+        let reporting_writes: Vec<_> = completion
+            .written_reports
+            .iter()
+            .filter(|report| {
+                report[0] == 0x11 && report[2] == REPROG_FEATURE_INDEX && report[3] >> 4 == 3
+            })
+            .collect();
+        assert_eq!(reporting_writes.len(), 2);
+        assert_eq!(
+            &reporting_writes[0][4..],
+            &reprog_reporting_change_payload(cid, armed_flags),
+            "arming sets only the diversion this capture needs while preserving the original remap"
+        );
+        assert_eq!(
+            &reporting_writes[1][4..],
+            &reprog_reporting_change_payload(cid, restored_flags),
+            "shutdown clears only diversion while preserving the original remap"
+        );
+        assert_eq!(completion.channel_open_count, 1);
+        self.backend
+            .require_complete()
+            .expect("capture cassette is strictly consumed");
+    }
 }
 
 #[tokio::test]
@@ -194,12 +564,14 @@ async fn bolt_pairing_replay_cancels_discovery_and_restores_notifications() {
     assert_eq!(
         completion.written_reports,
         vec![
+            receiver_notification_flags_read(),
             receiver_notification_flags_write([0x00, 0x09, 0x00]),
             bolt_discovery_write([30, 0x01, 0x00]),
             bolt_discovery_write([30, 0x02, 0x00]),
-            receiver_notification_flags_write([0x00, 0x00, 0x00]),
+            receiver_notification_flags_write([0x00, 0x01, 0x00]),
         ],
-        "cancel while searching must stop Bolt discovery before restoring notification flags"
+        "cancel while searching must stop Bolt discovery before restoring the notification \
+         flags found before pairing (inventory's WIRELESS stays on)"
     );
     assert_eq!(completion.channel_open_count, 1);
     assert_eq!(
@@ -214,8 +586,8 @@ async fn bolt_pairing_replay_cancels_discovery_and_restores_notifications() {
         .expect("pairing cassette is strictly consumed");
 }
 
-fn direct_gesture_node(id: NodeId) -> ReplayNode {
-    replay_node(id, DIRECT_PRODUCT_ID, "Gesture Capture Mouse")
+fn direct_capture_node(id: NodeId) -> ReplayNode {
+    replay_node(id, DIRECT_PRODUCT_ID, "Capture Device")
 }
 
 fn bolt_pairing_node(id: NodeId) -> ReplayNode {
@@ -239,7 +611,7 @@ fn replay_node(id: NodeId, product_id: u16, name: &str) -> ReplayNode {
         channel: Some(if product_id == BOLT_PRODUCT_ID {
             PAIRING_CHANNEL.to_string()
         } else {
-            GESTURE_CHANNEL.to_string()
+            CAPTURE_CHANNEL.to_string()
         }),
         raw_writer: RawWriterAvailability::Unavailable,
         receiver_slots: Vec::new(),
@@ -257,40 +629,117 @@ fn replay_topology(node: ReplayNode, channel: &str) -> ReplayTopology {
     }
 }
 
-fn gesture_capture_cassette() -> HidCassette {
+/// The exchanges one capture session over `cid` costs, from the production
+/// probe through arming, the held `0x1d4b` lookup, and the restore on shutdown.
+fn capture_cassette(
+    name: &str,
+    cid: u16,
+    control_flags: (u8, u8),
+    armed_flags: u8,
+    restored_flags: u8,
+) -> HidCassette {
+    let session = [
+        reprog_reporting_state_exchange(cid),
+        reprog_reporting_change_exchange(cid, armed_flags),
+        root_feature_lookup_exchange(0x1d4b, 0, 0),
+        reprog_reporting_change_exchange(cid, restored_flags),
+    ];
     cassette(
-        "gesture capture normal shutdown",
-        GESTURE_CHANNEL,
-        vec![
-            root_ping_exchange(),
-            root_feature_lookup_exchange(0x0001, 0x01, 0),
-            feature_set_count_exchange(2),
-            feature_set_entry_exchange(1, 0x0001),
-            feature_set_entry_exchange(2, reprog_controls::FEATURE_ID),
-            root_ping_exchange(),
-            root_feature_lookup_exchange(reprog_controls::FEATURE_ID, REPROG_FEATURE_INDEX, 4),
-            reprog_control_count_exchange(1),
-            reprog_gesture_control_info_exchange(),
-            reprog_reporting_state_exchange(),
-            reprog_reporting_change_exchange(0x33),
-            root_feature_lookup_exchange(0x1d4b, 0, 0),
-            reprog_reporting_change_exchange(0x22),
-        ],
+        name,
+        CAPTURE_CHANNEL,
+        capture_prelude(&[cid], control_flags)
+            .into_iter()
+            .chain(session)
+            .collect(),
     )
 }
 
+/// The exchanges of a keyboard session over the control table `table`: the
+/// shared prelude, then `session` from the first reporting read on.
+fn keyboard_cassette(name: &str, table: &[u16], session: Vec<CassetteExchange>) -> HidCassette {
+    cassette(
+        name,
+        CAPTURE_CHANNEL,
+        capture_prelude(table, KEYBOARD_CONTROL_FLAGS)
+            .into_iter()
+            .chain(session)
+            .collect(),
+    )
+}
+
+/// The exchanges before a capture session's first reporting read: the
+/// production probe, then the session's own open and control-table read.
+fn capture_prelude(table: &[u16], control_flags: (u8, u8)) -> Vec<CassetteExchange> {
+    let count = u8::try_from(table.len()).expect("a test control table fits a count byte");
+    let control_table = || {
+        (0u8..)
+            .zip(table)
+            .map(|(index, &cid)| reprog_control_info_exchange(index, cid, control_flags))
+    };
+    [
+        root_ping_exchange(),
+        root_feature_lookup_exchange(0x0001, 0x01, 0),
+        feature_set_count_exchange(2),
+        feature_set_entry_exchange(1, 0x0001),
+        feature_set_entry_exchange(2, reprog_controls::FEATURE_ID),
+        reprog_control_count_exchange(count),
+    ]
+    .into_iter()
+    .chain(control_table())
+    .chain([
+        root_ping_exchange(),
+        root_feature_lookup_exchange(reprog_controls::FEATURE_ID, REPROG_FEATURE_INDEX, 4),
+        reprog_control_count_exchange(count),
+    ])
+    .chain(control_table())
+    .collect()
+}
+
+/// `0x1b04` controls that dispatch as their own control buttons.
+fn keyboard_keys(cids: &[u16]) -> KeyboardWanted {
+    KeyboardWanted {
+        controls: cids
+            .iter()
+            .map(|&cid| (cid, ButtonId::control(cid)))
+            .collect(),
+        grid: BTreeMap::new(),
+    }
+}
+
+/// The payload of every `setCidReporting` write in `reports`, in order.
+fn reporting_writes(reports: &[Vec<u8>]) -> Vec<Vec<u8>> {
+    reports
+        .iter()
+        .filter(|report| {
+            report[0] == 0x11 && report[2] == REPROG_FEATURE_INDEX && report[3] >> 4 == 3
+        })
+        .map(|report| report[4..].to_vec())
+        .collect()
+}
+
 fn bolt_pairing_cancel_cassette() -> HidCassette {
+    // Inventory keeps WIRELESS on; pairing adds SOFTWARE_PRESENT only.
+    let mut flags_read = receiver_notification_flags_read();
+    flags_read[5] = 0x01;
     cassette(
         "Bolt discovery cancellation",
         PAIRING_CHANNEL,
-        [
-            receiver_notification_flags_write([0x00, 0x09, 0x00]),
-            bolt_discovery_write([30, 0x01, 0x00]),
-            bolt_discovery_write([30, 0x02, 0x00]),
-            receiver_notification_flags_write([0x00, 0x00, 0x00]),
-        ]
-        .into_iter()
-        .map(exact_echo_exchange)
+        std::iter::once(CassetteExchange {
+            request_match: RequestMatch::Exact,
+            request: receiver_notification_flags_read(),
+            response: Some(flags_read),
+            required: true,
+        })
+        .chain(
+            [
+                receiver_notification_flags_write([0x00, 0x09, 0x00]),
+                bolt_discovery_write([30, 0x01, 0x00]),
+                bolt_discovery_write([30, 0x02, 0x00]),
+                receiver_notification_flags_write([0x00, 0x01, 0x00]),
+            ]
+            .into_iter()
+            .map(exact_echo_exchange),
+        )
         .collect(),
     )
 }
@@ -350,22 +799,28 @@ fn reprog_control_count_exchange(count: u8) -> CassetteExchange {
     )
 }
 
-fn reprog_gesture_control_info_exchange() -> CassetteExchange {
+fn reprog_control_info_exchange(
+    index: u8,
+    cid: u16,
+    (flags, flags_high): (u8, u8),
+) -> CassetteExchange {
+    let mut request = [0u8; 16];
+    request[0] = index;
     let mut response = [0u8; 16];
-    response[0..2].copy_from_slice(&GESTURE_CID.to_be_bytes());
+    response[0..2].copy_from_slice(&cid.to_be_bytes());
     response[2..4].copy_from_slice(&0x009cu16.to_be_bytes());
-    response[4] = 0x31;
-    response[8] = 0x01;
+    response[4] = flags;
+    response[8] = flags_high;
     hidpp20_exchange(
-        hidpp20_long(0xff, REPROG_FEATURE_INDEX, 1, [0; 16]),
+        hidpp20_long(0xff, REPROG_FEATURE_INDEX, 1, request),
         hidpp20_long(0xff, REPROG_FEATURE_INDEX, 1, response),
     )
 }
 
-fn reprog_reporting_state_exchange() -> CassetteExchange {
-    let [cid_high, cid_low] = GESTURE_CID.to_be_bytes();
+fn reprog_reporting_state_exchange(cid: u16) -> CassetteExchange {
+    let [cid_high, cid_low] = cid.to_be_bytes();
     let mut response = [0u8; 16];
-    response[0..2].copy_from_slice(&GESTURE_CID.to_be_bytes());
+    response[0..2].copy_from_slice(&cid.to_be_bytes());
     response[2] = 0x44;
     response[3..5].copy_from_slice(&ORIGINAL_REMAP_CID.to_be_bytes());
     response[5] = 0x05;
@@ -375,15 +830,23 @@ fn reprog_reporting_state_exchange() -> CassetteExchange {
     )
 }
 
-fn reprog_reporting_change_exchange(flags: u8) -> CassetteExchange {
-    let payload = reprog_reporting_change_payload(flags);
-    let report = hidpp20_long(0xff, REPROG_FEATURE_INDEX, 3, payload);
+fn reprog_reporting_change_exchange(cid: u16, flags: u8) -> CassetteExchange {
+    let report = reprog_reporting_change_request(cid, flags);
     hidpp20_exchange(report.clone(), report)
 }
 
-fn reprog_reporting_change_payload(flags: u8) -> [u8; 16] {
+fn reprog_reporting_change_request(cid: u16, flags: u8) -> Vec<u8> {
+    hidpp20_long(
+        0xff,
+        REPROG_FEATURE_INDEX,
+        3,
+        reprog_reporting_change_payload(cid, flags),
+    )
+}
+
+fn reprog_reporting_change_payload(cid: u16, flags: u8) -> [u8; 16] {
     let mut payload = [0u8; 16];
-    payload[0..2].copy_from_slice(&GESTURE_CID.to_be_bytes());
+    payload[0..2].copy_from_slice(&cid.to_be_bytes());
     payload[2] = flags;
     payload[3..5].copy_from_slice(&ORIGINAL_REMAP_CID.to_be_bytes());
     payload
@@ -391,6 +854,10 @@ fn reprog_reporting_change_payload(flags: u8) -> [u8; 16] {
 
 fn receiver_notification_flags_write(flags: [u8; 3]) -> Vec<u8> {
     hidpp10_register_write(0x00, flags)
+}
+
+fn receiver_notification_flags_read() -> Vec<u8> {
+    vec![0x10, 0xff, 0x81, 0x00, 0x00, 0x00, 0x00]
 }
 
 fn bolt_discovery_write(payload: [u8; 3]) -> Vec<u8> {

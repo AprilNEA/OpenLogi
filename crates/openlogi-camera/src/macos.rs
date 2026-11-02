@@ -31,6 +31,9 @@ use objc2::msg_send;
 use objc2::rc::autoreleasepool;
 use objc2::runtime::{AnyClass, AnyObject};
 
+pub(crate) mod formats;
+use formats::{DeviceFormat, RateRange, round_fps};
+
 /// Raw camera metadata as reported by `AVCaptureDevice`, before vendor parsing.
 pub(crate) struct RawCamera {
     pub name: String,
@@ -132,75 +135,108 @@ pub(crate) fn enumerate() -> Vec<RawCamera> {
 /// `(0, 0, 0)` when none are reported. Reads format metadata only — no capture
 /// session, so no Camera permission is needed.
 fn best_format(device: *mut AnyObject) -> (u32, u32, u32) {
+    // SAFETY: `device` is a non-null `AVCaptureDevice` out of the enclosing
+    // `devicesWithMediaType:` array, alive for the enclosing pool.
+    let formats = device_formats(unsafe { &*device });
+    let mut best = (0u32, 0u32, 0u32);
+    for format in formats {
+        let fps = format
+            .rates
+            .iter()
+            .map(|range| round_fps(range.max))
+            .max()
+            .unwrap_or(0);
+        let (w, h) = (format.width, format.height);
+        let area = u64::from(w) * u64::from(h);
+        let best_area = u64::from(best.0) * u64::from(best.1);
+        if area > best_area || (w == best.0 && h == best.1 && fps > best.2) {
+            best = (w, h, fps);
+        }
+    }
+    best
+}
+
+/// Every format `device` supports, in the order of its `formats` array: an
+/// index into the result is an index into that array, which is how
+/// `capture_macos` finds the format to activate. An entry the device describes
+/// with no frame size has none (`0×0`) and no rates, rather than being left
+/// out, so the indices stay aligned. Metadata only — no capture session, so no
+/// Camera permission is needed.
+///
+/// The array and its elements are autoreleased: call this inside an
+/// [`autoreleasepool`] on a thread that has no run loop of its own.
+pub(crate) fn device_formats(device: &AnyObject) -> Vec<DeviceFormat> {
     // SAFETY: `device` is a valid `AVCaptureDevice`; `formats` is an autoreleased
-    // `NSArray` of `AVCaptureDeviceFormat`, each exposing a `CMFormatDescription`
-    // and frame-rate ranges via documented selectors.
+    // `NSArray` of `AVCaptureDeviceFormat` (never holding nil), each exposing a
+    // `CMFormatDescription` and frame-rate ranges via documented selectors.
     unsafe {
         let formats: *mut AnyObject = msg_send![device, formats];
         if formats.is_null() {
-            return (0, 0, 0);
+            return Vec::new();
         }
         let count: usize = msg_send![formats, count];
-        let mut best = (0u32, 0u32, 0u32);
+        let mut out = Vec::with_capacity(count);
         for i in 0..count {
             let format: *mut AnyObject = msg_send![formats, objectAtIndex: i];
-            if format.is_null() {
-                continue;
-            }
-            let desc: *mut CMFormatDescription = msg_send![format, formatDescription];
-            if desc.is_null() {
-                continue;
-            }
-            let dims = CMVideoFormatDescriptionGetDimensions(desc);
-            let w = u32::try_from(dims.width).unwrap_or(0);
-            let h = u32::try_from(dims.height).unwrap_or(0);
-            let fps = max_frame_rate(format);
-            let area = u64::from(w) * u64::from(h);
-            let best_area = u64::from(best.0) * u64::from(best.1);
-            if area > best_area || (w == best.0 && h == best.1 && fps > best.2) {
-                best = (w, h, fps);
-            }
+            out.push(read_format(format));
         }
-        best
+        out
     }
 }
 
-/// Highest `maxFrameRate` across a format's `videoSupportedFrameRateRanges`.
-fn max_frame_rate(format: *mut AnyObject) -> u32 {
-    // SAFETY: documented selectors on a valid `AVCaptureDeviceFormat` /
-    // `AVFrameRateRange`; `maxFrameRate` returns a `double`.
+/// One `AVCaptureDeviceFormat` as plain data.
+///
+/// # Safety
+/// `format` is null or a valid `AVCaptureDeviceFormat`.
+unsafe fn read_format(format: *mut AnyObject) -> DeviceFormat {
+    let mut read = DeviceFormat {
+        width: 0,
+        height: 0,
+        rates: Vec::new(),
+    };
+    if format.is_null() {
+        return read;
+    }
+    // SAFETY: documented selectors on a valid `AVCaptureDeviceFormat`.
+    unsafe {
+        let desc: *mut CMFormatDescription = msg_send![format, formatDescription];
+        if desc.is_null() {
+            return read;
+        }
+        let dims = CMVideoFormatDescriptionGetDimensions(desc);
+        read.width = u32::try_from(dims.width).unwrap_or(0);
+        read.height = u32::try_from(dims.height).unwrap_or(0);
+        read.rates = rate_ranges(format);
+    }
+    read
+}
+
+/// A format's `videoSupportedFrameRateRanges`, in the device's order.
+///
+/// # Safety
+/// `format` is a valid `AVCaptureDeviceFormat`.
+unsafe fn rate_ranges(format: *mut AnyObject) -> Vec<RateRange> {
+    // SAFETY: documented selectors on a valid `AVCaptureDeviceFormat` and its
+    // `AVFrameRateRange`s; `minFrameRate` / `maxFrameRate` return a `double`.
     unsafe {
         let ranges: *mut AnyObject = msg_send![format, videoSupportedFrameRateRanges];
         if ranges.is_null() {
-            return 0;
+            return Vec::new();
         }
         let count: usize = msg_send![ranges, count];
-        let mut max = 0.0f64;
+        let mut out = Vec::with_capacity(count);
         for i in 0..count {
             let range: *mut AnyObject = msg_send![ranges, objectAtIndex: i];
-            if range.is_null() {
-                continue;
-            }
-            let r: f64 = msg_send![range, maxFrameRate];
-            if r > max {
-                max = r;
-            }
+            out.push(if range.is_null() {
+                RateRange { min: 0.0, max: 0.0 }
+            } else {
+                RateRange {
+                    min: msg_send![range, minFrameRate],
+                    max: msg_send![range, maxFrameRate],
+                }
+            });
         }
-        round_fps(max)
-    }
-}
-
-/// Round a frame rate to the nearest whole fps (so 59.94 reads as 60).
-#[expect(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "fps is rounded, finite, and clamped to a small non-negative range"
-)]
-fn round_fps(rate: f64) -> u32 {
-    if rate.is_finite() && rate > 0.0 {
-        rate.round() as u32
-    } else {
-        0
+        out
     }
 }
 

@@ -1,0 +1,37 @@
+# Owner: orchestrator::devices::same_device_lifecycle. Receiver-slot identity
+# alone cannot distinguish replacement from a probe learning more identity.
+id: agent-device-lifecycle-owner
+language: rust
+severity: error
+message: Use orchestrator::devices::same_device_lifecycle for inventory retirement and retry continuity; do not compare reconstructed device identities here.
+note: |
+  Direct identity equality falsely retired requests when a receiver probe learned
+  a unit ID or serial, while stable-ID-only retries transferred to replacements.
+  Retirement and retry planning must share the lifecycle decision.
+files:
+  - crates/openlogi-agent-core/src/orchestrator.rs
+  - crates/openlogi-agent-core/src/orchestrator/**/*.rs
+rule:
+  all:
+    - any:
+        - pattern: DeviceIdentity::from_parts($$$LEFT) == DeviceIdentity::from_parts($$$RIGHT)
+        - pattern: DeviceIdentity::from_parts($$$LEFT) != DeviceIdentity::from_parts($$$RIGHT)
+        - all:
+            - any:
+                - pattern: stable_id($A) == $B
+                - pattern: stable_id($A) != $B
+                - pattern: $A == stable_id($B)
+                - pattern: $A != stable_id($B)
+            - inside:
+                kind: function_item
+                stopBy: end
+                has:
+                  field: name
+                  regex: '^(reapply_targets|plan_reapply|refresh_inventory_inner)$'
+    - not:
+        inside:
+          kind: function_item
+          stopBy: end
+          has:
+            field: name
+            regex: '^same_device_lifecycle$'

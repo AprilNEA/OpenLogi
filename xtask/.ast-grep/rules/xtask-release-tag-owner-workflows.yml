@@ -1,0 +1,61 @@
+# Owner: xtask's `support::release_tag` — which channel a release tag belongs
+# to.
+id: xtask-release-tag-owner-workflows
+language: yaml
+severity: error
+message: Release channels are decided by xtask's support::release_tag; read the `version` job's `channel` output instead of matching `-beta` against a tag in a workflow.
+note: |
+  `cargo xtask release version` parses the tag once and prints its channel.
+  A workflow that matched `-beta` in the tag would be a second parser.
+  A best-effort, lexical guard without data flow. It fires on a scalar that
+  contains `-beta` and either:
+  - references a tag or ref: `github.ref` / `github.ref_name`,
+    `github['ref']`, `GITHUB_REF` / `GITHUB_REF_NAME`, `refs/tags`, a shell
+    variable such as `$TAG`, `${RELEASE_TAG}` or `$tag_name`, a property
+    such as `env.TAG`, `inputs.tag`, `steps.<id>.outputs.release_tag` or
+    `github.event.release.tag_name`, or bracket access such as `env['TAG']`;
+    or
+  - is in the `tags` / `tags-ignore` filter of the `on.push` trigger, in
+    block or flow style, with the keys quoted or not.
+  Known limits, not a complete list: a tag copied into another variable
+  first (`env.VERSION`) passes; a `run` script that references a ref and
+  also mentions an unrelated `-beta` fires (move the unrelated part to its
+  own step); and literal text that reads like a reference, such as a step
+  name with `$TAG-beta` or `GITHUB_REF-beta`, fires.
+  See "Single source of truth" in AGENTS.md.
+files:
+  - .github/workflows/**
+rule:
+  any:
+    - kind: string_scalar
+    - kind: single_quote_scalar
+    - kind: double_quote_scalar
+    - kind: block_scalar
+  all:
+    - regex: "-beta"
+    - any:
+        - regex: "(?i)github\\.ref|github\\[\\s*['\"]ref|github_ref|refs/tags|\\$\\{?(\\w*_)?tag(_\\w*)?\\b|\\b(env|inputs|vars|matrix|outputs|event|release)\\.(\\w*_)?tag(_\\w*)?\\b|\\[\\s*['\"](\\w*_)?tag(_\\w*)?['\"]\\s*\\]"
+        - inside:
+            stopBy: end
+            any:
+              - kind: block_mapping_pair
+              - kind: flow_pair
+            has:
+              field: key
+              regex: "^[\"']?tags(-ignore)?[\"']?$"
+            inside:
+              stopBy: end
+              any:
+                - kind: block_mapping_pair
+                - kind: flow_pair
+              has:
+                field: key
+                regex: "^[\"']?push[\"']?$"
+              inside:
+                stopBy: end
+                any:
+                  - kind: block_mapping_pair
+                  - kind: flow_pair
+                has:
+                  field: key
+                  regex: "^[\"']?on[\"']?$"

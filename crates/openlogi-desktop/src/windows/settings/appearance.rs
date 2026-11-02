@@ -8,13 +8,13 @@ use super::{
     ActiveTheme, App, AppState, Appearance, Axis, Button, ButtonGroup, Entity, FluentBuilder, Hsla,
     IconName, InputState, InteractiveElement, IntoElement, Palette, ParentElement, Rc, SelectState,
     Selectable, SettingField, SettingGroup, SettingItem, SettingPage, SettingsView, SharedString,
-    StateEvent, StatefulInteractiveElement, Styled, Theme, ThemeColor, ThemeConfig, ThemeFilter,
-    ThemeMode, ThemeRegistry, UiScale, div, h_flex, px, rgb, theme, v_flex,
+    StatefulInteractiveElement, Styled, Theme, ThemeColor, ThemeConfig, ThemeFilter, ThemeMode,
+    ThemeRegistry, UiScale, div, h_flex, px, rgb, theme, v_flex,
 };
-use crate::platform::app_icon;
+use crate::platform::app_icon::AppIconExt as _;
 use crate::ui::choice_card::ChoiceCard;
 use crate::ui::components::control_input;
-use crate::ui::theme::Typography as _;
+use crate::ui::theme::{SelectableStyle as _, Typography as _};
 
 /// The Appearance page: light/dark mode, the theme grid, corner radius, and the
 /// interface language. Every theme here re-skins the whole app — the bespoke
@@ -101,20 +101,14 @@ fn appearance_of(cx: &App) -> Appearance {
 
 /// Persist an appearance-mode choice and re-apply the live theme.
 fn set_appearance(cx: &mut App, appearance: Appearance) {
-    AppState::update(cx, |state, cx| {
-        state.set_appearance(appearance);
-        cx.emit(StateEvent::SettingsChanged);
-    });
+    AppState::apply(cx, |state| state.commit_appearance(appearance));
     theme::apply_from_settings(None, cx);
 }
 
 /// Persist a corner-radius choice and re-apply the live theme. `None` defers to
 /// the active theme's own radius.
 fn set_radius(cx: &mut App, radius: Option<u8>) {
-    AppState::update(cx, |state, cx| {
-        state.set_ui_radius(radius);
-        cx.emit(StateEvent::SettingsChanged);
-    });
+    AppState::apply(cx, |state| state.commit_ui_radius(radius));
     theme::apply_from_settings(None, cx);
 }
 
@@ -122,10 +116,7 @@ fn set_radius(cx: &mut App, radius: Option<u8>) {
 /// root applies its own rem size on that repaint, avoiding a re-entrant update
 /// of the Settings window currently dispatching this click.
 fn set_scale(cx: &mut App, scale: UiScale) {
-    AppState::update(cx, |state, cx| {
-        state.set_ui_scale(scale);
-        cx.emit(StateEvent::SettingsChanged);
-    });
+    AppState::apply(cx, |state| state.commit_ui_scale(scale));
     cx.refresh_windows();
 }
 
@@ -252,7 +243,7 @@ fn icon_picker(cx: &App) -> gpui::Div {
 /// One icon card: the preview above a radio + label, ringed when it is the icon
 /// the app is wearing.
 fn icon_card(icon: AppIcon, selected: bool, accent: Hsla, pal: Palette) -> impl IntoElement {
-    let preview = app_icon::preview(icon);
+    let preview = icon.preview();
     ChoiceCard::new(SharedString::from(icon.to_string()), icon_label(icon))
         .selected(selected)
         .gap(px(6.))
@@ -281,12 +272,7 @@ fn icon_card(icon: AppIcon, selected: bool, accent: Hsla, pal: Palette) -> impl 
                 .child(radio_dot(selected, accent, pal))
                 .child(div().text_body().child(icon_label(icon))),
         )
-        .on_click(move |_, _, cx| {
-            AppState::update(cx, |state, cx| {
-                state.set_app_icon(icon);
-                cx.emit(StateEvent::SettingsChanged);
-            });
-        })
+        .on_click(move |_, _, cx| AppState::apply(cx, |state| state.commit_app_icon(icon)))
 }
 
 /// What an icon is called in the picker. Proper nouns, so they are not
@@ -381,17 +367,20 @@ fn radius_segment(cx: &App) -> ButtonGroup {
         .child(
             Button::new("radius-sharp")
                 .label(tr!("common.sharp"))
-                .selected(current == Some(0)),
+                .selected(current == Some(0))
+                .selected_segment(current == Some(0), cx),
         )
         .child(
             Button::new("radius-default")
                 .label(tr!("common.default"))
-                .selected(current.is_none()),
+                .selected(current.is_none())
+                .selected_segment(current.is_none(), cx),
         )
         .child(
             Button::new("radius-round")
                 .label(tr!("appearance.round"))
-                .selected(current == Some(12)),
+                .selected(current == Some(12))
+                .selected_segment(current == Some(12), cx),
         )
         .on_click(move |clicks, _, cx| {
             if let Some(&ix) = clicks.first() {
@@ -412,6 +401,7 @@ fn scale_segment(cx: &App) -> ButtonGroup {
             Button::new(("interface-scale", u32::from(scale.percent())))
                 .label(format!("{}%", scale.percent()))
                 .selected(current == scale)
+                .selected_segment(current == scale, cx)
         }))
         .on_click(|clicks, _, cx| {
             let Some(scale) = clicks
@@ -621,6 +611,7 @@ fn theme_card(
                 .gap_1()
                 .child(
                     div()
+                        .min_w_0()
                         .overflow_hidden()
                         .text_caption()
                         .text_color(pal.text_primary)
@@ -640,21 +631,20 @@ fn theme_card(
         )
         .on_click(move |_, _, cx| {
             let chosen = stored.to_string();
-            AppState::update(cx, move |s, cx| {
-                s.set_theme(dark, Some(chosen.clone()));
+            AppState::apply(cx, move |s| {
+                let events = s.commit_theme(mode, Some(chosen.clone()));
                 // Picking a theme configures the light or dark *slot*. Only pin
                 // the mode when the user has already chosen an explicit
                 // Light/Dark mode — a "Follow System" preference must survive so
                 // configuring (say) the dark slot doesn't force the whole app to
                 // dark.
                 if s.app_settings().appearance != Appearance::System {
-                    s.set_appearance(if dark {
-                        Appearance::Dark
-                    } else {
-                        Appearance::Light
-                    });
+                    return events.and(s.commit_appearance(match mode {
+                        ThemeMode::Light => Appearance::Light,
+                        ThemeMode::Dark => Appearance::Dark,
+                    }));
                 }
-                cx.emit(StateEvent::SettingsChanged);
+                events
             });
             theme::apply_from_settings(None, cx);
         })
@@ -677,16 +667,15 @@ fn filter_chip(
         .px_3()
         .py_1()
         .rounded_full()
-        .border_1()
+        .selected_border(selected, pal)
+        .selected_fill(selected)
         .text_caption()
         .cursor_pointer()
         .map(|this| {
             if selected {
-                this.border_color(pal.text_primary)
-                    .text_color(pal.text_primary)
+                this.text_color(pal.text_primary)
             } else {
-                this.border_color(pal.border)
-                    .text_color(pal.text_muted)
+                this.text_color(pal.text_muted)
                     .hover(|h| h.border_color(pal.text_muted))
                     .focus_visible(|h| h.border_color(pal.text_muted))
             }

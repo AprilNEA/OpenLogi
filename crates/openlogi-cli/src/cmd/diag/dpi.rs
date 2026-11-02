@@ -5,6 +5,7 @@ use std::fmt;
 use anyhow::{Context, Result};
 use clap::Args;
 use openlogi_hid::DpiCapabilities;
+use openlogi_hid::write::WriteError;
 
 use crate::cmd::diag::select_device;
 
@@ -59,13 +60,16 @@ pub async fn run(args: DpiArgs) -> Result<()> {
     }
 
     println!("  writing DPI: {target}");
-    openlogi_hid::set_dpi(&route, target)
-        .await
-        .context("write DPI")?;
-
-    let after = openlogi_hid::get_dpi(&route)
-        .await
-        .context("read DPI after write")?;
+    let after = match openlogi_hid::set_dpi(&route, target).await {
+        Ok(()) => openlogi_hid::get_dpi(&route)
+            .await
+            .context("read DPI after write")?,
+        // The write path already re-wrote once and reports the value the
+        // device kept; whether that is a fault is decided below, and a device
+        // that snapped to another supported value still gets restored.
+        Err(WriteError::DpiNotApplied { actual, .. }) => actual,
+        Err(error) => return Err(error).context("write DPI"),
+    };
     println!("  read-back DPI: {after}");
 
     // `target` is always a device-reported value, so a mismatch means the

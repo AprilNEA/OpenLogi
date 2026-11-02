@@ -1,0 +1,19 @@
+# Owner: openlogi_fixture::fs. All corpus consumers use the same strict loader.
+id: fixture-corpus-loading-owner
+language: rust
+severity: error
+message: Use openlogi_fixture::fs for corpus discovery and strict asset loading.
+note: The CLI loader previously had to be copied for each downstream corpus suite.
+files:
+  - crates/**/*.rs
+  - xtask/**/*.rs
+ignores:
+  - crates/openlogi-fixture/**
+rule:
+  any:
+    - kind: function_item
+      has:
+        field: name
+        regex: '^(load_cassettes|load_corpus|require_directory_id)$'
+    - kind: string_literal
+      regex: '\.\./\.\./fixtures/devices'

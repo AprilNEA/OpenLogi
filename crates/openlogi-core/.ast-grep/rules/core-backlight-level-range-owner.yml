@@ -1,0 +1,16 @@
+# Owner: openlogi_core::hid::backlight::max_backlight_level — the highest
+# selectable level is the reported count minus one, including level zero.
+id: core-backlight-level-range-owner
+language: rust
+severity: error
+message: Use max_backlight_level to convert a backlight level count to its highest selectable level.
+files:
+  - crates/**/*.rs
+ignores:
+  - crates/openlogi-core/src/hid/backlight.rs
+rule:
+  any:
+    - kind: binary_expression
+      regex: '\b(?:nb_levels|levels)\s*-\s*1\b'
+    - kind: call_expression
+      regex: '\b(?:nb_levels|levels)\.saturating_sub\(1\)'

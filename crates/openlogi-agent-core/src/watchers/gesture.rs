@@ -24,29 +24,34 @@ mod dispatch;
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::thread;
-use std::time::Duration;
 
+use openlogi_core::binding::ButtonId;
+use openlogi_core::config::MomentumParams;
 use openlogi_core::device_order::PhysicalDeviceKey;
 use openlogi_core::scroll::ScrollDelta;
 use openlogi_hid::{
-    CaptureChannel, CaptureSessionOutcome, CapturedInput, DeviceIoGate, PendingCaptureRestore,
-    run_capture_session_with_registry_spec,
+    CaptureHost, CaptureSessionOutcome, CaptureSessionStop, CapturedInput, DeviceRoute,
+    PendingCaptureRestore, run_capture_session,
 };
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
 use tracing::{debug, warn};
 
 use self::dispatch::InputDispatcher;
-use super::capture_session::{CaptureRecovery, CaptureSession, CaptureSlot, ReconcileAction};
+use super::capture_manager::{self, CaptureManager, ManagerInputs, PendingRestore};
+use super::capture_session::{
+    CaptureRecovery, CaptureSession, CaptureSlot, ReconcileAction, settle_capture_task,
+};
+use super::retry::RETRY_DELAY;
 use super::shutdown::{ManagerCompletion, WatcherHandle};
-use crate::capture_plan::{CaptureTarget, DeviceCapturePlan, DispatchPlan, SharedCapturePlans};
+use crate::capture_plan::{
+    CapturePublication, CaptureTarget, DeviceCapturePlan, DispatchPlan, SharedCapturePlans,
+};
+use crate::hardware::DeviceAccess;
 use crate::receiver_access::{ReceiverAccess, ReceiverRequestState, SessionReceiverLease};
 use crate::runtime::hook::SharedHookMaps;
 use crate::runtime::scroll::ScrollInputHandle;
 use crate::runtime::{ActionDispatcher, HidppSessionId};
-
-const RETRY_DELAY: Duration = Duration::from_secs(1);
 
 /// Output capabilities shared by every HID++ gesture capture session.
 #[derive(Clone)]
@@ -83,6 +88,21 @@ impl GestureOutputs {
             openlogi_inject::post_scroll(delta);
         }
     }
+
+    /// Post a diverted main wheel's scroll, eased by the scroll runtime
+    /// under its device's resolved momentum-scrolling settings.
+    fn post_main_wheel_scroll(
+        &self,
+        session: &HidppSessionId,
+        delta: ScrollDelta,
+        momentum: Option<MomentumParams>,
+    ) {
+        if let Err(direct) = self.scroll.try_hidpp_wheel_scroll(session, delta, momentum) {
+            // As for `post_scroll`: the wheel no longer scrolls by itself.
+            // `direct` is already scaled by the wheel's sensitivity.
+            openlogi_inject::post_scroll(direct);
+        }
+    }
 }
 
 /// Spawn the capture-manager thread. It owns a current-thread tokio runtime that
@@ -91,49 +111,24 @@ impl GestureOutputs {
 #[must_use]
 pub fn spawn(
     capture_plans: &SharedCapturePlans,
-    capture_channel: CaptureChannel,
-    receiver_access: ReceiverAccess,
-    channel_registry: openlogi_hid::ChannelRegistry,
-    device_io: DeviceIoGate,
+    access: DeviceAccess,
     outputs: GestureOutputs,
 ) -> WatcherHandle {
     let plans = capture_plans.clone();
-    let receiver_requests = receiver_access.subscribe_requests();
-    let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let (shutdown_done_tx, shutdown_done_rx) = oneshot::channel();
-    thread::spawn(move || {
-        let runtime = match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
-            Ok(rt) => rt,
-            Err(e) => {
-                warn!(error = %e, "capture watcher: could not build tokio runtime");
-                let _ = shutdown_done_tx.send(ManagerCompletion::Graceful);
-                return;
-            }
-        };
-        let completion = runtime.block_on(manage(GestureManagerContext {
+    let receiver_requests = access.receiver_access.subscribe_requests();
+    WatcherHandle::spawn("openlogi-gesture-watcher", move |shutdown| {
+        manage(GestureManagerContext {
             capture_plans: plans,
-            capture_channel,
-            receiver_access,
+            access,
             receiver_requests,
-            channel_registry,
-            device_io,
             outputs,
-            shutdown: shutdown_rx,
-        }));
-        // Detached session tasks belong to this current-thread runtime. Drop
-        // it before acknowledging so even an unexpected manager return cannot
-        // leave a late firmware writer behind the process boundary.
-        drop(runtime);
-        let _ = shutdown_done_tx.send(completion);
-    });
-    WatcherHandle::new(shutdown_tx, shutdown_done_rx)
+            shutdown,
+        })
+    })
 }
 
-type RunningSession = CaptureSession<CaptureTarget, DispatchPlan>;
-type GestureSlot = CaptureSlot<CaptureTarget, DispatchPlan, PendingRestore>;
+type RunningSession = CaptureSession<CaptureTarget, DispatchPlan, CaptureSessionStop>;
+type GestureSlot = CaptureSlot<CaptureTarget, DispatchPlan, PendingRestore, CaptureSessionStop>;
 
 struct CapturedEvent {
     physical_key: PhysicalDeviceKey,
@@ -152,11 +147,6 @@ enum SessionEvent {
     Done(SessionDone),
 }
 
-struct PendingRestore {
-    token: PendingCaptureRestore,
-    retry_at: Instant,
-}
-
 struct GestureManagerState {
     slots: HashMap<PhysicalDeviceKey, GestureSlot>,
     input_dispatcher: InputDispatcher,
@@ -166,32 +156,65 @@ struct GestureManagerState {
 #[derive(Clone)]
 struct SessionChannels {
     events: mpsc::UnboundedSender<SessionEvent>,
-    capture: CaptureChannel,
-    registry: openlogi_hid::ChannelRegistry,
-    device_io: DeviceIoGate,
+    access: DeviceAccess,
+    hook_maps: SharedHookMaps,
 }
 
 struct GestureManagerContext {
-    capture_plans: watch::Receiver<Arc<Vec<DeviceCapturePlan>>>,
-    capture_channel: CaptureChannel,
-    receiver_access: ReceiverAccess,
+    capture_plans: SharedCapturePlans,
+    access: DeviceAccess,
     receiver_requests: watch::Receiver<ReceiverRequestState>,
-    channel_registry: openlogi_hid::ChannelRegistry,
-    device_io: DeviceIoGate,
     outputs: GestureOutputs,
     shutdown: oneshot::Receiver<()>,
 }
 
+/// The OS-hook record of the buttons one capture session diverted (#2158).
+///
+/// The session's own forwarder and completion tasks write it, not the manager
+/// loop. The hook must know a button's owner before the kernel's echo of the
+/// button's first press arrives, and the manager can be busy awaiting
+/// another device's I/O.
+#[derive(Clone)]
+struct DivertedButtonRecord {
+    hook_maps: SharedHookMaps,
+    session: HidppSessionId,
+    route: DeviceRoute,
+}
+
+impl DivertedButtonRecord {
+    fn record(&self, button: ButtonId) {
+        if let Ok(mut maps) = self.hook_maps.write() {
+            maps.diverted_buttons
+                .record(&self.session, &self.route, button);
+        }
+    }
+
+    /// Hand every recorded button back to the hook. Called once the session's
+    /// task has ended and its inputs are drained, so it reports no more.
+    fn release(&self) {
+        if let Ok(mut maps) = self.hook_maps.write() {
+            maps.diverted_buttons.release(&self.session);
+        }
+    }
+}
+
 /// Forward one capture session's inputs onto the manager's ordered event
 /// channel. The sender closes only after the device listener has been dropped.
+/// A diverted-button report goes into `diverted` instead, before any press
+/// the session reports after it is forwarded.
 fn spawn_input_forwarder(
     physical_key: PhysicalDeviceKey,
     session: HidppSessionId,
     mut inputs: mpsc::UnboundedReceiver<CapturedInput>,
     events: mpsc::UnboundedSender<SessionEvent>,
+    diverted: DivertedButtonRecord,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         while let Some(input) = inputs.recv().await {
+            if let CapturedInput::ButtonDiverted(button) = input {
+                diverted.record(button);
+                continue;
+            }
             let _ = events.send(SessionEvent::Input(CapturedEvent {
                 physical_key: physical_key.clone(),
                 session: session.clone(),
@@ -202,16 +225,46 @@ fn spawn_input_forwarder(
 }
 
 /// Report completion only after every input accepted by the device listener
-/// has reached the manager's event channel.
+/// has reached the manager's event channel, and the hook has been handed back
+/// the buttons the session diverted.
 async fn report_done_after_inputs(
     forward_task: tokio::task::JoinHandle<()>,
     events: mpsc::UnboundedSender<SessionEvent>,
     done: SessionDone,
+    diverted: DivertedButtonRecord,
 ) {
     if let Err(error) = forward_task.await {
         debug!(%error, "capture input forwarder ended unexpectedly");
     }
+    diverted.release();
     let _ = events.send(SessionEvent::Done(done));
+}
+
+/// Settle the session task, then report its completion once every input it
+/// accepted has been forwarded. Apart from [`spawn_session`] so the path a
+/// panicking body takes can be driven in a test without a device.
+async fn complete_session(
+    session_task: tokio::task::JoinHandle<Option<PendingCaptureRestore>>,
+    forward_task: tokio::task::JoinHandle<()>,
+    events: mpsc::UnboundedSender<SessionEvent>,
+    physical_key: PhysicalDeviceKey,
+    session: HidppSessionId,
+    diverted: DivertedButtonRecord,
+) {
+    let pending_restore = settle_capture_task(session_task, "gesture").await;
+    // Use the same channel as input so completion follows every diverted
+    // report accepted before the listener was dropped.
+    report_done_after_inputs(
+        forward_task,
+        events,
+        SessionDone {
+            physical_key,
+            session,
+            pending_restore,
+        },
+        diverted,
+    )
+    .await;
 }
 
 /// Return the plan that owns an input from the currently tracked session. An
@@ -232,12 +285,36 @@ fn dispatch_context_for<'a>(
 #[cfg(test)]
 fn wanted_sessions(
     requests: ReceiverRequestState,
-    capture_plans: &watch::Receiver<Arc<Vec<DeviceCapturePlan>>>,
-) -> Arc<Vec<DeviceCapturePlan>> {
+    capture_plans: &SharedCapturePlans,
+) -> Vec<DeviceCapturePlan> {
     if requests.any() {
-        return Arc::new(Vec::new());
+        return Vec::new();
     }
-    Arc::clone(&capture_plans.borrow())
+    capture_plans.borrow().plans().to_vec()
+}
+
+/// Whether two dispatch plans resolve every input to the same action, differing
+/// at most in the pointer context they were selected for.
+fn same_bindings(a: &DispatchPlan, b: &DispatchPlan) -> bool {
+    let DispatchPlan {
+        config_key,
+        bindings,
+        gesture_bindings,
+        side_gesture_bindings,
+        thumbwheel_sensitivity,
+        invert_wheel,
+        momentum,
+        pointer: _,
+        shift_bindings,
+    } = a;
+    *config_key == b.config_key
+        && *bindings == b.bindings
+        && *gesture_bindings == b.gesture_bindings
+        && *side_gesture_bindings == b.side_gesture_bindings
+        && *thumbwheel_sensitivity == b.thumbwheel_sensitivity
+        && *invert_wheel == b.invert_wheel
+        && *momentum == b.momentum
+        && *shift_bindings == b.shift_bindings
 }
 
 fn reconcile_session(
@@ -245,10 +322,30 @@ fn reconcile_session(
     wanted: Option<(&CaptureTarget, &DispatchPlan)>,
     dispatcher: &mut InputDispatcher,
 ) {
-    if session.reconcile(wanted) == ReconcileAction::DispatchChanged {
-        dispatcher.cancel_session(session.id());
+    // A swipe that switches desktops moves the pointer onto another window,
+    // republishing an otherwise identical plan. Keep the hold so the same
+    // press can chain further swipes (#1634).
+    let pointer_only = wanted.is_some_and(|(_, plan)| same_bindings(session.dispatch(), plan));
+    if session.reconcile_with(wanted, stop_for_target_change) == ReconcileAction::DispatchChanged {
+        if !pointer_only {
+            dispatcher.cancel_session(session.id());
+        }
         let config_key = session.dispatch().config_key.clone();
         session.rekey(&config_key);
+    }
+}
+
+/// Stop command for a target change. A different route must be restored through
+/// the successor; the same route, including a reconnect rearm, uses shutdown.
+fn stop_for_target_change(
+    current: &CaptureTarget,
+    wanted: Option<&CaptureTarget>,
+) -> CaptureSessionStop {
+    match wanted {
+        Some(next) if next.route != current.route => {
+            CaptureSessionStop::Handoff(next.route.clone())
+        }
+        _ => CaptureSessionStop::Shutdown,
     }
 }
 
@@ -259,37 +356,20 @@ fn reconcile_published_session(
     key: &PhysicalDeviceKey,
     session: &mut RunningSession,
     receiver_requests: &watch::Receiver<ReceiverRequestState>,
-    capture_plans: &watch::Receiver<Arc<Vec<DeviceCapturePlan>>>,
+    capture_plans: &SharedCapturePlans,
     dispatcher: &mut InputDispatcher,
 ) {
     if receiver_requests.borrow().any() {
         reconcile_session(session, None, dispatcher);
     } else {
-        let plans = capture_plans.borrow();
-        let wanted = plans
+        let published = capture_plans.borrow();
+        let wanted = published
+            .plans()
             .iter()
             .find(|plan| plan.target.physical_key == *key)
             .map(|plan| (&plan.target, &plan.dispatch));
         reconcile_session(session, wanted, dispatcher);
     }
-}
-
-async fn wait_for_deadline(deadline: Option<Instant>) {
-    if let Some(deadline) = deadline {
-        tokio::time::sleep_until(deadline).await;
-    } else {
-        std::future::pending::<()>().await;
-    }
-}
-
-async fn wait_for_registry_change(
-    changes: &mut watch::Receiver<()>,
-    has_pending_restore: bool,
-) -> bool {
-    if !has_pending_restore {
-        return std::future::pending().await;
-    }
-    changes.changed().await.is_ok()
 }
 
 fn acquire_session_lease(
@@ -304,9 +384,11 @@ fn acquire_session_lease(
     Some(fresh)
 }
 
+/// Retry owed restores. `routes` is the latest physical-device publication; `None` keeps each token on its current route.
 async fn retry_pending_restores(
     slots: &mut HashMap<PhysicalDeviceKey, GestureSlot>,
     registry: &openlogi_hid::ChannelRegistry,
+    routes: Option<&CapturePublication>,
     now: Instant,
 ) {
     let keys: Vec<_> = slots
@@ -326,7 +408,18 @@ async fn retry_pending_restores(
             slots.insert(key, GestureSlot::Recovering(recovery));
             continue;
         };
-        if let CaptureSessionOutcome::RestorePending(token) = pending.token.retry(registry).await {
+        // Routes include devices capture skips. A same-route retry keeps the
+        // replacement-only policy set by a channel change.
+        let elected = routes
+            .and_then(|routes| routes.restore_route(&key))
+            .cloned();
+        let outcome = match elected {
+            Some(route) if route != *pending.token.route() => {
+                pending.token.retry_via(route, registry).await
+            }
+            _ => pending.token.retry(registry).await,
+        };
+        if let CaptureSessionOutcome::RestorePending(token) = outcome {
             recovery.pending_restore = Some(PendingRestore {
                 token,
                 retry_at: Instant::now() + RETRY_DELAY,
@@ -389,14 +482,14 @@ impl GestureManagerState {
         &mut self,
         requests: ReceiverRequestState,
         device_io_allowed: bool,
-        published: &Arc<Vec<DeviceCapturePlan>>,
-        receiver_access: &ReceiverAccess,
+        published: &Arc<CapturePublication>,
         channels: &SessionChannels,
     ) {
+        let receiver_access = &channels.access.receiver_access;
         // Keep existing passive listeners and their firmware ownership intact
-        // while the display/session is asleep. Retiring them here would issue
-        // restoration writes during DarkWake; retries and successors wait for
-        // the user-visible resume instead.
+        // while the host has paused device I/O. Retiring them here would issue
+        // restoration writes during a DarkWake; retries and successors wait
+        // for the full wake instead.
         if !device_io_allowed {
             return;
         }
@@ -404,7 +497,7 @@ impl GestureManagerState {
         let wanted = if requests.any() {
             &[][..]
         } else {
-            published.as_slice()
+            published.plans()
         };
         for (key, slot) in &mut self.slots {
             let Some(session) = slot.session_mut() else {
@@ -421,6 +514,7 @@ impl GestureManagerState {
                 return true;
             };
             if !published
+                .plans()
                 .iter()
                 .any(|plan| plan.target.physical_key == *key)
             {
@@ -442,7 +536,8 @@ impl GestureManagerState {
             None
         };
         if restore_lease.is_some() {
-            retry_pending_restores(&mut self.slots, &channels.registry, now).await;
+            let routes = (!requests.any()).then_some(published.as_ref());
+            retry_pending_restores(&mut self.slots, &channels.access.registry, routes, now).await;
         }
 
         for plan in wanted {
@@ -473,7 +568,7 @@ impl GestureManagerState {
         event: SessionEvent,
         device_io_allowed: bool,
         receiver_requests: &watch::Receiver<ReceiverRequestState>,
-        capture_plans: &watch::Receiver<Arc<Vec<DeviceCapturePlan>>>,
+        capture_plans: &SharedCapturePlans,
     ) -> bool {
         match event {
             SessionEvent::Input(event) => {
@@ -546,9 +641,8 @@ impl GestureManagerState {
 async fn drain_for_shutdown(
     state: &mut GestureManagerState,
     event_rx: &mut mpsc::UnboundedReceiver<SessionEvent>,
-    receiver_access: &ReceiverAccess,
     receiver_requests: &watch::Receiver<ReceiverRequestState>,
-    capture_plans: &watch::Receiver<Arc<Vec<DeviceCapturePlan>>>,
+    capture_plans: &SharedCapturePlans,
     channels: &SessionChannels,
 ) {
     for session in state
@@ -564,7 +658,7 @@ async fn drain_for_shutdown(
         };
         state.handle_session_event(
             event,
-            channels.device_io.allows_io(),
+            channels.access.device_io.allows_io(),
             receiver_requests,
             capture_plans,
         );
@@ -574,7 +668,7 @@ async fn drain_for_shutdown(
     if state.has_pending_restores() {
         warn!("capture watcher is waiting for pending firmware restoration before stopping");
     }
-    let mut device_io = channels.device_io.clone();
+    let mut device_io = channels.access.device_io.clone();
     while state.has_pending_restores() {
         if !device_io.allows_io() && !device_io.wait_until_allowed().await {
             // A closed suspended gate cannot prove firmware is native. The
@@ -582,8 +676,20 @@ async fn drain_for_shutdown(
             // deliberately remains here rather than losing these tokens.
             std::future::pending::<()>().await;
         }
-        if let Some(_lease) = acquire_session_lease(receiver_access, &mut state.lease) {
-            retry_pending_restores(&mut state.slots, &channels.registry, Instant::now()).await;
+        if let Some(_lease) =
+            acquire_session_lease(&channels.access.receiver_access, &mut state.lease)
+        {
+            // Clone before the await. Only this publication can move a stale
+            // handoff onto the route inventory still names, including a device
+            // whose capture plan was withdrawn.
+            let publication = Arc::clone(&capture_plans.borrow());
+            retry_pending_restores(
+                &mut state.slots,
+                &channels.access.registry,
+                Some(&publication),
+                Instant::now(),
+            )
+            .await;
         }
         if state.has_pending_restores() {
             tokio::time::sleep(RETRY_DELAY).await;
@@ -592,22 +698,77 @@ async fn drain_for_shutdown(
     }
 }
 
+/// The gesture manager as the shared loop drives it: many slots, one weak
+/// receiver lease shared by every session.
+struct GestureManager {
+    state: GestureManagerState,
+    channels: SessionChannels,
+}
+
+impl CaptureManager for GestureManager {
+    type Published = Arc<CapturePublication>;
+    type Event = SessionEvent;
+
+    async fn reconcile(&mut self, requests: ReceiverRequestState, published: &Self::Published) {
+        self.state
+            .reconcile(requests, true, published, &self.channels)
+            .await;
+    }
+
+    fn handle_session_event(
+        &mut self,
+        event: SessionEvent,
+        device_io_allowed: bool,
+        receiver_requests: &watch::Receiver<ReceiverRequestState>,
+        published: &watch::Receiver<Self::Published>,
+    ) -> bool {
+        self.state
+            .handle_session_event(event, device_io_allowed, receiver_requests, published)
+    }
+
+    fn deadline(&self, requests: ReceiverRequestState, device_io_allowed: bool) -> Option<Instant> {
+        self.state.deadline(requests, device_io_allowed)
+    }
+
+    fn has_pending_restores(&self) -> bool {
+        self.state.has_pending_restores()
+    }
+
+    fn expedite_pending_restores(&mut self) {
+        self.state.expedite_pending_restores();
+    }
+
+    async fn drain_for_shutdown(
+        &mut self,
+        events: &mut mpsc::UnboundedReceiver<SessionEvent>,
+        receiver_requests: &watch::Receiver<ReceiverRequestState>,
+        published: &watch::Receiver<Self::Published>,
+    ) {
+        drain_for_shutdown(
+            &mut self.state,
+            events,
+            receiver_requests,
+            published,
+            &self.channels,
+        )
+        .await;
+    }
+}
+
 /// Keep one capture session alive per online device, restarting a session when
 /// its device's plan changes, and dispatch incoming inputs against the plan of
 /// the device they arrived on. Runs for the lifetime of the process.
 async fn manage(context: GestureManagerContext) -> ManagerCompletion {
     let GestureManagerContext {
-        mut capture_plans,
-        capture_channel,
-        receiver_access,
-        mut receiver_requests,
-        channel_registry,
-        mut device_io,
+        capture_plans,
+        access,
+        receiver_requests,
         outputs,
-        mut shutdown,
+        shutdown,
     } = context;
-    let (events, mut event_rx) = mpsc::unbounded_channel::<SessionEvent>();
-    let mut registry_changes = channel_registry.subscribe();
+    let (events, event_rx) = mpsc::unbounded_channel::<SessionEvent>();
+    let registry_changes = access.registry.subscribe();
+    let device_io = access.device_io.clone();
     // Capture sessions run as detached tasks, so an unexpected exit (a transient
     // HID++ read error, a sleep-wake glitch, brief radio loss) would otherwise go
     // unnoticed. Each session reports its completion here, tagged with its device
@@ -617,92 +778,24 @@ async fn manage(context: GestureManagerContext) -> ManagerCompletion {
     // ignored by the shared capture-session lifecycle.
     let channels = SessionChannels {
         events,
-        capture: capture_channel,
-        registry: channel_registry,
-        device_io: device_io.clone(),
+        access,
+        hook_maps: outputs.hook_maps.clone(),
     };
-    let mut state = GestureManagerState::new(outputs);
-    let mut reconcile = true;
-
-    loop {
-        if reconcile {
-            reconcile = false;
-            let device_io_allowed = device_io.allows_io();
-            if device_io_allowed {
-                let requests = *receiver_requests.borrow_and_update();
-                let published = Arc::clone(&capture_plans.borrow_and_update());
-                state
-                    .reconcile(
-                        requests,
-                        device_io_allowed,
-                        &published,
-                        &receiver_access,
-                        &channels,
-                    )
-                    .await;
-            }
-        }
-
-        let requests = *receiver_requests.borrow();
-        let deadline = state.deadline(requests, device_io.allows_io());
-        if deadline.is_some_and(|deadline| deadline <= Instant::now()) {
-            reconcile = true;
-            continue;
-        }
-
-        tokio::select! {
-            biased;
-
-            _ = &mut shutdown => {
-                drain_for_shutdown(
-                    &mut state,
-                    &mut event_rx,
-                    &receiver_access,
-                    &receiver_requests,
-                    &capture_plans,
-                    &channels,
-                )
-                .await;
-                return ManagerCompletion::Graceful;
-            }
-            Some(event) = event_rx.recv() => {
-                reconcile |= state.handle_session_event(
-                    event,
-                    device_io.allows_io(),
-                    &receiver_requests,
-                    &capture_plans,
-                );
-            }
-            result = capture_plans.changed() => match result {
-                Ok(()) => reconcile = true,
-                Err(_) => return ManagerCompletion::Unexpected,
-            },
-            result = receiver_requests.changed() => match result {
-                Ok(()) => reconcile = true,
-                Err(_) => return ManagerCompletion::Unexpected,
-            },
-            allowed = device_io.changed() => match allowed {
-                Some(true) => reconcile = true,
-                Some(false) => {}
-                None => return ManagerCompletion::Unexpected,
-            },
-            open = wait_for_registry_change(
-                &mut registry_changes,
-                state.has_pending_restores(),
-            ) => {
-                if !open {
-                    return ManagerCompletion::Unexpected;
-                }
-                if device_io.allows_io() {
-                    state.expedite_pending_restores();
-                    reconcile = true;
-                }
-            }
-            () = wait_for_deadline(deadline) => {
-                reconcile = true;
-            }
-        }
-    }
+    capture_manager::run(
+        GestureManager {
+            state: GestureManagerState::new(outputs),
+            channels,
+        },
+        ManagerInputs {
+            published: capture_plans,
+            receiver_requests,
+            registry_changes,
+            device_io,
+            events: event_rx,
+            shutdown,
+        },
+    )
+    .await
 }
 
 /// Start one device's capture session plus its input-forwarding task, and
@@ -718,6 +811,11 @@ fn spawn_session(
     } = plan;
     let physical_key = target.physical_key.clone();
     let (stop_tx, stop_rx) = oneshot::channel();
+    let diverted = DivertedButtonRecord {
+        hook_maps: channels.hook_maps.clone(),
+        session: id.clone(),
+        route: target.route.clone(),
+    };
     // Tag this session's inputs with its device key so dispatch resolves them
     // against the right plan.
     let (session_tx, session_rx) = mpsc::unbounded_channel::<CapturedInput>();
@@ -726,25 +824,30 @@ fn spawn_session(
         id.clone(),
         session_rx,
         channels.events.clone(),
+        diverted.clone(),
     );
     let events = channels.events.clone();
     let done_id = id.clone();
     let done_key = physical_key;
     let session_route = target.route.clone();
     let session_spec = target.spec.clone();
-    let slot = Arc::clone(&channels.capture);
-    let registry = channels.registry.clone();
-    let device_io = channels.device_io.clone();
-    tokio::spawn(async move {
+    let slot = Arc::clone(&channels.access.channel);
+    let registry = channels.access.registry.clone();
+    let device_io = channels.access.device_io.clone();
+    // The session body runs in a task of its own so that even a panic in it
+    // still reaches the completion report below (`settle_capture_task`).
+    let session_task = tokio::spawn(async move {
         let _lease = lease;
-        let pending_restore = match run_capture_session_with_registry_spec(
+        match run_capture_session(
             session_route,
             session_spec,
-            session_tx,
-            stop_rx,
-            slot,
-            &registry,
-            device_io,
+            CaptureHost {
+                sink: session_tx,
+                shutdown: stop_rx,
+                channel_slot: slot,
+                registry: &registry,
+                device_io,
+            },
         )
         .await
         {
@@ -755,20 +858,16 @@ fn spawn_session(
                 debug!(%error, "capture session ended");
                 pending
             }
-        };
-        // Use the same channel as input so completion follows every diverted
-        // report accepted before the listener was dropped.
-        report_done_after_inputs(
-            forward_task,
-            events,
-            SessionDone {
-                physical_key: done_key,
-                session: done_id,
-                pending_restore,
-            },
-        )
-        .await;
+        }
     });
+    tokio::spawn(complete_session(
+        session_task,
+        forward_task,
+        events,
+        done_key,
+        done_id,
+        diverted,
+    ));
     CaptureSession::active(id, target, dispatch, stop_tx)
 }
 

@@ -1,7 +1,10 @@
+use std::time::Duration;
+
 use super::*;
+use crate::watchers::retry::wait_for_deadline;
 use openlogi_core::binding::{Action, Binding, ButtonId, GestureDirection};
 use openlogi_core::config::{ThumbwheelSensitivity, VerticalScrollSensitivity};
-use openlogi_hid::DeviceRoute;
+use openlogi_hid::{CaptureChannelSlot, DeviceRoute};
 
 fn route() -> DeviceRoute {
     DeviceRoute::Direct {
@@ -21,13 +24,24 @@ fn session_id(epoch: u64) -> HidppSessionId {
 fn plan() -> DeviceCapturePlan {
     crate::capture_plan::plan_for_device(
         &openlogi_core::config::Config::default(),
-        physical_key(),
-        "mouse-a",
-        route(),
+        crate::capture_plan::PlanDevice {
+            physical_key: physical_key(),
+            config_key: "mouse-a",
+            route: route(),
+            layout: None,
+        },
         None,
         0,
         true,
     )
+}
+
+fn diverted_record(id: &HidppSessionId, hook_maps: &SharedHookMaps) -> DivertedButtonRecord {
+    DivertedButtonRecord {
+        hook_maps: Arc::clone(hook_maps),
+        session: id.clone(),
+        route: route(),
+    }
 }
 
 fn live_session_from_plan(epoch: u64, plan: DeviceCapturePlan) -> RunningSession {
@@ -41,7 +55,10 @@ fn live_session_with_epoch(epoch: u64) -> RunningSession {
 
 fn draining_session_with_epoch(epoch: u64) -> RunningSession {
     let mut session = live_session_with_epoch(epoch);
-    assert_eq!(session.reconcile(None), ReconcileAction::Retiring);
+    assert_eq!(
+        session.reconcile_with(None, stop_for_target_change),
+        ReconcileAction::Retiring
+    );
     session
 }
 
@@ -149,20 +166,26 @@ async fn recovery_manager_waits_for_control_events_and_shutdown_between_retries(
     use futures_lite::future::poll_once;
 
     for shutdown_requested in [false, true] {
-        let (plans_tx, capture_plans) = watch::channel(Arc::new(vec![plan()]));
-        let capture = CaptureChannel::default();
+        let (plans_tx, capture_plans) =
+            watch::channel(Arc::new(CapturePublication::from_plans(vec![plan()])));
+        let capture = CaptureChannelSlot::default();
         // A missing inventory channel makes the real session task fail without
         // opening hardware; ordered Done then drives normal restart recovery.
         let registry = openlogi_hid::ChannelRegistry::default();
         let access = ReceiverAccess::default();
         let (_signal, device_io) = openlogi_hid::device_io_channel();
         let (ring, _ring_rx) = mpsc::unbounded_channel();
+        let device_access = DeviceAccess {
+            channel: capture,
+            registry,
+            receiver_access: access.clone(),
+            device_io,
+            transport_turns: crate::hardware::TransportTurns::default(),
+        };
         let mut actions = crate::runtime::ActionRuntime::new(
             Arc::default(),
-            capture.clone(),
-            registry.clone(),
-            access.clone(),
-            device_io.clone(),
+            Arc::default(),
+            device_access.clone(),
             ring,
         )
         .unwrap();
@@ -174,11 +197,8 @@ async fn recovery_manager_waits_for_control_events_and_shutdown_between_retries(
         let (shutdown_tx, shutdown) = oneshot::channel();
         let mut manager = std::pin::pin!(manage(GestureManagerContext {
             capture_plans,
-            capture_channel: capture,
             receiver_requests: access.subscribe_requests(),
-            receiver_access: access,
-            channel_registry: registry,
-            device_io,
+            access: device_access,
             outputs: GestureOutputs::new(actions.dispatcher(), scroll.input(), Arc::default()),
             shutdown,
         }));
@@ -214,7 +234,13 @@ async fn input_accepted_during_restoration_precedes_session_done() {
     let (session_tx, session_rx) = mpsc::unbounded_channel();
     let listener_sink = session_tx.clone();
     drop(session_tx);
-    let forward_task = spawn_input_forwarder(key.clone(), id.clone(), session_rx, events.clone());
+    let forward_task = spawn_input_forwarder(
+        key.clone(),
+        id.clone(),
+        session_rx,
+        events.clone(),
+        diverted_record(&id, &SharedHookMaps::default()),
+    );
     let completion = tokio::spawn(report_done_after_inputs(
         forward_task,
         events,
@@ -223,6 +249,7 @@ async fn input_accepted_during_restoration_precedes_session_done() {
             session: id.clone(),
             pending_restore: None,
         },
+        diverted_record(&id, &SharedHookMaps::default()),
     ));
     let (restored_tx, restored_rx) = oneshot::channel();
     let listener = tokio::spawn(async move {
@@ -252,6 +279,131 @@ async fn input_accepted_during_restoration_precedes_session_done() {
     match event_rx.recv().await {
         Some(SessionEvent::Done(done)) => assert_eq!(done.session, id),
         _ => panic!("Done must follow the last accepted input"),
+    }
+}
+
+/// #2158: the session's own forwarder tells the hook which buttons it
+/// diverted, before it forwards any press reported after that, and the hook
+/// gets them back once the session's inputs are drained.
+#[tokio::test]
+async fn diverted_buttons_are_published_before_the_sessions_presses() {
+    let id = session_id(7);
+    let key = physical_key();
+    let hook_maps = SharedHookMaps::default();
+    // The OS input source of `route()`.
+    let source = openlogi_hook::EventDevice {
+        vendor_id: Some(0x046d),
+        product_id: Some(0xc548),
+        product_name: None,
+    };
+    let owned = |maps: &SharedHookMaps| {
+        maps.read()
+            .unwrap()
+            .diverted_buttons
+            .owns(&source, ButtonId::Back)
+    };
+    let (events, mut event_rx) = mpsc::unbounded_channel();
+    let (sink, session_rx) = mpsc::unbounded_channel();
+    let diverted = diverted_record(&id, &hook_maps);
+    let forward_task = spawn_input_forwarder(
+        key.clone(),
+        id.clone(),
+        session_rx,
+        events.clone(),
+        diverted.clone(),
+    );
+    sink.send(CapturedInput::ButtonDiverted(ButtonId::Back))
+        .expect("the capture forwarder should remain open");
+    sink.send(CapturedInput::ButtonPulse(ButtonId::Back))
+        .expect("the capture forwarder should remain open");
+
+    match event_rx.recv().await {
+        Some(SessionEvent::Input(input)) => {
+            assert_eq!(
+                input.input,
+                CapturedInput::ButtonPulse(ButtonId::Back),
+                "the diversion report itself is not forwarded"
+            );
+            assert!(
+                owned(&hook_maps),
+                "the hook knows the owner before the manager sees the press"
+            );
+        }
+        _ => panic!("the press must be forwarded"),
+    }
+
+    drop(sink);
+    report_done_after_inputs(
+        forward_task,
+        events,
+        SessionDone {
+            physical_key: key,
+            session: id.clone(),
+            pending_restore: None,
+        },
+        diverted,
+    )
+    .await;
+    match event_rx.recv().await {
+        Some(SessionEvent::Done(done)) => assert_eq!(done.session, id),
+        _ => panic!("Done must follow the last forwarded input"),
+    }
+    assert!(!owned(&hook_maps), "an ended session owns no button");
+}
+
+/// The failure behind #1857 and #1849: a session body that panics used to
+/// take its completion report down with it, so the manager's slot stayed
+/// `Running` and the device was never re-armed.
+#[tokio::test]
+async fn a_session_body_that_panics_still_reports_done_after_its_inputs() {
+    let id = session_id(7);
+    let key = physical_key();
+    let (events, mut event_rx) = mpsc::unbounded_channel();
+    let (sink, session_rx) = mpsc::unbounded_channel();
+    let forward_task = spawn_input_forwarder(
+        key.clone(),
+        id.clone(),
+        session_rx,
+        events.clone(),
+        diverted_record(&id, &SharedHookMaps::default()),
+    );
+    let (never_restored, restore) = oneshot::channel::<Option<PendingCaptureRestore>>();
+    let session_task = tokio::spawn(async move {
+        sink.send(CapturedInput::ButtonPulse(ButtonId::DpiToggle))
+            .expect("the capture forwarder should remain open");
+        drop(never_restored);
+        // Dies with the sink still held, the way a panicking body does; the
+        // unwind is what closes the forwarder.
+        restore.await.expect("simulated capture panic")
+    });
+
+    complete_session(
+        session_task,
+        forward_task,
+        events,
+        key.clone(),
+        id.clone(),
+        diverted_record(&id, &SharedHookMaps::default()),
+    )
+    .await;
+
+    match event_rx.recv().await {
+        Some(SessionEvent::Input(input)) => {
+            assert_eq!(input.session, id);
+            assert_eq!(input.input, CapturedInput::ButtonPulse(ButtonId::DpiToggle));
+        }
+        _ => panic!("the input accepted before the panic must still be forwarded"),
+    }
+    match event_rx.recv().await {
+        Some(SessionEvent::Done(done)) => {
+            assert_eq!(done.session, id);
+            assert_eq!(done.physical_key, key);
+            assert!(
+                done.pending_restore.is_none(),
+                "a panicked body has no restoration to hand over"
+            );
+        }
+        _ => panic!("Done must follow the last input even when the body panicked"),
     }
 }
 
@@ -291,13 +443,17 @@ async fn exclusive_request_retires_capture_without_rejecting_owned_input() {
     .await
     .expect("pairing should announce its exclusive request");
 
-    let (plans, _) = tokio::sync::watch::channel(Arc::new(vec![plan()]));
+    let (plans, _) =
+        tokio::sync::watch::channel(Arc::new(CapturePublication::from_plans(vec![plan()])));
     let plans = plans.subscribe();
     let requests = access.subscribe_requests();
     assert!(wanted_sessions(*requests.borrow(), &plans).is_empty());
 
     let mut session = live_session_with_epoch(7);
-    assert_eq!(session.reconcile(None), ReconcileAction::Retiring);
+    assert_eq!(
+        session.reconcile_with(None, stop_for_target_change),
+        ReconcileAction::Retiring
+    );
     assert!(!session.is_active());
     assert!(
         dispatch_context_for(&session_id(7), Some(&session)).is_some(),
@@ -331,7 +487,10 @@ fn an_active_session_refreshes_bindings_without_rearming_hardware() {
     assert_eq!(session.target(), &new_plan.target);
 
     assert_eq!(
-        session.reconcile(Some((&new_plan.target, &new_plan.dispatch))),
+        session.reconcile_with(
+            Some((&new_plan.target, &new_plan.dispatch)),
+            stop_for_target_change,
+        ),
         ReconcileAction::DispatchChanged,
         "a hot plan refresh must cancel input lifecycles admitted under the old action map"
     );
@@ -370,10 +529,13 @@ fn side_gesture_transition_keeps_the_retiring_plan_until_native_restore() {
         .clear();
     assert_ne!(session.target(), &published_without_hook.target);
     assert_eq!(
-        session.reconcile(Some((
-            &published_without_hook.target,
-            &published_without_hook.dispatch,
-        ))),
+        session.reconcile_with(
+            Some((
+                &published_without_hook.target,
+                &published_without_hook.dispatch,
+            )),
+            stop_for_target_change,
+        ),
         ReconcileAction::Retiring
     );
     assert!(!session.is_active());
@@ -401,9 +563,12 @@ fn capture_target_changes_schedule_the_old_session_for_retirement() {
     let session = live_session_with_epoch(7);
     let mut plan = crate::capture_plan::plan_for_device(
         &openlogi_core::config::Config::default(),
-        physical_key(),
-        "mouse-a",
-        session.target().route.clone(),
+        crate::capture_plan::PlanDevice {
+            physical_key: physical_key(),
+            config_key: "mouse-a",
+            route: session.target().route.clone(),
+            layout: None,
+        },
         None,
         0,
         true,
@@ -415,6 +580,60 @@ fn capture_target_changes_schedule_the_old_session_for_retirement() {
         session.target(),
         &plan.target,
         "a capture-target epoch change must retire the old session"
+    );
+}
+
+#[test]
+fn receiver_route_change_requests_a_firmware_handoff() {
+    let old_plan = plan();
+    let mut new_plan = old_plan.clone();
+    let successor_route = DeviceRoute::Bolt {
+        receiver_uid: "receiver-b".to_owned(),
+        slot: 2,
+    };
+    new_plan.target.route.clone_from(&successor_route);
+    let (stop, mut stopped) = oneshot::channel();
+    let mut session =
+        CaptureSession::active(session_id(7), old_plan.target, old_plan.dispatch, stop);
+
+    assert_eq!(
+        session.reconcile_with(
+            Some((&new_plan.target, &new_plan.dispatch)),
+            stop_for_target_change,
+        ),
+        ReconcileAction::Retiring
+    );
+    assert_eq!(
+        stopped
+            .try_recv()
+            .expect("route change should stop the active session"),
+        CaptureSessionStop::Handoff(successor_route),
+        "teardown must restore through the receiver the mouse moved to"
+    );
+}
+
+#[test]
+fn same_route_rearm_shuts_down_instead_of_handing_off() {
+    let old_plan = plan();
+    let mut rearmed = old_plan.clone();
+    rearmed.target.rearm_generation = old_plan.target.rearm_generation + 1;
+    let (stop, mut stopped) = oneshot::channel();
+    let mut session =
+        CaptureSession::active(session_id(7), old_plan.target, old_plan.dispatch, stop);
+
+    assert_eq!(
+        session.reconcile_with(
+            Some((&rearmed.target, &rearmed.dispatch)),
+            stop_for_target_change,
+        ),
+        ReconcileAction::Retiring
+    );
+    assert_eq!(
+        stopped
+            .try_recv()
+            .expect("a reconnect rearm should stop the session"),
+        CaptureSessionStop::Shutdown,
+        "the same route restores through its current publication"
     );
 }
 
@@ -435,7 +654,10 @@ fn config_key_adoption_hot_refreshes_the_same_physical_capture_slot() {
         .get(&physical_key)
         .map(|plan| (&plan.target, &plan.dispatch));
 
-    assert_eq!(running.reconcile(desired), ReconcileAction::DispatchChanged);
+    assert_eq!(
+        running.reconcile_with(desired, stop_for_target_change),
+        ReconcileAction::DispatchChanged
+    );
     running.rekey(&wanted[&physical_key].dispatch.config_key);
     assert!(running.is_active());
     assert_eq!(running.id().device_key(), "unit:00000001");
@@ -455,9 +677,12 @@ fn active_session_adopts_action_only_plan_changes_without_rearming() {
     );
     let first = crate::capture_plan::plan_for_device(
         &config,
-        physical_key(),
-        "mouse-a",
-        route(),
+        crate::capture_plan::PlanDevice {
+            physical_key: physical_key(),
+            config_key: "mouse-a",
+            route: route(),
+            layout: None,
+        },
         None,
         0,
         true,
@@ -471,16 +696,22 @@ fn active_session_adopts_action_only_plan_changes_without_rearming() {
     );
     let rebound = crate::capture_plan::plan_for_device(
         &config,
-        physical_key(),
-        "mouse-a",
-        route(),
+        crate::capture_plan::PlanDevice {
+            physical_key: physical_key(),
+            config_key: "mouse-a",
+            route: route(),
+            layout: None,
+        },
         None,
         0,
         true,
     );
     assert_eq!(first.target, rebound.target);
     assert_eq!(
-        session.reconcile(Some((&rebound.target, &rebound.dispatch))),
+        session.reconcile_with(
+            Some((&rebound.target, &rebound.dispatch)),
+            stop_for_target_change,
+        ),
         ReconcileAction::DispatchChanged
     );
     assert_eq!(
@@ -495,9 +726,12 @@ fn active_session_adopts_gesture_and_per_app_dispatch_changes() {
     config.set_gesture_mode("mouse-a", ButtonId::GestureButton, true);
     let first = crate::capture_plan::plan_for_device(
         &config,
-        physical_key(),
-        "mouse-a",
-        route(),
+        crate::capture_plan::PlanDevice {
+            physical_key: physical_key(),
+            config_key: "mouse-a",
+            route: route(),
+            layout: None,
+        },
         None,
         0,
         true,
@@ -512,16 +746,22 @@ fn active_session_adopts_gesture_and_per_app_dispatch_changes() {
     );
     let gestured = crate::capture_plan::plan_for_device(
         &config,
-        physical_key(),
-        "mouse-a",
-        route(),
+        crate::capture_plan::PlanDevice {
+            physical_key: physical_key(),
+            config_key: "mouse-a",
+            route: route(),
+            layout: None,
+        },
         None,
         0,
         true,
     );
     assert_eq!(first.target, gestured.target);
     assert_eq!(
-        session.reconcile(Some((&gestured.target, &gestured.dispatch))),
+        session.reconcile_with(
+            Some((&gestured.target, &gestured.dispatch)),
+            stop_for_target_change,
+        ),
         ReconcileAction::DispatchChanged
     );
     assert_eq!(
@@ -540,9 +780,12 @@ fn active_session_adopts_gesture_and_per_app_dispatch_changes() {
     );
     let base = crate::capture_plan::plan_for_device(
         &config,
-        physical_key(),
-        "mouse-a",
-        route(),
+        crate::capture_plan::PlanDevice {
+            physical_key: physical_key(),
+            config_key: "mouse-a",
+            route: route(),
+            layout: None,
+        },
         None,
         0,
         true,
@@ -556,16 +799,22 @@ fn active_session_adopts_gesture_and_per_app_dispatch_changes() {
     );
     let per_app = crate::capture_plan::plan_for_device(
         &config,
-        physical_key(),
-        "mouse-a",
-        route(),
+        crate::capture_plan::PlanDevice {
+            physical_key: physical_key(),
+            config_key: "mouse-a",
+            route: route(),
+            layout: None,
+        },
         Some("com.example.Editor"),
         0,
         true,
     );
     assert_eq!(base.target, per_app.target);
     assert_eq!(
-        session.reconcile(Some((&per_app.target, &per_app.dispatch))),
+        session.reconcile_with(
+            Some((&per_app.target, &per_app.dispatch)),
+            stop_for_target_change,
+        ),
         ReconcileAction::DispatchChanged
     );
     assert_eq!(
@@ -584,9 +833,12 @@ fn wheel_configuration_changes_refresh_without_rearming_hardware() {
     );
     let first = crate::capture_plan::plan_for_device(
         &config,
-        physical_key(),
-        "mouse-a",
-        route(),
+        crate::capture_plan::PlanDevice {
+            physical_key: physical_key(),
+            config_key: "mouse-a",
+            route: route(),
+            layout: None,
+        },
         None,
         0,
         true,
@@ -600,9 +852,12 @@ fn wheel_configuration_changes_refresh_without_rearming_hardware() {
     );
     let rebound = crate::capture_plan::plan_for_device(
         &config,
-        physical_key(),
-        "mouse-a",
-        route(),
+        crate::capture_plan::PlanDevice {
+            physical_key: physical_key(),
+            config_key: "mouse-a",
+            route: route(),
+            layout: None,
+        },
         None,
         0,
         true,
@@ -612,7 +867,10 @@ fn wheel_configuration_changes_refresh_without_rearming_hardware() {
         "both custom bindings require the same HID++ diversion"
     );
     assert_eq!(
-        session.reconcile(Some((&rebound.target, &rebound.dispatch))),
+        session.reconcile_with(
+            Some((&rebound.target, &rebound.dispatch)),
+            stop_for_target_change,
+        ),
         ReconcileAction::DispatchChanged,
         "dispatch-only binding changes must not cycle firmware diversion"
     );
@@ -621,18 +879,156 @@ fn wheel_configuration_changes_refresh_without_rearming_hardware() {
     config.set_device_thumbwheel_sensitivity("mouse-a", Some(ThumbwheelSensitivity::MIN));
     let rescaled = crate::capture_plan::plan_for_device(
         &config,
-        physical_key(),
-        "mouse-a",
-        route(),
+        crate::capture_plan::PlanDevice {
+            physical_key: physical_key(),
+            config_key: "mouse-a",
+            route: route(),
+            layout: None,
+        },
         None,
         0,
         true,
     );
     assert_eq!(rebound.target, rescaled.target);
     assert_eq!(
-        session.reconcile(Some((&rescaled.target, &rescaled.dispatch))),
+        session.reconcile_with(
+            Some((&rescaled.target, &rescaled.dispatch)),
+            stop_for_target_change,
+        ),
         ReconcileAction::DispatchChanged,
         "an already-diverted wheel needs a state reset, not a hardware restart"
     );
     assert!(session.is_active());
+}
+
+#[tokio::test]
+async fn pending_restore_follows_a_disabled_devices_latest_route() {
+    use std::collections::BTreeMap;
+
+    let stale = DeviceRoute::Bolt {
+        receiver_uid: "receiver-b".to_owned(),
+        slot: 2,
+    };
+    let latest = DeviceRoute::Bolt {
+        receiver_uid: "receiver-c".to_owned(),
+        slot: 1,
+    };
+    let registry = openlogi_hid::ChannelRegistry::default();
+    let key = physical_key();
+    let recovering = |route: DeviceRoute| {
+        HashMap::from([(
+            key.clone(),
+            GestureSlot::recovering(
+                Some(PendingRestore {
+                    token: PendingCaptureRestore::detached(route),
+                    retry_at: Instant::now(),
+                }),
+                None,
+            ),
+        )])
+    };
+    let route_of = |slots: &HashMap<PhysicalDeviceKey, GestureSlot>| {
+        slots
+            .get(&key)
+            .and_then(GestureSlot::recovery)
+            .and_then(|recovery| recovery.pending_restore.as_ref())
+            .map(|pending| pending.token.route().clone())
+    };
+
+    let mut stuck = recovering(stale.clone());
+    retry_pending_restores(&mut stuck, &registry, None, Instant::now()).await;
+    assert_eq!(
+        route_of(&stuck),
+        Some(stale.clone()),
+        "without a published route the owed restore stays on its last target"
+    );
+
+    let mut followed = recovering(stale);
+    let publication =
+        CapturePublication::new(Vec::new(), BTreeMap::from([(key.clone(), latest.clone())]));
+    retry_pending_restores(&mut followed, &registry, Some(&publication), Instant::now()).await;
+    assert!(
+        publication.plans().is_empty(),
+        "capture stays disarmed while the device is disabled"
+    );
+    assert_eq!(
+        route_of(&followed),
+        Some(latest),
+        "restore must follow the mouse onto the receiver inventory names now"
+    );
+}
+
+#[tokio::test]
+async fn a_pointer_only_plan_refresh_keeps_a_held_gesture() {
+    use crate::runtime::scroll::{ScrollPreferences, ScrollRuntime};
+
+    let (_signal, device_io) = openlogi_hid::device_io_channel();
+    let (ring, _ring_rx) = mpsc::unbounded_channel();
+    let device_access = DeviceAccess {
+        channel: CaptureChannelSlot::default(),
+        registry: openlogi_hid::ChannelRegistry::default(),
+        receiver_access: ReceiverAccess::default(),
+        device_io,
+        transport_turns: crate::hardware::TransportTurns::default(),
+    };
+    let mut actions =
+        crate::runtime::ActionRuntime::new(Arc::default(), Arc::default(), device_access, ring)
+            .unwrap();
+    let mut scroll = ScrollRuntime::spawn(Arc::new(ScrollPreferences::new(
+        false,
+        VerticalScrollSensitivity::default(),
+    )))
+    .unwrap();
+    let mut dispatcher = InputDispatcher::new(GestureOutputs::new(
+        actions.dispatcher(),
+        scroll.input(),
+        Arc::default(),
+    ));
+
+    let mut held = plan();
+    held.dispatch.gesture_bindings.insert(
+        ButtonId::GestureButton,
+        [(GestureDirection::Left, Action::PreviousDesktop)].into(),
+    );
+    let mut session = live_session_from_plan(7, held.clone());
+    let id = session.id().clone();
+    dispatcher.dispatch(
+        &id,
+        session.dispatch(),
+        CapturedInput::ButtonDown(ButtonId::GestureButton),
+    );
+    assert!(dispatcher.holds_gesture_press(&id, ButtonId::GestureButton));
+
+    // The swipe switched desktops, leaving the pointer over another window
+    // (#1634): the republished plan differs only in its pointer target.
+    let mut moved = held;
+    moved.dispatch.pointer = Some(crate::runtime::PointerSelection::new(
+        openlogi_hook::PointerTarget::Desktop,
+        std::collections::BTreeSet::new(),
+    ));
+    reconcile_session(
+        &mut session,
+        Some((&moved.target, &moved.dispatch)),
+        &mut dispatcher,
+    );
+    assert!(
+        dispatcher.holds_gesture_press(&id, ButtonId::GestureButton),
+        "a pointer-only refresh must not end the hold that caused it"
+    );
+
+    // A real binding change still ends every admitted press.
+    let mut rebound = moved;
+    rebound.dispatch.gesture_bindings.insert(
+        ButtonId::GestureButton,
+        [(GestureDirection::Left, Action::Copy)].into(),
+    );
+    reconcile_session(
+        &mut session,
+        Some((&rebound.target, &rebound.dispatch)),
+        &mut dispatcher,
+    );
+    assert!(!dispatcher.holds_gesture_press(&id, ButtonId::GestureButton));
+
+    scroll.shutdown();
+    actions.shutdown();
 }

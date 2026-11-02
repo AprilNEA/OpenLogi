@@ -11,11 +11,13 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use v4l::fraction::Fraction;
 use v4l::frameinterval::FrameIntervalEnum;
 use v4l::video::Capture;
 use v4l::{Device, FourCC};
 
-use crate::Camera;
+use crate::stream_mode::whole_fps;
+use crate::{Camera, StreamMode, StreamModes};
 
 /// Where the kernel lists V4L2 nodes, one directory per `/dev/video*`.
 const SYSFS_V4L: &str = "/sys/class/video4linux";
@@ -31,6 +33,10 @@ pub(crate) struct Node {
     pub(crate) product_id: u16,
     /// USB `iSerialNumber` from sysfs when the device reports one.
     pub(crate) serial_number: Option<String>,
+    /// Canonicalized sysfs directory of the *USB device* (not interface)
+    /// behind this node — shared by every capture node the same physical
+    /// device exposes. See [`cameras`].
+    usb_device: PathBuf,
 }
 
 /// Enumerate every V4L2 capture node, newest-first by node index.
@@ -48,7 +54,8 @@ pub(crate) fn nodes() -> Vec<Node> {
         .filter_map(|entry| {
             let sysfs = entry.path();
             let dev_path = PathBuf::from("/dev").join(entry.file_name());
-            let (vendor_id, product_id) = usb_ids(&sysfs)?;
+            let usb_device = usb_device_sysfs(&sysfs)?;
+            let (vendor_id, product_id) = usb_ids(&usb_device)?;
             if !is_capture_node(&dev_path) {
                 return None;
             }
@@ -58,7 +65,8 @@ pub(crate) fn nodes() -> Vec<Node> {
                 path: dev_path,
                 vendor_id,
                 product_id,
-                serial_number: usb_serial(&sysfs),
+                serial_number: usb_serial(&usb_device),
+                usb_device,
             })
         })
         .collect();
@@ -99,6 +107,117 @@ pub(crate) fn describe(node: &Node) -> Camera {
     }
 }
 
+/// One [`Camera`] per physical USB device.
+///
+/// A UVC camera can expose more than one *streaming* interface — e.g. the
+/// Brio's second, low-resolution node feeding its IR sensor for Windows
+/// Hello — and each gets its own `/dev/videoN` capture node just like the
+/// main color sensor does (issue #1191). Grouping by the shared USB device
+/// directory and keeping only the highest-resolution node per group turns
+/// that back into one listing entry per physical camera; `node_for_unique_id`
+/// still resolves every node individually, so a secondary node stays
+/// controllable if some other path ever needs it.
+pub(crate) fn cameras() -> Vec<Camera> {
+    let described = nodes().into_iter().map(|node| {
+        let color = Device::with_path(&node.path)
+            .ok()
+            .and_then(|device| color_capability(&device));
+        (node.usb_device.clone(), describe(&node), color)
+    });
+    merge_by_usb_device(described)
+}
+
+/// How strongly a node's pixel formats mark it as the primary color sensor:
+/// a confirmed color node (`Some(true)`) beats one whose formats couldn't be
+/// read (`None`), which beats a confirmed monochrome IR/depth node
+/// (`Some(false)`). An enumeration failure therefore never hands the listing
+/// to a node we *know* is IR-only.
+fn color_rank(color: Option<bool>) -> u8 {
+    match color {
+        Some(true) => 2,
+        None => 1,
+        Some(false) => 0,
+    }
+}
+
+/// Collapse `(usb_device, Camera, color)` triples to one `Camera` per
+/// distinct `usb_device`, otherwise preserving first-seen order.
+///
+/// Color capability (see [`color_rank`]) decides first, so a mono-only IR
+/// node can never become the capture/control target while a sibling that is
+/// (or may be) the color sensor exists — regardless of `/dev/videoN` order
+/// or of either node's format enumeration failing.
+///
+/// Within the same color rank, resolution decides only when both sides are
+/// known: `None` means stepwise/continuous sizes or a failed enumeration,
+/// i.e. *unknown*, not "0x0". When nothing decides, the first-seen node
+/// keeps its place.
+fn merge_by_usb_device(
+    nodes: impl IntoIterator<Item = (PathBuf, Camera, Option<bool>)>,
+) -> Vec<Camera> {
+    let mut by_device: Vec<(PathBuf, Camera, Option<bool>)> = Vec::new();
+    for (usb_device, camera, color) in nodes {
+        match by_device.iter_mut().find(|(dev, _, _)| *dev == usb_device) {
+            Some((_, best, best_color)) => {
+                let candidate_wins = match color_rank(color).cmp(&color_rank(*best_color)) {
+                    std::cmp::Ordering::Greater => true,
+                    std::cmp::Ordering::Less => false,
+                    std::cmp::Ordering::Equal => {
+                        match (camera.max_resolution, best.max_resolution) {
+                            (Some(candidate), Some(current)) => {
+                                resolution_area(candidate) > resolution_area(current)
+                            }
+                            _ => false,
+                        }
+                    }
+                };
+                if candidate_wins {
+                    *best = camera;
+                    *best_color = color;
+                }
+            }
+            None => by_device.push((usb_device, camera, color)),
+        }
+    }
+    by_device.into_iter().map(|(_, camera, _)| camera).collect()
+}
+
+/// Whether `device` reports at least one pixel format that isn't a known
+/// monochrome-only V4L2 format; `None` when the format list can't be read.
+///
+/// UVC webcams with a secondary IR/depth sensor (e.g. the Brio's Windows
+/// Hello node, issue #1191) expose it as a plain capture node just like the
+/// primary color sensor. IR sensors report single-channel formats
+/// (`GREY`/`Y8`, `Y10`, `Y12`, `Y16`) where the color sensor reports
+/// YUV/RGB/compressed formats.
+fn color_capability(device: &Device) -> Option<bool> {
+    let formats = device.enum_formats().ok()?;
+    if formats.is_empty() {
+        return None;
+    }
+    Some(
+        formats
+            .iter()
+            .any(|format| !is_monochrome_fourcc(format.fourcc)),
+    )
+}
+
+/// Whether `fourcc` names a known monochrome-only V4L2 pixel format (as
+/// opposed to a YUV/RGB/Bayer/compressed one carrying color information).
+fn is_monochrome_fourcc(fourcc: FourCC) -> bool {
+    matches!(
+        &fourcc.repr,
+        b"GREY" | b"Y8  " | b"Y10 " | b"Y12 " | b"Y16 "
+    )
+}
+
+/// Pixel count of a resolution, for comparing which capture node is the
+/// primary sensor.
+fn resolution_area(resolution: (u32, u32)) -> u64 {
+    let (w, h) = resolution;
+    u64::from(w) * u64::from(h)
+}
+
 /// The `by-id` symlink for `path` when udev created one (it embeds the USB
 /// serial, so it survives replugging into another port), else the raw node
 /// path. Either way it round-trips through [`node_for_unique_id`].
@@ -116,11 +235,8 @@ fn unique_id_for(path: &Path) -> String {
         .to_string()
 }
 
-/// Read `idVendor`/`idProduct` from the USB device behind a V4L2 node.
-///
-/// `<sysfs>/device` is the USB *interface*; its parent holds the ids.
-fn usb_ids(sysfs: &Path) -> Option<(u16, u16)> {
-    let usb = usb_device_sysfs(sysfs)?;
+/// Read `idVendor`/`idProduct` from the USB device directory.
+fn usb_ids(usb: &Path) -> Option<(u16, u16)> {
     let vendor = read_trimmed(&usb.join("idVendor"))?;
     let product = read_trimmed(&usb.join("idProduct"))?;
     Some((
@@ -129,9 +245,9 @@ fn usb_ids(sysfs: &Path) -> Option<(u16, u16)> {
     ))
 }
 
-/// USB `iSerialNumber` from the parent USB device, when present and non-empty.
-fn usb_serial(sysfs: &Path) -> Option<String> {
-    let usb = usb_device_sysfs(sysfs)?;
+/// USB `iSerialNumber` from the USB device directory, when present and
+/// non-empty.
+fn usb_serial(usb: &Path) -> Option<String> {
     let serial = read_trimmed(&usb.join("serial"))?;
     let serial = serial.trim();
     // Kernel placeholder when the descriptor has no iSerialNumber.
@@ -163,48 +279,98 @@ fn max_format(device: &Device) -> (Option<(u32, u32)>, Option<u32>) {
         return (None, None);
     };
 
-    let mut max_resolution: Option<(u32, u32)> = None;
-    let mut max_fps: Option<u32> = None;
+    let sizes: Vec<SizeRates> = formats
+        .iter()
+        .flat_map(|format| sizes_with_rates(device, format.fourcc))
+        .collect();
+    summarize(&sizes)
+}
 
-    for format in formats {
-        let Ok(sizes) = device.enum_framesizes(format.fourcc) else {
-            continue;
-        };
-        for size in sizes {
-            for discrete in size.size.to_discrete() {
-                let candidate = (discrete.width, discrete.height);
-                if max_resolution.is_none_or(|(w, h)| {
-                    u64::from(candidate.0) * u64::from(candidate.1) > u64::from(w) * u64::from(h)
-                }) {
-                    max_resolution = Some(candidate);
-                }
-                if let Some(fps) = max_discrete_fps(device, format.fourcc, candidate) {
-                    max_fps = Some(max_fps.map_or(fps, |best: u32| best.max(fps)));
-                }
-            }
-        }
-    }
+/// A discrete frame size and the discrete rates the driver offers at it.
+/// `rates` is empty when the driver reports only a stepwise or continuous
+/// interval range for the size.
+struct SizeRates {
+    size: (u32, u32),
+    rates: Vec<u32>,
+}
 
+/// Largest frame size, and highest rate offered at any size. The first of two
+/// equally large sizes wins, so enumeration order stays the tiebreak.
+fn summarize(sizes: &[SizeRates]) -> (Option<(u32, u32)>, Option<u32>) {
+    let max_resolution = sizes
+        .iter()
+        .map(|entry| entry.size)
+        .fold(None, |best, size| match best {
+            Some(current) if resolution_area(size) <= resolution_area(current) => Some(current),
+            _ => Some(size),
+        });
+    let max_fps = sizes
+        .iter()
+        .flat_map(|entry| entry.rates.iter().copied())
+        .max();
     (max_resolution, max_fps)
 }
 
-/// Highest discrete frame rate the driver offers for one format and size.
-///
-/// Intervals are periods (seconds per frame), so the highest rate is the
-/// smallest interval. Stepwise/continuous ranges are skipped — they describe a
-/// span rather than an offered rate — as are zero-numerator entries, which
-/// would divide by zero.
-fn max_discrete_fps(device: &Device, fourcc: FourCC, size: (u32, u32)) -> Option<u32> {
-    let intervals = device.enum_frameintervals(fourcc, size.0, size.1).ok()?;
-    intervals
+/// Every discrete frame size the driver offers for `fourcc`, with the discrete
+/// rates at each. Stepwise and continuous *sizes* are skipped — they describe a
+/// span rather than an offered size.
+fn sizes_with_rates(device: &Device, fourcc: FourCC) -> Vec<SizeRates> {
+    device
+        .enum_framesizes(fourcc)
         .into_iter()
-        .filter_map(|interval| match interval.interval {
-            FrameIntervalEnum::Discrete(fraction) if fraction.numerator > 0 => {
-                Some(fraction.denominator / fraction.numerator)
+        .flatten()
+        .flat_map(|size| size.size.to_discrete())
+        .map(|discrete| {
+            let size = (discrete.width, discrete.height);
+            SizeRates {
+                size,
+                rates: discrete_rates(device, fourcc, size),
             }
-            _ => None,
         })
-        .max()
+        .collect()
+}
+
+/// The discrete frame rates the driver offers for one format and size.
+/// Stepwise/continuous ranges are skipped, as are intervals [`fps_of`] cannot
+/// turn into a rate.
+fn discrete_rates(device: &Device, fourcc: FourCC, size: (u32, u32)) -> Vec<u32> {
+    device
+        .enum_frameintervals(fourcc, size.0, size.1)
+        .into_iter()
+        .flatten()
+        .filter_map(|interval| match interval.interval {
+            FrameIntervalEnum::Discrete(fraction) => fps_of(fraction),
+            FrameIntervalEnum::Stepwise(_) => None,
+        })
+        .collect()
+}
+
+/// Every [`StreamMode`] the driver offers for `fourcc` — the list a user picks
+/// a resolution and a frame rate from. Sizes with no discrete rate are left
+/// out: there is no rate to ask the camera for.
+pub(crate) fn stream_modes(device: &Device, fourcc: FourCC) -> StreamModes {
+    StreamModes::new(sizes_with_rates(device, fourcc).into_iter().flat_map(
+        |SizeRates {
+             size: (width, height),
+             rates,
+         }| {
+            rates
+                .into_iter()
+                .map(move |fps| StreamMode { width, height, fps })
+        },
+    ))
+}
+
+/// Whole frames per second for a V4L2 frame interval.
+///
+/// Intervals are periods (seconds per frame), and the camera's own are rounded
+/// the way its firmware rounds them — `333333/10000000` is a 30 fps camera —
+/// so the rate is rounded to the nearest whole number, not truncated. `None`
+/// for a zero interval (it would divide by zero) or one too slow to round to a
+/// frame per second.
+pub(crate) fn fps_of(interval: Fraction) -> Option<u32> {
+    // A period of `n / d` seconds per frame is `d / n` frames per second.
+    whole_fps(interval.denominator, interval.numerator)
 }
 
 /// Read a sysfs attribute, trimming the trailing newline the kernel appends.
@@ -212,4 +378,227 @@ fn read_trimmed(path: &Path) -> Option<String> {
     fs::read_to_string(path)
         .ok()
         .map(|text| text.trim().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn camera(name: &str, max_resolution: Option<(u32, u32)>) -> Camera {
+        Camera {
+            name: name.to_string(),
+            unique_id: name.to_string(),
+            serial_number: Some("5091F273".to_string()),
+            vendor_id: 0x046d,
+            product_id: 0x085e,
+            max_resolution,
+            max_fps: None,
+        }
+    }
+
+    #[test]
+    fn brio_ir_node_collapses_into_the_main_capture_node() {
+        // Reproduces issue #1191: the Brio's two capture-capable /dev/videoN
+        // nodes (main sensor + IR sensor for Windows Hello) share one USB
+        // device directory and must collapse to a single listing entry.
+        let usb_device = PathBuf::from("/sys/devices/usb1/1-1");
+        let main = camera("Logitech BRIO", Some((4096, 2160)));
+        let ir = camera("Logitech BRIO", Some((340, 340)));
+
+        let cameras = merge_by_usb_device([
+            (usb_device.clone(), main.clone(), Some(true)),
+            (usb_device, ir, Some(false)),
+        ]);
+
+        assert_eq!(cameras, vec![main]);
+    }
+
+    #[test]
+    fn distinct_usb_devices_stay_separate() {
+        let one = camera("Logitech BRIO", Some((4096, 2160)));
+        let two = camera("Logitech StreamCam", Some((1920, 1080)));
+
+        let cameras = merge_by_usb_device([
+            (
+                PathBuf::from("/sys/devices/usb1/1-1"),
+                one.clone(),
+                Some(true),
+            ),
+            (
+                PathBuf::from("/sys/devices/usb1/1-2"),
+                two.clone(),
+                Some(true),
+            ),
+        ]);
+
+        assert_eq!(cameras, vec![one, two]);
+    }
+
+    #[test]
+    fn resolution_area_compares_pixel_counts() {
+        assert_eq!(resolution_area((340, 340)), 340 * 340);
+        assert!(resolution_area((4096, 2160)) > resolution_area((340, 340)));
+    }
+
+    #[test]
+    fn unknown_resolution_does_not_lose_to_a_known_smaller_node() {
+        // Reproduces the failure mode from the #1234 review: if the primary
+        // node only reports stepwise/continuous frame sizes (or enumeration
+        // fails), `max_resolution` is `None`, not "0x0". It must not be
+        // outranked by a sibling IR/secondary node just because that node
+        // happens to report a small discrete size.
+        let usb_device = PathBuf::from("/sys/devices/usb1/1-1");
+        let primary_unknown = camera("Logitech BRIO", None);
+        let ir = camera("Logitech BRIO", Some((340, 340)));
+
+        let cameras = merge_by_usb_device([
+            (usb_device.clone(), primary_unknown.clone(), Some(true)),
+            (usb_device, ir, Some(false)),
+        ]);
+
+        assert_eq!(cameras, vec![primary_unknown]);
+    }
+
+    #[test]
+    fn color_node_wins_over_an_ir_node_that_enumerates_first() {
+        // Reproduces the second #1234 review finding: when both the color
+        // and IR node have unknown resolution, `/dev/videoN` enumeration
+        // order is not a reliable tiebreaker — an IR node such as
+        // `/dev/video10` can sort before its sibling color node
+        // `/dev/video2` (nodes() sorts lexicographically by path, and "1" <
+        // "2"). The IR node here is first-seen and would win under plain
+        // "first-seen wins", but `is_color` must override that.
+        let usb_device = PathBuf::from("/sys/devices/usb1/1-1");
+        let ir_seen_first = camera("video10-ir", None);
+        let color_seen_second = camera("video2-color", None);
+
+        let cameras = merge_by_usb_device([
+            (usb_device.clone(), ir_seen_first, Some(false)),
+            (usb_device, color_seen_second.clone(), Some(true)),
+        ]);
+
+        assert_eq!(cameras, vec![color_seen_second]);
+    }
+
+    #[test]
+    fn is_monochrome_fourcc_recognizes_known_ir_formats() {
+        for code in [b"GREY", b"Y8  ", b"Y10 ", b"Y12 ", b"Y16 "] {
+            assert!(is_monochrome_fourcc(FourCC::new(code)));
+        }
+        for code in [b"YUYV", b"MJPG", b"NV12"] {
+            assert!(!is_monochrome_fourcc(FourCC::new(code)));
+        }
+    }
+
+    #[test]
+    fn unreadable_formats_still_beat_a_known_ir_node() {
+        // #1234 review: if the color node's format enumeration fails, a
+        // known-mono IR node with a discrete size must not take over.
+        let usb_device = PathBuf::from("/sys/devices/usb1/1-1");
+        let ir_seen_first = camera("video10-ir", Some((340, 340)));
+        let color_unreadable = camera("video2-color", None);
+
+        let cameras = merge_by_usb_device([
+            (usb_device.clone(), ir_seen_first, Some(false)),
+            (usb_device, color_unreadable.clone(), None),
+        ]);
+
+        assert_eq!(cameras, vec![color_unreadable]);
+    }
+
+    #[test]
+    fn color_node_beats_larger_ir_node() {
+        let usb_device = PathBuf::from("/sys/devices/usb1/1-1");
+        let ir = camera("ir", Some((4096, 2160)));
+        let color = camera("color", Some((1920, 1080)));
+
+        let cameras = merge_by_usb_device([
+            (usb_device.clone(), ir, Some(false)),
+            (usb_device, color.clone(), Some(true)),
+        ]);
+
+        assert_eq!(cameras, vec![color]);
+    }
+
+    fn size_rates(width: u32, height: u32, rates: &[u32]) -> SizeRates {
+        SizeRates {
+            size: (width, height),
+            rates: rates.to_vec(),
+        }
+    }
+
+    #[test]
+    fn fps_of_reads_a_clean_interval() {
+        assert_eq!(fps_of(Fraction::new(1, 30)), Some(30));
+        assert_eq!(fps_of(Fraction::new(1, 60)), Some(60));
+    }
+
+    #[test]
+    fn fps_of_rounds_the_intervals_cameras_actually_report() {
+        // UVC intervals are in 100 ns units and rarely divide evenly. A 30 fps
+        // camera may report 333333 (just under a third of a second) or 333334
+        // (just over it); the latter is 29.99994 fps, which the truncating
+        // `den / num` this replaced would have listed as 29.
+        assert_eq!(fps_of(Fraction::new(333_333, 10_000_000)), Some(30));
+        assert_eq!(fps_of(Fraction::new(333_334, 10_000_000)), Some(30));
+        assert_eq!(fps_of(Fraction::new(166_666, 10_000_000)), Some(60));
+        assert_eq!(fps_of(Fraction::new(400_000, 10_000_000)), Some(25));
+    }
+
+    #[test]
+    fn fps_of_keeps_slow_rates_that_round_to_a_whole_frame() {
+        // 7.5 fps (1333333 / 1e7) is a real UVC rate; it rounds to 8, not 0.
+        assert_eq!(fps_of(Fraction::new(1_333_333, 10_000_000)), Some(8));
+    }
+
+    #[test]
+    fn fps_of_rejects_intervals_that_are_not_a_rate() {
+        assert_eq!(fps_of(Fraction::new(0, 10_000_000)), None);
+        assert_eq!(fps_of(Fraction::new(0, 0)), None);
+        // Slower than one frame per two seconds rounds to zero fps.
+        assert_eq!(fps_of(Fraction::new(3, 1)), None);
+    }
+
+    #[test]
+    fn fps_of_does_not_overflow_on_extreme_fractions() {
+        // The rounding add happens in u64, so a hostile driver can't make it
+        // wrap (or panic in debug builds).
+        assert_eq!(fps_of(Fraction::new(u32::MAX, u32::MAX)), Some(1));
+        assert_eq!(fps_of(Fraction::new(u32::MAX, 1)), None);
+    }
+
+    #[test]
+    fn summarize_picks_the_largest_size_and_the_fastest_rate() {
+        let sizes = [
+            size_rates(640, 480, &[30, 15]),
+            size_rates(1920, 1080, &[30]),
+            size_rates(1280, 720, &[60, 30]),
+        ];
+
+        // The fastest rate is at 720p, not at the largest size.
+        assert_eq!(summarize(&sizes), (Some((1920, 1080)), Some(60)));
+    }
+
+    #[test]
+    fn summarize_keeps_the_first_of_two_equally_large_sizes() {
+        // 1280x720 and 960x960 are both 921 600 px.
+        let sizes = [size_rates(1280, 720, &[30]), size_rates(960, 960, &[30])];
+        assert_eq!(summarize(&sizes).0, Some((1280, 720)));
+
+        let reversed = [size_rates(960, 960, &[30]), size_rates(1280, 720, &[30])];
+        assert_eq!(summarize(&reversed).0, Some((960, 960)));
+    }
+
+    #[test]
+    fn summarize_reports_no_rate_when_no_size_has_a_discrete_one() {
+        // Stepwise/continuous intervals leave `rates` empty: the size still
+        // counts, the rate stays unknown.
+        let sizes = [size_rates(1920, 1080, &[])];
+        assert_eq!(summarize(&sizes), (Some((1920, 1080)), None));
+    }
+
+    #[test]
+    fn summarize_of_nothing_is_nothing() {
+        assert_eq!(summarize(&[]), (None, None));
+    }
 }

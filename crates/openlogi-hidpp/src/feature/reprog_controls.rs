@@ -3,7 +3,9 @@
 //! Logitech's v6 document names this feature `SpecialKeysMseButtons`: it
 //! enumerates physical and virtual controls, lets host software divert or remap
 //! them, and emits notifications for diverted buttons, raw XY, analytics key
-//! events, and raw wheel movement.
+//! events, and raw wheel movement. The event stream also reports a reporting
+//! change that another client made (see
+//! [`ReprogControlsEvent::ReportingChangedElsewhere`]).
 
 use openlogi_hidpp_derive::Feature;
 
@@ -56,7 +58,8 @@ impl ReprogControlsFeature {
     /// Optional boolean fields in [`CidReportingChange`] map to the corresponding
     /// `*-valid` bit in Logitech's packet. Fields set to `None` are left
     /// unchanged by the device. Remapping is carried as a value field rather
-    /// than a valid/value pair; `None` sends the documented `0` value.
+    /// than a valid/value pair; `None` sends `0`, which keeps the current
+    /// remap (see [`CidReportingChange::remap`]).
     pub async fn set_cid_reporting(
         &self,
         cid: ControlId,
@@ -282,7 +285,8 @@ pub struct CidReporting {
     pub force_raw_xy: bool,
     /// Whether raw XY reporting is enabled.
     pub raw_xy: bool,
-    /// Optional remapping target control ID.
+    /// The control this one is remapped to. The device reports `0` for a
+    /// control mapped to itself, which reads as `None`.
     pub remap: Option<ControlId>,
     /// Whether analytics key events are enabled.
     pub analytics_key_events: bool,
@@ -308,8 +312,8 @@ impl CidReporting {
 
 /// Changes for `setCidReporting`.
 ///
-/// For boolean fields, `None` means "leave unchanged". Remapping is encoded as
-/// the packet's value field and defaults to the documented `0` value.
+/// Every `None` field leaves that setting unchanged, `remap` included: its
+/// wire value `0` keeps the current remap.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct CidReportingChange {
@@ -321,8 +325,10 @@ pub struct CidReportingChange {
     pub force_raw_xy: Option<bool>,
     /// New raw XY state, or `None` to leave unchanged.
     pub raw_xy: Option<bool>,
-    /// Remaps to another control ID. `None` sends the documented `0` value,
-    /// which represents no persistent remapping.
+    /// New remap target, or `None` to keep the current remap. `None` sends
+    /// `0`, which `setCidReporting` reads as "keep the previously configured
+    /// remap", so it does not clear a remap. To clear one, remap the control
+    /// to its own control ID.
     pub remap: Option<ControlId>,
     /// New analytics key event state, or `None` to leave unchanged.
     pub analytics_key_events: Option<bool>,
@@ -385,7 +391,7 @@ pub struct CidReportingChangeEcho {
     pub force_raw_xy: Option<bool>,
     /// Echoed raw XY state when changed.
     pub raw_xy: Option<bool>,
-    /// Echoed remapping target when present.
+    /// Echoed remap target, or `None` when the request kept the current remap.
     pub remap: Option<ControlId>,
     /// Echoed analytics key event state when changed.
     pub analytics_key_events: Option<bool>,
