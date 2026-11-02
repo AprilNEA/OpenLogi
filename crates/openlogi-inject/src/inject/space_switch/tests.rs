@@ -203,14 +203,18 @@ fn only_one_transaction_can_run_and_drop_releases_the_slot() {
 fn a_request_for_the_display_being_switched_waits_for_its_switch() {
     let slot = Slot::new();
     let lease = Lease::acquire(&slot, DISPLAY).unwrap();
-    // A switch that outlasts the wait is stuck: the request is skipped.
-    assert!(Lease::acquire_within(&slot, DISPLAY, Duration::ZERO).is_none());
+    // The request waits out its whole patience instead of being skipped at
+    // once; a switch that outlasts it is stuck, and then it is skipped.
+    let patience = Duration::from_millis(50);
+    let asked = Instant::now();
+    assert!(Lease::acquire_within(&slot, DISPLAY, patience).is_none());
+    assert!(asked.elapsed() >= patience, "the request did not wait");
     let released = AtomicBool::new(false);
     std::thread::scope(|scope| {
         let next = scope.spawn(|| {
-            let lease = Lease::acquire(&slot, DISPLAY);
+            let lease = Lease::acquire_within(&slot, DISPLAY, Duration::from_secs(60));
             // However the threads interleave, the slot is free only once the
-            // switch under way has ended.
+            // switch under way has ended, and its end wakes a waiting request.
             (lease.is_some(), released.load(Ordering::SeqCst))
         });
         released.store(true, Ordering::SeqCst);
