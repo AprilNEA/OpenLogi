@@ -51,7 +51,12 @@ fn a_changed_byte_is_named() {
 
     let error = ensure_same_tree(&app(a.path()), &unpacked).unwrap_err();
 
-    assert!(error.to_string().contains("Contents/Info.plist"), "{error}");
+    // The message shows the path with the host's separator.
+    let changed = Path::new("Contents")
+        .join("Info.plist")
+        .display()
+        .to_string();
+    assert!(error.to_string().contains(&changed), "{error}");
 }
 
 #[test]
