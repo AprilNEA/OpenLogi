@@ -5,13 +5,14 @@ use std::path::Path;
 use gpui::App;
 use openlogi_core::device::{DeviceInventory, DeviceModelInfo, ModelTransport, PairedDevice};
 use openlogi_core::diagnostics::{
-    AppInfo, AssetInfo, AssetSource, ConnectionKind, DeviceDiag, DiagnosticsReport, InventoryState,
-    ReceiverDiag, RenderState,
+    AppInfo, AssetInfo, AssetSource, ConnectionKind, DeviceDiag, DiagnosticsReport, InstallSource,
+    InventoryState, ReceiverDiag, RenderState,
 };
 use openlogi_core::hid::{DeviceRoute, ReceiverBrand};
 use openlogi_core::update_feed::UpdateChannel;
 use openlogi_ipc::{InventoryHealth, PROTOCOL_VERSION, VirtualKeyboardStatus};
 
+use crate::platform::installation::{HomebrewCask, Installation, InstallationSource, LinuxPackage};
 use crate::services::assets::AssetResolver;
 use crate::state::{AppState, DpiLoad};
 
@@ -25,7 +26,9 @@ pub fn collect(cx: &App) -> DiagnosticsReport {
     let app = app_info(
         state,
         crate::platform::updater::channel_in_use(cx),
-        resolver.has_bundle_root(),
+        cx.try_global::<Installation>()
+            .copied()
+            .unwrap_or(Installation::Detecting),
     );
     let (receivers, devices) = match state {
         Some(state) => (collect_receivers(state), collect_devices(state)),
@@ -44,7 +47,7 @@ pub fn collect(cx: &App) -> DiagnosticsReport {
 fn app_info(
     state: Option<&AppState>,
     update_channel: UpdateChannel,
-    running_from_bundle: bool,
+    installation: Installation,
 ) -> AppInfo {
     // The live agent link, not a retained copy: a report copied while the
     // agent is down must say "not connected", not replay the last status.
@@ -78,7 +81,27 @@ fn app_info(
         thumbwheel_sensitivity: settings.map(|s| s.thumbwheel_sensitivity.into()),
         config_schema_version: config.map(|(version, _)| version),
         configured_device_count: config.map(|(_, count)| count),
-        running_from_bundle,
+        installation: match installation {
+            Installation::Detecting => None,
+            Installation::Detected(source) => Some(source.into()),
+        },
+    }
+}
+
+impl From<InstallationSource> for InstallSource {
+    fn from(source: InstallationSource) -> Self {
+        match source {
+            InstallationSource::Homebrew(HomebrewCask::Official) => Self::HomebrewOfficial,
+            InstallationSource::Homebrew(HomebrewCask::Latest) => Self::HomebrewLatest,
+            InstallationSource::LinuxPackage(LinuxPackage::Deb) => Self::Deb,
+            InstallationSource::LinuxPackage(LinuxPackage::Rpm) => Self::Rpm,
+            InstallationSource::LinuxPackage(LinuxPackage::Arch) => Self::Arch,
+            InstallationSource::Nix => Self::Nix,
+            InstallationSource::WindowsMsi => Self::WindowsMsi,
+            InstallationSource::WindowsPortable => Self::WindowsPortable,
+            InstallationSource::MacAppBundle => Self::MacAppBundle,
+            InstallationSource::Unknown => Self::Unknown,
+        }
     }
 }
 
@@ -385,6 +408,63 @@ mod connection_for_tests {
             ),
         ] {
             assert_eq!(connection_for(Some(&route), brand, None), expected);
+        }
+    }
+}
+
+#[cfg(test)]
+mod installation_tests {
+    use openlogi_core::update_feed::UpdateChannel;
+
+    use super::{
+        HomebrewCask, InstallSource, Installation, InstallationSource, LinuxPackage, app_info,
+    };
+
+    /// #2262: the report read the installation off the asset bundle, so every
+    /// release without bundled assets claimed to be a source build.
+    #[test]
+    fn the_report_carries_the_probed_installation_source() {
+        let reported =
+            |installation| app_info(None, UpdateChannel::Stable, installation).installation;
+        assert_eq!(reported(Installation::Detecting), None);
+        for (source, expected) in [
+            (
+                InstallationSource::Homebrew(HomebrewCask::Official),
+                InstallSource::HomebrewOfficial,
+            ),
+            (
+                InstallationSource::Homebrew(HomebrewCask::Latest),
+                InstallSource::HomebrewLatest,
+            ),
+            (
+                InstallationSource::LinuxPackage(LinuxPackage::Deb),
+                InstallSource::Deb,
+            ),
+            (
+                InstallationSource::LinuxPackage(LinuxPackage::Rpm),
+                InstallSource::Rpm,
+            ),
+            (
+                InstallationSource::LinuxPackage(LinuxPackage::Arch),
+                InstallSource::Arch,
+            ),
+            (InstallationSource::Nix, InstallSource::Nix),
+            (InstallationSource::WindowsMsi, InstallSource::WindowsMsi),
+            (
+                InstallationSource::WindowsPortable,
+                InstallSource::WindowsPortable,
+            ),
+            (
+                InstallationSource::MacAppBundle,
+                InstallSource::MacAppBundle,
+            ),
+            (InstallationSource::Unknown, InstallSource::Unknown),
+        ] {
+            assert_eq!(
+                reported(Installation::Detected(source)),
+                Some(expected),
+                "{source:?}"
+            );
         }
     }
 }

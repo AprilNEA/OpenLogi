@@ -17,13 +17,6 @@ mod macos;
 mod windows;
 
 /// Evidence-backed ownership of the currently running copy.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "each host constructs only its own installation sources"
-    )
-)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InstallationSource {
     /// A Homebrew receipt and Caskroom back-link identify this app bundle.
@@ -43,13 +36,6 @@ pub enum InstallationSource {
 }
 
 /// The two supported Homebrew cask tokens, independent of their recorded version.
-#[cfg_attr(
-    all(not(target_os = "macos"), not(test)),
-    expect(
-        dead_code,
-        reason = "Homebrew variants are constructed on macOS or in tests"
-    )
-)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HomebrewCask {
     /// `openlogi`, distributed by the official Homebrew cask repository.
@@ -59,13 +45,6 @@ pub enum HomebrewCask {
 }
 
 /// Linux package database that owns the running executable.
-#[cfg_attr(
-    all(not(target_os = "linux"), not(test)),
-    expect(
-        dead_code,
-        reason = "Linux package variants are constructed on Linux or in tests"
-    )
-)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LinuxPackage {
     /// Debian-family package registered with dpkg.
