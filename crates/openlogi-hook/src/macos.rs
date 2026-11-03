@@ -486,6 +486,18 @@ fn kernel_instant_us(name: &std::ffi::CStr) -> i64 {
         .saturating_add(i64::from(value.tv_usec))
 }
 
+/// What the lifecycle watchdog reads about the tap thread. Phase is read
+/// before progress: the tap thread marks progress before it publishes a
+/// phase, so a phase this read sees comes with a mark at least that fresh.
+fn observe(signals: &WatchdogSignals) -> LifecycleObservation {
+    LifecycleObservation {
+        phase: signals.phase(),
+        stop_requested: signals.stop_requested(),
+        tap_progress_at: signals.tap_progress_at(),
+        power: power_epoch(),
+    }
+}
+
 /// Independent lifecycle watchdog for paths that never enter the Rust tap
 /// callback (for example, TCC revocation wedging `CFRunLoopRunInMode` or the
 /// Accessibility query itself).
@@ -504,12 +516,7 @@ fn spawn_lifecycle_watchdog(
         .spawn(move || {
             let mut watchdog = LifecycleWatchdog::default();
             loop {
-                let observation = LifecycleObservation {
-                    phase: signals.phase(),
-                    stop_requested: signals.stop_requested(),
-                    tap_progress_at: signals.tap_progress_at(),
-                    power: power_epoch(),
-                };
+                let observation = observe(&signals);
                 match watchdog.evaluate(signals.now(), observation) {
                     LifecycleDecision::Continue => {
                         thread::park_timeout(LIFECYCLE_POLL_INTERVAL);
@@ -520,21 +527,15 @@ fn spawn_lifecycle_watchdog(
                         watched,
                         stalled,
                     } => {
-                        // The tap thread may have completed immediately after
-                        // the decision. Only a still-hazardous phase may exit.
-                        let phase = signals.phase();
-                        let still_hazardous = match reason {
-                            LifecycleExitReason::TapThreadStalled => {
-                                matches!(
-                                    phase,
-                                    TapPhase::Arming | TapPhase::Armed | TapPhase::Probing
-                                )
-                            }
-                            LifecycleExitReason::StopTimedOut => phase != TapPhase::ThreadExited,
-                        };
-                        if !still_hazardous {
+                        // The tap thread runs on while this one decides: it may
+                        // have completed, or come back from a late slice and
+                        // marked progress (#2210). Exit only for the stall the
+                        // decision was made on.
+                        let fresh = observe(&signals);
+                        if !watchdog.still_stalled(fresh) {
                             continue;
                         }
+                        let phase = fresh.phase;
                         let reason = match reason {
                             LifecycleExitReason::TapThreadStalled if phase == TapPhase::Arming => {
                                 "HID tap creation or activation stopped making progress"
@@ -552,10 +553,14 @@ fn spawn_lifecycle_watchdog(
                         // `stalled` is uptime since the stall began; `watched` is
                         // the part this thread was running to see. A wide gap
                         // between them says the process itself was frozen.
+                        // `largest_gap` is the longest this thread went between
+                        // two looks at the stall: far above the 100 ms poll, it
+                        // was not scheduled either, as under heavy CPU load.
                         error!(
                             reason,
                             stalled_ms = duration_millis(stalled),
                             watched_ms = duration_millis(watched),
+                            largest_gap_ms = duration_millis(watchdog.largest_gap()),
                             ?phase,
                             "HID CGEventTap lifecycle did not make progress before deadline — \
                              exiting agent to restore system input"
