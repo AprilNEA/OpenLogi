@@ -26,6 +26,7 @@ use gpui_component::{
     Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
+    scroll::ScrollableElement as _,
     spinner::Spinner,
     v_flex,
 };
@@ -349,21 +350,23 @@ impl Render for AddDeviceView {
                     .flex_1()
                     .min_h_0()
                     .w_full()
-                    .px_6()
                     .pt_6()
                     .gap_5()
                     .child(
                         v_flex()
+                            .px_6()
                             .gap_1()
                             .child(div().text_heading().child(title))
                             .when_some(subtitle, |this, subtitle| this.child(hint(subtitle, pal))),
                     )
+                    // The scroll owner spans the window, so its scrollbar sits
+                    // on the window edge; the page inset lives inside it.
                     .child(
                         div()
-                            .id("pairing-content")
                             .flex_1()
-                            .min_h_0()
-                            .overflow_y_scroll()
+                            .px_6()
+                            .overflow_y_scrollbar()
+                            .id("pairing-content")
                             .child(body),
                     ),
             )
@@ -515,6 +518,7 @@ fn device_row(device: &FoundDevice, pal: Palette) -> impl IntoElement {
         SharedString::from(device.name.clone()),
         pal,
     )
+    .debug_selector(move || format!("pairing-device-{address_id:012x}"))
     .on_click(move |_, _, cx| send(cx, PairDevice { address }))
 }
 
