@@ -407,6 +407,7 @@ mod tests {
 
     #[gpui::test]
     fn catalog_list_scrolls_inside_the_picker_popover(cx: &mut TestAppContext) {
+        let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
         cx.update(gpui_component::init);
         let clicked: Rc<RefCell<Option<usize>>> = Rc::default();
         let (_, cx) = cx.add_window_view({

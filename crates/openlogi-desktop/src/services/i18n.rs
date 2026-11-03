@@ -26,6 +26,11 @@ use openlogi_core::locale::activate;
 
 /// Serializes tests that mutate `rust_i18n`'s process-global locale, so a
 /// locale switch in one test cannot interleave with another's assertions.
+///
+/// Every test that simulates pointer input (click, press, move or scroll)
+/// holds it too. A press refreshes the window, and the redraw before the
+/// release lays it out in the current locale. A switch by a parallel test
+/// then moves the target, and GPUI drops the click without an error.
 #[cfg(test)]
 pub(crate) static LOCALE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
