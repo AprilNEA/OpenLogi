@@ -6,8 +6,8 @@ use gpui::{
     Rems, RenderOnce, SharedString, StatefulInteractiveElement as _, Styled, Window, div,
     prelude::FluentBuilder as _, px, rems, rgb,
 };
-use gpui_base::Button as BaseButton;
-use gpui_component::{
+use gpui_kit::base::Button as BaseButton;
+use gpui_kit::component::{
     IconName, Selectable as _, Sizable as _,
     button::{Button, ButtonGroup},
     h_flex,

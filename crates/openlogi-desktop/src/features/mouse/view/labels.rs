@@ -12,8 +12,8 @@ use gpui::{
     Refineable as _, RenderOnce, SharedString, StatefulInteractiveElement as _, Styled, Window,
     div, prelude::FluentBuilder as _, px, rems, rgb, svg,
 };
-use gpui_base::Button as BaseButton;
-use gpui_component::{Icon, IconName, h_flex};
+use gpui_kit::base::Button as BaseButton;
+use gpui_kit::component::{Icon, IconName, h_flex};
 use openlogi_core::binding::{Action, ButtonId, default_binding};
 
 use super::{ModelRect, MouseModelView, SIDE_GAP, set_control_hovered};

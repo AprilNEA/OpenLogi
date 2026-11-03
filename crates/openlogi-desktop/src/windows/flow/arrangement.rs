@@ -10,8 +10,8 @@ use gpui::{
     ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Window,
     div, prelude::FluentBuilder as _, px,
 };
-use gpui_base::Button as BaseButton;
-use gpui_component::{
+use gpui_kit::base::Button as BaseButton;
+use gpui_kit::component::{
     Icon, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex, v_flex,

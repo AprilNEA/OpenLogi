@@ -17,11 +17,11 @@ use gpui::{
     App, Context, IntoElement, ParentElement, Render, SharedString, Styled, Subscription, Window,
     div, px, relative,
 };
-use gpui_component::WindowExt as _;
-use gpui_component::button::{Button, ButtonVariants as _};
-use gpui_component::dialog::DialogButtonProps;
-use gpui_component::slider::Slider;
-use gpui_component::{Disableable as _, Selectable as _, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::WindowExt as _;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::dialog::DialogButtonProps;
+use gpui_kit::component::slider::Slider;
+use gpui_kit::component::{Disableable as _, Selectable as _, Sizable as _, h_flex, v_flex};
 use openlogi_core::config::MomentumScrolling;
 
 use super::glide_shape::glide_shape_picker;
@@ -580,7 +580,7 @@ mod tests {
     /// app-wide default, the Pointer tab to the selected mouse's override.
     #[gpui::test]
     fn each_scope_commits_its_own_settings(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
+        cx.update(gpui_kit::init);
         cx.update(|cx| {
             let resolver = AssetResolver::new();
             let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();

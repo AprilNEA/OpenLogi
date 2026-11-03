@@ -774,7 +774,7 @@ fn keys_tab(
     cx: &mut gpui::TestAppContext,
 ) -> (Entity<FunctionRowView>, &mut gpui::VisualTestContext) {
     cx.update(|cx| {
-        gpui_component::init(cx);
+        gpui_kit::init(cx);
         cx.set_reduce_motion(true);
         let resolver = crate::services::assets::AssetResolver::new();
         let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -861,7 +861,7 @@ fn the_key_panel_list_scrolls_under_a_scrollbar(cx: &mut gpui::TestAppContext) {
         .expect("the panel lists Copy");
     assert!(viewport.contains(&copy.center()), "Copy starts in view");
 
-    cx.simulate_event(gpui::ScrollWheelEvent {
+    cx.simulate_event(gpui::ScrollEvent {
         position: viewport.center(),
         delta: gpui::ScrollDelta::Pixels(point(px(0.), px(-60.))),
         ..Default::default()
@@ -898,7 +898,7 @@ fn the_key_overview_list_has_a_scrollbar(cx: &mut gpui::TestAppContext) {
         "F3 sits inside the scroll viewport: {viewport:?}"
     );
 
-    cx.simulate_event(gpui::ScrollWheelEvent {
+    cx.simulate_event(gpui::ScrollEvent {
         position: viewport.center(),
         delta: gpui::ScrollDelta::Pixels(point(px(0.), px(-2000.))),
         ..Default::default()

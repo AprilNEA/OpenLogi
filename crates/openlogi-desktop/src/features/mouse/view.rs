@@ -8,8 +8,8 @@ use gpui::{
     StatefulInteractiveElement as _, Styled, Subscription, Window, canvas, div, hsla, img,
     prelude::FluentBuilder as _, px, rgb, size,
 };
-use gpui_base::{Button as BaseButton, ElementExt as _};
-use gpui_component::{
+use gpui_kit::base::{Button as BaseButton, ElementExt as _};
+use gpui_kit::component::{
     h_flex,
     input::{InputEvent, InputState},
     v_flex,

@@ -8,8 +8,8 @@ use gpui::{
     StatefulInteractiveElement as _, Styled, UniformListScrollHandle, WeakEntity, div,
     prelude::FluentBuilder as _, px, uniform_list,
 };
-use gpui_base::Button as BaseButton;
-use gpui_component::{
+use gpui_kit::base::Button as BaseButton;
+use gpui_kit::component::{
     Icon, IconName, h_flex,
     popover::{Popover, PopoverState},
     scroll::ScrollableElement as _,
@@ -349,11 +349,11 @@ mod tests {
 
     use gpui::{
         Context, InteractiveElement as _, IntoElement, Modifiers, ParentElement as _, Render,
-        ScrollDelta, ScrollWheelEvent, Styled as _, TestAppContext, TouchPhase, Window, div, point,
-        px, uniform_list,
+        ScrollDelta, ScrollEvent, Styled as _, TestAppContext, TouchPhase, Window, div, point, px,
+        uniform_list,
     };
-    use gpui_component::button::Button;
-    use gpui_component::popover::Popover;
+    use gpui_kit::component::button::Button;
+    use gpui_kit::component::popover::Popover;
 
     use super::APP_ROW_H;
     use crate::features::binding_editor::compact_panel;
@@ -408,7 +408,7 @@ mod tests {
     #[gpui::test]
     fn catalog_list_scrolls_inside_the_picker_popover(cx: &mut TestAppContext) {
         let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
-        cx.update(gpui_component::init);
+        cx.update(gpui_kit::init);
         let clicked: Rc<RefCell<Option<usize>>> = Rc::default();
         let (_, cx) = cx.add_window_view({
             let clicked = clicked.clone();
@@ -429,11 +429,12 @@ mod tests {
         cx.simulate_click(cursor, Modifiers::default());
         assert_eq!(*clicked.borrow(), Some(0));
 
-        cx.simulate_event(ScrollWheelEvent {
+        cx.simulate_event(ScrollEvent {
             position: cursor,
             delta: ScrollDelta::Lines(point(0., -5.)),
             modifiers: Modifiers::default(),
             touch_phase: TouchPhase::Moved,
+            source: gpui::ScrollSource::Pointer,
         });
         cx.update(|window, cx| window.draw(cx).clear(cx));
 

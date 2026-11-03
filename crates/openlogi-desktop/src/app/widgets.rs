@@ -6,7 +6,7 @@ use gpui::{
     App, Context, InteractiveElement as _, IntoElement, ParentElement, RenderOnce, SharedString,
     Styled, Window, div, prelude::FluentBuilder as _, px,
 };
-use gpui_component::{
+use gpui_kit::component::{
     Disableable as _, Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,

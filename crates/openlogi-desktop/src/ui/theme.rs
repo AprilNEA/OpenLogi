@@ -17,7 +17,7 @@ use gpui::rgb;
 use gpui::{
     App, BoxShadow, FontWeight, Hsla, Pixels, Rems, Rgba, Styled, Window, hsla, px, relative, rems,
 };
-use gpui_component::{ActiveTheme as _, Theme, ThemeMode, ThemeRegistry};
+use gpui_kit::component::{ActiveTheme as _, Theme, ThemeMode, ThemeRegistry};
 use openlogi_core::config::{Appearance, UiScale};
 
 use crate::state::AppState;
@@ -273,7 +273,7 @@ pub const OPENLOGI_LIGHT: &str = "OpenLogi Light";
 pub const OPENLOGI_DARK: &str = "OpenLogi Dark";
 
 /// Register every bundled theme into the [`ThemeRegistry`]. Call once at
-/// startup, after `gpui_component::init` (which seeds the registry global). Our
+/// startup, after `gpui_kit::init` (which seeds the registry global). Our
 /// brand theme loads first; the upstream themes follow.
 pub fn register_builtin_themes(cx: &mut App) {
     let registry = ThemeRegistry::global_mut(cx);
@@ -528,14 +528,14 @@ impl<E: Styled> Typography for E {}
 
 #[cfg(test)]
 mod tests {
-    use gpui_component::button::Button;
+    use gpui_kit::component::button::Button;
 
     use super::*;
 
     #[gpui::test]
     fn bundled_theme_picker_keeps_upstream_and_openlogi_themes(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
-            gpui_component::init(cx);
+            gpui_kit::init(cx);
             register_builtin_themes(cx);
             let themes = ThemeRegistry::global(cx).themes();
             for name in [
@@ -614,7 +614,7 @@ mod tests {
     fn selected_segment_stands_out_in_both_openlogi_themes(cx: &mut gpui::TestAppContext) {
         const MIN_NON_TEXT_CONTRAST: f32 = 3.;
         cx.update(|cx| {
-            gpui_component::init(cx);
+            gpui_kit::init(cx);
             register_builtin_themes(cx);
             for (name, mode) in [
                 (OPENLOGI_LIGHT, ThemeMode::Light),

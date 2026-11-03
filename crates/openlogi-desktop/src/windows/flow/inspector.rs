@@ -5,7 +5,7 @@ use gpui::{
     App, Context, InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
     Styled as _, Window, div, prelude::FluentBuilder as _, px,
 };
-use gpui_component::{
+use gpui_kit::component::{
     Icon, IconName, Selectable as _, Sizable as _, WindowExt as _,
     button::{Button, ButtonGroup, ButtonVariant, ButtonVariants as _},
     dialog::DialogButtonProps,

@@ -9,8 +9,8 @@ use crate::ui::commit_slider::SliderUnit;
 use crate::ui::slider_row::SliderRow;
 use crate::ui::theme::FocusRingStyle as _;
 use crate::ui::theme::Typography as _;
-use gpui_base::Button as BaseButton;
-use gpui_component::radio::{Radio, RadioGroup};
+use gpui_kit::base::Button as BaseButton;
+use gpui_kit::component::radio::{Radio, RadioGroup};
 use openlogi_core::config::MouseProfileTarget;
 
 use crate::features::pointer::momentum::MomentumPanel;
@@ -295,7 +295,7 @@ mod tests {
     fn mouse_profile_target_choices_update_state_and_respect_failed_saves(cx: &mut TestAppContext) {
         let _locale = LOCALE_LOCK.lock().unwrap();
         cx.update(|cx| {
-            gpui_component::init(cx);
+            gpui_kit::init(cx);
             theme::register_builtin_themes(cx);
         });
 

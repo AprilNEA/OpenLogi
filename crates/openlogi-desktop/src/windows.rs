@@ -28,7 +28,7 @@ use gpui::{
     Pixels, Point, Render, SharedString, Size, Styled as _, Subscription, TitlebarOptions, Window,
     WindowBounds, WindowHandle, WindowOptions, div, px,
 };
-use gpui_component::{ActiveTheme as _, Root, TitleBar};
+use gpui_kit::component::{ActiveTheme as _, Root, TitleBar};
 use openlogi_core::brand::APP_ID;
 use tracing::warn;
 

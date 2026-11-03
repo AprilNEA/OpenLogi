@@ -11,7 +11,7 @@ use openlogi_core::hid::{DeviceRoute, ReceiverBrand};
 #[gpui::test]
 fn config_error_folder_button_opens_from_the_active_window(cx: &mut gpui::TestAppContext) {
     use gpui::{AppContext as _, Modifiers};
-    use gpui_component::Root;
+    use gpui_kit::component::Root;
 
     use super::{AppView, menu};
     use crate::services::{assets::AssetResolver, i18n::LOCALE_LOCK};
@@ -19,7 +19,7 @@ fn config_error_folder_button_opens_from_the_active_window(cx: &mut gpui::TestAp
 
     let _locale = LOCALE_LOCK.lock().unwrap();
     cx.update(|cx| {
-        gpui_component::init(cx);
+        gpui_kit::init(cx);
         crate::ui::theme::register_builtin_themes(cx);
         let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
         let resolver = AssetResolver::new();
@@ -64,13 +64,13 @@ fn main_window_renders_profile_confirmation_dialogs(cx: &mut gpui::TestAppContex
     use std::{cell::Cell, rc::Rc};
 
     use gpui::{AppContext as _, InteractiveElement as _, ParentElement as _, div};
-    use gpui_component::{Root, WindowExt as _};
+    use gpui_kit::component::{Root, WindowExt as _};
 
     use super::AppView;
     use crate::services::assets::AssetResolver;
     use crate::state::{AppState, Sources};
 
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     cx.update(|cx| {
         let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
         let resolver = AssetResolver::new();
@@ -116,7 +116,7 @@ fn main_window_renders_profile_confirmation_dialogs(cx: &mut gpui::TestAppContex
 #[gpui::test]
 fn the_device_rename_dialog_offers_save_and_cancel(cx: &mut gpui::TestAppContext) {
     use gpui::{AppContext as _, Modifiers};
-    use gpui_component::Root;
+    use gpui_kit::component::Root;
 
     use super::{AppView, home::open_rename_dialog};
     use crate::services::{assets::AssetResolver, i18n::LOCALE_LOCK};
@@ -124,7 +124,7 @@ fn the_device_rename_dialog_offers_save_and_cancel(cx: &mut gpui::TestAppContext
 
     let _locale = LOCALE_LOCK.lock().unwrap();
     rust_i18n::set_locale("en");
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     // The dialog slides in on the wall clock, so on a slow runner a redraw
     // between measuring Cancel and clicking it moves the button away from
     // the click. Reduced motion draws the dialog where it comes to rest.
@@ -183,14 +183,14 @@ fn open_device_detail(
     use std::{cell::RefCell, rc::Rc};
 
     use gpui::AppContext as _;
-    use gpui_component::Root;
+    use gpui_kit::component::Root;
 
     use super::AppView;
     use crate::services::assets::AssetResolver;
     use crate::state::{AgentLink, AppState, Sources};
 
     rust_i18n::set_locale("en");
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     cx.update(|cx| {
         let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
         let resolver = AssetResolver::new();
@@ -287,7 +287,7 @@ fn the_pointer_tab_offers_the_smooth_wheel(cx: &mut gpui::TestAppContext) {
 /// the profile bar.
 #[gpui::test]
 fn a_tab_opens_at_its_top_after_another_tab_scrolled(cx: &mut gpui::TestAppContext) {
-    use gpui::{Bounds, Modifiers, Pixels, ScrollDelta, ScrollWheelEvent, point, px, size};
+    use gpui::{Bounds, Modifiers, Pixels, ScrollDelta, ScrollEvent, point, px, size};
 
     use crate::services::i18n::LOCALE_LOCK;
     use crate::state::tests::direct_inventory;
@@ -311,7 +311,7 @@ fn a_tab_opens_at_its_top_after_another_tab_scrolled(cx: &mut gpui::TestAppConte
 
     let ring_top = open_tab(cx, "detail-navigation-ActionsRing").top();
     let pointer = open_tab(cx, "detail-navigation-Pointer");
-    cx.simulate_event(ScrollWheelEvent {
+    cx.simulate_event(ScrollEvent {
         position: point(pointer.left() + px(8.), px(300.)),
         delta: ScrollDelta::Pixels(point(px(0.), px(-5000.))),
         ..Default::default()
@@ -1106,7 +1106,7 @@ fn home_transport_icon_paints_in_its_transport_color(cx: &mut gpui::TestAppConte
     use super::home::transport_icon;
     use crate::ui::theme;
 
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     let pal = cx.update(|cx| theme::palette(cx));
     let routed = |route| DeviceRecord {
         route: Some(route),
@@ -1151,7 +1151,7 @@ fn home_transport_icon_paints_in_its_transport_color(cx: &mut gpui::TestAppConte
 #[gpui::test]
 fn home_grid_cards_share_one_column_width(cx: &mut gpui::TestAppContext) {
     use gpui::{AppContext as _, px, size};
-    use gpui_component::Root;
+    use gpui_kit::component::Root;
 
     use super::AppView;
     use crate::services::{assets::AssetResolver, i18n::LOCALE_LOCK};
@@ -1159,7 +1159,7 @@ fn home_grid_cards_share_one_column_width(cx: &mut gpui::TestAppContext) {
     use crate::state::{AgentLink, AppState, Sources};
 
     let _locale = LOCALE_LOCK.lock().unwrap();
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     cx.update(|cx| {
         let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
         let resolver = AssetResolver::new();
@@ -1668,7 +1668,7 @@ fn open_main_window_with_secure_input(
     use std::rc::Rc;
 
     use gpui::AppContext as _;
-    use gpui_component::Root;
+    use gpui_kit::component::Root;
     use openlogi_core::binding::Action;
 
     use super::AppView;
@@ -1676,7 +1676,7 @@ fn open_main_window_with_secure_input(
     use crate::state::{AgentLink, AppState, Sources};
 
     rust_i18n::set_locale("en");
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     cx.update(|cx| {
         let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
         let resolver = AssetResolver::new();
@@ -1784,7 +1784,7 @@ fn a_key_binding_edit_repaints_the_secure_input_notice(cx: &mut gpui::TestAppCon
 #[gpui::test]
 fn an_unreachable_agent_keeps_the_header_and_offers_retry(cx: &mut gpui::TestAppContext) {
     use gpui::{AppContext as _, Modifiers};
-    use gpui_component::Root;
+    use gpui_kit::component::Root;
     use openlogi_ipc::SecureInput;
 
     use super::AppView;
@@ -1794,7 +1794,7 @@ fn an_unreachable_agent_keeps_the_header_and_offers_retry(cx: &mut gpui::TestApp
 
     let _locale = LOCALE_LOCK.lock().unwrap();
     rust_i18n::set_locale("en");
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     let (commands, mut sent) = tokio::sync::mpsc::unbounded_channel();
     cx.update(|cx| {
         let resolver = AssetResolver::new();
@@ -1863,7 +1863,7 @@ fn an_unreachable_agent_keeps_the_header_and_offers_retry(cx: &mut gpui::TestApp
 #[gpui::test]
 fn the_flow_button_opens_one_flow_window(cx: &mut gpui::TestAppContext) {
     use gpui::{AppContext as _, Modifiers};
-    use gpui_component::Root;
+    use gpui_kit::component::Root;
     use openlogi_ipc::SecureInput;
 
     use super::AppView;
@@ -1874,7 +1874,7 @@ fn the_flow_button_opens_one_flow_window(cx: &mut gpui::TestAppContext) {
     // switched by a parallel test re-lays the header out under it.
     let _locale = LOCALE_LOCK.lock().unwrap();
     cx.update(|cx| {
-        gpui_component::init(cx);
+        gpui_kit::init(cx);
         crate::ui::theme::register_builtin_themes(cx);
         let (commands, _sent) = tokio::sync::mpsc::unbounded_channel();
         let resolver = AssetResolver::new();

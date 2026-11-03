@@ -1,5 +1,5 @@
 use gpui::{
-    AppContext as _, AssetSource, Bounds, Modifiers, ScrollDelta, ScrollWheelEvent, TestAppContext,
+    AppContext as _, AssetSource, Bounds, Modifiers, ScrollDelta, ScrollEvent, TestAppContext,
     point, size,
 };
 use openlogi_core::config::Config;
@@ -63,7 +63,7 @@ fn receiver(name: &str, product_id: u16, uid: Option<&str>) -> ReceiverInfo {
 #[gpui::test]
 fn reopening_keeps_the_selected_receiver_for_retry(cx: &mut TestAppContext) {
     let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     cx.update(theme::register_builtin_themes);
     let mut commands = cx.update(install_state);
     let bolt = receiver("Bolt", 0xc548, Some("00000000AAAABBBB"));
@@ -101,7 +101,7 @@ fn reopening_keeps_the_selected_receiver_for_retry(cx: &mut TestAppContext) {
 #[gpui::test]
 fn a_refused_start_keeps_its_error_and_target_after_empty_snapshots(cx: &mut TestAppContext) {
     let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     cx.update(theme::register_builtin_themes);
     let mut commands = cx.update(install_state);
     let bolt = receiver("Bolt", 0xc548, Some("00000000AAAABBBB"));
@@ -179,7 +179,7 @@ fn an_agent_session_supersedes_a_command_failure_and_can_be_dismissed(cx: &mut T
 #[gpui::test]
 fn changing_receiver_waits_for_cancellation_acknowledgement(cx: &mut TestAppContext) {
     let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     cx.update(theme::register_builtin_themes);
     let mut commands = cx.update(install_state);
     cx.update(|cx| apply_undeliverable(cx, PairingFailure::AlreadyActive));
@@ -203,7 +203,7 @@ fn changing_receiver_waits_for_cancellation_acknowledgement(cx: &mut TestAppCont
 #[gpui::test]
 fn a_recovered_receiver_identity_enables_the_same_open_picker(cx: &mut TestAppContext) {
     let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     cx.update(theme::register_builtin_themes);
     let mut commands = cx.update(install_state);
     let (_, visual) = cx.add_window_view(AddDeviceView::new);
@@ -254,7 +254,7 @@ fn a_recovered_receiver_identity_enables_the_same_open_picker(cx: &mut TestAppCo
 #[gpui::test]
 fn choosing_bolt_and_retrying_keep_the_explicit_target(cx: &mut TestAppContext) {
     let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     cx.update(theme::register_builtin_themes);
     let mut commands = cx.update(install_state);
     let unifying = receiver("Unifying Receiver", 0xc52b, Some("11223344"));
@@ -331,7 +331,7 @@ fn only_identified_receivers_can_be_selected() {
 
 #[gpui::test]
 fn empty_receiver_hotplug_updates_the_picker(cx: &mut TestAppContext) {
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     cx.update(theme::register_builtin_themes);
     let mut commands = cx.update(install_state);
     let (_, cx) = cx.add_window_view(AddDeviceView::new);
@@ -368,7 +368,7 @@ fn empty_receiver_hotplug_updates_the_picker(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn opening_waits_for_a_receiver_choice(cx: &mut TestAppContext) {
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     cx.update(theme::register_builtin_themes);
     let mut commands = cx.update(install_state);
     cx.update(open);
@@ -391,7 +391,7 @@ fn long_device_list() -> Vec<FoundDevice> {
 #[gpui::test]
 fn cancel_stays_in_the_bottom_bar_below_a_long_device_list(cx: &mut TestAppContext) {
     let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     cx.update(theme::register_builtin_themes);
     let mut commands = cx.update(install_state);
     cx.update(|cx| apply_state(cx, Some(PairingPhase::Found(long_device_list()))));
@@ -422,7 +422,7 @@ fn cancel_stays_in_the_bottom_bar_below_a_long_device_list(cx: &mut TestAppConte
 #[gpui::test]
 fn a_long_device_list_scrolls_under_a_scrollbar_on_the_window_edge(cx: &mut TestAppContext) {
     let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     cx.update(theme::register_builtin_themes);
     let _commands = cx.update(install_state);
     cx.update(|cx| apply_state(cx, Some(PairingPhase::Found(long_device_list()))));
@@ -460,7 +460,7 @@ fn a_long_device_list_scrolls_under_a_scrollbar_on_the_window_edge(cx: &mut Test
         "rows keep the same page inset on both sides inside the scroll owner: {bar:?}, {first:?}"
     );
 
-    cx.simulate_event(ScrollWheelEvent {
+    cx.simulate_event(ScrollEvent {
         position: bar.center(),
         delta: ScrollDelta::Pixels(point(px(0.), px(-60.))),
         ..Default::default()
@@ -478,7 +478,7 @@ fn a_long_device_list_scrolls_under_a_scrollbar_on_the_window_edge(cx: &mut Test
 #[gpui::test]
 fn cancel_before_choosing_a_receiver_closes_the_window(cx: &mut TestAppContext) {
     let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     cx.update(theme::register_builtin_themes);
     let mut commands = cx.update(install_state);
     let (_, visual) = cx.add_window_view(AddDeviceView::new);
@@ -497,7 +497,7 @@ fn cancel_before_choosing_a_receiver_closes_the_window(cx: &mut TestAppContext) 
 #[gpui::test]
 fn change_receiver_clears_a_failure_without_an_agent_session(cx: &mut TestAppContext) {
     let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     cx.update(theme::register_builtin_themes);
     let mut commands = cx.update(install_state);
     cx.update(|cx| apply_undeliverable(cx, PairingFailure::WatcherUnavailable));
@@ -580,7 +580,7 @@ impl Render for PointerPasskeyHarness {
 #[gpui::test]
 fn pointer_passkey_panel_renders(cx: &mut TestAppContext) {
     let pal = cx.update(|cx| {
-        gpui_component::init(cx);
+        gpui_kit::init(cx);
         theme::register_builtin_themes(cx);
         theme::palette(cx)
     });
@@ -599,7 +599,7 @@ fn pointer_passkey_panel_renders(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn escape_cancels_a_search_and_closes_the_idle_picker(cx: &mut TestAppContext) {
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     cx.update(theme::register_builtin_themes);
     cx.update(crate::app::menu::install);
     let mut commands = cx.update(install_state);

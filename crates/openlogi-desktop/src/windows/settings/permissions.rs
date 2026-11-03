@@ -14,7 +14,7 @@ use super::{IconName, Palette, SettingPage};
 use crate::ui::theme::FocusRingStyle as _;
 use crate::ui::theme::Typography as _;
 #[cfg(target_os = "macos")]
-use gpui_base::Button as BaseButton;
+use gpui_kit::base::Button as BaseButton;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use openlogi_permissions as permissions;
 
@@ -107,7 +107,7 @@ const DEVICE_ACCESS_GUIDE_URL: &str =
 fn input_device_access_field(cx: &App) -> gpui::Div {
     let pal = theme::palette(cx);
     let status = permissions::input_device_access();
-    let field = gpui_component::v_flex()
+    let field = gpui_kit::component::v_flex()
         .w_full()
         .gap_2()
         .child(status_badge(status, pal));
@@ -148,12 +148,14 @@ fn input_monitoring_item() -> SettingItem {
                 Some(_) => PermissionStatus::Denied,
                 None => PermissionStatus::Unknown,
             };
-            let field = gpui_component::v_flex().gap_1().child(permission_field(
-                "perm-input-monitoring",
-                badge,
-                Permission::InputMonitoring,
-                cx,
-            ));
+            let field = gpui_kit::component::v_flex()
+                .gap_1()
+                .child(permission_field(
+                    "perm-input-monitoring",
+                    badge,
+                    Permission::InputMonitoring,
+                    cx,
+                ));
             let pal = theme::palette(cx);
             if stalled {
                 field.child(

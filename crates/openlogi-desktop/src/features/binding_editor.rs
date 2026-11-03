@@ -7,7 +7,7 @@ use gpui::{
     StatefulInteractiveElement as _, Styled, Window, div, prelude::FluentBuilder as _, px, rgb,
     svg,
 };
-use gpui_component::{
+use gpui_kit::component::{
     Icon, IconName, Selectable as _, button::Button, h_flex, input::InputState,
     scroll::ScrollableElement, v_flex,
 };

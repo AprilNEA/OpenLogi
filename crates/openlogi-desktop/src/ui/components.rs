@@ -10,8 +10,8 @@ use gpui::{
     ParentElement, Pixels, RenderOnce, Role, SharedString, Stateful, StatefulInteractiveElement,
     Styled, Window, div, prelude::FluentBuilder as _, px, rgb,
 };
-use gpui_base::Button as BaseButton;
-use gpui_component::{
+use gpui_kit::base::Button as BaseButton;
+use gpui_kit::component::{
     Disableable, Icon, IconName, Selectable, Sizable, Size,
     button::ButtonVariants as _,
     dialog::{Cancel, Confirm, DialogFooter},
@@ -35,8 +35,8 @@ use super::theme::{self, ACCENT_BLUE, SelectableStyle as _, Typography as _};
 /// pin [`theme::CONTROL_H`] explicitly — construct them through these
 /// helpers; a bare `.small()` on one is a bug. Ghost and link affordances,
 /// pills, and icon-only toggles stay on the stock ladder on purpose.
-pub(crate) fn control_button(id: impl Into<ElementId>) -> gpui_component::button::Button {
-    gpui_component::button::Button::new(id)
+pub(crate) fn control_button(id: impl Into<ElementId>) -> gpui_kit::component::button::Button {
+    gpui_kit::component::button::Button::new(id)
         .small()
         .h(px(theme::CONTROL_H))
 }
@@ -633,7 +633,7 @@ impl RenderOnce for PresetChip {
 /// pill keeps the stock disabled look, because there is nothing to choose.
 #[derive(IntoElement)]
 pub(crate) struct Pill {
-    button: gpui_component::button::Button,
+    button: gpui_kit::component::button::Button,
     selected: bool,
     disabled: bool,
 }
@@ -641,7 +641,7 @@ pub(crate) struct Pill {
 impl Pill {
     pub(crate) fn new(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Self {
         Self {
-            button: gpui_component::button::Button::new(id)
+            button: gpui_kit::component::button::Button::new(id)
                 .compact()
                 .label(label),
             selected: false,
@@ -659,7 +659,7 @@ impl Pill {
     }
 
     /// The stock button, with the house selected look on an enabled selection.
-    fn into_button(self, pal: theme::Palette) -> gpui_component::button::Button {
+    fn into_button(self, pal: theme::Palette) -> gpui_kit::component::button::Button {
         let marked = self.selected && !self.disabled;
         self.button
             .selected(self.selected)

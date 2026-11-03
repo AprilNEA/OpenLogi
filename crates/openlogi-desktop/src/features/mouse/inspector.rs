@@ -8,8 +8,8 @@ use gpui::{
     Context, Entity, FocusHandle, InteractiveElement, IntoElement, ParentElement, Role,
     StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px, rgb, svg,
 };
-use gpui_base::Button as BaseButton;
-use gpui_component::{
+use gpui_kit::base::Button as BaseButton;
+use gpui_kit::component::{
     Disableable as _, Icon, IconName, Selectable as _, Sizable as _, button::Button, h_flex,
     input::InputState, scroll::ScrollableElement as _, v_flex,
 };

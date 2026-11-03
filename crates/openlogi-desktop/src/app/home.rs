@@ -15,8 +15,8 @@ use gpui::{
     IntoElement, ParentElement, SharedString, StatefulInteractiveElement as _, Styled, Svg, Window,
     canvas, div, fill, img, point, prelude::FluentBuilder as _, px, rgb, svg,
 };
-use gpui_base::Button as BaseButton;
-use gpui_component::{
+use gpui_kit::base::Button as BaseButton;
+use gpui_kit::component::{
     Icon, IconName, Sizable as _, WindowExt as _,
     button::{Button, ButtonVariant, ButtonVariants as _},
     dialog::DialogButtonProps,

@@ -6,8 +6,8 @@ use gpui::{
     SharedString, Size, StatefulInteractiveElement as _, Styled, Window, WindowOptions, div,
     prelude::FluentBuilder as _, px, rems,
 };
-use gpui_base::Button as BaseButton;
-use gpui_component::{
+use gpui_kit::base::Button as BaseButton;
+use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Root, Selectable as _, Sizable as _, Theme,
     ThemeMode, ThemeRegistry,
     button::{Button, ButtonVariants as _},
@@ -34,9 +34,9 @@ const TITLE: &str = "OpenLogi Component Gallery";
 
 /// Run the isolated development gallery application.
 pub(crate) fn run() {
-    let app = gpui_platform::application().with_assets(crate::app_assets::AppAssets);
+    let app = gpui_kit::application().with_assets(crate::app_assets::AppAssets);
     app.run(|cx| {
-        gpui_component::init(cx);
+        gpui_kit::init(cx);
         theme::register_builtin_themes(cx);
         install_openlogi_themes(cx);
 
@@ -674,7 +674,7 @@ mod tests {
 
     #[gpui::test]
     fn gallery_renders_without_application_state(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
+        cx.update(gpui_kit::init);
         cx.update(theme::register_builtin_themes);
         cx.update(install_openlogi_themes);
         let (view, cx) = cx.add_window_view(|_, cx| ComponentGallery::new(cx));

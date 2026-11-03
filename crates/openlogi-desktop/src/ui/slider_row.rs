@@ -16,7 +16,7 @@ use gpui::{
     AnyElement, App, Div, FontFeatures, InteractiveElement as _, IntoElement, ParentElement,
     RenderOnce, SharedString, Styled, Window, div, px,
 };
-use gpui_component::{h_flex, v_flex};
+use gpui_kit::component::{h_flex, v_flex};
 
 use super::theme::{self, Palette, Typography as _};
 
@@ -202,7 +202,7 @@ mod tests {
     /// neither the label nor the slider.
     #[gpui::test]
     fn the_value_column_keeps_the_widest_values_width_on_one_line(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
+        cx.update(gpui_kit::init);
         let widest = value_bounds(
             Row {
                 value: "100",

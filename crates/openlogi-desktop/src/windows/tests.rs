@@ -13,7 +13,7 @@ use openlogi_core::config::Config;
 fn settings_commands_reuse_the_live_window_and_reopen_after_close(cx: &mut TestAppContext) {
     let _locale = LOCALE_LOCK.lock().unwrap();
     cx.update(|cx| {
-        gpui_component::init(cx);
+        gpui_kit::init(cx);
         crate::ui::theme::register_builtin_themes(cx);
         let (commands, _) = tokio::sync::mpsc::unbounded_channel();
         let state = cx.new(|_| {

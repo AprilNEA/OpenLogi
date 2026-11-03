@@ -4,9 +4,9 @@ use gpui::{
     MouseButton, NavigationDirection, ParentElement, Render, Styled, Subscription, Window, div,
     prelude::FluentBuilder as _, rgb,
 };
-use gpui_base::Button as BaseButton;
-use gpui_component::{
-    Icon, IconName, Root, TitleBar,
+use gpui_kit::base::Button as BaseButton;
+use gpui_kit::component::{
+    Icon, IconName, TitleBar,
     button::{Button, ButtonVariants as _},
     v_flex,
 };
@@ -15,7 +15,7 @@ use openlogi_core::device::DeviceKind;
 use openlogi_ipc::InventoryHealth;
 use tracing::info;
 
-use self::menu::{APP_KEY_CONTEXT, CloseWindow, Minimize, NavigateBack, Zoom};
+use self::menu::{APP_KEY_CONTEXT, NavigateBack};
 use crate::features::action_ring::ActionRingPanel;
 use crate::features::audio::AudioPanel;
 use crate::features::camera::controls::CameraControlsPanel;
@@ -582,16 +582,7 @@ fn app_title_bar(cx: &App) -> impl IntoElement {
 
 impl Render for AppView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let content = self.render_content(window, cx);
-        // Root owns overlay state but the application must mount its layers.
-        // Keep them present across connecting, permission, and error screens too.
-        div()
-            .relative()
-            .size_full()
-            .child(content)
-            .children(Root::render_sheet_layer(window, cx))
-            .children(Root::render_dialog_layer(window, cx))
-            .children(Root::render_notification_layer(window, cx))
+        self.render_content(window, cx)
     }
 }
 
@@ -604,9 +595,6 @@ impl AppView {
         theme::apply_ui_scale(window, cx);
         let pal = theme::palette(cx);
 
-        // Every frame — including the pre-connection and error frames — hangs
-        // off this root, so the window actions (⌘W / ⌘M / zoom) work from the
-        // first frame on, not only once the full UI is up.
         let root = v_flex()
             .size_full()
             .bg(pal.page)
@@ -614,9 +602,6 @@ impl AppView {
             .tab_group()
             .track_focus(&self.focus_handle)
             .key_context(APP_KEY_CONTEXT)
-            .on_action(|_: &CloseWindow, window, _| window.remove_window())
-            .on_action(|_: &Minimize, window, _| window.minimize_window())
-            .on_action(|_: &Zoom, window, _| window.zoom_window())
             // Drawn only where the compositor left the chrome to us — as the
             // first row of every frame, including the pre-connection and error
             // frames, so it is present from the first frame on. A compositor

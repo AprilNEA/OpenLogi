@@ -34,8 +34,8 @@ use gpui::{
     SharedString, StatefulInteractiveElement as _, Styled, Subscription, Window, canvas, div, hsla,
     point, prelude::FluentBuilder as _, px, rgb, svg,
 };
-use gpui_component::tooltip::Tooltip;
-use gpui_component::{
+use gpui_kit::component::tooltip::Tooltip;
+use gpui_kit::component::{
     Selectable as _, h_flex, input::InputState, scroll::ScrollableElement as _, v_flex,
 };
 use openlogi_core::binding::{Action, ActionRingIcon, ButtonId, KeypadPage, WorkflowStep};
@@ -1204,9 +1204,11 @@ impl FunctionRowView {
                                 .flex_none()
                                 .size_3()
                                 .child(
-                                    gpui_component::Icon::new(gpui_component::IconName::Check)
-                                        .size_3()
-                                        .text_color(rgb(ACCENT_BLUE)),
+                                    gpui_kit::component::Icon::new(
+                                        gpui_kit::component::IconName::Check,
+                                    )
+                                    .size_3()
+                                    .text_color(rgb(ACCENT_BLUE)),
                                 ),
                         )
                     })
@@ -1320,9 +1322,11 @@ fn panel_action_rows(
                         )
                         .when(selected, |s| {
                             s.child(
-                                gpui_component::Icon::new(gpui_component::IconName::Check)
-                                    .size_3()
-                                    .text_color(rgb(ACCENT_BLUE)),
+                                gpui_kit::component::Icon::new(
+                                    gpui_kit::component::IconName::Check,
+                                )
+                                .size_3()
+                                .text_color(rgb(ACCENT_BLUE)),
                             )
                         })
                         .on_click(move |_ev, _window, cx| {

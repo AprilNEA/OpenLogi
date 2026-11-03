@@ -12,7 +12,7 @@ use gpui::{
     AnyElement, Context, Entity, IntoElement, ParentElement, Render, Styled, Subscription, Window,
     div, px,
 };
-use gpui_component::{
+use gpui_kit::component::{
     Icon, IconName, Selectable as _, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,

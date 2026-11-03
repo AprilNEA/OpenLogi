@@ -9,8 +9,8 @@ use gpui::{
     Role, SharedString, StatefulInteractiveElement as _, Styled, Toggled, div,
     prelude::FluentBuilder as _, px, rgb,
 };
-use gpui_base::Button as BaseButton;
-use gpui_component::{IconName, Selectable as _, h_flex, slider::Slider};
+use gpui_kit::base::Button as BaseButton;
+use gpui_kit::component::{IconName, Selectable as _, h_flex, slider::Slider};
 use openlogi_camera::CameraControl;
 
 use super::{BUILTIN_PROFILES, CameraControlsPanel, ControlSlider};

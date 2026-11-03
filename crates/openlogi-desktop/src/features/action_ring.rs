@@ -9,8 +9,8 @@ use gpui::{
     ParentElement, Render, ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled,
     Subscription, Window, div, prelude::FluentBuilder as _, px, rgb, svg,
 };
-use gpui_base::Button as BaseButton;
-use gpui_component::{
+use gpui_kit::base::Button as BaseButton;
+use gpui_kit::component::{
     Icon, IconName, Selectable as _,
     button::{Button, ButtonGroup},
     h_flex,

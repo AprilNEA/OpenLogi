@@ -6,8 +6,8 @@ use gpui::{
     Context, InteractiveElement, IntoElement, ParentElement, Rems, Role, SharedString,
     StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px, rems,
 };
-use gpui_base::Button as BaseButton;
-use gpui_component::{
+use gpui_kit::base::Button as BaseButton;
+use gpui_kit::component::{
     Disableable as _, Icon, IconName, Selectable as _, Sizable as _,
     button::{Button, ButtonGroup},
     description_list::{DescriptionItem, DescriptionList},
@@ -337,7 +337,7 @@ fn tab_body(
     tab: DetailTab,
     width: ContentWidth,
     content: impl IntoElement,
-) -> gpui_component::scroll::Scrollable<gpui::Div> {
+) -> gpui_kit::component::scroll::Scrollable<gpui::Div> {
     v_flex()
         .flex_1()
         .w_full()
@@ -1264,7 +1264,7 @@ mod tests {
     };
 
     use gpui::{AppContext as _, Modifiers, VisualTestContext};
-    use gpui_component::WindowExt;
+    use gpui_kit::component::WindowExt;
     use openlogi_core::config::{Config, MomentumScrolling};
 
     use super::{
@@ -1309,7 +1309,7 @@ mod tests {
         // row's right edge, out of the Configuration card.
         let _locale = LOCALE_LOCK.lock().unwrap();
         rust_i18n::set_locale("fr");
-        cx.update(gpui_component::init);
+        cx.update(gpui_kit::init);
         let (_view, cx) = cx.add_window_view(|_, _| DeviceEnabledRowHost);
         cx.simulate_resize(size(px(800.), px(600.)));
         cx.update(|window, cx| window.draw(cx).clear(cx));
@@ -1357,7 +1357,7 @@ mod tests {
         link_hires: bool,
         config: Config,
     ) -> &mut VisualTestContext {
-        cx.update(gpui_component::init);
+        cx.update(gpui_kit::init);
         cx.update(|cx| {
             let resolver = AssetResolver::new();
             let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -1378,7 +1378,7 @@ mod tests {
         // Rooted, so the row's confirmation dialog has somewhere to open.
         let (_view, cx) = cx.add_window_view(move |window, cx| {
             let host = cx.new(|_| SmoothWheelRowHost { hires });
-            gpui_component::Root::new(host, window, cx)
+            gpui_kit::component::Root::new(host, window, cx)
         });
         cx.simulate_resize(size(px(800.), px(600.)));
         cx.update(|window, cx| window.draw(cx).clear(cx));

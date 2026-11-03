@@ -17,7 +17,7 @@ pub(super) use gpui::{
     StatefulInteractiveElement, Styled, Subscription, Window, div, img, prelude::FluentBuilder, px,
     rgb,
 };
-pub(super) use gpui_component::{
+pub(super) use gpui_kit::component::{
     ActiveTheme, Disableable, Icon, IconName, IndexPath, Selectable, Sizable, TITLE_BAR_HEIGHT,
     Theme, ThemeColor, ThemeMode, ThemeRegistry,
     button::{Button, ButtonGroup, ButtonVariants},
@@ -37,7 +37,6 @@ pub(super) use openlogi_core::config::{
     Appearance, AssetSourcePreference, ThumbwheelSensitivity, UiScale, VerticalScrollSensitivity,
 };
 
-pub(super) use crate::app::menu::{CloseWindow, Minimize, Zoom};
 use crate::features::pointer::momentum::{MomentumPanel, MomentumScope};
 pub(super) use crate::services::assets::sync::{AssetCommand, AssetControl};
 pub(super) use crate::state::{AppState, StateEvent};
@@ -495,9 +494,6 @@ impl Render for SettingsView {
             .bg(pal.page)
             .text_color(pal.text_primary)
             .track_focus(&self.focus_handle)
-            .on_action(|_: &CloseWindow, window, _| window.remove_window())
-            .on_action(|_: &Minimize, window, _| window.minimize_window())
-            .on_action(|_: &Zoom, window, _| window.zoom_window())
             // Only where the compositor left the chrome to us, and as an
             // absolute overlay (with matching top padding) rather than a
             // flex-column row — the `Settings` sidebar uses `h_resizable`

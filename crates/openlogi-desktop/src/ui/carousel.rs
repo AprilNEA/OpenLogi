@@ -5,7 +5,7 @@
 //! carousel instead of being clipped hard. Selecting an item scrolls it fully
 //! into view; arrows beside the row navigate the controlled selection.
 //!
-//! Controlled, in the same spirit as [`gpui_component::tab::TabBar`]: the caller
+//! Controlled, in the same spirit as [`gpui_kit::component::tab::TabBar`]: the caller
 //! owns the selected index ([`Carousel::selected`]) and item count
 //! ([`Carousel::len`]), supplies items through [`Carousel::render_item`] (invoked
 //! per slot with whether it is selected), and reacts to
@@ -28,7 +28,7 @@ use gpui::{
     StatefulInteractiveElement as _, Styled, Window, canvas, div, fill, linear_color_stop,
     linear_gradient, point, prelude::FluentBuilder as _, rems,
 };
-use gpui_component::{
+use gpui_kit::component::{
     Disableable as _, IconName, Sizable as _, Size,
     button::{Button, ButtonVariants as _},
     h_flex, v_flex,
@@ -346,7 +346,7 @@ mod tests {
         }
     }
 
-    fn activate_key(cx: &mut gpui::VisualTestContext, key: &str) {
+    fn activate_key(cx: &mut gpui::VisualTestContext, key: &'static str) {
         let keystroke = Keystroke::parse(key).unwrap();
         cx.simulate_event(KeyDownEvent {
             keystroke: keystroke.clone(),
@@ -358,7 +358,7 @@ mod tests {
 
     #[gpui::test]
     fn carousel_arrows_are_controlled_and_instance_local(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
+        cx.update(gpui_kit::init);
         let selections = Rc::new(RefCell::new(Vec::new()));
         let (_, cx) = cx.add_window_view({
             let selections = selections.clone();
@@ -380,7 +380,7 @@ mod tests {
 
     #[gpui::test]
     fn carousel_clamps_selection_before_navigating(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
+        cx.update(gpui_kit::init);
         let selections = Rc::new(RefCell::new(Vec::new()));
         let (_, cx) = cx.add_window_view({
             let selections = selections.clone();
