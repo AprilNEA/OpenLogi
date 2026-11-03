@@ -1594,6 +1594,14 @@ impl Agent for MockAgent {
     async fn stop_flow_pairing(self, _: Context) {
         self.stop_flow().await;
     }
+
+    async fn action_ring_unhover(
+        self,
+        _: Context,
+        _session_id: u64,
+    ) -> Result<(), ActionRingCommandError> {
+        Err(ActionRingCommandError::SessionNotFound)
+    }
 }
 
 #[cfg(test)]

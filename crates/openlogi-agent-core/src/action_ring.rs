@@ -38,6 +38,14 @@ const SESSION_GRACE: Duration = Duration::from_secs(3);
 /// session opened.
 pub const SESSION_LIFETIME: Duration = DISPLAY_LIFETIME.saturating_add(SESSION_GRACE);
 
+/// How long the trigger must stay down after the ring opens for its release
+/// to choose.
+///
+/// A shorter press is a click: the ring stays open for the pointer to pick a
+/// slot, so a hand still moving the mouse as it clicks cannot run an action
+/// it only passed over.
+pub const HOLD_TO_CHOOSE: Duration = Duration::from_millis(250);
+
 /// Immutable input used to open one ring session.
 pub struct ActionRingSessionSpec {
     /// Config key of the device whose control opened the ring.
@@ -67,13 +75,46 @@ pub struct ActionRingHover {
     pub haptic_route: Option<DeviceRoute>,
 }
 
+/// What releasing the trigger that opened the ring did to it.
+pub enum ActionRingRelease {
+    /// Nothing closed: the press was a click, which leaves the ring open for
+    /// the pointer, or no ring was waiting on a held trigger.
+    Kept,
+    /// Held with no slot highlighted, so the ring closed without an action.
+    Cancelled {
+        /// The session that closed.
+        session_id: u64,
+    },
+    /// Held over a slot, so the ring closed and that slot's action runs.
+    Activated {
+        /// The session that closed.
+        session_id: u64,
+        /// The action to run.
+        activation: ActionRingActivation,
+    },
+}
+
 struct Session {
     invocation: ActionRingInvocation,
     device_key: String,
     haptic_route: Option<DeviceRoute>,
     actions: BTreeMap<ActionRingSlot, Action>,
     hovered: Option<ActionRingSlot>,
+    /// The trigger that opened this ring has not been released yet.
+    trigger_held: bool,
     opened_at: Instant,
+}
+
+impl Session {
+    /// Close this session on `slot`, or `None` when the slot is empty.
+    fn activate(mut self, slot: ActionRingSlot) -> Option<ActionRingActivation> {
+        let action = self.actions.remove(&slot)?;
+        Some(ActionRingActivation {
+            device_key: self.device_key,
+            action,
+            haptic_route: self.haptic_route,
+        })
+    }
 }
 
 #[derive(Default)]
@@ -161,6 +202,7 @@ impl ActionRingManager {
             haptic_route: spec.haptic_route,
             actions,
             hovered: None,
+            trigger_held: true,
             opened_at: Instant::now(),
         });
         self.publish(&state);
@@ -256,6 +298,15 @@ impl ActionRingManager {
         }))
     }
 
+    /// Record that the pointer left every slot, so releasing the held trigger
+    /// now cancels rather than choosing the slot it last passed over.
+    pub fn unhover(&self, session_id: u64) -> Result<(), ActionRingCommandError> {
+        let mut state = self.state();
+        self.expire_and_publish(&mut state);
+        state.active_session(session_id)?.hovered = None;
+        Ok(())
+    }
+
     /// Consume a session and return the snapshotted action for `slot`.
     pub fn activate(
         &self,
@@ -271,18 +322,43 @@ impl ActionRingManager {
         {
             return Err(ActionRingCommandError::SlotEmpty);
         }
-        let Some(mut session) = state.active.take() else {
+        let Some(session) = state.active.take() else {
             return Err(ActionRingCommandError::SessionNotFound);
         };
         self.publish(&state);
-        let Some(action) = session.actions.remove(&slot) else {
-            return Err(ActionRingCommandError::SlotEmpty);
+        session
+            .activate(slot)
+            .ok_or(ActionRingCommandError::SlotEmpty)
+    }
+
+    /// The trigger that opened the showing ring was released.
+    ///
+    /// Released within [`HOLD_TO_CHOOSE`] it was a click, and the ring stays
+    /// open. Held longer, the release chooses: the highlighted slot runs, and
+    /// with none highlighted the ring closes. Only the first release after a
+    /// ring opens counts.
+    pub fn release(&self) -> ActionRingRelease {
+        let mut state = self.state();
+        self.expire_and_publish(&mut state);
+        let Some(session) = state.active.as_mut().filter(|session| session.trigger_held) else {
+            return ActionRingRelease::Kept;
         };
-        Ok(ActionRingActivation {
-            device_key: session.device_key,
-            action,
-            haptic_route: session.haptic_route,
-        })
+        session.trigger_held = false;
+        if session.opened_at.elapsed() < HOLD_TO_CHOOSE {
+            return ActionRingRelease::Kept;
+        }
+        let Some(session) = state.active.take() else {
+            return ActionRingRelease::Kept;
+        };
+        self.publish(&state);
+        let session_id = session.invocation.session_id;
+        match session.hovered.and_then(|slot| session.activate(slot)) {
+            Some(activation) => ActionRingRelease::Activated {
+                session_id,
+                activation,
+            },
+            None => ActionRingRelease::Cancelled { session_id },
+        }
     }
 
     /// Cancel `session_id` if it is still active.
@@ -419,6 +495,72 @@ mod tests {
             manager.hover(invocation.session_id, ActionRingSlot::Top),
             Ok(None)
         );
+    }
+
+    /// A click on the trigger, even one that ends with the pointer over a
+    /// slot, leaves the ring open; a later release does not reach it either.
+    #[tokio::test(start_paused = true)]
+    async fn a_click_on_the_trigger_leaves_the_ring_open() {
+        let manager = ActionRingManager::default();
+        let invocation = manager.begin(spec());
+        manager
+            .hover(invocation.session_id, ActionRingSlot::Right)
+            .expect("the open session must take a hover");
+        tokio::time::advance(HOLD_TO_CHOOSE.saturating_sub(Duration::from_millis(1))).await;
+
+        assert!(matches!(manager.release(), ActionRingRelease::Kept));
+        tokio::time::advance(HOLD_TO_CHOOSE).await;
+        assert!(
+            matches!(manager.release(), ActionRingRelease::Kept),
+            "only the release of the press that opened the ring chooses"
+        );
+        assert!(manager.is_showing());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn releasing_a_held_trigger_runs_the_highlighted_slot() {
+        let manager = ActionRingManager::default();
+        let mut ring = manager.subscribe();
+        let invocation = manager.begin(spec());
+        ring.borrow_and_update();
+        manager
+            .hover(invocation.session_id, ActionRingSlot::Top)
+            .expect("the open session must take a hover");
+        manager
+            .hover(invocation.session_id, ActionRingSlot::Right)
+            .expect("the open session must take a hover");
+        tokio::time::advance(HOLD_TO_CHOOSE).await;
+
+        let ActionRingRelease::Activated {
+            session_id,
+            activation,
+        } = manager.release()
+        else {
+            panic!("a held release over a slot must run it");
+        };
+        assert_eq!(session_id, invocation.session_id);
+        assert_eq!(activation.action, Action::Paste, "the last slot hovered");
+        assert_eq!(ring.borrow_and_update().invocation, None);
+    }
+
+    /// Back over the centre after passing a slot, a held release cancels.
+    #[tokio::test(start_paused = true)]
+    async fn releasing_a_held_trigger_over_no_slot_cancels() {
+        let manager = ActionRingManager::default();
+        let invocation = manager.begin(spec());
+        manager
+            .hover(invocation.session_id, ActionRingSlot::Top)
+            .expect("the open session must take a hover");
+        manager
+            .unhover(invocation.session_id)
+            .expect("the open session must take an unhover");
+        tokio::time::advance(HOLD_TO_CHOOSE).await;
+
+        assert!(matches!(
+            manager.release(),
+            ActionRingRelease::Cancelled { session_id } if session_id == invocation.session_id
+        ));
+        assert!(!manager.is_showing());
     }
 
     #[tokio::test]

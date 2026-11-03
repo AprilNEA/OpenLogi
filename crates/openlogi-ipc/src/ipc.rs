@@ -177,7 +177,10 @@ pub use succession::Identity;
 ///      `Agent::{read_flow_identity, start_flow_pairing, pair_flow_peer,
 ///      confirm_flow_pairing, cancel_flow_pairing, stop_flow_pairing}`
 ///      appended after those — pairing another computer for Flow.
-pub const PROTOCOL_VERSION: u32 = 44;
+/// v45: `Agent::action_ring_unhover` appended — the ring's held trigger
+///      chooses on release, so the overlay reports the pointer leaving every
+///      slot as well as entering one.
+pub const PROTOCOL_VERSION: u32 = 45;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -1212,4 +1215,8 @@ pub trait Agent {
     async fn cancel_flow_pairing() -> Result<(), FlowPairingCommandError>;
     /// Close pairing, cancelling an attempt in progress.
     async fn stop_flow_pairing();
+    /// Report that the pointer left every slot of the ring, so releasing the
+    /// held trigger cancels instead of choosing the slot last reported by
+    /// [`Agent::action_ring_hover`].
+    async fn action_ring_unhover(session_id: u64) -> Result<(), ActionRingCommandError>;
 }
