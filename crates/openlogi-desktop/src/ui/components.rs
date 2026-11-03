@@ -20,6 +20,7 @@ use gpui_component::{
     searchable_list::SearchableListDelegate,
     select::{Select, SelectState},
     switch::Switch,
+    tooltip::Tooltip,
     v_flex,
 };
 
@@ -538,15 +539,18 @@ impl RenderOnce for ProfileTab {
                 tab.on_click(move |event, window, cx| handler(event, window, cx))
             })
             .when_some(self.delete, |tab, (id, handler)| {
+                let remove = tr!("common.remove_named_item", name => label.to_string());
                 tab.child(
                     BaseButton::new(id)
-                        .accessibility_label(
-                            tr!("common.remove_named_item", name => label.to_string()),
-                        )
-                        .px_0p5()
+                        .accessibility_label(remove.clone())
+                        .tooltip(move |window, cx| Tooltip::new(remove.clone()).build(window, cx))
+                        .size_5()
+                        .flex()
+                        .items_center()
+                        .justify_center()
                         .rounded_full()
                         .text_color(pal.text_muted)
-                        .hover(|style| style.text_color(pal.text_primary))
+                        .hover(|style| style.text_color(pal.text_primary).bg(pal.control_hover))
                         .focus_visible(move |style| style.focus_ring(pal))
                         .child(Icon::new(IconName::Close).size_3())
                         .on_click(move |event, window, cx| {

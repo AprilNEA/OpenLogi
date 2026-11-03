@@ -344,6 +344,7 @@ const CHIP_H: f32 = 28.;
 /// the device and updates `AppState.dpi`; the small × removes the preset.
 fn preset_chip(idx: usize, value: Dpi, active: bool, presets: &[Dpi]) -> impl IntoElement {
     let presets_for_remove: Vec<Dpi> = presets.to_vec();
+    let remove_label = tr!("common.remove_named_item", name => format!("{value} DPI"));
     PresetChip::new(("dpi-preset-chip", idx))
         .selected(active)
         .child(
@@ -369,9 +370,11 @@ fn preset_chip(idx: usize, value: Dpi, active: bool, presets: &[Dpi]) -> impl In
         )
         .child(
             Button::new(("dpi-preset-remove", idx))
-                .xsmall()
+                .small()
                 .ghost()
                 .icon(IconName::Close)
+                .accessibility_label(remove_label.clone())
+                .tooltip(remove_label)
                 .on_click(move |_event, _window, cx| {
                     let mut next = presets_for_remove.clone();
                     if idx < next.len() {

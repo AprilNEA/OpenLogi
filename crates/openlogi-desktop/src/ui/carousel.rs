@@ -24,9 +24,9 @@ use std::rc::Rc;
 
 use gpui::{
     AnyElement, App, Bounds, ElementId, Hsla, InteractiveElement as _, IntoElement,
-    ParentElement as _, Rems, RenderOnce, ScrollHandle, StatefulInteractiveElement as _, Styled,
-    Window, canvas, div, fill, linear_color_stop, linear_gradient, point,
-    prelude::FluentBuilder as _, rems,
+    ParentElement as _, Rems, RenderOnce, ScrollHandle, SharedString,
+    StatefulInteractiveElement as _, Styled, Window, canvas, div, fill, linear_color_stop,
+    linear_gradient, point, prelude::FluentBuilder as _, rems,
 };
 use gpui_component::{
     Disableable as _, IconName, Sizable as _, Size,
@@ -201,6 +201,7 @@ impl Carousel {
                     this.child(arrow(
                         (id.clone(), "previous").into(),
                         IconName::ChevronLeft,
+                        tr!("common.previous"),
                         selected.saturating_sub(1),
                         selected == 0,
                         Size::Large,
@@ -219,6 +220,7 @@ impl Carousel {
                     this.child(arrow(
                         (id.clone(), "next").into(),
                         IconName::ChevronRight,
+                        tr!("common.next"),
                         (selected + 1).min(len - 1),
                         selected + 1 >= len,
                         Size::Large,
@@ -291,6 +293,7 @@ fn edge_fades(
 fn arrow(
     id: ElementId,
     icon: IconName,
+    label: SharedString,
     target: usize,
     disabled: bool,
     size: Size,
@@ -298,6 +301,8 @@ fn arrow(
 ) -> impl IntoElement {
     Button::new(id)
         .icon(icon)
+        .accessibility_label(label.clone())
+        .tooltip(label)
         .ghost()
         .with_size(size)
         .disabled(disabled)
