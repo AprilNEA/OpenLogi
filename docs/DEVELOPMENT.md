@@ -555,10 +555,15 @@ The Environment IDs are not secrets; they are the repository variables
 environment secret shadows the repository secret of the same name, so a job
 sees the release token only inside the `release` GitHub environment, and a job
 outside it that asks for the release Environment fails in `op run` with the
-automation token. The `release` GitHub environment admits only `v*` tag refs
-and requires a review, so a branch dispatch with `sign` fails before any
-secret is read, and each tag run pauses twice for approval: once when the
-build legs reach the environment, once when `publish` does. The Azure
+automation token. The `release` GitHub environment admits only `v*` tag refs,
+so a branch dispatch with `sign` fails before any secret is read. It requires
+no review: the review lives in the separate `release-approval` environment,
+which holds no secrets, admits only `v*` tags, and requires a reviewer. The
+`version` job enters it, and every signing and publishing job needs `version`,
+so each tag run pauses once for approval, before anything builds. A review on
+`release` itself would pause every job that enters it as it becomes ready —
+macOS and Windows EXE together, then Windows MSI after the EXEs, then
+`publish` — so keep it off there. The Azure
 federated credential is bound to the environment
 (`repo:AprilNEA/OpenLogi:environment:release`), which is why the Windows jobs
 were in it first.
