@@ -520,3 +520,29 @@ fn pointer_passkey_panel_renders(cx: &mut TestAppContext) {
     assert!(bounds.size.width > gpui::px(0.));
     assert!(bounds.size.height > gpui::px(0.));
 }
+
+#[gpui::test]
+fn escape_cancels_a_search_and_closes_the_idle_picker(cx: &mut TestAppContext) {
+    cx.update(gpui_component::init);
+    cx.update(theme::register_builtin_themes);
+    cx.update(crate::app::menu::install);
+    let mut commands = cx.update(install_state);
+    cx.update(|cx| apply_state(cx, Some(PairingPhase::Searching)));
+    cx.update(open);
+    let handle = cx.update(|cx| cx.global::<windows::WindowRegistry>().add_device.unwrap());
+    let mut visual = gpui::VisualTestContext::from_window(handle.into(), cx);
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+
+    visual.simulate_keystrokes("escape");
+    assert!(matches!(commands.try_recv(), Ok(Command::CancelPairing(_))));
+
+    visual.update(|_, cx| {
+        apply_state(cx, None);
+        apply_cancelled(cx);
+    });
+    visual.simulate_keystrokes("escape");
+    assert!(
+        cx.update(|cx| cx.windows().is_empty()),
+        "Escape on the receiver picker closes the window, as Cancel does"
+    );
+}

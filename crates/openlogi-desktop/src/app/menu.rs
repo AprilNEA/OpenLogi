@@ -18,6 +18,9 @@ use crate::ui::battery::value_label;
 
 /// Keymap context installed on the main application surface.
 pub(crate) const APP_KEY_CONTEXT: &str = "OpenLogi";
+/// Key context of the small task windows (Add Device, update consent), where
+/// Escape answers the way their Cancel / Not now button does.
+pub(crate) const DIALOG_KEY_CONTEXT: &str = "OpenLogiDialog";
 
 actions!(
     openlogi,
@@ -28,6 +31,8 @@ actions!(
         BringAllToFront,
         /// Check for an application update.
         CheckForUpdates,
+        /// Dismiss a task window the way its Cancel / Not now button does.
+        Dismiss,
         /// Hide the OpenLogi window (macOS).
         Hide,
         /// Hide every other application (macOS).
@@ -104,6 +109,7 @@ pub fn install(cx: &mut App) {
         KeyBinding::new("cmd-w", CloseWindow, None),
         KeyBinding::new("cmd-,", OpenSettings, None),
         KeyBinding::new("alt-left", NavigateBack, Some(APP_KEY_CONTEXT)),
+        KeyBinding::new("escape", Dismiss, Some(DIALOG_KEY_CONTEXT)),
     ]);
 
     cx.set_menus(menus(cx));

@@ -33,7 +33,7 @@ use openlogi_core::device::ReceiverInfo;
 use openlogi_core::hid::{Click, PasskeyMethod, ReceiverSelector, find_receiver};
 use openlogi_ipc::{FoundDevice, PairingFailure, PairingPhase};
 
-use crate::app::menu::{CloseWindow, Minimize, Zoom};
+use crate::app::menu::{CloseWindow, DIALOG_KEY_CONTEXT, Dismiss, Minimize, Zoom};
 use crate::services::ipc::{CancelPairing, Command, PairDevice, StartPairing};
 use crate::state::{AppState, StateEvent};
 use crate::ui::components::control_button;
@@ -333,7 +333,9 @@ impl Render for AddDeviceView {
             .size_full()
             .bg(pal.page)
             .text_color(pal.text_primary)
+            .key_context(DIALOG_KEY_CONTEXT)
             .track_focus(&self.focus_handle)
+            .on_action(|_: &Dismiss, window, cx| dismiss(window, cx))
             .on_action(|_: &CloseWindow, window, _| window.remove_window())
             .on_action(|_: &Minimize, window, _| window.minimize_window())
             .on_action(|_: &Zoom, window, _| window.zoom_window())
@@ -411,6 +413,16 @@ fn pairing_body(state: &PairingUi, pal: Palette) -> gpui::Div {
                 matches!(failure, PairingFailure::ReceiverNotFound),
                 |this| this.child(hint(tr!("device.device_connection_help"), pal)),
             ),
+    }
+}
+
+/// Escape: what the step's leading button does — close the window before a
+/// receiver is chosen, otherwise end the search and return to the picker.
+fn dismiss(window: &mut Window, cx: &mut App) {
+    match cx.try_global::<PairingUi>().cloned().unwrap_or_default() {
+        PairingUi::Idle => window.remove_window(),
+        PairingUi::Cancelling => {}
+        _ => cancel_search(cx),
     }
 }
 
