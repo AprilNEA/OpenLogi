@@ -115,6 +115,7 @@ fn open_window_to_agent(
 ) -> (&mut VisualTestContext, UnboundedReceiver<Command>) {
     cx.update(gpui_kit::init);
     cx.update(theme::register_builtin_themes);
+    cx.update(crate::app::menu::install);
     let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
     cx.update(|cx| {
         let resolver = AssetResolver::new();
@@ -388,6 +389,35 @@ fn closing_the_dialog_stops_pairing(cx: &mut TestAppContext) {
     visual.simulate_keystrokes("escape");
     draw(visual);
     assert!(visual.debug_bounds("flow-pair").is_none());
+    assert!(matches!(
+        commands.try_recv(),
+        Ok(Command::StopFlowPairing(_))
+    ));
+}
+
+#[gpui::test]
+fn window_commands_remain_available_while_pairing(cx: &mut TestAppContext) {
+    use crate::app::menu::{CloseWindow, Minimize, Zoom};
+
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    let other = cx.open_window(gpui::size(px(400.), px(300.)), |_, _| gpui::Empty);
+    let (visual, mut commands) = open_window_to_agent(cx);
+    visual.update(|window, _| window.activate_window());
+    click(visual, "flow-add");
+    show_pairing(visual, FlowPairingPhase::Found(vec![nearby("devbox", 9)]));
+    visual.update(|window, cx| {
+        assert!(window.is_action_available(&Minimize, cx));
+        assert!(window.is_action_available(&Zoom, cx));
+        assert!(window.is_action_available(&CloseWindow, cx));
+    });
+    while commands.try_recv().is_ok() {}
+
+    visual.simulate_keystrokes(if cfg!(target_os = "macos") {
+        "cmd-w"
+    } else {
+        "ctrl-w"
+    });
+    cx.update(|cx| assert_eq!(cx.windows(), vec![other.into()]));
     assert!(matches!(
         commands.try_recv(),
         Ok(Command::StopFlowPairing(_))

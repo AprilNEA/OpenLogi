@@ -34,7 +34,7 @@ use openlogi_core::device::ReceiverInfo;
 use openlogi_core::hid::{Click, PasskeyMethod, ReceiverSelector, find_receiver};
 use openlogi_ipc::{FoundDevice, PairingFailure, PairingPhase};
 
-use crate::app::menu::{CloseWindow, DIALOG_KEY_CONTEXT, Dismiss, Minimize, Zoom};
+use crate::app::menu::{DIALOG_KEY_CONTEXT, Dismiss};
 use crate::services::ipc::{CancelPairing, Command, PairDevice, StartPairing};
 use crate::state::{AppState, StateEvent};
 use crate::ui::components::control_button;
@@ -337,9 +337,6 @@ impl Render for AddDeviceView {
             .key_context(DIALOG_KEY_CONTEXT)
             .track_focus(&self.focus_handle)
             .on_action(|_: &Dismiss, window, cx| dismiss(window, cx))
-            .on_action(|_: &CloseWindow, window, _| window.remove_window())
-            .on_action(|_: &Minimize, window, _| window.minimize_window())
-            .on_action(|_: &Zoom, window, _| window.zoom_window())
             // Only where the compositor left the chrome to us; the padded
             // content sits in the flex-column below it.
             .when(windows::needs_client_titlebar(window), |this| {

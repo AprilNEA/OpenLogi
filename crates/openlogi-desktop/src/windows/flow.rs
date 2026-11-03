@@ -27,7 +27,6 @@ use gpui_kit::component::{
 use openlogi_core::config::{FlowConfig, FlowEdge, FlowPeerName};
 use openlogi_ipc::FlowLinkState;
 
-use crate::app::menu::{CloseWindow, Minimize, Zoom};
 use crate::state::{
     AppState, FlowDeviceRow, FlowHealth, FlowHost, FlowIssue, FlowReadiness, StateEvent,
 };
@@ -183,9 +182,6 @@ impl Render for FlowView {
             .bg(pal.page)
             .text_color(pal.text_primary)
             .track_focus(&self.focus_handle)
-            .on_action(|_: &CloseWindow, window, _| window.remove_window())
-            .on_action(|_: &Minimize, window, _| window.minimize_window())
-            .on_action(|_: &Zoom, window, _| window.zoom_window())
             .when(windows::needs_client_titlebar(window), |this| {
                 this.child(windows::aux_title_bar(window_title(), cx))
             })

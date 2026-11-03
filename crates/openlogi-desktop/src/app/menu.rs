@@ -2,14 +2,17 @@
 //!
 //! GPUI's menu support is driven by registered actions + a `Keymap`: the
 //! platform layer reads bindings via `cx.set_menus` and stamps the matching
-//! `keyEquivalent` onto each `NSMenuItem`. App-level actions (Hide, Quit)
-//! get global listeners; window-level actions (Close, Minimize, Zoom) are
-//! attached to window root views.
+//! `keyEquivalent` onto each `NSMenuItem`. Window-level actions wrap the Kit
+//! root, so both application content and overlays dispatch through them.
 //!
 //! On Linux/Windows the menus + key bindings are stored but never surfaced
 //! in a top-of-screen bar — calling `install` there is a harmless no-op.
 
-use gpui::{App, KeyBinding, Menu, MenuItem, OsAction, actions};
+use gpui::{
+    AnyElement, App, Context, InteractiveElement as _, IntoElement, KeyBinding, Menu, MenuItem,
+    OsAction, ParentElement as _, Render, Styled as _, Window, actions, div,
+};
+use gpui_kit::base::{Root, RootPlugin};
 use gpui_kit::component::input;
 use openlogi_core::brand::{HELP_URL, RELEASES_URL, REPO_URL};
 use url::Url;
@@ -65,8 +68,34 @@ actions!(
     ]
 );
 
+struct WindowActions;
+
+impl Render for WindowActions {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        gpui::Empty
+    }
+}
+
+impl RootPlugin for WindowActions {
+    fn decorate(
+        &self,
+        surface: AnyElement,
+        _: &Root,
+        _: &mut Window,
+        _: &mut App,
+    ) -> impl IntoElement {
+        div()
+            .size_full()
+            .on_action(|_: &CloseWindow, window, _| window.remove_window())
+            .on_action(|_: &Minimize, window, _| window.minimize_window())
+            .on_action(|_: &Zoom, window, _| window.zoom_window())
+            .child(surface)
+    }
+}
+
 /// Wire global action handlers, key equivalents, and publish the menu bar.
 pub fn install(cx: &mut App) {
+    Root::register_plugin(cx, |_, _| WindowActions);
     #[cfg(target_os = "macos")]
     {
         cx.on_action(|_: &Hide, cx| cx.hide());
@@ -74,14 +103,6 @@ pub fn install(cx: &mut App) {
         cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
     }
     cx.on_action(|_: &Quit, cx| cx.quit());
-    // Fallback for future windows that forget to attach a view-level
-    // CloseWindow handler. Existing window roots handle this directly so the
-    // focused window is removed during normal action dispatch.
-    cx.on_action(|_: &CloseWindow, cx| {
-        if let Some(handle) = cx.active_window() {
-            let _ = handle.update(cx, |_, window, _| window.remove_window());
-        }
-    });
     cx.on_action(|_: &OpenSettings, cx| crate::windows::settings::open(cx));
     cx.on_action(|_: &OpenAbout, cx| {
         crate::windows::settings::open_at(crate::windows::settings::SettingsPage::About, cx);
