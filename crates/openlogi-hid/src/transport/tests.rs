@@ -121,6 +121,38 @@ fn child_of_lightspeed_receiver_is_detected() {
 }
 
 #[test]
+fn c545_linux_filter_keeps_receiver_and_excludes_both_children() {
+    let receiver = "/sys/devices/usb1/1-1/0003:046D:C545.0001";
+    assert!(!is_receiver_child_sysfs_path(receiver));
+    assert!(is_hidpp_candidate(
+        0x046d,
+        0xc545,
+        0xff00,
+        0x0002,
+        is_receiver_child_sysfs_path(receiver),
+    ));
+    for (product_id, child) in [
+        (0x4001, "0003:046D:4001.0002"),
+        (0x4002, "0003:046D:4002.0003"),
+    ] {
+        let path = format!("{receiver}/{child}");
+        assert!(is_receiver_child_sysfs_path(&path));
+        assert!(!is_hidpp_candidate(
+            0x046d,
+            product_id,
+            0xff00,
+            0x0002,
+            is_receiver_child_sysfs_path(&path),
+        ));
+    }
+    assert!(!is_hidpp_candidate(0x046d, 0xc545, 0x0001, 0x0002, false));
+    assert!(!is_hidpp_candidate(0xffff, 0xc545, 0xff00, 0x0002, false));
+    assert!(!is_receiver_child_sysfs_path(
+        "/sys/devices/usb1/1-1/0003:FFFF:C545.0001/0003:046D:4001.0002"
+    ));
+}
+
+#[test]
 fn unrelated_device_is_not_a_child() {
     assert!(!is_receiver_child_sysfs_path(UNRELATED));
 }
