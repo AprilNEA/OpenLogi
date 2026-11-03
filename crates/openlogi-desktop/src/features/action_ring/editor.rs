@@ -1,12 +1,12 @@
 //! Categorized action, shortcut, path, and icon editor for one ring slot.
 
+use gpui::{
+    Entity, InteractiveElement, IntoElement, ParentElement, Role, ScrollHandle,
+    StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px, rgb, svg,
+};
 use gpui_kit::component::{
     Icon, IconName, Selectable as _, button::Button, h_flex, input::InputState,
     scroll::ScrollableElement as _, v_flex,
-};
-use gpui_kit::{
-    Entity, InteractiveElement, IntoElement, ParentElement, Role, ScrollHandle,
-    StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px, rgb, svg,
 };
 use openlogi_core::binding::{
     Action, ActionRingEntry, ActionRingIcon, ActionRingSlot, ApplicationTarget, Category, KeyCombo,
@@ -182,9 +182,9 @@ fn icon_editor(
 }
 
 fn icon_button(
-    id: impl Into<gpui_kit::ElementId>,
+    id: impl Into<gpui::ElementId>,
     path: &'static str,
-    label: impl Into<gpui_kit::SharedString>,
+    label: impl Into<gpui::SharedString>,
     selected: bool,
     pal: Palette,
 ) -> Button {
@@ -379,24 +379,24 @@ fn ring_catalog() -> Vec<(Category, Vec<Action>)> {
     sections
 }
 
-fn commit_action(slot: ActionRingSlot, action: Action, cx: &mut gpui_kit::App) {
+fn commit_action(slot: ActionRingSlot, action: Action, cx: &mut gpui::App) {
     let Ok(action) = RingAction::new(action) else {
         return;
     };
     commit_slot(slot, Some(action), cx);
 }
 
-fn commit_slot(slot: ActionRingSlot, action: Option<RingAction>, cx: &mut gpui_kit::App) {
+fn commit_slot(slot: ActionRingSlot, action: Option<RingAction>, cx: &mut gpui::App) {
     AppState::apply(cx, |state| state.commit_action_ring_slot(slot, action));
 }
 
-fn commit_icon(slot: ActionRingSlot, icon: Option<ActionRingIcon>, cx: &mut gpui_kit::App) {
+fn commit_icon(slot: ActionRingSlot, icon: Option<ActionRingIcon>, cx: &mut gpui::App) {
     AppState::apply(cx, |state| state.commit_action_ring_icon(slot, icon));
 }
 
 #[cfg(test)]
 mod tests {
-    use gpui_kit::{
+    use gpui::{
         Context, Render, ScrollDelta, ScrollEvent, ScrollHandle, TestAppContext, Window, point, px,
     };
 
@@ -432,7 +432,7 @@ mod tests {
         }
     }
 
-    #[gpui_kit::test]
+    #[gpui::test]
     fn sidebar_scroll_does_not_move_the_page(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         let page_scroll = ScrollHandle::new();
@@ -452,7 +452,7 @@ mod tests {
             .debug_bounds("scrollbar-overlay")
             .expect("scrollbar overlay should exist");
         assert_eq!(overlay_before.origin, point(px(0.0), px(0.0)));
-        assert_eq!(overlay_before.size, gpui_kit::size(px(160.0), px(100.0)));
+        assert_eq!(overlay_before.size, gpui::size(px(160.0), px(100.0)));
 
         // Scroll inside the sidebar scroller
         cx.simulate_event(ScrollEvent {
@@ -474,11 +474,11 @@ mod tests {
         assert_eq!(overlay_after_sidebar_scroll.origin, point(px(0.0), px(0.0)));
         assert_eq!(
             overlay_after_sidebar_scroll.size,
-            gpui_kit::size(px(160.0), px(100.0))
+            gpui::size(px(160.0), px(100.0))
         );
 
         // Click near the bottom of the scrollbar track (x: 155px, y: 80px) to jump
-        cx.simulate_click(point(px(155.0), px(80.0)), gpui_kit::Modifiers::default());
+        cx.simulate_click(point(px(155.0), px(80.0)), gpui::Modifiers::default());
         cx.run_until_parked();
         cx.update(|window, cx| drop(window.draw(cx)));
 

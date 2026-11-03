@@ -1,5 +1,10 @@
 //! Debug-only gallery for reviewing shared controls without app runtime state.
 
+use gpui::{
+    App, AppContext as _, Context, InteractiveElement, IntoElement, ParentElement, Render, Role,
+    SharedString, Size, StatefulInteractiveElement as _, Styled, Window, WindowOptions, div, px,
+    rems,
+};
 use gpui_kit::base::Button as BaseButton;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Root, Selectable as _, Sizable as _, Theme,
@@ -10,11 +15,6 @@ use gpui_kit::component::{
     slider::Slider,
     tag::Tag,
     v_flex,
-};
-use gpui_kit::{
-    App, AppContext as _, Context, InteractiveElement, IntoElement, ParentElement, Render, Role,
-    SharedString, Size, StatefulInteractiveElement as _, Styled, Window, WindowOptions, div, px,
-    rems,
 };
 use openlogi_core::brand::APP_ID;
 use openlogi_core::config::UiScale;
@@ -224,7 +224,7 @@ impl ComponentGallery {
             ))
     }
 
-    fn choice_panel(&self, pal: Palette, cx: &mut Context<Self>) -> gpui_kit::Div {
+    fn choice_panel(&self, pal: Palette, cx: &mut Context<Self>) -> gpui::Div {
         gallery_panel(
             "ChoiceCard",
             IconName::LayoutDashboard,
@@ -262,7 +262,7 @@ impl ComponentGallery {
         )
     }
 
-    fn toggle_panel(&self, pal: Palette, cx: &mut Context<Self>) -> gpui_kit::Div {
+    fn toggle_panel(&self, pal: Palette, cx: &mut Context<Self>) -> gpui::Div {
         let label = if self.toggle_selected {
             "Enabled"
         } else {
@@ -307,7 +307,7 @@ impl ComponentGallery {
         )
     }
 
-    fn menu_panel(&self, pal: Palette, cx: &mut Context<Self>) -> gpui_kit::Div {
+    fn menu_panel(&self, pal: Palette, cx: &mut Context<Self>) -> gpui::Div {
         gallery_panel(
             "MenuRow",
             IconName::Menu,
@@ -341,7 +341,7 @@ impl ComponentGallery {
         )
     }
 
-    fn profile_panel(&self, pal: Palette, cx: &mut Context<Self>) -> gpui_kit::Div {
+    fn profile_panel(&self, pal: Palette, cx: &mut Context<Self>) -> gpui::Div {
         gallery_panel(
             "ProfileTab",
             IconName::Eye,
@@ -369,7 +369,7 @@ impl ComponentGallery {
         )
     }
 
-    fn preset_panel(&self, pal: Palette, cx: &mut Context<Self>) -> gpui_kit::Div {
+    fn preset_panel(&self, pal: Palette, cx: &mut Context<Self>) -> gpui::Div {
         gallery_panel(
             "PresetChip",
             IconName::Cpu,
@@ -396,7 +396,7 @@ impl ComponentGallery {
         )
     }
 
-    fn pill_panel(&self, pal: Palette, cx: &mut Context<Self>) -> gpui_kit::Div {
+    fn pill_panel(&self, pal: Palette, cx: &mut Context<Self>) -> gpui::Div {
         const STEPS: [&str; 3] = ["5 s", "10 s", "30 s"];
         gallery_panel(
             "Pill",
@@ -430,7 +430,7 @@ impl ComponentGallery {
         )
     }
 
-    fn slider_panel(&self, pal: Palette) -> gpui_kit::Div {
+    fn slider_panel(&self, pal: Palette) -> gpui::Div {
         gallery_panel(
             "CommitSlider",
             IconName::Sun,
@@ -451,7 +451,7 @@ impl ComponentGallery {
         )
     }
 
-    fn battery_panel(pal: Palette) -> gpui_kit::Div {
+    fn battery_panel(pal: Palette) -> gpui::Div {
         let battery = |percentage, level, status| BatteryInfo {
             percentage,
             level,
@@ -584,7 +584,7 @@ fn gallery_panel(
     icon: IconName,
     content: impl IntoElement,
     pal: Palette,
-) -> gpui_kit::Div {
+) -> gpui::Div {
     div()
         .w(rems(20.))
         .min_w(rems(18.))
@@ -620,11 +620,11 @@ fn choice_card(id: &'static str, label: &'static str, selected: bool, pal: Palet
 
 #[cfg(test)]
 mod tests {
-    use gpui_kit::TestAppContext;
+    use gpui::TestAppContext;
 
     use super::*;
 
-    #[gpui_kit::test]
+    #[gpui::test]
     fn gallery_renders_without_application_state(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         cx.update(theme::register_builtin_themes);

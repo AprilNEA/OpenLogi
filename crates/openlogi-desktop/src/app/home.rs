@@ -10,6 +10,11 @@ pub(super) use views::ordered_device_indices;
 
 use std::sync::Arc;
 
+use gpui::{
+    Anchor, AnyElement, App, AppContext as _, Context, Div, ElementId, Hsla, InteractiveElement,
+    IntoElement, ParentElement, SharedString, StatefulInteractiveElement as _, Styled, Window,
+    canvas, div, fill, img, point, prelude::FluentBuilder as _, px, rgb, svg,
+};
 use gpui_kit::base::Button as BaseButton;
 use gpui_kit::component::{
     Icon, IconName, Sizable as _, WindowExt as _,
@@ -20,11 +25,6 @@ use gpui_kit::component::{
     menu::{DropdownMenu as _, PopupMenu, PopupMenuItem},
     tooltip::Tooltip,
     v_flex,
-};
-use gpui_kit::{
-    Anchor, AnyElement, App, AppContext as _, Context, Div, ElementId, Hsla, InteractiveElement,
-    IntoElement, ParentElement, SharedString, StatefulInteractiveElement as _, Styled, Window,
-    canvas, div, fill, img, point, prelude::FluentBuilder as _, px, rgb, svg,
 };
 use openlogi_core::config::{DeviceViewMode, LightSettings};
 use openlogi_core::device::{DeviceKind, DeviceModelInfo, ModelTransport};
@@ -106,7 +106,7 @@ pub(crate) fn keyboard_glow(
         .filter(|l| l.enabled)?;
     let geom = record.asset.as_ref()?.glow.clone()?;
     let (r, g, b) = lighting.color.components();
-    let color = gpui_kit::Rgba {
+    let color = gpui::Rgba {
         r: f32::from(r) / 255.,
         g: f32::from(g) / 255.,
         b: f32::from(b) / 255.,
@@ -138,9 +138,9 @@ pub(crate) fn glow_canvas(geom: Arc<GlowGeometry>, color: Hsla) -> impl IntoElem
             let ox = f32::from(bounds.origin.x) + (bw - rw) / 2.;
             let oy = f32::from(bounds.origin.y) + (bh - rh) / 2.;
             for s in &geom.segments {
-                let quad = gpui_kit::Bounds {
+                let quad = gpui::Bounds {
                     origin: point(px(ox + s.x * rw), px(oy + s.y * rh)),
-                    size: gpui_kit::size(px((s.w * rw).max(1.)), px((s.h * rh).max(1.))),
+                    size: gpui::size(px((s.w * rw).max(1.)), px((s.h * rh).max(1.))),
                 };
                 window.paint_quad(fill(quad, color));
             }
@@ -326,7 +326,7 @@ fn battery_glance(
 
 fn device_ring(enabled: bool) -> Hsla {
     if enabled {
-        gpui_kit::transparent_black()
+        gpui::transparent_black()
     } else {
         rgb(theme::STATUS_DISABLED).into()
     }

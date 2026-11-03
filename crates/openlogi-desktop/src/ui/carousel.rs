@@ -20,15 +20,15 @@
 
 use std::rc::Rc;
 
+use gpui::{
+    AnyElement, App, ElementId, InteractiveElement as _, IntoElement, ParentElement as _, Rems,
+    RenderOnce, ScrollHandle, StatefulInteractiveElement as _, Styled, Window, div,
+    prelude::FluentBuilder as _, rems,
+};
 use gpui_kit::component::{
     Disableable as _, IconName, Sizable as _, Size,
     button::{Button, ButtonVariants as _},
     h_flex, v_flex,
-};
-use gpui_kit::{
-    AnyElement, App, ElementId, InteractiveElement as _, IntoElement, ParentElement as _, Rems,
-    RenderOnce, ScrollHandle, StatefulInteractiveElement as _, Styled, Window, div,
-    prelude::FluentBuilder as _, rems,
 };
 
 type SelectHandler = Rc<dyn Fn(&usize, &mut Window, &mut App) + 'static>;
@@ -223,7 +223,7 @@ fn arrow(
 mod tests {
     use std::{cell::RefCell, rc::Rc};
 
-    use gpui_kit::{Context, KeyDownEvent, KeyUpEvent, Keystroke, Render, TestAppContext, div, px};
+    use gpui::{Context, KeyDownEvent, KeyUpEvent, Keystroke, Render, TestAppContext, div, px};
 
     use super::*;
 
@@ -254,7 +254,7 @@ mod tests {
         }
     }
 
-    fn activate_key(cx: &mut gpui_kit::VisualTestContext, key: &'static str) {
+    fn activate_key(cx: &mut gpui::VisualTestContext, key: &'static str) {
         let keystroke = Keystroke::parse(key).unwrap();
         cx.simulate_event(KeyDownEvent {
             keystroke: keystroke.clone(),
@@ -264,7 +264,7 @@ mod tests {
         cx.simulate_event(KeyUpEvent { keystroke });
     }
 
-    #[gpui_kit::test]
+    #[gpui::test]
     fn carousel_arrows_are_controlled_and_instance_local(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         let selections = Rc::new(RefCell::new(Vec::new()));
@@ -286,7 +286,7 @@ mod tests {
         assert_eq!(&*selections.borrow(), &[(0, 0), (0, 2), (1, 0)]);
     }
 
-    #[gpui_kit::test]
+    #[gpui::test]
     fn carousel_clamps_selection_before_navigating(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         let selections = Rc::new(RefCell::new(Vec::new()));

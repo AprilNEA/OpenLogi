@@ -2,17 +2,17 @@
 
 use std::sync::Arc;
 
+use gpui::{
+    Anchor, Context, Entity, InteractiveElement, IntoElement, ParentElement, Role,
+    StatefulInteractiveElement as _, Styled, UniformListScrollHandle, WeakEntity, div,
+    prelude::FluentBuilder as _, px, uniform_list,
+};
 use gpui_kit::base::Button as BaseButton;
 use gpui_kit::component::{
     Icon, IconName, h_flex,
     popover::{Popover, PopoverState},
     scroll::ScrollableElement as _,
     v_flex,
-};
-use gpui_kit::{
-    Anchor, Context, Entity, InteractiveElement, IntoElement, ParentElement, Role,
-    StatefulInteractiveElement as _, Styled, UniformListScrollHandle, WeakEntity, div,
-    prelude::FluentBuilder as _, px, uniform_list,
 };
 
 use super::catalog::{AppCatalogPicker, ApplicationIconState, ProfileIconCache};
@@ -74,7 +74,7 @@ fn add_app_content(
     actions: &ProfileScopeActions,
     pal: Palette,
     cx: &mut Context<PopoverState>,
-) -> gpui_kit::Div {
+) -> gpui::Div {
     let popover = cx.entity().downgrade();
     let catalog_state = catalog.read(cx);
     let search = catalog_state.search();
@@ -181,7 +181,7 @@ fn catalog_list(
     popover: WeakEntity<PopoverState>,
     scroll: &UniformListScrollHandle,
     pal: Palette,
-) -> gpui_kit::Div {
+) -> gpui::Div {
     let count = rows.len();
     div()
         .relative()
@@ -291,7 +291,7 @@ fn application_row(
     actions: ProfileScopeActions,
     pal: Palette,
     popover: WeakEntity<PopoverState>,
-) -> gpui_kit::Div {
+) -> gpui::Div {
     let app = choice.app.clone();
     let aria_label = format!("{}: {}", choice.name, choice.app);
     div().h(px(APP_ROW_H)).child(
@@ -326,7 +326,7 @@ fn application_row(
     )
 }
 
-fn catalog_message(message: gpui_kit::SharedString, pal: Palette) -> impl IntoElement {
+fn catalog_message(message: gpui::SharedString, pal: Palette) -> impl IntoElement {
     div()
         .px_2()
         .py_2()
@@ -352,13 +352,13 @@ mod tests {
     use std::cell::RefCell;
     use std::rc::Rc;
 
-    use gpui_kit::component::button::Button;
-    use gpui_kit::component::popover::Popover;
-    use gpui_kit::{
+    use gpui::{
         Context, InteractiveElement as _, IntoElement, Modifiers, ParentElement as _, Render,
         ScrollDelta, ScrollEvent, Styled as _, TestAppContext, TouchPhase, Window, div, point, px,
         uniform_list,
     };
+    use gpui_kit::component::button::Button;
+    use gpui_kit::component::popover::Popover;
 
     use super::APP_ROW_H;
     use crate::features::binding_editor::compact_panel;
@@ -410,7 +410,7 @@ mod tests {
         }
     }
 
-    #[gpui_kit::test]
+    #[gpui::test]
     fn catalog_list_scrolls_inside_the_picker_popover(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         let clicked: Rc<RefCell<Option<usize>>> = Rc::default();
@@ -438,7 +438,7 @@ mod tests {
             delta: ScrollDelta::Lines(point(0., -5.)),
             modifiers: Modifiers::default(),
             touch_phase: TouchPhase::Moved,
-            source: gpui_kit::ScrollSource::Pointer,
+            source: gpui::ScrollSource::Pointer,
         });
         cx.update(|window, cx| window.draw(cx).clear(cx));
 

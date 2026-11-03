@@ -170,7 +170,7 @@ fn permission_item(
 
 /// A readable status word with colour retained as a supplemental marker.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-fn status_badge(status: PermissionStatus, pal: Palette) -> gpui_kit::Div {
+fn status_badge(status: PermissionStatus, pal: Palette) -> gpui::Div {
     let (label, color) = match status {
         PermissionStatus::Granted => (tr!("permissions.granted"), theme::STATUS_CONNECTED),
         PermissionStatus::Denied => (tr!("permissions.not_granted"), theme::STATUS_CONNECTING),
@@ -180,7 +180,7 @@ fn status_badge(status: PermissionStatus, pal: Palette) -> gpui_kit::Div {
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-fn badge(label: SharedString, color: u32, pal: Palette) -> gpui_kit::Div {
+fn badge(label: SharedString, color: u32, pal: Palette) -> gpui::Div {
     h_flex()
         .items_center()
         .gap_1()
@@ -197,7 +197,7 @@ fn permission_field(
     status: PermissionStatus,
     permission: Permission,
     cx: &App,
-) -> gpui_kit::Div {
+) -> gpui::Div {
     let pal = theme::palette(cx);
     // "Not determined" means never requested — Bluetooth deliberately never is
     // (BLE mice go through IOHIDManager) — so don't label it "Unknown".

@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 
-use gpui_kit::{App, Context};
+use gpui::{App, Context};
 use openlogi_core::config::DisableKey;
 use openlogi_core::hid::{DisableKeysMask, DisableKeysState, WriteError};
 use tracing::warn;
@@ -547,7 +547,7 @@ fn transaction_fences_match(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui_kit::AppContext as _;
+    use gpui::AppContext as _;
     use openlogi_core::config::{Config, ConfigFile};
     use openlogi_core::device::{
         Capabilities, DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports, PairedDevice,
@@ -672,7 +672,7 @@ mod tests {
         context
     }
 
-    fn install_reads(state: AppState, cx: &mut gpui_kit::TestAppContext) {
+    fn install_reads(state: AppState, cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
             let runtime: std::sync::Arc<dyn swr_core::Runtime> =
                 std::sync::Arc::new(swr_gpui::GpuiRuntime::new(cx));
@@ -722,7 +722,7 @@ mod tests {
 
     fn refresh_inventory(
         inventory: &DeviceInventory,
-        cx: &mut gpui_kit::TestAppContext,
+        cx: &mut gpui::TestAppContext,
     ) -> StateEvents {
         let events = cx.update(|cx| {
             AppState::update(cx, |state, _| {
@@ -738,8 +738,8 @@ mod tests {
         events
     }
 
-    #[gpui_kit::test]
-    fn a_settings_revision_discards_an_older_disable_keys_read(cx: &mut gpui_kit::TestAppContext) {
+    #[gpui::test]
+    fn a_settings_revision_discards_an_older_disable_keys_read(cx: &mut gpui::TestAppContext) {
         let mut inventory = keyboard_inventory(0xb35b, [1, 2, 3, 4]);
         let (state, mut receiver, key) = test_state(
             ConfigPersistence::MemoryOnly,
@@ -780,9 +780,9 @@ mod tests {
         );
     }
 
-    #[gpui_kit::test]
+    #[gpui::test]
     fn a_settings_revision_does_not_retire_a_pending_disable_keys_write(
-        cx: &mut gpui_kit::TestAppContext,
+        cx: &mut gpui::TestAppContext,
     ) {
         let mut inventory = keyboard_inventory(0xb35b, [1, 2, 3, 4]);
         let (state, mut receiver, key) = test_state(
@@ -909,10 +909,8 @@ mod tests {
         assert!(receiver.try_recv().is_err());
     }
 
-    #[gpui_kit::test]
-    fn settings_revision_invalidation_closes_the_ready_write_gate(
-        cx: &mut gpui_kit::TestAppContext,
-    ) {
+    #[gpui::test]
+    fn settings_revision_invalidation_closes_the_ready_write_gate(cx: &mut gpui::TestAppContext) {
         let mut inventory = keyboard_inventory(0xb35b, [1, 2, 3, 4]);
         let (state, mut receiver, key) = test_state(
             ConfigPersistence::MemoryOnly,
@@ -956,13 +954,13 @@ mod tests {
         cx.run_until_parked();
     }
 
-    #[gpui_kit::test]
+    #[gpui::test]
     #[expect(
         clippy::too_many_lines,
         reason = "Keep repeated external edits, stale receipts and read ordering in one lifecycle regression"
     )]
     fn file_changed_after_save_reconciles_disable_keys_without_resaving(
-        cx: &mut gpui_kit::TestAppContext,
+        cx: &mut gpui::TestAppContext,
     ) {
         let directory = tempfile::tempdir().expect("temporary config directory");
         let path = directory.path().join(openlogi_core::paths::CONFIG_FILE);
@@ -1161,13 +1159,13 @@ mod tests {
         );
     }
 
-    #[gpui_kit::test]
+    #[gpui::test]
     #[expect(
         clippy::too_many_lines,
         reason = "Keep the malformed-file, retry, receipt and post-receipt read lifecycle in one regression"
     )]
     fn failed_external_reconciliation_keeps_controls_blocked_after_a_fresh_read(
-        cx: &mut gpui_kit::TestAppContext,
+        cx: &mut gpui::TestAppContext,
     ) {
         let directory = tempfile::tempdir().expect("temporary config directory");
         let path = directory.path().join(openlogi_core::paths::CONFIG_FILE);
@@ -1331,9 +1329,9 @@ mod tests {
         );
     }
 
-    #[gpui_kit::test]
+    #[gpui::test]
     fn unconfirmed_disable_keys_write_requires_fresh_read_before_another_toggle(
-        cx: &mut gpui_kit::TestAppContext,
+        cx: &mut gpui::TestAppContext,
     ) {
         let inventory = keyboard_inventory(0xb35b, [1, 2, 3, 4]);
         let (state, mut receiver, key) = test_state(ConfigPersistence::MemoryOnly, &[inventory]);
@@ -1420,9 +1418,9 @@ mod tests {
         assert!(receiver.try_recv().is_err());
     }
 
-    #[gpui_kit::test]
+    #[gpui::test]
     fn same_route_reconnect_fences_an_outstanding_disable_keys_reconciliation(
-        cx: &mut gpui_kit::TestAppContext,
+        cx: &mut gpui::TestAppContext,
     ) {
         let mut inventory = keyboard_inventory(0xb35b, [1, 2, 3, 4]);
         let (state, mut receiver, key) = test_state(
@@ -1509,9 +1507,9 @@ mod tests {
         );
     }
 
-    #[gpui_kit::test]
+    #[gpui::test]
     fn failed_disable_keys_reconciliation_stays_blocked_until_retry_succeeds(
-        cx: &mut gpui_kit::TestAppContext,
+        cx: &mut gpui::TestAppContext,
     ) {
         let inventory = keyboard_inventory(0xb35b, [1, 2, 3, 4]);
         let (state, mut receiver, key) = test_state(ConfigPersistence::MemoryOnly, &[inventory]);
@@ -1768,9 +1766,9 @@ mod tests {
         );
     }
 
-    #[gpui_kit::test]
+    #[gpui::test]
     fn save_retry_fences_other_keyboards_until_receipt_and_post_receipt_read(
-        cx: &mut gpui_kit::TestAppContext,
+        cx: &mut gpui::TestAppContext,
     ) {
         let mut fixture = SaveRetryFixture::new(&[
             keyboard_inventory(0xb35b, [1, 2, 3, 4]),
@@ -1881,9 +1879,9 @@ mod tests {
         assert_eq!(locale, "ru");
     }
 
-    #[gpui_kit::test]
+    #[gpui::test]
     fn save_retry_activates_external_language_and_emits_language_changed(
-        cx: &mut gpui_kit::TestAppContext,
+        cx: &mut gpui::TestAppContext,
     ) {
         let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
         let _restore = RestoreLocale(rust_i18n::locale().to_string());
@@ -1901,7 +1899,7 @@ mod tests {
         let observed = cx.update(|cx| {
             let state = cx.new(|_| state);
             AppState::set_global(state.clone(), cx);
-            let observed = cx.new(|cx: &mut gpui_kit::Context<Vec<StateEvent>>| {
+            let observed = cx.new(|cx: &mut gpui::Context<Vec<StateEvent>>| {
                 cx.subscribe(&state, |events, source, event: &StateEvent, cx| {
                     if event == &StateEvent::LanguageChanged {
                         assert_eq!(source.read(cx).language(), Some("ru"));
@@ -1965,9 +1963,9 @@ mod tests {
         assert!(receiver.try_recv().is_err());
     }
 
-    #[gpui_kit::test]
+    #[gpui::test]
     fn save_retry_action_delivers_projection_events_for_current_selection(
-        cx: &mut gpui_kit::TestAppContext,
+        cx: &mut gpui::TestAppContext,
     ) {
         let fixture = SaveRetryFixture::new(&[
             keyboard_inventory(0xb35b, [1, 2, 3, 4]),
@@ -1988,7 +1986,7 @@ mod tests {
         let observer = cx.update(|cx| {
             let state = cx.new(|_| state);
             AppState::set_global(state.clone(), cx);
-            let observer = cx.new(|cx: &mut gpui_kit::Context<Vec<StateEvent>>| {
+            let observer = cx.new(|cx: &mut gpui::Context<Vec<StateEvent>>| {
                 cx.subscribe(&state, |events, source, event: &StateEvent, cx| {
                     // Subscribers must see the refreshed values at delivery time.
                     assert_eq!(

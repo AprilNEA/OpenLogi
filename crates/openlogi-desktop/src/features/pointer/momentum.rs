@@ -12,16 +12,16 @@
 //! the default. There, turning the glide on offers to turn on the mouse's
 //! Smooth wheel too, and the card says so when it is off.
 
+use gpui::prelude::FluentBuilder as _;
+use gpui::{
+    App, Context, Entity, IntoElement, ParentElement, Render, SharedString, Styled, Subscription,
+    Window, div, px, relative, rgb,
+};
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dialog::DialogButtonProps;
 use gpui_kit::component::slider::{Slider, SliderState};
 use gpui_kit::component::{Disableable as _, Selectable as _, Sizable as _, h_flex, v_flex};
-use gpui_kit::prelude::FluentBuilder as _;
-use gpui_kit::{
-    App, Context, Entity, IntoElement, ParentElement, Render, SharedString, Styled, Subscription,
-    Window, div, px, relative, rgb,
-};
 use openlogi_core::config::MomentumScrolling;
 
 use super::glide_shape::glide_shape_picker;
@@ -525,7 +525,7 @@ fn stop_marks(pal: Palette) -> impl IntoElement {
 
 #[cfg(test)]
 mod tests {
-    use gpui_kit::{AppContext as _, TestAppContext};
+    use gpui::{AppContext as _, TestAppContext};
     use openlogi_core::config::Config;
 
     use super::*;
@@ -580,7 +580,7 @@ mod tests {
 
     /// Each scope commits to its own settings: Settings → General to the
     /// app-wide default, the Pointer tab to the selected mouse's override.
-    #[gpui_kit::test]
+    #[gpui::test]
     fn each_scope_commits_its_own_settings(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         cx.update(|cx| {

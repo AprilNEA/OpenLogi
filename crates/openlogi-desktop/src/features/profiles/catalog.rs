@@ -6,11 +6,11 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use appcatalog::{Application, ApplicationIdentity, IdentityKind};
-use gpui_kit::component::input::{InputEvent, InputState};
-use gpui_kit::{
+use gpui::{
     AppContext as _, Context, Entity, RenderImage, Subscription, Task, UniformListScrollHandle,
     Window,
 };
+use gpui_kit::component::input::{InputEvent, InputState};
 
 use super::{CatalogPresentation, ProfileChoice};
 

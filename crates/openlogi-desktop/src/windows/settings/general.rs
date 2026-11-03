@@ -140,7 +140,7 @@ fn mouse_profile_target_item() -> SettingItem {
                 })
         }),
     )
-    .layout(gpui_kit::Axis::Vertical)
+    .layout(gpui::Axis::Vertical)
     .description(tr!("pointer.mouse_profile_target_description"))
 }
 
@@ -206,7 +206,7 @@ fn lock_key_notifications_item() -> SettingItem {
     })
 }
 
-fn thumbwheel_sensitivity_field(slider: &Entity<SliderState>, cx: &mut App) -> gpui_kit::Div {
+fn thumbwheel_sensitivity_field(slider: &Entity<SliderState>, cx: &mut App) -> gpui::Div {
     let value = ThumbwheelSensitivity::from_rounded(slider.read(cx).value().start());
     sensitivity_field(
         slider,
@@ -216,7 +216,7 @@ fn thumbwheel_sensitivity_field(slider: &Entity<SliderState>, cx: &mut App) -> g
     )
 }
 
-fn vertical_scroll_sensitivity_field(slider: &Entity<SliderState>, cx: &mut App) -> gpui_kit::Div {
+fn vertical_scroll_sensitivity_field(slider: &Entity<SliderState>, cx: &mut App) -> gpui::Div {
     let value = VerticalScrollSensitivity::from_rounded(slider.read(cx).value().start());
     sensitivity_field(
         slider,
@@ -231,7 +231,7 @@ fn sensitivity_field(
     value: String,
     is_default: bool,
     cx: &mut App,
-) -> gpui_kit::Div {
+) -> gpui::Div {
     let pal = theme::palette(cx);
     v_flex()
         .flex_shrink_0()
@@ -315,12 +315,12 @@ mod tests {
     use crate::services::{assets::AssetResolver, i18n::LOCALE_LOCK};
     use crate::state::{ConfigPersistence, Sources};
     use crate::windows::{WindowRegistry, settings};
-    use gpui_kit::{
+    use gpui::{
         AppContext as _, Bounds, Modifiers, TestAppContext, VisualTestContext, point, size,
     };
     use openlogi_core::config::{Config, UiScale};
 
-    #[gpui_kit::test]
+    #[gpui::test]
     fn mouse_profile_target_choices_update_state_and_respect_failed_saves(cx: &mut TestAppContext) {
         let _locale = LOCALE_LOCK.lock().unwrap();
         cx.update(|cx| {

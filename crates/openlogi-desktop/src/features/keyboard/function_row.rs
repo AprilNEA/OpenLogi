@@ -26,14 +26,14 @@
 use std::rc::Rc;
 use std::sync::Arc;
 
-use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{Selectable as _, h_flex, input::InputState, v_flex};
-use gpui_kit::{
+use gpui::{
     AnyElement, App, AppContext as _, Bounds, Context, Entity, FontWeight, Hsla,
     InteractiveElement, IntoElement, ParentElement, PathBuilder, Render, RenderOnce, Role,
     SharedString, StatefulInteractiveElement as _, Styled, Subscription, Window, canvas, div, hsla,
     point, prelude::FluentBuilder as _, px, rgb, svg,
 };
+use gpui_kit::component::tooltip::Tooltip;
+use gpui_kit::component::{Selectable as _, h_flex, input::InputState, v_flex};
 use openlogi_core::binding::{Action, ActionRingIcon, ButtonId, KeypadPage, WorkflowStep};
 
 use super::editors::{
@@ -51,8 +51,8 @@ use crate::state::{AppState, DeviceKey, DeviceRecord, StateEvent, StateEvents};
 use crate::ui::action::localized_action_label;
 use crate::ui::components::MenuRow;
 use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
-use gpui_kit::ease_in_out;
-use gpui_kit::{Animation, AnimationExt, img};
+use gpui::ease_in_out;
+use gpui::{Animation, AnimationExt, img};
 
 mod callout_layout;
 mod key_points;
@@ -402,7 +402,7 @@ fn binding_line(
     max_w: f32,
     highlighted: bool,
     pal: &Palette,
-) -> gpui_kit::Div {
+) -> gpui::Div {
     h_flex()
         .items_center()
         .justify_center()
@@ -575,7 +575,7 @@ fn selected_key_action(state: &AppState, target: &KeyTarget) -> Option<Action> {
 #[derive(IntoElement)]
 struct InspectorRow {
     keyboard: AnyElement,
-    panel: Option<gpui_kit::Div>,
+    panel: Option<gpui::Div>,
 }
 
 impl InspectorRow {
@@ -587,7 +587,7 @@ impl InspectorRow {
     }
 
     #[must_use]
-    fn panel(mut self, panel: Option<gpui_kit::Div>) -> Self {
+    fn panel(mut self, panel: Option<gpui::Div>) -> Self {
         self.panel = panel;
         self
     }
@@ -854,8 +854,8 @@ fn key_click_target(
                             .h(px(KEY_HOTSPOT_DOT))
                             .rounded_full()
                             .border_1()
-                            .border_color(gpui_kit::Hsla::from(rgb(ACCENT_BLUE)))
-                            .bg(gpui_kit::Hsla::from(rgb(ACCENT_BLUE))),
+                            .border_color(gpui::Hsla::from(rgb(ACCENT_BLUE)))
+                            .bg(gpui::Hsla::from(rgb(ACCENT_BLUE))),
                     )
                     .rounded_full()
                     .border_1()
@@ -872,7 +872,7 @@ fn key_click_target(
         })
 }
 
-fn binding_label(action: Option<&Action>) -> gpui_kit::SharedString {
+fn binding_label(action: Option<&Action>) -> gpui::SharedString {
     match action {
         Some(action) => localized_action_label(action),
         None => tr!("common.off"),
@@ -900,7 +900,7 @@ fn keyboard_leader_canvas(
 }
 
 fn paint_keyboard_leaders(
-    bounds: Bounds<gpui_kit::Pixels>,
+    bounds: Bounds<gpui::Pixels>,
     leaders: &[Vec<(f32, f32)>],
     selected: Option<usize>,
     hovered: Option<usize>,
@@ -957,7 +957,7 @@ impl FunctionRowView {
         slots: &[KeySlot],
         view: &Entity<Self>,
         cx: &mut Context<Self>,
-    ) -> gpui_kit::Div {
+    ) -> gpui::Div {
         let pal = theme::palette(cx);
         let slot = &slots[selected_idx];
         let target = slot.target.clone();
@@ -1093,7 +1093,7 @@ fn panel_action_rows(
     on_pick: &PickFn,
     view: &Entity<FunctionRowView>,
     pal: &Palette,
-) -> Vec<gpui_kit::Div> {
+) -> Vec<gpui::Div> {
     let mut children = action_rows("panel-action", current, on_pick, *pal);
 
     let power_user_actions: &[(PowerUserKind, SharedString, &'static str)] = &[

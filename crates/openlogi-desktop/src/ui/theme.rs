@@ -12,12 +12,10 @@
 //!   own widgets — which is what keeps a popover from rendering white under
 //!   an otherwise dark UI (see `main.rs`'s appearance wiring).
 
-use gpui_kit::component::{ActiveTheme as _, Theme, ThemeMode, ThemeRegistry};
 #[cfg(test)]
-use gpui_kit::rgb;
-use gpui_kit::{
-    App, FontWeight, Hsla, Pixels, Rems, Rgba, Styled, Window, hsla, px, relative, rems,
-};
+use gpui::rgb;
+use gpui::{App, FontWeight, Hsla, Pixels, Rems, Rgba, Styled, Window, hsla, px, relative, rems};
+use gpui_kit::component::{ActiveTheme as _, Theme, ThemeMode, ThemeRegistry};
 use openlogi_core::config::{Appearance, UiScale};
 
 use crate::state::AppState;
@@ -466,8 +464,8 @@ impl<E: Styled> Typography for E {}
 mod tests {
     use super::*;
 
-    #[gpui_kit::test]
-    fn bundled_theme_picker_keeps_upstream_and_openlogi_themes(cx: &mut gpui_kit::TestAppContext) {
+    #[gpui::test]
+    fn bundled_theme_picker_keeps_upstream_and_openlogi_themes(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
             gpui_kit::init(cx);
             register_builtin_themes(cx);

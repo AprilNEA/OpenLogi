@@ -7,7 +7,7 @@
 
 use std::borrow::Cow;
 
-use gpui_kit::{AssetSource, Result, SharedString};
+use gpui::{AssetSource, Result, SharedString};
 use openlogi_ui::action_icons::ActionIcons;
 
 /// Asset path [`AppAssets`] resolves to the embedded app logo.

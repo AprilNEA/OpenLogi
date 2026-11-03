@@ -7,7 +7,7 @@
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
 use std::path::Path;
 
-use gpui_kit::{App, Global};
+use gpui::{App, Global};
 
 #[cfg(any(target_os = "linux", test))]
 mod linux;

@@ -1,6 +1,6 @@
 //! Window sizing and singleton lifecycles.
 
-use gpui_kit::{AppContext as _, Bounds, Pixels, Size, TestAppContext, point, px, size};
+use gpui::{AppContext as _, Bounds, Pixels, Size, TestAppContext, point, px, size};
 
 use super::main_window::{MIN_SIZE, PREFERRED_SIZE};
 use super::{FRAME_ALLOWANCE, WindowFit, WindowRegistry, settings};
@@ -9,7 +9,7 @@ use crate::services::{assets::AssetResolver, i18n::LOCALE_LOCK};
 use crate::state::{AppState, Sources};
 use openlogi_core::config::Config;
 
-#[gpui_kit::test]
+#[gpui::test]
 fn settings_commands_reuse_the_live_window_and_reopen_after_close(cx: &mut TestAppContext) {
     let _locale = LOCALE_LOCK.lock().unwrap();
     cx.update(|cx| {
@@ -38,7 +38,7 @@ fn settings_commands_reuse_the_live_window_and_reopen_after_close(cx: &mut TestA
         });
     }
 
-    let other = cx.open_window(size(px(400.), px(300.)), |_, _| gpui_kit::Empty);
+    let other = cx.open_window(size(px(400.), px(300.)), |_, _| gpui::Empty);
     cx.update_window(other.into(), |_, window, _| window.activate_window())
         .unwrap();
     cx.update(|cx| assert_eq!(cx.active_window(), Some(other.into())));

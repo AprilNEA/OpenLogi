@@ -8,10 +8,10 @@ use openlogi_core::device::{
 };
 use openlogi_core::hid::DeviceRoute;
 
-#[gpui_kit::test]
-fn config_error_folder_button_opens_from_the_active_window(cx: &mut gpui_kit::TestAppContext) {
+#[gpui::test]
+fn config_error_folder_button_opens_from_the_active_window(cx: &mut gpui::TestAppContext) {
+    use gpui::{AppContext as _, Modifiers};
     use gpui_kit::component::Root;
-    use gpui_kit::{AppContext as _, Modifiers};
 
     use super::{AppView, menu};
     use crate::services::{assets::AssetResolver, i18n::LOCALE_LOCK};
@@ -59,12 +59,12 @@ fn config_error_folder_button_opens_from_the_active_window(cx: &mut gpui_kit::Te
     );
 }
 
-#[gpui_kit::test]
-fn main_window_renders_profile_confirmation_dialogs(cx: &mut gpui_kit::TestAppContext) {
+#[gpui::test]
+fn main_window_renders_profile_confirmation_dialogs(cx: &mut gpui::TestAppContext) {
     use std::{cell::Cell, rc::Rc};
 
+    use gpui::{AppContext as _, InteractiveElement as _, ParentElement as _, div};
     use gpui_kit::component::{Root, WindowExt as _};
-    use gpui_kit::{AppContext as _, InteractiveElement as _, ParentElement as _, div};
 
     use super::AppView;
     use crate::services::assets::AssetResolver;
@@ -113,10 +113,10 @@ fn main_window_renders_profile_confirmation_dialogs(cx: &mut gpui_kit::TestAppCo
 
 /// The device rename dialog must paint its own Save and Cancel buttons: a
 /// plain gpui-component dialog draws only the footer it is given.
-#[gpui_kit::test]
-fn the_device_rename_dialog_offers_save_and_cancel(cx: &mut gpui_kit::TestAppContext) {
+#[gpui::test]
+fn the_device_rename_dialog_offers_save_and_cancel(cx: &mut gpui::TestAppContext) {
+    use gpui::{AppContext as _, Modifiers};
     use gpui_kit::component::Root;
-    use gpui_kit::{AppContext as _, Modifiers};
 
     use super::{AppView, home::open_rename_dialog};
     use crate::services::{assets::AssetResolver, i18n::LOCALE_LOCK};
@@ -175,12 +175,12 @@ fn the_device_rename_dialog_offers_save_and_cancel(cx: &mut gpui_kit::TestAppCon
 /// The Pointer tab's Scrolling card carries the smooth-wheel switch, shows the
 /// saved setting (a smooth wheel turned on earlier switches off) and knows this
 /// link has `0x2121` (so it switches back on).
-#[gpui_kit::test]
-fn the_pointer_tab_offers_the_smooth_wheel(cx: &mut gpui_kit::TestAppContext) {
+#[gpui::test]
+fn the_pointer_tab_offers_the_smooth_wheel(cx: &mut gpui::TestAppContext) {
     use std::{cell::RefCell, rc::Rc};
 
+    use gpui::{AppContext as _, Modifiers, px, size};
     use gpui_kit::component::Root;
-    use gpui_kit::{AppContext as _, Modifiers, px, size};
 
     use super::AppView;
     use crate::services::{assets::AssetResolver, i18n::LOCALE_LOCK};
@@ -1427,16 +1427,13 @@ fn secure_input_needs_attention_only_while_it_pauses_a_key_binding() {
 /// Open the main window with Terminal holding Secure Input, F1 bound when
 /// `bind_a_key`, and return its root view.
 fn open_main_window_with_secure_input(
-    cx: &mut gpui_kit::TestAppContext,
+    cx: &mut gpui::TestAppContext,
     bind_a_key: bool,
-) -> (
-    gpui_kit::Entity<super::AppView>,
-    &mut gpui_kit::VisualTestContext,
-) {
+) -> (gpui::Entity<super::AppView>, &mut gpui::VisualTestContext) {
     use std::cell::RefCell;
     use std::rc::Rc;
 
-    use gpui_kit::AppContext as _;
+    use gpui::AppContext as _;
     use gpui_kit::component::Root;
     use openlogi_core::binding::Action;
 
@@ -1480,20 +1477,20 @@ fn f1() -> openlogi_core::config::KeyTrigger {
 }
 
 /// Draw a frame and report whether the attention bar names Secure Input.
-fn secure_input_notice_drawn(cx: &mut gpui_kit::VisualTestContext) -> bool {
+fn secure_input_notice_drawn(cx: &mut gpui::VisualTestContext) -> bool {
     cx.update(|window, cx| window.draw(cx).clear(cx));
     cx.debug_bounds("secure-input-notice").is_some()
 }
 
-#[gpui_kit::test]
-fn the_main_window_shows_secure_input_while_a_key_is_bound(cx: &mut gpui_kit::TestAppContext) {
+#[gpui::test]
+fn the_main_window_shows_secure_input_while_a_key_is_bound(cx: &mut gpui::TestAppContext) {
     let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
     let (_view, cx) = open_main_window_with_secure_input(cx, true);
     assert!(secure_input_notice_drawn(cx));
 }
 
-#[gpui_kit::test]
-fn the_main_window_hides_secure_input_with_no_key_bound(cx: &mut gpui_kit::TestAppContext) {
+#[gpui::test]
+fn the_main_window_hides_secure_input_with_no_key_bound(cx: &mut gpui::TestAppContext) {
     let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
     let (_view, cx) = open_main_window_with_secure_input(cx, false);
     assert!(!secure_input_notice_drawn(cx));
@@ -1502,8 +1499,8 @@ fn the_main_window_hides_secure_input_with_no_key_bound(cx: &mut gpui_kit::TestA
 /// The Keys tab's own view repaints only itself, so binding the first key or
 /// clearing the last one must also repaint the root view for the bar to
 /// follow while Secure Input stays on.
-#[gpui_kit::test]
-fn a_key_binding_edit_repaints_the_secure_input_notice(cx: &mut gpui_kit::TestAppContext) {
+#[gpui::test]
+fn a_key_binding_edit_repaints_the_secure_input_notice(cx: &mut gpui::TestAppContext) {
     use std::cell::Cell;
     use std::rc::Rc;
 
@@ -1521,7 +1518,7 @@ fn a_key_binding_edit_repaints_the_secure_input_notice(cx: &mut gpui_kit::TestAp
     });
     // What the Keys tab does: commit the binding and report the change
     // against the device on screen.
-    let edit_f1 = |cx: &mut gpui_kit::VisualTestContext, action: Option<Action>| {
+    let edit_f1 = |cx: &mut gpui::VisualTestContext, action: Option<Action>| {
         cx.update(|_, cx| {
             AppState::apply(cx, |state| {
                 let _ = state.commit_keyboard_binding(f1(), action);

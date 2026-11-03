@@ -1,4 +1,4 @@
-use gpui_kit::{
+use gpui::{
     Context, Entity, FocusHandle, InteractiveElement as _, IntoElement, KeyBinding, KeyDownEvent,
     Keystroke, Modifiers, ParentElement as _, Render, Styled as _, TestAppContext,
     VisualTestContext, Window, actions, div, prelude::FluentBuilder as _,
@@ -157,7 +157,7 @@ fn probe_window(cx: &mut TestAppContext) -> (Entity<Probe>, &mut VisualTestConte
     (probe, cx)
 }
 
-#[gpui_kit::test]
+#[gpui::test]
 fn a_recording_takes_one_key_press_ahead_of_key_bindings(cx: &mut TestAppContext) {
     let (probe, cx) = probe_window(cx);
 
@@ -176,7 +176,7 @@ fn a_recording_takes_one_key_press_ahead_of_key_bindings(cx: &mut TestAppContext
 
 /// The interceptor reads Shift from the window's modifier state, which GPUI
 /// updates from modifier changes and not from key presses (#2121).
-#[gpui_kit::test]
+#[gpui::test]
 fn a_recording_sees_shift_that_the_keystroke_dropped(cx: &mut TestAppContext) {
     let (probe, cx) = probe_window(cx);
 
@@ -193,7 +193,7 @@ fn a_recording_sees_shift_that_the_keystroke_dropped(cx: &mut TestAppContext) {
 
 /// #2138 review: leaving the editor, for example by switching tabs, must not
 /// leave a recording that swallows the next key press.
-#[gpui_kit::test]
+#[gpui::test]
 fn a_recording_ends_when_its_area_is_no_longer_rendered(cx: &mut TestAppContext) {
     let (probe, cx) = probe_window(cx);
 

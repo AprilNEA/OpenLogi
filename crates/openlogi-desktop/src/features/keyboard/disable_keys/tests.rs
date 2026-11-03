@@ -1,6 +1,6 @@
 use std::{collections::BTreeSet, sync::Arc};
 
-use gpui_kit::{
+use gpui::{
     AppContext as _, Entity, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, TestAppContext, point,
     px,
 };
@@ -118,7 +118,7 @@ fn answer_initial_read(
     other_requests
 }
 
-#[gpui_kit::test]
+#[gpui::test]
 fn general_external_reload_requires_latest_revision_receipt_then_fresh_read(
     cx: &mut TestAppContext,
 ) {
@@ -240,7 +240,7 @@ fn answer_post_receipt_read(
     cx.run_until_parked();
 }
 
-#[gpui_kit::test]
+#[gpui::test]
 fn general_refresh_failure_offers_a_working_reload_retry(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
     cx.update(theme::register_builtin_themes);
@@ -309,7 +309,7 @@ fn general_refresh_failure_offers_a_working_reload_retry(cx: &mut TestAppContext
     assert!(visual.debug_bounds("disable-keys-reload-retry").is_none());
 }
 
-#[gpui_kit::test]
+#[gpui::test]
 fn unavailable_agent_recovery_uses_the_current_language(cx: &mut TestAppContext) {
     let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
     let _restore = RestoreLocale(rust_i18n::locale().to_string());
@@ -400,7 +400,7 @@ impl Render for OfflineLoadHarness {
     }
 }
 
-#[gpui_kit::test]
+#[gpui::test]
 fn offline_unknown_and_loading_do_not_present_an_endless_spinner(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
     cx.update(theme::register_builtin_themes);
@@ -416,7 +416,7 @@ fn offline_unknown_and_loading_do_not_present_an_endless_spinner(cx: &mut TestAp
     }
 }
 
-#[gpui_kit::test]
+#[gpui::test]
 fn switch_focus_is_stable_but_not_shared_between_devices(cx: &mut TestAppContext) {
     let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
     let _restore = RestoreLocale(rust_i18n::locale().to_string());
@@ -506,7 +506,7 @@ fn all_recovery_errors_have_russian_product_messages() {
     }
 }
 
-#[gpui_kit::test]
+#[gpui::test]
 fn disabled_switch_does_not_write_or_take_focus(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
     cx.update(theme::register_builtin_themes);
@@ -677,22 +677,22 @@ fn exercise_save_retry(cx: &mut TestAppContext, keypress: Option<&'static str>) 
     );
 }
 
-#[gpui_kit::test]
+#[gpui::test]
 fn save_retry_click_preserves_external_binding_without_second_write(cx: &mut TestAppContext) {
     exercise_save_retry(cx, None);
 }
 
-#[gpui_kit::test]
+#[gpui::test]
 fn save_retry_enter_preserves_external_binding_without_second_write(cx: &mut TestAppContext) {
     exercise_save_retry(cx, Some("enter"));
 }
 
-#[gpui_kit::test]
+#[gpui::test]
 fn save_retry_space_preserves_external_binding_without_second_write(cx: &mut TestAppContext) {
     exercise_save_retry(cx, Some("space"));
 }
 
-#[gpui_kit::test]
+#[gpui::test]
 fn shared_reload_retry_is_inert_offline_and_retries_only_reload(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
     cx.update(theme::register_builtin_themes);
@@ -759,7 +759,7 @@ fn shared_reload_retry_is_inert_offline_and_retries_only_reload(cx: &mut TestApp
     );
 }
 
-#[gpui_kit::test]
+#[gpui::test]
 fn shared_read_retry_is_localized_and_restarts_the_failed_read(cx: &mut TestAppContext) {
     let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
     let _restore = RestoreLocale(rust_i18n::locale().to_string());
@@ -809,7 +809,7 @@ fn shared_read_retry_is_localized_and_restarts_the_failed_read(cx: &mut TestAppC
     assert!(receiver.try_recv().is_err());
 }
 
-#[gpui_kit::test]
+#[gpui::test]
 fn unsupported_read_has_localized_status_without_retry(cx: &mut TestAppContext) {
     let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
     let _restore = RestoreLocale(rust_i18n::locale().to_string());

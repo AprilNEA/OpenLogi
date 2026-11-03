@@ -7,12 +7,12 @@
 //! so it never reappears; "Enable" also runs one check immediately.
 
 use crate::ui::theme::Typography as _;
-use gpui_kit::component::{
-    Disableable as _, button::ButtonVariants as _, h_flex, scroll::ScrollableElement as _, v_flex,
-};
-use gpui_kit::{
+use gpui::{
     App, Context, FocusHandle, InteractiveElement, IntoElement, ParentElement as _, Render, Size,
     Styled as _, Subscription, Window, div, prelude::FluentBuilder as _, px,
+};
+use gpui_kit::component::{
+    Disableable as _, button::ButtonVariants as _, h_flex, scroll::ScrollableElement as _, v_flex,
 };
 
 use crate::app::menu::{CloseWindow, Minimize, Zoom};
@@ -155,7 +155,7 @@ impl Render for UpdateConsentView {
 
 #[cfg(test)]
 mod tests {
-    use gpui_kit::{
+    use gpui::{
         AppContext as _, Bounds, Modifiers, ScrollDelta, ScrollEvent, TestAppContext,
         VisualTestContext, point, size,
     };
@@ -165,7 +165,7 @@ mod tests {
     use crate::services::{assets::AssetResolver, i18n::LOCALE_LOCK};
     use crate::state::Sources;
 
-    #[gpui_kit::test]
+    #[gpui::test]
     fn consent_actions_stay_visible_while_long_copy_scrolls(cx: &mut TestAppContext) {
         let _locale = LOCALE_LOCK.lock().unwrap();
         cx.update(|cx| {
@@ -239,7 +239,7 @@ mod tests {
         rust_i18n::set_locale("en");
     }
 
-    #[gpui_kit::test]
+    #[gpui::test]
     fn invalid_manifest_disables_enable_but_allows_decline(cx: &mut TestAppContext) {
         let _locale = LOCALE_LOCK.lock().unwrap();
         rust_i18n::set_locale("en");

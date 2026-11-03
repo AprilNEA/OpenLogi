@@ -1,12 +1,12 @@
 //! Semantic selectable cards for bespoke pickers.
 
-use gpui_kit::base::Button as BaseButton;
-use gpui_kit::component::{Disableable, Selectable};
-use gpui_kit::{
+use gpui::{
     AnyElement, App, ClickEvent, ElementId, InteractiveElement, Interactivity, IntoElement,
     ParentElement, RenderOnce, Role, SharedString, StatefulInteractiveElement, StyleRefinement,
     Styled, Toggled, Window, prelude::FluentBuilder as _,
 };
+use gpui_kit::base::Button as BaseButton;
+use gpui_kit::component::{Disableable, Selectable};
 
 type ClickHandler = std::rc::Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 
@@ -121,7 +121,7 @@ impl RenderOnce for ChoiceCard {
 mod tests {
     use std::{cell::Cell, rc::Rc};
 
-    use gpui_kit::{
+    use gpui::{
         Bounds, Context, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, Pixels, Render,
         TestAppContext, canvas, div, point, px,
     };
@@ -155,7 +155,7 @@ mod tests {
         }
     }
 
-    fn activate_key(cx: &mut gpui_kit::VisualTestContext, key: &'static str) {
+    fn activate_key(cx: &mut gpui::VisualTestContext, key: &'static str) {
         let keystroke = Keystroke::parse(key).unwrap();
         cx.simulate_event(KeyDownEvent {
             keystroke: keystroke.clone(),
@@ -165,7 +165,7 @@ mod tests {
         cx.simulate_event(KeyUpEvent { keystroke });
     }
 
-    #[gpui_kit::test]
+    #[gpui::test]
     fn choice_card_is_focusable_and_activates_in_both_controlled_states(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         let activations = Rc::new(Cell::new(0));
@@ -196,7 +196,7 @@ mod tests {
         assert_eq!(parent_clicks.get(), 0);
     }
 
-    #[gpui_kit::test]
+    #[gpui::test]
     fn disabled_choice_card_is_inert_and_blocks_its_parent(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         let activations = Rc::new(Cell::new(0));
@@ -250,7 +250,7 @@ mod tests {
     /// The base button lays its root out as a row; a card must still stack its
     /// children top to bottom at the card's width, or a preview lands beside
     /// its label instead of above it.
-    #[gpui_kit::test]
+    #[gpui::test]
     fn choice_card_stacks_children_top_to_bottom_at_full_width(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         let first: PaintedBounds = Rc::default();

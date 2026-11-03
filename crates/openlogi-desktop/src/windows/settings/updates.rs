@@ -87,7 +87,7 @@ pub(super) fn updates_page(updater: Entity<Updater>) -> SettingPage {
 
 /// The Updates hero row: logo, name + version, a status pill, the live status
 /// message (or channel), and the one contextual action button.
-fn update_hero(updater: &Entity<Updater>, cx: &mut App) -> gpui_kit::Div {
+fn update_hero(updater: &Entity<Updater>, cx: &mut App) -> gpui::Div {
     let pal = crate::ui::theme::palette(cx);
     let status = updater.read(cx).status().clone();
     let channel = crate::platform::updater::channel_in_use(cx);
@@ -195,7 +195,7 @@ fn update_hero(updater: &Entity<Updater>, cx: &mut App) -> gpui_kit::Div {
 }
 
 /// The hero line's name for the channel this launch follows.
-fn channel_label(channel: UpdateChannel) -> gpui_kit::SharedString {
+fn channel_label(channel: UpdateChannel) -> gpui::SharedString {
     match channel {
         UpdateChannel::Stable => tr!("updates.stable_channel"),
         UpdateChannel::Beta => tr!("updates.beta_channel"),
@@ -230,11 +230,11 @@ fn channel_segment(cx: &App) -> ButtonGroup {
 }
 
 /// Read the published snapshot only; rendering must never probe the filesystem.
-fn installation_value(cx: &App) -> gpui_kit::Stateful<gpui_kit::Div> {
+fn installation_value(cx: &App) -> gpui::Stateful<gpui::Div> {
     let label = installation_label(*cx.global::<Installation>());
     div()
         .id("installation-source")
-        .role(gpui_kit::Role::Status)
+        .role(gpui::Role::Status)
         .aria_label(label.clone())
         .text_right()
         .text_sm()
@@ -243,7 +243,7 @@ fn installation_value(cx: &App) -> gpui_kit::Stateful<gpui_kit::Div> {
         .child(label)
 }
 
-fn installation_label(installation: Installation) -> gpui_kit::SharedString {
+fn installation_label(installation: Installation) -> gpui::SharedString {
     match installation {
         Installation::Detecting => tr!("updates.installation_detecting"),
         Installation::Detected(source) => match source {
@@ -293,7 +293,7 @@ fn release_link(cx: &App) -> Link {
 mod tests {
     use std::{cell::Cell, rc::Rc};
 
-    use gpui_kit::{
+    use gpui::{
         AppContext as _, Context, IntoElement, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers,
         ParentElement as _, Render, ScrollDelta, ScrollEvent, Styled as _, TestAppContext,
         VisualTestContext, Window, div, point,
@@ -349,7 +349,7 @@ mod tests {
         rust_i18n::set_locale("en");
     }
 
-    #[gpui_kit::test]
+    #[gpui::test]
     fn installation_completion_refreshes_open_settings(cx: &mut TestAppContext) {
         let _locale = LOCALE_LOCK.lock().unwrap();
         rust_i18n::set_locale("en");
@@ -368,7 +368,7 @@ mod tests {
             cx.set_global(Installation::Detecting);
         });
         let mut view = None;
-        let handle = cx.open_window(gpui_kit::size(px(920.), px(640.)), |window, cx| {
+        let handle = cx.open_window(gpui::size(px(920.), px(640.)), |window, cx| {
             let settings = cx.new(|cx| SettingsView::new(SettingsPage::Updates, window, cx));
             view = Some(settings.clone());
             gpui_kit::component::Root::new(settings, window, cx)
@@ -424,7 +424,7 @@ mod tests {
 
     /// Pointer clicks and Enter or Space on a focused button each pick their
     /// channel. Clicking the channel the settings already follow records it.
-    #[gpui_kit::test]
+    #[gpui::test]
     fn channel_buttons_commit_by_pointer_and_keyboard(cx: &mut TestAppContext) {
         struct Harness;
         impl Render for Harness {
@@ -465,7 +465,7 @@ mod tests {
             });
             AppState::set_global(state, cx);
         });
-        let handle = cx.open_window(gpui_kit::size(px(400.), px(120.)), |window, cx| {
+        let handle = cx.open_window(gpui::size(px(400.), px(120.)), |window, cx| {
             let harness = cx.new(|_| Harness);
             gpui_kit::component::Root::new(harness, window, cx)
         });
@@ -540,7 +540,7 @@ mod tests {
         visual.update(|window, cx| {
             // Source fields are primary row text, not captions. Native
             // SettingItem owns both labels, including their size and weight.
-            let expected_size = Some(gpui_kit::rems(0.875).into());
+            let expected_size = Some(gpui::rems(0.875).into());
             assert_eq!(installation_value(cx).style().text.font_size, expected_size);
             assert_eq!(release_link(cx).style().text.font_size, expected_size);
             let scale = window.scale_factor();

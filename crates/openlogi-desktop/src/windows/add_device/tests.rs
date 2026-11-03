@@ -1,4 +1,4 @@
-use gpui_kit::{AppContext as _, AssetSource, Modifiers, TestAppContext};
+use gpui::{AppContext as _, AssetSource, Modifiers, TestAppContext};
 use openlogi_core::config::Config;
 use openlogi_core::device::DeviceInventory;
 use openlogi_ipc::{AgentSnapshot, AgentStatus, ForegroundApps, InventoryHealth, PROTOCOL_VERSION};
@@ -56,7 +56,7 @@ fn receiver(name: &str, product_id: u16, uid: Option<&str>) -> ReceiverInfo {
     }
 }
 
-#[gpui_kit::test]
+#[gpui::test]
 fn reopening_keeps_the_selected_receiver_for_retry(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
     cx.update(theme::register_builtin_themes);
@@ -93,7 +93,7 @@ fn reopening_keeps_the_selected_receiver_for_retry(cx: &mut TestAppContext) {
     assert_eq!(request.selector, receiver_selector(&bolt).unwrap());
 }
 
-#[gpui_kit::test]
+#[gpui::test]
 fn a_refused_start_keeps_its_error_and_target_after_empty_snapshots(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
     cx.update(theme::register_builtin_themes);
@@ -146,7 +146,7 @@ fn a_refused_start_keeps_its_error_and_target_after_empty_snapshots(cx: &mut Tes
     });
 }
 
-#[gpui_kit::test]
+#[gpui::test]
 fn an_agent_session_supersedes_a_command_failure_and_can_be_dismissed(cx: &mut TestAppContext) {
     for phase in [
         PairingPhase::Searching,
@@ -170,7 +170,7 @@ fn an_agent_session_supersedes_a_command_failure_and_can_be_dismissed(cx: &mut T
     }
 }
 
-#[gpui_kit::test]
+#[gpui::test]
 fn changing_receiver_waits_for_cancellation_acknowledgement(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
     cx.update(theme::register_builtin_themes);
@@ -193,7 +193,7 @@ fn changing_receiver_waits_for_cancellation_acknowledgement(cx: &mut TestAppCont
     });
 }
 
-#[gpui_kit::test]
+#[gpui::test]
 fn a_recovered_receiver_identity_enables_the_same_open_picker(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
     cx.update(theme::register_builtin_themes);
@@ -243,7 +243,7 @@ fn a_recovered_receiver_identity_enables_the_same_open_picker(cx: &mut TestAppCo
     );
 }
 
-#[gpui_kit::test]
+#[gpui::test]
 fn choosing_bolt_and_retrying_keep_the_explicit_target(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
     cx.update(theme::register_builtin_themes);
@@ -320,7 +320,7 @@ fn only_identified_receivers_can_be_selected() {
     ));
 }
 
-#[gpui_kit::test]
+#[gpui::test]
 fn empty_receiver_hotplug_updates_the_picker(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
     cx.update(theme::register_builtin_themes);
@@ -357,7 +357,7 @@ fn empty_receiver_hotplug_updates_the_picker(cx: &mut TestAppContext) {
     );
 }
 
-#[gpui_kit::test]
+#[gpui::test]
 fn opening_waits_for_a_receiver_choice(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
     cx.update(theme::register_builtin_themes);
@@ -369,7 +369,7 @@ fn opening_waits_for_a_receiver_choice(cx: &mut TestAppContext) {
     );
 }
 
-#[gpui_kit::test]
+#[gpui::test]
 fn change_receiver_clears_a_failure_without_an_agent_session(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
     cx.update(theme::register_builtin_themes);
@@ -406,18 +406,18 @@ fn mouse_pairing_click_icons_are_embedded() {
 
 #[test]
 fn mouse_pairing_click_icon_resolves_text_color() {
-    let text_primary = gpui_kit::hsla(0.5, 0.5, 0.5, 1.0);
+    let text_primary = gpui::hsla(0.5, 0.5, 0.5, 1.0);
     let pal = Palette {
-        page: gpui_kit::hsla(0., 0., 0., 1.),
-        panel: gpui_kit::hsla(0., 0., 0., 1.),
-        control: gpui_kit::hsla(0., 0., 0., 1.),
-        control_hover: gpui_kit::hsla(0., 0., 0., 1.),
-        muted: gpui_kit::hsla(0., 0., 0., 1.),
-        border: gpui_kit::hsla(0., 0., 0., 1.),
+        page: gpui::hsla(0., 0., 0., 1.),
+        panel: gpui::hsla(0., 0., 0., 1.),
+        control: gpui::hsla(0., 0., 0., 1.),
+        control_hover: gpui::hsla(0., 0., 0., 1.),
+        muted: gpui::hsla(0., 0., 0., 1.),
+        border: gpui::hsla(0., 0., 0., 1.),
         text_primary,
-        text_muted: gpui_kit::hsla(0., 0., 0., 1.),
-        card_radius: gpui_kit::px(8.),
-        control_radius: gpui_kit::px(4.),
+        text_muted: gpui::hsla(0., 0., 0., 1.),
+        card_radius: gpui::px(8.),
+        control_radius: gpui::px(4.),
     };
     for click in [Click::Left, Click::Right] {
         let mut icon = click_icon_svg(click, pal);
@@ -449,7 +449,7 @@ impl Render for PointerPasskeyHarness {
     }
 }
 
-#[gpui_kit::test]
+#[gpui::test]
 fn pointer_passkey_panel_renders(cx: &mut TestAppContext) {
     let pal = cx.update(|cx| {
         gpui_kit::init(cx);
@@ -465,6 +465,6 @@ fn pointer_passkey_panel_renders(cx: &mut TestAppContext) {
     let bounds = cx
         .debug_bounds("passkey-sequence")
         .expect("passkey sequence must be laid out and painted");
-    assert!(bounds.size.width > gpui_kit::px(0.));
-    assert!(bounds.size.height > gpui_kit::px(0.));
+    assert!(bounds.size.width > gpui::px(0.));
+    assert!(bounds.size.height > gpui::px(0.));
 }

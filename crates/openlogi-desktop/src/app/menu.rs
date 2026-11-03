@@ -9,8 +9,8 @@
 //! On Linux/Windows the menus + key bindings are stored but never surfaced
 //! in a top-of-screen bar — calling `install` there is a harmless no-op.
 
+use gpui::{App, KeyBinding, Menu, MenuItem, OsAction, actions};
 use gpui_kit::component::input;
-use gpui_kit::{App, KeyBinding, Menu, MenuItem, OsAction, actions};
 use openlogi_core::brand::{HELP_URL, RELEASES_URL, REPO_URL};
 use url::Url;
 
@@ -144,7 +144,7 @@ fn menus(cx: &App) -> Vec<Menu> {
                 #[cfg(target_os = "macos")]
                 MenuItem::separator(),
                 #[cfg(target_os = "macos")]
-                MenuItem::os_submenu(tr!("app.services"), gpui_kit::SystemMenuType::Services),
+                MenuItem::os_submenu(tr!("app.services"), gpui::SystemMenuType::Services),
                 #[cfg(target_os = "macos")]
                 MenuItem::separator(),
                 #[cfg(target_os = "macos")]
@@ -230,13 +230,12 @@ fn device_menu_items(cx: &App) -> Vec<MenuItem> {
                     Some(battery) => format!("{} · {}", record.display_name, value_label(battery)),
                     None => record.display_name.clone(),
                 };
-                items.push(MenuItem::action(title, gpui_kit::NoAction).disabled(true));
+                items.push(MenuItem::action(title, gpui::NoAction).disabled(true));
             }
         }
         _ => {
             items.push(
-                MenuItem::action(tr!("device.no_devices_connected"), gpui_kit::NoAction)
-                    .disabled(true),
+                MenuItem::action(tr!("device.no_devices_connected"), gpui::NoAction).disabled(true),
             );
         }
     }

@@ -1,6 +1,6 @@
 use std::{cell::Cell, rc::Rc};
 
-use gpui_kit::{
+use gpui::{
     AppContext as _, Context, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, Render,
     TestAppContext, point,
 };
@@ -95,7 +95,7 @@ impl Render for ProfileTabHarness {
     }
 }
 
-fn activate_key(cx: &mut gpui_kit::VisualTestContext, key: &'static str) {
+fn activate_key(cx: &mut gpui::VisualTestContext, key: &'static str) {
     let keystroke = Keystroke::parse(key).unwrap();
     cx.simulate_event(KeyDownEvent {
         keystroke: keystroke.clone(),
@@ -105,7 +105,7 @@ fn activate_key(cx: &mut gpui_kit::VisualTestContext, key: &'static str) {
     cx.simulate_event(KeyUpEvent { keystroke });
 }
 
-#[gpui_kit::test]
+#[gpui::test]
 fn toggle_is_tab_focusable_and_reports_controlled_next_state(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
     let changes = Rc::new(Cell::new(None));
@@ -140,7 +140,7 @@ fn toggle_is_tab_focusable_and_reports_controlled_next_state(cx: &mut TestAppCon
     assert_eq!(changes.get(), Some(false));
 }
 
-#[gpui_kit::test]
+#[gpui::test]
 fn disabled_toggle_is_inert_and_blocks_its_parent(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
     let changes = Rc::new(Cell::new(None));
@@ -169,7 +169,7 @@ fn disabled_toggle_is_inert_and_blocks_its_parent(cx: &mut TestAppContext) {
     assert_eq!(parent_clicks.get(), 0);
 }
 
-#[gpui_kit::test]
+#[gpui::test]
 fn menu_row_is_tab_focusable_and_keyboard_activatable(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
     let activations = Rc::new(Cell::new(0));
@@ -192,12 +192,12 @@ fn menu_row_is_tab_focusable_and_keyboard_activatable(cx: &mut TestAppContext) {
 /// The guard is the point: `set_placeholder` notifies unconditionally, so
 /// an unguarded per-render restamp would re-render forever. Same text must
 /// not notify; a changed text must land.
-#[gpui_kit::test]
+#[gpui::test]
 fn localize_placeholder_restamps_only_on_change(cx: &mut TestAppContext) {
     struct Blank;
     impl Render for Blank {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            gpui_kit::Empty
+            gpui::Empty
         }
     }
 
@@ -222,7 +222,7 @@ fn localize_placeholder_restamps_only_on_change(cx: &mut TestAppContext) {
     });
 }
 
-#[gpui_kit::test]
+#[gpui::test]
 fn profile_tab_and_delete_are_separate_keyboard_targets(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
     let applications = Rc::new(Cell::new(0));
@@ -252,7 +252,7 @@ fn profile_tab_and_delete_are_separate_keyboard_targets(cx: &mut TestAppContext)
     assert_eq!(deletions.get(), 2);
 }
 
-#[gpui_kit::test]
+#[gpui::test]
 fn preset_chip_children_are_separate_keyboard_targets(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
     let applications = Rc::new(Cell::new(0));
@@ -285,7 +285,7 @@ fn preset_chip_children_are_separate_keyboard_targets(cx: &mut TestAppContext) {
 /// #2046: a stock selected `Button` differs from its neighbours only by the
 /// theme's pressed fill, about 1.07:1 on the light theme. A pill carries the
 /// accent mark instead, and only while there is something to choose.
-#[gpui_kit::test]
+#[gpui::test]
 fn only_an_enabled_selected_pill_carries_the_accent_mark(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
     let pal = cx.update(|cx| theme::palette(cx));

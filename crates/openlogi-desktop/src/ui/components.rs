@@ -4,6 +4,11 @@
 //! render time, so callers do not have to thread colours through free-function
 //! builders.
 
+use gpui::{
+    AnyElement, App, ClickEvent, ElementId, Entity, InteractiveElement, Interactivity, IntoElement,
+    ParentElement, Pixels, RenderOnce, Role, SharedString, Stateful, StatefulInteractiveElement,
+    Styled, Window, div, prelude::FluentBuilder as _, px, rgb,
+};
 use gpui_kit::base::Button as BaseButton;
 use gpui_kit::component::{
     Disableable, Icon, IconName, Selectable, Sizable, Size,
@@ -15,11 +20,6 @@ use gpui_kit::component::{
     select::{Select, SelectState},
     switch::Switch,
     v_flex,
-};
-use gpui_kit::{
-    AnyElement, App, ClickEvent, ElementId, Entity, InteractiveElement, Interactivity, IntoElement,
-    ParentElement, Pixels, RenderOnce, Role, SharedString, Stateful, StatefulInteractiveElement,
-    Styled, Window, div, prelude::FluentBuilder as _, px, rgb,
 };
 
 use super::theme::{self, ACCENT_BLUE, SelectableStyle as _, Typography as _};
@@ -287,7 +287,7 @@ impl RenderOnce for PanelCard {
         let pal = theme::palette(cx);
         div()
             .w_full()
-            .when(self.fill, gpui_kit::Styled::h_full)
+            .when(self.fill, gpui::Styled::h_full)
             .max_w_full()
             .min_w_0()
             .rounded(pal.card_radius)
@@ -504,7 +504,7 @@ impl RenderOnce for ProfileTab {
             .selected(self.selected)
             .aria_selected(self.selected)
             .accessibility_label(label.clone())
-            .when(!has_delete, gpui_kit::Styled::px_2)
+            .when(!has_delete, gpui::Styled::px_2)
             .when(has_delete, |tab| tab.pl_2().pr_1())
             .flex()
             .py_0p5()
@@ -574,7 +574,7 @@ impl RenderOnce for ProfileTab {
 /// A selected-state container for one DPI preset and its actions.
 #[derive(IntoElement)]
 pub(crate) struct PresetChip {
-    base: Stateful<gpui_kit::Div>,
+    base: Stateful<gpui::Div>,
     selected: bool,
     children: Vec<AnyElement>,
 }

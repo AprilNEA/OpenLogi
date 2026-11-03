@@ -13,13 +13,16 @@
     windows_subsystem = "windows"
 )]
 
-/// Translate into a [`gpui_kit::SharedString`]; declared here for crate-wide scope.
+// Keep existing GPUI paths while resolving all types through the Kit facade.
+extern crate gpui_kit as gpui;
+
+/// Translate into a [`gpui::SharedString`]; declared here for crate-wide scope.
 macro_rules! tr {
     ($($args:tt)*) => {
         // Catalog entries stay static; interpolated results are owned.
         match ::rust_i18n::t!($($args)*) {
-            ::std::borrow::Cow::Borrowed(s) => ::gpui_kit::SharedString::new_static(s),
-            ::std::borrow::Cow::Owned(s) => ::gpui_kit::SharedString::from(s),
+            ::std::borrow::Cow::Borrowed(s) => ::gpui::SharedString::new_static(s),
+            ::std::borrow::Cow::Owned(s) => ::gpui::SharedString::from(s),
         }
     };
 }
