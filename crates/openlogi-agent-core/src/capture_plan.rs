@@ -8,19 +8,24 @@
 //! plan of the session it arrived on, never against a global selected-device
 //! map.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use openlogi_core::binding::{Action, Binding, ButtonId, GestureDirection, default_binding};
+use openlogi_core::binding::{
+    Action, Binding, ButtonId, GamingLayout, GestureDirection, default_binding,
+};
 use openlogi_core::bindings::{button_bindings_for, hidpp_gesture_maps_for, oshook_gestures_for};
-use openlogi_core::config::{Config, ThumbwheelSensitivity};
+use openlogi_core::config::{Config, MomentumScrolling, OnboardMemory, ThumbwheelSensitivity};
 use openlogi_core::device_order::PhysicalDeviceKey;
 use openlogi_hid::DeviceRoute;
 use openlogi_hid::reprog_controls::DPI_MODE_SHIFT_CIDS;
 use openlogi_hid::session::gesture::{
-    CaptureSpec, DIVERTABLE_STANDARD_BUTTONS, GESTURE_SOURCE_BUTTONS,
+    CaptureSpec, DIVERTABLE_STANDARD_BUTTONS, GESTURE_SOURCE_BUTTONS, HostMode, OnboardTarget,
+    SlotRoute,
 };
 use tokio::sync::watch;
+
+use crate::runtime::PointerSelection;
 
 /// Hardware identity of one HID++ capture session.
 ///
@@ -71,11 +76,17 @@ pub struct DispatchPlan {
     /// it as Logi Options+ does. Read from the
     /// inversion source the main wheel uses on the device's current link,
     /// which [`plan_for_device`] cannot see: the orchestrator fills it in,
-    /// as it does [`Self::pointer_target`].
+    /// as it does `pointer`.
     pub invert_wheel: bool,
-    /// Pointer identity used to select these mouse bindings; absent for the
+    /// This device's effective momentum-scrolling settings (device override
+    /// or the app-wide default), carried with each report of its diverted
+    /// main wheel.
+    pub momentum: MomentumScrolling,
+    /// Pointer context used to select these mouse bindings; absent for the
     /// explicitly focused policy and keyboard input.
-    pub pointer_target: Option<openlogi_hook::PointerTarget>,
+    pub(crate) pointer: Option<PointerSelection>,
+    /// Bindings used while G-Shift is held.
+    pub shift_bindings: BTreeMap<ButtonId, Binding>,
 }
 
 /// One device's independently versioned hardware target and dispatch plan.
@@ -88,6 +99,47 @@ pub struct DeviceCapturePlan {
 }
 
 impl DeviceCapturePlan {
+    #[must_use]
+    pub fn with_onboard(mut self, config: &Config, layout: Option<&GamingLayout>) -> Self {
+        let key = &self.dispatch.config_key;
+        let shift = config.uses_gshift(key);
+        // Spy reports carry no motion, so gesture buttons stay with the OS hook.
+        let gestures = config.stored_bindings(key);
+        let keeps_gestures =
+            |button: ButtonId| matches!(gestures.get(&button), Some(Binding::Gesture(_)));
+        let may_capture = |button: ButtonId| {
+            config.app_settings.capture_mouse_events || !button.is_os_hook_button()
+        };
+        self.target.spec.onboard = match config.effective_onboard_memory(key, layout) {
+            None => None,
+            Some(OnboardMemory::Profile(index)) => Some(OnboardTarget::Profile(index)),
+            Some(OnboardMemory::Off) => layout.map(|layout| {
+                let diverted = &self.target.spec.divert_buttons;
+                OnboardTarget::Host(HostMode {
+                    slots: layout
+                        .buttons()
+                        .map(|button| {
+                            let captured = layout.needs_host_mode(button)
+                                || (shift
+                                    && may_capture(button)
+                                    && !keeps_gestures(button)
+                                    && layout.remappable().any(|b| b == button))
+                                || diverted.iter().any(|&(_, b)| b == button);
+                            let route = if captured {
+                                SlotRoute::Captured
+                            } else {
+                                SlotRoute::Native
+                            };
+                            (button, route)
+                        })
+                        .collect(),
+                    report_rate: config.report_rate(key),
+                })
+            }),
+        };
+        self
+    }
+
     /// Hand the `0x1b04` controls in `owned` to another session on the same
     /// device: they leave every divert set of this plan, and the dispatch map
     /// keeps resolving them so a press the other session forwards still finds
@@ -206,18 +258,70 @@ pub(crate) fn hidpp_side_gesture_maps_for(
         .collect()
 }
 
+/// Buttons that `config_key` binds unlike the `focused` application while
+/// the pointer selects the bindings of `hovered`.
+///
+/// A per-app override replaces a whole button
+/// ([`Config::effective_bindings`]). Every action that another button
+/// resolves to, whether tap, hold, or swipe, is therefore the one that the
+/// focused application gets.
+#[must_use]
+pub(crate) fn buttons_unlike_focus(
+    config: &Config,
+    config_key: Option<&str>,
+    hovered: Option<&str>,
+    focused: Option<&str>,
+) -> BTreeSet<ButtonId> {
+    let Some(key) = config_key.filter(|_| hovered != focused) else {
+        return BTreeSet::new();
+    };
+    let here = config.effective_bindings(key, hovered);
+    let there = config.effective_bindings(key, focused);
+    here.keys()
+        .chain(there.keys())
+        .filter(|button| here.get(button) != there.get(button))
+        .copied()
+        .collect()
+}
+
+/// `config_key`'s G-Shift layer as bindings.
+pub(crate) fn shift_bindings_for(config: &Config, config_key: &str) -> BTreeMap<ButtonId, Binding> {
+    config
+        .gshift_overrides(config_key)
+        .into_iter()
+        .flatten()
+        .map(|(button, action)| (*button, Binding::Single(action.clone())))
+        .collect()
+}
+
+/// The device a capture plan is built for.
+pub struct PlanDevice<'a> {
+    /// The physical device the plan's capture session belongs to.
+    pub physical_key: PhysicalDeviceKey,
+    /// The key of the device's settings in the config.
+    pub config_key: &'a str,
+    /// The route the plan captures on.
+    pub route: DeviceRoute,
+    /// The device's G-series layout, which names the stock functions of its
+    /// G buttons. `None` for a device without one.
+    pub layout: Option<&'a GamingLayout>,
+}
+
 /// Build one device's plan from the config (per-app effective for `app`).
 #[must_use]
 pub fn plan_for_device(
     config: &Config,
-    physical_key: PhysicalDeviceKey,
-    config_key: &str,
-    route: DeviceRoute,
+    PlanDevice {
+        physical_key,
+        config_key,
+        route,
+        layout,
+    }: PlanDevice<'_>,
     app: Option<&str>,
     rearm_generation: u64,
     os_mouse_hook_available: bool,
 ) -> DeviceCapturePlan {
-    let bindings = button_bindings_for(config, Some(config_key), app);
+    let bindings = button_bindings_for(config, Some(config_key), app, layout);
     // Gesture-mode OS-hook controls normally stay native so the hook sees the
     // press. Back/Forward may additionally request device-owned HID++ raw XY:
     // macOS uses it exclusively, while Windows keeps the hook as fallback.
@@ -323,6 +427,7 @@ pub fn plan_for_device(
                 // Needs the device's wheel capabilities and the settings of
                 // its current link, so the orchestrator fills it in.
                 divert_main_wheel: None,
+                onboard: None,
             },
             rearm_generation,
         },
@@ -333,7 +438,9 @@ pub fn plan_for_device(
             side_gesture_bindings,
             thumbwheel_sensitivity,
             invert_wheel: false,
-            pointer_target: None,
+            momentum: config.momentum_scrolling(config_key),
+            pointer: None,
+            shift_bindings: shift_bindings_for(config, config_key),
         },
     }
 }
@@ -341,6 +448,7 @@ pub fn plan_for_device(
 #[cfg(test)]
 mod tests {
     use openlogi_core::binding::{Binding, LongPressBinding, WheelHoldBinding};
+    use openlogi_core::hid::ProfileIndex;
     use openlogi_hid::reprog_controls::{
         GESTURE_BUTTON_CID, HAPTIC_PANEL_CID, MULTIPLATFORM_GESTURE_BUTTON_CID,
     };
@@ -376,6 +484,26 @@ mod tests {
         assert!(!CapturePublication::default().diverts_main_wheel(&route()));
     }
 
+    /// A device's dispatch carries its own momentum-scrolling settings, and
+    /// a device without them the app-wide default.
+    #[test]
+    fn the_dispatch_carries_the_devices_momentum_settings() {
+        let mut config = Config::default();
+        config.app_settings.momentum_scrolling.enabled = true;
+        let own = MomentumScrolling {
+            glide_ms: 800,
+            ..MomentumScrolling::default()
+        };
+        config.set_device_momentum_scrolling("mouse", Some(own));
+        let momentum = |key| {
+            plan_for_device(&config, key, route(), None, 0, true)
+                .dispatch
+                .momentum
+        };
+        assert_eq!(momentum("mouse"), own);
+        assert_eq!(momentum("other"), config.app_settings.momentum_scrolling);
+    }
+
     fn plan_for_device(
         config: &Config,
         config_key: &str,
@@ -386,14 +514,37 @@ mod tests {
     ) -> DeviceCapturePlan {
         super::plan_for_device(
             config,
-            PhysicalDeviceKey::parse("receiver:cafe:slot:2")
-                .expect("fixture should be a physical key"),
-            config_key,
-            route,
+            super::PlanDevice {
+                physical_key: PhysicalDeviceKey::parse("receiver:cafe:slot:2")
+                    .expect("fixture should be a physical key"),
+                config_key,
+                route,
+                layout: None,
+            },
             app,
             rearm_generation,
             os_mouse_hook_available,
         )
+    }
+
+    /// The plan the orchestrator builds for a G502 LIGHTSPEED: its bindings
+    /// and its onboard target see the same layout.
+    fn g502_plan(config: &Config) -> DeviceCapturePlan {
+        let layout = &openlogi_core::binding::G502_LIGHTSPEED;
+        super::plan_for_device(
+            config,
+            super::PlanDevice {
+                physical_key: PhysicalDeviceKey::parse("receiver:cafe:slot:2")
+                    .expect("fixture should be a physical key"),
+                config_key: "g502",
+                route: route(),
+                layout: Some(layout),
+            },
+            None,
+            0,
+            true,
+        )
+        .with_onboard(config, Some(layout))
     }
 
     /// Whether `plan` diverts `button` at all. The plan filters the divert
@@ -406,6 +557,122 @@ mod tests {
             .divert_buttons
             .iter()
             .any(|&(_, diverted)| diverted == button)
+    }
+
+    fn host_slots(plan: &DeviceCapturePlan) -> Option<Vec<(ButtonId, SlotRoute)>> {
+        match &plan.target.spec.onboard {
+            Some(OnboardTarget::Host(host)) => Some(host.slots.clone()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn g502_stays_onboard_until_a_host_only_button_is_rebound() {
+        let mut cfg = Config::default();
+        let plan = g502_plan(&cfg);
+        assert_eq!(plan.target.spec.onboard, None);
+
+        cfg.set_binding("g502", ButtonId::G9, Binding::Single(Action::Copy));
+        let plan = g502_plan(&cfg);
+        let slots = host_slots(&plan).expect("host mode");
+        let captured: Vec<_> = slots
+            .iter()
+            .filter(|(_, route)| *route == SlotRoute::Captured)
+            .map(|(b, _)| *b)
+            .collect();
+        assert_eq!(
+            captured,
+            [
+                ButtonId::G6,
+                ButtonId::G7,
+                ButtonId::G8,
+                ButtonId::G9,
+                ButtonId::WheelTiltRight,
+                ButtonId::WheelTiltLeft,
+            ],
+            "unbound standard buttons keep their native report"
+        );
+
+        cfg.set_binding("g502", ButtonId::Back, Binding::Single(Action::Copy));
+        let plan = g502_plan(&cfg);
+        assert!(
+            host_slots(&plan)
+                .unwrap()
+                .contains(&(ButtonId::Back, SlotRoute::Captured))
+        );
+    }
+
+    #[test]
+    fn an_untouched_g_button_keeps_its_stock_action_in_host_mode() {
+        let mut cfg = Config::default();
+        cfg.set_binding("g502", ButtonId::G9, Binding::Single(Action::Copy));
+        let plan = g502_plan(&cfg);
+        let slots = host_slots(&plan).expect("rebinding G9 enters host mode");
+        assert!(slots.contains(&(ButtonId::G7, SlotRoute::Captured)));
+        let action = |button| {
+            plan.dispatch
+                .bindings
+                .get(&button)
+                .map(Binding::click_action)
+        };
+        assert_eq!(action(ButtonId::G6), Some(Action::DpiShift));
+        assert_eq!(action(ButtonId::G7), Some(Action::PreviousDpiPreset));
+        assert_eq!(action(ButtonId::G8), Some(Action::NextDpiPreset));
+        assert_eq!(action(ButtonId::G9), Some(Action::Copy));
+    }
+
+    #[test]
+    fn gshift_captures_every_remappable_button() {
+        let mut cfg = Config::default();
+        cfg.set_binding("g502", ButtonId::Forward, Binding::Single(Action::GShift));
+        let plan = g502_plan(&cfg);
+        let slots = host_slots(&plan).expect("host mode");
+        assert!(slots.contains(&(ButtonId::MiddleClick, SlotRoute::Captured)));
+        assert!(slots.contains(&(ButtonId::Back, SlotRoute::Captured)));
+        assert!(slots.contains(&(ButtonId::LeftClick, SlotRoute::Native)));
+
+        cfg.set_gesture_mode("g502", ButtonId::Back, true);
+        let plan = g502_plan(&cfg);
+        assert!(
+            host_slots(&plan)
+                .unwrap()
+                .contains(&(ButtonId::Back, SlotRoute::Native)),
+            "a gesture button keeps its native report for the OS hook"
+        );
+    }
+
+    #[test]
+    fn mouse_capture_opt_out_keeps_standard_buttons_native_under_gshift() {
+        let mut cfg = Config::default();
+        cfg.app_settings.capture_mouse_events = false;
+        cfg.set_binding("g502", ButtonId::G7, Binding::Single(Action::GShift));
+        let plan = g502_plan(&cfg);
+        let slots = host_slots(&plan).expect("host mode");
+        for button in [ButtonId::MiddleClick, ButtonId::Back, ButtonId::Forward] {
+            assert!(
+                slots.contains(&(button, SlotRoute::Native)),
+                "{button:?} stays native"
+            );
+        }
+        assert!(slots.contains(&(ButtonId::G9, SlotRoute::Captured)));
+    }
+
+    #[test]
+    fn a_chosen_profile_wins_over_host_bindings() {
+        let mut cfg = Config::default();
+        cfg.set_binding("g502", ButtonId::G9, Binding::Single(Action::Copy));
+        cfg.set_onboard_memory(
+            "g502",
+            Some(OnboardMemory::Profile(ProfileIndex::new(5).unwrap())),
+        );
+        let plan = g502_plan(&cfg);
+        assert_eq!(
+            plan.target.spec.onboard,
+            Some(OnboardTarget::Profile(ProfileIndex::new(5).unwrap()))
+        );
+        cfg.set_onboard_memory("g502", Some(OnboardMemory::Off));
+        let plan = plan_for_device(&cfg, "g502", route(), None, 0, true).with_onboard(&cfg, None);
+        assert_eq!(plan.target.spec.onboard, None);
     }
 
     #[test]

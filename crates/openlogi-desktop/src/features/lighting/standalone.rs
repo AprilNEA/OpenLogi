@@ -3,9 +3,10 @@
 use crate::state::{AppState, DeviceKey, DeviceRecord, LightCommandStatus, StateEvent};
 use crate::ui::commit_slider::{CommitSlider, SliderRange};
 use crate::ui::components::Toggle;
+use crate::ui::slider_row::SliderRow;
 
 use super::visual::LightView;
-use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
+use crate::ui::theme::{self, Palette, Typography as _};
 use gpui::{
     BoxShadow, Context, Hsla, IntoElement, ParentElement, Render, Styled, Subscription, Window,
     div, hsla, point, prelude::FluentBuilder as _, px, rgb,
@@ -364,34 +365,17 @@ fn control_well(
     slider: impl IntoElement,
     pal: Palette,
 ) -> impl IntoElement {
-    v_flex()
-        .gap_3()
+    let (min, max) = endpoints;
+    div()
         .rounded(pal.control_radius)
         .border_1()
         .border_color(pal.border)
         .bg(pal.muted)
         .p_3()
         .child(
-            h_flex()
-                .justify_between()
-                .items_baseline()
-                .child(div().text_caption().text_color(pal.text_muted).child(title))
-                .child(
-                    div()
-                        .text_body()
-                        .text_color(rgb(ACCENT_BLUE))
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .child(value),
-                ),
-        )
-        .child(slider)
-        .child(
-            h_flex()
-                .justify_between()
-                .text_caption()
-                .text_color(pal.text_muted)
-                .child(endpoints.0)
-                .child(endpoints.1),
+            SliderRow::new(title, slider)
+                .value(value, [min.clone(), max.clone()])
+                .hint(h_flex().justify_between().child(min).child(max)),
         )
 }
 

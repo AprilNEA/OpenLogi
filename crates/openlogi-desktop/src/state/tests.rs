@@ -53,8 +53,10 @@ pub(crate) mod device_list;
 mod device_names;
 mod dpi;
 mod easy_switch;
+mod flow;
 mod fn_lock;
 pub(crate) mod force_sensing;
+pub(crate) mod keypad_pages;
 mod light_adoption;
 mod lighting;
 mod os_layout;
@@ -62,6 +64,7 @@ mod pointer_speed;
 mod profile_scope;
 mod reload;
 mod report_rate;
+mod sidetone;
 mod smartshift;
 mod smooth_wheel;
 mod transient_identity;
@@ -100,6 +103,7 @@ pub(crate) fn direct_inventory(unit_id: [u8; 4]) -> DeviceInventory {
             }),
             capabilities: Some(Capabilities::presumed_from_kind(DeviceKind::Mouse)),
             settings_revision: 0,
+            hidpp10: false,
         }],
     }
 }

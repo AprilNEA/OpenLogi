@@ -1,0 +1,87 @@
+{
+  "schema_version": 1,
+  "id": "mx-creative-keypad-001-profile",
+  "name": "MX Creative Keypad",
+  "inventories": [
+    {
+      "receiver": {
+        "name": "MX Keypad",
+        "vendor_id": 1133,
+        "product_id": 50004,
+        "unique_id": null
+      },
+      "paired": [
+        {
+          "slot": 255,
+          "codename": "MX Keypad",
+          "wpid": null,
+          "kind": "numpad",
+          "online": true,
+          "battery": null,
+          "model_info": {
+            "entity_count": 4,
+            "serial_number": "OL-SER-00001",
+            "unit_id": [
+              79,
+              76,
+              68,
+              1
+            ],
+            "transports": {
+              "usb": true,
+              "equad": false,
+              "btle": false,
+              "bluetooth": false
+            },
+            "model_ids": [
+              50004,
+              0,
+              0
+            ],
+            "extended_model_id": 2
+          },
+          "capabilities": {
+            "buttons": true,
+            "pointer": false,
+            "lighting": false,
+            "scroll_inversion": false,
+            "hires_wheel": false,
+            "thumbwheel": false,
+            "haptic_feedback": false,
+            "haptic_panel": false,
+            "dpi_gestures": false,
+            "fn_lock": false
+          }
+        }
+      ]
+    }
+  ],
+  "standalone": [],
+  "settings": [
+    {
+      "route": {
+        "Direct": {
+          "vendor_id": 1133,
+          "product_id": 50004
+        }
+      },
+      "dpi": {
+        "support": "unsupported"
+      },
+      "smartshift": {
+        "support": "unsupported"
+      },
+      "wheel": {
+        "support": "unsupported"
+      },
+      "backlight": {
+        "support": "unsupported"
+      },
+      "fn_lock": {
+        "support": "unsupported"
+      },
+      "lighting": "unsupported",
+      "light": "unsupported"
+    }
+  ]
+}

@@ -14,7 +14,7 @@ use openlogi_core::uinput;
 
 use crate::PermissionStatus;
 
-/// Probe Linux input-device access: `/dev/uinput` (write), at least one
+/// Probe Linux input-device access: `/dev/uinput` (read/write), at least one
 /// Logitech `/dev/hidraw*` (read/write), and those devices' `/dev/input/event*`
 /// nodes (read).
 ///
@@ -33,7 +33,7 @@ use crate::PermissionStatus;
 #[must_use]
 pub fn input_device_access() -> PermissionStatus {
     Probes {
-        uinput_writable: probe_uinput(),
+        uinput_read_write: probe_uinput(),
         hidraw: probe_logitech_hidraw(),
         event: probe_logitech_event(),
     }
@@ -66,8 +66,8 @@ pub(crate) enum EventProbe {
 /// All three probes, taken together.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Probes {
-    /// `/dev/uinput` opened for writing.
-    pub(crate) uinput_writable: bool,
+    /// `/dev/uinput` opened for reading and writing.
+    pub(crate) uinput_read_write: bool,
     pub(crate) hidraw: HidrawProbe,
     pub(crate) event: EventProbe,
 }
@@ -81,7 +81,7 @@ pub(crate) struct Probes {
 /// reported as broken.
 impl From<Probes> for PermissionStatus {
     fn from(probes: Probes) -> Self {
-        match (probes.uinput_writable, probes.hidraw, probes.event) {
+        match (probes.uinput_read_write, probes.hidraw, probes.event) {
             (false, _, _) | (_, HidrawProbe::Denied, _) | (_, _, EventProbe::Denied) => {
                 Self::Denied
             }
@@ -91,11 +91,24 @@ impl From<Probes> for PermissionStatus {
     }
 }
 
-/// Is `/dev/uinput` writable? NotFound (module not loaded) counts as no.
+/// Can the injector and the hook create their virtual devices on
+/// `/dev/uinput`? NotFound (module not loaded) counts as no.
 fn probe_uinput() -> bool {
+    probe_uinput_at(Path::new("/dev/uinput"))
+}
+
+/// Open `node` for reading and writing, as `evdev`'s
+/// `VirtualDeviceBuilder::new` does before it creates a device.
+///
+/// A write-only probe is not enough. Another package's rule that sets the
+/// node's mode to `0620` clamps the ACL mask, so logind's `uaccess` entry
+/// grants write alone. The node then passes a write-only `open()`, and device
+/// creation still fails with `EACCES` (#1414).
+pub(crate) fn probe_uinput_at(node: &Path) -> bool {
     fs::OpenOptions::new()
+        .read(true)
         .write(true)
-        .open("/dev/uinput")
+        .open(node)
         .is_ok()
 }
 

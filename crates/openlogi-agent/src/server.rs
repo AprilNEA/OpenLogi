@@ -24,15 +24,16 @@ use openlogi_core::device::DeviceInventory;
 use openlogi_hid::{
     BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
     ForceSensingInfo, HapticRestore, HapticRestoreOutcome, HapticWaveform, HidppOperation,
-    LightCommand, PointerSpeed, ReceiverSelector, ReportRate, ReportRateInfo, ScrollWheelMode,
-    SmartShiftStatus, WriteError,
+    LightCommand, OnboardState, PointerSpeed, ReceiverSelector, ReportRate, ReportRateInfo,
+    ScrollWheelMode, SidetoneLevel, SmartShiftStatus, WriteError,
 };
 use openlogi_ipc::transport;
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus,
-    BacklightObservation, ClientKind, ConfigReloadError, Generation, Identity, LockKeyObservation,
-    MonitorEvent, NoticeObservation, Observation, PROTOCOL_VERSION, PairingCommandError,
-    PairingFailure, PairingUpdate, RingObservation, SavedConfig, SavedConfigVerdict,
+    BacklightObservation, ClientKind, ConfigReloadError, FlowIdentity, FlowPairTarget,
+    FlowPairingCommandError, Generation, Identity, LockKeyObservation, MonitorEvent,
+    NoticeObservation, Observation, PROTOCOL_VERSION, PairingCommandError, PairingFailure,
+    PairingUpdate, RingObservation, SavedConfig, SavedConfigVerdict,
 };
 use succession::Compat;
 
@@ -116,6 +117,8 @@ impl AgentServer {
                 let launch_at_login = config.app_settings.launch_at_login;
                 #[cfg(target_os = "macos")]
                 let app_icon = config.app_settings.app_icon;
+                #[cfg(target_os = "macos")]
+                let show_in_menu_bar = config.app_settings.show_in_menu_bar;
                 let language = config.app_settings.language.clone();
                 match saved {
                     None => self.orchestrator.lock().await.reload_config(config),
@@ -133,6 +136,10 @@ impl AgentServer {
                 // restyle — the GUI can only reach the Dock and the bundle.
                 #[cfg(target_os = "macos")]
                 crate::tray::set_icon(app_icon);
+                // The "Show in menu bar" toggle too: install or remove the
+                // item now rather than at the next agent launch.
+                #[cfg(target_os = "macos")]
+                crate::tray::set_visible(show_in_menu_bar, app_icon);
                 // And the interface language: re-resolve the process locale
                 // (the Windows popup rebuilds per show and picks it up alone)
                 // and rebuild the macOS menu, whose titles were stamped at
@@ -305,6 +312,19 @@ impl Agent for AgentServer {
         self.shared.set_disable_keys(&route, desired).await
     }
 
+    async fn read_onboard(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<OnboardState, WriteError> {
+        self.shared
+            .device(&route)
+            .run(HidppOperation::ReadOnboard, |c| async move {
+                openlogi_hid::get_onboard_on(&c).await
+            })
+            .await
+    }
+
     async fn request_accessibility_prompt(self, _: Context) {
         Hook::prompt_accessibility();
     }
@@ -421,6 +441,17 @@ impl Agent for AgentServer {
             .rename_easy_switch_host(&route, slot, name)
             .await
     }
+
+    async fn switch_host(self, _: Context, route: DeviceRoute, host: u8) -> Result<(), WriteError> {
+        self.shared
+            .device(&route)
+            .run(HidppOperation::ChangeHost, |c| async move {
+                let changed = openlogi_hid::switch_host_on(&c, host).await?;
+                info!(%route, host, changed, "switch_host");
+                Ok(())
+            })
+            .await
+    }
     async fn reload_saved_config(
         self,
         _: Context,
@@ -436,6 +467,28 @@ impl Agent for AgentServer {
     ) -> Result<SavedConfigVerdict, ConfigReloadError> {
         let revision = self.reload(Some(&saved)).await?;
         Ok(saved_config_verdict(&saved, revision))
+    }
+
+    async fn read_sidetone(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<SidetoneLevel, WriteError> {
+        self.shared
+            .device(&route)
+            .run(HidppOperation::ReadSidetone, |c| async move {
+                openlogi_hid::get_sidetone_on(&c).await
+            })
+            .await
+    }
+
+    async fn set_sidetone(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        level: SidetoneLevel,
+    ) -> Result<SidetoneLevel, WriteError> {
+        self.shared.set_sidetone(&route, level).await
     }
 
     async fn observe_notices(self, _: Context, since: Generation) -> NoticeObservation {
@@ -551,6 +604,34 @@ impl Agent for AgentServer {
     async fn action_ring_cancel(self, _: Context, session_id: u64) {
         self.action_ring.cancel(session_id);
         self.ring_haptics.end_session(session_id);
+    }
+
+    async fn read_flow_identity(self, _: Context) -> Result<FlowIdentity, FlowPairingCommandError> {
+        self.shared.flow.pairing().identity().await
+    }
+
+    async fn start_flow_pairing(self, _: Context) -> Result<(), FlowPairingCommandError> {
+        self.shared.flow.pairing().start().await
+    }
+
+    async fn pair_flow_peer(
+        self,
+        _: Context,
+        target: FlowPairTarget,
+    ) -> Result<(), FlowPairingCommandError> {
+        self.shared.flow.pairing().pair(target).await
+    }
+
+    async fn confirm_flow_pairing(self, _: Context) -> Result<(), FlowPairingCommandError> {
+        self.shared.flow.pairing().confirm().await
+    }
+
+    async fn cancel_flow_pairing(self, _: Context) -> Result<(), FlowPairingCommandError> {
+        self.shared.flow.pairing().cancel().await
+    }
+
+    async fn stop_flow_pairing(self, _: Context) {
+        self.shared.flow.pairing().stop().await;
     }
 }
 
@@ -1056,6 +1137,7 @@ impl RingHapticPlayer {
 /// `main` holds the single-instance lock (`agent.lock`), so no other live agent
 /// owns this socket and any leftover is from a dead instance.
 pub async fn run(server: AgentServer) {
+    tokio::spawn(reload_after_flow_pairing(server.clone()));
     let listener = match transport::bind() {
         Ok(listener) => listener,
         Err(e) => {
@@ -1082,6 +1164,16 @@ pub async fn run(server: AgentServer) {
                     tokio::spawn(response);
                 }),
         );
+    }
+}
+
+/// Reload `config.toml` each time Flow pairing saved a peer in it, so the
+/// peer reaches Flow and the snapshot the way a saved edit would.
+async fn reload_after_flow_pairing(server: AgentServer) {
+    let mut saved = server.shared.flow.pairing().saved();
+    while saved.changed().await.is_ok() {
+        // A failed reload logged why and kept the config it had.
+        let _ = server.reload(None).await;
     }
 }
 

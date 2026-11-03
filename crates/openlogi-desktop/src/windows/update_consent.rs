@@ -15,7 +15,7 @@ use gpui_component::{
     Disableable as _, button::ButtonVariants as _, h_flex, scroll::ScrollableElement as _, v_flex,
 };
 
-use crate::app::menu::{CloseWindow, Minimize, Zoom};
+use crate::app::menu::{CloseWindow, DIALOG_KEY_CONTEXT, Dismiss, Minimize, Zoom};
 use crate::state::AppState;
 use crate::ui::components::control_button;
 use crate::ui::theme;
@@ -84,7 +84,9 @@ impl Render for UpdateConsentView {
             .size_full()
             .bg(pal.page)
             .text_color(pal.text_primary)
+            .key_context(DIALOG_KEY_CONTEXT)
             .track_focus(&self.focus_handle)
+            .on_action(|_: &Dismiss, window, cx| answer(false, window, cx))
             .on_action(|_: &CloseWindow, window, _| window.remove_window())
             .on_action(|_: &Minimize, window, _| window.minimize_window())
             .on_action(|_: &Zoom, window, _| window.zoom_window())
@@ -240,12 +242,13 @@ mod tests {
     }
 
     #[gpui::test]
-    fn invalid_manifest_disables_enable_but_allows_decline(cx: &mut TestAppContext) {
+    fn invalid_manifest_disables_enable_but_escape_declines(cx: &mut TestAppContext) {
         let _locale = LOCALE_LOCK.lock().unwrap();
         rust_i18n::set_locale("en");
         cx.update(|cx| {
             gpui_component::init(cx);
             theme::register_builtin_themes(cx);
+            crate::app::menu::install(cx);
             let (commands, _) = tokio::sync::mpsc::unbounded_channel();
             let state = cx.new(|_| {
                 AppState::new(Sources::in_memory(
@@ -272,8 +275,8 @@ mod tests {
             assert!(!state.app_settings().check_for_updates);
         });
 
-        let decline = visual.debug_bounds("update-consent-decline").unwrap();
-        visual.simulate_click(decline.center(), Modifiers::default());
+        // Escape answers the way "Not now" does.
+        visual.simulate_keystrokes("escape");
         cx.update(|cx| {
             let state = AppState::try_read(cx).unwrap();
             assert!(state.app_settings().update_prompt_seen);

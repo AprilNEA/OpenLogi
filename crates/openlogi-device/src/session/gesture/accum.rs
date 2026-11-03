@@ -120,7 +120,9 @@ impl CaptureAccum {
     ) {
         match event {
             RawControlEvent::DivertedButtons(cids) => {
-                // The swipe accumulator belongs to the raw-XY gesture diverts.
+                // The swipe accumulator belongs to the gesture-mode diverts:
+                // raw-XY, or plain for a source without raw XY, whose holds
+                // never move and so always end as a click.
                 // When a gesture-source control is instead diverted as a plain
                 // button (a single binding, not gesture mode), its press must flow
                 // through the `button_cids` loop only — not also emit a click.

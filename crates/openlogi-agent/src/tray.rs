@@ -115,6 +115,25 @@ pub fn relocalize() {
     });
 }
 
+/// Show or hide the menu-bar item to match the "Show in menu bar" setting,
+/// after a config reload — so the toggle applies without an agent restart.
+/// Same shape as [`set_icon`]: the work hops to the main queue. Installing
+/// an already-shown item or removing a hidden one is a no-op.
+pub fn set_visible(show: bool, app_icon: AppIcon) {
+    DispatchQueue::main().exec_async(move || {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        let installed = TRAY.with_borrow(Option::is_some);
+        if show && !installed {
+            install_status_item(mtm, app_icon);
+        } else if !show && let Some(state) = TRAY.take() {
+            status_item::remove_status_item(&state.item);
+            info!("menu-bar item removed");
+        }
+    });
+}
+
 struct SessionTargetIvars {
     gate: Arc<ActivityGate>,
 }
@@ -249,9 +268,8 @@ fn gui_is_running() -> bool {
 ///
 /// `show_in_menu_bar` honors the user's preference: when `false`, the same
 /// Accessory loop runs with no status item (the agent stays fully headless; the
-/// tokio core still does all the work). The toggle takes effect on the agent's
-/// next launch — a no-restart live toggle would need a main-thread hop from the
-/// IPC reload path (deferred; it can't be verified headlessly).
+/// tokio core still does all the work). A later config reload flips it live
+/// through [`set_visible`].
 /// `device_io_signal` is the hardware gate; it opens only while the Mac is in
 /// a full wake and this login session owns the console (`activity_macos`).
 pub fn run_app_loop(
@@ -274,9 +292,11 @@ pub fn run_app_loop(
     // Before `run()`: AppKit remaps the probes for the keyboard layout only
     // once the loop has turned with them in the main menu.
     openlogi_inject::prepare_menu_shortcuts(mtm);
-    // Bind the status item (+ its target/menu) so they outlive `run()` — the
-    // menu items only weakly reference the target. `None` when hidden.
-    let _tray = show_in_menu_bar.then(|| install_status_item(mtm, app_icon));
+    // `TRAY` keeps the status item (which retains its menu) and the target
+    // the menu items only weakly reference alive past `run()`.
+    if show_in_menu_bar {
+        install_status_item(mtm, app_icon);
+    }
 
     // AppKit documents that an app launched into an inactive session receives
     // `NSWorkspaceSessionDidResignActiveNotification` between its will- and
@@ -327,31 +347,21 @@ fn install_session_observer(gate: Arc<ActivityGate>) -> Retained<SessionTarget> 
     target
 }
 
-/// Build and install the menu-bar status item, returning the objects that must
-/// stay alive for the app's lifetime (the status item, the action target the
-/// menu items weakly reference, and the menu itself).
-fn install_status_item(
-    mtm: MainThreadMarker,
-    app_icon: AppIcon,
-) -> (
-    Retained<objc2_app_kit::NSStatusItem>,
-    Retained<MenuTarget>,
-    Retained<objc2_app_kit::NSMenu>,
-) {
+/// Build and install the menu-bar status item into [`TRAY`], which keeps it
+/// (and, through it, its menu) and the action target the menu items weakly
+/// reference alive until [`set_visible`] removes it.
+fn install_status_item(mtm: MainThreadMarker, app_icon: AppIcon) {
     let target = MenuTarget::new(mtm);
     let status_item = status_item::create_status_item();
     status_item::set_png_icon(&status_item, mtm, glyph(app_icon), "OpenLogi");
-    TRAY.with_borrow_mut(|slot| {
-        *slot = Some(TrayState {
-            item: status_item.clone(),
-            target: target.clone(),
-        });
-    });
     let menu = build_menu(mtm, &target);
     status_item.setMenu(Some(&menu));
+    TRAY.set(Some(TrayState {
+        item: status_item,
+        target,
+    }));
 
     info!("menu-bar item installed");
-    (status_item, target, menu)
 }
 
 /// Build the tray menu with the current locale's titles. The one constructor

@@ -8,42 +8,36 @@ use std::{
 
 use tracing::trace;
 
-use super::MAX_RAW_REPORT_LENGTH;
-
 #[cfg(test)]
 mod tests;
 
 /// An owned raw HID report delivered to a [`ChannelObserver`].
 ///
-/// Reports are bounded to the largest report accepted by the channel. The
-/// channel only constructs this copy when observation is enabled.
+/// Reports are as wide as the channel accepts them — up to the 4095-byte
+/// vendor image write — so the copy is sized to the report. The channel only
+/// constructs this copy when observation is enabled.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ObservedReport {
-    bytes: [u8; MAX_RAW_REPORT_LENGTH],
-    len: usize,
+    bytes: Box<[u8]>,
 }
 
 impl ObservedReport {
     pub(super) fn from_bytes(bytes: &[u8]) -> Self {
-        debug_assert!(bytes.len() <= MAX_RAW_REPORT_LENGTH);
-        let mut owned = [0; MAX_RAW_REPORT_LENGTH];
-        owned[..bytes.len()].copy_from_slice(bytes);
         Self {
-            bytes: owned,
-            len: bytes.len(),
+            bytes: bytes.into(),
         }
     }
 
     /// Returns the report bytes, including the report ID.
     #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
-        &self.bytes[..self.len]
+        &self.bytes
     }
 
     /// Returns the report length, including the report ID.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.len
+        self.bytes.len()
     }
 
     /// Returns whether the report is empty.
@@ -52,7 +46,7 @@ impl ObservedReport {
     /// the conventional collection API.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.len == 0
+        self.bytes.is_empty()
     }
 }
 

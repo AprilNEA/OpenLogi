@@ -1,5 +1,6 @@
 //! Add-application popover for per-application profiles.
 
+use crate::ui::theme::FocusRingStyle as _;
 use std::sync::Arc;
 
 use gpui::{
@@ -249,13 +250,7 @@ fn applications_toggle(
                 pal.control_hover
             })
         })
-        .focus_visible(move |button| {
-            button.bg(if expanded {
-                theme::accent_tint_hover()
-            } else {
-                pal.control_hover
-            })
-        })
+        .focus_visible(move |style| style.focus_ring(pal))
         .child(
             // The chevron sits centred in a row-icon-wide slot so the label
             // starts where the application names below do.
@@ -412,6 +407,7 @@ mod tests {
 
     #[gpui::test]
     fn catalog_list_scrolls_inside_the_picker_popover(cx: &mut TestAppContext) {
+        let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
         cx.update(gpui_component::init);
         let clicked: Rc<RefCell<Option<usize>>> = Rc::default();
         let (_, cx) = cx.add_window_view({

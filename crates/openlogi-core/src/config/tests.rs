@@ -3,12 +3,13 @@
 use std::{assert_matches, fs};
 
 use super::*;
-use crate::binding::{default_binding, default_gesture_binding};
-use crate::hid::{Dpi, SmartShiftAutoDisengage, SmartShiftThreshold, TunableTorque};
+use crate::binding::{G502_LIGHTSPEED, default_binding, default_gesture_binding};
+use crate::hid::{Dpi, ReportRate, SmartShiftAutoDisengage, SmartShiftThreshold, TunableTorque};
 
 mod app_settings;
 mod device_settings;
 mod files;
+mod flow;
 mod gestures;
 mod identity;
 mod keyboard;

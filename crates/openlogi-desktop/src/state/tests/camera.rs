@@ -1,4 +1,5 @@
-//! Camera settings: the legacy-key migration and camera-triggered automation.
+//! Camera settings: the legacy-key migration, the preview's stream mode, and
+//! camera-triggered automation.
 
 use super::*;
 
@@ -59,6 +60,104 @@ fn migrate_does_not_overwrite_existing_model_settings() {
             .map(|c| c.0["brightness"]),
         Some(99)
     );
+}
+
+const STREAM_KEY: &str = "camera:046d:0893";
+
+fn stream_mode(width: u32, height: u32, fps: u32) -> openlogi_camera::StreamMode {
+    openlogi_camera::StreamMode { width, height, fps }
+}
+
+#[test]
+fn no_stream_mode_is_saved_until_one_is_chosen() {
+    let state = camera_state(Config::ephemeral());
+    assert_eq!(state.camera_stream_mode(STREAM_KEY), None);
+}
+
+#[test]
+fn a_chosen_stream_mode_is_saved_and_announced() {
+    let mut state = camera_state(Config::ephemeral());
+    let mode = stream_mode(1920, 1080, 60);
+
+    let events = state.commit_camera_stream_mode(STREAM_KEY, mode);
+
+    assert_eq!(events, [StateEvent::CameraChanged]);
+    assert_eq!(state.camera_stream_mode(STREAM_KEY), Some(mode));
+    // Another camera's choice is its own.
+    assert_eq!(state.camera_stream_mode("camera:046d:085e"), None);
+}
+
+#[test]
+fn choosing_the_saved_stream_mode_again_announces_nothing() {
+    let mut state = camera_state(Config::ephemeral());
+    let mode = stream_mode(1280, 720, 30);
+    let _ = state.commit_camera_stream_mode(STREAM_KEY, mode);
+
+    assert!(
+        state.commit_camera_stream_mode(STREAM_KEY, mode).is_empty(),
+        "a repeat pick must not restart the stream"
+    );
+    assert_eq!(state.camera_stream_mode(STREAM_KEY), Some(mode));
+}
+
+#[test]
+fn a_changed_stream_mode_replaces_the_saved_one() {
+    let mut state = camera_state(Config::ephemeral());
+    let _ = state.commit_camera_stream_mode(STREAM_KEY, stream_mode(1920, 1080, 60));
+
+    let events = state.commit_camera_stream_mode(STREAM_KEY, stream_mode(640, 480, 15));
+
+    assert_eq!(events, [StateEvent::CameraChanged]);
+    assert_eq!(
+        state.camera_stream_mode(STREAM_KEY),
+        Some(stream_mode(640, 480, 15))
+    );
+}
+
+#[test]
+fn a_stream_mode_is_not_saved_among_the_uvc_controls() {
+    // The controls map is what the panel writes to the camera and what a
+    // profile snapshots; the preview's mode is neither.
+    let mut state = camera_state(Config::ephemeral());
+
+    let _ = state.commit_camera_stream_mode(STREAM_KEY, stream_mode(1280, 720, 30));
+
+    assert!(state.config.camera_controls(STREAM_KEY).is_none());
+    assert!(state.config.camera_stream_mode(STREAM_KEY).is_some());
+}
+
+#[test]
+fn saving_a_stream_mode_keeps_the_uvc_controls_and_they_keep_it() {
+    let mut config = Config::ephemeral();
+    config.set_camera_controls(STREAM_KEY, camera_controls(42));
+    let mut state = camera_state(config);
+    let mode = stream_mode(1920, 1080, 30);
+
+    let _ = state.commit_camera_stream_mode(STREAM_KEY, mode);
+    assert_eq!(
+        state.camera_control(STREAM_KEY, openlogi_camera::CameraControl::Brightness),
+        Some(42),
+        "choosing a mode must not lose a saved control"
+    );
+
+    let _ = state.commit_camera_control(STREAM_KEY, openlogi_camera::CameraControl::Contrast, 7);
+    let _ = state.commit_camera_auto(STREAM_KEY, openlogi_camera::AutoToggle::Focus, true);
+    assert_eq!(
+        state.camera_stream_mode(STREAM_KEY),
+        Some(mode),
+        "adjusting a control must not lose the chosen mode"
+    );
+}
+
+#[test]
+fn a_stream_mode_with_a_zero_is_not_saved() {
+    let mut state = camera_state(Config::ephemeral());
+
+    let events = state.commit_camera_stream_mode(STREAM_KEY, stream_mode(1920, 1080, 0));
+
+    assert!(events.is_empty());
+    assert_eq!(state.camera_stream_mode(STREAM_KEY), None);
+    assert!(state.config.camera_stream_mode(STREAM_KEY).is_none());
 }
 
 #[cfg(target_os = "macos")]

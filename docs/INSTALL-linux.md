@@ -68,6 +68,36 @@ The installer enables and starts `openlogi-agent.service` for the current user
 when systemd is available; failure to reach the user service manager does not
 roll back an otherwise successful package installation.
 
+## Arch Linux (AUR)
+
+The [`openlogi`](https://aur.archlinux.org/packages/openlogi) AUR package
+builds the tagged release from source and installs the binaries, the desktop
+entry, the udev rules, and the agent's user service. Install it with an AUR
+helper:
+
+```sh
+yay -S openlogi    # or: paru -S openlogi
+```
+
+Or build it by hand:
+
+```sh
+git clone https://aur.archlinux.org/openlogi.git
+cd openlogi
+makepkg -si
+```
+
+Then reload the udev rules and start the agent for your user:
+
+```sh
+sudo udevadm control --reload && sudo udevadm trigger
+systemctl --user enable --now openlogi-agent.service
+```
+
+The package is community-maintained and follows each stable release. The
+signed `.pkg.tar.zst` from the installer above is the alternative when you
+don't want to compile.
+
 ## NixOS
 
 The Flake in the repository's `packaging/` directory provides a package and a
@@ -190,8 +220,10 @@ Four production executables land in `target/release/`:
 
 OpenLogi needs:
 
-- **Write access to `/dev/uinput`** — to create the virtual input device for
-  button remapping.
+- **Read/write access to `/dev/uinput`** — to create the virtual input device
+  for button remapping. Write access alone is not enough: device creation opens
+  the node read/write, so a rule from another package that sets its mode to
+  `0620` blocks it.
 - **Read/write access to `/dev/hidraw*`** — to send HID++ commands to the Bolt
   receiver, or to the device itself when it is paired over Bluetooth.
 - **Read access to the mouse's `/dev/input/event*` node** — the hook grabs the
@@ -212,8 +244,7 @@ Verify access (should open without error):
 
 ```sh
 # Check uinput
-openlogi-agent --check-uinput 2>/dev/null || \
-    test -w /dev/uinput && echo "uinput OK"
+test -r /dev/uinput && test -w /dev/uinput && echo "uinput OK"
 
 # Check a hidraw node
 ls -la /dev/hidraw*

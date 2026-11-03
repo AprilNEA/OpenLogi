@@ -88,7 +88,21 @@ const MAX_BOLT_SLOTS: u8 = 6;
 /// table over a link that drops individual reports, which `hidpp::device`
 /// re-asks for per entry. At 6 s one lost report consumed the whole budget and
 /// the walk was abandoned mid-table, surfacing as a mouse that never appeared.
+///
+/// A due refresh of a known device bounds its re-read by
+/// [`REFRESH_WALK_BUDGET`](super::cache::REFRESH_WALK_BUDGET) instead, so that
+/// a device which answered its ping does not use up this budget (#2107).
 const PROBE_TIMEOUT: Duration = Duration::from_secs(25);
+
+// A refresh is a ping, its bounded re-read, a battery read, and, once per
+// connection on a keyboard, a lock-key read. Each read outside the walk is one
+// request.
+const _: () = assert!(
+    super::cache::REFRESH_WALK_BUDGET.as_millis()
+        + 3 * hidpp::channel::SEND_RESPONSE_TIMEOUT.as_millis()
+        < PROBE_TIMEOUT.as_millis(),
+    "a refresh must end inside the direct probe budget"
+);
 
 /// Probe budget for receiver nodes (Bolt/Unifying/Lightspeed dongles).
 ///

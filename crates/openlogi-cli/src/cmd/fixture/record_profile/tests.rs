@@ -11,7 +11,7 @@ use openlogi_core::hid::{
     BacklightChange, BacklightControls, BacklightMode, BacklightState, BacklightStatus,
     DisableKeysMask, DisableKeysState, Dpi, DpiInfo, EasySwitchHosts, EasySwitchSlot, FnLockState,
     ForceSensingInfo, HostConnection, LightCommand, PasskeyMethod, PointerSpeed, ReceiverSelector,
-    ReportRate, ReportRateInfo, ScrollWheelMode, SmartShiftStatus,
+    ReportRate, ReportRateInfo, ScrollWheelMode, SidetoneLevel, SmartShiftStatus,
 };
 use openlogi_fixture::{
     CANONICAL_DEVICE_PROFILE_JSON, SyntheticIdentityKind, classify_synthetic_identity_bytes,
@@ -20,10 +20,10 @@ use openlogi_fixture::{
 use openlogi_ipc::client::ProtocolSkew;
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentStatus, BacklightObservation,
-    ClientKind, ConfigReloadError, ForegroundApps, Generation, Identity, InventoryHealth,
-    LockKeyObservation, MonitorEvent, NoticeObservation, Observation, PROTOCOL_VERSION,
-    PairingCommandError, PairingFailure, PairingPhase, PairingUpdate, RingObservation, SavedConfig,
-    SavedConfigVerdict,
+    ClientKind, ConfigReloadError, FlowIdentity, FlowPairTarget, FlowPairingCommandError,
+    FlowStatus, ForegroundApps, Generation, Identity, InventoryHealth, LockKeyObservation,
+    MonitorEvent, NoticeObservation, Observation, PROTOCOL_VERSION, PairingCommandError,
+    PairingFailure, PairingPhase, PairingUpdate, RingObservation, SavedConfig, SavedConfigVerdict,
 };
 use tarpc::client::RpcError;
 use tarpc::context::Context as TarpcContext;
@@ -48,6 +48,7 @@ enum ReadFamily {
     PointerSpeed,
     ForceSensing,
     DisableKeys,
+    Sidetone,
 }
 
 #[derive(Clone)]
@@ -168,6 +169,14 @@ impl Agent for TestAgent {
         _fn_lock: bool,
     ) -> Result<FnLockState, WriteError> {
         unreachable!("profile capture must never write Fn-lock")
+    }
+
+    async fn read_onboard(
+        self,
+        _: TarpcContext,
+        _route: DeviceRoute,
+    ) -> Result<openlogi_core::hid::OnboardState, WriteError> {
+        unreachable!("profile capture does not read onboard memory")
     }
 
     async fn unpair_device(
@@ -401,6 +410,46 @@ impl Agent for TestAgent {
     ) -> Result<EasySwitchHosts, WriteError> {
         unreachable!("profile capture must never rename a host")
     }
+
+    async fn switch_host(
+        self,
+        _: TarpcContext,
+        _route: DeviceRoute,
+        _host: u8,
+    ) -> Result<(), WriteError> {
+        unreachable!("profile capture must never switch a host")
+    }
+
+    async fn read_flow_identity(
+        self,
+        _: TarpcContext,
+    ) -> Result<FlowIdentity, FlowPairingCommandError> {
+        unreachable!("profile capture does not read the Flow identity")
+    }
+
+    async fn start_flow_pairing(self, _: TarpcContext) -> Result<(), FlowPairingCommandError> {
+        unreachable!("profile capture must never pair a computer")
+    }
+
+    async fn pair_flow_peer(
+        self,
+        _: TarpcContext,
+        _target: FlowPairTarget,
+    ) -> Result<(), FlowPairingCommandError> {
+        unreachable!("profile capture must never pair a computer")
+    }
+
+    async fn confirm_flow_pairing(self, _: TarpcContext) -> Result<(), FlowPairingCommandError> {
+        unreachable!("profile capture must never pair a computer")
+    }
+
+    async fn cancel_flow_pairing(self, _: TarpcContext) -> Result<(), FlowPairingCommandError> {
+        unreachable!("profile capture must never pair a computer")
+    }
+
+    async fn stop_flow_pairing(self, _: TarpcContext) {
+        unreachable!("profile capture must never pair a computer")
+    }
     async fn reload_saved_config(
         self,
         _: TarpcContext,
@@ -445,6 +494,28 @@ impl Agent for TestAgent {
         _force: u16,
     ) -> Result<ForceSensingInfo, WriteError> {
         unreachable!("profile capture must never write the press force")
+    }
+
+    async fn read_sidetone(
+        self,
+        _: TarpcContext,
+        route: DeviceRoute,
+    ) -> Result<SidetoneLevel, WriteError> {
+        self.read(
+            ReadFamily::Sidetone,
+            &route,
+            |settings| &settings.sidetone,
+            0x8300,
+        )
+    }
+
+    async fn set_sidetone(
+        self,
+        _: TarpcContext,
+        _route: DeviceRoute,
+        _level: SidetoneLevel,
+    ) -> Result<SidetoneLevel, WriteError> {
+        unreachable!("profile capture must never write the sidetone")
     }
 
     async fn read_disable_keys(
@@ -556,6 +627,7 @@ fn fixture_agent_with(edit: impl FnOnce(&mut DeviceProfile)) -> TestAgent {
             recent: Vec::new(),
         },
         lights: Vec::new(),
+        flow: FlowStatus::default(),
     };
     TestAgent::from_profile(profile, snapshot)
 }
@@ -583,8 +655,10 @@ fn assert_receiver_capture_observations(inspection: &TestAgent) {
             ReadFamily::Smartshift,
             ReadFamily::Wheel,
             // A mouse has no `0x1982`, so no backlight read is issued.
+            ReadFamily::EasySwitch,
             ReadFamily::Smartshift,
             ReadFamily::DisableKeys,
+            ReadFamily::EasySwitch,
         ]
     );
 }

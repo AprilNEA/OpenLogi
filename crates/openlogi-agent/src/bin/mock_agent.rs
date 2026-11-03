@@ -34,11 +34,15 @@
 //!   toggles behave like a live device.
 //! - `start_pairing` runs a scripted Bolt flow: discovery → passkey → paired,
 //!   and the paired keyboard joins the inventory.
+//! - `start_flow_pairing` runs a scripted Flow pairing: two nearby computers
+//!   appear, any of them or a typed address shows a code, and once both users
+//!   confirm, the peer is saved in `config.toml` as the agent saves it.
 //!
 //! While it runs, the mock reads one console command per stdin line (`help`
 //! lists them) and changes what it reports: a device's battery, link, or
 //! failing reads and writes; a lock-key or backlight indicator; frozen test
-//! time; or every client connection, dropped as an agent restart drops them.
+//! time; a Flow peer's link or the other side of Flow pairing; or every
+//! client connection, dropped as an agent restart drops them.
 
 use std::ffi::OsString;
 use std::fs;
@@ -64,16 +68,17 @@ use openlogi_core::single_instance::{self, InstanceError, Role};
 use openlogi_fixture::{DeviceProfile, FixtureError, ProfileDeviceSettings, ProfileSetting};
 use openlogi_hid::{
     BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
-    ForceSensingInfo, LightCommand, PasskeyMethod, PointerSpeed, ReceiverSelector, ReportRate,
-    ReportRateInfo, ScrollWheelMode, SmartShiftStatus, WriteError,
+    ForceSensingInfo, LightCommand, OnboardState, PasskeyMethod, PointerSpeed, ReceiverSelector,
+    ReportRate, ReportRateInfo, ScrollWheelMode, SidetoneLevel, SmartShiftStatus, WriteError,
 };
 use openlogi_ipc::transport;
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus,
-    BacklightObservation, ClientKind, ConfigReloadError, ForegroundApps, FoundDevice, Generation,
-    Identity, InventoryHealth, LockKeyChange, LockKeyObservation, MonitorEvent, NoticeKind,
-    NoticeObservation, OBSERVE_HOLD, Observation, PROTOCOL_VERSION, PairingCommandError,
-    PairingFailure, PairingPhase, PairingUpdate, RingObservation, SavedConfig, SavedConfigVerdict,
+    BacklightObservation, ClientKind, ConfigReloadError, FlowIdentity, FlowPairTarget,
+    FlowPairingCommandError, ForegroundApps, FoundDevice, Generation, Identity, InventoryHealth,
+    LockKeyChange, LockKeyObservation, MonitorEvent, NoticeKind, NoticeObservation, OBSERVE_HOLD,
+    Observation, PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingPhase,
+    PairingUpdate, RingObservation, SavedConfig, SavedConfigVerdict,
 };
 use succession::Compat;
 use tarpc::context::Context;
@@ -84,6 +89,8 @@ use tracing::{info, warn};
 
 #[path = "mock_agent/control.rs"]
 mod control;
+#[path = "mock_agent/flow.rs"]
+mod flow;
 #[path = "mock_agent/profile.rs"]
 mod profile;
 
@@ -413,6 +420,7 @@ struct State {
     disable_keys_reads: u64,
     disable_keys_writes: u64,
     reload_calls: u64,
+    flow: flow::MockFlow,
 }
 
 impl State {
@@ -451,6 +459,7 @@ impl State {
             disable_keys_reads: 0,
             disable_keys_writes: 0,
             reload_calls: 0,
+            flow: flow::MockFlow::default(),
         })
     }
 
@@ -790,6 +799,7 @@ impl State {
             model_info: None,
             capabilities: Some(Capabilities::default()),
             settings_revision: 0,
+            hidpp10: false,
         });
         self.profile
             .settings
@@ -978,6 +988,7 @@ fn snapshot_of(state: &State) -> AgentSnapshot {
         pairing: state.phase.clone(),
         foreground: state.foreground(),
         lights: Vec::new(),
+        flow: state.flow.status(),
     }
 }
 
@@ -1159,6 +1170,17 @@ impl Agent for MockAgent {
         Ok(*stored)
     }
 
+    async fn read_onboard(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<OnboardState, WriteError> {
+        info!(%route, "read_onboard (no onboard memory in the mock)");
+        Err(WriteError::FeatureUnsupported {
+            feature_hex: 0x8100,
+        })
+    }
+
     async fn unpair_device(self, _: Context, route: DeviceRoute) -> Result<(), PairingFailure> {
         let result = self.state.lock().await.unpair(&route);
         info!(%route, ok = result.is_ok(), "unpair_device");
@@ -1233,6 +1255,27 @@ impl Agent for MockAgent {
         info!(%route, force, applied = stored.current, "set_force_sensing");
         Ok(*stored)
     }
+    async fn read_sidetone(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<SidetoneLevel, WriteError> {
+        let state = self.state.lock().await;
+        profile_value(&state.settings_for(&route)?.sidetone, &route, 0x8300).copied()
+    }
+    async fn set_sidetone(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        level: SidetoneLevel,
+    ) -> Result<SidetoneLevel, WriteError> {
+        let mut state = self.state.lock().await;
+        let settings = state.settings_for_mut(&route)?;
+        let stored = profile_value_mut(&mut settings.sidetone, &route, 0x8300)?;
+        *stored = level;
+        info!(%route, %level, "set_sidetone");
+        Ok(level)
+    }
     async fn set_backlight(
         self,
         _: Context,
@@ -1275,6 +1318,12 @@ impl Agent for MockAgent {
         }
         info!(%route, slot, "rename_easy_switch_host");
         Ok(stored.clone())
+    }
+
+    async fn switch_host(self, _: Context, route: DeviceRoute, host: u8) -> Result<(), WriteError> {
+        self.state.lock().await.settings_for(&route)?;
+        info!(%route, host, "switch_host (no-op in the mock)");
+        Ok(())
     }
     /// The mock reports no changes on its lights, so it has none to keep.
     async fn reload_saved_config(
@@ -1516,6 +1565,34 @@ impl Agent for MockAgent {
         validate_light_command(&state, &route, LightCommand::Power(enabled))?;
         info!(%route, enabled, "set_light_manual_power");
         Ok(())
+    }
+
+    async fn read_flow_identity(self, _: Context) -> Result<FlowIdentity, FlowPairingCommandError> {
+        Ok(Self::flow_identity())
+    }
+
+    async fn start_flow_pairing(self, _: Context) -> Result<(), FlowPairingCommandError> {
+        self.open_flow_pairing().await
+    }
+
+    async fn pair_flow_peer(
+        self,
+        _: Context,
+        target: FlowPairTarget,
+    ) -> Result<(), FlowPairingCommandError> {
+        self.pair_flow(target).await
+    }
+
+    async fn confirm_flow_pairing(self, _: Context) -> Result<(), FlowPairingCommandError> {
+        self.confirm_flow().await
+    }
+
+    async fn cancel_flow_pairing(self, _: Context) -> Result<(), FlowPairingCommandError> {
+        self.cancel_flow().await
+    }
+
+    async fn stop_flow_pairing(self, _: Context) {
+        self.stop_flow().await;
     }
 }
 

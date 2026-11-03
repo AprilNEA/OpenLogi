@@ -182,7 +182,7 @@ impl RawHidChannel for MockRawHidChannel {
     }
 }
 
-fn raw_report(msg: HidppMessage) -> Vec<u8> {
+pub(crate) fn raw_report(msg: HidppMessage) -> Vec<u8> {
     let mut buf = [0u8; LONG_REPORT_LENGTH];
     let len = msg.write_raw(&mut buf);
     buf[..len].to_vec()

@@ -171,6 +171,7 @@ OpenLogi 能做、而 Options+ 做不到的事：
 
 > [!IMPORTANT]
 > 先退出 **Logi Options+**（Linux 上还有 Solaar）。同一个接收器同时只能由一个应用占用。
+> 在 macOS 上，**Karabiner-Elements** 也会独占它修改的蓝牙键盘。请在 Karabiner-Elements → Settings → Devices 中为该键盘关闭 **Modify events**。
 
 | 平台 | 系统 | 架构 |
 | --- | --- | --- |
@@ -212,7 +213,13 @@ brew install --cask openlogi
 curl -fsSL https://github.com/AprilNEA/OpenLogi/releases/latest/download/install.sh | sh
 ```
 
-想先审阅脚本再运行，或使用 Flatpak、NixOS、无 systemd 的发行版，见 [INSTALL-linux.md](INSTALL-linux.md)。
+在 Arch Linux 上，AUR 软件包 [`openlogi`](https://aur.archlinux.org/packages/openlogi) 会从源码构建发布版本：
+
+```sh
+yay -S openlogi
+```
+
+想先审阅脚本再运行，或使用 AUR 软件包、Flatpak、NixOS、无 systemd 的发行版，见 [INSTALL-linux.md](INSTALL-linux.md)。
 
 ### Windows
 

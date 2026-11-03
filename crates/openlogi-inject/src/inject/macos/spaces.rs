@@ -17,6 +17,7 @@ use std::sync::{LazyLock, mpsc};
 use std::time::{Duration, Instant};
 
 use block2::RcBlock;
+use core_graphics::display::CGDisplay;
 use objc2::msg_send;
 use objc2::rc::{Allocated, Retained, autoreleasepool};
 use objc2::runtime::{AnyClass, AnyObject, ProtocolObject};
@@ -107,12 +108,70 @@ fn start(direction: Direction) {
 fn cursor_display() -> Option<u32> {
     let event = CGEvent::new(None)?;
     let point = CGEvent::location(Some(&event));
-    let mut displays = [0; 2];
+    // Only a mirror set's displays overlap, so every display a point lies
+    // on fits here, far above any real mirror set.
+    let mut displays = [0; 8];
+    let capacity = u32::try_from(displays.len()).ok()?;
     let mut count = 0;
-    // SAFETY: the two-element buffer and count are valid writable outputs.
-    let error = unsafe { CGGetDisplaysWithPoint(point, 2, displays.as_mut_ptr(), &raw mut count) };
-    // Ambiguous mirrored displays fail closed rather than guessing a target.
-    (error == CGError::Success && count == 1 && displays[0] != 0).then_some(displays[0])
+    // SAFETY: the buffer holds `capacity` IDs and count is a valid writable
+    // output.
+    let error =
+        unsafe { CGGetDisplaysWithPoint(point, capacity, displays.as_mut_ptr(), &raw mut count) };
+    if error != CGError::Success {
+        return None;
+    }
+    let hits = displays.get(..usize::try_from(count).ok()?)?;
+    mirror_set(hits.iter().map(|&display| Quartz.root(display)))
+}
+
+/// The one mirror set all of `roots` name, as its root display. A mirror
+/// set is one desktop with one row of Spaces, so a cursor on its primary and
+/// its mirrors at once still has one target (#2147). No display, or displays
+/// of two different sets, fail closed rather than guessing a target.
+fn mirror_set(roots: impl IntoIterator<Item = u32>) -> Option<u32> {
+    let mut roots = roots.into_iter();
+    let root = roots.next().filter(|&root| root != 0)?;
+    roots.all(|other| other == root).then_some(root)
+}
+
+/// The two questions Quartz answers about a display's mirror set. A seam so
+/// [`MirrorSets::root`] is testable without a mirrored display.
+trait MirrorSets {
+    /// The primary of `display`'s hardware mirror set, or `display` itself
+    /// outside one (`CGDisplayPrimaryDisplay`).
+    fn primary(&self, display: u32) -> u32;
+
+    /// The display `display` copies, or 0 when it copies none
+    /// (`CGDisplayMirrorsDisplay`).
+    fn mirrors(&self, display: u32) -> u32;
+
+    /// The display `display`'s mirror set is drawn from, or `display` itself
+    /// when it mirrors nothing. A hardware set resolves to its primary first,
+    /// then to the display that primary copies, so either answer reporting
+    /// the set is enough.
+    fn root(&self, display: u32) -> u32 {
+        let primary = match self.primary(display) {
+            0 => display,
+            primary => primary,
+        };
+        match self.mirrors(primary) {
+            0 => primary,
+            source => source,
+        }
+    }
+}
+
+/// The live display configuration.
+struct Quartz;
+
+impl MirrorSets for Quartz {
+    fn primary(&self, display: u32) -> u32 {
+        CGDisplay::new(display).primary_display()
+    }
+
+    fn mirrors(&self, display: u32) -> u32 {
+        CGDisplay::new(display).mirrors_display()
+    }
 }
 
 struct Observer {

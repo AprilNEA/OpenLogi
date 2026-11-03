@@ -9,16 +9,16 @@
 //! the mouse. When the mouse refuses the write, a note under the slider says
 //! so, because the slider keeps showing the saved speed.
 
-use gpui::{
-    AnyElement, App, Context, InteractiveElement, IntoElement, ParentElement, Styled, Window, div,
-};
-use gpui_component::{h_flex, slider::Slider, v_flex};
+use gpui::prelude::FluentBuilder as _;
+use gpui::{AnyElement, App, Context, InteractiveElement, IntoElement, ParentElement, Window, div};
+use gpui_component::slider::Slider;
 use openlogi_core::hid::PointerSpeed;
 
 use crate::state::{AppState, DeviceKey, PointerSpeedLoad};
 use crate::ui::commit_slider::{CommitSlider, SliderRange};
+use crate::ui::slider_row::SliderRow;
 use crate::ui::status::{retry_line, status_line};
-use crate::ui::theme::{Palette, Typography as _};
+use crate::ui::theme::Palette;
 
 /// What the row needs about the selected mouse.
 pub(super) struct PointerSpeedFacts {
@@ -100,8 +100,8 @@ impl PointerSpeedSlider {
     }
 }
 
-/// The row: a header with the speed as a percent, the slider or a status
-/// line, and what the setting does.
+/// The row: the speed as a percent and what the setting does, then the
+/// slider or a status line, and a note when the mouse refused the speed.
 pub(super) fn pointer_speed_section(
     facts: PointerSpeedFacts,
     slider: Option<&PointerSpeedSlider>,
@@ -142,39 +142,23 @@ pub(super) fn pointer_speed_section(
             status_line(tr!("pointer.pointer_speed_unsupported"), pal).into_any_element()
         }
     };
-    v_flex()
-        .gap_3()
-        .w_full()
-        .child(
-            h_flex()
-                .justify_between()
-                .items_baseline()
-                .child(
-                    div()
-                        .text_body()
-                        .text_color(pal.text_muted)
-                        .child(tr!("pointer.pointer_speed")),
-                )
-                .children(shown.map(|speed| {
-                    div().text_body().text_color(pal.text_primary).child(tr!(
-                        "pointer.pointer_speed_percent",
-                        percent => speed.slider_percent()
-                    ))
-                })),
+    let percent = |speed: PointerSpeed| {
+        tr!(
+            "pointer.pointer_speed_percent",
+            percent => speed.slider_percent()
         )
-        .child(body)
-        .children((refused && reachable).then(|| {
-            div()
-                .debug_selector(|| "pointer-speed-refusal".into())
-                .text_caption()
-                .text_color(pal.text_muted)
-                .child(tr!("pointer.pointer_speed_not_applied"))
-        }))
-        .child(
-            div()
-                .text_caption()
-                .text_color(pal.text_muted)
-                .child(tr!("pointer.pointer_speed_description")),
-        )
+    };
+    SliderRow::new(tr!("pointer.pointer_speed"), body)
+        .description(tr!("pointer.pointer_speed_description"))
+        .when_some(shown, |row, speed| {
+            row.value(percent(speed), [percent(PointerSpeed::MAX)])
+        })
+        .when(refused && reachable, |row| {
+            row.hint(
+                div()
+                    .debug_selector(|| "pointer-speed-refusal".into())
+                    .child(tr!("pointer.pointer_speed_not_applied")),
+            )
+        })
         .into_any_element()
 }

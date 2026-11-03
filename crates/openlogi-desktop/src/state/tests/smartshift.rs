@@ -1,9 +1,11 @@
 //! SmartShift write feedback against stale reads, and the re-read after the
-//! mouse changes its wheel mode itself.
+//! mouse changes its wheel mode itself, and the config floor on every write.
+
+use openlogi_core::config::{SMARTSHIFT_AUTO_DISENGAGE_DEFAULT, SmartShift};
 
 use super::fn_lock::drain;
 use super::*;
-use crate::services::ipc::{Command, ReadSmartShift};
+use crate::services::ipc::{Command, ReadSmartShift, SetSmartShift};
 use crate::state::SmartShiftLoad;
 
 #[test]
@@ -63,6 +65,66 @@ fn stale_smartshift_reads_do_not_resolve_newer_writes() {
     write.reset();
     assert!(!smartshift_read_is_current(Some(2), Some(&write)));
     assert!(smartshift_read_is_current(None, None));
+}
+
+/// Firmware can report a threshold below the configuration floor (an MX Master 3
+/// reports `4`, #2079), and the free-spin pill writes the read threshold back.
+/// The write must not save a config the next launch refuses to parse: the
+/// device and the config both get the default instead. A threshold the config
+/// accepts, and permanent ratchet, pass through unchanged.
+#[test]
+fn a_write_saves_only_a_threshold_the_config_loader_accepts() {
+    let threshold =
+        |raw: f32| SmartShiftAutoDisengage::Threshold(SmartShiftThreshold::from_rounded(raw));
+    let cases = [
+        (
+            threshold(4.0),
+            SmartShiftAutoDisengage::Threshold(SMARTSHIFT_AUTO_DISENGAGE_DEFAULT),
+        ),
+        (threshold(8.0), threshold(8.0)),
+        (
+            SmartShiftAutoDisengage::Permanent,
+            SmartShiftAutoDisengage::Permanent,
+        ),
+    ];
+    for (reported, saved) in cases {
+        let resolver = AssetResolver::new();
+        let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = AppState::new(Sources {
+            inventories: &[direct_inventory([0xa3, 0x93, 0xca, 0xe0])],
+            ..Sources::in_memory(Config::ephemeral(), &resolver, commands)
+        });
+        drain(&mut receiver);
+        let free_spin = SmartShiftStatus {
+            mode: SmartShiftMode::Free,
+            auto_disengage: reported,
+            tunable_torque: None,
+        };
+        let expected = SmartShiftStatus {
+            auto_disengage: saved,
+            ..free_spin
+        };
+
+        let _ = state.commit_smartshift(free_spin);
+
+        let persisted = state
+            .config
+            .smartshift(KNOWN_MOUSE_KEY)
+            .expect("the write is saved for the known mouse");
+        assert!(
+            SmartShift::accepts_auto_disengage(persisted.auto_disengage),
+            "{reported:?} saved a threshold the config loader rejects"
+        );
+        assert_eq!(persisted, SmartShift::from(expected));
+        let written: Vec<SmartShiftStatus> = drain(&mut receiver)
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::SetSmartShift(SetSmartShift { status, .. }) => Some(status),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(written, [expected], "the device gets what is saved");
+    }
 }
 
 fn status(mode: SmartShiftMode) -> SmartShiftStatus {

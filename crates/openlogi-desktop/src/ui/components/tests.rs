@@ -142,6 +142,7 @@ fn toggle_is_tab_focusable_and_reports_controlled_next_state(cx: &mut TestAppCon
 
 #[gpui::test]
 fn disabled_toggle_is_inert_and_blocks_its_parent(cx: &mut TestAppContext) {
+    let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
     cx.update(gpui_component::init);
     let changes = Rc::new(Cell::new(None));
     let parent_clicks = Rc::new(Cell::new(0));

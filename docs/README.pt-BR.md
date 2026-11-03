@@ -170,6 +170,7 @@ A cobertura de recursos depende do que cada dispositivo informa; o app mostra s�
 
 > [!IMPORTANT]
 > Feche o **Logi Options+** (e o Solaar no Linux) primeiro. Só um aplicativo pode controlar um receptor por vez.
+> No macOS, o **Karabiner-Elements** também bloqueia um teclado Bluetooth que ele modifica. Desative **Modify events** para esse teclado em Karabiner-Elements → Settings → Devices.
 
 | Plataforma | Sistema | Arquitetura |
 | --- | --- | --- |
@@ -211,7 +212,13 @@ Ou instale o pacote certo para a sua distribuição com um único comando. Ele v
 curl -fsSL https://github.com/AprilNEA/OpenLogi/releases/latest/download/install.sh | sh
 ```
 
-Para ler o script antes de executá-lo, e para Flatpak, NixOS e distribuições sem systemd, veja [INSTALL-linux.md](INSTALL-linux.md).
+No Arch Linux, o pacote do AUR [`openlogi`](https://aur.archlinux.org/packages/openlogi) compila a versão a partir do código-fonte:
+
+```sh
+yay -S openlogi
+```
+
+Para ler o script antes de executá-lo, e para o pacote do AUR, Flatpak, NixOS e distribuições sem systemd, veja [INSTALL-linux.md](INSTALL-linux.md).
 
 ### Windows
 

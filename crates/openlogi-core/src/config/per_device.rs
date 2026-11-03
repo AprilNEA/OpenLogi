@@ -9,11 +9,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
-    CameraControls, Config, DeviceIdentity, DisableKey, LightSettings, Lighting, ScrollResolution,
-    SmartShift, ThumbwheelSensitivity,
+    CameraControls, CameraStreamMode, Config, DeviceIdentity, DisableKey, LightSettings, Lighting,
+    MomentumScrolling, OnboardMemory, ScrollResolution, SmartShift, ThumbwheelSensitivity,
 };
 use crate::binding::{
-    ActionRingConfig, ActionRingIcon, ActionRingSlot, Binding, ButtonId, RingAction,
+    Action, ActionRingConfig, ActionRingIcon, ActionRingSlot, Binding, ButtonId, GamingLayout,
+    KeypadPage, RingAction, default_binding_on,
 };
 use crate::hid::{Dpi, PointerSpeed, ReportRate};
 
@@ -248,6 +249,23 @@ impl Config {
             .camera_profile = name;
     }
 
+    /// The frame size and rate saved for `device_key`'s live preview, or
+    /// `None` when the user never picked one.
+    #[must_use]
+    pub fn camera_stream_mode(&self, device_key: &str) -> Option<CameraStreamMode> {
+        self.devices
+            .get(device_key)
+            .and_then(|d| d.camera_stream_mode)
+    }
+
+    /// Record the frame size and rate `device_key`'s live preview opens at.
+    pub fn set_camera_stream_mode(&mut self, device_key: &str, mode: CameraStreamMode) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .camera_stream_mode = Some(mode);
+    }
+
     /// The standalone-light config for `device_key`, or `None` if unset.
     #[must_use]
     pub fn light(&self, device_key: &str) -> Option<LightSettings> {
@@ -337,6 +355,21 @@ impl Config {
             .or_default()
             .keep_os_layout = Some(keep);
     }
+
+    /// The stored onboard memory of `device_key`.
+    #[must_use]
+    pub fn onboard_memory(&self, device_key: &str) -> Option<OnboardMemory> {
+        self.devices.get(device_key).and_then(|d| d.onboard_memory)
+    }
+
+    /// Store the onboard memory of `device_key`.
+    pub fn set_onboard_memory(&mut self, device_key: &str, memory: Option<OnboardMemory>) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .onboard_memory = memory;
+    }
+
     /// The persisted report rate for `device_key`, or `None` when the user
     /// never chose one (the device keeps its own rate).
     #[must_use]
@@ -383,6 +416,78 @@ impl Config {
             .entry(device_key.to_string())
             .or_default()
             .force_sensing = Some(force);
+    }
+
+    /// The G-Shift layer of `device_key`, if not empty.
+    #[must_use]
+    pub fn gshift_overrides(&self, device_key: &str) -> Option<&BTreeMap<ButtonId, Action>> {
+        self.devices
+            .get(device_key)
+            .map(|d| &d.gshift_bindings)
+            .filter(|bindings| !bindings.is_empty())
+    }
+
+    /// Set or clear a G-Shift binding.
+    pub fn set_gshift_binding(
+        &mut self,
+        device_key: &str,
+        button: ButtonId,
+        action: Option<Action>,
+    ) {
+        let bindings = &mut self
+            .devices
+            .entry(device_key.to_string())
+            .or_default()
+            .gshift_bindings;
+        match action {
+            Some(action) => bindings.insert(button, action),
+            None => bindings.remove(&button),
+        };
+    }
+
+    /// Whether `device_key` uses G-Shift.
+    #[must_use]
+    pub fn uses_gshift(&self, device_key: &str) -> bool {
+        self.devices.get(device_key).is_some_and(|device| {
+            !device.gshift_bindings.is_empty()
+                || device.bindings.values().any(Binding::is_gshift)
+                || device
+                    .per_app_bindings
+                    .values()
+                    .flat_map(BTreeMap::values)
+                    .any(|action| *action == Action::GShift)
+        })
+    }
+
+    /// The stored choice, else host mode when a setting needs it.
+    #[must_use]
+    pub fn effective_onboard_memory(
+        &self,
+        device_key: &str,
+        layout: Option<&GamingLayout>,
+    ) -> Option<OnboardMemory> {
+        let device = self.devices.get(device_key)?;
+        if device.onboard_memory.is_some() {
+            return device.onboard_memory;
+        }
+        let layout = layout?;
+        let customized = |button: &ButtonId, binding: &Binding| {
+            layout.needs_host_mode(*button)
+                && (!matches!(binding, Binding::Single(_))
+                    || binding.click_action() != default_binding_on(Some(layout), *button))
+        };
+        let needs_host = device.report_rate.is_some()
+            || self.uses_gshift(device_key)
+            || device
+                .bindings
+                .iter()
+                .any(|(b, binding)| customized(b, binding))
+            || device
+                .per_app_bindings
+                .values()
+                .flatten()
+                .any(|(b, action)| customized(b, &Binding::Single(action.clone())));
+        needs_host.then_some(OnboardMemory::Off)
     }
 
     /// Record the SmartShift wheel config for `device_key`, so the agent can
@@ -449,6 +554,49 @@ impl Config {
             .enabled = enabled;
     }
 
+    /// The last of `device_key`'s keypad binding pages — its page count.
+    /// One page for any device that never had more.
+    #[must_use]
+    pub fn keypad_pages(&self, device_key: &str) -> KeypadPage {
+        self.devices
+            .get(device_key)
+            .map_or(KeypadPage::FIRST, |device| device.keypad_pages)
+    }
+
+    /// Give `device_key` pages `1..=last`. Shrinking drops every grid binding
+    /// on a removed page — device-wide and in each per-app overlay — so a
+    /// page re-added later starts empty instead of resurrecting old keys.
+    pub fn set_keypad_pages(&mut self, device_key: &str, last: KeypadPage) {
+        let device = self.devices.entry(device_key.to_string()).or_default();
+        device.keypad_pages = last;
+        let kept = |button: &ButtonId| button.grid_slot().is_none_or(|slot| slot.page <= last);
+        device.bindings.retain(|button, _| kept(button));
+        device.disabled_gestures.retain(|button, _| kept(button));
+        for overlay in device.per_app_bindings.values_mut() {
+            overlay.retain(|button, _| kept(button));
+        }
+    }
+
+    /// Whether any grid key on `page` of `device_key` is bound — device-wide
+    /// or in any per-app overlay — i.e. whether shrinking past `page`
+    /// ([`Self::set_keypad_pages`]) would drop a binding.
+    #[must_use]
+    pub fn keypad_page_binds(&self, device_key: &str, page: KeypadPage) -> bool {
+        let Some(device) = self.devices.get(device_key) else {
+            return false;
+        };
+        let on_page = |button: &ButtonId| button.grid_slot().is_some_and(|slot| slot.page == page);
+        device
+            .bindings
+            .iter()
+            .any(|(button, binding)| on_page(button) && *binding != Binding::Single(Action::None))
+            || device
+                .per_app_bindings
+                .values()
+                .flatten()
+                .any(|(button, action)| on_page(button) && *action != Action::None)
+    }
+
     /// The effective thumb-wheel sensitivity for `device_key`: the device's
     /// override when set, else the app-wide default.
     #[must_use]
@@ -470,6 +618,29 @@ impl Config {
             .entry(device_key.to_string())
             .or_default()
             .thumbwheel_sensitivity = sensitivity;
+    }
+
+    /// The effective momentum-scrolling settings for `device_key`: the
+    /// device's override when set, else the app-wide default.
+    #[must_use]
+    pub fn momentum_scrolling(&self, device_key: &str) -> MomentumScrolling {
+        self.devices
+            .get(device_key)
+            .and_then(|d| d.momentum_scrolling)
+            .unwrap_or(self.app_settings.momentum_scrolling)
+    }
+
+    /// Set (or clear, with `None`) `device_key`'s momentum-scrolling
+    /// override.
+    pub fn set_device_momentum_scrolling(
+        &mut self,
+        device_key: &str,
+        momentum: Option<MomentumScrolling>,
+    ) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .momentum_scrolling = momentum;
     }
 
     /// Whether `device_key`'s main wheel is smoothed through its diverted

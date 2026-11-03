@@ -11,12 +11,15 @@
 //! Streaming / Video call) plus user-saved customs, applied to the hardware in
 //! a single batched device-open.
 
+use std::sync::Arc;
+use std::time::Duration;
+
 use gpui::{
     App, AppContext as _, Context, IntoElement, ParentElement, Render, SharedString, Styled,
-    Subscription, Window, div, px,
+    Subscription, Task, Window, div, px,
 };
 use gpui_component::{WindowExt as _, dialog::DialogButtonProps, input::InputState, v_flex};
-use openlogi_camera::{AutoToggle, CameraControl, CameraState, ControlRange};
+use openlogi_camera::{AutoToggle, CameraControl, ControlRange};
 use openlogi_core::config::CameraControls;
 use tracing::debug;
 
@@ -26,10 +29,19 @@ use crate::ui::components::control_input;
 use crate::ui::section::section_label;
 use crate::ui::theme::{self, Typography as _};
 
+mod hardware;
 mod rows;
+#[cfg(test)]
+mod tests;
+use hardware::{Cancel, Hardware, Loaded, Saved, SystemUvc, Uvc};
 use rows::{
     control_label, control_row, from_slider, profiles_row, reset_button, section_indices, to_slider,
 };
+
+/// How long to wait before reading a camera again after it could not be read.
+/// A camera another application holds becomes free without an event to wait
+/// on; the retry only fires a read if the panel is still on screen.
+const RETRY_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Built-in profiles: `values` are fractions of each control's own range, so
 /// they scale to whatever the camera reports. Auto modes all engage — the
@@ -67,10 +79,14 @@ struct BuiltinProfile {
 }
 
 pub struct CameraControlsPanel {
-    /// Persistence key (`camera:vid:pid:serial:…` or legacy `camera-<uid>`).
+    hw: Arc<Hardware>,
+    /// Persistence key (`camera:vid:pid:serial:…` or legacy `camera-<uid>`)
+    /// the rows were built for; `None` until a load lands.
     key: Option<String>,
     /// OS capture id used for UVC open/read/write (may change with USB port).
     uid: Option<String>,
+    /// The background read in flight, or the retry wait after one failed.
+    pending: Option<Pending>,
     sliders: Vec<ControlSlider>,
     autos: Vec<AutoRow>,
     #[expect(dead_code, reason = "held to keep the AppState subscription alive")]
@@ -110,21 +126,24 @@ struct AutoRow {
     default: bool,
 }
 
-/// What [`CameraControlsPanel::ensure_built`] should build the panel from after
-/// re-asserting saved settings on the hardware.
-enum Reapplied {
-    /// Nothing needed writing, or the batch stuck — build from the desired
-    /// (saved-over-snapshot) state.
-    Clean,
-    /// The batch failed; build rows from this freshly-read live state.
-    Live(CameraState),
-    /// The batch failed and the confirming re-read failed too — the true
-    /// hardware state is unknown, so the caller must not cache a build.
-    Unknown,
+/// A camera the panel is loading, or waiting to retry. Replacing it drops the
+/// task, so a superseded load never lands.
+struct Pending {
+    key: String,
+    uid: String,
+    /// `true` while the read runs; `false` while waiting out [`RETRY_INTERVAL`].
+    reading: bool,
+    /// Stops a superseded load's re-apply from writing after newer edits.
+    _cancel: Cancel,
+    _task: Task<()>,
 }
 
 impl CameraControlsPanel {
     pub fn new(cx: &mut Context<Self>) -> Self {
+        Self::with_uvc(Arc::new(SystemUvc), cx)
+    }
+
+    fn with_uvc(uvc: Arc<dyn Uvc>, cx: &mut Context<Self>) -> Self {
         let state_obs = AppState::repaint_on(cx, |event| {
             matches!(
                 event,
@@ -132,8 +151,10 @@ impl CameraControlsPanel {
             )
         });
         Self {
+            hw: Arc::new(Hardware::new(uvc)),
             key: None,
             uid: None,
+            pending: None,
             sliders: Vec::new(),
             autos: Vec::new(),
             state_obs,
@@ -149,150 +170,110 @@ impl CameraControlsPanel {
         Some((record.config_key.clone(), record.capture_id.clone()?))
     }
 
-    /// Re-assert the saved auto/value differences on the hardware in one
-    /// device-open, reporting what the caller should build the panel from.
-    ///
-    /// `apply_settings` isn't atomic — it writes the auto mode, then the value —
-    /// so a rejected batch can leave the hardware between states, making the
-    /// pre-write snapshot untrustworthy. On failure we clear the active profile
-    /// (so a later edit's [`Self::sync_active_custom`] can't overwrite the saved
-    /// profile with fallback values) and re-read the device: [`Reapplied::Live`]
-    /// carries that truth for the caller to cache, while a re-read that also
-    /// fails yields [`Reapplied::Unknown`] — never the stale pre-write state.
-    fn reapply_saved(
-        key: &str,
-        uid: &str,
-        apply_autos: &[(AutoToggle, bool)],
-        apply_values: &[(CameraControl, i32)],
-        cx: &mut Context<Self>,
-    ) -> Reapplied {
-        if apply_autos.is_empty() && apply_values.is_empty() {
-            return Reapplied::Clean;
-        }
-        let Err(e) = openlogi_camera::apply_settings(uid, apply_autos, apply_values) else {
-            return Reapplied::Clean;
-        };
-        debug!(error = %e, "saved camera state reapply failed");
-        // This runs while building the panel. Do not emit back into this same
-        // view: if the confirming read also fails, an event-driven repaint
-        // would immediately retry forever instead of waiting for a real UI or
-        // inventory event.
-        AppState::update(cx, |state, _| {
-            let _ = state.commit_camera_active_profile(key, None);
-        });
-        match openlogi_camera::read_camera_state(uid) {
-            Ok(live) => Reapplied::Live(live),
-            Err(e) => {
-                debug!(error = %e, "post-failure camera re-read failed");
-                Reapplied::Unknown
-            }
-        }
-    }
-
-    /// Build the sliders and auto rows for `key` from the device's reported
-    /// state, re-applying any saved values in one batched device write. Cheap
-    /// no-op when already built for this camera. `uid` is the OS capture id.
+    /// Start loading `key`'s rows unless they are built or already loading.
+    /// The parent renders this panel only while the camera is on screen, so
+    /// render is the lifecycle switch, as for the preview: the UVC read and the
+    /// saved-state re-apply run on the background executor, and the panel shows
+    /// nothing until [`Self::finish_load`] publishes the result.
     fn ensure_built(&mut self, key: &str, uid: &str, cx: &mut Context<Self>) {
         if self.key.as_deref() == Some(key) && self.uid.as_deref() == Some(uid) {
             return;
         }
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|p| p.key == key && p.uid == uid)
+        {
+            return;
+        }
+        self.key = None;
+        self.uid = None;
         self.sliders.clear();
         self.autos.clear();
         // Port-bound keys from older builds → stable serial key, once per open.
-        // This is part of render-time panel construction; emitting an event
-        // here would create a hot repaint loop while an unavailable camera
-        // keeps failing the state read below.
+        // Config only, and silent: this runs from render.
         AppState::update(cx, |state, _| {
             state.migrate_legacy_camera_key(key, uid);
         });
+        let saved = AppState::try_read(cx).map_or_else(Saved::default, |state| Saved {
+            autos: AutoToggle::ALL
+                .into_iter()
+                .filter_map(|t| state.camera_auto(key, t).map(|on| (t, on)))
+                .collect(),
+            values: CameraControl::ALL
+                .into_iter()
+                .filter_map(|c| state.camera_control(key, c).map(|v| (c, v)))
+                .collect(),
+        });
+        let hw = self.hw.clone();
+        let read_uid = uid.to_string();
+        let cancel = Cancel::default();
+        let canceled = cancel.flag();
+        let task = cx.spawn(async move |panel, cx| {
+            let loaded = cx
+                .background_executor()
+                .spawn(async move { hardware::load(&hw, &read_uid, &saved, &canceled) })
+                .await;
+            panel
+                .update(cx, |panel, cx| panel.finish_load(loaded, cx))
+                .ok();
+        });
+        self.pending = Some(Pending {
+            key: key.to_string(),
+            uid: uid.to_string(),
+            reading: true,
+            _cancel: cancel,
+            _task: task,
+        });
+    }
 
-        // One device-open reads every control and auto state. A failed read
-        // means the camera is unreachable (unplugged or seized by another app):
-        // leave `self.key` unset so the next render retries, instead of caching
-        // an empty panel that never rebuilds once the device returns.
-        let Ok(snap) = openlogi_camera::read_camera_state(uid) else {
-            debug!("camera state read failed; retrying next render");
-            self.key = None;
-            self.uid = None;
+    /// Build the rows from a finished load. An unreachable camera (unplugged,
+    /// or seized by another app) or an unknown post-failure state builds
+    /// nothing and schedules a retry, rather than caching an empty panel that
+    /// never rebuilds once the device returns.
+    fn finish_load(&mut self, loaded: Loaded, cx: &mut Context<Self>) {
+        let Some(Pending { key, uid, .. }) = self.pending.take() else {
             return;
         };
-        self.key = Some(key.to_string());
-        self.uid = Some(uid.to_string());
-
-        // Saved auto states win over the device's, then saved values win for
-        // controls whose auto is off; the differences push back in one open.
-        let mut desired_autos = Vec::new();
-        let mut apply_autos = Vec::new();
-        for (toggle, st) in &snap.autos {
-            let saved = AppState::try_read(cx).and_then(|s| s.camera_auto(key, *toggle));
-            let on = saved.unwrap_or(st.current);
-            if on != st.current {
-                apply_autos.push((*toggle, on));
-            }
-            desired_autos.push((*toggle, on, *st));
+        if loaded.reapply_failed {
+            // Clear the active profile so a later edit's
+            // [`Self::sync_active_custom`] can't overwrite the saved profile
+            // with values the hardware didn't take.
+            AppState::apply(cx, |state| state.commit_camera_active_profile(&key, None));
         }
-        let auto_desired = |control: CameraControl| {
-            let toggle = control.auto_toggle()?;
-            desired_autos
-                .iter()
-                .find(|(t, ..)| *t == toggle)
-                .map(|(_, on, _)| *on)
+        let Some(state) = loaded.state else {
+            let task = cx.spawn(async move |panel, cx| {
+                cx.background_executor().timer(RETRY_INTERVAL).await;
+                panel
+                    .update(cx, |panel, cx| {
+                        panel.pending = None;
+                        cx.notify();
+                    })
+                    .ok();
+            });
+            self.pending = Some(Pending {
+                key,
+                uid,
+                reading: false,
+                _cancel: Cancel::default(),
+                _task: task,
+            });
+            cx.notify();
+            return;
         };
-        let mut desired_values = Vec::new();
-        let mut apply_values = Vec::new();
-        for (control, range) in &snap.controls {
-            let saved = AppState::try_read(cx).and_then(|s| s.camera_control(key, *control));
-            let initial =
-                SliderRange::new(range.min, range.max).clamp(saved.unwrap_or(range.current));
-            if saved.is_some()
-                && saved != Some(range.current)
-                && !auto_desired(*control).is_some_and(|on| on)
-            {
-                apply_values.push((*control, initial));
-            }
-            desired_values.push((*control, *range, initial));
-        }
-
-        // Saved state only sticks when the hardware takes it. On a rejected
-        // (non-atomic) batch, rebuild rows from the device's live state; if even
-        // that read fails, the hardware state is unknown — drop the key and let
-        // the next render retry rather than caching the stale pre-write values.
-        let live = match Self::reapply_saved(key, uid, &apply_autos, &apply_values, cx) {
-            Reapplied::Clean => None,
-            Reapplied::Live(state) => Some(state),
-            Reapplied::Unknown => {
-                self.key = None;
-                self.uid = None;
-                return;
-            }
-        };
-
-        for (toggle, on, st) in desired_autos {
-            let shown_on = match &live {
-                None => on,
-                Some(state) => state
-                    .autos
-                    .iter()
-                    .find(|(t, _)| *t == toggle)
-                    .map_or(st.current, |(_, s)| s.current),
-            };
+        for (toggle, st) in state.autos {
             self.autos.push(AutoRow {
                 toggle,
-                on: shown_on,
+                on: st.current,
                 default: st.default,
             });
         }
-        for (control, range, initial) in desired_values {
-            let shown = match &live {
-                None => initial,
-                Some(state) => state
-                    .controls
-                    .iter()
-                    .find(|(c, _)| *c == control)
-                    .map_or(range.current, |(_, r)| r.current),
-            };
-            self.push_control_slider(control, range, shown, uid, key, cx);
+        for (control, range) in state.controls {
+            self.push_control_slider(control, range, range.current, &uid, &key, cx);
         }
+        self.key = Some(key);
+        self.uid = Some(uid);
+        cx.notify();
     }
 
     /// Build one control's slider (seeded to `shown`), wire its release-writes
@@ -345,10 +326,10 @@ impl CameraControlsPanel {
             Some((toggle, ix))
         });
         let written = match takeover {
-            Some((toggle, _)) => {
-                openlogi_camera::apply_settings(uid, &[(toggle, false)], &[(control, v)])
-            }
-            None => openlogi_camera::set_control(uid, control, v),
+            Some((toggle, _)) => self
+                .hw
+                .apply_settings(uid, &[(toggle, false)], &[(control, v)]),
+            None => self.hw.set_control(uid, control, v),
         };
         if let Err(e) = written {
             debug!(?control, value = v, error = %e, "camera control write failed");
@@ -483,7 +464,7 @@ impl CameraControlsPanel {
         {
             values.push((slider.control, slider.value(cx)));
         }
-        if let Err(e) = openlogi_camera::apply_settings(&uid, &[(toggle, on)], &values) {
+        if let Err(e) = self.hw.apply_settings(&uid, &[(toggle, on)], &values) {
             debug!(?toggle, on, error = %e, "camera auto write failed");
             // Turning auto off batches the slider value, so a partial write can
             // land the mode but not the value; resync from live hardware.
@@ -514,7 +495,7 @@ impl CameraControlsPanel {
             .iter()
             .map(|s| (s.control, s.range.default))
             .collect();
-        if let Err(e) = openlogi_camera::apply_settings(&uid, &autos, &values) {
+        if let Err(e) = self.hw.apply_settings(&uid, &autos, &values) {
             debug!(error = %e, "camera reset failed");
             // Partial writes may have landed; rebuild from live hardware
             // rather than persisting a mixed reset.
@@ -565,7 +546,7 @@ impl CameraControlsPanel {
             autos.push((toggle, self.autos[pos].default));
             Some(pos)
         });
-        if let Err(e) = openlogi_camera::apply_settings(&uid, &autos, &[(control, default)]) {
+        if let Err(e) = self.hw.apply_settings(&uid, &autos, &[(control, default)]) {
             debug!(?control, value = default, error = %e, "camera control reset failed");
             // Auto default + value default aren't atomic; resync from live
             // hardware so a partial reset can't desync the row.
@@ -650,7 +631,7 @@ impl CameraControlsPanel {
             return;
         }
 
-        if let Err(e) = openlogi_camera::apply_settings(&uid, &autos, &values) {
+        if let Err(e) = self.hw.apply_settings(&uid, &autos, &values) {
             debug!(profile = id, error = %e, "camera profile apply failed");
             // Some writes may have landed; resync from live state and drop the
             // active profile so a later edit can't persist a half-applied one.
@@ -744,12 +725,16 @@ impl Render for CameraControlsPanel {
         let Some((key, uid)) = Self::active_camera(cx) else {
             self.key = None;
             self.uid = None;
+            self.pending = None;
             self.sliders.clear();
             self.autos.clear();
             return div();
         };
         self.ensure_built(&key, &uid, cx);
 
+        if self.pending.as_ref().is_some_and(|p| p.reading) {
+            return div();
+        }
         if self.sliders.is_empty() {
             return div()
                 .text_body()

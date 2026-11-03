@@ -19,12 +19,12 @@ use std::future::Future;
 use openlogi_core::config::{ConfigRevision, Lighting};
 use openlogi_core::hid::{
     BacklightChange, BacklightState, DeviceRoute, DisableKeysMask, DisableKeysState, Dpi, DpiInfo,
-    EasySwitchHosts, FnLockState, ForceSensingInfo, LightCommand, PointerSpeed, ReceiverSelector,
-    ReportRate, ReportRateInfo, SmartShiftStatus, WriteError,
+    EasySwitchHosts, FnLockState, ForceSensingInfo, LightCommand, OnboardState, PointerSpeed,
+    ReceiverSelector, ReportRate, ReportRateInfo, SidetoneLevel, SmartShiftStatus, WriteError,
 };
 use openlogi_ipc::{
-    AgentClient, ChosenLight, ConfigReloadError, PairingCommandError, PairingFailure, SavedConfig,
-    SavedConfigVerdict,
+    AgentClient, ChosenLight, ConfigReloadError, FlowPairTarget, FlowPairingCommandError,
+    PairingCommandError, PairingFailure, SavedConfig, SavedConfigVerdict,
 };
 use tarpc::client::RpcError;
 use tarpc::context;
@@ -34,7 +34,7 @@ use tracing::{debug, warn};
 use super::{
     ConfigReloadContext, DisableKeysRequestContext, GuiUpdate, UnpairFailure, UnpairIntent,
 };
-use crate::state::DeviceKey;
+use crate::state::{DeviceKey, FlowPairingRefusal};
 
 /// The GPUI-bound update stream a request may deliver through.
 pub(super) type UpdateSender = mpsc::UnboundedSender<GuiUpdate>;
@@ -228,6 +228,31 @@ impl Request for SetPointerSpeed {
 
     fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
         let _ = updates.send(GuiUpdate::PointerSpeedWritten {
+            key: self.key,
+            result: or_unavailable(outcome),
+        });
+    }
+}
+
+/// Write a headset's sidetone level now, answered as
+/// [`GuiUpdate::SidetoneWritten`] with the level the headset confirms.
+pub struct SetSidetone {
+    pub route: DeviceRoute,
+    pub level: SidetoneLevel,
+    pub key: DeviceKey,
+}
+
+impl Request for SetSidetone {
+    type Answer = Result<SidetoneLevel, WriteError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .set_sidetone(context::current(), self.route.clone(), self.level)
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
+        let _ = updates.send(GuiUpdate::SidetoneWritten {
             key: self.key,
             result: or_unavailable(outcome),
         });
@@ -545,6 +570,26 @@ impl Request for ReadPointerSpeed {
     }
 }
 
+/// Read a headset's sidetone level; the answer goes back over `reply`.
+pub struct ReadSidetone {
+    pub route: DeviceRoute,
+    pub reply: oneshot::Sender<Result<SidetoneLevel, WriteError>>,
+}
+
+impl Request for ReadSidetone {
+    type Answer = Result<SidetoneLevel, WriteError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .read_sidetone(context::current(), self.route.clone())
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, _: &UpdateSender) {
+        let _ = self.reply.send(or_unavailable(outcome));
+    }
+}
+
 /// Read the press force of a force-sensing button, with the range the device
 /// accepts; the answer goes back over `reply`.
 pub struct ReadForceSensing {
@@ -619,6 +664,25 @@ impl Request for ReadFnLock {
     async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
         client
             .read_fn_lock(context::current(), self.route.clone())
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, _: &UpdateSender) {
+        let _ = self.reply.send(or_unavailable(outcome));
+    }
+}
+
+pub struct ReadOnboard {
+    pub route: DeviceRoute,
+    pub reply: oneshot::Sender<Result<OnboardState, WriteError>>,
+}
+
+impl Request for ReadOnboard {
+    type Answer = Result<OnboardState, WriteError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .read_onboard(context::current(), self.route.clone())
             .await
     }
 
@@ -804,6 +868,23 @@ impl Request for RequestAccessibilityPrompt {
     fn deliver(self, _: Result<Self::Answer, Unavailable>, _: &UpdateSender) {}
 }
 
+/// Try the agent again now, at the user's request, instead of at the loop's
+/// own pace: connect at once and, if nothing answers, launch it without
+/// waiting out the spawn reflex. The observe loop handles it before dispatch
+/// (it starts a fresh outage); over a live connection there is nothing to
+/// retry, so running it asks the agent nothing.
+pub struct RetryConnection;
+
+impl Request for RetryConnection {
+    type Answer = ();
+
+    fn call(&self, _: &AgentClient) -> impl Future<Output = Result<Self::Answer, RpcError>> + Send {
+        std::future::ready(Ok(()))
+    }
+
+    fn deliver(self, _: Result<Self::Answer, Unavailable>, _: &UpdateSender) {}
+}
+
 /// An accepted pairing command needs no reply — its progress shows up in the
 /// observed state. A *rejected* one never becomes a session, and neither does
 /// one the agent never received, so the refusal is reported here or the
@@ -874,6 +955,100 @@ impl Request for CancelPairing {
             other => report_pairing_refusal(updates, other),
         }
     }
+}
+
+/// Report a Flow pairing command the agent did not take. Progress after an
+/// accepted command shows in the snapshot's `FlowStatus::pairing`, so an
+/// accepted one reports nothing.
+fn report_flow_pairing_refusal(
+    updates: &UpdateSender,
+    outcome: Result<Result<(), FlowPairingCommandError>, Unavailable>,
+) {
+    let refusal = match outcome {
+        Ok(Ok(())) => return,
+        Ok(Err(refused)) => FlowPairingRefusal::Refused(refused),
+        Err(Unavailable) => FlowPairingRefusal::AgentUnreachable,
+    };
+    let _ = updates.send(GuiUpdate::FlowPairingRefused(refusal));
+}
+
+/// Open Flow pairing, so this computer and the others with pairing open find
+/// each other.
+pub struct StartFlowPairing;
+
+impl Request for StartFlowPairing {
+    type Answer = Result<(), FlowPairingCommandError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client.start_flow_pairing(context::current()).await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
+        report_flow_pairing_refusal(updates, outcome);
+    }
+}
+
+/// Pair with a nearby computer or one at an address.
+pub struct PairFlowPeer {
+    pub target: FlowPairTarget,
+}
+
+impl Request for PairFlowPeer {
+    type Answer = Result<(), FlowPairingCommandError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .pair_flow_peer(context::current(), self.target.clone())
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
+        report_flow_pairing_refusal(updates, outcome);
+    }
+}
+
+/// The user saw the same code on both computers.
+pub struct ConfirmFlowPairing;
+
+impl Request for ConfirmFlowPairing {
+    type Answer = Result<(), FlowPairingCommandError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client.confirm_flow_pairing(context::current()).await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
+        report_flow_pairing_refusal(updates, outcome);
+    }
+}
+
+/// End the current Flow pairing attempt, or dismiss its result; pairing
+/// stays open.
+pub struct CancelFlowPairing;
+
+impl Request for CancelFlowPairing {
+    type Answer = Result<(), FlowPairingCommandError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client.cancel_flow_pairing(context::current()).await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
+        report_flow_pairing_refusal(updates, outcome);
+    }
+}
+
+/// Close Flow pairing. An unreachable agent has nothing open to close.
+pub struct StopFlowPairing;
+
+impl Request for StopFlowPairing {
+    type Answer = ();
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client.stop_flow_pairing(context::current()).await
+    }
+
+    fn deliver(self, _: Result<Self::Answer, Unavailable>, _: &UpdateSender) {}
 }
 
 /// Remove one pairing from its receiver, answered as
@@ -974,6 +1149,7 @@ commands! {
     SetFnLock,
     SetReportRate,
     SetPointerSpeed,
+    SetSidetone,
     SetForceSensing,
     SetBacklight,
     RenameEasySwitchHost,
@@ -982,18 +1158,26 @@ commands! {
     ReadFnLock,
     ReadReportRate,
     ReadPointerSpeed,
+    ReadSidetone,
     ReadForceSensing,
     ReadBacklight,
     ReadEasySwitchHosts,
     LoadConfig,
     ReadDisableKeys,
     SetDisableKeys,
+    ReadOnboard,
     ReloadConfig,
     RequestAccessibilityPrompt,
+    RetryConnection,
     StartPairing,
     PairDevice,
     CancelPairing,
     UnpairDevice,
+    StartFlowPairing,
+    PairFlowPeer,
+    ConfirmFlowPairing,
+    CancelFlowPairing,
+    StopFlowPairing,
     #[cfg(all(target_os = "macos", debug_assertions))]
     PollEventMonitor,
 }

@@ -1,4 +1,4 @@
-use gpui::{AppContext as _, AssetSource, Modifiers, TestAppContext};
+use gpui::{AppContext as _, AssetSource, Bounds, Modifiers, TestAppContext, point, size};
 use openlogi_core::config::Config;
 use openlogi_core::device::DeviceInventory;
 use openlogi_ipc::{AgentSnapshot, AgentStatus, ForegroundApps, InventoryHealth, PROTOCOL_VERSION};
@@ -44,6 +44,7 @@ fn snapshot(receivers: Vec<ReceiverInfo>) -> AgentSnapshot {
         pairing: None,
         foreground: ForegroundApps::default(),
         lights: Vec::new(),
+        flow: openlogi_ipc::FlowStatus::default(),
     }
 }
 
@@ -58,6 +59,7 @@ fn receiver(name: &str, product_id: u16, uid: Option<&str>) -> ReceiverInfo {
 
 #[gpui::test]
 fn reopening_keeps_the_selected_receiver_for_retry(cx: &mut TestAppContext) {
+    let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
     cx.update(gpui_component::init);
     cx.update(theme::register_builtin_themes);
     let mut commands = cx.update(install_state);
@@ -95,6 +97,7 @@ fn reopening_keeps_the_selected_receiver_for_retry(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn a_refused_start_keeps_its_error_and_target_after_empty_snapshots(cx: &mut TestAppContext) {
+    let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
     cx.update(gpui_component::init);
     cx.update(theme::register_builtin_themes);
     let mut commands = cx.update(install_state);
@@ -172,6 +175,7 @@ fn an_agent_session_supersedes_a_command_failure_and_can_be_dismissed(cx: &mut T
 
 #[gpui::test]
 fn changing_receiver_waits_for_cancellation_acknowledgement(cx: &mut TestAppContext) {
+    let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
     cx.update(gpui_component::init);
     cx.update(theme::register_builtin_themes);
     let mut commands = cx.update(install_state);
@@ -195,6 +199,7 @@ fn changing_receiver_waits_for_cancellation_acknowledgement(cx: &mut TestAppCont
 
 #[gpui::test]
 fn a_recovered_receiver_identity_enables_the_same_open_picker(cx: &mut TestAppContext) {
+    let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
     cx.update(gpui_component::init);
     cx.update(theme::register_builtin_themes);
     let mut commands = cx.update(install_state);
@@ -245,6 +250,7 @@ fn a_recovered_receiver_identity_enables_the_same_open_picker(cx: &mut TestAppCo
 
 #[gpui::test]
 fn choosing_bolt_and_retrying_keep_the_explicit_target(cx: &mut TestAppContext) {
+    let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
     cx.update(gpui_component::init);
     cx.update(theme::register_builtin_themes);
     let mut commands = cx.update(install_state);
@@ -370,7 +376,60 @@ fn opening_waits_for_a_receiver_choice(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn cancel_stays_in_the_bottom_bar_below_a_long_device_list(cx: &mut TestAppContext) {
+    let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
+    cx.update(gpui_component::init);
+    cx.update(theme::register_builtin_themes);
+    let mut commands = cx.update(install_state);
+    let devices = (0..12u8)
+        .map(|n| FoundDevice {
+            address: [0, 0, 0, 0, 0, n],
+            name: format!("Keyboard {n}"),
+        })
+        .collect();
+    cx.update(|cx| apply_state(cx, Some(PairingPhase::Found(devices))));
+    let (_, cx) = cx.add_window_view(AddDeviceView::new);
+    let viewport = Bounds::new(point(px(0.), px(0.)), size(px(520.), px(400.)));
+    cx.simulate_resize(viewport.size);
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+
+    let cancel = cx
+        .debug_bounds("pairing-cancel")
+        .expect("a running search offers Cancel");
+    assert!(
+        viewport.contains(&cancel.origin) && viewport.contains(&cancel.bottom_right()),
+        "the list must scroll above Cancel, not push it off {viewport:?}: {cancel:?}"
+    );
+    assert!(
+        cancel.left() > viewport.center().x && cancel.size.width < viewport.size.width / 4.,
+        "Cancel is a right-aligned secondary button, not a full-width bar: {cancel:?}"
+    );
+    cx.simulate_click(cancel.center(), Modifiers::default());
+    assert!(matches!(commands.try_recv(), Ok(Command::CancelPairing(_))));
+}
+
+#[gpui::test]
+fn cancel_before_choosing_a_receiver_closes_the_window(cx: &mut TestAppContext) {
+    let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
+    cx.update(gpui_component::init);
+    cx.update(theme::register_builtin_themes);
+    let mut commands = cx.update(install_state);
+    let (_, visual) = cx.add_window_view(AddDeviceView::new);
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    let cancel = visual
+        .debug_bounds("pairing-cancel")
+        .expect("the receiver picker offers Cancel");
+    visual.simulate_click(cancel.center(), Modifiers::default());
+    assert!(cx.windows().is_empty(), "Cancel closes the picker's window");
+    assert!(
+        commands.try_recv().is_err(),
+        "with no session there is nothing for the agent to cancel"
+    );
+}
+
+#[gpui::test]
 fn change_receiver_clears_a_failure_without_an_agent_session(cx: &mut TestAppContext) {
+    let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
     cx.update(gpui_component::init);
     cx.update(theme::register_builtin_themes);
     let mut commands = cx.update(install_state);
@@ -418,6 +477,8 @@ fn mouse_pairing_click_icon_resolves_text_color() {
         text_muted: gpui::hsla(0., 0., 0., 1.),
         card_radius: gpui::px(8.),
         control_radius: gpui::px(4.),
+        ring: gpui::hsla(0., 0., 0., 1.),
+        text_danger: gpui::hsla(0., 0., 0., 1.),
     };
     for click in [Click::Left, Click::Right] {
         let mut icon = click_icon_svg(click, pal);
@@ -467,4 +528,30 @@ fn pointer_passkey_panel_renders(cx: &mut TestAppContext) {
         .expect("passkey sequence must be laid out and painted");
     assert!(bounds.size.width > gpui::px(0.));
     assert!(bounds.size.height > gpui::px(0.));
+}
+
+#[gpui::test]
+fn escape_cancels_a_search_and_closes_the_idle_picker(cx: &mut TestAppContext) {
+    cx.update(gpui_component::init);
+    cx.update(theme::register_builtin_themes);
+    cx.update(crate::app::menu::install);
+    let mut commands = cx.update(install_state);
+    cx.update(|cx| apply_state(cx, Some(PairingPhase::Searching)));
+    cx.update(open);
+    let handle = cx.update(|cx| cx.global::<windows::WindowRegistry>().add_device.unwrap());
+    let mut visual = gpui::VisualTestContext::from_window(handle.into(), cx);
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+
+    visual.simulate_keystrokes("escape");
+    assert!(matches!(commands.try_recv(), Ok(Command::CancelPairing(_))));
+
+    visual.update(|_, cx| {
+        apply_state(cx, None);
+        apply_cancelled(cx);
+    });
+    visual.simulate_keystrokes("escape");
+    assert!(
+        cx.update(|cx| cx.windows().is_empty()),
+        "Escape on the receiver picker closes the window, as Cancel does"
+    );
 }

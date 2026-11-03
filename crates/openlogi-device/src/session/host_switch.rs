@@ -40,6 +40,7 @@ use hidpp::{
     },
     protocol::v20,
 };
+use openlogi_core::hid::{HidppOperation, WriteError};
 use thiserror::Error;
 use tokio::{
     sync::{mpsc, oneshot},
@@ -65,6 +66,7 @@ pub use restore::{
 use crate::{
     ChannelPool, ChannelRegistry, DeviceIoGate, DeviceRoute, IoSuspended, SharedChannel,
     backend::BackendError,
+    channel::registry::PublicationState,
     reprog_controls::{self, ReprogControlsV4},
 };
 
@@ -88,6 +90,11 @@ const HOST_TASK_IDS: [(reprog_controls::TaskId, u8); 3] = [
     (reprog_controls::task_ids::HOST_SWITCH_CHANNEL_3, 2),
 ];
 const HIDPP_OPERATION_TIMEOUT: Duration = Duration::from_secs(5);
+/// The whole advisory `HostsInfo` check in [`host_slot_is_empty`]. Its two
+/// reads are optional, so they must not use up the budget of the switch they
+/// guard: the agent gives a whole `switch_host` 5 s, and Flow 1 s to prepare
+/// each device.
+const HOSTS_INFO_BUDGET: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ReportingMode {
@@ -118,6 +125,9 @@ pub enum HostSwitchError {
     /// A required HID++ operation failed.
     #[error("HID++ protocol error: {0}")]
     Hidpp(String),
+    /// The device does not expose the ChangeHost feature.
+    #[error("device does not expose HID++ ChangeHost feature 0x1814")]
+    FeatureUnsupported,
     /// A required HID++ operation did not complete within its budget.
     #[error("HID++ operation timed out while {operation}")]
     TimedOut {
@@ -135,11 +145,50 @@ pub enum HostSwitchError {
         /// The zero-based host slot that has no pairing.
         host: u8,
     },
+    /// The requested host does not exist on this device.
+    #[error("host {host} is outside device host count {host_count}")]
+    HostOutOfRange {
+        /// The zero-based host slot that was requested.
+        host: u8,
+        /// Number of host slots reported by the device.
+        host_count: u8,
+    },
 }
 
 impl From<IoSuspended> for HostSwitchError {
     fn from(error: IoSuspended) -> Self {
         Self::Hid(error.into())
+    }
+}
+
+/// Carries a host-switch failure across the IPC boundary in the vocabulary
+/// the other Easy-Switch commands already use.
+///
+/// The impl lives here for the same reason as `From<BackendError>`: the
+/// orphan rule allows one home, and `openlogi-core` must not depend on this
+/// crate. A timeout keeps only the coarse [`HidppOperation::ChangeHost`],
+/// because [`WriteError::RequestTimedOut`] names operations, not steps.
+impl From<HostSwitchError> for WriteError {
+    fn from(error: HostSwitchError) -> Self {
+        match error {
+            HostSwitchError::Hid(error) => error.into(),
+            HostSwitchError::KeyboardNotFound | HostSwitchError::TargetNotFound => {
+                Self::DeviceNotFound
+            }
+            HostSwitchError::Hidpp(message) => Self::Hidpp(message),
+            HostSwitchError::FeatureUnsupported => Self::FeatureUnsupported {
+                feature_hex: ChangeHostFeature::ID,
+            },
+            HostSwitchError::TimedOut { .. } => Self::RequestTimedOut {
+                operation: HidppOperation::ChangeHost,
+            },
+            error @ HostSwitchError::UnsupportedKeyboard => Self::Hidpp(error.to_string()),
+            HostSwitchError::HostSlotEmpty { host } => Self::HostSlotEmpty { slot: host },
+            HostSwitchError::HostOutOfRange { host, host_count } => Self::HostOutOfRange {
+                slot: host,
+                host_count,
+            },
+        }
     }
 }
 
@@ -346,10 +395,13 @@ async fn depart(
     // A restore write now would wait for a keyboard that is leaving. The
     // owner retries it once inventory publishes the keyboard again.
     let restore = pending.map(|pending| {
-        if registry.is_current(shared) {
-            pending.allow_current_channel()
-        } else {
+        if matches!(
+            HostSwitchStop::for_current_publication(registry, shared),
+            HostSwitchStop::ChannelChanged
+        ) {
             pending
+        } else {
+            pending.allow_current_channel()
         }
     });
     HostSwitchSessionOutcome::Departed { restore }
@@ -431,8 +483,13 @@ async fn restore_after(
     let reuse_armed_channel = match stop {
         // A press does not retire the channel: teardown may write through it
         // for as long as inventory still publishes it.
-        HostSwitchStop::Pressed(_) => registry.is_current(shared),
-        HostSwitchStop::Shutdown => true,
+        HostSwitchStop::Pressed(_) => !matches!(
+            HostSwitchStop::for_current_publication(registry, shared),
+            HostSwitchStop::ChannelChanged
+        ),
+        // A withdrawn receiver slot may return on the same USB connection.
+        // The token still requires a live exact-route publication before writes.
+        HostSwitchStop::Shutdown | HostSwitchStop::ReceiverSlotGone => true,
         HostSwitchStop::ChannelChanged | HostSwitchStop::Departed(_) => false,
     };
     if reuse_armed_channel {
@@ -562,6 +619,9 @@ enum HostSwitchStop {
     /// Teardown was requested while inventory still published the channel
     /// that armed the session.
     Shutdown,
+    /// The keyboard's receiver slot went offline, but inventory still owns
+    /// the USB transport. Restoration may reuse it once the slot returns.
+    ReceiverSlotGone,
     /// The channel that armed the session must not be written through again:
     /// inventory removed or replaced it, or the owner reported the keyboard
     /// lost.
@@ -572,17 +632,28 @@ impl HostSwitchStop {
     fn requested_host(self) -> Option<u8> {
         match self {
             Self::Pressed(host) => Some(host),
-            Self::Departed(_) | Self::Shutdown | Self::ChannelChanged => None,
+            Self::Departed(_) | Self::Shutdown | Self::ReceiverSlotGone | Self::ChannelChanged => {
+                None
+            }
         }
     }
 
     /// A stop that did not itself retire the channel. Re-checking inventory
     /// keeps a simultaneously ready replacement from being written underneath.
     fn for_current_publication(registry: &ChannelRegistry, shared: &SharedChannel) -> Self {
-        if registry.is_current(shared) {
-            Self::Shutdown
-        } else {
-            Self::ChannelChanged
+        match registry.publication(shared) {
+            PublicationState::Current => Self::Shutdown,
+            PublicationState::SlotOffline => Self::ReceiverSlotGone,
+            PublicationState::Retired => Self::ChannelChanged,
+        }
+    }
+
+    /// Losing a receiver slot does not retire its still-published transport.
+    /// A lost owner on an otherwise current route remains conservative.
+    fn for_lost_publication(registry: &ChannelRegistry, shared: &SharedChannel) -> Self {
+        match registry.publication(shared) {
+            PublicationState::SlotOffline => Self::ReceiverSlotGone,
+            PublicationState::Current | PublicationState::Retired => Self::ChannelChanged,
         }
     }
 }
@@ -600,7 +671,10 @@ async fn monitor_host_switch(
         shutdown, triggers, position, registry, shared, device_io, hosts,
     )
     .await;
-    if stop == HostSwitchStop::ChannelChanged {
+    if matches!(
+        stop,
+        HostSwitchStop::ChannelChanged | HostSwitchStop::ReceiverSlotGone
+    ) {
         queued_departure(triggers, position, hosts).unwrap_or(stop)
     } else {
         stop
@@ -661,7 +735,7 @@ async fn watch_host_switch(
     loop {
         if !registry.is_current(shared) {
             info!(route = %shared.route(), "inventory replaced or removed host-switch channel");
-            return HostSwitchStop::ChannelChanged;
+            return HostSwitchStop::for_current_publication(registry, shared);
         }
         tokio::select! {
             biased;
@@ -676,7 +750,9 @@ async fn watch_host_switch(
                     HostSwitchStopReason::Graceful => {
                         HostSwitchStop::for_current_publication(registry, shared)
                     }
-                    HostSwitchStopReason::DeviceLost => HostSwitchStop::ChannelChanged,
+                    HostSwitchStopReason::DeviceLost => {
+                        HostSwitchStop::for_lost_publication(registry, shared)
+                    }
                 };
             }
             trigger = triggers.recv() => {
@@ -885,6 +961,106 @@ pub async fn switch_linked_hosts(
     Ok(changed)
 }
 
+/// Switch one device on an already-open shared channel to the zero-based `host`.
+///
+/// The device's reported host count is validated before writing, and a slot
+/// that `HostsInfo` reports as truly empty is refused (see
+/// `host_slot_is_empty`). A `true` result means the fire-and-forget write was
+/// issued; it cannot confirm that the device arrived at the destination,
+/// because the device leaves this channel as soon as the write takes effect.
+/// `false` means the device already reported `host` as current, so no write
+/// was needed.
+///
+/// # Errors
+///
+/// [`HostSwitchError::FeatureUnsupported`] without `0x1814`,
+/// [`HostSwitchError::HostOutOfRange`] for a slot beyond the device's host
+/// count, [`HostSwitchError::HostSlotEmpty`] for an unpaired slot, and the
+/// transport or timeout variants when the device does not answer.
+pub async fn switch_host_on(shared: &SharedChannel, host: u8) -> Result<bool, HostSwitchError> {
+    prepare_host_switch_on(shared, host).await?.apply().await
+}
+
+/// A host switch that passed every read-only check and waits for its write.
+///
+/// A caller that moves several devices prepares all of them first and writes
+/// only after every preparation succeeded. A device that fails a check then
+/// leaves every device where it was, because `setCurrentHost` takes the device
+/// off this host and cannot be undone from here.
+///
+/// The value keeps the device's channel open until it is applied or dropped.
+/// Dropping it writes nothing.
+#[must_use = "dropping a prepared host switch writes nothing"]
+pub struct PreparedHostSwitch(PreparedHostChange);
+
+impl PreparedHostSwitch {
+    /// The zero-based destination host slot.
+    #[must_use]
+    pub const fn host(&self) -> u8 {
+        self.0.host
+    }
+
+    /// Whether the device still has to move. `false` means the device already
+    /// reported the destination as its current host.
+    #[must_use]
+    pub const fn is_required(&self) -> bool {
+        self.0.required
+    }
+
+    /// Issue the fire-and-forget `setCurrentHost` write.
+    ///
+    /// The result means the same as [`switch_host_on`]'s. The device state is
+    /// not read again: a device that changed host since the preparation
+    /// receives the write for the prepared slot.
+    ///
+    /// # Errors
+    ///
+    /// The transport or timeout variants of [`HostSwitchError`] when the write
+    /// is not acknowledged. A timeout does not prove that the device ignored
+    /// the write.
+    pub async fn apply(self) -> Result<bool, HostSwitchError> {
+        apply_host_change(self.0).await
+    }
+}
+
+/// Run every read-only check for moving one device on an already-open shared
+/// channel to the zero-based `host`. [`PreparedHostSwitch::apply`] writes.
+///
+/// # Errors
+///
+/// As [`switch_host_on`], except that no write is issued.
+pub async fn prepare_host_switch_on(
+    shared: &SharedChannel,
+    host: u8,
+) -> Result<PreparedHostSwitch, HostSwitchError> {
+    prepare_host_change_on(shared.channel(), shared.device_index(), host)
+        .await
+        .map(PreparedHostSwitch)
+}
+
+/// Open `route` from `channel_pool` and run every read-only check for moving
+/// that device to the zero-based `host`. [`PreparedHostSwitch::apply`] writes.
+///
+/// The caller must hold exclusive receiver access for the whole preparation
+/// and write, as the keyboard-driven host transition does.
+///
+/// # Errors
+///
+/// [`HostSwitchError::TargetNotFound`] when the pool has no channel for
+/// `route`, and otherwise as [`prepare_host_switch_on`].
+pub async fn prepare_host_switch(
+    channel_pool: &ChannelPool,
+    route: &DeviceRoute,
+    host: u8,
+) -> Result<PreparedHostSwitch, HostSwitchError> {
+    let channel = open_channel(channel_pool, route, "opening host-change device channel")
+        .await?
+        .ok_or(HostSwitchError::TargetNotFound)?;
+    prepare_host_change_on(&channel, route.device_index(), host)
+        .await
+        .map(PreparedHostSwitch)
+}
+
 async fn arm_host_controls_inner(
     controls: &ReprogControlsV4,
     armed: &mut Vec<ArmedControl>,
@@ -1022,6 +1198,20 @@ async fn prepare_host_change(
     prepare_follower_change(channel, target.device_index(), keyboard_hosts, host).await
 }
 
+/// [`prepare_host_change_with`] for the device at `device_index` on `channel`.
+async fn prepare_host_change_on(
+    channel: &Arc<HidppChannel>,
+    device_index: u8,
+    host: u8,
+) -> Result<PreparedHostChange, HostSwitchError> {
+    let mut device = timed_hidpp(
+        "opening host-change device",
+        Device::new(Arc::clone(channel), device_index),
+    )
+    .await?;
+    prepare_host_change_with(&mut device, device_index, host).await
+}
+
 /// Read-only checks before `device` moves to `host`: the host is in range,
 /// and the device does not report it as an empty slot.
 async fn prepare_host_change_with(
@@ -1034,7 +1224,7 @@ async fn prepare_host_change_with(
         device.root().get_feature(ChangeHostFeature::ID),
     )
     .await?
-    .ok_or_else(|| HostSwitchError::Hidpp("ChangeHost is unsupported".into()))?;
+    .ok_or(HostSwitchError::FeatureUnsupported)?;
     let change_host = device.add_feature::<ChangeHostFeature>(info.index);
     let state = timed_hidpp("reading current host", change_host.get_host_info()).await?;
     let required = host_change_required(state.current_host, state.host_count, host)?;
@@ -1112,7 +1302,22 @@ where
 /// `name_len` is independent evidence the slot has a stored pairing, so it
 /// overrides an `Empty` status; only a slot with both `Empty` and no name is
 /// treated as truly empty.
+///
+/// A device that does not answer within [`HOSTS_INFO_BUDGET`] has not said
+/// the slot is empty either.
 async fn host_slot_is_empty(device: &mut Device, host: u8) -> bool {
+    timeout(HOSTS_INFO_BUDGET, slot_reported_empty(device, host))
+        .await
+        .unwrap_or_else(|_| {
+            debug!(
+                host,
+                "host slot status did not arrive in time; treating the slot as usable"
+            );
+            false
+        })
+}
+
+async fn slot_reported_empty(device: &mut Device, host: u8) -> bool {
     let feature = timed_hidpp(
         "locating hosts-info feature",
         device.root().get_feature(HostsInfoFeature::ID),
@@ -1147,9 +1352,10 @@ fn host_change_required(
     requested_host: u8,
 ) -> Result<bool, HostSwitchError> {
     if requested_host >= host_count {
-        return Err(HostSwitchError::Hidpp(format!(
-            "host {requested_host} is outside device host count {host_count}"
-        )));
+        return Err(HostSwitchError::HostOutOfRange {
+            host: requested_host,
+            host_count,
+        });
     }
     Ok(current_host != requested_host)
 }

@@ -6,9 +6,9 @@ use std::time::Instant;
 
 use super::{
     ActivePress, ButtonCommand, ButtonInput, ButtonRuntimeEvent, ButtonState, CancelReason,
-    EVENT_QUEUE_CAPACITY, EndReason, PressBehavior, PressToken, SHUTDOWN_POLL_PERIOD,
-    ShutdownRequest,
+    EVENT_QUEUE_CAPACITY, EndReason, PressBehavior, PressToken, ShutdownRequest,
 };
+use crate::runtime::receive_command;
 
 pub(super) fn run_worker(
     events: &mpsc::Receiver<ButtonCommand>,
@@ -22,7 +22,9 @@ pub(super) fn run_worker(
         if finish_shutdown_if_requested(shutdown, &mut state, emit) {
             return;
         }
-        let command = match events.recv_timeout(SHUTDOWN_POLL_PERIOD) {
+        // Shutdown and invalidation arrive with a `Wake`, so only a pending
+        // long-press threshold is a reason to stop waiting without a command.
+        let command = match receive_command(events, state.next_deadline()) {
             Ok(command) => command,
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 if settle_due_long_presses(

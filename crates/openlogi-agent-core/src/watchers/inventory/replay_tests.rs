@@ -621,6 +621,95 @@ async fn reopening_a_retired_channel_requests_device_wake_before_its_snapshot() 
         .expect("the probe exchanges are consumed");
 }
 
+/// After a wake the capture watchdog can find a direct channel dead long
+/// before inventory's own probes would (#2020). Its report must wake the
+/// worker, which retires the channel without probing it and reopens it, with
+/// the same single `DeviceWake` as the probe-driven path above.
+#[tokio::test]
+async fn a_capture_dead_channel_report_wakes_the_worker_and_replaces_the_channel() {
+    use super::schedule::{ReconcileTrigger, Schedule, WakeDetector};
+    use std::time::{Instant, SystemTime};
+
+    let node_id = NodeId::from("agent-dead-report-mouse".to_string());
+    let cassette = HidCassette {
+        schema_version: FIXTURE_SCHEMA_VERSION,
+        name: "agent mouse reported dead by capture".to_string(),
+        channel: CHANNEL.to_string(),
+        report_support: ReportSupport::ShortAndLong,
+        exchanges: direct_probe_exchanges(),
+    };
+    let backend = Arc::new(
+        ReplayBackend::new(direct_topology(node_id.clone()), vec![cassette])
+            .expect("valid dead-report replay"),
+    );
+    let (_signal, device_io) = device_io_channel();
+    let hardware = HardwareContext::injected(backend.clone(), device_io.clone());
+    let registry = ChannelRegistry::default();
+    let (events, mut published) = tokio::sync::mpsc::unbounded_channel();
+    let (_refresh, refresh_requests) = tokio::sync::mpsc::channel(1);
+    let (_rescan, rescans) = tokio::sync::mpsc::channel(1);
+    let (_notifier, hid_events) = openlogi_hid::inventory::events::event_channel();
+    let start = Instant::now();
+    let mut worker = super::InventoryWorker {
+        events,
+        refresh_requests,
+        rescans,
+        enumerator: hardware.enumerator().with_registry(registry.clone()),
+        hardware,
+        state: super::WatchState::default(),
+        hotplug: None,
+        hid_events,
+        schedule: Schedule::new(start),
+        wake_detector: WakeDetector::new(SystemTime::now(), start),
+        device_io,
+        refresh_open: true,
+        rescans_open: true,
+    };
+    let is_device_wake = |event: &InventoryEvent| matches!(event, InventoryEvent::DeviceWake);
+
+    assert!(worker.reconcile(ReconcileTrigger::Initial).await);
+    drain(&mut published);
+    let stale = registry
+        .lookup(&direct_route())
+        .expect("direct route published");
+
+    assert!(registry.report_dead(&stale));
+    let trigger = tokio::time::timeout(Duration::from_secs(1), worker.next_trigger())
+        .await
+        .expect("the report wakes the worker");
+    assert_eq!(trigger, ReconcileTrigger::DeadChannel);
+    assert!(worker.reconcile(trigger).await);
+    assert!(
+        registry.lookup(&direct_route()).is_none(),
+        "the reported channel is withdrawn in that same pass"
+    );
+    drop(stale);
+
+    let mut recovery = drain(&mut published);
+    for _ in 0..2 {
+        assert!(worker.reconcile(ReconcileTrigger::RepairRetry).await);
+        recovery.extend(drain(&mut published));
+    }
+
+    assert_eq!(
+        backend.open_count(&node_id).expect("known node"),
+        2,
+        "the reported channel must have been reopened"
+    );
+    assert_eq!(
+        recovery
+            .iter()
+            .filter(|event| is_device_wake(event))
+            .count(),
+        1,
+        "the replacement requests exactly one re-apply"
+    );
+    assert!(
+        registry.lookup(&direct_route()).is_some(),
+        "the replacement channel is published"
+    );
+}
+
 fn drain(
     published: &mut tokio::sync::mpsc::UnboundedReceiver<InventoryEvent>,
 ) -> Vec<InventoryEvent> {

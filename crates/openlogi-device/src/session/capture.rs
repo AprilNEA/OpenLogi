@@ -36,7 +36,7 @@ use redivert::ReportingChanges;
 use super::capture_restore::{
     ArmedReporting, CaptureChannelSlot, CaptureError, CaptureSessionOutcome, CaptureSessionStop,
     CaptureStop, PendingCaptureRestore, drop_listener_after, restore_after_stop,
-    stop_for_current_publication, wait_for_channel_change,
+    stop_for_current_publication, stop_for_dead_channel, wait_for_channel_change,
 };
 use super::gesture::CapturedInput;
 use crate::reprog_controls::{CidReportingChangeEcho, ReprogControlsV4};
@@ -147,12 +147,44 @@ pub(super) trait ArmedCapture {
         sink: mpsc::UnboundedSender<CapturedInput>,
     ) -> impl Fn(&v20::Message) + Send + Sync + 'static;
 
+    /// Build the handler for every raw report read from the node, before the
+    /// channel decides what protocol it belongs to — the path by which a
+    /// session captures vendor PDUs that share the node with HID++ and never
+    /// parse as messages. It runs on the channel's read thread, by shared
+    /// reference. The default ignores them; sessions that observe a vendor
+    /// protocol override it.
+    fn raw_report_handler(
+        &self,
+        _device_index: u8,
+        _sink: mpsc::UnboundedSender<CapturedInput>,
+    ) -> impl Fn(&[u8]) + Send + Sync + 'static {
+        |_bytes| {}
+    }
+
     /// Forget input state that a device power-cycle invalidated.
     fn reset_input_state(&self) {}
 
-    /// Re-issue every diversion after a wireless reconnect. Failures are
-    /// logged, not propagated: the next reconnection broadcast retries.
-    async fn rearm(&self);
+    /// Re-issue every diversion after a wireless reconnect. A failure the next
+    /// reconnection broadcast can retry is logged. `false` ends the session:
+    /// its controls are restored and capture arms again from scratch.
+    async fn rearm(&self) -> bool;
+
+    /// Resolve when the session's owner asks this capture to divert a
+    /// different set of controls. Waiting does not consume the request: it
+    /// stays pending until [`Self::retarget`] applies it, so a request that
+    /// arrives while device I/O is suspended is applied after resume. Never
+    /// resolves for a capture whose controls are fixed for its whole session.
+    async fn retarget_requested(&self) {
+        std::future::pending::<()>().await;
+    }
+
+    /// Divert and hand back controls until the firmware matches the latest
+    /// request, writing only the controls that change. An error ends the
+    /// session through the normal teardown, which hands back every control
+    /// this capture still owns.
+    async fn retarget(&mut self) -> Result<(), CaptureError> {
+        Ok(())
+    }
 
     /// The `0x1b04` accessor and every control armed through it, or `None`
     /// when this capture armed no `0x1b04` control. The session diverts one
@@ -161,7 +193,7 @@ pub(super) trait ArmedCapture {
 
     /// Take the subscription to the reporting changes that other clients
     /// make, which arming took before its first diversion write. `None` when
-    /// this capture armed no `0x1b04` control, or once taken.
+    /// this capture can never divert a `0x1b04` control, or once taken.
     fn take_reporting_changes(&mut self) -> Option<ReportingChangeStream>;
 
     /// Convert all armed firmware state into the one capability that can
@@ -176,6 +208,8 @@ pub(super) trait ArmedCapture {
 /// A normal stop restores every control before returning; transport
 /// replacement or loss may return [`CaptureSessionOutcome::RestorePending`]
 /// for the caller to retry on the current inventory channel.
+/// Failed wake-feature discovery also ends the epoch through this teardown,
+/// allowing the supervisor to retry without leaving capture unable to rearm.
 pub(super) async fn run_capture<A: ArmedCapture>(
     shared: SharedChannel,
     mut armed: A,
@@ -183,7 +217,7 @@ pub(super) async fn run_capture<A: ArmedCapture>(
 ) -> CaptureSessionOutcome {
     let CaptureHost {
         sink,
-        shutdown,
+        mut shutdown,
         channel_slot,
         registry,
         device_io,
@@ -218,6 +252,12 @@ pub(super) async fn run_capture<A: ArmedCapture>(
         }
     });
     let changes = ReportingChanges::new(armed.take_reporting_changes());
+    // The message listener only ever sees reports that parsed as HID++ (and
+    // replies, which it filters). Vendor PDUs sharing the node are invisible
+    // to it, so a session that captures a vendor protocol registers a raw
+    // listener too; the default handler ignores what it is given.
+    let raw_listener =
+        chan.add_raw_report_listener_guarded(armed.raw_report_handler(device_index, sink.clone()));
 
     // Wireless devices drop their diverted-control state when they
     // power-cycle (idle sleep, power switch, Easy-Switch host change) — the
@@ -225,28 +265,46 @@ pub(super) async fn run_capture<A: ArmedCapture>(
     // reconfigure. Re-arm on every broadcast, or the captured controls
     // silently revert to their native functions after the first nap.
     let root = RootFeature::new(Arc::clone(&chan), device_index, 0);
-    let wireless = root
-        .get_feature(WirelessDeviceStatusFeature::ID)
-        .await
-        .ok()
-        .flatten()
-        .map(|info| WirelessDeviceStatusFeature::new(Arc::clone(&chan), device_index, info.index));
-    armed.log_active(device_index, wireless.is_some());
-    let stop = monitor(
-        CaptureMonitor {
-            armed: &armed,
-            root: &root,
-            device_index,
-            registry,
-            shared: &shared,
-            activity: activity.as_deref(),
-        },
-        wireless,
-        changes,
-        shutdown,
-        device_io,
-    )
-    .await;
+    let stop = match root.get_feature(WirelessDeviceStatusFeature::ID).await {
+        Ok(info) => {
+            let wireless = info.map(|info| {
+                WirelessDeviceStatusFeature::new(Arc::clone(&chan), device_index, info.index)
+            });
+            armed.log_active(device_index, wireless.is_some());
+            monitor(
+                CaptureMonitor {
+                    armed: &mut armed,
+                    root: &root,
+                    device_index,
+                    registry,
+                    shared: &shared,
+                    activity: activity.as_deref(),
+                },
+                wireless,
+                changes,
+                shutdown,
+                device_io,
+            )
+            .await
+        }
+        Err(error) => {
+            // Only a successful lookup can establish that wake reports are
+            // unsupported. A transient failure must retire this epoch so its
+            // supervisor retries discovery before trusting capture again.
+            warn!(
+                ?error,
+                index = device_index,
+                capture = A::NAME,
+                "wake feature discovery failed — restarting capture"
+            );
+            match shutdown.try_recv() {
+                Ok(CaptureSessionStop::Handoff(route)) => CaptureStop::Handoff(route),
+                Ok(CaptureSessionStop::Shutdown) | Err(_) => {
+                    stop_for_current_publication(registry, &shared)
+                }
+            }
+        }
+    };
 
     // The slot is one last-writer-wins cell shared by every session, so a
     // sibling may have published its own channel after ours. Clear it only
@@ -262,16 +320,21 @@ pub(super) async fn run_capture<A: ArmedCapture>(
     // Keep accepting reports until firmware restoration is complete. The
     // agent drains this listener's forwarding task before publishing ordered
     // Done, so this session remains the sole owner of every input captured
-    // while its controls could still be diverted.
+    // while its controls could still be diverted. The raw listener follows the
+    // same contract — dropped after restoration, never mid-way.
     let pending = armed.into_pending(&shared);
-    let outcome = drop_listener_after(listener, restore_after_stop(stop, pending, registry)).await;
+    let outcome = drop_listener_after(
+        raw_listener,
+        drop_listener_after(listener, restore_after_stop(stop, pending, registry)),
+    )
+    .await;
     debug!(index = device_index, capture = A::NAME, "capture stopped");
     outcome
 }
 
 /// Borrowed state used while monitoring one armed capture session.
 struct CaptureMonitor<'a, A> {
-    armed: &'a A,
+    armed: &'a mut A,
     root: &'a RootFeature,
     device_index: u8,
     registry: &'a ChannelRegistry,
@@ -315,6 +378,20 @@ async fn next_activity(watchdog: Option<&Watchdog<'_>>) -> u64 {
     }
 }
 
+/// Apply the owner's latest request for diverted controls. A failed write
+/// ends the session, and its teardown hands back every control it owns.
+async fn retarget<A: ArmedCapture>(context: &mut CaptureMonitor<'_, A>) -> Result<(), CaptureStop> {
+    context.armed.retarget().await.map_err(|error| {
+        warn!(
+            ?error,
+            index = context.device_index,
+            capture = A::NAME,
+            "changing the diverted controls failed — restarting capture"
+        );
+        stop_for_current_publication(context.registry, context.shared)
+    })
+}
+
 /// When a watched channel has been idle for a full interval. Never resolves
 /// on an unwatched one.
 async fn idle_deadline(watchdog: Option<&Watchdog<'_>>) {
@@ -325,11 +402,12 @@ async fn idle_deadline(watchdog: Option<&Watchdog<'_>>) {
 }
 
 /// Keep a capture session alive and reapply its volatile diversions whenever
-/// the device announces a reconnect or another client hands a control back.
-/// Returns only the typed reason capture stopped; restoration performs a
-/// fresh registry lookup after monitoring.
+/// the device announces a reconnect or another client hands a control back,
+/// and change the diverted controls in place when the owner asks for a
+/// different set. Returns only the typed reason capture stopped; restoration
+/// performs a fresh registry lookup after monitoring.
 async fn monitor<A: ArmedCapture>(
-    context: CaptureMonitor<'_, A>,
+    mut context: CaptureMonitor<'_, A>,
     wireless: Option<WirelessDeviceStatusFeature>,
     mut changes: ReportingChanges,
     shutdown: oneshot::Receiver<CaptureSessionStop>,
@@ -397,13 +475,21 @@ async fn monitor<A: ArmedCapture>(
                 info!(?broadcast, capture = A::NAME, "device reconnected — re-arming capture");
                 context.armed.reset_input_state();
                 tokio::time::sleep(REARM_SETTLE_DELAY).await;
-                if device_io.allows_io() {
-                    context.armed.rearm().await;
+                if device_io.allows_io() && !context.armed.rearm().await {
+                    warn!(index = context.device_index, capture = A::NAME, "re-arm after wake failed — restarting session");
+                    return stop_for_current_publication(context.registry, context.shared);
                 }
             }
             echo = changes.next() => {
                 if device_io.allows_io() {
-                    changes.answer(context.armed, echo).await;
+                    changes.answer(&*context.armed, echo).await;
+                }
+            }
+            () = context.armed.retarget_requested() => {
+                // While I/O is suspended the request stays pending, and the
+                // gate at the top of the loop holds it until visible resume.
+                if device_io.allows_io() && let Err(stop) = retarget(&mut context).await {
+                    return stop;
                 }
             }
             seq = next_activity(watchdog.as_ref()) => {
@@ -428,7 +514,7 @@ async fn monitor<A: ArmedCapture>(
                     outcome,
                 ) == LivenessDecision::Restart {
                     warn!(index = context.device_index, capture = A::NAME, "capture channel stopped delivering — restarting session on a fresh channel");
-                    return stop_for_current_publication(context.registry, context.shared);
+                    return stop_for_dead_channel(context.registry, context.shared);
                 }
             }
         }

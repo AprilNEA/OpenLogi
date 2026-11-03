@@ -181,6 +181,7 @@ fn sync_depot(
     for resource_key in [
         "device_image",
         "device_buttons_image",
+        super::SIDE_VIEW_KEY,
         "device_camera_image",
         "image_metadata",
     ] {

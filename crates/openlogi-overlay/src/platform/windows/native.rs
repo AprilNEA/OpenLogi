@@ -1,7 +1,7 @@
 //! The Win32 boundary: sample once, establish the HWND's target DPI while it
-//! is still a 1px bootstrap, then place the window without activating it.
-//! The ring and the notice share both halves; only their final geometry
-//! differs.
+//! is still a 1px bootstrap, then place the window without activating it, so
+//! that no later click activates it either. The ring and the notice share
+//! both halves; only their final geometry differs.
 
 use anyhow::{Context as _, Result, ensure};
 use gpui::{App, Bounds, DevicePixels, DisplayId, Pixels, Point, Size, Window, point, size};
@@ -18,8 +18,9 @@ use windows_sys::Win32::Graphics::Gdi::{
 };
 use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE_DPI};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GWL_STYLE, GetCursorPos, GetWindowLongW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOZORDER,
-    SWP_SHOWWINDOW, SetWindowLongW, SetWindowPos, WS_CAPTION, WS_POPUP, WS_THICKFRAME,
+    GWL_EXSTYLE, GWL_STYLE, GetCursorPos, GetWindowLongW, SWP_FRAMECHANGED, SWP_NOACTIVATE,
+    SWP_NOZORDER, SWP_SHOWWINDOW, SetWindowLongW, SetWindowPos, WS_CAPTION, WS_EX_NOACTIVATE,
+    WS_POPUP, WS_THICKFRAME,
 };
 
 use super::{NoticePlacement, RingPlacement};
@@ -157,13 +158,19 @@ fn place(
     if let Err(error) = make_frameless(hwnd) {
         warn!(%error, "could not remove the overlay window frame");
     }
+    // Without this, the click that picks a ring slot takes the foreground
+    // from the application the slot's shortcut is meant for. The ring still
+    // opens if it fails: actions that press no keys keep working.
+    if let Err(error) = make_nonactivating(hwnd) {
+        warn!(%error, "could not keep the overlay window from taking the foreground");
+    }
     // Pin the 1px bootstrap well inside the selected monitor (GPUI should
     // already have opened it there). If that crosses a DPI boundary,
     // SetWindowPos synchronously delivers WM_DPICHANGED; GPUI applies its
     // suggested rectangle and updates rendering scale before this returns.
     // Final geometry is applied only AFTER that transition, so the suggested
     // rectangle cannot move the window away from where it was placed.
-    // FRAMECHANGED applies the frameless style set above in the same move.
+    // FRAMECHANGED applies the styles set above in the same move.
     let anchor = Bounds::new(display.center(), size(DevicePixels(1), DevicePixels(1)));
     set_bounds(
         hwnd,
@@ -237,6 +244,37 @@ fn make_frameless(hwnd: HWND) -> Result<()> {
     Ok(())
 }
 
+/// Keep a click on the overlay from taking the foreground away from the
+/// application it opened over.
+///
+/// A ring action presses its shortcut into the window with keyboard focus,
+/// so the application under the ring has to keep that focus through the
+/// click that picks a slot, as it does under the macOS non-activating panel
+/// and the Wayland layer surface without keyboard interactivity. GPUI shows
+/// the window without activating it, but answers every `WM_MOUSEACTIVATE`
+/// with `MA_ACTIVATE`, so that click made the overlay the foreground window
+/// and the shortcut reached the closing overlay instead. Windows does not
+/// activate a `WS_EX_NOACTIVATE` window when it is clicked. Active window
+/// tracking ("activate a window by hovering over it") still asks
+/// `WM_MOUSEACTIVATE`, so with that setting on, hovering can still activate it.
+#[expect(
+    unsafe_code,
+    reason = "extended-style read and write on a borrowed HWND, with typed values"
+)]
+fn make_nonactivating(hwnd: HWND) -> Result<()> {
+    // GWL_EXSTYLE is a 32-bit bit set like GWL_STYLE in `make_frameless`.
+    // SAFETY: hwnd belongs to the still-borrowed window.
+    let ex_style = unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) }.cast_unsigned();
+    let nonactivating = ex_style | WS_EX_NOACTIVATE;
+    // SAFETY: as above; a zero return is only an error with a last error set,
+    // and GPUI never creates a pop-up with a zero extended style.
+    if unsafe { SetWindowLongW(hwnd, GWL_EXSTYLE, nonactivating.cast_signed()) } == 0 {
+        return Err(std::io::Error::last_os_error())
+            .context("keep the overlay window from taking the foreground");
+    }
+    Ok(())
+}
+
 #[expect(
     unsafe_code,
     reason = "SetWindowPos on a borrowed HWND, with physical screen bounds"
@@ -259,4 +297,93 @@ fn set_bounds(hwnd: HWND, bounds: Bounds<DevicePixels>, flags: u32) -> Result<()
         return Err(std::io::Error::last_os_error()).context("position overlay window");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DestroyWindow, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    };
+
+    use super::*;
+
+    /// A bare Win32 pop-up with the extended style GPUI gives a
+    /// `WindowKind::PopUp`, destroyed on drop.
+    struct PopUp(HWND);
+
+    impl PopUp {
+        const GPUI_EX_STYLE: u32 = WS_EX_TOOLWINDOW | WS_EX_TOPMOST;
+
+        #[expect(
+            unsafe_code,
+            reason = "create a plain system-class window for the test"
+        )]
+        fn open() -> Self {
+            let class: Vec<u16> = "STATIC\0".encode_utf16().collect();
+            // SAFETY: `class` is a NUL-terminated system class name that
+            // outlives the call; every handle argument may be null.
+            let hwnd = unsafe {
+                CreateWindowExW(
+                    Self::GPUI_EX_STYLE,
+                    class.as_ptr(),
+                    std::ptr::null(),
+                    WS_POPUP,
+                    0,
+                    0,
+                    1,
+                    1,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null(),
+                )
+            };
+            assert!(
+                !hwnd.is_null(),
+                "create a test pop-up: {}",
+                std::io::Error::last_os_error()
+            );
+            Self(hwnd)
+        }
+
+        #[expect(
+            unsafe_code,
+            reason = "read the extended style of the test's own window"
+        )]
+        fn ex_style(&self) -> u32 {
+            // SAFETY: `self.0` is a live window this thread created.
+            unsafe { GetWindowLongW(self.0, GWL_EXSTYLE) }.cast_unsigned()
+        }
+    }
+
+    impl Drop for PopUp {
+        #[expect(unsafe_code, reason = "destroy the test's own window")]
+        fn drop(&mut self) {
+            // SAFETY: `self.0` is a live window this thread created, and it is
+            // destroyed only here.
+            unsafe { DestroyWindow(self.0) };
+        }
+    }
+
+    #[test]
+    fn a_click_cannot_activate_an_overlay_window() {
+        let window = PopUp::open();
+        assert_eq!(
+            window.ex_style() & WS_EX_NOACTIVATE,
+            0,
+            "a bare pop-up is activated by a click, as GPUI's was"
+        );
+        make_nonactivating(window.0).expect("set the overlay's extended style");
+        let ex_style = window.ex_style();
+        assert_ne!(
+            ex_style & WS_EX_NOACTIVATE,
+            0,
+            "a click must leave the foreground with the application under the overlay"
+        );
+        assert_eq!(
+            ex_style & PopUp::GPUI_EX_STYLE,
+            PopUp::GPUI_EX_STYLE,
+            "the overlay stays a topmost tool window"
+        );
+    }
 }

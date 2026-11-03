@@ -62,7 +62,12 @@ fn main() -> Result<()> {
         commands,
     } = ipc::spawn();
 
-    let mut app = gpui_platform::application().with_assets(openlogi_ui::action_icons::ActionIcons);
+    // GPUI 0.3.4 never releases a window's AccessKit adapter, and the adapter
+    // keeps the window's view, renderer and Metal surfaces alive, so every
+    // ring the overlay opened stayed in memory (#1741). The ring exposes no
+    // accessibility roles, so the overlay runs without AccessKit.
+    let mut app = gpui::Application::new_inaccessible(gpui_platform::current_platform(false))
+        .with_assets(openlogi_ui::action_icons::ActionIcons);
     // Application construction establishes GPUI's NSApplication subclass.
     // Asking AppKit for its singleton sooner creates a plain NSApplication,
     // which lacks the `platform` ivar GPUI needs. Set Accessory policy now:

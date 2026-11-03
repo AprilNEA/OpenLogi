@@ -315,6 +315,93 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn offline_receiver_host_controls_restore_on_the_same_channel_before_rearm() {
+        for route in [
+            DeviceRoute::Bolt {
+                receiver_uid: "host-receiver".into(),
+                slot: 2,
+            },
+            DeviceRoute::Unifying {
+                receiver_uid: "host-receiver".into(),
+                slot: 2,
+            },
+        ] {
+            let armed = Arc::new(tokio::sync::Notify::new());
+            let armed_signal = armed.clone();
+            let (raw, writes) = ScriptedRawHidChannel::with_dynamic_responder(move |request| {
+                if request[2] == 0x22 && request[3] >> 4 == 3 && request[6] & 1 != 0 {
+                    armed_signal.notify_one();
+                }
+                capture_keyboard(request, false)
+            });
+            let channel = scripted_channel(raw).await;
+            let registry = ChannelRegistry::default();
+            let node = NodeId::from("host-receiver".to_owned());
+            registry.replace_node(node.clone(), [route.clone()], channel.clone());
+            let (_stop, stopped) = tokio::sync::oneshot::channel();
+            let (_signal, gate) = crate::device_io_channel();
+            let pool = empty_pool();
+            let withdraw = async {
+                armed.notified().await;
+                registry.replace_node(node.clone(), [], channel.clone());
+            };
+            let (outcome, ()) = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                tokio::join!(
+                    run_host_switch_session(route.clone(), &[], stopped, &registry, &pool, gate),
+                    withdraw,
+                )
+            })
+            .await
+            .expect("withdrawing the slot must stop the armed host-switch session");
+            let (requested, pending) = outcome
+                .expect("the session armed successfully")
+                .into_parts();
+            assert_eq!(requested, super::HostSwitchFollowUp::Rearm);
+            let pending = pending.expect("the offline keyboard still owes reporting restoration");
+            let pending = match pending.retry(&registry).await {
+                HostSwitchRestoreOutcome::RestorePending(pending) => pending,
+                HostSwitchRestoreOutcome::Restored => panic!("an offline slot cannot restore"),
+            };
+            let reporting = || {
+                writes
+                    .written_reports()
+                    .into_iter()
+                    .filter(|request| request[2] == 0x22 && request[3] >> 4 == 3)
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(
+                reporting().len(),
+                1,
+                "no restore writes while the slot is offline"
+            );
+            registry.replace_node(node, [route.clone()], channel);
+            assert!(
+                matches!(
+                    pending.retry(&registry).await,
+                    HostSwitchRestoreOutcome::Restored
+                ),
+                "returning to the unchanged receiver must release host-switch cleanup"
+            );
+            assert_eq!(&reporting()[1][4..10], &[0, 0xd1, 0x32, 0, 0, 0]);
+
+            let (stop, stopped) = tokio::sync::oneshot::channel();
+            stop.send(HostSwitchStopReason::Graceful).unwrap();
+            let (_signal, gate) = crate::device_io_channel();
+            assert!(matches!(
+                run_host_switch_session(route, &[], stopped, &registry, &empty_pool(), gate).await,
+                Ok(HostSwitchSessionOutcome::Restored {
+                    requested_host: None
+                })
+            ));
+            assert_eq!(
+                reporting().len(),
+                4,
+                "the successor arms and restores after cleanup"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn retirement_before_listener_subscription_is_observed_without_another_event() {
         let route = DeviceRoute::Direct {
             vendor_id: 0x046d,

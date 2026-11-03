@@ -527,6 +527,9 @@ impl InventoryWorker {
                 }
                 tokio::time::sleep(SYSTEM_RESUME_SETTLE).await;
             }
+            ReconcileTrigger::DeadChannel => {
+                info!("capture reported a dead channel — replacing it");
+            }
             ReconcileTrigger::Initial
             | ReconcileTrigger::RepairRetry
             | ReconcileTrigger::SettingsConfirmation
@@ -629,6 +632,9 @@ impl InventoryWorker {
                 },
                 Some(source) = self.hid_events.recv() => {
                     break ReconcileTrigger::HidEvent(source);
+                }
+                () = self.enumerator.dead_channel_reported() => {
+                    break ReconcileTrigger::DeadChannel;
                 }
                 allowed = self.device_io.changed() => {
                     if allowed == Some(false) && self.device_io.wait_until_allowed().await {

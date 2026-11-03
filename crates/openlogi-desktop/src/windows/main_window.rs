@@ -6,19 +6,34 @@
 //! duplicate — and a window closed while the app kept running in the menu bar
 //! can be brought back.
 
-use gpui::{App, AppContext as _, Bounds, Size, Styled as _, WindowBounds, WindowOptions, px};
+use gpui::{App, AppContext as _, Pixels, Size, Styled as _, WindowOptions, px};
 use gpui_component::{ActiveTheme as _, Root};
 use openlogi_core::brand::APP_ID;
 use tracing::warn;
 
 use crate::app::AppView;
 use crate::ui::theme;
-use crate::windows::{WindowRegistry, titlebar_options};
+use crate::windows::{WindowFit, WindowRegistry, titlebar_options};
+
+/// The client size a fresh main window opens at when the work area holds it.
+pub(super) const PREFERRED_SIZE: Size<Pixels> = Size {
+    width: px(1280.),
+    height: px(820.),
+};
+
+/// How far the user may shrink the main window. The height keeps the buttons
+/// tab's mouse model above its scale floor (`MODEL_MIN_H` + the chrome/padding
+/// reserve) so its side labels never overlap; below this the model can't
+/// shrink further without crowding. [`WindowFit`] lowers it only on a work
+/// area too small to hold it.
+pub(super) const MIN_SIZE: Size<Pixels> = Size {
+    width: px(720.),
+    height: px(680.),
+};
 
 fn window_options(cx: &mut App) -> WindowOptions {
-    let bounds = Bounds::centered(None, Size::new(px(1280.), px(820.)), cx);
+    let fit = WindowFit::on_primary_display(PREFERRED_SIZE, MIN_SIZE, cx);
     WindowOptions {
-        window_bounds: Some(WindowBounds::Windowed(bounds)),
         // Advertise a Wayland xdg-toplevel app_id (and X11 WM_CLASS). Without it
         // the window ships no app_id, so GNOME's `get_wm_class()` returns empty
         // and our own `gnome_shell` frontmost backend reports OpenLogi as `None`
@@ -26,15 +41,11 @@ fn window_options(cx: &mut App) -> WindowOptions {
         // is the shared `brand::APP_ID`, matching the desktop file's
         // `StartupWMClass` and the macOS bundle-id family.
         app_id: Some(APP_ID.into()),
-        // Min height keeps the buttons tab's mouse model above its scale floor
-        // (`MODEL_MIN_H` + the chrome/padding reserve) so its side labels never
-        // overlap; below this the model can't shrink further without crowding.
-        window_min_size: Some(Size::new(px(720.), px(680.))),
         // Linux: transparent chrome so `AppView::render` can draw a client-side
         // `TitleBar` (the compositor declines server-side decorations and gpui's
         // fallback is unpainted). macOS/Windows keep their native titlebar.
         titlebar: Some(titlebar_options("OpenLogi")),
-        ..WindowOptions::default()
+        ..WindowOptions::from(fit)
     }
 }
 

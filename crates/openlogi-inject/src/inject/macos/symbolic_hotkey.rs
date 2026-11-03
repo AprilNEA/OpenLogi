@@ -103,6 +103,30 @@ impl SpaceShortcut {
     }
 }
 
+/// Type `virtual_key` under `flags` as `CGEvent`s, around whatever modifiers
+/// held chords keep down, in the shape a physical keyboard sends (see
+/// [`keystroke`]).
+///
+/// This is the fallback for a key press the virtual HID keyboard declined.
+/// A key event that only carries the modifier flags can leave those
+/// modifiers down: Command stays held, and an App Switcher that Command-Tab
+/// opened never closes (#2178).
+///
+/// No edge is offered to the virtual keyboard again. It declines a press of
+/// a key a held chord keeps down on it, but would accept that key's up edge
+/// and release the key under the chord.
+pub(super) fn post_keystroke(virtual_key: u16, flags: CGEventFlags) {
+    super::super::with_held_modifiers(|held| {
+        let Some(edges) = keystroke(virtual_key, flags, held) else {
+            tracing::warn!(virtual_key, "could not build the shortcut's key events");
+            return;
+        };
+        for edge in edges {
+            edge.event.post(CGEventTapLocation::HID);
+        }
+    });
+}
+
 /// One key edge of a keystroke, with the `CGEvent` that posts it when the
 /// virtual HID keyboard does not carry it.
 struct KeyEdge {
@@ -130,7 +154,10 @@ impl KeyEdge {
 /// WindowServer matches a synthesized symbolic hotkey only in this shape: a
 /// key event that merely carries the modifier flags is ignored, as is an
 /// arrow key without the numeric-pad flag every Apple keyboard sets on it
-/// (#1653).
+/// (#1653). Apple keyboards also set the Fn flag on an arrow key, and the
+/// default Mission Control and Spaces records include it, so an arrow key
+/// gets both flags. A custom shortcut carries no Fn bit of its own, and
+/// without it ⌃← does not move a Space (#2178).
 fn keystroke(virtual_key: u16, flags: CGEventFlags, held: HeldModifiers) -> Option<Vec<KeyEdge>> {
     let pressed: Vec<HeldKey> = MODIFIER_KEYS
         .iter()
@@ -146,7 +173,7 @@ fn keystroke(virtual_key: u16, flags: CGEventFlags, held: HeldModifiers) -> Opti
         .iter()
         .fold(flags, |rest, &(flag, _)| rest.difference(flag));
     if ARROW_KEYS.contains(&virtual_key) {
-        key_flags |= CGEventFlags::CGEventFlagNumericPad;
+        key_flags |= CGEventFlags::CGEventFlagNumericPad | CGEventFlags::CGEventFlagSecondaryFn;
     }
 
     let mut modifiers = held;
@@ -385,6 +412,22 @@ mod tests {
         );
     }
 
+    /// A custom ⌃← shortcut carries no Fn bit, but its arrow must be flagged
+    /// as the Spaces record expects, or the Space does not move (#2178).
+    #[test]
+    fn a_custom_arrow_shortcut_flags_the_arrow_like_a_keyboard() {
+        let events = keystroke(0x7b, CONTROL, HeldModifiers::default()).expect("keyboard events");
+        assert_eq!(
+            edges(&events),
+            [
+                (0x3b, Flags, CONTROL),
+                (0x7b, Down, CONTROL | FN | PAD),
+                (0x7b, Up, CONTROL | FN | PAD),
+                (0x3b, Flags, NONE),
+            ]
+        );
+    }
+
     /// A customized shortcut on a non-arrow key gets no numeric-pad flag, and
     /// its modifiers are released in the reverse of their press order.
     #[test]
@@ -400,6 +443,36 @@ mod tests {
                 (0x14, Up, COMMAND | SHIFT),
                 (0x38, Flags, COMMAND),
                 (0x37, Flags, NONE),
+            ]
+        );
+    }
+
+    /// The `CGEvent` fallback for a shortcut press releases each modifier it
+    /// presses as a key of its own: a Tab that only carries Command's flag
+    /// left Command down and the App Switcher open (#2178).
+    #[test]
+    fn a_shortcut_releases_every_modifier_it_presses() {
+        let events = keystroke(0x30, COMMAND, HeldModifiers::default()).expect("keyboard events");
+        assert_eq!(
+            edges(&events),
+            [
+                (0x37, Flags, COMMAND),
+                (0x30, Down, COMMAND),
+                (0x30, Up, COMMAND),
+                (0x37, Flags, NONE),
+            ]
+        );
+        let events =
+            keystroke(0x30, CONTROL | SHIFT, HeldModifiers::default()).expect("keyboard events");
+        assert_eq!(
+            edges(&events),
+            [
+                (0x3b, Flags, CONTROL),
+                (0x38, Flags, CONTROL | SHIFT),
+                (0x30, Down, CONTROL | SHIFT),
+                (0x30, Up, CONTROL | SHIFT),
+                (0x38, Flags, CONTROL),
+                (0x3b, Flags, NONE),
             ]
         );
     }

@@ -68,6 +68,18 @@ enum HeldKey {
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+impl HeldKey {
+    /// The output a chord's ordinary key `usage` holds. A usage the platform
+    /// presses as another key shares that key's owner, as Cmd shares
+    /// Control's on Linux and Windows: macOS presses F13 for Print Screen.
+    fn key(usage: KeyboardUsage) -> Self {
+        #[cfg(target_os = "macos")]
+        let usage = macos::pressed_usage(usage);
+        Self::Key(usage)
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 #[derive(Debug, Default, PartialEq, Eq)]
 struct HoldTransition {
     up: Vec<HeldKey>,
@@ -126,7 +138,7 @@ impl HeldOutput {
         pressed: Option<(&KeyCombo, HeldKeys)>,
     ) -> HoldTransition {
         let tapped = pressed.and_then(|(combo, keys)| {
-            (keys == HeldKeys::ModifiersOnly).then(|| HeldKey::Key(combo.key()))
+            (keys == HeldKeys::ModifiersOnly).then(|| HeldKey::key(combo.key()))
         });
         let released = released.map_or_else(Vec::new, |(combo, keys)| held_keys(combo, keys));
         let pressed = pressed.map_or_else(Vec::new, |(combo, keys)| held_keys(combo, keys));
@@ -205,7 +217,7 @@ fn held_keys(combo: &KeyCombo, held: HeldKeys) -> Vec<HeldKey> {
         keys.push(HeldKey::Super);
     }
     if held == HeldKeys::WholeChord {
-        keys.push(HeldKey::Key(combo.key()));
+        keys.push(HeldKey::key(combo.key()));
     }
     keys
 }
@@ -561,8 +573,10 @@ fn quantize_axis(residual: &mut f64, input: f64, units_per_input: f64) -> i32 {
 /// The OS applies it to wheel events from a device, but not to the events
 /// [`post_scroll`] and [`post_smooth_scroll`] synthesise. A caller posting in
 /// place of a diverted wheel flips its own distance with this. `false` on
-/// Windows and Linux, which apply no such reversal to a mouse wheel's
-/// events here.
+/// Windows and Linux. Windows 11 24H2 added a mouse Scrolling direction
+/// setting; the hook backend carries it into the wheel deltas the agent
+/// replays (`openlogi-hook`, #2291), and whether Windows also applies it to
+/// synthesised input is not established, so nothing is flipped here.
 #[must_use]
 pub fn natural_scrolling() -> bool {
     cfg_select! {
@@ -718,6 +732,8 @@ fn hid_usage_to_windows(usage: u8) -> Option<u16> {
         0x36 => Some(0xbc),
         0x37 => Some(0xbe),
         0x38 => Some(0xbf),
+        0x46 => Some(0x2c),
+        0x49 => Some(0x2d),
         0x4a => Some(0x24),
         0x4b => Some(0x21),
         0x4c => Some(0x2e),
@@ -807,6 +823,41 @@ mod tests {
             output.transition(Some((&control_b, HeldKeys::WholeChord)), None),
             HoldTransition {
                 up: vec![HeldKey::Control, HeldKey::Key(control_b.key())],
+                down: vec![],
+                tap: None,
+            }
+        );
+    }
+
+    /// macOS presses F13 for Print Screen, so a Print Screen hold and an F13
+    /// hold own one key: the first release leaves F13 down for the other.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn print_screen_and_f13_holds_share_one_key() {
+        let print_screen = combo("PrintScreen");
+        let f13 = combo("F13");
+        let mut output = HeldOutput::default();
+
+        assert_eq!(
+            output.transition(None, Some((&print_screen, HeldKeys::WholeChord))),
+            HoldTransition {
+                up: vec![],
+                down: vec![HeldKey::Key(f13.key())],
+                tap: None,
+            }
+        );
+        assert_eq!(
+            output.transition(None, Some((&f13, HeldKeys::WholeChord))),
+            HoldTransition::default()
+        );
+        assert_eq!(
+            output.transition(Some((&print_screen, HeldKeys::WholeChord)), None),
+            HoldTransition::default()
+        );
+        assert_eq!(
+            output.transition(Some((&f13, HeldKeys::WholeChord)), None),
+            HoldTransition {
+                up: vec![HeldKey::Key(f13.key())],
                 down: vec![],
                 tap: None,
             }
@@ -1171,6 +1222,26 @@ mod tests {
         assert_eq!(hid_usage_to_windows(0x50), Some(0x25)); // Left
         assert_eq!(hid_usage_to_windows(0x2c), Some(0x20)); // Space
         assert_eq!(hid_usage_to_windows(0x33), Some(0xba)); // Semicolon
+        assert_eq!(hid_usage_to_windows(0x46), Some(0x2c)); // VK_SNAPSHOT
+        assert_eq!(hid_usage_to_windows(0x49), Some(0x2d)); // Insert
         assert_eq!(hid_usage_to_windows(0xff), None);
+    }
+
+    /// Every key a custom shortcut can name has a Windows virtual key, or the
+    /// Windows backend drops the binding instead of pressing it.
+    #[test]
+    fn every_shortcut_usage_has_a_windows_virtual_key() {
+        use openlogi_core::binding::KeyboardUsage;
+
+        use super::hid_usage_to_windows;
+
+        for code in 0..=u8::MAX {
+            if KeyboardUsage::try_new(code).is_ok() {
+                assert!(
+                    hid_usage_to_windows(code).is_some(),
+                    "usage {code:#04x} has no Windows virtual key"
+                );
+            }
+        }
     }
 }

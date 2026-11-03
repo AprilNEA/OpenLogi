@@ -14,8 +14,12 @@
     reason = "GPUI builders take owned Copy palette values; entity.update wants closures"
 )]
 
-use super::function_row::{FunctionRowView, KeyTarget, commit_key_action};
-use crate::features::binding_editor::{compact_panel, divider, editor_scroll_list, title};
+use std::rc::Rc;
+
+use super::function_row::{FunctionRowView, KeyTarget, bound_action, commit_key_action};
+use crate::features::binding_editor::{
+    PickFn, application_editor, compact_panel, divider, editor_scroll_list, title,
+};
 use crate::state::AppState;
 use crate::ui::components::{MenuRow, control_input};
 use crate::ui::theme::{self, Palette, Typography as _};
@@ -35,6 +39,7 @@ use openlogi_core::binding::{Action, KeyCombo, WorkflowStep};
 /// Which power-user editor is showing for the selected key.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum PowerUserKind {
+    OpenApplication,
     TypeText,
     RunAppleScript,
     RunShellCommand,
@@ -44,6 +49,7 @@ pub enum PowerUserKind {
 impl PowerUserKind {
     pub(crate) fn heading_key(self) -> &'static str {
         match self {
+            Self::OpenApplication => "action_ring.open_application_or_folder",
             Self::TypeText => "actions.type_text_heading",
             Self::RunAppleScript => "actions.run_applescript_heading",
             Self::RunShellCommand => "actions.run_shell_command_heading",
@@ -54,6 +60,7 @@ impl PowerUserKind {
 
 pub(crate) fn text_editor_placeholder(kind: PowerUserKind) -> gpui::SharedString {
     match kind {
+        PowerUserKind::OpenApplication => tr!("action_ring.application_folder_path_or_url"),
         PowerUserKind::TypeText => tr!("actions.type_text_placeholder"),
         PowerUserKind::RunAppleScript => "display dialog \"Hello\"".into(),
         PowerUserKind::RunShellCommand => "echo hello".into(),
@@ -66,6 +73,9 @@ pub(crate) fn text_editor_seed(action: Option<&Action>, kind: PowerUserKind) -> 
         (Some(Action::TypeText(text)), PowerUserKind::TypeText)
         | (Some(Action::RunAppleScript(text)), PowerUserKind::RunAppleScript)
         | (Some(Action::RunShellCommand(text)), PowerUserKind::RunShellCommand) => text.clone(),
+        (Some(Action::OpenApplication(target)), PowerUserKind::OpenApplication) => {
+            target.path().to_owned()
+        }
         _ => String::new(),
     }
 }
@@ -83,12 +93,16 @@ pub fn editor_card(
     kind: PowerUserKind,
     text_state: Option<Entity<InputState>>,
     workflow_draft: Vec<WorkflowStep>,
+    application_invalid: bool,
     view: &Entity<FunctionRowView>,
     pal: Palette,
 ) -> gpui::Div {
     match kind {
         PowerUserKind::Workflow => workflow_editor_card(target, workflow_draft, view, pal),
         _ => match text_state {
+            Some(state) if kind == PowerUserKind::OpenApplication => {
+                application_editor_card(target, state, application_invalid, view, pal)
+            }
             Some(state) => text_editor_card(target, kind, state, view, pal),
             None => compact_panel(pal)
                 .w(px(300.))
@@ -125,6 +139,76 @@ fn text_editor_card(
         )
 }
 
+/// The mouse inspector's "Open Application or Folder" editor, committing to
+/// the key on Add, with a Cancel back to the list.
+fn application_editor_card(
+    target: KeyTarget,
+    text_state: Entity<InputState>,
+    invalid: bool,
+    view: &Entity<FunctionRowView>,
+    pal: Palette,
+) -> gpui::Div {
+    let heading = tr!(PowerUserKind::OpenApplication.heading_key());
+    let key_name = target.label();
+    let view_pick = view.clone();
+    let on_pick: PickFn = Rc::new(move |action, _window, cx| {
+        AppState::apply(cx, |state| {
+            let action = keep_application_name(bound_action(state, &target), action);
+            commit_key_action(state, &target, Some(action))
+        });
+        view_pick.update(cx, |v, vcx| v.close_editor(vcx));
+    });
+    let view_invalid = view.clone();
+    let on_invalid = Rc::new(move |cx: &mut App| {
+        view_invalid.update(cx, |v, vcx| v.mark_application_invalid(vcx));
+    });
+    let view_cancel = view.clone();
+
+    compact_panel(pal)
+        .w(px(300.))
+        .child(title(
+            tr!("actions.action_key_summary", action => heading, key => key_name),
+            pal,
+        ))
+        .child(divider(pal))
+        .child(
+            v_flex()
+                .p_2()
+                .gap_2()
+                .child(application_editor(
+                    "key-editor",
+                    &text_state,
+                    invalid,
+                    on_invalid,
+                    &on_pick,
+                    pal,
+                ))
+                .child(
+                    h_flex().justify_end().child(
+                        Button::new("editor-cancel")
+                            .ghost()
+                            .label(tr!("common.cancel"))
+                            .on_click(move |_e, _window, cx| {
+                                view_cancel.update(cx, |v, vcx| v.close_editor(vcx));
+                            }),
+                    ),
+                ),
+        )
+}
+
+/// The shared editor only knows the path, so re-adding the bound path would
+/// drop the target's saved display name. Keep the bound target in that case.
+fn keep_application_name(bound: Option<Action>, picked: Action) -> Action {
+    match (bound, &picked) {
+        (Some(Action::OpenApplication(bound)), Action::OpenApplication(target))
+            if bound.path() == target.path() =>
+        {
+            Action::OpenApplication(bound)
+        }
+        _ => picked,
+    }
+}
+
 /// Cancel (back to list) + Save (commit the drafted text).
 fn editor_action_row(
     target: KeyTarget,
@@ -159,7 +243,7 @@ fn editor_action_row(
                         PowerUserKind::TypeText => Action::TypeText(text),
                         PowerUserKind::RunAppleScript => Action::RunAppleScript(text),
                         PowerUserKind::RunShellCommand => Action::RunShellCommand(text),
-                        PowerUserKind::Workflow => return,
+                        PowerUserKind::OpenApplication | PowerUserKind::Workflow => return,
                     };
                     AppState::apply(cx, |state| commit_key_action(state, &target, Some(action)));
                     view_save.update(cx, |v, vcx| v.close_editor(vcx));

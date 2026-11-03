@@ -171,6 +171,7 @@ Der Funktionsumfang hängt davon ab, was das jeweilige Gerät meldet; die App ze
 
 > [!IMPORTANT]
 > Beende zuerst **Logi Options+** (und unter Linux Solaar). Ein Empfänger kann immer nur einer Anwendung gleichzeitig gehören.
+> Unter macOS belegt auch **Karabiner-Elements** eine Bluetooth-Tastatur, die es verändert. Schalte in Karabiner-Elements → Settings → Devices für diese Tastatur **Modify events** aus.
 
 | Plattform | System | Architektur |
 | --- | --- | --- |
@@ -212,7 +213,13 @@ Oder installiere mit einem Befehl das passende Paket für deine Distribution. Da
 curl -fsSL https://github.com/AprilNEA/OpenLogi/releases/latest/download/install.sh | sh
 ```
 
-Wie du das Skript vor dem Ausführen prüfst, sowie Hinweise zu Flatpak, NixOS und Distributionen ohne systemd findest du in [INSTALL-linux.md](INSTALL-linux.md).
+Unter Arch Linux baut das AUR-Paket [`openlogi`](https://aur.archlinux.org/packages/openlogi) das Release aus dem Quellcode:
+
+```sh
+yay -S openlogi
+```
+
+Wie du das Skript vor dem Ausführen prüfst, sowie Hinweise zum AUR-Paket, Flatpak, NixOS und Distributionen ohne systemd findest du in [INSTALL-linux.md](INSTALL-linux.md).
 
 ### Windows
 

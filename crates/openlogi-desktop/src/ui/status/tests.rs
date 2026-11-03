@@ -95,6 +95,7 @@ impl Render for InteractionHarness {
 
 #[gpui::test]
 fn retry_activates_once_per_enter_or_space_and_is_inert_when_disabled(cx: &mut TestAppContext) {
+    let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
     cx.update(gpui_component::init);
     let activations = Rc::new(Cell::new(0));
     let (view, visual) = cx.add_window_view({

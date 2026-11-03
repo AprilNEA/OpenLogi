@@ -148,6 +148,8 @@ Per-application profiles switch with the focused app. An `[apps]` alias lets one
 
 - Any Logitech UVC webcam (Brio, StreamCam, the C920 series, …), plug and play
 - Live preview that holds the camera only while you watch; leave it and the LED goes off
+- Pick the preview's resolution and frame rate from the modes your camera reports (this shapes OpenLogi's own preview, not what other apps get)
+- On macOS and Windows, a camera on a slower USB link than it supports (a USB 2 port, hub, or cable) is flagged, since it lists fewer resolutions and frame rates than it can deliver on USB 3
 - Zoom, pan, tilt, focus, exposure, white balance, and every other UVC control, written to the hardware so Meet, Zoom, and OBS see the change
 - Built-in Default / Streaming / Video call profiles plus your own snapshots, kept per camera
 
@@ -170,6 +172,7 @@ Feature coverage depends on what each device reports; the app shows only the con
 
 > [!IMPORTANT]
 > Quit **Logi Options+** (and Solaar on Linux) first. Only one application can own a receiver at a time.
+> On macOS, **Karabiner-Elements** also locks a Bluetooth keyboard that it modifies. Turn off **Modify events** for that keyboard in Karabiner-Elements → Settings → Devices.
 
 | Platform | System | Architecture |
 | --- | --- | --- |
@@ -211,7 +214,13 @@ Or install the right package for your distribution with one command. It verifies
 curl -fsSL https://github.com/AprilNEA/OpenLogi/releases/latest/download/install.sh | sh
 ```
 
-To read the script before running it, and for Flatpak, NixOS, and distributions without systemd, see [INSTALL-linux.md](docs/INSTALL-linux.md).
+On Arch Linux, the [`openlogi`](https://aur.archlinux.org/packages/openlogi) AUR package builds the release from source:
+
+```sh
+yay -S openlogi
+```
+
+To read the script before running it, and for the AUR package, Flatpak, NixOS, and distributions without systemd, see [INSTALL-linux.md](docs/INSTALL-linux.md).
 
 ### Windows
 

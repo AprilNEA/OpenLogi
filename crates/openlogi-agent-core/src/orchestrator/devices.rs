@@ -60,6 +60,9 @@ pub(super) fn main_wheel_divert(
     Some(MainWheelDivert {
         resolution,
         inverted,
+        // Momentum scrolling measures the wheel's speed: fractions of a notch
+        // make its glide smooth and let a finger stop show sooner.
+        high_resolution: config.momentum_scrolling(&dev.config_key).enabled,
     })
 }
 
@@ -780,17 +783,6 @@ pub(super) fn newly_kept_os_layouts<'a>(
     devices
         .iter()
         .filter(|dev| keeps_os_layout(config, dev) && !keeps_os_layout(previous, dev))
-}
-
-/// Whether this refresh invalidated any online device's volatile control
-/// diversion. Receiver routes stay connected while a paired mouse sleeps, so
-/// route equality alone cannot tell capture sessions to re-arm on wake.
-pub(super) fn any_device_needs_capture_rearm(
-    prev: &[AgentDevice],
-    next: &[AgentDevice],
-    reapply_all: bool,
-) -> bool {
-    !reapply_targets(prev, next, reapply_all).is_empty()
 }
 
 /// How many explicit confirmation passes a first-sighted or wake-targeted
