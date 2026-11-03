@@ -293,16 +293,31 @@ pub(super) fn run_shell_command(cmd: &str) {
         .output();
 }
 
-fn post_click(button: MouseButton) {
-    let (down, up, data) = match button {
+/// The `SendInput` down flag, up flag, and `mouseData` for `button`.
+fn mouse_button_flags(button: MouseButton) -> (u32, u32, i32) {
+    match button {
         MouseButton::Left => (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, 0),
         MouseButton::Right => (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, 0),
         MouseButton::Middle => (MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, 0),
         // Extra buttons share the X flag pair; mouseData carries which one.
         MouseButton::Back => (MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, i32::from(XBUTTON1)),
         MouseButton::Forward => (MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, i32::from(XBUTTON2)),
-    };
+    }
+}
+
+fn post_click(button: MouseButton) {
+    let (down, up, data) = mouse_button_flags(button);
     send_inputs(&[mouse_input(down, data), mouse_input(up, data)]);
+}
+
+/// Post one isolated edge of `button`, for a held mouse button.
+pub(super) fn post_mouse_edge(button: MouseButton, phase: KeyPhase) {
+    let (down, up, data) = mouse_button_flags(button);
+    let flags = match phase {
+        KeyPhase::Down => down,
+        KeyPhase::Up => up,
+    };
+    send_inputs(&[mouse_input(flags, data)]);
 }
 
 /// Post the already-resolved key `key` with `modifiers` held around it.

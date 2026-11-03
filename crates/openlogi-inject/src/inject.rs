@@ -13,7 +13,7 @@ use std::sync::{LazyLock, Mutex, PoisonError};
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use openlogi_core::binding::KeyboardUsage;
-use openlogi_core::binding::{Action, HeldKeys, KeyCombo};
+use openlogi_core::binding::{Action, HeldKeys, KeyCombo, MouseButton};
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use openlogi_core::binding::{Script, WorkflowStep};
 use openlogi_core::scroll::ScrollDelta;
@@ -484,6 +484,80 @@ fn hold_transition(
             tracing::warn!(
                 "held shortcut output unsupported on this platform"
             );
+        }
+    }
+}
+
+/// One synthetic mouse button held down, released exactly once when dropped.
+///
+/// Keep this value with the physical press lifecycle, like [`HeldChord`], so a
+/// button remapped to a mouse click drags the way the native button does
+/// (middle-drag panning, left-drag selection). Overlapping holds of the same
+/// button share one down edge: only the last owner to drop releases it.
+#[must_use = "dropping the held mouse button immediately releases its synthetic output"]
+pub struct HeldMouseButton {
+    button: MouseButton,
+}
+
+impl Drop for HeldMouseButton {
+    fn drop(&mut self) {
+        mouse_hold_transition(self.button, KeyPhase::Up);
+    }
+}
+
+/// Synthesise the down edge of `button` and return its release owner, or
+/// `None` where this platform has no held mouse output, in which case the
+/// caller falls back to [`execute`]'s balanced click.
+///
+/// Keep the returned [`HeldMouseButton`] until the physical press ends.
+#[must_use = "dropping the held mouse button immediately releases its synthetic output"]
+pub fn press_mouse_hold(button: MouseButton) -> Option<HeldMouseButton> {
+    cfg_select! {
+        target_os = "windows" => {
+            // Construct the owner before posting the edge so unwinding from
+            // the backend still balances the ownership count.
+            let held = HeldMouseButton { button };
+            mouse_hold_transition(button, KeyPhase::Down);
+            Some(held)
+        }
+        _ => {
+            let _ = button;
+            None
+        }
+    }
+}
+
+/// Owners per synthetic mouse button currently held down.
+#[cfg(target_os = "windows")]
+static HELD_MOUSE_BUTTONS: LazyLock<Mutex<HashMap<MouseButton, usize>>> =
+    LazyLock::new(Mutex::default);
+
+fn mouse_hold_transition(button: MouseButton, phase: KeyPhase) {
+    cfg_select! {
+        target_os = "windows" => {
+            let mut owners = HELD_MOUSE_BUTTONS.lock().unwrap_or_else(PoisonError::into_inner);
+            match phase {
+                KeyPhase::Down => {
+                    let count = owners.entry(button).or_insert(0);
+                    *count += 1;
+                    if *count == 1 {
+                        windows::post_mouse_edge(button, KeyPhase::Down);
+                    }
+                }
+                KeyPhase::Up => {
+                    let Some(count) = owners.get_mut(&button) else {
+                        return;
+                    };
+                    *count -= 1;
+                    if *count == 0 {
+                        owners.remove(&button);
+                        windows::post_mouse_edge(button, KeyPhase::Up);
+                    }
+                }
+            }
+        }
+        _ => {
+            let _ = (button, phase);
         }
     }
 }
