@@ -437,3 +437,40 @@ jobs:
       # `openlogi-core` earns its place only with `fs` off: that feature is
       # the config file, and a config file needs a filesystem.
       - run: cargo check -p openlogi-core --no-default-features --target wasm32-unknown-unknown
+
+  # The one status check the master ruleset requires. Requiring this job
+  # instead of each job above keeps the ruleset valid across job renames and
+  # matrix changes here; a job missing from `needs` is a job that cannot block
+  # a merge, which the xtask drift test `ci_results_needs_every_job` catches.
+  # `always()` so a failed or skipped dependency still reaches it. A job the
+  # `fmt` path filter skipped counts as passed, the same way GitHub treats a
+  # skipped required check; a failed or cancelled one fails this job.
+  ci-results:
+    name: CI results
+    if: ${{ always() }}
+    needs:
+      - fmt
+      - typos
+      - ast-grep
+      - publish-closure
+      - shell
+      - clippy
+      - msrv
+      - docs
+      - test-linux
+      - test-macos
+      - test-windows
+      - cargo-deny
+      - clippy-windows
+      - clippy-macos
+      - wasm
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Summarize
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: jq -r 'to_entries[] | "\(.value.result)\t\(.key)"' <<< "$RESULTS"
+      - name: Fail on a failed or cancelled job
+        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
+        run: exit 1

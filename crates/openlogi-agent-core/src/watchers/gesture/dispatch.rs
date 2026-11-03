@@ -118,21 +118,6 @@ impl InputDispatcher {
         }
     }
 
-    /// Publish a hardware polarity observation into the OS-hook snapshot.
-    fn record_thumbwheel_direction(&self, key: &str, input: CapturedInput) -> bool {
-        let CapturedInput::ThumbwheelDirection {
-            positive_is_forward,
-        } = input
-        else {
-            return false;
-        };
-        if let Ok(mut maps) = self.hook_maps.write() {
-            maps.thumbwheel_positive_is_forward
-                .insert(key.to_owned(), positive_is_forward);
-        }
-        true
-    }
-
     /// Whether `session` still holds an admitted gesture press for `button`.
     #[cfg(test)]
     pub(super) fn holds_gesture_press(&self, session: &HidppSessionId, button: ButtonId) -> bool {
@@ -219,10 +204,6 @@ impl InputDispatcher {
         input: CapturedInput,
     ) {
         let key = session.device_key();
-        if self.record_thumbwheel_direction(key, input) {
-            return;
-        }
-
         match input {
             CapturedInput::Gesture(button, direction) => {
                 let Some(press) = self.held_presses.get(session, button) else {
@@ -302,9 +283,6 @@ impl InputDispatcher {
                 ),
                 plan.momentum.resolve(),
             ),
-            CapturedInput::ThumbwheelDirection { .. } => {
-                unreachable!("thumb-wheel direction reports return before dispatch")
-            }
             CapturedInput::Interrupted => self.cancel_session(session),
             CapturedInput::HostModeEntered => self.outputs.actions.host_mode_entered(key),
             CapturedInput::ButtonDiverted(_) => {

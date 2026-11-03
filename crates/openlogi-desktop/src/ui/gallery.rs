@@ -1,9 +1,10 @@
 //! Debug-only gallery for reviewing shared controls without app runtime state.
 
+use super::theme::FocusRingStyle as _;
 use gpui::{
     App, AppContext as _, Context, InteractiveElement, IntoElement, ParentElement, Render, Role,
-    SharedString, Size, StatefulInteractiveElement as _, Styled, Window, WindowOptions, div, px,
-    rems,
+    SharedString, Size, StatefulInteractiveElement as _, Styled, Window, WindowOptions, div,
+    prelude::FluentBuilder as _, px, rems,
 };
 use gpui_kit::base::Button as BaseButton;
 use gpui_kit::component::{
@@ -25,6 +26,7 @@ use super::carousel::Carousel;
 use super::choice_card::ChoiceCard;
 use super::commit_slider::{CommitSlider, SliderRange};
 use super::components::{MenuRow, PanelCard, Pill, PresetChip, ProfileTab, Toggle, toggle_row};
+use super::slider_row::{SliderRow, disabled_track};
 use super::status::{retry_line, status_line};
 use super::theme::{self, ContentWidth, OPENLOGI_DARK, OPENLOGI_LIGHT, Palette, Typography as _};
 
@@ -104,7 +106,12 @@ struct ComponentGallery {
     carousel_selected: usize,
     slider: CommitSlider<u8>,
     slider_committed: u8,
+    row_slider: CommitSlider<u8>,
+    row_committed: u8,
 }
+
+/// Where the gallery's slider row starts, and what it marks as the default.
+const ROW_DEFAULT: u8 = 14;
 
 impl ComponentGallery {
     fn new(cx: &mut Context<Self>) -> Self {
@@ -114,6 +121,12 @@ impl ComponentGallery {
             slider_committed,
             cx,
             |this: &mut Self, value, _| this.slider_committed = value,
+        );
+        let row_slider = CommitSlider::new(
+            SliderRange::new(1, 100),
+            ROW_DEFAULT,
+            cx,
+            |this: &mut Self, value, _| this.row_committed = value,
         );
         Self {
             mode: ThemeMode::Light,
@@ -127,6 +140,8 @@ impl ComponentGallery {
             carousel_selected: 1,
             slider,
             slider_committed,
+            row_slider,
+            row_committed: ROW_DEFAULT,
         }
     }
 
@@ -208,6 +223,7 @@ impl ComponentGallery {
             .child(self.preset_panel(pal, cx))
             .child(self.pill_panel(pal, cx))
             .child(self.slider_panel(pal))
+            .child(self.slider_row_panel(pal))
             .child(Self::battery_panel(pal))
             .child(gallery_panel(
                 "Status and retry",
@@ -451,6 +467,36 @@ impl ComponentGallery {
         )
     }
 
+    fn slider_row_panel(&self, pal: Palette) -> gpui::Div {
+        let shown = self.row_slider.shown(self.row_committed);
+        gallery_panel(
+            "SliderRow",
+            IconName::Settings,
+            v_flex()
+                .gap_4()
+                .child(
+                    SliderRow::new(
+                        "Sensitivity",
+                        Slider::new(self.row_slider.slider()).horizontal(),
+                    )
+                    .value(shown.to_string(), ["100"])
+                    .when(shown == ROW_DEFAULT, |row| row.marker("Default"))
+                    .description(
+                        "The value column keeps the width of the widest value, so dragging \
+                         moves neither the number nor the label.",
+                    )
+                    .hint(format!("1–100 · committed {}", self.row_committed)),
+                )
+                .child(
+                    SliderRow::new("Scrolling force", disabled_track(pal))
+                        .value("50%", ["100%"])
+                        .description("Applies in ratchet mode only.")
+                        .disabled(true),
+                ),
+            pal,
+        )
+    }
+
     fn battery_panel(pal: Palette) -> gpui::Div {
         let battery = |percentage, level, status| BatteryInfo {
             percentage,
@@ -503,10 +549,12 @@ impl ComponentGallery {
             PanelCard::new(
             "Carousel",
             Icon::new(IconName::GalleryVerticalEnd).text_color(pal.text_muted),
-            div().w_full().h(rems(13.)).child(
+            // Enough cards to overflow, so the faded edge shows on the panel.
+            div().w_full().child(
                 Carousel::new("gallery-carousel", rems(12.))
-                    .len(4)
+                    .len(6)
                     .selected(selected)
+                    .surface(pal.panel)
                     .render_item(move |index, selected, _, cx| {
                         let pal = theme::palette(cx);
                         let view = view.clone();
@@ -610,7 +658,7 @@ fn choice_card(id: &'static str, label: &'static str, selected: bool, pal: Palet
         })
         .bg(pal.control)
         .hover(move |style| style.bg(pal.control_hover))
-        .focus_visible(move |style| style.border_color(theme::accent()))
+        .focus_visible(move |style| style.focus_ring(pal))
         .gap_1()
         // A preview strip above the label: the stacked shape the settings
         // pickers rely on.

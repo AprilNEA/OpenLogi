@@ -198,6 +198,7 @@ mod tests {
 
     #[gpui::test]
     fn disabled_choice_card_is_inert_and_blocks_its_parent(cx: &mut TestAppContext) {
+        let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
         cx.update(gpui_kit::init);
         let activations = Rc::new(Cell::new(0));
         let parent_clicks = Rc::new(Cell::new(0));

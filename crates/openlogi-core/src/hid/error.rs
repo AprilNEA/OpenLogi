@@ -181,8 +181,8 @@ pub enum WriteError {
     /// Nothing was written.
     #[error("the device does not let software rename its Easy-Switch hosts")]
     HostRenameUnsupported,
-    /// A rename of an Easy-Switch slot that has no computer paired, or that
-    /// the device does not have.
+    /// A rename of, or a switch to, an Easy-Switch slot that has no computer
+    /// paired, or (for a rename) that the device does not have.
     ///
     /// Nothing was written.
     #[error("Easy-Switch channel {} has no paired computer", u16::from(*slot) + 1)]
@@ -258,6 +258,20 @@ pub enum WriteError {
         /// Operation whose result must not be persisted by its caller.
         operation: HidppOperation,
     },
+    /// A switch to an Easy-Switch slot beyond the channels the device's
+    /// `0x1814 ChangeHost` reports.
+    ///
+    /// Nothing was written. Appended last — variant order is wire format.
+    #[error(
+        "Easy-Switch channel {} is beyond the device's {host_count} channels",
+        u16::from(*slot) + 1
+    )]
+    HostOutOfRange {
+        /// The zero-based slot index asked for.
+        slot: u8,
+        /// Number of host channels the device reports.
+        host_count: u8,
+    },
 }
 
 /// HID++ operation being performed when a device write/read failed.
@@ -332,13 +346,25 @@ pub enum HidppOperation {
     /// Read HID++ `0x4521` capabilities/current disabled-key mask. Appended
     /// after the `0x19c0` operations — variant order is wire format.
     ReadDisableKeys,
-    /// Write and verify HID++ `0x4521` disabled-key mask. Appended last.
+    /// Write and verify HID++ `0x4521` disabled-key mask. Appended after
+    /// `ReadDisableKeys` — variant order is wire format.
     WriteDisableKeys,
-    /// Read onboard memory. Appended last — variant order is wire format.
+    /// Read onboard memory. Appended after `WriteDisableKeys` — variant order
+    /// is wire format.
     ReadOnboard,
     /// Write an image to a keypad's LCD key over the vendor image report.
     /// Appended last — variant order is wire format.
     WriteKeyImage,
+    /// Switch a device to another Easy-Switch host through `0x1814
+    /// ChangeHost`. Appended after `WriteKeyImage` — variant order is wire
+    /// format.
+    ChangeHost,
+    /// Read the `0x8300` sidetone level. Appended after `ChangeHost` —
+    /// variant order is wire format.
+    ReadSidetone,
+    /// Write the `0x8300` sidetone level. Appended last — variant order is
+    /// wire format.
+    WriteSidetone,
 }
 
 /// HID++ feature error kind in a serializable wire-safe form.

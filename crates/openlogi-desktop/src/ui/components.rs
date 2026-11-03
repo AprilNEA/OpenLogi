@@ -4,6 +4,7 @@
 //! render time, so callers do not have to thread colours through free-function
 //! builders.
 
+use super::theme::FocusRingStyle as _;
 use gpui::{
     AnyElement, App, ClickEvent, ElementId, Entity, InteractiveElement, Interactivity, IntoElement,
     ParentElement, Pixels, RenderOnce, Role, SharedString, Stateful, StatefulInteractiveElement,
@@ -19,6 +20,7 @@ use gpui_kit::component::{
     searchable_list::SearchableListDelegate,
     select::{Select, SelectState},
     switch::Switch,
+    tooltip::Tooltip,
     v_flex,
 };
 
@@ -207,16 +209,17 @@ impl RenderOnce for Toggle {
     }
 }
 
-/// One setting: a title and a caption on the left, its toggle on the right.
-/// The caption column shrinks and wraps, so a long translation cannot push the
-/// toggle out of its card or panel. `selector` names the row for layout tests,
-/// and `{selector}-control` the toggle's slot.
+/// One setting: a title and a caption on the left, its control — a toggle, or
+/// a compact segmented choice — on the right. The caption column shrinks and
+/// wraps, so a long translation cannot push the control out of its card or
+/// panel. `selector` names the row for layout tests, and `{selector}-control`
+/// the control's slot.
 pub(crate) fn toggle_row(
     selector: &'static str,
     pal: theme::Palette,
     title: SharedString,
     description: SharedString,
-    toggle: Toggle,
+    control: impl IntoElement,
 ) -> impl IntoElement {
     h_flex()
         .debug_selector(move || selector.into())
@@ -239,7 +242,7 @@ pub(crate) fn toggle_row(
             div()
                 .debug_selector(move || format!("{selector}-control"))
                 .flex_shrink_0()
-                .child(toggle),
+                .child(control),
         )
 }
 
@@ -402,13 +405,7 @@ impl RenderOnce for MenuRow {
                     pal.control_hover
                 })
             })
-            .focus_visible(move |style| {
-                style.bg(if selected {
-                    theme::accent_tint_hover()
-                } else {
-                    pal.control_hover
-                })
-            })
+            .focus_visible(move |style| style.focus_ring(pal))
             .children(self.children)
             .when_some(self.on_click, |row, handler| {
                 row.on_click(move |event, window, cx| handler(event, window, cx))
@@ -535,15 +532,7 @@ impl RenderOnce for ProfileTab {
                     pal.control_hover
                 })
             })
-            .focus_visible(move |style| {
-                style
-                    .bg(if self.selected {
-                        theme::accent_tint_hover()
-                    } else {
-                        pal.control_hover
-                    })
-                    .border_color(accent)
-            })
+            .focus_visible(move |style| style.focus_ring(pal))
             .when_some(self.icon, |tab, icon| tab.child(icon.size_3()))
             .child(label.clone())
             .children(self.children)
@@ -551,16 +540,19 @@ impl RenderOnce for ProfileTab {
                 tab.on_click(move |event, window, cx| handler(event, window, cx))
             })
             .when_some(self.delete, |tab, (id, handler)| {
+                let remove = tr!("common.remove_named_item", name => label.to_string());
                 tab.child(
                     BaseButton::new(id)
-                        .accessibility_label(
-                            tr!("common.remove_named_item", name => label.to_string()),
-                        )
-                        .px_0p5()
+                        .accessibility_label(remove.clone())
+                        .tooltip(move |window, cx| Tooltip::new(remove.clone()).build(window, cx))
+                        .size_5()
+                        .flex()
+                        .items_center()
+                        .justify_center()
                         .rounded_full()
                         .text_color(pal.text_muted)
-                        .hover(|style| style.text_color(pal.text_primary))
-                        .focus_visible(|style| style.text_color(pal.text_primary))
+                        .hover(|style| style.text_color(pal.text_primary).bg(pal.control_hover))
+                        .focus_visible(move |style| style.focus_ring(pal))
                         .child(Icon::new(IconName::Close).size_3())
                         .on_click(move |event, window, cx| {
                             cx.stop_propagation();

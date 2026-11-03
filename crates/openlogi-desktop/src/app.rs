@@ -1,3 +1,4 @@
+use crate::ui::theme::FocusRingStyle as _;
 use gpui::{
     App, AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement,
     MouseButton, NavigationDirection, ParentElement, Render, Styled, Subscription, Window, div,
@@ -16,6 +17,7 @@ use tracing::info;
 
 use self::menu::{APP_KEY_CONTEXT, CloseWindow, Minimize, NavigateBack, Zoom};
 use crate::features::action_ring::ActionRingPanel;
+use crate::features::audio::AudioPanel;
 use crate::features::camera::controls::CameraControlsPanel;
 use crate::features::camera::preview::CameraPreview;
 use crate::features::keyboard::disable_keys::DisableKeysPanel;
@@ -86,6 +88,8 @@ enum DetailTab {
     Camera,
     /// Standalone light controls driven by a raw-HID device driver.
     Light,
+    /// Headset audio — sidetone.
+    Audio,
     /// Device info and configuration.
     Device,
 }
@@ -184,6 +188,9 @@ impl DetailTab {
         if record.light_capabilities.is_some() {
             tabs.push(Self::Light);
         }
+        if caps.sidetone {
+            tabs.push(Self::Audio);
+        }
         tabs.push(Self::Device);
         tabs
     }
@@ -204,6 +211,7 @@ impl DetailTab {
             Self::Pointer => tr!("device.pointer"),
             Self::Lighting | Self::Light => tr!("device.lighting"),
             Self::Camera => tr!("camera.camera"),
+            Self::Audio => tr!("device.audio"),
             Self::Device => tr!("device.device"),
         }
     }
@@ -224,6 +232,7 @@ pub struct AppView {
     camera_preview: Entity<CameraPreview>,
     camera_controls: Entity<CameraControlsPanel>,
     light_panel: Entity<LightPanel>,
+    audio_panel: Entity<AudioPanel>,
     profile_icons: ProfileIconCache,
     app_catalog: Entity<AppCatalogPicker>,
     /// Redraw the profile picker after discovery, filtering, or expansion changes.
@@ -308,6 +317,7 @@ impl AppView {
         let camera_preview = cx.new(CameraPreview::new);
         let camera_controls = cx.new(CameraControlsPanel::new);
         let light_panel = cx.new(LightPanel::new);
+        let audio_panel = cx.new(AudioPanel::new);
         let profile_icons = ProfileIconCache::default();
         let app_catalog = cx.new(|cx| AppCatalogPicker::new(profile_icons.clone(), window, cx));
         let app_catalog_obs = cx.observe(&app_catalog, |_, _, cx| cx.notify());
@@ -331,6 +341,7 @@ impl AppView {
             camera_preview,
             camera_controls,
             light_panel,
+            audio_panel,
             profile_icons,
             app_catalog,
             _app_catalog_obs: app_catalog_obs,
@@ -389,6 +400,8 @@ impl AppView {
                 !on_home && self.active_tab == DetailTab::Pointer && is_current(key)
             }
             StateEvent::CameraChanged => on_home || self.active_tab == DetailTab::Light,
+            // The Home header's Flow button shows Flow's status.
+            StateEvent::FlowChanged => on_home,
             // Child entities own these surfaces and subscribe directly. A
             // language switch already refreshes every window, and the root
             // caches no localized text. A refused removal is a dialog,
@@ -397,6 +410,7 @@ impl AppView {
             | StateEvent::DisableKeysChanged(_)
             | StateEvent::ReportRateChanged(_)
             | StateEvent::PointerSpeedChanged(_)
+            | StateEvent::SidetoneChanged(_)
             | StateEvent::ForceSensingChanged(_)
             | StateEvent::DeviceRemovalFailed { .. }
             | StateEvent::StalePairingRemovalFailed { .. }
@@ -524,7 +538,7 @@ impl AppView {
                     .text_color(pal.text_muted)
                     .cursor_pointer()
                     .hover(|s| s.text_color(pal.text_primary))
-                    .focus_visible(|s| s.text_color(pal.text_primary))
+                    .focus_visible(move |s| s.focus_ring(pal))
                     .child(tr!("permissions.not_now_use_dpi_and_other_features_only"))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.accessibility_dismissed = true;
@@ -626,20 +640,27 @@ impl AppView {
         let link = AppState::try_global(cx)
             .map(|state| state.read(cx))
             .map_or(AgentLink::Connecting, |s| s.agent_link().clone());
-        let status = match link {
+        // A lost connection keeps the last status on screen, marked as not
+        // live by the reconnecting bar; an unreachable agent replaces only the
+        // content, so the header's Settings stays reachable.
+        let (status, reconnecting) = match link {
             AgentLink::Connecting => {
                 window.set_window_title("OpenLogi");
                 return root.child(status::connecting_body(cx)).into_any_element();
             }
-            AgentLink::Unreachable => {
+            AgentLink::Unreachable { retrying } => {
                 window.set_window_title("OpenLogi");
-                return root.child(status::unreachable_body(cx)).into_any_element();
+                return root
+                    .child(home::home_header(cx))
+                    .child(status::unreachable_body(retrying, cx))
+                    .into_any_element();
             }
             AgentLink::OutdatedGui => {
                 window.set_window_title("OpenLogi");
                 return root.child(status::outdated_gui_body(cx)).into_any_element();
             }
-            AgentLink::Ready(status) => status,
+            AgentLink::Reconnecting(status) => (status, true),
+            AgentLink::Ready(status) => (status, false),
         };
 
         let granted = status.accessibility_granted;
@@ -714,6 +735,7 @@ impl AppView {
                         camera_preview: &self.camera_preview,
                         camera_controls: &self.camera_controls,
                         light_panel: &self.light_panel,
+                        audio_panel: &self.audio_panel,
                     },
                     &self.profile_icons,
                     &self.app_catalog,
@@ -729,7 +751,7 @@ impl AppView {
             (
                 home::home_header(cx).into_any_element(),
                 if has_device {
-                    home::device_gallery(cx).into_any_element()
+                    home::device_gallery(window, cx).into_any_element()
                 } else {
                     match status.inventory {
                         InventoryHealth::Scanning => home::device_scanning_state(cx),
@@ -743,7 +765,11 @@ impl AppView {
 
         let has_key_bindings =
             AppState::try_read(cx).is_some_and(|state| !state.keyboard_bindings().is_empty());
-        let attention = status::Attention::for_status(&status, has_key_bindings);
+        let attention = if reconnecting {
+            Some(status::Attention::Reconnecting)
+        } else {
+            status::Attention::for_status(&status, has_key_bindings)
+        };
         root.child(header_el)
             .child(content_el)
             .when_some(attention, |this, attention| {

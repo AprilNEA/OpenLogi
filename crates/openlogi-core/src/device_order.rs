@@ -269,6 +269,15 @@ impl PhysicalDeviceKey {
         }
     }
 
+    /// This key as the inventory writes it when it names the device by its
+    /// own identity: `serial:` or `unit:`, in lowercase like
+    /// [`DeviceIdentity::config_key`]. `None` for a key that names a route
+    /// that reaches the device.
+    #[must_use]
+    pub fn to_identity(&self) -> Option<Self> {
+        identity_fragment_is_physical(&self.0).then(|| Self(self.0.to_ascii_lowercase()))
+    }
+
     /// Whether `value` is a structurally valid runtime key whose only device
     /// identity is the all-zero unit id.
     #[must_use]

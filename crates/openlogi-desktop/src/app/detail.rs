@@ -1,6 +1,7 @@
 //! The device-detail screen: the header (back + name + section tabs), and the
 //! section bodies (Buttons, Keys, Pointer, Lighting, Camera, Device).
 
+use crate::ui::theme::FocusRingStyle as _;
 use gpui::{
     Context, InteractiveElement, IntoElement, ParentElement, Rems, Role, SharedString,
     StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px, rems,
@@ -12,7 +13,6 @@ use gpui_kit::component::{
     description_list::{DescriptionItem, DescriptionList},
     h_flex,
     scroll::ScrollableElement as _,
-    switch::Switch,
     tag::Tag,
     v_flex,
 };
@@ -23,6 +23,7 @@ use super::widgets::{back_button, connection_summary, kind_label, sidebar_action
 use super::{AppView, DetailTab};
 use crate::app::menu::open_config_folder;
 use crate::features::action_ring::ActionRingPanel;
+use crate::features::audio::{AUDIO_ICON, AudioPanel};
 use crate::features::camera::controls::CameraControlsPanel;
 use crate::features::camera::preview::CameraPreview;
 use crate::features::keyboard::disable_keys::DisableKeysPanel;
@@ -107,6 +108,7 @@ pub(super) struct DetailPanels<'a> {
     pub camera_preview: &'a gpui::Entity<CameraPreview>,
     pub camera_controls: &'a gpui::Entity<CameraControlsPanel>,
     pub light_panel: &'a gpui::Entity<LightPanel>,
+    pub audio_panel: &'a gpui::Entity<AudioPanel>,
 }
 
 /// The device-detail workspace below the identity bar: stable navigation rail
@@ -146,6 +148,7 @@ pub(super) fn detail_content(
             camera_tab(panels.camera_preview, panels.camera_controls).into_any_element()
         }
         DetailTab::Light => light_tab(panels.light_panel, cx).into_any_element(),
+        DetailTab::Audio => audio_tab(panels.audio_panel).into_any_element(),
         DetailTab::Device => device_tab(panels.disable_keys_panel, cx).into_any_element(),
     };
     let navigation = detail_navigation(tabs, active, cx);
@@ -204,6 +207,7 @@ fn detail_navigation(
         .children(tabs.iter().copied().enumerate().map(|(index, tab)| {
             let selected = tab == active;
             BaseButton::new(("detail-navigation", index))
+                .debug_selector(move || format!("detail-navigation-{tab:?}"))
                 .role(Role::Tab)
                 .selected(selected)
                 .accessibility_label(tab.label())
@@ -231,13 +235,7 @@ fn detail_navigation(
                         pal.control_hover
                     })
                 })
-                .focus_visible(move |row| {
-                    row.bg(if selected {
-                        crate::ui::theme::accent_tint_hover()
-                    } else {
-                        pal.control_hover
-                    })
-                })
+                .focus_visible(move |style| style.focus_ring(pal))
                 .child(
                     Icon::empty()
                         .path(detail_tab_icon(tab))
@@ -263,6 +261,7 @@ fn detail_tab_icon(tab: DetailTab) -> &'static str {
         DetailTab::Pointer => "action-icons/gauge.svg",
         DetailTab::Lighting | DetailTab::Light => "action-icons/palette.svg",
         DetailTab::Camera => "action-icons/camera.svg",
+        DetailTab::Audio => AUDIO_ICON,
         DetailTab::Device => "action-icons/settings.svg",
     }
 }
@@ -330,7 +329,12 @@ fn gshift_layer_bar(cx: &mut Context<AppView>) -> Option<impl IntoElement> {
     )
 }
 
+/// `tab`'s scrolling body. A `Scrollable` keys its scroll position by call
+/// site, and this one call site serves every tab, so the id carries the tab:
+/// each tab gets its own position, dropped while the tab is hidden, and opens
+/// at its top instead of at the offset another tab was scrolled to.
 fn tab_body(
+    tab: DetailTab,
     width: ContentWidth,
     content: impl IntoElement,
 ) -> gpui_kit::component::scroll::Scrollable<gpui::Div> {
@@ -340,6 +344,8 @@ fn tab_body(
         .min_h_0()
         .items_center()
         .overflow_y_scrollbar()
+        .id(("detail-tab-body", tab as usize))
+        .debug_selector(|| "detail-tab-body".into())
         .p(SCREEN_PAD.rems())
         .child(div().w_full().max_w(width.rems()).child(content))
 }
@@ -363,7 +369,14 @@ fn keys_tab(
         .when(keypad, |tab| {
             tab.children(button_profile_scope_bar(profile_icons, app_catalog, cx))
         })
-        .child(tab_body(ContentWidth::DoubleExtraLarge, keyboard_model.clone()).justify_center())
+        .child(
+            tab_body(
+                DetailTab::Keys,
+                ContentWidth::DoubleExtraLarge,
+                keyboard_model.clone(),
+            )
+            .justify_center(),
+        )
 }
 
 fn action_ring_tab(
@@ -381,7 +394,11 @@ fn action_ring_tab(
             app_catalog,
             cx,
         ))
-        .child(tab_body(ContentWidth::Medium, panel.clone()))
+        .child(tab_body(
+            DetailTab::ActionsRing,
+            ContentWidth::Medium,
+            panel.clone(),
+        ))
 }
 
 /// Pointer tab: the DPI panel, the SmartShift wheel controls, and the
@@ -397,6 +414,7 @@ fn pointer_tab(
 ) -> impl IntoElement {
     let pal = theme::palette(cx);
     tab_body(
+        DetailTab::Pointer,
         ContentWidth::Large,
         h_flex()
             .w_full()
@@ -692,6 +710,7 @@ fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
         .child(wheel_resolution_control(
             resolution,
             hires == HiresWheel::Here,
+            cx,
         ));
     PanelCard::new(
         tr!("pointer.scrolling"),
@@ -742,7 +761,13 @@ fn smooth_wheel_caption(hires: HiresWheel) -> gpui::SharedString {
     }
 }
 
-fn wheel_resolution_control(selected: Option<ScrollResolution>, enabled: bool) -> impl IntoElement {
+fn wheel_resolution_control(
+    selected: Option<ScrollResolution>,
+    enabled: bool,
+    cx: &gpui::App,
+) -> impl IntoElement {
+    use crate::ui::theme::SelectableStyle as _;
+
     let values = [
         None,
         Some(ScrollResolution::Low),
@@ -756,19 +781,22 @@ fn wheel_resolution_control(selected: Option<ScrollResolution>, enabled: bool) -
             Button::new("wheel-resolution-default")
                 .flex_1()
                 .label(tr!("pointer.device_default"))
-                .selected(selected.is_none()),
+                .selected(selected.is_none())
+                .selected_segment(enabled && selected.is_none(), cx),
         )
         .child(
             Button::new("wheel-resolution-low")
                 .flex_1()
                 .label(tr!("pointer.standard"))
-                .selected(selected == Some(ScrollResolution::Low)),
+                .selected(selected == Some(ScrollResolution::Low))
+                .selected_segment(enabled && selected == Some(ScrollResolution::Low), cx),
         )
         .child(
             Button::new("wheel-resolution-high")
                 .flex_1()
                 .label(tr!("pointer.high_resolution"))
-                .selected(selected == Some(ScrollResolution::High)),
+                .selected(selected == Some(ScrollResolution::High))
+                .selected_segment(enabled && selected == Some(ScrollResolution::High), cx),
         )
         .on_click(move |indices, _window, cx| {
             let Some(value) = indices.first().and_then(|index| values.get(*index)) else {
@@ -778,14 +806,30 @@ fn wheel_resolution_control(selected: Option<ScrollResolution>, enabled: bool) -
         })
 }
 
-/// Lighting tab: the RGB controls (swatches, on/off, brightness) in a titled
-/// card. Shown when the device reports a lighting capability — see
-/// [`DetailTab::tabs_for`].
-fn lighting_tab(lighting_panel: &gpui::Entity<LightingPanel>) -> impl IntoElement {
+/// Audio tab: the headset's sidetone in one untitled card — the rail already
+/// names the page "Audio", as with Lighting.
+fn audio_tab(audio_panel: &gpui::Entity<AudioPanel>) -> impl IntoElement {
     tab_body(
+        DetailTab::Audio,
         ContentWidth::Small,
         PanelCard::new(
-            tr!("device.lighting"),
+            SharedString::default(),
+            Icon::empty().path(AUDIO_ICON),
+            audio_panel.clone().into_any_element(),
+        ),
+    )
+}
+
+/// Lighting tab: the RGB controls (swatches, on/off, brightness) in an
+/// untitled card — the rail already names the page "Lighting", so a card
+/// title would only repeat it. Shown when the device reports a lighting
+/// capability — see [`DetailTab::tabs_for`].
+fn lighting_tab(lighting_panel: &gpui::Entity<LightingPanel>) -> impl IntoElement {
+    tab_body(
+        DetailTab::Lighting,
+        ContentWidth::Small,
+        PanelCard::new(
+            SharedString::default(),
             Icon::new(IconName::Palette),
             lighting_panel.clone().into_any_element(),
         ),
@@ -804,6 +848,7 @@ fn camera_tab(
     camera_controls: &gpui::Entity<CameraControlsPanel>,
 ) -> impl IntoElement {
     tab_body(
+        DetailTab::Camera,
         ContentWidth::DoubleExtraLarge,
         h_flex()
             .w_full()
@@ -860,6 +905,7 @@ fn light_tab(
         },
     );
     tab_body(
+        DetailTab::Light,
         ContentWidth::ExtraLarge,
         h_flex()
             .w_full()
@@ -899,6 +945,7 @@ fn device_tab(
         .and_then(|record| record.capabilities)
         .is_some_and(|capabilities| capabilities.disable_keys);
     tab_body(
+        DetailTab::Device,
         ContentWidth::Small,
         v_flex()
             .w_full()
@@ -1014,7 +1061,7 @@ fn device_details_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElem
                     .when_some(record.battery.as_ref(), |this, battery| {
                         this.child(BatteryIndicator::summary(battery))
                     })
-                    .child(device_description_list(record))
+                    .child(device_description_list(record, pal))
                     .into_any_element()
             },
         );
@@ -1055,26 +1102,15 @@ fn configuration_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoEleme
     let content = v_flex()
         .gap_3()
         .child(device_enabled_row(device_enabled, pal))
-        .child(
-            DescriptionList::new()
-                .columns(1)
-                // Keep long translated labels intact as the interface scale increases.
-                .label_width(rems(12.))
-                .bordered(false)
-                .child(DescriptionItem::new(tr!("profiles.active_profile")).value(app_profile))
-                .child(
-                    DescriptionItem::new(tr!("profiles.button_bindings"))
-                        .value(binding_count.to_string()),
-                )
-                .child(
-                    DescriptionItem::new(tr!("profiles.gesture_bindings"))
-                        .value(gesture_count.to_string()),
-                )
-                .child(
-                    DescriptionItem::new(tr!("pointer.dpi_presets"))
-                        .value(preset_count.to_string()),
-                ),
-        )
+        .child(detail_list(
+            [
+                (tr!("profiles.active_profile"), app_profile),
+                (tr!("profiles.button_bindings"), binding_count.to_string()),
+                (tr!("profiles.gesture_bindings"), gesture_count.to_string()),
+                (tr!("pointer.dpi_presets"), preset_count.to_string()),
+            ],
+            pal,
+        ))
         .child(
             h_flex()
                 .gap_2()
@@ -1100,46 +1136,28 @@ fn configuration_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoEleme
     )
 }
 
-/// "Manage this device" label, caption, and switch. The caption column shrinks
-/// so a long translation wraps instead of pushing the switch out of the card.
+/// "Manage this device": the device-wide switch, labelled On/Off like every
+/// other setting toggle.
 fn device_enabled_row(device_enabled: bool, pal: Palette) -> impl IntoElement {
-    h_flex()
-        .debug_selector(|| "device-enabled-row".into())
-        .justify_between()
-        .items_center()
-        .gap_4()
-        .child(
-            v_flex()
-                .flex_1()
-                .min_w_0()
-                .child(div().text_body().child(tr!("device.manage_this_device")))
-                .child(
-                    div()
-                        .text_caption()
-                        .text_color(pal.text_muted)
-                        .child(tr!("actions.native_controls_when_disabled")),
-                ),
-        )
-        .child(
-            div()
-                .debug_selector(|| "device-enabled-switch".into())
-                .flex_shrink_0()
-                .child(
-                    Switch::new("device-enabled")
-                        .checked(device_enabled)
-                        .on_click(|checked, _window, cx| {
-                            let enabled = *checked;
-                            AppState::apply(cx, |state| {
-                                state
-                                    .current_record()
-                                    .map(DeviceRecord::device_key)
-                                    .map_or_else(StateEvents::none, |key| {
-                                        state.commit_device_enabled(&key, enabled)
-                                    })
-                            });
-                        }),
-                ),
-        )
+    toggle_row(
+        "device-enabled-row",
+        pal,
+        tr!("device.manage_this_device"),
+        tr!("actions.native_controls_when_disabled"),
+        Toggle::new("device-enabled")
+            .selected(device_enabled)
+            .on_change(|enabled, _window, cx| {
+                let enabled = *enabled;
+                AppState::apply(cx, |state| {
+                    state
+                        .current_record()
+                        .map(DeviceRecord::device_key)
+                        .map_or_else(StateEvents::none, |key| {
+                            state.commit_device_enabled(&key, enabled)
+                        })
+                });
+            }),
+    )
 }
 
 fn device_summary(
@@ -1173,7 +1191,7 @@ fn device_summary(
         .child(status_badge(online, pal))
 }
 
-fn device_description_list(record: DeviceRecord) -> impl IntoElement {
+fn device_description_list(record: DeviceRecord, pal: Palette) -> impl IntoElement {
     // Cameras are plain UVC over the cable — no HID++ route, and their slot is
     // a synthetic 0 that would only mislead next to real receiver slots.
     let is_camera = matches!(record.kind, DeviceKind::Camera);
@@ -1182,20 +1200,45 @@ fn device_description_list(record: DeviceRecord) -> impl IntoElement {
     } else {
         connection_summary(&record)
     };
-    let mut items = vec![DescriptionItem::new(tr!("device.connection")).value(connection)];
-    items
-        .push(DescriptionItem::new(tr!("device.device_key")).value(elided_key(&record.config_key)));
+    let mut rows = vec![
+        (tr!("device.connection"), connection),
+        (tr!("device.device_key"), elided_key(&record.config_key)),
+    ];
     if let Some(serial) = record.serial_number {
-        items.push(DescriptionItem::new(tr!("device.serial")).value(serial));
+        rows.push((tr!("device.serial"), serial));
     }
+    detail_list(rows, pal)
+}
 
+/// The Device tab's label/value lists. Label and value share the body size,
+/// so each row reads on one baseline; the muted label carries the hierarchy.
+/// The label column is in rems: a fixed 100 px cut "Geräteschlüssel" and
+/// longer translations into their values (#1856), and rems keep them intact
+/// as the interface scale grows.
+fn detail_list(
+    rows: impl IntoIterator<Item = (SharedString, String)>,
+    pal: Palette,
+) -> impl IntoElement {
     DescriptionList::new()
         .columns(1)
-        // Match the configuration card: a fixed 100 px cut "Geräteschlüssel"
-        // and longer translations into their values (#1856).
         .label_width(rems(12.))
         .bordered(false)
-        .children(items)
+        .children(rows.into_iter().map(|(label, value)| {
+            DescriptionItem::new(
+                div()
+                    .text_body()
+                    .text_color(pal.text_muted)
+                    .child(label)
+                    .into_any_element(),
+            )
+            .value(
+                div()
+                    .text_body()
+                    .text_color(pal.text_primary)
+                    .child(value)
+                    .into_any_element(),
+            )
+        }))
 }
 
 /// Show long machine keys (a camera's config key embeds the OS device path)
@@ -1275,7 +1318,7 @@ mod tests {
             .debug_bounds("device-enabled-row")
             .expect("the row renders");
         let switch = cx
-            .debug_bounds("device-enabled-switch")
+            .debug_bounds("device-enabled-row-control")
             .expect("the row renders its switch");
         assert!(
             row.size.width <= px(360.),

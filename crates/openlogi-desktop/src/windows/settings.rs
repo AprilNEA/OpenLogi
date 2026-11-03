@@ -73,6 +73,9 @@ pub enum SettingsPage {
     #[default]
     General,
     Updates,
+    /// Where Linux shows input-device access, which the agent needs to run.
+    #[cfg(target_os = "linux")]
+    Permissions,
     About,
 }
 
@@ -82,6 +85,8 @@ impl SettingsPage {
         match self {
             Self::General => 0,
             Self::Updates => 1,
+            #[cfg(target_os = "linux")]
+            Self::Permissions => 2,
             // One lower on Windows: the Permissions page isn't registered
             // there (see the `mod permissions` cfg).
             Self::About => {

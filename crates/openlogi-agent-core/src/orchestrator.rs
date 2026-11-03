@@ -30,8 +30,9 @@ use openlogi_core::device_order::{DeviceIdentity, DeviceStableId, PhysicalDevice
 use openlogi_hid::{
     BacklightChange, BacklightState, CaptureChannelSlot, ChannelPool, ChannelRegistry,
     DeviceIoGate, DeviceRoute, DisableKeysMask, Dpi, EasySwitchHosts, FnLockState,
-    ForceSensingInfo, HidppOperation, HostOs, PointerSpeed, ReportRate, ReportRateInfo, WriteError,
-    commands_for_light_settings, is_reserved_keyboard_control, key_display_for,
+    ForceSensingInfo, HidppOperation, HostOs, PointerSpeed, ReportRate, ReportRateInfo,
+    SidetoneLevel, WriteError, commands_for_light_settings, is_reserved_keyboard_control,
+    key_display_for,
 };
 #[cfg(test)]
 use openlogi_ipc::ChosenLight;
@@ -44,6 +45,7 @@ use crate::capture_plan::{
     CapturePublication, PlanDevice, SharedCapturePlans, buttons_unlike_focus,
     hidpp_side_gesture_maps_for, plan_for_device, shift_bindings_for,
 };
+use crate::flow::{FlowController, InventoryDevice};
 use crate::hardware::{
     DeviceAccess, DeviceOp, HardwareContext, KeptOsLayouts, VolatileMouseSettings, WriteOrder,
     show_precision_led, write_pointer_speed_in_background,
@@ -167,6 +169,9 @@ pub struct SharedHandles {
     /// Receiver access shared by HID++ sessions and pairing. Pairing/host
     /// transitions are exclusive; capture sessions share under read leases.
     pub receiver_access: ReceiverAccess,
+    /// Flow peers, edge detection, and device handoff. Dormant until the
+    /// agent arms it.
+    pub flow: FlowController,
     /// Per-transport turns for agent-owned HID requests. Shared by every
     /// device access built from these handles, so two slots of one receiver
     /// queue behind each other before either starts its response timeout.
@@ -185,6 +190,8 @@ pub struct SharedHandles {
     pointer_speeds: Arc<PointerSpeeds>,
     /// Orders every path's press-force writes per force-sensing device.
     force_sensing_order: WriteOrder,
+    /// Orders the GUI's sidetone writes per headset.
+    sidetone_order: WriteOrder,
     /// Orders the GUI's backlight writes per keyboard.
     backlight_order: WriteOrder,
     /// Orders host renames per device.
@@ -353,6 +360,26 @@ impl SharedHandles {
                 &ticket,
                 |c| async move { openlogi_hid::set_force_sensing_on(&c, force).await },
                 |c| async move { openlogi_hid::get_force_sensing_on(&c).await },
+            )
+            .await
+    }
+
+    /// Write `level` to the headset at `route` and return the level it
+    /// confirms. When a newer sidetone write for the headset is requested
+    /// before this one gets its turn, this one reads the headset instead of
+    /// writing a level that is about to be replaced.
+    pub async fn set_sidetone(
+        &self,
+        route: &DeviceRoute,
+        level: SidetoneLevel,
+    ) -> Result<SidetoneLevel, WriteError> {
+        let ticket = self.sidetone_order.request(route);
+        self.device(route)
+            .run_in_turn(
+                HidppOperation::WriteSidetone,
+                &ticket,
+                |c| async move { openlogi_hid::set_sidetone_on(&c, level).await },
+                |c| async move { openlogi_hid::get_sidetone_on(&c).await },
             )
             .await
     }
@@ -681,6 +708,14 @@ impl Orchestrator {
         let (host_switch_links_tx, host_switch_links) = watch::channel(Arc::new(Vec::new()));
         let (watched_lights_tx, watched_lights) = watch::channel(Arc::new(Vec::new()));
         openlogi_inject::set_desktop_switch(desktop_switch(&config.app_settings));
+        let receiver_access = ReceiverAccess::default();
+        let flow = FlowController::new(
+            &config.flow,
+            Arc::clone(&observable),
+            hardware.channel_pool(),
+            receiver_access.clone(),
+            hardware.device_io(),
+        );
         let shared = SharedHandles {
             device_io: hardware.device_io(),
             channel_pool: hardware.channel_pool(),
@@ -699,7 +734,8 @@ impl Orchestrator {
             keyboard_channel: Arc::new(RwLock::new(None)),
             key_display_specs,
             capture_rearm_generation: Arc::new(AtomicU64::new(0)),
-            receiver_access: ReceiverAccess::default(),
+            receiver_access,
+            flow,
             transport_turns: crate::hardware::TransportTurns::default(),
             host_switch_links,
             watched_lights,
@@ -707,6 +743,7 @@ impl Orchestrator {
             report_rate_order: WriteOrder::default(),
             pointer_speeds: Arc::default(),
             force_sensing_order: WriteOrder::default(),
+            sidetone_order: WriteOrder::default(),
             backlight_order: WriteOrder::default(),
             host_name_order: WriteOrder::default(),
             follower_cookie_order: WriteOrder::default(),
@@ -869,15 +906,12 @@ impl Orchestrator {
     }
 
     /// Publish hook maps while preserving what hardware capture sessions
-    /// reported: thumb-wheel polarities, diverted buttons and held G-Shift
-    /// buttons. Selection, polarity, and bindings share the one lock the
-    /// callback reads, so a device switch cannot combine facts from two
-    /// devices.
+    /// reported: diverted buttons and held G-Shift buttons. Selection,
+    /// capture state, and bindings share the one lock the callback reads, so
+    /// a device switch cannot combine facts from two devices.
     fn publish_hook_maps(&self, mut maps: HookMaps) {
         match self.shared.hook_maps.write() {
             Ok(mut current) => {
-                maps.thumbwheel_positive_is_forward =
-                    std::mem::take(&mut current.thumbwheel_positive_is_forward);
                 maps.shift_held = std::mem::take(&mut current.shift_held);
                 maps.diverted_buttons = std::mem::take(&mut current.diverted_buttons);
                 *current = maps;
@@ -1092,6 +1126,7 @@ impl Orchestrator {
         publish_arc_if_changed(&self.watched_lights_tx, self.watched_lights());
         self.publish_lights();
         publish_arc_if_changed(&self.key_display_specs_tx, self.key_display_specs_for());
+        self.publish_flow();
     }
 
     /// What each online, enabled keypad's LCD keys should show: the glyph of
@@ -1125,6 +1160,33 @@ impl Orchestrator {
                 })
             })
             .collect()
+    }
+
+    /// Hand Flow its configuration and the devices it may move. Both
+    /// updates are no-ops when nothing changed.
+    fn publish_flow(&self) {
+        self.shared.flow.update_config(&self.config.flow);
+        self.shared.flow.update_devices(
+            self.devices
+                .iter()
+                .filter_map(Self::flow_inventory_device)
+                .collect(),
+        );
+    }
+
+    /// One device as Flow sees it, keyed like [`Self::capture_identity`].
+    fn flow_inventory_device(dev: &AgentDevice) -> Option<InventoryDevice> {
+        let identity = DeviceIdentity::from_parts(dev.serial.as_deref(), dev.unit_id);
+        let key = canonical_device_key(&stable_id(dev), Some(&identity))
+            .or_else(|| PhysicalDeviceKey::parse(&dev.config_key))?;
+        Some(InventoryDevice {
+            key,
+            route: dev.route.clone(),
+            serial: dev.serial.clone(),
+            unit_id: dev.unit_id,
+            kind: dev.kind,
+            online: dev.online,
+        })
     }
 
     fn publish_capture_plans(&self) {
@@ -1902,6 +1964,7 @@ impl Orchestrator {
             haptic_route,
             layout,
             language: self.config.app_settings.language.clone(),
+            size: ring.size,
         })
     }
 

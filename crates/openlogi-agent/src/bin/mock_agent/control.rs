@@ -14,6 +14,7 @@ use openlogi_ipc::{LockKeyChange, NoticeKind};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
+use super::flow::{self, FlowCommand};
 use super::{MockAgent, State, Target, battery_at};
 
 /// What `help` prints.
@@ -27,6 +28,13 @@ fail <n> clear                   answer reads and writes again
 lock caps|num|scroll on|off      a keyboard turns a lock key on or off
 backlight <level> <levels>       a keyboard reports its backlight level
 advance <seconds>                move frozen test time (--fixture runs only)
+flow link <peer> connected|unstable|lost
+                                 report a Flow peer's link state
+flow incoming                    a nearby computer starts Flow pairing with this one
+flow confirm                     the other computer's user confirms the code
+flow fail <reason>               fail the Flow pairing attempt; reasons:
+                                 cancel mismatch timeout unreachable busy version
+                                 lost save
 disconnect                       close every client connection
 help                             show this list";
 
@@ -64,6 +72,8 @@ pub(super) enum Command {
     Backlight { level: u8, levels: u8 },
     /// Move frozen test time forward.
     Advance(Duration),
+    /// Script a Flow peer's link or the other side of Flow pairing.
+    Flow(FlowCommand),
     /// Close every client connection, as an agent restart does.
     Disconnect,
 }
@@ -113,6 +123,7 @@ pub(super) fn parse(line: &str) -> Result<Option<Command>, String> {
                 .ok_or("advance needs a whole number of seconds")?;
             Command::Advance(Duration::from_secs(seconds))
         }
+        "flow" => Command::Flow(flow::parse(&mut words)?),
         "disconnect" => Command::Disconnect,
         other => return Err(format!("unknown command `{other}`; type `help`")),
     };
@@ -261,6 +272,7 @@ impl MockAgent {
                 state.clock.advance(duration)?;
                 Ok(format!("test time is {:?}", state.clock.elapsed()))
             }
+            Command::Flow(command) => self.apply_flow(command).await,
             Command::Disconnect => {
                 let connections = self.disconnects.receiver_count();
                 self.disconnects.send_replace(());

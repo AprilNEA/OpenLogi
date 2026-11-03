@@ -2,6 +2,7 @@
 
 use crate::state::AppState;
 use crate::ui::components::ProfileTab;
+use crate::ui::theme::FocusRingStyle as _;
 use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
 use gpui::{
     ClickEvent, Context, ElementId, InteractiveElement, MouseButton, MouseDownEvent, ParentElement,
@@ -185,7 +186,7 @@ pub(super) fn control_row(
                     pal.control
                 })
                 .hover(move |s| s.bg(chip_hover_fill(on, pal)))
-                .focus_visible(move |s| s.bg(chip_hover_fill(on, pal)))
+                .focus_visible(move |s| s.focus_ring(pal))
                 .child(tr!("common.auto"))
                 .on_click(cx.listener(move |panel, _: &ClickEvent, _window, cx| {
                     panel.toggle_auto(auto_ix, cx);
@@ -245,7 +246,7 @@ fn frequency_row(
                     pal.control
                 })
                 .hover(move |s| s.bg(chip_hover_fill(active, pal)))
-                .focus_visible(move |s| s.bg(chip_hover_fill(active, pal)))
+                .focus_visible(move |s| s.focus_ring(pal))
                 .child(label)
                 .on_click(cx.listener(move |panel, _: &ClickEvent, window, cx| {
                     let (Some(key), Some(uid)) = (panel.key.clone(), panel.uid.clone()) else {
@@ -317,7 +318,7 @@ fn binary_control_row(
                     pal.control
                 })
                 .hover(move |s| s.bg(chip_hover_fill(on, pal)))
-                .focus_visible(move |s| s.bg(chip_hover_fill(on, pal)))
+                .focus_visible(move |s| s.focus_ring(pal))
                 .child(if on {
                     tr!("common.on")
                 } else {
@@ -352,7 +353,7 @@ pub(super) fn reset_button(cx: &mut Context<CameraControlsPanel>) -> gpui::Div {
             .border_color(pal.border)
             .bg(pal.control)
             .hover(|s| s.bg(pal.control_hover))
-            .focus_visible(|s| s.bg(pal.control_hover))
+            .focus_visible(move |s| s.focus_ring(pal))
             .text_caption()
             .text_color(pal.text_muted)
             .child(tr!("camera.reset_to_defaults"))

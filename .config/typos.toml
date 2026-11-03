@@ -21,6 +21,8 @@ extend-ignore-re = ['\bOL-SER-[0-9]{5}\b']
 [default.extend-identifiers]
 # Protocol and domain identifiers whose source spelling must stay exact.
 PNGs = "PNGs"
+# async-hid's `Device::open_writeable`.
+open_writeable = "open_writeable"
 SWCustomHighligt2 = "SWCustomHighligt2"
 udid = "udid"
 

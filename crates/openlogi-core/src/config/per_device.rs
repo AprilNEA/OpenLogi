@@ -13,8 +13,8 @@ use super::{
     MomentumScrolling, OnboardMemory, ScrollResolution, SmartShift, ThumbwheelSensitivity,
 };
 use crate::binding::{
-    Action, ActionRingConfig, ActionRingIcon, ActionRingSlot, Binding, ButtonId, GamingLayout,
-    KeypadPage, RingAction, default_binding_on,
+    Action, ActionRingConfig, ActionRingIcon, ActionRingSize, ActionRingSlot, Binding, ButtonId,
+    GamingLayout, KeypadPage, RingAction, default_binding_on,
 };
 use crate::hid::{Dpi, PointerSpeed, ReportRate};
 
@@ -69,6 +69,15 @@ impl Config {
             .or_default()
             .action_ring
             .haptics = enabled;
+    }
+
+    /// Set how large `device_key`'s Actions Ring is drawn.
+    pub fn set_action_ring_size(&mut self, device_key: &str, size: ActionRingSize) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .action_ring
+            .size = size;
     }
 
     /// Replace or clear one slot in the default Actions Ring layout.

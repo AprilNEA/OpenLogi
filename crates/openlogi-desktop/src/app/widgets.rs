@@ -3,10 +3,11 @@
 //! screens.
 
 use gpui::{
-    Context, IntoElement, ParentElement, SharedString, Styled, div, prelude::FluentBuilder as _,
+    App, Context, InteractiveElement as _, IntoElement, ParentElement, RenderOnce, SharedString,
+    Styled, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_kit::component::{
-    IconName, Sizable as _,
+    Disableable as _, Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
 };
@@ -38,18 +39,71 @@ pub(super) fn settings_button() -> impl IntoElement {
         .icon(IconName::Settings)
         .label(tr!("app.settings"))
         .tooltip(tr!("app.settings"))
+        .debug_selector(|| "home-settings".into())
         .on_click(|_, _, cx| crate::windows::settings::open(cx))
+}
+
+/// Opens the Flow window. Its dot repeats Flow's status — green when the
+/// pointer can cross to a peer, amber when something blocks it — and the
+/// tooltip and accessible label say it in words.
+pub(super) fn flow_button() -> impl IntoElement {
+    FlowButton
+}
+
+#[derive(IntoElement)]
+struct FlowButton;
+
+impl RenderOnce for FlowButton {
+    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        let readiness = AppState::try_read(cx).map(AppState::flow_readiness);
+        let status = readiness
+            .as_ref()
+            .map(crate::windows::flow::status_label)
+            .unwrap_or_default();
+        let color = readiness
+            .as_ref()
+            .and_then(|readiness| crate::windows::flow::health_color(readiness.health));
+        let label = tr!("flow.button_label", status => status.to_string());
+        Button::new("home-flow")
+            .outline()
+            .icon(Icon::empty().path("action-icons/arrow-left-right.svg"))
+            .label(tr!("flow.title"))
+            .when_some(color, |button, color| {
+                button.child(div().size(px(8.)).rounded_full().bg(color))
+            })
+            .tooltip(label)
+            .debug_selector(|| "home-flow".into())
+            .on_click(|_, _, cx| crate::windows::flow::open(cx))
+    }
 }
 
 /// Primary action that opens the pairing window. The empty state carries its
 /// own equivalent CTA, so this never floats alone in an empty header.
 pub(super) fn add_device_button() -> impl IntoElement {
-    Button::new("header-add-device")
-        .primary()
-        .icon(IconName::Plus)
-        .label(tr!("pairing.add_device"))
-        .tooltip(tr!("pairing.add_device"))
-        .on_click(|_, _, cx| crate::windows::add_device::open(cx))
+    AddDeviceButton
+}
+
+/// [`add_device_button`]: pairing runs in the agent, so without a live
+/// connection the button is disabled and its tooltip says why.
+#[derive(IntoElement)]
+struct AddDeviceButton;
+
+impl RenderOnce for AddDeviceButton {
+    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        let connected = AppState::try_read(cx).is_some_and(|state| state.agent_status().is_some());
+        Button::new("header-add-device")
+            .primary()
+            .icon(IconName::Plus)
+            .label(tr!("pairing.add_device"))
+            .disabled(!connected)
+            .tooltip(if connected {
+                tr!("pairing.add_device")
+            } else {
+                tr!("pairing.pairing_agent_not_ready")
+            })
+            .debug_selector(|| "header-add-device".into())
+            .on_click(|_, _, cx| crate::windows::add_device::open(cx))
+    }
 }
 
 pub(super) fn main_window_title(show_device: bool, cx: &Context<AppView>) -> SharedString {

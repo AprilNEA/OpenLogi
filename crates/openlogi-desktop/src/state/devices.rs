@@ -65,6 +65,12 @@ pub struct DeviceRecord {
     pub asset: Option<ResolvedAsset>,
     pub model_info: Option<DeviceModelInfo>,
     pub codename: Option<String>,
+    /// The agent's [`PairedDevice::wpid`]. `None` when the agent read none,
+    /// and for a record with no paired device behind it: a camera, a
+    /// standalone device, an offline placeholder, the dev-only demo keyboard.
+    ///
+    /// [`PairedDevice::wpid`]: openlogi_core::device::PairedDevice::wpid
+    pub wpid: Option<u16>,
     pub serial_number: Option<String>,
     pub unit_id: [u8; 4],
     /// Standalone driver family, if this is a non-HID++ record.
@@ -327,6 +333,7 @@ pub(super) fn build_device_list(
                 asset,
                 model_info,
                 codename,
+                wpid: paired.wpid,
                 serial_number,
                 unit_id,
                 driver_id: None,
@@ -496,6 +503,7 @@ fn camera_record(camera: &Camera, resolver: &AssetResolver) -> DeviceRecord {
         asset,
         model_info: None,
         codename: None,
+        wpid: None,
         serial_number: camera.serial_number.clone(),
         unit_id: [0; 4],
         driver_id: None,
@@ -577,6 +585,7 @@ fn append_standalone(
             asset,
             model_info: None,
             codename: None,
+            wpid: None,
             serial_number: device.serial_number.clone(),
             unit_id: device.unit_id,
             driver_id: Some(device.driver_id.clone()),
@@ -779,6 +788,7 @@ fn offline_record(
         asset,
         model_info,
         codename: identity.codename.clone(),
+        wpid: None,
         serial_number: None,
         unit_id: [0; 4],
         driver_id: identity.driver_id.clone(),
@@ -839,6 +849,7 @@ pub(super) fn adopt_transient_record(known: &DeviceRecord, live: DeviceRecord) -
         asset: known.asset.clone().or(live.asset),
         model_info: known.model_info.clone().or(live.model_info),
         codename: known.codename.clone().or(live.codename),
+        wpid: live.wpid.or(known.wpid),
         serial_number: known.serial_number.clone().or(live.serial_number),
         unit_id: known.unit_id,
         driver_id: live.driver_id.or_else(|| known.driver_id.clone()),
@@ -946,6 +957,7 @@ fn demo_keyboard() -> DeviceRecord {
         asset: None,
         model_info: None,
         codename: None,
+        wpid: None,
         serial_number: None,
         unit_id: [0; 4],
         driver_id: None,
