@@ -209,16 +209,17 @@ impl RenderOnce for Toggle {
     }
 }
 
-/// One setting: a title and a caption on the left, its toggle on the right.
-/// The caption column shrinks and wraps, so a long translation cannot push the
-/// toggle out of its card or panel. `selector` names the row for layout tests,
-/// and `{selector}-control` the toggle's slot.
+/// One setting: a title and a caption on the left, its control — a toggle, or
+/// a compact segmented choice — on the right. The caption column shrinks and
+/// wraps, so a long translation cannot push the control out of its card or
+/// panel. `selector` names the row for layout tests, and `{selector}-control`
+/// the control's slot.
 pub(crate) fn toggle_row(
     selector: &'static str,
     pal: theme::Palette,
     title: SharedString,
     description: SharedString,
-    toggle: Toggle,
+    control: impl IntoElement,
 ) -> impl IntoElement {
     h_flex()
         .debug_selector(move || selector.into())
@@ -241,7 +242,7 @@ pub(crate) fn toggle_row(
             div()
                 .debug_selector(move || format!("{selector}-control"))
                 .flex_shrink_0()
-                .child(toggle),
+                .child(control),
         )
 }
 

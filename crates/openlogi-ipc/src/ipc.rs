@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use openlogi_core::app::ForegroundApp;
-use openlogi_core::binding::{ActionRingIcon, ActionRingSlot};
+use openlogi_core::binding::{ActionRingIcon, ActionRingSize, ActionRingSlot};
 use openlogi_core::config::{ConfigRevision, FlowPeerName, FlowPublicKey, Lighting};
 use openlogi_core::device::{
     BatteryInfo, ChangedOnLight, DeviceInventory, DeviceKind, LightState, LockKey, StandaloneDevice,
@@ -179,7 +179,8 @@ pub use succession::Identity;
 ///      appended after those — pairing another computer for Flow.
 /// v45: `Agent::action_ring_unhover` appended — the ring's held trigger
 ///      chooses on release, so the overlay reports the pointer leaving every
-///      slot as well as entering one.
+///      slot as well as entering one. `ActionRingInvocation::size` appended,
+///      the size the overlay draws the ring at.
 pub const PROTOCOL_VERSION: u32 = 45;
 
 /// Environment variable through which the agent hands a supervised helper the
@@ -791,6 +792,8 @@ pub struct ActionRingInvocation {
     pub slots: BTreeMap<ActionRingSlot, ActionRingPresentation>,
     /// Configured UI locale, or `None` to follow the overlay host's system locale.
     pub language: Option<String>,
+    /// How large the overlay draws this ring.
+    pub size: ActionRingSize,
 }
 
 /// The ring the overlay should be showing, stamped with its generation.

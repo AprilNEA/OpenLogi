@@ -11,10 +11,16 @@ use gpui::{
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
-    Icon, IconName, Selectable as _, h_flex, input::InputState, tooltip::Tooltip, v_flex,
+    Icon, IconName, Selectable as _,
+    button::{Button, ButtonGroup},
+    h_flex,
+    input::InputState,
+    tooltip::Tooltip,
+    v_flex,
 };
 use openlogi_core::binding::{
-    ActionRingConfig, ActionRingEntry, ActionRingIcon, ActionRingLayout, ActionRingSlot,
+    ActionRingConfig, ActionRingEntry, ActionRingIcon, ActionRingLayout, ActionRingSize,
+    ActionRingSlot,
 };
 use openlogi_ui::action_icons::RING_CANCEL_ICON;
 
@@ -24,7 +30,7 @@ use crate::features::keyboard::editors::{PowerUserKind, text_editor_placeholder}
 use crate::state::{AppState, StateEvent};
 use crate::ui::action::localized_action_label;
 use crate::ui::components::{Toggle, toggle_row};
-use crate::ui::theme::{self, Palette, Typography as _};
+use crate::ui::theme::{self, Palette, SelectableStyle as _, Typography as _};
 
 /// Stateful Actions Ring editor. Ring configuration itself lives in
 /// [`AppState`]; this entity owns selection and editor input state.
@@ -163,6 +169,13 @@ impl Render for ActionRingPanel {
                         AppState::apply(cx, |state| state.commit_action_ring_enabled(*enabled));
                     }),
             ))
+            .child(toggle_row(
+                "ring-size-row",
+                pal,
+                tr!("action_ring.ring_size"),
+                tr!("action_ring.ring_size_description"),
+                size_segment(ring.size, cx),
+            ))
             .when(haptics_supported, |panel| {
                 panel.child(toggle_row(
                     "ring-haptics-row",
@@ -210,6 +223,28 @@ fn editor_input(
     // language switch instead of keeping the placeholder it was built with.
     crate::ui::components::localize_placeholder(&state, placeholder, window, cx);
     state
+}
+
+/// Small / Medium / Large. Each button commits its own size: the group's own
+/// `on_click` hears only pointer clicks, so Enter and Space on a focused
+/// segment would not reach it.
+fn size_segment(current: ActionRingSize, cx: &App) -> ButtonGroup {
+    ButtonGroup::new("ring-size")
+        .outline()
+        .children(ActionRingSize::ALL.map(|size| {
+            let (id, label) = match size {
+                ActionRingSize::Small => ("ring-size-small", tr!("action_ring.size_small")),
+                ActionRingSize::Medium => ("ring-size-medium", tr!("action_ring.size_medium")),
+                ActionRingSize::Large => ("ring-size-large", tr!("action_ring.size_large")),
+            };
+            Button::new(id)
+                .label(label)
+                .selected(current == size)
+                .selected_segment(current == size, cx)
+                .on_click(move |_, _, cx| {
+                    AppState::apply(cx, |state| state.commit_action_ring_size(size));
+                })
+        }))
 }
 
 fn current_device_supports_haptics(cx: &Context<ActionRingPanel>) -> bool {

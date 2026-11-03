@@ -1,7 +1,8 @@
 //! The ring itself: the GPUI view, and the window it is drawn in.
 //!
-//! Where a client can place its own windows, the window is the ring: a 360×360
-//! panel centred on the cursor and clamped to its display. Wayland allows
+//! Where a client can place its own windows, the window is the ring: a square
+//! panel, sized by the ring's [`Geometry`], centred on the cursor and clamped
+//! to its display. Wayland allows
 //! neither half of that, so there each display gets a window covering it and
 //! the same panel is drawn at the pointer, in the one window that heard it last.
 
@@ -12,7 +13,7 @@ use gpui::{
     WindowBackgroundAppearance, WindowId, WindowKind, WindowOptions, canvas, div,
     linear_color_stop, linear_gradient, point, prelude::FluentBuilder as _, px, svg,
 };
-use openlogi_core::binding::{Action, ActionRingSlot};
+use openlogi_core::binding::{Action, ActionRingSize, ActionRingSlot};
 use openlogi_ipc::ActionRingInvocation;
 use openlogi_ui::action_icons::RING_CANCEL_ICON;
 use openlogi_ui::color;
@@ -22,21 +23,81 @@ use tokio::sync::mpsc;
 use crate::ipc::OverlayCommand;
 use crate::session::{self, ClickAwaySession, ShowingRing};
 
-/// The window the ring is drawn in. It is larger than the ring so a hovered
-/// slot's label fits beside it; everything outside the slots is transparent.
-pub(crate) const WINDOW_SIZE: f32 = 360.0;
-pub(crate) const SLOT_SIZE: f32 = 44.0;
-/// A hovered slot grows by about 15% around the same centre.
-const SELECTED_SLOT_SIZE: f32 = 50.0;
-pub(crate) const RADIUS: f32 = 76.0;
-const GLYPH_SIZE: f32 = 20.0;
-const SELECTED_GLYPH_SIZE: f32 = 22.0;
-const CANCEL_SIZE: f32 = 28.0;
-const CANCEL_GLYPH_SIZE: f32 = 14.0;
-/// How far the pointer must move from the centre before it aims at a slot.
-/// Inside it nothing is chosen: a click there, or a held trigger released
-/// there, closes the ring.
-const DEAD_ZONE: f32 = 24.0;
+/// The ring's dimensions at one [`ActionRingSize`], in points.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Geometry {
+    /// The window the ring is drawn in. It is larger than the ring so a
+    /// hovered slot's label fits beside it; everything outside the slots is
+    /// transparent.
+    pub(crate) window: f32,
+    /// From the centre to each slot's centre.
+    radius: f32,
+    slot: f32,
+    /// A hovered slot grows by about 15% around the same centre.
+    selected_slot: f32,
+    glyph: f32,
+    selected_glyph: f32,
+    cancel: f32,
+    cancel_glyph: f32,
+    /// How far the pointer must move from the centre before it aims at a
+    /// slot. Inside it nothing is chosen: a click there, or a held trigger
+    /// released there, closes the ring.
+    dead_zone: f32,
+}
+
+impl Geometry {
+    /// Medium is the standard ring. Each step scales the ring by about a
+    /// fifth, and the window grows with it so a label beside a side slot keeps
+    /// the same room.
+    pub(crate) const fn of(size: ActionRingSize) -> Self {
+        match size {
+            ActionRingSize::Small => Self {
+                window: 330.0,
+                radius: 62.0,
+                slot: 36.0,
+                selected_slot: 42.0,
+                glyph: 16.0,
+                selected_glyph: 18.0,
+                cancel: 24.0,
+                cancel_glyph: 12.0,
+                dead_zone: 20.0,
+            },
+            ActionRingSize::Medium => Self {
+                window: 360.0,
+                radius: 76.0,
+                slot: 44.0,
+                selected_slot: 50.0,
+                glyph: 20.0,
+                selected_glyph: 22.0,
+                cancel: 28.0,
+                cancel_glyph: 14.0,
+                dead_zone: 24.0,
+            },
+            ActionRingSize::Large => Self {
+                window: 400.0,
+                radius: 96.0,
+                slot: 54.0,
+                selected_slot: 62.0,
+                glyph: 24.0,
+                selected_glyph: 26.0,
+                cancel: 32.0,
+                cancel_glyph: 16.0,
+                dead_zone: 28.0,
+            },
+        }
+    }
+
+    /// The ring's footprint, out to a hovered slot's edge plus a margin.
+    ///
+    /// A click between the slots belongs to the ring, but macOS hands a click
+    /// on a nearly transparent pixel to the window below: at 1/255 alpha it
+    /// reached the app under the ring, at 0.01 the ring held it (measured on
+    /// macOS 27). A mid grey at that alpha shifts any desktop colour by under 1%.
+    fn footprint(self) -> f32 {
+        2.0 * (self.radius + self.selected_slot / 2.0 + LABEL_GAP)
+    }
+}
+
 /// Space between a hovered slot and its label.
 const LABEL_GAP: f32 = 6.0;
 /// Space a label keeps from the window edge, where its shadow would be cut off.
@@ -118,13 +179,7 @@ const SELECTED_FILL_L: f32 = 0.48;
 const SELECTED_BORDER_L: f32 = 0.78;
 const SELECTED_GLYPH: Hsla = neutral(1.0, 1.0);
 
-/// The ring's footprint, out to a hovered slot's edge plus a margin.
-///
-/// A click between the slots belongs to the ring, but macOS hands a click on a
-/// nearly transparent pixel to the window below: at 1/255 alpha it reached the
-/// app under the ring, at 0.01 the ring held it (measured on macOS 27). A mid
-/// grey at that alpha shifts any desktop colour by under 1%.
-const FOOTPRINT: f32 = 2.0 * (RADIUS + SELECTED_SLOT_SIZE / 2.0 + LABEL_GAP);
+/// See [`Geometry::footprint`].
 const FOOTPRINT_FILL: Hsla = neutral(0.5, 0.01);
 
 /// The beam's accent opacity where it leaves the centre and where it meets
@@ -134,14 +189,15 @@ const BEAM_ALPHA_AT_SLOT: f32 = 0.38;
 
 /// The slot a pointer `(x, y)` off the ring's centre aims at, among the
 /// `filled` ones: the slot whose sector holds it, once it is out of the
-/// [`DEAD_ZONE`]. The pointer need not be over the slot, so a hand that
+/// dead zone. The pointer need not be over the slot, so a hand that
 /// overshoots still chooses it.
 fn aimed_slot(
     filled: impl IntoIterator<Item = ActionRingSlot>,
+    geometry: Geometry,
     x: f32,
     y: f32,
 ) -> Option<ActionRingSlot> {
-    if x.hypot(y) < DEAD_ZONE {
+    if x.hypot(y) < geometry.dead_zone {
         return None;
     }
     let aimed = ActionRingSlot::toward(x, y);
@@ -154,13 +210,14 @@ fn aimed_slot(
 /// Corners of the beam from the centre to a highlighted `slot`, in panel
 /// coordinates: the centre, the two points where its sides touch the grown
 /// slot, and the slot's own centre, which the slot covers.
-fn beam(slot: ActionRingSlot) -> [Point<Pixels>; 4] {
-    let centre = WINDOW_SIZE / 2.0;
+fn beam(slot: ActionRingSlot, geometry: Geometry) -> [Point<Pixels>; 4] {
+    let centre = geometry.window / 2.0;
     let (x, y) = slot.unit_offset();
-    let radius = SELECTED_SLOT_SIZE / 2.0;
+    let ring = geometry.radius;
+    let radius = geometry.selected_slot / 2.0;
     // The sides run from the centre along the tangents to the slot's circle.
-    let spread = (radius / RADIUS).asin();
-    let reach = RADIUS.mul_add(RADIUS, -radius * radius).sqrt();
+    let spread = (radius / ring).asin();
+    let reach = ring.mul_add(ring, -radius * radius).sqrt();
     let side = |angle: f32| {
         let (sin, cos) = angle.sin_cos();
         point(
@@ -171,13 +228,13 @@ fn beam(slot: ActionRingSlot) -> [Point<Pixels>; 4] {
     [
         point(px(centre), px(centre)),
         side(spread),
-        point(px(x.mul_add(RADIUS, centre)), px(y.mul_add(RADIUS, centre))),
+        point(px(x.mul_add(ring, centre)), px(y.mul_add(ring, centre))),
         side(-spread),
     ]
 }
 
 /// The beam drawn under a highlighted `slot`, over the whole panel.
-fn beam_element(slot: ActionRingSlot) -> impl IntoElement {
+fn beam_element(slot: ActionRingSlot, geometry: Geometry) -> impl IntoElement {
     let (x, y) = slot.unit_offset();
     // A gradient's angle starts at the top and turns clockwise.
     let toward_slot = x.atan2(-y).to_degrees().rem_euclid(360.0);
@@ -190,7 +247,8 @@ fn beam_element(slot: ActionRingSlot) -> impl IntoElement {
     canvas(
         |_, _, _| {},
         move |bounds, (), window, _| {
-            let [apex, side, tip, other_side] = beam(slot).map(|corner| bounds.origin + corner);
+            let [apex, side, tip, other_side] =
+                beam(slot, geometry).map(|corner| bounds.origin + corner);
             let mut path = PathBuilder::fill();
             path.move_to(apex);
             path.line_to(side);
@@ -205,7 +263,7 @@ fn beam_element(slot: ActionRingSlot) -> impl IntoElement {
     .absolute()
     .left_0()
     .top_0()
-    .size(px(WINDOW_SIZE))
+    .size(px(geometry.window))
 }
 
 /// Which way a label grows from the point it is pinned to.
@@ -246,27 +304,27 @@ struct LabelPlace {
 }
 
 impl LabelPlace {
-    fn of(slot: ActionRingSlot) -> Self {
-        let centre = WINDOW_SIZE / 2.0;
+    fn of(slot: ActionRingSlot, geometry: Geometry) -> Self {
+        let centre = geometry.window / 2.0;
         let (x, y) = slot.unit_offset();
         let horizontal = Grow::away_from_centre(x);
         let ((anchor_x, anchor_y), vertical) = if Grow::away_from_centre(y) == Grow::Centred {
             (
                 (
-                    centre + x * (RADIUS + LABEL_GAP),
-                    centre - SELECTED_SLOT_SIZE / 2.0 - LABEL_GAP,
+                    centre + x * (geometry.radius + LABEL_GAP),
+                    centre - geometry.selected_slot / 2.0 - LABEL_GAP,
                 ),
                 Grow::Before,
             )
         } else {
-            let reach = RADIUS + SELECTED_SLOT_SIZE / 2.0 + LABEL_GAP;
+            let reach = geometry.radius + geometry.selected_slot / 2.0 + LABEL_GAP;
             (
                 (centre + x * reach, centre + y * reach),
                 Grow::away_from_centre(y),
             )
         };
         let room_before = anchor_x - LABEL_EDGE;
-        let room_after = WINDOW_SIZE - LABEL_EDGE - anchor_x;
+        let room_after = geometry.window - LABEL_EDGE - anchor_x;
         let width = match horizontal {
             Grow::Before => room_before,
             Grow::After => room_after,
@@ -418,17 +476,27 @@ impl RingView {
         true
     }
 
+    /// The dimensions this ring is drawn at.
+    const fn geometry(&self) -> Geometry {
+        Geometry::of(self.invocation.size)
+    }
+
     fn slot_element(&self, slot: ActionRingSlot, colors: RingColors) -> Option<gpui::AnyElement> {
         let presentation = self.invocation.slots.get(&slot)?;
         let icon_path = presentation.icon.asset_path();
         let selected = self.hovered == Some(slot);
+        let geometry = self.geometry();
         let (size, glyph_size, glyph) = if selected {
-            (SELECTED_SLOT_SIZE, SELECTED_GLYPH_SIZE, SELECTED_GLYPH)
+            (
+                geometry.selected_slot,
+                geometry.selected_glyph,
+                SELECTED_GLYPH,
+            )
         } else {
-            (SLOT_SIZE, GLYPH_SIZE, colors.glyph)
+            (geometry.slot, geometry.glyph, colors.glyph)
         };
         // A hovered slot grows around the centre it rests on.
-        let (left, top) = slot.placement(WINDOW_SIZE, RADIUS, size);
+        let (left, top) = slot.placement(geometry.window, geometry.radius, size);
         Some(
             div()
                 .absolute()
@@ -458,8 +526,11 @@ impl RingView {
 }
 
 impl RingView {
-    /// The fixed 360×360 ring. Both placements anchor this same element.
+    /// The ring's square panel. Both placements anchor this same element.
     fn panel(&self, colors: RingColors) -> Div {
+        let geometry = self.geometry();
+        let window = geometry.window;
+        let footprint = geometry.footprint();
         let hovered_label = self.hovered.and_then(|slot| {
             let presentation = self.invocation.slots.get(&slot)?;
             // User-authored labels render verbatim: passing them through the
@@ -481,25 +552,27 @@ impl RingView {
 
         div()
             .relative()
-            .size(px(WINDOW_SIZE))
+            .size(px(window))
             .child(
                 div()
                     .absolute()
-                    .left(px((WINDOW_SIZE - FOOTPRINT) / 2.0))
-                    .top(px((WINDOW_SIZE - FOOTPRINT) / 2.0))
-                    .size(px(FOOTPRINT))
+                    .left(px((window - footprint) / 2.0))
+                    .top(px((window - footprint) / 2.0))
+                    .size(px(footprint))
                     .rounded_full()
                     .bg(FOOTPRINT_FILL),
             )
-            .when_some(self.hovered, |ring, slot| ring.child(beam_element(slot)))
+            .when_some(self.hovered, |ring, slot| {
+                ring.child(beam_element(slot, geometry))
+            })
             .children(slots)
             .child(
                 div()
                     .id("ring-cancel")
                     .absolute()
-                    .left(px((WINDOW_SIZE - CANCEL_SIZE) / 2.0))
-                    .top(px((WINDOW_SIZE - CANCEL_SIZE) / 2.0))
-                    .size(px(CANCEL_SIZE))
+                    .left(px((window - geometry.cancel) / 2.0))
+                    .top(px((window - geometry.cancel) / 2.0))
+                    .size(px(geometry.cancel))
                     .flex()
                     .items_center()
                     .justify_center()
@@ -513,13 +586,13 @@ impl RingView {
                     .child(
                         svg()
                             .path(RING_CANCEL_ICON)
-                            .size(px(CANCEL_GLYPH_SIZE))
+                            .size(px(geometry.cancel_glyph))
                             .flex_none()
                             .text_color(colors.cancel_glyph),
                     ),
             )
             .when_some(hovered_label, |ring, (slot, label)| {
-                ring.child(label_element(LabelPlace::of(slot), label, colors))
+                ring.child(label_element(LabelPlace::of(slot, geometry), label, colors))
             })
     }
 }
@@ -571,13 +644,15 @@ impl Render for RingView {
             .read(cx)
             .center_in(window.window_handle().window_id());
         let colors = RingColors::for_appearance(window.appearance());
-        let panel = panel_origin(placement, center, window.viewport_size()).map(|origin| {
-            div()
-                .absolute()
-                .left(origin.x)
-                .top(origin.y)
-                .child(self.panel(colors))
-        });
+        let geometry = self.geometry();
+        let panel =
+            panel_origin(placement, geometry, center, window.viewport_size()).map(|origin| {
+                div()
+                    .absolute()
+                    .left(origin.x)
+                    .top(origin.y)
+                    .child(self.panel(colors))
+            });
         let click_pointer = self.pointer.clone();
         let filled: Vec<_> = self.invocation.slots.keys().copied().collect();
 
@@ -594,15 +669,17 @@ impl Render for RingView {
                         }
                     });
                 }
+                let geometry = this.geometry();
                 let Some((x, y)) = offset_from_centre(
                     this.placement,
+                    geometry,
                     this.pointer.read(cx),
                     window,
                     event.position,
                 ) else {
                     return;
                 };
-                let aimed = aimed_slot(this.invocation.slots.keys().copied(), x, y);
+                let aimed = aimed_slot(this.invocation.slots.keys().copied(), geometry, x, y);
                 if this.hover(aimed) {
                     cx.notify();
                 }
@@ -613,11 +690,12 @@ impl Render for RingView {
             .on_click(move |event: &ClickEvent, window, cx| {
                 let aimed = offset_from_centre(
                     placement,
+                    geometry,
                     click_pointer.read(cx),
                     window,
                     event.position(),
                 )
-                .and_then(|(x, y)| aimed_slot(filled.iter().copied(), x, y));
+                .and_then(|(x, y)| aimed_slot(filled.iter().copied(), geometry, x, y));
                 let command = match aimed {
                     Some(slot) => OverlayCommand::Activate { session_id, slot },
                     None => OverlayCommand::Cancel { session_id },
@@ -632,13 +710,14 @@ impl Render for RingView {
 /// while this window does not draw the panel.
 fn offset_from_centre(
     placement: Placement,
+    geometry: Geometry,
     pointer: &RingPointer,
     window: &Window,
     position: Point<Pixels>,
 ) -> Option<(f32, f32)> {
     let center = pointer.center_in(window.window_handle().window_id());
-    let origin = panel_origin(placement, center, window.viewport_size())?;
-    let half = px(WINDOW_SIZE / 2.0);
+    let origin = panel_origin(placement, geometry, center, window.viewport_size())?;
+    let half = px(geometry.window / 2.0);
     Some((
         (position.x - origin.x - half).as_f32(),
         (position.y - origin.y - half).as_f32(),
@@ -669,6 +748,7 @@ pub(crate) fn ring_window_options() -> WindowOptions {
 /// disagree with it under fractional scaling, so the clamp cannot use them.
 fn panel_origin(
     placement: Placement,
+    geometry: Geometry,
     center: Option<Point<Pixels>>,
     viewport: Size<Pixels>,
 ) -> Option<Point<Pixels>> {
@@ -676,7 +756,7 @@ fn panel_origin(
         Placement::Window => return Some(Point::default()),
         Placement::AtPointer => center?,
     };
-    let size = Size::new(px(WINDOW_SIZE), px(WINDOW_SIZE));
+    let size = Size::new(px(geometry.window), px(geometry.window));
     Some(clamp_window_origin(
         point(center.x - size.width / 2.0, center.y - size.height / 2.0),
         size,
@@ -725,10 +805,17 @@ mod tests {
         );
     }
 
+    const MEDIUM: Geometry = Geometry::of(ActionRingSize::Medium);
+
     #[test]
     fn a_window_sized_ring_fills_its_window() {
         assert_eq!(
-            panel_origin(Placement::Window, None, Size::new(px(360.0), px(360.0))),
+            panel_origin(
+                Placement::Window,
+                MEDIUM,
+                None,
+                Size::new(px(360.0), px(360.0))
+            ),
             Some(Point::default())
         );
     }
@@ -738,6 +825,7 @@ mod tests {
         assert_eq!(
             panel_origin(
                 Placement::AtPointer,
+                MEDIUM,
                 None,
                 Size::new(px(1920.0), px(1080.0))
             ),
@@ -747,13 +835,22 @@ mod tests {
 
     #[test]
     fn a_display_sized_ring_centers_on_the_pointer() {
-        assert_eq!(
+        let at_pointer = |size| {
             panel_origin(
                 Placement::AtPointer,
+                Geometry::of(size),
                 Some(point(px(900.0), px(500.0))),
-                Size::new(px(1920.0), px(1080.0))
-            ),
+                Size::new(px(1920.0), px(1080.0)),
+            )
+        };
+        assert_eq!(
+            at_pointer(ActionRingSize::Medium),
             Some(point(px(720.0), px(320.0)))
+        );
+        // A large ring's panel is 400 pt across.
+        assert_eq!(
+            at_pointer(ActionRingSize::Large),
+            Some(point(px(700.0), px(300.0)))
         );
     }
 
@@ -762,6 +859,7 @@ mod tests {
         assert_eq!(
             panel_origin(
                 Placement::AtPointer,
+                MEDIUM,
                 Some(point(px(4.0), px(1076.0))),
                 Size::new(px(1920.0), px(1080.0))
             ),
@@ -822,6 +920,10 @@ mod tests {
     }
 
     fn invocation() -> ActionRingInvocation {
+        sized_invocation(ActionRingSize::Medium)
+    }
+
+    fn sized_invocation(size: ActionRingSize) -> ActionRingInvocation {
         ActionRingInvocation {
             session_id: 7,
             slots: [(
@@ -834,16 +936,17 @@ mod tests {
             )]
             .into(),
             language: None,
+            size,
         }
     }
 
     /// Where the `Top` slot's centre lands when the panel centres on `center`
     /// well away from every edge.
     fn top_slot_at(center: Point<Pixels>) -> Point<Pixels> {
-        let (left, top) = ActionRingSlot::Top.placement(WINDOW_SIZE, RADIUS, SLOT_SIZE);
+        let (left, top) = ActionRingSlot::Top.placement(MEDIUM.window, MEDIUM.radius, MEDIUM.slot);
         point(
-            center.x - px(WINDOW_SIZE / 2.0) + px(left + SLOT_SIZE / 2.0),
-            center.y - px(WINDOW_SIZE / 2.0) + px(top + SLOT_SIZE / 2.0),
+            center.x - px(MEDIUM.window / 2.0) + px(left + MEDIUM.slot / 2.0),
+            center.y - px(MEDIUM.window / 2.0) + px(top + MEDIUM.slot / 2.0),
         )
     }
 
@@ -924,108 +1027,119 @@ mod tests {
         );
     }
 
-    /// The pointer chooses by direction: past a slot still chooses it, the
-    /// centre and an empty slot's sector choose nothing, and a click lands on
-    /// what it is aimed at.
+    /// The pointer chooses by direction at every size: past a slot still
+    /// chooses it, the dead zone and an empty slot's sector choose nothing,
+    /// and a click lands on what it is aimed at.
     #[gpui::test]
     fn the_pointer_aims_at_a_slot_by_direction(cx: &mut TestAppContext) {
-        let live = Arc::new(ClickAwaySession::new());
-        let (commands, mut sent) = mpsc::unbounded_channel();
-        let pointer = cx.new(|_| RingPointer::default());
-        let ring = cx.add_window(move |window, cx| {
-            RingView::new(
-                invocation(),
-                commands,
-                &live,
-                Placement::Window,
-                pointer,
-                window,
-                cx,
-            )
-        });
-        let mut ring_cx = VisualTestContext::from_window(ring.into(), cx);
-        let centre = WINDOW_SIZE / 2.0;
-        let at = |x: f32, y: f32| point(px(centre + x), px(centre + y));
-        let hovered =
-            |cx: &mut VisualTestContext| ring.read_with(cx, |view, _| view.hovered).unwrap();
-
-        // Well past the top slot and off its axis, but inside its sector.
-        ring_cx.simulate_mouse_move(at(30.0, -150.0), None, Modifiers::default());
-        assert_eq!(hovered(&mut ring_cx), Some(ActionRingSlot::Top));
-        assert_eq!(
-            sent.try_recv().ok(),
-            Some(OverlayCommand::Hover {
+        for size in ActionRingSize::ALL {
+            let live = Arc::new(ClickAwaySession::new());
+            let (commands, mut sent) = mpsc::unbounded_channel();
+            let pointer = cx.new(|_| RingPointer::default());
+            let ring = cx.add_window(move |window, cx| {
+                RingView::new(
+                    sized_invocation(size),
+                    commands,
+                    &live,
+                    Placement::Window,
+                    pointer,
+                    window,
+                    cx,
+                )
+            });
+            let mut ring_cx = VisualTestContext::from_window(ring.into(), cx);
+            let geometry = Geometry::of(size);
+            let centre = geometry.window / 2.0;
+            let at = |x: f32, y: f32| point(px(centre + x), px(centre + y));
+            let hovered =
+                |cx: &mut VisualTestContext| ring.read_with(cx, |view, _| view.hovered).unwrap();
+            let hover = |slot| OverlayCommand::Hover {
                 session_id: 7,
-                slot: Some(ActionRingSlot::Top)
-            })
-        );
+                slot,
+            };
 
-        ring_cx.simulate_mouse_move(at(15.0, 15.0), None, Modifiers::default());
-        assert_eq!(hovered(&mut ring_cx), None, "the centre chooses nothing");
-        assert_eq!(
-            sent.try_recv().ok(),
-            Some(OverlayCommand::Hover {
-                session_id: 7,
-                slot: None
-            })
-        );
+            // Well past the top slot and off its axis, but inside its sector.
+            ring_cx.simulate_mouse_move(at(30.0, -150.0), None, Modifiers::default());
+            assert_eq!(hovered(&mut ring_cx), Some(ActionRingSlot::Top), "{size:?}");
+            assert_eq!(sent.try_recv().ok(), Some(hover(Some(ActionRingSlot::Top))));
 
-        // Right has no action in this ring.
-        ring_cx.simulate_mouse_move(at(RADIUS, 0.0), None, Modifiers::default());
-        assert_eq!(hovered(&mut ring_cx), None);
-        assert!(
-            sent.try_recv().is_err(),
-            "nothing changed, so nothing is sent"
-        );
+            // Straight up toward the top slot, just inside this size's dead zone.
+            let edge = geometry.dead_zone;
+            ring_cx.simulate_mouse_move(at(0.0, 2.0 - edge), None, Modifiers::default());
+            assert_eq!(
+                hovered(&mut ring_cx),
+                None,
+                "{size:?}: the centre chooses nothing"
+            );
+            assert_eq!(sent.try_recv().ok(), Some(hover(None)));
+            ring_cx.simulate_mouse_move(at(0.0, -2.0 - edge), None, Modifiers::default());
+            assert_eq!(hovered(&mut ring_cx), Some(ActionRingSlot::Top), "{size:?}");
+            assert_eq!(sent.try_recv().ok(), Some(hover(Some(ActionRingSlot::Top))));
 
-        ring_cx.simulate_click(at(10.0, -60.0), Modifiers::default());
-        let mut last = None;
-        while let Ok(command) = sent.try_recv() {
-            last = Some(command);
+            // Right has no action in this ring.
+            ring_cx.simulate_mouse_move(at(geometry.radius, 0.0), None, Modifiers::default());
+            assert_eq!(hovered(&mut ring_cx), None, "{size:?}");
+            assert_eq!(sent.try_recv().ok(), Some(hover(None)));
+
+            ring_cx.simulate_click(at(10.0, -60.0), Modifiers::default());
+            let mut last = None;
+            while let Ok(command) = sent.try_recv() {
+                last = Some(command);
+            }
+            assert_eq!(
+                last,
+                Some(OverlayCommand::Activate {
+                    session_id: 7,
+                    slot: ActionRingSlot::Top
+                }),
+                "{size:?}"
+            );
         }
-        assert_eq!(
-            last,
-            Some(OverlayCommand::Activate {
-                session_id: 7,
-                slot: ActionRingSlot::Top
-            })
-        );
     }
 
-    /// A hovered slot's label, at its longest and tallest, stays in the window
-    /// and clear of every slot, including the hovered one at its grown size.
+    /// At every ring size, a hovered slot's label, at its longest and tallest,
+    /// stays in the window and clear of every slot, including the hovered one
+    /// at its grown size.
     #[test]
     fn a_hovered_slots_label_stays_in_the_window_and_off_every_slot() {
+        for ring in ActionRingSize::ALL {
+            labels_fit(Geometry::of(ring));
+        }
+    }
+
+    #[track_caller]
+    fn labels_fit(geometry: Geometry) {
+        let window = geometry.window;
         let overlaps = |place: LabelPlace, slot: ActionRingSlot, size: f32| {
-            let (left, top) = slot.placement(WINDOW_SIZE, RADIUS, size);
+            let (left, top) = slot.placement(window, geometry.radius, size);
             let (cx, cy, r) = (left + size / 2.0, top + size / 2.0, size / 2.0);
             let nearest_x = cx.clamp(place.left, place.left + place.width);
             let nearest_y = cy.clamp(place.top, place.top + LABEL_MAX_HEIGHT);
             (cx - nearest_x).hypot(cy - nearest_y) < r
         };
         for hovered in ActionRingSlot::ALL {
-            let place = LabelPlace::of(hovered);
+            let place = LabelPlace::of(hovered, geometry);
             assert!(
                 place.left >= 0.0
                     && place.top >= 0.0
-                    && place.left + place.width <= WINDOW_SIZE
-                    && place.top + LABEL_MAX_HEIGHT <= WINDOW_SIZE,
-                "{hovered:?}'s label leaves the window: {place:?}"
+                    && place.left + place.width <= window
+                    && place.top + LABEL_MAX_HEIGHT <= window,
+                "{hovered:?}'s label leaves the {window} pt window: {place:?}"
             );
             assert!(
                 place.width >= 90.0,
-                "{hovered:?}'s label has room for only {} pt",
+                "{hovered:?}'s label has room for only {} pt in the {window} pt window",
                 place.width
             );
             for slot in ActionRingSlot::ALL {
                 let size = if slot == hovered {
-                    SELECTED_SLOT_SIZE
+                    geometry.selected_slot
                 } else {
-                    SLOT_SIZE
+                    geometry.slot
                 };
                 assert!(
                     !overlaps(place, slot, size),
-                    "{hovered:?}'s label covers {slot:?}: {place:?}"
+                    "{hovered:?}'s label covers {slot:?} in the {window} pt window: {place:?}"
                 );
             }
         }

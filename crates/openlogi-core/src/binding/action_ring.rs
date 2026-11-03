@@ -313,6 +313,27 @@ impl Default for ActionRingLayout {
     }
 }
 
+/// How large the overlay draws the ring around the cursor.
+///
+/// The core stores the semantic choice; the overlay owns the geometry each
+/// size maps to.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionRingSize {
+    /// A tighter ring, for a hand that barely moves the mouse.
+    Small,
+    /// The standard ring.
+    #[default]
+    Medium,
+    /// A wider ring with larger slots.
+    Large,
+}
+
+impl ActionRingSize {
+    /// Every size, smallest first: the order the settings offer them.
+    pub const ALL: [Self; 3] = [Self::Small, Self::Medium, Self::Large];
+}
+
 /// Per-device Actions Ring settings and application-specific layouts.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -323,6 +344,9 @@ pub struct ActionRingConfig {
     /// Whether ring hover and activation transitions play device haptics.
     #[serde(default = "default_true")]
     pub haptics: bool,
+    /// How large the ring is drawn.
+    #[serde(default)]
+    pub size: ActionRingSize,
     /// Layout used when the foreground application has no override.
     #[serde(default)]
     pub default: ActionRingLayout,
@@ -336,6 +360,7 @@ impl Default for ActionRingConfig {
         Self {
             enabled: true,
             haptics: true,
+            size: ActionRingSize::default(),
             default: ActionRingLayout::default(),
             per_app: BTreeMap::new(),
         }
@@ -423,6 +448,15 @@ mod tests {
         assert_eq!(at(-179.0), ActionRingSlot::Left);
         assert_eq!(at(-158.0), ActionRingSlot::Left);
         assert_eq!(at(-157.0), ActionRingSlot::TopLeft);
+    }
+
+    #[test]
+    fn ring_size_is_a_snake_case_key_that_defaults_to_medium() {
+        let config: ActionRingConfig =
+            toml::from_str("size = \"large\"").expect("could not parse ring size");
+        assert_eq!(config.size, ActionRingSize::Large);
+        let config: ActionRingConfig = toml::from_str("").expect("could not parse empty ring");
+        assert_eq!(config.size, ActionRingSize::Medium);
     }
 
     #[test]

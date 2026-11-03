@@ -10,7 +10,9 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use openlogi_core::action_ring::DISPLAY_LIFETIME;
-use openlogi_core::binding::{Action, ActionRingIcon, ActionRingLayout, ActionRingSlot};
+use openlogi_core::binding::{
+    Action, ActionRingIcon, ActionRingLayout, ActionRingSize, ActionRingSlot,
+};
 use openlogi_hid::DeviceRoute;
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, ActionRingPresentation, Generation, OBSERVE_HOLD,
@@ -56,6 +58,8 @@ pub struct ActionRingSessionSpec {
     pub layout: ActionRingLayout,
     /// Configured UI locale, or `None` to follow the overlay host's system locale.
     pub language: Option<String>,
+    /// How large the overlay draws the ring.
+    pub size: ActionRingSize,
 }
 
 /// A validated slot activation returned to the action dispatcher.
@@ -194,6 +198,7 @@ impl ActionRingManager {
             session_id,
             slots,
             language: spec.language,
+            size: spec.size,
         };
         let mut state = self.state();
         state.active = Some(Session {
@@ -396,6 +401,7 @@ mod tests {
             haptic_route: None,
             layout: ActionRingConfig::default().default,
             language: None,
+            size: ActionRingSize::default(),
         }
     }
 
@@ -416,6 +422,7 @@ mod tests {
         spec.layout
             .set_icon(ActionRingSlot::Top, Some(ActionRingIcon::Keyboard));
         spec.language = Some("fr".to_string());
+        spec.size = ActionRingSize::Large;
         let invocation = manager.begin(spec);
         assert_eq!(
             invocation.slots[&ActionRingSlot::Top],
@@ -426,6 +433,7 @@ mod tests {
             }
         );
         assert_eq!(invocation.language.as_deref(), Some("fr"));
+        assert_eq!(invocation.size, ActionRingSize::Large);
     }
 
     #[tokio::test]
