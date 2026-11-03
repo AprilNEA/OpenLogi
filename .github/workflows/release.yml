@@ -347,6 +347,7 @@ jobs:
             --tag "$GITHUB_REF_NAME" \
             --base-url "$OPENLOGI_UPDATE_BASE_URL" \
             --include-windows \
+            --include-linux \
             --stage .release/stage
 
       # After the build legs stapled the DMGs: stapling rewrites the file, and

@@ -1,0 +1,67 @@
+#!/bin/sh
+# Privileged installer for an authenticated OpenLogi Arch Linux package.
+set -eu
+
+PATH=/usr/bin:/bin
+export PATH
+umask 077
+
+PUBLIC_KEY="RWRRkFtw+rqkvTlCTGKUszSE5dX9CK1teaQD45jO4P9rYlWLO4/nHVUF"
+
+if [ "$(id -u)" -ne 0 ] || [ "$#" -ne 4 ]; then
+    echo "Root privileges and four arguments required" >&2
+    exit 2
+fi
+
+source_package=$1
+source_signature=$2
+expected_hash=$3
+expected_name=$4
+
+case "$expected_name" in
+    openlogi-v*-linux-amd64.pkg.tar.zst)
+        [ "$(uname -m)" = "x86_64" ] || exit 2
+        ;;
+    openlogi-v*-linux-arm64.pkg.tar.zst)
+        [ "$(uname -m)" = "aarch64" ] || exit 2
+        ;;
+    *)
+        echo "Unsupported package name" >&2
+        exit 2
+        ;;
+esac
+
+case "$expected_hash" in
+    *[!0123456789abcdefABCDEF]*|"")
+        exit 2
+        ;;
+esac
+[ "${#expected_hash}" -eq 64 ] || exit 2
+
+[ -f "$source_package" ] || exit 2
+[ -f "$source_signature" ] || exit 2
+[ "$(basename "$source_package")" = "$expected_name" ] || exit 2
+
+work=$(mktemp -d /var/tmp/openlogi-update.XXXXXXXX)
+cleanup() {
+    rm -rf -- "$work"
+}
+trap cleanup EXIT
+trap "exit 1" HUP INT TERM
+
+package="$work/$expected_name"
+signature="$package.minisig"
+
+cp -- "$source_package" "$package"
+cp -- "$source_signature" "$signature"
+chmod 0600 "$package" "$signature"
+
+minisign -V -P "$PUBLIC_KEY" -m "$package" -x "$signature" >/dev/null
+
+printf "%s  %s
+" "$expected_hash" "$expected_name" |
+    (cd "$work" && sha256sum --check --status -)
+
+echo "Verified signed OpenLogi package"
+pacman -U --noconfirm -- "$package"
+echo "OpenLogi package installation completed"

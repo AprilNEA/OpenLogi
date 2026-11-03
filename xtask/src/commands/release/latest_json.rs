@@ -42,6 +42,9 @@ pub(crate) struct Args {
     /// `.msi` and installs it via gpui-updater's staged msiexec flow.
     #[arg(long)]
     include_windows: bool,
+    /// Include verified Linux packages shipped to the update host.
+    #[arg(long)]
+    include_linux: bool,
 }
 
 /// The built-in update engine's manifest. A release's feed record holds the
@@ -91,7 +94,12 @@ struct Classified {
 pub(crate) fn run(args: &Args) -> Result<()> {
     let tag = ReleaseTag::parse(&args.tag)?;
     let release_base = update_feed::release_url(&args.base_url, &tag);
-    let assets = collect_assets(&args.dist, &release_base, args.include_windows)?;
+    let assets = collect_assets(
+        &args.dist,
+        &release_base,
+        args.include_windows,
+        args.include_linux,
+    )?;
     // The DMGs are the publish gate's guaranteed artifact set; the Windows
     // legs are best-effort per arch (a failed leg publishes without them), so
     // their absence must not sink the whole manifest.
@@ -139,7 +147,12 @@ impl Manifest {
     }
 }
 
-fn collect_assets(dist: &Path, release_base: &str, include_windows: bool) -> Result<Vec<Asset>> {
+fn collect_assets(
+    dist: &Path,
+    release_base: &str,
+    include_windows: bool,
+    include_linux: bool,
+) -> Result<Vec<Asset>> {
     let mut assets = Vec::new();
     for entry in fs_err::read_dir(dist)
         .with_context(|| format!("could not read artifact directory {}", dist.display()))?
@@ -153,12 +166,21 @@ fn collect_assets(dist: &Path, release_base: &str, include_windows: bool) -> Res
         };
         // Gated so the manifest and the R2 upload step can never disagree
         // about the Windows artifacts — see the `include_windows` arg doc.
-        if classified.os == "windows" && !include_windows {
+        if (classified.os == "windows" && !include_windows)
+            || (classified.os == "linux" && !include_linux)
+        {
             continue;
         }
         let signature_name = format!("{name}.minisig");
         let signature_path = dist.join(&signature_name);
         if !signature_path.is_file() {
+            if classified.os == "linux" {
+                eprintln!(
+                    "warning: skipping unsigned Linux artifact: {}",
+                    path.display()
+                );
+                continue;
+            }
             bail!(
                 "missing minisign signature {} for updater artifact {}",
                 signature_path.display(),
@@ -218,7 +240,34 @@ fn classify(name: &str) -> Option<Classified> {
             minimum_os_version: WINDOWS_MINIMUM_OS_VERSION,
         });
     }
+    for (extension, format, content_type) in [
+        (".pkg.tar.zst", "pkg.tar.zst", "application/zstd"),
+        (".deb", "deb", "application/vnd.debian.binary-package"),
+        (".rpm", "rpm", "application/x-rpm"),
+    ] {
+        if let Some(stem) = name.strip_suffix(extension) {
+            if let Some(arch) = linux_arch(stem) {
+                return Some(Classified {
+                    os: "linux",
+                    arch,
+                    format,
+                    content_type,
+                    minimum_os_version: "",
+                });
+            }
+        }
+    }
     None
+}
+
+/// Normalize Linux package architectures to updater platform identifiers.
+fn linux_arch(stem: &str) -> Option<String> {
+    let (_, arch) = stem.rsplit_once("-linux-")?;
+    match arch {
+        "amd64" => Some("x86_64".to_owned()),
+        "arm64" => Some("arm64".to_owned()),
+        _ => None,
+    }
 }
 
 /// The `arm64`/`x86_64` suffix after the `-<os>-` marker, or `None` when the
