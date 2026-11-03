@@ -256,8 +256,14 @@ fn ring_preview(
                 .justify_center()
                 .rounded_full()
                 .bg(pal.muted)
-                .text_color(pal.text_muted)
-                .child(svg().path(RING_CANCEL_ICON).size(px(20.0)).flex_none()),
+                // An `svg` paints only with its own text colour.
+                .child(
+                    svg()
+                        .path(RING_CANCEL_ICON)
+                        .size(px(20.0))
+                        .flex_none()
+                        .text_color(pal.text_muted),
+                ),
         )
         .children(ActionRingSlot::ALL.into_iter().map(|slot| {
             slot_button(
