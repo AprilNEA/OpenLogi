@@ -111,7 +111,8 @@ fn reviewed_detail_tabs(id: &str) -> Vec<DetailTab> {
             DetailTab::ActionsRing,
             DetailTab::Device,
         ],
-        "mx-master-4-001" | "mx-master-3s-001" | "mx-master-3-001" | "mx-anywhere-3s-001" => vec![
+        "mx-master-4-001" | "mx-master-3s-001" | "mx-master-3-001" | "mx-master-2s-001"
+        | "mx-anywhere-3s-001" => vec![
             DetailTab::Buttons,
             DetailTab::ActionsRing,
             DetailTab::Pointer,
