@@ -1,0 +1,23 @@
+# Owner: GPUI's `secondary` modifier — Cmd on macOS, Ctrl on Linux and Windows.
+id: gui-secondary-shortcut
+language: rust
+severity: error
+message: Bind app shortcuts with `secondary-`, not `cmd-`; outside macOS `cmd` is the Super key, so the shortcut silently stops working there.
+note: |
+  The window and edit shortcuts (Quit, Close, Settings, Copy, ...) were bound
+  with `cmd-`, so Ctrl+W, Ctrl+Q and Ctrl+, did nothing on Linux and Windows.
+  Only the macOS-only Hide commands keep `cmd-`.
+files:
+  - crates/openlogi-desktop/src/**/*.rs
+ignores:
+  - "**/tests.rs"
+  - "**/tests/**"
+rule:
+  pattern: KeyBinding::new($KEY, $$$REST)
+  has:
+    field: arguments
+    has:
+      kind: string_literal
+      regex: '^"cmd-'
+      not:
+        regex: '^"cmd-(alt-)?h"$'

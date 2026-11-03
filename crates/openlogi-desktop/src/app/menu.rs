@@ -93,21 +93,23 @@ pub fn install(cx: &mut App) {
     cx.on_action(|_: &OpenLatestRelease, cx| cx.open_url(RELEASES_URL));
     cx.on_action(|_: &OpenRepository, cx| cx.open_url(REPO_URL));
 
+    // `secondary` is Cmd on macOS and Ctrl elsewhere; a bare `cmd` would be
+    // Super on Linux and Windows, which the window manager usually owns.
     cx.bind_keys([
-        KeyBinding::new("cmd-q", Quit, None),
-        KeyBinding::new("cmd-z", gpui_component::input::Undo, None),
-        KeyBinding::new("cmd-shift-z", gpui_component::input::Redo, None),
-        KeyBinding::new("cmd-x", gpui_component::input::Cut, None),
-        KeyBinding::new("cmd-c", gpui_component::input::Copy, None),
-        KeyBinding::new("cmd-v", gpui_component::input::Paste, None),
-        KeyBinding::new("cmd-a", gpui_component::input::SelectAll, None),
+        KeyBinding::new("secondary-q", Quit, None),
+        KeyBinding::new("secondary-z", gpui_component::input::Undo, None),
+        KeyBinding::new("secondary-shift-z", gpui_component::input::Redo, None),
+        KeyBinding::new("secondary-x", gpui_component::input::Cut, None),
+        KeyBinding::new("secondary-c", gpui_component::input::Copy, None),
+        KeyBinding::new("secondary-v", gpui_component::input::Paste, None),
+        KeyBinding::new("secondary-a", gpui_component::input::SelectAll, None),
         #[cfg(target_os = "macos")]
         KeyBinding::new("cmd-h", Hide, None),
         #[cfg(target_os = "macos")]
         KeyBinding::new("cmd-alt-h", HideOthers, None),
-        KeyBinding::new("cmd-m", Minimize, None),
-        KeyBinding::new("cmd-w", CloseWindow, None),
-        KeyBinding::new("cmd-,", OpenSettings, None),
+        KeyBinding::new("secondary-m", Minimize, None),
+        KeyBinding::new("secondary-w", CloseWindow, None),
+        KeyBinding::new("secondary-,", OpenSettings, None),
         KeyBinding::new("alt-left", NavigateBack, Some(APP_KEY_CONTEXT)),
         KeyBinding::new("escape", Dismiss, Some(DIALOG_KEY_CONTEXT)),
     ]);
