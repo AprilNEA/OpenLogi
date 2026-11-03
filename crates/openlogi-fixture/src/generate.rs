@@ -1,4 +1,5 @@
-//! Deterministic fixture-manifest generation from already sanitized assets.
+//! Deterministic fixture-manifest generation from already sanitized assets,
+//! and the case-to-device lookup that reads a generated relationship back.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -8,7 +9,7 @@ use openlogi_core::hid::{DeviceRoute, speaks_unifying_protocol};
 use super::{
     DeviceProfile, FIXTURE_SCHEMA_VERSION, FixtureCase, FixtureCaseRelationship,
     FixtureDeviceRoute, FixtureError, FixtureManifest, FixturePrincipal, HidCassette,
-    IdentityLedgerEntry, IdentityRepresentation, SyntheticIdentityKind,
+    IdentityLedgerEntry, IdentityRepresentation, ProfileDeviceSettings, SyntheticIdentityKind,
     classify_synthetic_identity_bytes, classify_synthetic_profile_identity,
     generate_synthetic_identity,
 };
@@ -47,6 +48,48 @@ impl FixtureManifest {
         super::verify::populate_exact_occurrences(&mut manifest, profile, cassettes)?;
         manifest.verify(profile, cassettes)?;
         Ok(manifest)
+    }
+
+    /// Return the recorded settings of the device that one declared case exercises.
+    ///
+    /// A receiver capture keeps every paired device, so the target is the
+    /// device principal named by the case relationship, never a position in
+    /// the profile. The settings route maps to a principal by the same rule
+    /// that [`Self::from_assets`] used to write the relationship.
+    pub fn case_settings<'a>(
+        &self,
+        profile: &'a DeviceProfile,
+        case: &str,
+    ) -> Result<&'a ProfileDeviceSettings, FixtureError> {
+        let lookup_error = |message: String| FixtureError::invalid("fixture case lookup", message);
+        let case = self
+            .cases
+            .iter()
+            .find(|declared| declared.name == case)
+            .ok_or_else(|| lookup_error(format!("case {case} is not declared")))?;
+        let FixtureCaseRelationship::Device { device } = &case.relationship else {
+            return Err(lookup_error(format!(
+                "case {} is a receiver operation and names no device",
+                case.name
+            )));
+        };
+        let mut targets = profile.settings.iter().filter(|settings| {
+            resolve_profile_route(&self.identity_ledger, &settings.route)
+                .is_ok_and(|principal| principal == device)
+        });
+        let target = targets.next().ok_or_else(|| {
+            lookup_error(format!(
+                "case {} device {device} has no recorded settings",
+                case.name
+            ))
+        })?;
+        if targets.next().is_some() {
+            return Err(lookup_error(format!(
+                "case {} device {device} has more than one settings route",
+                case.name
+            )));
+        }
+        Ok(target)
     }
 }
 

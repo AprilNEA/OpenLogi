@@ -714,9 +714,13 @@ mod tests {
             .iter()
             .find(|cassette| cassette.name == case)
             .expect("recorded case is present");
-        let (backend, route) =
-            ReplayBackend::from_profile(fixture.profile(), cassette).expect("valid replay target");
-        assert_eq!(route, target.route);
+        let route = &fixture
+            .case_settings(case)
+            .expect("recorded case names a device")
+            .route;
+        assert_eq!(route, &target.route);
+        let backend = ReplayBackend::from_profile(fixture.profile(), route, cassette)
+            .expect("valid replay target");
         Some((backend, target.route))
     }
 

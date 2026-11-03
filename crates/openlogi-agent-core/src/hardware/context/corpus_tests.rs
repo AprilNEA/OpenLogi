@@ -17,8 +17,9 @@ async fn contributed_corpus_reads_obey_agent_channel_and_suspend_boundaries() {
                 "dpi-info" | "smartshift-status" | "wheel-mode" | "backlight-state"
             )
         }) {
-            let (backend, route) = ReplayBackend::from_profile(fixture.profile(), cassette)
-                .expect("single-device contribution");
+            let settings = fixture.case_settings(&cassette.name).expect("case device");
+            let backend = ReplayBackend::from_profile(fixture.profile(), &settings.route, cassette)
+                .expect("recorded HID++ device");
             let backend = Arc::new(backend);
             let (signal, gate) = device_io_channel();
             let hardware = HardwareContext::injected(backend.clone(), gate);
@@ -30,7 +31,7 @@ async fn contributed_corpus_reads_obey_agent_channel_and_suspend_boundaries() {
             let shared = orchestrator.shared();
             assert_eq!(
                 shared
-                    .device(&route)
+                    .device(&settings.route)
                     .run(HidppOperation::ReadDpi, |_| async {
                         panic!("unpublished route must not run")
                     })
@@ -38,13 +39,13 @@ async fn contributed_corpus_reads_obey_agent_channel_and_suspend_boundaries() {
                 Err::<(), _>(WriteError::DeviceNotFound)
             );
             backend
-                .publish_route(&shared.channel_registry, &route)
+                .publish_route(&shared.channel_registry, &settings.route)
                 .await
                 .expect("recorded route opens");
             assert!(signal.suspend());
             assert_eq!(
                 shared
-                    .device(&route)
+                    .device(&settings.route)
                     .run(HidppOperation::ReadDpi, |_| async {
                         panic!("suspended I/O must not run")
                     })
@@ -52,12 +53,11 @@ async fn contributed_corpus_reads_obey_agent_channel_and_suspend_boundaries() {
                 Err::<(), _>(WriteError::DeviceNotFound)
             );
             assert!(signal.resume());
-            let settings = &fixture.profile().settings[0];
             match cassette.name.as_str() {
                 "dpi-info" => check(
                     &settings.dpi,
                     shared
-                        .device(&route)
+                        .device(&settings.route)
                         .run(HidppOperation::ReadDpiCapabilities, |channel| async move {
                             openlogi_hid::get_dpi_info_on(&channel).await
                         })
@@ -66,7 +66,7 @@ async fn contributed_corpus_reads_obey_agent_channel_and_suspend_boundaries() {
                 "smartshift-status" => check(
                     &settings.smartshift,
                     shared
-                        .device(&route)
+                        .device(&settings.route)
                         .run(HidppOperation::ReadSmartShift, |channel| async move {
                             openlogi_hid::get_smartshift_status_on(&channel).await
                         })
@@ -75,7 +75,7 @@ async fn contributed_corpus_reads_obey_agent_channel_and_suspend_boundaries() {
                 "wheel-mode" => check(
                     &settings.wheel,
                     shared
-                        .device(&route)
+                        .device(&settings.route)
                         .run(HidppOperation::ReadWheelMode, |channel| async move {
                             openlogi_hid::get_scroll_wheel_mode_on(&channel).await
                         })
@@ -84,7 +84,7 @@ async fn contributed_corpus_reads_obey_agent_channel_and_suspend_boundaries() {
                 "backlight-state" => check(
                     &settings.backlight,
                     shared
-                        .device(&route)
+                        .device(&settings.route)
                         .run(HidppOperation::ReadBacklight, |channel| async move {
                             openlogi_hid::get_backlight_on(&channel).await
                         })

@@ -1,4 +1,4 @@
-//! Shared topology for sanitized single-device capture and corpus replay.
+//! Shared one-device topology for sanitized capture self-replay and corpus replay.
 
 use super::{
     ChannelConnection, NodePresence, OpenOutcome, RawWriterAvailability, ReceiverLinkState,
@@ -56,44 +56,39 @@ impl ReplayTopology {
 }
 
 impl ReplayBackend {
-    /// Replay one operation from a single-device HID++ contribution.
+    /// Replay one operation against one paired HID++ device of a contribution.
     ///
-    /// Reject multi-device and raw-HID profiles instead of guessing a target.
+    /// A receiver contribution records every paired device, so the caller names
+    /// the target instead of this function guessing one by position. Corpus
+    /// tests take it from the case relationship through
+    /// [`openlogi_fixture::FixtureManifest::case_settings`]. Raw-HID routes and
+    /// routes absent from the profile's inventories are rejected.
     pub fn from_profile(
         profile: &DeviceProfile,
+        route: &DeviceRoute,
         cassette: &HidCassette,
-    ) -> Result<(Self, DeviceRoute), ReplayError> {
-        let ([inventory], [settings]) =
-            (profile.inventories.as_slice(), profile.settings.as_slice())
-        else {
-            return Err(ReplayError::invalid(
-                "corpus replay",
-                "requires one HID++ inventory and one settings route",
-            ));
-        };
-        if !profile.standalone.is_empty() || inventory.paired.len() != 1 {
-            return Err(ReplayError::invalid(
-                "corpus replay",
-                "requires one HID++ device",
-            ));
-        }
-        let route =
-            DeviceRoute::for_slot(inventory, inventory.paired[0].slot).ok_or_else(|| {
-                ReplayError::invalid("corpus replay", "profile device has no HID++ route")
+    ) -> Result<Self, ReplayError> {
+        let inventory = profile
+            .inventories
+            .iter()
+            .find(|inventory| {
+                inventory.paired.iter().any(|device| {
+                    DeviceRoute::for_slot(inventory, device.slot).as_ref() == Some(route)
+                })
+            })
+            .ok_or_else(|| {
+                ReplayError::invalid(
+                    "corpus replay",
+                    "target route is not a paired HID++ device of the profile",
+                )
             })?;
-        if route != settings.route {
-            return Err(ReplayError::invalid(
-                "corpus replay",
-                "settings route does not match inventory",
-            ));
-        }
         let topology = ReplayTopology::for_device(
-            &route,
+            route,
             inventory.receiver.vendor_id,
             inventory.receiver.product_id,
             cassette,
         );
-        Ok((Self::new(topology, vec![cassette.clone()])?, route))
+        Self::new(topology, vec![cassette.clone()])
     }
 }
 
@@ -121,7 +116,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_multi_device_profile_cannot_silently_select_the_first_route() {
+    fn a_multi_device_profile_replays_only_the_named_paired_route() {
         let profile: DeviceProfile =
             serde_json::from_str(openlogi_fixture::CANONICAL_DEVICE_PROFILE_JSON)
                 .expect("canonical profile");
@@ -129,12 +124,31 @@ mod tests {
             schema_version: openlogi_fixture::FIXTURE_SCHEMA_VERSION,
             name: "operation".into(),
             channel: "target".into(),
-            report_support: openlogi_fixture::ReportSupport::LongOnly,
-            exchanges: Vec::new(),
+            report_support: openlogi_fixture::ReportSupport::ShortAndLong,
+            exchanges: vec![openlogi_fixture::CassetteExchange {
+                request_match: openlogi_fixture::RequestMatch::Hidpp20,
+                request: vec![0x10, 3, 0, 0x10, 0, 0, 0],
+                response: Some(vec![0x10, 3, 0, 0x10, 4, 0, 0]),
+                required: true,
+            }],
         };
-        let error = ReplayBackend::from_profile(&profile, &cassette)
-            .err()
-            .expect("ambiguous profile must fail");
-        assert!(error.to_string().contains("one HID++ inventory"));
+        // The canonical Bolt receiver lists a mouse at slot 1 before the keyboard at slot 3.
+        let keyboard = &profile.settings[2].route;
+        assert!(matches!(keyboard, DeviceRoute::Bolt { slot: 3, .. }));
+        ReplayBackend::from_profile(&profile, keyboard, &cassette)
+            .expect("a named paired device replays");
+
+        let unpaired = DeviceRoute::Bolt {
+            receiver_uid: "OL-BOLT-UID-0001".to_string(),
+            slot: 6,
+        };
+        let raw_hid = &profile.settings[4].route;
+        assert!(matches!(raw_hid, DeviceRoute::RawHid { .. }));
+        for route in [&unpaired, raw_hid] {
+            let error = ReplayBackend::from_profile(&profile, route, &cassette)
+                .err()
+                .expect("a route outside the HID++ inventories must fail");
+            assert!(error.to_string().contains("not a paired HID++ device"));
+        }
     }
 }

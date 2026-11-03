@@ -47,10 +47,13 @@ async fn contributed_corpus_replays_every_declared_operation() {
                 .into_iter()
                 .find(|operation| operation.slug() == case)
                 .unwrap_or_else(|| panic!("{specimen}/{case}: no production operation"));
-            let (backend, route) = ReplayBackend::from_profile(fixture.profile(), cassette)
-                .expect("single-device contribution");
-            let settings = &fixture.profile().settings[0];
-            let observed = operation.observe(&backend, &route).await;
+            let settings = fixture
+                .case_settings(case)
+                .unwrap_or_else(|error| panic!("{specimen}/{case}: {error}"));
+            let route = &settings.route;
+            let backend = ReplayBackend::from_profile(fixture.profile(), route, cassette)
+                .unwrap_or_else(|error| panic!("{specimen}/{case}: {error}"));
+            let observed = operation.observe(&backend, route).await;
             backend
                 .require_complete()
                 .unwrap_or_else(|error| panic!("{specimen}/{case}: {error}"));
