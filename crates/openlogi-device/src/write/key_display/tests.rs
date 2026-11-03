@@ -297,3 +297,55 @@ async fn an_image_waits_for_the_request_in_flight() {
     let image_at = written.iter().position(is_image).unwrap();
     assert!(ping_at < image_at);
 }
+
+/// A caller that gives up after the packets went out does not end the
+/// pause: requests still wait until the image is acknowledged or its
+/// acknowledgement times out.
+#[tokio::test(start_paused = true)]
+async fn a_cancelled_image_holds_requests_until_its_ack_times_out() {
+    use std::sync::Arc;
+
+    use hidpp::channel::HidppMessage;
+
+    use crate::channel::scripted::ping_reply;
+
+    // Never acknowledges an image; answers the protocol ping.
+    let (raw, handle) = ScriptedRawHidChannel::with_dynamic_responder(|request| {
+        (request.first() != Some(&IMAGE_HEADER[0]))
+            .then(|| ping_reply(request))
+            .flatten()
+    });
+    let channel = scripted_channel(raw).await;
+    let shared = SharedChannel::new(Arc::clone(&channel), KEYPAD);
+    let is_image = |report: &Vec<u8>| report.first() == Some(&IMAGE_HEADER[0]);
+    let is_ping = |report: &Vec<u8>| report[2] == 0x00;
+
+    let cancelled = tokio::time::timeout(
+        Duration::from_millis(100),
+        write_key_image_on(&shared, display(), GridKey::TopLeft, &jpeg(900)),
+    )
+    .await;
+    assert!(cancelled.is_err(), "the image is still awaiting its ack");
+    assert!(handle.written_reports().iter().any(is_image));
+
+    let request = tokio::spawn({
+        let channel = Arc::clone(&channel);
+        async move {
+            channel
+                .send(
+                    HidppMessage::Short([0xff, 0x00, 0x11, 0x00, 0x00, 0x5a]),
+                    |reply| matches!(reply, HidppMessage::Short(bytes) if bytes[1] == 0x00),
+                )
+                .await
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        !handle.written_reports().iter().any(is_ping),
+        "a request went out before the image's ack timed out"
+    );
+
+    tokio::time::sleep(ACK_TIMEOUT).await;
+    request.await.unwrap().unwrap();
+    assert!(handle.written_reports().iter().any(is_ping));
+}
