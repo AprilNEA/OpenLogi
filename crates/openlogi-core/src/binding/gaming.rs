@@ -111,6 +111,35 @@ pub const G903_LIGHTSPEED: GamingLayout = GamingLayout {
     stock_dpi_presets: &[400, 800, 1600, 3200, 6400],
 };
 
+/// G502 HERO (wired, model key `0c08b`).
+///
+/// Wired USB variant of the G502 family. Its `0x8110` slot table was measured
+/// on real hardware (`openlogi diag mouse-buttons`): 11 slots with the identity
+/// host-mode mapping `01 02 03 04 05 06 07 08 09 0a 0b`, the same shape as the
+/// G502 LIGHTSPEED, and the same physical button layout, so the slot-to-button
+/// mapping mirrors [`G502_LIGHTSPEED`]. Stock DPI presets were not measured on
+/// this hardware and stay empty; the DPI cycle falls back to user-configured
+/// presets.
+pub const G502_HERO: GamingLayout = GamingLayout {
+    model_keys: &["0c08b"],
+    slots: &[
+        Slot::native(ButtonId::LeftClick),
+        Slot::native(ButtonId::RightClick),
+        Slot::native(ButtonId::MiddleClick),
+        Slot::native(ButtonId::Back),
+        Slot::native(ButtonId::Forward),
+        Slot::stock(ButtonId::G6, Action::DpiShift),
+        Slot::stock(ButtonId::G7, Action::PreviousDpiPreset),
+        Slot::stock(ButtonId::G8, Action::NextDpiPreset),
+        // G9 cycles the onboard profiles, which has no host equivalent.
+        Slot::stock(ButtonId::G9, Action::None),
+        Slot::silent(ButtonId::WheelTiltRight),
+        Slot::silent(ButtonId::WheelTiltLeft),
+    ],
+    stock_dpi_presets: &[],
+};
+};
+
 /// A gaming mouse whose layout nobody has dumped. Its first five slots are
 /// the standard HID buttons, which the OS input hook remaps without host
 /// mode. G6 and up differ per model and are not guessed.
@@ -129,7 +158,7 @@ pub const STANDARD_BUTTONS: GamingLayout = GamingLayout {
     stock_dpi_presets: &[],
 };
 
-const LAYOUTS: &[&GamingLayout] = &[&G502_LIGHTSPEED, &G903_LIGHTSPEED];
+const LAYOUTS: &[&GamingLayout] = &[&G502_LIGHTSPEED, &G903_LIGHTSPEED, &G502_HERO];
 
 /// Whether a device is a G-series mouse, and which buttons it offers. The
 /// agent, the tabs and the Buttons panel all ask this one verdict.
@@ -339,6 +368,15 @@ mod tests {
         assert_eq!(layout.button_for_g_number(6), None, "G6+ is model-specific");
         assert!(layout.remappable().all(ButtonId::is_os_hook_button));
         assert!(!layout.remappable().any(|b| layout.needs_host_mode(b)));
+    }
+
+    #[test]
+    fn g502_hero_resolves_and_has_eleven_slots() {
+        assert_eq!(GamingLayout::for_model_key("0c08b"), Some(&G502_HERO));
+        assert_eq!(G502_HERO.slots.len(), 11);
+        assert_eq!(G502_HERO.slot_of(ButtonId::G6), Some(5));
+        assert!(G502_HERO.needs_host_mode(ButtonId::G6));
+        assert!(!G502_HERO.needs_host_mode(ButtonId::Back));
     }
 
     #[test]
