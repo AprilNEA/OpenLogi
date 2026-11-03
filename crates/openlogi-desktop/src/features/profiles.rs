@@ -9,7 +9,7 @@ use std::rc::Rc;
 
 use gpui::{App, Entity, ParentElement, Styled, Window, div};
 use gpui_component::{WindowExt as _, button::ButtonVariant, dialog::DialogButtonProps, h_flex};
-use openlogi_core::app::{AppAliases, profile_key_for};
+use openlogi_core::app::{AppAliases, new_profile_key, profile_key_for};
 
 pub(crate) use self::catalog::{AppCatalogPicker, ProfileIconCache};
 use self::shell::ProfileScopeShell;
@@ -28,11 +28,13 @@ pub(super) struct ProfileChoice {
 }
 
 impl ProfileChoice {
-    /// A not-yet-saved profile for an application keyed by its identifier.
+    /// A not-yet-saved profile for the application `app` identifies, keyed
+    /// the way [`new_profile_key`] saves it. The icon stays with the
+    /// identifier, which is what the platform resolves icons from.
     pub(super) fn application(app: String, name: String) -> Self {
         Self {
-            icon: app.clone(),
-            app,
+            app: new_profile_key(&app),
+            icon: app,
             name,
             persisted: false,
         }
@@ -282,13 +284,21 @@ fn profile_scope_model(
         .map(|profile| profile.app.clone())
         .collect();
     let observed_ids: HashSet<String> = recent_apps.iter().map(|(app, _)| app.clone()).collect();
+    let mut recent_keys = HashSet::new();
     let available_recent: Vec<ProfileChoice> = recent_apps
         .iter()
-        .filter(|(app, _)| !coverage.covers(app) && editing_app.as_deref() != Some(app.as_str()))
+        .filter(|(app, _)| !coverage.covers(app))
         .map(|(app, name)| ProfileChoice::application(app.clone(), name.clone()))
+        // Two installations can share one key; offer it once, and never for
+        // the draft being edited.
+        .filter(|choice| {
+            editing_app.as_deref() != Some(choice.app.as_str())
+                && recent_keys.insert(choice.app.clone())
+        })
         .collect();
     let mut unavailable = persisted_ids;
     unavailable.extend(observed_ids.iter().cloned());
+    unavailable.extend(recent_keys);
     unavailable.extend(editing_app.iter().cloned());
     catalog.update(cx, |picker, cx| {
         for profile in &profiles {
