@@ -573,8 +573,10 @@ fn quantize_axis(residual: &mut f64, input: f64, units_per_input: f64) -> i32 {
 /// The OS applies it to wheel events from a device, but not to the events
 /// [`post_scroll`] and [`post_smooth_scroll`] synthesise. A caller posting in
 /// place of a diverted wheel flips its own distance with this. `false` on
-/// Windows and Linux, which apply no such reversal to a mouse wheel's
-/// events here.
+/// Windows and Linux. Windows 11 24H2 added a mouse Scrolling direction
+/// setting; the hook backend carries it into the wheel deltas the agent
+/// replays (`openlogi-hook`, #2291), and whether Windows also applies it to
+/// synthesised input is not established, so nothing is flipped here.
 #[must_use]
 pub fn natural_scrolling() -> bool {
     cfg_select! {
