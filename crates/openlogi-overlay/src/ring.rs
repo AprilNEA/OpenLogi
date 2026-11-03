@@ -7,7 +7,7 @@
 //! the same panel is drawn at the pointer, in the one window that heard it last.
 
 use gpui::{
-    Bounds, ClickEvent, Context, Div, Entity, Hsla, InteractiveElement, IntoElement,
+    Bounds, BoxShadow, ClickEvent, Context, Div, Entity, Hsla, InteractiveElement, IntoElement,
     MouseMoveEvent, ParentElement, PathBuilder, Pixels, Point, Render, SharedString, Size,
     StatefulInteractiveElement as _, Styled, Subscription, Window, WindowAppearance,
     WindowBackgroundAppearance, WindowId, WindowKind, WindowOptions, canvas, div,
@@ -35,6 +35,8 @@ pub(crate) struct Geometry {
     slot: f32,
     /// A hovered slot grows by about 15% around the same centre.
     selected_slot: f32,
+    /// How far the hovered slot's glow fades out past its edge.
+    halo: f32,
     glyph: f32,
     selected_glyph: f32,
     cancel: f32,
@@ -56,6 +58,7 @@ impl Geometry {
                 radius: 62.0,
                 slot: 36.0,
                 selected_slot: 42.0,
+                halo: 11.0,
                 glyph: 16.0,
                 selected_glyph: 18.0,
                 cancel: 24.0,
@@ -67,6 +70,7 @@ impl Geometry {
                 radius: 76.0,
                 slot: 44.0,
                 selected_slot: 50.0,
+                halo: 14.0,
                 glyph: 20.0,
                 selected_glyph: 22.0,
                 cancel: 28.0,
@@ -78,6 +82,7 @@ impl Geometry {
                 radius: 96.0,
                 slot: 54.0,
                 selected_slot: 62.0,
+                halo: 17.0,
                 glyph: 24.0,
                 selected_glyph: 26.0,
                 cancel: 32.0,
@@ -106,52 +111,54 @@ const LABEL_MAX_WIDTH: f32 = 160.0;
 const LABEL_LINE_HEIGHT: f32 = 16.0;
 const LABEL_PADDING_X: f32 = 8.0;
 const LABEL_PADDING_Y: f32 = 4.0;
-/// A label wraps once, then ends in an ellipsis; [`LABEL_MAX_HEIGHT`] fits both lines.
+/// A label wraps once, then ends in an ellipsis; [`LABEL_MAX_HEIGHT`] fits both
+/// lines and the tail.
 const LABEL_LINES: usize = 2;
-const LABEL_MAX_HEIGHT: f32 = LABEL_LINE_HEIGHT * 2.0 + LABEL_PADDING_Y * 2.0;
+/// The tail a label's bubble points at its slot with, and how far in from the
+/// bubble's corner it starts.
+const LABEL_TAIL_WIDTH: f32 = 12.0;
+const LABEL_TAIL_HEIGHT: f32 = 6.0;
+const LABEL_TAIL_INSET: f32 = 8.0;
+const LABEL_MAX_HEIGHT: f32 = LABEL_LINE_HEIGHT * 2.0 + LABEL_PADDING_Y * 2.0 + LABEL_TAIL_HEIGHT;
 /// Identifies the ring's windows to the compositor, whatever kind they are.
 pub(crate) const RING_APP_ID: &str = "openlogi-action-ring";
 
 /// The ring's neutral surfaces in one system appearance.
 ///
-/// The slots float over whatever is on the desktop with nothing behind them,
-/// so each slot carries its own contrast: a near-opaque fill, a hairline, and a
-/// shadow. The ring follows the system appearance rather than the settings
-/// app's theme, which this process does not load. Only the accent is shared
-/// (`openlogi_ui::color`); these greys are local by nature.
+/// The slots float over whatever is on the desktop with nothing behind them.
+/// An idle slot is a translucent disc with no edge, so the desktop shows
+/// through it; only the selected slot is solid. In light the disc is a shade
+/// off white, so it still reads over a white page. The ring follows the system
+/// appearance rather than the settings app's theme, which this process does
+/// not load. Only the accent is shared (`openlogi_ui::color`); these greys are
+/// local by nature.
 #[derive(Clone, Copy)]
 struct RingColors {
     slot: Hsla,
-    slot_border: Hsla,
     glyph: Hsla,
     cancel: Hsla,
+    cancel_border: Hsla,
     cancel_hover: Hsla,
     cancel_glyph: Hsla,
-    label: Hsla,
-    label_text: Hsla,
 }
 
 impl RingColors {
     const LIGHT: Self = Self {
-        slot: neutral(0.99, 0.94),
-        slot_border: neutral(0.0, 0.10),
+        slot: neutral(0.94, 0.78),
         glyph: neutral(0.20, 1.0),
         cancel: neutral(0.93, 0.94),
+        cancel_border: neutral(0.0, 0.10),
         cancel_hover: neutral(0.86, 0.96),
         cancel_glyph: neutral(0.30, 1.0),
-        label: neutral(0.12, 0.92),
-        label_text: neutral(0.98, 1.0),
     };
 
     const DARK: Self = Self {
-        slot: neutral(0.20, 0.92),
-        slot_border: neutral(1.0, 0.12),
+        slot: neutral(0.20, 0.70),
         glyph: neutral(0.92, 1.0),
         cancel: neutral(0.26, 0.92),
+        cancel_border: neutral(1.0, 0.12),
         cancel_hover: neutral(0.33, 0.95),
         cancel_glyph: neutral(0.80, 1.0),
-        label: neutral(0.95, 0.95),
-        label_text: neutral(0.10, 1.0),
     };
 
     const fn for_appearance(appearance: WindowAppearance) -> Self {
@@ -178,6 +185,14 @@ const fn neutral(lightness: f32, alpha: f32) -> Hsla {
 const SELECTED_FILL_L: f32 = 0.48;
 const SELECTED_BORDER_L: f32 = 0.78;
 const SELECTED_GLYPH: Hsla = neutral(1.0, 1.0);
+/// The selected slot's glow at its edge, as a share of the fill.
+const SELECTED_GLOW_ALPHA: f32 = 0.55;
+
+/// A label is a white speech bubble in either appearance, lifted off a white
+/// page by a soft shadow.
+const LABEL_FILL: Hsla = neutral(1.0, 1.0);
+const LABEL_TEXT: Hsla = neutral(0.10, 1.0);
+const LABEL_SHADOW: Hsla = neutral(0.0, 0.22);
 
 /// See [`Geometry::footprint`].
 const FOOTPRINT_FILL: Hsla = neutral(0.5, 0.01);
@@ -509,16 +524,23 @@ impl RingView {
                 .rounded_full()
                 .map(|slot| {
                     if selected {
+                        // The chosen slot glows in its own colour, fading out
+                        // into the desktop; the others stay crisp.
+                        let fill = color::accent_at_lightness(SELECTED_FILL_L);
                         slot.border_2()
                             .border_color(color::accent_at_lightness(SELECTED_BORDER_L))
-                            .bg(color::accent_at_lightness(SELECTED_FILL_L))
+                            .bg(fill)
+                            .shadow(vec![BoxShadow {
+                                color: fill.alpha(SELECTED_GLOW_ALPHA),
+                                offset: point(px(0.0), px(0.0)),
+                                blur_radius: px(geometry.halo),
+                                spread_radius: px(geometry.halo / 4.0),
+                                inset: false,
+                            }])
                     } else {
-                        slot.border_1()
-                            .border_color(colors.slot_border)
-                            .bg(colors.slot)
+                        slot.bg(colors.slot)
                     }
                 })
-                .shadow_md()
                 .child(svg().path(icon_path).size(px(glyph_size)).text_color(glyph))
                 .into_any_element(),
         )
@@ -578,7 +600,7 @@ impl RingView {
                     .justify_center()
                     .rounded_full()
                     .border_1()
-                    .border_color(colors.slot_border)
+                    .border_color(colors.cancel_border)
                     .bg(colors.cancel)
                     .hover(move |cancel| cancel.bg(colors.cancel_hover))
                     // An `svg` paints only with its own text colour; a parent's
@@ -592,18 +614,67 @@ impl RingView {
                     ),
             )
             .when_some(hovered_label, |ring, (slot, label)| {
-                ring.child(label_element(LabelPlace::of(slot, geometry), label, colors))
+                ring.child(label_element(
+                    LabelPlace::of(slot, geometry),
+                    label,
+                    geometry,
+                ))
             })
     }
 }
 
-/// A hovered slot's label, kept to the edges of its [`LabelPlace`] that touch
-/// the slot. Long labels wrap once and then end in an ellipsis.
-fn label_element(place: LabelPlace, label: SharedString, colors: RingColors) -> Div {
+/// A hovered slot's label, painted over the whole ring.
+///
+/// GPUI paints a primitive above only those whose bounds it overlaps, and a
+/// drop shadow's bounds end where its blur begins: the selected slot's glow
+/// reaches past them and would paint over the label's near edge. A layer
+/// spanning the panel overlaps the glow, so everything in it lands on top.
+fn label_element(place: LabelPlace, label: SharedString, geometry: Geometry) -> impl IntoElement {
+    canvas(
+        move |panel, window, cx| {
+            let mut bubble = label_bubble(place, label).into_any_element();
+            let origin = panel.origin + point(px(place.left), px(place.top));
+            let space = Size::new(px(place.width), px(LABEL_MAX_HEIGHT));
+            bubble.prepaint_as_root(origin, space.into(), window, cx);
+            bubble
+        },
+        |panel, mut bubble, window, cx| {
+            window.paint_layer(panel, |window| bubble.paint(window, cx));
+        },
+    )
+    .absolute()
+    .left_0()
+    .top_0()
+    .size(px(geometry.window))
+}
+
+/// A label as a speech bubble, kept to the edges of its [`LabelPlace`] that
+/// touch the slot. Long labels wrap once and then end in an ellipsis.
+fn label_bubble(place: LabelPlace, label: SharedString) -> Div {
+    // The tail leaves the bubble on the side facing the slot. It comes after
+    // the bubble so it paints over the bubble's shadow, and a bubble that
+    // grows downward reverses the column to put the tail on top.
+    let points_up = place.vertical == Grow::After;
+    let bubble = div()
+        .max_w(px(place.width))
+        .px(px(LABEL_PADDING_X))
+        .py(px(LABEL_PADDING_Y))
+        .rounded_lg()
+        .bg(LABEL_FILL)
+        .shadow(vec![BoxShadow {
+            color: LABEL_SHADOW,
+            offset: point(px(0.0), px(1.0)),
+            blur_radius: px(6.0),
+            spread_radius: px(0.0),
+            inset: false,
+        }])
+        .text_xs()
+        .line_height(px(LABEL_LINE_HEIGHT))
+        .text_color(LABEL_TEXT)
+        .line_clamp(LABEL_LINES)
+        .text_ellipsis()
+        .child(label);
     div()
-        .absolute()
-        .left(px(place.left))
-        .top(px(place.top))
         .w(px(place.width))
         .h(px(LABEL_MAX_HEIGHT))
         .flex()
@@ -619,19 +690,66 @@ fn label_element(place: LabelPlace, label: SharedString, colors: RingColors) -> 
         })
         .child(
             div()
-                .max_w(px(place.width))
-                .px(px(LABEL_PADDING_X))
-                .py(px(LABEL_PADDING_Y))
-                .rounded_md()
-                .bg(colors.label)
-                .shadow_sm()
-                .text_xs()
-                .line_height(px(LABEL_LINE_HEIGHT))
-                .text_color(colors.label_text)
-                .line_clamp(LABEL_LINES)
-                .text_ellipsis()
-                .child(label),
+                .flex()
+                .map(|column| {
+                    if points_up {
+                        column.flex_col_reverse()
+                    } else {
+                        column.flex_col()
+                    }
+                })
+                .map(|column| match place.horizontal {
+                    Grow::Before => column.items_end(),
+                    Grow::Centred => column.items_center(),
+                    Grow::After => column.items_start(),
+                })
+                .child(bubble)
+                .child(label_tail(place.horizontal, points_up)),
         )
+}
+
+/// A label's tail: a triangle whose base sinks a pixel into the bubble, so no
+/// seam shows, and whose tip leans toward the slot when the bubble sits off to
+/// one side of it.
+fn label_tail(horizontal: Grow, points_up: bool) -> impl IntoElement {
+    canvas(
+        |_, _, _| {},
+        move |bounds, (), window, _| {
+            let (base, tip) = if points_up {
+                (bounds.bottom(), bounds.top())
+            } else {
+                (bounds.top(), bounds.bottom())
+            };
+            let tip_x = match horizontal {
+                Grow::Before => bounds.right(),
+                Grow::Centred => bounds.center().x,
+                Grow::After => bounds.left(),
+            };
+            let mut path = PathBuilder::fill();
+            path.move_to(point(bounds.left(), base));
+            path.line_to(point(bounds.right(), base));
+            path.line_to(point(tip_x, tip));
+            path.close();
+            if let Ok(path) = path.build() {
+                window.paint_path(path, LABEL_FILL);
+            }
+        },
+    )
+    .flex_none()
+    .w(px(LABEL_TAIL_WIDTH))
+    .h(px(LABEL_TAIL_HEIGHT + 1.0))
+    .map(|tail| {
+        if points_up {
+            tail.mb(px(-1.0))
+        } else {
+            tail.mt(px(-1.0))
+        }
+    })
+    .map(|tail| match horizontal {
+        Grow::Before => tail.mr(px(LABEL_TAIL_INSET)),
+        Grow::Centred => tail,
+        Grow::After => tail.ml(px(LABEL_TAIL_INSET)),
+    })
 }
 
 impl Render for RingView {
