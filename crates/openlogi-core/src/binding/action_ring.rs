@@ -72,6 +72,32 @@ impl ActionRingSlot {
         }
     }
 
+    /// The slot whose 45° sector holds the direction `(x, y)` from the ring's
+    /// centre, in the same down-pointing Y as [`Self::unit_offset`]. Each
+    /// sector is centred on its slot, so the boundaries fall halfway between
+    /// neighbours. A zero vector has no direction and reads as `Right`.
+    #[must_use]
+    pub fn toward(x: f32, y: f32) -> Self {
+        // Clockwise on screen from Right, one slot per 45°.
+        const CLOCKWISE: [ActionRingSlot; 8] = [
+            ActionRingSlot::Right,
+            ActionRingSlot::BottomRight,
+            ActionRingSlot::Bottom,
+            ActionRingSlot::BottomLeft,
+            ActionRingSlot::Left,
+            ActionRingSlot::TopLeft,
+            ActionRingSlot::Top,
+            ActionRingSlot::TopRight,
+        ];
+        let eighths = (y.atan2(x) / std::f32::consts::FRAC_PI_4).round();
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "a rounded angle in eighths of a turn is an integer in -4..=4"
+        )]
+        let index = (eighths as i32).rem_euclid(8) as usize;
+        CLOCKWISE[index]
+    }
+
     /// Top-left corner at which to place this slot's `slot_size` box, on a
     /// square `canvas` whose ring has the given `radius`. All in the caller's
     /// own units; the live overlay and the settings preview differ only in
@@ -375,6 +401,28 @@ mod tests {
                 .iter()
                 .all(|slot| layout.slots.contains_key(slot))
         );
+    }
+
+    #[test]
+    fn each_slot_owns_the_sector_around_its_own_direction() {
+        for slot in ActionRingSlot::ALL {
+            let (x, y) = slot.unit_offset();
+            assert_eq!(ActionRingSlot::toward(x, y), slot);
+        }
+        // Sector edges sit 22.5° either side of a slot, with Y pointing down.
+        let at = |degrees: f32| {
+            let radians = degrees.to_radians();
+            ActionRingSlot::toward(radians.cos(), radians.sin())
+        };
+        assert_eq!(at(22.0), ActionRingSlot::Right);
+        assert_eq!(at(23.0), ActionRingSlot::BottomRight);
+        assert_eq!(at(-22.0), ActionRingSlot::Right);
+        assert_eq!(at(-23.0), ActionRingSlot::TopRight);
+        // Either side of the wrap from +180° to -180°.
+        assert_eq!(at(179.0), ActionRingSlot::Left);
+        assert_eq!(at(-179.0), ActionRingSlot::Left);
+        assert_eq!(at(-158.0), ActionRingSlot::Left);
+        assert_eq!(at(-157.0), ActionRingSlot::TopLeft);
     }
 
     #[test]
