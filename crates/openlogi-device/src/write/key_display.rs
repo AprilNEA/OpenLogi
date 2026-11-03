@@ -52,6 +52,10 @@ const ACK_ACCEPTED: [u8; 2] = [0x00, 0x01];
 /// packet. Acknowledgements arrive within milliseconds on hardware.
 const ACK_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// How long an image waits for the HID++ requests already in flight: the
+/// default request timeout, after which an unanswered request has given up.
+const PAUSE_TIMEOUT: Duration = hidpp::channel::SEND_RESPONSE_TIMEOUT;
+
 /// The LCD key panel of the device at `route`, or `None` when its keys are not
 /// displays: only a keypad the route reaches ([`DeviceRoute::keypad`]) has
 /// one.
@@ -110,6 +114,14 @@ pub async fn write_key_image_on(
     let ack_part = packets[packets.len() - 1][4] & !PART_MARKER;
 
     let channel = shared.channel();
+    // The keypad drops a HID++ request that is in flight when an image
+    // arrives, and can restart a few seconds later (#2281). No request that
+    // awaits a reply goes out from here until the image is acknowledged.
+    let _pause = tokio::time::timeout(PAUSE_TIMEOUT, channel.pause_requests())
+        .await
+        .map_err(|_| WriteError::RequestTimedOut {
+            operation: HidppOperation::WriteKeyImage,
+        })?;
     let (ack_tx, ack_rx) = oneshot::channel();
     let ack_tx = Mutex::new(Some(ack_tx));
     let _ack_listener = channel.add_raw_report_listener_guarded(move |report| {

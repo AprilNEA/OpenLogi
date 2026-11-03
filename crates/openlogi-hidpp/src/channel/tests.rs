@@ -16,6 +16,7 @@ use crate::{
 };
 
 mod lease;
+mod pause;
 mod raw_and_listeners;
 mod same_header;
 mod send;
