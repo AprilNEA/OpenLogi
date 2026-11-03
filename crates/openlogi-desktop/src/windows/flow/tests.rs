@@ -14,6 +14,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 
 use super::*;
 use crate::services::assets::AssetResolver;
+use crate::services::i18n::LOCALE_LOCK;
 use crate::services::ipc::{Command, PairFlowPeer};
 use crate::state::Sources;
 use crate::state::tests::direct_inventory;
@@ -105,7 +106,10 @@ fn open_window(cx: &mut TestAppContext) -> &mut VisualTestContext {
     open_window_to_agent(cx).0
 }
 
-/// The window, and the commands it sends the agent.
+/// The window, and the commands it sends the agent. Callers hold
+/// `LOCALE_LOCK`: a press refreshes the window, and the redraw before the
+/// release re-lays it out in whatever locale a parallel test has set, so the
+/// release misses the element the press hit.
 fn open_window_to_agent(
     cx: &mut TestAppContext,
 ) -> (&mut VisualTestContext, UnboundedReceiver<Command>) {
@@ -165,6 +169,7 @@ fn health(visual: &mut VisualTestContext) -> FlowHealth {
 /// once a device follows.
 #[gpui::test]
 fn a_peer_gets_a_device_and_moves_with_the_arrow_keys(cx: &mut TestAppContext) {
+    let _locale = LOCALE_LOCK.lock().unwrap();
     let visual = open_window(cx);
     assert_eq!(health(visual), FlowHealth::Blocked, "no device follows yet");
     assert!(
@@ -208,6 +213,7 @@ fn a_peer_gets_a_device_and_moves_with_the_arrow_keys(cx: &mut TestAppContext) {
 /// tray empties once it is placed.
 #[gpui::test]
 fn an_unplaced_peer_is_placed_from_the_inspector_and_dragged(cx: &mut TestAppContext) {
+    let _locale = LOCALE_LOCK.lock().unwrap();
     let visual = open_window(cx);
     assert!(visual.debug_bounds("flow-tile-Lab").is_none());
 
@@ -240,6 +246,7 @@ fn an_unplaced_peer_is_placed_from_the_inspector_and_dragged(cx: &mut TestAppCon
 /// peer asks first, then forgets its key and edge.
 #[gpui::test]
 fn the_switch_trigger_and_removal_write_the_flow_table(cx: &mut TestAppContext) {
+    let _locale = LOCALE_LOCK.lock().unwrap();
     let visual = open_window(cx);
 
     click(visual, "flow-trigger-modifier");
@@ -296,6 +303,7 @@ fn row_of(key: u8) -> &'static str {
 /// the list. A computer already added is listed but cannot be picked.
 #[gpui::test]
 fn adding_a_computer_pairs_with_the_one_picked(cx: &mut TestAppContext) {
+    let _locale = LOCALE_LOCK.lock().unwrap();
     let (visual, mut commands) = open_window_to_agent(cx);
     while commands.try_recv().is_ok() {}
     click(visual, "flow-add");
@@ -324,6 +332,7 @@ fn adding_a_computer_pairs_with_the_one_picked(cx: &mut TestAppContext) {
 /// and the inspector shows the computer so it can get a side.
 #[gpui::test]
 fn a_saved_computer_closes_the_dialog_and_is_selected(cx: &mut TestAppContext) {
+    let _locale = LOCALE_LOCK.lock().unwrap();
     let (visual, mut commands) = open_window_to_agent(cx);
     click(visual, "flow-add");
     show_pairing(
@@ -358,6 +367,7 @@ fn a_saved_computer_closes_the_dialog_and_is_selected(cx: &mut TestAppContext) {
 /// focus is gone with the step it was on. Enter alone closes nothing.
 #[gpui::test]
 fn closing_the_dialog_stops_pairing(cx: &mut TestAppContext) {
+    let _locale = LOCALE_LOCK.lock().unwrap();
     let (visual, mut commands) = open_window_to_agent(cx);
     click(visual, "flow-add");
     show_pairing(visual, FlowPairingPhase::Found(vec![nearby("devbox", 9)]));
