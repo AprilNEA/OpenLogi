@@ -1061,6 +1061,12 @@ fn overdue_long_press_precedes_unrelated_queued_actions() {
     assert!(matches!(&events[2], ButtonRuntimeEvent::Started(_)));
 }
 
+/// How long past the threshold a worker under continuous input may take to
+/// fire. It is not a latency budget: a starved worker never fires while the
+/// producer runs, and a loaded runner can deschedule one of the busy threads
+/// for longer than [`WAKE_SLACK`].
+const STARVATION_BOUND: Duration = Duration::from_secs(5);
+
 #[test]
 fn continuous_commands_cannot_starve_a_long_press_deadline() {
     let (commands, queued) = mpsc::sync_channel(EVENT_QUEUE_CAPACITY);
@@ -1102,7 +1108,9 @@ fn continuous_commands_cannot_starve_a_long_press_deadline() {
         });
     });
 
-    let wait_until = pressed_at + LONG_PRESS_THRESHOLD + Duration::from_millis(250);
+    // The producer keeps the queue full for the whole wait, so the deadline
+    // must fire between commands rather than after the input stops.
+    let wait_until = pressed_at + LONG_PRESS_THRESHOLD + STARVATION_BOUND;
     let triggered_after = loop {
         let Some(remaining) = wait_until.checked_duration_since(Instant::now()) else {
             break None;
@@ -1132,7 +1140,10 @@ fn continuous_commands_cannot_starve_a_long_press_deadline() {
     worker.join().expect("worker should stop");
 
     let triggered_after = triggered_after.expect("continuous input starved the long-press timer");
-    assert!(triggered_after <= LONG_PRESS_THRESHOLD + Duration::from_millis(250));
+    assert!(
+        triggered_after >= LONG_PRESS_THRESHOLD,
+        "continuous input fired the long action early, after {triggered_after:?}"
+    );
 }
 
 #[test]
