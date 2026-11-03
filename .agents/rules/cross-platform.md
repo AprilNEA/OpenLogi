@@ -3,6 +3,7 @@ paths:
   - "crates/openlogi-hook/**"
   - "crates/openlogi-inject/**"
   - "crates/openlogi-hid/**"
+  - "crates/openlogi-ipc/src/transport/windows.rs"
   - "crates/openlogi-agent/src/autostart.rs"
   - "crates/openlogi-agent/src/autostart/**"
   - "crates/openlogi-agent/src/resume_windows.rs"
@@ -30,6 +31,7 @@ When the diff touches any of:
 - `crates/openlogi-camera/src/capture_linux.rs`, `capture_windows.rs`,
   `com_windows.rs`, `uvc_windows.rs`, `uvc_linux.rs`, `linux.rs`
 - `crates/openlogi-hid/src/transport.rs` or `transport/windows.rs`
+- `crates/openlogi-ipc/src/transport/windows.rs`
 - any `#[cfg(target_os = …)]` block, in any crate
 
 you MUST either:
