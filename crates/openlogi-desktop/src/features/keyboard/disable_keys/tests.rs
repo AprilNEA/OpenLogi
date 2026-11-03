@@ -242,6 +242,7 @@ fn answer_post_receipt_read(
 
 #[gpui::test]
 fn general_refresh_failure_offers_a_working_reload_retry(cx: &mut TestAppContext) {
+    let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
     cx.update(gpui_component::init);
     cx.update(theme::register_builtin_themes);
     let directory = tempfile::tempdir().unwrap();
@@ -508,6 +509,7 @@ fn all_recovery_errors_have_russian_product_messages() {
 
 #[gpui::test]
 fn disabled_switch_does_not_write_or_take_focus(cx: &mut TestAppContext) {
+    let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
     cx.update(gpui_component::init);
     cx.update(theme::register_builtin_themes);
     let mut receiver = install_keyboard(cx);
@@ -589,6 +591,7 @@ impl Render for PanelHarness {
 }
 
 fn exercise_save_retry(cx: &mut TestAppContext, keypress: Option<&str>) {
+    let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
     cx.update(gpui_component::init);
     cx.update(theme::register_builtin_themes);
     let directory = tempfile::tempdir().unwrap();
@@ -694,6 +697,7 @@ fn save_retry_space_preserves_external_binding_without_second_write(cx: &mut Tes
 
 #[gpui::test]
 fn shared_reload_retry_is_inert_offline_and_retries_only_reload(cx: &mut TestAppContext) {
+    let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
     cx.update(gpui_component::init);
     cx.update(theme::register_builtin_themes);
     let mut receiver = install_keyboard(cx);

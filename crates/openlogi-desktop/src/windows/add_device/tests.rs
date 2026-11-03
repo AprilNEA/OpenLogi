@@ -59,6 +59,7 @@ fn receiver(name: &str, product_id: u16, uid: Option<&str>) -> ReceiverInfo {
 
 #[gpui::test]
 fn reopening_keeps_the_selected_receiver_for_retry(cx: &mut TestAppContext) {
+    let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
     cx.update(gpui_component::init);
     cx.update(theme::register_builtin_themes);
     let mut commands = cx.update(install_state);
@@ -96,6 +97,7 @@ fn reopening_keeps_the_selected_receiver_for_retry(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn a_refused_start_keeps_its_error_and_target_after_empty_snapshots(cx: &mut TestAppContext) {
+    let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
     cx.update(gpui_component::init);
     cx.update(theme::register_builtin_themes);
     let mut commands = cx.update(install_state);
@@ -173,6 +175,7 @@ fn an_agent_session_supersedes_a_command_failure_and_can_be_dismissed(cx: &mut T
 
 #[gpui::test]
 fn changing_receiver_waits_for_cancellation_acknowledgement(cx: &mut TestAppContext) {
+    let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
     cx.update(gpui_component::init);
     cx.update(theme::register_builtin_themes);
     let mut commands = cx.update(install_state);
@@ -196,6 +199,7 @@ fn changing_receiver_waits_for_cancellation_acknowledgement(cx: &mut TestAppCont
 
 #[gpui::test]
 fn a_recovered_receiver_identity_enables_the_same_open_picker(cx: &mut TestAppContext) {
+    let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
     cx.update(gpui_component::init);
     cx.update(theme::register_builtin_themes);
     let mut commands = cx.update(install_state);
@@ -246,6 +250,7 @@ fn a_recovered_receiver_identity_enables_the_same_open_picker(cx: &mut TestAppCo
 
 #[gpui::test]
 fn choosing_bolt_and_retrying_keep_the_explicit_target(cx: &mut TestAppContext) {
+    let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
     cx.update(gpui_component::init);
     cx.update(theme::register_builtin_themes);
     let mut commands = cx.update(install_state);
@@ -372,6 +377,7 @@ fn opening_waits_for_a_receiver_choice(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn cancel_stays_in_the_bottom_bar_below_a_long_device_list(cx: &mut TestAppContext) {
+    let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
     cx.update(gpui_component::init);
     cx.update(theme::register_builtin_themes);
     let mut commands = cx.update(install_state);
@@ -404,6 +410,7 @@ fn cancel_stays_in_the_bottom_bar_below_a_long_device_list(cx: &mut TestAppConte
 
 #[gpui::test]
 fn cancel_before_choosing_a_receiver_closes_the_window(cx: &mut TestAppContext) {
+    let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
     cx.update(gpui_component::init);
     cx.update(theme::register_builtin_themes);
     let mut commands = cx.update(install_state);
@@ -422,6 +429,7 @@ fn cancel_before_choosing_a_receiver_closes_the_window(cx: &mut TestAppContext) 
 
 #[gpui::test]
 fn change_receiver_clears_a_failure_without_an_agent_session(cx: &mut TestAppContext) {
+    let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
     cx.update(gpui_component::init);
     cx.update(theme::register_builtin_themes);
     let mut commands = cx.update(install_state);

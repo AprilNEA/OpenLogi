@@ -508,6 +508,7 @@ mod tests {
 
     #[gpui::test]
     fn sidebar_scroll_does_not_move_the_page(cx: &mut TestAppContext) {
+        let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
         cx.update(gpui_component::init);
         let page_scroll = ScrollHandle::new();
         let sidebar_scroll = ScrollHandle::new();
@@ -580,6 +581,7 @@ mod tests {
 
     #[gpui::test]
     fn custom_shortcut_stays_inside_the_slot_editor(cx: &mut TestAppContext) {
+        let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
         cx.update(gpui_component::init);
         let library_scroll = ScrollHandle::new();
         let (_, cx) = cx.add_window_view({

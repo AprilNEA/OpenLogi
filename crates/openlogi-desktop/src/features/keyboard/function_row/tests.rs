@@ -802,6 +802,7 @@ fn redraw(cx: &mut gpui::VisualTestContext) {
 /// half a panel to the left, out from under the click).
 #[gpui::test]
 fn selecting_a_key_leaves_the_board_where_it_was(cx: &mut gpui::TestAppContext) {
+    let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
     let (view, cx) = keys_tab(cx);
     let f1 = cx.debug_bounds("key-target-1").expect("F1 is on the board");
     assert!(cx.debug_bounds("key-overview").is_some());
@@ -822,6 +823,7 @@ fn selecting_a_key_leaves_the_board_where_it_was(cx: &mut gpui::TestAppContext) 
 /// highlights its key on the board and opens it like a click on the key.
 #[gpui::test]
 fn an_overview_row_points_at_its_key_and_opens_it(cx: &mut gpui::TestAppContext) {
+    let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
     let (view, cx) = keys_tab(cx);
     let row = cx.debug_bounds("key-overview-row-3").expect("F3 is listed");
 
