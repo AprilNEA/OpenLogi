@@ -770,31 +770,6 @@ fn hid_usage_to_windows(usage: u8) -> Option<u16> {
 mod tests {
     use openlogi_core::scroll::ScrollDelta;
 
-    /// The exit status and a failed start reach the caller, which logs them;
-    /// they used to be dropped.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    #[test]
-    fn a_script_reports_its_exit_status_and_a_failed_start() {
-        let mut failing = std::process::Command::new("/bin/sh");
-        failing.args(["-c", "exit 3"]);
-        assert_eq!(super::finish(&mut failing).unwrap().code(), Some(3));
-        let mut missing = std::process::Command::new("/nonexistent/openlogi-test");
-        super::finish(&mut missing).unwrap_err();
-    }
-
-    /// A child the script leaves in the background keeps its stdout open.
-    /// That must not keep the script, and so a workflow, waiting: reading the
-    /// output to its end waited for every holder of the pipe.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    #[test]
-    fn a_background_child_does_not_keep_the_script_waiting() {
-        let mut command = std::process::Command::new("/bin/sh");
-        command.args(["-c", "sleep 3 2>/dev/null &"]);
-        let started = std::time::Instant::now();
-        assert!(super::finish(&mut command).unwrap().success());
-        assert!(started.elapsed() < std::time::Duration::from_secs(2));
-    }
-
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     use openlogi_core::binding::{HeldKeys, KeyCombo};
 
@@ -1287,5 +1262,30 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The exit status and a failed start reach the caller, which logs them;
+    /// they used to be dropped.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn a_script_reports_its_exit_status_and_a_failed_start() {
+        let mut failing = std::process::Command::new("/bin/sh");
+        failing.args(["-c", "exit 3"]);
+        assert_eq!(super::finish(&mut failing).unwrap().code(), Some(3));
+        let mut missing = std::process::Command::new("/nonexistent/openlogi-test");
+        super::finish(&mut missing).unwrap_err();
+    }
+
+    /// A child the script leaves in the background keeps its stdout open.
+    /// That must not keep the script, and so a workflow, waiting: reading the
+    /// output to its end waited for every holder of the pipe.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn a_background_child_does_not_keep_the_script_waiting() {
+        let mut command = std::process::Command::new("/bin/sh");
+        command.args(["-c", "sleep 3 2>/dev/null &"]);
+        let started = std::time::Instant::now();
+        assert!(super::finish(&mut command).unwrap().success());
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
     }
 }
