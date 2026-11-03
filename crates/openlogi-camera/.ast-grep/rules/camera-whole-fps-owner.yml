@@ -1,0 +1,19 @@
+# Owner: openlogi_camera::stream_mode::whole_fps — a frame rate a driver reports
+# as a ratio, in whole frames per second. One rounding, so no backend decides
+# for itself what a `7.5` or a `10000000 / 333333` reads as.
+id: camera-whole-fps-owner
+language: rust
+severity: error
+message: A frame rate reported as a ratio becomes whole fps through openlogi_camera::stream_mode::whole_fps; do not re-derive the rounding.
+note: |
+  The V4L2 backend carried this integer idiom and the Media Foundation backend
+  needed it again; a third backend would have been a third copy. See "Single
+  source of truth" in AGENTS.md.
+files:
+  - crates/openlogi-camera/**/*.rs
+ignores:
+  - crates/openlogi-camera/src/stream_mode.rs
+rule:
+  any:
+    - pattern: ($NUMERATOR + $DENOMINATOR / 2) / $DENOMINATOR
+    - pattern: (2 * $NUMERATOR + $DENOMINATOR) / (2 * $DENOMINATOR)

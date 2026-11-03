@@ -17,6 +17,7 @@ use std::collections::BTreeMap;
 
 use gpui::{App, Context, Entity, Global};
 use openlogi_core::app::{AppAliases, ForegroundApp, profile_applies_to};
+use openlogi_core::binding::GamingLayout;
 use openlogi_core::config::Config;
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_core::hid::{Dpi, SmartShiftStatus};
@@ -30,11 +31,14 @@ pub(crate) use device_session::ObservedConnection;
 pub use devices::DeviceRecord;
 pub(crate) use easy_switch::HostRenameRefusal;
 pub(crate) use events::{StateEvent, StateEvents};
+pub(crate) use flow::{
+    FlowDeviceRow, FlowHealth, FlowHost, FlowIssue, FlowPairingRefusal, FlowReadiness,
+};
 pub use light::LightCommandStatus;
 pub(crate) use load::Load;
 pub use load::{
     BacklightLoad, DisableKeysLoad, DpiLoad, EasySwitchLoad, FnLockLoad, ForceSensingLoad,
-    OnboardLoad, PointerSpeedLoad, ReportRateLoad, SmartShiftLoad,
+    OnboardLoad, PointerSpeedLoad, ReportRateLoad, SidetoneLoad, SmartShiftLoad,
 };
 
 /// Result of confirming a SmartShift write by reading the value back.
@@ -83,6 +87,7 @@ mod disable_keys;
 mod dpi;
 mod easy_switch;
 mod events;
+mod flow;
 mod fn_lock;
 mod force_sensing;
 mod inventory;
@@ -97,6 +102,7 @@ mod reconciliation;
 mod report_rate;
 mod scroll;
 mod settings;
+mod sidetone;
 mod smartshift;
 
 #[cfg(test)]
@@ -158,11 +164,17 @@ pub enum AgentLink {
     /// devices" before the first snapshot flashed both at every
     /// already-set-up user (the original startup bug).
     Connecting,
-    /// Still no snapshot well past startup: the agent is genuinely
+    /// The connection to a running agent dropped and the IPC client is
+    /// reconnecting — an update's self-exec or a supervised restart is back
+    /// within seconds. Carries the agent's last status, so the window keeps
+    /// its screens but says the state is not live.
+    Reconnecting(openlogi_ipc::AgentStatus),
+    /// Still no snapshot well past startup or a loss: the agent is genuinely
     /// unreachable (binary missing, repeated spawn failures). Rendered as a
-    /// static error frame; polling continues and a snapshot upgrades this
-    /// back to [`Self::Ready`].
-    Unreachable,
+    /// static notice under the Home header; polling continues and a snapshot
+    /// upgrades this back to [`Self::Ready`]. `retrying` while an attempt the
+    /// user asked for is under way.
+    Unreachable { retrying: bool },
     /// The agent answered the handshake with a *newer* protocol than this
     /// process speaks — the app was updated on disk while this GUI stayed
     /// running. Only relaunching helps; without this state the window would
@@ -247,6 +259,7 @@ impl AppState {
             state.load_current_fn_lock(cx);
             state.load_current_report_rate(cx);
             state.load_current_pointer_speed(cx);
+            state.load_current_sidetone(cx);
             state.load_current_force_sensing(cx);
             state.load_current_backlight(cx);
             state.load_current_easy_switch(cx);
@@ -294,11 +307,11 @@ impl AppState {
         let identities_changed =
             config.edit(|config| inventory::persist_identities(config, &device_list));
         let current_device = pick_initial_device(&device_list, config.selected_device());
+        let current_record = device_list.get(current_device);
         let bindings = BindingState::new(
             &config,
-            device_list
-                .get(current_device)
-                .and_then(DeviceRecord::persistent_config_key),
+            current_record.and_then(DeviceRecord::persistent_config_key),
+            current_record.and_then(|record| GamingLayout::for_model_key(&record.model_key)),
         );
         let mut state = Self {
             config,

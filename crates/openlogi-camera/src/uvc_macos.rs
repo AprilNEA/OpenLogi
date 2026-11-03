@@ -15,8 +15,12 @@
 //!
 //! The IOKit handles themselves live in [`iokit`], which owns every `unsafe`
 //! block in this backend and hands the descriptor up as a plain `&[u8]`.
+//! What speed each camera's USB link runs at, as enumeration sees it, is
+//! [`link`]'s.
 
 mod iokit;
+mod link;
+pub(crate) use link::observe_links;
 
 use std::collections::HashMap;
 use std::ffi::c_void;
@@ -278,9 +282,12 @@ pub fn set_auto(unique_id: &str, toggle: AutoToggle, on: bool) -> Result<(), Con
 /// Apply a batch of auto toggles and control values in a single device-open —
 /// how profiles and saved-state reapplication write, so the seize count stays
 /// at one no matter how many controls change. Autos land first so a manual
-/// value isn't rejected by a still-armed auto mode. Every write is attempted
-/// (one rejection doesn't abandon the rest), but any failure surfaces so
-/// callers never persist or display a batch the hardware didn't take.
+/// value isn't rejected by a still-armed auto mode, and a value whose auto
+/// mode this batch switches on is not written at all: the camera stalls that
+/// `SET_CUR` ([`CameraControl::handed_to_auto`]). Every other write is
+/// attempted (one rejection doesn't abandon the rest), but any failure
+/// surfaces so callers never persist or display a batch the hardware didn't
+/// take.
 ///
 /// # Errors
 /// [`ControlError::NotFound`] when no USB device matches; otherwise the first
@@ -298,7 +305,10 @@ pub fn apply_settings(
             first_err.get_or_insert(e);
         }
     }
-    for (control, value) in values {
+    for (control, value) in values
+        .iter()
+        .filter(|(control, _)| !control.handed_to_auto(autos))
+    {
         if let Err(e) = dev.set(*control, *value) {
             first_err.get_or_insert(e);
         }
@@ -339,16 +349,12 @@ pub(crate) fn usb_serials_by_location() -> HashMap<u32, String> {
         })
 }
 
-/// Location id + USB serial from an `IOUSBDevice` service, without opening it.
-fn registry_location_and_serial(
-    service: &IoObject,
-    serial_key: &CFString,
-    location_key: &CFString,
-) -> Option<(u32, String)> {
-    // Prefer the USB device interface for the location (it is what the control
-    // path matches on); fall back to the registry number when the plug-in is
-    // busy.
-    let location = UsbInterface::open(service)
+/// An `IOUSBDevice` service's location id, without opening the device.
+///
+/// Prefers the USB device interface (it is what the control path matches on)
+/// and falls back to the registry number when the plug-in is busy.
+fn service_location(service: &IoObject, location_key: &CFString) -> Option<u32> {
+    UsbInterface::open(service)
         .and_then(|interface| interface.location_id())
         .or_else(|| {
             iokit::registry_property(service, location_key)?
@@ -356,7 +362,16 @@ fn registry_location_and_serial(
                 .ok()?
                 .as_i32()
                 .map(i32::cast_unsigned)
-        })?;
+        })
+}
+
+/// Location id + USB serial from an `IOUSBDevice` service, without opening it.
+fn registry_location_and_serial(
+    service: &IoObject,
+    serial_key: &CFString,
+    location_key: &CFString,
+) -> Option<(u32, String)> {
+    let location = service_location(service, location_key)?;
     let serial = iokit::registry_property(service, serial_key)?
         .downcast::<CFString>()
         .ok()?

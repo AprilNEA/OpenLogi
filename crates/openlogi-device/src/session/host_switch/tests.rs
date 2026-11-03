@@ -8,33 +8,21 @@ use tokio::sync::{mpsc, oneshot};
 use super::{
     ArmedControl, HostSwitchError, HostSwitchRestoreOutcome, HostSwitchSessionOutcome,
     HostSwitchStop, HostTable, HostTrigger, KeyboardHosts, KeyboardPosition,
-    PendingHostSwitchRestore, PreparedHostChange, ReportingMode, announced_host,
-    host_change_required, host_channel, key_trigger, monitor_host_switch, prepare_host_change_with,
+    PendingHostSwitchRestore, ReportingMode, announced_host, host_change_required, host_channel,
+    key_trigger, monitor_host_switch, prepare_host_change_on, prepare_host_switch_on,
     queued_departure, restoration_change, rollback_host_switch_start, run_host_switch_session,
-    shares_channel, timed_hidpp,
+    shares_channel, switch_host_on,
 };
 use crate::ChannelPool;
 use crate::backend::NodeId;
 use crate::channel::scripted::{
     ScriptedBackend, ScriptedRawHidChannel, feature_error, scripted_channel as raw_scripted_channel,
 };
+use crate::replay::ReplayChannelHandle;
 use crate::reprog_controls::{
     AnalyticsKeyEvent, CidReporting, ControlId, CtrlIdInfo, ReprogControlsEvent,
 };
 use crate::{ChannelRegistry, DeviceRoute, SharedChannel, device_io_channel};
-
-async fn prepare_host_change_on(
-    channel: &Arc<HidppChannel>,
-    device_index: u8,
-    host: u8,
-) -> Result<PreparedHostChange, HostSwitchError> {
-    let mut device = timed_hidpp(
-        "opening host-change device",
-        hidpp::device::Device::new(Arc::clone(channel), device_index),
-    )
-    .await?;
-    prepare_host_change_with(&mut device, device_index, host).await
-}
 
 /// Feature index the scripted keyboard reports for `0x1814 ChangeHost`.
 const CHANGE_HOST_INDEX: u8 = 0x04;
@@ -59,6 +47,8 @@ enum SlotStatus {
     LookupErrors,
     /// Implements the feature but errors on the status read.
     ReadErrors,
+    /// Implements the feature but never answers the status read.
+    ReadIgnored,
     /// Reports `status == Empty` for every slot, including paired ones, but
     /// still reports a nonzero friendly-name length for them — the MX
     /// Vertical quirk from #1709.
@@ -111,6 +101,7 @@ fn scripted_keyboard(request: &[u8], slot_status: SlotStatus) -> Option<Vec<u8>>
                     SlotStatus::LookupErrors => return Some(feature_error(request, BUSY)),
                     SlotStatus::Reported
                     | SlotStatus::ReadErrors
+                    | SlotStatus::ReadIgnored
                     | SlotStatus::StuckEmptyButNamed => HOSTS_INFO_INDEX,
                 },
                 _ => 0x00,
@@ -120,8 +111,10 @@ fn scripted_keyboard(request: &[u8], slot_status: SlotStatus) -> Option<Vec<u8>>
         (CHANGE_HOST_INDEX, 0x00) => payload[..2].copy_from_slice(&[3, 0]),
         // HostsInfo getHostInfo: echo the slot, then its pairing status.
         (HOSTS_INFO_INDEX, 0x01) => {
-            if slot_status == SlotStatus::ReadErrors {
-                return Some(feature_error(request, BUSY));
+            match slot_status {
+                SlotStatus::ReadErrors => return Some(feature_error(request, BUSY)),
+                SlotStatus::ReadIgnored => return None,
+                _ => {}
             }
             payload[0] = request[4];
             if slot_status == SlotStatus::StuckEmptyButNamed {
@@ -197,6 +190,100 @@ async fn switching_to_a_paired_slot_proceeds() {
     assert!(change.required, "host 1 differs from the current host 0");
 }
 
+/// A shared channel for one Bolt device, plus the handle that records writes.
+async fn shared_device(
+    responder: crate::channel::scripted::Responder,
+) -> (SharedChannel, ReplayChannelHandle) {
+    let (raw, handle) = ScriptedRawHidChannel::with_responder(responder);
+    let channel = raw_scripted_channel(raw).await;
+    let route = DeviceRoute::Bolt {
+        receiver_uid: "AABB".into(),
+        slot: 1,
+    };
+    (SharedChannel::new(channel, route), handle)
+}
+
+/// Whether a `ChangeHost setCurrentHost(host)` report was written.
+fn wrote_set_current_host(handle: &ReplayChannelHandle, host: u8) -> bool {
+    handle.written_reports().iter().any(|report| {
+        report.len() >= 5
+            && report[2] == CHANGE_HOST_INDEX
+            && report[3] >> 4 == 1
+            && report[4] == host
+    })
+}
+
+#[tokio::test]
+async fn switching_one_device_issues_the_fire_and_forget_write() {
+    let (shared, handle) = shared_device(keyboard_with_an_empty_third_slot).await;
+
+    let changed = switch_host_on(&shared, 1)
+        .await
+        .expect("a paired slot must be switchable");
+
+    assert!(changed);
+    assert!(wrote_set_current_host(&handle, 1));
+}
+
+#[tokio::test]
+async fn switching_one_device_honours_a_name_over_a_stuck_empty_status() {
+    // #1709 on the single-device path: Flow must still reach an MX Vertical
+    // whose status byte reads Empty for every slot.
+    let (shared, handle) = shared_device(keyboard_with_stuck_empty_status).await;
+
+    let changed = switch_host_on(&shared, 2)
+        .await
+        .expect("a named slot must be switchable despite a stuck Empty status");
+
+    assert!(changed);
+    assert!(wrote_set_current_host(&handle, 2));
+}
+
+#[tokio::test]
+async fn switching_one_device_to_an_unpaired_slot_writes_nothing() {
+    let (shared, handle) = shared_device(keyboard_with_an_empty_third_slot).await;
+
+    let error = switch_host_on(&shared, 2)
+        .await
+        .expect_err("an unpaired slot must be refused");
+
+    assert!(
+        matches!(error, HostSwitchError::HostSlotEmpty { host: 2 }),
+        "got {error:?}"
+    );
+    assert!(!wrote_set_current_host(&handle, 2));
+}
+
+#[tokio::test]
+async fn a_prepared_switch_writes_only_when_applied() {
+    // Flow prepares every device before it writes to any of them, so the
+    // preparation must not move this one.
+    let (shared, handle) = shared_device(keyboard_with_an_empty_third_slot).await;
+
+    let prepared = prepare_host_switch_on(&shared, 1)
+        .await
+        .expect("a paired slot must be switchable");
+
+    assert_eq!(prepared.host(), 1);
+    assert!(prepared.is_required());
+    assert!(!wrote_set_current_host(&handle, 1));
+    assert!(prepared.apply().await.expect("the write is acknowledged"));
+    assert!(wrote_set_current_host(&handle, 1));
+}
+
+#[tokio::test]
+async fn a_prepared_switch_to_the_current_host_writes_nothing() {
+    let (shared, handle) = shared_device(keyboard_with_an_empty_third_slot).await;
+
+    let prepared = prepare_host_switch_on(&shared, 0)
+        .await
+        .expect("staying on the current host is always fine");
+
+    assert!(!prepared.is_required());
+    assert!(!prepared.apply().await.expect("nothing to write"));
+    assert!(!wrote_set_current_host(&handle, 0));
+}
+
 #[tokio::test]
 async fn a_device_without_hosts_info_is_still_switched() {
     // 0x1815 is the only source of per-slot pairing status. Without it the
@@ -237,6 +324,27 @@ async fn an_unreadable_slot_status_does_not_block_the_switch() {
         .expect("an errored status read must not abort the switch");
 
     assert!(change.required);
+}
+
+#[tokio::test]
+async fn an_unanswered_slot_status_does_not_use_up_the_switch_budget() {
+    // A device that answers ChangeHost but ignores the HostsInfo read must
+    // still be switched within Flow's 1 s per-device preparation, and long
+    // before the agent's 5 s budget for the whole switch_host.
+    let channel =
+        scripted_channel(|request| scripted_keyboard(request, SlotStatus::ReadIgnored)).await;
+    let started = tokio::time::Instant::now();
+
+    let change = prepare_host_change_on(&channel, 1, 2)
+        .await
+        .expect("an unanswered status read must not abort the switch");
+
+    assert!(change.required);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(1),
+        "the advisory read took {:?}",
+        started.elapsed()
+    );
 }
 
 #[tokio::test]
@@ -496,10 +604,59 @@ fn different_valid_host_requires_a_change() {
 
 #[test]
 fn host_outside_device_range_is_rejected() {
-    assert!(
-        host_change_required(0, 2, 2).is_err(),
-        "host 2 is outside a device that reports 2 hosts and must be rejected"
-    );
+    let error = host_change_required(0, 2, 2).expect_err("host 2 must be rejected");
+
+    assert!(matches!(
+        error,
+        HostSwitchError::HostOutOfRange {
+            host: 2,
+            host_count: 2
+        }
+    ));
+}
+
+#[test]
+fn host_switch_errors_cross_ipc_as_the_easy_switch_vocabulary() {
+    use openlogi_core::hid::{HidppOperation, WriteError};
+
+    let cases = [
+        (
+            HostSwitchError::FeatureUnsupported,
+            WriteError::FeatureUnsupported {
+                feature_hex: 0x1814,
+            },
+        ),
+        (
+            HostSwitchError::HostOutOfRange {
+                host: 3,
+                host_count: 2,
+            },
+            WriteError::HostOutOfRange {
+                slot: 3,
+                host_count: 2,
+            },
+        ),
+        (
+            HostSwitchError::HostSlotEmpty { host: 2 },
+            WriteError::HostSlotEmpty { slot: 2 },
+        ),
+        (
+            HostSwitchError::TimedOut {
+                operation: "reading current host",
+            },
+            WriteError::RequestTimedOut {
+                operation: HidppOperation::ChangeHost,
+            },
+        ),
+        (HostSwitchError::TargetNotFound, WriteError::DeviceNotFound),
+        (
+            HostSwitchError::Hidpp("busy".into()),
+            WriteError::Hidpp("busy".into()),
+        ),
+    ];
+    for (error, expected) in cases {
+        assert_eq!(WriteError::from(error), expected);
+    }
 }
 
 #[test]

@@ -4,13 +4,14 @@ on:
   push:
     tags:
       - "v*"
-  # Manual, publish-free full build: produces the signed/notarized DMGs and
-  # the signed exes as run artifacts. Everything publish-side (GitHub
-  # Release, R2 / channels/*, the installer site, homebrew-tap) is tag-gated
-  # below, so a branch dispatch cannot create a release named after the
-  # branch, overwrite an updater channel, or ping the tap. Do NOT dispatch
-  # on an existing v* tag — that re-enters the full publish path against an
-  # immutable release.
+  # Manual, publish-free full build: the same installers as a tag run, but
+  # UNSIGNED. The `release` environment that holds the signing secrets admits
+  # only `v*` tags, so a branch dispatch cannot sign or notarize; everything
+  # publish-side (GitHub Release, R2 / channels/*, the installer site,
+  # homebrew-tap) is tag-gated below as well, so it cannot create a release
+  # named after the branch, overwrite an updater channel, or ping the tap. Do
+  # NOT dispatch on an existing v* tag — that re-enters the full publish path
+  # against an immutable release.
   workflow_dispatch:
 
 env:
@@ -65,8 +66,9 @@ jobs:
 
   # Build (and sign/notarize) every platform's installers. The build matrix
   # lives in a reusable workflow so PRs / manual dispatches can build the same
-  # installers UNSIGNED for testing; here we pass sign: true for the signed,
-  # notarized artifacts the publish job ships.
+  # installers UNSIGNED for testing; a tag run passes sign: true for the
+  # signed, notarized artifacts the publish job ships. A branch dispatch
+  # builds unsigned: the `release` environment would refuse it anyway.
   build:
     name: Build installers
     needs: version
@@ -74,13 +76,14 @@ jobs:
     # does not check out builds nothing, so nothing publishes.
     if: ${{ !cancelled() && needs.version.result != 'failure' }}
     uses: ./.github/workflows/build.yml
-    # Required so build.yml can read the 1Password / Azure / R2 signing secrets.
+    # Required so build.yml can read the 1Password / Azure / R2 signing secrets,
+    # which live in the `release` environment its signing jobs enter.
     secrets: inherit
     permissions:
       contents: read
       id-token: write # build.yml mints an OIDC token for Azure Artifact Signing.
     with:
-      sign: true
+      sign: ${{ github.ref_type == 'tag' }}
       build_version: ${{ needs.version.outputs.build_version }}
       # Empty for a stable release; a beta builds at its own version.
       stamp_version: ${{ needs.version.outputs.stamp_version }}
@@ -114,6 +117,10 @@ jobs:
       queue: max
     permissions:
       contents: write
+    # The R2 credentials and the minisign / Sparkle private keys are `release`
+    # environment secrets; the environment's review gate is the last stop
+    # before anything immutable is written.
+    environment: release
     env:
       # stable or beta, from the `version` job.
       RELEASE_CHANNEL: ${{ needs.version.outputs.channel }}
@@ -261,45 +268,31 @@ jobs:
             echo "pacman=false" >> "$GITHUB_OUTPUT"
           fi
 
+      # The updater keys, the R2 credentials and the host, from the release
+      # Environment (the publish job runs inside it).
       - name: Load static updater publishing config from 1Password
-        id: r2_config
-        uses: 1password/load-secrets-action@70062d7a876d3eb6334754fa26efd2fbd90c32f2 # v5.0.1
+        uses: AprilNEA/actions/op-environment@3ffb3374a171f06ccfd28fcebc687c9f58516e9b # v1.0.0
         with:
-          export-env: false
-        env:
-          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
-          OPENLOGI_UPDATE_BASE_URL: ${{ secrets.OP_R2_SECRET_ITEM }}/OPENLOGI_UPDATE_BASE_URL
-          OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY: ${{ secrets.OP_R2_SECRET_ITEM }}/OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY
-          OPENLOGI_UPDATE_MINISIGN_SECRET_KEY: ${{ secrets.OP_R2_SECRET_ITEM }}/OPENLOGI_UPDATE_MINISIGN_SECRET_KEY
-          OPENLOGI_SPARKLE_PUBLIC_ED_KEY: ${{ secrets.OP_R2_SECRET_ITEM }}/OPENLOGI_SPARKLE_PUBLIC_ED_KEY
-          OPENLOGI_SPARKLE_PRIVATE_ED_KEY: ${{ secrets.OP_R2_SECRET_ITEM }}/OPENLOGI_SPARKLE_PRIVATE_ED_KEY
-          R2_ACCOUNT_ID: ${{ secrets.OP_R2_SECRET_ITEM }}/CLOUDFLARE_R2_ACCOUNT_ID
-          R2_BUCKET: ${{ secrets.OP_R2_SECRET_ITEM }}/CLOUDFLARE_R2_BUCKET
-          R2_ACCESS_KEY_ID: ${{ secrets.OP_R2_SECRET_ITEM }}/CLOUDFLARE_R2_ACCESS_KEY_ID
-          R2_SECRET_ACCESS_KEY: ${{ secrets.OP_R2_SECRET_ITEM }}/CLOUDFLARE_R2_SECRET_ACCESS_KEY
+          service-account-token: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          environment-id: ${{ vars.OP_RELEASE_ENVIRONMENT_ID }}
 
       - name: Validate R2 publishing configuration
         env:
-          OPENLOGI_UPDATE_BASE_URL: ${{ steps.r2_config.outputs.OPENLOGI_UPDATE_BASE_URL }}
-          OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY: ${{ steps.r2_config.outputs.OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY }}
-          OPENLOGI_UPDATE_MINISIGN_SECRET_KEY: ${{ steps.r2_config.outputs.OPENLOGI_UPDATE_MINISIGN_SECRET_KEY }}
-          OPENLOGI_SPARKLE_PUBLIC_ED_KEY: ${{ steps.r2_config.outputs.OPENLOGI_SPARKLE_PUBLIC_ED_KEY }}
-          OPENLOGI_SPARKLE_PRIVATE_ED_KEY: ${{ steps.r2_config.outputs.OPENLOGI_SPARKLE_PRIVATE_ED_KEY }}
-          R2_ACCOUNT_ID: ${{ steps.r2_config.outputs.R2_ACCOUNT_ID }}
-          R2_BUCKET: ${{ steps.r2_config.outputs.R2_BUCKET }}
-          R2_ACCESS_KEY_ID: ${{ steps.r2_config.outputs.R2_ACCESS_KEY_ID }}
-          R2_SECRET_ACCESS_KEY: ${{ steps.r2_config.outputs.R2_SECRET_ACCESS_KEY }}
+          R2_ACCOUNT_ID: ${{ env.CLOUDFLARE_R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ env.CLOUDFLARE_R2_BUCKET }}
+          R2_ACCESS_KEY_ID: ${{ env.CLOUDFLARE_R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ env.CLOUDFLARE_R2_SECRET_ACCESS_KEY }}
         run: |
           set -euo pipefail
-          : "${OPENLOGI_UPDATE_BASE_URL:?Configure OPENLOGI_UPDATE_BASE_URL in the R2 1Password item}"
-          : "${OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY:?Configure OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY in the R2 1Password item}"
-          : "${OPENLOGI_UPDATE_MINISIGN_SECRET_KEY:?Configure OPENLOGI_UPDATE_MINISIGN_SECRET_KEY in the R2 1Password item}"
-          : "${OPENLOGI_SPARKLE_PUBLIC_ED_KEY:?Configure OPENLOGI_SPARKLE_PUBLIC_ED_KEY in the R2 1Password item}"
-          : "${OPENLOGI_SPARKLE_PRIVATE_ED_KEY:?Configure OPENLOGI_SPARKLE_PRIVATE_ED_KEY in the R2 1Password item}"
-          : "${R2_ACCOUNT_ID:?Configure CLOUDFLARE_R2_ACCOUNT_ID in the R2 1Password item}"
-          : "${R2_BUCKET:?Configure CLOUDFLARE_R2_BUCKET in the R2 1Password item}"
-          : "${R2_ACCESS_KEY_ID:?Configure CLOUDFLARE_R2_ACCESS_KEY_ID in the R2 1Password item}"
-          : "${R2_SECRET_ACCESS_KEY:?Configure CLOUDFLARE_R2_SECRET_ACCESS_KEY in the R2 1Password item}"
+          : "${OPENLOGI_UPDATE_BASE_URL:?Configure OPENLOGI_UPDATE_BASE_URL in the release Environment}"
+          : "${OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY:?Configure OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY in the release Environment}"
+          : "${OPENLOGI_UPDATE_MINISIGN_SECRET_KEY:?Configure OPENLOGI_UPDATE_MINISIGN_SECRET_KEY in the release Environment}"
+          : "${OPENLOGI_SPARKLE_PUBLIC_ED_KEY:?Configure OPENLOGI_SPARKLE_PUBLIC_ED_KEY in the release Environment}"
+          : "${OPENLOGI_SPARKLE_PRIVATE_ED_KEY:?Configure OPENLOGI_SPARKLE_PRIVATE_ED_KEY in the release Environment}"
+          : "${R2_ACCOUNT_ID:?Configure CLOUDFLARE_R2_ACCOUNT_ID in the release Environment}"
+          : "${R2_BUCKET:?Configure CLOUDFLARE_R2_BUCKET in the release Environment}"
+          : "${R2_ACCESS_KEY_ID:?Configure CLOUDFLARE_R2_ACCESS_KEY_ID in the release Environment}"
+          : "${R2_SECRET_ACCESS_KEY:?Configure CLOUDFLARE_R2_SECRET_ACCESS_KEY in the release Environment}"
           installer_key=$(sed -n 's/^MINISIGN_PUBLIC_KEY=//p' packaging/linux/install.sh)
           if [ "$installer_key" != "$OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY" ]; then
             echo "The Linux installer minisign public key does not match the release key." >&2
@@ -312,9 +305,6 @@ jobs:
           sudo apt-get install -y minisign
 
       - name: Sign release artifacts with minisign
-        env:
-          OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY: ${{ steps.r2_config.outputs.OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY }}
-          OPENLOGI_UPDATE_MINISIGN_SECRET_KEY: ${{ steps.r2_config.outputs.OPENLOGI_UPDATE_MINISIGN_SECRET_KEY }}
         run: |
           set -euo pipefail
           key_file="${RUNNER_TEMP}/openlogi-minisign.key"
@@ -350,8 +340,6 @@ jobs:
       # records further down. The stage stays outside dist, which is uploaded
       # as release assets.
       - name: Generate static updater manifest
-        env:
-          OPENLOGI_UPDATE_BASE_URL: ${{ steps.r2_config.outputs.OPENLOGI_UPDATE_BASE_URL }}
         run: |
           set -euo pipefail
           cargo run -p xtask -- release latest-json \
@@ -370,9 +358,6 @@ jobs:
       # version` gave the build legs.
       - name: Generate Sparkle appcasts
         env:
-          OPENLOGI_UPDATE_BASE_URL: ${{ steps.r2_config.outputs.OPENLOGI_UPDATE_BASE_URL }}
-          OPENLOGI_SPARKLE_PUBLIC_ED_KEY: ${{ steps.r2_config.outputs.OPENLOGI_SPARKLE_PUBLIC_ED_KEY }}
-          OPENLOGI_SPARKLE_PRIVATE_ED_KEY: ${{ steps.r2_config.outputs.OPENLOGI_SPARKLE_PRIVATE_ED_KEY }}
           OPENLOGI_BUILD_VERSION: ${{ needs.version.outputs.build_version }}
         run: |
           set -euo pipefail
@@ -385,12 +370,12 @@ jobs:
 
       - name: Upload static updater assets to R2
         env:
-          AWS_ACCESS_KEY_ID: ${{ steps.r2_config.outputs.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ steps.r2_config.outputs.R2_SECRET_ACCESS_KEY }}
+          AWS_ACCESS_KEY_ID: ${{ env.CLOUDFLARE_R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ env.CLOUDFLARE_R2_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: auto
           AWS_REGION: auto
-          R2_ACCOUNT_ID: ${{ steps.r2_config.outputs.R2_ACCOUNT_ID }}
-          R2_BUCKET: ${{ steps.r2_config.outputs.R2_BUCKET }}
+          R2_ACCOUNT_ID: ${{ env.CLOUDFLARE_R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ env.CLOUDFLARE_R2_BUCKET }}
         run: |
           set -euo pipefail
           endpoint="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
@@ -432,13 +417,12 @@ jobs:
       - name: Compose the channel files
         id: channels
         env:
-          AWS_ACCESS_KEY_ID: ${{ steps.r2_config.outputs.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ steps.r2_config.outputs.R2_SECRET_ACCESS_KEY }}
+          AWS_ACCESS_KEY_ID: ${{ env.CLOUDFLARE_R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ env.CLOUDFLARE_R2_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: auto
           AWS_REGION: auto
-          R2_ACCOUNT_ID: ${{ steps.r2_config.outputs.R2_ACCOUNT_ID }}
-          R2_BUCKET: ${{ steps.r2_config.outputs.R2_BUCKET }}
-          OPENLOGI_UPDATE_BASE_URL: ${{ steps.r2_config.outputs.OPENLOGI_UPDATE_BASE_URL }}
+          R2_ACCOUNT_ID: ${{ env.CLOUDFLARE_R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ env.CLOUDFLARE_R2_BUCKET }}
         run: |
           set -euo pipefail
           endpoint="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
@@ -461,12 +445,12 @@ jobs:
       # The manifests go up first, then the feeds, as before records.
       - name: Upload the channel files to R2
         env:
-          AWS_ACCESS_KEY_ID: ${{ steps.r2_config.outputs.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ steps.r2_config.outputs.R2_SECRET_ACCESS_KEY }}
+          AWS_ACCESS_KEY_ID: ${{ env.CLOUDFLARE_R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ env.CLOUDFLARE_R2_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: auto
           AWS_REGION: auto
-          R2_ACCOUNT_ID: ${{ steps.r2_config.outputs.R2_ACCOUNT_ID }}
-          R2_BUCKET: ${{ steps.r2_config.outputs.R2_BUCKET }}
+          R2_ACCOUNT_ID: ${{ env.CLOUDFLARE_R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ env.CLOUDFLARE_R2_BUCKET }}
         run: |
           set -euo pipefail
           endpoint="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
@@ -524,15 +508,17 @@ jobs:
     permissions:
       contents: read
     steps:
-      # Needed by the local token-minting action.
-      - uses: actions/checkout@v7
-
+      - name: Load the automation 1Password Environment
+        uses: AprilNEA/actions/op-environment@3ffb3374a171f06ccfd28fcebc687c9f58516e9b # v1.0.0
+        with:
+          service-account-token: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          environment-id: ${{ vars.OP_AUTOMATION_ENVIRONMENT_ID }}
       - name: Mint installer-site token (GitHub App)
         id: installer_site_token
-        uses: ./.github/actions/github-app-token-from-1password
+        uses: AprilNEA/actions/github-app-token@3ffb3374a171f06ccfd28fcebc687c9f58516e9b # v1.0.0
         with:
-          op-service-account-token: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
-          op-github-app-item: ${{ secrets.OP_GITHUB_APP_ITEM }}
+          client-id: ${{ env.GITHUB_APP_ID }}
+          private-key: ${{ env.GITHUB_APP_PRIVATE_KEY }}
           owner: openlogi-org
           repositories: get
 
@@ -557,15 +543,17 @@ jobs:
     permissions:
       contents: read
     steps:
-      # The token-minting action below is a local action, so the repo must be
-      # on disk before it can run.
-      - uses: actions/checkout@v7
+      - name: Load the automation 1Password Environment
+        uses: AprilNEA/actions/op-environment@3ffb3374a171f06ccfd28fcebc687c9f58516e9b # v1.0.0
+        with:
+          service-account-token: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          environment-id: ${{ vars.OP_AUTOMATION_ENVIRONMENT_ID }}
       - name: Mint homebrew-tap token (GitHub App)
         id: tap_token
-        uses: ./.github/actions/github-app-token-from-1password
+        uses: AprilNEA/actions/github-app-token@3ffb3374a171f06ccfd28fcebc687c9f58516e9b # v1.0.0
         with:
-          op-service-account-token: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
-          op-github-app-item: ${{ secrets.OP_GITHUB_APP_ITEM }}
+          client-id: ${{ env.GITHUB_APP_ID }}
+          private-key: ${{ env.GITHUB_APP_PRIVATE_KEY }}
           owner: AprilNEA
           repositories: homebrew-tap
       - name: Dispatch homebrew-tap update

@@ -58,13 +58,23 @@ use pending::{
 };
 use raw::supports_short_long_hidpp;
 
-/// This is the size of the buffer incoming reports are read into.
-/// As we only care about HID++ reports, this equals to [`LONG_REPORT_LENGTH`].
-const MAX_REPORT_LENGTH: usize = LONG_REPORT_LENGTH;
+/// Largest *input* report on any node the channel opens. Logitech's
+/// very-long HID++ lighting report (`0x12`) is 64 bytes, and the MX Creative
+/// Keypad's grid-key and acknowledgement vendor PDUs (`0x13`) are 32.
+const MAX_INPUT_REPORT_LENGTH: usize = 64;
 
-/// Largest output report accepted by [`HidppChannel::write_raw_report`].
-/// Logitech's very-long HID++ lighting report (`0x12`) is 64 bytes.
-const MAX_RAW_REPORT_LENGTH: usize = 64;
+/// This is the size of the buffer incoming reports are read into. It must
+/// cover the widest report any node carries, not only the 20-byte HID++ long
+/// message: the read thread cannot re-request a truncated report, so a
+/// narrower buffer would hand listeners a frame that never existed.
+const MAX_REPORT_LENGTH: usize = MAX_INPUT_REPORT_LENGTH;
+
+/// Largest report [`HidppChannel::write_raw_report`] accepts, report ID
+/// included: the MX Creative Keypad's image-write vendor report (`0x14`) is
+/// 4095 bytes, the widest output report a HID descriptor on these nodes
+/// declares. Outputs are bounded separately from inputs because no device
+/// sends a report that wide, so the read buffer stays small.
+const MAX_RAW_WRITE_LENGTH: usize = 4095;
 
 /// The default time budget for a [`HidppChannel::send`] request: the report
 /// write plus the wait for a matching response. Callers that need a different
@@ -114,6 +124,17 @@ pub enum AbandonedReply {
 
 type MessageListener = Arc<dyn Fn(HidppMessage, bool) + Send + Sync + 'static>;
 
+/// A listener for every raw report the read thread reads, before the channel
+/// decides what protocol it belongs to.
+///
+/// The message listener path filters by construction: a report is only
+/// delivered once it parses as HID++ and its correlation is settled. Raw
+/// listeners see the wire's framing instead, which is how OpenLogi captures a
+/// device's vendor PDUs — the MX Creative Keypad's `0x13` grid-key reports —
+/// that share a node with the HID++ protocol and never parse as HID++
+/// messages. (OpenLogi local addition.)
+type RawReportListener = Arc<dyn Fn(&[u8]) + Send + Sync + 'static>;
+
 /// Removes a HID++ message listener when dropped.
 pub struct MessageListenerGuard {
     message_listeners: Weak<Mutex<HashMap<u32, MessageListener>>>,
@@ -124,6 +145,21 @@ impl Drop for MessageListenerGuard {
     fn drop(&mut self) {
         if let Some(message_listeners) = self.message_listeners.upgrade() {
             lock(&message_listeners).remove(&self.hdl);
+        }
+    }
+}
+
+/// Removes a raw report listener when dropped (OpenLogi local addition — see
+/// [`HidppChannel::add_raw_report_listener`]).
+pub struct RawReportListenerGuard {
+    raw_listeners: Weak<Mutex<HashMap<u32, RawReportListener>>>,
+    hdl: u32,
+}
+
+impl Drop for RawReportListenerGuard {
+    fn drop(&mut self) {
+        if let Some(raw_listeners) = self.raw_listeners.upgrade() {
+            lock(&raw_listeners).remove(&self.hdl);
         }
     }
 }
@@ -264,11 +300,15 @@ pub struct HidppChannel {
     /// messages.
     message_listeners: Arc<Mutex<HashMap<u32, MessageListener>>>,
 
+    /// Registered listeners for every raw incoming report, independent of the
+    /// HID++ parse-and-match decision (OpenLogi local addition).
+    raw_listeners: Arc<Mutex<HashMap<u32, RawReportListener>>>,
+
     /// The handle assigned to the next registered message listener.
     ///
-    /// A counter, not a random draw: a handle is only ever a key into
-    /// [`Self::message_listeners`], so counting up is collision-free by
-    /// construction where drawing needed a retry loop to be merely unlikely.
+    /// A counter, not a random draw: a handle is only ever a key into either
+    /// listener table, so counting up is collision-free by construction where
+    /// drawing needed a retry loop to be merely unlikely.
     next_listener_hdl: AtomicU32,
 
     /// The sender signaling the read thread to stop.
@@ -342,6 +382,7 @@ impl HidppChannel {
         let raw_channel_rc = Arc::new(raw);
         let pending_messages_rc = Arc::new(Mutex::new(PendingQueue::default()));
         let message_listeners_rc = Arc::new(Mutex::new(HashMap::<u32, MessageListener>::new()));
+        let raw_listeners_rc = Arc::new(Mutex::new(HashMap::<u32, RawReportListener>::new()));
 
         let (close_sender, close_receiver) = oneshot::channel::<()>();
 
@@ -349,6 +390,7 @@ impl HidppChannel {
             let raw_channel = Arc::clone(&raw_channel_rc);
             let pending_messages = Arc::clone(&pending_messages_rc);
             let message_listeners = Arc::clone(&message_listeners_rc);
+            let raw_listeners = Arc::clone(&raw_listeners_rc);
             let observer = observer.clone();
 
             move || {
@@ -356,6 +398,7 @@ impl HidppChannel {
                     &*raw_channel,
                     &pending_messages,
                     &message_listeners,
+                    &raw_listeners,
                     observer.as_deref(),
                     close_receiver,
                 ));
@@ -374,6 +417,7 @@ impl HidppChannel {
             pending_message_id: AtomicU64::new(1),
             next_listener_hdl: AtomicU32::new(1),
             message_listeners: message_listeners_rc,
+            raw_listeners: raw_listeners_rc,
             read_thread_close: Some(close_sender),
             read_thread_hdl: Some(read_thread_hdl),
         })
@@ -652,11 +696,11 @@ impl HidppChannel {
 
     /// Write one raw HID report through this channel's already-owned transport.
     ///
-    /// Reports must contain `1..=64` bytes, including their report ID. The
+    /// Reports must contain `1..=4095` bytes, including their report ID. The
     /// operation is bounded by [`SEND_RESPONSE_TIMEOUT`] and returns the exact
-    /// byte count reported by the transport. This is intended for HID++ report
-    /// widths such as the 64-byte `0x12` lighting frame that [`HidppMessage`]
-    /// cannot represent.
+    /// byte count reported by the transport. This is intended for report
+    /// widths that [`HidppMessage`] cannot represent: the 64-byte `0x12`
+    /// lighting frame, and the keypad's 4095-byte `0x14` image write.
     pub async fn write_raw_report(&self, report: &[u8]) -> Result<usize, ChannelError> {
         self.write_raw_report_with_timeout(report, SEND_RESPONSE_TIMEOUT)
             .await
@@ -667,7 +711,7 @@ impl HidppChannel {
         report: &[u8],
         timeout: Duration,
     ) -> Result<usize, ChannelError> {
-        if !(1..=MAX_RAW_REPORT_LENGTH).contains(&report.len()) {
+        if !(1..=MAX_RAW_WRITE_LENGTH).contains(&report.len()) {
             return Err(ChannelError::InvalidRawReportLength(report.len()));
         }
 
@@ -716,6 +760,40 @@ impl HidppChannel {
     pub fn remove_msg_listener(&self, hdl: u32) -> bool {
         lock(&self.message_listeners).remove(&hdl).is_some()
     }
+
+    /// Registers a listener called with every raw report read from the
+    /// transport, in the wire's framing, whatever protocol it belongs to
+    /// — how a device's vendor PDUs sharing the node with HID++, such as the
+    /// MX Creative Keypad's grid-key reports, are captured (OpenLogi local
+    /// addition).
+    ///
+    /// Returns a handle that can be used to remove the listener using a call
+    /// to [`Self::remove_raw_report_listener`].
+    pub fn add_raw_report_listener(&self, listener: impl Fn(&[u8]) + Send + Sync + 'static) -> u32 {
+        let hdl = self.next_listener_hdl.fetch_add(1, Ordering::Relaxed);
+        lock(&self.raw_listeners).insert(hdl, Arc::new(listener));
+        hdl
+    }
+
+    /// Registers a raw report listener that is automatically removed when the
+    /// returned guard is dropped.
+    pub fn add_raw_report_listener_guarded(
+        &self,
+        listener: impl Fn(&[u8]) + Send + Sync + 'static,
+    ) -> RawReportListenerGuard {
+        let hdl = self.add_raw_report_listener(listener);
+        RawReportListenerGuard {
+            raw_listeners: Arc::downgrade(&self.raw_listeners),
+            hdl,
+        }
+    }
+
+    /// Removes a previously registered raw report listener.
+    ///
+    /// Returns whether a listener was found using the given handle.
+    pub fn remove_raw_report_listener(&self, hdl: u32) -> bool {
+        lock(&self.raw_listeners).remove(&hdl).is_some()
+    }
 }
 
 /// Reads reports from `raw_channel` until `close` fires, resolving each one
@@ -728,6 +806,7 @@ async fn read_loop(
     raw_channel: &dyn RawHidChannel,
     pending_messages: &Mutex<PendingQueue>,
     message_listeners: &Mutex<HashMap<u32, MessageListener>>,
+    raw_listeners: &Mutex<HashMap<u32, RawReportListener>>,
     observer: Option<&dyn ChannelObserver>,
     mut close: oneshot::Receiver<()>,
 ) {
@@ -749,6 +828,14 @@ async fn read_loop(
             }
         };
 
+        // Raw listeners get the report as the wire framed it, before any parse
+        // or correlation decision — their whole purpose is to capture protocols
+        // this channel deliberately skips past.
+        let listeners: Vec<_> = lock(raw_listeners).values().cloned().collect();
+        for listener in listeners {
+            listener(&buf[..len]);
+        }
+
         let Some(msg) = HidppMessage::read_raw(&buf[..len]) else {
             // Only a HID++ report ID can be malformed here: any other ID
             // belongs to a protocol sharing this node — Logitech DJ on a
@@ -763,7 +850,12 @@ async fn read_loop(
                     ChannelObservation::MalformedIncomingReport { report }
                 }
             });
-            trace!(len, foreign, "report not HID++ — dropped");
+            trace!(
+                len,
+                foreign,
+                payload = format_args!("{:02x?}", &buf[..len.min(16)]),
+                "report not HID++ — dropped"
+            );
             continue;
         };
 

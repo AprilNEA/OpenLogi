@@ -1,16 +1,20 @@
 //! Permissions settings page (macOS / Linux).
 
-#[cfg(target_os = "macos")]
-use super::{App, AppState, InteractiveElement, Permission};
-use super::{IconName, Palette, SettingPage};
+#[cfg(target_os = "linux")]
+use super::Axis;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use super::{
-    ParentElement, PermissionStatus, SettingField, SettingGroup, SettingItem, SharedString, Styled,
-    div, h_flex, px, rgb, theme,
+    App, ParentElement, PermissionStatus, SettingField, SettingGroup, SettingItem, SharedString,
+    Styled, div, h_flex, px, rgb, theme,
 };
+#[cfg(target_os = "macos")]
+use super::{AppState, InteractiveElement, Permission};
+use super::{IconName, Palette, SettingPage};
+#[cfg(target_os = "macos")]
+use crate::ui::theme::FocusRingStyle as _;
 use crate::ui::theme::Typography as _;
 #[cfg(target_os = "macos")]
-use gpui_base::Button as BaseButton;
+use gpui_kit::base::Button as BaseButton;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use openlogi_permissions as permissions;
 
@@ -75,36 +79,51 @@ pub(super) fn permissions_page(has_camera: bool) -> SettingPage {
     let _ = has_camera;
 
     #[cfg(target_os = "linux")]
-    let page = page.group(SettingGroup::new().item({
-        // Description is only shown when access is not yet granted — no noise
-        // when everything is already working.
-        SettingItem::new(
-            tr!("permissions.input_device_access"),
-            SettingField::render(move |_, _, cx| {
-                let pal = theme::palette(cx);
-                let status = permissions::input_device_access();
-                let field = gpui_component::v_flex()
-                    .gap_1()
-                    .child(status_badge(status, pal));
-                let hint = match status {
-                    PermissionStatus::Denied => {
-                        Some(tr!("permissions.linux_input_access_denied_description"))
-                    }
-                    PermissionStatus::Unknown => {
-                        Some(tr!("permissions.linux_input_access_unknown_description"))
-                    }
-                    PermissionStatus::Granted => None,
-                };
-                if let Some(text) = hint {
-                    field.child(div().text_caption().text_color(pal.text_muted).child(text))
-                } else {
-                    field
-                }
-            }),
-        )
-    }));
+    let page = page.group(
+        SettingGroup::new().item(
+            SettingItem::new(
+                tr!("permissions.input_device_access"),
+                SettingField::render(move |_, _, cx| input_device_access_field(cx)),
+            )
+            // Vertical: the hint runs to several sentences, not a compact
+            // right-side control — stacked full-width below the title it wraps
+            // instead of running past the card edge.
+            .layout(Axis::Vertical),
+        ),
+    );
 
     page
+}
+
+/// Where a Linux user finds the fix for missing device access: install the
+/// udev rules, reload them, and reconnect the device.
+#[cfg(target_os = "linux")]
+const DEVICE_ACCESS_GUIDE_URL: &str =
+    "https://openlogi.org/docs/troubleshooting#udev-rules-do-not-grant-mouse-input-access";
+
+/// Live status of the Linux device nodes. The hint and the guide link appear
+/// only while access is missing — no noise when everything already works.
+#[cfg(target_os = "linux")]
+fn input_device_access_field(cx: &App) -> gpui::Div {
+    let pal = theme::palette(cx);
+    let status = permissions::input_device_access();
+    let field = gpui_kit::component::v_flex()
+        .w_full()
+        .gap_2()
+        .child(status_badge(status, pal));
+    let hint = match status {
+        PermissionStatus::Denied => tr!("permissions.linux_input_access_denied_description"),
+        PermissionStatus::Unknown => tr!("permissions.linux_input_access_unknown_description"),
+        PermissionStatus::Granted => return field,
+    };
+    field
+        .child(div().text_caption().text_color(pal.text_muted).child(hint))
+        .child(h_flex().child(super::assets::action_button(
+            "perm-input-device-guide",
+            tr!("permissions.linux_input_access_guide"),
+            pal,
+            |cx| cx.open_url(DEVICE_ACCESS_GUIDE_URL),
+        )))
 }
 
 #[cfg(target_os = "macos")]
@@ -130,12 +149,14 @@ fn input_monitoring_item() -> SettingItem {
                 None => PermissionStatus::Unknown,
             };
             let denied = badge == PermissionStatus::Denied;
-            let field = gpui_component::v_flex().gap_1().child(permission_field(
-                "perm-input-monitoring",
-                badge,
-                Permission::InputMonitoring,
-                cx,
-            ));
+            let field = gpui_kit::component::v_flex()
+                .gap_1()
+                .child(permission_field(
+                    "perm-input-monitoring",
+                    badge,
+                    Permission::InputMonitoring,
+                    cx,
+                ));
             let pal = theme::palette(cx);
             let hint = if stalled {
                 Some(tr!("permissions.input_monitoring_granted_but_unavailable"))
@@ -239,7 +260,7 @@ fn permission_field(
                 .cursor_pointer()
                 .bg(pal.control)
                 .hover(move |s| s.bg(pal.control_hover))
-                .focus_visible(move |s| s.bg(pal.control_hover))
+                .focus_visible(move |s| s.focus_ring(pal))
                 .child(action_label)
                 .on_click(move |_, _, cx| {
                     // Accessibility must be prompted in the agent (it owns the

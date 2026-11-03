@@ -23,6 +23,7 @@ mod cache;
 mod channel_cache;
 pub mod events;
 mod features;
+pub mod hid_only;
 pub mod hotplug;
 mod ledger;
 mod mappings;

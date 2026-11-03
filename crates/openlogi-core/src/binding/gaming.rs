@@ -1,18 +1,65 @@
 //! `0x8110` button layouts of G-series mice, dumped from real hardware.
 //! Slot `n` is spy bit `n` and asset slot `g{n + 1}`.
 
+use super::action::Action;
 use super::button::ButtonId;
 use crate::device::Capabilities;
+
+/// One `0x8110` slot of a G-series mouse.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Slot {
+    /// The button on the slot.
+    pub button: ButtonId,
+    /// Whether the slot sends nothing in host mode unless captured.
+    pub host_silent: bool,
+    /// The button's stock function on this model, for a button whose stock
+    /// function differs per model. `None` takes
+    /// [`default_binding`](super::default_binding).
+    pub stock: Option<Action>,
+}
+
+impl Slot {
+    /// A slot that host mode still reports to the OS as a standard HID
+    /// button.
+    #[must_use]
+    pub const fn native(button: ButtonId) -> Self {
+        Self {
+            button,
+            host_silent: false,
+            stock: None,
+        }
+    }
+
+    /// A slot that host mode silences, with the same stock function on every
+    /// model.
+    #[must_use]
+    pub const fn silent(button: ButtonId) -> Self {
+        Self {
+            button,
+            host_silent: true,
+            stock: None,
+        }
+    }
+
+    /// A slot that host mode silences, with the stock function `stock` on
+    /// this model. OpenLogi performs `stock` while it captures the button.
+    #[must_use]
+    pub const fn stock(button: ButtonId, stock: Action) -> Self {
+        Self {
+            button,
+            host_silent: true,
+            stock: Some(stock),
+        }
+    }
+}
 
 /// One model's button slots.
 #[derive(Debug, PartialEq, Eq)]
 pub struct GamingLayout {
     /// HID++ model keys sharing this layout.
     pub model_keys: &'static [&'static str],
-    /// The button on each slot.
-    pub slots: &'static [ButtonId],
-    /// Slots that send nothing in host mode unless captured.
-    pub host_silent: &'static [ButtonId],
+    /// The slots, in `0x8110` order.
+    pub slots: &'static [Slot],
     /// Stock DPI levels, used until the user sets presets.
     pub stock_dpi_presets: &'static [u16],
 }
@@ -21,25 +68,18 @@ pub struct GamingLayout {
 pub const G502_LIGHTSPEED: GamingLayout = GamingLayout {
     model_keys: &["0407f"],
     slots: &[
-        ButtonId::LeftClick,
-        ButtonId::RightClick,
-        ButtonId::MiddleClick,
-        ButtonId::Back,
-        ButtonId::Forward,
-        ButtonId::G6,
-        ButtonId::G7,
-        ButtonId::G8,
-        ButtonId::G9,
-        ButtonId::WheelTiltRight,
-        ButtonId::WheelTiltLeft,
-    ],
-    host_silent: &[
-        ButtonId::G6,
-        ButtonId::G7,
-        ButtonId::G8,
-        ButtonId::G9,
-        ButtonId::WheelTiltRight,
-        ButtonId::WheelTiltLeft,
+        Slot::native(ButtonId::LeftClick),
+        Slot::native(ButtonId::RightClick),
+        Slot::native(ButtonId::MiddleClick),
+        Slot::native(ButtonId::Back),
+        Slot::native(ButtonId::Forward),
+        Slot::stock(ButtonId::G6, Action::DpiShift),
+        Slot::stock(ButtonId::G7, Action::PreviousDpiPreset),
+        Slot::stock(ButtonId::G8, Action::NextDpiPreset),
+        // G9 cycles the onboard profiles, which has no host equivalent.
+        Slot::stock(ButtonId::G9, Action::None),
+        Slot::silent(ButtonId::WheelTiltRight),
+        Slot::silent(ButtonId::WheelTiltLeft),
     ],
     stock_dpi_presets: &[400, 800, 1600, 3200, 6400],
 };
@@ -53,13 +93,12 @@ pub const G502_LIGHTSPEED: GamingLayout = GamingLayout {
 pub const STANDARD_BUTTONS: GamingLayout = GamingLayout {
     model_keys: &[],
     slots: &[
-        ButtonId::LeftClick,
-        ButtonId::RightClick,
-        ButtonId::MiddleClick,
-        ButtonId::Back,
-        ButtonId::Forward,
+        Slot::native(ButtonId::LeftClick),
+        Slot::native(ButtonId::RightClick),
+        Slot::native(ButtonId::MiddleClick),
+        Slot::native(ButtonId::Back),
+        Slot::native(ButtonId::Forward),
     ],
-    host_silent: &[],
     stock_dpi_presets: &[],
 };
 
@@ -115,7 +154,7 @@ impl GamingLayout {
     /// The slot of `button`.
     #[must_use]
     pub fn slot_of(&self, button: ButtonId) -> Option<u8> {
-        let slot = self.slots.iter().position(|&b| b == button)?;
+        let slot = self.slots.iter().position(|slot| slot.button == button)?;
         u8::try_from(slot).ok()
     }
 
@@ -123,21 +162,36 @@ impl GamingLayout {
     #[must_use]
     pub fn button_for_g_number(&self, number: u8) -> Option<ButtonId> {
         let slot = usize::from(number.checked_sub(1)?);
-        self.slots.get(slot).copied()
+        self.slots.get(slot).map(|slot| slot.button)
+    }
+
+    /// The button on each slot, in slot order.
+    pub fn buttons(&self) -> impl Iterator<Item = ButtonId> + '_ {
+        self.slots.iter().map(|slot| slot.button)
     }
 
     /// Every slot but the primary clicks.
     pub fn remappable(&self) -> impl Iterator<Item = ButtonId> + '_ {
-        self.slots
-            .iter()
-            .copied()
+        self.buttons()
             .filter(|b| !matches!(b, ButtonId::LeftClick | ButtonId::RightClick))
     }
 
     /// Whether rebinding `button` needs host mode.
     #[must_use]
     pub fn needs_host_mode(&self, button: ButtonId) -> bool {
-        self.host_silent.contains(&button)
+        self.slot(button).is_some_and(|slot| slot.host_silent)
+    }
+
+    /// The stock function of `button` on this model, if it differs per
+    /// model. [`default_binding_on`](super::default_binding_on) falls back to
+    /// [`default_binding`](super::default_binding) for every other button.
+    #[must_use]
+    pub fn stock_action(&self, button: ButtonId) -> Option<Action> {
+        self.slot(button)?.stock.clone()
+    }
+
+    fn slot(&self, button: ButtonId) -> Option<&Slot> {
+        self.slots.iter().find(|slot| slot.button == button)
     }
 }
 
@@ -198,10 +252,67 @@ mod tests {
     }
 
     #[test]
-    fn host_silent_buttons_are_slots() {
+    fn g502_lightspeed_keeps_its_stock_functions() {
+        let layout = &G502_LIGHTSPEED;
+        assert_eq!(layout.stock_action(ButtonId::G6), Some(Action::DpiShift));
+        assert_eq!(
+            layout.stock_action(ButtonId::G7),
+            Some(Action::PreviousDpiPreset)
+        );
+        assert_eq!(
+            layout.stock_action(ButtonId::G8),
+            Some(Action::NextDpiPreset)
+        );
+        assert_eq!(layout.stock_action(ButtonId::G9), Some(Action::None));
+        assert_eq!(layout.stock_action(ButtonId::WheelTiltLeft), None);
+        assert_eq!(layout.stock_action(ButtonId::Back), None);
+        assert!(layout.needs_host_mode(ButtonId::WheelTiltRight));
+    }
+
+    #[test]
+    fn the_default_of_a_g_button_comes_from_its_layout() {
+        use super::super::defaults::{default_binding, default_binding_on};
+        let g502 = Some(&G502_LIGHTSPEED);
+        assert_eq!(default_binding_on(g502, ButtonId::G6), Action::DpiShift);
+        assert_eq!(default_binding_on(None, ButtonId::G6), Action::None);
+        assert_eq!(default_binding(ButtonId::G8), Action::None);
+        for button in [
+            ButtonId::Back,
+            ButtonId::WheelTiltLeft,
+            ButtonId::MiddleClick,
+        ] {
+            assert_eq!(default_binding_on(g502, button), default_binding(button));
+        }
+    }
+
+    /// Gesture mode and wheel hold resolve defaults without a layout, which
+    /// is right only while no G-series button offers them.
+    #[test]
+    fn g_buttons_offer_neither_gesture_mode_nor_wheel_hold() {
+        for button in ButtonId::G_BUTTONS {
+            assert!(!button.supports_gesture_mode(), "{button:?}");
+            assert!(!button.supports_wheel_hold(), "{button:?}");
+        }
+    }
+
+    #[test]
+    fn every_g_button_on_a_dumped_layout_has_a_stock_function() {
         for layout in LAYOUTS {
-            for button in layout.host_silent {
-                assert!(layout.slot_of(*button).is_some(), "{button:?}");
+            for slot in layout.slots {
+                if ButtonId::G_BUTTONS.contains(&slot.button) {
+                    assert!(slot.stock.is_some(), "{:?}", slot.button);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_stock_function_belongs_to_a_host_silent_slot() {
+        for layout in LAYOUTS {
+            for slot in layout.slots {
+                if slot.stock.is_some() {
+                    assert!(slot.host_silent, "{:?}", slot.button);
+                }
             }
         }
     }

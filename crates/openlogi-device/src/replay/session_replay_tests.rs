@@ -16,9 +16,9 @@ use crate::session::gesture::CaptureSpec;
 use crate::{
     CaptureChannelSlot, CaptureHost, CaptureSessionFailure, CaptureSessionOutcome,
     CaptureSessionStop, CapturedInput, ChannelRegistry, DeviceIoGate, DeviceIoSignal, DeviceRoute,
-    Enumerator, NodeId, NodeInfo, PairingCommand, PairingEvent, ReceiverSelector, SharedChannel,
-    device_io_channel, reprog_controls, run_capture_session, run_keyboard_capture_session,
-    run_pairing,
+    Enumerator, KeyboardWanted, NodeId, NodeInfo, PairingCommand, PairingEvent, ReceiverSelector,
+    SharedChannel, device_io_channel, reprog_controls, run_capture_session,
+    run_keyboard_capture_session, run_pairing,
 };
 
 const CAPTURE_CHANNEL: &str = "capture-session";
@@ -96,11 +96,7 @@ async fn keyboard_capture_replay_restores_original_reporting_on_normal_shutdown(
     let (shutdown, host) = replay.host(sink);
     let capture = run_keyboard_capture_session(
         replay.route.clone(),
-        watch::channel(BTreeMap::from([(
-            KEYBOARD_CID,
-            ButtonId::control(KEYBOARD_CID),
-        )]))
-        .1,
+        watch::channel(keyboard_keys(&[KEYBOARD_CID])).1,
         host,
     );
 
@@ -247,7 +243,7 @@ async fn capture_replay_failed_wake_discovery_restores_before_retry() {
                 if keyboard {
                     run_keyboard_capture_session(
                         replay.route.clone(),
-                        watch::channel(BTreeMap::from([(cid, ButtonId::control(cid))])).1,
+                        watch::channel(keyboard_keys(&[cid])).1,
                         host,
                     )
                     .await
@@ -700,10 +696,14 @@ fn capture_prelude(table: &[u16], control_flags: (u8, u8)) -> Vec<CassetteExchan
 }
 
 /// `0x1b04` controls that dispatch as their own control buttons.
-fn keyboard_keys(cids: &[u16]) -> BTreeMap<u16, ButtonId> {
-    cids.iter()
-        .map(|&cid| (cid, ButtonId::control(cid)))
-        .collect()
+fn keyboard_keys(cids: &[u16]) -> KeyboardWanted {
+    KeyboardWanted {
+        controls: cids
+            .iter()
+            .map(|&cid| (cid, ButtonId::control(cid)))
+            .collect(),
+        grid: BTreeMap::new(),
+    }
 }
 
 /// The payload of every `setCidReporting` write in `reports`, in order.

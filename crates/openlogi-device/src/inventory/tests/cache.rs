@@ -1,6 +1,6 @@
 //! The probe cache: what it keys, when an entry ages out, and when a cached answer is reused.
-
 use super::*;
+use crate::channel::scripted::{feature_error, ping_reply};
 
 #[test]
 fn direct_codename_prefers_hidpp_marketing_name_over_generic_os_name() {
@@ -281,15 +281,15 @@ async fn a_duplicate_candidate_opens_only_one_channel() {
     );
 }
 
-/// A backend whose single node opens into a channel that still reports itself
-/// connected but rejects every write: a handle that looks alive yet can no
-/// longer reach the device.
-struct RejectingWritesBackend {
+/// A backend whose single node opens into the channel that `open` builds. The
+/// channel always reports itself connected, whatever it does with requests.
+struct DirectChannelBackend {
     node: NodeInfo,
+    open: fn() -> ScriptedRawHidChannel,
 }
 
 #[hidpp::async_trait]
-impl crate::backend::HidBackend for RejectingWritesBackend {
+impl crate::backend::HidBackend for DirectChannelBackend {
     async fn enumerate(&self) -> Result<Vec<NodeInfo>, crate::backend::BackendError> {
         Ok(vec![self.node.clone()])
     }
@@ -302,8 +302,7 @@ impl crate::backend::HidBackend for RejectingWritesBackend {
         &self,
         _node: &NodeInfo,
     ) -> Result<Option<Arc<hidpp::channel::HidppChannel>>, crate::backend::BackendError> {
-        let (raw, _) = ScriptedRawHidChannel::with_failing_writes(|_| None, |_| true);
-        Ok(Some(scripted_channel(raw).await))
+        Ok(Some(scripted_channel((self.open)()).await))
     }
 
     async fn open_raw_writer(
@@ -311,7 +310,7 @@ impl crate::backend::HidBackend for RejectingWritesBackend {
         _node: &NodeInfo,
     ) -> Result<Box<dyn crate::backend::RawWriter>, crate::backend::BackendError> {
         Err(crate::backend::BackendError::Backend(
-            "rejecting-writes test backend has no raw writer".into(),
+            "direct-channel test backend has no raw writer".into(),
         ))
     }
 
@@ -320,17 +319,23 @@ impl crate::backend::HidBackend for RejectingWritesBackend {
     }
 }
 
-/// A stale direct-device probe whose refresh fails is a failed probe, not a
-/// cache hit. Serving the cached answer in its place reports an unreachable
-/// channel healthy, so the ledger never retires it and the device stays dead
-/// until the agent restarts. A silent device takes the same branch once its
-/// request times out; rejected writes reach it without waiting.
-#[tokio::test]
-async fn a_failed_direct_reprobe_retires_the_channel() {
-    let info = scripted_node_info("unreachable-direct");
-    let node = info.id.clone();
-    let backend = Arc::new(RejectingWritesBackend { node: info });
-    let mut enumerator = Enumerator::with_backend(backend);
+/// A handle that looks alive yet can no longer reach the device: it rejects
+/// every write.
+fn rejecting_writes() -> ScriptedRawHidChannel {
+    ScriptedRawHidChannel::with_failing_writes(|_| None, |_| true).0
+}
+
+/// A device that answers the protocol ping and fails every other request, as
+/// a lossy link presents a walk whose replies go missing.
+fn answering_only_its_ping() -> ScriptedRawHidChannel {
+    ScriptedRawHidChannel::with_responder(|request| {
+        ping_reply(request).or_else(|| Some(feature_error(request, 0x01)))
+    })
+    .0
+}
+
+/// A due cache entry for a pointer device whose last walk completed.
+fn stale_pointer_entry() -> Cached {
     let mut last_good = cache_entry();
     last_good.probe.protocol = ProbedProtocol::Hidpp20 {
         capabilities: Capabilities {
@@ -342,9 +347,26 @@ async fn a_failed_direct_reprobe_retires_the_channel() {
     last_good.probed_at = Instant::now()
         .checked_sub(REFRESH_INTERVAL + Duration::from_nanos(1))
         .expect("the refresh interval fits the monotonic clock");
+    last_good
+}
+
+/// A stale direct-device probe whose refresh fails is a failed probe, not a
+/// cache hit. Serving the cached answer in its place reports an unreachable
+/// channel healthy, so the ledger never retires it and the device stays dead
+/// until the agent restarts. A silent device takes the same branch once its
+/// request times out; rejected writes reach it without waiting.
+#[tokio::test]
+async fn a_failed_direct_reprobe_retires_the_channel() {
+    let info = scripted_node_info("unreachable-direct");
+    let node = info.id.clone();
+    let backend = Arc::new(DirectChannelBackend {
+        node: info,
+        open: rejecting_writes,
+    });
+    let mut enumerator = Enumerator::with_backend(backend);
     enumerator
         .cache
-        .insert(CacheKey::Direct(node.clone()), last_good);
+        .insert(CacheKey::Direct(node.clone()), stale_pointer_entry());
 
     enumerator
         .enumerate()
@@ -361,5 +383,47 @@ async fn a_failed_direct_reprobe_retires_the_channel() {
     assert!(
         enumerator.channels.is_retiring(&node),
         "a second failed reprobe must retire the channel so it reopens"
+    );
+}
+
+/// A stale direct-device probe whose device answers the ping but not the
+/// re-read keeps its channel and stays published. The ping shows that the
+/// channel delivers replies. Retiring it for a re-read that a lossy Bluetooth
+/// link cut short ends control capture on a working device (#2107).
+#[tokio::test]
+async fn a_direct_reprobe_answered_by_its_ping_keeps_the_channel() {
+    let info = scripted_node_info("lossy-direct");
+    let node = info.id.clone();
+    let backend = Arc::new(DirectChannelBackend {
+        node: info,
+        open: answering_only_its_ping,
+    });
+    let mut enumerator = Enumerator::with_backend(backend);
+    enumerator
+        .cache
+        .insert(CacheKey::Direct(node.clone()), stale_pointer_entry());
+
+    // Past the ledger's retirement threshold and its replay grace both.
+    for pass in 1..=4 {
+        let inventories = enumerator
+            .enumerate()
+            .await
+            .expect("a reprobe the device answered settles");
+        assert!(
+            !enumerator.channels.is_retiring(&node),
+            "pass {pass}: a channel that answers its ping is not dead"
+        );
+        assert_eq!(
+            inventories.len(),
+            1,
+            "pass {pass}: the device stays published from its last complete walk"
+        );
+    }
+    assert!(
+        enumerator
+            .cache
+            .get(&CacheKey::Direct(node))
+            .is_some_and(|entry| entry.probe.capabilities().is_some()),
+        "the unfinished re-read must not replace the complete walk"
     );
 }

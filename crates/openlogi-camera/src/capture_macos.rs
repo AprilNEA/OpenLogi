@@ -8,6 +8,16 @@
 //! `NSCameraUsageDescription`; from an unbundled binary macOS denies access,
 //! which surfaces as [`CaptureError::AccessDenied`].
 //!
+//! A preview streams at the [`StreamMode`] it is handed, when the camera lists
+//! any (see [`stream_modes`]): the format and frame duration are set on the
+//! device itself, and the preview keeps the device's configuration lock until
+//! it ends. That lock is what makes the mode real: a session that does not
+//! hold it resets the device to its preset's format at `startRunning` (1080p
+//! at 24 fps by default), whatever was set before. The mode belongs to the
+//! preview alone. The device object is shared by every process and keeps the
+//! last format anyone set, but an application that opens the camera sets its
+//! own, so nothing here is a setting for other applications to inherit.
+//!
 //! FFI is `objc2` (matching the rest of the workspace's ObjC surface). The
 //! `AVFoundation` classes aren't in a typed framework crate, so this uses the
 //! `objc2` runtime (`class!` + `msg_send!`) with **`Retained<T>` for every
@@ -30,16 +40,43 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use block2::RcBlock;
-use objc2::rc::Retained;
+use objc2::encode::{Encode, Encoding};
+use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::{AnyObject, Bool, NSObject};
 use objc2::{AnyThread, DefinedClass, class, define_class, msg_send};
 
 pub use crate::capture_types::{CaptureError, Frame};
+use crate::macos::formats::{self, FrameTiming, Selection};
+use crate::{StreamMode, StreamModes};
 
 /// kCVPixelFormatType_32BGRA ('BGRA').
 const PIXEL_FORMAT_32BGRA: u32 = 0x4247_5241;
 /// kCVPixelBufferLock_ReadOnly.
 const LOCK_READ_ONLY: u64 = 1;
+
+/// CoreMedia's `CMTime`: `value / timescale` seconds, plus flags and an epoch.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct CMTime {
+    value: i64,
+    timescale: i32,
+    flags: u32,
+    epoch: i64,
+}
+
+// SAFETY: `repr(C)` and field-for-field the C struct `{?=qiIq}`
+// (`CMTimeValue`, `CMTimeScale`, `CMTimeFlags`, `CMTimeEpoch`).
+unsafe impl Encode for CMTime {
+    const ENCODING: Encoding = Encoding::Struct(
+        "?",
+        &[
+            Encoding::LongLong,
+            Encoding::Int,
+            Encoding::UInt,
+            Encoding::LongLong,
+        ],
+    );
+}
 
 /// One session's frame plumbing: the delegate writes, the owning [`Session`] /
 /// [`CameraStream`] reads. Owned per session — the Windows and Linux backends
@@ -56,8 +93,10 @@ struct FrameSink {
     /// from a repeat without comparing pixel buffers.
     generation: AtomicU64,
     /// Target max width for delegate downsampling (0 = full resolution).
-    /// Previews set this so an oversized buffer decimates down in one strided
-    /// pass instead of copying (and uploading) pixels they can never show.
+    /// A preview on the fixed 720p preset sets this so a camera that streams
+    /// wider than asked decimates down in one strided pass instead of copying
+    /// (and uploading) pixels the preview does not need. A preview at a chosen
+    /// mode leaves it 0: the size picked is the size shown.
     target_width: AtomicU32,
 }
 
@@ -70,6 +109,9 @@ unsafe extern "C" {
 #[link(name = "CoreMedia", kind = "framework")]
 unsafe extern "C" {
     fn CMSampleBufferGetImageBuffer(sbuf: *mut AnyObject) -> *mut AnyObject;
+    /// `value / timescale` seconds, as a valid `CMTime`. A pure function of its
+    /// arguments, with no precondition.
+    safe fn CMTimeMake(value: i64, timescale: i32) -> CMTime;
 }
 
 #[link(name = "CoreVideo", kind = "framework")]
@@ -319,6 +361,11 @@ struct Session {
     _output: Retained<AnyObject>,
     _delegate: Retained<FrameDelegate>,
     sink: Arc<FrameSink>,
+    /// The device's configuration lock, held for as long as the session runs
+    /// when a stream mode was set (see [`DeviceLock`]). It is a field, so it
+    /// is released *after* [`Drop for Session`](Session) has stopped the
+    /// session: the format the camera is left at is the one the stream used.
+    _format_lock: Option<DeviceLock>,
 }
 
 impl Drop for Session {
@@ -330,19 +377,227 @@ impl Drop for Session {
     }
 }
 
+/// The exclusive configuration lock on a capture device
+/// (`lockForConfiguration:`), released on drop.
+///
+/// A session's own `startRunning` resets a device it does not hold the lock on
+/// to the session preset's format (1080p at 24 fps for the default `High`),
+/// discarding the format and frame duration set a moment earlier. Measured on
+/// a StreamCam: a 1080p / 60 fps request delivered 24 fps at 1080p, and a 720p
+/// request delivered 1080p, until the lock was kept for the whole session, after
+/// which every requested mode arrived exactly (59.7 and 5.0 fps at both sizes).
+/// So whoever sets a stream mode keeps this guard until the stream ends.
+///
+/// The cost is what Apple documents for holding it: no other process can change
+/// the camera's format meanwhile, and only for as long as the preview is open.
+struct DeviceLock {
+    device: Retained<AnyObject>,
+}
+
+impl DeviceLock {
+    /// Take the lock on `device`, which fails when another process (or an
+    /// earlier session of this one) holds it.
+    fn acquire(device: &Retained<AnyObject>) -> Result<Self, CaptureError> {
+        let mut error: *mut AnyObject = std::ptr::null_mut();
+        // SAFETY: documented selector on a valid `AVCaptureDevice`; `error` is
+        // only written to and never read.
+        let locked: bool = unsafe { msg_send![&**device, lockForConfiguration: &mut error] };
+        if locked {
+            Ok(Self {
+                device: Retained::clone(device),
+            })
+        } else {
+            Err(CaptureError::Setup("device configuration lock".into()))
+        }
+    }
+}
+
+impl Drop for DeviceLock {
+    fn drop(&mut self) {
+        // SAFETY: this guard took the lock in `acquire` and releases it once.
+        unsafe {
+            let _: () = msg_send![&*self.device, unlockForConfiguration];
+        }
+    }
+}
+
+/// What a session is opened for.
+#[derive(Clone, Copy)]
+enum Purpose {
+    /// One full-resolution frame, at whatever the camera streams by default.
+    Snapshot,
+    /// The live preview: mirrored. It opens at the given mode when the camera
+    /// lists any, with `None` asking for the camera's default; a camera that
+    /// lists none keeps the 720p preset, with frames capped at its width.
+    Preview(Option<StreamMode>),
+}
+
+/// The modes the camera with `unique_id` can stream at.
+///
+/// Reads the device's format list only — no capture session, so no Camera
+/// permission. A camera whose formats name no frame rate lists nothing, which
+/// callers read as "nothing to choose".
+///
+/// # Errors
+/// [`CaptureError::NotFound`] when no camera has that id.
+pub fn stream_modes(unique_id: &str) -> Result<StreamModes, CaptureError> {
+    // An explicit pool: the device and its format list are autoreleased, and a
+    // caller thread with no run loop drains none on its own.
+    autoreleasepool(|_| {
+        let device = device_with_unique_id(unique_id).ok_or(CaptureError::NotFound)?;
+        Ok(formats::offered(&crate::macos::device_formats(&device)))
+    })
+}
+
+/// Make `selection` the device's active format and frame duration, and return
+/// the configuration lock that keeps it so.
+///
+/// `device` must already be an input of `session`: the properties are set
+/// together between the session's `beginConfiguration` and `commitConfiguration`,
+/// which is how AVFoundation documents changing them. The returned lock must
+/// outlive the session's `startRunning` (see [`DeviceLock`]): without it the
+/// session puts the device back on its preset's format.
+/// (`AVCaptureSessionPresetInputPriority`, the preset that would say otherwise,
+/// does not exist on macOS, and setting the format on an attached device is
+/// not enough on its own, as measured.)
+fn activate_format(
+    session: &AnyObject,
+    device: &Retained<AnyObject>,
+    selection: &Selection,
+) -> Result<DeviceLock, CaptureError> {
+    // SAFETY: documented selectors on a valid session; every `begin` is paired
+    // with a `commit` on all paths, including the error return of the closure.
+    unsafe {
+        let _: () = msg_send![session, beginConfiguration];
+        let result = DeviceLock::acquire(device).and_then(|lock| {
+            set_format(device, selection, &lock)?;
+            Ok(lock)
+        });
+        let _: () = msg_send![session, commitConfiguration];
+        result
+    }
+}
+
+/// Write `selection`'s format and frame duration to `device`, which `_lock`
+/// proves this caller has locked for configuration.
+fn set_format(
+    device: &AnyObject,
+    selection: &Selection,
+    _lock: &DeviceLock,
+) -> Result<(), CaptureError> {
+    // A duration outside the active format's range raises an
+    // `NSInvalidArgumentException`, which Rust cannot unwind through: the
+    // durations below come from the format's own range or from a rate inside it
+    // (see `formats::FrameTiming`), and every index is checked against the live
+    // arrays first.
+    let stale = || CaptureError::Setup("camera formats changed".into());
+    // SAFETY: documented selectors on a valid `AVCaptureDevice`, the
+    // `AVCaptureDeviceFormat` and `AVFrameRateRange` it lists (autoreleased, and
+    // used before returning), and CMTime values of the exact C layout.
+    unsafe {
+        let formats: *mut AnyObject = msg_send![device, formats];
+        let format_count: usize = if formats.is_null() {
+            0
+        } else {
+            msg_send![formats, count]
+        };
+        if selection.format >= format_count {
+            return Err(stale());
+        }
+        let format: *mut AnyObject = msg_send![formats, objectAtIndex: selection.format];
+
+        let ranges: *mut AnyObject = msg_send![format, videoSupportedFrameRateRanges];
+        let range_count: usize = if ranges.is_null() {
+            0
+        } else {
+            msg_send![ranges, count]
+        };
+        if selection.range >= range_count {
+            return Err(stale());
+        }
+        let range: *mut AnyObject = msg_send![ranges, objectAtIndex: selection.range];
+
+        let (min_duration, max_duration): (CMTime, CMTime) = match selection.timing {
+            FrameTiming::Reported => (
+                msg_send![range, minFrameDuration],
+                msg_send![range, maxFrameDuration],
+            ),
+            FrameTiming::Rate(fps) => {
+                let timescale = i32::try_from(fps).map_err(|_| stale())?;
+                let duration = CMTimeMake(1, timescale);
+                (duration, duration)
+            }
+        };
+
+        let _: () = msg_send![device, setActiveFormat: format];
+        let _: () = msg_send![device, setActiveVideoMinFrameDuration: min_duration];
+        let _: () = msg_send![device, setActiveVideoMaxFrameDuration: max_duration];
+    }
+    Ok(())
+}
+
+/// Point a preview at `requested`'s frame size and rate (or the camera's
+/// default), or at the fixed 720p preset when the camera lists no modes.
+///
+/// 720p is sharp on a Retina-scale preview (the 480pt box is 960 physical
+/// pixels wide) while still a fraction of the native 1080p per-frame copy and
+/// texture upload.
+fn set_preview_format(
+    session: &AnyObject,
+    device: &Retained<AnyObject>,
+    requested: Option<StreamMode>,
+) -> Result<PreviewFormat, CaptureError> {
+    let listed = crate::macos::device_formats(device);
+    if let Some(selection) = formats::choose(&listed, requested) {
+        tracing::debug!(mode = %selection.mode, "camera preview mode");
+        return Ok(PreviewFormat {
+            lock: Some(activate_format(session, device, &selection)?),
+            // The size the user picked reaches the preview as it is: a stride
+            // decimation of a 1080p frame would hand over 960x540, which is
+            // less than the 720p it is meant to beat.
+            max_width: 0,
+        });
+    }
+    // SAFETY: documented selectors on a valid session; the preset is
+    // AVFoundation's exported `NSString` constant.
+    unsafe {
+        let can: bool = msg_send![session, canSetSessionPreset: AVCaptureSessionPreset1280x720];
+        if can {
+            let _: () = msg_send![session, setSessionPreset: AVCaptureSessionPreset1280x720];
+        }
+    }
+    Ok(PreviewFormat {
+        lock: None,
+        // A camera that ignores the preset and streams wider is decimated down.
+        max_width: PRESET_PREVIEW_WIDTH,
+    })
+}
+
+/// What [`set_preview_format`] leaves a preview session with.
+struct PreviewFormat {
+    /// The configuration lock a chosen mode needs held while the session runs
+    /// (see [`DeviceLock`]); the preset fallback needs none.
+    lock: Option<DeviceLock>,
+    /// The widest frame the preview keeps, in pixels (0 = as delivered).
+    max_width: u32,
+}
+
+/// The preview's frame width under the fixed 720p preset.
+const PRESET_PREVIEW_WIDTH: u32 = 1280;
+
 /// Authorize, wire up, and start a capture session on `unique_id`. Frames
 /// begin arriving in the returned session's [`FrameSink`] shortly after this
 /// returns.
-fn open_session(unique_id: &str, low_res: bool) -> Result<Session, CaptureError> {
+fn open_session(unique_id: &str, purpose: Purpose) -> Result<Session, CaptureError> {
     ensure_access()?;
     let device = device_with_unique_id(unique_id).ok_or(CaptureError::NotFound)?;
-    // Previews cap at 720p-wide frames (the preview preset below already
-    // delivers exactly that; the decimator only kicks in if a camera ignores
-    // the preset and streams wider). Snapshots keep full resolution.
+    let preview = matches!(purpose, Purpose::Preview(_));
+    // Frames are kept as delivered until the preview's format says otherwise
+    // (below), which is also what a snapshot keeps.
     let sink = Arc::new(FrameSink {
         latest: Mutex::new(None),
         generation: AtomicU64::new(0),
-        target_width: AtomicU32::new(if low_res { 1280 } else { 0 }),
+        target_width: AtomicU32::new(0),
     });
 
     // SAFETY: standard AVCaptureSession wiring with documented selectors; every
@@ -368,16 +623,18 @@ fn open_session(unique_id: &str, low_res: bool) -> Result<Session, CaptureError>
         }
         let _: () = msg_send![&*session, addInput: input];
 
-        // Preview streams capture at 720p — sharp on a Retina-scale preview
-        // (the 480pt box is 960 physical pixels wide) while still a fraction
-        // of the native 1080p per-frame copy + texture upload.
-        if low_res {
-            let can: bool =
-                msg_send![&*session, canSetSessionPreset: AVCaptureSessionPreset1280x720];
-            if can {
-                let _: () = msg_send![&*session, setSessionPreset: AVCaptureSessionPreset1280x720];
+        // After `addInput`: the device must belong to the session for the
+        // format set here to be applied. The lock it returns is kept for the
+        // session's life (see `DeviceLock`); the early `?` returns below drop
+        // it, which releases the device.
+        let format_lock = match purpose {
+            Purpose::Preview(requested) => {
+                let format = set_preview_format(&session, &device, requested)?;
+                sink.target_width.store(format.max_width, Ordering::Relaxed);
+                format.lock
             }
-        }
+            Purpose::Snapshot => None,
+        };
 
         let output: *mut AnyObject = msg_send![class!(AVCaptureVideoDataOutput), new];
         let Some(output) = Retained::from_raw(output) else {
@@ -406,7 +663,7 @@ fn open_session(unique_id: &str, low_res: bool) -> Result<Session, CaptureError>
         // Selfie-mirror the live preview (not snapshots): a webcam self-view is
         // expected to read like a mirror. The driver flips on the connection, so
         // it costs zero per-frame CPU and never alters the outbound camera feed.
-        if low_res {
+        if preview {
             let conn: *mut AnyObject =
                 msg_send![&*output, connectionWithMediaType: AVMediaTypeVideo];
             if !conn.is_null() {
@@ -425,6 +682,7 @@ fn open_session(unique_id: &str, low_res: bool) -> Result<Session, CaptureError>
             _output: output,
             _delegate: delegate,
             sink,
+            _format_lock: format_lock,
         })
     }
 }
@@ -437,7 +695,7 @@ fn open_session(unique_id: &str, low_res: bool) -> Result<Session, CaptureError>
 /// granted, [`CaptureError::NotFound`] for an unknown id, [`CaptureError::Timeout`]
 /// when no frame arrives, or [`CaptureError::Setup`] on AVFoundation errors.
 pub fn capture_frame(unique_id: &str, timeout: Duration) -> Result<Frame, CaptureError> {
-    let session = open_session(unique_id, false)?;
+    let session = open_session(unique_id, Purpose::Snapshot)?;
     let deadline = Instant::now() + timeout;
     loop {
         if let Ok(mut slot) = session.sink.latest.lock()
@@ -496,10 +754,19 @@ impl CameraStream {
 
 /// Start a live capture stream on the camera with `unique_id`.
 ///
+/// The stream opens at `mode` when the camera [lists](stream_modes) it, and
+/// otherwise at the camera's default mode (the one nearest 1280×720 at 30 fps);
+/// `None` asks for that default. A camera that lists no modes streams at its
+/// fixed 720p preset.
+///
 /// # Errors
-/// Same as [`capture_frame`], minus `Timeout` (frames are polled, not awaited).
-pub fn start_stream(unique_id: &str) -> Result<CameraStream, CaptureError> {
+/// Same as [`capture_frame`], minus `Timeout` (frames are polled, not awaited);
+/// plus [`CaptureError::Setup`] when the camera refuses the chosen format.
+pub fn start_stream(
+    unique_id: &str,
+    mode: Option<StreamMode>,
+) -> Result<CameraStream, CaptureError> {
     Ok(CameraStream {
-        session: open_session(unique_id, true)?,
+        session: open_session(unique_id, Purpose::Preview(mode))?,
     })
 }

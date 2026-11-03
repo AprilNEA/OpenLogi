@@ -1,0 +1,27 @@
+# Owner: openlogi_core::hid::DeviceRoute::keypad — which known keypad, if
+# any, a route reaches.
+id: core-keypad-route-owner
+language: rust
+severity: error
+message: DeviceRoute::keypad() (openlogi-core hid/route.rs) decides which known keypad a route reaches; call it instead of looking the route's identity up in the keypad registry here.
+note: |
+  The agent's LCD key panel and the settings app's Keys tab both need "is
+  this that keypad"; the app once answered it by DeviceKind::Numpad and gave
+  every number pad the keypad's grid. See "Single source of truth" in
+  AGENTS.md.
+files:
+  - crates/**/*.rs
+  - xtask/**/*.rs
+ignores:
+  - crates/openlogi-device-registry/**
+  - crates/openlogi-core/src/hid/route.rs
+  # Enumeration names a direct device's kind from its bare USB identity,
+  # before any route exists.
+  - crates/openlogi-device/src/inventory/mappings.rs
+  # Checks the owner's answer against the registry entry it reads.
+  - crates/openlogi-device/src/write/key_display/tests.rs
+rule:
+  any:
+    - pattern: find_keypad($$$ARGS)
+    # The same lookup reached through its module path.
+    - pattern: $PATH::find_keypad($$$ARGS)

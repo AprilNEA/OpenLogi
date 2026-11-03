@@ -19,8 +19,9 @@
                     below, so the release workflow needs no extra define
 
   - Requires WixToolset.UI.wixext (the progress-only dialog flow) and
-    WixToolset.Util.wixext (util:CloseApplication below); the windows-msi job
-    installs both pinned to the same version as wix itself.
+    WixToolset.Util.wixext (util:CloseApplication and the ShellExec launch
+    below); the windows-msi job installs both pinned to the same version as
+    wix itself.
 -->
 
 <!--
@@ -77,6 +78,31 @@
       <DialogRef Id="MsiRMFilesInUse" />
       <DialogRef Id="ProgressDlg" />
       <DialogRef Id="UserExit" />
+      <!--
+        Offer to start OpenLogi from the final page, checked by default
+        (#1823). The Start Menu shortcut is the package's only other entry
+        point, and nothing runs until the GUI does: the GUI spawns the agent,
+        and only a running agent writes its own HKCU Run autostart entry.
+        ExitDialog shows the checkbox only when NOT Installed (a first install
+        or a major upgrade, never a repair or uninstall of the same package),
+        and the launch uses the same condition. Order="1" runs it before the
+        EndDialog below. In-app updates never see this page: gpui-updater
+        applies the MSI at /passive, where no authored dialog is shown, and its
+        apply script relaunches the app itself.
+        The launch is WixToolset.Util's predefined ShellExec action for this
+        architecture. It starts the target in the target's own directory
+        (INSTALLFOLDER, like the Start Menu shortcut), not in msiexec's
+        System32.
+      -->
+      <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Launch OpenLogi" />
+      <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
+      <Property Id="WixShellExecTarget" Value="[#OpenLogiExe]" />
+      <Publish Dialog="ExitDialog"
+               Control="Finish"
+               Event="DoAction"
+               Value="Wix4ShellExec_$(sys.BUILDARCHSHORT)"
+               Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 AND NOT Installed"
+               Order="1" />
       <Publish Dialog="ExitDialog"
                Control="Finish"
                Event="EndDialog"

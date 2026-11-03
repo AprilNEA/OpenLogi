@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "name": "smartshift-status",
+  "channel": "target",
+  "report_support": "long_only",
+  "exchanges": [
+    {
+      "request_match": "hidpp20",
+      "request": "11ff001000000000000000000000000000000000",
+      "response": "11ff001004050000000000000000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "11ff000021110000000000000000000000000000",
+      "response": "11ff000000000000000000000000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "11ff000021110000000000000000000000000000",
+      "response": "11ff000000000000000000000000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "11ff000021100000000000000000000000000000",
+      "response": "11ff000000000000000000000000000000000000",
+      "required": true
+    }
+  ]
+}

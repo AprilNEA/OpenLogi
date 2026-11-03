@@ -38,7 +38,7 @@ use crate::backlight::BacklightView;
 use crate::ipc::OverlayCommand;
 use crate::notice::NoticeShelf;
 use crate::platform::RingPlacement;
-use crate::ring::{RingPointer, RingView};
+use crate::ring::{Geometry, RingPointer, RingView};
 use crate::session::{
     ClickAwaySession, claim_the_role, close_all_ring_windows, close_ring_windows,
     spawn_click_away_dismissal,
@@ -113,6 +113,7 @@ fn main() -> Result<()> {
                 openlogi_core::locale::activate(invocation.language.as_deref());
                 cx.update(|cx| {
                     close_all_ring_windows(cx);
+                    let edge = gpui::px(Geometry::of(invocation.size).window);
                     #[cfg_attr(
                         windows,
                         expect(
@@ -120,7 +121,7 @@ fn main() -> Result<()> {
                             reason = "only the Wayland placement drains its openings"
                         )
                     )]
-                    let mut placement = match RingPlacement::capture(cx) {
+                    let mut placement = match RingPlacement::capture(cx, edge) {
                         Ok(placement) => placement,
                         Err(error) => {
                             warn!(%error, "could not locate Actions Ring display");

@@ -236,10 +236,18 @@ use windows::normalize_collection_path;
 /// Filtering on these pairs gives us one HID node per physical HID++ device on
 /// every supported OS, without reading report descriptors (`async-hid 0.4`
 /// only exposes those on Linux).
-const HIDPP_LONG_COLLECTIONS: [(u16, u16, bool); 3] = [
+const HIDPP_LONG_COLLECTIONS: [(u16, u16, bool); 4] = [
     (0xff00, 0x0002, false),
     (0xff43, 0x0202, true),
     (0xff43, 0x0602, false),
+    // Wired MX Creative Keypad. Only this vendor pair is listed so the device
+    // enumerates as one HID++ node. On macOS its five collections share one
+    // registry entry and accept standard short/long framing on any handle
+    // (measured live), so its vendor reports — grid-key input 0x13 and LCD
+    // image output 0x14 — ride this node too. Windows gives them the sibling
+    // collections 0x1a08 and 0x1a10, which `windows::WindowsHidppChannel`
+    // pairs by usage (#2281).
+    (0xff43, 0x1a02, false),
 ];
 
 /// Whether `(usage_page, usage_id)` is one of the HID++ long-report collections.

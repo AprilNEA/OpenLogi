@@ -9,12 +9,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
-    CameraControls, Config, DeviceIdentity, DisableKey, LightSettings, Lighting, OnboardMemory,
-    ScrollResolution, SmartShift, ThumbwheelSensitivity,
+    CameraControls, CameraStreamMode, Config, DeviceIdentity, DisableKey, LightSettings, Lighting,
+    MomentumScrolling, OnboardMemory, ScrollResolution, SmartShift, ThumbwheelSensitivity,
 };
 use crate::binding::{
-    Action, ActionRingConfig, ActionRingIcon, ActionRingSlot, Binding, ButtonId, GamingLayout,
-    RingAction, default_binding,
+    Action, ActionRingConfig, ActionRingIcon, ActionRingSize, ActionRingSlot, Binding, ButtonId,
+    GamingLayout, KeypadPage, RingAction, default_binding_on,
 };
 use crate::hid::{Dpi, PointerSpeed, ReportRate};
 
@@ -69,6 +69,15 @@ impl Config {
             .or_default()
             .action_ring
             .haptics = enabled;
+    }
+
+    /// Set how large `device_key`'s Actions Ring is drawn.
+    pub fn set_action_ring_size(&mut self, device_key: &str, size: ActionRingSize) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .action_ring
+            .size = size;
     }
 
     /// Replace or clear one slot in the default Actions Ring layout.
@@ -247,6 +256,23 @@ impl Config {
             .entry(device_key.to_string())
             .or_default()
             .camera_profile = name;
+    }
+
+    /// The frame size and rate saved for `device_key`'s live preview, or
+    /// `None` when the user never picked one.
+    #[must_use]
+    pub fn camera_stream_mode(&self, device_key: &str) -> Option<CameraStreamMode> {
+        self.devices
+            .get(device_key)
+            .and_then(|d| d.camera_stream_mode)
+    }
+
+    /// Record the frame size and rate `device_key`'s live preview opens at.
+    pub fn set_camera_stream_mode(&mut self, device_key: &str, mode: CameraStreamMode) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .camera_stream_mode = Some(mode);
     }
 
     /// The standalone-light config for `device_key`, or `None` if unset.
@@ -457,7 +483,7 @@ impl Config {
         let customized = |button: &ButtonId, binding: &Binding| {
             layout.needs_host_mode(*button)
                 && (!matches!(binding, Binding::Single(_))
-                    || binding.click_action() != default_binding(*button))
+                    || binding.click_action() != default_binding_on(Some(layout), *button))
         };
         let needs_host = device.report_rate.is_some()
             || self.uses_gshift(device_key)
@@ -537,6 +563,49 @@ impl Config {
             .enabled = enabled;
     }
 
+    /// The last of `device_key`'s keypad binding pages — its page count.
+    /// One page for any device that never had more.
+    #[must_use]
+    pub fn keypad_pages(&self, device_key: &str) -> KeypadPage {
+        self.devices
+            .get(device_key)
+            .map_or(KeypadPage::FIRST, |device| device.keypad_pages)
+    }
+
+    /// Give `device_key` pages `1..=last`. Shrinking drops every grid binding
+    /// on a removed page — device-wide and in each per-app overlay — so a
+    /// page re-added later starts empty instead of resurrecting old keys.
+    pub fn set_keypad_pages(&mut self, device_key: &str, last: KeypadPage) {
+        let device = self.devices.entry(device_key.to_string()).or_default();
+        device.keypad_pages = last;
+        let kept = |button: &ButtonId| button.grid_slot().is_none_or(|slot| slot.page <= last);
+        device.bindings.retain(|button, _| kept(button));
+        device.disabled_gestures.retain(|button, _| kept(button));
+        for overlay in device.per_app_bindings.values_mut() {
+            overlay.retain(|button, _| kept(button));
+        }
+    }
+
+    /// Whether any grid key on `page` of `device_key` is bound — device-wide
+    /// or in any per-app overlay — i.e. whether shrinking past `page`
+    /// ([`Self::set_keypad_pages`]) would drop a binding.
+    #[must_use]
+    pub fn keypad_page_binds(&self, device_key: &str, page: KeypadPage) -> bool {
+        let Some(device) = self.devices.get(device_key) else {
+            return false;
+        };
+        let on_page = |button: &ButtonId| button.grid_slot().is_some_and(|slot| slot.page == page);
+        device
+            .bindings
+            .iter()
+            .any(|(button, binding)| on_page(button) && *binding != Binding::Single(Action::None))
+            || device
+                .per_app_bindings
+                .values()
+                .flatten()
+                .any(|(button, action)| on_page(button) && *action != Action::None)
+    }
+
     /// The effective thumb-wheel sensitivity for `device_key`: the device's
     /// override when set, else the app-wide default.
     #[must_use]
@@ -558,6 +627,29 @@ impl Config {
             .entry(device_key.to_string())
             .or_default()
             .thumbwheel_sensitivity = sensitivity;
+    }
+
+    /// The effective momentum-scrolling settings for `device_key`: the
+    /// device's override when set, else the app-wide default.
+    #[must_use]
+    pub fn momentum_scrolling(&self, device_key: &str) -> MomentumScrolling {
+        self.devices
+            .get(device_key)
+            .and_then(|d| d.momentum_scrolling)
+            .unwrap_or(self.app_settings.momentum_scrolling)
+    }
+
+    /// Set (or clear, with `None`) `device_key`'s momentum-scrolling
+    /// override.
+    pub fn set_device_momentum_scrolling(
+        &mut self,
+        device_key: &str,
+        momentum: Option<MomentumScrolling>,
+    ) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .momentum_scrolling = momentum;
     }
 
     /// Whether `device_key`'s main wheel is smoothed through its diverted

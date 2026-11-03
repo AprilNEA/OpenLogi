@@ -278,6 +278,8 @@ impl Action {
             | Action::ToggleSmartShift
             | Action::TogglePrecisionMode
             | Action::ShowActionsRing
+            | Action::PreviousKeypadPage
+            | Action::NextKeypadPage
             | Action::OpenApplication(_) => Effect::AgentSide,
 
             Action::ScrollUp => Effect::Scroll { dx: 0, dy: 1 },

@@ -30,7 +30,7 @@ pub async fn enumerate_standalone(
 
 /// Classifies one enumerated HID node against every standalone driver family
 /// OpenLogi recognizes, in precedence order. `None` when no family claims it.
-fn standalone_device(device: &crate::backend::NodeInfo) -> Option<StandaloneDevice> {
+pub(super) fn standalone_device(device: &crate::backend::NodeInfo) -> Option<StandaloneDevice> {
     if let Some(descriptor) = find_litra(
         device.vendor_id,
         device.product_id,

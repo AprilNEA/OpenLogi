@@ -1,6 +1,6 @@
 //! Records a custom shortcut from the next key the user presses.
 
-use gpui::{Context, FocusHandle, Keystroke, Subscription, Window};
+use gpui::{Context, FocusHandle, Keystroke, Modifiers, Subscription, Window};
 use openlogi_core::binding::KeyCombo;
 
 #[cfg(test)]
@@ -16,6 +16,40 @@ pub(crate) enum Recording {
     Cancelled,
     /// A key a custom shortcut cannot send, such as a media key.
     Unsupported,
+    /// Shift with a digit or symbol key, such as Shift+]. GPUI reports such
+    /// a press as the character it types, without Shift (`}` for Shift+]),
+    /// and which key types that character depends on the keyboard layout.
+    /// The recorder cannot tell which chord was pressed, so it records none.
+    ShiftedSymbol,
+}
+
+impl Recording {
+    /// The recording for `keystroke` while the window saw `held` modifiers
+    /// down.
+    ///
+    /// Every GPUI platform drops Shift from a digit or symbol key and reports
+    /// the shifted character instead: Shift+] arrives as `}` and Shift+1 as
+    /// `!`. Only `held`, which GPUI tracks from modifier changes, still shows
+    /// Shift. Without this check such a press is either rejected or, on a
+    /// layout whose shifted character is a key a chord can name (Shift+7
+    /// types `/` on German), recorded as a different chord.
+    pub(crate) fn from_press(keystroke: &Keystroke, held: Modifiers) -> Self {
+        if held.shift && !keystroke.modifiers.shift && is_symbol(&keystroke.key) {
+            return Self::ShiftedSymbol;
+        }
+        Self::from(keystroke)
+    }
+}
+
+/// Whether GPUI names `key` by a single character that has no case: a digit
+/// or a symbol. GPUI keeps Shift for letters and for named keys such as
+/// `tab` or `pageup`.
+fn is_symbol(key: &str) -> bool {
+    let mut characters = key.chars();
+    matches!(
+        (characters.next(), characters.next()),
+        (Some(character), None) if !character.is_alphabetic()
+    )
 }
 
 impl From<&Keystroke> for Recording {
@@ -95,7 +129,7 @@ impl ShortcutRecorder {
             }
             let recording = if area.contains_focused(window, cx) {
                 cx.stop_propagation();
-                Recording::from(&event.keystroke)
+                Recording::from_press(&event.keystroke, window.modifiers())
             } else {
                 Recording::Cancelled
             };

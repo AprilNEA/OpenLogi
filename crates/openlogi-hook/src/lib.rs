@@ -45,6 +45,9 @@ pub use pointer::{
     pointer_target_is_focused,
 };
 
+mod probe;
+pub use probe::{DesktopPoint, DisplayBounds, PointerProbe, PointerState, WarpError};
+
 /// Logitech's USB/Bluetooth vendor id (`0x046D`), widened from
 /// [`openlogi_core::hid::LOGITECH_VENDOR_ID`] because the hook's identity
 /// sources (IOKit, evdev) hand it back as a `u32`.
@@ -127,6 +130,9 @@ static INVERT_SCROLL: AtomicBool = AtomicBool::new(false);
 /// always carries `device: None`), so the inversion could not be confined to
 /// the configured mouse. Applying it to every wheel event would reverse a
 /// precision touchpad too, which is the one thing this setting must not do.
+/// A Windows user reverses the wheel with the system's own Scrolling direction
+/// setting instead, which the backend carries into the delta the callback
+/// sees, so a replayed impulse follows it too (#2291).
 pub const SOFTWARE_SCROLL_INVERSION: bool = !cfg!(target_os = "windows");
 
 /// Turn software scroll inversion on or off for the captured pointers.
@@ -145,11 +151,13 @@ pub fn scroll_inversion() -> bool {
 /// Flip the vertical delta of a scroll [`MouseEvent`], leaving every other
 /// variant untouched.
 ///
-/// What [`Delivery::run`] hands the callback when software scroll inversion
-/// applies: the callback must see the same inverted delta that a pass-through
-/// event gets written back with, so a suppressed impulse (smoothing, non-1x
-/// sensitivity) is reversed too instead of only a forwarded one (#1737).
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+/// What `Delivery::run` (macOS and Linux) hands the callback when software
+/// scroll inversion applies: the callback must see the same inverted delta
+/// that a pass-through event gets written back with, so a suppressed impulse
+/// (smoothing, non-1x sensitivity) is reversed too instead of only a
+/// forwarded one (#1737).
+/// The Windows backend applies it for the system's reversed Scrolling
+/// direction, for the same reason (#2291).
 pub(crate) fn negate_scroll_y(event: MouseEvent) -> MouseEvent {
     match event {
         MouseEvent::Scroll {

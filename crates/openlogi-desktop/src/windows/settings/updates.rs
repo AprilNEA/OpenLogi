@@ -7,9 +7,10 @@ use super::{
     Updater, div, h_flex, img, px, v_flex,
 };
 use crate::platform::installation::{HomebrewCask, Installation, InstallationSource, LinuxPackage};
+use crate::ui::theme::FocusRingStyle as _;
 use crate::ui::theme::Typography as _;
-use gpui_base::Link;
-use gpui_component::ActiveTheme as _;
+use gpui_kit::base::Link;
+use gpui_kit::component::ActiveTheme as _;
 use openlogi_core::update_feed::UpdateChannel;
 
 /// The Updates page: a hero card with the running build, its update status, and
@@ -66,11 +67,15 @@ pub(super) fn updates_page(updater: Entity<Updater>) -> SettingPage {
         ))
         .gap_2()
         .footer(|_, cx| {
-            div()
-                .text_caption()
-                .text_color(crate::ui::theme::palette(cx).text_muted)
-                .debug_selector(|| "update-connection-policy".into())
-                .child(tr!("updates.update_connection_policy"))
+            // Kit aligns footers with the surface edge; this note follows the
+            // filled group's setting labels and their standard content inset.
+            div().px_4().child(
+                div()
+                    .text_caption()
+                    .text_color(crate::ui::theme::palette(cx).text_muted)
+                    .debug_selector(|| "update-connection-policy".into())
+                    .child(tr!("updates.update_connection_policy")),
+            )
         });
     SettingPage::new(tr!("updates.updates"))
         .icon(IconName::ArrowDown)
@@ -263,7 +268,6 @@ fn installation_label(installation: Installation) -> gpui::SharedString {
 fn release_link(cx: &App) -> Link {
     let pal = crate::ui::theme::palette(cx);
     let link_color = cx.theme().link;
-    let focus_color = cx.theme().ring;
     Link::new("update-changelog")
         .href(RELEASES_URL)
         .accessibility_label(tr!("updates.view_changelog"))
@@ -279,10 +283,10 @@ fn release_link(cx: &App) -> Link {
         .cursor_pointer()
         .hover(move |style| style.bg(pal.control_hover))
         .active(move |style| style.bg(pal.control))
-        .focus_visible(move |style| style.bg(focus_color).text_color(pal.page))
+        .focus_visible(move |style| style.focus_ring(pal))
         .debug_selector(|| "update-source-link".into())
         .child(div().underline().child("GitHub Releases"))
-        .child(gpui_component::Icon::new(IconName::ExternalLink).size_3p5())
+        .child(gpui_kit::component::Icon::new(IconName::ExternalLink).size_3p5())
 }
 
 #[cfg(test)]
@@ -291,7 +295,7 @@ mod tests {
 
     use gpui::{
         AppContext as _, Context, IntoElement, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers,
-        ParentElement as _, Render, ScrollDelta, ScrollWheelEvent, Styled as _, TestAppContext,
+        ParentElement as _, Render, ScrollDelta, ScrollEvent, Styled as _, TestAppContext,
         VisualTestContext, Window, div, point,
     };
     use openlogi_core::config::{Config, UiScale};
@@ -350,7 +354,7 @@ mod tests {
         let _locale = LOCALE_LOCK.lock().unwrap();
         rust_i18n::set_locale("en");
         cx.update(|cx| {
-            gpui_component::init(cx);
+            gpui_kit::init(cx);
             crate::ui::theme::register_builtin_themes(cx);
             let (commands, _) = tokio::sync::mpsc::unbounded_channel();
             let state = cx.new(|_| {
@@ -367,7 +371,7 @@ mod tests {
         let handle = cx.open_window(gpui::size(px(920.), px(640.)), |window, cx| {
             let settings = cx.new(|cx| SettingsView::new(SettingsPage::Updates, window, cx));
             view = Some(settings.clone());
-            gpui_component::Root::new(settings, window, cx)
+            gpui_kit::component::Root::new(settings, window, cx)
         });
         let view = view.unwrap();
         let mut visual = VisualTestContext::from_window(handle.into(), cx);
@@ -436,7 +440,7 @@ mod tests {
                     .update_channel
             })
         }
-        fn press(visual: &mut VisualTestContext, key: &str) {
+        fn press(visual: &mut VisualTestContext, key: &'static str) {
             let keystroke = Keystroke::parse(key).unwrap();
             visual.simulate_event(KeyDownEvent {
                 keystroke: keystroke.clone(),
@@ -449,7 +453,7 @@ mod tests {
         let _locale = LOCALE_LOCK.lock().unwrap();
         rust_i18n::set_locale("en");
         cx.update(|cx| {
-            gpui_component::init(cx);
+            gpui_kit::init(cx);
             crate::ui::theme::register_builtin_themes(cx);
             let (commands, _) = tokio::sync::mpsc::unbounded_channel();
             let state = cx.new(|_| {
@@ -463,7 +467,7 @@ mod tests {
         });
         let handle = cx.open_window(gpui::size(px(400.), px(120.)), |window, cx| {
             let harness = cx.new(|_| Harness);
-            gpui_component::Root::new(harness, window, cx)
+            gpui_kit::component::Root::new(harness, window, cx)
         });
         let mut visual = VisualTestContext::from_window(handle.into(), cx);
         visual.update(|window, cx| window.draw(cx).clear(cx));
@@ -512,7 +516,7 @@ mod tests {
     /// groups it draws, and the second scroll uses those heights.
     fn scroll_to_sources(visual: &mut VisualTestContext) {
         for _ in 0..2 {
-            visual.simulate_event(ScrollWheelEvent {
+            visual.simulate_event(ScrollEvent {
                 position: point(px(700.), px(500.)),
                 delta: ScrollDelta::Pixels(point(px(0.), px(-1000.))),
                 ..Default::default()

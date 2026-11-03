@@ -287,10 +287,9 @@ pub(super) fn run_shell_command(cmd: &str) {
     // Without this flag `cmd.exe` allocates and briefly flashes a visible
     // console window, since the agent itself is a console-less GUI/background
     // process and the child would otherwise get one of its own.
-    let _ = std::process::Command::new("cmd")
-        .args(["/C", cmd])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output();
+    let mut command = std::process::Command::new("cmd");
+    command.args(["/C", cmd]).creation_flags(CREATE_NO_WINDOW);
+    super::run_to_end(command, "shell command");
 }
 
 fn post_click(button: MouseButton) {

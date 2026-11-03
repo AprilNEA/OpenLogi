@@ -13,7 +13,10 @@ struct Diagnostics {
     // Feature ID, version, type bits; control ID, task ID, capability bits.
     features: Vec<(u16, u8, u8)>,
     controls: Vec<(u16, u16, u16)>,
-    raw_battery: String,
+    // The reviewed battery diagnostic, or `null` for a battery-free device
+    // whose only observation is that the battery feature is absent — the
+    // same unsupported/absent split the profile settings already model.
+    raw_battery: Option<String>,
 }
 
 #[tokio::test]
@@ -70,11 +73,17 @@ async fn contributed_corpus_replays_every_declared_operation() {
                     expected.controls,
                     "{specimen}/{case}"
                 ),
-                SemanticObservation::RawBattery(result) => assert_eq!(
-                    result.expect("battery diagnostic"),
-                    expected.raw_battery,
-                    "{specimen}/{case}"
-                ),
+                SemanticObservation::RawBattery(result) => match expected.raw_battery.as_deref() {
+                    Some(expected) => assert_eq!(
+                        result.expect("battery diagnostic"),
+                        expected,
+                        "{specimen}/{case}"
+                    ),
+                    None => assert!(
+                        matches!(result, Err(WriteError::FeatureUnsupported { .. })),
+                        "{specimen}/{case}: expected an absent battery feature, got {result:?}"
+                    ),
+                },
                 SemanticObservation::DpiInfo(result) => {
                     assert_setting(&settings.dpi, result, specimen, case);
                 }

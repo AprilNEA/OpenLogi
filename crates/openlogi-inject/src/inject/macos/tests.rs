@@ -1,7 +1,12 @@
-use core_graphics::event::{CGEventFlags, EventField};
-use openlogi_core::binding::Shortcut;
+use std::sync::PoisonError;
 
-use super::{LOCK_SCREEN_CHORD, combo, held_key_event, hid_usage_to_macos, key_event};
+use core_graphics::event::{CGEventFlags, CGEventType, EventField};
+use openlogi_core::binding::{KeyboardUsage, Shortcut};
+
+use super::{
+    HELD_KEY_PRESSES, LOCK_SCREEN_CHORD, TYPED_TEXT_KEYS, combo, held_key_event,
+    hid_usage_to_macos, key_event, text_events, typed_text_key,
+};
 use crate::inject::{HeldKey, HeldModifiers, KeyPhase, parse_shortcut};
 
 #[test]
@@ -75,6 +80,44 @@ fn held_edges_carry_the_aggregate_modifier_state() {
         .expect("Command has a macOS virtual-key mapping");
     assert!(!flags.contains(CGEventFlags::CGEventFlagCommand));
     assert!(flags.contains(CGEventFlags::CGEventFlagControl));
+}
+
+/// A key-down with no key-up leaves its key logically down, and an event
+/// that inherits a held modifier types a shortcut instead of text.
+#[test]
+fn typed_text_releases_each_character_and_carries_no_modifier() {
+    let events = text_events("aé", TYPED_TEXT_KEYS[0]).expect("keyboard events");
+    let kinds: Vec<_> = events.iter().map(|event| event.get_type() as u32).collect();
+    let (down, up) = (CGEventType::KeyDown as u32, CGEventType::KeyUp as u32);
+    assert_eq!(kinds, [down, up, down, up]);
+    let modifiers = CGEventFlags::CGEventFlagCommand
+        | CGEventFlags::CGEventFlagControl
+        | CGEventFlags::CGEventFlagShift
+        | CGEventFlags::CGEventFlagAlternate;
+    for event in &events {
+        assert!(!event.get_flags().intersects(modifiers));
+        assert_eq!(
+            event.get_integer_value_field(EventField::EVENT_SOURCE_USER_DATA),
+            crate::SYNTHETIC_EVENT_USER_DATA
+        );
+    }
+}
+
+/// A key-up on a key a held chord keeps down would end that hold early, so
+/// typed text goes down on the next key no hold owns.
+#[test]
+fn typed_text_skips_a_key_a_held_chord_keeps_down() {
+    let usage = KeyboardUsage::try_from(0x04).expect("0x04 is a valid keyboard usage");
+    HELD_KEY_PRESSES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(usage, TYPED_TEXT_KEYS[0]);
+    let key = typed_text_key();
+    HELD_KEY_PRESSES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .remove(&usage);
+    assert_eq!(key, Some(TYPED_TEXT_KEYS[1]));
 }
 
 /// The hook skips a key edge only by this tag, so every edge the backend

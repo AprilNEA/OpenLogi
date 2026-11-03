@@ -734,6 +734,7 @@ mod tests {
             audit: HidCassetteAudit::default(),
         };
         let captured = SemanticObservation::FeatureTable(Ok(vec![FeatureEntry {
+            index: 0,
             id: 0,
             version: 0,
             typ: FeatureType::empty(),
