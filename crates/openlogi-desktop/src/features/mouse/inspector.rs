@@ -988,7 +988,7 @@ fn custom_shortcut_editor(
                 div()
                     .debug_selector(move || format!("{id_prefix}-custom-shortcut-error"))
                     .text_caption()
-                    .text_color(rgb(0x00ef_4444))
+                    .text_color(pal.text_danger)
                     .child(match error {
                         ShortcutError::Unrecognized => {
                             tr!("action_ring.custom_action_invalid_input")

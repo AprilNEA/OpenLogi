@@ -671,7 +671,7 @@ fn problem(text: SharedString, cx: &App) -> impl IntoElement {
     div()
         .debug_selector(|| "flow-pair-problem".into())
         .text_caption()
-        .text_color(cx.theme().danger)
+        .text_color(theme::palette(cx).text_danger)
         .child(text)
 }
 
