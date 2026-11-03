@@ -6,7 +6,10 @@ use std::path::{Path, PathBuf};
 
 use serde::de::DeserializeOwned;
 
-use crate::{DeviceProfile, FixtureError, FixtureManifest, FixtureVerificationError, HidCassette};
+use crate::{
+    DeviceProfile, FixtureError, FixtureManifest, FixtureVerificationError, HidCassette,
+    ProfileDeviceSettings,
+};
 
 const MANIFEST_FILE: &str = "manifest.json";
 const PROFILE_FILE: &str = "profile.json";
@@ -128,6 +131,16 @@ impl Fixture {
     #[must_use]
     pub fn cassettes(&self) -> &[HidCassette] {
         &self.cassettes
+    }
+
+    /// The recorded settings of the device that one declared case exercises.
+    ///
+    /// See [`FixtureManifest::case_settings`].
+    pub fn case_settings(
+        &self,
+        case: &str,
+    ) -> std::result::Result<&ProfileDeviceSettings, FixtureError> {
+        self.manifest.case_settings(&self.profile, case)
     }
 }
 

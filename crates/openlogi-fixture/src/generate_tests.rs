@@ -1,7 +1,7 @@
 use super::{
     CANONICAL_DEVICE_PROFILE_JSON, CassetteExchange, DeviceProfile, FIXTURE_SCHEMA_VERSION,
-    FixtureCaseBinding, FixtureManifest, FixtureVerificationStage, HidCassette, ReportSupport,
-    RequestMatch,
+    FixtureCaseBinding, FixtureCaseRelationship, FixtureManifest, FixtureVerificationStage,
+    HidCassette, ReportSupport, RequestMatch,
 };
 
 #[test]
@@ -145,6 +145,48 @@ fn device_cases_allow_receiver_setup_only_for_receiver_routes() {
         )
         .expect_err("direct and raw-HID devices have no receiver setup traffic");
     }
+}
+
+#[test]
+fn a_case_finds_its_own_device_among_the_devices_on_one_receiver() {
+    let profile: DeviceProfile =
+        serde_json::from_str(CANONICAL_DEVICE_PROFILE_JSON).expect("canonical profile parses");
+    // The canonical Bolt receiver lists a mouse at slot 1 before the keyboard at slot 3.
+    let keyboard = &profile.settings[2];
+    let mut cassette = bolt_identity_cassette(b"OL-BOLT-UID-0001");
+    cassette.exchanges = vec![CassetteExchange {
+        request_match: RequestMatch::Hidpp20,
+        request: vec![0x10, 3, 0, 0x10, 0, 0, 0],
+        response: Some(vec![0x10, 3, 0, 0x10, 4, 0, 0]),
+        required: true,
+    }];
+    let mut manifest = FixtureManifest::from_assets(
+        "keyboard-case".to_string(),
+        &profile,
+        std::slice::from_ref(&cassette),
+        &[FixtureCaseBinding {
+            name: cassette.name.clone(),
+            route: keyboard.route.clone(),
+        }],
+    )
+    .expect("the keyboard's ping is valid");
+
+    assert_eq!(
+        manifest
+            .case_settings(&profile, &cassette.name)
+            .expect("the case names a recorded device"),
+        keyboard
+    );
+    manifest
+        .case_settings(&profile, "undeclared")
+        .expect_err("an undeclared case names no device");
+
+    manifest.cases[0].relationship = FixtureCaseRelationship::Receiver {
+        receiver: "receiver-1".to_string(),
+    };
+    manifest
+        .case_settings(&profile, &cassette.name)
+        .expect_err("a receiver operation names no device");
 }
 
 fn bolt_identity_cassette(identity: &[u8; 16]) -> HidCassette {

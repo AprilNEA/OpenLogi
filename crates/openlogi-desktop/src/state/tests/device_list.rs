@@ -37,7 +37,7 @@ fn receiver_inventory() -> DeviceInventory {
     }
 }
 
-fn canonical_device_profile() -> DeviceProfile {
+pub(crate) fn canonical_device_profile() -> DeviceProfile {
     let profile: DeviceProfile =
         serde_json::from_str(CANONICAL_DEVICE_PROFILE_JSON).expect("canonical profile parses");
     profile.validate().expect("canonical profile validates");
