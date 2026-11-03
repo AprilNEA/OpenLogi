@@ -880,11 +880,12 @@ fn the_key_panel_list_scrolls_under_a_scrollbar(cx: &mut gpui::TestAppContext) {
 /// The key overview lists every key in the same column, so a keyboard with
 /// more keys than the column holds needs the same scrollbar. The scroll
 /// viewport must keep the rows' height: collapsed, it clips every row and no
-/// pointer reaches them.
+/// pointer reaches them. Scrolled to the end, the last key is in view and
+/// opens like any other row.
 #[gpui::test]
 fn the_key_overview_list_has_a_scrollbar(cx: &mut gpui::TestAppContext) {
     let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
-    let (_view, cx) = keys_tab(cx);
+    let (view, cx) = keys_tab(cx);
 
     let overview = cx.debug_bounds("key-overview").expect("overview is shown");
     let viewport = cx
@@ -896,6 +897,23 @@ fn the_key_overview_list_has_a_scrollbar(cx: &mut gpui::TestAppContext) {
         viewport.contains(&row.center()),
         "F3 sits inside the scroll viewport: {viewport:?}"
     );
+
+    cx.simulate_event(gpui::ScrollWheelEvent {
+        position: viewport.center(),
+        delta: gpui::ScrollDelta::Pixels(point(px(0.), px(-2000.))),
+        ..Default::default()
+    });
+    redraw(cx);
+    let last = cx
+        .debug_bounds("key-overview-row-19")
+        .expect("F19 is listed");
+    assert!(
+        viewport.contains(&last.center()),
+        "the wheel brings F19 into view: {last:?} in {viewport:?}"
+    );
+    cx.simulate_click(last.center(), gpui::Modifiers::default());
+    redraw(cx);
+    view.read_with(cx, |view, _| assert_eq!(view.selected_key, Some(19)));
 }
 
 /// An unbound keyboard key does what it always did — "Off" read as though
