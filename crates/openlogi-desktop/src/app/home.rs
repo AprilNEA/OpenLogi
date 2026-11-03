@@ -28,7 +28,7 @@ use gpui_component::{
 };
 use openlogi_core::config::{DeviceViewMode, LightSettings};
 use openlogi_core::device::{DeviceKind, DeviceModelInfo, ModelTransport};
-use openlogi_core::hid::{DeviceRoute, ReceiverBrand, ReceiverProtocol};
+use openlogi_core::hid::ReceiverBrand;
 use openlogi_ipc::PairingFailure;
 
 use super::AppView;
@@ -40,7 +40,7 @@ use super::widgets::{
 use crate::features::lighting::visual as light_visual;
 use crate::services::assets::GlowGeometry;
 use crate::services::ipc::UnpairFailure;
-use crate::state::{AppState, DeviceRecord, ObservedConnection};
+use crate::state::{AppState, Attachment, DeviceRecord, ObservedConnection};
 use crate::ui::battery::{BatteryIndicator, glance_hint};
 use crate::ui::components::{control_input, save_cancel_footer};
 use crate::ui::theme::{self, ContentWidth, HEADER_H, Palette, Typography as _};
@@ -278,8 +278,7 @@ pub(super) fn transport_icon(
         ConnectionGlyph::Cable
     } else {
         connection_glyph(
-            record.route.as_ref(),
-            record.receiver_brand,
+            record.attachment(),
             record.model_info.as_ref(),
             saved_transport,
         )
@@ -696,7 +695,7 @@ impl ConnectionGlyph {
 /// receiver-paired devices, a USB mark for wired direct ones, a Bluetooth
 /// mark for the rest.
 ///
-/// A `Direct` route carries the vendor/product id of the HID node this
+/// A [`Attachment::Direct`] carries the product id of the HID node this
 /// session actually enumerated, which — for a multi-transport device —
 /// pinpoints the transport that's live *right now* via
 /// [`DeviceModelInfo::transport_for_product_id`], rather than guessing from
@@ -705,22 +704,19 @@ impl ConnectionGlyph {
 /// Offline cards retain the last observed mode, or an unambiguous recorded
 /// link after restart; radio support alone does not select Bluetooth.
 pub(super) fn connection_glyph(
-    route: Option<&DeviceRoute>,
-    receiver_brand: Option<ReceiverBrand>,
+    attachment: Option<Attachment>,
     model: Option<&DeviceModelInfo>,
     saved_transport: Option<ObservedConnection>,
 ) -> ConnectionGlyph {
-    let direct_transport = match route {
-        Some(DeviceRoute::Direct { product_id, .. }) => {
-            model.and_then(|m| m.transport_for_product_id(*product_id))
+    let direct_transport = match attachment {
+        Some(Attachment::Direct { product_id }) => {
+            model.and_then(|m| m.transport_for_product_id(product_id))
         }
         None => match saved_transport {
             Some(ObservedConnection::Direct(transport)) => Some(transport),
             Some(ObservedConnection::Receiver(_)) | None => None,
         },
-        Some(
-            DeviceRoute::Bolt { .. } | DeviceRoute::Unifying { .. } | DeviceRoute::RawHid { .. },
-        ) => None,
+        Some(Attachment::Receiver(_) | Attachment::RawHid) => None,
     };
     if let Some(transport) = direct_transport {
         return match transport {
@@ -729,28 +725,21 @@ pub(super) fn connection_glyph(
         };
     }
 
-    match (route, saved_transport) {
-        (Some(DeviceRoute::Bolt { .. }), _)
-        | (None, Some(ObservedConnection::Receiver(ReceiverProtocol::Bolt))) => {
-            ConnectionGlyph::Bolt
-        }
-        // Nano and Lightspeed receivers speak the Unifying protocol but are
-        // not Unifying receivers.
-        (Some(DeviceRoute::Unifying { .. }), _) => match receiver_brand {
-            Some(ReceiverBrand::Nano | ReceiverBrand::Lightspeed) => ConnectionGlyph::Dongle,
-            Some(ReceiverBrand::Bolt | ReceiverBrand::Unifying) | None => ConnectionGlyph::Unifying,
+    match (attachment, saved_transport) {
+        (Some(Attachment::Receiver(family)), _)
+        | (None, Some(ObservedConnection::Receiver(family))) => match family {
+            ReceiverBrand::Bolt => ConnectionGlyph::Bolt,
+            ReceiverBrand::Unifying => ConnectionGlyph::Unifying,
+            ReceiverBrand::Nano | ReceiverBrand::Lightspeed => ConnectionGlyph::Dongle,
         },
-        (None, Some(ObservedConnection::Receiver(ReceiverProtocol::Unifying))) => {
-            ConnectionGlyph::Unifying
-        }
         // An offline model's radio capabilities do not identify a connection.
         // Preserve the wired-only fallback; ambiguous offline links stay neutral.
-        (Some(DeviceRoute::Direct { .. }) | None, _) => match model.map(|m| m.transports) {
+        (Some(Attachment::Direct { .. }) | None, _) => match model.map(|m| m.transports) {
             Some(t) if (t.usb || t.equad) && !t.bluetooth && !t.btle => ConnectionGlyph::Cable,
-            _ if route.is_some() => ConnectionGlyph::Bluetooth,
+            _ if attachment.is_some() => ConnectionGlyph::Bluetooth,
             _ => ConnectionGlyph::Unknown,
         },
-        (Some(DeviceRoute::RawHid { .. }), _) => ConnectionGlyph::Cable,
+        (Some(Attachment::RawHid), _) => ConnectionGlyph::Cable,
     }
 }
 

@@ -2,11 +2,9 @@
 
 use std::collections::BTreeMap;
 
-use openlogi_core::hid::{DeviceRoute, ReceiverProtocol};
-
 use super::device_key::DeviceKey;
 use super::device_session::{DeviceSession, ObservedConnection};
-use super::devices::DeviceRecord;
+use super::devices::{Attachment, DeviceRecord};
 
 /// Owns the merged device catalog and keeps its active index valid.
 pub(super) struct DeviceStore {
@@ -58,19 +56,14 @@ impl DeviceStore {
 
     fn observe_connections(&mut self) {
         for record in self.records.iter().filter(|record| record.online) {
-            let transport = match record.route.as_ref() {
-                Some(DeviceRoute::Direct { product_id, .. }) => record
+            let transport = match record.attachment() {
+                Some(Attachment::Direct { product_id }) => record
                     .model_info
                     .as_ref()
-                    .and_then(|model| model.transport_for_product_id(*product_id))
+                    .and_then(|model| model.transport_for_product_id(product_id))
                     .map(ObservedConnection::Direct),
-                Some(DeviceRoute::Bolt { .. }) => {
-                    Some(ObservedConnection::Receiver(ReceiverProtocol::Bolt))
-                }
-                Some(DeviceRoute::Unifying { .. }) => {
-                    Some(ObservedConnection::Receiver(ReceiverProtocol::Unifying))
-                }
-                _ => None,
+                Some(Attachment::Receiver(family)) => Some(ObservedConnection::Receiver(family)),
+                Some(Attachment::RawHid) | None => None,
             };
             // An incomplete probe is not evidence of a connection-mode change.
             if let Some(transport) = transport {

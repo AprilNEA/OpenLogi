@@ -1,7 +1,7 @@
 //! What this GUI session knows about one device and never persists.
 
 use openlogi_core::device::ModelTransport;
-use openlogi_core::hid::ReceiverProtocol;
+use openlogi_core::hid::ReceiverBrand;
 
 use super::disable_keys::DisableKeysDeviceState;
 use super::light::LightDeviceState;
@@ -12,8 +12,9 @@ use super::smartshift::SmartShiftDeviceState;
 pub(crate) enum ObservedConnection {
     /// A directly attached USB or Bluetooth HID++ device.
     Direct(ModelTransport),
-    /// A paired device reached through this receiver protocol.
-    Receiver(ReceiverProtocol),
+    /// A paired device reached through a receiver of this family: the
+    /// [`Attachment`](super::Attachment) it had, not the protocol it spoke.
+    Receiver(ReceiverBrand),
 }
 
 /// Everything `AppState` tracks per device outside persisted configuration and
