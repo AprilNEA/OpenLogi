@@ -572,15 +572,15 @@ fn combo_flags(combo: &KeyCombo) -> CGEventFlags {
 }
 
 pub(super) fn run_apple_script(src: &str) {
-    let _ = std::process::Command::new("osascript")
-        .args(["-e", src])
-        .output();
+    let mut command = std::process::Command::new("/usr/bin/osascript");
+    command.args(["-e", src]);
+    super::run_to_end(command, "AppleScript");
 }
 
 pub(super) fn run_shell_command(cmd: &str) {
-    let _ = std::process::Command::new("/bin/sh")
-        .args(["-c", cmd])
-        .output();
+    let mut command = std::process::Command::new("/bin/sh");
+    command.args(["-c", cmd]);
+    super::run_to_end(command, "shell command");
 }
 
 /// Post a media/system key event (play/pause, track navigation, volume).
