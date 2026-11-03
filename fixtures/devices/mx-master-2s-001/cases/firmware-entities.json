@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "name": "firmware-entities",
+  "channel": "target",
+  "report_support": "short_and_long",
+  "exchanges": [
+    {
+      "request_match": "exact",
+      "request": "10ff83b5030000",
+      "response": "11ff83b5034f4c52010106070000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "10010010000000",
+      "response": "1101001004050000000000000000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "10010000000300",
+      "response": "1101000002000200000000000000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "10010200000000",
+      "response": "11010200044f4c44010006b01940690000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "10010210000000",
+      "response": "1101021001424f545601000600406916a9fc5401",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "10010210010000",
+      "response": "11010210004d504d1201000600b01916a9fc5401",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "10010210020000",
+      "response": "11010210004d504d1201000601406916a9fc5401",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "10010210030000",
+      "response": "11010210050000000000005a0000000000000000",
+      "required": true
+    }
+  ]
+}
