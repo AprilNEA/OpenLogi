@@ -151,10 +151,11 @@ pub fn scroll_inversion() -> bool {
 /// Flip the vertical delta of a scroll [`MouseEvent`], leaving every other
 /// variant untouched.
 ///
-/// What [`Delivery::run`] hands the callback when software scroll inversion
-/// applies: the callback must see the same inverted delta that a pass-through
-/// event gets written back with, so a suppressed impulse (smoothing, non-1x
-/// sensitivity) is reversed too instead of only a forwarded one (#1737).
+/// What `Delivery::run` (macOS and Linux) hands the callback when software
+/// scroll inversion applies: the callback must see the same inverted delta
+/// that a pass-through event gets written back with, so a suppressed impulse
+/// (smoothing, non-1x sensitivity) is reversed too instead of only a
+/// forwarded one (#1737).
 /// The Windows backend applies it for the system's reversed Scrolling
 /// direction, for the same reason (#2291).
 pub(crate) fn negate_scroll_y(event: MouseEvent) -> MouseEvent {

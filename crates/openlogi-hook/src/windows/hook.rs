@@ -390,7 +390,7 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
     // A pass-through forwards the native message, which Windows scrolls in
     // its configured direction; the callback's delta is what the agent
     // replays when it suppresses the event, so it carries that direction too.
-    // Read only for wheel messages: the setting is a registry value.
+    // Asked only for wheel messages; the registry is read at most once a second.
     let event = match event {
         scroll @ MouseEvent::Scroll { .. } => ScrollDirection::current().apply(scroll),
         other => other,

@@ -14,7 +14,16 @@
 //! `0` is "down motion scrolls down", `1` is "down motion scrolls up".
 //! Builds before 24H2 have no such value.
 
+use std::time::{Duration, Instant};
+
 use crate::{MouseEvent, negate_scroll_y};
+
+/// How long one read of the setting is reused.
+///
+/// The hook reads it on the global input path, ahead of a wheel message's
+/// delivery, so a burst of wheel events costs one registry read. A change in
+/// Settings applies within this time.
+const REFRESH: Duration = Duration::from_secs(1);
 
 /// Which way Windows scrolls for a vertical mouse-wheel rotation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -38,9 +47,50 @@ impl From<u32> for ScrollDirection {
     }
 }
 
+/// The setting as last read, reused for [`REFRESH`].
+#[derive(Clone, Copy, Debug, Default)]
+struct DirectionCache {
+    read: Option<(Instant, ScrollDirection)>,
+}
+
+impl DirectionCache {
+    /// The cached direction, or a fresh `read()` when the cache is empty or
+    /// [`REFRESH`] old.
+    fn get(&mut self, now: Instant, read: impl FnOnce() -> ScrollDirection) -> ScrollDirection {
+        if let Some((at, direction)) = self.read
+            && now.saturating_duration_since(at) < REFRESH
+        {
+            return direction;
+        }
+        let direction = read();
+        self.read = Some((now, direction));
+        direction
+    }
+}
+
+#[cfg(target_os = "windows")]
+thread_local! {
+    /// Thread-local like `LAST_POINT` in the hook: `WH_MOUSE_LL` callbacks run
+    /// on the thread that installed the hook, so the cache needs no
+    /// synchronization on the callback path.
+    static CACHE: std::cell::Cell<DirectionCache> =
+        const { std::cell::Cell::new(DirectionCache { read: None }) };
+}
+
 impl ScrollDirection {
-    /// The current user's setting, read fresh on every call because the user
-    /// can change it while the agent runs.
+    /// The current user's setting, re-read at most every [`REFRESH`] because
+    /// the user can change it while the agent runs.
+    #[cfg(target_os = "windows")]
+    pub(super) fn current() -> Self {
+        CACHE.with(|cell| {
+            let mut cache = cell.get();
+            let direction = cache.get(Instant::now(), Self::read);
+            cell.set(cache);
+            direction
+        })
+    }
+
+    /// Read the setting from the registry.
     ///
     /// A missing value (a build before 24H2, or a user who never changed it)
     /// and a failed read are both [`Self::Standard`]: the replay then keeps
@@ -50,7 +100,7 @@ impl ScrollDirection {
         unsafe_code,
         reason = "the setting is read through the Win32 registry API"
     )]
-    pub(super) fn current() -> Self {
+    fn read() -> Self {
         use windows_sys::Win32::Foundation::ERROR_SUCCESS;
         use windows_sys::Win32::System::Registry::{
             HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW,
@@ -95,6 +145,8 @@ impl ScrollDirection {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+
     use super::*;
     use crate::ScrollDelta;
 
@@ -143,5 +195,38 @@ mod tests {
             delta_y: -4,
         };
         assert_eq!(ScrollDirection::Reversed.apply(moved.clone()), moved);
+    }
+
+    /// The hook asks for the direction on every wheel message; the registry is
+    /// read once per [`REFRESH`] window, then again so a changed setting lands.
+    #[test]
+    fn cache_reads_the_setting_once_per_refresh_window() {
+        let start = Instant::now();
+        let reads = Cell::new(0);
+        let read = |direction| {
+            reads.set(reads.get() + 1);
+            direction
+        };
+        let mut cache = DirectionCache::default();
+
+        assert_eq!(
+            cache.get(start, || read(ScrollDirection::Reversed)),
+            ScrollDirection::Reversed
+        );
+        assert_eq!(
+            cache.get(start + Duration::from_millis(999), || {
+                read(ScrollDirection::Standard)
+            }),
+            ScrollDirection::Reversed,
+            "a read within REFRESH is reused"
+        );
+        assert_eq!(reads.get(), 1);
+
+        assert_eq!(
+            cache.get(start + REFRESH, || read(ScrollDirection::Standard)),
+            ScrollDirection::Standard,
+            "a REFRESH-old read is replaced"
+        );
+        assert_eq!(reads.get(), 2);
     }
 }
