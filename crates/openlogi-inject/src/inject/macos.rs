@@ -410,29 +410,46 @@ fn post_key(vk: u16, flags: CGEventFlags) {
     }
 }
 
+/// The keys a typed character can go down on: A, S, D. The unicode payload
+/// decides the inserted character, so the key is only a placeholder.
+const TYPED_TEXT_KEYS: [u16; 3] = [0x00, 0x01, 0x02];
+
 /// Type an arbitrary unicode string, one key press per character, each
-/// carrying its unicode payload via `CGEventKeyboardSetUnicodeString`. Every
-/// event is built before the first is posted.
+/// carrying its unicode payload via `CGEventKeyboardSetUnicodeString`.
+///
+/// The events are built and posted under the held-chord lock, on a key no
+/// held chord keeps down: a key-up on a held key would end that hold early.
+/// Every event is built before the first is posted.
 pub(super) fn type_text(text: &str) {
-    let Some(events) = text_events(text) else {
-        return;
-    };
-    for event in events {
-        event.post(CGEventTapLocation::HID);
-    }
+    super::with_held_modifiers(|_| {
+        let Some(vk) = typed_text_key() else {
+            tracing::warn!("held chords keep every TypeText key down");
+            return;
+        };
+        let Some(events) = text_events(text, vk) else {
+            return;
+        };
+        for event in events {
+            event.post(CGEventTapLocation::HID);
+        }
+    });
 }
 
-/// A key-down and a key-up for each character of `text`, as a keyboard types
-/// it. The flags are cleared, so a modifier the user or a held chord holds
-/// cannot turn a character into a shortcut.
-fn text_events(text: &str) -> Option<Vec<CGEvent>> {
+/// The first of [`TYPED_TEXT_KEYS`] no held chord keeps down. Only meaningful
+/// under the held-chord lock, as [`held_key_down`] is.
+fn typed_text_key() -> Option<u16> {
+    TYPED_TEXT_KEYS.into_iter().find(|&vk| !held_key_down(vk))
+}
+
+/// A key-down and a key-up on `vk` for each character of `text`, as a
+/// keyboard types it. The flags are cleared, so a modifier the user or a held
+/// chord holds cannot turn a character into a shortcut.
+fn text_events(text: &str, vk: u16) -> Option<Vec<CGEvent>> {
     let mut events = Vec::new();
     for ch in text.chars() {
         let s = ch.to_string();
         for phase in [KeyPhase::Down, KeyPhase::Up] {
-            // Keycode 0 (A) is a placeholder; the unicode payload determines
-            // the actual inserted character.
-            let event = key_event(0, CGEventFlags::empty(), phase)?;
+            let event = key_event(vk, CGEventFlags::empty(), phase)?;
             event.set_string(&s);
             events.push(event);
         }
