@@ -35,7 +35,9 @@ use gpui::{
     point, prelude::FluentBuilder as _, px, rgb, svg,
 };
 use gpui_component::tooltip::Tooltip;
-use gpui_component::{Selectable as _, h_flex, input::InputState, v_flex};
+use gpui_component::{
+    Selectable as _, h_flex, input::InputState, scroll::ScrollableElement as _, v_flex,
+};
 use openlogi_core::binding::{Action, ActionRingIcon, ButtonId, KeypadPage, WorkflowStep};
 
 use super::editors::{
@@ -766,9 +768,8 @@ fn key_overview(
         .child(divider(*pal))
         .child(
             div()
+                .overflow_y_scrollbar()
                 .id("key-overview-scroll")
-                .min_h_0()
-                .overflow_y_scroll()
                 .children(rows),
         )
 }

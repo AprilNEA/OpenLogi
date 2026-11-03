@@ -840,6 +840,82 @@ fn an_overview_row_points_at_its_key_and_opens_it(cx: &mut gpui::TestAppContext)
     });
 }
 
+/// A key's action list is taller than its cap. It must show the app's
+/// scrollbar over a viewport of exactly the cap, and the wheel must scroll
+/// the rows under it; without a scrollbar nothing says the list goes on.
+#[gpui::test]
+fn the_key_panel_list_scrolls_under_a_scrollbar(cx: &mut gpui::TestAppContext) {
+    use crate::features::binding_editor::EDITOR_LIST_MAX_H;
+
+    let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
+    let (view, cx) = keys_tab(cx);
+    view.update(cx, |view, cx| view.select_key(Some(1), cx));
+    redraw(cx);
+
+    let viewport = cx
+        .debug_bounds("scrollbar-overlay")
+        .expect("the key panel list has a scrollbar");
+    assert_eq!(viewport.size.height, px(EDITOR_LIST_MAX_H));
+    let copy = cx
+        .debug_bounds("panel-action-Copy")
+        .expect("the panel lists Copy");
+    assert!(viewport.contains(&copy.center()), "Copy starts in view");
+
+    cx.simulate_event(gpui::ScrollWheelEvent {
+        position: viewport.center(),
+        delta: gpui::ScrollDelta::Pixels(point(px(0.), px(-60.))),
+        ..Default::default()
+    });
+    redraw(cx);
+
+    let scrolled = cx
+        .debug_bounds("panel-action-Copy")
+        .expect("the panel still lists Copy");
+    assert!(
+        scrolled.origin.y < copy.origin.y,
+        "the wheel scrolls the list: {copy:?} -> {scrolled:?}"
+    );
+}
+
+/// The key overview lists every key in the same column, so a keyboard with
+/// more keys than the column holds needs the same scrollbar. The scroll
+/// viewport must keep the rows' height: collapsed, it clips every row and no
+/// pointer reaches them. Scrolled to the end, the last key is in view and
+/// opens like any other row.
+#[gpui::test]
+fn the_key_overview_list_has_a_scrollbar(cx: &mut gpui::TestAppContext) {
+    let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
+    let (view, cx) = keys_tab(cx);
+
+    let overview = cx.debug_bounds("key-overview").expect("overview is shown");
+    let viewport = cx
+        .debug_bounds("scrollbar-overlay")
+        .expect("the key overview list has a scrollbar");
+    assert!(overview.contains(&viewport.center()));
+    let row = cx.debug_bounds("key-overview-row-3").expect("F3 is listed");
+    assert!(
+        viewport.contains(&row.center()),
+        "F3 sits inside the scroll viewport: {viewport:?}"
+    );
+
+    cx.simulate_event(gpui::ScrollWheelEvent {
+        position: viewport.center(),
+        delta: gpui::ScrollDelta::Pixels(point(px(0.), px(-2000.))),
+        ..Default::default()
+    });
+    redraw(cx);
+    let last = cx
+        .debug_bounds("key-overview-row-19")
+        .expect("F19 is listed");
+    assert!(
+        viewport.contains(&last.center()),
+        "the wheel brings F19 into view: {last:?} in {viewport:?}"
+    );
+    cx.simulate_click(last.center(), gpui::Modifiers::default());
+    redraw(cx);
+    view.read_with(cx, |view, _| assert_eq!(view.selected_key, Some(19)));
+}
+
 /// An unbound keyboard key does what it always did — "Off" read as though
 /// every key were switched off. Only a keypad grid key, which has no
 /// function of its own, is off until something is bound to it.
