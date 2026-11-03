@@ -1,4 +1,7 @@
-use gpui::{AppContext as _, AssetSource, Bounds, Modifiers, TestAppContext, point, size};
+use gpui::{
+    AppContext as _, AssetSource, Bounds, Modifiers, ScrollDelta, ScrollWheelEvent, TestAppContext,
+    point, size,
+};
 use openlogi_core::config::Config;
 use openlogi_core::device::DeviceInventory;
 use openlogi_ipc::{AgentSnapshot, AgentStatus, ForegroundApps, InventoryHealth, PROTOCOL_VERSION};
@@ -375,19 +378,23 @@ fn opening_waits_for_a_receiver_choice(cx: &mut TestAppContext) {
     );
 }
 
+/// More discovered devices than the 520 × 400 window shows at once.
+fn long_device_list() -> Vec<FoundDevice> {
+    (0..12u8)
+        .map(|n| FoundDevice {
+            address: [0, 0, 0, 0, 0, n],
+            name: format!("Keyboard {n}"),
+        })
+        .collect()
+}
+
 #[gpui::test]
 fn cancel_stays_in_the_bottom_bar_below_a_long_device_list(cx: &mut TestAppContext) {
     let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
     cx.update(gpui_component::init);
     cx.update(theme::register_builtin_themes);
     let mut commands = cx.update(install_state);
-    let devices = (0..12u8)
-        .map(|n| FoundDevice {
-            address: [0, 0, 0, 0, 0, n],
-            name: format!("Keyboard {n}"),
-        })
-        .collect();
-    cx.update(|cx| apply_state(cx, Some(PairingPhase::Found(devices))));
+    cx.update(|cx| apply_state(cx, Some(PairingPhase::Found(long_device_list()))));
     let (_, cx) = cx.add_window_view(AddDeviceView::new);
     let viewport = Bounds::new(point(px(0.), px(0.)), size(px(520.), px(400.)));
     cx.simulate_resize(viewport.size);
@@ -406,6 +413,66 @@ fn cancel_stays_in_the_bottom_bar_below_a_long_device_list(cx: &mut TestAppConte
     );
     cx.simulate_click(cancel.center(), Modifiers::default());
     assert!(matches!(commands.try_recv(), Ok(Command::CancelPairing(_))));
+}
+
+/// A step taller than the window scrolls under the app's scrollbar, or
+/// nothing says it continues. The scroll owner spans the window, so the bar
+/// sits on the window's right edge, not 24 px inside it, and the rows keep
+/// the page inset inside the owner.
+#[gpui::test]
+fn a_long_device_list_scrolls_under_a_scrollbar_on_the_window_edge(cx: &mut TestAppContext) {
+    let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
+    cx.update(gpui_component::init);
+    cx.update(theme::register_builtin_themes);
+    let _commands = cx.update(install_state);
+    cx.update(|cx| apply_state(cx, Some(PairingPhase::Found(long_device_list()))));
+    let (_, cx) = cx.add_window_view(AddDeviceView::new);
+    let viewport = Bounds::new(point(px(0.), px(0.)), size(px(520.), px(400.)));
+    cx.simulate_resize(viewport.size);
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+
+    let bar = cx
+        .debug_bounds("scrollbar-overlay")
+        .expect("the step content has a scrollbar");
+    assert_eq!(
+        (bar.left(), bar.right()),
+        (viewport.left(), viewport.right()),
+        "the scrollbar spans the window, so it sits on the window edge: {bar:?}"
+    );
+    let cancel = cx
+        .debug_bounds("pairing-cancel")
+        .expect("a running search offers Cancel");
+    assert!(
+        bar.bottom() <= cancel.top(),
+        "the scroll region ends above the action bar: {bar:?}, {cancel:?}"
+    );
+
+    let first = cx
+        .debug_bounds("pairing-device-000000000000")
+        .expect("the first device is listed");
+    assert!(
+        bar.contains(&first.center()),
+        "the first device starts in view: {bar:?}, {first:?}"
+    );
+    let inset = first.left() - bar.left();
+    assert!(
+        inset > px(0.) && bar.right() - first.right() == inset,
+        "rows keep the same page inset on both sides inside the scroll owner: {bar:?}, {first:?}"
+    );
+
+    cx.simulate_event(ScrollWheelEvent {
+        position: bar.center(),
+        delta: ScrollDelta::Pixels(point(px(0.), px(-60.))),
+        ..Default::default()
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    let scrolled = cx
+        .debug_bounds("pairing-device-000000000000")
+        .expect("the first device is still listed");
+    assert!(
+        scrolled.top() < first.top(),
+        "the wheel scrolls the rows under the bar: {first:?} -> {scrolled:?}"
+    );
 }
 
 #[gpui::test]
