@@ -41,6 +41,7 @@ windows = { version = "0.61", features = [
     "Win32_Devices_Usb",
     "Win32_Foundation",
     "Win32_Media_DirectShow",
+    "Win32_Media_KernelStreaming",
     "Win32_Media_MediaFoundation",
     "Win32_Security",
     "Win32_Storage_FileSystem",

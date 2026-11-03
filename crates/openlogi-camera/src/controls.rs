@@ -1,5 +1,5 @@
 //! Platform-independent control vocabulary shared by every UVC backend
-//! (IOKit on macOS, DirectShow on Windows, stubs elsewhere).
+//! (IOKit on macOS, V4L2 on Linux, DirectShow on Windows, stubs elsewhere).
 
 use thiserror::Error;
 
@@ -11,6 +11,10 @@ pub enum CameraControl {
     Tilt,
     Focus,
     Exposure,
+    /// How wide the camera frames the scene, in the steps the camera offers.
+    FieldOfView,
+    /// Flip the image for a camera tilted down to show the desk in front of it.
+    ShowMode,
     PowerLineFrequency,
     LowLightCompensation,
     Brightness,
@@ -25,12 +29,14 @@ pub enum CameraControl {
 
 impl CameraControl {
     /// Every control, in the order the UI lists them (lens first, then image).
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 17] = [
         Self::Zoom,
         Self::Pan,
         Self::Tilt,
         Self::Focus,
         Self::Exposure,
+        Self::FieldOfView,
+        Self::ShowMode,
         Self::PowerLineFrequency,
         Self::LowLightCompensation,
         Self::Brightness,
@@ -52,6 +58,8 @@ impl CameraControl {
             Self::Tilt => "tilt",
             Self::Focus => "focus",
             Self::Exposure => "exposure",
+            Self::FieldOfView => "field_of_view",
+            Self::ShowMode => "show_mode",
             Self::PowerLineFrequency => "power_line_frequency",
             Self::LowLightCompensation => "low_light_compensation",
             Self::Brightness => "brightness",

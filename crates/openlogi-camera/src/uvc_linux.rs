@@ -13,6 +13,11 @@
 //!   requires every control in one call to share a class, and the controls this
 //!   crate exposes span the User (`0x0098_0000`) and Camera (`0x009a_0000`)
 //!   classes. [`apply_settings`] groups by class instead of issuing one call.
+//!
+//! Vendor Extension Unit controls (field of view, Show Mode) have no V4L2
+//! control id; [`extension`] reaches them by unit id and selector instead.
+
+mod extension;
 
 use v4l::Device;
 use v4l::control::{Control, Description, Flags, Value};
@@ -21,6 +26,7 @@ use crate::controls::{
     AutoState, AutoToggle, CameraControl, CameraState, ControlError, ControlRange,
 };
 use crate::linux;
+use extension::ExtensionUnits;
 
 /// `V4L2_CID_BRIGHTNESS` — the User control class base.
 const CID_BRIGHTNESS: u32 = 0x0098_0900;
@@ -54,7 +60,8 @@ const EXPOSURE_APERTURE_PRIORITY: i64 = 3;
 /// [`CameraControl::Tint`] has no V4L2 equivalent — UVC exposes white balance
 /// as a single colour temperature, and the component (blue/red balance) form
 /// the macOS backend uses for tint isn't a standard V4L2 control — so it
-/// reports [`ControlError::Unsupported`].
+/// reports [`ControlError::Unsupported`]. The Extension Unit controls have none
+/// either; they go through [`extension`].
 fn control_id(control: CameraControl) -> Option<u32> {
     Some(match control {
         CameraControl::Zoom => CID_ZOOM_ABSOLUTE,
@@ -71,7 +78,7 @@ fn control_id(control: CameraControl) -> Option<u32> {
         CameraControl::Gain => CID_GAIN,
         CameraControl::BacklightCompensation => CID_BACKLIGHT_COMPENSATION,
         CameraControl::WhiteBalance => CID_WHITE_BALANCE_TEMPERATURE,
-        CameraControl::Tint => return None,
+        CameraControl::Tint | CameraControl::FieldOfView | CameraControl::ShowMode => return None,
     })
 }
 
@@ -99,6 +106,9 @@ pub fn control_range(
     control: CameraControl,
 ) -> Result<ControlRange, ControlError> {
     let device = open(unique_id)?;
+    if let Some(vendor) = control.extension() {
+        return ExtensionUnits::of(unique_id).range(&device, vendor);
+    }
     let id = control_id(control).ok_or(ControlError::Unsupported)?;
     let description = describe(&device, id).ok_or(ControlError::Unsupported)?;
     range_of(&device, &description).ok_or(ControlError::Unsupported)
@@ -109,17 +119,7 @@ pub fn control_range(
 /// # Errors
 /// [`ControlError::NotFound`] when no node matches `unique_id`.
 pub fn control_ranges(unique_id: &str) -> Result<Vec<(CameraControl, ControlRange)>, ControlError> {
-    let device = open(unique_id)?;
-    let descriptions = query(&device)?;
-
-    Ok(CameraControl::ALL
-        .into_iter()
-        .filter_map(|control| {
-            let id = control_id(control)?;
-            let description = descriptions.iter().find(|d| d.id == id)?;
-            Some((control, range_of(&device, description)?))
-        })
-        .collect())
+    Ok(read_camera_state(unique_id)?.controls)
 }
 
 /// Read every supported control range and auto-toggle state in one device open.
@@ -129,10 +129,14 @@ pub fn control_ranges(unique_id: &str) -> Result<Vec<(CameraControl, ControlRang
 pub fn read_camera_state(unique_id: &str) -> Result<CameraState, ControlError> {
     let device = open(unique_id)?;
     let descriptions = query(&device)?;
+    let extensions = ExtensionUnits::of(unique_id);
 
     let controls = CameraControl::ALL
         .into_iter()
         .filter_map(|control| {
+            if let Some(vendor) = control.extension() {
+                return Some((control, extensions.range(&device, vendor).ok()?));
+            }
             let id = control_id(control)?;
             let description = descriptions.iter().find(|d| d.id == id)?;
             Some((control, range_of(&device, description)?))
@@ -168,6 +172,9 @@ pub fn set_control(
     value: i32,
 ) -> Result<(), ControlError> {
     let device = open(unique_id)?;
+    if let Some(vendor) = control.extension() {
+        return ExtensionUnits::of(unique_id).write(&device, vendor, value);
+    }
     let id = control_id(control).ok_or(ControlError::Unsupported)?;
     write_value(&device, id, i64::from(value))
 }
@@ -186,7 +193,8 @@ pub fn set_auto(unique_id: &str, toggle: AutoToggle, on: bool) -> Result<(), Con
 /// Autos are written first: a manual value is rejected while its auto mode
 /// still owns the control, so dragging an auto-gated slider must clear the
 /// mode before the value lands. Controls are then batched per class, since
-/// `VIDIOC_S_EXT_CTRLS` refuses a mixed-class call.
+/// `VIDIOC_S_EXT_CTRLS` refuses a mixed-class call. Extension Unit controls
+/// are not V4L2 controls, so they are written one by one after the batches.
 ///
 /// Unsupported controls are skipped rather than failing the batch — a profile
 /// saved against a Brio shouldn't fail wholesale when applied to a C270.
@@ -243,6 +251,20 @@ pub fn apply_settings(
                     Ok(()) | Err(ControlError::Unsupported) => {}
                     Err(error) => return Err(error),
                 }
+            }
+        }
+    }
+
+    let vendor: Vec<_> = values
+        .iter()
+        .filter_map(|&(control, value)| Some((control.extension()?, value)))
+        .collect();
+    if !vendor.is_empty() {
+        let extensions = ExtensionUnits::of(unique_id);
+        for (control, value) in vendor {
+            match extensions.write(&device, control, value) {
+                Ok(()) | Err(ControlError::Unsupported) => {}
+                Err(error) => return Err(error),
             }
         }
     }
@@ -458,7 +480,9 @@ mod tests {
         // silently dropped from every batch.
         for control in CameraControl::ALL {
             let Some(id) = control_id(control) else {
-                continue; // Tint has no V4L2 equivalent.
+                // Tint has no V4L2 equivalent; the Extension Unit controls
+                // are not V4L2 controls.
+                continue;
             };
             let class = id & CLASS_MASK;
             assert!(

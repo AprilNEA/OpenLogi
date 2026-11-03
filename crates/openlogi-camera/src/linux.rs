@@ -81,11 +81,23 @@ pub(crate) fn nodes() -> Vec<Node> {
 /// before comparing — a `by-id` path and its `/dev/videoN` target must resolve
 /// to the same node.
 pub(crate) fn node_for_unique_id(unique_id: &str) -> Option<PathBuf> {
+    node_for(unique_id).map(|node| node.path)
+}
+
+/// The raw descriptors of the USB device behind the node `unique_id` names:
+/// its device descriptor followed by every configuration descriptor, as the
+/// kernel caches them in sysfs. The file is world-readable, so reading it
+/// needs no access to the device itself.
+pub(crate) fn usb_descriptors(unique_id: &str) -> Option<Vec<u8>> {
+    fs::read(node_for(unique_id)?.usb_device.join("descriptors")).ok()
+}
+
+/// The node a [`Camera::unique_id`] names, compared after canonicalizing.
+fn node_for(unique_id: &str) -> Option<Node> {
     let target = fs::canonicalize(unique_id).ok()?;
     nodes()
         .into_iter()
         .find(|node| fs::canonicalize(&node.path).is_ok_and(|p| p == target))
-        .map(|node| node.path)
 }
 
 /// Build the [`Camera`] view of a node, including its largest frame size and
