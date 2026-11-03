@@ -1264,8 +1264,7 @@ mod tests {
         }
     }
 
-    /// The exit status and a failed start reach the caller, which logs them;
-    /// they used to be dropped.
+    /// The exit status and a failed start reach the caller, which logs them.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn a_script_reports_its_exit_status_and_a_failed_start() {
@@ -1278,7 +1277,7 @@ mod tests {
 
     /// A child the script leaves in the background keeps its stdout open.
     /// That must not keep the script, and so a workflow, waiting: reading the
-    /// output to its end waited for every holder of the pipe.
+    /// output to its end would wait for every holder of the pipe.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn a_background_child_does_not_keep_the_script_waiting() {
