@@ -1,7 +1,7 @@
-use core_graphics::event::{CGEventFlags, EventField};
+use core_graphics::event::{CGEventFlags, CGEventType, EventField};
 use openlogi_core::binding::Shortcut;
 
-use super::{LOCK_SCREEN_CHORD, combo, held_key_event, hid_usage_to_macos, key_event};
+use super::{LOCK_SCREEN_CHORD, combo, held_key_event, hid_usage_to_macos, key_event, text_events};
 use crate::inject::{HeldKey, HeldModifiers, KeyPhase, parse_shortcut};
 
 #[test]
@@ -75,6 +75,27 @@ fn held_edges_carry_the_aggregate_modifier_state() {
         .expect("Command has a macOS virtual-key mapping");
     assert!(!flags.contains(CGEventFlags::CGEventFlagCommand));
     assert!(flags.contains(CGEventFlags::CGEventFlagControl));
+}
+
+/// A key-down with no key-up leaves its key logically down, and an event
+/// that inherits a held modifier types a shortcut instead of text.
+#[test]
+fn typed_text_releases_each_character_and_carries_no_modifier() {
+    let events = text_events("aé").expect("keyboard events");
+    let kinds: Vec<_> = events.iter().map(|event| event.get_type() as u32).collect();
+    let (down, up) = (CGEventType::KeyDown as u32, CGEventType::KeyUp as u32);
+    assert_eq!(kinds, [down, up, down, up]);
+    let modifiers = CGEventFlags::CGEventFlagCommand
+        | CGEventFlags::CGEventFlagControl
+        | CGEventFlags::CGEventFlagShift
+        | CGEventFlags::CGEventFlagAlternate;
+    for event in &events {
+        assert!(!event.get_flags().intersects(modifiers));
+        assert_eq!(
+            event.get_integer_value_field(EventField::EVENT_SOURCE_USER_DATA),
+            crate::SYNTHETIC_EVENT_USER_DATA
+        );
+    }
 }
 
 /// The hook skips a key edge only by this tag, so every edge the backend

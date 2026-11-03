@@ -410,25 +410,34 @@ fn post_key(vk: u16, flags: CGEventFlags) {
     }
 }
 
-/// Type an arbitrary unicode string by emitting one key event per character,
-/// each carrying its unicode payload via `CGEventKeyboardSetUnicodeString`.
+/// Type an arbitrary unicode string, one key press per character, each
+/// carrying its unicode payload via `CGEventKeyboardSetUnicodeString`. Every
+/// event is built before the first is posted.
 pub(super) fn type_text(text: &str) {
-    let Ok(src) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
-        tracing::warn!("CGEventSource::new failed for type_text");
+    let Some(events) = text_events(text) else {
         return;
     };
-    for ch in text.chars() {
-        // Keycode 0 (A) is a placeholder; the unicode payload determines the
-        // actual inserted character.
-        let Ok(ev) = CGEvent::new_keyboard_event(src.clone(), 0, true) else {
-            tracing::warn!("CGEvent::new_keyboard_event failed in type_text");
-            continue;
-        };
-        let s = ch.to_string();
-        ev.set_string(&s);
-        tag_synthetic(&ev);
-        ev.post(CGEventTapLocation::HID);
+    for event in events {
+        event.post(CGEventTapLocation::HID);
     }
+}
+
+/// A key-down and a key-up for each character of `text`, as a keyboard types
+/// it. The flags are cleared, so a modifier the user or a held chord holds
+/// cannot turn a character into a shortcut.
+fn text_events(text: &str) -> Option<Vec<CGEvent>> {
+    let mut events = Vec::new();
+    for ch in text.chars() {
+        let s = ch.to_string();
+        for phase in [KeyPhase::Down, KeyPhase::Up] {
+            // Keycode 0 (A) is a placeholder; the unicode payload determines
+            // the actual inserted character.
+            let event = key_event(0, CGEventFlags::empty(), phase)?;
+            event.set_string(&s);
+            events.push(event);
+        }
+    }
+    Some(events)
 }
 
 /// Press a key chord described by a `KeyCombo` modifier bitmask + virtual
