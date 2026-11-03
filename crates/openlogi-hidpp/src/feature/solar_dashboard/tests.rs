@@ -57,6 +57,25 @@ fn ignores_unknown_event_sub_id() {
 }
 
 #[test]
+fn the_public_decoder_reads_the_status_of_every_event() {
+    // Spec example: 11 03 06 10 60 01 3F ... → battery 96%, light 319.
+    let mut payload = [0; 16];
+    payload[0] = 0x60;
+    payload[1] = 0x01;
+    payload[2] = 0x3f;
+    let status = SolarStatus {
+        battery_level: 96,
+        light_level: 319,
+    };
+
+    for function_id in 0..=2 {
+        let event = SolarEvent::decode(function_id, &payload).expect("functions 0 to 2 are events");
+        assert_eq!(event.status(), status, "function {function_id}");
+    }
+    assert_eq!(SolarEvent::decode(3, &payload), None);
+}
+
+#[test]
 fn maps_led_wire_values() {
     assert_eq!(u8::from(LedId::Off), 0);
     assert_eq!(LedId::try_from(3u8).unwrap(), LedId::Green);

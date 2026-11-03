@@ -56,3 +56,26 @@ impl DecodeEvent for SolarEvent {
         decode_event(sub_id, payload)
     }
 }
+
+impl SolarEvent {
+    /// Decodes one event payload for this feature, or returns `None` for an
+    /// unsupported function.
+    ///
+    /// Consumers that already own a channel-level listener can use this
+    /// without constructing a second
+    /// [`SolarDashboardFeature`](super::SolarDashboardFeature).
+    #[must_use]
+    pub fn decode(function_id: u8, payload: &[u8; 16]) -> Option<Self> {
+        decode_event(function_id, payload)
+    }
+
+    /// The battery and light readings this event carries.
+    #[must_use]
+    pub const fn status(self) -> SolarStatus {
+        match self {
+            Self::Battery(status) | Self::LightMeasure(status) | Self::CheckLightButton(status) => {
+                status
+            }
+        }
+    }
+}

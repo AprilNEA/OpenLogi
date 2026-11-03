@@ -20,6 +20,10 @@
 //! compared with the device's last lock state, and each key that changed goes
 //! to the on-screen indicator ([`EventReceiver::take_lock_keys`]).
 //!
+//! A solar keyboard's `0x4301` report carries its battery level, which the
+//! keyboard has no getter for. The level is recorded here for the next battery
+//! read, and the report asks for a reconciliation only when the level changed.
+//!
 //! [`PairedDevice::settings_revision`]: openlogi_core::device::PairedDevice::settings_revision
 
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -42,6 +46,7 @@ use hidpp::feature::fn_inversion::{
 use hidpp::feature::hires_wheel::{self, HiResWheelEvent};
 use hidpp::feature::lock_key_state::{LockKeyStateFeature, LockKeys};
 use hidpp::feature::multi_platform::PlatformChange;
+use hidpp::feature::solar_dashboard::SolarEvent;
 use hidpp::feature::unified_battery::BatteryEvent;
 use hidpp::feature::wireless_device_status::WirelessDeviceStatusEvent;
 use hidpp::protocol::{v10, v20};
@@ -100,6 +105,9 @@ pub enum HidppEventSource {
     /// between ratchet and free-spin on the device. The wheel mode a client
     /// shows is the SmartShift one, which the client re-reads.
     HiResWheelRatchet,
+    /// A solar keyboard's `SolarKeyboardDashboard` (`0x4301`) feature reported
+    /// a battery level that differs from its last report.
+    SolarDashboard,
 }
 
 impl HidppEventSource {
@@ -344,13 +352,14 @@ pub(crate) fn observed_event_channel() -> (EventNotifier, EventReceiver, EventOb
 ///
 /// Stored with the immutable feature-table cache because these indexes are
 /// discovered by the same walk. Every battery source the probe reads —
-/// unified `0x1004`, legacy `0x1000`, voltage `0x1001` and `0x1F20` ADC
-/// measurement — broadcasts its changes, so each has an index here. So do the
-/// settings a user can change on the device itself: Fn lock (`0x40a2`,
-/// `0x40a3`), extended DPI (`0x2202`), the keyboard platform (`0x4531`), the
-/// keyboard's disabled keys (`0x4521`), the extended report rate (`0x8061`),
-/// the keyboard backlight (`0x1982`) and the wheel's ratchet (`0x2121`). So
-/// do the keyboard's lock keys (`0x4220`), for the on-screen indicator only.
+/// unified `0x1004`, legacy `0x1000`, voltage `0x1001`, `0x1F20` ADC
+/// measurement and the solar `0x4301` — broadcasts its changes, so each has an
+/// index here. So do the settings a user can change on the device itself: Fn
+/// lock (`0x40a2`, `0x40a3`), extended DPI (`0x2202`), the keyboard platform
+/// (`0x4531`), the keyboard's disabled keys (`0x4521`), the extended report
+/// rate (`0x8061`), the keyboard backlight (`0x1982`) and the wheel's ratchet
+/// (`0x2121`). So do the keyboard's lock keys (`0x4220`), for the on-screen
+/// indicator only.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct EventFeatureIndices {
     pub(super) wireless_status: Option<u8>,
@@ -367,6 +376,7 @@ pub(super) struct EventFeatureIndices {
     pub(super) backlight: Option<u8>,
     pub(super) lock_key_state: Option<u8>,
     pub(super) hires_wheel: Option<u8>,
+    pub(super) solar_dashboard: Option<u8>,
 }
 
 impl EventFeatureIndices {
@@ -391,6 +401,7 @@ impl EventFeatureIndices {
                 0x1982 => indices.backlight = Some(index),
                 0x4220 => indices.lock_key_state = Some(index),
                 0x2121 => indices.hires_wheel = Some(index),
+                0x4301 => indices.solar_dashboard = Some(index),
                 _ => {}
             }
         }
@@ -509,6 +520,11 @@ struct DeviceEvents {
     /// lock-state read started before a comeback does not record its answer
     /// after it.
     lock_keys_connection: u64,
+    /// The battery level of the last `0x4301` report the device sent, its only
+    /// battery reading (see [`EventSubscriptionHandle::solar_battery`]). Kept
+    /// across re-registration and reconnection: every battery read asks the
+    /// keyboard for a fresh report.
+    solar_battery: Option<u8>,
 }
 
 impl DeviceEvents {
@@ -568,6 +584,9 @@ impl SubscriptionState {
         let device_index = message.header().device_index;
         if self.track_lock_keys(&message) {
             return None;
+        }
+        if let Some(changed) = self.track_solar_battery(&message) {
+            return changed.then_some(HidppEventSource::SolarDashboard);
         }
         let source = self
             .devices
@@ -645,6 +664,43 @@ impl SubscriptionState {
         true
     }
 
+    /// Record the battery level a `0x4301` report from a registered device
+    /// carries. `None` when `message` is no such report, otherwise whether the
+    /// level differs from the recorded one. Only a change asks for a
+    /// reconciliation: every battery read asks the keyboard for a report, so
+    /// an unchanged report that asked again would never stop.
+    fn track_solar_battery(&self, message: &v20::Message) -> Option<bool> {
+        let header = message.header();
+        if header.software_id.to_lo() != 0 {
+            return None;
+        }
+        let is_solar_report = |device: &DeviceEvents| {
+            device.device_index == header.device_index
+                && device.features.solar_dashboard == Some(header.feature_index)
+        };
+        if !self
+            .devices
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .any(is_solar_report)
+        {
+            return None;
+        }
+        let level = SolarEvent::decode(header.function_id.to_lo(), &message.extend_payload())?
+            .status()
+            .battery_level;
+        let previous = self
+            .devices
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter_mut()
+            .find(|device| is_solar_report(device))?
+            .solar_battery
+            .replace(level);
+        Some(previous != Some(level))
+    }
+
     /// [`DeviceEvents::forget_lock_keys`] for `device_index`, if registered.
     fn forget_lock_keys(&self, device_index: u8) {
         if let Some(device) = self
@@ -689,6 +745,7 @@ impl EventSubscriptionHandle {
                 lock_keys: None,
                 lock_keys_read: false,
                 lock_keys_connection: 0,
+                solar_battery: None,
             });
         }
     }
@@ -769,6 +826,18 @@ impl EventSubscriptionHandle {
             .iter()
             .find(|device| device.device_index == device_index)
             .map_or(0, |device| device.settings_revision)
+    }
+
+    /// The battery level of the last `0x4301` report `device_index` sent on
+    /// this channel; `None` before its first, or when it was never registered.
+    pub(super) fn solar_battery(&self, device_index: u8) -> Option<u8> {
+        self.state
+            .devices
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .find(|device| device.device_index == device_index)
+            .and_then(|device| device.solar_battery)
     }
 
     /// Suppress receiver connection events fabricated by the enumerator's own
@@ -870,6 +939,7 @@ mod tests {
                 backlight: None,
                 lock_key_state: None,
                 hires_wheel: None,
+                solar_dashboard: None,
             }
         );
     }
@@ -903,6 +973,7 @@ mod tests {
             lock_keys: None,
             lock_keys_read: false,
             lock_keys_connection: 0,
+            solar_battery: None,
             features: EventFeatureIndices {
                 wireless_status: Some(5),
                 unified_battery: None,
@@ -918,6 +989,7 @@ mod tests {
                 backlight: None,
                 lock_key_state: None,
                 hires_wheel: None,
+                solar_dashboard: None,
             },
         });
         state.receiver_snapshot_depth.store(1, Ordering::Release);
@@ -947,6 +1019,7 @@ mod tests {
             lock_keys: None,
             lock_keys_read: false,
             lock_keys_connection: 0,
+            solar_battery: None,
             features: EventFeatureIndices {
                 wireless_status: Some(5),
                 unified_battery: Some(7),
@@ -962,6 +1035,7 @@ mod tests {
                 backlight: None,
                 lock_key_state: None,
                 hires_wheel: None,
+                solar_dashboard: None,
             },
         });
 
@@ -1020,6 +1094,7 @@ mod tests {
             lock_keys: None,
             lock_keys_read: false,
             lock_keys_connection: 0,
+            solar_battery: None,
             features: EventFeatureIndices {
                 wireless_status: None,
                 unified_battery: None,
@@ -1035,6 +1110,7 @@ mod tests {
                 backlight: None,
                 lock_key_state: None,
                 hires_wheel: None,
+                solar_dashboard: None,
             },
         });
         let event = |function_id: u8, software_id: u8, bytes: [u8; 3]| {
@@ -1097,6 +1173,7 @@ mod tests {
             lock_keys: None,
             lock_keys_read: false,
             lock_keys_connection: 0,
+            solar_battery: None,
             features: EventFeatureIndices {
                 battery_status: Some(4),
                 battery_voltage: Some(6),
@@ -1154,6 +1231,83 @@ mod tests {
         }
         // Another feature's index on the same device is not a battery event.
         assert_eq!(state.decode(event(5, 0, 0, [50, 20, 0]), false), None);
+    }
+
+    #[test]
+    fn solar_dashboard_index_is_its_table_position() {
+        // The K750 feature table Solaar lists (pwr/Solaar#216).
+        let table = [
+            0x0001, 0x0003, 0x0005, 0x1b00, 0x1d4b, 0x1df3, 0x40a0, 0x4100, 0x4301, 0x4520,
+        ];
+        let indices = EventFeatureIndices::from_feature_ids(&table);
+        assert_eq!(indices.solar_dashboard, Some(9));
+        assert_eq!(indices.wireless_status, Some(5));
+    }
+
+    #[test]
+    fn solar_reports_ask_for_reconciliation_only_when_the_level_changes() {
+        let state = state(None);
+        state.devices.write().unwrap().push(DeviceEvents {
+            device_index: 1,
+            settings_revision: 0,
+            lock_keys: None,
+            lock_keys_read: false,
+            lock_keys_connection: 0,
+            solar_battery: None,
+            features: EventFeatureIndices {
+                solar_dashboard: Some(9),
+                ..EventFeatureIndices::default()
+            },
+        });
+        let report = |feature_index: u8, function_id: u8, software_id: u8, battery: u8| {
+            let mut payload = [0; 16];
+            payload[0] = battery;
+            v20::Message::Long(
+                v20::MessageHeader {
+                    device_index: 1,
+                    feature_index,
+                    function_id: U4::from_lo(function_id),
+                    software_id: U4::from_lo(software_id),
+                },
+                payload,
+            )
+            .into()
+        };
+        let level = || state.devices.read().unwrap()[0].solar_battery;
+
+        // The first report records the level and asks for a reconciliation.
+        assert_eq!(
+            state.decode(report(9, 0, 0, 96), false),
+            Some(HidppEventSource::SolarDashboard)
+        );
+        assert_eq!(level(), Some(96));
+        // The same level again, as the report a reconciliation's read asks
+        // for carries, asks for nothing: that read would ask again.
+        for function_id in 0..=2 {
+            assert_eq!(
+                state.decode(report(9, function_id, 0, 96), false),
+                None,
+                "function {function_id}"
+            );
+        }
+        // A new level from the broadcast, a light measure, or the CheckLight
+        // button asks again.
+        for (function_id, battery) in [(1, 95), (2, 94), (0, 93)] {
+            assert_eq!(
+                state.decode(report(9, function_id, 0, battery), false),
+                Some(HidppEventSource::SolarDashboard),
+                "function {function_id}"
+            );
+            assert_eq!(level(), Some(battery));
+        }
+        // A reply to our own request is matched to it and carries a software
+        // id; neither is a report. Nor is an unknown function, or another
+        // feature's index.
+        assert_eq!(state.decode(report(9, 1, 0, 50), true), None);
+        assert_eq!(state.decode(report(9, 1, 0xd, 50), false), None);
+        assert_eq!(state.decode(report(9, 3, 0, 50), false), None);
+        assert_eq!(state.decode(report(8, 1, 0, 50), false), None);
+        assert_eq!(level(), Some(93));
     }
 
     #[test]
