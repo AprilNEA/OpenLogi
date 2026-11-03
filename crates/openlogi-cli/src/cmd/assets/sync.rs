@@ -33,7 +33,11 @@ use openlogi_assets::{AssetRegistry, FRONT_RENDER_FILES, FetchOutcome, METADATA_
 ///
 /// (`back_*` renders stay remote until an easyswitch view needs them.)
 fn is_optional_asset(name: &str) -> bool {
-    if name == "side_core.png" || name == "side.png" {
+    // A side render may live at a nested path in newer depots
+    // (`images/device/side_hero.png`); match on the basename so those are
+    // fetched too.
+    let basename = name.rsplit('/').next().unwrap_or(name);
+    if basename == "side_core.png" || basename == "side.png" || (basename.starts_with("side_") && basename.ends_with(".png")) {
         return true;
     }
     if (name.starts_with("core_metadata_") || name.starts_with("metadata_"))
