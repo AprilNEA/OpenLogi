@@ -212,6 +212,7 @@ fn online_record(key: &str) -> DeviceRecord {
         asset: None,
         model_info: None,
         codename: None,
+        wpid: None,
         serial_number: None,
         unit_id: [1; 4],
         driver_id: None,

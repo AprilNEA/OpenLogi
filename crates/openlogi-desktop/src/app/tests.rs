@@ -1077,6 +1077,7 @@ fn record(kind: DeviceKind, capabilities: Option<Capabilities>) -> DeviceRecord 
         asset: None,
         model_info: None,
         codename: None,
+        wpid: None,
         serial_number: None,
         unit_id: [0; 4],
         driver_id: None,
