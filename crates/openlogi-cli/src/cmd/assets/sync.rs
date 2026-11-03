@@ -37,7 +37,10 @@ fn is_optional_asset(name: &str) -> bool {
     // (`images/device/side_hero.png`); match on the basename so those are
     // fetched too.
     let basename = name.rsplit('/').next().unwrap_or(name);
-    if basename == "side_core.png" || basename == "side.png" || (basename.starts_with("side_") && basename.ends_with(".png")) {
+    if basename == "side_core.png"
+        || basename == "side.png"
+        || (basename.starts_with("side_") && basename.ends_with(".png"))
+    {
         return true;
     }
     if (name.starts_with("core_metadata_") || name.starts_with("metadata_"))
