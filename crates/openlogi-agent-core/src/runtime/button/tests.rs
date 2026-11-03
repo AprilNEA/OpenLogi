@@ -474,6 +474,62 @@ fn pointer_change_retargets_a_gesture_hold_instead_of_canceling_it() {
 }
 
 #[test]
+fn pointer_change_keeps_a_held_mouse_button_down() {
+    use openlogi_hook::PointerTarget;
+    // A remapped Middle Click holds the middle button for the whole press.
+    // Dragging into another window must not release it (#370).
+    let (sent, received) = mpsc::channel();
+    let mut owner = ButtonRuntimeOwner::spawn(move |event| sent.send(event).expect("receiver"))
+        .expect("worker");
+    let input = owner.input();
+    let old = PointerTarget::Window {
+        process_id: 41,
+        window_id: 7,
+    };
+    let current = PointerTarget::Window {
+        process_id: 42,
+        window_id: 9,
+    };
+    let drag = input
+        .try_hook_down_with_target(
+            ButtonId::Forward,
+            Some(&Binding::Single(Action::MiddleClick)),
+            ActionDispatchTarget::for_pointer(Some(PointerPress::distinct(old)), || None),
+        )
+        .expect("drag down");
+    assert!(matches!(
+        recv_event(&received),
+        ButtonRuntimeEvent::Started(_)
+    ));
+
+    input.cancel_pointer_except(current);
+    assert!(input.try_hook_up(ButtonId::Forward));
+    let ButtonRuntimeEvent::Ended { press, reason } = recv_event(&received) else {
+        panic!("the drag must end only with its release");
+    };
+    assert_eq!(press.token(), &drag);
+    assert_eq!(reason, EndReason::Released);
+    assert!(owner.shutdown());
+}
+
+#[test]
+fn held_mouse_buttons_and_gesture_holds_follow_the_pointer() {
+    let now = Instant::now();
+    let follows = |binding: Option<&Binding>| PressBehavior::new(binding, now).follows_pointer();
+
+    assert!(follows(None), "a gesture hold chains swipes");
+    assert!(follows(Some(&Binding::Single(Action::MiddleClick))));
+    assert!(follows(Some(&Binding::Single(Action::LeftClick))));
+    assert!(!follows(Some(&Binding::Single(Action::Copy))));
+    // A long press or wheel hold clicks on release, so it holds no button.
+    assert!(!follows(Some(&long_press(
+        Action::MiddleClick,
+        Action::Copy
+    ))));
+    assert!(!follows(Some(&wheel_hold(Action::MiddleClick))));
+}
+
+#[test]
 fn source_cancellation_invalidates_queued_gesture_work() {
     let (sent, received) = mpsc::channel();
     let mut owner = ButtonRuntimeOwner::spawn(move |event| {
