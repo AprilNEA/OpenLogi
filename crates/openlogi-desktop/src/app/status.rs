@@ -299,6 +299,8 @@ fn accessibility_status(pal: Palette) -> impl IntoElement {
     use gpui::InteractiveElement as _;
     use gpui_base::Button as BaseButton;
 
+    use crate::ui::theme::FocusRingStyle as _;
+
     BaseButton::new("footer-accessibility")
         .accessibility_label(tr!("permissions.accessibility_not_granted_click_to_grant"))
         .flex()
@@ -308,7 +310,7 @@ fn accessibility_status(pal: Palette) -> impl IntoElement {
         .text_color(pal.text_primary)
         .cursor_pointer()
         .hover(|style| style.text_color(pal.text_muted))
-        .focus_visible(|style| style.text_color(pal.text_muted))
+        .focus_visible(move |style| style.focus_ring(pal))
         .child(
             div()
                 .size_1p5()

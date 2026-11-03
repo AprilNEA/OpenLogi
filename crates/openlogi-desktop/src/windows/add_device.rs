@@ -15,6 +15,7 @@
 //! Unifying just opens a lock and waits for the next device to link, so it
 //! jumps straight from *searching* to *paired*.
 
+use crate::ui::theme::FocusRingStyle as _;
 use gpui::{
     App, Context, ElementId, FocusHandle, FontWeight, Global, InteractiveElement, IntoElement,
     ParentElement as _, Render, SharedString, Size, StatefulInteractiveElement as _, Styled as _,
@@ -481,7 +482,7 @@ fn choice_row(id: impl Into<ElementId>, label: SharedString, pal: Palette) -> Ba
         .bg(pal.control)
         .cursor_pointer()
         .hover(|s| s.bg(pal.control_hover))
-        .focus_visible(|s| s.bg(pal.control_hover).border_color(theme::accent()))
+        .focus_visible(move |s| s.focus_ring(pal))
         .child(div().flex_1().min_w_0().truncate().text_body().child(label))
         .child(
             Icon::new(IconName::ChevronRight)

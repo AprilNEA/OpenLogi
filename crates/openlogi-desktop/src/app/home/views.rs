@@ -1,5 +1,6 @@
 //! Switchable grid, list, and carousel layouts for the Home device gallery.
 
+use crate::ui::theme::FocusRingStyle as _;
 use gpui::{
     AnyElement, App, Context, ElementId, InteractiveElement, IntoElement, ParentElement, Pixels,
     Rems, RenderOnce, SharedString, StatefulInteractiveElement as _, Styled, Window, div,
@@ -286,7 +287,7 @@ fn device_card_element(
     .aria_selected(active)
     .cursor_pointer()
     .hover(move |card| card.border_color(rgb(theme::ACCENT_BLUE)).shadow_sm())
-    .focus_visible(move |card| card.border_color(rgb(theme::ACCENT_BLUE)).shadow_sm())
+    .focus_visible(move |card| card.focus_ring(pal))
     .on_click(move |_, _, cx| {
         view.update(cx, |this, cx| {
             this.open_device(record_key.clone(), cx);
@@ -391,7 +392,7 @@ fn device_list_row(
         .aria_selected(active)
         .cursor_pointer()
         .hover(move |row| row.border_color(rgb(theme::ACCENT_BLUE)).shadow_sm())
-        .focus_visible(move |row| row.border_color(rgb(theme::ACCENT_BLUE)).shadow_sm())
+        .focus_visible(move |row| row.focus_ring(pal))
         .on_click(move |_, _, cx| {
             view.update(cx, |this, cx| {
                 this.open_device(record_key.clone(), cx);

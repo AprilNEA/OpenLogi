@@ -1,6 +1,7 @@
 //! The device-detail screen: the header (back + name + section tabs), and the
 //! section bodies (Buttons, Keys, Pointer, Lighting, Camera, Device).
 
+use crate::ui::theme::FocusRingStyle as _;
 use gpui::{
     Context, InteractiveElement, IntoElement, ParentElement, Rems, Role, SharedString,
     StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px, rems,
@@ -234,13 +235,7 @@ fn detail_navigation(
                         pal.control_hover
                     })
                 })
-                .focus_visible(move |row| {
-                    row.bg(if selected {
-                        crate::ui::theme::accent_tint_hover()
-                    } else {
-                        pal.control_hover
-                    })
-                })
+                .focus_visible(move |style| style.focus_ring(pal))
                 .child(
                     Icon::empty()
                         .path(detail_tab_icon(tab))

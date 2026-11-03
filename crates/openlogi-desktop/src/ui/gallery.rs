@@ -1,5 +1,6 @@
 //! Debug-only gallery for reviewing shared controls without app runtime state.
 
+use super::theme::FocusRingStyle as _;
 use gpui::{
     App, AppContext as _, Context, InteractiveElement, IntoElement, ParentElement, Render, Role,
     SharedString, Size, StatefulInteractiveElement as _, Styled, Window, WindowOptions, div,
@@ -657,7 +658,7 @@ fn choice_card(id: &'static str, label: &'static str, selected: bool, pal: Palet
         })
         .bg(pal.control)
         .hover(move |style| style.bg(pal.control_hover))
-        .focus_visible(move |style| style.border_color(theme::accent()))
+        .focus_visible(move |style| style.focus_ring(pal))
         .gap_1()
         // A preview strip above the label: the stacked shape the settings
         // pickers rely on.

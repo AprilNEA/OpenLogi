@@ -5,6 +5,7 @@
 //! keyboard through `openlogi_agent_core::hardware::set_lighting_in_background`
 //! (the agent, over IPC — the GUI has no device I/O of its own).
 
+use crate::ui::theme::FocusRingStyle as _;
 use gpui::{
     Context, InteractiveElement, IntoElement, ParentElement, Render, Role,
     StatefulInteractiveElement as _, Styled, Subscription, Toggled, Window, px, rgb,
@@ -146,7 +147,7 @@ fn swatch(color: Rgb, current: &Lighting, pal: Palette) -> impl IntoElement {
         })
         .bg(rgb(color.packed()))
         .cursor_pointer()
-        .focus_visible(|style| style.border_color(theme::accent()))
+        .focus_visible(move |style| style.focus_ring(pal))
         .on_click(move |_event, _window, cx| {
             AppState::apply(cx, |state| {
                 let mut next = state.lighting();

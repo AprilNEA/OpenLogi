@@ -1,6 +1,7 @@
 //! Appearance settings page: mode, theme grid, radius, scale, language.
 
 use super::language::{LanguageOption, language_select_field};
+use crate::ui::theme::FocusRingStyle as _;
 use gpui::{ElementId, img};
 use openlogi_core::config::AppIcon;
 
@@ -214,7 +215,7 @@ fn mode_card(
         .gap(px(6.))
         .items_center()
         .cursor_pointer()
-        .focus_visible(move |style| style.text_color(pal.text_primary))
+        .focus_visible(move |style| style.focus_ring(pal))
         .child(thumb)
         .child(
             h_flex()
@@ -249,7 +250,7 @@ fn icon_card(icon: AppIcon, selected: bool, accent: Hsla, pal: Palette) -> impl 
         .gap(px(6.))
         .items_center()
         .cursor_pointer()
-        .focus_visible(move |style| style.text_color(pal.text_primary))
+        .focus_visible(move |style| style.focus_ring(pal))
         .child(
             div()
                 .size(px(80.))
@@ -575,7 +576,7 @@ fn theme_card(
                 style.border_color(pal.text_muted)
             }
         })
-        .focus_visible(move |style| style.border_color(swatch.primary).shadow_sm())
+        .focus_visible(move |style| style.focus_ring(pal))
         .active(gpui::Styled::shadow_2xs)
         .child(
             v_flex()
@@ -677,9 +678,9 @@ fn filter_chip(
             } else {
                 this.text_color(pal.text_muted)
                     .hover(|h| h.border_color(pal.text_muted))
-                    .focus_visible(|h| h.border_color(pal.text_muted))
             }
         })
+        .focus_visible(move |h| h.focus_ring(pal))
         .child(label)
         .on_click(move |_, _, cx| {
             view.update(cx, |this, cx| {

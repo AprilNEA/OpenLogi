@@ -33,6 +33,7 @@
 //! waiting on a first frame that is never coming. Resource contention can clear
 //! without an event, so the preview retries on a timer while its tab is on screen.
 
+use crate::ui::theme::FocusRingStyle as _;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -477,7 +478,7 @@ impl Render for CameraPreview {
                             .text_color(pal.text_muted)
                             .cursor_pointer()
                             .hover(|s| s.text_color(pal.text_primary))
-                            .focus_visible(|s| s.text_color(pal.text_primary))
+                            .focus_visible(move |s| s.focus_ring(pal))
                             .child(tr!("camera.click_to_enable_camera_access"))
                             .on_click(|_, _, cx| {
                                 crate::features::camera::request_camera_access(cx);

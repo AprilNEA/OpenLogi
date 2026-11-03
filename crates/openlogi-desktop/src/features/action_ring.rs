@@ -3,6 +3,7 @@
 mod action_icons;
 mod editor;
 
+use crate::ui::theme::FocusRingStyle as _;
 use gpui::{
     App, AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement,
     ParentElement, Render, ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled,
@@ -337,15 +338,7 @@ fn slot_button(
                 pal.control_hover
             })
         })
-        .focus_visible(move |button| {
-            button
-                .border_color(rgb(theme::ACCENT_BLUE))
-                .bg(if selected {
-                    theme::accent_tint_hover()
-                } else {
-                    pal.control_hover
-                })
-        })
+        .focus_visible(move |style| style.focus_ring(pal))
         .on_click(move |_, _, cx| {
             selected_view.update(cx, |panel, cx| {
                 panel.selected_slot = slot;

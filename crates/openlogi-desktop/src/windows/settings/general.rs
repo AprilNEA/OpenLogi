@@ -7,6 +7,7 @@ use super::{
 };
 use crate::ui::commit_slider::SliderUnit;
 use crate::ui::slider_row::SliderRow;
+use crate::ui::theme::FocusRingStyle as _;
 use crate::ui::theme::Typography as _;
 use gpui_base::Button as BaseButton;
 use gpui_component::radio::{Radio, RadioGroup};
@@ -274,7 +275,7 @@ fn open_login_items_button(cx: &App) -> BaseButton {
         .cursor_pointer()
         .bg(pal.control)
         .hover(move |s| s.bg(pal.control_hover))
-        .focus_visible(move |s| s.bg(pal.control_hover))
+        .focus_visible(move |s| s.focus_ring(pal))
         .child(tr!("app.open_login_items"))
         .on_click(|_, _, _| crate::platform::registration::open_login_items_settings())
 }

@@ -10,6 +10,8 @@ use super::{
 #[cfg(target_os = "macos")]
 use super::{AppState, InteractiveElement, Permission};
 use super::{IconName, Palette, SettingPage};
+#[cfg(target_os = "macos")]
+use crate::ui::theme::FocusRingStyle as _;
 use crate::ui::theme::Typography as _;
 #[cfg(target_os = "macos")]
 use gpui_base::Button as BaseButton;
@@ -247,7 +249,7 @@ fn permission_field(
                 .cursor_pointer()
                 .bg(pal.control)
                 .hover(move |s| s.bg(pal.control_hover))
-                .focus_visible(move |s| s.bg(pal.control_hover))
+                .focus_visible(move |s| s.focus_ring(pal))
                 .child(action_label)
                 .on_click(move |_, _, cx| {
                     // Accessibility must be prompted in the agent (it owns the

@@ -14,7 +14,9 @@
 
 #[cfg(test)]
 use gpui::rgb;
-use gpui::{App, FontWeight, Hsla, Pixels, Rems, Rgba, Styled, Window, hsla, px, relative, rems};
+use gpui::{
+    App, BoxShadow, FontWeight, Hsla, Pixels, Rems, Rgba, Styled, Window, hsla, px, relative, rems,
+};
 use gpui_component::{ActiveTheme as _, Theme, ThemeMode, ThemeRegistry};
 use openlogi_core::config::{Appearance, UiScale};
 
@@ -148,6 +150,8 @@ pub struct Palette {
     /// [`Palette::card_radius`] so a control's corner sits concentrically inside
     /// its card's.
     pub control_radius: Pixels,
+    /// The theme's keyboard-focus colour; see [`FocusRingStyle::focus_ring`].
+    pub ring: Hsla,
 }
 
 fn contrast_ratio(foreground: Hsla, background: Hsla) -> f32 {
@@ -231,6 +235,7 @@ pub fn palette(cx: &App) -> Palette {
         text_muted: t.muted_foreground,
         card_radius: t.radius * 1.5,
         control_radius: t.radius,
+        ring: t.ring,
     }
 }
 
@@ -423,6 +428,31 @@ pub trait SelectableStyle: Styled + Sized {
 }
 
 impl<E: Styled> SelectableStyle for E {}
+
+/// Width of the halo [`FocusRingStyle::focus_ring`] paints outside the
+/// border, matching gpui-component's own `focus_ring_style`.
+const FOCUS_RING_WIDTH: Pixels = px(3.);
+
+/// The one keyboard-focus look for bespoke controls, so focus never reads as
+/// hover or selection. It matches the ring gpui-component's `Button` draws: the
+/// border takes the theme's `ring` colour and a half-opacity halo surrounds it.
+/// The halo is a spread shadow rather than the framework's extra child, so it
+/// fits inside a `focus_visible` refinement and never shifts layout.
+pub trait FocusRingStyle: Styled + Sized {
+    /// Style a `focus_visible` refinement with the shared focus ring.
+    #[must_use]
+    fn focus_ring(self, pal: Palette) -> Self {
+        self.border_color(pal.ring).shadow(vec![BoxShadow {
+            color: pal.ring.opacity(0.5),
+            offset: gpui::point(px(0.), px(0.)),
+            blur_radius: px(0.),
+            spread_radius: FOCUS_RING_WIDTH,
+            inset: false,
+        }])
+    }
+}
+
+impl<E: Styled> FocusRingStyle for E {}
 
 /// The app's type ramp as semantic roles, so a heading is `.text_heading()`
 /// everywhere instead of each call site re-picking a `text_*` size and a

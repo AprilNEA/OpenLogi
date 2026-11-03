@@ -1,3 +1,4 @@
+use crate::ui::theme::FocusRingStyle as _;
 use gpui::{
     App, AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement,
     MouseButton, NavigationDirection, ParentElement, Render, Styled, Subscription, Window, div,
@@ -537,7 +538,7 @@ impl AppView {
                     .text_color(pal.text_muted)
                     .cursor_pointer()
                     .hover(|s| s.text_color(pal.text_primary))
-                    .focus_visible(|s| s.text_color(pal.text_primary))
+                    .focus_visible(move |s| s.focus_ring(pal))
                     .child(tr!("permissions.not_now_use_dpi_and_other_features_only"))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.accessibility_dismissed = true;

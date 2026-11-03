@@ -469,6 +469,7 @@ fn mouse_pairing_click_icon_resolves_text_color() {
         text_muted: gpui::hsla(0., 0., 0., 1.),
         card_radius: gpui::px(8.),
         control_radius: gpui::px(4.),
+        ring: gpui::hsla(0., 0., 0., 1.),
     };
     for click in [Click::Left, Click::Right] {
         let mut icon = click_icon_svg(click, pal);

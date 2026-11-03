@@ -1,3 +1,4 @@
+use crate::ui::theme::FocusRingStyle as _;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -1056,7 +1057,8 @@ struct HotspotTrigger {
 }
 
 impl RenderOnce for HotspotTrigger {
-    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let pal = theme::palette(cx);
         let highlighted = self.hovered || self.selected;
         let selected = self.selected;
         let view = self.view;
@@ -1093,12 +1095,7 @@ impl RenderOnce for HotspotTrigger {
                         hsla(0., 0., 0.18, 0.85)
                     }),
             )
-            .focus_visible(|style| {
-                style
-                    .rounded_full()
-                    .border_2()
-                    .border_color(rgb(ACCENT_BLUE))
-            })
+            .focus_visible(move |style| style.rounded_full().focus_ring(pal))
             .on_click(move |_event, _window, cx| {
                 click_view.update(cx, |this, cx| {
                     this.select(btn);
