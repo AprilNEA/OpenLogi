@@ -8,8 +8,8 @@
 use gpui::{
     Bounds, Context, Div, Entity, Hsla, InteractiveElement, IntoElement, MouseMoveEvent,
     ParentElement, Pixels, Point, Render, SharedString, Size, StatefulInteractiveElement as _,
-    Styled, Subscription, Window, WindowBackgroundAppearance, WindowId, WindowKind, WindowOptions,
-    div, point, prelude::FluentBuilder as _, px, svg,
+    Styled, Subscription, Window, WindowAppearance, WindowBackgroundAppearance, WindowId,
+    WindowKind, WindowOptions, div, point, prelude::FluentBuilder as _, px, svg,
 };
 use openlogi_core::binding::{Action, ActionRingSlot};
 use openlogi_ipc::ActionRingInvocation;
@@ -21,22 +21,80 @@ use tokio::sync::mpsc;
 use crate::ipc::OverlayCommand;
 use crate::session::{self, ClickAwaySession, ShowingRing};
 
+/// The window the ring is drawn in. It is larger than the ring so a hovered
+/// slot's label fits beside it; everything outside the slots is transparent.
 pub(crate) const WINDOW_SIZE: f32 = 360.0;
-pub(crate) const SLOT_SIZE: f32 = 54.0;
-pub(crate) const RADIUS: f32 = 122.0;
+pub(crate) const SLOT_SIZE: f32 = 44.0;
+/// A hovered slot grows by about 15% around the same centre.
+const SELECTED_SLOT_SIZE: f32 = 50.0;
+pub(crate) const RADIUS: f32 = 76.0;
+const GLYPH_SIZE: f32 = 20.0;
+const SELECTED_GLYPH_SIZE: f32 = 22.0;
+const CANCEL_SIZE: f32 = 28.0;
+const CANCEL_GLYPH_SIZE: f32 = 14.0;
+/// Space between a hovered slot and its label.
+const LABEL_GAP: f32 = 6.0;
+/// Space a label keeps from the window edge, where its shadow would be cut off.
+const LABEL_EDGE: f32 = 4.0;
+const LABEL_MAX_WIDTH: f32 = 160.0;
+const LABEL_LINE_HEIGHT: f32 = 16.0;
+const LABEL_PADDING_X: f32 = 8.0;
+const LABEL_PADDING_Y: f32 = 4.0;
+/// A label wraps once, then ends in an ellipsis; [`LABEL_MAX_HEIGHT`] fits both lines.
+const LABEL_LINES: usize = 2;
+const LABEL_MAX_HEIGHT: f32 = LABEL_LINE_HEIGHT * 2.0 + LABEL_PADDING_Y * 2.0;
 /// Identifies the ring's windows to the compositor, whatever kind they are.
 pub(crate) const RING_APP_ID: &str = "openlogi-action-ring";
 
-/// The ring's own neutral scale. It floats over whatever is on the desktop, so
-/// unlike the settings app it cannot take its surfaces from the OS appearance —
-/// it commits to a dark panel and rides its own contrast. Only the accent is
-/// shared (`openlogi_ui::color`); these greys are local by nature.
-const PANEL: Hsla = neutral(0.06, 0.82);
-const SLOT_RESTING: Hsla = neutral(0.16, 0.98);
-const CANCEL_RESTING: Hsla = neutral(0.20, 0.98);
-const GLYPH: Hsla = neutral(0.98, 1.0);
-const LABEL: Hsla = neutral(0.94, 1.0);
-const CANCEL_GLYPH: Hsla = neutral(0.82, 1.0);
+/// The ring's neutral surfaces in one system appearance.
+///
+/// The slots float over whatever is on the desktop with nothing behind them,
+/// so each slot carries its own contrast: a near-opaque fill, a hairline, and a
+/// shadow. The ring follows the system appearance rather than the settings
+/// app's theme, which this process does not load. Only the accent is shared
+/// (`openlogi_ui::color`); these greys are local by nature.
+#[derive(Clone, Copy)]
+struct RingColors {
+    slot: Hsla,
+    slot_border: Hsla,
+    glyph: Hsla,
+    cancel: Hsla,
+    cancel_hover: Hsla,
+    cancel_glyph: Hsla,
+    label: Hsla,
+    label_text: Hsla,
+}
+
+impl RingColors {
+    const LIGHT: Self = Self {
+        slot: neutral(0.99, 0.94),
+        slot_border: neutral(0.0, 0.10),
+        glyph: neutral(0.20, 1.0),
+        cancel: neutral(0.93, 0.94),
+        cancel_hover: neutral(0.86, 0.96),
+        cancel_glyph: neutral(0.30, 1.0),
+        label: neutral(0.12, 0.92),
+        label_text: neutral(0.98, 1.0),
+    };
+
+    const DARK: Self = Self {
+        slot: neutral(0.20, 0.92),
+        slot_border: neutral(1.0, 0.12),
+        glyph: neutral(0.92, 1.0),
+        cancel: neutral(0.26, 0.92),
+        cancel_hover: neutral(0.33, 0.95),
+        cancel_glyph: neutral(0.80, 1.0),
+        label: neutral(0.95, 0.95),
+        label_text: neutral(0.10, 1.0),
+    };
+
+    const fn for_appearance(appearance: WindowAppearance) -> Self {
+        match appearance {
+            WindowAppearance::Light | WindowAppearance::VibrantLight => Self::LIGHT,
+            WindowAppearance::Dark | WindowAppearance::VibrantDark => Self::DARK,
+        }
+    }
+}
 
 const fn neutral(lightness: f32, alpha: f32) -> Hsla {
     Hsla {
@@ -47,11 +105,107 @@ const fn neutral(lightness: f32, alpha: f32) -> Hsla {
     }
 }
 
-/// The accent deepened for the dark panel: the brand lightness sits too close to
-/// the white glyph a selected slot carries, so the fill drops to `0.48` and the
-/// ring around it rises to `0.78`. Both keep the brand hue and saturation.
+/// The accent deepened for a selected slot: the brand lightness sits too close
+/// to the white glyph it carries, so the fill drops to `0.48` and the ring
+/// around it rises to `0.78`. Both keep the brand hue and saturation, and read
+/// the same over light and dark desktops.
 const SELECTED_FILL_L: f32 = 0.48;
 const SELECTED_BORDER_L: f32 = 0.78;
+const SELECTED_GLYPH: Hsla = neutral(1.0, 1.0);
+
+/// The ring's footprint, out to a hovered slot's edge plus a margin.
+///
+/// A click between the slots belongs to the ring, but macOS hands a click on a
+/// nearly transparent pixel to the window below: at 1/255 alpha it reached the
+/// app under the ring, at 0.01 the ring held it (measured on macOS 27). A mid
+/// grey at that alpha shifts any desktop colour by under 1%.
+const FOOTPRINT: f32 = 2.0 * (RADIUS + SELECTED_SLOT_SIZE / 2.0 + LABEL_GAP);
+const FOOTPRINT_FILL: Hsla = neutral(0.5, 0.01);
+
+/// Which way a label grows from the point it is pinned to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Grow {
+    Before,
+    Centred,
+    After,
+}
+
+impl Grow {
+    /// Away from the ring's centre along one axis of a slot's unit offset.
+    fn away_from_centre(offset: f32) -> Self {
+        if offset > 0.01 {
+            Self::After
+        } else if offset < -0.01 {
+            Self::Before
+        } else {
+            Self::Centred
+        }
+    }
+}
+
+/// The box a hovered slot's label may fill, in panel coordinates, and the
+/// edges of it the label keeps to.
+///
+/// The label sits just outside its slot and grows away from the ring's centre,
+/// so it never covers another slot, and it stays in the window. Straight out
+/// from a side slot there is room only for a short word, so a side slot's label
+/// sits on its upper shoulder instead.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct LabelPlace {
+    left: f32,
+    top: f32,
+    width: f32,
+    horizontal: Grow,
+    vertical: Grow,
+}
+
+impl LabelPlace {
+    fn of(slot: ActionRingSlot) -> Self {
+        let centre = WINDOW_SIZE / 2.0;
+        let (x, y) = slot.unit_offset();
+        let horizontal = Grow::away_from_centre(x);
+        let ((anchor_x, anchor_y), vertical) = if Grow::away_from_centre(y) == Grow::Centred {
+            (
+                (
+                    centre + x * (RADIUS + LABEL_GAP),
+                    centre - SELECTED_SLOT_SIZE / 2.0 - LABEL_GAP,
+                ),
+                Grow::Before,
+            )
+        } else {
+            let reach = RADIUS + SELECTED_SLOT_SIZE / 2.0 + LABEL_GAP;
+            (
+                (centre + x * reach, centre + y * reach),
+                Grow::away_from_centre(y),
+            )
+        };
+        let room_before = anchor_x - LABEL_EDGE;
+        let room_after = WINDOW_SIZE - LABEL_EDGE - anchor_x;
+        let width = match horizontal {
+            Grow::Before => room_before,
+            Grow::After => room_after,
+            Grow::Centred => 2.0 * room_before.min(room_after),
+        }
+        .min(LABEL_MAX_WIDTH);
+        let left = match horizontal {
+            Grow::Before => anchor_x - width,
+            Grow::Centred => anchor_x - width / 2.0,
+            Grow::After => anchor_x,
+        };
+        let top = match vertical {
+            Grow::Before => anchor_y - LABEL_MAX_HEIGHT,
+            Grow::Centred => anchor_y - LABEL_MAX_HEIGHT / 2.0,
+            Grow::After => anchor_y,
+        };
+        Self {
+            left,
+            top,
+            width,
+            horizontal,
+            vertical,
+        }
+    }
+}
 
 /// Where the ring's panel sits inside the window it was given.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -166,12 +320,19 @@ impl RingView {
     fn slot_element(
         &self,
         slot: ActionRingSlot,
+        colors: RingColors,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
         let presentation = self.invocation.slots.get(&slot)?;
         let icon_path = presentation.icon.asset_path();
         let selected = self.hovered == Some(slot);
-        let (left, top) = slot.placement(WINDOW_SIZE, RADIUS, SLOT_SIZE);
+        let (size, glyph_size, glyph) = if selected {
+            (SELECTED_SLOT_SIZE, SELECTED_GLYPH_SIZE, SELECTED_GLYPH)
+        } else {
+            (SLOT_SIZE, GLYPH_SIZE, colors.glyph)
+        };
+        // A hovered slot grows around the centre it rests on.
+        let (left, top) = slot.placement(WINDOW_SIZE, RADIUS, size);
         let session_id = self.invocation.session_id;
         let activate = self.commands.clone();
         Some(
@@ -180,24 +341,25 @@ impl RingView {
                 .absolute()
                 .left(px(left))
                 .top(px(top))
-                .size(px(SLOT_SIZE))
+                .size(px(size))
                 .flex()
                 .items_center()
                 .justify_center()
                 .rounded_full()
-                .bg(if selected {
-                    color::accent_at_lightness(SELECTED_FILL_L)
-                } else {
-                    SLOT_RESTING
-                })
-                .when(selected, |slot| {
-                    slot.border_2()
-                        .border_color(color::accent_at_lightness(SELECTED_BORDER_L))
+                .map(|slot| {
+                    if selected {
+                        slot.border_2()
+                            .border_color(color::accent_at_lightness(SELECTED_BORDER_L))
+                            .bg(color::accent_at_lightness(SELECTED_FILL_L))
+                    } else {
+                        slot.border_1()
+                            .border_color(colors.slot_border)
+                            .bg(colors.slot)
+                    }
                 })
                 .shadow_md()
-                .text_color(GLYPH)
                 .cursor_pointer()
-                .child(svg().path(icon_path).size(px(22.0)).text_color(GLYPH))
+                .child(svg().path(icon_path).size(px(glyph_size)).text_color(glyph))
                 .on_hover(cx.listener(move |this, hovered, _, cx| {
                     if *hovered && this.hovered != Some(slot) {
                         this.hovered = Some(slot);
@@ -222,7 +384,7 @@ impl RingView {
 
 impl RingView {
     /// The fixed 360×360 ring. Both placements anchor this same element.
-    fn panel(&self, cx: &mut Context<Self>) -> Div {
+    fn panel(&self, colors: RingColors, cx: &mut Context<Self>) -> Div {
         let session_id = self.invocation.session_id;
         let center_commands = self.commands.clone();
         let hovered_label = self.hovered.and_then(|slot| {
@@ -237,11 +399,11 @@ impl RingView {
             } else {
                 presentation.label.clone()
             };
-            Some(SharedString::from(label))
+            Some((slot, SharedString::from(label)))
         });
         let slots = ActionRingSlot::ALL
             .into_iter()
-            .filter_map(|slot| self.slot_element(slot, cx))
+            .filter_map(|slot| self.slot_element(slot, colors, cx))
             .collect::<Vec<_>>();
 
         div()
@@ -250,49 +412,85 @@ impl RingView {
             .child(
                 div()
                     .absolute()
-                    .left(px(18.0))
-                    .top(px(18.0))
-                    .size(px(WINDOW_SIZE - 36.0))
+                    .left(px((WINDOW_SIZE - FOOTPRINT) / 2.0))
+                    .top(px((WINDOW_SIZE - FOOTPRINT) / 2.0))
+                    .size(px(FOOTPRINT))
                     .rounded_full()
-                    .bg(PANEL)
-                    .shadow_lg(),
+                    .bg(FOOTPRINT_FILL),
             )
             .children(slots)
             .child(
                 div()
                     .id("ring-cancel")
                     .absolute()
-                    .left(px(WINDOW_SIZE / 2.0 - 24.0))
-                    .top(px(WINDOW_SIZE / 2.0 - 24.0))
-                    .size(px(48.0))
+                    .left(px((WINDOW_SIZE - CANCEL_SIZE) / 2.0))
+                    .top(px((WINDOW_SIZE - CANCEL_SIZE) / 2.0))
+                    .size(px(CANCEL_SIZE))
                     .flex()
                     .items_center()
                     .justify_center()
                     .rounded_full()
-                    .bg(CANCEL_RESTING)
-                    .text_color(CANCEL_GLYPH)
+                    .border_1()
+                    .border_color(colors.slot_border)
+                    .bg(colors.cancel)
+                    .hover(move |cancel| cancel.bg(colors.cancel_hover))
                     .cursor_pointer()
-                    .child(svg().path(RING_CANCEL_ICON).size(px(20.0)).flex_none())
+                    // An `svg` paints only with its own text colour; a parent's
+                    // does not reach it.
+                    .child(
+                        svg()
+                            .path(RING_CANCEL_ICON)
+                            .size(px(CANCEL_GLYPH_SIZE))
+                            .flex_none()
+                            .text_color(colors.cancel_glyph),
+                    )
                     .on_click(move |_, window, cx| {
                         cx.stop_propagation();
                         let _ = center_commands.send(OverlayCommand::Cancel { session_id });
                         session::dismiss_from_window(cx, window, session_id);
                     }),
             )
-            .when_some(hovered_label, |ring, label| {
-                ring.child(
-                    div()
-                        .absolute()
-                        .left(px(WINDOW_SIZE / 2.0 - 80.0))
-                        .top(px(WINDOW_SIZE / 2.0 + 34.0))
-                        .w(px(160.0))
-                        .text_center()
-                        .text_sm()
-                        .text_color(LABEL)
-                        .child(label),
-                )
+            .when_some(hovered_label, |ring, (slot, label)| {
+                ring.child(label_element(LabelPlace::of(slot), label, colors))
             })
     }
+}
+
+/// A hovered slot's label, kept to the edges of its [`LabelPlace`] that touch
+/// the slot. Long labels wrap once and then end in an ellipsis.
+fn label_element(place: LabelPlace, label: SharedString, colors: RingColors) -> Div {
+    div()
+        .absolute()
+        .left(px(place.left))
+        .top(px(place.top))
+        .w(px(place.width))
+        .h(px(LABEL_MAX_HEIGHT))
+        .flex()
+        .map(|region| match place.horizontal {
+            Grow::Before => region.justify_end(),
+            Grow::Centred => region.justify_center(),
+            Grow::After => region.justify_start(),
+        })
+        .map(|region| match place.vertical {
+            Grow::Before => region.items_end(),
+            Grow::Centred => region.items_center(),
+            Grow::After => region.items_start(),
+        })
+        .child(
+            div()
+                .max_w(px(place.width))
+                .px(px(LABEL_PADDING_X))
+                .py(px(LABEL_PADDING_Y))
+                .rounded_md()
+                .bg(colors.label)
+                .shadow_sm()
+                .text_xs()
+                .line_height(px(LABEL_LINE_HEIGHT))
+                .text_color(colors.label_text)
+                .line_clamp(LABEL_LINES)
+                .text_ellipsis()
+                .child(label),
+        )
 }
 
 impl Render for RingView {
@@ -304,12 +502,13 @@ impl Render for RingView {
             .pointer
             .read(cx)
             .center_in(window.window_handle().window_id());
+        let colors = RingColors::for_appearance(window.appearance());
         let panel = panel_origin(placement, center, window.viewport_size()).map(|origin| {
             div()
                 .absolute()
                 .left(origin.x)
                 .top(origin.y)
-                .child(self.panel(cx))
+                .child(self.panel(colors, cx))
         });
 
         div()
@@ -611,6 +810,45 @@ mod tests {
             Some(ActionRingSlot::Top),
             "the window on top draws a working panel"
         );
+    }
+
+    /// A hovered slot's label, at its longest and tallest, stays in the window
+    /// and clear of every slot, including the hovered one at its grown size.
+    #[test]
+    fn a_hovered_slots_label_stays_in_the_window_and_off_every_slot() {
+        let overlaps = |place: LabelPlace, slot: ActionRingSlot, size: f32| {
+            let (left, top) = slot.placement(WINDOW_SIZE, RADIUS, size);
+            let (cx, cy, r) = (left + size / 2.0, top + size / 2.0, size / 2.0);
+            let nearest_x = cx.clamp(place.left, place.left + place.width);
+            let nearest_y = cy.clamp(place.top, place.top + LABEL_MAX_HEIGHT);
+            (cx - nearest_x).hypot(cy - nearest_y) < r
+        };
+        for hovered in ActionRingSlot::ALL {
+            let place = LabelPlace::of(hovered);
+            assert!(
+                place.left >= 0.0
+                    && place.top >= 0.0
+                    && place.left + place.width <= WINDOW_SIZE
+                    && place.top + LABEL_MAX_HEIGHT <= WINDOW_SIZE,
+                "{hovered:?}'s label leaves the window: {place:?}"
+            );
+            assert!(
+                place.width >= 90.0,
+                "{hovered:?}'s label has room for only {} pt",
+                place.width
+            );
+            for slot in ActionRingSlot::ALL {
+                let size = if slot == hovered {
+                    SELECTED_SLOT_SIZE
+                } else {
+                    SLOT_SIZE
+                };
+                assert!(
+                    !overlaps(place, slot, size),
+                    "{hovered:?}'s label covers {slot:?}: {place:?}"
+                );
+            }
+        }
     }
 
     #[test]
