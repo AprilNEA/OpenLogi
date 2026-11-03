@@ -305,16 +305,30 @@ pub fn safe_component_path(
         label: label.to_owned(),
         component: component.to_owned(),
     };
-    // `Path::components` never yields separators on the platform that didn't
-    // produce them, so reject both kinds explicitly before consulting it.
-    if component.is_empty() || component.contains('/') || component.contains('\\') {
+    // Reject backslashes on every platform so a Windows-style separator can
+    // never sneak through on a Unix host (or vice versa).
+    if component.is_empty() || component.contains('\\') {
         return Err(reject());
     }
-    let mut parts = Path::new(component).components();
-    match (parts.next(), parts.next()) {
-        (Some(Component::Normal(_)), None) => Ok(base.join(component)),
-        _ => Err(reject()),
+    // Each `/`-separated component must be a normal, non-empty path segment.
+    // This allows the nested layouts the asset registry uses (e.g.
+    // `images/device/side_hero.png`) while still rejecting traversal
+    // (`..`, `.`, absolute paths, empty segments).
+    let mut normalized = PathBuf::new();
+    for part in component.split('/') {
+        if part.is_empty() {
+            return Err(reject());
+        }
+        let mut parsed = Path::new(part).components();
+        match (parsed.next(), parsed.next()) {
+            (Some(Component::Normal(name)), None) => normalized.push(name),
+            _ => return Err(reject()),
+        }
     }
+    if normalized.as_os_str().is_empty() {
+        return Err(reject());
+    }
+    Ok(base.join(normalized))
 }
 
 /// Write `bytes` beside `dst` and atomically rename into place.
@@ -329,6 +343,9 @@ pub(crate) fn write_replace(dst: &Path, bytes: &[u8]) -> Result<(), AssetError> 
         path: dst.to_owned(),
         source,
     };
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent).map_err(fail)?;
+    }
     let mut file = AtomicWriteFile::open(dst).map_err(fail)?;
     file.write_all(bytes).map_err(fail)?;
     file.commit().map_err(fail)
@@ -417,6 +434,10 @@ mod tests {
             Some(Path::new("/cache").join("front_core.png"))
         );
         assert_eq!(
+            safe_component_path(Path::new("/cache"), "images/device/side_hero.png", "asset").ok(),
+            Some(Path::new("/cache").join("images/device/side_hero.png"))
+        );
+        assert_eq!(
             safe_component_path(Path::new("/cache"), "mx_master_4", "depot").ok(),
             Some(Path::new("/cache").join("mx_master_4"))
         );
@@ -429,7 +450,9 @@ mod tests {
             ".",
             "..",
             "../LaunchAgents/x",
-            "nested/file.png",
+            "nested/../file.png",
+            "nested/./file.png",
+            "nested//file.png",
             "nested\\file.png",
             "/etc/passwd",
         ] {
