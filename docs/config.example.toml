@@ -133,6 +133,19 @@ KeyScreenCapture = "Sleep"
 KeyCalculator = { OpenApplication = { path = "/System/Applications/Calculator.app", display_name = "Calculator" } }
 "control:0x01f3" = { CustomShortcut = "Cmd+Shift+4" }
 
+# A G-series keyboard's G-keys are OpenLogi's only once the device opts in;
+# M1–M3 then switch G1–G5 between profiles ("profiles"), or every key above
+# the row is a key of its own ("nine_buttons").
+[devices."serial:G915EXAMPLE"]
+g_key_owner = "openlogi"
+gaming_key_mode = "profiles"
+
+[devices."serial:G915EXAMPLE".bindings]
+KeyG1 = "VolumeUp"
+KeyG2 = "VolumeDown"
+"M2:KeyG1" = "Copy"
+"M2:KeyG2" = "Paste"
+
 # Since schema 5 a device is keyed by what it *is* — `unit:<hex>` or
 # `serial:<s>` — rather than by the route it was reached on, so its settings
 # follow it between its receiver and a cable instead of splitting into two

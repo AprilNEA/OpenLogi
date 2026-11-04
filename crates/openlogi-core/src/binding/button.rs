@@ -11,11 +11,13 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use thiserror::Error;
 
 use super::control::Cid;
+use super::g_keys::{GKey, GKeyProfile, GKeySlot, ModeKey};
 
 /// One of the user-rebindable controls on a Logi device: a mouse hotspot,
-/// a keyboard key addressed by its HID++ `0x1b04` control ID, or a keypad grid
+/// a keyboard key addressed by its HID++ `0x1b04` control ID, a keypad grid
 /// key addressed by its [`GridSlot`] — a [`GridKey`] position on a
-/// [`KeypadPage`].
+/// [`KeypadPage`] — or a key of a G-series keyboard's gaming cluster: a
+/// G-key on one M-key profile ([`GKeySlot`]) or a [`ModeKey`].
 ///
 /// The mouse variants are declared in physical front-to-side order;
 /// [`ButtonId::ALL`] is consumed by the default-binding generator and the
@@ -30,7 +32,8 @@ use super::control::Cid;
 /// (`"MiddleClick"`), the catalog name for a known control
 /// (`"KeyScreenCapture"`) or `"control:0x0141"` for any other, and the
 /// position name for a grid key (`"gridMiddle"`, `"page2:gridMiddle"` on a
-/// later page) — so a `ButtonId` can key a TOML table. See
+/// later page), the printed name for a gaming key (`"KeyG1"`, `"M2:KeyG1"`
+/// on a later profile, `"KeyMR"`) — so a `ButtonId` can key a TOML table. See
 /// [`FromStr`](Self::from_str).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum ButtonId {
@@ -101,6 +104,19 @@ pub enum ButtonId {
     /// the keys; among keys the order is by control ID, so a GUI that wants
     /// physical F-row order sorts by catalog position instead.
     Control(Cid),
+    /// A key of a G-series keyboard's G-key column (HID++ `0x8010`), on one
+    /// of the three profiles M1–M3 select. The column has no `0x1b04`
+    /// control: the whole row is handed to software or left on its onboard
+    /// actions at once, so binding one key captures nothing by itself.
+    ///
+    /// Capture is physical: a session reports a press as its M1 slot
+    /// ([`ButtonId::g_key`]), and the active profile decides which slot's
+    /// binding that press dispatches.
+    GKey(GKeySlot),
+    /// One of the keys above a G-series keyboard's G-key column — M1–M3
+    /// (HID++ `0x8020`) or MR (`0x8030`). OpenLogi only listens to them; their
+    /// bindings run when the cluster is set to nine independent keys.
+    ModeKey(ModeKey),
 }
 
 impl ButtonId {
@@ -157,6 +173,25 @@ impl ButtonId {
     pub const fn grid_slot(self) -> Option<GridSlot> {
         match self {
             Self::Grid(slot) => Some(slot),
+            _ => None,
+        }
+    }
+
+    /// The physical G-key `key` — its M1 slot, the identity a capture
+    /// session reports a press as.
+    #[must_use]
+    pub const fn g_key(key: GKey) -> Self {
+        Self::GKey(GKeySlot {
+            profile: GKeyProfile::M1,
+            key,
+        })
+    }
+
+    /// The profile and key this button addresses, for a G-key.
+    #[must_use]
+    pub const fn g_key_slot(self) -> Option<GKeySlot> {
+        match self {
+            Self::GKey(slot) => Some(slot),
             _ => None,
         }
     }
@@ -264,9 +299,13 @@ impl ButtonId {
             ButtonId::G7 => Self::UNIT_NAMES[14].1,
             ButtonId::G8 => Self::UNIT_NAMES[15].1,
             ButtonId::G9 => Self::UNIT_NAMES[16].1,
-            // Grid keys and keyboard controls have no fixed name in this
-            // table; see [`GridKey::config_name`] and [`Cid::config_name`].
-            ButtonId::Grid(_) | ButtonId::Control(_) => return None,
+            // Grid keys, keyboard controls and gaming keys have no fixed name
+            // in this table; see [`GridKey::config_name`],
+            // [`Cid::config_name`], [`GKeySlot::config_name`] and
+            // [`ModeKey::config_name`].
+            ButtonId::Grid(_) | ButtonId::Control(_) | ButtonId::GKey(_) | ButtonId::ModeKey(_) => {
+                return None;
+            }
         })
     }
 
@@ -276,6 +315,8 @@ impl ButtonId {
         match self {
             ButtonId::Control(cid) => cid.config_name(),
             ButtonId::Grid(slot) => slot.config_name(),
+            ButtonId::GKey(slot) => slot.config_name(),
+            ButtonId::ModeKey(key) => Cow::Borrowed(key.config_name()),
             other => Cow::Borrowed(other.unit_name().unwrap_or_default()),
         }
     }
@@ -303,6 +344,8 @@ impl ButtonId {
             ButtonId::G9 => "G9",
             ButtonId::Grid(slot) => return slot.label(),
             ButtonId::Control(cid) => return cid.label(),
+            ButtonId::GKey(slot) => return slot.label(),
+            ButtonId::ModeKey(key) => key.label(),
         })
     }
 
@@ -331,6 +374,9 @@ impl ButtonId {
             // of the key's name.
             ButtonId::Grid(slot) => slot.key.translation_key(),
             ButtonId::Control(cid) => cid.translation_key(),
+            // Like a grid key's page, the profile is shown beside the key.
+            ButtonId::GKey(slot) => slot.key.translation_key(),
+            ButtonId::ModeKey(key) => key.translation_key(),
         }
     }
 }
@@ -638,13 +684,15 @@ impl FromStr for ButtonId {
     type Err = ParseButtonIdError;
 
     /// The inverse of [`ButtonId::config_name`]: a mouse button's variant
-    /// name, a grid slot's name, a known control's catalog name, or
-    /// `control:0x…`.
+    /// name, a grid slot's name, a gaming key's name, a known control's
+    /// catalog name, or `control:0x…`.
     fn from_str(name: &str) -> Result<Self, Self::Err> {
         ButtonId::UNIT_NAMES
             .into_iter()
             .find_map(|(button, unit_name)| (unit_name == name).then_some(button))
             .or_else(|| GridSlot::from_config_name(name).map(Self::Grid))
+            .or_else(|| GKeySlot::from_config_name(name).map(Self::GKey))
+            .or_else(|| ModeKey::from_config_name(name).map(Self::ModeKey))
             .or_else(|| Cid::from_config_name(name).map(ButtonId::Control))
             .ok_or_else(|| ParseButtonIdError(name.to_owned()))
     }

@@ -16,11 +16,12 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{
-    ActionRingIcon, Binding, ButtonId, GamingButtons, GamingLayout, GridKey, KeypadPage,
+    ActionRingIcon, Binding, ButtonId, GamingButtons, GamingLayout, GridKey, KeypadPage, ModeKey,
 };
 use openlogi_core::bindings::{bindings_on_page, button_bindings_for, oshook_gestures_for};
 use openlogi_core::config::{
-    AppSettings, Config, ConfigRevision, LightSettings, MouseProfileTarget, canonical_device_key,
+    AppSettings, Config, ConfigRevision, GKeyOwner, GamingKeyMode, LightSettings,
+    MouseProfileTarget, canonical_device_key,
 };
 use openlogi_core::device::{
     BatteryInfo, Capabilities, ChangedOnLight, DeviceInventory, DeviceKind, LightCapabilities,
@@ -30,9 +31,9 @@ use openlogi_core::device_order::{DeviceIdentity, DeviceStableId, PhysicalDevice
 use openlogi_hid::{
     BacklightChange, BacklightState, CaptureChannelSlot, ChannelPool, ChannelRegistry,
     DeviceIoGate, DeviceRoute, DisableKeysMask, Dpi, EasySwitchHosts, FnLockState,
-    ForceSensingInfo, HidppOperation, HostOs, PointerSpeed, ReportRate, ReportRateInfo,
-    SidetoneLevel, WriteError, commands_for_light_settings, is_reserved_keyboard_control,
-    key_display_for,
+    ForceSensingInfo, GamingWanted, HidppOperation, HostOs, PointerSpeed, ReportRate,
+    ReportRateInfo, SidetoneLevel, WriteError, commands_for_light_settings,
+    is_reserved_keyboard_control, key_display_for,
 };
 #[cfg(test)]
 use openlogi_ipc::ChosenLight;
@@ -964,8 +965,12 @@ impl Orchestrator {
             .iter()
             .filter(|d| d.kind.is_keyboard_family())
             .filter(|d| self.config.device_enabled(&d.config_key))
-            .filter(|d| binds_keys_in_some_profile(&self.config, &d.config_key))
             .filter_map(|dev| {
+                let gaming = gaming_wanted(&self.config, dev);
+                if !gaming.take_g_row && !binds_keys_in_some_profile(&self.config, &dev.config_key)
+                {
+                    return None;
+                }
                 let route = dev.route.clone()?;
                 let stored = self.foreground_key_bindings(&dev.config_key);
                 // Capture from every page; dispatch the current page's.
@@ -976,12 +981,16 @@ impl Orchestrator {
                         dev,
                         bindings,
                         divert,
+                        gaming,
                     },
                     route,
                 ))
             });
         let rank = |candidate: &KeyboardCandidate<'_>| {
-            (candidate.divert.captures_nothing(), !candidate.dev.online)
+            (
+                candidate.divert.captures_nothing() && !candidate.gaming.take_g_row,
+                !candidate.dev.online,
+            )
         };
         let mut chosen: Vec<(KeyboardCandidate<'_>, DeviceRoute)> = Vec::new();
         for (candidate, route) in candidates {
@@ -1007,6 +1016,8 @@ impl Orchestrator {
                 route,
                 wanted: chosen.divert.wanted,
                 grid: chosen.divert.grid,
+                gaming: chosen.gaming,
+                gaming_mode: self.config.gaming_key_mode(&chosen.dev.config_key),
                 bindings: chosen.bindings,
             });
         }
@@ -2401,6 +2412,7 @@ struct KeyboardCandidate<'a> {
     dev: &'a AgentDevice,
     bindings: BTreeMap<ButtonId, Binding>,
     divert: KeyboardDivertSet,
+    gaming: GamingWanted,
 }
 
 /// What the bindings ask a keyboard capture session to do: the `0x1b04`
@@ -2471,6 +2483,32 @@ fn keyboard_divert_set(bindings: &BTreeMap<ButtonId, Binding>) -> KeyboardDivert
         }
     }
     set
+}
+
+/// What `dev`'s capture session does with a G-series gaming cluster: nothing
+/// until the user hands G1–G5 to OpenLogi on this device, then the whole
+/// `0x8010` row, plus M1–M3 when the device has them, plus MR in
+/// [`GamingKeyMode::NineButtons`]. Bound or not, every G-key is then
+/// OpenLogi's, so the takeover is an explicit per-device choice.
+fn gaming_wanted(config: &Config, dev: &AgentDevice) -> GamingWanted {
+    let Some(capabilities) = dev.capabilities.as_ref().filter(|c| c.g_keys) else {
+        return GamingWanted::default();
+    };
+    if config.g_key_owner(&dev.config_key) != GKeyOwner::OpenLogi {
+        return GamingWanted::default();
+    }
+    let nine_buttons = config.gaming_key_mode(&dev.config_key) == GamingKeyMode::NineButtons;
+    let mode_keys = ModeKey::ALL
+        .into_iter()
+        .filter(|key| match key.profile() {
+            Some(_) => capabilities.m_keys,
+            None => capabilities.macro_record && nine_buttons,
+        })
+        .collect();
+    GamingWanted {
+        take_g_row: true,
+        mode_keys,
+    }
 }
 
 /// Whether `config_key` binds a key the capture session would take over in

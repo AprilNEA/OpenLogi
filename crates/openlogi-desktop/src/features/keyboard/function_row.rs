@@ -40,7 +40,10 @@ use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
     Selectable as _, h_flex, input::InputState, scroll::ScrollableElement as _, v_flex,
 };
-use openlogi_core::binding::{Action, ActionRingIcon, ButtonId, KeypadPage, WorkflowStep};
+use openlogi_core::binding::{
+    Action, ActionRingIcon, ButtonId, GKeyProfile, KeypadPage, WorkflowStep,
+};
+use openlogi_core::config::GamingKeyMode;
 
 use super::editors::{
     PowerUserKind, text_editor_placeholder, text_editor_seed, workflow_editor_seed,
@@ -53,21 +56,24 @@ use crate::features::binding_editor::{
 use crate::features::mouse::geometry::asset_dimensions_for_png;
 use crate::features::profiles::profile_name;
 use crate::services::assets::{GlowGeometry, ResolvedAsset};
-use crate::state::{AppState, DeviceKey, DeviceRecord, StateEvent, StateEvents};
+use crate::state::{AppState, DeviceKey, DeviceRecord, GamingKeys, StateEvent, StateEvents};
 use crate::ui::action::localized_action_label;
 use crate::ui::components::MenuRow;
 use crate::ui::theme::{self, ACCENT_BLUE, Palette, SCREEN_PAD, Typography as _};
 use gpui::{Animation, AnimationExt, ease_out_quint, img};
+use openlogi_core::hid::KeypadDescriptor;
 
 mod callout_layout;
+mod gaming;
 mod key_points;
 mod keypad;
 
 use callout_layout::{CalloutLayout, CardRect, callout_layout, side_bands_width};
+use gaming::gaming_bar;
 pub(crate) use key_points::KeyTarget;
 #[cfg(test)]
 use key_points::{EVEN_SPACING_END, EVEN_SPACING_START, key_x_fractions};
-use key_points::{KeySurface, key_surface, keypad_canvas};
+use key_points::{KeySlotLayout, KeySurface, StoredAs, key_surface, keypad_canvas, shows_g_keys};
 use keypad::{KeypadPane, KeypadPhotoPane, LastPage, keypad_page_bar, keypad_photo_render_size};
 
 /// Narrowest width of the inspector column beside the device: the key
@@ -167,8 +173,18 @@ pub struct FunctionRowView {
     /// The keypad binding page the grid keys are being edited on — this
     /// editor's own choice, independent of the page the keypad is showing.
     keypad_page: KeypadPage,
+    /// The M profile whose G-key bindings are being edited — this editor's
+    /// own choice, independent of the profile the keyboard is on.
+    g_profile: GKeyProfile,
+    /// Whether the selected key is an M1–M3 card in profile mode, as of the
+    /// last render: such a card makes its profile the edited one.
+    selected_profile_card: bool,
+    /// The gaming-key mode of the last render. A mode change reorders the
+    /// G-series keys (nine-button mode adds MR before G1–G5), so the selected
+    /// index and any open draft would land on another key.
+    gaming_mode: GamingKeyMode,
     /// The device and app profile being edited: another device starts back
-    /// on page 1, and either change drops the open editor.
+    /// on page 1 and profile M1, and either change drops the open editor.
     edit_scope: EditScope,
     /// The height the Keys tab leaves the inspector column, and the height
     /// the key overview took in it, as the last frame laid them out (see
@@ -201,6 +217,9 @@ impl FunctionRowView {
             workflow_draft: Vec::new(),
             application_invalid: false,
             keypad_page: KeypadPage::FIRST,
+            g_profile: GKeyProfile::M1,
+            selected_profile_card: false,
+            gaming_mode: GamingKeyMode::default(),
             edit_scope: EditScope::default(),
             inspector_room: None,
             overview_h: None,
@@ -308,6 +327,7 @@ impl FunctionRowView {
         if self.edit_scope != scope {
             if self.edit_scope.device != scope.device {
                 self.move_keypad_page(KeypadPage::FIRST);
+                self.g_profile = GKeyProfile::M1;
             }
             self.drop_editor();
             self.edit_scope = scope;
@@ -326,6 +346,76 @@ impl FunctionRowView {
     pub(crate) fn set_keypad_page(&mut self, page: KeypadPage, cx: &mut Context<Self>) {
         if self.keypad_page != page {
             self.move_keypad_page(page);
+            cx.notify();
+        }
+    }
+
+    /// The keys `layouts` places, as this view edits them: on its keypad page
+    /// and G-key profile. A selected profile key in profile mode makes its
+    /// profile the edited one first.
+    fn edited_slots(
+        &mut self,
+        layouts: Vec<KeySlotLayout>,
+        state: Option<&AppState>,
+        gaming: Option<GamingKeys>,
+    ) -> Vec<KeySlot> {
+        let gaming_mode = gaming.map_or_else(GamingKeyMode::default, |gaming| gaming.mode);
+        if gaming_mode != self.gaming_mode {
+            self.gaming_mode = gaming_mode;
+            self.selected_key = None;
+            self.drop_editor();
+        }
+        let card = self
+            .selected_key
+            .and_then(|idx| layouts.get(idx))
+            .and_then(|layout| profile_key(&layout.target, gaming_mode));
+        self.selected_profile_card = card.is_some();
+        if let Some(profile) = card
+            && profile != self.g_profile
+        {
+            self.g_profile = profile;
+            self.drop_editor();
+        }
+        key_slots_from_layouts(
+            layouts,
+            state,
+            KeyEditScope {
+                page: self.keypad_page,
+                g_profile: self.g_profile,
+                gaming_mode,
+            },
+        )
+    }
+
+    /// The bar over the device: a keypad's binding pages, or a G-series
+    /// keyboard's gaming cluster.
+    fn device_bar(
+        &self,
+        keypad: bool,
+        last_page: LastPage,
+        gaming: Option<GamingKeys>,
+        view: &Entity<Self>,
+        pal: &Palette,
+    ) -> Option<AnyElement> {
+        if keypad {
+            return Some(
+                keypad_page_bar(self.keypad_page, last_page, view, pal).into_any_element(),
+            );
+        }
+        gaming.map(|gaming| gaming_bar(gaming, self.g_profile, view, pal).into_any_element())
+    }
+
+    /// Edit the G-keys of `profile`, dropping any open editor when it moves.
+    /// A selected M1–M3 card is deselected: it names the profile it selects,
+    /// and would switch the editor straight back on the next render.
+    pub(crate) fn set_g_profile(&mut self, profile: GKeyProfile, cx: &mut Context<Self>) {
+        if self.g_profile != profile {
+            if self.selected_profile_card {
+                self.selected_key = None;
+                self.selected_profile_card = false;
+            }
+            self.g_profile = profile;
+            self.drop_editor();
             cx.notify();
         }
     }
@@ -403,7 +493,7 @@ impl Render for FunctionRowView {
         let viewport = window.viewport_size();
         let viewport_h = f32::from(viewport.height);
         let image_path = asset.map(|asset| asset.image_path.clone());
-        let surface = key_surface(asset, known_keypad);
+        let (surface, gaming) = device_keys(state, asset, known_keypad);
         let keypad = matches!(surface, KeySurface::Keypad(_));
         // A keypad on its photo draws its keys on the render itself: the
         // keyboard's callout band cannot lay eleven bubbles across a
@@ -417,7 +507,7 @@ impl Render for FunctionRowView {
             });
         let last_page = self.sync_edit_scope(state);
         let pal = theme::palette(cx);
-        let slots = key_slots_from_layouts(surface, state, self.keypad_page);
+        let slots = self.edited_slots(surface.slots(), state, gaming);
         let panel_w = inspector_width(&slots, window);
         let render_size = if keypad_photo {
             keypad_photo_render_size(asset, viewport_h)
@@ -496,8 +586,7 @@ impl Render for FunctionRowView {
                 .into_any_element()
         };
         let (inspector, column_h) = self.inspector(selected, &slots, &view, &pal, cx);
-        let page_bar = (keypad || keypad_photo)
-            .then(|| keypad_page_bar(self.keypad_page, last_page, &view, &pal));
+        let page_bar = self.device_bar(keypad || keypad_photo, last_page, gaming, &view, &pal);
 
         let row = InspectorRow::new(device, inspector, (panel_w, column_h));
         keys_tab_content(page_bar, row, &view)
@@ -531,6 +620,19 @@ fn keys_tab_content(
                 });
             }),
     )
+}
+
+/// The keys the selected device shows, and its gaming cluster when the
+/// render places its G-keys.
+fn device_keys(
+    state: Option<&AppState>,
+    asset: Option<&ResolvedAsset>,
+    keypad: Option<&KeypadDescriptor>,
+) -> (KeySurface, Option<GamingKeys>) {
+    let gaming = state
+        .and_then(AppState::current_gaming_keys)
+        .filter(|_| asset.is_some_and(shows_g_keys));
+    (key_surface(asset, keypad, gaming), gaming)
 }
 
 fn binding_line(
@@ -676,22 +778,54 @@ impl KeySlot {
     }
 }
 
+/// Which binding of a key with several the view edits: a keypad grid key's
+/// page, and a G-key's M profile.
+#[derive(Clone, Copy, Debug)]
+struct KeyEditScope {
+    page: KeypadPage,
+    g_profile: GKeyProfile,
+    /// What M1–M3 do on a G-series keyboard.
+    gaming_mode: GamingKeyMode,
+}
+
 /// One [`KeySlot`] per displayed key, each carrying the action it is bound
 /// to right now — the panes and the config panel render the same truth
-/// from the same source.
-/// The tab's keys with their current bindings, grid keys read on `page`.
+/// from the same source. Grid keys are read on the scope's page, G-keys in
+/// its profile.
 fn key_slots_from_layouts(
-    surface: KeySurface,
+    layouts: Vec<KeySlotLayout>,
     state: Option<&AppState>,
-    page: KeypadPage,
+    scope: KeyEditScope,
 ) -> Vec<KeySlot> {
     let key_actions = state.map(AppState::keypad_key_actions).unwrap_or_default();
-    surface
-        .slots()
+    // Nine-button presses run the M1 slots whatever profile was last edited.
+    let g_profile = match scope.gaming_mode {
+        GamingKeyMode::Profiles => scope.g_profile,
+        GamingKeyMode::NineButtons => GKeyProfile::M1,
+    };
+    layouts
         .into_iter()
         .enumerate()
         .map(|(idx, mut layout)| {
-            layout.target = layout.target.on_page(page);
+            layout.target = layout.target.on_page(scope.page).on_profile(g_profile);
+            if matches!(layout.target, KeyTarget::GKey(_)) {
+                layout.legend = layout.target.label();
+            }
+            // In profile mode M1–M3 switch profiles and bind nothing; the
+            // one being edited reads as the active one.
+            if let Some(profile) = profile_key(&layout.target, scope.gaming_mode) {
+                return KeySlot {
+                    idx,
+                    label: layout.legend.into(),
+                    x_frac: layout.point.x_frac,
+                    y_frac: layout.point.y_frac,
+                    binding: tr!("keyboard.g_key_profile", profile => profile.label()),
+                    binding_icon: NATIVE_FUNCTION_ICON,
+                    bound: profile == scope.g_profile,
+                    lcd_icon: None,
+                    target: layout.target,
+                };
+            }
             let bound = match &layout.target {
                 // The face the keypad shows, which a long press can set
                 // without a press action.
@@ -726,13 +860,24 @@ fn key_slots_from_layouts(
 /// keypad key is only ever observed, so [`Action::None`] there does nothing.
 pub(super) fn bound_action(state: &AppState, target: &KeyTarget) -> Option<Action> {
     match target {
-        KeyTarget::Control(button) => state.button_bindings().get(button).cloned(),
         KeyTarget::Grid(slot) => state
             .button_bindings()
             .get(&ButtonId::Grid(*slot))
             .filter(|action| **action != Action::None)
             .cloned(),
-        KeyTarget::FunctionKey(trigger) => state.keyboard_bindings().get(trigger).cloned(),
+        _ => match target.stored_as() {
+            StoredAs::Device(button) => state.button_bindings().get(&button).cloned(),
+            StoredAs::Global(trigger) => state.keyboard_bindings().get(trigger).cloned(),
+        },
+    }
+}
+
+/// The profile `target` switches to when it is M1–M3 in profile mode, where
+/// it binds nothing.
+fn profile_key(target: &KeyTarget, mode: GamingKeyMode) -> Option<GKeyProfile> {
+    match target {
+        KeyTarget::ModeKey(key) if mode == GamingKeyMode::Profiles => key.profile(),
+        _ => None,
     }
 }
 
@@ -746,26 +891,20 @@ pub(super) fn commit_key_action(
     target: &KeyTarget,
     action: Option<Action>,
 ) -> StateEvents {
-    match target {
-        KeyTarget::Control(button) => match action {
-            Some(action) => state.commit_binding(*button, action),
-            None => state.clear_binding(*button),
-        },
-        KeyTarget::Grid(slot) => match action {
-            Some(action) => state.commit_binding(ButtonId::Grid(*slot), action),
-            None => state.clear_binding(ButtonId::Grid(*slot)),
-        },
-        KeyTarget::FunctionKey(trigger) => state.commit_keyboard_binding(trigger.clone(), action),
+    match (target.stored_as(), action) {
+        (StoredAs::Device(button), Some(action)) => state.commit_binding(button, action),
+        (StoredAs::Device(button), None) => state.clear_binding(button),
+        (StoredAs::Global(trigger), action) => {
+            state.commit_keyboard_binding(trigger.clone(), action)
+        }
     }
 }
 
 /// The explicit action in the scope edited by the inspector. In an app profile,
 /// an inherited action is not selected; `None` selects the default-profile row.
 fn selected_key_action(state: &AppState, target: &KeyTarget) -> Option<Action> {
-    let button = match target {
-        KeyTarget::Control(button) => *button,
-        KeyTarget::Grid(slot) => ButtonId::Grid(*slot),
-        KeyTarget::FunctionKey(_) => return bound_action(state, target),
+    let StoredAs::Device(button) = target.stored_as() else {
+        return bound_action(state, target);
     };
     if state.editing_app().is_some() {
         state
@@ -1259,8 +1398,23 @@ fn key_click_target(
 /// has no function of its own and does nothing until something is bound.
 fn unbound_binding(target: &KeyTarget) -> (SharedString, &'static str) {
     match target {
-        KeyTarget::Grid(_) => (tr!("common.off"), action_icon_path(&Action::None)),
+        // A G-key or M key OpenLogi runs has no onboard action left.
+        KeyTarget::Grid(_) | KeyTarget::GKey(_) | KeyTarget::ModeKey(_) => {
+            (tr!("common.off"), action_icon_path(&Action::None))
+        }
         KeyTarget::Control(_) | KeyTarget::FunctionKey(_) => {
+            (tr!("keyboard.native_function"), NATIVE_FUNCTION_ICON)
+        }
+    }
+}
+
+/// The panel row that removes a key's assignment: back to its native
+/// function, or — for a G-key or M key OpenLogi runs, which has none left —
+/// off.
+fn resting_row(target: &KeyTarget) -> (SharedString, &'static str) {
+    match target {
+        KeyTarget::GKey(_) | KeyTarget::ModeKey(_) => unbound_binding(target),
+        KeyTarget::Control(_) | KeyTarget::Grid(_) | KeyTarget::FunctionKey(_) => {
             (tr!("keyboard.native_function"), NATIVE_FUNCTION_ICON)
         }
     }
@@ -1364,12 +1518,18 @@ impl FunctionRowView {
         }
 
         let state = AppState::try_read(cx);
+        if let Some(profile) = state.and_then(|state| selected_profile_key(state, &target)) {
+            return profile_key_panel(&key_name, profile, &pal);
+        }
         let current = state.and_then(|state| selected_key_action(state, &target));
         let uses_default = current.is_none();
         // A control or keypad key binds inside the open app profile, like a
         // mouse button.
         let app = match target {
-            KeyTarget::Control(_) | KeyTarget::Grid(_) => {
+            KeyTarget::Control(_)
+            | KeyTarget::Grid(_)
+            | KeyTarget::GKey(_)
+            | KeyTarget::ModeKey(_) => {
                 state.and_then(|state| state.editing_app().map(|app| profile_name(state, app)))
             }
             KeyTarget::FunctionKey(_) => None,
@@ -1395,6 +1555,7 @@ impl FunctionRowView {
         // clears the assignment, inheriting the device default in an app profile.
         let view_for_native = view.clone();
         let target_for_native = target.clone();
+        let (resting, resting_icon) = resting_row(&target);
         rows.push(
             v_flex().child(
                 MenuRow::new("panel-native")
@@ -1407,7 +1568,7 @@ impl FunctionRowView {
                             .gap_2()
                             .child(
                                 svg()
-                                    .path(NATIVE_FUNCTION_ICON)
+                                    .path(resting_icon)
                                     .size_4()
                                     .flex_none()
                                     .text_color(pal.text_muted),
@@ -1415,7 +1576,7 @@ impl FunctionRowView {
                             .child(div().child(if app.is_some() {
                                 tr!("profiles.use_the_default_profile")
                             } else {
-                                tr!("keyboard.native_function")
+                                resting
                             })),
                     )
                     .when(uses_default, |row| {
@@ -1449,6 +1610,28 @@ impl FunctionRowView {
             .child(divider(pal))
             .child(editor_scroll_list("key-panel-scroll", rows))
     }
+}
+
+/// The profile `target` switches to on the selected device, when it is M1–M3
+/// in profile mode.
+fn selected_profile_key(state: &AppState, target: &KeyTarget) -> Option<GKeyProfile> {
+    profile_key(target, state.current_gaming_keys()?.mode)
+}
+
+/// The panel of M1–M3 in profile mode: they bind nothing, they switch which
+/// profile G1–G5 run, and selecting one edits that profile's G-keys.
+fn profile_key_panel(key_name: &SharedString, profile: GKeyProfile, pal: &Palette) -> gpui::Div {
+    compact_panel(*pal)
+        .max_h_full()
+        .child(inspector_title(key_name.clone(), pal))
+        .child(divider(*pal))
+        .child(
+            div()
+                .px_2()
+                .py_2()
+                .text_color(pal.text_muted)
+                .child(tr!("keyboard.g_key_profile_description", profile => profile.label())),
+        )
 }
 
 /// The panel's title — which key is selected, e.g. "F1" or "Screen Capture

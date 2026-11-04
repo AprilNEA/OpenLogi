@@ -89,7 +89,11 @@ pub fn default_binding(button: ButtonId) -> Action {
         // Keypad grid keys stay on their own firmware function whatever the
         // binding says — they report through a vendor report, not a divert —
         // and seed the same inert default.
-        ButtonId::Control(_) | ButtonId::Grid(_) => Action::None,
+        // A G-series keyboard's gaming keys run nothing until bound: the
+        // whole cluster is taken only on the user's explicit opt-in.
+        ButtonId::Control(_) | ButtonId::Grid(_) | ButtonId::GKey(_) | ButtonId::ModeKey(_) => {
+            Action::None
+        }
     }
 }
 

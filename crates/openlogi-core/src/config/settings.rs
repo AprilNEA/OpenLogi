@@ -907,6 +907,35 @@ pub enum OnboardMemory {
     Profile(crate::hid::ProfileIndex),
 }
 
+/// Who runs a G-series keyboard's G1–G5 (HID++ `0x8010`). The keyboard has
+/// no per-key ownership: OpenLogi takes the whole row or none of it, so
+/// taking it silences every G-key without a binding. Only this explicit
+/// choice takes it, never a saved G-key binding.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GKeyOwner {
+    /// The keyboard's onboard actions.
+    #[default]
+    Keyboard,
+    /// OpenLogi: every G-key runs its binding.
+    #[serde(rename = "openlogi")]
+    OpenLogi,
+}
+
+/// What M1–M3 and MR do while OpenLogi runs a G-series keyboard's G-keys
+/// ([`GKeyOwner::OpenLogi`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GamingKeyMode {
+    /// M1–M3 switch G1–G5 between three profiles, starting on M1 each time
+    /// capture starts. MR keeps its onboard function.
+    #[default]
+    Profiles,
+    /// G1–G5, M1–M3 and MR are nine keys with a binding each. G1–G5 run their
+    /// M1 profile.
+    NineButtons,
+}
+
 /// Vertical wheel reporting resolution for HID++ `0x2121 HiResWheel`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

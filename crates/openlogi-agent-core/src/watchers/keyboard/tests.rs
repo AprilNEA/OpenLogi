@@ -22,6 +22,8 @@ fn spec_at(config_key: &str, route: DeviceRoute) -> KeyboardSpec {
         route,
         wanted: dispatch(Action::MissionControl).keys.controls,
         grid: dispatch(Action::MissionControl).keys.grid,
+        gaming: GamingWanted::default(),
+        gaming_mode: GamingKeyMode::default(),
         bindings: dispatch(Action::MissionControl).bindings,
     }
 }
@@ -48,9 +50,11 @@ fn dispatch(action: Action) -> KeyboardDispatchPlan {
     KeyboardDispatchPlan {
         config_key: "keyboard-a".to_owned(),
         bindings: BTreeMap::from([(SEARCH_KEY, Binding::Single(action))]),
+        gaming_mode: GamingKeyMode::default(),
         keys: KeyboardWanted {
             controls: BTreeMap::from([(0x00d4, SEARCH_KEY)]),
             grid: BTreeMap::new(),
+            gaming: GamingWanted::default(),
         },
     }
 }
@@ -189,12 +193,13 @@ async fn divert_set_changes_reach_the_running_session_in_place() {
         .insert(grid_key, Binding::Single(Action::Paste));
     per_app.keys.grid.insert(1, grid_key);
 
-    reconcile_session(
+    let resets_profile = reconcile_session(
         &mut session,
         Some((&target(), &per_app)),
         &actions.dispatcher(),
         &keys,
     );
+    assert!(!resets_profile, "the gaming cluster did not change");
     assert!(session.is_active(), "a divert-set change must not restart");
     assert_eq!(session.dispatch(), &per_app);
     assert!(session_view.has_changed().unwrap());
@@ -214,6 +219,30 @@ async fn divert_set_changes_reach_the_running_session_in_place() {
         !session_view.has_changed().unwrap(),
         "an action-only change must not write firmware"
     );
+
+    // Handing the G-key row over or back, or changing what M1–M3 do, leaves
+    // the M profile the agent selected stale: the keyboard's own M keys may
+    // have run in between.
+    let mut taken = same_keys.clone();
+    taken.keys.gaming.take_g_row = true;
+    let mut nine = taken.clone();
+    nine.gaming_mode = GamingKeyMode::NineButtons;
+    for (plan, why) in [
+        (&taken, "taking the row"),
+        (&nine, "changing the mode"),
+        (&same_keys, "handing the row back"),
+    ] {
+        assert!(
+            reconcile_session(
+                &mut session,
+                Some((&target(), plan)),
+                &actions.dispatcher(),
+                &keys
+            ),
+            "{why} resets the selected profile"
+        );
+        assert!(session.is_active(), "{why} must not restart");
+    }
     actions.shutdown();
 }
 
@@ -495,4 +524,80 @@ async fn a_session_body_that_panics_still_reports_done_after_its_inputs() {
         }
         _ => panic!("Done must follow the last input even when the body panicked"),
     }
+}
+
+#[test]
+fn a_selected_g_key_profile_belongs_to_the_session_that_selected_it() {
+    use openlogi_core::binding::{GKey, GKeySlot, ModeKey};
+    let mode = GamingKeyMode::Profiles;
+    let g1 = ButtonId::g_key(GKey::G1);
+    let g1_on = |profile| {
+        Resolved::Dispatch(CapturedInput::ButtonDown(ButtonId::GKey(GKeySlot {
+            profile,
+            key: GKey::G1,
+        })))
+    };
+    let m2 = CapturedInput::ButtonDown(ButtonId::ModeKey(ModeKey::M2));
+    let mut profiles = GKeyProfiles::default();
+    let keyboard = target().route;
+
+    assert_eq!(
+        profiles.resolve(&keyboard, 7, mode, CapturedInput::ButtonDown(g1)),
+        g1_on(GKeyProfile::M1)
+    );
+    assert_eq!(
+        profiles.resolve(&keyboard, 7, mode, m2),
+        Resolved::SelectedProfile
+    );
+    assert_eq!(
+        profiles.resolve(
+            &keyboard,
+            7,
+            mode,
+            CapturedInput::ButtonUp(ButtonId::ModeKey(ModeKey::M2))
+        ),
+        Resolved::Ignored
+    );
+    assert_eq!(
+        profiles.resolve(&keyboard, 7, mode, CapturedInput::ButtonDown(g1)),
+        g1_on(GKeyProfile::M2)
+    );
+    // Pressing the profile already running changes nothing, so it ends no
+    // held G-key.
+    assert_eq!(profiles.resolve(&keyboard, 7, mode, m2), Resolved::Ignored);
+    // A reconnect is a new session: it starts on M1 like the firmware.
+    assert_eq!(
+        profiles.resolve(&keyboard, 8, mode, CapturedInput::ButtonDown(g1)),
+        g1_on(GKeyProfile::M1)
+    );
+    // A wake inside the same session puts the keyboard back on M1 too.
+    profiles.resolve(&keyboard, 8, mode, m2);
+    assert_eq!(
+        profiles.resolve(&keyboard, 8, mode, CapturedInput::Interrupted),
+        Resolved::Dispatch(CapturedInput::Interrupted)
+    );
+    assert_eq!(
+        profiles.resolve(&keyboard, 8, mode, CapturedInput::ButtonDown(g1)),
+        g1_on(GKeyProfile::M1)
+    );
+    // Another keyboard never runs this one's profile.
+    profiles.resolve(&keyboard, 9, mode, m2);
+    assert_eq!(
+        profiles.resolve(&keypad_route(), 9, mode, CapturedInput::ButtonDown(g1)),
+        g1_on(GKeyProfile::M1)
+    );
+    // Nine keys: M2 is a key of its own and G1 stays on its M1 binding.
+    assert_eq!(
+        profiles.resolve(&keyboard, 9, GamingKeyMode::NineButtons, m2),
+        Resolved::Dispatch(m2)
+    );
+    assert_eq!(
+        profiles.resolve(
+            &keyboard,
+            9,
+            GamingKeyMode::NineButtons,
+            CapturedInput::ButtonDown(g1)
+        ),
+        g1_on(GKeyProfile::M1)
+    );
 }
