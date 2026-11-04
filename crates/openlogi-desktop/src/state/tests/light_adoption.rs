@@ -377,6 +377,7 @@ fn an_agent_snapshot_keeps_the_changes_it_reports() {
             hid_open_failures: false,
             secure_input: openlogi_ipc::SecureInput::Off,
             virtual_keyboard: openlogi_ipc::VirtualKeyboardStatus::Unsupported,
+            battery_widget: openlogi_core::device::BatteryWidgetStatus::Disabled,
         },
         inventory: Vec::new(),
         standalone: vec![light.clone()],
