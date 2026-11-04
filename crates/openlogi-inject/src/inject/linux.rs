@@ -19,7 +19,7 @@ use evdev::{AttributeSet, EventType, InputEvent, KeyCode, RelativeAxisCode};
 use zbus::blocking::Connection as DbusConn;
 
 use openlogi_core::binding::{
-    Action, Effect, KeyCombo, MediaKey, MouseButton, NativeAction, Shortcut,
+    Action, Effect, KeyCombo, MediaKey, MouseButton, NativeAction, Shortcut, ShortcutKey,
 };
 use openlogi_core::scroll::ScrollDelta;
 
@@ -103,14 +103,27 @@ fn combo(shortcut: Shortcut) -> KeyCombo {
 /// Press an already-resolved chord: a table lookup from [`combo`] or a
 /// user-recorded [`Action::CustomShortcut`]/`WorkflowStep::PressKey`.
 pub(super) fn press_combo(combo: &KeyCombo) {
-    let Some(key) = hid_usage_to_linux(combo.key().code()) else {
+    let Some(key) = linux_key(combo.key()) else {
         tracing::warn!(
-            usage = combo.key().code(),
-            "shortcut usage has no Linux mapping — press ignored"
+            chord = %combo.rendered_label(),
+            "shortcut key has no Linux mapping — press ignored"
         );
         return;
     };
     press_key(&modifiers_to_keycodes(combo), key);
+}
+
+/// The key uinput presses for `key`. uinput posts keys by position and this
+/// backend reads no layout, so every key keeps its US position: `+` is the
+/// `=` key, with the Shift [`implies_shift`] adds.
+fn linux_key(key: ShortcutKey) -> Option<KeyCode> {
+    hid_usage_to_linux(key.us_position().0.code())
+}
+
+/// Whether `combo`'s key needs Shift held beyond the chord's own modifiers:
+/// on a US layout, `+` is Shift+`=`.
+pub(super) fn implies_shift(combo: &KeyCombo) -> bool {
+    combo.key().us_position().1
 }
 
 /// Emit one edge for the physical keys whose ownership changed.
@@ -749,7 +762,7 @@ fn modifiers_to_keycodes(combo: &openlogi_core::binding::KeyCombo) -> Vec<KeyCod
     if combo.has_command() || combo.has_control() {
         modifiers.push(KeyCode::KEY_LEFTCTRL);
     }
-    if combo.has_shift() {
+    if combo.has_shift() || implies_shift(combo) {
         modifiers.push(KeyCode::KEY_LEFTSHIFT);
     }
     if combo.has_option() {
@@ -767,15 +780,15 @@ fn held_keycode(key: HeldKey) -> Option<KeyCode> {
         HeldKey::Shift => Some(KeyCode::KEY_LEFTSHIFT),
         HeldKey::Alt => Some(KeyCode::KEY_LEFTALT),
         HeldKey::Super => Some(KeyCode::KEY_LEFTMETA),
-        HeldKey::Key(usage) => {
-            let key = hid_usage_to_linux(usage.code());
-            if key.is_none() {
+        HeldKey::Key(key) => {
+            let code = linux_key(key);
+            if code.is_none() {
                 tracing::warn!(
-                    usage = usage.code(),
-                    "held shortcut usage has no Linux mapping — edge ignored"
+                    ?key,
+                    "held shortcut key has no Linux mapping — edge ignored"
                 );
             }
-            key
+            code
         }
     }
 }
@@ -1179,10 +1192,28 @@ mod tests {
         HELPER_PREFIXES, KEY_CAPABILITIES, ScrollOutput, action_scroll, capture_region_mods, combo,
         generic_linux_lock_fallback_chord, hid_usage_to_linux, hyprland_helper,
         hyprland_lock_fallback_chord, hyprland_lock_helper, hyprland_session_from_signature,
-        key_ev, key_phase_events, modifiers_to_keycodes, rel_ev, resolve_allowlisted_under,
-        scroll_events, syn, wait_with_retry,
+        implies_shift, key_ev, key_phase_events, linux_key, modifiers_to_keycodes, rel_ev,
+        resolve_allowlisted_under, scroll_events, syn, wait_with_retry,
     };
     use crate::inject::KeyPhase;
+
+    /// `+` has no key of its own on the US layout this backend presses by:
+    /// it is Shift+`=`, and a Shift the chord already writes is not doubled.
+    #[test]
+    fn plus_presses_shift_equals() {
+        for text in ["Ctrl++", "Ctrl+Shift++"] {
+            let chord: KeyCombo = text.parse().expect("valid chord");
+            assert_eq!(linux_key(chord.key()), Some(KeyCode::KEY_EQUAL), "{text}");
+            assert_eq!(
+                modifiers_to_keycodes(&chord),
+                [KeyCode::KEY_LEFTCTRL, KeyCode::KEY_LEFTSHIFT],
+                "{text}"
+            );
+        }
+        let equals: KeyCombo = "Ctrl+=".parse().expect("valid chord");
+        assert!(!implies_shift(&equals));
+        assert_eq!(modifiers_to_keycodes(&equals), [KeyCode::KEY_LEFTCTRL]);
+    }
 
     #[test]
     fn held_chord_edges_use_inverse_key_order() {
@@ -1294,9 +1325,8 @@ mod tests {
         // variant is checked here automatically instead of depending on
         // someone remembering to extend a second, independent list.
         for &shortcut in Shortcut::ALL {
-            let key = combo(shortcut).key().code();
             assert!(
-                hid_usage_to_linux(key).is_some(),
+                linux_key(combo(shortcut).key()).is_some(),
                 "{shortcut:?} table entry has no Linux keycode mapping"
             );
         }

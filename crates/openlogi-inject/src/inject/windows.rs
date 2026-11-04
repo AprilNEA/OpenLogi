@@ -19,6 +19,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{XBUTTON1, XBUTTON2};
 
 use openlogi_core::binding::{
     Action, Effect, KeyCombo, KeyboardUsage, MediaKey, MouseButton, NativeAction, Shortcut,
+    ShortcutKey,
 };
 use openlogi_core::scroll::ScrollDelta;
 
@@ -98,6 +99,21 @@ impl Key {
     /// the way [`Self::for_vk`] gives it one.
     fn for_usage(usage: KeyboardUsage, layout: ForegroundLayout) -> Option<Self> {
         super::hid_usage_to_windows(usage.code()).map(|vk| Self::for_vk(vk, layout))
+    }
+
+    /// The key that presses `key` under `layout`, and whether Shift must be
+    /// held with it beyond the chord's own modifiers.
+    ///
+    /// A usage resolves through [`Self::for_usage`]. `+` is the key `layout`
+    /// types it on, with Shift when the layout puts it there; a layout that
+    /// types it only with AltGr, or not at all, keeps the US Shift+`=`.
+    fn for_shortcut_key(key: ShortcutKey, layout: ForegroundLayout) -> Option<(Self, bool)> {
+        let (usage, us_shift) = key.us_position();
+        if us_shift && let Some((vk, shift)) = key.character().and_then(|ch| layout.key_typing(ch))
+        {
+            return Some((Self::for_vk(vk, layout), shift));
+        }
+        Self::for_usage(usage, layout).map(|key| (key, us_shift))
     }
 
     /// The key for the virtual key `vk` under `layout`.
@@ -406,7 +422,6 @@ pub(super) fn post_scroll(delta: ScrollDelta) {
 pub(super) fn press_combo(combo: &KeyCombo) {
     let Some(inputs) = combo_inputs(combo, ForegroundLayout::current()) else {
         tracing::warn!(
-            usage = combo.key().code(),
             chord = %combo.rendered_label(),
             "CustomShortcut key has no Windows mapping yet; press ignored"
         );
@@ -418,8 +433,20 @@ pub(super) fn press_combo(combo: &KeyCombo) {
 /// The key events that tap `combo` under `layout`, or `None` when its key has
 /// no Windows virtual key.
 fn combo_inputs(combo: &KeyCombo, layout: ForegroundLayout) -> Option<Vec<INPUT>> {
-    let key = Key::for_usage(combo.key(), layout)?;
-    Some(chord_inputs(key, &combo_modifiers(combo), layout))
+    let (key, shift) = Key::for_shortcut_key(combo.key(), layout)?;
+    let mut modifiers = combo_modifiers(combo);
+    if shift && !modifiers.contains(&VK_SHIFT) {
+        modifiers.push(VK_SHIFT);
+    }
+    Some(chord_inputs(key, &modifiers, layout))
+}
+
+/// Whether `combo`'s key needs Shift held beyond the chord's own modifiers
+/// under the foreground layout: `+` where that layout types it with Shift.
+pub(super) fn implies_shift(combo: &KeyCombo) -> bool {
+    combo.key().us_position().1
+        && Key::for_shortcut_key(combo.key(), ForegroundLayout::current())
+            .is_some_and(|(_, shift)| shift)
 }
 
 fn combo_modifiers(combo: &KeyCombo) -> Vec<u16> {
@@ -468,15 +495,15 @@ fn held_key(key: HeldKey, layout: ForegroundLayout) -> Option<Key> {
         HeldKey::Shift => Some(Key::for_vk(VK_SHIFT, layout)),
         HeldKey::Alt => Some(Key::for_vk(VK_MENU, layout)),
         HeldKey::Super => Some(Key::for_vk(VK_LWIN, layout)),
-        HeldKey::Key(usage) => {
-            let key = Key::for_usage(usage, layout);
-            if key.is_none() {
+        HeldKey::Key(key) => {
+            let pressed = Key::for_shortcut_key(key, layout).map(|(pressed, _)| pressed);
+            if pressed.is_none() {
                 tracing::warn!(
-                    usage = usage.code(),
-                    "held shortcut usage has no Windows mapping — edge ignored"
+                    ?key,
+                    "held shortcut key has no Windows mapping — edge ignored"
                 );
             }
-            key
+            pressed
         }
     }
 }
@@ -549,7 +576,7 @@ fn mouse_input(flags: u32, data: i32) -> INPUT {
 mod tests {
     use std::sync::Mutex;
 
-    use openlogi_core::binding::{KeyCombo, KeyboardUsage, Shortcut};
+    use openlogi_core::binding::{KeyCombo, KeyboardUsage, Shortcut, ShortcutKey};
     use windows_sys::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetKeyState;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -568,10 +595,47 @@ mod tests {
     };
 
     fn usage(label: &str) -> KeyboardUsage {
-        label
+        match label
             .parse::<KeyCombo>()
             .expect("test key must be valid")
             .key()
+        {
+            ShortcutKey::Usage(usage) => usage,
+            ShortcutKey::Plus => panic!("{label} names the plus key, which has no usage"),
+        }
+    }
+
+    /// `+` goes down on the key the host layout types it on, with Shift
+    /// exactly when that layout needs it: the US `=` key with Shift, or a
+    /// key of its own without (German). A held `Ctrl++` presses the same key.
+    #[test]
+    fn plus_presses_the_key_the_layout_types_it_on() {
+        let layout = ForegroundLayout::current();
+        let chord: KeyCombo = "Ctrl++".parse().expect("valid chord");
+        let (key, shift) = Key::for_shortcut_key(chord.key(), layout).expect("+ has a key");
+        if let Some((vk, typed_shift)) = layout.key_typing('+') {
+            assert_eq!((key.vk, shift), (vk, typed_shift));
+        } else {
+            assert_eq!((key.vk, shift), (0xbb, true), "VK_OEM_PLUS with Shift");
+        }
+        assert_eq!(super::implies_shift(&chord), shift);
+        assert_eq!(held_key(HeldKey::Key(chord.key()), layout), Some(key));
+
+        let mut downs = Vec::new();
+        for input in &combo_inputs(&chord, layout).expect("+ has a key") {
+            // SAFETY: `combo_inputs` builds every `INPUT` with `key_input`,
+            // which initialises the `ki` arm of the union.
+            let ki = unsafe { input.Anonymous.ki };
+            if ki.dwFlags & KEYEVENTF_KEYUP == 0 {
+                downs.push(ki.wVk);
+            }
+        }
+        let mut expected = vec![VK_CONTROL];
+        if shift {
+            expected.push(VK_SHIFT);
+        }
+        expected.push(key.vk);
+        assert_eq!(downs, expected);
     }
 
     /// Quotes must reach `cmd.exe` as written. `Command::args` escapes them and
@@ -825,7 +889,7 @@ mod tests {
             let Ok(chord) = combo(shortcut) else {
                 continue;
             };
-            let key = chord.key().code();
+            let key = chord.key().us_position().0.code();
             assert!(
                 super::super::hid_usage_to_windows(key).is_some(),
                 "{shortcut:?} table entry has no Windows virtual-key mapping"
@@ -956,7 +1020,7 @@ mod tests {
                 "{label} in a custom shortcut must carry its hardware scan code"
             );
             assert_eq!(
-                held_key(HeldKey::Key(usage(label)), layout),
+                held_key(HeldKey::Key(ShortcutKey::Usage(usage(label))), layout),
                 Some(expected),
                 "{label} in a held shortcut must carry its hardware scan code"
             );

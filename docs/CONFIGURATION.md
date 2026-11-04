@@ -484,6 +484,12 @@ modifier): a letter, a digit, `` - = [ ] \ ; ' ` , . / ``, `F1` to `F20`,
 `Insert` presses the Help key and `PrintScreen` presses F13, the key macOS
 reads a PC keyboard's Print Screen as.
 
+`+` is a key too, written last as `Ctrl++`, as `Ctrl+Plus`, or alone as `+`.
+It presses the key your keyboard layout types `+` on: its own key on a German
+or Swiss layout, and `=` with Shift on a US layout. On Linux, which presses
+keys by their US position, it is always Shift+`=`. `Ctrl+Shift+=` instead
+names the US `=` position and stays there on every layout.
+
 `PrintScreen` presses the key itself, so a screenshot tool that listens for
 Print Screen, such as ShareX or Greenshot, receives it. On Windows and macOS,
 the `Screenshot` and `CaptureRegion` actions press the system's own screenshot

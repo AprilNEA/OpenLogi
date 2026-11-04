@@ -67,7 +67,7 @@ impl MenuShortcut {
     /// that types no character.
     pub(super) fn written(combo: &KeyCombo) -> Option<Self> {
         Some(Self {
-            key: combo.key().ascii_char()?.to_string(),
+            key: combo.key().character()?.to_string(),
             modifiers: Modifiers {
                 // Super is Command on macOS.
                 command: combo.has_command() || combo.has_super(),

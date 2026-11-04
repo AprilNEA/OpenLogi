@@ -119,7 +119,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// unreleased version and leave this pin alone (`crates/openlogi-ipc/AGENTS.md`).
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 45);
+    assert_eq!(PROTOCOL_VERSION, 46);
 }
 
 #[test]
@@ -490,14 +490,16 @@ fn switch_host() {
     );
 }
 
-/// A chord crosses the wire as its modifier bits and the key's HID usage.
+/// A chord crosses the wire as its modifier bits and its key: variant 0
+/// with the key's HID usage, or variant 1 for `+`, which has no usage.
 #[test]
 fn key_combo_modifier_bits() {
     let combo = |text: &str| text.parse::<KeyCombo>().expect("valid chord");
-    assert_wire(&combo("Cmd+L"), "010f");
-    assert_wire(&combo("Super+L"), "100f");
-    assert_wire(&combo("Insert"), "0049");
-    assert_wire(&combo("PrintScreen"), "0046");
+    assert_wire(&combo("Cmd+L"), "01000f");
+    assert_wire(&combo("Super+L"), "10000f");
+    assert_wire(&combo("Insert"), "000049");
+    assert_wire(&combo("PrintScreen"), "000046");
+    assert_wire(&combo("Ctrl++"), "0401");
 }
 
 /// The agent identity is frozen: a helper from any build has to be able to

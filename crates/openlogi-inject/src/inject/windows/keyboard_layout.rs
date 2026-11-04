@@ -14,7 +14,7 @@
 use std::ptr::null_mut;
 
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyboardLayout, HKL, MAPVK_VK_TO_VSC, MapVirtualKeyExW,
+    GetKeyboardLayout, HKL, MAPVK_VK_TO_VSC, MapVirtualKeyExW, VkKeyScanExW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
 
@@ -42,6 +42,25 @@ impl ForegroundLayout {
         // an identifier the system returned, not a pointer it dereferences.
         let scan = unsafe { MapVirtualKeyExW(u32::from(vk), MAPVK_VK_TO_VSC, self.0) };
         u16::try_from(scan).unwrap_or(0)
+    }
+
+    /// The virtual key that types `ch` under this layout, and whether Shift
+    /// goes with it. `None` when no key types it, or only with AltGr or
+    /// Control, which would make it a different shortcut.
+    pub(super) fn key_typing(self, ch: char) -> Option<(u16, bool)> {
+        let mut unit = [0_u16; 2];
+        let [unit] = ch.encode_utf16(&mut unit) else {
+            return None;
+        };
+        // SAFETY: VkKeyScanExW reads no caller memory; the layout handle is an
+        // identifier the system returned, not a pointer it dereferences.
+        let [vk, state] = unsafe { VkKeyScanExW(*unit, self.0) }.to_le_bytes();
+        // -1 (no key) reads as state 0xff, which no arm below accepts.
+        match state {
+            0 => Some((u16::from(vk), false)),
+            1 => Some((u16::from(vk), true)),
+            _ => None,
+        }
     }
 
     /// The virtual key the key with `scan` produces under this layout, or 0
