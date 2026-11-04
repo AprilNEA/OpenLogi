@@ -6,9 +6,9 @@
 
 use super::theme::FocusRingStyle as _;
 use gpui::{
-    AnyElement, App, ClickEvent, ElementId, Entity, InteractiveElement, Interactivity, IntoElement,
-    ParentElement, Pixels, RenderOnce, Role, SharedString, Stateful, StatefulInteractiveElement,
-    Styled, Window, div, prelude::FluentBuilder as _, px, rgb,
+    AnyElement, App, ClickEvent, Div, ElementId, Entity, InteractiveElement, Interactivity,
+    IntoElement, ParentElement, Pixels, RenderOnce, Role, SharedString, Stateful,
+    StatefulInteractiveElement, Styled, Window, div, prelude::FluentBuilder as _, px, rgb,
 };
 use gpui_kit::base::Button as BaseButton;
 use gpui_kit::component::{
@@ -226,23 +226,47 @@ pub(crate) fn toggle_row(
         .justify_between()
         .items_center()
         .gap_4()
-        .child(
-            v_flex()
-                .flex_1()
-                .min_w_0()
-                .child(div().text_body().text_color(pal.text_primary).child(title))
-                .child(
-                    div()
-                        .text_caption()
-                        .text_color(pal.text_muted)
-                        .child(description),
-                ),
-        )
+        .child(setting_text(pal, title, description).flex_1().min_w_0())
         .child(
             div()
                 .debug_selector(move || format!("{selector}-control"))
                 .flex_shrink_0()
                 .child(control),
+        )
+}
+
+/// A [`toggle_row`] whose control sits under the caption instead of beside it,
+/// for a control too wide to share a narrow column with its text — a segmented
+/// choice in the Actions Ring's 320 px column, say — so the caption keeps the
+/// full width and the control starts at the leading edge. Same selectors.
+pub(crate) fn stacked_row(
+    selector: &'static str,
+    pal: theme::Palette,
+    title: SharedString,
+    description: SharedString,
+    control: impl IntoElement,
+) -> impl IntoElement {
+    v_flex()
+        .debug_selector(move || selector.into())
+        .items_start()
+        .gap_2()
+        .child(setting_text(pal, title, description).w_full())
+        .child(
+            div()
+                .debug_selector(move || format!("{selector}-control"))
+                .child(control),
+        )
+}
+
+/// The title and caption shared by [`toggle_row`] and [`stacked_row`].
+fn setting_text(pal: theme::Palette, title: SharedString, description: SharedString) -> Div {
+    v_flex()
+        .child(div().text_body().text_color(pal.text_primary).child(title))
+        .child(
+            div()
+                .text_caption()
+                .text_color(pal.text_muted)
+                .child(description),
         )
 }
 

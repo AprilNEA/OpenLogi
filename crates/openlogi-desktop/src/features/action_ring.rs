@@ -29,7 +29,7 @@ use self::editor::{PowerUserInputs, action_library};
 use crate::features::keyboard::editors::{PowerUserKind, text_editor_placeholder};
 use crate::state::{AppState, StateEvent};
 use crate::ui::action::localized_action_label;
-use crate::ui::components::{Toggle, toggle_row};
+use crate::ui::components::{Toggle, stacked_row, toggle_row};
 use crate::ui::theme::{self, Palette, SelectableStyle as _, Typography as _};
 
 /// Stateful Actions Ring editor. Ring configuration itself lives in
@@ -194,7 +194,9 @@ fn ring_switches(
                     AppState::apply(cx, |state| state.commit_action_ring_enabled(*enabled));
                 }),
         ))
-        .child(toggle_row(
+        // Three segments beside the caption leave it a few words per line in
+        // this column, so the segment goes under the text instead.
+        .child(stacked_row(
             "ring-size-row",
             pal,
             tr!("action_ring.ring_size"),

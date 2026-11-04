@@ -10,7 +10,7 @@ use gpui_kit::base::Button as BaseButton;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Root, Selectable as _, Sizable as _, Theme,
     ThemeMode, ThemeRegistry,
-    button::{Button, ButtonVariants as _},
+    button::{Button, ButtonGroup, ButtonVariants as _},
     h_flex,
     scroll::ScrollableElement as _,
     slider::Slider,
@@ -25,7 +25,9 @@ use super::battery::BatteryIndicator;
 use super::carousel::Carousel;
 use super::choice_card::ChoiceCard;
 use super::commit_slider::{CommitSlider, SliderRange};
-use super::components::{MenuRow, PanelCard, Pill, PresetChip, ProfileTab, Toggle, toggle_row};
+use super::components::{
+    MenuRow, PanelCard, Pill, PresetChip, ProfileTab, Toggle, stacked_row, toggle_row,
+};
 use super::slider_row::{SliderRow, disabled_track};
 use super::status::{retry_line, status_line};
 use super::theme::{
@@ -102,6 +104,7 @@ struct ComponentGallery {
     scale: UiScale,
     choice_selected: usize,
     toggle_selected: bool,
+    segment_selected: usize,
     menu_selected: usize,
     profile_selected: usize,
     preset_selected: bool,
@@ -147,6 +150,7 @@ impl ComponentGallery {
             scale: UiScale::Normal,
             choice_selected: 0,
             toggle_selected: true,
+            segment_selected: 1,
             menu_selected: 0,
             profile_selected: 1,
             preset_selected: true,
@@ -335,6 +339,30 @@ impl ComponentGallery {
                             this.toggle_selected = *selected;
                             cx.notify();
                         })),
+                ))
+                .child(stacked_row(
+                    "gallery-stacked-row",
+                    pal,
+                    SharedString::from("Stacked setting"),
+                    SharedString::from(
+                        "A control too wide to share a narrow column with this caption sits \
+                         under it at the leading edge.",
+                    ),
+                    ButtonGroup::new("gallery-stacked-row-segment")
+                        .outline()
+                        .children(["Small", "Medium", "Large"].into_iter().enumerate().map(
+                            |(index, label)| {
+                                let selected = self.segment_selected == index;
+                                Button::new(("gallery-stacked-row-segment", index))
+                                    .label(label)
+                                    .selected(selected)
+                                    .selected_segment(selected, cx)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.segment_selected = index;
+                                        cx.notify();
+                                    }))
+                            },
+                        )),
                 )),
             pal,
         )

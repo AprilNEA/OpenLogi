@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use gpui::{TestAppContext, size};
+use gpui::{TestAppContext, VisualTestContext, size};
 use openlogi_core::binding::{Action, KeyCombo, RingAction};
 use openlogi_core::config::Config;
 
@@ -54,8 +54,8 @@ impl Render for NarrowHost {
 
 const NARROW_W: f32 = 500.;
 
-#[gpui::test]
-fn the_slot_editor_wraps_below_the_ring_in_a_narrow_column(cx: &mut TestAppContext) {
+/// Draw the panel in the narrow column with an ephemeral config.
+fn draw_narrow_panel(cx: &mut TestAppContext) -> &mut VisualTestContext {
     cx.update(gpui_kit::init);
     cx.update(|cx| {
         let (commands, _) = tokio::sync::mpsc::unbounded_channel();
@@ -69,6 +69,12 @@ fn the_slot_editor_wraps_below_the_ring_in_a_narrow_column(cx: &mut TestAppConte
     });
     cx.simulate_resize(size(px(800.), px(1200.)));
     cx.update(|window, cx| window.draw(cx).clear(cx));
+    cx
+}
+
+#[gpui::test]
+fn the_slot_editor_wraps_below_the_ring_in_a_narrow_column(cx: &mut TestAppContext) {
+    let cx = draw_narrow_panel(cx);
 
     let editor = cx
         .debug_bounds("ring-slot-editor")
@@ -80,5 +86,33 @@ fn the_slot_editor_wraps_below_the_ring_in_a_narrow_column(cx: &mut TestAppConte
     assert!(
         editor.top() >= px(PREVIEW_SIZE),
         "the slot editor {editor:?} wraps below the ring"
+    );
+}
+
+/// The Small / Medium / Large segment sits under the Ring size caption, at
+/// the row's leading edge, instead of beside the text where it would leave
+/// the caption a few words per line.
+#[gpui::test]
+fn the_ring_size_segment_sits_under_its_caption(cx: &mut TestAppContext) {
+    let cx = draw_narrow_panel(cx);
+
+    let row = cx
+        .debug_bounds("ring-size-row")
+        .expect("the ring size row renders");
+    let segment = cx
+        .debug_bounds("ring-size-row-control")
+        .expect("the ring size segment renders");
+    assert_eq!(
+        segment.left(),
+        row.left(),
+        "the segment {segment:?} starts at the row's leading edge {row:?}"
+    );
+    assert!(
+        segment.top() > row.top() && segment.bottom() <= row.bottom(),
+        "the segment {segment:?} is the row's last line {row:?}"
+    );
+    assert!(
+        segment.right() <= row.right(),
+        "the segment {segment:?} stays inside the row {row:?}"
     );
 }
