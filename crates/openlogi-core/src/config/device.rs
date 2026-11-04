@@ -178,6 +178,18 @@ impl LinkOverrides {
     }
 }
 
+/// An OS a keyboard's key layout can be pinned to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PinnedOs {
+    /// macOS.
+    MacOs,
+    /// Windows.
+    Windows,
+    /// Linux.
+    Linux,
+}
+
 /// Settings scoped to a single physical device.
 ///
 /// Deserialization goes through `RawDeviceConfig` (`#[serde(from)]`) so
@@ -348,6 +360,10 @@ pub struct DeviceConfig {
     /// combination). `None` means "never set", which is on, as in Options+.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keep_os_layout: Option<bool>,
+    /// OS this keyboard's key layout is pinned to while [`Self::keep_os_layout`]
+    /// is off. `None` leaves the layout where it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub os_layout_pin: Option<PinnedOs>,
     /// Report rate (HID++ `0x8060` / `0x8061`), in hertz. The agent re-applies
     /// it when the device reconnects, like [`Self::dpi`], but only where the
     /// device lists it for the connection it is on — a wired-only rate is
@@ -492,6 +508,7 @@ impl Default for DeviceConfig {
             host_switch_targets: Vec::new(),
             fn_lock: None,
             keep_os_layout: None,
+            os_layout_pin: None,
             report_rate: None,
             pointer_speed: None,
             force_sensing: None,
@@ -638,6 +655,8 @@ struct RawDeviceConfig {
     #[serde(default)]
     keep_os_layout: Option<bool>,
     #[serde(default)]
+    os_layout_pin: Option<PinnedOs>,
+    #[serde(default)]
     report_rate: Option<ReportRate>,
     #[serde(default)]
     pointer_speed: Option<PointerSpeed>,
@@ -713,6 +732,7 @@ impl From<RawDeviceConfig> for DeviceConfig {
             host_switch_targets: raw.host_switch_targets,
             fn_lock: raw.fn_lock,
             keep_os_layout: raw.keep_os_layout,
+            os_layout_pin: raw.os_layout_pin,
             report_rate: raw.report_rate,
             pointer_speed: raw.pointer_speed,
             force_sensing: raw.force_sensing,

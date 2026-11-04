@@ -91,6 +91,34 @@ fn unset_keep_os_layout_is_omitted_from_toml() {
 }
 
 #[test]
+fn os_layout_pin_roundtrips_per_device_and_is_omitted_when_unset() {
+    let mut cfg = Config::default();
+    assert_eq!(cfg.os_layout_pin("2b042"), None);
+    cfg.set_os_layout_pin("2b042", Some(PinnedOs::MacOs));
+    let body = toml::to_string_pretty(&cfg).expect("serialize");
+    assert!(body.contains("os_layout_pin = \"macos\""), "{body}");
+    let restored = write_and_read(&cfg);
+    assert_eq!(restored.os_layout_pin("2b042"), Some(PinnedOs::MacOs));
+    assert_eq!(restored.os_layout_pin("absent"), None);
+    cfg.set_os_layout_pin("2b042", None);
+    let body = toml::to_string_pretty(&cfg).expect("serialize");
+    assert!(!body.contains("os_layout_pin"), "{body}");
+}
+
+#[test]
+fn an_os_layout_pin_survives_route_adoption() {
+    let route = "receiver:82839805:slot:1";
+    let mut config = Config::default();
+    config.set_os_layout_pin(route, Some(PinnedOs::Windows));
+    let canonical = crate::device_order::PhysicalDeviceKey::parse("unit:6be9d300").expect("valid");
+    assert!(config.adopt_route(&canonical, route, None));
+    assert_eq!(
+        config.os_layout_pin("unit:6be9d300"),
+        Some(PinnedOs::Windows)
+    );
+}
+
+#[test]
 fn smooth_wheel_defaults_off_and_roundtrips_per_device() {
     let mut cfg = Config::default();
     assert!(!cfg.smooth_wheel("mouse"));
