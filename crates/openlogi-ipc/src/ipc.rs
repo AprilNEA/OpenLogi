@@ -16,7 +16,8 @@ use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{ActionRingIcon, ActionRingSize, ActionRingSlot};
 use openlogi_core::config::{ConfigRevision, FlowPeerName, FlowPublicKey, Lighting};
 use openlogi_core::device::{
-    BatteryInfo, ChangedOnLight, DeviceInventory, DeviceKind, LightState, LockKey, StandaloneDevice,
+    BatteryInfo, BatteryWidgetStatus, ChangedOnLight, DeviceInventory, DeviceKind, LightState,
+    LockKey, StandaloneDevice,
 };
 use openlogi_core::hid::{
     BacklightChange, BacklightState, DeviceRoute, DisableKeysMask, DisableKeysState, Dpi, DpiInfo,
@@ -181,7 +182,8 @@ pub use succession::Identity;
 ///      chooses on release, so the overlay reports the pointer leaving every
 ///      slot as well as entering one. `ActionRingInvocation::size` appended,
 ///      the size the overlay draws the ring at.
-pub const PROTOCOL_VERSION: u32 = 45;
+/// v46: `AgentStatus::battery_widget` appended.
+pub const PROTOCOL_VERSION: u32 = 46;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -279,6 +281,8 @@ pub struct AgentStatus {
     pub secure_input: SecureInput,
     /// See [`VirtualKeyboardStatus`].
     pub virtual_keyboard: VirtualKeyboardStatus,
+    /// Experimental macOS battery publisher state, including partial failures.
+    pub battery_widget: BatteryWidgetStatus,
 }
 
 /// Status and inventory as one poll result. Kept together so the GUI never

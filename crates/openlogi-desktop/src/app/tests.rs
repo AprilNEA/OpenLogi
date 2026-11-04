@@ -1607,6 +1607,7 @@ fn status_with(secure_input: openlogi_ipc::SecureInput) -> openlogi_ipc::AgentSt
         hid_open_failures: false,
         secure_input,
         virtual_keyboard: openlogi_ipc::VirtualKeyboardStatus::Unsupported,
+        battery_widget: openlogi_core::device::BatteryWidgetStatus::Disabled,
     }
 }
 
