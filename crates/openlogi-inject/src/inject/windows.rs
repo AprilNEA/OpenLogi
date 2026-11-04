@@ -284,12 +284,20 @@ pub(super) fn run_apple_script(_src: &str) {
 }
 
 pub(super) fn run_shell_command(cmd: &str) {
+    super::run_to_end(shell_command(cmd), "shell command");
+}
+
+fn shell_command(cmd: &str) -> std::process::Command {
+    let mut command = std::process::Command::new("cmd");
+    // `args` would escape each `"` as `\"`, which `cmd.exe` does not understand:
+    // a quoted command silently does nothing and still exits 0. With `/S`, it
+    // strips only the outer quotes added here and runs the rest as written.
+    command.raw_arg(format!("/S /C \"{cmd}\""));
     // Without this flag `cmd.exe` allocates and briefly flashes a visible
     // console window, since the agent itself is a console-less GUI/background
     // process and the child would otherwise get one of its own.
-    let mut command = std::process::Command::new("cmd");
-    command.args(["/C", cmd]).creation_flags(CREATE_NO_WINDOW);
-    super::run_to_end(command, "shell command");
+    command.creation_flags(CREATE_NO_WINDOW);
+    command
 }
 
 fn post_click(button: MouseButton) {
@@ -526,6 +534,7 @@ mod tests {
         KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, Key, VK_BROWSER_BACK, VK_BROWSER_FORWARD,
         VK_DELETE, VK_DOWN, VK_END, VK_HOME, VK_INSERT, VK_LEFT, VK_LWIN, VK_NEXT, VK_PRIOR,
         VK_RIGHT, VK_SHIFT, VK_UP, combo, held_key, is_extended_key, key_input, send_inputs,
+        shell_command,
     };
 
     fn usage(label: &str) -> KeyboardUsage {
@@ -533,6 +542,25 @@ mod tests {
             .parse::<KeyCombo>()
             .expect("test key must be valid")
             .key()
+    }
+
+    /// Quotes must reach `cmd.exe` as written. `Command::args` escapes them and
+    /// the command silently does nothing; plain `/C` strips the wrong ones when
+    /// a command has more than one quoted part, as this one does.
+    #[test]
+    fn shell_command_keeps_quotes_as_written() {
+        let dir = std::env::temp_dir().join(format!("openlogi run {}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir must be writable");
+        let marker = dir.join("marker.txt");
+        let comspec = std::env::var("ComSpec").expect("Windows sets ComSpec");
+        let cmd = format!("\"{comspec}\" /c echo done> \"{}\"", marker.display());
+
+        let status = shell_command(&cmd).status().expect("cmd.exe must start");
+        let written = std::fs::read_to_string(&marker).unwrap_or_default();
+        std::fs::remove_dir_all(&dir).expect("temp dir must be removable");
+
+        assert!(status.success());
+        assert_eq!(written.trim(), "done");
     }
 
     /// A key a layout can move must carry the scan code of the key that
