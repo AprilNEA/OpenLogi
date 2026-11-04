@@ -85,9 +85,11 @@ pub(super) fn permissions_page(view: Entity<SettingsView>, has_camera: bool) -> 
 
     #[cfg(not(target_os = "macos"))]
     let _ = has_camera;
-    // Only Linux's row starts work that reports back into the view.
+    // Only Linux's row starts work that reports back into the view. Elsewhere
+    // the handle is consumed here: `let _ = view` would not move it, and the
+    // by-value parameter would then trip `clippy::needless_pass_by_value`.
     #[cfg(not(target_os = "linux"))]
-    let _ = view;
+    drop(view);
 
     #[cfg(target_os = "linux")]
     let page = page.group(
