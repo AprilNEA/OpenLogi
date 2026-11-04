@@ -102,6 +102,7 @@ enum ReportingMode {
     Analytics,
 }
 
+/// A host key that a session arms, and the reporting it restores the key to.
 #[derive(Clone, Copy)]
 struct ArmedControl {
     cid: u16,
@@ -256,34 +257,27 @@ pub async fn run_host_switch_session(
         .map(|index| listen_for_renames(&channel, keyboard_index, index, trigger_tx.clone()));
     hosts.read().await;
 
-    let (armed, controls_index) =
-        match arm_host_keys(&mut device, &shared, position.announces).await {
-            Ok(armed) => armed,
-            Err(failure) => {
-                let (error, pending) = *failure;
-                // A keyboard that is leaving stops answering, so the arm can
-                // fail because of the switch itself. The linked devices still
-                // follow a departure that the keyboard queued.
-                if let Some(HostSwitchStop::Departed(host)) =
-                    queued_departure(&mut triggers, position, &mut hosts)
-                {
-                    debug!(route = %keyboard, %error, "host keys failed to arm during a departure");
-                    let departure = Departure::new(&shared, hosts.table(), host);
-                    return Ok(depart(departure, pending, followers).await);
-                }
-                return Err(rollback_host_switch_start(error, pending, registry, &device_io).await);
+    let ArmedHostKeys {
+        armed,
+        controls_index,
+        listener: key_listener,
+    } = match arm_host_keys(&mut device, &shared, position.announces, &trigger_tx).await {
+        Ok(host_keys) => host_keys,
+        Err(failure) => {
+            let (error, pending) = *failure;
+            // A keyboard that is leaving stops answering, so the arm can
+            // fail because of the switch itself. The linked devices still
+            // follow a departure that the keyboard queued.
+            if let Some(HostSwitchStop::Departed(host)) =
+                queued_departure(&mut triggers, position, &mut hosts)
+            {
+                debug!(route = %keyboard, %error, "host keys failed to arm during a departure");
+                let departure = Departure::new(&shared, hosts.table(), host);
+                return Ok(depart(departure, pending, followers).await);
             }
-        };
-
-    let key_listener = controls_index.filter(|_| !armed.is_empty()).map(|index| {
-        listen_for_host_keys(
-            &channel,
-            keyboard_index,
-            index,
-            armed.clone(),
-            trigger_tx.clone(),
-        )
-    });
+            return Err(rollback_host_switch_start(error, pending, registry, &device_io).await);
+        }
+    };
     drop(trigger_tx);
 
     info!(
@@ -318,9 +312,14 @@ pub async fn run_host_switch_session(
     Ok(restore_after(stop, pending, &shared, registry, &device_io).await)
 }
 
-/// The host keys that a session armed, and the `ReprogControlsV4` index
-/// they were armed through.
-type ArmedHostKeys = (Vec<ArmedControl>, Option<u8>);
+/// The host keys that a session armed, the `ReprogControlsV4` index they
+/// were armed through, and the listener that hears them.
+#[derive(Default)]
+struct ArmedHostKeys {
+    armed: Vec<ArmedControl>,
+    controls_index: Option<u8>,
+    listener: Option<MessageListenerGuard>,
+}
 
 /// Why the host keys could not be armed, and the restoration that a partial
 /// arm left.
@@ -328,14 +327,19 @@ type ArmFailure = (HostSwitchError, Option<PendingHostSwitchRestore>);
 
 /// Arm the host keys of the keyboard on `shared`, unless it `announces` its
 /// host changes. A keyboard without `ReprogControlsV4` arms nothing.
+///
+/// Every host key is read before the first one is armed, and the listener
+/// that sends their presses to `triggers` is installed in between: the
+/// keyboard reports a key as soon as it applies the write, and no listener
+/// buffers a report that comes before it is installed (#2346).
 async fn arm_host_keys(
     device: &mut Device,
     shared: &SharedChannel,
     announces: bool,
+    triggers: &mpsc::UnboundedSender<HostTrigger>,
 ) -> Result<ArmedHostKeys, Box<ArmFailure>> {
-    let mut armed = Vec::new();
     if announces {
-        return Ok((armed, None));
+        return Ok(ArmedHostKeys::default());
     }
     let feature = match timed_hidpp(
         "locating host controls",
@@ -344,7 +348,7 @@ async fn arm_host_keys(
     .await
     {
         Ok(Some(feature)) => feature,
-        Ok(None) => return Ok((armed, None)),
+        Ok(None) => return Ok(ArmedHostKeys::default()),
         Err(error) => return Err(Box::new((error, None))),
     };
     let controls = ReprogControlsV4::new(
@@ -352,8 +356,25 @@ async fn arm_host_keys(
         shared.device_index(),
         feature.index,
     );
-    match arm_host_controls_inner(&controls, &mut armed).await {
-        Ok(()) => Ok((armed, Some(feature.index))),
+    let host_keys = read_host_controls(&controls)
+        .await
+        .map_err(|error| Box::new((error, None)))?;
+    let listener = (!host_keys.is_empty()).then(|| {
+        listen_for_host_keys(
+            shared.channel(),
+            shared.device_index(),
+            feature.index,
+            host_keys.clone(),
+            triggers.clone(),
+        )
+    });
+    let mut armed = Vec::new();
+    match arm_host_controls(&controls, &host_keys, &mut armed).await {
+        Ok(()) => Ok(ArmedHostKeys {
+            armed,
+            controls_index: Some(feature.index),
+            listener,
+        }),
         Err(error) => {
             let pending = PendingHostSwitchRestore::new(shared, feature.index, armed);
             Err(Box::new((error, pending)))
@@ -1061,11 +1082,13 @@ pub async fn prepare_host_switch(
         .map(PreparedHostSwitch)
 }
 
-async fn arm_host_controls_inner(
+/// The host keys among `controls`, each with the reporting it has before the
+/// session arms it. Only reads the keyboard.
+async fn read_host_controls(
     controls: &ReprogControlsV4,
-    armed: &mut Vec<ArmedControl>,
-) -> Result<(), HostSwitchError> {
+) -> Result<Vec<ArmedControl>, HostSwitchError> {
     let count = timed_hidpp("reading host control count", controls.get_count()).await?;
+    let mut host_keys = Vec::new();
     for index in 0..count {
         let info = timed_hidpp(
             "reading host control information",
@@ -1096,32 +1119,44 @@ async fn arm_host_controls_inner(
                 controls.get_cid_reporting(info.cid),
             )
             .await?;
-            // Record the rollback before issuing the write: a transport timeout
-            // can mean that the device applied the request but its response was
-            // lost, so the failing control must be restored as well.
-            armed.push(ArmedControl {
+            host_keys.push(ArmedControl {
                 cid: info.cid,
                 host,
                 mode,
                 original,
             });
-            match mode {
-                ReportingMode::Diverted => {
-                    timed_hidpp("diverting host control", controls.divert_cid(info.cid)).await?;
-                }
-                ReportingMode::Analytics => {
-                    timed_hidpp(
-                        "enabling host control analytics",
-                        controls.set_cid_reporting_full(
-                            info.cid,
-                            reprog_controls::CidReportingChange {
-                                analytics_key_events: Some(true),
-                                ..reprog_controls::CidReportingChange::default()
-                            },
-                        ),
-                    )
-                    .await?;
-                }
+        }
+    }
+    Ok(host_keys)
+}
+
+/// Arm each of `host_keys`, adding it to `armed` before its write.
+async fn arm_host_controls(
+    controls: &ReprogControlsV4,
+    host_keys: &[ArmedControl],
+    armed: &mut Vec<ArmedControl>,
+) -> Result<(), HostSwitchError> {
+    for &control in host_keys {
+        // Record the rollback before issuing the write: a transport timeout
+        // can mean that the device applied the request but its response was
+        // lost, so the failing control must be restored as well.
+        armed.push(control);
+        match control.mode {
+            ReportingMode::Diverted => {
+                timed_hidpp("diverting host control", controls.divert_cid(control.cid)).await?;
+            }
+            ReportingMode::Analytics => {
+                timed_hidpp(
+                    "enabling host control analytics",
+                    controls.set_cid_reporting_full(
+                        control.cid,
+                        reprog_controls::CidReportingChange {
+                            analytics_key_events: Some(true),
+                            ..reprog_controls::CidReportingChange::default()
+                        },
+                    ),
+                )
+                .await?;
             }
         }
     }
