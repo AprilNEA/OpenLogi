@@ -1,0 +1,230 @@
+//! A capture session hears a control from the moment arming diverts it, while
+//! it still arms the controls after that one (#2349).
+
+use std::collections::BTreeMap;
+use std::sync::{Arc, OnceLock, RwLock};
+use std::time::Duration;
+
+use openlogi_core::binding::ButtonId;
+use tokio::sync::{mpsc, oneshot, watch};
+
+use super::*;
+use crate::backend::NodeId;
+use crate::channel::scripted::{ScriptedRawHidChannel, scripted_channel};
+use crate::device_io_channel;
+use crate::replay::ReplayChannelHandle;
+use crate::reprog_controls;
+use crate::session::capture_restore::CaptureSessionFailure;
+use crate::session::gesture::{CaptureSpec, run_capture_session};
+use crate::session::keyboard::{KeyboardWanted, run_keyboard_capture_session};
+
+const REPROG_INDEX: u8 = 2;
+/// The `0x1b04` capability flag that marks a control divertable.
+const DIVERTABLE: u8 = 0x20;
+/// The `setCidReporting` flag that diverts a control.
+const DIVERT: u8 = 0x01;
+
+/// Where the device sends a report it makes on its own.
+type Wire = Arc<OnceLock<mpsc::UnboundedSender<Vec<u8>>>>;
+
+/// A device with `controls` on `0x1b04` at [`REPROG_INDEX`], all divertable
+/// and native, and no other feature. `setCidReporting` writes are echoed.
+///
+/// The write that diverts `controls[0]` is followed on the wire by a press
+/// and a release of that control: the user pressed it the instant the
+/// firmware applied the divert, before arming reached `controls[1]`.
+fn device(controls: [u16; 2], wire: Wire) -> (ScriptedRawHidChannel, ReplayChannelHandle) {
+    ScriptedRawHidChannel::with_dynamic_responder(move |request| {
+        let mut response = vec![0; 20];
+        response[..4].copy_from_slice(&request[..4]);
+        response[0] = 0x11;
+        // A feature id for the root lookup, a control id for reporting.
+        let id = u16::from_be_bytes([request[4], request[5]]);
+        match (request[2], request[3] >> 4) {
+            (0, 1) => response[4] = 4,
+            (0, 0) if id == reprog_controls::FEATURE_ID => response[4] = REPROG_INDEX,
+            (0, 0) => {}
+            (REPROG_INDEX, 0) => response[4] = 2,
+            (REPROG_INDEX, 1) => {
+                let cid = controls[usize::from(request[4])];
+                response[4..6].copy_from_slice(&cid.to_be_bytes());
+                response[8] = DIVERTABLE;
+            }
+            (REPROG_INDEX, 2) => response[4..6].copy_from_slice(&id.to_be_bytes()),
+            (REPROG_INDEX, 3) if id == controls[0] && request[6] & DIVERT != 0 => {
+                let wire = wire.get().expect("the wire is connected before arming");
+                for report in [
+                    request.to_vec(),
+                    diverted_buttons(request[1], &[id]),
+                    diverted_buttons(request[1], &[]),
+                ] {
+                    wire.send(report).expect("the channel is open");
+                }
+                return None;
+            }
+            (REPROG_INDEX, 3) => return Some(request.to_vec()),
+            _ => panic!("unexpected capture request: {request:02x?}"),
+        }
+        Some(response)
+    })
+}
+
+/// A `divertedButtonsEvent` from `device_index`: `held` are the diverted
+/// controls down now.
+fn diverted_buttons(device_index: u8, held: &[u16]) -> Vec<u8> {
+    let mut report = vec![0; 20];
+    report[..4].copy_from_slice(&[0x11, device_index, REPROG_INDEX, 0x00]);
+    for (slot, cid) in report[4..].as_chunks_mut::<2>().0.iter_mut().zip(held) {
+        *slot = cid.to_be_bytes();
+    }
+    report
+}
+
+/// The `setCidReporting` writes in `reports` that divert a control, by
+/// control id, in the order written.
+fn diverted(reports: &[Vec<u8>]) -> Vec<u16> {
+    reports
+        .iter()
+        .filter(|report| report[2] == REPROG_INDEX && report[3] >> 4 == 3)
+        .filter(|report| report[6] & DIVERT != 0)
+        .map(|report| u16::from_be_bytes([report[4], report[5]]))
+        .collect()
+}
+
+enum Capture {
+    Gesture(CaptureSpec),
+    Keyboard(KeyboardWanted),
+}
+
+/// Run `capture` on a [`device`] over `controls` until it reports `button`
+/// released, then stop it. Returns everything it sent until then and the
+/// reports it wrote.
+async fn press_while_arming(
+    controls: [u16; 2],
+    capture: Capture,
+    button: ButtonId,
+) -> (Vec<CapturedInput>, Vec<Vec<u8>>) {
+    let wire = Wire::default();
+    let (raw, handle) = device(controls, Arc::clone(&wire));
+    wire.set(raw.incoming_sender())
+        .expect("the wire is connected once");
+    let route = DeviceRoute::Direct {
+        vendor_id: 0x046d,
+        product_id: 0xb35b,
+    };
+    let registry = ChannelRegistry::default();
+    registry.replace_node(
+        NodeId::from("capture-node".to_owned()),
+        [route.clone()],
+        scripted_channel(raw).await,
+    );
+    let (sink, mut inputs) = mpsc::unbounded_channel();
+    let (shutdown, shutdown_rx) = oneshot::channel();
+    let session = tokio::spawn(async move {
+        let (_signal, device_io) = device_io_channel();
+        let host = CaptureHost {
+            sink,
+            shutdown: shutdown_rx,
+            channel_slot: Arc::new(RwLock::new(None)),
+            registry: &registry,
+            device_io,
+        };
+        match capture {
+            Capture::Gesture(spec) => run_capture_session(route, spec, host).await,
+            Capture::Keyboard(wanted) => {
+                run_keyboard_capture_session(route, watch::channel(wanted).1, host).await
+            }
+        }
+    });
+
+    let mut heard = Vec::new();
+    let released = tokio::time::timeout(Duration::from_secs(2), async {
+        while let Some(input) = inputs.recv().await {
+            heard.push(input);
+            if input == CapturedInput::ButtonUp(button) {
+                return;
+            }
+        }
+    })
+    .await;
+    shutdown
+        .send(CaptureSessionStop::Shutdown)
+        .expect("the session is still running");
+    let outcome: Result<CaptureSessionOutcome, CaptureSessionFailure> =
+        tokio::time::timeout(Duration::from_secs(2), session)
+            .await
+            .expect("the session stops")
+            .expect("the session task does not panic");
+    assert!(
+        matches!(outcome, Ok(CaptureSessionOutcome::Restored)),
+        "the session hands its controls back"
+    );
+    assert!(
+        released.is_ok(),
+        "the press while arming reached the sink: {heard:?}"
+    );
+    (heard, handle.written_reports())
+}
+
+#[tokio::test]
+async fn a_button_pressed_right_after_its_divert_reaches_the_sink() {
+    const MIDDLE: u16 = 0x0052;
+    const BACK: u16 = 0x0053;
+    let spec = CaptureSpec {
+        divert_buttons: vec![(MIDDLE, ButtonId::MiddleClick), (BACK, ButtonId::Back)],
+        ..CaptureSpec::default()
+    };
+    let (heard, written) = press_while_arming(
+        [MIDDLE, BACK],
+        Capture::Gesture(spec),
+        ButtonId::MiddleClick,
+    )
+    .await;
+
+    assert_eq!(
+        diverted(&written),
+        [MIDDLE, BACK],
+        "the press landed while the session still armed the back button"
+    );
+    let position = |input| heard.iter().position(|heard| *heard == input);
+    let down =
+        position(CapturedInput::ButtonDown(ButtonId::MiddleClick)).expect("the press is heard");
+    for button in [ButtonId::MiddleClick, ButtonId::Back] {
+        assert!(
+            position(CapturedInput::ButtonDiverted(button)).is_some_and(|at| at < down),
+            "{button:?} is reported diverted before the press: {heard:?}"
+        );
+    }
+    assert!(
+        position(CapturedInput::ButtonUp(ButtonId::MiddleClick)).is_some_and(|up| up > down),
+        "the release follows the press: {heard:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_key_pressed_right_after_its_divert_reaches_the_sink() {
+    const MUTE: u16 = 0x00e7;
+    const NEXT: u16 = 0x00e8;
+    let wanted = KeyboardWanted {
+        controls: BTreeMap::from([
+            (MUTE, ButtonId::control(MUTE)),
+            (NEXT, ButtonId::control(NEXT)),
+        ]),
+        grid: BTreeMap::new(),
+    };
+    let mute = ButtonId::control(MUTE);
+    let (heard, written) = press_while_arming([MUTE, NEXT], Capture::Keyboard(wanted), mute).await;
+
+    assert_eq!(
+        diverted(&written),
+        [MUTE, NEXT],
+        "the press landed while the session still armed the next key"
+    );
+    assert_eq!(
+        heard,
+        [
+            CapturedInput::ButtonDown(mute),
+            CapturedInput::ButtonUp(mute)
+        ]
+    );
+}

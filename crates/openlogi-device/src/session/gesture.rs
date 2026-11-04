@@ -4,8 +4,8 @@
 //! into [`CapturedInput`] the GUI can dispatch.
 //!
 //! [`run_capture_session`] runs on the HID++ channel inventory already holds
-//! open for one device, enables diversion on whichever of those controls it
-//! exposes, registers one message listener, and restores every control's
+//! open for one device, registers one message listener, enables diversion on
+//! whichever of those controls it exposes, and restores every control's
 //! default mapping on shutdown. Using that one channel matters: a second
 //! channel to the same device would split its input-report stream, so all
 //! captured controls share this session. The channel lifecycle itself is
@@ -41,7 +41,7 @@ use crate::SharedChannel;
 use crate::channel::route::DeviceRoute;
 
 pub use super::capture::CaptureHost;
-use super::capture::{ArmedCapture, Liveness, ReportingChangeStream, run_capture};
+use super::capture::{ArmedCapture, ArmingListener, Liveness, ReportingChangeStream, run_capture};
 use accum::CaptureAccum;
 pub(crate) use arm::enumerate_controls;
 use arm::{ArmedControls, ArmedThumbwheel, arm_controls};
@@ -221,8 +221,8 @@ pub struct CaptureSpec {
 /// for `route`: sharing that connection avoids splitting HID++ replies and
 /// input reports across two readers, and a registry miss
 /// ([`CaptureError::DeviceNotFound`]) is retried by the caller after a later
-/// inventory publication. Diverts whichever of those controls the device
-/// exposes, and listens. Returns once `host.shutdown` fires (or its sender is
+/// inventory publication. Listens, then diverts whichever of those controls
+/// the device exposes. Returns once `host.shutdown` fires (or its sender is
 /// dropped). A normal stop restores every diverted control before returning;
 /// transport replacement or loss may return
 /// [`CaptureSessionOutcome::RestorePending`] for the caller to retry on the
@@ -233,6 +233,7 @@ pub async fn run_capture_session(
     host: CaptureHost<'_>,
 ) -> Result<CaptureSessionOutcome, CaptureSessionFailure> {
     let shared = host.channel_for(&route)?;
+    let listener = ArmingListener::<GestureCapture>::install(&shared);
     let armed = arm_controls(&shared, &spec, host.registry).await?;
     for button in armed.diverted_buttons() {
         let _ = host.sink.send(CapturedInput::ButtonDiverted(button));
@@ -244,7 +245,7 @@ pub async fn run_capture_session(
     {
         let _ = host.sink.send(CapturedInput::HostModeEntered);
     }
-    Ok(run_capture(shared, GestureCapture::new(armed), host).await)
+    Ok(run_capture(shared, GestureCapture::new(armed), listener, host).await)
 }
 
 /// Gesture capture as [`run_capture`] drives it: the armed controls, and the

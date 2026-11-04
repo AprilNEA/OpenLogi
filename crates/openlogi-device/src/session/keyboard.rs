@@ -37,8 +37,8 @@ use tracing::{debug, info, warn};
 use crate::keypad_vendor::{VendorFunction, input_payload};
 
 use super::capture::{
-    ArmedCapture, CaptureHost, Liveness, ReportingChangeStream, open_device, run_capture,
-    subscribe_reporting_changes,
+    ArmedCapture, ArmingListener, CaptureHost, Liveness, ReportingChangeStream, open_device,
+    run_capture, subscribe_reporting_changes,
 };
 use super::capture_restore::{ArmedReporting, ReprogRestore, divert_keyboard_key};
 use super::gesture::{
@@ -117,8 +117,9 @@ pub async fn run_keyboard_capture_session(
     host: CaptureHost<'_>,
 ) -> Result<CaptureSessionOutcome, CaptureSessionFailure> {
     let shared = host.channel_for(&route)?;
+    let listener = ArmingListener::<ArmedKeys>::install(&shared);
     let armed = arm_keyboard(&shared, wanted, host.registry).await?;
-    Ok(run_capture(shared, armed, host).await)
+    Ok(run_capture(shared, armed, listener, host).await)
 }
 
 /// Divert the wanted controls of the keyboard behind `shared`.
