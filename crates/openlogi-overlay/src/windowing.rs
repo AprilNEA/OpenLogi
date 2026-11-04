@@ -9,6 +9,10 @@
 //! [`IDLE_RELEASE`]. GPUI owns the mode itself; this module only decides when
 //! to ask for a switch.
 //!
+//! Every path that opens a window must await [`connect`] first. GPUI refuses
+//! to open a window while headless, and only Windows starts headless, so a
+//! path that skips it breaks there alone.
+//!
 //! Elsewhere the overlay stays connected. On macOS a windowed GPUI app is a
 //! `Regular` one, with a Dock icon, and on Linux every ring would open a new
 //! display-server connection.
