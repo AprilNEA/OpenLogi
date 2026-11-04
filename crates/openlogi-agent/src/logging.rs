@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use openlogi_core::logging::MAX_LOG_FILES;
 use tracing::warn;
-use tracing_appender::non_blocking::{NonBlockingBuilder, WorkerGuard};
+use tracing_appender::non_blocking::{ErrorCounter, NonBlockingBuilder, WorkerGuard};
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::fmt::MakeWriter as _;
 use tracing_subscriber::fmt::format::Writer;
@@ -19,7 +19,7 @@ use tracing_subscriber::util::SubscriberInitExt as _;
 
 /// The file writer thread's guard, held for the life of the process: dropping
 /// it is what writes out the lines still queued — see [`flush`].
-static FILE_WRITER: Mutex<Option<WorkerGuard>> = Mutex::new(None);
+static FILE_WRITER: Mutex<Option<(WorkerGuard, ErrorCounter, LogFile)>> = Mutex::new(None);
 
 /// Install the agent's tracing subscriber and panic hook.
 ///
@@ -28,7 +28,7 @@ static FILE_WRITER: Mutex<Option<WorkerGuard>> = Mutex::new(None);
 /// — launchd gives the agent's stderr no destination and a Windows release
 /// build has no console, so without the file such an agent cannot be diagnosed
 /// at all (#336). File lines are written by a thread of their own, so the
-/// threads that log never wait on the disk; the queue is lossless, and
+/// threads that log never wait on the disk; the queue drops lines when full, and
 /// [`flush`] writes it out for a process about to end. If the file cannot be
 /// opened the agent falls back to stderr only and says so.
 pub(crate) fn init() {
@@ -36,10 +36,11 @@ pub(crate) fn init() {
     let file = file_appender().map(|appender| LogFile(Arc::new(appender)));
     let file_layer = file.as_ref().ok().map(|file| {
         let (writer, guard) = NonBlockingBuilder::default()
-            .lossy(false)
+            .lossy(true)
             .thread_name("openlogi-log")
             .finish(file.clone());
-        *FILE_WRITER.lock().unwrap_or_else(PoisonError::into_inner) = Some(guard);
+        let counter = writer.error_counter();
+        *FILE_WRITER.lock().unwrap_or_else(PoisonError::into_inner) = Some((guard, counter, file.clone()));
         tracing_subscriber::fmt::layer()
             .with_ansi(false)
             .with_writer(writer)
@@ -68,7 +69,13 @@ pub(crate) fn flush() {
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .take();
-    drop(writer);
+    if let Some((guard, counter, mut file)) = writer {
+        drop(guard);
+        let dropped = counter.dropped_lines();
+        if dropped > 0 {
+            let _ = writeln!(file, "WARN dropped {dropped} log lines because the queue was full");
+        }
+    }
 }
 
 /// A daily-rotated appender in the app state directory, capped at
