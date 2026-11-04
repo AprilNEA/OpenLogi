@@ -72,18 +72,21 @@ fn refresh_attribution(event: &CGEvent) {
     };
     let unchanged =
         LAST_ATTRIBUTION.with_borrow(|slot| slot.as_ref().is_some_and(|(id, _)| *id == sender));
-    if !unchanged {
-        remember_attribution(sender, &sender_device_info(sender).event_device);
+    if !unchanged && let Some(info) = sender_device_info(sender) {
+        remember_attribution(sender, &info.event_device);
     }
 }
 
 /// Best-effort device identity for a button event's HID sender.
 fn button_source(event: &CGEvent, id: ButtonId, pressed: bool) -> Option<crate::EventDevice> {
-    let attributed = event_sender_id(event).map(|sender| {
-        let device = sender_device_info(sender).event_device;
-        remember_attribution(sender, &device);
-        device
-    });
+    // A sender whose registry walk is still out is unattributed, so a press
+    // falls back to the device that last moved the pointer.
+    let attributed = event_sender_id(event)
+        .and_then(|sender| Some((sender, sender_device_info(sender)?.event_device)))
+        .map(|(sender, device)| {
+            remember_attribution(sender, &device);
+            device
+        });
     resolve_button_source(attributed, id, pressed)
 }
 
@@ -158,11 +161,12 @@ pub(super) fn translate_key(etype: CGEventType, event: &CGEvent) -> Option<KeyEv
 /// creates their `CGEvent`s; the device's product name identifies them.
 fn from_virtual_keyboard(event: &CGEvent) -> bool {
     event_sender_id(event).is_some_and(|sender| {
-        sender_device_info(sender)
-            .event_device
-            .product_name
-            .as_deref()
-            .is_some_and(openlogi_inject::is_virtual_keyboard_product)
+        sender_device_info(sender).is_some_and(|info| {
+            info.event_device
+                .product_name
+                .as_deref()
+                .is_some_and(openlogi_inject::is_virtual_keyboard_product)
+        })
     })
 }
 
@@ -250,7 +254,7 @@ pub(super) fn translate(etype: CGEventType, event: &CGEvent) -> Option<MouseEven
                 || event.get_integer_value_field(MOMENTUM_PHASE) != 0
                 || event.get_integer_value_field(SCROLL_COUNT) != 0;
             let sender = event_sender_id(event);
-            let device_info = sender.map(sender_device_info);
+            let device_info = sender.and_then(sender_device_info);
             let from_trackpad = device_info.as_ref().map_or(phase, |info| info.is_trackpad);
             Some(MouseEvent::Scroll {
                 delta,
