@@ -248,6 +248,7 @@ select_device_button_description = "Seleziona un pulsante sul dispositivo per ca
 remove_profile_description = "Elimina le associazioni personalizzate di questo profilo. Quelle predefinite non verranno modificate."
 
 [pointer]
+disable = "Disable"
 mouse_button_profiles = "Profili dei pulsanti del mouse"
 mouse_profile_pointer = "Puntatore del mouse"
 mouse_profile_focused = "Applicazione con il focus"

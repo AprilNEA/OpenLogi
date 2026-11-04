@@ -248,6 +248,7 @@ select_device_button_description = "在设备上选择一个按键以更改其�
 remove_profile_description = "这会删除此配置文件中的自定义按键绑定，不影响默认绑定。"
 
 [pointer]
+disable = "Disable"
 mouse_button_profiles = "鼠标按键配置文件"
 mouse_profile_pointer = "鼠标指针"
 mouse_profile_focused = "焦点应用程序"

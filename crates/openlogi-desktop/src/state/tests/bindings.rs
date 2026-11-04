@@ -65,6 +65,26 @@ fn picking_a_short_action_preserves_the_long_press_binding() {
                 [crate::services::ipc::Command::ReloadConfig(_)]
             ));
         }
+
+        let events = state.commit_binding(button, Action::Disable);
+        assert_eq!(
+            events,
+            [StateEvent::BindingsChanged(DeviceKey::from(
+                KNOWN_MOUSE_KEY
+            ))]
+        );
+        let expected = Binding::Single(Action::Disable);
+        assert_eq!(
+            state.config.stored_bindings(KNOWN_MOUSE_KEY).get(&button),
+            Some(&expected)
+        );
+        assert_eq!(
+            Config::load_from_path(&path)
+                .unwrap()
+                .stored_bindings(KNOWN_MOUSE_KEY)
+                .get(&button),
+            Some(&expected)
+        );
     }
 }
 

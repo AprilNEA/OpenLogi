@@ -248,6 +248,7 @@ select_device_button_description = "Selecciona un botón del dispositivo para ca
 remove_profile_description = "Se eliminarán las asignaciones personalizadas de este perfil. Las predeterminadas no cambiarán."
 
 [pointer]
+disable = "Disable"
 mouse_button_profiles = "Perfiles de botones del ratón"
 mouse_profile_pointer = "Puntero del ratón"
 mouse_profile_focused = "Aplicación con el foco"

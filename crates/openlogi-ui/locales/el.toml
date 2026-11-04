@@ -248,6 +248,7 @@ select_device_button_description = "Επιλέξτε ένα κουμπί στη 
 remove_profile_description = "Διαγράφονται οι προσαρμοσμένες αντιστοιχίσεις κουμπιών αυτού του προφίλ. Οι προεπιλεγμένες δεν επηρεάζονται."
 
 [pointer]
+disable = "Disable"
 mouse_button_profiles = "Προφίλ κουμπιών ποντικιού"
 mouse_profile_pointer = "Δείκτης ποντικιού"
 mouse_profile_focused = "Εφαρμογή με εστίαση"

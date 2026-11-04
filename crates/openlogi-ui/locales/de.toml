@@ -248,6 +248,7 @@ select_device_button_description = "Wähle eine Taste am Gerät aus, um ihre Fun
 remove_profile_description = "Dadurch werden die eigenen Tastenzuweisungen dieses Profils gelöscht. Standardzuweisungen bleiben erhalten."
 
 [pointer]
+disable = "Disable"
 mouse_button_profiles = "Maustastenprofile"
 mouse_profile_pointer = "Mauszeiger"
 mouse_profile_focused = "Fokussierte Anwendung"
