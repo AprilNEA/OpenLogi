@@ -25,6 +25,8 @@ PNGs = "PNGs"
 open_writeable = "open_writeable"
 SWCustomHighligt2 = "SWCustomHighligt2"
 udid = "udid"
+# evdev's key between left Shift and Z on ISO keyboards.
+KEY_102ND = "KEY_102ND"
 
 [default.extend-words]
 # Technical terms and prefixes accepted in prose and compound identifiers.
