@@ -99,3 +99,28 @@ fn same_model_serial_less_cameras_keep_independent_names() {
         "Desk camera"
     );
 }
+
+#[test]
+fn renaming_a_device_reloads_native_battery_names() {
+    let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = AppState::new(Sources::in_memory(
+        Config::ephemeral(),
+        &AssetResolver::new(),
+        commands,
+    ));
+    let _ = state.commit_device_custom_name(KNOWN_MOUSE_KEY, "Office mouse");
+    let reloaded = std::iter::from_fn(|| receiver.try_recv().ok())
+        .any(|command| matches!(command, crate::services::ipc::Command::ReloadConfig(_)));
+    assert_eq!(
+        reloaded,
+        cfg!(any(target_os = "macos", target_os = "windows"))
+    );
+    let _ = state.commit_device_custom_name(KNOWN_MOUSE_KEY, "Office mouse");
+    assert!(
+        matches!(
+            receiver.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ),
+        "an unchanged name needs no reload"
+    );
+}

@@ -247,7 +247,13 @@ impl AppState {
         self.config.edit(|config| {
             config.set_device_custom_name(record_key, custom_name.clone());
         });
-        if !self.persist_config("device name") {
+        // Native battery rows and warnings read custom names in the agent.
+        let persisted = if cfg!(any(target_os = "macos", target_os = "windows")) {
+            self.persist_and_reload("device name")
+        } else {
+            self.persist_config("device name")
+        };
+        if !persisted {
             return StateEvent::InventoryChanged.into();
         }
         for record in self
