@@ -210,6 +210,7 @@ impl ProbeCacheSnapshot {
                         // self-healing re-walk decides when it is due for a
                         // fresh read.
                         probed_at: Instant::now(),
+                        walked_at: Instant::now(),
                     },
                 )
             })
@@ -282,6 +283,7 @@ mod tests {
                 }),
                 events,
                 probed_at: Instant::now(),
+                walked_at: Instant::now(),
             },
         );
         cache.insert(
@@ -294,6 +296,7 @@ mod tests {
                 battery: None,
                 events: EventFeatureIndices::default(),
                 probed_at: Instant::now(),
+                walked_at: Instant::now(),
             },
         );
 

@@ -48,6 +48,7 @@ async fn offline_slot_is_named_by_the_receiver_without_probing_the_device() {
     let cache = HashMap::new();
     let pass = PassContext {
         cache: &cache,
+        departed: &DepartedUnits::default(),
         now: Instant::now(),
         subscriptions: None,
         timeouts: &ProbeTimeouts::DEFAULT,
@@ -82,8 +83,10 @@ async fn offline_slot_name_read_is_bounded_when_the_receiver_drops_the_reply() {
     let channel = scripted_channel(raw).await;
 
     let cache = HashMap::new();
+    let departed = DepartedUnits::default();
     let pass = PassContext {
         cache: &cache,
+        departed: &departed,
         now: Instant::now(),
         subscriptions: None,
         timeouts: &ProbeTimeouts::DEFAULT,
@@ -141,6 +144,7 @@ async fn hidpp10_slot_is_named_by_the_receiver_and_reports_its_battery() {
     let cache = HashMap::new();
     let pass = PassContext {
         cache: &cache,
+        departed: &DepartedUnits::default(),
         now: Instant::now(),
         subscriptions: None,
         timeouts: &ProbeTimeouts::DEFAULT,
@@ -212,6 +216,7 @@ async fn hidpp10_trackball_slot_takes_its_kind_from_the_arrival() {
     let cache = HashMap::new();
     let pass = PassContext {
         cache: &cache,
+        departed: &DepartedUnits::default(),
         now: Instant::now(),
         subscriptions: None,
         timeouts: &ProbeTimeouts::DEFAULT,

@@ -1,22 +1,30 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use hidpp::channel::HidppChannel;
+use hidpp::feature::CreatableFeature;
+use hidpp::feature::device_information::DeviceInformationFeature;
+use hidpp::feature::root::RootFeature;
 use openlogi_core::device::{BatteryInfo, BatteryLevel, BatteryStatus};
 
 use super::events::{EventFeatureIndices, EventSubscriptionHandle};
 use super::features::{
-    BatteryProbe, BatteryRead, ProbedFeatures, ProbedProtocol, Refresh, Refreshed, probe_features,
-    read_battery, refresh_features,
+    BatteryProbe, BatteryRead, KnownTable, ProbedFeatures, ProbedProtocol, Refresh, Refreshed,
+    TABLE_REWALK_INTERVAL, probe_features, read_battery, refresh_features,
 };
 use crate::backend::NodeId;
+use crate::channel::route::DeviceRoute;
 use crate::host_lock::ReceiverRegisterPhase;
 
 /// How long a device's probe is reused before a fresh read.
 /// The expensive part of a probe (the `enumerate_features` feature-table walk)
 /// reads *immutable* data — model, capabilities, marketing type — so it never
-/// needs re-reading for a known device; the periodic full probe is kept only as
-/// a self-healing pass (e.g. a firmware update reshuffling the feature table).
+/// needs re-reading for a known device. A due refresh pings the device, the
+/// liveness check (#1979), then compares the table's head and the unit
+/// ([`KnownTable`]); only a moved head, another unit, or a walk older than
+/// [`TABLE_REWALK_INTERVAL`], walks the table again, the self-healing pass for
+/// a firmware update reshuffling it.
 /// The volatile battery does NOT ride this window: cache hits re-read it every
 /// reconciliation through the memoized feature index (see [`read_battery`]).
 /// Elapsed time rather than scan count preserves cache freshness now that
@@ -58,6 +66,129 @@ pub(super) enum CacheKey {
 /// device's memoized data.
 pub(super) const CACHE_MISS_GRACE: u8 = 3;
 
+/// The physical unit behind a direct device, as its `0x0003` DeviceInformation
+/// reports it: what ties a device back to the walk it made on a node it has
+/// since left.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct UnitIdentity {
+    unit_id: [u8; 4],
+    model_ids: [u16; 3],
+}
+
+impl UnitIdentity {
+    /// `None` for an all-zero unit id, which tells no two units apart.
+    pub(super) fn new(unit_id: [u8; 4], model_ids: [u16; 3]) -> Option<Self> {
+        (unit_id != [0; 4]).then_some(Self { unit_id, model_ids })
+    }
+
+    /// The identity a completed walk read, if it read a usable one.
+    pub(super) fn of(probe: &ProbedFeatures) -> Option<Self> {
+        let info = probe.model_info.as_ref()?;
+        Self::new(info.unit_id, info.model_ids)
+    }
+
+    /// The unit the device at `slot` reports through `0x0003`, or `None`
+    /// when it does not answer, has no DeviceInformation, or reports an
+    /// all-zero unit id.
+    ///
+    /// Two requests, with no protocol ping first: the root lookup answers
+    /// only from a live HID++ 2.0 device.
+    pub(super) async fn read(channel: &Arc<HidppChannel>, slot: u8) -> Option<Self> {
+        let root = RootFeature::new(Arc::clone(channel), slot, 0);
+        let entry = root
+            .get_feature(DeviceInformationFeature::ID)
+            .await
+            .ok()??;
+        let feature = DeviceInformationFeature::new(Arc::clone(channel), slot, entry.index);
+        let info = feature.get_device_info().await.ok()?;
+        Self::new(info.unit_id, info.model_id)
+    }
+}
+
+/// How many departed direct devices keep their walk for a reconnect.
+const DEPARTED_CAPACITY: usize = 16;
+
+/// The completed walks of direct devices whose OS node has gone, by unit.
+///
+/// A Bluetooth device that powers off and back on returns on a new node — a
+/// new macOS registry entry, a new hidraw path — so the
+/// [`CacheKey::Direct`] entry it left can never hit again, and is evicted once
+/// the node stays missing. Without this, every power-on walked the whole
+/// feature table again, one request per feature and per control, before the
+/// device could be published and its volatile settings (wheel inversion, DPI,
+/// SmartShift) re-applied. Kept here, the walk is served after the
+/// two-request identity read that proves the unit.
+#[derive(Default)]
+pub(super) struct DepartedUnits {
+    entries: Vec<(UnitIdentity, Cached)>,
+}
+
+impl DepartedUnits {
+    /// Keep an evicted direct device's walk, replacing the unit's older one;
+    /// at capacity the least recently probed unit makes room.
+    pub(super) fn keep(&mut self, cached: Cached) {
+        let Some(identity) = UnitIdentity::of(&cached.probe) else {
+            return;
+        };
+        self.entries.retain(|(known, _)| *known != identity);
+        if self.entries.len() >= DEPARTED_CAPACITY
+            && let Some(oldest) = self
+                .entries
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, (_, entry))| entry.probed_at)
+                .map(|(at, _)| at)
+        {
+            self.entries.swap_remove(oldest);
+        }
+        self.entries.push((identity, cached));
+    }
+
+    fn get(&self, identity: UnitIdentity) -> Option<&Cached> {
+        self.entries
+            .iter()
+            .find_map(|(known, entry)| (*known == identity).then_some(entry))
+    }
+
+    fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+/// The direct-device walks a node that is new to the cache could be the
+/// return of: entries still aging out under the node they were read on, and
+/// [`DepartedUnits`] past that.
+#[derive(Clone, Copy)]
+pub(super) struct DirectWalks<'a> {
+    pub(super) cache: &'a HashMap<CacheKey, Cached>,
+    pub(super) departed: &'a DepartedUnits,
+}
+
+impl<'a> DirectWalks<'a> {
+    /// Whether any walk could match, so a node with nothing to match skips
+    /// the identity read.
+    pub(super) fn any(self) -> bool {
+        !self.departed.is_empty() || self.direct_units().next().is_some()
+    }
+
+    /// The most recent walk of `identity`.
+    pub(super) fn of_unit(self, identity: UnitIdentity) -> Option<&'a Cached> {
+        self.direct_units()
+            .filter(|(unit, _)| *unit == identity)
+            .map(|(_, entry)| entry)
+            .max_by_key(|entry| entry.probed_at)
+            .or_else(|| self.departed.get(identity))
+    }
+
+    /// The cached direct-device walks that read a usable unit identity.
+    fn direct_units(self) -> impl Iterator<Item = (UnitIdentity, &'a Cached)> {
+        self.cache
+            .iter()
+            .filter(|(key, _)| matches!(key, CacheKey::Direct(_)))
+            .filter_map(|(_, entry)| Some((UnitIdentity::of(&entry.probe)?, entry)))
+    }
+}
+
 /// A memoized probe result plus the instant it was taken.
 #[derive(Clone)]
 pub(super) struct Cached {
@@ -69,7 +200,32 @@ pub(super) struct Cached {
     pub(super) battery: Option<BatteryProbe>,
     /// Event-capable feature indexes found by the same immutable table walk.
     pub(super) events: EventFeatureIndices,
+    /// When the device last answered for this entry: a walk, or a refresh
+    /// whose table head matched. [`REFRESH_INTERVAL`] runs from here.
     pub(super) probed_at: Instant,
+    /// When the table behind this entry was last walked, for
+    /// [`TABLE_REWALK_INTERVAL`].
+    pub(super) walked_at: Instant,
+}
+
+impl Cached {
+    /// What a due refresh may compare in place of a walk, or `None` when the
+    /// walk has no head or is due its [`TABLE_REWALK_INTERVAL`].
+    ///
+    /// The unit is part of it: a key that is not the unit's own — a receiver
+    /// slot re-paired with a mouse of the same model, a reused hidraw path —
+    /// can lead to another unit with the same table, whose serial and unit id
+    /// a matching head alone would leave on the old one's entry.
+    pub(super) fn known_table(&self, now: Instant) -> Option<KnownTable> {
+        let head = self
+            .probe
+            .table_head
+            .filter(|_| now.saturating_duration_since(self.walked_at) <= TABLE_REWALK_INTERVAL)?;
+        Some(KnownTable {
+            head,
+            unit: UnitIdentity::of(&self.probe),
+        })
+    }
 }
 
 /// Carry the last-known percentage through a charge for battery sources that
@@ -156,6 +312,15 @@ async fn refresh_battery(
 pub(super) enum CacheOutcome {
     Fresh(CacheKey, Cached),
     Update(CacheKey, Cached),
+    /// A direct device came back on a new node with the walk it made on the
+    /// node it left (see [`DirectWalks`]), stored under the new node's key.
+    /// It reached the host again, so its device-RAM settings must be
+    /// re-applied even if no snapshot ever showed it offline.
+    Returned {
+        key: CacheKey,
+        cached: Cached,
+        route: DeviceRoute,
+    },
     Seen(CacheKey),
     Unkeyed,
 }
@@ -164,7 +329,10 @@ impl CacheOutcome {
     /// The entry this outcome keeps alive, if it has one.
     pub(super) fn key(&self) -> Option<&CacheKey> {
         match self {
-            Self::Fresh(key, _) | Self::Update(key, _) | Self::Seen(key) => Some(key),
+            Self::Fresh(key, _)
+            | Self::Update(key, _)
+            | Self::Returned { key, .. }
+            | Self::Seen(key) => Some(key),
             Self::Unkeyed => None,
         }
     }
@@ -253,11 +421,17 @@ async fn probe_or_reuse_registered(
                 subscriptions,
                 registers,
                 REFRESH_WALK_BUDGET,
+                c.known_table(now),
             )
             .await
             {
                 Refreshed::Answered(Some(probed)) => probed,
                 Refreshed::Answered(None) => return (c.probe.clone(), seen(id)),
+                Refreshed::Unchanged => {
+                    let mut entry = c.clone();
+                    entry.probed_at = now;
+                    return reuse(channel, index, registers, entry, id).await;
+                }
                 Refreshed::Unreachable => return (unreachable_stand_in(c), seen(id)),
             },
         };
@@ -302,6 +476,7 @@ async fn probe_or_reuse_registered(
                         battery,
                         events,
                         probed_at: now,
+                        walked_at: now,
                     };
                     (fresh, CacheOutcome::Fresh(key, value))
                 }
@@ -324,18 +499,33 @@ async fn probe_or_reuse_registered(
             // index and fold the reading back into the cache. A failed read
             // (asleep, mid-host-switch) keeps the last-known value; an
             // unlinked answer clears it.
-            if online
-                && let Some(probe) = c.battery
-                && let Some(key) = id.clone()
-            {
-                let mut entry = c.clone();
-                (entry.probe.battery, entry.probe.unlinked) =
-                    refresh_battery(channel, index, probe, registers, Some(&c.probe)).await;
-                return (entry.probe.clone(), CacheOutcome::Update(key, entry));
+            if online && c.battery.is_some() && id.is_some() {
+                return reuse(channel, index, registers, c.clone(), id).await;
             }
             (c.probe.clone(), seen(id))
         }
         None => (ProbedFeatures::default(), seen(id)),
+    }
+}
+
+/// Serve `entry`, a cached walk that still answers for the device, with its
+/// volatile battery re-read, and store it back under `id`.
+async fn reuse(
+    channel: &Arc<HidppChannel>,
+    index: u8,
+    registers: Option<&ReceiverRegisterPhase>,
+    mut entry: Cached,
+    id: Option<CacheKey>,
+) -> (ProbedFeatures, CacheOutcome) {
+    if let Some(probe) = entry.battery {
+        let known = entry.probe.clone();
+        (entry.probe.battery, entry.probe.unlinked) =
+            refresh_battery(channel, index, probe, registers, Some(&known)).await;
+    }
+    let probe = entry.probe.clone();
+    match id {
+        Some(key) => (probe, CacheOutcome::Update(key, entry)),
+        None => (probe, CacheOutcome::Unkeyed),
     }
 }
 

@@ -10,9 +10,11 @@ use tracing::debug;
 
 use super::{NodeProbe, PassContext, ProbeVerdict};
 use crate::backend::NodeInfo;
-use crate::channel::route::DIRECT_DEVICE_INDEX;
-use crate::inventory::cache::{CacheKey, CacheOutcome, ProbeTarget, probe_or_reuse, seen};
-use crate::inventory::features::Refresh;
+use crate::channel::route::{DIRECT_DEVICE_INDEX, DeviceRoute};
+use crate::inventory::cache::{
+    CacheKey, CacheOutcome, Cached, ProbeTarget, UnitIdentity, probe_or_reuse, seen,
+};
+use crate::inventory::features::{KnownTable, Refresh};
 use crate::inventory::mappings::{direct_identity_kind, resolve_device_kind};
 
 /// Prefer the device's own HID++ marketing name over the host HID collection
@@ -57,7 +59,11 @@ pub(super) async fn probe_direct(
         return failed_probe(info);
     }
     let id = CacheKey::Direct(info.id.clone());
-    let cached = pass.cache.get(&id);
+    let returning = match pass.cache.get(&id) {
+        Some(_) => None,
+        None => returning_walk(&channel, pass).await,
+    };
+    let cached = pass.cache.get(&id).or(returning.as_ref());
     // A direct device's HID node is present (it is the candidate), so probe it
     // as online: reuse the cached probe while fresh, otherwise probe. Whether
     // the device behind it is linked is the probe's answer, not this call's.
@@ -74,6 +80,22 @@ pub(super) async fn probe_direct(
         pass.subscriptions,
     )
     .await;
+    // A returning walk is not under this node's key yet: store it there, or
+    // the next pass reads the identity again — with the battery the cache hit
+    // re-read, when it had one to re-read.
+    let outcome = match (returning, outcome) {
+        (Some(_), CacheOutcome::Update(key, cached)) | (Some(cached), CacheOutcome::Seen(key)) => {
+            CacheOutcome::Returned {
+                key,
+                cached,
+                route: DeviceRoute::Direct {
+                    vendor_id: info.vendor_id,
+                    product_id: info.product_id,
+                },
+            }
+        }
+        (_, outcome) => outcome,
+    };
     // Hybrid peripheral discriminator. A genuine directly-attached device is
     // either wireless/Bluetooth — which reports a battery — or exposes a
     // configuration feature (buttons / pointer / lighting). A Bolt receiver's
@@ -168,6 +190,47 @@ pub(super) async fn probe_direct(
         verdict: ProbeVerdict::Healthy { complete: true },
         outcomes: vec![outcome],
     }
+}
+
+/// The walk a device on a node new to the cache made on a node it has left,
+/// re-dated to this pass.
+///
+/// A Bluetooth device returns on a new OS node every time it powers on, so
+/// without this each reconnect walked the whole feature table — tens of
+/// round trips over the air — before the device was published and its
+/// volatile settings re-applied. Its own `0x0003` unit id and model ids,
+/// read live in two requests, prove the unit is the one that made the
+/// walk. The table's head, two more, proves the table is the one walked: a
+/// unit returning over another transport — Bluetooth, then a cable — or
+/// after a firmware update lists another. `None` when no walk is known, the
+/// device does not answer, or neither matches: the node then gets a full
+/// probe.
+async fn returning_walk(channel: &Arc<HidppChannel>, pass: PassContext<'_>) -> Option<Cached> {
+    if !pass.direct_walks().any() {
+        return None;
+    }
+    let identity = UnitIdentity::read(channel, DIRECT_DEVICE_INDEX).await?;
+    let walk = pass.direct_walks().of_unit(identity)?;
+    let table = KnownTable {
+        head: walk.probe.table_head?,
+        // Proven above.
+        unit: None,
+    };
+    if !table.still_listed(channel, DIRECT_DEVICE_INDEX).await {
+        debug!(
+            ?identity,
+            "direct device returned listing another feature table — walking it"
+        );
+        return None;
+    }
+    debug!(
+        ?identity,
+        "direct device returned on a new node — reusing its walk"
+    );
+    Some(Cached {
+        probed_at: pass.now,
+        ..walk.clone()
+    })
 }
 
 /// A probe that could not check the node. The ledger replays its last-good

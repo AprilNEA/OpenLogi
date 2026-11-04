@@ -10,11 +10,11 @@ use openlogi_core::device::{
 };
 
 use super::cache::{
-    CACHE_MISS_GRACE, CacheKey, CacheOutcome, Cached, REFRESH_INTERVAL, backfill_identity,
-    is_stale, keep_known_capabilities,
+    CACHE_MISS_GRACE, CacheKey, CacheOutcome, Cached, DepartedUnits, DirectWalks, REFRESH_INTERVAL,
+    UnitIdentity, backfill_identity, is_stale, keep_known_capabilities,
 };
 use super::events::EventFeatureIndices;
-use super::features::{ProbedFeatures, ProbedProtocol};
+use super::features::{ProbedFeatures, ProbedProtocol, TABLE_REWALK_INTERVAL, TableHead};
 use super::ledger;
 use super::probe::{
     NodeProbe, PassContext, ProbeVerdict, assemble_bolt_probe, assemble_unifying_device,
@@ -47,6 +47,7 @@ fn cache_entry() -> Cached {
         battery: None,
         events: EventFeatureIndices::default(),
         probed_at: Instant::now(),
+        walked_at: Instant::now(),
     }
 }
 

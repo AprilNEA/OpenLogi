@@ -18,7 +18,7 @@ use crate::backend::NodeInfo;
 use crate::channel::route::is_receiver_pid;
 use crate::host_lock::{self, ReceiverRegisterPhase};
 
-use super::cache::{CacheKey, CacheOutcome, Cached};
+use super::cache::{CacheKey, CacheOutcome, Cached, DepartedUnits, DirectWalks};
 
 mod bolt;
 mod direct;
@@ -214,12 +214,22 @@ impl ProbeTimeouts {
 #[derive(Clone, Copy)]
 pub(super) struct PassContext<'a> {
     pub(super) cache: &'a HashMap<CacheKey, Cached>,
+    /// Walks of direct devices whose node has gone, for one that returns.
+    pub(super) departed: &'a DepartedUnits,
     pub(super) now: Instant,
     pub(super) subscriptions: Option<&'a EventSubscriptionHandle>,
     pub(super) timeouts: &'a ProbeTimeouts,
 }
 
 impl PassContext<'_> {
+    /// The direct-device walks a node new to the cache could be the return of.
+    pub(super) fn direct_walks(&self) -> DirectWalks<'_> {
+        DirectWalks {
+            cache: self.cache,
+            departed: self.departed,
+        }
+    }
+
     /// The settings revision this pass publishes for `device_index`: what the
     /// channel's event listener counted, or `0` for a pass without one.
     pub(super) fn settings_revision(&self, device_index: u8) -> u64 {
