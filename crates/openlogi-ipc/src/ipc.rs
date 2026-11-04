@@ -181,7 +181,8 @@ pub use succession::Identity;
 ///      chooses on release, so the overlay reports the pointer leaving every
 ///      slot as well as entering one. `ActionRingInvocation::size` appended,
 ///      the size the overlay draws the ring at.
-/// v46: `Capabilities::{g_keys, m_keys, macro_record}` appended — a G-series
+/// v46: `BatteryInfo::freshness` appended for current versus cached telemetry.
+///      `Capabilities::{g_keys, m_keys, macro_record}` appended — a G-series
 ///      keyboard's HID++ `0x8010` G-keys, `0x8020` M-keys and `0x8030` MR
 ///      key. `ButtonId::{GKey, ModeKey}` appended — the G1–G5 slot of an M
 ///      profile and M1–M3/MR. `Capabilities::change_host` appended after

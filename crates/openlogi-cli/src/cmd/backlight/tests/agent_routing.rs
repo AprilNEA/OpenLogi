@@ -14,6 +14,7 @@ type Step = Box<dyn FnOnce(AgentRequest) -> Answer + Send>;
 
 fn snapshot() -> AgentSnapshot {
     AgentSnapshot {
+        device_selection: None,
         status: AgentStatus {
             accessibility_granted: false,
             hook_installed: false,
