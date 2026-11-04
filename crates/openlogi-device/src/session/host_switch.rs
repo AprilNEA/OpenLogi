@@ -17,6 +17,10 @@
 //!   keyboard does not switch by itself. The session moves the linked devices
 //!   first and the keyboard last: once the keyboard leaves this host, its
 //!   HID++ channel can no longer command a mouse that shares its receiver.
+//!   A key counts when it is released, not when it is pressed. The session
+//!   hands the keys back to the firmware before anything moves, and a K580
+//!   whose keys were handed back while one was held left this host by itself,
+//!   before the linked devices could follow (#2352).
 //! - Analytics: the host keys keep their function and also report to
 //!   software.
 //!
@@ -448,7 +452,7 @@ fn listen_for_announcements(
 }
 
 /// Listen on `channel` for the armed host keys of the keyboard at
-/// `keyboard_index`, and send each press to `triggers`.
+/// `keyboard_index`, and send each press and release to `triggers`.
 fn listen_for_host_keys(
     channel: &HidppChannel,
     keyboard_index: u8,
@@ -536,9 +540,11 @@ async fn restore_after(
 /// What a listener saw on the keyboard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HostTrigger {
-    /// A diverted host key for this zero-based host was pressed. The keyboard
-    /// stays on this host until the session moves it.
+    /// A diverted host key for this zero-based host is held down. The
+    /// keyboard stays on this host until the session moves it.
     Pressed(u8),
+    /// No diverted host key is held down any more.
+    Released,
     /// A host key with analytics reporting was pressed for this zero-based
     /// host. The keyboard switches by itself.
     Reported(u8),
@@ -612,11 +618,11 @@ impl KeyboardPosition {
     }
 
     /// The stop that `trigger` asks for, or `None` for a trigger that does
-    /// not move the keyboard to another valid host.
+    /// not move the keyboard to another valid host. A diverted key stops the
+    /// session only once it is released, which [`watch_host_switch`] tracks.
     fn stop_for(self, trigger: HostTrigger) -> Option<HostSwitchStop> {
         let leaves_for = |host: u8| host < self.host_count && host != self.current_host;
         match trigger {
-            HostTrigger::Pressed(host) => Some(HostSwitchStop::Pressed(host)),
             HostTrigger::Reported(host) => {
                 leaves_for(host).then_some(HostSwitchStop::Departed(host))
             }
@@ -625,7 +631,7 @@ impl KeyboardPosition {
             HostTrigger::Announced(HostChangeRequest { from, to }) => (from == self.current_host
                 && leaves_for(to))
             .then_some(HostSwitchStop::Departed(to)),
-            HostTrigger::Renamed => None,
+            HostTrigger::Pressed(_) | HostTrigger::Released | HostTrigger::Renamed => None,
         }
     }
 }
@@ -633,7 +639,7 @@ impl KeyboardPosition {
 /// Why monitoring an armed host-switch session stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HostSwitchStop {
-    /// The keyboard asked for this zero-based host.
+    /// The diverted key for this zero-based host was pressed and released.
     Pressed(u8),
     /// The keyboard is switching to this zero-based host by itself.
     Departed(u8),
@@ -753,6 +759,10 @@ async fn watch_host_switch(
     hosts: &mut KeyboardHosts,
 ) -> HostSwitchStop {
     let mut registry_changes = registry.subscribe();
+    // The diverted host key that is held down. Its host is asked for when
+    // the key is released: the restore that follows the stop hands the key
+    // back to the firmware, which must not see it go up (#2352).
+    let mut held_host = None;
     loop {
         if !registry.is_current(shared) {
             info!(route = %shared.route(), "inventory replaced or removed host-switch channel");
@@ -780,14 +790,28 @@ async fn watch_host_switch(
                 let Some(trigger) = trigger else {
                     return HostSwitchStop::for_current_publication(registry, shared);
                 };
-                if trigger == HostTrigger::Renamed {
-                    // The table names the slots that a departure maps by name.
-                    if device_io.allows_io() {
-                        hosts.read().await;
-                    } else {
-                        hosts.forget();
+                match trigger {
+                    HostTrigger::Renamed => {
+                        // The table names the slots that a departure maps by
+                        // name.
+                        if device_io.allows_io() {
+                            hosts.read().await;
+                        } else {
+                            hosts.forget();
+                        }
+                        continue;
                     }
-                    continue;
+                    HostTrigger::Pressed(host) => {
+                        held_host = Some(host);
+                        continue;
+                    }
+                    HostTrigger::Released => {
+                        if let Some(host) = held_host.take() {
+                            return HostSwitchStop::Pressed(host);
+                        }
+                        continue;
+                    }
+                    HostTrigger::Reported(_) | HostTrigger::Announced(_) => {}
                 }
                 if let Some(stop) = position.stop_for(trigger) {
                     return stop;
@@ -1417,6 +1441,7 @@ fn host_channel(info: reprog_controls::CtrlIdInfo) -> Option<u8> {
 /// The trigger that `event` is for one of the armed `controls`. A diverted
 /// press and an analytics report count only for a control armed in that
 /// mode: the keyboard switches by itself only after the analytics report.
+/// A diverted report that names no diverted host key releases them all.
 fn key_trigger(
     controls: &[ArmedControl],
     event: reprog_controls::ReprogControlsEvent,
@@ -1424,10 +1449,16 @@ fn key_trigger(
     let armed_as = |mode| controls.iter().filter(move |control| control.mode == mode);
     match event {
         reprog_controls::ReprogControlsEvent::DivertedButtons(cids) => {
-            armed_as(ReportingMode::Diverted).find_map(|control| {
-                cids.contains(&control.cid.into())
-                    .then_some(HostTrigger::Pressed(control.host))
-            })
+            let mut diverted = armed_as(ReportingMode::Diverted).peekable();
+            diverted.peek()?;
+            Some(
+                diverted
+                    .find_map(|control| {
+                        cids.contains(&control.cid.into())
+                            .then_some(HostTrigger::Pressed(control.host))
+                    })
+                    .unwrap_or(HostTrigger::Released),
+            )
         }
         reprog_controls::ReprogControlsEvent::AnalyticsKeyEvents(events) => {
             armed_as(ReportingMode::Analytics).find_map(|control| {

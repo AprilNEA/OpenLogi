@@ -498,6 +498,7 @@ mod tests {
         let (_stop, stopped) = tokio::sync::oneshot::channel();
         let (press, presses) = tokio::sync::mpsc::unbounded_channel();
         press.send(HostTrigger::Pressed(2)).unwrap();
+        press.send(HostTrigger::Released).unwrap();
         assert_eq!(
             monitored(stopped, presses).await,
             HostSwitchStop::Pressed(2)
