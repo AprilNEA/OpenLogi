@@ -1313,11 +1313,20 @@ fn idle_worker_blocks_until_shutdown_wakes_it() {
     let (commands, queued) = mpsc::sync_channel(EVENT_QUEUE_CAPACITY);
     let (shutdown_tx, shutdown_rx) = mpsc::channel();
     let (sent, received) = mpsc::channel();
+    let (waiting_tx, waiting_rx) = mpsc::channel();
     let worker = thread::spawn(move || {
-        run_worker(&queued, &shutdown_rx, &AtomicU64::new(0), &mut |event| {
-            sent.send(event)
-                .expect("test receiver should stay connected");
-        });
+        super::worker::run_worker_observed(
+            &queued,
+            &shutdown_rx,
+            &AtomicU64::new(0),
+            &mut |event| {
+                sent.send(event)
+                    .expect("test receiver should stay connected");
+            },
+            &mut || {
+                let _ = waiting_tx.send(());
+            },
+        );
     });
     // A press with no long-press threshold leaves the worker nothing to time.
     commands
@@ -1330,8 +1339,13 @@ fn idle_worker_blocks_until_shutdown_wakes_it() {
         recv_event(&received),
         ButtonRuntimeEvent::Started(_)
     ));
-    // Let the worker settle back into its wait for the next command.
-    thread::sleep(Duration::from_millis(50));
+    // The second wait follows processing the press and the shutdown check.
+    waiting_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("initial wait");
+    waiting_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("wait after press");
 
     let (done, wait) = mpsc::sync_channel(0);
     shutdown_tx

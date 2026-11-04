@@ -16,6 +16,23 @@ pub(super) fn run_worker(
     shared_generation: &AtomicU64,
     emit: &mut impl FnMut(ButtonRuntimeEvent),
 ) {
+    run_worker_observed(
+        events,
+        shutdown,
+        shared_generation,
+        emit,
+        #[cfg(test)]
+        &mut || {},
+    );
+}
+
+pub(super) fn run_worker_observed(
+    events: &mpsc::Receiver<ButtonCommand>,
+    shutdown: &mpsc::Receiver<ShutdownRequest>,
+    shared_generation: &AtomicU64,
+    emit: &mut impl FnMut(ButtonRuntimeEvent),
+    #[cfg(test)] before_wait: &mut impl FnMut(),
+) {
     let mut state = ButtonState::default();
     let mut generation = shared_generation.load(Ordering::Acquire);
     loop {
@@ -24,6 +41,8 @@ pub(super) fn run_worker(
         }
         // Shutdown and invalidation arrive with a `Wake`, so only a pending
         // long-press threshold is a reason to stop waiting without a command.
+        #[cfg(test)]
+        before_wait();
         let command = match receive_command(events, state.next_deadline()) {
             Ok(command) => command,
             Err(mpsc::RecvTimeoutError::Timeout) => {
