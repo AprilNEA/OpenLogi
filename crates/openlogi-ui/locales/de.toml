@@ -899,6 +899,9 @@ g_key_profiles = "G1-G5 profile"
 g_key_profile = "G1-G5 profile %{profile}"
 g_key_in_profile = "%{key} (%{profile})"
 g_key_profile_description = "%{profile} switches G1-G5 to this profile. Select a G-key to bind it in this profile."
+set_profile_name = "Set %{profile} profile name"
+profile_name_placeholder = "For example: Work"
+profile_name_description = "Leave blank to clear the local profile name."
 
 [flow]
 title = "Flow"

@@ -58,7 +58,7 @@ use crate::features::profiles::profile_name;
 use crate::services::assets::{GlowGeometry, ResolvedAsset};
 use crate::state::{AppState, DeviceKey, DeviceRecord, GamingKeys, StateEvent, StateEvents};
 use crate::ui::action::localized_action_label;
-use crate::ui::components::MenuRow;
+use crate::ui::components::{MenuRow, control_button};
 use crate::ui::theme::{self, ACCENT_BLUE, Palette, SCREEN_PAD, Typography as _};
 use gpui::{Animation, AnimationExt, ease_out_quint, img};
 use openlogi_core::hid::KeypadDescriptor;
@@ -819,7 +819,12 @@ fn key_slots_from_layouts(
                     label: layout.legend.into(),
                     x_frac: layout.point.x_frac,
                     y_frac: layout.point.y_frac,
-                    binding: tr!("keyboard.g_key_profile", profile => profile.label()),
+                    binding: state
+                        .and_then(|state| state.current_g_key_profile_name(profile))
+                        .map_or_else(
+                            || tr!("keyboard.g_key_profile", profile => profile.label()),
+                            |name| SharedString::from(name.to_owned()),
+                        ),
                     binding_icon: NATIVE_FUNCTION_ICON,
                     bound: profile == scope.g_profile,
                     lcd_icon: None,
@@ -1518,22 +1523,14 @@ impl FunctionRowView {
         }
 
         let state = AppState::try_read(cx);
-        if let Some(profile) = state.and_then(|state| selected_profile_key(state, &target)) {
-            return profile_key_panel(&key_name, profile, &pal);
+        if let Some(panel) =
+            state.and_then(|state| profile_key_panel(state, &target, &key_name, &pal))
+        {
+            return panel;
         }
         let current = state.and_then(|state| selected_key_action(state, &target));
         let uses_default = current.is_none();
-        // A control or keypad key binds inside the open app profile, like a
-        // mouse button.
-        let app = match target {
-            KeyTarget::Control(_)
-            | KeyTarget::Grid(_)
-            | KeyTarget::GKey(_)
-            | KeyTarget::ModeKey(_) => {
-                state.and_then(|state| state.editing_app().map(|app| profile_name(state, app)))
-            }
-            KeyTarget::FunctionKey(_) => None,
-        };
+        let app = state.and_then(|state| binding_app(state, &target));
 
         let view_for_pick = view.clone();
         let target_for_pick = target.clone();
@@ -1612,26 +1609,54 @@ impl FunctionRowView {
     }
 }
 
-/// The profile `target` switches to on the selected device, when it is M1–M3
-/// in profile mode.
-fn selected_profile_key(state: &AppState, target: &KeyTarget) -> Option<GKeyProfile> {
-    profile_key(target, state.current_gaming_keys()?.mode)
+/// The app profile `target` binds in: the open one for a per-device key,
+/// which binds inside it like a mouse button; none for an F-row trigger,
+/// which binds across apps.
+fn binding_app(state: &AppState, target: &KeyTarget) -> Option<String> {
+    match target.stored_as() {
+        StoredAs::Device(_) => state.editing_app().map(|app| profile_name(state, app)),
+        StoredAs::Global(_) => None,
+    }
 }
 
-/// The panel of M1–M3 in profile mode: they bind nothing, they switch which
-/// profile G1–G5 run, and selecting one edits that profile's G-keys.
-fn profile_key_panel(key_name: &SharedString, profile: GKeyProfile, pal: &Palette) -> gpui::Div {
-    compact_panel(*pal)
-        .max_h_full()
-        .child(inspector_title(key_name.clone(), pal))
-        .child(divider(*pal))
-        .child(
-            div()
-                .px_2()
-                .py_2()
-                .text_color(pal.text_muted)
-                .child(tr!("keyboard.g_key_profile_description", profile => profile.label())),
-        )
+/// The panel of M1–M3 in profile mode, or `None` for any other key: they
+/// bind nothing, they switch which profile G1–G5 run, selecting one edits
+/// that profile's G-keys, and the panel names the profile.
+fn profile_key_panel(
+    state: &AppState,
+    target: &KeyTarget,
+    key_name: &SharedString,
+    pal: &Palette,
+) -> Option<gpui::Div> {
+    let profile = profile_key(target, state.current_gaming_keys()?.mode)?;
+    let name = state.current_g_key_profile_name(profile).map(str::to_owned);
+    // A named profile reads as its key and its name: "M2 · Work".
+    let title = name.as_ref().map_or_else(
+        || key_name.clone(),
+        |name| format!("{key_name} · {name}").into(),
+    );
+    let rename = control_button("g-key-profile-rename")
+        .outline()
+        .label(tr!("keyboard.set_profile_name", profile => profile.label()))
+        .on_click(move |_, window, cx| {
+            gaming::open_profile_name_dialog(window, cx, profile, name.clone().unwrap_or_default());
+        });
+    let panel =
+        compact_panel(*pal)
+            .max_h_full()
+            .child(inspector_title(title, pal))
+            .child(divider(*pal))
+            .child(
+                v_flex()
+                    .px_2()
+                    .py_2()
+                    .gap_3()
+                    .child(div().text_color(pal.text_muted).child(
+                        tr!("keyboard.g_key_profile_description", profile => profile.label()),
+                    ))
+                    .child(rename),
+            );
+    Some(panel)
 }
 
 /// The panel's title — which key is selected, e.g. "F1" or "Screen Capture

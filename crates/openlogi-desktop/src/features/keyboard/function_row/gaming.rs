@@ -3,19 +3,20 @@
 //! the view edits.
 //!
 //! The G-keys and M keys themselves are ordinary key slots of the parent
-//! view ([`super::key_points::KeyTarget::GKey`]); this only draws the bar and
-//! reports the profile choice back to it.
+//! view ([`super::key_points::KeyTarget::GKey`]); this only draws the bar,
+//! reports the profile choice back to it, and names a profile.
 
-use gpui::{App, Entity, IntoElement, ParentElement, Styled, Window, div};
+use gpui::{App, AppContext as _, Entity, IntoElement, ParentElement, Styled, Window, div, px};
 use gpui_kit::component::button::{Button, ButtonGroup};
-use gpui_kit::component::{Selectable as _, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::input::InputState;
+use gpui_kit::component::{Selectable as _, Sizable as _, WindowExt as _, h_flex, v_flex};
 use openlogi_core::binding::GKeyProfile;
 use openlogi_core::config::{GKeyOwner, GamingKeyMode};
 
 use super::FunctionRowView;
 use crate::state::{AppState, GamingKeys};
-use crate::ui::components::Toggle;
-use crate::ui::theme::{Palette, Typography as _};
+use crate::ui::components::{Toggle, control_input, save_cancel_footer};
+use crate::ui::theme::{self, Palette, Typography as _};
 
 /// The bar over a G-series keyboard: the takeover switch, then — while
 /// OpenLogi runs the G-keys of a keyboard with M keys — the mode, and in
@@ -102,6 +103,45 @@ pub(super) fn gaming_bar(
                 .text_color(pal.text_muted)
                 .child(tr!("keyboard.g_key_software_control_description")),
         )
+}
+
+/// Ask for the name of the selected keyboard's G-key `profile`, starting
+/// from `current`. A blank name clears it.
+pub(super) fn open_profile_name_dialog(
+    window: &mut Window,
+    cx: &mut App,
+    profile: GKeyProfile,
+    current: String,
+) {
+    let input = cx.new(|cx| {
+        let mut input =
+            InputState::new(window, cx).placeholder(tr!("keyboard.profile_name_placeholder"));
+        input.set_value(current, window, cx);
+        input
+    });
+    window.open_dialog(cx, move |dialog, window, cx| {
+        input.update(cx, |input, cx| input.focus(window, cx));
+        dialog
+            .w(px(420.))
+            .title(tr!("keyboard.set_profile_name", profile => profile.label()))
+            .child(
+                v_flex().gap_2().child(control_input(&input)).child(
+                    div()
+                        .text_caption()
+                        .text_color(theme::palette(cx).text_muted)
+                        .child(tr!("keyboard.profile_name_description")),
+                ),
+            )
+            .footer(save_cancel_footer())
+            .on_ok({
+                let input = input.clone();
+                move |_, _, cx| {
+                    let name = input.read(cx).value().to_string();
+                    AppState::apply(cx, |state| state.commit_g_key_profile_name(profile, &name));
+                    true
+                }
+            })
+    });
 }
 
 fn mode_id(mode: GamingKeyMode) -> &'static str {

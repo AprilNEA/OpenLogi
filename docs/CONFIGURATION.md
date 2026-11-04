@@ -298,7 +298,9 @@ Common device fields are:
   M1–M3 and MR nine keys with a binding each, where G1–G5 use their M1
   bindings. G-key bindings live in the device's `bindings` as `KeyG1` …
   `KeyG5` for M1 and `M2:KeyG1` … `M3:KeyG5` for the later profiles; M1–M3
-  and MR are `KeyM1` … `KeyM3` and `KeyMR`. Changing the mode keeps them all
+  and MR are `KeyM1` … `KeyM3` and `KeyMR`. Changing the mode keeps them all.
+  `g_key_profile_names` optionally names the profiles (`M2 = "Work"`); the
+  names only label them in the desktop app
 - `identity` and `disabled_gestures`, which are application-managed metadata
 
 `[keyboard.bindings]` contains global key triggers such as `f1` or

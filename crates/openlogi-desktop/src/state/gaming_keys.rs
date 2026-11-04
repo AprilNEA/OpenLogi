@@ -5,6 +5,7 @@
 //! the keyboard's capture session; the bindings themselves are ordinary
 //! per-device bindings ([`openlogi_core::binding::ButtonId::GKey`]).
 
+use openlogi_core::binding::GKeyProfile;
 use openlogi_core::config::{GKeyOwner, GamingKeyMode};
 
 use super::devices::DeviceRecord;
@@ -68,6 +69,41 @@ impl AppState {
             self.config
                 .edit(|config| config.set_gaming_key_mode(&key, mode));
             self.persist_and_reload("G-key mode");
+        }
+        events
+    }
+
+    /// The name the user gave the selected keyboard's G-key `profile`.
+    #[must_use]
+    pub(crate) fn current_g_key_profile_name(&self, profile: GKeyProfile) -> Option<&str> {
+        let key = self
+            .current_record()
+            .and_then(DeviceRecord::persistent_config_key)?;
+        self.config.g_key_profile_name(key, profile)
+    }
+
+    /// Name the selected keyboard's G-key `profile` and persist it; a blank
+    /// name clears it. The name only labels the profile here, so the agent
+    /// is not reloaded.
+    pub(crate) fn commit_g_key_profile_name(
+        &mut self,
+        profile: GKeyProfile,
+        name: &str,
+    ) -> StateEvents {
+        let events = self.for_current_device(StateEvent::BindingsChanged);
+        let Some(key) = self.gaming_config_key() else {
+            return events;
+        };
+        let name = name.trim();
+        if self
+            .config
+            .g_key_profile_name(&key, profile)
+            .unwrap_or_default()
+            != name
+        {
+            self.config
+                .edit(|config| config.set_g_key_profile_name(&key, profile, name));
+            self.persist_config("G-key profile name");
         }
         events
     }

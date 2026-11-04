@@ -158,6 +158,34 @@ fn g_key_owner_mode_and_profile_bindings_roundtrip() {
 }
 
 #[test]
+fn g_key_profile_names_are_trimmed_cleared_when_blank_and_folded() {
+    use crate::binding::GKeyProfile;
+    let route = "receiver:82839805:slot:4";
+    let mut cfg = Config::default();
+    cfg.set_g_key_profile_name(route, GKeyProfile::M2, "  Work  ");
+    let body = toml::to_string_pretty(&cfg).expect("serialize");
+    assert!(body.contains("M2 = \"Work\""), "{body}");
+    let mut restored = write_and_read(&cfg);
+    assert_eq!(
+        restored.g_key_profile_name(route, GKeyProfile::M2),
+        Some("Work")
+    );
+    assert_eq!(restored.g_key_profile_name(route, GKeyProfile::M1), None);
+
+    let canonical = crate::device_order::PhysicalDeviceKey::parse("unit:4f4c4405").expect("valid");
+    assert!(restored.adopt_route(&canonical, route, None));
+    assert_eq!(
+        restored.g_key_profile_name("unit:4f4c4405", GKeyProfile::M2),
+        Some("Work"),
+        "a name follows the device onto its identity key"
+    );
+
+    restored.set_g_key_profile_name("unit:4f4c4405", GKeyProfile::M2, "   ");
+    let body = toml::to_string_pretty(&restored).expect("serialize");
+    assert!(!body.contains("g_key_profile_names"), "{body}");
+}
+
+#[test]
 fn the_g_key_choices_survive_route_adoption() {
     use crate::config::{GKeyOwner, GamingKeyMode};
     let route = "receiver:82839805:slot:3";

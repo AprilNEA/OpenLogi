@@ -12,7 +12,9 @@ use super::settings::{
     Lighting, MomentumScrolling, OnboardMemory, ScrollResolution, SmartShift,
     ThumbwheelSensitivity, deserialize_gesture_owner,
 };
-use crate::binding::{Action, ActionRingConfig, Binding, ButtonId, GestureDirection, KeypadPage};
+use crate::binding::{
+    Action, ActionRingConfig, Binding, ButtonId, GKeyProfile, GestureDirection, KeypadPage,
+};
 use crate::device::{Capabilities, DeviceKind, DeviceModelInfo, LightCapabilities};
 use crate::hid::{DisableKeysMask, Dpi, PointerSpeed, ReportRate};
 
@@ -396,6 +398,11 @@ pub struct DeviceConfig {
     /// What M1–M3 and MR do while OpenLogi owns the gaming cluster.
     #[serde(default, skip_serializing_if = "is_default_gaming_key_mode")]
     pub gaming_key_mode: GamingKeyMode,
+    /// The names the user gave the M1–M3 G-key profiles, shown in place of
+    /// the profile's key. Local to this device's config; nothing reaches the
+    /// keyboard.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub g_key_profile_names: BTreeMap<GKeyProfile, String>,
 }
 
 impl DeviceConfig {
@@ -509,6 +516,7 @@ impl Default for DeviceConfig {
             keypad_pages: KeypadPage::FIRST,
             g_key_owner: GKeyOwner::Keyboard,
             gaming_key_mode: GamingKeyMode::Profiles,
+            g_key_profile_names: BTreeMap::new(),
         }
     }
 }
@@ -683,6 +691,8 @@ struct RawDeviceConfig {
     g_key_owner: GKeyOwner,
     #[serde(default)]
     gaming_key_mode: GamingKeyMode,
+    #[serde(default)]
+    g_key_profile_names: BTreeMap<GKeyProfile, String>,
     #[serde(default = "default_true")]
     enabled: bool,
     #[serde(default)]
@@ -756,6 +766,7 @@ impl From<RawDeviceConfig> for DeviceConfig {
             keypad_pages: raw.keypad_pages,
             g_key_owner: raw.g_key_owner,
             gaming_key_mode: raw.gaming_key_mode,
+            g_key_profile_names: raw.g_key_profile_names,
         }
     }
 }
