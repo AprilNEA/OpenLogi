@@ -276,7 +276,7 @@ async fn probe_or_reuse_registered(
             .await
             {
                 Refreshed::Answered(Some(probed)) => probed,
-                Refreshed::Answered(None) => return (c.probe.clone(), seen(id)),
+                Refreshed::Answered(None) => return (cached_probe(c), seen(id)),
                 Refreshed::Unreachable => return (unreachable_stand_in(c), seen(id)),
             },
         };
@@ -722,5 +722,71 @@ mod hold_tests {
         let reading = recovered.battery.unwrap();
         assert_eq!(reading.freshness, BatteryFreshness::Current);
         assert!(reading.needs_attention());
+    }
+    #[tokio::test(start_paused = true)]
+    async fn an_answered_refresh_without_a_battery_read_replays_cached_battery() {
+        use super::{
+            CacheKey, Cached, ProbeTarget, REFRESH_INTERVAL, REFRESH_WALK_BUDGET, probe_or_reuse,
+        };
+        use crate::channel::scripted::{ScriptedRawHidChannel, ping_reply, scripted_channel};
+        use crate::inventory::events::EventFeatureIndices;
+        use crate::inventory::features::{ProbedFeatures, Refresh};
+        use std::time::Instant;
+
+        let walking = std::sync::Arc::new(tokio::sync::Notify::new());
+        let started = walking.clone();
+        let (raw, _) = ScriptedRawHidChannel::with_dynamic_responder(move |request| {
+            if let Some(reply) = ping_reply(request) {
+                return Some(reply);
+            }
+            started.notify_one();
+            None
+        });
+        let channel = scripted_channel(raw).await;
+        let now = Instant::now();
+        let cached = Cached {
+            probe: ProbedFeatures {
+                battery: Some(battery(Some(8), BatteryStatus::Discharging)),
+                ..ProbedFeatures::default()
+            },
+            battery: Some(BatteryProbe::Legacy {
+                index: 1,
+                mileage: true,
+            }),
+            events: EventFeatureIndices::default(),
+            probed_at: now
+                .checked_sub(REFRESH_INTERVAL + std::time::Duration::from_secs(1))
+                .unwrap(),
+        };
+        let probing = tokio::spawn(async move {
+            probe_or_reuse(
+                &channel,
+                ProbeTarget {
+                    index: 0xff,
+                    registers: None,
+                },
+                Some(CacheKey::Bolt {
+                    unit_id: [1, 2, 3, 4],
+                }),
+                Some(&cached),
+                true,
+                now,
+                None,
+            )
+            .await
+        });
+        walking.notified().await;
+        tokio::time::advance(REFRESH_WALK_BUDGET).await;
+        let (replayed, _) = probing.await.unwrap();
+        assert_eq!(
+            replayed.refresh,
+            Refresh::Answered,
+            "the ping still proves reachability"
+        );
+        let reading = replayed.battery.unwrap();
+        assert_eq!(reading.percentage, Some(8));
+        assert_eq!(reading.freshness, BatteryFreshness::Cached);
+        assert!(!reading.needs_attention());
+        assert!(!reading.rearms_warning());
     }
 }
