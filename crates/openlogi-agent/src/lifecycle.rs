@@ -739,8 +739,8 @@ impl Running {
 
     #[cfg(all(unix, not(target_os = "macos")))]
     fn restart(&mut self, Replacement { path, retry }: Replacement) {
-        let error = crate::binary_watch::replace_process(&path);
-        warn!(%error, path = %path.display(), "exec of the updated agent failed — restoring the current image and retrying");
+        let error = crate::logging::prepare_exec(|| crate::binary_watch::replace_process(&path));
+        warn!(%error, path = %path.display(), "updated agent replacement failed — keeping the current image and retrying");
         self.restart_hidpp_watchers();
         let _ = retry.send(());
     }
