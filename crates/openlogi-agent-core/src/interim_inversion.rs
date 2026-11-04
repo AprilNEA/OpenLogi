@@ -106,9 +106,12 @@ enum Link {
     /// Online, native inversion not known to be in effect: first seen online
     /// by this agent, or no longer inverted natively.
     Unconfirmed,
-    /// Online again after the agent saw it go, its first write still to come.
-    /// A wheel that loses its inversion has lost it now.
+    /// Online again after the agent saw it go, its first check still to
+    /// come. A wheel that loses its inversion has lost it now.
     Returned { left_inverted: bool },
+    /// Online again, checked, and found without its inversion: the write
+    /// that restores it is still to land.
+    Restoring,
     /// Online, native inversion confirmed on this connection.
     Confirmed,
 }
@@ -128,14 +131,17 @@ impl Unit {
     fn interim(self) -> bool {
         self.inverts_natively
             && self.retention == Retention::Loses
-            && matches!(self.link, Link::Away { .. } | Link::Returned { .. })
+            && matches!(
+                self.link,
+                Link::Away { .. } | Link::Returned { .. } | Link::Restoring
+            )
     }
 
     fn go_offline(&mut self) {
         let left_inverted = match self.link {
             Link::Away { .. } => return,
             Link::Confirmed => true,
-            Link::Unseen | Link::Unconfirmed | Link::Returned { .. } => false,
+            Link::Unseen | Link::Unconfirmed | Link::Returned { .. } | Link::Restoring => false,
         };
         self.link = Link::Away { left_inverted };
     }
@@ -156,12 +162,19 @@ impl Unit {
             Link::Away { .. } => Link::Away {
                 left_inverted: false,
             },
-            Link::Unconfirmed | Link::Returned { .. } | Link::Confirmed => Link::Unconfirmed,
+            Link::Unconfirmed | Link::Returned { .. } | Link::Restoring | Link::Confirmed => {
+                Link::Unconfirmed
+            }
         };
     }
 
-    /// A wheel write found `found` on the wheel and left `left` there.
-    fn wrote(&mut self, found: ScrollWheelMode, left: ScrollWheelMode) {
+    /// A wheel write's check found `found` on the wheel, before writing.
+    ///
+    /// The inversion bit alone decides, whatever else the write still has to
+    /// change: a wheel found inverted is withdrawn from interim inversion on
+    /// the read, and one found without it stays reversed until the write
+    /// lands.
+    fn checked(&mut self, found: ScrollWheelMode) {
         if self.link
             == (Link::Returned {
                 left_inverted: true,
@@ -172,6 +185,16 @@ impl Unit {
                 (_, true) => Retention::Keeps,
             };
         }
+        self.link = match self.link {
+            away @ (Link::Unseen | Link::Away { .. }) => away,
+            _ if self.inverts_natively && found.inverted => Link::Confirmed,
+            Link::Returned { .. } | Link::Restoring => Link::Restoring,
+            Link::Unconfirmed | Link::Confirmed => Link::Unconfirmed,
+        };
+    }
+
+    /// A wheel write left `left` on the wheel.
+    fn wrote(&mut self, left: ScrollWheelMode) {
         if matches!(self.link, Link::Unseen | Link::Away { .. }) {
             return;
         }
@@ -213,10 +236,17 @@ impl Wheels {
         }
     }
 
-    /// A wheel write to `source` found `found` and left `left`.
-    fn wrote(&mut self, source: WheelSource, found: ScrollWheelMode, left: ScrollWheelMode) {
+    /// A wheel write's check on `source` found `found`.
+    fn checked(&mut self, source: WheelSource, found: ScrollWheelMode) {
         if let Some(unit) = self.units.get_mut(&source) {
-            unit.wrote(found, left);
+            unit.checked(found);
+        }
+    }
+
+    /// A wheel write to `source` left `left`.
+    fn wrote(&mut self, source: WheelSource, left: ScrollWheelMode) {
+        if let Some(unit) = self.units.get_mut(&source) {
+            unit.wrote(left);
         }
     }
 
@@ -348,11 +378,17 @@ impl InterimInversion {
         self.update(|wheels| wheels.sync(present));
     }
 
-    /// A native wheel write to `route` found `found` on the wheel and left
-    /// `left` there.
-    pub(crate) fn wrote(&self, route: &DeviceRoute, found: ScrollWheelMode, left: ScrollWheelMode) {
+    /// A native wheel write's check on `route` found `found` on the wheel.
+    pub(crate) fn checked(&self, route: &DeviceRoute, found: ScrollWheelMode) {
         if let Some(source) = wheel_source(route) {
-            self.update(|wheels| wheels.wrote(source, found, left));
+            self.update(|wheels| wheels.checked(source, found));
+        }
+    }
+
+    /// A native wheel write to `route` left `left` on the wheel.
+    pub(crate) fn wrote(&self, route: &DeviceRoute, left: ScrollWheelMode) {
+        if let Some(source) = wheel_source(route) {
+            self.update(|wheels| wheels.wrote(source, left));
         }
     }
 
@@ -452,11 +488,6 @@ mod tests {
         product_id: 0xb023,
     };
 
-    const ROUTE: DeviceRoute = DeviceRoute::Direct {
-        vendor_id: 0x046d,
-        product_id: 0xb023,
-    };
-
     fn present(online: bool) -> WheelPresence {
         WheelPresence {
             source: MOUSE,
@@ -483,12 +514,18 @@ mod tests {
         (mode(true), mode(true))
     }
 
+    /// A write's check, then the write landing.
+    fn visit(wheels: &mut Wheels, (found, left): (ScrollWheelMode, ScrollWheelMode)) {
+        wheels.checked(MOUSE, found);
+        wheels.wrote(MOUSE, left);
+    }
+
     /// The agent starts with the mouse online, confirms its inversion, and
     /// then sees it go away and come back.
     fn reconnected() -> Wheels {
         let mut wheels = Wheels::default();
         wheels.sync(&[present(true)]);
-        wheels.wrote(MOUSE, kept().0, kept().1);
+        visit(&mut wheels, kept());
         wheels.sync(&[present(false)]);
         wheels.sync(&[present(true)]);
         wheels
@@ -498,7 +535,7 @@ mod tests {
     fn a_wheel_seen_to_lose_its_inversion_is_reversed_until_the_write_lands() {
         let mut wheels = reconnected();
         assert!(wheels.interim().is_empty(), "nothing learned yet");
-        wheels.wrote(MOUSE, lost().0, lost().1);
+        visit(&mut wheels, lost());
         assert!(wheels.interim().is_empty(), "the write landed");
 
         wheels.sync(&[]);
@@ -509,19 +546,19 @@ mod tests {
         );
         wheels.sync(&[present(true)]);
         assert_eq!(wheels.interim(), vec![MOUSE], "still waiting on the write");
-        wheels.wrote(MOUSE, lost().0, lost().1);
+        visit(&mut wheels, lost());
         assert!(wheels.interim().is_empty(), "withdrawn once confirmed");
     }
 
     #[test]
     fn a_wheel_that_keeps_its_inversion_is_never_reversed() {
         let mut wheels = reconnected();
-        wheels.wrote(MOUSE, kept().0, kept().1);
+        visit(&mut wheels, kept());
         for _ in 0..3 {
             wheels.sync(&[present(false)]);
             assert!(wheels.interim().is_empty());
             wheels.sync(&[present(true)]);
-            wheels.wrote(MOUSE, kept().0, kept().1);
+            visit(&mut wheels, kept());
         }
         assert_eq!(wheels.learned()[0].retention, Retention::Keeps);
     }
@@ -535,7 +572,8 @@ mod tests {
             resolution: ScrollResolution::High,
             ..mode(true)
         };
-        wheels.wrote(MOUSE, found, mode(true));
+        wheels.checked(MOUSE, found);
+        wheels.wrote(MOUSE, mode(true));
         assert_eq!(wheels.learned()[0].retention, Retention::Keeps);
         wheels.sync(&[present(false)]);
         assert!(wheels.interim().is_empty());
@@ -547,10 +585,10 @@ mod tests {
     #[test]
     fn a_wheel_seen_to_lose_its_inversion_stays_armed_when_one_return_keeps_it() {
         let mut wheels = reconnected();
-        wheels.wrote(MOUSE, lost().0, lost().1);
+        visit(&mut wheels, lost());
         wheels.sync(&[present(false)]);
         wheels.sync(&[present(true)]);
-        wheels.wrote(MOUSE, kept().0, kept().1);
+        visit(&mut wheels, kept());
         assert!(wheels.interim().is_empty(), "withdrawn on the check");
 
         wheels.sync(&[present(false)]);
@@ -562,10 +600,10 @@ mod tests {
     #[test]
     fn a_wheel_that_kept_its_inversion_is_armed_once_it_loses_it() {
         let mut wheels = reconnected();
-        wheels.wrote(MOUSE, kept().0, kept().1);
+        visit(&mut wheels, kept());
         wheels.sync(&[present(false)]);
         wheels.sync(&[present(true)]);
-        wheels.wrote(MOUSE, lost().0, lost().1);
+        visit(&mut wheels, lost());
         wheels.sync(&[present(false)]);
         assert_eq!(wheels.interim(), vec![MOUSE]);
     }
@@ -576,14 +614,14 @@ mod tests {
     fn a_write_without_a_reconnect_behind_it_teaches_nothing() {
         let mut wheels = Wheels::default();
         wheels.sync(&[present(true)]);
-        wheels.wrote(MOUSE, lost().0, lost().1);
+        visit(&mut wheels, lost());
         wheels.sync(&[present(false)]);
         assert!(wheels.interim().is_empty());
 
         let mut first_seen_offline = Wheels::default();
         first_seen_offline.sync(&[present(false)]);
         first_seen_offline.sync(&[present(true)]);
-        first_seen_offline.wrote(MOUSE, lost().0, lost().1);
+        visit(&mut first_seen_offline, lost());
         first_seen_offline.sync(&[present(false)]);
         assert!(
             first_seen_offline.interim().is_empty(),
@@ -596,7 +634,7 @@ mod tests {
     #[test]
     fn a_wheel_the_agent_does_not_invert_is_never_reversed() {
         let mut wheels = reconnected();
-        wheels.wrote(MOUSE, lost().0, lost().1);
+        visit(&mut wheels, lost());
         wheels.sync(&[WheelPresence {
             inverts_natively: false,
             ..present(false)
@@ -604,14 +642,35 @@ mod tests {
         assert!(wheels.interim().is_empty());
     }
 
+    /// A wheel known to lose its inversion that kept it this time, with
+    /// another setting still to write: the read withdraws the reversal, so
+    /// the wait before the write does not reverse it twice.
+    #[test]
+    fn a_check_that_finds_the_inversion_withdraws_before_any_write() {
+        let mut wheels = reconnected();
+        visit(&mut wheels, lost());
+        wheels.sync(&[present(false)]);
+        wheels.sync(&[present(true)]);
+        assert_eq!(wheels.interim(), vec![MOUSE]);
+        wheels.checked(
+            MOUSE,
+            ScrollWheelMode {
+                resolution: ScrollResolution::High,
+                ..mode(true)
+            },
+        );
+        assert!(wheels.interim().is_empty(), "withdrawn on the read");
+    }
+
     #[test]
     fn a_failed_write_leaves_the_wheel_reversed() {
         let mut wheels = reconnected();
-        wheels.wrote(MOUSE, lost().0, lost().1);
+        visit(&mut wheels, lost());
         wheels.sync(&[present(false)]);
         wheels.sync(&[present(true)]);
-        // No outcome: the write failed, so the wheel still scrolls as it
-        // reports and the software reversal is what keeps it right.
+        wheels.checked(MOUSE, mode(false));
+        // No write landed, so the wheel still scrolls as it reports and the
+        // software reversal is what keeps it right.
         assert_eq!(wheels.interim(), vec![MOUSE]);
     }
 
@@ -620,7 +679,7 @@ mod tests {
     #[test]
     fn a_wheel_reported_gone_between_snapshots_returns_like_any_other() {
         let mut wheels = reconnected();
-        wheels.wrote(MOUSE, lost().0, lost().1);
+        visit(&mut wheels, lost());
         // Seen online in every snapshot, but its node was swapped.
         wheels.went_away(&[MOUSE]);
         assert_eq!(
@@ -629,7 +688,7 @@ mod tests {
             "armed the moment it is known gone"
         );
         wheels.sync(&[present(true)]);
-        wheels.wrote(MOUSE, lost().0, lost().1);
+        visit(&mut wheels, lost());
         assert!(wheels.interim().is_empty());
     }
 
@@ -648,15 +707,21 @@ mod tests {
     #[cfg(not(target_os = "windows"))]
     #[test]
     fn a_learned_retention_survives_a_restart() {
+        const ROUTE: DeviceRoute = DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xb023,
+        };
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("wheel-inversion.json");
         let first = InterimInversion::default();
         first.remember_in(path.clone());
         first.sync(&[present(true)]);
-        first.wrote(&ROUTE, kept().0, kept().1);
+        first.checked(&ROUTE, kept().0);
+        first.wrote(&ROUTE, kept().1);
         first.sync(&[present(false)]);
         first.sync(&[present(true)]);
-        first.wrote(&ROUTE, lost().0, lost().1);
+        first.checked(&ROUTE, lost().0);
+        first.wrote(&ROUTE, lost().1);
 
         let restarted = InterimInversion::default();
         restarted.remember_in(path);

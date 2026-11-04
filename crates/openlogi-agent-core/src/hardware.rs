@@ -1555,7 +1555,7 @@ async fn write_native_wheel_mode(
         return Ok(NativeWheelWrite::StoodDown);
     }
     let check = change.check_on(shared).await?;
-    let found = check.found();
+    interim.checked(route, check.found());
     let outcome = match check {
         // A wheel that kept its inversion is reversed twice while interim
         // inversion stands in for it: withdraw that on the read alone.
@@ -1564,12 +1564,25 @@ async fn write_native_wheel_mode(
             // Holding the turn, so nothing else switches the wheel meanwhile;
             // the wait is bounded well inside the write's timeout.
             interim.wait_for_rest(route).await;
-            due.write().await?
+            match due.write().await {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    // The write may have landed with only its reply or the
+                    // read-back lost. Read the wheel once more, so a landed
+                    // inversion is not reversed twice until the next write.
+                    if let Ok(mode) = openlogi_hid::get_scroll_wheel_mode_on(shared).await
+                        && mode.inverted
+                    {
+                        interim.wrote(route, mode);
+                    }
+                    return Err(error);
+                }
+            }
         }
     };
     // Withdraw any interim software inversion from this thread, the moment
     // the wheel confirms: until then a reconnected wheel is reversed twice.
-    interim.wrote(route, found, outcome.mode());
+    interim.wrote(route, outcome.mode());
     if capture_plans.borrow().diverts_main_wheel(route) {
         // The plan diverted the wheel while this write was on the wire, so it
         // may have landed after the session's divert.
