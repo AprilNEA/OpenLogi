@@ -492,6 +492,12 @@ key = "unit:0f1e2d3c"
 peer_channels = { self = 0, "work-laptop" = 1 }
 ```
 
+The Flow window shows "Can't switch computers" for a device without Easy-Switch
+host change (HID++ `0x1814`), such as a HID++ 1.0 device or a gaming mouse on
+its own receiver like a G305. Flow leaves that device on this machine and still
+moves the others. It's listed only while `[[flow.devices]]` names it, so it can
+be set to Off.
+
 The config stops loading when a peer name is empty, `self`, or has surrounding
 whitespace or control characters, two peers share a name or public key, two
 layout entries use the same edge, a layout entry or `peer_channels` names a

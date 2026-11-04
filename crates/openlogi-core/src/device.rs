@@ -243,8 +243,9 @@ pub struct Capabilities {
     pub macro_record: bool,
     /// The device can be moved to another Easy-Switch host slot — HID++
     /// `0x1814 ChangeHost`. Unlike [`Self::easy_switch`], it does not need
-    /// the slots' names. Appended: crosses the IPC and the persisted
-    /// identity.
+    /// the slots' names. Read it through [`Self::switch_hosts`] for whether
+    /// the device can move to another computer. Appended: crosses the IPC
+    /// and the persisted identity.
     #[serde(default)]
     pub change_host: bool,
 }
@@ -308,6 +309,19 @@ impl Capabilities {
             macro_record: ids.contains(&0x8030),
             change_host: ids.contains(&0x1814),
         }
+    }
+
+    /// Whether a device can move to another computer with Easy-Switch, from
+    /// the capabilities `measured` on the device itself (a live probe or the
+    /// probe cache, never a saved identity, which may predate `0x1814`) and
+    /// whether it answered as HID++ 1.0. A HID++ 1.0 device, or one whose
+    /// feature table has no `0x1814 ChangeHost` (a G305 on its LIGHTSPEED
+    /// receiver), cannot. A device not measured is presumed able. The Flow
+    /// window and the agent's handoff both decide here, so a device the
+    /// window shows as unable to switch is one the agent leaves behind.
+    #[must_use]
+    pub fn switch_hosts(measured: Option<&Self>, hidpp10: bool) -> bool {
+        !hidpp10 && measured.is_none_or(|capabilities| capabilities.change_host)
     }
 
     /// Best-effort capabilities for a device we could not probe (offline /
@@ -1184,7 +1198,25 @@ mod tests {
         assert!(!capabilities.hires_wheel);
         assert!(!capabilities.thumbwheel);
         assert!(capabilities.scroll_inversion);
+        assert!(!capabilities.change_host);
         Ok(())
+    }
+
+    /// Only a device measured without `0x1814`, or a HID++ 1.0 one, stays
+    /// behind. The G502 LIGHTSPEED table below has no `0x1814`, like the
+    /// G305's.
+    #[test]
+    fn a_device_switches_hosts_unless_measured_without_change_host() {
+        use super::Capabilities;
+        let mx = Capabilities::from_feature_ids(&[0x0001, 0x1814, 0x1815, 0x1b04]);
+        let g502 = Capabilities::from_feature_ids(&[
+            0x0000, 0x0001, 0x0003, 0x0005, 0x1001, 0x8070, 0x1300, 0x8100, 0x8110, 0x8060, 0x2201,
+            0x2121,
+        ]);
+        assert!(Capabilities::switch_hosts(Some(&mx), false));
+        assert!(!Capabilities::switch_hosts(Some(&g502), false));
+        assert!(Capabilities::switch_hosts(None, false), "not probed yet");
+        assert!(!Capabilities::switch_hosts(None, true), "HID++ 1.0");
     }
 
     /// Real feature tables: a G502 LIGHTSPEED, and a G705 reported on #886.
