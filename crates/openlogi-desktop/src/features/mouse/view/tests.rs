@@ -534,8 +534,8 @@ fn active_thumbwheel_directions_highlight_the_paired_control() {
 
 #[test]
 fn fallback_model_only_adds_thumbwheel_when_capability_is_measured() {
-    let without = model_hotspots(None, None, false, MOUSE_MODEL_SIZE);
-    let with = model_hotspots(None, None, true, MOUSE_MODEL_SIZE);
+    let without = model_hotspots(None, None, false, &[], MOUSE_MODEL_SIZE);
+    let with = model_hotspots(None, None, true, &[], MOUSE_MODEL_SIZE);
     assert_eq!(
         without
             .iter()
@@ -621,6 +621,75 @@ fn the_wheel_hold_switch_turns_holding_back_into_sideways_scrolling(cx: &mut Tes
         cx.debug_bounds("inspector-wheel-hold-row").is_none(),
         "only Back and Forward can hold the wheel"
     );
+    drop(view);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+}
+
+/// The Linux hook reads the Performance MX's zoom button (#1688), so the
+/// mouse view offers it on the fallback model: its card opens the binding
+/// editor, and the action picked there lands on Zoom. Only Linux has the
+/// hook's per-device table.
+#[cfg(target_os = "linux")]
+#[gpui::test]
+fn the_performance_mx_zoom_card_opens_its_binding_editor(cx: &mut TestAppContext) {
+    use openlogi_core::device::{DeviceInventory, DeviceKind, PairedDevice, ReceiverInfo};
+
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    cx.update(gpui_kit::init);
+    cx.update(|cx| {
+        let resolver = AssetResolver::new();
+        let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let inventory = DeviceInventory {
+            receiver: ReceiverInfo {
+                name: "Unifying Receiver".into(),
+                vendor_id: 0x046d,
+                product_id: 0xc52b,
+                unique_id: Some("DA2699E1".into()),
+            },
+            paired: vec![PairedDevice {
+                slot: 2,
+                codename: Some("Performance MX".into()),
+                wpid: Some(0x101a),
+                kind: DeviceKind::Mouse,
+                online: true,
+                battery: None,
+                model_info: None,
+                capabilities: None,
+                settings_revision: 0,
+                hidpp10: true,
+            }],
+        };
+        let state = cx.new(|_| {
+            AppState::new(Sources {
+                inventories: &[inventory],
+                ..Sources::in_memory(Config::ephemeral(), &resolver, commands)
+            })
+        });
+        AppState::set_global(state, cx);
+    });
+    let (view, cx) = cx.add_window_view(MouseModelView::new);
+    cx.simulate_resize(size(px(1200.), px(1000.)));
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+
+    click_picker_control(cx, "label-card-Button(Zoom)");
+    view.read_with(cx, |view, _| {
+        assert_eq!(view.selected, Some(ButtonId::Zoom.into()));
+    });
+    click_picker_control(cx, "inspector-current-action");
+    view.read_with(cx, |view, _| assert!(view.action_picker_open));
+    click_picker_control(cx, "inspector-action-Copy");
+    cx.update(|_, cx| {
+        assert_eq!(
+            AppState::try_read(cx)
+                .unwrap()
+                .button_bindings()
+                .get(&ButtonId::Zoom),
+            Some(&Action::Copy)
+        );
+    });
+
     drop(view);
     cx.update(|window, _| window.remove_window());
     cx.run_until_parked();
@@ -855,7 +924,7 @@ fn a_crowded_side_keeps_every_card_on_the_canvas() {
     let room = size(416., 526.);
     let g502 = GamingLayout::for_model_key("0407f");
     for widest in [80., 400.] {
-        let layout = model_layout(None, g502, room, 960., false, values(widest));
+        let layout = model_layout(None, g502, room, 960., false, &[], values(widest));
         assert_eq!(layout.labels.len(), 9);
         assert_eq!(layout.card.value_lines, 1);
         assert!(layout.mouse_h < 9. * LABEL_H, "model {}", layout.mouse_h);
@@ -875,6 +944,7 @@ fn a_shrunk_fallback_model_keeps_its_cards_apart() {
         size(MODEL_CONTENT_MAX_W, target_h),
         1200.,
         false,
+        &[],
         values(80.),
     );
     assert!((layout.mouse_h - target_h).abs() < 0.01);
@@ -899,6 +969,7 @@ fn english_values_fit_on_one_line_beside_a_model_that_fits_the_room() {
         DEFAULT_ROOM,
         1256.,
         true,
+        &[],
         values(WIDEST_ENGLISH_VALUE),
     );
     assert_eq!(layout.labels.len(), 6);
@@ -923,12 +994,35 @@ fn english_values_fit_on_one_line_beside_a_model_that_fits_the_room() {
     assert_cards_on_the_canvas(&layout);
 }
 
+/// The Performance MX's fallback model adds a Zoom card (#1688), and its six
+/// cards still fit beside the model at the default window.
+#[test]
+fn a_zoom_card_fits_beside_the_fallback_model() {
+    let layout = model_layout(
+        None,
+        None,
+        DEFAULT_ROOM,
+        1256.,
+        false,
+        &[ButtonId::GestureButton, ButtonId::Zoom],
+        values(WIDEST_ENGLISH_VALUE),
+    );
+    assert_eq!(layout.labels.len(), 6);
+    assert!(
+        layout
+            .labels
+            .iter()
+            .any(|label| label.id == ButtonId::Zoom.into())
+    );
+    assert_cards_on_the_canvas(&layout);
+}
+
 /// A value no card is wide enough for — "DPI-Voreinstellungen
 /// durchschalten" in German — wraps onto a second line in the widest card
 /// the room allows, and the taller cards still fit beside the model.
 #[test]
 fn a_value_too_long_for_the_widest_card_wraps_to_two_lines() {
-    let layout = model_layout(None, None, DEFAULT_ROOM, 1256., true, values(267.));
+    let layout = model_layout(None, None, DEFAULT_ROOM, 1256., true, &[], values(267.));
     let two_sided_w = (DEFAULT_ROOM.width - MODEL_MIN_IMAGE_W) / 2. - SIDE_GAP;
     assert!(
         (layout.card.w - two_sided_w).abs() < 0.01,
@@ -972,7 +1066,7 @@ fn the_longest_translated_value_wraps_to_three_lines(cx: &mut TestAppContext) {
     let cx = cx.add_empty_window();
     let (layout, lines_needed) = cx.update(|window, _| {
         let values = ValueMetrics::measure(shown, window);
-        let layout = model_layout(None, None, DEFAULT_ROOM, 1256., true, values);
+        let layout = model_layout(None, None, DEFAULT_ROOM, 1256., true, &[], values);
         // How the value text wraps the longest value at the card's width.
         let wrapped = window
             .text_system()

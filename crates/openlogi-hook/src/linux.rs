@@ -554,6 +554,15 @@ impl ButtonMap {
     }
 }
 
+/// The buttons `device`'s [`DEVICE_BUTTONS`] entry names, in table order.
+pub(crate) fn device_buttons(device: &EventDevice) -> Vec<ButtonId> {
+    ButtonMap::for_source(device)
+        .0
+        .iter()
+        .map(|&(_, id)| id)
+        .collect()
+}
+
 /// Run one event past the callback and return what to forward to the desktop
 /// for it, if anything. On a hi-res device, wheel events reach it only
 /// through [`PassThroughWheel`], and low-res counts never do.
@@ -847,6 +856,18 @@ mod tests {
             ButtonMap::for_source(&other_vendor).button(KeyCode::BTN_FORWARD),
             Some(ButtonId::Forward)
         );
+    }
+
+    /// The settings app reads the same table the hook dispatches through.
+    #[test]
+    fn device_buttons_name_the_device_table_entry() {
+        assert_eq!(
+            crate::device_buttons(&logitech_mouse(PERFORMANCE_MX)),
+            [ButtonId::GestureButton, ButtonId::Zoom]
+        );
+        for source in [logitech_mouse(0xb023), EventDevice::default()] {
+            assert_eq!(crate::device_buttons(&source), [], "{source:?}");
+        }
     }
 
     // ── translate ────────────────────────────────────────────────────────────

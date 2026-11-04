@@ -98,6 +98,9 @@ struct MouseWorkspaceData<'a> {
     gesture_maps: &'a BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
     glow: Option<(Arc<GlowGeometry>, Hsla)>,
     thumbwheel: bool,
+    /// [`DeviceRecord::hook_buttons`]: the silhouette places a hotspot for
+    /// each one it does not already draw.
+    hook_buttons: Vec<ButtonId>,
     dpi_gestures: bool,
     virtual_thumbwheel: bool,
     wheel_hold: &'a BTreeSet<ButtonId>,
@@ -128,6 +131,10 @@ impl<'a> MouseWorkspaceData<'a> {
                 .current_record()
                 .and_then(|record| record.capabilities)
                 .is_some_and(|capabilities| capabilities.thumbwheel),
+            hook_buttons: state
+                .current_record()
+                .map(DeviceRecord::hook_buttons)
+                .unwrap_or_default(),
             dpi_gestures: state
                 .current_record()
                 .and_then(|record| record.capabilities)
@@ -171,6 +178,7 @@ impl<'a> MouseWorkspaceData<'a> {
             gesture_maps: &NO_GESTURE_MAPS,
             glow: None,
             thumbwheel: false,
+            hook_buttons: Vec::new(),
             dpi_gestures: false,
             virtual_thumbwheel: false,
             wheel_hold: &NO_WHEEL_HOLD,
@@ -384,6 +392,7 @@ impl MouseModelView {
         asset: Option<&ResolvedAsset>,
         layout: Option<&GamingLayout>,
         thumbwheel: bool,
+        hook_buttons: &[ButtonId],
         value: impl Fn(MouseControlId) -> SharedString,
         window: &Window,
     ) -> ModelLayout {
@@ -395,7 +404,7 @@ impl MouseModelView {
             )
         });
         let values = ValueMetrics::measure(
-            model_hotspots(asset, layout, thumbwheel, MOUSE_MODEL_SIZE)
+            model_hotspots(asset, layout, thumbwheel, hook_buttons, MOUSE_MODEL_SIZE)
                 .into_iter()
                 .map(|hotspot| value(hotspot.id)),
             window,
@@ -406,6 +415,7 @@ impl MouseModelView {
             size(f32::from(room.width), f32::from(room.height)),
             f32::from(viewport.width),
             thumbwheel,
+            hook_buttons,
             values,
         )
     }
@@ -527,6 +537,7 @@ impl Render for MouseModelView {
             gesture_maps,
             glow,
             thumbwheel,
+            hook_buttons,
             dpi_gestures,
             virtual_thumbwheel,
             wheel_hold,
@@ -556,7 +567,7 @@ impl Render for MouseModelView {
             card,
             hotspots,
             labels,
-        } = self.fitted_layout(asset, layout, thumbwheel, value, window);
+        } = self.fitted_layout(asset, layout, thumbwheel, &hook_buttons, value, window);
 
         let highlight = self.hovered.or(active).or(self.selected);
         let view = cx.entity();
@@ -722,6 +733,7 @@ fn model_layout(
     room: Size<f32>,
     viewport_w: f32,
     thumbwheel: bool,
+    hook_buttons: &[ButtonId],
     values: ValueMetrics,
 ) -> ModelLayout {
     let target_h = room.height.clamp(MODEL_MIN_H, MOUSE_MODEL_SIZE.1);
@@ -741,7 +753,7 @@ fn model_layout(
     };
     let max_image_w = (content_w - left_gutter - right_gutter).max(MODEL_MIN_CONTENT_W / 2.);
     let (mouse_w, mouse_h) = model_size(asset, target_h, max_image_w);
-    let hotspots = model_hotspots(asset, layout, thumbwheel, (mouse_w, mouse_h));
+    let hotspots = model_hotspots(asset, layout, thumbwheel, hook_buttons, (mouse_w, mouse_h));
     let card = card_size(card_w, values, hotspots.len(), label_distribution, room_h);
     let labels = if has_labels {
         labels_from_hotspots(
@@ -845,13 +857,14 @@ fn model_hotspots(
     asset: Option<&ResolvedAsset>,
     layout: Option<&GamingLayout>,
     thumbwheel: bool,
+    hook_buttons: &[ButtonId],
     (w, h): (f32, f32),
 ) -> Vec<Hotspot> {
     if let Some(a) = asset {
         asset_hotspots_for_png(a, layout, w, h)
     } else {
         let scale = w / MOUSE_MODEL_SIZE.0;
-        fallback_hotspots(layout, thumbwheel)
+        fallback_hotspots(layout, thumbwheel, hook_buttons)
             .into_iter()
             .map(|hs| Hotspot {
                 x: hs.x * scale,

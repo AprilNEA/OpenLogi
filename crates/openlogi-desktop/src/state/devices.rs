@@ -4,6 +4,7 @@ use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, HashSet};
 
 use openlogi_camera::Camera;
+use openlogi_core::binding::ButtonId;
 use openlogi_core::config::{Config, DeviceConfig, DeviceIdentity, canonical_device_key};
 use openlogi_core::device::{
     BatteryInfo, Capabilities, DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports,
@@ -128,6 +129,21 @@ impl DeviceRecord {
             } else {
                 Capabilities::presumed_from_kind(self.kind)
             }
+        })
+    }
+
+    /// The buttons the OS hook reads from this device beyond the generic set
+    /// ([`openlogi_hook::device_buttons`]). The hook names a receiver-paired
+    /// mouse by its per-device node, which carries the [`Self::wpid`] as its
+    /// product id.
+    #[must_use]
+    pub fn hook_buttons(&self) -> Vec<ButtonId> {
+        self.wpid.map_or_else(Vec::new, |wpid| {
+            openlogi_hook::device_buttons(&openlogi_hook::EventDevice {
+                vendor_id: Some(openlogi_hook::LOGITECH_VENDOR_ID),
+                product_id: Some(u32::from(wpid)),
+                product_name: None,
+            })
         })
     }
 
