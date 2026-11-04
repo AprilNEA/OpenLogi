@@ -123,7 +123,13 @@ pub struct SwipeAccumulator {
 impl SwipeAccumulator {
     /// Begin a fresh hold, resetting the travel accumulator and commit state.
     pub fn begin(&mut self) {
-        self.held_since = Some(Instant::now());
+        self.begin_at(Instant::now());
+    }
+
+    /// [`Self::begin`] for a press that happened `at`, for a caller that
+    /// decodes a report after it arrived.
+    pub fn begin_at(&mut self, at: Instant) {
+        self.held_since = Some(at);
         self.dx = 0;
         self.dy = 0;
         self.fired = false;
@@ -145,8 +151,13 @@ impl SwipeAccumulator {
     /// [`GESTURE_HOLD_FOR_SWIPE`]), then restarts travel so the same hold can
     /// commit again; `None` while still too short or not holding.
     pub fn accumulate(&mut self, dx: i32, dy: i32) -> Option<GestureDirection> {
+        self.accumulate_at(dx, dy, Instant::now())
+    }
+
+    /// [`Self::accumulate`] for a delta that arrived `now`, for a caller that
+    /// decodes a report after it arrived.
+    pub fn accumulate_at(&mut self, dx: i32, dy: i32, now: Instant) -> Option<GestureDirection> {
         self.held_since?;
-        let now = Instant::now();
         if self
             .moved_at
             .is_some_and(|t| now.saturating_duration_since(t) >= GESTURE_REARM_PAUSE)
@@ -231,7 +242,7 @@ impl SwipeAccumulator {
         }
         let held_long_enough = self
             .held_since
-            .is_some_and(|t| t.elapsed() >= GESTURE_HOLD_FOR_SWIPE);
+            .is_some_and(|t| now.saturating_duration_since(t) >= GESTURE_HOLD_FOR_SWIPE);
         if held_long_enough && let Some(dir) = detect_swipe(self.dx, self.dy) {
             self.fired = true;
             self.last = Some(dir);
@@ -646,6 +657,35 @@ mod tests {
         // Once held long enough, the next delta commits.
         acc.backdate_hold_for_test();
         assert!(acc.accumulate(GESTURE_SWIPE_THRESHOLD + 100, 0).is_some());
+    }
+
+    #[test]
+    fn accumulator_times_a_late_decoded_hold_by_its_arrival() {
+        // Decoded back to back: the gate and the rest are measured between
+        // the instants the reports arrived, not between decodes.
+        let pressed = Instant::now();
+        let mut acc = SwipeAccumulator::default();
+        acc.begin_at(pressed);
+        let t = GESTURE_SWIPE_THRESHOLD + 10;
+        assert_eq!(
+            acc.accumulate_at(t, 0, pressed),
+            None,
+            "not held long enough yet"
+        );
+        let swiped = pressed + GESTURE_HOLD_FOR_SWIPE;
+        assert_eq!(
+            acc.accumulate_at(t, 0, swiped),
+            Some(GestureDirection::Right)
+        );
+        // Within the rest window the same direction does not fire again...
+        assert_eq!(acc.accumulate_at(t, 0, swiped), None);
+        // ...but after a rest it may.
+        let rested = swiped + GESTURE_REARM_PAUSE;
+        assert_eq!(
+            acc.accumulate_at(t, 0, rested),
+            Some(GestureDirection::Right)
+        );
+        assert!(!acc.end(), "a hold that swiped is not a click");
     }
 
     #[test]

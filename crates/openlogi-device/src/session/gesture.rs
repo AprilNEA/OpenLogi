@@ -41,7 +41,9 @@ use crate::SharedChannel;
 use crate::channel::route::DeviceRoute;
 
 pub use super::capture::CaptureHost;
-use super::capture::{ArmedCapture, ArmingListener, Liveness, ReportingChangeStream, run_capture};
+use super::capture::{
+    ArmedCapture, ArmingListener, Heard, Liveness, ReportingChangeStream, run_capture,
+};
 use accum::CaptureAccum;
 pub(crate) use arm::enumerate_controls;
 use arm::{ArmedControls, ArmedThumbwheel, arm_controls};
@@ -300,7 +302,7 @@ impl ArmedCapture for GestureCapture {
         &self,
         device_index: u8,
         sink: mpsc::UnboundedSender<CapturedInput>,
-    ) -> impl Fn(&v20::Message) + Send + Sync + 'static {
+    ) -> impl Fn(Heard<&v20::Message>) + Send + Sync + 'static {
         let armed = &self.armed;
         let accum = Arc::clone(&self.accum);
         let thumb_status = Arc::clone(&self.thumb_status);
@@ -336,7 +338,8 @@ impl ArmedCapture for GestureCapture {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .attach(sink.clone());
-        move |msg| {
+        move |heard: Heard<&v20::Message>| {
+            let msg = heard.report;
             if let Some((spy_index, captured)) = &spy
                 && let Some(mask) = spy::decode_mask(msg, device_index, *spy_index)
             {
@@ -353,7 +356,10 @@ impl ArmedCapture for GestureCapture {
                 // critical section is panic-free, so the data is consistent.
                 let mut acc = accum.lock().unwrap_or_else(PoisonError::into_inner);
                 acc.on_event(
-                    event,
+                    Heard {
+                        report: event,
+                        at: heard.at,
+                    },
                     &gesture_cids,
                     &dpi_set,
                     &gesture_button_set,

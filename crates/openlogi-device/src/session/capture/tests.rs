@@ -1,11 +1,12 @@
 //! A capture session hears a control from the moment arming diverts it, while
-//! it still arms the controls after that one (#2349).
+//! it still arms the controls after that one (#2349), and times what it heard
+//! by when it arrived.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
 
-use openlogi_core::binding::ButtonId;
+use openlogi_core::binding::{ButtonId, GESTURE_HOLD_FOR_SWIPE, GestureDirection};
 use tokio::sync::{mpsc, oneshot, watch};
 
 use super::*;
@@ -21,19 +22,32 @@ use crate::session::keyboard::{KeyboardWanted, run_keyboard_capture_session};
 const REPROG_INDEX: u8 = 2;
 /// The `0x1b04` capability flag that marks a control divertable.
 const DIVERTABLE: u8 = 0x20;
+/// The `0x1b04` additional capability flag that marks a control able to
+/// report raw XY.
+const RAW_XY: u8 = 0x01;
 /// The `setCidReporting` flag that diverts a control.
 const DIVERT: u8 = 0x01;
 
 /// Where the device sends a report it makes on its own.
 type Wire = Arc<OnceLock<mpsc::UnboundedSender<Vec<u8>>>>;
 
+/// What the user does with a control: each report the device sends for it,
+/// after the pause before it.
+type Touch = Vec<(Duration, Vec<u8>)>;
+
 /// A device with `controls` on `0x1b04` at [`REPROG_INDEX`], all divertable
-/// and native, and no other feature. `setCidReporting` writes are echoed.
+/// with raw XY and native, and no other feature. `setCidReporting` writes are
+/// echoed.
 ///
-/// The write that diverts `controls[0]` is followed on the wire by a press
-/// and a release of that control: the user pressed it the instant the
-/// firmware applied the divert, before arming reached `controls[1]`.
-fn device(controls: [u16; 2], wire: Wire) -> (ScriptedRawHidChannel, ReplayChannelHandle) {
+/// The write that diverts `controls[0]` is followed on the wire by `touch`
+/// of that control, given the device index and the control: the user
+/// touched it the instant the firmware applied the divert, and arming
+/// reaches `controls[1]` only once the touch is over.
+fn device(
+    controls: [u16; 2],
+    wire: Wire,
+    touch: fn(u8, u16) -> Touch,
+) -> (ScriptedRawHidChannel, ReplayChannelHandle) {
     ScriptedRawHidChannel::with_dynamic_responder(move |request| {
         let mut response = vec![0; 20];
         response[..4].copy_from_slice(&request[..4]);
@@ -49,15 +63,16 @@ fn device(controls: [u16; 2], wire: Wire) -> (ScriptedRawHidChannel, ReplayChann
                 let cid = controls[usize::from(request[4])];
                 response[4..6].copy_from_slice(&cid.to_be_bytes());
                 response[8] = DIVERTABLE;
+                response[12] = RAW_XY;
             }
             (REPROG_INDEX, 2) => response[4..6].copy_from_slice(&id.to_be_bytes()),
             (REPROG_INDEX, 3) if id == controls[0] && request[6] & DIVERT != 0 => {
                 let wire = wire.get().expect("the wire is connected before arming");
-                for report in [
-                    request.to_vec(),
-                    diverted_buttons(request[1], &[id]),
-                    diverted_buttons(request[1], &[]),
-                ] {
+                wire.send(request.to_vec()).expect("the channel is open");
+                // The channel's read thread hears each report as it is sent,
+                // so blocking here spaces their arrivals.
+                for (pause, report) in touch(request[1], id) {
+                    std::thread::sleep(pause);
                     wire.send(report).expect("the channel is open");
                 }
                 return None;
@@ -80,6 +95,23 @@ fn diverted_buttons(device_index: u8, held: &[u16]) -> Vec<u8> {
     report
 }
 
+/// A `divertedRawXYEvent` from `device_index`.
+fn raw_xy(device_index: u8, dx: i16, dy: i16) -> Vec<u8> {
+    let mut report = vec![0; 20];
+    report[..4].copy_from_slice(&[0x11, device_index, REPROG_INDEX, 0x10]);
+    report[4..6].copy_from_slice(&dx.to_be_bytes());
+    report[6..8].copy_from_slice(&dy.to_be_bytes());
+    report
+}
+
+/// A press and a release, back to back.
+fn click(device_index: u8, cid: u16) -> Touch {
+    vec![
+        (Duration::ZERO, diverted_buttons(device_index, &[cid])),
+        (Duration::ZERO, diverted_buttons(device_index, &[])),
+    ]
+}
+
 /// The `setCidReporting` writes in `reports` that divert a control, by
 /// control id, in the order written.
 fn diverted(reports: &[Vec<u8>]) -> Vec<u16> {
@@ -96,16 +128,17 @@ enum Capture {
     Keyboard(KeyboardWanted),
 }
 
-/// Run `capture` on a [`device`] over `controls` until it reports `button`
-/// released, then stop it. Returns everything it sent until then and the
-/// reports it wrote.
-async fn press_while_arming(
+/// Run `capture` on a [`device`] over `controls` whose first control the user
+/// touches while arming, until the session reports `button` released, then
+/// stop it. Returns everything it sent until then and the reports it wrote.
+async fn touch_while_arming(
     controls: [u16; 2],
+    touch: fn(u8, u16) -> Touch,
     capture: Capture,
     button: ButtonId,
 ) -> (Vec<CapturedInput>, Vec<Vec<u8>>) {
     let wire = Wire::default();
-    let (raw, handle) = device(controls, Arc::clone(&wire));
+    let (raw, handle) = device(controls, Arc::clone(&wire), touch);
     wire.set(raw.incoming_sender())
         .expect("the wire is connected once");
     let route = DeviceRoute::Direct {
@@ -161,7 +194,7 @@ async fn press_while_arming(
     );
     assert!(
         released.is_ok(),
-        "the press while arming reached the sink: {heard:?}"
+        "the touch while arming reached the sink: {heard:?}"
     );
     (heard, handle.written_reports())
 }
@@ -174,8 +207,9 @@ async fn a_button_pressed_right_after_its_divert_reaches_the_sink() {
         divert_buttons: vec![(MIDDLE, ButtonId::MiddleClick), (BACK, ButtonId::Back)],
         ..CaptureSpec::default()
     };
-    let (heard, written) = press_while_arming(
+    let (heard, written) = touch_while_arming(
         [MIDDLE, BACK],
+        click,
         Capture::Gesture(spec),
         ButtonId::MiddleClick,
     )
@@ -213,7 +247,8 @@ async fn a_key_pressed_right_after_its_divert_reaches_the_sink() {
         grid: BTreeMap::new(),
     };
     let mute = ButtonId::control(MUTE);
-    let (heard, written) = press_while_arming([MUTE, NEXT], Capture::Keyboard(wanted), mute).await;
+    let (heard, written) =
+        touch_while_arming([MUTE, NEXT], click, Capture::Keyboard(wanted), mute).await;
 
     assert_eq!(
         diverted(&written),
@@ -226,5 +261,51 @@ async fn a_key_pressed_right_after_its_divert_reaches_the_sink() {
             CapturedInput::ButtonDown(mute),
             CapturedInput::ButtonUp(mute)
         ]
+    );
+}
+
+#[tokio::test]
+async fn a_swipe_made_while_arming_is_timed_by_its_reports() {
+    const MIDDLE: u16 = 0x0052;
+    /// Hold the gesture button, wait past the swipe gate, move right, let
+    /// go. The first raw-XY sample of a hold is stale and dropped.
+    fn swipe(device_index: u8, cid: u16) -> Touch {
+        vec![
+            (Duration::ZERO, diverted_buttons(device_index, &[cid])),
+            (Duration::ZERO, raw_xy(device_index, -3000, 2400)),
+            (GESTURE_HOLD_FOR_SWIPE * 2, raw_xy(device_index, 120, 5)),
+            (Duration::ZERO, diverted_buttons(device_index, &[])),
+        ]
+    }
+    let gesture = reprog_controls::GESTURE_BUTTON_CID;
+    let spec = CaptureSpec {
+        divert_gesture_sources: vec![gesture],
+        divert_buttons: vec![(MIDDLE, ButtonId::MiddleClick)],
+        ..CaptureSpec::default()
+    };
+    let (heard, written) = touch_while_arming(
+        [gesture, MIDDLE],
+        swipe,
+        Capture::Gesture(spec),
+        ButtonId::GestureButton,
+    )
+    .await;
+
+    assert_eq!(
+        diverted(&written),
+        [gesture, MIDDLE],
+        "the swipe was over before the session armed the middle button"
+    );
+    let gestures: Vec<_> = heard
+        .iter()
+        .filter(|input| matches!(input, CapturedInput::Gesture(..)))
+        .collect();
+    assert_eq!(
+        gestures,
+        [&CapturedInput::Gesture(
+            ButtonId::GestureButton,
+            GestureDirection::Right
+        )],
+        "the hold lasted past the swipe gate, so it is a swipe, not a click: {heard:?}"
     );
 }
