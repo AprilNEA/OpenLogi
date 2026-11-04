@@ -215,7 +215,7 @@ mod file {
             .create(true)
             .append(true)
             .open(dir.join(file_name(prefix, day)))?;
-        prune(dir, prefix);
+        prune(dir, prefix, &dir.join(file_name(prefix, day)));
         Ok(file)
     }
 
@@ -242,7 +242,7 @@ mod file {
 
     /// Delete all but the newest [`MAX_LOG_FILES`] of `prefix`'s files in
     /// `dir`. Best effort: a file that cannot be listed or removed is kept.
-    fn prune(dir: &Path, prefix: &str) {
+    fn prune(dir: &Path, prefix: &str, active: &Path) {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
         };
@@ -257,8 +257,14 @@ mod file {
             .collect();
         // ISO dates sort as text, so the oldest come first.
         files.sort();
-        for stale in files.iter().take(files.len().saturating_sub(MAX_LOG_FILES)) {
-            let _ = std::fs::remove_file(stale);
+        let mut excess = files.len().saturating_sub(MAX_LOG_FILES);
+        for stale in files.iter().filter(|path| path.as_path() != active) {
+            if excess == 0 {
+                break;
+            }
+            if std::fs::remove_file(stale).is_ok() {
+                excess -= 1;
+            }
         }
     }
 
@@ -294,6 +300,21 @@ mod file {
         }
 
         #[test]
+        fn pruning_retains_active_day_after_clock_moves_backwards() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            for day in 1..=7 {
+                File::create(dir.path().join(file_name("gui", day))).expect("create");
+            }
+            let mut active = open_day(dir.path(), "gui", 0).expect("open active");
+            active.write_all(b"retained").expect("write");
+            assert_eq!(
+                std::fs::read(dir.path().join(file_name("gui", 0))).expect("read"),
+                b"retained"
+            );
+            assert_eq!(std::fs::read_dir(dir.path()).expect("list").count(), 7);
+        }
+
+        #[test]
         fn pruning_keeps_the_newest_files_of_its_own_prefix() {
             let dir = tempfile::tempdir().expect("tempdir");
             for day in 0..10 {
@@ -301,7 +322,7 @@ mod file {
             }
             let agent = dir.path().join(file_name("agent", 0));
             File::create(&agent).expect("create");
-            prune(dir.path(), "gui");
+            prune(dir.path(), "gui", &dir.path().join(file_name("gui", 9)));
             let mut left: Vec<_> = std::fs::read_dir(dir.path())
                 .expect("read dir")
                 .filter_map(Result::ok)
