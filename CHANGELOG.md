@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-11-04
+
+### Fixed
+
+- *(inject)* keep quotes in windows run command ([#2337](https://github.com/AprilNEA/OpenLogi/pull/2337))
+- *(overlay)* let go of the display on windows while nothing shows ([#2339](https://github.com/AprilNEA/OpenLogi/pull/2339))
+- *(device)* report a 0x1000 battery without mileage as a level ([#2333](https://github.com/AprilNEA/OpenLogi/pull/2333))
+
 ## [0.9.0] - 2026-11-03
 
 ### Added
