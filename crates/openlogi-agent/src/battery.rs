@@ -132,7 +132,6 @@ impl State {
         let present: BTreeSet<&str> = self
             .observations
             .iter()
-            .filter(|observation| observation.history_key.is_none())
             .map(|observation| observation.session_key.as_str())
             .collect();
         self.session_warned
@@ -145,6 +144,16 @@ impl State {
         let mut next = Snapshot::default();
         let mut alerts = Vec::new();
         for observation in &self.observations {
+            // The same pairing can gain an identity after an earlier probe
+            // failed. Keep its active episode when moving to durable history.
+            if let Some(key) = &observation.history_key {
+                if self.session_batteries.remove(&observation.session_key) {
+                    self.history.battery_devices.insert(key.clone());
+                }
+                if self.session_warned.remove(&observation.session_key) {
+                    self.history.warned.insert(key.clone());
+                }
+            }
             if !observation.online {
                 continue;
             }
@@ -424,6 +433,23 @@ mod tests {
         assert_eq!(read(&mut restarted, anonymous, Instant::now()).len(), 1);
         assert!(restarted.history.warned.is_empty());
     }
+    #[test]
+    fn an_anonymous_warning_episode_survives_identity_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.json");
+        let now = Instant::now();
+        let mut state = State::new(Some(path.clone()));
+        let mut anonymous = observation(8);
+        anonymous.history_key = None;
+        assert_eq!(read(&mut state, anonymous, now).len(), 1);
+        assert!(read(&mut state, observation(8), now).is_empty());
+
+        let mut restarted = State::new(Some(path));
+        assert!(read(&mut restarted, observation(8), now).is_empty());
+        assert!(read(&mut restarted, observation(26), now).is_empty());
+        assert_eq!(read(&mut restarted, observation(8), now).len(), 1);
+    }
+
     #[test]
     fn removed_anonymous_pairing_does_not_suppress_its_replacement() {
         let mut state = State::new(None);
