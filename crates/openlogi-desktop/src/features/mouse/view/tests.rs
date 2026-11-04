@@ -2,8 +2,9 @@ use gpui::{Entity, KeyDownEvent, Keystroke, Modifiers, TestAppContext, VisualTes
 use openlogi_core::binding::default_binding;
 use openlogi_core::config::Config;
 
-use super::ShortcutError::{ShiftedSymbol, Unrecognized};
 use super::*;
+use crate::features::binding_editor::ShortcutError::{ShiftedSymbol, Unrecognized};
+use crate::features::binding_editor::{Recording, ShortcutMode};
 use crate::features::mouse::leader_lines::Side;
 use crate::services::assets::AssetResolver;
 use crate::services::i18n::LOCALE_LOCK;
@@ -161,7 +162,7 @@ fn action_picker_renders_after_opening_through_the_inspector(cx: &mut TestAppCon
 
     click_picker_control(cx, "inspector-action-custom-shortcut-add");
     view.read_with(cx, |view, _| {
-        assert_eq!(view.invalid_drafts.shortcut, Some(Unrecognized));
+        assert_eq!(view.shortcut.error(), Some(Unrecognized));
         assert!(!view.invalid_drafts.application);
     });
     assert!(
@@ -172,7 +173,7 @@ fn action_picker_renders_after_opening_through_the_inspector(cx: &mut TestAppCon
     click_picker_control(cx, "inspector-action-custom-application-add");
     view.read_with(cx, |view, _| {
         assert!(view.action_picker_open);
-        assert_eq!(view.invalid_drafts.shortcut, Some(Unrecognized));
+        assert_eq!(view.shortcut.error(), Some(Unrecognized));
         assert!(view.invalid_drafts.application);
     });
     assert!(
@@ -185,7 +186,7 @@ fn action_picker_renders_after_opening_through_the_inspector(cx: &mut TestAppCon
     cx.simulate_input("Cmd+K");
     cx.update(|window, cx| window.draw(cx).clear(cx));
     view.read_with(cx, |view, _| {
-        assert_eq!(view.invalid_drafts.shortcut, None);
+        assert_eq!(view.shortcut.error(), None);
         assert!(view.invalid_drafts.application);
     });
     assert!(
@@ -202,7 +203,7 @@ fn action_picker_renders_after_opening_through_the_inspector(cx: &mut TestAppCon
 
     click_picker_control(cx, "inspector-current-action");
     view.read_with(cx, |view, cx| {
-        assert_eq!(view.custom_shortcut_input.read(cx).value(), "");
+        assert_eq!(view.shortcut.input().read(cx).value(), "");
         assert_eq!(view.custom_application_input.read(cx).value(), "");
         assert!(!view.invalid_drafts.application);
     });
@@ -226,7 +227,7 @@ fn action_picker_renders_after_opening_through_the_inspector(cx: &mut TestAppCon
     click_picker_control(cx, "inspector-current-action");
     click_picker_control(cx, "inspector-action-shortcut-hold");
     view.read_with(cx, |view, _| {
-        assert_eq!(view.shortcut_mode, ShortcutMode::Hold);
+        assert_eq!(view.shortcut.mode(), ShortcutMode::Hold);
     });
     click_picker_control(cx, "inspector-action-custom-shortcut-input");
     cx.simulate_input("Cmd+K");
@@ -236,7 +237,7 @@ fn action_picker_renders_after_opening_through_the_inspector(cx: &mut TestAppCon
 
     click_picker_control(cx, "inspector-current-action");
     view.read_with(cx, |view, _| {
-        assert_eq!(view.shortcut_mode, ShortcutMode::Tap);
+        assert_eq!(view.shortcut.mode(), ShortcutMode::Tap);
     });
     cx.update(|window, cx| {
         view.read(cx)
@@ -273,7 +274,7 @@ fn record_fills_the_custom_shortcut_from_the_next_key_press(cx: &mut TestAppCont
     click_picker_control(cx, "inspector-current-action");
     let shortcut_text = |cx: &mut VisualTestContext| {
         view.read_with(cx, |view, cx| {
-            view.custom_shortcut_input.read(cx).value().to_string()
+            view.shortcut.input().read(cx).value().to_string()
         })
     };
     let press = |cx: &mut VisualTestContext, keystroke: &str| {
@@ -308,7 +309,7 @@ fn record_fills_the_custom_shortcut_from_the_next_key_press(cx: &mut TestAppCont
     click_picker_control(cx, "inspector-action-custom-shortcut-record");
     press(cx, "f21");
     view.read_with(cx, |view, _| {
-        assert_eq!(view.invalid_drafts.shortcut, Some(Unrecognized));
+        assert_eq!(view.shortcut.error(), Some(Unrecognized));
     });
     assert!(
         cx.debug_bounds("inspector-action-custom-shortcut-error")
@@ -320,8 +321,8 @@ fn record_fills_the_custom_shortcut_from_the_next_key_press(cx: &mut TestAppCont
     click_picker_control(cx, "inspector-action-custom-shortcut-record");
     press_shifted_symbol(cx, "}");
     view.read_with(cx, |view, _| {
-        assert_eq!(view.invalid_drafts.shortcut, Some(ShiftedSymbol));
-        assert!(view.shortcut_recorder.is_none());
+        assert_eq!(view.shortcut.error(), Some(ShiftedSymbol));
+        assert!(!view.shortcut.is_recording());
     });
     assert_eq!(shortcut_text(cx), "Ctrl+Shift+PageUp");
 
@@ -329,7 +330,7 @@ fn record_fills_the_custom_shortcut_from_the_next_key_press(cx: &mut TestAppCont
     // key press reaches the newly focused field (#2138 review).
     click_picker_control(cx, "inspector-action-custom-shortcut-record");
     click_picker_control(cx, "inspector-action-custom-application-input");
-    view.read_with(cx, |view, _| assert!(view.shortcut_recorder.is_none()));
+    view.read_with(cx, |view, _| assert!(!view.shortcut.is_recording()));
     assert!(
         cx.debug_bounds("inspector-action-custom-shortcut-recording")
             .is_none()
@@ -444,12 +445,9 @@ fn a_selected_gesture_can_render_in_the_binding_inspector(cx: &mut TestAppContex
             ActionPickerContext {
                 open: true,
                 search: &view.action_search,
-                shortcut_input: &view.custom_shortcut_input,
                 application_input: &view.custom_application_input,
                 command_input: &view.custom_command_input,
-                shortcut_mode: view.shortcut_mode,
-                shortcut_recording: false,
-                shortcut_record_focus: &view.shortcut_record_focus,
+                shortcut: &view.shortcut,
                 invalid: view.invalid_drafts,
                 view: &entity,
             },
@@ -491,29 +489,31 @@ fn clearing_custom_action_drafts_resets_text_and_invalid_state(cx: &mut TestAppC
 
     cx.update(|window, cx| {
         view.update(cx, |view, cx| {
-            view.custom_shortcut_input
+            view.shortcut
+                .input()
                 .update(cx, |input, cx| input.set_value("Cmd+K", window, cx));
             view.custom_application_input
                 .update(cx, |input, cx| input.set_value("/bin/true", window, cx));
             view.custom_command_input
                 .update(cx, |input, cx| input.set_value("echo hi", window, cx));
+            view.shortcut.recorded(Recording::ShiftedSymbol, window, cx);
             view.invalid_drafts = InvalidDrafts {
-                shortcut: Some(ShiftedSymbol),
                 application: true,
                 command: true,
             };
-            view.shortcut_mode = ShortcutMode::Hold;
+            view.shortcut.set_mode(ShortcutMode::Hold);
 
             view.clear_custom_action_drafts(window, cx);
         });
     });
 
     view.update(cx, |view, cx| {
-        assert_eq!(view.custom_shortcut_input.read(cx).value(), "");
+        assert_eq!(view.shortcut.input().read(cx).value(), "");
         assert_eq!(view.custom_application_input.read(cx).value(), "");
         assert_eq!(view.custom_command_input.read(cx).value(), "");
         assert_eq!(view.invalid_drafts, InvalidDrafts::default());
-        assert_eq!(view.shortcut_mode, ShortcutMode::Tap);
+        assert_eq!(view.shortcut.error(), None);
+        assert_eq!(view.shortcut.mode(), ShortcutMode::Tap);
     });
     drop(view);
     cx.update(|window, _| window.remove_window());
