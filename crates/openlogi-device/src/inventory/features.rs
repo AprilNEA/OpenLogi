@@ -1489,8 +1489,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_legacy_battery_without_mileage_reads_its_four_levels() {
-        // Four levels, no mileage. 85 % is the draft's "full" range but the
-        // display buckets' "good".
+        // Four levels, no mileage. 85 is the draft's "full" range but the
+        // display buckets' "good". It is a level, not a percentage.
         let (probe, battery_probe, battery) =
             legacy_probe(Some([4, LEGACY_RECHARGEABLE]), [85, 50, 0]).await;
         assert_eq!(
@@ -1502,7 +1502,7 @@ mod tests {
         );
         assert!(!probe.capabilities_incomplete());
         let battery = battery.expect("a reading");
-        assert_eq!(battery.percentage, Some(85));
+        assert_eq!(battery.percentage, None);
         assert_eq!(battery.level, BatteryLevel::Full);
         assert_eq!(battery.status, BatteryStatus::Discharging);
     }
@@ -1517,7 +1517,9 @@ mod tests {
                 mileage: false,
             })
         );
-        assert_eq!(battery.expect("a reading").level, BatteryLevel::Low);
+        let battery = battery.expect("a reading");
+        assert_eq!(battery.percentage, None);
+        assert_eq!(battery.level, BatteryLevel::Low);
     }
 
     #[tokio::test]
