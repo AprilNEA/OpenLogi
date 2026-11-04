@@ -110,3 +110,29 @@ fn set_keyboard_binding_inserts_and_clears() {
     assert!(config.keyboard_bindings().get(&f1).is_none());
     assert!(config.keyboard_bindings().is_empty());
 }
+
+/// The G-Shift layer round-trips beside the normal map, and a trigger it
+/// leaves unbound keeps its normal action while G-Shift is held.
+#[test]
+fn keyboard_gshift_layer_round_trips_and_falls_back() {
+    let f1: KeyTrigger = "f1".parse().expect("parse key trigger");
+    let f2: KeyTrigger = "f2".parse().expect("parse key trigger");
+    let f12: KeyTrigger = "f12".parse().expect("parse key trigger");
+    let mut config = Config::default();
+    config.set_keyboard_binding(f12.clone(), Some(Action::GShift));
+    config.set_keyboard_binding(f1.clone(), Some(Action::VolumeUp));
+    config.set_keyboard_binding(f2.clone(), Some(Action::MuteVolume));
+    config.set_keyboard_gshift_binding(f1.clone(), Some(Action::MissionControl));
+
+    let keyboard = write_and_read(&config).keyboard;
+    assert_eq!(keyboard.action_for(&f1, false), Some(&Action::VolumeUp));
+    assert_eq!(
+        keyboard.action_for(&f1, true),
+        Some(&Action::MissionControl)
+    );
+    assert_eq!(keyboard.action_for(&f2, true), Some(&Action::MuteVolume));
+    assert_eq!(keyboard.action_for(&f12, true), Some(&Action::GShift));
+
+    config.set_keyboard_gshift_binding(f1.clone(), None);
+    assert!(config.keyboard_gshift_bindings().is_empty());
+}

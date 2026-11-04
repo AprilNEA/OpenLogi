@@ -41,10 +41,12 @@ profiles so they keep their native direction. v9 adds the `[apps]` alias table;
 v8 files load unchanged.
 v10 adds the per-device `disabled_keys` policy. Older readers reject a v10
 header before parsing its fields. A v9 file without the policy still loads.
+v11 adds the `[flow]` section; a file without it loads with Flow disabled.
+v12 adds `[keyboard.gshift_bindings]`; a v11 file without it still loads.
 
 ## Shape
 
-`schema_version` is required and currently `10`. `selected_device` is an
+`schema_version` is required and currently `12`. `selected_device` is an
 optional physical device key.
 
 `[app_settings]` contains application-wide preferences:
@@ -291,6 +293,10 @@ Common device fields are:
 `[keyboard.bindings]` contains global key triggers such as `f1` or
 `shift+command+f5`. Supported trigger modifiers are `shift`, `control`,
 `option`, and `command`; aliases such as `ctrl`, `alt`, and `cmd` are accepted.
+
+`[keyboard.gshift_bindings]` uses the same triggers. While a key bound to
+`GShift` is held, the other keys run their entry here, or their normal binding
+when they have none.
 
 ### Disabled keys
 

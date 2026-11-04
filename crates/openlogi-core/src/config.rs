@@ -65,6 +65,11 @@ use crate::binding::{Binding, ButtonId, GestureDirection};
 /// persisted shape or enum vocabulary changes; readers inspect this value
 /// before consuming the rest of the file.
 ///
+/// v12 adds `[keyboard.gshift_bindings]`, the F-row keys' G-Shift layer.
+/// Older files have none and run every key from `[keyboard.bindings]`. The
+/// bump makes a v11 build refuse a file that may hold the table at the
+/// version check, instead of failing on the unknown field.
+///
 /// v11 adds the `[flow]` section for cross-machine device handoff. Nothing
 /// older needs migrating, and a file without it loads as disabled Flow. The
 /// bump makes a v10 build refuse a file that may hold `[flow]` at the version
@@ -128,7 +133,7 @@ use crate::binding::{Binding, ButtonId, GestureDirection};
 /// next save; [`Config::load_from_path`] accepts supported versions `1` through
 /// [`SCHEMA_VERSION`] so an invalid or forward file fails loudly instead of
 /// silently losing bindings.
-pub const SCHEMA_VERSION: u32 = 11;
+pub const SCHEMA_VERSION: u32 = 12;
 
 /// Top-level config document.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -227,6 +232,21 @@ impl Config {
     #[must_use]
     pub fn keyboard_bindings(&self) -> &BTreeMap<KeyTrigger, Action> {
         &self.keyboard.bindings
+    }
+
+    /// Records (or, with `action = None`, clears) `trigger` in the keyboard's
+    /// G-Shift layer, device-agnostic like [`Self::set_keyboard_binding`].
+    pub fn set_keyboard_gshift_binding(&mut self, trigger: KeyTrigger, action: Option<Action>) {
+        match action {
+            Some(action) => self.keyboard.gshift_bindings.insert(trigger, action),
+            None => self.keyboard.gshift_bindings.remove(&trigger),
+        };
+    }
+
+    /// The keyboard's G-Shift layer (read accessor).
+    #[must_use]
+    pub fn keyboard_gshift_bindings(&self) -> &BTreeMap<KeyTrigger, Action> {
+        &self.keyboard.gshift_bindings
     }
 
     /// HID++ config key of the active device, if any.

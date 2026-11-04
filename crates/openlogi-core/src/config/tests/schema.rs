@@ -68,6 +68,36 @@ fn v9_without_disabled_keys_loads_and_a_save_stamps_the_current_schema() {
 }
 
 #[test]
+fn v11_without_keyboard_gshift_bindings_loads_and_a_save_stamps_the_current_schema() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    fs::write(
+        &path,
+        "schema_version = 11\n[keyboard.bindings]\nf12 = \"GShift\"\n",
+    )
+    .expect("write v11 config");
+
+    let (mut config, mut file) = ConfigFile::load_from_path(&path).expect("load v11 config");
+    assert_eq!(config.schema_version, SCHEMA_VERSION);
+    assert!(config.keyboard_gshift_bindings().is_empty());
+
+    let f1: KeyTrigger = "f1".parse().expect("parse key trigger");
+    config.set_keyboard_gshift_binding(f1.clone(), Some(Action::VolumeUp));
+    file.save(&config).expect("save config");
+
+    let saved = fs::read_to_string(&path).expect("read saved config");
+    assert!(
+        saved.starts_with(&format!("schema_version = {SCHEMA_VERSION}\n")),
+        "saved header: {saved}"
+    );
+    let reloaded = Config::load_from_path(&path).expect("reload config");
+    assert_eq!(
+        reloaded.keyboard_gshift_bindings().get(&f1),
+        Some(&Action::VolumeUp)
+    );
+}
+
+#[test]
 fn schema_version_zero_is_rejected() {
     let temp = tempfile::tempdir().expect("tempdir");
     let path = temp.path().join("config.toml");

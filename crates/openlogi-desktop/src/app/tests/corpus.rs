@@ -127,14 +127,10 @@ fn reviewed_detail_tabs(id: &str) -> Vec<DetailTab> {
         "mx-mechanical-mini-mac-001" | "mx-keys-s-001" | "mx-creative-keypad-001" => {
             vec![DetailTab::Keys, DetailTab::ActionsRing, DetailTab::Device]
         }
-        // The G915 is the same kind of keyboard, and its RGB effect engine
-        // (0x8071) and per-key lighting (0x8081) add the Lighting tab.
-        "g915-001" => vec![
-            DetailTab::Keys,
-            DetailTab::ActionsRing,
-            DetailTab::Lighting,
-            DetailTab::Device,
-        ],
+        // The G915's RGB effect engine (0x8071) and per-key lighting (0x8081)
+        // add the Lighting tab. They also make it G-series, whose keys are
+        // for games, so it gets no Actions Ring.
+        "g915-001" => vec![DetailTab::Keys, DetailTab::Lighting, DetailTab::Device],
         id => panic!("{id}: add reviewed desktop panel expectations"),
     }
 }

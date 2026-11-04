@@ -1094,6 +1094,37 @@ fn removing_the_edited_page_drops_its_draft(cx: &mut gpui::TestAppContext) {
     });
 }
 
+/// A commit saves to the open layer, so a draft started in one layer must
+/// not survive into the other.
+#[gpui::test]
+fn switching_the_binding_layer_drops_a_draft_for_the_old_one(cx: &mut gpui::TestAppContext) {
+    use crate::state::BindingLayer;
+
+    let (state, _commands) = crate::state::tests::keypad_pages::keypad_state();
+    cx.update(|cx| {
+        let state = cx.new(|_| state);
+        AppState::set_global(state, cx);
+        let view = cx.new(FunctionRowView::new);
+        view.update(cx, |view, cx| {
+            view.sync_edit_scope(AppState::try_read(cx));
+            view.select_key(Some(0), cx);
+            view.open_editor(PowerUserKind::Workflow, cx);
+            view.push_workflow_step(WorkflowStep::Delay { millis: 50 }, cx);
+        });
+
+        AppState::global(cx).update(cx, |state, _| {
+            let _ = state.set_binding_layer(BindingLayer::GShift);
+            assert_eq!(state.binding_layer(), BindingLayer::GShift);
+        });
+        view.update(cx, |view, cx| {
+            view.sync_edit_scope(AppState::try_read(cx));
+            assert_eq!(view.active_editor, None);
+            assert!(view.workflow_draft().is_empty());
+            assert_eq!(view.selected_key, Some(0));
+        });
+    });
+}
+
 #[gpui::test]
 fn switching_the_app_profile_drops_a_draft_for_the_old_one(cx: &mut gpui::TestAppContext) {
     let (state, _commands) = crate::state::tests::keypad_pages::keypad_state();

@@ -286,7 +286,8 @@ fn buttons_tab(
 fn gshift_layer_bar(cx: &mut Context<AppView>) -> Option<impl IntoElement> {
     let pal = theme::palette(cx);
     let state = AppState::try_read(cx)?;
-    if state.current_gaming_layout().is_none() || !state.current_device_is_persistent() {
+    let offers_gshift = state.current_gaming_layout().is_some() || state.current_gshift_keyboard();
+    if !offers_gshift || !state.current_device_is_persistent() {
         return None;
     }
     let gshift = state.binding_layer() == BindingLayer::GShift;
@@ -350,7 +351,8 @@ fn tab_body(
         .child(div().w_full().max_w(width.rems()).child(content))
 }
 
-/// Keys tab: the function-row remapper for a keyboard. A keypad's keys all
+/// Keys tab: the function-row remapper for a keyboard, with the G-Shift
+/// layer switch on a G-series keyboard. A keypad's keys all
 /// bind per app profile, so it gets the Buttons tab's profile selector; a
 /// keyboard's F-row binds globally and a selector there would mislead.
 fn keys_tab(
@@ -366,6 +368,7 @@ fn keys_tab(
         .flex_1()
         .w_full()
         .min_h_0()
+        .children(gshift_layer_bar(cx))
         .when(keypad, |tab| {
             tab.children(button_profile_scope_bar(profile_icons, app_catalog, cx))
         })

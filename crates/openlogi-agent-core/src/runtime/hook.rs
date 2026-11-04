@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use openlogi_core::binding::{
     Action, Binding, ButtonId, GestureDirection, SwipeAccumulator, default_binding,
 };
-use openlogi_core::config::KeyTrigger;
+use openlogi_core::config::{KeyTrigger, KeyboardConfig};
 use openlogi_hook::{
     EventDevice, EventDisposition, Hook, HookEvent, KeyEvent, MouseEvent, source_is_remappable,
 };
@@ -98,11 +98,11 @@ impl HookMaps {
 /// (orchestrator), the OS-hook callback, and the gesture watcher.
 pub type SharedHookMaps = Arc<RwLock<HookMaps>>;
 
-/// Shared keyboard trigger→action map for the function-key remapper. Unlike
-/// mouse bindings these are not per-app-profile (M1 scope — per the spec's
-/// non-goals), so a single map suffices. Keyed by the config `KeyTrigger`
-/// (keycode + modifiers).
-pub type SharedKeyboardBindings = Arc<RwLock<BTreeMap<KeyTrigger, Action>>>;
+/// Shared `[keyboard]` maps for the function-key remapper: the normal
+/// trigger→action map and its G-Shift layer. Unlike mouse bindings these are
+/// not per-app-profile (M1 scope — per the spec's non-goals). Keyed by the
+/// config `KeyTrigger` (keycode + modifiers).
+pub type SharedKeyboardBindings = Arc<RwLock<KeyboardConfig>>;
 
 /// Tracks which OS-hook gesture button (Middle/Back/Forward) is mid-hold and defers the
 /// swipe detection itself to a shared [`SwipeAccumulator`], which commits a swipe
@@ -225,6 +225,9 @@ thread_local! {
     /// key-down events are auto-repeat, not replacement presses; their first
     /// matching key-up ends the lifecycle.
     static HELD_KEYS: RefCell<HashSet<u16>> = RefCell::new(HashSet::new());
+    /// Function keys bound to G-Shift that are down. While any is, the other
+    /// keys run their G-Shift layer.
+    static SHIFT_KEYS: RefCell<HashSet<u16>> = RefCell::new(HashSet::new());
 }
 
 /// Whether a button event's physical source may be remapped/suppressed.
@@ -463,6 +466,14 @@ fn handle_moved(
     EventDisposition::PassThrough
 }
 
+/// Forget every key this thread holds, held actions and G-Shift alike, when
+/// capture was interrupted: their releases may never arrive, and a G-Shift
+/// left held would shift every later key.
+fn forget_held_keys() {
+    HELD_KEYS.with_borrow_mut(HashSet::clear);
+    SHIFT_KEYS.with_borrow_mut(HashSet::clear);
+}
+
 /// Remap one function-key edge without blocking the hook callback.
 fn handle_key(
     event: KeyEvent,
@@ -477,6 +488,10 @@ fn handle_key(
         modifiers,
     } = event;
     if !pressed {
+        if SHIFT_KEYS.with_borrow_mut(|keys| keys.remove(&keycode)) {
+            debug!(keycode, "keyboard G-Shift released");
+            return EventDisposition::Suppress;
+        }
         return HELD_KEYS.with_borrow_mut(|keys| {
             if keys.remove(&keycode) {
                 queued_event_disposition(dispatcher.try_hook_key_up(keycode))
@@ -485,17 +500,27 @@ fn handle_key(
             }
         });
     }
-    if HELD_KEYS.with_borrow(|keys| keys.contains(&keycode)) {
+    if HELD_KEYS.with_borrow(|keys| keys.contains(&keycode))
+        || SHIFT_KEYS.with_borrow(|keys| keys.contains(&keycode))
+    {
         return EventDisposition::Suppress;
     }
     let trigger = KeyTrigger { keycode, modifiers };
+    let shifted = SHIFT_KEYS.with_borrow(|keys| !keys.is_empty());
     let Some(action) = bindings
         .try_read()
         .ok()
-        .and_then(|map| map.get(&trigger).cloned())
+        .and_then(|maps| maps.action_for(&trigger, shifted).cloned())
     else {
         return EventDisposition::PassThrough;
     };
+    // G-Shift is the hook's own state, not an action to run: it lasts until
+    // the key's release above.
+    if action == Action::GShift {
+        debug!(keycode, "keyboard G-Shift held");
+        SHIFT_KEYS.with_borrow_mut(|keys| keys.insert(keycode));
+        return EventDisposition::Suppress;
+    }
 
     let action_target = capture_target();
     let queued = if action.is_held() {
@@ -557,7 +582,7 @@ pub fn start(
                 }
                 MouseEvent::CaptureInterrupted => {
                     HOLD.with_borrow_mut(HoldState::cancel);
-                    HELD_KEYS.with_borrow_mut(HashSet::clear);
+                    forget_held_keys();
                     dispatcher.cancel_hook_thread_buttons();
                     scroll.cancel_hooks();
                     EventDisposition::PassThrough
