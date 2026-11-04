@@ -1570,6 +1570,10 @@ impl Orchestrator {
             let Some(battery) = device.battery.as_ref() else {
                 continue;
             };
+            if !self.config.battery_preferences(&device.config_key).warn_low {
+                self.low_battery.observe_muted(&device.config_key, battery);
+                continue;
+            }
             if !self.low_battery.take_reading(
                 &self.config.app_settings,
                 &device.config_key,
@@ -1919,6 +1923,12 @@ impl Orchestrator {
             InventoryState::Ready { inventories, .. } => inventories.clone(),
             InventoryState::Pending | InventoryState::Unavailable => Vec::new(),
         }
+    }
+
+    /// Paired battery devices projected using the same configuration identity as the GUI.
+    #[must_use]
+    pub fn battery_observations(&self) -> Vec<crate::battery::Observation> {
+        crate::battery::observations(&self.config, &self.inventory())
     }
 
     /// The latest standalone raw-HID inventory snapshot.

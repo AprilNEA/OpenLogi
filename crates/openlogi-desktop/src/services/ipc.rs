@@ -65,6 +65,8 @@ pub use launch::mark_suite_quitting;
 use launch::spawn_agent;
 use link::Link;
 use reflex::SpawnReflex;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub use request::AcknowledgeDeviceSelection;
 use request::LinkLost;
 #[cfg(all(target_os = "macos", debug_assertions))]
 pub use request::PollEventMonitor;
@@ -1313,6 +1315,7 @@ mod tests {
             foreground: ForegroundApps::default(),
             lights: Vec::new(),
             flow: openlogi_ipc::FlowStatus::default(),
+            device_selection: None,
         }
     }
 

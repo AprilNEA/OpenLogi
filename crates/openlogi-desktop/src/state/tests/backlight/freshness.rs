@@ -12,6 +12,7 @@ fn dark() -> BacklightState {
 
 fn snapshot(cx: &mut gpui::TestAppContext, inventory: Vec<DeviceInventory>) {
     let snapshot = AgentSnapshot {
+        device_selection: None,
         status: AgentStatus {
             accessibility_granted: true,
             hook_installed: true,

@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use hidpp::channel::HidppChannel;
-use openlogi_core::device::{BatteryInfo, BatteryLevel, BatteryStatus};
+use openlogi_core::device::{BatteryFreshness, BatteryInfo, BatteryLevel, BatteryStatus};
 
 use super::events::{EventFeatureIndices, EventSubscriptionHandle};
 use super::features::{
@@ -104,6 +104,7 @@ fn hold_percentage_while_charging(
         return fresh;
     }
     let held = |p: &BatteryInfo| BatteryInfo {
+        freshness: BatteryFreshness::HeldPercentage,
         percentage: p.percentage,
         level: p.level,
         status: fresh.status,
@@ -118,6 +119,7 @@ fn hold_percentage_while_charging(
         }
         (BatteryProbe::Voltage(_) | BatteryProbe::Adc(_), Some(p)) => held(p),
         (BatteryProbe::Voltage(_) | BatteryProbe::Adc(_), None) => BatteryInfo {
+            freshness: BatteryFreshness::Current,
             percentage: None,
             level: BatteryLevel::Unknown,
             status: fresh.status,
@@ -156,7 +158,11 @@ async fn refresh_battery(
         ),
         BatteryRead::Unlinked => (None, true),
         BatteryRead::Unavailable => previous.map_or((None, false), |known| {
-            (known.battery.clone(), known.unlinked)
+            let mut battery = known.battery.clone();
+            if let Some(battery) = battery.as_mut() {
+                battery.freshness = BatteryFreshness::Cached;
+            }
+            (battery, known.unlinked)
         }),
     }
 }
@@ -326,7 +332,7 @@ async fn probe_or_reuse_registered(
         // A known device reaches this point only after it answered its ping,
         // so the last-known data still answers for it now.
         return match cached {
-            Some(c) => (c.probe.clone(), seen(id)),
+            Some(c) => (cached_probe(c), seen(id)),
             None => (fresh, seen(id)),
         };
     }
@@ -346,7 +352,7 @@ async fn probe_or_reuse_registered(
                     refresh_battery(channel, index, probe, registers, Some(&c.probe)).await;
                 return (entry.probe.clone(), CacheOutcome::Update(key, entry));
             }
-            (c.probe.clone(), seen(id))
+            (cached_probe(c), seen(id))
         }
         None => (ProbedFeatures::default(), seen(id)),
     }
@@ -356,9 +362,18 @@ async fn probe_or_reuse_registered(
 /// refresh ping. It is marked so that no caller reads it as a live answer,
 /// which would report an unreachable device healthy.
 fn unreachable_stand_in(cached: &Cached) -> ProbedFeatures {
-    let mut last_known = cached.probe.clone();
+    let mut last_known = cached_probe(cached);
     last_known.refresh = Refresh::Failed;
     last_known
+}
+
+/// Keep last-good display data while making its age explicit to warning consumers.
+pub(crate) fn cached_probe(cached: &Cached) -> ProbedFeatures {
+    let mut probe = cached.probe.clone();
+    if let Some(battery) = &mut probe.battery {
+        battery.freshness = BatteryFreshness::Cached;
+    }
+    probe
 }
 
 /// Carry a previous *complete* capability walk forward over one that a lost
@@ -416,12 +431,13 @@ pub(super) fn backfill_identity(fresh: &mut ProbedFeatures, cached: &ProbedFeatu
 
 #[cfg(test)]
 mod hold_tests {
-    use openlogi_core::device::{BatteryInfo, BatteryLevel, BatteryStatus};
+    use openlogi_core::device::{BatteryFreshness, BatteryInfo, BatteryLevel, BatteryStatus};
 
     use super::{BatteryProbe, hold_percentage_while_charging};
 
     fn battery(percentage: Option<u8>, status: BatteryStatus) -> BatteryInfo {
         BatteryInfo {
+            freshness: openlogi_core::device::BatteryFreshness::Current,
             percentage,
             level: BatteryLevel::Good,
             status,
@@ -454,6 +470,11 @@ mod hold_tests {
             );
             assert_eq!(held.percentage, Some(85), "mileage {mileage}");
             assert_eq!(held.status, BatteryStatus::Charging, "mileage {mileage}");
+            assert_eq!(held.usable_percentage(), None);
+            assert!(
+                !held.rearms_warning(),
+                "a held percentage is not a measured recovery"
+            );
         }
         let legacy = BatteryProbe::Legacy {
             index: 0,
@@ -592,6 +613,7 @@ mod hold_tests {
         };
         for probe in [level_only, BatteryProbe::StatusRegister] {
             let fresh = BatteryInfo {
+                freshness: BatteryFreshness::Current,
                 percentage: None,
                 level: BatteryLevel::Low,
                 status: BatteryStatus::Charging,
@@ -607,6 +629,7 @@ mod hold_tests {
         // A `0x07` charging report without a level stays unknown rather than
         // borrowing the last level.
         let no_level = BatteryInfo {
+            freshness: BatteryFreshness::Current,
             percentage: None,
             level: BatteryLevel::Unknown,
             status: BatteryStatus::Charging,
@@ -617,5 +640,87 @@ mod hold_tests {
             BatteryProbe::StatusRegister,
         );
         assert_eq!(live, no_level);
+    }
+    #[tokio::test]
+    async fn failed_refresh_replays_last_good_without_rearming_or_warning() {
+        use super::{CacheKey, Cached, ProbeTarget, probe_or_reuse};
+        use crate::channel::scripted::{ScriptedRawHidChannel, feature_error, scripted_channel};
+        use crate::inventory::events::EventFeatureIndices;
+        use crate::inventory::features::ProbedFeatures;
+        use openlogi_core::device::BatteryFreshness;
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        use std::time::Instant;
+
+        let fail = Arc::new(AtomicBool::new(true));
+        let responder_fail = fail.clone();
+        let (raw, _) = ScriptedRawHidChannel::with_dynamic_responder(move |request| {
+            if responder_fail.load(Ordering::Relaxed) {
+                return Some(feature_error(request, 0x08));
+            }
+            let mut reply = vec![0; 20];
+            reply[..4].copy_from_slice(&request[..4]);
+            reply[0] = 0x11;
+            reply[4] = 8;
+            Some(reply)
+        });
+        let channel = scripted_channel(raw).await;
+        let now = Instant::now();
+        let cached = Cached {
+            probe: ProbedFeatures {
+                battery: Some(battery(Some(8), BatteryStatus::Discharging)),
+                ..ProbedFeatures::default()
+            },
+            battery: Some(BatteryProbe::Legacy {
+                index: 1,
+                mileage: true,
+            }),
+            events: EventFeatureIndices::default(),
+            probed_at: now,
+        };
+        let key = CacheKey::Bolt {
+            unit_id: [1, 2, 3, 4],
+        };
+        let (failed, _) = probe_or_reuse(
+            &channel,
+            ProbeTarget {
+                index: 1,
+                registers: None,
+            },
+            Some(key.clone()),
+            Some(&cached),
+            true,
+            now,
+            None,
+        )
+        .await;
+        let reading = failed.battery.unwrap();
+        assert_eq!(
+            reading.percentage,
+            Some(8),
+            "last-good data remains available to the existing GUI"
+        );
+        assert_eq!(reading.freshness, BatteryFreshness::Cached);
+        assert!(!reading.needs_attention());
+        assert!(!reading.rearms_warning());
+        fail.store(false, Ordering::Relaxed);
+        let (recovered, _) = probe_or_reuse(
+            &channel,
+            ProbeTarget {
+                index: 1,
+                registers: None,
+            },
+            Some(key),
+            Some(&cached),
+            true,
+            now,
+            None,
+        )
+        .await;
+        let reading = recovered.battery.unwrap();
+        assert_eq!(reading.freshness, BatteryFreshness::Current);
+        assert!(reading.needs_attention());
     }
 }

@@ -222,6 +222,7 @@ pub(crate) fn status_register_battery_info(reading: StatusReading) -> BatteryInf
         map_status_register_level(reading.level)
     };
     BatteryInfo {
+        freshness: openlogi_core::device::BatteryFreshness::Current,
         percentage: None,
         level,
         status,
@@ -242,6 +243,7 @@ pub(crate) fn charge_register_battery_info(reading: ChargeReading) -> BatteryInf
         reading.percentage
     };
     BatteryInfo {
+        freshness: openlogi_core::device::BatteryFreshness::Current,
         percentage: Some(percentage),
         level: legacy_battery_level_from_percentage(percentage),
         status,
@@ -334,6 +336,7 @@ pub(crate) fn legacy_battery_info(
         _ => (Some(discharge_level), level_of(discharge_level)),
     };
     BatteryInfo {
+        freshness: openlogi_core::device::BatteryFreshness::Current,
         percentage: percentage.filter(|_| mileage),
         level,
         status,
@@ -426,6 +429,7 @@ mod tests {
             assert_eq!(
                 status_register_battery_info(reading),
                 BatteryInfo {
+                    freshness: openlogi_core::device::BatteryFreshness::Current,
                     percentage: None,
                     level,
                     status,
@@ -461,6 +465,7 @@ mod tests {
             assert_eq!(
                 charge_register_battery_info(reading),
                 BatteryInfo {
+                    freshness: openlogi_core::device::BatteryFreshness::Current,
                     percentage: Some(percentage),
                     level,
                     status,
