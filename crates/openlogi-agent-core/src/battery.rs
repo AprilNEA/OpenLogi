@@ -12,7 +12,7 @@ pub struct Observation {
     pub key: String,
     /// Stable physical identity for warning persistence, absent for anonymous devices.
     pub history_key: Option<String>,
-    /// Route and model evidence for an anonymous pairing, never persisted.
+    /// Route and model evidence for a connection session, never persisted.
     pub session_key: String,
     /// Offline pairings retain session history but never appear in the menu.
     pub online: bool,
@@ -36,7 +36,9 @@ pub(super) fn observations(config: &Config, inventories: &[DeviceInventory]) -> 
             let stable = DeviceStableId::from_parts(route.as_ref(), paired.slot, serial, unit);
             // A receiver slot identifies a route, not the device paired there.
             let history_key = identity.config_key();
-            let session_key = format!("{}:{:?}", stable.runtime_key(), paired.wpid);
+            // A direct device's runtime key gains its identity after probing;
+            // its connection session must survive that transition.
+            let session_key = format!("{}:{:?}", stable.route_key(), paired.wpid);
             let resolved_key = config.resolve_device_key(&stable, Some(&identity));
             let preferences = resolved_key
                 .as_ref()
@@ -152,6 +154,24 @@ mod tests {
                 capabilities: None,
                 settings_revision: 0,
             }],
+        }
+    }
+
+    #[test]
+    fn direct_battery_session_survives_identity_recovery() {
+        let config = Config::default();
+        for product in [0xb369, 0xc343] {
+            let identified = inventory(product, 0xff, [1, 2, 3, 4]);
+            let mut anonymous = identified.clone();
+            anonymous.paired[0].model_info = None;
+            let before = observations(&config, &[anonymous]).remove(0);
+            let after = observations(&config, &[identified]).remove(0);
+            assert_eq!(before.history_key, None);
+            assert_eq!(after.history_key.as_deref(), Some("unit:01020304"));
+            assert_eq!(
+                before.session_key, after.session_key,
+                "product {product:04x}"
+            );
         }
     }
 
