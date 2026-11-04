@@ -15,7 +15,7 @@ use std::io;
 use std::sync::{Arc, Mutex, PoisonError, RwLock, mpsc};
 use std::time::{Duration, Instant};
 
-use openlogi_core::binding::{Action, Binding, ButtonId};
+use openlogi_core::binding::{Action, Binding, ButtonId, Effect};
 use tracing::{debug, info, warn};
 
 use self::button::{
@@ -138,23 +138,48 @@ impl ActionDispatchTarget {
 /// RAII path.
 #[derive(Default)]
 struct HeldShortcuts {
-    by_press: HashMap<PressToken, openlogi_inject::HeldChord>,
+    by_press: HashMap<PressToken, HeldOutput>,
+}
+
+/// The synthetic output one accepted press keeps down.
+enum HeldOutput {
+    Chord(openlogi_inject::HeldChord),
+    /// A button remapped to a mouse click holds that click for as long as it
+    /// is pressed, so dragging with it works like the native button.
+    Mouse(
+        #[expect(dead_code, reason = "owned only so dropping it releases the button")]
+        openlogi_inject::HeldMouseButton,
+    ),
+}
+
+/// Whether `action` keeps output down for the length of its press.
+fn holds_output(action: &Action) -> bool {
+    action.held_chord().is_some() || matches!(action.effect(), Effect::Click(_))
 }
 
 impl HeldShortcuts {
     fn start(&mut self, press: &PressToken, action: &Action) -> bool {
-        let Some((combo, keys)) = action.held_chord() else {
-            return false;
-        };
-        match self.by_press.entry(press.clone()) {
-            std::collections::hash_map::Entry::Occupied(mut held) => {
-                held.get_mut().replace(combo, keys);
+        if let Some((combo, keys)) = action.held_chord() {
+            match self.by_press.entry(press.clone()) {
+                std::collections::hash_map::Entry::Occupied(mut held) => match held.get_mut() {
+                    HeldOutput::Chord(chord) => chord.replace(combo, keys),
+                    held @ HeldOutput::Mouse(_) => {
+                        *held = HeldOutput::Chord(openlogi_inject::press_hold(combo, keys));
+                    }
+                },
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    slot.insert(HeldOutput::Chord(openlogi_inject::press_hold(combo, keys)));
+                }
             }
-            std::collections::hash_map::Entry::Vacant(slot) => {
-                slot.insert(openlogi_inject::press_hold(combo, keys));
-            }
+            return true;
         }
-        true
+        if let Effect::Click(button) = action.effect()
+            && let Some(held) = openlogi_inject::press_mouse_hold(button)
+        {
+            self.by_press.insert(press.clone(), HeldOutput::Mouse(held));
+            return true;
+        }
+        false
     }
 
     fn end(&mut self, press: &PressToken) {
@@ -687,7 +712,7 @@ impl ButtonEventHandler {
         device_key: Option<&str>,
         target: ActionDispatchTarget,
     ) {
-        if action.held_chord().is_some() && target.resolve(action).is_none() {
+        if holds_output(action) && target.resolve(action).is_none() {
             return;
         }
         if matches!(action, Action::DpiShift) {
