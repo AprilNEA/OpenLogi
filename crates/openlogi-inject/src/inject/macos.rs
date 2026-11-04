@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex, PoisonError};
 
 use openlogi_core::binding::{
-    Action, Effect, KeyCombo, KeyboardUsage, MediaKey, MouseButton, NativeAction, Shortcut,
+    Action, Effect, KeyCombo, MediaKey, MouseButton, NativeAction, Shortcut, ShortcutKey,
 };
 
 use super::{HeldKey, HeldModifiers, KeyPhase};
@@ -461,24 +461,42 @@ fn text_events(text: &str, vk: u16) -> Option<Vec<CGEvent>> {
 /// keycode. Used by the workflow sequencer's `PressKey` step.
 pub(super) fn press_combo(combo: &KeyCombo) {
     // Super is Command on macOS, so it selects a layout's Command layer too.
-    let Some(vk) = key_for(combo.key(), combo.has_command() || combo.has_super()) else {
+    let Some(vk) = key_for(combo.key(), combo_command(combo)) else {
         tracing::warn!(
-            usage = combo.key().code(),
-            "shortcut usage has no macOS mapping"
+            chord = %combo.rendered_label(),
+            "shortcut key has no macOS mapping"
         );
         return;
     };
     post_key(vk, combo_flags(combo));
 }
 
-/// The key that types `usage`'s character under the user's keyboard layout;
+/// The key that types `key`'s character under the user's keyboard layout;
 /// keys a layout never moves, and characters it types only with Shift or
-/// Option, keep their US ANSI position (see [`keyboard_layout`]).
-fn key_for(usage: KeyboardUsage, command: bool) -> Option<u16> {
-    usage
-        .ascii_char()
-        .and_then(|ch| layout_key(ch, command))
-        .or_else(|| hid_usage_to_macos(usage.code()))
+/// Option, keep their US ANSI position (see [`keyboard_layout`]). The US
+/// position of `+` is `=`, pressed with the Shift [`implies_shift`] adds.
+fn key_for(key: ShortcutKey, command: bool) -> Option<u16> {
+    layout_typed_key(key, command).or_else(|| hid_usage_to_macos(key.us_position().0.code()))
+}
+
+/// The key that types `key`'s character on the active layout with no
+/// modifier held, or `None` when it keeps its US position.
+fn layout_typed_key(key: ShortcutKey, command: bool) -> Option<u16> {
+    key.character().and_then(|ch| layout_key(ch, command))
+}
+
+/// Whether `combo`'s key needs Shift held beyond the chord's own modifiers:
+/// `+` on a layout with no key of its own for it, which then presses the US
+/// Shift+`=`. A German or Swiss layout types `+` without Shift.
+pub(super) fn implies_shift(combo: &KeyCombo) -> bool {
+    let key = combo.key();
+    key.us_position().1 && layout_typed_key(key, combo_command(combo)).is_none()
+}
+
+/// Whether `combo` holds Command. Super is Command on macOS, so it selects a
+/// layout's Command layer too.
+fn combo_command(combo: &KeyCombo) -> bool {
+    combo.has_command() || combo.has_super()
 }
 
 /// Emit the physical-key edges whose shared ownership changed, preserving the
@@ -505,10 +523,10 @@ pub(super) fn hold_keys(
 
 fn post_held_key(key: HeldKey, phase: KeyPhase, modifiers: &mut HeldModifiers) {
     let Some((vk, flags)) = held_key_event(key, phase, modifiers) else {
-        if let HeldKey::Key(usage) = key {
+        if let HeldKey::Key(key) = key {
             tracing::warn!(
-                usage = usage.code(),
-                "held shortcut usage has no macOS mapping — edge ignored"
+                ?key,
+                "held shortcut key has no macOS mapping — edge ignored"
             );
         }
         return;
@@ -518,8 +536,7 @@ fn post_held_key(key: HeldKey, phase: KeyPhase, modifiers: &mut HeldModifiers) {
 
 /// The key each held chord key went down on, so its release lifts the same
 /// key even if the keyboard layout changed while it was held.
-static HELD_KEY_PRESSES: LazyLock<Mutex<HashMap<KeyboardUsage, u16>>> =
-    LazyLock::new(Mutex::default);
+static HELD_KEY_PRESSES: LazyLock<Mutex<HashMap<ShortcutKey, u16>>> = LazyLock::new(Mutex::default);
 
 fn held_key_event(
     key: HeldKey,
@@ -532,24 +549,24 @@ fn held_key_event(
         HeldKey::Shift => 0x38,
         HeldKey::Alt => 0x3a,
         HeldKey::Control => 0x3b,
-        HeldKey::Key(usage) => held_key(usage, phase, *modifiers)?,
+        HeldKey::Key(key) => held_key(key, phase, *modifiers)?,
     };
     Some((vk, held_modifier_flags(*modifiers)))
 }
 
-fn held_key(usage: KeyboardUsage, phase: KeyPhase, modifiers: HeldModifiers) -> Option<u16> {
+fn held_key(key: ShortcutKey, phase: KeyPhase, modifiers: HeldModifiers) -> Option<u16> {
     // The map only caches posted keys; a panic elsewhere leaves it consistent.
     let mut presses = HELD_KEY_PRESSES
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
-    let resolve = || key_for(usage, modifiers.contains(HeldKey::Command));
+    let resolve = || key_for(key, modifiers.contains(HeldKey::Command));
     match phase {
         KeyPhase::Down => {
             let vk = resolve()?;
-            presses.insert(usage, vk);
+            presses.insert(key, vk);
             Some(vk)
         }
-        KeyPhase::Up => presses.remove(&usage).or_else(resolve),
+        KeyPhase::Up => presses.remove(&key).or_else(resolve),
     }
 }
 
@@ -582,10 +599,10 @@ fn held_modifier_flags(modifiers: HeldModifiers) -> CGEventFlags {
 
 fn combo_flags(combo: &KeyCombo) -> CGEventFlags {
     let mut flags = CGEventFlags::CGEventFlagNull;
-    if combo.has_command() || combo.has_super() {
+    if combo_command(combo) {
         flags |= CGEventFlags::CGEventFlagCommand;
     }
-    if combo.has_shift() {
+    if combo.has_shift() || implies_shift(combo) {
         flags |= CGEventFlags::CGEventFlagShift;
     }
     if combo.has_control() {

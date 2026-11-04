@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex, PoisonError};
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-use openlogi_core::binding::KeyboardUsage;
+use openlogi_core::binding::ShortcutKey;
 use openlogi_core::binding::{Action, HeldKeys, KeyCombo};
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use openlogi_core::binding::{Script, WorkflowStep};
@@ -64,18 +64,21 @@ enum HeldKey {
     Control,
     Shift,
     Alt,
-    Key(KeyboardUsage),
+    Key(ShortcutKey),
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 impl HeldKey {
-    /// The output a chord's ordinary key `usage` holds. A usage the platform
-    /// presses as another key shares that key's owner, as Cmd shares
-    /// Control's on Linux and Windows: macOS presses F13 for Print Screen.
-    fn key(usage: KeyboardUsage) -> Self {
+    /// The output a chord's ordinary key holds. A usage the platform presses
+    /// as another key shares that key's owner, as Cmd shares Control's on
+    /// Linux and Windows: macOS presses F13 for Print Screen.
+    fn key(key: ShortcutKey) -> Self {
         #[cfg(target_os = "macos")]
-        let usage = macos::pressed_usage(usage);
-        Self::Key(usage)
+        let key = match key {
+            ShortcutKey::Usage(usage) => ShortcutKey::Usage(macos::pressed_usage(usage)),
+            ShortcutKey::Plus => ShortcutKey::Plus,
+        };
+        Self::Key(key)
     }
 }
 
@@ -206,7 +209,9 @@ fn held_keys(combo: &KeyCombo, held: HeldKeys) -> Vec<HeldKey> {
     if combo.has_control() {
         keys.push(HeldKey::Control);
     }
-    if combo.has_shift() {
+    // A key the active layout types only with Shift (`+` on a US layout)
+    // holds Shift as well, owned like a written one.
+    if combo.has_shift() || platform::implies_shift(combo) {
         keys.push(HeldKey::Shift);
     }
     if combo.has_option() {
@@ -972,6 +977,40 @@ mod tests {
             output.transition(Some((&command_b, HeldKeys::WholeChord)), None),
             HoldTransition {
                 up: vec![HeldKey::Command, HeldKey::Key(command_b.key())],
+                down: vec![],
+                tap: None,
+            }
+        );
+    }
+
+    /// Holding `Ctrl++` holds the Shift the US position needs and shares it
+    /// with a chord that writes Shift: releasing either leaves it down for
+    /// the other. Linux always presses `+` there; macOS and Windows only when
+    /// the active layout has no key of its own for it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_held_plus_owns_the_shift_its_position_needs() {
+        let plus = combo("Ctrl++");
+        let shifted = combo("Shift+A");
+        assert_eq!(
+            super::held_keys(&plus, HeldKeys::WholeChord),
+            vec![HeldKey::Control, HeldKey::Shift, HeldKey::Key(plus.key())]
+        );
+
+        let mut output = HeldOutput::default();
+        output.transition(None, Some((&plus, HeldKeys::WholeChord)));
+        assert_eq!(
+            output.transition(None, Some((&shifted, HeldKeys::WholeChord))),
+            HoldTransition {
+                up: vec![],
+                down: vec![HeldKey::Key(shifted.key())],
+                tap: None,
+            }
+        );
+        assert_eq!(
+            output.transition(Some((&plus, HeldKeys::WholeChord)), None),
+            HoldTransition {
+                up: vec![HeldKey::Control, HeldKey::Key(plus.key())],
                 down: vec![],
                 tap: None,
             }

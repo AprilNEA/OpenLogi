@@ -215,6 +215,17 @@ mod tests {
         assert_eq!(french.key_for('3', true), None);
     }
 
+    /// German gives `+` a key of its own, which a `Ctrl++` presses without
+    /// Shift; on a US layout it sits behind Shift, so it keeps the US
+    /// position, Shift+`=`.
+    #[test]
+    fn german_types_plus_on_its_own_key_and_us_only_behind_shift() {
+        let german = installed("com.apple.keylayout.German");
+        assert_eq!(german.key_for('+', true), Some(0x1e));
+        let us = installed("com.apple.keylayout.US");
+        assert_eq!(us.key_for('+', true), None);
+    }
+
     #[test]
     fn dvorak_moves_punctuation_too() {
         let dvorak = installed("com.apple.keylayout.Dvorak");

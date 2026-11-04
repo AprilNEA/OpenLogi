@@ -181,7 +181,9 @@ pub use succession::Identity;
 ///      chooses on release, so the overlay reports the pointer leaving every
 ///      slot as well as entering one. `ActionRingInvocation::size` appended,
 ///      the size the overlay draws the ring at.
-pub const PROTOCOL_VERSION: u32 = 45;
+/// v46: `KeyCombo`'s key is a `ShortcutKey`, a HID usage or the `+` key, so
+///      a chord's key gains a variant index ahead of its usage.
+pub const PROTOCOL_VERSION: u32 = 46;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to

@@ -1,7 +1,7 @@
 use std::sync::PoisonError;
 
 use core_graphics::event::{CGEventFlags, CGEventType, EventField};
-use openlogi_core::binding::{KeyboardUsage, Shortcut};
+use openlogi_core::binding::{KeyboardUsage, Shortcut, ShortcutKey};
 
 use super::{
     HELD_KEY_PRESSES, LOCK_SCREEN_CHORD, TYPED_TEXT_KEYS, combo, held_key_event,
@@ -37,7 +37,7 @@ fn combo_table_pins_representative_shortcuts() {
     // variant is checked here automatically instead of depending on
     // someone remembering to extend a second, independent list.
     for &shortcut in Shortcut::ALL {
-        let key = combo(shortcut).key().code();
+        let key = combo(shortcut).key().us_position().0.code();
         assert!(
             hid_usage_to_macos(key).is_some(),
             "{shortcut:?} table entry has no macOS virtual-key mapping"
@@ -53,7 +53,7 @@ fn lock_screen_chord_parses_and_resolves() {
     let chord = parse_shortcut(LOCK_SCREEN_CHORD);
     assert_eq!(chord.rendered_label(), "Cmd+Ctrl+Q");
     assert!(
-        hid_usage_to_macos(chord.key().code()).is_some(),
+        hid_usage_to_macos(chord.key().us_position().0.code()).is_some(),
         "the Lock Screen chord has no macOS virtual-key mapping"
     );
 }
@@ -107,7 +107,8 @@ fn typed_text_releases_each_character_and_carries_no_modifier() {
 /// typed text goes down on the next key no hold owns.
 #[test]
 fn typed_text_skips_a_key_a_held_chord_keeps_down() {
-    let usage = KeyboardUsage::try_from(0x04).expect("0x04 is a valid keyboard usage");
+    let usage =
+        ShortcutKey::Usage(KeyboardUsage::try_from(0x04).expect("0x04 is a valid keyboard usage"));
     HELD_KEY_PRESSES
         .lock()
         .unwrap_or_else(PoisonError::into_inner)

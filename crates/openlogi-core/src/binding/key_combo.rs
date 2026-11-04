@@ -118,20 +118,69 @@ const fn validate_keyboard_usage(value: &u8) -> Result<(), KeyboardUsageError> {
     }
 }
 
+/// The `=` key, whose US-layout Shift layer types `+`.
+const EQUALS: KeyboardUsage = match KeyboardUsage::try_new(0x2e) {
+    Ok(usage) => usage,
+    Err(_) => panic!("0x2e is a supported keyboard usage"),
+};
+
+/// The ordinary key of a [`KeyCombo`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ShortcutKey {
+    /// The key at this US-layout position. A key that types a character can
+    /// still move with the user's layout: see [`KeyboardUsage::ascii_char`].
+    Usage(KeyboardUsage),
+    /// The key that types `+`. It has no position of its own: a US layout
+    /// types it with Shift+`=`, while German or Swiss layouts give it its own
+    /// key, so each backend looks it up on the active layout.
+    Plus,
+}
+
+impl ShortcutKey {
+    /// The character this key types with no modifier held, for backends that
+    /// find the key typing it under the user's layout. `None` for keys a
+    /// layout never moves, as [`KeyboardUsage::ascii_char`].
+    #[must_use]
+    pub fn character(self) -> Option<char> {
+        match self {
+            Self::Usage(usage) => usage.ascii_char(),
+            Self::Plus => Some('+'),
+        }
+    }
+
+    /// Where a US layout types this key: the key's usage, and whether Shift
+    /// must be held as well. Backends fall back to it when the active layout
+    /// has no key typing [`Self::character`] on its own, or cannot be read.
+    #[must_use]
+    pub const fn us_position(self) -> (KeyboardUsage, bool) {
+        match self {
+            Self::Usage(usage) => (usage, false),
+            Self::Plus => (EQUALS, true),
+        }
+    }
+
+    fn label(self) -> String {
+        match self {
+            Self::Usage(usage) => usage.label(),
+            Self::Plus => "+".to_string(),
+        }
+    }
+}
+
 /// A platform-neutral keyboard chord.
 ///
 /// Human-readable formats store the canonical text chord; binary IPC stores
-/// validated modifier bits and a USB HID usage.
+/// validated modifier bits and the [`ShortcutKey`].
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct KeyCombo {
     modifiers: u8,
-    key: KeyboardUsage,
+    key: ShortcutKey,
 }
 
 #[derive(Serialize, Deserialize)]
 struct KeyComboWire {
     modifiers: u8,
-    key: KeyboardUsage,
+    key: ShortcutKey,
 }
 
 impl TryFrom<KeyComboWire> for KeyCombo {
@@ -190,9 +239,9 @@ impl<'de> Deserialize<'de> for KeyCombo {
 }
 
 impl KeyCombo {
-    /// USB HID keyboard usage for the ordinary key.
+    /// The chord's ordinary key.
     #[must_use]
-    pub const fn key(&self) -> KeyboardUsage {
+    pub const fn key(&self) -> ShortcutKey {
         self.key
     }
 
@@ -298,9 +347,23 @@ impl FromStr for KeyCombo {
             return Err(KeyComboParseError::Empty);
         }
 
+        // `+` joins the tokens, so a `+` key can only come last, written as a
+        // trailing `++` (`Ctrl++`) or alone.
+        let (body, plus) = if input == "+" {
+            ("", true)
+        } else if let Some(body) = input.strip_suffix("++") {
+            (body, true)
+        } else {
+            (input, false)
+        };
+        let tokens = body
+            .split('+')
+            .filter(|_| !body.is_empty())
+            .chain(plus.then_some("plus"));
+
         let mut modifiers = 0;
         let mut key = None;
-        for raw in input.split('+') {
+        for raw in tokens {
             let token = raw.trim();
             if token.is_empty() {
                 return Err(KeyComboParseError::UnknownToken(raw.to_string()));
@@ -332,8 +395,11 @@ fn parse_modifier(token: &str) -> Option<u8> {
     }
 }
 
-fn parse_key(token: &str) -> Result<KeyboardUsage, KeyComboParseError> {
+fn parse_key(token: &str) -> Result<ShortcutKey, KeyComboParseError> {
     let lowercase = token.to_ascii_lowercase();
+    if lowercase == "plus" {
+        return Ok(ShortcutKey::Plus);
+    }
     let usage = if lowercase.len() == 1 {
         let character = lowercase.chars().next().unwrap_or_default();
         match character {
@@ -383,21 +449,100 @@ fn parse_key(token: &str) -> Result<KeyboardUsage, KeyComboParseError> {
             _ => return Err(KeyComboParseError::UnknownToken(token.to_string())),
         }
     };
-    KeyboardUsage::try_from(usage).map_err(|_| KeyComboParseError::UnknownToken(token.to_string()))
+    KeyboardUsage::try_from(usage)
+        .map(ShortcutKey::Usage)
+        .map_err(|_| KeyComboParseError::UnknownToken(token.to_string()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// The HID usage of `combo`'s key, which must have one.
+    fn code(combo: &KeyCombo) -> u8 {
+        match combo.key() {
+            ShortcutKey::Usage(usage) => usage.code(),
+            ShortcutKey::Plus => panic!("{combo:?} names the plus key, which has no usage"),
+        }
+    }
+
+    /// `+` has no position of its own (#1607): it is written `Ctrl++`,
+    /// `Ctrl+Plus` or `+` alone, renders as `Ctrl++`, and is a different key
+    /// from Shift+`=`, which names a US position.
     #[test]
-    fn ascii_char_names_the_character_a_layout_can_move() {
+    fn plus_is_its_own_key() {
+        for input in ["Ctrl++", "ctrl+plus", "Ctrl + Plus", "CTRL+PLUS"] {
+            let combo = input.parse::<KeyCombo>().expect(input);
+            assert_eq!(combo.key(), ShortcutKey::Plus, "{input}");
+            assert!(combo.has_control() && !combo.has_shift(), "{input}");
+            assert_eq!(combo.rendered_label(), "Ctrl++", "{input}");
+            assert_eq!(combo.rendered_label().parse::<KeyCombo>(), Ok(combo));
+        }
+        let alone = "+".parse::<KeyCombo>().expect("a bare plus");
+        assert_eq!(alone.key(), ShortcutKey::Plus);
+        assert_eq!(alone.rendered_label(), "+");
+        assert_eq!(
+            "Cmd+Shift++"
+                .parse::<KeyCombo>()
+                .map(|combo| combo.rendered_label()),
+            Ok("Cmd+Shift++".to_string())
+        );
+
+        let shifted = "Ctrl+Shift+=".parse::<KeyCombo>().expect("Shift+=");
+        assert_ne!(shifted.key(), ShortcutKey::Plus);
+        assert_eq!(shifted.rendered_label(), "Ctrl+Shift+=");
+    }
+
+    #[test]
+    fn plus_falls_back_to_shift_equals_on_a_us_layout() {
+        assert_eq!(ShortcutKey::Plus.character(), Some('+'));
+        let (usage, shift) = ShortcutKey::Plus.us_position();
+        assert_eq!((usage.code(), shift), (0x2e, true));
+        let a = ShortcutKey::Usage(KeyboardUsage::try_new(0x04).expect("A"));
+        assert_eq!(
+            a.us_position(),
+            (KeyboardUsage::try_new(0x04).expect("A"), false)
+        );
+        assert_eq!(a.character(), Some('a'));
+    }
+
+    #[test]
+    fn a_misplaced_plus_is_rejected() {
+        assert_eq!(
+            "Ctrl+A++".parse::<KeyCombo>(),
+            Err(KeyComboParseError::MultipleKeys)
+        );
+        assert_eq!(
+            "Ctrl++A".parse::<KeyCombo>(),
+            Err(KeyComboParseError::UnknownToken(String::new()))
+        );
+        assert_eq!(
+            "Ctrl+".parse::<KeyCombo>(),
+            Err(KeyComboParseError::UnknownToken(String::new()))
+        );
+        // A trailing `++` with nothing before it is still the key alone.
+        assert_eq!(
+            "++".parse::<KeyCombo>().map(|combo| combo.key()),
+            Ok(ShortcutKey::Plus)
+        );
+    }
+
+    #[test]
+    fn plus_crosses_the_binary_wire() {
+        let combo = "Ctrl++".parse::<KeyCombo>().expect("Ctrl++");
+        let wire = KeyComboWire::from(combo.clone());
+        assert_eq!(wire.key, ShortcutKey::Plus);
+        assert_eq!(KeyCombo::try_from(wire), Ok(combo));
+    }
+
+    #[test]
+    fn character_names_the_character_a_layout_can_move() {
         let key = |text: &str| text.parse::<KeyCombo>().expect("valid shortcut").key();
-        assert_eq!(key("Cmd+S").ascii_char(), Some('s'));
-        assert_eq!(key("Cmd+3").ascii_char(), Some('3'));
-        assert_eq!(key("Cmd+[").ascii_char(), Some('['));
+        assert_eq!(key("Cmd+S").character(), Some('s'));
+        assert_eq!(key("Cmd+3").character(), Some('3'));
+        assert_eq!(key("Cmd+[").character(), Some('['));
         for fixed in ["F5", "Left", "Enter", "Escape", "Tab"] {
-            assert_eq!(key(fixed).ascii_char(), None, "{fixed}");
+            assert_eq!(key(fixed).character(), None, "{fixed}");
         }
     }
 
@@ -408,7 +553,7 @@ mod tests {
             .expect("valid shortcut failed");
         assert!(combo.has_super());
         assert!(!combo.has_command());
-        assert_eq!(combo.key().code(), 0x4d);
+        assert_eq!(code(&combo), 0x4d);
         assert_eq!(combo.rendered_label(), "Super+End");
 
         // `Win` and `Meta` name the same logo key (#893), not Command.
@@ -433,7 +578,7 @@ mod tests {
             .expect("valid shortcut failed");
         assert!(combo.has_command());
         assert!(combo.has_shift());
-        assert_eq!(combo.key().code(), 0x13);
+        assert_eq!(code(&combo), 0x13);
         assert_eq!(combo.rendered_label(), "Cmd+Shift+P");
 
         let combo = "Ctrl+Alt+Left"
@@ -441,14 +586,14 @@ mod tests {
             .expect("valid shortcut failed");
         assert!(combo.has_control());
         assert!(combo.has_option());
-        assert_eq!(combo.key().code(), 0x50);
+        assert_eq!(code(&combo), 0x50);
         assert_eq!(combo.rendered_label(), "Ctrl+Alt+Left");
     }
 
     #[test]
     fn a_uses_its_platform_neutral_hid_usage() {
         let combo = "Cmd+A".parse::<KeyCombo>().expect("valid shortcut failed");
-        assert_eq!(combo.key().code(), 0x04);
+        assert_eq!(code(&combo), 0x04);
         assert_eq!(combo.rendered_label(), "Cmd+A");
     }
 
@@ -456,7 +601,7 @@ mod tests {
     /// their full names and the abbreviations printed on keycaps (#2085).
     #[test]
     fn parses_the_editing_cluster_and_its_keycap_abbreviations() {
-        for (names, code, label) in [
+        for (names, usage, label) in [
             (&["Insert", "Ins"][..], 0x49, "Insert"),
             (&["Delete", "Del"][..], 0x4c, "Delete"),
             (&["Home"][..], 0x4a, "Home"),
@@ -466,9 +611,9 @@ mod tests {
         ] {
             for name in names {
                 let combo = name.parse::<KeyCombo>().expect("editing key must parse");
-                assert_eq!(combo.key().code(), code, "{name}");
+                assert_eq!(code(&combo), usage, "{name}");
                 assert_eq!(combo.rendered_label(), label, "{name}");
-                assert_eq!(combo.key().ascii_char(), None, "{name}");
+                assert_eq!(combo.key().character(), None, "{name}");
             }
         }
         let combo = "Shift+Ins"
@@ -490,9 +635,9 @@ mod tests {
             "PrtScr",
         ] {
             let combo = name.parse::<KeyCombo>().expect("Print Screen must parse");
-            assert_eq!(combo.key().code(), 0x46, "{name}");
+            assert_eq!(code(&combo), 0x46, "{name}");
             assert_eq!(combo.rendered_label(), "PrintScreen", "{name}");
-            assert_eq!(combo.key().ascii_char(), None, "{name}");
+            assert_eq!(combo.key().character(), None, "{name}");
         }
         let combo = "Alt+PrtSc"
             .parse::<KeyCombo>()
@@ -513,7 +658,7 @@ mod tests {
             let label = key.label();
             assert_eq!(
                 label.parse::<KeyCombo>().map(|combo| combo.key()),
-                Ok(key),
+                Ok(ShortcutKey::Usage(key)),
                 "usage {code:#04x} label {label:?}"
             );
         }
@@ -540,7 +685,7 @@ mod tests {
         // A bare `255` is not a TOML document, so the usage has to arrive in a
         // wire field — otherwise the parse fails on syntax before reaching the
         // usage guard.
-        let Err(error) = toml::from_str::<KeyComboWire>("modifiers = 0\nkey = 255") else {
+        let Err(error) = toml::from_str::<KeyComboWire>("modifiers = 0\n[key]\nUsage = 255") else {
             panic!("usage 255 is not a supported HID keyboard usage and must be rejected")
         };
         assert!(
@@ -552,7 +697,9 @@ mod tests {
         assert_eq!(
             KeyCombo::try_from(KeyComboWire {
                 modifiers: 128,
-                key: KeyboardUsage::try_from(0x04).expect("0x04 is a valid keyboard usage"),
+                key: ShortcutKey::Usage(
+                    KeyboardUsage::try_from(0x04).expect("0x04 is a valid keyboard usage")
+                ),
             }),
             Err(KeyComboParseError::InvalidModifiers(128))
         );
