@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use openlogi_core::config::{
     FlowConfig, FlowConfigError, FlowDevice, FlowEdge, FlowHostSlot, FlowLayout, FlowPeerName,
 };
-use openlogi_core::device::DeviceKind;
+use openlogi_core::device::{Capabilities, DeviceKind};
 use openlogi_core::device_order::PhysicalDeviceKey;
 use openlogi_ipc::{
     FlowLinkState, FlowPairTarget, FlowPairingCommandError, FlowPairingPhase, FlowStatus,
@@ -47,9 +47,10 @@ pub(crate) struct FlowDeviceRow {
     pub(crate) config: Option<FlowDevice>,
     /// Awake on this computer with a route, so a handoff can include it now.
     pub(crate) online: bool,
-    /// `false` for a HID++ 1.0 device, which has no host change (`0x1814`):
-    /// the agent cannot prepare its switch, and refuses the whole transfer
-    /// then. A device without the hosts list (`0x1815`) still switches.
+    /// `false` for a device with no host change (`0x1814`), as
+    /// [`Capabilities::switch_hosts`] decides: a HID++ 1.0 device, or a
+    /// gaming mouse on its own receiver. The agent leaves it here when the
+    /// others move. A device without the hosts list (`0x1815`) still switches.
     pub(crate) switchable: bool,
 }
 
@@ -102,8 +103,8 @@ pub(crate) enum FlowIssue {
         peer: FlowPeerName,
         link: Option<FlowLinkState>,
     },
-    /// A device with a channel for the peer cannot switch computers. While
-    /// it is online, no transfer to the peer can start.
+    /// A device with a channel for the peer cannot switch computers. It
+    /// stays here when the others move to the peer.
     CannotSwitch { device: String, peer: FlowPeerName },
     /// None of the devices with a channel for the peer is online here.
     DevicesAway(FlowPeerName),
@@ -123,8 +124,8 @@ pub(crate) struct FlowReadiness {
 
 /// Decide how ready `config` is, given the window's `devices`. The agent arms
 /// an edge only for a connected peer, and a crossing hands over the online
-/// devices with a channel for it, all or none: one that cannot switch keeps
-/// every device here. That is what counts as reachable.
+/// devices with a channel for it that can switch computers, all or none.
+/// That is what counts as reachable.
 pub(crate) fn readiness(
     config: &FlowConfig,
     link: impl Fn(&str) -> Option<FlowLinkState>,
@@ -176,12 +177,16 @@ pub(crate) fn readiness(
             peer: name.clone(),
         }));
         let online = |device: &&FlowDevice| row(device).is_some_and(|row| row.online);
-        match (stuck.iter().any(online), following.iter().any(online)) {
-            // An online device that cannot switch keeps every device here;
-            // `CannotSwitch` already names it.
-            (true, _) => {}
+        let moving = following
+            .iter()
+            .filter(|device| !stuck.contains(device))
+            .any(online);
+        match (moving, stuck.iter().any(online)) {
+            // Only devices that cannot switch are here; `CannotSwitch`
+            // already names them.
+            (false, true) => {}
             (false, false) => issues.push(FlowIssue::DevicesAway(name.clone())),
-            (false, true) => match link(name.as_str()) {
+            (true, _) => match link(name.as_str()) {
                 Some(FlowLinkState::Connected) => routes.extend(edges.into_iter().cloned()),
                 state => issues.push(FlowIssue::Unreachable {
                     peer: name.clone(),
@@ -403,7 +408,8 @@ impl AppState {
             // A device reached on two routes has a record for each; like the
             // agent, the online, addressable one decides.
             let online = record.online && record.route.is_some();
-            let switchable = !record.hidpp10;
+            let switchable =
+                Capabilities::switch_hosts(record.capabilities.as_ref(), record.hidpp10);
             if let Some(row) = rows.iter_mut().find(|row| row.key == key) {
                 row.online |= online;
                 row.switchable &= switchable;

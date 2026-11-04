@@ -185,7 +185,10 @@ pub use succession::Identity;
 ///      keyboard's HID++ `0x8010` G-keys, `0x8020` M-keys and `0x8030` MR
 ///      key. `ButtonId::{GKey, ModeKey}` appended — the G1–G5 slot of an M
 ///      profile and M1–M3/MR.
-pub const PROTOCOL_VERSION: u32 = 46;
+/// v47: `Capabilities::change_host` appended after `macro_record` — whether the
+///      device has HID++ `0x1814 ChangeHost`, so Flow can tell a device that
+///      cannot switch computers.
+pub const PROTOCOL_VERSION: u32 = 47;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to

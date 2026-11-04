@@ -17,6 +17,7 @@ fn raw_light_dev(key: &str) -> AgentDevice {
         serial: Some("glow-1".to_string()),
         unit_id: [0; 4],
         capabilities: None,
+        hidpp10: false,
         kind: DeviceKind::Light,
         light_capabilities: Some(openlogi_core::device::LightCapabilities {
             power: true,

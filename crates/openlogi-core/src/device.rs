@@ -241,6 +241,16 @@ pub struct Capabilities {
     /// Appended: crosses the IPC and the persisted identity.
     #[serde(default)]
     pub macro_record: bool,
+    /// The device can move to another computer: HID++ `0x1814 ChangeHost`.
+    /// Read it through [`Self::switch_hosts`]. Appended after `macro_record`:
+    /// crosses the IPC and the persisted identity. An identity saved before
+    /// it was measured presumes the feature, as OpenLogi did then.
+    #[serde(default = "presumed_change_host")]
+    pub change_host: bool,
+}
+
+const fn presumed_change_host() -> bool {
+    true
 }
 
 impl Capabilities {
@@ -300,17 +310,31 @@ impl Capabilities {
             g_keys: ids.contains(&0x8010),
             m_keys: ids.contains(&0x8020),
             macro_record: ids.contains(&0x8030),
+            change_host: ids.contains(&0x1814),
         }
+    }
+
+    /// Whether a device can move to another computer with Easy-Switch, from
+    /// its `measured` capabilities and whether it answered as HID++ 1.0. A
+    /// HID++ 1.0 device, or one whose feature table has no `0x1814
+    /// ChangeHost` (a G305 on its LIGHTSPEED receiver), cannot. A device not
+    /// probed yet is presumed able. The Flow window and the agent's handoff
+    /// both decide here, so a device the window shows as unable to switch is
+    /// one the agent leaves behind.
+    #[must_use]
+    pub fn switch_hosts(measured: Option<&Self>, hidpp10: bool) -> bool {
+        !hidpp10 && measured.is_none_or(|capabilities| capabilities.change_host)
     }
 
     /// Best-effort capabilities for a device we could not probe (offline /
     /// never reached), guessed from its [`DeviceKind`]. Used only as a fallback
     /// when no measured [`Capabilities`] exist — a sleeping mouse should still
     /// show its button/pointer panels so its bindings (host-side) stay
-    /// configurable.
+    /// configurable. Like [`Self::switch_hosts`], it presumes the device can
+    /// switch computers.
     #[must_use]
     pub fn presumed_from_kind(kind: DeviceKind) -> Self {
-        match kind {
+        let presumed = match kind {
             DeviceKind::Mouse | DeviceKind::Trackball => Self {
                 buttons: true,
                 pointer: true,
@@ -327,6 +351,10 @@ impl Capabilities {
                 ..Self::default()
             },
             _ => Self::default(),
+        };
+        Self {
+            change_host: true,
+            ..presumed
         }
     }
 
@@ -852,6 +880,7 @@ mod tests {
                     g_keys: false,
                     m_keys: false,
                     macro_record: false,
+                    change_host: false,
                 }),
                 settings_revision: 0,
                 hidpp10: false,
@@ -980,6 +1009,7 @@ mod tests {
                 g_keys: false,
                 m_keys: false,
                 macro_record: false,
+                change_host: false,
             }
         );
         assert!(!Capabilities::from_feature_ids(&[0x0003, 0x1b04]).thumbwheel);
@@ -1012,6 +1042,7 @@ mod tests {
                 g_keys: false,
                 m_keys: false,
                 macro_record: false,
+                change_host: false,
             }
         );
         // A G713: the gaming-key features and onboard profiles, no
@@ -1037,6 +1068,8 @@ mod tests {
         // alone switches channels but cannot name them.
         assert!(Capabilities::from_feature_ids(&[0x0001, 0x1815]).easy_switch);
         assert!(!Capabilities::from_feature_ids(&[0x0001, 0x1814]).easy_switch);
+        assert!(Capabilities::from_feature_ids(&[0x0001, 0x1814]).change_host);
+        assert!(!Capabilities::from_feature_ids(&[0x0001, 0x1815]).change_host);
         // 0x2205 sets the speed only where no DPI feature does (M590, MX
         // Ergo); a mouse with both keeps its DPI control.
         let scaled = Capabilities::from_feature_ids(&[0x0001, 0x2205]);
@@ -1094,7 +1127,28 @@ mod tests {
         assert!(!capabilities.hires_wheel);
         assert!(!capabilities.thumbwheel);
         assert!(capabilities.scroll_inversion);
+        assert!(
+            capabilities.change_host,
+            "an identity saved before 0x1814 was measured keeps switching"
+        );
         Ok(())
+    }
+
+    /// Only a device measured without `0x1814`, or a HID++ 1.0 one, stays
+    /// behind. The G502 LIGHTSPEED table below has no `0x1814`, like the
+    /// G305's.
+    #[test]
+    fn a_device_switches_hosts_unless_measured_without_change_host() {
+        use super::Capabilities;
+        let mx = Capabilities::from_feature_ids(&[0x0001, 0x1814, 0x1815, 0x1b04]);
+        let g502 = Capabilities::from_feature_ids(&[
+            0x0000, 0x0001, 0x0003, 0x0005, 0x1001, 0x8070, 0x1300, 0x8100, 0x8110, 0x8060, 0x2201,
+            0x2121,
+        ]);
+        assert!(Capabilities::switch_hosts(Some(&mx), false));
+        assert!(!Capabilities::switch_hosts(Some(&g502), false));
+        assert!(Capabilities::switch_hosts(None, false), "not probed yet");
+        assert!(!Capabilities::switch_hosts(None, true), "HID++ 1.0");
     }
 
     /// Real feature tables: a G502 LIGHTSPEED, and a G705 reported on #886.
@@ -1137,10 +1191,14 @@ mod tests {
         let numpad = Capabilities::presumed_from_kind(DeviceKind::Numpad);
         assert!(numpad.buttons);
         assert!(!numpad.pointer && !numpad.lighting);
-        // An unidentified device presumes nothing — it must be measured.
+        // An unidentified device presumes no feature — it must be measured.
+        // Like any unmeasured device, it is presumed to switch computers.
         assert_eq!(
             Capabilities::presumed_from_kind(DeviceKind::Unknown),
-            Capabilities::default()
+            Capabilities {
+                change_host: true,
+                ..Capabilities::default()
+            }
         );
     }
 
