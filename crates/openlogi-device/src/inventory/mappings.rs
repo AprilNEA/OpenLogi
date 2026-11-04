@@ -599,6 +599,7 @@ mod tests {
             assert_eq!(
                 battery,
                 BatteryInfo {
+                    freshness: openlogi_core::device::BatteryFreshness::Current,
                     percentage: None,
                     level,
                     status: BatteryStatus::Discharging,

@@ -372,8 +372,8 @@ pub enum BatteryFreshness {
     Current,
     /// The last successful reading, retained after a failed read or offline probe.
     Cached,
-    /// Charging was read now, but firmware supplied no percentage; the stored
-    /// percentage is a pre-charge value retained for the existing device UI.
+    /// Charging was read now, but firmware supplied no charge reading; the
+    /// percentage or coarse level is retained from before charging for display.
     HeldPercentage,
 }
 

@@ -448,6 +448,7 @@ mod hold_tests {
     /// charges with a discharge level of `0`.
     fn no_reading(status: BatteryStatus) -> BatteryInfo {
         BatteryInfo {
+            freshness: openlogi_core::device::BatteryFreshness::Current,
             percentage: None,
             level: BatteryLevel::Unknown,
             status,
@@ -516,6 +517,7 @@ mod hold_tests {
         assert_eq!(
             held,
             BatteryInfo {
+                freshness: openlogi_core::device::BatteryFreshness::HeldPercentage,
                 percentage: None,
                 level: BatteryLevel::Good,
                 status: BatteryStatus::Charging,
@@ -525,6 +527,7 @@ mod hold_tests {
         // A level the device reports while charging is live, not replaced by
         // the last one.
         let fresh = BatteryInfo {
+            freshness: openlogi_core::device::BatteryFreshness::Current,
             percentage: None,
             level: BatteryLevel::Low,
             status: BatteryStatus::Charging,
