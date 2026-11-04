@@ -478,6 +478,71 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn withdrawn_spy_route_restores_mapping_on_republished_channel() {
+        use crate::backend::NodeId;
+        use crate::channel::scripted::{ScriptedRawHidChannel, scripted_channel};
+        use crate::session::capture_restore::{
+            CaptureSessionOutcome, PendingCaptureRestore, restore_after_stop,
+            wait_for_channel_change,
+        };
+        use crate::{ChannelRegistry, DeviceRoute};
+
+        let route = DeviceRoute::Bolt {
+            receiver_uid: "receiver".into(),
+            slot: 1,
+        };
+        let node = NodeId::from("g603-receiver".to_owned());
+        let registry = ChannelRegistry::default();
+        let (raw, writes) = ScriptedRawHidChannel::with_responder(|request| {
+            let mut reply = request.to_vec();
+            if (request[2], request[3] >> 4) == (9, 2) {
+                reply[4] = 2; // The withdrawn mouse is still in host mode.
+            }
+            Some(reply)
+        });
+        let channel = scripted_channel(raw).await;
+        registry.replace_node(node.clone(), [route.clone()], channel.clone());
+        let shared = registry.lookup(&route).unwrap();
+        let pending = PendingCaptureRestore::new(
+            &shared,
+            None,
+            None,
+            None,
+            Some(SpyRestore {
+                onboard_index: 9,
+                spy_index: 10,
+                baseline: Some(vec![1, 2, 3, 4, 5, 6]),
+            }),
+        );
+        registry.replace_node(node.clone(), [], channel.clone());
+        let stop = wait_for_channel_change(&registry, &shared).await;
+        let CaptureSessionOutcome::RestorePending(pending) =
+            restore_after_stop(stop, pending, &registry).await
+        else {
+            panic!("unpublished route must retain host-mode restoration");
+        };
+        assert!(writes.written_reports().is_empty());
+        registry.replace_node(node, [route], channel);
+        assert!(matches!(
+            pending.retry(&registry).await,
+            CaptureSessionOutcome::Restored
+        ));
+        let reports: Vec<_> = writes
+            .written_reports()
+            .into_iter()
+            .filter(|report| (report[2], report[3] >> 4) != (9, 2))
+            .collect();
+        assert_eq!(reports.len(), 3);
+        assert_eq!((reports[0][2], reports[0][3] >> 4), (10, 2));
+        assert_eq!((reports[1][2], reports[1][3] >> 4), (10, 4));
+        assert_eq!(&reports[1][4..10], &[1, 2, 3, 4, 5, 6]);
+        assert_eq!(
+            (reports[2][2], reports[2][3] >> 4, reports[2][4]),
+            (9, 1, 1)
+        );
+    }
+
     #[test]
     fn mapping_mutes_captured_slots_and_keeps_native_buttons() {
         assert_eq!(host().mapping(), [1, 2, 3, 0, 5, 0, 0]);
