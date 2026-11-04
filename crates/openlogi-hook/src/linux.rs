@@ -667,7 +667,7 @@ fn device_thread(
                 );
                 let invert = is_vertical_wheel
                     && *report_inverted
-                        .get_or_insert_with(|| crate::scroll_inverted_for(Some(&source)));
+                        .get_or_insert_with(|| crate::reverse_wheel_scroll(Some(&source)));
                 if let Some(forwarded) = dispatch(event, hires_scroll, invert, &source, &*cb) {
                     if let Some(axis) = released {
                         wheel.forwarded(axis);

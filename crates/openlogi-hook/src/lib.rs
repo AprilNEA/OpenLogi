@@ -187,10 +187,46 @@ pub fn set_interim_scroll_inversion(sources: Vec<WheelSource>) {
 /// Never blocks, because the capture callback calls it: while the agent is
 /// replacing the interim set, an event reads it as empty. Not on Windows,
 /// which has no software inversion ([`SOFTWARE_SCROLL_INVERSION`]).
-#[cfg(not(target_os = "windows"))]
+///
+/// The Linux report end asks it; the macOS tap reverses only actual wheel
+/// events, through [`reverse_wheel_scroll`].
+#[cfg(any(target_os = "linux", all(test, not(target_os = "windows"))))]
 pub(crate) fn scroll_inverted_for(device: Option<&EventDevice>) -> bool {
+    scroll_inversion_for(device) != ScrollInversion::None
+}
+
+/// Whether to reverse a wheel scroll event from `device`, under
+/// [`set_scroll_inversion`] or [`set_interim_scroll_inversion`], recording an
+/// interim reversal for
+/// [`interim_scroll_idle`]. Only for an event that does move the wheel: any
+/// other report would read as a wheel still scrolling.
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn reverse_wheel_scroll(device: Option<&EventDevice>) -> bool {
+    match scroll_inversion_for(device) {
+        ScrollInversion::None => false,
+        ScrollInversion::Configured => true,
+        ScrollInversion::Interim => {
+            LAST_INTERIM_SCROLL.store(nanos_since_clock_base(), Ordering::Relaxed);
+            true
+        }
+    }
+}
+
+/// Why scroll from a device is reversed in software, if it is.
+#[cfg(not(target_os = "windows"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ScrollInversion {
+    None,
+    /// Every captured wheel, under [`set_scroll_inversion`].
+    Configured,
+    /// This wheel, under [`set_interim_scroll_inversion`].
+    Interim,
+}
+
+#[cfg(not(target_os = "windows"))]
+fn scroll_inversion_for(device: Option<&EventDevice>) -> ScrollInversion {
     if scroll_inversion() {
-        return true;
+        return ScrollInversion::Configured;
     }
     let Some(source) = device.and_then(|device| {
         Some(WheelSource {
@@ -198,18 +234,19 @@ pub(crate) fn scroll_inverted_for(device: Option<&EventDevice>) -> bool {
             product_id: device.product_id?,
         })
     }) else {
-        return false;
+        return ScrollInversion::None;
     };
-    let reversed = INTERIM_INVERSION
+    if INTERIM_INVERSION
         .try_read()
-        .is_ok_and(|sources| sources.contains(&source));
-    if reversed {
-        LAST_INTERIM_SCROLL.store(nanos_since_clock_base(), Ordering::Relaxed);
+        .is_ok_and(|sources| sources.contains(&source))
+    {
+        ScrollInversion::Interim
+    } else {
+        ScrollInversion::None
     }
-    reversed
 }
 
-/// When [`scroll_inverted_for`] last reversed a scroll under interim
+/// When [`reverse_wheel_scroll`] last reversed a scroll under interim
 /// inversion, in nanoseconds since [`CLOCK_BASE`] plus one; `0` for never.
 static LAST_INTERIM_SCROLL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 

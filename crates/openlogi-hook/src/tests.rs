@@ -257,6 +257,7 @@ fn interim_inversion_reverses_only_the_named_wheel_while_it_is_named() {
     }]);
 
     assert!(scroll_inverted_for(Some(&reconnected)));
+    assert!(reverse_wheel_scroll(Some(&reconnected)));
     assert!(
         interim_scroll_idle().is_some_and(|idle| idle < std::time::Duration::from_secs(1)),
         "the reversal is timed, so the native switch can wait for the wheel to rest"

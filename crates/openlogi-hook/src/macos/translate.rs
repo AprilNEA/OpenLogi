@@ -79,15 +79,17 @@ fn refresh_attribution(event: &CGEvent) {
 
 /// Best-effort device identity for a button event's HID sender.
 fn button_source(event: &CGEvent, id: ButtonId, pressed: bool) -> Option<crate::EventDevice> {
-    // A sender whose registry walk is still out is unattributed, so a press
-    // falls back to the device that last moved the pointer.
-    let attributed = event_sender_id(event)
-        .and_then(|sender| Some((sender, sender_device_info(sender)?.event_device)))
-        .map(|(sender, device)| {
-            remember_attribution(sender, &device);
-            device
-        });
-    resolve_button_source(attributed, id, pressed)
+    let Some(sender) = event_sender_id(event) else {
+        return resolve_button_source(None, id, pressed);
+    };
+    // A sender whose registry walk is still out is some device, just not
+    // one known yet: it borrows no other device's identity, so its click
+    // passes through as from a device that is not remappable.
+    let device = sender_device_info(sender).map_or_else(crate::EventDevice::default, |info| {
+        remember_attribution(sender, &info.event_device);
+        info.event_device
+    });
+    resolve_button_source(Some(device), id, pressed)
 }
 
 /// Pick a button event's identity. With no backing IOHIDEvent, a press falls
@@ -159,9 +161,13 @@ pub(super) fn translate_key(etype: CGEventType, event: &CGEvent) -> Option<KeyEv
 /// Whether `event` came from OpenLogi's virtual HID keyboard. Its keys
 /// carry no source user data, because the HID event system, not OpenLogi,
 /// creates their `CGEvent`s; the device's product name identifies them.
+///
+/// A sender whose registry walk is still out may be that keyboard, so it is
+/// treated as one: its keys pass through unremapped rather than risk a
+/// shortcut OpenLogi typed firing a binding.
 fn from_virtual_keyboard(event: &CGEvent) -> bool {
     event_sender_id(event).is_some_and(|sender| {
-        sender_device_info(sender).is_some_and(|info| {
+        sender_device_info(sender).is_none_or(|info| {
             info.event_device
                 .product_name
                 .as_deref()

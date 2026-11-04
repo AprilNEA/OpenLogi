@@ -314,7 +314,7 @@ fn wheel_scroll_to_invert(event: &HookEvent) -> bool {
             ..
         }) if delta.y() != 0.0
             && crate::source_is_remappable(device.as_ref())
-            && crate::scroll_inverted_for(device.as_ref())
+            && crate::reverse_wheel_scroll(device.as_ref())
     )
 }
 
