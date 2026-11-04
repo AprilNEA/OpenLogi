@@ -13,7 +13,7 @@ use gpui::{
 use gpui_kit::base::Button as BaseButton;
 use gpui_kit::component::{
     Disableable, Icon, IconName, Selectable, Sizable, Size,
-    button::ButtonVariants as _,
+    button::{ButtonVariants as _, Toggle as KitToggle, ToggleGroup, ToggleVariants as _},
     dialog::{Cancel, Confirm, DialogFooter},
     h_flex,
     input::{Input, InputState},
@@ -46,6 +46,44 @@ pub(crate) fn control_button(id: impl Into<ElementId>) -> gpui_kit::component::b
 pub(crate) fn control_input(state: &Entity<InputState>) -> Input {
     Input::new(state).small().min_h(px(theme::CONTROL_H))
 }
+
+/// An exclusive choice drawn as one joined row of segments: gpui-component's
+/// `ToggleGroup` in its outline, segmented, single-choice form. Its items are
+/// kit `Toggle`s, and the checked one takes the theme's `accent` fill under
+/// `accent_foreground`, so the choice stands out from its neighbours by more
+/// than the hairline they share. The group's `on_click` reports the next
+/// check vector; read it with [`chosen_segment`].
+///
+/// The group alone hears a click, so Enter and Space on a focused segment do
+/// not commit it.
+pub(crate) fn segmented_control(id: impl Into<ElementId>) -> ToggleGroup {
+    ToggleGroup::new(id).outline().segmented().single()
+}
+
+/// The index a click on a [`segmented_control`] chose, or `None` when it
+/// landed on the segment that was already checked: a single-choice group then
+/// reports every segment unchecked, and the control keeps its choice.
+pub(crate) fn chosen_segment(next: &[bool]) -> Option<usize> {
+    next.iter().position(|&checked| checked)
+}
+
+/// A segment, or a whole [`segmented_control`], that cannot be chosen right
+/// now. A kit `Toggle` drops activation and focus when disabled but keeps its
+/// enabled look, so this also dims it, the way a camera control dims under
+/// Auto, and a checked segment still shows which value is set.
+pub(crate) trait SegmentStyle: Disableable + Styled + Sized {
+    #[must_use]
+    fn unavailable(self, unavailable: bool) -> Self {
+        if unavailable {
+            self.disabled(true).opacity(0.5)
+        } else {
+            self
+        }
+    }
+}
+
+impl SegmentStyle for KitToggle {}
+impl SegmentStyle for ToggleGroup {}
 
 /// Cancel and Save buttons for a form dialog opened with `open_dialog`.
 ///

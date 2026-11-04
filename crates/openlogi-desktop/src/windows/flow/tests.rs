@@ -1,7 +1,11 @@
 use std::collections::BTreeMap;
 
-use gpui::{AppContext as _, Modifiers, MouseButton, TestAppContext, VisualTestContext, point, px};
+use gpui::{
+    AppContext as _, Bounds, Modifiers, MouseButton, Pixels, SharedString, TestAppContext,
+    VisualTestContext, point, px,
+};
 use gpui_kit::component::Root;
+use gpui_kit::test::TestWindowExt as _;
 use openlogi_core::config::{
     Config, FlowConfigParts, FlowDevice, FlowHostSlot, FlowLayout, FlowPeer, FlowPublicKey,
 };
@@ -140,10 +144,21 @@ fn draw(visual: &mut VisualTestContext) {
     visual.update(|window, cx| window.draw(cx).clear(cx));
 }
 
+/// Where `selector` was drawn in the last frame: an OpenLogi element names
+/// itself with a `debug_selector`, while a kit control such as a segment
+/// registers its `ElementId` with gpui-kit's test support instead.
+fn bounds_of(visual: &mut VisualTestContext, selector: &'static str) -> Option<Bounds<Pixels>> {
+    visual.debug_bounds(selector).or_else(|| {
+        visual.update(|window, _| {
+            window
+                .try_find(SharedString::from(selector))
+                .map(|found| found.bounds())
+        })
+    })
+}
+
 fn click(visual: &mut VisualTestContext, selector: &'static str) {
-    let bounds = visual
-        .debug_bounds(selector)
-        .unwrap_or_else(|| panic!("`{selector}` is drawn"));
+    let bounds = bounds_of(visual, selector).unwrap_or_else(|| panic!("`{selector}` is drawn"));
     visual.simulate_click(bounds.center(), Modifiers::none());
     draw(visual);
 }
@@ -192,7 +207,7 @@ fn a_peer_gets_a_device_and_moves_with_the_arrow_keys(cx: &mut TestAppContext) {
     );
     assert_eq!(health(visual), FlowHealth::Ready);
     assert!(
-        visual.debug_bounds("flow-self-unit:a393cae0-1").is_none(),
+        bounds_of(visual, "flow-self-unit:a393cae0-1").is_none(),
         "the peer's inspector edits only the peer's channel"
     );
 

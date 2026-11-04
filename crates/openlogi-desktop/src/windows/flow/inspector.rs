@@ -6,8 +6,8 @@ use gpui::{
     Styled as _, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_kit::component::{
-    Icon, IconName, Selectable as _, Sizable as _, WindowExt as _,
-    button::{Button, ButtonGroup, ButtonVariant, ButtonVariants as _},
+    Icon, IconName, Sizable as _, WindowExt as _,
+    button::{Button, ButtonVariant, ButtonVariants as _, Toggle, ToggleGroup},
     dialog::DialogButtonProps,
     h_flex,
     scroll::ScrollableElement as _,
@@ -18,7 +18,8 @@ use openlogi_core::device::DeviceKind;
 
 use super::{FlowModel, FlowView, PeerModel, channel_segment, edge_label, link_dot, link_label};
 use crate::state::{AppState, FlowDeviceRow, FlowHost};
-use crate::ui::theme::{Palette, SelectableStyle as _, Typography as _};
+use crate::ui::components::{chosen_segment, segmented_control};
+use crate::ui::theme::{Palette, Typography as _};
 
 const EDGES: [openlogi_core::config::FlowEdge; 4] = [
     openlogi_core::config::FlowEdge::Left,
@@ -32,15 +33,13 @@ pub(super) fn panel(
     selected: &FlowHost,
     pal: Palette,
     _window: &mut Window,
-    cx: &mut Context<FlowView>,
+    _cx: &mut Context<FlowView>,
 ) -> impl IntoElement {
     let body = match selected {
-        FlowHost::Peer(name) => model
-            .peer(name)
-            .map(|peer| peer_section(model, peer, pal, cx)),
+        FlowHost::Peer(name) => model.peer(name).map(|peer| peer_section(model, peer, pal)),
         FlowHost::This => None,
     }
-    .unwrap_or_else(|| this_section(model, pal, cx));
+    .unwrap_or_else(|| this_section(model, pal));
     v_flex()
         .debug_selector(|| "flow-inspector".into())
         .flex_none()
@@ -56,24 +55,19 @@ pub(super) fn panel(
         .child(body)
 }
 
-fn this_section(model: &FlowModel, pal: Palette, cx: &App) -> gpui::AnyElement {
+fn this_section(model: &FlowModel, pal: Palette) -> gpui::AnyElement {
     v_flex()
         .gap_5()
         .child(div().text_heading().child(tr!("flow.this_computer")))
         .child(
             section(tr!("flow.self_channels"))
-                .child(device_rows(model, &FlowHost::This, pal, cx))
+                .child(device_rows(model, &FlowHost::This, pal))
                 .child(caption(tr!("flow.self_channels_hint"), pal)),
         )
         .into_any_element()
 }
 
-fn peer_section(
-    model: &FlowModel,
-    peer: &PeerModel,
-    pal: Palette,
-    cx: &Context<FlowView>,
-) -> gpui::AnyElement {
+fn peer_section(model: &FlowModel, peer: &PeerModel, pal: Palette) -> gpui::AnyElement {
     let name = SharedString::from(peer.name.to_string());
     let host = FlowHost::Peer(peer.name.clone());
     v_flex()
@@ -100,7 +94,7 @@ fn peer_section(
         )
         .child(
             section(tr!("flow.position"))
-                .child(edge_segment(peer, cx))
+                .child(edge_segment(peer))
                 .when(peer.edges.len() > 1, |section| {
                     section.child(caption(
                         tr!("flow.position_several", name => name.to_string()),
@@ -114,7 +108,7 @@ fn peer_section(
         )
         .child(
             section(tr!("flow.devices"))
-                .child(device_rows(model, &host, pal, cx))
+                .child(device_rows(model, &host, pal))
                 .child(caption(tr!("flow.channels_hint"), pal)),
         )
         .child(remove_button(&peer.name))
@@ -129,26 +123,26 @@ fn caption(text: SharedString, pal: Palette) -> impl IntoElement {
     div().text_caption().text_color(pal.text_muted).child(text)
 }
 
-fn edge_segment(peer: &PeerModel, cx: &App) -> ButtonGroup {
-    ButtonGroup::new("flow-edge")
-        .outline()
+/// Which edge of this computer the peer sits on. A hand-edited layout can put
+/// it on several; each shows checked, and a click moves it to that edge.
+fn edge_segment(peer: &PeerModel) -> ToggleGroup {
+    let name = peer.name.clone();
+    segmented_control("flow-edge")
         .small()
         .children(EDGES.map(|edge| {
-            let chosen = peer.edges.contains(&edge);
-            let name = peer.name.clone();
-            let selector = format!("flow-edge-{edge:?}");
-            Button::new(SharedString::from(selector.clone()))
+            Toggle::new(SharedString::from(format!("flow-edge-{edge:?}")))
                 .label(edge_label(edge))
-                .selected(chosen)
-                .selected_segment(chosen, cx)
-                .debug_selector(move || selector.clone())
-                .on_click(move |_, _, cx| {
-                    AppState::apply(cx, |state| state.commit_flow_edge(&name, edge));
-                })
+                .checked(peer.edges.contains(&edge))
         }))
+        .on_click(move |next, _, cx| {
+            let Some(&edge) = chosen_segment(next).and_then(|index| EDGES.get(index)) else {
+                return;
+            };
+            AppState::apply(cx, |state| state.commit_flow_edge(&name, edge));
+        })
 }
 
-fn device_rows(model: &FlowModel, host: &FlowHost, pal: Palette, cx: &App) -> gpui::Div {
+fn device_rows(model: &FlowModel, host: &FlowHost, pal: Palette) -> gpui::Div {
     if model.devices.is_empty() {
         return v_flex().child(caption(tr!("flow.no_devices"), pal));
     }
@@ -156,11 +150,11 @@ fn device_rows(model: &FlowModel, host: &FlowHost, pal: Palette, cx: &App) -> gp
         model
             .devices
             .iter()
-            .map(|device| device_row(device, host, pal, cx)),
+            .map(|device| device_row(device, host, pal)),
     )
 }
 
-fn device_row(device: &FlowDeviceRow, host: &FlowHost, pal: Palette, cx: &App) -> impl IntoElement {
+fn device_row(device: &FlowDeviceRow, host: &FlowHost, pal: Palette) -> impl IntoElement {
     let icon = if device.kind.is_some_and(DeviceKind::is_keyboard_family) {
         "action-icons/keyboard.svg"
     } else {
@@ -198,7 +192,7 @@ fn device_row(device: &FlowDeviceRow, host: &FlowHost, pal: Palette, cx: &App) -
                 )
                 .when_some(note, |col, note| col.child(caption(note, pal))),
         )
-        .child(div().flex_none().child(channel_segment(device, host, cx)))
+        .child(div().flex_none().child(channel_segment(device, host)))
 }
 
 fn remove_button(peer: &FlowPeerName) -> impl IntoElement {

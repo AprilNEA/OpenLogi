@@ -10,7 +10,7 @@ use gpui_kit::base::Button as BaseButton;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Root, Selectable as _, Sizable as _, Theme,
     ThemeMode, ThemeRegistry,
-    button::{Button, ButtonVariants as _},
+    button::{Button, ButtonVariants as _, Toggle as KitToggle},
     h_flex,
     scroll::ScrollableElement as _,
     slider::Slider,
@@ -25,7 +25,10 @@ use super::battery::BatteryIndicator;
 use super::carousel::Carousel;
 use super::choice_card::ChoiceCard;
 use super::commit_slider::{CommitSlider, SliderRange};
-use super::components::{MenuRow, PanelCard, Pill, PresetChip, ProfileTab, Toggle, toggle_row};
+use super::components::{
+    MenuRow, PanelCard, Pill, PresetChip, ProfileTab, SegmentStyle as _, Toggle, chosen_segment,
+    segmented_control, toggle_row,
+};
 use super::slider_row::{SliderRow, disabled_track};
 use super::status::{retry_line, status_line};
 use super::theme::{self, ContentWidth, OPENLOGI_DARK, OPENLOGI_LIGHT, Palette, Typography as _};
@@ -98,6 +101,7 @@ struct ComponentGallery {
     mode: ThemeMode,
     scale: UiScale,
     choice_selected: usize,
+    segment_selected: usize,
     toggle_selected: bool,
     menu_selected: usize,
     profile_selected: usize,
@@ -132,6 +136,7 @@ impl ComponentGallery {
             mode: ThemeMode::Light,
             scale: UiScale::Normal,
             choice_selected: 0,
+            segment_selected: 1,
             toggle_selected: true,
             menu_selected: 0,
             profile_selected: 1,
@@ -217,6 +222,7 @@ impl ComponentGallery {
             .flex_wrap()
             .gap_4()
             .child(self.choice_panel(pal, cx))
+            .child(self.segment_panel(pal, cx))
             .child(self.toggle_panel(pal, cx))
             .child(self.menu_panel(pal, cx))
             .child(self.profile_panel(pal, cx))
@@ -274,6 +280,46 @@ impl ComponentGallery {
                     choice_card("gallery-choice-disabled", "Disabled choice", false, pal)
                         .disabled(true),
                 ),
+            pal,
+        )
+    }
+
+    /// A live [`segmented_control`], one that is unavailable as a whole, and one
+    /// with a single segment that cannot be chosen (a taken Easy-Switch channel).
+    fn segment_panel(&self, pal: Palette, cx: &mut Context<Self>) -> gpui::Div {
+        const SIZES: [&str; 3] = ["Small", "Medium", "Large"];
+        let selected = self.segment_selected;
+        let segments = move |id: &'static str| {
+            segmented_control(id).children(SIZES.into_iter().enumerate().map(
+                move |(index, label)| {
+                    KitToggle::new((id, index))
+                        .label(label)
+                        .checked(selected == index)
+                },
+            ))
+        };
+        gallery_panel(
+            "Segmented control",
+            IconName::LayoutDashboard,
+            v_flex()
+                .gap_2()
+                .child(segments("gallery-segment").on_click(cx.listener(
+                    |this, next: &Vec<bool>, _, cx| {
+                        if let Some(index) = chosen_segment(next) {
+                            this.segment_selected = index;
+                            cx.notify();
+                        }
+                    },
+                )))
+                .child(segments("gallery-segment-unavailable").unavailable(true))
+                .child(segmented_control("gallery-segment-taken").children(
+                    SIZES.into_iter().enumerate().map(move |(index, label)| {
+                        KitToggle::new(("gallery-segment-taken", index))
+                            .label(label)
+                            .checked(selected == index)
+                            .unavailable(index == 2)
+                    }),
+                )),
             pal,
         )
     }

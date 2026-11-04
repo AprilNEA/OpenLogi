@@ -452,14 +452,13 @@ fn dot(color: Hsla, hollow: bool) -> gpui::Div {
 }
 
 /// The Easy-Switch channel choice for one device and one computer: "off" and
-/// one button per channel, each taken channel disabled.
+/// one segment per channel, each taken channel unavailable.
 fn channel_segment(
     device: &FlowDeviceRow,
     host: &FlowHost,
-    cx: &App,
-) -> gpui_kit::component::button::ButtonGroup {
-    use crate::ui::theme::SelectableStyle as _;
-    use gpui_kit::component::Disableable as _;
+) -> gpui_kit::component::button::ToggleGroup {
+    use crate::ui::components::{SegmentStyle as _, chosen_segment, segmented_control};
+    use gpui_kit::component::button::Toggle as KitToggle;
     use openlogi_core::config::FlowHostSlot;
 
     let current = device.slot(host);
@@ -472,42 +471,34 @@ fn channel_segment(
         FlowHost::This => tr!("flow.channel_off_self"),
         FlowHost::Peer(_) => tr!("flow.channel_off"),
     };
-    let off = {
-        let key = device.key.clone();
-        let host = host.clone();
-        let selector = id("off");
-        Button::new(selector.clone())
-            .label(off_label)
-            .selected(current.is_none())
-            .selected_segment(current.is_none(), cx)
-            .debug_selector(move || selector.to_string())
-            .on_click(move |_, _, cx| {
-                AppState::apply(cx, |state| state.commit_flow_channel(&key, &host, None));
-            })
-    };
-    let slots = (0..FlowHostSlot::MAX_HOSTS).filter_map(|index| {
-        let slot = FlowHostSlot::new(index).ok()?;
-        let chosen = current == Some(slot);
-        let key = device.key.clone();
-        let host = host.clone();
-        let selector = id(&(index + 1).to_string());
-        Some(
-            Button::new(selector.clone())
-                .label(SharedString::from((index + 1).to_string()))
-                .selected(chosen)
-                .selected_segment(chosen, cx)
-                .disabled(!chosen && (!device.switchable || device.slot_taken(&host, slot)))
-                .debug_selector(move || selector.to_string())
-                .on_click(move |_, _, cx| {
-                    AppState::apply(cx, |state| {
-                        state.commit_flow_channel(&key, &host, Some(slot))
-                    });
-                }),
-        )
-    });
-    gpui_kit::component::button::ButtonGroup::new(id("channels"))
-        .outline()
+    let slots: Vec<FlowHostSlot> = (0..FlowHostSlot::MAX_HOSTS)
+        .filter_map(|index| FlowHostSlot::new(index).ok())
+        .collect();
+    // Segment 0 is "off"; the rest are the channels in order.
+    let choices: Vec<Option<FlowHostSlot>> = std::iter::once(None)
+        .chain(slots.iter().copied().map(Some))
+        .collect();
+    let key = device.key.clone();
+    let host = host.clone();
+    segmented_control(id("channels"))
         .xsmall()
-        .child(off)
-        .children(slots)
+        .child(
+            KitToggle::new(id("off"))
+                .label(off_label)
+                .checked(current.is_none()),
+        )
+        .children(slots.iter().map(|&slot| {
+            let chosen = current == Some(slot);
+            let number = (slot.get() + 1).to_string();
+            KitToggle::new(id(&number))
+                .label(SharedString::from(number.clone()))
+                .checked(chosen)
+                .unavailable(!chosen && (!device.switchable || device.slot_taken(&host, slot)))
+        }))
+        .on_click(move |next, _, cx| {
+            let Some(&slot) = chosen_segment(next).and_then(|index| choices.get(index)) else {
+                return;
+            };
+            AppState::apply(cx, |state| state.commit_flow_channel(&key, &host, slot));
+        })
 }

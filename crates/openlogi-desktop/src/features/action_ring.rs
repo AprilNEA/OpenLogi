@@ -12,7 +12,7 @@ use gpui::{
 use gpui_kit::base::Button as BaseButton;
 use gpui_kit::component::{
     Icon, IconName, Selectable as _,
-    button::{Button, ButtonGroup},
+    button::{Toggle as KitToggle, ToggleGroup},
     h_flex,
     input::InputState,
     tooltip::Tooltip,
@@ -29,8 +29,8 @@ use self::editor::{PowerUserInputs, action_library};
 use crate::features::keyboard::editors::{PowerUserKind, text_editor_placeholder};
 use crate::state::{AppState, StateEvent};
 use crate::ui::action::localized_action_label;
-use crate::ui::components::{Toggle, toggle_row};
-use crate::ui::theme::{self, Palette, SelectableStyle as _, Typography as _};
+use crate::ui::components::{Toggle, chosen_segment, segmented_control, toggle_row};
+use crate::ui::theme::{self, Palette, Typography as _};
 
 /// Stateful Actions Ring editor. Ring configuration itself lives in
 /// [`AppState`]; this entity owns selection and editor input state.
@@ -174,7 +174,7 @@ impl Render for ActionRingPanel {
                 pal,
                 tr!("action_ring.ring_size"),
                 tr!("action_ring.ring_size_description"),
-                size_segment(ring.size, cx),
+                size_segment(ring.size),
             ))
             .when(haptics_supported, |panel| {
                 panel.child(toggle_row(
@@ -225,26 +225,24 @@ fn editor_input(
     state
 }
 
-/// Small / Medium / Large. Each button commits its own size: the group's own
-/// `on_click` hears only pointer clicks, so Enter and Space on a focused
-/// segment would not reach it.
-fn size_segment(current: ActionRingSize, cx: &App) -> ButtonGroup {
-    ButtonGroup::new("ring-size")
-        .outline()
+/// Small / Medium / Large as one segmented control.
+fn size_segment(current: ActionRingSize) -> ToggleGroup {
+    segmented_control("ring-size")
         .children(ActionRingSize::ALL.map(|size| {
             let (id, label) = match size {
                 ActionRingSize::Small => ("ring-size-small", tr!("action_ring.size_small")),
                 ActionRingSize::Medium => ("ring-size-medium", tr!("action_ring.size_medium")),
                 ActionRingSize::Large => ("ring-size-large", tr!("action_ring.size_large")),
             };
-            Button::new(id)
-                .label(label)
-                .selected(current == size)
-                .selected_segment(current == size, cx)
-                .on_click(move |_, _, cx| {
-                    AppState::apply(cx, |state| state.commit_action_ring_size(size));
-                })
+            KitToggle::new(id).label(label).checked(current == size)
         }))
+        .on_click(|next, _, cx| {
+            let Some(&size) = chosen_segment(next).and_then(|index| ActionRingSize::ALL.get(index))
+            else {
+                return;
+            };
+            AppState::apply(cx, |state| state.commit_action_ring_size(size));
+        })
 }
 
 fn current_device_supports_haptics(cx: &Context<ActionRingPanel>) -> bool {
