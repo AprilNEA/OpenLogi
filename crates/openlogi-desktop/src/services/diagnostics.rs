@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use gpui::App;
-use openlogi_core::device::{DeviceInventory, DeviceModelInfo, ModelTransport, PairedDevice};
+use openlogi_core::device::{DeviceModelInfo, ModelTransport};
 use openlogi_core::diagnostics::{
     AppInfo, AssetInfo, AssetSource, ConnectionKind, DeviceDiag, DiagnosticsReport, InventoryState,
     ReceiverDiag, RenderState,
@@ -135,17 +135,17 @@ fn collect_receivers(state: &AppState) -> Vec<ReceiverDiag> {
 }
 
 fn collect_devices(state: &AppState) -> Vec<DeviceDiag> {
-    let inventories = state.last_inventory();
     state
         .devices()
         .iter()
         .map(|record| {
-            let paired = find_paired(&record.model_key, inventories);
-            let model = paired.and_then(|p| p.model_info.as_ref());
+            // Each row reads its own record. A model key is not unique: every
+            // device reporting all-zero model ids shares `00000` (#2312).
+            let model = record.model_info.as_ref();
             DeviceDiag {
                 display_name: record.display_name.clone(),
                 kind: record.kind,
-                codename: paired.and_then(|p| p.codename.clone()),
+                codename: record.codename.clone(),
                 connection: connection_for(record.route.as_ref(), record.receiver_brand, model),
                 online: record.online,
                 battery: record.battery.clone(),
@@ -154,7 +154,7 @@ fn collect_devices(state: &AppState) -> Vec<DeviceDiag> {
                 // Diagnostics are model-level by contract. The runtime config
                 // key may contain a receiver UID or raw-device serial.
                 config_key: record.model_key.clone(),
-                wpid: paired.and_then(|p| p.wpid),
+                wpid: record.wpid,
                 model_ids: model.map(|m| m.model_ids),
                 extended_model_id: model.map(|m| m.extended_model_id),
                 transports: model.map(|m| m.transports),
@@ -166,17 +166,6 @@ fn collect_devices(state: &AppState) -> Vec<DeviceDiag> {
             }
         })
         .collect()
-}
-
-fn find_paired<'a>(
-    model_key: &str,
-    inventories: &'a [DeviceInventory],
-) -> Option<&'a PairedDevice> {
-    inventories.iter().flat_map(|inv| &inv.paired).find(|p| {
-        p.model_info
-            .as_ref()
-            .is_some_and(|m| m.model_key() == model_key)
-    })
 }
 
 /// Refine the HID++ route into a user-facing connection type.
@@ -387,6 +376,107 @@ mod connection_for_tests {
             ),
         ] {
             assert_eq!(connection_for(Some(&route), brand, None), expected);
+        }
+    }
+}
+
+#[cfg(test)]
+mod collect_devices_tests {
+    use openlogi_core::config::Config;
+    use openlogi_core::device::{
+        DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports, PairedDevice, ReceiverInfo,
+    };
+
+    use super::{ConnectionKind, collect_devices};
+    use crate::services::assets::AssetResolver;
+    use crate::state::{AppState, Sources};
+
+    /// A receiver with one online device whose model ids are all zero, so its
+    /// model key is `00000`, the same as every other such device.
+    fn zero_model_id_inventory(
+        receiver_product_id: u16,
+        receiver_uid: &str,
+        kind: DeviceKind,
+        codename: &str,
+        wpid: u16,
+    ) -> DeviceInventory {
+        DeviceInventory {
+            receiver: ReceiverInfo {
+                name: "Receiver".into(),
+                vendor_id: 0x046d,
+                product_id: receiver_product_id,
+                unique_id: Some(receiver_uid.into()),
+            },
+            paired: vec![PairedDevice {
+                slot: 1,
+                codename: Some(codename.into()),
+                wpid: Some(wpid),
+                kind,
+                online: true,
+                battery: None,
+                model_info: Some(DeviceModelInfo {
+                    entity_count: 0,
+                    serial_number: None,
+                    unit_id: [0; 4],
+                    transports: DeviceTransports::default(),
+                    model_ids: [0; 3],
+                    extended_model_id: 0,
+                }),
+                capabilities: None,
+                settings_revision: 0,
+                hidpp10: false,
+            }],
+        }
+    }
+
+    /// #2312: a K750 on a Unifying receiver and a G602 on a Nano receiver
+    /// both report all-zero model ids. Each row names its own device, in
+    /// either inventory order.
+    #[test]
+    fn each_row_names_its_own_device_when_model_ids_collide() {
+        let k750 = zero_model_id_inventory(
+            0xc52b,
+            "BE2E95ED",
+            DeviceKind::Keyboard,
+            "Wireless Solar Keyboard K750",
+            0x400f,
+        );
+        let g602 = zero_model_id_inventory(
+            0xc537,
+            "F762998E",
+            DeviceKind::Mouse,
+            "Wireless Gaming Mouse",
+            0x402c,
+        );
+        for inventories in [[k750.clone(), g602.clone()], [g602.clone(), k750.clone()]] {
+            let resolver = AssetResolver::new();
+            let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+            let mut state =
+                AppState::new(Sources::in_memory(Config::ephemeral(), &resolver, commands));
+            let _ = state.refresh_inventories(&inventories, &[], &resolver, &[]);
+            state.store_inventory_snapshot(&inventories);
+
+            let rows: Vec<_> = collect_devices(&state)
+                .into_iter()
+                .map(|row| (row.connection, row.codename, row.wpid))
+                .collect();
+            assert_eq!(rows.len(), 2, "{rows:?}");
+            assert!(
+                rows.contains(&(
+                    ConnectionKind::UnifyingReceiver,
+                    Some("Wireless Solar Keyboard K750".to_string()),
+                    Some(0x400f),
+                )),
+                "{rows:?}"
+            );
+            assert!(
+                rows.contains(&(
+                    ConnectionKind::NanoReceiver,
+                    Some("Wireless Gaming Mouse".to_string()),
+                    Some(0x402c),
+                )),
+                "{rows:?}"
+            );
         }
     }
 }

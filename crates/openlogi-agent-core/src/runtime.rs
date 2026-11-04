@@ -10,7 +10,7 @@ pub mod hook;
 mod pointer;
 pub mod scroll;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::sync::{Arc, Mutex, PoisonError, RwLock, mpsc};
 use std::time::{Duration, Instant};
@@ -22,6 +22,7 @@ use self::button::{
     ButtonInputHandle, ButtonRuntimeEvent, ButtonRuntimeOwner, EndReason, PressControl,
 };
 pub(crate) use self::button::{HidppSessionId, PressToken};
+pub(crate) use self::pointer::{FocusBinding, PointerPress, PointerSelection};
 use crate::dpi::DpiBeforeShift;
 use crate::hardware::{
     DeviceAccess, restore_dpi_in_background, step_dpi_in_background,
@@ -71,6 +72,8 @@ pub enum ActionRequest {
         /// The pressing device.
         device_key: Option<String>,
     },
+    /// A button whose press opened the Actions Ring was released.
+    ActionsRingTriggerReleased,
     /// Turn the pressing keypad's binding page.
     TurnKeypadPage {
         /// The pressing device.
@@ -89,11 +92,14 @@ pub(crate) enum ActionDispatchTarget {
     /// The ordinary browser-navigation shortcut target captured outside Safari.
     Keyboard,
     /// The pointer context that selected the binding. Validated off the tap
-    /// before output. An identified window or desktop is never substituted
-    /// with an unrelated foreground window; an unidentified target retains
-    /// the focused fallback captured with the press.
+    /// before output. Keystrokes from a binding that the focused application
+    /// shares go where focused mode sends them. Other keystrokes need the
+    /// identified hovered window to have focus. A shared binding and an
+    /// unidentified target retain the frontmost Safari captured with the
+    /// press, as focused mode does.
     Pointer {
         target: openlogi_hook::PointerTarget,
+        focus: FocusBinding,
         fallback_safari_pid: Option<i32>,
     },
 }
@@ -104,16 +110,22 @@ impl ActionDispatchTarget {
     }
 
     fn for_pointer(
-        target: Option<openlogi_hook::PointerTarget>,
+        press: Option<PointerPress>,
         capture_safari_pid: impl FnOnce() -> Option<i32>,
     ) -> Self {
-        let safari_pid = match target {
-            None | Some(openlogi_hook::PointerTarget::Unavailable) => capture_safari_pid(),
-            Some(_) => None,
-        };
-        match target {
-            Some(target) => Self::Pointer {
+        // Focused mode, a shared binding, and an unidentified target send
+        // Safari navigation where focus is at the press.
+        let safari_pid = press
+            .is_none_or(|press| {
+                press.target == openlogi_hook::PointerTarget::Unavailable
+                    || press.focus == FocusBinding::Shared
+            })
+            .then(capture_safari_pid)
+            .flatten();
+        match press {
+            Some(PointerPress { target, focus }) => Self::Pointer {
                 target,
+                focus,
                 fallback_safari_pid: safari_pid,
             },
             None => safari_pid.map_or(Self::Keyboard, Self::SafariProcess),
@@ -604,6 +616,10 @@ struct ButtonEventHandler {
     executor: ActionExecutor,
     held: HeldShortcuts,
     held_dpi: HeldDpiShifts,
+    /// Presses that opened the Actions Ring as they went down. Releasing one
+    /// can choose a slot; a ring a gesture or a long press opened stays open
+    /// past the release that follows it.
+    ring_triggers: HashSet<PressToken>,
 }
 
 impl ButtonEventHandler {
@@ -612,6 +628,7 @@ impl ButtonEventHandler {
             executor,
             held: HeldShortcuts::default(),
             held_dpi: HeldDpiShifts::default(),
+            ring_triggers: HashSet::new(),
         }
     }
 
@@ -621,6 +638,9 @@ impl ButtonEventHandler {
                 if let Some(action) = press.start_action() {
                     if press.captured_by_os_hook() {
                         log_bound_action(press.control(), action);
+                    }
+                    if matches!(action, Action::ShowActionsRing) {
+                        self.ring_triggers.insert(press.token().clone());
                     }
                     self.start_action(press.token(), action, press.device_key(), press.target());
                 }
@@ -634,6 +654,18 @@ impl ButtonEventHandler {
             ButtonRuntimeEvent::Ended { press, reason } => {
                 self.held.end(press.token());
                 self.held_dpi.end(&self.executor, press.token());
+                // A canceled press may never have been let go, so it chooses
+                // nothing and the ring stays open for the pointer.
+                if self.ring_triggers.remove(press.token())
+                    && reason == EndReason::Released
+                    && self
+                        .executor
+                        .requests
+                        .send(ActionRequest::ActionsRingTriggerReleased)
+                        .is_err()
+                {
+                    warn!("agent runtime unavailable — Actions Ring release ignored");
+                }
                 if let EndReason::Canceled(reason) = reason {
                     match press.control() {
                         PressControl::Button(button) => {
@@ -739,12 +771,12 @@ impl ActionDispatcher {
         &self,
         action: &Action,
         device_key: Option<&str>,
-        target: Option<openlogi_hook::PointerTarget>,
+        pointer: Option<PointerPress>,
     ) {
         self.executor.dispatch_to(
             action,
             device_key,
-            ActionDispatchTarget::for_pointer(target, openlogi_hook::frontmost_safari_pid),
+            ActionDispatchTarget::for_pointer(pointer, openlogi_hook::frontmost_safari_pid),
         );
     }
 
@@ -812,13 +844,13 @@ impl ActionDispatcher {
         session: &HidppSessionId,
         button: ButtonId,
         binding: Option<&Binding>,
-        pointer_target: Option<openlogi_hook::PointerTarget>,
+        pointer: Option<PointerPress>,
     ) -> Option<PressToken> {
         self.buttons.try_hidpp_down(
             session,
             button,
             binding,
-            ActionDispatchTarget::for_pointer(pointer_target, openlogi_hook::frontmost_safari_pid),
+            ActionDispatchTarget::for_pointer(pointer, openlogi_hook::frontmost_safari_pid),
         )
     }
 
@@ -834,13 +866,13 @@ impl ActionDispatcher {
         session: &HidppSessionId,
         button: ButtonId,
         binding: Option<&Binding>,
-        pointer_target: Option<openlogi_hook::PointerTarget>,
+        pointer: Option<PointerPress>,
     ) {
         self.buttons.try_hidpp_pulse(
             session,
             button,
             binding,
-            ActionDispatchTarget::for_pointer(pointer_target, openlogi_hook::frontmost_safari_pid),
+            ActionDispatchTarget::for_pointer(pointer, openlogi_hook::frontmost_safari_pid),
         );
     }
 
@@ -1120,7 +1152,9 @@ mod tests {
             &Action::ShowActionsRing,
             Some("mouse"),
             ActionDispatchTarget::for_pointer(
-                Some(openlogi_hook::PointerTarget::Unavailable),
+                Some(PointerPress::distinct(
+                    openlogi_hook::PointerTarget::Unavailable,
+                )),
                 || None,
             ),
         );
@@ -1132,6 +1166,53 @@ mod tests {
             })
         );
     }
+
+    /// The release of a button that opened the ring reaches the agent, which
+    /// decides whether the hold chose a slot. A press canceled before its
+    /// release was seen must not choose.
+    #[test]
+    fn a_ring_trigger_reports_its_release_unless_canceled() {
+        let (_signal, device_io) = openlogi_hid::device_io_channel();
+        let (requests, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let mut runtime = ActionRuntime::new(
+            Arc::default(),
+            Arc::default(),
+            DeviceAccess {
+                channel: openlogi_hid::CaptureChannelSlot::default(),
+                registry: openlogi_hid::ChannelRegistry::default(),
+                receiver_access: crate::receiver_access::ReceiverAccess::default(),
+                device_io,
+                transport_turns: crate::hardware::TransportTurns::default(),
+            },
+            requests,
+        )
+        .expect("the button worker must start");
+        let buttons = runtime.dispatcher().buttons;
+        let ring = Binding::Single(Action::ShowActionsRing);
+        let opened = ActionRequest::ShowActionsRing { device_key: None };
+
+        buttons
+            .try_hook_down(ButtonId::MiddleClick, Some(&ring))
+            .expect("the press must be accepted");
+        assert!(buttons.try_hook_up(ButtonId::MiddleClick));
+        assert_eq!(received.blocking_recv(), Some(opened.clone()));
+        assert_eq!(
+            received.blocking_recv(),
+            Some(ActionRequest::ActionsRingTriggerReleased)
+        );
+
+        buttons
+            .try_hook_down(ButtonId::MiddleClick, Some(&ring))
+            .expect("the press must be accepted");
+        buttons.cancel_hook_thread();
+        assert_eq!(received.blocking_recv(), Some(opened));
+        runtime.shutdown();
+        assert!(
+            received.try_recv().is_err(),
+            "a canceled trigger must not report a release"
+        );
+    }
+
     /// Page actions go to the agent, keyed by the pressing keypad, and — like
     /// the ring — no pointer target gates them: the press acts on the keypad.
     #[test]
@@ -1152,7 +1233,9 @@ mod tests {
         };
         let unavailable = || {
             ActionDispatchTarget::for_pointer(
-                Some(openlogi_hook::PointerTarget::Unavailable),
+                Some(PointerPress::distinct(
+                    openlogi_hook::PointerTarget::Unavailable,
+                )),
                 || None,
             )
         };

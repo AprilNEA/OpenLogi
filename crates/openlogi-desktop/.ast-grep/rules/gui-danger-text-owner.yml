@@ -1,0 +1,20 @@
+# Owner: openlogi-desktop's ui::theme::Palette::text_danger — the theme's
+# danger hue adjusted to read as text on both the page and a card.
+id: gui-danger-text-owner
+language: rust
+severity: error
+message: Colour error text with Palette::text_danger; the theme's danger token is a fill colour and fails text contrast on the light page.
+note: |
+  Three error captions each picked their own red: two a raw #ef4444, one the
+  theme's danger token. All read below 4.5:1 on the light page, and the token
+  also below it on a dark card. See "Single source of truth" in AGENTS.md.
+files:
+  - crates/openlogi-desktop/src/**/*.rs
+ignores:
+  - "**/tests.rs"
+  - "**/tests/**"
+rule:
+  any:
+    - pattern: $E.text_color($T.danger)
+    - pattern: $E.text_color(rgb(0x00ef_4444))
+    - pattern: $E.text_color(rgb(theme::STATUS_DISABLED))

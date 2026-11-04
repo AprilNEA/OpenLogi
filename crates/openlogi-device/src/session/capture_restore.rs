@@ -8,7 +8,7 @@ use std::future::Future;
 use std::sync::{Arc, RwLock};
 
 use hidpp::feature::CreatableFeature as _;
-use hidpp::feature::hires_wheel::HiResWheelFeature;
+use hidpp::feature::hires_wheel::{HiResWheelFeature, WheelResolution};
 use hidpp::protocol::v20::Hidpp20Error;
 use thiserror::Error;
 
@@ -272,11 +272,16 @@ impl ThumbwheelRestore {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct HiResWheelRestore {
     feature_index: u8,
+    /// The native resolution to put back, when the divert changed it.
+    resolution: Option<WheelResolution>,
 }
 
 impl HiResWheelRestore {
-    pub(crate) fn new(feature_index: u8) -> Self {
-        Self { feature_index }
+    pub(crate) fn new(feature_index: u8, resolution: Option<WheelResolution>) -> Self {
+        Self {
+            feature_index,
+            resolution,
+        }
     }
 }
 
@@ -337,7 +342,10 @@ impl RestorePlan for CaptureRestorePlan {
         if let Some(wheel) = self.main_wheel {
             let feature =
                 HiResWheelFeature::new(channel.clone(), device_index, wheel.feature_index);
-            restored &= restore_result(main_wheel::undivert(&feature).await, "main wheel");
+            restored &= restore_result(
+                main_wheel::undivert(&feature, wheel.resolution).await,
+                "main wheel",
+            );
         }
         if let Some(thumb) = self.thumb {
             let thumbwheel = Thumbwheel::new(channel.clone(), device_index, thumb.feature_index);

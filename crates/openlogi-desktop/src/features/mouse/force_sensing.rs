@@ -13,7 +13,7 @@
 use gpui::{
     AnyElement, App, Context, InteractiveElement, IntoElement, ParentElement, Styled, Window, div,
 };
-use gpui_component::{
+use gpui_kit::component::{
     Disableable as _, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
@@ -250,7 +250,7 @@ pub(super) fn force_sensing_row(press_force: PressForce<'_>, pal: Palette) -> An
 #[cfg(test)]
 mod tests {
     use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext, px, size};
-    use gpui_component::slider::{SliderEvent, SliderState};
+    use gpui_kit::component::slider::{SliderEvent, SliderState};
     use openlogi_core::binding::ButtonId;
     use openlogi_core::config::Config;
     use openlogi_core::hid::ForceSensingInfo;
@@ -273,7 +273,7 @@ mod tests {
         &mut VisualTestContext,
         UnboundedReceiver<Command>,
     ) {
-        cx.update(gpui_component::init);
+        cx.update(gpui_kit::init);
         let (state, mut receiver) = mouse_state(true, Config::ephemeral());
         install(state, cx);
         answer_force_read(&mut receiver, reading);
@@ -480,7 +480,7 @@ mod tests {
 
     #[gpui::test]
     fn a_mouse_without_a_force_sensing_button_shows_no_row(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
+        cx.update(gpui_kit::init);
         let (state, _receiver) = mouse_state(false, Config::ephemeral());
         install(state, cx);
         let (panel, cx) = cx.add_window_view(MouseModelView::new);

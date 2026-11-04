@@ -3,6 +3,9 @@
 use super::*;
 use crate::channel::registry::PublicationState;
 use crate::channel::scripted::feature_error;
+use hidpp::channel::HidppChannel;
+use openlogi_core::hid::ProfileIndex;
+use std::sync::Mutex;
 
 #[tokio::test]
 async fn alternate_gesture_control_arming_respects_mode_and_capabilities() {
@@ -1231,4 +1234,453 @@ async fn a_host_mode_session_reports_entering_host_mode() {
         .expect("the session stops")
         .expect("the session task does not panic");
     assert!(matches!(outcome, Ok(CaptureSessionOutcome::Restored)));
+}
+
+/// One request a host-mode transition sends, as `(feature index, function,
+/// first payload bytes)`.
+type SeenRequest = (u8, u8, Vec<u8>);
+
+const ONBOARD: u8 = 9;
+const SPY: u8 = 10;
+const MODE_ONBOARD: u8 = 1;
+const MODE_HOST: u8 = 2;
+const GET_MAPPING_SEEN: (u8, u8) = (SPY, 3);
+const SET_MAPPING_SEEN: (u8, u8) = (SPY, 4);
+const SET_MODE_SEEN: (u8, u8) = (ONBOARD, 1);
+const SET_PROFILE_SEEN: (u8, u8) = (ONBOARD, 3);
+
+/// What a scripted mouse answers with a HID++ 2.0 error.
+#[derive(Clone, Copy, PartialEq)]
+enum Fault {
+    None,
+    SetMapping,
+    ButtonCount,
+    GetMapping,
+    GetMode,
+}
+
+/// A mouse with `0x8100` at 9 and `0x8110` at 10. Like the G502 X, it keeps
+/// its mapping across mode changes and refuses a mapping write outside host
+/// mode. `seen` records mapping reads and writes to either feature.
+struct ScriptedMouse {
+    mode: u8,
+    mapping: Vec<u8>,
+    fault: Fault,
+    seen: Vec<SeenRequest>,
+}
+
+impl ScriptedMouse {
+    fn answer(&mut self, request: &[u8]) -> Vec<u8> {
+        let mut response = vec![0; 20];
+        response[..4].copy_from_slice(&request[..4]);
+        response[0] = 0x11;
+        let function = request[3] >> 4;
+        let call = (request[2], function);
+        if call == SET_MAPPING_SEEN {
+            let slots = self.mapping.len();
+            self.seen
+                .push((SPY, function, request[4..4 + slots].to_vec()));
+            if self.fault == Fault::SetMapping || self.mode != MODE_HOST {
+                return feature_error(request, 2);
+            }
+            self.mapping.copy_from_slice(&request[4..4 + slots]);
+            return response;
+        }
+        if call == GET_MAPPING_SEEN {
+            self.seen.push((SPY, function, Vec::new()));
+        }
+        if call == SET_MODE_SEEN || call == SET_PROFILE_SEEN {
+            self.seen.push((ONBOARD, function, request[4..7].to_vec()));
+        }
+        match call {
+            (0, 1) => response[4] = 4,
+            (0, 0) => {
+                response[4] = match u16::from_be_bytes([request[4], request[5]]) {
+                    0x8100 => ONBOARD,
+                    0x8110 => SPY,
+                    _ => 0,
+                };
+            }
+            (ONBOARD, 2) if self.fault == Fault::GetMode => return feature_error(request, 2),
+            (ONBOARD, 2) => response[4] = self.mode,
+            SET_MODE_SEEN => self.mode = request[4],
+            (SPY, 0) if self.fault == Fault::ButtonCount => return feature_error(request, 2),
+            (SPY, 0) => response[4] = u8::try_from(self.mapping.len()).unwrap(),
+            GET_MAPPING_SEEN if self.fault == Fault::GetMapping => {
+                return feature_error(request, 2);
+            }
+            GET_MAPPING_SEEN => response[4..4 + self.mapping.len()].copy_from_slice(&self.mapping),
+            (ONBOARD | SPY, _) => {}
+            _ => panic!("unexpected capture request: {request:02x?}"),
+        }
+        response
+    }
+
+    fn take_seen(&mut self) -> Vec<((u8, u8), Vec<u8>)> {
+        self.seen
+            .drain(..)
+            .map(|(feature, function, payload)| ((feature, function), payload))
+            .collect()
+    }
+}
+
+async fn scripted_mouse(
+    mode: u8,
+    mapping: &[u8],
+    fault: Fault,
+) -> (Arc<HidppChannel>, Arc<Mutex<ScriptedMouse>>) {
+    let mouse = Arc::new(Mutex::new(ScriptedMouse {
+        mode,
+        mapping: mapping.to_vec(),
+        fault,
+        seen: Vec::new(),
+    }));
+    let (raw, _handle) = ScriptedRawHidChannel::with_dynamic_responder({
+        let mouse = Arc::clone(&mouse);
+        move |request| Some(mouse.lock().unwrap().answer(request))
+    });
+    (scripted_channel(raw).await, mouse)
+}
+
+fn three_slot_host_spec() -> CaptureSpec {
+    CaptureSpec {
+        onboard: Some(OnboardTarget::Host(HostMode {
+            slots: vec![
+                (ButtonId::LeftClick, SlotRoute::Native),
+                (ButtonId::Back, SlotRoute::Captured),
+                (ButtonId::G9, SlotRoute::Captured),
+            ],
+            report_rate: None,
+        })),
+        ..CaptureSpec::default()
+    }
+}
+
+fn profile_spec() -> CaptureSpec {
+    CaptureSpec {
+        onboard: Some(OnboardTarget::Profile(ProfileIndex::new(1).unwrap())),
+        ..CaptureSpec::default()
+    }
+}
+
+async fn arm(channel: &Arc<HidppChannel>, spec: &CaptureSpec) -> ArmedControls {
+    let device = Device::new(channel.clone(), 0xff).await.unwrap();
+    let mut armed = ArmedControls::default();
+    arm_controls_into(&device, channel, 0xff, spec, &mut armed)
+        .await
+        .unwrap();
+    armed
+}
+
+/// The G903's shipped table (#2178): an identity write would switch on slots
+/// the mouse had off. It is longer than the three slots the host spec names,
+/// so the whole table has to come from the mouse.
+const FOUND: [u8; 5] = [1, 2, 3, 0, 0];
+
+/// A table neither that spec's slots nor an identity write can produce, for
+/// the tests where `FOUND` could be mistaken for one.
+const SPARSE: [u8; 5] = [1, 0, 3, 0, 5];
+
+/// The way in reads the mouse's mapping while it is onboard. The way out
+/// writes that mapping back, while still in host mode, then the mode.
+#[tokio::test]
+async fn leaving_host_mode_writes_back_the_mapping_it_found() {
+    let (channel, mouse) = scripted_mouse(MODE_ONBOARD, &FOUND, Fault::None).await;
+    let armed = arm(&channel, &three_slot_host_spec()).await;
+    assert_eq!(
+        mouse.lock().unwrap().take_seen(),
+        [
+            (GET_MAPPING_SEEN, vec![]),
+            (SET_MODE_SEEN, vec![MODE_HOST, 0, 0]),
+            (SET_MAPPING_SEEN, vec![1, 0, 0, 0, 0]),
+        ]
+    );
+
+    let restore = armed.onboard.as_ref().unwrap().restore().unwrap();
+    assert!(restore.restore_on(&channel, 0xff).await);
+
+    let mut mouse = mouse.lock().unwrap();
+    assert_eq!(
+        mouse.take_seen(),
+        [
+            (SET_MAPPING_SEEN, FOUND.to_vec()),
+            (SET_MODE_SEEN, vec![MODE_ONBOARD, 0, 0]),
+        ]
+    );
+    assert_eq!(mouse.mapping, FOUND);
+}
+
+/// A mouse already in host mode holds our leftovers or another program's
+/// table, which is not its mapping: nothing is read and nothing is invented.
+/// The restore still completes, or it would stay owed forever.
+#[tokio::test]
+async fn arming_from_host_mode_reads_no_mapping_and_exit_writes_none() {
+    let (channel, mouse) = scripted_mouse(MODE_HOST, &[1, 0, 0, 0, 5], Fault::None).await;
+    let armed = arm(&channel, &three_slot_host_spec()).await;
+    assert!(
+        mouse
+            .lock()
+            .unwrap()
+            .take_seen()
+            .iter()
+            .all(|(call, _)| *call != GET_MAPPING_SEEN)
+    );
+
+    let restore = armed.onboard.as_ref().unwrap().restore().unwrap();
+    assert!(restore.restore_on(&channel, 0xff).await);
+
+    assert_eq!(
+        mouse.lock().unwrap().take_seen(),
+        [(SET_MODE_SEEN, vec![MODE_ONBOARD, 0, 0])]
+    );
+}
+
+/// A wake that left host mode on finds this session's own table, so the
+/// baseline taken on the way in stands.
+#[tokio::test]
+async fn rearm_in_host_mode_keeps_the_original_baseline() {
+    let (channel, mouse) = scripted_mouse(MODE_ONBOARD, &SPARSE, Fault::None).await;
+    let armed = arm(&channel, &three_slot_host_spec()).await;
+    mouse.lock().unwrap().take_seen();
+
+    assert!(armed.rearm().await);
+    assert!(
+        mouse
+            .lock()
+            .unwrap()
+            .take_seen()
+            .iter()
+            .all(|(call, _)| *call != GET_MAPPING_SEEN)
+    );
+
+    let restore = armed.onboard.as_ref().unwrap().restore().unwrap();
+    assert!(restore.restore_on(&channel, 0xff).await);
+    assert_eq!(mouse.lock().unwrap().mapping, SPARSE);
+}
+
+/// A mouse that power-cycled is onboard again, and the table it woke with is
+/// the truth now.
+#[tokio::test]
+async fn rearm_after_a_power_cycle_takes_the_fresh_mapping() {
+    let (channel, mouse) = scripted_mouse(MODE_ONBOARD, &FOUND, Fault::None).await;
+    let armed = arm(&channel, &three_slot_host_spec()).await;
+    {
+        let mut mouse = mouse.lock().unwrap();
+        mouse.mode = MODE_ONBOARD;
+        mouse.mapping = vec![1, 2, 0, 0, 7];
+    }
+
+    assert!(armed.rearm().await);
+
+    let restore = armed.onboard.as_ref().unwrap().restore().unwrap();
+    assert!(restore.restore_on(&channel, 0xff).await);
+    assert_eq!(mouse.lock().unwrap().mapping, [1, 2, 0, 0, 7]);
+}
+
+/// The mouse keeps host mode's table after returning onboard, so finding the
+/// mouse onboard proves no power cycle. Adopting that table would write the
+/// muted slots back on every later exit.
+#[tokio::test]
+async fn rearm_finding_our_own_table_onboard_keeps_the_original_baseline() {
+    let (channel, mouse) = scripted_mouse(MODE_ONBOARD, &SPARSE, Fault::None).await;
+    let armed = arm(&channel, &three_slot_host_spec()).await;
+    mouse.lock().unwrap().mode = MODE_ONBOARD;
+
+    assert!(armed.rearm().await);
+
+    let restore = armed.onboard.as_ref().unwrap().restore().unwrap();
+    assert!(restore.restore_on(&channel, 0xff).await);
+    assert_eq!(mouse.lock().unwrap().mapping, SPARSE);
+}
+
+/// The first session has nothing better to believe, and its own table is
+/// still no baseline: a stale mouse stays stale instead of getting worse.
+#[tokio::test]
+async fn first_arm_finding_our_own_table_onboard_holds_no_baseline() {
+    let (channel, mouse) = scripted_mouse(MODE_ONBOARD, &[1, 0, 0, 0, 0], Fault::None).await;
+    let armed = arm(&channel, &three_slot_host_spec()).await;
+    mouse.lock().unwrap().take_seen();
+
+    let restore = armed.onboard.as_ref().unwrap().restore().unwrap();
+    assert!(restore.restore_on(&channel, 0xff).await);
+
+    assert_eq!(
+        mouse.lock().unwrap().take_seen(),
+        [(SET_MODE_SEEN, vec![MODE_ONBOARD, 0, 0])]
+    );
+}
+
+/// A power-cycled mouse whose table cannot be read keeps the last one known.
+#[tokio::test]
+async fn a_failed_reread_after_a_power_cycle_keeps_the_held_baseline() {
+    let (channel, mouse) = scripted_mouse(MODE_ONBOARD, &SPARSE, Fault::None).await;
+    let armed = arm(&channel, &three_slot_host_spec()).await;
+    {
+        let mut mouse = mouse.lock().unwrap();
+        mouse.mode = MODE_ONBOARD;
+        mouse.mapping = vec![1, 2, 0, 0, 7];
+        mouse.fault = Fault::GetMapping;
+    }
+
+    assert!(armed.rearm().await);
+
+    let restore = armed.onboard.as_ref().unwrap().restore().unwrap();
+    assert!(restore.restore_on(&channel, 0xff).await);
+    assert_eq!(mouse.lock().unwrap().mapping, SPARSE);
+}
+
+/// A mouse leaving a host session for a profile: the mapping, then the mode,
+/// then the profile, which finds it onboard. The order of the two sessions
+/// themselves belongs to the agent's manager.
+#[tokio::test]
+async fn a_profile_after_a_restored_host_session_finds_the_mouse_onboard() {
+    let (channel, mouse) = scripted_mouse(MODE_ONBOARD, &SPARSE, Fault::None).await;
+    let armed = arm(&channel, &three_slot_host_spec()).await;
+    mouse.lock().unwrap().take_seen();
+
+    let restore = armed.onboard.as_ref().unwrap().restore().unwrap();
+    assert!(restore.restore_on(&channel, 0xff).await);
+    arm(&channel, &profile_spec()).await;
+
+    assert_eq!(
+        mouse.lock().unwrap().take_seen(),
+        [
+            (SET_MAPPING_SEEN, SPARSE.to_vec()),
+            (SET_MODE_SEEN, vec![MODE_ONBOARD, 0, 0]),
+            (SET_PROFILE_SEEN, vec![0, 1, 0]),
+        ]
+    );
+}
+
+/// A mapping that cannot be read costs the restore, never the session.
+#[tokio::test]
+async fn a_failed_baseline_read_still_arms() {
+    for fault in [Fault::ButtonCount, Fault::GetMapping, Fault::GetMode] {
+        let (channel, mouse) = scripted_mouse(MODE_ONBOARD, &FOUND, fault).await;
+        let armed = arm(&channel, &three_slot_host_spec()).await;
+        assert_eq!(mouse.lock().unwrap().mode, MODE_HOST);
+        assert_eq!(mouse.lock().unwrap().mapping, [1, 0, 0, 0, 0]);
+        mouse.lock().unwrap().take_seen();
+
+        let restore = armed.onboard.as_ref().unwrap().restore().unwrap();
+        assert!(restore.restore_on(&channel, 0xff).await);
+
+        assert_eq!(
+            mouse.lock().unwrap().take_seen(),
+            [(SET_MODE_SEEN, vec![MODE_ONBOARD, 0, 0])]
+        );
+    }
+}
+
+/// Arming that fails after muting the mouse rolls back with the mapping it
+/// read, so the baseline has to be held before the first write.
+#[tokio::test]
+async fn a_failed_host_mapping_write_keeps_the_baseline_for_rollback() {
+    let (channel, _) = scripted_mouse(MODE_ONBOARD, &SPARSE, Fault::SetMapping).await;
+    let device = Device::new(channel.clone(), 0xff).await.unwrap();
+    let mut armed = ArmedControls::default();
+    arm_controls_into(&device, &channel, 0xff, &three_slot_host_spec(), &mut armed)
+        .await
+        .unwrap_err();
+    let restore = armed.onboard.as_ref().unwrap().restore().unwrap();
+
+    let (reachable, mouse) = scripted_mouse(MODE_HOST, &[0; 5], Fault::None).await;
+    assert!(restore.restore_on(&reachable, 0xff).await);
+    assert_eq!(mouse.lock().unwrap().mapping, SPARSE);
+}
+
+/// A mapping write that fails must not strand the mouse in host mode, and the
+/// failure is reported. The retry finds the mouse onboard and writes nothing,
+/// so that mapping stays stale until a power cycle.
+#[tokio::test]
+async fn a_failed_mapping_restore_still_leaves_host_mode() {
+    let (channel, _) = scripted_mouse(MODE_ONBOARD, &SPARSE, Fault::None).await;
+    let armed = arm(&channel, &three_slot_host_spec()).await;
+    let restore = armed.onboard.as_ref().unwrap().restore().unwrap();
+
+    let (failing, mouse) = scripted_mouse(MODE_HOST, &[0; 5], Fault::SetMapping).await;
+    assert!(!restore.restore_on(&failing, 0xff).await);
+    assert_eq!(
+        mouse.lock().unwrap().take_seen(),
+        [
+            (SET_MAPPING_SEEN, SPARSE.to_vec()),
+            (SET_MODE_SEEN, vec![MODE_ONBOARD, 0, 0]),
+        ]
+    );
+
+    assert!(restore.restore_on(&failing, 0xff).await);
+    assert!(mouse.lock().unwrap().take_seen().is_empty());
+}
+
+/// A session's own restore finishes before its successor arms, so a profile
+/// target that finds host mode has no mapping to put back. It leaves host mode
+/// and selects the profile.
+#[tokio::test]
+async fn a_profile_target_finding_host_mode_writes_no_mapping() {
+    let (channel, mouse) = scripted_mouse(MODE_HOST, &[1, 0, 0], Fault::None).await;
+    arm(&channel, &profile_spec()).await;
+
+    assert_eq!(
+        mouse.lock().unwrap().take_seen(),
+        [
+            (SET_MODE_SEEN, vec![MODE_ONBOARD, 0, 0]),
+            (SET_PROFILE_SEEN, vec![0, 1, 0]),
+        ]
+    );
+}
+
+/// Host mode that never took leaves the mouse onboard, where the mapping write
+/// errors: the restore must complete instead of staying owed.
+#[tokio::test]
+async fn restoring_an_onboard_mouse_writes_no_mapping_and_succeeds() {
+    let (channel, _) = scripted_mouse(MODE_ONBOARD, &FOUND, Fault::None).await;
+    let armed = arm(&channel, &three_slot_host_spec()).await;
+    let restore = armed.onboard.as_ref().unwrap().restore().unwrap();
+
+    let (onboard, mouse) = scripted_mouse(MODE_ONBOARD, &FOUND, Fault::None).await;
+    assert!(restore.restore_on(&onboard, 0xff).await);
+    assert!(mouse.lock().unwrap().take_seen().is_empty());
+}
+
+/// A mode read that fails says nothing about the mode, so the restore must
+/// still try the mapping and the mode writes, in that order, rather than stay
+/// owed.
+#[tokio::test]
+async fn a_failed_mode_read_still_restores_the_mapping_and_the_mode() {
+    let (channel, _) = scripted_mouse(MODE_ONBOARD, &SPARSE, Fault::None).await;
+    let armed = arm(&channel, &three_slot_host_spec()).await;
+    let restore = armed.onboard.as_ref().unwrap().restore().unwrap();
+
+    let (unreadable, mouse) = scripted_mouse(MODE_HOST, &[0; 5], Fault::GetMode).await;
+    assert!(restore.restore_on(&unreadable, 0xff).await);
+
+    assert_eq!(
+        mouse.lock().unwrap().take_seen(),
+        [
+            (SET_MAPPING_SEEN, SPARSE.to_vec()),
+            (SET_MODE_SEEN, vec![MODE_ONBOARD, 0, 0]),
+        ]
+    );
+}
+
+/// An empty mapping pads to sixteen zeros and would mute every slot.
+#[tokio::test]
+async fn zero_slots_write_no_mapping() {
+    let (channel, mouse) = scripted_mouse(MODE_ONBOARD, &[], Fault::None).await;
+    let spec = CaptureSpec {
+        onboard: Some(OnboardTarget::Host(HostMode {
+            slots: Vec::new(),
+            report_rate: None,
+        })),
+        ..CaptureSpec::default()
+    };
+    let armed = arm(&channel, &spec).await;
+    mouse.lock().unwrap().take_seen();
+
+    let restore = armed.onboard.as_ref().unwrap().restore().unwrap();
+    assert!(restore.restore_on(&channel, 0xff).await);
+    assert_eq!(
+        mouse.lock().unwrap().take_seen(),
+        [(SET_MODE_SEEN, vec![MODE_ONBOARD, 0, 0])]
+    );
 }

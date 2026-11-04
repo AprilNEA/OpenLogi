@@ -3,27 +3,34 @@
 mod action_icons;
 mod editor;
 
+use crate::ui::theme::FocusRingStyle as _;
 use gpui::{
     App, AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement,
     ParentElement, Render, ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled,
     Subscription, Window, div, prelude::FluentBuilder as _, px, rgb, svg,
 };
-use gpui_base::Button as BaseButton;
-use gpui_component::{
-    Icon, IconName, Selectable as _, button::Button, h_flex, input::InputState, tooltip::Tooltip,
+use gpui_kit::base::Button as BaseButton;
+use gpui_kit::component::{
+    Icon, IconName, Selectable as _,
+    button::{Button, ButtonGroup},
+    h_flex,
+    input::InputState,
+    tooltip::Tooltip,
     v_flex,
 };
 use openlogi_core::binding::{
-    ActionRingConfig, ActionRingEntry, ActionRingIcon, ActionRingLayout, ActionRingSlot,
+    ActionRingConfig, ActionRingEntry, ActionRingIcon, ActionRingLayout, ActionRingSize,
+    ActionRingSlot,
 };
 use openlogi_ui::action_icons::RING_CANCEL_ICON;
 
 use self::action_icons::action_icon_path;
 use self::editor::{PowerUserInputs, action_library};
 use crate::features::keyboard::editors::{PowerUserKind, text_editor_placeholder};
-use crate::state::{AppState, StateEvent, StateEvents};
+use crate::state::{AppState, StateEvent};
 use crate::ui::action::localized_action_label;
-use crate::ui::theme::{self, Palette, Typography as _};
+use crate::ui::components::{Toggle, toggle_row};
+use crate::ui::theme::{self, Palette, SelectableStyle as _, Typography as _};
 
 /// Stateful Actions Ring editor. Ring configuration itself lives in
 /// [`AppState`]; this entity owns selection and editor input state.
@@ -151,57 +158,38 @@ impl Render for ActionRingPanel {
                         pal,
                     )),
             )
-            .child(enabled_row(ring.enabled, pal))
+            .child(toggle_row(
+                "ring-enabled-row",
+                pal,
+                tr!("action_ring.enable_ring"),
+                tr!("action_ring.open_at_the_current_cursor_position"),
+                Toggle::new("ring-enabled-toggle")
+                    .selected(ring.enabled)
+                    .on_change(|enabled, _, cx| {
+                        AppState::apply(cx, |state| state.commit_action_ring_enabled(*enabled));
+                    }),
+            ))
+            .child(toggle_row(
+                "ring-size-row",
+                pal,
+                tr!("action_ring.ring_size"),
+                tr!("action_ring.ring_size_description"),
+                size_segment(ring.size, cx),
+            ))
             .when(haptics_supported, |panel| {
-                panel.child(haptics_row(ring.haptics, pal))
+                panel.child(toggle_row(
+                    "ring-haptics-row",
+                    pal,
+                    tr!("action_ring.haptic_feedback"),
+                    tr!("action_ring.action_ring_haptic_description"),
+                    Toggle::new("ring-haptics-toggle")
+                        .selected(ring.haptics)
+                        .on_change(|haptics, _, cx| {
+                            AppState::apply(cx, |state| state.commit_action_ring_haptics(*haptics));
+                        }),
+                ))
             })
     }
-}
-
-/// The ring on/off toggle row.
-fn enabled_row(enabled: bool, pal: Palette) -> impl IntoElement {
-    h_flex()
-        .items_center()
-        .justify_between()
-        .gap_3()
-        .child(
-            v_flex()
-                .child(div().text_body().child(tr!("action_ring.actions_ring")))
-                .child(
-                    div()
-                        .text_caption()
-                        .text_color(pal.text_muted)
-                        .child(tr!("action_ring.open_at_the_current_cursor_position")),
-                ),
-        )
-        .child(toggle_button(
-            "ring-enabled",
-            enabled,
-            AppState::commit_action_ring_enabled,
-        ))
-}
-
-/// The haptic-feedback toggle row, shown only when the device supports it.
-fn haptics_row(haptics: bool, pal: Palette) -> impl IntoElement {
-    h_flex()
-        .items_center()
-        .justify_between()
-        .gap_3()
-        .child(
-            v_flex()
-                .child(div().text_body().child(tr!("action_ring.haptic_feedback")))
-                .child(
-                    div()
-                        .text_caption()
-                        .text_color(pal.text_muted)
-                        .child(tr!("action_ring.action_ring_haptic_description")),
-                ),
-        )
-        .child(toggle_button(
-            "ring-haptics",
-            haptics,
-            AppState::commit_action_ring_haptics,
-        ))
 }
 
 fn action_ring_editor_state(cx: &Context<ActionRingPanel>) -> (ActionRingConfig, ActionRingLayout) {
@@ -237,33 +225,34 @@ fn editor_input(
     state
 }
 
-fn current_device_supports_haptics(cx: &Context<ActionRingPanel>) -> bool {
-    AppState::try_read(cx).is_some_and(|state| {
-        state.current_record().is_some_and(|record| {
-            record
-                .capabilities
-                .unwrap_or_else(|| {
-                    openlogi_core::device::Capabilities::presumed_from_kind(record.kind)
+/// Small / Medium / Large. Each button commits its own size: the group's own
+/// `on_click` hears only pointer clicks, so Enter and Space on a focused
+/// segment would not reach it.
+fn size_segment(current: ActionRingSize, cx: &App) -> ButtonGroup {
+    ButtonGroup::new("ring-size")
+        .outline()
+        .children(ActionRingSize::ALL.map(|size| {
+            let (id, label) = match size {
+                ActionRingSize::Small => ("ring-size-small", tr!("action_ring.size_small")),
+                ActionRingSize::Medium => ("ring-size-medium", tr!("action_ring.size_medium")),
+                ActionRingSize::Large => ("ring-size-large", tr!("action_ring.size_large")),
+            };
+            Button::new(id)
+                .label(label)
+                .selected(current == size)
+                .selected_segment(current == size, cx)
+                .on_click(move |_, _, cx| {
+                    AppState::apply(cx, |state| state.commit_action_ring_size(size));
                 })
-                .haptic_feedback
-        })
-    })
+        }))
 }
 
-fn toggle_button(
-    id: &'static str,
-    enabled: bool,
-    commit: impl Fn(&mut AppState, bool) -> StateEvents + 'static,
-) -> Button {
-    Button::new(id)
-        .compact()
-        .label(if enabled {
-            tr!("common.on")
-        } else {
-            tr!("common.off")
-        })
-        .selected(enabled)
-        .on_click(move |_, _, cx| AppState::apply(cx, |state| commit(state, !enabled)))
+fn current_device_supports_haptics(cx: &Context<ActionRingPanel>) -> bool {
+    AppState::try_read(cx).is_some_and(|state| {
+        state
+            .current_record()
+            .is_some_and(|record| record.capabilities_or_presumed().haptic_feedback)
+    })
 }
 
 const PREVIEW_SIZE: f32 = 320.0;
@@ -302,8 +291,14 @@ fn ring_preview(
                 .justify_center()
                 .rounded_full()
                 .bg(pal.muted)
-                .text_color(pal.text_muted)
-                .child(svg().path(RING_CANCEL_ICON).size(px(20.0)).flex_none()),
+                // An `svg` paints only with its own text colour.
+                .child(
+                    svg()
+                        .path(RING_CANCEL_ICON)
+                        .size(px(20.0))
+                        .flex_none()
+                        .text_color(pal.text_muted),
+                ),
         )
         .children(ActionRingSlot::ALL.into_iter().map(|slot| {
             slot_button(
@@ -327,7 +322,7 @@ fn slot_button(
     let (left, top) = slot.placement(PREVIEW_SIZE, PREVIEW_RADIUS, PREVIEW_SLOT_SIZE);
     let label = entry.map_or_else(
         || tr!("action_ring.empty_slot").to_string(),
-        |entry| localized_action_label(entry.action()).to_string(),
+        |entry| entry_caption(entry).to_string(),
     );
     let icon_path = entry.map(|entry| {
         entry.custom_icon().map_or_else(
@@ -384,15 +379,7 @@ fn slot_button(
                 pal.control_hover
             })
         })
-        .focus_visible(move |button| {
-            button
-                .border_color(rgb(theme::ACCENT_BLUE))
-                .bg(if selected {
-                    theme::accent_tint_hover()
-                } else {
-                    pal.control_hover
-                })
-        })
+        .focus_visible(move |style| style.focus_ring(pal))
         .on_click(move |_, _, cx| {
             selected_view.update(cx, |panel, cx| {
                 panel.selected_slot = slot;
@@ -400,3 +387,16 @@ fn slot_button(
             });
         })
 }
+
+/// The name a populated slot shows in the preview: the label the user gave it,
+/// verbatim, or its action's localized name. The agent makes the same choice
+/// for the ring itself, so the preview and the ring name a slot alike.
+fn entry_caption(entry: &ActionRingEntry) -> SharedString {
+    entry.custom_label().map_or_else(
+        || localized_action_label(entry.action()),
+        |label| SharedString::from(label.to_owned()),
+    )
+}
+
+#[cfg(test)]
+mod tests;

@@ -58,7 +58,7 @@ async fn an_agent_that_keeps_coming_back_never_accumulates_its_way_to_an_exit() 
 fn activation_takes_priority_over_queued_hover_updates() {
     let hover = OverlayCommand::Hover {
         session_id: 1,
-        slot: ActionRingSlot::Top,
+        slot: Some(ActionRingSlot::Top),
     };
     let activation = OverlayCommand::Activate {
         session_id: 1,
@@ -87,7 +87,7 @@ fn a_new_sessions_hover_survives_the_previous_sessions_dismissal() {
     let closing = OverlayCommand::Cancel { session_id: 1 };
     let hover = OverlayCommand::Hover {
         session_id: 2,
-        slot: ActionRingSlot::Top,
+        slot: Some(ActionRingSlot::Top),
     };
 
     assert!(matches!(
@@ -171,7 +171,7 @@ async fn newer_activation_supersedes_a_stalled_terminal_request() {
 async fn stalled_hover_stops_when_the_command_channel_closes() {
     let hover = OverlayCommand::Hover {
         session_id: 1,
-        slot: ActionRingSlot::Top,
+        slot: Some(ActionRingSlot::Top),
     };
     let request_started = std::sync::Arc::new(tokio::sync::Notify::new());
     let (tx, mut rx) = mpsc::unbounded_channel();
@@ -208,7 +208,7 @@ async fn stalled_hover_stops_when_the_command_channel_closes() {
 fn only_terminal_commands_are_retryable() {
     let hover = OverlayCommand::Hover {
         session_id: 1,
-        slot: ActionRingSlot::Top,
+        slot: Some(ActionRingSlot::Top),
     };
     let activation = OverlayCommand::Activate {
         session_id: 1,

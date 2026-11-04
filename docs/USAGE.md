@@ -16,6 +16,7 @@ openlogi diag pointer-speed             # test 0x2205 pointer scaling and attemp
 openlogi diag smartshift                # toggle SmartShift and restore (smoke test)
 openlogi diag smartshift --torque 60    # set scrolling force / feedback intensity (1-100%)
 openlogi diag lighting ff0000           # solid colour for a wired RGB keyboard (any RRGGBB hex)
+openlogi diag host-switch --device "MX Master 3S" --host 1   # move a device to Easy-Switch channel 2
 ```
 
 Running `openlogi` with no subcommand defaults to `list`. Set
@@ -24,6 +25,8 @@ Running `openlogi` with no subcommand defaults to `list`. Set
 `openlogi diag pointer-speed` temporarily changes the selected device's pointer scaling. The command attempts to restore and verify the original scaling even when the test write fails. `--device NAME` selects a device; `--target RAW` sets the temporary 8.8 fixed-point value (`256` is 1×). By default, the command halves the current value, or doubles it when the raw value is `1`. Firmware may accept extreme values without clipping. A restoration error means the original speed could not be confirmed.
 
 `openlogi diag mouse-buttons` starts the HID++ `0x8110` button spy of a G-series mouse and prints the held slots on every press and release, with the G number G HUB shows for each slot. This is the slot order a new model's button layout needs. In onboard mode the active profile drives the buttons, and a button it leaves unbound may report nothing, so the command puts a mouse with `0x8100` in host mode for the watch, where every slot reports and each slot sends the HID button the printed mapping gives it (`0` sends nothing). It listens for `--duration SECS` (default 60), then stops the spy and restores onboard mode. Ctrl-C skips the restore; switch the mouse off and on to leave host mode. The command refuses to run while the OpenLogi agent runs, because the agent arms host mode itself. It also refuses a mouse already in host mode, or one whose mode it cannot read, because G HUB or another program owns the spy then. A mouse left in host mode by an interrupted watch, or by a program that quit without restoring it, leaves host mode only when it is switched off and on.
+
+`openlogi diag host-switch` asks the running agent to move one device to another Easy-Switch channel through HID++ `0x1814`. `--host` is zero-based, so `--host 1` is channel 2. `--device NAME` must match exactly one online device; a unique exact name wins over longer matches. The agent refuses a channel the device does not have and a channel the device reports as unpaired, before anything is written. Success means the agent sent the switch. It does not confirm that the device arrived, because the device then leaves this computer's radio link.
 
 ## Keyboard backlight
 

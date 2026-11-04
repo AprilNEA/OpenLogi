@@ -9,6 +9,7 @@ use openlogi_camera::Camera;
 use openlogi_core::device::{
     BatteryInfo, DeviceInventory, DeviceModelInfo, PairedDevice, StandaloneDevice,
 };
+use openlogi_hid::inventory::hid_only::HidOnlyProduct;
 use openlogi_ipc::client::ConnectError;
 use openlogi_ipc::{AgentSnapshot, AgentStatus};
 
@@ -68,8 +69,13 @@ pub async fn run(_args: ListArgs) -> Result<ExitCode> {
             return Err(error).context("failed to enumerate standalone HID devices");
         }
         println!("No Logitech HID++ devices or webcams found.");
+        let hid_only = hid_only_products().await;
+        if !hid_only.is_empty() {
+            println!();
+            print_hid_only(&hid_only);
+        }
         println!();
-        print_empty_notes(agent_status.as_ref());
+        print_empty_notes(agent_status.as_ref(), &hid_only);
         return Ok(ExitCode::from(NOTHING_FOUND));
     }
 
@@ -112,12 +118,30 @@ async fn agent_snapshot() -> Option<AgentSnapshot> {
     crate::agent::snapshot(&client).await.ok()
 }
 
+/// The Logitech products this host lists without any HID++ node.
+///
+/// Read by this process even when the agent answered: it is a plain HID
+/// listing that opens no device. A failed scan loses only this hint, so it
+/// goes to stderr instead of failing the command.
+async fn hid_only_products() -> Vec<HidOnlyProduct> {
+    openlogi_hid::enumerate_hid_only()
+        .await
+        .unwrap_or_else(|error| {
+            eprintln!("(scan for devices without HID++ failed: {error})");
+            Vec::new()
+        })
+}
+
 /// Why the list is empty. With an agent status in hand the reason is known;
-/// without one, fall back to the generic checklist.
-fn print_empty_notes(status: Option<&AgentStatus>) {
+/// without one, fall back to the generic checklist. A listed HID-only product
+/// is a fact about the host, so its note comes first in every case.
+fn print_empty_notes(status: Option<&AgentStatus>, hid_only: &[HidOnlyProduct]) {
+    println!("Notes:");
+    if !hid_only.is_empty() {
+        println!("  - {}", hid_only_note());
+    }
     match status {
         Some(status) if !status.input_monitoring_granted => {
-            println!("Notes:");
             println!(
                 "  - The agent does not hold Input Monitoring. Grant it to OpenLogi Agent: \
                  System Settings → Privacy & Security → Input Monitoring (the + picker \
@@ -127,7 +151,6 @@ fn print_empty_notes(status: Option<&AgentStatus>) {
         // Off macOS there is no Input Monitoring gate, so a failed open on
         // Linux is almost always missing hidraw access, not a stale session.
         Some(status) if status.hid_open_failures && cfg!(target_os = "linux") => {
-            println!("Notes:");
             println!(
                 "  - The agent's device opens keep failing. On Linux, HID++ access needs \
                  OpenLogi's udev rules (shipped by the packages; for a source build see \
@@ -135,7 +158,6 @@ fn print_empty_notes(status: Option<&AgentStatus>) {
             );
         }
         Some(status) if status.hid_open_failures => {
-            println!("Notes:");
             println!(
                 "  - Input Monitoring is granted, but the agent's device opens keep \
                  failing — another app may hold the devices (quit Logi Options+; for a \
@@ -145,7 +167,6 @@ fn print_empty_notes(status: Option<&AgentStatus>) {
             );
         }
         _ => {
-            println!("Notes:");
             println!("  - On macOS, quit Logi Options+ first — both apps fight over HID++ access.");
             println!(
                 "  - A Bluetooth-direct mouse (e.g. Lift, Signature) needs Input Monitoring \
@@ -156,6 +177,52 @@ fn print_empty_notes(status: Option<&AgentStatus>) {
                  packages; for a source build see docs/INSTALL-linux.md)."
             );
         }
+    }
+}
+
+/// What a listed HID-only product means on this host.
+///
+/// On Windows the cause seen in #2188 is a disabled vendor-defined
+/// collection (`CM_PROB_DISABLED`): the device still works as a plain mouse
+/// or keyboard, and Device Manager shows the collection with an error. A
+/// collection whose driver failed to start looks the same and has the same
+/// fix. The fix also applies to a standalone product such as the G600, whose
+/// own collection is vendor-defined too.
+fn hid_only_note() -> &'static str {
+    if cfg!(windows) {
+        "Windows lists the devices above without a HID++ collection. If one works with \
+         G HUB or Options+ on another PC, its vendor-defined collections are disabled or \
+         failed to start here: in Device Manager, uninstall its \"HID-compliant \
+         vendor-defined device\" entries, then replug it."
+    } else {
+        "The OS lists the devices above, but none of them exposes a HID++ interface, so \
+         OpenLogi cannot configure them."
+    }
+}
+
+fn print_hid_only(products: &[HidOnlyProduct]) {
+    println!(
+        "Logitech devices without a HID++ interface ({})",
+        products.len()
+    );
+    let last = products.len() - 1;
+    for (i, product) in products.iter().enumerate() {
+        let prefix = if i == last { "  └─" } else { "  ├─" };
+        println!("{prefix} {}", HidOnlyDisplay(product));
+    }
+}
+
+struct HidOnlyDisplay<'a>(&'a HidOnlyProduct);
+
+impl fmt::Display for HidOnlyDisplay<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} (vid={:04x} pid={:04x})",
+            self.0.name,
+            openlogi_hid::LOGITECH_VENDOR_ID,
+            self.0.product_id
+        )
     }
 }
 
@@ -360,9 +427,21 @@ mod format_tests {
     };
 
     use super::{
-        BatteryDisplay, CameraCapabilitiesDisplay, DeviceModelDisplay, PairedDevice,
-        PairedDeviceDisplay, StandaloneDisplay,
+        BatteryDisplay, CameraCapabilitiesDisplay, DeviceModelDisplay, HidOnlyDisplay,
+        HidOnlyProduct, PairedDevice, PairedDeviceDisplay, StandaloneDisplay,
     };
+
+    #[test]
+    fn hid_only_product_shows_name_and_ids() {
+        let product = HidOnlyProduct {
+            product_id: 0xc08b,
+            name: "G502 HERO Gaming Mouse".into(),
+        };
+        assert_eq!(
+            HidOnlyDisplay(&product).to_string(),
+            "G502 HERO Gaming Mouse (vid=046d pid=c08b)"
+        );
+    }
 
     #[test]
     fn standalone_device_shows_name_kind_ids_and_driver() {
@@ -404,6 +483,7 @@ mod format_tests {
             model_info: None,
             capabilities: None,
             settings_revision: 0,
+            hidpp10: false,
         }
     }
 

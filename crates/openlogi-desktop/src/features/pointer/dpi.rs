@@ -12,7 +12,7 @@ use gpui::{
     AnyElement, Context, Entity, IntoElement, ParentElement, Render, Styled, Subscription, Window,
     div, px,
 };
-use gpui_component::{
+use gpui_kit::component::{
     Icon, IconName, Selectable as _, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
@@ -27,6 +27,7 @@ use super::report_rate::{ReportRateFacts, report_rate_section};
 use crate::state::{AppState, DeviceKey, DpiLoad, StateEvent};
 use crate::ui::commit_slider::{CommitSlider, SliderRange};
 use crate::ui::components::PresetChip;
+use crate::ui::slider_row::SliderRow;
 use crate::ui::status::{retry_line, status_line};
 use crate::ui::theme::{self, Palette, Typography as _};
 
@@ -206,33 +207,20 @@ impl DpiPanel {
             snapshot.device_key.clone(),
             pal,
         );
+        // The column holds the device's highest DPI; until the range is read,
+        // the value shown is all there is to measure.
+        let widest = match &snapshot.status {
+            DpiLoad::Ready(info) => info.capabilities.max(),
+            _ => snapshot.dpi,
+        };
 
         v_flex()
             .gap_3()
             .w_full()
             .child(
-                h_flex()
-                    .justify_between()
-                    .items_baseline()
-                    .child(
-                        div()
-                            .text_body()
-                            .text_color(pal.text_muted)
-                            .child(tr!("pointer.dpi")),
-                    )
-                    .child(
-                        div()
-                            .text_body()
-                            .text_color(pal.text_primary)
-                            .child(format!("{}", snapshot.dpi)),
-                    ),
-            )
-            .child(slider)
-            .child(
-                div()
-                    .text_caption()
-                    .text_color(pal.text_muted)
-                    .child(range_label),
+                SliderRow::new(tr!("pointer.dpi"), slider)
+                    .value(snapshot.dpi.to_string(), [widest.to_string()])
+                    .hint(range_label),
             )
             .child(
                 v_flex()
@@ -260,8 +248,15 @@ fn dpi_panel_snapshot(cx: &mut Context<DpiPanel>) -> DpiPanelSnapshot {
         .and_then(|s| {
             let record = s.current_record()?;
             let device_key = record.device_key();
+            // A device without adjustable DPI is never read, so its load
+            // stays `Unknown`, which would show "reading…" for good.
+            let status = if s.current_dpi_supported() {
+                s.dpi_load_for(&device_key)
+            } else {
+                DpiLoad::Unsupported(tr!("pointer.adjustable_dpi_unsupported").to_string())
+            };
             Some(DpiPanelSnapshot {
-                status: s.dpi_load_for(&device_key),
+                status,
                 device_key: Some(device_key),
                 dpi: s.dpi(),
                 presets: s.dpi_presets(),
@@ -356,6 +351,7 @@ const CHIP_H: f32 = 28.;
 /// the device and updates `AppState.dpi`; the small × removes the preset.
 fn preset_chip(idx: usize, value: Dpi, active: bool, presets: &[Dpi]) -> impl IntoElement {
     let presets_for_remove: Vec<Dpi> = presets.to_vec();
+    let remove_label = tr!("common.remove_named_item", name => format!("{value} DPI"));
     PresetChip::new(("dpi-preset-chip", idx))
         .selected(active)
         .child(
@@ -381,9 +377,11 @@ fn preset_chip(idx: usize, value: Dpi, active: bool, presets: &[Dpi]) -> impl In
         )
         .child(
             Button::new(("dpi-preset-remove", idx))
-                .xsmall()
+                .small()
                 .ghost()
                 .icon(IconName::Close)
+                .accessibility_label(remove_label.clone())
+                .tooltip(remove_label)
                 .on_click(move |_event, _window, cx| {
                     let mut next = presets_for_remove.clone();
                     if idx < next.len() {

@@ -4,7 +4,7 @@ use gpui::{
     Context, ElementId, InteractiveElement as _, IntoElement, ParentElement, Render, Styled,
     Subscription, Window, div, prelude::FluentBuilder as _,
 };
-use gpui_component::{Disableable as _, Icon, h_flex, switch::Switch, v_flex};
+use gpui_kit::component::{Disableable as _, Icon, h_flex, switch::Switch, v_flex};
 use openlogi_core::config::DisableKey;
 use openlogi_core::hid::DisableKeysMask;
 

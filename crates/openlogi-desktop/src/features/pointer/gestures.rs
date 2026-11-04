@@ -10,16 +10,14 @@
 //! `SwipeThresholds` for the HID++ and OS-hook gesture paths.
 
 use gpui::{
-    Context, IntoElement, ParentElement, Render, SharedString, Styled, Subscription, Window, div,
-    rgb,
+    Context, IntoElement, ParentElement, Render, SharedString, Styled, Subscription, Window,
 };
-use gpui_component::{h_flex, slider::Slider, v_flex};
+use gpui_kit::component::{slider::Slider, v_flex};
 use openlogi_core::config::{GestureAxisBias, GestureSensitivity};
 
 use crate::state::{AppState, DeviceRecord, StateEvent, StateEvents};
 use crate::ui::commit_slider::{CommitSlider, SliderRange, SliderUnit};
-use crate::ui::section::section_label;
-use crate::ui::theme::{self, ACCENT_BLUE, Typography as _};
+use crate::ui::slider_row::SliderRow;
 
 pub struct GesturePanel {
     /// The selected device's gesture sensitivity (device override, else the
@@ -88,6 +86,7 @@ impl Render for GesturePanel {
         let sensitivity_row = slider_row(
             &mut self.sensitivity,
             sensitivity,
+            [GestureSensitivity::MIN, GestureSensitivity::MAX],
             tr!("pointer.gesture_sensitivity"),
             tr!("pointer.gesture_sensitivity_description"),
             window,
@@ -96,6 +95,7 @@ impl Render for GesturePanel {
         let axis_bias_row = slider_row(
             &mut self.axis_bias,
             axis_bias,
+            [GestureAxisBias::MIN, GestureAxisBias::MAX],
             tr!("pointer.gesture_axis_bias"),
             tr!("pointer.gesture_axis_bias_description"),
             window,
@@ -109,37 +109,20 @@ impl Render for GesturePanel {
     }
 }
 
-/// One labelled slider seated on `committed`, with its value and a caption.
+/// One slider row seated on `committed`, with its live value and a caption.
+/// The value column is sized for the wider of `bounds`.
 fn slider_row<T: SliderUnit + std::fmt::Display>(
     slider: &mut CommitSlider<T>,
     committed: T,
+    bounds: [T; 2],
     label: impl Into<SharedString>,
     description: impl Into<SharedString>,
     window: &mut Window,
     cx: &mut Context<GesturePanel>,
-) -> gpui::Div {
-    let pal = theme::palette(cx);
+) -> SliderRow {
     slider.sync(committed, window, cx);
     let display = slider.shown(committed);
-    v_flex()
-        .gap_2()
-        .child(
-            h_flex()
-                .justify_between()
-                .items_baseline()
-                .child(section_label(label, pal))
-                .child(
-                    div()
-                        .text_body()
-                        .text_color(rgb(ACCENT_BLUE))
-                        .child(format!("{display}")),
-                ),
-        )
-        .child(Slider::new(slider.slider()).horizontal())
-        .child(
-            div()
-                .text_caption()
-                .text_color(pal.text_muted)
-                .child(description.into()),
-        )
+    SliderRow::new(label, Slider::new(slider.slider()).horizontal())
+        .value(display.to_string(), bounds.map(|b| b.to_string()))
+        .description(description)
 }

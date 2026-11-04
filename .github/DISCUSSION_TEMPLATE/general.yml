@@ -1,0 +1,28 @@
+body:
+  - type: markdown
+    attributes:
+      value: |
+        General is for feedback, comparisons, and topics that fit no other category.
+        Questions and ideas posted here get moved, so please check first:
+
+        | You have | Post it in |
+        |---|---|
+        | A usage or setup question | [Q&A](https://github.com/AprilNEA/OpenLogi/discussions/new?category=q-a) |
+        | A feature idea | [Ideas](https://github.com/AprilNEA/OpenLogi/discussions/new?category=ideas) |
+        | Something that is broken | [Bug form](https://github.com/AprilNEA/OpenLogi/issues/new?template=bug_report.yml) |
+        | A device that is not detected or not supported | [Device form](https://github.com/AprilNEA/OpenLogi/issues/new?template=device_support.yml) |
+
+  - type: checkboxes
+    id: routing
+    attributes:
+      label: Category check
+      options:
+        - label: This is not a question, a feature idea, a bug report, or a device support request.
+          required: true
+
+  - type: textarea
+    id: message
+    attributes:
+      label: Message
+    validations:
+      required: true

@@ -122,6 +122,12 @@ impl ProbedFeatures {
     pub(super) fn completed(&self) -> bool {
         !matches!(self.protocol, ProbedProtocol::Unanswered)
     }
+
+    /// Whether the device answered as HID++ 1.0, which carries over to
+    /// [`PairedDevice::hidpp10`](openlogi_core::device::PairedDevice::hidpp10).
+    pub(super) fn is_hidpp10(&self) -> bool {
+        matches!(self.protocol, ProbedProtocol::Hidpp10)
+    }
 }
 
 /// What a probe learned about the protocol a device speaks.

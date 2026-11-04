@@ -1,0 +1,149 @@
+{
+  "schema_version": 1,
+  "id": "g915-001-profile",
+  "name": "G915",
+  "inventories": [
+    {
+      "receiver": {
+        "name": "Lightspeed Receiver",
+        "vendor_id": 1133,
+        "product_id": 50497,
+        "unique_id": "4F4C5201"
+      },
+      "paired": [
+        {
+          "slot": 1,
+          "codename": "G915 WIRELESS RGB MECHANICAL GAMING KEYBOARD",
+          "wpid": 16508,
+          "kind": "keyboard",
+          "online": true,
+          "battery": {
+            "percentage": 92,
+            "level": "full",
+            "status": "discharging"
+          },
+          "model_info": {
+            "entity_count": 5,
+            "serial_number": null,
+            "unit_id": [
+              79,
+              76,
+              68,
+              1
+            ],
+            "transports": {
+              "usb": true,
+              "equad": true,
+              "btle": true,
+              "bluetooth": false
+            },
+            "model_ids": [
+              45908,
+              16508,
+              49982
+            ],
+            "extended_model_id": 2
+          },
+          "capabilities": {
+            "buttons": true,
+            "pointer": false,
+            "lighting": true,
+            "scroll_inversion": false,
+            "hires_wheel": false,
+            "thumbwheel": false,
+            "haptic_feedback": false,
+            "haptic_panel": false,
+            "dpi_gestures": false,
+            "fn_lock": false,
+            "os_layout": false,
+            "report_rate": true,
+            "backlight": false,
+            "easy_switch": true,
+            "virtual_thumbwheel": false,
+            "pointer_scaling": false,
+            "force_sensing": false,
+            "disable_keys": false,
+            "onboard_profiles": true,
+            "button_spy": false
+          },
+          "settings_revision": 0,
+          "hidpp10": false
+        }
+      ]
+    }
+  ],
+  "standalone": [],
+  "settings": [
+    {
+      "route": {
+        "Unifying": {
+          "receiver_uid": "4F4C5201",
+          "slot": 1
+        }
+      },
+      "dpi": {
+        "support": "unsupported"
+      },
+      "smartshift": {
+        "support": "unsupported"
+      },
+      "wheel": {
+        "support": "unsupported"
+      },
+      "backlight": {
+        "support": "unsupported"
+      },
+      "fn_lock": {
+        "support": "unsupported"
+      },
+      "report_rate": {
+        "support": "supported",
+        "value": {
+          "current": 1000,
+          "supported": [
+            125,
+            250,
+            500,
+            1000
+          ]
+        }
+      },
+      "easy_switch": {
+        "support": "supported",
+        "value": {
+          "current": 0,
+          "slots": [
+            {
+              "index": 0,
+              "paired": true,
+              "connection": "Unifying",
+              "name": "Computer 1",
+              "name_max_len": 24,
+              "os": null
+            },
+            {
+              "index": 1,
+              "paired": true,
+              "connection": "Bluetooth",
+              "name": null,
+              "name_max_len": 24,
+              "os": null
+            }
+          ],
+          "can_rename": true
+        }
+      },
+      "pointer_speed": {
+        "support": "unsupported"
+      },
+      "force_sensing": {
+        "support": "unsupported"
+      },
+      "disable_keys": {
+        "support": "unsupported"
+      },
+      "lighting": "supported",
+      "light": "unsupported"
+    }
+  ]
+}

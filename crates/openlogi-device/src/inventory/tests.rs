@@ -71,6 +71,7 @@ fn inventory(slots: &[u8]) -> Vec<DeviceInventory> {
                 model_info: None,
                 capabilities: None,
                 settings_revision: 0,
+                hidpp10: false,
             })
             .collect(),
     }]
@@ -108,6 +109,7 @@ fn bolt_slot_with_identity(
             model_info: None,
             capabilities: None,
             settings_revision: 0,
+            hidpp10: false,
         },
         CacheOutcome::Seen(CacheKey::Bolt { unit_id }),
     )

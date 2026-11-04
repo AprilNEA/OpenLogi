@@ -61,6 +61,29 @@ optional physical device key.
 - `vertical_scroll_sensitivity`, from `1` through `100` (`14` is 1×);
   continuous trackpad input remains native
 - `thumbwheel_sensitivity`, from `1` through `100` (`14` is 1×)
+- `[app_settings.momentum_scrolling]` (off by default) is momentum scrolling
+  for every mouse whose `smooth_wheel` is on; a device's own
+  `momentum_scrolling` table overrides it. When SmartShift lets the wheel
+  spin freely, the page glides off at the speed it was spun, slows along the
+  chosen shape, and stops the moment a finger stops the wheel. Ratchet scrolling
+  keeps its steps. A glide's speed is `(1 − t/T)^p` of its start speed over
+  `T = τ·(p + 1)`, so every shape covers start speed × τ. Each value is clamped
+  into its range when the agent reads it:
+  - `enabled` (default `false`)
+  - `pixels_per_notch`, `10` through `60` (default `28`): reference pixels per
+    wheel notch, for ratchet steps and for the speed a spin launches the glide
+    at. macOS posts pixels; Windows and Linux scale native wheel ticks against
+    the default
+  - `glide_shape`: `sharp` (`p` ½), `linear` (1), `smooth` (2, default) or
+    `floaty` (4)
+  - `max_glide_speed`, `2000` through `15000` px/s (default `8000`): the fastest
+    one spin glides
+  - `glide_ms`, `150` through `1200` (default `400`): the glide's time constant
+    τ
+  - `repeat_boost`, `100` through `200` percent (default `135`): spinning again
+    while the page still glides, or soon after it stopped, the same way,
+    multiplies the glide by this much each time, up to 3× past
+    `max_glide_speed`; `100` turns it off
 - `mouse_profile_target`: `pointer` (default, including existing configs that
   omit this preference) or `focused`. Mouse button profiles follow the window
   under the pointer; the desktop uses the global bindings. Keyboard profiles
@@ -71,10 +94,14 @@ optional physical device key.
   surface uses the focused application's profile rather than the desktop's;
   with no focused application there is no such profile and the global bindings
   apply, as in focused mode. OpenLogi never activates a background window to
-  send a shortcut: over an identified window or the desktop, mouse
-  bindings that produce keystrokes or run workflows are skipped unless the
-  hovered window is focused. Global actions such as desktop switching can run
-  without changing application focus.
+  send a shortcut. Over an identified window or the desktop, a button that the
+  focused application binds the same way produces its keystrokes or runs its
+  workflow as focused mode does, in the focused application; a global hotkey
+  therefore works anywhere. A button that the hovered target binds
+  differently, through a per-app profile on either side, produces keystrokes
+  or runs workflows only while the hovered window is focused, and is skipped
+  otherwise. Global actions such as desktop switching can run without changing
+  application focus.
 - `low_battery_notifications` (default `true`): the agent shows a notice at the
   bottom of the screen when a connected device's battery runs low. Low means
   20% or less while the device is not charging, or a low or critical level from
@@ -133,6 +160,10 @@ Common device fields are:
   Scrolling card offers it as **Smooth wheel** when the current connection has
   `0x2121`; a smooth wheel turned on over another connection can still be turned
   off there. Absent or `false` leaves the wheel native
+- `momentum_scrolling`: this mouse's own momentum scrolling, the same keys as
+  `[app_settings.momentum_scrolling]`. Absent, the mouse follows the app-wide
+  table. The desktop's Pointer tab writes it, and removes it when the mouse is
+  set back to the Settings › General value
 - `bindings`: a button maps to one action, an independent short/long action
   pair, or a gesture-direction map.
   `Thumbwheel` is the thumb wheel's capacitive tap — it has no GUI control and

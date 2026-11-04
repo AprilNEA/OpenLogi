@@ -10,12 +10,12 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
     CameraControls, CameraStreamMode, Config, DeviceIdentity, DisableKey, GestureAxisBias,
-    GestureSensitivity, LightSettings, Lighting, OnboardMemory, ScrollResolution, SmartShift,
-    ThumbwheelSensitivity,
+    GestureSensitivity, LightSettings, Lighting, MomentumScrolling, OnboardMemory,
+    ScrollResolution, SmartShift, ThumbwheelSensitivity,
 };
 use crate::binding::{
-    Action, ActionRingConfig, ActionRingIcon, ActionRingSlot, Binding, ButtonId, GamingLayout,
-    KeypadPage, RingAction, SwipeThresholds, default_binding,
+    Action, ActionRingConfig, ActionRingIcon, ActionRingSize, ActionRingSlot, Binding, ButtonId,
+    GamingLayout, KeypadPage, RingAction, SwipeThresholds, default_binding_on,
 };
 use crate::hid::{Dpi, PointerSpeed, ReportRate};
 
@@ -70,6 +70,15 @@ impl Config {
             .or_default()
             .action_ring
             .haptics = enabled;
+    }
+
+    /// Set how large `device_key`'s Actions Ring is drawn.
+    pub fn set_action_ring_size(&mut self, device_key: &str, size: ActionRingSize) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .action_ring
+            .size = size;
     }
 
     /// Replace or clear one slot in the default Actions Ring layout.
@@ -475,7 +484,7 @@ impl Config {
         let customized = |button: &ButtonId, binding: &Binding| {
             layout.needs_host_mode(*button)
                 && (!matches!(binding, Binding::Single(_))
-                    || binding.click_action() != default_binding(*button))
+                    || binding.click_action() != default_binding_on(Some(layout), *button))
         };
         let needs_host = device.report_rate.is_some()
             || self.uses_gshift(device_key)
@@ -619,6 +628,29 @@ impl Config {
             .entry(device_key.to_string())
             .or_default()
             .thumbwheel_sensitivity = sensitivity;
+    }
+
+    /// The effective momentum-scrolling settings for `device_key`: the
+    /// device's override when set, else the app-wide default.
+    #[must_use]
+    pub fn momentum_scrolling(&self, device_key: &str) -> MomentumScrolling {
+        self.devices
+            .get(device_key)
+            .and_then(|d| d.momentum_scrolling)
+            .unwrap_or(self.app_settings.momentum_scrolling)
+    }
+
+    /// Set (or clear, with `None`) `device_key`'s momentum-scrolling
+    /// override.
+    pub fn set_device_momentum_scrolling(
+        &mut self,
+        device_key: &str,
+        momentum: Option<MomentumScrolling>,
+    ) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .momentum_scrolling = momentum;
     }
 
     /// Whether `device_key`'s main wheel is smoothed through its diverted

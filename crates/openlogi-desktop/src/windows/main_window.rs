@@ -7,7 +7,7 @@
 //! can be brought back.
 
 use gpui::{App, AppContext as _, Pixels, Size, Styled as _, WindowOptions, px};
-use gpui_component::{ActiveTheme as _, Root};
+use gpui_kit::component::{ActiveTheme as _, Root};
 use openlogi_core::brand::APP_ID;
 use tracing::warn;
 

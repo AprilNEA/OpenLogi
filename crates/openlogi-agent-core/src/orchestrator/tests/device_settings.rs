@@ -101,6 +101,34 @@ fn configured_wheel_mode_gates_resolution_and_inversion_independently() {
     assert_eq!(configured_wheel_mode(&config, &device, true), None);
 }
 
+/// Momentum scrolling measures the diverted wheel's speed, so with it on for
+/// the device the divert asks for high-resolution reports; off, the wheel
+/// reports as before.
+#[test]
+fn momentum_scrolling_diverts_the_wheel_in_high_resolution() {
+    let mut config = Config::default();
+    config.set_smooth_wheel("a", true);
+    let mut device = dev("a", 1, true);
+    device.capabilities = Some(Capabilities {
+        hires_wheel: true,
+        ..Capabilities::default()
+    });
+    let divert = |config: &Config| {
+        main_wheel_divert(config, &device, true)
+            .expect("the wheel is diverted")
+            .high_resolution
+    };
+    assert!(!divert(&config));
+    config.app_settings.momentum_scrolling.enabled = true;
+    assert!(divert(&config));
+    // The device's own setting wins over the app-wide default.
+    config.set_device_momentum_scrolling(
+        "a",
+        Some(openlogi_core::config::MomentumScrolling::default()),
+    );
+    assert!(!divert(&config), "this mouse turned it off for itself");
+}
+
 /// Smooth scrolling diverts the wheel only with the device's opt-in, its
 /// `0x2121` wheel, the mouse hook and mouse capture. The divert carries the
 /// settings the re-apply would write, and the re-apply stands down while the
@@ -123,6 +151,7 @@ fn the_main_wheel_is_diverted_only_with_every_gate_open() {
         Some(MainWheelDivert {
             resolution: Some(ScrollResolution::High),
             inverted: Some(true),
+            high_resolution: false,
         })
     );
     assert_eq!(

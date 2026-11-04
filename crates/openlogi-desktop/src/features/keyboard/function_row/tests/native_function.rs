@@ -29,7 +29,8 @@ impl Render for CalculatorInspector {
                     x_frac: 0.5,
                     y_frac: 0.1,
                     binding: "Copy".into(),
-                    binding_icon: None,
+                    binding_icon: action_icon_path(&Action::Copy),
+                    bound: true,
                     lcd_icon: None,
                 }],
                 &self.view,
@@ -41,7 +42,8 @@ impl Render for CalculatorInspector {
 
 #[gpui::test]
 fn keyboard_native_row_click_removes_the_persisted_binding(cx: &mut gpui::TestAppContext) {
-    cx.update(gpui_component::init);
+    let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
+    cx.update(gpui_kit::init);
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join(openlogi_core::paths::CONFIG_FILE);
     let (mut config, mut file) = ConfigFile::load_from_path(&path).unwrap();

@@ -2184,10 +2184,15 @@ mod tests {
     fn wheel_publication(route: &DeviceRoute, divert: bool) -> Arc<CapturePublication> {
         let mut plan = crate::capture_plan::plan_for_device(
             &openlogi_core::config::Config::default(),
-            openlogi_core::device_order::PhysicalDeviceKey::parse("unit:00000001")
+            crate::capture_plan::PlanDevice {
+                physical_key: openlogi_core::device_order::PhysicalDeviceKey::parse(
+                    "unit:00000001",
+                )
                 .expect("fixture is a physical key"),
-            "mouse",
-            route.clone(),
+                config_key: "mouse",
+                route: route.clone(),
+                layout: None,
+            },
             None,
             0,
             true,

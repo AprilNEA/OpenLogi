@@ -15,9 +15,10 @@
 //! agent we are quitting — then exits.
 //!
 //! Everything runs on one dedicated thread: the hidden window, its message
-//! pump, and the menu. The icon is re-added when Explorer restarts (the
-//! `TaskbarCreated` broadcast), and the glyph tracks the taskbar theme
-//! (black on a light taskbar, white on a dark one) at install time.
+//! pump, and the menu. The icon is re-added when a `TaskbarCreated`
+//! broadcast finds it gone (an Explorer restart), and the glyph tracks the
+//! taskbar theme (black on a light taskbar, white on a dark one) at install
+//! time.
 
 #![expect(
     unsafe_code,
@@ -26,12 +27,13 @@
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::HBRUSH;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Shell::{
-    NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW, Shell_NotifyIconW,
+    NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW,
+    Shell_NotifyIconW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CW_USEDEFAULT, CreateIconFromResourceEx, CreatePopupMenu, CreateWindowExW,
@@ -131,8 +133,11 @@ fn run_tray_loop(shutdown_tx: ShutdownRequestSender) {
             RegisterWindowMessageW(wide("TaskbarCreated").as_ptr()),
             Ordering::Relaxed,
         );
-        add_tray_icon(hwnd);
-        info!("tray icon installed");
+        if add_tray_icon(hwnd) {
+            info!("tray icon installed");
+        } else {
+            warn!("Shell_NotifyIconW(NIM_ADD) failed — no tray icon");
+        }
 
         let mut msg: MSG = std::mem::zeroed();
         while GetMessageW(&raw mut msg, std::ptr::null_mut(), 0, 0) > 0 {
@@ -167,11 +172,14 @@ unsafe extern "system" fn wnd_proc(
             0
         }
         m if m != 0 && m == TASKBAR_CREATED.load(Ordering::Relaxed) => {
-            // Explorer restarted; every tray icon was dropped. Re-add ours.
-            // SAFETY: `hwnd` is our own window, still live while its window
-            // procedure runs, and this is the thread that created it — the
-            // same conditions under which `run_tray_loop` first added the icon.
-            unsafe { add_tray_icon(hwnd) };
+            let mut shell = Shell { hwnd };
+            match shell.readd() {
+                Readd::StillPresent => debug!("TaskbarCreated, tray icon still present"),
+                Readd::Restored => info!("tray icon re-added after TaskbarCreated"),
+                Readd::Lost => {
+                    warn!("Shell_NotifyIconW(NIM_ADD) failed after TaskbarCreated — no tray icon");
+                }
+            }
             0
         }
         // SAFETY: handing the system back the message it just delivered,
@@ -182,28 +190,104 @@ unsafe extern "system" fn wnd_proc(
     }
 }
 
-/// Install the icon (idempotent enough for the re-add path: a duplicate
-/// `NIM_ADD` fails silently and the existing icon stays).
+/// What a `TaskbarCreated` broadcast found when it came to re-add the icon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Readd {
+    /// The shell still had the icon; nothing was added.
+    StillPresent,
+    /// The icon was gone and is back.
+    Restored,
+    /// The icon was gone and the shell refused to add it again.
+    Lost,
+}
+
+/// The two notification-area calls the `TaskbarCreated` handler makes. A
+/// trait so the re-add decision runs against a test double: CI has no
+/// Explorer to hold an icon.
+trait NotifyArea {
+    /// Refresh our icon in place (`NIM_MODIFY`). False when the shell does
+    /// not have it.
+    fn modify(&mut self) -> bool;
+    /// Add our icon (`NIM_ADD`). False when the shell refused it.
+    fn add(&mut self) -> bool;
+
+    /// Answer a `TaskbarCreated` broadcast. Explorer sends it after a restart
+    /// that dropped every icon, but other programs broadcast it too while our
+    /// icon is still there (#2296). `NIM_ADD` fails on an icon that exists,
+    /// so check with `NIM_MODIFY` first and add only an icon that is gone.
+    fn readd(&mut self) -> Readd {
+        if self.modify() {
+            Readd::StillPresent
+        } else if self.add() {
+            Readd::Restored
+        } else {
+            Readd::Lost
+        }
+    }
+}
+
+/// The real notification area, addressed through our hidden window. Only
+/// built in [`wnd_proc`], for the window it is running for.
+struct Shell {
+    hwnd: HWND,
+}
+
+impl NotifyArea for Shell {
+    fn modify(&mut self) -> bool {
+        // SAFETY: `self.hwnd` is the window whose procedure built this
+        // `Shell`. It is live while that procedure runs, on the thread that
+        // created it.
+        unsafe { modify_tray_icon(self.hwnd) }
+    }
+
+    fn add(&mut self) -> bool {
+        // SAFETY: as in `modify`; the same conditions under which
+        // `run_tray_loop` first added the icon.
+        unsafe { add_tray_icon(self.hwnd) }
+    }
+}
+
+/// Our icon as the shell identifies it (`hWnd` + `uID`), with the tooltip
+/// set (`NIF_TIP`). Each `Shell_NotifyIconW` call starts from this.
 #[expect(
     clippy::cast_possible_truncation,
     reason = "NOTIFYICONDATAW is a few hundred bytes"
 )]
-unsafe fn add_tray_icon(hwnd: HWND) {
-    // SAFETY: `nid` is fully initialized below; the tip buffer is bounded.
+fn notify_data(hwnd: HWND) -> NOTIFYICONDATAW {
+    // SAFETY: NOTIFYICONDATAW is a plain C struct of integers, handles and
+    // arrays; all-zero is its empty state.
+    let mut nid: NOTIFYICONDATAW = unsafe { std::mem::zeroed() };
+    nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
+    nid.hWnd = hwnd;
+    nid.uID = 1;
+    nid.uFlags = NIF_TIP;
+    let tip = wide("OpenLogi");
+    nid.szTip[..tip.len()].copy_from_slice(&tip);
+    nid
+}
+
+/// Add the icon (`NIM_ADD`). False when the shell refused it, which includes
+/// an icon that already exists: the re-add path checks first
+/// ([`NotifyArea::readd`]).
+unsafe fn add_tray_icon(hwnd: HWND) -> bool {
+    let mut nid = notify_data(hwnd);
+    nid.uFlags |= NIF_MESSAGE | NIF_ICON;
+    nid.uCallbackMessage = WM_TRAY;
+    // SAFETY: `tray_icon` only reads the embedded PNG; `nid` is fully
+    // initialized and outlives the call.
     unsafe {
-        let mut nid: NOTIFYICONDATAW = std::mem::zeroed();
-        nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
-        nid.hWnd = hwnd;
-        nid.uID = 1;
-        nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
-        nid.uCallbackMessage = WM_TRAY;
         nid.hIcon = tray_icon();
-        let tip = wide("OpenLogi");
-        nid.szTip[..tip.len()].copy_from_slice(&tip);
-        if Shell_NotifyIconW(NIM_ADD, &raw const nid) == 0 {
-            warn!("Shell_NotifyIconW(NIM_ADD) failed — no tray icon");
-        }
+        Shell_NotifyIconW(NIM_ADD, &raw const nid) != 0
     }
+}
+
+/// Re-send the tooltip (`NIM_MODIFY`). True only while the shell has the
+/// icon. It carries no icon handle, so a check that finds the icon in place
+/// creates no `HICON`.
+unsafe fn modify_tray_icon(hwnd: HWND) -> bool {
+    let nid = notify_data(hwnd);
+    // SAFETY: `nid` is fully initialized and outlives the call.
+    unsafe { Shell_NotifyIconW(NIM_MODIFY, &raw const nid) != 0 }
 }
 
 /// The tray glyph: the brand mark in black on a light taskbar, white on a
@@ -428,10 +512,6 @@ fn spawn_gui() {
 /// the agent we are about to exit), then the icon, then the agent. Mirrors
 /// the macOS Quit semantics; the GUI holds no unsaved state (config writes
 /// are immediate).
-#[expect(
-    clippy::cast_possible_truncation,
-    reason = "NOTIFYICONDATAW is a few hundred bytes"
-)]
 fn quit(hwnd: HWND) {
     use sysinfo::{Pid, ProcessesToUpdate, System};
     let mut system = System::new();
@@ -445,12 +525,9 @@ fn quit(hwnd: HWND) {
             }
         }
     }
-    // SAFETY: removing the icon this thread added.
+    let nid = notify_data(hwnd);
+    // SAFETY: removing the icon this thread added; `nid` outlives the call.
     unsafe {
-        let mut nid: NOTIFYICONDATAW = std::mem::zeroed();
-        nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
-        nid.hWnd = hwnd;
-        nid.uID = 1;
         Shell_NotifyIconW(NIM_DELETE, &raw const nid);
     }
     crate::overlay::evict_on_quit();
@@ -466,12 +543,63 @@ fn wide(s: &str) -> Vec<u16> {
 
 #[cfg(test)]
 mod tests {
-    use super::is_gui_process_name;
+    use super::{NotifyArea, Readd, is_gui_process_name};
 
     #[test]
     fn the_cli_binary_is_not_the_gui() {
         assert!(is_gui_process_name("OpenLogi.exe"));
         assert!(is_gui_process_name("openlogi-desktop.exe"));
         assert!(!is_gui_process_name("openlogi.exe")); // the CLI
+    }
+
+    /// The notification area as a `TaskbarCreated` broadcast finds it.
+    struct FakeShell {
+        has_icon: bool,
+        refuses_add: bool,
+        adds: usize,
+    }
+
+    impl NotifyArea for FakeShell {
+        fn modify(&mut self) -> bool {
+            self.has_icon
+        }
+
+        fn add(&mut self) -> bool {
+            self.adds += 1;
+            // Like the real shell, a duplicate add fails.
+            let added = !self.has_icon && !self.refuses_add;
+            self.has_icon |= added;
+            added
+        }
+    }
+
+    #[test]
+    fn taskbar_created_adds_only_a_missing_icon() {
+        // (icon still there, shell refuses adds) → (outcome, NIM_ADD calls).
+        // The first two rows are #2296: something re-sent TaskbarCreated
+        // every 60 s while Explorer kept the icon, and each blind NIM_ADD
+        // failed and logged a false "no tray icon".
+        let table = [
+            (true, false, Readd::StillPresent, 0),
+            (true, true, Readd::StillPresent, 0),
+            (false, false, Readd::Restored, 1),
+            (false, true, Readd::Lost, 1),
+        ];
+        for (has_icon, refuses_add, outcome, adds) in table {
+            let mut shell = FakeShell {
+                has_icon,
+                refuses_add,
+                adds: 0,
+            };
+            assert_eq!(
+                shell.readd(),
+                outcome,
+                "has_icon={has_icon} refuses_add={refuses_add}"
+            );
+            assert_eq!(
+                shell.adds, adds,
+                "has_icon={has_icon} refuses_add={refuses_add}"
+            );
+        }
     }
 }

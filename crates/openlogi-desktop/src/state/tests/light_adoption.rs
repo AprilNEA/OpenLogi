@@ -335,6 +335,7 @@ fn an_agent_snapshot_keeps_the_changes_it_reports() {
             (true, 135, 5000),
             brightness_changed_to(50),
         )],
+        flow: openlogi_ipc::FlowStatus::default(),
     };
 
     let changes = state.apply_agent_snapshot(&snapshot, &AssetResolver::new(), &[]);

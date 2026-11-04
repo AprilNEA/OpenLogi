@@ -223,6 +223,11 @@ pub struct Capabilities {
     /// HID++ `0x8110` button spy.
     #[serde(default)]
     pub button_spy: bool,
+    /// A headset's sidetone level can be read and changed — HID++ `0x8300
+    /// Sidetone`. Appended after `button_spy`: crosses the IPC and the
+    /// persisted identity.
+    #[serde(default)]
+    pub sidetone: bool,
 }
 
 impl Capabilities {
@@ -278,6 +283,7 @@ impl Capabilities {
             disable_keys: ids.contains(&0x4521),
             onboard_profiles: ids.contains(&0x8100),
             button_spy: ids.contains(&0x8110),
+            sidetone: ids.contains(&0x8300),
         }
     }
 
@@ -305,6 +311,19 @@ impl Capabilities {
                 ..Self::default()
             },
             _ => Self::default(),
+        }
+    }
+
+    /// The capabilities presumed for a HID++ 1.0 device, which has no feature
+    /// table. OpenLogi writes none of its registers, so only what the host
+    /// does for it is presumed: a mouse or trackball keeps the buttons that
+    /// the OS hook remaps. A DPI or lighting control would have no effect, so
+    /// neither is presumed (#2161).
+    #[must_use]
+    pub fn presumed_for_hidpp10(kind: DeviceKind) -> Self {
+        Self {
+            buttons: Self::presumed_from_kind(kind).buttons,
+            ..Self::default()
         }
     }
 }
@@ -597,8 +616,10 @@ pub struct PairedDevice {
     /// expose the feature. Drives asset-registry lookups in the GUI.
     pub model_info: Option<DeviceModelInfo>,
     /// Configuration capabilities derived from the device's HID++ feature
-    /// table. `None` for devices we couldn't probe (offline / unreachable);
-    /// the GUI then falls back to [`Capabilities::presumed_from_kind`].
+    /// table. `None` for devices we couldn't probe (offline / unreachable)
+    /// and for a HID++ 1.0 device, which has no table. The GUI then falls
+    /// back to [`Capabilities::presumed_from_kind`], or to
+    /// [`Capabilities::presumed_for_hidpp10`] when [`Self::hidpp10`] is set.
     pub capabilities: Option<Capabilities>,
     /// Moves each time the device itself reports changing a setting — the
     /// user toggling Fn lock on the keyboard, or a DPI button changing the
@@ -611,6 +632,14 @@ pub struct PairedDevice {
     /// the IPC encoding is positional and always carries it.
     #[serde(default)]
     pub settings_revision: u64,
+    /// The device answered as HID++ 1.0. It has no feature table, so
+    /// [`Self::capabilities`] stays `None` even after a completed probe.
+    /// `false` when no probe has completed yet.
+    ///
+    /// Appended. `default` keeps device fixtures recorded before it loading;
+    /// the IPC encoding is positional and always carries it.
+    #[serde(default)]
+    pub hidpp10: bool,
 }
 
 /// Address of a standalone raw-HID interface.
@@ -803,8 +832,10 @@ mod tests {
                     disable_keys: false,
                     onboard_profiles: false,
                     button_spy: false,
+                    sidetone: false,
                 }),
                 settings_revision: 0,
+                hidpp10: false,
             }],
         }
     }
@@ -926,6 +957,7 @@ mod tests {
                 disable_keys: false,
                 onboard_profiles: false,
                 button_spy: false,
+                sidetone: false,
             }
         );
         assert!(!Capabilities::from_feature_ids(&[0x0003, 0x1b04]).thumbwheel);
@@ -954,6 +986,7 @@ mod tests {
                 disable_keys: false,
                 onboard_profiles: false,
                 button_spy: false,
+                sidetone: false,
             }
         );
         // No driving features → nothing offered.
@@ -985,6 +1018,9 @@ mod tests {
         // changed; the 0x19b0 haptic engine alone does not.
         assert!(Capabilities::from_feature_ids(&[0x0001, 0x19c0]).force_sensing);
         assert!(!Capabilities::from_feature_ids(&[0x0001, 0x19b0]).force_sensing);
+        // The G535's table: sidetone, and battery through 0x1f20.
+        let headset = Capabilities::from_feature_ids(&[0x0001, 0x0003, 0x0005, 0x8300, 0x1f20]);
+        assert!(headset.sidetone && !headset.buttons && !headset.pointer);
     }
 
     #[test]
@@ -1075,6 +1111,27 @@ mod tests {
         // An unidentified device presumes nothing — it must be measured.
         assert_eq!(
             Capabilities::presumed_from_kind(DeviceKind::Unknown),
+            Capabilities::default()
+        );
+    }
+
+    #[test]
+    fn a_hidpp10_device_is_presumed_only_host_side_buttons() {
+        use super::Capabilities;
+        let buttons_only = Capabilities {
+            buttons: true,
+            ..Capabilities::default()
+        };
+        assert_eq!(
+            Capabilities::presumed_for_hidpp10(DeviceKind::Trackball),
+            buttons_only
+        );
+        assert_eq!(
+            Capabilities::presumed_for_hidpp10(DeviceKind::Mouse),
+            buttons_only
+        );
+        assert_eq!(
+            Capabilities::presumed_for_hidpp10(DeviceKind::Keyboard),
             Capabilities::default()
         );
     }

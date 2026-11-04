@@ -32,6 +32,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 use openlogi_core::config::FunctionKey;
 
 use super::cursor::{MonitorDpi, PhysicalCursorPosition};
+use super::scroll_direction::ScrollDirection;
 use super::worker::{WorkerEvent, WorkerPhase, WorkerStatus};
 use crate::{
     ButtonId, CursorPosition, EventDisposition, ForegroundApp, HookBackend, HookError, HookEvent,
@@ -386,6 +387,14 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
     let Some(event) = translate_event(wparam, data) else {
         return call_next(code, wparam, lparam);
     };
+    // A pass-through forwards the native message, which Windows scrolls in
+    // its configured direction; the callback's delta is what the agent
+    // replays when it suppresses the event, so it carries that direction too.
+    // Asked only for wheel messages; the registry is read at most once a second.
+    let event = match event {
+        scroll @ MouseEvent::Scroll { .. } => ScrollDirection::current().apply(scroll),
+        other => other,
+    };
 
     let callback = CALLBACK.lock().ok().and_then(|slot| slot.clone());
     let disposition = callback
@@ -612,7 +621,7 @@ fn current_modifiers() -> KeyModifiers {
     }
 }
 
-fn key_held(vk: VIRTUAL_KEY) -> bool {
+pub(super) fn key_held(vk: VIRTUAL_KEY) -> bool {
     // SAFETY: GetAsyncKeyState takes the key code by value; no preconditions.
     (unsafe { GetAsyncKeyState(i32::from(vk)) }) < 0
 }

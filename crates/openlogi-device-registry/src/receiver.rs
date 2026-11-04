@@ -63,6 +63,9 @@ pub const RECEIVERS: &[ReceiverDescriptor] = &[
     ReceiverDescriptor::logitech(0xc534, ReceiverBrand::Nano, ReceiverProtocol::Unifying),
     // Nano receiver bundled with the G602.
     ReceiverDescriptor::logitech(0xc537, ReceiverBrand::Nano, ReceiverProtocol::Unifying),
+    // Receiver bundled with the Spotlight presentation remote (WPID 0x405c),
+    // verified with a Spotlight; Projecteur drives it the same way.
+    ReceiverDescriptor::logitech(0xc53e, ReceiverBrand::Nano, ReceiverProtocol::Unifying),
     // Lightspeed gaming receiver used by the G502, G Pro Wireless, G604, and
     // other G-series devices.
     ReceiverDescriptor::logitech(
@@ -157,6 +160,14 @@ mod tests {
     #[test]
     fn mk270_mk295_nano_receiver_is_nano_over_unifying_protocol() {
         let receiver = find_receiver(LOGITECH_VENDOR_ID, 0xc534).expect("c534 receiver");
+
+        assert_eq!(receiver.brand, ReceiverBrand::Nano);
+        assert_eq!(receiver.protocol, ReceiverProtocol::Unifying);
+    }
+
+    #[test]
+    fn spotlight_receiver_is_nano_over_unifying_protocol() {
+        let receiver = find_receiver(LOGITECH_VENDOR_ID, 0xc53e).expect("c53e receiver");
 
         assert_eq!(receiver.brand, ReceiverBrand::Nano);
         assert_eq!(receiver.protocol, ReceiverProtocol::Unifying);

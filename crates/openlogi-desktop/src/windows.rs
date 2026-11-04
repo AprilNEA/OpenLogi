@@ -14,6 +14,7 @@
 //! lower edge off-screen.
 
 pub mod add_device;
+pub mod flow;
 pub mod main_window;
 pub mod settings;
 pub mod update_consent;
@@ -27,7 +28,7 @@ use gpui::{
     Pixels, Point, Render, SharedString, Size, Styled as _, Subscription, TitlebarOptions, Window,
     WindowBounds, WindowHandle, WindowOptions, div, px,
 };
-use gpui_component::{ActiveTheme as _, Root, TitleBar};
+use gpui_kit::component::{ActiveTheme as _, Root, TitleBar};
 use openlogi_core::brand::APP_ID;
 use tracing::warn;
 
@@ -112,6 +113,7 @@ pub struct WindowRegistry {
     pub main: Option<WindowHandle<Root>>,
     pub settings: Option<WindowHandle<Root>>,
     pub add_device: Option<WindowHandle<Root>>,
+    pub flow: Option<WindowHandle<Root>>,
     pub update_consent: Option<WindowHandle<Root>>,
 }
 
@@ -183,6 +185,7 @@ pub fn retitle_open(cx: &mut App) {
     let retitles = [
         (registry.settings, settings::window_title()),
         (registry.add_device, add_device::window_title()),
+        (registry.flow, flow::window_title()),
     ];
     for (handle, title) in retitles {
         if let Some(handle) = handle {
@@ -214,14 +217,16 @@ pub fn open_or_focus<V: AuxWindow + 'static>(
 ) {
     let title = title.into();
 
-    // Already open? Focus it and bail. A closed window leaves a stale handle
-    // whose `update` errors, falling through to a fresh open.
+    // An action dispatched from this window temporarily takes it out of GPUI's
+    // storage, so a failed update does not mean it closed. Check the live handles
+    // and activate after dispatch returns the borrowed window.
     let existing = *slot(cx.default_global::<WindowRegistry>());
     if let Some(handle) = existing
-        && handle
-            .update(cx, |_, window, _| window.activate_window())
-            .is_ok()
+        && cx.windows().contains(&handle.into())
     {
+        cx.defer(move |cx| {
+            let _ = handle.update(cx, |_, window, _| window.activate_window());
+        });
         return;
     }
 
