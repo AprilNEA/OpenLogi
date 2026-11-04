@@ -1,6 +1,6 @@
 //! Permissions settings page (macOS / Linux).
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use super::Axis;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use super::{
@@ -150,6 +150,7 @@ fn input_monitoring_item() -> SettingItem {
             };
             let denied = badge == PermissionStatus::Denied;
             let field = gpui_kit::component::v_flex()
+                .w_full()
                 .gap_1()
                 .child(permission_field(
                     "perm-input-monitoring",
@@ -179,6 +180,9 @@ fn input_monitoring_item() -> SettingItem {
         }),
     )
     .description(tr!("permissions.input_monitoring_permission_description"))
+    // Vertical: either hint runs to several sentences, which the right-hand
+    // slot would clip at the card edge; stacked below the title it wraps.
+    .layout(Axis::Vertical)
 }
 
 #[cfg(target_os = "macos")]
