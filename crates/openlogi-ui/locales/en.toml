@@ -248,6 +248,7 @@ select_device_button_description = "Select a button on the device to change what
 remove_profile_description = "This deletes the custom button bindings in this profile. Default bindings are not affected."
 
 [pointer]
+disable = "Disable"
 mouse_button_profiles = "Mouse button profiles"
 mouse_profile_pointer = "Mouse pointer"
 mouse_profile_focused = "Focused application"

@@ -248,6 +248,7 @@ select_device_button_description = "Vyberte tlačítko na zařízení a změňte
 remove_profile_description = "Odstraní vlastní přiřazení tlačítek v tomto profilu. Výchozí přiřazení se nezmění."
 
 [pointer]
+disable = "Disable"
 mouse_button_profiles = "Profily tlačítek myši"
 mouse_profile_pointer = "Ukazatel myši"
 mouse_profile_focused = "Aktivní aplikace"

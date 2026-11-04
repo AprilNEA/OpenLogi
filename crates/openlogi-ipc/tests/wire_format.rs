@@ -123,6 +123,11 @@ fn protocol_version_is_pinned() {
 }
 
 #[test]
+fn disable_action_wire_encoding_is_pinned() {
+    assert_wire(&Action::Disable, "3d");
+}
+
+#[test]
 fn config_reload_result() {
     let error = ConfigReloadError {
         message: "bad".into(),

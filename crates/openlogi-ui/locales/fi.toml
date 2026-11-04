@@ -248,6 +248,7 @@ select_device_button_description = "Valitse laitteesta painike, jonka toimintoa 
 remove_profile_description = "Tämä poistaa profiilin mukautetut painikesidonnat. Oletussidontoihin ei tehdä muutoksia."
 
 [pointer]
+disable = "Disable"
 mouse_button_profiles = "Hiiren painikeprofiilit"
 mouse_profile_pointer = "Hiiren osoitin"
 mouse_profile_focused = "Kohdistettu sovellus"

@@ -248,6 +248,7 @@ select_device_button_description = "Vælg en knap på enheden for at ændre dens
 remove_profile_description = "Dette sletter profilens brugerdefinerede knaptildelinger. Standardtildelinger påvirkes ikke."
 
 [pointer]
+disable = "Disable"
 mouse_button_profiles = "Profiler for museknapper"
 mouse_profile_pointer = "Musemarkør"
 mouse_profile_focused = "App med fokus"

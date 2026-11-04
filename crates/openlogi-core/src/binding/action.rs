@@ -234,6 +234,8 @@ pub enum Action {
     /// Move the pressing keypad to its next binding page, wrapping from the
     /// last page to page 1. Appended — variant order is wire format.
     NextKeypadPage,
+    /// Capture the input and suppress its native action.
+    Disable,
 }
 
 /// Which of a held chord's keys stay down for the lifetime of the press.
@@ -328,6 +330,7 @@ macro_rules! for_each_unit_action {
             LaunchpadShow "Launchpad" "actions.launchpad" Navigation Applications,
             // System
             None "Do Nothing" "pointer.do_nothing" System Ban,
+            Disable "Disable" "pointer.disable" System Ban not_pickable,
             LockScreen "Lock Screen" "actions.lock_screen" System Lock,
             Screenshot "Screenshot" "actions.screenshot" System Camera,
             CaptureRegion "Capture Region" "actions.capture_region" System Camera,

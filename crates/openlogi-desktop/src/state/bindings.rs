@@ -381,14 +381,15 @@ impl AppState {
             } else if gshift {
                 config.set_gshift_binding(&key, button, Some(action));
             } else {
-                let binding = match config.stored_bindings(&key).get(&button) {
-                    Some(Binding::LongPress(binding)) => {
+                let binding = match (action, config.stored_bindings(&key).get(&button)) {
+                    (Action::Disable, _) => Binding::Single(Action::Disable),
+                    (action, Some(Binding::LongPress(binding))) => {
                         Binding::LongPress(LongPressBinding::new(action, binding.long().clone()))
                     }
-                    Some(Binding::WheelHold(_)) => {
+                    (action, Some(Binding::WheelHold(_))) => {
                         Binding::WheelHold(WheelHoldBinding::horizontal_scroll(action))
                     }
-                    _ => Binding::Single(action),
+                    (action, _) => Binding::Single(action),
                 };
                 config.set_binding(&key, button, binding);
             }
