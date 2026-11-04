@@ -30,9 +30,8 @@ use openlogi_core::device_order::{DeviceIdentity, DeviceStableId, PhysicalDevice
 use openlogi_hid::{
     BacklightChange, BacklightState, CaptureChannelSlot, ChannelPool, ChannelRegistry,
     DeviceIoGate, DeviceRoute, DisableKeysMask, Dpi, EasySwitchHosts, FnLockState,
-    ForceSensingInfo, HidppOperation, HostOs, PointerSpeed, ReportRate, ReportRateInfo,
-    SidetoneLevel, WriteError, commands_for_light_settings, is_reserved_keyboard_control,
-    key_display_for,
+    ForceSensingInfo, HidppOperation, PointerSpeed, ReportRate, ReportRateInfo, SidetoneLevel,
+    WriteError, commands_for_light_settings, is_reserved_keyboard_control, key_display_for,
 };
 #[cfg(test)]
 use openlogi_ipc::ChosenLight;
@@ -74,11 +73,11 @@ use devices::{
     FollowerCookieState, FollowerCookieWrite, RECONNECT_REAPPLY_CONFIRM_RETRIES,
     VOLATILE_REAPPLY_CONFIRM_RETRIES, assignments_changed, build_devices, bump_settings_epoch,
     carry_lifecycle_budgets, changed_follower_cookies, changed_force_sensing,
-    config_keeps_os_layout, configured_dpi, configured_force_sensing, configured_report_rate,
-    configured_wheel_mode, host_switch_links, is_hidpp_device, keeps_os_layout, main_wheel_divert,
-    newly_kept_os_layouts, os_layout_appeared, pick_current, plan_disabled_keys_recovery,
-    plan_reapply, published_inventories, reconnect_follower_cookies, same_device_lifecycle,
-    saved_speed, settings_moved, stable_id, wheel_inverted,
+    config_os_layout_target, configured_dpi, configured_force_sensing, configured_report_rate,
+    configured_wheel_mode, host_switch_links, is_hidpp_device, main_wheel_divert,
+    newly_kept_os_layouts, os_layout_appeared, os_layout_target, pick_current,
+    plan_disabled_keys_recovery, plan_reapply, published_inventories, reconnect_follower_cookies,
+    same_device_lifecycle, saved_speed, settings_moved, stable_id, wheel_inverted,
 };
 
 /// The minimal per-device facts the agent needs: the config key (binding /
@@ -1793,12 +1792,17 @@ impl Orchestrator {
 
     /// Put `dev`'s keyboard on the host OS's key layout when the config keeps
     /// it there. Writes only when the current slot holds another platform.
+    /// While the setting is off, the OS the keyboard is pinned to takes the
+    /// host OS's place.
     fn keep_os_layout(&self, dev: &AgentDevice) {
-        if !dev.online || !keeps_os_layout(&self.config, dev) {
+        if !dev.online {
             return;
         }
-        self.kept_os_layouts.keep(&dev.config_key);
-        let (Some(route), Some(host)) = (dev.route.as_ref(), HostOs::current()) else {
+        let Some(host) = os_layout_target(&self.config, dev) else {
+            return;
+        };
+        self.kept_os_layouts.keep(&dev.config_key, host);
+        let Some(route) = dev.route.as_ref() else {
             return;
         };
         crate::hardware::keep_os_layout_in_background(
@@ -2213,9 +2217,11 @@ impl Orchestrator {
     /// or its device re-enabled — on the host OS's layout. Turning it off
     /// leaves the keyboard's layout where it is, as in Logi Options+, and
     /// withdraws a layout write still queued for it.
+    /// A pin that is new or moved to another OS takes effect the same way, and
+    /// turning the setting off with an OS pinned moves the keyboard to it.
     fn apply_enabled_os_layouts(&self, previous: &Config) {
         self.kept_os_layouts
-            .retain(|key| config_keeps_os_layout(&self.config, key));
+            .retain(|key, host| config_os_layout_target(&self.config, key) == Some(host));
         for dev in newly_kept_os_layouts(previous, &self.config, &self.devices) {
             self.keep_os_layout(dev);
         }
