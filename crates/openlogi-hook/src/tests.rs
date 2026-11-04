@@ -238,3 +238,36 @@ fn known_input_conflict_matches_curated_list() {
         None
     );
 }
+
+/// Interim inversion reverses only the wheels it names, and only while they
+/// are named: another Logitech mouse, an unattributed event, and the same
+/// wheel once its native inversion took over all scroll as they report.
+#[cfg(not(target_os = "windows"))]
+#[test]
+fn interim_inversion_reverses_only_the_named_wheel_while_it_is_named() {
+    let mouse = |product_id| EventDevice {
+        vendor_id: Some(LOGITECH_VENDOR_ID),
+        product_id: Some(product_id),
+        product_name: Some("MX Master 3".into()),
+    };
+    let reconnected = mouse(0xb023);
+    set_interim_scroll_inversion(vec![WheelSource {
+        vendor_id: LOGITECH_VENDOR_ID,
+        product_id: 0xb023,
+    }]);
+
+    assert!(scroll_inverted_for(Some(&reconnected)));
+    assert!(
+        interim_scroll_idle().is_some_and(|idle| idle < std::time::Duration::from_secs(1)),
+        "the reversal is timed, so the native switch can wait for the wheel to rest"
+    );
+    assert!(!scroll_inverted_for(Some(&mouse(0xb034))));
+    assert!(!scroll_inverted_for(None));
+    assert!(!scroll_inverted_for(Some(&EventDevice {
+        product_id: None,
+        ..reconnected.clone()
+    })));
+
+    set_interim_scroll_inversion(Vec::new());
+    assert!(!scroll_inverted_for(Some(&reconnected)));
+}

@@ -1460,3 +1460,78 @@ fn page_turns_need_pages_and_a_removed_page_falls_back_to_the_first() {
     orch.config.set_keypad_pages("keypad", page(1));
     assert_eq!(orch.keypad_page("keypad"), page(1));
 }
+
+/// Interim inversion stands in only for native inversion the agent writes,
+/// and only on a direct device, whose HID node is its own: reversing a
+/// receiver's node would reverse every mouse paired to it.
+#[test]
+fn only_a_direct_wheel_the_agent_inverts_natively_is_an_interim_candidate() {
+    let mut config = Config::default();
+    config.set_invert_scroll("a", true);
+    let wheel = Capabilities {
+        hires_wheel: true,
+        scroll_inversion: true,
+        ..Capabilities::default()
+    };
+    let mut direct = dev("a", 1, true);
+    direct.capabilities = Some(wheel);
+    direct.route = Some(DeviceRoute::Direct {
+        vendor_id: 0x046d,
+        product_id: 0xb023,
+    });
+    let mut bolt = dev("a", 2, true);
+    bolt.capabilities = Some(wheel);
+    let source = openlogi_hook::WheelSource {
+        vendor_id: 0x046d,
+        product_id: 0xb023,
+    };
+
+    let devices = vec![direct, bolt];
+    let presence = wheel_presence(&config, &devices, true);
+    assert_eq!(presence.len(), 1, "the Bolt slot has no wheel source");
+    assert_eq!(presence[0].source, source);
+    assert!(presence[0].inverts_natively);
+
+    config.set_smooth_wheel("a", true);
+    assert!(
+        !wheel_presence(&config, &devices, true)[0].inverts_natively,
+        "a capture session owns a diverted wheel and reverses what it posts"
+    );
+    config.set_smooth_wheel("a", false);
+    config.set_invert_scroll("a", false);
+    assert!(
+        !wheel_presence(&config, &devices, true)[0].inverts_natively,
+        "a wheel set to scroll as it reports needs no stand-in"
+    );
+}
+
+/// A quick power cycle swaps a Bluetooth device's node between two
+/// reconciliations, so every snapshot shows it online. Reported as returned,
+/// its next sighting re-applies its settings like any reconnect — and a
+/// return not reported leaves a steady snapshot steady.
+#[test]
+fn a_device_returned_on_a_new_node_reapplies_though_never_seen_offline() {
+    let mut orch = orchestrator(Config::default());
+    let online = [keypad_inventory(true)];
+    orch.refresh_inventory(&online, &[], false);
+    let first = panel_generation(&orch);
+    let route = DeviceRoute::Direct {
+        vendor_id: online[0].receiver.vendor_id,
+        product_id: online[0].receiver.product_id,
+    };
+
+    orch.devices_returned(&[DeviceRoute::Direct {
+        vendor_id: online[0].receiver.vendor_id,
+        product_id: 0xb023,
+    }]);
+    orch.refresh_inventory(&online, &[], false);
+    assert_eq!(
+        panel_generation(&orch),
+        first,
+        "another device's return leaves the keypad alone"
+    );
+
+    orch.devices_returned(&[route]);
+    orch.refresh_inventory(&online, &[], false);
+    assert_ne!(panel_generation(&orch), first, "its own return re-applies");
+}

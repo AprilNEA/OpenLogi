@@ -298,7 +298,8 @@ fn hooked_event_types() -> Vec<CGEventType> {
     ]
 }
 
-/// Whether this event is a mouse-wheel scroll software inversion applies to.
+/// Whether this event is a mouse-wheel scroll that software inversion
+/// applies to, and that inversion is on for its source.
 ///
 /// Trackpad scrolling is excluded by contract — the setting reverses one
 /// mouse, not the system direction — and so is any source the hook would not
@@ -311,7 +312,9 @@ fn wheel_scroll_to_invert(event: &HookEvent) -> bool {
             from_trackpad: false,
             device,
             ..
-        }) if delta.y() != 0.0 && crate::source_is_remappable(device.as_ref())
+        }) if delta.y() != 0.0
+            && crate::source_is_remappable(device.as_ref())
+            && crate::scroll_inverted_for(device.as_ref())
     )
 }
 
@@ -362,7 +365,7 @@ fn run_tap_callback(
         // Decided before the callback consumes the event: a Logitech wheel
         // scroll (never a trackpad) is the only thing software inversion may
         // touch.
-        let invert = crate::scroll_inversion() && wheel_scroll_to_invert(&hook_event);
+        let invert = wheel_scroll_to_invert(&hook_event);
         dispatch(cb, hook_event, invert, event)
     }));
     if let Ok(disposition) = result {

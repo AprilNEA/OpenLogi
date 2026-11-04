@@ -55,10 +55,12 @@ pub(crate) async fn bootstrap(config: Config) -> Option<Core> {
     let observable = Arc::new(ObservableState::new(env!("CARGO_PKG_VERSION").to_string()));
     #[cfg(target_os = "macos")]
     seed_permission_facts(&observable);
-    let orchestrator = Arc::new(Mutex::new(Orchestrator::new(
-        config,
-        Arc::clone(&observable),
-    )));
+    let orchestrator = Orchestrator::new(config, Arc::clone(&observable));
+    match openlogi_core::paths::data_dir() {
+        Ok(dir) => orchestrator.remember_wheel_inversion_in(dir.join("wheel-inversion.json")),
+        Err(e) => warn!(error = %e, "no data dir — learned wheel inversion is memory-only"),
+    }
+    let orchestrator = Arc::new(Mutex::new(orchestrator));
     let shared = orchestrator.lock().await.shared();
     let inputs = InputServices::start(&shared)?;
     let backlight_overlay = BacklightOverlayManager::default();

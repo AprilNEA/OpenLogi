@@ -13,6 +13,7 @@ use openlogi_hid::{DIRECT_DEVICE_INDEX, DeviceRoute, Dpi, LeadCookie, ReportRate
 
 use super::AgentDevice;
 use crate::hardware::WheelModeChange;
+use crate::interim_inversion::{WheelPresence, wheel_source};
 use crate::pointer_speed::SavedSpeed;
 use crate::watchers::host_switch::HostSwitchLink;
 
@@ -84,6 +85,38 @@ fn wheel_settings(
         .scroll_inversion
         .then(|| device.is_some_and(|d| d.effective_invert_scroll(&route_key)));
     Some((resolution, inverted))
+}
+
+/// Every direct device's wheel in `devices`, for the interim inversion:
+/// whether the agent writes native inversion to it ([`configured_wheel_mode`])
+/// and whether it is online. Two units of one model share a wheel source, so
+/// they fold into one entry that either of them sets.
+pub(super) fn wheel_presence(
+    config: &Config,
+    devices: &[AgentDevice],
+    os_mouse_hook_available: bool,
+) -> Vec<WheelPresence> {
+    let mut wheels: Vec<WheelPresence> = Vec::new();
+    for dev in devices {
+        let Some(source) = dev.route.as_ref().and_then(wheel_source) else {
+            continue;
+        };
+        let inverts_natively = config.device_enabled(&dev.config_key)
+            && configured_wheel_mode(config, dev, os_mouse_hook_available)
+                .is_some_and(WheelModeChange::inverts);
+        match wheels.iter_mut().find(|wheel| wheel.source == source) {
+            Some(wheel) => {
+                wheel.inverts_natively |= inverts_natively;
+                wheel.online |= dev.online;
+            }
+            None => wheels.push(WheelPresence {
+                source,
+                inverts_natively,
+                online: dev.online,
+            }),
+        }
+    }
+    wheels
 }
 
 /// Whether the scrolling the agent posts for `dev`'s main wheel is reversed —

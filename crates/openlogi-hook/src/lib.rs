@@ -26,8 +26,8 @@
 //! ```
 
 use std::cfg_select;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, RwLock};
 
 use thiserror::Error;
 
@@ -146,6 +146,97 @@ pub fn set_scroll_inversion(inverted: bool) {
 #[must_use]
 pub fn scroll_inversion() -> bool {
     INVERT_SCROLL.load(Ordering::Relaxed)
+}
+
+/// A wheel as the capture layer attributes a scroll event to it: the vendor
+/// and product id of the HID device that produced the event.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct WheelSource {
+    /// USB/Bluetooth vendor id.
+    pub vendor_id: u32,
+    /// USB/Bluetooth/HID product id.
+    pub product_id: u32,
+}
+
+/// Wheels reversed in software until their own native inversion takes over.
+///
+/// A mouse whose firmware inverts natively forgets that across a power cycle,
+/// and it scrolls the moment the OS has it back — well before the agent can
+/// reach it over HID++ and write the bit again. Listed here, its scroll is
+/// reversed from the first event; the agent withdraws it the moment the
+/// native write is confirmed, so the two never both apply for longer than
+/// that write's reply takes to arrive.
+static INTERIM_INVERSION: RwLock<Vec<WheelSource>> = RwLock::new(Vec::new());
+
+/// Replace the wheels reversed in software until their native inversion is
+/// confirmed. Unlike [`set_scroll_inversion`], this applies only to scroll
+/// attributed to one of `sources`. Has no effect where
+/// [`SOFTWARE_SCROLL_INVERSION`] is `false`.
+///
+/// Takes effect on the next scroll event; no restart of the hook is needed.
+pub fn set_interim_scroll_inversion(sources: Vec<WheelSource>) {
+    *INTERIM_INVERSION
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = sources;
+}
+
+/// Whether scroll from `device` is reversed in software: every captured wheel
+/// under [`set_scroll_inversion`], or this one under
+/// [`set_interim_scroll_inversion`].
+///
+/// Never blocks, because the capture callback calls it: while the agent is
+/// replacing the interim set, an event reads it as empty. Not on Windows,
+/// which has no software inversion ([`SOFTWARE_SCROLL_INVERSION`]).
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn scroll_inverted_for(device: Option<&EventDevice>) -> bool {
+    if scroll_inversion() {
+        return true;
+    }
+    let Some(source) = device.and_then(|device| {
+        Some(WheelSource {
+            vendor_id: device.vendor_id?,
+            product_id: device.product_id?,
+        })
+    }) else {
+        return false;
+    };
+    let reversed = INTERIM_INVERSION
+        .try_read()
+        .is_ok_and(|sources| sources.contains(&source));
+    if reversed {
+        LAST_INTERIM_SCROLL.store(nanos_since_clock_base(), Ordering::Relaxed);
+    }
+    reversed
+}
+
+/// When [`scroll_inverted_for`] last reversed a scroll under interim
+/// inversion, in nanoseconds since [`CLOCK_BASE`] plus one; `0` for never.
+static LAST_INTERIM_SCROLL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The instant [`LAST_INTERIM_SCROLL`] counts from.
+static CLOCK_BASE: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
+#[cfg(not(target_os = "windows"))]
+fn nanos_since_clock_base() -> u64 {
+    let base = *CLOCK_BASE.get_or_init(std::time::Instant::now);
+    u64::try_from(base.elapsed().as_nanos())
+        .unwrap_or(u64::MAX - 1)
+        .saturating_add(1)
+}
+
+/// How long since interim inversion last reversed a scroll event, or `None`
+/// when it never has.
+///
+/// A wheel's native inversion should take over from the interim one while
+/// the wheel rests: switched mid-scroll, the reports the wheel sends between
+/// the switch landing and the interim one being withdrawn are reversed twice,
+/// and a free-spinning wheel sends hundreds a second.
+#[must_use]
+pub fn interim_scroll_idle() -> Option<std::time::Duration> {
+    let last = LAST_INTERIM_SCROLL.load(Ordering::Relaxed);
+    let base = CLOCK_BASE.get()?;
+    let last = std::time::Duration::from_nanos(last.checked_sub(1)?);
+    Some(base.elapsed().saturating_sub(last))
 }
 
 /// Flip the vertical delta of a scroll [`MouseEvent`], leaving every other
