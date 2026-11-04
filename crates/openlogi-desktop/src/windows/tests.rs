@@ -1,9 +1,9 @@
-//! Window sizing and singleton lifecycles.
+//! Window sizing, titles and singleton lifecycles.
 
-use gpui::{AppContext as _, Bounds, Pixels, Size, TestAppContext, point, px, size};
+use gpui::{AppContext as _, Bounds, Pixels, SharedString, Size, TestAppContext, point, px, size};
 
 use super::main_window::{MIN_SIZE, PREFERRED_SIZE};
-use super::{FRAME_ALLOWANCE, WindowFit, WindowRegistry, settings};
+use super::{FRAME_ALLOWANCE, WindowFit, WindowRegistry, settings, titlebar_options};
 use crate::app::menu::{self, OpenAbout, OpenSettings};
 use crate::services::{assets::AssetResolver, i18n::LOCALE_LOCK};
 use crate::state::{AppState, Sources};
@@ -157,4 +157,17 @@ fn a_work_area_smaller_than_the_frame_yields_an_empty_size_not_a_negative_one() 
 
     assert_eq!(fit.bounds.size, Size::default());
     assert_eq!(fit.min_size, Size::default());
+}
+
+#[test]
+fn every_window_opens_already_named() {
+    // gpui sends the Wayland title before the initial commit only when the
+    // options carry it. niri resolves a window's `default-*` size rules at
+    // that commit, so a title stamped after `open_window` returned left a
+    // Settings rule unmatched and the window at its tiled size (#2342).
+    let options = titlebar_options("Settings");
+
+    assert_eq!(options.title, Some(SharedString::from("Settings")));
+    // Linux keeps the transparent chrome its client-side titlebar draws on.
+    assert_eq!(options.appears_transparent, cfg!(target_os = "linux"));
 }

@@ -137,18 +137,27 @@ pub fn needs_client_titlebar(window: &Window) -> bool {
 
 /// Titlebar options for an app window.
 ///
-/// On Linux this returns transparent options so the view *can* draw a
+/// Every platform carries `title`, so the window is named before it first
+/// maps. A Wayland compositor answers the initial commit with a configure
+/// built from the window rules that match at that moment: niri sizes a new
+/// window by its `default-*` rules then, and a title set only after
+/// `open_window` returns misses them (#2342).
+///
+/// On Linux the options are also transparent so the view *can* draw a
 /// client-side [`TitleBar`] (see [`aux_title_bar`]) on the compositors that
 /// leave it to the app. Whether it actually does is
 /// [`needs_client_titlebar`]'s call, made per window from what the compositor
-/// negotiated. On macOS / Windows this keeps the native titlebar carrying
-/// `title`, unchanged.
+/// negotiated. On macOS / Windows the native titlebar shows `title`.
 pub fn titlebar_options(title: impl Into<SharedString>) -> TitlebarOptions {
+    let title = Some(title.into());
     if cfg!(target_os = "linux") {
-        TitleBar::title_bar_options()
+        TitlebarOptions {
+            title,
+            ..TitleBar::title_bar_options()
+        }
     } else {
         TitlebarOptions {
-            title: Some(title.into()),
+            title,
             appears_transparent: false,
             traffic_light_position: None,
         }
@@ -257,10 +266,7 @@ pub fn open_or_focus<V: AuxWindow + 'static>(
 
     match opened {
         Ok(handle) => {
-            let _ = handle.update(cx, |_, window, _| {
-                window.activate_window();
-                window.set_window_title(&title);
-            });
+            let _ = handle.update(cx, |_, window, _| window.activate_window());
             *slot(cx.default_global::<WindowRegistry>()) = Some(handle);
         }
         Err(e) => warn!(error = %e, title = %title, "could not open auxiliary window"),
