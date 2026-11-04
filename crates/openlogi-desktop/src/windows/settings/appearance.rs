@@ -3,18 +3,19 @@
 use super::language::{LanguageOption, language_select_field};
 use crate::ui::theme::FocusRingStyle as _;
 use gpui::{ElementId, img};
+use gpui_kit::component::button::{Toggle, ToggleGroup};
 use openlogi_core::config::AppIcon;
 
 use super::{
-    ActiveTheme, App, AppState, Appearance, Axis, Button, ButtonGroup, Entity, FluentBuilder, Hsla,
-    IconName, InputState, InteractiveElement, IntoElement, Palette, ParentElement, Rc, SelectState,
+    ActiveTheme, App, AppState, Appearance, Axis, Entity, FluentBuilder, Hsla, IconName,
+    InputState, InteractiveElement, IntoElement, Palette, ParentElement, Rc, SelectState,
     Selectable, SettingField, SettingGroup, SettingItem, SettingPage, SettingsView, SharedString,
     StatefulInteractiveElement, Styled, Theme, ThemeColor, ThemeConfig, ThemeFilter, ThemeMode,
     ThemeRegistry, UiScale, div, h_flex, px, rgb, theme, v_flex,
 };
 use crate::platform::app_icon::AppIconExt as _;
 use crate::ui::choice_card::ChoiceCard;
-use crate::ui::components::control_input;
+use crate::ui::components::{chosen_segment, control_input, segmented_control};
 use crate::ui::theme::{SelectableStyle as _, Typography as _};
 
 /// The Appearance page: light/dark mode, the theme grid, corner radius, and the
@@ -360,32 +361,28 @@ fn radio_dot(selected: bool, accent: Hsla, pal: Palette) -> impl IntoElement {
 /// `None` — defer to the active theme's own radius — rather than a fixed 6px, so
 /// it neither mis-highlights under themes with a different radius nor traps the
 /// user away from the theme default.
-fn radius_segment(cx: &App) -> ButtonGroup {
+fn radius_segment(cx: &App) -> ToggleGroup {
     let current = AppState::try_read(cx).and_then(|s| s.app_settings().ui_radius);
     let options: [Option<u8>; 3] = [Some(0), None, Some(12)];
-    ButtonGroup::new("corner-radius")
-        .outline()
+    segmented_control("corner-radius")
         .child(
-            Button::new("radius-sharp")
+            Toggle::new("radius-sharp")
                 .label(tr!("common.sharp"))
-                .selected(current == Some(0))
-                .selected_segment(current == Some(0), cx),
+                .checked(current == Some(0)),
         )
         .child(
-            Button::new("radius-default")
+            Toggle::new("radius-default")
                 .label(tr!("common.default"))
-                .selected(current.is_none())
-                .selected_segment(current.is_none(), cx),
+                .checked(current.is_none()),
         )
         .child(
-            Button::new("radius-round")
+            Toggle::new("radius-round")
                 .label(tr!("appearance.round"))
-                .selected(current == Some(12))
-                .selected_segment(current == Some(12), cx),
+                .checked(current == Some(12)),
         )
-        .on_click(move |clicks, _, cx| {
-            if let Some(&ix) = clicks.first() {
-                set_radius(cx, options[ix]);
+        .on_click(move |next, _, cx| {
+            if let Some(&radius) = chosen_segment(next).and_then(|index| options.get(index)) {
+                set_radius(cx, radius);
             }
         })
 }
@@ -393,22 +390,17 @@ fn radius_segment(cx: &App) -> ButtonGroup {
 /// The supported interface-scale presets. Keeping this finite makes every
 /// layout state reviewable and avoids arbitrary values that can render a
 /// window unusable.
-fn scale_segment(cx: &App) -> ButtonGroup {
+fn scale_segment(cx: &App) -> ToggleGroup {
     let current =
         AppState::try_read(cx).map_or_else(UiScale::default, |state| state.app_settings().ui_scale);
-    ButtonGroup::new("interface-scale")
-        .outline()
+    segmented_control("interface-scale")
         .children(UiScale::ALL.map(|scale| {
-            Button::new(("interface-scale", u32::from(scale.percent())))
+            Toggle::new(("interface-scale", u32::from(scale.percent())))
                 .label(format!("{}%", scale.percent()))
-                .selected(current == scale)
-                .selected_segment(current == scale, cx)
+                .checked(current == scale)
         }))
-        .on_click(|clicks, _, cx| {
-            let Some(scale) = clicks
-                .first()
-                .and_then(|index| UiScale::ALL.get(*index))
-                .copied()
+        .on_click(|next, _, cx| {
+            let Some(&scale) = chosen_segment(next).and_then(|index| UiScale::ALL.get(index))
             else {
                 return;
             };

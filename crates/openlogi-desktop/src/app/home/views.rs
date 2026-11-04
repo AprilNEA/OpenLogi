@@ -2,18 +2,14 @@
 
 use crate::ui::theme::FocusRingStyle as _;
 use gpui::{
-    AnyElement, App, Context, ElementId, InteractiveElement, IntoElement, ParentElement, Pixels,
-    Rems, RenderOnce, SharedString, StatefulInteractiveElement as _, Styled, Window, div,
+    AnyElement, Context, ElementId, InteractiveElement, IntoElement, ParentElement, Pixels, Rems,
+    SharedString, StatefulInteractiveElement as _, Styled, Window, div,
     prelude::FluentBuilder as _, px, rems, rgb,
 };
 use gpui_kit::base::Button as BaseButton;
 use gpui_kit::component::{
-    IconName, Selectable as _, Sizable as _,
-    button::{Button, ButtonGroup},
-    h_flex,
-    menu::ContextMenuExt as _,
-    scroll::ScrollableElement as _,
-    v_flex,
+    IconName, Sizable as _, button::Toggle, h_flex, menu::ContextMenuExt as _,
+    scroll::ScrollableElement as _, v_flex,
 };
 use openlogi_core::config::DeviceViewMode;
 use openlogi_core::device::DeviceKind;
@@ -25,74 +21,53 @@ use super::{
 use crate::state::{AppState, DeviceRecord};
 use crate::ui::battery::{BatteryIndicator, battery_charging_no_reading, value_label};
 use crate::ui::carousel::Carousel;
-use crate::ui::theme::{self, ContentWidth, Palette, SelectableStyle as _, Typography as _};
+use crate::ui::components::{chosen_segment, segmented_control};
+use crate::ui::theme::{self, ContentWidth, Palette, Typography as _};
 
+/// Grid / list / carousel as one segmented control: the current mode is the
+/// checked segment, and the tooltip doubles as each icon's accessible name.
 pub(super) fn device_view_switcher(
     current: DeviceViewMode,
     view: gpui::Entity<AppView>,
 ) -> impl IntoElement {
-    /// Grid / list / carousel as one segmented control. The chosen segment
-    /// takes `SelectableStyle::selected_segment` like the app's other
-    /// segmented controls, which reads the theme at render time. Not a stock
-    /// `Toggle`: it hovers with the fill it marks its checked state with, so a
-    /// hovered mode would look selected too.
-    #[derive(IntoElement)]
-    struct Switcher {
-        current: DeviceViewMode,
-        view: gpui::Entity<AppView>,
-    }
+    const MODES: [DeviceViewMode; 3] = [
+        DeviceViewMode::Grid,
+        DeviceViewMode::List,
+        DeviceViewMode::Carousel,
+    ];
+    let segment = |mode: DeviceViewMode| {
+        let (id, icon, tooltip) = match mode {
+            DeviceViewMode::Grid => (
+                "device-view-grid",
+                IconName::LayoutDashboard,
+                tr!("common.grid"),
+            ),
+            DeviceViewMode::List => ("device-view-list", IconName::Menu, tr!("common.list")),
+            DeviceViewMode::Carousel => (
+                "device-view-carousel",
+                IconName::GalleryVerticalEnd,
+                tr!("common.carousel"),
+            ),
+        };
+        Toggle::new(id)
+            .icon(icon)
+            .tooltip(tooltip)
+            .checked(current == mode)
+    };
 
-    impl RenderOnce for Switcher {
-        fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
-            const MODES: [DeviceViewMode; 3] = [
-                DeviceViewMode::Grid,
-                DeviceViewMode::List,
-                DeviceViewMode::Carousel,
-            ];
-            let Self { current, view } = self;
-            let segment = |mode: DeviceViewMode| {
-                let (id, icon, tooltip) = match mode {
-                    DeviceViewMode::Grid => (
-                        "device-view-grid",
-                        IconName::LayoutDashboard,
-                        tr!("common.grid"),
-                    ),
-                    DeviceViewMode::List => {
-                        ("device-view-list", IconName::Menu, tr!("common.list"))
-                    }
-                    DeviceViewMode::Carousel => (
-                        "device-view-carousel",
-                        IconName::GalleryVerticalEnd,
-                        tr!("common.carousel"),
-                    ),
-                };
-                let selected = current == mode;
-                Button::new(id)
-                    .icon(icon)
-                    .accessibility_label(tooltip.clone())
-                    .tooltip(tooltip)
-                    .selected(selected)
-                    .selected_segment(selected, cx)
+    segmented_control("device-view")
+        .small()
+        .children(MODES.map(segment))
+        .on_click(move |next, _, cx| {
+            let Some(&mode) = chosen_segment(next).and_then(|index| MODES.get(index)) else {
+                return;
             };
-
-            ButtonGroup::new("device-view")
-                .outline()
-                .small()
-                .children(MODES.map(segment))
-                .on_click(move |clicks, _, cx| {
-                    let Some(&mode) = clicks.first().and_then(|&index| MODES.get(index)) else {
-                        return;
-                    };
-                    if mode == current {
-                        return;
-                    }
-                    AppState::apply(cx, |state| state.commit_device_view_mode(mode));
-                    view.update(cx, |_, cx| cx.notify());
-                })
-        }
-    }
-
-    Switcher { current, view }
+            if mode == current {
+                return;
+            }
+            AppState::apply(cx, |state| state.commit_device_view_mode(mode));
+            view.update(cx, |_, cx| cx.notify());
+        })
 }
 
 /// Gap between gallery cards.

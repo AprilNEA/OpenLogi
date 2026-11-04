@@ -9,7 +9,7 @@ use gpui::{
 use gpui_kit::base::Button as BaseButton;
 use gpui_kit::component::{
     Disableable as _, Icon, IconName, Selectable as _, Sizable as _,
-    button::{Button, ButtonGroup},
+    button::{Button, ButtonGroup, Toggle as KitToggle},
     description_list::{DescriptionItem, DescriptionList},
     h_flex,
     scroll::ScrollableElement as _,
@@ -710,7 +710,6 @@ fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
         .child(wheel_resolution_control(
             resolution,
             hires == HiresWheel::Here,
-            cx,
         ));
     PanelCard::new(
         tr!("pointer.scrolling"),
@@ -761,48 +760,43 @@ fn smooth_wheel_caption(hires: HiresWheel) -> gpui::SharedString {
     }
 }
 
-fn wheel_resolution_control(
-    selected: Option<ScrollResolution>,
-    enabled: bool,
-    cx: &gpui::App,
-) -> impl IntoElement {
-    use crate::ui::theme::SelectableStyle as _;
+fn wheel_resolution_control(selected: Option<ScrollResolution>, enabled: bool) -> impl IntoElement {
+    use crate::ui::components::{SegmentStyle as _, chosen_segment, segmented_control};
 
     let values = [
         None,
         Some(ScrollResolution::Low),
         Some(ScrollResolution::High),
     ];
-    ButtonGroup::new("wheel-resolution")
+    let segment = |id: &'static str, label: SharedString, value: Option<ScrollResolution>| {
+        KitToggle::new(id)
+            .flex_1()
+            .label(label)
+            .checked(selected == value)
+    };
+    segmented_control("wheel-resolution")
         .w_full()
-        .outline()
-        .disabled(!enabled)
-        .child(
-            Button::new("wheel-resolution-default")
-                .flex_1()
-                .label(tr!("pointer.device_default"))
-                .selected(selected.is_none())
-                .selected_segment(enabled && selected.is_none(), cx),
-        )
-        .child(
-            Button::new("wheel-resolution-low")
-                .flex_1()
-                .label(tr!("pointer.standard"))
-                .selected(selected == Some(ScrollResolution::Low))
-                .selected_segment(enabled && selected == Some(ScrollResolution::Low), cx),
-        )
-        .child(
-            Button::new("wheel-resolution-high")
-                .flex_1()
-                .label(tr!("pointer.high_resolution"))
-                .selected(selected == Some(ScrollResolution::High))
-                .selected_segment(enabled && selected == Some(ScrollResolution::High), cx),
-        )
-        .on_click(move |indices, _window, cx| {
-            let Some(value) = indices.first().and_then(|index| values.get(*index)) else {
+        .unavailable(!enabled)
+        .child(segment(
+            "wheel-resolution-default",
+            tr!("pointer.device_default"),
+            None,
+        ))
+        .child(segment(
+            "wheel-resolution-low",
+            tr!("pointer.standard"),
+            Some(ScrollResolution::Low),
+        ))
+        .child(segment(
+            "wheel-resolution-high",
+            tr!("pointer.high_resolution"),
+            Some(ScrollResolution::High),
+        ))
+        .on_click(move |next, _window, cx| {
+            let Some(&value) = chosen_segment(next).and_then(|index| values.get(index)) else {
                 return;
             };
-            AppState::apply(cx, |state| state.commit_scroll_resolution(*value));
+            AppState::apply(cx, |state| state.commit_scroll_resolution(value));
         })
 }
 
