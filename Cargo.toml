@@ -102,11 +102,13 @@ axwatch = "0.1"
 
 # Version-aligned GPUI snapshots. Keep the core and platform on one release so
 # the desktop, overlay, and their integrations share the same GPUI types.
-gpui = { package = "gpui-pre", version = "=0.3.10" }
-gpui_platform = { package = "gpui-pre-platform", version = "=0.3.10", features = ["font-kit", "x11", "wayland"] }
-# Keep Kit on a release checkout: build.rs embeds its repository-level themes.
+gpui = { package = "gpui-pre", version = "=0.3.11" }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.11", features = ["font-kit", "x11", "wayland"] }
+# Pin Kit to one upstream commit: build.rs embeds its repository-level themes,
+# and this main commit carries `ToggleGroup::single` (longbridge/gpui-kit#3775)
+# ahead of the release that will ship it. Move back to a `tag` with that release.
 # Use the default upstream GPUI backend, without the experimental gpui-fast feature.
-gpui-kit = { git = "https://github.com/longbridge/gpui-kit", tag = "v0.8.1" }
+gpui-kit = { git = "https://github.com/longbridge/gpui-kit", rev = "0ab9cf4ed6d237457e66efc56c8ffcf915e8ce05" }
 
 swr-core = "0.1"
 swr-gpui = { package = "swr-gpui-pre", version = "0.1" }
