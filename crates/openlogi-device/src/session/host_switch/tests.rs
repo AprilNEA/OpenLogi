@@ -1215,6 +1215,103 @@ async fn an_analytics_report_moves_the_mouse_without_writing_to_the_keyboard() {
     );
 }
 
+#[tokio::test]
+async fn a_host_key_reported_right_after_its_arm_still_moves_the_mouse() {
+    // The keyboard reports the key as soon as it applies the write that
+    // enables the report, before the session has finished arming (#2346).
+    let keyboard = PairedKeyboard {
+        change_host_version: 2,
+        announces: false,
+        hosts_info: false,
+        analytics_host_key: true,
+    };
+    let incoming = Arc::new(OnceLock::<mpsc::UnboundedSender<Vec<u8>>>::new());
+    let report = Arc::clone(&incoming);
+    let session = RunningSession::start(move |request| {
+        let response = bolt_pair(request, keyboard);
+        if !is_request(request, KEYBOARD_SLOT, REPROG_INDEX, 3) {
+            return response;
+        }
+        let incoming = report.get().expect("the sender is set before the arm");
+        // The acknowledgement, then the report, on the wire in that order.
+        for message in response.into_iter().chain([analytics_report()]) {
+            let _ = incoming.send(message);
+        }
+        None
+    })
+    .await;
+    incoming
+        .set(session.incoming.clone())
+        .expect("the sender is set once");
+
+    let (outcome, writes) = session.outcome().await;
+    assert!(
+        matches!(
+            outcome,
+            Ok(HostSwitchSessionOutcome::Departed { restore: Some(_) })
+        ),
+        "the report is heard, and the analytics bit is restored later"
+    );
+    assert!(
+        writes.iter().any(|report| {
+            is_request(report, MOUSE_SLOT, MOUSE_CHANGE_HOST_INDEX, 1) && report[4] == 1
+        }),
+        "the mouse follows to host 1"
+    );
+}
+
+#[tokio::test]
+async fn a_host_key_reported_before_its_arm_fails_still_moves_the_mouse() {
+    // The keyboard applies the write, reports the key, and leaves before it
+    // answers, so the arm fails because of the switch itself (#1623).
+    let keyboard = PairedKeyboard {
+        change_host_version: 2,
+        announces: false,
+        hosts_info: false,
+        analytics_host_key: true,
+    };
+    let incoming = Arc::new(OnceLock::<mpsc::UnboundedSender<Vec<u8>>>::new());
+    let report = Arc::clone(&incoming);
+    let session = RunningSession::start(move |request| {
+        if is_request(request, KEYBOARD_SLOT, REPROG_INDEX, 3) {
+            let incoming = report.get().expect("the sender is set before the arm");
+            let _ = incoming.send(analytics_report());
+            return Some(feature_error(request, HW_ERROR));
+        }
+        bolt_pair(request, keyboard)
+    })
+    .await;
+    incoming
+        .set(session.incoming.clone())
+        .expect("the sender is set once");
+
+    let (outcome, writes) = session.outcome().await;
+    assert!(
+        matches!(
+            outcome,
+            Ok(HostSwitchSessionOutcome::Departed { restore: Some(_) })
+        ),
+        "the failed write is restored after the keyboard is back"
+    );
+    let failed_at = writes
+        .iter()
+        .position(|report| is_request(report, KEYBOARD_SLOT, REPROG_INDEX, 3))
+        .expect("the session enables analytics reporting");
+    let after_failure = &writes[failed_at + 1..];
+    assert!(
+        after_failure
+            .iter()
+            .all(|report| report[1] != KEYBOARD_SLOT),
+        "no rollback write waits for the keyboard that is leaving"
+    );
+    assert!(
+        after_failure.iter().any(|report| {
+            is_request(report, MOUSE_SLOT, MOUSE_CHANGE_HOST_INDEX, 1) && report[4] == 1
+        }),
+        "the mouse follows to host 1"
+    );
+}
+
 #[test]
 fn a_departure_queued_before_the_channel_changed_still_moves_the_linked_devices() {
     let position = KeyboardPosition {

@@ -203,17 +203,17 @@ mod tests {
             (0x04, 0) => response[4..6].copy_from_slice(&[3, 0]),
             (0x22, 0) => response[4] = if fail_second_control { 2 } else { 1 },
             (0x22, 1) => {
-                if request[4] == 1 {
-                    return Some(feature_error(request, 0x08));
-                }
-                // Host key 1, divertable. Unrelated task/group fields are zero.
-                response[4..9].copy_from_slice(&[0, 0xd1, 0, 0, 0x20]);
+                // Host key 1, then host key 2, divertable. Unrelated task/group
+                // fields are zero.
+                response[4..9].copy_from_slice(&[0, 0xd1 + request[4], 0, 0, 0x20]);
             }
             (0x22, 2) => {
                 response[4..6].copy_from_slice(&request[4..6]);
                 // Original raw XY, persistent diversion, and force raw XY set.
                 response[6] = 0x54;
             }
+            // The second host key fails to arm after the first one armed.
+            (0x22, 3) if request[5] == 0xd2 => return Some(feature_error(request, 0x08)),
             (0x22, 3) => return Some(request.to_vec()),
             _ => return None,
         }
@@ -279,18 +279,23 @@ mod tests {
                     panic!("a graceful stop is not a departure")
                 }
             };
+            // The key whose arm failed is owed too: it may have applied.
+            let owed: &[u8] = if partial_arm { &[0xd1, 0xd2] } else { &[0xd1] };
             let reporting: Vec<_> = writes
                 .written_reports()
                 .into_iter()
                 .filter(|request| request[2] == 0x22 && request[3] >> 4 == 3)
                 .collect();
+            let (arms, restores) = reporting.split_at(owed.len());
+            for (arm, &cid) in arms.iter().zip(owed) {
+                assert_eq!(&arm[4..7], &[0, cid, 0x23]);
+            }
             assert_eq!(
-                reporting.len(),
-                3,
-                "one arm, then two failed bounded restores"
+                restores.len(),
+                2 * owed.len(),
+                "two failed bounded restores for each owed key"
             );
-            assert_eq!(&reporting[0][4..7], &[0, 0xd1, 0x23]);
-            assert_eq!(&reporting[1][4..7], &[0, 0xd1, 0x32]);
+            assert_eq!(&restores[0][4..7], &[0, 0xd1, 0x32]);
 
             registry.remove_node(&node);
             assert!(
@@ -309,8 +314,10 @@ mod tests {
                 HostSwitchRestoreOutcome::Restored
             ));
             let reporting = fresh.written_reports();
-            assert_eq!(reporting.len(), 1);
-            assert_eq!(&reporting[0][4..10], &[0, 0xd1, 0x32, 0, 0, 0]);
+            assert_eq!(reporting.len(), owed.len());
+            for (restore, &cid) in reporting.iter().zip(owed) {
+                assert_eq!(&restore[4..10], &[0, cid, 0x32, 0, 0, 0]);
+            }
         }
     }
 
