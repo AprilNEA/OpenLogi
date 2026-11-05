@@ -115,8 +115,10 @@ pub enum CapturedInput {
         /// the wheel's `0x2121` multiplier for a high-resolution one.
         per_notch: NonZeroU8,
     },
-    /// The device power-cycled with buttons held. Their presses are over, but
-    /// nobody let go: they end without the action a release would run.
+    /// The device power-cycled. Presses still held are over, but nobody let
+    /// go: they end without the action a release would run. State the device
+    /// forgot with the power cycle, such as a keyboard's G-key profile, starts
+    /// over.
     Interrupted,
     /// The session put the mouse in host mode. A session it replaced left
     /// onboard mode, which loads the stored profile's DPI, so the agent

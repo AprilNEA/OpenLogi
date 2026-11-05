@@ -17,6 +17,7 @@ mod category;
 mod control;
 mod defaults;
 mod effect;
+mod g_keys;
 mod gaming;
 mod gesture;
 mod key_combo;
@@ -39,6 +40,7 @@ pub use defaults::{
     default_binding, default_binding_for, default_binding_on, default_gesture_binding,
 };
 pub use effect::{Effect, MediaKey, MouseButton, NativeAction, Script, Shortcut};
+pub use g_keys::{GKey, GKeyProfile, GKeySlot, ModeKey};
 pub use gaming::{
     G502_LIGHTSPEED, G903_LIGHTSPEED, GamingButtons, GamingLayout, STANDARD_BUTTONS, Slot,
 };

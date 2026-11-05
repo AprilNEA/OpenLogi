@@ -9,8 +9,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
-    CameraControls, CameraStreamMode, Config, DeviceIdentity, DisableKey, LightSettings, Lighting,
-    MomentumScrolling, OnboardMemory, ScrollResolution, SmartShift, ThumbwheelSensitivity,
+    CameraControls, CameraStreamMode, Config, DeviceIdentity, DisableKey, GKeyOwner, GamingKeyMode,
+    LightSettings, Lighting, MomentumScrolling, OnboardMemory, ScrollResolution, SmartShift,
+    ThumbwheelSensitivity,
 };
 use crate::binding::{
     Action, ActionRingConfig, ActionRingIcon, ActionRingSize, ActionRingSlot, Binding, ButtonId,
@@ -425,6 +426,42 @@ impl Config {
             .entry(device_key.to_string())
             .or_default()
             .force_sensing = Some(force);
+    }
+
+    /// Who runs `device_key`'s G1–G5.
+    #[must_use]
+    pub fn g_key_owner(&self, device_key: &str) -> GKeyOwner {
+        self.devices
+            .get(device_key)
+            .map(|device| device.g_key_owner)
+            .unwrap_or_default()
+    }
+
+    /// Record who runs `device_key`'s G1–G5.
+    pub fn set_g_key_owner(&mut self, device_key: &str, owner: GKeyOwner) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .g_key_owner = owner;
+    }
+
+    /// What `device_key`'s M1–M3 and MR do while OpenLogi owns its gaming
+    /// cluster.
+    #[must_use]
+    pub fn gaming_key_mode(&self, device_key: &str) -> GamingKeyMode {
+        self.devices
+            .get(device_key)
+            .map(|device| device.gaming_key_mode)
+            .unwrap_or_default()
+    }
+
+    /// Record what `device_key`'s M1–M3 and MR do. The bindings of the other
+    /// mode stay stored.
+    pub fn set_gaming_key_mode(&mut self, device_key: &str, mode: GamingKeyMode) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .gaming_key_mode = mode;
     }
 
     /// The G-Shift layer of `device_key`, if not empty.

@@ -7,10 +7,10 @@
 use std::collections::BTreeMap;
 
 use crate::binding::{
-    Action, Binding, ButtonId, Cid, GamingLayout, GestureDirection, KeypadPage,
-    default_binding_for, default_binding_on,
+    Action, Binding, ButtonId, Cid, GKeyProfile, GKeySlot, GamingLayout, GestureDirection,
+    KeypadPage, default_binding_for, default_binding_on,
 };
-use crate::config::Config;
+use crate::config::{Config, GamingKeyMode};
 
 /// Effective per-button single-action map for the device `config_key`, with
 /// `app_bundle`'s per-app overlay applied. Unset buttons fall back to
@@ -109,6 +109,37 @@ pub fn bindings_on_page(
             Some(_) => None,
         })
         .collect()
+}
+
+/// What a press on a G-series keyboard's gaming cluster does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GamingPress {
+    /// Make `profile` the one G1–G5 run from now on; nothing dispatches.
+    SelectProfile(GKeyProfile),
+    /// Dispatch the binding stored under this button.
+    Dispatch(ButtonId),
+}
+
+/// What a press of `button` does in `mode` while `active` is the profile
+/// M1–M3 last selected. A capture session reports every G-key as its M1 slot
+/// ([`ButtonId::g_key`]); in [`GamingKeyMode::Profiles`] it runs the active
+/// profile's slot and M1–M3 select the profile, while in
+/// [`GamingKeyMode::NineButtons`] G1–G5 run their M1 slot and every key
+/// above them runs its own binding. Any other button dispatches as itself.
+#[must_use]
+pub fn gaming_press(button: ButtonId, mode: GamingKeyMode, active: GKeyProfile) -> GamingPress {
+    match (mode, button) {
+        (GamingKeyMode::Profiles, ButtonId::GKey(slot)) => {
+            GamingPress::Dispatch(ButtonId::GKey(GKeySlot {
+                profile: active,
+                ..slot
+            }))
+        }
+        (GamingKeyMode::Profiles, ButtonId::ModeKey(key)) => key
+            .profile()
+            .map_or(GamingPress::Dispatch(button), GamingPress::SelectProfile),
+        _ => GamingPress::Dispatch(button),
+    }
 }
 
 /// Per-direction maps for every HID++ gesture source (DPI/ModeShift, the
@@ -604,5 +635,44 @@ mod tests {
         assert!(cfg.keypad_page_binds("keypad", page(2)));
         assert!(cfg.keypad_page_binds("keypad", page(3)));
         assert!(!cfg.keypad_page_binds("keypad", page(1)));
+    }
+
+    #[test]
+    fn gaming_presses_follow_the_cluster_mode() {
+        use crate::binding::{GKey, ModeKey};
+        let g2 = ButtonId::g_key(GKey::G2);
+        let m3 = ButtonId::ModeKey(ModeKey::M3);
+        let mr = ButtonId::ModeKey(ModeKey::MacroRecord);
+        let on = |profile| {
+            GamingPress::Dispatch(ButtonId::GKey(GKeySlot {
+                profile,
+                key: GKey::G2,
+            }))
+        };
+        assert_eq!(
+            gaming_press(g2, GamingKeyMode::Profiles, GKeyProfile::M3),
+            on(GKeyProfile::M3)
+        );
+        assert_eq!(
+            gaming_press(m3, GamingKeyMode::Profiles, GKeyProfile::M1),
+            GamingPress::SelectProfile(GKeyProfile::M3)
+        );
+        assert_eq!(
+            gaming_press(mr, GamingKeyMode::Profiles, GKeyProfile::M1),
+            GamingPress::Dispatch(mr)
+        );
+        // Nine keys: the M1 slot whatever profile was active, and M3 is a key.
+        assert_eq!(
+            gaming_press(g2, GamingKeyMode::NineButtons, GKeyProfile::M2),
+            on(GKeyProfile::M1)
+        );
+        assert_eq!(
+            gaming_press(m3, GamingKeyMode::NineButtons, GKeyProfile::M1),
+            GamingPress::Dispatch(m3)
+        );
+        assert_eq!(
+            gaming_press(ButtonId::Back, GamingKeyMode::Profiles, GKeyProfile::M2),
+            GamingPress::Dispatch(ButtonId::Back)
+        );
     }
 }

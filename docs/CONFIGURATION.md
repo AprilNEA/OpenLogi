@@ -288,6 +288,17 @@ Common device fields are:
   own force, and the agent never writes one. The desktop app sets it with the
   Press force slider in the Haptic Sense Panel's inspector on the mouse page,
   which saves the force the device reads back
+- `g_key_owner` for G-series keyboards with HID++ `0x8010` G-keys:
+  `"openlogi"` hands the whole G1–G5 row to OpenLogi, so every G-key runs its
+  binding and an unbound one does nothing; absent or `"keyboard"` leaves the
+  keyboard's onboard actions. While it is on, `gaming_key_mode` says what the
+  keys above the row do. `"profiles"` (the default) makes M1–M3 switch G1–G5
+  between three sets of bindings, starting on M1 whenever capture starts, and
+  leaves MR recording macros on the keyboard. `"nine_buttons"` makes G1–G5,
+  M1–M3 and MR nine keys with a binding each, where G1–G5 use their M1
+  bindings. G-key bindings live in the device's `bindings` as `KeyG1` …
+  `KeyG5` for M1 and `M2:KeyG1` … `M3:KeyG5` for the later profiles; M1–M3
+  and MR are `KeyM1` … `KeyM3` and `KeyMR`. Changing the mode keeps them all
 - `identity` and `disabled_gestures`, which are application-managed metadata
 
 `[keyboard.bindings]` contains global key triggers such as `f1` or

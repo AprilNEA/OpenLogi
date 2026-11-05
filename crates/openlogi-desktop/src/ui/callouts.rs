@@ -34,16 +34,29 @@ fn segments_cross(a: (f32, f32), b: (f32, f32), c: (f32, f32), d: (f32, f32)) ->
     reason = "a row holds at most a few dozen callouts — well under f32 mantissa"
 )]
 pub(crate) fn spread_in_order(ideal: &[f32], spacing: f32, lo: f32, hi: f32) -> Vec<f32> {
-    if ideal.is_empty() {
+    let offsets: Vec<f32> = (0..ideal.len())
+        .map(|index| spacing * index as f32)
+        .collect();
+    spread_at_offsets(ideal, &offsets, lo, hi)
+}
+
+/// [`spread_in_order`] for neighbours that need different room: `offsets`
+/// gives each card's least distance from the first one, non-decreasing, so
+/// card `i + 1` stays at least `offsets[i + 1] - offsets[i]` past card `i`.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "a row holds at most a few dozen callouts — well under f32 mantissa"
+)]
+pub(crate) fn spread_at_offsets(ideal: &[f32], offsets: &[f32], lo: f32, hi: f32) -> Vec<f32> {
+    let Some(&last_offset) = offsets.last() else {
         return Vec::new();
-    }
-    // Shifting each target back by `index * spacing` turns "at least
-    // `spacing` apart" into "non-decreasing", which pooling adjacent
-    // violators solves in one pass: a run that would cross is replaced by
-    // its mean.
+    };
+    // Shifting each target back by its offset turns "at least that far
+    // apart" into "non-decreasing", which pooling adjacent violators solves
+    // in one pass: a run that would cross is replaced by its mean.
     let mut runs: Vec<(f32, usize)> = Vec::with_capacity(ideal.len());
-    for (index, target) in ideal.iter().enumerate() {
-        runs.push((target - spacing * index as f32, 1));
+    for (target, offset) in ideal.iter().zip(offsets) {
+        runs.push((target - offset, 1));
         while let [.., (sum_a, len_a), (sum_b, len_b)] = runs[..] {
             if sum_a / len_a as f32 <= sum_b / len_b as f32 {
                 break;
@@ -52,7 +65,7 @@ pub(crate) fn spread_in_order(ideal: &[f32], spacing: f32, lo: f32, hi: f32) -> 
             runs.push((sum_a + sum_b, len_a + len_b));
         }
     }
-    let last_start = hi - spacing * (ideal.len() - 1) as f32;
+    let last_start = hi - last_offset;
     let (first, last) = if last_start >= lo {
         (lo, last_start)
     } else {
@@ -61,8 +74,8 @@ pub(crate) fn spread_in_order(ideal: &[f32], spacing: f32, lo: f32, hi: f32) -> 
     };
     runs.into_iter()
         .flat_map(|(sum, len)| std::iter::repeat_n((sum / len as f32).clamp(first, last), len))
-        .enumerate()
-        .map(|(index, start)| start + spacing * index as f32)
+        .zip(offsets)
+        .map(|(start, offset)| start + offset)
         .collect()
 }
 
