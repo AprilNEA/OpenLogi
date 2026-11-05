@@ -290,7 +290,8 @@ pub enum ZoneWalkStep {
     Next,
     /// Light the previous zone again.
     Back,
-    /// End the walk and hand lighting back to the firmware.
+    /// End the walk. With an `0x8071` effect engine, lighting goes back to
+    /// the firmware.
     Stop,
 }
 
