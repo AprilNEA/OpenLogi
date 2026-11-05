@@ -4,7 +4,7 @@
 //! bar shown only while something needs saying.
 
 use gpui::{App, Div, IntoElement, ParentElement, SharedString, Styled, div, px, rgb};
-use gpui_component::{
+use gpui_kit::component::{
     Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
@@ -297,7 +297,7 @@ fn accessibility_status(pal: Palette) -> impl IntoElement {
     // macOS-gated affordance (`.hover()` + `.on_click()`), so an ungated import
     // would be unused — and a hard error under `-D warnings` — on Linux/Windows.
     use gpui::InteractiveElement as _;
-    use gpui_base::Button as BaseButton;
+    use gpui_kit::base::Button as BaseButton;
 
     use crate::ui::theme::FocusRingStyle as _;
 

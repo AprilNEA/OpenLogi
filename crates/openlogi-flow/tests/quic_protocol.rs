@@ -541,6 +541,45 @@ async fn rpc_stream_that_never_finishes_times_out() -> TestResult {
 }
 
 #[tokio::test]
+async fn quiet_pairing_connection_outlives_the_idle_timeout() -> TestResult {
+    let idle_timeout = Duration::from_millis(600);
+    let pair = ConnectedPair::connect(
+        (1, 1),
+        (1, 1),
+        true,
+        &[],
+        EndpointLimits {
+            idle_timeout,
+            ..EndpointLimits::default()
+        },
+    )
+    .await?;
+
+    // Both users comparing codes: nothing is sent for several idle periods.
+    tokio::time::sleep(idle_timeout * 4).await;
+
+    let client = async {
+        let (mut send, mut receive) = pair.first.open_rpc_stream().await?;
+        Envelope::new(FrameKind::PairStart, 0, vec![0xff])?
+            .write_to(&mut send)
+            .await?;
+        send.finish()?;
+        TestResult::Ok(Envelope::read_from(&mut receive).await?)
+    };
+    let (accepted, response) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(pair.second.accept_rpc(), client)
+    })
+    .await?;
+    assert!(matches!(
+        accepted?,
+        RpcEvent::Rejected(proto::ErrorCode::Invalid)
+    ));
+    let error = decode::<proto::Error>(&response?)?;
+    assert_eq!(error.code.as_known(), Some(proto::ErrorCode::Invalid));
+    Ok(())
+}
+
+#[tokio::test]
 async fn select_loop_over_stream_accepts_loses_no_request() -> TestResult {
     let pair = ConnectedPair::trusted((1, 1), (1, 1)).await?;
     let request =

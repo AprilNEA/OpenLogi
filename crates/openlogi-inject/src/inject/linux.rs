@@ -502,9 +502,9 @@ pub(super) fn run_apple_script(_src: &str) {
 }
 
 pub(super) fn run_shell_command(cmd: &str) {
-    let _ = std::process::Command::new("/bin/sh")
-        .args(["-c", cmd])
-        .output();
+    let mut command = std::process::Command::new("/bin/sh");
+    command.args(["-c", cmd]);
+    super::run_to_end(command, "shell command");
 }
 
 /// Settle time after creating the uinput device, before its first emit.

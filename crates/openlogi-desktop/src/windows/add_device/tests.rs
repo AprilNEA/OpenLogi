@@ -1,4 +1,7 @@
-use gpui::{AppContext as _, AssetSource, Bounds, Modifiers, TestAppContext, point, size};
+use gpui::{
+    AppContext as _, AssetSource, Bounds, Modifiers, ScrollDelta, ScrollEvent, TestAppContext,
+    point, size,
+};
 use openlogi_core::config::Config;
 use openlogi_core::device::DeviceInventory;
 use openlogi_ipc::{AgentSnapshot, AgentStatus, ForegroundApps, InventoryHealth, PROTOCOL_VERSION};
@@ -60,7 +63,7 @@ fn receiver(name: &str, product_id: u16, uid: Option<&str>) -> ReceiverInfo {
 #[gpui::test]
 fn reopening_keeps_the_selected_receiver_for_retry(cx: &mut TestAppContext) {
     let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     cx.update(theme::register_builtin_themes);
     let mut commands = cx.update(install_state);
     let bolt = receiver("Bolt", 0xc548, Some("00000000AAAABBBB"));
@@ -98,7 +101,7 @@ fn reopening_keeps_the_selected_receiver_for_retry(cx: &mut TestAppContext) {
 #[gpui::test]
 fn a_refused_start_keeps_its_error_and_target_after_empty_snapshots(cx: &mut TestAppContext) {
     let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     cx.update(theme::register_builtin_themes);
     let mut commands = cx.update(install_state);
     let bolt = receiver("Bolt", 0xc548, Some("00000000AAAABBBB"));
@@ -176,7 +179,7 @@ fn an_agent_session_supersedes_a_command_failure_and_can_be_dismissed(cx: &mut T
 #[gpui::test]
 fn changing_receiver_waits_for_cancellation_acknowledgement(cx: &mut TestAppContext) {
     let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     cx.update(theme::register_builtin_themes);
     let mut commands = cx.update(install_state);
     cx.update(|cx| apply_undeliverable(cx, PairingFailure::AlreadyActive));
@@ -200,7 +203,7 @@ fn changing_receiver_waits_for_cancellation_acknowledgement(cx: &mut TestAppCont
 #[gpui::test]
 fn a_recovered_receiver_identity_enables_the_same_open_picker(cx: &mut TestAppContext) {
     let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     cx.update(theme::register_builtin_themes);
     let mut commands = cx.update(install_state);
     let (_, visual) = cx.add_window_view(AddDeviceView::new);
@@ -251,7 +254,7 @@ fn a_recovered_receiver_identity_enables_the_same_open_picker(cx: &mut TestAppCo
 #[gpui::test]
 fn choosing_bolt_and_retrying_keep_the_explicit_target(cx: &mut TestAppContext) {
     let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     cx.update(theme::register_builtin_themes);
     let mut commands = cx.update(install_state);
     let unifying = receiver("Unifying Receiver", 0xc52b, Some("11223344"));
@@ -328,7 +331,7 @@ fn only_identified_receivers_can_be_selected() {
 
 #[gpui::test]
 fn empty_receiver_hotplug_updates_the_picker(cx: &mut TestAppContext) {
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     cx.update(theme::register_builtin_themes);
     let mut commands = cx.update(install_state);
     let (_, cx) = cx.add_window_view(AddDeviceView::new);
@@ -365,7 +368,7 @@ fn empty_receiver_hotplug_updates_the_picker(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn opening_waits_for_a_receiver_choice(cx: &mut TestAppContext) {
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     cx.update(theme::register_builtin_themes);
     let mut commands = cx.update(install_state);
     cx.update(open);
@@ -375,19 +378,23 @@ fn opening_waits_for_a_receiver_choice(cx: &mut TestAppContext) {
     );
 }
 
-#[gpui::test]
-fn cancel_stays_in_the_bottom_bar_below_a_long_device_list(cx: &mut TestAppContext) {
-    let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
-    cx.update(gpui_component::init);
-    cx.update(theme::register_builtin_themes);
-    let mut commands = cx.update(install_state);
-    let devices = (0..12u8)
+/// More discovered devices than the 520 × 400 window shows at once.
+fn long_device_list() -> Vec<FoundDevice> {
+    (0..12u8)
         .map(|n| FoundDevice {
             address: [0, 0, 0, 0, 0, n],
             name: format!("Keyboard {n}"),
         })
-        .collect();
-    cx.update(|cx| apply_state(cx, Some(PairingPhase::Found(devices))));
+        .collect()
+}
+
+#[gpui::test]
+fn cancel_stays_in_the_bottom_bar_below_a_long_device_list(cx: &mut TestAppContext) {
+    let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
+    cx.update(gpui_kit::init);
+    cx.update(theme::register_builtin_themes);
+    let mut commands = cx.update(install_state);
+    cx.update(|cx| apply_state(cx, Some(PairingPhase::Found(long_device_list()))));
     let (_, cx) = cx.add_window_view(AddDeviceView::new);
     let viewport = Bounds::new(point(px(0.), px(0.)), size(px(520.), px(400.)));
     cx.simulate_resize(viewport.size);
@@ -408,10 +415,70 @@ fn cancel_stays_in_the_bottom_bar_below_a_long_device_list(cx: &mut TestAppConte
     assert!(matches!(commands.try_recv(), Ok(Command::CancelPairing(_))));
 }
 
+/// A step taller than the window scrolls under the app's scrollbar, or
+/// nothing says it continues. The scroll owner spans the window, so the bar
+/// sits on the window's right edge, not 24 px inside it, and the rows keep
+/// the page inset inside the owner.
+#[gpui::test]
+fn a_long_device_list_scrolls_under_a_scrollbar_on_the_window_edge(cx: &mut TestAppContext) {
+    let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
+    cx.update(gpui_kit::init);
+    cx.update(theme::register_builtin_themes);
+    let _commands = cx.update(install_state);
+    cx.update(|cx| apply_state(cx, Some(PairingPhase::Found(long_device_list()))));
+    let (_, cx) = cx.add_window_view(AddDeviceView::new);
+    let viewport = Bounds::new(point(px(0.), px(0.)), size(px(520.), px(400.)));
+    cx.simulate_resize(viewport.size);
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+
+    let bar = cx
+        .debug_bounds("scrollbar-overlay")
+        .expect("the step content has a scrollbar");
+    assert_eq!(
+        (bar.left(), bar.right()),
+        (viewport.left(), viewport.right()),
+        "the scrollbar spans the window, so it sits on the window edge: {bar:?}"
+    );
+    let cancel = cx
+        .debug_bounds("pairing-cancel")
+        .expect("a running search offers Cancel");
+    assert!(
+        bar.bottom() <= cancel.top(),
+        "the scroll region ends above the action bar: {bar:?}, {cancel:?}"
+    );
+
+    let first = cx
+        .debug_bounds("pairing-device-000000000000")
+        .expect("the first device is listed");
+    assert!(
+        bar.contains(&first.center()),
+        "the first device starts in view: {bar:?}, {first:?}"
+    );
+    let inset = first.left() - bar.left();
+    assert!(
+        inset > px(0.) && bar.right() - first.right() == inset,
+        "rows keep the same page inset on both sides inside the scroll owner: {bar:?}, {first:?}"
+    );
+
+    cx.simulate_event(ScrollEvent {
+        position: bar.center(),
+        delta: ScrollDelta::Pixels(point(px(0.), px(-60.))),
+        ..Default::default()
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    let scrolled = cx
+        .debug_bounds("pairing-device-000000000000")
+        .expect("the first device is still listed");
+    assert!(
+        scrolled.top() < first.top(),
+        "the wheel scrolls the rows under the bar: {first:?} -> {scrolled:?}"
+    );
+}
+
 #[gpui::test]
 fn cancel_before_choosing_a_receiver_closes_the_window(cx: &mut TestAppContext) {
     let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     cx.update(theme::register_builtin_themes);
     let mut commands = cx.update(install_state);
     let (_, visual) = cx.add_window_view(AddDeviceView::new);
@@ -430,7 +497,7 @@ fn cancel_before_choosing_a_receiver_closes_the_window(cx: &mut TestAppContext) 
 #[gpui::test]
 fn change_receiver_clears_a_failure_without_an_agent_session(cx: &mut TestAppContext) {
     let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     cx.update(theme::register_builtin_themes);
     let mut commands = cx.update(install_state);
     cx.update(|cx| apply_undeliverable(cx, PairingFailure::WatcherUnavailable));
@@ -446,6 +513,39 @@ fn change_receiver_clears_a_failure_without_an_agent_session(cx: &mut TestAppCon
         assert!(matches!(cx.global::<PairingUi>(), PairingUi::Idle));
     });
     assert!(matches!(commands.try_recv(), Ok(Command::CancelPairing(_))));
+}
+
+/// Clicking a receiver focuses its row, and the next step removes that row.
+/// The window takes focus back, so Tab starts from the new step's first
+/// control instead of staying on a control that is gone.
+#[gpui::test]
+fn a_new_step_takes_focus_back_from_the_clicked_receiver(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    cx.update(theme::register_builtin_themes);
+    let mut commands = cx.update(install_state);
+    let bolt = receiver("Bolt", 0xc548, Some("00000000AAAABBBB"));
+    cx.update(|cx| {
+        AppState::update(cx, |state, cx| {
+            state
+                .apply_agent_snapshot(&snapshot(vec![bolt]), &AssetResolver::new(), &[])
+                .events
+                .emit(cx);
+        });
+    });
+    let (view, cx) = cx.add_window_view(AddDeviceView::new);
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    let choice = cx
+        .debug_bounds("pairing-receiver-c548-00000000AAAABBBB")
+        .expect("the receiver is selectable");
+    cx.simulate_click(choice.center(), Modifiers::default());
+    assert!(matches!(commands.try_recv(), Ok(Command::StartPairing(_))));
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    cx.update(|window, cx| {
+        assert!(
+            view.read(cx).focus_handle.is_focused(window),
+            "focus must not stay on the receiver row the search replaced"
+        );
+    });
 }
 
 #[test]
@@ -513,7 +613,7 @@ impl Render for PointerPasskeyHarness {
 #[gpui::test]
 fn pointer_passkey_panel_renders(cx: &mut TestAppContext) {
     let pal = cx.update(|cx| {
-        gpui_component::init(cx);
+        gpui_kit::init(cx);
         theme::register_builtin_themes(cx);
         theme::palette(cx)
     });
@@ -532,7 +632,7 @@ fn pointer_passkey_panel_renders(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn escape_cancels_a_search_and_closes_the_idle_picker(cx: &mut TestAppContext) {
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     cx.update(theme::register_builtin_themes);
     cx.update(crate::app::menu::install);
     let mut commands = cx.update(install_state);

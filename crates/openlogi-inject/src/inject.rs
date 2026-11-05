@@ -250,6 +250,27 @@ fn dispatch_script(script: Script<'_>) {
     }
 }
 
+/// Run a script's process to its end and log a failure, which would
+/// otherwise vanish. See [`finish`] for why it gets no pipes.
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+fn run_to_end(mut command: std::process::Command, kind: &'static str) {
+    match finish(&mut command) {
+        Ok(status) if status.success() => {}
+        Ok(status) => tracing::warn!(kind, %status, "script exited with an error"),
+        Err(error) => tracing::warn!(kind, %error, "script could not start"),
+    }
+}
+
+/// Wait for `command`'s process with no pipes: its stdin and stdout are
+/// null and its stderr is the agent's own. A child it leaves running in the
+/// background then cannot keep a workflow waiting for an end of output, and
+/// output nobody reads cannot pile up in the agent.
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+fn finish(command: &mut std::process::Command) -> std::io::Result<std::process::ExitStatus> {
+    use std::process::Stdio;
+    command.stdin(Stdio::null()).stdout(Stdio::null()).status()
+}
+
 /// Run workflow steps in order on the current (worker) thread, so a `Delay`
 /// never stalls the event tap. Each step is one call into the platform
 /// backend; a backend that cannot perform a step logs and moves on.
@@ -1243,5 +1264,29 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The exit status and a failed start reach the caller, which logs them.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn a_script_reports_its_exit_status_and_a_failed_start() {
+        let mut failing = std::process::Command::new("/bin/sh");
+        failing.args(["-c", "exit 3"]);
+        assert_eq!(super::finish(&mut failing).unwrap().code(), Some(3));
+        let mut missing = std::process::Command::new("/nonexistent/openlogi-test");
+        super::finish(&mut missing).unwrap_err();
+    }
+
+    /// A child the script leaves in the background keeps its stdout open.
+    /// That must not keep the script, and so a workflow, waiting: reading the
+    /// output to its end would wait for every holder of the pipe.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn a_background_child_does_not_keep_the_script_waiting() {
+        let mut command = std::process::Command::new("/bin/sh");
+        command.args(["-c", "sleep 3 2>/dev/null &"]);
+        let started = std::time::Instant::now();
+        assert!(super::finish(&mut command).unwrap().success());
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
     }
 }

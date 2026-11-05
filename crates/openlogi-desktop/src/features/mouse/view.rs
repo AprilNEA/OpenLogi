@@ -8,8 +8,8 @@ use gpui::{
     StatefulInteractiveElement as _, Styled, Subscription, Window, canvas, div, hsla, img,
     prelude::FluentBuilder as _, px, rgb, size,
 };
-use gpui_base::{Button as BaseButton, ElementExt as _};
-use gpui_component::{
+use gpui_kit::base::{Button as BaseButton, ElementExt as _};
+use gpui_kit::component::{
     h_flex,
     input::{InputEvent, InputState},
     v_flex,
@@ -74,7 +74,7 @@ fn held_actions(offer_gshift: bool) -> &'static [Action] {
 const MODEL_VERTICAL_RESERVE: f32 = 154.;
 
 mod labels;
-use labels::{CardSize, ValueMetrics, binding_label_for_control, label_control};
+use labels::{CardSize, MAX_VALUE_LINES, ValueMetrics, binding_label_for_control, label_control};
 /// Floor for the scaled model height. Below this the evenly-slotted side labels
 /// (≈[`LABEL_H`](super::geometry::LABEL_H) each) start to overlap; the window's minimum height is sized to
 /// keep the viewport above [`MODEL_VERTICAL_RESERVE`] + this.
@@ -731,7 +731,7 @@ fn model_layout(
     let has_labels =
         asset.is_none_or(|asset| asset_has_button_labels(asset, layout)) && viewport_w >= 960.;
     let content_w = room.width.clamp(MODEL_MIN_CONTENT_W, MODEL_CONTENT_MAX_W);
-    let (label_distribution, card_w) = label_columns(content_w, values.widest + values.chrome_w);
+    let (label_distribution, card_w) = label_columns(content_w, values.fit_w[0] + values.chrome_w);
     let gutter = card_w + SIDE_GAP;
     let left_gutter = if has_labels { gutter } else { 0. };
     let right_gutter = if has_labels && label_distribution == LabelDistribution::BothSides {
@@ -794,9 +794,10 @@ fn label_columns(content_w: f32, needed_w: f32) -> (LabelDistribution, f32) {
     )
 }
 
-/// The cards `card_w` wide: one value line when the widest value fits it,
-/// otherwise two, as long as `count` cards that tall still fit `room_h`
-/// with their gaps. Past that the value keeps one line and its ellipsis.
+/// The cards `card_w` wide, with as many value lines as the longest value
+/// needs at that width — up to [`MAX_VALUE_LINES`] — as long as `count`
+/// cards that tall still fit `room_h` with their gaps. Past that a value
+/// keeps the lines that fit and ends in an ellipsis.
 fn card_size(
     card_w: f32,
     values: ValueMetrics,
@@ -804,23 +805,26 @@ fn card_size(
     distribution: LabelDistribution,
     room_h: f32,
 ) -> CardSize {
+    let needed = values
+        .lines_at(card_w - values.chrome_w)
+        .unwrap_or(MAX_VALUE_LINES);
     let one_line = CardSize {
         w: card_w,
         h: LABEL_H,
         value_lines: 1,
     };
-    let two_lines = CardSize {
-        h: LABEL_H + values.line_h,
-        value_lines: 2,
-        ..one_line
-    };
-    if values.widest > card_w - values.chrome_w
-        && labels_fit(count, distribution, two_lines.h, room_h)
-    {
-        two_lines
-    } else {
-        one_line
-    }
+    // Each line makes every card taller: the most that still fit.
+    std::iter::successors(Some(one_line), |card| {
+        Some(CardSize {
+            h: card.h + values.line_h,
+            value_lines: card.value_lines + 1,
+            ..*card
+        })
+    })
+    .take(needed)
+    .take_while(|card| card.value_lines == 1 || labels_fit(count, distribution, card.h, room_h))
+    .last()
+    .unwrap_or(one_line)
 }
 
 /// The model's size fit inside a `max_w` × `target_h` box at the render's

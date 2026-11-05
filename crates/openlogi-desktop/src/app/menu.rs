@@ -2,14 +2,18 @@
 //!
 //! GPUI's menu support is driven by registered actions + a `Keymap`: the
 //! platform layer reads bindings via `cx.set_menus` and stamps the matching
-//! `keyEquivalent` onto each `NSMenuItem`. App-level actions (Hide, Quit)
-//! get global listeners; window-level actions (Close, Minimize, Zoom) are
-//! attached to window root views.
+//! `keyEquivalent` onto each `NSMenuItem`. Window-level actions wrap the Kit
+//! root, so both application content and overlays dispatch through them.
 //!
 //! On Linux/Windows the menus + key bindings are stored but never surfaced
 //! in a top-of-screen bar — calling `install` there is a harmless no-op.
 
-use gpui::{App, KeyBinding, Menu, MenuItem, OsAction, actions};
+use gpui::{
+    AnyElement, App, Context, InteractiveElement as _, IntoElement, KeyBinding, Menu, MenuItem,
+    OsAction, ParentElement as _, Render, Styled as _, Window, actions, div,
+};
+use gpui_kit::base::{Root, RootPlugin};
+use gpui_kit::component::input;
 use openlogi_core::brand::{HELP_URL, RELEASES_URL, REPO_URL};
 use url::Url;
 
@@ -64,8 +68,34 @@ actions!(
     ]
 );
 
+struct WindowActions;
+
+impl Render for WindowActions {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        gpui::Empty
+    }
+}
+
+impl RootPlugin for WindowActions {
+    fn decorate(
+        &self,
+        surface: AnyElement,
+        _: &Root,
+        _: &mut Window,
+        _: &mut App,
+    ) -> impl IntoElement {
+        div()
+            .size_full()
+            .on_action(|_: &CloseWindow, window, _| window.remove_window())
+            .on_action(|_: &Minimize, window, _| window.minimize_window())
+            .on_action(|_: &Zoom, window, _| window.zoom_window())
+            .child(surface)
+    }
+}
+
 /// Wire global action handlers, key equivalents, and publish the menu bar.
 pub fn install(cx: &mut App) {
+    Root::register_plugin(cx, |_, _| WindowActions);
     #[cfg(target_os = "macos")]
     {
         cx.on_action(|_: &Hide, cx| cx.hide());
@@ -73,14 +103,6 @@ pub fn install(cx: &mut App) {
         cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
     }
     cx.on_action(|_: &Quit, cx| cx.quit());
-    // Fallback for future windows that forget to attach a view-level
-    // CloseWindow handler. Existing window roots handle this directly so the
-    // focused window is removed during normal action dispatch.
-    cx.on_action(|_: &CloseWindow, cx| {
-        if let Some(handle) = cx.active_window() {
-            let _ = handle.update(cx, |_, window, _| window.remove_window());
-        }
-    });
     cx.on_action(|_: &OpenSettings, cx| crate::windows::settings::open(cx));
     cx.on_action(|_: &OpenAbout, cx| {
         crate::windows::settings::open_at(crate::windows::settings::SettingsPage::About, cx);
@@ -95,21 +117,36 @@ pub fn install(cx: &mut App) {
 
     // `secondary` is Cmd on macOS and Ctrl elsewhere; a bare `cmd` would be
     // Super on Linux and Windows, which the window manager usually owns.
+    // Kit resolves that alias through the host-aware loader, not `new`.
+    let secondary_bindings: [(&str, Box<dyn gpui::Action>); 10] = [
+        ("secondary-q", Box::new(Quit)),
+        ("secondary-z", Box::new(input::Undo)),
+        ("secondary-shift-z", Box::new(input::Redo)),
+        ("secondary-x", Box::new(input::Cut)),
+        ("secondary-c", Box::new(input::Copy)),
+        ("secondary-v", Box::new(input::Paste)),
+        ("secondary-a", Box::new(input::SelectAll)),
+        ("secondary-m", Box::new(Minimize)),
+        ("secondary-w", Box::new(CloseWindow)),
+        ("secondary-,", Box::new(OpenSettings)),
+    ];
+    #[expect(
+        clippy::expect_used,
+        reason = "the bindings above are fixed, valid literals"
+    )]
+    let secondary_bindings = secondary_bindings
+        .into_iter()
+        .map(|(key, action)| {
+            KeyBinding::load(key, action, None, false, None, cx)
+                .expect("static application shortcuts are valid for the host OS")
+        })
+        .collect::<Vec<_>>();
+    cx.bind_keys(secondary_bindings);
     cx.bind_keys([
-        KeyBinding::new("secondary-q", Quit, None),
-        KeyBinding::new("secondary-z", gpui_component::input::Undo, None),
-        KeyBinding::new("secondary-shift-z", gpui_component::input::Redo, None),
-        KeyBinding::new("secondary-x", gpui_component::input::Cut, None),
-        KeyBinding::new("secondary-c", gpui_component::input::Copy, None),
-        KeyBinding::new("secondary-v", gpui_component::input::Paste, None),
-        KeyBinding::new("secondary-a", gpui_component::input::SelectAll, None),
         #[cfg(target_os = "macos")]
         KeyBinding::new("cmd-h", Hide, None),
         #[cfg(target_os = "macos")]
         KeyBinding::new("cmd-alt-h", HideOthers, None),
-        KeyBinding::new("secondary-m", Minimize, None),
-        KeyBinding::new("secondary-w", CloseWindow, None),
-        KeyBinding::new("secondary-,", OpenSettings, None),
         KeyBinding::new("alt-left", NavigateBack, Some(APP_KEY_CONTEXT)),
         KeyBinding::new("escape", Dismiss, Some(DIALOG_KEY_CONTEXT)),
     ]);
@@ -169,32 +206,16 @@ fn menus(cx: &App) -> Vec<Menu> {
             name: tr!("common.edit"),
             disabled: false,
             items: vec![
-                MenuItem::os_action(
-                    tr!("common.undo"),
-                    gpui_component::input::Undo,
-                    OsAction::Undo,
-                ),
-                MenuItem::os_action(
-                    tr!("common.redo"),
-                    gpui_component::input::Redo,
-                    OsAction::Redo,
-                ),
+                MenuItem::os_action(tr!("common.undo"), input::Undo, OsAction::Undo),
+                MenuItem::os_action(tr!("common.redo"), input::Redo, OsAction::Redo),
                 MenuItem::separator(),
-                MenuItem::os_action(tr!("common.cut"), gpui_component::input::Cut, OsAction::Cut),
-                MenuItem::os_action(
-                    tr!("common.copy"),
-                    gpui_component::input::Copy,
-                    OsAction::Copy,
-                ),
-                MenuItem::os_action(
-                    tr!("common.paste"),
-                    gpui_component::input::Paste,
-                    OsAction::Paste,
-                ),
+                MenuItem::os_action(tr!("common.cut"), input::Cut, OsAction::Cut),
+                MenuItem::os_action(tr!("common.copy"), input::Copy, OsAction::Copy),
+                MenuItem::os_action(tr!("common.paste"), input::Paste, OsAction::Paste),
                 MenuItem::separator(),
                 MenuItem::os_action(
                     tr!("common.select_all"),
-                    gpui_component::input::SelectAll,
+                    input::SelectAll,
                     OsAction::SelectAll,
                 ),
             ],
@@ -240,13 +261,17 @@ fn menus(cx: &App) -> Vec<Menu> {
 }
 
 fn device_menu_items(cx: &App) -> Vec<MenuItem> {
+    let state = AppState::try_read(cx);
+    // Pairing runs in the agent: like the window's Add Device buttons, the
+    // item waits for a live link. The menu follows the link because every
+    // `StateEvent::AgentChanged` republishes it.
+    let agent_live = state.is_some_and(super::widgets::agent_live);
     let mut items = vec![
-        MenuItem::action(tr!("pairing.add_device_dialog"), OpenAddDevice),
+        MenuItem::action(tr!("pairing.add_device_dialog"), OpenAddDevice).disabled(!agent_live),
         MenuItem::separator(),
     ];
 
-    let state = AppState::try_global(cx);
-    match state.as_ref().map(|state| state.read(cx)) {
+    match state {
         Some(state) if !state.devices().is_empty() => {
             for record in state.devices() {
                 let title = match &record.battery {

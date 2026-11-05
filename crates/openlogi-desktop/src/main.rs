@@ -13,6 +13,9 @@
     windows_subsystem = "windows"
 )]
 
+// Keep existing GPUI paths while resolving all types through the Kit facade.
+extern crate gpui_kit as gpui;
+
 /// Translate into a [`gpui::SharedString`]; declared here for crate-wide scope.
 macro_rules! tr {
     ($($args:tt)*) => {
@@ -52,6 +55,14 @@ use crate::state::ConfigPersistence;
 use crate::ui::theme;
 
 fn main() -> Result<()> {
+    // Settings → Permissions re-runs this executable through pkexec, as root,
+    // to install the udev rules. That process must do nothing else: no log
+    // files in root's home, no instance lock, no window.
+    #[cfg(target_os = "linux")]
+    if openlogi_permissions::udev::is_install_request(std::env::args_os()) {
+        return Ok(openlogi_permissions::udev::install_rules()?);
+    }
+
     init_tracing();
 
     #[cfg(debug_assertions)]
@@ -103,8 +114,8 @@ fn main() -> Result<()> {
 
     // `with_assets` registers the embedded app logo
     // ([`app_assets`]) plus the lucide SVGs that back
-    // `gpui_component::IconName`; without it `img()` / `Icon` would fail to load.
-    let app = gpui_platform::application().with_assets(app_assets::AppAssets);
+    // `gpui_kit::component::IconName`; without it `img()` / `Icon` would fail to load.
+    let app = gpui_kit::application().with_assets(app_assets::AppAssets);
 
     // URL scheme: `open openlogi://open-settings` from the agent's tray or
     // external apps. Works for both cold start (macOS launches the app then
@@ -124,7 +135,7 @@ fn main() -> Result<()> {
     app.on_reopen(windows::main_window::open);
 
     app.run(move |cx| {
-        gpui_component::init(cx);
+        gpui_kit::init(cx);
         theme::register_builtin_themes(cx);
         app::menu::install(cx);
 

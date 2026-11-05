@@ -11,7 +11,7 @@ use gpui::{
     BoxShadow, Context, Hsla, IntoElement, ParentElement, Render, Styled, Subscription, Window,
     div, hsla, point, prelude::FluentBuilder as _, px, rgb,
 };
-use gpui_component::{Icon, IconName, Selectable as _, h_flex, slider::Slider, v_flex};
+use gpui_kit::component::{Icon, IconName, Selectable as _, h_flex, slider::Slider, v_flex};
 use openlogi_core::{
     config::LightSettings,
     device::{LightCapabilities, LightValueRange, LightValueUnit},

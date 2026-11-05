@@ -185,8 +185,10 @@ pub fn set_auto(unique_id: &str, toggle: AutoToggle, on: bool) -> Result<(), Con
 ///
 /// Autos are written first: a manual value is rejected while its auto mode
 /// still owns the control, so dragging an auto-gated slider must clear the
-/// mode before the value lands. Controls are then batched per class, since
-/// `VIDIOC_S_EXT_CTRLS` refuses a mixed-class call.
+/// mode before the value lands. A value whose auto mode this batch switches
+/// on is not written at all ([`CameraControl::handed_to_auto`]). Controls are
+/// then batched per class, since `VIDIOC_S_EXT_CTRLS` refuses a mixed-class
+/// call.
 ///
 /// Unsupported controls are skipped rather than failing the batch — a profile
 /// saved against a Brio shouldn't fail wholesale when applied to a C270.
@@ -211,7 +213,7 @@ pub fn apply_settings(
 
     let writable: Vec<(u32, i64)> = values
         .iter()
-        .filter(|&&(control, _)| !gated_by_enabled_auto(control, autos))
+        .filter(|(control, _)| !control.handed_to_auto(autos))
         .filter_map(|&(control, value)| {
             let id = control_id(control)?;
             has(id).then_some((id, i64::from(value)))
@@ -248,18 +250,6 @@ pub fn apply_settings(
     }
 
     Ok(())
-}
-
-/// Whether this call is handing `control` over to an auto mode.
-///
-/// A control under automatic control rejects manual writes, so a profile that
-/// carries both "auto on" and the value it gates would otherwise fail — and,
-/// because the write aborts the batch, would strand later controls unapplied.
-/// The auto toggle expresses the intent; the stale manual value is redundant.
-fn gated_by_enabled_auto(control: CameraControl, autos: &[(AutoToggle, bool)]) -> bool {
-    control
-        .auto_toggle()
-        .is_some_and(|gate| autos.iter().any(|&(toggle, on)| toggle == gate && on))
 }
 
 /// Mask selecting the class bits of a V4L2 control id.
@@ -427,29 +417,6 @@ mod tests {
         assert!(is_auto_mode(EXPOSURE_APERTURE_PRIORITY));
         assert!(!is_auto_mode(EXPOSURE_MANUAL));
         assert!(!is_auto_mode(EXPOSURE_SHUTTER_PRIORITY));
-    }
-
-    #[test]
-    fn a_control_handed_to_auto_is_skipped() {
-        let autos = [(AutoToggle::Exposure, true)];
-        // Exposure is gated by the toggle being switched on...
-        assert!(gated_by_enabled_auto(CameraControl::Exposure, &autos));
-        // ...while ungated controls, and controls gated by a *different*
-        // toggle, still apply.
-        assert!(!gated_by_enabled_auto(CameraControl::Zoom, &autos));
-        assert!(!gated_by_enabled_auto(CameraControl::Focus, &autos));
-    }
-
-    #[test]
-    fn a_control_taken_off_auto_still_applies() {
-        // Switching auto *off* is exactly when the manual value must be written.
-        let autos = [(AutoToggle::Focus, false)];
-        assert!(!gated_by_enabled_auto(CameraControl::Focus, &autos));
-    }
-
-    #[test]
-    fn an_unmentioned_toggle_leaves_its_control_writable() {
-        assert!(!gated_by_enabled_auto(CameraControl::WhiteBalance, &[]));
     }
 
     #[test]

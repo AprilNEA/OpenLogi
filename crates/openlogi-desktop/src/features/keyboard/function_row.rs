@@ -30,12 +30,16 @@ use std::sync::Arc;
 
 use gpui::{
     AnyElement, App, AppContext as _, Bounds, Context, Entity, FontWeight, Hsla,
-    InteractiveElement, IntoElement, ParentElement, PathBuilder, Render, RenderOnce, Role,
-    SharedString, StatefulInteractiveElement as _, Styled, Subscription, Window, canvas, div, hsla,
-    point, prelude::FluentBuilder as _, px, rgb, svg,
+    InteractiveElement, IntoElement, ParentElement, PathBuilder, Refineable as _, Render,
+    RenderOnce, Role, ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled,
+    Subscription, TextStyle, Window, canvas, div, hsla, linear_color_stop, linear_gradient, point,
+    prelude::FluentBuilder as _, px, rems, rgb, svg,
 };
-use gpui_component::tooltip::Tooltip;
-use gpui_component::{Selectable as _, h_flex, input::InputState, v_flex};
+use gpui_kit::base::ElementExt as _;
+use gpui_kit::component::tooltip::Tooltip;
+use gpui_kit::component::{
+    Selectable as _, h_flex, input::InputState, scroll::ScrollableElement as _, v_flex,
+};
 use openlogi_core::binding::{Action, ActionRingIcon, ButtonId, KeypadPage, WorkflowStep};
 
 use super::editors::{
@@ -52,7 +56,7 @@ use crate::services::assets::{GlowGeometry, ResolvedAsset};
 use crate::state::{AppState, DeviceKey, DeviceRecord, StateEvent, StateEvents};
 use crate::ui::action::localized_action_label;
 use crate::ui::components::MenuRow;
-use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
+use crate::ui::theme::{self, ACCENT_BLUE, Palette, SCREEN_PAD, Typography as _};
 use gpui::{Animation, AnimationExt, ease_out_quint, img};
 
 mod callout_layout;
@@ -66,17 +70,45 @@ use key_points::{EVEN_SPACING_END, EVEN_SPACING_START, key_x_fractions};
 use key_points::{KeySurface, key_surface, keypad_canvas};
 use keypad::{KeypadPane, KeypadPhotoPane, LastPage, keypad_page_bar, keypad_photo_render_size};
 
-/// Width of the inspector column beside the device: the key overview, or the
-/// selected key's config panel.
+/// Narrowest width of the inspector column beside the device: the key
+/// overview, or the selected key's config panel. The column grows past it
+/// to keep every key's name and binding on one line (see
+/// [`inspector_width`]).
 const PANEL_W: f32 = 320.;
+/// Widest the inspector column grows; past this a long name wraps instead.
+/// The board gives up what the column takes past [`PANEL_W`].
+const PANEL_MAX_W: f32 = 440.;
 /// Space between the device pane and the inspector column.
 const INSPECTOR_GAP: f32 = 20.;
-/// What the inspector column takes from the row, selected key or not.
+/// What the narrowest inspector column takes from the row.
 const INSPECTOR_W: f32 = PANEL_W + INSPECTOR_GAP;
-/// The inspector column's height, whatever it shows, so swapping the overview
-/// for a panel never resizes the row: tall enough to list a full keyboard's
-/// keys without scrolling, short enough for the main window's minimum height.
+/// The Keys tab's content width: the widest board beside the narrowest
+/// inspector column.
+const KEYS_CONTENT_W: f32 = KEYBOARD_W + INSPECTOR_W;
+/// The inspector column's height while the key overview needs no more: room
+/// for the key panel's action list. The column keeps one height whatever it
+/// shows, so swapping the overview for a panel never resizes the row; a
+/// longer overview grows it up to the height the Keys tab has (see
+/// [`inspector_height`]).
 const INSPECTOR_H: f32 = 540.;
+/// The least the column shrinks to in a short window, which then scrolls the
+/// tab instead.
+const INSPECTOR_MIN_H: f32 = 240.;
+/// Height of the fade over the overview's cut-off bottom edge, the Actions
+/// Ring library's treatment. The list then ends with as much padding, so its
+/// last row can scroll clear of the fade.
+const OVERVIEW_FADE_H: f32 = 24.;
+/// An overview row's binding icon, and the gap after it, in rems.
+const OVERVIEW_ICON: f32 = 0.875;
+const OVERVIEW_ICON_GAP: f32 = 0.375;
+/// What an overview row adds around its key name and binding, in rems: the
+/// card's padding and the row's either side (`compact_panel`'s `p_1p5`,
+/// `MenuRow`'s `px_2`), the row's `gap_2` between the two, and the binding's
+/// icon and gap.
+const OVERVIEW_ROW_CHROME: f32 = 2. * 0.375 + 2. * 0.5 + 0.5 + OVERVIEW_ICON + OVERVIEW_ICON_GAP;
+/// What it adds in pixels: the card's border either side, and the pixel each
+/// of the two texts can lose when layout snaps it to whole pixels.
+const OVERVIEW_ROW_PX: f32 = 2. + 2.;
 /// How long the config panel takes to fade in when a key is selected.
 const PANEL_ENTER: std::time::Duration = std::time::Duration::from_millis(160);
 /// How far the config panel travels while it fades in: out of the gap beside
@@ -138,6 +170,12 @@ pub struct FunctionRowView {
     /// The device and app profile being edited: another device starts back
     /// on page 1, and either change drops the open editor.
     edit_scope: EditScope,
+    /// The height the Keys tab leaves the inspector column, and the height
+    /// the key overview took in it, as the last frame laid them out (see
+    /// [`inspector_height`]).
+    inspector_room: Option<f32>,
+    overview_h: Option<f32>,
+    overview_scroll: ScrollHandle,
     _state_obs: Subscription,
 }
 
@@ -164,6 +202,9 @@ impl FunctionRowView {
             application_invalid: false,
             keypad_page: KeypadPage::FIRST,
             edit_scope: EditScope::default(),
+            inspector_room: None,
+            overview_h: None,
+            overview_scroll: ScrollHandle::new(),
             _state_obs: state_obs,
         }
     }
@@ -207,6 +248,49 @@ impl FunctionRowView {
             self.hovered_key = idx;
             cx.notify();
         }
+    }
+
+    /// Keep `height`, which the last frame measured into `slot`, and lay the
+    /// row out again when it moved.
+    fn remeasure(
+        &mut self,
+        slot: fn(&mut Self) -> &mut Option<f32>,
+        height: f32,
+        cx: &mut Context<Self>,
+    ) {
+        let slot = slot(self);
+        if slot.is_none_or(|old| (old - height).abs() > 0.5) {
+            *slot = Some(height);
+            cx.notify();
+        }
+    }
+
+    /// The inspector column's content and height. The column keeps its place
+    /// and size either way, so selecting a key never moves the board: it
+    /// lists every key until one is selected, then holds that key's panel.
+    fn inspector(
+        &self,
+        selected: Option<usize>,
+        slots: &[KeySlot],
+        view: &Entity<Self>,
+        pal: &Palette,
+        cx: &mut Context<Self>,
+    ) -> (Inspector, f32) {
+        let room = self
+            .inspector_room
+            .map_or(INSPECTOR_H, |room| room.max(INSPECTOR_MIN_H));
+        let inspector = match selected {
+            Some(selected) => Inspector::Panel(self.config_panel(selected, slots, view, cx)),
+            None => Inspector::Overview(key_overview(
+                slots,
+                self.hovered_key,
+                &self.overview_scroll,
+                room,
+                view,
+                pal,
+            )),
+        };
+        (inspector, inspector_height(self.overview_h, room))
     }
 
     /// Follow the selected device and the open app profile — dropping a
@@ -334,6 +418,7 @@ impl Render for FunctionRowView {
         let last_page = self.sync_edit_scope(state);
         let pal = theme::palette(cx);
         let slots = key_slots_from_layouts(surface, state, self.keypad_page);
+        let panel_w = inspector_width(&slots, window);
         let render_size = if keypad_photo {
             keypad_photo_render_size(asset, viewport_h)
         } else {
@@ -344,7 +429,11 @@ impl Render for FunctionRowView {
             keyboard_render_size(
                 asset,
                 viewport_h,
-                keyboard_max_width(f32::from(viewport.width), side_bands_width(&markers)),
+                keyboard_max_width(
+                    f32::from(viewport.width),
+                    side_bands_width(&markers),
+                    panel_w,
+                ),
             )
         };
 
@@ -406,23 +495,42 @@ impl Render for FunctionRowView {
                 .hovered(hovered)
                 .into_any_element()
         };
-        // The inspector column keeps its place either way, so selecting a key
-        // never moves the board: it lists every key until one is selected,
-        // then holds that key's panel.
-        let inspector = match selected {
-            Some(selected) => Inspector::Panel(self.config_panel(selected, &slots, &view, cx)),
-            None => Inspector::Overview(key_overview(&slots, hovered, &view, &pal)),
-        };
+        let (inspector, column_h) = self.inspector(selected, &slots, &view, &pal, cx);
         let page_bar = (keypad || keypad_photo)
             .then(|| keypad_page_bar(self.keypad_page, last_page, &view, &pal));
 
+        let row = InspectorRow::new(device, inspector, (panel_w, column_h));
+        keys_tab_content(page_bar, row, &view)
+    }
+}
+
+/// The Keys tab's content — a keypad's page bar over the device and its
+/// inspector column — reporting to `view` the room the tab's visible height
+/// leaves the column once this frame laid it out: the tab body clips to that
+/// height, inset by its padding. The next frame fits the column to it.
+fn keys_tab_content(
+    page_bar: Option<impl IntoElement>,
+    row: InspectorRow,
+    view: &Entity<FunctionRowView>,
+) -> gpui::Div {
+    let column_h = row.column.1;
+    let view = view.clone();
+    div().w_full().child(
         v_flex()
             .w_full()
             .items_center()
             .gap_3()
             .children(page_bar)
-            .child(InspectorRow::new(device, inspector))
-    }
+            .child(row)
+            .on_prepaint(move |content, window, cx| {
+                let visible = window.content_mask().bounds.size.height;
+                let pad = SCREEN_PAD.rems().to_pixels(window.rem_size());
+                let free = f32::from(visible - pad * 2. - content.size.height);
+                view.update(cx, |view, cx| {
+                    view.remeasure(|view| &mut view.inspector_room, column_h + free, cx);
+                });
+            }),
+    )
 }
 
 fn binding_line(
@@ -467,19 +575,63 @@ fn binding_line(
 }
 
 /// The widest the render may get. The whole pane — the render and any band
-/// of cards beside the board — keeps to [`KEYBOARD_W`], so the inspector
-/// column always fits beside it in the Keys tab, and shrinks further to keep
-/// the inspector beside it in a narrower window. Below
-/// [`KEYBOARD_MIN_BESIDE_W`] the inspector wraps under the board instead,
-/// which then keeps its full width.
-fn keyboard_max_width(viewport_w: f32, side_bands_w: f32) -> f32 {
-    let beside = (viewport_w - KEYS_HORIZONTAL_RESERVE - INSPECTOR_W).min(KEYBOARD_W);
+/// of cards beside the board — keeps to what [`KEYS_CONTENT_W`] leaves beside
+/// a `column_w` inspector column, so the column always fits beside it in the
+/// Keys tab, and shrinks further to keep the inspector beside it in a
+/// narrower window. Below [`KEYBOARD_MIN_BESIDE_W`] the inspector wraps
+/// under the board instead, which then keeps [`KEYBOARD_W`].
+fn keyboard_max_width(viewport_w: f32, side_bands_w: f32, column_w: f32) -> f32 {
+    let inspector_w = column_w + INSPECTOR_GAP;
+    let beside =
+        (viewport_w - KEYS_HORIZONTAL_RESERVE - inspector_w).min(KEYS_CONTENT_W - inspector_w);
     let pane_w = if beside >= KEYBOARD_MIN_BESIDE_W {
         beside
     } else {
         KEYBOARD_W
     };
     pane_w - side_bands_w
+}
+
+/// The inspector column's width: what the widest overview row — key name,
+/// binding icon and binding — takes on one line, from [`PANEL_W`] up to
+/// [`PANEL_MAX_W`]. Measured in the rows' own text style, so a language's
+/// long key names widen the column instead of being cut off.
+fn inspector_width(slots: &[KeySlot], window: &Window) -> f32 {
+    let mut style = window.text_style();
+    style.refine(div().text_caption().text_style());
+    let rem = window.rem_size();
+    let font_size = style.font_size.to_pixels(rem);
+    let text_w = |text: &SharedString, font_weight: FontWeight| {
+        let run = TextStyle {
+            font_weight,
+            ..style.clone()
+        }
+        .to_run(text.len());
+        let line = window
+            .text_system()
+            .shape_line(text.clone(), font_size, &[run], None);
+        f32::from(line.width)
+    };
+    let widest = slots
+        .iter()
+        .map(|slot| {
+            let binding_weight = if slot.bound {
+                FontWeight::MEDIUM
+            } else {
+                style.font_weight
+            };
+            text_w(&slot.label, style.font_weight) + text_w(&slot.binding, binding_weight)
+        })
+        .fold(0., f32::max);
+    let chrome = f32::from(rems(OVERVIEW_ROW_CHROME).to_pixels(rem)) + OVERVIEW_ROW_PX;
+    (widest + chrome).clamp(PANEL_W, PANEL_MAX_W)
+}
+
+/// The inspector column's height: what the key overview took when it last
+/// showed, no less than [`INSPECTOR_H`] for the key panel, and no more than
+/// the `room` the Keys tab leaves it.
+fn inspector_height(overview_h: Option<f32>, room: f32) -> f32 {
+    overview_h.unwrap_or(0.).max(INSPECTOR_H).min(room)
 }
 
 /// The keyboard render size: the actual PNG aspect at up to `max_w` wide,
@@ -640,13 +792,17 @@ enum Inspector {
 struct InspectorRow {
     device: AnyElement,
     inspector: Inspector,
+    /// The column's width and height (see [`inspector_width`] and
+    /// [`inspector_height`]).
+    column: (f32, f32),
 }
 
 impl InspectorRow {
-    fn new(device: impl Into<AnyElement>, inspector: Inspector) -> Self {
+    fn new(device: impl Into<AnyElement>, inspector: Inspector, column: (f32, f32)) -> Self {
         Self {
             device: device.into(),
             inspector,
+            column,
         }
     }
 }
@@ -662,6 +818,7 @@ impl RenderOnce for InspectorRow {
             // while it is open keeps this element, so it does not replay.
             Inspector::Panel(panel) => div()
                 .relative()
+                .size_full()
                 .child(panel)
                 .with_animation(
                     "key-panel-enter",
@@ -674,6 +831,7 @@ impl RenderOnce for InspectorRow {
                 )
                 .into_any_element(),
         };
+        let (column_w, column_h) = self.column;
         h_flex()
             .w_full()
             .flex_wrap()
@@ -684,8 +842,8 @@ impl RenderOnce for InspectorRow {
             .child(
                 v_flex()
                     .flex_none()
-                    .w(px(PANEL_W))
-                    .h(px(INSPECTOR_H))
+                    .w(px(column_w))
+                    .h(px(column_h))
                     .child(content),
             )
     }
@@ -695,82 +853,146 @@ impl RenderOnce for InspectorRow {
 /// the callouts over the board do not have. A row shares the hover highlight
 /// with its key's callout and leader, and opens the key like a click on
 /// either.
+///
+/// The list takes the height its rows need up to `room`, reporting what it
+/// took back to `view` for the column (see [`inspector_height`]); past
+/// `room` it scrolls, its cut-off edge fading into the card.
 fn key_overview(
     slots: &[KeySlot],
     hovered: Option<usize>,
+    scroll: &ScrollHandle,
+    room: f32,
     view: &Entity<FunctionRowView>,
     pal: &Palette,
 ) -> gpui::Div {
-    let rows = slots.iter().map(|slot| {
-        let idx = slot.idx;
-        let view_hover = view.clone();
-        let view_click = view.clone();
-        let binding_color = if slot.bound {
-            pal.text_primary
-        } else {
-            pal.text_muted
-        };
-        MenuRow::new(("key-overview-row", idx))
-            .debug_selector(move || format!("key-overview-row-{idx}"))
-            .selected(hovered == Some(idx))
-            .aria_label(slot.summary())
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_caption()
-                    .child(slot.label.clone()),
-            )
-            .child(
-                h_flex()
-                    .flex_shrink_0()
-                    .max_w(px(PANEL_W / 2.))
-                    .items_center()
-                    .gap_1p5()
-                    .child(
-                        svg()
-                            .path(slot.binding_icon)
-                            .size_3p5()
-                            .flex_none()
-                            .text_color(binding_color),
-                    )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .text_caption()
-                            .text_color(binding_color)
-                            .when(slot.bound, |text| text.font_weight(FontWeight::MEDIUM))
-                            .child(slot.binding.clone()),
-                    ),
-            )
-            .on_hover(move |hovered, _window, cx| {
-                let next = (*hovered).then_some(idx);
-                view_hover.update(cx, |v, vcx| v.set_hovered_key(next, vcx));
-            })
-            .on_click(move |_ev, _window, cx| {
-                // The key's panel replaces the overview, so this row never
-                // sees its hover end.
-                view_click.update(cx, |v, vcx| {
-                    v.set_hovered_key(None, vcx);
-                    v.click_key(idx, vcx);
-                });
-            })
-    });
+    let rows = slots
+        .iter()
+        .map(|slot| overview_row(slot, hovered == Some(slot.idx), view, pal));
+    let overflows = scroll.max_offset().y > px(0.);
+    let scroll_for_measure = scroll.clone();
+    let view_measure = view.clone();
     compact_panel(*pal)
         .debug_selector(|| "key-overview".into())
-        .w(px(PANEL_W))
-        .max_h(px(INSPECTOR_H))
+        .max_h(px(room))
         .child(inspector_title(tr!("device.keys"), pal))
         .child(divider(*pal))
         .child(
-            div()
-                .id("key-overview-scroll")
+            v_flex()
+                .relative()
                 .min_h_0()
-                .overflow_y_scroll()
-                .children(rows),
+                .child(
+                    v_flex()
+                        .id("key-overview-scroll")
+                        .min_h_0()
+                        .track_scroll(scroll)
+                        .overflow_y_scroll()
+                        .child(
+                            v_flex()
+                                .children(rows)
+                                .when(overflows, |list| list.pb(px(OVERVIEW_FADE_H))),
+                        ),
+                )
+                .when(overflows, |list| {
+                    list.child(
+                        div()
+                            .debug_selector(|| "key-overview-fade".into())
+                            .absolute()
+                            .bottom_0()
+                            .left_0()
+                            .right_0()
+                            .h(px(OVERVIEW_FADE_H))
+                            .bg(linear_gradient(
+                                180.,
+                                linear_color_stop(pal.panel.opacity(0.), 0.),
+                                linear_color_stop(pal.panel, 1.),
+                            )),
+                    )
+                })
+                .vertical_scrollbar(scroll),
         )
+        // The card's height is what the column grows to; whether the list
+        // scrolls decides its fade, so a change in either lays out again.
+        .on_prepaint(move |bounds, _window, cx| {
+            let scrolls = scroll_for_measure.max_offset().y > px(0.);
+            view_measure.update(cx, |view, cx| {
+                view.remeasure(|view| &mut view.overview_h, f32::from(bounds.size.height), cx);
+                if scrolls != overflows {
+                    cx.notify();
+                }
+            });
+        })
+}
+
+/// One key's overview row: its name, and its binding's icon and name.
+fn overview_row(
+    slot: &KeySlot,
+    hovered: bool,
+    view: &Entity<FunctionRowView>,
+    pal: &Palette,
+) -> MenuRow {
+    let idx = slot.idx;
+    let view_hover = view.clone();
+    let view_click = view.clone();
+    let binding_color = if slot.bound {
+        pal.text_primary
+    } else {
+        pal.text_muted
+    };
+    // The column is as wide as the widest row needs, so both texts keep one
+    // line; a name too long even for the widest column shares the squeeze
+    // with the binding and wraps rather than losing its end.
+    MenuRow::new(("key-overview-row", idx))
+        .debug_selector(move || format!("key-overview-row-{idx}"))
+        .selected(hovered)
+        .aria_label(slot.summary())
+        .child(
+            div()
+                .flex_auto()
+                .min_w_0()
+                .overflow_hidden()
+                .text_ellipsis()
+                .line_clamp(2)
+                .text_caption()
+                .debug_selector(move || format!("key-overview-name-{idx}"))
+                .child(slot.label.clone()),
+        )
+        .child(
+            h_flex()
+                .min_w_0()
+                .items_center()
+                .gap(rems(OVERVIEW_ICON_GAP))
+                .child(
+                    svg()
+                        .path(slot.binding_icon)
+                        .size(rems(OVERVIEW_ICON))
+                        .flex_none()
+                        .text_color(binding_color),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .line_clamp(2)
+                        .text_caption()
+                        .text_color(binding_color)
+                        .when(slot.bound, |text| text.font_weight(FontWeight::MEDIUM))
+                        .debug_selector(move || format!("key-overview-binding-{idx}"))
+                        .child(slot.binding.clone()),
+                ),
+        )
+        .on_hover(move |hovered, _window, cx| {
+            let next = (*hovered).then_some(idx);
+            view_hover.update(cx, |v, vcx| v.set_hovered_key(next, vcx));
+        })
+        .on_click(move |_ev, _window, cx| {
+            // The key's panel replaces the overview, so this row never
+            // sees its hover end.
+            view_click.update(cx, |v, vcx| {
+                v.set_hovered_key(None, vcx);
+                v.click_key(idx, vcx);
+            });
+        })
 }
 
 /// The keyboard photo with callout bubbles above each function key, leader
@@ -1203,9 +1425,11 @@ impl FunctionRowView {
                                 .flex_none()
                                 .size_3()
                                 .child(
-                                    gpui_component::Icon::new(gpui_component::IconName::Check)
-                                        .size_3()
-                                        .text_color(rgb(ACCENT_BLUE)),
+                                    gpui_kit::component::Icon::new(
+                                        gpui_kit::component::IconName::Check,
+                                    )
+                                    .size_3()
+                                    .text_color(rgb(ACCENT_BLUE)),
                                 ),
                         )
                     })
@@ -1220,8 +1444,7 @@ impl FunctionRowView {
         rows.extend(panel_action_rows(current.as_ref(), &on_pick, view, &pal));
 
         compact_panel(pal)
-            .w(px(PANEL_W))
-            .max_h(px(INSPECTOR_H))
+            .max_h_full()
             .child(title_header(&key_name, app.as_deref(), &pal))
             .child(divider(pal))
             .child(editor_scroll_list("key-panel-scroll", rows))
@@ -1319,9 +1542,11 @@ fn panel_action_rows(
                         )
                         .when(selected, |s| {
                             s.child(
-                                gpui_component::Icon::new(gpui_component::IconName::Check)
-                                    .size_3()
-                                    .text_color(rgb(ACCENT_BLUE)),
+                                gpui_kit::component::Icon::new(
+                                    gpui_kit::component::IconName::Check,
+                                )
+                                .size_3()
+                                .text_color(rgb(ACCENT_BLUE)),
                             )
                         })
                         .on_click(move |_ev, _window, cx| {

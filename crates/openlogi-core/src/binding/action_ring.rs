@@ -72,6 +72,32 @@ impl ActionRingSlot {
         }
     }
 
+    /// The slot whose 45° sector holds the direction `(x, y)` from the ring's
+    /// centre, in the same down-pointing Y as [`Self::unit_offset`]. Each
+    /// sector is centred on its slot, so the boundaries fall halfway between
+    /// neighbours. A zero vector has no direction and reads as `Right`.
+    #[must_use]
+    pub fn toward(x: f32, y: f32) -> Self {
+        // Clockwise on screen from Right, one slot per 45°.
+        const CLOCKWISE: [ActionRingSlot; 8] = [
+            ActionRingSlot::Right,
+            ActionRingSlot::BottomRight,
+            ActionRingSlot::Bottom,
+            ActionRingSlot::BottomLeft,
+            ActionRingSlot::Left,
+            ActionRingSlot::TopLeft,
+            ActionRingSlot::Top,
+            ActionRingSlot::TopRight,
+        ];
+        let eighths = (y.atan2(x) / std::f32::consts::FRAC_PI_4).round();
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "a rounded angle in eighths of a turn is an integer in -4..=4"
+        )]
+        let index = (eighths as i32).rem_euclid(8) as usize;
+        CLOCKWISE[index]
+    }
+
     /// Top-left corner at which to place this slot's `slot_size` box, on a
     /// square `canvas` whose ring has the given `radius`. All in the caller's
     /// own units; the live overlay and the settings preview differ only in
@@ -287,6 +313,27 @@ impl Default for ActionRingLayout {
     }
 }
 
+/// How large the overlay draws the ring around the cursor.
+///
+/// The core stores the semantic choice; the overlay owns the geometry each
+/// size maps to.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionRingSize {
+    /// A tighter ring, for a hand that barely moves the mouse.
+    Small,
+    /// The standard ring.
+    #[default]
+    Medium,
+    /// A wider ring with larger slots.
+    Large,
+}
+
+impl ActionRingSize {
+    /// Every size, smallest first: the order the settings offer them.
+    pub const ALL: [Self; 3] = [Self::Small, Self::Medium, Self::Large];
+}
+
 /// Per-device Actions Ring settings and application-specific layouts.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -297,6 +344,9 @@ pub struct ActionRingConfig {
     /// Whether ring hover and activation transitions play device haptics.
     #[serde(default = "default_true")]
     pub haptics: bool,
+    /// How large the ring is drawn.
+    #[serde(default)]
+    pub size: ActionRingSize,
     /// Layout used when the foreground application has no override.
     #[serde(default)]
     pub default: ActionRingLayout,
@@ -310,6 +360,7 @@ impl Default for ActionRingConfig {
         Self {
             enabled: true,
             haptics: true,
+            size: ActionRingSize::default(),
             default: ActionRingLayout::default(),
             per_app: BTreeMap::new(),
         }
@@ -375,6 +426,37 @@ mod tests {
                 .iter()
                 .all(|slot| layout.slots.contains_key(slot))
         );
+    }
+
+    #[test]
+    fn each_slot_owns_the_sector_around_its_own_direction() {
+        for slot in ActionRingSlot::ALL {
+            let (x, y) = slot.unit_offset();
+            assert_eq!(ActionRingSlot::toward(x, y), slot);
+        }
+        // Sector edges sit 22.5° either side of a slot, with Y pointing down.
+        let at = |degrees: f32| {
+            let radians = degrees.to_radians();
+            ActionRingSlot::toward(radians.cos(), radians.sin())
+        };
+        assert_eq!(at(22.0), ActionRingSlot::Right);
+        assert_eq!(at(23.0), ActionRingSlot::BottomRight);
+        assert_eq!(at(-22.0), ActionRingSlot::Right);
+        assert_eq!(at(-23.0), ActionRingSlot::TopRight);
+        // Either side of the wrap from +180° to -180°.
+        assert_eq!(at(179.0), ActionRingSlot::Left);
+        assert_eq!(at(-179.0), ActionRingSlot::Left);
+        assert_eq!(at(-158.0), ActionRingSlot::Left);
+        assert_eq!(at(-157.0), ActionRingSlot::TopLeft);
+    }
+
+    #[test]
+    fn ring_size_is_a_snake_case_key_that_defaults_to_medium() {
+        let config: ActionRingConfig =
+            toml::from_str("size = \"large\"").expect("could not parse ring size");
+        assert_eq!(config.size, ActionRingSize::Large);
+        let config: ActionRingConfig = toml::from_str("").expect("could not parse empty ring");
+        assert_eq!(config.size, ActionRingSize::Medium);
     }
 
     #[test]

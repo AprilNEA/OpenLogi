@@ -34,7 +34,8 @@ use std::fmt::Write;
 use bincode::Options;
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{
-    Action, ActionRingIcon, ActionRingSlot, ButtonId, GridKey, GridSlot, KeyCombo, KeypadPage,
+    Action, ActionRingIcon, ActionRingSize, ActionRingSlot, ButtonId, GridKey, GridSlot, KeyCombo,
+    KeypadPage,
 };
 use openlogi_core::config::{
     ConfigRevision, FlowPeerName, FlowPublicKey, Lighting, ScrollResolution,
@@ -118,7 +119,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// unreleased version and leave this pin alone (`crates/openlogi-ipc/AGENTS.md`).
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 44);
+    assert_eq!(PROTOCOL_VERSION, 45);
 }
 
 #[test]
@@ -523,8 +524,10 @@ fn action_ring_types() {
                 },
             )]),
             language: Some("fr".to_string()),
+            size: ActionRingSize::Large,
         },
-        "2a010003437574000701026672",
+        // The size is one trailing byte after the locale.
+        "2a01000343757400070102667202",
     );
     // The literal flag is one byte between label and icon.
     assert_wire(
@@ -535,6 +538,8 @@ fn action_ring_types() {
         },
         "034375740107",
     );
+    assert_wire(&ActionRingSize::Small, "00");
+    assert_wire(&ActionRingSize::Large, "02");
     assert_wire(&ActionRingSlot::Top, "00");
     assert_wire(&ActionRingSlot::TopLeft, "07");
     assert_wire(&ActionRingIcon::Keyboard, "07");
@@ -556,6 +561,8 @@ fn action_ring_types() {
     );
     assert_wire(&ActionRingCommandError::SessionNotFound, "00");
     assert_wire(&ActionRingCommandError::SlotEmpty, "01");
+    // Appended after the Flow pairing methods.
+    assert_wire(&AgentRequest::ActionRingUnhover { session_id: 7 }, "3907");
     assert_wire(&HidppOperation::WriteFnLock, "0c");
     assert_wire(&HidppOperation::PlayHaptic, "0e");
     assert_wire(&HidppOperation::ReadFnLock, "0f");

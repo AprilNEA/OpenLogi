@@ -95,7 +95,7 @@ impl Render for ProfileTabHarness {
     }
 }
 
-fn activate_key(cx: &mut gpui::VisualTestContext, key: &str) {
+fn activate_key(cx: &mut gpui::VisualTestContext, key: &'static str) {
     let keystroke = Keystroke::parse(key).unwrap();
     cx.simulate_event(KeyDownEvent {
         keystroke: keystroke.clone(),
@@ -107,7 +107,7 @@ fn activate_key(cx: &mut gpui::VisualTestContext, key: &str) {
 
 #[gpui::test]
 fn toggle_is_tab_focusable_and_reports_controlled_next_state(cx: &mut TestAppContext) {
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     let changes = Rc::new(Cell::new(None));
     let parent_clicks = Rc::new(Cell::new(0));
     let (view, cx) = cx.add_window_view({
@@ -143,7 +143,7 @@ fn toggle_is_tab_focusable_and_reports_controlled_next_state(cx: &mut TestAppCon
 #[gpui::test]
 fn disabled_toggle_is_inert_and_blocks_its_parent(cx: &mut TestAppContext) {
     let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     let changes = Rc::new(Cell::new(None));
     let parent_clicks = Rc::new(Cell::new(0));
     let (_, cx) = cx.add_window_view({
@@ -172,7 +172,7 @@ fn disabled_toggle_is_inert_and_blocks_its_parent(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn menu_row_is_tab_focusable_and_keyboard_activatable(cx: &mut TestAppContext) {
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     let activations = Rc::new(Cell::new(0));
     let (_, cx) = cx.add_window_view({
         let activations = activations.clone();
@@ -202,7 +202,7 @@ fn localize_placeholder_restamps_only_on_change(cx: &mut TestAppContext) {
         }
     }
 
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     let (_, cx) = cx.add_window_view(|_, _| Blank);
     let input = cx.update(|window, cx| cx.new(|cx| InputState::new(window, cx).placeholder("old")));
     let notifies = Rc::new(Cell::new(0_usize));
@@ -225,7 +225,7 @@ fn localize_placeholder_restamps_only_on_change(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn profile_tab_and_delete_are_separate_keyboard_targets(cx: &mut TestAppContext) {
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     let applications = Rc::new(Cell::new(0));
     let deletions = Rc::new(Cell::new(0));
     let (_, cx) = cx.add_window_view({
@@ -255,7 +255,7 @@ fn profile_tab_and_delete_are_separate_keyboard_targets(cx: &mut TestAppContext)
 
 #[gpui::test]
 fn preset_chip_children_are_separate_keyboard_targets(cx: &mut TestAppContext) {
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     let applications = Rc::new(Cell::new(0));
     let removals = Rc::new(Cell::new(0));
     let (_, cx) = cx.add_window_view({
@@ -288,7 +288,7 @@ fn preset_chip_children_are_separate_keyboard_targets(cx: &mut TestAppContext) {
 /// accent mark instead, and only while there is something to choose.
 #[gpui::test]
 fn only_an_enabled_selected_pill_carries_the_accent_mark(cx: &mut TestAppContext) {
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     let pal = cx.update(|cx| theme::palette(cx));
     let mark = |selected: bool, disabled: bool| {
         let mut button = Pill::new("pill", "5 min")

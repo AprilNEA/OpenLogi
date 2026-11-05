@@ -11,9 +11,6 @@
     windows_subsystem = "windows"
 )]
 
-// `t!` resolves against a backend the invoking crate must generate itself, so
-// both binaries expand `i18n!` over the one catalog in `openlogi-ui` — the same
-// crate this one already depends on for locale negotiation.
 rust_i18n::i18n!("../openlogi-ui/locales", fallback = "en");
 
 mod backlight;
@@ -23,6 +20,7 @@ mod notice;
 mod platform;
 mod ring;
 mod session;
+mod windowing;
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -38,7 +36,7 @@ use crate::backlight::BacklightView;
 use crate::ipc::OverlayCommand;
 use crate::notice::NoticeShelf;
 use crate::platform::{MotionPreference, RingPlacement, settle_latest_invocation};
-use crate::ring::{RingPointer, RingView};
+use crate::ring::{Geometry, RingPointer, RingView};
 use crate::session::{
     ClickAwaySession, claim_the_role, close_all_ring_windows, close_ring_windows,
     spawn_click_away_dismissal,
@@ -52,7 +50,6 @@ fn main() -> Result<()> {
     openlogi_core::logging::init_stderr();
 
     openlogi_core::locale::activate(None);
-    // Held for the whole run: dropping it hands the role to the replacement.
     let _tenancy = claim_the_role()?;
     let ipc::Handle {
         mut invocations,
@@ -62,29 +59,28 @@ fn main() -> Result<()> {
         commands,
     } = ipc::spawn();
 
-    // GPUI 0.3.4 never releases a window's AccessKit adapter, and the adapter
-    // keeps the window's view, renderer and Metal surfaces alive, so every
-    // ring the overlay opened stayed in memory (#1741). The ring exposes no
-    // accessibility roles, so the overlay runs without AccessKit.
     let mut app = gpui::Application::new_inaccessible(gpui_platform::current_platform(false))
         .with_assets(openlogi_ui::action_icons::ActionIcons);
-    // Application construction establishes GPUI's NSApplication subclass.
-    // Asking AppKit for its singleton sooner creates a plain NSApplication,
-    // which lacks the `platform` ivar GPUI needs. Set Accessory policy now:
-    // GPUI owns the singleton, but `app.run` has not finished launching yet.
     platform::configure_application();
     app = app.with_quit_mode(gpui::QuitMode::Explicit);
+    if let Some(mode) = windowing::initial() {
+        app = app.with_windowing(mode);
+    }
     app.run(move |cx| {
-        // GPUI's didFinishLaunching callback resets the policy to Regular.
-        // Reapply the helper policy after that reset, without constructing
-        // NSApplication before GPUI has installed its subclass.
         platform::configure_application();
+        windowing::install(cx);
         let live_session = Arc::new(ClickAwaySession::new());
         spawn_click_away_dismissal(cx, Arc::clone(&live_session));
         let shelf = Rc::new(RefCell::new(NoticeShelf::default()));
         cx.spawn(async move |cx| {
             while let Some(observed) = notices.recv().await {
                 openlogi_core::locale::activate(observed.language.as_deref());
+                if !observed.notices.is_empty()
+                    && let Err(error) = cx.update(windowing::connect).await
+                {
+                    warn!(%error, "could not connect to the display for a notice");
+                    continue;
+                }
                 let Some(cards) = shelf.borrow_mut().observe(observed.notices) else {
                     continue;
                 };
@@ -93,10 +89,14 @@ fn main() -> Result<()> {
         })
         .detach();
         cx.spawn(async move |cx| {
-            // The agent's timer is the indicator's only clock: it reports
-            // nothing showing when the time is up, or when it is gone.
             while let Some(observed) = lock_keys.recv().await {
                 openlogi_core::locale::activate(observed.language.as_deref());
+                if observed.shown.is_some()
+                    && let Err(error) = cx.update(windowing::connect).await
+                {
+                    warn!(%error, "could not connect to the display for a lock-key indicator");
+                    continue;
+                }
                 cx.update(|cx| lock_key::present(cx, observed.shown));
             }
         })
@@ -104,9 +104,6 @@ fn main() -> Result<()> {
         cx.spawn(async move |cx| {
             let mut motion = MotionPreference::default();
             while let Some(observed) = invocations.recv().await {
-                // No ring is what a dismissal looks like: close whatever is
-                // showing and open nothing. The agent has already forgotten the
-                // session, so there is nothing to acknowledge either.
                 let Some(invocation) = observed else {
                     cx.update(close_all_ring_windows);
                     continue;
@@ -125,8 +122,16 @@ fn main() -> Result<()> {
                     continue;
                 };
                 openlogi_core::locale::activate(invocation.language.as_deref());
+                if let Err(error) = cx.update(windowing::connect).await {
+                    warn!(%error, "could not connect to the display for the Actions Ring");
+                    let _ = commands.send(OverlayCommand::Cancel {
+                        session_id: invocation.session_id,
+                    });
+                    continue;
+                }
                 cx.update(|cx| {
                     close_all_ring_windows(cx);
+                    let edge = gpui::px(Geometry::of(invocation.size).window);
                     #[cfg_attr(
                         windows,
                         expect(
@@ -134,7 +139,7 @@ fn main() -> Result<()> {
                             reason = "only the Wayland placement drains its openings"
                         )
                     )]
-                    let mut placement = match RingPlacement::capture(cx) {
+                    let mut placement = match RingPlacement::capture(cx, edge) {
                         Ok(placement) => placement,
                         Err(error) => {
                             warn!(%error, "could not locate Actions Ring display");
@@ -147,8 +152,6 @@ fn main() -> Result<()> {
                     let commands = commands.clone();
                     let timeout_commands = commands.clone();
                     let session_id = invocation.session_id;
-                    // Wayland opens one window per display; they share where
-                    // the pointer was heard, so only one of them draws the ring.
                     let pointer = cx.new(|_| RingPointer::default());
                     let primary = platform::open_first(placement.openings(), |(options, panel)| {
                         let invocation = invocation.clone();
@@ -173,10 +176,6 @@ fn main() -> Result<()> {
                     };
                     if let Err(error) = primary
                         .update(cx, |_, window, cx| {
-                            // Native placement resizes the window inside this
-                            // update, where GPUI's own resize/move callbacks
-                            // cannot borrow the app. Resync its viewport and
-                            // scale, or it keeps rendering at the bootstrap size.
                             placement.show(window).map(|()| window.bounds_changed(cx))
                         })
                         .and_then(std::convert::identity)
@@ -204,6 +203,12 @@ fn main() -> Result<()> {
                     visible = observation.visible,
                     "backlight observation received"
                 );
+                if observation.visible
+                    && let Err(error) = cx.update(windowing::connect).await
+                {
+                    warn!(%error, "could not connect to the display for the backlight indicator");
+                    continue;
+                }
                 cx.update(|cx| {
                     for handle in cx.windows() {
                         if let Some(view) = handle.downcast::<BacklightView>() {

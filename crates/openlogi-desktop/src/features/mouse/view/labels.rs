@@ -8,12 +8,13 @@ use crate::ui::action::localized_action_label;
 use crate::ui::theme::FocusRingStyle as _;
 use crate::ui::theme::{self, ACCENT_BLUE, Typography as _};
 use gpui::{
-    App, ElementId, Entity, Hsla, InteractiveElement, IntoElement, ParentElement, Pixels,
-    Refineable as _, RenderOnce, SharedString, StatefulInteractiveElement as _, Styled, Window,
-    div, prelude::FluentBuilder as _, px, rems, rgb, svg,
+    App, ElementId, Entity, Hsla, IndentAdjustment, InteractiveElement, IntoElement, LineFragment,
+    ParentElement, Pixels, Refineable as _, RenderOnce, SharedString,
+    StatefulInteractiveElement as _, Styled, Window, div, prelude::FluentBuilder as _, px, rems,
+    rgb, svg,
 };
-use gpui_base::Button as BaseButton;
-use gpui_component::{Icon, IconName, h_flex};
+use gpui_kit::base::Button as BaseButton;
+use gpui_kit::component::{Icon, IconName, h_flex};
 use openlogi_core::binding::{Action, ButtonId, default_binding};
 
 use super::{ModelRect, MouseModelView, SIDE_GAP, set_control_hovered};
@@ -42,12 +43,18 @@ pub(super) struct CardSize {
     pub(super) value_lines: usize,
 }
 
-/// The cards' values as this window renders them: the widest one on a
-/// single line, the width a card adds around its value, and the height of
-/// one more value line.
+/// The most lines a card's value wraps to before it ends in an ellipsis.
+pub(super) const MAX_VALUE_LINES: usize = 3;
+
+/// The cards' values as this window renders them: how wide the value text
+/// must be for every value to fit in each line count a card allows, the
+/// width a card adds around its value, and the height of one more value
+/// line.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct ValueMetrics {
-    pub(super) widest: f32,
+    /// `fit_w[n]` fits every value in `n + 1` lines, wrapped where the text
+    /// itself wraps: `fit_w[0]` is the widest value on one line.
+    pub(super) fit_w: [f32; MAX_VALUE_LINES],
     pub(super) chrome_w: f32,
     pub(super) line_h: f32,
 }
@@ -69,16 +76,59 @@ impl ValueMetrics {
             );
             f32::from(shaped.width)
         };
-        let widest = values
-            .into_iter()
-            .map(|text| text.lines().map(line_w).fold(0., f32::max))
-            .fold(0., f32::max);
+        let mut wrapper = window.text_system().line_wrapper(style.font(), font_size);
+        let mut fit_w = [0.; MAX_VALUE_LINES];
+        for text in values {
+            let one_line = text.lines().map(line_w).fold(0., f32::max);
+            fit_w[0] = f32::max(fit_w[0], one_line);
+            for lines in 2..=MAX_VALUE_LINES {
+                // The rendered value indents no continuation line, so the
+                // measurement must not either.
+                let wraps_to = |width: f32| {
+                    wrapper
+                        .wrap_line(
+                            &[LineFragment::text(&text)],
+                            px(width),
+                            IndentAdjustment::NoIndent,
+                        )
+                        .count()
+                        + 1
+                };
+                fit_w[lines - 1] = f32::max(fit_w[lines - 1], narrowest(one_line, lines, wraps_to));
+            }
+        }
         Self {
-            widest,
+            fit_w,
             chrome_w: card_chrome_w(rem),
             line_h: f32::from(style.line_height_in_pixels(rem)),
         }
     }
+
+    /// The fewest lines every value fits in at `value_w`, or `None` when even
+    /// [`MAX_VALUE_LINES`] cut one off.
+    pub(super) fn lines_at(&self, value_w: f32) -> Option<usize> {
+        self.fit_w
+            .iter()
+            .position(|&fit| fit <= value_w)
+            .map(|index| index + 1)
+    }
+}
+
+/// The narrowest width, to a tenth of a pixel, at which a text `one_line`
+/// wide wraps to at most `lines` lines (two or more) as `wraps_to` counts
+/// them. At its one-line width it fits, whatever the wrapper rounds.
+fn narrowest(one_line: f32, lines: usize, mut wraps_to: impl FnMut(f32) -> usize) -> f32 {
+    let mut fits = one_line + PIXEL_SNAP;
+    let mut short = 0.;
+    while fits - short > 0.1 {
+        let mid = f32::midpoint(short, fits);
+        if wraps_to(mid) <= lines {
+            fits = mid;
+        } else {
+            short = mid;
+        }
+    }
+    fits
 }
 
 /// The width a card adds around its value text: padding, borders, the icon,

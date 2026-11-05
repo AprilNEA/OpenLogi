@@ -12,7 +12,7 @@ use gpui::{
     AnyElement, Context, Entity, IntoElement, ParentElement, Render, Styled, Subscription, Window,
     div, px,
 };
-use gpui_component::{
+use gpui_kit::component::{
     Icon, IconName, Selectable as _, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
@@ -248,8 +248,15 @@ fn dpi_panel_snapshot(cx: &mut Context<DpiPanel>) -> DpiPanelSnapshot {
         .and_then(|s| {
             let record = s.current_record()?;
             let device_key = record.device_key();
+            // A device without adjustable DPI is never read, so its load
+            // stays `Unknown`, which would show "reading…" for good.
+            let status = if s.current_dpi_supported() {
+                s.dpi_load_for(&device_key)
+            } else {
+                DpiLoad::Unsupported(tr!("pointer.adjustable_dpi_unsupported").to_string())
+            };
             Some(DpiPanelSnapshot {
-                status: s.dpi_load_for(&device_key),
+                status,
                 device_key: Some(device_key),
                 dpi: s.dpi(),
                 presets: s.dpi_presets(),

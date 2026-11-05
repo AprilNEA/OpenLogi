@@ -460,8 +460,11 @@ fn theme_picker(
                 .child(tr!("appearance.no_themes_match_query", query => query))
         })
         .when(!no_matches, |grid| {
-            grid.flex()
-                .flex_wrap()
+            // Columns share the page width, so the grid ends where the filter
+            // row above it ends at every interface scale. The Settings window
+            // cannot shrink below the width four columns were sized for.
+            grid.grid()
+                .grid_cols(4)
                 .gap_2()
                 .children(themes.into_iter().map(|(name, mode, swatch)| {
                     let selected = name == active;
@@ -559,7 +562,6 @@ fn theme_card(
     let stored = name.clone();
     ChoiceCard::new((ElementId::from("theme"), name.clone()), name.clone())
         .selected(selected)
-        .w(px(132.))
         .p(px(8.))
         .gap_2()
         .rounded(pal.card_radius)

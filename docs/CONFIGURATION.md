@@ -41,10 +41,12 @@ profiles so they keep their native direction. v9 adds the `[apps]` alias table;
 v8 files load unchanged.
 v10 adds the per-device `disabled_keys` policy. Older readers reject a v10
 header before parsing its fields. A v9 file without the policy still loads.
+v11 adds the `[flow]` section. Older readers reject a v11 header before
+parsing its fields. A v10 file without the section loads with Flow disabled.
 
 ## Shape
 
-`schema_version` is required and currently `10`. `selected_device` is an
+`schema_version` is required and currently `11`. `selected_device` is an
 optional physical device key.
 
 `[app_settings]` contains application-wide preferences:
@@ -425,6 +427,51 @@ The desktop app shows an alias profile under the alias's name and the icon of
 its first identifier on this platform. It does not offer an application in
 Recent applications or All applications when that application already runs
 under a profile. The desktop app does not create aliases; write them here.
+
+### Flow
+
+`[flow]` holds the cross-machine device handoff settings. Without it, Flow is
+disabled. Pairing writes each peer with its pinned public key; write the layout
+and devices here. Its fields are:
+
+- `enabled` and `require_modifier` (both default `false`). With
+  `require_modifier` on, the cursor crosses a configured screen edge only while
+  Control is held.
+- `[[flow.peers]]`: one trusted machine each, with a `name`, its
+  `public_key` (`ed25519:` and 64 lower-case hex digits), and optional
+  `addresses`. Each address is an IP, a hostname, or `host:port`, tried
+  alongside mDNS results; a bare value uses Flow's default port.
+- `[[flow.layout]]`: the `edge` of this machine's screen (`left`, `right`,
+  `top`, or `bottom`) that leads to `peer`.
+- `[[flow.devices]]`: a device Flow may move. `key` is its identity key,
+  `serial:` or `unit:`; a route key such as
+  `receiver:<receiver-id>:slot:<number>` is rejected. `peer_channels` maps
+  `self` and each peer name to the 0-based Easy-Switch slot, `0` to `2`, that
+  the device uses for that machine.
+
+```toml
+[flow]
+enabled = true
+
+[[flow.peers]]
+name = "work-laptop"
+public_key = "ed25519:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+addresses = ["work-laptop.tailnet.example", "10.0.0.7"]
+
+[[flow.layout]]
+edge = "right"
+peer = "work-laptop"
+
+[[flow.devices]]
+key = "unit:0f1e2d3c"
+peer_channels = { self = 0, "work-laptop" = 1 }
+```
+
+The config stops loading when a peer name is empty, `self`, or has surrounding
+whitespace or control characters, two peers share a name or public key, two
+layout entries use the same edge, a layout entry or `peer_channels` names a
+peer that `[[flow.peers]]` does not define, two device entries share a key, a
+device has no `self` slot, or two machines share one slot.
 
 ## Actions
 

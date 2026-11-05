@@ -10,8 +10,8 @@ use gpui::{
     Context, InteractiveElement, IntoElement, ParentElement, Render, Role,
     StatefulInteractiveElement as _, Styled, Subscription, Toggled, Window, px, rgb,
 };
-use gpui_base::Button as BaseButton;
-use gpui_component::{Selectable as _, h_flex, slider::Slider, v_flex};
+use gpui_kit::base::Button as BaseButton;
+use gpui_kit::component::{Selectable as _, h_flex, slider::Slider, v_flex};
 use openlogi_core::color::Rgb;
 use openlogi_core::config::Lighting;
 

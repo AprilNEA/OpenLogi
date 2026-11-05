@@ -6,8 +6,8 @@ use gpui::{
     Context, InteractiveElement, IntoElement, ParentElement, Rems, Role, SharedString,
     StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px, rems,
 };
-use gpui_base::Button as BaseButton;
-use gpui_component::{
+use gpui_kit::base::Button as BaseButton;
+use gpui_kit::component::{
     Disableable as _, Icon, IconName, Selectable as _, Sizable as _,
     button::{Button, ButtonGroup},
     description_list::{DescriptionItem, DescriptionList},
@@ -82,15 +82,16 @@ pub(super) fn detail_header(
         .border_b_1()
         .border_color(pal.border)
         .child(back_button(cx))
+        // The name takes the room the status leaves and truncates only when
+        // that runs out, at any interface scale.
         .child(
             div()
+                .flex_1()
                 .min_w_0()
-                .max_w(px(220.))
                 .truncate()
                 .text_heading()
                 .child(name),
         )
-        .child(div().flex_1())
         .children(battery)
         .when_some(online, |this, online| this.child(status_badge(online, pal)))
 }
@@ -277,6 +278,7 @@ fn buttons_tab(
     v_flex()
         .flex_1()
         .w_full()
+        .min_w_0()
         .min_h_0()
         .children(button_profile_scope_bar(profile_icons, app_catalog, cx))
         .children(gshift_layer_bar(cx))
@@ -337,10 +339,11 @@ fn tab_body(
     tab: DetailTab,
     width: ContentWidth,
     content: impl IntoElement,
-) -> gpui_component::scroll::Scrollable<gpui::Div> {
+) -> gpui_kit::component::scroll::Scrollable<gpui::Div> {
     v_flex()
         .flex_1()
         .w_full()
+        .min_w_0()
         .min_h_0()
         .items_center()
         .overflow_y_scrollbar()
@@ -365,6 +368,7 @@ fn keys_tab(
     v_flex()
         .flex_1()
         .w_full()
+        .min_w_0()
         .min_h_0()
         .when(keypad, |tab| {
             tab.children(button_profile_scope_bar(profile_icons, app_catalog, cx))
@@ -388,6 +392,7 @@ fn action_ring_tab(
     v_flex()
         .flex_1()
         .w_full()
+        .min_w_0()
         .min_h_0()
         .children(action_ring_profile_scope_bar(
             profile_icons,
@@ -879,7 +884,8 @@ fn camera_tab(
     )
 }
 
-/// Standalone-light controls in a separate panel from HID++ keyboard RGB.
+/// Standalone-light controls in a separate panel from HID++ keyboard RGB. The
+/// controls card is untitled for the same reason as [`lighting_tab`]'s.
 fn light_tab(
     light_panel: &gpui::Entity<LightPanel>,
     cx: &mut Context<AppView>,
@@ -923,7 +929,7 @@ fn light_tab(
                     .w(LIGHT_CONTROLS_W)
                     .min_w(LIGHT_CONTROLS_MIN_W)
                     .child(PanelCard::new(
-                        tr!("device.lighting"),
+                        SharedString::default(),
                         Icon::new(IconName::Sun),
                         light_panel.clone().into_any_element(),
                     )),
@@ -1264,7 +1270,7 @@ mod tests {
     };
 
     use gpui::{AppContext as _, Modifiers, VisualTestContext};
-    use gpui_component::WindowExt;
+    use gpui_kit::component::WindowExt;
     use openlogi_core::config::{Config, MomentumScrolling};
 
     use super::{
@@ -1291,6 +1297,48 @@ mod tests {
         }
     }
 
+    /// The workspace row: the rail beside a tab body whose card holds a
+    /// caption long enough to wrap, as the Device tab's does.
+    struct TabBodyBesideRailHost;
+
+    impl Render for TabBodyBesideRailHost {
+        fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            gpui_kit::component::h_flex()
+                .size_full()
+                .child(div().w(px(super::DETAIL_RAIL_W)).flex_shrink_0())
+                .child(super::tab_body(
+                    super::DetailTab::Device,
+                    super::ContentWidth::Small,
+                    device_enabled_row(true, theme::palette(cx)),
+                ))
+        }
+    }
+
+    #[gpui::test]
+    fn a_tab_body_ends_inside_a_narrow_window(cx: &mut TestAppContext) {
+        // Without a zero minimum width the body took the whole row's width
+        // and ran its right side, past the rail's width, out of the window.
+        let _locale = LOCALE_LOCK.lock().unwrap();
+        rust_i18n::set_locale("en");
+        cx.update(gpui_kit::init);
+        let (_view, cx) = cx.add_window_view(|_, _| TabBodyBesideRailHost);
+        // The main window's minimum width.
+        let window_w = px(720.);
+        cx.simulate_resize(size(window_w, px(600.)));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        let body = cx
+            .debug_bounds("detail-tab-body")
+            .expect("the tab body renders");
+        let switch = cx
+            .debug_bounds("device-enabled-row-control")
+            .expect("the card renders its switch");
+        assert!(
+            body.right() <= window_w && switch.right() <= window_w,
+            "body {body:?} and switch {switch:?} must end inside the {window_w:?} window"
+        );
+    }
+
     /// Hosts the row at a card-like width so a long caption has to wrap.
     struct DeviceEnabledRowHost;
 
@@ -1309,7 +1357,7 @@ mod tests {
         // row's right edge, out of the Configuration card.
         let _locale = LOCALE_LOCK.lock().unwrap();
         rust_i18n::set_locale("fr");
-        cx.update(gpui_component::init);
+        cx.update(gpui_kit::init);
         let (_view, cx) = cx.add_window_view(|_, _| DeviceEnabledRowHost);
         cx.simulate_resize(size(px(800.), px(600.)));
         cx.update(|window, cx| window.draw(cx).clear(cx));
@@ -1357,7 +1405,7 @@ mod tests {
         link_hires: bool,
         config: Config,
     ) -> &mut VisualTestContext {
-        cx.update(gpui_component::init);
+        cx.update(gpui_kit::init);
         cx.update(|cx| {
             let resolver = AssetResolver::new();
             let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -1378,7 +1426,7 @@ mod tests {
         // Rooted, so the row's confirmation dialog has somewhere to open.
         let (_view, cx) = cx.add_window_view(move |window, cx| {
             let host = cx.new(|_| SmoothWheelRowHost { hires });
-            gpui_component::Root::new(host, window, cx)
+            gpui_kit::component::Root::new(host, window, cx)
         });
         cx.simulate_resize(size(px(800.), px(600.)));
         cx.update(|window, cx| window.draw(cx).clear(cx));

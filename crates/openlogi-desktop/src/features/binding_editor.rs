@@ -7,8 +7,9 @@ use gpui::{
     StatefulInteractiveElement as _, Styled, Window, div, prelude::FluentBuilder as _, px, rgb,
     svg,
 };
-use gpui_component::{
-    Icon, IconName, Selectable as _, button::Button, h_flex, input::InputState, v_flex,
+use gpui_kit::component::{
+    Icon, IconName, Selectable as _, button::Button, h_flex, input::InputState,
+    scroll::ScrollableElement, v_flex,
 };
 use openlogi_core::binding::{Action, ApplicationTarget, Category, GestureDirection};
 
@@ -274,16 +275,23 @@ pub(crate) fn divider(pal: Palette) -> impl IntoElement {
     div().mb_1().h(px(1.)).w_full().bg(pal.border)
 }
 
-/// Height-capped scroll region for compact editor rows.
+/// Height-capped scroll region for compact editor rows, with the app's
+/// scrollbar so a list taller than the cap shows that it scrolls.
+///
+/// The cap sits on a wrapper, not on the scrolled element:
+/// [`ScrollableElement::overflow_y_scrollbar`] keeps that element as the
+/// scrolled content, so a `max_h` on it would clamp the content to the
+/// viewport and leave nothing to scroll.
 pub(crate) fn editor_scroll_list(
     id: &'static str,
     rows: impl IntoIterator<Item = impl IntoElement>,
 ) -> impl IntoElement {
-    div()
-        .id(id)
-        .max_h(px(EDITOR_LIST_MAX_H))
-        .overflow_y_scroll()
-        .children(rows)
+    v_flex().max_h(px(EDITOR_LIST_MAX_H)).child(div()
+            .overflow_y_scrollbar()
+            // Every list shares this call site, which is the default
+            // scroll-state key; the caller's id keeps each list's position.
+            .id(id)
+            .children(rows))
 }
 
 /// A single-field "Open Application or Folder" editor, matching the Action
