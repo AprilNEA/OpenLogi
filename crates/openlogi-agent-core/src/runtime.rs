@@ -881,6 +881,12 @@ impl ActionDispatcher {
         self.buttons.cancel_hidpp_session(session);
     }
 
+    /// Cancel the G-key presses a HID++ keyboard session holds after its M
+    /// profile changed; its other keys keep running.
+    pub(crate) fn cancel_hidpp_g_keys(&self, session: &HidppSessionId) {
+        self.buttons.cancel_hidpp_g_keys(session);
+    }
+
     /// Invalidate every active lifecycle after a binding/profile change or
     /// capture-owner transition. Events already queued under the old
     /// generation are ignored even if they arrive after this call's wake-up.

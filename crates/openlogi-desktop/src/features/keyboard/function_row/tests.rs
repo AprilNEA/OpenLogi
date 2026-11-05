@@ -9,6 +9,7 @@ use openlogi_core::device::DeviceKind;
 use openlogi_core::hid::{DeviceRoute, KeypadDescriptor};
 use std::path::PathBuf;
 
+mod gaming;
 mod native_function;
 /// The MX Creative Keypad, as its wired route names it.
 fn mx_keypad() -> Option<&'static KeypadDescriptor> {
@@ -167,7 +168,8 @@ fn the_stock_keypad_render_puts_every_key_on_the_photo() {
     let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
     rust_i18n::set_locale("en");
 
-    let KeySurface::Photo(stock) = key_surface(Some(&stock_keypad_asset((935, 1105))), mx_keypad())
+    let KeySurface::Photo(stock) =
+        key_surface(Some(&stock_keypad_asset((935, 1105))), mx_keypad(), None)
     else {
         panic!("the stock render maps the keys onto the photo");
     };
@@ -200,7 +202,7 @@ fn a_restaged_keypad_render_falls_back_to_the_keycap_map() {
     let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
     rust_i18n::set_locale("en");
 
-    let surface = key_surface(Some(&stock_keypad_asset((1057, 1227))), mx_keypad());
+    let surface = key_surface(Some(&stock_keypad_asset((1057, 1227))), mx_keypad(), None);
 
     assert!(matches!(surface, KeySurface::Keypad(_)));
 }
@@ -1023,9 +1025,13 @@ fn every_key_name_shows_whole_in_the_longest_translation(cx: &mut gpui::TestAppC
         .map(|(&cid, column)| (cid, 4. + 5. * column, 10.))
         .collect();
     let slots = key_slots_from_layouts(
-        key_surface(Some(&asset_with_controls(&markers)), None),
+        key_surface(Some(&asset_with_controls(&markers)), None, None).slots(),
         None,
-        KeypadPage::FIRST,
+        KeyEditScope {
+            page: KeypadPage::FIRST,
+            g_profile: GKeyProfile::M1,
+            gaming_mode: GamingKeyMode::default(),
+        },
     );
     assert_eq!(slots.len(), CONTROLS.len());
     install_state(cx);
@@ -1180,7 +1186,7 @@ fn only_grid_targets_move_to_the_edited_page() {
     let paging = KeyTarget::Control(ButtonId::Control(Cid::RIGHT_PAGING));
     assert_eq!(paging.clone().on_page(second), paging);
     // Every keypad layout slot starts on page 1, whatever page is edited.
-    let keypad = key_surface(None, mx_keypad()).slots();
+    let keypad = key_surface(None, mx_keypad(), None).slots();
     assert!(
         keypad
             .iter()

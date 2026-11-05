@@ -8,10 +8,13 @@ use serde::{Deserialize, Serialize};
 
 use super::button_map::{deserialize_button_map, deserialize_button_maps_by_app};
 use super::settings::{
-    CameraControls, CameraStreamMode, GestureOwner, LightSettings, Lighting, MomentumScrolling,
-    OnboardMemory, ScrollResolution, SmartShift, ThumbwheelSensitivity, deserialize_gesture_owner,
+    CameraControls, CameraStreamMode, GKeyOwner, GamingKeyMode, GestureOwner, LightSettings,
+    Lighting, MomentumScrolling, OnboardMemory, ScrollResolution, SmartShift,
+    ThumbwheelSensitivity, deserialize_gesture_owner,
 };
-use crate::binding::{Action, ActionRingConfig, Binding, ButtonId, GestureDirection, KeypadPage};
+use crate::binding::{
+    Action, ActionRingConfig, Binding, ButtonId, GKeyProfile, GestureDirection, KeypadPage,
+};
 use crate::device::{Capabilities, DeviceKind, DeviceModelInfo, LightCapabilities};
 use crate::hid::{DisableKeysMask, Dpi, PointerSpeed, ReportRate};
 
@@ -388,6 +391,18 @@ pub struct DeviceConfig {
     /// One page is the default and is omitted from `config.toml`.
     #[serde(default, skip_serializing_if = "is_first_page")]
     pub keypad_pages: KeypadPage,
+    /// Who runs a G-series keyboard's G1–G5. The keyboard's onboard actions
+    /// are the default and are omitted from `config.toml`.
+    #[serde(default, skip_serializing_if = "is_default_g_key_owner")]
+    pub g_key_owner: GKeyOwner,
+    /// What M1–M3 and MR do while OpenLogi owns the gaming cluster.
+    #[serde(default, skip_serializing_if = "is_default_gaming_key_mode")]
+    pub gaming_key_mode: GamingKeyMode,
+    /// The names the user gave the M1–M3 G-key profiles, shown in place of
+    /// the profile's key. Local to this device's config; nothing reaches the
+    /// keyboard.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub g_key_profile_names: BTreeMap<GKeyProfile, String>,
 }
 
 impl DeviceConfig {
@@ -499,6 +514,9 @@ impl Default for DeviceConfig {
             onboard_memory: None,
             gshift_bindings: BTreeMap::new(),
             keypad_pages: KeypadPage::FIRST,
+            g_key_owner: GKeyOwner::Keyboard,
+            gaming_key_mode: GamingKeyMode::Profiles,
+            g_key_profile_names: BTreeMap::new(),
         }
     }
 }
@@ -511,6 +529,26 @@ impl Default for DeviceConfig {
 )]
 fn is_first_page(page: &KeypadPage) -> bool {
     *page == KeypadPage::FIRST
+}
+
+/// `skip_serializing_if` helper: the default gaming-key mode stays out of
+/// `config.toml`.
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde's skip_serializing_if requires a fn(&T) -> bool signature"
+)]
+fn is_default_gaming_key_mode(mode: &GamingKeyMode) -> bool {
+    *mode == GamingKeyMode::default()
+}
+
+/// `skip_serializing_if` helper: the keyboard's own G-keys stay out of
+/// `config.toml`.
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde's skip_serializing_if requires a fn(&T) -> bool signature"
+)]
+fn is_default_g_key_owner(owner: &GKeyOwner) -> bool {
+    *owner == GKeyOwner::default()
 }
 
 /// `serde(default)` helper for `bool` fields that default to `true`.
@@ -649,6 +687,12 @@ struct RawDeviceConfig {
     gshift_bindings: BTreeMap<ButtonId, Action>,
     #[serde(default)]
     keypad_pages: KeypadPage,
+    #[serde(default)]
+    g_key_owner: GKeyOwner,
+    #[serde(default)]
+    gaming_key_mode: GamingKeyMode,
+    #[serde(default)]
+    g_key_profile_names: BTreeMap<GKeyProfile, String>,
     #[serde(default = "default_true")]
     enabled: bool,
     #[serde(default)]
@@ -720,6 +764,9 @@ impl From<RawDeviceConfig> for DeviceConfig {
             onboard_memory: raw.onboard_memory,
             gshift_bindings: raw.gshift_bindings,
             keypad_pages: raw.keypad_pages,
+            g_key_owner: raw.g_key_owner,
+            gaming_key_mode: raw.gaming_key_mode,
+            g_key_profile_names: raw.g_key_profile_names,
         }
     }
 }
