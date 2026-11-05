@@ -657,23 +657,70 @@ const GENERIC_CODENAME_WORDS: [&str; 3] = ["mouse", "keyboard", "trackball"];
 /// Size/hand qualifiers, not model-generation words such as `3S` or `X`.
 const VARIANT_QUALIFIER_SUFFIXES: [&str; 2] = ["l", "left"];
 
-/// Correct a shared depot's variant name (M650 vs. M650 L, #1332).
-///
-/// Return an override only when the firmware name matches a nonempty catalog
-/// prefix and every remaining word is a recognized qualifier. Keep catalog
-/// spelling, joining matched words with single spaces. `None` leaves the
-/// caller's existing name untouched; only a correction allocates a string.
+/// A product the catalog files under a sibling's depot and `displayName`,
+/// told apart only by the model word its firmware reports.
+struct DepotSibling {
+    /// The depot's catalog `displayName`.
+    catalog_name: &'static str,
+    /// The sibling's leading firmware-name word, which is also its display
+    /// name.
+    model: &'static str,
+}
+
+/// The `g513` depot (model id `c33c`) also serves the G512: its manifest
+/// lists `g512_ext*` variants beside the `g513_ext*` ones, and a G512's
+/// firmware reports `G512 RGB MECHANICAL GAMING KEYBOARD` (#2402).
+const DEPOT_SIBLINGS: [DepotSibling; 1] = [DepotSibling {
+    catalog_name: "G513",
+    model: "G512",
+}];
+
+/// Correct a shared depot's display name from the firmware name: either a
+/// sibling product the depot also serves (G512 in the G513 depot, #2402) or
+/// a variant the catalog names with an extra qualifier (M650 vs. M650 L,
+/// #1332). `None` leaves the caller's existing name untouched; only a
+/// correction allocates a string.
 fn variant_display_name_override(catalog_name: &str, codename: Option<&str>) -> Option<String> {
-    let codename_words = codename?.split_whitespace().filter(|word| {
+    let codename = codename?;
+    depot_sibling_name(catalog_name, codename)
+        .map(str::to_owned)
+        .or_else(|| qualifier_free_name(catalog_name, codename))
+}
+
+/// The firmware name's words, minus [`GENERIC_CODENAME_WORDS`].
+fn codename_model_words(codename: &str) -> impl Iterator<Item = &str> {
+    codename.split_whitespace().filter(|word| {
         !GENERIC_CODENAME_WORDS.iter().any(|generic| {
             word.chars()
                 .flat_map(char::to_lowercase)
                 .eq(generic.chars())
         })
-    });
+    })
+}
+
+/// The [`DEPOT_SIBLINGS`] model whose depot is `catalog_name` and whose
+/// model word leads the firmware name.
+fn depot_sibling_name(catalog_name: &str, codename: &str) -> Option<&'static str> {
+    let model = codename_model_words(codename).next()?;
+    DEPOT_SIBLINGS
+        .iter()
+        .find(|sibling| {
+            catalog_name
+                .trim()
+                .eq_ignore_ascii_case(sibling.catalog_name)
+                && model.eq_ignore_ascii_case(sibling.model)
+        })
+        .map(|sibling| sibling.model)
+}
+
+/// The catalog name without its qualifiers, for a firmware name that matches
+/// a nonempty catalog prefix where every remaining word is a recognized
+/// qualifier. Keeps catalog spelling, joining matched words with single
+/// spaces.
+fn qualifier_free_name(catalog_name: &str, codename: &str) -> Option<String> {
     let mut catalog_words = catalog_name.split_whitespace();
     let mut matched_words = 0;
-    for word in codename_words {
+    for word in codename_model_words(codename) {
         if !catalog_words.next()?.eq_ignore_ascii_case(word) {
             return None;
         }
