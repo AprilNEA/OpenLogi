@@ -171,6 +171,7 @@ async fn divert_set_changes_reach_the_running_session_in_place() {
             transport_turns: crate::hardware::TransportTurns::default(),
         },
         ring,
+        crate::event_haptics::EventHaptics::default(),
     )
     .unwrap();
     let keys = watch::Sender::new(dispatch(Action::MissionControl).keys);
@@ -359,6 +360,7 @@ async fn recovery_manager_waits_for_control_events_and_shutdown_between_retries(
             Arc::default(),
             device_access.clone(),
             ring,
+            crate::event_haptics::EventHaptics::default(),
         )
         .unwrap();
         let (shutdown_tx, shutdown) = oneshot::channel();
@@ -411,6 +413,7 @@ async fn each_published_keyboard_runs_its_own_session() {
         Arc::default(),
         device_access.clone(),
         ring,
+        crate::event_haptics::EventHaptics::default(),
     )
     .unwrap();
     let (events, _event_rx) = mpsc::unbounded_channel();

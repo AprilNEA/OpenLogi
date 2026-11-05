@@ -1,10 +1,11 @@
-//! Which device-wide haptic enables the Actions Ring still owes back.
+//! Which device-wide haptic enables the haptic player still owes back.
 //!
-//! Arming may turn a device's haptic engine on for a ring session
+//! Arming may turn a device's haptic engine on for a ring session, or for as
+//! long as event haptics play on the device
 //! ([`openlogi_hid::ensure_haptics_armed_on`]). That flag is device-wide, so
 //! leaving it on would override a user who turned haptics off in another app.
 //! This ledger decides when each enable is handed back; the worker in
-//! [`super::RingHapticPlayer`] does the I/O.
+//! [`super::HapticPlayer`] does the I/O.
 
 use std::time::{Duration, Instant};
 
@@ -38,11 +39,18 @@ pub(super) struct Owed<R> {
 #[derive(Debug)]
 pub(super) struct RestoreLedger<R> {
     owed: Vec<Owed<R>>,
+    /// Devices event haptics play on. Nothing is handed back on them, however
+    /// it came to be owed, until the hold is released: the engine has to stay
+    /// on for every click.
+    held: Vec<DeviceRoute>,
 }
 
 impl<R> Default for RestoreLedger<R> {
     fn default() -> Self {
-        Self { owed: Vec::new() }
+        Self {
+            owed: Vec::new(),
+            held: Vec::new(),
+        }
     }
 }
 
@@ -97,9 +105,79 @@ impl<R> RestoreLedger<R> {
         }
     }
 
+    /// Event haptics started playing on `route`, and arming it returned
+    /// `restore`: `Some` when that arming turned the engine on.
+    ///
+    /// While held, the device hands nothing back, so a ring session that
+    /// ends there leaves the engine on for the next click. A newer proof
+    /// replaces an older one, as for a session.
+    pub(super) fn hold(&mut self, route: DeviceRoute, restore: Option<R>, now: Instant) {
+        if let Some(restore) = restore {
+            if let Some(owed) = self.owed.iter_mut().find(|owed| owed.route == route) {
+                owed.restore = restore;
+            } else {
+                self.owed.push(Owed {
+                    route: route.clone(),
+                    restore,
+                    session: 0,
+                    due: now,
+                });
+            }
+        }
+        if !self.held.contains(&route) {
+            self.held.push(route);
+        }
+    }
+
+    /// A play outside any session or hold — a preview, a script's tap —
+    /// armed `route`, and arming returned `restore`: `Some` when it turned
+    /// the engine on. The engine stays on until `until`, so a run of such
+    /// plays does not turn it off and on between them; a restore already
+    /// owed there is never made due sooner.
+    pub(super) fn lent(&mut self, route: DeviceRoute, restore: Option<R>, until: Instant) {
+        if let Some(owed) = self.owed.iter_mut().find(|owed| owed.route == route) {
+            owed.due = owed.due.max(until);
+            if let Some(restore) = restore {
+                owed.restore = restore;
+            }
+        } else if let Some(restore) = restore {
+            self.owed.push(Owed {
+                route,
+                restore,
+                session: 0,
+                due: until,
+            });
+        }
+    }
+
+    /// The proof of the enable owed on `route`, if any.
+    pub(super) fn proof(&self, route: &DeviceRoute) -> Option<&R> {
+        self.owed
+            .iter()
+            .find(|owed| owed.route == *route)
+            .map(|owed| &owed.restore)
+    }
+
+    /// A write changed the configuration on `route` that its owed enable
+    /// proves: `restore` proves the new one. A device that owes nothing is
+    /// left owing nothing.
+    pub(super) fn reprove(&mut self, route: &DeviceRoute, restore: R) {
+        if let Some(owed) = self.owed.iter_mut().find(|owed| owed.route == *route) {
+            owed.restore = restore;
+        }
+    }
+
+    /// Event haptics stopped playing on `route`. What it owes is due as it
+    /// would have been without the hold: at once for an enable the hold
+    /// made, and after its session for one a ring session made.
+    pub(super) fn release(&mut self, route: &DeviceRoute) {
+        self.held.retain(|held| held != route);
+    }
+
     /// The agent is leaving, or handing over to a replacement, which ends
-    /// every session: every restore is due at `now`.
+    /// every session and every hold: every restore is due at `now`.
     pub(super) fn leaving(&mut self, now: Instant) {
+        self.held.clear();
         for owed in &mut self.owed {
             owed.due = owed.due.min(now);
         }
@@ -107,13 +185,20 @@ impl<R> RestoreLedger<R> {
 
     /// When the next restore is due, or `None` when nothing is owed.
     pub(super) fn next_due(&self) -> Option<Instant> {
-        self.owed.iter().map(|owed| owed.due).min()
+        self.owed
+            .iter()
+            .filter(|owed| !self.held.contains(&owed.route))
+            .map(|owed| owed.due)
+            .min()
     }
 
     /// Take one restore that is due at `now`. It is no longer owed unless
     /// the caller hands it back through [`Self::retry`].
     pub(super) fn take_due(&mut self, now: Instant) -> Option<Owed<R>> {
-        let index = self.owed.iter().position(|owed| owed.due <= now)?;
+        let index = self
+            .owed
+            .iter()
+            .position(|owed| owed.due <= now && !self.held.contains(&owed.route))?;
         Some(self.owed.swap_remove(index))
     }
 
@@ -328,6 +413,123 @@ mod tests {
         ledger.closed(2, start);
         assert_eq!(due(&mut ledger, start), vec![(mouse(), 8)]);
         assert_eq!(ledger.next_due(), None);
+    }
+
+    #[test]
+    fn a_lent_engine_is_handed_back_after_the_last_play_that_lent_it() {
+        let start = Instant::now();
+        let lend = Duration::from_secs(3);
+        let mut ledger = RestoreLedger::default();
+        ledger.lent(mouse(), Some(7), start + lend);
+        let again = start + Duration::from_secs(1);
+        // The next tap finds the engine on: it only extends the loan.
+        ledger.lent(mouse(), None, again + lend);
+        assert_eq!(due(&mut ledger, start + lend), vec![]);
+        assert_eq!(due(&mut ledger, again + lend), vec![(mouse(), 7)]);
+        ledger.lent(mouse(), None, again + lend);
+        assert_eq!(ledger.next_due(), None, "found on, owes nothing");
+    }
+
+    #[test]
+    fn a_lend_never_hands_back_an_open_session_early() {
+        let start = Instant::now();
+        let mut ledger = RestoreLedger::default();
+        ledger.opened(1, mouse(), Some(7), start);
+        ledger.lent(mouse(), None, start + Duration::from_secs(3));
+        assert_eq!(ledger.next_due(), Some(start + SESSION_LIFETIME));
+    }
+
+    #[test]
+    fn a_held_device_keeps_a_lent_engine_on() {
+        let start = Instant::now();
+        let mut ledger = RestoreLedger::default();
+        ledger.hold(mouse(), None, start);
+        ledger.lent(mouse(), Some(7), start);
+        assert_eq!(due(&mut ledger, start + SESSION_LIFETIME), vec![]);
+        ledger.release(&mouse());
+        assert_eq!(due(&mut ledger, start), vec![(mouse(), 7)]);
+    }
+
+    #[test]
+    fn a_reproved_restore_hands_back_the_new_proof_when_it_is_due() {
+        let start = Instant::now();
+        let mut ledger = RestoreLedger::default();
+        ledger.reprove(&mouse(), 9);
+        assert_eq!(ledger.proof(&mouse()), None, "owes nothing, gains nothing");
+        ledger.opened(1, mouse(), Some(7), start);
+        ledger.reprove(&mouse(), 8);
+        assert_eq!(ledger.proof(&mouse()), Some(&8));
+        ledger.closed(1, start);
+        assert_eq!(due(&mut ledger, start), vec![(mouse(), 8)]);
+    }
+
+    #[test]
+    fn a_hold_that_turned_the_engine_on_hands_it_back_when_released() {
+        let start = Instant::now();
+        let mut ledger = RestoreLedger::default();
+        ledger.hold(mouse(), Some(7), start);
+        assert_eq!(ledger.next_due(), None, "held");
+        assert_eq!(due(&mut ledger, start + SESSION_LIFETIME), vec![]);
+        ledger.release(&mouse());
+        assert_eq!(due(&mut ledger, start), vec![(mouse(), 7)]);
+    }
+
+    #[test]
+    fn a_hold_that_found_the_engine_on_owes_nothing() {
+        let start = Instant::now();
+        let mut ledger = RestoreLedger::<u8>::default();
+        ledger.hold(mouse(), None, start);
+        ledger.release(&mouse());
+        assert_eq!(ledger.next_due(), None);
+    }
+
+    #[test]
+    fn a_ring_session_ending_on_a_held_device_leaves_the_engine_on() {
+        let start = Instant::now();
+        let mut ledger = RestoreLedger::default();
+        // Event haptics found the engine on; later something cleared it and
+        // a ring session armed it again.
+        ledger.hold(mouse(), None, start);
+        ledger.opened(1, mouse(), Some(7), start);
+        ledger.closed(1, start);
+        assert_eq!(due(&mut ledger, start + SESSION_LIFETIME), vec![]);
+        // Once the hold ends, the session's enable is handed back.
+        ledger.release(&mouse());
+        assert_eq!(due(&mut ledger, start), vec![(mouse(), 7)]);
+    }
+
+    #[test]
+    fn releasing_during_a_ring_session_waits_for_that_session() {
+        let start = Instant::now();
+        let mut ledger = RestoreLedger::default();
+        ledger.hold(mouse(), Some(7), start);
+        ledger.opened(1, mouse(), None, start);
+        ledger.release(&mouse());
+        assert_eq!(due(&mut ledger, start), vec![], "the ring still plays");
+        ledger.closed(1, start);
+        assert_eq!(due(&mut ledger, start), vec![(mouse(), 7)]);
+    }
+
+    #[test]
+    fn a_ring_session_on_another_device_does_not_end_a_hold() {
+        let start = Instant::now();
+        let mut ledger = RestoreLedger::default();
+        ledger.hold(mouse(), Some(7), start);
+        ledger.opened(1, other_mouse(), Some(9), start);
+        ledger.closed(1, start);
+        assert_eq!(due(&mut ledger, start), vec![(other_mouse(), 9)]);
+    }
+
+    #[test]
+    fn leaving_ends_every_hold() {
+        let start = Instant::now();
+        let mut ledger = RestoreLedger::default();
+        ledger.hold(mouse(), Some(7), start);
+        ledger.leaving(start);
+        assert_eq!(due(&mut ledger, start), vec![(mouse(), 7)]);
+        // The worker holds again once the agent stays after all.
+        ledger.hold(mouse(), Some(8), start);
+        assert_eq!(due(&mut ledger, start), vec![]);
     }
 
     #[test]

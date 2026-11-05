@@ -1460,3 +1460,33 @@ fn page_turns_need_pages_and_a_removed_page_falls_back_to_the_first() {
     orch.config.set_keypad_pages("keypad", page(1));
     assert_eq!(orch.keypad_page("keypad"), page(1));
 }
+/// A chosen strength is written to each online, enabled device that has a
+/// haptic engine — and to no other.
+#[test]
+fn a_chosen_haptic_strength_plays_on_each_online_haptic_device() {
+    let strong = openlogi_core::hid::HapticStrength::try_new(90).expect("valid strength");
+    let mut config = Config::default();
+    for key in ["a", "b", "c", "e"] {
+        config.set_haptic_strength(key, strong);
+    }
+    config.set_device_enabled("e", false);
+    let haptic = |mut device: AgentDevice| {
+        device.capabilities = Some(Capabilities {
+            haptic_feedback: true,
+            ..Capabilities::default()
+        });
+        device
+    };
+    let mut orch = orchestrator(config);
+    orch.devices = vec![
+        haptic(dev("a", 1, true)),
+        haptic(dev("b", 2, false)),
+        dev("c", 3, true),
+        haptic(dev("d", 4, true)),
+        haptic(dev("e", 5, true)),
+    ];
+    assert_eq!(
+        orch.haptic_strengths(),
+        vec![(dev("a", 1, true).route.expect("routed"), strong)]
+    );
+}

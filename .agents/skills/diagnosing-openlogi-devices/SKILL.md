@@ -59,6 +59,8 @@ receiver discovery can enable notifications and request arrival reports.
 | `diag smartshift` without `--sensitivity` or `--leave-flipped` | Toggles mode and attempts restoration; failures can prevent restoration |
 | `diag smartshift --sensitivity N` | Sets sensitivity without restoring the previous value; preserves the current mode |
 | `diag smartshift --leave-flipped` | Toggles mode and intentionally skips restoration |
+| `diag haptic` without `--waveform` or `--all` | Reads the haptic capabilities, config, and status; writes nothing |
+| `diag haptic --waveform N` / `--all` | Plays waveforms on the device; changes no setting |
 | `diag lighting` | Writes lighting; not an observation-only diagnostic |
 
 Diagnostic `--device` uses the first case-insensitive substring match. If names

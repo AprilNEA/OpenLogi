@@ -119,7 +119,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// unreleased version and leave this pin alone (`crates/openlogi-ipc/AGENTS.md`).
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 45);
+    assert_eq!(PROTOCOL_VERSION, 46);
 }
 
 #[test]
@@ -1385,6 +1385,22 @@ fn report_rate_dtos_and_errors() {
             ],
         },
         "fbe803037dfbf401fbe803",
+    );
+}
+
+/// A haptic preview names its device or leaves it to the agent, and the
+/// feedback by its declaration index.
+#[test]
+fn play_haptic() {
+    use openlogi_core::config::EventHapticFeedback;
+    assert_wire(&EventHapticFeedback::Off, "00");
+    assert_wire(&EventHapticFeedback::SharpCollision, "04");
+    assert_wire(
+        &AgentRequest::PlayHaptic {
+            route: None,
+            feedback: EventHapticFeedback::WhisperCollision,
+        },
+        "3a0001",
     );
 }
 
