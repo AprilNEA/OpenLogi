@@ -323,6 +323,38 @@ mod tests {
     use openlogi_core::config::AssetSourcePreference;
 
     #[test]
+    fn g512_photo_and_metadata_are_selected_for_download() {
+        let root = tempfile::tempdir().expect("asset root");
+        let manifest = root.path().join("manifest.json");
+        std::fs::write(
+            &manifest,
+            r#"{"devices":[{"modelId":"g512_ext6","resources":[{"key":"device_image","src":"front_ext6.png"},{"key":"image_metadata","src":"metadata.json"}]}]}"#,
+        )
+        .unwrap();
+        let entry = openlogi_assets::DeviceEntry {
+            model_id: "c33c".into(),
+            model_ids: Vec::new(),
+            display_name: "G513".into(),
+            kind: "keyboard".into(),
+            asset_path: "assets/g513/".into(),
+            files: Vec::new(),
+        };
+        for (key, expected) in [
+            ("device_image", "front_ext6.png"),
+            ("image_metadata", "metadata.json"),
+        ] {
+            assert_eq!(
+                super::pick_variant_filename(&manifest, &entry, "g513", 6, key).as_deref(),
+                Some(expected)
+            );
+            assert_eq!(
+                super::pick_variant_filename(&manifest, &entry, "g513", 5, key),
+                None
+            );
+        }
+    }
+
+    #[test]
     fn automatic_preference_races_the_built_in_sources() {
         assert_eq!(
             source_for_sync(AssetSourcePreference::Automatic, None),

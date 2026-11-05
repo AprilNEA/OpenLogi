@@ -120,6 +120,11 @@ pub(super) fn candidate_manifest_bases(
     {
         candidates.push(stem.to_string());
     }
+    // The c33c depot mixes g513_extN and g512_extN manifest identities.
+    // Both downloads and resolution must try the G512-specific resources.
+    if depot.eq_ignore_ascii_case("g513") {
+        candidates.push("g512".to_string());
+    }
     candidates
 }
 
