@@ -10,6 +10,7 @@ use az::SaturatingAs;
 use nutype::nutype;
 use serde::{Deserialize, Serialize};
 
+use super::LightingKey;
 use crate::binding::ButtonId;
 use crate::color::Rgb;
 use crate::device::ChangedOnLight;
@@ -706,13 +707,13 @@ fn default_true() -> bool {
     true
 }
 
-/// Per-device RGB lighting: a single static color, brightness, and on/off.
-/// Deliberately basic — per-key effects are a later addition.
+/// Per-device RGB lighting: a static color, optional per-key colors over it,
+/// brightness, and on/off.
 ///
 /// Crosses the agent↔GUI IPC (`set_lighting`), so field order is wire format —
 /// changes require a `PROTOCOL_VERSION` bump (guarded by
 /// `openlogi-ipc/tests/wire_format.rs`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Lighting {
     /// Master on/off for the device's lighting. The color and brightness
@@ -732,6 +733,35 @@ pub struct Lighting {
         deserialize_with = "deserialize_brightness"
     )]
     pub brightness: u8,
+    /// Colors for single keys over [`Self::color`], by key position. Empty
+    /// for one color across the keyboard. Brightness and on/off apply to
+    /// these too. Only a keyboard whose zone map is known shows them; any
+    /// other keeps the static color.
+    #[serde(default, deserialize_with = "deserialize_lighting_keys")]
+    pub keys: BTreeMap<LightingKey, Rgb>,
+}
+
+/// The config file leaves an empty key map out. The IPC encoding has no field
+/// names, so it always carries the map.
+impl Serialize for Lighting {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct as _;
+
+        let skip_keys = serializer.is_human_readable() && self.keys.is_empty();
+        let mut state = serializer.serialize_struct("Lighting", if skip_keys { 3 } else { 4 })?;
+        state.serialize_field("enabled", &self.enabled)?;
+        state.serialize_field("color", &self.color)?;
+        state.serialize_field("brightness", &self.brightness)?;
+        if skip_keys {
+            state.skip_field("keys")?;
+        } else {
+            state.serialize_field("keys", &self.keys)?;
+        }
+        state.end()
+    }
 }
 
 /// Persisted settings for a standalone light such as Logitech Litra.
@@ -821,6 +851,7 @@ impl Default for Lighting {
             enabled: default_lighting_enabled(),
             color: default_lighting_color(),
             brightness: default_lighting_brightness(),
+            keys: BTreeMap::new(),
         }
     }
 }
@@ -859,11 +890,28 @@ where
     D: serde::Deserializer<'de>,
 {
     let color = String::deserialize(deserializer)?;
-    color
-        .strip_prefix('#')
-        .unwrap_or(color.as_str())
-        .parse()
-        .map_err(serde::de::Error::custom)
+    parse_lighting_color(&color).map_err(serde::de::Error::custom)
+}
+
+/// Per-key colors take the same `#`-tolerant hex as [`Lighting::color`].
+fn deserialize_lighting_keys<'de, D>(
+    deserializer: D,
+) -> Result<BTreeMap<LightingKey, Rgb>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    BTreeMap::<LightingKey, String>::deserialize(deserializer)?
+        .into_iter()
+        .map(|(key, color)| {
+            parse_lighting_color(&color)
+                .map(|color| (key, color))
+                .map_err(|error| serde::de::Error::custom(format_args!("key {key}: {error}")))
+        })
+        .collect()
+}
+
+fn parse_lighting_color(color: &str) -> Result<Rgb, crate::color::RgbParseError> {
+    color.strip_prefix('#').unwrap_or(color).parse()
 }
 
 /// Per-webcam UVC controls, keyed by control name (`brightness`, `focus`,

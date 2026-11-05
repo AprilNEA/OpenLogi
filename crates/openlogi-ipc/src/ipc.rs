@@ -184,7 +184,8 @@ pub use succession::Identity;
 /// v46: `Capabilities::{g_keys, m_keys, macro_record}` appended — a G-series
 ///      keyboard's HID++ `0x8010` G-keys, `0x8020` M-keys and `0x8030` MR
 ///      key. `ButtonId::{GKey, ModeKey}` appended — the G1–G5 slot of an M
-///      profile and M1–M3/MR.
+///      profile and M1–M3/MR. `Lighting::keys` appended — colours for
+///      single keys over the static colour, by key position.
 pub const PROTOCOL_VERSION: u32 = 46;
 
 /// Environment variable through which the agent hands a supervised helper the

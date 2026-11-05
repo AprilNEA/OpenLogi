@@ -1103,14 +1103,25 @@ fn device_settings_payloads() {
     assert_wire(&smartshift, "0001103c");
 
     // `Rgb` serializes as the same hex string the field used to hold raw, so
-    // the pinned bytes are identical to the pre-newtype encoding.
+    // the pinned bytes are identical to the pre-newtype encoding. The key map
+    // always rides along, even empty: the config file omits it, the wire
+    // cannot.
+    let solid = Lighting {
+        enabled: true,
+        color: "8000ff".parse().expect("valid hex"),
+        brightness: 80,
+        keys: BTreeMap::new(),
+    };
+    assert_wire(&solid, "01063830303066665000");
     assert_wire(
         &Lighting {
-            enabled: true,
-            color: "8000ff".parse().expect("valid hex"),
-            brightness: 80,
+            keys: BTreeMap::from([(
+                "Esc".parse().expect("a known key"),
+                "ff0000".parse().expect("valid hex"),
+            )]),
+            ..solid
         },
-        "010638303030666650",
+        "010638303030666650010345736306666630303030",
     );
 
     assert_wire(

@@ -7,7 +7,7 @@ use std::sync::Arc;
 use hidpp::channel::{ChannelError, HidppChannel};
 use hidpp::device::Device;
 use hidpp::feature::CreatableFeature;
-use hidpp::feature::device_information::DeviceInformationFeature;
+use hidpp::feature::device_information::{DeviceInformation, DeviceInformationFeature};
 use hidpp::feature::rgb_effects::{
     CLUSTER_EFFECT_PARAM_COUNT, EventsNotificationFlags, PowerModeTarget, RgbEffectsFeature,
     RgbPersistence, SwControlFlags,
@@ -308,6 +308,17 @@ async fn device(channel: &Arc<HidppChannel>, index: u8) -> Result<Device, WriteE
 /// on one receiver slot apart. `None` when the device has no
 /// `DeviceInformation` feature.
 async fn unit_id(device: &mut Device) -> Result<Option<[u8; 4]>, WriteError> {
+    Ok(device_information(device).await?.map(|info| info.unit_id))
+}
+
+/// The model ids `device` reports through `0x0003`, which name the product
+/// whatever transport it is on. `None` when the device has no
+/// `DeviceInformation` feature.
+pub(super) async fn model_id(device: &mut Device) -> Result<Option<[u16; 3]>, WriteError> {
+    Ok(device_information(device).await?.map(|info| info.model_id))
+}
+
+async fn device_information(device: &mut Device) -> Result<Option<DeviceInformation>, WriteError> {
     let feature = match open_feature::<DeviceInformationFeature>(device).await {
         Ok(feature) => feature,
         Err(WriteError::FeatureUnsupported { .. }) => return Ok(None),
@@ -326,7 +337,7 @@ async fn unit_id(device: &mut Device) -> Result<Option<[u8; 4]>, WriteError> {
                 DeviceInformationFeature::ID,
             ),
         })?;
-    Ok(Some(info.unit_id))
+    Ok(Some(info))
 }
 
 /// Each cluster's Static effect `(cluster, effect index)`, and whether every
