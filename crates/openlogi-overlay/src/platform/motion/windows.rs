@@ -21,6 +21,8 @@ fn client_area_animation_enabled() -> Option<bool> {
     };
 
     let mut enabled = 0i32;
+    // SAFETY: SPI_GETCLIENTAREAANIMATION writes a single BOOL to pvParam; `enabled` is a
+    // live, properly aligned i32 for the duration of the call, and uiParam/fWinIni are unused.
     let ok = unsafe {
         SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, (&raw mut enabled).cast(), 0)
     };

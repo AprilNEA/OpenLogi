@@ -29,19 +29,12 @@ impl MotionPreference {
             self.last_known = Some(motion);
             motion.reduce_motion()
         } else {
-            self.last_known.map(Motion::reduce_motion).unwrap_or(false)
+            self.last_known.is_some_and(Motion::reduce_motion)
         }
     }
 }
 
 #[must_use]
-#[cfg_attr(
-    target_os = "macos",
-    expect(
-        clippy::unnecessary_wraps,
-        reason = "macOS always returns a live preference; other platforms use None for read failure"
-    )
-)]
 pub fn read_reduced_motion() -> Option<Motion> {
     #[cfg(target_os = "macos")]
     {
@@ -63,9 +56,9 @@ pub fn read_reduced_motion() -> Option<Motion> {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     use std::process::Command;
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     use std::time::{Duration, Instant};
 
     #[cfg(target_os = "linux")]
