@@ -69,6 +69,7 @@ pub async fn run(args: ZonesArgs) -> Result<()> {
     );
 
     let mut keys: BTreeMap<u8, Option<String>> = BTreeMap::new();
+    let mut saved: Result<()> = Ok(());
     let walked = openlogi_hid::walk_per_key_zones(&route, lit, async |zone: LitZone| {
         let answer = match prompt(zone).await {
             Ok(line) => parse_answer(line.as_deref()),
@@ -80,7 +81,16 @@ pub async fn run(args: ZonesArgs) -> Result<()> {
         match answer {
             Answer::Key(key) => {
                 keys.insert(zone.zone_id, key);
-                ZoneWalkStep::Next
+                // Saved after every answer: a destination that cannot be
+                // written stops the walk at the first key, and an interrupted
+                // walk keeps what was named.
+                saved = std::fs::write(&args.output, render(&keys))
+                    .with_context(|| format!("write {}", args.output.display()));
+                if saved.is_ok() {
+                    ZoneWalkStep::Next
+                } else {
+                    ZoneWalkStep::Stop
+                }
             }
             Answer::Back => ZoneWalkStep::Back,
             Answer::Quit => ZoneWalkStep::Stop,
@@ -88,10 +98,8 @@ pub async fn run(args: ZonesArgs) -> Result<()> {
     })
     .await;
 
-    // Keep what was named even when the walk failed part-way.
+    saved?;
     if !keys.is_empty() {
-        std::fs::write(&args.output, render(&keys))
-            .with_context(|| format!("write {}", args.output.display()))?;
         println!("\nwrote {} zones to {}", keys.len(), args.output.display());
     }
     walked.context("walk the keyboard's zones")?;
