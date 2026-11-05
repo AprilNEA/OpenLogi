@@ -237,6 +237,20 @@ impl LightingWrite {
         // falls back without mutating the device.
         let engine = rgb::probe(channel, index, &scope).await?;
         if let Some(engine) = engine.as_ref().filter(|engine| engine.is_complete()) {
+            // Per-key paint is a sub-mode of Static, so a keyboard painted key
+            // by key keeps that frame under a new Static colour. One whose zone
+            // map is known gets the colour as a whole frame instead, which
+            // clears the key colours an earlier write left.
+            if engine.has_known_zone_map() {
+                match scope.read(PerKeyV2Target::open(channel, index)).await {
+                    Ok(target) => {
+                        return self.paint_v2(&target, index, Some(engine), &scope).await;
+                    }
+                    Err(WriteError::FeatureUnsupported { feature_hex })
+                        if feature_hex == PerKeyLightingFeature::ID => {}
+                    Err(error) => return Err(error),
+                }
+            }
             return engine.apply(index, self.color, &scope).await.map(Some);
         }
         debug!("no supported 0x8071 static effect — trying per-key paths");

@@ -683,3 +683,41 @@ async fn rgb_unreadable_unit_id_fails_before_claiming() {
         assert!(reports.iter().all(|r| !is_effect(r)));
     }
 }
+
+/// A G515 under its effect engine takes one colour as a whole `0x8081`
+/// frame: a Static colour alone would leave the key colours of an earlier
+/// per-key frame lit, since per-key paint is a sub-mode of Static.
+#[tokio::test]
+async fn one_colour_repaints_a_known_keyboard_frame() {
+    let (shared, handle) = device(|request| {
+        let mut reply = response(request)?;
+        // getDeviceInfo: a G515 LS TKL's model ids at payload bytes 7..13.
+        if (request[2], request[3] >> 4) == (9, 0) {
+            reply[11..17].copy_from_slice(&[0xb3, 0x89, 0x40, 0xb4, 0xc3, 0x55]);
+        }
+        Some(reply)
+    })
+    .await;
+
+    let lease = write().apply_on(&shared, || false, || true).await;
+
+    assert!(
+        lease.is_ok_and(|lease| lease.is_some()),
+        "the engine stays claimed"
+    );
+    let reports = handle.written_reports();
+    let paints = reports
+        .iter()
+        .filter(|r| r[2] == 7 && r[3] >> 4 == 6)
+        .map(|r| r[4..7].to_vec())
+        .collect::<Vec<_>>();
+    assert!(!paints.is_empty(), "a 0x8081 frame is painted");
+    assert!(
+        paints.iter().all(|colour| colour == &[0x17, 0x82, 0xc4]),
+        "every zone takes the one colour: {paints:?}"
+    );
+    assert!(
+        reports.iter().any(|r| r[2] == 7 && r[3] >> 4 == 7),
+        "the frame is committed"
+    );
+}

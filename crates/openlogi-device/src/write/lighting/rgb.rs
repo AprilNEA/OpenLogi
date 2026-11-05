@@ -63,6 +63,8 @@ impl RgbControlLease {
 pub(super) struct RgbEngine {
     feature: Arc<RgbEffectsFeature>,
     unit: Option<[u8; 4]>,
+    /// The model ids from the same `0x0003` read as [`Self::unit`].
+    model_id: Option<[u16; 3]>,
     statics: Vec<(u8, u8)>,
     complete: bool,
 }
@@ -94,11 +96,12 @@ pub(super) async fn probe(
         }) => return Ok(None),
         Err(error) => return Err(error),
     };
-    let unit = scope.read(unit_id(&mut device)).await?;
+    let info = scope.read(device_information(&mut device)).await?;
     let (statics, complete) = discover(&feature, scope).await?;
     Ok(Some(RgbEngine {
         feature,
-        unit,
+        unit: info.as_ref().map(|info| info.unit_id),
+        model_id: info.map(|info| info.model_id),
         statics,
         complete,
     }))
@@ -109,6 +112,14 @@ impl RgbEngine {
     /// whole device without a per-key frame.
     pub(super) fn is_complete(&self) -> bool {
         self.complete
+    }
+
+    /// Whether [`openlogi_device_registry::keyboard`] knows which `0x8081`
+    /// zone lights which key on this product.
+    pub(super) fn has_known_zone_map(&self) -> bool {
+        self.model_id
+            .and_then(openlogi_device_registry::keyboard::per_key_zones)
+            .is_some()
     }
 
     /// Colour every cluster with its Static effect. Callers check
