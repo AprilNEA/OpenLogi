@@ -739,6 +739,10 @@ applying_light_setting = "Aplicando el ajuste de luz…"
 auto_on_with_camera = "Encendido automático con la cámara"
 camera_light_auto_description = "Enciende la luz mientras se usa alguna cámara y la apaga cuando ninguna está activa."
 keyboard_lighting_description = "OpenLogi la aplica mientras se ejecuta; no se guarda en el teclado."
+per_key_hint = "Haz clic en las teclas para seleccionarlas y elige un color. Sin teclas seleccionadas, el color se aplica a todo el teclado."
+clear_selection = "Borrar selección"
+use_keyboard_color = "Usar el color del teclado"
+reset_all_keys = "Restablecer todas las teclas"
 
 [action_ring]
 actions_ring = "Anillo de acciones"

@@ -739,6 +739,10 @@ applying_light_setting = "Işık ayarı uygulanıyor…"
 auto_on_with_camera = "Kamerayla otomatik aç"
 camera_light_auto_description = "Herhangi bir kamera kullanılırken bu ışık açılır, kameralar durunca kapatılır."
 keyboard_lighting_description = "OpenLogi çalıştığı sürece uygulanır, klavyeye kaydedilmez."
+per_key_hint = "Seçmek için tuşlara tıklayın, ardından bir renk seçin. Hiçbir tuş seçili değilse renk tüm klavyeye uygulanır."
+clear_selection = "Seçimi temizle"
+use_keyboard_color = "Klavye rengini kullan"
+reset_all_keys = "Tüm tuşları sıfırla"
 
 [action_ring]
 actions_ring = "Eylem Halkası"

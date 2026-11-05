@@ -739,6 +739,10 @@ applying_light_setting = "조명 설정 적용 중…"
 auto_on_with_camera = "카메라 사용 시 자동 켜기"
 camera_light_auto_description = "카메라를 하나라도 사용 중이면 조명을 켜고 모든 카메라가 비활성 상태이면 끕니다."
 keyboard_lighting_description = "OpenLogi가 실행 중일 때 적용되며 키보드에는 저장되지 않습니다."
+per_key_hint = "키를 클릭해 선택한 다음 색상을 고르세요. 선택한 키가 없으면 키보드 전체에 색상이 적용됩니다."
+clear_selection = "선택 해제"
+use_keyboard_color = "키보드 색상 사용"
+reset_all_keys = "모든 키 재설정"
 
 [action_ring]
 actions_ring = "액션 링"
