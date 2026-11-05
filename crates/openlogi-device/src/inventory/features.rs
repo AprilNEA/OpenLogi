@@ -17,6 +17,7 @@ use hidpp::{
         gestures2::Gestures2Feature,
         multi_platform::{MultiPlatformCapabilities, MultiPlatformFeature},
         reprog_controls::{ReprogControlsFeature, control_ids},
+        solar_dashboard::SolarDashboardFeature,
         unified_battery::UnifiedBatteryFeature,
     },
     protocol::{
@@ -40,8 +41,8 @@ use super::events::{EventFeatureIndices, EventSubscriptionHandle};
 use super::mappings::{
     charge_register_battery_info, legacy_battery_info, legacy_battery_level_from_percentage,
     map_adc_battery_status, map_battery_level, map_battery_status, map_device_type,
-    map_voltage_battery_status, normalize_serial_number, status_register_battery_info,
-    voltage_battery_percentage,
+    map_voltage_battery_status, normalize_serial_number, solar_battery_info,
+    status_register_battery_info, voltage_battery_percentage,
 };
 
 /// Everything a single device probe yields. Any field is `None` when the
@@ -168,8 +169,10 @@ pub(super) enum BatteryRead {
 /// — the same enhanced-then-legacy split SmartShift has with `0x2111`/`0x2110`.
 /// G-series wireless gaming devices (G915, G903 LS) expose neither and report
 /// battery only as a voltage via `0x1001`; wireless G-series headsets (G733)
-/// report it as a voltage via `0x1F20` instead. HID++ 1.0 devices (Performance
-/// MX, M705) have no feature table and report it through a fixed register.
+/// report it as a voltage via `0x1F20` instead. Solar keyboards (K750) expose
+/// none of these and report a percentage only in `0x4301` reports. HID++ 1.0
+/// devices (Performance MX, M705) have no feature table and report it through
+/// a fixed register.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) enum BatteryProbe {
     /// `0x1004` at `index`. `state_of_charge` is the device's capability bit
@@ -188,6 +191,10 @@ pub(super) enum BatteryProbe {
     },
     Voltage(u8),
     Adc(u8),
+    /// `0x4301` at the index. The feature has no battery getter: the level
+    /// arrives only in its reports, which the channel's event listener records
+    /// (see [`read_solar_battery`]).
+    Solar(u8),
     /// HID++ 1.0 register `0x07`: a coarse level, no percentage.
     StatusRegister,
     /// HID++ 1.0 register `0x0D`: a percentage.
@@ -203,11 +210,15 @@ pub(super) enum BatteryProbe {
 /// A HID++ 1.0 register is read only under the receiver's register phase,
 /// for the reason `probe_hidpp10` gives; without `registers` it is
 /// unavailable.
+///
+/// A `0x4301` source is read through the level its reports carry, which
+/// `subscriptions` records; without it the source is unavailable.
 pub(super) async fn read_battery(
     channel: &Arc<HidppChannel>,
     slot: u8,
     probe: BatteryProbe,
     registers: Option<&ReceiverRegisterPhase>,
+    subscriptions: Option<&EventSubscriptionHandle>,
 ) -> BatteryRead {
     let reading = match probe {
         BatteryProbe::Unified {
@@ -265,6 +276,9 @@ pub(super) async fn read_battery(
                 _ => None,
             }
         }
+        BatteryProbe::Solar(feature_index) => {
+            read_solar_battery(channel, slot, feature_index, subscriptions).await
+        }
         BatteryProbe::StatusRegister | BatteryProbe::ChargeRegister if registers.is_none() => None,
         BatteryProbe::StatusRegister => register_battery::read_status(channel, slot)
             .await
@@ -278,11 +292,44 @@ pub(super) async fn read_battery(
     reading.map_or(BatteryRead::Unavailable, BatteryRead::Reading)
 }
 
+/// Ask a `0x4301` keyboard for one report, and return the level of the last
+/// report it sent.
+///
+/// The report this request schedules arrives later as an event. The listener
+/// records its level, and asks for a reconciliation when the level changed,
+/// so the first reading after a probe shows without waiting for the
+/// keyboard's own broadcast (every ~90 s). The request also keeps the
+/// recorded level current when broadcasts are missed. A request the keyboard
+/// does not answer leaves the read unavailable, like any other battery read
+/// that fails.
+///
+/// Without a listener (a one-shot probe) no report can be recorded, so no
+/// request is sent.
+async fn read_solar_battery(
+    channel: &Arc<HidppChannel>,
+    slot: u8,
+    feature_index: u8,
+    subscriptions: Option<&EventSubscriptionHandle>,
+) -> Option<BatteryInfo> {
+    let subscriptions = subscriptions?;
+    if let Err(error) = SolarDashboardFeature::new(Arc::clone(channel), slot, feature_index)
+        .set_light_measure(1, 1)
+        .await
+    {
+        debug!(slot, ?error, "SolarKeyboardDashboard report request failed");
+        return None;
+    }
+    subscriptions
+        .solar_battery(slot)
+        .and_then(solar_battery_info)
+}
+
 /// Locate a device's battery feature in an enumerated feature-ID table,
 /// preferring the unified `0x1004`, then the legacy `0x1000`, then the
 /// voltage-only `0x1001` and `0x1F20` (which report no percentage, so a direct
-/// source always outranks them). The table is 1-based (index 0 is the implicit root
-/// feature, which enumeration omits).
+/// source always outranks them), then the solar `0x4301`, which has no getter
+/// (see [`read_solar_battery`]). The table is 1-based (index 0 is the implicit
+/// root feature, which enumeration omits).
 ///
 /// The table alone cannot say whether a `0x1004` reports a percentage, or
 /// whether a `0x1000` reports mileage, so either source comes back assuming
@@ -293,6 +340,7 @@ pub(super) fn battery_feature_index(ids: impl IntoIterator<Item = u16>) -> Optio
     let mut legacy = None;
     let mut voltage = None;
     let mut adc = None;
+    let mut solar = None;
     for (pos, id) in ids.into_iter().enumerate() {
         // Stop gracefully past u8::MAX instead of `?`-returning None, which would
         // discard a `legacy` already found. (The table caps at 255, so unreachable.)
@@ -317,8 +365,11 @@ pub(super) fn battery_feature_index(ids: impl IntoIterator<Item = u16>) -> Optio
         if id == AdcMeasurementFeature::ID && adc.is_none() {
             adc = Some(BatteryProbe::Adc(index));
         }
+        if id == SolarDashboardFeature::ID && solar.is_none() {
+            solar = Some(BatteryProbe::Solar(index));
+        }
     }
-    legacy.or(voltage).or(adc)
+    legacy.or(voltage).or(adc).or(solar)
 }
 
 /// Read the marketing identity from HID++ `0x0005` when the device exposes it.
@@ -831,24 +882,33 @@ fn force_sensing_error_answer(error: Hidpp20Error) -> Result<bool, ()> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
     use std::time::Duration;
 
+    use hidpp::channel::HidppChannel;
     use hidpp::feature::{
         CreatableFeature as _, FeatureType, adc_measurement::AdcMeasurementFeature,
         battery_status::BatteryStatusFeature, battery_voltage::BatteryVoltageFeature,
-        disable_keys::DisableKeysFeature, unified_battery::UnifiedBatteryFeature,
+        disable_keys::DisableKeysFeature, solar_dashboard::SolarDashboardFeature,
+        unified_battery::UnifiedBatteryFeature,
     };
 
     use openlogi_core::device::{BatteryInfo, BatteryLevel, BatteryStatus};
+    use tokio::sync::mpsc;
 
     use super::{
         BatteryProbe, BatteryRead, ProbedFeatures, ProbedProtocol, Refreshed,
         battery_feature_index, probe_features, read_battery, refresh_features,
     };
     use crate::channel::scripted::{
-        ScriptedRawHidChannel, feature_error, ping_reply, register_error, scripted_channel,
+        ScriptedRawHidChannel, ScriptedRawHidHandle, feature_error, ping_reply, register_error,
+        scripted_channel,
     };
     use crate::host_lock::ReceiverRegisterPhase;
+    use crate::inventory::events::{
+        ChannelEventSubscriptions, EventFeatureIndices, EventReceiver, HidppEventSource,
+        event_channel,
+    };
 
     #[tokio::test]
     async fn a_refresh_reports_the_answered_ping_when_its_walk_runs_past_the_budget() {
@@ -958,7 +1018,7 @@ mod tests {
         let writes_before = handle.written_reports().len();
         for probe in [BatteryProbe::StatusRegister, BatteryProbe::ChargeRegister] {
             assert_eq!(
-                read_battery(&channel, 1, probe, None).await,
+                read_battery(&channel, 1, probe, None, None).await,
                 BatteryRead::Unavailable
             );
         }
@@ -978,6 +1038,7 @@ mod tests {
             1,
             BatteryProbe::StatusRegister,
             Some(&ReceiverRegisterPhase::uncontended()),
+            None,
         )
         .await
         else {
@@ -1001,6 +1062,7 @@ mod tests {
             1,
             BatteryProbe::ChargeRegister,
             Some(&ReceiverRegisterPhase::uncontended()),
+            None,
         )
         .await
         else {
@@ -1383,10 +1445,12 @@ mod tests {
         let channel = scripted_channel(raw).await;
         let (probe, battery_probe, _) = probe_features(&channel, 0xff, None, None).await;
         let battery = match battery_probe {
-            Some(battery_probe) => match read_battery(&channel, 0xff, battery_probe, None).await {
-                BatteryRead::Reading(info) => Some(info),
-                _ => None,
-            },
+            Some(battery_probe) => {
+                match read_battery(&channel, 0xff, battery_probe, None, None).await {
+                    BatteryRead::Reading(info) => Some(info),
+                    _ => None,
+                }
+            }
             None => None,
         };
         (probe, battery_probe, battery)
@@ -1478,10 +1542,12 @@ mod tests {
         let channel = scripted_channel(raw).await;
         let (probe, battery_probe, _) = probe_features(&channel, 0xff, None, None).await;
         let battery = match battery_probe {
-            Some(battery_probe) => match read_battery(&channel, 0xff, battery_probe, None).await {
-                BatteryRead::Reading(info) => Some(info),
-                _ => None,
-            },
+            Some(battery_probe) => {
+                match read_battery(&channel, 0xff, battery_probe, None, None).await {
+                    BatteryRead::Reading(info) => Some(info),
+                    _ => None,
+                }
+            }
             None => None,
         };
         (probe, battery_probe, battery)
@@ -1614,7 +1680,7 @@ mod tests {
             Some(response)
         });
         let channel = scripted_channel(raw).await;
-        read_battery(&channel, 0xff, BatteryProbe::Adc(8), None).await
+        read_battery(&channel, 0xff, BatteryProbe::Adc(8), None, None).await
     }
 
     #[tokio::test]
@@ -1672,7 +1738,8 @@ mod tests {
             Some(response)
         });
         let channel = scripted_channel(raw).await;
-        let BatteryRead::Reading(battery) = read_battery(&channel, 0xff, legacy(2), None).await
+        let BatteryRead::Reading(battery) =
+            read_battery(&channel, 0xff, legacy(2), None, None).await
         else {
             panic!("expected a reading");
         };
@@ -1715,6 +1782,161 @@ mod tests {
             let table = [AdcMeasurementFeature::ID, other];
             assert_eq!(battery_feature_index(table), Some(expected), "{other:#06x}");
         }
+    }
+
+    /// The K750 feature table Solaar lists (pwr/Solaar#216): `0x4301` at
+    /// index 9, and no other battery source.
+    const K750_FEATURES: [u16; 10] = [
+        0x0001, 0x0003, 0x0005, 0x1b00, 0x1d4b, 0x1df3, 0x40a0, 0x4100, 0x4301, 0x4520,
+    ];
+
+    #[test]
+    fn solar_battery_is_found_when_it_is_the_only_source() {
+        assert_eq!(SolarDashboardFeature::ID, 0x4301);
+        assert_eq!(
+            battery_feature_index(K750_FEATURES),
+            Some(BatteryProbe::Solar(9))
+        );
+    }
+
+    #[test]
+    fn solar_battery_ranks_below_every_other_source() {
+        for (other, expected) in [
+            (UnifiedBatteryFeature::ID, unified(2)),
+            (BatteryStatusFeature::ID, legacy(2)),
+            (BatteryVoltageFeature::ID, BatteryProbe::Voltage(2)),
+            (AdcMeasurementFeature::ID, BatteryProbe::Adc(2)),
+        ] {
+            let table = [SolarDashboardFeature::ID, other];
+            assert_eq!(battery_feature_index(table), Some(expected), "{other:#06x}");
+        }
+    }
+
+    /// A K750 at Unifying slot 1 that answers each request with `responder`,
+    /// on a channel whose event listener has the keyboard registered. Reports
+    /// the keyboard sends go through the returned sender.
+    async fn solar_keyboard(
+        responder: fn(&[u8]) -> Option<Vec<u8>>,
+    ) -> (
+        Arc<HidppChannel>,
+        ScriptedRawHidHandle,
+        mpsc::UnboundedSender<Vec<u8>>,
+        ChannelEventSubscriptions,
+        EventReceiver,
+    ) {
+        let (raw, handle) = ScriptedRawHidChannel::with_dynamic_responder(responder);
+        let reports = raw.incoming_sender();
+        let channel = scripted_channel(raw).await;
+        let (notifier, events) = event_channel();
+        let subscriptions = ChannelEventSubscriptions::attach(&channel, None, notifier);
+        subscriptions
+            .handle()
+            .register_device(1, EventFeatureIndices::from_feature_ids(&K750_FEATURES));
+        (channel, handle, reports, subscriptions, events)
+    }
+
+    /// A `0x4301` report from the K750 at slot 1: event `function`, carrying
+    /// `battery` percent and 319 lux.
+    fn solar_report(function: u8, battery: u8) -> Vec<u8> {
+        let mut report = vec![0x11, 0x01, 0x09, function << 4, battery, 0x01, 0x3f];
+        report.resize(20, 0);
+        report
+    }
+
+    /// How many `setLightMeasure` requests (function 0 of `0x4301` at index 9)
+    /// were written.
+    fn light_measure_requests(handle: &ScriptedRawHidHandle) -> usize {
+        handle
+            .written_reports()
+            .iter()
+            .filter(|report| report.get(2) == Some(&9) && report.get(3).map(|f| f >> 4) == Some(0))
+            .count()
+    }
+
+    /// Acknowledge a request for one light-measure report, 1 s from now.
+    fn acknowledge_light_measure(request: &[u8]) -> Vec<u8> {
+        assert_eq!(
+            (request[2], request[3] >> 4, &request[4..7]),
+            (9, 0, &[1, 1, 0][..]),
+            "unexpected request: {request:02x?}"
+        );
+        let mut response = vec![0; 20];
+        response[..4].copy_from_slice(&request[..4]);
+        response[0] = 0x11;
+        response
+    }
+
+    #[tokio::test]
+    async fn solar_battery_reads_the_level_of_the_last_report() {
+        let (channel, handle, reports, subscriptions, mut events) =
+            solar_keyboard(|request| Some(acknowledge_light_measure(request))).await;
+        let listener = subscriptions.handle();
+
+        // No report yet: the read asks for one and has nothing to show.
+        assert_eq!(
+            read_battery(&channel, 1, BatteryProbe::Solar(9), None, Some(&listener)).await,
+            BatteryRead::Unavailable
+        );
+        assert_eq!(light_measure_requests(&handle), 1);
+
+        // The report that request schedules (the spec's 96 %) asks for the
+        // reconciliation whose read shows it.
+        reports
+            .send(solar_report(1, 96))
+            .expect("the scripted channel is open");
+        let source = tokio::time::timeout(Duration::from_secs(2), events.recv())
+            .await
+            .expect("the report must ask for a reconciliation");
+        assert_eq!(source, Some(HidppEventSource::SolarDashboard));
+        assert_eq!(
+            read_battery(&channel, 1, BatteryProbe::Solar(9), None, Some(&listener)).await,
+            BatteryRead::Reading(BatteryInfo {
+                percentage: Some(96),
+                level: BatteryLevel::Full,
+                status: BatteryStatus::Discharging,
+            })
+        );
+        assert_eq!(
+            light_measure_requests(&handle),
+            2,
+            "every read asks for a fresh report"
+        );
+    }
+
+    #[tokio::test]
+    async fn solar_battery_is_unavailable_when_the_request_fails() {
+        // The keyboard answers busy. The level its last broadcast recorded is
+        // no live answer, so the cache keeps its last-known reading instead.
+        let (channel, _, reports, subscriptions, mut events) =
+            solar_keyboard(|request| Some(feature_error(request, 0x08))).await;
+        let listener = subscriptions.handle();
+        reports
+            .send(solar_report(0, 96))
+            .expect("the scripted channel is open");
+        tokio::time::timeout(Duration::from_secs(2), events.recv())
+            .await
+            .expect("the broadcast must ask for a reconciliation");
+        assert_eq!(listener.solar_battery(1), Some(96));
+
+        assert_eq!(
+            read_battery(&channel, 1, BatteryProbe::Solar(9), None, Some(&listener)).await,
+            BatteryRead::Unavailable
+        );
+    }
+
+    #[tokio::test]
+    async fn solar_battery_without_a_listener_sends_no_request() {
+        // A one-shot probe has no listener to record the report a request
+        // would schedule.
+        let (raw, handle) = ScriptedRawHidChannel::with_dynamic_responder(|request| {
+            Some(acknowledge_light_measure(request))
+        });
+        let channel = scripted_channel(raw).await;
+        assert_eq!(
+            read_battery(&channel, 1, BatteryProbe::Solar(9), None, None).await,
+            BatteryRead::Unavailable
+        );
+        assert_eq!(light_measure_requests(&handle), 0);
     }
 
     #[test]

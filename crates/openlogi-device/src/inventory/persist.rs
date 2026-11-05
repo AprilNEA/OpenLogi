@@ -59,7 +59,9 @@ use super::features::{BatteryProbe, ProbedFeatures};
 /// v19 folds `capabilities` and `capabilities_incomplete` into `protocol`,
 /// which also records HID++ 1.0, and adds the HID++ 1.0 battery registers to
 /// `BatteryProbe`.
-const SCHEMA_VERSION: u32 = 19;
+/// v20 adds the `0x4301` solar-dashboard event index and the solar battery
+/// source to `BatteryProbe`.
+const SCHEMA_VERSION: u32 = 20;
 
 impl ProbeCacheError {
     /// Report why a store could not keep a snapshot.
@@ -259,6 +261,7 @@ mod tests {
             backlight: Some(16),
             lock_key_state: Some(17),
             hires_wheel: Some(19),
+            solar_dashboard: Some(20),
         };
         let mut cache = HashMap::new();
         cache.insert(

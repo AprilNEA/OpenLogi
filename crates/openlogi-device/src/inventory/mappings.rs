@@ -248,6 +248,22 @@ pub(crate) fn charge_register_battery_info(reading: ChargeReading) -> BatteryInf
     }
 }
 
+/// Build a [`BatteryInfo`] from the battery level a `0x4301` report carries, a
+/// percentage that takes the display buckets. `None` for a level above 100,
+/// which is no percentage.
+///
+/// The report has no charge state. Its light level says how much light the
+/// panel gets, not whether the battery is charging, and the keyboard's own
+/// broadcast always reports it as zero. So every reading is
+/// [`BatteryStatus::Discharging`], as Solaar reads that broadcast.
+pub(crate) fn solar_battery_info(percentage: u8) -> Option<BatteryInfo> {
+    (..=100).contains(&percentage).then(|| BatteryInfo {
+        percentage: Some(percentage),
+        level: legacy_battery_level_from_percentage(percentage),
+        status: BatteryStatus::Discharging,
+    })
+}
+
 /// Estimate a charge percentage from a `0x1001` or `0x1F20` battery voltage
 /// reading.
 ///
@@ -380,8 +396,8 @@ mod tests {
         HidppLegacyBatteryStatus, HidppVoltageChargingStatus, StatusReading, UnifyingDeviceKind,
         charge_register_battery_info, coarse_legacy_battery_level, direct_identity_kind,
         legacy_battery_info, legacy_battery_level_from_percentage, map_unifying_kind,
-        map_voltage_battery_status, resolve_device_kind, status_register_battery_info,
-        voltage_battery_percentage,
+        map_voltage_battery_status, resolve_device_kind, solar_battery_info,
+        status_register_battery_info, voltage_battery_percentage,
     };
 
     #[test]
@@ -468,6 +484,29 @@ mod tests {
                 "{wire:02x?}"
             );
         }
+    }
+
+    #[test]
+    fn solar_level_buckets_its_percentage_and_rejects_more_than_100() {
+        for (percentage, level) in [
+            (100, BatteryLevel::Full),
+            (96, BatteryLevel::Full),
+            (50, BatteryLevel::Good),
+            (19, BatteryLevel::Critical),
+            (0, BatteryLevel::Critical),
+        ] {
+            assert_eq!(
+                solar_battery_info(percentage),
+                Some(BatteryInfo {
+                    percentage: Some(percentage),
+                    level,
+                    status: BatteryStatus::Discharging,
+                }),
+                "{percentage}"
+            );
+        }
+        assert_eq!(solar_battery_info(101), None);
+        assert_eq!(solar_battery_info(u8::MAX), None);
     }
 
     #[test]

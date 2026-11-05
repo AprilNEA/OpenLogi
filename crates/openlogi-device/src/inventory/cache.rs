@@ -143,9 +143,10 @@ async fn refresh_battery(
     index: u8,
     probe: BatteryProbe,
     registers: Option<&ReceiverRegisterPhase>,
+    subscriptions: Option<&EventSubscriptionHandle>,
     previous: Option<&ProbedFeatures>,
 ) -> (Option<BatteryInfo>, bool) {
-    match read_battery(channel, index, probe, registers).await {
+    match read_battery(channel, index, probe, registers, subscriptions).await {
         BatteryRead::Reading(battery) => (
             Some(hold_percentage_while_charging(
                 battery,
@@ -281,6 +282,7 @@ async fn probe_or_reuse_registered(
                 index,
                 probe,
                 registers,
+                subscriptions,
                 cached.map(|known| &known.probe),
             )
             .await;
@@ -342,8 +344,15 @@ async fn probe_or_reuse_registered(
                 && let Some(key) = id.clone()
             {
                 let mut entry = c.clone();
-                (entry.probe.battery, entry.probe.unlinked) =
-                    refresh_battery(channel, index, probe, registers, Some(&c.probe)).await;
+                (entry.probe.battery, entry.probe.unlinked) = refresh_battery(
+                    channel,
+                    index,
+                    probe,
+                    registers,
+                    subscriptions,
+                    Some(&c.probe),
+                )
+                .await;
                 return (entry.probe.clone(), CacheOutcome::Update(key, entry));
             }
             (c.probe.clone(), seen(id))
