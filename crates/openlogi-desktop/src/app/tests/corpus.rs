@@ -129,7 +129,9 @@ fn reviewed_detail_tabs(id: &str) -> Vec<DetailTab> {
         }
         // The G915 is the same kind of keyboard, and its RGB effect engine
         // (0x8071) and per-key lighting (0x8081) add the Lighting tab.
-        "g915-001" => vec![
+        // The captured keyboard has reprogrammable controls and lighting;
+        // the current Keys panel also exposes Actions Ring for keyboards.
+        "g512-001" | "g915-001" => vec![
             DetailTab::Keys,
             DetailTab::ActionsRing,
             DetailTab::Lighting,

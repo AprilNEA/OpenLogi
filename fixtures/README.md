@@ -85,6 +85,14 @@ corpus. It stays under
 the published `openlogi-fixture` crate and mock agent remain self-contained.
 It intentionally declares no recorded cases or hardware provenance.
 
+## G512 capture
+
+`devices/g512-001` was captured on Windows through wired USB (`046d:c33c`, direct slot 255) with CLI and Agent 0.9.0. The device reports `G512 RGB MECHANICAL GAMING KEYBOARD`, model IDs `[c33c,0000,0000]`, and extended model `06`. This identity shares the G513 asset depot; the capture does not imply the physical keyboard is a G513.
+
+The seven contributed cases cover the feature table, four reprogrammable controls, and unsupported battery, DPI, SmartShift, wheel, and backlight reads. Feature and control expectations were transcribed from captured response fields independently of decoder output. The firmware-entities capture is omitted because the corpus does not yet accept independently reviewed firmware expectations. The wizard replaced the unit identity with its synthetic identity before publication.
+
+The semantic profile reports lighting, Fn-lock, and report-rate support. No lighting, Fn-lock, report-rate, or remapping writes were tested. Replay verification does not establish physical write behavior or key-slot assignments. OpenLogi and G HUB were stopped for direct capture and restarted afterward.
+
 ## MX Master 4 capture
 
 `devices/mx-master-4-001` was captured on macOS on 2026-10-10 through a Bolt receiver (`046d:c548`, slot 2). The mouse reports model ID `0xb042`. The semantic profile came from CLI and Agent 0.8.11; the HID++ cassettes came from the repository CLI 0.8.13. Receiver and device identities are synthetic.
