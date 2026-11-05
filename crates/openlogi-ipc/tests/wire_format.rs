@@ -1102,6 +1102,22 @@ fn device_settings_payloads() {
     let smartshift: Result<SmartShiftStatus, WriteError> = Ok(representative_smartshift_status());
     assert_wire(&smartshift, "0001103c");
 
+    assert_wire(
+        &ReceiverSelector::BoltUid("F00DCAFE".into()),
+        "01084630304443414645",
+    );
+    assert_wire(&ReceiverSelector::First, "00");
+    assert_wire(
+        &ReceiverSelector::ReceiverUid {
+            product_id: 0xc548,
+            uid: "F00DCAFE".into(),
+        },
+        "02fb48c5084630304443414645",
+    );
+}
+
+#[test]
+fn lighting() {
     // `Rgb` serializes as the same hex string the field used to hold raw, so
     // the pinned bytes are identical to the pre-newtype encoding. The key map
     // always rides along, even empty: the config file omits it, the wire
@@ -1122,19 +1138,6 @@ fn device_settings_payloads() {
             ..solid
         },
         "010638303030666650010345736306666630303030",
-    );
-
-    assert_wire(
-        &ReceiverSelector::BoltUid("F00DCAFE".into()),
-        "01084630304443414645",
-    );
-    assert_wire(&ReceiverSelector::First, "00");
-    assert_wire(
-        &ReceiverSelector::ReceiverUid {
-            product_id: 0xc548,
-            uid: "F00DCAFE".into(),
-        },
-        "02fb48c5084630304443414645",
     );
 }
 
