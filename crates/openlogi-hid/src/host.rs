@@ -233,6 +233,16 @@ pub async fn set_keyboard_color_with(
     .await
 }
 
+/// Light each `0x8081` zone of the keyboard `route` reaches alone, so a person
+/// can name the key each zone id drives. See [`device::walk_per_key_zones`].
+pub async fn walk_per_key_zones(
+    route: &DeviceRoute,
+    lit: openlogi_core::color::Rgb,
+    observe: impl AsyncFnMut(device::LitZone) -> device::ZoneWalkStep,
+) -> Result<(), WriteError> {
+    device::walk_per_key_zones(&*native_backend(), route, lit, observe).await
+}
+
 /// Play a haptic waveform on the device `route` reaches.
 pub async fn play_haptic(route: &DeviceRoute, waveform: HapticWaveform) -> Result<(), WriteError> {
     device::play_haptic(&*native_backend(), route, waveform).await

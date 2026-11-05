@@ -77,8 +77,9 @@ pub use hires_wheel::{
 };
 pub use key_display::{KeyDisplay, KeyImageJpeg, key_display_for, write_key_image_on};
 pub use lighting::{
-    LightingMethod, LightingWrite, RgbControlLease, release_rgb_control, set_keyboard_color,
-    set_keyboard_color_on, set_keyboard_color_with, set_keyboard_color_with_on,
+    LightingMethod, LightingWrite, LitZone, RgbControlLease, ZoneWalkStep, release_rgb_control,
+    set_keyboard_color, set_keyboard_color_on, set_keyboard_color_with, set_keyboard_color_with_on,
+    walk_per_key_zones, walk_per_key_zones_on,
 };
 pub(crate) use litra::litra_capabilities;
 pub use litra::{

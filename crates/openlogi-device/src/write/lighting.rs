@@ -283,6 +283,85 @@ pub async fn release_rgb_control(
     rgb::release(shared.channel(), shared.device_index(), lease, &scope).await
 }
 
+/// What a zone walk does after the caller has looked at the lit zone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ZoneWalkStep {
+    /// Light the next zone.
+    Next,
+    /// Light the previous zone again.
+    Back,
+    /// End the walk and hand lighting back to the firmware.
+    Stop,
+}
+
+/// The one zone a walk has lit, and where it sits in the walk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LitZone {
+    /// The `0x8081` zone id.
+    pub zone_id: u8,
+    /// This zone's position among the present zones, from `0`.
+    pub position: usize,
+    /// How many zones the device reports as present.
+    pub total: usize,
+}
+
+/// How long a zone walk may hold the keyboard. A person names every zone in
+/// turn, so the five-second budget of a colour write does not apply.
+const ZONE_WALK_BUDGET: Duration = Duration::from_hours(1);
+
+/// Light every `0x8081` zone of `route` alone, in zone-id order, so a person
+/// can name the key each id drives.
+///
+/// Every other zone stays dark. After each zone is lit, `observe` decides
+/// whether the walk moves on, goes back one zone, or stops. With an `0x8071`
+/// effect engine the walk runs under its software control and hands it back
+/// when it ends, so the keyboard returns to its own effect.
+///
+/// Diagnostic only: it does not take the lighting lock the agent's writes
+/// use, so run it with the agent stopped.
+pub async fn walk_per_key_zones(
+    backend: &dyn HidBackend,
+    route: &DeviceRoute,
+    lit: openlogi_core::color::Rgb,
+    observe: impl AsyncFnMut(LitZone) -> ZoneWalkStep,
+) -> Result<(), WriteError> {
+    with_route(backend, route, |channel| async move {
+        let shared = SharedChannel::new(channel, route.clone());
+        walk_per_key_zones_on(&shared, lit, observe).await
+    })
+    .await
+}
+
+/// [`walk_per_key_zones`] on an existing channel.
+pub async fn walk_per_key_zones_on(
+    shared: &SharedChannel,
+    lit: openlogi_core::color::Rgb,
+    mut observe: impl AsyncFnMut(LitZone) -> ZoneWalkStep,
+) -> Result<(), WriteError> {
+    let channel = shared.channel();
+    let index = shared.device_index();
+    let scope = WriteScope {
+        deadline: tokio::time::Instant::now() + ZONE_WALK_BUDGET,
+        cancelled: || false,
+        available: || true,
+    };
+    let engine = rgb::probe(channel, index, &scope).await?;
+    let target = scope.read(PerKeyV2Target::open(channel, index)).await?;
+    let (red, green, blue) = lit.components();
+    let lit = Rgb { red, green, blue };
+    let mut walk = async || target.walk(index, lit, &scope, &mut observe).await;
+    match engine {
+        None => walk().await,
+        Some(engine) => {
+            let black = openlogi_core::color::Rgb::new(0, 0, 0);
+            let lease = engine
+                .under_per_key_control(index, black, &scope, walk)
+                .await?;
+            rgb::release(channel, index, lease, &scope).await
+        }
+    }
+}
+
 struct WriteScope<C, A> {
     deadline: tokio::time::Instant,
     cancelled: C,
@@ -521,6 +600,64 @@ impl PerKeyV2Target {
             ?color,
             "set keyboard colour via typed 0x8081"
         );
+        Ok(())
+    }
+
+    /// Light each present zone alone, as [`walk_per_key_zones`] describes.
+    /// The first frame after a fresh claim can land before the firmware
+    /// leaves onboard mode, so the dark base frame is painted twice.
+    async fn walk(
+        &self,
+        index: u8,
+        lit: Rgb,
+        scope: &WriteScope<impl Fn() -> bool, impl Fn() -> bool>,
+        mut observe: impl AsyncFnMut(LitZone) -> ZoneWalkStep,
+    ) -> Result<(), WriteError> {
+        let dark = Rgb {
+            red: 0,
+            green: 0,
+            blue: 0,
+        };
+        self.paint(index, dark, scope).await?;
+        tokio::time::sleep(FRAME_GAP).await;
+        self.paint(index, dark, scope).await?;
+
+        let feature = &self.feature;
+        let total = self.zones.len();
+        let mut position = 0;
+        let mut shown: Option<u8> = None;
+        while let Some(&zone_id) = self.zones.get(position) {
+            // One setRgbZonesSingleValue per colour: a G515 LS TKL answers a
+            // two-zone setIndividualRgbZones without echoing the second zone.
+            if let Some(previous) = shown.filter(|&previous| previous != zone_id) {
+                scope.check()?;
+                retry_busy(scope, async || {
+                    feature.set_rgb_zones_single_value(dark, &[previous]).await
+                })
+                .await?;
+            }
+            scope.check()?;
+            retry_busy(scope, async || {
+                feature.set_rgb_zones_single_value(lit, &[zone_id]).await
+            })
+            .await?;
+            retry_busy(scope, async || {
+                feature.frame_end(FramePersistence::Volatile, 0, 0).await
+            })
+            .await?;
+            shown = Some(zone_id);
+            let step = observe(LitZone {
+                zone_id,
+                position,
+                total,
+            })
+            .await;
+            match step {
+                ZoneWalkStep::Next => position += 1,
+                ZoneWalkStep::Back => position = position.saturating_sub(1),
+                ZoneWalkStep::Stop => break,
+            }
+        }
         Ok(())
     }
 }
