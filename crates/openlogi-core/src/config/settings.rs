@@ -894,20 +894,48 @@ where
 }
 
 /// Per-key colors take the same `#`-tolerant hex as [`Lighting::color`].
+/// Names ignore case, so two spellings of one key (`Esc` and `esc`) are an
+/// error rather than one silently replacing the other.
 fn deserialize_lighting_keys<'de, D>(
     deserializer: D,
 ) -> Result<BTreeMap<LightingKey, Rgb>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    BTreeMap::<LightingKey, String>::deserialize(deserializer)?
-        .into_iter()
-        .map(|(key, color)| {
-            parse_lighting_color(&color)
-                .map(|color| (key, color))
-                .map_err(|error| serde::de::Error::custom(format_args!("key {key}: {error}")))
-        })
-        .collect()
+    struct KeysVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for KeysVisitor {
+        type Value = BTreeMap<LightingKey, Rgb>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("a table of key colors keyed by key name")
+        }
+
+        fn visit_map<A>(self, mut access: A) -> Result<Self::Value, A::Error>
+        where
+            A: serde::de::MapAccess<'de>,
+        {
+            use serde::de::Error as _;
+
+            let mut keys = BTreeMap::new();
+            let mut spellings: BTreeMap<LightingKey, String> = BTreeMap::new();
+            while let Some(name) = access.next_key::<String>()? {
+                let key: LightingKey = name.parse().map_err(A::Error::custom)?;
+                let color = access.next_value::<String>()?;
+                let color = parse_lighting_color(&color)
+                    .map_err(|error| A::Error::custom(format_args!("key {key}: {error}")))?;
+                if let Some(earlier) = spellings.insert(key, name.clone()) {
+                    return Err(A::Error::custom(format_args!(
+                        "`{earlier}` and `{name}` name the same key; keep one"
+                    )));
+                }
+                keys.insert(key, color);
+            }
+            Ok(keys)
+        }
+    }
+
+    deserializer.deserialize_map(KeysVisitor)
 }
 
 fn parse_lighting_color(color: &str) -> Result<Rgb, crate::color::RgbParseError> {

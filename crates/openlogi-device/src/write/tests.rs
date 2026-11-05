@@ -896,6 +896,31 @@ async fn key_colours_paint_over_the_base_in_one_frame() -> Result<(), WriteError
 }
 
 #[tokio::test]
+async fn a_key_listed_twice_takes_its_last_colour() -> Result<(), WriteError> {
+    let (raw, handle) = ScriptedRawHidChannel::with_responder(g515_scripted_response);
+    let channel = scripted_channel(raw).await;
+    let shared = SharedChannel::new(
+        channel,
+        DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xc355,
+        },
+    );
+    let (red, green) = ([0xff, 0, 0], [0, 0xff, 0]);
+
+    key_colour_write(&[(0x04, red), (0x04, green), (0x04, red)])
+        .apply_on(&shared, || false, || true)
+        .await?;
+
+    // Grouping the two red entries first would have painted green over them.
+    assert_eq!(
+        per_key_v2_paints(&handle),
+        [([0, 0, 0xff], vec![1, 2, 3, 4]), (red, vec![1])]
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn key_colours_on_an_unmapped_keyboard_paint_the_base_alone() -> Result<(), WriteError> {
     // The same zones, but no 0x0003 to name the product: no zone map.
     let (raw, handle) = ScriptedRawHidChannel::with_responder(per_key_v2_scripted_response);

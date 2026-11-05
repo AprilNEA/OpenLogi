@@ -101,6 +101,21 @@ fn an_unknown_key_name_is_rejected() {
 }
 
 #[test]
+fn two_spellings_of_one_key_are_rejected() {
+    // TOML keeps `Esc` and `esc` apart; key names ignore case, so one would
+    // silently replace the other and vanish on the next save.
+    let error = toml::from_str::<Config>(
+        r#"
+            schema_version = 3
+            [devices.g515.lighting]
+            keys = { Esc = "ff0000", esc = "00ff00" }
+        "#,
+    )
+    .expect_err("two spellings of one key must fail");
+    assert!(error.to_string().contains("name the same key"), "{error}");
+}
+
+#[test]
 fn standalone_light_settings_roundtrip_per_device() {
     let mut cfg = Config::default();
     cfg.set_light(

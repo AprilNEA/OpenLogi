@@ -76,11 +76,14 @@ pub async fn run(args: LightingArgs) -> Result<()> {
     let color: Rgb = args.color.trim_start_matches('#').parse()?;
     let (r, g, b) = color.components();
 
-    let keys = args
-        .keys
-        .iter()
-        .map(|arg| parse_key(arg))
-        .collect::<Result<Vec<_>>>()?;
+    let mut keys = Vec::with_capacity(args.keys.len());
+    for arg in &args.keys {
+        let (key, color) = parse_key(arg)?;
+        if keys.iter().any(|&(known, _)| known == key) {
+            bail!("--key {key} is given more than once");
+        }
+        keys.push((key, color));
+    }
     if !keys.is_empty() && !matches!(args.method, Method::Auto) {
         bail!("--key needs --method auto");
     }
@@ -145,6 +148,17 @@ mod color_validation_tests {
         assert!(parse_key("Esc").is_err());
         assert!(parse_key("Hyper=ff0000").is_err());
         assert!(parse_key("Esc=red").is_err());
+    }
+
+    #[tokio::test]
+    async fn a_key_given_twice_is_refused() {
+        let err = run(LightingArgs {
+            keys: vec!["Esc=ff0000".into(), "esc=00ff00".into()],
+            ..args("00ff00")
+        })
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("more than once"), "{err}");
     }
 
     #[tokio::test]

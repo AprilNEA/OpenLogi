@@ -617,22 +617,27 @@ impl PerKeyV2Target {
         })
     }
 
-    /// The present zone and colour for each of `keys` the zone map places.
+    /// The present zone and colour for each of `keys` the zone map places,
+    /// one entry per zone: a key listed more than once takes its last colour.
     /// A key the map has no zone for, or whose zone the device does not
     /// report, is left out.
     fn key_zones(&self, keys: &[(u8, openlogi_core::color::Rgb)]) -> Vec<(u8, Rgb)> {
         let Some(map) = self.zone_map else {
             return Vec::new();
         };
-        keys.iter()
-            .filter_map(|&(usage, color)| {
-                let zone = map.zone(usage).filter(|zone| self.zones.contains(zone));
-                if zone.is_none() {
-                    debug!(usage, "no present 0x8081 zone for this key");
-                }
-                Some((zone?, hidpp_rgb(color)))
-            })
-            .collect()
+        let mut zones: Vec<(u8, Rgb)> = Vec::with_capacity(keys.len());
+        for &(usage, color) in keys {
+            let Some(zone) = map.zone(usage).filter(|zone| self.zones.contains(zone)) else {
+                debug!(usage, "no present 0x8081 zone for this key");
+                continue;
+            };
+            let color = hidpp_rgb(color);
+            match zones.iter_mut().find(|(known, _)| *known == zone) {
+                Some(entry) => entry.1 = color,
+                None => zones.push((zone, color)),
+            }
+        }
+        zones
     }
 
     /// Paint every present zone `color`, then commit the frame.
