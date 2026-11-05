@@ -3,7 +3,8 @@
 # Supports .deb, .rpm, and Arch .pkg.tar.zst packages.
 set -eu
 
-PATH=/usr/bin:/bin
+# Include sbin so dpkg can find ldconfig and start-stop-daemon.
+PATH=/usr/sbin:/sbin:/usr/bin:/bin
 export PATH
 umask 077
 

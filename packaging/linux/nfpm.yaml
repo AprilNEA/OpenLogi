@@ -120,7 +120,9 @@ overrides:
     depends:
       - curl
       - minisign
-      - polkitd | policykit-1
+      # pkexec is split out of polkitd on current Debian/Ubuntu; require it
+      # explicitly so in-app updates can elevate. policykit-1 covers older releases.
+      - pkexec | policykit-1
       - libxkbcommon0
       - libxkbcommon-x11-0
       - libxcb1
