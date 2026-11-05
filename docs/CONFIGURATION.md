@@ -439,8 +439,8 @@ and devices here. Its fields are:
   Control is held.
 - `[[flow.peers]]`: one trusted machine each, with a `name`, its
   `public_key` (`ed25519:` and 64 lower-case hex digits), and optional
-  `addresses`. Each address is an IP, a hostname, or `host:port`, tried when
-  mDNS cannot reach the peer; a bare value uses Flow's default port.
+  `addresses`. Each address is an IP, a hostname, or `host:port`, tried
+  alongside mDNS results; a bare value uses Flow's default port.
 - `[[flow.layout]]`: the `edge` of this machine's screen (`left`, `right`,
   `top`, or `bottom`) that leads to `peer`.
 - `[[flow.devices]]`: a device Flow may move. `key` is its identity key,
