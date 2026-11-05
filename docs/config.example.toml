@@ -1,5 +1,5 @@
 # OpenLogi configuration example. Copy only the sections you need.
-schema_version = 11
+schema_version = 12
 selected_device = "receiver:aabbccdd:slot:1"
 
 [app_settings]
@@ -17,6 +17,10 @@ asset_source = "automatic"
 language = "en"
 thumbwheel_sensitivity = 14
 appearance = "system"
+# macOS only: blur the desktop behind the window.
+acrylic_glass = false
+# Window background and popup opacity, from 0 to 100%.
+acrylic_opacity = 75
 ui_scale = "normal"
 device_view_mode = "grid"
 # macOS only: "openlogi" (the signed icon) or "prism".

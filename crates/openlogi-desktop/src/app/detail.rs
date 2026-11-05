@@ -152,6 +152,7 @@ pub(super) fn detail_content(
         DetailTab::Audio => audio_tab(panels.audio_panel).into_any_element(),
         DetailTab::Device => device_tab(panels.disable_keys_panel, cx).into_any_element(),
     };
+    let page_background = crate::ui::theme::page_background(cx);
     let navigation = detail_navigation(tabs, active, cx);
     v_flex()
         .flex_1()
@@ -181,7 +182,7 @@ pub(super) fn detail_content(
                 .min_h_0()
                 .w_full()
                 .items_stretch()
-                .bg(pal.page)
+                .bg(page_background)
                 .child(navigation)
                 .child(content),
         )

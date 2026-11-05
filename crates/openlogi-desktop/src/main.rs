@@ -139,6 +139,7 @@ fn main() -> Result<()> {
         theme::register_builtin_themes(cx);
         theme::sync_scrollbar_mode(cx);
         app::menu::install(cx);
+        platform::accessibility::install(cx);
 
         // Seed the Add Device window's initial state. Its buttons only send
         // intents; the session itself is the agent's, and every observation

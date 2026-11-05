@@ -255,6 +255,11 @@ pub(crate) fn compact_panel(pal: Palette) -> gpui::Div {
         .p_1p5()
 }
 
+/// The existing compact panel with the popup material opacity.
+pub(crate) fn compact_popup(pal: Palette, cx: &gpui::App) -> gpui::Div {
+    compact_panel(pal).bg(crate::ui::theme::popup_background(cx))
+}
+
 /// A group heading inset to line up with the rows under it.
 pub(crate) fn editor_section(label: impl Into<gpui::SharedString>, pal: Palette) -> gpui::Div {
     section_label(label, pal).w_full().px_2().pt_2().pb_0p5()

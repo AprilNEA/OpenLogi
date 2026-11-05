@@ -1,0 +1,22 @@
+# Owner: openlogi-desktop's ui::theme::glass selects the material after
+# checking settings and accessibility. platform::window_material applies it.
+id: gui-window-material-owner
+language: rust
+severity: error
+message: Let ui::theme::glass select the material and platform::window_material apply it; window-local decisions bypass accessibility and opacity settings.
+note: |
+  A window-local material decision can ignore Reduce Transparency or disagree
+  with the active theme's tint. See "Single source of truth" in AGENTS.md.
+files:
+  - crates/openlogi-desktop/src/**/*.rs
+ignores:
+  - crates/openlogi-desktop/src/ui/theme.rs
+  - crates/openlogi-desktop/src/ui/theme/glass.rs
+  - crates/openlogi-desktop/src/platform/window_material.rs
+  - crates/openlogi-desktop/src/platform/window_material/macos.rs
+rule:
+  any:
+    - pattern: $WINDOW.set_background_appearance($$$ARGS)
+    - all:
+        - kind: scoped_identifier
+        - regex: '(^|::)WindowBackgroundAppearance::'

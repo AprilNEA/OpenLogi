@@ -1,9 +1,9 @@
-//! Appearance settings page: mode, theme grid, radius, scale, language.
+//! Appearance settings page: language, window material, and theme.
 
 use super::language::{LanguageOption, language_select_field};
 use crate::ui::theme::FocusRingStyle as _;
-use gpui::{ElementId, img};
-use openlogi_core::config::AppIcon;
+use gpui::{ClickEvent, ElementId, Window, img};
+use openlogi_core::config::{AppIcon, AppSettings};
 
 use super::{
     ActiveTheme, App, AppState, Appearance, Axis, Button, ButtonGroup, Entity, FluentBuilder, Hsla,
@@ -14,14 +14,21 @@ use super::{
 };
 use crate::platform::app_icon::AppIconExt as _;
 use crate::ui::choice_card::ChoiceCard;
+use crate::ui::commit_slider::{CommitSlider, SliderRange, SliderUnit as _};
 use crate::ui::components::control_input;
+use crate::ui::slider_row::SliderRow;
 use crate::ui::theme::{SelectableStyle as _, Typography as _};
+use gpui_kit::component::slider::{Slider, SliderState};
+use gpui_kit::component::{
+    Disableable as _, Sizable as _, button::ButtonVariants as _, switch::Switch,
+};
 
 /// The Appearance page: light/dark mode, the theme grid, corner radius, and the
 /// interface language. Every theme here re-skins the whole app — the bespoke
 /// surfaces read the same `cx.theme()` tokens as the framework widgets.
 pub(super) fn appearance_page(
     view: Entity<SettingsView>,
+    opacity: Entity<SliderState>,
     filter: ThemeFilter,
     theme_search: Entity<InputState>,
     language_select: Entity<SelectState<Vec<LanguageOption>>>,
@@ -29,25 +36,23 @@ pub(super) fn appearance_page(
     // Titled groups so the sidebar shows them as sub-items (gpui-component
     // renders a page's groups as nested sidebar entries once there's more than
     // one and each is titled). Item titles stay distinct from their group title.
-    let mut theme_group = SettingGroup::new()
-        .title(tr!("appearance.theme"))
-        .item(
-            SettingItem::new(
-                tr!("appearance.appearance_mode"),
-                SettingField::render(move |_, _, cx| mode_segment(cx)),
-            )
-            .layout(Axis::Vertical)
-            .description(tr!("appearance.appearance_mode_description")),
+    let window_group = cfg!(target_os = "macos").then(|| window_group(view.clone(), opacity));
+    let mut theme_group = SettingGroup::new().title(tr!("appearance.theme")).item(
+        SettingItem::new(
+            tr!("appearance.appearance_mode"),
+            SettingField::render(move |_, _, cx| mode_segment(cx)),
         )
-        .item(
-            SettingItem::new(
-                tr!("appearance.color_theme"),
-                SettingField::render(move |_, _, cx| {
-                    theme_picker(&view, &theme_search, filter, cx)
-                }),
-            )
-            .layout(Axis::Vertical),
-        );
+        .layout(Axis::Vertical)
+        .description(tr!("appearance.appearance_mode_description")),
+    );
+
+    theme_group = theme_group.item(
+        SettingItem::new(
+            tr!("appearance.color_theme"),
+            SettingField::render(move |_, _, cx| theme_picker(&view, &theme_search, filter, cx)),
+        )
+        .layout(Axis::Vertical),
+    );
 
     // Only macOS can wear a chosen icon: Windows embeds one into the executable
     // at build time and Linux installs a fixed one from the package.
@@ -88,11 +93,142 @@ pub(super) fn appearance_page(
         .description(tr!("appearance.choose_the_interface_language")),
     );
 
-    SettingPage::new(tr!("appearance.appearance"))
+    let page = SettingPage::new(tr!("appearance.appearance"))
         .icon(IconName::Palette)
         .resettable(false)
-        .group(language_group)
-        .group(theme_group)
+        .group(language_group);
+    let page = if let Some(window_group) = window_group {
+        page.group(window_group)
+    } else {
+        page
+    };
+    page.group(theme_group)
+}
+
+fn window_group(view: Entity<SettingsView>, opacity: Entity<SliderState>) -> SettingGroup {
+    SettingGroup::new()
+        .title(tr!("appearance.window"))
+        .item(
+            SettingItem::new(
+                tr!("appearance.acrylic_glass"),
+                SettingField::render(|options, _, cx| {
+                    acrylic_glass_switch(cx)
+                        .disabled(options.is_disabled())
+                        .with_size(options.size())
+                }),
+            )
+            .description(tr!("appearance.acrylic_glass_description")),
+        )
+        .item(glass_opacity_item(view, opacity))
+}
+
+fn acrylic_glass_switch(cx: &App) -> Switch {
+    Switch::new("acrylic-glass")
+        .accessibility_label(tr!("appearance.acrylic_glass"))
+        .checked(AppState::try_read(cx).is_some_and(|s| s.app_settings().acrylic_glass))
+        .on_change(|enabled, _, cx| {
+            AppState::apply(cx, |state| state.commit_acrylic_glass(*enabled));
+            theme::apply_from_settings(None, cx);
+        })
+}
+
+/// Keep preview changes in the theme owner and save once when the thumb rests.
+pub(super) fn opacity_slider<V: 'static>(cx: &mut gpui::Context<V>) -> CommitSlider<u8> {
+    let initial = AppState::try_read(cx).map_or_else(
+        || AppSettings::default().acrylic_opacity(),
+        |state| state.app_settings().acrylic_opacity(),
+    );
+    CommitSlider::previewing(
+        SliderRange::new(0, AppSettings::clamp_acrylic_opacity(u8::MAX)),
+        initial,
+        cx,
+        |_, value, cx| {
+            if theme::uses_glass(cx) {
+                theme::preview_acrylic_opacity(value, cx);
+            }
+        },
+        |_, value, cx| {
+            if theme::uses_glass(cx) {
+                AppState::apply(cx, |state| state.commit_acrylic_opacity(value));
+                theme::apply_from_settings(None, cx);
+            }
+        },
+    )
+}
+
+fn glass_opacity_item(view: Entity<SettingsView>, slider: Entity<SliderState>) -> SettingItem {
+    SettingItem::render(move |options, _, cx| {
+        let view = view.clone();
+        opacity_row(&slider, options.is_disabled(), cx, move |_, window, cx| {
+            view.update(cx, |view, cx| {
+                reset_opacity(&view.acrylic_opacity, window, cx);
+                cx.notify();
+            });
+        })
+    })
+    .keywords([
+        tr!("appearance.glass_opacity"),
+        tr!("appearance.glass_opacity_description"),
+    ])
+}
+
+fn opacity_row(
+    slider: &Entity<SliderState>,
+    disabled: bool,
+    cx: &App,
+    on_reset: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> SliderRow {
+    let disabled = disabled || !theme::uses_glass(cx);
+    let default = AppSettings::default().acrylic_opacity();
+    let value = u8::from_slider(slider.read(cx).value().start());
+    let changed = value != default;
+    let reset_description = tr!("appearance.reset_opacity_description", opacity = default);
+    SliderRow::new(
+        tr!("appearance.glass_opacity"),
+        div()
+            .id("glass-opacity")
+            .debug_selector(|| "glass-opacity-track".into())
+            .w_full()
+            .flex()
+            .role(gpui::Role::Group)
+            .aria_label(tr!("appearance.glass_opacity"))
+            .child(
+                Slider::new(slider)
+                    .horizontal()
+                    .disabled(disabled)
+                    .when(disabled, |slider| slider.bg(cx.theme().muted_foreground)),
+            ),
+    )
+    .value(format!("{value}%"), ["100%"])
+    .value_action(
+        Button::new("glass-opacity-reset")
+            .debug_selector(|| "glass-opacity-reset".into())
+            .ghost()
+            .xsmall()
+            .label(tr!("appearance.reset_opacity"))
+            .tooltip(reset_description)
+            .disabled(disabled || !changed)
+            .when(!changed, Styled::invisible)
+            .on_click(on_reset),
+    )
+    .description(tr!("appearance.glass_opacity_description"))
+    .disabled(disabled)
+    .compact()
+}
+
+fn reset_opacity(opacity: &CommitSlider<u8>, window: &mut Window, cx: &mut App) {
+    if !theme::uses_glass(cx) {
+        return;
+    }
+    AppState::apply(cx, |state| {
+        state.commit_acrylic_opacity(AppSettings::default().acrylic_opacity())
+    });
+    // A failed write keeps the accepted setting, including the thumb and material.
+    if let Some(state) = AppState::try_read(cx) {
+        let accepted = state.app_settings().acrylic_opacity();
+        opacity.seat(accepted, window, cx);
+    }
+    theme::apply_from_settings(None, cx);
 }
 
 /// The stored light/dark preference (defaults to following the OS).
@@ -690,4 +826,407 @@ fn filter_chip(
                 cx.notify();
             });
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::assets::AssetResolver;
+    use crate::state::{ConfigPersistence, Sources};
+    use gpui::{
+        AppContext as _, Context, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, Render,
+        TestAppContext, Window,
+    };
+    use gpui_kit::component::slider::SliderEvent;
+    use openlogi_core::config::Config;
+
+    struct GlassSwitch;
+
+    struct GlassOpacity {
+        opacity: CommitSlider<u8>,
+    }
+
+    impl Render for GlassOpacity {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let saved = AppState::try_read(cx)
+                .unwrap()
+                .app_settings()
+                .acrylic_opacity();
+            self.opacity.sync(saved, window, cx);
+            let owner = cx.entity();
+            div()
+                .id("opacity-row")
+                .tab_group()
+                .w(px(300.))
+                .child(opacity_row(
+                    self.opacity.slider(),
+                    false,
+                    cx,
+                    move |_, window, cx| {
+                        owner.update(cx, |this, cx| {
+                            reset_opacity(&this.opacity, window, cx);
+                            cx.notify();
+                        });
+                    },
+                ))
+        }
+    }
+
+    impl Render for GlassSwitch {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div().flex().items_start().child(
+                div()
+                    .debug_selector(|| "glass-switch".into())
+                    .child(acrylic_glass_switch(cx)),
+            )
+        }
+    }
+
+    fn install_state(cx: &mut TestAppContext, persistence: ConfigPersistence) {
+        install_config(cx, persistence, Config::ephemeral());
+    }
+
+    fn install_config(cx: &mut TestAppContext, persistence: ConfigPersistence, config: Config) {
+        cx.update(|cx| {
+            gpui_kit::component::init(cx);
+            theme::register_builtin_themes(cx);
+            let (commands, _) = tokio::sync::mpsc::unbounded_channel();
+            let state = cx.new(|_| {
+                AppState::new(Sources {
+                    persistence,
+                    ..Sources::in_memory(config, &AssetResolver::new(), commands)
+                })
+            });
+            AppState::set_global(state, cx);
+            theme::apply_from_settings(None, cx);
+        });
+    }
+
+    fn install_custom_opacity(cx: &mut TestAppContext, persistence: ConfigPersistence) {
+        let mut config = Config::ephemeral();
+        config.app_settings.acrylic_glass = true;
+        config.app_settings.acrylic_opacity = 40;
+        install_config(cx, persistence, config);
+    }
+
+    fn activate_key(cx: &mut gpui::VisualTestContext, key: &'static str) {
+        let keystroke = Keystroke::parse(key).unwrap();
+        cx.simulate_event(KeyDownEvent {
+            keystroke: keystroke.clone(),
+            is_held: false,
+            prefer_character_input: false,
+        });
+        cx.simulate_event(KeyUpEvent { keystroke });
+    }
+
+    fn assert_opacity(view: &Entity<GlassOpacity>, cx: &mut gpui::VisualTestContext, expected: u8) {
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        view.read_with(cx, |view, cx| {
+            assert_eq!(
+                AppState::try_read(cx)
+                    .unwrap()
+                    .app_settings()
+                    .acrylic_opacity(),
+                expected
+            );
+            assert_eq!(view.opacity.value(cx), expected);
+            assert_eq!(view.opacity.seated(), expected);
+            if theme::uses_glass(cx) {
+                assert!(
+                    (cx.theme().tokens.background.a - f32::from(expected) / 100.).abs()
+                        < f32::EPSILON
+                );
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn glass_opacity_reset_restores_the_default_without_moving_the_track(cx: &mut TestAppContext) {
+        let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
+        install_custom_opacity(cx, ConfigPersistence::MemoryOnly);
+        let (view, cx) = cx.add_window_view(|_, cx| GlassOpacity {
+            opacity: opacity_slider(cx),
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let track = cx.debug_bounds("glass-opacity-track").unwrap();
+        let value = cx.debug_bounds("slider-row-value").unwrap();
+        let reset = cx.debug_bounds("glass-opacity-reset").unwrap();
+        let supported = cx.update(|_, cx| theme::uses_glass(cx));
+
+        // Reset must also cancel a live preview, including CommitSlider's drag state.
+        let slider = view.read_with(cx, |view, _| view.opacity.slider().clone());
+        if supported {
+            cx.update(|window, cx| {
+                slider.update(cx, |slider, cx| {
+                    slider.set_value(55., window, cx);
+                    cx.emit(SliderEvent::Change(55.0.into()));
+                });
+            });
+        }
+        cx.run_until_parked();
+        cx.simulate_click(reset.center(), Modifiers::default());
+        cx.run_until_parked();
+        let expected = if supported {
+            AppSettings::default().acrylic_opacity()
+        } else {
+            40
+        };
+        assert_opacity(&view, cx, expected);
+        assert_eq!(cx.debug_bounds("glass-opacity-track").unwrap(), track);
+        assert_eq!(cx.debug_bounds("slider-row-value").unwrap(), value);
+        cx.update(|window, cx| {
+            window.blur(cx);
+            window.focus_next(cx);
+            assert!(
+                window.focused(cx).is_none(),
+                "hidden or disabled Reset is not a tab stop"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn glass_opacity_reset_supports_keyboard_and_follows_external_changes(cx: &mut TestAppContext) {
+        let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
+        install_custom_opacity(cx, ConfigPersistence::MemoryOnly);
+        let (view, cx) = cx.add_window_view(|_, cx| GlassOpacity {
+            opacity: opacity_slider(cx),
+        });
+        let supported = cx.update(|_, cx| theme::uses_glass(cx));
+        for key in ["enter", "space"] {
+            cx.update(|_, cx| {
+                AppState::apply(cx, |state| state.commit_acrylic_opacity(40));
+            });
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            cx.update(Window::focus_next);
+            activate_key(cx, key);
+            cx.run_until_parked();
+            assert_opacity(
+                &view,
+                cx,
+                if supported {
+                    AppSettings::default().acrylic_opacity()
+                } else {
+                    40
+                },
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn glass_opacity_reset_preserves_the_accepted_value_after_a_failed_write(
+        cx: &mut TestAppContext,
+    ) {
+        let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
+        install_custom_opacity(cx, ConfigPersistence::ReadOnly("invalid config".into()));
+        let (view, cx) = cx.add_window_view(|_, cx| GlassOpacity {
+            opacity: opacity_slider(cx),
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let reset = cx.debug_bounds("glass-opacity-reset").unwrap();
+        cx.simulate_click(reset.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert_opacity(&view, cx, 40);
+        cx.update(|_, cx| {
+            assert_eq!(
+                AppState::try_read(cx).unwrap().config_issue(),
+                Some("invalid config")
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn glass_opacity_reset_is_inert_when_glass_is_off(cx: &mut TestAppContext) {
+        let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
+        install_custom_opacity(cx, ConfigPersistence::MemoryOnly);
+        cx.update(|cx| {
+            AppState::apply(cx, |state| state.commit_acrylic_glass(false));
+            theme::apply_from_settings(None, cx);
+        });
+        let (view, cx) = cx.add_window_view(|_, cx| GlassOpacity {
+            opacity: opacity_slider(cx),
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let reset = cx.debug_bounds("glass-opacity-reset").unwrap();
+        cx.simulate_click(reset.center(), Modifiers::default());
+        cx.update(Window::focus_next);
+        activate_key(cx, "enter");
+        activate_key(cx, "space");
+        assert_opacity(&view, cx, 40);
+        cx.update(|window, cx| assert!(window.focused(cx).is_none()));
+    }
+
+    #[gpui::test]
+    fn glass_switch_applies_pointer_and_keyboard_changes(cx: &mut TestAppContext) {
+        let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
+        install_state(cx, ConfigPersistence::MemoryOnly);
+        let (_, cx) = cx.add_window_view(|_, _| GlassSwitch);
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let bounds = cx.debug_bounds("glass-switch").expect("glass switch");
+        cx.simulate_click(bounds.center(), Modifiers::default());
+        cx.update(|_, cx| {
+            assert!(
+                AppState::try_read(cx)
+                    .expect("state")
+                    .app_settings()
+                    .acrylic_glass
+            );
+            assert_eq!(
+                cx.theme().tokens.background.a < 1.,
+                crate::platform::accessibility::allows_glass()
+            );
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let keystroke = Keystroke::parse("space").expect("space key");
+        cx.simulate_event(KeyDownEvent {
+            keystroke: keystroke.clone(),
+            is_held: false,
+            prefer_character_input: false,
+        });
+        cx.simulate_event(KeyUpEvent { keystroke });
+        cx.update(|_, cx| {
+            assert!(
+                !AppState::try_read(cx)
+                    .expect("state")
+                    .app_settings()
+                    .acrylic_glass
+            );
+            assert_eq!(cx.theme().tokens.background.color, cx.theme().background);
+        });
+    }
+
+    #[gpui::test]
+    fn glass_switch_keeps_the_saved_value_when_config_is_read_only(cx: &mut TestAppContext) {
+        let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
+        install_state(cx, ConfigPersistence::ReadOnly("invalid config".into()));
+        let (_, cx) = cx.add_window_view(|_, _| GlassSwitch);
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let bounds = cx.debug_bounds("glass-switch").expect("glass switch");
+        cx.simulate_click(bounds.center(), Modifiers::default());
+        cx.update(|_, cx| {
+            let state = AppState::try_read(cx).expect("state");
+            assert!(!state.app_settings().acrylic_glass);
+            assert_eq!(state.config_issue(), Some("invalid config"));
+            assert_eq!(cx.theme().tokens.background.color, cx.theme().background);
+        });
+    }
+
+    #[gpui::test]
+    fn glass_opacity_pointer_changes_the_material_only_when_enabled(cx: &mut TestAppContext) {
+        let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
+        install_state(cx, ConfigPersistence::MemoryOnly);
+        let (_, cx) = cx.add_window_view(|_, cx| GlassOpacity {
+            opacity: opacity_slider(cx),
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let bounds = cx
+            .debug_bounds("glass-opacity-track")
+            .expect("opacity track");
+        let target = gpui::point(bounds.left() + bounds.size.width * 0.25, bounds.center().y);
+        cx.simulate_click(target, Modifiers::default());
+        cx.update(|_, cx| {
+            assert_eq!(
+                AppState::try_read(cx)
+                    .unwrap()
+                    .app_settings()
+                    .acrylic_opacity(),
+                AppSettings::default().acrylic_opacity()
+            );
+            AppState::apply(cx, |state| state.commit_acrylic_glass(true));
+            theme::apply_from_settings(None, cx);
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.simulate_click(target, Modifiers::default());
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            let saved = AppState::try_read(cx)
+                .unwrap()
+                .app_settings()
+                .acrylic_opacity();
+            if theme::uses_glass(cx) {
+                assert!(saved.abs_diff(25) <= 1, "saved opacity: {saved}");
+                let background: gpui::Background = cx.theme().tokens.background.into();
+                assert_eq!(background.as_solid().unwrap().a, f32::from(saved) / 100.);
+            } else {
+                assert_eq!(saved, AppSettings::default().acrylic_opacity());
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn glass_opacity_previews_live_and_commits_only_on_release(cx: &mut TestAppContext) {
+        let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
+        install_state(cx, ConfigPersistence::MemoryOnly);
+        let (view, cx) = cx.add_window_view(|_, cx| GlassOpacity {
+            opacity: opacity_slider(cx),
+        });
+        let slider = view.read_with(cx, |view, _| view.opacity.slider().clone());
+        slider.update(cx, |_, cx| cx.emit(SliderEvent::Change(20.0.into())));
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            assert_eq!(
+                AppState::try_read(cx)
+                    .unwrap()
+                    .app_settings()
+                    .acrylic_opacity(),
+                AppSettings::default().acrylic_opacity()
+            );
+            assert!(!theme::uses_glass(cx));
+            AppState::apply(cx, |state| state.commit_acrylic_glass(true));
+            theme::apply_from_settings(None, cx);
+        });
+        let supported = cx.update(|_, cx| theme::uses_glass(cx));
+        slider.update(cx, |_, cx| cx.emit(SliderEvent::Change(55.0.into())));
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            assert_eq!(
+                AppState::try_read(cx)
+                    .unwrap()
+                    .app_settings()
+                    .acrylic_opacity(),
+                AppSettings::default().acrylic_opacity()
+            );
+            if supported {
+                assert!((cx.theme().tokens.background.a - 0.55).abs() < f32::EPSILON);
+            } else {
+                assert_eq!(cx.theme().tokens.background.color, cx.theme().background);
+            }
+        });
+        slider.update(cx, |_, cx| cx.emit(SliderEvent::Release(55.0.into())));
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            assert_eq!(
+                AppState::try_read(cx)
+                    .unwrap()
+                    .app_settings()
+                    .acrylic_opacity(),
+                if supported {
+                    55
+                } else {
+                    AppSettings::default().acrylic_opacity()
+                }
+            );
+            if supported {
+                assert!((cx.theme().tokens.background.a - 0.55).abs() < f32::EPSILON);
+            }
+            AppState::apply(cx, |state| state.commit_acrylic_glass(false));
+            theme::apply_from_settings(None, cx);
+        });
+        slider.update(cx, |_, cx| cx.emit(SliderEvent::Release(25.0.into())));
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            assert_eq!(
+                AppState::try_read(cx)
+                    .unwrap()
+                    .app_settings()
+                    .acrylic_opacity(),
+                if supported {
+                    55
+                } else {
+                    AppSettings::default().acrylic_opacity()
+                }
+            );
+            assert_eq!(cx.theme().tokens.background.color, cx.theme().background);
+        });
+    }
 }

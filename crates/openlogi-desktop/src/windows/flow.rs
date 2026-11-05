@@ -179,10 +179,10 @@ impl Render for FlowView {
 
         v_flex()
             .size_full()
-            .bg(pal.page)
+            .bg(crate::ui::theme::page_background(cx))
             .text_color(pal.text_primary)
             .track_focus(&self.focus_handle)
-            .when(windows::needs_client_titlebar(window), |this| {
+            .when(windows::needs_client_titlebar(window, cx), |this| {
                 this.child(windows::aux_title_bar(window_title(), cx))
             })
             .when_some(model, |this, model| {

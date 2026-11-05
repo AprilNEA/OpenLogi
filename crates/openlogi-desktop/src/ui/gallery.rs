@@ -8,8 +8,8 @@ use gpui::{
 };
 use gpui_kit::base::Button as BaseButton;
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Icon, IconName, Root, Selectable as _, Sizable as _, Theme,
-    ThemeMode, ThemeRegistry,
+    Disableable as _, Icon, IconName, Selectable as _, Sizable as _, Theme, ThemeMode,
+    ThemeRegistry,
     button::{Button, ButtonGroup, ButtonVariants as _},
     h_flex,
     scroll::ScrollableElement as _,
@@ -65,7 +65,8 @@ pub(crate) fn run() {
         let opened = cx.open_window(options, |window, cx| {
             theme::apply_scale(window, UiScale::Normal);
             let view = cx.new(ComponentGallery::new);
-            cx.new(|cx| Root::new(view, window, cx).bg(cx.theme().background))
+            theme::apply_preview_material(window, view.read(cx).glass, cx);
+            cx.new(|cx| crate::windows::window_root(view, window, cx))
         });
 
         match opened {
@@ -99,8 +100,13 @@ fn install_openlogi_themes(cx: &mut App) {
     Theme::change(ThemeMode::Light, None, cx);
 }
 
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent states of unrelated controls in the component gallery"
+)]
 struct ComponentGallery {
     mode: ThemeMode,
+    glass: bool,
     scale: UiScale,
     choice_selected: usize,
     toggle_selected: bool,
@@ -147,6 +153,7 @@ impl ComponentGallery {
         );
         Self {
             mode: ThemeMode::Light,
+            glass: std::env::var("OPENLOGI_GALLERY_GLASS").as_deref() == Ok("1"),
             scale: UiScale::Normal,
             choice_selected: 0,
             toggle_selected: true,
@@ -203,6 +210,7 @@ impl ComponentGallery {
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.mode = ThemeMode::Light;
                                 Theme::change(ThemeMode::Light, Some(window), cx);
+                                theme::apply_preview_material(window, this.glass, cx);
                                 cx.notify();
                             })),
                     )
@@ -214,9 +222,23 @@ impl ComponentGallery {
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.mode = ThemeMode::Dark;
                                 Theme::change(ThemeMode::Dark, Some(window), cx);
+                                theme::apply_preview_material(window, this.glass, cx);
                                 cx.notify();
                             })),
                     )
+                    .when(cfg!(target_os = "macos"), |row| {
+                        row.child(
+                            Button::new("gallery-glass")
+                                .outline()
+                                .label(tr!("appearance.acrylic_glass"))
+                                .selected(self.glass)
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.glass = !this.glass;
+                                    theme::apply_preview_material(window, this.glass, cx);
+                                    cx.notify();
+                                })),
+                        )
+                    })
                     .children(UiScale::ALL.map(|candidate| {
                         Button::new(("gallery-scale", u32::from(candidate.percent())))
                             .outline()
@@ -525,6 +547,19 @@ impl ComponentGallery {
                         Slider::new(self.row_slider.slider()).horizontal(),
                     )
                     .value(shown.to_string(), ["100"])
+                    .value_action(
+                        Button::new("gallery-slider-reset")
+                            .ghost()
+                            .xsmall()
+                            .label("Reset")
+                            .disabled(shown == ROW_DEFAULT)
+                            .when(shown == ROW_DEFAULT, Styled::invisible)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.row_committed = ROW_DEFAULT;
+                                this.row_slider.seat(ROW_DEFAULT, window, cx);
+                                cx.notify();
+                            })),
+                    )
                     .when(shown == ROW_DEFAULT, |row| row.marker("Default"))
                     .description(
                         "The value column keeps the width of the widest value, so dragging \
@@ -705,7 +740,7 @@ impl Render for ComponentGallery {
         let pal = theme::palette(cx);
         v_flex()
             .size_full()
-            .bg(pal.page)
+            .bg(theme::page_background(cx))
             .text_color(pal.text_primary)
             .child(crate::windows::aux_title_bar(TITLE, cx))
             .child(self.toolbar(pal, cx))

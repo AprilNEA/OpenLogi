@@ -35,6 +35,7 @@ pub(crate) struct SliderRow {
     marker: Option<AnyElement>,
     /// The button the value becomes when it can be typed in exactly.
     entry: Option<BaseButton>,
+    value_action: Option<AnyElement>,
     description: Option<SharedString>,
     hint: Option<AnyElement>,
     disabled: bool,
@@ -54,6 +55,7 @@ impl SliderRow {
             widest: Vec::new(),
             marker: None,
             entry: None,
+            value_action: None,
             description: None,
             hint: None,
             disabled: false,
@@ -102,6 +104,14 @@ impl SliderRow {
                 .accessibility_label(label)
                 .on_click(on_click),
         );
+        self
+    }
+
+    /// A secondary command beside the value. Keep its space reserved when
+    /// hiding it so the label and track do not move during a drag.
+    #[must_use]
+    pub(crate) fn value_action(mut self, action: impl IntoElement) -> Self {
+        self.value_action = Some(action.into_any_element());
         self
     }
 
@@ -181,6 +191,17 @@ impl RenderOnce for SliderRow {
                 )
                 .child(number)
         });
+        let value = match self.value_action {
+            Some(action) => Some(
+                h_flex()
+                    .flex_shrink_0()
+                    .gap_2()
+                    .child(action)
+                    .children(value)
+                    .into_any_element(),
+            ),
+            None => value.map(IntoElement::into_any_element),
+        };
         v_flex()
             .w_full()
             .gap_2()

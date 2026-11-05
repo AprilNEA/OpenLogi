@@ -26,7 +26,7 @@ use crate::ui::theme::Typography as _;
 use gpui::{
     App, AppContext as _, Bounds, Context, Decorations, Global, IntoElement, ParentElement as _,
     Pixels, Point, Render, SharedString, Size, Styled as _, Subscription, TitlebarOptions, Window,
-    WindowBounds, WindowHandle, WindowOptions, div, px,
+    WindowBounds, WindowHandle, WindowOptions, div, prelude::FluentBuilder as _, px,
 };
 use gpui_kit::component::{ActiveTheme as _, Root, TitleBar};
 use openlogi_core::brand::APP_ID;
@@ -98,6 +98,7 @@ impl From<WindowFit> for WindowOptions {
         Self {
             window_bounds: Some(WindowBounds::Windowed(fit.bounds)),
             window_min_size: Some(fit.min_size),
+            app_owns_titlebar_drag: cfg!(target_os = "macos"),
             ..Self::default()
         }
     }
@@ -128,11 +129,12 @@ impl Global for WindowRegistry {}
 /// it and hands back a real server-side titlebar, so that blanket rule put a
 /// second one underneath it (#890).
 ///
-/// macOS and Windows always report `Server` here, so the single check covers
-/// every platform without a `cfg`.
+/// Acrylic windows on macOS extend content below the native traffic lights.
+/// A transparent client row reserves their space and supplies the drag region.
 #[must_use]
-pub fn needs_client_titlebar(window: &Window) -> bool {
+pub fn needs_client_titlebar(window: &Window, cx: &App) -> bool {
     matches!(window.window_decorations(), Decorations::Client { .. })
+        || (cfg!(target_os = "macos") && crate::ui::theme::uses_glass(cx))
 }
 
 /// Titlebar options for an app window.
@@ -147,7 +149,8 @@ pub fn needs_client_titlebar(window: &Window) -> bool {
 /// client-side [`TitleBar`] (see [`aux_title_bar`]) on the compositors that
 /// leave it to the app. Whether it actually does is
 /// [`needs_client_titlebar`]'s call, made per window from what the compositor
-/// negotiated. On macOS / Windows the native titlebar shows `title`.
+/// negotiated. macOS keeps its native titlebar until the material adapter
+/// enables Acrylic. Windows keeps its native titlebar.
 pub fn titlebar_options(title: impl Into<SharedString>) -> TitlebarOptions {
     let title = Some(title.into());
     if cfg!(target_os = "linux") {
@@ -172,16 +175,34 @@ pub fn titlebar_options(title: impl Into<SharedString>) -> TitlebarOptions {
 /// is otherwise unpainted. On macOS the widget reserves the traffic-light space.
 pub fn aux_title_bar(title: impl Into<SharedString>, cx: &App) -> impl IntoElement {
     let title = title.into();
-    TitleBar::new().child(
-        div()
-            .flex_1()
-            .flex()
-            .items_center()
-            .justify_center()
-            .text_body()
-            .text_color(cx.theme().muted_foreground)
-            .child(title),
-    )
+    TitleBar::new()
+        .when(
+            cfg!(target_os = "macos") && crate::ui::theme::uses_glass(cx),
+            |bar| bar.bg(gpui::transparent_black()).border_b_0(),
+        )
+        .child(
+            div()
+                .flex_1()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_body()
+                .text_color(cx.theme().muted_foreground)
+                .child(title),
+        )
+}
+
+/// Mount the live theme canvas and keep the native material sized to the window.
+pub(crate) fn window_root(
+    view: impl Into<gpui::AnyView>,
+    window: &mut Window,
+    cx: &mut Context<Root>,
+) -> Root {
+    cx.observe_window_bounds(window, |_, window, cx| {
+        crate::ui::theme::refresh_window_material(window, cx);
+    })
+    .detach();
+    Root::new(view, window, cx)
 }
 
 /// Restamp the native titles of the open auxiliary windows after a live
@@ -261,7 +282,7 @@ pub fn open_or_focus<V: AuxWindow + 'static>(
             crate::ui::theme::apply_from_settings(Some(window), cx);
         });
         view.update(cx, |v, _| v.set_appearance_obs(appearance_obs));
-        cx.new(|cx| Root::new(view, window, cx).bg(cx.theme().background))
+        cx.new(|cx| window_root(view, window, cx))
     });
 
     match opened {

@@ -19,7 +19,7 @@ use gpui_kit::component::{
 use super::catalog::{AppCatalogPicker, ApplicationIconState, ProfileIconCache};
 use super::shell::application_mark;
 use super::{AddAppChoices, CatalogPresentation, ProfileChoice, ProfileScopeActions};
-use crate::features::binding_editor::{compact_panel, divider, title};
+use crate::features::binding_editor::{compact_popup, divider, title};
 use crate::ui::components::{MenuRow, control_button, control_input};
 use crate::ui::theme::{self, Palette, SelectableStyle as _, Typography as _};
 
@@ -39,7 +39,7 @@ pub(super) fn add_app_popover(
     let catalog_on_open = catalog.clone();
     Popover::new(format!("{id_base}:add-app-popover"))
         .anchor(Anchor::TopRight)
-        // `compact_panel` is the surface; the popover chrome would wrap it in
+        // `compact_popup` is the surface; the popover chrome would wrap it in
         // a second padded, differently-rounded box.
         .appearance(false)
         .trigger(
@@ -114,7 +114,7 @@ fn add_app_content(
     let list_len = application_rows.len();
     let application_rows = Arc::new(application_rows);
 
-    compact_panel(pal)
+    compact_popup(pal, cx)
         .w(px(320.))
         .child(title(tr!("profiles.add_app_profile"), pal))
         .child(divider(pal))
@@ -356,11 +356,11 @@ mod tests {
     use gpui_kit::component::popover::Popover;
 
     use super::APP_ROW_H;
-    use crate::features::binding_editor::compact_panel;
+    use crate::features::binding_editor::compact_popup;
     use crate::ui::components::MenuRow;
     use crate::ui::theme;
 
-    /// The Add-app popover structure — unstyled popover, `compact_panel`
+    /// The Add-app popover structure — unstyled popover, `compact_popup`
     /// surface, `uniform_list` catalog — with rows that record activation
     /// instead of touching `AppState`.
     struct PickerScrollHarness {
@@ -374,9 +374,9 @@ mod tests {
             Popover::new("add-app-popover")
                 .appearance(false)
                 .trigger(Button::new("add-app-profile").label("Add app"))
-                .content(move |_state, _window, _cx| {
+                .content(move |_state, _window, cx| {
                     let clicked = clicked.clone();
-                    compact_panel(pal).w(px(320.)).child(
+                    compact_popup(pal, cx).w(px(320.)).child(
                         uniform_list(
                             "application-catalog-list",
                             30,

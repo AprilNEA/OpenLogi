@@ -316,6 +316,27 @@ pub struct AppSettings {
     /// Logi Options+; off switches instantly. Only macOS reads it.
     #[serde(default = "default_true")]
     pub animate_desktop_switch: bool,
+    /// Use a translucent, blurred window background on supported platforms.
+    /// Off by default. macOS Reduce Transparency and Increase Contrast override it.
+    #[serde(default)]
+    pub acrylic_glass: bool,
+    /// Window background opacity, in whole percentages. Defaults to 75%.
+    #[serde(
+        default = "default_acrylic_opacity",
+        deserialize_with = "deserialize_acrylic_opacity"
+    )]
+    pub acrylic_opacity: u8,
+}
+
+const fn default_acrylic_opacity() -> u8 {
+    75
+}
+
+fn deserialize_acrylic_opacity<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<u8, D::Error> {
+    let value = i64::deserialize(deserializer)?;
+    Ok(AppSettings::clamp_acrylic_opacity(value.saturating_as()))
 }
 
 const SENSITIVITY_MIN: u8 = 1;
@@ -487,6 +508,18 @@ fn rounded_sensitivity(value: f32) -> u8 {
 }
 
 impl AppSettings {
+    /// Return the opacity percentage within its supported range.
+    #[must_use]
+    pub fn acrylic_opacity(&self) -> u8 {
+        Self::clamp_acrylic_opacity(self.acrylic_opacity)
+    }
+
+    /// Limit an opacity percentage to the supported range.
+    #[must_use]
+    pub fn clamp_acrylic_opacity(value: u8) -> u8 {
+        value.min(100)
+    }
+
     /// `skip_serializing_if` helper: true when nothing diverges from the
     /// default, so empty settings don't clutter `config.toml`.
     #[must_use]
@@ -523,6 +556,8 @@ impl Default for AppSettings {
             low_battery_notifications: true,
             lock_key_notifications: true,
             animate_desktop_switch: true,
+            acrylic_glass: false,
+            acrylic_opacity: default_acrylic_opacity(),
         }
     }
 }
@@ -1122,6 +1157,47 @@ mod tests {
         assert_eq!(
             settings.momentum_scrolling.glide_ms,
             MomentumScrolling::default().glide_ms
+        );
+    }
+
+    #[test]
+    fn acrylic_glass_is_opt_in_and_survives_a_config_roundtrip() {
+        let mut settings: AppSettings = toml::from_str("").expect("older settings");
+        assert!(!settings.acrylic_glass);
+        assert!(!AppSettings::default().acrylic_glass);
+        settings.acrylic_glass = true;
+        let saved = toml::to_string(&settings).expect("save settings");
+        let restored: AppSettings = toml::from_str(&saved).expect("read settings");
+        assert!(restored.acrylic_glass);
+    }
+
+    #[test]
+    fn acrylic_opacity_defaults_to_seventy_five_and_clamps_hand_edited_values() {
+        let older: AppSettings = toml::from_str("").expect("older settings");
+        assert_eq!(older.acrylic_opacity(), 75);
+        assert!(!older.acrylic_glass);
+        for (raw, expected) in [
+            (-40, 0),
+            (0, 0),
+            (37, 37),
+            (80, 80),
+            (100, 100),
+            (1000, 100),
+        ] {
+            let settings: AppSettings =
+                toml::from_str(&format!("acrylic_opacity = {raw}")).expect("opacity setting");
+            assert_eq!(settings.acrylic_opacity, expected);
+            let saved = toml::to_string(&settings).expect("save settings");
+            let restored: AppSettings = toml::from_str(&saved).expect("read settings");
+            assert_eq!(restored.acrylic_opacity(), expected);
+        }
+        assert_eq!(
+            AppSettings {
+                acrylic_opacity: 255,
+                ..older
+            }
+            .acrylic_opacity(),
+            100
         );
     }
 

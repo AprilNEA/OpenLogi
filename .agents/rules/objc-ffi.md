@@ -35,6 +35,8 @@ files; **keep this table in sync when you add or move one**:
 | `openlogi-camera/src/uvc_macos.rs`, `.../uvc_macos/iokit.rs` | IOKit USB / UVC control transfers; every `unsafe` in the macOS UVC backend lives in `iokit.rs` |
 | `openlogi-desktop/src/platform/registration/macos.rs` | `SMAppService` registration of the agent's launchd service (the login-item side of the agent lifecycle; the GUI must own it — the API resolves the plist against the calling app's bundle) |
 | `openlogi-desktop/src/platform/os.rs` | `NSProcessInfo` OS version + the `NSAppearance` titlebar sync |
+| `openlogi-desktop/src/platform/accessibility/macos.rs` | the `NSWorkspace` display-accessibility preferences and their change notification |
+| `openlogi-desktop/src/platform/window_material/macos.rs` | the app-owned `NSVisualEffectView` below GPUI's render view, reached through the public AppKit window handle |
 | `openlogi-hid/src/permissions.rs` | `IOHIDCheckAccess` / `IOHIDRequestAccess` (the prompting half of Input Monitoring) |
 | `openlogi-hook/src/macos.rs` | the CGEventTap (on `core-graphics`, see below), the Accessibility-trust check/prompt, the off-tap `NSWorkspace` frontmost-app read, and the `CGGetEventTapList` enumeration |
 | `openlogi-hook/src/macos/foreground.rs` | the `NSWorkspace` activation observer, the `NSRunningApplication` conversion behind every frontmost-app read, and the Safari PID snapshot |
