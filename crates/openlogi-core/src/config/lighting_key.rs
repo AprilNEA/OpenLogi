@@ -216,8 +216,8 @@ mod tests {
             assert_eq!(key.usage(), usage);
             assert_eq!(key.to_string(), name);
         }
-        assert!("Fn".parse::<LightingKey>().is_err());
-        assert!("".parse::<LightingKey>().is_err());
+        "Fn".parse::<LightingKey>().expect_err("not a key name");
+        "".parse::<LightingKey>().expect_err("not a key name");
     }
 
     #[test]

@@ -145,9 +145,9 @@ mod color_validation_tests {
         let (key, color) = parse_key("esc=#ff0000").expect("a valid --key");
         assert_eq!(key.name(), "Esc");
         assert_eq!(color.components(), (0xff, 0, 0));
-        assert!(parse_key("Esc").is_err());
-        assert!(parse_key("Hyper=ff0000").is_err());
-        assert!(parse_key("Esc=red").is_err());
+        parse_key("Esc").expect_err("not a valid --key");
+        parse_key("Hyper=ff0000").expect_err("not a valid --key");
+        parse_key("Esc=red").expect_err("not a valid --key");
     }
 
     #[tokio::test]
