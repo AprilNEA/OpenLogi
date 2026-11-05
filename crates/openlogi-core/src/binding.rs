@@ -39,7 +39,9 @@ pub use defaults::{
     default_binding, default_binding_for, default_binding_on, default_gesture_binding,
 };
 pub use effect::{Effect, MediaKey, MouseButton, NativeAction, Script, Shortcut};
-pub use gaming::{G502_LIGHTSPEED, GamingButtons, GamingLayout, STANDARD_BUTTONS, Slot};
+pub use gaming::{
+    G502_LIGHTSPEED, G903_LIGHTSPEED, GamingButtons, GamingLayout, STANDARD_BUTTONS, Slot,
+};
 pub use gesture::GestureDirection;
 pub use key_combo::{KeyCombo, KeyComboParseError, KeyboardUsage, KeyboardUsageError};
 pub use swipe::{
