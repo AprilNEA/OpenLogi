@@ -674,6 +674,83 @@ async fn a_keyboard_with_only_per_key_v2_can_be_coloured() -> Result<(), WriteEr
     Ok(())
 }
 
+/// Whether `report` is a `0x8081 frameEnd` request on the scripted keyboard.
+fn is_per_key_v2_commit(report: &[u8]) -> bool {
+    report.len() >= 4 && report[2] == 0x07 && report[3] >> 4 == 0x07
+}
+
+#[tokio::test]
+async fn a_per_key_v2_request_answered_busy_is_resent() -> Result<(), WriteError> {
+    // A G515 LS TKL answers Busy to a 0x8081 frame sent right after its
+    // previous commit, and takes the same request a moment later.
+    let busy_left = AtomicU8::new(1);
+    let (raw, handle) = ScriptedRawHidChannel::with_dynamic_responder(move |request| {
+        if is_per_key_v2_commit(request) && busy_left.swap(0, Ordering::SeqCst) == 1 {
+            return Some(feature_error(request, BUSY));
+        }
+        per_key_v2_scripted_response(request)
+    });
+    let channel = scripted_channel(raw).await;
+    let shared = SharedChannel::new(
+        channel,
+        DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xc355,
+        },
+    );
+
+    set_keyboard_color_on(&shared, 0x11, 0x22, 0x33).await?;
+
+    let commits = handle
+        .written_reports()
+        .iter()
+        .filter(|report| is_per_key_v2_commit(report))
+        .count();
+    assert_eq!(commits, 2, "the Busy commit must be sent once more");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_per_key_v2_request_that_stays_busy_fails_after_the_backoff() {
+    let (raw, handle) = ScriptedRawHidChannel::with_responder(|request| {
+        if is_per_key_v2_commit(request) {
+            return Some(feature_error(request, BUSY));
+        }
+        per_key_v2_scripted_response(request)
+    });
+    let channel = scripted_channel(raw).await;
+    let shared = SharedChannel::new(
+        channel,
+        DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xc355,
+        },
+    );
+
+    let error = set_keyboard_color_on(&shared, 0x11, 0x22, 0x33)
+        .await
+        .expect_err("a commit that stays Busy must fail");
+
+    assert!(
+        matches!(
+            error,
+            WriteError::HidppFeature {
+                feature_hex: 0x8081,
+                kind: HidppFeatureErrorKind::Busy,
+                ..
+            }
+        ),
+        "got {error:?}"
+    );
+    // The first attempt plus one resend per backoff step, then it gives up.
+    let commits = handle
+        .written_reports()
+        .iter()
+        .filter(|report| is_per_key_v2_commit(report))
+        .count();
+    assert_eq!(commits, 4);
+}
+
 fn scripted_response(request: &[u8]) -> Option<Vec<u8>> {
     if request.len() < 7 || !matches!(request[0], 0x10 | 0x11) {
         return None;

@@ -502,18 +502,19 @@ impl PerKeyV2Target {
     ) -> Result<(), WriteError> {
         // One request carries at most MAX_SINGLE_VALUE_ZONES ids and silently
         // ignores the rest, so the chunking is the caller's job.
+        let feature = &self.feature;
         for chunk in self.zones.chunks(MAX_SINGLE_VALUE_ZONES) {
             scope.check()?;
-            self.feature
-                .set_rgb_zones_single_value(color, chunk)
-                .await
-                .map_err(classify_per_key_v2_error)?;
+            retry_busy(scope, async || {
+                feature.set_rgb_zones_single_value(color, chunk).await
+            })
+            .await?;
         }
         scope.check()?;
-        self.feature
-            .frame_end(FramePersistence::Volatile, 0, 0)
-            .await
-            .map_err(classify_per_key_v2_error)?;
+        retry_busy(scope, async || {
+            feature.frame_end(FramePersistence::Volatile, 0, 0).await
+        })
+        .await?;
         debug!(
             index,
             zone_count = self.zones.len(),
@@ -572,6 +573,39 @@ pub(super) fn collect_present_zones(
             }
         }
     }
+}
+
+/// Waits before each retry of a `0x8081` request the device answered with
+/// `Busy`. A G515 LS TKL (`046d:c355`) commits the first frame after a fresh
+/// `0x8071` claim, then answers `Busy` to the replayed frame sent about 30 ms
+/// later. Solaar retries per-key requests on `Busy` with the same backoff.
+const PER_KEY_V2_BUSY_BACKOFF: [Duration; 3] = [
+    Duration::from_millis(30),
+    Duration::from_millis(60),
+    Duration::from_millis(90),
+];
+
+/// Send a `0x8081` request, resending it while the device answers `Busy`.
+///
+/// A `Busy` reply means the device did not act on the request, so resending
+/// the same zones or commit is safe. `scope` is checked before each resend, so
+/// cancellation and the deadline still stop the frame. The last `Busy` after
+/// every backoff step is returned as the error.
+async fn retry_busy<T>(
+    scope: &WriteScope<impl Fn() -> bool, impl Fn() -> bool>,
+    mut request: impl AsyncFnMut() -> Result<T, Hidpp20Error>,
+) -> Result<T, WriteError> {
+    for delay in PER_KEY_V2_BUSY_BACKOFF {
+        match request().await {
+            Err(Hidpp20Error::Feature(v20::ErrorType::Busy)) => {
+                debug!(?delay, "0x8081 answered Busy; resending");
+                tokio::time::sleep(delay).await;
+                scope.check()?;
+            }
+            other => return other.map_err(classify_per_key_v2_error),
+        }
+    }
+    request().await.map_err(classify_per_key_v2_error)
 }
 
 /// Classify a HID++ error from the `PerKeyLighting2` functions.
