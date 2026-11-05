@@ -328,21 +328,27 @@ impl Config {
             .map_or(&[], |device| device.host_switch_targets.as_slice())
     }
 
-    /// Add or remove one physical device from `keyboard_key`'s linked
-    /// Easy-Switch group. Repeated writes are idempotent and preserve the
-    /// target order already stored in the configuration.
-    pub fn set_host_switch_target(&mut self, keyboard_key: &str, target_key: &str, enabled: bool) {
+    /// Add one physical device to `keyboard_key`'s linked Easy-Switch group.
+    /// Linking a device again is a no-op and keeps the target order already
+    /// stored in the configuration.
+    pub fn link_host_switch_target(&mut self, keyboard_key: &str, target_key: &str) {
         let targets = &mut self
             .devices
             .entry(keyboard_key.to_string())
             .or_default()
             .host_switch_targets;
-        if enabled {
-            if !targets.iter().any(|target| target == target_key) {
-                targets.push(target_key.to_string());
-            }
-        } else {
-            targets.retain(|target| target != target_key);
+        if !targets.iter().any(|target| target == target_key) {
+            targets.push(target_key.to_string());
+        }
+    }
+
+    /// Remove one physical device from `keyboard_key`'s linked Easy-Switch
+    /// group. Unlinking a device that is not linked is a no-op.
+    pub fn unlink_host_switch_target(&mut self, keyboard_key: &str, target_key: &str) {
+        if let Some(device) = self.devices.get_mut(keyboard_key) {
+            device
+                .host_switch_targets
+                .retain(|target| target != target_key);
         }
     }
 
@@ -765,16 +771,16 @@ mod tests {
     fn host_switch_target_edits_are_idempotent_and_ordered() {
         let mut config = Config::ephemeral();
 
-        config.set_host_switch_target("keyboard", "mouse-b", true);
-        config.set_host_switch_target("keyboard", "mouse-a", true);
-        config.set_host_switch_target("keyboard", "mouse-b", true);
+        config.link_host_switch_target("keyboard", "mouse-b");
+        config.link_host_switch_target("keyboard", "mouse-a");
+        config.link_host_switch_target("keyboard", "mouse-b");
         assert_eq!(
             config.host_switch_targets("keyboard"),
             ["mouse-b", "mouse-a"]
         );
 
-        config.set_host_switch_target("keyboard", "mouse-b", false);
-        config.set_host_switch_target("keyboard", "missing", false);
+        config.unlink_host_switch_target("keyboard", "mouse-b");
+        config.unlink_host_switch_target("keyboard", "missing");
         assert_eq!(config.host_switch_targets("keyboard"), ["mouse-a"]);
     }
 }

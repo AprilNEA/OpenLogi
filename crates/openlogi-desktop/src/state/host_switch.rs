@@ -80,33 +80,53 @@ impl AppState {
             .collect()
     }
 
-    /// Add or remove one target from the active keyboard's linked switch
-    /// group, then reload the agent so its existing host-switch watcher uses
-    /// the new relationship.
-    pub(crate) fn commit_host_switch_target(
-        &mut self,
-        target_key: &str,
-        selected: bool,
-    ) -> StateEvents {
+    /// Add one target to the active keyboard's linked switch group, then
+    /// reload the agent so its existing host-switch watcher uses the new
+    /// relationship.
+    pub(crate) fn link_host_switch_target(&mut self, target_key: &str) -> StateEvents {
         let events = self.for_current_device(StateEvent::DeviceConfigChanged);
-        // Only a listed row whose state actually changes is written.
-        let changes = self
-            .current_host_switch_targets()
-            .iter()
-            .any(|target| target.key == target_key && target.selected != selected);
-        let Some(keyboard_key) = self
-            .current_record()
-            .and_then(DeviceRecord::persistent_config_key)
-            .filter(|_| changes)
-            .map(str::to_string)
+        let Some((keyboard_key, _)) = self
+            .listed_host_switch_target(target_key)
+            .filter(|(_, target)| !target.selected)
         else {
             return events;
         };
         self.config.edit(|config| {
-            config.set_host_switch_target(&keyboard_key, target_key, selected);
+            config.link_host_switch_target(&keyboard_key, target_key);
         });
         self.persist_and_reload("Easy-Switch target");
         events
+    }
+
+    /// Remove one target from the active keyboard's linked switch group, then
+    /// reload the agent.
+    pub(crate) fn unlink_host_switch_target(&mut self, target_key: &str) -> StateEvents {
+        let events = self.for_current_device(StateEvent::DeviceConfigChanged);
+        let Some((keyboard_key, _)) = self
+            .listed_host_switch_target(target_key)
+            .filter(|(_, target)| target.selected)
+        else {
+            return events;
+        };
+        self.config.edit(|config| {
+            config.unlink_host_switch_target(&keyboard_key, target_key);
+        });
+        self.persist_and_reload("Easy-Switch target");
+        events
+    }
+
+    /// The active keyboard's configuration key and the listed row for
+    /// `target_key`. Only a listed row is ever written.
+    fn listed_host_switch_target(&self, target_key: &str) -> Option<(String, HostSwitchTarget)> {
+        let target = self
+            .current_host_switch_targets()
+            .into_iter()
+            .find(|target| target.key == target_key)?;
+        let keyboard_key = self
+            .current_record()
+            .and_then(DeviceRecord::persistent_config_key)?
+            .to_string();
+        Some((keyboard_key, target))
     }
 }
 
@@ -252,7 +272,7 @@ mod tests {
         let (mut state, mut receiver) = state();
         while receiver.try_recv().is_ok() {}
 
-        let events = state.commit_host_switch_target("unit:05060708", true);
+        let events = state.link_host_switch_target("unit:05060708");
 
         assert_eq!(
             events,
@@ -273,7 +293,7 @@ mod tests {
         let (mut state, mut receiver) = state();
         while receiver.try_recv().is_ok() {}
         state.config.edit(|config| {
-            config.set_host_switch_target("unit:01020304", "unit:090a0b0c", true);
+            config.link_host_switch_target("unit:01020304", "unit:090a0b0c");
         });
 
         let targets = state.current_host_switch_targets();
@@ -281,7 +301,7 @@ mod tests {
             target.key == "unit:090a0b0c" && target.name == "Basic Mouse" && target.selected
         }));
 
-        let _ = state.commit_host_switch_target("unit:090a0b0c", false);
+        let _ = state.unlink_host_switch_target("unit:090a0b0c");
         assert!(
             !state
                 .config

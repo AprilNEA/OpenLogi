@@ -16,7 +16,7 @@ use crate::ui::components::Toggle;
 use crate::ui::theme::{self, Typography as _};
 
 /// Render the controlled table. AppState remains the sole owner of the
-/// selection; each row sends only the requested boolean value.
+/// selection; each row only asks it to link or unlink that row's device.
 pub(crate) fn target_table(cx: &mut App) -> impl IntoElement {
     let pal = theme::palette(cx);
     let targets = AppState::try_read(cx)
@@ -89,10 +89,15 @@ pub(crate) fn target_table(cx: &mut App) -> impl IntoElement {
                                                     let selected = *selected;
                                                     let target_key = target_key.clone();
                                                     AppState::apply(cx, move |state| {
-                                                        state.commit_host_switch_target(
-                                                            &target_key,
-                                                            selected,
-                                                        )
+                                                        if selected {
+                                                            state.link_host_switch_target(
+                                                                &target_key,
+                                                            )
+                                                        } else {
+                                                            state.unlink_host_switch_target(
+                                                                &target_key,
+                                                            )
+                                                        }
                                                     });
                                                 }),
                                         ),
