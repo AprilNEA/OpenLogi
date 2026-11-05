@@ -145,6 +145,10 @@ pub fn new_entity(cx: &mut App) -> Entity<Updater> {
 
 #[cfg(target_os = "linux")]
 fn linux_updater(channel: UpdateChannel, cx: &mut Context<Updater>) -> Updater {
+    #[expect(
+        clippy::expect_used,
+        reason = "CARGO_PKG_VERSION is cargo-provided and always valid semver"
+    )]
     let version = Version::parse(env!("CARGO_PKG_VERSION")).expect("valid embedded version");
     Updater::with_driver(
         linux::LinuxPackageDriver::new(
