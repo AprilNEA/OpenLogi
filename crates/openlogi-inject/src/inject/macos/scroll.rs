@@ -482,6 +482,8 @@ mod tests {
 
     /// A zoom is the scroll event retyped: its deltas — which Zoom reads —
     /// and the synthetic tag survive the stamp, and a scroll stays a scroll.
+    /// Core Graphics converts a 16.16 field to a double only for a scroll's
+    /// type, so the zoom's fixed-point distance is checked as stored.
     #[test]
     fn zoom_stamp_retypes_wheel_events_and_keeps_their_deltas() {
         let ticks = QuantizedScroll { x: 0, y: 2 };
@@ -499,9 +501,11 @@ mod tests {
             zoom.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_DELTA_AXIS_1),
             2
         );
-        let y =
-            zoom.get_double_value_field(EventField::SCROLL_WHEEL_EVENT_FIXED_POINT_DELTA_AXIS_1);
-        assert!((y - 1.5).abs() < 1.0e-4, "{y}");
+        assert_eq!(
+            zoom.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_FIXED_POINT_DELTA_AXIS_1),
+            3 << 15,
+            "1.5 lines in 16.16"
+        );
         assert_eq!(
             zoom.get_integer_value_field(EventField::EVENT_SOURCE_USER_DATA),
             crate::SYNTHETIC_EVENT_USER_DATA
