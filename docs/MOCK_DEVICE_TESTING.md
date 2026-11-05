@@ -648,6 +648,14 @@ A cassette may retain an unassociated report as evidence, but replay injects it
 only at an explicit step/barrier. Otherwise a scheduler difference would turn
 recorded timing into a flaky test.
 
+Capture drops an unmatched HID++ report that no recorded request could have
+taken as its answer: a receiver or device notification, or a reply to another
+host driver on the same node (on Linux, hid-logitech-dj and hid-logitech-hidpp
+drive a receiver through the hidraw node capture reads, and hid-logitech-hidpp
+tags its requests with software ID 1). It rejects the recording
+when some recorded request could have taken the report, because that request's
+recorded answer may then belong to another sender.
+
 ### Completion
 
 A replay case reports:
