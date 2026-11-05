@@ -255,14 +255,13 @@ pub fn install(cx: &mut App, settings: &AppSettings) {
         else {
             return;
         };
-        if updater.read(cx).is_driver_backed() {
-            if with_sparkle(&updater, cx, |_| ()).is_some() {
-                adopt_sparkle_auto_install(&updater, auto_install, cx);
-            }
+        if with_sparkle(&updater, cx, |_| ()).is_some() {
+            adopt_sparkle_auto_install(&updater, auto_install, cx);
         } else if auto_install && matches!(updater.read(cx).status(), UpdateStatus::Available(_)) {
-            // The engine found a newer version and the user opted into
-            // automatic install: download and stage it (applied on the next
-            // restart, never mid-session). Sparkle does this on its own.
+            // The engine or Linux package driver found a newer version and the
+            // user opted into automatic install: download and stage/install it
+            // (applied on the next restart for the engine; Linux packages ask
+            // for elevation then relaunch). Sparkle does this on its own.
             updater.update(cx, Updater::download_and_install);
         }
     });

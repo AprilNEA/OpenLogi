@@ -1,7 +1,15 @@
-#[cfg(test)]
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+
+use gpui_updater::{
+    DriverEvent, DriverEvents, EngineConfig, Release, StaticManifestSource, UpdateDriver,
+    UpdateEngine, Verification, Version,
+};
 
 use crate::platform::installation::{InstallationSource, LinuxPackage};
+
+/// Privileged helper shipped in release packages.
+pub(crate) const UPDATE_INSTALL_HELPER: &str = "/usr/libexec/openlogi-update-install";
 
 /// Package format required by the installation that owns OpenLogi.
 pub(crate) fn package_format(source: InstallationSource) -> Option<&'static str> {
@@ -23,59 +31,47 @@ pub(crate) fn matches_package(source: InstallationSource, name: &str) -> bool {
     name.starts_with("openlogi-v") && name.contains("-linux-") && name.ends_with(&expected)
 }
 
-/// The privileged command to install an already verified Arch package.
-#[cfg(test)]
-pub(crate) fn arch_install_command(package: &Path) -> (&'static str, Vec<String>) {
+/// Expected release asset name for this machine and package source.
+pub(crate) fn expected_package_name(
+    source: InstallationSource,
+    version: &Version,
+) -> Option<String> {
+    let format = package_format(source)?;
+    let arch = match std::env::consts::ARCH {
+        "x86_64" => "amd64",
+        "aarch64" => "arm64",
+        _ => return None,
+    };
+    Some(format!("openlogi-v{version}-linux-{arch}.{format}"))
+}
+
+/// Architecture label consumed by [`StaticManifestSource`].
+fn manifest_arch() -> Option<&'static str> {
+    match std::env::consts::ARCH {
+        "x86_64" => Some("x86_64"),
+        "aarch64" => Some("arm64"),
+        _ => None,
+    }
+}
+
+/// Build the `pkexec` argv that production `install()` runs after download.
+pub(crate) fn helper_install_command(
+    package: &Path,
+    signature: &Path,
+    checksum: &str,
+    expected_name: &str,
+) -> (&'static str, Vec<String>) {
     (
-        "pacman",
+        "pkexec",
         vec![
-            "-U".to_owned(),
-            "--".to_owned(),
+            UPDATE_INSTALL_HELPER.to_owned(),
             package.to_string_lossy().into_owned(),
+            signature.to_string_lossy().into_owned(),
+            checksum.to_owned(),
+            expected_name.to_owned(),
         ],
     )
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn selects_arch_package_format() {
-        assert_eq!(
-            package_format(InstallationSource::LinuxPackage(LinuxPackage::Arch)),
-            Some("pkg.tar.zst")
-        );
-    }
-
-    #[test]
-    fn rejects_wrong_package_format() {
-        let arch = InstallationSource::LinuxPackage(LinuxPackage::Arch);
-
-        assert!(matches_package(
-            arch,
-            "openlogi-v0.8.21-linux-amd64.pkg.tar.zst"
-        ));
-
-        assert!(!matches_package(arch, "openlogi-v0.8.21-linux-amd64.deb"));
-
-        assert!(!matches_package(arch, "untrusted.pkg.tar.zst"));
-    }
-
-    #[test]
-    fn builds_pacman_command_without_shell_interpolation() {
-        let (program, args) = arch_install_command(Path::new("/tmp/update.pkg.tar.zst"));
-        assert_eq!(program, "pacman");
-        assert_eq!(args, ["-U", "--", "/tmp/update.pkg.tar.zst"]);
-    }
-}
-
-use std::sync::{Arc, Mutex};
-
-use gpui_updater::{
-    DriverEvent, DriverEvents, EngineConfig, Release, StaticManifestSource, UpdateDriver,
-    UpdateEngine, Verification, Version,
-};
 
 /// Backend de actualizaciones para instalaciones Linux gestionadas por paquetes.
 pub(crate) struct LinuxPackageDriver {
@@ -120,9 +116,8 @@ impl UpdateDriver for LinuxPackageDriver {
         events.emit(DriverEvent::Checking);
 
         std::thread::spawn(move || {
-            let Some(format) = package_format(InstallationSource::detect())
-                .filter(|format| *format == "pkg.tar.zst")
-            else {
+            let installation = InstallationSource::detect();
+            let Some(format) = package_format(installation) else {
                 events.emit(DriverEvent::Failed(
                     "This Linux installation is not managed by a supported package manager"
                         .to_owned(),
@@ -131,12 +126,17 @@ impl UpdateDriver for LinuxPackageDriver {
                 return;
             };
 
+            let Some(arch) = manifest_arch() else {
+                events.emit(DriverEvent::Failed(
+                    "Unsupported Linux architecture".to_owned(),
+                ));
+                events.emit(DriverEvent::Settled);
+                return;
+            };
+
             let source = StaticManifestSource::new(url)
                 .os("linux")
-                .arch(match std::env::consts::ARCH {
-                    "aarch64" => "arm64",
-                    _ => "x86_64",
-                })
+                .arch(arch)
                 .format(format);
 
             let mut config = EngineConfig::new(version).verification(Verification::Strict);
@@ -149,20 +149,14 @@ impl UpdateDriver for LinuxPackageDriver {
 
             match engine.check() {
                 Ok(Some(release)) => {
-                    let arch = match std::env::consts::ARCH {
-                        "x86_64" => "amd64",
-                        "aarch64" => "arm64",
-                        _ => {
-                            events.emit(DriverEvent::Failed(
-                                "Unsupported Linux architecture".to_owned(),
-                            ));
-                            events.emit(DriverEvent::Settled);
-                            return;
-                        }
+                    let Some(expected) = expected_package_name(installation, &release.version)
+                    else {
+                        events.emit(DriverEvent::Failed(
+                            "Unsupported Linux architecture".to_owned(),
+                        ));
+                        events.emit(DriverEvent::Settled);
+                        return;
                     };
-
-                    let expected =
-                        format!("openlogi-v{}-linux-{arch}.pkg.tar.zst", release.version);
 
                     if release.asset.name != expected {
                         events.emit(DriverEvent::Failed(
@@ -219,21 +213,19 @@ impl UpdateDriver for LinuxPackageDriver {
         std::thread::spawn(move || {
             let result = (|| -> Result<Version, String> {
                 let installation = InstallationSource::detect();
-
-                if installation != InstallationSource::LinuxPackage(LinuxPackage::Arch) {
+                let Some(format) = package_format(installation) else {
                     return Err(
-                        "In-app installation currently supports Arch Linux packages only".into(),
+                        "In-app installation supports Debian, RPM, and Arch Linux packages only"
+                            .into(),
                     );
-                }
-
-                let arch = match std::env::consts::ARCH {
-                    "x86_64" => "amd64",
-                    "aarch64" => "arm64",
-                    _ => return Err("Unsupported architecture".into()),
                 };
 
-                let expected_name =
-                    format!("openlogi-v{}-linux-{arch}.pkg.tar.zst", release.version);
+                let Some(arch) = manifest_arch() else {
+                    return Err("Unsupported architecture".into());
+                };
+
+                let expected_name = expected_package_name(installation, &release.version)
+                    .ok_or("Unsupported architecture")?;
 
                 if release.asset.name != expected_name {
                     return Err("Unexpected package name, version or architecture".into());
@@ -249,11 +241,8 @@ impl UpdateDriver for LinuxPackageDriver {
 
                 let source = StaticManifestSource::new(url)
                     .os("linux")
-                    .arch(match arch {
-                        "amd64" => "x86_64",
-                        _ => "arm64",
-                    })
-                    .format("pkg.tar.zst");
+                    .arch(arch)
+                    .format(format);
 
                 let config = EngineConfig::new(version)
                     .verification(Verification::Strict)
@@ -278,8 +267,7 @@ impl UpdateDriver for LinuxPackageDriver {
 
                 // A privileged helper is shipped with newer OpenLogi packages.
                 // Older installations must be upgraded manually once.
-                let helper = "/usr/libexec/openlogi-update-install";
-                if !std::path::Path::new(helper).is_file() {
+                if !Path::new(UPDATE_INSTALL_HELPER).is_file() {
                     return Err(
                         "The secure update helper is not installed. Update OpenLogi manually once to enable in-app installation."
                             .to_owned(),
@@ -300,7 +288,7 @@ impl UpdateDriver for LinuxPackageDriver {
                     })
                     .ok_or("Missing or invalid SHA-256 checksum")?;
 
-                let signature = temporary.path().join(format!("{expected_name}.minisig"));
+                let signature: PathBuf = temporary.path().join(format!("{expected_name}.minisig"));
 
                 let download_status = std::process::Command::new("curl")
                     .args([
@@ -327,15 +315,13 @@ impl UpdateDriver for LinuxPackageDriver {
                 }
 
                 // The helper copies into a root-owned directory, then verifies
-                // minisign and SHA-256 before executing pacman.
+                // minisign and SHA-256 before invoking the package manager.
                 events.emit(DriverEvent::Installing);
 
-                let status = std::process::Command::new("pkexec")
-                    .arg(helper)
-                    .arg(&artifact)
-                    .arg(&signature)
-                    .arg(checksum)
-                    .arg(&expected_name)
+                let (program, args) =
+                    helper_install_command(&artifact, &signature, checksum, &expected_name);
+                let status = std::process::Command::new(program)
+                    .args(&args)
                     .status()
                     .map_err(|error| format!("Could not start polkit: {error}"))?;
 
@@ -372,5 +358,79 @@ impl UpdateDriver for LinuxPackageDriver {
             )));
             events.emit(DriverEvent::Settled);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn selects_package_formats_for_supported_sources() {
+        assert_eq!(
+            package_format(InstallationSource::LinuxPackage(LinuxPackage::Arch)),
+            Some("pkg.tar.zst")
+        );
+        assert_eq!(
+            package_format(InstallationSource::LinuxPackage(LinuxPackage::Deb)),
+            Some("deb")
+        );
+        assert_eq!(
+            package_format(InstallationSource::LinuxPackage(LinuxPackage::Rpm)),
+            Some("rpm")
+        );
+        assert_eq!(package_format(InstallationSource::Unknown), None);
+    }
+
+    #[test]
+    fn rejects_wrong_package_format() {
+        let arch = InstallationSource::LinuxPackage(LinuxPackage::Arch);
+        let deb = InstallationSource::LinuxPackage(LinuxPackage::Deb);
+        let rpm = InstallationSource::LinuxPackage(LinuxPackage::Rpm);
+
+        assert!(matches_package(
+            arch,
+            "openlogi-v0.8.21-linux-amd64.pkg.tar.zst"
+        ));
+        assert!(matches_package(deb, "openlogi-v0.8.21-linux-amd64.deb"));
+        assert!(matches_package(rpm, "openlogi-v0.8.21-linux-amd64.rpm"));
+
+        assert!(!matches_package(arch, "openlogi-v0.8.21-linux-amd64.deb"));
+        assert!(!matches_package(deb, "openlogi-v0.8.21-linux-amd64.rpm"));
+        assert!(!matches_package(rpm, "untrusted.rpm"));
+    }
+
+    #[test]
+    fn builds_expected_package_names() {
+        let version = Version::parse("0.9.1").unwrap();
+        let name = expected_package_name(
+            InstallationSource::LinuxPackage(LinuxPackage::Deb),
+            &version,
+        )
+        .expect("supported arch");
+        assert!(
+            name == "openlogi-v0.9.1-linux-amd64.deb" || name == "openlogi-v0.9.1-linux-arm64.deb"
+        );
+    }
+
+    #[test]
+    fn builds_pkexec_helper_command_without_shell_interpolation() {
+        let (program, args) = helper_install_command(
+            Path::new("/tmp/openlogi-v0.9.1-linux-amd64.deb"),
+            Path::new("/tmp/openlogi-v0.9.1-linux-amd64.deb.minisig"),
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "openlogi-v0.9.1-linux-amd64.deb",
+        );
+        assert_eq!(program, "pkexec");
+        assert_eq!(
+            args,
+            [
+                UPDATE_INSTALL_HELPER,
+                "/tmp/openlogi-v0.9.1-linux-amd64.deb",
+                "/tmp/openlogi-v0.9.1-linux-amd64.deb.minisig",
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                "openlogi-v0.9.1-linux-amd64.deb",
+            ]
+        );
     }
 }

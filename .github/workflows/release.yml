@@ -303,6 +303,11 @@ jobs:
             echo "The Linux installer minisign public key does not match the release key." >&2
             exit 1
           fi
+          helper_key=$(sed -n 's/^MINISIGN_PUBLIC_KEY=//p' packaging/linux/openlogi-update-install)
+          if [ "$helper_key" != "$OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY" ]; then
+            echo "The Linux in-app update helper minisign public key does not match the release key." >&2
+            exit 1
+          fi
 
       - name: Install minisign
         run: |
