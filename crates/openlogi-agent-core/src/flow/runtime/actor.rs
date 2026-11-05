@@ -169,6 +169,7 @@ impl Actor {
                     } else {
                         info!("Flow has no pointer in this session; outgoing handoffs are off");
                         self.crossings_open = false;
+                        self.observable.set_flow_pointer_missing();
                     }
                 }
             }

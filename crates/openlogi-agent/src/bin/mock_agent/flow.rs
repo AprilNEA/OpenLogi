@@ -8,9 +8,10 @@
 //! agent saves it, through `ConfigFile::save`. The snapshot lists the peers
 //! saved there.
 //!
-//! The console's `flow` commands set a saved peer's link state, make another
-//! computer start pairing with this one, make the other user confirm first,
-//! or fail the attempt for any reason. Fixture runs keep test time frozen, so
+//! The console's `flow` commands set a saved peer's link state, say why this
+//! computer cannot switch at a screen edge, make another computer start
+//! pairing with this one, make the other user confirm first, or fail the
+//! attempt for any reason. Fixture runs keep test time frozen, so
 //! pairing refuses to open there, as the Bolt script does.
 
 use std::collections::BTreeMap;
@@ -21,8 +22,9 @@ use std::time::Duration;
 use openlogi_agent_core::flow::{PairedPeer, save_peer};
 use openlogi_core::config::{ConfigFile, FlowPublicKey};
 use openlogi_ipc::{
-    FlowIdentity, FlowLinkState, FlowPairTarget, FlowPairingCommandError, FlowPairingFailure,
-    FlowPairingPeer, FlowPairingPhase, FlowPeerStatus, FlowPlatform, FlowStatus,
+    FlowEdgeOff, FlowIdentity, FlowLinkState, FlowPairTarget, FlowPairingCommandError,
+    FlowPairingFailure, FlowPairingPeer, FlowPairingPhase, FlowPeerStatus, FlowPlatform,
+    FlowStatus,
 };
 
 use super::MockAgent;
@@ -55,6 +57,9 @@ pub(super) const CODE: &str = "418672";
 pub(super) enum FlowCommand {
     /// Report the link to the saved peer named `peer` as `state`.
     Link { peer: String, state: FlowLinkState },
+    /// Report why this computer cannot switch at a screen edge, or `None`
+    /// for nothing.
+    EdgeOff(Option<FlowEdgeOff>),
     /// A nearby computer starts pairing with this one.
     Incoming,
     /// The other computer's user confirms the code.
@@ -72,6 +77,8 @@ pub(super) struct MockFlow {
     /// Link states the console set for saved peers, by peer name. A peer
     /// the console never named is connected.
     links: BTreeMap<String, FlowLinkState>,
+    /// What the console said stops edge switching; nothing until it does.
+    edge_off: Option<FlowEdgeOff>,
     open: bool,
     /// Counts the times pairing opened, so a discovery scheduled before a
     /// close does not reach the next opening.
@@ -135,6 +142,7 @@ impl MockFlow {
                 })
                 .collect(),
             pairing: self.phase(),
+            edge_off: self.edge_off,
         }
     }
 
@@ -344,6 +352,10 @@ impl MockFlow {
                 self.links.insert(peer, state);
                 Ok(reply)
             }
+            FlowCommand::EdgeOff(edge_off) => {
+                self.edge_off = edge_off;
+                Ok(format!("Flow edge switching off: {edge_off:?}"))
+            }
             _ if !self.open => Err("Flow pairing is closed; open it in the GUI first".to_owned()),
             FlowCommand::Incoming => {
                 if self.attempt.is_some() {
@@ -397,6 +409,13 @@ fn peer(name: &str, key: u8, platform: FlowPlatform) -> FlowPairingPeer {
 pub(super) fn parse<'a>(words: &mut impl Iterator<Item = &'a str>) -> Result<FlowCommand, String> {
     match words.next() {
         Some("link") => parse_link(words),
+        Some("edge") => match words.next() {
+            Some("on") => Ok(FlowCommand::EdgeOff(None)),
+            Some("no-pointer") => Ok(FlowCommand::EdgeOff(Some(FlowEdgeOff::NoPointer))),
+            Some("capture-off") => Ok(FlowCommand::EdgeOff(Some(FlowEdgeOff::MouseCaptureOff))),
+            Some("no-hook") => Ok(FlowCommand::EdgeOff(Some(FlowEdgeOff::NoMouseHook))),
+            _ => Err("flow edge needs on, no-pointer, capture-off or no-hook".to_owned()),
+        },
         Some("incoming") => Ok(FlowCommand::Incoming),
         Some("confirm") => Ok(FlowCommand::PeerConfirms),
         Some("fail") => {
@@ -416,7 +435,8 @@ pub(super) fn parse<'a>(words: &mut impl Iterator<Item = &'a str>) -> Result<Flo
             Ok(FlowCommand::Fail(reason))
         }
         _ => Err(
-            "flow needs `link <peer> <state>`, `incoming`, `confirm`, or `fail <reason>`"
+            "flow needs `link <peer> <state>`, `edge <state>`, `incoming`, `confirm`, or \
+             `fail <reason>`"
                 .to_owned(),
         ),
     }

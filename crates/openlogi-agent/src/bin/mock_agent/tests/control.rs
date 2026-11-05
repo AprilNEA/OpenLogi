@@ -1,7 +1,7 @@
 //! The control console's commands, parsed as a developer types them and
 //! applied through the mock as a client would then see them.
 
-use openlogi_ipc::{AgentClient, FlowLinkState};
+use openlogi_ipc::{AgentClient, FlowEdgeOff, FlowLinkState};
 
 use super::super::control::{Command, Fault, parse};
 use super::super::flow::FlowCommand;
@@ -175,6 +175,16 @@ fn indicator_and_session_commands_parse() {
                 state: FlowLinkState::Degraded,
             })),
         ),
+        (
+            "flow edge no-pointer",
+            Some(Command::Flow(FlowCommand::EdgeOff(Some(
+                FlowEdgeOff::NoPointer,
+            )))),
+        ),
+        (
+            "flow edge on",
+            Some(Command::Flow(FlowCommand::EdgeOff(None))),
+        ),
         ("disconnect", Some(Command::Disconnect)),
     ];
     for (line, expected) in cases {
@@ -210,6 +220,8 @@ fn malformed_commands_are_refused() {
         "flow Work PC unstable",
         "flow link unstable",
         "flow link Work PC maybe",
+        "flow edge",
+        "flow edge maybe",
         "disconnect all",
     ] {
         parse(line).expect_err(line);

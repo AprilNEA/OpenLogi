@@ -11,7 +11,7 @@ use openlogi_flow::generated as proto;
 use openlogi_flow::transport::{
     FlowConnection, FlowEndpoint, MachineIdentity, NotificationEvent, PeerTrust, message_envelope,
 };
-use openlogi_ipc::FlowLinkState;
+use openlogi_ipc::{FlowEdgeOff, FlowLinkState};
 use tokio::sync::watch;
 
 use super::{Binding, FlowRuntime, FlowStart, hello};
@@ -139,6 +139,17 @@ async fn a_peer_hands_a_keyboard_to_this_host() {
         .expect("connect in time")
         .expect("connect");
     wait_for_link(&observable, FlowLinkState::Connected).await;
+    // Without a pointer this computer cannot switch at an edge, whatever the
+    // hook does, and the snapshot says why.
+    tokio::time::timeout(
+        WAIT,
+        observable
+            .subscribe()
+            .wait_for(|observed| observed.snapshot.flow.edge_off == Some(FlowEdgeOff::NoPointer)),
+    )
+    .await
+    .expect("the missing pointer is published in time")
+    .expect("the observable lives");
 
     let accept = call(&connection, 41).await;
     assert_eq!(accept.transfer_id, 41);

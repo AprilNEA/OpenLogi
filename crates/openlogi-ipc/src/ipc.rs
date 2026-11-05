@@ -184,7 +184,9 @@ pub use succession::Identity;
 /// v46: `Capabilities::{g_keys, m_keys, macro_record}` appended — a G-series
 ///      keyboard's HID++ `0x8010` G-keys, `0x8020` M-keys and `0x8030` MR
 ///      key. `ButtonId::{GKey, ModeKey}` appended — the G1–G5 slot of an M
-///      profile and M1–M3/MR.
+///      profile and M1–M3/MR. `FlowStatus::edge_off` and [`FlowEdgeOff`]
+///      appended — why moving the pointer off a screen edge cannot switch
+///      from this computer.
 pub const PROTOCOL_VERSION: u32 = 46;
 
 /// Environment variable through which the agent hands a supervised helper the
@@ -340,6 +342,26 @@ pub struct FlowStatus {
     /// enabled. `None` while pairing is closed: never started, stopped,
     /// expired, or lost with an agent restart. See [`FlowPairingPhase`].
     pub pairing: Option<FlowPairingPhase>,
+    /// Why moving the pointer off a screen edge cannot switch from this
+    /// computer, or `None` while nothing is known to stop it. Other computers
+    /// can switch to this one either way. See [`FlowEdgeOff`].
+    pub edge_off: Option<FlowEdgeOff>,
+}
+
+/// Why moving the pointer off a screen edge cannot switch from this computer.
+///
+/// Append new variants only: the enum crosses the bincode IPC.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FlowEdgeOff {
+    /// The session does not let OpenLogi read the pointer: a Wayland
+    /// session, or no display.
+    NoPointer,
+    /// `capture_mouse_events = false` keeps the OS mouse hook off, so
+    /// pointer motion never reaches Flow.
+    MouseCaptureOff,
+    /// The OS mouse hook is not running: Accessibility is not granted on
+    /// macOS, or the hook could not start.
+    NoMouseHook,
 }
 
 /// One configured Flow peer and the state of its session.

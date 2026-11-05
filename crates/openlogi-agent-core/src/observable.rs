@@ -19,14 +19,16 @@
 //! generation. The lock-key indicator has its own cell for the same reason,
 //! [`LockKeyIndicator`].
 
+use std::sync::{Mutex, MutexGuard, PoisonError};
+
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::brand::is_openlogi_foreground_id;
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_hook::Hook;
 use openlogi_ipc::{
-    AgentSnapshot, AgentStatus, FlowPairingPhase, FlowPeerStatus, FlowStatus, ForegroundApps,
-    FoundDevice, Generation, InventoryHealth, OBSERVE_HOLD, Observation, ObservedLight,
-    PROTOCOL_VERSION, PairingPhase, RECENT_APPS, SecureInput, VirtualKeyboardStatus,
+    AgentSnapshot, AgentStatus, FlowEdgeOff, FlowPairingPhase, FlowPeerStatus, FlowStatus,
+    ForegroundApps, FoundDevice, Generation, InventoryHealth, OBSERVE_HOLD, Observation,
+    ObservedLight, PROTOCOL_VERSION, PairingPhase, RECENT_APPS, SecureInput, VirtualKeyboardStatus,
 };
 use tokio::sync::watch;
 
@@ -36,8 +38,37 @@ use crate::notices::NoticeBoard;
 /// The agent's observable state, and the notification that it changed.
 pub struct ObservableState {
     tx: watch::Sender<Observation>,
+    /// What [`FlowStatus::edge_off`] is decided from besides the hook state
+    /// in the snapshot. Each writer holds it across its write, so the
+    /// published value always matches every fact it was decided from.
+    flow_edge: Mutex<FlowEdge>,
     notices: NoticeBoard,
     lock_keys: LockKeyIndicator,
+}
+
+/// The facts besides the hook state that decide [`FlowStatus::edge_off`].
+struct FlowEdge {
+    /// A Flow generation found no pointer in this session. The session
+    /// decides this, so it does not change while the agent runs.
+    no_pointer: bool,
+    /// `app_settings.capture_mouse_events` as the agent started with it.
+    mouse_capture: bool,
+}
+
+impl FlowEdge {
+    /// Without a pointer the hook does not matter: the motion it reports
+    /// cannot be read back as a position.
+    fn edge_off(&self, hook_installed: bool) -> Option<FlowEdgeOff> {
+        if self.no_pointer {
+            Some(FlowEdgeOff::NoPointer)
+        } else if hook_installed {
+            None
+        } else if self.mouse_capture {
+            Some(FlowEdgeOff::NoMouseHook)
+        } else {
+            Some(FlowEdgeOff::MouseCaptureOff)
+        }
+    }
 }
 
 impl ObservableState {
@@ -51,6 +82,10 @@ impl ObservableState {
     /// reader can observe the placeholder.
     #[must_use]
     pub fn new(agent_version: String) -> Self {
+        let flow_edge = FlowEdge {
+            no_pointer: false,
+            mouse_capture: true,
+        };
         // Generation 1, not 0: 0 is the client sentinel for "I have seen
         // nothing", so a first `observe(0)` must differ from whatever is here.
         let (tx, _) = watch::channel(Observation {
@@ -79,11 +114,15 @@ impl ObservableState {
                 pairing: None,
                 foreground: ForegroundApps::default(),
                 lights: Vec::new(),
-                flow: FlowStatus::default(),
+                flow: FlowStatus {
+                    edge_off: flow_edge.edge_off(false),
+                    ..FlowStatus::default()
+                },
             },
         });
         Self {
             tx,
+            flow_edge: Mutex::new(flow_edge),
             notices: NoticeBoard::default(),
             lock_keys: LockKeyIndicator::default(),
         }
@@ -243,15 +282,55 @@ impl ObservableState {
     /// with the hook state it produced. One generation on purpose: published
     /// separately, a revoke would briefly serve a state claiming the hook is
     /// installed without the permission it requires.
+    ///
+    /// Whether Flow can switch at a screen edge follows the hook in the same
+    /// generation.
     pub fn set_accessibility_and_hook(&self, granted: bool, hook_installed: bool) {
+        let edge = self.flow_edge();
         self.update(|snapshot| {
+            let edge_off = edge.edge_off(hook_installed);
             if snapshot.status.accessibility_granted == granted
                 && snapshot.status.hook_installed == hook_installed
+                && snapshot.flow.edge_off == edge_off
             {
                 return false;
             }
             snapshot.status.accessibility_granted = granted;
             snapshot.status.hook_installed = hook_installed;
+            snapshot.flow.edge_off = edge_off;
+            true
+        });
+    }
+
+    /// Record `app_settings.capture_mouse_events` as the agent started with
+    /// it, which tells a hook switched off apart from one that is missing.
+    pub fn set_mouse_capture(&self, capture: bool) {
+        let mut edge = self.flow_edge();
+        edge.mouse_capture = capture;
+        self.publish_flow_edge(&edge);
+    }
+
+    /// Record that a Flow generation found no pointer in this session, so
+    /// moving the pointer off an edge cannot switch from it.
+    pub fn set_flow_pointer_missing(&self) {
+        let mut edge = self.flow_edge();
+        edge.no_pointer = true;
+        self.publish_flow_edge(&edge);
+    }
+
+    fn flow_edge(&self) -> MutexGuard<'_, FlowEdge> {
+        self.flow_edge
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn publish_flow_edge(&self, edge: &FlowEdge) {
+        self.update(|snapshot| {
+            let edge_off = edge.edge_off(snapshot.status.hook_installed);
+            if snapshot.flow.edge_off == edge_off {
+                return false;
+            }
+            snapshot.flow.edge_off = edge_off;
             true
         });
     }
@@ -358,7 +437,7 @@ mod tests {
     use openlogi_core::brand::APP_ID;
     use openlogi_core::device::{DeviceInventory, DeviceKind, PairedDevice, ReceiverInfo};
     use openlogi_hid::DIRECT_DEVICE_INDEX;
-    use openlogi_ipc::{InventoryHealth, RECENT_APPS, VirtualKeyboardStatus};
+    use openlogi_ipc::{FlowEdgeOff, InventoryHealth, RECENT_APPS, VirtualKeyboardStatus};
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -520,6 +599,25 @@ mod tests {
         assert!(snapshot.status.accessibility_granted);
         assert_eq!(snapshot.inventory.len(), 1);
         assert_eq!(snapshot.status.inventory, InventoryHealth::Ready);
+    }
+
+    /// Edge switching needs both the pointer and the hook, and the snapshot
+    /// names the one the user can act on.
+    #[test]
+    fn flow_edge_off_names_what_stops_edge_switching() {
+        let state = state();
+        let edge_off = || state.snapshot().flow.edge_off;
+
+        state.set_mouse_capture(false);
+        assert_eq!(edge_off(), Some(FlowEdgeOff::MouseCaptureOff));
+        state.set_mouse_capture(true);
+        assert_eq!(edge_off(), Some(FlowEdgeOff::NoMouseHook));
+        state.set_accessibility_and_hook(true, true);
+        assert_eq!(edge_off(), None);
+        state.set_flow_pointer_missing();
+        assert_eq!(edge_off(), Some(FlowEdgeOff::NoPointer));
+        state.set_accessibility_and_hook(false, false);
+        assert_eq!(edge_off(), Some(FlowEdgeOff::NoPointer));
     }
 
     #[test]

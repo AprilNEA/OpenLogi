@@ -14,7 +14,8 @@ use openlogi_core::config::{
 use openlogi_core::device::DeviceKind;
 use openlogi_core::device_order::PhysicalDeviceKey;
 use openlogi_ipc::{
-    FlowLinkState, FlowPairTarget, FlowPairingCommandError, FlowPairingPhase, FlowStatus,
+    FlowEdgeOff, FlowLinkState, FlowPairTarget, FlowPairingCommandError, FlowPairingPhase,
+    FlowStatus,
 };
 use tracing::warn;
 
@@ -92,6 +93,9 @@ pub(crate) enum FlowHealth {
 /// Something that keeps one peer from working.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum FlowIssue {
+    /// Moving the pointer off an edge cannot switch from this computer, so
+    /// no peer can be reached from it. See [`FlowEdgeOff`].
+    EdgeOff(FlowEdgeOff),
     /// No edge of this computer leads to the peer.
     Unplaced(FlowPeerName),
     /// No device has a channel for the peer.
@@ -121,12 +125,14 @@ pub(crate) struct FlowReadiness {
     pub(crate) issues: Vec<FlowIssue>,
 }
 
-/// Decide how ready `config` is, given the window's `devices`. The agent arms
-/// an edge only for a connected peer, and a crossing hands over the online
+/// Decide how ready `config` is, given the window's `devices` and why the
+/// agent says edges cannot switch from here, if it does. The agent arms an
+/// edge only for a connected peer, and a crossing hands over the online
 /// devices with a channel for it, all or none: one that cannot switch keeps
 /// every device here. That is what counts as reachable.
 pub(crate) fn readiness(
     config: &FlowConfig,
+    edge_off: Option<FlowEdgeOff>,
     link: impl Fn(&str) -> Option<FlowLinkState>,
     devices: &[FlowDeviceRow],
 ) -> FlowReadiness {
@@ -146,7 +152,7 @@ pub(crate) fn readiness(
         row(device).map_or_else(|| device.key().as_str().to_owned(), |row| row.name.clone())
     };
     let mut routes = Vec::new();
-    let mut issues = Vec::new();
+    let mut issues: Vec<FlowIssue> = edge_off.map(FlowIssue::EdgeOff).into_iter().collect();
     for peer in config.peers() {
         let name = &peer.name;
         let edges: Vec<&FlowLayout> = config
@@ -182,7 +188,13 @@ pub(crate) fn readiness(
             (true, _) => {}
             (false, false) => issues.push(FlowIssue::DevicesAway(name.clone())),
             (false, true) => match link(name.as_str()) {
-                Some(FlowLinkState::Connected) => routes.extend(edges.into_iter().cloned()),
+                Some(FlowLinkState::Connected) => {
+                    // A connected peer is no route while no edge can switch;
+                    // `EdgeOff` already says why.
+                    if edge_off.is_none() {
+                        routes.extend(edges.into_iter().cloned());
+                    }
+                }
                 state => issues.push(FlowIssue::Unreachable {
                     peer: name.clone(),
                     link: state,
@@ -363,6 +375,7 @@ impl AppState {
     pub(crate) fn flow_readiness(&self) -> FlowReadiness {
         readiness(
             &self.config.flow,
+            self.agent_status().and(self.agent.flow.edge_off),
             |peer| self.flow_link(peer),
             &self.flow_devices(),
         )
