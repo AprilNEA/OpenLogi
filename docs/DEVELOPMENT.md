@@ -183,6 +183,8 @@ fail 3 error         # the keyboard stays online, but every request fails
 lock caps on         # the overlay shows the Caps Lock indicator
 backlight 2 4        # the overlay shows backlight level 2 of 4
 flow link Work PC unstable  # a saved Flow peer's link: connected, unstable, or lost
+flow edge no-pointer # why no edge can switch from here: no-pointer, capture-off,
+                     # no-hook, or on
 flow incoming        # with Flow pairing open, a computer pairs with this one
 flow confirm         # the other computer's user confirms the code first
 flow fail timeout    # the attempt fails: cancel, mismatch, timeout, unreachable,

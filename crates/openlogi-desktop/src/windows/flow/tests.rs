@@ -98,8 +98,24 @@ fn snapshot() -> AgentSnapshot {
                 },
             ],
             pairing: None,
+            edge_off: None,
         },
     }
+}
+
+/// Apply the agent's snapshot with `edge_off` in its Flow status.
+fn report_edge_off(visual: &mut VisualTestContext, edge_off: Option<FlowEdgeOff>) {
+    let mut reported = snapshot();
+    reported.flow.edge_off = edge_off;
+    visual.update(|_, cx| {
+        AppState::update(cx, |state, cx| {
+            state
+                .apply_agent_snapshot(&reported, &AssetResolver::new(), &[])
+                .events
+                .emit(cx);
+        });
+    });
+    draw(visual);
 }
 
 fn open_window(cx: &mut TestAppContext) -> &mut VisualTestContext {
@@ -190,6 +206,12 @@ fn a_peer_gets_a_device_and_moves_with_the_arrow_keys(cx: &mut TestAppContext) {
         )
         .unwrap()]
     );
+    assert_eq!(health(visual), FlowHealth::Ready);
+    // While the agent says no edge can switch from here, the connected peer
+    // is no route.
+    report_edge_off(visual, Some(FlowEdgeOff::NoPointer));
+    assert_eq!(health(visual), FlowHealth::Blocked);
+    report_edge_off(visual, None);
     assert_eq!(health(visual), FlowHealth::Ready);
     assert!(
         visual.debug_bounds("flow-self-unit:a393cae0-1").is_none(),

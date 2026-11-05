@@ -7,7 +7,9 @@ use openlogi_core::config::{
     FlowLayout, FlowPeer, FlowPeerName, FlowPublicKey,
 };
 use openlogi_core::device_order::PhysicalDeviceKey;
-use openlogi_ipc::{FlowLinkState, FlowPairingPeer, FlowPairingPhase, FlowPlatform, FlowStatus};
+use openlogi_ipc::{
+    FlowEdgeOff, FlowLinkState, FlowPairingPeer, FlowPairingPhase, FlowPlatform, FlowStatus,
+};
 
 use crate::services::assets::AssetResolver;
 use crate::services::ipc::Command;
@@ -222,7 +224,7 @@ fn readiness_names_what_keeps_each_peer_from_working() {
         row("unit:0000beef", "MX Keys", true, true),
     ];
 
-    let ready = readiness(&flow, link, &devices);
+    let ready = readiness(&flow, None, link, &devices);
     assert_eq!(ready.health, FlowHealth::Ready);
     assert_eq!(
         ready.routes,
@@ -249,6 +251,7 @@ fn readiness_names_what_keeps_each_peer_from_working() {
     // With `work` lost, nothing is reachable: Flow is blocked, not ready.
     let blocked = readiness(
         &flow,
+        None,
         |peer| (peer == "work").then_some(FlowLinkState::Lost),
         &devices,
     );
@@ -257,7 +260,7 @@ fn readiness_names_what_keeps_each_peer_from_working() {
 
     // A placed peer no device follows is named before its link.
     assert_eq!(
-        readiness(&config(Vec::new()), link, &devices).issues,
+        readiness(&config(Vec::new()), None, link, &devices).issues,
         [
             FlowIssue::NoDevice(name("work")),
             FlowIssue::NoDevice(name("lab")),
@@ -268,7 +271,43 @@ fn readiness_names_what_keeps_each_peer_from_working() {
     let mut off = flow.into_parts();
     off.enabled = false;
     let off = FlowConfig::try_from(off).unwrap();
-    assert_eq!(readiness(&off, link, &devices).health, FlowHealth::Off);
+    assert_eq!(
+        readiness(&off, None, link, &devices).health,
+        FlowHealth::Off
+    );
+}
+
+/// When the agent says no edge can switch from this computer, a connected
+/// peer is no route, and the reason comes first.
+#[test]
+fn an_edge_that_cannot_switch_blocks_every_route() {
+    let flow = config(vec![device("unit:a393cae0", 0, &[("work", 1)])]);
+    let connected = |_: &str| Some(FlowLinkState::Connected);
+    let devices = [row("unit:a393cae0", "MX Master 3S", true, true)];
+    assert_eq!(
+        readiness(&flow, None, connected, &devices).health,
+        FlowHealth::Ready
+    );
+
+    let blocked = readiness(&flow, Some(FlowEdgeOff::NoPointer), connected, &devices);
+    assert_eq!(blocked.health, FlowHealth::Blocked);
+    assert!(blocked.routes.is_empty());
+    assert_eq!(
+        blocked.issues,
+        [
+            FlowIssue::EdgeOff(FlowEdgeOff::NoPointer),
+            FlowIssue::NoDevice(name("lab")),
+            FlowIssue::Unplaced(name("den")),
+        ]
+    );
+
+    let mut off = flow.into_parts();
+    off.enabled = false;
+    let off = FlowConfig::try_from(off).unwrap();
+    assert_eq!(
+        readiness(&off, Some(FlowEdgeOff::NoMouseHook), connected, &devices).health,
+        FlowHealth::Off
+    );
 }
 
 /// A crossing hands over only online devices, all or none: a peer whose
@@ -281,9 +320,9 @@ fn a_route_needs_an_online_device_and_none_that_cannot_switch() {
         device("unit:0000beef", 0, &[("work", 1)]),
     ]);
     let connected = |_: &str| Some(FlowLinkState::Connected);
-    let routes = |devices: &[FlowDeviceRow]| readiness(&flow, connected, devices).routes;
+    let routes = |devices: &[FlowDeviceRow]| readiness(&flow, None, connected, devices).routes;
     let work_issues = |devices: &[FlowDeviceRow]| {
-        readiness(&flow, connected, devices)
+        readiness(&flow, None, connected, devices)
             .issues
             .into_iter()
             .filter(|issue| !matches!(issue, FlowIssue::Unplaced(_) | FlowIssue::NoDevice(_)))
@@ -466,6 +505,7 @@ fn a_computer_the_agent_paired_is_adopted_before_the_next_save() {
             },
             name: name("devbox"),
         }),
+        edge_off: None,
     });
     assert!(state.flow_config().peer("devbox").is_some());
     assert!(

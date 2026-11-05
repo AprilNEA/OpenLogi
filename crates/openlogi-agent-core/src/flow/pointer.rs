@@ -109,23 +109,20 @@ pub(crate) struct PointerThread {
 }
 
 impl PointerThread {
-    /// Start the thread on this session's pointer. Crossings go to
-    /// `crossings`; one that does not fit is dropped.
-    pub(crate) fn spawn(crossings: async_mpsc::Sender<EdgeCrossing>) -> std::io::Result<Self> {
-        Self::spawn_with(PointerProbe::connect, crossings)
-    }
-
     /// Start the thread on this session's pointer, or with `probe` off on
-    /// no pointer at all, as in a session that has no probe. Such a thread
-    /// exits at once and drops `crossings`.
+    /// no pointer at all, as in a session that has no probe. Crossings go to
+    /// `crossings`; one that does not fit is dropped. The thread tells
+    /// `found` whether it opened a pointer before it reads anything; one
+    /// without a pointer then exits and drops `crossings`.
     pub(crate) fn start(
         probe: bool,
         crossings: async_mpsc::Sender<EdgeCrossing>,
+        found: impl FnOnce(bool) + Send + 'static,
     ) -> std::io::Result<Self> {
         if probe {
-            Self::spawn(crossings)
+            Self::spawn_with(PointerProbe::connect, crossings, found)
         } else {
-            Self::spawn_with(|| None::<PointerProbe>, crossings)
+            Self::spawn_with(|| None::<PointerProbe>, crossings, found)
         }
     }
 
@@ -133,6 +130,7 @@ impl PointerThread {
     fn spawn_with<P, F>(
         connect: F,
         crossings: async_mpsc::Sender<EdgeCrossing>,
+        found: impl FnOnce(bool) + Send + 'static,
     ) -> std::io::Result<Self>
     where
         P: Pointer,
@@ -144,7 +142,9 @@ impl PointerThread {
         let join = thread::Builder::new()
             .name("openlogi-flow-pointer".to_owned())
             .spawn(move || {
-                let Some(pointer) = connect() else {
+                let pointer = connect();
+                found(pointer.is_some());
+                let Some(pointer) = pointer else {
                     warn!("Flow cannot read the pointer in this session; edge handoff is off");
                     return;
                 };

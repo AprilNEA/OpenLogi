@@ -242,6 +242,7 @@ impl Wanted {
             demand,
         } = core;
         observable.set_virtual_keyboard(virtual_keyboard.status());
+        observable.set_mouse_capture(capture_mouse_events);
         // Closing the channel turns post-arming declarations into no-ops in
         // the server's `declare_client` handler.
         drop(demand);

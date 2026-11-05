@@ -30,6 +30,8 @@ backlight <level> <levels>       a keyboard reports its backlight level
 advance <seconds>                move frozen test time (--fixture runs only)
 flow link <peer> connected|unstable|lost
                                  report a Flow peer's link state
+flow edge on|no-pointer|capture-off|no-hook
+                                 say why this computer cannot switch at an edge
 flow incoming                    a nearby computer starts Flow pairing with this one
 flow confirm                     the other computer's user confirms the code
 flow fail <reason>               fail the Flow pairing attempt; reasons:

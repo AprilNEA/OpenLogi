@@ -441,6 +441,8 @@ detector, which reports "crossed edge E at normalized position t".
 - The thread needs the OS mouse hook to wake it. With
   `app_settings.capture_mouse_events = false`, or without Accessibility on
   macOS, no edge fires; incoming handoffs still work.
+- The snapshot's `FlowStatus::edge_off` names which of these stops edges
+  firing, and the Flow window shows it instead of Ready.
 
 ## Agent runtime
 

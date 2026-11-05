@@ -57,12 +57,12 @@ use openlogi_core::hid::{
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, ActionRingPresentation, AgentRequest,
     AgentResponse, AgentSnapshot, AgentStatus, BacklightObservation, ChosenLight, ClientKind,
-    ConfigReloadError, FlowIdentity, FlowLinkState, FlowPairTarget, FlowPairingCommandError,
-    FlowPairingFailure, FlowPairingPeer, FlowPairingPhase, FlowPeerStatus, FlowPlatform,
-    FlowStatus, ForegroundApps, FoundDevice, Identity, InventoryHealth, LockKeyChange,
-    LockKeyObservation, MonitorEvent, Notice, NoticeKind, NoticeObservation, Observation,
-    ObservedLight, PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingPhase,
-    PairingUpdate, RingObservation, SavedConfig, SavedConfigVerdict, SecureInput,
+    ConfigReloadError, FlowEdgeOff, FlowIdentity, FlowLinkState, FlowPairTarget,
+    FlowPairingCommandError, FlowPairingFailure, FlowPairingPeer, FlowPairingPhase, FlowPeerStatus,
+    FlowPlatform, FlowStatus, ForegroundApps, FoundDevice, Identity, InventoryHealth,
+    LockKeyChange, LockKeyObservation, MonitorEvent, Notice, NoticeKind, NoticeObservation,
+    Observation, ObservedLight, PROTOCOL_VERSION, PairingCommandError, PairingFailure,
+    PairingPhase, PairingUpdate, RingObservation, SavedConfig, SavedConfigVerdict, SecureInput,
     VirtualKeyboardStatus,
 };
 use succession::{Compat, Run};
@@ -683,7 +683,7 @@ fn agent_snapshot() {
     };
     assert_wire(
         &snapshot,
-        "010001010705302e362e360100000000000000000000000000",
+        "010001010705302e362e36010000000000000000000000000000",
     );
 
     // The observation is the snapshot with its generation in front.
@@ -693,7 +693,7 @@ fn agent_snapshot() {
     };
     assert_wire(
         &observed,
-        "03010001010705302e362e360100000000000000000000000000",
+        "03010001010705302e362e36010000000000000000000000000000",
     );
 }
 
@@ -704,7 +704,10 @@ fn flow_status() {
     assert_wire(&FlowLinkState::Connected, "00");
     assert_wire(&FlowLinkState::Degraded, "01");
     assert_wire(&FlowLinkState::Lost, "02");
-    assert_wire(&FlowStatus::default(), "000000");
+    assert_wire(&FlowEdgeOff::NoPointer, "00");
+    assert_wire(&FlowEdgeOff::MouseCaptureOff, "01");
+    assert_wire(&FlowEdgeOff::NoMouseHook, "02");
+    assert_wire(&FlowStatus::default(), "00000000");
     assert_wire(
         &FlowStatus {
             enabled: true,
@@ -714,10 +717,11 @@ fn flow_status() {
                 state: FlowLinkState::Degraded,
             }],
             pairing: Some(FlowPairingPhase::Searching),
+            edge_off: Some(FlowEdgeOff::NoPointer),
         },
         "0101046465736b48656432353531393a\
          61626162616261626162616261626162616261626162616261626162616261626162616261626162\
-         616261626162616261626162616261626162616261626162010100",
+         6162616261626162616261626162616261626162616261620101000100",
     );
 }
 

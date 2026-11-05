@@ -25,7 +25,7 @@ use gpui_kit::component::{
     v_flex,
 };
 use openlogi_core::config::{FlowConfig, FlowEdge, FlowPeerName};
-use openlogi_ipc::FlowLinkState;
+use openlogi_ipc::{FlowEdgeOff, FlowLinkState};
 
 use crate::state::{
     AppState, FlowDeviceRow, FlowHealth, FlowHost, FlowIssue, FlowReadiness, StateEvent,
@@ -375,6 +375,9 @@ fn status_text(readiness: &FlowReadiness) -> SharedString {
 
 fn issue_text(issue: &FlowIssue) -> SharedString {
     match issue {
+        FlowIssue::EdgeOff(FlowEdgeOff::NoPointer) => tr!("flow.issue_no_pointer"),
+        FlowIssue::EdgeOff(FlowEdgeOff::MouseCaptureOff) => tr!("flow.issue_mouse_capture_off"),
+        FlowIssue::EdgeOff(FlowEdgeOff::NoMouseHook) => tr!("flow.issue_no_mouse_hook"),
         FlowIssue::Unplaced(peer) => tr!("flow.issue_unplaced", name => peer.to_string()),
         FlowIssue::NoDevice(peer) => tr!("flow.issue_no_device", name => peer.to_string()),
         FlowIssue::Unreachable { peer, link } => match link {
