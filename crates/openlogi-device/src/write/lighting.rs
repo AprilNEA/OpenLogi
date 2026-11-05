@@ -358,7 +358,9 @@ pub async fn walk_per_key_zones_on(
             let lease = engine
                 .under_per_key_control(index, black, &scope, walk)
                 .await?;
-            rgb::release(channel, index, lease, &scope).await
+            // The hand-back has its own five-second budget, so a walk that
+            // ends close to ZONE_WALK_BUDGET still returns control.
+            release_rgb_control(shared, lease, || true).await
         }
     }
 }
