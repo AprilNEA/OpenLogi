@@ -7,6 +7,7 @@
 
 use std::cell::RefCell;
 
+use core_graphics::display::CGDisplay;
 use core_graphics::event::{CGEvent, CGEventField, CGEventFlags, CGEventType, EventField};
 use tracing::debug;
 
@@ -124,6 +125,19 @@ fn modifiers_from_flags(flags: CGEventFlags) -> KeyModifiers {
     }
 }
 
+/// The modifiers a `FlagsChanged` event leaves held, or `None` for any
+/// other event type and for one OpenLogi itself posted.
+pub(super) fn translate_modifiers(etype: CGEventType, event: &CGEvent) -> Option<KeyModifiers> {
+    if !matches!(etype, CGEventType::FlagsChanged)
+        || event.get_integer_value_field(EventField::EVENT_SOURCE_USER_DATA)
+            == openlogi_inject::SYNTHETIC_EVENT_USER_DATA
+        || from_virtual_keyboard(event)
+    {
+        return None;
+    }
+    Some(modifiers_from_flags(event.get_flags()))
+}
+
 /// Translate a keyboard `CGEvent` into a [`KeyEvent`]. Returns `None` for
 /// non-key event types (the mouse path handles those), for `FlagsChanged`
 /// (modifier state rides on the next key event via its flags; a standalone
@@ -164,6 +178,17 @@ fn from_virtual_keyboard(event: &CGEvent) -> bool {
             .as_deref()
             .is_some_and(openlogi_inject::is_virtual_keyboard_product)
     })
+}
+
+/// Note the display a pointer move lands on, while the agent asks
+/// ([`crate::track_pointer_display`]).
+fn note_pointer_display(event: &CGEvent) {
+    if crate::tracks_pointer_display()
+        && let Ok((displays, _)) = CGDisplay::displays_with_point(event.location(), 1)
+        && let Some(&display) = displays.first()
+    {
+        crate::record_pointer_display(display);
+    }
 }
 
 /// Convert a `CGEvent` to our [`MouseEvent`] vocabulary. Returns `None`
@@ -266,6 +291,7 @@ pub(super) fn translate(etype: CGEventType, event: &CGEvent) -> Option<MouseEven
         | CGEventType::RightMouseDragged
         | CGEventType::OtherMouseDragged => {
             refresh_attribution(event);
+            note_pointer_display(event);
             let dx = event.get_integer_value_field(EventField::MOUSE_EVENT_DELTA_X);
             let dy = event.get_integer_value_field(EventField::MOUSE_EVENT_DELTA_Y);
             #[expect(

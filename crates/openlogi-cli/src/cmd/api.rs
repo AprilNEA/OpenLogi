@@ -7,6 +7,7 @@ use std::process::ExitCode;
 
 use anyhow::Result;
 use clap::{Args, Subcommand, ValueEnum};
+use openlogi_core::config::EventHapticFeedback;
 use openlogi_core::hid::{
     DeviceRoute, Dpi, EasySwitchSlot, HostConnection, ReportRate, SmartShiftMode, WriteError,
 };
@@ -91,6 +92,41 @@ pub enum ApiCommand {
         #[arg(long, requires = "channel")]
         name: Option<String>,
     },
+    /// Play a haptic on the mouse: a tap a script can send, such as a coding
+    /// agent that finished. Without `--device`, the mouse event haptics play
+    /// on, else the first one with a haptic engine.
+    Haptic(HapticArgs),
+}
+
+/// What `api haptic` plays, where, and how often.
+#[derive(Debug, Args)]
+pub struct HapticArgs {
+    /// Exact opaque ID returned by `api devices`.
+    #[arg(long)]
+    device: Option<String>,
+    /// `whisper_collision`, `subtle_collision`, `damp_collision`, or
+    /// `sharp_collision`.
+    #[arg(long, default_value = "subtle_collision", value_parser = parse_feedback)]
+    waveform: EventHapticFeedback,
+    /// Play it this many times.
+    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u8).range(1..=10))]
+    repeat: u8,
+    /// Pause between the plays of `--repeat`.
+    #[arg(long, default_value_t = 160)]
+    interval_ms: u64,
+}
+
+fn parse_feedback(name: &str) -> Result<EventHapticFeedback, String> {
+    EventHapticFeedback::from_name(name)
+        .filter(|feedback| feedback.plays())
+        .ok_or_else(|| {
+            let names: Vec<_> = EventHapticFeedback::ALL
+                .into_iter()
+                .filter(|feedback| feedback.plays())
+                .map(EventHapticFeedback::name)
+                .collect();
+            format!("unknown waveform `{name}`; one of: {}", names.join(", "))
+        })
 }
 
 /// A partial SmartShift update; omitted fields are read from the device.
@@ -269,12 +305,37 @@ async fn execute(
             )
             .await
         }
+        ApiCommand::Haptic(args) => haptic(client, &snapshot, &args).await,
     }?;
     if let Some(save) = save {
         save.commit(client).await?;
         result["persistence"] = json!("saved");
     }
     Ok(result)
+}
+
+/// Play `args.waveform` `args.repeat` times on the chosen mouse.
+async fn haptic(
+    client: &AgentClient,
+    snapshot: &AgentSnapshot,
+    args: &HapticArgs,
+) -> Result<Value, ApiError> {
+    let route = args
+        .device
+        .as_deref()
+        .map(|device| select_device(snapshot, device))
+        .transpose()?;
+    for play in 0..args.repeat {
+        if play > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(args.interval_ms)).await;
+        }
+        agent::call(client.play_haptic(context::current(), route.clone(), args.waveform)).await??;
+    }
+    Ok(json!({
+        "device": route.map(|route| route.to_string()),
+        "waveform": args.waveform.name(),
+        "repeat": args.repeat,
+    }))
 }
 
 /// Read the Fn lock, or set it to `set` first and check that it took.

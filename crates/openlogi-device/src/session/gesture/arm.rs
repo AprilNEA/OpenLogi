@@ -67,6 +67,9 @@ pub(super) struct ArmedControls {
     /// `0x2121` main wheel, present when its movement reports are diverted.
     pub(super) main_wheel: Option<ArmedMainWheel>,
     pub(super) onboard: Option<ArmedOnboard>,
+    /// The `0x2121` feature index whose ratchet switches the session
+    /// reports, when [`CaptureSpec::report_wheel_ratchet`] asks.
+    pub(super) ratchet_index: Option<u8>,
 }
 
 pub(super) struct ArmedThumbwheel {
@@ -311,10 +314,15 @@ pub(super) async fn arm_controls_into(
         arm_thumbwheel(Thumbwheel::new(Arc::clone(chan), slot, info.index), armed).await?;
     }
 
-    if let Some(requested) = spec.divert_main_wheel
+    if (spec.divert_main_wheel.is_some() || spec.report_wheel_ratchet)
         && let Some(info) = device.root().get_feature(HiResWheelFeature::ID).await?
     {
-        arm_main_wheel(chan, slot, info.index, requested, armed).await?;
+        if let Some(requested) = spec.divert_main_wheel {
+            arm_main_wheel(chan, slot, info.index, requested, armed).await?;
+        }
+        if spec.report_wheel_ratchet {
+            armed.ratchet_index = Some(info.index);
+        }
     }
     if let Some(target) = &spec.onboard {
         spy::arm_onboard(device, chan, slot, target, &mut armed.onboard).await?;

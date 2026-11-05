@@ -12,15 +12,44 @@ use crate::{feature::FeatureEndpoint, protocol::v20::Hidpp20Error};
 bitflags::bitflags! {
     /// Waveforms the device reports as playable.
     ///
-    /// Unknown bits are retained so newer firmware does not silently lose
-    /// capability information.
+    /// Bit *N* is waveform ID *N*, see [`HapticWaveform`]. Unknown bits are
+    /// retained so newer firmware does not silently lose capability
+    /// information.
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     #[cfg_attr(feature = "serde", derive(serde::Serialize))]
     pub struct SupportedWaveforms: u32 {
+        /// A sharp state-change pulse.
+        const SHARP_STATE_CHANGE = 1 << 0;
         /// A damp state-change pulse, used after activating a ring action.
         const DAMP_STATE_CHANGE = 1 << 1;
+        /// A sharp collision pulse.
+        const SHARP_COLLISION = 1 << 2;
+        /// A damp collision pulse.
+        const DAMP_COLLISION = 1 << 3;
         /// A subtle collision pulse, used when the highlighted ring slot changes.
         const SUBTLE_COLLISION = 1 << 4;
+        /// A happy alert.
+        const HAPPY_ALERT = 1 << 5;
+        /// An angry alert.
+        const ANGRY_ALERT = 1 << 6;
+        /// A completion pattern.
+        const COMPLETED = 1 << 7;
+        /// A square-wave pattern.
+        const SQUARE = 1 << 8;
+        /// A wave pattern.
+        const WAVE = 1 << 9;
+        /// A firework pattern.
+        const FIREWORK = 1 << 10;
+        /// A mad pattern.
+        const MAD = 1 << 11;
+        /// A knocking pattern.
+        const KNOCK = 1 << 12;
+        /// A jingle pattern.
+        const JINGLE = 1 << 13;
+        /// A ringing pattern.
+        const RINGING = 1 << 14;
+        /// A whisper-quiet collision pulse.
+        const WHISPER_COLLISION = 1 << 27;
     }
 }
 
@@ -51,13 +80,101 @@ bitflags::bitflags! {
 }
 
 /// A haptic waveform ID accepted by `playWaveform`.
+///
+/// The IDs and names follow Solaar's `HapticWaveForms`, which are Logitech's
+/// own event names. Only [`Self::DampStateChange`] and
+/// [`Self::SubtleCollision`] have been verified against an MX Master 4; the
+/// rest are pending hardware confirmation (`openlogi diag haptic` lists what
+/// a device advertises and plays each one), and a device only plays what its
+/// [`SupportedWaveforms`] mask names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, IntoPrimitive, TryFromPrimitive)]
 #[repr(u8)]
 pub enum HapticWaveform {
+    /// A firm state-change pulse.
+    SharpStateChange = 0,
     /// Confirmation pulse used when an action runs.
     DampStateChange = 1,
+    /// A firm collision pulse.
+    SharpCollision = 2,
+    /// A soft collision pulse.
+    DampCollision = 3,
     /// Light boundary pulse used for hover transitions.
     SubtleCollision = 4,
+    /// A short, upbeat alert.
+    HappyAlert = 5,
+    /// A short, harsh alert.
+    AngryAlert = 6,
+    /// A completion pattern.
+    Completed = 7,
+    /// A square-wave pattern.
+    Square = 8,
+    /// A wave pattern.
+    Wave = 9,
+    /// A firework pattern.
+    Firework = 10,
+    /// A mad pattern.
+    Mad = 11,
+    /// A knocking pattern.
+    Knock = 12,
+    /// A jingle pattern.
+    Jingle = 13,
+    /// A ringing pattern.
+    Ringing = 14,
+    /// A whisper-quiet collision pulse, the faintest of the set.
+    WhisperCollision = 27,
+}
+
+impl HapticWaveform {
+    /// Every waveform this crate names, in ID order.
+    pub const ALL: [Self; 16] = [
+        Self::SharpStateChange,
+        Self::DampStateChange,
+        Self::SharpCollision,
+        Self::DampCollision,
+        Self::SubtleCollision,
+        Self::HappyAlert,
+        Self::AngryAlert,
+        Self::Completed,
+        Self::Square,
+        Self::Wave,
+        Self::Firework,
+        Self::Mad,
+        Self::Knock,
+        Self::Jingle,
+        Self::Ringing,
+        Self::WhisperCollision,
+    ];
+
+    /// Logitech's snake_case event name, as in Solaar and the Logi plugin SDK.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::SharpStateChange => "sharp_state_change",
+            Self::DampStateChange => "damp_state_change",
+            Self::SharpCollision => "sharp_collision",
+            Self::DampCollision => "damp_collision",
+            Self::SubtleCollision => "subtle_collision",
+            Self::HappyAlert => "happy_alert",
+            Self::AngryAlert => "angry_alert",
+            Self::Completed => "completed",
+            Self::Square => "square",
+            Self::Wave => "wave",
+            Self::Firework => "firework",
+            Self::Mad => "mad",
+            Self::Knock => "knock",
+            Self::Jingle => "jingle",
+            Self::Ringing => "ringing",
+            Self::WhisperCollision => "whisper_collision",
+        }
+    }
+
+    /// The waveform whose [`Self::name`] is `name`.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|waveform| waveform.name() == name)
+    }
 }
 
 /// Valid device haptic intensity (`0..=100`).
@@ -263,6 +380,35 @@ mod tests {
         assert!(!others.supports(HapticWaveform::DampStateChange));
         assert!(!others.supports(HapticWaveform::SubtleCollision));
         assert!(!SupportedWaveforms::empty().supports(HapticWaveform::SubtleCollision));
+    }
+
+    #[test]
+    fn every_waveform_id_round_trips_and_has_a_matching_mask_bit() {
+        for waveform in HapticWaveform::ALL {
+            let id = u8::from(waveform);
+            assert_eq!(HapticWaveform::try_from(id), Ok(waveform));
+            assert_eq!(HapticWaveform::from_name(waveform.name()), Some(waveform));
+            let bit = SupportedWaveforms::from_bits_retain(1 << id);
+            assert!(
+                bit.supports(waveform),
+                "{} must map to bit {id}",
+                waveform.name()
+            );
+            assert_eq!(
+                bit.iter().count(),
+                1,
+                "{} has a named mask flag",
+                waveform.name()
+            );
+        }
+    }
+
+    #[test]
+    fn waveform_ids_match_the_solaar_table() {
+        let ids: Vec<u8> = HapticWaveform::ALL.into_iter().map(u8::from).collect();
+        assert_eq!(ids, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 27]);
+        assert_eq!(HapticWaveform::from_name("not_a_waveform"), None);
+        HapticWaveform::try_from(15).unwrap_err();
     }
 
     #[test]

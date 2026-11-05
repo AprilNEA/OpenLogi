@@ -58,7 +58,7 @@ use openlogi_agent_core::lock_keys::LockKeyIndicator;
 use openlogi_agent_core::notices::{LowBatteryWatch, NoticeBoard};
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::ActionRingSlot;
-use openlogi_core::config::{AppSettings, Config, Lighting};
+use openlogi_core::config::{AppSettings, Config, EventHapticFeedback, Lighting};
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceInventory, DeviceKind, LockKey,
     PairedDevice, StandaloneDevice, prettify_codename,
@@ -1275,6 +1275,16 @@ impl Agent for MockAgent {
         *stored = level;
         info!(%route, %level, "set_sidetone");
         Ok(level)
+    }
+    async fn play_haptic(
+        self,
+        _: Context,
+        route: Option<DeviceRoute>,
+        feedback: EventHapticFeedback,
+    ) -> Result<(), WriteError> {
+        // Nothing to feel in a scripted inventory; the log shows it arrived.
+        info!(?route, feedback = feedback.name(), "play_haptic");
+        Ok(())
     }
     async fn set_backlight(
         self,
