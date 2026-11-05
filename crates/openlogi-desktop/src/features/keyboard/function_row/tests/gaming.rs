@@ -302,6 +302,69 @@ fn the_profile_picker_wins_over_a_selected_m_key_card(cx: &mut gpui::TestAppCont
         });
     });
 }
+
+/// A G915 the desktop knows, with G-keys and M keys, saving to `path`.
+fn g915_state(path: &std::path::Path) -> AppState {
+    use crate::services::assets::AssetResolver;
+    use crate::state::{ConfigPersistence, Sources};
+    use openlogi_core::config::ConfigFile;
+
+    let (config, file) = ConfigFile::load_from_path(path).unwrap();
+    let resolver = AssetResolver::new();
+    let (commands, _) = tokio::sync::mpsc::unbounded_channel();
+    let mut inventory = crate::state::tests::direct_inventory([0x4f, 0x4c, 0x44, 0x07]);
+    inventory.paired[0].kind = DeviceKind::Keyboard;
+    inventory.paired[0].capabilities = Some(openlogi_core::device::Capabilities {
+        g_keys: true,
+        m_keys: true,
+        macro_record: true,
+        ..Default::default()
+    });
+    AppState::new(Sources {
+        inventories: &[inventory],
+        persistence: ConfigPersistence::UserFile(file),
+        ..Sources::in_memory(config, &resolver, commands)
+    })
+}
+
+#[test]
+fn a_named_profile_labels_its_m_key_card_and_a_blank_name_clears_it() {
+    let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(openlogi_core::paths::CONFIG_FILE);
+    let mut state = g915_state(&path);
+    let _ = state.commit_g_key_owner(openlogi_core::config::GKeyOwner::OpenLogi);
+    let gaming = state.current_gaming_keys();
+    let card = |state: &AppState| {
+        let layouts = key_surface(Some(&g913_asset("g915", "G915")), None, gaming).slots();
+        key_slots_from_layouts(
+            layouts,
+            Some(state),
+            KeyEditScope {
+                page: KeypadPage::FIRST,
+                g_profile: GKeyProfile::M1,
+                gaming_mode: GamingKeyMode::Profiles,
+            },
+        )
+        .into_iter()
+        .find(|slot| slot.target == KeyTarget::ModeKey(ModeKey::M2))
+        .expect("M2 shows")
+        .binding
+    };
+    assert_eq!(card(&state).as_ref(), "G1-G5 profile M2");
+
+    let _ = state.commit_g_key_profile_name(GKeyProfile::M2, "  Work ");
+    assert_eq!(card(&state).as_ref(), "Work");
+    let saved = openlogi_core::config::Config::load_from_path(&path).unwrap();
+    let key = "unit:4f4c4407";
+    assert_eq!(saved.g_key_profile_name(key, GKeyProfile::M2), Some("Work"));
+
+    let _ = state.commit_g_key_profile_name(GKeyProfile::M2, "   ");
+    assert_eq!(card(&state).as_ref(), "G1-G5 profile M2");
+    let saved = openlogi_core::config::Config::load_from_path(&path).unwrap();
+    assert_eq!(saved.g_key_profile_name(key, GKeyProfile::M2), None);
+}
+
 #[gpui::test]
 fn a_mode_change_drops_the_selection_and_its_draft(cx: &mut gpui::TestAppContext) {
     use crate::services::assets::AssetResolver;

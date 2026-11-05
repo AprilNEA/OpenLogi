@@ -15,7 +15,7 @@ use super::{
 };
 use crate::binding::{
     Action, ActionRingConfig, ActionRingIcon, ActionRingSize, ActionRingSlot, Binding, ButtonId,
-    GamingLayout, KeypadPage, RingAction, default_binding_on,
+    GKeyProfile, GamingLayout, KeypadPage, RingAction, default_binding_on,
 };
 use crate::hid::{Dpi, PointerSpeed, ReportRate};
 
@@ -453,6 +453,29 @@ impl Config {
             .get(device_key)
             .map(|device| device.gaming_key_mode)
             .unwrap_or_default()
+    }
+
+    /// The name the user gave `device_key`'s G-key `profile`, if any.
+    #[must_use]
+    pub fn g_key_profile_name(&self, device_key: &str, profile: GKeyProfile) -> Option<&str> {
+        self.devices
+            .get(device_key)?
+            .g_key_profile_names
+            .get(&profile)
+            .map(String::as_str)
+    }
+
+    /// Name `device_key`'s G-key `profile`, trimmed; a blank name removes it.
+    pub fn set_g_key_profile_name(&mut self, device_key: &str, profile: GKeyProfile, name: &str) {
+        let names = &mut self
+            .devices
+            .entry(device_key.to_string())
+            .or_default()
+            .g_key_profile_names;
+        match name.trim() {
+            "" => names.remove(&profile),
+            name => names.insert(profile, name.to_owned()),
+        };
     }
 
     /// Record what `device_key`'s M1–M3 and MR do. The bindings of the other

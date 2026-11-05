@@ -899,6 +899,9 @@ g_key_profiles = "G1–G5 設定檔"
 g_key_profile = "G1–G5 設定 %{profile}"
 g_key_in_profile = "%{key}（%{profile}）"
 g_key_profile_description = "%{profile} 會將 G1–G5 切換到此設定檔。選擇一個 G 鍵即可在此設定檔中設定它。"
+set_profile_name = "設定 %{profile} 設定檔名稱"
+profile_name_placeholder = "例如：工作"
+profile_name_description = "留空即可清除儲存在本機的設定檔名稱。"
 
 [flow]
 title = "Flow"
