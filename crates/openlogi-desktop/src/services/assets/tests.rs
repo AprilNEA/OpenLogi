@@ -621,17 +621,22 @@ fn g512_in_the_shared_g513_depot_shows_its_own_name() {
     let root = tempfile::tempdir().expect("create asset root");
     let depot = root.path().join("g513");
     std::fs::create_dir_all(&depot).unwrap();
+    std::fs::write(depot.join("front.png"), png_header(100, 200)).unwrap();
+    std::fs::write(depot.join("front_ext6.png"), png_header(300, 100)).unwrap();
     std::fs::write(
-        depot.join("metadata.json"),
-        r#"{"images":[{"key":"device_image","origin":{"width":100,"height":40}}]}"#,
+        depot.join("manifest.json"),
+        r#"{"devices":[{"modelId":"g512_ext6","resources":[{"key":"device_image","src":"front_ext6.png"},{"key":"image_metadata","src":"metadata_g512.json"}]}]}"#,
     )
     .unwrap();
-    std::fs::write(depot.join("front.png"), png_header(100, 40)).unwrap();
+    std::fs::write(
+        depot.join("metadata_g512.json"),
+        r#"{"images":[{"key":"device_image","origin":{"width":300,"height":100}}]}"#,
+    )
+    .unwrap();
     let resolver = resolver_over(&[root.path()], Some(g513_index()));
     let model = g512_model();
 
-    // One cached G513 depot serves both keyboards; each device's firmware
-    // name decides only its own display name, never the artwork.
+    // The same cached extended-model render serves both firmware names.
     for (codename, expected) in [
         (None, "G513"),
         (Some("G512 RGB MECHANICAL GAMING KEYBOARD"), "G512"),
@@ -641,7 +646,10 @@ fn g512_in_the_shared_g513_depot_shows_its_own_name() {
         let asset = resolver.resolve(&model, codename).expect("resolve c33c");
         assert_eq!(asset.display_name, expected, "codename={codename:?}");
         assert_eq!(asset.depot, "g513");
-        assert_eq!(asset.image_path, depot.join("front.png"));
+        assert_eq!(asset.image_path, depot.join("front_ext6.png"));
+        assert_eq!(asset.hero_image_path, Some(depot.join("front_ext6.png")));
+        assert_eq!((asset.png_width, asset.png_height), (300, 100));
+        assert_eq!(asset.metadata.origin().expect("G512 metadata").width, 300);
     }
     assert_eq!(resolver.resolved.borrow().len(), 1, "artwork stays shared");
 }

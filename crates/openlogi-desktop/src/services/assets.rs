@@ -665,6 +665,9 @@ struct DepotSibling {
     /// The sibling's leading firmware-name word, which is also its display
     /// name.
     model: &'static str,
+    /// The base the depot manifest files the sibling's variants under
+    /// (`{manifest_base}_ext{N}`).
+    manifest_base: &'static str,
 }
 
 /// The `g513` depot (model id `c33c`) also serves the G512: its manifest
@@ -673,6 +676,7 @@ struct DepotSibling {
 const DEPOT_SIBLINGS: [DepotSibling; 1] = [DepotSibling {
     catalog_name: "G513",
     model: "G512",
+    manifest_base: "g512",
 }];
 
 /// Correct a shared depot's display name from the firmware name: either a
@@ -698,19 +702,28 @@ fn codename_model_words(codename: &str) -> impl Iterator<Item = &str> {
     })
 }
 
+/// The [`DEPOT_SIBLINGS`] filed under the depot whose catalog `displayName`
+/// is `catalog_name`.
+fn depot_siblings(catalog_name: &str) -> impl Iterator<Item = &'static DepotSibling> {
+    let catalog_name = catalog_name.trim();
+    DEPOT_SIBLINGS
+        .iter()
+        .filter(move |sibling| catalog_name.eq_ignore_ascii_case(sibling.catalog_name))
+}
+
 /// The [`DEPOT_SIBLINGS`] model whose depot is `catalog_name` and whose
 /// model word leads the firmware name.
 fn depot_sibling_name(catalog_name: &str, codename: &str) -> Option<&'static str> {
     let model = codename_model_words(codename).next()?;
-    DEPOT_SIBLINGS
-        .iter()
-        .find(|sibling| {
-            catalog_name
-                .trim()
-                .eq_ignore_ascii_case(sibling.catalog_name)
-                && model.eq_ignore_ascii_case(sibling.model)
-        })
+    depot_siblings(catalog_name)
+        .find(|sibling| model.eq_ignore_ascii_case(sibling.model))
         .map(|sibling| sibling.model)
+}
+
+/// The manifest bases of the [`DEPOT_SIBLINGS`] filed under the depot whose
+/// catalog `displayName` is `catalog_name`.
+fn depot_sibling_manifest_bases(catalog_name: &str) -> impl Iterator<Item = &'static str> {
+    depot_siblings(catalog_name).map(|sibling| sibling.manifest_base)
 }
 
 /// The catalog name without its qualifiers, for a firmware name that matches
