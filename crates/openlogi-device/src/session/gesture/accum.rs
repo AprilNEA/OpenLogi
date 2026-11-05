@@ -3,11 +3,13 @@
 //! which held wheel-hold button the raw wheel belongs to.
 
 use std::num::NonZeroU8;
+use std::time::Instant;
 
 use openlogi_core::binding::{ButtonId, GestureDirection, SwipeAccumulator};
 use tokio::sync::mpsc;
 use tracing::{debug, trace};
 
+use super::super::capture::Heard;
 use super::{CapturedInput, GESTURE_SOURCE_BUTTONS};
 use crate::reprog_controls::{RawControlEvent, RawWheelEvent, RawWheelResolution};
 
@@ -43,10 +45,16 @@ enum HoldState {
     },
 }
 
-/// Begin a hold for `cid`, its swipe accumulator started fresh.
-fn begin_hold(cid: u16, button: ButtonId, overlap: bool, skip_first_raw_xy: bool) -> HoldState {
+/// Begin a hold for `cid`, pressed `at`, its swipe accumulator started fresh.
+fn begin_hold(
+    cid: u16,
+    button: ButtonId,
+    overlap: bool,
+    skip_first_raw_xy: bool,
+    at: Instant,
+) -> HoldState {
     let mut swipe = SwipeAccumulator::default();
-    swipe.begin();
+    swipe.begin_at(at);
     HoldState::Holding {
         cid,
         button,
@@ -109,16 +117,18 @@ impl CaptureAccum {
     /// Update the accumulator and emit on a decoded `0x1b04` event: preserve
     /// physical button edges, and commit a gesture swipe the instant it
     /// crosses the threshold (mid-swipe, like Options+) rather than on release.
+    /// A swipe is timed by when its reports arrived, which for a report held
+    /// while arming is earlier than now.
     pub(super) fn on_event(
         &mut self,
-        event: RawControlEvent,
+        event: Heard<RawControlEvent>,
         gesture_cids: &[u16],
         dpi_cids: &[u16],
         gesture_button_cids: &[(u16, ButtonId)],
         button_cids: &[(u16, ButtonId)],
         sink: &mpsc::UnboundedSender<CapturedInput>,
     ) {
-        match event {
+        match event.report {
             RawControlEvent::DivertedButtons(cids) => {
                 // The swipe accumulator belongs to the gesture-mode diverts:
                 // raw-XY, or plain for a source without raw XY, whose holds
@@ -177,6 +187,7 @@ impl CaptureAccum {
                                 button,
                                 held.len() > 1,
                                 !self.gestures_down.contains(&cid),
+                                event.at,
                             ),
                             None => HoldState::Idle,
                         }
@@ -221,12 +232,18 @@ impl CaptureAccum {
                 }
             }
             RawControlEvent::RawXy { dx, dy } => {
-                self.on_raw_xy(dx, dy, sink);
+                self.on_raw_xy(dx, dy, event.at, sink);
             }
         }
     }
 
-    fn on_raw_xy(&mut self, dx: i16, dy: i16, sink: &mpsc::UnboundedSender<CapturedInput>) {
+    fn on_raw_xy(
+        &mut self,
+        dx: i16,
+        dy: i16,
+        at: Instant,
+        sink: &mpsc::UnboundedSender<CapturedInput>,
+    ) {
         // Motion is attributed to the holding source; outside a hold the report
         // is stray and dropped.
         let HoldState::Holding {
@@ -255,7 +272,7 @@ impl CaptureAccum {
         // Commit the instant a clean direction emerges (mid-swipe, repeatable per hold);
         // the accumulator gates on hold duration internally and drops travel that
         // arrives outside a hold.
-        if let Some(direction) = swipe.accumulate(i32::from(dx), i32::from(dy)) {
+        if let Some(direction) = swipe.accumulate_at(i32::from(dx), i32::from(dy), at) {
             debug!(?direction, %button, "gesture committed");
             let _ = sink.send(CapturedInput::Gesture(*button, direction));
         }
@@ -318,5 +335,15 @@ pub(super) fn handle_reprog(
     button_cids: &[(u16, ButtonId)],
     sink: &mpsc::UnboundedSender<CapturedInput>,
 ) {
-    acc.on_event(event, gesture_cids, dpi_cids, &[], button_cids, sink);
+    acc.on_event(
+        Heard {
+            report: event,
+            at: Instant::now(),
+        },
+        gesture_cids,
+        dpi_cids,
+        &[],
+        button_cids,
+        sink,
+    );
 }

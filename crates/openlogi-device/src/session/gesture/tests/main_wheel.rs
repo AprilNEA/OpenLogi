@@ -363,10 +363,10 @@ async fn movement_reports_reach_the_dispatcher_as_main_wheel_input() {
     let capture = GestureCapture::new(armed.controls);
     let (sink, mut inputs) = mpsc::unbounded_channel();
     let handler = capture.report_handler(0xff, sink);
-    handler(&movement(true, 16, 0));
-    handler(&movement(false, -1, 0));
-    handler(&movement(true, 0, 3));
-    handler(&wheel_event(1, &[1]));
+    handler(heard(&movement(true, 16, 0)));
+    handler(heard(&movement(false, -1, 0)));
+    handler(heard(&movement(true, 0, 3)));
+    handler(heard(&wheel_event(1, &[1])));
     let per_notch = |units| NonZeroU8::new(units).expect("non-zero");
     assert_eq!(
         std::iter::from_fn(|| inputs.try_recv().ok()).collect::<Vec<_>>(),

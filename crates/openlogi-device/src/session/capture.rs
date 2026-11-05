@@ -1,23 +1,28 @@
 //! The channel lifecycle every capture session shares.
 //!
-//! A capture session arms a device-specific set of controls and then does the
-//! same thing whatever those controls are: publish its channel for hardware
-//! writes to reuse, listen for diverted reports, re-arm when the device
-//! reconnects or another client hands a control back, stop when asked or when
-//! inventory replaces the channel, and hand every control back before it
-//! stops listening. [`run_capture`] is that sequence. [`ArmedCapture`] is what
-//! differs between the gesture and the keyboard session: which controls are
-//! armed and what their reports mean.
+//! A capture session starts listening ([`ArmingListener`]), arms a
+//! device-specific set of controls, and then does the same thing whatever
+//! those controls are: publish its channel for hardware writes to reuse,
+//! decode the diverted reports, re-arm when the device reconnects or another
+//! client hands a control back, stop when asked or when inventory replaces
+//! the channel, and hand every control back before it stops listening.
+//! [`run_capture`] is that sequence once arming is done. [`ArmedCapture`] is
+//! what differs between the gesture and the keyboard session: which controls
+//! are armed and what their reports mean.
 
 mod liveness;
 mod redivert;
+#[cfg(test)]
+mod tests;
 
+use std::marker::PhantomData;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use futures_lite::Stream;
 use hidpp::{
+    channel::MessageListenerGuard,
     device::Device,
     feature::{
         CreatableFeature, EmittingFeature,
@@ -140,12 +145,16 @@ pub(super) trait ArmedCapture {
     fn log_active(&self, device_index: u8, wake_rearm: bool);
 
     /// Build the handler for every unsolicited report on the session's
-    /// channel. It runs on the channel's read thread, by shared reference.
+    /// channel, starting with the ones heard while arming (see
+    /// [`ArmingListener`]). It runs on the channel's read thread, by shared
+    /// reference; only those held reports reach it on the session's task,
+    /// before any later one. Each report comes with when the channel read
+    /// it, which is what anything timed must go by.
     fn report_handler(
         &self,
         device_index: u8,
         sink: mpsc::UnboundedSender<CapturedInput>,
-    ) -> impl Fn(&v20::Message) + Send + Sync + 'static;
+    ) -> impl Fn(Heard<&v20::Message>) + Send + Sync + 'static;
 
     /// Build the handler for every raw report read from the node, before the
     /// channel decides what protocol it belongs to — the path by which a
@@ -202,8 +211,154 @@ pub(super) trait ArmedCapture {
     fn into_pending(self, retired: &SharedChannel) -> Option<PendingCaptureRestore>;
 }
 
+/// The message listener of a capture session that is still arming.
+///
+/// A device reports a diverted control from the moment it applies the write
+/// that diverts it, and the channel hands each report only to the listeners
+/// that exist when its read thread sees it (#2349). The handler that decodes
+/// those reports is built from the finished arming, so a session installs
+/// this listener before its first write. It holds every unsolicited report
+/// until [`run_capture`] makes it live, which hands the held reports to the
+/// handler in arrival order, before any later one. Each keeps the instant it
+/// arrived ([`Heard::at`]), so a capture that times its input, such as a
+/// gesture's hold, measures what the user did rather than when the report
+/// was decoded.
+///
+/// Typed by the capture it listens for, so the session it is handed to
+/// watches the channel the way that capture asks ([`ArmedCapture::LIVENESS`]).
+pub(super) struct ArmingListener<A> {
+    delivery: Arc<Mutex<Delivery>>,
+    /// What the listener records, for a [`Liveness::Watched`] capture.
+    activity: Option<Arc<ChannelActivity>>,
+    guard: MessageListenerGuard,
+    capture: PhantomData<fn() -> A>,
+}
+
+impl<A: ArmedCapture> ArmingListener<A> {
+    /// Listen on `shared`, before arming writes anything to it.
+    pub(super) fn install(shared: &SharedChannel) -> Self {
+        let activity = match A::LIVENESS {
+            Liveness::Watched => Some(Arc::new(ChannelActivity::default())),
+            Liveness::Unwatched => None,
+        };
+        let delivery = Arc::new(Mutex::new(Delivery::Held(Vec::new())));
+        let guard = shared.channel().add_msg_listener_guarded({
+            let activity = activity.clone();
+            let delivery = Arc::clone(&delivery);
+            move |raw, matched| {
+                let at = std::time::Instant::now();
+                // Every parsed inbound HID++ report proves this channel's read
+                // path is alive, including responses matched to another request.
+                if let Some(activity) = &activity {
+                    activity.record();
+                }
+                if matched {
+                    return;
+                }
+                lock_delivery(&delivery).deliver(Heard {
+                    report: v20::Message::from(raw),
+                    at,
+                });
+            }
+        });
+        Self {
+            delivery,
+            activity,
+            guard,
+            capture: PhantomData,
+        }
+    }
+
+    /// Hand every held report to `handler`, in arrival order, and from then
+    /// on every report as the channel reads it.
+    fn go_live(
+        self,
+        handler: impl Fn(Heard<&v20::Message>) + Send + Sync + 'static,
+    ) -> LiveListener {
+        lock_delivery(&self.delivery).go_live(handler);
+        LiveListener {
+            activity: self.activity,
+            _guard: self.guard,
+        }
+    }
+}
+
+/// A report a capture session's listener heard, and when it heard it.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Heard<T> {
+    pub(super) report: T,
+    /// When the channel's read thread handed the report to the listener. A
+    /// report held while arming is decoded later than that.
+    pub(super) at: std::time::Instant,
+}
+
+impl<T> Heard<T> {
+    fn as_ref(&self) -> Heard<&T> {
+        Heard {
+            report: &self.report,
+            at: self.at,
+        }
+    }
+}
+
+/// The message listener of a live capture session. Dropping it is what stops
+/// the armed capture's handler from hearing the channel.
+struct LiveListener {
+    /// What the listener records, for a [`Liveness::Watched`] capture.
+    activity: Option<Arc<ChannelActivity>>,
+    _guard: MessageListenerGuard,
+}
+
+/// Where a capture session's listener sends the unsolicited reports it hears.
+enum Delivery {
+    /// Arming: every report waits, in arrival order. The wait is bounded by
+    /// arming itself, a fixed run of requests that each wait at most the
+    /// channel's timeout, and only unsolicited HID++ reports wait: replies
+    /// are matched to their requests, and traffic that does not parse as
+    /// HID++ never reaches a message listener.
+    Held(Vec<Heard<v20::Message>>),
+    /// Live: each report goes straight to the armed capture's handler. Boxed
+    /// because that handler is built after the listener that calls it.
+    Live(Box<ReportHandler>),
+}
+
+/// An armed capture's handler for the unsolicited reports its session hears
+/// ([`ArmedCapture::report_handler`]).
+type ReportHandler = dyn Fn(Heard<&v20::Message>) + Send + Sync;
+
+impl Delivery {
+    fn deliver(&mut self, heard: Heard<v20::Message>) {
+        match self {
+            Self::Held(held) => held.push(heard),
+            Self::Live(handler) => handler(heard.as_ref()),
+        }
+    }
+
+    /// Replay the held reports through `handler`, then switch to it. The
+    /// caller holds the lock throughout, so a report the read thread sees
+    /// meanwhile waits for the replay instead of overtaking a held one.
+    fn go_live(&mut self, handler: impl Fn(Heard<&v20::Message>) + Send + Sync + 'static) {
+        if let Self::Held(held) = self {
+            for heard in held.drain(..) {
+                handler(heard.as_ref());
+            }
+        }
+        *self = Self::Live(Box::new(handler));
+    }
+}
+
+/// Recover the delivery even if a prior holder panicked: each critical
+/// section either queues a report or hands it to the handler, so the queue
+/// is consistent.
+fn lock_delivery(delivery: &Mutex<Delivery>) -> MutexGuard<'_, Delivery> {
+    delivery.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 /// Run one armed capture on `shared` until it is told to stop or inventory
 /// replaces the channel, then hand every diverted control back.
+///
+/// `listener` is the one the session installed before arming. What it heard
+/// meanwhile reaches `armed`'s report handler first.
 ///
 /// A normal stop restores every control before returning; transport
 /// replacement or loss may return [`CaptureSessionOutcome::RestorePending`]
@@ -213,6 +368,7 @@ pub(super) trait ArmedCapture {
 pub(super) async fn run_capture<A: ArmedCapture>(
     shared: SharedChannel,
     mut armed: A,
+    listener: ArmingListener<A>,
     host: CaptureHost<'_>,
 ) -> CaptureSessionOutcome {
     let CaptureHost {
@@ -232,30 +388,14 @@ pub(super) async fn run_capture<A: ArmedCapture>(
         *slot = Some(shared.clone());
     }
 
-    let activity = match A::LIVENESS {
-        Liveness::Watched => Some(Arc::new(ChannelActivity::default())),
-        Liveness::Unwatched => None,
-    };
-    let listener = chan.add_msg_listener_guarded({
-        let activity = activity.clone();
-        let on_report = armed.report_handler(device_index, sink.clone());
-        move |raw, matched| {
-            // Every parsed inbound HID++ report proves this channel's read
-            // path is alive, including responses matched to another request.
-            if let Some(activity) = &activity {
-                activity.record();
-            }
-            if matched {
-                return;
-            }
-            on_report(&v20::Message::from(raw));
-        }
-    });
+    let listener = listener.go_live(armed.report_handler(device_index, sink.clone()));
     let changes = ReportingChanges::new(armed.take_reporting_changes());
     // The message listener only ever sees reports that parsed as HID++ (and
     // replies, which it filters). Vendor PDUs sharing the node are invisible
     // to it, so a session that captures a vendor protocol registers a raw
-    // listener too; the default handler ignores what it is given.
+    // listener too; the default handler ignores what it is given. Vendor
+    // reports are observed, never diverted: arming does not change where the
+    // device sends them, so this listener need not exist before it.
     let raw_listener =
         chan.add_raw_report_listener_guarded(armed.raw_report_handler(device_index, sink.clone()));
 
@@ -278,7 +418,7 @@ pub(super) async fn run_capture<A: ArmedCapture>(
                     device_index,
                     registry,
                     shared: &shared,
-                    activity: activity.as_deref(),
+                    activity: listener.activity.as_deref(),
                 },
                 wireless,
                 changes,

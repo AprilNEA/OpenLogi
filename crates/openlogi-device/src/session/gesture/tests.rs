@@ -23,6 +23,14 @@ mod session;
 mod thumb_wheel;
 mod wheel_hold;
 
+/// `message`, as the channel hands it to a live report handler.
+fn heard(message: &v20::Message) -> Heard<&v20::Message> {
+    Heard {
+        report: message,
+        at: std::time::Instant::now(),
+    }
+}
+
 fn reporting(
     diverted: bool,
     remap: Option<reprog_controls::ControlId>,

@@ -209,11 +209,11 @@ async fn a_roll_that_never_reports_its_stop_ends_without_a_tap() {
     let capture = armed_thumbwheel_capture().await;
     let (sink, mut inputs) = mpsc::unbounded_channel();
     let handler = capture.report_handler(0xff, sink);
-    handler(&wheel_report(2, 1, true));
-    handler(&wheel_report(3, 2, true));
+    handler(heard(&wheel_report(2, 1, true)));
+    handler(heard(&wheel_report(3, 2, true)));
     // The release, reported as `Inactive` in place of the dropped `Stop`.
-    handler(&wheel_report(0, 0, true));
-    handler(&wheel_report(0, 0, true));
+    handler(heard(&wheel_report(0, 0, true)));
+    handler(heard(&wheel_report(0, 0, true)));
     assert_eq!(
         received(&mut inputs),
         vec![
@@ -231,9 +231,9 @@ async fn a_reconnect_forgets_a_roll_left_open() {
     let capture = armed_thumbwheel_capture().await;
     let (sink, mut inputs) = mpsc::unbounded_channel();
     let handler = capture.report_handler(0xff, sink);
-    handler(&wheel_report(3, 2, true));
+    handler(heard(&wheel_report(3, 2, true)));
     capture.reset_input_state();
-    handler(&wheel_report(0, 0, true));
+    handler(heard(&wheel_report(0, 0, true)));
     assert_eq!(
         received(&mut inputs),
         vec![scroll(3), CapturedInput::ButtonPulse(ButtonId::Thumbwheel)]
@@ -248,10 +248,10 @@ async fn an_unknown_status_byte_with_a_tap_is_not_a_click() {
     let capture = armed_thumbwheel_capture().await;
     let (sink, mut inputs) = mpsc::unbounded_channel();
     let handler = capture.report_handler(0xff, sink);
-    handler(&wheel_report(0, 0x04, true));
-    handler(&wheel_report(0, 0xff, true));
+    handler(heard(&wheel_report(0, 0x04, true)));
+    handler(heard(&wheel_report(0, 0xff, true)));
     assert_eq!(received(&mut inputs), Vec::new());
-    handler(&wheel_report(0, 0, true));
+    handler(heard(&wheel_report(0, 0, true)));
     assert_eq!(
         received(&mut inputs),
         vec![CapturedInput::ButtonPulse(ButtonId::Thumbwheel)]

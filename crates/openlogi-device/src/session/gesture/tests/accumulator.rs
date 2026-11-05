@@ -4,6 +4,14 @@ use super::*;
 
 const GESTURE: &[u16] = &[reprog_controls::GESTURE_BUTTON_CID];
 
+/// `event`, as heard just now.
+fn now(event: RawControlEvent) -> Heard<RawControlEvent> {
+    Heard {
+        report: event,
+        at: std::time::Instant::now(),
+    }
+}
+
 #[test]
 fn alternate_gesture_control_delivers_click_and_swipe() {
     for swipe in [false, true] {
@@ -615,18 +623,18 @@ fn a_side_gesture_button_uses_its_hidpp_raw_xy() {
     let buttons = [(cid, ButtonId::Forward)];
     let down = RawControlEvent::DivertedButtons([cid, 0, 0, 0]);
 
-    acc.on_event(down, &[], &[], &buttons, &[], &tx);
+    acc.on_event(now(down), &[], &[], &buttons, &[], &tx);
     stale_report(&mut acc, &tx);
     acc.backdate_hold_for_test();
     acc.on_event(
-        RawControlEvent::RawXy { dx: -120, dy: 5 },
+        now(RawControlEvent::RawXy { dx: -120, dy: 5 }),
         &[],
         &[],
         &buttons,
         &[],
         &tx,
     );
-    acc.on_event(release(), &[], &[], &buttons, &[], &tx);
+    acc.on_event(now(release()), &[], &[], &buttons, &[], &tx);
 
     assert_eq!(
         rx.try_recv(),
@@ -657,8 +665,8 @@ fn a_side_gesture_button_tap_is_a_click() {
     let buttons = [(cid, ButtonId::Forward)];
     let down = RawControlEvent::DivertedButtons([cid, 0, 0, 0]);
 
-    acc.on_event(down, &[], &[], &buttons, &[], &tx);
-    acc.on_event(release(), &[], &[], &buttons, &[], &tx);
+    acc.on_event(now(down), &[], &[], &buttons, &[], &tx);
+    acc.on_event(now(release()), &[], &[], &buttons, &[], &tx);
 
     assert_eq!(
         rx.try_recv(),
@@ -686,18 +694,18 @@ fn a_dpi_gesture_button_uses_the_shared_raw_xy_path() {
     let buttons = [(cid, ButtonId::DpiToggle)];
     let down = RawControlEvent::DivertedButtons([cid, 0, 0, 0]);
 
-    acc.on_event(down, &[], &[], &buttons, &[], &tx);
+    acc.on_event(now(down), &[], &[], &buttons, &[], &tx);
     stale_report(&mut acc, &tx);
     acc.backdate_hold_for_test();
     acc.on_event(
-        RawControlEvent::RawXy { dx: 5, dy: -120 },
+        now(RawControlEvent::RawXy { dx: 5, dy: -120 }),
         &[],
         &[],
         &buttons,
         &[],
         &tx,
     );
-    acc.on_event(release(), &[], &[], &buttons, &[], &tx);
+    acc.on_event(now(release()), &[], &[], &buttons, &[], &tx);
 
     assert_eq!(
         rx.try_recv(),

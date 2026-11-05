@@ -37,8 +37,8 @@ use tracing::{debug, info, warn};
 use crate::keypad_vendor::{VendorFunction, input_payload};
 
 use super::capture::{
-    ArmedCapture, CaptureHost, Liveness, ReportingChangeStream, open_device, run_capture,
-    subscribe_reporting_changes,
+    ArmedCapture, ArmingListener, CaptureHost, Heard, Liveness, ReportingChangeStream, open_device,
+    run_capture, subscribe_reporting_changes,
 };
 use super::capture_restore::{ArmedReporting, ReprogRestore, divert_keyboard_key};
 use super::gesture::{
@@ -117,8 +117,9 @@ pub async fn run_keyboard_capture_session(
     host: CaptureHost<'_>,
 ) -> Result<CaptureSessionOutcome, CaptureSessionFailure> {
     let shared = host.channel_for(&route)?;
+    let listener = ArmingListener::<ArmedKeys>::install(&shared);
     let armed = arm_keyboard(&shared, wanted, host.registry).await?;
-    Ok(run_capture(shared, armed, host).await)
+    Ok(run_capture(shared, armed, listener, host).await)
 }
 
 /// Divert the wanted controls of the keyboard behind `shared`.
@@ -427,12 +428,14 @@ impl ArmedCapture for ArmedKeys {
         &self,
         device_index: u8,
         sink: mpsc::UnboundedSender<CapturedInput>,
-    ) -> impl Fn(&v20::Message) + Send + Sync + 'static {
+    ) -> impl Fn(Heard<&v20::Message>) + Send + Sync + 'static {
         let feature_index = self.controls.feature_index();
         let keys = Arc::clone(&self.keys);
-        move |msg| {
+        // Key edges are untimed here: the agent times a hold from when it
+        // receives the press.
+        move |heard| {
             let Some(RawControlEvent::DivertedButtons(cids)) =
-                reprog_controls::decode_event(msg, device_index, feature_index)
+                reprog_controls::decode_event(heard.report, device_index, feature_index)
             else {
                 return;
             };

@@ -183,11 +183,11 @@ async fn raw_wheel_while_back_is_held_reaches_the_dispatcher_in_order() {
     let capture = GestureCapture::new(armed);
     let (sink, mut inputs) = mpsc::unbounded_channel();
     let handler = capture.report_handler(0xff, sink);
-    handler(&reprog_event(0, &BACK.to_be_bytes()));
+    handler(heard(&reprog_event(0, &BACK.to_be_bytes())));
     let [high, low] = (-16i16).to_be_bytes();
     // divertedRawWheel: high resolution (bit 4), one period, delta -16.
-    handler(&reprog_event(4, &[0x11, high, low]));
-    handler(&reprog_event(0, &[0, 0]));
+    handler(heard(&reprog_event(4, &[0x11, high, low])));
+    handler(heard(&reprog_event(0, &[0, 0])));
     assert_eq!(
         std::iter::from_fn(|| inputs.try_recv().ok()).collect::<Vec<_>>(),
         [
