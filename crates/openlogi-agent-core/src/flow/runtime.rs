@@ -225,8 +225,13 @@ impl FlowRuntime {
         let (events_tx, events_rx) = mpsc::channel(EVENT_QUEUE);
         let (crossings_tx, crossings_rx) = mpsc::channel(CROSSING_QUEUE);
         let (state_tx, state_rx) = watch::channel(TrustedInitialState::default());
-        let pointer =
-            PointerThread::start(probe, crossings_tx).map_err(FlowRuntimeError::Pointer)?;
+        let pointer = {
+            let observable = Arc::clone(&observable);
+            PointerThread::start(probe, crossings_tx, move |found| {
+                observable.set_flow_pointer(found);
+            })
+            .map_err(FlowRuntimeError::Pointer)?
+        };
         let waker = pointer.waker();
 
         let mut writers = Vec::with_capacity(peer_keys.len());

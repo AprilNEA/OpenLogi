@@ -48,8 +48,10 @@ pub struct ObservableState {
 
 /// The facts besides the hook state that decide [`FlowStatus::edge_off`].
 struct FlowEdge {
-    /// A Flow generation found no pointer in this session. The session
-    /// decides this, so it does not change while the agent runs.
+    /// The last Flow generation found no pointer in this session. Only a
+    /// generation's own probe changes it, so one starting on Wayland does
+    /// not show Ready before its probe fails again, and one whose X11
+    /// display came back clears it.
     no_pointer: bool,
     /// `app_settings.capture_mouse_events` as the agent started with it.
     mouse_capture: bool,
@@ -310,11 +312,12 @@ impl ObservableState {
         self.publish_flow_edge(&edge);
     }
 
-    /// Record that a Flow generation found no pointer in this session, so
-    /// moving the pointer off an edge cannot switch from it.
-    pub fn set_flow_pointer_missing(&self) {
+    /// Record whether a Flow generation's pointer thread opened this
+    /// session's pointer. Without one, moving the pointer off an edge cannot
+    /// switch from this computer.
+    pub fn set_flow_pointer(&self, found: bool) {
         let mut edge = self.flow_edge();
-        edge.no_pointer = true;
+        edge.no_pointer = !found;
         self.publish_flow_edge(&edge);
     }
 
@@ -614,10 +617,14 @@ mod tests {
         assert_eq!(edge_off(), Some(FlowEdgeOff::NoMouseHook));
         state.set_accessibility_and_hook(true, true);
         assert_eq!(edge_off(), None);
-        state.set_flow_pointer_missing();
+        state.set_flow_pointer(false);
         assert_eq!(edge_off(), Some(FlowEdgeOff::NoPointer));
         state.set_accessibility_and_hook(false, false);
         assert_eq!(edge_off(), Some(FlowEdgeOff::NoPointer));
+        // A later generation whose display came back clears the reason.
+        state.set_accessibility_and_hook(true, true);
+        state.set_flow_pointer(true);
+        assert_eq!(edge_off(), None);
     }
 
     #[test]

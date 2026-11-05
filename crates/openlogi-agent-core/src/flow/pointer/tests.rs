@@ -286,7 +286,12 @@ fn the_thread_reports_a_dwell_crossing_and_stops_on_request() {
         let fake = fake.clone();
         move || Some(fake)
     };
-    let thread = PointerThread::spawn_with(connect, sender).expect("spawn the pointer thread");
+    let (found_tx, found) = std::sync::mpsc::channel();
+    let thread = PointerThread::spawn_with(connect, sender, move |found| {
+        let _ = found_tx.send(found);
+    })
+    .expect("spawn the pointer thread");
+    assert_eq!(found.recv_timeout(Duration::from_secs(5)), Ok(true));
     thread.configure(right_edge(false));
     let waker = thread.waker();
 
@@ -324,7 +329,8 @@ fn a_cursor_resting_on_the_edge_crosses_after_one_wake() {
         let fake = fake.clone();
         move || Some(fake)
     };
-    let thread = PointerThread::spawn_with(connect, sender).expect("spawn the pointer thread");
+    let thread =
+        PointerThread::spawn_with(connect, sender, |_| {}).expect("spawn the pointer thread");
     thread.configure(right_edge(false));
     // Let the thread take the settings before the one motion it sees.
     std::thread::sleep(ms(100));
@@ -357,7 +363,8 @@ fn the_thread_reads_again_after_motion_stops() {
         let fake = fake.clone();
         move || Some(fake)
     };
-    let thread = PointerThread::spawn_with(connect, sender).expect("spawn the pointer thread");
+    let thread =
+        PointerThread::spawn_with(connect, sender, |_| {}).expect("spawn the pointer thread");
     thread.configure(right_edge(false));
     // Let the thread take the settings before the one motion it sees.
     std::thread::sleep(ms(100));
@@ -382,8 +389,16 @@ fn the_thread_reads_again_after_motion_stops() {
 #[test]
 fn a_thread_without_a_pointer_exits_and_ignores_commands() {
     let (sender, _crossings) = mpsc::channel(1);
-    let thread =
-        PointerThread::spawn_with(|| None::<Fake>, sender).expect("spawn the pointer thread");
+    let (found_tx, found) = std::sync::mpsc::channel();
+    let thread = PointerThread::spawn_with(
+        || None::<Fake>,
+        sender,
+        move |found| {
+            let _ = found_tx.send(found);
+        },
+    )
+    .expect("spawn the pointer thread");
+    assert_eq!(found.recv_timeout(Duration::from_secs(5)), Ok(false));
     thread.configure(right_edge(false));
     thread.waker().moved();
     thread.stop();
