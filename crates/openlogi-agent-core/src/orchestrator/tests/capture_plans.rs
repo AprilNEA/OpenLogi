@@ -503,6 +503,34 @@ fn hook_maps_publish_selection_and_preserve_capture_observations() {
     assert!(maps.shift_held.contains("a"));
 }
 
+/// The hook tells another mouse's press from the selected device's by the
+/// selected device's route, so the snapshot names it and keeps the diversions
+/// sessions reported on it across a rebuild (#2381).
+#[test]
+fn hook_maps_name_the_selected_route_its_diversions_are_kept_under() {
+    let mut orch = orchestrator(Config::default());
+    orch.devices = vec![dev("a", 1, true), dev("b", 2, true)];
+    orch.rebuild();
+    let route = mouse_route("AA00", 1);
+    {
+        let mut maps = orch.shared.hook_maps.write().expect("hook maps");
+        assert_eq!(maps.selected_device.as_deref(), Some("a"));
+        assert_eq!(maps.selected_route.as_ref(), Some(&route));
+        maps.diverted_buttons.record(
+            &crate::runtime::HidppSessionId::with_epoch("a", 3),
+            &route,
+            ButtonId::MiddleClick,
+        );
+    }
+    orch.reload_config(Config::default());
+    let maps = orch.shared.hook_maps.read().expect("hook maps");
+    assert_eq!(maps.selected_route.as_ref(), Some(&route));
+    assert!(
+        maps.diverted_buttons
+            .diverted_on(&route, ButtonId::MiddleClick)
+    );
+}
+
 fn assert_side_gesture_capture_follows_platform_ownership_and_hook_availability(button: ButtonId) {
     let mut config = Config::default();
     config.set_gesture_mode("a", button, true);

@@ -884,11 +884,18 @@ impl Orchestrator {
         let shift_bindings = key
             .map(|key| shift_bindings_for(&self.config, key))
             .unwrap_or_default();
+        let selected_route = key.and_then(|key| {
+            self.devices
+                .iter()
+                .find(|dev| dev.config_key == key)
+                .and_then(|dev| dev.route.clone())
+        });
         HookMaps {
             bindings,
             gestures,
             pointer,
             selected_device: key.map(str::to_owned),
+            selected_route,
             shift_bindings,
             ..HookMaps::default()
         }
