@@ -14,8 +14,8 @@ umask 077
 MINISIGN_PUBLIC_KEY=RWRRkFtw+rqkvTlCTGKUszSE5dX9CK1teaQD45jO4P9rYlWLO4/nHVUF
 
 if [ "$(id -u)" -ne 0 ] || [ "$#" -ne 4 ]; then
-    echo "Root privileges and four arguments required" >&2
-    exit 2
+  echo "Root privileges and four arguments required" >&2
+  exit 2
 fi
 
 source_package=$1
@@ -24,22 +24,22 @@ expected_hash=$3
 expected_name=$4
 
 case "$expected_name" in
-    openlogi-v*-linux-amd64.pkg.tar.zst | openlogi-v*-linux-amd64.deb | openlogi-v*-linux-amd64.rpm)
-        [ "$(uname -m)" = "x86_64" ] || exit 2
-        ;;
-    openlogi-v*-linux-arm64.pkg.tar.zst | openlogi-v*-linux-arm64.deb | openlogi-v*-linux-arm64.rpm)
-        [ "$(uname -m)" = "aarch64" ] || exit 2
-        ;;
-    *)
-        echo "Unsupported package name" >&2
-        exit 2
-        ;;
+  openlogi-v*-linux-amd64.pkg.tar.zst | openlogi-v*-linux-amd64.deb | openlogi-v*-linux-amd64.rpm)
+    [ "$(uname -m)" = "x86_64" ] || exit 2
+    ;;
+  openlogi-v*-linux-arm64.pkg.tar.zst | openlogi-v*-linux-arm64.deb | openlogi-v*-linux-arm64.rpm)
+    [ "$(uname -m)" = "aarch64" ] || exit 2
+    ;;
+  *)
+    echo "Unsupported package name" >&2
+    exit 2
+    ;;
 esac
 
 case "$expected_hash" in
-    *[!0123456789abcdefABCDEF]* | "")
-        exit 2
-        ;;
+  *[!0123456789abcdefABCDEF]* | "")
+    exit 2
+    ;;
 esac
 [ "${#expected_hash}" -eq 64 ] || exit 2
 
@@ -49,7 +49,7 @@ esac
 
 work=$(mktemp -d /var/tmp/openlogi-update.XXXXXXXX)
 cleanup() {
-    rm -rf -- "$work"
+  rm -rf -- "$work"
 }
 trap cleanup EXIT
 trap "exit 1" HUP INT TERM
@@ -65,38 +65,38 @@ minisign -V -P "$MINISIGN_PUBLIC_KEY" -m "$package" -x "$signature" >/dev/null
 
 printf "%s  %s
 " "$expected_hash" "$expected_name" |
-    (cd "$work" && sha256sum --check --status -)
+  (cd "$work" && sha256sum --check --status -)
 
 echo "Verified signed OpenLogi package"
 
 case "$expected_name" in
-    *.pkg.tar.zst)
-        pacman -U --noconfirm -- "$package"
-        ;;
-    *.deb)
-        if command -v apt-get >/dev/null 2>&1; then
-            apt-get install -y "$package"
-        elif command -v apt >/dev/null 2>&1; then
-            apt install -y "$package"
-        else
-            dpkg -i -- "$package"
-        fi
-        ;;
-    *.rpm)
-        if command -v dnf >/dev/null 2>&1; then
-            dnf install -y "$package"
-        elif command -v yum >/dev/null 2>&1; then
-            yum install -y "$package"
-        elif command -v zypper >/dev/null 2>&1; then
-            zypper --non-interactive install --allow-unsigned-rpm "$package"
-        else
-            rpm -Uvh -- "$package"
-        fi
-        ;;
-    *)
-        echo "Unsupported package format" >&2
-        exit 2
-        ;;
+  *.pkg.tar.zst)
+    pacman -U --noconfirm -- "$package"
+    ;;
+  *.deb)
+    if command -v apt-get >/dev/null 2>&1; then
+      apt-get install -y "$package"
+    elif command -v apt >/dev/null 2>&1; then
+      apt install -y "$package"
+    else
+      dpkg -i -- "$package"
+    fi
+    ;;
+  *.rpm)
+    if command -v dnf >/dev/null 2>&1; then
+      dnf install -y "$package"
+    elif command -v yum >/dev/null 2>&1; then
+      yum install -y "$package"
+    elif command -v zypper >/dev/null 2>&1; then
+      zypper --non-interactive install --allow-unsigned-rpm "$package"
+    else
+      rpm -Uvh -- "$package"
+    fi
+    ;;
+  *)
+    echo "Unsupported package format" >&2
+    exit 2
+    ;;
 esac
 
 echo "OpenLogi package installation completed"
