@@ -7,7 +7,7 @@ use openlogi_camera::Camera;
 use openlogi_core::config::{Config, DeviceConfig, DeviceIdentity, canonical_device_key};
 use openlogi_core::device::{
     BatteryInfo, Capabilities, DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports,
-    LightCapabilities, StandaloneDevice, prettify_codename,
+    LightCapabilities, PairedDevice, StandaloneDevice, prettify_codename,
 };
 use openlogi_core::device_order::{
     DeviceIdentity as RouteIdentity, DeviceStableId, PhysicalDeviceKey,
@@ -65,6 +65,12 @@ pub struct DeviceRecord {
     pub asset: Option<ResolvedAsset>,
     pub model_info: Option<DeviceModelInfo>,
     pub codename: Option<String>,
+    /// The agent's [`PairedDevice::wpid`]. `None` when the agent read none,
+    /// and for a record with no paired device behind it: a camera, a
+    /// standalone device, an offline placeholder, the dev-only demo keyboard.
+    ///
+    /// [`PairedDevice::wpid`]: openlogi_core::device::PairedDevice::wpid
+    pub wpid: Option<u16>,
     pub serial_number: Option<String>,
     pub unit_id: [u8; 4],
     /// Standalone driver family, if this is a non-HID++ record.
@@ -84,8 +90,14 @@ pub struct DeviceRecord {
     /// Continuity across sleep lives in the hid layer: its probe cache keeps
     /// serving the last-known capabilities for a known-but-offline device, so
     /// this is `None` only for a device never probed since the agent started —
-    /// and the UI then falls back to [`Capabilities::presumed_from_kind`].
+    /// and the UI then falls back to [`Self::capabilities_or_presumed`].
     pub capabilities: Option<Capabilities>,
+    /// The agent's [`PairedDevice::hidpp10`]: the device answered as HID++
+    /// 1.0, so [`Self::capabilities`] is `None` although it was probed.
+    /// `false` for a record with no HID++ device behind it.
+    ///
+    /// [`PairedDevice::hidpp10`]: openlogi_core::device::PairedDevice::hidpp10
+    pub hidpp10: bool,
     /// Capabilities for standalone non-HID++ controls such as Litra lights.
     pub light_capabilities: Option<LightCapabilities>,
     pub slot: u8,
@@ -105,6 +117,20 @@ pub struct DeviceRecord {
 }
 
 impl DeviceRecord {
+    /// [`Self::capabilities`], or the set presumed when none is measured:
+    /// from the kind, or only the host-side set for a HID++ 1.0 device, whose
+    /// DPI or lighting control would have no effect (#2161).
+    #[must_use]
+    pub fn capabilities_or_presumed(&self) -> Capabilities {
+        self.capabilities.unwrap_or_else(|| {
+            if self.hidpp10 {
+                Capabilities::presumed_for_hidpp10(self.kind)
+            } else {
+                Capabilities::presumed_from_kind(self.kind)
+            }
+        })
+    }
+
     /// Typed key for `AppState`'s per-device UI caches (DPI/SmartShift load
     /// state, standalone-light overrides, inventory-miss counters). Wraps
     /// [`Self::config_key`] — see [`DeviceKey`].
@@ -216,6 +242,17 @@ impl super::AppState {
     }
 }
 
+/// The name a receiver-paired device is shown under: its asset's name, else
+/// its prettified codename, else its receiver slot number.
+fn paired_display_name(asset: Option<&ResolvedAsset>, paired: &PairedDevice) -> String {
+    asset
+        .map(|a| a.display_name.clone())
+        .or_else(|| paired.codename.as_deref().map(prettify_codename))
+        .unwrap_or_else(|| {
+            tr!("device.receiver_slot_number", number => paired.slot.to_string()).to_string()
+        })
+}
+
 /// Build the gallery's device list as the **union** of the live inventory and
 /// the persisted set of devices we've seen before.
 ///
@@ -283,14 +320,7 @@ pub(super) fn build_device_list(
                     .map(PhysicalDeviceKey::into_string);
             let route_key = stable_id.route_key();
 
-            let display_name = asset
-                .as_ref()
-                .map(|a| a.display_name.clone())
-                .or_else(|| paired.codename.as_deref().map(prettify_codename))
-                .unwrap_or_else(|| {
-                    tr!("device.receiver_slot_number", number => paired.slot.to_string())
-                        .to_string()
-                });
+            let display_name = paired_display_name(asset.as_ref(), paired);
             let kind = effective_kind(paired.kind, asset.as_ref().and_then(|a| a.kind));
             list.push(DeviceRecord {
                 config_key,
@@ -303,6 +333,7 @@ pub(super) fn build_device_list(
                 asset,
                 model_info,
                 codename,
+                wpid: paired.wpid,
                 serial_number,
                 unit_id,
                 driver_id: None,
@@ -312,6 +343,7 @@ pub(super) fn build_device_list(
                 capture_id: None,
                 kind,
                 capabilities: paired.capabilities,
+                hidpp10: paired.hidpp10,
                 light_capabilities: None,
                 slot: paired.slot,
                 online: paired.online,
@@ -471,6 +503,7 @@ fn camera_record(camera: &Camera, resolver: &AssetResolver) -> DeviceRecord {
         asset,
         model_info: None,
         codename: None,
+        wpid: None,
         serial_number: camera.serial_number.clone(),
         unit_id: [0; 4],
         driver_id: None,
@@ -480,6 +513,7 @@ fn camera_record(camera: &Camera, resolver: &AssetResolver) -> DeviceRecord {
         capture_id: Some(camera.unique_id.clone()),
         kind: DeviceKind::Camera,
         capabilities: None,
+        hidpp10: false,
         light_capabilities: None,
         slot: 0,
         online: true,
@@ -551,6 +585,7 @@ fn append_standalone(
             asset,
             model_info: None,
             codename: None,
+            wpid: None,
             serial_number: device.serial_number.clone(),
             unit_id: device.unit_id,
             driver_id: Some(device.driver_id.clone()),
@@ -560,6 +595,7 @@ fn append_standalone(
             capture_id: None,
             kind: device.kind,
             capabilities: device.capabilities,
+            hidpp10: false,
             light_capabilities: device.light_capabilities,
             slot: openlogi_core::hid::DIRECT_DEVICE_INDEX,
             online: device.online,
@@ -752,6 +788,7 @@ fn offline_record(
         asset,
         model_info,
         codename: identity.codename.clone(),
+        wpid: None,
         serial_number: None,
         unit_id: [0; 4],
         driver_id: identity.driver_id.clone(),
@@ -761,6 +798,7 @@ fn offline_record(
         capture_id: None,
         kind: identity.kind,
         capabilities: Some(identity.capabilities),
+        hidpp10: false,
         light_capabilities: identity.light_capabilities,
         slot: 0,
         online: false,
@@ -811,6 +849,7 @@ pub(super) fn adopt_transient_record(known: &DeviceRecord, live: DeviceRecord) -
         asset: known.asset.clone().or(live.asset),
         model_info: known.model_info.clone().or(live.model_info),
         codename: known.codename.clone().or(live.codename),
+        wpid: live.wpid.or(known.wpid),
         serial_number: known.serial_number.clone().or(live.serial_number),
         unit_id: known.unit_id,
         driver_id: live.driver_id.or_else(|| known.driver_id.clone()),
@@ -827,6 +866,7 @@ pub(super) fn adopt_transient_record(known: &DeviceRecord, live: DeviceRecord) -
             known.kind
         },
         capabilities: live.capabilities.or(known.capabilities),
+        hidpp10: live.hidpp10,
         light_capabilities: live.light_capabilities.or(known.light_capabilities),
         slot: live.slot,
         online: live.online,
@@ -917,6 +957,7 @@ fn demo_keyboard() -> DeviceRecord {
         asset: None,
         model_info: None,
         codename: None,
+        wpid: None,
         serial_number: None,
         unit_id: [0; 4],
         driver_id: None,
@@ -929,6 +970,7 @@ fn demo_keyboard() -> DeviceRecord {
             lighting: true,
             ..Capabilities::default()
         }),
+        hidpp10: false,
         light_capabilities: None,
         slot: 0,
         online: true,

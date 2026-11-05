@@ -1,0 +1,62 @@
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Ask a usage or setup question here. When a reply solves it, mark that reply as the answer.
+
+        Wrong place?
+
+        - **Something is broken:** use the [bug form](https://github.com/AprilNEA/OpenLogi/issues/new?template=bug_report.yml).
+        - **A device is not detected, or you want a device supported:** use the [device form](https://github.com/AprilNEA/OpenLogi/issues/new?template=device_support.yml).
+        - **A feature idea:** post it in [Ideas](https://github.com/AprilNEA/OpenLogi/discussions/new?category=ideas).
+        - **A security issue:** report it [privately](https://github.com/AprilNEA/OpenLogi/security/advisories/new).
+
+        Device questions are faster to answer when **Logi Options+** is not running, because the two apps compete for HID++ access.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Pre-flight checklist
+      options:
+        - label: I searched [existing discussions](https://github.com/AprilNEA/OpenLogi/discussions) and the [docs](https://github.com/AprilNEA/OpenLogi/tree/master/docs).
+          required: true
+
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+      description: What are you trying to do, and what happens instead?
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - macOS
+        - Linux
+        - Windows
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: OpenLogi version
+      description: GUI → About window, or run `openlogi --version`. Leave empty if you have not installed OpenLogi yet.
+      placeholder: e.g. 0.8.20
+
+  - type: input
+    id: device
+    attributes:
+      label: Device and connection
+      description: Leave empty if the question is not about a device.
+      placeholder: e.g. MX Master 3S over a Logi Bolt receiver
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics report
+      description: For a device question, open the **About** window, click **Copy Diagnostics**, and paste the result here. The report is privacy-filtered.
+      render: markdown

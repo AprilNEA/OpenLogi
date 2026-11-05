@@ -30,6 +30,7 @@ use gpui::{AssetSource, Result, SharedString};
 /// preview of the same ring exactly.
 #[rustfmt::skip]
 const ACTION_ICONS: &[(&str, &[u8])] = &[
+    ("action-icons/arrow-left-right.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/arrow-left-right.svg"))),
     ("action-icons/arrow-left.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/arrow-left.svg"))),
     ("action-icons/arrow-right.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/arrow-right.svg"))),
     ("action-icons/ban.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/ban.svg"))),

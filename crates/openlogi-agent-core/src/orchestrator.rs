@@ -16,11 +16,12 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{
-    ActionRingIcon, Binding, ButtonId, GamingButtons, GamingLayout, GridKey, KeypadPage,
+    ActionRingIcon, Binding, ButtonId, GamingButtons, GamingLayout, GridKey, KeypadPage, ModeKey,
 };
 use openlogi_core::bindings::{bindings_on_page, button_bindings_for, oshook_gestures_for};
 use openlogi_core::config::{
-    AppSettings, Config, ConfigRevision, LightSettings, MouseProfileTarget, canonical_device_key,
+    AppSettings, Config, ConfigRevision, GKeyOwner, GamingKeyMode, LightSettings,
+    MouseProfileTarget, canonical_device_key,
 };
 use openlogi_core::device::{
     BatteryInfo, Capabilities, ChangedOnLight, DeviceInventory, DeviceKind, LightCapabilities,
@@ -30,8 +31,9 @@ use openlogi_core::device_order::{DeviceIdentity, DeviceStableId, PhysicalDevice
 use openlogi_hid::{
     BacklightChange, BacklightState, CaptureChannelSlot, ChannelPool, ChannelRegistry,
     DeviceIoGate, DeviceRoute, DisableKeysMask, Dpi, EasySwitchHosts, FnLockState,
-    ForceSensingInfo, HidppOperation, HostOs, PointerSpeed, ReportRate, ReportRateInfo, WriteError,
-    commands_for_light_settings, is_reserved_keyboard_control, key_display_for,
+    ForceSensingInfo, GamingWanted, HidppOperation, HostOs, PointerSpeed, ReportRate,
+    ReportRateInfo, SidetoneLevel, WriteError, commands_for_light_settings,
+    is_reserved_keyboard_control, key_display_for,
 };
 #[cfg(test)]
 use openlogi_ipc::ChosenLight;
@@ -41,9 +43,10 @@ use tracing::{debug, info, warn};
 
 use crate::action_ring::ActionRingSessionSpec;
 use crate::capture_plan::{
-    CapturePublication, SharedCapturePlans, hidpp_side_gesture_maps_for, plan_for_device,
-    shift_bindings_for,
+    CapturePublication, PlanDevice, SharedCapturePlans, buttons_unlike_focus,
+    hidpp_side_gesture_maps_for, plan_for_device, shift_bindings_for,
 };
+use crate::flow::{FlowController, InventoryDevice};
 use crate::hardware::{
     DeviceAccess, DeviceOp, HardwareContext, KeptOsLayouts, VolatileMouseSettings, WriteOrder,
     show_precision_led, write_pointer_speed_in_background,
@@ -52,9 +55,9 @@ use crate::notices::LowBatteryWatch;
 use crate::observable::ObservableState;
 use crate::pointer_speed::{AppWrite, ReloadChange, SavedSpeed, SpeedMouse, SpeedWrite};
 use crate::receiver_access::ReceiverAccess;
-use crate::runtime::PageTurn;
 use crate::runtime::hook::{HookMaps, SharedHookMaps};
 use crate::runtime::scroll::ScrollPreferences;
+use crate::runtime::{PageTurn, PointerSelection};
 use crate::watchers::host_switch::{HostSwitchLink, HostSwitchLinks};
 use crate::watchers::inventory::InventoryRefresh;
 use crate::watchers::key_display::{KeyDisplaySpec, KeyFace, SharedKeyDisplaySpecs};
@@ -167,6 +170,9 @@ pub struct SharedHandles {
     /// Receiver access shared by HID++ sessions and pairing. Pairing/host
     /// transitions are exclusive; capture sessions share under read leases.
     pub receiver_access: ReceiverAccess,
+    /// Flow peers, edge detection, and device handoff. Dormant until the
+    /// agent arms it.
+    pub flow: FlowController,
     /// Per-transport turns for agent-owned HID requests. Shared by every
     /// device access built from these handles, so two slots of one receiver
     /// queue behind each other before either starts its response timeout.
@@ -185,6 +191,8 @@ pub struct SharedHandles {
     pointer_speeds: Arc<PointerSpeeds>,
     /// Orders every path's press-force writes per force-sensing device.
     force_sensing_order: WriteOrder,
+    /// Orders the GUI's sidetone writes per headset.
+    sidetone_order: WriteOrder,
     /// Orders the GUI's backlight writes per keyboard.
     backlight_order: WriteOrder,
     /// Orders host renames per device.
@@ -353,6 +361,26 @@ impl SharedHandles {
                 &ticket,
                 |c| async move { openlogi_hid::set_force_sensing_on(&c, force).await },
                 |c| async move { openlogi_hid::get_force_sensing_on(&c).await },
+            )
+            .await
+    }
+
+    /// Write `level` to the headset at `route` and return the level it
+    /// confirms. When a newer sidetone write for the headset is requested
+    /// before this one gets its turn, this one reads the headset instead of
+    /// writing a level that is about to be replaced.
+    pub async fn set_sidetone(
+        &self,
+        route: &DeviceRoute,
+        level: SidetoneLevel,
+    ) -> Result<SidetoneLevel, WriteError> {
+        let ticket = self.sidetone_order.request(route);
+        self.device(route)
+            .run_in_turn(
+                HidppOperation::WriteSidetone,
+                &ticket,
+                |c| async move { openlogi_hid::set_sidetone_on(&c, level).await },
+                |c| async move { openlogi_hid::get_sidetone_on(&c).await },
             )
             .await
     }
@@ -681,6 +709,14 @@ impl Orchestrator {
         let (host_switch_links_tx, host_switch_links) = watch::channel(Arc::new(Vec::new()));
         let (watched_lights_tx, watched_lights) = watch::channel(Arc::new(Vec::new()));
         openlogi_inject::set_desktop_switch(desktop_switch(&config.app_settings));
+        let receiver_access = ReceiverAccess::default();
+        let flow = FlowController::new(
+            &config.flow,
+            Arc::clone(&observable),
+            hardware.channel_pool(),
+            receiver_access.clone(),
+            hardware.device_io(),
+        );
         let shared = SharedHandles {
             device_io: hardware.device_io(),
             channel_pool: hardware.channel_pool(),
@@ -699,7 +735,8 @@ impl Orchestrator {
             keyboard_channel: Arc::new(RwLock::new(None)),
             key_display_specs,
             capture_rearm_generation: Arc::new(AtomicU64::new(0)),
-            receiver_access: ReceiverAccess::default(),
+            receiver_access,
+            flow,
             transport_turns: crate::hardware::TransportTurns::default(),
             host_switch_links,
             watched_lights,
@@ -707,6 +744,7 @@ impl Orchestrator {
             report_rate_order: WriteOrder::default(),
             pointer_speeds: Arc::default(),
             force_sensing_order: WriteOrder::default(),
+            sidetone_order: WriteOrder::default(),
             backlight_order: WriteOrder::default(),
             host_name_order: WriteOrder::default(),
             follower_cookie_order: WriteOrder::default(),
@@ -763,11 +801,16 @@ impl Orchestrator {
         self.shared.clone()
     }
 
-    fn current_key(&self) -> Option<&str> {
+    /// The selected inventory entry. A device seen on two links has an entry
+    /// per link under one key; this is the one [`pick_current`] chose.
+    fn current_device(&self) -> Option<&AgentDevice> {
         self.devices
             .get(self.current)
             .filter(|device| is_hidpp_device(device))
-            .map(|d| d.config_key.as_str())
+    }
+
+    fn current_key(&self) -> Option<&str> {
+        self.current_device().map(|d| d.config_key.as_str())
     }
 
     /// The app whose mouse profile applies, and the pointer target dispatch
@@ -794,11 +837,29 @@ impl Orchestrator {
         (app, Some(target))
     }
 
-    /// Build the OS-hook callback's maps for `key` and its mouse context. Both hook
-    /// sub-maps are app-scoped (a per-app override can demote the gesture owner),
-    /// so they're built together here and published under one lock — keeping
-    /// `rebuild` and `set_current_app` from drifting into a half-populated write.
-    fn hook_maps_for(&self, key: Option<&str>) -> HookMaps {
+    /// The pointer context for `key`'s bindings resolved for `app`. It names
+    /// the buttons that the focused application binds otherwise, so a press of
+    /// any other button may send its keystrokes as focused mode does.
+    fn pointer_selection(
+        &self,
+        key: Option<&str>,
+        app: Option<&str>,
+        target: Option<openlogi_hook::PointerTarget>,
+    ) -> Option<PointerSelection> {
+        target.map(|target| {
+            let unlike_focus =
+                buttons_unlike_focus(&self.config, key, app, self.current_app.as_deref());
+            PointerSelection::new(target, unlike_focus)
+        })
+    }
+
+    /// Build the OS-hook callback's maps for the `selected` device and its mouse
+    /// context. Both hook sub-maps are app-scoped (a per-app override can demote
+    /// the gesture owner), so they're built together here and published under
+    /// one lock — keeping `rebuild` and `set_current_app` from drifting into a
+    /// half-populated write.
+    fn hook_maps_for(&self, selected: Option<&AgentDevice>) -> HookMaps {
+        let key = selected.map(|device| device.config_key.as_str());
         // A disabled selected device gets empty maps: the OS hook then passes
         // its events through untouched instead of applying remaps to a device
         // the user asked OpenLogi to leave alone.
@@ -806,7 +867,10 @@ impl Orchestrator {
             return HookMaps::default();
         }
         let (app, pointer_target) = self.mouse_context();
-        let mut bindings = button_bindings_for(&self.config, key, app);
+        let pointer = self.pointer_selection(key, app, pointer_target);
+        // The OS hook only sees standard HID buttons, whose defaults no
+        // G-series layout changes, so this map needs no layout.
+        let mut bindings = button_bindings_for(&self.config, key, app, None);
         let mut gestures = oshook_gestures_for(&self.config, key, app);
         if cfg!(target_os = "macos")
             && let Some(key) = key
@@ -830,8 +894,11 @@ impl Orchestrator {
         HookMaps {
             bindings,
             gestures,
-            pointer_target,
+            pointer,
             selected_device: key.map(str::to_owned),
+            // The selected entry's own link: another entry under the same key
+            // names a link its capture session is not on.
+            selected_route: selected.and_then(|device| device.route.clone()),
             shift_bindings,
             ..HookMaps::default()
         }
@@ -850,15 +917,12 @@ impl Orchestrator {
     }
 
     /// Publish hook maps while preserving what hardware capture sessions
-    /// reported: thumb-wheel polarities, diverted buttons and held G-Shift
-    /// buttons. Selection, polarity, and bindings share the one lock the
-    /// callback reads, so a device switch cannot combine facts from two
-    /// devices.
+    /// reported: diverted buttons and held G-Shift buttons. Selection,
+    /// capture state, and bindings share the one lock the callback reads, so
+    /// a device switch cannot combine facts from two devices.
     fn publish_hook_maps(&self, mut maps: HookMaps) {
         match self.shared.hook_maps.write() {
             Ok(mut current) => {
-                maps.thumbwheel_positive_is_forward =
-                    std::mem::take(&mut current.thumbwheel_positive_is_forward);
                 maps.shift_held = std::mem::take(&mut current.shift_held);
                 maps.diverted_buttons = std::mem::take(&mut current.diverted_buttons);
                 *current = maps;
@@ -911,8 +975,12 @@ impl Orchestrator {
             .iter()
             .filter(|d| d.kind.is_keyboard_family())
             .filter(|d| self.config.device_enabled(&d.config_key))
-            .filter(|d| binds_keys_in_some_profile(&self.config, &d.config_key))
             .filter_map(|dev| {
+                let gaming = gaming_wanted(&self.config, dev);
+                if !gaming.take_g_row && !binds_keys_in_some_profile(&self.config, &dev.config_key)
+                {
+                    return None;
+                }
                 let route = dev.route.clone()?;
                 let stored = self.foreground_key_bindings(&dev.config_key);
                 // Capture from every page; dispatch the current page's.
@@ -923,12 +991,16 @@ impl Orchestrator {
                         dev,
                         bindings,
                         divert,
+                        gaming,
                     },
                     route,
                 ))
             });
         let rank = |candidate: &KeyboardCandidate<'_>| {
-            (candidate.divert.captures_nothing(), !candidate.dev.online)
+            (
+                candidate.divert.captures_nothing() && !candidate.gaming.take_g_row,
+                !candidate.dev.online,
+            )
         };
         let mut chosen: Vec<(KeyboardCandidate<'_>, DeviceRoute)> = Vec::new();
         for (candidate, route) in candidates {
@@ -954,6 +1026,8 @@ impl Orchestrator {
                 route,
                 wanted: chosen.divert.wanted,
                 grid: chosen.divert.grid,
+                gaming: chosen.gaming,
+                gaming_mode: self.config.gaming_key_mode(&chosen.dev.config_key),
                 bindings: chosen.bindings,
             });
         }
@@ -963,7 +1037,12 @@ impl Orchestrator {
     /// `config_key`'s stored bindings for the foreground app, across every
     /// keypad page.
     fn foreground_key_bindings(&self, config_key: &str) -> BTreeMap<ButtonId, Binding> {
-        button_bindings_for(&self.config, Some(config_key), self.current_app.as_deref())
+        button_bindings_for(
+            &self.config,
+            Some(config_key),
+            self.current_app.as_deref(),
+            None,
+        )
     }
 
     /// The part of `stored` that `config_key`'s keys act on now: its current
@@ -1012,7 +1091,7 @@ impl Orchestrator {
     /// Rewrite every shared map from the current config + selected device.
     fn rebuild(&self) {
         let key = self.current_key();
-        self.publish_hook_maps(self.hook_maps_for(key));
+        self.publish_hook_maps(self.hook_maps_for(self.current_device()));
         self.publish_scroll_inversion(key);
         self.publish_device_runtime();
     }
@@ -1068,6 +1147,7 @@ impl Orchestrator {
         publish_arc_if_changed(&self.watched_lights_tx, self.watched_lights());
         self.publish_lights();
         publish_arc_if_changed(&self.key_display_specs_tx, self.key_display_specs_for());
+        self.publish_flow();
     }
 
     /// What each online, enabled keypad's LCD keys should show: the glyph of
@@ -1101,6 +1181,33 @@ impl Orchestrator {
                 })
             })
             .collect()
+    }
+
+    /// Hand Flow its configuration and the devices it may move. Both
+    /// updates are no-ops when nothing changed.
+    fn publish_flow(&self) {
+        self.shared.flow.update_config(&self.config.flow);
+        self.shared.flow.update_devices(
+            self.devices
+                .iter()
+                .filter_map(Self::flow_inventory_device)
+                .collect(),
+        );
+    }
+
+    /// One device as Flow sees it, keyed like [`Self::capture_identity`].
+    fn flow_inventory_device(dev: &AgentDevice) -> Option<InventoryDevice> {
+        let identity = DeviceIdentity::from_parts(dev.serial.as_deref(), dev.unit_id);
+        let key = canonical_device_key(&stable_id(dev), Some(&identity))
+            .or_else(|| PhysicalDeviceKey::parse(&dev.config_key))?;
+        Some(InventoryDevice {
+            key,
+            route: dev.route.clone(),
+            serial: dev.serial.clone(),
+            unit_id: dev.unit_id,
+            kind: dev.kind,
+            online: dev.online,
+        })
     }
 
     fn publish_capture_plans(&self) {
@@ -1225,21 +1332,25 @@ impl Orchestrator {
             } else {
                 self.mouse_context()
             };
+            let layout = GamingLayout::for_model_key(&dev.model_key);
             let mut plan = plan_for_device(
                 &self.config,
-                physical_key,
-                &dev.config_key,
-                route,
+                PlanDevice {
+                    physical_key,
+                    config_key: &dev.config_key,
+                    route,
+                    layout,
+                },
                 app,
                 rearm_generation,
                 self.os_mouse_hook_available,
             );
-            plan.dispatch.pointer_target = pointer_target;
+            plan.dispatch.pointer =
+                self.pointer_selection(Some(&dev.config_key), app, pointer_target);
             plan.dispatch.invert_wheel = wheel_inverted(&self.config, dev);
             plan.target.spec.divert_main_wheel =
                 main_wheel_divert(&self.config, dev, self.os_mouse_hook_available);
-            let mut plan =
-                plan.with_onboard(&self.config, GamingLayout::for_model_key(&dev.model_key));
+            let mut plan = plan.with_onboard(&self.config, layout);
             if let Some(keyboard) = keyboards
                 .iter()
                 .find(|keyboard| keyboard.route == plan.target.route)
@@ -1874,6 +1985,7 @@ impl Orchestrator {
             haptic_route,
             layout,
             language: self.config.app_settings.language.clone(),
+            size: ring.size,
         })
     }
 
@@ -1971,7 +2083,7 @@ impl Orchestrator {
             return false;
         }
         let previous = std::mem::replace(&mut self.current_app, id);
-        self.publish_hook_maps(self.hook_maps_for(self.current_key()));
+        self.publish_hook_maps(self.hook_maps_for(self.current_device()));
         // Capture plans are app-scoped (per-app binding overlays); republish
         // them with the keyboard's effective bindings.
         self.publish_device_runtime();
@@ -2001,7 +2113,7 @@ impl Orchestrator {
         if self.config.app_settings.mouse_profile_target == MouseProfileTarget::Focused {
             return false;
         }
-        self.publish_hook_maps(self.hook_maps_for(self.current_key()));
+        self.publish_hook_maps(self.hook_maps_for(self.current_device()));
         self.publish_capture_plans();
         previous != self.mouse_context().1
     }
@@ -2310,6 +2422,7 @@ struct KeyboardCandidate<'a> {
     dev: &'a AgentDevice,
     bindings: BTreeMap<ButtonId, Binding>,
     divert: KeyboardDivertSet,
+    gaming: GamingWanted,
 }
 
 /// What the bindings ask a keyboard capture session to do: the `0x1b04`
@@ -2382,6 +2495,32 @@ fn keyboard_divert_set(bindings: &BTreeMap<ButtonId, Binding>) -> KeyboardDivert
     set
 }
 
+/// What `dev`'s capture session does with a G-series gaming cluster: nothing
+/// until the user hands G1–G5 to OpenLogi on this device, then the whole
+/// `0x8010` row, plus M1–M3 when the device has them, plus MR in
+/// [`GamingKeyMode::NineButtons`]. Bound or not, every G-key is then
+/// OpenLogi's, so the takeover is an explicit per-device choice.
+fn gaming_wanted(config: &Config, dev: &AgentDevice) -> GamingWanted {
+    let Some(capabilities) = dev.capabilities.as_ref().filter(|c| c.g_keys) else {
+        return GamingWanted::default();
+    };
+    if config.g_key_owner(&dev.config_key) != GKeyOwner::OpenLogi {
+        return GamingWanted::default();
+    }
+    let nine_buttons = config.gaming_key_mode(&dev.config_key) == GamingKeyMode::NineButtons;
+    let mode_keys = ModeKey::ALL
+        .into_iter()
+        .filter(|key| match key.profile() {
+            Some(_) => capabilities.m_keys,
+            None => capabilities.macro_record && nine_buttons,
+        })
+        .collect();
+    GamingWanted {
+        take_g_row: true,
+        mode_keys,
+    }
+}
+
 /// Whether `config_key` binds a key the capture session would take over in
 /// its device-wide profile or in any of its per-app profiles. The
 /// device-wide profile is read with the defaults the session dispatches, so
@@ -2390,7 +2529,7 @@ fn keyboard_divert_set(bindings: &BTreeMap<ButtonId, Binding>) -> KeyboardDivert
 /// single action, so its presence captures the key exactly as the same
 /// device-wide binding does.
 fn binds_keys_in_some_profile(config: &Config, config_key: &str) -> bool {
-    let device_wide = button_bindings_for(config, Some(config_key), None);
+    let device_wide = button_bindings_for(config, Some(config_key), None, None);
     !keyboard_divert_set(&device_wide).captures_nothing()
         || config
             .app_profiles(config_key)

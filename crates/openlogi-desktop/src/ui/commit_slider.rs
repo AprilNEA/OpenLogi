@@ -11,9 +11,9 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use gpui::{App, AppContext as _, Context, Entity, Subscription, Window};
-use gpui_component::slider::{SliderEvent, SliderState};
+use gpui_kit::component::slider::{SliderEvent, SliderState};
 use openlogi_core::config::{ThumbwheelSensitivity, VerticalScrollSensitivity};
-use openlogi_core::hid::{Dpi, PointerSpeed, SmartShiftThreshold, TunableTorque};
+use openlogi_core::hid::{Dpi, PointerSpeed, SidetoneLevel, SmartShiftThreshold, TunableTorque};
 
 /// A value a slider thumb can rest on.
 pub(crate) trait SliderUnit: Copy + PartialEq + 'static {
@@ -81,6 +81,17 @@ impl SliderUnit for PointerSpeed {
 
     fn from_slider(raw: f32) -> Self {
         Self::from_slider(raw)
+    }
+}
+
+/// A sidetone level rests on whole percents.
+impl SliderUnit for SidetoneLevel {
+    fn to_slider(self) -> f32 {
+        f32::from(self.percent())
+    }
+
+    fn from_slider(raw: f32) -> Self {
+        Self::clamped(u8::from_slider(raw))
     }
 }
 
@@ -321,7 +332,7 @@ mod tests {
     use std::rc::Rc;
 
     use gpui::{Context, Empty, IntoElement, Render, TestAppContext, Window};
-    use gpui_component::slider::SliderEvent;
+    use gpui_kit::component::slider::SliderEvent;
 
     use super::{CommitSlider, SliderRange, Thumb};
 

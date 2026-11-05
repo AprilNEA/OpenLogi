@@ -1,21 +1,23 @@
+use crate::ui::theme::FocusRingStyle as _;
 use gpui::{
     App, AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement,
     MouseButton, NavigationDirection, ParentElement, Render, Styled, Subscription, Window, div,
     prelude::FluentBuilder as _, rgb,
 };
-use gpui_base::Button as BaseButton;
-use gpui_component::{
-    Icon, IconName, Root, TitleBar,
+use gpui_kit::base::Button as BaseButton;
+use gpui_kit::component::{
+    Icon, IconName, TitleBar,
     button::{Button, ButtonVariants as _},
     v_flex,
 };
 use openlogi_core::binding::GamingButtons;
-use openlogi_core::device::{Capabilities, DeviceKind};
+use openlogi_core::device::DeviceKind;
 use openlogi_ipc::InventoryHealth;
 use tracing::info;
 
-use self::menu::{APP_KEY_CONTEXT, CloseWindow, Minimize, NavigateBack, Zoom};
+use self::menu::{APP_KEY_CONTEXT, NavigateBack};
 use crate::features::action_ring::ActionRingPanel;
+use crate::features::audio::AudioPanel;
 use crate::features::camera::controls::CameraControlsPanel;
 use crate::features::camera::preview::CameraPreview;
 use crate::features::keyboard::disable_keys::DisableKeysPanel;
@@ -24,6 +26,7 @@ use crate::features::lighting::keyboard_rgb::LightingPanel;
 use crate::features::lighting::standalone::LightPanel;
 use crate::features::mouse::view::MouseModelView;
 use crate::features::pointer::dpi::DpiPanel;
+use crate::features::pointer::momentum::{MomentumPanel, MomentumScope};
 use crate::features::pointer::smartshift::SmartShiftPanel;
 use crate::features::profiles::{AppCatalogPicker, ProfileIconCache};
 use crate::services::assets::user_cache_root;
@@ -85,6 +88,8 @@ enum DetailTab {
     Camera,
     /// Standalone light controls driven by a raw-HID device driver.
     Light,
+    /// Headset audio — sidetone.
+    Audio,
     /// Device info and configuration.
     Device,
 }
@@ -104,15 +109,17 @@ impl DetailTab {
     /// device can do that thing, so a misclassified device can't lose its
     /// panels (issue #127). Devices we never probed (offline at startup) have no
     /// measured capabilities; we presume a set from their kind so a sleeping
-    /// mouse still shows its (host-side) button bindings.
+    /// mouse still shows its (host-side) button bindings. A HID++ 1.0 device
+    /// has no table at all; it is presumed only the host-side set, so it gets
+    /// no Pointer tab whose DPI control would have no effect (#2161).
     ///
     /// The Buttons panel renders a mouse-model silhouette with hotspots. It is
     /// only useful for pointer-type devices; keyboards get the Keys panel
     /// instead, even when they expose ReprogControls over HID++.
+    ///
+    /// [`Capabilities`]: openlogi_core::device::Capabilities
     fn tabs_for(record: &DeviceRecord) -> Vec<Self> {
-        let caps = record
-            .capabilities
-            .unwrap_or_else(|| Capabilities::presumed_from_kind(record.kind));
+        let caps = record.capabilities_or_presumed();
         // Buttons panel is a mouse-model silhouette — only for pointer devices.
         // Keyboards get the Keys panel instead, even when they expose ReprogControls.
         // `caps.pointer` (a measured HID++ DPI feature) settles it on its own
@@ -181,6 +188,9 @@ impl DetailTab {
         if record.light_capabilities.is_some() {
             tabs.push(Self::Light);
         }
+        if caps.sidetone {
+            tabs.push(Self::Audio);
+        }
         tabs.push(Self::Device);
         tabs
     }
@@ -201,6 +211,7 @@ impl DetailTab {
             Self::Pointer => tr!("device.pointer"),
             Self::Lighting | Self::Light => tr!("device.lighting"),
             Self::Camera => tr!("camera.camera"),
+            Self::Audio => tr!("device.audio"),
             Self::Device => tr!("device.device"),
         }
     }
@@ -216,10 +227,12 @@ pub struct AppView {
     disable_keys_panel: Entity<DisableKeysPanel>,
     dpi_panel: Entity<DpiPanel>,
     smartshift_panel: Entity<SmartShiftPanel>,
+    momentum_panel: Entity<MomentumPanel>,
     lighting_panel: Entity<LightingPanel>,
     camera_preview: Entity<CameraPreview>,
     camera_controls: Entity<CameraControlsPanel>,
     light_panel: Entity<LightPanel>,
+    audio_panel: Entity<AudioPanel>,
     profile_icons: ProfileIconCache,
     app_catalog: Entity<AppCatalogPicker>,
     /// Redraw the profile picker after discovery, filtering, or expansion changes.
@@ -299,10 +312,12 @@ impl AppView {
         let disable_keys_panel = cx.new(DisableKeysPanel::new);
         let dpi_panel = cx.new(DpiPanel::new);
         let smartshift_panel = cx.new(SmartShiftPanel::new);
+        let momentum_panel = cx.new(|cx| MomentumPanel::new(MomentumScope::SelectedDevice, cx));
         let lighting_panel = cx.new(LightingPanel::new);
         let camera_preview = cx.new(CameraPreview::new);
         let camera_controls = cx.new(CameraControlsPanel::new);
         let light_panel = cx.new(LightPanel::new);
+        let audio_panel = cx.new(AudioPanel::new);
         let profile_icons = ProfileIconCache::default();
         let app_catalog = cx.new(|cx| AppCatalogPicker::new(profile_icons.clone(), window, cx));
         let app_catalog_obs = cx.observe(&app_catalog, |_, _, cx| cx.notify());
@@ -321,10 +336,12 @@ impl AppView {
             disable_keys_panel,
             dpi_panel,
             smartshift_panel,
+            momentum_panel,
             lighting_panel,
             camera_preview,
             camera_controls,
             light_panel,
+            audio_panel,
             profile_icons,
             app_catalog,
             _app_catalog_obs: app_catalog_obs,
@@ -383,6 +400,8 @@ impl AppView {
                 !on_home && self.active_tab == DetailTab::Pointer && is_current(key)
             }
             StateEvent::CameraChanged => on_home || self.active_tab == DetailTab::Light,
+            // The Home header's Flow button shows Flow's status.
+            StateEvent::FlowChanged => on_home,
             // Child entities own these surfaces and subscribe directly. A
             // language switch already refreshes every window, and the root
             // caches no localized text. A refused removal is a dialog,
@@ -391,6 +410,7 @@ impl AppView {
             | StateEvent::DisableKeysChanged(_)
             | StateEvent::ReportRateChanged(_)
             | StateEvent::PointerSpeedChanged(_)
+            | StateEvent::SidetoneChanged(_)
             | StateEvent::ForceSensingChanged(_)
             | StateEvent::DeviceRemovalFailed { .. }
             | StateEvent::StalePairingRemovalFailed { .. }
@@ -518,7 +538,7 @@ impl AppView {
                     .text_color(pal.text_muted)
                     .cursor_pointer()
                     .hover(|s| s.text_color(pal.text_primary))
-                    .focus_visible(|s| s.text_color(pal.text_primary))
+                    .focus_visible(move |s| s.focus_ring(pal))
                     .child(tr!("permissions.not_now_use_dpi_and_other_features_only"))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.accessibility_dismissed = true;
@@ -562,16 +582,7 @@ fn app_title_bar(cx: &App) -> impl IntoElement {
 
 impl Render for AppView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let content = self.render_content(window, cx);
-        // Root owns overlay state but the application must mount its layers.
-        // Keep them present across connecting, permission, and error screens too.
-        div()
-            .relative()
-            .size_full()
-            .child(content)
-            .children(Root::render_sheet_layer(window, cx))
-            .children(Root::render_dialog_layer(window, cx))
-            .children(Root::render_notification_layer(window, cx))
+        self.render_content(window, cx)
     }
 }
 
@@ -584,9 +595,6 @@ impl AppView {
         theme::apply_ui_scale(window, cx);
         let pal = theme::palette(cx);
 
-        // Every frame — including the pre-connection and error frames — hangs
-        // off this root, so the window actions (⌘W / ⌘M / zoom) work from the
-        // first frame on, not only once the full UI is up.
         let root = v_flex()
             .size_full()
             .bg(pal.page)
@@ -594,9 +602,6 @@ impl AppView {
             .tab_group()
             .track_focus(&self.focus_handle)
             .key_context(APP_KEY_CONTEXT)
-            .on_action(|_: &CloseWindow, window, _| window.remove_window())
-            .on_action(|_: &Minimize, window, _| window.minimize_window())
-            .on_action(|_: &Zoom, window, _| window.zoom_window())
             // Drawn only where the compositor left the chrome to us — as the
             // first row of every frame, including the pre-connection and error
             // frames, so it is present from the first frame on. A compositor
@@ -629,20 +634,27 @@ impl AppView {
         let link = AppState::try_global(cx)
             .map(|state| state.read(cx))
             .map_or(AgentLink::Connecting, |s| s.agent_link().clone());
-        let status = match link {
+        // A lost connection keeps the last status on screen, marked as not
+        // live by the reconnecting bar; an unreachable agent replaces only the
+        // content, so the header's Settings stays reachable.
+        let (status, reconnecting) = match link {
             AgentLink::Connecting => {
                 window.set_window_title("OpenLogi");
                 return root.child(status::connecting_body(cx)).into_any_element();
             }
-            AgentLink::Unreachable => {
+            AgentLink::Unreachable { retrying } => {
                 window.set_window_title("OpenLogi");
-                return root.child(status::unreachable_body(cx)).into_any_element();
+                return root
+                    .child(home::home_header(cx))
+                    .child(status::unreachable_body(retrying, cx))
+                    .into_any_element();
             }
             AgentLink::OutdatedGui => {
                 window.set_window_title("OpenLogi");
                 return root.child(status::outdated_gui_body(cx)).into_any_element();
             }
-            AgentLink::Ready(status) => status,
+            AgentLink::Reconnecting(status) => (status, true),
+            AgentLink::Ready(status) => (status, false),
         };
 
         let granted = status.accessibility_granted;
@@ -712,10 +724,12 @@ impl AppView {
                         disable_keys_panel: &self.disable_keys_panel,
                         dpi_panel: &self.dpi_panel,
                         smartshift_panel: &self.smartshift_panel,
+                        momentum_panel: &self.momentum_panel,
                         lighting_panel: &self.lighting_panel,
                         camera_preview: &self.camera_preview,
                         camera_controls: &self.camera_controls,
                         light_panel: &self.light_panel,
+                        audio_panel: &self.audio_panel,
                     },
                     &self.profile_icons,
                     &self.app_catalog,
@@ -731,7 +745,7 @@ impl AppView {
             (
                 home::home_header(cx).into_any_element(),
                 if has_device {
-                    home::device_gallery(cx).into_any_element()
+                    home::device_gallery(window, cx).into_any_element()
                 } else {
                     match status.inventory {
                         InventoryHealth::Scanning => home::device_scanning_state(cx),
@@ -745,7 +759,11 @@ impl AppView {
 
         let has_key_bindings =
             AppState::try_read(cx).is_some_and(|state| !state.keyboard_bindings().is_empty());
-        let attention = status::Attention::for_status(&status, has_key_bindings);
+        let attention = if reconnecting {
+            Some(status::Attention::Reconnecting)
+        } else {
+            status::Attention::for_status(&status, has_key_bindings)
+        };
         root.child(header_el)
             .child(content_el)
             .when_some(attention, |this, attention| {

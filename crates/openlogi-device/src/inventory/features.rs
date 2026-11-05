@@ -122,6 +122,12 @@ impl ProbedFeatures {
     pub(super) fn completed(&self) -> bool {
         !matches!(self.protocol, ProbedProtocol::Unanswered)
     }
+
+    /// Whether the device answered as HID++ 1.0, which carries over to
+    /// [`PairedDevice::hidpp10`](openlogi_core::device::PairedDevice::hidpp10).
+    pub(super) fn is_hidpp10(&self) -> bool {
+        matches!(self.protocol, ProbedProtocol::Hidpp10)
+    }
 }
 
 /// What a probe learned about the protocol a device speaks.
@@ -1483,8 +1489,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_legacy_battery_without_mileage_reads_its_four_levels() {
-        // Four levels, no mileage. 85 % is the draft's "full" range but the
-        // display buckets' "good".
+        // Four levels, no mileage. 85 is the draft's "full" range but the
+        // display buckets' "good". It is a level, not a percentage.
         let (probe, battery_probe, battery) =
             legacy_probe(Some([4, LEGACY_RECHARGEABLE]), [85, 50, 0]).await;
         assert_eq!(
@@ -1496,7 +1502,7 @@ mod tests {
         );
         assert!(!probe.capabilities_incomplete());
         let battery = battery.expect("a reading");
-        assert_eq!(battery.percentage, Some(85));
+        assert_eq!(battery.percentage, None);
         assert_eq!(battery.level, BatteryLevel::Full);
         assert_eq!(battery.status, BatteryStatus::Discharging);
     }
@@ -1511,7 +1517,9 @@ mod tests {
                 mileage: false,
             })
         );
-        assert_eq!(battery.expect("a reading").level, BatteryLevel::Low);
+        let battery = battery.expect("a reading");
+        assert_eq!(battery.percentage, None);
+        assert_eq!(battery.level, BatteryLevel::Low);
     }
 
     #[tokio::test]

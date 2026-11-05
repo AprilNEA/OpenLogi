@@ -1,6 +1,7 @@
 //! Appearance settings page: mode, theme grid, radius, scale, language.
 
 use super::language::{LanguageOption, language_select_field};
+use crate::ui::theme::FocusRingStyle as _;
 use gpui::{ElementId, img};
 use openlogi_core::config::AppIcon;
 
@@ -14,7 +15,7 @@ use super::{
 use crate::platform::app_icon::AppIconExt as _;
 use crate::ui::choice_card::ChoiceCard;
 use crate::ui::components::control_input;
-use crate::ui::theme::Typography as _;
+use crate::ui::theme::{SelectableStyle as _, Typography as _};
 
 /// The Appearance page: light/dark mode, the theme grid, corner radius, and the
 /// interface language. Every theme here re-skins the whole app — the bespoke
@@ -214,7 +215,7 @@ fn mode_card(
         .gap(px(6.))
         .items_center()
         .cursor_pointer()
-        .focus_visible(move |style| style.text_color(pal.text_primary))
+        .focus_visible(move |style| style.focus_ring(pal))
         .child(thumb)
         .child(
             h_flex()
@@ -249,7 +250,7 @@ fn icon_card(icon: AppIcon, selected: bool, accent: Hsla, pal: Palette) -> impl 
         .gap(px(6.))
         .items_center()
         .cursor_pointer()
-        .focus_visible(move |style| style.text_color(pal.text_primary))
+        .focus_visible(move |style| style.focus_ring(pal))
         .child(
             div()
                 .size(px(80.))
@@ -367,17 +368,20 @@ fn radius_segment(cx: &App) -> ButtonGroup {
         .child(
             Button::new("radius-sharp")
                 .label(tr!("common.sharp"))
-                .selected(current == Some(0)),
+                .selected(current == Some(0))
+                .selected_segment(current == Some(0), cx),
         )
         .child(
             Button::new("radius-default")
                 .label(tr!("common.default"))
-                .selected(current.is_none()),
+                .selected(current.is_none())
+                .selected_segment(current.is_none(), cx),
         )
         .child(
             Button::new("radius-round")
                 .label(tr!("appearance.round"))
-                .selected(current == Some(12)),
+                .selected(current == Some(12))
+                .selected_segment(current == Some(12), cx),
         )
         .on_click(move |clicks, _, cx| {
             if let Some(&ix) = clicks.first() {
@@ -398,6 +402,7 @@ fn scale_segment(cx: &App) -> ButtonGroup {
             Button::new(("interface-scale", u32::from(scale.percent())))
                 .label(format!("{}%", scale.percent()))
                 .selected(current == scale)
+                .selected_segment(current == scale, cx)
         }))
         .on_click(|clicks, _, cx| {
             let Some(scale) = clicks
@@ -455,8 +460,11 @@ fn theme_picker(
                 .child(tr!("appearance.no_themes_match_query", query => query))
         })
         .when(!no_matches, |grid| {
-            grid.flex()
-                .flex_wrap()
+            // Columns share the page width, so the grid ends where the filter
+            // row above it ends at every interface scale. The Settings window
+            // cannot shrink below the width four columns were sized for.
+            grid.grid()
+                .grid_cols(4)
                 .gap_2()
                 .children(themes.into_iter().map(|(name, mode, swatch)| {
                     let selected = name == active;
@@ -554,7 +562,6 @@ fn theme_card(
     let stored = name.clone();
     ChoiceCard::new((ElementId::from("theme"), name.clone()), name.clone())
         .selected(selected)
-        .w(px(132.))
         .p(px(8.))
         .gap_2()
         .rounded(pal.card_radius)
@@ -571,7 +578,7 @@ fn theme_card(
                 style.border_color(pal.text_muted)
             }
         })
-        .focus_visible(move |style| style.border_color(swatch.primary).shadow_sm())
+        .focus_visible(move |style| style.focus_ring(pal))
         .active(gpui::Styled::shadow_2xs)
         .child(
             v_flex()
@@ -663,20 +670,19 @@ fn filter_chip(
         .px_3()
         .py_1()
         .rounded_full()
-        .border_1()
+        .selected_border(selected, pal)
+        .selected_fill(selected)
         .text_caption()
         .cursor_pointer()
         .map(|this| {
             if selected {
-                this.border_color(pal.text_primary)
-                    .text_color(pal.text_primary)
+                this.text_color(pal.text_primary)
             } else {
-                this.border_color(pal.border)
-                    .text_color(pal.text_muted)
+                this.text_color(pal.text_muted)
                     .hover(|h| h.border_color(pal.text_muted))
-                    .focus_visible(|h| h.border_color(pal.text_muted))
             }
         })
+        .focus_visible(move |h| h.focus_ring(pal))
         .child(label)
         .on_click(move |_, _, cx| {
             view.update(cx, |this, cx| {

@@ -162,8 +162,12 @@ to start while it is running.
 
 The script covers an online mouse (DPI and SmartShift writes persist and read
 back, battery drains so poll-driven repaints are visible), an offline mouse, a
-lighting-capable keyboard, a directly-attached device, and a full Bolt pairing
-flow (discovery → passkey → paired). Its agent version carries a `-mock` suffix,
+lighting-capable keyboard, a directly-attached device, a full Bolt pairing
+flow (discovery → passkey → paired), and Flow pairing: two nearby computers
+appear, choosing one or typing any address shows the code `418672`, and the
+other computer's user confirms 3 s after you do. The paired computer is saved
+in the profile's `config.toml`, as the agent saves it, and the snapshot lists
+the peers saved there. Its agent version carries a `-mock` suffix,
 so a mock session is identifiable in the UI. It is a dev tool only and is never
 bundled.
 
@@ -178,6 +182,11 @@ offline 1            # it goes offline; reads and writes fail
 fail 3 error         # the keyboard stays online, but every request fails
 lock caps on         # the overlay shows the Caps Lock indicator
 backlight 2 4        # the overlay shows backlight level 2 of 4
+flow link Work PC unstable  # a saved Flow peer's link: connected, unstable, or lost
+flow incoming        # with Flow pairing open, a computer pairs with this one
+flow confirm         # the other computer's user confirms the code first
+flow fail timeout    # the attempt fails: cancel, mismatch, timeout, unreachable,
+                     # busy, version, lost, or save
 disconnect           # every client loses its connection and reconnects
 ```
 
@@ -202,6 +211,65 @@ Gallery mode opens one isolated window and bypasses the normal single-instance,
 config, agent, asset-sync, and updater startup paths. The environment variable is
 ignored by release builds.
 
+### Headless rendering in a sandbox
+
+An Amp orb has no physical display, but its Desktop tab runs a labwc Wayland
+compositor with one 1280×720 output (`HEADLESS-1`) and Xwayland on `:0`. The
+mock agent and the GUI can run there, and screenshots and input work through
+Wayland tools. `.agents/setup` installs them: `grim` captures the output, `wtype`
+types, and `wlrctl` moves, clicks, and scrolls the pointer and lists windows.
+Debian 12 has no `wlrctl` package, so setup builds v0.2.2 from source into
+`/usr/local/bin` and keeps its build dependencies installed. `ydotool` needs
+`/dev/uinput`, which only root can open in an orb, and `xdotool` cannot drive
+Wayland windows.
+
+[`.agents/scripts/orb-gui.sh`](../.agents/scripts/orb-gui.sh) wraps the steps
+below:
+
+```sh
+.agents/scripts/orb-gui.sh start                 # Desktop, build, mock and GUI
+.agents/scripts/orb-gui.sh start --fixture fixtures/devices/mx-master-3s-001/profile.json
+OPENLOGI_COMPONENT_GALLERY=1 .agents/scripts/orb-gui.sh restart   # gallery
+.agents/scripts/orb-gui.sh move 640 400          # hover
+.agents/scripts/orb-gui.sh click 1058 58         # Settings on the device list
+.agents/scripts/orb-gui.sh run wtype 'search text'
+.agents/scripts/orb-gui.sh run wlrctl pointer scroll 5
+.agents/scripts/orb-gui.sh shot /tmp/settings.png
+.agents/scripts/orb-gui.sh stop
+```
+
+What it does, and what to keep if you run the steps by hand:
+
+- `amp orb desktop ensure` starts the Desktop and writes its environment to
+  `~/.cache/amp/desktop/environment`: `WAYLAND_DISPLAY=wayland-0`,
+  `XDG_RUNTIME_DIR=~/.cache/amp/desktop/runtime`, and `DISPLAY=:0`. Source that
+  file before running any of the tools above.
+- The Desktop also opens a maximized Chrome. The script minimizes it with
+  `wlrctl toplevel minimize app_id:google-chrome`, so agent-browser can still use it.
+- Launch the GUI with `WAYLAND_DISPLAY` set. Under the X11 backend GPUI runs, but
+  its window never reaches a `grim` capture.
+- The mock and the GUI must see the same `XDG_RUNTIME_DIR`: the dev IPC socket is
+  `$XDG_RUNTIME_DIR/openlogi-dev/agent.sock`. Start the mock first, wait for the
+  socket, then start the GUI with `OPENLOGI_DEV_AGENT=0`.
+- Run both as orb services (`amp orb service start <name> --command …`), never
+  with `nohup`, `&`, or tmux: those processes die when the Amp CLI restarts. The
+  script names them `openlogi-mock` and `openlogi-gui`; read their output with
+  `amp orb service logs <name>`. After a code change, rebuild, then stop and start
+  `openlogi-gui` (`orb-gui.sh restart`).
+- The first launch opens a "Check for updates?" window over the device list.
+  `start` presses Tab and Return to answer Not now, which records the answer in
+  the dev config.
+- `wlrctl pointer move` is relative. For absolute coordinates, move by
+  `-10000 -10000` to pin the pointer at the top-left corner first.
+- The pointer stays where the last command left it, so captures keep its hover
+  state. `shot` waits half a second for GPUI to repaint after the last input.
+- `view_media` is rate-limited. To inspect many captures, join them first, for
+  example `magick a.png b.png +append -resize 50% ab.png`.
+
+The Desktop renders at scale 1, so captures are 1280×720 at 1×. Mock success in
+an orb proves rendering and IPC-driven state only, not HID writes, permissions,
+input hooks, or the macOS build.
+
 ## Project layout
 
 ```
@@ -213,6 +281,7 @@ crates/
   openlogi-hid/     device discovery, HID++ reads/writes, and control capture over async-hid
   openlogi-assets/  device-render registry schema + cached HTTP fetch from OpenLogi asset mirrors
   openlogi-cli/     CLI implementation: command tree + `run()`, called by the `openlogi` binary
+  openlogi-flow/    Flow protobuf protocol, framing, pairing, identity, and QUIC transport
   openlogi-agent-core/  shared orchestration + the agent/GUI IPC contract
   openlogi-agent/   the `openlogi-agent` binary — background agent owning device I/O and the hook
   openlogi-hook/    OS mouse hook: macOS CGEventTap, Linux evdev/uinput, Windows WH_MOUSE_LL
@@ -321,6 +390,11 @@ opening or merging PRs, publishing, or approving/rerunning workflows.
 - Issues use the bug/feature/device forms and the `type:`/`area:`/`platform:`/`needs:`/
   `status:` label families. Deferred or out-of-scope work becomes a linked issue, not a
   TODO comment.
+- Discussions route by category: Q&A for usage questions (mark the reply that solves
+  it), Ideas for feature wishes, General for the rest. The forms in
+  `.github/DISCUSSION_TEMPLATE/` carry this routing; device requests go to the device
+  issue form. When an issue tracks a discussion, link it and close the discussion as a
+  duplicate. Close a discussion whose request has shipped as resolved.
 
 ### Adopting contributor PRs
 
@@ -381,6 +455,15 @@ cargo run -p xtask -- linux package
 
 The package contents (binaries, udev rules, systemd user unit, desktop entry,
 icon) are declared in `packaging/linux/nfpm.yaml`.
+
+After nfpm, `linux package` re-encodes two of the packages: the `.deb` data
+member becomes `data.tar.xz` (xz level 9), and the `.pkg.tar.zst` becomes a
+level-19 zstd frame with a 128 MiB window. The four binaries share most of
+their code, and only a window that spans the whole tar finds it; this halves
+both packages. Leave `deb.compression` unset in `nfpm.yaml`, because the
+rewrite expects nfpm's gzip data member. The `.rpm` keeps nfpm's compression.
+The two encodes add about three minutes per architecture (164 s on a 6-core
+x86_64 machine).
 
 `packaging/linux/install.sh` is a POSIX `/bin/sh` frontend for those release
 packages, not a second package lifecycle. Its online mode maps the host and
@@ -507,8 +590,56 @@ Sparkle that fails to load fall back to the engine and `latest.json`.
 Sparkle read only that manifest, and they update into a Sparkle bundle through
 it.
 
-Configure the R2/update settings in one 1Password item referenced by the GitHub
-secret `OP_R2_SECRET_ITEM`. The item must contain:
+### Release secrets: 1Password Environments and the `release` environment
+
+Every workflow reads its credentials from 1Password through the shared
+[`AprilNEA/actions/op-environment`](https://github.com/AprilNEA/actions)
+action, which runs `op run --environment` with a service-account token and
+exports the Environment's variables, masked, to the job's later steps
+(`GITHUB_ENV`, so a step reads `$APPLE_ID` or `${{ env.APPLE_ID }}`). GitHub
+App tokens are then minted by its sibling `github-app-token` from
+`env.GITHUB_APP_ID` / `env.GITHUB_APP_PRIVATE_KEY`. Both are pinned by commit
+SHA with the version as a comment, like every action that handles a secret.
+Two [1Password Environments](https://developer.1password.com/environments)
+hold them, each read by a service account scoped to that Environment alone, so
+the vaults the items used to live in no longer matter:
+
+| 1Password Environment | Variables | Service account token lives in | Read by |
+|---|---|---|---|
+| `OpenLogi Automation` | `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `CARGO_REGISTRY_TOKEN`, `CROWDIN_PROJECT_ID`, `CROWDIN_PERSONAL_TOKEN` | repository secret `OP_SERVICE_ACCOUNT_TOKEN` | release-plz, the beta cut, Crowdin, the flake update, and the release workflow's installer-site / homebrew-tap dispatches, from any branch |
+| `OpenLogi Release` | the `APPLE_*`, `AZURE_*`, `OPENLOGI_UPDATE_*`, `OPENLOGI_SPARKLE_*` and `CLOUDFLARE_R2_*` variables listed below | **`release` GitHub environment** secret `OP_SERVICE_ACCOUNT_TOKEN` | the signing jobs in `build.yml` (`macos`, `windows`, `windows-msi`) when `sign` is set, and `release.yml`'s `publish` job |
+
+The Environment IDs are not secrets; they are the repository variables
+`OP_AUTOMATION_ENVIRONMENT_ID` and `OP_RELEASE_ENVIRONMENT_ID`. A GitHub
+environment secret shadows the repository secret of the same name, so a job
+sees the release token only inside the `release` GitHub environment, and a job
+outside it that asks for the release Environment fails in `op run` with the
+automation token. The `release` GitHub environment admits only `v*` tag refs,
+so a branch dispatch with `sign` fails before any secret is read. It requires
+no review: the review lives in the separate `release-approval` environment,
+which holds no secrets, admits only `v*` tags, and requires a reviewer. The
+`version` job enters it, and every signing and publishing job needs `version`,
+so each tag run pauses once for approval, before anything builds. A review on
+`release` itself would pause every job that enters it as it becomes ready —
+macOS and Windows EXE together, then Windows MSI after the EXEs, then
+`publish` — so keep it off there. The Azure
+federated credential is bound to the environment
+(`repo:AprilNEA/OpenLogi:environment:release`), which is why the Windows jobs
+were in it first.
+
+`op-environment` exports whatever the Environment holds, so a new variable
+needs no workflow change beyond its consumer; a variable the Environment
+lacks is simply unset, and each job's validation step names the missing one.
+Everything exported is visible to every later step of that job, third-party
+actions included, which is one more reason the two Environments stay apart.
+
+The `OpenLogi Release` Environment must contain the Apple signing values
+`xtask/README.md` describes (`APPLE_SIGNING_IDENTITY`, `APPLE_CERTIFICATE`,
+`APPLE_CERTIFICATE_PASSWORD`, `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID`,
+`APPLE_AGENT_PROVISIONING_PROFILE`), the Azure Artifact Signing values
+(`AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`,
+`AZURE_SIGNING_ENDPOINT`, `AZURE_SIGNING_ACCOUNT`, `AZURE_CERT_PROFILE`), and
+the R2/update settings:
 
 - `OPENLOGI_UPDATE_BASE_URL` — public HTTPS base URL, for example
   `https://updates.openlogi.org`.
@@ -798,7 +929,8 @@ translations land in git.
 
 Each run:
 
-1. Snapshots every `locales/*.toml`.
+1. Snapshots every `locales/*.toml` and writes the per-locale count of values
+   equal to English to the job summary (a backlog metric; it never fails the job).
 2. Uploads `en.toml` **sources**.
 3. Uploads **per-language translations** already in git (`import_eq_suggestions`
    off so `value == English` is not stored as a finished translation).
@@ -807,9 +939,10 @@ Each run:
    kept; headers / `_version` preserved).
 6. Opens/updates `crowdin/i18n` only when the working tree still differs.
 
-Like the release workflow, the job reads its credentials from one 1Password
-item referenced by the GitHub secret `OP_CROWDIN_SECRET_ITEM`. The item must
-contain:
+Like the release workflow, the job reads its credentials through
+`AprilNEA/actions/op-environment`, from the `OpenLogi Automation` 1Password
+Environment (see [Release secrets](#release-secrets-1password-environments-and-the-release-environment)),
+which must contain:
 
 - `CROWDIN_PROJECT_ID` — the numeric Crowdin project id.
 - `CROWDIN_PERSONAL_TOKEN` — a Crowdin API token with access to the project.
@@ -824,7 +957,7 @@ OpenLogi project:
 
 Missing or invalid credentials fail the workflow. Translation PRs run the
 normal CI checks, including the locale key parity test (every catalog must match
-`en.toml` key-for-key). The workflow uses the existing `OP_GITHUB_APP_ITEM` to
+`en.toml` key-for-key). The workflow uses the GitHub App from the same Environment to
 mint a short-lived token for pushing its translation branch and opening the PR;
 the default `GITHUB_TOKEN` remains read-only. Checkout runs with
 `persist-credentials: false` and the origin remote is rewritten to the app token
@@ -836,4 +969,6 @@ Local helpers (with Crowdin credentials configured):
 devenv tasks run openlogi:i18n-upload    # en.toml sources + per-language translations
 devenv tasks run openlogi:i18n-download  # download + merge + i18n tests
 python3 .github/scripts/i18n/merge_crowdin_download.py --self-test
+python3 .github/scripts/i18n/english_fill_in_report.py \
+  --locales crates/openlogi-ui/locales --en crates/openlogi-ui/locales/en.toml
 ```

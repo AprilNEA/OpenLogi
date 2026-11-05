@@ -13,8 +13,8 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use openlogi_core::app::ForegroundApp;
-use openlogi_core::binding::{ActionRingIcon, ActionRingSlot};
-use openlogi_core::config::{ConfigRevision, Lighting};
+use openlogi_core::binding::{ActionRingIcon, ActionRingSize, ActionRingSlot};
+use openlogi_core::config::{ConfigRevision, FlowPeerName, FlowPublicKey, Lighting};
 use openlogi_core::device::{
     BatteryInfo, ChangedOnLight, DeviceInventory, DeviceKind, LightState, LockKey, StandaloneDevice,
 };
@@ -22,7 +22,7 @@ use openlogi_core::hid::{
     BacklightChange, BacklightState, DeviceRoute, DisableKeysMask, DisableKeysState, Dpi, DpiInfo,
     EasySwitchHosts, FnLockState, ForceSensingInfo, LightCommand, OnboardState, PairingError,
     PasskeyMethod, PointerSpeed, ReceiverSelector, ReportRate, ReportRateInfo, ScrollWheelMode,
-    SmartShiftStatus, WriteError,
+    SidetoneLevel, SmartShiftStatus, WriteError,
 };
 use serde::{Deserialize, Serialize};
 pub use succession::Identity;
@@ -162,10 +162,31 @@ pub use succession::Identity;
 ///      them — an image written to one of the MX Creative Keypad's LCD keys;
 ///      `Action::{PreviousKeypadPage, NextKeypadPage}` appended after the
 ///      G-series actions, and `ButtonId` grid keys gain page-qualified names
-///      (`page2:gridMiddle`) — the keypad's binding pages.
-///      `Capabilities::change_host` appended after them — `0x1814`
-///      ChangeHost without `0x1815` HostsInfo.
-pub const PROTOCOL_VERSION: u32 = 43;
+///      (`page2:gridMiddle`) — the keypad's binding pages. `PairedDevice::hidpp10`
+///      appended, so the GUI can tell a HID++ 1.0 device from one it never
+///      probed.
+/// v44: `Agent::switch_host`, `WriteError::HostOutOfRange` and
+///      `HidppOperation::ChangeHost` appended — software-initiated `0x1814`
+///      host switching of one device. `AgentSnapshot::flow` appended —
+///      whether Flow is enabled, and the coarse link state of each
+///      configured peer. `Capabilities::sidetone`,
+///      `HidppOperation::{ReadSidetone, WriteSidetone}` and
+///      `Agent::{read_sidetone, set_sidetone}` appended after them — a
+///      headset's HID++ `0x8300` sidetone level, as a [`SidetoneLevel`].
+///      `FlowStatus::pairing` with [`FlowPairingPhase`], and
+///      `Agent::{read_flow_identity, start_flow_pairing, pair_flow_peer,
+///      confirm_flow_pairing, cancel_flow_pairing, stop_flow_pairing}`
+///      appended after those — pairing another computer for Flow.
+/// v45: `Agent::action_ring_unhover` appended — the ring's held trigger
+///      chooses on release, so the overlay reports the pointer leaving every
+///      slot as well as entering one. `ActionRingInvocation::size` appended,
+///      the size the overlay draws the ring at.
+/// v46: `Capabilities::{g_keys, m_keys, macro_record}` appended — a G-series
+///      keyboard's HID++ `0x8010` G-keys, `0x8020` M-keys and `0x8030` MR
+///      key. `ButtonId::{GKey, ModeKey}` appended — the G1–G5 slot of an M
+///      profile and M1–M3/MR. `Capabilities::change_host` appended after
+///      them — `0x1814` ChangeHost without `0x1815` HostsInfo.
+pub const PROTOCOL_VERSION: u32 = 46;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -287,6 +308,9 @@ pub struct AgentSnapshot {
     /// light reached only through its raw report reads nothing back and is
     /// not listed.
     pub lights: Vec<ObservedLight>,
+    /// Whether cross-machine Flow is enabled, and the coarse link state of
+    /// each configured peer. See [`FlowStatus`].
+    pub flow: FlowStatus,
 }
 
 /// A standalone light as it reported itself to the agent.
@@ -300,6 +324,187 @@ pub struct ObservedLight {
     /// Settings changed on the light itself that the saved settings do not
     /// hold yet. The agent already uses them; the GUI saves them.
     pub changed_on_light: ChangedOnLight,
+}
+
+/// Cross-machine Flow state at the snapshot's low update rate.
+///
+/// Ping sequence numbers, round-trip times, and last-seen timestamps stay out
+/// of IPC. They change every few seconds without changing what the UI shows,
+/// and each change would publish a new observation.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FlowStatus {
+    /// The loaded config enables Flow.
+    pub enabled: bool,
+    /// The configured peers, in config order.
+    pub peers: Vec<FlowPeerStatus>,
+    /// Where pairing stands while it is open, whether or not Flow is
+    /// enabled. `None` while pairing is closed: never started, stopped,
+    /// expired, or lost with an agent restart. See [`FlowPairingPhase`].
+    pub pairing: Option<FlowPairingPhase>,
+}
+
+/// One configured Flow peer and the state of its session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FlowPeerStatus {
+    /// The peer's name in `[[flow.peers]]`.
+    pub name: FlowPeerName,
+    /// The peer's pinned identity key.
+    pub public_key: FlowPublicKey,
+    /// The state of the application session with the peer.
+    pub state: FlowLinkState,
+}
+
+/// The state of the application session with one Flow peer.
+///
+/// Append new variants only: the enum crosses the bincode IPC.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FlowLinkState {
+    /// QUIC and the Flow `Hello` exchange are complete, and the peer answers
+    /// pings.
+    Connected,
+    /// The QUIC connection stays open, but the peer's pongs are late.
+    Degraded,
+    /// No Flow connection to the peer exists.
+    Lost,
+}
+
+/// This computer's Flow identity: what another computer shows and pins for
+/// it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FlowIdentity {
+    /// The name other computers show for this one: its host name.
+    pub machine_name: String,
+    /// The key other computers pin for this one.
+    pub public_key: FlowPublicKey,
+}
+
+/// Another computer in a Flow pairing session.
+///
+/// `name` and `platform` are what the computer says about itself, for
+/// display. Once connected, `public_key` is the key the connection proved; in
+/// [`FlowPairingPhase::Found`] it is the key the computer advertises.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FlowPairingPeer {
+    /// The computer's own name for itself, possibly empty.
+    pub name: String,
+    /// The computer's Flow identity key.
+    pub public_key: FlowPublicKey,
+    /// The operating system the computer runs.
+    pub platform: FlowPlatform,
+}
+
+/// The operating system a Flow computer runs, as it reports it.
+///
+/// Append new variants only: the enum crosses the bincode IPC.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FlowPlatform {
+    /// The computer did not say, or named a platform this build does not know.
+    Unknown,
+    /// macOS.
+    Macos,
+    /// Windows.
+    Windows,
+    /// Linux, on X11 or Wayland.
+    Linux,
+}
+
+/// The computer [`Agent::pair_flow_peer`] pairs with.
+///
+/// Append new variants only: the enum crosses the bincode IPC.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FlowPairTarget {
+    /// A computer that [`FlowPairingPhase::Found`] lists, by its key.
+    Nearby(FlowPublicKey),
+    /// A host name or IP address, optionally with a port, for a computer
+    /// that the local network cannot find, such as one across a VPN. The
+    /// agent saves the host as the peer's address once pairing succeeds.
+    Address(String),
+}
+
+/// Where Flow pairing stands, while it is open.
+///
+/// State, not a stream of steps, as [`PairingPhase`] is. Both computers open
+/// pairing; either one picks the other, and then both show the same code.
+/// The agent saves the peer only after both users confirm the code.
+///
+/// Append new variants only: the enum crosses the bincode IPC.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FlowPairingPhase {
+    /// Pairing is open and no other computer with pairing open is found.
+    Searching,
+    /// The computers found with pairing open, in the order they appeared.
+    Found(Vec<FlowPairingPeer>),
+    /// Connecting to the picked computer, or another computer is connecting
+    /// to this one. `peer` is `None` until an address answers.
+    Connecting { peer: Option<FlowPairingPeer> },
+    /// Both computers show `code`, six ASCII digits. This computer's user
+    /// has not answered yet.
+    ShowingCode { peer: FlowPairingPeer, code: String },
+    /// This computer's user confirmed `code`; the other computer's user has
+    /// not yet.
+    WaitingForPeer { peer: FlowPairingPeer, code: String },
+    /// Both users confirmed. The agent saved the computer in `config.toml`
+    /// as the `[[flow.peers]]` entry `name`, with no screen edge, and it
+    /// appears in [`FlowStatus::peers`].
+    Paired {
+        peer: FlowPairingPeer,
+        name: FlowPeerName,
+    },
+    /// The attempt ended, and this computer saved nothing. `peer` is `None`
+    /// when no computer answered. When the connection ends just after the
+    /// other user confirmed second, the other computer may have saved this
+    /// one already.
+    Failed {
+        peer: Option<FlowPairingPeer>,
+        reason: FlowPairingFailure,
+    },
+}
+
+/// Why a Flow pairing attempt failed.
+///
+/// Append new variants only: the enum crosses the bincode IPC.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FlowPairingFailure {
+    /// The other computer's user cancelled or declined.
+    PeerCancelled,
+    /// The other computer reported that the codes differ, or its reply did
+    /// not match what it had committed to.
+    CodeMismatch,
+    /// The users did not both confirm within the two minutes the code is
+    /// valid, or the other computer stopped answering before a code showed.
+    TimedOut,
+    /// No computer answered at the picked computer's addresses, or the
+    /// address did not resolve.
+    Unreachable,
+    /// The other computer is pairing with another computer.
+    PeerBusy,
+    /// The two computers share no Flow protocol version; one of them needs
+    /// an update.
+    IncompatibleVersion,
+    /// The connection closed, or the other computer broke the pairing
+    /// protocol, before both users confirmed.
+    ConnectionLost,
+    /// Both users confirmed, but this computer could not save the other in
+    /// `config.toml`.
+    SaveFailed { message: String },
+}
+
+/// Why a Flow pairing command was refused. Progress after an accepted
+/// command shows in [`FlowStatus::pairing`].
+///
+/// Append new variants only: the enum crosses the bincode IPC.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FlowPairingCommandError {
+    /// Pairing is not open.
+    NotStarted,
+    /// A pairing attempt is already in progress.
+    Busy,
+    /// The key is not among the computers [`FlowPairingPhase::Found`] lists.
+    UnknownPeer,
+    /// No code is waiting for this computer's answer.
+    NothingToConfirm,
+    /// The Flow identity or the pairing endpoint is unavailable.
+    Unavailable { message: String },
 }
 
 /// The controls of a standalone light that the user set in the GUI without
@@ -592,6 +797,8 @@ pub struct ActionRingInvocation {
     pub slots: BTreeMap<ActionRingSlot, ActionRingPresentation>,
     /// Configured UI locale, or `None` to follow the overlay host's system locale.
     pub language: Option<String>,
+    /// How large the overlay draws this ring.
+    pub size: ActionRingSize,
 }
 
 /// The ring the overlay should be showing, stamped with its generation.
@@ -972,4 +1179,52 @@ pub trait Agent {
 
     /// Read a G-series mouse's onboard memory.
     async fn read_onboard(route: DeviceRoute) -> Result<OnboardState, WriteError>;
+
+    /// Switch the device on `route` to the zero-based Easy-Switch slot `host`
+    /// through HID++ `0x1814 ChangeHost`.
+    ///
+    /// The agent refuses a slot beyond the device's channel count with
+    /// [`WriteError::HostOutOfRange`], and a slot `0x1815 HostsInfo` reports
+    /// as unpaired with [`WriteError::HostSlotEmpty`]; nothing is written
+    /// then. `Ok` means the device already used `host` or the fire-and-forget
+    /// write was issued. It does not mean the device arrived: once the write
+    /// takes effect, its radio link has left this computer.
+    async fn switch_host(route: DeviceRoute, host: u8) -> Result<(), WriteError>;
+
+    /// Read the sidetone level of the headset on `route` (HID++ `0x8300`).
+    async fn read_sidetone(route: DeviceRoute) -> Result<SidetoneLevel, WriteError>;
+    /// Write the sidetone level of the headset on `route` now and answer with
+    /// the level the headset confirms. The headset keeps it across power
+    /// cycles, so nothing is saved to the config.
+    async fn set_sidetone(
+        route: DeviceRoute,
+        level: SidetoneLevel,
+    ) -> Result<SidetoneLevel, WriteError>;
+
+    /// This computer's Flow identity. The agent creates the machine key on
+    /// first use, so this works before pairing is opened or Flow enabled.
+    async fn read_flow_identity() -> Result<FlowIdentity, FlowPairingCommandError>;
+    /// Open Flow pairing: this computer appears in the nearby list of other
+    /// computers with pairing open, lists them in [`FlowStatus::pairing`],
+    /// and accepts one of them pairing with it. Pairing closes itself after
+    /// ten minutes without an attempt; calling this again while it is open
+    /// keeps it open and changes nothing else.
+    async fn start_flow_pairing() -> Result<(), FlowPairingCommandError>;
+    /// Start pairing with `target`. Refused while another attempt runs; after
+    /// [`FlowPairingPhase::Paired`] or [`FlowPairingPhase::Failed`] it starts
+    /// a new attempt.
+    async fn pair_flow_peer(target: FlowPairTarget) -> Result<(), FlowPairingCommandError>;
+    /// The user confirmed that both computers show the same code, in
+    /// [`FlowPairingPhase::ShowingCode`].
+    async fn confirm_flow_pairing() -> Result<(), FlowPairingCommandError>;
+    /// End the current attempt, telling the other computer the user
+    /// cancelled, or dismiss its result. Pairing stays open and shows the
+    /// nearby computers again.
+    async fn cancel_flow_pairing() -> Result<(), FlowPairingCommandError>;
+    /// Close pairing, cancelling an attempt in progress.
+    async fn stop_flow_pairing();
+    /// Report that the pointer left every slot of the ring, so releasing the
+    /// held trigger cancels instead of choosing the slot last reported by
+    /// [`Agent::action_ring_hover`].
+    async fn action_ring_unhover(session_id: u64) -> Result<(), ActionRingCommandError>;
 }

@@ -1,10 +1,12 @@
 //! The keyboard key remapper view — the Keys tab body.
 //!
-//! A two-pane inspector model (the "pro-tool" layout): the keyboard photo sits
-//! beside a row of mouse-style callout bubbles, and clicking a key **selects**
-//! it (no popover). A tall, scrollable config panel slides in on the right
-//! while the keyboard physically makes room. Only one key is selected at a
-//! time.
+//! A two-pane inspector model (the "pro-tool" layout): the keyboard photo,
+//! with an icon callout over each key, beside a fixed inspector column. With
+//! no key selected the column lists every key by its full name with what it
+//! does now — the callouts have one key pitch of room, the list has the
+//! column's. Clicking a key **selects** it (no popover) and the column fades
+//! in its config panel in place, so the board never moves under the pointer.
+//! Only one key is selected at a time.
 //!
 //! Which keys appear is the asset's call (see [`key_points::key_surface`]): a
 //! depot with control markers shows the keyboard's own HID++ controls on the
@@ -28,13 +30,20 @@ use std::sync::Arc;
 
 use gpui::{
     AnyElement, App, AppContext as _, Bounds, Context, Entity, FontWeight, Hsla,
-    InteractiveElement, IntoElement, ParentElement, PathBuilder, Render, RenderOnce, Role,
-    SharedString, StatefulInteractiveElement as _, Styled, Subscription, Window, canvas, div, hsla,
-    point, prelude::FluentBuilder as _, px, rgb, svg,
+    InteractiveElement, IntoElement, ParentElement, PathBuilder, Refineable as _, Render,
+    RenderOnce, Role, ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled,
+    Subscription, TextStyle, Window, canvas, div, hsla, linear_color_stop, linear_gradient, point,
+    prelude::FluentBuilder as _, px, rems, rgb, svg,
 };
-use gpui_component::tooltip::Tooltip;
-use gpui_component::{Selectable as _, h_flex, input::InputState, v_flex};
-use openlogi_core::binding::{Action, ActionRingIcon, ButtonId, KeypadPage, WorkflowStep};
+use gpui_kit::base::ElementExt as _;
+use gpui_kit::component::tooltip::Tooltip;
+use gpui_kit::component::{
+    Selectable as _, h_flex, input::InputState, scroll::ScrollableElement as _, v_flex,
+};
+use openlogi_core::binding::{
+    Action, ActionRingIcon, ButtonId, GKeyProfile, KeypadPage, WorkflowStep,
+};
+use openlogi_core::config::GamingKeyMode;
 
 use super::editors::{
     PowerUserKind, text_editor_placeholder, text_editor_seed, workflow_editor_seed,
@@ -47,34 +56,80 @@ use crate::features::binding_editor::{
 use crate::features::mouse::geometry::asset_dimensions_for_png;
 use crate::features::profiles::profile_name;
 use crate::services::assets::{GlowGeometry, ResolvedAsset};
-use crate::state::{AppState, DeviceKey, DeviceRecord, StateEvent, StateEvents};
+use crate::state::{AppState, DeviceKey, DeviceRecord, GamingKeys, StateEvent, StateEvents};
 use crate::ui::action::localized_action_label;
-use crate::ui::components::MenuRow;
-use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
-use gpui::ease_in_out;
-use gpui::{Animation, AnimationExt, img};
+use crate::ui::components::{MenuRow, control_button};
+use crate::ui::theme::{self, ACCENT_BLUE, Palette, SCREEN_PAD, Typography as _};
+use gpui::{Animation, AnimationExt, ease_out_quint, img};
+use openlogi_core::hid::KeypadDescriptor;
 
 mod callout_layout;
+mod gaming;
 mod key_points;
 mod keypad;
 
 use callout_layout::{CalloutLayout, CardRect, callout_layout, side_bands_width};
+use gaming::gaming_bar;
 pub(crate) use key_points::KeyTarget;
 #[cfg(test)]
 use key_points::{EVEN_SPACING_END, EVEN_SPACING_START, key_x_fractions};
-use key_points::{KeySurface, key_surface, keypad_canvas};
+use key_points::{KeySlotLayout, KeySurface, StoredAs, key_surface, keypad_canvas, shows_g_keys};
 use keypad::{KeypadPane, KeypadPhotoPane, LastPage, keypad_page_bar, keypad_photo_render_size};
 
-/// Width of the config panel (CSS px) when a key is selected.
+/// Narrowest width of the inspector column beside the device: the key
+/// overview, or the selected key's config panel. The column grows past it
+/// to keep every key's name and binding on one line (see
+/// [`inspector_width`]).
 const PANEL_W: f32 = 320.;
-/// Duration of the keyboard slide + panel slide animation.
-const SLIDE_MS: u64 = 180;
-/// Maximum keyboard render width in the Keys inspector.
+/// Widest the inspector column grows; past this a long name wraps instead.
+/// The board gives up what the column takes past [`PANEL_W`].
+const PANEL_MAX_W: f32 = 440.;
+/// Space between the device pane and the inspector column.
+const INSPECTOR_GAP: f32 = 20.;
+/// What the narrowest inspector column takes from the row.
+const INSPECTOR_W: f32 = PANEL_W + INSPECTOR_GAP;
+/// The Keys tab's content width: the widest board beside the narrowest
+/// inspector column.
+const KEYS_CONTENT_W: f32 = KEYBOARD_W + INSPECTOR_W;
+/// The inspector column's height while the key overview needs no more: room
+/// for the key panel's action list. The column keeps one height whatever it
+/// shows, so swapping the overview for a panel never resizes the row; a
+/// longer overview grows it up to the height the Keys tab has (see
+/// [`inspector_height`]).
+const INSPECTOR_H: f32 = 540.;
+/// The least the column shrinks to in a short window, which then scrolls the
+/// tab instead.
+const INSPECTOR_MIN_H: f32 = 240.;
+/// Height of the fade over the overview's cut-off bottom edge, the Actions
+/// Ring library's treatment. The list then ends with as much padding, so its
+/// last row can scroll clear of the fade.
+const OVERVIEW_FADE_H: f32 = 24.;
+/// An overview row's binding icon, and the gap after it, in rems.
+const OVERVIEW_ICON: f32 = 0.875;
+const OVERVIEW_ICON_GAP: f32 = 0.375;
+/// What an overview row adds around its key name and binding, in rems: the
+/// card's padding and the row's either side (`compact_panel`'s `p_1p5`,
+/// `MenuRow`'s `px_2`), the row's `gap_2` between the two, and the binding's
+/// icon and gap.
+const OVERVIEW_ROW_CHROME: f32 = 2. * 0.375 + 2. * 0.5 + 0.5 + OVERVIEW_ICON + OVERVIEW_ICON_GAP;
+/// What it adds in pixels: the card's border either side, and the pixel each
+/// of the two texts can lose when layout snaps it to whole pixels.
+const OVERVIEW_ROW_PX: f32 = 2. + 2.;
+/// How long the config panel takes to fade in when a key is selected.
+const PANEL_ENTER: std::time::Duration = std::time::Duration::from_millis(160);
+/// How far the config panel travels while it fades in: out of the gap beside
+/// the board, never over the board itself.
+const PANEL_ENTER_SHIFT: f32 = 12.;
+/// Maximum keyboard render width in the Keys inspector — with the inspector
+/// column, the Keys tab's full content width.
 const KEYBOARD_W: f32 = 700.;
+/// Narrowest the board pane gets to keep the inspector beside it; a narrower
+/// window wraps the inspector under the board instead.
+const KEYBOARD_MIN_BESIDE_W: f32 = 520.;
 /// Render size when no asset resolved: the placeholder box.
 const FALLBACK_KEYBOARD_SIZE: (f32, f32) = (KEYBOARD_W, 220.);
 /// Space above the keyboard reserved for function-key callouts.
-const CALLOUT_BAND_H: f32 = 118.;
+const CALLOUT_BAND_H: f32 = 84.;
 /// Vertical chrome around the keyboard pane (header, tab strip, screen
 /// padding, footer) — the viewport height minus this and the callout band is
 /// what the render may occupy before it scales down to fit.
@@ -84,12 +139,20 @@ const KEYS_VERTICAL_RESERVE: f32 = 224.;
 const KEYS_HORIZONTAL_RESERVE: f32 = crate::ui::theme::DETAIL_RAIL_W + 48.;
 /// Floor on the render height so a tiny window still shows a usable model.
 const KEYBOARD_MIN_IMG_H: f32 = 160.;
-const KEY_CALLOUT_H: f32 = 48.;
+/// A callout carries one icon: a key pitch holds no readable name.
+const KEY_CALLOUT_H: f32 = 28.;
+const KEY_CALLOUT_ICON: f32 = 14.;
+/// The quiet mark a callout carries while its key keeps its own function —
+/// the glyph printed on the key already says what that is.
+const KEY_CALLOUT_DOT: f32 = 5.;
 const KEY_CALLOUT_TOP_UPPER: f32 = 2.;
-const KEY_CALLOUT_TOP_LOWER: f32 = 56.;
+const KEY_CALLOUT_TOP_LOWER: f32 = KEY_CALLOUT_TOP_UPPER + KEY_CALLOUT_H + 8.;
 const KEY_TARGET_W: f32 = 30.;
 const KEY_TARGET_H: f32 = 30.;
 const KEY_HOTSPOT_DOT: f32 = 12.;
+/// The glyph for a key on its own function, as the panel's Native function
+/// row shows it.
+const NATIVE_FUNCTION_ICON: &str = "action-icons/keyboard.svg";
 
 /// The function-row remapper view.
 pub struct FunctionRowView {
@@ -110,9 +173,25 @@ pub struct FunctionRowView {
     /// The keypad binding page the grid keys are being edited on — this
     /// editor's own choice, independent of the page the keypad is showing.
     keypad_page: KeypadPage,
+    /// The M profile whose G-key bindings are being edited — this editor's
+    /// own choice, independent of the profile the keyboard is on.
+    g_profile: GKeyProfile,
+    /// Whether the selected key is an M1–M3 card in profile mode, as of the
+    /// last render: such a card makes its profile the edited one.
+    selected_profile_card: bool,
+    /// The gaming-key mode of the last render. A mode change reorders the
+    /// G-series keys (nine-button mode adds MR before G1–G5), so the selected
+    /// index and any open draft would land on another key.
+    gaming_mode: GamingKeyMode,
     /// The device and app profile being edited: another device starts back
-    /// on page 1, and either change drops the open editor.
+    /// on page 1 and profile M1, and either change drops the open editor.
     edit_scope: EditScope,
+    /// The height the Keys tab leaves the inspector column, and the height
+    /// the key overview took in it, as the last frame laid them out (see
+    /// [`inspector_height`]).
+    inspector_room: Option<f32>,
+    overview_h: Option<f32>,
+    overview_scroll: ScrollHandle,
     _state_obs: Subscription,
 }
 
@@ -138,7 +217,13 @@ impl FunctionRowView {
             workflow_draft: Vec::new(),
             application_invalid: false,
             keypad_page: KeypadPage::FIRST,
+            g_profile: GKeyProfile::M1,
+            selected_profile_card: false,
+            gaming_mode: GamingKeyMode::default(),
             edit_scope: EditScope::default(),
+            inspector_room: None,
+            overview_h: None,
+            overview_scroll: ScrollHandle::new(),
             _state_obs: state_obs,
         }
     }
@@ -184,6 +269,49 @@ impl FunctionRowView {
         }
     }
 
+    /// Keep `height`, which the last frame measured into `slot`, and lay the
+    /// row out again when it moved.
+    fn remeasure(
+        &mut self,
+        slot: fn(&mut Self) -> &mut Option<f32>,
+        height: f32,
+        cx: &mut Context<Self>,
+    ) {
+        let slot = slot(self);
+        if slot.is_none_or(|old| (old - height).abs() > 0.5) {
+            *slot = Some(height);
+            cx.notify();
+        }
+    }
+
+    /// The inspector column's content and height. The column keeps its place
+    /// and size either way, so selecting a key never moves the board: it
+    /// lists every key until one is selected, then holds that key's panel.
+    fn inspector(
+        &self,
+        selected: Option<usize>,
+        slots: &[KeySlot],
+        view: &Entity<Self>,
+        pal: &Palette,
+        cx: &mut Context<Self>,
+    ) -> (Inspector, f32) {
+        let room = self
+            .inspector_room
+            .map_or(INSPECTOR_H, |room| room.max(INSPECTOR_MIN_H));
+        let inspector = match selected {
+            Some(selected) => Inspector::Panel(self.config_panel(selected, slots, view, cx)),
+            None => Inspector::Overview(key_overview(
+                slots,
+                self.hovered_key,
+                &self.overview_scroll,
+                room,
+                view,
+                pal,
+            )),
+        };
+        (inspector, inspector_height(self.overview_h, room))
+    }
+
     /// Follow the selected device and the open app profile — dropping a
     /// draft started for another, and starting a new device on page 1 — keep
     /// the edited page on the device's pages (clamped when pages were
@@ -199,6 +327,7 @@ impl FunctionRowView {
         if self.edit_scope != scope {
             if self.edit_scope.device != scope.device {
                 self.move_keypad_page(KeypadPage::FIRST);
+                self.g_profile = GKeyProfile::M1;
             }
             self.drop_editor();
             self.edit_scope = scope;
@@ -217,6 +346,76 @@ impl FunctionRowView {
     pub(crate) fn set_keypad_page(&mut self, page: KeypadPage, cx: &mut Context<Self>) {
         if self.keypad_page != page {
             self.move_keypad_page(page);
+            cx.notify();
+        }
+    }
+
+    /// The keys `layouts` places, as this view edits them: on its keypad page
+    /// and G-key profile. A selected profile key in profile mode makes its
+    /// profile the edited one first.
+    fn edited_slots(
+        &mut self,
+        layouts: Vec<KeySlotLayout>,
+        state: Option<&AppState>,
+        gaming: Option<GamingKeys>,
+    ) -> Vec<KeySlot> {
+        let gaming_mode = gaming.map_or_else(GamingKeyMode::default, |gaming| gaming.mode);
+        if gaming_mode != self.gaming_mode {
+            self.gaming_mode = gaming_mode;
+            self.selected_key = None;
+            self.drop_editor();
+        }
+        let card = self
+            .selected_key
+            .and_then(|idx| layouts.get(idx))
+            .and_then(|layout| profile_key(&layout.target, gaming_mode));
+        self.selected_profile_card = card.is_some();
+        if let Some(profile) = card
+            && profile != self.g_profile
+        {
+            self.g_profile = profile;
+            self.drop_editor();
+        }
+        key_slots_from_layouts(
+            layouts,
+            state,
+            KeyEditScope {
+                page: self.keypad_page,
+                g_profile: self.g_profile,
+                gaming_mode,
+            },
+        )
+    }
+
+    /// The bar over the device: a keypad's binding pages, or a G-series
+    /// keyboard's gaming cluster.
+    fn device_bar(
+        &self,
+        keypad: bool,
+        last_page: LastPage,
+        gaming: Option<GamingKeys>,
+        view: &Entity<Self>,
+        pal: &Palette,
+    ) -> Option<AnyElement> {
+        if keypad {
+            return Some(
+                keypad_page_bar(self.keypad_page, last_page, view, pal).into_any_element(),
+            );
+        }
+        gaming.map(|gaming| gaming_bar(gaming, self.g_profile, view, pal).into_any_element())
+    }
+
+    /// Edit the G-keys of `profile`, dropping any open editor when it moves.
+    /// A selected M1–M3 card is deselected: it names the profile it selects,
+    /// and would switch the editor straight back on the next render.
+    pub(crate) fn set_g_profile(&mut self, profile: GKeyProfile, cx: &mut Context<Self>) {
+        if self.g_profile != profile {
+            if self.selected_profile_card {
+                self.selected_key = None;
+                self.selected_profile_card = false;
+            }
+            self.g_profile = profile;
+            self.drop_editor();
             cx.notify();
         }
     }
@@ -294,7 +493,7 @@ impl Render for FunctionRowView {
         let viewport = window.viewport_size();
         let viewport_h = f32::from(viewport.height);
         let image_path = asset.map(|asset| asset.image_path.clone());
-        let surface = key_surface(asset, known_keypad);
+        let (surface, gaming) = device_keys(state, asset, known_keypad);
         let keypad = matches!(surface, KeySurface::Keypad(_));
         // A keypad on its photo draws its keys on the render itself: the
         // keyboard's callout band cannot lay eleven bubbles across a
@@ -308,7 +507,8 @@ impl Render for FunctionRowView {
             });
         let last_page = self.sync_edit_scope(state);
         let pal = theme::palette(cx);
-        let slots = key_slots_from_layouts(surface, state, self.keypad_page);
+        let slots = self.edited_slots(surface.slots(), state, gaming);
+        let panel_w = inspector_width(&slots, window);
         let render_size = if keypad_photo {
             keypad_photo_render_size(asset, viewport_h)
         } else {
@@ -319,7 +519,11 @@ impl Render for FunctionRowView {
             keyboard_render_size(
                 asset,
                 viewport_h,
-                keyboard_max_width(f32::from(viewport.width), side_bands_width(&markers)),
+                keyboard_max_width(
+                    f32::from(viewport.width),
+                    side_bands_width(&markers),
+                    panel_w,
+                ),
             )
         };
 
@@ -381,19 +585,54 @@ impl Render for FunctionRowView {
                 .hovered(hovered)
                 .into_any_element()
         };
-        let panel = selected.map(|selected| self.config_panel(selected, &slots, &view, cx));
-        let page_bar = (keypad || keypad_photo)
-            .then(|| keypad_page_bar(self.keypad_page, last_page, &view, &pal));
+        let (inspector, column_h) = self.inspector(selected, &slots, &view, &pal, cx);
+        let page_bar = self.device_bar(keypad || keypad_photo, last_page, gaming, &view, &pal);
 
-        // The whole row animates as one: when a key is selected the right-side
-        // panel grows in and the keyboard nudges left to make room.
+        let row = InspectorRow::new(device, inspector, (panel_w, column_h));
+        keys_tab_content(page_bar, row, &view)
+    }
+}
+
+/// The Keys tab's content — a keypad's page bar over the device and its
+/// inspector column — reporting to `view` the room the tab's visible height
+/// leaves the column once this frame laid it out: the tab body clips to that
+/// height, inset by its padding. The next frame fits the column to it.
+fn keys_tab_content(
+    page_bar: Option<impl IntoElement>,
+    row: InspectorRow,
+    view: &Entity<FunctionRowView>,
+) -> gpui::Div {
+    let column_h = row.column.1;
+    let view = view.clone();
+    div().w_full().child(
         v_flex()
             .w_full()
             .items_center()
             .gap_3()
             .children(page_bar)
-            .child(InspectorRow::new(device).panel(panel))
-    }
+            .child(row)
+            .on_prepaint(move |content, window, cx| {
+                let visible = window.content_mask().bounds.size.height;
+                let pad = SCREEN_PAD.rems().to_pixels(window.rem_size());
+                let free = f32::from(visible - pad * 2. - content.size.height);
+                view.update(cx, |view, cx| {
+                    view.remeasure(|view| &mut view.inspector_room, column_h + free, cx);
+                });
+            }),
+    )
+}
+
+/// The keys the selected device shows, and its gaming cluster when the
+/// render places its G-keys.
+fn device_keys(
+    state: Option<&AppState>,
+    asset: Option<&ResolvedAsset>,
+    keypad: Option<&KeypadDescriptor>,
+) -> (KeySurface, Option<GamingKeys>) {
+    let gaming = state
+        .and_then(AppState::current_gaming_keys)
+        .filter(|_| asset.is_some_and(shows_g_keys));
+    (key_surface(asset, keypad, gaming), gaming)
 }
 
 fn binding_line(
@@ -437,13 +676,64 @@ fn binding_line(
         )
 }
 
-/// The widest the render may get. A board without cards beside it keeps
-/// [`KEYBOARD_W`]. One with them gives up as much width as keeps the whole
-/// pane inside the Keys tab, but never more than the pane would have
-/// overflowed with the render alone, so the band never makes it wider.
-fn keyboard_max_width(viewport_w: f32, side_bands_w: f32) -> f32 {
-    let room = (viewport_w - KEYS_HORIZONTAL_RESERVE).max(KEYBOARD_W);
-    KEYBOARD_W.min(room - side_bands_w)
+/// The widest the render may get. The whole pane — the render and any band
+/// of cards beside the board — keeps to what [`KEYS_CONTENT_W`] leaves beside
+/// a `column_w` inspector column, so the column always fits beside it in the
+/// Keys tab, and shrinks further to keep the inspector beside it in a
+/// narrower window. Below [`KEYBOARD_MIN_BESIDE_W`] the inspector wraps
+/// under the board instead, which then keeps [`KEYBOARD_W`].
+fn keyboard_max_width(viewport_w: f32, side_bands_w: f32, column_w: f32) -> f32 {
+    let inspector_w = column_w + INSPECTOR_GAP;
+    let beside =
+        (viewport_w - KEYS_HORIZONTAL_RESERVE - inspector_w).min(KEYS_CONTENT_W - inspector_w);
+    let pane_w = if beside >= KEYBOARD_MIN_BESIDE_W {
+        beside
+    } else {
+        KEYBOARD_W
+    };
+    pane_w - side_bands_w
+}
+
+/// The inspector column's width: what the widest overview row — key name,
+/// binding icon and binding — takes on one line, from [`PANEL_W`] up to
+/// [`PANEL_MAX_W`]. Measured in the rows' own text style, so a language's
+/// long key names widen the column instead of being cut off.
+fn inspector_width(slots: &[KeySlot], window: &Window) -> f32 {
+    let mut style = window.text_style();
+    style.refine(div().text_caption().text_style());
+    let rem = window.rem_size();
+    let font_size = style.font_size.to_pixels(rem);
+    let text_w = |text: &SharedString, font_weight: FontWeight| {
+        let run = TextStyle {
+            font_weight,
+            ..style.clone()
+        }
+        .to_run(text.len());
+        let line = window
+            .text_system()
+            .shape_line(text.clone(), font_size, &[run], None);
+        f32::from(line.width)
+    };
+    let widest = slots
+        .iter()
+        .map(|slot| {
+            let binding_weight = if slot.bound {
+                FontWeight::MEDIUM
+            } else {
+                style.font_weight
+            };
+            text_w(&slot.label, style.font_weight) + text_w(&slot.binding, binding_weight)
+        })
+        .fold(0., f32::max);
+    let chrome = f32::from(rems(OVERVIEW_ROW_CHROME).to_pixels(rem)) + OVERVIEW_ROW_PX;
+    (widest + chrome).clamp(PANEL_W, PANEL_MAX_W)
+}
+
+/// The inspector column's height: what the key overview took when it last
+/// showed, no less than [`INSPECTOR_H`] for the key panel, and no more than
+/// the `room` the Keys tab leaves it.
+fn inspector_height(overview_h: Option<f32>, room: f32) -> f32 {
+    overview_h.unwrap_or(0.).max(INSPECTOR_H).min(room)
 }
 
 /// The keyboard render size: the actual PNG aspect at up to `max_w` wide,
@@ -467,42 +757,98 @@ struct KeySlot {
     target: KeyTarget,
     x_frac: f32,
     y_frac: f32,
+    /// What the key does now: the bound action's name, or what it does
+    /// unbound (see [`unbound_binding`]).
     binding: SharedString,
-    binding_icon: Option<&'static str>,
+    /// The icon for [`Self::binding`].
+    binding_icon: &'static str,
+    /// Whether an action is bound, rather than the key doing what it does
+    /// unbound.
+    bound: bool,
     /// The glyph the keypad's LCD shows for this key's binding — the agent
     /// paints exactly this icon on the device, so the render mirrors it.
     lcd_icon: Option<&'static str>,
 }
 
+impl KeySlot {
+    /// The key's name with what it does, for a tooltip or an accessible
+    /// label: "Brightness Down Key · Native function".
+    fn summary(&self) -> SharedString {
+        format!("{} · {}", self.label, self.binding).into()
+    }
+}
+
+/// Which binding of a key with several the view edits: a keypad grid key's
+/// page, and a G-key's M profile.
+#[derive(Clone, Copy, Debug)]
+struct KeyEditScope {
+    page: KeypadPage,
+    g_profile: GKeyProfile,
+    /// What M1–M3 do on a G-series keyboard.
+    gaming_mode: GamingKeyMode,
+}
+
 /// One [`KeySlot`] per displayed key, each carrying the action it is bound
 /// to right now — the panes and the config panel render the same truth
-/// from the same source.
-/// The tab's keys with their current bindings, grid keys read on `page`.
+/// from the same source. Grid keys are read on the scope's page, G-keys in
+/// its profile.
 fn key_slots_from_layouts(
-    surface: KeySurface,
+    layouts: Vec<KeySlotLayout>,
     state: Option<&AppState>,
-    page: KeypadPage,
+    scope: KeyEditScope,
 ) -> Vec<KeySlot> {
     let key_actions = state.map(AppState::keypad_key_actions).unwrap_or_default();
-    surface
-        .slots()
+    // Nine-button presses run the M1 slots whatever profile was last edited.
+    let g_profile = match scope.gaming_mode {
+        GamingKeyMode::Profiles => scope.g_profile,
+        GamingKeyMode::NineButtons => GKeyProfile::M1,
+    };
+    layouts
         .into_iter()
         .enumerate()
         .map(|(idx, mut layout)| {
-            layout.target = layout.target.on_page(page);
+            layout.target = layout.target.on_page(scope.page).on_profile(g_profile);
+            if matches!(layout.target, KeyTarget::GKey(_)) {
+                layout.legend = layout.target.label();
+            }
+            // In profile mode M1–M3 switch profiles and bind nothing; the
+            // one being edited reads as the active one.
+            if let Some(profile) = profile_key(&layout.target, scope.gaming_mode) {
+                return KeySlot {
+                    idx,
+                    label: layout.legend.into(),
+                    x_frac: layout.point.x_frac,
+                    y_frac: layout.point.y_frac,
+                    binding: state
+                        .and_then(|state| state.current_g_key_profile_name(profile))
+                        .map_or_else(
+                            || tr!("keyboard.g_key_profile", profile => profile.label()),
+                            |name| SharedString::from(name.to_owned()),
+                        ),
+                    binding_icon: NATIVE_FUNCTION_ICON,
+                    bound: profile == scope.g_profile,
+                    lcd_icon: None,
+                    target: layout.target,
+                };
+            }
             let bound = match &layout.target {
                 // The face the keypad shows, which a long press can set
                 // without a press action.
                 KeyTarget::Grid(slot) => key_actions.get(&ButtonId::Grid(*slot)).cloned(),
                 target => state.and_then(|state| bound_action(state, target)),
             };
+            let (binding, binding_icon) = match &bound {
+                Some(action) => (localized_action_label(action), action_icon_path(action)),
+                None => unbound_binding(&layout.target),
+            };
             KeySlot {
                 idx,
                 label: layout.legend.into(),
                 x_frac: layout.point.x_frac,
                 y_frac: layout.point.y_frac,
-                binding: binding_label(bound.as_ref()),
-                binding_icon: bound.as_ref().map(action_icon_path),
+                binding,
+                binding_icon,
+                bound: bound.is_some(),
                 lcd_icon: bound
                     .as_ref()
                     .map(|action| ActionRingIcon::for_action(action).asset_path()),
@@ -519,13 +865,24 @@ fn key_slots_from_layouts(
 /// keypad key is only ever observed, so [`Action::None`] there does nothing.
 pub(super) fn bound_action(state: &AppState, target: &KeyTarget) -> Option<Action> {
     match target {
-        KeyTarget::Control(button) => state.button_bindings().get(button).cloned(),
         KeyTarget::Grid(slot) => state
             .button_bindings()
             .get(&ButtonId::Grid(*slot))
             .filter(|action| **action != Action::None)
             .cloned(),
-        KeyTarget::FunctionKey(trigger) => state.keyboard_bindings().get(trigger).cloned(),
+        _ => match target.stored_as() {
+            StoredAs::Device(button) => state.button_bindings().get(&button).cloned(),
+            StoredAs::Global(trigger) => state.keyboard_bindings().get(trigger).cloned(),
+        },
+    }
+}
+
+/// The profile `target` switches to when it is M1–M3 in profile mode, where
+/// it binds nothing.
+fn profile_key(target: &KeyTarget, mode: GamingKeyMode) -> Option<GKeyProfile> {
+    match target {
+        KeyTarget::ModeKey(key) if mode == GamingKeyMode::Profiles => key.profile(),
+        _ => None,
     }
 }
 
@@ -539,26 +896,20 @@ pub(super) fn commit_key_action(
     target: &KeyTarget,
     action: Option<Action>,
 ) -> StateEvents {
-    match target {
-        KeyTarget::Control(button) => match action {
-            Some(action) => state.commit_binding(*button, action),
-            None => state.clear_binding(*button),
-        },
-        KeyTarget::Grid(slot) => match action {
-            Some(action) => state.commit_binding(ButtonId::Grid(*slot), action),
-            None => state.clear_binding(ButtonId::Grid(*slot)),
-        },
-        KeyTarget::FunctionKey(trigger) => state.commit_keyboard_binding(trigger.clone(), action),
+    match (target.stored_as(), action) {
+        (StoredAs::Device(button), Some(action)) => state.commit_binding(button, action),
+        (StoredAs::Device(button), None) => state.clear_binding(button),
+        (StoredAs::Global(trigger), action) => {
+            state.commit_keyboard_binding(trigger.clone(), action)
+        }
     }
 }
 
 /// The explicit action in the scope edited by the inspector. In an app profile,
 /// an inherited action is not selected; `None` selects the default-profile row.
 fn selected_key_action(state: &AppState, target: &KeyTarget) -> Option<Action> {
-    let button = match target {
-        KeyTarget::Control(button) => *button,
-        KeyTarget::Grid(slot) => ButtonId::Grid(*slot),
-        KeyTarget::FunctionKey(_) => return bound_action(state, target),
+    let StoredAs::Device(button) = target.stored_as() else {
+        return bound_action(state, target);
     };
     if state.editing_app().is_some() {
         state
@@ -570,48 +921,222 @@ fn selected_key_action(state: &AppState, target: &KeyTarget) -> Option<Action> {
     }
 }
 
-/// The two-pane row: keyboard photo (or keypad keycaps) + an optional side
-/// panel.
+/// What the inspector column beside the device shows.
+enum Inspector {
+    /// Every key and what it does, while no key is selected.
+    Overview(gpui::Div),
+    /// The selected key's config panel.
+    Panel(gpui::Div),
+}
+
+/// The two-pane row: keyboard photo (or keypad keycaps) beside the inspector
+/// column. The column keeps its size whatever it shows, so the device never
+/// moves; a window too narrow for both wraps the column under the device.
 #[derive(IntoElement)]
 struct InspectorRow {
-    keyboard: AnyElement,
-    panel: Option<gpui::Div>,
+    device: AnyElement,
+    inspector: Inspector,
+    /// The column's width and height (see [`inspector_width`] and
+    /// [`inspector_height`]).
+    column: (f32, f32),
 }
 
 impl InspectorRow {
-    fn new(keyboard: impl Into<AnyElement>) -> Self {
+    fn new(device: impl Into<AnyElement>, inspector: Inspector, column: (f32, f32)) -> Self {
         Self {
-            keyboard: keyboard.into(),
-            panel: None,
+            device: device.into(),
+            inspector,
+            column,
         }
-    }
-
-    #[must_use]
-    fn panel(mut self, panel: Option<gpui::Div>) -> Self {
-        self.panel = panel;
-        self
     }
 }
 
 impl RenderOnce for InspectorRow {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        let content = match self.inspector {
+            // The resting state appears at once, the way the panel leaves.
+            Inspector::Overview(overview) => overview.into_any_element(),
+            // The panel fades in where it will stay, drifting the last few
+            // pixels out of the gap beside the board. Only opacity and an
+            // offset that leaves layout alone move; selecting another key
+            // while it is open keeps this element, so it does not replay.
+            Inspector::Panel(panel) => div()
+                .relative()
+                .size_full()
+                .child(panel)
+                .with_animation(
+                    "key-panel-enter",
+                    Animation::new(PANEL_ENTER).with_easing(ease_out_quint()),
+                    |panel, delta| {
+                        panel
+                            .opacity(delta)
+                            .left(px(-PANEL_ENTER_SHIFT * (1. - delta)))
+                    },
+                )
+                .into_any_element(),
+        };
+        let (column_w, column_h) = self.column;
         h_flex()
             .w_full()
+            .flex_wrap()
             .items_center()
             .justify_center()
-            .child(self.keyboard)
-            .when_some(self.panel, |row, panel| {
-                // The panel grows in from width 0 → PANEL_W over SLIDE_MS,
-                // easing in/out, always on the right as a stable inspector.
-                let animated_panel = div().overflow_hidden().child(panel).with_animation(
-                    "panel-slide",
-                    Animation::new(std::time::Duration::from_millis(SLIDE_MS))
-                        .with_easing(ease_in_out),
-                    |element, delta| element.w(px(PANEL_W * delta)),
-                );
-                row.gap_5().child(animated_panel)
-            })
+            .gap(px(INSPECTOR_GAP))
+            .child(self.device)
+            .child(
+                v_flex()
+                    .flex_none()
+                    .w(px(column_w))
+                    .h(px(column_h))
+                    .child(content),
+            )
     }
+}
+
+/// Every key the tab shows with what it does now, by full name — the room
+/// the callouts over the board do not have. A row shares the hover highlight
+/// with its key's callout and leader, and opens the key like a click on
+/// either.
+///
+/// The list takes the height its rows need up to `room`, reporting what it
+/// took back to `view` for the column (see [`inspector_height`]); past
+/// `room` it scrolls, its cut-off edge fading into the card.
+fn key_overview(
+    slots: &[KeySlot],
+    hovered: Option<usize>,
+    scroll: &ScrollHandle,
+    room: f32,
+    view: &Entity<FunctionRowView>,
+    pal: &Palette,
+) -> gpui::Div {
+    let rows = slots
+        .iter()
+        .map(|slot| overview_row(slot, hovered == Some(slot.idx), view, pal));
+    let overflows = scroll.max_offset().y > px(0.);
+    let scroll_for_measure = scroll.clone();
+    let view_measure = view.clone();
+    compact_panel(*pal)
+        .debug_selector(|| "key-overview".into())
+        .max_h(px(room))
+        .child(inspector_title(tr!("device.keys"), pal))
+        .child(divider(*pal))
+        .child(
+            v_flex()
+                .relative()
+                .min_h_0()
+                .child(
+                    v_flex()
+                        .id("key-overview-scroll")
+                        .min_h_0()
+                        .track_scroll(scroll)
+                        .overflow_y_scroll()
+                        .child(
+                            v_flex()
+                                .children(rows)
+                                .when(overflows, |list| list.pb(px(OVERVIEW_FADE_H))),
+                        ),
+                )
+                .when(overflows, |list| {
+                    list.child(
+                        div()
+                            .debug_selector(|| "key-overview-fade".into())
+                            .absolute()
+                            .bottom_0()
+                            .left_0()
+                            .right_0()
+                            .h(px(OVERVIEW_FADE_H))
+                            .bg(linear_gradient(
+                                180.,
+                                linear_color_stop(pal.panel.opacity(0.), 0.),
+                                linear_color_stop(pal.panel, 1.),
+                            )),
+                    )
+                })
+                .vertical_scrollbar(scroll),
+        )
+        // The card's height is what the column grows to; whether the list
+        // scrolls decides its fade, so a change in either lays out again.
+        .on_prepaint(move |bounds, _window, cx| {
+            let scrolls = scroll_for_measure.max_offset().y > px(0.);
+            view_measure.update(cx, |view, cx| {
+                view.remeasure(|view| &mut view.overview_h, f32::from(bounds.size.height), cx);
+                if scrolls != overflows {
+                    cx.notify();
+                }
+            });
+        })
+}
+
+/// One key's overview row: its name, and its binding's icon and name.
+fn overview_row(
+    slot: &KeySlot,
+    hovered: bool,
+    view: &Entity<FunctionRowView>,
+    pal: &Palette,
+) -> MenuRow {
+    let idx = slot.idx;
+    let view_hover = view.clone();
+    let view_click = view.clone();
+    let binding_color = if slot.bound {
+        pal.text_primary
+    } else {
+        pal.text_muted
+    };
+    // The column is as wide as the widest row needs, so both texts keep one
+    // line; a name too long even for the widest column shares the squeeze
+    // with the binding and wraps rather than losing its end.
+    MenuRow::new(("key-overview-row", idx))
+        .debug_selector(move || format!("key-overview-row-{idx}"))
+        .selected(hovered)
+        .aria_label(slot.summary())
+        .child(
+            div()
+                .flex_auto()
+                .min_w_0()
+                .overflow_hidden()
+                .text_ellipsis()
+                .line_clamp(2)
+                .text_caption()
+                .debug_selector(move || format!("key-overview-name-{idx}"))
+                .child(slot.label.clone()),
+        )
+        .child(
+            h_flex()
+                .min_w_0()
+                .items_center()
+                .gap(rems(OVERVIEW_ICON_GAP))
+                .child(
+                    svg()
+                        .path(slot.binding_icon)
+                        .size(rems(OVERVIEW_ICON))
+                        .flex_none()
+                        .text_color(binding_color),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .line_clamp(2)
+                        .text_caption()
+                        .text_color(binding_color)
+                        .when(slot.bound, |text| text.font_weight(FontWeight::MEDIUM))
+                        .debug_selector(move || format!("key-overview-binding-{idx}"))
+                        .child(slot.binding.clone()),
+                ),
+        )
+        .on_hover(move |hovered, _window, cx| {
+            let next = (*hovered).then_some(idx);
+            view_hover.update(cx, |v, vcx| v.set_hovered_key(next, vcx));
+        })
+        .on_click(move |_ev, _window, cx| {
+            // The key's panel replaces the overview, so this row never
+            // sees its hover end.
+            view_click.update(cx, |v, vcx| {
+                v.set_hovered_key(None, vcx);
+                v.click_key(idx, vcx);
+            });
+        })
 }
 
 /// The keyboard photo with callout bubbles above each function key, leader
@@ -725,7 +1250,10 @@ impl RenderOnce for KeyboardPane {
     }
 }
 
-/// One callout bubble, above its key or beside it (see [`callout_layout`]).
+/// One callout, above its key or beside it (see [`callout_layout`]): the icon
+/// of the action bound to the key, or a muted dot while the key keeps its own
+/// function. A key pitch has no room for a readable name, so the name and
+/// binding live in the tooltip and the inspector's overview.
 #[derive(IntoElement)]
 struct KeyCallout {
     slot: KeySlot,
@@ -741,27 +1269,30 @@ impl RenderOnce for KeyCallout {
         let CardRect { left, top, width } = self.card;
         let view_hover = self.view.clone();
         let view_click = self.view;
-        let binding = self.slot.binding;
-        let binding_icon = self.slot.binding_icon;
         let highlighted = self.highlighted;
-        let full_label = self.slot.label.clone();
+        let summary = self.slot.summary();
+        let tooltip = summary.clone();
+        let icon_color = if highlighted {
+            rgb(ACCENT_BLUE).into()
+        } else if self.slot.bound {
+            pal.text_primary
+        } else {
+            pal.text_muted
+        };
 
-        v_flex()
+        div()
             .id(("key-callout", idx))
-            // The bubble itself truncates the key name to one line (#1687 —
-            // a long translation, e.g. German's compound names, wrapped to
-            // several lines and overflowed into neighbouring callouts); the
-            // tooltip is where the untruncated name stays readable.
-            .tooltip(move |window, cx| Tooltip::new(full_label.clone()).build(window, cx))
+            .role(Role::Button)
+            .aria_label(summary)
+            .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
             .absolute()
             .top(px(top))
             .left(px(left))
             .w(px(width))
             .h(px(KEY_CALLOUT_H))
-            .px_1()
+            .flex()
             .justify_center()
             .items_center()
-            .gap(px(1.))
             .rounded_md()
             .border_1()
             .border_color(if highlighted {
@@ -782,27 +1313,20 @@ impl RenderOnce for KeyCallout {
                     pal.control_hover
                 })
             })
-            .child(
+            .child(if self.slot.bound {
+                svg()
+                    .path(self.slot.binding_icon)
+                    .size(px(KEY_CALLOUT_ICON))
+                    .flex_none()
+                    .text_color(icon_color)
+                    .into_any_element()
+            } else {
                 div()
-                    .max_w(px(width - 8.))
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .text_caption()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(if highlighted {
-                        rgb(ACCENT_BLUE).into()
-                    } else {
-                        pal.text_primary
-                    })
-                    .child(self.slot.label.clone()),
-            )
-            .child(binding_line(
-                binding,
-                binding_icon,
-                width - 8.,
-                highlighted,
-                &pal,
-            ))
+                    .size(px(KEY_CALLOUT_DOT))
+                    .rounded_full()
+                    .bg(icon_color)
+                    .into_any_element()
+            })
             .on_hover(move |hovered, _window, cx| {
                 let next = (*hovered).then_some(idx);
                 view_hover.update(cx, |v, vcx| v.set_hovered_key(next, vcx));
@@ -831,6 +1355,7 @@ fn key_click_target(
 
     div()
         .id(("key-target", idx))
+        .debug_selector(move || format!("key-target-{idx}"))
         .absolute()
         .top(px(top))
         .left(px(left))
@@ -872,10 +1397,31 @@ fn key_click_target(
         })
 }
 
-fn binding_label(action: Option<&Action>) -> gpui::SharedString {
-    match action {
-        Some(action) => localized_action_label(action),
-        None => tr!("common.off"),
+/// What an unbound key does, as its binding line reads: a keyboard key keeps
+/// its own function, the way the panel's Native function row puts it — not
+/// "Off", which reads as if every key were switched off; a keypad grid key
+/// has no function of its own and does nothing until something is bound.
+fn unbound_binding(target: &KeyTarget) -> (SharedString, &'static str) {
+    match target {
+        // A G-key or M key OpenLogi runs has no onboard action left.
+        KeyTarget::Grid(_) | KeyTarget::GKey(_) | KeyTarget::ModeKey(_) => {
+            (tr!("common.off"), action_icon_path(&Action::None))
+        }
+        KeyTarget::Control(_) | KeyTarget::FunctionKey(_) => {
+            (tr!("keyboard.native_function"), NATIVE_FUNCTION_ICON)
+        }
+    }
+}
+
+/// The panel row that removes a key's assignment: back to its native
+/// function, or — for a G-key or M key OpenLogi runs, which has none left —
+/// off.
+fn resting_row(target: &KeyTarget) -> (SharedString, &'static str) {
+    match target {
+        KeyTarget::GKey(_) | KeyTarget::ModeKey(_) => unbound_binding(target),
+        KeyTarget::Control(_) | KeyTarget::Grid(_) | KeyTarget::FunctionKey(_) => {
+            (tr!("keyboard.native_function"), NATIVE_FUNCTION_ICON)
+        }
     }
 }
 
@@ -977,16 +1523,14 @@ impl FunctionRowView {
         }
 
         let state = AppState::try_read(cx);
+        if let Some(panel) =
+            state.and_then(|state| profile_key_panel(state, &target, &key_name, &pal))
+        {
+            return panel;
+        }
         let current = state.and_then(|state| selected_key_action(state, &target));
         let uses_default = current.is_none();
-        // A control or keypad key binds inside the open app profile, like a
-        // mouse button.
-        let app = match target {
-            KeyTarget::Control(_) | KeyTarget::Grid(_) => {
-                state.and_then(|state| state.editing_app().map(|app| profile_name(state, app)))
-            }
-            KeyTarget::FunctionKey(_) => None,
-        };
+        let app = state.and_then(|state| binding_app(state, &target));
 
         let view_for_pick = view.clone();
         let target_for_pick = target.clone();
@@ -1008,6 +1552,7 @@ impl FunctionRowView {
         // clears the assignment, inheriting the device default in an app profile.
         let view_for_native = view.clone();
         let target_for_native = target.clone();
+        let (resting, resting_icon) = resting_row(&target);
         rows.push(
             v_flex().child(
                 MenuRow::new("panel-native")
@@ -1020,7 +1565,7 @@ impl FunctionRowView {
                             .gap_2()
                             .child(
                                 svg()
-                                    .path("action-icons/keyboard.svg")
+                                    .path(resting_icon)
                                     .size_4()
                                     .flex_none()
                                     .text_color(pal.text_muted),
@@ -1028,7 +1573,7 @@ impl FunctionRowView {
                             .child(div().child(if app.is_some() {
                                 tr!("profiles.use_the_default_profile")
                             } else {
-                                tr!("keyboard.native_function")
+                                resting
                             })),
                     )
                     .when(uses_default, |row| {
@@ -1038,9 +1583,11 @@ impl FunctionRowView {
                                 .flex_none()
                                 .size_3()
                                 .child(
-                                    gpui_component::Icon::new(gpui_component::IconName::Check)
-                                        .size_3()
-                                        .text_color(rgb(ACCENT_BLUE)),
+                                    gpui_kit::component::Icon::new(
+                                        gpui_kit::component::IconName::Check,
+                                    )
+                                    .size_3()
+                                    .text_color(rgb(ACCENT_BLUE)),
                                 ),
                         )
                     })
@@ -1055,12 +1602,61 @@ impl FunctionRowView {
         rows.extend(panel_action_rows(current.as_ref(), &on_pick, view, &pal));
 
         compact_panel(pal)
-            .w(px(PANEL_W))
-            .max_h(px(500.))
+            .max_h_full()
             .child(title_header(&key_name, app.as_deref(), &pal))
             .child(divider(pal))
             .child(editor_scroll_list("key-panel-scroll", rows))
     }
+}
+
+/// The app profile `target` binds in: the open one for a per-device key,
+/// which binds inside it like a mouse button; none for an F-row trigger,
+/// which binds across apps.
+fn binding_app(state: &AppState, target: &KeyTarget) -> Option<String> {
+    match target.stored_as() {
+        StoredAs::Device(_) => state.editing_app().map(|app| profile_name(state, app)),
+        StoredAs::Global(_) => None,
+    }
+}
+
+/// The panel of M1–M3 in profile mode, or `None` for any other key: they
+/// bind nothing, they switch which profile G1–G5 run, selecting one edits
+/// that profile's G-keys, and the panel names the profile.
+fn profile_key_panel(
+    state: &AppState,
+    target: &KeyTarget,
+    key_name: &SharedString,
+    pal: &Palette,
+) -> Option<gpui::Div> {
+    let profile = profile_key(target, state.current_gaming_keys()?.mode)?;
+    let name = state.current_g_key_profile_name(profile).map(str::to_owned);
+    // A named profile reads as its key and its name: "M2 · Work".
+    let title = name.as_ref().map_or_else(
+        || key_name.clone(),
+        |name| format!("{key_name} · {name}").into(),
+    );
+    let rename = control_button("g-key-profile-rename")
+        .outline()
+        .label(tr!("keyboard.set_profile_name", profile => profile.label()))
+        .on_click(move |_, window, cx| {
+            gaming::open_profile_name_dialog(window, cx, profile, name.clone().unwrap_or_default());
+        });
+    let panel =
+        compact_panel(*pal)
+            .max_h_full()
+            .child(inspector_title(title, pal))
+            .child(divider(*pal))
+            .child(
+                v_flex()
+                    .px_2()
+                    .py_2()
+                    .gap_3()
+                    .child(div().text_color(pal.text_muted).child(
+                        tr!("keyboard.g_key_profile_description", profile => profile.label()),
+                    ))
+                    .child(rename),
+            );
+    Some(panel)
 }
 
 /// The panel's title — which key is selected, e.g. "F1" or "Screen Capture
@@ -1070,6 +1666,11 @@ fn title_header(key_name: &SharedString, app: Option<&str>, pal: &Palette) -> im
         Some(app) => tr!("actions.bind_control_in_app", name => key_name.clone(), app => app),
         None => tr!("actions.bind_control", name => key_name.clone()),
     };
+    inspector_title(title, pal)
+}
+
+/// A heading in the inspector column, over the overview or a key's panel.
+fn inspector_title(title: SharedString, pal: &Palette) -> impl IntoElement {
     h_flex()
         .items_center()
         .justify_between()
@@ -1149,9 +1750,11 @@ fn panel_action_rows(
                         )
                         .when(selected, |s| {
                             s.child(
-                                gpui_component::Icon::new(gpui_component::IconName::Check)
-                                    .size_3()
-                                    .text_color(rgb(ACCENT_BLUE)),
+                                gpui_kit::component::Icon::new(
+                                    gpui_kit::component::IconName::Check,
+                                )
+                                .size_3()
+                                .text_color(rgb(ACCENT_BLUE)),
                             )
                         })
                         .on_click(move |_ev, _window, cx| {

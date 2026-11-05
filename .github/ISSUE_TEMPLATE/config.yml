@@ -1,7 +1,7 @@
 blank_issues_enabled: false
 contact_links:
   - name: 💬 Questions & Support (GitHub Discussions)
-    url: https://github.com/AprilNEA/OpenLogi/discussions
+    url: https://github.com/AprilNEA/OpenLogi/discussions/new?category=q-a
     about: Usage questions, setup help, and how-tos. Please don't open an issue for support questions.
   - name: 📣 Community Chat (Telegram)
     url: https://t.me/+u8DfyLlIqPYxZjJh

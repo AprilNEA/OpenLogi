@@ -8,7 +8,8 @@ use std::future::Future;
 use std::sync::{Arc, RwLock};
 
 use hidpp::feature::CreatableFeature as _;
-use hidpp::feature::hires_wheel::HiResWheelFeature;
+use hidpp::feature::gaming_g_keys::GamingGKeysFeature;
+use hidpp::feature::hires_wheel::{HiResWheelFeature, WheelResolution};
 use hidpp::protocol::v20::Hidpp20Error;
 use thiserror::Error;
 
@@ -272,9 +273,28 @@ impl ThumbwheelRestore {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct HiResWheelRestore {
     feature_index: u8,
+    /// The native resolution to put back, when the divert changed it.
+    resolution: Option<WheelResolution>,
 }
 
 impl HiResWheelRestore {
+    pub(crate) fn new(feature_index: u8, resolution: Option<WheelResolution>) -> Self {
+        Self {
+            feature_index,
+            resolution,
+        }
+    }
+}
+
+/// The G-key row a keyboard session took from its onboard actions over
+/// `0x8010`. Teardown hands the whole row back: the feature has no per-key
+/// state to restore.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct GKeysRestore {
+    feature_index: u8,
+}
+
+impl GKeysRestore {
     pub(crate) fn new(feature_index: u8) -> Self {
         Self { feature_index }
     }
@@ -294,7 +314,8 @@ pub(crate) enum CaptureStop {
 }
 
 /// What a capture session writes to hand its controls back: every diverted
-/// `0x1b04` control's reporting, the thumb wheel's, and the main wheel's.
+/// `0x1b04` control's reporting, the thumb wheel's, the main wheel's, host
+/// mode, and a keyboard's G-key row.
 ///
 /// One untimed attempt per control; a failed one leaves the whole plan owed.
 pub struct CaptureRestorePlan {
@@ -302,6 +323,7 @@ pub struct CaptureRestorePlan {
     thumb: Option<ThumbwheelRestore>,
     main_wheel: Option<HiResWheelRestore>,
     spy: Option<SpyRestore>,
+    g_keys: Option<GKeysRestore>,
 }
 
 impl fmt::Debug for CaptureRestorePlan {
@@ -317,6 +339,7 @@ impl fmt::Debug for CaptureRestorePlan {
             .field("has_thumbwheel", &self.thumb.is_some())
             .field("has_main_wheel", &self.main_wheel.is_some())
             .field("host_mode", &self.spy.is_some())
+            .field("g_key_row", &self.g_keys.is_some())
             .finish()
     }
 }
@@ -337,7 +360,10 @@ impl RestorePlan for CaptureRestorePlan {
         if let Some(wheel) = self.main_wheel {
             let feature =
                 HiResWheelFeature::new(channel.clone(), device_index, wheel.feature_index);
-            restored &= restore_result(main_wheel::undivert(&feature).await, "main wheel");
+            restored &= restore_result(
+                main_wheel::undivert(&feature, wheel.resolution).await,
+                "main wheel",
+            );
         }
         if let Some(thumb) = self.thumb {
             let thumbwheel = Thumbwheel::new(channel.clone(), device_index, thumb.feature_index);
@@ -345,6 +371,10 @@ impl RestorePlan for CaptureRestorePlan {
         }
         if let Some(spy) = &self.spy {
             restored &= spy.restore_on(&channel, device_index).await;
+        }
+        if let Some(g_keys) = self.g_keys {
+            let feature = GamingGKeysFeature::new(channel, device_index, g_keys.feature_index);
+            restored &= restore_result(feature.release_row().await, "G-key row");
         }
         restored
     }
@@ -372,20 +402,27 @@ impl PendingCaptureRestore {
                 thumb: None,
                 main_wheel: None,
                 spy: None,
+                g_keys: None,
             },
         )
     }
 
-    /// The restore owed for `reprog`, the two wheels and host mode, or `None`
-    /// when the session diverted nothing.
+    /// The restore owed for `reprog`, the two wheels, host mode and the
+    /// G-key row, or `None` when the session diverted nothing.
     pub(crate) fn new(
         retired: &SharedChannel,
         reprog: Option<ReprogRestore>,
         thumb: Option<ThumbwheelRestore>,
         main_wheel: Option<HiResWheelRestore>,
         spy: Option<SpyRestore>,
+        g_keys: Option<GKeysRestore>,
     ) -> Option<Self> {
-        if reprog.is_none() && thumb.is_none() && main_wheel.is_none() && spy.is_none() {
+        if reprog.is_none()
+            && thumb.is_none()
+            && main_wheel.is_none()
+            && spy.is_none()
+            && g_keys.is_none()
+        {
             return None;
         }
         Some(Self::owing(
@@ -395,6 +432,7 @@ impl PendingCaptureRestore {
                 thumb,
                 main_wheel,
                 spy,
+                g_keys,
             },
         ))
     }

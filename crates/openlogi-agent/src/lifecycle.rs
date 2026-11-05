@@ -27,6 +27,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt as _;
+use openlogi_agent_core::action_ring::ActionRingRelease;
 use openlogi_agent_core::backlight_overlay::BacklightOverlayManager;
 use openlogi_agent_core::event_monitor::EventMonitor;
 use openlogi_agent_core::observable::ObservableState;
@@ -313,6 +314,7 @@ impl Armed {
 
         // HID++ watchers need no Accessibility — start them up front.
         running.restart_hidpp_watchers();
+        running.shared.flow.arm();
         let (mut watchers, inventory_refresh) = startup::spawn_state_watchers(&running.shared);
         let mut ring = running.inputs.ring.subscribe();
 
@@ -341,6 +343,7 @@ impl Armed {
                     ActionRequest::ShowActionsRing { device_key } => {
                         running.begin_action_ring(device_key.as_deref()).await;
                     }
+                    ActionRequest::ActionsRingTriggerReleased => running.release_action_ring(),
                     ActionRequest::TurnKeypadPage { device_key, turn } => {
                         running
                             .orchestrator
@@ -603,6 +606,26 @@ impl Running {
         }
     }
 
+    /// The trigger that opened the ring was let go: a held release chooses
+    /// the highlighted slot, or closes the ring over none.
+    fn release_action_ring(&self) {
+        match self.inputs.ring.release() {
+            ActionRingRelease::Kept => {}
+            ActionRingRelease::Cancelled { session_id } => {
+                self.ring_haptics.end_session(session_id);
+            }
+            ActionRingRelease::Activated {
+                session_id,
+                activation,
+            } => server::run_ring_activation(
+                &self.inputs.dispatcher,
+                &self.ring_haptics,
+                session_id,
+                activation,
+            ),
+        }
+    }
+
     /// Fold one Accessibility-grant change into the hook, then publish the
     /// permission and the hook state it produced as one generation — no
     /// observation can claim the hook is installed without the permission it
@@ -659,6 +682,7 @@ impl Running {
             self.inputs.dispatcher.clone(),
             self.inputs.scroll_input.clone(),
             Arc::clone(&self.event_monitor),
+            self.shared.flow.input(),
         )
     }
 
@@ -772,6 +796,8 @@ impl Running {
         reason: &str,
         tray_guard: Option<tokio::sync::oneshot::Sender<()>>,
     ) -> ! {
+        // Flow holds receiver leases and device I/O, so it stops first.
+        self.shared.flow.shutdown().await;
         self.ring_haptics.finish().await;
         std::mem::replace(&mut self.hidpp_watchers, WatcherFleet::Inactive)
             .stop_for_exit()

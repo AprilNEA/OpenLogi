@@ -22,11 +22,13 @@ use openlogi_core::hid::smartshift::{
 use openlogi_device::ChannelPool;
 use openlogi_device::backend::{HidBackend, HotplugStream};
 use openlogi_device::backlight::{BacklightChange, BacklightState};
+use openlogi_device::inventory::hid_only::HidOnlyProduct;
 use openlogi_device::inventory::{Enumerator, InventoryError};
 use openlogi_device::pairing::PairingReceiver;
 use openlogi_device::write::{
     self as device, Dpi, DpiInfo, FeatureEntry, FirmwareEntity, HapticWaveform, LightingMethod,
     LitraModel, PointerScaling, ReprogControlEntry, ScrollResolution, ScrollWheelMode,
+    SidetoneLevel,
 };
 use openlogi_device::{ButtonSpyError, ButtonSpyWatch, LightWatch};
 use openlogi_device::{DeviceIoGate, DeviceIoSignal, DeviceRoute};
@@ -67,6 +69,20 @@ pub async fn get_dpi_info(route: &DeviceRoute) -> Result<DpiInfo, WriteError> {
 /// Write a new sensor DPI to the device `route` reaches.
 pub async fn set_dpi(route: &DeviceRoute, dpi: Dpi) -> Result<(), WriteError> {
     device::set_dpi(&*native_backend(), route, dpi).await
+}
+
+/// Read the sidetone level of the headset `route` reaches.
+pub async fn get_sidetone(route: &DeviceRoute) -> Result<SidetoneLevel, WriteError> {
+    device::get_sidetone(&*native_backend(), route).await
+}
+
+/// Write a sidetone level to the headset `route` reaches and return the
+/// level it confirms.
+pub async fn set_sidetone(
+    route: &DeviceRoute,
+    level: SidetoneLevel,
+) -> Result<SidetoneLevel, WriteError> {
+    device::set_sidetone(&*native_backend(), route, level).await
 }
 
 /// Read the pointer-motion scaling of the device `route` reaches.
@@ -217,6 +233,16 @@ pub async fn set_keyboard_color_with(
     .await
 }
 
+/// Light each `0x8081` zone of the keyboard `route` reaches alone, so a person
+/// can name the key each zone id drives. See [`device::walk_per_key_zones`].
+pub async fn walk_per_key_zones(
+    route: &DeviceRoute,
+    lit: openlogi_core::color::Rgb,
+    observe: impl AsyncFnMut(device::LitZone) -> device::ZoneWalkStep,
+) -> Result<(), WriteError> {
+    device::walk_per_key_zones(&*native_backend(), route, lit, observe).await
+}
+
 /// Play a haptic waveform on the device `route` reaches.
 pub async fn play_haptic(route: &DeviceRoute, waveform: HapticWaveform) -> Result<(), WriteError> {
     device::play_haptic(&*native_backend(), route, waveform).await
@@ -306,6 +332,11 @@ pub fn channel_pool() -> ChannelPool {
 /// Enumerate this host's recognized standalone devices.
 pub async fn enumerate_standalone() -> Result<Vec<StandaloneDevice>, InventoryError> {
     openlogi_device::inventory::standalone::enumerate_standalone(&*native_backend()).await
+}
+
+/// List the Logitech products this host shows while it offers no HID++ node.
+pub async fn enumerate_hid_only() -> Result<Vec<HidOnlyProduct>, InventoryError> {
+    openlogi_device::inventory::hid_only::enumerate_hid_only(&*native_backend()).await
 }
 
 /// Subscribe to this host's HID hotplug events.

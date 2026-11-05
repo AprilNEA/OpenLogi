@@ -11,10 +11,10 @@ use gpui::{
     SharedString, StatefulInteractiveElement as _, Styled, Window, div, hsla,
     prelude::FluentBuilder as _, px, rgb, svg,
 };
-use gpui_component::button::{Button, ButtonGroup, ButtonVariant, ButtonVariants as _};
-use gpui_component::dialog::DialogButtonProps;
-use gpui_component::tooltip::Tooltip;
-use gpui_component::{
+use gpui_kit::component::button::{Button, ButtonGroup, ButtonVariant, ButtonVariants as _};
+use gpui_kit::component::dialog::DialogButtonProps;
+use gpui_kit::component::tooltip::Tooltip;
+use gpui_kit::component::{
     Disableable as _, Icon, IconName, Selectable as _, Sizable as _, WindowExt as _, h_flex, v_flex,
 };
 use openlogi_core::binding::{Cid, GridKey, KeypadPage};
@@ -326,7 +326,7 @@ impl RenderOnce for PhotoKey {
         let outer = PHOTO_RING_GAP + PHOTO_RING_W;
         let left = self.slot.x_frac * self.render.0 - shape.w / 2. - outer;
         let top = self.slot.y_frac * self.render.1 - shape.h / 2. - outer;
-        let tooltip: SharedString = format!("{} · {}", self.slot.label, self.slot.binding).into();
+        let tooltip = self.slot.summary();
         let ring = match state {
             KeyState::Selected => rgb(ACCENT_BLUE).into(),
             KeyState::Hovered => hsla(0., 0., 1., 0.55),
@@ -458,7 +458,7 @@ impl RenderOnce for KeyCap {
         let tooltip = self.slot.label.clone();
         let legend = self.slot.label;
         let binding = self.slot.binding;
-        let binding_icon = self.slot.binding_icon;
+        let binding_icon = self.slot.bound.then_some(self.slot.binding_icon);
         let left = self.slot.x_frac * w - cap_w / 2.;
         let top = self.slot.y_frac * h - cap_h / 2.;
         let view_hover = self.view.clone();
@@ -539,7 +539,11 @@ impl RenderOnce for KeyCap {
 fn keycap_height(target: &KeyTarget) -> f32 {
     match target {
         KeyTarget::Control(button) if button.cid().is_some_and(is_paging_cid) => KEYCAP_PAGING_H,
-        KeyTarget::Control(_) | KeyTarget::Grid(_) | KeyTarget::FunctionKey(_) => KEYCAP_H,
+        KeyTarget::Control(_)
+        | KeyTarget::Grid(_)
+        | KeyTarget::FunctionKey(_)
+        | KeyTarget::GKey(_)
+        | KeyTarget::ModeKey(_) => KEYCAP_H,
     }
 }
 
@@ -548,7 +552,7 @@ fn keycap_glyph(target: &KeyTarget) -> Option<&'static str> {
     match target {
         KeyTarget::Grid(slot) => Some(grid_glyph(slot.key)),
         KeyTarget::Control(button) => button.cid().and_then(paging_glyph),
-        KeyTarget::FunctionKey(_) => None,
+        KeyTarget::FunctionKey(_) | KeyTarget::GKey(_) | KeyTarget::ModeKey(_) => None,
     }
 }
 

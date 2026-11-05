@@ -161,7 +161,9 @@ pub(crate) fn spawn(startup: Startup, cx: &mut gpui::App) {
                     let Some(update) = update else {
                         ipc_open = false;
                         warn!("IPC update channel closed — agent state unavailable");
-                        cx.update(|cx| set_agent_link(state::AgentLink::Unreachable, cx));
+                        cx.update(|cx| {
+                            set_agent_link(state::AgentLink::Unreachable { retrying: false }, cx);
+                        });
                         continue;
                     };
                     rt.on_agent_update(update, cx);
@@ -287,10 +289,15 @@ impl Runtime {
         match update {
             ipc::GuiUpdate::Snapshot(snapshot) => {
                 self.apply_snapshot(&snapshot, cx);
-                self.snapshot = Some(snapshot);
+                self.snapshot = Some(*snapshot);
+            }
+            ipc::GuiUpdate::Reconnecting => {
+                cx.update(|cx| AppState::apply(cx, AppState::agent_link_lost));
             }
             ipc::GuiUpdate::Unreachable => {
-                cx.update(|cx| set_agent_link(state::AgentLink::Unreachable, cx));
+                cx.update(|cx| {
+                    set_agent_link(state::AgentLink::Unreachable { retrying: false }, cx);
+                });
             }
             ipc::GuiUpdate::OutdatedGui => {
                 cx.update(|cx| set_agent_link(state::AgentLink::OutdatedGui, cx));
@@ -318,6 +325,9 @@ impl Runtime {
             ipc::GuiUpdate::PairingCancelled => {
                 cx.update(windows::add_device::apply_cancelled);
             }
+            ipc::GuiUpdate::FlowPairingRefused(refusal) => cx.update(|cx| {
+                AppState::apply(cx, |state| state.apply_flow_pairing_refusal(refusal));
+            }),
             ipc::GuiUpdate::ConfigLoadResult { result } => {
                 cx.update(|cx| apply_config_load(result, cx));
             }
@@ -351,6 +361,11 @@ impl Runtime {
             ipc::GuiUpdate::PointerSpeedWritten { key, result } => {
                 cx.update(|cx| {
                     AppState::apply(cx, |state| state.apply_pointer_speed_written(&key, result));
+                });
+            }
+            ipc::GuiUpdate::SidetoneWritten { key, result } => {
+                cx.update(|cx| {
+                    AppState::apply(cx, |state| state.apply_sidetone_written(&key, result));
                 });
             }
             ipc::GuiUpdate::ForceSensingWritten {

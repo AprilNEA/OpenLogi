@@ -10,6 +10,7 @@ pub(crate) mod components;
 #[cfg(debug_assertions)]
 pub(crate) mod gallery;
 pub mod section;
+pub(crate) mod slider_row;
 pub mod spacing;
 pub mod status;
 pub mod theme;

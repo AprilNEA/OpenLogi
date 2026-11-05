@@ -7,14 +7,15 @@
 use std::collections::BTreeMap;
 
 use crate::binding::{
-    Action, Binding, ButtonId, Cid, GestureDirection, KeypadPage, default_binding,
-    default_binding_for,
+    Action, Binding, ButtonId, Cid, GKeyProfile, GKeySlot, GamingLayout, GestureDirection,
+    KeypadPage, default_binding_for, default_binding_on,
 };
-use crate::config::Config;
+use crate::config::{Config, GamingKeyMode};
 
 /// Effective per-button single-action map for the device `config_key`, with
 /// `app_bundle`'s per-app overlay applied. Unset buttons fall back to
-/// [`default_binding`].
+/// [`default_binding_on`] with the device's `layout`, which is `None` for a
+/// device without a dumped G-series layout.
 ///
 /// This projection is for one-shot consumers such as thumb-wheel rotation and
 /// the GUI. Lifecycle-aware button paths use [`button_bindings_for`] so a long
@@ -26,8 +27,9 @@ pub fn bindings_for(
     config: &Config,
     config_key: Option<&str>,
     app_bundle: Option<&str>,
+    layout: Option<&GamingLayout>,
 ) -> BTreeMap<ButtonId, Action> {
-    button_bindings_for(config, config_key, app_bundle)
+    button_bindings_for(config, config_key, app_bundle, layout)
         .into_iter()
         .map(|(button, binding)| (button, binding.click_action()))
         .collect()
@@ -37,12 +39,15 @@ pub fn bindings_for(
 ///
 /// Unlike [`bindings_for`], this preserves threshold-based long presses. A
 /// sparse gesture map receives only its missing `Click` default so it keeps its
-/// gesture identity while retaining the same plain-click fallback.
+/// gesture identity while retaining the same plain-click fallback. Unset
+/// buttons fall back to [`default_binding_on`] with `layout`, as in
+/// [`bindings_for`].
 #[must_use]
 pub fn button_bindings_for(
     config: &Config,
     config_key: Option<&str>,
     app_bundle: Option<&str>,
+    layout: Option<&GamingLayout>,
 ) -> BTreeMap<ButtonId, Binding> {
     let stored = config_key
         .map(|key| config.effective_bindings(key, app_bundle))
@@ -51,7 +56,7 @@ pub fn button_bindings_for(
         .iter()
         .chain(&ButtonId::G_BUTTONS)
         .copied()
-        .map(|button| (button, Binding::Single(default_binding(button))))
+        .map(|button| (button, Binding::Single(default_binding_on(layout, button))))
         .collect();
     if config_key.is_some_and(|key| config.keypad_pages(key) > KeypadPage::FIRST) {
         bindings.extend(keypad_paging_defaults());
@@ -59,7 +64,7 @@ pub fn button_bindings_for(
     for (button, mut binding) in stored {
         if let Binding::Gesture(map) = &mut binding {
             map.entry(GestureDirection::Click)
-                .or_insert_with(|| default_binding(button));
+                .or_insert_with(|| default_binding_on(layout, button));
         }
         bindings.insert(button, binding);
     }
@@ -104,6 +109,37 @@ pub fn bindings_on_page(
             Some(_) => None,
         })
         .collect()
+}
+
+/// What a press on a G-series keyboard's gaming cluster does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GamingPress {
+    /// Make `profile` the one G1–G5 run from now on; nothing dispatches.
+    SelectProfile(GKeyProfile),
+    /// Dispatch the binding stored under this button.
+    Dispatch(ButtonId),
+}
+
+/// What a press of `button` does in `mode` while `active` is the profile
+/// M1–M3 last selected. A capture session reports every G-key as its M1 slot
+/// ([`ButtonId::g_key`]); in [`GamingKeyMode::Profiles`] it runs the active
+/// profile's slot and M1–M3 select the profile, while in
+/// [`GamingKeyMode::NineButtons`] G1–G5 run their M1 slot and every key
+/// above them runs its own binding. Any other button dispatches as itself.
+#[must_use]
+pub fn gaming_press(button: ButtonId, mode: GamingKeyMode, active: GKeyProfile) -> GamingPress {
+    match (mode, button) {
+        (GamingKeyMode::Profiles, ButtonId::GKey(slot)) => {
+            GamingPress::Dispatch(ButtonId::GKey(GKeySlot {
+                profile: active,
+                ..slot
+            }))
+        }
+        (GamingKeyMode::Profiles, ButtonId::ModeKey(key)) => key
+            .profile()
+            .map_or(GamingPress::Dispatch(button), GamingPress::SelectProfile),
+        _ => GamingPress::Dispatch(button),
+    }
 }
 
 /// Per-direction maps for every HID++ gesture source (DPI/ModeShift, the
@@ -192,6 +228,24 @@ mod tests {
     use crate::binding::{LongPressBinding, default_gesture_binding};
 
     use super::*;
+    use crate::binding::default_binding;
+
+    #[test]
+    fn an_unset_g_button_projects_its_layouts_stock_function() {
+        use crate::binding::G502_LIGHTSPEED;
+        let mut cfg = Config::default();
+        cfg.set_binding("0407f", ButtonId::G7, Binding::Single(Action::None));
+        let g502 = bindings_for(&cfg, Some("0407f"), None, Some(&G502_LIGHTSPEED));
+        assert_eq!(g502.get(&ButtonId::G6), Some(&Action::DpiShift));
+        assert_eq!(
+            g502.get(&ButtonId::G7),
+            Some(&Action::None),
+            "a stored binding wins over the stock function"
+        );
+        assert_eq!(g502.get(&ButtonId::G8), Some(&Action::NextDpiPreset));
+        let unknown = bindings_for(&cfg, Some("0407f"), None, None);
+        assert_eq!(unknown.get(&ButtonId::G6), Some(&Action::None));
+    }
 
     #[test]
     fn click_less_gesture_keeps_default_click_in_projection() {
@@ -203,7 +257,7 @@ mod tests {
         map.insert(GestureDirection::Up, Action::Copy);
         cfg.set_binding("2b042", ButtonId::GestureButton, Binding::Gesture(map));
 
-        let projected = bindings_for(&cfg, Some("2b042"), None);
+        let projected = bindings_for(&cfg, Some("2b042"), None, None);
         assert_eq!(
             projected.get(&ButtonId::GestureButton),
             Some(&default_binding(ButtonId::GestureButton)),
@@ -217,9 +271,9 @@ mod tests {
         let binding = Binding::LongPress(LongPressBinding::new(Action::Copy, Action::Paste));
         cfg.set_binding("2b042", ButtonId::Back, binding.clone());
 
-        let lifecycle = button_bindings_for(&cfg, Some("2b042"), None);
+        let lifecycle = button_bindings_for(&cfg, Some("2b042"), None, None);
         assert_eq!(lifecycle.get(&ButtonId::Back), Some(&binding));
-        let actions = bindings_for(&cfg, Some("2b042"), None);
+        let actions = bindings_for(&cfg, Some("2b042"), None, None);
         assert_eq!(actions.get(&ButtonId::Back), Some(&Action::Copy));
     }
 
@@ -236,7 +290,7 @@ mod tests {
             Action::VolumeUp.into(),
         );
 
-        let projected = bindings_for(&cfg, Some("2b034"), None);
+        let projected = bindings_for(&cfg, Some("2b034"), None, None);
         assert_eq!(projected.get(&ButtonId::Thumbwheel), Some(&Action::None));
     }
 
@@ -245,7 +299,7 @@ mod tests {
         let mut cfg = Config::default();
         cfg.set_binding("2b034", ButtonId::Thumbwheel, Action::AppExpose.into());
 
-        let projected = bindings_for(&cfg, Some("2b034"), None);
+        let projected = bindings_for(&cfg, Some("2b034"), None, None);
         assert_eq!(
             projected.get(&ButtonId::Thumbwheel),
             Some(&Action::AppExpose)
@@ -260,7 +314,7 @@ mod tests {
         map.insert(GestureDirection::Click, Action::Paste);
         cfg.set_binding("2b042", ButtonId::GestureButton, Binding::Gesture(map));
 
-        let projected = bindings_for(&cfg, Some("2b042"), None);
+        let projected = bindings_for(&cfg, Some("2b042"), None, None);
         assert_eq!(
             projected.get(&ButtonId::GestureButton),
             Some(&Action::Paste)
@@ -419,7 +473,8 @@ mod tests {
                     expected
                 );
                 assert_eq!(
-                    bindings_for(&cfg, Some("2b042"), Some("com.example.Editor")).get(&button),
+                    bindings_for(&cfg, Some("2b042"), Some("com.example.Editor"), None)
+                        .get(&button),
                     Some(&action)
                 );
                 assert_eq!(hidpp_gesture_maps_for(&cfg, Some("2b042"), None), global);
@@ -473,18 +528,18 @@ mod tests {
         let left = ButtonId::Control(Cid::LEFT_PAGING);
         let right = ButtonId::Control(Cid::RIGHT_PAGING);
         let mut cfg = Config::default();
-        let single = button_bindings_for(&cfg, Some("keypad"), None);
+        let single = button_bindings_for(&cfg, Some("keypad"), None, None);
         assert!(!single.contains_key(&left) && !single.contains_key(&right));
 
         cfg.set_keypad_pages("keypad", KeypadPage::new(2).unwrap());
-        let paged = button_bindings_for(&cfg, Some("keypad"), None);
+        let paged = button_bindings_for(&cfg, Some("keypad"), None, None);
         assert_eq!(paged[&left], Binding::Single(Action::PreviousKeypadPage));
         assert_eq!(paged[&right], Binding::Single(Action::NextKeypadPage));
         // Another device is untouched by this one's pages.
-        assert!(!button_bindings_for(&cfg, Some("other"), None).contains_key(&left));
+        assert!(!button_bindings_for(&cfg, Some("other"), None, None).contains_key(&left));
 
         cfg.set_binding("keypad", right, Binding::Single(Action::Copy));
-        let rebound = button_bindings_for(&cfg, Some("keypad"), None);
+        let rebound = button_bindings_for(&cfg, Some("keypad"), None, None);
         assert_eq!(rebound[&right], Binding::Single(Action::Copy));
         assert_eq!(rebound[&left], Binding::Single(Action::PreviousKeypadPage));
     }
@@ -580,5 +635,44 @@ mod tests {
         assert!(cfg.keypad_page_binds("keypad", page(2)));
         assert!(cfg.keypad_page_binds("keypad", page(3)));
         assert!(!cfg.keypad_page_binds("keypad", page(1)));
+    }
+
+    #[test]
+    fn gaming_presses_follow_the_cluster_mode() {
+        use crate::binding::{GKey, ModeKey};
+        let g2 = ButtonId::g_key(GKey::G2);
+        let m3 = ButtonId::ModeKey(ModeKey::M3);
+        let mr = ButtonId::ModeKey(ModeKey::MacroRecord);
+        let on = |profile| {
+            GamingPress::Dispatch(ButtonId::GKey(GKeySlot {
+                profile,
+                key: GKey::G2,
+            }))
+        };
+        assert_eq!(
+            gaming_press(g2, GamingKeyMode::Profiles, GKeyProfile::M3),
+            on(GKeyProfile::M3)
+        );
+        assert_eq!(
+            gaming_press(m3, GamingKeyMode::Profiles, GKeyProfile::M1),
+            GamingPress::SelectProfile(GKeyProfile::M3)
+        );
+        assert_eq!(
+            gaming_press(mr, GamingKeyMode::Profiles, GKeyProfile::M1),
+            GamingPress::Dispatch(mr)
+        );
+        // Nine keys: the M1 slot whatever profile was active, and M3 is a key.
+        assert_eq!(
+            gaming_press(g2, GamingKeyMode::NineButtons, GKeyProfile::M2),
+            on(GKeyProfile::M1)
+        );
+        assert_eq!(
+            gaming_press(m3, GamingKeyMode::NineButtons, GKeyProfile::M1),
+            GamingPress::Dispatch(m3)
+        );
+        assert_eq!(
+            gaming_press(ButtonId::Back, GamingKeyMode::Profiles, GKeyProfile::M2),
+            GamingPress::Dispatch(ButtonId::Back)
+        );
     }
 }

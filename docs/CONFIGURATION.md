@@ -41,10 +41,12 @@ profiles so they keep their native direction. v9 adds the `[apps]` alias table;
 v8 files load unchanged.
 v10 adds the per-device `disabled_keys` policy. Older readers reject a v10
 header before parsing its fields. A v9 file without the policy still loads.
+v11 adds the `[flow]` section. Older readers reject a v11 header before
+parsing its fields. A v10 file without the section loads with Flow disabled.
 
 ## Shape
 
-`schema_version` is required and currently `10`. `selected_device` is an
+`schema_version` is required and currently `11`. `selected_device` is an
 optional physical device key.
 
 `[app_settings]` contains application-wide preferences:
@@ -61,6 +63,29 @@ optional physical device key.
 - `vertical_scroll_sensitivity`, from `1` through `100` (`14` is 1×);
   continuous trackpad input remains native
 - `thumbwheel_sensitivity`, from `1` through `100` (`14` is 1×)
+- `[app_settings.momentum_scrolling]` (off by default) is momentum scrolling
+  for every mouse whose `smooth_wheel` is on; a device's own
+  `momentum_scrolling` table overrides it. When SmartShift lets the wheel
+  spin freely, the page glides off at the speed it was spun, slows along the
+  chosen shape, and stops the moment a finger stops the wheel. Ratchet scrolling
+  keeps its steps. A glide's speed is `(1 − t/T)^p` of its start speed over
+  `T = τ·(p + 1)`, so every shape covers start speed × τ. Each value is clamped
+  into its range when the agent reads it:
+  - `enabled` (default `false`)
+  - `pixels_per_notch`, `10` through `60` (default `28`): reference pixels per
+    wheel notch, for ratchet steps and for the speed a spin launches the glide
+    at. macOS posts pixels; Windows and Linux scale native wheel ticks against
+    the default
+  - `glide_shape`: `sharp` (`p` ½), `linear` (1), `smooth` (2, default) or
+    `floaty` (4)
+  - `max_glide_speed`, `2000` through `15000` px/s (default `8000`): the fastest
+    one spin glides
+  - `glide_ms`, `150` through `1200` (default `400`): the glide's time constant
+    τ
+  - `repeat_boost`, `100` through `200` percent (default `135`): spinning again
+    while the page still glides, or soon after it stopped, the same way,
+    multiplies the glide by this much each time, up to 3× past
+    `max_glide_speed`; `100` turns it off
 - `mouse_profile_target`: `pointer` (default, including existing configs that
   omit this preference) or `focused`. Mouse button profiles follow the window
   under the pointer; the desktop uses the global bindings. Keyboard profiles
@@ -71,10 +96,14 @@ optional physical device key.
   surface uses the focused application's profile rather than the desktop's;
   with no focused application there is no such profile and the global bindings
   apply, as in focused mode. OpenLogi never activates a background window to
-  send a shortcut: over an identified window or the desktop, mouse
-  bindings that produce keystrokes or run workflows are skipped unless the
-  hovered window is focused. Global actions such as desktop switching can run
-  without changing application focus.
+  send a shortcut. Over an identified window or the desktop, a button that the
+  focused application binds the same way produces its keystrokes or runs its
+  workflow as focused mode does, in the focused application; a global hotkey
+  therefore works anywhere. A button that the hovered target binds
+  differently, through a per-app profile on either side, produces keystrokes
+  or runs workflows only while the hovered window is focused, and is skipped
+  otherwise. Global actions such as desktop switching can run without changing
+  application focus.
 - `low_battery_notifications` (default `true`): the agent shows a notice at the
   bottom of the screen when a connected device's battery runs low. Low means
   20% or less while the device is not charging, or a low or critical level from
@@ -133,6 +162,10 @@ Common device fields are:
   Scrolling card offers it as **Smooth wheel** when the current connection has
   `0x2121`; a smooth wheel turned on over another connection can still be turned
   off there. Absent or `false` leaves the wheel native
+- `momentum_scrolling`: this mouse's own momentum scrolling, the same keys as
+  `[app_settings.momentum_scrolling]`. Absent, the mouse follows the app-wide
+  table. The desktop's Pointer tab writes it, and removes it when the mouse is
+  set back to the Settings › General value
 - `bindings`: a button maps to one action, an independent short/long action
   pair, or a gesture-direction map.
   `Thumbwheel` is the thumb wheel's capacitive tap — it has no GUI control and
@@ -256,6 +289,19 @@ Common device fields are:
   own force, and the agent never writes one. The desktop app sets it with the
   Press force slider in the Haptic Sense Panel's inspector on the mouse page,
   which saves the force the device reads back
+- `g_key_owner` for G-series keyboards with HID++ `0x8010` G-keys:
+  `"openlogi"` hands the whole G1–G5 row to OpenLogi, so every G-key runs its
+  binding and an unbound one does nothing; absent or `"keyboard"` leaves the
+  keyboard's onboard actions. While it is on, `gaming_key_mode` says what the
+  keys above the row do. `"profiles"` (the default) makes M1–M3 switch G1–G5
+  between three sets of bindings, starting on M1 whenever capture starts, and
+  leaves MR recording macros on the keyboard. `"nine_buttons"` makes G1–G5,
+  M1–M3 and MR nine keys with a binding each, where G1–G5 use their M1
+  bindings. G-key bindings live in the device's `bindings` as `KeyG1` …
+  `KeyG5` for M1 and `M2:KeyG1` … `M3:KeyG5` for the later profiles; M1–M3
+  and MR are `KeyM1` … `KeyM3` and `KeyMR`. Changing the mode keeps them all.
+  `g_key_profile_names` optionally names the profiles (`M2 = "Work"`); the
+  names only label them in the desktop app
 - `identity` and `disabled_gestures`, which are application-managed metadata
 
 `[keyboard.bindings]` contains global key triggers such as `f1` or
@@ -395,6 +441,51 @@ The desktop app shows an alias profile under the alias's name and the icon of
 its first identifier on this platform. It does not offer an application in
 Recent applications or All applications when that application already runs
 under a profile. The desktop app does not create aliases; write them here.
+
+### Flow
+
+`[flow]` holds the cross-machine device handoff settings. Without it, Flow is
+disabled. Pairing writes each peer with its pinned public key; write the layout
+and devices here. Its fields are:
+
+- `enabled` and `require_modifier` (both default `false`). With
+  `require_modifier` on, the cursor crosses a configured screen edge only while
+  Control is held.
+- `[[flow.peers]]`: one trusted machine each, with a `name`, its
+  `public_key` (`ed25519:` and 64 lower-case hex digits), and optional
+  `addresses`. Each address is an IP, a hostname, or `host:port`, tried
+  alongside mDNS results; a bare value uses Flow's default port.
+- `[[flow.layout]]`: the `edge` of this machine's screen (`left`, `right`,
+  `top`, or `bottom`) that leads to `peer`.
+- `[[flow.devices]]`: a device Flow may move. `key` is its identity key,
+  `serial:` or `unit:`; a route key such as
+  `receiver:<receiver-id>:slot:<number>` is rejected. `peer_channels` maps
+  `self` and each peer name to the 0-based Easy-Switch slot, `0` to `2`, that
+  the device uses for that machine.
+
+```toml
+[flow]
+enabled = true
+
+[[flow.peers]]
+name = "work-laptop"
+public_key = "ed25519:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+addresses = ["work-laptop.tailnet.example", "10.0.0.7"]
+
+[[flow.layout]]
+edge = "right"
+peer = "work-laptop"
+
+[[flow.devices]]
+key = "unit:0f1e2d3c"
+peer_channels = { self = 0, "work-laptop" = 1 }
+```
+
+The config stops loading when a peer name is empty, `self`, or has surrounding
+whitespace or control characters, two peers share a name or public key, two
+layout entries use the same edge, a layout entry or `peer_channels` names a
+peer that `[[flow.peers]]` does not define, two device entries share a key, a
+device has no `self` slot, or two machines share one slot.
 
 ## Actions
 

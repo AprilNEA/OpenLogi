@@ -10,7 +10,9 @@ use openlogi_core::hid::{
 };
 use openlogi_ipc::client::{ConnectError, ProtocolSkew};
 use openlogi_ipc::testing::in_memory_agent;
-use openlogi_ipc::{AgentRequest, AgentResponse, AgentStatus, ForegroundApps, InventoryHealth};
+use openlogi_ipc::{
+    AgentRequest, AgentResponse, AgentStatus, FlowStatus, ForegroundApps, InventoryHealth,
+};
 
 use super::*;
 
@@ -51,6 +53,7 @@ fn snapshot() -> AgentSnapshot {
                 model_info: None,
                 capabilities: None,
                 settings_revision: 0,
+                hidpp10: false,
             }],
         }],
         standalone: Vec::new(),
@@ -61,6 +64,7 @@ fn snapshot() -> AgentSnapshot {
             recent: Vec::new(),
         },
         lights: Vec::new(),
+        flow: FlowStatus::default(),
     }
 }
 

@@ -5,7 +5,7 @@ use gpui::{
     App, InteractiveElement as _, IntoElement, ParentElement, Styled, div,
     prelude::FluentBuilder as _,
 };
-use gpui_component::{
+use gpui_kit::component::{
     Selectable as _, Sizable as _,
     table::{Table, TableBody, TableCell, TableRow},
     v_flex,
@@ -158,13 +158,14 @@ mod tests {
                     ..Capabilities::presumed_from_kind(kind)
                 }),
                 settings_revision: 0,
+                hidpp10: false,
             }],
         }
     }
 
     fn install_state(cx: &mut TestAppContext, with_target: bool) {
         cx.update(|cx| {
-            gpui_component::init(cx);
+            gpui_kit::init(cx);
             crate::ui::theme::register_builtin_themes(cx);
             let keyboard = inventory("MX Keys", DeviceKind::Keyboard, [1, 2, 3, 4]);
             let mouse = inventory("MX Master", DeviceKind::Mouse, [5, 6, 7, 8]);

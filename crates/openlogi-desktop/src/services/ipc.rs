@@ -21,11 +21,13 @@
 //! agent that was never reachable but gives a lost connection
 //! [`reflex::SPAWN_AFTER_LOSS`] first (the deliberate quits and the supervised
 //! restarts announce themselves within that window) and never fires at a live
-//! agent newer than this GUI. An outage longer than `link::UNREACHABLE_AFTER`
-//! is pushed to the GUI as [`GuiUpdate::Unreachable`] so the window can say so
-//! instead of waiting forever. A dead agent is noticed the moment the socket
-//! closes; a *hung* one is noticed when its hold window passes without an
-//! answer.
+//! agent newer than this GUI. A lost connection is pushed to the GUI at once
+//! as [`GuiUpdate::Reconnecting`], and an outage longer than
+//! `link::UNREACHABLE_AFTER` as [`GuiUpdate::Unreachable`], so the window can
+//! say so instead of waiting forever; from there [`RetryConnection`] relaunches
+//! without waiting out the reflex. A dead agent is noticed the moment the
+//! socket closes; a *hung* one is noticed when its hold window passes without
+//! an answer.
 //!
 //! Device commands are transient: one that finds no connection is answered as
 //! unavailable by the request itself ([`request::Request::deliver`]) and the
@@ -42,7 +44,7 @@ use std::time::{Duration, Instant};
 
 use openlogi_core::hid::{
     BacklightState, DeviceRoute, DisableKeysState, Dpi, EasySwitchHosts, FnLockState,
-    ForceSensingInfo, LightCommand, PointerSpeed, ReportRateInfo, WriteError,
+    ForceSensingInfo, LightCommand, PointerSpeed, ReportRateInfo, SidetoneLevel, WriteError,
 };
 use openlogi_ipc::client::{self, ConnectError};
 use openlogi_ipc::{
@@ -52,7 +54,7 @@ use tarpc::client::RpcError;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
-use crate::state::DeviceKey;
+use crate::state::{DeviceKey, FlowPairingRefusal};
 
 mod launch;
 mod link;
@@ -67,12 +69,13 @@ use request::LinkLost;
 #[cfg(all(target_os = "macos", debug_assertions))]
 pub use request::PollEventMonitor;
 pub use request::{
-    CancelPairing, Command, LoadConfig, PairDevice, ReadBacklight, ReadDisableKeys, ReadDpi,
-    ReadEasySwitchHosts, ReadFnLock, ReadForceSensing, ReadOnboard, ReadPointerSpeed,
-    ReadReportRate, ReadSmartShift, ReloadConfig, RenameEasySwitchHost, RequestAccessibilityPrompt,
-    SetBacklight, SetDisableKeys, SetDpi, SetFnLock, SetForceSensing, SetLight,
-    SetLightManualPower, SetLighting, SetPointerSpeed, SetReportRate, SetSmartShift, StartPairing,
-    UnpairDevice,
+    CancelFlowPairing, CancelPairing, Command, ConfirmFlowPairing, LoadConfig, PairDevice,
+    PairFlowPeer, ReadBacklight, ReadDisableKeys, ReadDpi, ReadEasySwitchHosts, ReadFnLock,
+    ReadForceSensing, ReadOnboard, ReadPointerSpeed, ReadReportRate, ReadSidetone, ReadSmartShift,
+    ReloadConfig, RenameEasySwitchHost, RequestAccessibilityPrompt, RetryConnection, SetBacklight,
+    SetDisableKeys, SetDpi, SetFnLock, SetForceSensing, SetLight, SetLightManualPower, SetLighting,
+    SetPointerSpeed, SetReportRate, SetSidetone, SetSmartShift, StartFlowPairing, StartPairing,
+    StopFlowPairing, UnpairDevice,
 };
 
 /// Complete identity of one Disable Keys write/reload transaction.
@@ -103,7 +106,12 @@ const RECONNECT_DELAY: Duration = Duration::from_millis(250);
 /// What the client thread tells the GPUI loop.
 pub enum GuiUpdate {
     /// The agent's state, as of a generation this client had not seen.
-    Snapshot(AgentSnapshot),
+    Snapshot(Box<AgentSnapshot>),
+    /// An established connection dropped. The agent may only be restarting —
+    /// an update's self-exec, a supervised respawn — so the window keeps its
+    /// last snapshot but stops presenting it as live. Sent once per lost
+    /// connection; a snapshot or [`Self::Unreachable`] supersedes it.
+    Reconnecting,
     /// No usable connection for `link::UNREACHABLE_AFTER`: the agent is
     /// genuinely unreachable (not just starting up). Never sent while a newer
     /// agent is the reason; a snapshot or [`Self::OutdatedGui`] supersedes it.
@@ -178,6 +186,14 @@ pub enum GuiUpdate {
         /// The read-back, or why the write did not land.
         result: Result<PointerSpeed, WriteError>,
     },
+    /// What a headset confirms after a sidetone write the GUI asked for: the
+    /// level it took, or the typed refusal. Answers [`SetSidetone`].
+    SidetoneWritten {
+        /// The headset that was written.
+        key: DeviceKey,
+        /// The confirmed level, or why the write did not land.
+        result: Result<SidetoneLevel, WriteError>,
+    },
     /// What a force-sensing button reports after a press-force write the GUI
     /// asked for: the force it took, or the typed refusal. Answers
     /// [`SetForceSensing`].
@@ -226,6 +242,9 @@ pub enum GuiUpdate {
     PairingUndeliverable(PairingFailure),
     /// Cancellation completed and the receiver is available for a new choice.
     PairingCancelled,
+    /// The agent did not take a Flow pairing command, or could not be
+    /// reached for it.
+    FlowPairingRefused(FlowPairingRefusal),
     /// Whether the receiver let a pairing go. Answers [`UnpairDevice`].
     DeviceUnpaired {
         /// The pairing the receiver was asked to drop.
@@ -334,7 +353,7 @@ async fn observe_loop(
     let mut retry = ticker(RECONNECT_DELAY);
     loop {
         let woken = tokio::select! {
-            observed = link.observed() => Woken::Observed(observed),
+            observed = link.observed() => Woken::Observed(observed.map(|snapshot| snapshot.map(Box::new))),
             cmd = cmd_rx.recv() => Woken::Command(cmd),
             _ = retry.tick(), if link.is_down() => Woken::Reconnect,
         };
@@ -355,6 +374,17 @@ async fn observe_loop(
             // delivered at the end of this turn if a connection exists.
             Woken::Command(Some(Command::ReloadConfig(reload))) => owed.save(reload),
             Woken::Command(Some(Command::LoadConfig(_))) => owed.load = true,
+            // The user asked to try again. A live link has nothing to retry;
+            // a down one starts over as if cold — nobody else is coming — so
+            // the reflex fires this turn if the connect fails, and the window
+            // is owed a fresh verdict on a fresh outage clock.
+            Woken::Command(Some(Command::RetryConnection(_))) => {
+                if link.is_down() {
+                    link = Link::cold(Instant::now());
+                    reflex = SpawnReflex::new();
+                    link.ensure(effects, update_tx).await;
+                }
+            }
             Woken::Command(Some(cmd)) => {
                 let pairing_transition =
                     matches!(cmd, Command::StartPairing(_) | Command::CancelPairing(_));
@@ -374,10 +404,7 @@ async fn observe_loop(
         // same as anywhere: drop the link, keep the reload for the next one.
         owed.deliver(&mut link, update_tx).await;
         let now = Instant::now();
-        if let Some(notice) = link
-            .down_mut()
-            .and_then(|down| down.unreachable_notice(now))
-        {
+        if let Some(notice) = link.down_mut().and_then(|down| down.notice(now)) {
             let _ = update_tx.send(notice);
         }
         if reflex.should_fire(&link, now) {
@@ -469,8 +496,9 @@ impl OwedReloads {
 
 /// Why [`observe_loop`] woke up.
 enum Woken {
-    /// The observe call answered, or its connection dropped.
-    Observed(Result<Option<AgentSnapshot>, RpcError>),
+    /// The observe call answered, or its connection dropped. The snapshot is
+    /// boxed so the other wakes do not carry its size.
+    Observed(Result<Option<Box<AgentSnapshot>>, RpcError>),
     /// A device command, or `None` once the GUI drops the sender.
     Command(Option<Command>),
     /// Time to try connecting again.
@@ -1237,6 +1265,32 @@ mod tests {
         assert_eq!(effects.launches, 0, "a reachable agent is never spawned at");
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn a_retry_launches_the_agent_without_waiting_out_the_reflex() {
+        // The reflex fired for this cold start and would not fire again for
+        // `SPAWN_RETRY_PERIOD`. The user's Retry must not wait that out.
+        let mut effects = ScriptedEffects::answering([]);
+        let (update_tx, _updates) = mpsc::unbounded_channel();
+        let (commands, mut cmd_rx) = mpsc::unbounded_channel();
+
+        tokio::select! {
+            () = observe_loop(&mut effects, &update_tx, &mut cmd_rx) => {
+                panic!("the loop ends only once the GUI hangs up")
+            }
+            // Retry between two reconnect ticks, so only the retry can launch.
+            () = async {
+                tokio::time::sleep(RECONNECT_DELAY / 2).await;
+                commands.send(RetryConnection.into()).unwrap();
+                tokio::time::sleep(RECONNECT_DELAY / 4).await;
+            } => {}
+        }
+
+        assert_eq!(
+            effects.launches, 2,
+            "one launch for the cold start, and one for the retry"
+        );
+    }
+
     /// A snapshot the tests can tell apart by its camera flag.
     fn snapshot(camera_active: bool) -> AgentSnapshot {
         AgentSnapshot {
@@ -1258,6 +1312,7 @@ mod tests {
             pairing: None,
             foreground: ForegroundApps::default(),
             lights: Vec::new(),
+            flow: openlogi_ipc::FlowStatus::default(),
         }
     }
 
@@ -1363,7 +1418,7 @@ mod tests {
                 let mut seen = Vec::new();
                 while seen.len() < 2 {
                     if let Some(GuiUpdate::Snapshot(snapshot)) = updates.recv().await {
-                        seen.push(snapshot);
+                        seen.push(*snapshot);
                     }
                 }
                 seen

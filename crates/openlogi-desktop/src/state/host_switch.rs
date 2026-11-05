@@ -160,6 +160,7 @@ mod tests {
                 }),
                 capabilities: Some(capabilities),
                 settings_revision: 0,
+                hidpp10: false,
             }],
         }
     }

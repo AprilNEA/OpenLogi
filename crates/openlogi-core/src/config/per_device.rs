@@ -9,12 +9,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
-    CameraControls, CameraStreamMode, Config, DeviceIdentity, DisableKey, LightSettings, Lighting,
-    OnboardMemory, ScrollResolution, SmartShift, ThumbwheelSensitivity,
+    CameraControls, CameraStreamMode, Config, DeviceIdentity, DisableKey, GKeyOwner, GamingKeyMode,
+    LightSettings, Lighting, MomentumScrolling, OnboardMemory, ScrollResolution, SmartShift,
+    ThumbwheelSensitivity,
 };
 use crate::binding::{
-    Action, ActionRingConfig, ActionRingIcon, ActionRingSlot, Binding, ButtonId, GamingLayout,
-    KeypadPage, RingAction, default_binding,
+    Action, ActionRingConfig, ActionRingIcon, ActionRingSize, ActionRingSlot, Binding, ButtonId,
+    GKeyProfile, GamingLayout, KeypadPage, RingAction, default_binding_on,
 };
 use crate::hid::{Dpi, PointerSpeed, ReportRate};
 
@@ -69,6 +70,15 @@ impl Config {
             .or_default()
             .action_ring
             .haptics = enabled;
+    }
+
+    /// Set how large `device_key`'s Actions Ring is drawn.
+    pub fn set_action_ring_size(&mut self, device_key: &str, size: ActionRingSize) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .action_ring
+            .size = size;
     }
 
     /// Replace or clear one slot in the default Actions Ring layout.
@@ -445,6 +455,65 @@ impl Config {
             .force_sensing = Some(force);
     }
 
+    /// Who runs `device_key`'s G1–G5.
+    #[must_use]
+    pub fn g_key_owner(&self, device_key: &str) -> GKeyOwner {
+        self.devices
+            .get(device_key)
+            .map(|device| device.g_key_owner)
+            .unwrap_or_default()
+    }
+
+    /// Record who runs `device_key`'s G1–G5.
+    pub fn set_g_key_owner(&mut self, device_key: &str, owner: GKeyOwner) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .g_key_owner = owner;
+    }
+
+    /// What `device_key`'s M1–M3 and MR do while OpenLogi owns its gaming
+    /// cluster.
+    #[must_use]
+    pub fn gaming_key_mode(&self, device_key: &str) -> GamingKeyMode {
+        self.devices
+            .get(device_key)
+            .map(|device| device.gaming_key_mode)
+            .unwrap_or_default()
+    }
+
+    /// The name the user gave `device_key`'s G-key `profile`, if any.
+    #[must_use]
+    pub fn g_key_profile_name(&self, device_key: &str, profile: GKeyProfile) -> Option<&str> {
+        self.devices
+            .get(device_key)?
+            .g_key_profile_names
+            .get(&profile)
+            .map(String::as_str)
+    }
+
+    /// Name `device_key`'s G-key `profile`, trimmed; a blank name removes it.
+    pub fn set_g_key_profile_name(&mut self, device_key: &str, profile: GKeyProfile, name: &str) {
+        let names = &mut self
+            .devices
+            .entry(device_key.to_string())
+            .or_default()
+            .g_key_profile_names;
+        match name.trim() {
+            "" => names.remove(&profile),
+            name => names.insert(profile, name.to_owned()),
+        };
+    }
+
+    /// Record what `device_key`'s M1–M3 and MR do. The bindings of the other
+    /// mode stay stored.
+    pub fn set_gaming_key_mode(&mut self, device_key: &str, mode: GamingKeyMode) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .gaming_key_mode = mode;
+    }
+
     /// The G-Shift layer of `device_key`, if not empty.
     #[must_use]
     pub fn gshift_overrides(&self, device_key: &str) -> Option<&BTreeMap<ButtonId, Action>> {
@@ -501,7 +570,7 @@ impl Config {
         let customized = |button: &ButtonId, binding: &Binding| {
             layout.needs_host_mode(*button)
                 && (!matches!(binding, Binding::Single(_))
-                    || binding.click_action() != default_binding(*button))
+                    || binding.click_action() != default_binding_on(Some(layout), *button))
         };
         let needs_host = device.report_rate.is_some()
             || self.uses_gshift(device_key)
@@ -645,6 +714,29 @@ impl Config {
             .entry(device_key.to_string())
             .or_default()
             .thumbwheel_sensitivity = sensitivity;
+    }
+
+    /// The effective momentum-scrolling settings for `device_key`: the
+    /// device's override when set, else the app-wide default.
+    #[must_use]
+    pub fn momentum_scrolling(&self, device_key: &str) -> MomentumScrolling {
+        self.devices
+            .get(device_key)
+            .and_then(|d| d.momentum_scrolling)
+            .unwrap_or(self.app_settings.momentum_scrolling)
+    }
+
+    /// Set (or clear, with `None`) `device_key`'s momentum-scrolling
+    /// override.
+    pub fn set_device_momentum_scrolling(
+        &mut self,
+        device_key: &str,
+        momentum: Option<MomentumScrolling>,
+    ) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .momentum_scrolling = momentum;
     }
 
     /// Whether `device_key`'s main wheel is smoothed through its diverted

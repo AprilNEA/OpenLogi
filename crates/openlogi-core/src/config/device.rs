@@ -8,10 +8,13 @@ use serde::{Deserialize, Serialize};
 
 use super::button_map::{deserialize_button_map, deserialize_button_maps_by_app};
 use super::settings::{
-    CameraControls, CameraStreamMode, GestureOwner, LightSettings, Lighting, OnboardMemory,
-    ScrollResolution, SmartShift, ThumbwheelSensitivity, deserialize_gesture_owner,
+    CameraControls, CameraStreamMode, GKeyOwner, GamingKeyMode, GestureOwner, LightSettings,
+    Lighting, MomentumScrolling, OnboardMemory, ScrollResolution, SmartShift,
+    ThumbwheelSensitivity, deserialize_gesture_owner,
 };
-use crate::binding::{Action, ActionRingConfig, Binding, ButtonId, GestureDirection, KeypadPage};
+use crate::binding::{
+    Action, ActionRingConfig, Binding, ButtonId, GKeyProfile, GestureDirection, KeypadPage,
+};
 use crate::device::{Capabilities, DeviceKind, DeviceModelInfo, LightCapabilities};
 use crate::hid::{DisableKeysMask, Dpi, PointerSpeed, ReportRate};
 
@@ -321,6 +324,12 @@ pub struct DeviceConfig {
     /// native, and is omitted from `config.toml`.
     #[serde(default, skip_serializing_if = "is_false")]
     pub smooth_wheel: bool,
+    /// Per-device momentum-scrolling override for the smoothed main wheel.
+    /// `None` falls back to the app-wide
+    /// [`AppSettings::momentum_scrolling`](crate::config::AppSettings::momentum_scrolling).
+    /// The GUI clears it when the device is set back to the app-wide value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub momentum_scrolling: Option<MomentumScrolling>,
     /// Physical config keys of pointing devices that follow this keyboard's
     /// host switch channel. The relationship is keyboard-initiated: pressing
     /// one of this device's host keys switches every listed target first, then
@@ -382,6 +391,18 @@ pub struct DeviceConfig {
     /// One page is the default and is omitted from `config.toml`.
     #[serde(default, skip_serializing_if = "is_first_page")]
     pub keypad_pages: KeypadPage,
+    /// Who runs a G-series keyboard's G1–G5. The keyboard's onboard actions
+    /// are the default and are omitted from `config.toml`.
+    #[serde(default, skip_serializing_if = "is_default_g_key_owner")]
+    pub g_key_owner: GKeyOwner,
+    /// What M1–M3 and MR do while OpenLogi owns the gaming cluster.
+    #[serde(default, skip_serializing_if = "is_default_gaming_key_mode")]
+    pub gaming_key_mode: GamingKeyMode,
+    /// The names the user gave the M1–M3 G-key profiles, shown in place of
+    /// the profile's key. Local to this device's config; nothing reaches the
+    /// keyboard.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub g_key_profile_names: BTreeMap<GKeyProfile, String>,
 }
 
 impl DeviceConfig {
@@ -482,6 +503,7 @@ impl Default for DeviceConfig {
             invert_scroll: false,
             scroll_resolution: None,
             smooth_wheel: false,
+            momentum_scrolling: None,
             host_switch_targets: Vec::new(),
             fn_lock: None,
             keep_os_layout: None,
@@ -492,6 +514,9 @@ impl Default for DeviceConfig {
             onboard_memory: None,
             gshift_bindings: BTreeMap::new(),
             keypad_pages: KeypadPage::FIRST,
+            g_key_owner: GKeyOwner::Keyboard,
+            gaming_key_mode: GamingKeyMode::Profiles,
+            g_key_profile_names: BTreeMap::new(),
         }
     }
 }
@@ -504,6 +529,26 @@ impl Default for DeviceConfig {
 )]
 fn is_first_page(page: &KeypadPage) -> bool {
     *page == KeypadPage::FIRST
+}
+
+/// `skip_serializing_if` helper: the default gaming-key mode stays out of
+/// `config.toml`.
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde's skip_serializing_if requires a fn(&T) -> bool signature"
+)]
+fn is_default_gaming_key_mode(mode: &GamingKeyMode) -> bool {
+    *mode == GamingKeyMode::default()
+}
+
+/// `skip_serializing_if` helper: the keyboard's own G-keys stay out of
+/// `config.toml`.
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde's skip_serializing_if requires a fn(&T) -> bool signature"
+)]
+fn is_default_g_key_owner(owner: &GKeyOwner) -> bool {
+    *owner == GKeyOwner::default()
 }
 
 /// `serde(default)` helper for `bool` fields that default to `true`.
@@ -623,6 +668,8 @@ struct RawDeviceConfig {
     #[serde(default)]
     smooth_wheel: bool,
     #[serde(default)]
+    momentum_scrolling: Option<MomentumScrolling>,
+    #[serde(default)]
     host_switch_targets: Vec<String>,
     #[serde(default)]
     fn_lock: Option<bool>,
@@ -640,6 +687,12 @@ struct RawDeviceConfig {
     gshift_bindings: BTreeMap<ButtonId, Action>,
     #[serde(default)]
     keypad_pages: KeypadPage,
+    #[serde(default)]
+    g_key_owner: GKeyOwner,
+    #[serde(default)]
+    gaming_key_mode: GamingKeyMode,
+    #[serde(default)]
+    g_key_profile_names: BTreeMap<GKeyProfile, String>,
     #[serde(default = "default_true")]
     enabled: bool,
     #[serde(default)]
@@ -700,6 +753,7 @@ impl From<RawDeviceConfig> for DeviceConfig {
             invert_scroll: raw.invert_scroll,
             scroll_resolution: raw.scroll_resolution,
             smooth_wheel: raw.smooth_wheel,
+            momentum_scrolling: raw.momentum_scrolling,
             host_switch_targets: raw.host_switch_targets,
             fn_lock: raw.fn_lock,
             keep_os_layout: raw.keep_os_layout,
@@ -710,6 +764,9 @@ impl From<RawDeviceConfig> for DeviceConfig {
             onboard_memory: raw.onboard_memory,
             gshift_bindings: raw.gshift_bindings,
             keypad_pages: raw.keypad_pages,
+            g_key_owner: raw.g_key_owner,
+            gaming_key_mode: raw.gaming_key_mode,
+            g_key_profile_names: raw.g_key_profile_names,
         }
     }
 }

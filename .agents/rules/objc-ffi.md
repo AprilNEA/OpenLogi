@@ -38,10 +38,11 @@ files; **keep this table in sync when you add or move one**:
 | `openlogi-hid/src/permissions.rs` | `IOHIDCheckAccess` / `IOHIDRequestAccess` (the prompting half of Input Monitoring) |
 | `openlogi-hook/src/macos.rs` | the CGEventTap (on `core-graphics`, see below), the Accessibility-trust check/prompt, the off-tap `NSWorkspace` frontmost-app read, and the `CGGetEventTapList` enumeration |
 | `openlogi-hook/src/macos/foreground.rs` | the `NSWorkspace` activation observer, the `NSRunningApplication` conversion behind every frontmost-app read, and the Safari PID snapshot |
+| `openlogi-hook/src/macos/probe.rs` | Flow's pointer probe: the modifier read (`CGEventSourceFlagsState`), `CGGetActiveDisplayList` / `CGDisplayBounds`, and the `CGWarpMouseCursorPosition` warp |
 | `openlogi-hook/src/macos/secure_input.rs` | the Secure Event Input read: `IsSecureEventInputEnabled` (hand-declared, see below) and the `kCGSSessionSecureInputPID` entry of `CGSessionCopyCurrentDictionary`, named through `foreground.rs`'s `NSRunningApplication` conversion |
 | `openlogi-hook/src/macos/sender.rs` | the HID sender-id lookup and the IOKit registry walk that resolves it to a device |
 | `openlogi-inject/src/inject/macos.rs` | CGEvent key and click synthesis, media-key `NSEvent`s |
-| `openlogi-inject/src/inject/macos/scroll.rs` | CGEvent scroll synthesis, including the continuous-scroll phase fields |
+| `openlogi-inject/src/inject/macos/scroll.rs` | CGEvent scroll synthesis, including the continuous-scroll phase fields, and the zoom retyping of wheel events while Accessibility Zoom's scroll modifiers are held (`+[NSEvent modifierFlags]` and the `com.apple.universalaccess` defaults) |
 | `openlogi-inject/src/inject/macos/ax.rs` | the shared `AXUIElement` attribute reads (`CFRetained` adoption of the Copy-rule out-pointer) and `AXChildren` iteration |
 | `openlogi-inject/src/inject/macos/browser.rs` | Safari's toolbar-button navigation over `ax.rs`, and the off-thread `NSWorkspace` Safari validation |
 | `openlogi-inject/src/inject/macos/menu_shortcut.rs` | the hidden probe `NSMenu` AppKit remaps for the keyboard layout, and pressing the frontmost app's matching menu item through AX |
@@ -273,6 +274,8 @@ under a `SAFETY` comment. Where it currently lives on macOS:
 - `hook/macos/secure_input.rs` — the `CGSession` dictionary cast.
 - `hook/macos/sender.rs` — the sender-id `extern` calls and the IOKit registry
   walk, including the Create-rule `CFString` / `CFNumber` wraps.
+- `hook/macos/probe.rs` — the `CGGetActiveDisplayList` out-pointers; the rest of
+  Flow's pointer probe is safe `objc2-core-graphics`.
 - `inject/macos/ax.rs` — AX attribute-copy out-pointers and the unchecked
   `AXChildren` element type; each child is downcast before use.
 - `inject/macos/browser.rs` — typed AX creation, `AXPress`, and
@@ -337,6 +340,8 @@ temporaries. The call sites that keep an explicit
   Safari process.
 - `openlogi-inject`'s menu-shortcut press — the action worker, where the
   `NSWorkspace` frontmost-app reads autorelease temporaries.
+- `openlogi-inject`'s wheel-event zoom check — the scroll worker and hook
+  threads, where the `NSUserDefaults` suite read autoreleases temporaries.
 - `openlogi-camera`'s device enumeration — every `AVCaptureDevice` string is
   copied out before the pool drains, so no `Retained<T>` escapes it.
 

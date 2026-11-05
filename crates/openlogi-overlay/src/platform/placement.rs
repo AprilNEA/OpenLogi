@@ -6,7 +6,7 @@ use gpui::{
 use tracing::warn;
 
 use crate::notice::{bottom_centre, notice_window_options};
-use crate::ring::{Placement, WINDOW_SIZE, clamp_window_origin, ring_window_options};
+use crate::ring::{Placement, clamp_window_origin, ring_window_options};
 
 /// Captured placement for one invocation, before its windows are opened.
 pub(crate) struct RingPlacement {
@@ -18,7 +18,8 @@ impl RingPlacement {
         clippy::unnecessary_wraps,
         reason = "the Windows placement capture is fallible"
     )]
-    pub(crate) fn capture(cx: &mut gpui::App) -> anyhow::Result<Self> {
+    /// Where to open a ring whose window is `edge` across.
+    pub(crate) fn capture(cx: &mut gpui::App, edge: Pixels) -> anyhow::Result<Self> {
         if on_wayland() {
             let displays = cx.displays();
             if !displays.is_empty() {
@@ -49,7 +50,7 @@ impl RingPlacement {
             warn!("no displays reported; falling back to a positioned Actions Ring window");
         }
         Ok(Self {
-            alternatives: vec![vec![positioned_window(cx)]],
+            alternatives: vec![vec![positioned_window(cx, edge)]],
         })
     }
 
@@ -161,8 +162,8 @@ fn cursor_screen(cx: &gpui::App) -> CursorScreen {
     }
 }
 
-fn positioned_window(cx: &gpui::App) -> (WindowOptions, Placement) {
-    let size = Size::new(px(WINDOW_SIZE), px(WINDOW_SIZE));
+fn positioned_window(cx: &gpui::App, edge: Pixels) -> (WindowOptions, Placement) {
+    let size = Size::new(edge, edge);
     let screen = cursor_screen(cx);
     let center = screen
         .cursor

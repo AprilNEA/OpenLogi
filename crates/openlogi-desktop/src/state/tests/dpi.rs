@@ -1,9 +1,10 @@
 //! `resolve_dpi`'s precedence — a live read beats the persisted config value,
 //! which beats the hardcoded default — plus the `AppState`-level wiring that
 //! feeds it the configured value, and the DPI write: the editor saves a value
-//! only after the mouse took it.
+//! only after the mouse took it. Only a device with adjustable DPI is read.
 
-use super::fn_lock::drain;
+use super::fn_lock::{drain, keyboard_inventory};
+use super::pointer_speed::install as install_reads;
 use super::*;
 use crate::services::ipc::{Command, ReadDpi, SetDpi};
 use crate::state::{DEFAULT_DPI, DpiLoad};
@@ -289,18 +290,7 @@ fn install(
     receiver: &mut tokio::sync::mpsc::UnboundedReceiver<Command>,
     cx: &mut gpui::TestAppContext,
 ) -> DeviceRoute {
-    cx.update(|cx| {
-        let runtime: Arc<dyn swr_core::Runtime> = Arc::new(swr_gpui::GpuiRuntime::new(cx));
-        let client = swr_core::SwrClient::builder().build(runtime.clone());
-        let state = cx.new(|_| {
-            let mut state = state;
-            state.connect_device_reads(client, runtime);
-            state
-        });
-        AppState::set_global(state, cx);
-        AppState::load_current_device_reads(cx);
-    });
-    cx.run_until_parked();
+    install_reads(state, cx);
     let route = answer_dpi_read(receiver, SAVED, &[800, 1200, 1600]);
     cx.run_until_parked();
     route
@@ -403,5 +393,96 @@ fn a_write_that_did_not_reach_the_mouse_reads_it_again(cx: &mut gpui::TestAppCon
     assert_eq!(
         shown_and_saved(cx),
         (Dpi::new(1600), Dpi::new(1600), Some(SAVED))
+    );
+}
+
+/// The state built from `inventory`, with its one device selected, and the
+/// commands it sends.
+fn selected(
+    inventory: DeviceInventory,
+) -> (AppState, tokio::sync::mpsc::UnboundedReceiver<Command>) {
+    let resolver = AssetResolver::new();
+    let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let state = AppState::new(Sources {
+        inventories: &[inventory],
+        ..Sources::in_memory(Config::ephemeral(), &resolver, commands)
+    });
+    drain(&mut receiver);
+    assert!(
+        state
+            .current_record()
+            .is_some_and(|record| record.route.is_some()),
+        "the device is selected and has a route to read it on"
+    );
+    (state, receiver)
+}
+
+/// Install `state` with live reads and return whether it asked the selected
+/// device for its DPI, and what it then knows of that DPI.
+fn dpi_read_on_install(
+    state: AppState,
+    mut receiver: tokio::sync::mpsc::UnboundedReceiver<Command>,
+    cx: &mut gpui::TestAppContext,
+) -> (bool, DpiLoad) {
+    let key = state.current_record().expect("selected").device_key();
+    install_reads(state, cx);
+    let asked = drain(&mut receiver)
+        .iter()
+        .any(|command| matches!(command, Command::ReadDpi(_)));
+    let load = cx.read(|cx| {
+        AppState::try_read(cx)
+            .expect("state installed")
+            .dpi_load_for(&key)
+    });
+    (asked, load)
+}
+
+/// #2318: a keyboard has no DPI. Asking an offline one for it failed after
+/// its retries, and the diagnostics report printed "DPI: read failed".
+#[gpui::test]
+fn a_keyboard_is_not_asked_for_its_dpi(cx: &mut gpui::TestAppContext) {
+    let mut unprobed_offline = keyboard_inventory(false);
+    unprobed_offline.paired[0].capabilities = None;
+    unprobed_offline.paired[0].online = false;
+    for inventory in [keyboard_inventory(false), unprobed_offline] {
+        let (state, receiver) = selected(inventory);
+        assert!(!state.current_dpi_supported());
+
+        assert_eq!(
+            dpi_read_on_install(state, receiver, cx),
+            (false, DpiLoad::Unknown)
+        );
+    }
+}
+
+/// The kind presumes adjustable DPI for a mouse that has not been probed
+/// yet, so its DPI is still read.
+#[gpui::test]
+fn an_unprobed_mouse_is_asked_for_its_dpi(cx: &mut gpui::TestAppContext) {
+    let mut inventory = direct_inventory([0xa3, 0x93, 0xca, 0xe0]);
+    inventory.paired[0].capabilities = None;
+    let (state, receiver) = selected(inventory);
+    assert!(state.current_dpi_supported());
+
+    assert_eq!(
+        dpi_read_on_install(state, receiver, cx),
+        (true, DpiLoad::Loading)
+    );
+}
+
+/// A probed mouse without `0x2201` / `0x2202` can still have a Pointer tab
+/// for its wheel. It is not read, and its card says it has no adjustable DPI
+/// instead of reading forever.
+#[gpui::test]
+fn a_probed_mouse_without_adjustable_dpi_is_not_read(cx: &mut gpui::TestAppContext) {
+    assert!(state_with_a_known_mouse().current_dpi_supported());
+    let mut inventory = direct_inventory([0xa3, 0x93, 0xca, 0xe0]);
+    inventory.paired[0].capabilities = Some(Capabilities::from_feature_ids(&[0x1b04, 0x2121]));
+    let (state, receiver) = selected(inventory);
+    assert!(!state.current_dpi_supported());
+
+    assert_eq!(
+        dpi_read_on_install(state, receiver, cx),
+        (false, DpiLoad::Unknown)
     );
 }
