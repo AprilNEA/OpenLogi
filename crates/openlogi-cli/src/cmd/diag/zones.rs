@@ -41,12 +41,13 @@ enum Answer {
     Quit,
 }
 
-fn parse_answer(line: &str) -> Answer {
-    match line.trim() {
-        "" => Answer::Key(None),
-        ":b" => Answer::Back,
-        ":q" => Answer::Quit,
-        key => Answer::Key(Some(key.to_owned())),
+/// `None` is the end of input, which stops the walk as `:q` does.
+fn parse_answer(line: Option<&str>) -> Answer {
+    match line.map(str::trim) {
+        None | Some(":q") => Answer::Quit,
+        Some("") => Answer::Key(None),
+        Some(":b") => Answer::Back,
+        Some(key) => Answer::Key(Some(key.to_owned())),
     }
 }
 
@@ -70,7 +71,7 @@ pub async fn run(args: ZonesArgs) -> Result<()> {
     let mut keys: BTreeMap<u8, Option<String>> = BTreeMap::new();
     let walked = openlogi_hid::walk_per_key_zones(&route, lit, async |zone: LitZone| {
         let answer = match prompt(zone).await {
-            Ok(line) => parse_answer(&line),
+            Ok(line) => parse_answer(line.as_deref()),
             Err(error) => {
                 eprintln!("could not read the answer ({error}); stopping");
                 Answer::Quit
@@ -98,7 +99,8 @@ pub async fn run(args: ZonesArgs) -> Result<()> {
 }
 
 /// Ask which key `zone` lit, reading the answer off the async runtime.
-async fn prompt(zone: LitZone) -> Result<String> {
+/// `None` at the end of input.
+async fn prompt(zone: LitZone) -> Result<Option<String>> {
     print!(
         "zone {}/{} (id {:#04x}): ",
         zone.position + 1,
@@ -108,7 +110,9 @@ async fn prompt(zone: LitZone) -> Result<String> {
     std::io::stdout().flush()?;
     let line = tokio::task::spawn_blocking(|| {
         let mut line = String::new();
-        std::io::stdin().read_line(&mut line).map(|_| line)
+        std::io::stdin()
+            .read_line(&mut line)
+            .map(|read| (read > 0).then_some(line))
     })
     .await??;
     Ok(line)
@@ -130,11 +134,16 @@ mod tests {
 
     #[test]
     fn answers_name_a_key_skip_go_back_or_quit() {
-        assert_eq!(parse_answer("Esc\n"), Answer::Key(Some("Esc".into())));
-        assert_eq!(parse_answer("  \n"), Answer::Key(None));
-        assert_eq!(parse_answer("-"), Answer::Key(Some("-".into())));
-        assert_eq!(parse_answer(":b"), Answer::Back);
-        assert_eq!(parse_answer(":q"), Answer::Quit);
+        assert_eq!(parse_answer(Some("Esc\n")), Answer::Key(Some("Esc".into())));
+        assert_eq!(parse_answer(Some("  \n")), Answer::Key(None));
+        assert_eq!(parse_answer(Some("-")), Answer::Key(Some("-".into())));
+        assert_eq!(parse_answer(Some(":b")), Answer::Back);
+        assert_eq!(parse_answer(Some(":q")), Answer::Quit);
+    }
+
+    #[test]
+    fn the_end_of_input_stops_the_walk() {
+        assert_eq!(parse_answer(None), Answer::Quit);
     }
 
     #[test]
