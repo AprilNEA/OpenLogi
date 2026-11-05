@@ -12,6 +12,48 @@ use openlogi_core::config::{
 use openlogi_core::update_feed::UpdateChannel;
 
 impl AppState {
+    /// A persistent identity and battery evidence, including cached readings, enable
+    /// the controls. A later missing reading keeps a known device's preferences.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    pub fn battery_preferences_available(&self, record: &super::devices::DeviceRecord) -> bool {
+        record.is_persistent()
+            && (record.battery.is_some()
+                || self
+                    .devices
+                    .sessions
+                    .get(record.config_key.as_str())
+                    .is_some_and(|session| session.battery_model.is_some()))
+    }
+
+    /// Preferences shared by every route of this physical device.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    pub fn battery_preferences(&self, key: &str) -> openlogi_core::config::BatteryPreferences {
+        self.config.battery_preferences(key)
+    }
+
+    /// Persist the independent menu and warning choices through the usual config owner.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    pub fn commit_battery_preferences(
+        &mut self,
+        key: &DeviceKey,
+        preferences: openlogi_core::config::BatteryPreferences,
+    ) -> StateEvents {
+        if !self
+            .devices()
+            .iter()
+            .any(|record| record.persistent_config_key() == Some(key.as_str()))
+        {
+            return StateEvents::none();
+        }
+        let events = StateEvent::DeviceConfigChanged(key.clone()).into();
+        if self.config.battery_preferences(key.as_str()) != preferences {
+            self.config
+                .edit(|config| config.set_battery_preferences(key.as_str(), preferences));
+            self.persist_and_reload("battery preferences");
+        }
+        events
+    }
+
     /// App-wide settings backing the Settings window (launch-at-login,
     /// update check). Read-only view; mutate via the `commit_*` methods below
     /// so the change is persisted.
@@ -205,7 +247,13 @@ impl AppState {
         self.config.edit(|config| {
             config.set_device_custom_name(record_key, custom_name.clone());
         });
-        if !self.persist_config("device name") {
+        // Native battery rows and warnings read custom names in the agent.
+        let persisted = if cfg!(any(target_os = "macos", target_os = "windows")) {
+            self.persist_and_reload("device name")
+        } else {
+            self.persist_config("device name")
+        };
+        if !persisted {
             return StateEvent::InventoryChanged.into();
         }
         for record in self

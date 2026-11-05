@@ -595,6 +595,7 @@ mod tests {
                     gpui::div()
                         .debug_selector(move || format!("inline-{percentage}"))
                         .child(BatteryIndicator::inline(&BatteryInfo {
+                            freshness: openlogi_core::device::BatteryFreshness::Current,
                             percentage: Some(percentage),
                             level: BatteryLevel::Good,
                             status: BatteryStatus::Discharging,
@@ -663,6 +664,7 @@ mod tests {
         ];
         for (percentage, level, status, expected) in cases {
             let battery = BatteryInfo {
+                freshness: openlogi_core::device::BatteryFreshness::Current,
                 percentage: Some(percentage),
                 level,
                 status,
@@ -673,6 +675,7 @@ mod tests {
 
     fn level_only(level: BatteryLevel, status: BatteryStatus) -> BatteryInfo {
         BatteryInfo {
+            freshness: openlogi_core::device::BatteryFreshness::Current,
             percentage: None,
             level,
             status,
@@ -727,6 +730,7 @@ mod tests {
         ];
         for (percentage, level, status, expected) in cases {
             let battery = BatteryInfo {
+                freshness: openlogi_core::device::BatteryFreshness::Current,
                 percentage,
                 level,
                 status,

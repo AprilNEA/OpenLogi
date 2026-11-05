@@ -15,6 +15,7 @@ const KEY: &str = "serial:abc123";
 
 fn discharging(percentage: u8) -> BatteryInfo {
     BatteryInfo {
+        freshness: openlogi_core::device::BatteryFreshness::Current,
         percentage: Some(percentage),
         level: BatteryLevel::Good,
         status: BatteryStatus::Discharging,
@@ -153,4 +154,29 @@ async fn a_recharge_while_the_notices_are_off_is_still_taken_in() {
         "the discharge after the recharge is announced once they are on"
     );
     assert_ne!(posted[1].id, first[0].id);
+}
+
+#[tokio::test]
+async fn a_device_battery_opt_out_mutes_overlay_notices_until_enabled() {
+    let mut config = Config::default();
+    config.set_battery_preferences(
+        KEY,
+        openlogi_core::config::BatteryPreferences {
+            show_in_menu: false,
+            warn_low: false,
+        },
+    );
+    let (mut orch, observable) = wired(config);
+    refresh(&mut orch, discharging(10), true, "MX Master 3S");
+    assert!(notices(&observable).await.is_empty());
+
+    orch.config.set_battery_preferences(
+        KEY,
+        openlogi_core::config::BatteryPreferences {
+            show_in_menu: false,
+            warn_low: true,
+        },
+    );
+    refresh(&mut orch, discharging(10), true, "MX Master 3S");
+    assert_eq!(notices(&observable).await.len(), 1);
 }

@@ -69,6 +69,7 @@ fn device_commands_parse() {
             Some(Command::Battery {
                 device: 0,
                 reading: Some(BatteryInfo {
+                    freshness: openlogi_core::device::BatteryFreshness::Current,
                     percentage: Some(5),
                     level: BatteryLevel::Critical,
                     status: BatteryStatus::Discharging,
@@ -80,6 +81,7 @@ fn device_commands_parse() {
             Some(Command::Battery {
                 device: 1,
                 reading: Some(BatteryInfo {
+                    freshness: openlogi_core::device::BatteryFreshness::Current,
                     percentage: Some(40),
                     level: BatteryLevel::Good,
                     status: BatteryStatus::Charging,

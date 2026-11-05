@@ -181,7 +181,10 @@ pub use succession::Identity;
 ///      chooses on release, so the overlay reports the pointer leaving every
 ///      slot as well as entering one. `ActionRingInvocation::size` appended,
 ///      the size the overlay draws the ring at.
-pub const PROTOCOL_VERSION: u32 = 45;
+/// v46: `BatteryInfo::freshness`, `AgentSnapshot::device_selection`, and
+///      `Agent::acknowledge_device_selection` appended for battery freshness
+///      and retained, acknowledged tray navigation.
+pub const PROTOCOL_VERSION: u32 = 46;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -306,6 +309,8 @@ pub struct AgentSnapshot {
     /// Whether cross-machine Flow is enabled, and the coarse link state of
     /// each configured peer. See [`FlowStatus`].
     pub flow: FlowStatus,
+    /// Most recent unacknowledged tray request, retained across GUI launches.
+    pub device_selection: Option<DeviceSelection>,
 }
 
 /// A standalone light as it reported itself to the agent.
@@ -539,6 +544,17 @@ pub enum SavedConfigVerdict {
     /// Another writer changed the file after the GUI saved it. The agent
     /// applied that external revision without restoring the GUI's older save.
     FileChangedAfterSave,
+}
+
+/// A tray click addressed to one physical device and one agent publication.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceSelection {
+    /// Agent run, preventing a delayed acknowledgement from clearing a new run's request.
+    pub agent: Identity,
+    /// Publication generation, also distinguishing repeated clicks on the same device.
+    pub request_id: u64,
+    /// Agent-supplied navigation key matching the GUI's device record.
+    pub device_key: String,
 }
 
 /// The application the agent currently resolves per-app profiles against, and
@@ -1222,4 +1238,6 @@ pub trait Agent {
     /// held trigger cancels instead of choosing the slot last reported by
     /// [`Agent::action_ring_hover`].
     async fn action_ring_unhover(session_id: u64) -> Result<(), ActionRingCommandError>;
+    /// Acknowledge only the exact device selection the GUI has displayed.
+    async fn acknowledge_device_selection(request: DeviceSelection);
 }

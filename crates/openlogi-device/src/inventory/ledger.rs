@@ -104,6 +104,17 @@ impl FailureKind {
     }
 }
 
+/// A replay preserves last-good display values, never their claim of freshness.
+fn cached_inventory(previous: &DeviceInventory) -> DeviceInventory {
+    let mut replay = previous.clone();
+    for device in &mut replay.paired {
+        if let Some(battery) = &mut device.battery {
+            battery.freshness = openlogi_core::device::BatteryFreshness::Cached;
+        }
+    }
+    replay
+}
+
 // Hand-written: `derive(Default)` would needlessly bound `K: Default`, which
 // a node key doesn't (and needn't) satisfy.
 impl<K> Default for NodeLedger<K> {
@@ -192,7 +203,7 @@ impl<K: Eq + Hash + Clone> NodeLedger<K> {
                     failure_kind,
                     "node check incomplete — replaying its last good inventory"
                 );
-                Some(previous.clone())
+                Some(cached_inventory(previous))
             } else {
                 live
             }
@@ -221,7 +232,7 @@ impl<K: Eq + Hash + Clone> NodeLedger<K> {
     /// contention that is not its own.
     pub fn defer(&self, node: &K) -> SettledNode {
         SettledNode {
-            inventory: self.last_good.get(node).cloned(),
+            inventory: self.last_good.get(node).map(cached_inventory),
             evict_channel: false,
         }
     }
