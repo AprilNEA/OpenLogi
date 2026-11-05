@@ -66,9 +66,12 @@ pub struct GamingLayout {
 
 /// G502 LIGHTSPEED (wpid `0x407f`). The extended model id tells the colours
 /// apart: `0` is the black unit dumped in #1729, `2` the purple one from
-/// #2372, which reports the same wpid, model ids and 11 slots.
+/// #2372, which reports the same wpid, model ids and 11 slots. `1` is the
+/// pink one, sold with the purple one. No unit has been dumped. G HUB's
+/// `g502_wireless` depot gives all three ids one default configuration of 11
+/// inputs, and the same hotspot metadata to `1` and `2` (#2375).
 pub const G502_LIGHTSPEED: GamingLayout = GamingLayout {
-    model_keys: &["0407f", "2407f"],
+    model_keys: &["0407f", "1407f", "2407f"],
     slots: &[
         Slot::native(ButtonId::LeftClick),
         Slot::native(ButtonId::RightClick),
@@ -259,12 +262,13 @@ mod tests {
     }
 
     /// #2372: the purple G502 LIGHTSPEED reports extended model id 2, and
-    /// its gaming tables made it a five-button `Standard` mouse.
+    /// its gaming tables made it a five-button `Standard` mouse. #2375: the
+    /// pink one has id 1.
     #[test]
     fn every_g502_lightspeed_colour_takes_its_layout() {
         use crate::device::{DeviceModelInfo, DeviceTransports};
         let gaming = Capabilities::from_feature_ids(&[0x2201, 0x8060, 0x8100, 0x8110]);
-        for extended_model_id in [0x00, 0x02] {
+        for extended_model_id in [0x00, 0x01, 0x02] {
             let model = DeviceModelInfo {
                 entity_count: 3,
                 serial_number: None,
