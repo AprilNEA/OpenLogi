@@ -1,7 +1,8 @@
 //! Assets (device-image cache) settings page.
 
+use crate::ui::theme::FocusRingStyle as _;
 use crate::ui::theme::Typography as _;
-use gpui_base::Button as BaseButton;
+use gpui_kit::base::Button as BaseButton;
 use std::time::Duration;
 
 use crate::ui::components::control_select;
@@ -212,7 +213,7 @@ pub(super) fn action_button(
         .cursor_pointer()
         .bg(pal.control)
         .hover(move |s| s.bg(pal.control_hover))
-        .focus_visible(move |s| s.bg(pal.control_hover))
+        .focus_visible(move |s| s.focus_ring(pal))
         .child(label)
         .on_click(move |_, _, cx| on_click(cx))
 }

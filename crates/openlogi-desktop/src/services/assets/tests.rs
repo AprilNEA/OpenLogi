@@ -586,6 +586,66 @@ fn cached_m650_assets_keep_each_devices_firmware_name() {
     assert_eq!(resolver.resolved.borrow().len(), 1, "artwork stays shared");
 }
 
+/// A wired G512 as issue #2402's live inventory reports it:
+/// `model_ids=[c33c,0000,0000] ext=06 transports=usb`.
+fn g512_model() -> DeviceModelInfo {
+    DeviceModelInfo {
+        transports: DeviceTransports {
+            usb: true,
+            ..Default::default()
+        },
+        model_ids: [0xc33c, 0, 0],
+        extended_model_id: 6,
+        ..bare_model()
+    }
+}
+
+/// The catalog's single entry for `c33c`: the `g513` depot, whose
+/// `displayName` is `G513` for every variant, the G512 ones included.
+fn g513_index() -> Index {
+    index_of(
+        "g513",
+        DeviceEntry {
+            model_id: "c33c".to_string(),
+            model_ids: vec!["c33c".to_string()],
+            display_name: "G513".to_string(),
+            kind: "KEYBOARD".to_string(),
+            asset_path: "v1/devices/g513/".to_string(),
+            files: Vec::new(),
+        },
+    )
+}
+
+#[test]
+fn g512_in_the_shared_g513_depot_shows_its_own_name() {
+    let root = tempfile::tempdir().expect("create asset root");
+    let depot = root.path().join("g513");
+    std::fs::create_dir_all(&depot).unwrap();
+    std::fs::write(
+        depot.join("metadata.json"),
+        r#"{"images":[{"key":"device_image","origin":{"width":100,"height":40}}]}"#,
+    )
+    .unwrap();
+    std::fs::write(depot.join("front.png"), png_header(100, 40)).unwrap();
+    let resolver = resolver_over(&[root.path()], Some(g513_index()));
+    let model = g512_model();
+
+    // One cached G513 depot serves both keyboards; each device's firmware
+    // name decides only its own display name, never the artwork.
+    for (codename, expected) in [
+        (None, "G513"),
+        (Some("G512 RGB MECHANICAL GAMING KEYBOARD"), "G512"),
+        (Some("G513 RGB MECHANICAL GAMING KEYBOARD"), "G513"),
+        (Some("G512 RGB MECHANICAL GAMING KEYBOARD"), "G512"),
+    ] {
+        let asset = resolver.resolve(&model, codename).expect("resolve c33c");
+        assert_eq!(asset.display_name, expected, "codename={codename:?}");
+        assert_eq!(asset.depot, "g513");
+        assert_eq!(asset.image_path, depot.join("front.png"));
+    }
+    assert_eq!(resolver.resolved.borrow().len(), 1, "artwork stays shared");
+}
+
 #[test]
 fn variant_display_name_preserves_matching_and_whitespace_rules() {
     // None means leave the catalog name untouched, including its whitespace.
@@ -629,6 +689,22 @@ fn variant_display_name_preserves_matching_and_whitespace_rules() {
             Some("Signature M650 \u{212a}eyboard"),
             Some("Signature M650"),
         ),
+        // A sibling product sharing the depot (#2402), matched on the
+        // firmware's leading model word and only within its own depot.
+        (
+            "G513",
+            Some("G512 RGB MECHANICAL GAMING KEYBOARD"),
+            Some("G512"),
+        ),
+        (" g513 ", Some("g512 rgb mechanical gaming"), Some("G512")),
+        ("G513", Some("Keyboard G512"), Some("G512")),
+        ("G513", Some("G513 RGB MECHANICAL GAMING KEYBOARD"), None),
+        ("G513", Some("G512X RGB"), None),
+        ("G513", Some("RGB G512"), None),
+        ("G513", Some("Keyboard"), None),
+        ("G513", None, None),
+        ("G915", Some("G512 RGB MECHANICAL GAMING KEYBOARD"), None),
+        ("G512", Some("G512 RGB MECHANICAL GAMING KEYBOARD"), None),
     ] {
         assert_eq!(
             variant_display_name_override(catalog, codename).as_deref(),
@@ -912,4 +988,148 @@ fn depot_without_any_render_still_misses() {
             .load_files(depot, &entry, bare_model().extended_model_id)
             .is_none()
     );
+}
+
+/// The head of a G HUB encrypted asset: a magic, the header length, then a
+/// JSON header naming the key. No image decoder reads past it.
+fn ghub_encrypted_blob() -> Vec<u8> {
+    let mut bytes = b"!\x05! \x82\0\0\0".to_vec();
+    bytes.extend_from_slice(br#"{"key-id": "ad3e4085-55be-40ae-8b4a-afeedb479a3d"}"#);
+    bytes.extend_from_slice(&[0x34, 0x4d, 0x6d, 0x00, 0x60, 0x28]);
+    bytes
+}
+
+#[test]
+fn renders_are_recognised_by_their_bytes() {
+    let root = tempfile::tempdir().expect("create temp dir");
+    let write = |name: &str, bytes: &[u8]| {
+        let path = root.path().join(name);
+        std::fs::write(&path, bytes).expect("write file");
+        path
+    };
+    let png = write("45a9d07d-91e8-47d6-92b3-f3827d951246", &png_header(10, 10));
+    let webp = write("front_mihoyo.webp", b"RIFF\x10\0\0\0WEBPVP8 ");
+    let blob = write(
+        "58ee56b0-5ca6-4e7b-b764-2d1746094b78",
+        &ghub_encrypted_blob(),
+    );
+    assert!(images::is_drawable_image(&png));
+    assert!(images::is_drawable_image(&webp));
+    assert!(!images::is_drawable_image(&blob));
+    assert!(!images::is_drawable_image(&write("empty.png", b"")));
+    assert!(!images::is_drawable_image(&root.path().join("missing.png")));
+}
+
+/// The `g502_wireless` depot as the catalog serves it: the black base model
+/// in PNG, the purple `ext2` variant as `variant_render` with metadata
+/// calibrated for it, everything keyed on the depot name.
+fn write_g502_lightspeed_depot(root: &Path, variant_render: &[u8]) -> PathBuf {
+    let dir = root.join("g502_wireless");
+    std::fs::create_dir_all(&dir).expect("create depot dir");
+    std::fs::write(
+        dir.join("manifest.json"),
+        r#"{"devices":[
+            {"modelId":"g502_wireless","resources":[
+                {"key":"device_image","src":"front.png"},
+                {"key":"device_side","src":"side.png"},
+                {"key":"image_metadata","src":"metadata.json"}]},
+            {"modelId":"g502_wireless_ext2","resources":[
+                {"key":"device_image","src":"58ee56b0-5ca6-4e7b-b764-2d1746094b78"},
+                {"key":"device_side","src":"642c5810-f750-48db-99b1-9dc46f750908"},
+                {"key":"image_metadata","src":"metadata_ext2.json"}]}
+        ]}"#,
+    )
+    .expect("write manifest");
+    for (name, g1_x) in [("metadata.json", 538), ("metadata_ext2.json", 535)] {
+        std::fs::write(
+            dir.join(name),
+            format!(
+                r#"{{"images":[
+                    {{"key":"device_image","origin":{{"width":1391,"height":2700}},
+                     "assignments":[{{"slotId":"g502wireless_g1_m1",
+                                     "marker":{{"x":{g1_x},"y":614}}}}]}},
+                    {{"key":"device_side","origin":{{"width":936,"height":2700}},
+                     "assignments":[{{"slotId":"g502wireless_g4_m1",
+                                     "marker":{{"x":580,"y":1800}}}}]}}
+                ]}}"#,
+            ),
+        )
+        .expect("write metadata");
+    }
+    std::fs::write(dir.join("front.png"), png_header(1391, 2700)).expect("write front");
+    std::fs::write(dir.join("side.png"), png_header(936, 2700)).expect("write side");
+    for name in [
+        "58ee56b0-5ca6-4e7b-b764-2d1746094b78",
+        "642c5810-f750-48db-99b1-9dc46f750908",
+    ] {
+        std::fs::write(dir.join(name), variant_render).expect("write variant render");
+    }
+    dir
+}
+
+fn g502_lightspeed_index() -> Index {
+    index_of(
+        "g502_wireless",
+        DeviceEntry {
+            model_id: "407f".into(),
+            model_ids: vec!["407f".into()],
+            display_name: "G502 Lightspeed".into(),
+            kind: "MOUSE".into(),
+            asset_path: "v1/devices/g502_wireless/".into(),
+            files: Vec::new(),
+        },
+    )
+}
+
+fn g502_lightspeed(extended_model_id: u8) -> DeviceModelInfo {
+    DeviceModelInfo {
+        model_ids: [0x407f, 0xc08d, 0x0000],
+        extended_model_id,
+        ..bare_model()
+    }
+}
+
+fn first_front_marker_x(asset: &ResolvedAsset) -> Option<f32> {
+    let front = asset.metadata.image("device_image")?;
+    front.assignments.first().map(|a| a.marker.x)
+}
+
+/// #2375: the purple G502 LIGHTSPEED's renders are encrypted. It drew the blob
+/// as its main view, which renders as nothing, beside the black side view and
+/// under hotspots calibrated for the purple renders.
+#[test]
+fn an_encrypted_colour_variant_is_drawn_as_the_base_model() {
+    let root = tempfile::tempdir().expect("create temp dir");
+    let dir = write_g502_lightspeed_depot(root.path(), &ghub_encrypted_blob());
+    let resolver = resolver_over(&[root.path()], Some(g502_lightspeed_index()));
+
+    let asset = resolver
+        .resolve(&g502_lightspeed(2), None)
+        .expect("the purple G502 LIGHTSPEED resolves");
+    assert_eq!(asset.image_path, dir.join("front.png"));
+    assert_eq!(asset.hero_image_path, Some(dir.join("front.png")));
+    assert_eq!((asset.png_width, asset.png_height), (1391, 2700));
+    let side = asset.side_view.as_ref().expect("the side view");
+    assert_eq!(side.image_path, dir.join("side.png"));
+    assert_eq!(
+        first_front_marker_x(&asset),
+        Some(538.0),
+        "the base model's hotspots"
+    );
+}
+
+#[test]
+fn a_drawable_colour_variant_keeps_its_renders_and_metadata() {
+    let root = tempfile::tempdir().expect("create temp dir");
+    let dir = write_g502_lightspeed_depot(root.path(), &png_header(1391, 2700));
+    let resolver = resolver_over(&[root.path()], Some(g502_lightspeed_index()));
+
+    let asset = resolver
+        .resolve(&g502_lightspeed(2), None)
+        .expect("the purple G502 LIGHTSPEED resolves");
+    assert_eq!(
+        asset.image_path,
+        dir.join("58ee56b0-5ca6-4e7b-b764-2d1746094b78")
+    );
+    assert_eq!(first_front_marker_x(&asset), Some(535.0));
 }

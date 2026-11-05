@@ -1,0 +1,24 @@
+# Owner: openlogi-desktop's ui::theme::FocusRingStyle::focus_ring — the one
+# keyboard-focus look for bespoke controls, matching gpui-component's own ring.
+id: gui-focus-ring-owner
+language: rust
+severity: error
+message: Style focus_visible with ui::theme::FocusRingStyle::focus_ring; it owns the keyboard-focus look, so focus never reads as hover or selection.
+note: |
+  Twenty-five bespoke controls each picked their own focus look: most copied
+  their hover fill, some only recoloured text that was already that colour,
+  and one only lowered opacity, so keyboard focus was invisible or looked like
+  hover. See "Single source of truth" in AGENTS.md.
+files:
+  - crates/openlogi-desktop/src/**/*.rs
+ignores:
+  - "**/tests.rs"
+  - "**/tests/**"
+rule:
+  pattern: $E.focus_visible($F)
+  not:
+    has:
+      field: arguments
+      has:
+        stopBy: end
+        pattern: $S.focus_ring($P)

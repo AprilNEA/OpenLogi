@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use openlogi_core::device::{BatteryInfo, BatteryStatus, LockKey};
+use openlogi_core::device::{BatteryInfo, BatteryLevel, BatteryStatus, LockKey};
 use openlogi_fixture::RequestMatch;
 use tokio::sync::mpsc;
 
@@ -1020,7 +1020,7 @@ async fn headset_switch_off_broadcast_requests_reconciliation_to_offline() {
 
 /// Probe a node whose only battery source is `feature_id` (at index 2), emit
 /// that feature's event-`0` broadcast carrying `broadcast`, and return the
-/// battery percentage before and after the reconciliation it requests.
+/// battery reading before and after the reconciliation it requests.
 async fn battery_broadcast_refresh(
     feature_id: u16,
     answers: [Vec<u8>; 2],
@@ -1067,20 +1067,33 @@ async fn battery_broadcast_refresh(
 }
 
 /// The `(percentage, status)` of a reading, for the assertions below. These
-/// 0x1000/0x1001 readings always carry a percentage.
+/// 0x1001 readings always carry a percentage.
 fn charge(battery: Option<BatteryInfo>) -> Option<(u8, BatteryStatus)> {
     battery.map(|battery| {
         let percentage = battery
             .percentage
-            .expect("a 0x1000/0x1001 reading carries a percentage");
+            .expect("a 0x1001 reading carries a percentage");
         (percentage, battery.status)
+    })
+}
+
+/// The `(level, status)` of a `0x1000` reading, for the assertions below. The
+/// fixture's battery reports no mileage, so its readings carry no percentage.
+fn legacy_level(battery: Option<BatteryInfo>) -> Option<(BatteryLevel, BatteryStatus)> {
+    battery.map(|battery| {
+        assert_eq!(
+            battery.percentage, None,
+            "a 0x1000 reading without mileage carries no percentage"
+        );
+        (battery.level, battery.status)
     })
 }
 
 #[tokio::test]
 async fn legacy_battery_broadcast_requests_reconciliation_to_a_fresh_reading() {
-    // 0x1000 `getBatteryLevelStatus`: level 50 %, next 20 %, discharging; the
-    // broadcast reports the drop to 20 %, which the reconciliation re-reads.
+    // 0x1000 `getBatteryLevelStatus`: level 50 (good), next 20, discharging;
+    // the broadcast reports the drop to 20 (low), which the reconciliation
+    // re-reads.
     let (before, after) = battery_broadcast_refresh(
         0x1000,
         [
@@ -1092,10 +1105,10 @@ async fn legacy_battery_broadcast_requests_reconciliation_to_a_fresh_reading() {
     )
     .await;
     assert_eq!(
-        (charge(before), charge(after)),
+        (legacy_level(before), legacy_level(after)),
         (
-            Some((50, BatteryStatus::Discharging)),
-            Some((20, BatteryStatus::Discharging))
+            Some((BatteryLevel::Good, BatteryStatus::Discharging)),
+            Some((BatteryLevel::Low, BatteryStatus::Discharging))
         )
     );
 }
@@ -1103,7 +1116,7 @@ async fn legacy_battery_broadcast_requests_reconciliation_to_a_fresh_reading() {
 #[tokio::test]
 async fn legacy_battery_broadcast_reports_a_charging_change() {
     // Plugged in: only the status byte moves to 1 (recharging), so the
-    // reconciliation must surface "charging" with the same 50 %.
+    // reconciliation must surface "charging" with the same good level.
     let (before, after) = battery_broadcast_refresh(
         0x1000,
         [
@@ -1115,18 +1128,18 @@ async fn legacy_battery_broadcast_reports_a_charging_change() {
     )
     .await;
     assert_eq!(
-        (charge(before), charge(after)),
+        (legacy_level(before), legacy_level(after)),
         (
-            Some((50, BatteryStatus::Discharging)),
-            Some((50, BatteryStatus::Charging))
+            Some((BatteryLevel::Good, BatteryStatus::Discharging)),
+            Some((BatteryLevel::Good, BatteryStatus::Charging))
         )
     );
 }
 
 #[tokio::test]
-async fn legacy_battery_broadcast_reports_charging_while_holding_the_percentage() {
-    // Plugged in, and the firmware stops gauging: 0 % while recharging. The
-    // pre-charge 50 % is held, but the status must still change.
+async fn legacy_battery_broadcast_reports_charging_while_holding_the_level() {
+    // Plugged in, and the firmware stops reporting: 0 while recharging. The
+    // pre-charge good level is held, but the status must still change.
     let (before, after) = battery_broadcast_refresh(
         0x1000,
         [
@@ -1138,10 +1151,10 @@ async fn legacy_battery_broadcast_reports_charging_while_holding_the_percentage(
     )
     .await;
     assert_eq!(
-        (charge(before), charge(after)),
+        (legacy_level(before), legacy_level(after)),
         (
-            Some((50, BatteryStatus::Discharging)),
-            Some((50, BatteryStatus::Charging))
+            Some((BatteryLevel::Good, BatteryStatus::Discharging)),
+            Some((BatteryLevel::Good, BatteryStatus::Charging))
         )
     );
 }

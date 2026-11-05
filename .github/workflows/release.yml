@@ -33,6 +33,12 @@ jobs:
     name: Release version
     if: ${{ github.ref_type == 'tag' }}
     runs-on: ubuntu-latest
+    # The run's one review gate. `release-approval` holds no secrets and only
+    # requires a reviewer, so a tag run pauses once, here, before anything
+    # builds. Every later job needs this one, so nothing signs or publishes
+    # without that approval; the `release` environment that holds the secrets
+    # then admits the signing and publish jobs without asking again.
+    environment: release-approval
     permissions:
       contents: read
     outputs:
@@ -118,8 +124,7 @@ jobs:
     permissions:
       contents: write
     # The R2 credentials and the minisign / Sparkle private keys are `release`
-    # environment secrets; the environment's review gate is the last stop
-    # before anything immutable is written.
+    # environment secrets. The run was approved once, at `version`.
     environment: release
     env:
       # stable or beta, from the `version` job.

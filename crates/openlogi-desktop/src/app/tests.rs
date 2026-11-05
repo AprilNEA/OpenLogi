@@ -11,7 +11,7 @@ use openlogi_core::hid::{DeviceRoute, ReceiverBrand};
 #[gpui::test]
 fn config_error_folder_button_opens_from_the_active_window(cx: &mut gpui::TestAppContext) {
     use gpui::{AppContext as _, Modifiers};
-    use gpui_component::Root;
+    use gpui_kit::component::Root;
 
     use super::{AppView, menu};
     use crate::services::{assets::AssetResolver, i18n::LOCALE_LOCK};
@@ -19,7 +19,7 @@ fn config_error_folder_button_opens_from_the_active_window(cx: &mut gpui::TestAp
 
     let _locale = LOCALE_LOCK.lock().unwrap();
     cx.update(|cx| {
-        gpui_component::init(cx);
+        gpui_kit::init(cx);
         crate::ui::theme::register_builtin_themes(cx);
         let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
         let resolver = AssetResolver::new();
@@ -64,13 +64,13 @@ fn main_window_renders_profile_confirmation_dialogs(cx: &mut gpui::TestAppContex
     use std::{cell::Cell, rc::Rc};
 
     use gpui::{AppContext as _, InteractiveElement as _, ParentElement as _, div};
-    use gpui_component::{Root, WindowExt as _};
+    use gpui_kit::component::{Root, WindowExt as _};
 
     use super::AppView;
     use crate::services::assets::AssetResolver;
     use crate::state::{AppState, Sources};
 
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     cx.update(|cx| {
         let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
         let resolver = AssetResolver::new();
@@ -116,7 +116,7 @@ fn main_window_renders_profile_confirmation_dialogs(cx: &mut gpui::TestAppContex
 #[gpui::test]
 fn the_device_rename_dialog_offers_save_and_cancel(cx: &mut gpui::TestAppContext) {
     use gpui::{AppContext as _, Modifiers};
-    use gpui_component::Root;
+    use gpui_kit::component::Root;
 
     use super::{AppView, home::open_rename_dialog};
     use crate::services::{assets::AssetResolver, i18n::LOCALE_LOCK};
@@ -124,7 +124,7 @@ fn the_device_rename_dialog_offers_save_and_cancel(cx: &mut gpui::TestAppContext
 
     let _locale = LOCALE_LOCK.lock().unwrap();
     rust_i18n::set_locale("en");
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     // The dialog slides in on the wall clock, so on a slow runner a redraw
     // between measuring Cancel and clicking it moves the button away from
     // the click. Reduced motion draws the dialog where it comes to rest.
@@ -183,14 +183,14 @@ fn open_device_detail(
     use std::{cell::RefCell, rc::Rc};
 
     use gpui::AppContext as _;
-    use gpui_component::Root;
+    use gpui_kit::component::Root;
 
     use super::AppView;
     use crate::services::assets::AssetResolver;
     use crate::state::{AgentLink, AppState, Sources};
 
     rust_i18n::set_locale("en");
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     cx.update(|cx| {
         let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
         let resolver = AssetResolver::new();
@@ -287,7 +287,7 @@ fn the_pointer_tab_offers_the_smooth_wheel(cx: &mut gpui::TestAppContext) {
 /// the profile bar.
 #[gpui::test]
 fn a_tab_opens_at_its_top_after_another_tab_scrolled(cx: &mut gpui::TestAppContext) {
-    use gpui::{Bounds, Modifiers, Pixels, ScrollDelta, ScrollWheelEvent, point, px, size};
+    use gpui::{Bounds, Modifiers, Pixels, ScrollDelta, ScrollEvent, point, px, size};
 
     use crate::services::i18n::LOCALE_LOCK;
     use crate::state::tests::direct_inventory;
@@ -311,7 +311,7 @@ fn a_tab_opens_at_its_top_after_another_tab_scrolled(cx: &mut gpui::TestAppConte
 
     let ring_top = open_tab(cx, "detail-navigation-ActionsRing").top();
     let pointer = open_tab(cx, "detail-navigation-Pointer");
-    cx.simulate_event(ScrollWheelEvent {
+    cx.simulate_event(ScrollEvent {
         position: point(pointer.left() + px(8.), px(300.)),
         delta: ScrollDelta::Pixels(point(px(0.), px(-5000.))),
         ..Default::default()
@@ -1077,6 +1077,7 @@ fn record(kind: DeviceKind, capabilities: Option<Capabilities>) -> DeviceRecord 
         asset: None,
         model_info: None,
         codename: None,
+        wpid: None,
         serial_number: None,
         unit_id: [0; 4],
         driver_id: None,
@@ -1105,7 +1106,7 @@ fn home_transport_icon_paints_in_its_transport_color(cx: &mut gpui::TestAppConte
     use super::home::transport_icon;
     use crate::ui::theme;
 
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     let pal = cx.update(|cx| theme::palette(cx));
     let routed = |route| DeviceRecord {
         route: Some(route),
@@ -1150,7 +1151,7 @@ fn home_transport_icon_paints_in_its_transport_color(cx: &mut gpui::TestAppConte
 #[gpui::test]
 fn home_grid_cards_share_one_column_width(cx: &mut gpui::TestAppContext) {
     use gpui::{AppContext as _, px, size};
-    use gpui_component::Root;
+    use gpui_kit::component::Root;
 
     use super::AppView;
     use crate::services::{assets::AssetResolver, i18n::LOCALE_LOCK};
@@ -1158,7 +1159,7 @@ fn home_grid_cards_share_one_column_width(cx: &mut gpui::TestAppContext) {
     use crate::state::{AgentLink, AppState, Sources};
 
     let _locale = LOCALE_LOCK.lock().unwrap();
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     cx.update(|cx| {
         let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
         let resolver = AssetResolver::new();
@@ -1255,6 +1256,9 @@ fn tabs_prefer_buttons_when_a_keyboard_kind_measures_a_pointer() {
         onboard_profiles: false,
         button_spy: false,
         sidetone: false,
+        g_keys: false,
+        m_keys: false,
+        macro_record: false,
     });
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
     assert!(
@@ -1294,6 +1298,9 @@ fn tabs_follow_capabilities_not_kind() {
         onboard_profiles: false,
         button_spy: false,
         sidetone: false,
+        g_keys: false,
+        m_keys: false,
+        macro_record: false,
     });
     // After 0x0005 kind-correction the record has kind=Mouse, not Keyboard.
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Mouse, caps));
@@ -1380,6 +1387,9 @@ fn keyboard_without_asset_hides_buttons_tab() {
         onboard_profiles: false,
         button_spy: false,
         sidetone: false,
+        g_keys: false,
+        m_keys: false,
+        macro_record: false,
     });
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
     assert!(
@@ -1413,6 +1423,9 @@ fn keyboard_with_buttons_shows_keys_tab() {
         onboard_profiles: false,
         button_spy: false,
         sidetone: false,
+        g_keys: false,
+        m_keys: false,
+        macro_record: false,
     });
     let keyboard = record(DeviceKind::Keyboard, caps);
     let tabs = DetailTab::tabs_for(&keyboard);
@@ -1667,7 +1680,7 @@ fn open_main_window_with_secure_input(
     use std::rc::Rc;
 
     use gpui::AppContext as _;
-    use gpui_component::Root;
+    use gpui_kit::component::Root;
     use openlogi_core::binding::Action;
 
     use super::AppView;
@@ -1675,7 +1688,7 @@ fn open_main_window_with_secure_input(
     use crate::state::{AgentLink, AppState, Sources};
 
     rust_i18n::set_locale("en");
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     cx.update(|cx| {
         let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
         let resolver = AssetResolver::new();
@@ -1776,24 +1789,44 @@ fn a_key_binding_edit_repaints_the_secure_input_notice(cx: &mut gpui::TestAppCon
     assert!(!secure_input_notice_drawn(cx));
 }
 
-/// A lost agent first marks the window's last state as reconnecting. Once it
-/// is unreachable, the notice replaces only the content: the header keeps
-/// Settings usable, Add Device stays shut, and Retry asks the IPC client to
-/// try again now.
+/// Whether the menu bar's Add Device can be chosen.
+fn menu_offers_add_device(cx: &mut gpui::VisualTestContext) -> bool {
+    use gpui::OwnedMenuItem;
+
+    cx.update(|_, cx| {
+        let menus = cx.get_menus().expect("the menu bar is published");
+        let add_device = menus
+            .iter()
+            .flat_map(|menu| &menu.items)
+            .find_map(|item| match item {
+                OwnedMenuItem::Action {
+                    action, disabled, ..
+                } if action.partial_eq(&super::menu::OpenAddDevice) => Some(!*disabled),
+                _ => None,
+            });
+        add_device.expect("the Device menu lists Add Device")
+    })
+}
+
+/// A lost agent first marks the window's last state as reconnecting, and
+/// every Add Device entry shuts: the header's, the empty state's, and the
+/// menu bar's. Once it is unreachable, the notice replaces only the content:
+/// the header keeps Settings usable, and Retry asks the IPC client to try
+/// again now.
 #[gpui::test]
 fn an_unreachable_agent_keeps_the_header_and_offers_retry(cx: &mut gpui::TestAppContext) {
     use gpui::{AppContext as _, Modifiers};
-    use gpui_component::Root;
+    use gpui_kit::component::Root;
     use openlogi_ipc::SecureInput;
 
-    use super::AppView;
+    use super::{AppView, menu};
     use crate::services::ipc::Command;
     use crate::services::{assets::AssetResolver, i18n::LOCALE_LOCK};
     use crate::state::{AgentLink, AppState, Sources};
 
     let _locale = LOCALE_LOCK.lock().unwrap();
     rust_i18n::set_locale("en");
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     let (commands, mut sent) = tokio::sync::mpsc::unbounded_channel();
     cx.update(|cx| {
         let resolver = AssetResolver::new();
@@ -1807,6 +1840,7 @@ fn an_unreachable_agent_keeps_the_header_and_offers_retry(cx: &mut gpui::TestApp
             state
         });
         AppState::set_global(state, cx);
+        menu::install(cx);
     });
     let (_, cx) = cx.add_window_view(|window, cx| {
         let view = cx.new(|cx| AppView::new(window, cx));
@@ -1816,11 +1850,29 @@ fn an_unreachable_agent_keeps_the_header_and_offers_retry(cx: &mut gpui::TestApp
 
     draw(cx);
     assert!(cx.debug_bounds("agent-reconnecting").is_none());
+    assert!(
+        menu_offers_add_device(cx),
+        "a live agent pairs from the menu"
+    );
     cx.update(|_, cx| AppState::apply(cx, AppState::agent_link_lost));
     draw(cx);
     assert!(
         cx.debug_bounds("agent-reconnecting").is_some(),
         "a lost agent's last state is not presented as live"
+    );
+    let empty_add_device = cx
+        .debug_bounds("empty-add-device")
+        .expect("the empty state keeps its Add Device");
+    let windows = cx.update(|_, cx| cx.windows().len());
+    cx.simulate_click(empty_add_device.center(), Modifiers::none());
+    assert_eq!(
+        cx.update(|_, cx| cx.windows().len()),
+        windows,
+        "pairing needs the agent, so the empty state's Add Device opens nothing"
+    );
+    assert!(
+        !menu_offers_add_device(cx),
+        "nor does the menu bar's, which follows the link"
     );
 
     cx.update(|_, cx| {
@@ -1855,6 +1907,118 @@ fn an_unreachable_agent_keeps_the_header_and_offers_retry(cx: &mut gpui::TestApp
         AgentLink::Unreachable { retrying: true },
         "the notice shows the attempt until the IPC client answers it"
     );
+
+    cx.update(|_, cx| {
+        AppState::apply(cx, |state| {
+            state.set_agent_link(AgentLink::Ready(status_with(SecureInput::Off)))
+        });
+    });
+    assert!(
+        menu_offers_add_device(cx),
+        "the agent's answer reopens pairing in the menu"
+    );
+}
+
+/// While the window reconnects, a device the agent last reported connected
+/// is shown as reconnecting — on its card in every Home layout and in the
+/// detail header — and one it reported offline stays offline.
+#[gpui::test]
+fn a_lost_agent_marks_connected_devices_as_reconnecting(cx: &mut gpui::TestAppContext) {
+    use std::{cell::RefCell, rc::Rc};
+
+    use gpui::{AppContext as _, Modifiers, px, size};
+    use gpui_kit::component::Root;
+    use openlogi_core::config::DeviceViewMode;
+
+    use super::AppView;
+    use crate::services::{assets::AssetResolver, i18n::LOCALE_LOCK};
+    use crate::state::tests::direct_inventory;
+    use crate::state::{AgentLink, AppState, Sources};
+
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    cx.update(gpui_kit::component::init);
+    cx.update(|cx| {
+        let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let resolver = AssetResolver::new();
+        let mut asleep = direct_inventory([0xa3, 0x93, 0xca, 0xe1]);
+        asleep.paired[0].online = false;
+        let inventories = [direct_inventory([0xa3, 0x93, 0xca, 0xe0]), asleep];
+        let state = cx.new(|_| {
+            let mut state = AppState::new(Sources {
+                inventories: &inventories,
+                ..Sources::in_memory(
+                    openlogi_core::config::Config::ephemeral(),
+                    &resolver,
+                    commands,
+                )
+            });
+            let _ = state.set_agent_link(AgentLink::Ready(status_with(
+                openlogi_ipc::SecureInput::Off,
+            )));
+            state
+        });
+        AppState::set_global(state, cx);
+    });
+    let hosted = Rc::new(RefCell::new(None));
+    let slot = Rc::clone(&hosted);
+    let (_, cx) = cx.add_window_view(move |window, cx| {
+        let view = cx.new(|cx| AppView::new(window, cx));
+        *slot.borrow_mut() = Some(view.clone());
+        Root::new(view, window, cx)
+    });
+    let app_view = hosted
+        .borrow_mut()
+        .take()
+        .expect("the window hosts the app");
+    cx.simulate_resize(size(px(1280.), px(900.)));
+    let draw = |cx: &mut gpui::VisualTestContext| cx.update(|window, cx| window.draw(cx).clear(cx));
+    let show = |cx: &mut gpui::VisualTestContext, mode: DeviceViewMode| {
+        cx.update(|_, cx| {
+            AppState::apply(cx, |state| state.commit_device_view_mode(mode));
+            app_view.update(cx, |_, cx| cx.notify());
+        });
+        draw(cx);
+    };
+
+    draw(cx);
+    assert!(
+        cx.debug_bounds("device-reconnecting").is_none(),
+        "a live agent confirms the device"
+    );
+    cx.update(|_, cx| AppState::apply(cx, AppState::agent_link_lost));
+    draw(cx);
+    let [live_card, _asleep_card] = ["home-grid-card-0", "home-grid-card-1"]
+        .map(|card| cx.debug_bounds(card).expect("the grid shows both devices"));
+    // The last marker painted wins the selector, and the offline card paints
+    // after the connected one: a marker on the first card proves the second
+    // carries none.
+    let marker = cx
+        .debug_bounds("device-reconnecting")
+        .expect("the grid card says it is reconnecting");
+    assert!(
+        live_card.contains(&marker.center()),
+        "{marker:?} in {live_card:?}"
+    );
+    for mode in [DeviceViewMode::List, DeviceViewMode::Carousel] {
+        show(cx, mode);
+        assert!(
+            cx.debug_bounds("device-reconnecting").is_some(),
+            "the {mode:?} layout says it is reconnecting"
+        );
+    }
+
+    show(cx, DeviceViewMode::Grid);
+    cx.simulate_click(live_card.center(), Modifiers::none());
+    draw(cx);
+    assert!(
+        cx.debug_bounds("home-grid-card-0").is_none(),
+        "the detail screen shows"
+    );
+    assert!(
+        cx.debug_bounds("device-reconnecting").is_some(),
+        "the detail header's pill says it is reconnecting"
+    );
 }
 
 /// The header's Flow button opens the Flow window once; pressing it again
@@ -1862,7 +2026,7 @@ fn an_unreachable_agent_keeps_the_header_and_offers_retry(cx: &mut gpui::TestApp
 #[gpui::test]
 fn the_flow_button_opens_one_flow_window(cx: &mut gpui::TestAppContext) {
     use gpui::{AppContext as _, Modifiers};
-    use gpui_component::Root;
+    use gpui_kit::component::Root;
     use openlogi_ipc::SecureInput;
 
     use super::AppView;
@@ -1873,7 +2037,7 @@ fn the_flow_button_opens_one_flow_window(cx: &mut gpui::TestAppContext) {
     // switched by a parallel test re-lays the header out under it.
     let _locale = LOCALE_LOCK.lock().unwrap();
     cx.update(|cx| {
-        gpui_component::init(cx);
+        gpui_kit::init(cx);
         crate::ui::theme::register_builtin_themes(cx);
         let (commands, _sent) = tokio::sync::mpsc::unbounded_channel();
         let resolver = AssetResolver::new();

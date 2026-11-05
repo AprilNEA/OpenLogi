@@ -674,6 +674,139 @@ async fn a_keyboard_with_only_per_key_v2_can_be_coloured() -> Result<(), WriteEr
     Ok(())
 }
 
+/// Whether `report` is a `0x8081 frameEnd` request on the scripted keyboard.
+fn is_per_key_v2_commit(report: &[u8]) -> bool {
+    report.len() >= 4 && report[2] == 0x07 && report[3] >> 4 == 0x07
+}
+
+#[tokio::test]
+async fn a_per_key_v2_request_answered_busy_is_resent() -> Result<(), WriteError> {
+    // A G515 LS TKL answers Busy to a 0x8081 frame sent right after its
+    // previous commit, and takes the same request a moment later.
+    let busy_left = AtomicU8::new(1);
+    let (raw, handle) = ScriptedRawHidChannel::with_dynamic_responder(move |request| {
+        if is_per_key_v2_commit(request) && busy_left.swap(0, Ordering::SeqCst) == 1 {
+            return Some(feature_error(request, BUSY));
+        }
+        per_key_v2_scripted_response(request)
+    });
+    let channel = scripted_channel(raw).await;
+    let shared = SharedChannel::new(
+        channel,
+        DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xc355,
+        },
+    );
+
+    set_keyboard_color_on(&shared, 0x11, 0x22, 0x33).await?;
+
+    let commits = handle
+        .written_reports()
+        .iter()
+        .filter(|report| is_per_key_v2_commit(report))
+        .count();
+    assert_eq!(commits, 2, "the Busy commit must be sent once more");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_per_key_v2_request_that_stays_busy_fails_after_the_backoff() {
+    let (raw, handle) = ScriptedRawHidChannel::with_responder(|request| {
+        if is_per_key_v2_commit(request) {
+            return Some(feature_error(request, BUSY));
+        }
+        per_key_v2_scripted_response(request)
+    });
+    let channel = scripted_channel(raw).await;
+    let shared = SharedChannel::new(
+        channel,
+        DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xc355,
+        },
+    );
+
+    let error = set_keyboard_color_on(&shared, 0x11, 0x22, 0x33)
+        .await
+        .expect_err("a commit that stays Busy must fail");
+
+    assert!(
+        matches!(
+            error,
+            WriteError::HidppFeature {
+                feature_hex: 0x8081,
+                kind: HidppFeatureErrorKind::Busy,
+                ..
+            }
+        ),
+        "got {error:?}"
+    );
+    // The first attempt plus one resend per backoff step, then it gives up.
+    let commits = handle
+        .written_reports()
+        .iter()
+        .filter(|report| is_per_key_v2_commit(report))
+        .count();
+    assert_eq!(commits, 4);
+}
+
+#[tokio::test]
+async fn a_zone_walk_lights_each_zone_alone_and_can_go_back() -> Result<(), WriteError> {
+    let (raw, handle) = ScriptedRawHidChannel::with_responder(per_key_v2_scripted_response);
+    let channel = scripted_channel(raw).await;
+    let shared = SharedChannel::new(
+        channel,
+        DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xc355,
+        },
+    );
+    let lit = openlogi_core::color::Rgb::new(0xff, 0x80, 0x01);
+    // Forward, back once, then forward to the end.
+    let mut steps = vec![ZoneWalkStep::Next, ZoneWalkStep::Back].into_iter();
+    let mut shown = Vec::new();
+
+    walk_per_key_zones_on(&shared, lit, async |zone: LitZone| {
+        assert_eq!(zone.total, 4);
+        shown.push((zone.zone_id, zone.position));
+        steps.next().unwrap_or(ZoneWalkStep::Next)
+    })
+    .await?;
+
+    assert_eq!(shown, [(1, 0), (2, 1), (1, 0), (2, 1), (3, 2), (4, 3)]);
+    let written = handle.written_reports();
+    // setRgbZonesSingleValue requests as (colour, first zone id, second id).
+    let paints: Vec<_> = written
+        .iter()
+        .filter(|report| report.len() == 20 && report[2] == 0x07 && report[3] >> 4 == 0x06)
+        .map(|report| ([report[4], report[5], report[6]], report[7], report[8]))
+        .collect();
+    let (dark, lit) = ([0, 0, 0], [0xff, 0x80, 0x01]);
+    // Two dark base frames over every zone, then zone 1 alone; each later
+    // step darkens the zone shown before it and lights the next one.
+    assert_eq!(
+        paints[..7],
+        [
+            (dark, 1, 2),
+            (dark, 1, 2),
+            (lit, 1, 0),
+            (dark, 1, 0),
+            (lit, 2, 0),
+            (dark, 2, 0),
+            (lit, 1, 0),
+        ]
+    );
+    assert_eq!(paints.len(), 2 + 1 + 2 * (shown.len() - 1));
+    // Two dark base frames, then one commit per lit zone.
+    let commits = written
+        .iter()
+        .filter(|report| is_per_key_v2_commit(report))
+        .count();
+    assert_eq!(commits, 2 + shown.len());
+    Ok(())
+}
+
 fn scripted_response(request: &[u8]) -> Option<Vec<u8>> {
     if request.len() < 7 || !matches!(request[0], 0x10 | 0x11) {
         return None;

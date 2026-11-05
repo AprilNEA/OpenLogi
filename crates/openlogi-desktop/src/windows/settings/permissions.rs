@@ -1,7 +1,11 @@
 //! Permissions settings page (macOS / Linux).
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use super::Axis;
+#[cfg(target_os = "linux")]
+use super::{
+    ActiveTheme, ButtonVariants, ClipboardItem, Context, FluentBuilder, Hsla, IntoElement,
+};
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use super::{
     App, ParentElement, PermissionStatus, SettingField, SettingGroup, SettingItem, SharedString,
@@ -9,12 +13,18 @@ use super::{
 };
 #[cfg(target_os = "macos")]
 use super::{AppState, InteractiveElement, Permission};
-use super::{IconName, Palette, SettingPage};
+use super::{Entity, IconName, Palette, SettingPage, SettingsView};
+#[cfg(target_os = "linux")]
+use crate::ui::components::control_button;
+#[cfg(target_os = "macos")]
+use crate::ui::theme::FocusRingStyle as _;
 use crate::ui::theme::Typography as _;
 #[cfg(target_os = "macos")]
-use gpui_base::Button as BaseButton;
+use gpui_kit::base::Button as BaseButton;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use openlogi_permissions as permissions;
+#[cfg(target_os = "linux")]
+use openlogi_permissions::udev::{GrantError, RulesManager};
 
 #[cfg_attr(
     not(any(target_os = "macos", target_os = "linux")),
@@ -23,7 +33,7 @@ use openlogi_permissions as permissions;
         reason = "`has_camera` only gates a macOS/Linux row; elsewhere the page is empty"
     )
 )]
-pub(super) fn permissions_page(has_camera: bool) -> SettingPage {
+pub(super) fn permissions_page(view: Entity<SettingsView>, has_camera: bool) -> SettingPage {
     let page = SettingPage::new(tr!("permissions.permissions"))
         .icon(IconName::Info)
         .resettable(false);
@@ -75,13 +85,18 @@ pub(super) fn permissions_page(has_camera: bool) -> SettingPage {
 
     #[cfg(not(target_os = "macos"))]
     let _ = has_camera;
+    // Only Linux's row starts work that reports back into the view. Elsewhere
+    // the handle is consumed here: `let _ = view` would not move it, and the
+    // by-value parameter would then trip `clippy::needless_pass_by_value`.
+    #[cfg(not(target_os = "linux"))]
+    drop(view);
 
     #[cfg(target_os = "linux")]
     let page = page.group(
         SettingGroup::new().item(
             SettingItem::new(
                 tr!("permissions.input_device_access"),
-                SettingField::render(move |_, _, cx| input_device_access_field(cx)),
+                SettingField::render(move |_, _, cx| input_device_access_field(&view, cx)),
             )
             // Vertical: the hint runs to several sentences, not a compact
             // right-side control — stacked full-width below the title it wraps
@@ -93,35 +108,218 @@ pub(super) fn permissions_page(has_camera: bool) -> SettingPage {
     page
 }
 
-/// Where a Linux user finds the fix for missing device access: install the
-/// udev rules, reload them, and reconnect the device.
+/// Where a Linux user finds the manual fix for missing device access: install
+/// the udev rules, reload them, and reconnect the device.
 #[cfg(target_os = "linux")]
 const DEVICE_ACCESS_GUIDE_URL: &str =
     "https://openlogi.org/docs/troubleshooting#udev-rules-do-not-grant-mouse-input-access";
 
-/// Live status of the Linux device nodes. The hint and the guide link appear
-/// only while access is missing — no noise when everything already works.
+/// The same fix from inside a Flatpak, which has to run on the host.
 #[cfg(target_os = "linux")]
-fn input_device_access_field(cx: &App) -> gpui::Div {
+const FLATPAK_GUIDE_URL: &str =
+    "https://openlogi.org/docs/troubleshooting#a-flatpak-install-shows-no-devices";
+
+/// The Linux "Grant access…" run: the udev rules installed through pkexec.
+#[cfg(target_os = "linux")]
+#[derive(Default)]
+pub(super) enum InputAccessGrant {
+    /// Not attempted since the window opened.
+    #[default]
+    Idle,
+    /// pkexec is running: its dialog is open, or the rules are being installed.
+    Running,
+    /// How the last attempt ended. Success only means the rules are in place;
+    /// the live probe still decides the badge.
+    Finished(Result<(), GrantError>),
+}
+
+#[cfg(target_os = "linux")]
+impl SettingsView {
+    /// Install the udev rules through pkexec, off the UI thread. The page
+    /// re-probes on the render that reports the outcome.
+    fn grant_input_device_access(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.input_access_grant, InputAccessGrant::Running) {
+            return;
+        }
+        self.input_access_grant = InputAccessGrant::Running;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let outcome = cx
+                .background_executor()
+                .spawn(async { permissions::udev::grant_input_device_access() })
+                .await;
+            // The window may have closed while the dialog was open.
+            let _ = this.update(cx, |this, cx| {
+                this.input_access_grant = InputAccessGrant::Finished(outcome);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+}
+
+/// Live status of the Linux device nodes, and the fix while access is
+/// missing: "Grant access…" installs the udev rules, unless a package manager
+/// or sandbox owns them, in which case its own instructions replace the
+/// button. Nothing beyond the badge once everything works.
+#[cfg(target_os = "linux")]
+fn input_device_access_field(view: &Entity<SettingsView>, cx: &App) -> gpui::Div {
     let pal = theme::palette(cx);
     let status = permissions::input_device_access();
-    let field = gpui_component::v_flex()
+    let grant = &view.read(cx).input_access_grant;
+    let field = gpui_kit::component::v_flex()
         .w_full()
         .gap_2()
         .child(status_badge(status, pal));
-    let hint = match status {
-        PermissionStatus::Denied => tr!("permissions.linux_input_access_denied_description"),
-        PermissionStatus::Unknown => tr!("permissions.linux_input_access_unknown_description"),
-        PermissionStatus::Granted => return field,
-    };
-    field
-        .child(div().text_caption().text_color(pal.text_muted).child(hint))
-        .child(h_flex().child(super::assets::action_button(
-            "perm-input-device-guide",
-            tr!("permissions.linux_input_access_guide"),
-            pal,
-            |cx| cx.open_url(DEVICE_ACCESS_GUIDE_URL),
-        )))
+    match status {
+        // Right after a fix, say whether anything still needs a restart.
+        PermissionStatus::Granted => {
+            return field.when(
+                matches!(grant, InputAccessGrant::Finished(Ok(()))),
+                |field| {
+                    field.child(caption(
+                        tr!("permissions.permission_applies_without_restart"),
+                        pal.text_muted,
+                    ))
+                },
+            );
+        }
+        PermissionStatus::Unknown => {
+            return field
+                .child(caption(
+                    tr!("permissions.linux_input_access_unknown_description"),
+                    pal.text_muted,
+                ))
+                .child(h_flex().child(guide_button(DEVICE_ACCESS_GUIDE_URL)));
+        }
+        PermissionStatus::Denied => {}
+    }
+    let field = field.child(caption(
+        tr!("permissions.linux_input_access_denied_description"),
+        pal.text_muted,
+    ));
+    field.child(match permissions::udev::rules_manager() {
+        Some(RulesManager::Flatpak) => flatpak_remedy(cx),
+        Some(RulesManager::NixOs) => gpui_kit::component::v_flex()
+            .gap_2()
+            .child(caption(
+                tr!("permissions.linux_input_access_nixos"),
+                pal.text_muted,
+            ))
+            .child(h_flex().child(guide_button(DEVICE_ACCESS_GUIDE_URL))),
+        None => grant_remedy(view, grant, cx),
+    })
+}
+
+/// "Grant access…" beside the guide, and what the last run reported.
+#[cfg(target_os = "linux")]
+fn grant_remedy(view: &Entity<SettingsView>, grant: &InputAccessGrant, cx: &App) -> gpui::Div {
+    let view = view.clone();
+    let running = matches!(grant, InputAccessGrant::Running);
+    gpui_kit::component::v_flex()
+        .gap_2()
+        .child(
+            h_flex()
+                .gap_2()
+                .child(
+                    control_button("perm-input-device-grant")
+                        .primary()
+                        // A loading button draws its spinner in the icon
+                        // slot, so it needs one while running.
+                        .when(running, |button| button.icon(IconName::LoaderCircle))
+                        .label(tr!("permissions.linux_grant_access"))
+                        .loading(running)
+                        .on_click(move |_, _, cx| {
+                            view.update(cx, SettingsView::grant_input_device_access);
+                        }),
+                )
+                .child(guide_button(DEVICE_ACCESS_GUIDE_URL)),
+        )
+        .when_some(grant_message(grant, cx), |remedy, (text, color)| {
+            remedy.child(caption(text, color))
+        })
+}
+
+/// A Flatpak cannot reach the host's `/etc` or pkexec, so the fix is a
+/// command for the user to run on the host.
+#[cfg(target_os = "linux")]
+fn flatpak_remedy(cx: &App) -> gpui::Div {
+    let pal = theme::palette(cx);
+    let command = permissions::udev::flatpak_host_command();
+    gpui_kit::component::v_flex()
+        .gap_2()
+        .child(caption(
+            tr!("permissions.linux_input_access_flatpak"),
+            pal.text_muted,
+        ))
+        .when_some(command.clone(), |remedy, command| {
+            remedy.child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .rounded(pal.control_radius)
+                    .border_1()
+                    .border_color(pal.border)
+                    .bg(pal.control)
+                    .font_family(cx.theme().mono_font_family.clone())
+                    .text_caption()
+                    .text_color(pal.text_primary)
+                    .child(command),
+            )
+        })
+        .child(
+            h_flex()
+                .gap_2()
+                .when_some(command, |row, command| {
+                    row.child(
+                        control_button("perm-input-device-copy")
+                            .outline()
+                            .label(tr!("common.copy"))
+                            .on_click(move |_, _, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(command.clone()));
+                            }),
+                    )
+                })
+                .child(guide_button(FLATPAK_GUIDE_URL)),
+        )
+}
+
+/// What the last "Grant access…" run reports while access is still denied,
+/// and the colour that tells a failure from a step to take.
+#[cfg(target_os = "linux")]
+fn grant_message(grant: &InputAccessGrant, cx: &App) -> Option<(SharedString, Hsla)> {
+    let muted = theme::palette(cx).text_muted;
+    let danger = cx.theme().danger;
+    Some(match grant {
+        InputAccessGrant::Idle => return None,
+        InputAccessGrant::Running => (tr!("permissions.linux_grant_waiting"), muted),
+        // Installed, and still denied: what is left is the user's to do.
+        InputAccessGrant::Finished(Ok(())) => (tr!("permissions.linux_grant_still_missing"), muted),
+        InputAccessGrant::Finished(Err(GrantError::Cancelled)) => {
+            (tr!("permissions.linux_grant_cancelled"), muted)
+        }
+        InputAccessGrant::Finished(Err(GrantError::PkexecMissing)) => {
+            (tr!("permissions.linux_grant_pkexec_missing"), danger)
+        }
+        InputAccessGrant::Finished(Err(GrantError::Failed(reason))) => (
+            tr!("permissions.linux_grant_failed", reason => reason),
+            danger,
+        ),
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn caption(text: SharedString, color: Hsla) -> gpui::Div {
+    div().text_caption().text_color(color).child(text)
+}
+
+/// "View guide": the troubleshooting page for doing the fix by hand.
+#[cfg(target_os = "linux")]
+fn guide_button(url: &'static str) -> impl IntoElement {
+    control_button("perm-input-device-guide")
+        .outline()
+        .label(tr!("permissions.linux_input_access_guide"))
+        .on_click(move |_, _, cx| cx.open_url(url))
 }
 
 #[cfg(target_os = "macos")]
@@ -146,26 +344,41 @@ fn input_monitoring_item() -> SettingItem {
                 Some(_) => PermissionStatus::Denied,
                 None => PermissionStatus::Unknown,
             };
-            let field = gpui_component::v_flex().gap_1().child(permission_field(
-                "perm-input-monitoring",
-                badge,
-                Permission::InputMonitoring,
-                cx,
-            ));
+            let denied = badge == PermissionStatus::Denied;
+            let field = gpui_kit::component::v_flex()
+                .w_full()
+                .gap_1()
+                .child(permission_field(
+                    "perm-input-monitoring",
+                    badge,
+                    Permission::InputMonitoring,
+                    cx,
+                ));
             let pal = theme::palette(cx);
-            if stalled {
-                field.child(
-                    div()
-                        .text_caption()
-                        .text_color(pal.text_muted)
-                        .child(tr!("permissions.input_monitoring_granted_but_unavailable")),
-                )
+            let hint = if stalled {
+                Some(tr!("permissions.input_monitoring_granted_but_unavailable"))
+            } else if denied {
+                // The background agent reads the devices, so the grant has to
+                // name it; one given to OpenLogi itself or to Terminal does
+                // not reach it (#1851). Denied also covers an enabled entry
+                // the agent cannot use: a stale one, or a grant made after
+                // launch whose automatic relaunch was refused
+                // (`InputMonitoring::NeedsRelaunch`). The hint covers both.
+                Some(tr!("permissions.input_monitoring_agent_instructions"))
+            } else {
+                None
+            };
+            if let Some(text) = hint {
+                field.child(div().text_caption().text_color(pal.text_muted).child(text))
             } else {
                 field
             }
         }),
     )
     .description(tr!("permissions.input_monitoring_permission_description"))
+    // Vertical: either hint runs to several sentences, which the right-hand
+    // slot would clip at the card edge; stacked below the title it wraps.
+    .layout(Axis::Vertical)
 }
 
 #[cfg(target_os = "macos")]
@@ -247,7 +460,7 @@ fn permission_field(
                 .cursor_pointer()
                 .bg(pal.control)
                 .hover(move |s| s.bg(pal.control_hover))
-                .focus_visible(move |s| s.bg(pal.control_hover))
+                .focus_visible(move |s| s.focus_ring(pal))
                 .child(action_label)
                 .on_click(move |_, _, cx| {
                     // Accessibility must be prompted in the agent (it owns the

@@ -450,6 +450,15 @@ impl Agent for TestAgent {
     async fn stop_flow_pairing(self, _: TarpcContext) {
         unreachable!("profile capture must never pair a computer")
     }
+
+    async fn action_ring_unhover(
+        self,
+        _: TarpcContext,
+        _session_id: u64,
+    ) -> Result<(), ActionRingCommandError> {
+        unreachable!("profile capture must not drive the Actions Ring")
+    }
+
     async fn reload_saved_config(
         self,
         _: TarpcContext,

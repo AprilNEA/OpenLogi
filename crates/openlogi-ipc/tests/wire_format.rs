@@ -34,7 +34,8 @@ use std::fmt::Write;
 use bincode::Options;
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{
-    Action, ActionRingIcon, ActionRingSlot, ButtonId, GridKey, GridSlot, KeyCombo, KeypadPage,
+    Action, ActionRingIcon, ActionRingSize, ActionRingSlot, ButtonId, GKey, GKeyProfile, GKeySlot,
+    GridKey, GridSlot, KeyCombo, KeypadPage, ModeKey,
 };
 use openlogi_core::config::{
     ConfigRevision, FlowPeerName, FlowPublicKey, Lighting, ScrollResolution,
@@ -118,7 +119,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// unreleased version and leave this pin alone (`crates/openlogi-ipc/AGENTS.md`).
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 44);
+    assert_eq!(PROTOCOL_VERSION, 46);
 }
 
 #[test]
@@ -523,8 +524,10 @@ fn action_ring_types() {
                 },
             )]),
             language: Some("fr".to_string()),
+            size: ActionRingSize::Large,
         },
-        "2a010003437574000701026672",
+        // The size is one trailing byte after the locale.
+        "2a01000343757400070102667202",
     );
     // The literal flag is one byte between label and icon.
     assert_wire(
@@ -535,6 +538,8 @@ fn action_ring_types() {
         },
         "034375740107",
     );
+    assert_wire(&ActionRingSize::Small, "00");
+    assert_wire(&ActionRingSize::Large, "02");
     assert_wire(&ActionRingSlot::Top, "00");
     assert_wire(&ActionRingSlot::TopLeft, "07");
     assert_wire(&ActionRingIcon::Keyboard, "07");
@@ -556,6 +561,8 @@ fn action_ring_types() {
     );
     assert_wire(&ActionRingCommandError::SessionNotFound, "00");
     assert_wire(&ActionRingCommandError::SlotEmpty, "01");
+    // Appended after the Flow pairing methods.
+    assert_wire(&AgentRequest::ActionRingUnhover { session_id: 7 }, "3907");
     assert_wire(&HidppOperation::WriteFnLock, "0c");
     assert_wire(&HidppOperation::PlayHaptic, "0e");
     assert_wire(&HidppOperation::ReadFnLock, "0f");
@@ -580,6 +587,19 @@ fn keypad_page_actions_and_slots() {
         }),
         "1070616765323a677269644d6964646c65",
     );
+}
+
+/// A G-key's slot and an M key cross the wire by their persisted names.
+#[test]
+fn g_key_slots_and_mode_keys() {
+    assert_wire(
+        &ButtonId::GKey(GKeySlot {
+            profile: GKeyProfile::M2,
+            key: GKey::G1,
+        }),
+        "084d323a4b65794731",
+    );
+    assert_wire(&ButtonId::ModeKey(ModeKey::MacroRecord), "054b65794d52");
 }
 
 #[test]
@@ -918,6 +938,9 @@ fn device_inventory() {
                 onboard_profiles: false,
                 button_spy: false,
                 sidetone: true,
+                g_keys: false,
+                m_keys: false,
+                macro_record: false,
             }),
             settings_revision: 7,
             hidpp10: false,
@@ -925,7 +948,7 @@ fn device_inventory() {
     }];
     assert_wire(
         &inventory,
-        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b00001010150020001030106323134304c5a0102030400010100fb34b0fb8240000b010101000001010101010001010101010101000000010700",
+        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b00001010150020001030106323134304c5a0102030400010100fb34b0fb8240000b010101000001010101010001010101010101000000010000000700",
     );
 }
 

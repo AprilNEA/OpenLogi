@@ -7,9 +7,11 @@ use super::{
 };
 use crate::ui::commit_slider::SliderUnit;
 use crate::ui::slider_row::SliderRow;
+use crate::ui::theme::FocusRingStyle as _;
 use crate::ui::theme::Typography as _;
-use gpui_base::Button as BaseButton;
-use gpui_component::radio::{Radio, RadioGroup};
+use gpui_kit::base::Button as BaseButton;
+use gpui_kit::component::Sizable as _;
+use gpui_kit::component::radio::{Radio, RadioGroup};
 use openlogi_core::config::MouseProfileTarget;
 
 use crate::features::pointer::momentum::MomentumPanel;
@@ -118,11 +120,13 @@ fn mouse_profile_target_item() -> SettingItem {
             RadioGroup::vertical("mouse-profile-target")
                 .child(
                     Radio::new("mouse-profile-pointer")
+                        .small()
                         .label(tr!("pointer.mouse_profile_pointer"))
                         .debug_selector(|| "mouse-profile-pointer".into()),
                 )
                 .child(
                     Radio::new("mouse-profile-focused")
+                        .small()
                         .label(tr!("pointer.mouse_profile_focused"))
                         .debug_selector(|| "mouse-profile-focused".into()),
                 )
@@ -208,7 +212,8 @@ fn lock_key_notifications_item() -> SettingItem {
 
 /// A sensitivity slider laid out as the device pages lay theirs out — label
 /// and value on one line, the slider across the row — with "Default" beside
-/// the value while it rests there. A custom item has no title of its own, so
+/// the value while it rests there, in the kit items' type step so it matches
+/// the switches above and below it. A custom item has no title of its own, so
 /// its title and description are its search keywords.
 fn sensitivity_item<T: SliderUnit + std::fmt::Display>(
     title: SharedString,
@@ -225,6 +230,7 @@ fn sensitivity_item<T: SliderUnit + std::fmt::Display>(
                 .value(value.to_string(), [max.to_string()])
                 .when(value == default, |row| row.marker(tr!("common.default")))
                 .description(description.clone())
+                .compact()
         }
     })
     .keywords([title, description])
@@ -274,7 +280,7 @@ fn open_login_items_button(cx: &App) -> BaseButton {
         .cursor_pointer()
         .bg(pal.control)
         .hover(move |s| s.bg(pal.control_hover))
-        .focus_visible(move |s| s.bg(pal.control_hover))
+        .focus_visible(move |s| s.focus_ring(pal))
         .child(tr!("app.open_login_items"))
         .on_click(|_, _, _| crate::platform::registration::open_login_items_settings())
 }
@@ -294,7 +300,7 @@ mod tests {
     fn mouse_profile_target_choices_update_state_and_respect_failed_saves(cx: &mut TestAppContext) {
         let _locale = LOCALE_LOCK.lock().unwrap();
         cx.update(|cx| {
-            gpui_component::init(cx);
+            gpui_kit::init(cx);
             theme::register_builtin_themes(cx);
         });
 

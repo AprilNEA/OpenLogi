@@ -9,12 +9,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
-    CameraControls, CameraStreamMode, Config, DeviceIdentity, DisableKey, LightSettings, Lighting,
-    MomentumScrolling, OnboardMemory, ScrollResolution, SmartShift, ThumbwheelSensitivity,
+    CameraControls, CameraStreamMode, Config, DeviceIdentity, DisableKey, GKeyOwner, GamingKeyMode,
+    LightSettings, Lighting, MomentumScrolling, OnboardMemory, ScrollResolution, SmartShift,
+    ThumbwheelSensitivity,
 };
 use crate::binding::{
-    Action, ActionRingConfig, ActionRingIcon, ActionRingSlot, Binding, ButtonId, GamingLayout,
-    KeypadPage, RingAction, default_binding_on,
+    Action, ActionRingConfig, ActionRingIcon, ActionRingSize, ActionRingSlot, Binding, ButtonId,
+    GKeyProfile, GamingLayout, KeypadPage, RingAction, default_binding_on,
 };
 use crate::hid::{Dpi, PointerSpeed, ReportRate};
 
@@ -69,6 +70,15 @@ impl Config {
             .or_default()
             .action_ring
             .haptics = enabled;
+    }
+
+    /// Set how large `device_key`'s Actions Ring is drawn.
+    pub fn set_action_ring_size(&mut self, device_key: &str, size: ActionRingSize) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .action_ring
+            .size = size;
     }
 
     /// Replace or clear one slot in the default Actions Ring layout.
@@ -416,6 +426,65 @@ impl Config {
             .entry(device_key.to_string())
             .or_default()
             .force_sensing = Some(force);
+    }
+
+    /// Who runs `device_key`'s G1–G5.
+    #[must_use]
+    pub fn g_key_owner(&self, device_key: &str) -> GKeyOwner {
+        self.devices
+            .get(device_key)
+            .map(|device| device.g_key_owner)
+            .unwrap_or_default()
+    }
+
+    /// Record who runs `device_key`'s G1–G5.
+    pub fn set_g_key_owner(&mut self, device_key: &str, owner: GKeyOwner) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .g_key_owner = owner;
+    }
+
+    /// What `device_key`'s M1–M3 and MR do while OpenLogi owns its gaming
+    /// cluster.
+    #[must_use]
+    pub fn gaming_key_mode(&self, device_key: &str) -> GamingKeyMode {
+        self.devices
+            .get(device_key)
+            .map(|device| device.gaming_key_mode)
+            .unwrap_or_default()
+    }
+
+    /// The name the user gave `device_key`'s G-key `profile`, if any.
+    #[must_use]
+    pub fn g_key_profile_name(&self, device_key: &str, profile: GKeyProfile) -> Option<&str> {
+        self.devices
+            .get(device_key)?
+            .g_key_profile_names
+            .get(&profile)
+            .map(String::as_str)
+    }
+
+    /// Name `device_key`'s G-key `profile`, trimmed; a blank name removes it.
+    pub fn set_g_key_profile_name(&mut self, device_key: &str, profile: GKeyProfile, name: &str) {
+        let names = &mut self
+            .devices
+            .entry(device_key.to_string())
+            .or_default()
+            .g_key_profile_names;
+        match name.trim() {
+            "" => names.remove(&profile),
+            name => names.insert(profile, name.to_owned()),
+        };
+    }
+
+    /// Record what `device_key`'s M1–M3 and MR do. The bindings of the other
+    /// mode stay stored.
+    pub fn set_gaming_key_mode(&mut self, device_key: &str, mode: GamingKeyMode) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .gaming_key_mode = mode;
     }
 
     /// The G-Shift layer of `device_key`, if not empty.

@@ -14,8 +14,8 @@ use gpui::{
     ParentElement as _, SharedString, Styled as _, Subscription, WeakEntity, Window, div,
     prelude::FluentBuilder as _, px,
 };
-use gpui_base::Button as BaseButton;
-use gpui_component::{
+use gpui_kit::base::Button as BaseButton;
+use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, WindowExt as _,
     button::{Button, ButtonVariants as _},
     dialog::Dialog,
@@ -671,7 +671,7 @@ fn problem(text: SharedString, cx: &App) -> impl IntoElement {
     div()
         .debug_selector(|| "flow-pair-problem".into())
         .text_caption()
-        .text_color(cx.theme().danger)
+        .text_color(theme::palette(cx).text_danger)
         .child(text)
 }
 

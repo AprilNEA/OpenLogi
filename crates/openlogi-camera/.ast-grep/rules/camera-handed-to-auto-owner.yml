@@ -1,0 +1,19 @@
+# Owner: openlogi_camera::CameraControl::handed_to_auto — whether a batch that
+# switches auto modes on hands a control over to one, so its manual value must
+# not be written. One decision, so no backend works out for itself which auto
+# mode gates which control.
+id: camera-handed-to-auto-owner
+language: rust
+severity: error
+message: Whether a batch hands a control to its auto mode is decided by openlogi_camera::CameraControl::handed_to_auto; do not re-derive it from auto_toggle().
+note: |
+  The V4L2 backend skipped auto-gated values with a private helper while the
+  IOKit backend wrote them, so a reset or profile that engaged auto modes was
+  stalled by the camera and discarded on macOS (#2308). See "Single source of
+  truth" in AGENTS.md.
+files:
+  - crates/openlogi-camera/**/*.rs
+ignores:
+  - crates/openlogi-camera/src/controls.rs
+rule:
+  pattern: $CONTROL.auto_toggle()

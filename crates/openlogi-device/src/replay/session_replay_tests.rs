@@ -16,8 +16,8 @@ use crate::session::gesture::CaptureSpec;
 use crate::{
     CaptureChannelSlot, CaptureHost, CaptureSessionFailure, CaptureSessionOutcome,
     CaptureSessionStop, CapturedInput, ChannelRegistry, DeviceIoGate, DeviceIoSignal, DeviceRoute,
-    Enumerator, KeyboardWanted, NodeId, NodeInfo, PairingCommand, PairingEvent, ReceiverSelector,
-    SharedChannel, device_io_channel, reprog_controls, run_capture_session,
+    Enumerator, GamingWanted, KeyboardWanted, NodeId, NodeInfo, PairingCommand, PairingEvent,
+    ReceiverSelector, SharedChannel, device_io_channel, reprog_controls, run_capture_session,
     run_keyboard_capture_session, run_pairing,
 };
 
@@ -108,6 +108,66 @@ async fn keyboard_capture_replay_restores_original_reporting_on_normal_shutdown(
         KEYBOARD_ARMED_FLAGS,
         KEYBOARD_RESTORED_FLAGS,
     );
+}
+
+/// The `0x8010` feature index the G-key replay places `GamingGKeys` at.
+const G_KEYS_FEATURE_INDEX: u8 = 0x03;
+
+/// Taking a G-series keyboard's G-key row is a whole-row write, owed back
+/// on teardown like a diverted control: the session reads the row's length,
+/// takes it, and hands it back before it completes. The strict cassette
+/// fails on any other request — a session asked for nothing of the gaming
+/// cluster never looks it up (the other keyboard replays prove that).
+#[tokio::test]
+async fn keyboard_capture_replay_takes_and_hands_back_the_g_key_row() {
+    let replay = ArmedReplay::enumerate(keyboard_cassette(
+        "keyboard capture takes the G-key row",
+        &[KEYBOARD_CID],
+        vec![
+            root_feature_lookup_exchange(0x8010, G_KEYS_FEATURE_INDEX, 0),
+            root_feature_lookup_exchange(0x8020, 0, 0),
+            root_feature_lookup_exchange(0x8030, 0, 0),
+            hidpp20_exchange(
+                hidpp20_short(0xff, G_KEYS_FEATURE_INDEX, 0, [0, 0, 0]),
+                hidpp20_short(0xff, G_KEYS_FEATURE_INDEX, 0, [5, 0, 0]),
+            ),
+            hidpp20_exchange(
+                hidpp20_short(0xff, G_KEYS_FEATURE_INDEX, 2, [1, 0, 0]),
+                hidpp20_short(0xff, G_KEYS_FEATURE_INDEX, 2, [0, 0, 0]),
+            ),
+            root_feature_lookup_exchange(0x1d4b, 0, 0),
+            hidpp20_exchange(
+                hidpp20_short(0xff, G_KEYS_FEATURE_INDEX, 2, [0, 0, 0]),
+                hidpp20_short(0xff, G_KEYS_FEATURE_INDEX, 2, [0, 0, 0]),
+            ),
+        ],
+    ))
+    .await;
+    let (sink, _captured) = mpsc::unbounded_channel();
+    let (shutdown, host) = replay.host(sink);
+    let capture = run_keyboard_capture_session(
+        replay.route.clone(),
+        watch::channel(KeyboardWanted {
+            gaming: GamingWanted {
+                take_g_row: true,
+                mode_keys: std::collections::BTreeSet::new(),
+            },
+            ..KeyboardWanted::default()
+        })
+        .1,
+        host,
+    );
+
+    let (outcome, ()) = tokio::join!(capture, replay.stop_after_arm(shutdown));
+
+    assert!(matches!(
+        outcome.expect("capture session shuts down cleanly"),
+        CaptureSessionOutcome::Restored
+    ));
+    replay
+        .backend
+        .require_complete()
+        .expect("the G-key cassette is strictly consumed");
 }
 
 /// A per-app binding change retargets a running keyboard session in place
@@ -703,6 +763,7 @@ fn keyboard_keys(cids: &[u16]) -> KeyboardWanted {
             .map(|&cid| (cid, ButtonId::control(cid)))
             .collect(),
         grid: BTreeMap::new(),
+        gaming: GamingWanted::default(),
     }
 }
 

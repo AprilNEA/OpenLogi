@@ -1,15 +1,17 @@
 //! The Unifying receiver: arrival broadcasts, the arrival trigger and its retries, and codename reads.
 
+use hidpp::channel::SEND_RESPONSE_TIMEOUT;
+use hidpp::receiver::unifying::DeviceConnection;
 use openlogi_core::device::BatteryLevel;
 
 use super::*;
 use crate::channel::scripted::register_error;
 
-#[tokio::test]
-async fn offline_arrival_rebroadcasts_surface_without_probing_the_device() {
-    // The exact wire bytes once misread as proof that the online bit is
-    // stuck: `04 62 69 40` is an encrypted MX Master 2S (wpid 0x4069) slot
-    // re-broadcast with bit 6 *set* — link not established, device offline.
+/// Slot 1's offline re-broadcast. The exact wire bytes once misread as proof
+/// that the online bit is stuck: `04 62 69 40` is an encrypted MX Master 2S
+/// (wpid 0x4069) slot re-broadcast with bit 6 *set* — link not established,
+/// device offline.
+fn offline_mx_master_2s_arrival() -> DeviceConnection {
     let message = Message::Short(
         MessageHeader {
             device_index: 1,
@@ -21,8 +23,25 @@ async fn offline_arrival_rebroadcasts_surface_without_probing_the_device() {
         panic!("expected a device-connection event");
     };
     assert!(!event.online, "bit 6 set must decode as offline");
+    event
+}
 
-    let (raw, handle) = ScriptedRawHidChannel::with_responder(|_| None);
+#[tokio::test]
+async fn offline_slot_is_named_by_the_receiver_without_probing_the_device() {
+    let event = offline_mx_master_2s_arrival();
+    let (raw, handle) = ScriptedRawHidChannel::with_responder(|request| {
+        match (request[1], request[2], request[3]) {
+            // #447: the receiver keeps slot 1's name at sub-register 0x40,
+            // so a stale pairing is named while its device is away.
+            (0xff, 0x83, 0xb5) if request[4] == 0x40 => {
+                let mut response = vec![0x11, 0xff, 0x83, 0xb5, 0x40, 0x0c];
+                response.extend_from_slice(b"MX Master 2S");
+                response.resize(20, 0);
+                Some(response)
+            }
+            _ => panic!("an offline slot must not be probed: {request:02x?}"),
+        }
+    });
     let channel = scripted_channel(raw).await;
     let writes_before = handle.written_reports().len();
 
@@ -45,10 +64,47 @@ async fn offline_arrival_rebroadcasts_surface_without_probing_the_device() {
 
     assert!(!device.online);
     assert_eq!(device.wpid, Some(0x4069));
-    assert_eq!(
-        handle.written_reports().len(),
-        writes_before,
-        "an offline slot must not be probed for features, battery, or codename"
+    assert_eq!(device.codename.as_deref(), Some("MX Master 2S"));
+    let writes = &handle.written_reports()[writes_before..];
+    assert!(
+        writes.iter().all(|report| report[1] == 0xff),
+        "an offline slot must not be probed for features or battery: {writes:02x?}"
+    );
+}
+
+#[tokio::test]
+async fn offline_slot_name_read_is_bounded_when_the_receiver_drops_the_reply() {
+    // The offline name read runs on every reconciliation under the register
+    // phase, so a receiver that never answers it must cost the receiver's
+    // short budget, not a full request timeout.
+    let event = offline_mx_master_2s_arrival();
+    let (raw, _) = ScriptedRawHidChannel::with_responder(|_| None);
+    let channel = scripted_channel(raw).await;
+
+    let cache = HashMap::new();
+    let pass = PassContext {
+        cache: &cache,
+        now: Instant::now(),
+        subscriptions: None,
+        timeouts: &ProbeTimeouts::DEFAULT,
+    };
+    let started = Instant::now();
+    let (device, _) = probe_unifying_slot(
+        &channel,
+        &event,
+        "SERIAL",
+        &host_lock::ReceiverRegisterPhase::uncontended(),
+        pass,
+    )
+    .await
+    .expect("an offline slot surfaces without its name");
+
+    assert!(!device.online);
+    assert_eq!(device.codename, None);
+    let waited = started.elapsed();
+    assert!(
+        waited < SEND_RESPONSE_TIMEOUT,
+        "the name read waited {waited:?}"
     );
 }
 

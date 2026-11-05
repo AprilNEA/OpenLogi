@@ -556,6 +556,34 @@ fn a_key_event_counts_only_for_the_mode_its_control_was_armed_in() {
 }
 
 #[test]
+fn a_diverted_report_without_a_host_key_releases_it() {
+    let control = |mode| ArmedControl {
+        cid: 0x00d3,
+        host: 2,
+        mode,
+        original: noisy_reporting(),
+    };
+    let another_key_held = ReprogControlsEvent::DivertedButtons([
+        ControlId(0x00c3),
+        ControlId(0),
+        ControlId(0),
+        ControlId(0),
+    ]);
+    let nothing_held = ReprogControlsEvent::DivertedButtons([ControlId(0); 4]);
+    for event in [another_key_held, nothing_held] {
+        assert_eq!(
+            key_trigger(&[control(ReportingMode::Diverted)], event),
+            Some(HostTrigger::Released)
+        );
+        assert_eq!(
+            key_trigger(&[control(ReportingMode::Analytics)], event),
+            None,
+            "no host key is diverted, so none is released"
+        );
+    }
+}
+
+#[test]
 fn only_a_switch_away_from_this_host_is_a_departure() {
     let position = KeyboardPosition {
         feature_index: CHANGE_HOST_INDEX,
@@ -587,8 +615,8 @@ fn only_a_switch_away_from_this_host_is_a_departure() {
     assert_eq!(position.stop_for(HostTrigger::Reported(3)), None);
     assert_eq!(
         position.stop_for(HostTrigger::Pressed(1)),
-        Some(HostSwitchStop::Pressed(1)),
-        "a diverted press goes to the commanded transition"
+        None,
+        "a diverted key stops the session only when it is released"
     );
 }
 
@@ -705,6 +733,15 @@ const MOUSE_CHANGE_HOST_INDEX: u8 = 0x06;
 /// The keyboard's `ReprogControlsV4` index in [`bolt_pair`].
 const REPROG_INDEX: u8 = 0x07;
 
+/// How the keyboard's key for host 1 in [`bolt_pair`] reports to software.
+#[derive(Clone, Copy)]
+enum HostKey {
+    /// It reports analytics events but cannot be diverted.
+    Analytics,
+    /// It can be diverted.
+    Divertable,
+}
+
 /// The keyboard of [`bolt_pair`].
 #[derive(Clone, Copy)]
 struct PairedKeyboard {
@@ -714,9 +751,8 @@ struct PairedKeyboard {
     announces: bool,
     /// The keyboard has `0x1815`, with hosts 0 and 1 paired and host 2 empty.
     hosts_info: bool,
-    /// The keyboard has `0x1b04` with one control: the key for host 1, which
-    /// reports analytics events but cannot be diverted.
-    analytics_host_key: bool,
+    /// The keyboard has `0x1b04` with one control: the key for host 1.
+    host_key: Option<HostKey>,
 }
 
 /// A Bolt receiver with a keyboard in slot 1 and a mouse in slot 2, both on
@@ -735,7 +771,7 @@ fn bolt_pair(request: &[u8], keyboard: PairedKeyboard) -> Option<Vec<u8>> {
                 payload[2] = keyboard.change_host_version;
             }
             0x1815 if keyboard.hosts_info => payload[0] = HOSTS_INFO_INDEX,
-            0x1b04 if keyboard.analytics_host_key => payload[0] = REPROG_INDEX,
+            0x1b04 if keyboard.host_key.is_some() => payload[0] = REPROG_INDEX,
             _ => {}
         },
         (KEYBOARD_SLOT, CHANGE_HOST_INDEX, 0x00) | (MOUSE_SLOT, MOUSE_CHANGE_HOST_INDEX, 0x00) => {
@@ -750,8 +786,12 @@ fn bolt_pair(request: &[u8], keyboard: PairedKeyboard) -> Option<Vec<u8>> {
         (KEYBOARD_SLOT, REPROG_INDEX, 0x00) => payload[0] = 1,
         (KEYBOARD_SLOT, REPROG_INDEX, 0x01) => {
             payload[..4].copy_from_slice(&[0x00, HOST_1_CID, 0x00, 0xaf]);
-            // Additional flags: analytics key events only.
-            payload[8] = 0x04;
+            match keyboard.host_key {
+                // Flags: divertable.
+                Some(HostKey::Divertable) => payload[4] = 0x20,
+                // Additional flags: analytics key events only.
+                Some(HostKey::Analytics) | None => payload[8] = 0x04,
+            }
         }
         (KEYBOARD_SLOT, REPROG_INDEX, 0x02) => payload[..2].copy_from_slice(&request[4..6]),
         (KEYBOARD_SLOT, REPROG_INDEX, 0x03) => {
@@ -793,6 +833,17 @@ fn analytics_report() -> Vec<u8> {
         HOST_1_CID,
         0x01,
     ]);
+    report
+}
+
+/// The keyboard's `0x1b04` diverted-buttons event: `held` are the low bytes of
+/// the diverted controls held down, none for a release.
+fn diverted_report(held: &[u8]) -> Vec<u8> {
+    let mut report = vec![0u8; 20];
+    report[..4].copy_from_slice(&[0x11, KEYBOARD_SLOT, REPROG_INDEX, 0x00]);
+    for (slot, cid) in held.iter().enumerate() {
+        report[5 + 2 * slot] = *cid;
+    }
     report
 }
 
@@ -935,7 +986,7 @@ async fn a_departure_announced_while_the_host_keys_arm_still_moves_the_mouse() {
         change_host_version: 2,
         announces: false,
         hosts_info: false,
-        analytics_host_key: true,
+        host_key: Some(HostKey::Analytics),
     };
     let incoming = Arc::new(OnceLock::<mpsc::UnboundedSender<Vec<u8>>>::new());
     let announce = Arc::clone(&incoming);
@@ -989,7 +1040,7 @@ async fn announce_during_host_read(
         change_host_version: 2,
         announces: true,
         hosts_info: false,
-        analytics_host_key: false,
+        host_key: None,
     };
     let incoming = Arc::new(OnceLock::<mpsc::UnboundedSender<Vec<u8>>>::new());
     let announce = Arc::clone(&incoming);
@@ -1066,7 +1117,7 @@ async fn a_rename_makes_the_session_read_the_keyboard_slots_again() {
         change_host_version: 2,
         announces: true,
         hosts_info: true,
-        analytics_host_key: false,
+        host_key: None,
     };
     let session = RunningSession::start(move |request| bolt_pair(request, keyboard)).await;
     session.written(HOSTS_INFO_INDEX, 1, 3).await;
@@ -1101,7 +1152,7 @@ async fn an_announced_switch_moves_the_mouse_and_leaves_the_keyboard_alone() {
         change_host_version: 2,
         announces: true,
         hosts_info: false,
-        analytics_host_key: false,
+        host_key: None,
     };
     let (outcome, writes) = announce_to_session(keyboard, announcement(0, 1)).await;
 
@@ -1139,7 +1190,7 @@ async fn a_switch_to_an_empty_keyboard_slot_leaves_the_mouse() {
         change_host_version: 2,
         announces: true,
         hosts_info: true,
-        analytics_host_key: false,
+        host_key: None,
     };
     let (outcome, writes) = announce_to_session(keyboard, announcement(0, 2)).await;
 
@@ -1163,7 +1214,7 @@ async fn a_keyboard_without_the_capability_or_host_keys_is_still_heard() {
         change_host_version: 2,
         announces: false,
         hosts_info: false,
-        analytics_host_key: false,
+        host_key: None,
     };
     let (outcome, writes) = announce_to_session(keyboard, announcement(0, 1)).await;
 
@@ -1187,7 +1238,7 @@ async fn an_analytics_report_moves_the_mouse_without_writing_to_the_keyboard() {
         change_host_version: 2,
         announces: false,
         hosts_info: false,
-        analytics_host_key: true,
+        host_key: Some(HostKey::Analytics),
     };
     let (outcome, writes) = trigger_session(keyboard, (REPROG_INDEX, 3), analytics_report()).await;
 
@@ -1212,6 +1263,158 @@ async fn an_analytics_report_moves_the_mouse_without_writing_to_the_keyboard() {
             is_request(report, MOUSE_SLOT, MOUSE_CHANGE_HOST_INDEX, 1) && report[4] == 1
         }),
         "the mouse follows to host 1"
+    );
+}
+
+#[tokio::test]
+async fn a_host_key_reported_right_after_its_arm_still_moves_the_mouse() {
+    // The keyboard reports the key as soon as it applies the write that
+    // enables the report, before the session has finished arming (#2346).
+    let keyboard = PairedKeyboard {
+        change_host_version: 2,
+        announces: false,
+        hosts_info: false,
+        host_key: Some(HostKey::Analytics),
+    };
+    let incoming = Arc::new(OnceLock::<mpsc::UnboundedSender<Vec<u8>>>::new());
+    let report = Arc::clone(&incoming);
+    let session = RunningSession::start(move |request| {
+        let response = bolt_pair(request, keyboard);
+        if !is_request(request, KEYBOARD_SLOT, REPROG_INDEX, 3) {
+            return response;
+        }
+        let incoming = report.get().expect("the sender is set before the arm");
+        // The acknowledgement, then the report, on the wire in that order.
+        for message in response.into_iter().chain([analytics_report()]) {
+            let _ = incoming.send(message);
+        }
+        None
+    })
+    .await;
+    incoming
+        .set(session.incoming.clone())
+        .expect("the sender is set once");
+
+    let (outcome, writes) = session.outcome().await;
+    assert!(
+        matches!(
+            outcome,
+            Ok(HostSwitchSessionOutcome::Departed { restore: Some(_) })
+        ),
+        "the report is heard, and the analytics bit is restored later"
+    );
+    assert!(
+        writes.iter().any(|report| {
+            is_request(report, MOUSE_SLOT, MOUSE_CHANGE_HOST_INDEX, 1) && report[4] == 1
+        }),
+        "the mouse follows to host 1"
+    );
+}
+
+#[tokio::test]
+async fn a_host_key_reported_before_its_arm_fails_still_moves_the_mouse() {
+    // The keyboard applies the write, reports the key, and leaves before it
+    // answers, so the arm fails because of the switch itself (#1623).
+    let keyboard = PairedKeyboard {
+        change_host_version: 2,
+        announces: false,
+        hosts_info: false,
+        host_key: Some(HostKey::Analytics),
+    };
+    let incoming = Arc::new(OnceLock::<mpsc::UnboundedSender<Vec<u8>>>::new());
+    let report = Arc::clone(&incoming);
+    let session = RunningSession::start(move |request| {
+        if is_request(request, KEYBOARD_SLOT, REPROG_INDEX, 3) {
+            let incoming = report.get().expect("the sender is set before the arm");
+            let _ = incoming.send(analytics_report());
+            return Some(feature_error(request, HW_ERROR));
+        }
+        bolt_pair(request, keyboard)
+    })
+    .await;
+    incoming
+        .set(session.incoming.clone())
+        .expect("the sender is set once");
+
+    let (outcome, writes) = session.outcome().await;
+    assert!(
+        matches!(
+            outcome,
+            Ok(HostSwitchSessionOutcome::Departed { restore: Some(_) })
+        ),
+        "the failed write is restored after the keyboard is back"
+    );
+    let failed_at = writes
+        .iter()
+        .position(|report| is_request(report, KEYBOARD_SLOT, REPROG_INDEX, 3))
+        .expect("the session enables analytics reporting");
+    let after_failure = &writes[failed_at + 1..];
+    assert!(
+        after_failure
+            .iter()
+            .all(|report| report[1] != KEYBOARD_SLOT),
+        "no rollback write waits for the keyboard that is leaving"
+    );
+    assert!(
+        after_failure.iter().any(|report| {
+            is_request(report, MOUSE_SLOT, MOUSE_CHANGE_HOST_INDEX, 1) && report[4] == 1
+        }),
+        "the mouse follows to host 1"
+    );
+}
+
+#[tokio::test]
+async fn a_held_host_key_stays_diverted_until_its_release() {
+    // A K580 whose host keys were handed back while one was held left this
+    // host by itself, before the mouse could follow (#2352).
+    let keyboard = PairedKeyboard {
+        change_host_version: 2,
+        announces: false,
+        hosts_info: true,
+        host_key: Some(HostKey::Divertable),
+    };
+    let reporting_writes = |writes: &[Vec<u8>]| -> Vec<Vec<u8>> {
+        writes
+            .iter()
+            .filter(|report| is_request(report, KEYBOARD_SLOT, REPROG_INDEX, 3))
+            .cloned()
+            .collect()
+    };
+    let session = RunningSession::start(move |request| bolt_pair(request, keyboard)).await;
+    session.written(REPROG_INDEX, 3, 1).await;
+    session.send(diverted_report(&[HOST_1_CID]));
+    // The session hears the rename after the press, and reads the slots again
+    // only if the press did not end it.
+    session.send(rename_reply());
+    session.written(HOSTS_INFO_INDEX, 1, 6).await;
+    assert_eq!(
+        reporting_writes(&session.handle.written_reports()).len(),
+        1,
+        "the held key is not handed back to the firmware"
+    );
+
+    session.send(diverted_report(&[]));
+    let (outcome, writes) = session.outcome().await;
+    assert!(
+        matches!(
+            outcome,
+            Ok(HostSwitchSessionOutcome::Restored {
+                requested_host: Some(1)
+            })
+        ),
+        "the release asks for host 1"
+    );
+    let reporting = reporting_writes(&writes);
+    assert_eq!(
+        reporting.len(),
+        2,
+        "the key is armed, then restored once it is up"
+    );
+    assert_eq!(reporting[1][5], HOST_1_CID);
+    assert_eq!(
+        reporting[1][6] & 1,
+        0,
+        "the restore stops diverting the key"
     );
 }
 

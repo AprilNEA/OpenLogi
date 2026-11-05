@@ -11,10 +11,10 @@ use gpui::{
     SharedString, StatefulInteractiveElement as _, Styled, Window, div, hsla,
     prelude::FluentBuilder as _, px, rgb, svg,
 };
-use gpui_component::button::{Button, ButtonGroup, ButtonVariant, ButtonVariants as _};
-use gpui_component::dialog::DialogButtonProps;
-use gpui_component::tooltip::Tooltip;
-use gpui_component::{
+use gpui_kit::component::button::{Button, ButtonGroup, ButtonVariant, ButtonVariants as _};
+use gpui_kit::component::dialog::DialogButtonProps;
+use gpui_kit::component::tooltip::Tooltip;
+use gpui_kit::component::{
     Disableable as _, Icon, IconName, Selectable as _, Sizable as _, WindowExt as _, h_flex, v_flex,
 };
 use openlogi_core::binding::{Cid, GridKey, KeypadPage};
@@ -539,7 +539,11 @@ impl RenderOnce for KeyCap {
 fn keycap_height(target: &KeyTarget) -> f32 {
     match target {
         KeyTarget::Control(button) if button.cid().is_some_and(is_paging_cid) => KEYCAP_PAGING_H,
-        KeyTarget::Control(_) | KeyTarget::Grid(_) | KeyTarget::FunctionKey(_) => KEYCAP_H,
+        KeyTarget::Control(_)
+        | KeyTarget::Grid(_)
+        | KeyTarget::FunctionKey(_)
+        | KeyTarget::GKey(_)
+        | KeyTarget::ModeKey(_) => KEYCAP_H,
     }
 }
 
@@ -548,7 +552,7 @@ fn keycap_glyph(target: &KeyTarget) -> Option<&'static str> {
     match target {
         KeyTarget::Grid(slot) => Some(grid_glyph(slot.key)),
         KeyTarget::Control(button) => button.cid().and_then(paging_glyph),
-        KeyTarget::FunctionKey(_) => None,
+        KeyTarget::FunctionKey(_) | KeyTarget::GKey(_) | KeyTarget::ModeKey(_) => None,
     }
 }
 

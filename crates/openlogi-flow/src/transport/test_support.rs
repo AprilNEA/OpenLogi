@@ -4,7 +4,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 
 use quinn::{Connection, Endpoint};
 
-use super::{MachineIdentity, PeerTrust, quic_configs};
+use super::{EndpointLimits, MachineIdentity, PeerTrust, quic_configs};
 use crate::generated as proto;
 
 /// Binds to an ephemeral loopback port.
@@ -36,7 +36,7 @@ pub(crate) async fn stalled_dial(
     trust: PeerTrust,
     address: SocketAddr,
 ) -> StalledDial {
-    let (_, client_config) = quic_configs(identity, trust).unwrap();
+    let (_, client_config) = quic_configs(identity, trust, &EndpointLimits::default()).unwrap();
     let endpoint = Endpoint::client(localhost()).unwrap();
     let connection = endpoint
         .connect_with(client_config, address, "openlogi-flow")

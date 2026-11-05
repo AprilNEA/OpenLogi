@@ -3,13 +3,15 @@
 
 use gpui::{
     App, Context, InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Window, div, prelude::FluentBuilder as _, px,
+    Styled as _, Window, div, prelude::FluentBuilder as _, px,
 };
-use gpui_component::{
+use gpui_kit::component::{
     Icon, IconName, Selectable as _, Sizable as _, WindowExt as _,
     button::{Button, ButtonGroup, ButtonVariant, ButtonVariants as _},
     dialog::DialogButtonProps,
-    h_flex, v_flex,
+    h_flex,
+    scroll::ScrollableElement as _,
+    v_flex,
 };
 use openlogi_core::config::FlowPeerName;
 use openlogi_core::device::DeviceKind;
@@ -40,12 +42,12 @@ pub(super) fn panel(
     }
     .unwrap_or_else(|| this_section(model, pal, cx));
     v_flex()
-        .id("flow-inspector")
         .debug_selector(|| "flow-inspector".into())
         .flex_none()
         .w(px(320.))
         .h_full()
-        .overflow_y_scroll()
+        .overflow_y_scrollbar()
+        .id("flow-inspector")
         .border_l_1()
         .border_color(pal.border)
         .bg(pal.panel)

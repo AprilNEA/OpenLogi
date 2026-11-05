@@ -30,9 +30,10 @@ use crate::session::allegiance;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum OverlayCommand {
+    /// The pointer moved onto `slot`, or off every slot when `None`.
     Hover {
         session_id: u64,
-        slot: ActionRingSlot,
+        slot: Option<ActionRingSlot>,
     },
     Activate {
         session_id: u64,
@@ -353,10 +354,17 @@ type CommandFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 async fn send_command(client: &AgentClient, command: OverlayCommand) -> bool {
     let ctx = context::current();
     match command {
-        OverlayCommand::Hover { session_id, slot } => client
+        OverlayCommand::Hover {
+            session_id,
+            slot: Some(slot),
+        } => client
             .action_ring_hover(ctx, session_id, slot)
             .await
             .is_ok(),
+        OverlayCommand::Hover {
+            session_id,
+            slot: None,
+        } => client.action_ring_unhover(ctx, session_id).await.is_ok(),
         OverlayCommand::Activate { session_id, slot } => client
             .action_ring_activate(ctx, session_id, slot)
             .await

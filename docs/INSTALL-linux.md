@@ -240,6 +240,12 @@ sudo udevadm control --reload-rules
 sudo udevadm trigger
 ```
 
+Or let the app do it: **Settings → Permissions → Grant access…** asks polkit
+for an administrator password, then runs `openlogi-desktop --install-udev-rules`
+as root. That writes the same file, reloads udev, and re-applies the rules to
+connected devices. It is not offered in the Flatpak or on NixOS, where the
+rules are installed as described in those sections.
+
 Verify access (should open without error):
 
 ```sh

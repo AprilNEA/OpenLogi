@@ -42,8 +42,8 @@ use tracing::{debug, warn};
 use walkdir::WalkDir;
 
 use self::images::{
-    buttons_image_for, find_variant_in_manifest, load_manifest, metadata_for, read_png_dimensions,
-    variant_image_for,
+    buttons_image_for, find_variant_in_manifest, is_drawable_image, load_manifest, metadata_for,
+    read_png_dimensions, side_image_for, variant_image_for,
 };
 pub(crate) use self::paths::user_cache_root;
 use self::paths::{bundle_assets_root, load_index};
@@ -181,12 +181,11 @@ fn resolve_side_view(
                 .map(str::to_string)
         })
     });
-    let image_path = variant
+    let (image_path, (png_width, png_height)) = variant
         .into_iter()
         .chain(["side.png".to_string()])
         .filter_map(|n| safe_component_path(dir, &n, "asset file").ok())
-        .find(|p| p.exists())?;
-    let (png_width, png_height) = read_png_dimensions(&image_path).ok()?;
+        .find_map(|p| read_png_dimensions(&p).ok().map(|dims| (p, dims)))?;
     Some(SideView {
         image_path,
         png_width,
@@ -367,6 +366,7 @@ impl AssetResolver {
             // colour render resolves regardless of which pid Logi keyed on.
             // Parse the manifest once and consult it for every candidate.
             let manifest = load_manifest(&dir);
+            let ext = drawable_variant(&dir, entry, depot, manifest.as_ref(), extended_model_id);
 
             // Hotspot metadata: the variant's manifest `image_metadata`, else
             // `core_metadata.json` (newer) or `metadata.json` (older).
@@ -378,17 +378,17 @@ impl AssetResolver {
             // serves the device, rather than a render with no hotspots. A depot
             // that publishes none at all (cameras) legitimately resolves from
             // its render alone.
-            let meta = resolve_metadata(&dir, entry, depot, manifest.as_ref(), extended_model_id);
+            let meta = resolve_metadata(&dir, entry, depot, manifest.as_ref(), ext);
             if meta.is_none() && entry.preferred_file(&METADATA_FILES).is_some() {
                 continue;
             }
 
-            let buttons_name = manifest.as_ref().and_then(|m| {
-                find_variant_in_manifest(m, entry, depot, extended_model_id, buttons_image_for)
-            });
-            let variant_front_name = manifest.as_ref().and_then(|m| {
-                find_variant_in_manifest(m, entry, depot, extended_model_id, variant_image_for)
-            });
+            let buttons_name = manifest
+                .as_ref()
+                .and_then(|m| find_variant_in_manifest(m, entry, depot, ext, buttons_image_for));
+            let variant_front_name = manifest
+                .as_ref()
+                .and_then(|m| find_variant_in_manifest(m, entry, depot, ext, variant_image_for));
             // Front/hero render for the gallery: the colour variant's
             // `device_image`, falling back to the generic front renders. Resolved
             // against this same root so it sits beside the buttons image.
@@ -397,16 +397,17 @@ impl AssetResolver {
                 .into_iter()
                 .chain(FRONT_RENDER_FILES.map(str::to_string))
                 .filter_map(|n| safe_component_path(&dir, &n, "asset file").ok())
-                .find(|p| p.exists());
+                .find(|p| is_drawable_image(p));
             let image_name = buttons_name
                 .clone()
                 .or_else(|| variant_front_name.clone())
                 .unwrap_or_else(|| "side_core.png".to_string());
             // The chosen file may not have been synced (older bundles
-            // shipped front-only); fall back through alternatives so a
-            // stale cache still gets *something* rather than a synthetic
-            // silhouette. Both filename schemas (`*_core` and bare) are
-            // tried for each of the buttons and hero renders.
+            // shipped front-only), or may be no image at all; fall back
+            // through alternatives so a stale cache still gets *something*
+            // rather than a synthetic silhouette. Both filename schemas
+            // (`*_core` and bare) are tried for each of the buttons and hero
+            // renders.
             let mut candidates = vec![image_name.clone()];
             candidates.extend(BUTTONS_RENDER_FILES.map(str::to_string));
             candidates.extend(variant_front_name);
@@ -414,7 +415,7 @@ impl AssetResolver {
             let Some(image_path) = candidates
                 .iter()
                 .filter_map(|n| safe_component_path(&dir, n, "asset file").ok())
-                .find(|p| p.exists())
+                .find(|p| is_drawable_image(p))
             else {
                 continue;
             };
@@ -428,8 +429,7 @@ impl AssetResolver {
                 debug!(depot, root = %root.display(), "depot ships no hotspot metadata — rendering image without hotspots");
                 Metadata::default()
             };
-            let side_view =
-                resolve_side_view(&dir, entry, manifest.as_ref(), extended_model_id, &metadata);
+            let side_view = resolve_side_view(&dir, entry, manifest.as_ref(), ext, &metadata);
             let image_path = main_view(image_path, side_view.as_ref(), hero_image_path.as_ref());
             let (png_width, png_height) = match read_png_dimensions(&image_path) {
                 Ok(dims) => dims,
@@ -450,7 +450,7 @@ impl AssetResolver {
                 depot,
                 root = %root.display(),
                 image = %image_name,
-                ext = extended_model_id,
+                ext,
                 png_width,
                 png_height,
                 "asset hit"
@@ -539,6 +539,39 @@ impl Default for AssetResolver {
     }
 }
 
+/// The colour variant [`AssetResolver::load_files`] draws for `ext`: `ext`
+/// itself, or `0` (the base model) when the renders the manifest names for
+/// `ext` are on disk and none of them is an image. G HUB ships the pink and
+/// purple G502 LIGHTSPEED that way, encrypted (#2375). Their hotspot metadata
+/// is calibrated for those renders, so the base model's renders come with the
+/// base model's metadata. A variant whose renders have not landed yet keeps
+/// its `ext`.
+fn drawable_variant(
+    dir: &Path,
+    entry: &DeviceEntry,
+    depot: &str,
+    manifest: Option<&DepotManifest>,
+    ext: u8,
+) -> u8 {
+    let Some(manifest) = manifest.filter(|_| ext != 0) else {
+        return ext;
+    };
+    let renders: Vec<PathBuf> = [variant_image_for, buttons_image_for, side_image_for]
+        .into_iter()
+        .filter_map(|lookup| find_variant_in_manifest(manifest, entry, depot, ext, lookup))
+        .filter_map(|name| safe_component_path(dir, &name, "asset file").ok())
+        .filter(|path| path.is_file())
+        .collect();
+    if renders.is_empty() || renders.iter().any(|path| is_drawable_image(path)) {
+        return ext;
+    }
+    debug!(
+        depot,
+        ext, "colour variant renders are not images — drawing the base model"
+    );
+    0
+}
+
 /// Resolve a depot's hotspot-metadata file inside `dir`, as `(filename, path)`.
 ///
 /// The manifest's `image_metadata` for this colour variant comes first, then
@@ -624,23 +657,70 @@ const GENERIC_CODENAME_WORDS: [&str; 3] = ["mouse", "keyboard", "trackball"];
 /// Size/hand qualifiers, not model-generation words such as `3S` or `X`.
 const VARIANT_QUALIFIER_SUFFIXES: [&str; 2] = ["l", "left"];
 
-/// Correct a shared depot's variant name (M650 vs. M650 L, #1332).
-///
-/// Return an override only when the firmware name matches a nonempty catalog
-/// prefix and every remaining word is a recognized qualifier. Keep catalog
-/// spelling, joining matched words with single spaces. `None` leaves the
-/// caller's existing name untouched; only a correction allocates a string.
+/// A product the catalog files under a sibling's depot and `displayName`,
+/// told apart only by the model word its firmware reports.
+struct DepotSibling {
+    /// The depot's catalog `displayName`.
+    catalog_name: &'static str,
+    /// The sibling's leading firmware-name word, which is also its display
+    /// name.
+    model: &'static str,
+}
+
+/// The `g513` depot (model id `c33c`) also serves the G512: its manifest
+/// lists `g512_ext*` variants beside the `g513_ext*` ones, and a G512's
+/// firmware reports `G512 RGB MECHANICAL GAMING KEYBOARD` (#2402).
+const DEPOT_SIBLINGS: [DepotSibling; 1] = [DepotSibling {
+    catalog_name: "G513",
+    model: "G512",
+}];
+
+/// Correct a shared depot's display name from the firmware name: either a
+/// sibling product the depot also serves (G512 in the G513 depot, #2402) or
+/// a variant the catalog names with an extra qualifier (M650 vs. M650 L,
+/// #1332). `None` leaves the caller's existing name untouched; only a
+/// correction allocates a string.
 fn variant_display_name_override(catalog_name: &str, codename: Option<&str>) -> Option<String> {
-    let codename_words = codename?.split_whitespace().filter(|word| {
+    let codename = codename?;
+    depot_sibling_name(catalog_name, codename)
+        .map(str::to_owned)
+        .or_else(|| qualifier_free_name(catalog_name, codename))
+}
+
+/// The firmware name's words, minus [`GENERIC_CODENAME_WORDS`].
+fn codename_model_words(codename: &str) -> impl Iterator<Item = &str> {
+    codename.split_whitespace().filter(|word| {
         !GENERIC_CODENAME_WORDS.iter().any(|generic| {
             word.chars()
                 .flat_map(char::to_lowercase)
                 .eq(generic.chars())
         })
-    });
+    })
+}
+
+/// The [`DEPOT_SIBLINGS`] model whose depot is `catalog_name` and whose
+/// model word leads the firmware name.
+fn depot_sibling_name(catalog_name: &str, codename: &str) -> Option<&'static str> {
+    let model = codename_model_words(codename).next()?;
+    DEPOT_SIBLINGS
+        .iter()
+        .find(|sibling| {
+            catalog_name
+                .trim()
+                .eq_ignore_ascii_case(sibling.catalog_name)
+                && model.eq_ignore_ascii_case(sibling.model)
+        })
+        .map(|sibling| sibling.model)
+}
+
+/// The catalog name without its qualifiers, for a firmware name that matches
+/// a nonempty catalog prefix where every remaining word is a recognized
+/// qualifier. Keeps catalog spelling, joining matched words with single
+/// spaces.
+fn qualifier_free_name(catalog_name: &str, codename: &str) -> Option<String> {
     let mut catalog_words = catalog_name.split_whitespace();
     let mut matched_words = 0;
-    for word in codename_words {
+    for word in codename_model_words(codename) {
         if !catalog_words.next()?.eq_ignore_ascii_case(word) {
             return None;
         }

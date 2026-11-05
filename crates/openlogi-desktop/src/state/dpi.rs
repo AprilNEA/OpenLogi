@@ -19,9 +19,18 @@ use super::load::DpiLoad;
 use super::{AppState, DEFAULT_DPI, StateEvent};
 
 impl AppState {
+    /// Whether the active device has adjustable DPI: HID++ `0x2201` /
+    /// `0x2202`, measured, or presumed from its kind before the first probe.
+    /// A device without it has no DPI to read, so none is asked for.
+    #[must_use]
+    pub(crate) fn current_dpi_supported(&self) -> bool {
+        self.current_record().is_some_and(has_adjustable_dpi)
+    }
+
     pub(super) fn load_current_dpi(&mut self, cx: &mut Context<Self>) {
         let Some((key, route)) = self
             .current_record()
+            .filter(|record| has_adjustable_dpi(record))
             .and_then(|record| Some((record.device_key(), record.route.clone()?)))
         else {
             return;
@@ -259,4 +268,11 @@ pub(super) fn resolve_dpi(live: Option<&DpiLoad>, configured: Option<Dpi>) -> Dp
         _ => None,
     });
     from_live.or(configured).unwrap_or(DEFAULT_DPI)
+}
+
+/// `record`'s AdjustableDpi capability, measured or presumed — the flag that
+/// also gives a misclassified mouse its Buttons tab in `DetailTab::tabs_for`.
+/// An unprobed mouse is presumed to have it, a keyboard is not.
+fn has_adjustable_dpi(record: &DeviceRecord) -> bool {
+    record.capabilities_or_presumed().pointer
 }

@@ -3,17 +3,24 @@
 mod action_icons;
 mod editor;
 
+use crate::ui::theme::FocusRingStyle as _;
 use gpui::{
     App, AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement,
     ParentElement, Render, ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled,
     Subscription, Window, div, prelude::FluentBuilder as _, px, rgb, svg,
 };
-use gpui_base::Button as BaseButton;
-use gpui_component::{
-    Icon, IconName, Selectable as _, h_flex, input::InputState, tooltip::Tooltip, v_flex,
+use gpui_kit::base::Button as BaseButton;
+use gpui_kit::component::{
+    Icon, IconName, Selectable as _,
+    button::{Button, ButtonGroup},
+    h_flex,
+    input::InputState,
+    tooltip::Tooltip,
+    v_flex,
 };
 use openlogi_core::binding::{
-    ActionRingConfig, ActionRingEntry, ActionRingIcon, ActionRingLayout, ActionRingSlot,
+    ActionRingConfig, ActionRingEntry, ActionRingIcon, ActionRingLayout, ActionRingSize,
+    ActionRingSlot,
 };
 use openlogi_ui::action_icons::RING_CANCEL_ICON;
 
@@ -22,8 +29,8 @@ use self::editor::{PowerUserInputs, action_library};
 use crate::features::keyboard::editors::{PowerUserKind, text_editor_placeholder};
 use crate::state::{AppState, StateEvent};
 use crate::ui::action::localized_action_label;
-use crate::ui::components::{Toggle, toggle_row};
-use crate::ui::theme::{self, Palette, Typography as _};
+use crate::ui::components::{Toggle, stacked_row, toggle_row};
+use crate::ui::theme::{self, Palette, SelectableStyle as _, Typography as _};
 
 /// Stateful Actions Ring editor. Ring configuration itself lives in
 /// [`AppState`]; this entity owns selection and editor input state.
@@ -135,12 +142,24 @@ impl Render for ActionRingPanel {
                     ),
             )
             .child(
+                // The editor wraps below the ring when the window is too narrow
+                // for both, rather than clipping them. The ring's own switches
+                // sit under it, beside the taller editor, so the page fits one
+                // screen at the larger interface scales.
                 h_flex()
                     .w_full()
+                    .flex_wrap()
                     .items_start()
                     .justify_center()
                     .gap_4()
-                    .child(ring_preview(&layout, self.selected_slot, &view, pal))
+                    .child(
+                        v_flex()
+                            .flex_none()
+                            .w(px(PREVIEW_SIZE))
+                            .gap_4()
+                            .child(ring_preview(&layout, self.selected_slot, &view, pal))
+                            .child(ring_switches(&ring, haptics_supported, pal, cx)),
+                    )
                     .child(action_library(
                         self.selected_slot,
                         layout.slots.get(&self.selected_slot),
@@ -151,31 +170,52 @@ impl Render for ActionRingPanel {
                         pal,
                     )),
             )
-            .child(toggle_row(
-                "ring-enabled-row",
+    }
+}
+
+/// The settings that apply to the whole ring: whether a button press opens
+/// it, its size, and its haptics on a device that has them.
+fn ring_switches(
+    ring: &ActionRingConfig,
+    haptics_supported: bool,
+    pal: Palette,
+    cx: &App,
+) -> impl IntoElement {
+    v_flex()
+        .gap_3()
+        .child(toggle_row(
+            "ring-enabled-row",
+            pal,
+            tr!("action_ring.enable_ring"),
+            tr!("action_ring.open_at_the_current_cursor_position"),
+            Toggle::new("ring-enabled-toggle")
+                .selected(ring.enabled)
+                .on_change(|enabled, _, cx| {
+                    AppState::apply(cx, |state| state.commit_action_ring_enabled(*enabled));
+                }),
+        ))
+        // Three segments beside the caption leave it a few words per line in
+        // this column, so the segment goes under the text instead.
+        .child(stacked_row(
+            "ring-size-row",
+            pal,
+            tr!("action_ring.ring_size"),
+            tr!("action_ring.ring_size_description"),
+            size_segment(ring.size, cx),
+        ))
+        .when(haptics_supported, |switches| {
+            switches.child(toggle_row(
+                "ring-haptics-row",
                 pal,
-                tr!("action_ring.enable_ring"),
-                tr!("action_ring.open_at_the_current_cursor_position"),
-                Toggle::new("ring-enabled-toggle")
-                    .selected(ring.enabled)
-                    .on_change(|enabled, _, cx| {
-                        AppState::apply(cx, |state| state.commit_action_ring_enabled(*enabled));
+                tr!("action_ring.haptic_feedback"),
+                tr!("action_ring.action_ring_haptic_description"),
+                Toggle::new("ring-haptics-toggle")
+                    .selected(ring.haptics)
+                    .on_change(|haptics, _, cx| {
+                        AppState::apply(cx, |state| state.commit_action_ring_haptics(*haptics));
                     }),
             ))
-            .when(haptics_supported, |panel| {
-                panel.child(toggle_row(
-                    "ring-haptics-row",
-                    pal,
-                    tr!("action_ring.haptic_feedback"),
-                    tr!("action_ring.action_ring_haptic_description"),
-                    Toggle::new("ring-haptics-toggle")
-                        .selected(ring.haptics)
-                        .on_change(|haptics, _, cx| {
-                            AppState::apply(cx, |state| state.commit_action_ring_haptics(*haptics));
-                        }),
-                ))
-            })
-    }
+        })
 }
 
 fn action_ring_editor_state(cx: &Context<ActionRingPanel>) -> (ActionRingConfig, ActionRingLayout) {
@@ -209,6 +249,28 @@ fn editor_input(
     // language switch instead of keeping the placeholder it was built with.
     crate::ui::components::localize_placeholder(&state, placeholder, window, cx);
     state
+}
+
+/// Small / Medium / Large. Each button commits its own size: the group's own
+/// `on_click` hears only pointer clicks, so Enter and Space on a focused
+/// segment would not reach it.
+fn size_segment(current: ActionRingSize, cx: &App) -> ButtonGroup {
+    ButtonGroup::new("ring-size")
+        .outline()
+        .children(ActionRingSize::ALL.map(|size| {
+            let (id, label) = match size {
+                ActionRingSize::Small => ("ring-size-small", tr!("action_ring.size_small")),
+                ActionRingSize::Medium => ("ring-size-medium", tr!("action_ring.size_medium")),
+                ActionRingSize::Large => ("ring-size-large", tr!("action_ring.size_large")),
+            };
+            Button::new(id)
+                .label(label)
+                .selected(current == size)
+                .selected_segment(current == size, cx)
+                .on_click(move |_, _, cx| {
+                    AppState::apply(cx, |state| state.commit_action_ring_size(size));
+                })
+        }))
 }
 
 fn current_device_supports_haptics(cx: &Context<ActionRingPanel>) -> bool {
@@ -255,8 +317,14 @@ fn ring_preview(
                 .justify_center()
                 .rounded_full()
                 .bg(pal.muted)
-                .text_color(pal.text_muted)
-                .child(svg().path(RING_CANCEL_ICON).size(px(20.0)).flex_none()),
+                // An `svg` paints only with its own text colour.
+                .child(
+                    svg()
+                        .path(RING_CANCEL_ICON)
+                        .size(px(20.0))
+                        .flex_none()
+                        .text_color(pal.text_muted),
+                ),
         )
         .children(ActionRingSlot::ALL.into_iter().map(|slot| {
             slot_button(
@@ -337,15 +405,7 @@ fn slot_button(
                 pal.control_hover
             })
         })
-        .focus_visible(move |button| {
-            button
-                .border_color(rgb(theme::ACCENT_BLUE))
-                .bg(if selected {
-                    theme::accent_tint_hover()
-                } else {
-                    pal.control_hover
-                })
-        })
+        .focus_visible(move |style| style.focus_ring(pal))
         .on_click(move |_, _, cx| {
             selected_view.update(cx, |panel, cx| {
                 panel.selected_slot = slot;

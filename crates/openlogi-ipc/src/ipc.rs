@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use openlogi_core::app::ForegroundApp;
-use openlogi_core::binding::{ActionRingIcon, ActionRingSlot};
+use openlogi_core::binding::{ActionRingIcon, ActionRingSize, ActionRingSlot};
 use openlogi_core::config::{ConfigRevision, FlowPeerName, FlowPublicKey, Lighting};
 use openlogi_core::device::{
     BatteryInfo, ChangedOnLight, DeviceInventory, DeviceKind, LightState, LockKey, StandaloneDevice,
@@ -177,7 +177,15 @@ pub use succession::Identity;
 ///      `Agent::{read_flow_identity, start_flow_pairing, pair_flow_peer,
 ///      confirm_flow_pairing, cancel_flow_pairing, stop_flow_pairing}`
 ///      appended after those — pairing another computer for Flow.
-pub const PROTOCOL_VERSION: u32 = 44;
+/// v45: `Agent::action_ring_unhover` appended — the ring's held trigger
+///      chooses on release, so the overlay reports the pointer leaving every
+///      slot as well as entering one. `ActionRingInvocation::size` appended,
+///      the size the overlay draws the ring at.
+/// v46: `Capabilities::{g_keys, m_keys, macro_record}` appended — a G-series
+///      keyboard's HID++ `0x8010` G-keys, `0x8020` M-keys and `0x8030` MR
+///      key. `ButtonId::{GKey, ModeKey}` appended — the G1–G5 slot of an M
+///      profile and M1–M3/MR.
+pub const PROTOCOL_VERSION: u32 = 46;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -788,6 +796,8 @@ pub struct ActionRingInvocation {
     pub slots: BTreeMap<ActionRingSlot, ActionRingPresentation>,
     /// Configured UI locale, or `None` to follow the overlay host's system locale.
     pub language: Option<String>,
+    /// How large the overlay draws this ring.
+    pub size: ActionRingSize,
 }
 
 /// The ring the overlay should be showing, stamped with its generation.
@@ -1212,4 +1222,8 @@ pub trait Agent {
     async fn cancel_flow_pairing() -> Result<(), FlowPairingCommandError>;
     /// Close pairing, cancelling an attempt in progress.
     async fn stop_flow_pairing();
+    /// Report that the pointer left every slot of the ring, so releasing the
+    /// held trigger cancels instead of choosing the slot last reported by
+    /// [`Agent::action_ring_hover`].
+    async fn action_ring_unhover(session_id: u64) -> Result<(), ActionRingCommandError>;
 }

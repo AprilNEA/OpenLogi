@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use gpui::{AppContext as _, Modifiers, MouseButton, TestAppContext, VisualTestContext, point, px};
-use gpui_component::Root;
+use gpui_kit::component::Root;
 use openlogi_core::config::{
     Config, FlowConfigParts, FlowDevice, FlowHostSlot, FlowLayout, FlowPeer, FlowPublicKey,
 };
@@ -14,6 +14,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 
 use super::*;
 use crate::services::assets::AssetResolver;
+use crate::services::i18n::LOCALE_LOCK;
 use crate::services::ipc::{Command, PairFlowPeer};
 use crate::state::Sources;
 use crate::state::tests::direct_inventory;
@@ -105,12 +106,16 @@ fn open_window(cx: &mut TestAppContext) -> &mut VisualTestContext {
     open_window_to_agent(cx).0
 }
 
-/// The window, and the commands it sends the agent.
+/// The window, and the commands it sends the agent. Callers hold
+/// `LOCALE_LOCK`: a press refreshes the window, and the redraw before the
+/// release re-lays it out in whatever locale a parallel test has set, so the
+/// release misses the element the press hit.
 fn open_window_to_agent(
     cx: &mut TestAppContext,
 ) -> (&mut VisualTestContext, UnboundedReceiver<Command>) {
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     cx.update(theme::register_builtin_themes);
+    cx.update(crate::app::menu::install);
     let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
     cx.update(|cx| {
         let resolver = AssetResolver::new();
@@ -165,6 +170,7 @@ fn health(visual: &mut VisualTestContext) -> FlowHealth {
 /// once a device follows.
 #[gpui::test]
 fn a_peer_gets_a_device_and_moves_with_the_arrow_keys(cx: &mut TestAppContext) {
+    let _locale = LOCALE_LOCK.lock().unwrap();
     let visual = open_window(cx);
     assert_eq!(health(visual), FlowHealth::Blocked, "no device follows yet");
     assert!(
@@ -208,6 +214,7 @@ fn a_peer_gets_a_device_and_moves_with_the_arrow_keys(cx: &mut TestAppContext) {
 /// tray empties once it is placed.
 #[gpui::test]
 fn an_unplaced_peer_is_placed_from_the_inspector_and_dragged(cx: &mut TestAppContext) {
+    let _locale = LOCALE_LOCK.lock().unwrap();
     let visual = open_window(cx);
     assert!(visual.debug_bounds("flow-tile-Lab").is_none());
 
@@ -240,6 +247,7 @@ fn an_unplaced_peer_is_placed_from_the_inspector_and_dragged(cx: &mut TestAppCon
 /// peer asks first, then forgets its key and edge.
 #[gpui::test]
 fn the_switch_trigger_and_removal_write_the_flow_table(cx: &mut TestAppContext) {
+    let _locale = LOCALE_LOCK.lock().unwrap();
     let visual = open_window(cx);
 
     click(visual, "flow-trigger-modifier");
@@ -296,6 +304,7 @@ fn row_of(key: u8) -> &'static str {
 /// the list. A computer already added is listed but cannot be picked.
 #[gpui::test]
 fn adding_a_computer_pairs_with_the_one_picked(cx: &mut TestAppContext) {
+    let _locale = LOCALE_LOCK.lock().unwrap();
     let (visual, mut commands) = open_window_to_agent(cx);
     while commands.try_recv().is_ok() {}
     click(visual, "flow-add");
@@ -324,6 +333,7 @@ fn adding_a_computer_pairs_with_the_one_picked(cx: &mut TestAppContext) {
 /// and the inspector shows the computer so it can get a side.
 #[gpui::test]
 fn a_saved_computer_closes_the_dialog_and_is_selected(cx: &mut TestAppContext) {
+    let _locale = LOCALE_LOCK.lock().unwrap();
     let (visual, mut commands) = open_window_to_agent(cx);
     click(visual, "flow-add");
     show_pairing(
@@ -358,6 +368,7 @@ fn a_saved_computer_closes_the_dialog_and_is_selected(cx: &mut TestAppContext) {
 /// focus is gone with the step it was on. Enter alone closes nothing.
 #[gpui::test]
 fn closing_the_dialog_stops_pairing(cx: &mut TestAppContext) {
+    let _locale = LOCALE_LOCK.lock().unwrap();
     let (visual, mut commands) = open_window_to_agent(cx);
     click(visual, "flow-add");
     show_pairing(visual, FlowPairingPhase::Found(vec![nearby("devbox", 9)]));
@@ -378,6 +389,35 @@ fn closing_the_dialog_stops_pairing(cx: &mut TestAppContext) {
     visual.simulate_keystrokes("escape");
     draw(visual);
     assert!(visual.debug_bounds("flow-pair").is_none());
+    assert!(matches!(
+        commands.try_recv(),
+        Ok(Command::StopFlowPairing(_))
+    ));
+}
+
+#[gpui::test]
+fn window_commands_remain_available_while_pairing(cx: &mut TestAppContext) {
+    use crate::app::menu::{CloseWindow, Minimize, Zoom};
+
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    let other = cx.open_window(gpui::size(px(400.), px(300.)), |_, _| gpui::Empty);
+    let (visual, mut commands) = open_window_to_agent(cx);
+    visual.update(|window, _| window.activate_window());
+    click(visual, "flow-add");
+    show_pairing(visual, FlowPairingPhase::Found(vec![nearby("devbox", 9)]));
+    visual.update(|window, cx| {
+        assert!(window.is_action_available(&Minimize, cx));
+        assert!(window.is_action_available(&Zoom, cx));
+        assert!(window.is_action_available(&CloseWindow, cx));
+    });
+    while commands.try_recv().is_ok() {}
+
+    visual.simulate_keystrokes(if cfg!(target_os = "macos") {
+        "cmd-w"
+    } else {
+        "ctrl-w"
+    });
+    cx.update(|cx| assert_eq!(cx.windows(), vec![other.into()]));
     assert!(matches!(
         commands.try_recv(),
         Ok(Command::StopFlowPairing(_))

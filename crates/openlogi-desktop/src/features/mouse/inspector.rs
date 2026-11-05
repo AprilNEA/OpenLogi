@@ -1,5 +1,6 @@
 //! Fixed binding inspector for the Buttons workspace.
 
+use crate::ui::theme::FocusRingStyle as _;
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
@@ -7,8 +8,8 @@ use gpui::{
     Context, Entity, FocusHandle, InteractiveElement, IntoElement, ParentElement, Role,
     StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px, rgb, svg,
 };
-use gpui_base::Button as BaseButton;
-use gpui_component::{
+use gpui_kit::base::Button as BaseButton;
+use gpui_kit::component::{
     Disableable as _, Icon, IconName, Selectable as _, Sizable as _, button::Button, h_flex,
     input::InputState, scroll::ScrollableElement as _, v_flex,
 };
@@ -769,7 +770,7 @@ fn selection_card(
         .p_3()
         .cursor_pointer()
         .hover(move |card| card.bg(pal.control_hover))
-        .focus_visible(move |card| card.bg(pal.control_hover).border_color(rgb(ACCENT_BLUE)))
+        .focus_visible(move |card| card.focus_ring(pal))
         .child(
             div()
                 .text_caption()
@@ -987,7 +988,7 @@ fn custom_shortcut_editor(
                 div()
                     .debug_selector(move || format!("{id_prefix}-custom-shortcut-error"))
                     .text_caption()
-                    .text_color(rgb(0x00ef_4444))
+                    .text_color(pal.text_danger)
                     .child(match error {
                         ShortcutError::Unrecognized => {
                             tr!("action_ring.custom_action_invalid_input")

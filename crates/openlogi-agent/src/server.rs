@@ -12,7 +12,7 @@ use std::sync::{Arc, PoisonError};
 use std::time::{Duration, Instant};
 
 use futures::StreamExt as _;
-use openlogi_agent_core::action_ring::ActionRingManager;
+use openlogi_agent_core::action_ring::{ActionRingActivation, ActionRingManager};
 use openlogi_agent_core::backlight_overlay::BacklightOverlayManager;
 use openlogi_agent_core::event_monitor::SharedEventMonitor;
 use openlogi_agent_core::observable::ObservableState;
@@ -588,16 +588,7 @@ impl Agent for AgentServer {
         slot: ActionRingSlot,
     ) -> Result<(), ActionRingCommandError> {
         let activation = self.action_ring.activate(session_id, slot)?;
-        self.dispatcher
-            .dispatch(&activation.action, Some(&activation.device_key));
-        self.ring_haptics.play(
-            activation.haptic_route,
-            HapticWaveform::DampStateChange,
-            "activation",
-        );
-        // After the confirmation buzz, so it plays before the engine is
-        // handed back.
-        self.ring_haptics.end_session(session_id);
+        run_ring_activation(&self.dispatcher, &self.ring_haptics, session_id, activation);
         Ok(())
     }
 
@@ -633,6 +624,33 @@ impl Agent for AgentServer {
     async fn stop_flow_pairing(self, _: Context) {
         self.shared.flow.pairing().stop().await;
     }
+
+    async fn action_ring_unhover(
+        self,
+        _: Context,
+        session_id: u64,
+    ) -> Result<(), ActionRingCommandError> {
+        self.action_ring.unhover(session_id)
+    }
+}
+
+/// Run the action a ring session closed on, whether a click on the overlay
+/// or the release of a held trigger chose it, and confirm it with a buzz.
+pub(crate) fn run_ring_activation(
+    dispatcher: &ActionDispatcher,
+    haptics: &RingHapticPlayer,
+    session_id: u64,
+    activation: ActionRingActivation,
+) {
+    dispatcher.dispatch(&activation.action, Some(&activation.device_key));
+    haptics.play(
+        activation.haptic_route,
+        HapticWaveform::DampStateChange,
+        "activation",
+    );
+    // After the confirmation buzz, so it plays before the engine is handed
+    // back.
+    haptics.end_session(session_id);
 }
 
 /// Coalescing Actions Ring haptic player: at most one waveform is in flight,

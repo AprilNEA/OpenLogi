@@ -70,7 +70,7 @@ pub use session::host_switch::{
     switch_linked_hosts,
 };
 pub use session::keyboard::{
-    KeyboardWanted, RESERVED_KEYBOARD_CONTROLS, is_reserved_keyboard_control,
+    GamingWanted, KeyboardWanted, RESERVED_KEYBOARD_CONTROLS, is_reserved_keyboard_control,
     run_keyboard_capture_session,
 };
 pub use write::{
