@@ -220,6 +220,7 @@ pub async fn set_keyboard_color_with(
             method,
             color: openlogi_core::color::Rgb::new(r, g, b),
             keys: Vec::new(),
+            animation: None,
         }
         .apply(
             &*native_backend(),
@@ -249,6 +250,7 @@ pub async fn set_keyboard_key_colors(
             method: LightingMethod::Auto,
             color,
             keys,
+            animation: None,
         }
         .apply(
             &*native_backend(),
@@ -271,6 +273,23 @@ pub async fn walk_per_key_zones(
     observe: impl AsyncFnMut(device::LitZone) -> device::ZoneWalkStep,
 ) -> Result<(), WriteError> {
     device::walk_per_key_zones(&*native_backend(), route, lit, observe).await
+}
+
+/// Every effect the `0x8071` engine of the device `route` reaches offers.
+/// See [`device::rgb_effects`].
+pub async fn rgb_effects(route: &DeviceRoute) -> Result<Vec<device::RgbEffectEntry>, WriteError> {
+    device::rgb_effects(&*native_backend(), route).await
+}
+
+/// Run one `0x8071` effect on the device `route` reaches until `hold`
+/// returns. See [`device::try_rgb_effect`].
+pub async fn try_rgb_effect(
+    route: &DeviceRoute,
+    effect_id: u16,
+    params: [u8; 10],
+    hold: impl AsyncFnOnce(),
+) -> Result<usize, WriteError> {
+    device::try_rgb_effect(&*native_backend(), route, effect_id, params, hold).await
 }
 
 /// Play a haptic waveform on the device `route` reaches.

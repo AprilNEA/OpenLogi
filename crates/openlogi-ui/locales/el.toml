@@ -743,6 +743,15 @@ per_key_hint = "Κάντε κλικ σε πλήκτρα για να τα επι�
 clear_selection = "Απαλοιφή επιλογής"
 use_keyboard_color = "Χρήση χρώματος πληκτρολογίου"
 reset_all_keys = "Επαναφορά όλων των πλήκτρων"
+effect = "Εφέ"
+effect_static = "Σταθερό"
+effect_breathing = "Αναπνοή"
+effect_cycle = "Κύκλος χρωμάτων"
+effect_ripple = "Κυματισμός"
+speed = "Ταχύτητα"
+speed_slow = "Αργή"
+speed_medium = "Μέτρια"
+speed_fast = "Γρήγορη"
 
 [action_ring]
 actions_ring = "Δακτύλιος ενεργειών"

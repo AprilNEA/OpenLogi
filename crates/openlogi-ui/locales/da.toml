@@ -743,6 +743,15 @@ per_key_hint = "Klik på taster for at vælge dem, og vælg derefter en farve. U
 clear_selection = "Ryd valg"
 use_keyboard_color = "Brug tastaturets farve"
 reset_all_keys = "Nulstil alle taster"
+effect = "Effekt"
+effect_static = "Fast"
+effect_breathing = "Åndedræt"
+effect_cycle = "Farvecyklus"
+effect_ripple = "Krusning"
+speed = "Hastighed"
+speed_slow = "Langsom"
+speed_medium = "Middel"
+speed_fast = "Hurtig"
 
 [action_ring]
 actions_ring = "Handlingsring"

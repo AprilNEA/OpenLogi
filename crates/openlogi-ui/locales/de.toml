@@ -743,6 +743,15 @@ per_key_hint = "Klicke auf Tasten, um sie auszuwählen, und wähle dann eine Far
 clear_selection = "Auswahl aufheben"
 use_keyboard_color = "Tastaturfarbe verwenden"
 reset_all_keys = "Alle Tasten zurücksetzen"
+effect = "Effekt"
+effect_static = "Statisch"
+effect_breathing = "Atmen"
+effect_cycle = "Farbwechsel"
+effect_ripple = "Welleneffekt"
+speed = "Geschwindigkeit"
+speed_slow = "Langsam"
+speed_medium = "Mittel"
+speed_fast = "Schnell"
 
 [action_ring]
 actions_ring = "Aktionsring"

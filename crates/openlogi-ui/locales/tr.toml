@@ -743,6 +743,15 @@ per_key_hint = "Seçmek için tuşlara tıklayın, ardından bir renk seçin. Hi
 clear_selection = "Seçimi temizle"
 use_keyboard_color = "Klavye rengini kullan"
 reset_all_keys = "Tüm tuşları sıfırla"
+effect = "Efekt"
+effect_static = "Sabit"
+effect_breathing = "Nefes"
+effect_cycle = "Renk döngüsü"
+effect_ripple = "Dalgalanma"
+speed = "Hız"
+speed_slow = "Yavaş"
+speed_medium = "Orta"
+speed_fast = "Hızlı"
 
 [action_ring]
 actions_ring = "Eylem Halkası"

@@ -33,6 +33,7 @@ use super::{
 mod rgb;
 
 pub use rgb::RgbControlLease;
+pub use rgb::effects::{OnboardSlotInfo, RgbEffectEntry, rgb_effects, try_rgb_effect};
 
 /// HID++ `PerKeyLighting` (`0x8080`) — streams each key's colour individually.
 /// Its feature *index* varies per device, so it's resolved at runtime.
@@ -119,6 +120,7 @@ pub async fn set_keyboard_color_with(
         method,
         color: openlogi_core::color::Rgb::new(r, g, b),
         keys: Vec::new(),
+        animation: None,
     }
     .apply(backend, route, || false, || true)
     .await
@@ -138,6 +140,79 @@ pub struct LightingWrite {
     /// [`openlogi_device_registry::keyboard`] knows; any other device shows
     /// [`Self::color`] alone.
     pub keys: Vec<(u8, openlogi_core::color::Rgb)>,
+    /// A firmware animation to run instead of the still colours, through
+    /// the `0x8071` effect engine. A device whose engine does not offer it
+    /// shows [`Self::color`] instead. Only [`LightingMethod::Auto`] runs it.
+    pub animation: Option<LightingAnimation>,
+}
+
+/// An `0x8071` effect a lighting write runs instead of a still colour, with
+/// the parameter layout worked out on a G515 LS TKL. The effect ids are the
+/// engine's own, so any device that offers one takes the same layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LightingAnimation {
+    /// [`LightingWrite::color`] fades in and out.
+    Breathing {
+        /// Milliseconds from one peak to the next.
+        period_ms: u16,
+    },
+    /// Every hue in turn.
+    Cycle {
+        /// Milliseconds for one full turn.
+        period_ms: u16,
+        /// Brightness percent, `0`–`100`.
+        intensity: u8,
+    },
+    /// A pressed key lights in [`LightingWrite::color`] and the light
+    /// spreads to its neighbours.
+    Ripple {
+        /// Milliseconds the light takes to fade.
+        period_ms: u16,
+    },
+}
+
+impl LightingAnimation {
+    /// The `0x8071` effect id.
+    #[must_use]
+    pub const fn effect_id(self) -> u16 {
+        match self {
+            Self::Breathing { .. } => 0x000a,
+            Self::Cycle { .. } => 0x0015,
+            Self::Ripple { .. } => 0x0017,
+        }
+    }
+
+    /// The `setRgbClusterEffect` parameters for this effect in `color`.
+    ///
+    /// - Breathing: colour (0–2), period (3–4, big-endian), intensity (6).
+    /// - Cycle: saturation (1), period (5–6, little-endian), intensity (7).
+    /// - Ripple: the pressed key's colour (0–2), the spreading wave's colour
+    ///   (3–5, the same here), period (6–7, big-endian).
+    #[must_use]
+    pub fn params(self, color: openlogi_core::color::Rgb) -> [u8; 10] {
+        let (r, g, b) = color.components();
+        let mut params = [0; 10];
+        match self {
+            Self::Breathing { period_ms } => {
+                params[..3].copy_from_slice(&[r, g, b]);
+                params[3..5].copy_from_slice(&period_ms.to_be_bytes());
+                params[6] = 100;
+            }
+            Self::Cycle {
+                period_ms,
+                intensity,
+            } => {
+                params[1] = 0xff;
+                params[5..7].copy_from_slice(&period_ms.to_le_bytes());
+                params[7] = intensity.min(100);
+            }
+            Self::Ripple { period_ms } => {
+                params[..6].copy_from_slice(&[r, g, b, r, g, b]);
+                params[6..8].copy_from_slice(&period_ms.to_be_bytes());
+            }
+        }
+        params
+    }
 }
 
 impl LightingWrite {
@@ -207,6 +282,9 @@ impl LightingWrite {
             }
             LightingMethod::Auto => {}
         }
+        if let Some(lease) = self.animate(channel, index, &scope).await? {
+            return Ok(Some(lease));
+        }
         if !self.keys.is_empty() {
             // Per-key colours need 0x8081 and a known zone map. Every probe
             // precedes the first claim, so a keyboard without either falls
@@ -275,6 +353,35 @@ impl LightingWrite {
     /// effect over host frames; without one there is nothing to claim. Zone
     /// discovery precedes the claim, so a device without usable zones still
     /// falls back without mutation.
+    /// Run [`Self::animation`] on the effect engine. `None` when there is no
+    /// animation or the device does not offer it: every probe precedes the
+    /// claim, so nothing was changed and the caller paints one colour.
+    async fn animate(
+        &self,
+        channel: &Arc<HidppChannel>,
+        index: u8,
+        scope: &WriteScope<impl Fn() -> bool, impl Fn() -> bool>,
+    ) -> Result<Option<RgbControlLease>, WriteError> {
+        let Some(animation) = self.animation else {
+            return Ok(None);
+        };
+        let Some(engine) = rgb::probe(channel, index, scope).await? else {
+            debug!(?animation, "no 0x8071 effect engine; painting one colour");
+            return Ok(None);
+        };
+        let params = animation.params(self.color);
+        let lease = engine
+            .apply_animation(index, animation.effect_id(), params, scope)
+            .await?;
+        if lease.is_none() {
+            debug!(
+                ?animation,
+                "no cluster offers this effect; painting one colour"
+            );
+        }
+        Ok(lease)
+    }
+
     async fn per_key_v2(
         &self,
         channel: &Arc<HidppChannel>,
@@ -1018,6 +1125,7 @@ pub async fn set_keyboard_color_with_on(
         method,
         color: openlogi_core::color::Rgb::new(r, g, b),
         keys: Vec::new(),
+        animation: None,
     }
     .apply_on(shared, || false, || shared.channel().is_connected())
     .await

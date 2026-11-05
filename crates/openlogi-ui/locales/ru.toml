@@ -743,6 +743,15 @@ per_key_hint = "Нажмите на клавиши, чтобы выбрать и
 clear_selection = "Снять выделение"
 use_keyboard_color = "Цвет клавиатуры"
 reset_all_keys = "Сбросить все клавиши"
+effect = "Эффект"
+effect_static = "Статичный"
+effect_breathing = "Дыхание"
+effect_cycle = "Смена цветов"
+effect_ripple = "Рябь"
+speed = "Скорость"
+speed_slow = "Медленно"
+speed_medium = "Средне"
+speed_fast = "Быстро"
 
 [action_ring]
 actions_ring = "Кольцо действий"

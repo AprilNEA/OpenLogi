@@ -11,23 +11,36 @@ use std::collections::BTreeSet;
 use crate::ui::theme::FocusRingStyle as _;
 use gpui::{
     Context, InteractiveElement, IntoElement, ParentElement, Render, Role,
-    StatefulInteractiveElement as _, Styled, Subscription, Toggled, Window, div, px, rgb,
+    StatefulInteractiveElement as _, Styled, Subscription, Toggled, Window, div,
+    prelude::FluentBuilder as _, px, rgb,
 };
 use gpui_kit::base::Button as BaseButton;
 use gpui_kit::component::{
-    Disableable as _, Selectable as _, Sizable as _, button::Button, h_flex, slider::Slider, v_flex,
+    Disableable as _, Selectable as _, Sizable as _,
+    button::{Button, ButtonGroup},
+    h_flex,
+    slider::Slider,
+    v_flex,
 };
 use openlogi_core::color::Rgb;
-use openlogi_core::config::{Lighting, LightingKey};
+use openlogi_core::config::{Lighting, LightingEffect, LightingKey};
 
-use super::per_key::{key_color, per_key_photo, photo_editor};
+use super::per_key::{has_firmware_effects, key_color, per_key_photo, photo_editor};
 use crate::state::{AppState, StateEvent};
 use crate::ui::commit_slider::{CommitSlider, SliderRange};
 use crate::ui::components::{Toggle, toggle_row};
 use crate::ui::slider_row::SliderRow;
-use crate::ui::theme::{self, Palette, Typography as _};
+use crate::ui::theme::{self, Palette, SelectableStyle as _, Typography as _};
 
 const SWATCH: f32 = 28.;
+
+/// The effects the selector offers, in its order.
+const EFFECTS: [LightingEffect; 4] = [
+    LightingEffect::Static,
+    LightingEffect::Breathing,
+    LightingEffect::Cycle,
+    LightingEffect::Ripple,
+];
 
 /// Preset colors. Deliberately small — covering the common keyboard accent
 /// colors.
@@ -96,7 +109,16 @@ impl Render for LightingPanel {
         let state = AppState::try_read(cx);
         let lighting = state.map(AppState::lighting).unwrap_or_default();
         let record = state.and_then(AppState::current_record);
-        let photo = record.and_then(per_key_photo);
+        let effects = record.is_some_and(has_firmware_effects);
+        let effect = if effects {
+            lighting.effect
+        } else {
+            LightingEffect::Static
+        };
+        // Keys are picked only for the still colours they keep.
+        let photo = record
+            .and_then(per_key_photo)
+            .filter(|_| effect == LightingEffect::Static);
         let device = record.map(|record| record.config_key.clone());
         if self.selection_device != device || photo.is_none() {
             self.selected.clear();
@@ -108,10 +130,31 @@ impl Render for LightingPanel {
         // disturbing an in-progress drag.
         self.brightness.sync(lighting.brightness, window, cx);
 
-        let swatches: Vec<_> = PALETTE
-            .iter()
-            .map(|&color| swatch(color, &lighting, &self.selected, pal))
-            .collect();
+        // The cycle turns through every hue, so it takes no colour.
+        let swatches: Vec<_> = if effect == LightingEffect::Cycle {
+            Vec::new()
+        } else {
+            PALETTE
+                .iter()
+                .map(|&color| swatch(color, &lighting, &self.selected, pal))
+                .collect()
+        };
+        let effect_rows = effects.then(|| {
+            v_flex()
+                .gap_3()
+                .child(labelled(
+                    tr!("lighting.effect"),
+                    effect_control(effect, cx),
+                    pal,
+                ))
+                .when(effect != LightingEffect::Static, |rows| {
+                    rows.child(labelled(
+                        tr!("lighting.speed"),
+                        speed_control(&lighting, cx),
+                        pal,
+                    ))
+                })
+        });
         let editor = photo.map(|photo| {
             v_flex()
                 .gap_2()
@@ -145,6 +188,7 @@ impl Render for LightingPanel {
                         });
                     }),
             ))
+            .children(effect_rows)
             .children(editor)
             .child(h_flex().gap_2().flex_wrap().children(swatches))
             .child(
@@ -158,6 +202,99 @@ impl Render for LightingPanel {
                 ),
             )
     }
+}
+
+/// A caption over `control`.
+fn labelled(label: impl IntoElement, control: impl IntoElement, pal: Palette) -> impl IntoElement {
+    v_flex()
+        .gap_1()
+        .child(div().text_caption().text_color(pal.text_muted).child(label))
+        .child(control)
+}
+
+/// One segment per firmware effect; picking one starts it at its own pace.
+fn effect_control(effect: LightingEffect, cx: &gpui::App) -> impl IntoElement {
+    let labels = [
+        tr!("lighting.effect_static"),
+        tr!("lighting.effect_breathing"),
+        tr!("lighting.effect_cycle"),
+        tr!("lighting.effect_ripple"),
+    ];
+    EFFECTS
+        .iter()
+        .zip(labels)
+        .enumerate()
+        .fold(
+            ButtonGroup::new("lighting-effect").w_full().outline(),
+            |group, (index, (&value, label))| {
+                group.child(
+                    Button::new(("lighting-effect", index))
+                        .flex_1()
+                        .label(label)
+                        .selected(effect == value)
+                        .selected_segment(effect == value, cx),
+                )
+            },
+        )
+        .on_click(|indices, _window, cx| {
+            let Some(&value) = indices.first().and_then(|index| EFFECTS.get(*index)) else {
+                return;
+            };
+            AppState::apply(cx, |state| {
+                let mut next = state.lighting();
+                next.enabled = true;
+                next.effect = value;
+                next.period_ms = None;
+                state.commit_lighting(next)
+            });
+        })
+}
+
+/// Slow, medium and fast paces for `effect`, in milliseconds per round. The
+/// medium one is the effect's own pace.
+fn speed_presets(effect: LightingEffect) -> [u16; 3] {
+    let medium = effect.default_period_ms();
+    [medium.saturating_mul(2), medium, medium / 2]
+}
+
+/// Slow, medium and fast for the running effect.
+fn speed_control(lighting: &Lighting, cx: &gpui::App) -> impl IntoElement {
+    let presets = speed_presets(lighting.effect);
+    let current = lighting
+        .period_ms
+        .unwrap_or_else(|| lighting.effect.default_period_ms());
+    let labels = [
+        tr!("lighting.speed_slow"),
+        tr!("lighting.speed_medium"),
+        tr!("lighting.speed_fast"),
+    ];
+    presets
+        .iter()
+        .zip(labels)
+        .enumerate()
+        .fold(
+            ButtonGroup::new("lighting-speed").w_full().outline(),
+            |group, (index, (&period, label))| {
+                group.child(
+                    Button::new(("lighting-speed", index))
+                        .flex_1()
+                        .label(label)
+                        .selected(current == period)
+                        .selected_segment(current == period, cx),
+                )
+            },
+        )
+        .on_click(move |indices, _window, cx| {
+            let Some(&period) = indices.first().and_then(|index| presets.get(*index)) else {
+                return;
+            };
+            AppState::apply(cx, |state| {
+                let mut next = state.lighting();
+                next.enabled = true;
+                next.period_ms = Some(period);
+                state.commit_lighting(next)
+            });
+        })
 }
 
 /// The buttons under the photo: drop the picked keys, give them back the

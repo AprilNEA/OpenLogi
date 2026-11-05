@@ -17,6 +17,7 @@ fn write() -> LightingWrite {
         method: LightingMethod::Auto,
         color: Rgb::new(0x17, 0x82, 0xc4),
         keys: Vec::new(),
+        animation: None,
     }
 }
 
@@ -719,5 +720,53 @@ async fn one_colour_repaints_a_known_keyboard_frame() {
     assert!(
         reports.iter().any(|r| r[2] == 7 && r[3] >> 4 == 7),
         "the frame is committed"
+    );
+}
+
+#[test]
+fn animation_params_follow_the_layout_worked_out_on_a_g515() {
+    use crate::write::LightingAnimation;
+
+    let red = Rgb::new(0xff, 0, 0);
+    assert_eq!(
+        LightingAnimation::Breathing { period_ms: 4000 }.params(red),
+        [0xff, 0, 0, 0x0f, 0xa0, 0, 100, 0, 0, 0]
+    );
+    assert_eq!(
+        LightingAnimation::Cycle {
+            period_ms: 5000,
+            intensity: 60,
+        }
+        .params(red),
+        [0, 0xff, 0, 0, 0, 0x88, 0x13, 60, 0, 0]
+    );
+    assert_eq!(
+        LightingAnimation::Ripple { period_ms: 500 }.params(red),
+        [0xff, 0, 0, 0xff, 0, 0, 0x01, 0xf4, 0, 0]
+    );
+}
+
+/// A device whose engine offers no breathing effect shows the colour
+/// instead, through the Static effects of a normal write.
+#[tokio::test]
+async fn an_animation_no_cluster_offers_falls_back_to_the_colour() {
+    let (shared, handle) = device(response).await;
+    let write = LightingWrite {
+        animation: Some(crate::write::LightingAnimation::Breathing { period_ms: 4000 }),
+        ..write()
+    };
+
+    let lease = write.apply_on(&shared, || false, || true).await;
+
+    assert!(
+        lease.is_ok_and(|lease| lease.is_some()),
+        "the colour is painted"
+    );
+    let reports = handle.written_reports();
+    let effects: Vec<_> = reports.iter().filter(|r| is_effect(r)).collect();
+    assert!(!effects.is_empty(), "Static effects are written");
+    assert!(
+        effects.iter().all(|r| r[6..9] == [0x17, 0x82, 0xc4]),
+        "every effect carries the colour: {effects:?}"
     );
 }

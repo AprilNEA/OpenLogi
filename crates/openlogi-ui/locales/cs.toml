@@ -743,6 +743,15 @@ per_key_hint = "Klepnutím vyberte klávesy a poté zvolte barvu. Bez vybraných
 clear_selection = "Zrušit výběr"
 use_keyboard_color = "Použít barvu klávesnice"
 reset_all_keys = "Obnovit všechny klávesy"
+effect = "Efekt"
+effect_static = "Pevná"
+effect_breathing = "Dýchání"
+effect_cycle = "Cyklus barev"
+effect_ripple = "Vlnění"
+speed = "Rychlost"
+speed_slow = "Pomalá"
+speed_medium = "Střední"
+speed_fast = "Rychlá"
 
 [action_ring]
 actions_ring = "Kruh akcí"

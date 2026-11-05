@@ -12,6 +12,8 @@ fn lighting_roundtrips_per_device() {
             color: "00aabb".parse().expect("valid hex"),
             brightness: 75,
             keys: BTreeMap::new(),
+            effect: LightingEffect::Static,
+            period_ms: None,
         },
     );
     let restored = write_and_read(&cfg);
@@ -22,6 +24,8 @@ fn lighting_roundtrips_per_device() {
             color: "00aabb".parse().expect("valid hex"),
             brightness: 75,
             keys: BTreeMap::new(),
+            effect: LightingEffect::Static,
+            period_ms: None,
         })
     );
     assert_eq!(restored.lighting("absent"), None);
@@ -220,4 +224,23 @@ fn hash_prefixed_lighting_color_migrates_to_canonical_hex() {
     let saved = fs::read_to_string(path).expect("read saved config");
     assert!(saved.contains("color = \"ff0000\""));
     assert!(!saved.contains("color = \"#"));
+}
+
+#[test]
+fn an_effect_and_its_pace_roundtrip_and_a_static_one_stays_out_of_the_file() {
+    let mut cfg = Config::default();
+    let breathing = Lighting {
+        effect: LightingEffect::Breathing,
+        period_ms: Some(2500),
+        ..Lighting::default()
+    };
+    cfg.set_lighting("g515", breathing.clone());
+    cfg.set_lighting("plain", Lighting::default());
+    let text = toml::to_string(&cfg).expect("config serializes");
+    assert!(text.contains("effect = \"breathing\""), "{text}");
+    assert!(text.contains("period_ms = 2500"), "{text}");
+    assert!(!text.contains("effect = \"static\""), "{text}");
+    let restored = write_and_read(&cfg);
+    assert_eq!(restored.lighting("g515"), Some(breathing));
+    assert_eq!(restored.lighting("plain"), Some(Lighting::default()));
 }

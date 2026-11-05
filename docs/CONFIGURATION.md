@@ -236,6 +236,14 @@ Common device fields are:
   Key colours show only on a keyboard whose lighting zones OpenLogi has
   mapped (today the G515 LS TKL); others keep the static colour. An unknown
   key name stops the file from loading.
+
+  `effect` picks an animation the keyboard's firmware runs instead of the
+  still colours: `static` (the default), `breathing` (`color` fades in and
+  out), `cycle` (every hue in turn) or `ripple` (a pressed key lights in
+  `color` and the light spreads to its neighbours). `period_ms` sets how
+  long one round takes, from 100 to 60000; left out, the effect keeps its
+  own pace (4000, 5000 and 500 ms). Brightness applies to every effect. A
+  keyboard whose firmware does not offer the effect shows `color`.
 - `smartshift`, and camera controls / profiles
 - `camera_stream_mode`: the live preview's mode, a table of `width`, `height`
   (pixels) and `fps`. All three are required and must be positive, or the file

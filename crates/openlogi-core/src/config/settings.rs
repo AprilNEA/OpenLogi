@@ -708,7 +708,7 @@ fn default_true() -> bool {
 }
 
 /// Per-device RGB lighting: a static color, optional per-key colors over it,
-/// brightness, and on/off.
+/// or a firmware animation, with brightness and on/off.
 ///
 /// Crosses the agent↔GUI IPC (`set_lighting`), so field order is wire format —
 /// changes require a `PROTOCOL_VERSION` bump (guarded by
@@ -739,10 +739,48 @@ pub struct Lighting {
     /// other keeps the static color.
     #[serde(default, deserialize_with = "deserialize_lighting_keys")]
     pub keys: BTreeMap<LightingKey, Rgb>,
+    /// An animation the keyboard's firmware runs instead of the still
+    /// colors. [`LightingEffect::Static`] keeps [`Self::color`] and
+    /// [`Self::keys`].
+    #[serde(default)]
+    pub effect: LightingEffect,
+    /// How long one round of [`Self::effect`] takes, in milliseconds. Left
+    /// out, the effect's own pace ([`LightingEffect::default_period_ms`]).
+    #[serde(default)]
+    pub period_ms: Option<u16>,
 }
 
-/// The config file leaves an empty key map out. The IPC encoding has no field
-/// names, so it always carries the map.
+/// A lighting animation the keyboard's firmware runs by itself.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LightingEffect {
+    /// The still [`Lighting::color`], with any [`Lighting::keys`] over it.
+    #[default]
+    Static,
+    /// [`Lighting::color`] fades in and out.
+    Breathing,
+    /// The whole keyboard turns through every hue.
+    Cycle,
+    /// A pressed key lights in [`Lighting::color`], spreading to its
+    /// neighbours.
+    Ripple,
+}
+
+impl LightingEffect {
+    /// The pace an effect takes when [`Lighting::period_ms`] is left out.
+    #[must_use]
+    pub const fn default_period_ms(self) -> u16 {
+        match self {
+            Self::Static => 0,
+            Self::Breathing => 4000,
+            Self::Cycle => 5000,
+            Self::Ripple => 500,
+        }
+    }
+}
+
+/// The config file leaves out an empty key map, a static effect and an unset
+/// period. The IPC encoding has no field names, so it always carries them.
 impl Serialize for Lighting {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -750,8 +788,12 @@ impl Serialize for Lighting {
     {
         use serde::ser::SerializeStruct as _;
 
-        let skip_keys = serializer.is_human_readable() && self.keys.is_empty();
-        let mut state = serializer.serialize_struct("Lighting", if skip_keys { 3 } else { 4 })?;
+        let file = serializer.is_human_readable();
+        let skip_keys = file && self.keys.is_empty();
+        let skip_effect = file && self.effect == LightingEffect::Static;
+        let skip_period = file && self.period_ms.is_none();
+        let len = 6 - usize::from(skip_keys) - usize::from(skip_effect) - usize::from(skip_period);
+        let mut state = serializer.serialize_struct("Lighting", len)?;
         state.serialize_field("enabled", &self.enabled)?;
         state.serialize_field("color", &self.color)?;
         state.serialize_field("brightness", &self.brightness)?;
@@ -759,6 +801,16 @@ impl Serialize for Lighting {
             state.skip_field("keys")?;
         } else {
             state.serialize_field("keys", &self.keys)?;
+        }
+        if skip_effect {
+            state.skip_field("effect")?;
+        } else {
+            state.serialize_field("effect", &self.effect)?;
+        }
+        if skip_period {
+            state.skip_field("period_ms")?;
+        } else {
+            state.serialize_field("period_ms", &self.period_ms)?;
         }
         state.end()
     }
@@ -852,6 +904,8 @@ impl Default for Lighting {
             color: default_lighting_color(),
             brightness: default_lighting_brightness(),
             keys: BTreeMap::new(),
+            effect: LightingEffect::Static,
+            period_ms: None,
         }
     }
 }

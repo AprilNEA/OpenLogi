@@ -743,6 +743,15 @@ per_key_hint = "Cliquez sur des touches pour les sélectionner, puis choisissez 
 clear_selection = "Effacer la sélection"
 use_keyboard_color = "Utiliser la couleur du clavier"
 reset_all_keys = "Réinitialiser toutes les touches"
+effect = "Effet"
+effect_static = "Fixe"
+effect_breathing = "Respiration"
+effect_cycle = "Cycle de couleurs"
+effect_ripple = "Ondulation"
+speed = "Vitesse"
+speed_slow = "Lente"
+speed_medium = "Moyenne"
+speed_fast = "Rapide"
 
 [action_ring]
 actions_ring = "Anneau d’actions"

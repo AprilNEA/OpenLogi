@@ -24,6 +24,7 @@ const FEATURE: u16 = 0x8071;
 // The effect ID is stable; each cluster's index for it is discovered separately.
 const STATIC_RGB: u16 = 1;
 
+pub(super) mod effects;
 #[cfg(test)]
 mod tests;
 

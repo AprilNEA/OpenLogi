@@ -743,6 +743,15 @@ per_key_hint = "Націсніце на клавішы, каб выбраць і
 clear_selection = "Зняць выбар"
 use_keyboard_color = "Колер клавіятуры"
 reset_all_keys = "Скінуць усе клавішы"
+effect = "Эфект"
+effect_static = "Статычны"
+effect_breathing = "Дыханне"
+effect_cycle = "Змена колераў"
+effect_ripple = "Рабізна"
+speed = "Хуткасць"
+speed_slow = "Павольна"
+speed_medium = "Сярэдне"
+speed_fast = "Хутка"
 
 [action_ring]
 actions_ring = "Кола дзеянняў"

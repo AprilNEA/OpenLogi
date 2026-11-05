@@ -857,6 +857,7 @@ fn key_colour_write(keys: &[(u8, [u8; 3])]) -> LightingWrite {
             .iter()
             .map(|&(usage, color)| (usage, rgb(color)))
             .collect(),
+        animation: None,
     }
 }
 

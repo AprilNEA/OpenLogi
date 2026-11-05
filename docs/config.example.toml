@@ -111,6 +111,10 @@ brightness = 80
 # On a keyboard with mapped lighting zones, single keys can take their own
 # colour over `color`:
 # keys = { Esc = "ffffff", W = "ff00ff", A = "ff00ff", S = "ff00ff", D = "ff00ff" }
+# Or an animation the keyboard runs by itself, at its own pace unless
+# `period_ms` says otherwise:
+# effect = "breathing"
+# period_ms = 3000
 
 [devices."receiver:aabbccdd:slot:1".smartshift]
 mode = "ratchet"

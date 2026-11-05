@@ -743,6 +743,15 @@ per_key_hint = "Натисніть клавіші, щоб вибрати їх, �
 clear_selection = "Скасувати вибір"
 use_keyboard_color = "Колір клавіатури"
 reset_all_keys = "Скинути всі клавіші"
+effect = "Ефект"
+effect_static = "Статичний"
+effect_breathing = "Дихання"
+effect_cycle = "Зміна кольорів"
+effect_ripple = "Брижі"
+speed = "Швидкість"
+speed_slow = "Повільно"
+speed_medium = "Середньо"
+speed_fast = "Швидко"
 
 [action_ring]
 actions_ring = "Кільце дій"

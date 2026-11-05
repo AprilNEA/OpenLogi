@@ -51,6 +51,17 @@ impl PerKeyPhoto {
     }
 }
 
+/// Whether `record` is a keyboard whose firmware effects OpenLogi drives:
+/// the ones whose parameters were worked out on that keyboard, which today
+/// are the ones with a known zone map.
+pub(crate) fn has_firmware_effects(record: &DeviceRecord) -> bool {
+    record.kind == DeviceKind::Keyboard
+        && record
+            .model_info
+            .as_ref()
+            .is_some_and(|info| per_key_zones(info.model_ids).is_some())
+}
+
 /// The photo editor for `record`, or `None` when the keyboard has no known
 /// zone map or its depot does not draw its keys.
 pub(crate) fn per_key_photo(record: &DeviceRecord) -> Option<PerKeyPhoto> {

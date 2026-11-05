@@ -743,6 +743,15 @@ per_key_hint = "Valitse näppäimiä napsauttamalla ja valitse sitten väri. Jos
 clear_selection = "Tyhjennä valinta"
 use_keyboard_color = "Käytä näppäimistön väriä"
 reset_all_keys = "Palauta kaikki näppäimet"
+effect = "Tehoste"
+effect_static = "Kiinteä"
+effect_breathing = "Hengitys"
+effect_cycle = "Värikierto"
+effect_ripple = "Väreily"
+speed = "Nopeus"
+speed_slow = "Hidas"
+speed_medium = "Keskitaso"
+speed_fast = "Nopea"
 
 [action_ring]
 actions_ring = "Toimintorengas"

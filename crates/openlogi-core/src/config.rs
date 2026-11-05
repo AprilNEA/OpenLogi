@@ -53,7 +53,7 @@ pub use revision::ConfigRevision;
 pub use settings::LightSettings;
 pub use settings::{
     AppIcon, AppSettings, Appearance, AssetSourcePreference, CameraControls, CameraStreamMode,
-    DeviceViewMode, GKeyOwner, GamingKeyMode, GlideShape, Lighting, MomentumParams,
+    DeviceViewMode, GKeyOwner, GamingKeyMode, GlideShape, Lighting, LightingEffect, MomentumParams,
     MomentumScrolling, MouseProfileTarget, OnboardMemory, SMARTSHIFT_AUTO_DISENGAGE_DEFAULT,
     SMARTSHIFT_MIN_AUTO_DISENGAGE, ScrollResolution, SmartShift, ThumbwheelSensitivity, UiScale,
     VerticalScrollSensitivity, WheelMode,

@@ -743,6 +743,15 @@ per_key_hint = "Klicka på tangenter för att markera dem och välj sedan en fä
 clear_selection = "Rensa markering"
 use_keyboard_color = "Använd tangentbordets färg"
 reset_all_keys = "Återställ alla tangenter"
+effect = "Effekt"
+effect_static = "Fast"
+effect_breathing = "Andning"
+effect_cycle = "Färgcykel"
+effect_ripple = "Krusning"
+speed = "Hastighet"
+speed_slow = "Långsam"
+speed_medium = "Medel"
+speed_fast = "Snabb"
 
 [action_ring]
 actions_ring = "Åtgärdsring"

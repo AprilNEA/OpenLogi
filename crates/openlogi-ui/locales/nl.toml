@@ -743,6 +743,15 @@ per_key_hint = "Klik op toetsen om ze te selecteren en kies dan een kleur. Zonde
 clear_selection = "Selectie wissen"
 use_keyboard_color = "Toetsenbordkleur gebruiken"
 reset_all_keys = "Alle toetsen herstellen"
+effect = "Effect"
+effect_static = "Vast"
+effect_breathing = "Ademen"
+effect_cycle = "Kleurencyclus"
+effect_ripple = "Rimpeling"
+speed = "Snelheid"
+speed_slow = "Langzaam"
+speed_medium = "Gemiddeld"
+speed_fast = "Snel"
 
 [action_ring]
 actions_ring = "Actiering"

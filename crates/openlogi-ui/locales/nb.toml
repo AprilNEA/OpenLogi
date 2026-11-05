@@ -743,6 +743,15 @@ per_key_hint = "Klikk på taster for å velge dem, og velg deretter en farge. Ut
 clear_selection = "Fjern valg"
 use_keyboard_color = "Bruk tastaturets farge"
 reset_all_keys = "Tilbakestill alle taster"
+effect = "Effekt"
+effect_static = "Fast"
+effect_breathing = "Pust"
+effect_cycle = "Fargesyklus"
+effect_ripple = "Krusning"
+speed = "Hastighet"
+speed_slow = "Sakte"
+speed_medium = "Middels"
+speed_fast = "Rask"
 
 [action_ring]
 actions_ring = "Handlingsring"
