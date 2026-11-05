@@ -155,7 +155,8 @@ fn sync_depot(
     // Baseline: hotspot metadata + manifest + hero render, in whichever
     // schema this depot ships (`*_core` or the bare names). Manifest is
     // fetched here so the variant lookup below has something to consult.
-    for name in entry.baseline_files() {
+    let mut fetched = entry.baseline_files();
+    for name in &fetched {
         fetch_to_cache(client, &entry.asset_path, &dir, entry, name)?;
     }
 
@@ -163,10 +164,11 @@ fn sync_depot(
     // points `device_buttons_image` at a distinct side view. Fetch it only
     // when the registry lists it so front-only devices don't 404; failure
     // is non-fatal (the GUI falls back to the hero render).
-    if let Some(side) = entry.preferred_file(&BUTTONS_RENDER_FILES)
-        && let Err(e) = fetch_to_cache(client, &entry.asset_path, &dir, entry, side)
-    {
-        warn!(depot, error = %e, "buttons render fetch failed");
+    if let Some(side) = entry.preferred_file(&BUTTONS_RENDER_FILES) {
+        match fetch_to_cache(client, &entry.asset_path, &dir, entry, side) {
+            Ok(()) => fetched.push(side),
+            Err(e) => warn!(depot, error = %e, "buttons render fetch failed"),
+        }
     }
 
     // Optional second pass: download the manifest-mapped resources — the
@@ -189,16 +191,7 @@ fn sync_depot(
         else {
             continue;
         };
-        if matches!(
-            variant.as_str(),
-            "front_core.png"
-                | "front.png"
-                | "side_core.png"
-                | "side.png"
-                | "core_metadata.json"
-                | "metadata_full.json"
-                | "metadata.json"
-        ) {
+        if fetched.contains(&variant.as_str()) {
             continue;
         }
         if let Err(e) = fetch_to_cache(client, &entry.asset_path, &dir, entry, &variant) {
@@ -321,6 +314,69 @@ mod tests {
     use super::{AssetTarget, model_key, source_for_sync};
     use openlogi_assets::AssetSource;
     use openlogi_core::config::AssetSourcePreference;
+
+    #[test]
+    fn g512_sync_fetches_metadata_not_in_the_baseline() {
+        use std::io::{Read, Write};
+        use std::net::{TcpListener, TcpStream};
+
+        let root = tempfile::tempdir().expect("asset root");
+        let dir = root.path().join("g513");
+        std::fs::create_dir(&dir).unwrap();
+        let metadata = br#"{"images":[]}"#;
+        let mut entry = openlogi_assets::DeviceEntry {
+            model_id: "c33c".into(),
+            model_ids: Vec::new(),
+            display_name: "G513".into(),
+            kind: "keyboard".into(),
+            asset_path: "assets/g513/".into(),
+            files: Vec::new(),
+        };
+        for (name, bytes) in [
+            ("manifest.json", br#"{"devices":[{"modelId":"g512_ext6","resources":[{"key":"image_metadata","src":"metadata.json"}]}]}"#.as_slice()),
+            ("metadata_full.json", br#"{"images":[]}"#.as_slice()),
+            ("metadata.json", metadata.as_slice()),
+        ] {
+            entry.files.push(openlogi_assets::FileEntry {
+                name: name.into(),
+                sha256: openlogi_assets::http::sha256_hex(bytes),
+                bytes: bytes.len() as u64,
+            });
+            if name != "metadata.json" {
+                std::fs::write(dir.join(name), bytes).unwrap();
+            }
+        }
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut byte = [0];
+            while stream.read(&mut byte).unwrap() != 0 {
+                request.push(byte[0]);
+                if request.ends_with(b"\r\n\r\n") {
+                    break;
+                }
+            }
+            if !request.is_empty() {
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    metadata.len()
+                )
+                .unwrap();
+                stream.write_all(metadata).unwrap();
+            }
+            request
+        });
+        let client = openlogi_assets::http::AssetClient::new(&format!("http://{address}"));
+        super::sync_depot(&client, root.path(), "g513", &entry, 6).unwrap();
+        // Release the server even when a regression skips the HTTP request.
+        drop(TcpStream::connect(address));
+        let request = server.join().unwrap();
+        assert!(request.starts_with(b"GET /assets/g513/metadata.json "));
+        assert_eq!(std::fs::read(dir.join("metadata.json")).unwrap(), metadata);
+    }
 
     #[test]
     fn g512_photo_and_metadata_are_selected_for_download() {
