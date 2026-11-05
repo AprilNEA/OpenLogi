@@ -41,9 +41,10 @@ use openlogi_core::config::{
     ConfigRevision, FlowPeerName, FlowPublicKey, Lighting, ScrollResolution,
 };
 use openlogi_core::device::{
-    BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, ChangedOnLight, DeviceInventory,
-    DeviceKind, DeviceModelInfo, DeviceTransports, LightCapabilities, LightState, LightValueRange,
-    LightValueUnit, LockKey, PairedDevice, RawDeviceAddress, ReceiverInfo, StandaloneDevice,
+    BatteryInfo, BatteryLevel, BatteryStatus, BatteryWidgetStatus, Capabilities, ChangedOnLight,
+    DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports, LightCapabilities, LightState,
+    LightValueRange, LightValueUnit, LockKey, PairedDevice, RawDeviceAddress, ReceiverInfo,
+    StandaloneDevice,
 };
 use openlogi_core::hid::{
     BacklightChange, BacklightControls, BacklightDuration, BacklightMode, BacklightState,
@@ -119,7 +120,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// unreleased version and leave this pin alone (`crates/openlogi-ipc/AGENTS.md`).
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 45);
+    assert_eq!(PROTOCOL_VERSION, 46);
 }
 
 #[test]
@@ -626,8 +627,11 @@ fn agent_status() {
             display_name: "A".into(),
         })),
         virtual_keyboard: VirtualKeyboardStatus::Active,
+        battery_widget: BatteryWidgetStatus::Active {
+            published_devices: 2,
+        },
     };
-    assert_wire(&status, "010001010705302e362e36010001010161014102");
+    assert_wire(&status, "010001010705302e362e360100010101610141020202");
 
     assert_wire(&InventoryHealth::Scanning, "00");
     assert_wire(&InventoryHealth::Ready, "01");
@@ -655,6 +659,7 @@ fn agent_snapshot() {
             hid_open_failures: false,
             secure_input: SecureInput::Off,
             virtual_keyboard: VirtualKeyboardStatus::Unsupported,
+            battery_widget: BatteryWidgetStatus::Disabled,
         },
         inventory: Vec::new(),
         standalone: Vec::new(),
@@ -670,7 +675,7 @@ fn agent_snapshot() {
     };
     assert_wire(
         &snapshot,
-        "010001010705302e362e360100000000000000000000000000",
+        "010001010705302e362e36010000000000000000000000000000",
     );
 
     // The observation is the snapshot with its generation in front.
@@ -680,7 +685,7 @@ fn agent_snapshot() {
     };
     assert_wire(
         &observed,
-        "03010001010705302e362e360100000000000000000000000000",
+        "03010001010705302e362e36010000000000000000000000000000",
     );
 }
 
@@ -1463,5 +1468,29 @@ fn disable_keys_requests_are_appended() {
             desired: DisableKeysMask::CAPS_LOCK,
         },
         "2d000846303044434146450101",
+    );
+}
+
+#[test]
+fn battery_widget_status() {
+    assert_wire(&BatteryWidgetStatus::Disabled, "00");
+    assert_wire(
+        &BatteryWidgetStatus::Unavailable {
+            reason: "bad".into(),
+        },
+        "0103626164",
+    );
+    assert_wire(
+        &BatteryWidgetStatus::Active {
+            published_devices: 2,
+        },
+        "0202",
+    );
+    assert_wire(
+        &BatteryWidgetStatus::Failed {
+            published_devices: 1,
+            reason: "bad".into(),
+        },
+        "030103626164",
     );
 }

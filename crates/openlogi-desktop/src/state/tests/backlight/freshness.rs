@@ -23,6 +23,7 @@ fn snapshot(cx: &mut gpui::TestAppContext, inventory: Vec<DeviceInventory>) {
             hid_open_failures: false,
             secure_input: openlogi_ipc::SecureInput::Off,
             virtual_keyboard: openlogi_ipc::VirtualKeyboardStatus::Unsupported,
+            battery_widget: openlogi_core::device::BatteryWidgetStatus::Disabled,
         },
         inventory,
         standalone: Vec::new(),

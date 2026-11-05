@@ -46,6 +46,7 @@ use tracing::{debug, info, warn};
 use openlogi_ipc::ClientKind;
 
 use self::transition::{Replacement, WatcherFleet};
+use crate::power_source::PowerSources;
 use crate::shutdown::{self, ShutdownRequest, ShutdownRequests, ShutdownSignals};
 use crate::startup::{self, Core, InputServices};
 use crate::virtual_keyboard::VirtualKeyboard;
@@ -261,6 +262,7 @@ impl Wanted {
                 capture_mouse_events,
                 held_pointer: None,
                 virtual_keyboard,
+                power_sources: PowerSources::new(),
             },
         }
     }
@@ -298,6 +300,8 @@ struct Running {
     /// `CGEvent`s. The exit path releases it only after the action workers
     /// that press keys stopped.
     virtual_keyboard: VirtualKeyboard,
+    /// Opt-in Batteries-widget publisher for Bolt/Unifying accessories.
+    power_sources: PowerSources,
 }
 
 impl Armed {
@@ -318,6 +322,9 @@ impl Armed {
         let (mut watchers, inventory_refresh) = startup::spawn_state_watchers(&running.shared);
         let mut ring = running.inputs.ring.subscribe();
 
+        let config_changes = running.orchestrator.lock().await.subscribe_config_changes();
+        running.power_sources.watch_config(config_changes);
+
         info!("openlogi-agent started");
         loop {
             tokio::select! {
@@ -335,6 +342,9 @@ impl Armed {
                 }
                 (request, stopped) = running.hidpp_watchers.replacement_ready() => {
                     running.complete_replacement(request, stopped);
+                }
+                () = running.power_sources.wake() => {
+                    running.reconcile_power_sources().await;
                 }
                 Some(event) = watchers.next() => {
                     running.apply_watcher(event, &inventory_refresh).await;
@@ -370,6 +380,13 @@ impl Armed {
 }
 
 impl Running {
+    /// Reconcile config, inventory and expiry through the publisher's single owner.
+    async fn reconcile_power_sources(&mut self) {
+        self.power_sources
+            .reconcile(&self.orchestrator, &self.observable)
+            .await;
+    }
+
     /// Retire a terminal hook worker and publish that input capture is no
     /// longer installed. The native callbacks have already been cleared, so
     /// the interval before this check remains pass-through rather than
@@ -485,7 +502,7 @@ impl Running {
     }
 
     /// Fold one inventory-watcher event into the orchestrator.
-    async fn apply_inventory(&self, event: InventoryEvent, refresh: &InventoryRefresh) {
+    async fn apply_inventory(&mut self, event: InventoryEvent, refresh: &InventoryRefresh) {
         match event {
             InventoryEvent::Snapshot {
                 inventories,
@@ -505,6 +522,7 @@ impl Running {
                 }
                 let confirm_settings = orchestrator.needs_reapply_confirmation();
                 drop(orchestrator);
+                self.reconcile_power_sources().await;
                 if confirm_settings {
                     refresh.request_settings_confirmation();
                 }
@@ -820,6 +838,7 @@ impl Running {
         reason: &str,
         tray_guard: Option<tokio::sync::oneshot::Sender<()>>,
     ) -> ! {
+        self.power_sources.clear_all();
         shutdown::release_hook_and_exit(
             self.hook.take(),
             &mut self.inputs,
