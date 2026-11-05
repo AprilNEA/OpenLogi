@@ -1,0 +1,27 @@
+# Owner: openlogi_core::udev — what udev's database says a Linux event node
+# is, and whether that lets the node count as a mouse.
+id: core-udev-mouse-owner
+language: rust
+severity: error
+message: Ask openlogi_core::udev (UdevMouse::of_event_node, UdevMouse::allows_mouse), the udev classification owner, instead of reading udev's database or ID_INPUT_MOUSE here.
+note: |
+  The input access probe consulted udev's ID_INPUT_MOUSE and the Linux hook
+  did not, so the hook grabbed an MX Keys keyboard node that the probe had
+  learned to skip (#2365, #2367). Both decide through the owner. See "Single
+  source of truth" in AGENTS.md.
+  The verdict's variants are not a second way to ask: compare them and the
+  rule for an unrecorded node is decided again at the call site.
+files:
+  - crates/**/*.rs
+ignores:
+  - crates/openlogi-core/src/udev.rs
+rule:
+  any:
+    # udev's database, or the property its records carry, written out.
+    - all:
+        - kind: string_literal
+        - regex: 'run/udev|ID_INPUT_MOUSE'
+    # The policy re-derived from the variants.
+    - pattern: $VERDICT == UdevMouse::$VARIANT
+    - pattern: $VERDICT != UdevMouse::$VARIANT
+    - pattern: matches!($VERDICT, UdevMouse::$VARIANT)
