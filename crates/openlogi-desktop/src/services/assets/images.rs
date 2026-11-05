@@ -91,7 +91,8 @@ where
     None
 }
 
-/// Enumerate candidate manifest bases: model IDs, the depot name, and any stripped `_ext\d+` stem.
+/// Enumerate candidate manifest bases: model IDs, the depot name, any stripped `_ext\d+` stem,
+/// and the bases of products the catalog files under the same depot (`DEPOT_SIBLINGS`).
 pub(super) fn candidate_manifest_bases(
     entry: &openlogi_assets::DeviceEntry,
     depot: &str,
@@ -120,10 +121,15 @@ pub(super) fn candidate_manifest_bases(
     {
         candidates.push(stem.to_string());
     }
-    // The c33c depot mixes g513_extN and g512_extN manifest identities.
-    // Both downloads and resolution must try the G512-specific resources.
-    if depot.eq_ignore_ascii_case("g513") {
-        candidates.push("g512".to_string());
+    // A sibling's variants keep their own base (`g512_ext6` in the G513
+    // depot), tried after the depot's own bases.
+    for base in super::depot_sibling_manifest_bases(&entry.display_name) {
+        if !candidates
+            .iter()
+            .any(|c: &String| c.eq_ignore_ascii_case(base))
+        {
+            candidates.push(base.to_string());
+        }
     }
     candidates
 }
