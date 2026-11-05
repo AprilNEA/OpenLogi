@@ -29,9 +29,7 @@ impl MotionPreference {
             self.last_known = Some(motion);
             motion.reduce_motion()
         } else {
-            self.last_known
-                .map(Motion::reduce_motion)
-                .unwrap_or(false)
+            self.last_known.map(Motion::reduce_motion).unwrap_or(false)
         }
     }
 }

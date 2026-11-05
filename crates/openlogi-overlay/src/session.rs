@@ -355,7 +355,9 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn motion_turned_off_between_opens_applies_to_the_next_ring(cx: &mut gpui::TestAppContext) {
+    async fn motion_turned_off_between_opens_applies_to_the_next_ring(
+        cx: &mut gpui::TestAppContext,
+    ) {
         cx.spawn(|mut async_cx| async move {
             let mut preference = MotionPreference::default();
             assert!(!open_with_read(&mut async_cx, &mut preference, Some(Motion::Full)).await);
@@ -410,7 +412,9 @@ mod tests {
     }
 
     #[gpui::test]
-    fn settle_replacement_while_read_pending_opens_latest_after_read(cx: &mut gpui::TestAppContext) {
+    fn settle_replacement_while_read_pending_opens_latest_after_read(
+        cx: &mut gpui::TestAppContext,
+    ) {
         use std::cell::Cell;
         use std::rc::Rc;
 
@@ -443,7 +447,9 @@ mod tests {
     }
 
     #[gpui::test]
-    fn settle_invocation_channel_closed_while_read_pending_returns_none(cx: &mut gpui::TestAppContext) {
+    fn settle_invocation_channel_closed_while_read_pending_returns_none(
+        cx: &mut gpui::TestAppContext,
+    ) {
         use std::cell::Cell;
         use std::rc::Rc;
 
@@ -471,7 +477,9 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn settle_replacement_then_dismissal_during_read_returns_none(cx: &mut gpui::TestAppContext) {
+    async fn settle_replacement_then_dismissal_during_read_returns_none(
+        cx: &mut gpui::TestAppContext,
+    ) {
         cx.spawn(|mut async_cx| async move {
             let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
             let mut preference = MotionPreference::default();
@@ -493,7 +501,9 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn settle_dismissal_then_replacement_during_read_returns_none(cx: &mut gpui::TestAppContext) {
+    async fn settle_dismissal_then_replacement_during_read_returns_none(
+        cx: &mut gpui::TestAppContext,
+    ) {
         cx.spawn(|mut async_cx| async move {
             let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
             let mut preference = MotionPreference::default();
@@ -515,7 +525,9 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn settle_with_empty_queue_returns_first_and_applies_motion(cx: &mut gpui::TestAppContext) {
+    async fn settle_with_empty_queue_returns_first_and_applies_motion(
+        cx: &mut gpui::TestAppContext,
+    ) {
         cx.spawn(|mut async_cx| async move {
             let (_sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
             let mut preference = MotionPreference::default();
