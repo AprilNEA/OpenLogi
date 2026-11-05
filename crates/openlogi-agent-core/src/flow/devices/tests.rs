@@ -77,6 +77,31 @@ fn outgoing_lists_online_routed_devices_with_a_slot_for_the_peer() {
     assert!(offline.outgoing(&peer()).is_empty());
 }
 
+/// A gaming mouse on its own receiver has no `0x1814`, yet a stale
+/// `[flow.devices]` entry gives it a channel. It stays here, and the keyboard
+/// still moves instead of the whole handoff failing on it.
+#[test]
+fn outgoing_leaves_out_a_device_that_cannot_switch_hosts() {
+    let config = config(vec![
+        configured(MOUSE, Some(1)),
+        configured(KEYBOARD, Some(1)),
+    ]);
+    let mut mouse = record(MOUSE, DeviceKind::Mouse, 0x0a, true);
+    mouse.switches_hosts = false;
+    let inventory = [mouse, record(KEYBOARD, DeviceKind::Keyboard, 0x0b, true)];
+    let devices = LocalDevices::join(&config, &inventory);
+
+    let outgoing = devices.outgoing(&peer());
+
+    assert_eq!(outgoing.len(), 1);
+    assert_eq!(outgoing[0].identity.ids, unit_identity(0x0b).ids);
+    assert_eq!(
+        keys(&devices),
+        [MOUSE, KEYBOARD],
+        "still listed and announced"
+    );
+}
+
 #[test]
 fn find_matches_on_any_shared_identifier_and_rejects_malformed_ones() {
     let config = config(vec![configured(MOUSE, Some(1))]);

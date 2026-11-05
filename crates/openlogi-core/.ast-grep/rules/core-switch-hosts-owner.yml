@@ -1,0 +1,26 @@
+# Owner: openlogi_core::device::Capabilities::switch_hosts — whether a device
+# can move to another computer with Easy-Switch (HID++ `0x1814 ChangeHost`):
+# not a HID++ 1.0 device, not one measured without `0x1814`, and presumed for
+# a device not probed yet. The Flow window's "Can't switch computers" and the
+# agent's outgoing handoff set both ask it, so a device the window shows as
+# unable to switch is the one the agent leaves behind.
+id: core-switch-hosts-owner
+language: rust
+severity: error
+message: Whether a device can switch computers is openlogi_core::device::Capabilities::switch_hosts's; call it instead of reading Capabilities::change_host here.
+note: |
+  The Flow window decided it from `hidpp10` alone, so a HID++ 2.0 gaming
+  mouse without `0x1814` (a G305 on its LIGHTSPEED receiver) was offered a
+  channel, and the agent then refused every handoff on it. See "Single source
+  of truth" in AGENTS.md.
+files:
+  - crates/**/*.rs
+ignores:
+  - crates/openlogi-core/src/device.rs
+  - "**/tests.rs"
+  - "**/tests/**"
+rule:
+  kind: field_expression
+  has:
+    field: field
+    regex: '^change_host$'
