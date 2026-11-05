@@ -33,6 +33,11 @@ tracing = { workspace = true }
 # The machine name Flow peers show for this computer.
 gethostname = "1.1.0"
 
+# The camera watcher reads the Capability Access Manager's webcam consent store
+# to learn whether any client currently holds a camera.
+[target.'cfg(target_os = "windows")'.dependencies]
+winreg = { workspace = true }
+
 [lints]
 workspace = true
 

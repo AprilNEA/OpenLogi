@@ -8,7 +8,7 @@ paths:
   - "crates/openlogi-agent/src/tray.rs"
   - "crates/openlogi-agent/src/status_item.rs"
   - "crates/openlogi-agent/src/lifecycle/armed_session.rs"
-  - "crates/openlogi-agent-core/src/watchers/camera.rs"
+  - "crates/openlogi-agent-core/src/watchers/camera/macos.rs"
   - "crates/openlogi-hook/src/macos.rs"
   - "crates/openlogi-hook/src/macos/**"
   - "crates/openlogi-inject/src/inject/macos.rs"
@@ -29,7 +29,7 @@ files; **keep this table in sync when you add or move one**:
 | `openlogi-agent/src/activity_macos.rs` | the device-I/O gate's levels: the `IOPMConnection` powerd subscription (hand-declared SPI, see below) and the `CGSessionCopyCurrentDictionary` console read |
 | `openlogi-agent/src/status_item.rs` | safe `objc2` wrappers over `NSStatusItem` / `NSMenu` / `NSMenuItem` |
 | `openlogi-agent/src/tray.rs` | the menu-bar semantics, `MenuTarget` + `SessionTarget` (`define_class!`), the Accessory `NSApplication` loop, the `NSWorkspace` session (fast-user-switch) notifications |
-| `openlogi-agent-core/src/watchers/camera.rs` | the CoreMediaIO "camera is running" property read |
+| `openlogi-agent-core/src/watchers/camera/macos.rs` | the CoreMediaIO "camera is running" property read |
 | `openlogi-camera/src/capture_macos.rs` | `AVCaptureSession` capture + the `define_class!` frame delegate, and the Camera TCC prompt |
 | `openlogi-camera/src/macos.rs` | `AVCaptureDevice` enumeration (`class!` + `msg_send!`) |
 | `openlogi-camera/src/uvc_macos.rs`, `.../uvc_macos/iokit.rs` | IOKit USB / UVC control transfers; every `unsafe` in the macOS UVC backend lives in `iokit.rs` |
@@ -230,7 +230,7 @@ its single user. The current set, all deliberate:
   (`AVMediaTypeVideo`, `CMSampleBufferGetImageBuffer`, the `CVPixelBuffer`
   accessors, `CFRunLoopRunInMode`, `dispatch_queue_create`) — AVFoundation has no
   typed framework crate in the tree.
-- `openlogi-agent-core/src/watchers/camera.rs`: the CoreMediaIO property API —
+- `openlogi-agent-core/src/watchers/camera/macos.rs`: the CoreMediaIO property API —
   same reason.
 - `openlogi-inject`: the `dlopen`/`dlsym`-resolved private SPIs
   (`CoreDockSendNotification`, the CGS symbolic-hotkey trio), and in

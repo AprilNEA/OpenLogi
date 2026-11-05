@@ -8,6 +8,74 @@ use openlogi_hid::reprog_controls::BACK_CIDS;
 use super::*;
 use crate::runtime::PointerSelection;
 
+/// A Litra on its vendor protocol, enumerated like any other device.
+fn raw_light_dev(key: &str) -> AgentDevice {
+    AgentDevice {
+        config_key: key.to_string(),
+        model_key: "Litra Glow".to_string(),
+        route: Some(DeviceRoute::RawHid {
+            vendor_id: 0x046d,
+            product_id: 0xc900,
+            usage_page: 0xff43,
+            usage_id: 0x0202,
+            identity: "serial:glow-1".to_string(),
+        }),
+        slot: DIRECT_DEVICE_INDEX,
+        serial: Some("glow-1".to_string()),
+        unit_id: [0; 4],
+        capabilities: None,
+        kind: openlogi_core::device::DeviceKind::Light,
+        light_capabilities: Some(openlogi_core::device::LightCapabilities {
+            power: true,
+            ..openlogi_core::device::LightCapabilities::default()
+        }),
+        online: true,
+        settings_revision: 0,
+        codename: None,
+        battery: None,
+    }
+}
+
+/// A standalone light enumerates like any other device and, once it reports a
+/// serial, resolves a physical key — so nothing upstream stops it reaching the
+/// HID++ planners. Its route is the one fact that rules it out: a raw route
+/// cannot carry a control divert or a DPI feature write, and a plan built for
+/// one leaves the gesture watcher opening a session the device rejects, over
+/// and over.
+///
+/// Drive the published projections rather than the route predicate alone, so
+/// deleting either planner's filter fails here.
+#[test]
+fn a_standalone_light_is_left_out_of_both_hidpp_planners() {
+    let mut orch = orchestrator(Config::default());
+    orch.devices = vec![raw_light_dev("light"), dev("mouse", 1, true)];
+    orch.rebuild();
+
+    let publication = orch.shared.capture_plans.borrow().clone();
+    assert_eq!(
+        publication.plans().len(),
+        1,
+        "only the HID++ device can carry a capture session"
+    );
+    assert!(
+        publication
+            .plans()
+            .iter()
+            .all(|plan| plan.target.route.speaks_hidpp()),
+        "no capture plan may name a raw route"
+    );
+
+    let cycles = orch.shared.dpi_cycle.read().expect("dpi cycle lock");
+    assert!(
+        !cycles.by_key.contains_key("light"),
+        "a light has no route that can carry a DPI feature write"
+    );
+    assert!(
+        cycles.by_key.contains_key("mouse"),
+        "the HID++ device still gets its cycle"
+    );
+}
+
 #[test]
 fn a_new_route_does_not_rearm_an_existing_capture() {
     let mut orch = orchestrator(Config::default());

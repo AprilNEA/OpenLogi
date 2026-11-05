@@ -1208,7 +1208,9 @@ impl Orchestrator {
             .iter()
             .filter(|dev| dev.online && self.config.device_enabled(&dev.config_key))
         {
-            let Some(route) = dev.route.clone() else {
+            // DPI is a HID++ feature write; a standalone light has no route
+            // that can carry one.
+            let Some(route) = dev.route.clone().filter(DeviceRoute::speaks_hidpp) else {
                 continue;
             };
             let mut presets = self.config.dpi_presets(&dev.config_key);
@@ -1346,7 +1348,11 @@ impl Orchestrator {
         if !dev.online {
             return None;
         }
-        let route = dev.route.clone()?;
+        // Capture diverts HID++ controls, so a standalone light's raw route has
+        // nothing to arm and nothing to restore. Without this the gesture
+        // watcher opens a session on it, the device rejects it, and the watcher
+        // re-arms for as long as the light stays plugged in.
+        let route = dev.route.clone().filter(DeviceRoute::speaks_hidpp)?;
         let identity = DeviceIdentity::from_parts(dev.serial.as_deref(), dev.unit_id);
         let physical_key = canonical_device_key(&stable_id(dev), Some(&identity))
             .or_else(|| PhysicalDeviceKey::parse(&dev.config_key))?;
