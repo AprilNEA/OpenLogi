@@ -3,6 +3,7 @@
 use hidpp::nibble::U4;
 
 use super::*;
+use openlogi_core::binding::SwipeThresholds;
 use thumbwheel::RotationStatus;
 
 /// The resolutions an MX Master 4 reports: 20 ratchets natively, 120
@@ -170,7 +171,7 @@ async fn armed_thumbwheel_capture() -> GestureCapture {
     arm_controls_into(&device, &channel, 0xff, &spec, &mut armed)
         .await
         .unwrap();
-    GestureCapture::new(armed)
+    GestureCapture::new(armed, SwipeThresholds::DEFAULT)
 }
 
 /// A `thumbwheelEvent` from the wheel [`armed_thumbwheel_capture`] arms, with

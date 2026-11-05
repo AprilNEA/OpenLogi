@@ -26,6 +26,7 @@ use crate::features::lighting::keyboard_rgb::LightingPanel;
 use crate::features::lighting::standalone::LightPanel;
 use crate::features::mouse::view::MouseModelView;
 use crate::features::pointer::dpi::DpiPanel;
+use crate::features::pointer::gestures::GesturePanel;
 use crate::features::pointer::momentum::{MomentumPanel, MomentumScope};
 use crate::features::pointer::smartshift::SmartShiftPanel;
 use crate::features::profiles::{AppCatalogPicker, ProfileIconCache};
@@ -227,6 +228,7 @@ pub struct AppView {
     disable_keys_panel: Entity<DisableKeysPanel>,
     dpi_panel: Entity<DpiPanel>,
     smartshift_panel: Entity<SmartShiftPanel>,
+    gesture_panel: Entity<GesturePanel>,
     momentum_panel: Entity<MomentumPanel>,
     lighting_panel: Entity<LightingPanel>,
     camera_preview: Entity<CameraPreview>,
@@ -312,6 +314,7 @@ impl AppView {
         let disable_keys_panel = cx.new(DisableKeysPanel::new);
         let dpi_panel = cx.new(DpiPanel::new);
         let smartshift_panel = cx.new(SmartShiftPanel::new);
+        let gesture_panel = cx.new(GesturePanel::new);
         let momentum_panel = cx.new(|cx| MomentumPanel::new(MomentumScope::SelectedDevice, cx));
         let lighting_panel = cx.new(LightingPanel::new);
         let camera_preview = cx.new(CameraPreview::new);
@@ -336,6 +339,7 @@ impl AppView {
             disable_keys_panel,
             dpi_panel,
             smartshift_panel,
+            gesture_panel,
             momentum_panel,
             lighting_panel,
             camera_preview,
@@ -724,6 +728,7 @@ impl AppView {
                         disable_keys_panel: &self.disable_keys_panel,
                         dpi_panel: &self.dpi_panel,
                         smartshift_panel: &self.smartshift_panel,
+                        gesture_panel: &self.gesture_panel,
                         momentum_panel: &self.momentum_panel,
                         lighting_panel: &self.lighting_panel,
                         camera_preview: &self.camera_preview,

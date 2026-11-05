@@ -3,9 +3,10 @@
 //! shared by both gesture-capture paths. This is input processing, distinct
 //! from the `Action` vocabulary the parent [`binding`](super) module defines.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use super::GestureDirection;
+use crate::config::{GestureAxisBias, GestureSensitivity};
 
 /// Minimum dominant-axis travel (raw-XY units) before a held gesture commits to
 /// a direction. Tuned to match Logitech Options+'s responsiveness.
@@ -13,6 +14,9 @@ pub const GESTURE_SWIPE_THRESHOLD: i32 = 50;
 /// Maximum cross-axis travel allowed at the threshold, so only a reasonably
 /// straight swipe commits. Grows with the dominant axis (`max(deadzone, 35%)`).
 pub const GESTURE_SWIPE_DEADZONE: i32 = 40;
+/// Cross-axis travel allowed as a share of the dominant axis, in percent, once
+/// that share passes [`GESTURE_SWIPE_DEADZONE`].
+pub const GESTURE_SWIPE_CONE_PCT: i32 = 35;
 /// Net travel that keeps going the committed direction before that direction
 /// fires again, so one continuous motion steps through several desktops like
 /// Options+. Larger than [`GESTURE_SWIPE_THRESHOLD`] so the overshoot of a
@@ -39,44 +43,172 @@ pub const GESTURE_HOLD_FOR_SWIPE: std::time::Duration = std::time::Duration::fro
 /// short or too diagonal.
 ///
 /// The dominant axis must pass [`GESTURE_SWIPE_THRESHOLD`] while the cross axis
-/// stays within `max(`[`GESTURE_SWIPE_DEADZONE`]`, 35% of dominant)`. Callers
-/// fire the bound action the moment this returns `Some` — mid-swipe, like
-/// Options+ — rather than waiting for the button release; a press that never
-/// commits a direction is treated as [`GestureDirection::Click`] on release.
+/// stays within `max(`[`GESTURE_SWIPE_DEADZONE`]`, `[`GESTURE_SWIPE_CONE_PCT`]`%
+/// of dominant)`: [`SwipeThresholds::classify`] at the built-in defaults.
 ///
 /// Coordinates follow the device's raw-XY convention (`+x` = right, `+y` =
 /// down), so an upward swipe (negative `dy`) maps to [`GestureDirection::Up`].
 #[must_use]
 pub fn detect_swipe(dx: i32, dy: i32) -> Option<GestureDirection> {
-    // Saturating throughout: a [`SwipeAccumulator`] hold that never commits (a
-    // sustained diagonal) keeps summing travel, so `dx`/`dy` can reach the i32
-    // bounds. `i32::MIN.abs()` would panic and a plain `dominant * 35` would
-    // overflow — and a panic in the input-hook callback is exactly the freeze
-    // hazard we must never hit. The clamp is inert in the normal range.
-    let (abs_x, abs_y) = (dx.saturating_abs(), dy.saturating_abs());
-    let dominant = abs_x.max(abs_y);
-    if dominant < GESTURE_SWIPE_THRESHOLD {
-        return None;
+    SwipeThresholds::DEFAULT.classify(dx, dy)
+}
+
+/// The commit limits for one swipe axis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AxisLimit {
+    /// Travel along this axis (raw-XY units) before a swipe commits.
+    pub travel: i32,
+    /// Cross-axis travel allowed, as a percentage of this axis's travel, once
+    /// it passes [`SwipeThresholds::deadzone`].
+    pub cone_pct: i32,
+    /// Weight this axis's travel carries when deciding which axis dominates.
+    pub weight: i32,
+}
+
+/// Everything that decides when a gesture hold commits a swipe, derived from a
+/// [`GestureSensitivity`] and a [`GestureAxisBias`]. The defaults of both map
+/// to [`Self::DEFAULT`], which is exactly the built-in constants
+/// ([`GESTURE_HOLD_FOR_SWIPE`], [`GESTURE_SWIPE_THRESHOLD`],
+/// [`GESTURE_SWIPE_DEADZONE`], [`GESTURE_SWIPE_CONE_PCT`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SwipeThresholds {
+    /// How long the button must be held before travel can commit.
+    pub hold: Duration,
+    /// Cross-axis travel always allowed, however short the swipe.
+    pub deadzone: i32,
+    /// Limits for Left/Right swipes.
+    pub horizontal: AxisLimit,
+    /// Limits for Up/Down swipes.
+    pub vertical: AxisLimit,
+}
+
+/// Scale applied to the built-in hold, travel and deadzone at the least and
+/// most sensitive settings, in percent; the default sensitivity is 100%.
+const LEAST_SENSITIVE_PCT: i32 = 160;
+const MOST_SENSITIVE_PCT: i32 = 40;
+
+impl SwipeThresholds {
+    /// The built-in thresholds, used at the default sensitivity and bias.
+    pub const DEFAULT: Self = Self {
+        hold: GESTURE_HOLD_FOR_SWIPE,
+        deadzone: GESTURE_SWIPE_DEADZONE,
+        horizontal: AxisLimit {
+            travel: GESTURE_SWIPE_THRESHOLD,
+            cone_pct: GESTURE_SWIPE_CONE_PCT,
+            weight: 100,
+        },
+        vertical: AxisLimit {
+            travel: GESTURE_SWIPE_THRESHOLD,
+            cone_pct: GESTURE_SWIPE_CONE_PCT,
+            weight: 100,
+        },
+    };
+
+    /// Classify running travel against these thresholds: a direction once the
+    /// dominant axis passes its travel while the cross axis stays within
+    /// `max(deadzone, cone_pct of dominant)`, else `None`.
+    ///
+    /// Callers fire the bound action the moment this returns `Some` —
+    /// mid-swipe, like Options+ — rather than waiting for the button release;
+    /// a press that never commits a direction is treated as
+    /// [`GestureDirection::Click`] on release.
+    #[must_use]
+    pub fn classify(&self, dx: i32, dy: i32) -> Option<GestureDirection> {
+        // Saturating throughout: a [`SwipeAccumulator`] hold that never commits (a
+        // sustained diagonal) keeps summing travel, so `dx`/`dy` can reach the i32
+        // bounds. `i32::MIN.abs()` would panic and a plain `dominant * 35` would
+        // overflow — and a panic in the input-hook callback is exactly the freeze
+        // hazard we must never hit. The clamp is inert in the normal range.
+        let (abs_x, abs_y) = (dx.saturating_abs(), dy.saturating_abs());
+        let horizontal = i64::from(abs_x) * i64::from(self.horizontal.weight)
+            > i64::from(abs_y) * i64::from(self.vertical.weight);
+        if horizontal {
+            self.within(self.horizontal, abs_x, abs_y)
+                .then_some(if dx > 0 {
+                    GestureDirection::Right
+                } else {
+                    GestureDirection::Left
+                })
+        } else {
+            self.within(self.vertical, abs_y, abs_x)
+                .then_some(if dy > 0 {
+                    GestureDirection::Down
+                } else {
+                    GestureDirection::Up
+                })
+        }
     }
-    let cross_limit = GESTURE_SWIPE_DEADZONE.max(dominant.saturating_mul(35) / 100);
-    if abs_x > abs_y {
-        if abs_y > cross_limit {
-            return None;
-        }
-        Some(if dx > 0 {
-            GestureDirection::Right
+
+    /// Whether travel continuing a committed `direction` (`along` it, with
+    /// signed sideways drift `across`) is a straight swipe on that
+    /// direction's axis, so it may repeat.
+    fn continues_straight(&self, direction: GestureDirection, along: i32, across: i32) -> bool {
+        let limit = match direction {
+            GestureDirection::Left | GestureDirection::Right => self.horizontal,
+            GestureDirection::Up | GestureDirection::Down => self.vertical,
+            GestureDirection::Click => return false,
+        };
+        let across = across.saturating_abs();
+        along > across && self.within(limit, along, across)
+    }
+
+    /// Whether `dominant` travel passes `limit` with `cross` inside its cone.
+    fn within(&self, limit: AxisLimit, dominant: i32, cross: i32) -> bool {
+        dominant >= limit.travel
+            && cross
+                <= self
+                    .deadzone
+                    .max(dominant.saturating_mul(limit.cone_pct) / 100)
+    }
+}
+
+impl Default for SwipeThresholds {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+impl From<(GestureSensitivity, GestureAxisBias)> for SwipeThresholds {
+    fn from((sensitivity, bias): (GestureSensitivity, GestureAxisBias)) -> Self {
+        // Sensitivity scales hold, travel and deadzone together, linearly on
+        // each side of the default, so the default reproduces the constants.
+        let (raw, min, default, max) = (
+            i32::from(sensitivity.into_inner()),
+            i32::from(GestureSensitivity::MIN.into_inner()),
+            i32::from(GestureSensitivity::DEFAULT.into_inner()),
+            i32::from(GestureSensitivity::MAX.into_inner()),
+        );
+        let pct = if raw <= default {
+            100 + (LEAST_SENSITIVE_PCT - 100) * (default - raw) / (default - min)
         } else {
-            GestureDirection::Left
-        })
-    } else {
-        if abs_x > cross_limit {
-            return None;
-        }
-        Some(if dy > 0 {
-            GestureDirection::Down
+            100 - (100 - MOST_SENSITIVE_PCT) * (raw - default) / (max - default)
+        };
+        let scale = |base: i32| base * pct / 100;
+        let travel = scale(GESTURE_SWIPE_THRESHOLD);
+
+        // Bias in -50..=50: negative favors Left/Right, positive Up/Down. The
+        // favored axis needs less travel, tolerates more drift, and weighs
+        // more in deciding which axis dominates; zero changes nothing.
+        let bias = i32::from(bias.into_inner());
+        let (h_travel_pct, v_travel_pct) = if bias < 0 {
+            (100 + bias / 2, 100 - bias)
         } else {
-            GestureDirection::Up
-        })
+            (100 + bias, 100 - bias / 2)
+        };
+        Self {
+            hold: GESTURE_HOLD_FOR_SWIPE * pct.unsigned_abs() / 100,
+            deadzone: scale(GESTURE_SWIPE_DEADZONE),
+            horizontal: AxisLimit {
+                travel: travel * h_travel_pct / 100,
+                cone_pct: GESTURE_SWIPE_CONE_PCT - bias / 3,
+                weight: 100 - bias,
+            },
+            vertical: AxisLimit {
+                travel: travel * v_travel_pct / 100,
+                cone_pct: GESTURE_SWIPE_CONE_PCT + bias / 3,
+                weight: 100 + bias,
+            },
+        }
     }
 }
 
@@ -118,6 +250,8 @@ pub struct SwipeAccumulator {
     repeat_cross: i32,
     /// When the last motion arrived, to detect the pause that ends a stroke.
     moved_at: Option<Instant>,
+    /// The hold gate and classification limits this accumulator applies.
+    thresholds: SwipeThresholds,
 }
 
 impl SwipeAccumulator {
@@ -133,6 +267,12 @@ impl SwipeAccumulator {
         self.moved_at = None;
     }
 
+    /// Begin a fresh hold, as [`Self::begin`], under `thresholds`.
+    pub fn begin_with_config(&mut self, thresholds: SwipeThresholds) {
+        self.thresholds = thresholds;
+        self.begin();
+    }
+
     /// Whether a hold is in progress (between [`Self::begin`] and [`Self::end`]),
     /// so callers can do rising/falling-edge detection without a second flag.
     #[must_use]
@@ -142,7 +282,7 @@ impl SwipeAccumulator {
 
     /// Feed a pointer-move / raw-XY delta into the current hold. Returns
     /// `Some(direction)` the instant travel commits (only after the hold passes
-    /// [`GESTURE_HOLD_FOR_SWIPE`]), then restarts travel so the same hold can
+    /// [`SwipeThresholds::hold`]), then restarts travel so the same hold can
     /// commit again; `None` while still too short or not holding.
     pub fn accumulate(&mut self, dx: i32, dy: i32) -> Option<GestureDirection> {
         self.held_since?;
@@ -185,7 +325,8 @@ impl SwipeAccumulator {
                 // The same straightness rule as a fresh swipe, seen in the
                 // committed direction's frame (`Right` = along it).
                 let straight =
-                    detect_swipe(self.repeat, self.repeat_cross) == Some(GestureDirection::Right);
+                    self.thresholds
+                        .continues_straight(dir, self.repeat, self.repeat_cross);
                 if self.repeat >= GESTURE_REPEAT_DISTANCE && straight {
                     // Carry the excess, so a report spanning two repeat
                     // distances fires again on the next report. The excess is
@@ -231,8 +372,8 @@ impl SwipeAccumulator {
         }
         let held_long_enough = self
             .held_since
-            .is_some_and(|t| t.elapsed() >= GESTURE_HOLD_FOR_SWIPE);
-        if held_long_enough && let Some(dir) = detect_swipe(self.dx, self.dy) {
+            .is_some_and(|t| t.elapsed() >= self.thresholds.hold);
+        if held_long_enough && let Some(dir) = self.thresholds.classify(self.dx, self.dy) {
             self.fired = true;
             self.last = Some(dir);
             self.repeat = 0;
@@ -254,14 +395,21 @@ impl SwipeAccumulator {
         was_click
     }
 
-    /// Test-only seam: backdate the current hold so its [`GESTURE_HOLD_FOR_SWIPE`]
+    /// Test-only seam: backdate the current hold so its [`SwipeThresholds::hold`]
     /// gate is already satisfied, letting a test exercise a committed swipe
     /// without sleeping. Real code never calls this — [`Self::begin`] records the
     /// true start instant. A no-op when not currently holding.
     #[doc(hidden)]
     pub fn backdate_hold_for_test(&mut self) {
+        self.backdate_hold_by_for_test(self.thresholds.hold * 2);
+    }
+
+    /// Test-only seam: backdate the current hold by `held`, as if the button
+    /// had been down that long. A no-op when not currently holding.
+    #[doc(hidden)]
+    pub fn backdate_hold_by_for_test(&mut self, held: Duration) {
         if self.held_since.is_some() {
-            self.held_since = Instant::now().checked_sub(GESTURE_HOLD_FOR_SWIPE * 2);
+            self.held_since = Instant::now().checked_sub(held);
         }
     }
 
@@ -751,5 +899,140 @@ mod tests {
         acc.begin();
         assert!(acc.end(), "the held release is a click");
         assert!(!acc.end(), "the redundant second release is not a click");
+    }
+
+    // ── SwipeThresholds (sensitivity and axis bias) ───────────────────────────
+
+    fn thresholds(sensitivity: u8, bias: i8) -> SwipeThresholds {
+        SwipeThresholds::from((
+            GestureSensitivity::try_new(sensitivity).unwrap(),
+            GestureAxisBias::try_new(bias).unwrap(),
+        ))
+    }
+
+    #[test]
+    fn default_settings_reproduce_the_built_in_thresholds() {
+        assert_eq!(
+            SwipeThresholds::from((GestureSensitivity::DEFAULT, GestureAxisBias::DEFAULT)),
+            SwipeThresholds::DEFAULT
+        );
+        assert_eq!(
+            SwipeAccumulator::default().thresholds,
+            SwipeThresholds::DEFAULT
+        );
+    }
+
+    #[test]
+    fn sensitivity_scales_hold_travel_and_deadzone_together() {
+        let least = SwipeThresholds::from((GestureSensitivity::MIN, GestureAxisBias::DEFAULT));
+        assert_eq!(least.hold, GESTURE_HOLD_FOR_SWIPE * 160 / 100);
+        assert_eq!(least.horizontal.travel, GESTURE_SWIPE_THRESHOLD * 160 / 100);
+        assert_eq!(least.deadzone, GESTURE_SWIPE_DEADZONE * 160 / 100);
+
+        let most = SwipeThresholds::from((GestureSensitivity::MAX, GestureAxisBias::DEFAULT));
+        assert_eq!(most.hold, GESTURE_HOLD_FOR_SWIPE * 40 / 100);
+        assert_eq!(most.vertical.travel, GESTURE_SWIPE_THRESHOLD * 40 / 100);
+        assert_eq!(most.deadzone, GESTURE_SWIPE_DEADZONE * 40 / 100);
+
+        // Monotonic: more sensitive never needs a longer hold or more travel.
+        let mut previous = least;
+        for raw in 2..=100 {
+            let next = thresholds(raw, 0);
+            assert!(next.hold <= previous.hold, "hold at {raw}");
+            assert!(
+                next.horizontal.travel <= previous.horizontal.travel,
+                "travel at {raw}"
+            );
+            previous = next;
+        }
+    }
+
+    #[test]
+    fn axis_bias_favors_one_axis_and_is_neutral_at_zero() {
+        let horizontal = thresholds(50, -50);
+        assert!(horizontal.horizontal.travel < horizontal.vertical.travel);
+        assert!(horizontal.horizontal.cone_pct > horizontal.vertical.cone_pct);
+        assert!(horizontal.horizontal.weight > horizontal.vertical.weight);
+
+        let vertical = thresholds(50, 50);
+        assert!(vertical.vertical.travel < vertical.horizontal.travel);
+        assert!(vertical.vertical.cone_pct > vertical.horizontal.cone_pct);
+
+        // 45% drift: too diagonal at the default cone, a swipe when favored.
+        assert_eq!(SwipeThresholds::DEFAULT.classify(100, 45), None);
+        assert_eq!(horizontal.classify(100, 45), Some(GestureDirection::Right));
+        assert_eq!(vertical.classify(45, -100), Some(GestureDirection::Up));
+    }
+
+    #[test]
+    fn custom_thresholds_do_not_panic_on_extreme_values() {
+        for t in [thresholds(1, -50), thresholds(100, 50)] {
+            assert_eq!(t.classify(i32::MAX, 0), Some(GestureDirection::Right));
+            assert_eq!(t.classify(0, i32::MIN), Some(GestureDirection::Up));
+            assert_eq!(t.classify(i32::MIN, i32::MIN), None);
+        }
+    }
+
+    #[test]
+    fn a_click_held_under_the_hold_gate_stays_a_click_despite_drift() {
+        // 50-150 ms is a deliberate click that is still shorter than the
+        // default 160 ms gate: travel during it must not commit a swipe.
+        for held_ms in [50, 100, 150] {
+            let mut acc = SwipeAccumulator::default();
+            acc.begin();
+            acc.backdate_hold_by_for_test(Duration::from_millis(held_ms));
+            assert_eq!(
+                acc.accumulate(GESTURE_SWIPE_THRESHOLD * 3, 0),
+                None,
+                "{held_ms} ms hold"
+            );
+            assert!(acc.end(), "{held_ms} ms hold is a click");
+        }
+    }
+
+    #[test]
+    fn configured_thresholds_gate_the_accumulator() {
+        // The least sensitive setting needs a longer hold and more travel.
+        let mut acc = SwipeAccumulator::default();
+        acc.begin_with_config(thresholds(1, 0));
+        acc.backdate_hold_by_for_test(GESTURE_HOLD_FOR_SWIPE + Duration::from_millis(20));
+        assert_eq!(
+            acc.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
+            None,
+            "held under 256 ms"
+        );
+        acc.backdate_hold_for_test();
+        assert_eq!(acc.accumulate(10, 0), None, "70 of the 80 units needed");
+        assert_eq!(acc.accumulate(10, 0), Some(GestureDirection::Right));
+    }
+
+    #[test]
+    fn repeats_use_the_configured_axis_bias() {
+        // Horizontal bias widens the Left/Right cone, so a continuing stroke
+        // with 45% drift still repeats, as its first swipe would commit.
+        let mut acc = SwipeAccumulator::default();
+        acc.begin_with_config(thresholds(50, -50));
+        acc.backdate_hold_for_test();
+        assert_eq!(
+            acc.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
+            Some(GestureDirection::Right)
+        );
+        let mut fired = Vec::new();
+        for _ in 0..=(GESTURE_REPEAT_DISTANCE / 20) {
+            fired.extend(acc.accumulate(20, -9));
+        }
+        assert_eq!(fired, [GestureDirection::Right]);
+
+        // The default cone rejects the same stroke.
+        let mut acc = SwipeAccumulator::default();
+        acc.begin();
+        acc.backdate_hold_for_test();
+        assert_eq!(
+            acc.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
+            Some(GestureDirection::Right)
+        );
+        for _ in 0..=(GESTURE_REPEAT_DISTANCE / 20) {
+            assert_eq!(acc.accumulate(20, -9), None);
+        }
     }
 }

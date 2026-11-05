@@ -76,6 +76,8 @@ fn app_info(
         check_for_updates: settings.map(|s| s.check_for_updates),
         update_channel: Some(update_channel),
         thumbwheel_sensitivity: settings.map(|s| s.thumbwheel_sensitivity.into()),
+        gesture_sensitivity: settings.map(|s| s.gesture_sensitivity.into()),
+        gesture_axis_bias: settings.map(|s| s.gesture_axis_bias.into()),
         config_schema_version: config.map(|(version, _)| version),
         configured_device_count: config.map(|(_, count)| count),
         running_from_bundle,

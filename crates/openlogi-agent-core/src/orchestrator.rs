@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{
     ActionRingIcon, Binding, ButtonId, GamingButtons, GamingLayout, GridKey, KeypadPage,
+    SwipeThresholds,
 };
 use openlogi_core::bindings::{bindings_on_page, button_bindings_for, oshook_gestures_for};
 use openlogi_core::config::{
@@ -858,6 +859,13 @@ impl Orchestrator {
         if key.is_some_and(|k| !self.config.device_enabled(k)) {
             return HookMaps::default();
         }
+        let gesture_thresholds = key.map_or_else(
+            || {
+                let settings = &self.config.app_settings;
+                SwipeThresholds::from((settings.gesture_sensitivity, settings.gesture_axis_bias))
+            },
+            |k| self.config.gesture_thresholds(k),
+        );
         let (app, pointer_target) = self.mouse_context();
         let pointer = self.pointer_selection(key, app, pointer_target);
         // The OS hook only sees standard HID buttons, whose defaults no
@@ -889,6 +897,7 @@ impl Orchestrator {
             pointer,
             selected_device: key.map(str::to_owned),
             shift_bindings,
+            gesture_thresholds,
             ..HookMaps::default()
         }
     }

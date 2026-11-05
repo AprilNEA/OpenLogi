@@ -4,7 +4,7 @@
 
 use std::num::NonZeroU8;
 
-use openlogi_core::binding::{ButtonId, GestureDirection, SwipeAccumulator};
+use openlogi_core::binding::{ButtonId, GestureDirection, SwipeAccumulator, SwipeThresholds};
 use tokio::sync::mpsc;
 use tracing::{debug, trace};
 
@@ -43,10 +43,17 @@ enum HoldState {
     },
 }
 
-/// Begin a hold for `cid`, its swipe accumulator started fresh.
-fn begin_hold(cid: u16, button: ButtonId, overlap: bool, skip_first_raw_xy: bool) -> HoldState {
+/// Begin a hold for `cid`, its swipe accumulator started fresh under
+/// `thresholds`.
+fn begin_hold(
+    cid: u16,
+    button: ButtonId,
+    overlap: bool,
+    skip_first_raw_xy: bool,
+    thresholds: SwipeThresholds,
+) -> HoldState {
     let mut swipe = SwipeAccumulator::default();
-    swipe.begin();
+    swipe.begin_with_config(thresholds);
     HoldState::Holding {
         cid,
         button,
@@ -72,6 +79,23 @@ pub(super) struct CaptureAccum {
     /// Diverted standard-button and wheel-hold CIDs held in the last event,
     /// in press order.
     buttons_down: Vec<u16>,
+    /// The thresholds every hold's swipe accumulator starts with.
+    thresholds: SwipeThresholds,
+}
+
+impl CaptureAccum {
+    /// A fresh accumulator whose holds commit under `thresholds`.
+    pub(super) fn new(thresholds: SwipeThresholds) -> Self {
+        Self {
+            thresholds,
+            ..Self::default()
+        }
+    }
+
+    /// The thresholds this accumulator's holds commit under.
+    pub(super) fn thresholds(&self) -> SwipeThresholds {
+        self.thresholds
+    }
 }
 
 #[cfg(test)]
@@ -177,6 +201,7 @@ impl CaptureAccum {
                                 button,
                                 held.len() > 1,
                                 !self.gestures_down.contains(&cid),
+                                self.thresholds,
                             ),
                             None => HoldState::Idle,
                         }

@@ -33,6 +33,7 @@ use crate::features::lighting::standalone::LightPanel;
 use crate::features::lighting::visual as light_visual;
 use crate::features::mouse::view::MouseModelView;
 use crate::features::pointer::dpi::DpiPanel;
+use crate::features::pointer::gestures::GesturePanel;
 use crate::features::pointer::momentum::{MomentumPanel, confirm_turning_off_with_smooth_wheel};
 use crate::features::pointer::smartshift::SmartShiftPanel;
 use crate::features::profiles::{
@@ -104,6 +105,7 @@ pub(super) struct DetailPanels<'a> {
     pub disable_keys_panel: &'a gpui::Entity<DisableKeysPanel>,
     pub dpi_panel: &'a gpui::Entity<DpiPanel>,
     pub smartshift_panel: &'a gpui::Entity<SmartShiftPanel>,
+    pub gesture_panel: &'a gpui::Entity<GesturePanel>,
     pub momentum_panel: &'a gpui::Entity<MomentumPanel>,
     pub lighting_panel: &'a gpui::Entity<LightingPanel>,
     pub camera_preview: &'a gpui::Entity<CameraPreview>,
@@ -140,6 +142,7 @@ pub(super) fn detail_content(
         DetailTab::Pointer => pointer_tab(
             panels.dpi_panel,
             panels.smartshift_panel,
+            panels.gesture_panel,
             panels.momentum_panel,
             cx,
         )
@@ -406,14 +409,15 @@ fn action_ring_tab(
         ))
 }
 
-/// Pointer tab: the DPI panel, the SmartShift wheel controls, and the
-/// scroll-wheel preferences, each in a titled card, then momentum scrolling
-/// across the bottom. Use a responsive two-column grid that still fits the
-/// window's 720 px minimum width, so these short controls don't force a
-/// vertical scroll.
+/// Pointer tab: the DPI panel, the SmartShift wheel controls, the gesture
+/// tuning, and the scroll-wheel preferences, each in a titled card, then
+/// momentum scrolling across the bottom. Use a responsive two-column grid that
+/// still fits the window's 720 px minimum width, so these short controls don't
+/// force a vertical scroll.
 fn pointer_tab(
     dpi_panel: &gpui::Entity<DpiPanel>,
     smartshift_panel: &gpui::Entity<SmartShiftPanel>,
+    gesture_panel: &gpui::Entity<GesturePanel>,
     momentum_panel: &gpui::Entity<MomentumPanel>,
     cx: &mut Context<AppView>,
 ) -> impl IntoElement {
@@ -439,6 +443,14 @@ fn pointer_tab(
                     tr!("pointer.smartshift"),
                     Icon::empty().path("action-icons/refresh-cw.svg"),
                     smartshift_panel.clone().into_any_element(),
+                )
+                .fill(),
+            ))
+            .child(pointer_grid_card(
+                PanelCard::new(
+                    tr!("actions.gestures"),
+                    Icon::empty().path("action-icons/move.svg"),
+                    gesture_panel.clone().into_any_element(),
                 )
                 .fill(),
             ))

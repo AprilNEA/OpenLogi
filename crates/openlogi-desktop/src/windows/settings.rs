@@ -34,7 +34,8 @@ pub(super) use gpui_kit::component::{
 pub(super) use gpui_updater::{UpdateStatus, Updater};
 pub(super) use openlogi_core::brand::{HELP_URL, RELEASES_URL, REPO_URL};
 pub(super) use openlogi_core::config::{
-    Appearance, AssetSourcePreference, ThumbwheelSensitivity, UiScale, VerticalScrollSensitivity,
+    Appearance, AssetSourcePreference, GestureAxisBias, GestureSensitivity, ThumbwheelSensitivity,
+    UiScale, VerticalScrollSensitivity,
 };
 
 use crate::features::pointer::momentum::{MomentumPanel, MomentumScope};
@@ -129,6 +130,8 @@ pub struct SettingsView {
     asset_source_select: Entity<SelectState<Vec<assets::AssetSourceOption>>>,
     thumbwheel_sensitivity: CommitSlider<ThumbwheelSensitivity>,
     vertical_scroll_sensitivity: CommitSlider<VerticalScrollSensitivity>,
+    gesture_sensitivity: CommitSlider<GestureSensitivity>,
+    gesture_axis_bias: CommitSlider<GestureAxisBias>,
     /// The General page's momentum-scrolling card: the app-wide default.
     momentum_panel: Entity<MomentumPanel>,
     /// Shared app-wide updater, surfaced on the Updates page. A launch-time
@@ -228,8 +231,6 @@ impl SettingsView {
         cx.subscribe_in(&asset_source_select, window, Self::on_asset_source_select)
             .detach();
 
-        let thumbwheel_sensitivity = Self::thumbwheel_sensitivity_slider(cx);
-        let vertical_scroll_sensitivity = Self::vertical_scroll_sensitivity_slider(cx);
         let momentum_panel = cx.new(|cx| MomentumPanel::new(MomentumScope::General, cx));
 
         // Poll the agent's live event monitor while this window is open. The task
@@ -272,8 +273,10 @@ impl SettingsView {
             initial_page,
             language_select,
             asset_source_select,
-            thumbwheel_sensitivity,
-            vertical_scroll_sensitivity,
+            thumbwheel_sensitivity: Self::thumbwheel_sensitivity_slider(cx),
+            vertical_scroll_sensitivity: Self::vertical_scroll_sensitivity_slider(cx),
+            gesture_sensitivity: Self::gesture_sensitivity_slider(cx),
+            gesture_axis_bias: Self::gesture_axis_bias_slider(cx),
             momentum_panel,
             updater,
             updater_obs,
@@ -340,6 +343,34 @@ impl SettingsView {
                 AppState::apply(cx, |state| {
                     state.commit_vertical_scroll_sensitivity(sensitivity)
                 });
+            },
+        )
+    }
+
+    fn gesture_sensitivity_slider(cx: &mut Context<Self>) -> CommitSlider<GestureSensitivity> {
+        let current = AppState::try_read(cx).map_or(GestureSensitivity::DEFAULT, |state| {
+            state.app_settings().gesture_sensitivity
+        });
+        CommitSlider::new(
+            SliderRange::new(GestureSensitivity::MIN, GestureSensitivity::MAX),
+            current,
+            cx,
+            |_, sensitivity, cx| {
+                AppState::apply(cx, |state| state.commit_gesture_sensitivity(sensitivity));
+            },
+        )
+    }
+
+    fn gesture_axis_bias_slider(cx: &mut Context<Self>) -> CommitSlider<GestureAxisBias> {
+        let current = AppState::try_read(cx).map_or(GestureAxisBias::DEFAULT, |state| {
+            state.app_settings().gesture_axis_bias
+        });
+        CommitSlider::new(
+            SliderRange::new(GestureAxisBias::MIN, GestureAxisBias::MAX),
+            current,
+            cx,
+            |_, bias, cx| {
+                AppState::apply(cx, |state| state.commit_gesture_axis_bias(bias));
             },
         )
     }
@@ -435,13 +466,17 @@ impl Render for SettingsView {
         // these independently owned sliders so neither can keep presenting the
         // rejected value after that rollback.
         if let Some(settings) = AppState::try_read(cx).map(AppState::app_settings) {
-            let (vertical_scroll, thumbwheel) = (
+            let (vertical_scroll, thumbwheel, gesture, gesture_bias) = (
                 settings.vertical_scroll_sensitivity,
                 settings.thumbwheel_sensitivity,
+                settings.gesture_sensitivity,
+                settings.gesture_axis_bias,
             );
             self.vertical_scroll_sensitivity
                 .sync(vertical_scroll, window, cx);
             self.thumbwheel_sensitivity.sync(thumbwheel, window, cx);
+            self.gesture_sensitivity.sync(gesture, window, cx);
+            self.gesture_axis_bias.sync(gesture_bias, window, cx);
         }
         let pal = theme::palette(cx);
         let view = cx.entity();
@@ -466,6 +501,8 @@ impl Render for SettingsView {
                 general::SensitivitySliders {
                     vertical_scroll: self.vertical_scroll_sensitivity.slider().clone(),
                     thumbwheel: self.thumbwheel_sensitivity.slider().clone(),
+                    gesture: self.gesture_sensitivity.slider().clone(),
+                    gesture_bias: self.gesture_axis_bias.slider().clone(),
                 },
                 self.momentum_panel.clone(),
                 self.registration_status,
