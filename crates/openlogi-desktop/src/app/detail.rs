@@ -478,13 +478,7 @@ fn onboard_card(pal: Palette, cx: &mut Context<AppView>) -> Option<impl IntoElem
     };
     let memory = state.current_onboard_active();
     let host = memory == Some(OnboardMemory::Off);
-    // The agent takes control only of a model whose buttons it knows.
-    let openlogi = state.current_gaming_layout().map(|_| {
-        (
-            OnboardMemory::Off,
-            tr!("pointer.onboard_openlogi").to_string(),
-        )
-    });
+    let mapped = state.current_gaming_layout().is_some();
     let profiles = reading.as_ref().map_or_else(Vec::new, |r| {
         r.profiles
             .iter()
@@ -498,11 +492,17 @@ fn onboard_card(pal: Palette, cx: &mut Context<AppView>) -> Option<impl IntoElem
             .collect()
     });
 
-    let memory_description = if host {
-        tr!("pointer.onboard_host_description")
-    } else {
-        tr!("pointer.onboard_profile_description")
+    // Without a known layout, host mode captures no buttons.
+    let memory_description = match (host, mapped) {
+        (true, true) => tr!("pointer.onboard_host_description"),
+        (true, false) => tr!("pointer.onboard_host_unmapped_description"),
+        (false, true) => tr!("pointer.onboard_profile_description"),
+        (false, false) => tr!("pointer.onboard_profile_unmapped_description"),
     };
+    let openlogi = (
+        OnboardMemory::Off,
+        tr!("pointer.onboard_openlogi").to_string(),
+    );
     Some(
         PanelCard::new(
             tr!("pointer.onboard_memory"),
@@ -510,7 +510,7 @@ fn onboard_card(pal: Palette, cx: &mut Context<AppView>) -> Option<impl IntoElem
             v_flex().gap_4().child(setting_row(
                 tr!("pointer.onboard_active"),
                 memory_description,
-                onboard_memory_control(memory, openlogi.into_iter().chain(profiles).collect()),
+                onboard_memory_control(memory, std::iter::once(openlogi).chain(profiles).collect()),
                 pal,
             )),
         )

@@ -1,5 +1,5 @@
-//! G-series host mode: captured buttons are muted in the `0x8110` mapping and
-//! dispatched from spy reports.
+//! Host mode for mice with onboard profiles. With a known layout, captured
+//! buttons are muted in the `0x8110` mapping and dispatched from spy reports.
 
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -43,7 +43,8 @@ pub enum SlotRoute {
 /// Host-mode capture.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostMode {
-    /// Every slot, and where its presses go.
+    /// Every slot, and where its presses go. Empty for a model whose layout
+    /// nobody has dumped: host mode then captures no buttons.
     pub slots: Vec<(ButtonId, SlotRoute)>,
     /// Report rate to set.
     pub report_rate: Option<ReportRate>,
@@ -91,42 +92,53 @@ pub(super) struct ArmedOnboard {
 
 enum ArmedMode {
     Host {
-        spy_index: u8,
+        /// `None` without a layout: no mapping is written and no button
+        /// captured.
+        spy: Option<ArmedSpy>,
         host: HostMode,
-        captured: Vec<(u8, ButtonId)>,
-        /// The mapping read on the way into host mode, written back on the
-        /// way out. Behind a `Mutex` because a rearm, which takes `&self`,
-        /// replaces it when a power cycle put the mouse back onboard.
-        baseline: Mutex<Option<Vec<u8>>>,
     },
     Profile(ProfileIndex),
+}
+
+struct ArmedSpy {
+    index: u8,
+    captured: Vec<(u8, ButtonId)>,
+    /// The mapping read on the way into host mode, written back on the way
+    /// out. Behind a `Mutex` because a rearm, which takes `&self`, replaces
+    /// it when a power cycle put the mouse back onboard.
+    baseline: Mutex<Option<Vec<u8>>>,
+}
+
+impl ArmedSpy {
+    fn feature(&self, chan: &Arc<HidppChannel>, device_index: u8) -> MouseButtonSpyFeature {
+        MouseButtonSpyFeature::new(Arc::clone(chan), device_index, self.index)
+    }
 }
 
 impl ArmedOnboard {
     pub(super) fn spy(&self) -> Option<(u8, Vec<(u8, ButtonId)>)> {
         match &self.mode {
-            ArmedMode::Host {
-                spy_index,
-                captured,
-                ..
-            } => Some((*spy_index, captured.clone())),
-            ArmedMode::Profile(_) => None,
+            ArmedMode::Host { spy: Some(spy), .. } => Some((spy.index, spy.captured.clone())),
+            ArmedMode::Host { spy: None, .. } | ArmedMode::Profile(_) => None,
         }
     }
 
-    pub(super) fn restore(&self) -> Option<SpyRestore> {
+    pub(super) fn is_host(&self) -> bool {
+        matches!(self.mode, ArmedMode::Host { .. })
+    }
+
+    pub(super) fn restore(&self) -> Option<HostRestore> {
         match &self.mode {
-            ArmedMode::Host {
-                spy_index,
-                baseline,
-                ..
-            } => Some(SpyRestore {
+            ArmedMode::Host { spy, .. } => Some(HostRestore {
                 onboard_index: self.onboard_index,
-                spy_index: *spy_index,
-                baseline: baseline
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .clone(),
+                spy: spy.as_ref().map(|spy| SpyRestore {
+                    index: spy.index,
+                    baseline: spy
+                        .baseline
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .clone(),
+                }),
             }),
             ArmedMode::Profile(_) => None,
         }
@@ -139,12 +151,7 @@ impl ArmedOnboard {
     pub(super) async fn rearm(&self) -> bool {
         let onboard = self.onboard();
         let result = match &self.mode {
-            ArmedMode::Host {
-                spy_index,
-                host,
-                baseline,
-                ..
-            } => self.apply_host(&onboard, *spy_index, host, baseline).await,
+            ArmedMode::Host { spy, host } => self.apply_host(&onboard, spy.as_ref(), host).await,
             ArmedMode::Profile(index) => apply_profile(&onboard, *index)
                 .await
                 .map_err(CaptureError::from),
@@ -166,17 +173,20 @@ impl ArmedOnboard {
     async fn apply_host(
         &self,
         onboard: &OnboardProfilesFeature,
-        spy_index: u8,
+        spy: Option<&ArmedSpy>,
         host: &HostMode,
-        baseline: &Mutex<Option<Vec<u8>>>,
     ) -> Result<(), CaptureError> {
-        let spy = MouseButtonSpyFeature::new(Arc::clone(&self.chan), self.device_index, spy_index);
-        if let Some(found) = read_baseline(onboard, &spy, &host.mapping()).await {
-            *baseline.lock().unwrap_or_else(PoisonError::into_inner) = Some(found);
+        let feature = spy.map(|spy| spy.feature(&self.chan, self.device_index));
+        if let (Some(spy), Some(feature)) = (spy, &feature)
+            && let Some(found) = read_baseline(onboard, feature, &host.mapping()).await
+        {
+            *spy.baseline.lock().unwrap_or_else(PoisonError::into_inner) = Some(found);
         }
         onboard.set_mode(OnboardMode::Host).await?;
-        spy.set_mapping(&host.mapping()).await?;
-        spy.start_spy().await?;
+        if let Some(feature) = &feature {
+            feature.set_mapping(&host.mapping()).await?;
+            feature.start_spy().await?;
+        }
         if let Some(rate) = host.report_rate {
             // The mouse takes a rate write only in host mode, so it goes here.
             match set_report_rate_on_channel(&self.chan, self.device_index, rate).await {
@@ -255,7 +265,8 @@ fn is_ours(found: &[u8], ours: &[u8]) -> bool {
 /// How leaving host mode went: the two writes are independent, because a
 /// failed mapping write must not strand the mouse in host mode.
 struct HostExit {
-    /// The mapping write succeeded, or had nothing to write.
+    /// The mapping write succeeded, or had nothing to write. A session
+    /// without a spy wrote no mapping, so it owes none.
     mapped: bool,
     /// The mode write.
     left: Result<(), Hidpp20Error>,
@@ -268,26 +279,25 @@ struct HostExit {
 /// no slots, which has nothing to restore.
 async fn leave_host_mode(
     onboard: &OnboardProfilesFeature,
-    spy: &MouseButtonSpyFeature,
-    baseline: Option<&[u8]>,
+    spy: Option<(&MouseButtonSpyFeature, Option<&[u8]>)>,
 ) -> HostExit {
-    let mapped = match baseline {
-        Some([]) => true,
-        Some(mapping) => {
+    let mapped = match spy {
+        None | Some((_, Some([]))) => true,
+        Some((spy, Some(mapping))) => {
             let written = spy.set_mapping(mapping).await;
             if let Err(error) = &written {
                 warn!(?error, "restoring the 0x8110 button mapping failed");
             }
             written.is_ok()
         }
-        None => {
+        Some((_, None)) => {
             warn!("no 0x8110 baseline: the button mapping could not be restored");
             true
         }
     };
     let left = onboard.set_mode(OnboardMode::Onboard).await;
     if let Err(error) = &left {
-        warn!(?error, "leaving G-series host mode failed");
+        warn!(?error, "leaving host mode failed");
     }
     HostExit { mapped, left }
 }
@@ -327,15 +337,23 @@ pub(super) async fn arm_onboard(
     let mode = match target {
         OnboardTarget::Profile(index) => ArmedMode::Profile(*index),
         OnboardTarget::Host(host) => {
-            let Some(spy_info) = root.get_feature(MouseButtonSpyFeature::ID).await? else {
-                debug!("host mode requested on a device without 0x8110 — ignored");
-                return Ok(());
+            // Without a layout there is no mapping to write, so no spy either.
+            let spy = if host.slots.is_empty() {
+                None
+            } else {
+                let Some(spy_info) = root.get_feature(MouseButtonSpyFeature::ID).await? else {
+                    debug!("host mode requested on a device without 0x8110 — ignored");
+                    return Ok(());
+                };
+                Some(ArmedSpy {
+                    index: spy_info.index,
+                    captured: host.captured().collect(),
+                    baseline: Mutex::new(None),
+                })
             };
             ArmedMode::Host {
-                spy_index: spy_info.index,
-                captured: host.captured().collect(),
+                spy,
                 host: host.clone(),
-                baseline: Mutex::new(None),
             }
         }
     };
@@ -347,16 +365,10 @@ pub(super) async fn arm_onboard(
     });
     let onboard = state.onboard();
     match &state.mode {
-        ArmedMode::Host {
-            spy_index,
-            host,
-            captured,
-            baseline,
-        } => {
-            state
-                .apply_host(&onboard, *spy_index, host, baseline)
-                .await?;
-            info!(captured = captured.len(), "G-series host mode active");
+        ArmedMode::Host { spy, host } => {
+            state.apply_host(&onboard, spy.as_ref(), host).await?;
+            let captured = spy.as_ref().map_or(0, |spy| spy.captured.len());
+            info!(captured, "host mode active");
         }
         ArmedMode::Profile(index) => {
             apply_profile(&onboard, *index).await?;
@@ -366,24 +378,37 @@ pub(super) async fn arm_onboard(
 }
 
 #[derive(Debug)]
-pub(crate) struct SpyRestore {
+pub(crate) struct HostRestore {
     onboard_index: u8,
-    spy_index: u8,
+    /// `None` for a session that captured no buttons.
+    spy: Option<SpyRestore>,
+}
+
+#[derive(Debug)]
+struct SpyRestore {
+    index: u8,
     /// The mapping to write back, if one was read.
     baseline: Option<Vec<u8>>,
 }
 
-impl SpyRestore {
+impl HostRestore {
     /// Stop the spy, write the baseline back and leave host mode.
     ///
     /// `false` keeps the restore owed. A mouse found onboard completes it
     /// without a write, so a mapping-only failure, which still left host mode,
     /// stays stale until a power cycle: the retry has nothing it can do.
     pub(crate) async fn restore_on(&self, chan: &Arc<HidppChannel>, device_index: u8) -> bool {
-        let spy = MouseButtonSpyFeature::new(Arc::clone(chan), device_index, self.spy_index);
+        let spy = self.spy.as_ref().map(|spy| {
+            (
+                MouseButtonSpyFeature::new(Arc::clone(chan), device_index, spy.index),
+                spy.baseline.as_deref(),
+            )
+        });
         let onboard =
             OnboardProfilesFeature::new(Arc::clone(chan), device_index, self.onboard_index);
-        if let Err(error) = spy.stop_spy().await {
+        if let Some((spy, _)) = &spy
+            && let Err(error) = spy.stop_spy().await
+        {
             debug!(?error, "stopping 0x8110 spy failed");
         }
         // A mouse already onboard (host mode never took) refuses the mapping
@@ -391,7 +416,11 @@ impl SpyRestore {
         if matches!(onboard.get_mode().await, Ok(OnboardMode::Onboard)) {
             return true;
         }
-        let exit = leave_host_mode(&onboard, &spy, self.baseline.as_deref()).await;
+        let exit = leave_host_mode(
+            &onboard,
+            spy.as_ref().map(|(spy, baseline)| (spy, *baseline)),
+        )
+        .await;
         exit.mapped && exit.left.is_ok()
     }
 }
