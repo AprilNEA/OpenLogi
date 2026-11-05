@@ -531,6 +531,33 @@ fn hook_maps_name_the_selected_route_its_diversions_are_kept_under() {
     );
 }
 
+/// A mouse seen on two links has an entry per link under one key. The hook
+/// names the link of the entry selection picked, where its capture session
+/// runs, not the first entry with that key.
+#[test]
+fn hook_maps_name_the_route_of_the_selected_entry_when_two_links_share_a_key() {
+    let direct = DeviceRoute::Direct {
+        vendor_id: 0x046d,
+        product_id: 0xb034,
+    };
+    let mut orch = orchestrator(Config::default());
+    orch.devices = vec![
+        dev("mx", 1, false),
+        AgentDevice {
+            route: Some(direct.clone()),
+            ..dev("mx", 0, true)
+        },
+    ];
+    orch.reload_config(Config::default());
+    assert_eq!(orch.current_key(), Some("mx"));
+    let maps = orch.shared.hook_maps.read().expect("hook maps");
+    assert_eq!(
+        maps.selected_route.as_ref(),
+        Some(&direct),
+        "the offline Bolt entry runs no session"
+    );
+}
+
 fn assert_side_gesture_capture_follows_platform_ownership_and_hook_availability(button: ButtonId) {
     let mut config = Config::default();
     config.set_gesture_mode("a", button, true);
