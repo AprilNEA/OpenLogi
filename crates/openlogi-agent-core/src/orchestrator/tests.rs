@@ -7,7 +7,8 @@ use super::{
     configured_force_sensing, configured_report_rate, configured_wheel_mode, desktop_switch,
     devices::keeps_os_layout, host_switch_links, main_wheel_divert, newly_kept_os_layouts,
     os_layout_appeared, os_layout_target, pick_current, plan_reapply, reapply_targets,
-    reconnect_follower_cookies, settings_moved, stable_id, wheel_inverted,
+    reconnect_follower_cookies, settings_moved, should_apply_os_pointer_settings, stable_id,
+    wheel_inverted,
 };
 use crate::hardware::WheelModeChange;
 use crate::watchers::keyboard::KeyboardSpec;

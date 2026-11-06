@@ -1769,15 +1769,22 @@ impl Orchestrator {
         if let Some(write) = speed_write {
             self.write_pointer_speed(write);
         }
-        // Apply OS-level pointer speed if configured.
         let compositor = openlogi_core::compositor::Compositor::detect();
-        let use_curve = self
-            .config
-            .os_pointer_accel(key)
-            .unwrap_or(compositor == openlogi_core::compositor::Compositor::Hyprland);
-        let is_hyprland = compositor == openlogi_core::compositor::Compositor::Hyprland;
+        // The default Hyprland curve is a global pointing-device policy, not
+        // a reason for a keyboard-only reconnect to change pointer settings.
+        let pointer_device = dev
+            .capabilities
+            .is_some_and(|caps| caps.pointer || caps.pointer_scaling);
         let factor_opt = self.config.os_pointer_speed(key);
-        if factor_opt.is_some() || (use_curve && is_hyprland) {
+        let accel_opt = self.config.os_pointer_accel(key);
+        let explicit_pointer_config = factor_opt.is_some() || accel_opt.is_some();
+        let use_curve = accel_opt.unwrap_or(
+            pointer_device && compositor == openlogi_core::compositor::Compositor::Hyprland,
+        );
+        let is_hyprland = compositor == openlogi_core::compositor::Compositor::Hyprland;
+        if should_apply_os_pointer_settings(pointer_device, explicit_pointer_config, is_hyprland)
+            && (factor_opt.is_some() || (use_curve && is_hyprland))
+        {
             let factor = factor_opt.unwrap_or(0.0);
             if use_curve && is_hyprland {
                 let gain = (4.8 * (1.0 + factor as f64)).max(0.3);
@@ -1795,7 +1802,6 @@ impl Orchestrator {
                     });
                 }
             } else if is_hyprland && !use_curve {
-                // Toggle off: restore adaptive profile.
                 let cmd = "hyprctl eval \"hl.config({input={accel_profile='adaptive'}})\"; \
                            hyprctl keyword input:accel_profile 'adaptive'"
                     .to_string();
@@ -1804,7 +1810,6 @@ impl Orchestrator {
                         let _ = c.wait();
                     });
                 }
-                // Also apply sensitivity if a factor is set.
                 if let Some(f) = factor_opt
                     && let Some(cmd) = openlogi_core::compositor::apply_pointer_speed(compositor, f)
                 {
@@ -1816,11 +1821,9 @@ impl Orchestrator {
                 }
             } else if let Some(cmd) =
                 openlogi_core::compositor::apply_pointer_speed(compositor, factor)
+                && factor_opt.is_some()
             {
-                // Only apply pointer speed when originally configured.
-                if factor_opt.is_some()
-                    && let Ok(mut c) = std::process::Command::new(&cmd[0]).args(&cmd[1..]).spawn()
-                {
+                if let Ok(mut c) = std::process::Command::new(&cmd[0]).args(&cmd[1..]).spawn() {
                     std::thread::spawn(move || {
                         let _ = c.wait();
                     });
@@ -2362,8 +2365,15 @@ impl Orchestrator {
     /// leaves the keyboard's layout where it is, as in Logi Options+, and
     /// withdraws a layout write still queued for it.
     fn apply_enabled_os_layouts(&self, previous: &Config) {
-        self.kept_os_layouts
-            .retain(|key, _| config_keeps_os_layout(&self.config, key));
+        self.kept_os_layouts.retain(|key, host| {
+            config_keeps_os_layout(&self.config, key)
+                || self
+                    .devices
+                    .iter()
+                    .find(|dev| dev.config_key == key)
+                    .and_then(|dev| os_layout_target(&self.config, dev))
+                    == Some(host)
+        });
         for dev in newly_kept_os_layouts(previous, &self.config, &self.devices) {
             self.keep_os_layout(dev);
         }
@@ -2503,6 +2513,14 @@ impl Orchestrator {
             .filter(|dev| dev.online)
             .filter_map(|dev| Some((dev, dev.route.as_ref()?, dev.light_capabilities?)))
     }
+}
+
+fn should_apply_os_pointer_settings(
+    pointer_device: bool,
+    explicit_config: bool,
+    is_hyprland: bool,
+) -> bool {
+    explicit_config || (pointer_device && is_hyprland)
 }
 
 /// One standalone-light write a config reload queues.

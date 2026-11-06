@@ -200,6 +200,30 @@ fn a_reload_withdraws_queued_layout_writes_the_user_opted_out_of() {
 }
 
 #[test]
+fn pointer_reapply_policy_requires_pointer_device_for_default_curve() {
+    assert!(!should_apply_os_pointer_settings(false, false, true));
+    assert!(should_apply_os_pointer_settings(true, false, true));
+    assert!(!should_apply_os_pointer_settings(true, false, false));
+    // A saved speed/acceleration setting remains explicit even when capability
+    // discovery has not identified the device as a pointing device.
+    assert!(should_apply_os_pointer_settings(false, true, false));
+}
+
+#[test]
+fn pin_only_layout_survives_an_unrelated_config_reload() {
+    let mut orch = orchestrator(pinned(PinnedOs::Windows));
+    orch.devices = vec![layout_keyboard("kbd", 1)];
+    let target = platform(OsMask::WINDOWS);
+    orch.kept_os_layouts.keep("kbd", target);
+
+    let mut unrelated = orch.config.clone();
+    unrelated.app_settings.launch_at_login = !unrelated.app_settings.launch_at_login;
+    orch.replace_config(unrelated);
+
+    assert!(orch.kept_os_layouts.contains("kbd", target));
+}
+
+#[test]
 fn a_kept_layout_is_wanted_only_on_the_platform_it_was_kept_on() {
     let kept = KeptOsLayouts::default();
     let macos = platform(OsMask::MACOS);
