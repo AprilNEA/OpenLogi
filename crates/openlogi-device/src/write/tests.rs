@@ -2133,3 +2133,35 @@ async fn raw_feature_calls_find_no_feature_the_device_lacks() {
         "nothing is called"
     );
 }
+
+#[tokio::test]
+async fn raw_feature_calls_reach_the_root_at_index_zero() {
+    let (raw, handle) =
+        ScriptedRawHidChannel::with_responder(|request| raw_feature_device(request, true));
+    let channel = scripted_channel(raw).await;
+
+    // A ping, with a byte past what a short report carries to tell it apart
+    // from the one `Device::new` sends.
+    let (index, replies) =
+        raw_feature_calls_on_channel(&channel, 1, 0x0000, &[raw_call(1, &[0, 0, 0x5a, 0xc3])])
+            .await
+            .expect("the call goes out")
+            .expect("every device has the root");
+
+    assert_eq!(index, 0);
+    let mut ping = [0u8; RAW_FEATURE_PARAMS];
+    ping[0] = 4;
+    assert_eq!(replies, [RawFeatureReply::Payload(ping)]);
+    let sent = handle.written_reports();
+    assert!(
+        sent.iter()
+            .any(|report| report.len() > 7 && report[2] == 0 && report[7] == 0xc3),
+        "the call went to index 0"
+    );
+    assert!(
+        !sent
+            .iter()
+            .any(|report| report[2] == 0 && report[3] >> 4 == 0),
+        "the root is not looked up"
+    );
+}

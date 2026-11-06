@@ -12,6 +12,7 @@ use hidpp::{
         DeviceEntityFirmwareInfo, DeviceEntityType, DeviceInformationFeature,
     },
     feature::feature_set::FeatureSetFeature,
+    feature::root::RootFeature,
     feature::unified_battery::{BatteryInfo as UnifiedBatteryInfo, UnifiedBatteryFeature},
     nibble::U4,
     protocol::v20::{self, ErrorType, Hidpp20Error},
@@ -213,19 +214,26 @@ pub(crate) async fn raw_feature_calls_on_channel(
     let device = Device::new(Arc::clone(channel), index)
         .await
         .map_err(|_| WriteError::DeviceUnreachable { index })?;
-    let Some(info) = device
-        .root()
-        .get_feature(feature_id)
-        .await
-        .map_err(|e| classify_hidpp_error(e, HidppOperation::ResolveFeature, feature_id))?
-    else {
-        return Ok(None);
+    // The root answers a lookup of itself with index 0, which reads as
+    // absent, but it lives at index 0 on every HID++ 2.0 device.
+    let feature_index = if feature_id == RootFeature::ID {
+        0
+    } else {
+        let Some(info) = device
+            .root()
+            .get_feature(feature_id)
+            .await
+            .map_err(|e| classify_hidpp_error(e, HidppOperation::ResolveFeature, feature_id))?
+        else {
+            return Ok(None);
+        };
+        info.index
     };
     let mut replies = Vec::with_capacity(calls.len());
     for call in calls {
         let header = v20::MessageHeader {
             device_index: index,
-            feature_index: info.index,
+            feature_index,
             function_id: call.function,
             software_id: channel.get_sw_id(),
         };
@@ -239,7 +247,7 @@ pub(crate) async fn raw_feature_calls_on_channel(
         };
         replies.push(reply);
     }
-    Ok(Some((info.index, replies)))
+    Ok(Some((feature_index, replies)))
 }
 
 /// Enumerate the device's HID++ `0x1b04` reprogrammable controls. This is a
