@@ -24,5 +24,5 @@ pub use index::{
     METADATA_FILES,
 };
 pub use manifest::{DepotManifest, ManifestDevice, ManifestResource, variant_model_id};
-pub use metadata::{Assignment, Direction, ImageEntry, Metadata, Origin, Point};
+pub use metadata::{Assignment, Direction, ImageEntry, KeyRegion, Metadata, Origin, Point};
 pub use source::{AssetRegistry, AssetSource};

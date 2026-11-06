@@ -923,6 +923,7 @@ mod tests {
                             width: origin.0,
                             height: origin.1,
                         },
+                        zones: Vec::new(),
                         assignments: Vec::new(),
                     },
                     ImageEntry {
@@ -931,6 +932,7 @@ mod tests {
                             width: origin.0,
                             height: origin.1,
                         },
+                        zones: Vec::new(),
                         assignments,
                     },
                 ],

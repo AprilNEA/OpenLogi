@@ -29,6 +29,7 @@ use crate::features::camera::preview::CameraPreview;
 use crate::features::keyboard::disable_keys::DisableKeysPanel;
 use crate::features::keyboard::function_row::FunctionRowView;
 use crate::features::lighting::keyboard_rgb::LightingPanel;
+use crate::features::lighting::per_key::per_key_photo;
 use crate::features::lighting::standalone::LightPanel;
 use crate::features::lighting::visual as light_visual;
 use crate::features::mouse::view::MouseModelView;
@@ -144,7 +145,7 @@ pub(super) fn detail_content(
             cx,
         )
         .into_any_element(),
-        DetailTab::Lighting => lighting_tab(panels.lighting_panel).into_any_element(),
+        DetailTab::Lighting => lighting_tab(panels.lighting_panel, cx).into_any_element(),
         DetailTab::Camera => {
             camera_tab(panels.camera_preview, panels.camera_controls).into_any_element()
         }
@@ -828,11 +829,23 @@ fn audio_tab(audio_panel: &gpui::Entity<AudioPanel>) -> impl IntoElement {
 /// Lighting tab: the RGB controls (swatches, on/off, brightness) in an
 /// untitled card — the rail already names the page "Lighting", so a card
 /// title would only repeat it. Shown when the device reports a lighting
-/// capability — see [`DetailTab::tabs_for`].
-fn lighting_tab(lighting_panel: &gpui::Entity<LightingPanel>) -> impl IntoElement {
+/// capability — see [`DetailTab::tabs_for`]. A keyboard with per-key colors
+/// gets the wide body its photo needs.
+fn lighting_tab(
+    lighting_panel: &gpui::Entity<LightingPanel>,
+    cx: &Context<AppView>,
+) -> impl IntoElement {
+    let per_key = AppState::try_read(cx)
+        .and_then(AppState::current_record)
+        .and_then(per_key_photo)
+        .is_some();
     tab_body(
         DetailTab::Lighting,
-        ContentWidth::Small,
+        if per_key {
+            ContentWidth::Large
+        } else {
+            ContentWidth::Small
+        },
         PanelCard::new(
             SharedString::default(),
             Icon::new(IconName::Palette),
