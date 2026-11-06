@@ -56,7 +56,7 @@ pub use settings::{
     DeviceViewMode, GKeyOwner, GamingKeyMode, GlideShape, Lighting, LightingEffect, MomentumParams,
     MomentumScrolling, MouseProfileTarget, OnboardMemory, SMARTSHIFT_AUTO_DISENGAGE_DEFAULT,
     SMARTSHIFT_MIN_AUTO_DISENGAGE, ScrollResolution, SmartShift, ThumbwheelSensitivity, UiScale,
-    VerticalScrollSensitivity, WheelMode,
+    VerticalScrollSensitivity, WaveDirection, WaveShape, WheelMode,
 };
 
 use crate::app::AppAliases;

@@ -23,7 +23,7 @@ use gpui_kit::component::{
     v_flex,
 };
 use openlogi_core::color::Rgb;
-use openlogi_core::config::{Lighting, LightingEffect, LightingKey};
+use openlogi_core::config::{Lighting, LightingEffect, LightingKey, WaveDirection};
 
 use super::per_key::{has_firmware_effects, key_color, per_key_photo, photo_editor};
 use crate::state::{AppState, StateEvent};
@@ -35,12 +35,20 @@ use crate::ui::theme::{self, Palette, SelectableStyle as _, Typography as _};
 const SWATCH: f32 = 28.;
 
 /// The effects the selector offers, in its order.
-const EFFECTS: [LightingEffect; 4] = [
+const EFFECTS: [LightingEffect; 5] = [
     LightingEffect::Static,
     LightingEffect::Breathing,
     LightingEffect::Cycle,
     LightingEffect::Ripple,
+    LightingEffect::Wave,
 ];
+
+/// The wave's subtle, medium and strong depths, in percent.
+const WAVE_DEPTHS: [u8; 3] = [30, 50, 75];
+/// The wave's narrow, medium and wide bands, in percent of the keyboard.
+const WAVE_WIDTHS: [u8; 3] = [35, 60, 85];
+const WAVE_DIRECTIONS: [WaveDirection; 2] =
+    [WaveDirection::LeftToRight, WaveDirection::RightToLeft];
 
 /// Preset colors. Deliberately small — covering the common keyboard accent
 /// colors.
@@ -115,10 +123,11 @@ impl Render for LightingPanel {
         } else {
             LightingEffect::Static
         };
-        // Keys are picked only for the still colours they keep.
+        // Keys are picked for the still colours they keep, alone or held over
+        // a drawn wave.
         let photo = record
             .and_then(per_key_photo)
-            .filter(|_| effect == LightingEffect::Static);
+            .filter(|_| matches!(effect, LightingEffect::Static | LightingEffect::Wave));
         let device = record.map(|record| record.config_key.clone());
         if self.selection_device != device || photo.is_none() {
             self.selected.clear();
@@ -139,22 +148,7 @@ impl Render for LightingPanel {
                 .map(|&color| swatch(color, &lighting, &self.selected, pal))
                 .collect()
         };
-        let effect_rows = effects.then(|| {
-            v_flex()
-                .gap_3()
-                .child(labelled(
-                    tr!("lighting.effect"),
-                    effect_control(effect, cx),
-                    pal,
-                ))
-                .when(effect != LightingEffect::Static, |rows| {
-                    rows.child(labelled(
-                        tr!("lighting.speed"),
-                        speed_control(&lighting, cx),
-                        pal,
-                    ))
-                })
-        });
+        let effect_rows = effects.then(|| effect_rows(effect, &lighting, pal, cx));
         let editor = photo.map(|photo| {
             v_flex()
                 .gap_2()
@@ -204,6 +198,117 @@ impl Render for LightingPanel {
     }
 }
 
+/// The effect selector and the running effect's settings.
+fn effect_rows(
+    effect: LightingEffect,
+    lighting: &Lighting,
+    pal: Palette,
+    cx: &gpui::App,
+) -> impl IntoElement + use<> {
+    v_flex()
+        .gap_3()
+        .child(labelled(
+            tr!("lighting.effect"),
+            effect_control(effect, cx),
+            pal,
+        ))
+        .when(effect != LightingEffect::Static, |rows| {
+            rows.child(labelled(
+                tr!("lighting.speed"),
+                speed_control(lighting, cx),
+                pal,
+            ))
+        })
+        .when(effect == LightingEffect::Wave, |rows| {
+            let shape = lighting.wave;
+            rows.child(labelled(
+                tr!("lighting.wave_depth"),
+                choice(
+                    "wave-depth",
+                    [
+                        tr!("lighting.depth_subtle"),
+                        tr!("lighting.depth_medium"),
+                        tr!("lighting.depth_strong"),
+                    ],
+                    WAVE_DEPTHS,
+                    shape.depth,
+                    |lighting, depth| lighting.wave.depth = depth,
+                    cx,
+                ),
+                pal,
+            ))
+            .child(labelled(
+                tr!("lighting.wave_width"),
+                choice(
+                    "wave-width",
+                    [
+                        tr!("lighting.width_narrow"),
+                        tr!("lighting.width_medium"),
+                        tr!("lighting.width_wide"),
+                    ],
+                    WAVE_WIDTHS,
+                    shape.width,
+                    |lighting, width| lighting.wave.width = width,
+                    cx,
+                ),
+                pal,
+            ))
+            .child(labelled(
+                tr!("lighting.wave_direction"),
+                choice(
+                    "wave-direction",
+                    [
+                        tr!("lighting.direction_left_to_right"),
+                        tr!("lighting.direction_right_to_left"),
+                    ],
+                    WAVE_DIRECTIONS,
+                    shape.direction,
+                    |lighting, direction| lighting.wave.direction = direction,
+                    cx,
+                ),
+                pal,
+            ))
+        })
+}
+
+/// One segment per option; picking one sets it with `set` and commits.
+fn choice<T: Copy + PartialEq + 'static, const N: usize>(
+    id: &'static str,
+    labels: [gpui::SharedString; N],
+    values: [T; N],
+    current: T,
+    set: fn(&mut Lighting, T),
+    cx: &gpui::App,
+) -> impl IntoElement + use<T, N> {
+    values
+        .iter()
+        .zip(labels)
+        .enumerate()
+        .fold(
+            ButtonGroup::new(id).w_full().outline(),
+            |group, (index, (&value, label))| {
+                group.child(
+                    Button::new((id, index))
+                        .flex_1()
+                        .label(label)
+                        .selected(current == value)
+                        .selected_segment(current == value, cx),
+                )
+            },
+        )
+        .on_click(move |indices, _window, cx| {
+            let Some(&value) = indices.first().and_then(|index| values.get(*index)) else {
+                return;
+            };
+            AppState::apply(cx, |state| {
+                let mut next = state.lighting();
+                next.enabled = true;
+                set(&mut next, value);
+                state.commit_lighting(next)
+            });
+        })
+}
+
 /// A caption over `control`.
 fn labelled(label: impl IntoElement, control: impl IntoElement, pal: Palette) -> impl IntoElement {
     v_flex()
@@ -213,12 +318,13 @@ fn labelled(label: impl IntoElement, control: impl IntoElement, pal: Palette) ->
 }
 
 /// One segment per firmware effect; picking one starts it at its own pace.
-fn effect_control(effect: LightingEffect, cx: &gpui::App) -> impl IntoElement {
+fn effect_control(effect: LightingEffect, cx: &gpui::App) -> impl IntoElement + use<> {
     let labels = [
         tr!("lighting.effect_static"),
         tr!("lighting.effect_breathing"),
         tr!("lighting.effect_cycle"),
         tr!("lighting.effect_ripple"),
+        tr!("lighting.effect_wave"),
     ];
     EFFECTS
         .iter()
@@ -258,7 +364,7 @@ fn speed_presets(effect: LightingEffect) -> [u16; 3] {
 }
 
 /// Slow, medium and fast for the running effect.
-fn speed_control(lighting: &Lighting, cx: &gpui::App) -> impl IntoElement {
+fn speed_control(lighting: &Lighting, cx: &gpui::App) -> impl IntoElement + use<> {
     let presets = speed_presets(lighting.effect);
     let current = lighting
         .period_ms

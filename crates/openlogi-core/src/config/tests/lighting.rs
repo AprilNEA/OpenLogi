@@ -14,6 +14,7 @@ fn lighting_roundtrips_per_device() {
             keys: BTreeMap::new(),
             effect: LightingEffect::Static,
             period_ms: None,
+            wave: WaveShape::default(),
         },
     );
     let restored = write_and_read(&cfg);
@@ -26,6 +27,7 @@ fn lighting_roundtrips_per_device() {
             keys: BTreeMap::new(),
             effect: LightingEffect::Static,
             period_ms: None,
+            wave: WaveShape::default(),
         })
     );
     assert_eq!(restored.lighting("absent"), None);
@@ -243,4 +245,34 @@ fn an_effect_and_its_pace_roundtrip_and_a_static_one_stays_out_of_the_file() {
     let restored = write_and_read(&cfg);
     assert_eq!(restored.lighting("g515"), Some(breathing));
     assert_eq!(restored.lighting("plain"), Some(Lighting::default()));
+}
+
+#[test]
+fn a_wave_keeps_its_shape_and_a_default_shape_stays_out_of_the_file() {
+    let mut cfg = Config::default();
+    let wave = Lighting {
+        effect: LightingEffect::Wave,
+        wave: WaveShape {
+            depth: 30,
+            width: 80,
+            direction: WaveDirection::RightToLeft,
+        },
+        ..Lighting::default()
+    };
+    cfg.set_lighting("g515", wave.clone());
+    let text = toml::to_string(&cfg).expect("config serializes");
+    assert!(text.contains("effect = \"wave\""), "{text}");
+    assert!(text.contains("direction = \"right_to_left\""), "{text}");
+    let restored = write_and_read(&cfg);
+    assert_eq!(restored.lighting("g515"), Some(wave));
+
+    cfg.set_lighting(
+        "g515",
+        Lighting {
+            effect: LightingEffect::Wave,
+            ..Lighting::default()
+        },
+    );
+    let text = toml::to_string(&cfg).expect("config serializes");
+    assert!(!text.contains("depth"), "{text}");
 }

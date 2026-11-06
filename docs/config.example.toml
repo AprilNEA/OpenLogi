@@ -115,6 +115,9 @@ brightness = 80
 # `period_ms` says otherwise:
 # effect = "breathing"
 # period_ms = 3000
+# Or a wave OpenLogi draws across the keys, with `keys` held still over it:
+# effect = "wave"
+# wave = { depth = 50, width = 60, direction = "left_to_right" }
 
 [devices."receiver:aabbccdd:slot:1".smartshift]
 mode = "ratchet"

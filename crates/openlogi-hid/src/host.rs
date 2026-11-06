@@ -292,6 +292,17 @@ pub async fn try_rgb_effect(
     device::try_rgb_effect(&*native_backend(), route, effect_id, params, hold).await
 }
 
+/// Paint per-key frames from `render` on the device `route` reaches until
+/// `keep_going` says stop. See [`device::animate_per_key`].
+pub async fn animate_per_key(
+    route: &DeviceRoute,
+    render: impl FnMut(std::time::Duration) -> Vec<(u8, openlogi_core::color::Rgb)>,
+    keep_going: impl Fn() -> bool,
+    delta: bool,
+) -> Result<device::AnimationRun, WriteError> {
+    device::animate_per_key(&*native_backend(), route, render, keep_going, delta).await
+}
+
 /// Play a haptic waveform on the device `route` reaches.
 pub async fn play_haptic(route: &DeviceRoute, waveform: HapticWaveform) -> Result<(), WriteError> {
     device::play_haptic(&*native_backend(), route, waveform).await

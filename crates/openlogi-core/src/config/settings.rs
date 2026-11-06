@@ -748,6 +748,44 @@ pub struct Lighting {
     /// out, the effect's own pace ([`LightingEffect::default_period_ms`]).
     #[serde(default)]
     pub period_ms: Option<u16>,
+    /// How [`LightingEffect::Wave`] looks.
+    #[serde(default)]
+    pub wave: WaveShape,
+}
+
+/// The shape of a [`LightingEffect::Wave`]: a dimmer band crossing keys lit
+/// in [`Lighting::color`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct WaveShape {
+    /// How far the band dims the keys at its front, in percent: `0` leaves
+    /// them as they are, `100` turns them off.
+    pub depth: u8,
+    /// The band's width, in percent of the keyboard.
+    pub width: u8,
+    /// The way the band travels.
+    pub direction: WaveDirection,
+}
+
+impl Default for WaveShape {
+    fn default() -> Self {
+        Self {
+            depth: 50,
+            width: 60,
+            direction: WaveDirection::LeftToRight,
+        }
+    }
+}
+
+/// The way a [`LightingEffect::Wave`] travels.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WaveDirection {
+    /// From the Esc side to the arrow keys.
+    #[default]
+    LeftToRight,
+    /// From the arrow keys to the Esc side.
+    RightToLeft,
 }
 
 /// A lighting animation the keyboard's firmware runs by itself.
@@ -764,6 +802,10 @@ pub enum LightingEffect {
     /// A pressed key lights in [`Lighting::color`], spreading to its
     /// neighbours.
     Ripple,
+    /// A dimmer band crosses keys lit in [`Lighting::color`], shaped by
+    /// [`Lighting::wave`]. Drawn by OpenLogi frame by frame, so
+    /// [`Lighting::keys`] stay lit in their own colours over it.
+    Wave,
 }
 
 impl LightingEffect {
@@ -775,6 +817,7 @@ impl LightingEffect {
             Self::Breathing => 4000,
             Self::Cycle => 5000,
             Self::Ripple => 500,
+            Self::Wave => 3000,
         }
     }
 }
@@ -792,7 +835,12 @@ impl Serialize for Lighting {
         let skip_keys = file && self.keys.is_empty();
         let skip_effect = file && self.effect == LightingEffect::Static;
         let skip_period = file && self.period_ms.is_none();
-        let len = 6 - usize::from(skip_keys) - usize::from(skip_effect) - usize::from(skip_period);
+        let skip_wave = file && self.wave == WaveShape::default();
+        let len = 7
+            - usize::from(skip_keys)
+            - usize::from(skip_effect)
+            - usize::from(skip_period)
+            - usize::from(skip_wave);
         let mut state = serializer.serialize_struct("Lighting", len)?;
         state.serialize_field("enabled", &self.enabled)?;
         state.serialize_field("color", &self.color)?;
@@ -811,6 +859,11 @@ impl Serialize for Lighting {
             state.skip_field("period_ms")?;
         } else {
             state.serialize_field("period_ms", &self.period_ms)?;
+        }
+        if skip_wave {
+            state.skip_field("wave")?;
+        } else {
+            state.serialize_field("wave", &self.wave)?;
         }
         state.end()
     }
@@ -906,6 +959,7 @@ impl Default for Lighting {
             keys: BTreeMap::new(),
             effect: LightingEffect::Static,
             period_ms: None,
+            wave: WaveShape::default(),
         }
     }
 }

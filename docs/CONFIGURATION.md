@@ -244,6 +244,14 @@ Common device fields are:
   long one round takes, from 100 to 60000; left out, the effect keeps its
   own pace (4000, 5000 and 500 ms). Brightness applies to every effect. A
   keyboard whose firmware does not offer the effect shows `color`.
+
+  `effect = "wave"` is drawn by OpenLogi itself on a keyboard whose key
+  positions it knows (today the G515 LS TKL): keys lit in `color`, with a
+  dimmer band crossing them once every `period_ms` (3000 by default), while
+  the keys in `keys` stay lit in their own colours. Shape it with a `wave`
+  table: `depth` (how far the band dims, 0–100 %, default 50), `width` (the
+  band's width, 5–100 % of the keyboard, default 60) and `direction`
+  (`left_to_right` or `right_to_left`). The wave runs while OpenLogi runs.
 - `smartshift`, and camera controls / profiles
 - `camera_stream_mode`: the live preview's mode, a table of `width`, `height`
   (pixels) and `fps`. All three are required and must be positive, or the file

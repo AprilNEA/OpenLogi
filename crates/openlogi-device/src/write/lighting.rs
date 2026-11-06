@@ -30,8 +30,10 @@ use super::{
     write_whole_raw_report,
 };
 
+mod animate;
 mod rgb;
 
+pub use animate::{AnimationRun, KeyFrames, animate_per_key};
 pub use rgb::RgbControlLease;
 pub use rgb::effects::{OnboardSlotInfo, RgbEffectEntry, rgb_effects, try_rgb_effect};
 
@@ -707,6 +709,8 @@ struct PerKeyV2Target {
     /// Which zone lights which key, when the product is one
     /// [`openlogi_device_registry::keyboard`] knows.
     zone_map: Option<PerKeyZones>,
+    /// Where each key sits across the keyboard, for drawn effects.
+    columns: Option<&'static [(u8, u16)]>,
 }
 
 impl PerKeyV2Target {
@@ -728,13 +732,14 @@ impl PerKeyV2Target {
                 feature_hex: PerKeyLightingFeature::ID,
             });
         }
-        let zone_map = rgb::model_id(&mut device)
-            .await?
-            .and_then(openlogi_device_registry::keyboard::per_key_zones);
+        let model_id = rgb::model_id(&mut device).await?;
+        let zone_map = model_id.and_then(openlogi_device_registry::keyboard::per_key_zones);
+        let columns = model_id.and_then(openlogi_device_registry::keyboard::key_columns);
         Ok(Self {
             feature,
             zones,
             zone_map,
+            columns,
         })
     }
 
