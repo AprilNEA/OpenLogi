@@ -286,7 +286,7 @@ pub async fn dump_features(route: &DeviceRoute) -> Result<Vec<FeatureEntry>, Wri
 pub async fn raw_feature_calls(
     route: &DeviceRoute,
     feature_id: u16,
-    calls: Vec<(u8, [u8; 16])>,
+    calls: &[device::RawFeatureCall],
 ) -> Result<Option<(u8, Vec<device::RawFeatureReply>)>, WriteError> {
     device::raw_feature_calls(&*native_backend(), route, feature_id, calls).await
 }

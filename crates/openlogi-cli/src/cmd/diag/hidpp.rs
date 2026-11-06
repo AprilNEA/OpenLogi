@@ -9,13 +9,10 @@ use std::io::Write as _;
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
-use openlogi_hid::RawFeatureReply;
+use openlogi_hid::{RAW_FEATURE_PARAMS, RawFeatureCall, RawFeatureReply};
 use openlogi_ipc::client::ConnectError;
 
 use crate::cmd::diag::select_device;
-
-/// Parameter bytes a long HID++ 2.0 report carries.
-const PARAM_COUNT: usize = 16;
 
 #[derive(Debug, Args)]
 pub struct HidppArgs {
@@ -52,14 +49,14 @@ pub async fn run(args: HidppArgs) -> Result<()> {
             .iter()
             .map(|call| parse_call(call))
             .collect::<Result<Vec<_>>>()?;
-        return call_and_print(&route, args.feature, calls).await;
+        return call_and_print(&route, args.feature, &calls).await;
     }
     while let Some(line) = prompt("fn and params (`1 00 05`, :q to stop): ").await? {
         if line.trim() == ":q" {
             break;
         }
         match parse_call(&line) {
-            Ok(call) => call_and_print(&route, args.feature, vec![call]).await?,
+            Ok(call) => call_and_print(&route, args.feature, &[call]).await?,
             Err(error) => eprintln!("{error}"),
         }
     }
@@ -69,23 +66,23 @@ pub async fn run(args: HidppArgs) -> Result<()> {
 async fn call_and_print(
     route: &openlogi_hid::DeviceRoute,
     feature: u16,
-    calls: Vec<(u8, [u8; PARAM_COUNT])>,
+    calls: &[RawFeatureCall],
 ) -> Result<()> {
-    let sent = calls.clone();
     let Some((index, replies)) = openlogi_hid::raw_feature_calls(route, feature, calls)
         .await
         .with_context(|| format!("call feature {feature:#06x}"))?
     else {
         bail!("the device has no feature {feature:#06x}; run `diag features` for its list");
     };
-    for ((function, params), reply) in sent.iter().zip(replies) {
+    for (call, reply) in calls.iter().zip(replies) {
         let answer = match reply {
             RawFeatureReply::Payload(payload) => hex(&payload),
             RawFeatureReply::Error(error) => format!("error {error:?}"),
         };
         println!(
-            "{feature:#06x}@{index} fn {function:>2} {} -> {answer}",
-            hex(trimmed(params))
+            "{feature:#06x}@{index} fn {:>2} {} -> {answer}",
+            call.function(),
+            hex(trimmed(call.params()))
         );
     }
     Ok(())
@@ -107,28 +104,26 @@ fn parse_feature_id(text: &str) -> Result<u16, String> {
 }
 
 /// A function number, then hex parameter bytes with spaces anywhere.
-fn parse_call(text: &str) -> Result<(u8, [u8; PARAM_COUNT])> {
+fn parse_call(text: &str) -> Result<RawFeatureCall> {
     let text = text.trim();
     let (function, rest) = text.split_once(char::is_whitespace).unwrap_or((text, ""));
     let function: u8 = function
         .parse()
         .with_context(|| format!("`{function}` is not a function number"))?;
-    if function > 15 {
-        bail!("function {function}: HID++ 2.0 functions run 0–15");
-    }
     let digits: String = rest.chars().filter(|c| !c.is_whitespace()).collect();
     if !digits.len().is_multiple_of(2) {
         bail!("`{rest}`: an odd number of hex digits");
     }
-    if digits.len() > PARAM_COUNT * 2 {
-        bail!("`{rest}`: more than {PARAM_COUNT} bytes");
+    if digits.len() > RAW_FEATURE_PARAMS * 2 {
+        bail!("`{rest}`: more than {RAW_FEATURE_PARAMS} bytes");
     }
-    let mut params = [0; PARAM_COUNT];
+    let mut params = [0; RAW_FEATURE_PARAMS];
     for (slot, pair) in params.iter_mut().zip(digits.as_bytes().chunks(2)) {
         let pair = std::str::from_utf8(pair).context("hex digits")?;
         *slot = u8::from_str_radix(pair, 16).with_context(|| format!("`{pair}` is not hex"))?;
     }
-    Ok((function, params))
+    RawFeatureCall::new(function, params)
+        .with_context(|| format!("function {function}: HID++ 2.0 functions run 0–15"))
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -160,10 +155,13 @@ mod tests {
 
     #[test]
     fn a_call_is_a_function_then_zero_padded_bytes() {
-        let (function, params) = parse_call(" 1 00 0 5 ").expect("call parses");
-        assert_eq!(function, 1);
-        assert_eq!(params[..3], [0, 5, 0]);
-        assert_eq!(parse_call("0").expect("bare function").1, [0; PARAM_COUNT]);
+        let call = parse_call(" 1 00 0 5 ").expect("call parses");
+        assert_eq!(call.function(), 1);
+        assert_eq!(call.params()[..3], [0, 5, 0]);
+        assert_eq!(
+            parse_call("0").expect("bare function").params(),
+            &[0; RAW_FEATURE_PARAMS]
+        );
         parse_call("16").expect_err("function past 15");
         parse_call("1 abc").expect_err("odd digit count");
         parse_call("x").expect_err("not a number");

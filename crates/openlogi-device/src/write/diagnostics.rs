@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use hidpp::{
-    channel::HidppChannel,
+    channel::{HidppChannel, LONG_REPORT_LENGTH},
     device::Device,
     feature::CreatableFeature,
     feature::FeatureType,
@@ -130,20 +130,61 @@ pub(crate) async fn dump_features_on_channel(
     Ok(entries)
 }
 
+/// Parameter bytes one long HID++ 2.0 report carries, and the length of
+/// every [`RawFeatureReply::Payload`].
+pub const RAW_FEATURE_PARAMS: usize = LONG_REPORT_LENGTH - 4;
+
+/// One raw call to a HID++ 2.0 feature, for [`raw_feature_calls`]: a
+/// function number and the parameters of a long report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RawFeatureCall {
+    function: U4,
+    params: [u8; RAW_FEATURE_PARAMS],
+}
+
+impl RawFeatureCall {
+    /// The call of `function` with `params`, or `None` past function 15: a
+    /// HID++ 2.0 function number is four bits, and a larger one would go out
+    /// as a different function.
+    #[must_use]
+    pub fn new(function: u8, params: [u8; RAW_FEATURE_PARAMS]) -> Option<Self> {
+        if function > 0x0f {
+            return None;
+        }
+        Some(Self {
+            function: U4::from_lo(function),
+            params,
+        })
+    }
+
+    /// The function number, 0–15.
+    #[must_use]
+    pub fn function(&self) -> u8 {
+        self.function.to_lo()
+    }
+
+    /// The parameter bytes, as sent.
+    #[must_use]
+    pub fn params(&self) -> &[u8; RAW_FEATURE_PARAMS] {
+        &self.params
+    }
+}
+
 /// What one raw call to a HID++ 2.0 feature got back. For
 /// [`raw_feature_calls`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RawFeatureReply {
-    /// The response payload; a short response is zero-padded to 16 bytes.
-    Payload([u8; 16]),
+    /// The response payload; a short response is zero-padded to
+    /// [`RAW_FEATURE_PARAMS`] bytes.
+    Payload([u8; RAW_FEATURE_PARAMS]),
     /// The error the feature answered with.
     Error(ErrorType),
 }
 
-/// Call feature `feature_id` of the device on `route` once for each
-/// `(function, parameters)` of `calls`, in order, over one channel, and
-/// return the feature's index with every answer. `None` when the device has
-/// no such feature. Each call goes out as a long report.
+/// Call feature `feature_id` of the device on `route` once for each of
+/// `calls`, in order, over one channel, and return the feature's index with
+/// every answer. `None` when the device has no such feature. Each call goes
+/// out as a long report.
 ///
 /// For `openlogi diag hidpp`, to learn an undocumented feature's functions
 /// from their answers. Nothing checks what a function does: a call can write
@@ -152,11 +193,11 @@ pub async fn raw_feature_calls(
     backend: &dyn HidBackend,
     route: &DeviceRoute,
     feature_id: u16,
-    calls: Vec<(u8, [u8; 16])>,
+    calls: &[RawFeatureCall],
 ) -> Result<Option<(u8, Vec<RawFeatureReply>)>, WriteError> {
     let index = route.device_index();
     with_route(backend, route, move |channel| async move {
-        raw_feature_calls_on_channel(&channel, index, feature_id, &calls).await
+        raw_feature_calls_on_channel(&channel, index, feature_id, calls).await
     })
     .await
 }
@@ -167,7 +208,7 @@ pub(crate) async fn raw_feature_calls_on_channel(
     channel: &Arc<HidppChannel>,
     index: u8,
     feature_id: u16,
-    calls: &[(u8, [u8; 16])],
+    calls: &[RawFeatureCall],
 ) -> Result<Option<(u8, Vec<RawFeatureReply>)>, WriteError> {
     let device = Device::new(Arc::clone(channel), index)
         .await
@@ -181,14 +222,17 @@ pub(crate) async fn raw_feature_calls_on_channel(
         return Ok(None);
     };
     let mut replies = Vec::with_capacity(calls.len());
-    for &(function, params) in calls {
+    for call in calls {
         let header = v20::MessageHeader {
             device_index: index,
             feature_index: info.index,
-            function_id: U4::from_lo(function),
+            function_id: call.function,
             software_id: channel.get_sw_id(),
         };
-        let reply = match channel.send_v20(v20::Message::Long(header, params)).await {
+        let reply = match channel
+            .send_v20(v20::Message::Long(header, call.params))
+            .await
+        {
             Ok(response) => RawFeatureReply::Payload(response.extend_payload()),
             Err(Hidpp20Error::Feature(error)) => RawFeatureReply::Error(error),
             Err(error) => return Err(WriteError::Hidpp(format!("{error:?}"))),

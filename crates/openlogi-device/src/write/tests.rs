@@ -10,8 +10,8 @@ use hidpp::protocol::v20::ErrorType;
 use crate::SharedChannel;
 use crate::channel::scripted::{ScriptedRawHidChannel, feature_error, scripted_channel};
 use crate::write::diagnostics::{
-    RawFeatureReply, dump_features_on_channel, dump_firmware_entities_on_channel,
-    raw_feature_calls_on_channel, read_battery_raw_on_channel,
+    RAW_FEATURE_PARAMS, RawFeatureCall, RawFeatureReply, dump_features_on_channel,
+    dump_firmware_entities_on_channel, raw_feature_calls_on_channel, read_battery_raw_on_channel,
 };
 use crate::write::dpi::expand_dpi_ranges;
 use crate::write::lighting::{collect_present_zones, per_key_commit, per_key_frames};
@@ -2034,6 +2034,24 @@ async fn a_refused_index_after_the_root_still_fails_the_dump() {
 
 const RAW_FEATURE_INDEX: u8 = 0x10;
 
+/// The call of `function` with `params` first and zeros after.
+fn raw_call(function: u8, params: &[u8]) -> RawFeatureCall {
+    let mut padded = [0u8; RAW_FEATURE_PARAMS];
+    padded[..params.len()].copy_from_slice(params);
+    RawFeatureCall::new(function, padded).expect("a four-bit function")
+}
+
+#[test]
+fn a_raw_call_takes_only_a_four_bit_function() {
+    let params = [0u8; RAW_FEATURE_PARAMS];
+    assert_eq!(
+        RawFeatureCall::new(15, params).map(|call| call.function()),
+        Some(15)
+    );
+    assert_eq!(RawFeatureCall::new(16, params), None);
+    assert_eq!(RawFeatureCall::new(0x21, params), None);
+}
+
 /// A keyboard with feature `0x1b05` at index 0x10: function 0 answers
 /// `01 02 03`, function 1 refuses with `InvalidArgument`. With `offered`
 /// false the device has no such feature.
@@ -2067,16 +2085,18 @@ async fn raw_feature_calls_answer_each_call_in_order() {
         ScriptedRawHidChannel::with_responder(|request| raw_feature_device(request, true));
     let channel = scripted_channel(raw).await;
 
-    let mut params = [0u8; 16];
-    params[..2].copy_from_slice(&[0xab, 0xcd]);
-    let (index, replies) =
-        raw_feature_calls_on_channel(&channel, 1, 0x1b05, &[(0, [0; 16]), (1, params)])
-            .await
-            .expect("the calls go out")
-            .expect("the device offers the feature");
+    let (index, replies) = raw_feature_calls_on_channel(
+        &channel,
+        1,
+        0x1b05,
+        &[raw_call(0, &[]), raw_call(1, &[0xab, 0xcd])],
+    )
+    .await
+    .expect("the calls go out")
+    .expect("the device offers the feature");
 
     assert_eq!(index, RAW_FEATURE_INDEX);
-    let mut first = [0u8; 16];
+    let mut first = [0u8; RAW_FEATURE_PARAMS];
     first[..3].copy_from_slice(&[1, 2, 3]);
     assert_eq!(
         replies,
@@ -2100,7 +2120,7 @@ async fn raw_feature_calls_find_no_feature_the_device_lacks() {
         ScriptedRawHidChannel::with_responder(|request| raw_feature_device(request, false));
     let channel = scripted_channel(raw).await;
 
-    let answer = raw_feature_calls_on_channel(&channel, 1, 0x1b05, &[(0, [0; 16])])
+    let answer = raw_feature_calls_on_channel(&channel, 1, 0x1b05, &[raw_call(0, &[])])
         .await
         .expect("the lookup answers");
 
