@@ -69,6 +69,31 @@ fn per_key_colors_roundtrip_by_key_name() {
     );
 }
 
+/// Key colours arrived with v12: a v11 file loads with none, and saving it
+/// declares the version that may hold them, so a v11 build refuses the file
+/// at the version check instead of on the unknown field.
+#[test]
+fn a_v11_lighting_loads_without_keys_and_saves_as_v12() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    fs::write(
+        &path,
+        r#"
+            schema_version = 11
+            [devices.g515.lighting]
+            color = "0040ff"
+        "#,
+    )
+    .expect("write config");
+
+    let cfg = Config::load_from_path(&path).expect("load a v11 file");
+    assert_eq!(cfg.lighting("g515").map(|l| l.keys), Some(BTreeMap::new()));
+
+    cfg.save_to_path(&path).expect("save");
+    let saved = fs::read_to_string(&path).expect("read saved config");
+    assert!(saved.starts_with("schema_version = 12\n"), "{saved}");
+}
+
 #[test]
 fn a_solid_color_saves_no_key_map() {
     let mut cfg = Config::default();
