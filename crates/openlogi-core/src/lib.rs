@@ -31,6 +31,7 @@ pub mod hid;
 pub mod locale;
 #[cfg(feature = "logging")]
 pub mod logging;
+pub mod macos_accel;
 #[cfg(feature = "fs")]
 pub mod paths;
 pub mod scroll;

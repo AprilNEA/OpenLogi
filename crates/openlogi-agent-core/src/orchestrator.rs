@@ -77,9 +77,9 @@ use devices::{
     carry_lifecycle_budgets, changed_follower_cookies, changed_force_sensing,
     config_keeps_os_layout, configured_dpi, configured_force_sensing, configured_report_rate,
     configured_wheel_mode, host_switch_links, is_hidpp_device, keeps_os_layout, main_wheel_divert,
-    newly_kept_os_layouts, os_layout_appeared, os_layout_target, pick_current, plan_disabled_keys_recovery,
-    plan_reapply, published_inventories, reconnect_follower_cookies, same_device_lifecycle,
-    saved_speed, settings_moved, stable_id, wheel_inverted,
+    newly_kept_os_layouts, os_layout_appeared, os_layout_target, pick_current,
+    plan_disabled_keys_recovery, plan_reapply, published_inventories, reconnect_follower_cookies,
+    same_device_lifecycle, saved_speed, settings_moved, stable_id, wheel_inverted,
 };
 
 /// The minimal per-device facts the agent needs: the config key (binding /
@@ -1772,7 +1772,22 @@ impl Orchestrator {
         // Apply OS-level pointer speed if configured.
         if let Some(factor) = self.config.os_pointer_speed(key) {
             let compositor = openlogi_core::compositor::Compositor::detect();
-            if let Some(cmd) = openlogi_core::compositor::apply_pointer_speed(compositor, factor) {
+            // On Hyprland, generate a macOS-style custom accel curve with
+            // the slider as gain (0.0..2.0, centered at 1.0). Other
+            // compositors fall back to the sensitivity factor.
+            if compositor == openlogi_core::compositor::Compositor::Hyprland {
+                let gain = 4.8 * (1.0 + factor as f64);
+                let (_step, points) =
+                    openlogi_core::macos_accel::generate(1000.0, 120.0, 0.5, 64, gain);
+                let lut = openlogi_core::macos_accel::format_lut(0.5, &points);
+                let cmd = format!(
+                    "hyprctl eval \"hl.config({{input={{accel_profile='{}'}}}})\"",
+                    lut
+                );
+                let _ = std::process::Command::new("sh").arg("-c").arg(cmd).spawn();
+            } else if let Some(cmd) =
+                openlogi_core::compositor::apply_pointer_speed(compositor, factor)
+            {
                 let _ = std::process::Command::new(&cmd[0]).args(&cmd[1..]).spawn();
             }
         }
@@ -2247,6 +2262,7 @@ impl Orchestrator {
     /// the system's pre-existing default value.
     fn apply_changed_os_pointer_speeds(&self, previous: &Config) {
         let compositor = openlogi_core::compositor::Compositor::detect();
+        let is_hyprland = compositor == openlogi_core::compositor::Compositor::Hyprland;
         for dev in self.devices.iter().filter(|dev| dev.online) {
             let key = &dev.config_key;
             if !self.config.device_enabled(key)
@@ -2257,7 +2273,19 @@ impl Orchestrator {
             let Some(factor) = self.config.os_pointer_speed(key) else {
                 continue;
             };
-            if let Some(cmd) = openlogi_core::compositor::apply_pointer_speed(compositor, factor) {
+            if is_hyprland {
+                let gain = 4.8 * (1.0 + factor as f64);
+                let (_step, points) =
+                    openlogi_core::macos_accel::generate(1000.0, 120.0, 0.5, 64, gain);
+                let lut = openlogi_core::macos_accel::format_lut(0.5, &points);
+                let cmd = format!(
+                    "hyprctl eval \"hl.config({{input={{accel_profile='{}'}}}})\"",
+                    lut
+                );
+                let _ = std::process::Command::new("sh").arg("-c").arg(cmd).spawn();
+            } else if let Some(cmd) =
+                openlogi_core::compositor::apply_pointer_speed(compositor, factor)
+            {
                 let _ = std::process::Command::new(&cmd[0]).args(&cmd[1..]).spawn();
             }
         }
