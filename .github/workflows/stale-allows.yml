@@ -75,6 +75,14 @@ jobs:
             libxkbcommon-x11-dev libx11-xcb-dev \
             libssl-dev libzstd-dev pkg-config
       - run: cargo xtask lint sweep-allows --out stale-allows.json
+      # Re-run a failed lane with "Enable debug logging" to hold it open for
+      # SSH as whoever started the re-run; an ordinary failure fails at once.
+      - name: Breakpoint for SSH debugging
+        if: ${{ failure() && runner.debug == '1' }}
+        uses: namespacelabs/breakpoint-action@18b8b1dc6ac651288cfffb20bee1a447632997a1 # v0.0.16
+        with:
+          duration: 30m
+          authorized-users: ${{ github.triggering_actor }}
       - uses: actions/upload-artifact@v7
         with:
           name: stale-allows-${{ matrix.os }}
