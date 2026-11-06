@@ -1,0 +1,17 @@
+# Owner: GPUI Component Root reads the live background token set by
+# openlogi-desktop's ui::theme::glass. No desktop root stores a fixed fill.
+id: gui-root-background-owner
+language: rust
+severity: error
+message: Let Root read the live theme background token; a stored Root background overrides Acrylic Glass and later theme changes.
+note: |
+  Main, auxiliary, and gallery roots previously stored an opaque background.
+  The material owner now supplies one canvas through the live theme token.
+  See "Single source of truth" in AGENTS.md.
+files:
+  - crates/openlogi-desktop/src/**/*.rs
+rule:
+  any:
+    - pattern: Root::new($$$ARGS).bg($BACKGROUND)
+    - pattern: gpui_kit::component::Root::new($$$ARGS).bg($BACKGROUND)
+    - pattern: gpui_kit::base::Root::new($$$ARGS).bg($BACKGROUND)

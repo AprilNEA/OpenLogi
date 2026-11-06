@@ -6,7 +6,7 @@ use gpui::{
 };
 use gpui_kit::base::Button as BaseButton;
 use gpui_kit::component::{
-    Icon, IconName, TitleBar,
+    Icon, IconName,
     button::{Button, ButtonVariants as _},
     v_flex,
 };
@@ -488,7 +488,7 @@ impl AppView {
         let pal = theme::palette(cx);
         v_flex()
             .size_full()
-            .bg(pal.page)
+            .bg(crate::ui::theme::page_background(cx))
             .text_color(pal.text_primary)
             .items_center()
             .justify_center()
@@ -560,26 +560,6 @@ fn request_accessibility(cx: &mut App) {
     permissions::open_pane(Permission::Accessibility);
 }
 
-/// Client-side main-window titlebar: window controls (minimize / maximize /
-/// close on Linux + Windows), the drag region, and the app name centred.
-/// Replaces the native titlebar so Linux — where the compositor declines
-/// server-side decorations and gpui falls back to client-side ones it doesn't
-/// paint — still gets a titlebar and window controls. On macOS the widget
-/// reserves the traffic-light space.
-fn app_title_bar(cx: &App) -> impl IntoElement {
-    let pal = theme::palette(cx);
-    TitleBar::new().child(
-        div()
-            .flex_1()
-            .flex()
-            .items_center()
-            .justify_center()
-            .text_body()
-            .text_color(pal.text_muted)
-            .child("OpenLogi"),
-    )
-}
-
 impl Render for AppView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.render_content(window, cx)
@@ -597,18 +577,15 @@ impl AppView {
 
         let root = v_flex()
             .size_full()
-            .bg(pal.page)
+            .bg(crate::ui::theme::page_background(cx))
             .text_color(pal.text_primary)
             .tab_group()
             .track_focus(&self.focus_handle)
             .key_context(APP_KEY_CONTEXT)
-            // Drawn only where the compositor left the chrome to us — as the
-            // first row of every frame, including the pre-connection and error
-            // frames, so it is present from the first frame on. A compositor
-            // that decorates the window itself (KWin, and macOS / Windows)
-            // reports `Server` and this stays out of the way.
-            .when(crate::windows::needs_client_titlebar(window), |this| {
-                this.child(app_title_bar(cx))
+            // Reserve a drag row for client decorations and macOS Acrylic.
+            // Keep this row in connection and error frames too.
+            .when(crate::windows::needs_client_titlebar(window, cx), |this| {
+                this.child(crate::windows::aux_title_bar("OpenLogi", cx))
             });
         let root = Self::with_back_navigation(root, cx);
 

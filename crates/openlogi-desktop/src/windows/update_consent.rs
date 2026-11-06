@@ -82,14 +82,14 @@ impl Render for UpdateConsentView {
 
         v_flex()
             .size_full()
-            .bg(pal.page)
+            .bg(crate::ui::theme::page_background(cx))
             .text_color(pal.text_primary)
             .key_context(DIALOG_KEY_CONTEXT)
             .track_focus(&self.focus_handle)
             .on_action(|_: &Dismiss, window, cx| answer(false, window, cx))
             // Only where the compositor left the chrome to us; the centred
             // content sits in the flex-column below it.
-            .when(windows::needs_client_titlebar(window), |this| {
+            .when(windows::needs_client_titlebar(window, cx), |this| {
                 this.child(windows::aux_title_bar(tr!("app.openlogi"), cx))
             })
             .child(

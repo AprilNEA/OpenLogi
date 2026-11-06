@@ -129,6 +129,10 @@ pub struct SettingsView {
     asset_source_select: Entity<SelectState<Vec<assets::AssetSourceOption>>>,
     thumbwheel_sensitivity: CommitSlider<ThumbwheelSensitivity>,
     vertical_scroll_sensitivity: CommitSlider<VerticalScrollSensitivity>,
+    /// Window background opacity, previewed while dragged and saved on release.
+    acrylic_opacity: CommitSlider<u8>,
+    /// Restore the saved material if Settings closes during an opacity preview.
+    _opacity_release: Subscription,
     /// The General page's momentum-scrolling card: the app-wide default.
     momentum_panel: Entity<MomentumPanel>,
     /// Shared app-wide updater, surfaced on the Updates page. A launch-time
@@ -211,10 +215,7 @@ impl SettingsView {
             }
         })
         .detach();
-        let current = AppState::try_read(cx).and_then(|s| s.app_settings().language.clone());
-        let options = language::language_options();
-        let selected = language::selected_language_index(current.as_deref(), &options);
-        let language_select = cx.new(|cx| SelectState::new(options, Some(selected), window, cx));
+        let language_select = language::select_state(window, cx);
         cx.subscribe_in(&language_select, window, Self::on_language_select)
             .detach();
 
@@ -274,6 +275,8 @@ impl SettingsView {
             asset_source_select,
             thumbwheel_sensitivity,
             vertical_scroll_sensitivity,
+            acrylic_opacity: appearance::opacity_slider(cx),
+            _opacity_release: Self::restore_opacity_on_close(cx),
             momentum_panel,
             updater,
             updater_obs,
@@ -306,6 +309,14 @@ impl SettingsView {
 
     /// The thumb-wheel sensitivity slider. The label tracks the live slider
     /// value while it is dragged; persistence happens once on release.
+    fn restore_opacity_on_close(cx: &mut Context<Self>) -> Subscription {
+        cx.on_release(|_, cx| {
+            if theme::uses_glass(cx) {
+                cx.defer(|cx| theme::apply_from_settings(None, cx));
+            }
+        })
+    }
+
     fn thumbwheel_sensitivity_slider(
         cx: &mut Context<Self>,
     ) -> CommitSlider<ThumbwheelSensitivity> {
@@ -435,10 +446,12 @@ impl Render for SettingsView {
         // these independently owned sliders so neither can keep presenting the
         // rejected value after that rollback.
         if let Some(settings) = AppState::try_read(cx).map(AppState::app_settings) {
-            let (vertical_scroll, thumbwheel) = (
+            let (vertical_scroll, thumbwheel, opacity) = (
                 settings.vertical_scroll_sensitivity,
                 settings.thumbwheel_sensitivity,
+                settings.acrylic_opacity(),
             );
+            self.acrylic_opacity.sync(opacity, window, cx);
             self.vertical_scroll_sensitivity
                 .sync(vertical_scroll, window, cx);
             self.thumbwheel_sensitivity.sync(thumbwheel, window, cx);
@@ -478,6 +491,7 @@ impl Render for SettingsView {
         let settings = settings
             .page(appearance::appearance_page(
                 view.clone(),
+                self.acrylic_opacity.slider().clone(),
                 self.theme_filter,
                 self.theme_search.clone(),
                 self.language_select.clone(),
@@ -497,14 +511,14 @@ impl Render for SettingsView {
         div()
             .size_full()
             .relative()
-            .bg(pal.page)
+            .bg(theme::page_background(cx))
             .text_color(pal.text_primary)
             .track_focus(&self.focus_handle)
             // Only where the compositor left the chrome to us, and as an
             // absolute overlay (with matching top padding) rather than a
             // flex-column row — the `Settings` sidebar uses `h_resizable`
             // percentage sizing, which a flex column would break.
-            .when(windows::needs_client_titlebar(window), |this| {
+            .when(windows::needs_client_titlebar(window, cx), |this| {
                 this.pt(TITLE_BAR_HEIGHT).child(
                     div()
                         .absolute()

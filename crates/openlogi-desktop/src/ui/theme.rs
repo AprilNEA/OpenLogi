@@ -15,7 +15,8 @@
 #[cfg(test)]
 use gpui::rgb;
 use gpui::{
-    App, BoxShadow, FontWeight, Hsla, Pixels, Rems, Rgba, Styled, Window, hsla, px, relative, rems,
+    App, AppContext as _, BoxShadow, FontWeight, Global, Hsla, Pixels, Rems, Rgba, Styled, Window,
+    WindowBackgroundAppearance, hsla, px, relative, rems,
 };
 use gpui_kit::component::{
     ActiveTheme as _, Theme, ThemeMode, ThemeRegistry, scroll::ScrollbarMode,
@@ -25,6 +26,53 @@ use openlogi_core::config::{Appearance, UiScale};
 use crate::state::AppState;
 
 use super::spacing::DynamicSpacing;
+
+mod glass;
+
+#[derive(Clone, Copy)]
+enum AppliedMaterial {
+    Opaque,
+    Glass { alpha: f32 },
+}
+
+impl Global for AppliedMaterial {}
+
+impl AppliedMaterial {
+    fn appearance(self) -> WindowBackgroundAppearance {
+        match self {
+            Self::Opaque => WindowBackgroundAppearance::Opaque,
+            Self::Glass { .. } => WindowBackgroundAppearance::Transparent,
+        }
+    }
+}
+
+/// Whether the window background uses the native material.
+#[must_use]
+pub fn uses_glass(cx: &App) -> bool {
+    matches!(
+        cx.try_global::<AppliedMaterial>(),
+        Some(AppliedMaterial::Glass { .. })
+    )
+}
+
+/// Expose Root's single material canvas through full-page containers.
+#[must_use]
+pub(crate) fn page_background(cx: &App) -> Hsla {
+    if uses_glass(cx) {
+        Hsla::transparent_black()
+    } else {
+        cx.theme().background
+    }
+}
+
+/// Keep the original popup surface color and apply only the material opacity.
+#[must_use]
+pub(crate) fn popup_background(cx: &App) -> Hsla {
+    match cx.try_global::<AppliedMaterial>() {
+        Some(AppliedMaterial::Glass { alpha }) => cx.theme().group_box.alpha(*alpha),
+        _ => cx.theme().group_box,
+    }
+}
 
 // The brand accent lives in `openlogi-ui` so the overlay paints the same blue
 // this app does — it cannot depend on this crate, and a local copy is how the
@@ -424,19 +472,31 @@ pub fn apply_ui_scale(window: &mut Window, cx: &App) {
 /// Pass the window being built (first paint / appearance observer) so its OS
 /// appearance is read directly and it repaints; pass `None` from a settings
 /// edit (no window in hand) — every open window is refreshed instead.
-pub fn apply_from_settings(window: Option<&mut Window>, cx: &mut App) {
-    let (appearance, light_name, dark_name, radius) = AppState::try_read(cx).map_or_else(
-        || (Appearance::default(), None, None, None),
-        |state| {
-            let s = state.app_settings();
-            (
-                s.appearance,
-                s.theme_light.clone(),
-                s.theme_dark.clone(),
-                s.ui_radius,
-            )
-        },
-    );
+pub fn apply_from_settings(mut window: Option<&mut Window>, cx: &mut App) {
+    let (appearance, light_name, dark_name, radius, requested, opacity) = AppState::try_read(cx)
+        .map_or_else(
+            || {
+                (
+                    Appearance::default(),
+                    None,
+                    None,
+                    None,
+                    false,
+                    openlogi_core::config::AppSettings::default().acrylic_opacity(),
+                )
+            },
+            |state| {
+                let s = state.app_settings();
+                (
+                    s.appearance,
+                    s.theme_light.clone(),
+                    s.theme_dark.clone(),
+                    s.ui_radius,
+                    s.acrylic_glass,
+                    s.acrylic_opacity(),
+                )
+            },
+        );
 
     // Sync the native window chrome (titlebar) to the pref first, so the
     // `System` branch below reads the *real* OS appearance rather than a stale
@@ -482,14 +542,56 @@ pub fn apply_from_settings(window: Option<&mut Window>, cx: &mut App) {
         Appearance::Light => ThemeMode::Light,
         Appearance::Dark => ThemeMode::Dark,
     };
-    Theme::change(mode, window, cx);
+    Theme::change(mode, window.as_deref_mut(), cx);
 
     let theme = Theme::global_mut(cx);
     normalize_theme_contrast(theme);
     if let Some(radius) = radius {
         theme.radius = px(f32::from(radius));
     }
-    // Theme tokens are app-global and consumed by every open window.
+    apply_material(window.as_deref(), requested, opacity, cx);
+}
+
+/// Apply the material to the component gallery without changing its theme design.
+pub fn apply_preview_material(window: &mut Window, requested: bool, cx: &mut App) {
+    Theme::change(cx.theme().mode, Some(window), cx);
+    normalize_theme_contrast(Theme::global_mut(cx));
+    let opacity = openlogi_core::config::AppSettings::default().acrylic_opacity();
+    apply_material(Some(window), requested, opacity, cx);
+}
+
+/// Preview a slider drag without writing configuration on each frame.
+pub(crate) fn preview_acrylic_opacity(opacity: u8, cx: &mut App) {
+    let requested = AppState::try_read(cx).is_some_and(|state| state.app_settings().acrylic_glass);
+    apply_material(None, requested, opacity, cx);
+}
+
+/// Restore the native material after a window geometry change.
+pub fn refresh_window_material(window: &Window, cx: &App) {
+    let material = cx
+        .try_global::<AppliedMaterial>()
+        .copied()
+        .unwrap_or(AppliedMaterial::Opaque);
+    crate::platform::window_material::apply(window, material.appearance());
+}
+
+fn apply_material(window: Option<&Window>, requested: bool, opacity: u8, cx: &mut App) {
+    let applied = glass::apply(Theme::global_mut(cx), requested, opacity);
+    cx.set_global(applied);
+    Theme::sync_base(cx);
+    if let Some(window) = window {
+        crate::platform::window_material::apply(window, applied.appearance());
+    }
+    // Settings callbacks temporarily borrow their window. Update all native
+    // windows after that borrow ends, including the current Settings window.
+    cx.defer(move |cx| {
+        for handle in cx.windows() {
+            let _ = cx.update_window(handle, |_, window, _| {
+                crate::platform::window_material::apply(window, applied.appearance());
+                window.refresh();
+            });
+        }
+    });
     cx.refresh_windows();
 }
 

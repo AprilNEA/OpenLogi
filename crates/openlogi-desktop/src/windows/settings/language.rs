@@ -3,9 +3,20 @@
 use crate::ui::components::control_select;
 
 use super::{
-    Entity, IndexPath, IntoElement, ParentElement, SelectItem, SelectState, SharedString, Styled,
-    div, px,
+    AppContext as _, AppState, Context, Entity, IndexPath, IntoElement, ParentElement, SelectItem,
+    SelectState, SharedString, Styled, Window, div, px,
 };
+
+/// Initialize the picker from the saved language preference.
+pub(super) fn select_state<V: 'static>(
+    window: &mut Window,
+    cx: &mut Context<V>,
+) -> Entity<SelectState<Vec<LanguageOption>>> {
+    let current = AppState::try_read(cx).and_then(|state| state.app_settings().language.clone());
+    let options = language_options();
+    let selected = selected_language_index(current.as_deref(), &options);
+    cx.new(|cx| SelectState::new(options, Some(selected), window, cx))
+}
 
 #[derive(Clone)]
 pub(super) struct LanguageOption {

@@ -5,6 +5,30 @@ use std::collections::BTreeSet;
 use super::*;
 
 #[test]
+fn older_settings_gain_glass_defaults_and_save_the_current_schema() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    for version in [1, 10, 11] {
+        fs::write(&path, format!("schema_version = {version}\n")).expect("write old config");
+        let (mut config, mut file) = ConfigFile::load_from_path(&path).expect("load old config");
+        assert!(!config.app_settings.acrylic_glass);
+        assert_eq!(
+            config.app_settings.acrylic_opacity(),
+            AppSettings::default().acrylic_opacity()
+        );
+        config.app_settings.acrylic_glass = true;
+        config.app_settings.acrylic_opacity = 37;
+        file.save(&config).expect("save current config");
+        let saved = fs::read_to_string(&path).expect("read current config");
+        assert!(saved.starts_with(&format!("schema_version = {SCHEMA_VERSION}\n")));
+        let restored = Config::load_from_path(&path).expect("reload current config");
+        assert_eq!(restored.schema_version, SCHEMA_VERSION);
+        assert!(restored.app_settings.acrylic_glass);
+        assert_eq!(restored.app_settings.acrylic_opacity(), 37);
+    }
+}
+
+#[test]
 fn rejects_next_schema_version_but_accepts_v1() {
     // A future version is rejected loudly; the current and older versions
     // load (older ones migrate through the shim).

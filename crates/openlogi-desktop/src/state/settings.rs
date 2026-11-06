@@ -107,6 +107,25 @@ impl AppState {
         self.persist_config("appearance setting");
         StateEvent::SettingsChanged.into()
     }
+    /// Persist the glass preference. The theme owner applies the material.
+    pub fn commit_acrylic_glass(&mut self, enabled: bool) -> StateEvents {
+        if self.config.app_settings.acrylic_glass != enabled {
+            self.config
+                .edit(|config| config.app_settings.acrylic_glass = enabled);
+            self.persist_config("acrylic glass setting");
+        }
+        StateEvent::SettingsChanged.into()
+    }
+    /// Persist the glass opacity without reloading the input agent.
+    pub fn commit_acrylic_opacity(&mut self, value: u8) -> StateEvents {
+        let value = AppSettings::clamp_acrylic_opacity(value);
+        if self.config.app_settings.acrylic_opacity != value {
+            self.config
+                .edit(|config| config.app_settings.acrylic_opacity = value);
+            self.persist_config("acrylic opacity setting");
+        }
+        StateEvent::SettingsChanged.into()
+    }
     /// Persist the text and interface scale. Open window roots apply the new
     /// rem size when the caller refreshes them. An already-set value writes
     /// nothing and is still reported.

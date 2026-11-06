@@ -106,3 +106,61 @@ fn czech_pairing_translations_resolve() {
         "Spárováno na pozici 2."
     );
 }
+
+/// Switching the configured locale must translate both material controls and
+/// their descriptions through this binary's live catalog, without fallback.
+#[test]
+fn glass_controls_follow_live_locale_changes() {
+    struct RestoreLocale(String);
+
+    impl Drop for RestoreLocale {
+        fn drop(&mut self) {
+            rust_i18n::set_locale(&self.0);
+        }
+    }
+
+    let _locale = super::LOCALE_LOCK.lock().expect("locale lock");
+    let _restore = RestoreLocale(rust_i18n::locale().to_string());
+    let keys = [
+        "appearance.acrylic_glass",
+        "appearance.acrylic_glass_description",
+        "appearance.glass_opacity",
+        "appearance.glass_opacity_description",
+        "appearance.window",
+        "appearance.reset_opacity",
+        "appearance.reset_opacity_description",
+    ];
+    let english = keys.map(|key| rust_i18n::t!(key, locale = "en").to_string());
+
+    for (language, switch_label, slider_label) in [
+        ("zh-CN", "亚克力玻璃", "玻璃不透明度"),
+        ("fr", "Verre acrylique", "Opacité du verre"),
+        ("de", "Acrylglas", "Glasdeckkraft"),
+        ("ja", "アクリルガラス", "ガラスの不透明度"),
+        ("zh-HK", "亞加力玻璃", "玻璃不透明度"),
+        ("zh-TW", "壓克力玻璃", "玻璃不透明度"),
+        ("zh-CN", "亚克力玻璃", "玻璃不透明度"),
+    ] {
+        super::apply(&openlogi_core::config::AppSettings {
+            language: Some(language.to_owned()),
+            ..Default::default()
+        });
+        assert_eq!(rust_i18n::t!("appearance.acrylic_glass"), switch_label);
+        assert_eq!(rust_i18n::t!("appearance.glass_opacity"), slider_label);
+        let opacity = openlogi_core::config::AppSettings::default().acrylic_opacity();
+        let reset_description =
+            rust_i18n::t!("appearance.reset_opacity_description", opacity = opacity);
+        assert!(reset_description.contains(&opacity.to_string()));
+        assert!(!reset_description.contains("%{"));
+
+        for (key, fallback) in keys.into_iter().zip(&english) {
+            let translated = rust_i18n::t!(key).to_string();
+            assert!(!translated.is_empty(), "{language}: {key} is empty");
+            assert_ne!(translated, key, "{language}: unresolved key {key}");
+            assert_ne!(
+                &translated, fallback,
+                "{language}: English fallback for {key}"
+            );
+        }
+    }
+}

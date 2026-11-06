@@ -6,8 +6,7 @@
 //! duplicate — and a window closed while the app kept running in the menu bar
 //! can be brought back.
 
-use gpui::{App, AppContext as _, Pixels, Size, Styled as _, WindowOptions, px};
-use gpui_kit::component::{ActiveTheme as _, Root};
+use gpui::{App, AppContext as _, Pixels, Size, WindowOptions, px};
 use openlogi_core::brand::APP_ID;
 use tracing::warn;
 
@@ -72,7 +71,7 @@ pub fn open(cx: &mut App) {
         });
         view.update(cx, |v, _| v.set_appearance_obs(appearance_obs));
 
-        cx.new(|cx| Root::new(view, window, cx).bg(cx.theme().background))
+        cx.new(|cx| crate::windows::window_root(view, window, cx))
     });
 
     match opened {
