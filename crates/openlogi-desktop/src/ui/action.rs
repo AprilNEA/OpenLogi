@@ -37,6 +37,38 @@ pub(crate) fn localized_action_label(action: &Action) -> SharedString {
         Action::OpenApplication(target) => {
             tr!("actions.open_named_target", name => target.display_name())
         }
+        Action::MissionControl => {
+            if cfg!(target_os = "linux") {
+                tr!("actions.activities_overview")
+            } else if cfg!(target_os = "windows") {
+                tr!("actions.task_view")
+            } else {
+                tr!("actions.mission_control")
+            }
+        }
+        Action::LaunchpadShow => {
+            if cfg!(target_os = "linux") {
+                tr!("actions.show_applications")
+            } else if cfg!(target_os = "windows") {
+                tr!("actions.start_menu")
+            } else {
+                tr!("actions.launchpad")
+            }
+        }
+        Action::PreviousDesktop => {
+            if cfg!(target_os = "linux") {
+                tr!("actions.previous_workspace")
+            } else {
+                tr!("actions.previous_desktop")
+            }
+        }
+        Action::NextDesktop => {
+            if cfg!(target_os = "linux") {
+                tr!("actions.next_workspace")
+            } else {
+                tr!("actions.next_desktop")
+            }
+        }
         _ => tr!(action
             .translation_key()
             .expect("every payload-free action has a translation key")),
