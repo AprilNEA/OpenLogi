@@ -28,9 +28,9 @@ env:
 
 # Runners: every job runs on Namespace (namespace.so), which sponsors
 # OpenLogi's CI. Labels pick the shape: 2x4 for jobs that compile nothing,
-# 8x16 for the Linux and Windows compile jobs (8x32 for clippy, which needs
-# the memory), 6x14 for macOS. Namespace has no Intel Macs, so the macOS
-# x86_64 tests run on Apple Silicon under Rosetta 2.
+# 8x16 for the Linux and Windows compile jobs (8x32 for Linux clippy and
+# MSRV, which need the memory), 6x14 for macOS. Namespace has no Intel Macs,
+# so the macOS x86_64 tests run on Apple Silicon under Rosetta 2.
 #
 # Cache policy:
 # - rust-cache keeps Cargo's registry/git inputs only; caching target/ produced
@@ -197,8 +197,9 @@ jobs:
         include:
           - os: macos
             runner: nscloud-macos-tahoe-arm64-6x14
+          # 32 GB: on 8x16 a rustc in this check was killed by signal 9.
           - os: linux
-            runner: nscloud-ubuntu-24.04-amd64-8x16
+            runner: nscloud-ubuntu-24.04-amd64-8x32
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.99
