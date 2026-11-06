@@ -174,6 +174,14 @@ pub(crate) fn action_rows_with(
                 .cloned(),
         );
         actions.retain(|action| !offer.hidden.contains(action));
+        #[cfg(target_os = "linux")]
+        actions.retain(|action| {
+            if *action == Action::AppExpose {
+                is_kde()
+            } else {
+                true
+            }
+        });
         let category_label = rust_i18n::t!(category.translation_key());
         let category_matches = category_label.to_lowercase().contains(&query);
         // Number the full catalog before filtering so typing in the search box
@@ -242,6 +250,14 @@ pub(crate) fn action_rows_with(
         );
     }
     sections
+}
+
+#[cfg(target_os = "linux")]
+fn is_kde() -> bool {
+    std::env::var("XDG_CURRENT_DESKTOP")
+        .unwrap_or_default()
+        .to_lowercase()
+        .contains("kde")
 }
 
 /// Shared card surface for compact binding panels and menus.
