@@ -73,7 +73,6 @@ jobs:
               - 'release-plz.toml'
               - 'devenv.*'
               - '.envrc'
-              - 'flake.*'
               - '!**/*.md'
       - uses: dtolnay/rust-toolchain@stable
         with:
