@@ -9,9 +9,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
-    CameraControls, CameraStreamMode, Config, DeviceIdentity, DisableKey, GKeyOwner, GamingKeyMode,
-    LightSettings, Lighting, MomentumScrolling, OnboardMemory, ScrollResolution, SmartShift,
-    ThumbwheelSensitivity,
+    CameraControls, CameraStreamMode, Config, DEFAULT_DPI_PRESETS, DeviceIdentity, DisableKey,
+    GKeyOwner, GamingKeyMode, LightSettings, Lighting, MomentumScrolling, OnboardMemory,
+    ScrollResolution, SmartShift, ThumbwheelSensitivity,
 };
 use crate::binding::{
     Action, ActionRingConfig, ActionRingIcon, ActionRingSize, ActionRingSlot, Binding, ButtonId,
@@ -111,24 +111,26 @@ impl Config {
             .set_icon(slot, icon);
     }
 
-    /// The ordered DPI preset list for `device_key`, or an empty `Vec` if the
-    /// device has none configured yet.
+    /// The ordered DPI preset list for `device_key`: the one the user set,
+    /// or, while they never set one, the stock levels of `model_key`'s
+    /// [`GamingLayout`], else [`DEFAULT_DPI_PRESETS`]. A list the user
+    /// emptied stays empty.
     #[must_use]
-    pub fn dpi_presets(&self, device_key: &str) -> Vec<Dpi> {
+    pub fn dpi_presets(&self, device_key: &str, model_key: &str) -> Vec<Dpi> {
         self.devices
             .get(device_key)
-            .map(|d| d.dpi_presets.clone())
-            .unwrap_or_default()
+            .and_then(|d| d.dpi_presets.clone())
+            .unwrap_or_else(|| default_dpi_presets(model_key))
     }
 
-    /// Replace the DPI preset list for `device_key`. Pass an empty `Vec` to
-    /// clear (the device block is kept; the field is just omitted on save
-    /// thanks to `skip_serializing_if`).
+    /// Replace the DPI preset list for `device_key`. An empty `Vec` is saved
+    /// as an empty list, so the device keeps having none instead of falling
+    /// back to [`DEFAULT_DPI_PRESETS`].
     pub fn set_dpi_presets(&mut self, device_key: &str, presets: Vec<Dpi>) {
         self.devices
             .entry(device_key.to_string())
             .or_default()
-            .dpi_presets = presets;
+            .dpi_presets = Some(presets);
     }
 
     /// The last-known [`DeviceIdentity`] for `device_key`, or `None` if the
@@ -761,6 +763,19 @@ impl Config {
             .or_default()
             .smooth_wheel = enabled;
     }
+}
+
+/// The DPI presets `model_key` offers before the user sets a list: its
+/// gaming layout's stock levels, or [`DEFAULT_DPI_PRESETS`] for a model
+/// without any.
+fn default_dpi_presets(model_key: &str) -> Vec<Dpi> {
+    GamingLayout::for_model_key(model_key)
+        .map(|layout| layout.stock_dpi_presets)
+        .filter(|stock| !stock.is_empty())
+        .map_or_else(
+            || DEFAULT_DPI_PRESETS.to_vec(),
+            |stock| stock.iter().copied().map(Dpi::new).collect(),
+        )
 }
 
 #[cfg(test)]
