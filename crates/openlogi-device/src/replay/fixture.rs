@@ -20,7 +20,9 @@ impl ReplayTopology {
         cassette: &HidCassette,
     ) -> Self {
         let receiver_slots = match route {
-            DeviceRoute::Bolt { slot, .. } | DeviceRoute::Unifying { slot, .. } => {
+            DeviceRoute::Bolt { slot, .. }
+            | DeviceRoute::Unifying { slot, .. }
+            | DeviceRoute::Hidpp20Receiver { slot, .. } => {
                 vec![ReceiverSlot {
                     slot: *slot,
                     state: ReceiverSlotState::Paired(ReceiverLinkState::Online),
