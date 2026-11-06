@@ -57,11 +57,21 @@ impl Compositor {
     /// Returns None if no command is known.
     pub fn pointer_speed_command(&self, sensitivity: f32) -> Option<Vec<String>> {
         match self {
+            // Hyprland ships two config parsers and only one accepts a runtime
+            // set per install: `hyprctl keyword` (legacy) is rejected outright
+            // by the Lua parser ("keyword can't work with non-legacy
+            // parsers"), where `hyprctl eval` runs Lua — but eval does not
+            // exist upstream. Both fail with exit 0, so the fallback cannot be
+            // decided from the exit code; run both and let each install honor
+            // the one it understands. `hl.config` merges, so the eval only
+            // touches `sensitivity`.
             Compositor::Hyprland => Some(vec![
-                "hyprctl".to_string(),
-                "keyword".to_string(),
-                "input:sensitivity".to_string(),
-                sensitivity.to_string(),
+                "sh".to_string(),
+                "-c".to_string(),
+                format!(
+                    "hyprctl eval \"hl.config({{input={{sensitivity={sensitivity}}}}})\"; \
+                     hyprctl keyword input:sensitivity {sensitivity}"
+                ),
             ]),
             Compositor::Sway => Some(vec![
                 "swaymsg".to_string(),
@@ -102,7 +112,16 @@ mod apply_tests {
     #[test]
     fn hyprland_generates_correct_command() {
         let cmd = apply_pointer_speed(Compositor::Hyprland, -0.2).unwrap();
-        assert_eq!(cmd, vec!["hyprctl", "keyword", "input:sensitivity", "-0.2"]);
+        let (shell, script) = (cmd[0].as_str(), cmd[1].as_str());
+        assert_eq!((shell, cmd.len()), ("sh", 3));
+        assert_eq!(script, "-c");
+        // The Lua-parser runtime set and the legacy keyword both go out; each
+        // Hyprland install honors the one its config parser understands.
+        assert_eq!(
+            cmd[2],
+            "hyprctl eval \"hl.config({input={sensitivity=-0.2}})\"; \
+             hyprctl keyword input:sensitivity -0.2"
+        );
     }
 
     #[test]
@@ -142,7 +161,8 @@ mod tests {
         let cmd = Compositor::Hyprland.pointer_speed_command(0.5);
         assert!(cmd.is_some());
         let cmd = cmd.unwrap();
-        assert_eq!(cmd[0], "hyprctl");
+        assert_eq!((cmd[0].as_str(), cmd[1].as_str()), ("sh", "-c"));
+        assert!(cmd[2].contains("sensitivity=0.5"));
     }
 
     #[test]

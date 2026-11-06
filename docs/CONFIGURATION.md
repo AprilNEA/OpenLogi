@@ -149,7 +149,9 @@ Common device fields are:
   factor, from `-1.0` to `1.0`. The Pointer tab slider saves it; an online,
   enabled device gets changed values immediately and again when it reconnects.
   When unset, OpenLogi leaves the system's existing pointer sensitivity
-  untouched.
+  untouched. A libinput `custom` acceleration profile accepts but ignores this
+  factor — libinput applies only the curve there — so the factor shapes
+  adaptive and flat setups, not a hand-tuned accel curve.
 - `smooth_wheel` for mice with a HID++ `0x2121` wheel: `true` smooths that
   mouse's main wheel in software, as Logi Options+ "Smooth scrolling" does,
   whatever `smooth_scroll` says. The agent switches the wheel to diverted
