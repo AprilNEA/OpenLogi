@@ -6,7 +6,7 @@ use openlogi_core::binding::{Action, ButtonId, Effect, NativeAction};
 use openlogi_hook::PointerTarget;
 use tracing::debug;
 
-use super::ActionDispatchTarget;
+use super::{ActionDispatchTarget, ActionName};
 
 /// The pointer context a snapshot selected its mouse bindings for.
 ///
@@ -130,7 +130,7 @@ impl ActionDispatchTarget {
         let current = current();
         let press = PointerPress { target, focus };
         let Some(route) = pointer_route(action, press, current, || is_focused(target)) else {
-            debug!(action = %action.label(), captured = ?target, ?current, ?focus, "mouse action target unavailable, moved, or not focused — skipped");
+            debug!(action = %ActionName(action), captured = ?target, ?current, ?focus, "mouse action target unavailable, moved, or not focused — skipped");
             return None;
         };
         Some(match (route, target) {
