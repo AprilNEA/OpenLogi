@@ -47,7 +47,7 @@ pub struct WaveArgs {
     /// Brightness steps the wave is drawn in. Fewer steps take fewer requests
     /// per frame, so more frames per second.
     #[arg(long, default_value_t = 8)]
-    pub levels: u8,
+    pub steps: u8,
 
     /// The darkest the passing band gets, as a share of `--brightness`
     /// (0–1): 0.5 dims the keys to half. With `--light`, the share the keys
@@ -177,7 +177,7 @@ struct Wave {
     color: Rgb,
     period: f32,
     width: f32,
-    levels: f32,
+    steps: f32,
     floor: f32,
     reverse: bool,
     light: bool,
@@ -194,7 +194,7 @@ impl Wave {
             color: scale(args.color, f32::from(args.brightness.clamp(1, 100)) / 100.),
             period,
             width: args.width.clamp(0.05, 1.),
-            levels: f32::from(args.levels.max(2)),
+            steps: f32::from(args.steps.max(2)),
             floor: args.floor.clamp(0., 1.),
             reverse: args.reverse,
             light: args.light,
@@ -219,7 +219,7 @@ impl Wave {
             0.
         };
         let band = if self.light { lit } else { 1. - lit };
-        let level = (band * (self.levels - 1.)).round() / (self.levels - 1.);
+        let level = (band * (self.steps - 1.)).round() / (self.steps - 1.);
         let share = self.floor + (1. - self.floor) * level;
         scale(self.color, share)
     }
@@ -265,7 +265,7 @@ mod tests {
             color: Rgb::new(0, 0xa0, 0xff),
             period: 2.,
             width: 0.5,
-            levels: 5.,
+            steps: 5.,
             floor: 0.,
             reverse: false,
             light: true,
