@@ -1,5 +1,5 @@
 use gpui::{Entity, KeyDownEvent, Keystroke, Modifiers, TestAppContext, VisualTestContext, size};
-use openlogi_core::binding::default_binding;
+use openlogi_core::binding::{ClickButton, ClickCount, default_binding};
 use openlogi_core::config::Config;
 
 use super::ShortcutError::{ShiftedSymbol, Unrecognized};
@@ -407,6 +407,65 @@ fn the_action_picker_binds_a_button_to_a_shell_command(cx: &mut TestAppContext) 
 }
 
 #[gpui::test]
+fn the_advanced_click_editor_binds_the_click_it_shows(cx: &mut TestAppContext) {
+    use crate::features::mouse::inspector::{CLICK_BUTTONS, CLICK_COUNTS};
+
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    // The editor's choices name their labels through a table, which the
+    // typed-key sweep cannot see.
+    for key in CLICK_BUTTONS
+        .map(|(_, _, key)| key)
+        .into_iter()
+        .chain(CLICK_COUNTS.map(|(_, _, key)| key))
+        .chain(["actions.advanced_click"])
+    {
+        assert_ne!(rust_i18n::t!(key), key, "no catalog key {key}");
+    }
+    cx.update(gpui_kit::init);
+    install_app_state(cx);
+    let (view, cx) = cx.add_window_view(MouseModelView::new);
+    cx.simulate_resize(size(px(1200.), px(1000.)));
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+
+    click_picker_control(cx, "label-card-Button(Forward)");
+    click_picker_control(cx, "inspector-current-action");
+    click_picker_control(cx, "inspector-action-advanced-click-button-right");
+    click_picker_control(cx, "inspector-action-advanced-click-count-double");
+    click_picker_control(cx, "inspector-action-advanced-click-modifier-shift");
+    view.read_with(cx, |view, _| {
+        assert!(view.action_picker_open);
+        assert_eq!(view.advanced_click.button, ClickButton::Right);
+        assert_eq!(view.advanced_click.count, ClickCount::Double);
+    });
+    click_picker_control(cx, "inspector-action-advanced-click-add");
+    view.read_with(cx, |view, _| assert!(!view.action_picker_open));
+    assert_forward_binding(
+        cx,
+        &Action::AdvancedClick(AdvancedClick {
+            button: ClickButton::Right,
+            count: ClickCount::Double,
+            modifiers: "Shift".parse().unwrap(),
+        }),
+    );
+
+    // Reopening starts from a fresh draft, and toggling a modifier twice
+    // removes it again: what is left is a plain single click.
+    click_picker_control(cx, "inspector-current-action");
+    view.read_with(cx, |view, _| {
+        assert_eq!(view.advanced_click, AdvancedClick::default());
+    });
+    click_picker_control(cx, "inspector-action-advanced-click-modifier-shift");
+    click_picker_control(cx, "inspector-action-advanced-click-modifier-shift");
+    click_picker_control(cx, "inspector-action-advanced-click-add");
+    assert_forward_binding(cx, &Action::LeftClick);
+
+    drop(view);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+}
+
+#[gpui::test]
 fn a_selected_gesture_can_render_in_the_binding_inspector(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
     install_app_state(cx);
@@ -451,6 +510,7 @@ fn a_selected_gesture_can_render_in_the_binding_inspector(cx: &mut TestAppContex
                 shortcut_recording: false,
                 shortcut_record_focus: &view.shortcut_record_focus,
                 invalid: view.invalid_drafts,
+                advanced_click: view.advanced_click,
                 view: &entity,
             },
             cx,
@@ -503,6 +563,10 @@ fn clearing_custom_action_drafts_resets_text_and_invalid_state(cx: &mut TestAppC
                 command: true,
             };
             view.shortcut_mode = ShortcutMode::Hold;
+            view.advanced_click = AdvancedClick {
+                count: ClickCount::Triple,
+                ..AdvancedClick::default()
+            };
 
             view.clear_custom_action_drafts(window, cx);
         });
@@ -514,6 +578,7 @@ fn clearing_custom_action_drafts_resets_text_and_invalid_state(cx: &mut TestAppC
         assert_eq!(view.custom_command_input.read(cx).value(), "");
         assert_eq!(view.invalid_drafts, InvalidDrafts::default());
         assert_eq!(view.shortcut_mode, ShortcutMode::Tap);
+        assert_eq!(view.advanced_click, AdvancedClick::default());
     });
     drop(view);
     cx.update(|window, _| window.remove_window());
