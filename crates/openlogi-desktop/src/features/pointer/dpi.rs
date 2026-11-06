@@ -23,6 +23,7 @@ use openlogi_core::hid::{Dpi, DpiCapabilities};
 use tracing::debug;
 
 use super::pointer_speed::{PointerSpeedFacts, PointerSpeedSlider, pointer_speed_section};
+use super::os_pointer_speed::os_pointer_speed_section;
 use super::report_rate::{ReportRateFacts, report_rate_section};
 use crate::state::{AppState, DeviceKey, DpiLoad, StateEvent};
 use crate::ui::commit_slider::{CommitSlider, SliderRange};
@@ -167,6 +168,7 @@ impl Render for DpiPanel {
             .gap_3()
             .w_full()
             .child(main)
+            .child(os_pointer_speed_section(cx, pal))
             .children(report_rate_section(ReportRateFacts::current(cx), pal))
     }
 }
