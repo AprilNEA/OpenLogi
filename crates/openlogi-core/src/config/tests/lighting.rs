@@ -72,13 +72,10 @@ fn per_key_colors_roundtrip_by_key_name() {
 fn a_v11_lighting_loads_without_keys_and_saves_as_v12() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("config.toml");
+    // Unindented: a save keeps the file's own layout around what it edits.
     fs::write(
         &path,
-        r#"
-            schema_version = 11
-            [devices.g515.lighting]
-            color = "0040ff"
-        "#,
+        "schema_version = 11\n[devices.g515.lighting]\ncolor = \"0040ff\"\n",
     )
     .expect("write config");
 
