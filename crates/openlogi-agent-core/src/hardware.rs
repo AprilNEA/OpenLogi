@@ -23,7 +23,7 @@ use std::future::Future;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::Duration;
 
-use openlogi_core::config::Lighting;
+use openlogi_core::config::{KeyRemap, Lighting};
 #[cfg(test)]
 use openlogi_hid::DisableKeysMask;
 use openlogi_hid::{
@@ -745,6 +745,39 @@ pub(crate) fn write_fn_lock_in_background(op: DeviceOp, ticket: WriteTicket, on:
                 } else {
                     debug!(index, on, "Fn-lock write superseded by a newer one");
                 }
+            });
+        },
+    );
+}
+
+/// Spawn an OS thread that writes `remap` to `op`'s keyboard via
+/// [`openlogi_hid::set_key_remap_on`], unless a newer remap write for the
+/// keyboard was requested after `ticket`. Returns immediately; failures
+/// (incl. keyboards without `0x1b05` key customisation) are logged.
+pub(crate) fn write_key_remap_in_background(op: DeviceOp, ticket: WriteTicket, remap: KeyRemap) {
+    let index = op.route.device_index();
+    let turn = op.access.transport_turns.turn_for(&op.route);
+    op.spawn_timed_write(
+        "key remap write",
+        move |op| async move {
+            within_turn(
+                &ticket,
+                &turn,
+                || async {
+                    let shared = op.resolve()?;
+                    openlogi_hid::set_key_remap_on(&shared, &remap)
+                        .await
+                        .map(Some)
+                },
+                || async { Ok(None) },
+            )
+            .await
+        },
+        move |result| {
+            log_outcome(index, "key remap write", result, |skipped| match skipped {
+                Some(skipped) if skipped.is_empty() => debug!(index, "key remap written"),
+                Some(skipped) => debug!(index, ?skipped, "key remap written without some keys"),
+                None => debug!(index, "key remap write superseded by a newer one"),
             });
         },
     );

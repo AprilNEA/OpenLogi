@@ -19,6 +19,7 @@ mod flow;
 mod function_key;
 mod gestures;
 mod identity;
+mod key_remap;
 mod key_trigger;
 mod lighting_key;
 mod migrate;
@@ -47,6 +48,7 @@ pub use flow::{
 };
 pub use function_key::FunctionKey;
 pub use identity::canonical_device_key;
+pub use key_remap::{KeyRemap, KeyTarget, KeyTargetError, MediaKey};
 pub use key_trigger::{KeyModifiers, KeyTrigger, KeyboardConfig, ParseTriggerError};
 pub use lighting_key::{LightingKey, LightingKeyError};
 pub use revision::ConfigRevision;
@@ -67,9 +69,10 @@ use crate::binding::{Binding, ButtonId, GestureDirection};
 /// persisted shape or enum vocabulary changes; readers inspect this value
 /// before consuming the rest of the file.
 ///
-/// v12 adds per-device keyboard lighting `keys`: colours for single keys
-/// over the keyboard colour. Nothing older needs migrating, and a file
-/// without them lights every key in the keyboard colour. The bump makes a v11
+/// v12 adds per-device keyboard lighting `keys` (colours for single keys
+/// over the keyboard colour) and `key_remap` (what keys send instead, per
+/// layer). Nothing older needs migrating: a file without them lights every
+/// key in the keyboard colour and leaves the keys alone. The bump makes a v11
 /// build refuse a file that may hold them at the version check, instead of
 /// failing on the unknown field.
 ///

@@ -126,6 +126,8 @@ glide_ms = 600
 [devices."receiver:aabbccdd:slot:2"]
 host_switch_targets = ["receiver:aabbccdd:slot:1"]
 fn_lock = false
+# What keys send instead of their own key, per layer (G515 LS TKL).
+key_remap = { base = { CapsLock = "Esc", Menu = "g_shift" }, fn = { F1 = "mute" } }
 
 # Keyboard keys are named by their HID++ control: a catalog name such as
 # `KeyScreenCapture`, or `control:0x<cid>` for any control `openlogi diag

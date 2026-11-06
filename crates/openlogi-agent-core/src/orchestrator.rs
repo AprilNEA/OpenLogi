@@ -20,7 +20,7 @@ use openlogi_core::binding::{
 };
 use openlogi_core::bindings::{bindings_on_page, button_bindings_for, oshook_gestures_for};
 use openlogi_core::config::{
-    AppSettings, Config, ConfigRevision, GKeyOwner, GamingKeyMode, LightSettings,
+    AppSettings, Config, ConfigRevision, GKeyOwner, GamingKeyMode, KeyRemap, LightSettings,
     MouseProfileTarget, canonical_device_key,
 };
 use openlogi_core::device::{
@@ -183,6 +183,8 @@ pub struct SharedHandles {
     pub watched_lights: WatchedLights,
     /// Orders every path's Fn-lock writes per keyboard.
     fn_lock_order: WriteOrder,
+    /// Orders every path's key-remap writes per keyboard.
+    key_remap_order: WriteOrder,
     /// Orders the GUI's report-rate writes and the reconnect reapply's per
     /// mouse.
     report_rate_order: WriteOrder,
@@ -540,6 +542,16 @@ impl SharedHandles {
         }
     }
 
+    /// Write `remap` to the keyboard at `route` without waiting, for the
+    /// config-reload and reconnect paths; the outcome is logged.
+    fn write_key_remap_in_background(&self, route: &DeviceRoute, remap: KeyRemap) {
+        crate::hardware::write_key_remap_in_background(
+            self.keyboard_device(route),
+            self.key_remap_order.request(route),
+            remap,
+        );
+    }
+
     /// [`Self::set_fn_lock`] without waiting, for the config-reload and
     /// reconnect paths; the outcome is logged.
     fn write_fn_lock_in_background(&self, route: &DeviceRoute, fn_lock: bool) {
@@ -741,6 +753,7 @@ impl Orchestrator {
             host_switch_links,
             watched_lights,
             fn_lock_order: WriteOrder::default(),
+            key_remap_order: WriteOrder::default(),
             report_rate_order: WriteOrder::default(),
             pointer_speeds: Arc::default(),
             force_sensing_order: WriteOrder::default(),
@@ -1763,6 +1776,11 @@ impl Orchestrator {
         if let Some(fn_lock) = self.config.fn_lock(key) {
             self.shared.write_fn_lock_in_background(&route, fn_lock);
         }
+        // The keyboard forgets its remap when it powers off.
+        if let Some(remap) = self.config.key_remap(key) {
+            self.shared
+                .write_key_remap_in_background(&route, remap.clone());
+        }
         if let Some(force) = configured_force_sensing(&self.config, dev) {
             self.shared.write_force_sensing_in_background(&route, force);
         }
@@ -2196,6 +2214,7 @@ impl Orchestrator {
         self.rebuild();
         self.apply_native_wheel_modes();
         self.apply_changed_fn_locks(&previous);
+        self.apply_changed_key_remaps(&previous);
         self.apply_changed_force_sensing(&previous);
         for dev in &self.devices {
             let was_enabled = dev
@@ -2272,6 +2291,24 @@ impl Orchestrator {
             if let Some(fn_lock) = fn_lock {
                 self.shared.write_fn_lock_in_background(&route, fn_lock);
             }
+        }
+    }
+
+    /// Push a changed key remap to the online keyboard it belongs to. A remap
+    /// the config dropped is written empty, which clears what the keyboard
+    /// still holds from it. The reconnect path is
+    /// [`Self::reapply_volatile_settings`].
+    fn apply_changed_key_remaps(&self, previous: &Config) {
+        for dev in self.devices.iter().filter(|dev| dev.online) {
+            let Some(route) = dev.route.clone() else {
+                continue;
+            };
+            let remap = self.config.key_remap(&dev.config_key);
+            if remap == previous.key_remap(&dev.config_key) {
+                continue;
+            }
+            self.shared
+                .write_key_remap_in_background(&route, remap.cloned().unwrap_or_default());
         }
     }
 

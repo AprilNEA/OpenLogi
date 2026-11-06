@@ -43,9 +43,9 @@ v10 adds the per-device `disabled_keys` policy. Older readers reject a v10
 header before parsing its fields. A v9 file without the policy still loads.
 v11 adds the `[flow]` section. Older readers reject a v11 header before
 parsing its fields. A v10 file without the section loads with Flow disabled.
-v12 adds per-device keyboard lighting `keys`. Older readers reject a v12
-header before parsing its fields. A v11 file without them lights every key in
-the keyboard colour.
+v12 adds per-device keyboard lighting `keys` and `key_remap`. Older readers
+reject a v12 header before parsing its fields. A v11 file without them lights
+every key in the keyboard colour and leaves the keys alone.
 
 ## Shape
 
@@ -289,6 +289,19 @@ Common device fields are:
   clear a link when the keyboard is asleep or its receiver is unplugged. After
   a restart, the agent knows the cookie again once the keyboard reports it
 - `fn_lock` for compatible keyboards
+- `key_remap` for keyboards with HID++ `0x1b05` key customisation whose keys
+  OpenLogi knows (the G515 LS TKL): what each key sends instead of its own
+  key, per layer — `base` on its own, `fn` with Fn held, `g_shift` with a key
+  remapped to `g_shift` held. Keys use the lighting `keys` names; a target is
+  another key name, a media key (`mute`, `volume_up`, `volume_down`,
+  `play_pause`, `next_track`, `previous_track`) or `g_shift`:
+  `key_remap = { base = { CapsLock = "Esc", Menu = "g_shift" }, fn = { F1 =
+  "mute" }, g_shift = { F1 = "D" } }`. The keyboard forgets its remap when it
+  powers off, so the agent writes it whenever the keyboard connects and when a
+  reload changes it; while it does, the keyboard is in host mode, as under
+  G HUB. Every layer is written, so a key left out of a layer keeps the
+  keyboard's own behaviour there; an empty table clears an earlier remap.
+  Absent leaves the keys unmanaged
 - `disabled_keys` for keyboards with HID++ `0x4521`: the keys the keyboard
   suppresses in hardware (see [Disabled keys](#disabled-keys)). Absent leaves
   the setting unmanaged; an explicit empty array enables all supported known
