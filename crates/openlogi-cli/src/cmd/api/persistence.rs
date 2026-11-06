@@ -136,12 +136,12 @@ impl Save {
         self.config.set_keep_os_layout(&self.key, keep);
     }
 
-    pub(super) fn set_os_pointer_speed(&mut self, key: &str, speed: f32) {
-        self.config.set_os_pointer_speed(key, Some(speed));
+    pub(super) fn set_os_pointer_speed(&mut self, speed: f32) {
+        self.config.set_os_pointer_speed(&self.key, Some(speed));
     }
 
-    pub(super) fn os_pointer_speed(&self, key: &str) -> Option<f32> {
-        self.config.os_pointer_speed(key)
+    pub(super) fn os_pointer_speed(&self) -> Option<f32> {
+        self.config.os_pointer_speed(&self.key)
     }
     pub(super) fn report_rate(&mut self, rate: ReportRate) {
         self.config.set_report_rate(&self.key, rate);

@@ -258,7 +258,6 @@ async fn execute(
             }))
         }
         ApiCommand::PointerSpeed { device, set } => {
-            let route = select_device(&snapshot, &device)?;
             let Some(save) = save.as_mut() else {
                 return Err(ApiError::new(
                     "invalid_value",
@@ -266,14 +265,14 @@ async fn execute(
                 ));
             };
             if let Some(factor) = set {
-                save.set_os_pointer_speed(&route, *factor);
+                save.set_os_pointer_speed(factor);
                 Ok(json!({
                     "device": device,
                     "persistence": "not_saved",
                     "os_pointer_speed": factor,
                 }))
             } else {
-                let current = save.os_pointer_speed(&route).unwrap_or(1.0);
+                let current = save.os_pointer_speed().unwrap_or(1.0);
                 Ok(json!({
                     "device": device,
                     "os_pointer_speed": current,
