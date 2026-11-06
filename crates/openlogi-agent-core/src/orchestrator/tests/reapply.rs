@@ -527,7 +527,7 @@ fn confirmation_budget_survives_config_key_adoption() {
     assert!(orchestrator.needs_reapply_confirmation());
 
     let canonical = PhysicalDeviceKey::parse("unit:01020304").expect("key");
-    assert!(config.adopt_route(&canonical, legacy, None));
+    assert!(config.adopt_route(&canonical, legacy, [0; 4], None));
     orchestrator.reload_config(config);
     orchestrator.refresh_inventory_for_settings_confirmation(
         std::slice::from_ref(&inventory),
