@@ -23,12 +23,11 @@ use super::geometry::{
 };
 use super::hotspots::{Hotspot, MOUSE_MODEL_SIZE, MouseControlId};
 use super::inspector::{
-    ActionPickerContext, BindingInspectorData, InvalidDrafts, ShortcutError, ShortcutMode,
-    binding_inspector,
+    ActionPickerContext, BindingInspectorData, InvalidDrafts, binding_inspector,
 };
 use super::leader_lines::{Geometry as LeaderGeometry, Label, paint as paint_leader_lines};
 use crate::app::{glow_canvas, keyboard_glow};
-use crate::features::binding_editor::{Recording, RecordsShortcut, ShortcutRecorder};
+use crate::features::binding_editor::{EditsShortcut, Recording, RecordsShortcut, ShortcutDraft};
 use crate::features::keyboard::editors::{PowerUserKind, text_editor_placeholder};
 use crate::features::profiles::{profile_canvas_status, profile_name};
 use crate::services::assets::{GlowGeometry, ResolvedAsset};
@@ -192,17 +191,13 @@ pub struct MouseModelView {
     gesture_active_dir: Option<GestureDirection>,
     action_picker_open: bool,
     action_search: Entity<InputState>,
-    pub(super) custom_shortcut_input: Entity<InputState>,
     pub(super) custom_application_input: Entity<InputState>,
     pub(super) custom_command_input: Entity<InputState>,
     /// Which custom editors' last "Add" attempt failed to parse, so their
     /// captions can show an inline error.
     pub(super) invalid_drafts: InvalidDrafts,
-    pub(super) shortcut_mode: ShortcutMode,
-    /// The custom shortcut recording in progress, if any.
-    shortcut_recorder: Option<ShortcutRecorder>,
-    /// The Record button's area; a recording lasts while focus stays in it.
-    shortcut_record_focus: FocusHandle,
+    /// The custom shortcut editor's draft.
+    pub(super) shortcut: ShortcutDraft,
     /// The press-force slider while the haptic panel's inspector shows it.
     pub(super) force_sensing: Option<ForceSensingSlider>,
     /// The canvas area as last laid out, which the model and its cards fit
@@ -222,17 +217,7 @@ impl MouseModelView {
             }
         })
         .detach();
-        let custom_shortcut_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder(tr!("action_ring.shortcut_e_g_cmd_plus_shift_plus_p"))
-        });
-        cx.subscribe(&custom_shortcut_input, |view, _, event: &InputEvent, cx| {
-            if matches!(event, InputEvent::Change) {
-                view.invalid_drafts.shortcut = None;
-                cx.notify();
-            }
-        })
-        .detach();
+        let shortcut = ShortcutDraft::new(window, cx);
         let custom_application_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder(tr!("action_ring.application_folder_path_or_url"))
@@ -275,13 +260,10 @@ impl MouseModelView {
             gesture_active_dir: None,
             action_picker_open: false,
             action_search,
-            custom_shortcut_input,
             custom_application_input,
             custom_command_input,
             invalid_drafts: InvalidDrafts::default(),
-            shortcut_mode: ShortcutMode::Tap,
-            shortcut_recorder: None,
-            shortcut_record_focus: cx.focus_handle(),
+            shortcut,
             force_sensing: None,
             canvas_room: None,
             _state_obs: state_obs,
@@ -296,15 +278,12 @@ impl MouseModelView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.custom_shortcut_input
-            .update(cx, |input, cx| input.set_value("", window, cx));
+        self.shortcut.reset(None, window, cx);
         self.custom_application_input
             .update(cx, |input, cx| input.set_value("", window, cx));
         self.custom_command_input
             .update(cx, |input, cx| input.set_value("", window, cx));
         self.invalid_drafts = InvalidDrafts::default();
-        self.shortcut_mode = ShortcutMode::Tap;
-        self.shortcut_recorder = None;
     }
 
     /// Set (or clear, with `None`) the activated gesture direction. Callers must
@@ -312,31 +291,17 @@ impl MouseModelView {
     pub(crate) fn set_gesture_selected_dir(&mut self, dir: Option<GestureDirection>) {
         self.gesture_active_dir = dir;
         self.action_picker_open = false;
-        self.shortcut_recorder = None;
+        self.shortcut.stop_recording();
     }
 
     pub(super) fn toggle_action_picker(&mut self) {
         self.action_picker_open = !self.action_picker_open;
-        self.shortcut_recorder = None;
+        self.shortcut.stop_recording();
     }
 
     pub(super) fn close_action_picker(&mut self) {
         self.action_picker_open = false;
-        self.shortcut_recorder = None;
-    }
-
-    /// Start recording the custom shortcut, or stop the recording in
-    /// progress.
-    pub(super) fn toggle_shortcut_recording(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.shortcut_recorder.take().is_none() {
-            let area = self.shortcut_record_focus.clone();
-            self.shortcut_recorder = Some(ShortcutRecorder::start(&area, window, cx));
-        }
-        cx.notify();
+        self.shortcut.stop_recording();
     }
 
     /// The action picker's state, as the inspector reads it.
@@ -344,12 +309,9 @@ impl MouseModelView {
         ActionPickerContext {
             open: self.action_picker_open,
             search: &self.action_search,
-            shortcut_input: &self.custom_shortcut_input,
             application_input: &self.custom_application_input,
             command_input: &self.custom_command_input,
-            shortcut_mode: self.shortcut_mode,
-            shortcut_recording: self.shortcut_recorder.is_some(),
-            shortcut_record_focus: &self.shortcut_record_focus,
+            shortcut: &self.shortcut,
             invalid: self.invalid_drafts,
             view,
         }
@@ -364,7 +326,7 @@ impl MouseModelView {
         self.selected = None;
         self.gesture_active_dir = None;
         self.action_picker_open = false;
-        self.shortcut_recorder = None;
+        self.shortcut.stop_recording();
     }
 
     /// Keep the canvas area measured in the last frame, and lay the model out
@@ -415,7 +377,7 @@ impl MouseModelView {
             self.selected = Some(control);
             self.gesture_active_dir = None;
             self.action_picker_open = false;
-            self.shortcut_recorder = None;
+            self.shortcut.stop_recording();
         }
     }
 }
@@ -452,12 +414,7 @@ impl MouseModelView {
             window,
             cx,
         );
-        crate::ui::components::localize_placeholder(
-            &self.custom_shortcut_input,
-            tr!("action_ring.shortcut_e_g_cmd_plus_shift_plus_p"),
-            window,
-            cx,
-        );
+        self.shortcut.localize(window, cx);
         crate::ui::components::localize_placeholder(
             &self.custom_application_input,
             tr!("action_ring.application_folder_path_or_url"),
@@ -486,32 +443,20 @@ impl MouseModelView {
 }
 
 impl RecordsShortcut for MouseModelView {
-    /// A recorded chord fills the shortcut field, and Add commits it in the
-    /// chosen mode. A key the recorder cannot turn into a chord shows the
-    /// field's error and leaves the field as it was.
     fn shortcut_recorded(
         &mut self,
         recording: Recording,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.shortcut_recorder = None;
-        match recording {
-            Recording::Chord(combo) => {
-                self.custom_shortcut_input.update(cx, |input, cx| {
-                    input.set_value(combo.rendered_label(), window, cx);
-                });
-                self.invalid_drafts.shortcut = None;
-            }
-            Recording::Cancelled => {}
-            Recording::Unsupported => {
-                self.invalid_drafts.shortcut = Some(ShortcutError::Unrecognized);
-            }
-            Recording::ShiftedSymbol => {
-                self.invalid_drafts.shortcut = Some(ShortcutError::ShiftedSymbol);
-            }
-        }
+        self.shortcut.recorded(recording, window, cx);
         cx.notify();
+    }
+}
+
+impl EditsShortcut for MouseModelView {
+    fn shortcut_draft(&mut self) -> Option<&mut ShortcutDraft> {
+        Some(&mut self.shortcut)
     }
 }
 

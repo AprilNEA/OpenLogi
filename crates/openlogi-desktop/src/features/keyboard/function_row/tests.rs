@@ -1169,6 +1169,85 @@ fn open_application_editor_binds_the_selected_key(cx: &mut gpui::TestAppContext)
     cx.run_until_parked();
 }
 
+/// The key panel offers the mouse inspector's Custom shortcut editor (#1607):
+/// Add binds the field's chord to the key in the chosen mode, text that is no
+/// chord binds nothing, and reopening the editor shows the bound chord.
+#[gpui::test]
+fn custom_shortcut_editor_binds_the_selected_key(cx: &mut gpui::TestAppContext) {
+    use crate::services::i18n::LOCALE_LOCK;
+    use gpui::{Modifiers, VisualTestContext};
+
+    fn click(cx: &mut VisualTestContext, selector: &'static str) {
+        let bounds = cx.debug_bounds(selector).expect(selector);
+        cx.simulate_click(bounds.center(), Modifiers::default());
+        redraw(cx);
+    }
+    fn f1_binding(cx: &mut VisualTestContext, trigger: &KeyTarget) -> Option<Action> {
+        cx.update(|_, cx| bound_action(AppState::try_read(cx).unwrap(), trigger))
+    }
+
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    let (view, cx) = keys_tab(cx);
+    // Slot 1 of the fallback F-row is F1.
+    let f1 = key_slots(None, None)[1].target.clone();
+    view.update(cx, |view, cx| {
+        view.select_key(Some(1), cx);
+        view.open_editor(PowerUserKind::CustomShortcut, cx);
+    });
+    redraw(cx);
+
+    click(cx, "key-editor-custom-shortcut-add");
+    assert!(
+        cx.debug_bounds("key-editor-custom-shortcut-error")
+            .is_some()
+    );
+    view.read_with(cx, |view, _| {
+        assert_eq!(view.active_editor, Some(PowerUserKind::CustomShortcut));
+    });
+    assert_eq!(f1_binding(cx, &f1), None);
+
+    click(cx, "key-editor-custom-shortcut-input");
+    cx.simulate_input("Ctrl+Alt+C");
+    redraw(cx);
+    assert!(
+        cx.debug_bounds("key-editor-custom-shortcut-error")
+            .is_none()
+    );
+    click(cx, "key-editor-shortcut-hold");
+    click(cx, "key-editor-custom-shortcut-add");
+    let held = Action::HoldShortcut("Ctrl+Alt+C".parse().expect("valid chord"));
+    assert_eq!(f1_binding(cx, &f1), Some(held.clone()));
+    view.read_with(cx, |view, _| {
+        assert_eq!(view.active_editor, None);
+        assert!(
+            view.shortcut.is_none(),
+            "closing the editor drops its draft"
+        );
+    });
+    assert!(power_user_selected(
+        Some(&held),
+        PowerUserKind::CustomShortcut
+    ));
+
+    view.update(cx, |view, cx| {
+        view.open_editor(PowerUserKind::CustomShortcut, cx);
+    });
+    redraw(cx);
+    view.read_with(cx, |view, cx| {
+        let draft = view.shortcut.as_ref().expect("the open editor has a draft");
+        assert_eq!(draft.input().read(cx).value(), "Ctrl+Alt+C");
+        assert_eq!(
+            draft.mode(),
+            crate::features::binding_editor::ShortcutMode::Hold
+        );
+    });
+
+    drop(view);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+}
+
 /// The view edits grid keys on its chosen page by moving their targets there;
 /// the paging buttons and F-row keys have no pages and stay as they are.
 #[test]

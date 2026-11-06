@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use gpui::{
-    Context, Entity, FocusHandle, InteractiveElement, IntoElement, ParentElement, Role,
+    Context, Entity, InteractiveElement, IntoElement, ParentElement, Role,
     StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px, rgb, svg,
 };
 use gpui_kit::base::Button as BaseButton;
@@ -22,8 +22,8 @@ use super::hotspots::MouseControlId;
 use super::thumbwheel::ThumbwheelPreset;
 use super::view::MouseModelView;
 use crate::features::binding_editor::{
-    ActionOffer, GESTURE_BUTTON_ICON, PickFn, action_icon_path, action_rows_with,
-    application_editor, command_editor, editor_section, gesture_direction_icon,
+    ActionOffer, GESTURE_BUTTON_ICON, PickFn, ShortcutDraft, action_icon_path, action_rows_with,
+    application_editor, command_editor, editor_section, gesture_direction_icon, shortcut_editor,
 };
 use crate::state::AppState;
 use crate::ui::action::localized_action_label;
@@ -62,54 +62,20 @@ pub(super) struct BindingInspectorData<'a> {
 pub(super) struct ActionPickerContext<'a> {
     pub open: bool,
     pub search: &'a Entity<InputState>,
-    pub shortcut_input: &'a Entity<InputState>,
     pub application_input: &'a Entity<InputState>,
     pub command_input: &'a Entity<InputState>,
-    pub shortcut_mode: ShortcutMode,
-    /// Whether Record is waiting for the next key press.
-    pub shortcut_recording: bool,
-    /// The Record button's area, which holds focus while recording.
-    pub shortcut_record_focus: &'a FocusHandle,
+    pub shortcut: &'a ShortcutDraft,
     pub invalid: InvalidDrafts,
     pub view: &'a Entity<MouseModelView>,
 }
 
 /// Which custom-action editors rejected their last Add, so each shows an
-/// inline error until its text changes or the picker reopens.
+/// inline error until its text changes or the picker reopens. The custom
+/// shortcut editor keeps its own, in its [`ShortcutDraft`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct InvalidDrafts {
-    pub shortcut: Option<ShortcutError>,
     pub application: bool,
     pub command: bool,
-}
-
-/// Why the custom shortcut editor shows an error.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum ShortcutError {
-    /// The typed text, or the recorded key, is not a chord a shortcut can
-    /// send.
-    Unrecognized,
-    /// Record saw Shift with a digit or symbol key, which it cannot record
-    /// (see [`Recording::ShiftedSymbol`]). Typing the chord still works.
-    ///
-    /// [`Recording::ShiftedSymbol`]: crate::features::binding_editor::Recording::ShiftedSymbol
-    ShiftedSymbol,
-}
-
-/// Whether the custom shortcut editor records a tapped or a held chord.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum ShortcutMode {
-    Tap,
-    Hold,
-}
-
-impl ShortcutMode {
-    fn action(self, combo: openlogi_core::binding::KeyCombo) -> Action {
-        match self {
-            Self::Tap => Action::CustomShortcut(combo),
-            Self::Hold => Action::HoldShortcut(combo),
-        }
-    }
 }
 
 pub(super) fn binding_inspector(
@@ -836,7 +802,13 @@ fn action_library(
     v_flex()
         .gap_2()
         .pt_1()
-        .child(custom_shortcut_editor(id_prefix, &picker, on_pick, pal))
+        .child(shortcut_editor(
+            id_prefix,
+            picker.shortcut,
+            picker.view,
+            on_pick,
+            pal,
+        ))
         .child(application_editor(
             id_prefix,
             picker.application_input,
@@ -885,118 +857,6 @@ fn action_library(
                 })
                 .children(rows),
         )
-}
-
-/// A single-field "Custom Shortcut" editor, matching the Action Ring editor's
-/// `shortcut_editor` (`features/action_ring/editor.rs`) so the same custom
-/// action is reachable from the plain per-button picker, not just the ring.
-/// Record fills the field from the next key press; Add commits the field.
-fn custom_shortcut_editor(
-    id_prefix: &'static str,
-    picker: &ActionPickerContext<'_>,
-    on_pick: &PickFn,
-    pal: Palette,
-) -> impl IntoElement {
-    let input = picker.shortcut_input;
-    let mode = picker.shortcut_mode;
-    let recording = picker.shortcut_recording;
-    let view = picker.view;
-    let submit_input = input.clone();
-    let on_pick = on_pick.clone();
-    let mode_button = |option: ShortcutMode| {
-        let (id, label) = match option {
-            ShortcutMode::Tap => ("tap", tr!("actions.shortcut_tap")),
-            ShortcutMode::Hold => ("hold", tr!("actions.shortcut_hold")),
-        };
-        let view = view.clone();
-        control_button(format!("{id_prefix}-shortcut-{id}"))
-            .debug_selector(move || format!("{id_prefix}-shortcut-{id}"))
-            .selected(mode == option)
-            .label(label)
-            .on_click(move |_, _, cx| {
-                view.update(cx, |view, cx| {
-                    view.shortcut_mode = option;
-                    cx.notify();
-                });
-            })
-    };
-    let tap_button = mode_button(ShortcutMode::Tap);
-    let hold_button = mode_button(ShortcutMode::Hold);
-    let record_view = view.clone();
-    let view = view.clone();
-    v_flex()
-        .gap_1()
-        .child(editor_section(tr!("action_ring.custom_shortcut"), pal))
-        .child(h_flex().gap_2().child(tap_button).child(hold_button))
-        .child(
-            h_flex()
-                .gap_2()
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .debug_selector(move || format!("{id_prefix}-custom-shortcut-input"))
-                        .child(control_input(input).cleanable(true)),
-                )
-                .child(
-                    div().track_focus(picker.shortcut_record_focus).child(
-                        Button::new(format!("{id_prefix}-custom-shortcut-record"))
-                            .debug_selector(move || format!("{id_prefix}-custom-shortcut-record"))
-                            .compact()
-                            .selected(recording)
-                            .label(if recording {
-                                tr!("common.cancel")
-                            } else {
-                                tr!("actions.record_shortcut")
-                            })
-                            .on_click(move |_, window, cx| {
-                                record_view.update(cx, |view, cx| {
-                                    view.toggle_shortcut_recording(window, cx);
-                                });
-                            }),
-                    ),
-                )
-                .child(
-                    Button::new(format!("{id_prefix}-custom-shortcut-add"))
-                        .debug_selector(move || format!("{id_prefix}-custom-shortcut-add"))
-                        .compact()
-                        .label(tr!("common.add"))
-                        .on_click(move |_, window, cx| {
-                            let shortcut = submit_input.read(cx).value().to_string();
-                            match shortcut.parse::<openlogi_core::binding::KeyCombo>() {
-                                Ok(combo) => (on_pick)(mode.action(combo), window, cx),
-                                Err(_) => view.update(cx, |view, cx| {
-                                    view.invalid_drafts.shortcut =
-                                        Some(ShortcutError::Unrecognized);
-                                    cx.notify();
-                                }),
-                            }
-                        }),
-                ),
-        )
-        .when(recording, |editor| {
-            editor.child(
-                div()
-                    .debug_selector(move || format!("{id_prefix}-custom-shortcut-recording"))
-                    .text_caption()
-                    .text_color(pal.text_muted)
-                    .child(tr!("actions.press_the_shortcut_to_record")),
-            )
-        })
-        .when_some(picker.invalid.shortcut, |editor, error| {
-            editor.child(
-                div()
-                    .debug_selector(move || format!("{id_prefix}-custom-shortcut-error"))
-                    .text_caption()
-                    .text_color(pal.text_danger)
-                    .child(match error {
-                        ShortcutError::Unrecognized => {
-                            tr!("action_ring.custom_action_invalid_input")
-                        }
-                        ShortcutError::ShiftedSymbol => tr!("actions.shifted_symbol_unrecordable"),
-                    }),
-            )
-        })
 }
 
 fn gesture_action(

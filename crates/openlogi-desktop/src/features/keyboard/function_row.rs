@@ -50,8 +50,8 @@ use super::editors::{
 };
 use crate::app::{glow_canvas, keyboard_glow};
 use crate::features::binding_editor::{
-    PickFn, action_icon_path, action_rows, compact_panel, divider, editor_scroll_list,
-    editor_section,
+    EditsShortcut, PickFn, Recording, RecordsShortcut, ShortcutDraft, action_icon_path,
+    action_rows, compact_panel, divider, editor_scroll_list, editor_section,
 };
 use crate::features::mouse::geometry::asset_dimensions_for_png;
 use crate::features::profiles::profile_name;
@@ -166,6 +166,8 @@ pub struct FunctionRowView {
     active_editor: Option<PowerUserKind>,
     /// Lazily-created [`InputState`] for the text editors.
     text_state: Option<Entity<InputState>>,
+    /// The Custom shortcut editor's draft, created when that editor opens.
+    shortcut: Option<ShortcutDraft>,
     /// Draft copy of the Workflow steps under edit.
     workflow_draft: Vec<WorkflowStep>,
     /// Whether the Open Application editor rejected a blank path.
@@ -214,6 +216,7 @@ impl FunctionRowView {
             hovered_key: None,
             active_editor: None,
             text_state: None,
+            shortcut: None,
             workflow_draft: Vec::new(),
             application_invalid: false,
             keypad_page: KeypadPage::FIRST,
@@ -244,6 +247,7 @@ impl FunctionRowView {
     fn drop_editor(&mut self) {
         self.active_editor = None;
         self.text_state = None;
+        self.shortcut = None;
         self.workflow_draft.clear();
         self.application_invalid = false;
     }
@@ -423,6 +427,7 @@ impl FunctionRowView {
     pub(crate) fn open_editor(&mut self, kind: PowerUserKind, cx: &mut Context<Self>) {
         self.active_editor = Some(kind);
         self.text_state = None;
+        self.shortcut = None;
         self.workflow_draft.clear();
         self.application_invalid = false;
         cx.notify();
@@ -473,6 +478,53 @@ impl FunctionRowView {
         if idx < self.workflow_draft.len() {
             self.workflow_draft.remove(idx);
             cx.notify();
+        }
+    }
+}
+
+impl FunctionRowView {
+    /// Give the open `kind` editor its draft, seeded from the key's bound
+    /// action the first time, and re-stamp its placeholder after a language
+    /// switch.
+    fn prepare_editor(
+        &mut self,
+        kind: PowerUserKind,
+        bound: Option<&Action>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match kind {
+            PowerUserKind::Workflow => {
+                if self.workflow_draft.is_empty() {
+                    self.workflow_draft = workflow_editor_seed(bound);
+                }
+            }
+            PowerUserKind::CustomShortcut => {
+                if let Some(draft) = &self.shortcut {
+                    draft.localize(window, cx);
+                } else {
+                    let mut draft = ShortcutDraft::new(window, cx);
+                    draft.reset(bound, window, cx);
+                    self.shortcut = Some(draft);
+                }
+            }
+            _ => {
+                if let Some(state) = self.text_state.clone() {
+                    crate::ui::components::localize_placeholder(
+                        &state,
+                        text_editor_placeholder(kind),
+                        window,
+                        cx,
+                    );
+                } else {
+                    self.new_text_state(
+                        text_editor_seed(bound, kind),
+                        text_editor_placeholder(kind),
+                        window,
+                        cx,
+                    );
+                }
+            }
         }
     }
 }
@@ -540,30 +592,7 @@ impl Render for FunctionRowView {
             && let Some(slot) = slots.get(selected_idx)
         {
             let current_action = state.and_then(|state| bound_action(state, &slot.target));
-            match kind {
-                PowerUserKind::Workflow => {
-                    if self.workflow_draft.is_empty() {
-                        self.workflow_draft = workflow_editor_seed(current_action.as_ref());
-                    }
-                }
-                _ => {
-                    if let Some(state) = self.text_state.clone() {
-                        crate::ui::components::localize_placeholder(
-                            &state,
-                            text_editor_placeholder(kind),
-                            window,
-                            cx,
-                        );
-                    } else {
-                        self.new_text_state(
-                            text_editor_seed(current_action.as_ref(), kind),
-                            text_editor_placeholder(kind),
-                            window,
-                            cx,
-                        );
-                    }
-                }
-            }
+            self.prepare_editor(kind, current_action.as_ref(), window, cx);
         }
         let view = cx.entity();
         // The same selection, panel, and editor machinery on either surface:
@@ -1514,9 +1543,12 @@ impl FunctionRowView {
             return super::editors::editor_card(
                 target,
                 kind,
-                self.text_state.clone(),
-                self.workflow_draft.clone(),
-                self.application_invalid,
+                super::editors::EditorDrafts {
+                    text_state: self.text_state.clone(),
+                    shortcut: self.shortcut.as_ref(),
+                    workflow: self.workflow_draft.clone(),
+                    application_invalid: self.application_invalid,
+                },
                 view,
                 pal,
             );
@@ -1697,6 +1729,11 @@ fn panel_action_rows(
 
     let power_user_actions: &[(PowerUserKind, SharedString, &'static str)] = &[
         (
+            PowerUserKind::CustomShortcut,
+            tr!("action_ring.custom_shortcut"),
+            "action-icons/keyboard.svg",
+        ),
+        (
             PowerUserKind::OpenApplication,
             tr!("action_ring.open_application_or_folder"),
             "action-icons/grid-3x3.svg",
@@ -1766,12 +1803,35 @@ fn panel_action_rows(
     children
 }
 
+impl RecordsShortcut for FunctionRowView {
+    fn shortcut_recorded(
+        &mut self,
+        recording: Recording,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(draft) = &mut self.shortcut {
+            draft.recorded(recording, window, cx);
+            cx.notify();
+        }
+    }
+}
+
+impl EditsShortcut for FunctionRowView {
+    fn shortcut_draft(&mut self) -> Option<&mut ShortcutDraft> {
+        self.shortcut.as_mut()
+    }
+}
+
 /// Whether `current` is the action the `kind` editor makes, so its row reads
 /// as the key's binding.
 fn power_user_selected(current: Option<&Action>, kind: PowerUserKind) -> bool {
     matches!(
         (current, kind),
         (
+            Some(Action::CustomShortcut(_) | Action::HoldShortcut(_)),
+            PowerUserKind::CustomShortcut
+        ) | (
             Some(Action::OpenApplication(_)),
             PowerUserKind::OpenApplication
         ) | (Some(Action::TypeText(_)), PowerUserKind::TypeText)

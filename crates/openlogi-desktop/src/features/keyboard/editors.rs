@@ -18,7 +18,8 @@ use std::rc::Rc;
 
 use super::function_row::{FunctionRowView, KeyTarget, bound_action, commit_key_action};
 use crate::features::binding_editor::{
-    PickFn, application_editor, compact_panel, divider, editor_scroll_list, title,
+    PickFn, ShortcutDraft, application_editor, compact_panel, divider, editor_scroll_list,
+    shortcut_editor, title,
 };
 use crate::state::AppState;
 use crate::ui::components::{MenuRow, control_input};
@@ -39,6 +40,7 @@ use openlogi_core::binding::{Action, KeyCombo, WorkflowStep};
 /// Which power-user editor is showing for the selected key.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum PowerUserKind {
+    CustomShortcut,
     OpenApplication,
     TypeText,
     RunAppleScript,
@@ -49,6 +51,7 @@ pub enum PowerUserKind {
 impl PowerUserKind {
     pub(crate) fn heading_key(self) -> &'static str {
         match self {
+            Self::CustomShortcut => "action_ring.custom_shortcut",
             Self::OpenApplication => "action_ring.open_application_or_folder",
             Self::TypeText => "actions.type_text_heading",
             Self::RunAppleScript => "actions.run_applescript_heading",
@@ -64,7 +67,7 @@ pub(crate) fn text_editor_placeholder(kind: PowerUserKind) -> gpui::SharedString
         PowerUserKind::TypeText => tr!("actions.type_text_placeholder"),
         PowerUserKind::RunAppleScript => "display dialog \"Hello\"".into(),
         PowerUserKind::RunShellCommand => "echo hello".into(),
-        PowerUserKind::Workflow => "".into(),
+        PowerUserKind::CustomShortcut | PowerUserKind::Workflow => "".into(),
     }
 }
 
@@ -87,18 +90,40 @@ pub(crate) fn workflow_editor_seed(action: Option<&Action>) -> Vec<WorkflowStep>
     }
 }
 
+/// The open editor's drafts, as [`editor_card`] renders them.
+pub struct EditorDrafts<'a> {
+    /// The text editors' field.
+    pub text_state: Option<Entity<InputState>>,
+    /// The Custom shortcut editor's draft.
+    pub shortcut: Option<&'a ShortcutDraft>,
+    /// The Workflow editor's steps.
+    pub workflow: Vec<WorkflowStep>,
+    /// Whether the Open Application editor rejected a blank path.
+    pub application_invalid: bool,
+}
+
 /// Render the editor card for `kind`, replacing the panel's action list.
 pub fn editor_card(
     target: KeyTarget,
     kind: PowerUserKind,
-    text_state: Option<Entity<InputState>>,
-    workflow_draft: Vec<WorkflowStep>,
-    application_invalid: bool,
+    drafts: EditorDrafts<'_>,
     view: &Entity<FunctionRowView>,
     pal: Palette,
 ) -> gpui::Div {
+    let EditorDrafts {
+        text_state,
+        shortcut,
+        workflow,
+        application_invalid,
+    } = drafts;
     match kind {
-        PowerUserKind::Workflow => workflow_editor_card(target, workflow_draft, view, pal),
+        PowerUserKind::Workflow => workflow_editor_card(target, workflow, view, pal),
+        PowerUserKind::CustomShortcut => match shortcut {
+            Some(draft) => shortcut_editor_card(target, draft, view, pal),
+            None => compact_panel(pal)
+                .w(px(300.))
+                .child(title(tr!("keyboard.editor_unavailable"), pal)),
+        },
         _ => match text_state {
             Some(state) if kind == PowerUserKind::OpenApplication => {
                 application_editor_card(target, state, application_invalid, view, pal)
@@ -196,6 +221,48 @@ fn application_editor_card(
         )
 }
 
+/// The mouse inspector's Custom shortcut editor, committing the chord to the
+/// key on Add in the chosen mode, with a Cancel back to the list.
+fn shortcut_editor_card(
+    target: KeyTarget,
+    draft: &ShortcutDraft,
+    view: &Entity<FunctionRowView>,
+    pal: Palette,
+) -> gpui::Div {
+    let heading = tr!(PowerUserKind::CustomShortcut.heading_key());
+    let key_name = target.label();
+    let view_pick = view.clone();
+    let on_pick: PickFn = Rc::new(move |action, _window, cx| {
+        AppState::apply(cx, |state| commit_key_action(state, &target, Some(action)));
+        view_pick.update(cx, |v, vcx| v.close_editor(vcx));
+    });
+    let view_cancel = view.clone();
+
+    compact_panel(pal)
+        .w(px(300.))
+        .child(title(
+            tr!("actions.action_key_summary", action => heading, key => key_name),
+            pal,
+        ))
+        .child(divider(pal))
+        .child(
+            v_flex()
+                .p_2()
+                .gap_2()
+                .child(shortcut_editor("key-editor", draft, view, &on_pick, pal))
+                .child(
+                    h_flex().justify_end().child(
+                        Button::new("editor-cancel")
+                            .ghost()
+                            .label(tr!("common.cancel"))
+                            .on_click(move |_e, _window, cx| {
+                                view_cancel.update(cx, |v, vcx| v.close_editor(vcx));
+                            }),
+                    ),
+                ),
+        )
+}
+
 /// The shared editor only knows the path, so re-adding the bound path would
 /// drop the target's saved display name. Keep the bound target in that case.
 fn keep_application_name(bound: Option<Action>, picked: Action) -> Action {
@@ -243,7 +310,9 @@ fn editor_action_row(
                         PowerUserKind::TypeText => Action::TypeText(text),
                         PowerUserKind::RunAppleScript => Action::RunAppleScript(text),
                         PowerUserKind::RunShellCommand => Action::RunShellCommand(text),
-                        PowerUserKind::OpenApplication | PowerUserKind::Workflow => return,
+                        PowerUserKind::CustomShortcut
+                        | PowerUserKind::OpenApplication
+                        | PowerUserKind::Workflow => return,
                     };
                     AppState::apply(cx, |state| commit_key_action(state, &target, Some(action)));
                     view_save.update(cx, |v, vcx| v.close_editor(vcx));

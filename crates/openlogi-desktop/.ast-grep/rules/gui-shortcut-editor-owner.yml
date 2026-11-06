@@ -1,0 +1,21 @@
+# Owner: openlogi-desktop's features::binding_editor::shortcut_editor — the
+# custom shortcut editor every binding surface shares: its draft (field, Tap or
+# Hold, error), the recording that fills it, and what each recording outcome
+# does to the field.
+id: gui-shortcut-editor-owner
+language: rust
+severity: error
+message: Show binding_editor::shortcut_editor over a ShortcutDraft instead of starting a ShortcutRecorder here; the draft owns the recording and what each outcome does to the field.
+note: |
+  The mouse inspector carried the only recorder-backed editor (#2138, #2181),
+  and the keyboard key panel was about to grow a second copy of its recording
+  state and error handling (#1607). See "Single source of truth" in AGENTS.md.
+files:
+  - crates/openlogi-desktop/src/**/*.rs
+ignores:
+  - crates/openlogi-desktop/src/features/binding_editor/shortcut_editor.rs
+  - crates/openlogi-desktop/src/features/binding_editor/shortcut_recorder.rs
+  - "**/tests.rs"
+  - "**/tests/**"
+rule:
+  pattern: ShortcutRecorder::start($$$ARGS)
