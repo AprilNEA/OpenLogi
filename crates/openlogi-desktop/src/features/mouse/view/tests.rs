@@ -809,6 +809,25 @@ fn an_inherited_gesture_button_offers_the_held_actions(cx: &mut TestAppContext) 
     cx.run_until_parked();
 }
 
+#[gpui::test]
+fn gesture_single_action_picker_offers_disable(cx: &mut TestAppContext) {
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    let mut config = Config::ephemeral();
+    config.set_gesture_mode(
+        crate::state::tests::KNOWN_MOUSE_KEY,
+        ButtonId::GestureButton,
+        false,
+    );
+    let (view, cx) = wheel_hold_view(cx, false, config, ButtonId::GestureButton);
+    view.update(cx, |view, _| view.action_picker_open = true);
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(cx.debug_bounds("inspector-action-Disable").is_some());
+    drop(view);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+}
+
 /// Card metrics for values whose widest measures `widest` on one line and
 /// splits evenly onto more, with the card chrome and line height the default
 /// rem size gives.
