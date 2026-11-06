@@ -1282,3 +1282,49 @@ fn switching_the_app_profile_drops_a_draft_for_the_old_one(cx: &mut gpui::TestAp
         });
     });
 }
+
+/// A tenkeyless keyboard whose depot draws its keys for per-key lighting (the
+/// G515 LS TKL's): Esc, F1 and F12 on the top row, and a letter key.
+fn per_key_asset() -> ResolvedAsset {
+    let json = r#"{"images":[{"key":"device_image","origin":{"width":2000,"height":1000},
+        "zones":[{"id":"PERKEY_KEYBOARD","components":[
+            {"id":41,"renderings":[{"type":"rect","rect":{"x":100,"y":200,"width":100,"height":100}}]},
+            {"id":58,"renderings":[{"type":"rect","rect":{"x":300,"y":200,"width":100,"height":100}}]},
+            {"id":69,"renderings":[{"type":"rect","rect":{"x":1500,"y":200,"width":100,"height":100}}]},
+            {"id":4,"renderings":[{"type":"rect","rect":{"x":200,"y":600,"width":100,"height":100}}]}
+        ]}]}]}"#;
+    ResolvedAsset {
+        depot: "g515_ls_tkl".to_string(),
+        display_name: "G515 LIGHTSPEED TKL".to_string(),
+        kind: Some(DeviceKind::Keyboard),
+        image_path: PathBuf::from("/tmp/g515.png"),
+        hero_image_path: None,
+        glow: None,
+        metadata: serde_json::from_str(json).expect("depot parses"),
+        png_width: 2000,
+        png_height: 1000,
+        side_view: None,
+    }
+}
+
+#[test]
+fn a_per_key_depot_places_only_the_top_row_keys_it_draws() {
+    let asset = per_key_asset();
+    let slots = key_slots(Some(&asset), None);
+    let legends: Vec<&str> = slots.iter().map(|slot| slot.legend.as_str()).collect();
+    assert_eq!(legends, ["Esc", "F1", "F12"]);
+    assert_eq!(
+        slots[0].point,
+        KeyPoint {
+            x_frac: 0.075,
+            y_frac: 0.25,
+        }
+    );
+    assert_eq!(
+        slots[2].point,
+        KeyPoint {
+            x_frac: 0.775,
+            y_frac: 0.25,
+        }
+    );
+}
