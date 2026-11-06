@@ -233,9 +233,10 @@ Common device fields are:
   - the keypad: `NumLock`, `KpSlash`, `KpAsterisk`, `KpMinus`, `KpPlus`,
     `KpEnter`, `Kp0`–`Kp9`, `KpPeriod`
 
-  Key colours show only on a keyboard whose lighting zones OpenLogi has
-  mapped (today the G515 LS TKL); others keep the static colour. An unknown
-  key name stops the file from loading.
+  Key colours show on a keyboard with `0x8081` lighting zones that OpenLogi
+  has mapped (today the G515 LS TKL), and on a keyboard with `0x8080`, which
+  addresses keys directly (such as the G512). Others keep the static colour.
+  An unknown key name stops the file from loading.
 - `smartshift`, and camera controls / profiles
 - `camera_stream_mode`: the live preview's mode, a table of `width`, `height`
   (pixels) and `fps`. All three are required and must be positive, or the file

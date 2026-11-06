@@ -21,9 +21,14 @@ device layer turns a key into a zone.
   `openlogi diag zones`: usage − 3 for `0x04..=0x65`, `0x68 + n` for the eight
   modifiers. Other keyboards may share that rule, but none is assumed to until
   a walk confirms it, because a wrong map paints the wrong keys.
-- **An unmapped keyboard keeps the static colour.** Per-key colours fall back
-  to the one-colour path before anything is claimed, so `keys` never changes
-  what an unmapped keyboard shows.
+- **`0x8080` needs no map.** It addresses keys by HID usage, so a keyboard
+  with `0x8080` and no `0x8081` (such as the G512) takes `keys` directly. The
+  fixed colour goes through `0x8070` first, because a frame cannot replace a
+  running onboard effect, then one `0x8080` frame with every key's colour.
+- **An unmapped keyboard keeps the static colour.** With neither a known
+  `0x8081` map nor `0x8080`, per-key colours fall back to the one-colour path
+  before anything is claimed, so `keys` never changes what such a keyboard
+  shows.
 - **One frame.** The base colour and the keys go out as `setRgbZonesSingleValue`
   requests grouped by colour, then a single `frameEnd`, so the keyboard never
   shows the base without its keys.

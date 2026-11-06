@@ -2300,3 +2300,45 @@ async fn a_rejected_key_frame_fails_the_key_write_before_the_commit() {
             .any(|report| is_per_key_commit(report))
     );
 }
+
+#[tokio::test]
+async fn a_key_write_cancelled_after_the_fixed_colour_sends_no_key_frame() {
+    // Cancellation is checked between the fixed colour and the key frame, so a
+    // request cancelled in between leaves the keys alone.
+    const ZONES: ScriptedZones = &[(0x0001, &[0x0001])];
+    let effects = color_led_effects_device(ZONES);
+    let fixed_sent = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let seen = Arc::clone(&fixed_sent);
+    let (shared, handle) = per_key_shared(move |request| {
+        if request.len() == 20 && request[2] == COLOR_LED_EFFECTS_INDEX && request[3] >> 4 == 0x03 {
+            seen.store(true, Ordering::SeqCst);
+        }
+        let lookup = request.len() >= 7 && request[2] == 0x00 && request[3] >> 4 == 0x00;
+        if lookup && u16::from_be_bytes([request[4], request[5]]) == 0x8080 {
+            return scripted_response(request);
+        }
+        if request.get(2) == Some(&0x07) {
+            return scripted_response(request);
+        }
+        effects(request)
+    })
+    .await;
+
+    let result = one_red_key()
+        .apply_on(&shared, || fixed_sent.load(Ordering::SeqCst), || true)
+        .await;
+
+    assert_eq!(
+        result,
+        Err(WriteError::RequestTimedOut {
+            operation: HidppOperation::Lighting,
+        })
+    );
+    assert!(
+        handle
+            .written_reports()
+            .iter()
+            .all(|report| report.first() != Some(&0x12)),
+        "no key frame after the cancellation"
+    );
+}

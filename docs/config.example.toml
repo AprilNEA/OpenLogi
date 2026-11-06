@@ -108,8 +108,8 @@ Bottom = { action = "ShowDesktop", label = "Desktop" }
 enabled = true
 color = "ff0000"
 brightness = 80
-# On a keyboard with mapped lighting zones, single keys can take their own
-# colour over `color`:
+# On a keyboard with mapped lighting zones, or with HID++ 0x8080 per-key
+# lighting, single keys can take their own colour over `color`:
 # keys = { Esc = "ffffff", W = "ff00ff", A = "ff00ff", S = "ff00ff", D = "ff00ff" }
 
 [devices."receiver:aabbccdd:slot:1".smartshift]

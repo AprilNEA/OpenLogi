@@ -735,8 +735,9 @@ pub struct Lighting {
     pub brightness: u8,
     /// Colors for single keys over [`Self::color`], by key position. Empty
     /// for one color across the keyboard. Brightness and on/off apply to
-    /// these too. Only a keyboard whose zone map is known shows them; any
-    /// other keeps the static color.
+    /// these too. A keyboard whose `0x8081` zone map is known shows them, and
+    /// so does one with `0x8080`, which addresses keys by usage; any other
+    /// keeps the static color.
     #[serde(default, deserialize_with = "deserialize_lighting_keys")]
     pub keys: BTreeMap<LightingKey, Rgb>,
 }

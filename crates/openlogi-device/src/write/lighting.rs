@@ -220,10 +220,7 @@ impl LightingWrite {
                 Err(WriteError::FeatureUnsupported { feature_hex })
                     if feature_hex == PerKeyLightingFeature::ID =>
                 {
-                    match scope
-                        .read(paint_keys_v1(channel, index, self.color, &self.keys))
-                        .await
-                    {
+                    match paint_keys_v1(channel, index, self.color, &self.keys, &scope).await {
                         Err(WriteError::FeatureUnsupported { feature_hex })
                             if feature_hex == PER_KEY_LIGHTING_FEATURE =>
                         {
@@ -914,19 +911,36 @@ async fn paint_keys_v1(
     device_index: u8,
     base: openlogi_core::color::Rgb,
     keys: &[(u8, openlogi_core::color::Rgb)],
+    scope: &WriteScope<impl Fn() -> bool, impl Fn() -> bool>,
 ) -> Result<(), WriteError> {
-    resolve_feature_index(channel, device_index, PER_KEY_LIGHTING_FEATURE)
+    scope
+        .read(resolve_feature_index(
+            channel,
+            device_index,
+            PER_KEY_LIGHTING_FEATURE,
+        ))
         .await?
         .ok_or(WriteError::FeatureUnsupported {
             feature_hex: PER_KEY_LIGHTING_FEATURE,
         })?;
     let (r, g, b) = base.components();
-    match set_color_effects(channel, device_index, r, g, b).await {
+    // Each step is its own read, so cancellation or a retired channel stops
+    // the write between the fixed colour and the key frame.
+    match scope
+        .read(set_color_effects(channel, device_index, r, g, b))
+        .await
+    {
         Err(WriteError::FeatureUnsupported { feature_hex })
             if feature_hex == COLOR_LED_EFFECTS_FEATURE => {}
         other => other?,
     }
-    stream_per_key(channel, device_index, &key_entries(base, keys)).await?;
+    scope
+        .read(stream_per_key(
+            channel,
+            device_index,
+            &key_entries(base, keys),
+        ))
+        .await?;
     debug!(
         device_index,
         keys = keys.len(),
