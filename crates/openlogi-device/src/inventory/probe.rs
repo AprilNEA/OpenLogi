@@ -11,7 +11,7 @@ use hidpp::{
 };
 use openlogi_core::device::DeviceInventory;
 use tokio::time::timeout;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use super::events::EventSubscriptionHandle;
 use crate::backend::NodeInfo;
@@ -244,8 +244,8 @@ pub(super) enum ProbeVerdict {
     /// its last-good snapshot briefly, but must eventually reopen the channel.
     AliveButIncomplete,
     /// The node was not checked at all: another OpenLogi process held its
-    /// receiver register phase, so this probe skipped the node's I/O and has
-    /// no evidence either way. The ledger replays the last-good snapshot
+    /// receiver register phase, so this probe skipped the node's I/O, or the
+    /// OS refused to send it (#1799) — either way it has no evidence. The ledger replays the last-good snapshot
     /// without counting a failure — a channel that was never asked cannot
     /// have failed, and must not be retired for it — and the node's cache
     /// entries are held out of miss aging, while the one-shot retry
@@ -318,7 +318,8 @@ impl NodeProbe {
     }
 
     /// A probe that never ran: another process held the receiver's register
-    /// phase for longer than it was willing to wait.
+    /// phase for longer than it was willing to wait, or the OS refused its
+    /// writes.
     pub(super) fn deferred() -> Self {
         Self {
             inventory: None,
@@ -356,7 +357,8 @@ pub(super) async fn probe_one(
     } else {
         pass.timeouts.direct
     };
-    match receiver::detect(Arc::clone(&channel)) {
+    let transport = Arc::clone(&channel);
+    let probe = match receiver::detect(Arc::clone(&channel)) {
         Some(Receiver::Bolt(bolt)) => {
             let Some(registers) = lock_receiver_registers(&info, pass.timeouts).await else {
                 return NodeProbe::deferred();
@@ -386,7 +388,18 @@ pub(super) async fn probe_one(
             // P2.4 — verified path; no Bolt-pairing slot indirection needed.
             within_budget(budget, receiver, probe_direct(channel, &info, pass)).await
         }
+    };
+    // A probe the OS refused to send asked the node nothing (#1799): macOS
+    // turns every write away while another process holds Secure Input, for
+    // as long as hours behind a lock screen. Counting that as a failure
+    // retires the channel every other tick, and the reopened one is refused
+    // all the same. Defer instead — replay the last-good inventory and hold
+    // the node's cache entries — until the transport accepts writes again.
+    if !probe.verdict.is_healthy() && transport.writes_refused() {
+        debug!("the OS is refusing writes to this node — deferring its probe");
+        return NodeProbe::deferred();
     }
+    probe
 }
 
 /// Take the receiver's register phase for this probe, or `None` to defer it.

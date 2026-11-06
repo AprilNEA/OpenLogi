@@ -507,7 +507,7 @@ async fn monitor<A: ArmedCapture>(
                 {
                     continue;
                 }
-                let outcome = ping_outcome(context.root).await;
+                let outcome = ping_outcome(context.root, context.shared.channel()).await;
                 if watchdog.liveness.finish_ping(
                     Instant::now(),
                     watchdog.activity.seq(),
@@ -522,8 +522,11 @@ async fn monitor<A: ArmedCapture>(
 }
 
 /// Ping the device through the session's channel, and classify the result.
-async fn ping_outcome(root: &RootFeature) -> PingOutcome {
+async fn ping_outcome(root: &RootFeature, channel: &hidpp::channel::HidppChannel) -> PingOutcome {
     match root.ping(0x5a).await {
+        // The OS refused the ping (#1799): the channel is fine, and a fresh
+        // one would be refused the same way until the spell ends.
+        Err(_) if channel.writes_refused() => PingOutcome::Refused,
         Err(v20::Hidpp20Error::Channel(
             hidpp::channel::ChannelError::Timeout | hidpp::channel::ChannelError::NoResponse,
         )) => PingOutcome::AllSilent,
