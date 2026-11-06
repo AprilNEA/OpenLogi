@@ -245,16 +245,16 @@ fn classify(name: &str) -> Option<Classified> {
         (".deb", "deb", "application/vnd.debian.binary-package"),
         (".rpm", "rpm", "application/x-rpm"),
     ] {
-        if let Some(stem) = name.strip_suffix(extension) {
-            if let Some(arch) = linux_arch(stem) {
-                return Some(Classified {
-                    os: "linux",
-                    arch,
-                    format,
-                    content_type,
-                    minimum_os_version: "",
-                });
-            }
+        if let Some(stem) = name.strip_suffix(extension)
+            && let Some(arch) = linux_arch(stem)
+        {
+            return Some(Classified {
+                os: "linux",
+                arch,
+                format,
+                content_type,
+                minimum_os_version: "",
+            });
         }
     }
     None
