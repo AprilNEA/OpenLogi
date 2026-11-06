@@ -77,8 +77,8 @@ impl Compositor {
                 "swaymsg".to_string(),
                 "input".to_string(),
                 "*".to_string(),
-                "accel_profile".to_string(),
-                "adaptive".to_string(),
+                "pointer_accel".to_string(),
+                sensitivity.to_string(),
             ]),
             Compositor::Gnome => Some(vec![
                 "gsettings".to_string(),
@@ -88,11 +88,13 @@ impl Compositor {
                 sensitivity.to_string(),
             ]),
             Compositor::X11 => Some(vec![
-                "xinput".to_string(),
-                "--set-prop".to_string(),
-                "*".to_string(),
-                "libinput Accel Speed".to_string(),
-                sensitivity.to_string(),
+                "sh".to_string(),
+                "-c".to_string(),
+                format!(
+                    "dev=$(xinput list --name-only | grep -iE 'mouse|touchpad|pointer' | head -1); \
+                     [ -n \"$dev\" ] && xinput --set-prop \"$dev\" 'libinput Accel Speed' {}",
+                    sensitivity
+                ),
             ]),
             _ => None,
         }

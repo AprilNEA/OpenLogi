@@ -258,13 +258,13 @@ async fn execute(
             }))
         }
         ApiCommand::PointerSpeed { device, set } => {
-            let Some(save) = save.as_mut() else {
-                return Err(ApiError::new(
-                    "invalid_value",
-                    "pointer-speed changes an agent setting; add --save",
-                ));
-            };
             if let Some(factor) = set {
+                let Some(save) = save.as_mut() else {
+                    return Err(ApiError::new(
+                        "invalid_value",
+                        "pointer-speed changes an agent setting; add --save",
+                    ));
+                };
                 save.set_os_pointer_speed(factor);
                 Ok(json!({
                     "device": device,
@@ -272,7 +272,10 @@ async fn execute(
                     "os_pointer_speed": factor,
                 }))
             } else {
-                let current = save.os_pointer_speed().unwrap_or(1.0);
+                let current = save
+                    .as_ref()
+                    .and_then(|s| s.os_pointer_speed())
+                    .unwrap_or(1.0);
                 Ok(json!({
                     "device": device,
                     "os_pointer_speed": current,

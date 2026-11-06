@@ -75,6 +75,8 @@ pub(super) fn os_pointer_speed_section(
     pal: Palette,
 ) -> Option<AnyElement> {
     let facts = facts?;
+    let is_hyprland = openlogi_core::compositor::Compositor::detect()
+        == openlogi_core::compositor::Compositor::Hyprland;
     let shown = slider.map_or(facts.speed, |slider| slider.slider.shown(facts.speed));
     let body = slider.map_or_else(
         || crate::ui::slider_row::disabled_track(pal).into_any_element(),
@@ -84,20 +86,25 @@ pub(super) fn os_pointer_speed_section(
                 .into_any_element()
         },
     );
-    let toggle = crate::ui::components::Toggle::new("os-pointer-accel-toggle")
-        .selected(facts.accel_enabled.unwrap_or(false))
-        .label(tr!("pointer.os_pointer_accel"))
-        .on_change(|selected, _window, cx| {
-            let selected = *selected;
-            AppState::apply(cx, |state| state.commit_os_pointer_accel(Some(selected)));
-        });
     let mut row = SliderRow::new(tr!("pointer.os_pointer_speed"), body)
         .description(tr!("pointer.os_pointer_speed_description"))
         .value(format!("{:.2}", slider_to_speed(shown)), ["-1.00", "1.00"]);
     if !facts.configured {
         row = row.marker(tr!("default"));
     }
-    Some(v_flex().gap_3().child(toggle).child(row).into_any_element())
+    let mut container = v_flex().gap_3().child(row);
+    if is_hyprland {
+        let toggle_state = facts.accel_enabled.unwrap_or(is_hyprland);
+        let toggle = crate::ui::components::Toggle::new("os-pointer-accel-toggle")
+            .selected(toggle_state)
+            .label(tr!("pointer.os_pointer_accel"))
+            .on_change(|selected, _window, cx| {
+                let selected = *selected;
+                AppState::apply(cx, |state| state.commit_os_pointer_accel(Some(selected)));
+            });
+        container = container.child(toggle);
+    }
+    Some(container.into_any_element())
 }
 
 fn slider_to_speed(value: i32) -> f32 {

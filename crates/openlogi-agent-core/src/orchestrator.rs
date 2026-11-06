@@ -31,9 +31,9 @@ use openlogi_core::device_order::{DeviceIdentity, DeviceStableId, PhysicalDevice
 use openlogi_hid::{
     BacklightChange, BacklightState, CaptureChannelSlot, ChannelPool, ChannelRegistry,
     DeviceIoGate, DeviceRoute, DisableKeysMask, Dpi, EasySwitchHosts, FnLockState,
-    ForceSensingInfo, GamingWanted, HidppOperation, HostOs, PointerSpeed, ReportRate,
-    ReportRateInfo, SidetoneLevel, WriteError, commands_for_light_settings,
-    is_reserved_keyboard_control, key_display_for,
+    ForceSensingInfo, GamingWanted, HidppOperation, PointerSpeed, ReportRate, ReportRateInfo,
+    SidetoneLevel, WriteError, commands_for_light_settings, is_reserved_keyboard_control,
+    key_display_for,
 };
 #[cfg(test)]
 use openlogi_ipc::ChosenLight;
@@ -76,7 +76,7 @@ use devices::{
     VOLATILE_REAPPLY_CONFIRM_RETRIES, assignments_changed, build_devices, bump_settings_epoch,
     carry_lifecycle_budgets, changed_follower_cookies, changed_force_sensing,
     config_keeps_os_layout, configured_dpi, configured_force_sensing, configured_report_rate,
-    configured_wheel_mode, host_switch_links, is_hidpp_device, keeps_os_layout, main_wheel_divert,
+    configured_wheel_mode, host_switch_links, is_hidpp_device, main_wheel_divert,
     newly_kept_os_layouts, os_layout_appeared, os_layout_target, pick_current,
     plan_disabled_keys_recovery, plan_reapply, published_inventories, reconnect_follower_cookies,
     same_device_lifecycle, saved_speed, settings_moved, stable_id, wheel_inverted,
@@ -1770,35 +1770,61 @@ impl Orchestrator {
             self.write_pointer_speed(write);
         }
         // Apply OS-level pointer speed if configured.
-        if let Some(factor) = self.config.os_pointer_speed(key) {
-            let compositor = openlogi_core::compositor::Compositor::detect();
-            // On Hyprland, generate a macOS-style custom accel curve when the
-            // toggle is on (or auto-enabled). Other compositors fall back to
-            // the sensitivity factor.
-            let use_curve = self
-                .config
-                .os_pointer_accel(key)
-                .unwrap_or(compositor == openlogi_core::compositor::Compositor::Hyprland);
-            if use_curve && compositor == openlogi_core::compositor::Compositor::Hyprland {
-                let gain = 4.8 * (1.0 + factor as f64);
+        let compositor = openlogi_core::compositor::Compositor::detect();
+        let use_curve = self
+            .config
+            .os_pointer_accel(key)
+            .unwrap_or(compositor == openlogi_core::compositor::Compositor::Hyprland);
+        let is_hyprland = compositor == openlogi_core::compositor::Compositor::Hyprland;
+        let factor_opt = self.config.os_pointer_speed(key);
+        if factor_opt.is_some() || (use_curve && is_hyprland) {
+            let factor = factor_opt.unwrap_or(0.0);
+            if use_curve && is_hyprland {
+                let gain = (4.8 * (1.0 + factor as f64)).max(0.3);
                 let (_step, points) =
                     openlogi_core::macos_accel::generate(1000.0, 120.0, 0.5, 64, gain);
                 let lut = openlogi_core::macos_accel::format_lut(0.5, &points);
                 let cmd = format!(
-                    "hyprctl eval \"hl.config({{input={{accel_profile='{}'}}}})\"",
-                    lut
+                    "hyprctl eval \"hl.config({{input={{accel_profile='{}'}}}})\"; \
+                     hyprctl keyword input:accel_profile '{}'",
+                    lut, lut
                 );
-                let _ = std::process::Command::new("sh").arg("-c").arg(cmd).spawn();
-            } else if compositor == openlogi_core::compositor::Compositor::Hyprland && !use_curve {
+                if let Ok(mut c) = std::process::Command::new("sh").arg("-c").arg(cmd).spawn() {
+                    std::thread::spawn(move || {
+                        let _ = c.wait();
+                    });
+                }
+            } else if is_hyprland && !use_curve {
                 // Toggle off: restore adaptive profile.
-                let _ = std::process::Command::new("sh")
-                    .arg("-c")
-                    .arg("hyprctl eval \"hl.config({input={accel_profile='adaptive'}})\"")
-                    .spawn();
+                let cmd = "hyprctl eval \"hl.config({input={accel_profile='adaptive'}})\"; \
+                           hyprctl keyword input:accel_profile 'adaptive'"
+                    .to_string();
+                if let Ok(mut c) = std::process::Command::new("sh").arg("-c").arg(cmd).spawn() {
+                    std::thread::spawn(move || {
+                        let _ = c.wait();
+                    });
+                }
+                // Also apply sensitivity if a factor is set.
+                if let Some(f) = factor_opt
+                    && let Some(cmd) = openlogi_core::compositor::apply_pointer_speed(compositor, f)
+                {
+                    if let Ok(mut c) = std::process::Command::new(&cmd[0]).args(&cmd[1..]).spawn() {
+                        std::thread::spawn(move || {
+                            let _ = c.wait();
+                        });
+                    }
+                }
             } else if let Some(cmd) =
                 openlogi_core::compositor::apply_pointer_speed(compositor, factor)
             {
-                let _ = std::process::Command::new(&cmd[0]).args(&cmd[1..]).spawn();
+                // Only apply pointer speed when originally configured.
+                if factor_opt.is_some()
+                    && let Ok(mut c) = std::process::Command::new(&cmd[0]).args(&cmd[1..]).spawn()
+                {
+                    std::thread::spawn(move || {
+                        let _ = c.wait();
+                    });
+                }
             }
         }
         self.keep_os_layout(dev);
@@ -1847,10 +1873,10 @@ impl Orchestrator {
     /// Put `dev`'s keyboard on the host OS's key layout when the config keeps
     /// it there. Writes only when the current slot holds another platform.
     fn keep_os_layout(&self, dev: &AgentDevice) {
-        if !dev.online || !keeps_os_layout(&self.config, dev) {
+        if !dev.online {
             return;
         }
-        let Some(host) = HostOs::current() else {
+        let Some(host) = os_layout_target(&self.config, dev) else {
             return;
         };
         self.kept_os_layouts.keep(&dev.config_key, host);
@@ -2282,37 +2308,52 @@ impl Orchestrator {
                 continue;
             }
             let use_curve = self.config.os_pointer_accel(key).unwrap_or(is_hyprland);
-            let Some(factor) = self.config.os_pointer_speed(key) else {
-                // Toggle changed but no speed set: if turning off on Hyprland,
-                // restore adaptive profile.
-                if !use_curve && is_hyprland {
-                    let _ = std::process::Command::new("sh")
-                        .arg("-c")
-                        .arg("hyprctl eval \"hl.config({input={accel_profile='adaptive'}})\"")
-                        .spawn();
-                }
-                continue;
-            };
+            let speed_opt = self.config.os_pointer_speed(key);
+            let factor = speed_opt.unwrap_or(0.0);
             if use_curve && is_hyprland {
-                let gain = 4.8 * (1.0 + factor as f64);
+                let gain = (4.8 * (1.0 + factor as f64)).max(0.3);
                 let (_step, points) =
                     openlogi_core::macos_accel::generate(1000.0, 120.0, 0.5, 64, gain);
                 let lut = openlogi_core::macos_accel::format_lut(0.5, &points);
                 let cmd = format!(
-                    "hyprctl eval \"hl.config({{input={{accel_profile='{}'}}}})\"",
-                    lut
+                    "hyprctl eval \"hl.config({{input={{accel_profile='{}'}}}})\"; \
+                     hyprctl keyword input:accel_profile '{}'",
+                    lut, lut
                 );
-                let _ = std::process::Command::new("sh").arg("-c").arg(cmd).spawn();
+                if let Ok(mut c) = std::process::Command::new("sh").arg("-c").arg(cmd).spawn() {
+                    std::thread::spawn(move || {
+                        let _ = c.wait();
+                    });
+                }
             } else if is_hyprland && !use_curve {
                 // Toggle off: restore adaptive profile.
-                let _ = std::process::Command::new("sh")
-                    .arg("-c")
-                    .arg("hyprctl eval \"hl.config({input={accel_profile='adaptive'}})\"")
-                    .spawn();
-            } else if let Some(cmd) =
-                openlogi_core::compositor::apply_pointer_speed(compositor, factor)
+                let cmd = "hyprctl eval \"hl.config({input={accel_profile='adaptive'}})\"; \
+                           hyprctl keyword input:accel_profile 'adaptive'"
+                    .to_string();
+                if let Ok(mut c) = std::process::Command::new("sh").arg("-c").arg(cmd).spawn() {
+                    std::thread::spawn(move || {
+                        let _ = c.wait();
+                    });
+                }
+                // Also apply sensitivity if a factor is set.
+                if let Some(f) = speed_opt
+                    && let Some(cmd) = openlogi_core::compositor::apply_pointer_speed(compositor, f)
+                {
+                    if let Ok(mut c) = std::process::Command::new(&cmd[0]).args(&cmd[1..]).spawn() {
+                        std::thread::spawn(move || {
+                            let _ = c.wait();
+                        });
+                    }
+                }
+            } else if speed_opt.is_some()
+                && let Some(cmd) =
+                    openlogi_core::compositor::apply_pointer_speed(compositor, factor)
             {
-                let _ = std::process::Command::new(&cmd[0]).args(&cmd[1..]).spawn();
+                if let Ok(mut c) = std::process::Command::new(&cmd[0]).args(&cmd[1..]).spawn() {
+                    std::thread::spawn(move || {
+                        let _ = c.wait();
+                    });
+                }
             }
         }
     }
