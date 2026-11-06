@@ -5,11 +5,13 @@ use hidpp::feature::FeatureType;
 use hidpp::feature::extended_dpi::{DpiRange, Lod, SensorCapabilities};
 use hidpp::feature::per_key_lighting::FramePersistence;
 use hidpp::feature::smartshift::WheelMode;
+use hidpp::protocol::v20::ErrorType;
 
 use crate::SharedChannel;
 use crate::channel::scripted::{ScriptedRawHidChannel, feature_error, scripted_channel};
 use crate::write::diagnostics::{
-    dump_features_on_channel, dump_firmware_entities_on_channel, read_battery_raw_on_channel,
+    RawFeatureReply, dump_features_on_channel, dump_firmware_entities_on_channel,
+    raw_feature_calls_on_channel, read_battery_raw_on_channel,
 };
 use crate::write::dpi::expand_dpi_ranges;
 use crate::write::lighting::{collect_present_zones, per_key_commit, per_key_frames};
@@ -2027,5 +2029,87 @@ async fn a_refused_index_after_the_root_still_fails_the_dump() {
             }
         ),
         "unexpected error: {error:?}"
+    );
+}
+
+const RAW_FEATURE_INDEX: u8 = 0x10;
+
+/// A keyboard with feature `0x1b05` at index 0x10: function 0 answers
+/// `01 02 03`, function 1 refuses with `InvalidArgument`. With `offered`
+/// false the device has no such feature.
+fn raw_feature_device(request: &[u8], offered: bool) -> Option<Vec<u8>> {
+    if request.len() < 7 || !matches!(request[0], 0x10 | 0x11) {
+        return None;
+    }
+    let mut payload = [0u8; 16];
+    match (request[2], request[3] >> 4) {
+        // Root ping used by Device::new.
+        (0x00, 0x01) => payload[0] = 4,
+        // Root feature lookup.
+        (0x00, 0x00) => {
+            let feature_id = u16::from_be_bytes([request[4], request[5]]);
+            payload[0] = u8::from(offered && feature_id == 0x1b05) * RAW_FEATURE_INDEX;
+        }
+        (RAW_FEATURE_INDEX, 0x00) => payload[..3].copy_from_slice(&[1, 2, 3]),
+        (RAW_FEATURE_INDEX, 0x01) => return Some(feature_error(request, 0x02)),
+        _ => return None,
+    }
+    let mut response = vec![0u8; 20];
+    response[0] = 0x11;
+    response[1..4].copy_from_slice(&request[1..4]);
+    response[4..].copy_from_slice(&payload);
+    Some(response)
+}
+
+#[tokio::test]
+async fn raw_feature_calls_answer_each_call_in_order() {
+    let (raw, handle) =
+        ScriptedRawHidChannel::with_responder(|request| raw_feature_device(request, true));
+    let channel = scripted_channel(raw).await;
+
+    let mut params = [0u8; 16];
+    params[..2].copy_from_slice(&[0xab, 0xcd]);
+    let (index, replies) =
+        raw_feature_calls_on_channel(&channel, 1, 0x1b05, &[(0, [0; 16]), (1, params)])
+            .await
+            .expect("the calls go out")
+            .expect("the device offers the feature");
+
+    assert_eq!(index, RAW_FEATURE_INDEX);
+    let mut first = [0u8; 16];
+    first[..3].copy_from_slice(&[1, 2, 3]);
+    assert_eq!(
+        replies,
+        [
+            RawFeatureReply::Payload(first),
+            RawFeatureReply::Error(ErrorType::InvalidArgument),
+        ]
+    );
+    let sent = handle.written_reports();
+    let call = sent
+        .iter()
+        .find(|report| report[2] == RAW_FEATURE_INDEX && report[3] >> 4 == 1)
+        .expect("function 1 was sent");
+    assert_eq!(call[0], 0x11, "a long report");
+    assert_eq!(call[4..6], [0xab, 0xcd]);
+}
+
+#[tokio::test]
+async fn raw_feature_calls_find_no_feature_the_device_lacks() {
+    let (raw, handle) =
+        ScriptedRawHidChannel::with_responder(|request| raw_feature_device(request, false));
+    let channel = scripted_channel(raw).await;
+
+    let answer = raw_feature_calls_on_channel(&channel, 1, 0x1b05, &[(0, [0; 16])])
+        .await
+        .expect("the lookup answers");
+
+    assert_eq!(answer, None);
+    assert!(
+        !handle
+            .written_reports()
+            .iter()
+            .any(|report| report[2] == RAW_FEATURE_INDEX),
+        "nothing is called"
     );
 }

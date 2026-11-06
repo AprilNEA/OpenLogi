@@ -13,7 +13,8 @@ use hidpp::{
     },
     feature::feature_set::FeatureSetFeature,
     feature::unified_battery::{BatteryInfo as UnifiedBatteryInfo, UnifiedBatteryFeature},
-    protocol::v20::{ErrorType, Hidpp20Error},
+    nibble::U4,
+    protocol::v20::{self, ErrorType, Hidpp20Error},
 };
 
 use crate::backend::HidBackend;
@@ -127,6 +128,74 @@ pub(crate) async fn dump_features_on_channel(
         });
     }
     Ok(entries)
+}
+
+/// What one raw call to a HID++ 2.0 feature got back. For
+/// [`raw_feature_calls`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RawFeatureReply {
+    /// The response payload; a short response is zero-padded to 16 bytes.
+    Payload([u8; 16]),
+    /// The error the feature answered with.
+    Error(ErrorType),
+}
+
+/// Call feature `feature_id` of the device on `route` once for each
+/// `(function, parameters)` of `calls`, in order, over one channel, and
+/// return the feature's index with every answer. `None` when the device has
+/// no such feature. Each call goes out as a long report.
+///
+/// For `openlogi diag hidpp`, to learn an undocumented feature's functions
+/// from their answers. Nothing checks what a function does: a call can write
+/// as easily as read, so the caller picks the functions.
+pub async fn raw_feature_calls(
+    backend: &dyn HidBackend,
+    route: &DeviceRoute,
+    feature_id: u16,
+    calls: Vec<(u8, [u8; 16])>,
+) -> Result<Option<(u8, Vec<RawFeatureReply>)>, WriteError> {
+    let index = route.device_index();
+    with_route(backend, route, move |channel| async move {
+        raw_feature_calls_on_channel(&channel, index, feature_id, &calls).await
+    })
+    .await
+}
+
+/// [`raw_feature_calls`] against an already-open channel, the shape the
+/// tests drive a scripted device through.
+pub(crate) async fn raw_feature_calls_on_channel(
+    channel: &Arc<HidppChannel>,
+    index: u8,
+    feature_id: u16,
+    calls: &[(u8, [u8; 16])],
+) -> Result<Option<(u8, Vec<RawFeatureReply>)>, WriteError> {
+    let device = Device::new(Arc::clone(channel), index)
+        .await
+        .map_err(|_| WriteError::DeviceUnreachable { index })?;
+    let Some(info) = device
+        .root()
+        .get_feature(feature_id)
+        .await
+        .map_err(|e| classify_hidpp_error(e, HidppOperation::ResolveFeature, feature_id))?
+    else {
+        return Ok(None);
+    };
+    let mut replies = Vec::with_capacity(calls.len());
+    for &(function, params) in calls {
+        let header = v20::MessageHeader {
+            device_index: index,
+            feature_index: info.index,
+            function_id: U4::from_lo(function),
+            software_id: channel.get_sw_id(),
+        };
+        let reply = match channel.send_v20(v20::Message::Long(header, params)).await {
+            Ok(response) => RawFeatureReply::Payload(response.extend_payload()),
+            Err(Hidpp20Error::Feature(error)) => RawFeatureReply::Error(error),
+            Err(error) => return Err(WriteError::Hidpp(format!("{error:?}"))),
+        };
+        replies.push(reply);
+    }
+    Ok(Some((info.index, replies)))
 }
 
 /// Enumerate the device's HID++ `0x1b04` reprogrammable controls. This is a
