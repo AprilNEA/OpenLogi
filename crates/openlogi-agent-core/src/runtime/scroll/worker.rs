@@ -1489,12 +1489,19 @@ mod tests {
     #[test]
     fn generation_invalidation_cancels_started_output_out_of_band() {
         let (frames, received) = mpsc::channel();
+        let (resume, paused) = mpsc::sync_channel(0);
         let mut runtime = ScrollRuntime::spawn_with(
             preferences(true, 14),
             move |frame| {
+                let began = frame.phase == openlogi_inject::SmoothScrollPhase::Began;
                 frames
                     .send(frame)
                     .expect("test frame receiver remains open");
+                if began {
+                    paused
+                        .recv_timeout(Duration::from_secs(5))
+                        .expect("test publishes invalidation before resuming the worker");
+                }
             },
             |_| {},
         )
@@ -1510,6 +1517,8 @@ mod tests {
         );
 
         input.cancel_hooks();
+        // Keep the gesture active until the invalidation has been published.
+        resume.send(()).expect("resume scroll worker");
         loop {
             let phase = received
                 .recv_timeout(Duration::from_secs(1))
