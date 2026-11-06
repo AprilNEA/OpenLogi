@@ -68,24 +68,35 @@ async fn call_and_print(
     feature: u16,
     calls: &[RawFeatureCall],
 ) -> Result<()> {
-    let Some((index, replies)) = openlogi_hid::raw_feature_calls(route, feature, calls)
+    let Some(answers) = openlogi_hid::raw_feature_calls(route, feature, calls)
         .await
         .with_context(|| format!("call feature {feature:#06x}"))?
     else {
         bail!("the device has no feature {feature:#06x}; run `diag features` for its list");
     };
-    for (call, reply) in calls.iter().zip(replies) {
+    for (reply, call) in answers.replies.iter().zip(calls) {
         let answer = match reply {
-            RawFeatureReply::Payload(payload) => hex(&payload),
+            RawFeatureReply::Payload(payload) => hex(payload),
             RawFeatureReply::Error(error) => format!("error {error:?}"),
         };
-        println!(
-            "{feature:#06x}@{index} fn {:>2} {} -> {answer}",
-            call.function(),
-            hex(trimmed(call.params()))
-        );
+        print_answer(feature, answers.index, call, &answer);
     }
-    Ok(())
+    // The batch stopped at the call after the last answer.
+    let Some(failure) = answers.failure else {
+        return Ok(());
+    };
+    if let Some(call) = calls.get(answers.replies.len()) {
+        print_answer(feature, answers.index, call, "no answer");
+    }
+    Err(failure).with_context(|| format!("call feature {feature:#06x}"))
+}
+
+fn print_answer(feature: u16, index: u8, call: &RawFeatureCall, answer: &str) {
+    println!(
+        "{feature:#06x}@{index} fn {:>2} {} -> {answer}",
+        call.function(),
+        hex(trimmed(call.params()))
+    );
 }
 
 /// `params` without its trailing zero bytes, at least one byte, for a

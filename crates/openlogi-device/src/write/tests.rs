@@ -2079,13 +2079,25 @@ fn raw_feature_device(request: &[u8], offered: bool) -> Option<Vec<u8>> {
     Some(response)
 }
 
+/// What function 0 of [`raw_feature_device`]'s feature answers.
+fn raw_function_0_payload() -> [u8; RAW_FEATURE_PARAMS] {
+    let mut payload = [0u8; RAW_FEATURE_PARAMS];
+    payload[..3].copy_from_slice(&[1, 2, 3]);
+    payload
+}
+
+/// A call to function `function` of [`raw_feature_device`]'s feature.
+fn is_raw_function(report: &[u8], function: u8) -> bool {
+    report[2] == RAW_FEATURE_INDEX && report[3] >> 4 == function
+}
+
 #[tokio::test]
 async fn raw_feature_calls_answer_each_call_in_order() {
     let (raw, handle) =
         ScriptedRawHidChannel::with_responder(|request| raw_feature_device(request, true));
     let channel = scripted_channel(raw).await;
 
-    let (index, replies) = raw_feature_calls_on_channel(
+    let answers = raw_feature_calls_on_channel(
         &channel,
         1,
         0x1b05,
@@ -2095,16 +2107,15 @@ async fn raw_feature_calls_answer_each_call_in_order() {
     .expect("the calls go out")
     .expect("the device offers the feature");
 
-    assert_eq!(index, RAW_FEATURE_INDEX);
-    let mut first = [0u8; RAW_FEATURE_PARAMS];
-    first[..3].copy_from_slice(&[1, 2, 3]);
+    assert_eq!(answers.index, RAW_FEATURE_INDEX);
     assert_eq!(
-        replies,
+        answers.replies,
         [
-            RawFeatureReply::Payload(first),
+            RawFeatureReply::Payload(raw_function_0_payload()),
             RawFeatureReply::Error(ErrorType::InvalidArgument),
         ]
     );
+    assert_eq!(answers.failure, None);
     let sent = handle.written_reports();
     let call = sent
         .iter()
@@ -2135,6 +2146,43 @@ async fn raw_feature_calls_find_no_feature_the_device_lacks() {
 }
 
 #[tokio::test]
+async fn raw_feature_calls_keep_the_answers_before_a_lost_call() {
+    // Function 2 never reaches the device.
+    let (raw, handle) = ScriptedRawHidChannel::with_failing_writes(
+        |request| raw_feature_device(request, true),
+        |request| is_raw_function(request, 2),
+    );
+    let channel = scripted_channel(raw).await;
+
+    let answers = raw_feature_calls_on_channel(
+        &channel,
+        1,
+        0x1b05,
+        &[raw_call(0, &[]), raw_call(2, &[]), raw_call(1, &[])],
+    )
+    .await
+    .expect("the lookup answers")
+    .expect("the device offers the feature");
+
+    assert_eq!(
+        answers.replies,
+        [RawFeatureReply::Payload(raw_function_0_payload())]
+    );
+    assert!(
+        matches!(answers.failure, Some(WriteError::Hidpp(_))),
+        "the lost call is reported: {:?}",
+        answers.failure
+    );
+    assert!(
+        !handle
+            .written_reports()
+            .iter()
+            .any(|report| is_raw_function(report, 1)),
+        "nothing after the lost call is sent"
+    );
+}
+
+#[tokio::test]
 async fn raw_feature_calls_reach_the_root_at_index_zero() {
     let (raw, handle) =
         ScriptedRawHidChannel::with_responder(|request| raw_feature_device(request, true));
@@ -2142,16 +2190,16 @@ async fn raw_feature_calls_reach_the_root_at_index_zero() {
 
     // A ping, with a byte past what a short report carries to tell it apart
     // from the one `Device::new` sends.
-    let (index, replies) =
+    let answers =
         raw_feature_calls_on_channel(&channel, 1, 0x0000, &[raw_call(1, &[0, 0, 0x5a, 0xc3])])
             .await
             .expect("the call goes out")
             .expect("every device has the root");
 
-    assert_eq!(index, 0);
+    assert_eq!(answers.index, 0);
     let mut ping = [0u8; RAW_FEATURE_PARAMS];
     ping[0] = 4;
-    assert_eq!(replies, [RawFeatureReply::Payload(ping)]);
+    assert_eq!(answers.replies, [RawFeatureReply::Payload(ping)]);
     let sent = handle.written_reports();
     assert!(
         sent.iter()

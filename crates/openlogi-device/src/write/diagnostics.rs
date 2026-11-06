@@ -182,10 +182,26 @@ pub enum RawFeatureReply {
     Error(ErrorType),
 }
 
+/// What [`raw_feature_calls`] got back from one feature.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawFeatureAnswers {
+    /// The feature's index in the device's feature table.
+    pub index: u8,
+    /// One reply per call, in call order, up to the first call that got
+    /// none.
+    pub replies: Vec<RawFeatureReply>,
+    /// Why the call after the last reply got no answer; the calls after it
+    /// were not sent. `None` when every call was answered.
+    pub failure: Option<WriteError>,
+}
+
 /// Call feature `feature_id` of the device on `route` once for each of
-/// `calls`, in order, over one channel, and return the feature's index with
-/// every answer. `None` when the device has no such feature. Each call goes
-/// out as a long report.
+/// `calls`, in order, over one channel, and return what they got back.
+/// `None` when the device has no such feature. Each call goes out as a long
+/// report.
+///
+/// A call that gets no answer stops the rest, and the answers before it are
+/// kept: earlier calls may already have changed the device.
 ///
 /// For `openlogi diag hidpp`, to learn an undocumented feature's functions
 /// from their answers. Nothing checks what a function does: a call can write
@@ -195,7 +211,7 @@ pub async fn raw_feature_calls(
     route: &DeviceRoute,
     feature_id: u16,
     calls: &[RawFeatureCall],
-) -> Result<Option<(u8, Vec<RawFeatureReply>)>, WriteError> {
+) -> Result<Option<RawFeatureAnswers>, WriteError> {
     let index = route.device_index();
     with_route(backend, route, move |channel| async move {
         raw_feature_calls_on_channel(&channel, index, feature_id, calls).await
@@ -210,7 +226,7 @@ pub(crate) async fn raw_feature_calls_on_channel(
     index: u8,
     feature_id: u16,
     calls: &[RawFeatureCall],
-) -> Result<Option<(u8, Vec<RawFeatureReply>)>, WriteError> {
+) -> Result<Option<RawFeatureAnswers>, WriteError> {
     let device = Device::new(Arc::clone(channel), index)
         .await
         .map_err(|_| WriteError::DeviceUnreachable { index })?;
@@ -229,7 +245,11 @@ pub(crate) async fn raw_feature_calls_on_channel(
         };
         info.index
     };
-    let mut replies = Vec::with_capacity(calls.len());
+    let mut answers = RawFeatureAnswers {
+        index: feature_index,
+        replies: Vec::with_capacity(calls.len()),
+        failure: None,
+    };
     for call in calls {
         let header = v20::MessageHeader {
             device_index: index,
@@ -243,11 +263,14 @@ pub(crate) async fn raw_feature_calls_on_channel(
         {
             Ok(response) => RawFeatureReply::Payload(response.extend_payload()),
             Err(Hidpp20Error::Feature(error)) => RawFeatureReply::Error(error),
-            Err(error) => return Err(WriteError::Hidpp(format!("{error:?}"))),
+            Err(error) => {
+                answers.failure = Some(WriteError::Hidpp(format!("{error:?}")));
+                break;
+            }
         };
-        replies.push(reply);
+        answers.replies.push(reply);
     }
-    Ok(Some((feature_index, replies)))
+    Ok(Some(answers))
 }
 
 /// Enumerate the device's HID++ `0x1b04` reprogrammable controls. This is a

@@ -287,7 +287,7 @@ pub async fn raw_feature_calls(
     route: &DeviceRoute,
     feature_id: u16,
     calls: &[device::RawFeatureCall],
-) -> Result<Option<(u8, Vec<device::RawFeatureReply>)>, WriteError> {
+) -> Result<Option<device::RawFeatureAnswers>, WriteError> {
     device::raw_feature_calls(&*native_backend(), route, feature_id, calls).await
 }
 
