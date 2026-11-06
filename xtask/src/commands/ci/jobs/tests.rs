@@ -39,6 +39,27 @@ fn workflow_commands(workflow: &str) -> String {
         .join(" ")
 }
 
+/// The lines of the `ci.yml` job keyed `key`, from its key to the next job's,
+/// so a test can check what that one job runs rather than the whole workflow.
+fn workflow_job<'a>(workflow: &'a str, key: &str) -> Vec<&'a str> {
+    let header = format!("  {key}:");
+    let mut lines = workflow
+        .lines()
+        .skip_while(|line| line.trim_end() != header)
+        .peekable();
+    let Some(first) = lines.next() else {
+        panic!("ci.yml has no `{key}` job");
+    };
+    // A job ends where the next key at the same two-space indent starts.
+    let is_job_key = |line: &&str| {
+        line.strip_prefix("  ")
+            .is_some_and(|rest| !rest.starts_with(' ') && !rest.trim().is_empty())
+    };
+    std::iter::once(first)
+        .chain(lines.take_while(|line| !is_job_key(line)))
+        .collect()
+}
+
 #[test]
 fn wrapped_commands_join_under_either_line_ending() {
     let joined = "cargo doc --workspace --exclude openlogi-ui";
@@ -93,6 +114,40 @@ fn ci_yml_runs_what_this_runner_runs() {
                 "ci.yml does not run `{argv}` for {job:?}"
             );
         }
+    }
+}
+
+/// The native Windows job is planned apart from the loop above, because its
+/// first host is not Windows and elsewhere it plans the cross-lint proxy. It
+/// must still run what CI's `clippy (windows)` runs — the docs step included,
+/// or a Windows-only broken doc link passes locally and fails there.
+#[test]
+fn native_clippy_windows_runs_what_ci_runs() {
+    let Some(workflow) = workflow() else {
+        return;
+    };
+    // Only this job's commands: the `docs` job runs the same `cargo doc`, so
+    // searching the whole workflow would pass with the Windows step removed.
+    let commands = workflow_commands(&workflow_job(&workflow, "clippy-windows").join(
+        "
+",
+    ));
+    let sh = Shell::new().expect("a shell");
+
+    let plan = Job::ClippyWindows.plan(&sh, Host::Windows).expect("a plan");
+    let Action::Run(steps) = plan.action else {
+        panic!("clippy (windows) planned no steps on Windows");
+    };
+    let argvs: Vec<String> = steps.iter().map(super::super::Step::argv_line).collect();
+    assert!(
+        argvs.iter().any(|argv| argv.starts_with("cargo doc ")),
+        "the native plan must build the docs: {argvs:?}"
+    );
+    for argv in argvs {
+        assert!(
+            commands.contains(&argv),
+            "ci.yml does not run `{argv}` for ClippyWindows"
+        );
     }
 }
 
