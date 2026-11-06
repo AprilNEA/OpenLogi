@@ -801,11 +801,16 @@ impl Orchestrator {
         self.shared.clone()
     }
 
-    fn current_key(&self) -> Option<&str> {
+    /// The selected inventory entry. A device seen on two links has an entry
+    /// per link under one key; this is the one [`pick_current`] chose.
+    fn current_device(&self) -> Option<&AgentDevice> {
         self.devices
             .get(self.current)
             .filter(|device| is_hidpp_device(device))
-            .map(|d| d.config_key.as_str())
+    }
+
+    fn current_key(&self) -> Option<&str> {
+        self.current_device().map(|d| d.config_key.as_str())
     }
 
     /// The app whose mouse profile applies, and the pointer target dispatch
@@ -848,11 +853,13 @@ impl Orchestrator {
         })
     }
 
-    /// Build the OS-hook callback's maps for `key` and its mouse context. Both hook
-    /// sub-maps are app-scoped (a per-app override can demote the gesture owner),
-    /// so they're built together here and published under one lock — keeping
-    /// `rebuild` and `set_current_app` from drifting into a half-populated write.
-    fn hook_maps_for(&self, key: Option<&str>) -> HookMaps {
+    /// Build the OS-hook callback's maps for the `selected` device and its mouse
+    /// context. Both hook sub-maps are app-scoped (a per-app override can demote
+    /// the gesture owner), so they're built together here and published under
+    /// one lock — keeping `rebuild` and `set_current_app` from drifting into a
+    /// half-populated write.
+    fn hook_maps_for(&self, selected: Option<&AgentDevice>) -> HookMaps {
+        let key = selected.map(|device| device.config_key.as_str());
         // A disabled selected device gets empty maps: the OS hook then passes
         // its events through untouched instead of applying remaps to a device
         // the user asked OpenLogi to leave alone.
@@ -889,6 +896,9 @@ impl Orchestrator {
             gestures,
             pointer,
             selected_device: key.map(str::to_owned),
+            // The selected entry's own link: another entry under the same key
+            // names a link its capture session is not on.
+            selected_route: selected.and_then(|device| device.route.clone()),
             shift_bindings,
             ..HookMaps::default()
         }
@@ -1081,7 +1091,7 @@ impl Orchestrator {
     /// Rewrite every shared map from the current config + selected device.
     fn rebuild(&self) {
         let key = self.current_key();
-        self.publish_hook_maps(self.hook_maps_for(key));
+        self.publish_hook_maps(self.hook_maps_for(self.current_device()));
         self.publish_scroll_inversion(key);
         self.publish_device_runtime();
     }
@@ -2073,7 +2083,7 @@ impl Orchestrator {
             return false;
         }
         let previous = std::mem::replace(&mut self.current_app, id);
-        self.publish_hook_maps(self.hook_maps_for(self.current_key()));
+        self.publish_hook_maps(self.hook_maps_for(self.current_device()));
         // Capture plans are app-scoped (per-app binding overlays); republish
         // them with the keyboard's effective bindings.
         self.publish_device_runtime();
@@ -2103,7 +2113,7 @@ impl Orchestrator {
         if self.config.app_settings.mouse_profile_target == MouseProfileTarget::Focused {
             return false;
         }
-        self.publish_hook_maps(self.hook_maps_for(self.current_key()));
+        self.publish_hook_maps(self.hook_maps_for(self.current_device()));
         self.publish_capture_plans();
         previous != self.mouse_context().1
     }

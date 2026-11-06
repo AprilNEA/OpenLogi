@@ -17,7 +17,9 @@ use gpui::rgb;
 use gpui::{
     App, BoxShadow, FontWeight, Hsla, Pixels, Rems, Rgba, Styled, Window, hsla, px, relative, rems,
 };
-use gpui_kit::component::{ActiveTheme as _, Theme, ThemeMode, ThemeRegistry};
+use gpui_kit::component::{
+    ActiveTheme as _, Theme, ThemeMode, ThemeRegistry, scroll::ScrollbarMode,
+};
 use openlogi_core::config::{Appearance, UiScale};
 
 use crate::state::AppState;
@@ -370,6 +372,25 @@ pub fn register_builtin_themes(cx: &mut App) {
     }
 }
 
+/// Show scrollbars the way the platform setting asks. Call once at startup,
+/// after `gpui_kit::init`.
+///
+/// gpui-kit maps a platform that keeps scrollbars visible to `Hover`, which
+/// still hides the bar until the pointer reaches its track. macOS "Show scroll
+/// bars: Always", Windows "Always show scrollbars" and a Linux desktop without
+/// overlay scrolling all ask for a bar that stays drawn.
+pub fn sync_scrollbar_mode(cx: &mut App) {
+    Theme::set_scrollbar_mode(scrollbar_mode(cx.should_auto_hide_scrollbars()), cx);
+}
+
+fn scrollbar_mode(platform_auto_hides: bool) -> ScrollbarMode {
+    if platform_auto_hides {
+        ScrollbarMode::Scrolling
+    } else {
+        ScrollbarMode::Always
+    }
+}
+
 pub(crate) fn rem_size(scale: UiScale) -> Pixels {
     px(BASE_REM_SIZE * f32::from(scale.percent()) / 100.)
 }
@@ -632,6 +653,32 @@ mod tests {
             ] {
                 assert!(themes.contains_key(name), "missing bundled theme: {name}");
             }
+        });
+    }
+
+    /// A platform that keeps scrollbars visible gets a bar that stays drawn,
+    /// not one that waits for the pointer; one that hides them shows the bar
+    /// while scrolling.
+    #[test]
+    fn scrollbar_mode_follows_the_platform_setting() {
+        assert_eq!(scrollbar_mode(false), ScrollbarMode::Always);
+        assert_eq!(scrollbar_mode(true), ScrollbarMode::Scrolling);
+    }
+
+    /// The test platform keeps scrollbars visible. The synced mode reaches the
+    /// base layer that draws the bar and holds across a theme change.
+    #[gpui::test]
+    fn the_synced_scrollbar_mode_holds_across_a_theme_change(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            register_builtin_themes(cx);
+            sync_scrollbar_mode(cx);
+            Theme::change(ThemeMode::Dark, None, cx);
+            assert_eq!(cx.theme().scrollbar_mode, ScrollbarMode::Always);
+            assert_eq!(
+                gpui_kit::base::Theme::global(cx).scrollbar.mode(),
+                ScrollbarMode::Always
+            );
         });
     }
 

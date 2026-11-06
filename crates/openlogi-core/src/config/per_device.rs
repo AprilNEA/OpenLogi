@@ -319,6 +319,39 @@ impl Config {
             .disabled_keys = Some(disabled_keys);
     }
 
+    /// The physical device keys that should follow `keyboard_key` when its
+    /// Easy-Switch channel changes.
+    #[must_use]
+    pub fn host_switch_targets(&self, keyboard_key: &str) -> &[String] {
+        self.devices
+            .get(keyboard_key)
+            .map_or(&[], |device| device.host_switch_targets.as_slice())
+    }
+
+    /// Add one physical device to `keyboard_key`'s linked Easy-Switch group.
+    /// Linking a device again is a no-op and keeps the target order already
+    /// stored in the configuration.
+    pub fn link_host_switch_target(&mut self, keyboard_key: &str, target_key: &str) {
+        let targets = &mut self
+            .devices
+            .entry(keyboard_key.to_string())
+            .or_default()
+            .host_switch_targets;
+        if !targets.iter().any(|target| target == target_key) {
+            targets.push(target_key.to_string());
+        }
+    }
+
+    /// Remove one physical device from `keyboard_key`'s linked Easy-Switch
+    /// group. Unlinking a device that is not linked is a no-op.
+    pub fn unlink_host_switch_target(&mut self, keyboard_key: &str, target_key: &str) {
+        if let Some(device) = self.devices.get_mut(keyboard_key) {
+            device
+                .host_switch_targets
+                .retain(|target| target != target_key);
+        }
+    }
+
     /// Return `device_key` to unmanaged Disable Keys state.
     pub fn clear_disabled_keys(&mut self, device_key: &str) {
         if let Some(device) = self.devices.get_mut(device_key) {
@@ -727,5 +760,27 @@ impl Config {
             .entry(device_key.to_string())
             .or_default()
             .smooth_wheel = enabled;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Config;
+
+    #[test]
+    fn host_switch_target_edits_are_idempotent_and_ordered() {
+        let mut config = Config::ephemeral();
+
+        config.link_host_switch_target("keyboard", "mouse-b");
+        config.link_host_switch_target("keyboard", "mouse-a");
+        config.link_host_switch_target("keyboard", "mouse-b");
+        assert_eq!(
+            config.host_switch_targets("keyboard"),
+            ["mouse-b", "mouse-a"]
+        );
+
+        config.unlink_host_switch_target("keyboard", "mouse-b");
+        config.unlink_host_switch_target("keyboard", "missing");
+        assert_eq!(config.host_switch_targets("keyboard"), ["mouse-a"]);
     }
 }

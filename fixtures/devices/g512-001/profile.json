@@ -1,0 +1,131 @@
+{
+  "schema_version": 1,
+  "id": "g512-001-profile",
+  "name": "G512",
+  "inventories": [
+    {
+      "receiver": {
+        "name": "G512 RGB MECHANICAL GAMING KEYBOARD",
+        "vendor_id": 1133,
+        "product_id": 49980,
+        "unique_id": null
+      },
+      "paired": [
+        {
+          "slot": 255,
+          "codename": "G512 RGB MECHANICAL GAMING KEYBOARD",
+          "wpid": null,
+          "kind": "keyboard",
+          "online": true,
+          "battery": null,
+          "model_info": {
+            "entity_count": 2,
+            "serial_number": null,
+            "unit_id": [
+              79,
+              76,
+              68,
+              1
+            ],
+            "transports": {
+              "usb": true,
+              "equad": false,
+              "btle": false,
+              "bluetooth": false
+            },
+            "model_ids": [
+              49980,
+              0,
+              0
+            ],
+            "extended_model_id": 6
+          },
+          "capabilities": {
+            "buttons": true,
+            "pointer": false,
+            "lighting": true,
+            "scroll_inversion": false,
+            "hires_wheel": false,
+            "thumbwheel": false,
+            "haptic_feedback": false,
+            "haptic_panel": false,
+            "dpi_gestures": false,
+            "fn_lock": true,
+            "os_layout": false,
+            "report_rate": true,
+            "backlight": false,
+            "easy_switch": false,
+            "virtual_thumbwheel": false,
+            "pointer_scaling": false,
+            "force_sensing": false,
+            "disable_keys": false,
+            "onboard_profiles": false,
+            "button_spy": false,
+            "sidetone": false
+          },
+          "settings_revision": 0,
+          "hidpp10": false
+        }
+      ]
+    }
+  ],
+  "standalone": [],
+  "settings": [
+    {
+      "route": {
+        "Direct": {
+          "vendor_id": 1133,
+          "product_id": 49980
+        }
+      },
+      "dpi": {
+        "support": "unsupported"
+      },
+      "smartshift": {
+        "support": "unsupported"
+      },
+      "wheel": {
+        "support": "unsupported"
+      },
+      "backlight": {
+        "support": "unsupported"
+      },
+      "fn_lock": {
+        "support": "supported",
+        "value": {
+          "fn_lock": true,
+          "default_fn_lock": true
+        }
+      },
+      "report_rate": {
+        "support": "supported",
+        "value": {
+          "current": 1000,
+          "supported": [
+            125,
+            250,
+            500,
+            1000
+          ]
+        }
+      },
+      "easy_switch": {
+        "support": "unsupported"
+      },
+      "pointer_speed": {
+        "support": "unsupported"
+      },
+      "force_sensing": {
+        "support": "unsupported"
+      },
+      "disable_keys": {
+        "support": "unsupported"
+      },
+      "sidetone": {
+        "support": "unsupported"
+      },
+      "lighting": "supported",
+      "light": "unsupported"
+    }
+  ]
+}
