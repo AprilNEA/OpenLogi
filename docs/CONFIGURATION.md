@@ -43,9 +43,9 @@ v10 adds the per-device `disabled_keys` policy. Older readers reject a v10
 header before parsing its fields. A v9 file without the policy still loads.
 v11 adds the `[flow]` section. Older readers reject a v11 header before
 parsing its fields. A v10 file without the section loads with Flow disabled.
-v12 adds per-device keyboard lighting `keys`. Older readers reject a v12
-header before parsing its fields. A v11 file without them lights every key in
-the keyboard colour.
+v12 adds per-device keyboard lighting `keys`, `effect` and `period_ms`. Older
+readers reject a v12 header before parsing its fields. A v11 file without them
+lights every key still in the keyboard colour.
 
 ## Shape
 

@@ -67,9 +67,10 @@ use crate::binding::{Binding, ButtonId, GestureDirection};
 /// persisted shape or enum vocabulary changes; readers inspect this value
 /// before consuming the rest of the file.
 ///
-/// v12 adds per-device keyboard lighting `keys`: colours for single keys
-/// over the keyboard colour. Nothing older needs migrating, and a file
-/// without them lights every key in the keyboard colour. The bump makes a v11
+/// v12 adds per-device keyboard lighting `keys` (colours for single keys
+/// over the keyboard colour), `effect` and `period_ms` (a firmware animation
+/// and its pace). Nothing older needs migrating, and a file without them
+/// lights every key still in the keyboard colour. The bump makes a v11
 /// build refuse a file that may hold them at the version check, instead of
 /// failing on the unknown field.
 ///
