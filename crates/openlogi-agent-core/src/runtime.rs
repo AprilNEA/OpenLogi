@@ -636,6 +636,7 @@ impl HeldDpiShifts {
         let cycles = Arc::clone(&executor.dpi_cycle);
         let speeds = Arc::clone(&executor.pointer_speeds);
         let restored = executor.announce_written(&held.route);
+        let failed = executor.announce_written(&held.route);
         // Settling a restore ends the precision speed, so the LED goes dark.
         let led = restore.as_ref().map(|_| false);
         restore_dpi_in_background(
@@ -650,6 +651,7 @@ impl HeldDpiShifts {
                 }
                 restored();
             },
+            failed,
         );
     }
 }
@@ -1038,6 +1040,8 @@ fn dispatch_browser_navigation(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
 
     static BROWSER_NAV_TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -1332,11 +1336,11 @@ mod tests {
     }
 
     /// [`dpi_shift_executor`] over a mouse that answers at 800 DPI, and the
-    /// requests the executor hands the agent. `accept` says whether the
-    /// mouse takes a DPI written to it.
+    /// requests the executor hands the agent. `accept` runs on each DPI
+    /// write and says whether the mouse takes it.
     async fn answered_dpi_executor(
         current: Option<Dpi>,
-        accept: bool,
+        accept: impl Fn() -> bool + Send + Sync + 'static,
     ) -> (
         ActionExecutor,
         tokio::sync::mpsc::UnboundedReceiver<ActionRequest>,
@@ -1347,12 +1351,8 @@ mod tests {
             .target
             .clone()
             .unwrap();
-        crate::test_support::publish_dpi_mouse(
-            &executor.access.registry,
-            route.clone(),
-            move || accept,
-        )
-        .await;
+        crate::test_support::publish_dpi_mouse(&executor.access.registry, route.clone(), accept)
+            .await;
         let (requests, received) = tokio::sync::mpsc::unbounded_channel();
         executor.requests = requests;
         (executor, received, route)
@@ -1377,7 +1377,7 @@ mod tests {
     async fn a_dpi_preset_write_is_announced_once_it_settles() {
         for accept in [true, false] {
             let (executor, mut received, route) =
-                answered_dpi_executor(Some(Dpi::new(400)), accept).await;
+                answered_dpi_executor(Some(Dpi::new(400)), move || accept).await;
 
             executor.dispatch(&Action::CycleDpiPresets, Some("mouse"));
 
@@ -1393,7 +1393,7 @@ mod tests {
     /// mouse before it writes, and is announced the same way.
     #[tokio::test]
     async fn a_dpi_step_from_the_mouse_reading_is_announced() {
-        let (executor, mut received, route) = answered_dpi_executor(None, true).await;
+        let (executor, mut received, route) = answered_dpi_executor(None, || true).await;
 
         executor.dispatch(&Action::NextDpiPreset, Some("mouse"));
 
@@ -1404,25 +1404,50 @@ mod tests {
     }
 
     /// A DPI shift announces both its write and the restore its release
-    /// writes, so the GUI follows the mouse down and back.
+    /// writes, so the GUI follows the mouse down and back. A restore the
+    /// mouse rejects is announced as well, as a timed-out one is: the mouse
+    /// may have taken it.
     #[tokio::test]
     async fn a_dpi_shift_and_its_restore_are_announced() {
-        let (executor, mut received, route) = answered_dpi_executor(None, true).await;
-        let press = PressToken::hook_for_test(1, ButtonId::G6);
-        let mut held = HeldDpiShifts::default();
+        for restore_lands in [true, false] {
+            // The shift's write lands; the restore is the second write.
+            let writes = Arc::new(AtomicUsize::new(0));
+            let counted = Arc::clone(&writes);
+            let (executor, mut received, route) = answered_dpi_executor(None, move || {
+                counted.fetch_add(1, Ordering::SeqCst) == 0 || restore_lands
+            })
+            .await;
+            // The mouse lists only 800 and 1600, so the shift goes to 800.
+            executor
+                .dpi_cycle
+                .write()
+                .unwrap()
+                .by_key
+                .get_mut("mouse")
+                .unwrap()
+                .presets = vec![Dpi::new(800), Dpi::new(1600)];
+            let press = PressToken::hook_for_test(1, ButtonId::G6);
+            let mut held = HeldDpiShifts::default();
 
-        held.start(&executor, &press, Some("mouse"));
-        assert_eq!(
-            next_request(&mut received).await,
-            ActionRequest::SettingsWritten {
-                route: route.clone()
-            }
-        );
-        held.end(&executor, &press);
-        assert_eq!(
-            next_request(&mut received).await,
-            ActionRequest::SettingsWritten { route }
-        );
+            held.start(&executor, &press, Some("mouse"));
+            assert_eq!(
+                next_request(&mut received).await,
+                ActionRequest::SettingsWritten {
+                    route: route.clone()
+                }
+            );
+            held.end(&executor, &press);
+            assert_eq!(
+                next_request(&mut received).await,
+                ActionRequest::SettingsWritten { route },
+                "restore lands: {restore_lands}"
+            );
+            assert_eq!(
+                writes.load(Ordering::SeqCst),
+                2,
+                "both writes reach the mouse"
+            );
+        }
     }
 
     /// A preset step reads the mouse first only while OpenLogi never set its
