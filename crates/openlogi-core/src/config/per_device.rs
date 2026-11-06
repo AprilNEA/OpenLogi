@@ -112,14 +112,15 @@ impl Config {
     }
 
     /// The ordered DPI preset list for `device_key`: the one the user set,
-    /// or [`DEFAULT_DPI_PRESETS`] while they never set one. A list the user
+    /// or, while they never set one, the stock levels of `model_key`'s
+    /// [`GamingLayout`], else [`DEFAULT_DPI_PRESETS`]. A list the user
     /// emptied stays empty.
     #[must_use]
-    pub fn dpi_presets(&self, device_key: &str) -> Vec<Dpi> {
+    pub fn dpi_presets(&self, device_key: &str, model_key: &str) -> Vec<Dpi> {
         self.devices
             .get(device_key)
             .and_then(|d| d.dpi_presets.clone())
-            .unwrap_or_else(|| DEFAULT_DPI_PRESETS.to_vec())
+            .unwrap_or_else(|| default_dpi_presets(model_key))
     }
 
     /// Replace the DPI preset list for `device_key`. An empty `Vec` is saved
@@ -762,6 +763,19 @@ impl Config {
             .or_default()
             .smooth_wheel = enabled;
     }
+}
+
+/// The DPI presets `model_key` offers before the user sets a list: its
+/// gaming layout's stock levels, or [`DEFAULT_DPI_PRESETS`] for a model
+/// without any.
+fn default_dpi_presets(model_key: &str) -> Vec<Dpi> {
+    GamingLayout::for_model_key(model_key)
+        .map(|layout| layout.stock_dpi_presets)
+        .filter(|stock| !stock.is_empty())
+        .map_or_else(
+            || DEFAULT_DPI_PRESETS.to_vec(),
+            |stock| stock.iter().copied().map(Dpi::new).collect(),
+        )
 }
 
 #[cfg(test)]

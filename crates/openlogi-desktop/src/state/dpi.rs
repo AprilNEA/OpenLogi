@@ -77,7 +77,10 @@ impl AppState {
     #[must_use]
     pub fn dpi_presets(&self) -> Vec<Dpi> {
         self.current_record()
-            .map(|record| self.config.dpi_presets(&record.config_key))
+            .map(|record| {
+                self.config
+                    .dpi_presets(&record.config_key, &record.model_key)
+            })
             .unwrap_or_default()
     }
     /// The active device's known DPI: the live capability read once it
