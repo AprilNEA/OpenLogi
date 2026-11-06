@@ -31,9 +31,9 @@ use openlogi_core::device_order::{DeviceIdentity, DeviceStableId, PhysicalDevice
 use openlogi_hid::{
     BacklightChange, BacklightState, CaptureChannelSlot, ChannelPool, ChannelRegistry,
     DeviceIoGate, DeviceRoute, DisableKeysMask, Dpi, EasySwitchHosts, FnLockState,
-    ForceSensingInfo, GamingWanted, HidppOperation, HostOs, PointerSpeed, ReportRate,
-    ReportRateInfo, SidetoneLevel, WriteError, commands_for_light_settings,
-    is_reserved_keyboard_control, key_display_for,
+    ForceSensingInfo, GamingWanted, HidppOperation, PointerSpeed, ReportRate, ReportRateInfo,
+    SidetoneLevel, WriteError, commands_for_light_settings, is_reserved_keyboard_control,
+    key_display_for,
 };
 #[cfg(test)]
 use openlogi_ipc::ChosenLight;

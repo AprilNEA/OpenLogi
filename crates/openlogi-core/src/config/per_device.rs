@@ -10,8 +10,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
     CameraControls, CameraStreamMode, Config, DeviceIdentity, DisableKey, GKeyOwner, GamingKeyMode,
-    LightSettings, Lighting, MomentumScrolling, OnboardMemory, PinnedOs, ScrollResolution, SmartShift,
-    ThumbwheelSensitivity,
+    LightSettings, Lighting, MomentumScrolling, OnboardMemory, PinnedOs, ScrollResolution,
+    SmartShift, ThumbwheelSensitivity,
 };
 use crate::binding::{
     Action, ActionRingConfig, ActionRingIcon, ActionRingSize, ActionRingSlot, Binding, ButtonId,
@@ -404,22 +404,6 @@ impl Config {
     #[must_use]
     pub fn os_layout_pin(&self, device_key: &str) -> Option<PinnedOs> {
         self.devices.get(device_key).and_then(|d| d.os_layout_pin)
-    }
-
-    /// The OS-level pointer speed factor for `device_key`, or `None` when the
-    /// agent should leave the OS pointer speed alone.
-    #[must_use]
-    pub fn os_pointer_speed(&self, device_key: &str) -> Option<f32> {
-        self.devices.get(device_key).and_then(|d| d.os_pointer_speed)
-    }
-
-    /// Record the OS-level pointer speed factor for `device_key`, or `None`
-    /// to clear it.
-    pub fn set_os_pointer_speed(&mut self, device_key: &str, speed: Option<f32>) {
-        self.devices
-            .entry(device_key.to_string())
-            .or_default()
-            .os_pointer_speed = speed;
     }
 
     /// Record the OS `device_key`'s key layout is pinned to, or `None` to

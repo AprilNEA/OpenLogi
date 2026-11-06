@@ -20,7 +20,6 @@ pub mod binding;
 pub mod bindings;
 pub mod brand;
 pub mod color;
-pub mod compositor;
 pub mod config;
 pub mod device;
 pub mod device_order;
