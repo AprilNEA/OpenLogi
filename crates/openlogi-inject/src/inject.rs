@@ -532,7 +532,7 @@ fn with_held_modifiers<R>(post: impl FnOnce(HeldModifiers) -> R) -> R {
 ///
 /// A one-shot keystroke posted through this sees exactly which keys held
 /// chords own and never interleaves with a held transition.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 fn with_held_output<R>(post: impl FnOnce(&HeldOutput) -> R) -> R {
     let output = HELD_OUTPUT.lock().unwrap_or_else(PoisonError::into_inner);
     post(&output)

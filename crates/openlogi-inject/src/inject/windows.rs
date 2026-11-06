@@ -23,7 +23,7 @@ use openlogi_core::binding::{
 };
 use openlogi_core::scroll::ScrollDelta;
 
-use super::{HeldKey, KeyPhase, ScrollQuantizer};
+use super::{HeldKey, HeldOutput, KeyPhase, ScrollQuantizer};
 
 mod keyboard_layout;
 
@@ -346,12 +346,10 @@ fn post_click(button: MouseButton) {
 fn post_vk(vk: u16, modifiers: &[u16]) {
     let layout = ForegroundLayout::current();
     let key = Key::for_vk(vk, layout);
-    send_inputs(&chord_inputs(
-        key,
-        modifiers,
-        layout,
-        &ModifiersDown::current(),
-    ));
+    super::with_held_output(|held| {
+        let down = ModifiersDown::current(held);
+        send_inputs(&chord_inputs(key, modifiers, layout, &down));
+    });
 }
 
 /// The key events that tap `key` with `modifiers` held around it, leaving out
@@ -399,7 +397,12 @@ impl ModifiersDown {
     /// the focus is. The high-order bit of `GetKeyState` would not do: it
     /// follows the calling thread's input queue, and the thread that taps a
     /// chord owns no window.
-    fn current() -> Self {
+    ///
+    /// It takes the held-chord owners, so only a caller under the lock that
+    /// orders held-chord edges can read it. Send the chord under that same
+    /// lock: a held chord that ended between the read and the send would
+    /// leave its modifier out of the chord and up on the system.
+    fn current(_held: &HeldOutput) -> Self {
         Self(
             [VK_CONTROL, VK_SHIFT, VK_MENU, VK_LWIN]
                 .into_iter()
@@ -471,19 +474,19 @@ pub(super) fn post_scroll(delta: ScrollDelta) {
 }
 
 pub(super) fn press_combo(combo: &KeyCombo) {
-    let Some(inputs) = combo_inputs(
-        combo,
-        ForegroundLayout::current(),
-        &ModifiersDown::current(),
-    ) else {
+    let layout = ForegroundLayout::current();
+    let sent = super::with_held_output(|held| {
+        let inputs = combo_inputs(combo, layout, &ModifiersDown::current(held))?;
+        send_inputs(&inputs);
+        Some(())
+    });
+    if sent.is_none() {
         tracing::warn!(
             usage = combo.key().code(),
             chord = %combo.rendered_label(),
             "CustomShortcut key has no Windows mapping yet; press ignored"
         );
-        return;
-    };
-    send_inputs(&inputs);
+    }
 }
 
 /// The key events that tap `combo` under `layout`, leaving out the modifiers
