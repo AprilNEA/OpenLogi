@@ -67,6 +67,13 @@ use crate::binding::{Binding, ButtonId, GestureDirection};
 /// persisted shape or enum vocabulary changes; readers inspect this value
 /// before consuming the rest of the file.
 ///
+/// v12 adds per-device keyboard lighting `keys` (colours for single keys
+/// over the keyboard colour), `effect` and `period_ms` (a firmware animation
+/// and its pace). Nothing older needs migrating, and a file without them
+/// lights every key still in the keyboard colour. The bump makes a v11
+/// build refuse a file that may hold them at the version check, instead of
+/// failing on the unknown field.
+///
 /// v11 adds the `[flow]` section for cross-machine device handoff. Nothing
 /// older needs migrating, and a file without it loads as disabled Flow. The
 /// bump makes a v10 build refuse a file that may hold `[flow]` at the version
@@ -130,7 +137,7 @@ use crate::binding::{Binding, ButtonId, GestureDirection};
 /// next save; [`Config::load_from_path`] accepts supported versions `1` through
 /// [`SCHEMA_VERSION`] so an invalid or forward file fails loudly instead of
 /// silently losing bindings.
-pub const SCHEMA_VERSION: u32 = 11;
+pub const SCHEMA_VERSION: u32 = 12;
 
 /// Top-level config document.
 #[derive(Debug, Clone, Serialize, Deserialize)]
