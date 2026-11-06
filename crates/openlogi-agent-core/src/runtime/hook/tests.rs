@@ -661,19 +661,38 @@ fn a_diverted_button_is_owned_only_on_its_own_direct_device() {
 }
 
 #[test]
-fn receiver_routes_and_hidpp_only_buttons_are_not_recorded() {
+fn a_receiver_route_names_no_echo_source_and_hidpp_only_buttons_are_not_recorded() {
     let mut diverted = DivertedButtons::default();
-    let bolt = openlogi_hid::DeviceRoute::Bolt {
-        receiver_uid: "C0FFEE".into(),
-        slot: 1,
-    };
+    let bolt = bolt_route(1);
     diverted.record(&m650_session(7), &bolt, ButtonId::Back);
     diverted.record(&m650_session(7), &m650_route(), ButtonId::DpiToggle);
     assert!(
         !diverted.owns(&m650_bluetooth(), ButtonId::Back),
         "a receiver route names no OS input identity"
     );
+    assert!(
+        diverted.diverted_on(&bolt, ButtonId::Back),
+        "but its device's presses still never reach the OS"
+    );
     assert!(!diverted.owns(&m650_bluetooth(), ButtonId::DpiToggle));
+    assert!(!diverted.diverted_on(&m650_route(), ButtonId::DpiToggle));
+}
+
+#[test]
+fn a_diversion_is_reported_only_for_its_own_route_while_its_session_lives() {
+    let mut diverted = DivertedButtons::default();
+    diverted.record(&m650_session(7), &bolt_route(2), ButtonId::MiddleClick);
+    assert!(diverted.diverted_on(&bolt_route(2), ButtonId::MiddleClick));
+    assert!(
+        !diverted.diverted_on(&bolt_route(2), ButtonId::Back),
+        "only what the session diverted"
+    );
+    assert!(
+        !diverted.diverted_on(&bolt_route(1), ButtonId::MiddleClick),
+        "another slot is another device"
+    );
+    diverted.release(&m650_session(7));
+    assert!(!diverted.diverted_on(&bolt_route(2), ButtonId::MiddleClick));
 }
 
 #[test]
@@ -805,5 +824,119 @@ fn an_echoed_press_keeps_its_release_after_the_session_ends() {
         events.recv_timeout(Duration::from_millis(200)).is_err(),
         "neither edge reached the button runtime"
     );
+    assert!(owner.shutdown());
+}
+
+/// A Bolt receiver slot, the route of a mouse whose OS input names no device.
+fn bolt_route(slot: u8) -> openlogi_hid::DeviceRoute {
+    openlogi_hid::DeviceRoute::Bolt {
+        receiver_uid: "C0FFEE".into(),
+        slot,
+    }
+}
+
+/// Hook maps for an MX Master 3S on Bolt slot 2 whose Middle opens the Actions
+/// Ring, with its capture session having diverted Middle.
+fn mx_master_3s_diverting_middle() -> HookMaps {
+    let mut maps = HookMaps {
+        bindings: BTreeMap::from([(ButtonId::MiddleClick, Action::ShowActionsRing.into())]),
+        selected_device: Some("mx-master-3s".into()),
+        selected_route: Some(bolt_route(2)),
+        ..HookMaps::default()
+    };
+    maps.diverted_buttons.record(
+        &crate::runtime::HidppSessionId::with_epoch("mx-master-3s", 7),
+        &bolt_route(2),
+        ButtonId::MiddleClick,
+    );
+    maps
+}
+
+/// #2381: Windows names no source for a Middle click. Once the selected MX
+/// Master 3S has diverted its Middle, an OS Middle click cannot be its own, so
+/// the G305 that sent it keeps its native click on both edges instead of
+/// opening the 3S's Actions Ring.
+#[test]
+fn an_unattributed_press_of_a_button_the_selected_device_diverted_stays_native() {
+    let (dispatcher, mut owner, events) = test_dispatcher();
+    let hooks = Arc::new(RwLock::new(mx_master_3s_diverting_middle()));
+    assert_eq!(
+        handle_button(
+            ButtonId::MiddleClick,
+            true,
+            None,
+            &hooks,
+            &dispatcher,
+            || None
+        ),
+        EventDisposition::PassThrough
+    );
+    // The release follows its press even when the session ends in between.
+    hooks.write().expect("maps").diverted_buttons.release(
+        &crate::runtime::HidppSessionId::with_epoch("mx-master-3s", 7),
+    );
+    assert_eq!(
+        handle_button(
+            ButtonId::MiddleClick,
+            false,
+            None,
+            &hooks,
+            &dispatcher,
+            || None
+        ),
+        EventDisposition::PassThrough
+    );
+    assert!(
+        events.recv_timeout(Duration::from_millis(200)).is_err(),
+        "the selected device's binding never ran"
+    );
+    assert!(owner.shutdown());
+}
+
+/// Without a diversion on the selected device the unattributed press may be
+/// its own, so the binding still applies — through a release that arrives
+/// after a session diverted the control mid-press.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn an_unattributed_press_keeps_the_selected_binding_while_that_device_has_not_diverted_it() {
+    use super::super::button::ButtonRuntimeEvent;
+    let (dispatcher, mut owner, events) = test_dispatcher();
+    let mut maps = mx_master_3s_diverting_middle();
+    maps.selected_route = Some(bolt_route(1));
+    let hooks = Arc::new(RwLock::new(maps));
+    assert_eq!(
+        handle_button(
+            ButtonId::MiddleClick,
+            true,
+            None,
+            &hooks,
+            &dispatcher,
+            || None
+        ),
+        EventDisposition::Suppress,
+        "another device's diversion says nothing about the selected one"
+    );
+    let ButtonRuntimeEvent::Started(press) =
+        events.recv_timeout(Duration::from_secs(1)).expect("down")
+    else {
+        panic!("started");
+    };
+    assert_eq!(press.start_action(), Some(&Action::ShowActionsRing));
+    hooks.write().expect("maps").selected_route = Some(bolt_route(2));
+    assert_eq!(
+        handle_button(
+            ButtonId::MiddleClick,
+            false,
+            None,
+            &hooks,
+            &dispatcher,
+            || None
+        ),
+        EventDisposition::Suppress
+    );
+    assert!(matches!(
+        events.recv_timeout(Duration::from_secs(1)).expect("up"),
+        ButtonRuntimeEvent::Ended { .. }
+    ));
     assert!(owner.shutdown());
 }

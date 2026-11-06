@@ -137,6 +137,7 @@ fn main() -> Result<()> {
     app.run(move |cx| {
         gpui_kit::init(cx);
         theme::register_builtin_themes(cx);
+        theme::sync_scrollbar_mode(cx);
         app::menu::install(cx);
 
         // Seed the Add Device window's initial state. Its buttons only send
