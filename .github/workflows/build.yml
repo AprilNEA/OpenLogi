@@ -679,7 +679,17 @@ jobs:
           Copy-Item packaging\windows\openlogi-installation.json stage\openlogi-installation.json
           # Zipping after signing is safe: Authenticode lives in the PE files.
           $ref = $env:GITHUB_REF_NAME -replace '/', '-'
-          Compress-Archive -Path stage\* -DestinationPath "dist\OpenLogi-$ref-windows-${{ matrix.arch }}.zip"
+          # 7-Zip's maximum Deflate preset, not Compress-Archive: the same zip
+          # format, which Expand-Archive in the MSI job reads, 7% smaller
+          # (v0.8.20 x86_64: 32.05 → 29.79 MB) for about 30 s more. Higher
+          # -mpass settings save under 0.1% more at four times the time.
+          # windows-2025 ships 7-Zip on PATH. 7z expands `stage\*` itself,
+          # including `bin\`, since pwsh does not glob native arguments.
+          7z a -tzip -mx=9 -bso0 -bsp0 "dist\OpenLogi-$ref-windows-${{ matrix.arch }}.zip" .\stage\*
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "7z exited with $LASTEXITCODE"
+            exit 1
+          }
 
       - uses: actions/upload-artifact@v7
         with:
