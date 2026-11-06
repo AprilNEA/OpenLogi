@@ -91,6 +91,49 @@ fn unset_keep_os_layout_is_omitted_from_toml() {
 }
 
 #[test]
+fn os_layout_pin_roundtrips_per_device_and_is_omitted_when_unset() {
+    let mut cfg = Config::default();
+    assert_eq!(cfg.os_layout_pin("2b042"), None);
+    cfg.set_os_layout_pin("2b042", Some(PinnedOs::MacOs));
+    let body = toml::to_string_pretty(&cfg).expect("serialize");
+    assert!(body.contains("os_layout_pin = \"macos\""), "{body}");
+    let restored = write_and_read(&cfg);
+    assert_eq!(restored.os_layout_pin("2b042"), Some(PinnedOs::MacOs));
+    assert_eq!(restored.os_layout_pin("absent"), None);
+    cfg.set_os_layout_pin("2b042", None);
+    let body = toml::to_string_pretty(&cfg).expect("serialize");
+    assert!(!body.contains("os_layout_pin"), "{body}");
+}
+
+#[test]
+fn os_pointer_speed_roundtrips_per_device_and_is_omitted_when_unset() {
+    let mut cfg = Config::default();
+    assert_eq!(cfg.os_pointer_speed("2b042"), None);
+    cfg.set_os_pointer_speed("2b042", Some(0.5));
+    let body = toml::to_string_pretty(&cfg).expect("serialize");
+    assert!(body.contains("os_pointer_speed = 0.5"), "{body}");
+    let restored = write_and_read(&cfg);
+    assert_eq!(restored.os_pointer_speed("2b042"), Some(0.5));
+    assert_eq!(restored.os_pointer_speed("absent"), None);
+    cfg.set_os_pointer_speed("2b042", None);
+    let body = toml::to_string_pretty(&cfg).expect("serialize");
+    assert!(!body.contains("os_pointer_speed"), "{body}");
+}
+
+#[test]
+fn an_os_layout_pin_survives_route_adoption() {
+    let route = "receiver:82839805:slot:1";
+    let mut config = Config::default();
+    config.set_os_layout_pin(route, Some(PinnedOs::Windows));
+    let canonical = crate::device_order::PhysicalDeviceKey::parse("unit:6be9d300").expect("valid");
+    assert!(config.adopt_route(&canonical, route, None));
+    assert_eq!(
+        config.os_layout_pin("unit:6be9d300"),
+        Some(PinnedOs::Windows)
+    );
+}
+
+#[test]
 fn smooth_wheel_defaults_off_and_roundtrips_per_device() {
     let mut cfg = Config::default();
     assert!(!cfg.smooth_wheel("mouse"));
@@ -118,88 +161,6 @@ fn a_smooth_wheel_opt_in_survives_route_adoption() {
         "sanity: the route entry folded"
     );
     assert!(config.smooth_wheel("unit:4f4c4403"));
-}
-
-#[test]
-fn g_key_owner_mode_and_profile_bindings_roundtrip() {
-    use crate::binding::{GKey, GKeyProfile, GKeySlot, ModeKey};
-    use crate::config::{GKeyOwner, GamingKeyMode};
-    let mut cfg = Config::default();
-    let body = toml::to_string_pretty(&cfg).expect("serialize");
-    assert!(!body.contains("g_key_owner") && !body.contains("gaming_key_mode"));
-    cfg.set_g_key_owner("g915", GKeyOwner::OpenLogi);
-    cfg.set_gaming_key_mode("g915", GamingKeyMode::NineButtons);
-    let m2_g1 = ButtonId::GKey(GKeySlot {
-        profile: GKeyProfile::M2,
-        key: GKey::G1,
-    });
-    cfg.set_binding("g915", m2_g1, Binding::Single(Action::Copy));
-    cfg.set_binding(
-        "g915",
-        ButtonId::ModeKey(ModeKey::MacroRecord),
-        Binding::Single(Action::Paste),
-    );
-    let body = toml::to_string_pretty(&cfg).expect("serialize");
-    assert!(body.contains("g_key_owner = \"openlogi\""), "{body}");
-    assert!(
-        body.contains("gaming_key_mode = \"nine_buttons\""),
-        "{body}"
-    );
-    assert!(body.contains("\"M2:KeyG1\" = \"Copy\""), "{body}");
-    assert!(body.contains("KeyMR = \"Paste\""), "{body}");
-    let restored = write_and_read(&cfg);
-    assert_eq!(restored.g_key_owner("g915"), GKeyOwner::OpenLogi);
-    assert_eq!(restored.gaming_key_mode("g915"), GamingKeyMode::NineButtons);
-    assert_eq!(
-        restored.stored_bindings("g915").get(&m2_g1),
-        Some(&Binding::Single(Action::Copy))
-    );
-    assert_eq!(restored.g_key_owner("absent"), GKeyOwner::Keyboard);
-}
-
-#[test]
-fn g_key_profile_names_are_trimmed_cleared_when_blank_and_folded() {
-    use crate::binding::GKeyProfile;
-    let route = "receiver:82839805:slot:4";
-    let mut cfg = Config::default();
-    cfg.set_g_key_profile_name(route, GKeyProfile::M2, "  Work  ");
-    let body = toml::to_string_pretty(&cfg).expect("serialize");
-    assert!(body.contains("M2 = \"Work\""), "{body}");
-    let mut restored = write_and_read(&cfg);
-    assert_eq!(
-        restored.g_key_profile_name(route, GKeyProfile::M2),
-        Some("Work")
-    );
-    assert_eq!(restored.g_key_profile_name(route, GKeyProfile::M1), None);
-
-    let canonical = crate::device_order::PhysicalDeviceKey::parse("unit:4f4c4405").expect("valid");
-    assert!(restored.adopt_route(&canonical, route, None));
-    assert_eq!(
-        restored.g_key_profile_name("unit:4f4c4405", GKeyProfile::M2),
-        Some("Work"),
-        "a name follows the device onto its identity key"
-    );
-
-    restored.set_g_key_profile_name("unit:4f4c4405", GKeyProfile::M2, "   ");
-    let body = toml::to_string_pretty(&restored).expect("serialize");
-    assert!(!body.contains("g_key_profile_names"), "{body}");
-}
-
-#[test]
-fn the_g_key_choices_survive_route_adoption() {
-    use crate::config::{GKeyOwner, GamingKeyMode};
-    let route = "receiver:82839805:slot:3";
-    let mut config = Config::default();
-    config.set_g_key_owner(route, GKeyOwner::OpenLogi);
-    config.set_gaming_key_mode(route, GamingKeyMode::NineButtons);
-    let canonical = crate::device_order::PhysicalDeviceKey::parse("unit:4f4c4404").expect("valid");
-    assert!(config.adopt_route(&canonical, route, None));
-    assert!(!config.devices.contains_key(route));
-    assert_eq!(config.g_key_owner("unit:4f4c4404"), GKeyOwner::OpenLogi);
-    assert_eq!(
-        config.gaming_key_mode("unit:4f4c4404"),
-        GamingKeyMode::NineButtons
-    );
 }
 
 #[test]

@@ -7,7 +7,7 @@
 
 #[cfg(test)]
 use crate::binding::{Action, ButtonId};
-use crate::config::{Config, DeviceConfig, GKeyOwner, GamingKeyMode};
+use crate::config::{Config, DeviceConfig};
 #[cfg(test)]
 use crate::config::{LightSettings, Lighting, LinkConfig};
 use crate::device::Capabilities;
@@ -310,14 +310,6 @@ pub(super) fn fold(device: &mut DeviceConfig, mut legacy: DeviceConfig, route_ke
     // `smooth_wheel` is a bare opt-in with no per-link slot: for the same
     // reason only a legacy `true` is evidence of a choice, so it carries over.
     device.smooth_wheel |= legacy.smooth_wheel;
-    // Handing the G-keys to OpenLogi is the same kind of bare opt-in.
-    if legacy.g_key_owner == GKeyOwner::OpenLogi {
-        device.g_key_owner = GKeyOwner::OpenLogi;
-    }
-    // Only a mode the user picked is evidence; the default is never-set.
-    if device.gaming_key_mode == GamingKeyMode::default() {
-        device.gaming_key_mode = legacy.gaming_key_mode;
-    }
 
     // Scalar values with no per-link override slot: take the legacy value
     // when the canonical side is unset. A genuine disagreement keeps the
@@ -346,6 +338,8 @@ pub(super) fn fold(device: &mut DeviceConfig, mut legacy: DeviceConfig, route_ke
     fold_option_field!(momentum_scrolling);
     fold_option_field!(fn_lock);
     fold_option_field!(keep_os_layout);
+    fold_option_field!(os_layout_pin);
+    fold_option_field!(os_pointer_speed);
     fold_option_field!(onboard_memory);
     fold_option_field!(report_rate);
     fold_option_field!(pointer_speed);
@@ -432,7 +426,6 @@ fn fold_maps(device: &mut DeviceConfig, legacy: &mut DeviceConfig, route_key: &s
     fold_map_field!(disabled_gestures);
     fold_map_field!(per_app_bindings);
     fold_map_field!(camera_profiles);
-    fold_map_field!(g_key_profile_names);
 }
 
 #[cfg(test)]
