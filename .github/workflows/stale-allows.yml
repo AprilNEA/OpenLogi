@@ -41,8 +41,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # 32 GB: the baseline clippy run once used 15.3 of 16 GB and failed.
           - os: linux
-            runner: nscloud-ubuntu-24.04-amd64-8x16
+            runner: nscloud-ubuntu-24.04-amd64-8x32
             cache: linux-stable-debug
           - os: windows
             runner: nscloud-windows-2022-amd64-8x16
