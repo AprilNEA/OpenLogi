@@ -34,8 +34,8 @@ use std::fmt::Write;
 use bincode::Options;
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{
-    Action, ActionRingIcon, ActionRingSize, ActionRingSlot, ButtonId, GridKey, GridSlot, KeyCombo,
-    KeypadPage,
+    Action, ActionRingIcon, ActionRingSize, ActionRingSlot, ButtonId, GKey, GKeyProfile, GKeySlot,
+    GridKey, GridSlot, KeyCombo, KeypadPage, ModeKey,
 };
 use openlogi_core::config::{
     ConfigRevision, FlowPeerName, FlowPublicKey, Lighting, ScrollResolution,
@@ -119,7 +119,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// unreleased version and leave this pin alone (`crates/openlogi-ipc/AGENTS.md`).
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 45);
+    assert_eq!(PROTOCOL_VERSION, 46);
 }
 
 #[test]
@@ -589,6 +589,19 @@ fn keypad_page_actions_and_slots() {
     );
 }
 
+/// A G-key's slot and an M key cross the wire by their persisted names.
+#[test]
+fn g_key_slots_and_mode_keys() {
+    assert_wire(
+        &ButtonId::GKey(GKeySlot {
+            profile: GKeyProfile::M2,
+            key: GKey::G1,
+        }),
+        "084d323a4b65794731",
+    );
+    assert_wire(&ButtonId::ModeKey(ModeKey::MacroRecord), "054b65794d52");
+}
+
 #[test]
 fn monitor_events() {
     assert_wire(
@@ -925,6 +938,10 @@ fn device_inventory() {
                 onboard_profiles: false,
                 button_spy: false,
                 sidetone: true,
+                g_keys: false,
+                m_keys: false,
+                macro_record: false,
+                change_host: false,
             }),
             settings_revision: 7,
             hidpp10: false,
@@ -932,7 +949,7 @@ fn device_inventory() {
     }];
     assert_wire(
         &inventory,
-        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b00001010150020001030106323134304c5a0102030400010100fb34b0fb8240000b010101000001010101010001010101010101000000010700",
+        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b00001010150020001030106323134304c5a0102030400010100fb34b0fb8240000b01010100000101010101000101010101010100000001000000000700",
     );
 }
 

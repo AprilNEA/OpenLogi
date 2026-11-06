@@ -127,9 +127,11 @@ fn reviewed_detail_tabs(id: &str) -> Vec<DetailTab> {
         "mx-mechanical-mini-mac-001" | "mx-keys-s-001" | "mx-creative-keypad-001" => {
             vec![DetailTab::Keys, DetailTab::ActionsRing, DetailTab::Device]
         }
-        // The G915 is the same kind of keyboard, and its RGB effect engine
-        // (0x8071) and per-key lighting (0x8081) add the Lighting tab.
-        "g915-001" => vec![
+        // The G915 and G512 are the same kind of keyboard. The G915's RGB
+        // effect engine (0x8071) and per-key lighting (0x8081) add the
+        // Lighting tab; the G512 reaches it through the older 0x8070 and
+        // 0x8080 pair.
+        "g512-001" | "g915-001" => vec![
             DetailTab::Keys,
             DetailTab::ActionsRing,
             DetailTab::Lighting,

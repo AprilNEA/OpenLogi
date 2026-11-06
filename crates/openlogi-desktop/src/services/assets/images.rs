@@ -38,6 +38,22 @@ pub(super) fn read_png_dimensions(path: &Path) -> std::io::Result<(u32, u32)> {
     Ok((width, height))
 }
 
+/// Whether the file at `path` starts like an image format, so the GUI can
+/// draw it. The extension says nothing: the catalog names many renders by
+/// bare UUID, most of them PNG or WebP. G HUB ships some colour variants
+/// encrypted under the same kind of name (the pink and purple G502
+/// LIGHTSPEED, #2375), and no decoder reads those.
+pub(super) fn is_drawable_image(path: &Path) -> bool {
+    use std::fs::File;
+    use std::io::Read;
+
+    // `RIFF????WEBP`, the longest signature `guess_format` needs.
+    let mut header = Vec::with_capacity(16);
+    File::open(path)
+        .and_then(|file| file.take(16).read_to_end(&mut header))
+        .is_ok_and(|_| image::guess_format(&header).is_ok())
+}
+
 /// Look up the colour variant matching `ext` in an already-loaded depot
 /// manifest. Returns the `device_image` src filename — falling back to
 /// `device_camera_image`, the hero-render key webcam depots use instead — or
@@ -75,7 +91,8 @@ where
     None
 }
 
-/// Enumerate candidate manifest bases: model IDs, the depot name, and any stripped `_ext\d+` stem.
+/// Enumerate candidate manifest bases: model IDs, the depot name, any stripped `_ext\d+` stem,
+/// and the bases of products the catalog files under the same depot (`DEPOT_SIBLINGS`).
 pub(super) fn candidate_manifest_bases(
     entry: &openlogi_assets::DeviceEntry,
     depot: &str,
@@ -104,6 +121,16 @@ pub(super) fn candidate_manifest_bases(
     {
         candidates.push(stem.to_string());
     }
+    // A sibling's variants keep their own base (`g512_ext6` in the G513
+    // depot), tried after the depot's own bases.
+    for base in super::depot_sibling_manifest_bases(&entry.display_name) {
+        if !candidates
+            .iter()
+            .any(|c: &String| c.eq_ignore_ascii_case(base))
+        {
+            candidates.push(base.to_string());
+        }
+    }
     candidates
 }
 
@@ -117,6 +144,18 @@ pub(super) fn buttons_image_for(
 ) -> Option<String> {
     manifest
         .resource_for_variant(base_model_id, ext, "device_buttons_image")
+        .map(str::to_string)
+}
+
+/// Like [`variant_image_for`] but returns the G-series side render
+/// ([`SIDE_VIEW_KEY`](super::SIDE_VIEW_KEY)).
+pub(super) fn side_image_for(
+    manifest: &DepotManifest,
+    base_model_id: &str,
+    ext: u8,
+) -> Option<String> {
+    manifest
+        .resource_for_variant(base_model_id, ext, super::SIDE_VIEW_KEY)
         .map(str::to_string)
 }
 

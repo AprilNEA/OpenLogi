@@ -64,9 +64,14 @@ pub struct GamingLayout {
     pub stock_dpi_presets: &'static [u16],
 }
 
-/// G502 LIGHTSPEED (wpid `0x407f`).
+/// G502 LIGHTSPEED (wpid `0x407f`). The extended model id tells the colours
+/// apart: `0` is the black unit dumped in #1729, `2` the purple one from
+/// #2372, which reports the same wpid, model ids and 11 slots. `1` is the
+/// pink one, sold with the purple one. No unit has been dumped. G HUB's
+/// `g502_wireless` depot gives all three ids one default configuration of 11
+/// inputs, and the same hotspot metadata to `1` and `2` (#2375).
 pub const G502_LIGHTSPEED: GamingLayout = GamingLayout {
-    model_keys: &["0407f"],
+    model_keys: &["0407f", "1407f", "2407f"],
     slots: &[
         Slot::native(ButtonId::LeftClick),
         Slot::native(ButtonId::RightClick),
@@ -80,6 +85,28 @@ pub const G502_LIGHTSPEED: GamingLayout = GamingLayout {
         Slot::stock(ButtonId::G9, Action::None),
         Slot::silent(ButtonId::WheelTiltRight),
         Slot::silent(ButtonId::WheelTiltLeft),
+    ],
+    stock_dpi_presets: &[400, 800, 1600, 3200, 6400],
+};
+
+/// G903 LIGHTSPEED (wpid `0x4087`), dumped in #2178. Ambidextrous: the left
+/// side pair is Back and Forward, the right side pair is G6 and G7, and the
+/// DPI keys are G8 (down, left) and G9 (up, right). Slot 11 never reports.
+pub const G903_LIGHTSPEED: GamingLayout = GamingLayout {
+    model_keys: &["04087"],
+    slots: &[
+        Slot::native(ButtonId::LeftClick),
+        Slot::native(ButtonId::RightClick),
+        Slot::native(ButtonId::MiddleClick),
+        Slot::native(ButtonId::Back),
+        Slot::native(ButtonId::Forward),
+        // The right side pair mirrors the left one.
+        Slot::stock(ButtonId::G6, Action::MouseBack),
+        Slot::stock(ButtonId::G7, Action::MouseForward),
+        Slot::stock(ButtonId::G8, Action::PreviousDpiPreset),
+        Slot::stock(ButtonId::G9, Action::NextDpiPreset),
+        Slot::silent(ButtonId::WheelTiltLeft),
+        Slot::silent(ButtonId::WheelTiltRight),
     ],
     stock_dpi_presets: &[400, 800, 1600, 3200, 6400],
 };
@@ -102,7 +129,7 @@ pub const STANDARD_BUTTONS: GamingLayout = GamingLayout {
     stock_dpi_presets: &[],
 };
 
-const LAYOUTS: &[&GamingLayout] = &[&G502_LIGHTSPEED];
+const LAYOUTS: &[&GamingLayout] = &[&G502_LIGHTSPEED, &G903_LIGHTSPEED];
 
 /// Whether a device is a G-series mouse, and which buttons it offers. The
 /// agent, the tabs and the Buttons panel all ask this one verdict.
@@ -232,6 +259,75 @@ mod tests {
         assert!(!layout.remappable().any(|b| b == ButtonId::LeftClick));
         assert!(layout.needs_host_mode(ButtonId::G7));
         assert!(!layout.needs_host_mode(ButtonId::Back));
+    }
+
+    /// #2372: the purple G502 LIGHTSPEED reports extended model id 2, and
+    /// its gaming tables made it a five-button `Standard` mouse. #2375: the
+    /// pink one has id 1.
+    #[test]
+    fn every_g502_lightspeed_colour_takes_its_layout() {
+        use crate::device::{DeviceModelInfo, DeviceTransports};
+        let gaming = Capabilities::from_feature_ids(&[0x2201, 0x8060, 0x8100, 0x8110]);
+        for extended_model_id in [0x00, 0x01, 0x02] {
+            let model = DeviceModelInfo {
+                entity_count: 3,
+                serial_number: None,
+                unit_id: [0; 4],
+                transports: DeviceTransports {
+                    usb: true,
+                    equad: true,
+                    btle: false,
+                    bluetooth: false,
+                },
+                model_ids: [0x407f, 0xc08d, 0x0000],
+                extended_model_id,
+            };
+            assert_eq!(
+                GamingButtons::for_device(&model.model_key(), Some(&gaming)),
+                Some(GamingButtons::Dumped(&G502_LIGHTSPEED)),
+                "extended model id {extended_model_id}"
+            );
+        }
+    }
+
+    #[test]
+    fn g903_lightspeed_slots_match_the_hardware_dump() {
+        let layout = GamingLayout::for_model_key("04087").unwrap();
+        assert_eq!(layout, &G903_LIGHTSPEED);
+        assert_eq!(layout.button_for_g_number(4), Some(ButtonId::Back));
+        assert_eq!(layout.button_for_g_number(5), Some(ButtonId::Forward));
+        assert_eq!(layout.button_for_g_number(6), Some(ButtonId::G6));
+        assert_eq!(layout.button_for_g_number(9), Some(ButtonId::G9));
+        assert_eq!(
+            layout.button_for_g_number(10),
+            Some(ButtonId::WheelTiltLeft)
+        );
+        assert_eq!(
+            layout.button_for_g_number(11),
+            Some(ButtonId::WheelTiltRight)
+        );
+        assert_eq!(layout.button_for_g_number(12), None);
+        assert!(layout.needs_host_mode(ButtonId::G8));
+        assert!(!layout.needs_host_mode(ButtonId::Forward));
+    }
+
+    #[test]
+    fn g903_lightspeed_keeps_its_stock_functions() {
+        let layout = &G903_LIGHTSPEED;
+        assert_eq!(layout.stock_action(ButtonId::G6), Some(Action::MouseBack));
+        assert_eq!(
+            layout.stock_action(ButtonId::G7),
+            Some(Action::MouseForward)
+        );
+        assert_eq!(
+            layout.stock_action(ButtonId::G8),
+            Some(Action::PreviousDpiPreset)
+        );
+        assert_eq!(
+            layout.stock_action(ButtonId::G9),
+            Some(Action::NextDpiPreset)
+        );
+        assert_eq!(layout.stock_action(ButtonId::WheelTiltLeft), None);
     }
 
     #[test]

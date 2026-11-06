@@ -181,7 +181,12 @@ pub use succession::Identity;
 ///      chooses on release, so the overlay reports the pointer leaving every
 ///      slot as well as entering one. `ActionRingInvocation::size` appended,
 ///      the size the overlay draws the ring at.
-pub const PROTOCOL_VERSION: u32 = 45;
+/// v46: `Capabilities::{g_keys, m_keys, macro_record}` appended — a G-series
+///      keyboard's HID++ `0x8010` G-keys, `0x8020` M-keys and `0x8030` MR
+///      key. `ButtonId::{GKey, ModeKey}` appended — the G1–G5 slot of an M
+///      profile and M1–M3/MR. `Capabilities::change_host` appended after
+///      them — `0x1814` ChangeHost without `0x1815` HostsInfo.
+pub const PROTOCOL_VERSION: u32 = 46;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to

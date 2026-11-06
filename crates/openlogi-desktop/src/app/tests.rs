@@ -1256,6 +1256,10 @@ fn tabs_prefer_buttons_when_a_keyboard_kind_measures_a_pointer() {
         onboard_profiles: false,
         button_spy: false,
         sidetone: false,
+        g_keys: false,
+        m_keys: false,
+        macro_record: false,
+        change_host: false,
     });
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
     assert!(
@@ -1295,6 +1299,10 @@ fn tabs_follow_capabilities_not_kind() {
         onboard_profiles: false,
         button_spy: false,
         sidetone: false,
+        g_keys: false,
+        m_keys: false,
+        macro_record: false,
+        change_host: false,
     });
     // After 0x0005 kind-correction the record has kind=Mouse, not Keyboard.
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Mouse, caps));
@@ -1381,6 +1389,10 @@ fn keyboard_without_asset_hides_buttons_tab() {
         onboard_profiles: false,
         button_spy: false,
         sidetone: false,
+        g_keys: false,
+        m_keys: false,
+        macro_record: false,
+        change_host: false,
     });
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
     assert!(
@@ -1414,6 +1426,10 @@ fn keyboard_with_buttons_shows_keys_tab() {
         onboard_profiles: false,
         button_spy: false,
         sidetone: false,
+        g_keys: false,
+        m_keys: false,
+        macro_record: false,
+        change_host: false,
     });
     let keyboard = record(DeviceKind::Keyboard, caps);
     let tabs = DetailTab::tabs_for(&keyboard);
