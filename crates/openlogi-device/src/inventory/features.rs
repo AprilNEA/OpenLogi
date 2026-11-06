@@ -13,10 +13,12 @@ use hidpp::{
         device_information::{DeviceInformationFeature, DeviceTransport},
         device_type_and_name::DeviceTypeAndNameFeature,
         disable_keys::DisableKeysFeature,
+        feature_set::FeatureSetFeature,
         force_sensing_button::ForceSensingButtonFeature,
         gestures2::Gestures2Feature,
         multi_platform::{MultiPlatformCapabilities, MultiPlatformFeature},
         reprog_controls::{ReprogControlsFeature, control_ids},
+        root::RootFeature,
         unified_battery::UnifiedBatteryFeature,
     },
     protocol::{
@@ -32,6 +34,7 @@ use serde::{Deserialize, Serialize};
 use tokio::time::timeout;
 use tracing::debug;
 
+use super::cache::UnitIdentity;
 use crate::host_lock::ReceiverRegisterPhase;
 use crate::reprog_controls::{BACK_CIDS, DPI_MODE_SHIFT_CIDS, FORWARD_CIDS};
 use crate::write::{force_button_is_changeable, panel_button};
@@ -74,7 +77,92 @@ pub(super) struct ProbedFeatures {
     /// stand-in, so this is never persisted.
     #[serde(skip)]
     pub(super) refresh: Refresh,
+    /// The head of the feature table this walk read, which a due refresh
+    /// compares instead of walking again. Not persisted: an entry loaded
+    /// from disk is walked once, on its first refresh.
+    #[serde(skip)]
+    pub(super) table_head: Option<TableHead>,
 }
+
+/// The head of a device's feature table: where `0x0001` FeatureSet sits and
+/// how many features the table lists.
+///
+/// A due refresh used to walk the whole table again — one request per feature
+/// and per reprogrammable control, several seconds over a Bluetooth link —
+/// only to re-read data that is immutable unless the firmware changes. A
+/// firmware change that reshuffles the table moves this head, which costs two
+/// requests to read, and they are the first two of a walk, so every device
+/// that can be walked answers them. A head that still matches lets the cached
+/// walk stand; [`TABLE_REWALK_INTERVAL`] still walks it now and then, for a
+/// change the head cannot show.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct TableHead {
+    feature_set_index: u8,
+    count: u8,
+}
+
+impl TableHead {
+    /// A head with these fields, for a test that needs one without a walk.
+    #[cfg(test)]
+    pub(super) const fn new(feature_set_index: u8, count: u8) -> Self {
+        Self {
+            feature_set_index,
+            count,
+        }
+    }
+
+    /// The head of the table `features` lists, in table order from index 1.
+    fn of(features: &[hidpp::feature::feature_set::FeatureInformation]) -> Option<Self> {
+        let position = features
+            .iter()
+            .position(|feature| feature.id == FeatureSetFeature::ID)?;
+        Some(Self {
+            feature_set_index: u8::try_from(position + 1).ok()?,
+            count: u8::try_from(features.len()).ok()?,
+        })
+    }
+
+    /// Read the head from the device, or `None` when it does not answer both
+    /// requests or lists no FeatureSet.
+    pub(super) async fn read(channel: &Arc<HidppChannel>, slot: u8) -> Option<Self> {
+        let root = RootFeature::new(Arc::clone(channel), slot, 0);
+        let entry = root.get_feature(FeatureSetFeature::ID).await.ok()??;
+        let feature_set = FeatureSetFeature::new(Arc::clone(channel), slot, entry.index);
+        Some(Self {
+            feature_set_index: entry.index,
+            count: feature_set.count().await.ok()?,
+        })
+    }
+}
+
+/// A completed walk, as a refresh compares it with the device in place of
+/// walking again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct KnownTable {
+    pub(super) head: TableHead,
+    /// The unit the walk read, when it read a usable one; `None` compares the
+    /// head alone.
+    pub(super) unit: Option<UnitIdentity>,
+}
+
+impl KnownTable {
+    /// Whether the device at `slot` still lists this table: the same head and,
+    /// when one is known, the same unit. Two requests for the head and two
+    /// for the unit.
+    pub(super) async fn still_listed(self, channel: &Arc<HidppChannel>, slot: u8) -> bool {
+        if TableHead::read(channel, slot).await != Some(self.head) {
+            return false;
+        }
+        match self.unit {
+            None => true,
+            Some(unit) => UnitIdentity::read(channel, slot).await == Some(unit),
+        }
+    }
+}
+
+/// How often a device whose table head is unchanged is walked anyway, for a
+/// firmware change that kept the head where it was.
+pub(super) const TABLE_REWALK_INTERVAL: Duration = Duration::from_hours(1);
 
 /// Whether a probe's data is the device's answer or the cache's stand-in for
 /// a device that did not answer its refresh.
@@ -397,6 +485,9 @@ pub(super) enum Refreshed {
     /// The device did not answer the protocol ping, so nothing shows that it
     /// is reachable.
     Unreachable,
+    /// The device answered its ping and its table head still matches the
+    /// walk behind the cache, so that walk answers for it: nothing was walked.
+    Unchanged,
     /// The device answered the ping, so its channel delivers replies. The
     /// probe after the ping is `None` when it ran past its budget.
     Answered(Option<FeatureProbe>),
@@ -419,9 +510,19 @@ pub(super) async fn refresh_features(
     subscriptions: Option<&EventSubscriptionHandle>,
     registers: Option<&ReceiverRegisterPhase>,
     walk_budget: Duration,
+    known: Option<KnownTable>,
 ) -> Refreshed {
     let walk = match Device::new(Arc::clone(channel), slot).await {
         Ok(device) => {
+            if let Some(known) = known
+                && known.still_listed(channel, slot).await
+            {
+                debug!(
+                    slot,
+                    "feature table and unit unchanged — keeping the cached walk"
+                );
+                return Refreshed::Unchanged;
+            }
             timeout(
                 walk_budget,
                 probe_hidpp20(device, channel, slot, subscriptions),
@@ -486,8 +587,10 @@ async fn probe_hidpp20(
     let mut battery_probe = None;
     let mut event_features = EventFeatureIndices::default();
     let mut probe_haptic_controls = false;
+    let mut table_head = None;
     let mut capabilities = match device.enumerate_features().await {
         Ok(Some(features)) => {
+            table_head = TableHead::of(&features);
             let ids: Vec<u16> = features.iter().map(|f| f.id).collect();
             battery_probe = battery_feature_index(ids.iter().copied());
             event_features = EventFeatureIndices::from_feature_ids(&ids);
@@ -578,6 +681,7 @@ async fn probe_hidpp20(
             identity_incomplete,
             unlinked: false,
             refresh: Refresh::Answered,
+            table_head,
         },
         battery_probe,
         event_features,
@@ -842,13 +946,14 @@ mod tests {
     use openlogi_core::device::{BatteryInfo, BatteryLevel, BatteryStatus};
 
     use super::{
-        BatteryProbe, BatteryRead, ProbedFeatures, ProbedProtocol, Refreshed,
+        BatteryProbe, BatteryRead, KnownTable, ProbedFeatures, ProbedProtocol, Refreshed,
         battery_feature_index, probe_features, read_battery, refresh_features,
     };
     use crate::channel::scripted::{
         ScriptedRawHidChannel, feature_error, ping_reply, register_error, scripted_channel,
     };
     use crate::host_lock::ReceiverRegisterPhase;
+    use crate::inventory::cache::UnitIdentity;
 
     #[tokio::test]
     async fn a_refresh_reports_the_answered_ping_when_its_walk_runs_past_the_budget() {
@@ -857,7 +962,7 @@ mod tests {
         let (raw, _) = ScriptedRawHidChannel::with_responder(ping_reply);
         let channel = scripted_channel(raw).await;
         let refreshed =
-            refresh_features(&channel, 0xff, None, None, Duration::from_millis(50)).await;
+            refresh_features(&channel, 0xff, None, None, Duration::from_millis(50), None).await;
         assert!(
             matches!(refreshed, Refreshed::Answered(None)),
             "the ping was answered, and the walk did not finish"
@@ -868,8 +973,204 @@ mod tests {
     async fn a_refresh_whose_ping_goes_unanswered_is_unreachable() {
         let (raw, _) = ScriptedRawHidChannel::with_failing_writes(|_| None, |_| true);
         let channel = scripted_channel(raw).await;
-        let refreshed = refresh_features(&channel, 0xff, None, None, Duration::from_secs(8)).await;
+        let refreshed =
+            refresh_features(&channel, 0xff, None, None, Duration::from_secs(8), None).await;
         assert!(matches!(refreshed, Refreshed::Unreachable));
+    }
+
+    /// A device whose table lists `count` features with FeatureSet at index 1,
+    /// answering the ping and the table head. Every table entry read (FeatureSet
+    /// function 1) is answered with an error, so a walk cannot complete; the
+    /// returned handle shows whether one was attempted.
+    fn table_head_device(count: u8) -> (ScriptedRawHidChannel, crate::replay::ReplayChannelHandle) {
+        ScriptedRawHidChannel::with_dynamic_responder(move |request| {
+            if let Some(pong) = ping_reply(request) {
+                return Some(pong);
+            }
+            let mut reply = request[..4].to_vec();
+            match (request[2], request[3] >> 4, request[4], request[5]) {
+                (0x00, 0x00, 0x00, 0x01) => reply.extend_from_slice(&[0x01, 0x00, 0x00]),
+                (0x01, 0x00, _, _) => reply.extend_from_slice(&[count, 0x00, 0x00]),
+                _ => return Some(feature_error(request, 0x02)),
+            }
+            Some(reply)
+        })
+    }
+
+    fn table_entry_reads(handle: &crate::replay::ReplayChannelHandle) -> usize {
+        handle
+            .written_reports()
+            .iter()
+            .filter(|report| report.len() >= 4 && report[2] == 0x01 && report[3] >> 4 == 0x01)
+            .count()
+    }
+
+    const HEAD: super::TableHead = super::TableHead {
+        feature_set_index: 1,
+        count: 30,
+    };
+
+    /// A due refresh used to re-walk the whole table — several seconds over a
+    /// Bluetooth link — to re-read data only a firmware change can move. A
+    /// table head that still matches the walk behind the cache is the answer.
+    #[tokio::test]
+    async fn a_refresh_whose_table_head_matches_walks_nothing() {
+        let (raw, handle) = table_head_device(30);
+        let channel = scripted_channel(raw).await;
+        let refreshed = refresh_features(
+            &channel,
+            0xff,
+            None,
+            None,
+            Duration::from_secs(8),
+            Some(KnownTable {
+                head: HEAD,
+                unit: None,
+            }),
+        )
+        .await;
+        assert!(matches!(refreshed, Refreshed::Unchanged));
+        assert_eq!(table_entry_reads(&handle), 0);
+    }
+
+    #[tokio::test]
+    async fn a_refresh_whose_table_head_moved_walks_the_table() {
+        let (raw, handle) = table_head_device(31);
+        let channel = scripted_channel(raw).await;
+        let refreshed = refresh_features(
+            &channel,
+            0xff,
+            None,
+            None,
+            Duration::from_secs(8),
+            Some(KnownTable {
+                head: HEAD,
+                unit: None,
+            }),
+        )
+        .await;
+        assert!(
+            !matches!(refreshed, Refreshed::Unchanged),
+            "a table that grew is walked again"
+        );
+        assert!(table_entry_reads(&handle) > 0);
+    }
+
+    /// The head a walk records is the head a refresh reads back: were they to
+    /// disagree, every refresh would walk again and the saving would be gone.
+    #[tokio::test]
+    async fn the_head_a_walk_records_is_the_head_a_refresh_reads() {
+        let features = [0x0001_u16, 0x2121];
+        let (raw, handle) = ScriptedRawHidChannel::with_dynamic_responder(move |request| {
+            let mut response = vec![0; 20];
+            response[..4].copy_from_slice(&request[..4]);
+            response[0] = 0x11;
+            match (request[2], request[3] >> 4) {
+                (0, 1) => response[4] = 4,
+                (0, 0) => {
+                    let id = u16::from_be_bytes([request[4], request[5]]);
+                    response[4] = features
+                        .iter()
+                        .position(|&known| known == id)
+                        .map_or(0, |position| u8::try_from(position + 1).unwrap());
+                }
+                (1, 0) => response[4] = u8::try_from(features.len()).unwrap(),
+                (1, 1) => {
+                    let id = features[usize::from(request[4]) - 1];
+                    response[4..6].copy_from_slice(&id.to_be_bytes());
+                }
+                _ => {}
+            }
+            Some(response)
+        });
+        let channel = scripted_channel(raw).await;
+        let (walked, _, _) = probe_features(&channel, 0xff, None, None).await;
+        let head = walked.table_head.expect("the walk read the table");
+        let entries_walked = table_entry_reads(&handle);
+
+        let refreshed = refresh_features(
+            &channel,
+            0xff,
+            None,
+            None,
+            Duration::from_secs(8),
+            Some(KnownTable { head, unit: None }),
+        )
+        .await;
+        assert!(matches!(refreshed, Refreshed::Unchanged));
+        assert_eq!(
+            table_entry_reads(&handle),
+            entries_walked,
+            "the refresh read no table entry"
+        );
+    }
+
+    /// A device with FeatureSet at 1 and DeviceInformation at 2, reporting
+    /// `unit_id`, answering every request a refresh's comparison makes.
+    fn unit_device(
+        unit_id: [u8; 4],
+    ) -> (ScriptedRawHidChannel, crate::replay::ReplayChannelHandle) {
+        ScriptedRawHidChannel::with_dynamic_responder(move |request| {
+            let mut response = vec![0; 20];
+            response[..4].copy_from_slice(&request[..4]);
+            response[0] = 0x11;
+            match (request[2], request[3] >> 4) {
+                (0, 1) => response[4] = 4,
+                (0, 0) => {
+                    response[4] = match u16::from_be_bytes([request[4], request[5]]) {
+                        0x0001 => 1,
+                        0x0003 => 2,
+                        _ => 0,
+                    };
+                }
+                (1, 0) => response[4] = 30,
+                (2, 0) => {
+                    response[5..9].copy_from_slice(&unit_id);
+                    response[11..13].copy_from_slice(&0xb023_u16.to_be_bytes());
+                }
+                _ => return Some(feature_error(request, 0x02)),
+            }
+            Some(response)
+        })
+    }
+
+    /// A receiver slot re-paired with another mouse of the same model lists
+    /// the same table head: the unit tells them apart, so the newcomer is
+    /// walked and published under its own serial.
+    #[tokio::test]
+    async fn a_refresh_that_finds_another_unit_walks_the_table() {
+        let known = UnitIdentity::new([1, 2, 3, 4], [0xb023, 0, 0]);
+        for (unit_id, unchanged) in [([1, 2, 3, 4], true), ([9, 9, 9, 9], false)] {
+            let (raw, _) = unit_device(unit_id);
+            let channel = scripted_channel(raw).await;
+            let refreshed = refresh_features(
+                &channel,
+                0xff,
+                None,
+                None,
+                Duration::from_millis(200),
+                Some(KnownTable {
+                    head: HEAD,
+                    unit: known,
+                }),
+            )
+            .await;
+            assert_eq!(
+                matches!(refreshed, Refreshed::Unchanged),
+                unchanged,
+                "unit {unit_id:?}"
+            );
+        }
+    }
+
+    /// Without a known head — a walk loaded from disk, or one due its
+    /// periodic re-walk — the refresh walks as before.
+    #[tokio::test]
+    async fn a_refresh_without_a_known_head_walks_the_table() {
+        let (raw, handle) = table_head_device(30);
+        let channel = scripted_channel(raw).await;
+        refresh_features(&channel, 0xff, None, None, Duration::from_secs(8), None).await;
+        assert!(table_entry_reads(&handle) > 0);
     }
 
     /// A HID++ 1.0 mouse at slot 1 with register `0x07` (a Performance MX, per

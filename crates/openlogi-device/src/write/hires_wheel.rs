@@ -10,6 +10,8 @@ use hidpp::{
         HiResWheelFeature, WheelEventTarget, WheelMode as HidppWheelMode,
         WheelResolution as HidppWheelResolution,
     },
+    feature::root::RootFeature,
+    protocol::v20::Hidpp20Error,
 };
 pub use openlogi_core::config::ScrollResolution;
 pub use openlogi_core::hid::scroll::{ScrollReportingTarget, ScrollWheelMode};
@@ -57,22 +59,25 @@ pub async fn set_scroll_resolution(
 ) -> Result<ScrollWheelMode, WriteError> {
     let index = route.device_index();
     with_route(backend, route, move |channel| async move {
-        change_wheel_mode_on_channel(&channel, index, Some(resolution), None, false).await
+        change_wheel_mode_on_channel(&channel, index, Some(resolution), None, Wheel::Unprobed)
+            .await
+            .map(WheelModeWrite::mode)
     })
     .await
 }
 
-/// Set only the wheel resolution on an already-open [`SharedChannel`].
-pub async fn set_scroll_resolution_on(
+/// Check only the wheel resolution on an already-open [`SharedChannel`]:
+/// whether the wheel holds it, or the write that sets it.
+pub async fn check_scroll_resolution_on(
     shared: &SharedChannel,
     resolution: ScrollResolution,
-) -> Result<ScrollWheelMode, WriteError> {
-    change_wheel_mode_on_channel(
+) -> Result<WheelModeCheck, WriteError> {
+    check_wheel_mode_on_channel(
         shared.channel(),
         shared.device_index(),
         Some(resolution),
         None,
-        false,
+        Wheel::Probed,
     )
     .await
 }
@@ -89,23 +94,38 @@ pub async fn set_scroll_wheel_mode(
 ) -> Result<ScrollWheelMode, WriteError> {
     let index = route.device_index();
     with_route(backend, route, move |channel| async move {
-        change_wheel_mode_on_channel(&channel, index, Some(resolution), Some(inverted), true).await
+        change_wheel_mode_on_channel(
+            &channel,
+            index,
+            Some(resolution),
+            Some(inverted),
+            Wheel::Unprobed,
+        )
+        .await
+        .map(WheelModeWrite::mode)
     })
     .await
 }
 
-/// Set wheel resolution and inversion on an already-open [`SharedChannel`].
-pub async fn set_scroll_wheel_mode_on(
+/// Check wheel resolution and inversion on an already-open
+/// [`SharedChannel`]: whether the wheel holds them, or the one write that
+/// sets both.
+///
+/// For a device the inventory probed, whose probe found native inversion
+/// ([`Capabilities::scroll_inversion`](openlogi_core::device::Capabilities::scroll_inversion)):
+/// that probe established the protocol and is the wheel's own `has_invert`
+/// answer, so neither is asked again before the write lands.
+pub async fn check_scroll_wheel_mode_on(
     shared: &SharedChannel,
     resolution: ScrollResolution,
     inverted: bool,
-) -> Result<ScrollWheelMode, WriteError> {
-    change_wheel_mode_on_channel(
+) -> Result<WheelModeCheck, WriteError> {
+    check_wheel_mode_on_channel(
         shared.channel(),
         shared.device_index(),
         Some(resolution),
         Some(inverted),
-        true,
+        Wheel::Probed,
     )
     .await
 }
@@ -124,28 +144,179 @@ pub async fn set_scroll_inversion(
 ) -> Result<(), WriteError> {
     let index = route.device_index();
     with_route(backend, route, move |channel| async move {
-        change_wheel_mode_on_channel(&channel, index, None, Some(inverted), true)
+        change_wheel_mode_on_channel(&channel, index, None, Some(inverted), Wheel::Unprobed)
             .await
             .map(|_| ())
     })
     .await
 }
 
-/// Write scroll inversion on an already-open [`SharedChannel`], with the same
-/// reporting-target behavior as [`set_scroll_inversion`].
-pub async fn set_scroll_inversion_on(
+/// Check scroll inversion on an already-open [`SharedChannel`]: whether the
+/// wheel holds it, or the write that sets it, with the same reporting-target
+/// behavior as [`set_scroll_inversion`].
+///
+/// For a device the inventory probed, as [`check_scroll_wheel_mode_on`] is.
+/// This is the write a reconnected mouse waits on, scrolling the wrong way
+/// until it lands.
+pub async fn check_scroll_inversion_on(
     shared: &SharedChannel,
     inverted: bool,
-) -> Result<(), WriteError> {
-    change_wheel_mode_on_channel(
+) -> Result<WheelModeCheck, WriteError> {
+    check_wheel_mode_on_channel(
         shared.channel(),
         shared.device_index(),
         None,
         Some(inverted),
-        true,
+        Wheel::Probed,
     )
     .await
-    .map(|_| ())
+}
+
+/// What a wheel-mode write found on the wheel, and the mode it left there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WheelModeWrite {
+    /// The wheel already held the mode, so nothing was written.
+    AlreadySet(ScrollWheelMode),
+    /// The wheel held another mode; the mode was written and read back.
+    Written(ScrollWheelMode),
+}
+
+impl WheelModeWrite {
+    /// The mode the wheel holds now.
+    #[must_use]
+    pub fn mode(self) -> ScrollWheelMode {
+        match self {
+            Self::AlreadySet(mode) | Self::Written(mode) => mode,
+        }
+    }
+}
+
+/// What a wheel-mode write already knows about the device it writes to.
+#[derive(Clone, Copy)]
+enum Wheel {
+    /// Nothing: a one-off write pings the device for its protocol, and asks
+    /// the wheel whether it can invert before writing inversion, refusing
+    /// with [`WriteError::FeatureUnsupported`] when it cannot.
+    Unprobed,
+    /// The agent's write to a device its inventory probed: the device speaks
+    /// HID++ 2.0, and the caller gated any inversion on the probed capability,
+    /// which is the wheel's own `has_invert` answer. Neither is asked again:
+    /// a reconnected mouse scrolls the wrong way until this write lands, and
+    /// every round trip before it lengthens that.
+    Probed,
+}
+
+impl Wheel {
+    async fn open(
+        self,
+        channel: &Arc<HidppChannel>,
+        index: u8,
+    ) -> Result<Arc<HiResWheelFeature>, WriteError> {
+        match self {
+            Self::Unprobed => {
+                let mut device = open_device(channel, index).await?;
+                open_feature::<HiResWheelFeature>(&mut device).await
+            }
+            Self::Probed => {
+                let root = RootFeature::new(Arc::clone(channel), index, 0);
+                let entry = root
+                    .get_feature(HiResWheelFeature::ID)
+                    .await
+                    .map_err(|error| match error {
+                        // What the ping would have reported: nothing answered.
+                        Hidpp20Error::Channel(_) => WriteError::DeviceUnreachable { index },
+                        error => classify_hidpp_error(
+                            error,
+                            HidppOperation::ResolveFeature,
+                            HiResWheelFeature::ID,
+                        ),
+                    })?
+                    .ok_or(WriteError::FeatureUnsupported {
+                        feature_hex: HiResWheelFeature::ID,
+                    })?;
+                Ok(Arc::new(HiResWheelFeature::new(
+                    Arc::clone(channel),
+                    index,
+                    entry.index,
+                )))
+            }
+        }
+    }
+}
+
+/// A wheel-mode change checked against the wheel, not yet written.
+pub enum WheelModeCheck {
+    /// The wheel already holds the mode: nothing to write.
+    AlreadySet(ScrollWheelMode),
+    /// The wheel holds another mode; [`DueWheelMode::write`] switches it.
+    Due(DueWheelMode),
+}
+
+impl WheelModeCheck {
+    /// The mode the check found on the wheel.
+    #[must_use]
+    pub fn found(&self) -> ScrollWheelMode {
+        match self {
+            Self::AlreadySet(mode) => *mode,
+            Self::Due(due) => due.found,
+        }
+    }
+
+    /// Write the change if it is due.
+    ///
+    /// # Errors
+    ///
+    /// What [`DueWheelMode::write`] returns.
+    pub async fn apply(self) -> Result<WheelModeWrite, WriteError> {
+        match self {
+            Self::AlreadySet(mode) => Ok(WheelModeWrite::AlreadySet(mode)),
+            Self::Due(due) => due.write().await,
+        }
+    }
+}
+
+/// The write a [`WheelModeCheck`] found due, bound to the wheel it read.
+///
+/// Split from the check so the caller chooses when the wheel switches: it
+/// reverses the moment the write lands, and a wheel scrolling then sends
+/// reports the caller may be reversing itself.
+pub struct DueWheelMode {
+    feature: Arc<HiResWheelFeature>,
+    index: u8,
+    /// The mode the wheel reported, edited to the change, so the
+    /// firmware-owned fields outside resolution/invert/target are written
+    /// back as they were.
+    request: HidppWheelMode,
+    desired: ScrollWheelMode,
+    /// The mode the check read, before any write.
+    found: ScrollWheelMode,
+}
+
+impl DueWheelMode {
+    /// Write the mode, then read it back.
+    ///
+    /// # Errors
+    ///
+    /// When the write or the read-back fails, or the wheel reports a mode
+    /// other than the one written.
+    pub async fn write(self) -> Result<WheelModeWrite, WriteError> {
+        let Self {
+            feature,
+            index,
+            request,
+            desired,
+            found: _,
+        } = self;
+        let written = feature.set_wheel_mode(request).await.map_err(|error| {
+            classify_hidpp_error(error, HidppOperation::WriteWheelMode, HiResWheelFeature::ID)
+        })?;
+        validate_applied(mode_from_hidpp(written)?, desired)?;
+
+        let read_back = read_mode(&feature).await?;
+        validate_applied(read_back, desired)?;
+        debug!(index, ?read_back, "wheel mode written and verified");
+        Ok(WheelModeWrite::Written(read_back))
+    }
 }
 
 async fn change_wheel_mode_on_channel(
@@ -153,11 +324,23 @@ async fn change_wheel_mode_on_channel(
     index: u8,
     resolution: Option<ScrollResolution>,
     inverted: Option<bool>,
-    require_invert_support: bool,
-) -> Result<ScrollWheelMode, WriteError> {
-    let mut device = open_device(channel, index).await?;
-    let feature = open_feature::<HiResWheelFeature>(&mut device).await?;
-    if require_invert_support {
+    wheel: Wheel,
+) -> Result<WheelModeWrite, WriteError> {
+    check_wheel_mode_on_channel(channel, index, resolution, inverted, wheel)
+        .await?
+        .apply()
+        .await
+}
+
+async fn check_wheel_mode_on_channel(
+    channel: &Arc<HidppChannel>,
+    index: u8,
+    resolution: Option<ScrollResolution>,
+    inverted: Option<bool>,
+    wheel: Wheel,
+) -> Result<WheelModeCheck, WriteError> {
+    let feature = wheel.open(channel, index).await?;
+    if matches!(wheel, Wheel::Unprobed) && inverted.is_some() {
         let capabilities = feature.get_wheel_capabilities().await.map_err(|error| {
             classify_hidpp_error(error, HidppOperation::ReadWheelMode, HiResWheelFeature::ID)
         })?;
@@ -173,24 +356,19 @@ async fn change_wheel_mode_on_channel(
     let desired = desired_mode(current, resolution, inverted);
     if current == desired {
         debug!(index, ?desired, "wheel mode already set; skipping");
-        return Ok(current);
+        return Ok(WheelModeCheck::AlreadySet(current));
     }
-
-    // Edit the mode the device reported rather than building a new one, so the
-    // firmware-owned fields outside resolution/invert/target are written back.
     let mut request = device_mode;
     request.target = target_to_hidpp(desired.target);
     request.resolution = resolution_to_hidpp(desired.resolution);
     request.inverted = desired.inverted;
-    let written = feature.set_wheel_mode(request).await.map_err(|error| {
-        classify_hidpp_error(error, HidppOperation::WriteWheelMode, HiResWheelFeature::ID)
-    })?;
-    validate_applied(mode_from_hidpp(written)?, desired)?;
-
-    let read_back = read_mode(&feature).await?;
-    validate_applied(read_back, desired)?;
-    debug!(index, ?read_back, "wheel mode written and verified");
-    Ok(read_back)
+    Ok(WheelModeCheck::Due(DueWheelMode {
+        feature,
+        index,
+        request,
+        desired,
+        found: current,
+    }))
 }
 
 async fn open_device(channel: &Arc<HidppChannel>, index: u8) -> Result<Device, WriteError> {
@@ -352,9 +530,15 @@ mod tests {
             },
         );
 
-        let applied = set_scroll_resolution_on(&shared, ScrollResolution::High).await?;
+        let applied = check_scroll_resolution_on(&shared, ScrollResolution::High)
+            .await?
+            .apply()
+            .await?;
 
-        assert_eq!(applied, native(ScrollResolution::High, false));
+        assert_eq!(
+            applied,
+            WheelModeWrite::Written(native(ScrollResolution::High, false))
+        );
         // Only the resolution bit changes; analytics, priority and rate survive.
         assert_eq!(mode_writes(&handle), vec![[0b1010, 0x05, 0x07]]);
         Ok(())
@@ -371,9 +555,101 @@ mod tests {
             },
         );
 
-        set_scroll_inversion_on(&shared, true).await?;
+        check_scroll_inversion_on(&shared, true)
+            .await?
+            .apply()
+            .await?;
 
         assert_eq!(mode_writes(&handle), vec![[0b1110, 0x02, 0x09]]);
+        Ok(())
+    }
+
+    /// The agent's inversion write goes to a device its inventory probed: it
+    /// must spend no round trip on the protocol ping or on the wheel's
+    /// capabilities before the write a reconnected wheel is waiting on.
+    #[tokio::test]
+    async fn the_agent_inversion_write_asks_nothing_the_probe_answered() -> Result<(), WriteError> {
+        let (raw, handle) = stateful_wheel([0b0000, 0x00, 0x00]);
+        let shared = SharedChannel::new(
+            scripted_channel(raw).await,
+            DeviceRoute::Direct {
+                vendor_id: 0x046d,
+                product_id: 0xb023,
+            },
+        );
+
+        let outcome = check_scroll_inversion_on(&shared, true)
+            .await?
+            .apply()
+            .await?;
+
+        let requests: Vec<(u8, u8)> = handle
+            .written_reports()
+            .into_iter()
+            .filter(|report| report.len() >= 7)
+            .map(|report| (report[2], report[3] >> 4))
+            .collect();
+        assert_eq!(
+            requests,
+            vec![
+                (0x00, 0x00),
+                (HIRES_WHEEL_INDEX, 0x01),
+                (HIRES_WHEEL_INDEX, 0x02),
+                (HIRES_WHEEL_INDEX, 0x01),
+            ],
+            "feature lookup, mode read, mode write, read-back — no ping, no capabilities"
+        );
+        assert_eq!(
+            outcome,
+            WheelModeWrite::Written(native(ScrollResolution::Low, true))
+        );
+        Ok(())
+    }
+
+    /// Whether the wheel still held the mode is what tells a wheel that kept
+    /// its inversion across a reconnect from one that lost it.
+    #[tokio::test]
+    async fn an_inversion_the_wheel_kept_is_reported_already_set() -> Result<(), WriteError> {
+        let (raw, handle) = stateful_wheel([0b0100, 0x00, 0x00]);
+        let shared = SharedChannel::new(
+            scripted_channel(raw).await,
+            DeviceRoute::Direct {
+                vendor_id: 0x046d,
+                product_id: 0xb023,
+            },
+        );
+
+        let outcome = check_scroll_inversion_on(&shared, true)
+            .await?
+            .apply()
+            .await?;
+
+        assert_eq!(
+            outcome,
+            WheelModeWrite::AlreadySet(native(ScrollResolution::Low, true))
+        );
+        assert!(mode_writes(&handle).is_empty());
+        Ok(())
+    }
+
+    /// A one-off write knows nothing of the device, so it still confirms the
+    /// wheel can invert before writing inversion.
+    #[tokio::test]
+    async fn a_one_off_inversion_write_still_checks_the_wheel_can_invert() -> Result<(), WriteError>
+    {
+        let (raw, handle) = stateful_wheel([0b0000, 0x00, 0x00]);
+        let channel = scripted_channel(raw).await;
+
+        change_wheel_mode_on_channel(&channel, 0xff, None, Some(true), Wheel::Unprobed).await?;
+
+        let capability_reads = handle
+            .written_reports()
+            .into_iter()
+            .filter(|report| {
+                report.len() >= 7 && report[2] == HIRES_WHEEL_INDEX && report[3] >> 4 == 0x00
+            })
+            .count();
+        assert_eq!(capability_reads, 1);
         Ok(())
     }
 

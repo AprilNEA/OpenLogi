@@ -30,13 +30,14 @@ use openlogi_hid::{
     CaptureChannelSlot, ChannelRegistry, DeviceIoGate, DeviceRoute, Dpi, FollowerLink,
     FollowerRelease, HidppOperation, HostOs, HostSwitchError, LeadCookie, OsLayoutOutcome,
     PointerSpeed, ReportRate, ScrollResolution, SharedChannel, SmartShiftStatus, WeakSharedChannel,
-    WriteError,
+    WheelModeCheck, WheelModeWrite, WriteError,
 };
 use tokio::time::error::Elapsed;
 use tracing::{debug, info, warn};
 
 use crate::capture_plan::SharedCapturePlans;
 use crate::dpi::DpiBeforeShift;
+use crate::interim_inversion::InterimInversion;
 use crate::pointer_speed::SpeedTarget;
 use crate::receiver_access::ReceiverAccess;
 
@@ -54,7 +55,7 @@ pub(crate) use write_order::{WriteOrder, WriteTicket};
 /// own, so without this an asleep / unresponsive device would hang (and leak)
 /// this background thread forever; a write to a live device completes in well
 /// under a second.
-const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Physical transport behind a route. Slots on one receiver share a HID writer,
 /// so they share one turnstile even though their device indices differ.
@@ -1204,6 +1205,7 @@ pub(crate) fn reapply_mouse_volatile_in_background(
     settings: VolatileMouseSettings,
     report_rate_order: &WriteOrder,
     capture_plans: &SharedCapturePlans,
+    interim: &InterimInversion,
 ) {
     match op.resolve() {
         Ok(shared) => drop(shared),
@@ -1225,6 +1227,7 @@ pub(crate) fn reapply_mouse_volatile_in_background(
     let route = op.route.clone();
     let index = route.device_index();
     let capture_plans = capture_plans.clone();
+    let interim = interim.clone();
     std::thread::spawn(move || {
         let Some(rt) = one_shot_runtime("volatile reapply") else {
             return;
@@ -1241,9 +1244,9 @@ pub(crate) fn reapply_mouse_volatile_in_background(
             let op = DeviceOp { access, route };
             let turn = op.access.transport_turns.turn_for(&op.route);
             if let Some(change) = wheel {
-                let (plans, route) = (&capture_plans, &op.route);
+                let (plans, interim, route) = (&capture_plans, &interim, &op.route);
                 let result = timed_on_current_channel(&op, &turn, |shared| async move {
-                    write_native_wheel_mode(change, &shared, plans, route).await
+                    write_native_wheel_mode(change, &shared, plans, interim, route).await
                 })
                 .await;
                 log_wheel_result(index, change, result);
@@ -1324,29 +1327,35 @@ impl WheelModeChange {
         }
     }
 
-    /// Write the change through `shared`.
+    /// Check the change against the wheel behind `shared`: whether it holds
+    /// the mode already, or the write that sets it.
     ///
     /// # Errors
     ///
-    /// Whatever the HiResWheel write reports, including
+    /// Whatever the HiResWheel read reports, including
     /// [`WriteError::FeatureUnsupported`] on a wheel without the feature.
-    pub async fn apply_on(self, shared: &SharedChannel) -> Result<(), WriteError> {
+    pub async fn check_on(self, shared: &SharedChannel) -> Result<WheelModeCheck, WriteError> {
         match self {
             Self::ResolutionAndInversion {
                 resolution,
                 inverted,
-            } => openlogi_hid::set_scroll_wheel_mode_on(shared, resolution, inverted)
-                .await
-                .map(|_| ()),
+            } => openlogi_hid::check_scroll_wheel_mode_on(shared, resolution, inverted).await,
             Self::Resolution(resolution) => {
-                openlogi_hid::set_scroll_resolution_on(shared, resolution)
-                    .await
-                    .map(|_| ())
+                openlogi_hid::check_scroll_resolution_on(shared, resolution).await
             }
             Self::Inversion(inverted) => {
-                openlogi_hid::set_scroll_inversion_on(shared, inverted).await
+                openlogi_hid::check_scroll_inversion_on(shared, inverted).await
             }
         }
+    }
+
+    /// Whether this change turns native inversion on.
+    #[must_use]
+    pub fn inverts(self) -> bool {
+        matches!(
+            self,
+            Self::Inversion(true) | Self::ResolutionAndInversion { inverted: true, .. }
+        )
     }
 }
 
@@ -1501,17 +1510,18 @@ pub(crate) fn step_dpi_in_background(
 /// for `op`'s device. Unsupported devices are expected and only logged at
 /// debug level. The write stands down if, by its turn, `capture_plans` hands
 /// the wheel to a capture session (see `write_native_wheel_mode`).
-pub fn write_scroll_wheel_mode_in_background(
+pub(crate) fn write_scroll_wheel_mode_in_background(
     op: DeviceOp,
     change: WheelModeChange,
     capture_plans: SharedCapturePlans,
+    interim: InterimInversion,
 ) {
     let index = op.route.device_index();
     let route = op.route.clone();
     op.spawn_write(
         "wheel mode write",
         move |shared| async move {
-            write_native_wheel_mode(change, &shared, &capture_plans, &route).await
+            write_native_wheel_mode(change, &shared, &capture_plans, &interim, &route).await
         },
         move |result| log_wheel_result(index, change, result),
     );
@@ -1520,8 +1530,8 @@ pub fn write_scroll_wheel_mode_in_background(
 /// What a native wheel-mode write did once it held its transport turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NativeWheelWrite {
-    /// The change was written.
-    Written,
+    /// The change reached the wheel: written, or found already set.
+    Written(WheelModeWrite),
     /// A capture session now owns the wheel, so nothing was written.
     StoodDown,
 }
@@ -1538,12 +1548,41 @@ async fn write_native_wheel_mode(
     change: WheelModeChange,
     shared: &SharedChannel,
     capture_plans: &SharedCapturePlans,
+    interim: &InterimInversion,
     route: &DeviceRoute,
 ) -> Result<NativeWheelWrite, WriteError> {
     if capture_plans.borrow().diverts_main_wheel(route) {
         return Ok(NativeWheelWrite::StoodDown);
     }
-    change.apply_on(shared).await?;
+    let check = change.check_on(shared).await?;
+    interim.checked(route, check.found());
+    let outcome = match check {
+        // A wheel that kept its inversion is reversed twice while interim
+        // inversion stands in for it: withdraw that on the read alone.
+        WheelModeCheck::AlreadySet(mode) => WheelModeWrite::AlreadySet(mode),
+        WheelModeCheck::Due(due) => {
+            // Holding the turn, so nothing else switches the wheel meanwhile;
+            // the wait is bounded well inside the write's timeout.
+            interim.wait_for_rest(route).await;
+            match due.write().await {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    // The write may have landed with only its reply or the
+                    // read-back lost. Read the wheel once more, so a landed
+                    // inversion is not reversed twice until the next write.
+                    if let Ok(mode) = openlogi_hid::get_scroll_wheel_mode_on(shared).await
+                        && mode.inverted
+                    {
+                        interim.wrote(route, mode);
+                    }
+                    return Err(error);
+                }
+            }
+        }
+    };
+    // Withdraw any interim software inversion from this thread, the moment
+    // the wheel confirms: until then a reconnected wheel is reversed twice.
+    interim.wrote(route, outcome.mode());
     if capture_plans.borrow().diverts_main_wheel(route) {
         // The plan diverted the wheel while this write was on the wire, so it
         // may have landed after the session's divert.
@@ -1554,7 +1593,7 @@ async fn write_native_wheel_mode(
              scrolling may stay off until the session re-arms"
         );
     }
-    Ok(NativeWheelWrite::Written)
+    Ok(NativeWheelWrite::Written(outcome))
 }
 
 /// Apply `lighting` to the keyboard at `op`'s device on a background thread.
@@ -1845,6 +1884,7 @@ mod tests {
             },
             &rates,
             &no_capture_plans(),
+            &InterimInversion::default(),
         );
 
         assert!(
@@ -2154,6 +2194,7 @@ mod tests {
             },
             &WriteOrder::default(),
             &no_capture_plans(),
+            &InterimInversion::default(),
         );
         wait_until_a_worker_holds_the_receiver(&receiver_access).await;
 
@@ -2239,6 +2280,7 @@ mod tests {
                     access.op(&published.route),
                     change,
                     plans.clone(),
+                    InterimInversion::default(),
                 );
             }
             WheelWritePath::Reapply => reapply_mouse_volatile_in_background(
@@ -2249,6 +2291,7 @@ mod tests {
                 },
                 &WriteOrder::default(),
                 &plans,
+                &InterimInversion::default(),
             ),
         }
         wait_until_a_worker_holds_the_receiver(&receiver_access).await;

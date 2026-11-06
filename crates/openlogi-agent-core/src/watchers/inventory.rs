@@ -14,14 +14,14 @@ use std::time::{Instant, SystemTime};
 use futures_lite::StreamExt as _;
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_hid::inventory::events::{BacklightUpdate, HidppEventSource, LockKeyUpdate};
-use openlogi_hid::{ChannelRegistry, DeviceIoGate};
+use openlogi_hid::{ChannelRegistry, DeviceIoGate, DeviceRoute};
 use openlogi_ipc::LockKeyChange;
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, info, warn};
 
 use schedule::{
-    DeadlinePurpose, HID_EVENT_SETTLE, HOTPLUG_SETTLE, ReconcileTrigger, SYSTEM_RESUME_SETTLE,
-    ScanClock, ScanOutcome, Schedule, WakeDetector,
+    DeadlinePurpose, HID_EVENT_SETTLE, ReconcileTrigger, SYSTEM_RESUME_SETTLE, ScanClock,
+    ScanOutcome, Schedule, WakeDetector,
 };
 
 use crate::hardware::HardwareContext;
@@ -90,6 +90,12 @@ pub enum InventoryEvent {
     /// snapshot, like [`Self::SystemWake`] but with the shorter link-race
     /// confirm budget.
     DeviceWake,
+    /// Direct devices the enumerator found back on a new OS node: a Bluetooth
+    /// device returns on one after every power cycle. Sent before the
+    /// snapshot that publishes them, which may show them online throughout —
+    /// a quick power cycle swaps the node between two reconciliations — so
+    /// their return is a reconnect all the same.
+    DevicesReturned(Vec<DeviceRoute>),
 }
 
 /// The watcher's cross-pass memory, factored out of the I/O loop so the
@@ -494,7 +500,10 @@ impl InventoryWorker {
     async fn settle_trigger(&mut self, trigger: ReconcileTrigger) -> bool {
         match trigger {
             ReconcileTrigger::Hotplug => {
-                tokio::time::sleep(HOTPLUG_SETTLE).await;
+                let settle = self.schedule.hotplug_settle(Instant::now());
+                if !settle.is_zero() {
+                    tokio::time::sleep(settle).await;
+                }
                 if let Some(stream) = self.hotplug.as_mut() {
                     while let Some(drained) = futures_lite::future::poll_once(stream.next()).await {
                         if drained.is_none() {
@@ -556,7 +565,7 @@ impl InventoryWorker {
         result: Result<Vec<DeviceInventory>, openlogi_hid::InventoryError>,
         started: Instant,
     ) -> bool {
-        let (event, outcome, replaced) = match result {
+        let (event, outcome, replaced, returned) = match result {
             Ok(inventories) => {
                 let standalone = self.hardware.enumerate_standalone().await;
                 let standalone_failed = standalone.is_err();
@@ -571,13 +580,20 @@ impl InventoryWorker {
                     || standalone_failed
                     || self.state.raw_nodes.has_pending_misses();
                 let replaced = self.enumerator.replaced_channels_last_tick();
+                let returned = self.enumerator.returned_direct_devices_last_tick().to_vec();
                 (
                     Some(event),
                     ScanOutcome::Snapshot { needs_repair },
                     replaced,
+                    returned,
                 )
             }
-            Err(error) => (self.state.classify(Err(error)), ScanOutcome::Failed, false),
+            Err(error) => (
+                self.state.classify(Err(error)),
+                ScanOutcome::Failed,
+                false,
+                Vec::new(),
+            ),
         };
         if !self.device_io.allows_io() {
             debug!(
@@ -594,6 +610,17 @@ impl InventoryWorker {
                 debug!("inventory watcher receiver dropped — exiting");
                 return false;
             }
+        }
+        // Likewise ahead of the snapshot: it may show a returned device as
+        // online throughout.
+        if !returned.is_empty()
+            && self
+                .events
+                .send(InventoryEvent::DevicesReturned(returned))
+                .is_err()
+        {
+            debug!("inventory watcher receiver dropped — exiting");
+            return false;
         }
         if let Some(event) = event
             && self.events.send(event).is_err()

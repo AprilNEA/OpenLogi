@@ -629,7 +629,7 @@ fn device_thread(
                 // it would send a redundant second SYN_REPORT.
                 let inverted = report_inverted
                     .take()
-                    .unwrap_or_else(crate::scroll_inversion);
+                    .unwrap_or_else(|| crate::scroll_inverted_for(Some(&source)));
                 wheel.end_report(&mut pending, inverted);
                 if emit_report(&mut virtual_device, &mut pending, &path).is_break() {
                     break 'read;
@@ -666,7 +666,8 @@ fn device_thread(
                     )
                 );
                 let invert = is_vertical_wheel
-                    && *report_inverted.get_or_insert_with(crate::scroll_inversion);
+                    && *report_inverted
+                        .get_or_insert_with(|| crate::reverse_wheel_scroll(Some(&source)));
                 if let Some(forwarded) = dispatch(event, hires_scroll, invert, &source, &*cb) {
                     if let Some(axis) = released {
                         wheel.forwarded(axis);

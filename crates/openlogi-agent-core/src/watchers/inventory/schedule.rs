@@ -9,7 +9,8 @@ use openlogi_hid::inventory::events::HidppEventSource;
 /// cadence only while an explicit lifecycle contract still needs it.
 pub(super) const FAST_RETRY_DELAY: Duration = Duration::from_secs(2);
 
-/// Pause after an OS node event while the HID interface set settles.
+/// Pause after an OS node event that follows another within this window,
+/// while the HID interface set settles (see [`Schedule::hotplug_settle`]).
 pub(super) const HOTPLUG_SETTLE: Duration = Duration::from_millis(400);
 
 /// Pause after a HID++ burst so one reconciliation covers the whole burst.
@@ -103,6 +104,8 @@ pub(super) struct Schedule {
     confirmation: Option<Confirmation>,
     recovery_due: Instant,
     retry_count: u8,
+    /// When the latest hotplug reconciliation began enumerating.
+    hotplug_scan: Option<Instant>,
 }
 
 impl Schedule {
@@ -112,7 +115,28 @@ impl Schedule {
             confirmation: None,
             recovery_due: now + RECOVERY_SCAN_PERIOD,
             retry_count: 0,
+            hotplug_scan: None,
         }
+    }
+
+    /// How long a hotplug reconciliation triggered at `now` waits before it
+    /// enumerates.
+    ///
+    /// The first node event after a quiet spell enumerates at once: a mouse
+    /// that powers on is usable the moment the OS lists it, and its volatile
+    /// settings (wheel inversion above all) are re-applied only after the
+    /// snapshot that brings it back, so a fixed pause before every pass showed
+    /// as the wheel scrolling the wrong way for that long. An event within
+    /// [`HOTPLUG_SETTLE`] of the last hotplug pass is the rest of a burst — a
+    /// receiver's interfaces enumerate one by one — and waits that out so one
+    /// more pass covers the whole set.
+    pub(super) fn hotplug_settle(&mut self, now: Instant) -> Duration {
+        let settle = match self.hotplug_scan {
+            Some(last) if now.saturating_duration_since(last) < HOTPLUG_SETTLE => HOTPLUG_SETTLE,
+            _ => Duration::ZERO,
+        };
+        self.hotplug_scan = Some(now + settle);
+        settle
     }
 
     /// Next deadline and its purpose.
@@ -230,6 +254,36 @@ impl WakeDetector {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_hotplug_burst_enumerates_at_once_then_settles_its_tail() {
+        let start = Instant::now();
+        let mut schedule = Schedule::new(start);
+
+        assert_eq!(
+            schedule.hotplug_settle(start),
+            Duration::ZERO,
+            "the first node event enumerates at once"
+        );
+        let tail = start + Duration::from_millis(50);
+        assert_eq!(
+            schedule.hotplug_settle(tail),
+            HOTPLUG_SETTLE,
+            "an event inside the window is the burst's tail and settles"
+        );
+        let settled_at = tail + HOTPLUG_SETTLE;
+        assert_eq!(
+            schedule.hotplug_settle(settled_at + Duration::from_millis(100)),
+            HOTPLUG_SETTLE,
+            "the window runs from when the settled pass enumerated"
+        );
+        let quiet = settled_at + Duration::from_millis(100) + HOTPLUG_SETTLE * 2;
+        assert_eq!(
+            schedule.hotplug_settle(quiet),
+            Duration::ZERO,
+            "after a quiet spell the next device enumerates at once again"
+        );
+    }
 
     fn closed(at: Instant) -> ScanClock {
         ScanClock {

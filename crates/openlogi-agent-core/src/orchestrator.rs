@@ -51,6 +51,7 @@ use crate::hardware::{
     DeviceAccess, DeviceOp, HardwareContext, KeptOsLayouts, VolatileMouseSettings, WriteOrder,
     show_precision_led, write_pointer_speed_in_background,
 };
+use crate::interim_inversion::InterimInversion;
 use crate::notices::LowBatteryWatch;
 use crate::observable::ObservableState;
 use crate::pointer_speed::{AppWrite, ReloadChange, SavedSpeed, SpeedMouse, SpeedWrite};
@@ -79,7 +80,7 @@ use devices::{
     configured_wheel_mode, host_switch_links, is_hidpp_device, keeps_os_layout, main_wheel_divert,
     newly_kept_os_layouts, os_layout_appeared, pick_current, plan_disabled_keys_recovery,
     plan_reapply, published_inventories, reconnect_follower_cookies, same_device_lifecycle,
-    saved_speed, settings_moved, stable_id, wheel_inverted,
+    saved_speed, settings_moved, stable_id, wheel_inverted, wheel_presence,
 };
 
 /// The minimal per-device facts the agent needs: the config key (binding /
@@ -204,6 +205,9 @@ pub struct SharedHandles {
     /// The running inventory watcher's refresh handle, published at arming;
     /// `None` while no watcher runs.
     inventory_refresh: Arc<RwLock<Option<InventoryRefresh>>>,
+    /// Software inversion standing in for reconnected wheels' native
+    /// inversion until the wheel writes confirm it.
+    interim_inversion: InterimInversion,
 }
 
 impl SharedHandles {
@@ -750,6 +754,7 @@ impl Orchestrator {
             follower_cookie_order: WriteOrder::default(),
             disabled_keys_order: WriteOrder::default(),
             inventory_refresh: Arc::new(RwLock::new(None)),
+            interim_inversion: InterimInversion::default(),
         };
         let orch = Self {
             config,
@@ -1385,6 +1390,9 @@ impl Orchestrator {
         }
         self.os_mouse_hook_available = available;
         self.publish_capture_plans();
+        // Whether a capture session takes the wheel, and with it whether the
+        // agent inverts it natively, follows the hook.
+        self.sync_interim_inversion(&self.devices);
     }
 
     /// Apply a fresh inventory snapshot. Always refreshes the snapshot the IPC
@@ -1434,6 +1442,7 @@ impl Orchestrator {
         };
         self.publish_inventory();
         let devices = build_devices(&self.config, inventories, standalone);
+        self.sync_interim_inversion(&devices);
         // Retire departing routes before forgetting them. Offline routes that
         // remain in inventory still observe config changes without doing I/O.
         for old in &self.devices {
@@ -1690,6 +1699,34 @@ impl Orchestrator {
         self.force_reapply(RECONNECT_REAPPLY_CONFIRM_RETRIES);
     }
 
+    /// Keep what reconnects teach about each wheel's native inversion in
+    /// `path`, and start from what it already holds. Without it a restarted
+    /// agent learns again, and the reconnect it learns from scrolls the wrong
+    /// way until the native write lands.
+    pub fn remember_wheel_inversion_in(&self, path: std::path::PathBuf) {
+        self.shared.interim_inversion.remember_in(path);
+    }
+
+    /// Direct devices came back on a new OS node, which the snapshot about to
+    /// follow may show online throughout: a quick power cycle swaps a
+    /// Bluetooth device's node between two reconciliations. The connection
+    /// the last snapshot knew them by is gone, so they are taken offline
+    /// here. Their sighting in that snapshot is then the offline→online
+    /// transition every reconnect re-applies device-RAM settings on, and
+    /// their wheels are reversed in software until those land.
+    pub fn devices_returned(&mut self, routes: &[DeviceRoute]) {
+        for dev in &mut self.devices {
+            if dev
+                .route
+                .as_ref()
+                .is_some_and(|route| routes.contains(route))
+            {
+                dev.online = false;
+            }
+        }
+        self.shared.interim_inversion.went_away(routes);
+    }
+
     /// Coalesce forced re-apply requests, keeping the largest confirm budget:
     /// a device reconnect arriving between a system wake and its snapshot must
     /// not shrink the wake's boot-race ladder.
@@ -1752,6 +1789,7 @@ impl Orchestrator {
                 settings,
                 &self.shared.report_rate_order,
                 &self.shared.capture_plans,
+                &self.shared.interim_inversion,
             );
         }
         // A disabled entry is re-applied too: it writes black, and a device
@@ -1918,8 +1956,21 @@ impl Orchestrator {
                 self.shared.device(&route),
                 change,
                 self.shared.capture_plans.clone(),
+                self.shared.interim_inversion.clone(),
             );
         }
+    }
+
+    /// Tell the interim inversion which wheels the agent inverts natively and
+    /// which are online in `devices`, before any write to them is queued: a
+    /// wheel that just went away is armed for its return, and a write that
+    /// confirms one must find it known.
+    fn sync_interim_inversion(&self, devices: &[AgentDevice]) {
+        self.shared.interim_inversion.sync(&wheel_presence(
+            &self.config,
+            devices,
+            self.os_mouse_hook_available,
+        ));
     }
 
     /// The native wheel mode the agent's own writes (the reconnect re-apply
@@ -2194,6 +2245,7 @@ impl Orchestrator {
             .retain(|key, _| retained_overrides.contains(key));
         self.current = pick_current(&self.devices, self.config.selected_device());
         self.rebuild();
+        self.sync_interim_inversion(&self.devices);
         self.apply_native_wheel_modes();
         self.apply_changed_fn_locks(&previous);
         self.apply_changed_force_sensing(&previous);

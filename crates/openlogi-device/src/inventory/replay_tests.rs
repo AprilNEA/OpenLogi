@@ -8,6 +8,7 @@ use tokio::sync::mpsc;
 use super::Enumerator;
 use super::cache::{CACHE_MISS_GRACE, CacheKey, REFRESH_INTERVAL};
 use super::events::{HidppEventSource, event_channel, observed_event_channel};
+use super::features::TABLE_REWALK_INTERVAL;
 use super::replay_test_support::{
     BOLT_CHANNEL, BOLT_UID, BoltSlot, DIRECT_CHANNEL, HEADSET_CHANNEL, HEADSET_PRODUCT_ID,
     adc_error, adc_reading, battery_only_fixture, bolt_fixture, connection_notification,
@@ -934,13 +935,18 @@ async fn headset_stale_reprobe_preserves_unavailable_link_state() {
         enumerator.timeouts.arrival_drain = Duration::ZERO;
 
         assert_eq!(headset_state(&mut enumerator).await, before);
-        enumerator
+        let entry = enumerator
             .cache
             .get_mut(&key)
-            .expect("the initial probe is cached")
-            .probed_at = Instant::now()
+            .expect("the initial probe is cached");
+        entry.probed_at = Instant::now()
             .checked_sub(REFRESH_INTERVAL + Duration::from_nanos(1))
             .expect("the refresh interval fits the monotonic clock");
+        // Past the periodic re-walk too: an unchanged table head alone would
+        // let the cached walk stand, and this case is about a full reprobe.
+        entry.walked_at = Instant::now()
+            .checked_sub(TABLE_REWALK_INTERVAL + Duration::from_nanos(1))
+            .expect("the re-walk interval fits the monotonic clock");
         assert_eq!(
             headset_state(&mut enumerator).await,
             after,

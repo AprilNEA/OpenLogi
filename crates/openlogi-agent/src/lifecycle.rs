@@ -537,6 +537,11 @@ impl Running {
                     .await
                     .reapply_reconnected_on_next_refresh();
             }
+            // A device back on a new node: re-apply its settings on the next
+            // snapshot even if that snapshot never shows it offline.
+            InventoryEvent::DevicesReturned(routes) => {
+                self.orchestrator.lock().await.devices_returned(&routes);
+            }
         }
     }
 

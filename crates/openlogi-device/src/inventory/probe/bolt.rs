@@ -133,6 +133,7 @@ pub(in crate::inventory) fn assemble_bolt_probe(
             | CacheOutcome::Seen(CacheKey::Bolt { unit_id }) => Some(*unit_id),
             CacheOutcome::Fresh(..)
             | CacheOutcome::Update(..)
+            | CacheOutcome::Returned { .. }
             | CacheOutcome::Seen(..)
             | CacheOutcome::Unkeyed => None,
         };

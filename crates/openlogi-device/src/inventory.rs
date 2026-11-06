@@ -31,7 +31,7 @@ pub mod persist;
 mod probe;
 pub mod standalone;
 
-use cache::{CACHE_MISS_GRACE, CacheKey, CacheOutcome, Cached};
+use cache::{CACHE_MISS_GRACE, CacheKey, CacheOutcome, Cached, DepartedUnits};
 use channel_cache::ChannelCache;
 use events::{ChannelEventSubscriptions, EventNotifier, EventSubscriptionHandle};
 use persist::{ProbeCacheSnapshot, ProbeCacheStore};
@@ -71,6 +71,9 @@ pub struct Enumerator {
     /// host's; tests and other hosts supply their own.
     backend: Arc<dyn HidBackend>,
     cache: HashMap<CacheKey, Cached>,
+    /// Walks of direct devices evicted from `cache` once their node stayed
+    /// gone, kept for when the device returns on a new node.
+    departed: DepartedUnits,
     /// Consecutive passes each cached device has been missing, for grace-period
     /// eviction.
     misses: HashMap<CacheKey, u8>,
@@ -109,6 +112,8 @@ pub struct Enumerator {
     /// Nodes the most recent pass reopened after retiring their channel for
     /// failing probes, while the ledger replayed them as online throughout.
     replaced_last_tick: Vec<NodeId>,
+    /// Direct devices the most recent pass found back on a new node.
+    returned_last_tick: Vec<DeviceRoute>,
     /// Coalesced lifecycle-event sink installed on newly opened channels.
     event_notifier: Option<EventNotifier>,
     /// The timeouts every pass's probes run under.
@@ -373,6 +378,16 @@ impl Enumerator {
         !self.replaced_last_tick.is_empty()
     }
 
+    /// The direct devices the most recent pass found back on a new OS node: a
+    /// Bluetooth device returns on one after every power cycle. Each reached
+    /// the host again, so its device-RAM settings need re-applying — even
+    /// when the swap happened between two passes, and no snapshot ever
+    /// showed it offline.
+    #[must_use]
+    pub fn returned_direct_devices_last_tick(&self) -> &[DeviceRoute] {
+        &self.returned_last_tick
+    }
+
     /// An enumerator that walks `backend` — this host's HID stack, a scripted
     /// device tree in tests, or another host's.
     #[must_use]
@@ -380,6 +395,7 @@ impl Enumerator {
         Self {
             backend,
             cache: HashMap::new(),
+            departed: DepartedUnits::default(),
             misses: HashMap::new(),
             node_cache_keys: HashMap::new(),
             channels: ChannelCache::default(),
@@ -392,6 +408,7 @@ impl Enumerator {
             retry_needed_last_tick: false,
             evicted_nodes: HashSet::new(),
             replaced_last_tick: Vec::new(),
+            returned_last_tick: Vec::new(),
             event_notifier: None,
             timeouts: ProbeTimeouts::DEFAULT,
         }
@@ -664,14 +681,14 @@ impl Enumerator {
         // updates are collected and applied afterwards (no `RefCell`). Each
         // probe bounds its own I/O by the pass's timeouts (`probe_one`).
         let results = {
-            let cache = &self.cache;
-            let timeouts = &self.timeouts;
+            let (cache, departed, timeouts) = (&self.cache, &self.departed, &self.timeouts);
             active
                 .into_iter()
                 .map(|(info, channel, events)| async move {
                     let node = info.id.clone();
                     let pass = PassContext {
                         cache,
+                        departed,
                         now,
                         subscriptions: events.as_ref(),
                         timeouts,
@@ -789,6 +806,7 @@ impl Enumerator {
     /// so [`Self::evict_unseen`] can age out the rest.
     fn apply_outcomes(&mut self, outcomes: Vec<CacheOutcome>) -> HashSet<CacheKey> {
         let mut seen_keys = HashSet::new();
+        self.returned_last_tick.clear();
         for outcome in outcomes {
             match outcome {
                 CacheOutcome::Fresh(key, cached) => {
@@ -805,6 +823,13 @@ impl Enumerator {
                 CacheOutcome::Update(key, cached) => {
                     seen_keys.insert(key.clone());
                     self.cache.insert(key, cached);
+                }
+                CacheOutcome::Returned { key, cached, route } => {
+                    seen_keys.insert(key.clone());
+                    self.cache.insert(key, cached);
+                    if !self.returned_last_tick.contains(&route) {
+                        self.returned_last_tick.push(route);
+                    }
                 }
                 CacheOutcome::Seen(key) => {
                     seen_keys.insert(key);
@@ -892,7 +917,11 @@ impl Enumerator {
             let misses = self.misses.entry(key.clone()).or_insert(0);
             *misses += 1;
             if *misses > CACHE_MISS_GRACE {
-                self.cache.remove(&key);
+                if let Some(entry) = self.cache.remove(&key)
+                    && matches!(key, CacheKey::Direct(_))
+                {
+                    self.departed.keep(entry);
+                }
                 self.misses.remove(&key);
                 for keys in self.node_cache_keys.values_mut() {
                     keys.remove(&key);

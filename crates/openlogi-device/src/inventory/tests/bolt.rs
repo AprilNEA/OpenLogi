@@ -258,6 +258,7 @@ async fn a_receiver_probe_that_waited_for_its_register_phase_keeps_its_whole_io_
     let (key, cache) = stale_silent_slot_cache();
     let pass = PassContext {
         cache: &cache,
+        departed: &DepartedUnits::default(),
         now: Instant::now(),
         subscriptions: None,
         timeouts: &timeouts,
@@ -321,6 +322,7 @@ async fn a_receiver_probe_defers_when_the_register_phase_is_held_past_the_wait()
     let cache = HashMap::new();
     let pass = PassContext {
         cache: &cache,
+        departed: &DepartedUnits::default(),
         now: Instant::now(),
         subscriptions: None,
         timeouts: &timeouts,
@@ -351,6 +353,7 @@ async fn a_receiver_probe_whose_io_outruns_the_budget_is_failed() {
     let (_, cache) = stale_silent_slot_cache();
     let pass = PassContext {
         cache: &cache,
+        departed: &DepartedUnits::default(),
         now: Instant::now(),
         subscriptions: None,
         timeouts: &timeouts,
@@ -384,6 +387,7 @@ async fn a_bolt_receiver_with_an_unanswered_uid_keeps_its_slots() {
     let (key, cache) = stale_silent_slot_cache();
     let pass = PassContext {
         cache: &cache,
+        departed: &DepartedUnits::default(),
         now: Instant::now(),
         subscriptions: None,
         timeouts: &timeouts,
@@ -436,6 +440,7 @@ async fn a_bolt_receiver_with_an_unanswered_pairing_count_stops_before_metadata(
     let cache = HashMap::new();
     let pass = PassContext {
         cache: &cache,
+        departed: &DepartedUnits::default(),
         now: Instant::now(),
         subscriptions: None,
         timeouts: &timeouts,
@@ -505,6 +510,7 @@ async fn a_bolt_slot_without_a_marketing_name_reads_both_codename_chunks() {
     let (_, cache) = stale_silent_slot_cache();
     let pass = PassContext {
         cache: &cache,
+        departed: &DepartedUnits::default(),
         now: Instant::now(),
         subscriptions: None,
         timeouts: &timeouts,
@@ -542,6 +548,7 @@ async fn a_bolt_slot_is_named_by_its_marketing_name_over_the_truncated_register(
     )]);
     let pass = PassContext {
         cache: &cache,
+        departed: &DepartedUnits::default(),
         now: Instant::now(),
         subscriptions: None,
         timeouts: &timeouts,
@@ -582,6 +589,7 @@ async fn a_lost_second_codename_chunk_keeps_the_probe_inside_its_budget() {
     let (_, cache) = stale_silent_slot_cache();
     let pass = PassContext {
         cache: &cache,
+        departed: &DepartedUnits::default(),
         now: Instant::now(),
         subscriptions: None,
         timeouts: &timeouts,
