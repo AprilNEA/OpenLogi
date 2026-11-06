@@ -1770,6 +1770,15 @@ impl Orchestrator {
         if let Some(write) = speed_write {
             self.write_pointer_speed(write);
         }
+        // Apply OS-level pointer speed if configured.
+        if let Some(factor) = self.config.os_pointer_speed(key) {
+            let compositor = openlogi_core::compositor::Compositor::detect();
+            if let Some(cmd) = openlogi_core::compositor::apply_pointer_speed(compositor, factor) {
+                let _ = std::process::Command::new(&cmd[0])
+                    .args(&cmd[1..])
+                    .spawn();
+            }
+        }
         self.keep_os_layout(dev);
         let _ = self.shared.reapply_disabled_keys(&route);
         if let Some(capabilities) = dev.light_capabilities
