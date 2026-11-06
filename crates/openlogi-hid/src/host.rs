@@ -219,6 +219,36 @@ pub async fn set_keyboard_color_with(
         device::LightingWrite {
             method,
             color: openlogi_core::color::Rgb::new(r, g, b),
+            keys: Vec::new(),
+        }
+        .apply(
+            &*native_backend(),
+            &target,
+            || cancel.is_cancelled(),
+            || gate.allows_io(),
+        )
+        .await
+        .map(drop)
+    })?
+    .finish()
+    .await
+}
+
+/// Set every key to `color`, with `keys` as `(HID keyboard usage, colour)`
+/// over it on a keyboard whose zone map is known. Any other keyboard shows
+/// `color` alone.
+pub async fn set_keyboard_key_colors(
+    route: &DeviceRoute,
+    color: openlogi_core::color::Rgb,
+    keys: Vec<(u8, openlogi_core::color::Rgb)>,
+) -> Result<(), WriteError> {
+    let target = route.clone();
+    let gate = device_io_gate();
+    crate::lighting::LightingJob::spawn(route, move |cancel| async move {
+        device::LightingWrite {
+            method: LightingMethod::Auto,
+            color,
+            keys,
         }
         .apply(
             &*native_backend(),

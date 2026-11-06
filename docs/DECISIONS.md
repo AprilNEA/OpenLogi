@@ -4,6 +4,40 @@ Durable "why we did it this way" records that are not obvious from the code.
 Add a dated entry when a non-obvious architectural or dependency decision is
 made or revisited.
 
+## 2026-11: Per-key colours are keyed by key position, mapped per product
+
+`0x8081` addresses lighting zones by number and reports which numbers exist,
+not which key each one lights. `Lighting::keys` names keys instead, and the
+device layer turns a key into a zone.
+
+- **Keys, not zones, in the config.** A zone number means nothing to a person
+  editing `config.toml`, and the same key can sit under different numbers on
+  another model. A name stands for one USB HID keyboard usage, which is a
+  switch position: a layout changes the legends, not the positions, so one
+  name works for every layout. The punctuation keys a layout relabels are
+  named after their US legend.
+- **Zone maps are per product, in `openlogi-device-registry`.** No protocol
+  reports them. The G515 LS TKL was walked zone by zone with
+  `openlogi diag zones`: usage − 3 for `0x04..=0x65`, `0x68 + n` for the eight
+  modifiers. Other keyboards may share that rule, but none is assumed to until
+  a walk confirms it, because a wrong map paints the wrong keys.
+- **`0x8080` needs no map.** It addresses keys by HID usage, so a keyboard
+  with `0x8080` and no `0x8081` (such as the G512) takes `keys` directly. The
+  fixed colour goes through `0x8070` first, because a frame cannot replace a
+  running onboard effect, then one `0x8080` frame with every key's colour.
+- **An unmapped keyboard keeps the static colour.** With neither a known
+  `0x8081` map nor `0x8080`, per-key colours fall back to the one-colour path
+  before anything is claimed, so `keys` never changes what such a keyboard
+  shows.
+- **One frame.** The base colour and the keys go out as `setRgbZonesSingleValue`
+  requests grouped by colour, then a single `frameEnd`, so the keyboard never
+  shows the base without its keys.
+- **The config file omits an empty map; the wire always carries it.**
+  `Lighting` crosses the IPC, whose bincode encoding has no field names, so its
+  `Serialize` skips `keys` only for human-readable formats.
+
+Verified on a G515 LS TKL over LIGHTSPEED with `openlogi diag lighting --key`.
+
 ## 2026-11: The agent saves a paired Flow computer in `config.toml`
 
 Until now the agent only read `config.toml`; the GUI and `openlogi api` wrote

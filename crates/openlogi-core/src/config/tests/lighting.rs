@@ -11,6 +11,7 @@ fn lighting_roundtrips_per_device() {
             enabled: true,
             color: "00aabb".parse().expect("valid hex"),
             brightness: 75,
+            keys: BTreeMap::new(),
         },
     );
     let restored = write_and_read(&cfg);
@@ -20,9 +21,98 @@ fn lighting_roundtrips_per_device() {
             enabled: true,
             color: "00aabb".parse().expect("valid hex"),
             brightness: 75,
+            keys: BTreeMap::new(),
         })
     );
     assert_eq!(restored.lighting("absent"), None);
+}
+
+#[test]
+fn per_key_colors_roundtrip_by_key_name() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    fs::write(
+        &path,
+        r##"
+            schema_version = 3
+            [devices.g515.lighting]
+            color = "0040ff"
+            keys = { esc = "ff0000", LShift = "#00ff00", "1" = "ffffff" }
+        "##,
+    )
+    .expect("write config");
+
+    let cfg = Config::load_from_path(&path).expect("load per-key colors");
+    let keys = cfg.lighting("g515").expect("lighting").keys;
+    let key = |name: &str| name.parse::<LightingKey>().expect("a known key");
+    assert_eq!(
+        keys,
+        BTreeMap::from([
+            (key("Esc"), crate::color::Rgb::new(0xff, 0, 0)),
+            (key("LShift"), crate::color::Rgb::new(0, 0xff, 0)),
+            (key("1"), crate::color::Rgb::WHITE),
+        ])
+    );
+
+    // Saved back under the canonical names, colors without `#`.
+    cfg.save_to_path(&path).expect("save");
+    let saved = fs::read_to_string(&path).expect("read saved config");
+    assert!(saved.contains("Esc = \"ff0000\""), "{saved}");
+    assert!(saved.contains("LShift = \"00ff00\""), "{saved}");
+    assert_eq!(
+        write_and_read(&cfg).lighting("g515").map(|l| l.keys),
+        Some(keys)
+    );
+}
+
+#[test]
+fn a_solid_color_saves_no_key_map() {
+    let mut cfg = Config::default();
+    cfg.set_lighting("g513", Lighting::default());
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    cfg.save_to_path(&path).expect("save");
+    let saved = fs::read_to_string(path).expect("read saved config");
+    assert!(saved.contains("[devices.g513.lighting]"), "{saved}");
+    assert!(!saved.contains("keys"), "{saved}");
+}
+
+#[test]
+fn an_unknown_key_name_is_rejected() {
+    let error = toml::from_str::<Config>(
+        r#"
+            schema_version = 3
+            [devices.g515.lighting]
+            keys = { Hyper = "ff0000" }
+        "#,
+    )
+    .expect_err("an unknown key must fail");
+    assert!(error.to_string().contains("unknown key name"), "{error}");
+
+    let error = toml::from_str::<Config>(
+        r#"
+            schema_version = 3
+            [devices.g515.lighting]
+            keys = { Esc = "red" }
+        "#,
+    )
+    .expect_err("an invalid key color must fail");
+    assert!(error.to_string().contains("key Esc"), "{error}");
+}
+
+#[test]
+fn two_spellings_of_one_key_are_rejected() {
+    // TOML keeps `Esc` and `esc` apart; key names ignore case, so one would
+    // silently replace the other and vanish on the next save.
+    let error = toml::from_str::<Config>(
+        r#"
+            schema_version = 3
+            [devices.g515.lighting]
+            keys = { Esc = "ff0000", esc = "00ff00" }
+        "#,
+    )
+    .expect_err("two spellings of one key must fail");
+    assert!(error.to_string().contains("name the same key"), "{error}");
 }
 
 #[test]

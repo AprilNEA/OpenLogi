@@ -20,6 +20,7 @@ mod function_key;
 mod gestures;
 mod identity;
 mod key_trigger;
+mod lighting_key;
 mod migrate;
 mod per_app;
 mod per_device;
@@ -47,6 +48,7 @@ pub use flow::{
 pub use function_key::FunctionKey;
 pub use identity::canonical_device_key;
 pub use key_trigger::{KeyModifiers, KeyTrigger, KeyboardConfig, ParseTriggerError};
+pub use lighting_key::{LightingKey, LightingKeyError};
 pub use revision::ConfigRevision;
 pub use settings::LightSettings;
 pub use settings::{
