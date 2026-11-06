@@ -17,7 +17,7 @@ pub(super) use gpui::{
     StatefulInteractiveElement, Styled, Subscription, Window, div, img, prelude::FluentBuilder, px,
     rgb,
 };
-pub(super) use gpui_component::{
+pub(super) use gpui_kit::component::{
     ActiveTheme, Disableable, Icon, IconName, IndexPath, Selectable, Sizable, TITLE_BAR_HEIGHT,
     Theme, ThemeColor, ThemeMode, ThemeRegistry,
     button::{Button, ButtonGroup, ButtonVariants},
@@ -37,7 +37,7 @@ pub(super) use openlogi_core::config::{
     Appearance, AssetSourcePreference, ThumbwheelSensitivity, UiScale, VerticalScrollSensitivity,
 };
 
-pub(super) use crate::app::menu::{CloseWindow, Minimize, Zoom};
+use crate::features::pointer::momentum::{MomentumPanel, MomentumScope};
 pub(super) use crate::services::assets::sync::{AssetCommand, AssetControl};
 pub(super) use crate::state::{AppState, StateEvent};
 use crate::ui::commit_slider::{CommitSlider, SliderRange};
@@ -72,6 +72,9 @@ pub enum SettingsPage {
     #[default]
     General,
     Updates,
+    /// Where Linux shows input-device access, which the agent needs to run.
+    #[cfg(target_os = "linux")]
+    Permissions,
     About,
 }
 
@@ -81,6 +84,8 @@ impl SettingsPage {
         match self {
             Self::General => 0,
             Self::Updates => 1,
+            #[cfg(target_os = "linux")]
+            Self::Permissions => 2,
             // One lower on Windows: the Permissions page isn't registered
             // there (see the `mod permissions` cfg).
             Self::About => {
@@ -124,6 +129,8 @@ pub struct SettingsView {
     asset_source_select: Entity<SelectState<Vec<assets::AssetSourceOption>>>,
     thumbwheel_sensitivity: CommitSlider<ThumbwheelSensitivity>,
     vertical_scroll_sensitivity: CommitSlider<VerticalScrollSensitivity>,
+    /// The General page's momentum-scrolling card: the app-wide default.
+    momentum_panel: Entity<MomentumPanel>,
     /// Shared app-wide updater, surfaced on the Updates page. A launch-time
     /// check result is already visible when the window opens.
     updater: Entity<Updater>,
@@ -147,6 +154,10 @@ pub struct SettingsView {
     /// General page's "switched off in System Settings" notice while keeping
     /// the render path on this intentional cache.
     registration_status: crate::platform::registration::ServiceStatus,
+    /// The Permissions page's "Grant access…" run, which installs the udev
+    /// rules through pkexec.
+    #[cfg(target_os = "linux")]
+    input_access_grant: permissions::InputAccessGrant,
     /// Drives the debug live event monitor: polls the agent on a timer while the
     /// Settings window is open. Dropping it with the view stops polling, which
     /// lets the agent's idle janitor turn monitoring back off.
@@ -219,6 +230,7 @@ impl SettingsView {
 
         let thumbwheel_sensitivity = Self::thumbwheel_sensitivity_slider(cx);
         let vertical_scroll_sensitivity = Self::vertical_scroll_sensitivity_slider(cx);
+        let momentum_panel = cx.new(|cx| MomentumPanel::new(MomentumScope::General, cx));
 
         // Poll the agent's live event monitor while this window is open. The task
         // is held in the view, so closing Settings drops it, polling stops, and
@@ -262,12 +274,15 @@ impl SettingsView {
             asset_source_select,
             thumbwheel_sensitivity,
             vertical_scroll_sensitivity,
+            momentum_panel,
             updater,
             updater_obs,
             copied: false,
             copied_gen: 0,
             asset_cache_desc: assets::cache_size_description(),
             registration_status: crate::platform::registration::status(),
+            #[cfg(target_os = "linux")]
+            input_access_grant: permissions::InputAccessGrant::default(),
             #[cfg(all(target_os = "macos", debug_assertions))]
             _monitor_task: monitor_task,
         }
@@ -452,13 +467,14 @@ impl Render for SettingsView {
                     vertical_scroll: self.vertical_scroll_sensitivity.slider().clone(),
                     thumbwheel: self.thumbwheel_sensitivity.slider().clone(),
                 },
+                self.momentum_panel.clone(),
                 self.registration_status,
             ))
             .page(updates::updates_page(self.updater.clone()));
         // Registered only where grants exist to manage — see the `mod
         // permissions` cfg for why Windows skips it.
         #[cfg(any(target_os = "macos", target_os = "linux"))]
-        let settings = settings.page(permissions::permissions_page(has_camera));
+        let settings = settings.page(permissions::permissions_page(view.clone(), has_camera));
         let settings = settings
             .page(appearance::appearance_page(
                 view.clone(),
@@ -484,9 +500,6 @@ impl Render for SettingsView {
             .bg(pal.page)
             .text_color(pal.text_primary)
             .track_focus(&self.focus_handle)
-            .on_action(|_: &CloseWindow, window, _| window.remove_window())
-            .on_action(|_: &Minimize, window, _| window.minimize_window())
-            .on_action(|_: &Zoom, window, _| window.zoom_window())
             // Only where the compositor left the chrome to us, and as an
             // absolute overlay (with matching top padding) rather than a
             // flex-column row — the `Settings` sidebar uses `h_resizable`

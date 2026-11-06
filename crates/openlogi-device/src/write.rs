@@ -11,7 +11,7 @@
 use std::sync::Arc;
 
 use hidpp::{
-    channel::HidppChannel,
+    channel::{ChannelError, HidppChannel},
     device::Device,
     feature::{CreatableFeature, disable_keys::DisableKeysFeature},
 };
@@ -20,6 +20,7 @@ use crate::backend::HidBackend;
 use crate::channel::route::{DeviceRoute, open_route_channel};
 
 mod backlight;
+mod button_spy;
 mod diagnostics;
 mod disable_keys;
 mod dpi;
@@ -30,15 +31,18 @@ mod fn_lock;
 mod force_sensing;
 mod haptic;
 mod hires_wheel;
+mod key_display;
 mod lighting;
 mod litra;
 mod onboard;
 mod os_layout;
 mod pointer_scaling;
 mod report_rate;
+mod sidetone;
 mod smartshift;
 
 pub use backlight::{get_backlight, get_backlight_on, update_backlight, update_backlight_on};
+pub use button_spy::{ButtonSpyError, ButtonSpyWatch, watch_button_spy};
 pub use diagnostics::{
     FeatureEntry, FirmwareEntity, FirmwareEntityInfo, RAW_BATTERY_FEATURES, ReprogControlEntry,
     dump_features, dump_firmware_entities, dump_reprog_controls, read_battery_raw,
@@ -71,9 +75,11 @@ pub use hires_wheel::{
     get_scroll_wheel_mode_on, set_scroll_inversion, set_scroll_inversion_on, set_scroll_resolution,
     set_scroll_resolution_on, set_scroll_wheel_mode, set_scroll_wheel_mode_on,
 };
+pub use key_display::{KeyDisplay, KeyImageJpeg, key_display_for, write_key_image_on};
 pub use lighting::{
-    LightingMethod, LightingWrite, RgbControlLease, release_rgb_control, set_keyboard_color,
-    set_keyboard_color_on, set_keyboard_color_with, set_keyboard_color_with_on,
+    LightingMethod, LightingWrite, LitZone, RgbControlLease, ZoneWalkStep, release_rgb_control,
+    set_keyboard_color, set_keyboard_color_on, set_keyboard_color_with, set_keyboard_color_with_on,
+    walk_per_key_zones, walk_per_key_zones_on,
 };
 pub(crate) use litra::litra_capabilities;
 pub use litra::{
@@ -87,7 +93,9 @@ pub use openlogi_core::hid::{DisableKeysMask, DisableKeysState};
 pub use openlogi_core::hid::{
     EasySwitchHosts, EasySwitchSlot, HostConnection, HostOsInfo, HostOsKind,
 };
-pub use openlogi_core::hid::{ForceSensingInfo, PointerSpeed, ReportRate, ReportRateInfo};
+pub use openlogi_core::hid::{
+    ForceSensingInfo, PointerSpeed, ReportRate, ReportRateInfo, SidetoneLevel,
+};
 pub use os_layout::{HostOs, OsLayoutOutcome, OsVersion, keep_os_layout_on};
 pub use pointer_scaling::{
     PointerScaling, get_pointer_scaling, get_pointer_speed_on, set_pointer_scaling,
@@ -97,6 +105,7 @@ pub(crate) use report_rate::set_report_rate_on_channel;
 pub use report_rate::{
     get_report_rate_info, get_report_rate_info_on, set_report_rate, set_report_rate_on,
 };
+pub use sidetone::{get_sidetone, get_sidetone_on, set_sidetone, set_sidetone_on};
 pub use smartshift::{
     get_smartshift_status, get_smartshift_status_on, set_smartshift, set_smartshift_on,
     set_smartshift_sensitivity, set_smartshift_torque, toggle_smartshift, toggle_smartshift_on,
@@ -176,6 +185,34 @@ where
     match open_route_channel(backend, route).await? {
         Some(channel) => f(channel).await,
         None => Err(WriteError::DeviceNotFound),
+    }
+}
+
+/// Write `report` whole through `channel`'s raw-report path, for the report
+/// widths an HID++ message cannot carry — the per-key lighting frame and the
+/// keypad's image write.
+///
+/// A transport timeout is `operation`'s [`WriteError::RequestTimedOut`]. A
+/// short write is an error too: the device acts only on a complete report.
+pub(crate) async fn write_whole_raw_report(
+    channel: &HidppChannel,
+    report: &[u8],
+    operation: HidppOperation,
+) -> Result<(), WriteError> {
+    let written = channel
+        .write_raw_report(report)
+        .await
+        .map_err(|error| match error {
+            ChannelError::Timeout => WriteError::RequestTimedOut { operation },
+            other => WriteError::Hidpp(format!("{other:?}")),
+        })?;
+    if written == report.len() {
+        Ok(())
+    } else {
+        Err(WriteError::Hidpp(format!(
+            "{operation:?} report wrote {written} of {} bytes",
+            report.len()
+        )))
     }
 }
 

@@ -309,6 +309,54 @@ mod tests {
     }
 
     #[test]
+    fn mouse_buttons_listens_a_minute_unless_told_otherwise() {
+        let parse = |extra: &[&str]| {
+            let args = ["openlogi", "diag", "mouse-buttons"].iter().chain(extra);
+            match Cli::try_parse_from(args)
+                .expect("valid mouse-buttons invocation parses")
+                .cmd
+                .expect("subcommand present")
+            {
+                Command::Diag(DiagCmd::MouseButtons(args)) => args,
+                other => panic!("expected Diag(MouseButtons), got {other:?}"),
+            }
+        };
+
+        let defaults = parse(&[]);
+        assert_eq!(defaults.duration, 60);
+        assert!(defaults.device.is_none());
+
+        let chosen = parse(&["--device", "G903", "--duration", "180"]);
+        assert_eq!(chosen.device.as_deref(), Some("G903"));
+        assert_eq!(chosen.duration, 180);
+    }
+
+    #[test]
+    fn host_switch_requires_a_device_and_maps_the_zero_based_host() {
+        Cli::try_parse_from(["openlogi", "diag", "host-switch", "--host", "1"])
+            .expect_err("host-switch without --device must be rejected");
+
+        let cli = Cli::try_parse_from([
+            "openlogi",
+            "diag",
+            "host-switch",
+            "--device",
+            "MX Master 3S",
+            "--host",
+            "1",
+        ])
+        .expect("valid host-switch invocation parses");
+
+        match cli.cmd.expect("subcommand present") {
+            Command::Diag(DiagCmd::HostSwitch(args)) => {
+                assert_eq!(args.device, "MX Master 3S");
+                assert_eq!(args.host, 1);
+            }
+            other => panic!("expected Diag(HostSwitch), got {other:?}"),
+        }
+    }
+
+    #[test]
     fn fixture_record_case_parses_every_read_only_operation() {
         let operations = [
             ("feature-table", FixtureOperation::FeatureTable),

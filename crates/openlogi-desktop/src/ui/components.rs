@@ -4,13 +4,14 @@
 //! render time, so callers do not have to thread colours through free-function
 //! builders.
 
+use super::theme::FocusRingStyle as _;
 use gpui::{
-    AnyElement, App, ClickEvent, ElementId, Entity, InteractiveElement, Interactivity, IntoElement,
-    ParentElement, Pixels, RenderOnce, Role, SharedString, Stateful, StatefulInteractiveElement,
-    Styled, Window, div, prelude::FluentBuilder as _, px, rgb,
+    AnyElement, App, ClickEvent, Div, ElementId, Entity, InteractiveElement, Interactivity,
+    IntoElement, ParentElement, Pixels, RenderOnce, Role, SharedString, Stateful,
+    StatefulInteractiveElement, Styled, Window, div, prelude::FluentBuilder as _, px, rgb,
 };
-use gpui_base::Button as BaseButton;
-use gpui_component::{
+use gpui_kit::base::Button as BaseButton;
+use gpui_kit::component::{
     Disableable, Icon, IconName, Selectable, Sizable, Size,
     button::ButtonVariants as _,
     dialog::{Cancel, Confirm, DialogFooter},
@@ -19,6 +20,7 @@ use gpui_component::{
     searchable_list::SearchableListDelegate,
     select::{Select, SelectState},
     switch::Switch,
+    tooltip::Tooltip,
     v_flex,
 };
 
@@ -33,8 +35,8 @@ use super::theme::{self, ACCENT_BLUE, SelectableStyle as _, Typography as _};
 /// pin [`theme::CONTROL_H`] explicitly — construct them through these
 /// helpers; a bare `.small()` on one is a bug. Ghost and link affordances,
 /// pills, and icon-only toggles stay on the stock ladder on purpose.
-pub(crate) fn control_button(id: impl Into<ElementId>) -> gpui_component::button::Button {
-    gpui_component::button::Button::new(id)
+pub(crate) fn control_button(id: impl Into<ElementId>) -> gpui_kit::component::button::Button {
+    gpui_kit::component::button::Button::new(id)
         .small()
         .h(px(theme::CONTROL_H))
 }
@@ -104,6 +106,7 @@ pub(crate) struct Toggle {
     disabled: bool,
     size: Size,
     label: Option<SharedString>,
+    accessibility_label: Option<SharedString>,
     icon: Option<IconName>,
     min_width: Option<Pixels>,
     on_change: Option<SwitchHandler>,
@@ -119,6 +122,7 @@ impl Toggle {
             disabled: false,
             size: Size::Small,
             label: None,
+            accessibility_label: None,
             icon: None,
             min_width: None,
             on_change: None,
@@ -128,6 +132,14 @@ impl Toggle {
     #[must_use]
     pub(crate) fn label(mut self, label: impl Into<Option<SharedString>>) -> Self {
         self.label = label.into();
+        self
+    }
+
+    /// The name a screen reader announces, when the switch's subject is shown
+    /// beside it rather than in its On/Off label.
+    #[must_use]
+    pub(crate) fn accessibility_label(mut self, label: impl Into<SharedString>) -> Self {
+        self.accessibility_label = Some(label.into());
         self
     }
 
@@ -193,6 +205,9 @@ impl RenderOnce for Toggle {
             .with_size(self.size)
             .label(label)
             .color(rgb(ACCENT_BLUE));
+        if let Some(name) = self.accessibility_label {
+            toggle = toggle.accessibility_label(name);
+        }
         if let Some(handler) = self.on_change {
             toggle = toggle.on_click(move |selected, window, cx| handler(selected, window, cx));
         }
@@ -207,39 +222,64 @@ impl RenderOnce for Toggle {
     }
 }
 
-/// One setting: a title and a caption on the left, its toggle on the right.
-/// The caption column shrinks and wraps, so a long translation cannot push the
-/// toggle out of its card or panel. `selector` names the row for layout tests,
-/// and `{selector}-control` the toggle's slot.
+/// One setting: a title and a caption on the left, its control — a toggle, or
+/// a compact segmented choice — on the right. The caption column shrinks and
+/// wraps, so a long translation cannot push the control out of its card or
+/// panel. `selector` names the row for layout tests, and `{selector}-control`
+/// the control's slot.
 pub(crate) fn toggle_row(
     selector: &'static str,
     pal: theme::Palette,
     title: SharedString,
     description: SharedString,
-    toggle: Toggle,
+    control: impl IntoElement,
 ) -> impl IntoElement {
     h_flex()
         .debug_selector(move || selector.into())
         .justify_between()
         .items_center()
         .gap_4()
-        .child(
-            v_flex()
-                .flex_1()
-                .min_w_0()
-                .child(div().text_body().text_color(pal.text_primary).child(title))
-                .child(
-                    div()
-                        .text_caption()
-                        .text_color(pal.text_muted)
-                        .child(description),
-                ),
-        )
+        .child(setting_text(pal, title, description).flex_1().min_w_0())
         .child(
             div()
                 .debug_selector(move || format!("{selector}-control"))
                 .flex_shrink_0()
-                .child(toggle),
+                .child(control),
+        )
+}
+
+/// A [`toggle_row`] whose control sits under the caption instead of beside it,
+/// for a control too wide to share a narrow column with its text — a segmented
+/// choice in the Actions Ring's 320 px column, say — so the caption keeps the
+/// full width and the control starts at the leading edge. Same selectors.
+pub(crate) fn stacked_row(
+    selector: &'static str,
+    pal: theme::Palette,
+    title: SharedString,
+    description: SharedString,
+    control: impl IntoElement,
+) -> impl IntoElement {
+    v_flex()
+        .debug_selector(move || selector.into())
+        .items_start()
+        .gap_2()
+        .child(setting_text(pal, title, description).w_full())
+        .child(
+            div()
+                .debug_selector(move || format!("{selector}-control"))
+                .child(control),
+        )
+}
+
+/// The title and caption shared by [`toggle_row`] and [`stacked_row`].
+fn setting_text(pal: theme::Palette, title: SharedString, description: SharedString) -> Div {
+    v_flex()
+        .child(div().text_body().text_color(pal.text_primary).child(title))
+        .child(
+            div()
+                .text_caption()
+                .text_color(pal.text_muted)
+                .child(description),
         )
 }
 
@@ -250,6 +290,7 @@ pub(crate) struct PanelCard {
     icon: Icon,
     content: AnyElement,
     fill: bool,
+    title_suffix: Option<AnyElement>,
 }
 
 impl PanelCard {
@@ -263,7 +304,15 @@ impl PanelCard {
             icon,
             content: content.into_any_element(),
             fill: false,
+            title_suffix: None,
         }
+    }
+
+    /// Show `suffix` beside the title, such as a status tag.
+    #[must_use]
+    pub(crate) fn title_suffix(mut self, suffix: impl IntoElement) -> Self {
+        self.title_suffix = Some(suffix.into_any_element());
+        self
     }
 
     #[must_use]
@@ -296,7 +345,8 @@ impl RenderOnce for PanelCard {
                                 .gap_2()
                                 .text_color(pal.text_primary)
                                 .child(self.icon.size_4().text_color(pal.text_muted))
-                                .child(div().text_subheading().child(self.title)),
+                                .child(div().text_subheading().child(self.title))
+                                .children(self.title_suffix),
                         )
                     })
                     .child(self.content),
@@ -392,13 +442,7 @@ impl RenderOnce for MenuRow {
                     pal.control_hover
                 })
             })
-            .focus_visible(move |style| {
-                style.bg(if selected {
-                    theme::accent_tint_hover()
-                } else {
-                    pal.control_hover
-                })
-            })
+            .focus_visible(move |style| style.focus_ring(pal))
             .children(self.children)
             .when_some(self.on_click, |row, handler| {
                 row.on_click(move |event, window, cx| handler(event, window, cx))
@@ -525,15 +569,7 @@ impl RenderOnce for ProfileTab {
                     pal.control_hover
                 })
             })
-            .focus_visible(move |style| {
-                style
-                    .bg(if self.selected {
-                        theme::accent_tint_hover()
-                    } else {
-                        pal.control_hover
-                    })
-                    .border_color(accent)
-            })
+            .focus_visible(move |style| style.focus_ring(pal))
             .when_some(self.icon, |tab, icon| tab.child(icon.size_3()))
             .child(label.clone())
             .children(self.children)
@@ -541,16 +577,19 @@ impl RenderOnce for ProfileTab {
                 tab.on_click(move |event, window, cx| handler(event, window, cx))
             })
             .when_some(self.delete, |tab, (id, handler)| {
+                let remove = tr!("common.remove_named_item", name => label.to_string());
                 tab.child(
                     BaseButton::new(id)
-                        .accessibility_label(
-                            tr!("common.remove_named_item", name => label.to_string()),
-                        )
-                        .px_0p5()
+                        .accessibility_label(remove.clone())
+                        .tooltip(move |window, cx| Tooltip::new(remove.clone()).build(window, cx))
+                        .size_5()
+                        .flex()
+                        .items_center()
+                        .justify_center()
                         .rounded_full()
                         .text_color(pal.text_muted)
-                        .hover(|style| style.text_color(pal.text_primary))
-                        .focus_visible(|style| style.text_color(pal.text_primary))
+                        .hover(|style| style.text_color(pal.text_primary).bg(pal.control_hover))
+                        .focus_visible(move |style| style.focus_ring(pal))
                         .child(Icon::new(IconName::Close).size_3())
                         .on_click(move |event, window, cx| {
                             cx.stop_propagation();
@@ -631,7 +670,7 @@ impl RenderOnce for PresetChip {
 /// pill keeps the stock disabled look, because there is nothing to choose.
 #[derive(IntoElement)]
 pub(crate) struct Pill {
-    button: gpui_component::button::Button,
+    button: gpui_kit::component::button::Button,
     selected: bool,
     disabled: bool,
 }
@@ -639,7 +678,7 @@ pub(crate) struct Pill {
 impl Pill {
     pub(crate) fn new(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Self {
         Self {
-            button: gpui_component::button::Button::new(id)
+            button: gpui_kit::component::button::Button::new(id)
                 .compact()
                 .label(label),
             selected: false,
@@ -657,7 +696,7 @@ impl Pill {
     }
 
     /// The stock button, with the house selected look on an enabled selection.
-    fn into_button(self, pal: theme::Palette) -> gpui_component::button::Button {
+    fn into_button(self, pal: theme::Palette) -> gpui_kit::component::button::Button {
         let marked = self.selected && !self.disabled;
         self.button
             .selected(self.selected)

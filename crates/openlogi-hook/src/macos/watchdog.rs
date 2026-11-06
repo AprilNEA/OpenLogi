@@ -261,6 +261,24 @@ struct Stall {
     /// returns because the probe alone outlasted the short budget.
     budget: Duration,
     watched: Duration,
+    /// The longest the watchdog went between two looks at this stall, before
+    /// any sleep discount. Far above [`LIFECYCLE_POLL_INTERVAL`] means the
+    /// watchdog thread itself was not scheduled for that long.
+    largest_gap: Duration,
+}
+
+/// The budget a stall observed in `phase` is judged by.
+///
+/// A thread that published `Probing` reached that store, so it is alive and
+/// inside a named CoreGraphics/TCC call rather than wedged servicing the tap.
+/// Judge it against the probe budget for either exit reason — a stop request
+/// landing on a slow probe is the same situation.
+const fn budget_for(phase: TapPhase) -> Duration {
+    if matches!(phase, TapPhase::Probing) {
+        TAP_PROBE_BUDGET
+    } else {
+        TAP_SHUTDOWN_BUDGET
+    }
 }
 
 impl LifecycleWatchdog {
@@ -272,14 +290,13 @@ impl LifecycleWatchdog {
         // The whole gap counts, unless a kernel sleep or wake fell inside it:
         // then the process was frozen for an unknown part of it, and at most
         // `OBSERVATION_GAP` is charged.
-        let credit = self.last_evaluated.map_or(Duration::ZERO, |(last, power)| {
-            let gap = now.saturating_sub(last);
-            if power == observation.power {
-                gap
-            } else {
-                gap.min(OBSERVATION_GAP)
-            }
-        });
+        let gap = self
+            .last_evaluated
+            .map_or(Duration::ZERO, |(last, _)| now.saturating_sub(last));
+        let credit = match self.last_evaluated {
+            Some((_, power)) if power != observation.power => gap.min(OBSERVATION_GAP),
+            _ => gap,
+        };
         self.last_evaluated = Some((now, observation.power));
 
         match observation.phase {
@@ -312,30 +329,26 @@ impl LifecycleWatchdog {
             self.stall = None;
             return LifecycleDecision::Continue;
         };
-        // A thread that published `Probing` reached that store, so it is alive
-        // and inside a named CoreGraphics/TCC call rather than wedged servicing
-        // the tap. Judge it against the probe budget for either exit reason —
-        // a stop request landing on a slow probe is the same situation.
-        let budget = if observation.phase == TapPhase::Probing {
-            TAP_PROBE_BUDGET
-        } else {
-            TAP_SHUTDOWN_BUDGET
-        };
+        let budget = budget_for(observation.phase);
         // A stall seen for the first time is charged at most one credit for
         // whatever preceded this evaluation.
-        let watched = match self.stall {
+        let (watched, largest_gap) = match self.stall {
             Some(stall)
                 if stall.reason == reason && stall.started == started && stall.budget == budget =>
             {
-                stall.watched + credit
+                (stall.watched + credit, stall.largest_gap.max(gap))
             }
-            _ => now.saturating_sub(started).min(credit),
+            _ => {
+                let since_started = now.saturating_sub(started);
+                (since_started.min(credit), since_started.min(gap))
+            }
         };
         self.stall = Some(Stall {
             reason,
             started,
             budget,
             watched,
+            largest_gap,
         });
         if watched >= budget {
             LifecycleDecision::Exit {
@@ -346,6 +359,42 @@ impl LifecycleWatchdog {
         } else {
             LifecycleDecision::Continue
         }
+    }
+
+    /// Whether the stall the latest [`LifecycleDecision::Exit`] was made on
+    /// still stands in `fresh`, an observation read after that decision.
+    ///
+    /// The tap thread keeps running while this one decides. It can tear the
+    /// tap down or exit, and it can come back from a late run-loop slice: it
+    /// then marks progress and publishes `Probing`, or re-arms, before the
+    /// exit lands. Under heavy CPU load both threads are woken late together,
+    /// and an exit decided on the pre-slice mark force-exited agents whose tap
+    /// thread had just returned (#2210). A thread that marked progress since
+    /// the decided stall began is not wedged, so the exit is withdrawn and the
+    /// next evaluation times whatever follows as a new stall. A wedged thread
+    /// cannot mark progress, so this never spares one.
+    pub fn still_stalled(&self, fresh: LifecycleObservation) -> bool {
+        let Some(stall) = self.stall else {
+            return false;
+        };
+        if budget_for(fresh.phase) != stall.budget {
+            return false;
+        }
+        match stall.reason {
+            LifecycleExitReason::TapThreadStalled => {
+                matches!(
+                    fresh.phase,
+                    TapPhase::Arming | TapPhase::Armed | TapPhase::Probing
+                ) && fresh.tap_progress_at == stall.started
+            }
+            LifecycleExitReason::StopTimedOut => fresh.phase != TapPhase::ThreadExited,
+        }
+    }
+
+    /// The longest gap between two evaluations of the stall being timed;
+    /// zero when there is none.
+    pub fn largest_gap(&self) -> Duration {
+        self.stall.map_or(Duration::ZERO, |stall| stall.largest_gap)
     }
 }
 
@@ -964,6 +1013,121 @@ mod tests {
             ),
             LifecycleDecision::Complete
         );
+    }
+
+    #[test]
+    fn progress_after_an_exit_decision_withdraws_it() {
+        // #2210: under load the tap thread came back from a late slice between
+        // the decision and the exit and published `Probing`, and the agent was
+        // exited anyway, logging a 2.0 s probe stall against a 10 s budget.
+        let mut watchdog = LifecycleWatchdog::default();
+        let stalled = observation(TapPhase::Armed, false, Duration::ZERO);
+        assert_eq!(
+            watched(&mut watchdog, TAP_SHUTDOWN_BUDGET, stalled),
+            exit(
+                LifecycleExitReason::TapThreadStalled,
+                TAP_SHUTDOWN_BUDGET,
+                TAP_SHUTDOWN_BUDGET
+            )
+        );
+        assert!(
+            watchdog.still_stalled(stalled),
+            "nothing moved: the exit stands"
+        );
+        assert!(
+            watchdog.still_stalled(LifecycleObservation {
+                stop_requested: true,
+                ..stalled
+            }),
+            "a stop request is no progress"
+        );
+
+        let returned = TAP_SHUTDOWN_BUDGET + Duration::from_millis(1);
+        assert!(
+            !watchdog.still_stalled(observation(TapPhase::Probing, false, returned)),
+            "the slice returned and the thread entered its probe"
+        );
+        assert!(
+            !watchdog.still_stalled(observation(TapPhase::Armed, false, returned)),
+            "the slice returned and the thread re-armed"
+        );
+        assert!(!watchdog.still_stalled(observation(TapPhase::TapStopped, false, Duration::ZERO)));
+        assert!(!watchdog.still_stalled(observation(
+            TapPhase::ThreadExited,
+            false,
+            Duration::ZERO
+        )));
+
+        // The withdrawn exit leaves a fresh stall that gets the full budget.
+        let fresh = observation(TapPhase::Armed, false, returned);
+        assert_eq!(
+            watchdog.evaluate(returned, fresh),
+            LifecycleDecision::Continue
+        );
+        assert_eq!(
+            watched(&mut watchdog, returned + TAP_SHUTDOWN_BUDGET, fresh),
+            exit(
+                LifecycleExitReason::TapThreadStalled,
+                TAP_SHUTDOWN_BUDGET,
+                TAP_SHUTDOWN_BUDGET
+            )
+        );
+    }
+
+    #[test]
+    fn a_stop_exit_stands_until_the_thread_exits() {
+        let mut watchdog = LifecycleWatchdog::default();
+        let stopping = observation(TapPhase::Armed, true, Duration::ZERO);
+        assert_eq!(
+            watched(&mut watchdog, TAP_SHUTDOWN_BUDGET, stopping),
+            exit(
+                LifecycleExitReason::StopTimedOut,
+                TAP_SHUTDOWN_BUDGET,
+                TAP_SHUTDOWN_BUDGET
+            )
+        );
+        assert!(watchdog.still_stalled(stopping));
+        assert!(
+            watchdog.still_stalled(observation(TapPhase::TapStopped, true, Duration::ZERO)),
+            "a destroyed tap still owes the thread exit"
+        );
+        assert!(
+            !watchdog.still_stalled(observation(TapPhase::Probing, true, Duration::ZERO)),
+            "a stop that lands on a probe is judged by the probe budget"
+        );
+        assert!(!watchdog.still_stalled(observation(TapPhase::ThreadExited, true, Duration::ZERO)));
+    }
+
+    #[test]
+    fn largest_gap_reports_the_longest_look_away() {
+        let mut watchdog = LifecycleWatchdog::default();
+        assert_eq!(watchdog.largest_gap(), Duration::ZERO);
+        let stalled = observation(TapPhase::Armed, false, Duration::ZERO);
+        assert_eq!(
+            watched(&mut watchdog, Duration::from_millis(600), stalled),
+            LifecycleDecision::Continue
+        );
+        assert_eq!(watchdog.largest_gap(), LIFECYCLE_POLL_INTERVAL);
+
+        // Descheduled for 450 ms under load (#2210): charged in full, and
+        // reported so an exit log tells a starved process from a wedged tap.
+        let late = Duration::from_millis(1_050);
+        assert_eq!(
+            watchdog.evaluate(late, stalled),
+            LifecycleDecision::Continue
+        );
+        assert_eq!(watchdog.largest_gap(), Duration::from_millis(450));
+
+        // A new stall keeps its own record, from where it began.
+        let restarted = late + Duration::from_millis(50);
+        assert_eq!(
+            watchdog.evaluate(
+                late + LIFECYCLE_POLL_INTERVAL,
+                observation(TapPhase::Armed, false, restarted)
+            ),
+            LifecycleDecision::Continue
+        );
+        assert_eq!(watchdog.largest_gap(), Duration::from_millis(50));
     }
 
     #[test]

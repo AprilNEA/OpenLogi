@@ -26,13 +26,14 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 use super::{NoticePlacement, RingPlacement};
 
 impl RingPlacement {
-    pub(crate) fn capture(_cx: &mut App) -> Result<Self> {
+    pub(crate) fn capture(_cx: &mut App, edge: Pixels) -> Result<Self> {
         let sample = sample_monitor()?;
         Ok(Self {
             display_id: sample.display_id,
             cursor: sample.cursor,
             display: sample.display,
             dpi: sample.dpi,
+            edge,
         })
     }
 

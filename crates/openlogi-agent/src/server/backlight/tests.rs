@@ -30,6 +30,7 @@ fn inventory(product_id: u16) -> DeviceInventory {
             model_info: None,
             capabilities: Some(Capabilities::default()),
             settings_revision: 0,
+            hidpp10: false,
         }],
     }
 }

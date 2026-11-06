@@ -7,7 +7,7 @@ use gpui::{
 };
 
 use crate::notice::{BOTTOM_MARGIN, notice_window_options};
-use crate::ring::{Placement, WINDOW_SIZE, ring_window_options};
+use crate::ring::{Placement, ring_window_options};
 
 #[cfg(target_os = "windows")]
 mod native;
@@ -20,6 +20,8 @@ pub(crate) struct RingPlacement {
     /// The selected monitor's effective DPI, used only to express the
     /// bootstrap bounds in that monitor's logical pixels.
     dpi: u32,
+    /// The ring window's side, in logical pixels.
+    edge: Pixels,
 }
 
 impl RingPlacement {
@@ -54,10 +56,11 @@ impl RingPlacement {
 
     #[expect(
         clippy::cast_possible_truncation,
-        reason = "360 DIP scaled by a native display DPI fits in screen-sized i32 pixels"
+        reason = "a ring window of a few hundred DIP scaled by a native display DPI fits in screen-sized i32 pixels"
     )]
     fn bounds(&self, dpi: u32) -> Bounds<DevicePixels> {
-        let edge = DevicePixels((f64::from(WINDOW_SIZE) * f64::from(dpi) / 96.0).round() as i32);
+        let edge =
+            DevicePixels((f64::from(self.edge.as_f32()) * f64::from(dpi) / 96.0).round() as i32);
         let half = DevicePixels(edge.0 / 2);
         let desired = self.cursor - point(half, half);
         // If the display is smaller than the ring, anchor to its top-left
@@ -157,6 +160,7 @@ mod tests {
                 size(DevicePixels(rect.2 - rect.0), DevicePixels(rect.3 - rect.1)),
             ),
             dpi: 96,
+            edge: gpui::px(360.0),
         }
     }
 

@@ -9,12 +9,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
-    CameraControls, Config, DeviceIdentity, DisableKey, LightSettings, Lighting, OnboardMemory,
-    ScrollResolution, SmartShift, ThumbwheelSensitivity,
+    CameraControls, CameraStreamMode, Config, DeviceIdentity, DisableKey, GKeyOwner, GamingKeyMode,
+    LightSettings, Lighting, MomentumScrolling, OnboardMemory, ScrollResolution, SmartShift,
+    ThumbwheelSensitivity,
 };
 use crate::binding::{
-    Action, ActionRingConfig, ActionRingIcon, ActionRingSlot, Binding, ButtonId, GamingLayout,
-    RingAction, default_binding,
+    Action, ActionRingConfig, ActionRingIcon, ActionRingSize, ActionRingSlot, Binding, ButtonId,
+    GKeyProfile, GamingLayout, KeypadPage, RingAction, default_binding_on,
 };
 use crate::hid::{Dpi, PointerSpeed, ReportRate};
 
@@ -69,6 +70,15 @@ impl Config {
             .or_default()
             .action_ring
             .haptics = enabled;
+    }
+
+    /// Set how large `device_key`'s Actions Ring is drawn.
+    pub fn set_action_ring_size(&mut self, device_key: &str, size: ActionRingSize) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .action_ring
+            .size = size;
     }
 
     /// Replace or clear one slot in the default Actions Ring layout.
@@ -249,6 +259,23 @@ impl Config {
             .camera_profile = name;
     }
 
+    /// The frame size and rate saved for `device_key`'s live preview, or
+    /// `None` when the user never picked one.
+    #[must_use]
+    pub fn camera_stream_mode(&self, device_key: &str) -> Option<CameraStreamMode> {
+        self.devices
+            .get(device_key)
+            .and_then(|d| d.camera_stream_mode)
+    }
+
+    /// Record the frame size and rate `device_key`'s live preview opens at.
+    pub fn set_camera_stream_mode(&mut self, device_key: &str, mode: CameraStreamMode) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .camera_stream_mode = Some(mode);
+    }
+
     /// The standalone-light config for `device_key`, or `None` if unset.
     #[must_use]
     pub fn light(&self, device_key: &str) -> Option<LightSettings> {
@@ -290,6 +317,39 @@ impl Config {
             .entry(device_key.to_string())
             .or_default()
             .disabled_keys = Some(disabled_keys);
+    }
+
+    /// The physical device keys that should follow `keyboard_key` when its
+    /// Easy-Switch channel changes.
+    #[must_use]
+    pub fn host_switch_targets(&self, keyboard_key: &str) -> &[String] {
+        self.devices
+            .get(keyboard_key)
+            .map_or(&[], |device| device.host_switch_targets.as_slice())
+    }
+
+    /// Add one physical device to `keyboard_key`'s linked Easy-Switch group.
+    /// Linking a device again is a no-op and keeps the target order already
+    /// stored in the configuration.
+    pub fn link_host_switch_target(&mut self, keyboard_key: &str, target_key: &str) {
+        let targets = &mut self
+            .devices
+            .entry(keyboard_key.to_string())
+            .or_default()
+            .host_switch_targets;
+        if !targets.iter().any(|target| target == target_key) {
+            targets.push(target_key.to_string());
+        }
+    }
+
+    /// Remove one physical device from `keyboard_key`'s linked Easy-Switch
+    /// group. Unlinking a device that is not linked is a no-op.
+    pub fn unlink_host_switch_target(&mut self, keyboard_key: &str, target_key: &str) {
+        if let Some(device) = self.devices.get_mut(keyboard_key) {
+            device
+                .host_switch_targets
+                .retain(|target| target != target_key);
+        }
     }
 
     /// Return `device_key` to unmanaged Disable Keys state.
@@ -401,6 +461,65 @@ impl Config {
             .force_sensing = Some(force);
     }
 
+    /// Who runs `device_key`'s G1–G5.
+    #[must_use]
+    pub fn g_key_owner(&self, device_key: &str) -> GKeyOwner {
+        self.devices
+            .get(device_key)
+            .map(|device| device.g_key_owner)
+            .unwrap_or_default()
+    }
+
+    /// Record who runs `device_key`'s G1–G5.
+    pub fn set_g_key_owner(&mut self, device_key: &str, owner: GKeyOwner) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .g_key_owner = owner;
+    }
+
+    /// What `device_key`'s M1–M3 and MR do while OpenLogi owns its gaming
+    /// cluster.
+    #[must_use]
+    pub fn gaming_key_mode(&self, device_key: &str) -> GamingKeyMode {
+        self.devices
+            .get(device_key)
+            .map(|device| device.gaming_key_mode)
+            .unwrap_or_default()
+    }
+
+    /// The name the user gave `device_key`'s G-key `profile`, if any.
+    #[must_use]
+    pub fn g_key_profile_name(&self, device_key: &str, profile: GKeyProfile) -> Option<&str> {
+        self.devices
+            .get(device_key)?
+            .g_key_profile_names
+            .get(&profile)
+            .map(String::as_str)
+    }
+
+    /// Name `device_key`'s G-key `profile`, trimmed; a blank name removes it.
+    pub fn set_g_key_profile_name(&mut self, device_key: &str, profile: GKeyProfile, name: &str) {
+        let names = &mut self
+            .devices
+            .entry(device_key.to_string())
+            .or_default()
+            .g_key_profile_names;
+        match name.trim() {
+            "" => names.remove(&profile),
+            name => names.insert(profile, name.to_owned()),
+        };
+    }
+
+    /// Record what `device_key`'s M1–M3 and MR do. The bindings of the other
+    /// mode stay stored.
+    pub fn set_gaming_key_mode(&mut self, device_key: &str, mode: GamingKeyMode) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .gaming_key_mode = mode;
+    }
+
     /// The G-Shift layer of `device_key`, if not empty.
     #[must_use]
     pub fn gshift_overrides(&self, device_key: &str) -> Option<&BTreeMap<ButtonId, Action>> {
@@ -457,7 +576,7 @@ impl Config {
         let customized = |button: &ButtonId, binding: &Binding| {
             layout.needs_host_mode(*button)
                 && (!matches!(binding, Binding::Single(_))
-                    || binding.click_action() != default_binding(*button))
+                    || binding.click_action() != default_binding_on(Some(layout), *button))
         };
         let needs_host = device.report_rate.is_some()
             || self.uses_gshift(device_key)
@@ -537,6 +656,49 @@ impl Config {
             .enabled = enabled;
     }
 
+    /// The last of `device_key`'s keypad binding pages — its page count.
+    /// One page for any device that never had more.
+    #[must_use]
+    pub fn keypad_pages(&self, device_key: &str) -> KeypadPage {
+        self.devices
+            .get(device_key)
+            .map_or(KeypadPage::FIRST, |device| device.keypad_pages)
+    }
+
+    /// Give `device_key` pages `1..=last`. Shrinking drops every grid binding
+    /// on a removed page — device-wide and in each per-app overlay — so a
+    /// page re-added later starts empty instead of resurrecting old keys.
+    pub fn set_keypad_pages(&mut self, device_key: &str, last: KeypadPage) {
+        let device = self.devices.entry(device_key.to_string()).or_default();
+        device.keypad_pages = last;
+        let kept = |button: &ButtonId| button.grid_slot().is_none_or(|slot| slot.page <= last);
+        device.bindings.retain(|button, _| kept(button));
+        device.disabled_gestures.retain(|button, _| kept(button));
+        for overlay in device.per_app_bindings.values_mut() {
+            overlay.retain(|button, _| kept(button));
+        }
+    }
+
+    /// Whether any grid key on `page` of `device_key` is bound — device-wide
+    /// or in any per-app overlay — i.e. whether shrinking past `page`
+    /// ([`Self::set_keypad_pages`]) would drop a binding.
+    #[must_use]
+    pub fn keypad_page_binds(&self, device_key: &str, page: KeypadPage) -> bool {
+        let Some(device) = self.devices.get(device_key) else {
+            return false;
+        };
+        let on_page = |button: &ButtonId| button.grid_slot().is_some_and(|slot| slot.page == page);
+        device
+            .bindings
+            .iter()
+            .any(|(button, binding)| on_page(button) && *binding != Binding::Single(Action::None))
+            || device
+                .per_app_bindings
+                .values()
+                .flatten()
+                .any(|(button, action)| on_page(button) && *action != Action::None)
+    }
+
     /// The effective thumb-wheel sensitivity for `device_key`: the device's
     /// override when set, else the app-wide default.
     #[must_use]
@@ -560,6 +722,29 @@ impl Config {
             .thumbwheel_sensitivity = sensitivity;
     }
 
+    /// The effective momentum-scrolling settings for `device_key`: the
+    /// device's override when set, else the app-wide default.
+    #[must_use]
+    pub fn momentum_scrolling(&self, device_key: &str) -> MomentumScrolling {
+        self.devices
+            .get(device_key)
+            .and_then(|d| d.momentum_scrolling)
+            .unwrap_or(self.app_settings.momentum_scrolling)
+    }
+
+    /// Set (or clear, with `None`) `device_key`'s momentum-scrolling
+    /// override.
+    pub fn set_device_momentum_scrolling(
+        &mut self,
+        device_key: &str,
+        momentum: Option<MomentumScrolling>,
+    ) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .momentum_scrolling = momentum;
+    }
+
     /// Whether `device_key`'s main wheel is smoothed through its diverted
     /// HID++ reports
     /// ([`DeviceConfig::smooth_wheel`](super::DeviceConfig::smooth_wheel)).
@@ -575,5 +760,27 @@ impl Config {
             .entry(device_key.to_string())
             .or_default()
             .smooth_wheel = enabled;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Config;
+
+    #[test]
+    fn host_switch_target_edits_are_idempotent_and_ordered() {
+        let mut config = Config::ephemeral();
+
+        config.link_host_switch_target("keyboard", "mouse-b");
+        config.link_host_switch_target("keyboard", "mouse-a");
+        config.link_host_switch_target("keyboard", "mouse-b");
+        assert_eq!(
+            config.host_switch_targets("keyboard"),
+            ["mouse-b", "mouse-a"]
+        );
+
+        config.unlink_host_switch_target("keyboard", "mouse-b");
+        config.unlink_host_switch_target("keyboard", "missing");
+        assert_eq!(config.host_switch_targets("keyboard"), ["mouse-a"]);
     }
 }

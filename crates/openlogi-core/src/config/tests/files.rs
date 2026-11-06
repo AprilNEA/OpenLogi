@@ -13,6 +13,19 @@ fn canonical_configuration_example_parses() {
     };
     assert_eq!(long_press.short(), &Action::ShowDesktop);
     assert_eq!(long_press.long(), &Action::MissionControl);
+    assert_eq!(
+        config
+            .momentum_scrolling("receiver:aabbccdd:slot:1")
+            .glide_ms,
+        600,
+        "the documented device override wins"
+    );
+    assert!(
+        config
+            .momentum_scrolling("receiver:aabbccdd:slot:2")
+            .enabled,
+        "a device without one follows the documented app-wide table"
+    );
 }
 
 #[test]

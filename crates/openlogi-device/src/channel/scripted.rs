@@ -48,6 +48,15 @@ pub(crate) fn register_error(request: &[u8], error: u8) -> Vec<u8> {
     vec![0x10, request[1], 0x8f, request[2], request[3], error, 0x00]
 }
 
+/// A HID++ 4.5 device's answer to `request` when it is the protocol ping
+/// (root feature `0x00`, function 1), else `None`. The answer echoes the ping's
+/// header and its ping-data byte.
+#[cfg(test)]
+pub(crate) fn ping_reply(request: &[u8]) -> Option<Vec<u8>> {
+    (request[2] == 0x00 && request[3] >> 4 == 1)
+        .then(|| vec![0x10, request[1], 0x00, request[3], 0x04, 0x05, request[6]])
+}
+
 /// A live channel over `raw`.
 #[expect(
     clippy::expect_used,

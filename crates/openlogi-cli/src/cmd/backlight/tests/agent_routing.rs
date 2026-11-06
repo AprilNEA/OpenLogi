@@ -43,6 +43,7 @@ fn snapshot() -> AgentSnapshot {
                 model_info: None,
                 capabilities: Some(Capabilities::from_feature_ids(&[0x1982])),
                 settings_revision: 0,
+                hidpp10: false,
             }],
         }],
         standalone: Vec::new(),
@@ -53,6 +54,7 @@ fn snapshot() -> AgentSnapshot {
             recent: Vec::new(),
         },
         lights: Vec::new(),
+        flow: openlogi_ipc::FlowStatus::default(),
     }
 }
 

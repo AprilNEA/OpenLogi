@@ -14,6 +14,7 @@
 //! lower edge off-screen.
 
 pub mod add_device;
+pub mod flow;
 pub mod main_window;
 pub mod settings;
 pub mod update_consent;
@@ -27,7 +28,7 @@ use gpui::{
     Pixels, Point, Render, SharedString, Size, Styled as _, Subscription, TitlebarOptions, Window,
     WindowBounds, WindowHandle, WindowOptions, div, px,
 };
-use gpui_component::{ActiveTheme as _, Root, TitleBar};
+use gpui_kit::component::{ActiveTheme as _, Root, TitleBar};
 use openlogi_core::brand::APP_ID;
 use tracing::warn;
 
@@ -112,6 +113,7 @@ pub struct WindowRegistry {
     pub main: Option<WindowHandle<Root>>,
     pub settings: Option<WindowHandle<Root>>,
     pub add_device: Option<WindowHandle<Root>>,
+    pub flow: Option<WindowHandle<Root>>,
     pub update_consent: Option<WindowHandle<Root>>,
 }
 
@@ -135,18 +137,27 @@ pub fn needs_client_titlebar(window: &Window) -> bool {
 
 /// Titlebar options for an app window.
 ///
-/// On Linux this returns transparent options so the view *can* draw a
+/// Every platform carries `title`, so the window is named before it first
+/// maps. A Wayland compositor answers the initial commit with a configure
+/// built from the window rules that match at that moment: niri sizes a new
+/// window by its `default-*` rules then, and a title set only after
+/// `open_window` returns misses them (#2342).
+///
+/// On Linux the options are also transparent so the view *can* draw a
 /// client-side [`TitleBar`] (see [`aux_title_bar`]) on the compositors that
 /// leave it to the app. Whether it actually does is
 /// [`needs_client_titlebar`]'s call, made per window from what the compositor
-/// negotiated. On macOS / Windows this keeps the native titlebar carrying
-/// `title`, unchanged.
+/// negotiated. On macOS / Windows the native titlebar shows `title`.
 pub fn titlebar_options(title: impl Into<SharedString>) -> TitlebarOptions {
+    let title = Some(title.into());
     if cfg!(target_os = "linux") {
-        TitleBar::title_bar_options()
+        TitlebarOptions {
+            title,
+            ..TitleBar::title_bar_options()
+        }
     } else {
         TitlebarOptions {
-            title: Some(title.into()),
+            title,
             appears_transparent: false,
             traffic_light_position: None,
         }
@@ -183,6 +194,7 @@ pub fn retitle_open(cx: &mut App) {
     let retitles = [
         (registry.settings, settings::window_title()),
         (registry.add_device, add_device::window_title()),
+        (registry.flow, flow::window_title()),
     ];
     for (handle, title) in retitles {
         if let Some(handle) = handle {
@@ -214,14 +226,16 @@ pub fn open_or_focus<V: AuxWindow + 'static>(
 ) {
     let title = title.into();
 
-    // Already open? Focus it and bail. A closed window leaves a stale handle
-    // whose `update` errors, falling through to a fresh open.
+    // An action dispatched from this window temporarily takes it out of GPUI's
+    // storage, so a failed update does not mean it closed. Check the live handles
+    // and activate after dispatch returns the borrowed window.
     let existing = *slot(cx.default_global::<WindowRegistry>());
     if let Some(handle) = existing
-        && handle
-            .update(cx, |_, window, _| window.activate_window())
-            .is_ok()
+        && cx.windows().contains(&handle.into())
     {
+        cx.defer(move |cx| {
+            let _ = handle.update(cx, |_, window, _| window.activate_window());
+        });
         return;
     }
 
@@ -252,10 +266,7 @@ pub fn open_or_focus<V: AuxWindow + 'static>(
 
     match opened {
         Ok(handle) => {
-            let _ = handle.update(cx, |_, window, _| {
-                window.activate_window();
-                window.set_window_title(&title);
-            });
+            let _ = handle.update(cx, |_, window, _| window.activate_window());
             *slot(cx.default_global::<WindowRegistry>()) = Some(handle);
         }
         Err(e) => warn!(error = %e, title = %title, "could not open auxiliary window"),

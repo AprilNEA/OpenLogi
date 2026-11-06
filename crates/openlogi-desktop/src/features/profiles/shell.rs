@@ -1,11 +1,12 @@
 //! Reusable profile tabs and feature-independent controls.
 
+use crate::ui::theme::FocusRingStyle as _;
 use gpui::{
     App, Entity, InteractiveElement, IntoElement, ParentElement, RenderOnce, Role,
     StatefulInteractiveElement as _, Styled, Window, div, img, prelude::FluentBuilder as _, px,
 };
-use gpui_base::Button as BaseButton;
-use gpui_component::{
+use gpui_kit::base::Button as BaseButton;
+use gpui_kit::component::{
     IconName, Sizable as _,
     button::ButtonVariants as _,
     h_flex,
@@ -182,13 +183,7 @@ fn profile_tab(
                 pal.control_hover
             })
         })
-        .focus_visible(move |tab| {
-            tab.bg(if selected {
-                theme::accent_tint_hover()
-            } else {
-                pal.control_hover
-            })
-        })
+        .focus_visible(move |style| style.focus_ring(pal))
         .children(leading)
         .child(label)
 }

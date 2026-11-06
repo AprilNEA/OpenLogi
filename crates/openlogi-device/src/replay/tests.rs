@@ -765,6 +765,7 @@ fn direct_probe_fixture() -> SyntheticFixture {
                     ..Capabilities::default()
                 }),
                 settings_revision: 0,
+                hidpp10: false,
             }],
         }],
         standalone: Vec::new(),
@@ -841,6 +842,7 @@ fn receiver_dpi_fixture() -> SyntheticFixture {
                     ..Capabilities::default()
                 }),
                 settings_revision: 0,
+                hidpp10: false,
             }],
         }],
         standalone: Vec::new(),
@@ -900,6 +902,7 @@ fn dpi_settings(route: DeviceRoute, current: u16, supported: Vec<u16>) -> Profil
         pointer_speed: ProfileSetting::Unsupported,
         force_sensing: ProfileSetting::Unsupported,
         disable_keys: ProfileSetting::Unsupported,
+        sidetone: ProfileSetting::Unsupported,
         lighting: ProfileSupport::Unsupported,
         light: ProfileSupport::Unsupported,
     }

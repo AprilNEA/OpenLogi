@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use hidpp::{
-    channel::{ChannelError, HidppChannel},
+    channel::HidppChannel,
     device::Device,
     feature::{
         CreatableFeature,
@@ -24,7 +24,10 @@ use crate::SharedChannel;
 use crate::backend::HidBackend;
 use crate::channel::route::DeviceRoute;
 
-use super::{HidppOperation, WriteError, classify_hidpp_error, open_feature, with_route};
+use super::{
+    HidppOperation, WriteError, classify_hidpp_error, open_feature, with_route,
+    write_whole_raw_report,
+};
 
 mod rgb;
 
@@ -280,6 +283,88 @@ pub async fn release_rgb_control(
     rgb::release(shared.channel(), shared.device_index(), lease, &scope).await
 }
 
+/// What a zone walk does after the caller has looked at the lit zone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ZoneWalkStep {
+    /// Light the next zone.
+    Next,
+    /// Light the previous zone again.
+    Back,
+    /// End the walk. With an `0x8071` effect engine, lighting goes back to
+    /// the firmware.
+    Stop,
+}
+
+/// The one zone a walk has lit, and where it sits in the walk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LitZone {
+    /// The `0x8081` zone id.
+    pub zone_id: u8,
+    /// This zone's position among the present zones, from `0`.
+    pub position: usize,
+    /// How many zones the device reports as present.
+    pub total: usize,
+}
+
+/// How long a zone walk may hold the keyboard. A person names every zone in
+/// turn, so the five-second budget of a colour write does not apply.
+const ZONE_WALK_BUDGET: Duration = Duration::from_hours(1);
+
+/// Light every `0x8081` zone of `route` alone, in zone-id order, so a person
+/// can name the key each id drives.
+///
+/// Every other zone stays dark. After each zone is lit, `observe` decides
+/// whether the walk moves on, goes back one zone, or stops. With an `0x8071`
+/// effect engine the walk runs under its software control and hands it back
+/// when it ends, so the keyboard returns to its own effect.
+///
+/// Diagnostic only: it does not take the lighting lock the agent's writes
+/// use, so run it with the agent stopped.
+pub async fn walk_per_key_zones(
+    backend: &dyn HidBackend,
+    route: &DeviceRoute,
+    lit: openlogi_core::color::Rgb,
+    observe: impl AsyncFnMut(LitZone) -> ZoneWalkStep,
+) -> Result<(), WriteError> {
+    with_route(backend, route, |channel| async move {
+        let shared = SharedChannel::new(channel, route.clone());
+        walk_per_key_zones_on(&shared, lit, observe).await
+    })
+    .await
+}
+
+/// [`walk_per_key_zones`] on an existing channel.
+pub async fn walk_per_key_zones_on(
+    shared: &SharedChannel,
+    lit: openlogi_core::color::Rgb,
+    mut observe: impl AsyncFnMut(LitZone) -> ZoneWalkStep,
+) -> Result<(), WriteError> {
+    let channel = shared.channel();
+    let index = shared.device_index();
+    let scope = WriteScope {
+        deadline: tokio::time::Instant::now() + ZONE_WALK_BUDGET,
+        cancelled: || false,
+        available: || true,
+    };
+    let engine = rgb::probe(channel, index, &scope).await?;
+    let target = scope.read(PerKeyV2Target::open(channel, index)).await?;
+    let (red, green, blue) = lit.components();
+    let lit = Rgb { red, green, blue };
+    let mut walk = async || target.walk(index, lit, &scope, &mut observe).await;
+    match engine {
+        None => walk().await,
+        Some(engine) => {
+            let black = openlogi_core::color::Rgb::new(0, 0, 0);
+            let lease = engine
+                .under_per_key_control(index, black, &scope, walk)
+                .await?;
+            // The hand-back has its own five-second budget, so a walk that
+            // ends close to ZONE_WALK_BUDGET still returns control.
+            release_rgb_control(shared, lease, || true).await
+        }
+    }
+}
+
 struct WriteScope<C, A> {
     deadline: tokio::time::Instant,
     cancelled: C,
@@ -499,24 +584,83 @@ impl PerKeyV2Target {
     ) -> Result<(), WriteError> {
         // One request carries at most MAX_SINGLE_VALUE_ZONES ids and silently
         // ignores the rest, so the chunking is the caller's job.
+        let feature = &self.feature;
         for chunk in self.zones.chunks(MAX_SINGLE_VALUE_ZONES) {
             scope.check()?;
-            self.feature
-                .set_rgb_zones_single_value(color, chunk)
-                .await
-                .map_err(classify_per_key_v2_error)?;
+            retry_busy(scope, async || {
+                feature.set_rgb_zones_single_value(color, chunk).await
+            })
+            .await?;
         }
         scope.check()?;
-        self.feature
-            .frame_end(FramePersistence::Volatile, 0, 0)
-            .await
-            .map_err(classify_per_key_v2_error)?;
+        retry_busy(scope, async || {
+            feature.frame_end(FramePersistence::Volatile, 0, 0).await
+        })
+        .await?;
         debug!(
             index,
             zone_count = self.zones.len(),
             ?color,
             "set keyboard colour via typed 0x8081"
         );
+        Ok(())
+    }
+
+    /// Light each present zone alone, as [`walk_per_key_zones`] describes.
+    /// The first frame after a fresh claim can land before the firmware
+    /// leaves onboard mode, so the dark base frame is painted twice.
+    async fn walk(
+        &self,
+        index: u8,
+        lit: Rgb,
+        scope: &WriteScope<impl Fn() -> bool, impl Fn() -> bool>,
+        mut observe: impl AsyncFnMut(LitZone) -> ZoneWalkStep,
+    ) -> Result<(), WriteError> {
+        let dark = Rgb {
+            red: 0,
+            green: 0,
+            blue: 0,
+        };
+        self.paint(index, dark, scope).await?;
+        tokio::time::sleep(FRAME_GAP).await;
+        self.paint(index, dark, scope).await?;
+
+        let feature = &self.feature;
+        let total = self.zones.len();
+        let mut position = 0;
+        let mut shown: Option<u8> = None;
+        while let Some(&zone_id) = self.zones.get(position) {
+            // One setRgbZonesSingleValue per colour: a G515 LS TKL answers a
+            // two-zone setIndividualRgbZones without echoing the second zone.
+            if let Some(previous) = shown.filter(|&previous| previous != zone_id) {
+                scope.check()?;
+                retry_busy(scope, async || {
+                    feature.set_rgb_zones_single_value(dark, &[previous]).await
+                })
+                .await?;
+            }
+            scope.check()?;
+            retry_busy(scope, async || {
+                feature.set_rgb_zones_single_value(lit, &[zone_id]).await
+            })
+            .await?;
+            retry_busy(scope, async || {
+                feature.frame_end(FramePersistence::Volatile, 0, 0).await
+            })
+            .await?;
+            shown = Some(zone_id);
+            let step = observe(LitZone {
+                zone_id,
+                position,
+                total,
+            })
+            .await;
+            match step {
+                ZoneWalkStep::Next => position += 1,
+                ZoneWalkStep::Back => position = position.saturating_sub(1),
+                ZoneWalkStep::Stop => break,
+            }
+        }
         Ok(())
     }
 }
@@ -571,6 +715,39 @@ pub(super) fn collect_present_zones(
     }
 }
 
+/// Waits before each retry of a `0x8081` request the device answered with
+/// `Busy`. A G515 LS TKL (`046d:c355`) commits the first frame after a fresh
+/// `0x8071` claim, then answers `Busy` to the replayed frame sent about 30 ms
+/// later. Solaar retries per-key requests on `Busy` with the same backoff.
+const PER_KEY_V2_BUSY_BACKOFF: [Duration; 3] = [
+    Duration::from_millis(30),
+    Duration::from_millis(60),
+    Duration::from_millis(90),
+];
+
+/// Send a `0x8081` request, resending it while the device answers `Busy`.
+///
+/// A `Busy` reply means the device did not act on the request, so resending
+/// the same zones or commit is safe. `scope` is checked before each resend, so
+/// cancellation and the deadline still stop the frame. The last `Busy` after
+/// every backoff step is returned as the error.
+async fn retry_busy<T>(
+    scope: &WriteScope<impl Fn() -> bool, impl Fn() -> bool>,
+    mut request: impl AsyncFnMut() -> Result<T, Hidpp20Error>,
+) -> Result<T, WriteError> {
+    for delay in PER_KEY_V2_BUSY_BACKOFF {
+        match request().await {
+            Err(Hidpp20Error::Feature(v20::ErrorType::Busy)) => {
+                debug!(?delay, "0x8081 answered Busy; resending");
+                tokio::time::sleep(delay).await;
+                scope.check()?;
+            }
+            other => return other.map_err(classify_per_key_v2_error),
+        }
+    }
+    request().await.map_err(classify_per_key_v2_error)
+}
+
 /// Classify a HID++ error from the `PerKeyLighting2` functions.
 fn classify_per_key_v2_error(error: hidpp::protocol::v20::Hidpp20Error) -> WriteError {
     classify_hidpp_error(error, HidppOperation::Lighting, PerKeyLightingFeature::ID)
@@ -617,16 +794,7 @@ async fn set_color_per_key(
     };
 
     for report in per_key_frames(device_index, feature_index, r, g, b) {
-        let written = channel
-            .write_raw_report(&report)
-            .await
-            .map_err(classify_raw_lighting_error)?;
-        if written != report.len() {
-            return Err(WriteError::Hidpp(format!(
-                "raw lighting report wrote {written} of {} bytes",
-                report.len()
-            )));
-        }
+        write_whole_raw_report(channel, &report, HidppOperation::Lighting).await?;
     }
 
     RootFeature::new(Arc::clone(channel), device_index, 0)
@@ -713,15 +881,6 @@ fn per_key_header(device_index: u8, feature_index: u8, function: u8) -> v20::Mes
 /// Classify a HID++ error from the `PerKeyLighting` request path.
 fn classify_per_key_error(error: Hidpp20Error) -> WriteError {
     classify_hidpp_error(error, HidppOperation::Lighting, PER_KEY_LIGHTING_FEATURE)
-}
-
-fn classify_raw_lighting_error(error: ChannelError) -> WriteError {
-    match error {
-        ChannelError::Timeout => WriteError::RequestTimedOut {
-            operation: HidppOperation::Lighting,
-        },
-        other => WriteError::Hidpp(format!("{other:?}")),
-    }
 }
 
 /// Set a solid keyboard colour on an already-open [`SharedChannel`], using

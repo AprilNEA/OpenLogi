@@ -5,8 +5,7 @@
 //! control; paired devices speak HID++ 2.0 once addressed via their slot index.
 //!
 //! The register layout for device enumeration (`0xB5/0x5N`, `0xB5/0x6N`) is
-//! identical to Bolt's. The device-kind encoding differs from Bolt at values 5+
-//! (see [`DeviceKind`]).
+//! identical to Bolt's, and so is the device-kind nibble (see [`DeviceKind`]).
 
 use std::sync::Arc;
 
@@ -295,9 +294,11 @@ pub struct DevicePairingInformation {
 
 /// Represents the kind of a device paired to a Unifying receiver.
 ///
-/// The encoding matches Bolt for values 1–4; from 5 onwards Unifying uses a
-/// shifted table (Remote=5, Trackball=6, Touchpad=7) while Bolt reserves those
-/// values and places them at 7–9.
+/// The low nibble of the device-info byte, in the HID++ 1.0 device-type
+/// encoding Bolt uses too: `0x05` and `0x06` are reserved, and remote,
+/// trackball and touchpad sit at `0x07`–`0x09`. The values follow the Linux
+/// `hid-logitech-dj` driver and Solaar's `DEVICE_KIND`, not a spec read here.
+/// The old `0x05`–`0x07` table decoded an M570 trackball as Unknown (#2202).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, IntoPrimitive, FromPrimitive)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
@@ -316,11 +317,11 @@ pub enum DeviceKind {
     /// Presenter device.
     Presenter = 0x04,
     /// Remote-control device.
-    Remote = 0x05,
+    Remote = 0x07,
     /// Trackball device.
-    Trackball = 0x06,
+    Trackball = 0x08,
     /// Touchpad device.
-    Touchpad = 0x07,
+    Touchpad = 0x09,
 }
 
 /// Represents a device-connection event fired by the receiver when a paired
@@ -540,9 +541,10 @@ mod tests {
     }
 
     #[test]
-    fn device_kind_uses_the_unifying_table_not_bolts() {
-        // Unifying and Bolt agree up to 4 and diverge from 5 on: `5` is a
-        // remote here but reserved on Bolt, which places its remote at 7.
+    fn device_kind_uses_the_hidpp10_device_type_nibble() {
+        // The same table as Bolt's: `5` and `6` are reserved, and remote,
+        // trackball and touchpad are `7` to `9`. This decoder used to read
+        // `5` to `7` for them, so a trackball came out as Unknown.
         let kind = |nibble: u8| {
             let mut payload = [0u8; 17];
             payload[1] = nibble;
@@ -552,9 +554,33 @@ mod tests {
             }
         };
 
-        assert_eq!(kind(0x05), DeviceKind::Remote);
-        assert_eq!(kind(0x06), DeviceKind::Trackball);
-        assert_eq!(kind(0x07), DeviceKind::Touchpad);
+        assert_eq!(kind(0x05), DeviceKind::Unknown);
+        assert_eq!(kind(0x06), DeviceKind::Unknown);
+        assert_eq!(kind(0x07), DeviceKind::Remote);
+        assert_eq!(kind(0x08), DeviceKind::Trackball);
+        assert_eq!(kind(0x09), DeviceKind::Touchpad);
+    }
+
+    #[test]
+    fn an_m570_arrival_decodes_as_a_trackball() {
+        // #2202: an M570 (wpid 1028) surfaced as Unknown. The bytes are the
+        // trackball nibble plus the encryption bit, not a wire capture.
+        let mut payload = [0u8; 17];
+        payload[0] = 0x04; // eQuad step 4 DJ: a Unifying link
+        payload[1] = (1 << 5) | 0x08;
+        payload[2] = 0x28;
+        payload[3] = 0x10;
+
+        assert_eq!(
+            decode_notification(&notification(1, 0x41, payload)).unwrap(),
+            Event::DeviceConnection(DeviceConnection {
+                index: 1,
+                kind: DeviceKind::Trackball,
+                encrypted: true,
+                online: true,
+                wpid: 0x1028,
+            })
+        );
     }
 
     #[test]

@@ -147,6 +147,20 @@ pub(super) trait ArmedCapture {
         sink: mpsc::UnboundedSender<CapturedInput>,
     ) -> impl Fn(&v20::Message) + Send + Sync + 'static;
 
+    /// Build the handler for every raw report read from the node, before the
+    /// channel decides what protocol it belongs to — the path by which a
+    /// session captures vendor PDUs that share the node with HID++ and never
+    /// parse as messages. It runs on the channel's read thread, by shared
+    /// reference. The default ignores them; sessions that observe a vendor
+    /// protocol override it.
+    fn raw_report_handler(
+        &self,
+        _device_index: u8,
+        _sink: mpsc::UnboundedSender<CapturedInput>,
+    ) -> impl Fn(&[u8]) + Send + Sync + 'static {
+        |_bytes| {}
+    }
+
     /// Forget input state that a device power-cycle invalidated.
     fn reset_input_state(&self) {}
 
@@ -238,6 +252,12 @@ pub(super) async fn run_capture<A: ArmedCapture>(
         }
     });
     let changes = ReportingChanges::new(armed.take_reporting_changes());
+    // The message listener only ever sees reports that parsed as HID++ (and
+    // replies, which it filters). Vendor PDUs sharing the node are invisible
+    // to it, so a session that captures a vendor protocol registers a raw
+    // listener too; the default handler ignores what it is given.
+    let raw_listener =
+        chan.add_raw_report_listener_guarded(armed.raw_report_handler(device_index, sink.clone()));
 
     // Wireless devices drop their diverted-control state when they
     // power-cycle (idle sleep, power switch, Easy-Switch host change) — the
@@ -300,9 +320,14 @@ pub(super) async fn run_capture<A: ArmedCapture>(
     // Keep accepting reports until firmware restoration is complete. The
     // agent drains this listener's forwarding task before publishing ordered
     // Done, so this session remains the sole owner of every input captured
-    // while its controls could still be diverted.
+    // while its controls could still be diverted. The raw listener follows the
+    // same contract — dropped after restoration, never mid-way.
     let pending = armed.into_pending(&shared);
-    let outcome = drop_listener_after(listener, restore_after_stop(stop, pending, registry)).await;
+    let outcome = drop_listener_after(
+        raw_listener,
+        drop_listener_after(listener, restore_after_stop(stop, pending, registry)),
+    )
+    .await;
     debug!(index = device_index, capture = A::NAME, "capture stopped");
     outcome
 }

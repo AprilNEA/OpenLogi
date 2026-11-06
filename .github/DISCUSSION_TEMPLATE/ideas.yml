@@ -1,0 +1,46 @@
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Share an idea or a feature wish. If the idea already exists, upvote it instead of posting a duplicate.
+
+        When an idea becomes planned work, a maintainer links the tracking issue and closes the discussion.
+
+        Want support for a specific device? Use the [device form](https://github.com/AprilNEA/OpenLogi/issues/new?template=device_support.yml) instead. It collects the diagnostic output that device support needs.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Pre-flight checklist
+      options:
+        - label: I searched [Ideas](https://github.com/AprilNEA/OpenLogi/discussions/categories/ideas), [open issues](https://github.com/AprilNEA/OpenLogi/issues), and the [feature list](https://github.com/AprilNEA/OpenLogi#features).
+          required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / motivation
+      description: What are you trying to do? What is missing or frustrating today?
+    validations:
+      required: true
+
+  - type: textarea
+    id: idea
+    attributes:
+      label: Idea
+      description: What would you like OpenLogi to do?
+    validations:
+      required: true
+
+  - type: input
+    id: device
+    attributes:
+      label: Device(s)
+      description: The device this idea is for, if any.
+      placeholder: e.g. MX Master 4, MX Keys S
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives and workarounds
+      description: How Logi Options+ or another tool handles this, or what you do today.

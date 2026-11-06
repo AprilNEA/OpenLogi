@@ -1,0 +1,23 @@
+# Owner: openlogi_core::device_order::PhysicalDeviceKey::names_identity —
+# which configuration keys name a device by its serial or by its unit id.
+id: core-identity-keys-owner
+language: rust
+severity: error
+message: PhysicalDeviceKey::names_identity() (openlogi-core config/identity.rs) decides whether a key names a device by its serial or unit id; call it instead of deriving each identifier's key here.
+note: |
+  The agent's Flow device join and the GUI's Flow window both match a
+  configured `serial:` or `unit:` key against a device that reports both. A
+  second derivation of the per-identifier keys can drift from the agent's, and
+  the window then shows a working device as away. See "Single source of truth"
+  in AGENTS.md.
+files:
+  - crates/**/*.rs
+ignores:
+  - crates/openlogi-core/src/config/identity.rs
+rule:
+  any:
+    # The unit-only and serial-only keys: the ingredients of the decision.
+    # `from_parts(serial, unit_id)` with both is the one preferred identity and
+    # stays allowed.
+    - pattern: $IDENTITY::from_parts(None, $UNIT).config_key()
+    - pattern: $IDENTITY::from_parts(Some($SERIAL), [0; 4]).config_key()

@@ -1,7 +1,7 @@
 //! Shared lifecycle state for HID++ capture managers.
 //!
 //! Gesture and keyboard capture deliberately keep separate manager state
-//! machines: their cardinality, receiver-lease strategy and dispatch state
+//! machines: what keys a slot, what a session targets and what it dispatches
 //! differ. They run on one select loop (`capture_manager`); this module shares
 //! the invariants their state has in common: one tracked hardware epoch stays
 //! authoritative until its asynchronous teardown reports completion, and a

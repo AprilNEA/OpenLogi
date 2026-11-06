@@ -17,7 +17,7 @@ use self::wheel::{ScrollScale, WheelAccumulators, WheelOutput, WheelRotation};
 use super::GestureOutputs;
 use crate::capture_plan::DispatchPlan;
 use crate::runtime::hook::SharedHookMaps;
-use crate::runtime::{HidppSessionId, PressToken};
+use crate::runtime::{HidppSessionId, PointerPress, PressToken};
 
 /// Effective thumb-wheel configuration whose continuity is tied to one
 /// dispatch plan. A binding or sensitivity update clears accumulated state
@@ -118,21 +118,6 @@ impl InputDispatcher {
         }
     }
 
-    /// Publish a hardware polarity observation into the OS-hook snapshot.
-    fn record_thumbwheel_direction(&self, key: &str, input: CapturedInput) -> bool {
-        let CapturedInput::ThumbwheelDirection {
-            positive_is_forward,
-        } = input
-        else {
-            return false;
-        };
-        if let Ok(mut maps) = self.hook_maps.write() {
-            maps.thumbwheel_positive_is_forward
-                .insert(key.to_owned(), positive_is_forward);
-        }
-        true
-    }
-
     /// Whether `session` still holds an admitted gesture press for `button`.
     #[cfg(test)]
     pub(super) fn holds_gesture_press(&self, session: &HidppSessionId, button: ButtonId) -> bool {
@@ -186,18 +171,28 @@ impl InputDispatcher {
         released
     }
 
-    /// `button`'s binding, from the G-Shift layer while G-Shift is held. A
-    /// gesture source has none: its click/swipe map owns the press.
+    /// `button`'s binding, from the G-Shift layer while G-Shift is held, and
+    /// the pointer identity that the press carries. A gesture source has no
+    /// binding: its click/swipe map owns the press.
     fn binding_for<'p>(
         &self,
         session: &HidppSessionId,
         plan: &'p DispatchPlan,
         button: ButtonId,
         is_gesture: bool,
-    ) -> Option<&'p Binding> {
-        (!is_gesture)
-            .then(|| press_binding(plan, button, self.shift_held.active(session)))
-            .flatten()
+    ) -> (Option<&'p Binding>, Option<PointerPress>) {
+        let shifted = !is_gesture && self.shift_held.active(session);
+        let pointer = plan.pointer.as_ref().map(|pointer| {
+            if shift_binding(plan, button, shifted).is_some() {
+                pointer.unscoped_press()
+            } else {
+                pointer.press(button)
+            }
+        });
+        let binding = (!is_gesture)
+            .then(|| press_binding(plan, button, shifted))
+            .flatten();
+        (binding, pointer)
     }
 
     /// Route one captured input from `session` to its bound action or
@@ -209,10 +204,6 @@ impl InputDispatcher {
         input: CapturedInput,
     ) {
         let key = session.device_key();
-        if self.record_thumbwheel_direction(key, input) {
-            return;
-        }
-
         match input {
             CapturedInput::Gesture(button, direction) => {
                 let Some(press) = self.held_presses.get(session, button) else {
@@ -246,19 +237,17 @@ impl InputDispatcher {
                 // single-action projection on down.
                 let is_gesture = plan.gesture_bindings.contains_key(&button)
                     || plan.side_gesture_bindings.contains_key(&button);
-                let binding = self.binding_for(session, plan, button, is_gesture);
+                let (binding, pointer) = self.binding_for(session, plan, button, is_gesture);
                 let tracks_hold = is_gesture || binding.is_some_and(Binding::is_wheel_hold);
                 if let Some(binding) = binding {
                     debug!(key, ?button, action = %binding.click_action().label(), "HID++ button → binding");
                 } else {
                     debug!(key, ?button, "HID++ button with no binding — ignored");
                 }
-                let press = self.outputs.actions.try_hidpp_button_down(
-                    session,
-                    button,
-                    binding,
-                    plan.pointer_target,
-                );
+                let press = self
+                    .outputs
+                    .actions
+                    .try_hidpp_button_down(session, button, binding, pointer);
                 if tracks_hold {
                     if let Some(press) = press {
                         self.held_presses.start(session, button, press);
@@ -292,10 +281,8 @@ impl InputDispatcher {
                     plan.invert_wheel,
                     openlogi_inject::natural_scrolling(),
                 ),
+                plan.momentum.resolve(),
             ),
-            CapturedInput::ThumbwheelDirection { .. } => {
-                unreachable!("thumb-wheel direction reports return before dispatch")
-            }
             CapturedInput::Interrupted => self.cancel_session(session),
             CapturedInput::HostModeEntered => self.outputs.actions.host_mode_entered(key),
             CapturedInput::ButtonDiverted(_) => {
@@ -323,7 +310,7 @@ impl InputDispatcher {
             session,
             button,
             binding,
-            plan.pointer_target,
+            plan.pointer.as_ref().map(|pointer| pointer.press(button)),
         );
     }
 
@@ -391,7 +378,7 @@ impl InputDispatcher {
                     self.outputs.actions.dispatch_pointer_action(
                         action,
                         Some(key),
-                        plan.pointer_target,
+                        plan.pointer.as_ref().map(|pointer| pointer.press(button)),
                     );
                 }
             }
@@ -451,11 +438,13 @@ impl HeldShift {
     }
 }
 
+/// The held G-Shift layer's binding for `button`.
+fn shift_binding(plan: &DispatchPlan, button: ButtonId, shifted: bool) -> Option<&Binding> {
+    shifted.then(|| plan.shift_bindings.get(&button)).flatten()
+}
+
 fn press_binding(plan: &DispatchPlan, button: ButtonId, shifted: bool) -> Option<&Binding> {
-    shifted
-        .then(|| plan.shift_bindings.get(&button))
-        .flatten()
-        .or_else(|| plan.bindings.get(&button))
+    shift_binding(plan, button, shifted).or_else(|| plan.bindings.get(&button))
 }
 
 #[cfg(test)]

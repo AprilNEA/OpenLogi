@@ -638,6 +638,7 @@ mod tests {
                     model_info: None,
                     capabilities: None,
                     settings_revision: 0,
+                    hidpp10: false,
                 },
                 PairedDevice {
                     slot: 1,
@@ -649,6 +650,7 @@ mod tests {
                     model_info: None,
                     capabilities: None,
                     settings_revision: 0,
+                    hidpp10: false,
                 },
                 PairedDevice {
                     slot: openlogi_device::DIRECT_DEVICE_INDEX,
@@ -660,6 +662,7 @@ mod tests {
                     model_info: None,
                     capabilities: None,
                     settings_revision: 0,
+                    hidpp10: false,
                 },
             ],
         }];

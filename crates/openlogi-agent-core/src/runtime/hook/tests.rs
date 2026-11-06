@@ -1,6 +1,7 @@
 //! Regression tests for OS-hook state and dispatch policy.
 
 use super::*;
+use crate::runtime::FocusBinding;
 use openlogi_core::binding::{GESTURE_SWIPE_THRESHOLD, LongPressBinding};
 use openlogi_core::config::KeyModifiers;
 
@@ -52,7 +53,7 @@ fn test_dispatcher() -> (
                 device_io: openlogi_hid::device_io_channel().1,
                 transport_turns: crate::hardware::TransportTurns::default(),
             },
-            action_ring,
+            requests: action_ring,
         },
         buttons: owner.input(),
     };
@@ -232,7 +233,7 @@ fn queued_key_action_retains_its_press_time_target() {
     );
     assert_eq!(
         queued.recv().expect("action should be queued"),
-        (Action::BrowserBack, target)
+        (Action::BrowserBack, target, PressControl::Key(keycode))
     );
     assert!(owner.shutdown());
 }
@@ -287,7 +288,10 @@ fn mouse_press_uses_the_target_published_with_its_binding_not_frontmost_safari()
     let (dispatcher, mut owner, events) = test_dispatcher();
     let hooks = Arc::new(RwLock::new(HookMaps {
         bindings: BTreeMap::from([(ButtonId::Back, Action::PreviousDesktop.into())]),
-        pointer_target: Some(PointerTarget::Desktop),
+        pointer: Some(PointerSelection::new(
+            PointerTarget::Desktop,
+            BTreeSet::from([ButtonId::Back]),
+        )),
         ..HookMaps::default()
     }));
     let mouse = EventDevice {
@@ -315,6 +319,7 @@ fn mouse_press_uses_the_target_published_with_its_binding_not_frontmost_safari()
         press.target(),
         ActionDispatchTarget::Pointer {
             target: PointerTarget::Desktop,
+            focus: FocusBinding::Distinct,
             fallback_safari_pid: None,
         }
     );
@@ -376,6 +381,35 @@ fn mouse_press_uses_the_target_published_with_its_binding_not_frontmost_safari()
 }
 
 #[test]
+fn pointer_press_judges_the_binding_layer_that_the_press_reads() {
+    use openlogi_hook::PointerTarget;
+
+    let mut maps = HookMaps {
+        bindings: BTreeMap::from([(ButtonId::Back, Action::BrowserBack.into())]),
+        shift_bindings: BTreeMap::from([(ButtonId::Back, Action::Copy.into())]),
+        selected_device: Some("mouse".into()),
+        pointer: Some(PointerSelection::new(
+            PointerTarget::Desktop,
+            BTreeSet::from([ButtonId::Back]),
+        )),
+        ..HookMaps::default()
+    };
+    let focus = |maps: &HookMaps, id| maps.pointer_press(id).map(|press| press.focus);
+    assert_eq!(focus(&maps, ButtonId::Back), Some(FocusBinding::Distinct));
+    assert_eq!(focus(&maps, ButtonId::Forward), Some(FocusBinding::Shared));
+    // No app profile changes the G-Shift layer, so focus shares its binding
+    // even where the base layer differs.
+    maps.shift_held.insert("mouse".into());
+    assert_eq!(
+        maps.press_binding(ButtonId::Back).0,
+        Some(Action::Copy.into())
+    );
+    assert_eq!(focus(&maps, ButtonId::Back), Some(FocusBinding::Shared));
+    maps.pointer = None;
+    assert_eq!(maps.pointer_press(ButtonId::Back), None);
+}
+
+#[test]
 fn queued_unidentified_pointer_action_retains_its_press_time_target() {
     use super::super::button::ButtonRuntimeEvent;
     use openlogi_hook::PointerTarget;
@@ -396,7 +430,10 @@ fn queued_unidentified_pointer_action_retains_its_press_time_target() {
         let (dispatcher, mut owner, events) = test_dispatcher();
         let hooks = Arc::new(RwLock::new(HookMaps {
             bindings: BTreeMap::from([(ButtonId::Back, Action::BrowserBack.into())]),
-            pointer_target: Some(PointerTarget::Unavailable),
+            pointer: Some(PointerSelection::new(
+                PointerTarget::Unavailable,
+                BTreeSet::new(),
+            )),
             ..HookMaps::default()
         }));
         let focused_safari = Cell::new(pressed_safari);
@@ -531,80 +568,6 @@ fn scroll_interception_uses_the_button_source_safety_policy_and_skips_trackpads(
 }
 
 #[test]
-fn rebound_horizontal_wheel_maps_to_thumbwheel_directions() {
-    let maps = HookMaps {
-        bindings: BTreeMap::from([
-            (ButtonId::ThumbwheelScrollUp, Action::NextTab.into()),
-            (ButtonId::ThumbwheelScrollDown, Action::PrevTab.into()),
-        ]),
-        ..HookMaps::default()
-    };
-    assert_eq!(
-        rebound_thumbwheel_action(&maps, 1.0),
-        Some((ButtonId::ThumbwheelScrollDown, Action::PrevTab))
-    );
-    assert_eq!(
-        rebound_thumbwheel_action(&maps, -1.0),
-        Some((ButtonId::ThumbwheelScrollUp, Action::NextTab))
-    );
-    assert_eq!(rebound_thumbwheel_action(&maps, 0.0), None);
-}
-
-#[test]
-fn rebound_horizontal_wheel_uses_the_selected_devices_polarity() {
-    let maps = HookMaps {
-        bindings: BTreeMap::from([
-            (ButtonId::ThumbwheelScrollUp, Action::NextTab.into()),
-            (ButtonId::ThumbwheelScrollDown, Action::PrevTab.into()),
-        ]),
-        selected_device: Some("mx3".to_owned()),
-        thumbwheel_positive_is_forward: BTreeMap::from([("mx3".to_owned(), true)]),
-        ..HookMaps::default()
-    };
-    assert_eq!(
-        rebound_thumbwheel_action(&maps, 1.0),
-        Some((ButtonId::ThumbwheelScrollUp, Action::NextTab))
-    );
-    assert_eq!(
-        rebound_thumbwheel_action(&maps, -1.0),
-        Some((ButtonId::ThumbwheelScrollDown, Action::PrevTab))
-    );
-}
-
-#[test]
-fn rebound_horizontal_wheel_does_not_guess_a_selected_devices_polarity() {
-    let maps = HookMaps {
-        bindings: BTreeMap::from([
-            (ButtonId::ThumbwheelScrollUp, Action::NextTab.into()),
-            (ButtonId::ThumbwheelScrollDown, Action::PrevTab.into()),
-        ]),
-        selected_device: Some("not-learned-yet".to_owned()),
-        ..HookMaps::default()
-    };
-    assert_eq!(rebound_thumbwheel_action(&maps, 1.0), None);
-    assert_eq!(rebound_thumbwheel_action(&maps, -1.0), None);
-}
-
-#[test]
-fn native_thumbwheel_scroll_stays_os_native() {
-    let maps = HookMaps {
-        bindings: BTreeMap::from([
-            (
-                ButtonId::ThumbwheelScrollUp,
-                default_binding(ButtonId::ThumbwheelScrollUp).into(),
-            ),
-            (
-                ButtonId::ThumbwheelScrollDown,
-                default_binding(ButtonId::ThumbwheelScrollDown).into(),
-            ),
-        ]),
-        ..HookMaps::default()
-    };
-    assert_eq!(rebound_thumbwheel_action(&maps, 1.0), None);
-    assert_eq!(rebound_thumbwheel_action(&maps, -1.0), None);
-}
-
-#[test]
 fn long_press_never_passes_through_as_a_native_click() {
     let binding = Binding::LongPress(LongPressBinding::new(
         default_binding(ButtonId::Back),
@@ -698,19 +661,38 @@ fn a_diverted_button_is_owned_only_on_its_own_direct_device() {
 }
 
 #[test]
-fn receiver_routes_and_hidpp_only_buttons_are_not_recorded() {
+fn a_receiver_route_names_no_echo_source_and_hidpp_only_buttons_are_not_recorded() {
     let mut diverted = DivertedButtons::default();
-    let bolt = openlogi_hid::DeviceRoute::Bolt {
-        receiver_uid: "C0FFEE".into(),
-        slot: 1,
-    };
+    let bolt = bolt_route(1);
     diverted.record(&m650_session(7), &bolt, ButtonId::Back);
     diverted.record(&m650_session(7), &m650_route(), ButtonId::DpiToggle);
     assert!(
         !diverted.owns(&m650_bluetooth(), ButtonId::Back),
         "a receiver route names no OS input identity"
     );
+    assert!(
+        diverted.diverted_on(&bolt, ButtonId::Back),
+        "but its device's presses still never reach the OS"
+    );
     assert!(!diverted.owns(&m650_bluetooth(), ButtonId::DpiToggle));
+    assert!(!diverted.diverted_on(&m650_route(), ButtonId::DpiToggle));
+}
+
+#[test]
+fn a_diversion_is_reported_only_for_its_own_route_while_its_session_lives() {
+    let mut diverted = DivertedButtons::default();
+    diverted.record(&m650_session(7), &bolt_route(2), ButtonId::MiddleClick);
+    assert!(diverted.diverted_on(&bolt_route(2), ButtonId::MiddleClick));
+    assert!(
+        !diverted.diverted_on(&bolt_route(2), ButtonId::Back),
+        "only what the session diverted"
+    );
+    assert!(
+        !diverted.diverted_on(&bolt_route(1), ButtonId::MiddleClick),
+        "another slot is another device"
+    );
+    diverted.release(&m650_session(7));
+    assert!(!diverted.diverted_on(&bolt_route(2), ButtonId::MiddleClick));
 }
 
 #[test]
@@ -842,5 +824,119 @@ fn an_echoed_press_keeps_its_release_after_the_session_ends() {
         events.recv_timeout(Duration::from_millis(200)).is_err(),
         "neither edge reached the button runtime"
     );
+    assert!(owner.shutdown());
+}
+
+/// A Bolt receiver slot, the route of a mouse whose OS input names no device.
+fn bolt_route(slot: u8) -> openlogi_hid::DeviceRoute {
+    openlogi_hid::DeviceRoute::Bolt {
+        receiver_uid: "C0FFEE".into(),
+        slot,
+    }
+}
+
+/// Hook maps for an MX Master 3S on Bolt slot 2 whose Middle opens the Actions
+/// Ring, with its capture session having diverted Middle.
+fn mx_master_3s_diverting_middle() -> HookMaps {
+    let mut maps = HookMaps {
+        bindings: BTreeMap::from([(ButtonId::MiddleClick, Action::ShowActionsRing.into())]),
+        selected_device: Some("mx-master-3s".into()),
+        selected_route: Some(bolt_route(2)),
+        ..HookMaps::default()
+    };
+    maps.diverted_buttons.record(
+        &crate::runtime::HidppSessionId::with_epoch("mx-master-3s", 7),
+        &bolt_route(2),
+        ButtonId::MiddleClick,
+    );
+    maps
+}
+
+/// #2381: Windows names no source for a Middle click. Once the selected MX
+/// Master 3S has diverted its Middle, an OS Middle click cannot be its own, so
+/// the G305 that sent it keeps its native click on both edges instead of
+/// opening the 3S's Actions Ring.
+#[test]
+fn an_unattributed_press_of_a_button_the_selected_device_diverted_stays_native() {
+    let (dispatcher, mut owner, events) = test_dispatcher();
+    let hooks = Arc::new(RwLock::new(mx_master_3s_diverting_middle()));
+    assert_eq!(
+        handle_button(
+            ButtonId::MiddleClick,
+            true,
+            None,
+            &hooks,
+            &dispatcher,
+            || None
+        ),
+        EventDisposition::PassThrough
+    );
+    // The release follows its press even when the session ends in between.
+    hooks.write().expect("maps").diverted_buttons.release(
+        &crate::runtime::HidppSessionId::with_epoch("mx-master-3s", 7),
+    );
+    assert_eq!(
+        handle_button(
+            ButtonId::MiddleClick,
+            false,
+            None,
+            &hooks,
+            &dispatcher,
+            || None
+        ),
+        EventDisposition::PassThrough
+    );
+    assert!(
+        events.recv_timeout(Duration::from_millis(200)).is_err(),
+        "the selected device's binding never ran"
+    );
+    assert!(owner.shutdown());
+}
+
+/// Without a diversion on the selected device the unattributed press may be
+/// its own, so the binding still applies — through a release that arrives
+/// after a session diverted the control mid-press.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn an_unattributed_press_keeps_the_selected_binding_while_that_device_has_not_diverted_it() {
+    use super::super::button::ButtonRuntimeEvent;
+    let (dispatcher, mut owner, events) = test_dispatcher();
+    let mut maps = mx_master_3s_diverting_middle();
+    maps.selected_route = Some(bolt_route(1));
+    let hooks = Arc::new(RwLock::new(maps));
+    assert_eq!(
+        handle_button(
+            ButtonId::MiddleClick,
+            true,
+            None,
+            &hooks,
+            &dispatcher,
+            || None
+        ),
+        EventDisposition::Suppress,
+        "another device's diversion says nothing about the selected one"
+    );
+    let ButtonRuntimeEvent::Started(press) =
+        events.recv_timeout(Duration::from_secs(1)).expect("down")
+    else {
+        panic!("started");
+    };
+    assert_eq!(press.start_action(), Some(&Action::ShowActionsRing));
+    hooks.write().expect("maps").selected_route = Some(bolt_route(2));
+    assert_eq!(
+        handle_button(
+            ButtonId::MiddleClick,
+            false,
+            None,
+            &hooks,
+            &dispatcher,
+            || None
+        ),
+        EventDisposition::Suppress
+    );
+    assert!(matches!(
+        events.recv_timeout(Duration::from_secs(1)).expect("up"),
+        ButtonRuntimeEvent::Ended { .. }
+    ));
     assert!(owner.shutdown());
 }

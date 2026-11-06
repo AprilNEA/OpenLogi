@@ -8,7 +8,9 @@ use std::collections::{BTreeMap, HashSet};
 use std::rc::Rc;
 
 use gpui::{App, Entity, ParentElement, Styled, Window, div};
-use gpui_component::{WindowExt as _, button::ButtonVariant, dialog::DialogButtonProps, h_flex};
+use gpui_kit::component::{
+    WindowExt as _, button::ButtonVariant, dialog::DialogButtonProps, h_flex,
+};
 use openlogi_core::app::{AppAliases, profile_key_for};
 
 pub(crate) use self::catalog::{AppCatalogPicker, ProfileIconCache};

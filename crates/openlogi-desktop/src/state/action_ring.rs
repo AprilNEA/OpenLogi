@@ -1,7 +1,7 @@
 //! Actions Ring settings and editor scope for the selected device.
 
 use openlogi_core::binding::{
-    ActionRingConfig, ActionRingIcon, ActionRingLayout, ActionRingSlot, RingAction,
+    ActionRingConfig, ActionRingIcon, ActionRingLayout, ActionRingSize, ActionRingSlot, RingAction,
 };
 
 use super::events::StateEvents;
@@ -174,6 +174,22 @@ impl AppState {
         self.config
             .edit(|config| config.set_action_ring_haptics(&key, enabled));
         self.persist_and_reload("Actions Ring haptics");
+        events
+    }
+
+    /// Set how large the active device's ring is drawn.
+    pub fn commit_action_ring_size(&mut self, size: ActionRingSize) -> StateEvents {
+        let events = self.for_current_device(StateEvent::BindingsChanged);
+        let Some(key) = self
+            .current_record()
+            .and_then(DeviceRecord::persistent_config_key)
+            .map(str::to_string)
+        else {
+            return events;
+        };
+        self.config
+            .edit(|config| config.set_action_ring_size(&key, size));
+        self.persist_and_reload("Actions Ring size");
         events
     }
 }

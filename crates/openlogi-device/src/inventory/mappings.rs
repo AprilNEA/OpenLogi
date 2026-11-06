@@ -16,6 +16,7 @@ use hidpp::register::battery::{
     StatusReading,
 };
 use openlogi_core::device::{BatteryInfo, BatteryLevel, BatteryStatus, DeviceKind};
+use openlogi_device_registry::keypad::find_keypad;
 
 /// Trim NUL padding and whitespace from a `DeviceInformation` serial; an
 /// all-padding serial collapses to `None`.
@@ -76,9 +77,11 @@ pub(crate) fn map_device_type(ty: HidppDeviceType) -> DeviceKind {
 
 /// First step of the device-kind precedence chain:
 ///
-/// > asset registry > **HID++ `0x0005`** > **Bolt pairing register**
+/// > asset registry > **HID++ `0x0005`** > **register**
 ///
-/// This folds the two HID++ sources; the GUI applies the final asset-registry
+/// where *register* is the Bolt pairing register on the receiver path and the
+/// curated identity registry (`direct_identity_kind`) on the direct path. This
+/// folds the two HID++ sources; the GUI applies the final asset-registry
 /// override in `effective_kind` (`crates/openlogi-desktop/src/state/devices.rs`).
 /// Adding a kind source means slotting it into this one chain — and updating
 /// both docs.
@@ -88,12 +91,26 @@ pub(crate) fn map_device_type(ty: HidppDeviceType) -> DeviceKind {
 /// MX Anywhere 3S surfacing as `Keyboard`, which strips its button/pointer tabs
 /// — issue #127). We therefore trust `probed` whenever it names a kind we model,
 /// falling back to `register` when the device was offline (no probe → `None`),
-/// didn't answer `0x0005`, or reported a type we don't map (`Unknown`). On the
-/// receiver-less direct path `register` is simply `Unknown`.
+/// didn't answer `0x0005`, or reported a type we don't map (`Unknown`).
 pub(crate) fn resolve_device_kind(probed: Option<DeviceKind>, register: DeviceKind) -> DeviceKind {
     match probed {
         Some(kind) if kind != DeviceKind::Unknown => kind,
         _ => register,
+    }
+}
+
+/// The direct path's register: a per-product kind claim over the identity
+/// registry, for attached devices that answer HID++ but report no usable
+/// `0x0005` type and have no pairing register to fall back on. Without it
+/// such a device classifies `Unknown` and silently leaves the keyboard capture
+/// plane, so its bound keys stay native (the MX Creative Keypad, whose
+/// `DeviceType` is `None`, is why this exists). Unknown products return
+/// `Unknown`, exactly what the direct path passed before this source existed.
+pub(crate) fn direct_identity_kind(vendor_id: u16, product_id: u16) -> DeviceKind {
+    if find_keypad(vendor_id, product_id).is_some() {
+        DeviceKind::Numpad
+    } else {
+        DeviceKind::Unknown
     }
 }
 
@@ -215,8 +232,8 @@ pub(crate) fn status_register_battery_info(reading: StatusReading) -> BatteryInf
 /// takes the display buckets.
 ///
 /// Charge complete reads 100 % / [`BatteryLevel::Full`] whatever charge the
-/// register sent alongside it, as [`legacy_battery_info`] reads it for
-/// `0x1000`.
+/// register sent alongside it, as [`legacy_battery_info`] reads it for a
+/// `0x1000` device with mileage.
 pub(crate) fn charge_register_battery_info(reading: ChargeReading) -> BatteryInfo {
     let status = map_register_charging(reading.charging);
     let percentage = if status == BatteryStatus::Full {
@@ -286,14 +303,19 @@ pub(crate) fn voltage_battery_percentage(voltage_mv: u16) -> u8 {
 /// In every other state the firmware reports `0`, meaning unknown. That is
 /// how the Linux HID++ driver reads the feature
 /// (`hidpp20_batterylevel_map_status_capacity`), and it sets charge complete
-/// to 100 %. Here charge complete reads 100 % / [`BatteryLevel::Full`]. Any
-/// other off-battery state that reports `0` has no percentage and a
+/// to 100 %. Here charge complete reads [`BatteryLevel::Full`]. Any other
+/// off-battery state that reports `0` has no percentage and a
 /// [`BatteryLevel::Unknown`] level: the "charging, no reading" shape a voltage
 /// source gives on a cold start, rather than a critically empty battery.
 ///
 /// `mileage` is the device's capability: with it the discharge level is a gauge
-/// reading and takes the display buckets; without it the level is one of four
-/// coarse levels, which [`coarse_legacy_battery_level`] reads back.
+/// reading. It is the percentage, charge complete is 100 %, and the level takes
+/// the display buckets. Without it the discharge level encodes one of a few
+/// coarse levels, which [`coarse_legacy_battery_level`] reads back. That
+/// reading carries no percentage, the same shape as a `0x1004` battery without
+/// state of charge. The Linux HID++ driver likewise exposes only a capacity
+/// level for such a device. An M325 reports `70` from a new battery until it
+/// drops to `5` (issue #2332), so `70 %` would claim a gauge it does not have.
 pub(crate) fn legacy_battery_info(
     discharge_level: u8,
     status: HidppLegacyBatteryStatus,
@@ -312,7 +334,7 @@ pub(crate) fn legacy_battery_info(
         _ => (Some(discharge_level), level_of(discharge_level)),
     };
     BatteryInfo {
-        percentage,
+        percentage: percentage.filter(|_| mileage),
         level,
         status,
     }
@@ -356,9 +378,10 @@ mod tests {
     use super::{
         BatteryInfo, BatteryLevel, BatteryStatus, ChargeReading, DeviceKind,
         HidppLegacyBatteryStatus, HidppVoltageChargingStatus, StatusReading, UnifyingDeviceKind,
-        charge_register_battery_info, coarse_legacy_battery_level, legacy_battery_info,
-        legacy_battery_level_from_percentage, map_unifying_kind, map_voltage_battery_status,
-        resolve_device_kind, status_register_battery_info, voltage_battery_percentage,
+        charge_register_battery_info, coarse_legacy_battery_level, direct_identity_kind,
+        legacy_battery_info, legacy_battery_level_from_percentage, map_unifying_kind,
+        map_voltage_battery_status, resolve_device_kind, status_register_battery_info,
+        voltage_battery_percentage,
     };
 
     #[test]
@@ -550,19 +573,61 @@ mod tests {
                 legacy_battery_info(discharge_level, HidppLegacyBatteryStatus::Discharging, true);
             assert_eq!(without.level, coarse, "{discharge_level} without mileage");
             assert_eq!(with.level, display, "{discharge_level} with mileage");
-            assert_eq!(without.percentage, Some(discharge_level));
+            assert_eq!(without.percentage, None);
             assert_eq!(with.percentage, Some(discharge_level));
         }
     }
 
     #[test]
-    fn legacy_off_battery_rules_do_not_depend_on_mileage() {
-        for mileage in [false, true] {
+    fn a_legacy_level_without_mileage_is_not_a_percentage() {
+        // Issue #2332: an M325 reports `70` from a new battery, then `5`. Both
+        // are levels, so neither may read as a gauged percentage.
+        for (discharge_level, level, needs_attention) in [
+            (70, BatteryLevel::Good, false),
+            (5, BatteryLevel::Critical, true),
+        ] {
+            let battery = legacy_battery_info(
+                discharge_level,
+                HidppLegacyBatteryStatus::Discharging,
+                false,
+            );
+            assert_eq!(
+                battery,
+                BatteryInfo {
+                    percentage: None,
+                    level,
+                    status: BatteryStatus::Discharging,
+                },
+                "discharge level {discharge_level}"
+            );
+            assert_eq!(
+                battery.needs_attention(),
+                needs_attention,
+                "discharge level {discharge_level}"
+            );
+        }
+        // The draft's low level is `25`, above the 20 % attention threshold:
+        // only the level raises the low-battery cue.
+        assert!(
+            legacy_battery_info(25, HidppLegacyBatteryStatus::Discharging, false).needs_attention()
+        );
+    }
+
+    #[test]
+    fn legacy_charge_complete_is_full_and_a_percentage_only_with_mileage() {
+        for (mileage, percentage) in [(false, None), (true, Some(100))] {
             let full = legacy_battery_info(0, HidppLegacyBatteryStatus::Full, mileage);
             assert_eq!(
                 (full.percentage, full.level),
-                (Some(100), BatteryLevel::Full)
+                (percentage, BatteryLevel::Full),
+                "mileage {mileage}"
             );
+        }
+    }
+
+    #[test]
+    fn legacy_charging_without_a_reading_does_not_depend_on_mileage() {
+        for mileage in [false, true] {
             let charging = legacy_battery_info(0, HidppLegacyBatteryStatus::Recharging, mileage);
             assert_eq!(
                 (charging.percentage, charging.level),
@@ -630,6 +695,19 @@ mod tests {
             .ok()
             .map(map_legacy_battery_status);
         assert_eq!(mapped, Some(BatteryStatus::Unknown));
+    }
+
+    #[test]
+    fn direct_identity_kind_only_claims_known_keypads() {
+        // The MX Creative Keypad gets a kind despite reporting DeviceType None;
+        // every other product must stay Unknown so no other device is affected.
+        assert_eq!(
+            direct_identity_kind(0x046d, 0xc354),
+            DeviceKind::Numpad,
+            "known wired keypad must claim a kind"
+        );
+        assert_eq!(direct_identity_kind(0x046d, 0xb034), DeviceKind::Unknown);
+        assert_eq!(direct_identity_kind(0x1234, 0xc354), DeviceKind::Unknown);
     }
 
     #[test]

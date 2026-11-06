@@ -27,6 +27,15 @@ use std::fmt;
 pub struct Cid(u16);
 
 impl Cid {
+    /// The MX Creative Keypad's left paging button.
+    pub const LEFT_PAGING: Self = Self(0x01a1);
+    /// The MX Creative Keypad's right paging button.
+    pub const RIGHT_PAGING: Self = Self(0x01a2);
+    /// Both paging buttons, left to right — the keypad's only `0x1b04`
+    /// controls, drawn under its grid and seeded with the page actions on a
+    /// keypad that has more than one page.
+    pub const PAGING: [Self; 2] = [Self::LEFT_PAGING, Self::RIGHT_PAGING];
+
     /// Wrap a raw `0x1b04` control ID.
     #[must_use]
     pub const fn new(cid: u16) -> Self {
@@ -363,6 +372,21 @@ pub const KNOWN_CONTROLS: &[KnownControl] = &[
     ),
     known(0x01a5, "KeyDiamond", "Diamond Key", "keyboard.diamond_key"),
     known(0x01a6, "KeyStar", "Star Key", "keyboard.star_key"),
+    // The MX Creative Keypad's paging buttons. Both are divertable; the rest of
+    // the keypad's keys (its LCD grid) report through a vendor report, not
+    // 0x1b04, so they have no CIDs to catalog.
+    known(
+        Cid::LEFT_PAGING.0,
+        "KeyLeftPaging",
+        "Left Paging Button",
+        "keyboard.left_paging_key",
+    ),
+    known(
+        Cid::RIGHT_PAGING.0,
+        "KeyRightPaging",
+        "Right Paging Button",
+        "keyboard.right_paging_key",
+    ),
 ];
 
 #[cfg(test)]

@@ -458,6 +458,7 @@ fn persisted_action_variant_names_are_stable() {
         "NewTab",
         "NextDesktop",
         "NextDpiPreset",
+        "NextKeypadPage",
         "NextTab",
         "NextTrack",
         "None",
@@ -468,6 +469,7 @@ fn persisted_action_variant_names_are_stable() {
         "PrevTrack",
         "PreviousDesktop",
         "PreviousDpiPreset",
+        "PreviousKeypadPage",
         "Redo",
         "ReloadPage",
         "ReopenTab",
@@ -796,6 +798,134 @@ fn button_ids_persist_as_their_config_names() {
     assert_eq!(binding_roundtrip(bindings.clone()), bindings);
 }
 
+/// Grid keys persist by position name, and that table must be the same mapping
+/// the device layer reads the wire index through — both directions are locked.
+#[test]
+fn grid_keys_persist_by_position_name() {
+    let mut bindings = BTreeMap::new();
+    bindings.insert(
+        ButtonId::grid(GridKey::Middle),
+        Binding::Single(Action::Screenshot),
+    );
+    bindings.insert(
+        ButtonId::grid(GridKey::BottomRight),
+        Binding::Single(Action::Copy),
+    );
+    bindings.insert(
+        ButtonId::Grid(GridSlot {
+            page: KeypadPage::new(3).unwrap(),
+            key: GridKey::Middle,
+        }),
+        Binding::Single(Action::Paste),
+    );
+
+    let toml = toml::to_string_pretty(&BindingWrapper {
+        bindings: bindings.clone(),
+    })
+    .expect("serialize");
+    assert!(toml.contains("gridMiddle = \"Screenshot\""), "{toml}");
+    assert!(toml.contains("gridBottomRight = \"Copy\""), "{toml}");
+    assert!(toml.contains("\"page3:gridMiddle\" = \"Paste\""), "{toml}");
+    assert_eq!(binding_roundtrip(bindings.clone()), bindings);
+}
+
+/// Every slot has exactly one spelling: page 1 is the bare position name, so
+/// `page1:` is refused rather than aliased, and a page outside `2..=15`, a
+/// signed or empty number, or an unknown position names no button.
+#[test]
+fn grid_slot_names_have_one_spelling_each() {
+    for page in KeypadPage::MAX.through() {
+        for key in GridKey::ALL {
+            let button = ButtonId::Grid(GridSlot { page, key });
+            assert_eq!(
+                button.config_name().parse::<ButtonId>(),
+                Ok(button),
+                "{button:?}"
+            );
+        }
+    }
+    for refused in [
+        "page1:gridMiddle",
+        "page0:gridMiddle",
+        "page16:gridMiddle",
+        "page+2:gridMiddle",
+        "page:gridMiddle",
+        "page2:gridCentre",
+        "page2gridMiddle",
+    ] {
+        assert!(refused.parse::<ButtonId>().is_err(), "{refused}");
+    }
+}
+
+#[test]
+fn keypad_pages_wrap_within_the_last_page() {
+    let page = |n| KeypadPage::new(n).unwrap();
+    assert_eq!(page(1).next_within(page(3)), page(2));
+    assert_eq!(page(3).next_within(page(3)), page(1));
+    assert_eq!(page(1).previous_within(page(3)), page(3));
+    assert_eq!(page(2).previous_within(page(3)), page(1));
+    // One page: both directions stay put.
+    assert_eq!(page(1).next_within(page(1)), page(1));
+    assert_eq!(page(1).previous_within(page(1)), page(1));
+    // A page past a shrunken count re-enters the range at its nearest end.
+    assert_eq!(page(5).next_within(page(3)), page(1));
+    assert_eq!(page(5).previous_within(page(3)), page(3));
+    assert_eq!(page(4).through().count(), 4);
+}
+
+#[test]
+fn keypad_page_numbers_are_bounded_on_input() {
+    #[derive(Debug, Deserialize)]
+    struct Pages {
+        pages: KeypadPage,
+    }
+    assert!(KeypadPage::new(0).is_none());
+    assert!(KeypadPage::new(16).is_none());
+    assert_eq!(KeypadPage::MAX.number(), 15);
+    assert_eq!(
+        toml::from_str::<Pages>("pages = 4").unwrap().pages,
+        KeypadPage::new(4).unwrap()
+    );
+    toml::from_str::<Pages>("pages = 0").unwrap_err();
+    toml::from_str::<Pages>("pages = 16").unwrap_err();
+}
+
+/// The row-major pinning the grid-key probe's mapping run verified: the
+/// declaration order is the wire order, indexes are exactly `1..=9`, and the
+/// name table is injective so config bindings can be keyed by it.
+#[test]
+fn grid_key_index_mapping_is_row_major_and_total() {
+    let mut names = std::collections::HashSet::new();
+    for (position, key) in GridKey::ALL.iter().enumerate() {
+        let index = u8::try_from(position).expect("nine keys") + 1;
+        assert_eq!(key.index(), index, "{key:?} wire index");
+        assert_eq!(GridKey::from_index(index), Some(*key));
+        assert!(names.insert(key.config_name()), "duplicate name");
+        assert_eq!(GridKey::from_config_name(key.config_name()), Some(*key));
+    }
+    assert_eq!(GridKey::from_index(0), None);
+    assert_eq!(GridKey::from_index(10), None);
+}
+
+/// The GUI's keycap grid draws from `position`, so it must agree with the
+/// wire numbering: row-major, three by three, every cell used once.
+#[test]
+fn grid_key_positions_are_the_row_major_grid_the_device_reports() {
+    let mut cells = std::collections::HashSet::new();
+    for key in GridKey::ALL {
+        let position = key.position();
+        assert_eq!(
+            position.row * 3 + position.col,
+            u16::from(key.index()) - 1,
+            "{key:?} position"
+        );
+        cells.insert(position);
+    }
+    assert_eq!(cells.len(), 9, "the nine keys fill distinct cells");
+    let grid = openlogi_device_registry::keypad::MX_CREATIVE_KEYPAD_GRID;
+    assert!(cells.iter().all(|cell| grid.contains(*cell)));
+}
+
 #[test]
 fn the_original_key_names_still_load_as_controls() {
     // Files written by 0.7–0.8.9 name keyboard keys with these variants; the
@@ -854,4 +984,20 @@ fn mouse_buttons_sort_ahead_of_every_keyboard_control() {
         assert_eq!(button.config_name().parse::<ButtonId>(), Ok(button));
     }
     assert_eq!(default_binding(ButtonId::control(0x01f3)), Action::None);
+}
+
+#[test]
+fn a_key_shows_its_press_action_or_nothing_when_unbound() {
+    let long_press = |short, long| Binding::LongPress(LongPressBinding::new(short, long));
+    let cases = [
+        (Binding::Single(Action::None), None),
+        (Binding::Single(Action::Copy), Some(Action::Copy)),
+        (long_press(Action::Copy, Action::Paste), Some(Action::Copy)),
+        (long_press(Action::None, Action::Paste), Some(Action::Paste)),
+        // A long press does something whatever its arms hold.
+        (long_press(Action::None, Action::None), Some(Action::None)),
+    ];
+    for (binding, shown) in cases {
+        assert_eq!(binding.key_action(), shown, "{binding:?}");
+    }
 }

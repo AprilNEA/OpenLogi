@@ -155,6 +155,25 @@ impl Binding {
         }
     }
 
+    /// The action a key bound to this shows — a keypad key's LCD face, its
+    /// legend in the app — or `None` when the key does nothing.
+    ///
+    /// A [`LongPress`](Binding::LongPress) does something whatever its arms
+    /// hold and shows its short action, or its long one when only that is
+    /// set. Any other shape does something unless its
+    /// [`click_action`](Self::click_action) is [`Action::None`], the "leave
+    /// native" value.
+    #[must_use]
+    pub fn key_action(&self) -> Option<Action> {
+        match self {
+            Binding::LongPress(press) if *press.short() == Action::None => {
+                Some(press.long().clone())
+            }
+            Binding::LongPress(press) => Some(press.short().clone()),
+            _ => Some(self.click_action()).filter(|action| *action != Action::None),
+        }
+    }
+
     /// The action bound to `direction`, if this is a gesture binding.
     /// The other shapes have no directions and return `None`.
     #[must_use]

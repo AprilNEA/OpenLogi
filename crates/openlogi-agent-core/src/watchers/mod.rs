@@ -11,6 +11,7 @@ pub mod gesture;
 pub mod host_switch;
 pub mod input_monitoring;
 pub mod inventory;
+pub mod key_display;
 pub mod keyboard;
 pub mod light;
 pub mod pairing;
