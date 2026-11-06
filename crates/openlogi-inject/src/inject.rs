@@ -172,6 +172,12 @@ impl HeldOutput {
         }
     }
 
+    /// Whether a held chord keeps `key` down.
+    #[cfg(target_os = "linux")]
+    fn owns(&self, key: HeldKey) -> bool {
+        self.owners.contains_key(&key)
+    }
+
     #[cfg(target_os = "macos")]
     fn modifiers(&self) -> HeldModifiers {
         let mut modifiers = HeldModifiers::default();
@@ -519,6 +525,17 @@ fn hold_transition(
 fn with_held_modifiers<R>(post: impl FnOnce(HeldModifiers) -> R) -> R {
     let output = HELD_OUTPUT.lock().unwrap_or_else(PoisonError::into_inner);
     post(output.modifiers())
+}
+
+/// Run `post` with the keys held chords keep down, under the lock that orders
+/// held-chord edges.
+///
+/// A one-shot keystroke posted through this sees exactly which keys held
+/// chords own and never interleaves with a held transition.
+#[cfg(target_os = "linux")]
+fn with_held_output<R>(post: impl FnOnce(&HeldOutput) -> R) -> R {
+    let output = HELD_OUTPUT.lock().unwrap_or_else(PoisonError::into_inner);
+    post(&output)
 }
 
 /// Let the frontmost app's menus answer shortcuts the keyboard layout
