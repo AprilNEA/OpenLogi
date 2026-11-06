@@ -77,7 +77,7 @@ use devices::{
     carry_lifecycle_budgets, changed_follower_cookies, changed_force_sensing,
     config_keeps_os_layout, configured_dpi, configured_force_sensing, configured_report_rate,
     configured_wheel_mode, host_switch_links, is_hidpp_device, keeps_os_layout, main_wheel_divert,
-    newly_kept_os_layouts, os_layout_appeared, pick_current, plan_disabled_keys_recovery,
+    newly_kept_os_layouts, os_layout_appeared, os_layout_target, pick_current, plan_disabled_keys_recovery,
     plan_reapply, published_inventories, reconnect_follower_cookies, same_device_lifecycle,
     saved_speed, settings_moved, stable_id, wheel_inverted,
 };
@@ -1825,8 +1825,11 @@ impl Orchestrator {
         if !dev.online || !keeps_os_layout(&self.config, dev) {
             return;
         }
-        self.kept_os_layouts.keep(&dev.config_key);
-        let (Some(route), Some(host)) = (dev.route.as_ref(), HostOs::current()) else {
+        let Some(host) = HostOs::current() else {
+            return;
+        };
+        self.kept_os_layouts.keep(&dev.config_key, host);
+        let Some(route) = dev.route.as_ref() else {
             return;
         };
         crate::hardware::keep_os_layout_in_background(
@@ -2266,7 +2269,7 @@ impl Orchestrator {
     /// withdraws a layout write still queued for it.
     fn apply_enabled_os_layouts(&self, previous: &Config) {
         self.kept_os_layouts
-            .retain(|key| config_keeps_os_layout(&self.config, key));
+            .retain(|key, _| config_keeps_os_layout(&self.config, key));
         for dev in newly_kept_os_layouts(previous, &self.config, &self.devices) {
             self.keep_os_layout(dev);
         }

@@ -65,6 +65,11 @@ use crate::binding::{Binding, ButtonId, GestureDirection};
 /// persisted shape or enum vocabulary changes; readers inspect this value
 /// before consuming the rest of the file.
 ///
+/// v12 adds per-device [`DeviceConfig::os_layout_pin`]. Older files omit the
+/// setting and leave the keyboard's layout where it is. The bump makes a v11
+/// build reject a file that stores the field at the version check instead of
+/// failing after parsing an unknown field.
+///
 /// v11 adds the `[flow]` section for cross-machine device handoff. Nothing
 /// older needs migrating, and a file without it loads as disabled Flow. The
 /// bump makes a v10 build refuse a file that may hold `[flow]` at the version
