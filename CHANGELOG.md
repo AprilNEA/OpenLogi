@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(gui,agent)* add a per-device OS pointer-speed slider and apply changes on save and reconnect ([#2423](https://github.com/AprilNEA/OpenLogi/pull/2423))
+
+### Fixed
+
+- *(agent)* avoid applying the default pointer curve to keyboards and retain OS-layout pins across config reloads ([#2423](https://github.com/AprilNEA/OpenLogi/pull/2423))
+
+
 ## [0.9.0] - 2026-11-03
 
 ### Added

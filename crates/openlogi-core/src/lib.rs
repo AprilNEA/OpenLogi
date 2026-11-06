@@ -20,6 +20,7 @@ pub mod binding;
 pub mod bindings;
 pub mod brand;
 pub mod color;
+pub mod compositor;
 pub mod config;
 pub mod device;
 pub mod device_order;
@@ -30,6 +31,7 @@ pub mod hid;
 pub mod locale;
 #[cfg(feature = "logging")]
 pub mod logging;
+pub mod macos_accel;
 #[cfg(feature = "fs")]
 pub mod paths;
 pub mod scroll;

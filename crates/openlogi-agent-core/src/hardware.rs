@@ -17,7 +17,7 @@
 //! at the cadence these fire at (≤ once per slider release / button press)
 //! and avoids holding a long-lived async runtime alongside GPUI's executor.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
@@ -930,26 +930,33 @@ enum Landed {
 /// device. A queued write can wait behind pairing or a host switch, so it
 /// asks this set when it starts and again just before it writes, and does
 /// not land after the user opted out.
+///
+/// Each device is kept on one host platform: the host OS, or the OS it is
+/// pinned to. Moving the pin replaces that platform, so a write queued for the
+/// old one does not land either.
 #[derive(Debug, Default)]
-pub(crate) struct KeptOsLayouts(Mutex<HashSet<String>>);
+pub(crate) struct KeptOsLayouts(Mutex<HashMap<String, HostOs>>);
 
 impl KeptOsLayouts {
     /// Record that `key`'s layout is kept.
-    pub(crate) fn keep(&self, key: &str) {
-        self.lock().insert(key.to_owned());
+    /// It is kept on `host`, in place of any other platform.
+    pub(crate) fn keep(&self, key: &str, host: HostOs) {
+        self.lock().insert(key.to_owned(), host);
     }
 
     /// Drop every device for which `still_kept` says no.
-    pub(crate) fn retain(&self, still_kept: impl Fn(&str) -> bool) {
-        self.lock().retain(|key| still_kept(key));
+    /// It is given the device's key and the platform it is kept on.
+    pub(crate) fn retain(&self, still_kept: impl Fn(&str, HostOs) -> bool) {
+        self.lock().retain(|key, host| still_kept(key, *host));
     }
 
     /// Whether `key`'s layout is kept.
-    pub(crate) fn contains(&self, key: &str) -> bool {
-        self.lock().contains(key)
+    /// Only `host` counts, not another platform it was kept on.
+    pub(crate) fn contains(&self, key: &str, host: HostOs) -> bool {
+        self.lock().get(key) == Some(&host)
     }
 
-    fn lock(&self) -> MutexGuard<'_, HashSet<String>> {
+    fn lock(&self) -> MutexGuard<'_, HashMap<String, HostOs>> {
         self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
@@ -969,12 +976,12 @@ pub(crate) fn keep_os_layout_in_background(
     op.spawn_write(
         "OS layout write",
         move |c| async move {
-            openlogi_hid::keep_os_layout_on(&c, host, || kept.contains(&key)).await
+            openlogi_hid::keep_os_layout_on(&c, host, || kept.contains(&key, host)).await
         },
         move |result| {
             log_outcome(index, "OS layout write", result, |outcome| {
                 if let OsLayoutOutcome::Switched { from, to } = outcome {
-                    info!(index, ?from, to, "keyboard layout switched to the host OS");
+                    info!(index, ?from, to, "keyboard layout switched");
                 } else {
                     debug!(index, ?outcome, "keyboard layout left as it is");
                 }

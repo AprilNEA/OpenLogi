@@ -167,6 +167,50 @@ impl AppState {
         self.pointer.refused_pointer_speeds.remove(key);
         self.pointer.reads.refresh_pointer_speed(key);
     }
+    /// Persisted OS-level pointer speed factor for the active device.
+    #[must_use]
+    pub fn current_os_pointer_speed(&self) -> Option<f32> {
+        self.current_record()
+            .and_then(DeviceRecord::persistent_config_key)
+            .and_then(|key| self.config.os_pointer_speed(key))
+    }
+
+    /// Whether macOS-style acceleration is enabled for the active device.
+    /// `None` means auto (enabled on Hyprland, disabled elsewhere).
+    #[must_use]
+    pub fn current_os_pointer_accel(&self) -> Option<bool> {
+        self.current_record()
+            .and_then(DeviceRecord::persistent_config_key)
+            .and_then(|key| self.config.os_pointer_accel(key))
+    }
+
+    /// Persist the macOS-style acceleration toggle for the active device.
+    pub fn commit_os_pointer_accel(&mut self, enabled: Option<bool>) -> StateEvents {
+        let events = self.for_current_device(StateEvent::DeviceConfigChanged);
+        let persistent_key = self
+            .current_record()
+            .and_then(|r| r.persistent_config_key().map(str::to_string));
+        if let Some(key) = persistent_key {
+            self.config
+                .edit(|config| config.set_os_pointer_accel(&key, enabled));
+            self.persist_and_reload("os pointer accel");
+        }
+        events
+    }
+
+    /// Persist `speed` (or clear with `None`) for the active device.
+    pub fn commit_os_pointer_speed(&mut self, speed: Option<f32>) -> StateEvents {
+        let events = self.for_current_device(StateEvent::DeviceConfigChanged);
+        let persistent_key = self
+            .current_record()
+            .and_then(|r| r.persistent_config_key().map(str::to_string));
+        if let Some(key) = persistent_key {
+            self.config
+                .edit(|config| config.set_os_pointer_speed(&key, speed));
+            self.persist_and_reload("os pointer speed");
+        }
+        events
+    }
 
     pub(super) fn load_current_pointer_speed(&mut self, cx: &mut gpui::Context<Self>) {
         let Some((key, route)) = self

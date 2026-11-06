@@ -91,33 +91,61 @@ fn unset_keep_os_layout_is_omitted_from_toml() {
 }
 
 #[test]
-fn smooth_wheel_defaults_off_and_roundtrips_per_device() {
+fn os_layout_pin_roundtrips_per_device_and_is_omitted_when_unset() {
     let mut cfg = Config::default();
-    assert!(!cfg.smooth_wheel("mouse"));
-    cfg.set_smooth_wheel("mouse", true);
+    assert_eq!(cfg.os_layout_pin("2b042"), None);
+    cfg.set_os_layout_pin("2b042", Some(PinnedOs::MacOs));
     let body = toml::to_string_pretty(&cfg).expect("serialize");
-    assert!(body.contains("smooth_wheel = true"), "{body}");
+    assert!(body.contains("os_layout_pin = \"macos\""), "{body}");
     let restored = write_and_read(&cfg);
-    assert!(restored.smooth_wheel("mouse"));
-    assert!(!restored.smooth_wheel("absent"));
-    cfg.set_smooth_wheel("mouse", false);
+    assert_eq!(restored.os_layout_pin("2b042"), Some(PinnedOs::MacOs));
+    assert_eq!(restored.os_layout_pin("absent"), None);
+    cfg.set_os_layout_pin("2b042", None);
     let body = toml::to_string_pretty(&cfg).expect("serialize");
-    assert!(!body.contains("smooth_wheel"), "off is omitted: {body}");
-    assert!(!write_and_read(&cfg).smooth_wheel("mouse"));
+    assert!(!body.contains("os_layout_pin"), "{body}");
 }
 
 #[test]
-fn a_smooth_wheel_opt_in_survives_route_adoption() {
-    let route = "receiver:82839805:slot:2";
+fn os_pointer_speed_roundtrips_per_device_and_is_omitted_when_unset() {
+    let mut cfg = Config::default();
+    assert_eq!(cfg.os_pointer_speed("2b042"), None);
+    cfg.set_os_pointer_speed("2b042", Some(0.5));
+    let body = toml::to_string_pretty(&cfg).expect("serialize");
+    assert!(body.contains("os_pointer_speed = 0.5"), "{body}");
+    let restored = write_and_read(&cfg);
+    assert_eq!(restored.os_pointer_speed("2b042"), Some(0.5));
+    assert_eq!(restored.os_pointer_speed("absent"), None);
+    cfg.set_os_pointer_speed("2b042", None);
+    let body = toml::to_string_pretty(&cfg).expect("serialize");
+    assert!(!body.contains("os_pointer_speed"), "{body}");
+}
+
+#[test]
+fn os_pointer_accel_roundtrips_per_device_and_is_omitted_when_unset() {
+    let mut cfg = Config::default();
+    assert_eq!(cfg.os_pointer_accel("2b042"), None);
+    cfg.set_os_pointer_accel("2b042", Some(true));
+    let body = toml::to_string_pretty(&cfg).expect("serialize");
+    assert!(body.contains("os_pointer_accel = true"), "{body}");
+    let restored = write_and_read(&cfg);
+    assert_eq!(restored.os_pointer_accel("2b042"), Some(true));
+    assert_eq!(restored.os_pointer_accel("absent"), None);
+    cfg.set_os_pointer_accel("2b042", None);
+    let body = toml::to_string_pretty(&cfg).expect("serialize");
+    assert!(!body.contains("os_pointer_accel"), "{body}");
+}
+
+#[test]
+fn an_os_layout_pin_survives_route_adoption() {
+    let route = "receiver:82839805:slot:1";
     let mut config = Config::default();
-    config.set_smooth_wheel(route, true);
-    let canonical = crate::device_order::PhysicalDeviceKey::parse("unit:4f4c4403").expect("valid");
+    config.set_os_layout_pin(route, Some(PinnedOs::Windows));
+    let canonical = crate::device_order::PhysicalDeviceKey::parse("unit:6be9d300").expect("valid");
     assert!(config.adopt_route(&canonical, route, None));
-    assert!(
-        !config.devices.contains_key(route),
-        "sanity: the route entry folded"
+    assert_eq!(
+        config.os_layout_pin("unit:6be9d300"),
+        Some(PinnedOs::Windows)
     );
-    assert!(config.smooth_wheel("unit:4f4c4403"));
 }
 
 #[test]
@@ -171,15 +199,12 @@ fn g_key_profile_names_are_trimmed_cleared_when_blank_and_folded() {
         Some("Work")
     );
     assert_eq!(restored.g_key_profile_name(route, GKeyProfile::M1), None);
-
     let canonical = crate::device_order::PhysicalDeviceKey::parse("unit:4f4c4405").expect("valid");
     assert!(restored.adopt_route(&canonical, route, None));
     assert_eq!(
         restored.g_key_profile_name("unit:4f4c4405", GKeyProfile::M2),
-        Some("Work"),
-        "a name follows the device onto its identity key"
+        Some("Work")
     );
-
     restored.set_g_key_profile_name("unit:4f4c4405", GKeyProfile::M2, "   ");
     let body = toml::to_string_pretty(&restored).expect("serialize");
     assert!(!body.contains("g_key_profile_names"), "{body}");
@@ -200,6 +225,36 @@ fn the_g_key_choices_survive_route_adoption() {
         config.gaming_key_mode("unit:4f4c4404"),
         GamingKeyMode::NineButtons
     );
+}
+
+#[test]
+fn smooth_wheel_defaults_off_and_roundtrips_per_device() {
+    let mut cfg = Config::default();
+    assert!(!cfg.smooth_wheel("mouse"));
+    cfg.set_smooth_wheel("mouse", true);
+    let body = toml::to_string_pretty(&cfg).expect("serialize");
+    assert!(body.contains("smooth_wheel = true"), "{body}");
+    let restored = write_and_read(&cfg);
+    assert!(restored.smooth_wheel("mouse"));
+    assert!(!restored.smooth_wheel("absent"));
+    cfg.set_smooth_wheel("mouse", false);
+    let body = toml::to_string_pretty(&cfg).expect("serialize");
+    assert!(!body.contains("smooth_wheel"), "off is omitted: {body}");
+    assert!(!write_and_read(&cfg).smooth_wheel("mouse"));
+}
+
+#[test]
+fn a_smooth_wheel_opt_in_survives_route_adoption() {
+    let route = "receiver:82839805:slot:2";
+    let mut config = Config::default();
+    config.set_smooth_wheel(route, true);
+    let canonical = crate::device_order::PhysicalDeviceKey::parse("unit:4f4c4403").expect("valid");
+    assert!(config.adopt_route(&canonical, route, None));
+    assert!(
+        !config.devices.contains_key(route),
+        "sanity: the route entry folded"
+    );
+    assert!(config.smooth_wheel("unit:4f4c4403"));
 }
 
 #[test]
