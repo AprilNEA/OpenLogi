@@ -1303,17 +1303,7 @@ impl Orchestrator {
             let Some(route) = dev.route.clone() else {
                 continue;
             };
-            let mut presets = self.config.dpi_presets(&dev.config_key);
-            if presets.is_empty()
-                && let Some(layout) = GamingLayout::for_model_key(&dev.model_key)
-            {
-                presets = layout
-                    .stock_dpi_presets
-                    .iter()
-                    .copied()
-                    .map(Dpi::new)
-                    .collect();
-            }
+            let presets = self.config.dpi_presets(&dev.config_key, &dev.model_key);
             let committed = configured_dpi(&self.config, dev);
             let previous = guard
                 .by_key
