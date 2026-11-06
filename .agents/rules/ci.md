@@ -166,8 +166,12 @@ warning that host clippy `-D warnings` does not surface still fails CI.
 CI always sets `CARGO_TERM_COLOR=always`, `CARGO_INCREMENTAL=0`, and
 `RUSTFLAGS=-D warnings`. Compilation jobs also set `RUSTC_WRAPPER=sccache`;
 `cargo-deny` clears it because metadata probes rustc without compiling and the
-job deliberately skips sccache setup. `rust-cache` stores only Cargo registry/git
-inputs (`cache-targets: false`); sccache owns compiler outputs. PRs read the
+job deliberately skips sccache setup. The Linux `clippy`, `MSRV`, `rustdoc`, and
+`tests (linux)` jobs keep Cargo's registry, git sources, and `target/` on a
+per-job Namespace cache volume that only a push to master commits; each empties
+`target/` once it passes `CACHED_TARGET_LIMIT_MB`, because Cargo never prunes it.
+In the other jobs `rust-cache` stores only Cargo registry/git inputs
+(`cache-targets: false`). sccache owns compiler outputs everywhere. PRs read the
 default branch's sccache objects but do not write their isolated merge-ref cache.
 
 The `fmt` job selects all workspace test jobs with the path filter in `ci.yml`. Source, fixture, test-resource, dependency, toolchain, and CI changes run those jobs; pure Markdown and unrelated design assets skip them. The workflow still reports each skipped job, so required checks do not remain pending. PRs use the full PR diff; pushes use the full pushed range. Local test commands always run, regardless of changed paths.
