@@ -34,6 +34,7 @@
 //! PlayPause NextTrack PrevTrack VolumeUp VolumeDown MuteVolume
 //! CycleDpiPresets ToggleSmartShift
 //! ScrollUp ScrollDown HorizontalScrollLeft HorizontalScrollRight
+//! CustomShortcut:<mod_hex>:<key_hex> TypeText:<text>
 
 use std::time::Duration;
 
@@ -52,6 +53,10 @@ fn parse_action(s: &str) -> Result<Action, String> {
             .parse::<KeyCombo>()
             .map(Action::CustomShortcut)
             .map_err(|error| error.to_string());
+    }
+
+    if let Some(text) = s.strip_prefix("TypeText:") {
+        return Ok(Action::TypeText(text.to_owned()));
     }
 
     // Every other variant is a serde unit variant that deserializes straight
@@ -181,6 +186,7 @@ fn print_usage() {
                   CycleDpiPresets ToggleSmartShift\n\
                   ScrollUp ScrollDown HorizontalScrollLeft HorizontalScrollRight\n\
                   CustomShortcut:<mod_hex>:<key_hex>\n\
+                  TypeText:<text>\n\
          \n\
          CustomShortcut modifier bits: 0x01=Cmd/Ctrl 0x02=Shift 0x04=Ctrl 0x08=Option/Alt\n\
          CustomShortcut key_hex: macOS kVK_* code (e.g. 0x08=C, 0x09=V, 0x7E=Up)\n\
@@ -189,6 +195,7 @@ fn print_usage() {
            inject_action --delay 3 Copy\n\
            inject_action --delay 2 --between 500 VolumeUp VolumeDown PlayPause\n\
            inject_action ScrollDown ScrollDown ScrollDown\n\
-           inject_action CustomShortcut:0x01:0x08   # Ctrl+C"
+           inject_action CustomShortcut:0x01:0x08   # Ctrl+C\n\
+           inject_action 'TypeText:Hello, world!'"
     );
 }

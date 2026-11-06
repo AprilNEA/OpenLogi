@@ -25,6 +25,8 @@ workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 evdev = { workspace = true }
+wayland-client = "0.31"
+xkbcommon = { version = "0.8", default-features = false }
 zbus = "5"
 
 [target.'cfg(target_os = "macos")'.dependencies]
