@@ -37,7 +37,10 @@ impl Save {
                 set: Some(_),
             }
             | ApiCommand::OsLayout { device, .. } => device,
-            | ApiCommand::PointerSpeed { device, set: Some(_) } => device,
+            ApiCommand::PointerSpeed {
+                device,
+                set: Some(_),
+            } => device,
             ApiCommand::Smartshift(args)
                 if args.mode.is_some() || args.auto_disengage.is_some() =>
             {

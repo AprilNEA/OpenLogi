@@ -22,8 +22,10 @@ use gpui_kit::component::{
 use openlogi_core::hid::{Dpi, DpiCapabilities};
 use tracing::debug;
 
+use super::os_pointer_speed::{
+    OsPointerSpeedFacts, OsPointerSpeedSlider, os_pointer_speed_section,
+};
 use super::pointer_speed::{PointerSpeedFacts, PointerSpeedSlider, pointer_speed_section};
-use super::os_pointer_speed::os_pointer_speed_section;
 use super::report_rate::{ReportRateFacts, report_rate_section};
 use crate::state::{AppState, DeviceKey, DpiLoad, StateEvent};
 use crate::ui::commit_slider::{CommitSlider, SliderRange};
@@ -38,6 +40,8 @@ pub struct DpiPanel {
     slider: Option<DpiSlider>,
     /// The pointer-speed slider of a mouse without adjustable DPI.
     pointer_speed: Option<PointerSpeedSlider>,
+    /// The per-device compositor pointer-speed override.
+    os_pointer_speed: Option<OsPointerSpeedSlider>,
     _state_obs: Subscription,
 }
 
@@ -79,12 +83,14 @@ impl DpiPanel {
                 StateEvent::DpiChanged(_)
                     | StateEvent::ReportRateChanged(_)
                     | StateEvent::PointerSpeedChanged(_)
+                    | StateEvent::DeviceConfigChanged(_)
             )
         });
 
         Self {
             slider: None,
             pointer_speed: None,
+            os_pointer_speed: None,
             _state_obs: state_obs,
         }
     }
@@ -164,11 +170,21 @@ impl Render for DpiPanel {
             self.pointer_speed = None;
             self.dpi_section(window, cx)
         };
+        let os_speed_facts = OsPointerSpeedFacts::current(cx);
+        if let Some(facts) = &os_speed_facts {
+            OsPointerSpeedSlider::sync(&mut self.os_pointer_speed, facts, window, cx);
+        } else {
+            self.os_pointer_speed = None;
+        }
         v_flex()
             .gap_3()
             .w_full()
             .child(main)
-            .child(os_pointer_speed_section(cx, pal))
+            .children(os_pointer_speed_section(
+                os_speed_facts,
+                self.os_pointer_speed.as_ref(),
+                pal,
+            ))
             .children(report_rate_section(ReportRateFacts::current(cx), pal))
     }
 }

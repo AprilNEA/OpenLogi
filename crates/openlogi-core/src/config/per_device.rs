@@ -9,13 +9,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
-    CameraControls, CameraStreamMode, Config, DeviceIdentity, DisableKey, LightSettings, Lighting,
-    MomentumScrolling, OnboardMemory, PinnedOs, ScrollResolution, SmartShift,
-    ThumbwheelSensitivity,
+    CameraControls, CameraStreamMode, Config, DeviceIdentity, DisableKey, GKeyOwner, GamingKeyMode,
+    LightSettings, Lighting, MomentumScrolling, OnboardMemory, PinnedOs, ScrollResolution,
+    SmartShift, ThumbwheelSensitivity,
 };
 use crate::binding::{
     Action, ActionRingConfig, ActionRingIcon, ActionRingSize, ActionRingSlot, Binding, ButtonId,
-    GamingLayout, KeypadPage, RingAction, default_binding_on,
+    GKeyProfile, GamingLayout, KeypadPage, RingAction, default_binding_on,
 };
 use crate::hid::{Dpi, PointerSpeed, ReportRate};
 
@@ -326,6 +326,38 @@ impl Config {
         }
     }
 
+    /// The physical device keys that should follow `keyboard_key` when its
+    /// Easy-Switch channel changes.
+    #[must_use]
+    pub fn host_switch_targets(&self, keyboard_key: &str) -> &[String] {
+        self.devices
+            .get(keyboard_key)
+            .map_or(&[], |device| device.host_switch_targets.as_slice())
+    }
+
+    /// Add one physical device to `keyboard_key`'s linked Easy-Switch group.
+    /// Linking a device again is a no-op and keeps the target order already
+    /// stored in the configuration.
+    pub fn link_host_switch_target(&mut self, keyboard_key: &str, target_key: &str) {
+        let targets = &mut self
+            .devices
+            .entry(keyboard_key.to_string())
+            .or_default()
+            .host_switch_targets;
+        if !targets.iter().any(|target| target == target_key) {
+            targets.push(target_key.to_string());
+        }
+    }
+
+    /// Remove one physical device from `keyboard_key`'s linked Easy-Switch
+    /// group. Unlinking a device that is not linked is a no-op.
+    pub fn unlink_host_switch_target(&mut self, keyboard_key: &str, target_key: &str) {
+        if let Some(device) = self.devices.get_mut(keyboard_key) {
+            device
+                .host_switch_targets
+                .retain(|target| target != target_key);
+        }
+    }
     /// The SmartShift wheel config for `device_key`, or `None` if never set.
     #[must_use]
     pub fn smartshift(&self, device_key: &str) -> Option<SmartShift> {
@@ -348,8 +380,8 @@ impl Config {
             .fn_lock = Some(fn_lock);
     }
 
-    /// Whether the agent keeps `device_key`'s key layout on the host OS. On
-    /// unless the user turned it off, as in Logi Options+.
+    /// Whether the agent keeps `device_key`'s key layout on the host OS.
+    /// On unless the user turned it off, as in Logi Options+.
     #[must_use]
     pub fn keep_os_layout(&self, device_key: &str) -> bool {
         self.devices
@@ -377,7 +409,9 @@ impl Config {
     /// agent should leave the OS pointer speed alone.
     #[must_use]
     pub fn os_pointer_speed(&self, device_key: &str) -> Option<f32> {
-        self.devices.get(device_key).and_then(|d| d.os_pointer_speed)
+        self.devices
+            .get(device_key)
+            .and_then(|d| d.os_pointer_speed)
     }
 
     /// Record the OS-level pointer speed factor for `device_key`, or `None`
@@ -412,6 +446,41 @@ impl Config {
             .onboard_memory = memory;
     }
 
+    /// Who runs `device_key`'s G1–G5.
+    #[must_use]
+    pub fn g_key_owner(&self, device_key: &str) -> GKeyOwner {
+        self.devices
+            .get(device_key)
+            .map(|device| device.g_key_owner)
+            .unwrap_or_default()
+    }
+
+    /// Record who runs `device_key`'s G1–G5.
+    pub fn set_g_key_owner(&mut self, device_key: &str, owner: GKeyOwner) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .g_key_owner = owner;
+    }
+
+    /// What `device_key`'s M1–M3 and MR do while OpenLogi owns its gaming
+    /// cluster.
+    #[must_use]
+    pub fn gaming_key_mode(&self, device_key: &str) -> GamingKeyMode {
+        self.devices
+            .get(device_key)
+            .map(|device| device.gaming_key_mode)
+            .unwrap_or_default()
+    }
+    /// The name the user gave `device_key`'s G-key `profile`, if any.
+    #[must_use]
+    pub fn g_key_profile_name(&self, device_key: &str, profile: GKeyProfile) -> Option<&str> {
+        self.devices
+            .get(device_key)?
+            .g_key_profile_names
+            .get(&profile)
+            .map(String::as_str)
+    }
     /// The persisted report rate for `device_key`, or `None` when the user
     /// never chose one (the device keeps its own rate).
     #[must_use]
@@ -425,6 +494,28 @@ impl Config {
             .entry(device_key.to_string())
             .or_default()
             .report_rate = Some(rate);
+    }
+
+    /// Name `device_key`'s G-key `profile`, trimmed; a blank name removes it.
+    pub fn set_g_key_profile_name(&mut self, device_key: &str, profile: GKeyProfile, name: &str) {
+        let names = &mut self
+            .devices
+            .entry(device_key.to_string())
+            .or_default()
+            .g_key_profile_names;
+        match name.trim() {
+            "" => names.remove(&profile),
+            name => names.insert(profile, name.to_owned()),
+        };
+    }
+
+    /// Record what `device_key`'s M1–M3 and MR do. The bindings of the other
+    /// mode stay stored.
+    pub fn set_gaming_key_mode(&mut self, device_key: &str, mode: GamingKeyMode) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .gaming_key_mode = mode;
     }
 
     /// The persisted pointer speed for `device_key`, or `None` when the user
@@ -451,8 +542,7 @@ impl Config {
     }
 
     /// Record the press force for `device_key`'s force-sensing button; the
-    /// agent re-applies it, clamped into the device's range, when the device
-    /// reconnects.
+    /// agent re-applies it, clamped into the device's range, when it reconnects.
     pub fn set_force_sensing(&mut self, device_key: &str, force: u16) {
         self.devices
             .entry(device_key.to_string())
@@ -700,5 +790,26 @@ impl Config {
             .entry(device_key.to_string())
             .or_default()
             .smooth_wheel = enabled;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Config;
+
+    #[test]
+    fn host_switch_target_edits_are_idempotent_and_ordered() {
+        let mut config = Config::ephemeral();
+        config.link_host_switch_target("keyboard", "mouse-b");
+        config.link_host_switch_target("keyboard", "mouse-a");
+        config.link_host_switch_target("keyboard", "mouse-b");
+        assert_eq!(
+            config.host_switch_targets("keyboard"),
+            ["mouse-b", "mouse-a"]
+        );
+
+        config.unlink_host_switch_target("keyboard", "mouse-b");
+        config.unlink_host_switch_target("keyboard", "missing");
+        assert_eq!(config.host_switch_targets("keyboard"), ["mouse-a"]);
     }
 }

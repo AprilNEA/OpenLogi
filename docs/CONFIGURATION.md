@@ -145,6 +145,11 @@ Common device fields are:
 
 - `custom_name`, `enabled`, `dpi`, `dpi_presets`, thumb-wheel sensitivity,
   scroll inversion, and scroll resolution
+- `os_pointer_speed` (optional): this device's compositor pointer-sensitivity
+  factor, from `-1.0` to `1.0`. The Pointer tab slider saves it; an online,
+  enabled device gets changed values immediately and again when it reconnects.
+  When unset, OpenLogi leaves the system's existing pointer sensitivity
+  untouched.
 - `smooth_wheel` for mice with a HID++ `0x2121` wheel: `true` smooths that
   mouse's main wheel in software, as Logi Options+ "Smooth scrolling" does,
   whatever `smooth_scroll` says. The agent switches the wheel to diverted

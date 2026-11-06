@@ -178,9 +178,12 @@ impl AppState {
     /// Persist `speed` (or clear with `None`) for the active device.
     pub fn commit_os_pointer_speed(&mut self, speed: Option<f32>) -> StateEvents {
         let events = self.for_current_device(StateEvent::DeviceConfigChanged);
-        let persistent_key = self.current_record().and_then(|r| r.persistent_config_key().map(str::to_string));
+        let persistent_key = self
+            .current_record()
+            .and_then(|r| r.persistent_config_key().map(str::to_string));
         if let Some(key) = persistent_key {
-            self.config.edit(|config| config.set_os_pointer_speed(&key, speed));
+            self.config
+                .edit(|config| config.set_os_pointer_speed(&key, speed));
             self.persist_and_reload("os pointer speed");
         }
         events

@@ -112,8 +112,17 @@ mod apply_tests {
 
     #[test]
     fn all_known_compositors_have_commands() {
-        for c in [Compositor::Hyprland, Compositor::Sway, Compositor::Gnome, Compositor::X11] {
-            assert!(c.pointer_speed_command(0.0).is_some(), "{:?} has no command", c);
+        for c in [
+            Compositor::Hyprland,
+            Compositor::Sway,
+            Compositor::Gnome,
+            Compositor::X11,
+        ] {
+            assert!(
+                c.pointer_speed_command(0.0).is_some(),
+                "{:?} has no command",
+                c
+            );
         }
     }
 }

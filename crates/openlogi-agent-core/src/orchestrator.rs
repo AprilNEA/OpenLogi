@@ -20,8 +20,7 @@ use openlogi_core::binding::{
 };
 use openlogi_core::bindings::{bindings_on_page, button_bindings_for, oshook_gestures_for};
 use openlogi_core::config::{
-    AppSettings, Config, ConfigRevision, LightSettings,
-    GamingKeyMode,
+    AppSettings, Config, ConfigRevision, GKeyOwner, GamingKeyMode, LightSettings,
     MouseProfileTarget, canonical_device_key,
 };
 use openlogi_core::device::{
@@ -1028,7 +1027,7 @@ impl Orchestrator {
                 wanted: chosen.divert.wanted,
                 grid: chosen.divert.grid,
                 gaming: chosen.gaming,
-                gaming_mode: GamingKeyMode::Profiles,
+                gaming_mode: self.config.gaming_key_mode(&chosen.dev.config_key),
                 bindings: chosen.bindings,
             });
         }
@@ -1774,9 +1773,7 @@ impl Orchestrator {
         if let Some(factor) = self.config.os_pointer_speed(key) {
             let compositor = openlogi_core::compositor::Compositor::detect();
             if let Some(cmd) = openlogi_core::compositor::apply_pointer_speed(compositor, factor) {
-                let _ = std::process::Command::new(&cmd[0])
-                    .args(&cmd[1..])
-                    .spawn();
+                let _ = std::process::Command::new(&cmd[0]).args(&cmd[1..]).spawn();
             }
         }
         self.keep_os_layout(dev);
@@ -2229,7 +2226,9 @@ impl Orchestrator {
         }
 
         self.apply_changed_pointer_speeds(&previous);
+        self.apply_changed_os_pointer_speeds(&previous);
         self.apply_enabled_os_layouts(&previous);
+
         let writes = changed_follower_cookies(
             &previous,
             &self.config,
@@ -2238,6 +2237,27 @@ impl Orchestrator {
         );
         self.write_follower_cookies(writes);
         self.changed_lights(&previous_lights)
+    }
+
+    /// Apply a changed OS-level pointer speed to each online, enabled device.
+    /// Clearing the override sends no command because the agent does not own
+    /// the system's pre-existing default value.
+    fn apply_changed_os_pointer_speeds(&self, previous: &Config) {
+        let compositor = openlogi_core::compositor::Compositor::detect();
+        for dev in self.devices.iter().filter(|dev| dev.online) {
+            let key = &dev.config_key;
+            if !self.config.device_enabled(key)
+                || self.config.os_pointer_speed(key) == previous.os_pointer_speed(key)
+            {
+                continue;
+            }
+            let Some(factor) = self.config.os_pointer_speed(key) else {
+                continue;
+            };
+            if let Some(cmd) = openlogi_core::compositor::apply_pointer_speed(compositor, factor) {
+                let _ = std::process::Command::new(&cmd[0]).args(&cmd[1..]).spawn();
+            }
+        }
     }
 
     /// Put each keyboard whose "keep OS layout" just took effect — turned on,
@@ -2514,10 +2534,20 @@ fn gaming_wanted(config: &Config, dev: &AgentDevice) -> GamingWanted {
     let Some(capabilities) = dev.capabilities.as_ref().filter(|c| c.g_keys) else {
         return GamingWanted::default();
     };
-    let _ = (config, capabilities);
+    if config.g_key_owner(&dev.config_key) != GKeyOwner::OpenLogi {
+        return GamingWanted::default();
+    }
+    let nine_buttons = config.gaming_key_mode(&dev.config_key) == GamingKeyMode::NineButtons;
+    let mode_keys = ModeKey::ALL
+        .into_iter()
+        .filter(|key| match key.profile() {
+            Some(_) => capabilities.m_keys,
+            None => capabilities.macro_record && nine_buttons,
+        })
+        .collect();
     GamingWanted {
-        take_g_row: false,
-        mode_keys: Default::default(),
+        take_g_row: true,
+        mode_keys,
     }
 }
 

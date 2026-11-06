@@ -7,7 +7,7 @@
 
 #[cfg(test)]
 use crate::binding::{Action, ButtonId};
-use crate::config::{Config, DeviceConfig};
+use crate::config::{Config, DeviceConfig, GKeyOwner, GamingKeyMode};
 #[cfg(test)]
 use crate::config::{LightSettings, Lighting, LinkConfig};
 use crate::device::Capabilities;
@@ -311,6 +311,13 @@ pub(super) fn fold(device: &mut DeviceConfig, mut legacy: DeviceConfig, route_ke
     // reason only a legacy `true` is evidence of a choice, so it carries over.
     device.smooth_wheel |= legacy.smooth_wheel;
 
+    if legacy.g_key_owner == GKeyOwner::OpenLogi {
+        device.g_key_owner = GKeyOwner::OpenLogi;
+    }
+    if device.gaming_key_mode == GamingKeyMode::default() {
+        device.gaming_key_mode = legacy.gaming_key_mode;
+    }
+
     // Scalar values with no per-link override slot: take the legacy value
     // when the canonical side is unset. A genuine disagreement keeps the
     // canonical value — there is nowhere to park the legacy one — and is
@@ -425,6 +432,7 @@ fn fold_maps(device: &mut DeviceConfig, legacy: &mut DeviceConfig, route_key: &s
     fold_map_field!(bindings);
     fold_map_field!(disabled_gestures);
     fold_map_field!(per_app_bindings);
+    fold_map_field!(g_key_profile_names);
     fold_map_field!(camera_profiles);
 }
 
