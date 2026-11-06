@@ -16,7 +16,7 @@ use gpui_kit::component::{
     tag::Tag,
     v_flex,
 };
-use openlogi_core::config::{OnboardMemory, ScrollResolution};
+use openlogi_core::config::{OnboardMemory, PinnedOs, ScrollResolution};
 use openlogi_core::device::DeviceKind;
 
 use super::widgets::{back_button, connection_summary, kind_label, sidebar_action, status_badge};
@@ -40,7 +40,7 @@ use crate::features::profiles::{
 };
 use crate::state::{AppState, BindingLayer, DeviceRecord, Load, StateEvents};
 use crate::ui::battery::BatteryIndicator;
-use crate::ui::components::{PanelCard, Toggle, toggle_row};
+use crate::ui::components::{PanelCard, Toggle, stacked_row, toggle_row};
 use crate::ui::theme::{
     self, ContentWidth, DETAIL_RAIL_W, HEADER_H, Palette, SCREEN_PAD, Typography as _,
 };
@@ -985,6 +985,7 @@ fn device_tab(
 /// and which state to show (the keyboard's own reading once it lands, else the
 /// persisted preference — see `AppState::current_fn_lock_shown`), and whether
 /// its key layout can be kept on the host OS and is.
+/// Also the OS that layout is pinned to, if any.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 #[expect(
     clippy::struct_excessive_bools,
@@ -995,6 +996,7 @@ struct KeyboardFacts {
     fn_lock: bool,
     os_layout_supported: bool,
     keep_os_layout: bool,
+    os_layout_pin: Option<PinnedOs>,
 }
 
 /// Keyboard card: the Fn-lock and keep-OS-layout toggles. Fn lock is written
@@ -1002,12 +1004,14 @@ struct KeyboardFacts {
 /// is the keyboard's own reading once it lands, so a change made on the
 /// keyboard (Fn+Esc) is visible too. Keep OS layout is an agent setting: the
 /// agent sets the host OS's layout and restores it after a layout shortcut.
+/// The pin sets another OS's layout while keep OS layout is off.
 fn keyboard_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
     let facts = AppState::try_read(cx).map_or_else(KeyboardFacts::default, |state| KeyboardFacts {
         fn_lock_supported: state.current_fn_lock_supported(),
         fn_lock: state.current_fn_lock_shown(),
         os_layout_supported: state.current_os_layout_supported(),
         keep_os_layout: state.current_keep_os_layout(),
+        os_layout_pin: state.current_os_layout_pin(),
     });
     let fn_lock_description = if facts.fn_lock_supported {
         tr!("device.fn_lock_description")
@@ -1045,10 +1049,54 @@ fn keyboard_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
                 AppState::apply(cx, |state| state.commit_keep_os_layout(*keep));
             }),
     );
+    let os_layout_pin_row = facts.os_layout_supported.then(|| {
+        stacked_row(
+            "os-layout-pin-row",
+            pal,
+            tr!("device.os_layout_pin"),
+            tr!("device.os_layout_pin_description"),
+            os_layout_pin_control(facts.os_layout_pin, !facts.keep_os_layout, cx),
+        )
+    });
     PanelCard::new(
         tr!("device.keys"),
         Icon::empty().path("action-icons/keyboard.svg"),
-        v_flex().gap_4().child(fn_lock_row).child(os_layout_row),
+        v_flex()
+            .gap_4()
+            .child(fn_lock_row)
+            .child(os_layout_row)
+            .children(os_layout_pin_row),
+    )
+}
+
+fn os_layout_pin_control(
+    selected: Option<PinnedOs>,
+    enabled: bool,
+    cx: &gpui::App,
+) -> impl IntoElement {
+    use crate::ui::theme::SelectableStyle as _;
+
+    ButtonGroup::new("os-layout-pin").outline().children(
+        [
+            (None, "os-layout-pin-none", tr!("device.os_layout_pin_none")),
+            (Some(PinnedOs::MacOs), "os-layout-pin-macos", "macOS".into()),
+            (
+                Some(PinnedOs::Windows),
+                "os-layout-pin-windows",
+                "Windows".into(),
+            ),
+            (Some(PinnedOs::Linux), "os-layout-pin-linux", "Linux".into()),
+        ]
+        .map(|(pin, id, label)| {
+            Button::new(id)
+                .label(label)
+                .disabled(!enabled)
+                .selected(selected == pin)
+                .selected_segment(enabled && selected == pin, cx)
+                .on_click(move |_, _, cx| {
+                    AppState::apply(cx, |state| state.commit_os_layout_pin(pin));
+                })
+        }),
     )
 }
 
