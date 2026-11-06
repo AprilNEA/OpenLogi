@@ -7,6 +7,10 @@
 //! land in the camera's own registers, so — exactly as on macOS — a change is
 //! seen by every app that opens the camera.
 //!
+//! Power-line frequency and AE priority have no name in those interfaces'
+//! enums, but the proxies forward any id to the driver's kernel-streaming
+//! property of the same number, so the two map like every other control.
+//!
 //! Enumeration also lives here: the DirectShow video-input category yields
 //! each camera's friendly name and its device path, whose embedded
 //! `vid_xxxx&pid_xxxx` markers give the USB identity. The device path is the
@@ -51,11 +55,15 @@ const VPA_SHARPNESS: i32 = 4;
 const VPA_WHITE_BALANCE: i32 = 7;
 const VPA_BACKLIGHT_COMPENSATION: i32 = 8;
 const VPA_GAIN: i32 = 9;
+/// `KSPROPERTY_VIDEOPROCAMP_POWERLINE_FREQUENCY`, past the end of the enum.
+const VPA_POWER_LINE_FREQUENCY: i32 = 13;
 const CC_PAN: i32 = 0;
 const CC_TILT: i32 = 1;
 const CC_ZOOM: i32 = 3;
 const CC_EXPOSURE: i32 = 4;
 const CC_FOCUS: i32 = 6;
+/// `KSPROPERTY_CAMERACONTROL_AUTO_EXPOSURE_PRIORITY`, past the end of the enum.
+const CC_AE_PRIORITY: i32 = 19;
 /// `*_Flags_Auto` / `*_Flags_Manual` share values across both interfaces.
 const FLAG_AUTO: i32 = 0x1;
 const FLAG_MANUAL: i32 = 0x2;
@@ -65,7 +73,6 @@ const FLAG_MANUAL: i32 = 0x2;
 enum Prop {
     VideoProcAmp(i32),
     CameraControl(i32),
-    Unsupported,
 }
 
 impl CameraControl {
@@ -76,7 +83,8 @@ impl CameraControl {
             Self::Tilt => Prop::CameraControl(CC_TILT),
             Self::Focus => Prop::CameraControl(CC_FOCUS),
             Self::Exposure => Prop::CameraControl(CC_EXPOSURE),
-            Self::PowerLineFrequency | Self::LowLightCompensation => Prop::Unsupported,
+            Self::PowerLineFrequency => Prop::VideoProcAmp(VPA_POWER_LINE_FREQUENCY),
+            Self::LowLightCompensation => Prop::CameraControl(CC_AE_PRIORITY),
             Self::Brightness => Prop::VideoProcAmp(VPA_BRIGHTNESS),
             Self::Contrast => Prop::VideoProcAmp(VPA_CONTRAST),
             Self::Saturation => Prop::VideoProcAmp(VPA_SATURATION),
@@ -216,11 +224,21 @@ pub fn apply_settings(
         }
     }
     for (control, value) in values {
-        if let Err(e) = dev.set(control.prop(), *value, FLAG_MANUAL) {
+        if let Err(e) = dev.set(control.prop(), *value, value_flags(*control, autos)) {
             first_err.get_or_insert(e);
         }
     }
     first_err.map_or(Ok(()), Err)
+}
+
+/// The mode to write a batched value under. DirectShow carries auto/manual on
+/// every write, so a manual flag here would undo the auto mode the same batch
+/// just engaged.
+fn value_flags(control: CameraControl, autos: &[(AutoToggle, bool)]) -> i32 {
+    let engaged = control
+        .auto_toggle()
+        .is_some_and(|toggle| autos.contains(&(toggle, true)));
+    if engaged { FLAG_AUTO } else { FLAG_MANUAL }
 }
 
 /// A camera's bound capture filter, with the two control interfaces it may
@@ -259,12 +277,26 @@ impl<'a> Device<'a> {
     }
 
     /// GetRange for `prop`: the control's bounds plus its capability flags.
+    ///
+    /// Boolean AE priority needs synthetic bounds because UVC cameras commonly
+    /// implement only GET_CUR (the C922 reports 0..=0 while holding 1); with no
+    /// default either, the live value is the only safe reset target.
     fn range(&self, prop: Prop) -> Result<(ControlRange, i32), ControlError> {
+        if matches!(prop, Prop::CameraControl(CC_AE_PRIORITY)) {
+            let current = self.get(prop)?.0;
+            let range = ControlRange {
+                min: 0,
+                max: 1,
+                default: current,
+                current,
+                value_mask: None,
+            };
+            return Ok((range, 0));
+        }
         let (mut min, mut max, mut step, mut default, mut caps) = (0, 0, 0, 0, 0);
         // SAFETY: documented COM calls writing the five out-params.
         unsafe {
             match prop {
-                Prop::Unsupported => return Err(ControlError::Unsupported),
                 Prop::VideoProcAmp(id) => self
                     .proc_amp
                     .as_ref()
@@ -311,7 +343,6 @@ impl<'a> Device<'a> {
         // SAFETY: documented COM calls writing the two out-params.
         unsafe {
             match prop {
-                Prop::Unsupported => return Err(ControlError::Unsupported),
                 Prop::VideoProcAmp(id) => self
                     .proc_amp
                     .as_ref()
@@ -338,7 +369,6 @@ impl<'a> Device<'a> {
         // SAFETY: documented COM calls; the device validates the value.
         unsafe {
             match prop {
-                Prop::Unsupported => return Err(ControlError::Unsupported),
                 Prop::VideoProcAmp(id) => self
                     .proc_amp
                     .as_ref()
@@ -460,7 +490,37 @@ fn parse_device_path_ids(path: &str) -> Option<(u16, u16)> {
 
 #[cfg(test)]
 mod tests {
-    use super::usb_serial_from_device_path;
+    use super::{
+        CC_AE_PRIORITY, FLAG_AUTO, FLAG_MANUAL, Prop, VPA_POWER_LINE_FREQUENCY,
+        usb_serial_from_device_path, value_flags,
+    };
+    use crate::controls::{AutoToggle, CameraControl};
+
+    #[test]
+    fn a_batched_value_keeps_the_auto_mode_its_batch_engaged() {
+        let autos = [(AutoToggle::Focus, true), (AutoToggle::Exposure, false)];
+        assert_eq!(value_flags(CameraControl::Focus, &autos), FLAG_AUTO);
+        assert_eq!(value_flags(CameraControl::Exposure, &autos), FLAG_MANUAL);
+        assert_eq!(
+            value_flags(CameraControl::WhiteBalance, &autos),
+            FLAG_MANUAL
+        );
+        assert_eq!(value_flags(CameraControl::Brightness, &autos), FLAG_MANUAL);
+    }
+
+    /// Neither id is in the DirectShow enums, so nothing but this pins them.
+    #[test]
+    fn flicker_and_low_light_use_the_driver_property_ids() {
+        assert!(matches!(
+            CameraControl::PowerLineFrequency.prop(),
+            Prop::VideoProcAmp(VPA_POWER_LINE_FREQUENCY)
+        ));
+        assert!(matches!(
+            CameraControl::LowLightCompensation.prop(),
+            Prop::CameraControl(CC_AE_PRIORITY)
+        ));
+        assert_eq!((VPA_POWER_LINE_FREQUENCY, CC_AE_PRIORITY), (13, 19));
+    }
 
     #[test]
     fn real_usb_serial_is_extracted() {
