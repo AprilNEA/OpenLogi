@@ -68,8 +68,9 @@ use crate::binding::{Binding, ButtonId, GestureDirection};
 /// before consuming the rest of the file.
 ///
 /// v12 adds per-device keyboard lighting `keys` (colours for single keys
-/// over the keyboard colour), `effect` and `period_ms` (a firmware animation
-/// and its pace). Nothing older needs migrating, and a file without them
+/// over the keyboard colour), `effect` and `period_ms` (an animation and its
+/// pace), `wave` (a drawn wave's shape) and `idle` (what the keyboard shows
+/// while no key is pressed). Nothing older needs migrating, and a file without them
 /// lights every key still in the keyboard colour. The bump makes a v11
 /// build refuse a file that may hold them at the version check, instead of
 /// failing on the unknown field.
