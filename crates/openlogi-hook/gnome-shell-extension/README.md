@@ -26,6 +26,13 @@ No titles, window contents, or input are read, and the extension adds no UI.
 
 ## Install
 
+The `.deb`, `.rpm` and `.pkg.tar.zst` packages (and `install.sh --from-source`)
+already place the extension in `/usr/share/gnome-shell/extensions/`. You only
+need to enable it; see [Enable](#enable).
+
+To install from a checkout instead, copy it into your user extensions
+directory:
+
 ```sh
 UUID=openlogi-frontmost@openlogi.dev
 DEST="$HOME/.local/share/gnome-shell/extensions/$UUID"
@@ -33,10 +40,13 @@ mkdir -p "$DEST"
 cp metadata.json extension.js ringAnimation.js "$DEST"/
 ```
 
+## Enable
+
 On Wayland the shell cannot be reloaded in place, so **log out and back in** to
-let GNOME pick up the newly added extension, then enable it:
+let GNOME pick up a newly installed extension, then enable it:
 
 ```sh
+UUID=openlogi-frontmost@openlogi.dev
 gnome-extensions enable "$UUID"
 gnome-extensions info "$UUID"   # State should be ACTIVE
 ```
