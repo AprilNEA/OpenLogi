@@ -62,6 +62,8 @@ let
       # xtask's packaged-bins test include_str!s this; omitting it fails
       # `cargo test --workspace` inside the Nix sandbox.
       (src + "/packaging/linux/nfpm.yaml")
+      # Patched third-party crates the workspace `[patch.crates-io]` points at.
+      (src + "/vendor")
       (src + "/xtask")
     ];
   };
