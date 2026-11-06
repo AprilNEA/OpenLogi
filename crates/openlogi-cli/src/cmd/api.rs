@@ -69,6 +69,15 @@ pub enum ApiCommand {
         #[arg(long, value_enum)]
         set: Switch,
     },
+    /// Set the OS-level pointer speed factor for a mouse (requires --save).
+    PointerSpeed {
+        /// Exact opaque ID returned by `api devices`.
+        #[arg(long)]
+        device: String,
+        /// The speed factor to apply at the compositor level (e.g. 0.9).
+        #[arg(long)]
+        set: Option<f32>,
+    },
     /// Read the report rate, or set it immediately (add --save to persist).
     ReportRate {
         /// Exact opaque ID returned by `api devices`.
@@ -247,6 +256,29 @@ async fn execute(
                 "persistence": "not_saved",
                 "keep_os_layout": keep,
             }))
+        }
+        ApiCommand::PointerSpeed { device, set } => {
+            let route = select_device(&snapshot, &device)?;
+            let Some(save) = save.as_mut() else {
+                return Err(ApiError::new(
+                    "invalid_value",
+                    "pointer-speed changes an agent setting; add --save",
+                ));
+            };
+            if let Some(factor) = set {
+                save.set_os_pointer_speed(&route, *factor);
+                Ok(json!({
+                    "device": device,
+                    "persistence": "not_saved",
+                    "os_pointer_speed": factor,
+                }))
+            } else {
+                let current = save.os_pointer_speed(&route).unwrap_or(1.0);
+                Ok(json!({
+                    "device": device,
+                    "os_pointer_speed": current,
+                }))
+            }
         }
         ApiCommand::ReportRate { device, set } => {
             report_rate(

@@ -19,6 +19,7 @@ pub mod flow;
 pub mod hardware;
 pub mod lock_keys;
 pub mod notices;
+pub mod os_pointer_speed;
 pub mod observable;
 pub mod orchestrator;
 pub mod pointer_speed;

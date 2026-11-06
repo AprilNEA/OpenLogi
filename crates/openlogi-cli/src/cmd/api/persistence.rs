@@ -37,6 +37,7 @@ impl Save {
                 set: Some(_),
             }
             | ApiCommand::OsLayout { device, .. } => device,
+            | ApiCommand::PointerSpeed { device, set: Some(_) } => device,
             ApiCommand::Smartshift(args)
                 if args.mode.is_some() || args.auto_disengage.is_some() =>
             {
@@ -133,6 +134,14 @@ impl Save {
 
     pub(super) fn keep_os_layout(&mut self, keep: bool) {
         self.config.set_keep_os_layout(&self.key, keep);
+    }
+
+    pub(super) fn set_os_pointer_speed(&mut self, key: &str, speed: f32) {
+        self.config.set_os_pointer_speed(key, Some(speed));
+    }
+
+    pub(super) fn os_pointer_speed(&self, key: &str) -> Option<f32> {
+        self.config.os_pointer_speed(key)
     }
     pub(super) fn report_rate(&mut self, rate: ReportRate) {
         self.config.set_report_rate(&self.key, rate);
