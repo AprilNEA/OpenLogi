@@ -586,6 +586,74 @@ fn cached_m650_assets_keep_each_devices_firmware_name() {
     assert_eq!(resolver.resolved.borrow().len(), 1, "artwork stays shared");
 }
 
+/// A wired G512 as issue #2402's live inventory reports it:
+/// `model_ids=[c33c,0000,0000] ext=06 transports=usb`.
+fn g512_model() -> DeviceModelInfo {
+    DeviceModelInfo {
+        transports: DeviceTransports {
+            usb: true,
+            ..Default::default()
+        },
+        model_ids: [0xc33c, 0, 0],
+        extended_model_id: 6,
+        ..bare_model()
+    }
+}
+
+/// The catalog's single entry for `c33c`: the `g513` depot, whose
+/// `displayName` is `G513` for every variant, the G512 ones included.
+fn g513_index() -> Index {
+    index_of(
+        "g513",
+        DeviceEntry {
+            model_id: "c33c".to_string(),
+            model_ids: vec!["c33c".to_string()],
+            display_name: "G513".to_string(),
+            kind: "KEYBOARD".to_string(),
+            asset_path: "v1/devices/g513/".to_string(),
+            files: Vec::new(),
+        },
+    )
+}
+
+#[test]
+fn g512_in_the_shared_g513_depot_shows_its_own_name() {
+    let root = tempfile::tempdir().expect("create asset root");
+    let depot = root.path().join("g513");
+    std::fs::create_dir_all(&depot).unwrap();
+    std::fs::write(depot.join("front.png"), png_header(100, 200)).unwrap();
+    std::fs::write(depot.join("front_ext6.png"), png_header(300, 100)).unwrap();
+    std::fs::write(
+        depot.join("manifest.json"),
+        r#"{"devices":[{"modelId":"g512_ext6","resources":[{"key":"device_image","src":"front_ext6.png"},{"key":"image_metadata","src":"metadata_g512.json"}]}]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        depot.join("metadata_g512.json"),
+        r#"{"images":[{"key":"device_image","origin":{"width":300,"height":100}}]}"#,
+    )
+    .unwrap();
+    let resolver = resolver_over(&[root.path()], Some(g513_index()));
+    let model = g512_model();
+
+    // The same cached extended-model render serves both firmware names.
+    for (codename, expected) in [
+        (None, "G513"),
+        (Some("G512 RGB MECHANICAL GAMING KEYBOARD"), "G512"),
+        (Some("G513 RGB MECHANICAL GAMING KEYBOARD"), "G513"),
+        (Some("G512 RGB MECHANICAL GAMING KEYBOARD"), "G512"),
+    ] {
+        let asset = resolver.resolve(&model, codename).expect("resolve c33c");
+        assert_eq!(asset.display_name, expected, "codename={codename:?}");
+        assert_eq!(asset.depot, "g513");
+        assert_eq!(asset.image_path, depot.join("front_ext6.png"));
+        assert_eq!(asset.hero_image_path, Some(depot.join("front_ext6.png")));
+        assert_eq!((asset.png_width, asset.png_height), (300, 100));
+        assert_eq!(asset.metadata.origin().expect("G512 metadata").width, 300);
+    }
+    assert_eq!(resolver.resolved.borrow().len(), 1, "artwork stays shared");
+}
+
 #[test]
 fn variant_display_name_preserves_matching_and_whitespace_rules() {
     // None means leave the catalog name untouched, including its whitespace.
@@ -629,6 +697,22 @@ fn variant_display_name_preserves_matching_and_whitespace_rules() {
             Some("Signature M650 \u{212a}eyboard"),
             Some("Signature M650"),
         ),
+        // A sibling product sharing the depot (#2402), matched on the
+        // firmware's leading model word and only within its own depot.
+        (
+            "G513",
+            Some("G512 RGB MECHANICAL GAMING KEYBOARD"),
+            Some("G512"),
+        ),
+        (" g513 ", Some("g512 rgb mechanical gaming"), Some("G512")),
+        ("G513", Some("Keyboard G512"), Some("G512")),
+        ("G513", Some("G513 RGB MECHANICAL GAMING KEYBOARD"), None),
+        ("G513", Some("G512X RGB"), None),
+        ("G513", Some("RGB G512"), None),
+        ("G513", Some("Keyboard"), None),
+        ("G513", None, None),
+        ("G915", Some("G512 RGB MECHANICAL GAMING KEYBOARD"), None),
+        ("G512", Some("G512 RGB MECHANICAL GAMING KEYBOARD"), None),
     ] {
         assert_eq!(
             variant_display_name_override(catalog, codename).as_deref(),

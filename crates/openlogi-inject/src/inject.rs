@@ -127,15 +127,60 @@ impl HeldModifiers {
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 #[derive(Default)]
 struct HeldOutput {
-    owners: HashMap<HeldKey, usize>,
+    owners: HashMap<HeldKey, Owned>,
+}
+
+/// A key held chords keep down: how many own it, and who pressed it.
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+#[derive(Clone, Copy, Debug)]
+struct Owned {
+    holds: usize,
+    press: Press,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+impl Owned {
+    fn posted(&self) -> bool {
+        self.press == Press::Posted
+    }
+}
+
+/// Who pressed a key held chords keep down.
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Press {
+    /// The first hold posted its down edge, so the last one posts its up edge.
+    Posted,
+    /// The key was already down outside OpenLogi when the first hold took it,
+    /// as a modifier the user holds on the keyboard is. It gets neither edge:
+    /// the up edge would release it while the user still holds it (#2417).
+    AlreadyDown,
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 impl HeldOutput {
+    /// [`Self::transition_around`] with no key down outside OpenLogi.
+    #[cfg(any(target_os = "linux", target_os = "macos", test))]
     fn transition(
         &mut self,
         released: Option<(&KeyCombo, HeldKeys)>,
         pressed: Option<(&KeyCombo, HeldKeys)>,
+    ) -> HoldTransition {
+        self.transition_around(released, pressed, &[])
+    }
+
+    /// The edges that release `released` and hold `pressed`, as one
+    /// transition, around the keys `already_down` outside OpenLogi.
+    ///
+    /// A key both chords hold stays down throughout and keeps who pressed it.
+    /// A hold that takes a key in `already_down` from no owner gets no down
+    /// edge for it, and the hold that last releases it gets no up edge (see
+    /// [`Press::AlreadyDown`]).
+    fn transition_around(
+        &mut self,
+        released: Option<(&KeyCombo, HeldKeys)>,
+        pressed: Option<(&KeyCombo, HeldKeys)>,
+        already_down: &[HeldKey],
     ) -> HoldTransition {
         let tapped = pressed.and_then(|(combo, keys)| {
             (keys == HeldKeys::ModifiersOnly).then(|| HeldKey::key(combo.key()))
@@ -146,7 +191,7 @@ impl HeldOutput {
 
         for key in &released {
             match self.owners.get_mut(key) {
-                Some(owners) if *owners > 1 => *owners -= 1,
+                Some(owned) if owned.holds > 1 => owned.holds -= 1,
                 Some(_) => {
                     self.owners.remove(key);
                 }
@@ -154,22 +199,42 @@ impl HeldOutput {
             }
         }
         for key in &pressed {
-            *self.owners.entry(*key).or_default() += 1;
+            self.owners
+                .entry(*key)
+                .and_modify(|owned| owned.holds += 1)
+                .or_insert_with(|| Owned {
+                    holds: 1,
+                    press: match before.get(key) {
+                        Some(owned) => owned.press,
+                        None if already_down.contains(key) => Press::AlreadyDown,
+                        None => Press::Posted,
+                    },
+                });
         }
 
         HoldTransition {
             up: released
                 .into_iter()
-                .filter(|key| before.contains_key(key) && !self.owners.contains_key(key))
+                .filter(|key| {
+                    !self.owners.contains_key(key) && before.get(key).is_some_and(Owned::posted)
+                })
                 .collect(),
             down: pressed
                 .into_iter()
-                .filter(|key| !before.contains_key(key) && self.owners.contains_key(key))
+                .filter(|key| {
+                    !before.contains_key(key) && self.owners.get(key).is_some_and(Owned::posted)
+                })
                 .collect(),
             // A modifiers-only hold never owns its ordinary key, so an owner
             // here is another hold keeping that key down. Leave it alone.
             tap: tapped.filter(|key| !self.owners.contains_key(key)),
         }
+    }
+
+    /// Whether a held chord keeps `key` down.
+    #[cfg(target_os = "linux")]
+    fn owns(&self, key: HeldKey) -> bool {
+        self.owners.contains_key(&key)
     }
 
     #[cfg(target_os = "macos")]
@@ -443,6 +508,10 @@ impl Drop for HeldChord {
 /// The tap is skipped while another held chord keeps that ordinary key down,
 /// because its up edge would release the other chord's key early.
 ///
+/// On Windows, a modifier already down when the hold takes it, such as one
+/// the user holds on the keyboard, gets neither edge: its up edge would
+/// release it while the user still holds it (#2417).
+///
 /// Keep the returned [`HeldChord`] until the physical press ends. Prefer
 /// [`execute`] when the caller does not own a matching terminal event.
 pub fn press_hold(combo: &KeyCombo, keys: HeldKeys) -> HeldChord {
@@ -493,7 +562,10 @@ fn hold_transition(
         }
         target_os = "windows" => {
             let mut output = HELD_OUTPUT.lock().unwrap_or_else(PoisonError::into_inner);
-            let transition = output.transition(released, pressed);
+            // Read the modifiers under the lock that orders held edges, so no
+            // other held edge lands between the read and the send.
+            let already_down = windows::held_modifiers_down(&output);
+            let transition = output.transition_around(released, pressed, &already_down);
             windows::hold_keys(&transition.up, KeyPhase::Up);
             windows::hold_keys(&transition.down, KeyPhase::Down);
             if let Some(key) = transition.tap {
@@ -519,6 +591,17 @@ fn hold_transition(
 fn with_held_modifiers<R>(post: impl FnOnce(HeldModifiers) -> R) -> R {
     let output = HELD_OUTPUT.lock().unwrap_or_else(PoisonError::into_inner);
     post(output.modifiers())
+}
+
+/// Run `post` with the keys held chords keep down, under the lock that orders
+/// held-chord edges.
+///
+/// A one-shot keystroke posted through this sees exactly which keys held
+/// chords own and never interleaves with a held transition.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+fn with_held_output<R>(post: impl FnOnce(&HeldOutput) -> R) -> R {
+    let output = HELD_OUTPUT.lock().unwrap_or_else(PoisonError::into_inner);
+    post(&output)
 }
 
 /// Let the frontmost app's menus answer shortcuts the keyboard layout
@@ -1227,6 +1310,122 @@ mod tests {
             HoldTransition {
                 up: vec![HeldKey::Key(old.key())],
                 down: vec![HeldKey::Key(new.key())],
+                tap: None,
+            }
+        );
+    }
+
+    /// A hold that takes a modifier the user already holds on the keyboard
+    /// posts neither of its edges: the up edge would release it while the
+    /// user still holds it, and the next click would arrive without it
+    /// (#2417). The modifiers nobody holds are pressed and released as usual.
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn a_hold_leaves_a_modifier_already_down_out_of_both_edges() {
+        let chord = combo("Ctrl+Shift+Tab");
+        let tab = HeldKey::Key(chord.key());
+        let mut output = HeldOutput::default();
+
+        assert_eq!(
+            output.transition_around(
+                None,
+                Some((&chord, HeldKeys::ModifiersOnly)),
+                &[HeldKey::Control]
+            ),
+            HoldTransition {
+                up: vec![],
+                down: vec![HeldKey::Shift],
+                tap: Some(tab),
+            }
+        );
+        assert_eq!(
+            output.transition(Some((&chord, HeldKeys::ModifiersOnly)), None),
+            HoldTransition {
+                up: vec![HeldKey::Shift],
+                down: vec![],
+                tap: None,
+            },
+            "the hold must not release the Ctrl it never pressed"
+        );
+        assert_eq!(
+            output.transition(None, Some((&chord, HeldKeys::ModifiersOnly))),
+            HoldTransition {
+                up: vec![],
+                down: vec![HeldKey::Control, HeldKey::Shift],
+                tap: Some(tab),
+            },
+            "a hold that finds Ctrl up presses it again"
+        );
+    }
+
+    /// A modifier the user held when its first hold took it stays unpressed
+    /// while other holds share it and while the first one is replaced, which
+    /// does not read the keyboard again: no hold ever releases it.
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn a_modifier_already_down_stays_unpressed_until_its_last_hold_ends() {
+        let control_a = combo("Ctrl+A");
+        let control_b = combo("Ctrl+B");
+        let control_c = combo("Ctrl+C");
+        let mut output = HeldOutput::default();
+
+        output.transition_around(
+            None,
+            Some((&control_a, HeldKeys::WholeChord)),
+            &[HeldKey::Control],
+        );
+        output.transition(None, Some((&control_c, HeldKeys::WholeChord)));
+        output.transition(Some((&control_c, HeldKeys::WholeChord)), None);
+        assert_eq!(
+            output.transition(
+                Some((&control_a, HeldKeys::WholeChord)),
+                Some((&control_b, HeldKeys::WholeChord))
+            ),
+            HoldTransition {
+                up: vec![HeldKey::Key(control_a.key())],
+                down: vec![HeldKey::Key(control_b.key())],
+                tap: None,
+            },
+            "a replacement keeps the Ctrl it never pressed unpressed"
+        );
+        assert_eq!(
+            output.transition(Some((&control_b, HeldKeys::WholeChord)), None),
+            HoldTransition {
+                up: vec![HeldKey::Key(control_b.key())],
+                down: vec![],
+                tap: None,
+            }
+        );
+    }
+
+    /// The system also reports down the modifiers held chords pressed. A hold
+    /// or a replacement that reads one of those keeps it the chords' to
+    /// release, or the last hold would leave it stuck down.
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn a_modifier_a_hold_pressed_stays_its_to_release() {
+        let control_a = combo("Ctrl+A");
+        let control_b = combo("Ctrl+B");
+        let control_c = combo("Ctrl+C");
+        let mut output = HeldOutput::default();
+
+        output.transition(None, Some((&control_a, HeldKeys::WholeChord)));
+        output.transition_around(
+            None,
+            Some((&control_c, HeldKeys::WholeChord)),
+            &[HeldKey::Control],
+        );
+        output.transition(Some((&control_c, HeldKeys::WholeChord)), None);
+        output.transition_around(
+            Some((&control_a, HeldKeys::WholeChord)),
+            Some((&control_b, HeldKeys::WholeChord)),
+            &[HeldKey::Control],
+        );
+        assert_eq!(
+            output.transition(Some((&control_b, HeldKeys::WholeChord)), None),
+            HoldTransition {
+                up: vec![HeldKey::Control, HeldKey::Key(control_b.key())],
+                down: vec![],
                 tap: None,
             }
         );

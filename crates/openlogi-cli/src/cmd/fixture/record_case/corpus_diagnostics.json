@@ -1,4 +1,36 @@
 {
+  "g512-001": {
+    "cases": ["backlight-state", "dpi-info", "feature-table", "raw-battery", "reprogrammable-controls", "smartshift-status", "wheel-mode"],
+    "features": [
+      [0, 1, 0],
+      [1, 1, 0],
+      [3, 2, 0],
+      [17698, 0, 0],
+      [5, 0, 0],
+      [7680, 0, 64],
+      [17728, 0, 0],
+      [7856, 0, 96],
+      [32864, 0, 0],
+      [194, 0, 0],
+      [6145, 0, 96],
+      [6146, 0, 96],
+      [32896, 2, 0],
+      [32880, 7, 0],
+      [6177, 0, 0],
+      [7104, 0, 0],
+      [6150, 3, 96],
+      [16546, 0, 0],
+      [6916, 3, 0],
+      [32, 0, 0]
+    ],
+    "controls": [
+      [247, 204, 122],
+      [249, 206, 122],
+      [248, 205, 122],
+      [250, 207, 122]
+    ],
+    "raw_battery": null
+  },
   "g915-001": {
     "cases": ["backlight-state", "dpi-info", "feature-table", "raw-battery", "reprogrammable-controls", "smartshift-status", "wheel-mode"],
     "features": [
