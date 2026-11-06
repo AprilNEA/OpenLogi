@@ -1772,10 +1772,14 @@ impl Orchestrator {
         // Apply OS-level pointer speed if configured.
         if let Some(factor) = self.config.os_pointer_speed(key) {
             let compositor = openlogi_core::compositor::Compositor::detect();
-            // On Hyprland, generate a macOS-style custom accel curve with
-            // the slider as gain (0.0..2.0, centered at 1.0). Other
-            // compositors fall back to the sensitivity factor.
-            if compositor == openlogi_core::compositor::Compositor::Hyprland {
+            // On Hyprland, generate a macOS-style custom accel curve when the
+            // toggle is on (or auto-enabled). Other compositors fall back to
+            // the sensitivity factor.
+            let use_curve = self
+                .config
+                .os_pointer_accel(key)
+                .unwrap_or(compositor == openlogi_core::compositor::Compositor::Hyprland);
+            if use_curve && compositor == openlogi_core::compositor::Compositor::Hyprland {
                 let gain = 4.8 * (1.0 + factor as f64);
                 let (_step, points) =
                     openlogi_core::macos_accel::generate(1000.0, 120.0, 0.5, 64, gain);
@@ -2267,13 +2271,15 @@ impl Orchestrator {
             let key = &dev.config_key;
             if !self.config.device_enabled(key)
                 || self.config.os_pointer_speed(key) == previous.os_pointer_speed(key)
+                || self.config.os_pointer_accel(key) == previous.os_pointer_accel(key)
             {
                 continue;
             }
             let Some(factor) = self.config.os_pointer_speed(key) else {
                 continue;
             };
-            if is_hyprland {
+            let use_curve = self.config.os_pointer_accel(key).unwrap_or(is_hyprland);
+            if use_curve && is_hyprland {
                 let gain = 4.8 * (1.0 + factor as f64);
                 let (_step, points) =
                     openlogi_core::macos_accel::generate(1000.0, 120.0, 0.5, 64, gain);

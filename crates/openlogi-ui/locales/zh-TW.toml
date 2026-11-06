@@ -327,6 +327,7 @@ couldnt_read_report_rate_click_to_retry = "無法讀取回報率，請按一下�
 pointer_speed = "指標速度"
 os_pointer_speed = "系統指標速度"
 os_pointer_speed_description = "設定作業系統的指標靈敏度。範圍：-1.00 至 1.00。"
+os_pointer_accel = "macOS-style acceleration"
 pointer_speed_percent = "%{percent}％"
 pointer_speed_description = "滑鼠本身套用於移動的速度。將精確模式指派給按鍵後，可在最慢速度與目前速度之間切換。"
 reading_pointer_speed = "正在讀取指標速度…"

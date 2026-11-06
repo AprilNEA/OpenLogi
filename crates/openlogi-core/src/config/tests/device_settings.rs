@@ -121,6 +121,21 @@ fn os_pointer_speed_roundtrips_per_device_and_is_omitted_when_unset() {
 }
 
 #[test]
+fn os_pointer_accel_roundtrips_per_device_and_is_omitted_when_unset() {
+    let mut cfg = Config::default();
+    assert_eq!(cfg.os_pointer_accel("2b042"), None);
+    cfg.set_os_pointer_accel("2b042", Some(true));
+    let body = toml::to_string_pretty(&cfg).expect("serialize");
+    assert!(body.contains("os_pointer_accel = true"), "{body}");
+    let restored = write_and_read(&cfg);
+    assert_eq!(restored.os_pointer_accel("2b042"), Some(true));
+    assert_eq!(restored.os_pointer_accel("absent"), None);
+    cfg.set_os_pointer_accel("2b042", None);
+    let body = toml::to_string_pretty(&cfg).expect("serialize");
+    assert!(!body.contains("os_pointer_accel"), "{body}");
+}
+
+#[test]
 fn an_os_layout_pin_survives_route_adoption() {
     let route = "receiver:82839805:slot:1";
     let mut config = Config::default();

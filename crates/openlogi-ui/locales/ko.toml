@@ -327,6 +327,7 @@ couldnt_read_report_rate_click_to_retry = "보고율을 읽지 못했습니다. 
 pointer_speed = "포인터 속도"
 os_pointer_speed = "OS 포인터 속도"
 os_pointer_speed_description = "운영 체제의 포인터 감도를 설정합니다. 범위: -1.00~1.00."
+os_pointer_accel = "macOS-style acceleration"
 pointer_speed_percent = "%{percent}%"
 pointer_speed_description = "마우스가 자체 움직임에 적용하는 속도입니다. 버튼에 정밀 모드를 할당하면 가장 느린 속도로 전환했다가 되돌릴 수 있습니다."
 reading_pointer_speed = "포인터 속도 읽는 중…"

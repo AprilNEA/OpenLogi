@@ -414,6 +414,15 @@ impl Config {
             .and_then(|d| d.os_pointer_speed)
     }
 
+    /// Whether macOS-style acceleration is enabled for `device_key`.
+    /// `None` means auto (enabled on Hyprland, disabled elsewhere).
+    #[must_use]
+    pub fn os_pointer_accel(&self, device_key: &str) -> Option<bool> {
+        self.devices
+            .get(device_key)
+            .and_then(|d| d.os_pointer_accel)
+    }
+
     /// Record the OS-level pointer speed factor for `device_key`, or `None`
     /// to clear it.
     pub fn set_os_pointer_speed(&mut self, device_key: &str, speed: Option<f32>) {
@@ -421,6 +430,14 @@ impl Config {
             .entry(device_key.to_string())
             .or_default()
             .os_pointer_speed = speed;
+    }
+    /// Record whether macOS-style acceleration is enabled for `device_key`.
+    /// `None` clears the choice (back to auto).
+    pub fn set_os_pointer_accel(&mut self, device_key: &str, enabled: Option<bool>) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .os_pointer_accel = enabled;
     }
 
     /// Record the OS `device_key`'s key layout is pinned to, or `None` to

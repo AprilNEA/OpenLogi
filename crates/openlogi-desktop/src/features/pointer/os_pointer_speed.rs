@@ -1,7 +1,8 @@
 //! The OS-level pointer-speed override for the selected mouse.
 
-use gpui::{AnyElement, App, Context, IntoElement, Window};
+use gpui::{AnyElement, App, Context, IntoElement, ParentElement as _, Styled as _, Window};
 use gpui_kit::component::slider::Slider;
+use gpui_kit::component::{Selectable as _, v_flex};
 
 use crate::state::{AppState, DeviceKey};
 use crate::ui::commit_slider::{CommitSlider, SliderRange};
@@ -17,6 +18,7 @@ pub(super) struct OsPointerSpeedFacts {
     key: DeviceKey,
     speed: i32,
     configured: bool,
+    accel_enabled: Option<bool>,
 }
 
 impl OsPointerSpeedFacts {
@@ -24,10 +26,12 @@ impl OsPointerSpeedFacts {
         let state = AppState::try_read(cx)?;
         let record = state.current_record()?;
         let configured_speed = state.current_os_pointer_speed();
+        let accel_enabled = state.current_os_pointer_accel();
         Some(Self {
             key: record.device_key(),
             speed: configured_speed.map_or(DEFAULT_SPEED, speed_to_slider),
             configured: configured_speed.is_some(),
+            accel_enabled,
         })
     }
 }
@@ -65,9 +69,6 @@ impl OsPointerSpeedSlider {
         });
     }
 }
-
-/// Render the slider and its saved value. An unset override rests at neutral
-/// sensitivity and is marked as the system default; release persists the value.
 pub(super) fn os_pointer_speed_section(
     facts: Option<OsPointerSpeedFacts>,
     slider: Option<&OsPointerSpeedSlider>,
@@ -83,13 +84,20 @@ pub(super) fn os_pointer_speed_section(
                 .into_any_element()
         },
     );
+    let toggle = crate::ui::components::Toggle::new("os-pointer-accel-toggle")
+        .selected(facts.accel_enabled.unwrap_or(false))
+        .label(tr!("pointer.os_pointer_accel"))
+        .on_change(|selected, _window, cx| {
+            let selected = *selected;
+            AppState::apply(cx, |state| state.commit_os_pointer_accel(Some(selected)));
+        });
     let mut row = SliderRow::new(tr!("pointer.os_pointer_speed"), body)
         .description(tr!("pointer.os_pointer_speed_description"))
         .value(format!("{:.2}", slider_to_speed(shown)), ["-1.00", "1.00"]);
     if !facts.configured {
         row = row.marker(tr!("default"));
     }
-    Some(row.into_any_element())
+    Some(v_flex().gap_3().child(toggle).child(row).into_any_element())
 }
 
 fn slider_to_speed(value: i32) -> f32 {

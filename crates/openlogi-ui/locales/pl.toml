@@ -327,6 +327,7 @@ couldnt_read_report_rate_click_to_retry = "Nie udało się odczytać częstotliw
 pointer_speed = "Szybkość wskaźnika"
 os_pointer_speed = "Szybkość wskaźnika systemu"
 os_pointer_speed_description = "Ustawia czułość wskaźnika w systemie operacyjnym. Zakres: od -1,00 do 1,00."
+os_pointer_accel = "macOS-style acceleration"
 pointer_speed_percent = "%{percent}%"
 pointer_speed_description = "Szybkość, z jaką mysz przelicza własny ruch. Przypisz Tryb precyzyjny do przycisku, aby przełączać na najniższą szybkość i z powrotem."
 reading_pointer_speed = "Odczytywanie szybkości wskaźnika…"

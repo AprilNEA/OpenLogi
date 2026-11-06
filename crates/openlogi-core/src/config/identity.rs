@@ -347,6 +347,7 @@ pub(super) fn fold(device: &mut DeviceConfig, mut legacy: DeviceConfig, route_ke
     fold_option_field!(keep_os_layout);
     fold_option_field!(os_layout_pin);
     fold_option_field!(os_pointer_speed);
+    fold_option_field!(os_pointer_accel);
     fold_option_field!(onboard_memory);
     fold_option_field!(report_rate);
     fold_option_field!(pointer_speed);

@@ -327,6 +327,7 @@ couldnt_read_report_rate_click_to_retry = "Kunde inte läsa rapporteringsfrekven
 pointer_speed = "Pekarhastighet"
 os_pointer_speed = "Pekarhastighet i systemet"
 os_pointer_speed_description = "Ställer in pekarens känslighet i operativsystemet. Intervall: −1,00 till 1,00."
+os_pointer_accel = "macOS-style acceleration"
 pointer_speed_percent = "%{percent}%"
 pointer_speed_description = "Hastigheten som musen själv använder för sin rörelse. Tilldela Precisionsläge till en knapp för att växla till lägsta hastigheten och tillbaka."
 reading_pointer_speed = "Läser pekarhastighet…"
