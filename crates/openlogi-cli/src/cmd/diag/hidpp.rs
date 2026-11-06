@@ -9,6 +9,7 @@ use std::io::Write as _;
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
+use openlogi_core::single_instance::{self, Role};
 use openlogi_hid::{RAW_FEATURE_PARAMS, RawFeatureCall, RawFeatureReply};
 use openlogi_ipc::client::ConnectError;
 
@@ -34,6 +35,12 @@ pub struct HidppArgs {
 
 pub async fn run(args: HidppArgs) -> Result<()> {
     // The agent holds the device's channel and may write to it at any time.
+    // It takes this lock before any HID I/O, so holding it to the end keeps
+    // one from starting while a prompt waits; the endpoint check catches an
+    // agent that is already up.
+    let _agent_lock = single_instance::acquire(Role::Agent).context(
+        "could not take the agent's instance lock; quit the OpenLogi agent, then run this again",
+    )?;
     if !matches!(
         crate::agent::connect().await,
         Err(ConnectError::Endpoint(_))
