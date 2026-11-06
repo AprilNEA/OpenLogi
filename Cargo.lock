@@ -6318,6 +6318,8 @@ dependencies = [
  "tarpc",
  "thiserror 2.0.18",
  "tokio",
+ "widestring",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

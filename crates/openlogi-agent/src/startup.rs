@@ -22,6 +22,7 @@ use openlogi_agent_core::watchers::{self, gesture::GestureOutputs};
 use openlogi_core::config::Config;
 #[cfg(target_os = "macos")]
 use openlogi_hook::Hook;
+use openlogi_ipc::transport;
 use tokio::sync::Mutex;
 use tracing::warn;
 
@@ -48,7 +49,20 @@ pub(crate) struct Core {
 /// arming: no permission prompt, no device open, no helper spawn. Binding
 /// ahead of the watchers and prompts lets a dormant agent hear demand, and
 /// keeps a first-run consent dialog from blackholing the GUI's connect.
+///
+/// The endpoint is claimed first, and not being able to claim it is fatal:
+/// an agent without its endpoint would run on unreachable, and on Windows the
+/// name — this user's, this profile's — is taken only when another principal
+/// holds it ([`transport::bind`]).
 pub(crate) async fn bootstrap(config: Config) -> Option<Core> {
+    let listener = match transport::bind() {
+        Ok(listener) => listener,
+        Err(e) => {
+            warn!(error = %e, "could not bind IPC socket — agent exiting");
+            return None;
+        }
+    };
+
     // The orchestrator is shared with the IPC server and mutated by the
     // select loop, so it lives behind an async mutex; locks are brief. The
     // hook facts are published by the select loop, which owns the hook.
@@ -74,15 +88,18 @@ pub(crate) async fn bootstrap(config: Config) -> Option<Core> {
         Arc::clone(&observable),
     ));
 
-    let (ring_haptics, demand) = spawn_ipc_server(
+    let (server, demand) = AgentServer::new(
         Arc::clone(&orchestrator),
-        &shared,
+        shared.clone(),
         Arc::clone(&observable),
-        Arc::clone(&pairing),
+        pairing,
         Arc::clone(&event_monitor),
-        &inputs,
+        Arc::clone(&inputs.ring),
+        inputs.dispatcher.clone(),
         backlight_overlay.clone(),
     );
+    let ring_haptics = server.ring_haptics.clone();
+    tokio::spawn(server::run(listener, server));
     Some(Core {
         orchestrator,
         shared,
@@ -93,33 +110,6 @@ pub(crate) async fn bootstrap(config: Config) -> Option<Core> {
         ring_haptics,
         demand,
     })
-}
-
-fn spawn_ipc_server(
-    orchestrator: Arc<Mutex<Orchestrator>>,
-    shared: &SharedHandles,
-    observable: Arc<ObservableState>,
-    pairing: Arc<pairing::PairingManager>,
-    event_monitor: Arc<EventMonitor>,
-    inputs: &InputServices,
-    backlight_overlay: BacklightOverlayManager,
-) -> (
-    server::RingHapticPlayer,
-    tokio::sync::mpsc::UnboundedReceiver<openlogi_ipc::ClientKind>,
-) {
-    let (server, demand) = AgentServer::new(
-        orchestrator,
-        shared.clone(),
-        observable,
-        pairing,
-        event_monitor,
-        Arc::clone(&inputs.ring),
-        inputs.dispatcher.clone(),
-        backlight_overlay,
-    );
-    let ring_haptics = server.ring_haptics.clone();
-    tokio::spawn(server::run(server));
-    (ring_haptics, demand)
 }
 
 /// The input-action runtimes — pure in-process workers that touch no device

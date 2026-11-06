@@ -473,8 +473,9 @@ mod tests {
         )));
     }
 
-    // Unix socket paths honor XDG_CONFIG_HOME; Windows uses a fixed pipe name
-    // and cannot isolate this endpoint test from a real agent that way.
+    // Unix socket paths honor XDG_CONFIG_HOME; the Windows pipe is named by
+    // user and profile, so this endpoint test cannot be isolated from a real
+    // agent that way.
     #[cfg(unix)]
     #[test]
     fn direct_capture_ownership() {
