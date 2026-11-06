@@ -108,7 +108,7 @@ pub(crate) async fn dump_features_on_channel(
     })?;
     let mut entries = Vec::with_capacity(usize::from(count) + 1);
     for i in 0..=count {
-        let info = match feature_set.get_feature(i).await {
+        let info = match feature_set.get_feature(i, feature_set_info.version).await {
             Ok(info) => info,
             Err(Hidpp20Error::Feature(ErrorType::InvalidArgument)) if i == 0 => continue,
             Err(e) => {
