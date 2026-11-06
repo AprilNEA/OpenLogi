@@ -14,7 +14,6 @@ use gpui::{
 use openlogi_core::device::LockKey;
 use openlogi_ipc::LockKeyChange;
 use openlogi_ui::action_icons::LOCK_KEY_ICON;
-use tracing::warn;
 
 /// Wide enough for the longest translated title on one line.
 const WIDTH: f32 = 360.0;
@@ -106,9 +105,13 @@ pub(crate) fn present(cx: &mut App, shown: Option<LockKeyChange>) {
     };
     if open.is_empty() {
         let options = window_options(cx);
-        if let Err(error) = cx.open_window(options, |_, cx| cx.new(|_| LockKeyView { change })) {
-            warn!(%error, "could not open the lock-key indicator window");
-        }
+        let alternatives = crate::platform::indicator_windows(options)
+            .into_iter()
+            .map(|options| vec![options])
+            .collect();
+        crate::platform::open_first(alternatives, |options| {
+            cx.open_window(options, |_, cx| cx.new(|_| LockKeyView { change }))
+        });
         return;
     }
     for view in open {

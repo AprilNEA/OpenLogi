@@ -17,6 +17,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use tracing::{debug, warn};
 
+/// Window alternatives for a non-focusing transient indicator.
+pub(crate) fn indicator_windows(options: gpui::WindowOptions) -> Vec<gpui::WindowOptions> {
+    #[cfg(not(target_os = "windows"))]
+    {
+        placement::indicator_windows(options)
+    }
+    #[cfg(target_os = "windows")]
+    {
+        vec![options]
+    }
+}
+
 /// Open the first of `alternatives` that shows a window, returning the first
 /// window it opened.
 ///
