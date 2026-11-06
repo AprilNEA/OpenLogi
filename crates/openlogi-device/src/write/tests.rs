@@ -2166,3 +2166,137 @@ async fn a_refused_index_after_the_root_still_fails_the_dump() {
         "unexpected error: {error:?}"
     );
 }
+
+/// A `LightingWrite` asking for one red key over a dim blue keyboard.
+fn one_red_key() -> LightingWrite {
+    LightingWrite {
+        method: LightingMethod::Auto,
+        color: openlogi_core::color::Rgb::new(0, 0, 0x40),
+        keys: vec![(41, openlogi_core::color::Rgb::new(0xff, 0, 0))],
+    }
+}
+
+/// Every `(usage, [r, g, b])` the `0x12` frames in `written` carry.
+fn per_key_entries(written: &[Vec<u8>]) -> Vec<(u8, [u8; 3])> {
+    written
+        .iter()
+        .filter(|report| report.first() == Some(&0x12))
+        .flat_map(|report| {
+            let count = usize::from(report[7]);
+            report[8..8 + count * 4]
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|&[usage, r, g, b]| (usage, [r, g, b]))
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+async fn per_key_shared(
+    responder: impl Fn(&[u8]) -> Option<Vec<u8>> + Send + Sync + 'static,
+) -> (SharedChannel, crate::replay::ReplayChannelHandle) {
+    let (raw, handle) = ScriptedRawHidChannel::with_dynamic_responder(responder);
+    let shared = SharedChannel::new(
+        scripted_channel(raw).await,
+        DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xc33c,
+        },
+    );
+    (shared, handle)
+}
+
+#[tokio::test]
+async fn keys_on_a_keyboard_with_only_0x8080_get_one_frame_by_usage() -> Result<(), WriteError> {
+    // No 0x8081 and no zone map: 0x8080 addresses keys by HID usage instead.
+    let (shared, handle) = per_key_shared(scripted_response).await;
+
+    one_red_key().apply_on(&shared, || false, || true).await?;
+
+    let written = handle.written_reports();
+    let entries = per_key_entries(&written);
+    assert_eq!(entries.len(), 0xe9, "every usage, once");
+    for (usage, color) in entries {
+        let want = if usage == 41 {
+            [0xff, 0, 0]
+        } else {
+            [0, 0, 0x40]
+        };
+        assert_eq!(color, want, "usage {usage}");
+    }
+    assert!(written.iter().any(|report| is_per_key_commit(report)));
+    Ok(())
+}
+
+#[tokio::test]
+async fn keys_go_out_after_the_fixed_colour_on_a_keyboard_with_both() -> Result<(), WriteError> {
+    // A G512 replays its onboard effect over a frame sent without the fixed
+    // colour first, so 0x8070 must be written before the first 0x12 frame.
+    const ZONES: ScriptedZones = &[(0x0001, &[0x0001])];
+    let effects = color_led_effects_device(ZONES);
+    let (shared, handle) = per_key_shared(move |request| {
+        let lookup = request.len() >= 7 && request[2] == 0x00 && request[3] >> 4 == 0x00;
+        if lookup && u16::from_be_bytes([request[4], request[5]]) == 0x8080 {
+            return scripted_response(request);
+        }
+        if request.get(2) == Some(&0x07) {
+            return scripted_response(request);
+        }
+        effects(request)
+    })
+    .await;
+
+    one_red_key().apply_on(&shared, || false, || true).await?;
+
+    let written = handle.written_reports();
+    let fixed = written.iter().position(|report| {
+        report.len() == 20 && report[2] == COLOR_LED_EFFECTS_INDEX && report[3] >> 4 == 0x03
+    });
+    let first_frame = written
+        .iter()
+        .position(|report| report.first() == Some(&0x12));
+    assert!(
+        matches!((fixed, first_frame), (Some(fixed), Some(frame)) if fixed < frame),
+        "the fixed colour precedes the key frame: {fixed:?} {first_frame:?}"
+    );
+    assert_eq!(&written[fixed.expect("written")][6..9], [0, 0, 0x40]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn keys_on_a_keyboard_without_per_key_lighting_leave_one_colour() -> Result<(), WriteError> {
+    const ZONES: ScriptedZones = &[(0x0001, &[0x0001])];
+    let (shared, handle) = per_key_shared(color_led_effects_device(ZONES)).await;
+
+    one_red_key().apply_on(&shared, || false, || true).await?;
+
+    let written = handle.written_reports();
+    assert!(written.iter().all(|report| report.first() != Some(&0x12)));
+    assert!(written.iter().any(|report| {
+        report.len() == 20 && report[2] == COLOR_LED_EFFECTS_INDEX && report[3] >> 4 == 0x03
+    }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_rejected_key_frame_fails_the_key_write_before_the_commit() {
+    let (shared, handle) = per_key_shared(per_key_frame_rejected_response).await;
+
+    let result = one_red_key().apply_on(&shared, || false, || true).await;
+
+    assert_eq!(
+        result,
+        Err(WriteError::HidppFeature {
+            operation: HidppOperation::Lighting,
+            feature_hex: 0x8080,
+            kind: HidppFeatureErrorKind::InvalidArgument,
+        })
+    );
+    assert!(
+        !handle
+            .written_reports()
+            .iter()
+            .any(|report| is_per_key_commit(report))
+    );
+}
