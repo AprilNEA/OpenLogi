@@ -89,6 +89,35 @@ impl Compositor {
     }
 }
 
+/// Generate the compositor command for a given sensitivity value.
+/// Returns None if the compositor is unknown or doesn't support pointer speed.
+pub fn apply_pointer_speed(compositor: Compositor, sensitivity: f32) -> Option<Vec<String>> {
+    compositor.pointer_speed_command(sensitivity)
+}
+
+#[cfg(test)]
+mod apply_tests {
+    use super::*;
+
+    #[test]
+    fn hyprland_generates_correct_command() {
+        let cmd = apply_pointer_speed(Compositor::Hyprland, -0.2).unwrap();
+        assert_eq!(cmd, vec!["hyprctl", "keyword", "input:sensitivity", "-0.2"]);
+    }
+
+    #[test]
+    fn unknown_returns_none() {
+        assert!(apply_pointer_speed(Compositor::Unknown, 0.5).is_none());
+    }
+
+    #[test]
+    fn all_known_compositors_have_commands() {
+        for c in [Compositor::Hyprland, Compositor::Sway, Compositor::Gnome, Compositor::X11] {
+            assert!(c.pointer_speed_command(0.0).is_some(), "{:?} has no command", c);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
