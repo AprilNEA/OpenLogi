@@ -367,7 +367,8 @@ fn derive_capabilities(
 ///
 /// `registers` is the receiver's register phase, when the caller holds it for
 /// the whole probe. A HID++ 1.0 device is probed only under it (see
-/// `probe_hidpp10`); without it the device stays unanswered.
+/// `probe_hidpp10`); without it the probe records the HID++ 1.0 answer and
+/// reads no register.
 ///
 /// Only online, responsive devices reach here.
 pub(super) async fn probe_features(
@@ -447,7 +448,10 @@ pub(super) async fn refresh_features(
 }
 
 /// [`probe_hidpp10`] when the caller holds the receiver's register phase.
-/// Without it, the device stays unanswered.
+/// Without it, the probe still records that the device answered as HID++ 1.0:
+/// that answer is definitive, so the direct path settles the node instead of
+/// retrying it as a failure (#2432). No register is read, so the battery
+/// source stays unknown.
 async fn probe_hidpp10_held(
     channel: &HidppChannel,
     slot: u8,
@@ -458,9 +462,16 @@ async fn probe_hidpp10_held(
     } else {
         debug!(
             slot,
-            "HID++ 1.0 device outside a register phase, not probed"
+            "HID++ 1.0 device outside a register phase, registers not read"
         );
-        unanswered()
+        (
+            ProbedFeatures {
+                protocol: ProbedProtocol::Hidpp10,
+                ..ProbedFeatures::default()
+            },
+            None,
+            EventFeatureIndices::default(),
+        )
     }
 }
 
@@ -924,7 +935,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hidpp10_device_outside_the_register_phase_is_not_probed() {
+    async fn hidpp10_device_outside_the_register_phase_is_recognised_without_register_reads() {
         // A wired HID++ 1.0 mouse, or one behind a receiver OpenLogi does not
         // recognize: no register phase is held, so its registers stay unread.
         // The responder answers them anyway, so a stray read fails the
@@ -938,7 +949,10 @@ mod tests {
         });
         let channel = scripted_channel(raw).await;
         let (probe, battery, _) = probe_features(&channel, 0xff, None, None).await;
-        assert!(!probe.completed());
+        assert!(
+            probe.is_hidpp10(),
+            "the device answered as HID++ 1.0, which is not a missing answer (#2432)"
+        );
         assert_eq!(battery, None);
         assert!(
             handle
