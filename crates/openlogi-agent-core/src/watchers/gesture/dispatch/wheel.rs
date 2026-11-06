@@ -13,9 +13,14 @@ use openlogi_core::config::ThumbwheelSensitivity;
 use openlogi_core::scroll::ScrollDelta;
 use openlogi_hid::thumbwheel::WheelResolution;
 
-/// Idle gap after which a partly accumulated discrete action is forgotten, so
-/// slow intermittent nudges do not eventually cross the threshold.
+/// Idle gap after which a partly accumulated discrete action or scroll dead
+/// zone is forgotten, so slow intermittent nudges do not eventually cross it.
 const ACTION_DECAY: Duration = Duration::from_millis(300);
+
+/// Increments a scroll roll must reach before it moves anything. Resting a
+/// thumb on the wheel reports a stray increment or two (MX Master 4, 120 per
+/// revolution), which must not scroll.
+const SCROLL_DEAD_ZONE: i32 = 3;
 
 /// Minimum gap between two fires of the same discrete action, so one deliberate
 /// flick triggers once instead of repeating across a fast spin.
@@ -108,25 +113,50 @@ impl WheelDirection {
             return WheelOutput::Idle;
         }
         if let Some(binding) = ScrollBinding::from_action(action) {
-            return self.advance_scroll(binding, magnitude, scale);
+            return self.advance_scroll(binding, magnitude, scale, now);
         }
         self.advance_action(action, magnitude, scale.sensitivity, now)
     }
 
-    /// Emit continuous scroll immediately as a typed fractional delta. The
-    /// smooth-scroll runtime owns interpolation; this state only records the
-    /// mutually exclusive mode so returning to a discrete action starts fresh.
+    /// Emit continuous scroll as a typed fractional delta once the roll clears
+    /// [`SCROLL_DEAD_ZONE`]. The smooth-scroll runtime owns interpolation.
     fn advance_scroll(
         &mut self,
         binding: ScrollBinding,
         magnitude: i32,
         scale: ScrollScale,
+        now: Instant,
     ) -> WheelOutput {
         let context = ScrollContext { binding, scale };
-        if !matches!(&self.state, WheelState::Scroll(previous) if *previous == context) {
-            self.state = WheelState::Scroll(context);
+        let held = match &self.state {
+            WheelState::Scroll {
+                context: previous,
+                held,
+                last_event,
+            } if *previous == context
+                && now.saturating_duration_since(*last_event) <= ACTION_DECAY =>
+            {
+                *held
+            }
+            _ => 0,
+        };
+        let rolled = held.saturating_add(magnitude);
+        self.state = WheelState::Scroll {
+            context,
+            held: rolled.min(SCROLL_DEAD_ZONE),
+            last_event: now,
+        };
+        if rolled < SCROLL_DEAD_ZONE {
+            return WheelOutput::Idle;
         }
-        let distance = f64::from(magnitude) * scale.per_increment();
+        // The crossing report also releases what the dead zone held back, so
+        // a real roll scrolls its full distance.
+        let increments = if held < SCROLL_DEAD_ZONE {
+            rolled
+        } else {
+            magnitude
+        };
+        let distance = f64::from(increments) * scale.per_increment();
         if distance == 0.0 {
             WheelOutput::Idle
         } else {
@@ -211,7 +241,12 @@ enum WheelState {
     #[default]
     Idle,
     /// Continuous scrolling under one exact axis, resolution, and sensitivity.
-    Scroll(ScrollContext),
+    /// `held` counts the current roll up to [`SCROLL_DEAD_ZONE`].
+    Scroll {
+        context: ScrollContext,
+        held: i32,
+        last_event: Instant,
+    },
     /// Increment progress and timing retained for one exact discrete binding.
     Action {
         binding: DiscreteBinding,
