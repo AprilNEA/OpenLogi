@@ -216,10 +216,7 @@ fn names_are_unique_across_jobs() {
 #[test]
 fn matrix_leg_names_resolve() {
     // What someone copies out of a CI run's job list.
-    for name in [
-        "MSRV (cargo check, macos-latest)",
-        "MSRV (cargo check, ubuntu-latest)",
-    ] {
+    for name in ["MSRV (cargo check, macos)", "MSRV (cargo check, linux)"] {
         assert_eq!(Job::resolve(name).as_deref(), Some(&[Job::Msrv][..]));
     }
     for name in ["tests (macos, arm64)", "tests (macos, x86_64)"] {
@@ -281,11 +278,10 @@ fn jobs_name_the_hosts_ci_gives_them() {
     assert_eq!(hosts(Job::TestsLinux), vec![Host::Linux]);
     assert_eq!(hosts(Job::TestsMacos), vec![Host::Macos]);
     assert_eq!(hosts(Job::TestsWindows), vec![Host::Windows]);
-    // CI's msrv matrix is macos-latest + ubuntu-latest — there is no
-    // Windows leg to reproduce.
+    // CI's msrv matrix is macOS + Linux — there is no Windows leg to reproduce.
     assert_eq!(hosts(Job::Msrv), vec![Host::Linux, Host::Macos]);
     // Natively on Windows, everywhere else as the cross-lint proxy.
     assert_eq!(hosts(Job::ClippyWindows), Host::ANY.to_vec());
-    // macos-latest only: nothing cross-lints the macOS cfg.
+    // macOS only: nothing cross-lints the macOS cfg.
     assert_eq!(hosts(Job::ClippyMacos), vec![Host::Macos]);
 }

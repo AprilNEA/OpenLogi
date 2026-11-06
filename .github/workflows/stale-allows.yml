@@ -41,13 +41,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: linux
+            runner: nscloud-ubuntu-24.04-amd64-8x16
             cache: linux-stable-debug
-          - os: windows-latest
+          - os: windows
+            runner: nscloud-windows-2022-amd64-8x16
             cache: windows-stable-debug
-          - os: macos-latest
+          - os: macos
+            runner: nscloud-macos-tahoe-arm64-6x14
             cache: macos-stable-debug
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
@@ -83,7 +86,7 @@ jobs:
     # platform is silent on the other two, so a partial merge would call it
     # stale; the failed lane already fails the run.
     needs: sweep
-    runs-on: ubuntu-latest
+    runs-on: nscloud-ubuntu-24.04-amd64-8x16
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
