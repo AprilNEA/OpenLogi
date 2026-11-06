@@ -1789,6 +1789,12 @@ impl Orchestrator {
                     lut
                 );
                 let _ = std::process::Command::new("sh").arg("-c").arg(cmd).spawn();
+            } else if compositor == openlogi_core::compositor::Compositor::Hyprland && !use_curve {
+                // Toggle off: restore adaptive profile.
+                let _ = std::process::Command::new("sh")
+                    .arg("-c")
+                    .arg("hyprctl eval \"hl.config({input={accel_profile='adaptive'}})\"")
+                    .spawn();
             } else if let Some(cmd) =
                 openlogi_core::compositor::apply_pointer_speed(compositor, factor)
             {
@@ -2270,15 +2276,23 @@ impl Orchestrator {
         for dev in self.devices.iter().filter(|dev| dev.online) {
             let key = &dev.config_key;
             if !self.config.device_enabled(key)
-                || self.config.os_pointer_speed(key) == previous.os_pointer_speed(key)
-                || self.config.os_pointer_accel(key) == previous.os_pointer_accel(key)
+                || (self.config.os_pointer_speed(key) == previous.os_pointer_speed(key)
+                    && self.config.os_pointer_accel(key) == previous.os_pointer_accel(key))
             {
                 continue;
             }
+            let use_curve = self.config.os_pointer_accel(key).unwrap_or(is_hyprland);
             let Some(factor) = self.config.os_pointer_speed(key) else {
+                // Toggle changed but no speed set: if turning off on Hyprland,
+                // restore adaptive profile.
+                if !use_curve && is_hyprland {
+                    let _ = std::process::Command::new("sh")
+                        .arg("-c")
+                        .arg("hyprctl eval \"hl.config({input={accel_profile='adaptive'}})\"")
+                        .spawn();
+                }
                 continue;
             };
-            let use_curve = self.config.os_pointer_accel(key).unwrap_or(is_hyprland);
             if use_curve && is_hyprland {
                 let gain = 4.8 * (1.0 + factor as f64);
                 let (_step, points) =
@@ -2289,6 +2303,12 @@ impl Orchestrator {
                     lut
                 );
                 let _ = std::process::Command::new("sh").arg("-c").arg(cmd).spawn();
+            } else if is_hyprland && !use_curve {
+                // Toggle off: restore adaptive profile.
+                let _ = std::process::Command::new("sh")
+                    .arg("-c")
+                    .arg("hyprctl eval \"hl.config({input={accel_profile='adaptive'}})\"")
+                    .spawn();
             } else if let Some(cmd) =
                 openlogi_core::compositor::apply_pointer_speed(compositor, factor)
             {
@@ -2296,7 +2316,6 @@ impl Orchestrator {
             }
         }
     }
-
     /// Put each keyboard whose "keep OS layout" just took effect — turned on,
     /// or its device re-enabled — on the host OS's layout. Turning it off
     /// leaves the keyboard's layout where it is, as in Logi Options+, and
