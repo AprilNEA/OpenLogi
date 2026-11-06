@@ -381,12 +381,13 @@ fn chord_inputs(
     inputs
 }
 
-/// The chord modifiers already down when a chord is tapped.
+/// The chord modifiers already down when a chord is tapped or a hold starts.
 ///
 /// A tapped chord leaves these out of both of its edges. Its up edge would
 /// otherwise release a modifier the user still holds on the keyboard, or one
 /// a held chord keeps down, and later input would arrive without it (#2413).
 /// The key between the edges still arrives with the modifier down.
+/// A held chord does the same through [`held_modifiers_down`] (#2417).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct ModifiersDown(Vec<u16>);
 
@@ -414,6 +415,25 @@ impl ModifiersDown {
     fn contains(&self, vk: u16) -> bool {
         self.0.contains(&vk)
     }
+
+    /// These modifiers as the keys a held chord owns.
+    fn held_keys(&self) -> Vec<HeldKey> {
+        [
+            HeldKey::Control,
+            HeldKey::Shift,
+            HeldKey::Alt,
+            HeldKey::Super,
+        ]
+        .into_iter()
+        .filter(|&key| modifier_vk(key).is_some_and(|vk| self.contains(vk)))
+        .collect()
+    }
+}
+
+/// The held-chord modifiers down right now, as [`ModifiersDown::current`]
+/// reads them. A hold that takes one of them posts neither of its edges.
+pub(super) fn held_modifiers_down(held: &HeldOutput) -> Vec<HeldKey> {
+    ModifiersDown::current(held).held_keys()
 }
 
 /// Whether the chord modifier `vk` is down. `VK_CONTROL`, `VK_SHIFT` and
@@ -541,21 +561,28 @@ pub(super) fn hold_keys(keys: &[HeldKey], phase: KeyPhase) {
 /// The two differ only if the layout changes during the hold, and the
 /// virtual key, which the system's key state is indexed by, stays the same.
 fn held_key(key: HeldKey, layout: ForegroundLayout) -> Option<Key> {
+    let HeldKey::Key(usage) = key else {
+        return modifier_vk(key).map(|vk| Key::for_vk(vk, layout));
+    };
+    let key = Key::for_usage(usage, layout);
+    if key.is_none() {
+        tracing::warn!(
+            usage = usage.code(),
+            "held shortcut usage has no Windows mapping — edge ignored"
+        );
+    }
+    key
+}
+
+/// The virtual key a held chord posts for the modifier `key`, or `None` for
+/// an ordinary key.
+fn modifier_vk(key: HeldKey) -> Option<u16> {
     match key {
-        HeldKey::Control => Some(Key::for_vk(VK_CONTROL, layout)),
-        HeldKey::Shift => Some(Key::for_vk(VK_SHIFT, layout)),
-        HeldKey::Alt => Some(Key::for_vk(VK_MENU, layout)),
-        HeldKey::Super => Some(Key::for_vk(VK_LWIN, layout)),
-        HeldKey::Key(usage) => {
-            let key = Key::for_usage(usage, layout);
-            if key.is_none() {
-                tracing::warn!(
-                    usage = usage.code(),
-                    "held shortcut usage has no Windows mapping — edge ignored"
-                );
-            }
-            key
-        }
+        HeldKey::Control => Some(VK_CONTROL),
+        HeldKey::Shift => Some(VK_SHIFT),
+        HeldKey::Alt => Some(VK_MENU),
+        HeldKey::Super => Some(VK_LWIN),
+        HeldKey::Key(_) => None,
     }
 }
 
@@ -879,6 +906,22 @@ mod tests {
         let inputs = combo_inputs(&copy, layout, &ModifiersDown(vec![VK_CONTROL]))
             .expect("Copy has a Windows key");
         assert_eq!(edges(&inputs), [(c, false), (c, true)]);
+    }
+
+    /// The modifiers the system reports down reach a hold as the keys it
+    /// owns, so a hold leaves out the one the user holds and no other
+    /// (#2417).
+    #[test]
+    fn modifiers_down_name_the_keys_a_hold_owns() {
+        assert_eq!(
+            ModifiersDown(vec![VK_CONTROL, VK_LWIN]).held_keys(),
+            [HeldKey::Control, HeldKey::Super]
+        );
+        assert_eq!(
+            ModifiersDown(vec![VK_SHIFT, VK_MENU]).held_keys(),
+            [HeldKey::Shift, HeldKey::Alt]
+        );
+        assert!(ModifiersDown::default().held_keys().is_empty());
     }
 
     /// The keys with no faithful scan code keep the plain virtual-key form
