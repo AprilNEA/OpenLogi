@@ -62,6 +62,8 @@ let
       # xtask's packaged-bins test include_str!s this; omitting it fails
       # `cargo test --workspace` inside the Nix sandbox.
       (src + "/packaging/linux/nfpm.yaml")
+      # Patched third-party crates the workspace `[patch.crates-io]` points at.
+      (src + "/vendor")
       (src + "/xtask")
     ];
   };
@@ -112,6 +114,7 @@ rustPlatform.buildRustPackage {
     outputHashes = {
       "appicon-0.1.0" = "sha256-XY8NS2qrpPbUXZ3xCPGjZbbT0tSVpapbcTbgA2H5+/I=";
       "gpui-kit-0.8.1" = gpuiComponentHash;
+      "calloop-wayland-source-0.4.1" = "sha256-t7IThoAeQt1pjmjP6FP+NMYk8JIVvVFCI9B8ZfUiRNI=";
     };
   };
 

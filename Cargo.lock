@@ -1071,8 +1071,7 @@ dependencies = [
 [[package]]
 name = "calloop-wayland-source"
 version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "138efcf0940a02ebf0cc8d1eff41a1682a46b431630f4c52450d6265876021fa"
+source = "git+https://github.com/Smithay/calloop-wayland-source?rev=cab67860c4e8fef8a92cb11f6f3a08dd3b05536a#cab67860c4e8fef8a92cb11f6f3a08dd3b05536a"
 dependencies = [
  "calloop",
  "rustix 1.1.4",
@@ -3298,8 +3297,6 @@ dependencies = [
 [[package]]
 name = "gpui-pre-linux"
 version = "0.3.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7c6ffd2dce7b75cce0bb3382994912f84c2a05389a4a236bb8bd72cb098fc083"
 dependencies = [
  "accesskit",
  "accesskit_unix",
