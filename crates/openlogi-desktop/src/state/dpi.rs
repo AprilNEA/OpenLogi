@@ -76,8 +76,10 @@ impl AppState {
     /// empty `Vec` when no device is selected. UI helper.
     #[must_use]
     pub fn dpi_presets(&self) -> Vec<Dpi> {
-        self.current_record()
-            .map_or_default(|record| self.config.dpi_presets(&record.config_key))
+        self.current_record().map_or_default(|record| {
+            self.config
+                .dpi_presets(&record.config_key, &record.model_key)
+        })
     }
     /// The active device's known DPI: the live capability read once it
     /// completes, else the persisted config value, else [`DEFAULT_DPI`] for a

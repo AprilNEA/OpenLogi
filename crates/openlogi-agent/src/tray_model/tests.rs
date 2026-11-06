@@ -736,6 +736,21 @@ mod controls {
     }
 
     #[test]
+    fn a_gaming_mouse_never_given_presets_offers_its_stock_levels() {
+        let mut device = mouse(true);
+        let model = device.model_info.as_mut().expect("model info");
+        // `0407f`: a gaming layout with stock DPI levels.
+        model.extended_model_id = 0;
+        model.model_ids[0] = 0x407f;
+        let row = row(device, &Config::default());
+        assert_eq!(
+            offered_dpi(&row),
+            ["400 DPI", "800 DPI", "1600 DPI", "3200 DPI", "6400 DPI"],
+            "the menu offers the levels the agent's DPI cycle steps through"
+        );
+    }
+
+    #[test]
     fn a_mouse_with_emptied_presets_shows_its_dpi_and_the_way_to_set_presets() {
         let mut config = Config::default();
         config.set_dpi_presets(MOUSE_KEY, vec![]);
