@@ -436,11 +436,14 @@ impl DeviceOp {
         self,
         lighting: &Lighting,
     ) -> Result<openlogi_hid::lighting::LightingJob, WriteError> {
-        if lighting.enabled && lighting.effect == openlogi_core::config::LightingEffect::Wave {
-            return self.wave(lighting);
+        if lighting.enabled
+            && (lighting.effect == openlogi_core::config::LightingEffect::Wave
+                || lighting.idle.after_seconds > 0)
+        {
+            return self.supervised(lighting);
         }
-        // A drawn wave holds the route's lighting lock while it paints, so it
-        // is stopped before this write queues for the lock.
+        // Supervised lighting holds the route's lighting lock while it runs,
+        // so it is stopped before this write queues for the lock.
         wave::stop(&self.route);
         let ticket = rgb_control::SESSION
             .admit()
@@ -453,13 +456,7 @@ impl DeviceOp {
             ..
         } = self.access;
         let route = self.route.clone();
-        let (r, g, b) = lighting_rgb(lighting);
-        let write = openlogi_hid::write::LightingWrite {
-            method: openlogi_hid::LightingMethod::Auto,
-            color: openlogi_core::color::Rgb::new(r, g, b),
-            keys: lighting_keys(lighting),
-            animation: lighting_animation(lighting),
-        };
+        let write = lighting_write(lighting);
         openlogi_hid::lighting::LightingJob::spawn(&self.route, move |cancel| async move {
             let _lease = tokio::time::timeout(WRITE_TIMEOUT, receiver_access.acquire_for_io())
                 .await
@@ -484,13 +481,19 @@ impl DeviceOp {
         })
     }
 
-    /// Draw `lighting`'s wave on a per-key keyboard until another lighting
-    /// write for the route, or the agent's exit, stops it. Each frame leases
-    /// the receiver on its own, so the wave never holds up other device I/O
-    /// for longer than a frame. The first frame's `0x8071` claim is recorded
-    /// like a write's. A keyboard whose zones or key positions are unknown
-    /// fails with [`WriteError::FeatureUnsupported`], logged by the caller.
-    fn wave(self, lighting: &Lighting) -> Result<openlogi_hid::lighting::LightingJob, WriteError> {
+    /// Run `lighting` under supervision until another lighting write for the
+    /// route, or the agent's exit, stops it: draw a wave frame by frame, and
+    /// switch to the idle lighting once no key has been pressed for its time,
+    /// back at the next key press. Each step leases the receiver on its own,
+    /// so the job never holds up other device I/O for longer than a frame.
+    /// The requester's answer comes after the first step; the first `0x8071`
+    /// claim is recorded like a write's. A drawn wave on a keyboard whose
+    /// zones or key positions are unknown fails with
+    /// [`WriteError::FeatureUnsupported`]; drawn idle rays there are skipped.
+    fn supervised(
+        self,
+        lighting: &Lighting,
+    ) -> Result<openlogi_hid::lighting::LightingJob, WriteError> {
         let ticket = rgb_control::SESSION
             .admit()
             .ok_or(WriteError::DeviceNotFound)?;
@@ -503,65 +506,91 @@ impl DeviceOp {
         } = self.access;
         let route = self.route.clone();
         let stop = wave::start(&route);
-        let look = wave::WaveLook::new(
-            lighting,
-            dimmed(lighting.color, lighting.brightness),
-            lighting_keys(lighting),
-        );
-        openlogi_hid::lighting::LightingJob::spawn(&self.route, move |cancel| async move {
-            let mut ticket = Some(ticket);
-            let mut frames: Option<openlogi_hid::write::KeyFrames> = None;
-            let start = tokio::time::Instant::now();
-            let result = async {
-                while !stop.load(std::sync::atomic::Ordering::Acquire) && !cancel.is_cancelled() {
-                    let tick = tokio::time::Instant::now();
-                    {
-                        let _lease =
-                            tokio::time::timeout(WRITE_TIMEOUT, receiver_access.acquire_for_io())
-                                .await
-                                .map_err(|_| WriteError::RequestTimedOut {
-                                    operation: HidppOperation::Lighting,
-                                })?;
-                        if !device_io.allows_io() {
-                            // Sleep or shutdown: the wave is reapplied on
-                            // resume like any other lighting.
+        let active = active_show(lighting);
+        let idle = (lighting.idle.after_seconds > 0).then(|| {
+            (
+                Duration::from_secs(u64::from(lighting.idle.after_seconds)),
+                idle_show(lighting),
+            )
+        });
+        openlogi_hid::lighting::LightingJob::spawn_long(
+            &self.route,
+            move |cancel, ready| async move {
+                let stopped = || stop.load(std::sync::atomic::Ordering::Acquire);
+                let mut ticket = Some(ticket);
+                let mut frames: Option<openlogi_hid::write::KeyFrames> = None;
+                let mut rays_unsupported = false;
+                let mut shown: Option<bool> = None;
+                let start = tokio::time::Instant::now();
+                let result = async {
+                    loop {
+                        if stopped() || (ticket.is_some() && cancel.is_cancelled()) {
                             return Ok(());
                         }
-                        let channel = authoritative_channel(Some(&capture), &registry, &route)?;
-                        let available = || device_io.allows_io() && registry.is_current(&channel);
-                        if frames.is_none() {
-                            frames = Some(
-                                openlogi_hid::write::KeyFrames::open(&channel, available).await?,
-                            );
-                        }
-                        let Some(stream) = frames.as_mut() else {
-                            return Ok(());
+                        let tick = tokio::time::Instant::now();
+                        let resting = is_resting(idle.as_ref(), rays_unsupported);
+                        let show = match &idle {
+                            Some((_, show)) if resting => show,
+                            _ => &active,
                         };
-                        let keys = look.frame(stream.columns(), tick - start);
-                        let lease = stream
-                            .paint(
-                                &channel,
-                                &keys,
-                                || stop.load(std::sync::atomic::Ordering::Acquire),
-                                available,
+                        let entering = shown != Some(resting);
+                        let drawing = matches!(show, Show::Drawn(_));
+                        if drawing || entering {
+                            let _lease = tokio::time::timeout(
+                                WRITE_TIMEOUT,
+                                receiver_access.acquire_for_io(),
                             )
-                            .await?;
-                        // Only the first frame admits the write; later ones
-                        // must not hold up the exit.
-                        if let Some(ticket) = ticket.take()
-                            && let Some(lease) = lease
-                        {
-                            ticket.record(&route, channel.downgrade(), lease);
+                            .await
+                            .map_err(|_| {
+                                WriteError::RequestTimedOut {
+                                    operation: HidppOperation::Lighting,
+                                }
+                            })?;
+                            if !device_io.allows_io() {
+                                // Sleep or shutdown: the lighting is reapplied on
+                                // resume like any other.
+                                return Ok(());
+                            }
+                            let channel = authoritative_channel(Some(&capture), &registry, &route)?;
+                            let available =
+                                || device_io.allows_io() && registry.is_current(&channel);
+                            let lease = match show
+                                .step(
+                                    &mut frames,
+                                    entering,
+                                    tick - start,
+                                    &channel,
+                                    &stopped,
+                                    &available,
+                                )
+                                .await
+                            {
+                                Ok(lease) => lease,
+                                Err(WriteError::FeatureUnsupported { .. }) if resting => {
+                                    rays_unsupported = true;
+                                    continue;
+                                }
+                                Err(error) => return Err(error),
+                            };
+                            // Only the first step admits the write; later ones
+                            // must not hold up the exit.
+                            if let Some(ticket) = ticket.take() {
+                                if let Some(lease) = lease {
+                                    ticket.record(&route, channel.downgrade(), lease);
+                                }
+                                ready.ready();
+                            }
+                            shown = Some(resting);
                         }
+                        let pause = if drawing { wave::FRAME } else { IDLE_POLL };
+                        tokio::time::sleep_until(tick + pause).await;
                     }
-                    tokio::time::sleep_until(tick + wave::FRAME).await;
                 }
-                Ok(())
-            }
-            .await;
-            wave::finished(&route, &stop);
-            result
-        })
+                .await;
+                wave::finished(&route, &stop);
+                result
+            },
+        )
     }
 
     /// Return `lease` to the firmware through `connection`, the one the claim
@@ -1660,6 +1689,124 @@ pub fn set_lighting_in_background(op: DeviceOp, lighting: &Lighting) {
         Ok(job) => job.detach(),
         Err(error) => warn!(?error, "could not start background lighting"),
     }
+}
+
+/// How often supervised lighting checks for a key press or a rest while
+/// nothing is being drawn.
+const IDLE_POLL: Duration = Duration::from_millis(250);
+
+/// What supervised lighting shows in one of its modes.
+enum Show {
+    /// Frames the agent draws.
+    Drawn(wave::Drawn),
+    /// A one-off write, still colours or a firmware effect.
+    Firmware(openlogi_hid::write::LightingWrite),
+}
+
+/// Whether supervised lighting rests now: no key has been pressed for the
+/// time `idle` waits, and its show can play. A drawn idle show the keyboard
+/// turned down (`unsupported`) leaves it in use.
+fn is_resting(idle: Option<&(Duration, Show)>, unsupported: bool) -> bool {
+    let Some((after, show)) = idle else {
+        return false;
+    };
+    let rested = openlogi_inject::seconds_since_key_press()
+        .and_then(|seconds| Duration::try_from_secs_f64(seconds).ok());
+    rested.is_some_and(|rested| rested >= *after)
+        && !(unsupported && matches!(show, Show::Drawn(_)))
+}
+
+impl Show {
+    /// Put this show on the keyboard behind `channel` for one step: the write
+    /// itself, or the next frame of a drawing. `frames` is the drawing's
+    /// per-key stream, opened on the first frame and kept between steps;
+    /// `entering` repaints it whole, since a firmware effect may have run
+    /// since its last frame. Returns the `0x8071` claim the step made, if any.
+    async fn step(
+        &self,
+        frames: &mut Option<openlogi_hid::write::KeyFrames>,
+        entering: bool,
+        elapsed: Duration,
+        channel: &SharedChannel,
+        stopped: &impl Fn() -> bool,
+        available: &impl Fn() -> bool,
+    ) -> Result<Option<openlogi_hid::write::RgbControlLease>, WriteError> {
+        match self {
+            Self::Firmware(write) => write.apply_on(channel, stopped, available).await,
+            Self::Drawn(drawing) => {
+                let stream = match frames.take() {
+                    Some(mut stream) => {
+                        if entering {
+                            stream.reclaim();
+                        }
+                        stream
+                    }
+                    None => openlogi_hid::write::KeyFrames::open(channel, available).await?,
+                };
+                let stream = frames.insert(stream);
+                let keys = drawing.frame(stream.positions(), elapsed);
+                stream.paint(channel, &keys, stopped, available).await
+            }
+        }
+    }
+}
+
+/// The write that shows `lighting`'s still colours or firmware effect.
+fn lighting_write(lighting: &Lighting) -> openlogi_hid::write::LightingWrite {
+    let (r, g, b) = lighting_rgb(lighting);
+    openlogi_hid::write::LightingWrite {
+        method: openlogi_hid::LightingMethod::Auto,
+        color: openlogi_core::color::Rgb::new(r, g, b),
+        keys: lighting_keys(lighting),
+        animation: lighting_animation(lighting),
+    }
+}
+
+/// What `lighting` shows while keys are being pressed.
+fn active_show(lighting: &Lighting) -> Show {
+    if lighting.effect == openlogi_core::config::LightingEffect::Wave {
+        Show::Drawn(wave::Drawn::Wave(wave::WaveLook::new(
+            lighting,
+            dimmed(lighting.color, lighting.brightness),
+            lighting_keys(lighting),
+        )))
+    } else {
+        Show::Firmware(lighting_write(lighting))
+    }
+}
+
+/// What `lighting` shows while the keyboard rests: its idle effect at the
+/// effect's own pace, in the idle colour scaled by brightness.
+fn idle_show(lighting: &Lighting) -> Show {
+    use openlogi_core::config::{IdleEffect, LightingEffect};
+    use openlogi_hid::write::LightingAnimation;
+
+    let color = dimmed(lighting.idle.color, lighting.brightness);
+    let animation = match lighting.idle.effect {
+        IdleEffect::Rays => {
+            return Show::Drawn(wave::Drawn::Rays(wave::RaysLook::new(
+                dimmed(lighting.color, lighting.brightness),
+                color,
+                lighting_keys(lighting),
+            )));
+        }
+        IdleEffect::Ripple => LightingAnimation::Ripple {
+            period_ms: LightingEffect::Ripple.default_period_ms(),
+        },
+        IdleEffect::Cycle => LightingAnimation::Cycle {
+            period_ms: LightingEffect::Cycle.default_period_ms(),
+            intensity: lighting.brightness,
+        },
+        IdleEffect::Breathing => LightingAnimation::Breathing {
+            period_ms: LightingEffect::Breathing.default_period_ms(),
+        },
+    };
+    Show::Firmware(openlogi_hid::write::LightingWrite {
+        method: openlogi_hid::LightingMethod::Auto,
+        color,
+        keys: Vec::new(),
+        animation: Some(animation),
+    })
 }
 
 /// Resolve a [`Lighting`] config to an `(r, g, b)` triple: the configured

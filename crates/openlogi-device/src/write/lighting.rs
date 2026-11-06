@@ -196,9 +196,29 @@ impl LightingAnimation {
         let mut params = [0; 10];
         match self {
             Self::Breathing { period_ms } => {
-                params[..3].copy_from_slice(&[r, g, b]);
+                // The firmware's breathing darkens weak channels more than a
+                // still colour does, which pulls mixed hues towards their
+                // strongest channel (a magenta turns violet, a violet blue).
+                // Send the hue at full strength, red and blue lifted along a
+                // square-root curve (green, the brightest LED, left as is,
+                // as tried on a G515), and let the intensity byte dim it.
+                let peak = r.max(g).max(b);
+                let full = |c: u8| u16::from(c) * 255 / u16::from(peak.max(1));
+                let lifted = |c: u8| {
+                    let level = f64::from(full(c)) / 255.0;
+                    // `level` is within 0..=1, so the result fits a byte.
+                    #[expect(
+                        clippy::cast_possible_truncation,
+                        clippy::cast_sign_loss,
+                        reason = "a 0..=1 level times 255 fits a byte"
+                    )]
+                    let byte = (level.sqrt() * 255.0).round() as u8;
+                    byte
+                };
+                let green = u8::try_from(full(g)).unwrap_or(u8::MAX);
+                params[..3].copy_from_slice(&[lifted(r), green, lifted(b)]);
                 params[3..5].copy_from_slice(&period_ms.to_be_bytes());
-                params[6] = 100;
+                params[6] = u8::try_from((u16::from(peak) * 100 + 127) / 255).unwrap_or(100);
             }
             Self::Cycle {
                 period_ms,
@@ -709,8 +729,8 @@ struct PerKeyV2Target {
     /// Which zone lights which key, when the product is one
     /// [`openlogi_device_registry::keyboard`] knows.
     zone_map: Option<PerKeyZones>,
-    /// Where each key sits across the keyboard, for drawn effects.
-    columns: Option<&'static [(u8, u16)]>,
+    /// Where each key sits on the keyboard, for drawn effects.
+    positions: Option<&'static [(u8, u16, u8)]>,
 }
 
 impl PerKeyV2Target {
@@ -734,12 +754,12 @@ impl PerKeyV2Target {
         }
         let model_id = rgb::model_id(&mut device).await?;
         let zone_map = model_id.and_then(openlogi_device_registry::keyboard::per_key_zones);
-        let columns = model_id.and_then(openlogi_device_registry::keyboard::key_columns);
+        let positions = model_id.and_then(openlogi_device_registry::keyboard::key_positions);
         Ok(Self {
             feature,
             zones,
             zone_map,
-            columns,
+            positions,
         })
     }
 

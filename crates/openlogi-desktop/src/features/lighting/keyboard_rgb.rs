@@ -23,7 +23,7 @@ use gpui_kit::component::{
     v_flex,
 };
 use openlogi_core::color::Rgb;
-use openlogi_core::config::{Lighting, LightingEffect, LightingKey, WaveDirection};
+use openlogi_core::config::{IdleEffect, Lighting, LightingEffect, LightingKey, WaveDirection};
 
 use super::per_key::{has_firmware_effects, key_color, per_key_photo, photo_editor};
 use crate::state::{AppState, StateEvent};
@@ -47,6 +47,14 @@ const EFFECTS: [LightingEffect; 5] = [
 const WAVE_DEPTHS: [u8; 3] = [30, 50, 75];
 /// The wave's narrow, medium and wide bands, in percent of the keyboard.
 const WAVE_WIDTHS: [u8; 3] = [35, 60, 85];
+/// Seconds without a key press before the idle lighting starts; `0` never.
+const IDLE_DELAYS: [u16; 4] = [0, 15, 30, 60];
+const IDLE_EFFECTS: [IdleEffect; 4] = [
+    IdleEffect::Rays,
+    IdleEffect::Ripple,
+    IdleEffect::Cycle,
+    IdleEffect::Breathing,
+];
 const WAVE_DIRECTIONS: [WaveDirection; 2] =
     [WaveDirection::LeftToRight, WaveDirection::RightToLeft];
 
@@ -72,6 +80,9 @@ pub struct LightingPanel {
     /// The device [`Self::selected`] was picked on, so a device switch
     /// starts with nothing picked.
     selection_device: Option<String>,
+    /// Whether the panel shows the idle lighting rather than the lighting
+    /// while the keyboard is in use.
+    resting_tab: bool,
     _state_obs: Subscription,
 }
 
@@ -99,6 +110,7 @@ impl LightingPanel {
             brightness,
             selected: BTreeSet::new(),
             selection_device: None,
+            resting_tab: false,
             _state_obs: state_obs,
         }
     }
@@ -123,11 +135,12 @@ impl Render for LightingPanel {
         } else {
             LightingEffect::Static
         };
+        let resting = effects && self.resting_tab;
         // Keys are picked for the still colours they keep, alone or held over
         // a drawn wave.
-        let photo = record
-            .and_then(per_key_photo)
-            .filter(|_| matches!(effect, LightingEffect::Static | LightingEffect::Wave));
+        let photo = record.and_then(per_key_photo).filter(|_| {
+            !resting && matches!(effect, LightingEffect::Static | LightingEffect::Wave)
+        });
         let device = record.map(|record| record.config_key.clone());
         if self.selection_device != device || photo.is_none() {
             self.selected.clear();
@@ -140,7 +153,7 @@ impl Render for LightingPanel {
         self.brightness.sync(lighting.brightness, window, cx);
 
         // The cycle turns through every hue, so it takes no colour.
-        let swatches: Vec<_> = if effect == LightingEffect::Cycle {
+        let swatches: Vec<_> = if resting || effect == LightingEffect::Cycle {
             Vec::new()
         } else {
             PALETTE
@@ -148,7 +161,9 @@ impl Render for LightingPanel {
                 .map(|&color| swatch(color, &lighting, &self.selected, pal))
                 .collect()
         };
-        let effect_rows = effects.then(|| effect_rows(effect, &lighting, pal, cx));
+        let tabs = effects.then(|| mode_tabs(resting, cx));
+        let effect_rows = (effects && !resting).then(|| effect_rows(effect, &lighting, pal, cx));
+        let idle_rows = resting.then(|| idle_rows(&lighting, pal, cx));
         let editor = photo.map(|photo| {
             v_flex()
                 .gap_2()
@@ -165,6 +180,7 @@ impl Render for LightingPanel {
         v_flex()
             .gap_3()
             .w_full()
+            .children(tabs)
             // The tab and the card already say "Lighting"; the row names what
             // the switch does to the keyboard instead.
             .child(toggle_row(
@@ -183,6 +199,7 @@ impl Render for LightingPanel {
                     }),
             ))
             .children(effect_rows)
+            .children(idle_rows)
             .children(editor)
             .child(h_flex().gap_2().flex_wrap().children(swatches))
             .child(
@@ -196,6 +213,31 @@ impl Render for LightingPanel {
                 ),
             )
     }
+}
+
+/// "In use" and "At rest": which of the two lightings the panel edits.
+fn mode_tabs(resting: bool, cx: &mut Context<LightingPanel>) -> impl IntoElement + use<> {
+    ButtonGroup::new("lighting-mode")
+        .w_full()
+        .outline()
+        .child(
+            Button::new("lighting-mode-active")
+                .flex_1()
+                .label(tr!("lighting.tab_active"))
+                .selected(!resting)
+                .selected_segment(!resting, cx),
+        )
+        .child(
+            Button::new("lighting-mode-idle")
+                .flex_1()
+                .label(tr!("lighting.tab_idle"))
+                .selected(resting)
+                .selected_segment(resting, cx),
+        )
+        .on_click(cx.listener(|panel, indices: &Vec<usize>, _window, cx| {
+            panel.resting_tab = indices.first() == Some(&1);
+            cx.notify();
+        }))
 }
 
 /// The effect selector and the running effect's settings.
@@ -268,6 +310,104 @@ fn effect_rows(
                 ),
                 pal,
             ))
+        })
+}
+
+/// The idle lighting's settings: when it starts, its effect and its colour.
+fn idle_rows(lighting: &Lighting, pal: Palette, cx: &gpui::App) -> impl IntoElement + use<> {
+    let idle = lighting.idle;
+    v_flex()
+        .gap_3()
+        .child(
+            div()
+                .text_caption()
+                .text_color(pal.text_muted)
+                .child(tr!("lighting.idle_hint")),
+        )
+        .child(labelled(
+            tr!("lighting.idle_after"),
+            choice(
+                "idle-after",
+                [
+                    tr!("lighting.idle_never"),
+                    tr!("lighting.idle_after_seconds", seconds => "15"),
+                    tr!("lighting.idle_after_seconds", seconds => "30"),
+                    tr!("lighting.idle_after_minute"),
+                ],
+                IDLE_DELAYS,
+                idle.after_seconds,
+                |lighting, seconds| lighting.idle.after_seconds = seconds,
+                cx,
+            ),
+            pal,
+        ))
+        .when(idle.after_seconds > 0, |rows| {
+            rows.child(labelled(
+                tr!("lighting.idle_effect"),
+                choice(
+                    "idle-effect",
+                    [
+                        tr!("lighting.idle_rays"),
+                        tr!("lighting.effect_ripple"),
+                        tr!("lighting.effect_cycle"),
+                        tr!("lighting.effect_breathing"),
+                    ],
+                    IDLE_EFFECTS,
+                    idle.effect,
+                    |lighting, effect| lighting.idle.effect = effect,
+                    cx,
+                ),
+                pal,
+            ))
+            // The cycle turns through every hue, so it takes no colour.
+            .when(idle.effect != IdleEffect::Cycle, |rows| {
+                rows.child(labelled(
+                    tr!("lighting.idle_color"),
+                    h_flex()
+                        .gap_2()
+                        .flex_wrap()
+                        .children(PALETTE.iter().map(|&color| idle_swatch(color, idle.color, pal))),
+                    pal,
+                ))
+            })
+        })
+}
+
+/// One colour for the idle lighting.
+fn idle_swatch(color: Rgb, current: Rgb, pal: Palette) -> impl IntoElement + use<> {
+    let selected = current == color;
+    BaseButton::new(("idle-swatch", color.packed()))
+        .role(Role::RadioButton)
+        .selected(selected)
+        .accessibility_label(format!(
+            "{} #{:06X}",
+            tr!("lighting.idle_color"),
+            color.packed()
+        ))
+        .aria_toggled(if selected {
+            Toggled::True
+        } else {
+            Toggled::False
+        })
+        .aria_selected(selected)
+        .size(px(SWATCH))
+        .rounded(pal.control_radius)
+        .border_2()
+        .border_color(if selected {
+            theme::accent()
+        } else {
+            pal.border
+        })
+        .bg(rgb(color.packed()))
+        .cursor_pointer()
+        .focus_visible(move |style| style.focus_ring(pal))
+        .on_click(move |_event, _window, cx| {
+            AppState::apply(cx, |state| {
+                let mut next = state.lighting();
+                next.enabled = true;
+                next.idle.color = color;
+                state.commit_lighting(next)
+            });
         })
 }
 

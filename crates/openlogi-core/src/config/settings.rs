@@ -751,6 +751,9 @@ pub struct Lighting {
     /// How [`LightingEffect::Wave`] looks.
     #[serde(default)]
     pub wave: WaveShape,
+    /// What the keyboard shows while it rests.
+    #[serde(default)]
+    pub idle: IdleLighting,
 }
 
 /// The shape of a [`LightingEffect::Wave`]: a dimmer band crossing keys lit
@@ -775,6 +778,48 @@ impl Default for WaveShape {
             direction: WaveDirection::LeftToRight,
         }
     }
+}
+
+/// What a keyboard shows once no key has been pressed for a while, whatever
+/// [`Lighting::effect`] it runs otherwise. The next key press brings that
+/// effect back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct IdleLighting {
+    /// Seconds without a key press before the idle lighting starts; `0`
+    /// never starts it.
+    pub after_seconds: u16,
+    /// The effect shown while idle.
+    pub effect: IdleEffect,
+    /// Its colour: the rays', the ripple's or the breathing's. The colour
+    /// cycle ignores it.
+    pub color: Rgb,
+}
+
+impl Default for IdleLighting {
+    fn default() -> Self {
+        Self {
+            after_seconds: 0,
+            effect: IdleEffect::Rays,
+            color: Rgb::new(0xff, 0xff, 0xff),
+        }
+    }
+}
+
+/// An effect for [`IdleLighting`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IdleEffect {
+    /// Streaks of [`IdleLighting::color`] running along the key rows over
+    /// [`Lighting::color`], drawn by OpenLogi.
+    #[default]
+    Rays,
+    /// The firmware's [`LightingEffect::Ripple`] in the idle colour.
+    Ripple,
+    /// The firmware's [`LightingEffect::Cycle`].
+    Cycle,
+    /// The firmware's [`LightingEffect::Breathing`] in the idle colour.
+    Breathing,
 }
 
 /// The way a [`LightingEffect::Wave`] travels.
@@ -836,11 +881,13 @@ impl Serialize for Lighting {
         let skip_effect = file && self.effect == LightingEffect::Static;
         let skip_period = file && self.period_ms.is_none();
         let skip_wave = file && self.wave == WaveShape::default();
-        let len = 7
+        let skip_idle = file && self.idle == IdleLighting::default();
+        let len = 8
             - usize::from(skip_keys)
             - usize::from(skip_effect)
             - usize::from(skip_period)
-            - usize::from(skip_wave);
+            - usize::from(skip_wave)
+            - usize::from(skip_idle);
         let mut state = serializer.serialize_struct("Lighting", len)?;
         state.serialize_field("enabled", &self.enabled)?;
         state.serialize_field("color", &self.color)?;
@@ -864,6 +911,11 @@ impl Serialize for Lighting {
             state.skip_field("wave")?;
         } else {
             state.serialize_field("wave", &self.wave)?;
+        }
+        if skip_idle {
+            state.skip_field("idle")?;
+        } else {
+            state.serialize_field("idle", &self.idle)?;
         }
         state.end()
     }
@@ -960,6 +1012,7 @@ impl Default for Lighting {
             effect: LightingEffect::Static,
             period_ms: None,
             wave: WaveShape::default(),
+            idle: IdleLighting::default(),
         }
     }
 }

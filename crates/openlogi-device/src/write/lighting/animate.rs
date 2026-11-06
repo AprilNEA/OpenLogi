@@ -140,7 +140,7 @@ impl KeyFrames {
         let scope = frame_scope(|| false, available);
         let engine = rgb::probe(channel, index, &scope).await?;
         let target = scope.read(PerKeyV2Target::open(channel, index)).await?;
-        if target.zone_map.is_none() || target.columns.is_none() {
+        if target.zone_map.is_none() || target.positions.is_none() {
             return Err(WriteError::FeatureUnsupported {
                 feature_hex: hidpp::feature::per_key_lighting::PerKeyLightingFeature::ID,
             });
@@ -152,10 +152,17 @@ impl KeyFrames {
         })
     }
 
-    /// Each key's horizontal centre, `(HID usage, 0..=1000 left to right)`.
+    /// Each key's place: `(HID usage, 0..=1000 from left to right, row from
+    /// the top)`.
     #[must_use]
-    pub fn columns(&self) -> &'static [(u8, u16)] {
-        self.target.columns.unwrap_or_default()
+    pub fn positions(&self) -> &'static [(u8, u16, u8)] {
+        self.target.positions.unwrap_or_default()
+    }
+
+    /// Take software control again with the next frame, after something
+    /// else (a firmware effect) has run on the keyboard in between.
+    pub fn reclaim(&mut self) {
+        self.claimed = false;
     }
 
     /// Paint `keys` (HID usage and colour; a key left out is dark) as one

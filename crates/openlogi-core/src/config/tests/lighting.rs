@@ -15,6 +15,7 @@ fn lighting_roundtrips_per_device() {
             effect: LightingEffect::Static,
             period_ms: None,
             wave: WaveShape::default(),
+            idle: IdleLighting::default(),
         },
     );
     let restored = write_and_read(&cfg);
@@ -28,6 +29,7 @@ fn lighting_roundtrips_per_device() {
             effect: LightingEffect::Static,
             period_ms: None,
             wave: WaveShape::default(),
+            idle: IdleLighting::default(),
         })
     );
     assert_eq!(restored.lighting("absent"), None);
@@ -257,12 +259,19 @@ fn a_wave_keeps_its_shape_and_a_default_shape_stays_out_of_the_file() {
             width: 80,
             direction: WaveDirection::RightToLeft,
         },
+        idle: IdleLighting {
+            after_seconds: 30,
+            effect: IdleEffect::Breathing,
+            color: "ff8800".parse().expect("valid hex"),
+        },
         ..Lighting::default()
     };
     cfg.set_lighting("g515", wave.clone());
     let text = toml::to_string(&cfg).expect("config serializes");
     assert!(text.contains("effect = \"wave\""), "{text}");
     assert!(text.contains("direction = \"right_to_left\""), "{text}");
+    assert!(text.contains("after_seconds = 30"), "{text}");
+    assert!(text.contains("effect = \"breathing\""), "{text}");
     let restored = write_and_read(&cfg);
     assert_eq!(restored.lighting("g515"), Some(wave));
 
@@ -275,4 +284,5 @@ fn a_wave_keeps_its_shape_and_a_default_shape_stays_out_of_the_file() {
     );
     let text = toml::to_string(&cfg).expect("config serializes");
     assert!(!text.contains("depth"), "{text}");
+    assert!(!text.contains("after_seconds"), "{text}");
 }

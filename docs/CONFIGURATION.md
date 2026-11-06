@@ -252,6 +252,13 @@ Common device fields are:
   table: `depth` (how far the band dims, 0–100 %, default 50), `width` (the
   band's width, 5–100 % of the keyboard, default 60) and `direction`
   (`left_to_right` or `right_to_left`). The wave runs while OpenLogi runs.
+- `idle` is what a keyboard with effects shows at rest, whatever `effect`
+  runs in use: `idle = { after_seconds = 30, effect = "rays", color = "ffffff" }`
+  switches to it once no key has been pressed for `after_seconds` (`0`, the
+  default, never rests) and back at the next key press. `effect` is `rays`
+  (the default: rays of `color` along the key rows over the keyboard
+  colour), `ripple`, `cycle` or `breathing`; `cycle` ignores `color`. Idle
+  time is read from macOS; elsewhere the keyboard does not rest yet.
 - `smartshift`, and camera controls / profiles
 - `camera_stream_mode`: the live preview's mode, a table of `width`, `height`
   (pixels) and `fps`. All three are required and must be positive, or the file

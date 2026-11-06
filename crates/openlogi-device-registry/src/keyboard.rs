@@ -33,9 +33,10 @@ impl PerKeyZones {
 struct Entry {
     model_ids: &'static [u16],
     zones: PerKeyZones,
-    /// Each key's horizontal centre by HID usage, `0` at the left edge of
-    /// the keys and `1000` at the right, for effects drawn across them.
-    columns: &'static [(u8, u16)],
+    /// Each key by HID usage: its horizontal centre, `0` at the left edge of
+    /// the keys and `1000` at the right, and its row, `0` for the function
+    /// keys, for effects drawn across them.
+    keys: &'static [(u8, u16, u8)],
 }
 
 const KEYBOARDS: &[Entry] = &[
@@ -44,101 +45,102 @@ const KEYBOARDS: &[Entry] = &[
     Entry {
         model_ids: &[0xb389, 0x40b4, 0xc355],
         zones: PerKeyZones::UsageMinusThree,
-        columns: G515_COLUMNS,
+        keys: G515_KEYS,
     },
 ];
 
-/// The G515 LS TKL's key centres, measured from the `PERKEY_KEYBOARD` boxes
-/// of its G HUB depot image (the ISO Enter by its outline).
-const G515_COLUMNS: &[(u8, u16)] = &[
-    (0x04, 123),
-    (0x05, 371),
-    (0x06, 261),
-    (0x07, 234),
-    (0x08, 219),
-    (0x09, 289),
-    (0x0a, 343),
-    (0x0b, 399),
-    (0x0c, 494),
-    (0x0d, 454),
-    (0x0e, 509),
-    (0x0f, 563),
-    (0x10, 481),
-    (0x11, 425),
-    (0x12, 551),
-    (0x13, 605),
-    (0x14, 110),
-    (0x15, 275),
-    (0x16, 179),
-    (0x17, 330),
-    (0x18, 439),
-    (0x19, 316),
-    (0x1a, 165),
-    (0x1b, 206),
-    (0x1c, 385),
-    (0x1d, 152),
-    (0x1e, 82),
-    (0x1f, 137),
-    (0x20, 192),
-    (0x21, 246),
-    (0x22, 302),
-    (0x23, 357),
-    (0x24, 412),
-    (0x25, 467),
-    (0x26, 522),
-    (0x27, 578),
-    (0x28, 784),
-    (0x29, 27),
-    (0x2a, 770),
-    (0x2b, 42),
-    (0x2c, 378),
-    (0x2d, 633),
-    (0x2e, 687),
-    (0x2f, 660),
-    (0x30, 715),
-    (0x32, 728),
-    (0x33, 618),
-    (0x34, 673),
-    (0x35, 28),
-    (0x36, 536),
-    (0x37, 591),
-    (0x38, 646),
-    (0x39, 48),
-    (0x3a, 137),
-    (0x3b, 192),
-    (0x3c, 247),
-    (0x3d, 302),
-    (0x3e, 385),
-    (0x3f, 440),
-    (0x40, 495),
-    (0x41, 550),
-    (0x42, 632),
-    (0x43, 688),
-    (0x44, 744),
-    (0x45, 798),
-    (0x46, 862),
-    (0x47, 919),
-    (0x48, 974),
-    (0x49, 863),
-    (0x4a, 918),
-    (0x4b, 974),
-    (0x4c, 863),
-    (0x4d, 918),
-    (0x4e, 973),
-    (0x4f, 972),
-    (0x50, 863),
-    (0x51, 918),
-    (0x52, 919),
-    (0x64, 96),
-    (0x65, 722),
-    (0xe0, 33),
-    (0xe1, 34),
-    (0xe2, 171),
-    (0xe3, 103),
-    (0xe4, 790),
-    (0xe5, 749),
-    (0xe6, 584),
-    (0xe7, 653),
+/// The G515 LS TKL's keys: horizontal centre and row, measured from the
+/// `PERKEY_KEYBOARD` boxes of its G HUB depot image (the ISO Enter by its
+/// outline, on the row of its top half).
+const G515_KEYS: &[(u8, u16, u8)] = &[
+    (0x04, 123, 3),
+    (0x05, 371, 4),
+    (0x06, 261, 4),
+    (0x07, 234, 3),
+    (0x08, 219, 2),
+    (0x09, 289, 3),
+    (0x0a, 343, 3),
+    (0x0b, 399, 3),
+    (0x0c, 494, 2),
+    (0x0d, 454, 3),
+    (0x0e, 509, 3),
+    (0x0f, 563, 3),
+    (0x10, 481, 4),
+    (0x11, 425, 4),
+    (0x12, 551, 2),
+    (0x13, 605, 2),
+    (0x14, 110, 2),
+    (0x15, 275, 2),
+    (0x16, 179, 3),
+    (0x17, 330, 2),
+    (0x18, 439, 2),
+    (0x19, 316, 4),
+    (0x1a, 165, 2),
+    (0x1b, 206, 4),
+    (0x1c, 385, 2),
+    (0x1d, 152, 4),
+    (0x1e, 82, 1),
+    (0x1f, 137, 1),
+    (0x20, 192, 1),
+    (0x21, 246, 1),
+    (0x22, 302, 1),
+    (0x23, 357, 1),
+    (0x24, 412, 1),
+    (0x25, 467, 1),
+    (0x26, 522, 1),
+    (0x27, 578, 1),
+    (0x28, 784, 2),
+    (0x29, 27, 0),
+    (0x2a, 770, 1),
+    (0x2b, 42, 2),
+    (0x2c, 378, 5),
+    (0x2d, 633, 1),
+    (0x2e, 687, 1),
+    (0x2f, 660, 2),
+    (0x30, 715, 2),
+    (0x32, 728, 3),
+    (0x33, 618, 3),
+    (0x34, 673, 3),
+    (0x35, 28, 1),
+    (0x36, 536, 4),
+    (0x37, 591, 4),
+    (0x38, 646, 4),
+    (0x39, 48, 3),
+    (0x3a, 137, 0),
+    (0x3b, 192, 0),
+    (0x3c, 247, 0),
+    (0x3d, 302, 0),
+    (0x3e, 385, 0),
+    (0x3f, 440, 0),
+    (0x40, 495, 0),
+    (0x41, 550, 0),
+    (0x42, 632, 0),
+    (0x43, 688, 0),
+    (0x44, 744, 0),
+    (0x45, 798, 0),
+    (0x46, 862, 0),
+    (0x47, 919, 0),
+    (0x48, 974, 0),
+    (0x49, 863, 1),
+    (0x4a, 918, 1),
+    (0x4b, 974, 1),
+    (0x4c, 863, 2),
+    (0x4d, 918, 2),
+    (0x4e, 973, 2),
+    (0x4f, 972, 5),
+    (0x50, 863, 5),
+    (0x51, 918, 5),
+    (0x52, 919, 4),
+    (0x64, 96, 4),
+    (0x65, 722, 5),
+    (0xe0, 33, 5),
+    (0xe1, 34, 4),
+    (0xe2, 171, 5),
+    (0xe3, 103, 5),
+    (0xe4, 790, 5),
+    (0xe5, 749, 4),
+    (0xe6, 584, 5),
+    (0xe7, 653, 5),
 ];
 
 /// The zone map of the keyboard whose `0x0003` `getDeviceInfo` reports
@@ -156,10 +158,11 @@ pub fn per_key_zones(model_id: [u16; 3]) -> Option<PerKeyZones> {
         .map(|entry| entry.zones)
 }
 
-/// Where each key of the keyboard reporting `model_id` sits across it, as
-/// `(HID usage, 0..=1000 from left to right)`, for a known keyboard.
+/// Where each key of the keyboard reporting `model_id` sits, as `(HID
+/// usage, 0..=1000 from left to right, row from the top)`, for a known
+/// keyboard.
 #[must_use]
-pub fn key_columns(model_id: [u16; 3]) -> Option<&'static [(u8, u16)]> {
+pub fn key_positions(model_id: [u16; 3]) -> Option<&'static [(u8, u16, u8)]> {
     KEYBOARDS
         .iter()
         .find(|entry| {
@@ -167,28 +170,33 @@ pub fn key_columns(model_id: [u16; 3]) -> Option<&'static [(u8, u16)]> {
                 .iter()
                 .any(|id| *id != 0 && entry.model_ids.contains(id))
         })
-        .map(|entry| entry.columns)
+        .map(|entry| entry.keys)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{PerKeyZones, key_columns, per_key_zones};
+    use super::{PerKeyZones, key_positions, per_key_zones};
 
     #[test]
     fn the_g515_places_every_mapped_key_once_across_the_board() {
-        let columns = key_columns([0, 0x40b4, 0]).expect("the G515 is known");
-        assert_eq!(columns.len(), 88);
-        assert!(columns.iter().all(|&(_, x)| x <= 1000));
-        let esc = columns.iter().find(|(usage, _)| *usage == 0x29);
-        assert_eq!(esc.map(|&(_, x)| x), Some(27), "Esc sits at the left");
+        let keys = key_positions([0, 0x40b4, 0]).expect("the G515 is known");
+        assert_eq!(keys.len(), 88);
+        assert!(keys.iter().all(|&(_, x, row)| x <= 1000 && row <= 5));
+        let esc = keys.iter().find(|(usage, ..)| *usage == 0x29);
+        assert_eq!(
+            esc.map(|&(_, x, row)| (x, row)),
+            Some((27, 0)),
+            "Esc, top left"
+        );
+        let space = keys.iter().find(|(usage, ..)| *usage == 0x2c);
+        assert_eq!(space.map(|&(.., row)| row), Some(5), "Space, bottom row");
         assert!(
-            columns.windows(2).all(|pair| pair[0].0 < pair[1].0),
+            keys.windows(2).all(|pair| pair[0].0 < pair[1].0),
             "one entry per key, in usage order"
         );
         assert!(
-            columns
-                .iter()
-                .all(|&(usage, _)| PerKeyZones::UsageMinusThree.zone(usage).is_some())
+            keys.iter()
+                .all(|&(usage, ..)| PerKeyZones::UsageMinusThree.zone(usage).is_some())
         );
     }
 

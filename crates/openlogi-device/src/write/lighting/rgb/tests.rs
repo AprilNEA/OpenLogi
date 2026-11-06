@@ -732,6 +732,12 @@ fn animation_params_follow_the_layout_worked_out_on_a_g515() {
         LightingAnimation::Breathing { period_ms: 4000 }.params(red),
         [0xff, 0, 0, 0x0f, 0xa0, 0, 100, 0, 0, 0]
     );
+    // A dimmed colour goes out at full strength, red and blue lifted, its
+    // dimming as intensity.
+    assert_eq!(
+        LightingAnimation::Breathing { period_ms: 4000 }.params(Rgb::new(0x7a, 0x39, 0x9b)),
+        [0xe2, 0x5d, 0xff, 0x0f, 0xa0, 0, 61, 0, 0, 0]
+    );
     assert_eq!(
         LightingAnimation::Cycle {
             period_ms: 5000,

@@ -38,8 +38,8 @@ use openlogi_core::binding::{
     GridKey, GridSlot, KeyCombo, KeypadPage, ModeKey,
 };
 use openlogi_core::config::{
-    ConfigRevision, FlowPeerName, FlowPublicKey, Lighting, LightingEffect, ScrollResolution,
-    WaveShape,
+    ConfigRevision, FlowPeerName, FlowPublicKey, IdleLighting, Lighting, LightingEffect,
+    ScrollResolution, WaveShape,
 };
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, ChangedOnLight, DeviceInventory,
@@ -1123,7 +1123,8 @@ fn lighting() {
     // `Rgb` serializes as the same hex string the field used to hold raw, so
     // the pinned bytes are identical to the pre-newtype encoding. The key map
     // always rides along, even empty, and so do the effect, its period and
-    // the wave's shape (50 % deep, 60 % wide, left to right):
+    // the wave's shape (50 % deep, 60 % wide, left to right) and the idle
+    // lighting (never, rays, white):
     // the config file omits them, the wire cannot.
     let solid = Lighting {
         enabled: true,
@@ -1133,8 +1134,9 @@ fn lighting() {
         effect: LightingEffect::Static,
         period_ms: None,
         wave: WaveShape::default(),
+        idle: IdleLighting::default(),
     };
-    assert_wire(&solid, "010638303030666650000000323c00");
+    assert_wire(&solid, "010638303030666650000000323c00000006666666666666");
     assert_wire(
         &Lighting {
             keys: BTreeMap::from([(
@@ -1143,7 +1145,7 @@ fn lighting() {
             )]),
             ..solid.clone()
         },
-        "0106383030306666500103457363066666303030300000323c00",
+        "0106383030306666500103457363066666303030300000323c00000006666666666666",
     );
     // Breathing is the second effect; 4000 ms takes bincode's three-byte
     // `u16` form (0xfb, then little-endian).
@@ -1153,7 +1155,7 @@ fn lighting() {
             period_ms: Some(4000),
             ..solid
         },
-        "010638303030666650000101fba00f323c00",
+        "010638303030666650000101fba00f323c00000006666666666666",
     );
 }
 

@@ -188,8 +188,9 @@ pub use succession::Identity;
 ///      them — `0x1814` ChangeHost without `0x1815` HostsInfo.
 ///      `Lighting::keys` appended — colours for single keys over the static
 ///      colour, by key position.
-///      `Lighting::{effect, period_ms, wave}` appended — a firmware or
-///      host-drawn animation, its pace and the wave's shape.
+///      `Lighting::{effect, period_ms, wave, idle}` appended — a firmware or
+///      host-drawn animation, its pace, the wave's shape and what the
+///      keyboard shows while it rests.
 pub const PROTOCOL_VERSION: u32 = 46;
 
 /// Environment variable through which the agent hands a supervised helper the

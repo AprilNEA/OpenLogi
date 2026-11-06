@@ -33,6 +33,25 @@ impl LightingCancellation {
     }
 }
 
+/// Where a lighting job's requester waits for its answer; taken by whichever
+/// comes first, the worker's early answer or its final result.
+type Answer = Arc<Mutex<Option<oneshot::Sender<Result<(), WriteError>>>>>;
+
+/// Lets a long-running lighting worker answer its requester before it ends:
+/// a drawn effect keeps painting after its first frame, but the requester
+/// only waits for that frame.
+pub struct LightingReady(Answer);
+
+impl LightingReady {
+    /// Report success to whoever waits on the job now. Later calls, and the
+    /// job's own end, then report nothing more.
+    pub fn ready(&self) {
+        if let Some(sender) = self.0.lock().unwrap_or_else(PoisonError::into_inner).take() {
+            let _ = sender.send(Ok(()));
+        }
+    }
+}
+
 /// A lighting worker that owns its runtime and route lock until compensation
 /// finishes. Dropping this handle requests cancellation, without blocking or
 /// destroying the worker. Use [`Self::detach`] for background reapplication.
@@ -52,6 +71,18 @@ impl LightingJob {
         F: FnOnce(LightingCancellation) -> Fut + Send + 'static,
         Fut: Future<Output = Result<(), WriteError>>,
     {
+        Self::spawn_long(route, |cancel, _ready| operation(cancel))
+    }
+
+    /// [`Self::spawn`] for a worker that runs on after answering: the job
+    /// resolves at the first [`LightingReady::ready`], or at the end of
+    /// `operation` if it never calls it. A requester that stops waiting
+    /// still cancels the worker; once it has its answer, it no longer can.
+    pub fn spawn_long<F, Fut>(route: &DeviceRoute, operation: F) -> Result<Self, WriteError>
+    where
+        F: FnOnce(LightingCancellation, LightingReady) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<(), WriteError>>,
+    {
         let lock = LIGHTING_LOCKS
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -61,6 +92,8 @@ impl LightingJob {
         let cancel = Arc::new(AtomicBool::new(false));
         let cancellation = LightingCancellation(Arc::clone(&cancel));
         let (sender, result) = oneshot::channel();
+        let sender = Arc::new(Mutex::new(Some(sender)));
+        let ready = LightingReady(Arc::clone(&sender));
         let route = route.clone();
         std::thread::Builder::new()
             .name("openlogi-rgb".into())
@@ -74,7 +107,7 @@ impl LightingJob {
                             return Err(timed_out());
                         }
                         // No timeout around this future: it owns native writes.
-                        operation(cancellation).await
+                        operation(cancellation, ready).await
                     }),
                     Err(error) => Err(WriteError::RuntimeInit {
                         message: error.to_string(),
@@ -84,8 +117,11 @@ impl LightingJob {
                     Ok(()) => debug!(%route, "lighting transaction completed"),
                     Err(error) => warn!(%route, ?error, "lighting transaction failed"),
                 }
-                // A cancelled/detached requester may have dropped its receiver.
-                let _ = sender.send(result);
+                // A cancelled/detached requester may have dropped its receiver,
+                // and a long worker may have answered already.
+                if let Some(sender) = sender.lock().unwrap_or_else(PoisonError::into_inner).take() {
+                    let _ = sender.send(result);
+                }
             })
             .map_err(|error| {
                 WriteError::Hid(format!("could not start lighting worker: {error}"))

@@ -118,6 +118,8 @@ brightness = 80
 # Or a wave OpenLogi draws across the keys, with `keys` held still over it:
 # effect = "wave"
 # wave = { depth = 50, width = 60, direction = "left_to_right" }
+# And, whatever runs in use, rays across the keys after 30 s without a key press:
+# idle = { after_seconds = 30, effect = "rays", color = "ffffff" }
 
 [devices."receiver:aabbccdd:slot:1".smartshift]
 mode = "ratchet"
