@@ -1,5 +1,8 @@
 [workspace]
 resolver = "3"
+# `vendor/` holds patched third-party crates (see `[patch.crates-io]`); they
+# are path dependencies, not members, so workspace lints never apply to them.
+exclude = ["vendor"]
 members = [
     "crates/openlogi",
     "crates/openlogi-core",
@@ -117,6 +120,12 @@ swr-gpui = { package = "swr-gpui-pre", version = "0.1" }
 # release after 0.4.1 is on crates.io.
 [patch.crates-io]
 calloop-wayland-source = { git = "https://github.com/Smithay/calloop-wayland-source", rev = "cab67860c4e8fef8a92cb11f6f3a08dd3b05536a" }
+# gpui-pre-linux 0.3.10 with one guard in `set_size_and_scale`: it skips
+# `wp_viewport.set_destination(0, 0)`, a protocol error that a fractional
+# scale event sends to a layer surface the compositor has not sized yet, so
+# the Actions Ring never opened at a fractional scale (#1989). Drop this patch
+# once a gpui-pre release carries zed-industries/zed#61368.
+gpui-pre-linux = { path = "vendor/gpui-pre-linux" }
 
 [workspace.lints.rust]
 # Denied workspace-wide, but `deny` (not `forbid`) so a crate that genuinely

@@ -1533,9 +1533,20 @@ impl WaylandWindowStatePtr {
 
         {
             let state = self.state.borrow();
-            if let Some(viewport) = &state.viewport {
-                viewport
-                    .set_destination(f32::from(size.width) as i32, f32::from(size.height) as i32);
+            // OpenLogi patch (#1989): a layer surface whose size the
+            // compositor has not configured yet still has 0x0 bounds when a
+            // fractional-scale event arrives, and `set_destination(0, 0)` is
+            // a protocol error that kills the whole Wayland connection. Skip
+            // it until the compositor assigns a real size; the configure that
+            // follows calls back in here with it. Upstream:
+            // https://github.com/zed-industries/zed/pull/61368
+            let width = f32::from(size.width) as i32;
+            let height = f32::from(size.height) as i32;
+            if let Some(viewport) = &state.viewport
+                && width > 0
+                && height > 0
+            {
+                viewport.set_destination(width, height);
             }
         }
     }
