@@ -337,6 +337,29 @@ fn a_model_only_device_listed_twice_on_its_route_still_adopts_it() {
 }
 
 #[test]
+fn a_device_listed_twice_with_two_readings_settles_after_one_save() {
+    // Two nodes of one device need not report the same capabilities. The
+    // route is adopted once; a second identical snapshot must not flip the
+    // link from one reading to the other and save again on every tick.
+    let unit = direct_inventory([0xa3, 0x93, 0xca, 0xe0]);
+    let mut other_node = unit.clone();
+    other_node.paired[0].capabilities = Some(Capabilities::default());
+    let snapshot = [unit, other_node];
+    let resolver = AssetResolver::new();
+    let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = AppState::new(Sources::in_memory(Config::ephemeral(), &resolver, commands));
+
+    let _ = state.refresh_inventories(&snapshot, &[], &resolver, &[]);
+    while receiver.try_recv().is_ok() {}
+    let _ = state.refresh_inventories(&snapshot, &[], &resolver, &[]);
+
+    assert!(
+        receiver.try_recv().is_err(),
+        "an unchanged snapshot must not persist or reload again"
+    );
+}
+
+#[test]
 fn two_devices_with_their_own_units_on_one_route_stay_two_cards() {
     let resolver = AssetResolver::new();
     let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();

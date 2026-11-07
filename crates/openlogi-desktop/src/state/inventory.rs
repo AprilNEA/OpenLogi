@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, HashSet};
 
 use openlogi_core::config::{Config, DeviceIdentity};
-use openlogi_core::device::{DeviceInventory, StandaloneDevice};
+use openlogi_core::device::{Capabilities, DeviceInventory, StandaloneDevice};
 use openlogi_core::device_order::PhysicalDeviceKey;
 use openlogi_core::hid::DeviceRoute;
 use tracing::debug;
@@ -681,11 +681,14 @@ pub(super) fn persist_identities(config: &mut Config, list: &[DeviceRecord]) -> 
 /// entry, so a device reached both ways in one snapshot resolves to the one
 /// entry its settings actually live under.
 ///
-/// A route two online records share cannot be attributed to either one —
-/// `route_key` for a Direct route strips the device's own identity, so two
-/// same-model direct devices seen online in the same snapshot report the
-/// *same* route key. `Config::adopt_route` is exclusive per route, so
-/// adopting it for one twin only gets it stolen back by the other on the
+/// A route that online records of two different devices share cannot be
+/// attributed to either one — `route_key` for a Direct route strips the
+/// device's own identity, so two same-model direct devices seen online in the
+/// same snapshot report the *same* route key. Records that fold onto the same
+/// key are one entry listed more than once — two G402s sharing their model
+/// key, or two HID++ nodes of one mouse — not twins, and their route is
+/// adopted once. `Config::adopt_route` is exclusive per route, so adopting it
+/// for one twin only gets it stolen back by the other on the
 /// very next tick — a persist-and-reload storm that also churns the loser's
 /// `LinkConfig` (including any per-link overrides) on every refresh. Such a
 /// route is therefore skipped entirely; the route-derived key each twin
@@ -697,29 +700,72 @@ pub(super) fn persist_identities(config: &mut Config, list: &[DeviceRecord]) -> 
 /// still under a pre-schema-5 route key — so folding onto `config_key` would
 /// fold the legacy entry onto itself and the branch would never converge.
 pub(super) fn adopt_routes(config: &mut Config, list: &[DeviceRecord]) -> bool {
-    let mut route_counts: BTreeMap<&str, usize> = BTreeMap::new();
-    let sightings = || list.iter().filter(|record| record.sighting_key().is_some());
-    for record in sightings() {
-        *route_counts.entry(record.route_key.as_str()).or_insert(0) += 1;
+    let adoptable = || list.iter().filter(|record| record.sighting_key().is_some());
+    let mut sightings: BTreeMap<&str, Vec<&DeviceRecord>> = BTreeMap::new();
+    for record in adoptable() {
+        sightings
+            .entry(record.route_key.as_str())
+            .or_default()
+            .push(record);
     }
     let mut adopted = false;
-    for record in sightings() {
-        if route_counts
-            .get(record.route_key.as_str())
-            .is_some_and(|&count| count > 1)
-        {
+    // List order, not route order: folding two legacy entries into one
+    // device keeps the first one's values as its defaults.
+    let mut handled = HashSet::new();
+    for record in adoptable() {
+        let route_key = record.route_key.as_str();
+        if !handled.insert(route_key) {
             continue;
         }
-        let canonical = record
-            .canonical_key
-            .as_deref()
-            .unwrap_or(&record.config_key);
-        let Some(key) = PhysicalDeviceKey::parse(canonical) else {
+        let Some(sighting) = RouteSighting::of(&sightings[route_key]) else {
             continue;
         };
-        adopted |= config.adopt_route(&key, &record.route_key, record.capabilities);
+        let Some(key) = PhysicalDeviceKey::parse(sighting.device) else {
+            continue;
+        };
+        adopted |= config.adopt_route(&key, route_key, sighting.capabilities);
     }
     adopted
+}
+
+/// What every online record listed on one route says about it, once they
+/// are known to name a single device.
+struct RouteSighting<'a> {
+    /// The entry [`adopt_routes`] folds the route into.
+    device: &'a str,
+    /// The capabilities every record that read them agrees on. Two nodes of
+    /// one device that disagree record none, rather than overwriting the link
+    /// with each reading in turn and saving the config on every tick.
+    capabilities: Option<Capabilities>,
+}
+
+impl<'a> RouteSighting<'a> {
+    /// `None` when the records fold onto two different entries: same-model
+    /// twins, which the route alone cannot tell apart.
+    fn of(records: &[&'a DeviceRecord]) -> Option<Self> {
+        let (first, rest) = records.split_first()?;
+        let device = fold_target(first);
+        if rest.iter().any(|record| fold_target(record) != device) {
+            return None;
+        }
+        let mut readings = records.iter().filter_map(|record| record.capabilities);
+        let capabilities = readings
+            .next()
+            .filter(|first| readings.all(|reading| reading == *first));
+        Some(Self {
+            device,
+            capabilities,
+        })
+    }
+}
+
+/// The entry [`adopt_routes`] folds `record`'s route into: its canonical key
+/// when it has one, else the key its settings resolve to.
+fn fold_target(record: &DeviceRecord) -> &str {
+    record
+        .canonical_key
+        .as_deref()
+        .unwrap_or(&record.config_key)
 }
 
 /// The devices in `new` that changed a setting themselves since `old` — Fn
