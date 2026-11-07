@@ -18,6 +18,7 @@ const EXTENDED_MODEL_ID: u8 = 1;
 enum SerialReads {
     Answer,
     FailOnce,
+    FailAlways,
 }
 
 impl SerialReads {
@@ -25,6 +26,7 @@ impl SerialReads {
         match self {
             Self::Answer => 0,
             Self::FailOnce => 1,
+            Self::FailAlways => usize::MAX,
         }
     }
 }
@@ -228,4 +230,30 @@ async fn a_bolt_serial_read_lost_once_is_read_again_on_the_next_scan() {
 #[tokio::test]
 async fn a_unifying_serial_read_lost_once_is_read_again_on_the_next_scan() {
     a_serial_lost_once_is_read_again_by_the_next_scan(Receiver::Unifying).await;
+}
+
+async fn a_serial_that_never_reads_leaves_the_device_unidentified(receiver: Receiver) {
+    // Its unit id would key it `unit:<hex>`, a key it stops answering to once
+    // its serial is read. It gets no identity for as long as the read keeps
+    // failing.
+    let channel = paired_device(SerialReads::FailAlways).await;
+
+    for _ in 0..3 {
+        let scan = receiver.scan(&channel).await;
+        assert_eq!(scan.model_info, None, "no identity was read");
+        assert!(
+            matches!(scan.outcome, CacheOutcome::Seen(..)),
+            "a probe with no identity is never memoized"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_bolt_device_whose_serial_never_reads_stays_unidentified() {
+    a_serial_that_never_reads_leaves_the_device_unidentified(Receiver::Bolt).await;
+}
+
+#[tokio::test]
+async fn a_unifying_device_whose_serial_never_reads_stays_unidentified() {
+    a_serial_that_never_reads_leaves_the_device_unidentified(Receiver::Unifying).await;
 }

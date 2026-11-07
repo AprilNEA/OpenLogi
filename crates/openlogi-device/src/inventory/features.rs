@@ -1037,13 +1037,10 @@ mod tests {
         assert!(probe.capabilities().is_some());
     }
 
-    #[tokio::test]
-    async fn a_lost_serial_read_beside_a_zero_unit_id_is_no_identity() {
-        // The device says it has a serial number, but the read of it fails and
-        // its unit id is all-zero. Its model info would then read as a model
-        // identity and key it by its route alone, which is not what the device
-        // said: nothing may identify it until the serial read succeeds.
-        let (raw, _) = ScriptedRawHidChannel::with_dynamic_responder(|request| {
+    /// A HID++ 2.0 device whose DeviceInformation says it has a serial number
+    /// and reports `unit_id`, but whose serial-number read fails.
+    async fn probe_with_a_lost_serial_read(unit_id: [u8; 4]) -> ProbedFeatures {
+        let (raw, _) = ScriptedRawHidChannel::with_dynamic_responder(move |request| {
             let mut response = vec![0; 20];
             response[..4].copy_from_slice(&request[..4]);
             response[0] = 0x11;
@@ -1060,10 +1057,9 @@ mod tests {
                 (1, 1) => response[4..6].copy_from_slice(
                     &[0x0001u16, 0x0003][usize::from(request[4]) - 1].to_be_bytes(),
                 ),
-                // DeviceInformation: a serial number is supported, the unit id
-                // is all-zero.
                 (2, 0) => {
                     response[4] = 3;
+                    response[5..9].copy_from_slice(&unit_id);
                     response[18] = 0x01;
                 }
                 (2, 2) => return Some(feature_error(request, 0x08)),
@@ -1072,9 +1068,31 @@ mod tests {
             Some(response)
         });
         let channel = within_deadline("opening the channel", scripted_channel(raw)).await;
+        within_deadline("the probe", probe_features(&channel, 0xff, None, None))
+            .await
+            .0
+    }
 
-        let (probe, _, _) =
-            within_deadline("the probe", probe_features(&channel, 0xff, None, None)).await;
+    #[tokio::test]
+    async fn a_lost_serial_read_beside_a_zero_unit_id_is_no_identity() {
+        // Its model info would read as a model identity and key the device by
+        // its route alone, which is not what the device said.
+        let probe = probe_with_a_lost_serial_read([0; 4]).await;
+
+        assert_eq!(probe.model_info, None, "no identity was read");
+        assert!(
+            probe.identity_incomplete,
+            "the device has an identity the probe failed to read"
+        );
+        assert!(probe.capabilities().is_some());
+    }
+
+    #[tokio::test]
+    async fn a_lost_serial_read_beside_a_unit_id_is_no_identity() {
+        // Its model info would read as a unit identity and key the device
+        // `unit:<hex>`, and settings saved under that key are left behind
+        // once the serial is read (#2025).
+        let probe = probe_with_a_lost_serial_read([0xa3, 0x93, 0xca, 0xe0]).await;
 
         assert_eq!(probe.model_info, None, "no identity was read");
         assert!(
