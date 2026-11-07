@@ -391,7 +391,7 @@ pub async fn watch(
 #[cfg(test)]
 mod tests {
     use std::assert_matches;
-    use std::sync::{PoisonError, mpsc};
+    use std::sync::{PoisonError, TryLockError, mpsc};
     use std::time::Duration;
 
     use super::{
@@ -412,22 +412,32 @@ mod tests {
             usage_id: 0x0202,
             identity: "serial:device-lock-map".into(),
         };
-        let (held, holding) = mpsc::channel();
-        let holder = std::thread::spawn(move || {
-            let _map = DEVICE_LOCKS.lock().unwrap_or_else(PoisonError::into_inner);
-            held.send(()).expect("the test waits for the held map");
-            std::thread::sleep(Duration::from_millis(200));
-        });
-        holding.recv().expect("the holder takes the map");
-
-        tokio::select! {
-            biased;
-            _guard = device_lock(&route) => {}
-            () = tokio::time::sleep(Duration::from_secs(5)) => {
-                panic!("paused time ran on while the command waited for the lock map");
+        // The holder lets go after 200 ms. A lookup that starts later finds the
+        // map free and proves nothing, so that round is run again.
+        for _round in 0..5 {
+            let (held, holding) = mpsc::channel();
+            let holder = std::thread::spawn(move || {
+                let _map = DEVICE_LOCKS.lock().unwrap_or_else(PoisonError::into_inner);
+                held.send(()).expect("the test waits for the held map");
+                std::thread::sleep(Duration::from_millis(200));
+            });
+            holding.recv().expect("the holder takes the map");
+            let contended = matches!(DEVICE_LOCKS.try_lock(), Err(TryLockError::WouldBlock));
+            if contended {
+                tokio::select! {
+                    biased;
+                    _guard = device_lock(&route) => {}
+                    () = tokio::time::sleep(Duration::from_secs(5)) => {
+                        panic!("paused time ran on while the command waited for the lock map");
+                    }
+                }
+            }
+            holder.join().expect("the holder does not panic");
+            if contended {
+                return;
             }
         }
-        holder.join().expect("the holder does not panic");
+        panic!("the lock map was already free each time the command looked it up");
     }
 
     #[test]
