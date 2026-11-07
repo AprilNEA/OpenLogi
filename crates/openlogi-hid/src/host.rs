@@ -341,6 +341,16 @@ pub async fn dump_features(route: &DeviceRoute) -> Result<Vec<FeatureEntry>, Wri
     device::dump_features(&*native_backend(), route).await
 }
 
+/// Call one HID++ 2.0 feature of the device `route` reaches with raw
+/// parameters. See [`device::raw_feature_calls`].
+pub async fn raw_feature_calls(
+    route: &DeviceRoute,
+    feature_id: u16,
+    calls: &[device::RawFeatureCall],
+) -> Result<Option<device::RawFeatureAnswers>, WriteError> {
+    device::raw_feature_calls(&*native_backend(), route, feature_id, calls).await
+}
+
 /// Walk the firmware entities of the device `route` reaches.
 pub async fn dump_firmware_entities(
     route: &DeviceRoute,

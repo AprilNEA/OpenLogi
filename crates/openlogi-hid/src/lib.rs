@@ -34,12 +34,12 @@ pub use host::{
     animate_per_key, apply_litra, channel_pool, dump_features, dump_firmware_entities,
     dump_reprog_controls, enumerate, enumerate_hid_only, enumerate_standalone, get_backlight,
     get_dpi, get_dpi_info, get_onboard, get_pointer_scaling, get_scroll_wheel_mode, get_sidetone,
-    get_smartshift_status, list_pairing_receivers, play_haptic, read_battery_raw, read_litra_state,
-    rgb_effects, set_dpi, set_fn_lock, set_keyboard_color, set_keyboard_color_with,
-    set_keyboard_key_colors, set_pointer_scaling, set_scroll_inversion, set_scroll_resolution,
-    set_scroll_wheel_mode, set_sidetone, set_smartshift, set_smartshift_sensitivity,
-    set_smartshift_torque, toggle_smartshift, try_rgb_effect, update_backlight, walk_per_key_zones,
-    watch_button_spy, watch_hotplug, watch_litra,
+    get_smartshift_status, list_pairing_receivers, play_haptic, raw_feature_calls,
+    read_battery_raw, read_litra_state, rgb_effects, set_dpi, set_fn_lock, set_keyboard_color,
+    set_keyboard_color_with, set_keyboard_key_colors, set_pointer_scaling, set_scroll_inversion,
+    set_scroll_resolution, set_scroll_wheel_mode, set_sidetone, set_smartshift,
+    set_smartshift_sensitivity, set_smartshift_torque, toggle_smartshift, try_rgb_effect,
+    update_backlight, walk_per_key_zones, watch_button_spy, watch_hotplug, watch_litra,
 };
 pub use lighting::{set_keyboard_color_on, set_keyboard_color_with_on};
 pub use probe_cache::FileProbeCacheStore;

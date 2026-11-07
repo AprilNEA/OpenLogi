@@ -57,6 +57,9 @@ impl ReceiverDescriptor {
 pub const RECEIVERS: &[ReceiverDescriptor] = &[
     ReceiverDescriptor::logitech(0xc52b, ReceiverBrand::Unifying, ReceiverProtocol::Unifying),
     ReceiverDescriptor::logitech(0xc532, ReceiverBrand::Unifying, ReceiverProtocol::Unifying),
+    // Pre-Unifying Nano receiver bundled with the MX Revolution, a HID++ 1.0
+    // mouse — cross-checked against Solaar's NANO_RECEIVER_C51A.
+    ReceiverDescriptor::logitech(0xc51a, ReceiverBrand::Nano, ReceiverProtocol::Unifying),
     // Nano receiver bundled with budget wireless combos (e.g. MK270, MK295),
     // limited to 2 paired devices — cross-checked against Solaar's
     // NANO_RECEIVER_C534.
@@ -154,6 +157,14 @@ mod tests {
         let receiver = find_receiver(LOGITECH_VENDOR_ID, 0xc54d).expect("c54d receiver");
 
         assert_eq!(receiver.brand, ReceiverBrand::Lightspeed);
+        assert_eq!(receiver.protocol, ReceiverProtocol::Unifying);
+    }
+
+    #[test]
+    fn mx_revolution_nano_receiver_is_nano_over_unifying_protocol() {
+        let receiver = find_receiver(LOGITECH_VENDOR_ID, 0xc51a).expect("c51a receiver");
+
+        assert_eq!(receiver.brand, ReceiverBrand::Nano);
         assert_eq!(receiver.protocol, ReceiverProtocol::Unifying);
     }
 
