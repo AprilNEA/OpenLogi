@@ -41,6 +41,25 @@ real QUIC and save each other in their own config files, and by store tests
 that merge into an existing file. No pairing between two real computers has
 been run yet.
 
+## 2026-11: A half-read direct node beside a live twin is probe noise
+
+A direct route is only `vid:pid`, so a probe that never read DeviceInformation
+does not say which mouse answered. With a device of that model online on the
+route, the node may be that device's own second node while a twin is
+unplugged. Folding it into the absent twin would show an unplugged mouse
+online, and edits on its card would be saved under its key.
+
+So the GUI adopts a half-read node through a card's last live route only when
+no twin is online there, at any count of twins. With one online, the node is
+dropped and the absent card stays offline. The cost is that a twin which
+half-reads beside another shows offline until its probe reads
+DeviceInformation; a first-sight probe that failed its reads is not memoized,
+so the next reconciliation tries again.
+
+This rule covers adoption only. A half-read node on a route that an entry holds
+in its `links` index resolves to that entry first
+(`Config::resolve_device_key`), and is never transient.
+
 ## 2026-11: Flow is set up in its own window, opened from the device list
 
 Flow is configured in a standalone window, as Settings and Add Device are. A

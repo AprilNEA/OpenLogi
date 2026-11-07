@@ -270,13 +270,13 @@ impl AppState {
     }
     /// Pair each transient direct record in the snapshot with the device it
     /// physically is. A transient key (`…:unit:00000000`) is a half-read probe
-    /// of some existing device, not a new one (#482): when exactly one known
-    /// card sharing its `direct:<vid>:<pid>` wire identity is not live online —
-    /// so the half-read probe can only be that device — the transient record is
-    /// folded into that card instead of surfacing beside it (or evicting it).
-    /// With no such card the transient is dropped as probe noise when its wire
-    /// product is already live online, and an ambiguous one (two known
-    /// same-model cards absent) is left alone.
+    /// of some existing device, not a new one (#482): when no device of its
+    /// `direct:<vid>:<pid>` wire identity is online and exactly one known card
+    /// shares that identity, the half-read probe can only be that device, and
+    /// the transient record is folded into that card instead of surfacing
+    /// beside it (or evicting it). With a device of that wire identity online
+    /// it is dropped as probe noise, whichever card is absent, and an
+    /// ambiguous one (two known same-model cards absent) is left alone.
     ///
     /// The wire identity is compared through [`DeviceRecord::route_key`], not
     /// `config_key`: since Task 6 a persistent record's `config_key` may
@@ -286,11 +286,13 @@ impl AppState {
     /// backs an offline placeholder that has already been adopted once, but
     /// two same-model direct devices can only ever have *one* owner for a
     /// shared `direct:<vid>:<pid>` route (`Config::adopt_route` is
-    /// exclusive), so the absent twin also needs a route-independent proof:
-    /// [`record_wire_pid`] compares the HID++ model id the offline
-    /// placeholder persisted against the one the half-read probe itself
-    /// reports (`model_info` survives a half read even when the unit id
-    /// does not).
+    /// exclusive), so the absent twin also needs another proof: the route
+    /// its last live record was reached by, or [`record_wire_pid`], which
+    /// compares the HID++ model id the offline placeholder persisted against
+    /// the one the transient probe reports, when it reports one. A probe
+    /// that read DeviceInformation is no longer transient, even with an
+    /// all-zero unit id (a model identity), so for a direct device the
+    /// last live route is the proof that remains.
     pub(crate) fn adopt_transient_records(
         &self,
         by_key: &mut BTreeMap<String, DeviceRecord>,
@@ -324,30 +326,36 @@ impl AppState {
                         || transient_wire_pid.is_some()
                             && record_wire_pid(record) == transient_wire_pid)
             };
-            // A live online sibling is accounted for and never a candidate,
-            // but it must not discard the transient — the half-read probe may
-            // be the *other* same-model device.
+            // A direct route is only `vid:pid`, so nothing says which mouse
+            // answered: the half-read node may be a second node of a device
+            // online there. Folding it into an absent twin would show an
+            // unplugged mouse online and save edits under its key.
+            if by_key
+                .values()
+                .any(|record| same_wire(record) && record.is_online())
+            {
+                by_key.remove(&key);
+                continue;
+            }
             let mut candidates: Vec<String> = by_key
                 .iter()
-                .filter(|(_, record)| same_wire(record) && !record.is_online())
+                .filter(|(_, record)| same_wire(record))
                 .map(|(k, _)| k.clone())
                 .collect();
+            // Last tick's live record proves its wire by its own route, which
+            // its offline placeholder in this snapshot no longer carries. A
+            // half-read probe with no model info has no other proof to offer.
+            let absent_now =
+                |key: &String| by_key.get(key).is_none_or(|record| !record.is_online());
             for previous in &self.devices.records {
                 if same_wire(previous)
-                    && !by_key.contains_key(&previous.config_key)
+                    && absent_now(&previous.config_key)
                     && !candidates.contains(&previous.config_key)
                 {
                     candidates.push(previous.config_key.clone());
                 }
             }
             let [known_key] = candidates.as_slice() else {
-                if candidates.is_empty()
-                    && by_key
-                        .iter()
-                        .any(|(_, record)| same_wire(record) && record.is_online())
-                {
-                    by_key.remove(&key);
-                }
                 continue;
             };
             // Last tick's record carries the freshest identity; the offline
