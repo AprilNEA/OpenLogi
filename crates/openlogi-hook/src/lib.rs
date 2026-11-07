@@ -694,6 +694,30 @@ pub fn secure_input_enabled() -> bool {
     }
 }
 
+/// The buttons `device` reports to the hook that the generic button map
+/// reads as another button or drops: its entry in the Linux hook's
+/// per-device table (the Performance MX's zoom button and thumb rest).
+/// Empty for every other device, and off Linux, where the hook keeps no such
+/// table.
+#[must_use]
+#[cfg_attr(
+    not(target_os = "linux"),
+    expect(
+        unused_variables,
+        reason = "only the Linux hook keeps a per-device button table"
+    )
+)]
+pub fn device_buttons(device: &EventDevice) -> Vec<ButtonId> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::device_buttons(device)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Vec::new()
+    }
+}
+
 /// The app macOS attributes Secure Event Input to.
 ///
 /// The attribution is the window server's: a background process that turns

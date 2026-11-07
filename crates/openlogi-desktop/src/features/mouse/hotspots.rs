@@ -68,10 +68,12 @@ impl Hotspot {
     }
 }
 
-/// Where the silhouette places a G-series button it has no hotspot for, when
-/// the mouse has no artwork: the wheel tilts beside the wheel, G7/G8 by the
-/// left click, G9 behind the wheel and G6 on the side.
-pub(super) fn gaming_fallback_hotspot(button: ButtonId) -> Option<Hotspot> {
+/// Where the silhouette places a button it has no default hotspot for, when
+/// the mouse has no artwork. For a G-series button: the wheel tilts beside
+/// the wheel, G7/G8 by the left click, G9 behind the wheel and G6 on the
+/// side. The Performance MX's zoom button sits between Back and the gesture
+/// button, as it does on the mouse.
+pub(super) fn placed_fallback_hotspot(button: ButtonId) -> Option<Hotspot> {
     let (x, y, w, h) = match button {
         ButtonId::WheelTiltLeft => (138., 120., 38., 70.),
         ButtonId::WheelTiltRight => (244., 120., 38., 70.),
@@ -79,6 +81,7 @@ pub(super) fn gaming_fallback_hotspot(button: ButtonId) -> Option<Hotspot> {
         ButtonId::G7 => (100., 60., 50., 50.),
         ButtonId::G8 => (100., 120., 50., 50.),
         ButtonId::G9 => (185., 215., 50., 40.),
+        ButtonId::Zoom => (0., 352., 40., 26.),
         _ => return None,
     };
     Some(Hotspot {
@@ -93,6 +96,7 @@ pub(super) fn gaming_fallback_hotspot(button: ButtonId) -> Option<Hotspot> {
 /// Fallback hotspot layout for the no-asset path (synthetic silhouette).
 /// Primary L/R click are intentionally absent — Logi doesn't expose them
 /// as remappable and we follow the same rule everywhere.
+/// Forward sits in front of Back, as it does on Logitech's side buttons.
 #[must_use]
 pub fn default_hotspots(thumbwheel: bool) -> Vec<Hotspot> {
     let mut hotspots = vec![
@@ -106,14 +110,14 @@ pub fn default_hotspots(thumbwheel: bool) -> Vec<Hotspot> {
         Hotspot {
             id: ButtonId::Back.into(),
             x: 0.,
-            y: 220.,
+            y: 290.,
             w: 40.,
             h: 60.,
         },
         Hotspot {
             id: ButtonId::Forward.into(),
             x: 0.,
-            y: 290.,
+            y: 220.,
             w: 40.,
             h: 60.,
         },

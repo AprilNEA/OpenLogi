@@ -422,15 +422,25 @@ fn side_leaders_cross(
 /// The fallback silhouette's hotspots for a device without an image. A
 /// G-series mouse keeps only the buttons its layout has: the generic DPI and
 /// gesture buttons are `0x1b04` controls it cannot capture. The layout's
-/// other buttons get placed hotspots, so each one can still be opened.
-pub fn fallback_hotspots(layout: Option<&GamingLayout>, thumbwheel: bool) -> Vec<Hotspot> {
+/// other buttons get placed hotspots, so each one can still be opened, and so
+/// do `hook_buttons`, the buttons the OS hook reads from this mouse beyond
+/// the generic set ([`openlogi_hook::device_buttons`]).
+pub fn fallback_hotspots(
+    layout: Option<&GamingLayout>,
+    thumbwheel: bool,
+    hook_buttons: &[ButtonId],
+) -> Vec<Hotspot> {
     let mut hotspots = super::hotspots::default_hotspots(thumbwheel);
     hotspots.retain(|hotspot| on_fallback(layout, hotspot));
-    for button in layout.into_iter().flat_map(GamingLayout::remappable) {
+    let placed = layout
+        .into_iter()
+        .flat_map(GamingLayout::remappable)
+        .chain(hook_buttons.iter().copied());
+    for button in placed {
         if !hotspots
             .iter()
             .any(|hotspot| hotspot.id.button() == Some(button))
-            && let Some(hotspot) = super::hotspots::gaming_fallback_hotspot(button)
+            && let Some(hotspot) = super::hotspots::placed_fallback_hotspot(button)
         {
             hotspots.push(hotspot);
         }
@@ -491,7 +501,7 @@ mod tests {
     use openlogi_core::device::DeviceKind;
 
     use super::*;
-    use crate::features::mouse::hotspots::default_hotspots;
+    use crate::features::mouse::hotspots::{default_hotspots, placed_fallback_hotspot};
 
     /// Label positions for the synthetic fallback silhouette at its authored
     /// size.
@@ -501,7 +511,7 @@ mod tests {
         distribution: LabelDistribution,
     ) -> Vec<Label> {
         labels_from_hotspots(
-            &fallback_hotspots(layout, thumbwheel),
+            &fallback_hotspots(layout, thumbwheel, &[]),
             MOUSE_MODEL_SIZE.0,
             MOUSE_MODEL_SIZE.1,
             MOUSE_MODEL_SIZE.1,
@@ -591,7 +601,7 @@ mod tests {
     fn an_undivertable_mouse_without_an_image_keeps_only_what_it_delivers() {
         use openlogi_core::binding::STANDARD_BUTTONS;
         let ids = |layout| -> Vec<_> {
-            fallback_hotspots(layout, true)
+            fallback_hotspots(layout, true, &[])
                 .iter()
                 .map(|hotspot| hotspot.id)
                 .collect()
@@ -609,7 +619,42 @@ mod tests {
         drawn.sort_by_key(|id| format!("{id:?}"));
         assert_eq!(drawn, every, "every remappable button can be opened");
 
-        assert_eq!(fallback_hotspots(None, true), default_hotspots(true));
+        assert_eq!(fallback_hotspots(None, true, &[]), default_hotspots(true));
+    }
+
+    /// The Performance MX's hook reads its zoom button and its thumb rest,
+    /// as the gesture button (#1688). The silhouette already draws the
+    /// gesture button, so only Zoom gets a placed hotspot: below Forward and
+    /// Back and above the gesture button, as on the mouse, and clear of every
+    /// other one.
+    #[test]
+    fn hook_buttons_the_silhouette_lacks_get_placed_hotspots() {
+        let hotspots = fallback_hotspots(None, false, &[ButtonId::GestureButton, ButtonId::Zoom]);
+        let mut expected = default_hotspots(false);
+        expected.push(
+            placed_fallback_hotspot(ButtonId::Zoom).expect("the silhouette has a place for Zoom"),
+        );
+        assert_eq!(hotspots, expected);
+
+        let center_y = |button: ButtonId| {
+            hotspots
+                .iter()
+                .find(|hotspot| hotspot.id == button.into())
+                .expect("a drawn hotspot")
+                .center()
+                .1
+        };
+        assert!(center_y(ButtonId::Forward) < center_y(ButtonId::Back));
+        assert!(center_y(ButtonId::Back) < center_y(ButtonId::Zoom));
+        assert!(center_y(ButtonId::Zoom) < center_y(ButtonId::GestureButton));
+
+        let overlap = |a: &Hotspot, b: &Hotspot| {
+            a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h
+        };
+        let zoom = expected.last().expect("Zoom is placed last");
+        for other in &hotspots[..hotspots.len() - 1] {
+            assert!(!overlap(zoom, other), "Zoom overlaps {:?}", other.id);
+        }
     }
 
     #[test]
