@@ -7,6 +7,7 @@
 
 mod backlight;
 mod haptic_restore;
+mod settings;
 
 use std::sync::{Arc, PoisonError};
 use std::time::{Duration, Instant};
@@ -218,12 +219,7 @@ impl Agent for AgentServer {
         route: DeviceRoute,
         status: SmartShiftStatus,
     ) -> Result<(), WriteError> {
-        self.shared
-            .device(&route)
-            .run(HidppOperation::WriteSmartShift, |c| async move {
-                openlogi_hid::set_smartshift_on(&c, status).await
-            })
-            .await
+        self.shared.set_smartshift(&route, status).await
     }
 
     async fn read_dpi(self, _: Context, route: DeviceRoute) -> Result<DpiInfo, WriteError> {

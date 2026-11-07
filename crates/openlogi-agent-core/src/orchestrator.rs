@@ -32,7 +32,7 @@ use openlogi_hid::{
     BacklightChange, BacklightState, CaptureChannelSlot, ChannelPool, ChannelRegistry,
     DeviceIoGate, DeviceRoute, DisableKeysMask, Dpi, EasySwitchHosts, FnLockState,
     ForceSensingInfo, GamingWanted, HidppOperation, HostOs, PointerSpeed, ReportRate,
-    ReportRateInfo, SidetoneLevel, WriteError, commands_for_light_settings,
+    ReportRateInfo, SidetoneLevel, SmartShiftStatus, WriteError, commands_for_light_settings,
     is_reserved_keyboard_control, key_display_for,
 };
 #[cfg(test)]
@@ -67,8 +67,10 @@ use crate::{DpiCycleState, DpiCycles, PointerSpeeds};
 
 mod devices;
 mod lights;
+mod settings;
 
 pub use lights::{ConfigSource, LightWriteClaim, TakenLightChange, write_light};
+pub use settings::{ConfigReload, DeviceSettings, SettingError};
 
 use devices::reapply_targets;
 use devices::{
@@ -427,6 +429,19 @@ impl SharedHandles {
             cycles.rejected_at(route, dpi);
         }
         result
+    }
+
+    /// Write `status` to the SmartShift wheel of the mouse at `route`.
+    pub async fn set_smartshift(
+        &self,
+        route: &DeviceRoute,
+        status: SmartShiftStatus,
+    ) -> Result<(), WriteError> {
+        self.device(route)
+            .run(HidppOperation::WriteSmartShift, |c| async move {
+                openlogi_hid::set_smartshift_on(&c, status).await
+            })
+            .await
     }
 
     /// Apply `change` to the backlight of the keyboard at `route` and return
