@@ -111,6 +111,22 @@ pub const G903_LIGHTSPEED: GamingLayout = GamingLayout {
     stock_dpi_presets: &[400, 800, 1600, 3200, 6400],
 };
 
+/// Original PRO X SUPERLIGHT (wpid `0x4093`, USB `0xc094`). The five
+/// `0x8110` slots were checked on extended model id 2. G HUB's
+/// `pro_x_wireless_mouse` depot shares its five-button metadata and default
+/// configuration across extended model ids 0–5.
+pub const PRO_X_SUPERLIGHT: GamingLayout = GamingLayout {
+    model_keys: &["04093", "14093", "24093", "34093", "44093", "54093"],
+    slots: &[
+        Slot::native(ButtonId::LeftClick),
+        Slot::native(ButtonId::RightClick),
+        Slot::native(ButtonId::MiddleClick),
+        Slot::native(ButtonId::Back),
+        Slot::native(ButtonId::Forward),
+    ],
+    stock_dpi_presets: &[400, 800, 1600, 3200, 6400],
+};
+
 /// A gaming mouse whose layout nobody has dumped. Its first five slots are
 /// the standard HID buttons, which the OS input hook remaps without host
 /// mode. G6 and up differ per model and are not guessed.
@@ -129,7 +145,7 @@ pub const STANDARD_BUTTONS: GamingLayout = GamingLayout {
     stock_dpi_presets: &[],
 };
 
-const LAYOUTS: &[&GamingLayout] = &[&G502_LIGHTSPEED, &G903_LIGHTSPEED];
+const LAYOUTS: &[&GamingLayout] = &[&G502_LIGHTSPEED, &G903_LIGHTSPEED, &PRO_X_SUPERLIGHT];
 
 /// Whether a device is a G-series mouse, and which buttons it offers. The
 /// agent, the tabs and the Buttons panel all ask this one verdict.
@@ -286,6 +302,40 @@ mod tests {
                 GamingButtons::for_device(&model.model_key(), Some(&gaming)),
                 Some(GamingButtons::Dumped(&G502_LIGHTSPEED)),
                 "extended model id {extended_model_id}"
+            );
+        }
+    }
+
+    #[test]
+    fn original_superlight_colours_share_a_layout_without_claiming_other_models() {
+        use crate::device::{DeviceModelInfo, DeviceTransports};
+
+        let gaming = Capabilities::from_feature_ids(&[0x1004, 0x8100, 0x8110, 0x8060, 0x2201]);
+        for extended_model_id in 0..=5 {
+            let model = DeviceModelInfo {
+                entity_count: 3,
+                serial_number: None,
+                unit_id: [0; 4],
+                transports: DeviceTransports {
+                    usb: true,
+                    equad: true,
+                    btle: false,
+                    bluetooth: false,
+                },
+                model_ids: [0x4093, 0xc094, 0],
+                extended_model_id,
+            };
+            assert_eq!(
+                GamingButtons::for_device(&model.model_key(), Some(&gaming)),
+                Some(GamingButtons::Dumped(&PRO_X_SUPERLIGHT)),
+                "extended model id {extended_model_id}"
+            );
+        }
+        for other in ["64093", "040a9", "040b8"] {
+            assert_eq!(
+                GamingButtons::for_device(other, Some(&gaming)),
+                Some(GamingButtons::Standard),
+                "unverified model {other} stays generic"
             );
         }
     }
