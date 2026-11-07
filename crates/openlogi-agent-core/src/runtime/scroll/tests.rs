@@ -879,6 +879,62 @@ fn a_free_spin_scrolls_by_momentum_and_a_finger_stop_ends_it_at_once() {
     assert!(settling.is_empty(), "settling tick scrolled: {settling:?}");
 }
 
+/// A finger catches a free spin to flick it again: the catch ends the glide
+/// at once, and the push that follows scrolls straight away — its second
+/// notch is no longer the wheel settling — instead of being swallowed until
+/// the settle time has run out (#2435).
+#[test]
+fn a_push_right_after_a_catch_scrolls_at_once() {
+    let mut engine = momentum_engine();
+    let source = hidpp_source("mouse", 1);
+    let mut frames = Vec::new();
+    let caught = drive_wheel(
+        &mut engine,
+        &source,
+        Instant::now(),
+        |_| 200.0,
+        Duration::from_millis(600),
+        &mut frames,
+    );
+    // The catch: the wheel goes quiet until the detector reads a stop.
+    let mut at = caught;
+    while !matches!(
+        engine.wheels.get(&source).map(|s| s.detector.phase()),
+        Some(WheelPhase::Stopped(_))
+    ) {
+        engine.advance_due(at, &mut |f| frames.push(f));
+        at += Duration::from_millis(1);
+        assert!(
+            at - caught < Duration::from_millis(100),
+            "the catch never read as a stop"
+        );
+    }
+    let stopped = at;
+    // The flick on: a notch every poll the same way, as the recorded
+    // repeated flicks push the wheel right after each catch.
+    let poll = Duration::from_micros(7_500);
+    let mut pushed = Vec::new();
+    let mut next_report = stopped + poll;
+    while at < stopped + Duration::from_millis(60) {
+        if at >= next_report {
+            engine.wheel_impulse(source.clone(), wheel(0.0, 2.0), 1.0, at, &mut |f| {
+                pushed.push((at, f));
+            });
+            next_report += poll;
+        }
+        engine.advance_due(at, &mut |f| pushed.push((at, f)));
+        at += Duration::from_millis(1);
+    }
+    let first = pushed
+        .iter()
+        .find(|(_, f)| f.delta.y > 0.0)
+        .map(|(when, _)| *when - stopped);
+    assert!(
+        first.is_some_and(|after| after <= Duration::from_millis(30)),
+        "the push first scrolled {first:?} after the catch"
+    );
+}
+
 /// Momentum scrolling off: the smoothed wheel eases in ticks exactly as any
 /// other wheel, however fast it spins.
 #[test]

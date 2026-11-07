@@ -1383,7 +1383,8 @@ fn log_wheel_result(
 
 /// Write the DPI `restore` yields once this write's turn comes, if any, and
 /// forget `before` once it is written. As a pointer-speed write does, it then
-/// sets the DPI LED when `led` says, and runs `on_restored` once it landed.
+/// sets the DPI LED when `led` says, runs `on_restored` once it landed, and
+/// `on_failed` when the mouse rejected it or the write timed out.
 pub(crate) fn restore_dpi_in_background(
     op: DeviceOp,
     ticket: WriteTicket,
@@ -1391,6 +1392,7 @@ pub(crate) fn restore_dpi_in_background(
     led: Option<bool>,
     restore: impl FnOnce() -> Option<Dpi> + Send + 'static,
     on_restored: impl FnOnce() + Send + 'static,
+    on_failed: impl FnOnce() + Send + 'static,
 ) {
     let index = op.route.device_index();
     let turn = op.access.transport_turns.turn_for(&op.route);
@@ -1418,6 +1420,7 @@ pub(crate) fn restore_dpi_in_background(
             .await
         },
         move |result| {
+            let failed = write_failed(&result);
             log_outcome(index, "DPI restore", result, |restored| match restored {
                 Some(Some(dpi)) => {
                     debug!(index, %dpi, "DPI restored");
@@ -1426,6 +1429,9 @@ pub(crate) fn restore_dpi_in_background(
                 Some(None) => debug!(index, "no DPI to restore"),
                 None => debug!(index, "DPI restore superseded by a newer write"),
             });
+            if failed {
+                on_failed();
+            }
         },
     );
 }

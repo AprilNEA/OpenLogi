@@ -23,7 +23,7 @@ use openlogi_core::binding::{
 };
 use openlogi_core::scroll::ScrollDelta;
 
-use super::{HeldKey, KeyPhase, QuantizedScroll, ScrollQuantizer};
+use super::{HeldKey, HeldOutput, KeyPhase, QuantizedScroll, ScrollQuantizer};
 
 const HIGH_RES_UNITS_PER_TICK: f64 = 120.0;
 
@@ -627,9 +627,34 @@ fn rel_ev(axis: RelativeAxisCode, value: i32) -> InputEvent {
 /// Two separate frames give the kernel distinct timestamps for press and
 /// release, which matches what the kernel `uinput` docs show and avoids
 /// toolkits treating a zero-duration event as invalid.
+///
+/// A modifier a held chord keeps down on the device gets neither edge. The
+/// kernel drops the repeated press, but the release would lift the held
+/// chord's modifier while that chord is still held (#2413).
 fn press_key(mods: &[KeyCode], key: KeyCode) {
-    emit(&key_phase_events(mods, key, KeyPhase::Down));
-    emit(&key_phase_events(mods, key, KeyPhase::Up));
+    super::with_held_output(|held| {
+        let mods = unheld_modifiers(mods, held);
+        emit(&key_phase_events(&mods, key, KeyPhase::Down));
+        emit(&key_phase_events(&mods, key, KeyPhase::Up));
+    });
+}
+
+/// The keys of `mods` no held chord keeps down on the device.
+fn unheld_modifiers(mods: &[KeyCode], held: &HeldOutput) -> Vec<KeyCode> {
+    let held: Vec<KeyCode> = [
+        HeldKey::Control,
+        HeldKey::Shift,
+        HeldKey::Alt,
+        HeldKey::Super,
+    ]
+    .into_iter()
+    .filter(|&key| held.owns(key))
+    .filter_map(held_keycode)
+    .collect();
+    mods.iter()
+        .copied()
+        .filter(|code| !held.contains(code))
+        .collect()
 }
 
 /// Build one `SYN_REPORT` frame. Down order is modifiers then key; up order
@@ -1173,16 +1198,16 @@ mod tests {
     use std::process::Command;
 
     use evdev::{KeyCode, RelativeAxisCode};
-    use openlogi_core::binding::{KeyCombo, KeyboardUsage, NativeAction, Shortcut};
+    use openlogi_core::binding::{HeldKeys, KeyCombo, KeyboardUsage, NativeAction, Shortcut};
 
     use super::{
         HELPER_PREFIXES, KEY_CAPABILITIES, ScrollOutput, action_scroll, capture_region_mods, combo,
         generic_linux_lock_fallback_chord, hid_usage_to_linux, hyprland_helper,
         hyprland_lock_fallback_chord, hyprland_lock_helper, hyprland_session_from_signature,
         key_ev, key_phase_events, modifiers_to_keycodes, rel_ev, resolve_allowlisted_under,
-        scroll_events, syn, wait_with_retry,
+        scroll_events, syn, unheld_modifiers, wait_with_retry,
     };
-    use crate::inject::KeyPhase;
+    use crate::inject::{HeldOutput, KeyPhase};
 
     #[test]
     fn held_chord_edges_use_inverse_key_order() {
@@ -1204,6 +1229,32 @@ mod tests {
                 key_ev(KeyCode::KEY_LEFTCTRL, 0),
                 syn(),
             ]
+        );
+    }
+
+    /// A one-shot chord leaves out a modifier a held chord keeps down on the
+    /// shared device: its release would lift that modifier while the chord is
+    /// still held (#2413). Cmd shares Control's key, so a held Cmd chord
+    /// keeps the tapped chord's Ctrl out too.
+    #[test]
+    fn one_shot_chord_leaves_held_chord_modifiers_alone() {
+        let mods = [KeyCode::KEY_LEFTCTRL, KeyCode::KEY_LEFTSHIFT];
+        assert_eq!(unheld_modifiers(&mods, &HeldOutput::default()), mods);
+
+        let mut output = HeldOutput::default();
+        let chord: KeyCombo = "Cmd+X".parse().expect("test chord must be valid");
+        let _ = output.transition(None, Some((&chord, HeldKeys::ModifiersOnly)));
+        assert_eq!(
+            unheld_modifiers(&mods, &output),
+            [KeyCode::KEY_LEFTSHIFT],
+            "the held chord's Ctrl must get neither edge"
+        );
+
+        let _ = output.transition(Some((&chord, HeldKeys::ModifiersOnly)), None);
+        assert_eq!(
+            unheld_modifiers(&mods, &output),
+            mods,
+            "a released chord no longer keeps its Ctrl out"
         );
     }
 
