@@ -195,3 +195,74 @@ fn a_zero_unit_entry_with_no_recorded_identity_is_left_alone() {
     assert!(config.devices.contains_key(LEGACY_KEY));
     assert!(!config.devices.contains_key(MODEL_KEY));
 }
+
+/// What "Manage this device" turned off and back on left in a released
+/// file for an M535 over Bluetooth, which reports neither a serial nor a
+/// unit id: an empty entry under the all-zero unit id, with no identity.
+const MANAGED_M535: &str = "schema_version = 11\n\n\
+     [devices]\n\n\
+     [devices.\"direct:046d:b016:unit:00000000\"]\n";
+const M535_LEGACY_KEY: &str = "direct:046d:b016:unit:00000000";
+const M535_MODEL_KEY: &str = "direct:046d:b016";
+
+fn m535() -> DeviceStableId {
+    DeviceStableId::Direct {
+        vendor_id: 0x046d,
+        product_id: 0xb016,
+        identity: Some(DeviceIdentity::Model),
+    }
+}
+
+#[test]
+fn the_empty_entry_manage_this_device_left_is_inert() {
+    let config = load(MANAGED_M535);
+
+    assert!(
+        !config.devices[M535_LEGACY_KEY].holds_settings(),
+        "it holds nothing a device could read"
+    );
+    assert_eq!(
+        config
+            .resolve_device_key(&m535(), Some(&DeviceIdentity::Model))
+            .map(PhysicalDeviceKey::into_string)
+            .as_deref(),
+        Some(M535_MODEL_KEY)
+    );
+    assert!(config.device_enabled(M535_MODEL_KEY));
+}
+
+#[test]
+fn a_binding_set_beside_that_entry_survives_a_reload() {
+    // The reported bug: a non-default option set for the M535 was never
+    // saved, because the device had no key to save it under.
+    let mut config = load(MANAGED_M535);
+    let key = config
+        .resolve_device_key(&m535(), Some(&DeviceIdentity::Model))
+        .expect("a model-only direct device has a key");
+    config.set_binding(key.as_str(), ButtonId::Back, Binding::Single(Action::Copy));
+
+    let reloaded = write_and_read(&config);
+
+    let key = reloaded
+        .resolve_device_key(&m535(), Some(&DeviceIdentity::Model))
+        .expect("a model-only direct device has a key");
+    assert_eq!(
+        reloaded.stored_bindings(key.as_str()).get(&ButtonId::Back),
+        Some(&Binding::Single(Action::Copy))
+    );
+}
+
+#[test]
+fn a_disabled_zero_unit_entry_with_no_identity_does_not_disable_the_model() {
+    // The same key names the transient card of a probe that never read an
+    // identity, possibly of another device of that model: its switch says
+    // nothing about the device keyed by its model.
+    let config = load(&edited(
+        MANAGED_M535,
+        "unit:00000000\"]\n",
+        "unit:00000000\"]\nenabled = false\n",
+    ));
+
+    assert!(!config.device_enabled(M535_LEGACY_KEY));
+    assert!(config.device_enabled(M535_MODEL_KEY));
+}
