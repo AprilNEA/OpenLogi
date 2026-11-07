@@ -1,8 +1,25 @@
-use gpui::{Bounds, point, px, size};
+use gpui::{Bounds, Pixels, TestAppContext, VisualTestContext, point, px, size};
 use openlogi_core::device::{BatteryInfo, BatteryLevel, BatteryStatus, DeviceKind};
 use openlogi_ipc::{Notice, NoticeKind};
 
 use super::*;
+
+/// The drawn bounds of the card, the device name, and the charge of a
+/// low-battery notice for a device called `name`, in a window sized for it.
+fn drawn_card(cx: &mut TestAppContext, name: &str) -> [Bounds<Pixels>; 3] {
+    let view = NoticeView {
+        cards: vec![low_battery(1, Some(name), Some(15))],
+        shelf: Rc::new(RefCell::new(NoticeShelf::default())),
+    };
+    let window = cx.open_window(stack_size(1), |_, _| view);
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    ["notice-1", "notice-1-device", "notice-1-charge"].map(|selector| {
+        visual
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("`{selector}` is drawn"))
+    })
+}
 
 fn low_battery(id: u64, name: Option<&str>, percentage: Option<u8>) -> Notice {
     Notice {
@@ -156,6 +173,34 @@ fn a_low_battery_card_names_the_device_and_its_charge() {
             device: "MX Master 3S".into(),
             charge: Some("15%".into()),
         }
+    );
+}
+
+/// A name wider than the card gives way; the charge keeps its size and its
+/// place inside the card.
+#[gpui::test]
+fn a_name_wider_than_the_card_gives_way_to_the_charge(cx: &mut TestAppContext) {
+    let [card, short_name, charge] = drawn_card(cx, "MX Master 3S");
+    let [_, long_name, crowded_charge] = drawn_card(cx, &"MX Master 3S ".repeat(20));
+    assert!(
+        short_name.right() < charge.left() && charge.right() < card.right(),
+        "a short name and the charge sit side by side inside the card"
+    );
+    assert_eq!(
+        crowded_charge.size, charge.size,
+        "the charge neither shrinks nor wraps beside a long name"
+    );
+    assert!(
+        crowded_charge.right() <= card.right(),
+        "the charge stays inside the card"
+    );
+    assert!(
+        long_name.right() <= crowded_charge.left(),
+        "the name stops short of the charge"
+    );
+    assert!(
+        long_name.size.width > short_name.size.width,
+        "the name fills the room the charge leaves"
     );
 }
 
