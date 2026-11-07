@@ -264,6 +264,7 @@ impl NoticeView {
         let notice_shelf = Rc::clone(&self.shelf);
         div()
             .id(("notice", id))
+            .debug_selector(move || format!("notice-{id}"))
             .w(px(CARD_WIDTH))
             .h(px(CARD_HEIGHT))
             .flex()
@@ -305,9 +306,20 @@ impl NoticeView {
                             .text_xs()
                             .text_color(DETAIL)
                             // The name gives way; the charge never does.
-                            .child(div().min_w_0().truncate().child(device))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .debug_selector(move || format!("notice-{id}-device"))
+                                    .child(device),
+                            )
                             .when_some(charge, |line, charge| {
-                                line.child(div().flex_none().child(format!("· {charge}")))
+                                line.child(
+                                    div()
+                                        .flex_none()
+                                        .debug_selector(move || format!("notice-{id}-charge"))
+                                        .child(format!("· {charge}")),
+                                )
                             }),
                     ),
             )
