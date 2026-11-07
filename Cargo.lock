@@ -5949,6 +5949,7 @@ dependencies = [
 name = "openlogi-agent"
 version = "0.9.0"
 dependencies = [
+ "block2 0.6.2",
  "dispatch2",
  "embed-resource",
  "futures",
@@ -5970,6 +5971,7 @@ dependencies = [
  "openlogi-hook",
  "openlogi-inject",
  "openlogi-ipc",
+ "openlogi-permissions",
  "rust-i18n",
  "serde_json",
  "succession",

@@ -42,6 +42,10 @@ mod status_item;
 mod takeover;
 #[cfg(target_os = "macos")]
 mod tray;
+// The menu-bar menu's platform-free model. Only the macOS tray draws it so
+// far; tests build it everywhere, since nothing in it is platform code.
+#[cfg(any(target_os = "macos", test))]
+mod tray_model;
 #[cfg(target_os = "windows")]
 mod tray_windows;
 mod virtual_keyboard;
@@ -126,10 +130,9 @@ fn main() {
         // The AppKit loop releases this launch hold only after it has read the
         // login session's console ownership and powerd's current power state.
         let _ = device_io_signal.suspend();
-        // Read the menu-bar preference before `config` moves into the core
-        // thread; the main thread hosts the tray.
-        let show_in_menu_bar = config.app_settings.show_in_menu_bar;
-        let app_icon = config.app_settings.app_icon;
+        // Copy the config before it moves into the core thread: the main
+        // thread hosts the tray, which reads it whenever its menu opens.
+        let tray_config = std::sync::Arc::new(config.clone());
         // The tray waits for the core to declare the agent *armed*: a dormant
         // agent (launch_at_login off, started at login, no client yet) must
         // not put an icon in the menu bar only to vanish seconds later. Arming
@@ -147,13 +150,7 @@ fn main() {
             return;
         }
         if let Ok(observable) = armed_rx.recv() {
-            tray::run_app_loop(
-                show_in_menu_bar,
-                app_icon,
-                observable,
-                device_io_signal,
-                shutdown_tx,
-            );
+            tray::run_app_loop(tray_config, observable, device_io_signal, shutdown_tx);
         }
     }
     #[cfg(not(target_os = "macos"))]
