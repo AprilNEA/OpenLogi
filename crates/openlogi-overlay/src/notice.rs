@@ -43,6 +43,9 @@ pub(crate) const NOTICE_APP_ID: &str = "openlogi-notice";
 /// Card colours. Like the ring, a notice floats over whatever is on screen, so
 /// it commits to a dark card instead of following the OS appearance.
 const CARD: Hsla = neutral(0.10, 0.94);
+/// A hairline at the card's edge: over a dark desktop the shadow alone does
+/// not separate the card from what it floats on.
+const EDGE: Hsla = neutral(1.0, 0.10);
 const TITLE: Hsla = neutral(0.98, 1.0);
 const DETAIL: Hsla = neutral(0.78, 1.0);
 /// The battery glyph: amber, the colour of a warning that needs no action yet.
@@ -270,6 +273,8 @@ impl NoticeView {
             .px(px(16.0))
             .rounded(px(14.0))
             .bg(CARD)
+            .border_1()
+            .border_color(EDGE)
             .shadow_lg()
             .cursor_pointer()
             .child(
