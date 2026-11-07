@@ -9,6 +9,7 @@ use super::{
 use crate::platform::installation::{HomebrewCask, Installation, InstallationSource, LinuxPackage};
 use crate::ui::theme::FocusRingStyle as _;
 use crate::ui::theme::PressableStyle as _;
+use crate::ui::theme::SelectableStyle as _;
 use crate::ui::theme::Typography as _;
 use gpui_kit::base::Link;
 use gpui_kit::component::ActiveTheme as _;
@@ -224,6 +225,7 @@ fn channel_segment(cx: &App) -> ButtonGroup {
             Button::new(id)
                 .label(label)
                 .selected(current == channel)
+                .selected_segment(current == channel, cx)
                 .debug_selector(move || id.into())
                 .on_click(move |_, _, cx| {
                     AppState::apply(cx, |state| state.commit_update_channel(channel));

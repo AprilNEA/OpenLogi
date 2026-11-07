@@ -43,7 +43,7 @@ use crate::ui::battery::BatteryIndicator;
 use crate::ui::components::{PanelCard, Toggle, toggle_row};
 use crate::ui::theme::{
     self, ContentWidth, DETAIL_RAIL_W, HEADER_H, Palette, PressableStyle as _, SCREEN_PAD,
-    Typography as _,
+    SelectableStyle as _, Typography as _,
 };
 
 mod backlight;
@@ -307,12 +307,14 @@ fn gshift_layer_bar(cx: &mut Context<AppView>) -> Option<impl IntoElement> {
                     .child(
                         Button::new("gshift-layer-normal")
                             .label(tr!("actions.g_shift_normal"))
-                            .selected(!gshift),
+                            .selected(!gshift)
+                            .selected_segment(!gshift, cx),
                     )
                     .child(
                         Button::new("gshift-layer-shift")
                             .label(tr!("actions.g_shift"))
-                            .selected(gshift),
+                            .selected(gshift)
+                            .selected_segment(gshift, cx),
                     )
                     .on_click(|indices, _window, cx| {
                         let layer = if indices.first() == Some(&1) {
@@ -505,7 +507,7 @@ fn onboard_card(pal: Palette, cx: &mut Context<AppView>) -> Option<impl IntoElem
             v_flex().gap_4().child(setting_row(
                 tr!("pointer.onboard_active"),
                 memory_description,
-                onboard_memory_control(memory, openlogi.into_iter().chain(profiles).collect()),
+                onboard_memory_control(memory, openlogi.into_iter().chain(profiles).collect(), cx),
                 pal,
             )),
         )
@@ -542,21 +544,23 @@ fn setting_row(
 fn onboard_memory_control(
     selected: Option<OnboardMemory>,
     choices: Vec<(OnboardMemory, String)>,
+    cx: &gpui::App,
 ) -> impl IntoElement {
     let values: Vec<OnboardMemory> = choices.iter().map(|(value, _)| *value).collect();
-    choices
-        .into_iter()
-        .enumerate()
-        .fold(
-            ButtonGroup::new("onboard-memory").w_full().outline(),
-            |group, (index, (value, label))| {
-                group.child(
+    ButtonGroup::new("onboard-memory")
+        .w_full()
+        .outline()
+        .children(
+            choices
+                .into_iter()
+                .enumerate()
+                .map(|(index, (value, label))| {
                     Button::new(("onboard-memory", index))
                         .flex_1()
                         .label(label)
-                        .selected(selected == Some(value)),
-                )
-            },
+                        .selected(selected == Some(value))
+                        .selected_segment(selected == Some(value), cx)
+                }),
         )
         .on_click(move |indices, _window, cx| {
             if let Some(value) = indices.first().and_then(|i| values.get(*i)) {
@@ -766,8 +770,6 @@ fn wheel_resolution_control(
     enabled: bool,
     cx: &gpui::App,
 ) -> impl IntoElement {
-    use crate::ui::theme::SelectableStyle as _;
-
     let values = [
         None,
         Some(ScrollResolution::Low),
