@@ -35,11 +35,12 @@ use objc2_foundation::{
 
 use super::super::DesktopSwitch;
 use super::super::space_switch::{
-    self, Backend, Direction, Failure, Lease, Pace, PostGate, SlideFrame, SlidePhase, SpaceState,
+    self, Backend, Direction, Failure, Outcome, Pace, PostGate, Queue, SlideFrame, SlidePhase,
+    SpaceState,
 };
 use super::{app_services, app_services_symbol};
 
-static BUSY: AtomicBool = AtomicBool::new(false);
+static SWITCHES: Queue = Queue::new();
 /// Whether a switch slides. The host publishes the user's choice here
 /// through [`set_desktop_switch`]; until it does, switches stay instant.
 static SLIDE: AtomicBool = AtomicBool::new(false);
@@ -64,45 +65,54 @@ pub(super) fn next_desktop() {
 }
 
 fn start(direction: Direction) {
-    let Some(lease) = Lease::acquire(&BUSY) else {
-        tracing::debug!(?direction, "Space switch already pending — skipped");
-        return;
-    };
     // Capture the display before scheduling. A moved cursor must not retarget
     // a delayed action to another monitor; `post` checks it again.
     let Some(display_id) = cursor_display() else {
         tracing::warn!(?direction, "Space switch: cursor display unavailable");
         return;
     };
-    // Read once: a setting changed mid-switch applies to the next one.
-    let switch = desktop_switch();
+    let run = match SWITCHES.admit(display_id, direction) {
+        Ok(run) => run,
+        Err(busy) => {
+            tracing::debug!(?direction, ?busy, "Space switch under way");
+            return;
+        }
+    };
     let result = space_switch::spawn_ordered(move |gate| {
-        let _lease = lease;
-        autoreleasepool(|_| {
-            let result = Native::new(display_id, switch)
-                .and_then(|mut native| space_switch::run(&mut native, direction, gate));
-            match result {
-                Ok(outcome) => {
-                    tracing::debug!(
-                        display_id,
-                        ?direction,
-                        ?switch,
-                        ?outcome,
-                        "Space switch result"
-                    );
-                }
-                Err(error) => tracing::warn!(
-                    display_id,
-                    ?direction,
-                    ?error,
-                    "Space switch unconfirmed — no retry"
-                ),
-            }
+        run.drain(direction, gate, |direction, gate| {
+            switch_once(display_id, direction, gate)
         });
     });
     if let Err(error) = result {
         tracing::warn!(?error, "Space switch preparation failed — no retry");
     }
+}
+
+/// One confirmed switch on `display_id`. The switch style is read per switch,
+/// so a setting changed during a run applies to its next step.
+fn switch_once(display_id: u32, direction: Direction, gate: PostGate) -> Result<Outcome, Failure> {
+    let switch = desktop_switch();
+    autoreleasepool(|_| {
+        Native::new(display_id, switch)
+            .and_then(|mut native| space_switch::run(&mut native, direction, gate))
+    })
+    .inspect(|outcome| {
+        tracing::debug!(
+            display_id,
+            ?direction,
+            ?switch,
+            ?outcome,
+            "Space switch result"
+        );
+    })
+    .inspect_err(|error| {
+        tracing::warn!(
+            display_id,
+            ?direction,
+            ?error,
+            "Space switch unconfirmed — no retry"
+        );
+    })
 }
 
 fn cursor_display() -> Option<u32> {
