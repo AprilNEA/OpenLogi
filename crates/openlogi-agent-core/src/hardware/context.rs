@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use openlogi_core::device::{LightState, StandaloneDevice};
-use openlogi_core::hid::{LightCommand, PairingError, WriteError};
+use openlogi_core::hid::{Dpi, DpiInfo, LightCommand, PairingError, WriteError};
 use openlogi_hid::backend::{HidBackend, HotplugStream};
 use openlogi_hid::inventory::persist::ProbeCacheStore;
 use openlogi_hid::pairing::ReceiverIdentityCache;
@@ -145,6 +145,27 @@ impl HardwareContext {
         model: LitraModel,
     ) -> Result<Option<LightWatch>, WriteError> {
         openlogi_hid::write::watch_litra(&*self.backend, route, model).await
+    }
+
+    /// Read the DPI slots of the G600 `route` reaches through this context's
+    /// backend and lifecycle gate.
+    pub(crate) async fn read_g600_dpi(&self, route: &DeviceRoute) -> Result<DpiInfo, WriteError> {
+        if !self.device_io.allows_io() {
+            return Err(WriteError::DeviceNotFound);
+        }
+        openlogi_hid::write::get_g600_dpi_info(&*self.backend, route).await
+    }
+
+    /// Select the DPI slot of the G600 `route` reaches that holds `dpi`.
+    pub(crate) async fn set_g600_dpi(
+        &self,
+        route: &DeviceRoute,
+        dpi: Dpi,
+    ) -> Result<(), WriteError> {
+        if !self.device_io.allows_io() {
+            return Err(WriteError::DeviceNotFound);
+        }
+        openlogi_hid::write::set_g600_dpi(&*self.backend, route, dpi).await
     }
 
     fn from_parts(
