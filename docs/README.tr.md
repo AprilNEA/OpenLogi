@@ -248,12 +248,12 @@ Ayarlar düz TOML kullanır; kaydetme işlemleri sembolik bağlı (symlink) ayar
     <img src="https://contrib.rocks/image?repo=AprilNEA/OpenLogi" alt="Katkıda bulunanlar">
 </a>
 
-OpenLogi logosunu ve uygulama simgesini tasarlayan [@kubai087](https://github.com/kubai087)'ye özel teşekkürler.
+Logo ve uygulama simgesi: [@kubai087](https://github.com/kubai087).
 
 ### İlham ve kaynaklar
 
-- [Solaar](https://github.com/pwr-Solaar/Solaar), belgelenmemiş HID++ özellikleri ve cihaza özgü davranışlar konusunda başlıca başvuru kaynağımız.
-- [@TomBadash](https://github.com/TomBadash) tarafından geliştirilen [Mouser](https://github.com/TomBadash/Mouser), OpenLogi'nin ilk kapsamına ve işletim sistemine özgü giriş kancası tasarımına ilham verdi.
+- [Solaar](https://github.com/pwr-Solaar/Solaar), Logitech'in HID++ protokolünü ve cihaz davranışlarını açık biçimde belgelediği için.
+- [@TomBadash](https://github.com/TomBadash) tarafından geliştirilen [Mouser](https://github.com/TomBadash/Mouser), Options+ yerine yerel ve hesapsız bir yaklaşıma ilham verdiği için.
 
 ### Altyapı
 

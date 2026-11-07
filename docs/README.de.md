@@ -249,12 +249,12 @@ Siehe [DEVELOPMENT.md](DEVELOPMENT.md), einschließlich [Sicherheit des macOS-In
     <img src="https://contrib.rocks/image?repo=AprilNEA/OpenLogi" alt="Mitwirkende">
 </a>
 
-Besonderer Dank gilt [@kubai087](https://github.com/kubai087) für den Entwurf des OpenLogi-Logos und des App-Icons.
+Logo und App-Icon von [@kubai087](https://github.com/kubai087).
 
 ### Credits
 
-- [Solaar](https://github.com/pwr-Solaar/Solaar), unsere erste Anlaufstelle für undokumentierte HID++-Funktionen und Geräte-Eigenheiten.
-- [Mouser](https://github.com/TomBadash/Mouser) von [@TomBadash](https://github.com/TomBadash), das den frühen Funktionsumfang von OpenLogi und den plattformspezifischen Input-Hook inspiriert hat.
+- [Solaar](https://github.com/pwr-Solaar/Solaar) für die offene Dokumentation von Logitechs HID++-Protokoll und Geräteverhalten.
+- [Mouser](https://github.com/TomBadash/Mouser) von [@TomBadash](https://github.com/TomBadash) als Inspiration für einen lokalen, kontofreien Ansatz statt Options+.
 
 ### Infrastruktur
 

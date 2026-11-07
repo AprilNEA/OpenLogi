@@ -251,12 +251,12 @@ See [DEVELOPMENT.md](docs/DEVELOPMENT.md), including [macOS input-hook safety](d
     <img src="https://contrib.rocks/image?repo=AprilNEA/OpenLogi" alt="Contributors">
 </a>
 
-Special thanks to [@kubai087](https://github.com/kubai087) for designing the OpenLogi logo and app icon.
+Logo and app icon by [@kubai087](https://github.com/kubai087).
 
 ### Credits
 
-- [Solaar](https://github.com/pwr-Solaar/Solaar), our go-to reference for undocumented HID++ features and device quirks.
-- [Mouser](https://github.com/TomBadash/Mouser) by [@TomBadash](https://github.com/TomBadash), which inspired OpenLogi's early scope and per-OS input hook design.
+- [Solaar](https://github.com/pwr-Solaar/Solaar) for documenting Logitech's HID++ protocol and device behavior in the open.
+- [Mouser](https://github.com/TomBadash/Mouser) by [@TomBadash](https://github.com/TomBadash) for inspiring a local, account-free take on Options+.
 
 ### Infrastructure
 
