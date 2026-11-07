@@ -110,3 +110,22 @@ fn set_keyboard_binding_inserts_and_clears() {
     assert!(config.keyboard_bindings().get(&f1).is_none());
     assert!(config.keyboard_bindings().is_empty());
 }
+
+#[test]
+fn a_key_remap_roundtrips_per_device_and_an_empty_one_stays_recorded() {
+    let key = |name: &str| -> LightingKey { name.parse().expect("a key name") };
+    let mut cfg = Config::default();
+    let remap = KeyRemap {
+        base: BTreeMap::from([(key("CapsLock"), KeyTarget::Key(key("Esc")))]),
+        fn_layer: BTreeMap::from([(key("F1"), KeyTarget::Media(MediaKey::Mute))]),
+        g_shift: BTreeMap::new(),
+    };
+    cfg.set_key_remap("g515", remap.clone());
+    cfg.set_key_remap("cleared", KeyRemap::default());
+
+    let restored = write_and_read(&cfg);
+
+    assert_eq!(restored.key_remap("g515"), Some(&remap));
+    assert_eq!(restored.key_remap("cleared"), Some(&KeyRemap::default()));
+    assert_eq!(restored.key_remap("absent"), None);
+}
