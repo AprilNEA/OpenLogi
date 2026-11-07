@@ -34,7 +34,8 @@ pub enum DiagCmd {
     Features(features::FeaturesArgs),
     /// Call one HID++ 2.0 feature with raw parameters and print its answers.
     Hidpp(hidpp::HidppArgs),
-    /// Dump HID++ 0x1b04 reprogrammable controls and capability flags.
+    /// Dump HID++ 0x1b04 reprogrammable controls with their current reporting
+    /// state; `--reset` lands every control back on native first.
     Controls(controls::ControlsArgs),
     /// Read the raw battery report (0x1004, 0x1000, or 0x1F20 fields).
     Battery(battery::BatteryArgs),

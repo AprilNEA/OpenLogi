@@ -99,7 +99,7 @@ async fn arm_spec(
     let channel = scripted_channel(raw).await;
     let device = Device::new(channel.clone(), 0xff).await.unwrap();
     let mut armed = ArmedControls::default();
-    arm_controls_into(&device, &channel, 0xff, spec, &mut armed)
+    arm_controls_into(&device, &channel, 0xff, &TEST_ROUTE, spec, &mut armed)
         .await
         .unwrap();
     (armed, channel, handle)
@@ -255,7 +255,7 @@ async fn arm_kernel_diverted_m650_back() -> (
         ..CaptureSpec::default()
     };
     let mut armed = ArmedControls::default();
-    arm_controls_into(&device, &channel, 0xff, &spec, &mut armed)
+    arm_controls_into(&device, &channel, 0xff, &TEST_ROUTE, &spec, &mut armed)
         .await
         .unwrap();
     let pending = armed

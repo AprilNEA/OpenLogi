@@ -28,6 +28,7 @@ mod arm;
 pub(super) mod main_wheel;
 mod spy;
 
+use std::collections::BTreeSet;
 use std::num::NonZeroU8;
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -205,6 +206,10 @@ pub struct CaptureSpec {
     pub divert_main_wheel: Option<MainWheelDivert>,
     /// G-series host mode or onboard profile.
     pub onboard: Option<OnboardTarget>,
+    /// `0x1b04` controls a sibling session on the same device diverts — the
+    /// keyboard session's bound keys. Arming neither diverts them nor hands
+    /// them back to the firmware, whatever reporting it finds on them.
+    pub sibling_controls: BTreeSet<u16>,
 }
 
 /// Capture the controls selected by `spec` on `route` until `host.shutdown`

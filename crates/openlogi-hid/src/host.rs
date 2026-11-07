@@ -27,8 +27,8 @@ use openlogi_device::inventory::{Enumerator, InventoryError};
 use openlogi_device::pairing::PairingReceiver;
 use openlogi_device::write::{
     self as device, Dpi, DpiInfo, FeatureEntry, FirmwareEntity, HapticWaveform, LightingMethod,
-    LitraModel, PointerScaling, ReprogControlEntry, ScrollResolution, ScrollWheelMode,
-    SidetoneLevel,
+    LitraModel, PointerScaling, ReprogControlEntry, ReprogControlReporting, ScrollResolution,
+    ScrollWheelMode, SidetoneLevel,
 };
 use openlogi_device::{ButtonSpyError, ButtonSpyWatch, LightWatch};
 use openlogi_device::{DeviceIoGate, DeviceIoSignal, DeviceRoute};
@@ -303,6 +303,22 @@ pub async fn dump_reprog_controls(
     route: &DeviceRoute,
 ) -> Result<Vec<ReprogControlEntry>, WriteError> {
     device::dump_reprog_controls(&*native_backend(), route).await
+}
+
+/// Read every reprogrammable control of the device `route` reaches together
+/// with its current reporting state.
+pub async fn dump_reprog_reporting(
+    route: &DeviceRoute,
+) -> Result<Vec<ReprogControlReporting>, WriteError> {
+    device::dump_reprog_reporting(&*native_backend(), route).await
+}
+
+/// Land every reprogrammable control of the device `route` reaches on native
+/// reporting, returning the ones that were not already there as found.
+pub async fn release_reprog_controls(
+    route: &DeviceRoute,
+) -> Result<Vec<ReprogControlReporting>, WriteError> {
+    device::release_reprog_controls(&*native_backend(), route).await
 }
 
 /// Read the raw battery report of the device `route` reaches.

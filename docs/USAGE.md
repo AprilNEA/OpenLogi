@@ -9,7 +9,8 @@ For the desktop app's Add Device flow, see [wireless pairing](PAIRING.md).
 openlogi list                 # paired devices: slot, codename, kind, online, battery
 openlogi assets sync          # pre-fetch device renders from the fastest available mirror
 openlogi diag features        # dump every HID++ feature the active device reports
-openlogi diag controls        # dump reprogrammable controls and capability flags
+openlogi diag controls        # dump reprogrammable controls, their current reporting, and capability flags
+openlogi diag controls --reset # land every control back on native reporting (quit the agent first)
 openlogi diag hidpp --feature 0x1b05 --call 0   # call one HID++ 2.0 feature function with raw parameters
 openlogi diag mouse-buttons   # print the 0x8110 slot each G-series mouse button sends
 openlogi diag zones --device G515   # light each 0x8081 keyboard zone alone and record its key
@@ -33,6 +34,12 @@ Running `openlogi` with no subcommand defaults to `list`. Set
 `openlogi diag zones` lights each HID++ `0x8081` zone of a keyboard alone, in zone-id order, and asks which key lit. Type the key and press Enter; Enter alone records that nothing visible lit, `:b` goes back one zone, and `:q` or the end of input stops; any other answer, a single `q` or `<` included, is a key label. The answers go to `--output FILE` (default `zones.tsv`) as tab-separated zone ids and keys, saved after every answer; a destination that cannot be written stops the walk at the first answer. `--color RRGGBB` sets the lit colour (default white). With an `0x8071` effect engine the walk takes software control of the lighting and hands it back at the end, so the keyboard returns to its own effect. Ctrl-C skips the hand-back; switch the keyboard off and on, or reconnect it, to return it to its own effect, or stop with `:q` instead. The command refuses to run while the OpenLogi agent runs.
 
 `openlogi diag host-switch` asks the running agent to move one device to another Easy-Switch channel through HID++ `0x1814`. `--host` is zero-based, so `--host 1` is channel 2. `--device NAME` must match exactly one online device; a unique exact name wins over longer matches. The agent refuses a channel the device does not have and a channel the device reports as unpaired, before anything is written. Success means the agent sent the switch. It does not confirm that the device arrived, because the device then leaves this computer's radio link.
+
+A pointer or button that stays dead after OpenLogi was killed or uninstalled
+(the device keeps its HID++ diversion bits in RAM, across hosts) is recovered
+by `openlogi diag controls --reset` with the agent stopped: it prints which
+controls were still diverted, releases them, and reads the table back. A
+running agent heals the same state itself when it next arms the device.
 
 ## Keyboard backlight
 

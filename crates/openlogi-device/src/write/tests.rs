@@ -8,10 +8,15 @@ use hidpp::feature::smartshift::WheelMode;
 use hidpp::protocol::v20::ErrorType;
 
 use crate::SharedChannel;
-use crate::channel::scripted::{ScriptedRawHidChannel, feature_error, scripted_channel};
+use crate::channel::scripted::{
+    ScriptedControl, ScriptedRawHidChannel, feature_error, is_reporting_read_for, reporting_writes,
+    scripted_channel, scripted_mouse,
+};
+use crate::reprog_controls::CidFlags;
 use crate::write::diagnostics::{
     RAW_FEATURE_PARAMS, RawFeatureCall, RawFeatureReply, dump_features_on_channel,
-    dump_firmware_entities_on_channel, raw_feature_calls_on_channel, read_battery_raw_on_channel,
+    dump_firmware_entities_on_channel, dump_reprog_reporting_on_channel,
+    raw_feature_calls_on_channel, read_battery_raw_on_channel, release_reprog_controls_on_channel,
 };
 use crate::write::dpi::expand_dpi_ranges;
 use crate::write::lighting::{collect_present_zones, per_key_commit, per_key_frames};
@@ -2211,5 +2216,192 @@ async fn raw_feature_calls_reach_the_root_at_index_zero() {
             .iter()
             .any(|report| report[2] == 0 && report[3] >> 4 == 0),
         "the root is not looked up"
+    );
+}
+
+const DIVERTABLE: u16 = CidFlags::DIVERTABLE.bits();
+const RAW_XY: u16 = CidFlags::RAW_XY.bits();
+const FORCE_RAW_XY: u16 = CidFlags::FORCE_RAW_XY.bits();
+
+/// Back, left diverted with raw-XY by a process that never tore down
+/// (`getCidReporting` byte: divert bit 0, rawXY bit 4).
+const STALE_BACK: ScriptedControl = ScriptedControl {
+    cid: 0x0053,
+    task_id: 0x0001,
+    flags: DIVERTABLE,
+    reporting: 0x11,
+};
+/// The virtual gesture control with force raw-XY (bit 6) set on top — the
+/// state that takes the pointer with it.
+const STALE_VIRTUAL: ScriptedControl = ScriptedControl {
+    cid: 0x00d7,
+    task_id: 0x00b2,
+    flags: DIVERTABLE | RAW_XY | FORCE_RAW_XY,
+    reporting: 0x51,
+};
+/// Middle, native.
+const NATIVE_MIDDLE: ScriptedControl = ScriptedControl {
+    cid: 0x0052,
+    task_id: 0x0002,
+    flags: DIVERTABLE,
+    reporting: 0x00,
+};
+/// A persistently diverted control (bit 2) — not capture's bit to clear.
+const PERSISTENT_ONLY: ScriptedControl = ScriptedControl {
+    cid: 0x00c4,
+    task_id: 0x00a3,
+    flags: DIVERTABLE,
+    reporting: 0x04,
+};
+
+async fn scripted_mouse_channel(
+    controls: Vec<ScriptedControl>,
+    reject: Option<u16>,
+) -> (Arc<HidppChannel>, crate::replay::ReplayChannelHandle) {
+    let (raw, handle) =
+        ScriptedRawHidChannel::with_dynamic_responder(scripted_mouse(controls, reject));
+    (scripted_channel(raw).await, handle)
+}
+
+/// The reporting dump reads back every control's volatile reporting alongside its
+/// identity, so a diversion a dead process left in device RAM is visible in
+/// `openlogi diag controls` rather than inferred from a dead pointer.
+#[tokio::test]
+async fn the_control_dump_reports_each_controls_current_reporting() {
+    let (channel, handle) =
+        scripted_mouse_channel(vec![STALE_BACK, STALE_VIRTUAL, NATIVE_MIDDLE], None).await;
+
+    let entries = dump_reprog_reporting_on_channel(&channel, 1)
+        .await
+        .expect("a scripted mouse dumps");
+
+    assert_eq!(entries.len(), 3);
+    assert_eq!(
+        (
+            entries[0].control.cid,
+            entries[0].control.task_id,
+            entries[0].control.flags.bits()
+        ),
+        (STALE_BACK.cid, STALE_BACK.task_id, STALE_BACK.flags)
+    );
+    let back = entries[0].reporting.expect("Back's reporting reads back");
+    assert!(back.diverted && back.raw_xy && !back.force_raw_xy);
+    let virtual_gesture = entries[1]
+        .reporting
+        .expect("the virtual control reads back");
+    assert!(virtual_gesture.diverted && virtual_gesture.force_raw_xy);
+    let middle = entries[2].reporting.expect("Middle reads back");
+    assert!(!middle.diverted && !middle.raw_xy && !middle.force_raw_xy);
+    assert!(
+        reporting_writes(&handle).is_empty(),
+        "a dump is a read, never a write"
+    );
+}
+
+/// A `getCidReporting` the firmware refuses is that control's `None`, not a
+/// failed dump: the identity row is still evidence.
+#[tokio::test]
+async fn a_control_whose_reporting_the_device_refuses_is_reported_as_unreadable() {
+    let mouse = scripted_mouse(vec![STALE_BACK, NATIVE_MIDDLE], None);
+    let (raw, _handle) = ScriptedRawHidChannel::with_dynamic_responder(move |request| {
+        if is_reporting_read_for(request, NATIVE_MIDDLE.cid) {
+            return Some(feature_error(request, 0x02));
+        }
+        mouse(request)
+    });
+    let channel = scripted_channel(raw).await;
+
+    let entries = dump_reprog_reporting_on_channel(&channel, 1)
+        .await
+        .expect("one refused readback does not fail the table");
+
+    assert_eq!(entries.len(), 2);
+    assert!(entries[0].reporting.is_some());
+    assert_eq!(entries[1].control.cid, NATIVE_MIDDLE.cid);
+    assert_eq!(entries[1].reporting, None);
+}
+
+/// Release lands every diverted control on native with exactly the sessions'
+/// reconcile write — divert and raw-XY cleared through their valid bits, force
+/// raw-XY cleared only where the control advertises it — leaves native and
+/// persistently-diverted controls alone, and returns the released controls in
+/// the state they were found.
+#[tokio::test]
+async fn release_lands_diverted_controls_on_native_and_leaves_the_rest_alone() {
+    let (channel, handle) = scripted_mouse_channel(
+        vec![STALE_BACK, NATIVE_MIDDLE, STALE_VIRTUAL, PERSISTENT_ONLY],
+        None,
+    )
+    .await;
+
+    let released = release_reprog_controls_on_channel(&channel, 1)
+        .await
+        .expect("a scripted mouse releases");
+
+    assert_eq!(
+        released
+            .iter()
+            .map(|found| found.control.cid)
+            .collect::<Vec<_>>(),
+        vec![STALE_BACK.cid, STALE_VIRTUAL.cid],
+        "only the controls that needed a write are reported"
+    );
+    let found = released[0]
+        .reporting
+        .expect("released controls were readable");
+    assert!(
+        found.diverted && found.raw_xy,
+        "the entry carries the pre-release state, not the post-write one"
+    );
+    assert_eq!(
+        reporting_writes(&handle),
+        vec![
+            // divert=0 dvalid, rawXY=0 rvalid
+            (STALE_BACK.cid, 0x22),
+            // … plus forceRawXY=0 fvalid, since this control advertises it
+            (STALE_VIRTUAL.cid, 0xa2),
+        ]
+    );
+}
+
+/// A control the device will not describe is skipped, not written blind: the
+/// caller asked to fix what is wrong, and an unreadable control is unknown,
+/// not known-bad.
+#[tokio::test]
+async fn release_skips_a_control_whose_reporting_cannot_be_read() {
+    let mouse = scripted_mouse(vec![STALE_BACK, STALE_VIRTUAL], None);
+    let (raw, handle) = ScriptedRawHidChannel::with_dynamic_responder(move |request| {
+        if is_reporting_read_for(request, STALE_VIRTUAL.cid) {
+            return Some(feature_error(request, 0x02));
+        }
+        mouse(request)
+    });
+    let channel = scripted_channel(raw).await;
+
+    let released = release_reprog_controls_on_channel(&channel, 1)
+        .await
+        .expect("the readable control still releases");
+
+    assert_eq!(released.len(), 1);
+    assert_eq!(released[0].control.cid, STALE_BACK.cid);
+    assert_eq!(reporting_writes(&handle), vec![(STALE_BACK.cid, 0x22)]);
+}
+
+/// A refused native write is an error, not a shrug: the caller asked for the
+/// device to be fixed, and a stuck control that stays stuck must be said so.
+#[tokio::test]
+async fn a_refused_release_write_is_an_error() {
+    let (channel, handle) =
+        scripted_mouse_channel(vec![STALE_BACK, STALE_VIRTUAL], Some(STALE_BACK.cid)).await;
+
+    let error = release_reprog_controls_on_channel(&channel, 1)
+        .await
+        .expect_err("a control the device will not release is a failure");
+
+    assert!(matches!(error, WriteError::Hidpp(_)), "got {error:?}");
+    assert_eq!(
+        reporting_writes(&handle),
+        vec![(STALE_BACK.cid, 0x22)],
+        "release stops at the refused control"
     );
 }

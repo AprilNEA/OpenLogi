@@ -50,7 +50,7 @@ async fn alternate_gesture_control_arming_respects_mode_and_capabilities() {
                     }
                 };
                 let mut armed = ArmedControls::default();
-                arm_controls_into(&device, &channel, 0xff, &spec, &mut armed)
+                arm_controls_into(&device, &channel, 0xff, &TEST_ROUTE, &spec, &mut armed)
                     .await
                     .unwrap();
                 // Gesture mode diverts with raw XY where the control offers
@@ -133,7 +133,7 @@ async fn dpi_gesture_arming_never_overwrites_raw_xy_with_plain_diversion() {
                 ..CaptureSpec::default()
             };
             let mut armed = ArmedControls::default();
-            arm_controls_into(&device, &channel, 0xff, &spec, &mut armed)
+            arm_controls_into(&device, &channel, 0xff, &TEST_ROUTE, &spec, &mut armed)
                 .await
                 .unwrap();
             let writes: Vec<_> = handle
@@ -209,7 +209,7 @@ async fn m720_gesture_button_arms_from_its_reported_control_table() {
             }
         };
         let mut armed = ArmedControls::default();
-        arm_controls_into(&device, &channel, 0xff, &spec, &mut armed)
+        arm_controls_into(&device, &channel, 0xff, &TEST_ROUTE, &spec, &mut armed)
             .await
             .unwrap();
         let writes: Vec<_> = handle
@@ -275,7 +275,7 @@ async fn a_gesture_source_without_raw_xy_still_delivers_its_click() {
         ..CaptureSpec::default()
     };
     let mut armed = ArmedControls::default();
-    arm_controls_into(&device, &channel, 0xff, &spec, &mut armed)
+    arm_controls_into(&device, &channel, 0xff, &TEST_ROUTE, &spec, &mut armed)
         .await
         .unwrap();
     let writes: Vec<_> = handle
@@ -360,7 +360,7 @@ async fn diverted_buttons_are_what_arming_wrote_not_what_was_requested() {
         ..CaptureSpec::default()
     };
     let mut armed = ArmedControls::default();
-    arm_controls_into(&device, &channel, 0xff, &spec, &mut armed)
+    arm_controls_into(&device, &channel, 0xff, &TEST_ROUTE, &spec, &mut armed)
         .await
         .unwrap();
     assert_eq!(
@@ -1037,9 +1037,16 @@ async fn arm_then_restore_thumbwheel(status: [u8; 2]) -> Vec<[u8; 2]> {
     let shared = SharedChannel::new(channel.clone(), route);
     let device = Device::new(channel.clone(), 0xff).await.unwrap();
     let mut armed = ArmedControls::default();
-    arm_controls_into(&device, &channel, 0xff, &thumbwheel_spec(), &mut armed)
-        .await
-        .unwrap();
+    arm_controls_into(
+        &device,
+        &channel,
+        0xff,
+        &TEST_ROUTE,
+        &thumbwheel_spec(),
+        &mut armed,
+    )
+    .await
+    .unwrap();
     let pending = armed
         .into_pending(&shared)
         .expect("a diverted thumb wheel must be owed a restore");
@@ -1088,9 +1095,16 @@ async fn a_thumbwheel_refusing_its_info_read_is_left_native() {
     let channel = scripted_channel(raw).await;
     let device = Device::new(channel.clone(), 0xff).await.unwrap();
     let mut armed = ArmedControls::default();
-    arm_controls_into(&device, &channel, 0xff, &thumbwheel_spec(), &mut armed)
-        .await
-        .unwrap();
+    arm_controls_into(
+        &device,
+        &channel,
+        0xff,
+        &TEST_ROUTE,
+        &thumbwheel_spec(),
+        &mut armed,
+    )
+    .await
+    .unwrap();
     assert!(armed.thumb.is_none(), "the wheel must not be owned");
     assert_eq!(reporting_writes(&handle), Vec::<[u8; 2]>::new());
 }
@@ -1111,9 +1125,16 @@ async fn a_transport_failure_reading_thumbwheel_info_fails_arming_before_any_div
     let channel = scripted_channel(raw).await;
     let device = Device::new(channel.clone(), 0xff).await.unwrap();
     let mut armed = ArmedControls::default();
-    arm_controls_into(&device, &channel, 0xff, &thumbwheel_spec(), &mut armed)
-        .await
-        .unwrap_err();
+    arm_controls_into(
+        &device,
+        &channel,
+        0xff,
+        &TEST_ROUTE,
+        &thumbwheel_spec(),
+        &mut armed,
+    )
+    .await
+    .unwrap_err();
     assert!(armed.thumb.is_none(), "the wheel must not be owned");
     assert_eq!(reporting_writes(&handle), Vec::<[u8; 2]>::new());
 }
@@ -1163,7 +1184,7 @@ async fn host_rearm_reports_a_spy_that_did_not_start() {
         ..CaptureSpec::default()
     };
     let mut armed = ArmedControls::default();
-    arm_controls_into(&device, &channel, 0xff, &spec, &mut armed)
+    arm_controls_into(&device, &channel, 0xff, &TEST_ROUTE, &spec, &mut armed)
         .await
         .unwrap();
 
@@ -1371,7 +1392,7 @@ fn profile_spec() -> CaptureSpec {
 async fn arm(channel: &Arc<HidppChannel>, spec: &CaptureSpec) -> ArmedControls {
     let device = Device::new(channel.clone(), 0xff).await.unwrap();
     let mut armed = ArmedControls::default();
-    arm_controls_into(&device, channel, 0xff, spec, &mut armed)
+    arm_controls_into(&device, channel, 0xff, &TEST_ROUTE, spec, &mut armed)
         .await
         .unwrap();
     armed
@@ -1584,9 +1605,16 @@ async fn a_failed_host_mapping_write_keeps_the_baseline_for_rollback() {
     let (channel, _) = scripted_mouse(MODE_ONBOARD, &SPARSE, Fault::SetMapping).await;
     let device = Device::new(channel.clone(), 0xff).await.unwrap();
     let mut armed = ArmedControls::default();
-    arm_controls_into(&device, &channel, 0xff, &three_slot_host_spec(), &mut armed)
-        .await
-        .unwrap_err();
+    arm_controls_into(
+        &device,
+        &channel,
+        0xff,
+        &TEST_ROUTE,
+        &three_slot_host_spec(),
+        &mut armed,
+    )
+    .await
+    .unwrap_err();
     let restore = armed.onboard.as_ref().unwrap().restore().unwrap();
 
     let (reachable, mouse) = scripted_mouse(MODE_HOST, &[0; 5], Fault::None).await;

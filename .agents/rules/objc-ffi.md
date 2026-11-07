@@ -28,7 +28,7 @@ files; **keep this table in sync when you add or move one**:
 |---|---|
 | `openlogi-agent/src/activity_macos.rs` | the device-I/O gate's levels: the `IOPMConnection` powerd subscription (hand-declared SPI, see below) and the `CGSessionCopyCurrentDictionary` console read |
 | `openlogi-agent/src/status_item.rs` | safe `objc2` wrappers over `NSStatusItem` / `NSMenu` / `NSMenuItem` |
-| `openlogi-agent/src/tray.rs` | the menu-bar semantics, `MenuTarget` + `SessionTarget` (`define_class!`), the Accessory `NSApplication` loop, the `NSWorkspace` session (fast-user-switch) notifications |
+| `openlogi-agent/src/tray.rs` | the menu-bar semantics, `MenuTarget` + `SessionTarget` + the `NSApplicationDelegate` `AppDelegate` (`define_class!`), the Accessory `NSApplication` loop, the `NSWorkspace` session (fast-user-switch) notifications, `terminate:` routed to the graceful exit |
 | `openlogi-agent-core/src/watchers/camera.rs` | the CoreMediaIO "camera is running" property read |
 | `openlogi-camera/src/capture_macos.rs` | `AVCaptureSession` capture + the `define_class!` frame delegate, and the Camera TCC prompt |
 | `openlogi-camera/src/macos.rs` | `AVCaptureDevice` enumeration (`class!` + `msg_send!`) |
@@ -119,11 +119,18 @@ every 2 s tray refresh under the old `cocoa`/`objc` 0.x path).
   there. Do **not** copy gpui's own `NSThread.isMainThread` + `dispatch2`
   runtime-check idiom; we use the compile-time `MainThreadMarker` guarantee.
 - The tray needs no `static` and no `thread_local`: `run_app_loop` is `-> !`, so
-  the status item, its `MenuTarget`, the `SessionTarget` and the powerd
-  `PowerConnection` are bound as locals that outlive `NSApplication::run()`.
-  They must stay bound — menu items reference their target *weakly*, the
-  notification center does the same, and the power callback's `param` points
-  into the connection's own `Arc`.
+  the status item, its `MenuTarget`, the `SessionTarget`, the `AppDelegate` and
+  the powerd `PowerConnection` are bound as locals that outlive
+  `NSApplication::run()`. They must stay bound — menu items reference their
+  target *weakly*, the notification center does the same,
+  `NSApplication.delegate` is a weak property, and the power callback's
+  `param` points into the connection's own `Arc`.
+- The agent's `NSApplication` always has a delegate, and its
+  `applicationShouldTerminate:` never returns: it blocks the main thread in the
+  same lifecycle handoff the menu's Quit uses until the core has restored
+  firmware capture and exited. Without it AppKit answers `terminate:` — an
+  Apple-Event quit, logout, shutdown — with a bare `exit()` that leaves every
+  diverted control leaked in device RAM (#917).
 - `openlogi-camera`'s frame delegate is deliberately the opposite: an
   `NSObject` subclass with no `thread_kind`, because AVFoundation drives it on
   a background dispatch queue. Its one ivar is the owning session's

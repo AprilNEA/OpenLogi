@@ -167,7 +167,7 @@ async fn armed_thumbwheel_capture() -> GestureCapture {
         ..CaptureSpec::default()
     };
     let mut armed = ArmedControls::default();
-    arm_controls_into(&device, &channel, 0xff, &spec, &mut armed)
+    arm_controls_into(&device, &channel, 0xff, &TEST_ROUTE, &spec, &mut armed)
         .await
         .unwrap();
     GestureCapture::new(armed)

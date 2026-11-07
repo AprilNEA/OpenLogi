@@ -132,6 +132,14 @@ impl CtrlIdInfo {
         self.typed_flags().supports_raw_xy()
     }
 
+    /// Whether the control can report raw XY movement whenever it is
+    /// diverted, not only while held — the bit that, left set, takes the
+    /// pointer with it.
+    #[must_use]
+    pub fn supports_force_raw_xy(self) -> bool {
+        self.typed_flags().supports_force_raw_xy()
+    }
+
     /// Whether the control can report the main wheel's movement while held,
     /// in place of scrolling — required for a wheel-hold button.
     #[must_use]

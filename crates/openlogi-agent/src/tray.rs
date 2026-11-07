@@ -14,6 +14,13 @@
 //! forwards the `NSWorkspace` session edges (fast user switching) to it and
 //! sequences the launch hold around `finishLaunching`.
 //!
+//! Every termination AppKit brokers — an Apple-Event quit from `osascript`,
+//! Activity Monitor, or Homebrew's cask `quit:`, plus logout and system
+//! shutdown — arrives at [`AppDelegate`], which hands it to the same lifecycle
+//! exit as the menu's Quit so firmware capture is restored before the process
+//! is gone. Without a delegate, `NSApplication` answers `terminate:` with a
+//! bare `exit()` that skips restore entirely.
+//!
 //! macOS-only. AppKit objects are `Retained<T>` (no #99-style leaks); the run
 //! loop owns the main thread for the agent's lifetime.
 
@@ -27,13 +34,14 @@ use std::sync::Arc;
 
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
-use objc2::runtime::{AnyObject, NSObject};
+use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject};
 use objc2::{
     AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel,
 };
 use objc2_app_kit::NSStatusItem;
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSImage, NSRunningApplication, NSWorkspace,
+    NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate,
+    NSApplicationTerminateReply, NSImage, NSRunningApplication, NSWorkspace,
     NSWorkspaceSessionDidBecomeActiveNotification, NSWorkspaceSessionDidResignActiveNotification,
 };
 use objc2_foundation::{NSNotification, NSString};
@@ -212,6 +220,40 @@ impl MenuTarget {
     }
 }
 
+define_class!(
+    // SAFETY: NSObject has no subclassing requirements, and `AppDelegate` does
+    // not implement `Drop`.
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "OpenLogiAgentAppDelegate"]
+    struct AppDelegate;
+
+    unsafe impl NSObjectProtocol for AppDelegate {}
+
+    unsafe impl NSApplicationDelegate for AppDelegate {
+        /// `terminate:` asks here before AppKit ends the process. The answer is
+        /// the graceful exit itself: it blocks this main thread until the core
+        /// has restored firmware capture and called `process::exit`, so no
+        /// reply is ever returned.
+        #[unsafe(method(applicationShouldTerminate:))]
+        fn application_should_terminate(
+            &self,
+            _sender: &NSApplication,
+        ) -> NSApplicationTerminateReply {
+            exit_gracefully("application terminate")
+        }
+    }
+);
+
+impl AppDelegate {
+    fn new(mtm: MainThreadMarker) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(());
+        // SAFETY: `init` initializes our freshly-allocated NSObject subclass and
+        // returns it (the two-phase construction objc2's `define_class!` uses).
+        unsafe { msg_send![super(this), init] }
+    }
+}
+
 fn open_url(url: &str) {
     match opener::open(url) {
         Ok(()) => info!(url, "menu-bar — opening URL"),
@@ -225,8 +267,8 @@ fn open_command(command: DeeplinkCommand) {
     open_url(&command.to_url());
 }
 
-/// Menu-bar Quit: take a running GUI with us, then hand process termination to
-/// the lifecycle that owns firmware capture and the input hook.
+/// Menu-bar Quit: the user asked for *OpenLogi* to stop, so take a running GUI
+/// with us before leaving through [`exit_gracefully`].
 ///
 /// Kept out of `define_class!` so the lint set actually sees the exit — clippy
 /// does not look inside macro expansions.
@@ -242,8 +284,21 @@ fn quit_agent() -> ! {
             .arg(DeeplinkCommand::Quit.to_url())
             .output();
     }
+    exit_gracefully("menu-bar Quit")
+}
+
+/// Hand process termination to the lifecycle that owns firmware capture and
+/// the input hook, after asking the overlay to leave. Blocks the calling
+/// (main) thread until the core has ended the process.
+///
+/// The one exit for every deliberate termination of *this process* — the
+/// menu's Quit and AppKit's `terminate:` alike. Unlike [`quit_agent`] it does
+/// not fan out to the GUI: a quit addressed to the agent (Activity Monitor, a
+/// cask uninstall, logout) is not a request to stop anything else, and at
+/// logout the GUI receives its own.
+fn exit_gracefully(trigger: &str) -> ! {
     crate::overlay::evict_on_quit();
-    info!("menu-bar Quit — requesting graceful agent shutdown");
+    info!(trigger, "requesting graceful agent shutdown");
     let requests = SHUTDOWN_TX.with_borrow(Clone::clone);
     shutdown::request_tray_quit(requests.as_ref(), 0)
 }
@@ -286,6 +341,9 @@ pub fn run_app_loop(
     };
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+    // The delegate is a weak property; bind it so it outlives `run()`.
+    let delegate = AppDelegate::new(mtm);
+    app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
 
     let gate = ActivityGate::new(device_io_signal);
     let _session = install_session_observer(Arc::clone(&gate));
