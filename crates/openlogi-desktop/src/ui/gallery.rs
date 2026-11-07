@@ -300,11 +300,6 @@ impl ComponentGallery {
     }
 
     fn toggle_panel(&self, pal: Palette, cx: &mut Context<Self>) -> gpui::Div {
-        let label = if self.toggle_selected {
-            "Enabled"
-        } else {
-            "Disabled"
-        };
         gallery_panel(
             "Toggle",
             IconName::Settings,
@@ -313,7 +308,7 @@ impl ComponentGallery {
                 .child(
                     Toggle::new("gallery-toggle")
                         .selected(self.toggle_selected)
-                        .label(Some(SharedString::from(label)))
+                        .accessibility_label("Toggle")
                         .on_change(cx.listener(|this, selected: &bool, _, cx| {
                             this.toggle_selected = *selected;
                             cx.notify();
@@ -322,6 +317,7 @@ impl ComponentGallery {
                 .child(
                     Toggle::new("gallery-toggle-disabled")
                         .selected(true)
+                        .accessibility_label("Disabled toggle")
                         .label(Some(SharedString::from("Unavailable")))
                         .disabled(true),
                 )
