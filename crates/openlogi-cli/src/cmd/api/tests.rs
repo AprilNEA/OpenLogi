@@ -215,6 +215,50 @@ async fn status_has_a_separate_explicit_json_contract() {
 }
 
 #[tokio::test]
+async fn a_direct_route_listed_twice_is_ambiguous_even_for_a_model_only_device() {
+    // Two G402s report only their model and share one route: the selection
+    // cannot tell them apart, so no write is attempted.
+    let g402 = DeviceInventory {
+        receiver: ReceiverInfo {
+            name: "G402".into(),
+            vendor_id: 0x046d,
+            product_id: 0xc07e,
+            unique_id: None,
+        },
+        paired: vec![PairedDevice {
+            slot: openlogi_core::hid::DIRECT_DEVICE_INDEX,
+            codename: Some("G402".into()),
+            wpid: None,
+            kind: DeviceKind::Mouse,
+            online: true,
+            battery: None,
+            model_info: None,
+            capabilities: None,
+            settings_revision: 0,
+            hidpp10: false,
+        }],
+    };
+    let route = DeviceRoute::Direct {
+        vendor_id: 0x046d,
+        product_id: 0xc07e,
+    };
+    let mut seen_twice = snapshot();
+    seen_twice.inventory = vec![g402.clone(), g402];
+
+    let result = run_script(
+        seen_twice,
+        ApiCommand::Dpi {
+            device: route.to_string(),
+            set: Some(1200),
+        },
+        vec![],
+    )
+    .await;
+    assert_eq!(result["ok"], false);
+    assert_eq!(result["error"]["code"], "ambiguous_device");
+}
+
+#[tokio::test]
 async fn selection_failures_never_issue_a_device_rpc() {
     let mut duplicate = snapshot();
     duplicate.inventory.push(duplicate.inventory[0].clone());
