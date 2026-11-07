@@ -995,7 +995,9 @@ fn english_values_fit_on_one_line_beside_a_model_that_fits_the_room() {
 }
 
 /// The Performance MX's fallback model adds a Zoom card (#1688), and its six
-/// cards still fit beside the model at the default window.
+/// cards still fit beside the model at the default window. Its side-button
+/// cards read Forward, Back, Zoom from the top, as the buttons sit on the
+/// mouse.
 #[test]
 fn a_zoom_card_fits_beside_the_fallback_model() {
     let layout = model_layout(
@@ -1013,6 +1015,23 @@ fn a_zoom_card_fits_beside_the_fallback_model() {
             .labels
             .iter()
             .any(|label| label.id == ButtonId::Zoom.into())
+    );
+    let side_buttons =
+        [ButtonId::Forward, ButtonId::Back, ButtonId::Zoom].map(MouseControlId::from);
+    let mut side_cards: Vec<_> = layout
+        .labels
+        .iter()
+        .filter(|label| side_buttons.contains(&label.id))
+        .collect();
+    side_cards.sort_by(|a, b| a.y.total_cmp(&b.y));
+    assert!(
+        side_cards
+            .iter()
+            .all(|label| label.side == side_cards[0].side)
+    );
+    assert_eq!(
+        side_cards.iter().map(|label| label.id).collect::<Vec<_>>(),
+        side_buttons
     );
     assert_cards_on_the_canvas(&layout);
 }

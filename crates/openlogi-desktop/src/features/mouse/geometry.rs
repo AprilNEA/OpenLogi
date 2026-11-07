@@ -624,8 +624,9 @@ mod tests {
 
     /// The Performance MX's hook reads its zoom button and its thumb rest,
     /// as the gesture button (#1688). The silhouette already draws the
-    /// gesture button, so only Zoom gets a placed hotspot: between Forward
-    /// and the gesture button, as on the mouse, and clear of every other one.
+    /// gesture button, so only Zoom gets a placed hotspot: below Forward and
+    /// Back and above the gesture button, as on the mouse, and clear of every
+    /// other one.
     #[test]
     fn hook_buttons_the_silhouette_lacks_get_placed_hotspots() {
         let hotspots = fallback_hotspots(None, false, &[ButtonId::GestureButton, ButtonId::Zoom]);
@@ -643,7 +644,8 @@ mod tests {
                 .center()
                 .1
         };
-        assert!(center_y(ButtonId::Forward) < center_y(ButtonId::Zoom));
+        assert!(center_y(ButtonId::Forward) < center_y(ButtonId::Back));
+        assert!(center_y(ButtonId::Back) < center_y(ButtonId::Zoom));
         assert!(center_y(ButtonId::Zoom) < center_y(ButtonId::GestureButton));
 
         let overlap = |a: &Hotspot, b: &Hotspot| {
