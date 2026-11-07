@@ -690,10 +690,13 @@ fn agent_snapshot() {
         lights: Vec::new(),
         // Pinned populated in `flow_status` below.
         flow: FlowStatus::default(),
+        // A digest: 32 bytes as they are, with no length in front.
+        config_revision: ConfigRevision::of(""),
     };
     assert_wire(
         &snapshot,
-        "010001010705302e362e360100000000000000000000000000",
+        "010001010705302e362e360100000000000000000000000000\
+         e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     );
 
     // The observation is the snapshot with its generation in front.
@@ -703,7 +706,8 @@ fn agent_snapshot() {
     };
     assert_wire(
         &observed,
-        "03010001010705302e362e360100000000000000000000000000",
+        "03010001010705302e362e360100000000000000000000000000\
+         e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     );
 }
 

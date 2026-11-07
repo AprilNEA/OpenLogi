@@ -21,6 +21,7 @@
 
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::brand::is_openlogi_foreground_id;
+use openlogi_core::config::ConfigRevision;
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_hook::Hook;
 use openlogi_ipc::{
@@ -80,6 +81,7 @@ impl ObservableState {
                 foreground: ForegroundApps::default(),
                 lights: Vec::new(),
                 flow: FlowStatus::default(),
+                config_revision: ConfigRevision::default(),
             },
         });
         Self {
@@ -223,6 +225,18 @@ impl ObservableState {
                 return false;
             }
             snapshot.flow.pairing = pairing;
+            true
+        });
+    }
+
+    /// Publish the revision of the `config.toml` the agent just loaded. A
+    /// reload of the same file notifies nobody.
+    pub fn set_config_revision(&self, revision: ConfigRevision) {
+        self.update(|snapshot| {
+            if snapshot.config_revision == revision {
+                return false;
+            }
+            snapshot.config_revision = revision;
             true
         });
     }

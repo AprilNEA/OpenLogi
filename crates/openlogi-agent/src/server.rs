@@ -129,6 +129,7 @@ impl AgentServer {
                         .await
                         .reload_saved_config(config, revision, saved),
                 }
+                self.observable.set_config_revision(revision);
                 self.dispatcher.cancel_all_buttons();
                 // The GUI's launch-at-login toggle reaches us through this
                 // reload, so re-reconcile the autostart from the new config.
