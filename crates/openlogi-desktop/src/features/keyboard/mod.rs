@@ -16,3 +16,4 @@ pub mod disable_keys;
 pub mod editors;
 pub mod function_row;
 pub(crate) mod host_switch;
+pub mod key_remap;
