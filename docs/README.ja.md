@@ -243,20 +243,18 @@ yay -S openlogi
 
 ## 謝辞
 
-### クレジット
-
-- [Solaar](https://github.com/pwr-Solaar/Solaar) by [@pwr](https://github.com/pwr) —— オープンソースの HID++ 実装およびプロトコルリファレンス
-- [Mouser](https://github.com/TomBadash/Mouser) by [@TomBadash](https://github.com/TomBadash) —— ローカル完結・アカウント不要の Options+ 代替
-
-### デザイン
-
-- [@kubai087](https://github.com/kubai087) —— OpenLogi のロゴおよびアプリアイコン
-
 ### コントリビューター
 
 <a href="https://github.com/AprilNEA/OpenLogi/graphs/contributors">
     <img src="https://contrib.rocks/image?repo=AprilNEA/OpenLogi" alt="コントリビューター">
 </a>
+
+- [@kubai087](https://github.com/kubai087) —— OpenLogi のロゴおよびアプリアイコンのデザイン
+
+### クレジット
+
+- [Solaar](https://github.com/pwr-Solaar/Solaar) by [@pwr](https://github.com/pwr) —— オープンソースの HID++ 実装およびプロトコルリファレンス
+- [Mouser](https://github.com/TomBadash/Mouser) by [@TomBadash](https://github.com/TomBadash) —— ローカル完結・アカウント不要の Options+ 代替
 
 ### インフラストラクチャ
 

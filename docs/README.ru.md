@@ -242,20 +242,18 @@ yay -S openlogi
 
 ## Благодарности
 
-### Проекты и источники
-
-- [Solaar](https://github.com/pwr-Solaar/Solaar) от [@pwr](https://github.com/pwr) — открытая реализация HID++ и справочник по протоколу
-- [Mouser](https://github.com/TomBadash/Mouser) от [@TomBadash](https://github.com/TomBadash) — локальная замена Options+ без аккаунта
-
-### Дизайн
-
-- [@kubai087](https://github.com/kubai087) — логотип и иконка приложения OpenLogi
-
 ### Участники
 
 <a href="https://github.com/AprilNEA/OpenLogi/graphs/contributors">
     <img src="https://contrib.rocks/image?repo=AprilNEA/OpenLogi" alt="Участники">
 </a>
+
+- [@kubai087](https://github.com/kubai087) — дизайн логотипа и иконки приложения OpenLogi
+
+### Проекты и источники
+
+- [Solaar](https://github.com/pwr-Solaar/Solaar) от [@pwr](https://github.com/pwr) — открытая реализация HID++ и справочник по протоколу
+- [Mouser](https://github.com/TomBadash/Mouser) от [@TomBadash](https://github.com/TomBadash) — локальная замена Options+ без аккаунта
 
 ### Инфраструктура
 

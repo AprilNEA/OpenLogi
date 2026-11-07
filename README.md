@@ -245,20 +245,18 @@ See [DEVELOPMENT.md](docs/DEVELOPMENT.md), including [macOS input-hook safety](d
 
 ## Acknowledgments
 
-### Credits
-
-- [Solaar](https://github.com/pwr-Solaar/Solaar) by [@pwr](https://github.com/pwr) — open-source HID++ implementation and protocol reference
-- [Mouser](https://github.com/TomBadash/Mouser) by [@TomBadash](https://github.com/TomBadash) — local, account-free Options+ replacement
-
-### Design
-
-- [@kubai087](https://github.com/kubai087) — OpenLogi logo and app icon
-
 ### Contributors
 
 <a href="https://github.com/AprilNEA/OpenLogi/graphs/contributors">
     <img src="https://contrib.rocks/image?repo=AprilNEA/OpenLogi" alt="Contributors">
 </a>
+
+- [@kubai087](https://github.com/kubai087) — OpenLogi logo and app icon design
+
+### Credits
+
+- [Solaar](https://github.com/pwr-Solaar/Solaar) by [@pwr](https://github.com/pwr) — open-source HID++ implementation and protocol reference
+- [Mouser](https://github.com/TomBadash/Mouser) by [@TomBadash](https://github.com/TomBadash) — local, account-free Options+ replacement
 
 ### Infrastructure
 

@@ -242,20 +242,18 @@ Consulta [DEVELOPMENT.md](DEVELOPMENT.md), incluida la [seguridad del hook de en
 
 ## Agradecimientos
 
-### Créditos
-
-- [Solaar](https://github.com/pwr-Solaar/Solaar) de [@pwr](https://github.com/pwr) — implementación de HID++ de código abierto y referencia del protocolo
-- [Mouser](https://github.com/TomBadash/Mouser) de [@TomBadash](https://github.com/TomBadash) — sustituto de Options+ local y sin cuentas
-
-### Diseño
-
-- [@kubai087](https://github.com/kubai087) — logo e icono de la aplicación de OpenLogi
-
 ### Colaboradores
 
 <a href="https://github.com/AprilNEA/OpenLogi/graphs/contributors">
     <img src="https://contrib.rocks/image?repo=AprilNEA/OpenLogi" alt="Colaboradores">
 </a>
+
+- [@kubai087](https://github.com/kubai087) — diseño del logo y del icono de la aplicación de OpenLogi
+
+### Créditos
+
+- [Solaar](https://github.com/pwr-Solaar/Solaar) de [@pwr](https://github.com/pwr) — implementación de HID++ de código abierto y referencia del protocolo
+- [Mouser](https://github.com/TomBadash/Mouser) de [@TomBadash](https://github.com/TomBadash) — sustituto de Options+ local y sin cuentas
 
 ### Infraestructura
 

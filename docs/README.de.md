@@ -243,20 +243,18 @@ Siehe [DEVELOPMENT.md](DEVELOPMENT.md), einschließlich [Sicherheit des macOS-In
 
 ## Danksagungen
 
-### Credits
-
-- [Solaar](https://github.com/pwr-Solaar/Solaar) von [@pwr](https://github.com/pwr) — quelloffene HID++-Implementierung und Protokollreferenz
-- [Mouser](https://github.com/TomBadash/Mouser) von [@TomBadash](https://github.com/TomBadash) — lokaler Options+-Ersatz ohne Konto
-
-### Design
-
-- [@kubai087](https://github.com/kubai087) — OpenLogi-Logo und App-Icon
-
 ### Mitwirkende
 
 <a href="https://github.com/AprilNEA/OpenLogi/graphs/contributors">
     <img src="https://contrib.rocks/image?repo=AprilNEA/OpenLogi" alt="Mitwirkende">
 </a>
+
+- [@kubai087](https://github.com/kubai087) — Design des OpenLogi-Logos und App-Icons
+
+### Credits
+
+- [Solaar](https://github.com/pwr-Solaar/Solaar) von [@pwr](https://github.com/pwr) — quelloffene HID++-Implementierung und Protokollreferenz
+- [Mouser](https://github.com/TomBadash/Mouser) von [@TomBadash](https://github.com/TomBadash) — lokaler Options+-Ersatz ohne Konto
 
 ### Infrastruktur
 
