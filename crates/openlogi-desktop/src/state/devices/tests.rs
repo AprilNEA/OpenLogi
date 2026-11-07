@@ -159,6 +159,47 @@ fn one_mouse_on_two_routes_is_one_record() {
 }
 
 #[test]
+fn one_mouse_live_on_both_routes_is_shown_on_its_cable() {
+    // Equal liveness: the record later in canonical order wins, and a direct
+    // route sorts after a receiver one, whichever was enumerated first.
+    let cable = DeviceRoute::Direct {
+        vendor_id: 0x046d,
+        product_id: 0xc08d,
+    };
+    for inventories in [
+        [receiver_inventory(), cabled_inventory()],
+        [cabled_inventory(), receiver_inventory()],
+    ] {
+        let records = records_from(&Config::default(), &inventories);
+        assert_eq!(records.len(), 1, "got {records:#?}");
+        assert_eq!(records[0].route, Some(cable.clone()));
+    }
+}
+
+#[test]
+fn one_mouse_live_on_two_routes_adopts_both() {
+    // Two online records on two routes are one device reached two ways, not
+    // twins: each route is indexed in the device's entry.
+    let mut config = Config::default();
+    let resolver = AssetResolver::new();
+    let list = build_device_list(
+        &[receiver_inventory(), cabled_inventory()],
+        &[],
+        &resolver,
+        &config,
+        &[],
+    );
+
+    assert!(adopt_routes(&mut config, &list));
+    let links: Vec<&str> = config.devices["unit:6be9d300"]
+        .links
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(links, ["direct:046d:c08d", "receiver:82839805:slot:1"]);
+}
+
+#[test]
 fn records_keep_the_registered_receiver_family() {
     for (product_id, expected) in [
         (0xc52b, ReceiverBrand::Unifying),
