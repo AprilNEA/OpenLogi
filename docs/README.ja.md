@@ -243,14 +243,13 @@ yay -S openlogi
 
 ## 謝辞
 
-### 先行実装・リファレンス
+### クレジット
 
 - [Solaar](https://github.com/pwr-Solaar/Solaar) by [@pwr](https://github.com/pwr) —— オープンソースの HID++ 実装およびプロトコルリファレンス
 - [Mouser](https://github.com/TomBadash/Mouser) by [@TomBadash](https://github.com/TomBadash) —— ローカル完結・アカウント不要の Options+ 代替
+- [@kubai087](https://github.com/kubai087) —— OpenLogi のロゴおよびアプリアイコンのデザイン
 
 ### コントリビューター
-
-- [@kubai087](https://github.com/kubai087) —— OpenLogi のロゴおよびアプリアイコンのデザイン
 
 <a href="https://github.com/AprilNEA/OpenLogi/graphs/contributors">
     <img src="https://contrib.rocks/image?repo=AprilNEA/OpenLogi" alt="コントリビューター">
@@ -268,10 +267,6 @@ yay -S openlogi
 
 - Apache License 2.0（[LICENSE-APACHE](../LICENSE-APACHE)）
 - MIT ライセンス（[LICENSE-MIT](../LICENSE-MIT)）
-
-### サードパーティコード
-
-`crates/openlogi-hidpp` は [`hidpp`](https://crates.io/crates/hidpp)（作者 [@lus](https://github.com/lus)）の vendored fork で、0BSD ライセンスです。
 
 ### ロゴとブランドアセット
 

@@ -243,14 +243,13 @@ Voir [DEVELOPMENT.md](DEVELOPMENT.md), notamment la [sécurité du hook d'entré
 
 ## Remerciements
 
-### Projets de référence
+### Crédits
 
 - [Solaar](https://github.com/pwr-Solaar/Solaar) par [@pwr](https://github.com/pwr) — implémentation open source de HID++ et référence du protocole
 - [Mouser](https://github.com/TomBadash/Mouser) par [@TomBadash](https://github.com/TomBadash) — remplacement d'Options+ local et sans compte
+- [@kubai087](https://github.com/kubai087) — conception du logo et de l'icône d'application OpenLogi
 
 ### Contributeurs
-
-- [@kubai087](https://github.com/kubai087) — conception du logo et de l'icône d'application OpenLogi
 
 <a href="https://github.com/AprilNEA/OpenLogi/graphs/contributors">
     <img src="https://contrib.rocks/image?repo=AprilNEA/OpenLogi" alt="Contributeurs">
@@ -268,11 +267,6 @@ Le code de ce dépôt est sous double licence, au choix :
 
 - Apache License, version 2.0 ([LICENSE-APACHE](../LICENSE-APACHE))
 - Licence MIT ([LICENSE-MIT](../LICENSE-MIT))
-
-### Code tiers
-
-`crates/openlogi-hidpp` est un fork intégré de [`hidpp`](https://crates.io/crates/hidpp)
-par [@lus](https://github.com/lus), sous licence 0BSD.
 
 ### Logo et ressources de marque
 

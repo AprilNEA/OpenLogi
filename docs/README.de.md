@@ -243,14 +243,13 @@ Siehe [DEVELOPMENT.md](DEVELOPMENT.md), einschließlich [Sicherheit des macOS-In
 
 ## Danksagungen
 
-### Vorarbeiten & Referenzen
+### Credits
 
 - [Solaar](https://github.com/pwr-Solaar/Solaar) von [@pwr](https://github.com/pwr) — quelloffene HID++-Implementierung und Protokollreferenz
 - [Mouser](https://github.com/TomBadash/Mouser) von [@TomBadash](https://github.com/TomBadash) — lokaler Options+-Ersatz ohne Konto
+- [@kubai087](https://github.com/kubai087) — Design des OpenLogi-Logos und App-Icons
 
 ### Mitwirkende
-
-- [@kubai087](https://github.com/kubai087) — Design des OpenLogi-Logos und App-Icons
 
 <a href="https://github.com/AprilNEA/OpenLogi/graphs/contributors">
     <img src="https://contrib.rocks/image?repo=AprilNEA/OpenLogi" alt="Mitwirkende">
@@ -268,11 +267,6 @@ Der Code in diesem Repository ist doppelt lizenziert, wahlweise unter
 
 - Apache License, Version 2.0 ([LICENSE-APACHE](../LICENSE-APACHE))
 - MIT-Lizenz ([LICENSE-MIT](../LICENSE-MIT))
-
-### Code von Dritten
-
-`crates/openlogi-hidpp` ist ein eingebundener Fork von [`hidpp`](https://crates.io/crates/hidpp)
-von [@lus](https://github.com/lus), lizenziert unter 0BSD.
 
 ### Logo & Markenressourcen
 

@@ -245,14 +245,13 @@ See [DEVELOPMENT.md](docs/DEVELOPMENT.md), including [macOS input-hook safety](d
 
 ## Acknowledgments
 
-### Prior art & references
+### Credits
 
 - [Solaar](https://github.com/pwr-Solaar/Solaar) by [@pwr](https://github.com/pwr) — open-source HID++ implementation and protocol reference
 - [Mouser](https://github.com/TomBadash/Mouser) by [@TomBadash](https://github.com/TomBadash) — local, account-free Options+ replacement
+- [@kubai087](https://github.com/kubai087) — OpenLogi logo and app icon design
 
 ### Contributors
-
-- [@kubai087](https://github.com/kubai087) — OpenLogi logo and app icon design
 
 <a href="https://github.com/AprilNEA/OpenLogi/graphs/contributors">
     <img src="https://contrib.rocks/image?repo=AprilNEA/OpenLogi" alt="Contributors">
@@ -272,11 +271,6 @@ The code in this repository is dual-licensed under either of
 - MIT license ([LICENSE-MIT](LICENSE-MIT))
 
 at your option.
-
-### Third-party code
-
-`crates/openlogi-hidpp` is a vendored fork of [`hidpp`](https://crates.io/crates/hidpp)
-by [@lus](https://github.com/lus), licensed 0BSD.
 
 ### Logo & brand assets
 

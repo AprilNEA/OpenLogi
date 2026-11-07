@@ -242,14 +242,13 @@ Ayarlar düz TOML kullanır; kaydetme işlemleri sembolik bağlı (symlink) ayar
 
 ## Teşekkürler
 
-### Öncül projeler ve referanslar
+### Özel teşekkürler
 
 - [Solaar](https://github.com/pwr-Solaar/Solaar) ([@pwr](https://github.com/pwr)) — açık kaynak HID++ uygulaması ve protokol referansı
 - [Mouser](https://github.com/TomBadash/Mouser) ([@TomBadash](https://github.com/TomBadash)) — hesap gerektirmeyen, yerel bir Options+ alternatifi
+- [@kubai087](https://github.com/kubai087) — OpenLogi logosu ve uygulama simgesi tasarımı
 
 ### Katkıda bulunanlar
-
-- [@kubai087](https://github.com/kubai087) — OpenLogi logosu ve uygulama simgesi tasarımı
 
 <a href="https://github.com/AprilNEA/OpenLogi/graphs/contributors">
     <img src="https://contrib.rocks/image?repo=AprilNEA/OpenLogi" alt="Katkıda bulunanlar">
@@ -267,12 +266,6 @@ Bu depodaki kod, aşağıdakilerden birinin seçimine bağlı olarak çift lisan
 
 - Apache License, Version 2.0 ([LICENSE-APACHE](../LICENSE-APACHE))
 - MIT lisansı ([LICENSE-MIT](../LICENSE-MIT))
-
-### Üçüncü taraf kod
-
-`crates/openlogi-hidpp`, [@lus](https://github.com/lus) tarafından yazılan
-[`hidpp`](https://crates.io/crates/hidpp) paketinin 0BSD lisanslı, depoya
-gömülü bir çatallanmasıdır (fork).
 
 ### Logo ve marka varlıkları
 

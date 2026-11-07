@@ -242,14 +242,13 @@ yay -S openlogi
 
 ## Благодарности
 
-### Предшественники и источники
+### Особая благодарность
 
 - [Solaar](https://github.com/pwr-Solaar/Solaar) от [@pwr](https://github.com/pwr) — открытая реализация HID++ и справочник по протоколу
 - [Mouser](https://github.com/TomBadash/Mouser) от [@TomBadash](https://github.com/TomBadash) — локальная замена Options+ без аккаунта
+- [@kubai087](https://github.com/kubai087) — дизайн логотипа и иконки приложения OpenLogi
 
 ### Участники
-
-- [@kubai087](https://github.com/kubai087) — дизайн логотипа и иконки приложения OpenLogi
 
 <a href="https://github.com/AprilNEA/OpenLogi/graphs/contributors">
     <img src="https://contrib.rocks/image?repo=AprilNEA/OpenLogi" alt="Участники">
@@ -267,11 +266,6 @@ yay -S openlogi
 
 - Apache License, Version 2.0 ([LICENSE-APACHE](../LICENSE-APACHE))
 - MIT license ([LICENSE-MIT](../LICENSE-MIT))
-
-### Сторонний код
-
-`crates/openlogi-hidpp` — вендорский форк [`hidpp`](https://crates.io/crates/hidpp)
-от [@lus](https://github.com/lus), лицензия 0BSD.
 
 ### Логотип и бренд
 

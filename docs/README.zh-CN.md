@@ -243,14 +243,13 @@ yay -S openlogi
 
 ## 致谢
 
-### 先行项目与参考
+### 特别鸣谢
 
 - [Solaar](https://github.com/pwr-Solaar/Solaar)，作者 [@pwr](https://github.com/pwr) —— 开源 HID++ 实现与协议参考
 - [Mouser](https://github.com/TomBadash/Mouser)，作者 [@TomBadash](https://github.com/TomBadash) —— 本地、无需账号的 Options+ 替代品
+- [@kubai087](https://github.com/kubai087) —— OpenLogi Logo 与应用图标设计
 
 ### 贡献者
-
-- [@kubai087](https://github.com/kubai087) —— OpenLogi Logo 与应用图标设计
 
 <a href="https://github.com/AprilNEA/OpenLogi/graphs/contributors">
     <img src="https://contrib.rocks/image?repo=AprilNEA/OpenLogi" alt="贡献者">
@@ -268,10 +267,6 @@ yay -S openlogi
 
 - Apache License 2.0（[LICENSE-APACHE](../LICENSE-APACHE)）
 - MIT 许可证（[LICENSE-MIT](../LICENSE-MIT)）
-
-### 第三方代码
-
-`crates/openlogi-hidpp` 是 [`hidpp`](https://crates.io/crates/hidpp)（作者 [@lus](https://github.com/lus)）的 vendored fork，采用 0BSD 许可证。
 
 ### Logo 与品牌资产
 

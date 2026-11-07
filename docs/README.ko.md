@@ -243,14 +243,13 @@ yay -S openlogi
 
 ## 감사의 말
 
-### 선행 프로젝트 및 참고 자료
+### 크레딧
 
 - [Solaar](https://github.com/pwr-Solaar/Solaar) — [@pwr](https://github.com/pwr): 오픈소스 HID++ 구현 및 프로토콜 레퍼런스
 - [Mouser](https://github.com/TomBadash/Mouser) — [@TomBadash](https://github.com/TomBadash): 로컬에서 동작하는 계정 없는 Options+ 대체제
+- [@kubai087](https://github.com/kubai087) — OpenLogi 로고 및 앱 아이콘 디자인
 
 ### 기여자
-
-- [@kubai087](https://github.com/kubai087) — OpenLogi 로고 및 앱 아이콘 디자인
 
 <a href="https://github.com/AprilNEA/OpenLogi/graphs/contributors">
     <img src="https://contrib.rocks/image?repo=AprilNEA/OpenLogi" alt="기여자">
@@ -268,10 +267,6 @@ yay -S openlogi
 
 - Apache License 2.0 ([LICENSE-APACHE](../LICENSE-APACHE))
 - MIT 라이선스 ([LICENSE-MIT](../LICENSE-MIT))
-
-### 서드파티 코드
-
-`crates/openlogi-hidpp`는 [`hidpp`](https://crates.io/crates/hidpp)([@lus](https://github.com/lus) 제작)의 vendored fork이며, 0BSD 라이선스를 따릅니다.
 
 ### 로고 및 브랜드 자산
 
