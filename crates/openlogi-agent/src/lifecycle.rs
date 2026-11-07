@@ -225,7 +225,10 @@ impl Wanted {
             ..
         } = self.0;
         #[cfg(target_os = "macos")]
-        let _ = armed_tx.send(Arc::clone(&core.observable));
+        {
+            let _ = armed_tx.send(Arc::clone(&core.observable));
+            tokio::spawn(crate::tray::watch_attention(core.observable.subscribe()));
+        }
         #[cfg(target_os = "macos")]
         armed_session::record();
         overlay::spawn();

@@ -1,12 +1,17 @@
 //! The agent's macOS AppKit loop, menu-bar item, and login-session observer.
 //!
-//! The always-on agent hosts the menu bar (the GUI is on-demand). The item
-//! carries GUI-directed actions ("Show Main Window", Settings, About, Check for
-//! Updates) and "Quit OpenLogi"; the GitHub/help links live in the GUI's own
-//! menu bar, not here. Clicks fire on the main thread's AppKit run loop.
+//! The always-on agent hosts the menu bar (the GUI is on-demand). The menu
+//! shows what needs attention, every device, the current application and Flow
+//! ([`TrayMenu`] decides which rows and what they say), then GUI-directed
+//! actions ("Show Main Window", Settings, About, Check for Updates) and "Quit
+//! OpenLogi"; the GitHub/help links live in the GUI's own menu bar, not here.
+//! Clicks fire on the main thread's AppKit run loop.
 //!
-//! The menu is rebuilt every time it is about to open, so it always shows the
-//! current locale's titles; nothing has to push changes into it.
+//! The menu is rebuilt every time it is about to open, from the agent's
+//! in-memory snapshot and the config the core last handed over
+//! ([`set_config`]), so opening it waits on no device and no lock. The icon is
+//! the one thing pushed: the core marks it when something needs the user
+//! ([`watch_attention`]).
 //!
 //! GUI-directed actions open [`DeeplinkCommand`] `openlogi://` URLs which macOS
 //! delivers to the GUI via Apple Events — works for both cold start (app
@@ -25,7 +30,7 @@
     reason = "objc2 calls: super-init, action targets, and selector-based workspace notifications"
 )]
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::sync::Arc;
 
 use dispatch2::DispatchQueue;
@@ -35,25 +40,35 @@ use objc2::{
     AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel,
 };
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSImage, NSMenu, NSMenuDelegate,
-    NSRunningApplication, NSStatusItem, NSWorkspace, NSWorkspaceSessionDidBecomeActiveNotification,
-    NSWorkspaceSessionDidResignActiveNotification,
+    NSApplication, NSApplicationActivationPolicy, NSColor, NSEventModifierFlags, NSImage, NSMenu,
+    NSMenuDelegate, NSMenuItem, NSRunningApplication, NSStatusItem, NSWorkspace,
+    NSWorkspaceSessionDidBecomeActiveNotification, NSWorkspaceSessionDidResignActiveNotification,
 };
 use objc2_foundation::{NSNotification, NSObjectProtocol, NSString};
 use openlogi_agent_core::observable::ObservableState;
 use openlogi_core::brand::{self, DeeplinkCommand};
-use openlogi_core::config::AppIcon;
+use openlogi_core::config::{AppIcon, Config};
+use openlogi_core::device::{BatteryAttention, BatteryInfo, DeviceKind};
 use openlogi_hid::DeviceIoSignal;
+use openlogi_ipc::Observation;
+use rust_i18n::t;
+use tokio::sync::watch;
 use tracing::{info, warn};
 
 use crate::activity_macos::{self, ActivityGate};
 use crate::shutdown::{self, ShutdownRequestSender};
-use crate::status_item;
+use crate::status_item::{self, Trailing, TrailingTitles};
+use crate::tray_model::{
+    AppRow, BatteryFill, Detail, DeviceRow, FlowRow, Issue, Permission, TrayMenu, battery_text,
+    is_charging, needs_attention,
+};
 
 /// The installed menu-bar item, which a later config reload restyles or
 /// removes, plus the target its menu and menu items only weakly reference.
 struct TrayState {
     item: Retained<NSStatusItem>,
+    /// The app icon whose glyph the item shows.
+    icon: AppIcon,
     /// Never read: held so the menu's delegate and the items' action target
     /// live exactly as long as the item.
     _target: Retained<MenuTarget>,
@@ -69,6 +84,13 @@ thread_local! {
     /// Kept separately because the AppKit loop still exists when the status
     /// item is hidden by preference.
     static SHUTDOWN_TX: RefCell<Option<ShutdownRequestSender>> = const { RefCell::new(None) };
+    /// The config the menu reads, as the core last loaded it. A copy kept on
+    /// the main thread, so opening the menu takes no lock; [`set_config`]
+    /// replaces it.
+    static CONFIG: RefCell<Arc<Config>> = RefCell::default();
+    /// Whether the icon carries its attention mark. Kept apart from [`TRAY`]
+    /// so an item installed later starts with the current mark.
+    static ATTENTION: Cell<bool> = const { Cell::new(false) };
 }
 
 /// The menu-bar glyph for `icon`: a monochrome template the system tints for
@@ -79,6 +101,18 @@ const fn glyph(icon: AppIcon) -> &'static [u8] {
         AppIcon::Openlogi => include_bytes!("../assets/tray-icon@2x.png"),
         AppIcon::Prism => include_bytes!("../assets/tray-icon-prism@2x.png"),
     }
+}
+
+/// Draw `state`'s icon: its app icon's glyph, marked when something needs
+/// the user.
+fn draw_icon(state: &TrayState, mtm: MainThreadMarker) {
+    status_item::set_png_icon(
+        &state.item,
+        mtm,
+        glyph(state.icon),
+        ATTENTION.get(),
+        "OpenLogi",
+    );
 }
 
 /// Point the menu-bar item at `icon`'s glyph, so picking an app icon changes
@@ -92,12 +126,48 @@ pub fn set_icon(icon: AppIcon) {
         let Some(mtm) = MainThreadMarker::new() else {
             return;
         };
-        TRAY.with_borrow(|state| {
-            if let Some(state) = state.as_ref() {
-                status_item::set_png_icon(&state.item, mtm, glyph(icon), "OpenLogi");
+        TRAY.with_borrow_mut(|state| {
+            if let Some(state) = state.as_mut() {
+                state.icon = icon;
+                draw_icon(state, mtm);
             }
         });
     });
+}
+
+/// Hand the menu the config the core just loaded. Callable from anywhere: the
+/// copy hops to the main queue, where the menu reads it the next time it
+/// opens.
+pub fn set_config(config: Arc<Config>) {
+    DispatchQueue::main().exec_async(move || CONFIG.set(config));
+}
+
+/// Keep the icon's attention mark in step with the agent state for as long as
+/// the state lives: the mark shows while [`needs_attention`] says so, and the
+/// main thread redraws the icon only when that verdict changes.
+pub async fn watch_attention(mut changes: watch::Receiver<Observation>) {
+    // What `ATTENTION` starts as.
+    let mut marked = false;
+    loop {
+        let attention = needs_attention(&changes.borrow_and_update().snapshot);
+        if attention != marked {
+            marked = attention;
+            DispatchQueue::main().exec_async(move || {
+                let Some(mtm) = MainThreadMarker::new() else {
+                    return;
+                };
+                ATTENTION.set(attention);
+                TRAY.with_borrow(|state| {
+                    if let Some(state) = state.as_ref() {
+                        draw_icon(state, mtm);
+                    }
+                });
+            });
+        }
+        if changes.changed().await.is_err() {
+            return;
+        }
+    }
 }
 
 /// Show or hide the menu-bar item to match the "Show in menu bar" setting,
@@ -155,11 +225,21 @@ impl SessionTarget {
 
 struct MenuTargetIvars {
     /// The agent state the menu is built from.
-    #[expect(
-        dead_code,
-        reason = "held for the menu's rebuild; no row reads agent state yet"
-    )]
     observable: Arc<ObservableState>,
+    /// What each row built from [`TrayMenu`] does when clicked, indexed by
+    /// the row's tag. Refilled with the menu.
+    actions: RefCell<Vec<Action>>,
+}
+
+/// What clicking a row built from [`TrayMenu`] does.
+#[derive(Clone)]
+enum Action {
+    /// Open the settings app at this link.
+    Open(DeeplinkCommand),
+    /// Open this permission's System Settings pane.
+    Pane(Permission),
+    /// Show the log directory in Finder.
+    ShowLogs,
 }
 
 define_class!(
@@ -192,6 +272,11 @@ define_class!(
             open_command(&DeeplinkCommand::CheckForUpdates);
         }
 
+        #[unsafe(method(performAction:))]
+        fn perform_action(&self, sender: &NSMenuItem) {
+            self.perform(sender.tag());
+        }
+
         #[unsafe(method(quitOpenLogi:))]
         fn quit_openlogi(&self, _sender: Option<&AnyObject>) {
             quit_agent();
@@ -207,7 +292,7 @@ define_class!(
     // the protocol requires.
     unsafe impl NSMenuDelegate for MenuTarget {
         // AppKit calls this just before the menu opens, so the rebuild picks
-        // up the locale of that moment.
+        // up the state and the locale of that moment.
         #[unsafe(method(menuNeedsUpdate:))]
         fn menu_needs_update(&self, menu: &NSMenu) {
             menu.removeAllItems();
@@ -218,10 +303,44 @@ define_class!(
 
 impl MenuTarget {
     fn new(mtm: MainThreadMarker, observable: Arc<ObservableState>) -> Retained<Self> {
-        let this = Self::alloc(mtm).set_ivars(MenuTargetIvars { observable });
+        let this = Self::alloc(mtm).set_ivars(MenuTargetIvars {
+            observable,
+            actions: RefCell::default(),
+        });
         // SAFETY: `init` initializes our freshly-allocated NSObject subclass and
         // returns it (the two-phase construction objc2's `define_class!` uses).
         unsafe { msg_send![super(this), init] }
+    }
+
+    /// An item titled `title` that does `action` when clicked.
+    fn action_item(&self, title: &str, action: Action) -> Retained<NSMenuItem> {
+        self.keyed_action_item(title, action, "")
+    }
+
+    /// [`Self::action_item`] with the key equivalent `key` (⌘ plus `key`).
+    fn keyed_action_item(&self, title: &str, action: Action, key: &str) -> Retained<NSMenuItem> {
+        let item = status_item::new_action_item(self.mtm(), title, sel!(performAction:), self, key);
+        let mut actions = self.ivars().actions.borrow_mut();
+        // A menu holds a few dozen items, far inside `NSInteger`.
+        item.setTag(isize::try_from(actions.len()).unwrap_or(isize::MAX));
+        actions.push(action);
+        item
+    }
+
+    /// Do what the item tagged `tag` was built to do.
+    fn perform(&self, tag: isize) {
+        let action = usize::try_from(tag)
+            .ok()
+            .and_then(|index| self.ivars().actions.borrow().get(index).cloned());
+        match action {
+            Some(Action::Open(command)) => open_command(&command),
+            Some(Action::Pane(permission)) => openlogi_permissions::open_pane(match permission {
+                Permission::Accessibility => openlogi_permissions::Permission::Accessibility,
+                Permission::InputMonitoring => openlogi_permissions::Permission::InputMonitoring,
+            }),
+            Some(Action::ShowLogs) => show_logs(),
+            None => warn!(tag, "menu-bar item with no action"),
+        }
     }
 }
 
@@ -236,6 +355,17 @@ fn open_url(url: &str) {
 /// macOS launches the GUI (cold start) or hands the URL to the running app.
 fn open_command(command: &DeeplinkCommand) {
     open_url(&command.to_url());
+}
+
+/// Show the directory the agent's logs are written to in Finder.
+fn show_logs() {
+    match openlogi_core::paths::state_dir() {
+        Ok(dir) => match opener::open(&dir) {
+            Ok(()) => info!(dir = %dir.display(), "menu-bar — showing logs"),
+            Err(e) => warn!(error = %e, dir = %dir.display(), "could not show logs"),
+        },
+        Err(e) => warn!(error = %e, "no log directory to show"),
+    }
 }
 
 /// Menu-bar Quit: take a running GUI with us, then hand process termination to
@@ -279,21 +409,25 @@ fn gui_is_running() -> bool {
 /// process's main thread; blocks for the agent's lifetime (the agent exits via
 /// Quit).
 ///
-/// `show_in_menu_bar` honors the user's preference: when `false`, the same
+/// `config` is the config the agent started with. Its "Show in menu bar"
+/// preference decides whether the item shows: when `false`, the same
 /// Accessory loop runs with no status item (the agent stays fully headless; the
 /// tokio core still does all the work). A later config reload flips it live
-/// through [`set_visible`].
+/// through [`set_visible`], and hands the menu the new config through
+/// [`set_config`].
 /// `observable` is the agent state the menu is built from.
 /// `device_io_signal` is the hardware gate; it opens only while the Mac is in
 /// a full wake and this login session owns the console (`activity_macos`).
 pub fn run_app_loop(
-    show_in_menu_bar: bool,
-    app_icon: AppIcon,
+    config: Arc<Config>,
     observable: Arc<ObservableState>,
     device_io_signal: DeviceIoSignal,
     shutdown_tx: ShutdownRequestSender,
 ) -> ! {
     SHUTDOWN_TX.with_borrow_mut(|slot| *slot = Some(shutdown_tx));
+    let show_in_menu_bar = config.app_settings.show_in_menu_bar;
+    let app_icon = config.app_settings.app_icon;
+    CONFIG.set(config);
     let Some(mtm) = MainThreadMarker::new() else {
         warn!("agent AppKit loop not started off the main thread — exiting");
         let requests = SHUTDOWN_TX.with_borrow(Clone::clone);
@@ -370,23 +504,88 @@ fn install_session_observer(gate: Arc<ActivityGate>) -> Retained<SessionTarget> 
 fn install_status_item(mtm: MainThreadMarker, app_icon: AppIcon, observable: Arc<ObservableState>) {
     let target = MenuTarget::new(mtm, observable);
     let status_item = status_item::create_status_item();
-    status_item::set_png_icon(&status_item, mtm, glyph(app_icon), "OpenLogi");
     let menu = status_item::new_menu(mtm);
     menu.setDelegate(Some(ProtocolObject::from_ref(&*target)));
     status_item.setMenu(Some(&menu));
-    TRAY.set(Some(TrayState {
+    let state = TrayState {
         item: status_item,
+        icon: app_icon,
         _target: target,
-    }));
+    };
+    draw_icon(&state, mtm);
+    TRAY.set(Some(state));
 
     info!("menu-bar item installed");
 }
 
-/// Fill the empty tray `menu` with the current locale's titles, each item
-/// sending its action to `target`.
+/// Fill the empty tray `menu` from the agent's current state, in the current
+/// locale, each item sending its action to `target`.
 fn populate_menu(menu: &NSMenu, target: &MenuTarget) {
     let mtm = target.mtm();
+    let snapshot = target.ivars().observable.snapshot();
+    let model = CONFIG.with_borrow(|config| TrayMenu::new(&snapshot, config));
+    target.ivars().actions.borrow_mut().clear();
+    // Every trailing part of this menu ends on one right edge.
+    let mut titles = TrailingTitles::default();
 
+    for issue in &model.issues {
+        menu.addItem(&issue_item(target, issue, &mut titles));
+    }
+    if !model.issues.is_empty() {
+        status_item::add_separator(menu, mtm);
+    }
+
+    menu.addItem(&status_item::section_header(mtm, &t!("device.devices")));
+    if model.devices.is_empty() {
+        menu.addItem(&status_item::info_item(
+            mtm,
+            &t!("device.no_devices_connected"),
+        ));
+    }
+    for row in &model.devices {
+        let item = device_item(target, row);
+        if let Some(detail) = row.detail() {
+            titles.push(&item, row.name.clone(), trailing(detail));
+        }
+        menu.addItem(&item);
+        // Holding ⌥ swaps in how the device is connected.
+        let link = device_item(target, row);
+        titles.push(&link, row.name.clone(), Trailing::text(row.link.text()));
+        alternate(&link, NSEventModifierFlags::Option);
+        menu.addItem(&link);
+    }
+    status_item::add_separator(menu, mtm);
+
+    if let Some(app) = &model.app {
+        let item = app_item(target, app);
+        titles.push(
+            &item,
+            app.current.name.clone(),
+            Trailing::text(app.current.buttons.text()),
+        );
+        menu.addItem(&item);
+    }
+    if let Some(flow) = &model.flow {
+        let title = t!("flow.title");
+        let item = flow_item(target, flow, &title);
+        titles.push(&item, title.into_owned(), Trailing::text(flow.detail()));
+        menu.addItem(&item);
+    }
+    menu.addItem(&target.action_item(
+        &t!("pairing.add_device_dialog"),
+        Action::Open(DeeplinkCommand::AddDevice),
+    ));
+    status_item::add_separator(menu, mtm);
+
+    add_window_items(menu, target, &model);
+
+    titles.apply();
+}
+
+/// Add the items every menu ends with: the GUI's windows, each with its ⌥
+/// alternate, then Quit.
+fn add_window_items(menu: &NSMenu, target: &MenuTarget, model: &TrayMenu) {
+    let mtm = target.mtm();
     let show = status_item::new_action_item(
         mtm,
         &rust_i18n::t!("app.show_main_window"),
@@ -395,6 +594,12 @@ fn populate_menu(menu: &NSMenu, target: &MenuTarget) {
         "m",
     );
     menu.addItem(&show);
+    let logs = target.keyed_action_item(&t!("tray.show_logs"), Action::ShowLogs, "m");
+    alternate(
+        &logs,
+        NSEventModifierFlags::Command | NSEventModifierFlags::Option,
+    );
+    menu.addItem(&logs);
     status_item::add_separator(menu, mtm);
 
     let settings = status_item::new_action_item(
@@ -413,6 +618,12 @@ fn populate_menu(menu: &NSMenu, target: &MenuTarget) {
         "",
     );
     menu.addItem(&about);
+    let version = status_item::info_item(
+        mtm,
+        &t!("tray.version", version => &model.version, protocol => model.protocol),
+    );
+    alternate(&version, NSEventModifierFlags::Option);
+    menu.addItem(&version);
     let updates = status_item::new_action_item(
         mtm,
         &rust_i18n::t!("updates.check_for_updates_dialog"),
@@ -438,6 +649,186 @@ fn populate_menu(menu: &NSMenu, target: &MenuTarget) {
         quit.setImage(Some(&image));
     }
     menu.addItem(&quit);
+}
+
+/// Make `item` the alternate of the item before it, shown in its place while
+/// `modifiers` are held. AppKit pairs the two by their key equivalent.
+fn alternate(item: &NSMenuItem, modifiers: NSEventModifierFlags) {
+    item.setKeyEquivalentModifierMask(modifiers);
+    item.setAlternate(true);
+}
+
+/// The row for `issue`, which opens where it is fixed or, when nothing fixes
+/// it, only explains.
+fn issue_item(
+    target: &MenuTarget,
+    issue: &Issue,
+    titles: &mut TrailingTitles,
+) -> Retained<NSMenuItem> {
+    let title = issue.title();
+    let action = match issue {
+        Issue::MissingPermission(permission) => Some(Action::Pane(*permission)),
+        // The settings app explains both causes: another app holding the
+        // devices, or a grant that needs a fresh login.
+        Issue::DevicesUnavailable => Some(Action::Open(DeeplinkCommand::OpenSettings)),
+        Issue::SecureInput(_) => None,
+    };
+    let item = match action {
+        Some(action) => target.action_item(&title, action),
+        None => status_item::info_item(target.mtm(), &title),
+    };
+    if let Some(image) = status_item::symbol("exclamationmark.triangle", None) {
+        item.setImage(Some(&image));
+    }
+    if let Some(detail) = issue.detail() {
+        titles.push(&item, title, Trailing::text(detail));
+    }
+    item
+}
+
+/// The row for one device, with its submenu: what the menu knows about it,
+/// then the way to its settings.
+fn device_item(target: &MenuTarget, row: &DeviceRow) -> Retained<NSMenuItem> {
+    let mtm = target.mtm();
+    let item = NSMenuItem::new(mtm);
+    item.setTitle(&NSString::from_str(&row.name));
+    if let Some(image) = status_item::symbol(kind_symbol(row.kind), None) {
+        item.setImage(Some(&image));
+    }
+    let submenu = status_item::new_menu(mtm);
+    for line in row.info() {
+        submenu.addItem(&status_item::info_item(mtm, &line));
+    }
+    status_item::add_separator(&submenu, mtm);
+    submenu.addItem(&target.action_item(
+        &t!("tray.open_device_settings"),
+        Action::Open(row.settings.clone()),
+    ));
+    item.setSubmenu(Some(&submenu));
+    item
+}
+
+/// What a device row's trailing part shows for `detail`.
+fn trailing(detail: Detail) -> Trailing {
+    match detail {
+        Detail::Battery(battery) => {
+            Trailing::glyph(battery_glyph(&battery), battery_text(&battery))
+        }
+        Detail::Text(text) => Trailing::text(text),
+    }
+}
+
+/// The battery glyph for `battery`: filled to its reading, bolted while it
+/// charges, orange when low and red when critical.
+fn battery_glyph(battery: &BatteryInfo) -> Option<Retained<NSImage>> {
+    let name = if is_charging(battery) {
+        "battery.100.bolt"
+    } else {
+        match BatteryFill::of(battery) {
+            BatteryFill::Empty => "battery.0",
+            BatteryFill::Quarter => "battery.25",
+            BatteryFill::Half => "battery.50",
+            BatteryFill::ThreeQuarters => "battery.75",
+            BatteryFill::Full => "battery.100",
+        }
+    };
+    let glyph = status_item::symbol(name, Some(&battery_text(battery)))?;
+    let fill = match battery.attention() {
+        Some(BatteryAttention::Critical) => NSColor::systemRedColor(),
+        Some(BatteryAttention::Low) => NSColor::systemOrangeColor(),
+        None => NSColor::secondaryLabelColor(),
+    };
+    Some(status_item::tinted(
+        &glyph,
+        &[&fill, &NSColor::secondaryLabelColor()],
+    ))
+}
+
+/// The SF Symbol that stands for a device of `kind`.
+const fn kind_symbol(kind: DeviceKind) -> &'static str {
+    if kind.is_keyboard_family() {
+        return "keyboard";
+    }
+    match kind {
+        DeviceKind::Mouse | DeviceKind::Trackball => "computermouse",
+        // The keyboard family returned above.
+        DeviceKind::Keyboard | DeviceKind::Numpad | DeviceKind::Unknown => "questionmark.circle",
+        DeviceKind::Presenter | DeviceKind::Remote => "av.remote",
+        DeviceKind::Touchpad => "hand.point.up.left",
+        DeviceKind::Tablet => "pencil.tip",
+        DeviceKind::Gamepad | DeviceKind::Joystick => "gamecontroller",
+        DeviceKind::Headset => "headphones",
+        DeviceKind::Camera => "web.camera",
+        DeviceKind::Light => "lightbulb",
+    }
+}
+
+/// The current-application row, with its submenu: which buttons it runs
+/// with, the way to edit them, and the applications used before it.
+fn app_item(target: &MenuTarget, app: &AppRow) -> Retained<NSMenuItem> {
+    let mtm = target.mtm();
+    let item = NSMenuItem::new(mtm);
+    item.setTitle(&NSString::from_str(&app.current.name));
+    if let Some(image) = status_item::symbol("macwindow", None) {
+        item.setImage(Some(&image));
+    }
+    let submenu = status_item::new_menu(mtm);
+    submenu.addItem(&status_item::info_item(mtm, &app.summary()));
+    submenu.addItem(&target.action_item(
+        &t!("tray.edit_app_buttons", app => app.current.name),
+        Action::Open(app.current.profile.clone()),
+    ));
+    if !app.recent.is_empty() {
+        status_item::add_separator(&submenu, mtm);
+        submenu.addItem(&status_item::section_header(mtm, &t!("tray.recent_apps")));
+        let mut titles = TrailingTitles::default();
+        for recent in &app.recent {
+            let row = target.action_item(&recent.name, Action::Open(recent.profile.clone()));
+            titles.push(
+                &row,
+                recent.name.clone(),
+                Trailing::text(recent.buttons.text()),
+            );
+            submenu.addItem(&row);
+        }
+        titles.apply();
+    }
+    item.setSubmenu(Some(&submenu));
+    item
+}
+
+/// The Flow row titled `title`, with its submenu: each paired computer's link,
+/// then the way to Flow's settings.
+fn flow_item(target: &MenuTarget, flow: &FlowRow, title: &str) -> Retained<NSMenuItem> {
+    let mtm = target.mtm();
+    let item = NSMenuItem::new(mtm);
+    item.setTitle(&NSString::from_str(title));
+    if let Some(image) = status_item::symbol("display.2", None) {
+        item.setImage(Some(&image));
+    }
+    let submenu = status_item::new_menu(mtm);
+    if flow.peers.is_empty() {
+        submenu.addItem(&status_item::info_item(mtm, &t!("flow.status_no_peers")));
+    } else {
+        submenu.addItem(&status_item::section_header(
+            mtm,
+            &t!("tray.paired_computers"),
+        ));
+        let mut titles = TrailingTitles::default();
+        for peer in &flow.peers {
+            let row = status_item::info_item(mtm, &peer.name);
+            titles.push(&row, peer.name.clone(), Trailing::text(peer.state_text()));
+            submenu.addItem(&row);
+        }
+        titles.apply();
+    }
+    status_item::add_separator(&submenu, mtm);
+    submenu.addItem(&target.action_item(
+        &t!("tray.flow_settings"),
+        Action::Open(DeeplinkCommand::OpenFlow),
+    ));
+    item.setSubmenu(Some(&submenu));
+    item
 }
 
 #[cfg(test)]

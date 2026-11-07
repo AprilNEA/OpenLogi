@@ -121,6 +121,10 @@ impl AgentServer {
                 #[cfg(target_os = "macos")]
                 let show_in_menu_bar = config.app_settings.show_in_menu_bar;
                 let language = config.app_settings.language.clone();
+                // The menu reads the config on the main thread, from its own
+                // copy.
+                #[cfg(target_os = "macos")]
+                crate::tray::set_config(Arc::new(config.clone()));
                 match saved {
                     None => self.orchestrator.lock().await.reload_config(config),
                     Some(saved) => self
