@@ -52,6 +52,9 @@ saved, its DPI presets included.
   (`online.then_some(&identity)`), and the agent's list stays per route, both
   G402s listed under their one key, while folding them into one card is the
   GUI's call.
+  The GUI tells them from same-model twins by their shared key and indexes
+  that route in the entry once, so the card keeps its connection mode once
+  they are unplugged.
 - **No hardware fixture yet.** The probe test is scripted from the v0 answer
   shape, not recorded from a G402. A recording could only pin the profile:
   `openlogi fixture contribute` refuses a cassette for a device with neither
