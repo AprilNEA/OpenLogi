@@ -139,14 +139,11 @@ impl AgentServer {
                 // The "Show in menu bar" toggle too: install or remove the
                 // item now rather than at the next agent launch.
                 #[cfg(target_os = "macos")]
-                crate::tray::set_visible(show_in_menu_bar, app_icon);
-                // And the interface language: re-resolve the process locale
-                // (the Windows popup rebuilds per show and picks it up alone)
-                // and rebuild the macOS menu, whose titles were stamped at
-                // install.
+                crate::tray::set_visible(show_in_menu_bar, app_icon, Arc::clone(&self.observable));
+                // And the interface language: re-resolve the process locale.
+                // Both tray menus rebuild each time they open and pick it up
+                // alone.
                 openlogi_core::locale::activate(language.as_deref());
-                #[cfg(target_os = "macos")]
-                crate::tray::relocalize();
                 Ok(revision)
             }
             Err(error) => {

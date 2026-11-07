@@ -5,6 +5,9 @@
 //! Updates) and "Quit OpenLogi"; the GitHub/help links live in the GUI's own
 //! menu bar, not here. Clicks fire on the main thread's AppKit run loop.
 //!
+//! The menu is rebuilt every time it is about to open, so it always shows the
+//! current locale's titles; nothing has to push changes into it.
+//!
 //! GUI-directed actions open [`DeeplinkCommand`] `openlogi://` URLs which macOS
 //! delivers to the GUI via Apple Events — works for both cold start (app
 //! launched then URL delivered) and warm reactivation (URL delivered to the
@@ -27,16 +30,17 @@ use std::sync::Arc;
 
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
-use objc2::runtime::{AnyObject, NSObject};
+use objc2::runtime::{AnyObject, NSObject, ProtocolObject};
 use objc2::{
     AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel,
 };
-use objc2_app_kit::NSStatusItem;
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSImage, NSRunningApplication, NSWorkspace,
-    NSWorkspaceSessionDidBecomeActiveNotification, NSWorkspaceSessionDidResignActiveNotification,
+    NSApplication, NSApplicationActivationPolicy, NSImage, NSMenu, NSMenuDelegate,
+    NSRunningApplication, NSStatusItem, NSWorkspace, NSWorkspaceSessionDidBecomeActiveNotification,
+    NSWorkspaceSessionDidResignActiveNotification,
 };
-use objc2_foundation::{NSNotification, NSString};
+use objc2_foundation::{NSNotification, NSObjectProtocol, NSString};
+use openlogi_agent_core::observable::ObservableState;
 use openlogi_core::brand::{self, DeeplinkCommand};
 use openlogi_core::config::AppIcon;
 use openlogi_hid::DeviceIoSignal;
@@ -46,12 +50,13 @@ use crate::activity_macos::{self, ActivityGate};
 use crate::shutdown::{self, ShutdownRequestSender};
 use crate::status_item;
 
-/// The installed menu-bar item plus the action target its menu items weakly
-/// reference — everything a later config reload needs to restyle the icon or
-/// rebuild the menu in a new language.
+/// The installed menu-bar item, which a later config reload restyles or
+/// removes, plus the target its menu and menu items only weakly reference.
 struct TrayState {
     item: Retained<NSStatusItem>,
-    target: Retained<MenuTarget>,
+    /// Never read: held so the menu's delegate and the items' action target
+    /// live exactly as long as the item.
+    _target: Retained<MenuTarget>,
 }
 
 thread_local! {
@@ -95,38 +100,19 @@ pub fn set_icon(icon: AppIcon) {
     });
 }
 
-/// Rebuild the menu-bar menu with the current locale's titles, after a config
-/// reload switched the interface language. Same shape as [`set_icon`]: the
-/// work hops to the main queue, and a hidden item is a no-op.
-pub fn relocalize() {
-    DispatchQueue::main().exec_async(|| {
-        let Some(mtm) = MainThreadMarker::new() else {
-            return;
-        };
-        TRAY.with_borrow(|state| {
-            if let Some(state) = state.as_ref() {
-                // The status item retains the menu; the fresh one replaces the
-                // old wholesale so titles, order, and key equivalents cannot
-                // drift from `build_menu`.
-                let menu = build_menu(mtm, &state.target);
-                state.item.setMenu(Some(&menu));
-            }
-        });
-    });
-}
-
 /// Show or hide the menu-bar item to match the "Show in menu bar" setting,
 /// after a config reload — so the toggle applies without an agent restart.
 /// Same shape as [`set_icon`]: the work hops to the main queue. Installing
-/// an already-shown item or removing a hidden one is a no-op.
-pub fn set_visible(show: bool, app_icon: AppIcon) {
+/// an already-shown item or removing a hidden one is a no-op. `observable` is
+/// the state an installed item's menu is built from.
+pub fn set_visible(show: bool, app_icon: AppIcon, observable: Arc<ObservableState>) {
     DispatchQueue::main().exec_async(move || {
         let Some(mtm) = MainThreadMarker::new() else {
             return;
         };
         let installed = TRAY.with_borrow(Option::is_some);
         if show && !installed {
-            install_status_item(mtm, app_icon);
+            install_status_item(mtm, app_icon, observable);
         } else if !show && let Some(state) = TRAY.take() {
             status_item::remove_status_item(&state.item);
             info!("menu-bar item removed");
@@ -167,11 +153,21 @@ impl SessionTarget {
     }
 }
 
+struct MenuTargetIvars {
+    /// The agent state the menu is built from.
+    #[expect(
+        dead_code,
+        reason = "held for the menu's rebuild; no row reads agent state yet"
+    )]
+    observable: Arc<ObservableState>,
+}
+
 define_class!(
     // SAFETY: NSObject has no subclassing requirements, and `MenuTarget` does
     // not implement `Drop`.
     #[unsafe(super(NSObject))]
     #[thread_kind = MainThreadOnly]
+    #[ivars = MenuTargetIvars]
     #[name = "OpenLogiAgentMenuTarget"]
     struct MenuTarget;
 
@@ -201,11 +197,28 @@ define_class!(
             quit_agent();
         }
     }
+
+    // SAFETY: `NSObjectProtocol` asks nothing beyond being an `NSObject`,
+    // which `MenuTarget` subclasses.
+    unsafe impl NSObjectProtocol for MenuTarget {}
+
+    // SAFETY: the one method implemented matches the protocol's
+    // `menuNeedsUpdate:` signature, and `MenuTarget` is main-thread-only, as
+    // the protocol requires.
+    unsafe impl NSMenuDelegate for MenuTarget {
+        // AppKit calls this just before the menu opens, so the rebuild picks
+        // up the locale of that moment.
+        #[unsafe(method(menuNeedsUpdate:))]
+        fn menu_needs_update(&self, menu: &NSMenu) {
+            menu.removeAllItems();
+            populate_menu(menu, self);
+        }
+    }
 );
 
 impl MenuTarget {
-    fn new(mtm: MainThreadMarker) -> Retained<Self> {
-        let this = Self::alloc(mtm).set_ivars(());
+    fn new(mtm: MainThreadMarker, observable: Arc<ObservableState>) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(MenuTargetIvars { observable });
         // SAFETY: `init` initializes our freshly-allocated NSObject subclass and
         // returns it (the two-phase construction objc2's `define_class!` uses).
         unsafe { msg_send![super(this), init] }
@@ -270,11 +283,13 @@ fn gui_is_running() -> bool {
 /// Accessory loop runs with no status item (the agent stays fully headless; the
 /// tokio core still does all the work). A later config reload flips it live
 /// through [`set_visible`].
+/// `observable` is the agent state the menu is built from.
 /// `device_io_signal` is the hardware gate; it opens only while the Mac is in
 /// a full wake and this login session owns the console (`activity_macos`).
 pub fn run_app_loop(
     show_in_menu_bar: bool,
     app_icon: AppIcon,
+    observable: Arc<ObservableState>,
     device_io_signal: DeviceIoSignal,
     shutdown_tx: ShutdownRequestSender,
 ) -> ! {
@@ -293,9 +308,9 @@ pub fn run_app_loop(
     // once the loop has turned with them in the main menu.
     openlogi_inject::prepare_menu_shortcuts(mtm);
     // `TRAY` keeps the status item (which retains its menu) and the target
-    // the menu items only weakly reference alive past `run()`.
+    // the menu and its items only weakly reference alive past `run()`.
     if show_in_menu_bar {
-        install_status_item(mtm, app_icon);
+        install_status_item(mtm, app_icon, observable);
     }
 
     // AppKit documents that an app launched into an inactive session receives
@@ -348,26 +363,29 @@ fn install_session_observer(gate: Arc<ActivityGate>) -> Retained<SessionTarget> 
 }
 
 /// Build and install the menu-bar status item into [`TRAY`], which keeps it
-/// (and, through it, its menu) and the action target the menu items weakly
+/// (and, through it, its menu) and the target the menu and its items weakly
 /// reference alive until [`set_visible`] removes it.
-fn install_status_item(mtm: MainThreadMarker, app_icon: AppIcon) {
-    let target = MenuTarget::new(mtm);
+///
+/// The menu starts empty: its delegate fills it each time it is about to open.
+fn install_status_item(mtm: MainThreadMarker, app_icon: AppIcon, observable: Arc<ObservableState>) {
+    let target = MenuTarget::new(mtm, observable);
     let status_item = status_item::create_status_item();
     status_item::set_png_icon(&status_item, mtm, glyph(app_icon), "OpenLogi");
-    let menu = build_menu(mtm, &target);
+    let menu = status_item::new_menu(mtm);
+    menu.setDelegate(Some(ProtocolObject::from_ref(&*target)));
     status_item.setMenu(Some(&menu));
     TRAY.set(Some(TrayState {
         item: status_item,
-        target,
+        _target: target,
     }));
 
     info!("menu-bar item installed");
 }
 
-/// Build the tray menu with the current locale's titles. The one constructor
-/// for both the install and a [`relocalize`] rebuild, so the two cannot drift.
-fn build_menu(mtm: MainThreadMarker, target: &MenuTarget) -> Retained<objc2_app_kit::NSMenu> {
-    let menu = status_item::new_menu(mtm);
+/// Fill the empty tray `menu` with the current locale's titles, each item
+/// sending its action to `target`.
+fn populate_menu(menu: &NSMenu, target: &MenuTarget) {
+    let mtm = target.mtm();
 
     let show = status_item::new_action_item(
         mtm,
@@ -377,7 +395,7 @@ fn build_menu(mtm: MainThreadMarker, target: &MenuTarget) -> Retained<objc2_app_
         "m",
     );
     menu.addItem(&show);
-    status_item::add_separator(&menu, mtm);
+    status_item::add_separator(menu, mtm);
 
     let settings = status_item::new_action_item(
         mtm,
@@ -403,7 +421,7 @@ fn build_menu(mtm: MainThreadMarker, target: &MenuTarget) -> Retained<objc2_app_
         "u",
     );
     menu.addItem(&updates);
-    status_item::add_separator(&menu, mtm);
+    status_item::add_separator(menu, mtm);
 
     let quit = status_item::new_action_item(
         mtm,
@@ -420,7 +438,6 @@ fn build_menu(mtm: MainThreadMarker, target: &MenuTarget) -> Retained<objc2_app_
         quit.setImage(Some(&image));
     }
     menu.addItem(&quit);
-    menu
 }
 
 #[cfg(test)]

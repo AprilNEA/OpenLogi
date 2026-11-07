@@ -62,7 +62,7 @@ const DORMANT_TIMEOUT: Duration = Duration::from_secs(60);
 pub(crate) async fn run(
     config: Config,
     shutdown_requests: ShutdownRequests,
-    #[cfg(target_os = "macos")] armed_tx: std::sync::mpsc::Sender<()>,
+    #[cfg(target_os = "macos")] armed_tx: std::sync::mpsc::Sender<Arc<ObservableState>>,
 ) {
     // Reconcile the agent's launch-at-login autostart and clear the legacy GUI
     // LaunchAgent, before `config` moves into the orchestrator.
@@ -101,16 +101,17 @@ struct Booted {
     capture_mouse_events: bool,
     #[cfg(target_os = "macos")]
     launch_at_login: bool,
-    /// Releases the main thread's tray loop once the agent arms.
+    /// Releases the main thread's tray loop once the agent arms, handing it
+    /// the state its menu is built from.
     #[cfg(target_os = "macos")]
-    armed_tx: std::sync::mpsc::Sender<()>,
+    armed_tx: std::sync::mpsc::Sender<Arc<ObservableState>>,
 }
 
 impl Booted {
     async fn bootstrap(
         config: Config,
         shutdown_requests: ShutdownRequests,
-        #[cfg(target_os = "macos")] armed_tx: std::sync::mpsc::Sender<()>,
+        #[cfg(target_os = "macos")] armed_tx: std::sync::mpsc::Sender<Arc<ObservableState>>,
     ) -> Option<Self> {
         // Read before `config` moves into the orchestrator.
         let capture_mouse_events = config.app_settings.capture_mouse_events;
@@ -224,7 +225,7 @@ impl Wanted {
             ..
         } = self.0;
         #[cfg(target_os = "macos")]
-        let _ = armed_tx.send(());
+        let _ = armed_tx.send(Arc::clone(&core.observable));
         #[cfg(target_os = "macos")]
         armed_session::record();
         overlay::spawn();
