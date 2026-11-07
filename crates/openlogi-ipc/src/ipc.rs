@@ -290,6 +290,27 @@ pub struct AgentStatus {
     pub virtual_keyboard: VirtualKeyboardStatus,
 }
 
+impl AgentStatus {
+    /// Whether Secure Event Input is pausing key bindings right now, and if
+    /// so the app macOS attributes it to (`None` inside when it names none).
+    /// `has_key_bindings` is whether the user bound any key through the OS
+    /// hook.
+    ///
+    /// Mouse buttons, scrolling, gestures and HID++-diverted controls keep
+    /// working under Secure Event Input, so it pauses something only when
+    /// such a binding exists and the hook that would run it is installed.
+    #[must_use]
+    pub fn secure_input_pausing_keys(
+        &self,
+        has_key_bindings: bool,
+    ) -> Option<Option<&ForegroundApp>> {
+        match &self.secure_input {
+            SecureInput::On(app) if has_key_bindings && self.hook_installed => Some(app.as_ref()),
+            SecureInput::On(_) | SecureInput::Off => None,
+        }
+    }
+}
+
 /// Status and inventory as one poll result. Kept together so the GUI never
 /// pairs inventory readiness from one orchestrator state with the inventory
 /// list from another.
