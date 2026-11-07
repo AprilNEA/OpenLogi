@@ -43,7 +43,14 @@ use crate::shutdown::{ShutdownRequest, ShutdownRequestSender};
 
 /// How often to stat the executable: one `metadata` call per tick — noise next
 /// to the 2 s HID enumerate — while keeping the update-to-restart window short.
+#[cfg(not(target_os = "windows"))]
 const BINARY_CHECK_PERIOD: Duration = Duration::from_secs(10);
+/// Windows ticks once a minute so an idle agent wakes less. A running image
+/// cannot be deleted there, so an uninstaller stops the agent before the
+/// absence verdict could matter, and an update settles within two minutes
+/// instead of twenty seconds.
+#[cfg(target_os = "windows")]
+const BINARY_CHECK_PERIOD: Duration = Duration::from_secs(60);
 
 /// What "the binary changed" means: a different size or mtime at the same
 /// path. Every real update path rewrites the file, so content hashing would
@@ -80,9 +87,9 @@ fn sight(path: &Path) -> Sighting {
 
 /// How many consecutive ticks with nothing at our path mean the app is gone
 /// rather than being replaced. At [`BINARY_CHECK_PERIOD`] that is 30 s of
-/// absence — far longer than the unlink/write window of any install path, and
-/// short enough that an uninstall does not leave an armed event tap behind for
-/// long.
+/// absence (3 min on Windows) — far longer than the unlink/write window of any
+/// install path, and short enough that an uninstall does not leave an armed
+/// event tap behind for long.
 const MISSING_TICKS_UNTIL_GONE: u32 = 3;
 
 /// What one watch tick concluded.
