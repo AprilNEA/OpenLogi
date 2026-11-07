@@ -200,6 +200,10 @@ fn bolt_receiver_node(tag: &str) -> NodeInfo {
 /// Timeouts shrunk to test scale, in the production proportions: the slot
 /// probe and the drain fit the receiver budget with room, and the register
 /// lock wait is long enough for a holder to release inside it.
+///
+/// The room is 400 ms, which one scheduling stall on a loaded CI runner can
+/// take (#2414). A test that checks what the probe assembled, not when it
+/// gives up, widens `receiver` well past the silent slot's wait.
 fn quick_timeouts() -> ProbeTimeouts {
     ProbeTimeouts {
         register_lock: Duration::from_secs(2),
@@ -491,7 +495,10 @@ fn bolt_receiver_with_a_two_chunk_codename(request: &[u8]) -> Option<Vec<u8>> {
 #[tokio::test]
 async fn a_bolt_slot_without_a_marketing_name_reads_both_codename_chunks() {
     let info = bolt_receiver_node("two-chunk-codename");
-    let timeouts = quick_timeouts();
+    let timeouts = ProbeTimeouts {
+        receiver: Duration::from_secs(3),
+        ..quick_timeouts()
+    };
     let (raw, _handle) =
         ScriptedRawHidChannel::with_responder(bolt_receiver_with_a_two_chunk_codename);
     let channel = scripted_channel(raw.presenting_as(BOLT_RECEIVER_PID)).await;
@@ -517,7 +524,10 @@ async fn a_bolt_slot_without_a_marketing_name_reads_both_codename_chunks() {
 #[tokio::test]
 async fn a_bolt_slot_is_named_by_its_marketing_name_over_the_truncated_register() {
     let info = bolt_receiver_node("truncated-codename");
-    let timeouts = quick_timeouts();
+    let timeouts = ProbeTimeouts {
+        receiver: Duration::from_secs(3),
+        ..quick_timeouts()
+    };
     let (raw, _handle) =
         ScriptedRawHidChannel::with_responder(bolt_receiver_with_a_truncated_codename);
     let channel = scripted_channel(raw.presenting_as(BOLT_RECEIVER_PID)).await;
