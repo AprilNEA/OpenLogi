@@ -447,6 +447,8 @@ impl DeviceOp {
         let write = openlogi_hid::write::LightingWrite {
             method: openlogi_hid::LightingMethod::Auto,
             color: openlogi_core::color::Rgb::new(r, g, b),
+            keys: lighting_keys(lighting),
+            animation: lighting_animation(lighting),
         };
         openlogi_hid::lighting::LightingJob::spawn(&self.route, move |cancel| async move {
             let _lease = tokio::time::timeout(WRITE_TIMEOUT, receiver_access.acquire_for_io())
@@ -1583,10 +1585,54 @@ pub fn lighting_rgb(lighting: &Lighting) -> (u8, u8, u8) {
     if !lighting.enabled {
         return (0, 0, 0);
     }
-    let (r, g, b) = lighting.color.components();
-    let scale =
-        |c: u8| u8::try_from(u16::from(c) * u16::from(lighting.brightness) / 100).unwrap_or(c);
-    (scale(r), scale(g), scale(b))
+    dimmed(lighting.color, lighting.brightness).components()
+}
+
+/// Resolve a [`Lighting`]'s per-key colours to `(HID keyboard usage, colour)`
+/// pairs, scaled by brightness like [`lighting_rgb`]. Empty when the lighting
+/// is off: every key then takes the black of the static colour.
+#[must_use]
+pub fn lighting_keys(lighting: &Lighting) -> Vec<(u8, openlogi_core::color::Rgb)> {
+    if !lighting.enabled {
+        return Vec::new();
+    }
+    lighting
+        .keys
+        .iter()
+        .map(|(key, &color)| (key.usage(), dimmed(color, lighting.brightness)))
+        .collect()
+}
+
+/// Resolve a [`Lighting`]'s effect to the firmware animation that runs it,
+/// at the configured pace or the effect's own. `None` for a still colour,
+/// and while the lighting is off. A pace is held to 0.1–60 s.
+#[must_use]
+pub fn lighting_animation(lighting: &Lighting) -> Option<openlogi_hid::write::LightingAnimation> {
+    use openlogi_core::config::LightingEffect;
+    use openlogi_hid::write::LightingAnimation;
+
+    if !lighting.enabled {
+        return None;
+    }
+    let period_ms = lighting
+        .period_ms
+        .unwrap_or_else(|| lighting.effect.default_period_ms())
+        .clamp(100, 60_000);
+    match lighting.effect {
+        LightingEffect::Static => None,
+        LightingEffect::Breathing => Some(LightingAnimation::Breathing { period_ms }),
+        LightingEffect::Cycle => Some(LightingAnimation::Cycle {
+            period_ms,
+            intensity: lighting.brightness,
+        }),
+        LightingEffect::Ripple => Some(LightingAnimation::Ripple { period_ms }),
+    }
+}
+
+fn dimmed(color: openlogi_core::color::Rgb, brightness: u8) -> openlogi_core::color::Rgb {
+    let (r, g, b) = color.components();
+    let scale = |c: u8| u8::try_from(u16::from(c) * u16::from(brightness) / 100).unwrap_or(c);
+    openlogi_core::color::Rgb::new(scale(r), scale(g), scale(b))
 }
 
 /// Bound any single HID++ call by [`WRITE_TIMEOUT`] so an asleep / unresponsive
@@ -2537,5 +2583,63 @@ mod tests {
         let started = tokio::time::Instant::now();
 
         assert_eq!(within_led_budget(started, async { 7 }).await, Some(7));
+    }
+
+    #[test]
+    fn key_colours_take_the_brightness_and_go_dark_with_the_lighting() {
+        use openlogi_core::color::Rgb;
+
+        let mut lighting = Lighting {
+            brightness: 50,
+            keys: [("Esc", "ff0000"), ("LShift", "00ff80")]
+                .into_iter()
+                .map(|(key, color)| {
+                    (
+                        key.parse().expect("a known key"),
+                        color.parse().expect("valid hex"),
+                    )
+                })
+                .collect(),
+            ..Lighting::default()
+        };
+        assert_eq!(
+            lighting_keys(&lighting),
+            [
+                (0x29, Rgb::new(0x7f, 0, 0)),
+                (0xe1, Rgb::new(0, 0x7f, 0x40))
+            ]
+        );
+
+        lighting.enabled = false;
+        assert!(lighting_keys(&lighting).is_empty());
+        assert_eq!(lighting_animation(&lighting), None);
+        assert_eq!(lighting_rgb(&lighting), (0, 0, 0));
+    }
+
+    #[test]
+    fn an_effect_runs_at_its_own_pace_unless_one_is_set() {
+        use openlogi_core::config::LightingEffect;
+        use openlogi_hid::write::LightingAnimation;
+
+        let mut lighting = Lighting {
+            effect: LightingEffect::Cycle,
+            brightness: 60,
+            ..Lighting::default()
+        };
+        assert_eq!(
+            lighting_animation(&lighting),
+            Some(LightingAnimation::Cycle {
+                period_ms: 5000,
+                intensity: 60,
+            })
+        );
+        lighting.effect = LightingEffect::Ripple;
+        lighting.period_ms = Some(20);
+        assert_eq!(
+            lighting_animation(&lighting),
+            Some(LightingAnimation::Ripple { period_ms: 100 })
+        );
+        lighting.effect = LightingEffect::Static;
+        assert_eq!(lighting_animation(&lighting), None);
     }
 }

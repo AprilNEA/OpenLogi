@@ -38,7 +38,7 @@ use openlogi_core::binding::{
     GridKey, GridSlot, KeyCombo, KeypadPage, ModeKey,
 };
 use openlogi_core::config::{
-    ConfigRevision, FlowPeerName, FlowPublicKey, Lighting, ScrollResolution,
+    ConfigRevision, FlowPeerName, FlowPublicKey, Lighting, LightingEffect, ScrollResolution,
 };
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, ChangedOnLight, DeviceInventory,
@@ -1103,17 +1103,6 @@ fn device_settings_payloads() {
     let smartshift: Result<SmartShiftStatus, WriteError> = Ok(representative_smartshift_status());
     assert_wire(&smartshift, "0001103c");
 
-    // `Rgb` serializes as the same hex string the field used to hold raw, so
-    // the pinned bytes are identical to the pre-newtype encoding.
-    assert_wire(
-        &Lighting {
-            enabled: true,
-            color: "8000ff".parse().expect("valid hex"),
-            brightness: 80,
-        },
-        "010638303030666650",
-    );
-
     assert_wire(
         &ReceiverSelector::BoltUid("F00DCAFE".into()),
         "01084630304443414645",
@@ -1125,6 +1114,43 @@ fn device_settings_payloads() {
             uid: "F00DCAFE".into(),
         },
         "02fb48c5084630304443414645",
+    );
+}
+
+#[test]
+fn lighting() {
+    // `Rgb` serializes as the same hex string the field used to hold raw, so
+    // the pinned bytes are identical to the pre-newtype encoding. The key map
+    // always rides along, even empty, and so do the effect and its period:
+    // the config file omits them, the wire cannot.
+    let solid = Lighting {
+        enabled: true,
+        color: "8000ff".parse().expect("valid hex"),
+        brightness: 80,
+        keys: BTreeMap::new(),
+        effect: LightingEffect::Static,
+        period_ms: None,
+    };
+    assert_wire(&solid, "010638303030666650000000");
+    assert_wire(
+        &Lighting {
+            keys: BTreeMap::from([(
+                "Esc".parse().expect("a known key"),
+                "ff0000".parse().expect("valid hex"),
+            )]),
+            ..solid.clone()
+        },
+        "0106383030306666500103457363066666303030300000",
+    );
+    // Breathing is the second effect; 4000 ms takes bincode's three-byte
+    // `u16` form (0xfb, then little-endian).
+    assert_wire(
+        &Lighting {
+            effect: LightingEffect::Breathing,
+            period_ms: Some(4000),
+            ..solid
+        },
+        "010638303030666650000101fba00f",
     );
 }
 

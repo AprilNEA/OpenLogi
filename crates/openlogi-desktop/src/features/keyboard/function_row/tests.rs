@@ -361,6 +361,7 @@ fn control_slots_dedupe_repeats_and_skip_easy_switch() {
             width: 1872,
             height: 728,
         },
+        zones: Vec::new(),
         assignments: vec![control_assignment(0x00d1, 8.65, 13.8)],
     });
 
@@ -385,6 +386,7 @@ fn control_slots_dedupe_across_image_groups_keeping_the_keys_image_position() {
             width: 1872,
             height: 728,
         },
+        zones: Vec::new(),
         // Earlier in reading order (further left) and on another row.
         assignments: vec![
             control_assignment(0x010a, 5.0, 13.8),
@@ -641,6 +643,7 @@ fn legacy_asset(
                     width: origin.0,
                     height: origin.1,
                 },
+                zones: Vec::new(),
                 assignments,
             }],
         },
@@ -676,6 +679,7 @@ fn asset_with_controls(controls: &[(u16, f32, f32)]) -> ResolvedAsset {
                     width: 1872,
                     height: 728,
                 },
+                zones: Vec::new(),
                 assignments: controls
                     .iter()
                     .map(|&(cid, x, y)| control_assignment(cid, x, y))
@@ -727,6 +731,7 @@ fn keypad_marker_asset() -> ResolvedAsset {
                     width: 935,
                     height: 1105,
                 },
+                zones: Vec::new(),
                 assignments,
             }],
         },

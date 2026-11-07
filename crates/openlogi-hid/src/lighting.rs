@@ -163,6 +163,8 @@ pub async fn set_keyboard_color_with_on(
         LightingWrite {
             method,
             color: Rgb::new(r, g, b),
+            keys: Vec::new(),
+            animation: None,
         }
         .apply_on(&channel, || cancel.is_cancelled(), || gate.allows_io())
         .await

@@ -1,5 +1,5 @@
 # OpenLogi configuration example. Copy only the sections you need.
-schema_version = 11
+schema_version = 12
 selected_device = "receiver:aabbccdd:slot:1"
 
 [app_settings]
@@ -108,6 +108,13 @@ Bottom = { action = "ShowDesktop", label = "Desktop" }
 enabled = true
 color = "ff0000"
 brightness = 80
+# On a keyboard with mapped lighting zones, single keys can take their own
+# colour over `color`:
+# keys = { Esc = "ffffff", W = "ff00ff", A = "ff00ff", S = "ff00ff", D = "ff00ff" }
+# Or an animation the keyboard runs by itself, at its own pace unless
+# `period_ms` says otherwise:
+# effect = "breathing"
+# period_ms = 3000
 
 [devices."receiver:aabbccdd:slot:1".smartshift]
 mode = "ratchet"

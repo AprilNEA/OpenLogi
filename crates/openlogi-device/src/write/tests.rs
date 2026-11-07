@@ -809,6 +809,144 @@ async fn a_zone_walk_lights_each_zone_alone_and_can_go_back() -> Result<(), Writ
     Ok(())
 }
 
+/// The [`per_key_v2_scripted_response`] keyboard, identified through
+/// `0x0003` as a G515 LS TKL, whose zone map the registry knows.
+fn g515_scripted_response(request: &[u8]) -> Option<Vec<u8>> {
+    const DEVICE_INFO: u8 = 0x03;
+    if request.len() < 7 || !matches!(request[0], 0x10 | 0x11) {
+        return None;
+    }
+    let mut payload = [0u8; 16];
+    let long = match (request[2], request[3] >> 4) {
+        (0x00, 0x00) if u16::from_be_bytes([request[4], request[5]]) == 0x0003 => {
+            payload[0] = DEVICE_INFO;
+            false
+        }
+        // getDeviceInfo: the model ids sit at payload bytes 7..13.
+        (DEVICE_INFO, 0x00) => {
+            payload[7..13].copy_from_slice(&[0xb3, 0x89, 0x40, 0xb4, 0xc3, 0x55]);
+            true
+        }
+        _ => return per_key_v2_scripted_response(request),
+    };
+    let mut response = vec![0u8; if long { 20 } else { 7 }];
+    response[0] = if long { 0x11 } else { 0x10 };
+    response[1..4].copy_from_slice(&request[1..4]);
+    let payload_len = response.len() - 4;
+    response[4..].copy_from_slice(&payload[..payload_len]);
+    Some(response)
+}
+
+/// `(colour, zone ids)` of every `setRgbZonesSingleValue` request written.
+fn per_key_v2_paints(handle: &crate::replay::ReplayChannelHandle) -> Vec<([u8; 3], Vec<u8>)> {
+    handle
+        .written_reports()
+        .iter()
+        .filter(|report| report.len() == 20 && report[2] == 0x07 && report[3] >> 4 == 0x06)
+        .map(|report| {
+            let zones = report[7..20].iter().copied().take_while(|&zone| zone != 0);
+            ([report[4], report[5], report[6]], zones.collect())
+        })
+        .collect()
+}
+
+fn key_colour_write(keys: &[(u8, [u8; 3])]) -> LightingWrite {
+    let rgb = |[r, g, b]: [u8; 3]| openlogi_core::color::Rgb::new(r, g, b);
+    LightingWrite {
+        method: LightingMethod::Auto,
+        color: rgb([0, 0, 0xff]),
+        keys: keys
+            .iter()
+            .map(|&(usage, color)| (usage, rgb(color)))
+            .collect(),
+        animation: None,
+    }
+}
+
+#[tokio::test]
+async fn key_colours_paint_over_the_base_in_one_frame() -> Result<(), WriteError> {
+    let (raw, handle) = ScriptedRawHidChannel::with_responder(g515_scripted_response);
+    let channel = scripted_channel(raw).await;
+    let shared = SharedChannel::new(
+        channel,
+        DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xc355,
+        },
+    );
+    let (red, green) = ([0xff, 0, 0], [0, 0xff, 0]);
+    // A, C and D light zones 1, 3 and 4 on a G515. Esc's zone (0x26) is not
+    // one this keyboard reports, so it is left out.
+    let write = key_colour_write(&[(0x04, red), (0x06, red), (0x07, green), (0x29, red)]);
+
+    write.apply_on(&shared, || false, || true).await?;
+
+    assert_eq!(
+        per_key_v2_paints(&handle),
+        [
+            ([0, 0, 0xff], vec![1, 2, 3, 4]),
+            (red, vec![1, 3]),
+            (green, vec![4]),
+        ]
+    );
+    let commits = handle
+        .written_reports()
+        .iter()
+        .filter(|report| is_per_key_v2_commit(report))
+        .count();
+    assert_eq!(commits, 1, "the base and the keys commit as one frame");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_key_listed_twice_takes_its_last_colour() -> Result<(), WriteError> {
+    let (raw, handle) = ScriptedRawHidChannel::with_responder(g515_scripted_response);
+    let channel = scripted_channel(raw).await;
+    let shared = SharedChannel::new(
+        channel,
+        DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xc355,
+        },
+    );
+    let (red, green) = ([0xff, 0, 0], [0, 0xff, 0]);
+
+    key_colour_write(&[(0x04, red), (0x04, green), (0x04, red)])
+        .apply_on(&shared, || false, || true)
+        .await?;
+
+    // Grouping the two red entries first would have painted green over them.
+    assert_eq!(
+        per_key_v2_paints(&handle),
+        [([0, 0, 0xff], vec![1, 2, 3, 4]), (red, vec![1])]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn key_colours_on_an_unmapped_keyboard_paint_the_base_alone() -> Result<(), WriteError> {
+    // The same zones, but no 0x0003 to name the product: no zone map.
+    let (raw, handle) = ScriptedRawHidChannel::with_responder(per_key_v2_scripted_response);
+    let channel = scripted_channel(raw).await;
+    let shared = SharedChannel::new(
+        channel,
+        DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xc339,
+        },
+    );
+
+    key_colour_write(&[(0x04, [0xff, 0, 0])])
+        .apply_on(&shared, || false, || true)
+        .await?;
+
+    assert_eq!(
+        per_key_v2_paints(&handle),
+        [([0, 0, 0xff], vec![1, 2, 3, 4])]
+    );
+    Ok(())
+}
+
 fn scripted_response(request: &[u8]) -> Option<Vec<u8>> {
     if request.len() < 7 || !matches!(request[0], 0x10 | 0x11) {
         return None;
