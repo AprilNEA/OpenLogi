@@ -178,22 +178,22 @@ define_class!(
     impl MenuTarget {
         #[unsafe(method(openOpenLogi:))]
         fn open_openlogi(&self, _sender: Option<&AnyObject>) {
-            open_command(DeeplinkCommand::Show);
+            open_command(&DeeplinkCommand::Show);
         }
 
         #[unsafe(method(openSettings:))]
         fn open_settings(&self, _sender: Option<&AnyObject>) {
-            open_command(DeeplinkCommand::OpenSettings);
+            open_command(&DeeplinkCommand::OpenSettings);
         }
 
         #[unsafe(method(openAbout:))]
         fn open_about(&self, _sender: Option<&AnyObject>) {
-            open_command(DeeplinkCommand::OpenAbout);
+            open_command(&DeeplinkCommand::OpenAbout);
         }
 
         #[unsafe(method(checkForUpdates:))]
         fn check_for_updates(&self, _sender: Option<&AnyObject>) {
-            open_command(DeeplinkCommand::CheckForUpdates);
+            open_command(&DeeplinkCommand::CheckForUpdates);
         }
 
         #[unsafe(method(quitOpenLogi:))]
@@ -221,7 +221,7 @@ fn open_url(url: &str) {
 
 /// Route a GUI-directed [`DeeplinkCommand`] through the `openlogi://` scheme.
 /// macOS launches the GUI (cold start) or hands the URL to the running app.
-fn open_command(command: DeeplinkCommand) {
+fn open_command(command: &DeeplinkCommand) {
     open_url(&command.to_url());
 }
 

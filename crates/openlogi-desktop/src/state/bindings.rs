@@ -209,6 +209,32 @@ impl AppState {
         self.set_editing_layer(app.map(Layer::App))
     }
 
+    /// Open, in the button and the Actions Ring editors, the profile the
+    /// active device runs the foreground application `app` under — matched as
+    /// the agent matches it, so an `exe:` or alias profile that already covers
+    /// `app` opens rather than a new draft keyed by `app` itself.
+    pub fn open_app_profile(&mut self, app: &str) -> StateEvents {
+        let Some(key) = self
+            .current_record()
+            .and_then(DeviceRecord::persistent_config_key)
+        else {
+            return StateEvents::none();
+        };
+        let buttons = self
+            .config
+            .app_profile_for(key, app)
+            .unwrap_or(app)
+            .to_owned();
+        let ring = self
+            .config
+            .action_ring(key)
+            .profile_for(&self.config.apps, app)
+            .unwrap_or(app)
+            .to_owned();
+        self.set_editing_app(Some(buttons))
+            .and(self.set_editing_action_ring_app(Some(ring)))
+    }
+
     /// Which bindings the mouse editor edits.
     #[must_use]
     pub fn binding_layer(&self) -> BindingLayer {
