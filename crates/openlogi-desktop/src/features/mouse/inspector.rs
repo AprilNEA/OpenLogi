@@ -28,7 +28,9 @@ use crate::features::binding_editor::{
 use crate::state::AppState;
 use crate::ui::action::localized_action_label;
 use crate::ui::components::{MenuRow, Toggle, control_button, control_input, toggle_row};
-use crate::ui::theme::{self, ACCENT_BLUE, Palette, PressableStyle as _, Typography as _};
+use crate::ui::theme::{
+    self, ACCENT_BLUE, Palette, PressableStyle as _, SelectableStyle as _, Typography as _,
+};
 
 pub(super) const INSPECTOR_W: f32 = 328.;
 
@@ -903,31 +905,27 @@ fn custom_shortcut_editor(
     let view = picker.view;
     let submit_input = input.clone();
     let on_pick = on_pick.clone();
-    let mode_button = |option: ShortcutMode| {
-        let (id, label) = match option {
-            ShortcutMode::Tap => ("tap", tr!("actions.shortcut_tap")),
-            ShortcutMode::Hold => ("hold", tr!("actions.shortcut_hold")),
-        };
-        let view = view.clone();
-        control_button(format!("{id_prefix}-shortcut-{id}"))
-            .debug_selector(move || format!("{id_prefix}-shortcut-{id}"))
-            .selected(mode == option)
-            .label(label)
-            .on_click(move |_, _, cx| {
-                view.update(cx, |view, cx| {
-                    view.shortcut_mode = option;
-                    cx.notify();
-                });
-            })
-    };
-    let tap_button = mode_button(ShortcutMode::Tap);
-    let hold_button = mode_button(ShortcutMode::Hold);
     let record_view = view.clone();
     let view = view.clone();
     v_flex()
         .gap_1()
         .child(editor_section(tr!("action_ring.custom_shortcut"), pal))
-        .child(h_flex().gap_2().child(tap_button).child(hold_button))
+        .child(
+            h_flex()
+                .gap_2()
+                .child(shortcut_mode_button(
+                    id_prefix,
+                    picker,
+                    ShortcutMode::Tap,
+                    pal,
+                ))
+                .child(shortcut_mode_button(
+                    id_prefix,
+                    picker,
+                    ShortcutMode::Hold,
+                    pal,
+                )),
+        )
         .child(
             h_flex()
                 .gap_2()
@@ -996,6 +994,35 @@ fn custom_shortcut_editor(
                         ShortcutError::ShiftedSymbol => tr!("actions.shifted_symbol_unrecordable"),
                     }),
             )
+        })
+}
+
+/// One Tap / Hold segment of the custom shortcut editor; the current mode
+/// takes the selected border and fill.
+fn shortcut_mode_button(
+    id_prefix: &'static str,
+    picker: &ActionPickerContext<'_>,
+    option: ShortcutMode,
+    pal: Palette,
+) -> impl IntoElement {
+    let (id, label) = match option {
+        ShortcutMode::Tap => ("tap", tr!("actions.shortcut_tap")),
+        ShortcutMode::Hold => ("hold", tr!("actions.shortcut_hold")),
+    };
+    let selected = picker.shortcut_mode == option;
+    let view = picker.view.clone();
+    control_button(format!("{id_prefix}-shortcut-{id}"))
+        .debug_selector(move || format!("{id_prefix}-shortcut-{id}"))
+        .selected(selected)
+        .when(selected, |button| {
+            button.selected_border(true, pal).selected_fill(true)
+        })
+        .label(label)
+        .on_click(move |_, _, cx| {
+            view.update(cx, |view, cx| {
+                view.shortcut_mode = option;
+                cx.notify();
+            });
         })
 }
 

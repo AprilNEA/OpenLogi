@@ -16,7 +16,7 @@ use openlogi_core::config::{GKeyOwner, GamingKeyMode};
 use super::FunctionRowView;
 use crate::state::{AppState, GamingKeys};
 use crate::ui::components::{Toggle, control_input, save_cancel_footer};
-use crate::ui::theme::{self, Palette, Typography as _};
+use crate::ui::theme::{self, Palette, SelectableStyle as _, Typography as _};
 
 /// The bar over a G-series keyboard: the takeover switch, then — while
 /// OpenLogi runs the G-keys of a keyboard with M keys — the mode, and in
@@ -26,6 +26,7 @@ pub(super) fn gaming_bar(
     editing: GKeyProfile,
     view: &Entity<FunctionRowView>,
     pal: &Palette,
+    cx: &App,
 ) -> impl IntoElement {
     let takeover = Toggle::new("g-key-software-control")
         .selected(gaming.software_control)
@@ -48,6 +49,7 @@ pub(super) fn gaming_bar(
                 Button::new(mode_id(*mode))
                     .label(mode_label(*mode))
                     .selected(*mode == gaming.mode)
+                    .selected_segment(*mode == gaming.mode, cx)
             }))
             .on_click(move |indices: &Vec<usize>, _: &mut Window, cx: &mut App| {
                 if let Some(mode) = indices.first().and_then(|index| modes.get(*index)) {
@@ -75,6 +77,7 @@ pub(super) fn gaming_bar(
                         Button::new(("g-key-profile", index))
                             .label(profile.label())
                             .selected(*profile == editing)
+                            .selected_segment(*profile == editing, cx)
                     }))
                     .on_click(move |indices: &Vec<usize>, _: &mut Window, cx: &mut App| {
                         if let Some(profile) = indices

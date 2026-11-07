@@ -398,13 +398,14 @@ impl FunctionRowView {
         gaming: Option<GamingKeys>,
         view: &Entity<Self>,
         pal: &Palette,
+        cx: &App,
     ) -> Option<AnyElement> {
         if keypad {
             return Some(
-                keypad_page_bar(self.keypad_page, last_page, view, pal).into_any_element(),
+                keypad_page_bar(self.keypad_page, last_page, view, pal, cx).into_any_element(),
             );
         }
-        gaming.map(|gaming| gaming_bar(gaming, self.g_profile, view, pal).into_any_element())
+        gaming.map(|gaming| gaming_bar(gaming, self.g_profile, view, pal, cx).into_any_element())
     }
 
     /// Edit the G-keys of `profile`, dropping any open editor when it moves.
@@ -588,7 +589,7 @@ impl Render for FunctionRowView {
                 .into_any_element()
         };
         let (inspector, column_h) = self.inspector(selected, &slots, &view, &pal, cx);
-        let page_bar = self.device_bar(keypad || keypad_photo, last_page, gaming, &view, &pal);
+        let page_bar = self.device_bar(keypad || keypad_photo, last_page, gaming, &view, &pal, cx);
 
         let row = InspectorRow::new(device, inspector, (panel_w, column_h));
         keys_tab_content(page_bar, row, &view)
