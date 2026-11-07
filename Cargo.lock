@@ -6121,6 +6121,7 @@ dependencies = [
  "openlogi-camera",
  "openlogi-core",
  "openlogi-device",
+ "openlogi-device-registry",
  "openlogi-fixture",
  "openlogi-hook",
  "openlogi-ipc",

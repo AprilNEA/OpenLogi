@@ -742,6 +742,10 @@ applying_light_setting = "Verlichtingsinstelling toepassen…"
 auto_on_with_camera = "Automatisch aan met camera"
 camera_light_auto_description = "Schakel de verlichting in zodra een camera wordt gebruikt en uit wanneer geen camera actief is."
 keyboard_lighting_description = "Toegepast door OpenLogi zolang het draait, niet opgeslagen op het toetsenbord."
+per_key_hint = "Klik op toetsen om ze te selecteren en kies dan een kleur. Zonder geselecteerde toetsen geldt de kleur voor het hele toetsenbord."
+clear_selection = "Selectie wissen"
+use_keyboard_color = "Toetsenbordkleur gebruiken"
+reset_all_keys = "Alle toetsen herstellen"
 
 [action_ring]
 actions_ring = "Actiering"

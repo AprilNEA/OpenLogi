@@ -2118,3 +2118,68 @@ fn a_gaming_keyboard_gets_no_keys_or_mouse_tabs() {
     assert!(!tabs.contains(&DetailTab::Buttons) && !tabs.contains(&DetailTab::ActionsRing));
     assert!(tabs.contains(&DetailTab::Lighting));
 }
+
+/// A G515 LS TKL as its USB receiver reports it, with a depot drawing Esc,
+/// the ISO `#` key and an ISO Enter's L shape around it.
+fn per_key_keyboard() -> DeviceRecord {
+    let json = r#"{"images":[{"key":"device_image","origin":{"width":2048,"height":845},
+        "zones":[{"id":"PERKEY_KEYBOARD","components":[
+            {"id":50,"renderings":[{"type":"rect","rect":{"x":1426,"y":496,"width":105,"height":103}}]},
+            {"id":40,"renderings":[{"type":"path","d":"M1509 385h160v215h-160z"}]},
+            {"id":41,"renderings":[{"type":"rect","rect":{"x":29,"y":145,"width":105,"height":104}}]}
+        ]}]}]}"#;
+    let mut keyboard = record(DeviceKind::Keyboard, None);
+    keyboard.model_info = Some(DeviceModelInfo {
+        entity_count: 1,
+        serial_number: None,
+        unit_id: [0; 4],
+        transports: DeviceTransports {
+            usb: true,
+            equad: true,
+            btle: true,
+            bluetooth: false,
+        },
+        model_ids: [0xb389, 0x40b4, 0xc355],
+        extended_model_id: 0,
+    });
+    keyboard.asset = Some(ResolvedAsset {
+        depot: "g515_ls_tkl".to_string(),
+        display_name: "G515 LS TKL".to_string(),
+        kind: Some(DeviceKind::Keyboard),
+        image_path: std::path::PathBuf::from("/tmp/g515.webp"),
+        hero_image_path: None,
+        glow: None,
+        metadata: serde_json::from_str(json).expect("depot parses"),
+        png_width: 2048,
+        png_height: 845,
+        side_view: None,
+    });
+    keyboard
+}
+
+/// The photo editor shows for a keyboard with a known zone map and a depot
+/// that draws its keys, with the Enter's outline box painted under the `#`
+/// key it overlaps.
+#[test]
+fn per_key_photo_needs_a_zone_map_and_drawn_keys() {
+    use crate::features::lighting::per_key::per_key_photo;
+
+    let photo = per_key_photo(&per_key_keyboard()).expect("per-key photo");
+    assert_eq!(photo.key_order(), ["Enter", "IsoHash", "Esc"]);
+
+    let mut unknown_model = per_key_keyboard();
+    if let Some(info) = unknown_model.model_info.as_mut() {
+        info.model_ids = [0xb35b, 0, 0];
+    }
+    assert!(per_key_photo(&unknown_model).is_none());
+
+    let mut no_drawing = per_key_keyboard();
+    if let Some(asset) = no_drawing.asset.as_mut() {
+        asset.metadata = openlogi_assets::Metadata::default();
+    }
+    assert!(per_key_photo(&no_drawing).is_none());
+
+    let mut asleep = per_key_keyboard();
+    asleep.model_info = None;
+    assert!(per_key_photo(&asleep).is_none());
+}
