@@ -153,7 +153,8 @@ fn a_low_battery_card_names_the_device_and_its_charge() {
         notice_text(&notice.kind),
         NoticeText {
             title: "Low battery".into(),
-            detail: "MX Master 3S · 15%".into(),
+            device: "MX Master 3S".into(),
+            charge: Some("15%".into()),
         }
     );
 }
@@ -161,8 +162,7 @@ fn a_low_battery_card_names_the_device_and_its_charge() {
 #[test]
 fn a_nameless_device_is_named_by_its_kind_and_a_level_only_reading_shows_no_percentage() {
     let notice = low_battery(1, None, None);
-    assert_eq!(
-        notice_text(&notice.kind).detail,
-        SharedString::from("Mouse")
-    );
+    let text = notice_text(&notice.kind);
+    assert_eq!(text.device, SharedString::from("Mouse"));
+    assert_eq!(text.charge, None);
 }

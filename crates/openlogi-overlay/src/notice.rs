@@ -15,7 +15,8 @@ use std::rc::Rc;
 use gpui::{
     AppContext as _, Context, FontWeight, Hsla, InteractiveElement, IntoElement, ParentElement,
     Pixels, Render, SharedString, Size, StatefulInteractiveElement as _, Styled, Window,
-    WindowBackgroundAppearance, WindowKind, WindowOptions, div, px, size, svg,
+    WindowBackgroundAppearance, WindowKind, WindowOptions, div, prelude::FluentBuilder as _, px,
+    size, svg,
 };
 use openlogi_ipc::{Notice, NoticeKind};
 use openlogi_ui::action_icons::LOW_BATTERY_ICON;
@@ -151,11 +152,16 @@ pub(crate) fn notice_window_options() -> WindowOptions {
     }
 }
 
-/// The two lines of a card: what happened, and to which device.
+/// The text of a card: what happened, to which device, and at what charge.
+/// The charge stays apart from the name so a long name truncates without
+/// taking the number — the part worth reading — with it.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct NoticeText {
     pub(crate) title: SharedString,
-    pub(crate) detail: SharedString,
+    pub(crate) device: SharedString,
+    /// The charge as a percentage, such as "15%"; none when the device
+    /// reports only a coarse level.
+    pub(crate) charge: Option<SharedString>,
 }
 
 /// The text of one notice, in the active locale.
@@ -169,13 +175,12 @@ pub(crate) fn notice_text(kind: &NoticeKind) -> NoticeText {
             let device = name
                 .clone()
                 .unwrap_or_else(|| rust_i18n::t!(kind.translation_key()).into_owned());
-            let detail = match battery.percentage {
-                Some(percentage) => format!("{device} · {percentage}%"),
-                None => device,
-            };
             NoticeText {
                 title: rust_i18n::t!("device.low_battery").into_owned().into(),
-                detail: detail.into(),
+                device: device.into(),
+                charge: battery
+                    .percentage
+                    .map(|percentage| format!("{percentage}%").into()),
             }
         }
     }
@@ -247,7 +252,11 @@ pub(crate) struct NoticeView {
 
 impl NoticeView {
     fn card(&self, notice: &Notice) -> impl IntoElement + use<> {
-        let NoticeText { title, detail } = notice_text(&notice.kind);
+        let NoticeText {
+            title,
+            device,
+            charge,
+        } = notice_text(&notice.kind);
         let id = notice.id;
         let notice_shelf = Rc::clone(&self.shelf);
         div()
@@ -274,6 +283,7 @@ impl NoticeView {
                 div()
                     .flex()
                     .flex_col()
+                    .flex_1()
                     .min_w_0()
                     .child(
                         div()
@@ -282,7 +292,19 @@ impl NoticeView {
                             .text_color(TITLE)
                             .child(title),
                     )
-                    .child(div().text_xs().text_color(DETAIL).truncate().child(detail)),
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap(px(6.0))
+                            .text_xs()
+                            .text_color(DETAIL)
+                            // The name gives way; the charge never does.
+                            .child(div().min_w_0().truncate().child(device))
+                            .when_some(charge, |line, charge| {
+                                line.child(div().flex_none().child(format!("· {charge}")))
+                            }),
+                    ),
             )
             .on_click(move |_, window, cx| {
                 // This window is checked out of the app while its handler
