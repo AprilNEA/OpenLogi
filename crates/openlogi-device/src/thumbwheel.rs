@@ -9,46 +9,29 @@
 //! and re-synthesises horizontal scroll from the rotation deltas to keep
 //! scrolling working.
 //!
-//! `hidpp 0.2` ships no typed wrapper, so we re-implement the functions
-//! OpenLogi needs: `getThumbwheelInfo` (capabilities — notably whether the wheel
-//! reports a single tap), `getThumbwheelStatus` (the reporting state to hand
-//! back), `setThumbwheelReporting` (enter/leave diverted mode), and decode the
-//! unsolicited `thumbwheelEvent`. Wire format from `x2150_thumbwheel_v0.pdf`.
+//! The wire format — `getThumbwheelInfo`, `getThumbwheelStatus`,
+//! `setThumbwheelReporting` and the unsolicited `thumbwheelEvent` — is
+//! `hidpp`'s typed [`ThumbwheelFeature`]. This module is the capture session's
+//! view of it: which reports belong to a roll, what a diverted increment is
+//! worth natively, and which reporting state to hand back.
 
 use std::sync::Arc;
 
 use hidpp::{
     channel::HidppChannel,
-    nibble::U4,
+    feature::{
+        CreatableFeature,
+        thumbwheel::{
+            ThumbwheelCapabilities, ThumbwheelFeature, ThumbwheelReportingMode,
+            ThumbwheelRotationStatus, ThumbwheelStatusUpdate,
+        },
+    },
     protocol::v20::{self, Hidpp20Error},
 };
 use serde::{Deserialize, Serialize};
 
 /// `Thumbwheel` HID++ feature ID.
-pub const FEATURE_ID: u16 = 0x2150;
-
-/// `getThumbwheelInfo` function ID.
-const FN_GET_INFO: u8 = 0;
-/// `getThumbwheelStatus` function ID.
-const FN_GET_STATUS: u8 = 1;
-/// `setThumbwheelReporting` function ID.
-const FN_SET_REPORTING: u8 = 2;
-
-/// Reporting-mode value: native HID scroll.
-const MODE_NATIVE: u8 = 0;
-/// Reporting-mode value: diverted to HID++ events.
-const MODE_DIVERTED: u8 = 1;
-
-/// `c_single_tap` capability bit in `getThumbwheelInfo` byte 5.
-const CAP_SINGLE_TAP: u8 = 0x08;
-/// `invert` bit in `getThumbwheelStatus` byte 1.
-const STATUS_INVERTED: u8 = 0x01;
-/// `single_tap` bit in `thumbwheelEvent` byte 5.
-const EV_SINGLE_TAP: u8 = 0x08;
-/// `proxy` bit in `thumbwheelEvent` byte 5.
-const EV_PROXY: u8 = 0x04;
-/// `touch` bit in `thumbwheelEvent` byte 5.
-const EV_TOUCH: u8 = 0x02;
+pub const FEATURE_ID: u16 = ThumbwheelFeature::ID;
 
 /// Where a `thumbwheelEvent` sits in the life cycle of one roll
 /// (`thumbwheelEvent` byte 4).
@@ -86,22 +69,22 @@ pub enum RotationStatus {
     Other(u8),
 }
 
-impl RotationStatus {
-    /// Decode `thumbwheelEvent` byte 4. A value outside the four the spec
-    /// defines stays [`RotationStatus::Other`], as in the typed `hidpp`
-    /// wrapper: reading it as `Inactive` would claim a settled wheel and let
-    /// the report's tap bit fire a bound action.
-    #[must_use]
-    fn from_byte(byte: u8) -> Self {
-        match byte {
-            0 => Self::Inactive,
-            1 => Self::Start,
-            2 => Self::Active,
-            3 => Self::Stop,
-            other => Self::Other(other),
+impl From<ThumbwheelRotationStatus> for RotationStatus {
+    /// A value outside the four the spec defines stays
+    /// [`RotationStatus::Other`]: reading it as `Inactive` would claim a
+    /// settled wheel and let the report's tap bit fire a bound action.
+    fn from(status: ThumbwheelRotationStatus) -> Self {
+        match status {
+            ThumbwheelRotationStatus::Inactive => Self::Inactive,
+            ThumbwheelRotationStatus::Start => Self::Start,
+            ThumbwheelRotationStatus::Active => Self::Active,
+            ThumbwheelRotationStatus::Stop => Self::Stop,
+            other => Self::Other(other.into()),
         }
     }
+}
 
+impl RotationStatus {
     /// Whether this report says the wheel is at rest, the only status on
     /// which a tap bit is the user's own. A roll's reports, its `Stop`
     /// included, carry the tap bit of the contact that rolled the wheel, and
@@ -195,11 +178,11 @@ pub enum ReportingMode {
 }
 
 impl ReportingMode {
-    /// The `setThumbwheelReporting` byte 0 value for this mode.
-    fn to_byte(self) -> u8 {
+    /// The mode `setThumbwheelReporting` writes for this one.
+    fn wire(self) -> ThumbwheelReportingMode {
         match self {
-            Self::Native => MODE_NATIVE,
-            Self::Diverted => MODE_DIVERTED,
+            Self::Native => ThumbwheelReportingMode::Native,
+            Self::Diverted => ThumbwheelReportingMode::Diverted,
         }
     }
 }
@@ -214,15 +197,19 @@ pub struct ThumbwheelStatus {
 }
 
 impl ThumbwheelStatus {
-    fn from_payload(p: &[u8; 16]) -> Result<Self, Hidpp20Error> {
-        let mode = match p[0] {
-            MODE_NATIVE => ReportingMode::Native,
-            MODE_DIVERTED => ReportingMode::Diverted,
+    /// `hidpp` already refuses a mode byte the spec does not define; a mode a
+    /// later `hidpp` adds is refused here the same way.
+    fn from_wire(
+        status: hidpp::feature::thumbwheel::ThumbwheelStatus,
+    ) -> Result<Self, Hidpp20Error> {
+        let mode = match status.reporting_mode {
+            ThumbwheelReportingMode::Native => ReportingMode::Native,
+            ThumbwheelReportingMode::Diverted => ReportingMode::Diverted,
             _ => return Err(Hidpp20Error::UnsupportedResponse),
         };
         Ok(Self {
             mode,
-            direction: WheelDirection::from_inverted(p[1] & STATUS_INVERTED != 0),
+            direction: WheelDirection::from_inverted(status.direction_inverted),
         })
     }
 }
@@ -282,24 +269,23 @@ pub fn decode_event(
     {
         return None;
     }
-    let p = msg.extend_payload();
+    let update = ThumbwheelStatusUpdate::from_payload(&msg.extend_payload());
     Some(ThumbwheelEvent {
-        rotation: i16::from_be_bytes([p[0], p[1]]),
-        rotation_status: RotationStatus::from_byte(p[4]),
-        single_tap: p[5] & EV_SINGLE_TAP != 0,
-        touch: p[5] & EV_TOUCH != 0,
-        proxy: p[5] & EV_PROXY != 0,
+        rotation: update.rotation,
+        rotation_status: update.rotation_status.into(),
+        single_tap: update.single_tap,
+        touch: update.touch,
+        proxy: update.proxy,
     })
 }
 
 /// `Thumbwheel` accessor bound to one device + resolved feature index.
 ///
 /// Construct with the feature index from the device's root feature
-/// (`get_feature(`[`FEATURE_ID`]`)`). Cheap to clone (an `Arc` plus two indices).
+/// (`get_feature(`[`FEATURE_ID`]`)`). Cheap to clone (an `Arc` plus an index).
 #[derive(Clone)]
 pub struct Thumbwheel {
-    chan: Arc<HidppChannel>,
-    device_index: u8,
+    feature: Arc<ThumbwheelFeature>,
     feature_index: u8,
 }
 
@@ -308,8 +294,7 @@ impl Thumbwheel {
     #[must_use]
     pub fn new(chan: Arc<HidppChannel>, device_index: u8, feature_index: u8) -> Self {
         Self {
-            chan,
-            device_index,
+            feature: Arc::new(ThumbwheelFeature::new(chan, device_index, feature_index)),
             feature_index,
         }
     }
@@ -321,39 +306,24 @@ impl Thumbwheel {
         self.feature_index
     }
 
-    /// Send a feature function call carrying a full long-message payload.
-    async fn call(&self, function_id: u8, params: [u8; 16]) -> Result<[u8; 16], Hidpp20Error> {
-        let response = self
-            .chan
-            .send_v20(v20::Message::Long(
-                v20::MessageHeader {
-                    device_index: self.device_index,
-                    feature_index: self.feature_index,
-                    function_id: U4::from_lo(function_id),
-                    software_id: self.chan.get_sw_id(),
-                },
-                params,
-            ))
-            .await?;
-        Ok(response.extend_payload())
-    }
-
     /// Read the wheel's resolution and capabilities.
     pub async fn get_info(&self) -> Result<ThumbwheelInfo, Hidpp20Error> {
-        let p = self.call(FN_GET_INFO, [0; 16]).await?;
+        let info = self.feature.get_thumbwheel_info().await?;
         Ok(ThumbwheelInfo {
             resolution: WheelResolution {
-                native_res: u16::from_be_bytes([p[0], p[1]]),
-                diverted_res: u16::from_be_bytes([p[2], p[3]]),
+                native_res: info.native_resolution,
+                diverted_res: info.diverted_resolution,
             },
-            default_dir: p[4] & 0x01,
-            supports_single_tap: p[5] & CAP_SINGLE_TAP != 0,
+            default_dir: info.default_direction.into(),
+            supports_single_tap: info
+                .capabilities
+                .contains(ThumbwheelCapabilities::SINGLE_TAP),
         })
     }
 
     /// Read the wheel's current reporting mode and rotation sign.
     pub async fn get_status(&self) -> Result<ThumbwheelStatus, Hidpp20Error> {
-        ThumbwheelStatus::from_payload(&self.call(FN_GET_STATUS, [0; 16]).await?)
+        ThumbwheelStatus::from_wire(self.feature.get_thumbwheel_status().await?)
     }
 
     /// Enter diverted reporting; wheel events then arrive on this feature
@@ -375,11 +345,9 @@ impl Thumbwheel {
         mode: ReportingMode,
         direction: WheelDirection,
     ) -> Result<(), Hidpp20Error> {
-        let mut params = [0u8; 16];
-        params[0] = mode.to_byte();
-        params[1] = u8::from(direction == WheelDirection::Inverted);
-        self.call(FN_SET_REPORTING, params).await?;
-        Ok(())
+        self.feature
+            .set_thumbwheel_reporting(mode.wire(), direction == WheelDirection::Inverted)
+            .await
     }
 }
 
@@ -405,7 +373,10 @@ impl WheelDirection {
 
 #[cfg(test)]
 mod tests {
+    use hidpp::nibble::U4;
+
     use super::*;
+    use crate::channel::scripted::{ScriptedRawHidChannel, scripted_channel};
 
     fn event(function_id: u8, software_id: u8, payload: [u8; 16]) -> v20::Message {
         v20::Message::Long(
@@ -424,7 +395,8 @@ mod tests {
         let mut p = [0u8; 16];
         p[0..2].copy_from_slice(&(-7i16).to_be_bytes());
         p[4] = 2;
-        p[5] = EV_SINGLE_TAP | EV_TOUCH;
+        // single_tap (bit 3) and touch (bit 1).
+        p[5] = 0x08 | 0x02;
         assert_eq!(
             decode_event(&event(0, 0, p), 2, 6),
             Some(ThumbwheelEvent {
@@ -491,16 +463,26 @@ mod tests {
         assert_eq!(decode_event(&event(0, 0, p), 2, 9), None);
     }
 
-    #[test]
-    fn decodes_reporting_status_and_rejects_unknown_modes() {
-        let status = |mode, flags| {
-            let mut p = [0u8; 16];
-            p[0] = mode;
-            p[1] = flags;
-            ThumbwheelStatus::from_payload(&p)
-        };
+    /// What [`Thumbwheel::get_status`] reads from a wheel whose
+    /// `getThumbwheelStatus` reply starts with `mode` and `flags`.
+    async fn read_status(mode: u8, flags: u8) -> Result<ThumbwheelStatus, Hidpp20Error> {
+        let (raw, _) = ScriptedRawHidChannel::with_dynamic_responder(move |request| {
+            let mut response = vec![0; 20];
+            response[..4].copy_from_slice(&request[..4]);
+            response[0] = 0x11;
+            response[4] = mode;
+            response[5] = flags;
+            Some(response)
+        });
+        Thumbwheel::new(scripted_channel(raw).await, 0xff, 3)
+            .get_status()
+            .await
+    }
+
+    #[tokio::test]
+    async fn reads_reporting_status_and_rejects_unknown_modes() {
         assert_eq!(
-            status(0, 0b001).unwrap(),
+            read_status(0, 0b001).await.unwrap(),
             ThumbwheelStatus {
                 mode: ReportingMode::Native,
                 direction: WheelDirection::Inverted,
@@ -508,16 +490,42 @@ mod tests {
         );
         // touch (bit 1) and proxy (bit 2) do not read as inversion.
         assert_eq!(
-            status(1, 0b110).unwrap(),
+            read_status(1, 0b110).await.unwrap(),
             ThumbwheelStatus {
                 mode: ReportingMode::Diverted,
                 direction: WheelDirection::Default,
             }
         );
         assert!(matches!(
-            status(2, 0),
+            read_status(2, 0).await,
             Err(Hidpp20Error::UnsupportedResponse)
         ));
+    }
+
+    /// `setThumbwheelReporting` carries the mode in byte 0 and the inversion
+    /// flag in byte 1, the bytes the hand-written encoder sent before.
+    #[tokio::test]
+    async fn set_reporting_writes_the_mode_then_the_inversion_flag() {
+        let (raw, handle) =
+            ScriptedRawHidChannel::with_dynamic_responder(|request| Some(request.to_vec()));
+        let wheel = Thumbwheel::new(scripted_channel(raw).await, 0xff, 3);
+
+        wheel.divert(WheelDirection::Inverted).await.unwrap();
+        wheel
+            .restore(ThumbwheelStatus {
+                mode: ReportingMode::Native,
+                direction: WheelDirection::Default,
+            })
+            .await
+            .unwrap();
+
+        let writes: Vec<Vec<u8>> = handle
+            .written_reports()
+            .into_iter()
+            .filter(|report| report[2] == 3 && report[3] >> 4 == 2)
+            .map(|report| report[4..7].to_vec())
+            .collect();
+        assert_eq!(writes, [vec![1, 1, 0], vec![0, 0, 0]]);
     }
 
     #[test]
