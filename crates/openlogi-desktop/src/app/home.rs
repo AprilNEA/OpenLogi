@@ -156,10 +156,13 @@ pub(crate) fn glow_canvas(geom: Arc<GlowGeometry>, color: Hsla) -> impl IntoElem
 /// A device card in the Home grid and carousel: product image with the
 /// connectivity-and-battery glance in its corner, then the identity line and
 /// the transport it is reachable over.
-/// The `active` device keeps a persistent accent ring and faint fill; inactive
-/// cards gain the same ring on hover or keyboard focus.
 /// Returns an unstyled semantic button so the gallery can add its activation
-/// handler without giving up keyboard behavior.
+/// handler without giving up keyboard behavior. The gallery marks the active
+/// device with [`SelectableStyle::selected_border`] and `selected_fill`, the
+/// house selected look, and gives the other cards the accent ring on hover
+/// or keyboard focus; this card paints only the disabled ring itself.
+///
+/// [`SelectableStyle::selected_border`]: crate::ui::theme::SelectableStyle::selected_border
 #[expect(
     clippy::too_many_arguments,
     reason = "each argument is one fact the gallery reads from AppState for this card"
