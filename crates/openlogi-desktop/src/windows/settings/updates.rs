@@ -8,6 +8,7 @@ use super::{
 };
 use crate::platform::installation::{HomebrewCask, Installation, InstallationSource, LinuxPackage};
 use crate::ui::theme::FocusRingStyle as _;
+use crate::ui::theme::PressableStyle as _;
 use crate::ui::theme::Typography as _;
 use gpui_kit::base::Link;
 use gpui_kit::component::ActiveTheme as _;
@@ -281,8 +282,7 @@ fn release_link(cx: &App) -> Link {
         .text_color(link_color)
         .rounded(pal.control_radius)
         .cursor_pointer()
-        .hover(move |style| style.bg(pal.control_hover))
-        .active(move |style| style.bg(pal.control))
+        .pressable_fill(false, pal)
         .focus_visible(move |style| style.focus_ring(pal))
         .debug_selector(|| "update-source-link".into())
         .child(div().underline().child("GitHub Releases"))

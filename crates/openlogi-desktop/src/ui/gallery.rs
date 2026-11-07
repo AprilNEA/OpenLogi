@@ -31,8 +31,8 @@ use super::components::{
 use super::slider_row::{SliderRow, disabled_track};
 use super::status::{retry_line, status_line};
 use super::theme::{
-    self, ContentWidth, OPENLOGI_DARK, OPENLOGI_LIGHT, Palette, SelectableStyle as _,
-    Typography as _,
+    self, ContentWidth, OPENLOGI_DARK, OPENLOGI_LIGHT, Palette, PressableStyle as _,
+    SelectableStyle as _, Typography as _,
 };
 
 const TITLE: &str = "OpenLogi Component Gallery";
@@ -584,7 +584,7 @@ impl ComponentGallery {
                 } else {
                     pal.text_muted
                 })
-                .hover(move |style| style.bg(pal.control_hover))
+                .pressable_fill(auto, pal)
                 .focus_visible(move |style| style.focus_ring(pal))
                 .child("Auto")
                 .on_click(cx.listener(|this, _, _, cx| {
@@ -758,7 +758,7 @@ fn choice_card(id: &'static str, label: &'static str, selected: bool, pal: Palet
             pal.border
         })
         .bg(pal.control)
-        .hover(move |style| style.bg(pal.control_hover))
+        .pressable_fill(false, pal)
         .focus_visible(move |style| style.focus_ring(pal))
         .gap_1()
         // A preview strip above the label: the stacked shape the settings

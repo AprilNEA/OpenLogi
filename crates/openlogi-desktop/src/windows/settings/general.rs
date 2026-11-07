@@ -8,6 +8,7 @@ use super::{
 use crate::ui::commit_slider::SliderUnit;
 use crate::ui::slider_row::SliderRow;
 use crate::ui::theme::FocusRingStyle as _;
+use crate::ui::theme::PressableStyle as _;
 use crate::ui::theme::Typography as _;
 use gpui_kit::base::Button as BaseButton;
 use gpui_kit::component::Sizable as _;
@@ -279,7 +280,7 @@ fn open_login_items_button(cx: &App) -> BaseButton {
         .text_caption()
         .cursor_pointer()
         .bg(pal.control)
-        .hover(move |s| s.bg(pal.control_hover))
+        .pressable_fill(false, pal)
         .focus_visible(move |s| s.focus_ring(pal))
         .child(tr!("app.open_login_items"))
         .on_click(|_, _, _| crate::platform::registration::open_login_items_settings())

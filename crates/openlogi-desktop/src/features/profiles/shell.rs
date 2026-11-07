@@ -18,7 +18,7 @@ use super::catalog::{AppCatalogPicker, ApplicationIconState, ProfileIconCache};
 use super::picker::add_app_popover;
 use super::{ProfileChoice, ProfileScopeActions, ProfileScopeModel};
 use crate::ui::components::control_button;
-use crate::ui::theme::{self, Palette, SelectableStyle as _, Typography as _};
+use crate::ui::theme::{self, Palette, PressableStyle as _, SelectableStyle as _, Typography as _};
 
 /// Icon edge inside single-line profile tabs.
 const TAB_ICON_EDGE: f32 = 18.;
@@ -176,13 +176,7 @@ fn profile_tab(
         .text_body()
         .text_color(pal.text_primary)
         .selected_fill(selected)
-        .hover(move |tab| {
-            tab.bg(if selected {
-                theme::accent_tint_hover()
-            } else {
-                pal.control_hover
-            })
-        })
+        .pressable_fill(selected, pal)
         .focus_visible(move |style| style.focus_ring(pal))
         .children(leading)
         .child(label)
