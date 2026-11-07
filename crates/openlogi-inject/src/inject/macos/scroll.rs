@@ -19,6 +19,8 @@ static SMOOTH_SCROLL_QUANTIZER: LazyLock<Mutex<ScrollQuantizer>> =
 static WHEEL_TICK_QUANTIZER: LazyLock<Mutex<ScrollQuantizer>> =
     LazyLock::new(|| Mutex::new(ScrollQuantizer::default()));
 
+const POINTS_PER_LINE: i32 = 10;
+
 // `core-graphics` 0.25 does not expose these `CGEventTypes.h` fields.
 const SCROLL_PHASE: u32 = 99; // kCGScrollWheelEventScrollPhase
 const MOMENTUM_PHASE: u32 = 123; // kCGScrollWheelEventMomentumPhase
@@ -193,6 +195,14 @@ pub(in crate::inject) fn post_phased_scroll(delta: ScrollDelta, phase: SmoothScr
 /// from JS wheel handlers). A phase is stamped only where a gesture is the
 /// point, such as a horizontal swipe AppKit's recognisers must see.
 fn post_continuous_scroll(delta: ScrollDelta, phase: Option<SmoothScrollPhase>) {
+    // AppKit completes a phased gesture (a row swipe) only from pixel events.
+    let delta = match delta {
+        ScrollDelta::WheelTicks { x, y } if phase.is_some() => {
+            let points = f64::from(POINTS_PER_LINE);
+            ScrollDelta::pixels(x * points, y * points)
+        }
+        _ => delta,
+    };
     if let ScrollDelta::WheelTicks { x, y } = delta {
         if phase.is_none() && x == 0.0 && y == 0.0 {
             return;
@@ -326,8 +336,8 @@ fn set_continuous_axis(
     fixed_field: u32,
     point_field: u32,
 ) {
-    const POINTS_PER_LINE: i64 = 10;
     const FIXED_POINT_SCALE: i64 = 1 << 16;
+    let per_line = i64::from(POINTS_PER_LINE);
     let points = i64::from(points);
     // Write order is load-bearing: a scroll CGEvent keeps one canonical
     // distance, and writing the coarse integer *line* field makes it the
@@ -335,8 +345,8 @@ fn set_continuous_axis(
     // points per line, discarding pixel precision (measured on macOS 15.7:
     // frames under 10 points arrived as zero and the rest quantized to
     // 8-point steps). Writing the point delta last keeps it authoritative.
-    event.set_integer_value_field(line_field, points / POINTS_PER_LINE);
-    event.set_integer_value_field(fixed_field, points * FIXED_POINT_SCALE / POINTS_PER_LINE);
+    event.set_integer_value_field(line_field, points / per_line);
+    event.set_integer_value_field(fixed_field, points * FIXED_POINT_SCALE / per_line);
     event.set_integer_value_field(point_field, points);
 }
 
