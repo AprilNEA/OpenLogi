@@ -14,6 +14,7 @@ use gpui_kit::component::{
     h_flex,
     scroll::ScrollableElement as _,
     tag::Tag,
+    tooltip::Tooltip,
     v_flex,
 };
 use openlogi_core::config::{OnboardMemory, ScrollResolution};
@@ -208,12 +209,17 @@ fn detail_navigation(
         .p_3()
         .children(tabs.iter().copied().enumerate().map(|(index, tab)| {
             let selected = tab == active;
+            let label = tab.label();
+            let tip = label.clone();
             BaseButton::new(("detail-navigation", index))
                 .debug_selector(move || format!("detail-navigation-{tab:?}"))
                 .role(Role::Tab)
                 .selected(selected)
-                .accessibility_label(tab.label())
+                .accessibility_label(label.clone())
                 .aria_selected(selected)
+                // A long localized name at a large scale clips; the tip
+                // carries the whole word.
+                .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
                 .w_full()
                 .flex()
                 .items_center()
@@ -238,7 +244,7 @@ fn detail_navigation(
                         .size_4()
                         .flex_none(),
                 )
-                .child(tab.label())
+                .child(div().flex_1().min_w_0().truncate().child(label))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.active_tab = tab;
                     if tab == DetailTab::Pointer {
