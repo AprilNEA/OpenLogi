@@ -1311,6 +1311,27 @@ fn tabs_follow_capabilities_not_kind() {
     assert!(!tabs.contains(&DetailTab::Lighting));
 }
 
+/// A G600 measures a pointer capability its raw-HID driver delivers (the DPI
+/// slot) and no buttons: it gets the Pointer panel and nothing that needs
+/// HID++ controls or a mouse model.
+#[test]
+fn a_dpi_only_standalone_mouse_gets_the_pointer_tab_alone() {
+    let caps = Some(Capabilities {
+        pointer: true,
+        ..Capabilities::default()
+    });
+    let mut g600 = record(DeviceKind::Mouse, caps);
+    g600.model_key = "raw:c24a".to_string();
+    g600.driver_id = Some("logitech-g600".to_string());
+    g600.persistent = false;
+    let tabs = DetailTab::tabs_for(&g600);
+    assert!(tabs.contains(&DetailTab::Pointer));
+    assert!(!tabs.contains(&DetailTab::Buttons));
+    assert!(!tabs.contains(&DetailTab::ActionsRing));
+    assert!(!tabs.contains(&DetailTab::Keys));
+    assert_eq!(DetailTab::default_for(&g600), DetailTab::Pointer);
+}
+
 #[test]
 fn trackball_with_software_scroll_shows_pointer_tab() {
     let caps = Some(Capabilities {
