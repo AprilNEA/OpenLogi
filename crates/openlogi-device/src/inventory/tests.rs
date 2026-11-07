@@ -39,6 +39,7 @@ mod cache;
 mod deferral;
 mod publication;
 mod retry;
+mod serial;
 mod unifying;
 
 fn cache_entry() -> Cached {
