@@ -295,6 +295,47 @@ fn a_route_shared_by_two_online_twins_is_never_adopted() {
     );
 }
 
+/// The route keys indexed in `key`'s entry, after one snapshot that lists
+/// `inventories`.
+fn links_after(inventories: &[DeviceInventory], key: &str) -> Vec<String> {
+    let resolver = AssetResolver::new();
+    let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = AppState::new(Sources::in_memory(Config::ephemeral(), &resolver, commands));
+    let _ = state.refresh_inventories(inventories, &[], &resolver, &[]);
+    state
+        .config
+        .devices
+        .get(key)
+        .map(|device| device.links.keys().cloned().collect())
+        .unwrap_or_default()
+}
+
+#[test]
+fn a_device_listed_twice_on_its_route_still_adopts_it() {
+    // Two HID++ nodes of one mouse are one device, not twins: both carry the
+    // same key, so the route is attributable and indexed like a single sighting.
+    let unit = direct_inventory([0xa3, 0x93, 0xca, 0xe0]);
+    assert_eq!(
+        links_after(std::slice::from_ref(&unit), "unit:a393cae0"),
+        ["direct:046d:b023"]
+    );
+    assert_eq!(
+        links_after(&[unit.clone(), unit], "unit:a393cae0"),
+        ["direct:046d:b023"]
+    );
+}
+
+#[test]
+fn a_model_only_device_listed_twice_on_its_route_still_adopts_it() {
+    // Two G402s plugged in at once: the agent lists both on one route under
+    // the one model key they share, so they are one entry, not twins.
+    let model_only = direct_inventory([0; 4]);
+    assert_eq!(
+        links_after(&[model_only.clone(), model_only], "direct:046d:b023"),
+        ["direct:046d:b023"]
+    );
+}
+
 #[test]
 fn two_devices_with_their_own_units_on_one_route_stay_two_cards() {
     let resolver = AssetResolver::new();
