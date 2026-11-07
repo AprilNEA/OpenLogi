@@ -249,12 +249,12 @@ yay -S openlogi
     <img src="https://contrib.rocks/image?repo=AprilNEA/OpenLogi" alt="コントリビューター">
 </a>
 
-- [@kubai087](https://github.com/kubai087) —— OpenLogi のロゴおよびアプリアイコンのデザイン
+OpenLogi のロゴとアプリアイコンをデザインしてくれた [@kubai087](https://github.com/kubai087) に心より感謝します。
 
 ### クレジット
 
-- [Solaar](https://github.com/pwr-Solaar/Solaar) by [@pwr](https://github.com/pwr) —— オープンソースの HID++ 実装およびプロトコルリファレンス
-- [Mouser](https://github.com/TomBadash/Mouser) by [@TomBadash](https://github.com/TomBadash) —— ローカル完結・アカウント不要の Options+ 代替
+- [Solaar](https://github.com/pwr-Solaar/Solaar)：非公開の HID++ 機能やデバイス固有の挙動を調べるうえで欠かせないリファレンスです。
+- [@TomBadash](https://github.com/TomBadash) による [Mouser](https://github.com/TomBadash/Mouser)：OpenLogi 初期のスコープと OS ごとの入力フック設計に大きな着想を与えてくれました。
 
 ### インフラストラクチャ
 

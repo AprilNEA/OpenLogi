@@ -249,12 +249,12 @@ Voir [DEVELOPMENT.md](DEVELOPMENT.md), notamment la [sécurité du hook d'entré
     <img src="https://contrib.rocks/image?repo=AprilNEA/OpenLogi" alt="Contributeurs">
 </a>
 
-- [@kubai087](https://github.com/kubai087) — conception du logo et de l'icône d'application OpenLogi
+Un grand merci à [@kubai087](https://github.com/kubai087) pour la conception du logo et de l'icône d'application OpenLogi.
 
 ### Crédits
 
-- [Solaar](https://github.com/pwr-Solaar/Solaar) par [@pwr](https://github.com/pwr) — implémentation open source de HID++ et référence du protocole
-- [Mouser](https://github.com/TomBadash/Mouser) par [@TomBadash](https://github.com/TomBadash) — remplacement d'Options+ local et sans compte
+- [Solaar](https://github.com/pwr-Solaar/Solaar), notre référence incontournable pour les fonctionnalités HID++ non documentées et les particularités matérielles.
+- [Mouser](https://github.com/TomBadash/Mouser) par [@TomBadash](https://github.com/TomBadash), qui a inspiré le périmètre initial d'OpenLogi et l'architecture des hooks d'entrée propres à chaque système.
 
 ### Infrastructure
 

@@ -248,12 +248,12 @@ Ayarlar düz TOML kullanır; kaydetme işlemleri sembolik bağlı (symlink) ayar
     <img src="https://contrib.rocks/image?repo=AprilNEA/OpenLogi" alt="Katkıda bulunanlar">
 </a>
 
-- [@kubai087](https://github.com/kubai087) — OpenLogi logosu ve uygulama simgesi tasarımı
+OpenLogi logosunu ve uygulama simgesini tasarlayan [@kubai087](https://github.com/kubai087)'ye özel teşekkürler.
 
 ### İlham ve kaynaklar
 
-- [Solaar](https://github.com/pwr-Solaar/Solaar) ([@pwr](https://github.com/pwr)) — açık kaynak HID++ uygulaması ve protokol referansı
-- [Mouser](https://github.com/TomBadash/Mouser) ([@TomBadash](https://github.com/TomBadash)) — hesap gerektirmeyen, yerel bir Options+ alternatifi
+- [Solaar](https://github.com/pwr-Solaar/Solaar), belgelenmemiş HID++ özellikleri ve cihaza özgü davranışlar konusunda başlıca başvuru kaynağımız.
+- [@TomBadash](https://github.com/TomBadash) tarafından geliştirilen [Mouser](https://github.com/TomBadash/Mouser), OpenLogi'nin ilk kapsamına ve işletim sistemine özgü giriş kancası tasarımına ilham verdi.
 
 ### Altyapı
 

@@ -249,12 +249,12 @@ yay -S openlogi
     <img src="https://contrib.rocks/image?repo=AprilNEA/OpenLogi" alt="기여자">
 </a>
 
-- [@kubai087](https://github.com/kubai087) — OpenLogi 로고 및 앱 아이콘 디자인
+OpenLogi 로고와 앱 아이콘을 디자인해 준 [@kubai087](https://github.com/kubai087)에게 특별한 감사를 전합니다.
 
 ### 크레딧
 
-- [Solaar](https://github.com/pwr-Solaar/Solaar) — [@pwr](https://github.com/pwr): 오픈소스 HID++ 구현 및 프로토콜 레퍼런스
-- [Mouser](https://github.com/TomBadash/Mouser) — [@TomBadash](https://github.com/TomBadash): 로컬에서 동작하는 계정 없는 Options+ 대체제
+- [Solaar](https://github.com/pwr-Solaar/Solaar), 문서화되지 않은 HID++ 기능과 기기별 특성을 확인할 때 가장 먼저 참고한 레퍼런스입니다.
+- [@TomBadash](https://github.com/TomBadash)의 [Mouser](https://github.com/TomBadash/Mouser), OpenLogi의 초기 방향성과 OS별 입력 훅 설계에 영감을 주었습니다.
 
 ### 인프라
 

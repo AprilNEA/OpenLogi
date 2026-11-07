@@ -251,12 +251,12 @@ See [DEVELOPMENT.md](docs/DEVELOPMENT.md), including [macOS input-hook safety](d
     <img src="https://contrib.rocks/image?repo=AprilNEA/OpenLogi" alt="Contributors">
 </a>
 
-- [@kubai087](https://github.com/kubai087) — OpenLogi logo and app icon design
+Special thanks to [@kubai087](https://github.com/kubai087) for designing the OpenLogi logo and app icon.
 
 ### Credits
 
-- [Solaar](https://github.com/pwr-Solaar/Solaar) by [@pwr](https://github.com/pwr) — open-source HID++ implementation and protocol reference
-- [Mouser](https://github.com/TomBadash/Mouser) by [@TomBadash](https://github.com/TomBadash) — local, account-free Options+ replacement
+- [Solaar](https://github.com/pwr-Solaar/Solaar), our go-to reference for undocumented HID++ features and device quirks.
+- [Mouser](https://github.com/TomBadash/Mouser) by [@TomBadash](https://github.com/TomBadash), which inspired OpenLogi's early scope and per-OS input hook design.
 
 ### Infrastructure
 

@@ -248,12 +248,12 @@ yay -S openlogi
     <img src="https://contrib.rocks/image?repo=AprilNEA/OpenLogi" alt="Участники">
 </a>
 
-- [@kubai087](https://github.com/kubai087) — дизайн логотипа и иконки приложения OpenLogi
+Отдельное спасибо [@kubai087](https://github.com/kubai087) за дизайн логотипа и иконки приложения OpenLogi.
 
 ### Проекты и источники
 
-- [Solaar](https://github.com/pwr-Solaar/Solaar) от [@pwr](https://github.com/pwr) — открытая реализация HID++ и справочник по протоколу
-- [Mouser](https://github.com/TomBadash/Mouser) от [@TomBadash](https://github.com/TomBadash) — локальная замена Options+ без аккаунта
+- [Solaar](https://github.com/pwr-Solaar/Solaar), наш главный ориентир по недокументированным возможностям HID++ и особенностям конкретных устройств.
+- [Mouser](https://github.com/TomBadash/Mouser) от [@TomBadash](https://github.com/TomBadash), вдохновивший ранний замысел OpenLogi и архитектуру платформенных хуков ввода.
 
 ### Инфраструктура
 

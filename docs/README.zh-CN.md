@@ -249,12 +249,12 @@ yay -S openlogi
     <img src="https://contrib.rocks/image?repo=AprilNEA/OpenLogi" alt="贡献者">
 </a>
 
-- [@kubai087](https://github.com/kubai087) —— OpenLogi Logo 与应用图标设计
+特别感谢 [@kubai087](https://github.com/kubai087) 设计了 OpenLogi 的 Logo 与应用图标。
 
 ### 参考与鸣谢
 
-- [Solaar](https://github.com/pwr-Solaar/Solaar)，作者 [@pwr](https://github.com/pwr) —— 开源 HID++ 实现与协议参考
-- [Mouser](https://github.com/TomBadash/Mouser)，作者 [@TomBadash](https://github.com/TomBadash) —— 本地、无需账号的 Options+ 替代品
+- [Solaar](https://github.com/pwr-Solaar/Solaar)，我们排查未公开 HID++ 特性与设备细节时的首要参考。
+- [@TomBadash](https://github.com/TomBadash) 的 [Mouser](https://github.com/TomBadash/Mouser)，启发了 OpenLogi 早期的功能边界与各平台输入钩子设计。
 
 ### 基础设施
 
