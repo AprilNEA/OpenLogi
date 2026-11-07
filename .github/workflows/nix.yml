@@ -41,7 +41,7 @@ concurrency:
 jobs:
   evaluate:
     name: flake evaluation and formatting
-    runs-on: ubuntu-24.04
+    runs-on: nscloud-ubuntu-24.04-amd64-8x16
     timeout-minutes: 15
     steps:
       - name: Checkout
@@ -72,13 +72,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Most of the build is the serial fat-LTO tail of the release
+        # profile, so 16 vCPUs bought little over 8. Memory peaked at 12 GB,
+        # hence 32 GB rather than 16.
         include:
           - system: x86_64-linux
             machine: x86_64
-            runner: ubuntu-24.04
+            runner: nscloud-ubuntu-24.04-amd64-8x32
           - system: aarch64-linux
             machine: aarch64
-            runner: ubuntu-24.04-arm
+            runner: nscloud-ubuntu-24.04-arm64-8x32
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

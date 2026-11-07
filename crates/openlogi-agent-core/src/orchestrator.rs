@@ -609,8 +609,9 @@ pub struct Orchestrator {
     disabled_keys_recovery: BTreeMap<DeviceStableId, u8>,
     /// Agent-owned settings changes on each route, added to the published
     /// [`PairedDevice::settings_revision`](openlogi_core::device::PairedDevice::settings_revision).
-    /// Disable Keys recovery and backlight writes can change the keyboard
-    /// without a firmware broadcast, so clients need this move to read again.
+    /// Disable Keys recovery and backlight writes can change the keyboard,
+    /// and a DPI action the mouse, without a firmware broadcast, so clients
+    /// need this move to read again.
     settings_epochs: Vec<(DeviceRoute, u64)>,
     /// Last successful aggregate camera-use sample. `None` means the macOS
     /// watcher has not produced its first usable observation yet.

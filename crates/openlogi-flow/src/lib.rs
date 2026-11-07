@@ -21,9 +21,17 @@ pub mod transport;
 // Buffa emits compatibility suppressions and intentionally mechanical code.
 // The allow is scoped to generated include expansions; clippy cannot credit an
 // `expect` with lints originating there, so fulfilment cannot be tracked.
+// The lints are named rather than grouped so that the weekly stale-allows
+// sweep can judge each one; it cannot judge a lint group.
 #[allow(
-    clippy::all,
-    clippy::pedantic,
+    clippy::cast_lossless,
+    clippy::default_trait_access,
+    clippy::elidable_lifetime_names,
+    clippy::missing_fields_in_debug,
+    clippy::pub_underscore_fields,
+    clippy::redundant_closure_for_method_calls,
+    clippy::semicolon_if_nothing_returned,
+    clippy::single_match_else,
     clippy::allow_attributes,
     clippy::allow_attributes_without_reason,
     reason = "buffa-generated code is not maintained by this crate"
