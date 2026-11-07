@@ -16,6 +16,7 @@ use openlogi_hid::{DeviceRoute, dump_features};
 pub mod battery;
 pub mod controls;
 pub mod dpi;
+pub mod effects;
 pub mod features;
 pub mod hidpp;
 pub mod host_switch;
@@ -25,6 +26,7 @@ pub mod onboard;
 pub mod pointer_speed;
 pub mod sidetone;
 pub mod smartshift;
+pub mod wave;
 pub mod wheel;
 pub mod zones;
 
@@ -44,6 +46,11 @@ pub enum DiagCmd {
     Smartshift(smartshift::SmartshiftArgs),
     /// Set an online RGB device to a solid colour (e.g. `ff0000` for red).
     Lighting(lighting::LightingArgs),
+    /// List the HID++ 0x8071 effects a device offers, or try one by hand.
+    Effects(effects::EffectsArgs),
+    /// Draw a wave across a per-key keyboard, with chosen keys held still,
+    /// and report the frames per second it reaches.
+    Wave(wave::WaveArgs),
     /// Read or set the HID++ 0x2121 wheel reporting resolution.
     Wheel(wheel::WheelArgs),
     /// Read 0x2205 pointer scaling → write a test value → read back → restore.
@@ -75,6 +82,8 @@ impl DiagCmd {
             Self::Dpi(args) => dpi::run(args).await,
             Self::Smartshift(args) => smartshift::run(args).await,
             Self::Lighting(args) => lighting::run(args).await,
+            Self::Effects(args) => effects::run(args).await,
+            Self::Wave(args) => wave::run(args).await,
             Self::Wheel(args) => wheel::run(args).await,
             Self::PointerSpeed(args) => pointer_speed::run(args).await,
             Self::Onboard(args) => onboard::run(args).await,

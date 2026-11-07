@@ -43,10 +43,13 @@ v10 adds the per-device `disabled_keys` policy. Older readers reject a v10
 header before parsing its fields. A v9 file without the policy still loads.
 v11 adds the `[flow]` section. Older readers reject a v11 header before
 parsing its fields. A v10 file without the section loads with Flow disabled.
+v12 adds per-device keyboard lighting `keys`, `effect`, `period_ms`, `wave` and
+`idle`. Older readers reject a v12 header before parsing its fields. A v11 file without them
+lights every key still in the keyboard colour.
 
 ## Shape
 
-`schema_version` is required and currently `11`. `selected_device` is an
+`schema_version` is required and currently `12`. `selected_device` is an
 optional physical device key.
 
 `[app_settings]` contains application-wide preferences:
@@ -214,7 +217,52 @@ Common device fields are:
 - `action_ring`: default and complete per-application eight-slot layouts;
   `action_ring.per_app` takes the same selectors as `per_app_bindings`,
   including the Windows `exe:<filename>` fallback and `app:<alias>` keys
-- `lighting`, `smartshift`, and camera controls / profiles
+- `lighting`: `enabled`, a static `color` (`"RRGGBB"`), `brightness` (0–100)
+  and, for keyboards, `keys`: colours for single keys over `color`, such as
+  `keys = { Esc = "ff0000", W = "ff00ff" }`. Brightness and `enabled` apply to
+  the keys too. Key names say where a key sits, not what its keycap prints,
+  and ignore case:
+  - letters `A`–`Z`, digits `1`–`0`, `F1`–`F12`, `Esc`, `Tab`, `CapsLock`,
+    `Backspace`, `Enter`, `Space`, `Menu`
+  - modifiers `LCtrl`, `LShift`, `LAlt`, `LWin`, `RCtrl`, `RShift`, `RAlt`,
+    `RWin` (the Fn key on keyboards that put Fn in that slot, such as the
+    G515)
+  - `PrintScreen`, `ScrollLock`, `Pause`, `Insert`, `Home`, `PageUp`,
+    `Delete`, `End`, `PageDown`, `Up`, `Down`, `Left`, `Right`
+  - the keys a layout relabels, by their US legend: `Grave` (left of `1`),
+    `Minus`, `Equal`, `LBracket`, `RBracket`, `Backslash` (ANSI, above
+    Enter), `Semicolon`, `Quote`, `IsoHash` (ISO, left of Enter), `Comma`,
+    `Period`, `Slash`, `IsoBackslash` (ISO, right of the left Shift)
+  - the keypad: `NumLock`, `KpSlash`, `KpAsterisk`, `KpMinus`, `KpPlus`,
+    `KpEnter`, `Kp0`–`Kp9`, `KpPeriod`
+
+  Key colours show only on a keyboard whose lighting zones OpenLogi has
+  mapped (today the G515 LS TKL); others keep the static colour. An unknown
+  key name stops the file from loading.
+
+  `effect` picks an animation the keyboard's firmware runs instead of the
+  still colours: `static` (the default), `breathing` (`color` fades in and
+  out), `cycle` (every hue in turn) or `ripple` (a pressed key lights in
+  `color` and the light spreads to its neighbours). `period_ms` sets how
+  long one round takes, from 100 to 60000; left out, the effect keeps its
+  own pace (4000, 5000 and 500 ms). Brightness applies to every effect. A
+  keyboard whose firmware does not offer the effect shows `color`.
+
+  `effect = "wave"` is drawn by OpenLogi itself on a keyboard whose key
+  positions it knows (today the G515 LS TKL): keys lit in `color`, with a
+  dimmer band crossing them once every `period_ms` (3000 by default), while
+  the keys in `keys` stay lit in their own colours. Shape it with a `wave`
+  table: `depth` (how far the band dims, 0–100 %, default 50), `width` (the
+  band's width, 5–100 % of the keyboard, default 60) and `direction`
+  (`left_to_right` or `right_to_left`). The wave runs while OpenLogi runs.
+- `idle` is what a keyboard with effects shows at rest, whatever `effect`
+  runs in use: `idle = { after_seconds = 30, effect = "rays", color = "ffffff" }`
+  switches to it once no key has been pressed for `after_seconds` (`0`, the
+  default, never rests) and back at the next key press. `effect` is `rays`
+  (the default: rays of `color` along the key rows over the keyboard
+  colour), `ripple`, `cycle` or `breathing`; `cycle` ignores `color`. Idle
+  time is read from macOS; elsewhere the keyboard does not rest yet.
+- `smartshift`, and camera controls / profiles
 - `camera_stream_mode`: the live preview's mode, a table of `width`, `height`
   (pixels) and `fps`. All three are required and must be positive, or the file
   does not load. Without the table, or when the camera no longer offers that

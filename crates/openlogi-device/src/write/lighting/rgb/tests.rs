@@ -16,6 +16,8 @@ fn write() -> LightingWrite {
     LightingWrite {
         method: LightingMethod::Auto,
         color: Rgb::new(0x17, 0x82, 0xc4),
+        keys: Vec::new(),
+        animation: None,
     }
 }
 
@@ -681,4 +683,96 @@ async fn rgb_unreadable_unit_id_fails_before_claiming() {
         assert!(control_writes(&reports).is_empty(), "nothing was claimed");
         assert!(reports.iter().all(|r| !is_effect(r)));
     }
+}
+
+/// A G515 under its effect engine takes one colour as a whole `0x8081`
+/// frame: a Static colour alone would leave the key colours of an earlier
+/// per-key frame lit, since per-key paint is a sub-mode of Static.
+#[tokio::test]
+async fn one_colour_repaints_a_known_keyboard_frame() {
+    let (shared, handle) = device(|request| {
+        let mut reply = response(request)?;
+        // getDeviceInfo: a G515 LS TKL's model ids at payload bytes 7..13.
+        if (request[2], request[3] >> 4) == (9, 0) {
+            reply[11..17].copy_from_slice(&[0xb3, 0x89, 0x40, 0xb4, 0xc3, 0x55]);
+        }
+        Some(reply)
+    })
+    .await;
+
+    let lease = write().apply_on(&shared, || false, || true).await;
+
+    assert!(
+        lease.is_ok_and(|lease| lease.is_some()),
+        "the engine stays claimed"
+    );
+    let reports = handle.written_reports();
+    let paints = reports
+        .iter()
+        .filter(|r| r[2] == 7 && r[3] >> 4 == 6)
+        .map(|r| r[4..7].to_vec())
+        .collect::<Vec<_>>();
+    assert!(!paints.is_empty(), "a 0x8081 frame is painted");
+    assert!(
+        paints.iter().all(|colour| colour == &[0x17, 0x82, 0xc4]),
+        "every zone takes the one colour: {paints:?}"
+    );
+    assert!(
+        reports.iter().any(|r| r[2] == 7 && r[3] >> 4 == 7),
+        "the frame is committed"
+    );
+}
+
+#[test]
+fn animation_params_follow_the_layout_worked_out_on_a_g515() {
+    use crate::write::LightingAnimation;
+
+    let red = Rgb::new(0xff, 0, 0);
+    assert_eq!(
+        LightingAnimation::Breathing { period_ms: 4000 }.params(red),
+        [0xff, 0, 0, 0x0f, 0xa0, 0, 100, 0, 0, 0]
+    );
+    // A dimmed colour goes out at full strength, red and blue lifted, its
+    // dimming as intensity.
+    assert_eq!(
+        LightingAnimation::Breathing { period_ms: 4000 }.params(Rgb::new(0x7a, 0x39, 0x9b)),
+        [0xe2, 0x5d, 0xff, 0x0f, 0xa0, 0, 61, 0, 0, 0]
+    );
+    assert_eq!(
+        LightingAnimation::Cycle {
+            period_ms: 5000,
+            intensity: 60,
+        }
+        .params(red),
+        [0, 0xff, 0, 0, 0, 0x88, 0x13, 60, 0, 0]
+    );
+    assert_eq!(
+        LightingAnimation::Ripple { period_ms: 500 }.params(red),
+        [0xff, 0, 0, 0xff, 0, 0, 0x01, 0xf4, 0, 0]
+    );
+}
+
+/// A device whose engine offers no breathing effect shows the colour
+/// instead, through the Static effects of a normal write.
+#[tokio::test]
+async fn an_animation_no_cluster_offers_falls_back_to_the_colour() {
+    let (shared, handle) = device(response).await;
+    let write = LightingWrite {
+        animation: Some(crate::write::LightingAnimation::Breathing { period_ms: 4000 }),
+        ..write()
+    };
+
+    let lease = write.apply_on(&shared, || false, || true).await;
+
+    assert!(
+        lease.is_ok_and(|lease| lease.is_some()),
+        "the colour is painted"
+    );
+    let reports = handle.written_reports();
+    let effects: Vec<_> = reports.iter().filter(|r| is_effect(r)).collect();
+    assert!(!effects.is_empty(), "Static effects are written");
+    assert!(
+        effects.iter().all(|r| r[6..9] == [0x17, 0x82, 0xc4]),
+        "every effect carries the colour: {effects:?}"
+    );
 }

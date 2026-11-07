@@ -7,7 +7,7 @@ use std::sync::Arc;
 use hidpp::channel::{ChannelError, HidppChannel};
 use hidpp::device::Device;
 use hidpp::feature::CreatableFeature;
-use hidpp::feature::device_information::DeviceInformationFeature;
+use hidpp::feature::device_information::{DeviceInformation, DeviceInformationFeature};
 use hidpp::feature::rgb_effects::{
     CLUSTER_EFFECT_PARAM_COUNT, EventsNotificationFlags, PowerModeTarget, RgbEffectsFeature,
     RgbPersistence, SwControlFlags,
@@ -24,6 +24,7 @@ const FEATURE: u16 = 0x8071;
 // The effect ID is stable; each cluster's index for it is discovered separately.
 const STATIC_RGB: u16 = 1;
 
+pub(super) mod effects;
 #[cfg(test)]
 mod tests;
 
@@ -63,6 +64,8 @@ impl RgbControlLease {
 pub(super) struct RgbEngine {
     feature: Arc<RgbEffectsFeature>,
     unit: Option<[u8; 4]>,
+    /// The model ids from the same `0x0003` read as [`Self::unit`].
+    model_id: Option<[u16; 3]>,
     statics: Vec<(u8, u8)>,
     complete: bool,
 }
@@ -94,11 +97,12 @@ pub(super) async fn probe(
         }) => return Ok(None),
         Err(error) => return Err(error),
     };
-    let unit = scope.read(unit_id(&mut device)).await?;
+    let info = scope.read(device_information(&mut device)).await?;
     let (statics, complete) = discover(&feature, scope).await?;
     Ok(Some(RgbEngine {
         feature,
-        unit,
+        unit: info.as_ref().map(|info| info.unit_id),
+        model_id: info.map(|info| info.model_id),
         statics,
         complete,
     }))
@@ -109,6 +113,14 @@ impl RgbEngine {
     /// whole device without a per-key frame.
     pub(super) fn is_complete(&self) -> bool {
         self.complete
+    }
+
+    /// Whether [`openlogi_device_registry::keyboard`] knows which `0x8081`
+    /// zone lights which key on this product.
+    pub(super) fn has_known_zone_map(&self) -> bool {
+        self.model_id
+            .and_then(openlogi_device_registry::keyboard::per_key_zones)
+            .is_some()
     }
 
     /// Colour every cluster with its Static effect. Callers check
@@ -308,6 +320,17 @@ async fn device(channel: &Arc<HidppChannel>, index: u8) -> Result<Device, WriteE
 /// on one receiver slot apart. `None` when the device has no
 /// `DeviceInformation` feature.
 async fn unit_id(device: &mut Device) -> Result<Option<[u8; 4]>, WriteError> {
+    Ok(device_information(device).await?.map(|info| info.unit_id))
+}
+
+/// The model ids `device` reports through `0x0003`, which name the product
+/// whatever transport it is on. `None` when the device has no
+/// `DeviceInformation` feature.
+pub(super) async fn model_id(device: &mut Device) -> Result<Option<[u16; 3]>, WriteError> {
+    Ok(device_information(device).await?.map(|info| info.model_id))
+}
+
+async fn device_information(device: &mut Device) -> Result<Option<DeviceInformation>, WriteError> {
     let feature = match open_feature::<DeviceInformationFeature>(device).await {
         Ok(feature) => feature,
         Err(WriteError::FeatureUnsupported { .. }) => return Ok(None),
@@ -326,7 +349,7 @@ async fn unit_id(device: &mut Device) -> Result<Option<[u8; 4]>, WriteError> {
                 DeviceInformationFeature::ID,
             ),
         })?;
-    Ok(Some(info.unit_id))
+    Ok(Some(info))
 }
 
 /// Each cluster's Static effect `(cluster, effect index)`, and whether every
