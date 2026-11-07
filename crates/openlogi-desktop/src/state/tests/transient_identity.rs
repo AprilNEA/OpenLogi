@@ -5,7 +5,7 @@ use super::*;
 #[test]
 fn transient_identity_is_not_persisted_or_retained_after_resolution() {
     let resolver = AssetResolver::new();
-    let transient_inventory = direct_inventory([0; 4]);
+    let transient_inventory = half_read_direct_inventory();
     let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
     let mut state = AppState::new(Sources {
         inventories: &[transient_inventory],
@@ -51,7 +51,7 @@ fn transient_probe_folds_into_its_known_card() {
     assert_eq!(state.devices()[0].config_key, stable_key);
 
     let transient_list = build_device_list(
-        &[direct_inventory([0; 4])],
+        &[half_read_direct_inventory()],
         &[],
         &resolver,
         &state.config,
@@ -83,7 +83,7 @@ fn transient_record_beside_its_live_device_is_dropped() {
     let both = build_device_list(
         &[
             direct_inventory([0xa3, 0x93, 0xca, 0xe0]),
-            direct_inventory([0; 4]),
+            half_read_direct_inventory(),
         ],
         &[],
         &resolver,
@@ -99,11 +99,11 @@ fn transient_record_beside_its_live_device_is_dropped() {
 }
 
 #[test]
-fn transient_probe_adopts_the_absent_sibling_of_a_live_twin() {
-    // Two same-model devices; one probes complete, the other half-reads.
-    // The live twin must not get the transient discarded as its own noise:
-    // the half-read probe can only be the sibling, which keeps its card
-    // online and routed.
+fn transient_probe_beside_a_live_twin_is_not_adopted() {
+    // Two same-model devices; one probes complete, and a half-read node
+    // answers on their route. A direct route is only `vid:pid`, so that node
+    // may be the live twin's second one while the other mouse is unplugged:
+    // the absent card stays offline, and the node is dropped as probe noise.
     let resolver = AssetResolver::new();
     let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
     let mut state = AppState::new(Sources {
@@ -115,7 +115,7 @@ fn transient_probe_adopts_the_absent_sibling_of_a_live_twin() {
     });
 
     let snapshot = build_device_list(
-        &[direct_inventory([1, 1, 1, 1]), direct_inventory([0; 4])],
+        &[direct_inventory([1, 1, 1, 1]), half_read_direct_inventory()],
         &[],
         &resolver,
         &state.config,
@@ -124,16 +124,104 @@ fn transient_probe_adopts_the_absent_sibling_of_a_live_twin() {
     let merged = state.merge_inventory_snapshot(snapshot);
 
     assert_eq!(merged.len(), 2, "no third card for the half-read probe");
-    // The sibling's own unit id is known and online: the transport-free
-    // identity key wins over the direct-route runtime key.
-    let Some(sibling) = merged.iter().find(|r| r.config_key == "unit:02020202") else {
-        panic!("the sibling card must survive under its physical key");
-    };
-    assert!(
-        sibling.is_online(),
-        "the half-read probe keeps the sibling online"
+    assert_online_and_absent(&merged, &["unit:01010101"], "unit:02020202");
+}
+
+/// The half-read node is a second node of an online mouse, and another is
+/// unplugged. The unplugged mouse's last live record names the shared route,
+/// which proves its model and not that it answered.
+#[test]
+fn partial_node_with_offline_twin() {
+    let resolver = AssetResolver::new();
+    let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = AppState::new(Sources {
+        inventories: &[
+            direct_inventory([1, 1, 1, 1]),
+            direct_inventory([2, 2, 2, 2]),
+            direct_inventory([3, 3, 3, 3]),
+        ],
+        ..Sources::in_memory(Config::ephemeral(), &resolver, commands)
+    });
+
+    let snapshot = build_device_list(
+        &[
+            direct_inventory([2, 2, 2, 2]),
+            half_read_direct_inventory(),
+            direct_inventory([3, 3, 3, 3]),
+        ],
+        &[],
+        &resolver,
+        &state.config,
+        &[],
     );
-    assert!(sibling.route.is_some(), "the live route stays usable");
+    let merged = state.merge_inventory_snapshot(snapshot);
+
+    assert_eq!(merged.len(), 3, "no fourth card for the half-read node");
+    assert_online_and_absent(
+        &merged,
+        &["unit:02020202", "unit:03030303"],
+        "unit:01010101",
+    );
+}
+
+/// With no twin online, the half-read probe takes the one card last seen on
+/// its route, even when the card's offline placeholder carries nothing else
+/// that names the route.
+#[test]
+fn transient_probe_adopts_its_last_live_card_with_no_twin_online() {
+    let resolver = AssetResolver::new();
+    let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = AppState::new(Sources {
+        inventories: &[direct_inventory([1, 1, 1, 1])],
+        ..Sources::in_memory(Config::ephemeral(), &resolver, commands)
+    });
+    state.config.edit(|config| {
+        config
+            .devices
+            .get_mut("unit:01010101")
+            .expect("the device has an entry")
+            .links
+            .clear();
+    });
+
+    let snapshot = build_device_list(
+        &[half_read_direct_inventory()],
+        &[],
+        &resolver,
+        &state.config,
+        &[],
+    );
+    let merged = state.merge_inventory_snapshot(snapshot);
+
+    assert_eq!(merged.len(), 1, "no second card for the half-read probe");
+    assert_eq!(merged[0].config_key, "unit:01010101");
+    assert!(merged[0].is_online(), "the half-read probe keeps it online");
+    assert!(
+        merged[0].addressable_route().is_some(),
+        "the live route stays usable"
+    );
+}
+
+/// `online` keep their cards and their route, and `absent` shows no device to
+/// write to.
+fn assert_online_and_absent(merged: &[DeviceRecord], online: &[&str], absent: &str) {
+    for key in online {
+        let record = merged
+            .iter()
+            .find(|record| record.config_key == *key)
+            .unwrap_or_else(|| panic!("{key} must keep its card"));
+        assert!(record.is_online(), "{key} stays online");
+        assert!(record.addressable_route().is_some(), "{key} stays writable");
+    }
+    let absent = merged
+        .iter()
+        .find(|record| record.config_key == absent)
+        .expect("the unplugged device keeps its card");
+    assert!(!absent.is_online(), "the unplugged device stays offline");
+    assert!(
+        absent.addressable_route().is_none(),
+        "nothing may be written to the unplugged device"
+    );
 }
 
 #[test]
@@ -152,7 +240,7 @@ fn ambiguous_transient_probe_is_not_adopted() {
     assert_eq!(state.devices().len(), 2);
 
     let transient_list = build_device_list(
-        &[direct_inventory([0; 4])],
+        &[half_read_direct_inventory()],
         &[],
         &resolver,
         &state.config,
