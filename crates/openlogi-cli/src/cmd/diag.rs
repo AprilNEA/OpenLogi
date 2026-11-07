@@ -17,6 +17,7 @@ pub mod battery;
 pub mod controls;
 pub mod dpi;
 pub mod features;
+pub mod g600;
 pub mod hidpp;
 pub mod host_switch;
 pub mod lighting;
@@ -58,6 +59,9 @@ pub enum DiagCmd {
     Sidetone(sidetone::SidetoneArgs),
     /// Light each HID++ 0x8081 zone of a keyboard alone and record its key.
     Zones(zones::ZonesArgs),
+    /// Read a G600's active profile, DPI slot and onboard DPI tables over its
+    /// feature reports.
+    G600(g600::G600Args),
 }
 
 impl DiagCmd {
@@ -81,6 +85,7 @@ impl DiagCmd {
             Self::MouseButtons(args) => mouse_buttons::run(args).await,
             Self::HostSwitch(args) => host_switch::run(args).await,
             Self::Sidetone(args) => sidetone::run(args).await,
+            Self::G600(args) => g600::run(args).await,
             Self::Zones(args) => zones::run(args).await,
         }
     }

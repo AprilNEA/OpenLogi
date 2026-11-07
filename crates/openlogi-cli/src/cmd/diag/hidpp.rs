@@ -144,7 +144,8 @@ fn parse_call(text: &str) -> Result<RawFeatureCall> {
         .with_context(|| format!("function {function}: HID++ 2.0 functions run 0–15"))
 }
 
-fn hex(bytes: &[u8]) -> String {
+/// `bytes` as space-separated hex pairs, the way every diag prints a report.
+pub(super) fn hex(bytes: &[u8]) -> String {
     bytes
         .iter()
         .map(|byte| format!("{byte:02x}"))
