@@ -351,6 +351,13 @@ impl Armed {
                             .await
                             .turn_keypad_page(device_key.as_deref(), turn);
                     }
+                    ActionRequest::SettingsWritten { route } => {
+                        running
+                            .orchestrator
+                            .lock()
+                            .await
+                            .announce_settings_changed(&route);
+                    }
                 },
                 Ok(()) = ring.changed() => {
                     running.apply_held_pointer().await;
