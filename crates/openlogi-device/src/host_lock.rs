@@ -103,12 +103,14 @@ pub async fn lock_within(name: &str, budget: Duration) -> io::Result<Option<Host
 ///
 /// A phase is a probe's register reads — on a Unifying receiver held through
 /// its slot walk, since a codename read comes after it — or a route open's
-/// unique-id read: seconds at most, with the 1.5 s arrival drains and a slow
-/// Unifying device's first-sight slot walk (up to 6 s) as the long poles. A
-/// holder still going past this is either a pairing session, which holds the
-/// phase for its whole run, or a probe failing one request timeout at a time;
-/// a waiter defers to it rather than joining it unlocked either way.
-pub const RECEIVER_REGISTER_TIMEOUT: Duration = Duration::from_secs(8);
+/// unique-id read. The longest healthy phase is a Unifying probe: two 1.5 s
+/// arrival drains when the receiver's wireless notifications start off, then
+/// a slow device's first-sight slot walk of up to 6 s. The inventory probe
+/// asserts that this fits. A holder still going past this is either a pairing
+/// session, which holds the phase for its whole run, or a probe failing one
+/// request timeout at a time; a waiter defers to it rather than joining it
+/// unlocked either way.
+pub const RECEIVER_REGISTER_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Holds a receiver's register phase for this process — or nothing, when the
 /// host cannot arbitrate the phase at all. Dropping it releases the phase.

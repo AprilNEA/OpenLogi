@@ -145,19 +145,28 @@ const RECEIVER_PROBE_TIMEOUT: Duration = Duration::from_secs(13);
 /// reprogrammable controls, a 20 ms radio poll) sends ~35 sequential requests
 /// at ~100 ms each: the previous 3.5 s cap cut it off on most passes, and the
 /// keyboard stayed an unnamed device without a battery for the whole session
-/// (#2444). 6 s leaves headroom for that walk while the arrival drain plus the
-/// walk still ends inside [`host_lock::RECEIVER_REGISTER_TIMEOUT`], since the
-/// walk runs under the receiver's register phase (asserted below).
+/// (#2444). 6 s leaves headroom for that walk. The walk runs under the
+/// receiver's register phase, so a healthy phase with this walk must still end
+/// inside [`host_lock::RECEIVER_REGISTER_TIMEOUT`] (asserted below).
 pub(super) const UNIFYING_SLOT_PROBE_TIMEOUT: Duration = Duration::from_secs(6);
 
-// The Unifying slot walk holds the receiver's register phase, so a healthy
-// probe's two long poles must end before another process waiting for that
-// phase gives up on it.
-const _: () = assert!(
-    ARRIVAL_DRAIN_TIMEOUT.as_millis() + UNIFYING_SLOT_PROBE_TIMEOUT.as_millis()
-        < host_lock::RECEIVER_REGISTER_TIMEOUT.as_millis(),
-    "a first-sight Unifying walk must end inside a register-phase waiter's budget"
-);
+// A healthy Unifying probe holds the register phase through up to two arrival
+// drains (the second when the receiver's wireless notifications start off) and
+// then the slot walk. Its register replies take milliseconds. That phase must
+// end before another process waiting for it gives up, and inside the
+// receiver's own probe budget.
+const _: () = {
+    let healthy_phase =
+        2 * ARRIVAL_DRAIN_TIMEOUT.as_millis() + UNIFYING_SLOT_PROBE_TIMEOUT.as_millis();
+    assert!(
+        healthy_phase < host_lock::RECEIVER_REGISTER_TIMEOUT.as_millis(),
+        "a healthy Unifying register phase must end inside a waiter's budget"
+    );
+    assert!(
+        healthy_phase < RECEIVER_PROBE_TIMEOUT.as_millis(),
+        "a healthy Unifying register phase must end inside the receiver probe budget"
+    );
+};
 
 /// Per-slot budget when a Unifying device already has a fresh immutable probe.
 ///
