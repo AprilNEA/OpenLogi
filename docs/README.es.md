@@ -242,10 +242,24 @@ Consulta [DEVELOPMENT.md](DEVELOPMENT.md), incluida la [seguridad del hook de en
 
 ## Agradecimientos
 
-- **Windows, cámaras e i18n** por [@davidbudnick](https://github.com/davidbudnick) — RGB del teclado, compatibilidad con Windows, compatibilidad con las webcams de Logitech
-- **Port a Linux** por [@cserby](https://github.com/cserby) — compatibilidad con Linux
-- [Solaar](https://github.com/pwr-Solaar/Solaar) de [@pwr](https://github.com/pwr) — implementación de HID++ de código abierto
-- [Mouser](https://github.com/TomBadash/Mouser) de [@TomBadash](https://github.com/TomBadash) — un sustituto de Options+ local y sin cuentas
+### Proyectos previos y referencias
+
+- [Solaar](https://github.com/pwr-Solaar/Solaar) de [@pwr](https://github.com/pwr) — implementación de HID++ de código abierto y referencia del protocolo
+- [Mouser](https://github.com/TomBadash/Mouser) de [@TomBadash](https://github.com/TomBadash) — sustituto de Options+ local y sin cuentas
+
+### Colaboradores
+
+- [@kubai087](https://github.com/kubai087) — diseño del logo y del icono de la aplicación de OpenLogi
+
+<a href="https://github.com/AprilNEA/OpenLogi/graphs/contributors">
+    <img src="https://contrib.rocks/image?repo=AprilNEA/OpenLogi" alt="Colaboradores">
+</a>
+
+### Infraestructura
+
+<a href="https://namespace.so/github-actions?utm_source=oss&utm_campaign=openlogi" target="_blank" rel="noopener noreferrer">
+    <img src="https://namespace.so/oss/badge.svg" alt="CI powered by Namespace" height="32">
+</a>
 
 ## Licencia
 
@@ -261,8 +275,7 @@ de [@lus](https://github.com/lus), con licencia 0BSD.
 
 ### Logo y recursos de marca
 
-Gracias a [@kubai087](https://github.com/kubai087) por diseñar el logo de
-OpenLogi. El logo y el icono de la aplicación (los recursos de marca que hay en
+El logo y el icono de la aplicación de OpenLogi (los recursos de marca que hay en
 [`design/`](../design/)) son © 2026 AprilNEA, todos los derechos reservados, y no
 están cubiertos por las licencias MIT/Apache anteriores; consulta
 [`design/LICENSE`](../design/LICENSE). Hacer un fork del código no da ningún

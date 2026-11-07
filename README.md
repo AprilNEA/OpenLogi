@@ -245,10 +245,24 @@ See [DEVELOPMENT.md](docs/DEVELOPMENT.md), including [macOS input-hook safety](d
 
 ## Acknowledgments
 
-- **Windows, cameras, and i18n** by [@davidbudnick](https://github.com/davidbudnick) — keyboard RGB, Windows support, Logitech webcam support
-- **Linux port** by [@cserby](https://github.com/cserby) — Linux support
-- [Solaar](https://github.com/pwr-Solaar/Solaar) by [@pwr](https://github.com/pwr) — open-source HID++ implementation
-- [Mouser](https://github.com/TomBadash/Mouser) by [@TomBadash](https://github.com/TomBadash) — a local, account-free Options+ replacement
+### Prior art & references
+
+- [Solaar](https://github.com/pwr-Solaar/Solaar) by [@pwr](https://github.com/pwr) — open-source HID++ implementation and protocol reference
+- [Mouser](https://github.com/TomBadash/Mouser) by [@TomBadash](https://github.com/TomBadash) — local, account-free Options+ replacement
+
+### Contributors
+
+- [@kubai087](https://github.com/kubai087) — OpenLogi logo and app icon design
+
+<a href="https://github.com/AprilNEA/OpenLogi/graphs/contributors">
+    <img src="https://contrib.rocks/image?repo=AprilNEA/OpenLogi" alt="Contributors">
+</a>
+
+### Infrastructure
+
+<a href="https://namespace.so/github-actions?utm_source=oss&utm_campaign=openlogi" target="_blank" rel="noopener noreferrer">
+    <img src="https://namespace.so/oss/badge.svg" alt="CI powered by Namespace" height="32">
+</a>
 
 ## License
 
@@ -266,9 +280,8 @@ by [@lus](https://github.com/lus), licensed 0BSD.
 
 ### Logo & brand assets
 
-Thanks to [@kubai087](https://github.com/kubai087) for designing the OpenLogi
-logo. The OpenLogi logo and app icon (the brand assets under
-[`design/`](design/)) are © 2026 AprilNEA, all rights reserved, and are not covered by the MIT/Apache
+The OpenLogi logo and app icon (the brand assets under [`design/`](design/))
+are © 2026 AprilNEA, all rights reserved, and are not covered by the MIT/Apache
 licenses above; see [`design/LICENSE`](design/LICENSE). Forking the code grants
 no right to the OpenLogi name, logo, or icon; please don't use them to represent
 your own projects, forks, or distributions without prior written permission.

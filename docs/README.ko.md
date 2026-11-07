@@ -243,10 +243,24 @@ yay -S openlogi
 
 ## 감사의 말
 
-- **Windows·카메라·i18n** — [@davidbudnick](https://github.com/davidbudnick): 키보드 RGB 지원, Windows 지원, Logitech 웹캠 지원
-- **Linux 포팅** — [@cserby](https://github.com/cserby): Linux 지원
-- [Solaar](https://github.com/pwr-Solaar/Solaar) — [@pwr](https://github.com/pwr): 오픈소스 HID++ 구현
+### 선행 프로젝트 및 참고 자료
+
+- [Solaar](https://github.com/pwr-Solaar/Solaar) — [@pwr](https://github.com/pwr): 오픈소스 HID++ 구현 및 프로토콜 레퍼런스
 - [Mouser](https://github.com/TomBadash/Mouser) — [@TomBadash](https://github.com/TomBadash): 로컬에서 동작하는 계정 없는 Options+ 대체제
+
+### 기여자
+
+- [@kubai087](https://github.com/kubai087) — OpenLogi 로고 및 앱 아이콘 디자인
+
+<a href="https://github.com/AprilNEA/OpenLogi/graphs/contributors">
+    <img src="https://contrib.rocks/image?repo=AprilNEA/OpenLogi" alt="기여자">
+</a>
+
+### 인프라
+
+<a href="https://namespace.so/github-actions?utm_source=oss&utm_campaign=openlogi" target="_blank" rel="noopener noreferrer">
+    <img src="https://namespace.so/oss/badge.svg" alt="CI powered by Namespace" height="32">
+</a>
 
 ## 라이선스
 
@@ -261,7 +275,7 @@ yay -S openlogi
 
 ### 로고 및 브랜드 자산
 
-OpenLogi 로고를 디자인해 준 [@kubai087](https://github.com/kubai087)에게 감사드립니다. OpenLogi 로고와 앱 아이콘 — [`design/`](../design/) 아래의 브랜드 자산 — 은 © 2026 AprilNEA가 모든 권리를 보유하며, 위 MIT/Apache 라이선스의 적용을 받지 않습니다. [`design/LICENSE`](../design/LICENSE)를 참고하세요. 코드를 포크해도 OpenLogi 이름·로고·아이콘에 대한 권리는 부여되지 않습니다. 사전 서면 허가 없이 자신의 프로젝트, 포크, 배포판을 나타내는 데 사용하지 마세요.
+OpenLogi 로고와 앱 아이콘 — [`design/`](../design/) 아래의 브랜드 자산 — 은 © 2026 AprilNEA가 모든 권리를 보유하며, 위 MIT/Apache 라이선스의 적용을 받지 않습니다. [`design/LICENSE`](../design/LICENSE)를 참고하세요. 코드를 포크해도 OpenLogi 이름·로고·아이콘에 대한 권리는 부여되지 않습니다. 사전 서면 허가 없이 자신의 프로젝트, 포크, 배포판을 나타내는 데 사용하지 마세요.
 
 ---
 

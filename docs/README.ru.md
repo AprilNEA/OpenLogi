@@ -242,10 +242,24 @@ yay -S openlogi
 
 ## Благодарности
 
-- **Windows, камеры и i18n** — [@davidbudnick](https://github.com/davidbudnick): RGB клавиатуры, поддержка Windows, веб-камеры Logitech
-- **Порт на Linux** — [@cserby](https://github.com/cserby)
-- [Solaar](https://github.com/pwr-Solaar/Solaar) от [@pwr](https://github.com/pwr) — открытая реализация HID++
+### Предшественники и источники
+
+- [Solaar](https://github.com/pwr-Solaar/Solaar) от [@pwr](https://github.com/pwr) — открытая реализация HID++ и справочник по протоколу
 - [Mouser](https://github.com/TomBadash/Mouser) от [@TomBadash](https://github.com/TomBadash) — локальная замена Options+ без аккаунта
+
+### Участники
+
+- [@kubai087](https://github.com/kubai087) — дизайн логотипа и иконки приложения OpenLogi
+
+<a href="https://github.com/AprilNEA/OpenLogi/graphs/contributors">
+    <img src="https://contrib.rocks/image?repo=AprilNEA/OpenLogi" alt="Участники">
+</a>
+
+### Инфраструктура
+
+<a href="https://namespace.so/github-actions?utm_source=oss&utm_campaign=openlogi" target="_blank" rel="noopener noreferrer">
+    <img src="https://namespace.so/oss/badge.svg" alt="CI powered by Namespace" height="32">
+</a>
 
 ## Лицензия
 
@@ -261,8 +275,7 @@ yay -S openlogi
 
 ### Логотип и бренд
 
-Спасибо [@kubai087](https://github.com/kubai087) за дизайн логотипа OpenLogi.
-Логотип и иконка приложения (бренд-ассеты в
+Логотип и иконка приложения OpenLogi (бренд-ассеты в
 [`design/`](../design/)) © 2026 AprilNEA, все права защищены, и не покрываются
 лицензиями MIT/Apache выше; см. [`design/LICENSE`](../design/LICENSE). Форк кода
 не даёт прав на имя, логотип или иконку OpenLogi; не используйте их для своих

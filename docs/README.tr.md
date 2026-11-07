@@ -242,10 +242,24 @@ Ayarlar düz TOML kullanır; kaydetme işlemleri sembolik bağlı (symlink) ayar
 
 ## Teşekkürler
 
-- **Windows, kameralar ve i18n**: [@davidbudnick](https://github.com/davidbudnick) — klavye RGB, Windows desteği, Logitech web kamerası desteği
-- **Linux portu**: [@cserby](https://github.com/cserby) — Linux desteği
-- [Solaar](https://github.com/pwr-Solaar/Solaar) ([@pwr](https://github.com/pwr)) — açık kaynak HID++ uygulaması
+### Öncül projeler ve referanslar
+
+- [Solaar](https://github.com/pwr-Solaar/Solaar) ([@pwr](https://github.com/pwr)) — açık kaynak HID++ uygulaması ve protokol referansı
 - [Mouser](https://github.com/TomBadash/Mouser) ([@TomBadash](https://github.com/TomBadash)) — hesap gerektirmeyen, yerel bir Options+ alternatifi
+
+### Katkıda bulunanlar
+
+- [@kubai087](https://github.com/kubai087) — OpenLogi logosu ve uygulama simgesi tasarımı
+
+<a href="https://github.com/AprilNEA/OpenLogi/graphs/contributors">
+    <img src="https://contrib.rocks/image?repo=AprilNEA/OpenLogi" alt="Katkıda bulunanlar">
+</a>
+
+### Altyapı
+
+<a href="https://namespace.so/github-actions?utm_source=oss&utm_campaign=openlogi" target="_blank" rel="noopener noreferrer">
+    <img src="https://namespace.so/oss/badge.svg" alt="CI powered by Namespace" height="32">
+</a>
 
 ## Lisans
 
@@ -262,8 +276,7 @@ gömülü bir çatallanmasıdır (fork).
 
 ### Logo ve marka varlıkları
 
-OpenLogi logosunu tasarlayan [@kubai087](https://github.com/kubai087)'e
-teşekkürler. OpenLogi logosu ve uygulama simgesi ([`design/`](../design/)
+OpenLogi logosu ve uygulama simgesi ([`design/`](../design/)
 altındaki marka varlıkları) © 2026 AprilNEA'ya aittir, tüm hakları saklıdır,
 ve yukarıdaki MIT/Apache lisansları kapsamında değildir; bakınız
 [`design/LICENSE`](../design/LICENSE). Kodu çatallamak, OpenLogi adı, logosu
