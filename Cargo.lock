@@ -6100,6 +6100,7 @@ dependencies = [
  "num_enum",
  "nutype",
  "openlogi-device-registry",
+ "percent-encoding",
  "plist",
  "rust-i18n",
  "serde",
