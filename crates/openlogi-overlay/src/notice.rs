@@ -19,6 +19,7 @@ use gpui::{
 };
 use openlogi_ipc::{Notice, NoticeKind};
 use openlogi_ui::action_icons::LOW_BATTERY_ICON;
+use openlogi_ui::color::neutral;
 use tracing::warn;
 
 use crate::platform::NoticePlacement;
@@ -50,15 +51,6 @@ const WARNING: Hsla = Hsla {
     l: 0.56,
     a: 1.0,
 };
-
-const fn neutral(lightness: f32, alpha: f32) -> Hsla {
-    Hsla {
-        h: 0.0,
-        s: 0.0,
-        l: lightness,
-        a: alpha,
-    }
-}
 
 /// What the overlay remembers between the agent's lists: the latest list,
 /// which cards the user dismissed, and which cards are on screen.
