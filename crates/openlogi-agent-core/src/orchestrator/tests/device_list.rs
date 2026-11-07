@@ -426,3 +426,37 @@ fn a_link_removed_after_the_keyboard_left_is_still_cleared() {
     orchestrator.reload_config(Config::default());
     assert_eq!(orchestrator.follower_cookies().held_for(mouse), [byte]);
 }
+
+#[test]
+fn two_devices_with_their_own_units_on_one_route_are_both_managed() {
+    // Two cabled mice of one model share the route but not the key.
+    let devices = build_devices(
+        &Config::default(),
+        &[
+            direct_inventory_state(0xc08d, None, [1, 1, 1, 1], true),
+            direct_inventory_state(0xc08d, None, [2, 2, 2, 2], true),
+        ],
+        &[],
+    );
+
+    let keys: Vec<&str> = devices
+        .iter()
+        .map(|device| device.config_key.as_str())
+        .collect();
+    assert_eq!(keys, ["unit:01010101", "unit:02020202"]);
+}
+
+#[test]
+fn two_model_only_devices_of_one_model_are_both_managed_under_one_key() {
+    // Two G402s report neither a serial nor a unit id, and are reached by
+    // the same `direct:<vid>:<pid>` route: nothing tells them apart, so they
+    // share the one entry their route keys.
+    let g402 = direct_inventory_state(0xc07e, None, [0; 4], true);
+    let devices = build_devices(&Config::default(), &[g402.clone(), g402], &[]);
+
+    let keys: Vec<&str> = devices
+        .iter()
+        .map(|device| device.config_key.as_str())
+        .collect();
+    assert_eq!(keys, ["direct:046d:c07e", "direct:046d:c07e"]);
+}
