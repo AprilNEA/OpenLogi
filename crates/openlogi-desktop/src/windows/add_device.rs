@@ -40,7 +40,7 @@ use crate::app::menu::{DIALOG_KEY_CONTEXT, Dismiss};
 use crate::services::ipc::{CancelPairing, Command, PairDevice, StartPairing};
 use crate::state::{AppState, StateEvent};
 use crate::ui::components::control_button;
-use crate::ui::theme::{self, Palette, Typography as _};
+use crate::ui::theme::{self, Palette, PressableStyle as _, Typography as _};
 use crate::windows::{self, AuxWindow};
 
 /// The pairing flow as the window renders it: the agent's [`PairingPhase`]
@@ -514,7 +514,7 @@ fn choice_row(id: impl Into<ElementId>, label: SharedString, pal: Palette) -> Ba
         .border_color(pal.border)
         .bg(pal.control)
         .cursor_pointer()
-        .hover(|s| s.bg(pal.control_hover))
+        .pressable_fill(false, pal)
         .focus_visible(move |s| s.focus_ring(pal))
         .child(div().flex_1().min_w_0().truncate().text_body().child(label))
         .child(

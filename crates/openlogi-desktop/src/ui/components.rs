@@ -24,7 +24,7 @@ use gpui_kit::component::{
     v_flex,
 };
 
-use super::theme::{self, ACCENT_BLUE, SelectableStyle as _, Typography as _};
+use super::theme::{self, ACCENT_BLUE, PressableStyle as _, SelectableStyle as _, Typography as _};
 
 /// A gpui-component button at the house control height.
 ///
@@ -435,13 +435,7 @@ impl RenderOnce for MenuRow {
             .text_body()
             .text_color(pal.text_primary)
             .selected_fill(selected)
-            .hover(move |style| {
-                style.bg(if selected {
-                    theme::accent_tint_hover()
-                } else {
-                    pal.control_hover
-                })
-            })
+            .pressable_fill(selected, pal)
             .focus_visible(move |style| style.focus_ring(pal))
             .children(self.children)
             .when_some(self.on_click, |row, handler| {
@@ -562,13 +556,7 @@ impl RenderOnce for ProfileTab {
             } else {
                 pal.control
             })
-            .hover(move |style| {
-                style.bg(if self.selected {
-                    theme::accent_tint_hover()
-                } else {
-                    pal.control_hover
-                })
-            })
+            .pressable_fill(self.selected, pal)
             .focus_visible(move |style| style.focus_ring(pal))
             .when_some(self.icon, |tab, icon| tab.child(icon.size_3()))
             .child(label.clone())
@@ -588,7 +576,11 @@ impl RenderOnce for ProfileTab {
                         .justify_center()
                         .rounded_full()
                         .text_color(pal.text_muted)
-                        .hover(|style| style.text_color(pal.text_primary).bg(pal.control_hover))
+                        // The glyph brightens instead of taking a fill: a fill
+                        // would match the tab's own hover fill under it, and
+                        // the tab, hovered and pressed along with the glyph,
+                        // already gives the press feedback.
+                        .hover(|style| style.text_color(pal.text_primary))
                         .focus_visible(move |style| style.focus_ring(pal))
                         .child(Icon::new(IconName::Close).size_3())
                         .on_click(move |event, window, cx| {
@@ -648,13 +640,7 @@ impl RenderOnce for PresetChip {
             .selected_border(selected, pal)
             .bg(pal.control)
             .selected_fill(selected)
-            .hover(move |style| {
-                style.bg(if selected {
-                    theme::accent_tint_hover()
-                } else {
-                    pal.control_hover
-                })
-            })
+            .pressable_fill(selected, pal)
             .children(self.children)
     }
 }

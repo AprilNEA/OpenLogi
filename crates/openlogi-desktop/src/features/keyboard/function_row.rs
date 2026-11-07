@@ -59,7 +59,9 @@ use crate::services::assets::{GlowGeometry, ResolvedAsset};
 use crate::state::{AppState, DeviceKey, DeviceRecord, GamingKeys, StateEvent, StateEvents};
 use crate::ui::action::localized_action_label;
 use crate::ui::components::{MenuRow, control_button};
-use crate::ui::theme::{self, ACCENT_BLUE, Palette, SCREEN_PAD, Typography as _};
+use crate::ui::theme::{
+    self, ACCENT_BLUE, Palette, PressableStyle as _, SCREEN_PAD, Typography as _,
+};
 use gpui::{Animation, AnimationExt, ease_out_quint, img};
 use openlogi_core::hid::KeypadDescriptor;
 
@@ -1306,13 +1308,7 @@ impl RenderOnce for KeyCallout {
                 pal.control
             })
             .cursor_pointer()
-            .hover(move |s| {
-                s.bg(if highlighted {
-                    theme::accent_tint_hover()
-                } else {
-                    pal.control_hover
-                })
-            })
+            .pressable_fill(highlighted, pal)
             .child(if self.slot.bound {
                 svg()
                     .path(self.slot.binding_icon)
