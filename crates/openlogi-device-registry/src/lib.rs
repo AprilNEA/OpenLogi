@@ -14,6 +14,7 @@
 pub mod camera;
 pub mod g600;
 pub mod headset;
+pub mod keyboard;
 pub mod keypad;
 pub mod litra;
 pub mod receiver;

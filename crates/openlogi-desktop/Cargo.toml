@@ -22,6 +22,7 @@ openlogi-ui = { path = "../openlogi-ui" }
 openlogi-camera = { path = "../openlogi-camera" }
 openlogi-hook = { path = "../openlogi-hook" }
 openlogi-assets = { path = "../openlogi-assets" }
+openlogi-device-registry = { workspace = true }
 openlogi-ipc = { path = "../openlogi-ipc" }
 openlogi-permissions = { path = "../openlogi-permissions" }
 tarpc = { workspace = true }

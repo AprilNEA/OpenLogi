@@ -237,6 +237,9 @@ pub(super) fn key_surface(
         if let Some(points) = legacy_pixel_key_points(asset) {
             return KeySurface::Photo(function_key_slots(points));
         }
+        if let Some(slots) = per_key_function_slots(asset) {
+            return KeySurface::Photo(slots);
+        }
     } else if keypad.is_some() {
         return KeySurface::Keypad(keypad_slots());
     }
@@ -623,6 +626,64 @@ fn function_key_slots(points: Vec<KeyPoint>) -> Vec<KeySlotLayout> {
             point,
         })
         .collect()
+}
+
+/// The top-row keys a G HUB-style depot draws in its per-key lighting map
+/// ([`openlogi_assets::Metadata::key_regions`]), each on its own key's
+/// centre, or `None` when the depot has no such map. Only the keys the
+/// keyboard has get a slot: a tenkeyless board without F13–F19 shows none of
+/// them, where the evenly spaced fallback would invent their places.
+fn per_key_function_slots(asset: &ResolvedAsset) -> Option<Vec<KeySlotLayout>> {
+    let origin = asset.metadata.origin()?;
+    let width = f32::from(u16::try_from(origin.width).ok().filter(|w| *w > 0)?);
+    let height = f32::from(u16::try_from(origin.height).ok().filter(|h| *h > 0)?);
+    let regions = asset.metadata.key_regions();
+    let slots: Vec<KeySlotLayout> = FunctionKey::ALL
+        .into_iter()
+        .filter_map(|key| {
+            let usage = function_key_usage(key);
+            let rect = regions.iter().find(|region| region.usage == usage)?.rect;
+            Some(KeySlotLayout {
+                target: KeyTarget::FunctionKey(KeyTrigger {
+                    keycode: key.keycode(),
+                    modifiers: KeyModifiers::default(),
+                }),
+                legend: key.label().to_owned(),
+                point: KeyPoint {
+                    x_frac: ((rect.x + rect.width / 2.) / width).clamp(0., 1.),
+                    y_frac: ((rect.y + rect.height / 2.) / height).clamp(0., 1.),
+                },
+            })
+        })
+        .collect();
+    (!slots.is_empty()).then_some(slots)
+}
+
+/// The USB HID keyboard usage of a top-row key: Escape, F1–F12 in one run,
+/// F13–F19 in another.
+fn function_key_usage(key: FunctionKey) -> u8 {
+    match key {
+        FunctionKey::Esc => 0x29,
+        FunctionKey::F1 => 0x3a,
+        FunctionKey::F2 => 0x3b,
+        FunctionKey::F3 => 0x3c,
+        FunctionKey::F4 => 0x3d,
+        FunctionKey::F5 => 0x3e,
+        FunctionKey::F6 => 0x3f,
+        FunctionKey::F7 => 0x40,
+        FunctionKey::F8 => 0x41,
+        FunctionKey::F9 => 0x42,
+        FunctionKey::F10 => 0x43,
+        FunctionKey::F11 => 0x44,
+        FunctionKey::F12 => 0x45,
+        FunctionKey::F13 => 0x68,
+        FunctionKey::F14 => 0x69,
+        FunctionKey::F15 => 0x6a,
+        FunctionKey::F16 => 0x6b,
+        FunctionKey::F17 => 0x6c,
+        FunctionKey::F18 => 0x6d,
+        FunctionKey::F19 => 0x6e,
+    }
 }
 
 #[cfg(test)]

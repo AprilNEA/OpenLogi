@@ -742,6 +742,10 @@ applying_light_setting = "Bruker lysinnstilling…"
 auto_on_with_camera = "Slå på automatisk med kameraet"
 camera_light_auto_description = "Slå på lyset når et kamera er i bruk, og av når ingen kameraer er aktive."
 keyboard_lighting_description = "Brukes av OpenLogi mens det kjører, og lagres ikke på tastaturet."
+per_key_hint = "Klikk på taster for å velge dem, og velg deretter en farge. Uten valgte taster gjelder fargen hele tastaturet."
+clear_selection = "Fjern valg"
+use_keyboard_color = "Bruk tastaturets farge"
+reset_all_keys = "Tilbakestill alle taster"
 
 [action_ring]
 actions_ring = "Handlingsring"
