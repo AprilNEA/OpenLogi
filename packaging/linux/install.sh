@@ -135,6 +135,23 @@ need_command() {
   command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
 }
 
+# Whether an installed system package (not this script) owns $1. Checked
+# before touching a file at a path both a package and this installer can
+# write to, so a migration or removal here never strands a package-managed
+# file (dpkg/rpm reinstall, or pacman on an AUR build of the .deb).
+owned_by_package() {
+  if command -v dpkg >/dev/null 2>&1 && dpkg -S "$1" >/dev/null 2>&1; then
+    return 0
+  fi
+  if command -v rpm >/dev/null 2>&1 && rpm -qf "$1" >/dev/null 2>&1; then
+    return 0
+  fi
+  if command -v pacman >/dev/null 2>&1 && pacman -Qo "$1" >/dev/null 2>&1; then
+    return 0
+  fi
+  return 1
+}
+
 require_linux() {
   need_command uname
   [ "$(uname -s)" = Linux ] || die "this installer supports Linux only"
@@ -420,8 +437,24 @@ install_source() {
     install_source_file 755 "${BUILD_DIR}/${binary}" "${BINDIR}/${binary}"
   done
 
+  # /etc/udev/rules.d is reserved for admin-authored overrides, not a file a
+  # package or installer ships; pacman's udev-reload hook only watches
+  # /usr/lib/udev/rules.d, so a prior install there never reloaded on an
+  # Arch-family system without a manual `udevadm control --reload-rules`. A
+  # stale copy at the old path also shadows the new one (udev prefers /etc),
+  # so a previous run of this same script needs migrating off it — but only
+  # when it isn't a package's own file, which owns its lifecycle independently.
+  if [ -e /etc/udev/rules.d/70-openlogi.rules ] &&
+    ! owned_by_package /etc/udev/rules.d/70-openlogi.rules; then
+    if [ "$DRY_RUN" -eq 1 ]; then
+      print_command sudo rm -f /etc/udev/rules.d/70-openlogi.rules
+    else
+      printf 'Migrating the udev rule from /etc to /usr/lib...\n'
+      run_privileged rm -f /etc/udev/rules.d/70-openlogi.rules
+    fi
+  fi
   install_source_file 644 "${SCRIPT_DIR}/udev/70-openlogi.rules" \
-    /etc/udev/rules.d/70-openlogi.rules
+    /usr/lib/udev/rules.d/70-openlogi.rules
   install_source_file 644 "${TEMP_DIR}/openlogi-agent.service" \
     /usr/lib/systemd/user/openlogi-agent.service
   install_source_file 644 "${SCRIPT_DIR}/desktop/openlogi.desktop" \
