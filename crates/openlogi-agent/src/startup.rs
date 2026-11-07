@@ -310,7 +310,8 @@ pub(crate) fn spawn_state_watchers(
     // light needs restoring when it stops.
     let light_watcher =
         watchers::light::spawn(shared.hardware(), &shared.watched_lights, light_events);
-    let mut pointer = watchers::pointer::spawn();
+    // Samples only while the mouse-profile policy follows the pointer.
+    let mut pointer = watchers::pointer::spawn(&shared.pointer_demand);
     // Publish capability even when an unsupported source has no worker and
     // closes immediately. The orchestrator starts unknown, never guessing.
     pointer.mark_changed();
