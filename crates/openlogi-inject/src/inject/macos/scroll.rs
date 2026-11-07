@@ -195,14 +195,7 @@ pub(in crate::inject) fn post_phased_scroll(delta: ScrollDelta, phase: SmoothScr
 /// from JS wheel handlers). A phase is stamped only where a gesture is the
 /// point, such as a horizontal swipe AppKit's recognisers must see.
 fn post_continuous_scroll(delta: ScrollDelta, phase: Option<SmoothScrollPhase>) {
-    // AppKit completes a phased gesture (a row swipe) only from pixel events.
-    let delta = match delta {
-        ScrollDelta::WheelTicks { x, y } if phase.is_some() => {
-            let points = f64::from(POINTS_PER_LINE);
-            ScrollDelta::pixels(x * points, y * points)
-        }
-        _ => delta,
-    };
+    let delta = frame_distance(delta, phase);
     if let ScrollDelta::WheelTicks { x, y } = delta {
         if phase.is_none() && x == 0.0 && y == 0.0 {
             return;
@@ -228,6 +221,20 @@ fn post_continuous_scroll(delta: ScrollDelta, phase: Option<SmoothScrollPhase>) 
     }
     if let Some(event) = continuous_scroll_event(delta, phase) {
         post_wheel_event(&event, phase);
+    }
+}
+
+/// The distance a frame goes out with. AppKit completes a phased gesture (a
+/// row swipe) only from pixel events: on line ticks it starts the swipe and
+/// snaps it back. A phased frame's wheel ticks therefore become pixels at the
+/// points per line the continuous fields carry; phaseless ticks stay ticks.
+fn frame_distance(delta: ScrollDelta, phase: Option<SmoothScrollPhase>) -> ScrollDelta {
+    match delta {
+        ScrollDelta::WheelTicks { x, y } if phase.is_some() => {
+            let points = f64::from(POINTS_PER_LINE);
+            ScrollDelta::pixels(x * points, y * points)
+        }
+        _ => delta,
     }
 }
 
@@ -393,6 +400,34 @@ mod tests {
                 crate::SYNTHETIC_EVENT_USER_DATA
             );
         }
+    }
+
+    /// A phased gesture's wheel ticks go out as pixels at ten points per
+    /// line, terminal zero-distance frames included: AppKit snaps a row swipe
+    /// back on line ticks. Phaseless ticks stay ticks, and pixels pass through.
+    #[test]
+    fn phased_wheel_ticks_go_out_as_pixels() {
+        let ticks = ScrollDelta::wheel_ticks(-1.5, 0.25);
+        for phase in [
+            SmoothScrollPhase::Began,
+            SmoothScrollPhase::Changed,
+            SmoothScrollPhase::Ended,
+            SmoothScrollPhase::Cancelled,
+        ] {
+            assert_eq!(
+                frame_distance(ticks, Some(phase)),
+                ScrollDelta::pixels(-15.0, 2.5),
+                "{phase:?}"
+            );
+        }
+        let ended = Some(SmoothScrollPhase::Ended);
+        assert_eq!(
+            frame_distance(ScrollDelta::wheel_ticks(0.0, 0.0), ended),
+            ScrollDelta::pixels(0.0, 0.0)
+        );
+        assert_eq!(frame_distance(ticks, None), ticks);
+        let pixels = ScrollDelta::pixels(3.0, -4.0);
+        assert_eq!(frame_distance(pixels, ended), pixels);
     }
 
     #[test]
