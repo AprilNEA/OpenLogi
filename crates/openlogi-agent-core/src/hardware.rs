@@ -23,7 +23,7 @@ use std::future::Future;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::Duration;
 
-use openlogi_core::config::Lighting;
+use openlogi_core::config::{KeyRemap, Lighting};
 #[cfg(test)]
 use openlogi_hid::DisableKeysMask;
 use openlogi_hid::{
@@ -447,6 +447,7 @@ impl DeviceOp {
         let write = openlogi_hid::write::LightingWrite {
             method: openlogi_hid::LightingMethod::Auto,
             color: openlogi_core::color::Rgb::new(r, g, b),
+            keys: lighting_keys(lighting),
         };
         openlogi_hid::lighting::LightingJob::spawn(&self.route, move |cancel| async move {
             let _lease = tokio::time::timeout(WRITE_TIMEOUT, receiver_access.acquire_for_io())
@@ -744,6 +745,39 @@ pub(crate) fn write_fn_lock_in_background(op: DeviceOp, ticket: WriteTicket, on:
                 } else {
                     debug!(index, on, "Fn-lock write superseded by a newer one");
                 }
+            });
+        },
+    );
+}
+
+/// Spawn an OS thread that writes `remap` to `op`'s keyboard via
+/// [`openlogi_hid::set_key_remap_on`], unless a newer remap write for the
+/// keyboard was requested after `ticket`. Returns immediately; failures
+/// (incl. keyboards without `0x1b05` key customisation) are logged.
+pub(crate) fn write_key_remap_in_background(op: DeviceOp, ticket: WriteTicket, remap: KeyRemap) {
+    let index = op.route.device_index();
+    let turn = op.access.transport_turns.turn_for(&op.route);
+    op.spawn_timed_write(
+        "key remap write",
+        move |op| async move {
+            within_turn(
+                &ticket,
+                &turn,
+                || async {
+                    let shared = op.resolve()?;
+                    openlogi_hid::set_key_remap_on(&shared, &remap)
+                        .await
+                        .map(Some)
+                },
+                || async { Ok(None) },
+            )
+            .await
+        },
+        move |result| {
+            log_outcome(index, "key remap write", result, |skipped| match skipped {
+                Some(skipped) if skipped.is_empty() => debug!(index, "key remap written"),
+                Some(skipped) => debug!(index, ?skipped, "key remap written without some keys"),
+                None => debug!(index, "key remap write superseded by a newer one"),
             });
         },
     );
@@ -1583,10 +1617,28 @@ pub fn lighting_rgb(lighting: &Lighting) -> (u8, u8, u8) {
     if !lighting.enabled {
         return (0, 0, 0);
     }
-    let (r, g, b) = lighting.color.components();
-    let scale =
-        |c: u8| u8::try_from(u16::from(c) * u16::from(lighting.brightness) / 100).unwrap_or(c);
-    (scale(r), scale(g), scale(b))
+    dimmed(lighting.color, lighting.brightness).components()
+}
+
+/// Resolve a [`Lighting`]'s per-key colours to `(HID keyboard usage, colour)`
+/// pairs, scaled by brightness like [`lighting_rgb`]. Empty when the lighting
+/// is off: every key then takes the black of the static colour.
+#[must_use]
+pub fn lighting_keys(lighting: &Lighting) -> Vec<(u8, openlogi_core::color::Rgb)> {
+    if !lighting.enabled {
+        return Vec::new();
+    }
+    lighting
+        .keys
+        .iter()
+        .map(|(key, &color)| (key.usage(), dimmed(color, lighting.brightness)))
+        .collect()
+}
+
+fn dimmed(color: openlogi_core::color::Rgb, brightness: u8) -> openlogi_core::color::Rgb {
+    let (r, g, b) = color.components();
+    let scale = |c: u8| u8::try_from(u16::from(c) * u16::from(brightness) / 100).unwrap_or(c);
+    openlogi_core::color::Rgb::new(scale(r), scale(g), scale(b))
 }
 
 /// Bound any single HID++ call by [`WRITE_TIMEOUT`] so an asleep / unresponsive
@@ -2537,5 +2589,35 @@ mod tests {
         let started = tokio::time::Instant::now();
 
         assert_eq!(within_led_budget(started, async { 7 }).await, Some(7));
+    }
+
+    #[test]
+    fn key_colours_take_the_brightness_and_go_dark_with_the_lighting() {
+        use openlogi_core::color::Rgb;
+
+        let mut lighting = Lighting {
+            brightness: 50,
+            keys: [("Esc", "ff0000"), ("LShift", "00ff80")]
+                .into_iter()
+                .map(|(key, color)| {
+                    (
+                        key.parse().expect("a known key"),
+                        color.parse().expect("valid hex"),
+                    )
+                })
+                .collect(),
+            ..Lighting::default()
+        };
+        assert_eq!(
+            lighting_keys(&lighting),
+            [
+                (0x29, Rgb::new(0x7f, 0, 0)),
+                (0xe1, Rgb::new(0, 0x7f, 0x40))
+            ]
+        );
+
+        lighting.enabled = false;
+        assert!(lighting_keys(&lighting).is_empty());
+        assert_eq!(lighting_rgb(&lighting), (0, 0, 0));
     }
 }

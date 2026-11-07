@@ -10,8 +10,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
     CameraControls, CameraStreamMode, Config, DeviceIdentity, DisableKey, GKeyOwner, GamingKeyMode,
-    LightSettings, Lighting, MomentumScrolling, OnboardMemory, ScrollResolution, SmartShift,
-    ThumbwheelSensitivity,
+    KeyRemap, LightSettings, Lighting, MomentumScrolling, OnboardMemory, ScrollResolution,
+    SmartShift, ThumbwheelSensitivity,
 };
 use crate::binding::{
     Action, ActionRingConfig, ActionRingIcon, ActionRingSize, ActionRingSlot, Binding, ButtonId,
@@ -379,6 +379,25 @@ impl Config {
             .entry(device_key.to_string())
             .or_default()
             .fn_lock = Some(fn_lock);
+    }
+
+    /// The keys `device_key` sends something else for, or `None` when the
+    /// user never remapped any (the keyboard keeps its own keys).
+    #[must_use]
+    pub fn key_remap(&self, device_key: &str) -> Option<&KeyRemap> {
+        self.devices
+            .get(device_key)
+            .and_then(|d| d.key_remap.as_ref())
+    }
+
+    /// Record the keys `device_key` sends something else for; the agent
+    /// writes them on reload and when the keyboard reconnects. An empty map
+    /// stays recorded, so the agent clears what an earlier one wrote.
+    pub fn set_key_remap(&mut self, device_key: &str, remap: KeyRemap) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .key_remap = Some(remap);
     }
 
     /// Whether the agent keeps `device_key`'s key layout on the host OS. On

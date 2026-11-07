@@ -28,7 +28,9 @@ use crate::features::camera::controls::CameraControlsPanel;
 use crate::features::camera::preview::CameraPreview;
 use crate::features::keyboard::disable_keys::DisableKeysPanel;
 use crate::features::keyboard::function_row::FunctionRowView;
+use crate::features::keyboard::key_remap::KeyRemapPanel;
 use crate::features::lighting::keyboard_rgb::LightingPanel;
+use crate::features::lighting::per_key::per_key_photo;
 use crate::features::lighting::standalone::LightPanel;
 use crate::features::lighting::visual as light_visual;
 use crate::features::mouse::view::MouseModelView;
@@ -101,6 +103,7 @@ pub(super) struct DetailPanels<'a> {
     pub mouse_model: &'a gpui::Entity<MouseModelView>,
     pub action_ring: &'a gpui::Entity<ActionRingPanel>,
     pub keyboard_model: &'a gpui::Entity<FunctionRowView>,
+    pub key_remap_panel: &'a gpui::Entity<KeyRemapPanel>,
     pub disable_keys_panel: &'a gpui::Entity<DisableKeysPanel>,
     pub dpi_panel: &'a gpui::Entity<DpiPanel>,
     pub smartshift_panel: &'a gpui::Entity<SmartShiftPanel>,
@@ -134,9 +137,14 @@ pub(super) fn detail_content(
         DetailTab::ActionsRing => {
             action_ring_tab(panels.action_ring, profile_icons, app_catalog, cx).into_any_element()
         }
-        DetailTab::Keys => {
-            keys_tab(panels.keyboard_model, profile_icons, app_catalog, cx).into_any_element()
-        }
+        DetailTab::Keys => keys_tab(
+            panels.keyboard_model,
+            panels.key_remap_panel,
+            profile_icons,
+            app_catalog,
+            cx,
+        )
+        .into_any_element(),
         DetailTab::Pointer => pointer_tab(
             panels.dpi_panel,
             panels.smartshift_panel,
@@ -144,7 +152,7 @@ pub(super) fn detail_content(
             cx,
         )
         .into_any_element(),
-        DetailTab::Lighting => lighting_tab(panels.lighting_panel).into_any_element(),
+        DetailTab::Lighting => lighting_tab(panels.lighting_panel, cx).into_any_element(),
         DetailTab::Camera => {
             camera_tab(panels.camera_preview, panels.camera_controls).into_any_element()
         }
@@ -358,6 +366,7 @@ fn tab_body(
 /// keyboard's F-row binds globally and a selector there would mislead.
 fn keys_tab(
     keyboard_model: &gpui::Entity<FunctionRowView>,
+    key_remap_panel: &gpui::Entity<KeyRemapPanel>,
     profile_icons: &ProfileIconCache,
     app_catalog: &gpui::Entity<AppCatalogPicker>,
     cx: &mut Context<AppView>,
@@ -377,7 +386,13 @@ fn keys_tab(
             tab_body(
                 DetailTab::Keys,
                 ContentWidth::DoubleExtraLarge,
-                keyboard_model.clone(),
+                v_flex()
+                    .gap_6()
+                    .w_full()
+                    .items_center()
+                    .child(keyboard_model.clone())
+                    // Renders nothing unless the keyboard's keys are known.
+                    .child(key_remap_panel.clone()),
             )
             .justify_center(),
         )
@@ -828,11 +843,23 @@ fn audio_tab(audio_panel: &gpui::Entity<AudioPanel>) -> impl IntoElement {
 /// Lighting tab: the RGB controls (swatches, on/off, brightness) in an
 /// untitled card — the rail already names the page "Lighting", so a card
 /// title would only repeat it. Shown when the device reports a lighting
-/// capability — see [`DetailTab::tabs_for`].
-fn lighting_tab(lighting_panel: &gpui::Entity<LightingPanel>) -> impl IntoElement {
+/// capability — see [`DetailTab::tabs_for`]. A keyboard with per-key colors
+/// gets the wide body its photo needs.
+fn lighting_tab(
+    lighting_panel: &gpui::Entity<LightingPanel>,
+    cx: &Context<AppView>,
+) -> impl IntoElement {
+    let per_key = AppState::try_read(cx)
+        .and_then(AppState::current_record)
+        .and_then(per_key_photo)
+        .is_some();
     tab_body(
         DetailTab::Lighting,
-        ContentWidth::Small,
+        if per_key {
+            ContentWidth::Large
+        } else {
+            ContentWidth::Small
+        },
         PanelCard::new(
             SharedString::default(),
             Icon::new(IconName::Palette),

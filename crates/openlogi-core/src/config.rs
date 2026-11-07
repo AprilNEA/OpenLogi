@@ -19,7 +19,9 @@ mod flow;
 mod function_key;
 mod gestures;
 mod identity;
+mod key_remap;
 mod key_trigger;
+mod lighting_key;
 mod migrate;
 mod per_app;
 mod per_device;
@@ -46,7 +48,9 @@ pub use flow::{
 };
 pub use function_key::FunctionKey;
 pub use identity::canonical_device_key;
+pub use key_remap::{KeyRemap, KeyTarget, KeyTargetError, MediaKey};
 pub use key_trigger::{KeyModifiers, KeyTrigger, KeyboardConfig, ParseTriggerError};
+pub use lighting_key::{LightingKey, LightingKeyError};
 pub use revision::ConfigRevision;
 pub use settings::LightSettings;
 pub use settings::{
@@ -64,6 +68,13 @@ use crate::binding::{Binding, ButtonId, GestureDirection};
 /// The schema version the current build produces. Bumped whenever the
 /// persisted shape or enum vocabulary changes; readers inspect this value
 /// before consuming the rest of the file.
+///
+/// v12 adds per-device keyboard lighting `keys` (colours for single keys
+/// over the keyboard colour) and `key_remap` (what keys send instead, per
+/// layer). Nothing older needs migrating: a file without them lights every
+/// key in the keyboard colour and leaves the keys alone. The bump makes a v11
+/// build refuse a file that may hold them at the version check, instead of
+/// failing on the unknown field.
 ///
 /// v11 adds the `[flow]` section for cross-machine device handoff. Nothing
 /// older needs migrating, and a file without it loads as disabled Flow. The
@@ -128,7 +139,7 @@ use crate::binding::{Binding, ButtonId, GestureDirection};
 /// next save; [`Config::load_from_path`] accepts supported versions `1` through
 /// [`SCHEMA_VERSION`] so an invalid or forward file fails loudly instead of
 /// silently losing bindings.
-pub const SCHEMA_VERSION: u32 = 11;
+pub const SCHEMA_VERSION: u32 = 12;
 
 /// Top-level config document.
 #[derive(Debug, Clone, Serialize, Deserialize)]
