@@ -118,6 +118,8 @@ pub struct SwipeAccumulator {
     repeat_cross: i32,
     /// When the last motion arrived, to detect the pause that ends a stroke.
     moved_at: Option<Instant>,
+    /// The travel behind the latest fresh commit, until it is taken.
+    committed: Option<(i32, i32)>,
 }
 
 impl SwipeAccumulator {
@@ -131,6 +133,7 @@ impl SwipeAccumulator {
         self.repeat = 0;
         self.repeat_cross = 0;
         self.moved_at = None;
+        self.committed = None;
     }
 
     /// Whether a hold is in progress (between [`Self::begin`] and [`Self::end`]),
@@ -235,6 +238,7 @@ impl SwipeAccumulator {
         if held_long_enough && let Some(dir) = detect_swipe(self.dx, self.dy) {
             self.fired = true;
             self.last = Some(dir);
+            self.committed = Some((self.dx, self.dy));
             self.repeat = 0;
             self.repeat_cross = 0;
             self.dx = 0;
@@ -242,6 +246,20 @@ impl SwipeAccumulator {
             return Some(dir);
         }
         None
+    }
+
+    /// The travel behind the commit [`Self::accumulate`] just returned, once,
+    /// so a live consumer opened at that commit starts where the hand already
+    /// is. `None` after a repeat: its travel continued a committed stroke.
+    pub fn take_committed_travel(&mut self) -> Option<(i32, i32)> {
+        self.committed.take()
+    }
+
+    /// Whether the current hold has committed a swipe. Capture paths stream
+    /// the hold's later motion to interactive consumers from then on.
+    #[must_use]
+    pub fn has_committed(&self) -> bool {
+        self.held_since.is_some() && self.fired
     }
 
     /// End the current hold. Returns `true` when an in-progress hold ended
@@ -458,6 +476,27 @@ mod tests {
             Some(GestureDirection::Right)
         );
         assert_eq!(acc.accumulate(1, 0), Some(GestureDirection::Right));
+    }
+
+    #[test]
+    fn accumulator_hands_out_each_fresh_commits_travel_once() {
+        let mut acc = SwipeAccumulator::default();
+        acc.begin();
+        acc.backdate_hold_for_test();
+        assert_eq!(acc.take_committed_travel(), None);
+        assert_eq!(acc.accumulate(60, 0), Some(GestureDirection::Right));
+        assert_eq!(acc.take_committed_travel(), Some((60, 0)));
+        assert_eq!(acc.take_committed_travel(), None, "taken once");
+        // A repeat continues the committed stroke: no travel of its own.
+        assert_eq!(
+            acc.accumulate(GESTURE_REPEAT_DISTANCE, 0),
+            Some(GestureDirection::Right)
+        );
+        assert_eq!(acc.take_committed_travel(), None);
+        // A reversal is a fresh commit, counted from the turning point.
+        assert_eq!(acc.accumulate(-30, 0), None);
+        assert_eq!(acc.accumulate(-40, 0), Some(GestureDirection::Left));
+        assert_eq!(acc.take_committed_travel(), Some((-70, 0)));
     }
 
     #[test]
