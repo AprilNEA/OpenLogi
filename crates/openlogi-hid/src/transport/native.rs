@@ -7,13 +7,16 @@
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 
-use async_hid::{AsyncHidWrite as _, Device, DeviceWriter};
+use async_hid::{
+    AsyncHidFeatureHandle as _, AsyncHidWrite as _, Device, DeviceFeatureHandle, DeviceWriter,
+};
 use hidpp::async_trait;
 use hidpp::channel::HidppChannel;
+use tracing::debug;
 
 use openlogi_device::DeviceIoGate;
 use openlogi_device::backend::{
-    BackendError, HidBackend, HotplugStream, NodeId, NodeInfo, RawWriter,
+    BackendError, HidBackend, HotplugStream, NodeId, NodeInfo, RawFeatureHandle, RawWriter,
 };
 
 use crate::recording::{
@@ -155,6 +158,23 @@ impl NativeBackend {
             device_io: self.device_io.clone(),
         })
     }
+
+    async fn open_native_feature_handle(
+        &self,
+        node: &NodeInfo,
+    ) -> Result<NativeFeatureHandle, BackendError> {
+        self.device_io.ensure_allowed()?;
+        let handle = self
+            .handle(node)?
+            .open_feature_handle()
+            .await
+            .map_err(super::backend_error)?;
+        self.device_io.ensure_allowed()?;
+        Ok(NativeFeatureHandle {
+            handle,
+            device_io: self.device_io.clone(),
+        })
+    }
 }
 
 #[async_trait]
@@ -231,6 +251,18 @@ impl HidBackend for NativeBackend {
         }
     }
 
+    async fn open_raw_feature(
+        &self,
+        node: &NodeInfo,
+    ) -> Result<Box<dyn RawFeatureHandle>, BackendError> {
+        // The cassette format models HID++ exchanges and raw output writes;
+        // feature-report traffic passes through unrecorded.
+        if self.recording.is_some() {
+            debug!(node = %node.id, "feature-report traffic is not recorded");
+        }
+        Ok(Box::new(self.open_native_feature_handle(node).await?))
+    }
+
     fn watch(&self) -> Result<HotplugStream, BackendError> {
         Ok(Box::new(watch_nodes()?))
     }
@@ -240,6 +272,35 @@ impl HidBackend for NativeBackend {
 struct NativeRawWriter {
     writer: DeviceWriter,
     device_io: DeviceIoGate,
+}
+
+/// [`RawFeatureHandle`] over an `async-hid` feature-report handle.
+///
+/// `async-hid` owns the host's length rules: on Windows it sizes its buffer
+/// from the collection's declared feature length, zero-pads a shorter write
+/// and copies a read's prefix into the caller's buffer.
+struct NativeFeatureHandle {
+    handle: DeviceFeatureHandle,
+    device_io: DeviceIoGate,
+}
+
+#[async_trait]
+impl RawFeatureHandle for NativeFeatureHandle {
+    async fn write_feature_report(&mut self, report: &[u8]) -> Result<(), BackendError> {
+        self.device_io.ensure_allowed()?;
+        self.handle
+            .write_feature_report(report)
+            .await
+            .map_err(super::backend_error)
+    }
+
+    async fn read_feature_report(&mut self, report: &mut [u8]) -> Result<usize, BackendError> {
+        self.device_io.ensure_allowed()?;
+        self.handle
+            .read_feature_report(report)
+            .await
+            .map_err(super::backend_error)
+    }
 }
 
 #[async_trait]

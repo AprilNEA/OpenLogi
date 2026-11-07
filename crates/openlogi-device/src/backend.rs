@@ -148,6 +148,40 @@ pub trait RawWriter: Send + Sync {
     async fn write_output_report(&mut self, report: &[u8]) -> Result<(), BackendError>;
 }
 
+/// A feature-report handle, for devices configured by `SET_REPORT` /
+/// `GET_REPORT` (Feature) rather than HID++.
+///
+/// Feature reports are request/response on a handle of their own, which is why
+/// this is not a method pair on [`RawWriter`]: that is a bare output-report
+/// sink with no reply expected. The G600's vendor collection is the one
+/// device driven this way today.
+// Not `expect`: the lint is raised inside `async_trait`'s expansion, which rustc
+// does not credit to an expectation. Clippy 1.99 flags the `#[must_use]` the
+// macro puts on each boxed future; rust-clippy#17547 (1.100) stops linting
+// macro-generated code.
+#[expect(clippy::allow_attributes, reason = "see above")]
+#[allow(
+    clippy::double_must_use,
+    reason = "raised on `async_trait`'s generated methods, not on this source"
+)]
+#[async_trait]
+pub trait RawFeatureHandle: Send + Sync {
+    /// Send one feature report, report id included as the first byte.
+    ///
+    /// The backend owns the host's length rules — Windows pads a report to the
+    /// collection's declared feature length — so callers pass the protocol's
+    /// own length.
+    async fn write_feature_report(&mut self, report: &[u8]) -> Result<(), BackendError>;
+
+    /// Fetch the feature report whose id is `report[0]` into `report`,
+    /// returning how many bytes the host handed back, id included.
+    ///
+    /// A host may hand back the collection's full feature length with the
+    /// report zero-padded (Windows) or exactly the report's own length
+    /// (hidraw); `report` must be long enough for either.
+    async fn read_feature_report(&mut self, report: &mut [u8]) -> Result<usize, BackendError>;
+}
+
 /// The HID stack beneath OpenLogi's HID++ layer.
 ///
 /// One implementation per host HID API. Everything above it — enumeration
@@ -190,6 +224,21 @@ pub trait HidBackend: Send + Sync {
 
     /// Open `node` for raw output reports.
     async fn open_raw_writer(&self, node: &NodeInfo) -> Result<Box<dyn RawWriter>, BackendError>;
+
+    /// Open `node` for feature reports.
+    ///
+    /// Only the native backend has such a handle today; a backend without one
+    /// answers [`BackendError::Backend`], so a scripted device tree that
+    /// never models feature reports needs no override.
+    async fn open_raw_feature(
+        &self,
+        node: &NodeInfo,
+    ) -> Result<Box<dyn RawFeatureHandle>, BackendError> {
+        let _ = node;
+        Err(BackendError::Backend(
+            "this backend has no feature-report handle".into(),
+        ))
+    }
 
     /// Subscribe to node connect/disconnect events.
     fn watch(&self) -> Result<HotplugStream, BackendError>;

@@ -26,9 +26,9 @@ use openlogi_device::inventory::hid_only::HidOnlyProduct;
 use openlogi_device::inventory::{Enumerator, InventoryError};
 use openlogi_device::pairing::PairingReceiver;
 use openlogi_device::write::{
-    self as device, Dpi, DpiInfo, FeatureEntry, FirmwareEntity, HapticWaveform, LightingMethod,
-    LitraModel, PointerScaling, ReprogControlEntry, ScrollResolution, ScrollWheelMode,
-    SidetoneLevel,
+    self as device, Dpi, DpiInfo, FeatureEntry, FirmwareEntity, G600Dump, G600Status,
+    HapticWaveform, LightingMethod, LitraModel, PointerScaling, ReprogControlEntry,
+    ScrollResolution, ScrollWheelMode, SidetoneLevel,
 };
 use openlogi_device::{ButtonSpyError, ButtonSpyWatch, LightWatch};
 use openlogi_device::{DeviceIoGate, DeviceIoSignal, DeviceRoute};
@@ -246,6 +246,27 @@ pub async fn walk_per_key_zones(
 /// Play a haptic waveform on the device `route` reaches.
 pub async fn play_haptic(route: &DeviceRoute, waveform: HapticWaveform) -> Result<(), WriteError> {
     device::play_haptic(&*native_backend(), route, waveform).await
+}
+
+/// Read the DPI slots of the G600 `route` reaches, as a DPI read.
+pub async fn get_g600_dpi_info(route: &DeviceRoute) -> Result<DpiInfo, WriteError> {
+    device::get_g600_dpi_info(&*native_backend(), route).await
+}
+
+/// Select the DPI slot of the G600 `route` reaches that holds `dpi`.
+pub async fn set_g600_dpi(route: &DeviceRoute, dpi: Dpi) -> Result<(), WriteError> {
+    device::set_g600_dpi(&*native_backend(), route, dpi).await
+}
+
+/// Read the active selection and the three onboard profiles of the G600
+/// `route` reaches.
+pub async fn read_g600_status(route: &DeviceRoute) -> Result<G600Status, WriteError> {
+    device::read_g600_status(&*native_backend(), route).await
+}
+
+/// Read every report of the G600 `route` reaches, verbatim.
+pub async fn dump_g600_reports(route: &DeviceRoute) -> Result<G600Dump, WriteError> {
+    device::dump_g600_reports(&*native_backend(), route).await
 }
 
 /// Apply a light command to the Litra `route` reaches, returning the state

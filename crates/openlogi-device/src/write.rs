@@ -29,6 +29,7 @@ mod easy_switch;
 mod error;
 mod fn_lock;
 mod force_sensing;
+mod g600;
 mod haptic;
 mod hires_wheel;
 mod key_display;
@@ -37,6 +38,7 @@ mod litra;
 mod onboard;
 mod os_layout;
 mod pointer_scaling;
+mod raw_lock;
 mod report_rate;
 mod sidetone;
 mod smartshift;
@@ -65,6 +67,11 @@ pub use easy_switch::{
 pub use error::{HidppFeatureErrorKind, HidppOperation, WriteError};
 pub use fn_lock::{get_fn_lock, get_fn_lock_on, set_fn_lock, set_fn_lock_on};
 pub use force_sensing::{get_force_sensing_on, set_force_sensing_on};
+pub use g600::{
+    G600_DRIVER_ID, G600Dump, G600ProfileSummary, G600Status, dump_reports as dump_g600_reports,
+    get_dpi_info as get_g600_dpi_info, is_g600_route, read_status as read_g600_status,
+    set_dpi as set_g600_dpi,
+};
 pub use haptic::{
     HapticRestore, HapticRestoreOutcome, ensure_haptics_armed_on, play_haptic, play_haptic_on,
     restore_haptics_on,
