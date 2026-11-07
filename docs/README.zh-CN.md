@@ -243,11 +243,14 @@ yay -S openlogi
 
 ## 致谢
 
-### 特别鸣谢
+### 参考与鸣谢
 
 - [Solaar](https://github.com/pwr-Solaar/Solaar)，作者 [@pwr](https://github.com/pwr) —— 开源 HID++ 实现与协议参考
 - [Mouser](https://github.com/TomBadash/Mouser)，作者 [@TomBadash](https://github.com/TomBadash) —— 本地、无需账号的 Options+ 替代品
-- [@kubai087](https://github.com/kubai087) —— OpenLogi Logo 与应用图标设计
+
+### 设计
+
+- [@kubai087](https://github.com/kubai087) —— OpenLogi Logo 与应用图标
 
 ### 贡献者
 

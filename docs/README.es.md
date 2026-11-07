@@ -246,7 +246,10 @@ Consulta [DEVELOPMENT.md](DEVELOPMENT.md), incluida la [seguridad del hook de en
 
 - [Solaar](https://github.com/pwr-Solaar/Solaar) de [@pwr](https://github.com/pwr) — implementación de HID++ de código abierto y referencia del protocolo
 - [Mouser](https://github.com/TomBadash/Mouser) de [@TomBadash](https://github.com/TomBadash) — sustituto de Options+ local y sin cuentas
-- [@kubai087](https://github.com/kubai087) — diseño del logo y del icono de la aplicación de OpenLogi
+
+### Diseño
+
+- [@kubai087](https://github.com/kubai087) — logo e icono de la aplicación de OpenLogi
 
 ### Colaboradores
 

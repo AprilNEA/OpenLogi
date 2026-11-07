@@ -247,7 +247,10 @@ Siehe [DEVELOPMENT.md](DEVELOPMENT.md), einschließlich [Sicherheit des macOS-In
 
 - [Solaar](https://github.com/pwr-Solaar/Solaar) von [@pwr](https://github.com/pwr) — quelloffene HID++-Implementierung und Protokollreferenz
 - [Mouser](https://github.com/TomBadash/Mouser) von [@TomBadash](https://github.com/TomBadash) — lokaler Options+-Ersatz ohne Konto
-- [@kubai087](https://github.com/kubai087) — Design des OpenLogi-Logos und App-Icons
+
+### Design
+
+- [@kubai087](https://github.com/kubai087) — OpenLogi-Logo und App-Icon
 
 ### Mitwirkende
 

@@ -249,7 +249,10 @@ See [DEVELOPMENT.md](docs/DEVELOPMENT.md), including [macOS input-hook safety](d
 
 - [Solaar](https://github.com/pwr-Solaar/Solaar) by [@pwr](https://github.com/pwr) — open-source HID++ implementation and protocol reference
 - [Mouser](https://github.com/TomBadash/Mouser) by [@TomBadash](https://github.com/TomBadash) — local, account-free Options+ replacement
-- [@kubai087](https://github.com/kubai087) — OpenLogi logo and app icon design
+
+### Design
+
+- [@kubai087](https://github.com/kubai087) — OpenLogi logo and app icon
 
 ### Contributors
 

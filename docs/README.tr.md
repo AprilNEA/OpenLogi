@@ -242,11 +242,14 @@ Ayarlar düz TOML kullanır; kaydetme işlemleri sembolik bağlı (symlink) ayar
 
 ## Teşekkürler
 
-### Özel teşekkürler
+### İlham ve kaynaklar
 
 - [Solaar](https://github.com/pwr-Solaar/Solaar) ([@pwr](https://github.com/pwr)) — açık kaynak HID++ uygulaması ve protokol referansı
 - [Mouser](https://github.com/TomBadash/Mouser) ([@TomBadash](https://github.com/TomBadash)) — hesap gerektirmeyen, yerel bir Options+ alternatifi
-- [@kubai087](https://github.com/kubai087) — OpenLogi logosu ve uygulama simgesi tasarımı
+
+### Tasarım
+
+- [@kubai087](https://github.com/kubai087) — OpenLogi logosu ve uygulama simgesi
 
 ### Katkıda bulunanlar
 

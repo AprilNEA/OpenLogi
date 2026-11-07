@@ -242,11 +242,14 @@ yay -S openlogi
 
 ## Благодарности
 
-### Особая благодарность
+### Проекты и источники
 
 - [Solaar](https://github.com/pwr-Solaar/Solaar) от [@pwr](https://github.com/pwr) — открытая реализация HID++ и справочник по протоколу
 - [Mouser](https://github.com/TomBadash/Mouser) от [@TomBadash](https://github.com/TomBadash) — локальная замена Options+ без аккаунта
-- [@kubai087](https://github.com/kubai087) — дизайн логотипа и иконки приложения OpenLogi
+
+### Дизайн
+
+- [@kubai087](https://github.com/kubai087) — логотип и иконка приложения OpenLogi
 
 ### Участники
 
