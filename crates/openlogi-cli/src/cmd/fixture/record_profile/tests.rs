@@ -637,6 +637,7 @@ fn fixture_agent_with(edit: impl FnOnce(&mut DeviceProfile)) -> TestAgent {
         },
         lights: Vec::new(),
         flow: FlowStatus::default(),
+        config_revision: openlogi_core::config::ConfigRevision::default(),
     };
     TestAgent::from_profile(profile, snapshot)
 }

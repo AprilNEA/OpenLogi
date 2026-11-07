@@ -401,12 +401,23 @@ impl AppState {
 
     fn restore_config_projections(&mut self) {
         self.restore_binding_projections();
-        if let Some(dpi) = self.current_record().and_then(|record| {
-            record
-                .persistent_config_key()
-                .and_then(|key| self.config.devices.get(key))
-                .and_then(|device| device.effective_dpi(&record.route_key))
-        }) {
+        // A DPI the mouse has not answered yet keeps showing; its answer
+        // decides what shows next (`apply_dpi_written`).
+        if let Some(dpi) = self
+            .current_record()
+            .filter(|record| {
+                !self
+                    .pointer
+                    .pending_dpi_writes
+                    .contains_key(&record.device_key())
+            })
+            .and_then(|record| {
+                record
+                    .persistent_config_key()
+                    .and_then(|key| self.config.devices.get(key))
+                    .and_then(|device| device.effective_dpi(&record.route_key))
+            })
+        {
             self.pointer.dpi = dpi;
         }
     }

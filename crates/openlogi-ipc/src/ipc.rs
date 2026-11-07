@@ -187,6 +187,9 @@ pub use succession::Identity;
 ///      profile and M1–M3/MR. `Capabilities::change_host` appended after
 ///      them — `0x1814` ChangeHost without `0x1815` HostsInfo.
 ///      `Action::HoldModifier` appended for bare-modifier holds.
+///      `AgentSnapshot::config_revision` appended — the revision of
+///      `config.toml` the agent last loaded, so the settings app learns of
+///      a save another writer made.
 pub const PROTOCOL_VERSION: u32 = 46;
 
 /// Environment variable through which the agent hands a supervised helper the
@@ -312,6 +315,13 @@ pub struct AgentSnapshot {
     /// Whether cross-machine Flow is enabled, and the coarse link state of
     /// each configured peer. See [`FlowStatus`].
     pub flow: FlowStatus,
+    /// The revision of the `config.toml` the agent last loaded: it moves
+    /// when the agent reloads any writer's save — the settings app's,
+    /// `openlogi api --save`, Flow pairing, or the agent's own. The default
+    /// revision until the agent first reloads the file. A client holding the
+    /// file at another revision reads the file to tell whether it is the one
+    /// behind.
+    pub config_revision: ConfigRevision,
 }
 
 /// A standalone light as it reported itself to the agent.
