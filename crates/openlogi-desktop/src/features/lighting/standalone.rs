@@ -240,12 +240,12 @@ fn light_hero(device_name: &str, view: LightView, pal: Palette) -> impl IntoElem
         .child(
             Toggle::new("standalone-light-toggle")
                 .selected(effective_enabled)
+                .accessibility_label(tr!("device.lighting"))
                 .icon(if effective_enabled {
                     IconName::Sun
                 } else {
                     IconName::Moon
                 })
-                .min_width(px(72.))
                 .on_change(|enabled, _window, cx| {
                     AppState::apply(cx, |state| state.commit_manual_light_power(*enabled));
                 }),
@@ -329,7 +329,7 @@ fn camera_automation(current: LightSettings, pal: Palette) -> impl IntoElement {
         .child(
             Toggle::new("standalone-light-camera-automation")
                 .selected(current.auto_camera)
-                .min_width(px(72.))
+                .accessibility_label(tr!("lighting.auto_on_with_camera"))
                 .on_change(|auto_camera, _window, cx| {
                     AppState::apply(cx, |state| {
                         let mut light = state.light();

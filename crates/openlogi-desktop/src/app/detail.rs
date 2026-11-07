@@ -676,6 +676,7 @@ fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
             Toggle::new("invert-scroll-toggle")
                 .selected(inverted)
                 .disabled(!inversion_supported)
+                .accessibility_label(tr!("pointer.invert_scroll_direction"))
                 .label((!inversion_supported).then(|| tr!("common.unavailable")))
                 .on_change(|inverted, _window, cx| {
                     AppState::apply(cx, |state| state.commit_invert_scroll(*inverted));
