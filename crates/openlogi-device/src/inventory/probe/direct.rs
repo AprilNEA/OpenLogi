@@ -36,8 +36,9 @@ pub(in crate::inventory) fn preferred_direct_codename(
 /// the same battery + model-info features the Bolt path uses. Yields no
 /// inventory when the channel doesn't respond to HID++ at `0xff` (in which
 /// case it's neither a receiver nor a direct device we recognise) — healthy
-/// only if that rejection rests on a completed feature walk, so a device
-/// that merely failed to answer is settled as a failed probe instead.
+/// only if that rejection rests on a completed feature walk or a HID++ 1.0
+/// answer, so a device that merely failed to answer is settled as a failed
+/// probe instead.
 pub(super) async fn probe_direct(
     channel: Arc<HidppChannel>,
     info: &NodeInfo,
@@ -74,6 +75,18 @@ pub(super) async fn probe_direct(
         pass.subscriptions,
     )
     .await;
+    // A HID++ 1.0 answer settles the node as surely as a completed walk: the
+    // device answered, in a protocol this path does not list (#2161). Taking
+    // it for a transient failure retires and reopens the channel every few
+    // passes for as long as the device stays plugged in (#2432).
+    if probe.is_hidpp10() {
+        debug!(
+            vid = format_args!("{:04x}", info.vendor_id),
+            pid = format_args!("{:04x}", info.product_id),
+            "slot 0xff answered as HID++ 1.0 — unsupported direct device; skipping"
+        );
+        return rejected_node();
+    }
     // Hybrid peripheral discriminator. A genuine directly-attached device is
     // either wireless/Bluetooth — which reports a battery — or exposes a
     // configuration feature (buttons / pointer / lighting). A Bolt receiver's
@@ -119,13 +132,7 @@ pub(super) async fn probe_direct(
             "slot 0xff exposes no battery or config feature — likely a receiver \
              secondary interface; skipping"
         );
-        // Don't cache or keep a rejected non-peripheral — `Unkeyed` lets any
-        // prior entry for this node be evicted.
-        return NodeProbe {
-            inventory: None,
-            verdict: ProbeVerdict::healthy_when(walk_succeeded),
-            outcomes: vec![CacheOutcome::Unkeyed],
-        };
+        return rejected_node();
     }
 
     // Direct devices have no receiver codename register. Prefer the device's
@@ -167,6 +174,18 @@ pub(super) async fn probe_direct(
         inventory: Some(inventory),
         verdict: ProbeVerdict::Healthy { complete: true },
         outcomes: vec![outcome],
+    }
+}
+
+/// A node that answered as something this path does not list: a receiver's
+/// secondary interface, or a HID++ 1.0 device. The answer is authoritative, so
+/// the node is healthy with no inventory. It is neither cached nor kept:
+/// `Unkeyed` lets any prior entry for the node be evicted.
+fn rejected_node() -> NodeProbe {
+    NodeProbe {
+        inventory: None,
+        verdict: ProbeVerdict::Healthy { complete: true },
+        outcomes: vec![CacheOutcome::Unkeyed],
     }
 }
 

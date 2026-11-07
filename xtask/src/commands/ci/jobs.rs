@@ -149,7 +149,7 @@ impl Job {
             Self::Clippy => default_spec(
                 "clippy",
                 &[],
-                "CI runs it on ubuntu-latest, so it compiles linux cfg. Host clippy on macOS or Windows is a different compilation, not this job.",
+                "CI runs it on Linux, so it compiles linux cfg. Host clippy on macOS or Windows is a different compilation, not this job.",
             ),
             Self::Msrv => Spec {
                 name: "MSRV (cargo check)",
@@ -176,7 +176,7 @@ impl Job {
                 prefix: Some("tests (macos"),
                 hosts: &[Host::Macos],
                 in_default_run: true,
-                caveat: "CI's matrix is arm64 (macos-latest) and x86_64 (macos-15-intel); a host only ever covers its own arch.",
+                caveat: "CI's matrix is arm64 and x86_64, both on an Apple Silicon runner: the x86_64 leg passes `--target x86_64-apple-darwin` and runs under Rosetta 2. `cargo xtask ci` runs only the host arch.",
             },
             Self::TestsWindows => host_spec(
                 "tests (windows)",
@@ -197,13 +197,13 @@ impl Job {
                 // cross-lint proxy.
                 hosts: Host::ANY,
                 in_default_run: true,
-                caveat: "CI lints the whole workspace natively on windows-latest. Anywhere else this is the ring-free cross lint over the crates that carry Windows code — a proxy, not that job.",
+                caveat: "CI lints the whole workspace natively on Windows. Anywhere else this is the ring-free cross lint over the crates that carry Windows code — a proxy, not that job.",
             },
             Self::ClippyMacos => host_spec(
                 "clippy (macos)",
                 &["clippy-macos"],
                 &[Host::Macos],
-                "CI lints the whole workspace natively on macos-latest (arm64), the only job that lints the macOS cfg (`tests (macos)` compiles it, without clippy). No other host can reproduce it. On a Mac it is the same command as host `clippy`, so the second run is a cache hit.",
+                "CI lints the whole workspace natively on macOS (arm64), the only job that lints the macOS cfg (`tests (macos)` compiles it, without clippy). No other host can reproduce it. On a Mac it is the same command as host `clippy`, so the second run is a cache hit.",
             ),
             Self::Wasm => default_spec(
                 "wasm (portable crates)",
