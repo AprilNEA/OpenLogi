@@ -243,10 +243,24 @@ yay -S openlogi
 
 ## 謝辞
 
-- **Windows・カメラ・i18n**: [@davidbudnick](https://github.com/davidbudnick) —— キーボード RGB 対応、Windows 対応、Logitech ウェブカメラ対応
-- **Linux 移植**: [@cserby](https://github.com/cserby) —— Linux 対応
-- [Solaar](https://github.com/pwr-Solaar/Solaar) by [@pwr](https://github.com/pwr) —— オープンソースの HID++ 実装
-- [Mouser](https://github.com/TomBadash/Mouser) by [@TomBadash](https://github.com/TomBadash) —— ローカル完結・アカウント不要の Options+ 代替
+### コントリビューター
+
+<a href="https://github.com/AprilNEA/OpenLogi/graphs/contributors">
+    <img src="https://contrib.rocks/image?repo=AprilNEA/OpenLogi" alt="コントリビューター">
+</a>
+
+ロゴとアプリアイコンのデザインは [@kubai087](https://github.com/kubai087) によるものです。
+
+### クレジット
+
+- [Solaar](https://github.com/pwr-Solaar/Solaar)：Logitech の HID++ プロトコルとデバイスの挙動をオープンに記録し続けてきたことに対して。
+- [@TomBadash](https://github.com/TomBadash) の [Mouser](https://github.com/TomBadash/Mouser)：ローカル完結・アカウント不要で Options+ を置き換える着想に対して。
+
+### インフラストラクチャ
+
+<a href="https://namespace.so/github-actions?utm_source=oss&utm_campaign=openlogi" target="_blank" rel="noopener noreferrer">
+    <img src="https://namespace.so/oss/badge.svg" alt="CI powered by Namespace" height="32">
+</a>
 
 ## ライセンス
 
@@ -255,13 +269,9 @@ yay -S openlogi
 - Apache License 2.0（[LICENSE-APACHE](../LICENSE-APACHE)）
 - MIT ライセンス（[LICENSE-MIT](../LICENSE-MIT)）
 
-### サードパーティコード
-
-`crates/openlogi-hidpp` は [`hidpp`](https://crates.io/crates/hidpp)（作者 [@lus](https://github.com/lus)）の vendored fork で、0BSD ライセンスです。
-
 ### ロゴとブランドアセット
 
-OpenLogi のロゴをデザインしてくれた [@kubai087](https://github.com/kubai087) に感謝します。OpenLogi のロゴとアプリアイコン —— [`design/`](../design/) 配下のブランドアセット —— は © 2026 AprilNEA が全権利を留保しており、上記の MIT/Apache ライセンスの対象外です。[`design/LICENSE`](../design/LICENSE) を参照してください。コードをフォークしても OpenLogi の名称・ロゴ・アイコンの使用権は付与されません。事前の書面による許可なく、ご自身のプロジェクト、フォーク、配布物を表すために使用しないでください。
+OpenLogi のロゴとアプリアイコン —— [`design/`](../design/) 配下のブランドアセット —— は © 2026 AprilNEA が全権利を留保しており、上記の MIT/Apache ライセンスの対象外です。[`design/LICENSE`](../design/LICENSE) を参照してください。コードをフォークしても OpenLogi の名称・ロゴ・アイコンの使用権は付与されません。事前の書面による許可なく、ご自身のプロジェクト、フォーク、配布物を表すために使用しないでください。
 
 ---
 
