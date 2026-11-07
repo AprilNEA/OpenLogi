@@ -7,6 +7,8 @@
 //! responder; only the plumbing lives here.
 
 use std::sync::Arc;
+#[cfg(test)]
+use std::time::Duration;
 
 use hidpp::channel::{HidppChannel, RawHidChannel};
 
@@ -55,6 +57,19 @@ pub(crate) fn register_error(request: &[u8], error: u8) -> Vec<u8> {
 pub(crate) fn ping_reply(request: &[u8]) -> Option<Vec<u8>> {
     (request[2] == 0x00 && request[3] >> 4 == 1)
         .then(|| vec![0x10, request[1], 0x00, request[3], 0x04, 0x05, request[6]])
+}
+
+/// How long a scripted exchange may take, far longer than a healthy one needs.
+#[cfg(test)]
+const TEST_DEADLINE: Duration = Duration::from_secs(10);
+
+/// Await `work`, or fail the test by naming it: a stalled probe should fail
+/// clearly rather than leave the test waiting.
+#[cfg(test)]
+pub(crate) async fn within_deadline<T>(what: &str, work: impl Future<Output = T>) -> T {
+    tokio::time::timeout(TEST_DEADLINE, work)
+        .await
+        .unwrap_or_else(|_| panic!("{what} did not finish within {TEST_DEADLINE:?}"))
 }
 
 /// A live channel over `raw`.
@@ -184,5 +199,16 @@ pub(crate) fn scripted_node_info(id: &str) -> NodeInfo {
         name: format!("scripted node {id}"),
         manufacturer: Some("Logitech".into()),
         serial_number: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::within_deadline;
+
+    #[tokio::test(start_paused = true)]
+    #[should_panic(expected = "the stalled probe did not finish within")]
+    async fn a_stalled_exchange_fails_the_test_by_name() {
+        within_deadline("the stalled probe", std::future::pending::<()>()).await;
     }
 }

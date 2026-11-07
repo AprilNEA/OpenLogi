@@ -850,7 +850,9 @@ mod tests {
         disable_keys::DisableKeysFeature, unified_battery::UnifiedBatteryFeature,
     };
 
-    use openlogi_core::device::{BatteryInfo, BatteryLevel, BatteryStatus};
+    use openlogi_core::device::{
+        BatteryInfo, BatteryLevel, BatteryStatus, DeviceModelInfo, DeviceTransports,
+    };
 
     use super::{
         BatteryProbe, BatteryRead, ProbedFeatures, ProbedProtocol, Refreshed,
@@ -858,6 +860,7 @@ mod tests {
     };
     use crate::channel::scripted::{
         ScriptedRawHidChannel, feature_error, ping_reply, register_error, scripted_channel,
+        within_deadline,
     };
     use crate::host_lock::ReceiverRegisterPhase;
 
@@ -961,6 +964,67 @@ mod tests {
                 .all(|report| report.get(2) != Some(&0x81)),
             "no register read may go out without the register phase"
         );
+    }
+
+    /// What the scripted DeviceInformation answers below say beside `unit_id`:
+    /// three entities, and every other field zero.
+    fn answered_model(unit_id: [u8; 4]) -> DeviceModelInfo {
+        DeviceModelInfo {
+            entity_count: 3,
+            serial_number: None,
+            unit_id,
+            transports: DeviceTransports::default(),
+            model_ids: [0; 3],
+            extended_model_id: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_v0_device_information_answer_is_a_completed_identity() {
+        // The G402 answers DeviceInformation v0: firmware entities only, every
+        // identity field zero. That is the device's complete answer, not a
+        // lost reply, so the probe is whole and carries the model info the
+        // agent and GUI key the device by.
+        let (raw, _) = ScriptedRawHidChannel::with_dynamic_responder(|request| {
+            let mut response = vec![0; 20];
+            response[..4].copy_from_slice(&request[..4]);
+            response[0] = 0x11;
+            match (request[2], request[3] >> 4) {
+                // Root: protocol 4.x ping, then the feature index lookups.
+                (0, 1) => response[4] = 4,
+                (0, 0) => {
+                    response[4] = match u16::from_be_bytes([request[4], request[5]]) {
+                        0x0001 => 1,
+                        0x0003 => 2,
+                        _ => 0,
+                    };
+                }
+                // FeatureSet: two features, IFeatureSet and DeviceInformation.
+                (1, 0) => response[4] = 2,
+                (1, 1) => response[4..6].copy_from_slice(
+                    &[0x0001u16, 0x0003][usize::from(request[4]) - 1].to_be_bytes(),
+                ),
+                // DeviceInformation v0: three entities, nothing else.
+                (2, 0) => response[4] = 3,
+                _ => panic!("unexpected request: {request:02x?}"),
+            }
+            Some(response)
+        });
+        let channel = within_deadline("opening the channel", scripted_channel(raw)).await;
+
+        let (probe, _, _) =
+            within_deadline("the probe", probe_features(&channel, 0xff, None, None)).await;
+
+        assert_eq!(
+            probe.model_info,
+            Some(answered_model([0; 4])),
+            "a v0 answer is still an answer"
+        );
+        assert!(
+            !probe.identity_incomplete,
+            "nothing was lost, the device has no more to say"
+        );
+        assert!(probe.capabilities().is_some());
     }
 
     #[tokio::test]
