@@ -38,7 +38,8 @@ use openlogi_core::binding::{
     GridKey, GridSlot, KeyCombo, KeypadPage, ModeKey,
 };
 use openlogi_core::config::{
-    ConfigRevision, FlowPeerName, FlowPublicKey, Lighting, ScrollResolution,
+    ConfigRevision, FlowPeerName, FlowPublicKey, Lighting, LightingEffect, LightingEffectPeriod,
+    ScrollResolution,
 };
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, ChangedOnLight, DeviceInventory,
@@ -942,6 +943,7 @@ fn device_inventory() {
                 m_keys: false,
                 macro_record: false,
                 change_host: false,
+                lighting_effects: false,
             }),
             settings_revision: 7,
             hidpp10: false,
@@ -949,7 +951,7 @@ fn device_inventory() {
     }];
     assert_wire(
         &inventory,
-        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b00001010150020001030106323134304c5a0102030400010100fb34b0fb8240000b01010100000101010101000101010101010100000001000000000700",
+        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b00001010150020001030106323134304c5a0102030400010100fb34b0fb8240000b0101010000010101010100010101010101010000000100000000000700",
     );
 }
 
@@ -1103,17 +1105,6 @@ fn device_settings_payloads() {
     let smartshift: Result<SmartShiftStatus, WriteError> = Ok(representative_smartshift_status());
     assert_wire(&smartshift, "0001103c");
 
-    // `Rgb` serializes as the same hex string the field used to hold raw, so
-    // the pinned bytes are identical to the pre-newtype encoding.
-    assert_wire(
-        &Lighting {
-            enabled: true,
-            color: "8000ff".parse().expect("valid hex"),
-            brightness: 80,
-        },
-        "010638303030666650",
-    );
-
     assert_wire(
         &ReceiverSelector::BoltUid("F00DCAFE".into()),
         "01084630304443414645",
@@ -1126,6 +1117,27 @@ fn device_settings_payloads() {
         },
         "02fb48c5084630304443414645",
     );
+}
+
+#[test]
+fn lighting_payloads() {
+    // `Rgb` serializes as the same hex string the field used to hold raw, so
+    // the bytes up to the brightness are identical to the pre-newtype
+    // encoding. The effect follows as its variant index, then the period as a
+    // varint (3000 = `fb` + `0bb8` little-endian).
+    assert_wire(
+        &Lighting {
+            enabled: true,
+            color: "8000ff".parse().expect("valid hex"),
+            brightness: 80,
+            effect: LightingEffect::Breathing,
+            effect_period_ms: LightingEffectPeriod::try_new(3_000).expect("valid period"),
+        },
+        "01063830303066665001fbb80b",
+    );
+    assert_wire(&LightingEffect::Static, "00");
+    assert_wire(&LightingEffect::Breathing, "01");
+    assert_wire(&LightingEffect::ColorCycle, "02");
 }
 
 #[test]

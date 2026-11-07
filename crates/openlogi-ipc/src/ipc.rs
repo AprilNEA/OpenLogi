@@ -186,6 +186,10 @@ pub use succession::Identity;
 ///      key. `ButtonId::{GKey, ModeKey}` appended — the G1–G5 slot of an M
 ///      profile and M1–M3/MR. `Capabilities::change_host` appended after
 ///      them — `0x1814` ChangeHost without `0x1815` HostsInfo.
+///      `Lighting::{effect, effect_period_ms}` appended, with
+///      [`LightingEffect`](openlogi_core::config::LightingEffect) — a static,
+///      breathing or colour-cycle effect and its pace — and
+///      `Capabilities::lighting_effects` appended after `change_host`.
 pub const PROTOCOL_VERSION: u32 = 46;
 
 /// Environment variable through which the agent hands a supervised helper the

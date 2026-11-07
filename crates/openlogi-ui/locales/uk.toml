@@ -742,6 +742,11 @@ applying_light_setting = "Застосування налаштування св
 auto_on_with_camera = "Автоувімкнення разом із камерою"
 camera_light_auto_description = "Вмикати це світло, поки використовується будь-яка камера, і вимикати, коли камери зупиняються."
 keyboard_lighting_description = "Застосовується OpenLogi, поки він працює, і не зберігається в клавіатурі."
+effect = "Ефект"
+effect_static = "Статичний"
+effect_breathing = "Дихання"
+effect_color_cycle = "Зміна кольорів"
+effect_period = "Довжина циклу"
 
 [action_ring]
 actions_ring = "Кільце дій"
