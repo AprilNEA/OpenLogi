@@ -21,8 +21,8 @@ use openlogi_device_registry::keypad::find_keypad;
 /// Trim NUL padding and whitespace from a `DeviceInformation` serial; an
 /// all-padding serial collapses to `None`.
 pub(crate) fn normalize_serial_number(serial: &str) -> Option<String> {
-    let serial = serial.trim_matches('\0').trim().to_string();
-    (!serial.is_empty()).then_some(serial)
+    let trimmed = serial.trim_matches(|c: char| c == '\0' || c.is_whitespace());
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
 /// Map a Bolt pairing-register device kind to our [`DeviceKind`].
@@ -729,5 +729,23 @@ mod tests {
                 "kind {input:?} mapped incorrectly"
             );
         }
+    }
+
+    #[test]
+    fn normalize_serial_number_trims_nul_and_whitespace() {
+        use super::normalize_serial_number;
+
+        assert_eq!(normalize_serial_number(""), None);
+        assert_eq!(normalize_serial_number("   "), None);
+        assert_eq!(normalize_serial_number("\0\0"), None);
+        assert_eq!(normalize_serial_number("  \0\0 "), None);
+        assert_eq!(
+            normalize_serial_number("  \0ABC123\0  "),
+            Some("ABC123".to_string())
+        );
+        assert_eq!(
+            normalize_serial_number("f4:73:35:43:c8:12"),
+            Some("f4:73:35:43:c8:12".to_string())
+        );
     }
 }
