@@ -3,6 +3,7 @@
 
 use super::action::Action;
 use super::button::ButtonId;
+use super::key_combo::{KeyCombo, KeyboardUsage};
 use crate::device::Capabilities;
 
 /// One `0x8110` slot of a G-series mouse.
@@ -62,6 +63,9 @@ pub struct GamingLayout {
     pub slots: &'static [Slot],
     /// Stock DPI levels, used until the user sets presets.
     pub stock_dpi_presets: &'static [u16],
+    /// Use HID++ for standard button clicks when onboard HID events do not
+    /// reliably deliver their bindings.
+    prefer_spy_for_standard_buttons: bool,
 }
 
 /// G502 LIGHTSPEED (wpid `0x407f`). The extended model id tells the colours
@@ -87,6 +91,7 @@ pub const G502_LIGHTSPEED: GamingLayout = GamingLayout {
         Slot::silent(ButtonId::WheelTiltLeft),
     ],
     stock_dpi_presets: &[400, 800, 1600, 3200, 6400],
+    prefer_spy_for_standard_buttons: false,
 };
 
 /// G903 LIGHTSPEED (wpid `0x4087`), dumped in #2178. Ambidextrous: the left
@@ -109,7 +114,37 @@ pub const G903_LIGHTSPEED: GamingLayout = GamingLayout {
         Slot::silent(ButtonId::WheelTiltRight),
     ],
     stock_dpi_presets: &[400, 800, 1600, 3200, 6400],
+    prefer_spy_for_standard_buttons: false,
 };
+
+/// G604 LIGHTSPEED, with all thirteen slots verified over Bluetooth.
+pub const G604_LIGHTSPEED: GamingLayout = GamingLayout {
+    model_keys: &["0b024", "04085"],
+    slots: &[
+        Slot::native(ButtonId::LeftClick),
+        Slot::native(ButtonId::RightClick),
+        Slot::native(ButtonId::MiddleClick),
+        Slot::stock(ButtonId::G4, Action::DpiShift),
+        Slot::native(ButtonId::Back),
+        Slot::native(ButtonId::Forward),
+        Slot::stock(ButtonId::G7, stock_number_key(0x20)), // 3
+        Slot::stock(ButtonId::G8, stock_number_key(0x1f)), // 2
+        Slot::stock(ButtonId::G9, stock_number_key(0x1e)), // 1
+        Slot::stock(ButtonId::G10, Action::PreviousDpiPreset),
+        Slot::stock(ButtonId::G11, Action::NextDpiPreset),
+        Slot::silent(ButtonId::WheelTiltLeft),
+        Slot::silent(ButtonId::WheelTiltRight),
+    ],
+    stock_dpi_presets: &[400, 800, 1600, 3200],
+    prefer_spy_for_standard_buttons: true,
+};
+
+const fn stock_number_key(usage: u8) -> Action {
+    let Ok(key) = KeyboardUsage::try_new(usage) else {
+        panic!("invalid HID usage for stock key");
+    };
+    Action::CustomShortcut(KeyCombo::unmodified(key))
+}
 
 /// A gaming mouse whose layout nobody has dumped. Its first five slots are
 /// the standard HID buttons, which the OS input hook remaps without host
@@ -127,9 +162,10 @@ pub const STANDARD_BUTTONS: GamingLayout = GamingLayout {
         Slot::native(ButtonId::Forward),
     ],
     stock_dpi_presets: &[],
+    prefer_spy_for_standard_buttons: false,
 };
 
-const LAYOUTS: &[&GamingLayout] = &[&G502_LIGHTSPEED, &G903_LIGHTSPEED];
+const LAYOUTS: &[&GamingLayout] = &[&G502_LIGHTSPEED, &G903_LIGHTSPEED, &G604_LIGHTSPEED];
 
 /// Whether a device is a G-series mouse, and which buttons it offers. The
 /// agent, the tabs and the Buttons panel all ask this one verdict.
@@ -203,10 +239,16 @@ impl GamingLayout {
             .filter(|b| !matches!(b, ButtonId::LeftClick | ButtonId::RightClick))
     }
 
-    /// Whether rebinding `button` needs host mode.
+    /// Whether this slot sends nothing in host mode unless captured.
     #[must_use]
     pub fn needs_host_mode(&self, button: ButtonId) -> bool {
         self.slot(button).is_some_and(|slot| slot.host_silent)
+    }
+
+    /// Whether a remapped standard mouse click should be delivered over HID++.
+    #[must_use]
+    pub fn prefers_spy(&self, button: ButtonId) -> bool {
+        self.prefer_spy_for_standard_buttons && button.is_os_hook_button()
     }
 
     /// The stock function of `button` on this model, if it differs per
@@ -328,6 +370,32 @@ mod tests {
             Some(Action::NextDpiPreset)
         );
         assert_eq!(layout.stock_action(ButtonId::WheelTiltLeft), None);
+    }
+
+    #[test]
+    fn g604_slots_match_the_bluetooth_hardware_dump() {
+        use ButtonId::*;
+        let layout = GamingLayout::for_model_key("0b024").unwrap();
+        assert_eq!(GamingLayout::for_model_key("04085"), Some(layout));
+        assert_eq!(
+            layout.buttons().collect::<Vec<_>>(),
+            [
+                LeftClick,
+                RightClick,
+                MiddleClick,
+                G4,
+                Back,
+                Forward,
+                G7,
+                G8,
+                G9,
+                G10,
+                G11,
+                WheelTiltLeft,
+                WheelTiltRight,
+            ]
+        );
+        assert_eq!(layout.remappable().count(), 11);
     }
 
     #[test]

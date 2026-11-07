@@ -8,7 +8,7 @@ use super::value::Binding;
 
 /// Sensible defaults for a fresh device so the panel isn't empty on first run.
 ///
-/// A G-series button (`G6`–`G9`) gets [`Action::None`] here: its stock
+/// A G-series button gets [`Action::None`] here: its stock
 /// function differs per model, so a caller that can see one asks
 /// [`default_binding_on`] with the device's layout.
 ///
@@ -82,7 +82,13 @@ pub fn default_binding(button: ButtonId) -> Action {
             clippy::match_same_arms,
             reason = "the layout owns a G button's default; unrelated to the keyboard arm"
         )]
-        ButtonId::G6 | ButtonId::G7 | ButtonId::G8 | ButtonId::G9 => Action::None,
+        ButtonId::G4
+        | ButtonId::G6
+        | ButtonId::G7
+        | ButtonId::G8
+        | ButtonId::G9
+        | ButtonId::G10
+        | ButtonId::G11 => Action::None,
         // Keyboard keys stay on their native firmware function until the user
         // explicitly binds them; an unbound key is never diverted, so a
         // `None` default keeps the projection total without capturing anything.

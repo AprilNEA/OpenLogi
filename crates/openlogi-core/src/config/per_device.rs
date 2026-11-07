@@ -574,9 +574,12 @@ impl Config {
         }
         let layout = layout?;
         let customized = |button: &ButtonId, binding: &Binding| {
-            layout.needs_host_mode(*button)
-                && (!matches!(binding, Binding::Single(_))
-                    || binding.click_action() != default_binding_on(Some(layout), *button))
+            let customized = !matches!(binding, Binding::Single(_))
+                || binding.click_action() != default_binding_on(Some(layout), *button);
+            let spy_click = self.app_settings.capture_mouse_events
+                && layout.prefers_spy(*button)
+                && matches!(binding, Binding::Single(_) | Binding::LongPress(_));
+            customized && (layout.needs_host_mode(*button) || spy_click)
         };
         let needs_host = device.report_rate.is_some()
             || self.uses_gshift(device_key)

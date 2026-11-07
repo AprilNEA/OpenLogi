@@ -567,6 +567,55 @@ mod tests {
     }
 
     #[test]
+    fn g604_routes_existing_click_bindings_to_their_physical_slots() {
+        let mut cfg = Config::default();
+        let layout = GamingLayout::for_model_key("0b024").unwrap();
+        let plan = |config: &Config| {
+            super::plan_for_device(
+                config,
+                super::PlanDevice {
+                    physical_key: PhysicalDeviceKey::parse("unit:12345678").unwrap(),
+                    config_key: "g604",
+                    route: DeviceRoute::Direct {
+                        vendor_id: 0x046d,
+                        product_id: 0xb024,
+                    },
+                    layout: Some(layout),
+                },
+                None,
+                0,
+                true,
+            )
+            .with_onboard(config, Some(layout))
+        };
+
+        assert!(host_slots(&plan(&cfg)).is_none());
+        for (button, action) in [
+            (ButtonId::MiddleClick, Action::SelectAll),
+            (ButtonId::Back, Action::Paste),
+            (ButtonId::Forward, Action::Copy),
+        ] {
+            cfg.set_binding("g604", button, Binding::Single(action));
+        }
+
+        let mapped = plan(&cfg);
+        let slots = host_slots(&mapped).unwrap();
+        assert_eq!(slots[0], (ButtonId::LeftClick, SlotRoute::Native));
+        assert_eq!(slots[1], (ButtonId::RightClick, SlotRoute::Native));
+        for (slot, button, action) in [
+            (2, ButtonId::MiddleClick, Action::SelectAll),
+            (4, ButtonId::Back, Action::Paste),
+            (5, ButtonId::Forward, Action::Copy),
+        ] {
+            assert_eq!(slots[slot], (button, SlotRoute::Captured));
+            assert_eq!(mapped.dispatch.bindings[&button].click_action(), action);
+        }
+
+        cfg.app_settings.capture_mouse_events = false;
+        assert!(host_slots(&plan(&cfg)).is_none());
+    }
+
+    #[test]
     fn g502_stays_onboard_until_a_host_only_button_is_rebound() {
         let mut cfg = Config::default();
         let plan = g502_plan(&cfg);
