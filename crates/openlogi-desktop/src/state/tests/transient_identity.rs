@@ -296,6 +296,30 @@ fn a_route_shared_by_two_online_twins_is_never_adopted() {
 }
 
 #[test]
+fn two_devices_with_their_own_units_on_one_route_stay_two_cards() {
+    let resolver = AssetResolver::new();
+    let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = AppState::new(Sources::in_memory(Config::ephemeral(), &resolver, commands));
+
+    let _ = state.refresh_inventories(
+        &[
+            direct_inventory([1, 1, 1, 1]),
+            direct_inventory([2, 2, 2, 2]),
+        ],
+        &[],
+        &resolver,
+        &[],
+    );
+
+    let keys: Vec<&str> = state
+        .devices()
+        .iter()
+        .map(|record| record.config_key.as_str())
+        .collect();
+    assert_eq!(keys, ["unit:01010101", "unit:02020202"]);
+}
+
+#[test]
 fn historical_transient_lighting_is_not_exposed_without_a_live_record() {
     let transient_key = "direct:046d:b023:unit:00000000";
     let mut config = Config::ephemeral();
