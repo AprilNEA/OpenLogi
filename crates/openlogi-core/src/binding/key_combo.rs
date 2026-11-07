@@ -570,6 +570,13 @@ mod tests {
             ("NumpadPlus", 0x57),
             ("NumpadEnter", 0x58),
             ("Numpad1", 0x59),
+            ("Numpad2", 0x5a),
+            ("Numpad3", 0x5b),
+            ("Numpad4", 0x5c),
+            ("Numpad5", 0x5d),
+            ("Numpad6", 0x5e),
+            ("Numpad7", 0x5f),
+            ("Numpad8", 0x60),
             ("Numpad9", 0x61),
             ("Numpad0", 0x62),
             ("NumpadDecimal", 0x63),
@@ -605,8 +612,9 @@ mod tests {
                 "{unknown}"
             );
         }
-        // Num Lock / Clear (0x53) and the unused 0x64..=0x66 stay rejected.
-        for code in [0x53, 0x64, 0x65, 0x66] {
+        // Num Lock / Clear (0x53), Keypad Clear (0xd8), and the unsupported
+        // 0x64..=0x66 stay rejected.
+        for code in [0x53, 0x64, 0x65, 0x66, 0xd8] {
             assert!(KeyboardUsage::try_new(code).is_err(), "{code:#04x}");
         }
     }
@@ -641,12 +649,18 @@ mod tests {
             shortcut: KeyCombo,
         }
 
-        let combo = "Cmd+Shift+P"
-            .parse::<KeyCombo>()
-            .expect("valid shortcut failed");
-        let wrapper = Wrapper { shortcut: combo };
-        let encoded = toml::to_string(&wrapper).expect("shortcut serialization failed");
-        assert_eq!(encoded, "shortcut = \"Cmd+Shift+P\"\n");
-        assert_eq!(toml::from_str::<Wrapper>(&encoded), Ok(wrapper));
+        for label in ["Cmd+Shift+P".to_string()]
+            .into_iter()
+            .chain((0x54..=0x63).chain([0x67]).map(|code| {
+                let key = KeyboardUsage::try_new(code).expect("keypad usage");
+                format!("Ctrl+Alt+Shift+{}", key.label())
+            }))
+        {
+            let combo = label.parse::<KeyCombo>().expect("valid shortcut failed");
+            let wrapper = Wrapper { shortcut: combo };
+            let encoded = toml::to_string(&wrapper).expect("shortcut serialization failed");
+            assert_eq!(encoded, format!("shortcut = \"{label}\"\n"));
+            assert_eq!(toml::from_str::<Wrapper>(&encoded), Ok(wrapper));
+        }
     }
 }

@@ -820,8 +820,8 @@ fn hid_usage_to_windows(usage: u8) -> Option<u16> {
         0x27 => Some(u16::from(b'0')),
         0x3a..=0x45 => Some(0x70 + u16::from(usage - 0x3a)),
         0x68..=0x6f => Some(0x7c + u16::from(usage - 0x68)),
-        // Keypad Enter (0x58) shares VK_RETURN; only the extended-key flag,
-        // which this table cannot carry, tells it from the main Enter.
+        // windows::Key::for_usage preserves keypad Enter's extended prefix;
+        // VK_RETURN alone cannot distinguish it from the main Enter.
         0x28 | 0x58 => Some(0x0d),
         0x29 => Some(0x1b),
         0x2a => Some(0x08),
