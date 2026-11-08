@@ -170,6 +170,70 @@ async fn keyboard_capture_replay_takes_and_hands_back_the_g_key_row() {
         .expect("the G-key cassette is strictly consumed");
 }
 
+/// A G-key row whose release write fails is still owed: the firmware may
+/// hold the row. The failed change ends the session, and its teardown writes
+/// the release again instead of forgetting the row.
+#[tokio::test]
+async fn keyboard_capture_replay_hands_back_a_g_key_row_whose_release_failed() {
+    let release = hidpp20_short(0xff, G_KEYS_FEATURE_INDEX, 2, [0, 0, 0]);
+    let replay = ArmedReplay::enumerate(keyboard_cassette(
+        "keyboard capture retries a failed G-key row release",
+        &[KEYBOARD_CID],
+        vec![
+            root_feature_lookup_exchange(0x8010, G_KEYS_FEATURE_INDEX, 0),
+            root_feature_lookup_exchange(0x8020, 0, 0),
+            root_feature_lookup_exchange(0x8030, 0, 0),
+            hidpp20_exchange(
+                hidpp20_short(0xff, G_KEYS_FEATURE_INDEX, 0, [0, 0, 0]),
+                hidpp20_short(0xff, G_KEYS_FEATURE_INDEX, 0, [5, 0, 0]),
+            ),
+            hidpp20_exchange(
+                hidpp20_short(0xff, G_KEYS_FEATURE_INDEX, 2, [1, 0, 0]),
+                hidpp20_short(0xff, G_KEYS_FEATURE_INDEX, 2, [0, 0, 0]),
+            ),
+            root_feature_lookup_exchange(0x1d4b, 0, 0),
+            hidpp20_exchange(
+                release.clone(),
+                crate::channel::scripted::feature_error(&release, 0x08),
+            ),
+            hidpp20_exchange(release.clone(), release),
+        ],
+    ))
+    .await;
+    let g_row = |take_g_row| KeyboardWanted {
+        gaming: GamingWanted {
+            take_g_row,
+            mode_keys: std::collections::BTreeSet::new(),
+        },
+        ..KeyboardWanted::default()
+    };
+    let (wanted_tx, wanted) = watch::channel(g_row(true));
+    let (sink, _captured) = mpsc::unbounded_channel();
+    let (_shutdown, host) = replay.host(sink);
+    let capture = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        run_keyboard_capture_session(replay.route.clone(), wanted, host),
+    );
+    let hand_back = async {
+        replay.wireless_lookup.request_written().await;
+        wanted_tx.send_replace(g_row(false));
+        replay.wireless_lookup.release();
+    };
+
+    let (outcome, ()) = tokio::join!(capture, hand_back);
+
+    assert!(matches!(
+        outcome
+            .expect("a failed release ends the session without a shutdown request")
+            .expect("the session's teardown hands the row back"),
+        CaptureSessionOutcome::Restored
+    ));
+    replay
+        .backend
+        .require_complete()
+        .expect("the G-key cassette is strictly consumed");
+}
+
 /// A per-app binding change retargets a running keyboard session in place
 /// (#2140). The session hands back only the key that left the set and
 /// diverts only the key that joined it. It does not read the control table
