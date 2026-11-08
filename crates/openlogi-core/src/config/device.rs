@@ -367,6 +367,18 @@ pub struct DeviceConfig {
     /// is off. `None` leaves the layout where it is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub os_layout_pin: Option<PinnedOs>,
+    /// OS-level pointer speed factor for mice whose speed OpenLogi sets at
+    /// the compositor level (like Logi Options+ does on macOS). The agent
+    /// applies it via the compositor's CLI when the mouse connects. `None`
+    /// means "never set — leave the OS pointer speed alone".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub os_pointer_speed: Option<f32>,
+    /// Whether to use a macOS-style acceleration curve (Apple IOHID) instead
+    /// of the compositor's native sensitivity. `None` means auto: enabled on
+    /// Hyprland, disabled elsewhere. `Some(true)` forces it on, `Some(false)`
+    /// forces it off (falls back to sensitivity).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub os_pointer_accel: Option<bool>,
     /// Report rate (HID++ `0x8060` / `0x8061`), in hertz. The agent re-applies
     /// it when the device reconnects, like [`Self::dpi`], but only where the
     /// device lists it for the connection it is on — a wired-only rate is
@@ -524,6 +536,8 @@ impl Default for DeviceConfig {
             fn_lock: None,
             keep_os_layout: None,
             os_layout_pin: None,
+            os_pointer_speed: None,
+            os_pointer_accel: None,
             report_rate: None,
             pointer_speed: None,
             force_sensing: None,
@@ -695,6 +709,10 @@ struct RawDeviceConfig {
     #[serde(default)]
     os_layout_pin: Option<PinnedOs>,
     #[serde(default)]
+    os_pointer_speed: Option<f32>,
+    #[serde(default)]
+    os_pointer_accel: Option<bool>,
+    #[serde(default)]
     report_rate: Option<ReportRate>,
     #[serde(default)]
     pointer_speed: Option<PointerSpeed>,
@@ -777,6 +795,8 @@ impl From<RawDeviceConfig> for DeviceConfig {
             fn_lock: raw.fn_lock,
             keep_os_layout: raw.keep_os_layout,
             os_layout_pin: raw.os_layout_pin,
+            os_pointer_speed: raw.os_pointer_speed,
+            os_pointer_accel: raw.os_pointer_accel,
             report_rate: raw.report_rate,
             pointer_speed: raw.pointer_speed,
             force_sensing: raw.force_sensing,

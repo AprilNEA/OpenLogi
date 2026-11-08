@@ -246,6 +246,13 @@ impl Config {
     }
 }
 
+/// Whether two copies of one scalar setting differ. The test is exact on
+/// purpose: both copies come from the same parsed TOML, so a difference is a
+/// real disagreement and never float rounding.
+fn values_differ<T: PartialEq>(canonical: &T, legacy: &T) -> bool {
+    canonical != legacy
+}
+
 /// Merge a legacy route-keyed entry into its device's canonical entry.
 ///
 /// A value the canonical side does not have is simply taken. A value both
@@ -327,7 +334,7 @@ pub(super) fn fold(device: &mut DeviceConfig, mut legacy: DeviceConfig, route_ke
         ($field:ident) => {
             match (&device.$field, legacy.$field) {
                 (None, Some(value)) => device.$field = Some(value),
-                (Some(ours), Some(theirs)) if *ours != theirs => {
+                (Some(ours), Some(theirs)) if values_differ(ours, &theirs) => {
                     tracing::warn!(
                         %route_key,
                         field = stringify!($field),
@@ -347,6 +354,8 @@ pub(super) fn fold(device: &mut DeviceConfig, mut legacy: DeviceConfig, route_ke
     fold_option_field!(fn_lock);
     fold_option_field!(keep_os_layout);
     fold_option_field!(os_layout_pin);
+    fold_option_field!(os_pointer_speed);
+    fold_option_field!(os_pointer_accel);
     fold_option_field!(onboard_memory);
     fold_option_field!(report_rate);
     fold_option_field!(pointer_speed);

@@ -119,6 +119,36 @@ fn an_os_layout_pin_survives_route_adoption() {
 }
 
 #[test]
+fn os_pointer_speed_roundtrips_per_device_and_is_omitted_when_unset() {
+    let mut cfg = Config::default();
+    assert_eq!(cfg.os_pointer_speed("2b042"), None);
+    cfg.set_os_pointer_speed("2b042", Some(0.5));
+    let body = toml::to_string_pretty(&cfg).expect("serialize");
+    assert!(body.contains("os_pointer_speed = 0.5"), "{body}");
+    let restored = write_and_read(&cfg);
+    assert_eq!(restored.os_pointer_speed("2b042"), Some(0.5));
+    assert_eq!(restored.os_pointer_speed("absent"), None);
+    cfg.set_os_pointer_speed("2b042", None);
+    let body = toml::to_string_pretty(&cfg).expect("serialize");
+    assert!(!body.contains("os_pointer_speed"), "{body}");
+}
+
+#[test]
+fn os_pointer_accel_roundtrips_per_device_and_is_omitted_when_unset() {
+    let mut cfg = Config::default();
+    assert_eq!(cfg.os_pointer_accel("2b042"), None);
+    cfg.set_os_pointer_accel("2b042", Some(true));
+    let body = toml::to_string_pretty(&cfg).expect("serialize");
+    assert!(body.contains("os_pointer_accel = true"), "{body}");
+    let restored = write_and_read(&cfg);
+    assert_eq!(restored.os_pointer_accel("2b042"), Some(true));
+    assert_eq!(restored.os_pointer_accel("absent"), None);
+    cfg.set_os_pointer_accel("2b042", None);
+    let body = toml::to_string_pretty(&cfg).expect("serialize");
+    assert!(!body.contains("os_pointer_accel"), "{body}");
+}
+
+#[test]
 fn smooth_wheel_defaults_off_and_roundtrips_per_device() {
     let mut cfg = Config::default();
     assert!(!cfg.smooth_wheel("mouse"));

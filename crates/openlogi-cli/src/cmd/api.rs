@@ -69,6 +69,15 @@ pub enum ApiCommand {
         #[arg(long, value_enum)]
         set: Switch,
     },
+    /// Set the OS-level pointer speed factor for a mouse (requires --save).
+    PointerSpeed {
+        /// Exact opaque ID returned by `api devices`.
+        #[arg(long)]
+        device: String,
+        /// The speed factor to apply at the compositor level (e.g. 0.9).
+        #[arg(long)]
+        set: Option<f32>,
+    },
     /// Read the report rate, or set it immediately (add --save to persist).
     ReportRate {
         /// Exact opaque ID returned by `api devices`.
@@ -248,6 +257,7 @@ async fn execute(
                 "keep_os_layout": keep,
             }))
         }
+        ApiCommand::PointerSpeed { device, set } => pointer_speed(&device, set, save.as_mut()),
         ApiCommand::ReportRate { device, set } => {
             report_rate(
                 client,
@@ -347,6 +357,34 @@ async fn dpi(
         "current": info.current,
         "supported": info.capabilities.values(),
     }))
+}
+
+/// `pointer-speed`: set or read this device's saved compositor factor. A read
+/// gives `null` while no factor is saved, because OpenLogi then leaves the
+/// system's own pointer sensitivity alone.
+fn pointer_speed(
+    device: &str,
+    set: Option<f32>,
+    save: Option<&mut Save>,
+) -> Result<Value, ApiError> {
+    match (set, save) {
+        (Some(factor), Some(save)) => {
+            save.set_os_pointer_speed(factor);
+            Ok(json!({
+                "device": device,
+                "persistence": "not_saved",
+                "os_pointer_speed": factor,
+            }))
+        }
+        (Some(_), None) => Err(ApiError::new(
+            "invalid_value",
+            "pointer-speed changes an agent setting; add --save",
+        )),
+        (None, save) => Ok(json!({
+            "device": device,
+            "os_pointer_speed": save.and_then(|save| save.os_pointer_speed()),
+        })),
+    }
 }
 
 async fn report_rate(

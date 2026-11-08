@@ -254,3 +254,40 @@ fn a_refresh_checks_a_keyboard_whose_layout_support_shows_up_late() {
     orch.refresh_inventory(std::slice::from_ref(&inventory), &[], false);
     assert!(orch.kept_os_layouts.contains(&key, host()));
 }
+
+#[test]
+fn pointer_reapply_policy_requires_pointer_device_for_default_curve() {
+    assert!(!should_apply_os_pointer_settings(false, false, true));
+    assert!(should_apply_os_pointer_settings(true, false, true));
+    assert!(!should_apply_os_pointer_settings(true, false, false));
+    // A saved speed/acceleration setting remains explicit even when capability
+    // discovery has not identified the device as a pointing device.
+    assert!(should_apply_os_pointer_settings(false, true, false));
+}
+
+#[test]
+fn os_pointer_write_is_one_policy_for_reconnect_and_reload() {
+    use OsPointerWrite::{Adaptive, Curve, Nothing, Speed};
+    // A pointing device on Hyprland gets the default curve.
+    assert_eq!(os_pointer_write(None, true, false, true), Curve);
+    // A keyboard with no saved setting leaves the pointer alone, on a reconnect
+    // and on a config reload alike.
+    assert_eq!(os_pointer_write(None, false, false, true), Nothing);
+    // A saved toggle decides the profile: off restores adaptive, on keeps the curve.
+    assert_eq!(os_pointer_write(Some(false), true, false, true), Adaptive);
+    assert_eq!(os_pointer_write(Some(true), false, true, true), Curve);
+    // Off Hyprland the saved factor is the only write.
+    assert_eq!(os_pointer_write(None, true, true, false), Speed);
+    assert_eq!(os_pointer_write(None, true, false, false), Nothing);
+}
+
+#[test]
+fn a_mouse_stays_a_pointing_device_while_its_feature_walk_is_unfinished() {
+    // The regression: a reconnect whose walk has not reported capabilities used
+    // to read as "not a pointer" and swap the curve for the adaptive profile.
+    let mut mouse = dev("mx", 1, true);
+    mouse.capabilities = None;
+    assert!(is_pointing_device(&mouse));
+    mouse.kind = DeviceKind::Keyboard;
+    assert!(!is_pointing_device(&mouse));
+}

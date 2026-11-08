@@ -70,6 +70,37 @@ fn a_release_persists_the_speed_and_writes_the_mouse() {
 }
 
 #[test]
+fn an_os_speed_override_is_persisted_and_can_be_cleared() {
+    let (mut state, mut receiver) = mouse_state(true, Config::ephemeral());
+    drain(&mut receiver);
+    let key = state
+        .current_record()
+        .expect("the mouse is selected")
+        .device_key();
+
+    assert_eq!(state.current_os_pointer_speed(), None);
+    assert_eq!(
+        state.commit_os_pointer_speed(Some(-0.4)),
+        [StateEvent::DeviceConfigChanged(key.clone())]
+    );
+    assert_eq!(state.current_os_pointer_speed(), Some(-0.4));
+    assert!(matches!(
+        drain(&mut receiver).as_slice(),
+        [Command::ReloadConfig(_)]
+    ));
+
+    assert_eq!(
+        state.commit_os_pointer_speed(None),
+        [StateEvent::DeviceConfigChanged(key)]
+    );
+    assert_eq!(state.current_os_pointer_speed(), None);
+    assert!(matches!(
+        drain(&mut receiver).as_slice(),
+        [Command::ReloadConfig(_)]
+    ));
+}
+
+#[test]
 fn a_release_is_inert_on_a_mouse_without_pointer_scaling() {
     let (mut state, mut receiver) = mouse_state(false, Config::ephemeral());
     drain(&mut receiver);
