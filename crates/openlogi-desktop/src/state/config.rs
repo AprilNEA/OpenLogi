@@ -93,16 +93,21 @@ impl ConfigState {
     /// The report only says when to look. A report the agent made before,
     /// or of this process's own revision, needs no look. Any other is read
     /// from the file, which answers: the agent may only be behind, still at
-    /// an earlier save of this process, and then the file is unchanged.
+    /// an earlier save of this process, and then the file is unchanged. A
+    /// report whose file could not be read is looked at again with the next.
     pub(super) fn saved_elsewhere(&mut self, reported: ConfigRevision) -> bool {
-        if self.agent_revision.replace(reported) == Some(reported) || reported == self.revision() {
+        if self.agent_revision == Some(reported) || reported == self.revision() {
+            self.agent_revision = Some(reported);
             return false;
         }
         let ConfigPersistence::UserFile(file) = &self.persistence else {
             return false;
         };
         match file.reload() {
-            Ok((_, on_disk)) => on_disk.revision() != file.revision(),
+            Ok((_, on_disk)) => {
+                self.agent_revision = Some(reported);
+                on_disk.revision() != file.revision()
+            }
             Err(error) => {
                 warn!(%error, "could not read config.toml the agent reloaded");
                 false

@@ -539,6 +539,29 @@ fn a_save_another_writer_made_is_adopted_once_the_agent_loads_it() {
     assert!(saved.app_settings.animate_desktop_switch);
 }
 
+/// A report of another writer's save whose file could not be read is
+/// looked at again with the next snapshot, not forgotten.
+#[test]
+fn another_writers_save_is_adopted_after_a_failed_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(openlogi_core::paths::CONFIG_FILE);
+    let resolver = AssetResolver::new();
+    let (mut state, _receiver) = file_backed_mouse(&path, &resolver);
+    let mut edit = ConfigEdit::load(&path).unwrap();
+    edit.config_mut().app_settings.smooth_scroll = true;
+    let elsewhere = edit.commit().unwrap();
+    let saved = std::fs::read(&path).unwrap();
+
+    std::fs::write(&path, "not [toml").unwrap();
+    let unread = state.apply_agent_snapshot(&agent_loaded(elsewhere), &resolver, &[]);
+    assert!(!unread.events.contains(&StateEvent::SettingsChanged));
+
+    std::fs::write(&path, saved).unwrap();
+    let adopted = state.apply_agent_snapshot(&agent_loaded(elsewhere), &resolver, &[]);
+    assert!(adopted.events.contains(&StateEvent::SettingsChanged));
+    assert!(state.app_settings().smooth_scroll);
+}
+
 /// A DPI the mouse has not answered yet is not saved: adopting another
 /// writer's save keeps showing it, and the mouse's answer saves it on top
 /// of the adopted file.
