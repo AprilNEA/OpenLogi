@@ -210,22 +210,23 @@ async fn keyboard_capture_replay_hands_back_a_g_key_row_whose_release_failed() {
     let (wanted_tx, wanted) = watch::channel(g_row(true));
     let (sink, _captured) = mpsc::unbounded_channel();
     let (_shutdown, host) = replay.host(sink);
-    let capture = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        run_keyboard_capture_session(replay.route.clone(), wanted, host),
-    );
+    let capture = run_keyboard_capture_session(replay.route.clone(), wanted, host);
     let hand_back = async {
         replay.wireless_lookup.request_written().await;
         wanted_tx.send_replace(g_row(false));
         replay.wireless_lookup.release();
     };
 
-    let (outcome, ()) = tokio::join!(capture, hand_back);
+    // Bounds the hand-back too: a session that ends before its wake lookup
+    // would otherwise leave it waiting forever.
+    let (outcome, ()) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        tokio::join!(capture, hand_back)
+    })
+    .await
+    .expect("a failed release ends the session without a shutdown request");
 
     assert!(matches!(
-        outcome
-            .expect("a failed release ends the session without a shutdown request")
-            .expect("the session's teardown hands the row back"),
+        outcome.expect("the session's teardown hands the row back"),
         CaptureSessionOutcome::Restored
     ));
     replay
