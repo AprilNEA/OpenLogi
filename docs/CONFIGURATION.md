@@ -145,7 +145,7 @@ Common device fields are:
 
 - `custom_name`, `enabled`, `dpi`, `dpi_presets`, thumb-wheel sensitivity,
   scroll inversion, and scroll resolution
-- `os_pointer_speed` (optional): this device's compositor pointer-sensitivity
+- `os_pointer_speed` (optional): the desktop's pointer-sensitivity factor, applied to every mouse (global, not per device)
   factor, from `-1.0` to `1.0`. The Pointer tab slider saves it; an online,
   enabled device gets changed values immediately and again when it reconnects.
   When unset, OpenLogi leaves the system's existing pointer sensitivity
