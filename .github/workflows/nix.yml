@@ -79,10 +79,6 @@ jobs:
           - system: x86_64-linux
             machine: x86_64
             runner: nscloud-ubuntu-24.04-amd64-8x32
-          # That serial tail made aarch64 take 34 minutes on AmpereOne,
-          # against 15 for x86_64, so aarch64 runs on Namespace's Linux on
-          # Apple Silicon. There 16x32 costs the same as 8x32, and labels
-          # cannot select 12x24.
           - system: aarch64-linux
             machine: aarch64
             runner: nscloud-ubuntu-24.04-arm64-16x32;linux-on-apple-silicon=true
