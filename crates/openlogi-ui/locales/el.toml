@@ -327,6 +327,7 @@ couldnt_read_report_rate_click_to_retry = "Δεν ήταν δυνατή η αν�
 pointer_speed = "Ταχύτητα δείκτη"
 os_pointer_speed = "Ταχύτητα δείκτη στο λειτουργικό σύστημα"
 os_pointer_speed_description = "Ρυθμίζει την ευαισθησία του δείκτη στο λειτουργικό σύστημα. Εύρος: -1,00 έως 1,00."
+os_pointer_speed_reset = "Επαναφορά"
 os_pointer_accel = "macOS-style acceleration"
 pointer_speed_percent = "%{percent}%"
 pointer_speed_description = "Η ταχύτητα που εφαρμόζει το ποντίκι στην κίνησή του. Αντιστοιχίστε τη Λειτουργία ακριβείας σε ένα κουμπί για εναλλαγή στη χαμηλότερη ταχύτητα και πίσω."

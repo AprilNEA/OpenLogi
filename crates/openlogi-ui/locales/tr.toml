@@ -327,6 +327,7 @@ couldnt_read_report_rate_click_to_retry = "Raporlama hızı okunamadı. Yeniden 
 pointer_speed = "İşaretçi hızı"
 os_pointer_speed = "Sistem işaretçi hızı"
 os_pointer_speed_description = "İşletim sistemindeki işaretçi hassasiyetini ayarlar. Aralık: -1,00 ile 1,00."
+os_pointer_speed_reset = "Sıfırla"
 os_pointer_accel = "macOS-style acceleration"
 pointer_speed_percent = "%{percent}%"
 pointer_speed_description = "Farenin kendi hareketine uyguladığı hız. En yavaş hıza geçip geri dönmek için bir düğmeye Hassas Mod atayın."

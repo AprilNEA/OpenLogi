@@ -327,6 +327,7 @@ couldnt_read_report_rate_click_to_retry = "Не вдалося прочитат�
 pointer_speed = "Швидкість вказівника"
 os_pointer_speed = "Швидкість вказівника в системі"
 os_pointer_speed_description = "Задає чутливість вказівника в операційній системі. Діапазон: від -1,00 до 1,00."
+os_pointer_speed_reset = "Скинути"
 os_pointer_accel = "macOS-style acceleration"
 pointer_speed_percent = "%{percent}%"
 pointer_speed_description = "Швидкість, яку миша застосовує до свого руху. Призначте кнопці «Режим точності», щоб перемикатися на найнижчу швидкість і назад."

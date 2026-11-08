@@ -327,6 +327,7 @@ couldnt_read_report_rate_click_to_retry = "No se pudo leer la frecuencia de sond
 pointer_speed = "Velocidad del puntero"
 os_pointer_speed = "Velocidad del puntero del sistema"
 os_pointer_speed_description = "Ajusta la sensibilidad del puntero del sistema operativo. Rango: de -1,00 a 1,00."
+os_pointer_speed_reset = "Restablecer"
 os_pointer_accel = "macOS-style acceleration"
 pointer_speed_percent = "%{percent}%"
 pointer_speed_description = "La velocidad que el ratón aplica a su propio movimiento. Asigna Modo de precisión a un botón para cambiar a la velocidad más lenta y volver."

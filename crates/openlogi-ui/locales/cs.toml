@@ -327,6 +327,7 @@ couldnt_read_report_rate_click_to_retry = "Frekvenci hlášení se nepodařilo n
 pointer_speed = "Rychlost ukazatele"
 os_pointer_speed = "Rychlost ukazatele v systému"
 os_pointer_speed_description = "Nastavuje citlivost ukazatele v operačním systému. Rozsah: −1,00 až 1,00."
+os_pointer_speed_reset = "Obnovit"
 os_pointer_accel = "macOS-style acceleration"
 pointer_speed_percent = "%{percent} %"
 pointer_speed_description = "Rychlost, kterou myš uplatňuje na svůj pohyb. Přiřaďte tlačítku Režim přesnosti a přepínejte na nejnižší rychlost a zpět."

@@ -327,6 +327,7 @@ couldnt_read_report_rate_click_to_retry = "Не удалось прочитат�
 pointer_speed = "Скорость указателя"
 os_pointer_speed = "Скорость указателя в системе"
 os_pointer_speed_description = "Задаёт чувствительность указателя в операционной системе. Диапазон: от −1,00 до 1,00."
+os_pointer_speed_reset = "Сбросить"
 os_pointer_accel = "macOS-style acceleration"
 pointer_speed_percent = "%{percent}%"
 pointer_speed_description = "Скорость, которую мышь применяет к своему движению. Назначьте кнопке «Режим точности», чтобы переключаться на самую низкую скорость и обратно."

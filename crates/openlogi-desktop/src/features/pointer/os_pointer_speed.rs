@@ -1,13 +1,15 @@
 //! The OS-level pointer-speed override for the selected mouse.
 
+use gpui::InteractiveElement as _;
 use gpui::{AnyElement, App, Context, IntoElement, ParentElement as _, Styled as _, Window};
+use gpui_kit::base::Button as BaseButton;
 use gpui_kit::component::slider::Slider;
 use gpui_kit::component::{Selectable as _, v_flex};
 
 use crate::state::{AppState, DeviceKey};
 use crate::ui::commit_slider::{CommitSlider, SliderRange};
 use crate::ui::slider_row::SliderRow;
-use crate::ui::theme::Palette;
+use crate::ui::theme::{FocusRingStyle as _, Palette, Typography as _};
 
 const MIN_SPEED: i32 = -100;
 const MAX_SPEED: i32 = 100;
@@ -75,23 +77,26 @@ pub(super) fn os_pointer_speed_section(
     pal: Palette,
 ) -> Option<AnyElement> {
     let facts = facts?;
-    let is_hyprland = openlogi_core::compositor::Compositor::detect()
-        == openlogi_core::compositor::Compositor::Hyprland;
+    let compositor = openlogi_core::compositor::Compositor::detect();
+    let is_hyprland = compositor == openlogi_core::compositor::Compositor::Hyprland;
+    // With no pointer-speed backend (KDE, unknown desktops) a slider would save
+    // a value that nothing applies, so the row stays disabled.
+    let supported = openlogi_core::compositor::apply_pointer_speed(compositor, 0.0).is_some();
     let shown = slider.map_or(facts.speed, |slider| slider.slider.shown(facts.speed));
-    let body = slider.map_or_else(
-        || crate::ui::slider_row::disabled_track(pal).into_any_element(),
-        |slider| {
-            Slider::new(slider.slider.slider())
-                .horizontal()
-                .into_any_element()
-        },
-    );
+    let body = match slider {
+        Some(slider) if supported => Slider::new(slider.slider.slider())
+            .horizontal()
+            .into_any_element(),
+        _ => crate::ui::slider_row::disabled_track(pal).into_any_element(),
+    };
     let mut row = SliderRow::new(tr!("pointer.os_pointer_speed"), body)
         .description(tr!("pointer.os_pointer_speed_description"))
         .value(format!("{:.2}", slider_to_speed(shown)), ["-1.00", "1.00"]);
-    if !facts.configured {
-        row = row.marker(tr!("default"));
-    }
+    row = if facts.configured {
+        row.marker(reset_button(pal))
+    } else {
+        row.marker(tr!("default"))
+    };
     let mut container = v_flex().gap_3().child(row);
     if is_hyprland {
         let toggle_state = facts.accel_enabled.unwrap_or(is_hyprland);
@@ -105,6 +110,26 @@ pub(super) fn os_pointer_speed_section(
         container = container.child(toggle);
     }
     Some(container.into_any_element())
+}
+
+/// Clears the saved speed so the compositor's own setting is left alone again.
+fn reset_button(pal: Palette) -> BaseButton {
+    BaseButton::new("os-pointer-speed-reset")
+        .accessibility_label(tr!("pointer.os_pointer_speed_reset"))
+        .px_2p5()
+        .py_0p5()
+        .rounded_md()
+        .border_1()
+        .border_color(pal.border)
+        .bg(pal.control)
+        .hover(|s| s.bg(pal.control_hover))
+        .focus_visible(move |s| s.focus_ring(pal))
+        .text_caption()
+        .text_color(pal.text_muted)
+        .child(tr!("pointer.os_pointer_speed_reset"))
+        .on_click(|_, _, cx| {
+            AppState::apply(cx, |state| state.commit_os_pointer_speed(None));
+        })
 }
 
 fn slider_to_speed(value: i32) -> f32 {

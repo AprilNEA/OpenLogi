@@ -327,6 +327,7 @@ couldnt_read_report_rate_click_to_retry = "Couldn't read the report rate. Click 
 pointer_speed = "Pointer speed"
 os_pointer_speed = "Pointer acceleration"
 os_pointer_speed_description = "macOS-style acceleration curve (Apple IOHID). Gain: -1.00 (flat) to 1.00 (double). On Hyprland this generates a custom accel_profile; other compositors use the sensitivity factor."
+os_pointer_speed_reset = "Reset"
 os_pointer_accel = "macOS-style acceleration"
 pointer_speed_percent = "%{percent}%"
 pointer_speed_description = "The speed the mouse applies to its own movement. Assign Precision Mode to a button to switch to the slowest speed and back."

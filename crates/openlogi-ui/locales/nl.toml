@@ -327,6 +327,7 @@ couldnt_read_report_rate_click_to_retry = "Rapportagesnelheid kan niet worden ge
 pointer_speed = "Aanwijzersnelheid"
 os_pointer_speed = "Aanwijzersnelheid van het systeem"
 os_pointer_speed_description = "Stelt de aanwijzergevoeligheid van het besturingssysteem in. Bereik: -1,00 tot 1,00."
+os_pointer_speed_reset = "Herstellen"
 os_pointer_accel = "macOS-style acceleration"
 pointer_speed_percent = "%{percent}%"
 pointer_speed_description = "De snelheid die de muis zelf op zijn beweging toepast. Wijs Precisiemodus toe aan een knop om naar de laagste snelheid en terug te schakelen."
