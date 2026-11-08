@@ -123,7 +123,7 @@ pub(in crate::app) fn device_gallery(window: &Window, cx: &mut Context<AppView>)
 /// within the connected and offline groups.
 pub(in crate::app) fn ordered_device_indices(records: &[DeviceRecord]) -> Vec<usize> {
     let mut indices: Vec<_> = (0..records.len()).collect();
-    indices.sort_by_key(|index| !records[*index].online);
+    indices.sort_by_key(|index| !records[*index].is_online());
     indices
 }
 
@@ -267,7 +267,7 @@ fn device_card_element(
 ) -> BaseButton {
     let record = &state.devices()[idx];
     let active = idx == active_idx;
-    let connectivity = Connectivity::new(record.online, agent_live(state));
+    let connectivity = Connectivity::new(record.is_online(), agent_live(state));
     let enabled = state.device_enabled(&record.config_key);
     let light_enabled =
         record.kind == DeviceKind::Light && state.light_enabled_for(&record.device_key());
@@ -329,7 +329,7 @@ fn device_list_row(
 ) -> BaseButton {
     let record = &state.devices()[idx];
     let active = idx == active_idx;
-    let connectivity = Connectivity::new(record.online, agent_live(state));
+    let connectivity = Connectivity::new(record.is_online(), agent_live(state));
     let enabled = state.device_enabled(&record.config_key);
     let light_enabled =
         record.kind == DeviceKind::Light && state.light_enabled_for(&record.device_key());
@@ -359,7 +359,7 @@ fn device_list_row(
                 .items_center()
                 .justify_center()
                 .overflow_hidden()
-                .opacity(if record.online { 1. } else { 0.38 })
+                .opacity(if record.is_online() { 1. } else { 0.38 })
                 .when_some(glow, |this, (geom, color)| {
                     this.child(super::glow_canvas(geom, color))
                 })
@@ -407,7 +407,7 @@ fn device_list_row(
                 .gap_2()
                 .when_some(record.battery.as_ref(), |this, battery| {
                     this.child(battery_reading(
-                        BatteryIndicator::status(battery, record.online),
+                        BatteryIndicator::status(battery, record.is_online()),
                         connectivity,
                     ))
                 })

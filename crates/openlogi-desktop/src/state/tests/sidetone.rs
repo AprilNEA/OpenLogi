@@ -111,7 +111,7 @@ fn an_offline_headset_is_not_written() {
     });
     drain(&mut receiver);
     let record = state.current_record().expect("the headset is selected");
-    assert!(!record.online && record.route.is_some());
+    assert!(!record.is_online() && record.route.is_some());
     assert!(state.current_sidetone_supported());
     assert_eq!(state.current_sidetone_route(), None);
 

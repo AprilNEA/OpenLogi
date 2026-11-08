@@ -70,7 +70,7 @@ pub(super) fn detail_header(
         || tr!("device.device").to_string(),
         |r| r.display_name.clone(),
     );
-    let online = record.map(|r| r.online);
+    let online = record.map(DeviceRecord::is_online);
     let battery = record
         .and_then(|r| r.battery.as_ref())
         .map(BatteryIndicator::inline);
@@ -128,7 +128,7 @@ pub(super) fn detail_content(
     let pal = theme::palette(cx);
     let online = AppState::try_read(cx)
         .and_then(AppState::current_record)
-        .is_some_and(|record| record.online);
+        .is_some_and(DeviceRecord::is_online);
     let content = match active {
         DetailTab::Buttons => {
             buttons_tab(panels.mouse_model, profile_icons, app_catalog, cx).into_any_element()
@@ -908,7 +908,7 @@ fn light_tab(
             let record = state.current_record();
             (
                 record.and_then(|record| record.asset.as_ref()),
-                record.is_some_and(|record| record.online),
+                record.is_some_and(DeviceRecord::is_online),
                 state.light_enabled(),
                 state.light(),
             )
@@ -1075,7 +1075,7 @@ fn device_details_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElem
                         &record.display_name,
                         &record.model_name,
                         record.kind,
-                        record.online,
+                        record.is_online(),
                         pal,
                     ))
                     .when_some(record.battery.as_ref(), |this, battery| {

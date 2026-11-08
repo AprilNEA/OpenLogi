@@ -46,7 +46,7 @@ impl AppState {
     #[must_use]
     pub fn current_easy_switch_reachable(&self) -> bool {
         self.current_record()
-            .is_some_and(|record| record.online && record.route.is_some())
+            .is_some_and(|record| record.addressable_route().is_some())
     }
 
     /// What is known of the active device's Easy-Switch hosts.

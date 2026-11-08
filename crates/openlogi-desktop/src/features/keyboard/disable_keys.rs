@@ -39,7 +39,7 @@ impl DisableKeysPanel {
             return status_line(tr!("device.no_active_device"), pal).into_any_element();
         };
         let key = record.device_key();
-        let online = record.online;
+        let online = record.is_online();
         let persistent = state.current_device_is_persistent();
         let enabled = state.disable_keys_controls_enabled(&key);
         let persistence = state.disable_keys_status(&key).cloned().unwrap_or_default();
