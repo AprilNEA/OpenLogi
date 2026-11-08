@@ -33,7 +33,10 @@ mod wheel_hold;
 #[cfg(feature = "fs")]
 mod tests;
 
-pub use device::{DeviceConfig, DeviceIdentity, DisableKey, LinkConfig, LinkOverrides, PinnedOs};
+pub use device::{
+    DeviceConfig, DeviceIdentity, DisableKey, LinkConfig, LinkOverrides, PinnedOs,
+    is_valid_os_pointer_speed,
+};
 #[cfg(all(test, feature = "fs", unix))]
 use file::resolve_symlinks;
 #[cfg(feature = "fs")]

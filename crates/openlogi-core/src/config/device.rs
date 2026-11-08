@@ -371,6 +371,11 @@ pub struct DeviceConfig {
     /// the compositor level (like Logi Options+ does on macOS). The agent
     /// applies it via the compositor's CLI when the mouse connects. `None`
     /// means "never set — leave the OS pointer speed alone".
+    ///
+    /// Scope: the compositor settings it drives (Sway `input *`, Hyprland
+    /// `input:sensitivity` and the accel curve, GNOME `gsettings`) are global,
+    /// not per device. Only configured mice trigger a write, but a configured
+    /// mouse still changes the pointer for every device the compositor sees.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub os_pointer_speed: Option<f32>,
     /// Whether to use a macOS-style acceleration curve (Apple IOHID) instead
@@ -735,6 +740,14 @@ struct RawDeviceConfig {
     g_key_profile_names: BTreeMap<GKeyProfile, String>,
 }
 
+/// Whether `speed` is a usable OS pointer speed factor: finite and within
+/// `-1.0..=1.0`. The desktop slider and the CLI both write this range, and a
+/// config value outside it is dropped at load rather than sent to a compositor.
+#[must_use]
+pub fn is_valid_os_pointer_speed(speed: f32) -> bool {
+    speed.is_finite() && (-1.0..=1.0).contains(&speed)
+}
+
 impl From<RawDeviceConfig> for DeviceConfig {
     fn from(raw: RawDeviceConfig) -> Self {
         let mut bindings = raw.bindings; // the v2 map wins on every key.
@@ -794,7 +807,9 @@ impl From<RawDeviceConfig> for DeviceConfig {
             fn_lock: raw.fn_lock,
             keep_os_layout: raw.keep_os_layout,
             os_layout_pin: raw.os_layout_pin,
-            os_pointer_speed: raw.os_pointer_speed,
+            os_pointer_speed: raw
+                .os_pointer_speed
+                .filter(|speed| is_valid_os_pointer_speed(*speed)),
             os_pointer_accel: raw.os_pointer_accel,
             report_rate: raw.report_rate,
             pointer_speed: raw.pointer_speed,
@@ -830,6 +845,22 @@ mod tests {
         );
         let serialized = toml::to_string(&config)?;
         assert!(serialized.contains("host_switch_targets"));
+        Ok(())
+    }
+
+    #[test]
+    fn os_pointer_speed_outside_the_factor_range_loads_as_unset()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let valid: DeviceConfig = toml::from_str("os_pointer_speed = 0.5")?;
+        assert_eq!(valid.os_pointer_speed, Some(0.5));
+        for text in [
+            "os_pointer_speed = nan",
+            "os_pointer_speed = inf",
+            "os_pointer_speed = -2.0",
+        ] {
+            let config: DeviceConfig = toml::from_str(text)?;
+            assert_eq!(config.os_pointer_speed, None, "{text}");
+        }
         Ok(())
     }
 
