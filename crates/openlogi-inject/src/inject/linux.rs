@@ -195,7 +195,8 @@ fn dispatch_generic_linux_native(action: &Action, native: NativeAction) {
             gnome_key_or_skip(action, &[KeyCode::KEY_LEFTMETA], KeyCode::KEY_A);
         }
         // On KDE, drive KWin's D-Bus API directly; elsewhere press the
-        // desktop's own workspace chord (see `desktop_switch_mods`).
+        // desktop's own workspace chord (see `desktop_switch_mods`), which is
+        // also what KDE falls back to when the KWin call is not handled.
         NativeAction::PreviousDesktop => {
             kwin_switch_desktop("previousDesktop").unwrap_or_else(|| {
                 press_key(
@@ -1008,10 +1009,10 @@ fn capture_region_mods(desktop: Option<&str>) -> Vec<KeyCode> {
 /// from the (colon-separated) `$XDG_CURRENT_DESKTOP` value.
 ///
 /// Ctrl+Alt is GNOME's stock binding, and what an unset or unrecognised
-/// desktop keeps. COSMIC binds Super+Ctrl+←/→ instead and leaves Ctrl+Alt+←/→
-/// unbound.
+/// desktop keeps. COSMIC and KDE Plasma (KWin's "Switch One Desktop to the
+/// Left/Right") bind Super+Ctrl+←/→ instead and leave Ctrl+Alt+←/→ unbound.
 fn desktop_switch_mods(desktop: Option<&str>) -> &'static [KeyCode] {
-    if desktop.is_some_and(|desktop| desktop.split(':').any(|d| d == "cosmic")) {
+    if desktop.is_some_and(|desktop| desktop.split(':').any(|d| matches!(d, "cosmic" | "kde"))) {
         &[KeyCode::KEY_LEFTMETA, KeyCode::KEY_LEFTCTRL]
     } else {
         &[KeyCode::KEY_LEFTCTRL, KeyCode::KEY_LEFTALT]
@@ -1557,6 +1558,10 @@ mod tests {
             (Some("pop:cosmic"), super_ctrl),
             // ...but only a whole entry, not a substring of another name.
             (Some("cosmic-like"), ctrl_alt),
+            // KWin binds Ctrl+Meta+←/→, not GNOME's Ctrl+Alt (#2487). This is
+            // the chord KDE presses when the KWin D-Bus call is not handled.
+            (Some("kde"), super_ctrl),
+            (Some("kde-like"), ctrl_alt),
         ] {
             assert_eq!(
                 desktop_switch_mods(desktop),
