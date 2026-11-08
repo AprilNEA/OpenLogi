@@ -57,7 +57,7 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{NSNotification, NSObjectProtocol, NSString};
 use openlogi_agent_core::observable::ObservableState;
-use openlogi_agent_core::orchestrator::SharedHandles;
+use openlogi_agent_core::orchestrator::{SettingError, SharedHandles};
 use openlogi_core::brand::{self, DeeplinkCommand};
 use openlogi_core::config::{AppIcon, Config};
 use openlogi_core::device::{BatteryAttention, BatteryInfo, DeviceKind};
@@ -65,7 +65,7 @@ use openlogi_hid::{DeviceIoSignal, DeviceRoute, WriteError};
 use openlogi_ipc::Observation;
 use rust_i18n::t;
 use tokio::sync::watch;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::activity_macos::{self, ActivityGate};
 use crate::server::{self, AgentServer};
@@ -424,10 +424,8 @@ impl MenuTarget {
         let Some(route) = row.route.clone().filter(|_| reads.any()) else {
             return;
         };
-        let started = MEMORY.with_borrow_mut(|memory| {
-            let device = memory.entry(route.clone()).or_default();
-            !std::mem::replace(&mut device.reading_now, true)
-        });
+        let started = MEMORY
+            .with_borrow_mut(|memory| memory.entry(route.clone()).or_default().start_reading());
         if !started {
             return;
         }
@@ -436,9 +434,10 @@ impl MenuTarget {
             let fresh = Box::pin(read_device(&shared, &route, reads)).await;
             DispatchQueue::main().exec_async(move || {
                 MEMORY.with_borrow_mut(|memory| {
-                    let device = memory.entry(route.clone()).or_default();
-                    device.reading.merge(reads, fresh);
-                    device.reading_now = false;
+                    memory
+                        .entry(route.clone())
+                        .or_default()
+                        .finish_reading(reads, fresh);
                 });
                 refill(&route);
             });
@@ -450,17 +449,10 @@ impl MenuTarget {
     fn change(&self, route: DeviceRoute, change: Change) {
         let server = self.ivars().backend.server.clone();
         self.ivars().backend.runtime.spawn(async move {
-            let result = apply(&server, &route, change).await;
+            let outcome = apply(&server, &route, change).await;
             DispatchQueue::main().exec_async(move || {
                 MEMORY.with_borrow_mut(|memory| {
-                    let device = memory.entry(route.clone()).or_default();
-                    match result {
-                        Ok(()) => {
-                            device.reading.record(change);
-                            device.failure = None;
-                        }
-                        Err(failure) => device.failure = Some(failure),
-                    }
+                    memory.entry(route.clone()).or_default().changed(outcome);
                 });
                 refill(&route);
             });
@@ -501,8 +493,13 @@ async fn read_device(shared: &SharedHandles, route: &DeviceRoute, reads: Reads) 
 
 /// Make `change` to the device at `route` as the settings app would: saved
 /// settings through the agent's device settings, the backlight and sidetone,
-/// which the device keeps itself, on the device alone.
-async fn apply(server: &AgentServer, route: &DeviceRoute, change: Change) -> Result<(), Failure> {
+/// which the device keeps itself, on the device alone. Answers the change
+/// the device took, or `None` when a newer write superseded it.
+async fn apply(
+    server: &AgentServer,
+    route: &DeviceRoute,
+    change: Change,
+) -> Result<Option<Change>, Failure> {
     let settings = server.device_settings();
     let saved = match change {
         Change::Dpi(dpi) => settings.set_dpi(route, dpi).await,
@@ -520,28 +517,41 @@ async fn apply(server: &AgentServer, route: &DeviceRoute, change: Change) -> Res
                 backlight,
             )
             .await
-            .map(drop)
+            .map(|_| Some(change))
             .map_err(|error| {
                 warn!(%route, %error, "menu-bar backlight change failed");
                 Failure::Device
             });
         }
         Change::Sidetone(level) => {
-            return server
-                .shared
-                .set_sidetone(route, level)
+            let written = server.shared.set_sidetone(route, level).await;
+            // The settings app re-reads it, as it does after a backlight
+            // change the agent made.
+            server
+                .orchestrator
+                .lock()
                 .await
-                .map(drop)
+                .announce_settings_changed(route);
+            // A superseded write answers the level the headset kept.
+            return written
+                .map(|level| Some(Change::Sidetone(level)))
                 .map_err(|error| {
                     warn!(%route, %error, "menu-bar sidetone change failed");
                     Failure::Device
                 });
         }
     };
-    saved.map_err(|error| {
-        warn!(%route, %error, ?change, "menu-bar setting change failed");
-        Failure::of(&error)
-    })
+    match saved {
+        Ok(()) => Ok(Some(change)),
+        Err(SettingError::Write(WriteError::WriteSuperseded { .. })) => {
+            debug!(%route, ?change, "menu-bar setting change superseded by a newer write");
+            Ok(None)
+        }
+        Err(error) => {
+            warn!(%route, %error, ?change, "menu-bar setting change failed");
+            Err(Failure::of(&error))
+        }
+    }
 }
 
 /// Refill every submenu of the device at `route` from what the menu now
