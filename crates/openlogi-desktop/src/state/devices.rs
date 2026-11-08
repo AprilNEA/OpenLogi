@@ -4,6 +4,7 @@ use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, HashSet};
 
 use openlogi_camera::Camera;
+use openlogi_core::binding::ButtonId;
 use openlogi_core::config::{Config, DeviceConfig, DeviceIdentity, canonical_device_key};
 use openlogi_core::device::{
     BatteryInfo, Capabilities, DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports,
@@ -128,6 +129,21 @@ impl DeviceRecord {
             } else {
                 Capabilities::presumed_from_kind(self.kind)
             }
+        })
+    }
+
+    /// The buttons the OS hook reads from this device beyond the generic set
+    /// ([`openlogi_hook::device_buttons`]). The hook names a receiver-paired
+    /// mouse by its per-device node, which carries the [`Self::wpid`] as its
+    /// product id.
+    #[must_use]
+    pub fn hook_buttons(&self) -> Vec<ButtonId> {
+        self.wpid.map_or_else(Vec::new, |wpid| {
+            openlogi_hook::device_buttons(&openlogi_hook::EventDevice {
+                vendor_id: Some(openlogi_hook::LOGITECH_VENDOR_ID),
+                product_id: Some(u32::from(wpid)),
+                product_name: None,
+            })
         })
     }
 
@@ -280,27 +296,23 @@ pub(super) fn build_device_list(
             let route = DeviceRoute::for_slot(inv, paired.slot);
             let receiver_brand = find_receiver(inv.receiver.vendor_id, inv.receiver.product_id)
                 .map(|receiver| receiver.brand);
-            let (model_key, asset, model_info, codename, serial_number, unit_id) =
+            // No HID++ 2.0 model info — HID++ 1.0 device or feature walk timed
+            // out — still surfaces the device, under the model key's wpid (or
+            // slot) fallback, so it appears in the gallery with a stable
+            // display fallback.
+            let model_key = paired.model_key();
+            let codename = paired.codename.clone();
+            let (asset, model_info, serial_number, unit_id) =
                 if let Some(model) = paired.model_info.as_ref() {
                     let asset = resolver.resolve(model, paired.codename.as_deref());
                     (
-                        model.model_key(),
                         asset,
                         Some(model.clone()),
-                        paired.codename.clone(),
                         model.serial_number.clone(),
                         model.unit_id,
                     )
                 } else {
-                    // No HID++ 2.0 model info — HID++ 1.0 device or feature walk
-                    // timed out. Surface the device anyway using the wpid (or slot
-                    // as a last-resort model key) so it appears in the gallery
-                    // with a stable display fallback.
-                    let key = paired.wpid.map_or_else(
-                        || format!("slot{}", paired.slot),
-                        |w| format!("wpid{w:04x}"),
-                    );
-                    (key, None, None, paired.codename.clone(), None, [0u8; 4])
+                    (None, None, None, [0u8; 4])
                 };
             let stable_id = DeviceStableId::from_parts(
                 route.as_ref(),
@@ -729,10 +741,7 @@ pub(super) fn record_wire_pid(record: &DeviceRecord) -> Option<String> {
         // A degenerate `model_ids[0] == 0` falls through to `None` (no PID dedup);
         // the record still dedups by key, so two identical zero-id models showing
         // as separate offline cards is a rare, accepted gap.
-        _ => record
-            .model_key
-            .strip_prefix("wpid")
-            .map(str::to_ascii_lowercase),
+        _ => PairedDevice::wpid_of_model_key(&record.model_key).map(str::to_ascii_lowercase),
     }
 }
 

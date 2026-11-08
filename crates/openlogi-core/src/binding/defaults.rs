@@ -83,6 +83,14 @@ pub fn default_binding(button: ButtonId) -> Action {
             reason = "the layout owns a G button's default; unrelated to the keyboard arm"
         )]
         ButtonId::G6 | ButtonId::G7 | ButtonId::G8 | ButtonId::G9 => Action::None,
+        // The Performance MX zoom button has no host action of its own; the OS
+        // hook leaves it native while it keeps this seed.
+        #[expect(
+            clippy::match_same_arms,
+            reason = "Zoom stays native through the OS hook; unrelated to the G buttons or the \
+                      keyboard arm"
+        )]
+        ButtonId::Zoom => Action::None,
         // Keyboard keys stay on their native firmware function until the user
         // explicitly binds them; an unbound key is never diverted, so a
         // `None` default keeps the projection total without capturing anything.
