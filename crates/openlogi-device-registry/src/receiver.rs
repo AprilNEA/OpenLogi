@@ -82,6 +82,14 @@ pub const RECEIVERS: &[ReceiverDescriptor] = &[
         ReceiverBrand::Lightspeed,
         ReceiverProtocol::Unifying,
     ),
+    // Lightspeed receiver bundled with the G613 keyboard (WPID 0x4065) —
+    // cross-checked against Solaar's LIGHTSPEED_RECEIVER_C53D, which drives
+    // it with that keyboard.
+    ReceiverDescriptor::logitech(
+        0xc53d,
+        ReceiverBrand::Lightspeed,
+        ReceiverProtocol::Unifying,
+    ),
     // Lightspeed nano receiver, verified with a G305 (WPID 0x4074).
     ReceiverDescriptor::logitech(
         0xc53f,
@@ -139,6 +147,14 @@ mod tests {
     #[test]
     fn powerplay_receiver_is_lightspeed_over_unifying_protocol() {
         let receiver = find_receiver(LOGITECH_VENDOR_ID, 0xc53a).expect("c53a receiver");
+
+        assert_eq!(receiver.brand, ReceiverBrand::Lightspeed);
+        assert_eq!(receiver.protocol, ReceiverProtocol::Unifying);
+    }
+
+    #[test]
+    fn g613_receiver_is_lightspeed_over_unifying_protocol() {
+        let receiver = find_receiver(LOGITECH_VENDOR_ID, 0xc53d).expect("c53d receiver");
 
         assert_eq!(receiver.brand, ReceiverBrand::Lightspeed);
         assert_eq!(receiver.protocol, ReceiverProtocol::Unifying);
