@@ -551,17 +551,6 @@ impl Default for DeviceConfig {
         }
     }
 }
-
-/// `skip_serializing_if` helper: a single-page keypad (or any other device)
-/// keeps `keypad_pages` out of `config.toml`.
-#[expect(
-    clippy::trivially_copy_pass_by_ref,
-    reason = "serde's skip_serializing_if requires a fn(&T) -> bool signature"
-)]
-fn is_first_page(page: &KeypadPage) -> bool {
-    *page == KeypadPage::FIRST
-}
-
 /// `skip_serializing_if` helper: the default gaming-key mode stays out of
 /// `config.toml`.
 #[expect(
@@ -580,6 +569,16 @@ fn is_default_gaming_key_mode(mode: &GamingKeyMode) -> bool {
 )]
 fn is_default_g_key_owner(owner: &GKeyOwner) -> bool {
     *owner == GKeyOwner::default()
+}
+
+/// `skip_serializing_if` helper: a single-page keypad (or any other device)
+/// keeps `keypad_pages` out of `config.toml`.
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde's skip_serializing_if requires a fn(&T) -> bool signature"
+)]
+fn is_first_page(page: &KeypadPage) -> bool {
+    *page == KeypadPage::FIRST
 }
 
 /// `serde(default)` helper for `bool` fields that default to `true`.
@@ -724,16 +723,16 @@ struct RawDeviceConfig {
     gshift_bindings: BTreeMap<ButtonId, Action>,
     #[serde(default)]
     keypad_pages: KeypadPage,
+    #[serde(default = "default_true")]
+    enabled: bool,
+    #[serde(default)]
+    custom_name: Option<String>,
     #[serde(default)]
     g_key_owner: GKeyOwner,
     #[serde(default)]
     gaming_key_mode: GamingKeyMode,
     #[serde(default)]
     g_key_profile_names: BTreeMap<GKeyProfile, String>,
-    #[serde(default = "default_true")]
-    enabled: bool,
-    #[serde(default)]
-    custom_name: Option<String>,
 }
 
 impl From<RawDeviceConfig> for DeviceConfig {
@@ -825,7 +824,6 @@ mod tests {
   "receiver:mouse:slot:2",
 ]"#,
         )?;
-
         assert_eq!(
             config.host_switch_targets,
             ["receiver:keyboard:slot:1", "receiver:mouse:slot:2"]
@@ -840,11 +838,9 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let missing: DeviceConfig = toml::from_str("")?;
         assert_eq!(missing.disabled_keys, None);
-
         let empty: DeviceConfig = toml::from_str("disabled_keys = []")?;
         assert_eq!(empty.disabled_keys, Some(BTreeSet::new()));
         assert!(toml::to_string(&empty)?.contains("disabled_keys = []"));
-
         let configured: DeviceConfig =
             toml::from_str("disabled_keys = [\"caps_lock\", \"windows_command\"]")?;
         assert_eq!(
@@ -859,8 +855,6 @@ mod tests {
         Ok(())
     }
 
-    /// Every device entry written before binding pages existed omits
-    /// `keypad_pages`, and must still load — as one page.
     #[test]
     fn a_device_without_keypad_pages_loads_with_one_page() -> Result<(), Box<dyn std::error::Error>>
     {

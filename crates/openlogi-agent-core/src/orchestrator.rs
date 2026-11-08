@@ -75,7 +75,7 @@ use devices::{
     FollowerCookieState, FollowerCookieWrite, RECONNECT_REAPPLY_CONFIRM_RETRIES,
     VOLATILE_REAPPLY_CONFIRM_RETRIES, assignments_changed, build_devices, bump_settings_epoch,
     carry_lifecycle_budgets, changed_follower_cookies, changed_force_sensing,
-    config_os_layout_target, configured_dpi, configured_force_sensing, configured_report_rate,
+    config_keeps_os_layout, configured_dpi, configured_force_sensing, configured_report_rate,
     configured_wheel_mode, host_switch_links, is_hidpp_device, main_wheel_divert,
     newly_kept_os_layouts, os_layout_appeared, os_layout_target, pick_current,
     plan_disabled_keys_recovery, plan_reapply, published_inventories, reconnect_follower_cookies,
@@ -1769,14 +1769,67 @@ impl Orchestrator {
         if let Some(write) = speed_write {
             self.write_pointer_speed(write);
         }
+        let compositor = openlogi_core::compositor::Compositor::detect();
         // The default Hyprland curve is a global pointing-device policy, not
         // a reason for a keyboard-only reconnect to change pointer settings.
-        apply_os_pointer_policy(
-            openlogi_core::compositor::Compositor::detect(),
-            is_pointing_device(dev),
-            self.config.os_pointer_accel(key),
-            self.config.os_pointer_speed(key),
+        let pointer_device = dev
+            .capabilities
+            .is_some_and(|caps| caps.pointer || caps.pointer_scaling);
+        let factor_opt = self.config.os_pointer_speed(key);
+        let accel_opt = self.config.os_pointer_accel(key);
+        let explicit_pointer_config = factor_opt.is_some() || accel_opt.is_some();
+        let use_curve = accel_opt.unwrap_or(
+            pointer_device && compositor == openlogi_core::compositor::Compositor::Hyprland,
         );
+        let is_hyprland = compositor == openlogi_core::compositor::Compositor::Hyprland;
+        if should_apply_os_pointer_settings(pointer_device, explicit_pointer_config, is_hyprland)
+            && (factor_opt.is_some() || (use_curve && is_hyprland))
+        {
+            let factor = factor_opt.unwrap_or(0.0);
+            if use_curve && is_hyprland {
+                let gain = (4.8 * (1.0 + factor as f64)).max(0.3);
+                let (_step, points) =
+                    openlogi_core::macos_accel::generate(1000.0, 120.0, 0.5, 64, gain);
+                let lut = openlogi_core::macos_accel::format_lut(0.5, &points);
+                let cmd = format!(
+                    "hyprctl eval \"hl.config({{input={{accel_profile='{}'}}}})\"; \
+                     hyprctl keyword input:accel_profile '{}'",
+                    lut, lut
+                );
+                if let Ok(mut c) = std::process::Command::new("sh").arg("-c").arg(cmd).spawn() {
+                    std::thread::spawn(move || {
+                        let _ = c.wait();
+                    });
+                }
+            } else if is_hyprland && !use_curve {
+                let cmd = "hyprctl eval \"hl.config({input={accel_profile='adaptive'}})\"; \
+                           hyprctl keyword input:accel_profile 'adaptive'"
+                    .to_string();
+                if let Ok(mut c) = std::process::Command::new("sh").arg("-c").arg(cmd).spawn() {
+                    std::thread::spawn(move || {
+                        let _ = c.wait();
+                    });
+                }
+                if let Some(f) = factor_opt
+                    && let Some(cmd) = openlogi_core::compositor::apply_pointer_speed(compositor, f)
+                {
+                    if let Ok(mut c) = std::process::Command::new(&cmd[0]).args(&cmd[1..]).spawn() {
+                        std::thread::spawn(move || {
+                            let _ = c.wait();
+                        });
+                    }
+                }
+            } else if let Some(cmd) =
+                openlogi_core::compositor::apply_pointer_speed(compositor, factor)
+                && factor_opt.is_some()
+            {
+                if let Ok(mut c) = std::process::Command::new(&cmd[0]).args(&cmd[1..]).spawn() {
+                    std::thread::spawn(move || {
+                        let _ = c.wait();
+                    });
+                }
+            }
+        }
         self.keep_os_layout(dev);
         let _ = self.shared.reapply_disabled_keys(&route);
         if let Some(capabilities) = dev.light_capabilities
@@ -1822,8 +1875,6 @@ impl Orchestrator {
 
     /// Put `dev`'s keyboard on the host OS's key layout when the config keeps
     /// it there. Writes only when the current slot holds another platform.
-    /// While the setting is off, the OS the keyboard is pinned to takes the
-    /// host OS's place.
     fn keep_os_layout(&self, dev: &AgentDevice) {
         if !dev.online {
             return;
@@ -2234,6 +2285,7 @@ impl Orchestrator {
         self.apply_changed_pointer_speeds(&previous);
         self.apply_changed_os_pointer_speeds(&previous);
         self.apply_enabled_os_layouts(&previous);
+
         let writes = changed_follower_cookies(
             &previous,
             &self.config,
@@ -2249,6 +2301,7 @@ impl Orchestrator {
     /// the system's pre-existing default value.
     fn apply_changed_os_pointer_speeds(&self, previous: &Config) {
         let compositor = openlogi_core::compositor::Compositor::detect();
+        let is_hyprland = compositor == openlogi_core::compositor::Compositor::Hyprland;
         for dev in self.devices.iter().filter(|dev| dev.online) {
             let key = &dev.config_key;
             if !self.config.device_enabled(key)
@@ -2257,26 +2310,70 @@ impl Orchestrator {
             {
                 continue;
             }
-            // The same policy a reconnect applies, so a saved change and a
-            // reconnect write the same profile for the same settings.
-            apply_os_pointer_policy(
-                compositor,
-                is_pointing_device(dev),
-                self.config.os_pointer_accel(key),
-                self.config.os_pointer_speed(key),
-            );
+            let use_curve = self.config.os_pointer_accel(key).unwrap_or(is_hyprland);
+            let speed_opt = self.config.os_pointer_speed(key);
+            let factor = speed_opt.unwrap_or(0.0);
+            if use_curve && is_hyprland {
+                let gain = (4.8 * (1.0 + factor as f64)).max(0.3);
+                let (_step, points) =
+                    openlogi_core::macos_accel::generate(1000.0, 120.0, 0.5, 64, gain);
+                let lut = openlogi_core::macos_accel::format_lut(0.5, &points);
+                let cmd = format!(
+                    "hyprctl eval \"hl.config({{input={{accel_profile='{}'}}}})\"; \
+                     hyprctl keyword input:accel_profile '{}'",
+                    lut, lut
+                );
+                if let Ok(mut c) = std::process::Command::new("sh").arg("-c").arg(cmd).spawn() {
+                    std::thread::spawn(move || {
+                        let _ = c.wait();
+                    });
+                }
+            } else if is_hyprland && !use_curve {
+                // Toggle off: restore adaptive profile.
+                let cmd = "hyprctl eval \"hl.config({input={accel_profile='adaptive'}})\"; \
+                           hyprctl keyword input:accel_profile 'adaptive'"
+                    .to_string();
+                if let Ok(mut c) = std::process::Command::new("sh").arg("-c").arg(cmd).spawn() {
+                    std::thread::spawn(move || {
+                        let _ = c.wait();
+                    });
+                }
+                // Also apply sensitivity if a factor is set.
+                if let Some(f) = speed_opt
+                    && let Some(cmd) = openlogi_core::compositor::apply_pointer_speed(compositor, f)
+                {
+                    if let Ok(mut c) = std::process::Command::new(&cmd[0]).args(&cmd[1..]).spawn() {
+                        std::thread::spawn(move || {
+                            let _ = c.wait();
+                        });
+                    }
+                }
+            } else if speed_opt.is_some()
+                && let Some(cmd) =
+                    openlogi_core::compositor::apply_pointer_speed(compositor, factor)
+            {
+                if let Ok(mut c) = std::process::Command::new(&cmd[0]).args(&cmd[1..]).spawn() {
+                    std::thread::spawn(move || {
+                        let _ = c.wait();
+                    });
+                }
+            }
         }
     }
-
     /// Put each keyboard whose "keep OS layout" just took effect — turned on,
     /// or its device re-enabled — on the host OS's layout. Turning it off
     /// leaves the keyboard's layout where it is, as in Logi Options+, and
     /// withdraws a layout write still queued for it.
-    /// A pin that is new or moved to another OS takes effect the same way, and
-    /// turning the setting off with an OS pinned moves the keyboard to it.
     fn apply_enabled_os_layouts(&self, previous: &Config) {
-        self.kept_os_layouts
-            .retain(|key, host| config_os_layout_target(&self.config, key) == Some(host));
+        self.kept_os_layouts.retain(|key, host| {
+            config_keeps_os_layout(&self.config, key)
+                || self
+                    .devices
+                    .iter()
+                    .find(|dev| dev.config_key == key)
+                    .and_then(|dev| os_layout_target(&self.config, dev))
+                    == Some(host)
+        });
         for dev in newly_kept_os_layouts(previous, &self.config, &self.devices) {
             self.keep_os_layout(dev);
         }
@@ -2416,6 +2513,14 @@ impl Orchestrator {
             .filter(|dev| dev.online)
             .filter_map(|dev| Some((dev, dev.route.as_ref()?, dev.light_capabilities?)))
     }
+}
+
+fn should_apply_os_pointer_settings(
+    pointer_device: bool,
+    explicit_config: bool,
+    is_hyprland: bool,
+) -> bool {
+    explicit_config || (pointer_device && is_hyprland)
 }
 
 /// One standalone-light write a config reload queues.
@@ -2591,127 +2696,6 @@ fn publish_arc_if_changed<T: PartialEq>(publication: &watch::Sender<Arc<T>>, val
         *current = Arc::new(value);
         true
     });
-}
-
-fn should_apply_os_pointer_settings(
-    pointer_device: bool,
-    explicit_config: bool,
-    is_hyprland: bool,
-) -> bool {
-    explicit_config || (pointer_device && is_hyprland)
-}
-
-/// Whether `dev` is a pointing device for the OS pointer policy. The HID++
-/// kind holds across reconnects, but `capabilities` can be unset or partial
-/// while the feature walk runs, so a reconnect must not change the policy
-/// because that walk has not finished. Capabilities still answer for a device
-/// of another kind that reports sensor speed control.
-fn is_pointing_device(dev: &AgentDevice) -> bool {
-    matches!(
-        dev.kind,
-        DeviceKind::Mouse | DeviceKind::Trackball | DeviceKind::Touchpad
-    ) || dev
-        .capabilities
-        .is_some_and(|caps| caps.pointer || caps.pointer_scaling)
-}
-
-/// The compositor write one device's OS pointer settings call for. Both the
-/// reconnect and the config-reload path decide through this, so the same saved
-/// settings always produce the same write.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OsPointerWrite {
-    /// Nothing: no policy applies to this device.
-    Nothing,
-    /// Hyprland's custom acceleration curve, its gain set by the factor.
-    Curve,
-    /// Hyprland's stock adaptive profile, plus the factor as sensitivity.
-    Adaptive,
-    /// The factor as sensitivity, on a compositor other than Hyprland.
-    Speed,
-}
-
-fn os_pointer_write(
-    accel_opt: Option<bool>,
-    pointing: bool,
-    factor_set: bool,
-    is_hyprland: bool,
-) -> OsPointerWrite {
-    let explicit = factor_set || accel_opt.is_some();
-    if !should_apply_os_pointer_settings(pointing, explicit, is_hyprland) {
-        return OsPointerWrite::Nothing;
-    }
-    match (is_hyprland, accel_opt.unwrap_or(pointing && is_hyprland)) {
-        (true, true) => OsPointerWrite::Curve,
-        (true, false) => OsPointerWrite::Adaptive,
-        (false, _) if factor_set => OsPointerWrite::Speed,
-        (false, _) => OsPointerWrite::Nothing,
-    }
-}
-
-/// Apply one device's OS pointer policy to the running compositor.
-fn apply_os_pointer_policy(
-    compositor: openlogi_core::compositor::Compositor,
-    pointing: bool,
-    accel_opt: Option<bool>,
-    factor_opt: Option<f32>,
-) {
-    let is_hyprland = compositor == openlogi_core::compositor::Compositor::Hyprland;
-    match os_pointer_write(accel_opt, pointing, factor_opt.is_some(), is_hyprland) {
-        OsPointerWrite::Nothing => {}
-        OsPointerWrite::Curve => {
-            set_hyprland_accel_profile(&hyprland_curve_profile(factor_opt.unwrap_or(0.0)));
-        }
-        OsPointerWrite::Adaptive => {
-            set_hyprland_accel_profile("adaptive");
-            if let Some(factor) = factor_opt {
-                spawn_pointer_speed(compositor, factor);
-            }
-        }
-        OsPointerWrite::Speed => {
-            if let Some(factor) = factor_opt {
-                spawn_pointer_speed(compositor, factor);
-            }
-        }
-    }
-}
-
-/// Hyprland's custom acceleration curve as a `custom` LUT. The gain follows
-/// the speed factor and is clamped so the bottom of the slider stays above zero.
-fn hyprland_curve_profile(factor: f32) -> String {
-    let gain = (4.8 * (1.0 + f64::from(factor))).max(0.3);
-    let (_step, points) = openlogi_core::macos_accel::generate(1000.0, 120.0, 0.5, 64, gain);
-    openlogi_core::macos_accel::format_lut(0.5, &points)
-}
-
-/// Set Hyprland's pointer acceleration profile on the running session. The
-/// profile is `adaptive` or a LUT from [`hyprland_curve_profile`].
-fn set_hyprland_accel_profile(profile: &str) {
-    spawn_detached(&[
-        "sh".to_string(),
-        "-c".to_string(),
-        format!(
-            "hyprctl eval \"hl.config({{input={{accel_profile='{profile}'}}}})\"; \
-             hyprctl keyword input:accel_profile '{profile}'"
-        ),
-    ]);
-}
-
-fn spawn_pointer_speed(compositor: openlogi_core::compositor::Compositor, factor: f32) {
-    if let Some(cmd) = openlogi_core::compositor::apply_pointer_speed(compositor, factor) {
-        spawn_detached(&cmd);
-    }
-}
-
-/// Run a command without blocking the caller; a helper thread reaps it.
-fn spawn_detached(args: &[String]) {
-    let Some((program, rest)) = args.split_first() else {
-        return;
-    };
-    if let Ok(mut child) = std::process::Command::new(program).args(rest).spawn() {
-        std::thread::spawn(move || {
-            let _ = child.wait();
-        });
-    }
 }
 
 #[cfg(test)]

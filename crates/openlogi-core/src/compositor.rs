@@ -22,7 +22,6 @@ pub enum Compositor {
 
 impl Compositor {
     /// Detect the running compositor from environment variables.
-    #[must_use]
     pub fn detect() -> Self {
         if std::env::var_os("WAYLAND_DISPLAY").is_some() {
             if let Ok(desktop) = std::env::var("XDG_CURRENT_DESKTOP") {
@@ -56,7 +55,6 @@ impl Compositor {
 
     /// The command to apply pointer speed for this compositor.
     /// Returns None if no command is known.
-    #[must_use]
     pub fn pointer_speed_command(&self, sensitivity: f32) -> Option<Vec<String>> {
         match self {
             // Hyprland ships two config parsers and only one accepts a runtime
@@ -105,7 +103,6 @@ impl Compositor {
 
 /// Generate the compositor command for a given sensitivity value.
 /// Returns None if the compositor is unknown or doesn't support pointer speed.
-#[must_use]
 pub fn apply_pointer_speed(compositor: Compositor, sensitivity: f32) -> Option<Vec<String>> {
     compositor.pointer_speed_command(sensitivity)
 }
@@ -144,7 +141,8 @@ mod apply_tests {
         ] {
             assert!(
                 c.pointer_speed_command(0.0).is_some(),
-                "{c:?} has no command",
+                "{:?} has no command",
+                c
             );
         }
     }

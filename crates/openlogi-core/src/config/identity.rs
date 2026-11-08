@@ -246,13 +246,6 @@ impl Config {
     }
 }
 
-/// Whether two copies of one scalar setting differ. The test is exact on
-/// purpose: both copies come from the same parsed TOML, so a difference is a
-/// real disagreement and never float rounding.
-fn values_differ<T: PartialEq>(canonical: &T, legacy: &T) -> bool {
-    canonical != legacy
-}
-
 /// Merge a legacy route-keyed entry into its device's canonical entry.
 ///
 /// A value the canonical side does not have is simply taken. A value both
@@ -317,11 +310,10 @@ pub(super) fn fold(device: &mut DeviceConfig, mut legacy: DeviceConfig, route_ke
     // `smooth_wheel` is a bare opt-in with no per-link slot: for the same
     // reason only a legacy `true` is evidence of a choice, so it carries over.
     device.smooth_wheel |= legacy.smooth_wheel;
-    // Handing the G-keys to OpenLogi is the same kind of bare opt-in.
+
     if legacy.g_key_owner == GKeyOwner::OpenLogi {
         device.g_key_owner = GKeyOwner::OpenLogi;
     }
-    // Only a mode the user picked is evidence; the default is never-set.
     if device.gaming_key_mode == GamingKeyMode::default() {
         device.gaming_key_mode = legacy.gaming_key_mode;
     }
@@ -334,7 +326,7 @@ pub(super) fn fold(device: &mut DeviceConfig, mut legacy: DeviceConfig, route_ke
         ($field:ident) => {
             match (&device.$field, legacy.$field) {
                 (None, Some(value)) => device.$field = Some(value),
-                (Some(ours), Some(theirs)) if values_differ(ours, &theirs) => {
+                (Some(ours), Some(theirs)) if *ours != theirs => {
                     tracing::warn!(
                         %route_key,
                         field = stringify!($field),
@@ -441,8 +433,8 @@ fn fold_maps(device: &mut DeviceConfig, legacy: &mut DeviceConfig, route_key: &s
     fold_map_field!(bindings);
     fold_map_field!(disabled_gestures);
     fold_map_field!(per_app_bindings);
-    fold_map_field!(camera_profiles);
     fold_map_field!(g_key_profile_names);
+    fold_map_field!(camera_profiles);
 }
 
 #[cfg(test)]

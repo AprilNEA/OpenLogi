@@ -787,19 +787,8 @@ fn pinned_os_layout(config: &Config, key: &str) -> Option<HostOs> {
     Some(HostOs { os, version: None })
 }
 
-/// The host platform `config` keeps the key layout of the device under `key`
-/// on, whatever the device supports: the host OS while the setting is on,
-/// else the OS it is pinned to.
-pub(super) fn config_os_layout_target(config: &Config, key: &str) -> Option<HostOs> {
-    if config_keeps_os_layout(config, key) {
-        HostOs::current()
-    } else {
-        pinned_os_layout(config, key)
-    }
-}
-
 /// The host platform `config` keeps `dev`'s key layout on: as
-/// [`config_os_layout_target`], for a keyboard whose platform software can set.
+/// [`os_layout_target`], for a keyboard whose platform software can set.
 pub(super) fn os_layout_target(config: &Config, dev: &AgentDevice) -> Option<HostOs> {
     if keeps_os_layout(config, dev) {
         HostOs::current()

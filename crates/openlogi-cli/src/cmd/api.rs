@@ -257,7 +257,31 @@ async fn execute(
                 "keep_os_layout": keep,
             }))
         }
-        ApiCommand::PointerSpeed { device, set } => pointer_speed(&device, set, save.as_mut()),
+        ApiCommand::PointerSpeed { device, set } => {
+            if let Some(factor) = set {
+                let Some(save) = save.as_mut() else {
+                    return Err(ApiError::new(
+                        "invalid_value",
+                        "pointer-speed changes an agent setting; add --save",
+                    ));
+                };
+                save.set_os_pointer_speed(factor);
+                Ok(json!({
+                    "device": device,
+                    "persistence": "not_saved",
+                    "os_pointer_speed": factor,
+                }))
+            } else {
+                let current = save
+                    .as_ref()
+                    .and_then(|s| s.os_pointer_speed())
+                    .unwrap_or(1.0);
+                Ok(json!({
+                    "device": device,
+                    "os_pointer_speed": current,
+                }))
+            }
+        }
         ApiCommand::ReportRate { device, set } => {
             report_rate(
                 client,
@@ -357,34 +381,6 @@ async fn dpi(
         "current": info.current,
         "supported": info.capabilities.values(),
     }))
-}
-
-/// `pointer-speed`: set or read this device's saved compositor factor. A read
-/// gives `null` while no factor is saved, because OpenLogi then leaves the
-/// system's own pointer sensitivity alone.
-fn pointer_speed(
-    device: &str,
-    set: Option<f32>,
-    save: Option<&mut Save>,
-) -> Result<Value, ApiError> {
-    match (set, save) {
-        (Some(factor), Some(save)) => {
-            save.set_os_pointer_speed(factor);
-            Ok(json!({
-                "device": device,
-                "persistence": "not_saved",
-                "os_pointer_speed": factor,
-            }))
-        }
-        (Some(_), None) => Err(ApiError::new(
-            "invalid_value",
-            "pointer-speed changes an agent setting; add --save",
-        )),
-        (None, save) => Ok(json!({
-            "device": device,
-            "os_pointer_speed": save.and_then(|save| save.os_pointer_speed()),
-        })),
-    }
 }
 
 async fn report_rate(

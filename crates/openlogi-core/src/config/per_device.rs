@@ -319,6 +319,13 @@ impl Config {
             .disabled_keys = Some(disabled_keys);
     }
 
+    /// Return `device_key` to unmanaged Disable Keys state.
+    pub fn clear_disabled_keys(&mut self, device_key: &str) {
+        if let Some(device) = self.devices.get_mut(device_key) {
+            device.disabled_keys = None;
+        }
+    }
+
     /// The physical device keys that should follow `keyboard_key` when its
     /// Easy-Switch channel changes.
     #[must_use]
@@ -351,14 +358,6 @@ impl Config {
                 .retain(|target| target != target_key);
         }
     }
-
-    /// Return `device_key` to unmanaged Disable Keys state.
-    pub fn clear_disabled_keys(&mut self, device_key: &str) {
-        if let Some(device) = self.devices.get_mut(device_key) {
-            device.disabled_keys = None;
-        }
-    }
-
     /// The SmartShift wheel config for `device_key`, or `None` if never set.
     #[must_use]
     pub fn smartshift(&self, device_key: &str) -> Option<SmartShift> {
@@ -381,8 +380,8 @@ impl Config {
             .fn_lock = Some(fn_lock);
     }
 
-    /// Whether the agent keeps `device_key`'s key layout on the host OS. On
-    /// unless the user turned it off, as in Logi Options+.
+    /// Whether the agent keeps `device_key`'s key layout on the host OS.
+    /// On unless the user turned it off, as in Logi Options+.
     #[must_use]
     pub fn keep_os_layout(&self, device_key: &str) -> bool {
         self.devices
@@ -404,15 +403,6 @@ impl Config {
     #[must_use]
     pub fn os_layout_pin(&self, device_key: &str) -> Option<PinnedOs> {
         self.devices.get(device_key).and_then(|d| d.os_layout_pin)
-    }
-
-    /// Record the OS `device_key`'s key layout is pinned to, or `None` to
-    /// clear the pin.
-    pub fn set_os_layout_pin(&mut self, device_key: &str, pin: Option<PinnedOs>) {
-        self.devices
-            .entry(device_key.to_string())
-            .or_default()
-            .os_layout_pin = pin;
     }
 
     /// The OS-level pointer speed factor for `device_key`, or `None` when the
@@ -450,6 +440,15 @@ impl Config {
             .os_pointer_accel = enabled;
     }
 
+    /// Record the OS `device_key`'s key layout is pinned to, or `None` to
+    /// clear the pin.
+    pub fn set_os_layout_pin(&mut self, device_key: &str, pin: Option<PinnedOs>) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .os_layout_pin = pin;
+    }
+
     /// The stored onboard memory of `device_key`.
     #[must_use]
     pub fn onboard_memory(&self, device_key: &str) -> Option<OnboardMemory> {
@@ -462,54 +461,6 @@ impl Config {
             .entry(device_key.to_string())
             .or_default()
             .onboard_memory = memory;
-    }
-
-    /// The persisted report rate for `device_key`, or `None` when the user
-    /// never chose one (the device keeps its own rate).
-    #[must_use]
-    pub fn report_rate(&self, device_key: &str) -> Option<ReportRate> {
-        self.devices.get(device_key).and_then(|d| d.report_rate)
-    }
-    /// Record the report rate for `device_key`; the agent re-applies it when
-    /// the device reconnects on a connection that lists it.
-    pub fn set_report_rate(&mut self, device_key: &str, rate: ReportRate) {
-        self.devices
-            .entry(device_key.to_string())
-            .or_default()
-            .report_rate = Some(rate);
-    }
-
-    /// The persisted pointer speed for `device_key`, or `None` when the user
-    /// never chose one (the mouse keeps its own speed).
-    #[must_use]
-    pub fn pointer_speed(&self, device_key: &str) -> Option<PointerSpeed> {
-        self.devices.get(device_key).and_then(|d| d.pointer_speed)
-    }
-
-    /// Record the pointer speed for `device_key`; the agent re-applies it
-    /// when the mouse reconnects.
-    pub fn set_pointer_speed(&mut self, device_key: &str, speed: PointerSpeed) {
-        self.devices
-            .entry(device_key.to_string())
-            .or_default()
-            .pointer_speed = Some(speed);
-    }
-
-    /// The persisted press force for `device_key`'s force-sensing button, or
-    /// `None` when the user never chose one (the device keeps its own force).
-    #[must_use]
-    pub fn force_sensing(&self, device_key: &str) -> Option<u16> {
-        self.devices.get(device_key).and_then(|d| d.force_sensing)
-    }
-
-    /// Record the press force for `device_key`'s force-sensing button; the
-    /// agent re-applies it, clamped into the device's range, when the device
-    /// reconnects.
-    pub fn set_force_sensing(&mut self, device_key: &str, force: u16) {
-        self.devices
-            .entry(device_key.to_string())
-            .or_default()
-            .force_sensing = Some(force);
     }
 
     /// Who runs `device_key`'s G1–G5.
@@ -538,7 +489,6 @@ impl Config {
             .map(|device| device.gaming_key_mode)
             .unwrap_or_default()
     }
-
     /// The name the user gave `device_key`'s G-key `profile`, if any.
     #[must_use]
     pub fn g_key_profile_name(&self, device_key: &str, profile: GKeyProfile) -> Option<&str> {
@@ -547,6 +497,20 @@ impl Config {
             .g_key_profile_names
             .get(&profile)
             .map(String::as_str)
+    }
+    /// The persisted report rate for `device_key`, or `None` when the user
+    /// never chose one (the device keeps its own rate).
+    #[must_use]
+    pub fn report_rate(&self, device_key: &str) -> Option<ReportRate> {
+        self.devices.get(device_key).and_then(|d| d.report_rate)
+    }
+    /// Record the report rate for `device_key`; the agent re-applies it when
+    /// the device reconnects on a connection that lists it.
+    pub fn set_report_rate(&mut self, device_key: &str, rate: ReportRate) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .report_rate = Some(rate);
     }
 
     /// Name `device_key`'s G-key `profile`, trimmed; a blank name removes it.
@@ -569,6 +533,38 @@ impl Config {
             .entry(device_key.to_string())
             .or_default()
             .gaming_key_mode = mode;
+    }
+
+    /// The persisted pointer speed for `device_key`, or `None` when the user
+    /// never chose one (the mouse keeps its own speed).
+    #[must_use]
+    pub fn pointer_speed(&self, device_key: &str) -> Option<PointerSpeed> {
+        self.devices.get(device_key).and_then(|d| d.pointer_speed)
+    }
+
+    /// Record the pointer speed for `device_key`; the agent re-applies it
+    /// when the mouse reconnects.
+    pub fn set_pointer_speed(&mut self, device_key: &str, speed: PointerSpeed) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .pointer_speed = Some(speed);
+    }
+
+    /// The persisted press force for `device_key`'s force-sensing button, or
+    /// `None` when the user never chose one (the device keeps its own force).
+    #[must_use]
+    pub fn force_sensing(&self, device_key: &str) -> Option<u16> {
+        self.devices.get(device_key).and_then(|d| d.force_sensing)
+    }
+
+    /// Record the press force for `device_key`'s force-sensing button; the
+    /// agent re-applies it, clamped into the device's range, when it reconnects.
+    pub fn set_force_sensing(&mut self, device_key: &str, force: u16) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .force_sensing = Some(force);
     }
 
     /// The G-Shift layer of `device_key`, if not empty.
@@ -821,7 +817,6 @@ mod tests {
     #[test]
     fn host_switch_target_edits_are_idempotent_and_ordered() {
         let mut config = Config::ephemeral();
-
         config.link_host_switch_target("keyboard", "mouse-b");
         config.link_host_switch_target("keyboard", "mouse-a");
         config.link_host_switch_target("keyboard", "mouse-b");
