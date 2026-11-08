@@ -1135,9 +1135,118 @@ fn a_drawable_colour_variant_keeps_its_renders_and_metadata() {
     let asset = resolver
         .resolve(&g502_lightspeed(2), None)
         .expect("the purple G502 LIGHTSPEED resolves");
+
     assert_eq!(
         asset.image_path,
         dir.join("58ee56b0-5ca6-4e7b-b764-2d1746094b78")
     );
+    let side = asset.side_view.as_ref().expect("the side view");
+    assert_eq!(
+        side.image_path,
+        dir.join("642c5810-f750-48db-99b1-9dc46f750908"),
+        "the variant's own side render, not the base model's"
+    );
     assert_eq!(first_front_marker_x(&asset), Some(535.0));
+}
+
+const G502X_PLUS_WHITE_FRONT: &str = "images/device/e0e9dacc-b5c0-4434-8b8d-410a7aa81d2f";
+const G502X_PLUS_WHITE_SIDE: &str = "images/device/22c9ac7a-43ed-48b7-8771-72ca4ae2a6bb";
+
+/// The `g502x_plus` depot as the catalog serves it (#2457): only `front.png`
+/// at the depot root, every manifest render under `images/device/`, and the
+/// variants keyed on the depot name rather than a model id.
+fn write_g502x_plus_depot(root: &Path, white_side_src: &str) -> PathBuf {
+    let dir = root.join("g502x_plus");
+    std::fs::create_dir_all(dir.join("images").join("device")).expect("create depot dirs");
+    std::fs::write(
+        dir.join("manifest.json"),
+        format!(
+            r#"{{"devices":[
+                {{"modelId":"g502x_plus","resources":[
+                    {{"key":"device_image","src":"images/device/85641870-0a46-49dc-ab7a-9a152e74d77a"}},
+                    {{"key":"device_side","src":"images/device/55d70c6f-0d74-4045-aed4-e450baa4eeff"}}]}},
+                {{"modelId":"g502x_plus_ext1","resources":[
+                    {{"key":"device_image","src":"{G502X_PLUS_WHITE_FRONT}"}},
+                    {{"key":"device_side","src":"{white_side_src}"}}]}}
+            ]}}"#
+        ),
+    )
+    .expect("write manifest");
+    std::fs::write(
+        dir.join("metadata.json"),
+        r#"{"images":[
+            {"key":"device_image","origin":{"width":1662,"height":2800},
+             "assignments":[{"slotId":"g502xplus_g1_m1","marker":{"x":540,"y":620}}]},
+            {"key":"device_side","origin":{"width":1157,"height":2800},
+             "assignments":[{"slotId":"g502xplus_g4_m1","marker":{"x":580,"y":1800}}]}
+        ]}"#,
+    )
+    .expect("write metadata");
+    std::fs::write(dir.join("front.png"), png_header(1662, 2800)).expect("write front");
+    for (name, width) in [
+        (G502X_PLUS_WHITE_FRONT, 1661),
+        (G502X_PLUS_WHITE_SIDE, 1153),
+    ] {
+        std::fs::write(dir.join(name), png_header(width, 2800)).expect("write variant render");
+    }
+    dir
+}
+
+fn g502x_plus_index() -> Index {
+    index_of(
+        "g502x_plus",
+        DeviceEntry {
+            model_id: "c095".into(),
+            model_ids: vec!["c095".into(), "4099".into()],
+            display_name: "G502 X PLUS".into(),
+            kind: "MOUSE".into(),
+            asset_path: "v1/devices/g502x_plus/".into(),
+            files: Vec::new(),
+        },
+    )
+}
+
+fn g502x_plus(extended_model_id: u8) -> DeviceModelInfo {
+    DeviceModelInfo {
+        model_ids: [0x4099, 0x0000, 0x0000],
+        extended_model_id,
+        ..bare_model()
+    }
+}
+
+/// #2457: the white G502 X PLUS drew the black `front.png` and no side view,
+/// because its renders sit under `images/device/` and its variants are keyed
+/// on the depot name.
+#[test]
+fn a_colour_variant_draws_its_renders_from_a_depot_sub_directory() {
+    let root = tempfile::tempdir().expect("create temp dir");
+    let dir = write_g502x_plus_depot(root.path(), G502X_PLUS_WHITE_SIDE);
+    let resolver = resolver_over(&[root.path()], Some(g502x_plus_index()));
+
+    let asset = resolver
+        .resolve(&g502x_plus(1), None)
+        .expect("the white G502 X PLUS resolves");
+
+    assert_eq!(
+        asset.hero_image_path,
+        Some(dir.join(G502X_PLUS_WHITE_FRONT))
+    );
+    assert_eq!(asset.image_path, dir.join(G502X_PLUS_WHITE_FRONT));
+    let side = asset.side_view.as_ref().expect("the side view");
+    assert_eq!(side.image_path, dir.join(G502X_PLUS_WHITE_SIDE));
+    assert_eq!((side.png_width, side.png_height), (1153, 2800));
+}
+
+#[test]
+fn a_manifest_sub_path_cannot_reach_outside_its_depot() {
+    let root = tempfile::tempdir().expect("create temp dir");
+    write_g502x_plus_depot(root.path(), "images/../../side.png");
+    std::fs::write(root.path().join("side.png"), png_header(1153, 2800)).expect("write escape");
+    let resolver = resolver_over(&[root.path()], Some(g502x_plus_index()));
+
+    let asset = resolver
+        .resolve(&g502x_plus(1), None)
+        .expect("the white G502 X PLUS resolves");
+
+    assert_eq!(asset.side_view, None);
 }
