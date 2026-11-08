@@ -36,8 +36,8 @@ impl Save {
                 device,
                 set: Some(_),
             }
-            | ApiCommand::OsLayout { device, .. } => device,
-            ApiCommand::PointerSpeed {
+            | ApiCommand::OsLayout { device, .. }
+            | ApiCommand::PointerSpeed {
                 device,
                 set: Some(_),
             } => device,

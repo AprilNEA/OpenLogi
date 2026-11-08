@@ -188,6 +188,10 @@ fn measured_without_os_layout(snapshot: &AgentSnapshot, route: &DeviceRoute) -> 
     })
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "dispatch maps every ApiCommand variant to its reply"
+)]
 async fn execute(
     client: &AgentClient,
     command: ApiCommand,
@@ -274,7 +278,7 @@ async fn execute(
             } else {
                 let current = save
                     .as_ref()
-                    .and_then(|s| s.os_pointer_speed())
+                    .and_then(persistence::Save::os_pointer_speed)
                     .unwrap_or(1.0);
                 Ok(json!({
                     "device": device,

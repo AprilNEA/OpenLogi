@@ -262,6 +262,10 @@ impl Config {
 /// before schema 5, so a route-keyed entry on disk cannot carry one — but
 /// [`Config::migrate_transport_scoped_keys`] folds two *renamed* entries that
 /// each already carry the route they were renamed out of.
+#[expect(
+    clippy::float_cmp,
+    reason = "fold_option_field compares scalar Option fields; an exact mismatch is the only trigger for the warning"
+)]
 pub(super) fn fold(device: &mut DeviceConfig, mut legacy: DeviceConfig, route_key: &str) {
     for (key, value) in std::mem::take(&mut legacy.links) {
         device.links.entry(key).or_insert(value);

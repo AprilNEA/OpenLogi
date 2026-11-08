@@ -1708,6 +1708,10 @@ impl Orchestrator {
     /// it, not `self.devices`, which still holds the previous inventory while
     /// [`Self::refresh_inventory`] runs: there `dev` and the keyboards that
     /// came online with it would still look offline.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "reapply sequence is one ordered list of per-setting writes"
+    )]
     fn reapply_volatile_settings(&self, dev: &AgentDevice, devices: &[AgentDevice]) {
         // A disabled device is left fully native — no writes of any kind.
         if !self.config.device_enabled(&dev.config_key) {
@@ -1787,14 +1791,13 @@ impl Orchestrator {
         {
             let factor = factor_opt.unwrap_or(0.0);
             if use_curve && is_hyprland {
-                let gain = (4.8 * (1.0 + factor as f64)).max(0.3);
+                let gain = (4.8 * (1.0 + f64::from(factor))).max(0.3);
                 let (_step, points) =
                     openlogi_core::macos_accel::generate(1000.0, 120.0, 0.5, 64, gain);
                 let lut = openlogi_core::macos_accel::format_lut(0.5, &points);
                 let cmd = format!(
-                    "hyprctl eval \"hl.config({{input={{accel_profile='{}'}}}})\"; \
-                     hyprctl keyword input:accel_profile '{}'",
-                    lut, lut
+                    "hyprctl eval \"hl.config({{input={{accel_profile='{lut}'}}}})\"; \
+                     hyprctl keyword input:accel_profile '{lut}'"
                 );
                 if let Ok(mut c) = std::process::Command::new("sh").arg("-c").arg(cmd).spawn() {
                     std::thread::spawn(move || {
@@ -1812,22 +1815,20 @@ impl Orchestrator {
                 }
                 if let Some(f) = factor_opt
                     && let Some(cmd) = openlogi_core::compositor::apply_pointer_speed(compositor, f)
+                    && let Ok(mut c) = std::process::Command::new(&cmd[0]).args(&cmd[1..]).spawn()
                 {
-                    if let Ok(mut c) = std::process::Command::new(&cmd[0]).args(&cmd[1..]).spawn() {
-                        std::thread::spawn(move || {
-                            let _ = c.wait();
-                        });
-                    }
-                }
-            } else if let Some(cmd) =
-                openlogi_core::compositor::apply_pointer_speed(compositor, factor)
-                && factor_opt.is_some()
-            {
-                if let Ok(mut c) = std::process::Command::new(&cmd[0]).args(&cmd[1..]).spawn() {
                     std::thread::spawn(move || {
                         let _ = c.wait();
                     });
                 }
+            } else if let Some(cmd) =
+                openlogi_core::compositor::apply_pointer_speed(compositor, factor)
+                && factor_opt.is_some()
+                && let Ok(mut c) = std::process::Command::new(&cmd[0]).args(&cmd[1..]).spawn()
+            {
+                std::thread::spawn(move || {
+                    let _ = c.wait();
+                });
             }
         }
         self.keep_os_layout(dev);
@@ -2314,14 +2315,13 @@ impl Orchestrator {
             let speed_opt = self.config.os_pointer_speed(key);
             let factor = speed_opt.unwrap_or(0.0);
             if use_curve && is_hyprland {
-                let gain = (4.8 * (1.0 + factor as f64)).max(0.3);
+                let gain = (4.8 * (1.0 + f64::from(factor))).max(0.3);
                 let (_step, points) =
                     openlogi_core::macos_accel::generate(1000.0, 120.0, 0.5, 64, gain);
                 let lut = openlogi_core::macos_accel::format_lut(0.5, &points);
                 let cmd = format!(
-                    "hyprctl eval \"hl.config({{input={{accel_profile='{}'}}}})\"; \
-                     hyprctl keyword input:accel_profile '{}'",
-                    lut, lut
+                    "hyprctl eval \"hl.config({{input={{accel_profile='{lut}'}}}})\"; \
+                     hyprctl keyword input:accel_profile '{lut}'"
                 );
                 if let Ok(mut c) = std::process::Command::new("sh").arg("-c").arg(cmd).spawn() {
                     std::thread::spawn(move || {
@@ -2341,22 +2341,20 @@ impl Orchestrator {
                 // Also apply sensitivity if a factor is set.
                 if let Some(f) = speed_opt
                     && let Some(cmd) = openlogi_core::compositor::apply_pointer_speed(compositor, f)
+                    && let Ok(mut c) = std::process::Command::new(&cmd[0]).args(&cmd[1..]).spawn()
                 {
-                    if let Ok(mut c) = std::process::Command::new(&cmd[0]).args(&cmd[1..]).spawn() {
-                        std::thread::spawn(move || {
-                            let _ = c.wait();
-                        });
-                    }
-                }
-            } else if speed_opt.is_some()
-                && let Some(cmd) =
-                    openlogi_core::compositor::apply_pointer_speed(compositor, factor)
-            {
-                if let Ok(mut c) = std::process::Command::new(&cmd[0]).args(&cmd[1..]).spawn() {
                     std::thread::spawn(move || {
                         let _ = c.wait();
                     });
                 }
+            } else if speed_opt.is_some()
+                && let Some(cmd) =
+                    openlogi_core::compositor::apply_pointer_speed(compositor, factor)
+                && let Ok(mut c) = std::process::Command::new(&cmd[0]).args(&cmd[1..]).spawn()
+            {
+                std::thread::spawn(move || {
+                    let _ = c.wait();
+                });
             }
         }
     }

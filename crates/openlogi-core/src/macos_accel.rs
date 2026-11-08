@@ -11,9 +11,9 @@ pub const GCUBIC: f64 = 7864.0 / 65536.0;
 /// Apple quartic gain coefficient.
 pub const GQUARTIC: f64 = 0.0 / 65536.0;
 /// Lower threshold where the curve switches from polynomial to linear.
-pub const T0: f64 = 465306.0 / 65536.0;
+pub const T0: f64 = 465_306.0 / 65_536.0;
 /// Upper threshold where the curve switches from linear to square-root.
-pub const T1: f64 = 1179648.0 / 65536.0;
+pub const T1: f64 = 1_179_648.0 / 65_536.0;
 /// Apple reference frame rate in Hz.
 pub const APPLE_FRAME_RATE: f64 = 67.0;
 /// Apple cursor scale factor.
@@ -56,6 +56,10 @@ pub fn apple_accel(q: f64) -> f64 {
 
 /// Generate `(step, points)` for a libinput custom accel profile.
 #[must_use]
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "count is a small LUT length, far below 2^52"
+)]
 pub fn generate(dpi: f64, report_rate: f64, step: f64, count: usize, gain: f64) -> (f64, Vec<f64>) {
     let mut points = Vec::with_capacity(count);
     for i in 0..count {
@@ -71,7 +75,7 @@ pub fn generate(dpi: f64, report_rate: f64, step: f64, count: usize, gain: f64) 
 /// Format points as a space-separated string for hyprctl.
 #[must_use]
 pub fn format_lut(step: f64, points: &[f64]) -> String {
-    let pts: Vec<String> = points.iter().map(|p| format!("{:.6}", p)).collect();
+    let pts: Vec<String> = points.iter().map(|p| format!("{p:.6}")).collect();
     format!("custom {} {}", step, pts.join(" "))
 }
 
@@ -124,7 +128,7 @@ mod tests {
     fn format_lut_prefix() {
         let (_, pts) = generate(1000.0, 120.0, 0.5, 64, 4.8);
         let s = format_lut(0.5, &pts);
-        assert!(s.starts_with("custom 0.5"), "got: {}", s);
+        assert!(s.starts_with("custom 0.5"), "got: {s}");
     }
 
     #[test]
@@ -139,7 +143,7 @@ mod tests {
     #[test]
     fn non_negative() {
         for i in 0..1000 {
-            let q = i as f64 * 0.01;
+            let q = f64::from(i) * 0.01;
             assert!(apple_accel(q) >= 0.0);
         }
     }
