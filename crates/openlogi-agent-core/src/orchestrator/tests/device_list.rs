@@ -205,6 +205,16 @@ fn units_of_a_model_do_not_take_the_settings_saved_under_its_model_key() {
 }
 
 #[test]
+fn build_devices_skips_a_receiver_device_whose_identity_was_never_read() {
+    // Its slot would give it a key, as the GUI lists it, but nothing the device
+    // reported says which device sits there, so no settings are applied to it.
+    let mut inventory = bolt_inventory([0xa3, 0x93, 0xca, 0xe0]);
+    inventory.paired[0].model_info = None;
+
+    assert!(build_devices(&Config::default(), &[inventory], &[]).is_empty());
+}
+
+#[test]
 fn build_devices_skips_a_device_whose_identity_was_never_read() {
     // No DeviceInformation answer at all: the agent has nothing to key on and
     // waits for the next probe rather than applying defaults.
