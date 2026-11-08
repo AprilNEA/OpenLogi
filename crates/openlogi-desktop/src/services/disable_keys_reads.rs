@@ -30,6 +30,9 @@ struct DisableKeysRead {
 }
 
 /// Whether hardware snapshots can describe the externally adopted file.
+///
+/// One fence for every keyboard. It meets each device's own transaction
+/// phase only in [`AppState::disable_keys_controls_enabled`].
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) enum ConfigReconciliation {
     /// No external adoption is waiting for an agent receipt.
@@ -37,7 +40,9 @@ pub(crate) enum ConfigReconciliation {
     Confirmed,
     /// Reload Retry can refresh and submit the file again.
     Required(DisableKeysError),
-    /// Only this receipt may release the shared write fence.
+    /// Only this receipt may release the shared write fence. An agent restart
+    /// does not abandon it: the IPC client holds the reload until a live agent
+    /// answers it, and that answer releases or fails the fence.
     Awaiting(ConfigReloadContext),
 }
 
