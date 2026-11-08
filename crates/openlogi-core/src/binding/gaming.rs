@@ -138,7 +138,6 @@ pub const G502_HERO: GamingLayout = GamingLayout {
     ],
     stock_dpi_presets: &[],
 };
-};
 
 /// A gaming mouse whose layout nobody has dumped. Its first five slots are
 /// the standard HID buttons, which the OS input hook remaps without host
