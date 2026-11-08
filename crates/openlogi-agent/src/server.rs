@@ -5,7 +5,7 @@
 //! The agent owns all device I/O, so the GUI never opens a device — it routes
 //! "apply now" / "read" commands here, and polls snapshots.
 
-mod backlight;
+pub(crate) mod backlight;
 mod haptic_restore;
 mod settings;
 
@@ -145,7 +145,7 @@ impl AgentServer {
                 // The "Show in menu bar" toggle too: install or remove the
                 // item now rather than at the next agent launch.
                 #[cfg(target_os = "macos")]
-                crate::tray::set_visible(show_in_menu_bar, app_icon, Arc::clone(&self.observable));
+                crate::tray::set_visible(show_in_menu_bar, app_icon);
                 // And the interface language: re-resolve the process locale.
                 // Both tray menus rebuild each time they open and pick it up
                 // alone.

@@ -534,3 +534,702 @@ fn the_battery_glyph_fills_to_the_nearest_quarter() {
     assert_eq!(level(BatteryLevel::Critical), BatteryFill::Empty);
     assert_eq!(level(BatteryLevel::Full), BatteryFill::Full);
 }
+
+mod controls {
+    //! What a device's submenu offers to change, and when it greys out.
+
+    use openlogi_agent_core::orchestrator::SettingError;
+    use openlogi_core::config::{
+        Config, ConfigError, DeviceEditError, SMARTSHIFT_AUTO_DISENGAGE_DEFAULT, SmartShift,
+        WheelMode,
+    };
+    use openlogi_core::device::{
+        Capabilities, ChangedOnLight, DeviceKind, LightCapabilities, LightState, LightValueRange,
+        LightValueUnit, PairedDevice, RawDeviceAddress, StandaloneDevice,
+    };
+    use openlogi_core::device_order::{DeviceStableId, PhysicalDeviceKey};
+    use openlogi_core::hid::{
+        BacklightChange, BacklightControls, BacklightMode, BacklightState, BacklightStatus,
+        DeviceRoute, DisableKeysMask, DisableKeysState, Dpi, LightCommand, SidetoneLevel,
+        SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus, SmartShiftThreshold,
+        TunableTorque, WriteError,
+    };
+    use openlogi_ipc::{AgentSnapshot, ObservedLight};
+
+    use super::super::{
+        CameraRow, Change, DeviceMemory, DeviceRow, Entry, Failure, Read, Reads, SeenCamera,
+        TrayMenu,
+    };
+    use super::{BOLT, paired, receiver, snapshot};
+
+    const MOUSE_KEY: &str = "unit:4f4c4401";
+    const UNIT: [u8; 4] = [0x4f, 0x4c, 0x44, 0x01];
+
+    /// A device of `kind` with `capabilities` in slot 1 of a Bolt receiver.
+    fn bolt_device(kind: DeviceKind, capabilities: Capabilities, online: bool) -> PairedDevice {
+        let mut device = paired(1, "MX Master 3S", UNIT, online);
+        device.kind = kind;
+        device.capabilities = Some(capabilities);
+        device
+    }
+
+    fn mouse(online: bool) -> PairedDevice {
+        let capabilities = Capabilities {
+            buttons: true,
+            pointer: true,
+            ..Capabilities::default()
+        };
+        bolt_device(DeviceKind::Mouse, capabilities, online)
+    }
+
+    fn row(device: PairedDevice, config: &Config) -> DeviceRow {
+        let mut snapshot = snapshot();
+        snapshot.inventory = vec![receiver(BOLT, "AA", vec![device])];
+        TrayMenu::new(&snapshot, config).devices[0].clone()
+    }
+
+    /// The key the agent writes a device's settings under on the link of
+    /// [`row`] — the route an offline device resolves through.
+    fn route_key(device: &PairedDevice) -> String {
+        let inventory = receiver(BOLT, "AA", vec![device.clone()]);
+        let route = DeviceRoute::for_slot(&inventory, device.slot);
+        DeviceStableId::from_parts(route.as_ref(), device.slot, None, UNIT).route_key()
+    }
+
+    /// Each choice as (title, checked, what clicking it changes).
+    fn choices(entries: &[Entry]) -> Vec<(String, bool, Option<Change>)> {
+        entries
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::Choice {
+                    title,
+                    checked,
+                    change,
+                } => Some((title.clone(), *checked, *change)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn choice(entries: &[Entry], title: &str) -> (bool, Option<Change>) {
+        choices(entries)
+            .into_iter()
+            .find(|(t, _, _)| t == title)
+            .map_or_else(
+                || panic!("no {title:?} in {entries:#?}"),
+                |(_, checked, change)| (checked, change),
+            )
+    }
+
+    fn notes(entries: &[Entry]) -> Vec<&str> {
+        entries
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::Note(note) => Some(note.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn headers(entries: &[Entry]) -> Vec<&str> {
+        entries
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::Header(header) => Some(header.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn dpi(value: u16) -> Dpi {
+        Dpi::new(value)
+    }
+
+    fn threshold(value: u8) -> SmartShiftThreshold {
+        SmartShiftThreshold::try_new(value).expect("a threshold")
+    }
+
+    #[test]
+    fn an_online_mouse_checks_the_dpi_it_reads_back_and_the_saved_one_until_then() {
+        let mut config = Config::default();
+        config.set_dpi_presets(MOUSE_KEY, vec![dpi(800), dpi(1600), dpi(3200)]);
+        config.set_dpi(MOUSE_KEY, dpi(1600));
+        let row = row(mouse(true), &config);
+        assert!(row.reads().dpi && row.reads().wheel);
+
+        let mut memory = DeviceMemory {
+            reading_now: true,
+            ..DeviceMemory::default()
+        };
+        let entries = row.entries(&memory);
+        assert_eq!(notes(&entries), ["Reading…"]);
+        assert_eq!(
+            choices(&entries)[..3],
+            [
+                ("800 DPI".to_owned(), false, Some(Change::Dpi(dpi(800)))),
+                ("1600 DPI".to_owned(), true, Some(Change::Dpi(dpi(1600)))),
+                ("3200 DPI".to_owned(), false, Some(Change::Dpi(dpi(3200)))),
+            ]
+        );
+        assert_eq!(
+            choice(&entries, "Managed by OpenLogi"),
+            (true, Some(Change::Managed(false)))
+        );
+        assert!(
+            !headers(&entries).contains(&"Wheel mode"),
+            "a wheel neither saved nor read may not exist"
+        );
+
+        // The mouse's own DPI button moved it on from what the config holds.
+        memory.reading_now = false;
+        memory.reading.dpi = Read::Value(dpi(3200));
+        let entries = row.entries(&memory);
+        assert!(choice(&entries, "3200 DPI").0);
+        assert!(!choice(&entries, "1600 DPI").0);
+        assert!(notes(&entries).is_empty());
+
+        memory.reading.dpi = Read::Value(dpi(1000));
+        let entries = row.entries(&memory);
+        assert!(
+            choices(&entries)
+                .iter()
+                .take(3)
+                .all(|(_, checked, _)| !checked)
+        );
+        assert_eq!(notes(&entries), ["Current: 1000 DPI"]);
+    }
+
+    #[test]
+    fn a_mouse_without_presets_shows_its_dpi_and_the_way_to_set_presets() {
+        let row = row(mouse(true), &Config::default());
+        let memory = DeviceMemory {
+            reading: super::super::Reading {
+                dpi: Read::Value(dpi(1200)),
+                ..Default::default()
+            },
+            ..DeviceMemory::default()
+        };
+        let entries = row.entries(&memory);
+        assert_eq!(headers(&entries)[0], "DPI presets");
+        assert!(entries.contains(&Entry::Note("Current: 1200 DPI".to_owned())));
+        assert!(entries.contains(&Entry::Open {
+            title: "Set Presets…".to_owned(),
+            link: row.settings.clone(),
+        }));
+        assert!(
+            !choices(&entries)
+                .iter()
+                .any(|(title, ..)| title.ends_with("DPI")),
+            "no DPI to pick from"
+        );
+    }
+
+    #[test]
+    fn an_offline_mouse_changes_the_dpi_and_wheel_it_gets_at_reconnect() {
+        let device = mouse(false);
+        let mut config = Config::default();
+        let key = PhysicalDeviceKey::parse(MOUSE_KEY).expect("a key");
+        // Asleep, the mouse reads no identity: its route finds its settings.
+        config.adopt_route(&key, &route_key(&device), None);
+        config.set_dpi_presets(MOUSE_KEY, vec![dpi(800), dpi(1600)]);
+        config.set_dpi(MOUSE_KEY, dpi(1600));
+        config.set_smartshift(
+            MOUSE_KEY,
+            SmartShift {
+                mode: WheelMode::Ratchet,
+                auto_disengage: SmartShiftAutoDisengage::Threshold(threshold(20)),
+                tunable_torque: None,
+            },
+        );
+        let row = row(device, &config);
+        assert!(!row.reads().any(), "an offline device answers no read");
+
+        // What it read before it went to sleep is not what it gets back.
+        let mut memory = DeviceMemory::default();
+        memory.reading.dpi = Read::Value(dpi(800));
+        let entries = row.entries(&memory);
+        assert_eq!(
+            notes(&entries),
+            ["Changes are saved now and apply when it reconnects."]
+        );
+        assert_eq!(
+            choice(&entries, "1600 DPI"),
+            (true, Some(Change::Dpi(dpi(1600))))
+        );
+        assert!(!choice(&entries, "800 DPI").0);
+        assert!(choice(&entries, "SmartShift").0);
+        assert_eq!(
+            choice(&entries, "Free spin").1,
+            Some(Change::Wheel(SmartShiftStatus {
+                mode: SmartShiftMode::Free,
+                auto_disengage: SmartShiftAutoDisengage::Threshold(threshold(20)),
+                tunable_torque: None,
+            }))
+        );
+        assert!(choice(&entries, "Managed by OpenLogi").1.is_some());
+    }
+
+    #[test]
+    fn the_wheel_choices_keep_the_torque_and_a_speed_smartshift_can_save() {
+        let row = row(mouse(true), &Config::default());
+        let torque = TunableTorque::try_new(70).expect("a torque");
+        let wheel = |mode, auto_disengage| SmartShiftStatus {
+            mode,
+            auto_disengage,
+            tunable_torque: Some(torque),
+        };
+        let entries_for = |status| {
+            let mut memory = DeviceMemory::default();
+            memory.reading.wheel = status;
+            row.entries(&memory)
+        };
+
+        let permanent = wheel(SmartShiftMode::Ratchet, SmartShiftAutoDisengage::Permanent);
+        let entries = entries_for(Read::Value(permanent));
+        assert!(choice(&entries, "Ratchet").0);
+        assert!(!choice(&entries, "SmartShift").0);
+        assert_eq!(
+            choice(&entries, "SmartShift").1,
+            Some(Change::Wheel(wheel(
+                SmartShiftMode::Ratchet,
+                SmartShiftAutoDisengage::Threshold(SMARTSHIFT_AUTO_DISENGAGE_DEFAULT),
+            ))),
+            "a permanent ratchet has no speed to release at"
+        );
+
+        let free = wheel(
+            SmartShiftMode::Free,
+            SmartShiftAutoDisengage::Threshold(threshold(30)),
+        );
+        let entries = entries_for(Read::Value(free));
+        assert!(choice(&entries, "Free spin").0);
+        assert_eq!(
+            choice(&entries, "SmartShift").1,
+            Some(Change::Wheel(wheel(
+                SmartShiftMode::Ratchet,
+                SmartShiftAutoDisengage::Threshold(threshold(30)),
+            )))
+        );
+        assert_eq!(
+            choice(&entries, "Ratchet").1,
+            Some(Change::Wheel(permanent))
+        );
+
+        // Below the floor a config can hold, which would refuse the save.
+        let twitchy = wheel(
+            SmartShiftMode::Ratchet,
+            SmartShiftAutoDisengage::Threshold(threshold(4)),
+        );
+        let entries = entries_for(Read::Value(twitchy));
+        assert!(choice(&entries, "SmartShift").0);
+        assert_eq!(
+            choice(&entries, "Free spin").1,
+            Some(Change::Wheel(wheel(
+                SmartShiftMode::Free,
+                SmartShiftAutoDisengage::Threshold(SMARTSHIFT_AUTO_DISENGAGE_DEFAULT),
+            )))
+        );
+
+        let unsupported = Read::of(Err::<SmartShiftStatus, _>(WriteError::FeatureUnsupported {
+            feature_hex: 0x2111,
+        }));
+        assert!(!headers(&entries_for(unsupported)).contains(&"Wheel mode"));
+    }
+
+    fn keyboard(online: bool) -> PairedDevice {
+        let capabilities = Capabilities {
+            fn_lock: true,
+            backlight: true,
+            disable_keys: true,
+            ..Capabilities::default()
+        };
+        bolt_device(DeviceKind::Keyboard, capabilities, online)
+    }
+
+    fn backlight(enabled: bool, mode: BacklightMode) -> BacklightState {
+        BacklightState {
+            enabled,
+            mode,
+            status: BacklightStatus::PermanentManual,
+            current_level: 3,
+            nb_levels: 8,
+            power_save: false,
+            controls: BacklightControls::AUTOMATIC | BacklightControls::LEVEL,
+            duration: None,
+        }
+    }
+
+    #[test]
+    fn a_keyboard_greys_out_what_it_has_not_read_and_toggles_what_it_has() {
+        let mut config = Config::default();
+        config.set_fn_lock(MOUSE_KEY, true);
+        let row = row(keyboard(true), &config);
+        let reads = row.reads();
+        assert_eq!(
+            reads,
+            Reads {
+                fn_lock: true,
+                backlight: true,
+                disabled_keys: true,
+                ..Reads::default()
+            },
+            "a keyboard reads what it has, and nothing of a mouse's"
+        );
+
+        let mut memory = DeviceMemory {
+            reading_now: true,
+            ..DeviceMemory::default()
+        };
+        let entries = row.entries(&memory);
+        assert_eq!(notes(&entries), ["Reading…"]);
+        assert_eq!(
+            choice(&entries, "Fn Lock"),
+            (true, None),
+            "the saved Fn lock"
+        );
+        assert_eq!(choice(&entries, "Backlight").1, None);
+        assert_eq!(choice(&entries, "Automatic brightness").1, None);
+        assert!(
+            !headers(&entries).contains(&"Disabled keys"),
+            "which keys it can disable is the keyboard's to say"
+        );
+
+        // Caps Lock and an unknown key are disabled; the keyboard also
+        // supports Insert, and nothing else this version knows.
+        let unknown = DisableKeysMask::from_bits_retain(0x80);
+        let fresh = super::super::Reading {
+            fn_lock: Read::Value(false),
+            backlight: Read::Value(backlight(true, BacklightMode::PermanentManual)),
+            disabled_keys: Read::Value(DisableKeysState {
+                supported: DisableKeysMask::CAPS_LOCK | DisableKeysMask::INSERT | unknown,
+                disabled: DisableKeysMask::CAPS_LOCK | unknown,
+            }),
+            // Not asked for: a stale value the merge must keep.
+            dpi: Read::Failed,
+            ..Default::default()
+        };
+        memory.reading.dpi = Read::Value(dpi(800));
+        memory.reading.merge(reads, fresh);
+        memory.reading_now = false;
+        assert_eq!(memory.reading.dpi, Read::Value(dpi(800)));
+        let entries = row.entries(&memory);
+        assert!(notes(&entries).is_empty());
+        assert_eq!(
+            choice(&entries, "Fn Lock"),
+            (false, Some(Change::FnLock(true)))
+        );
+        assert_eq!(
+            choice(&entries, "Backlight"),
+            (
+                true,
+                Some(Change::Backlight(BacklightChange::Enabled(false)))
+            )
+        );
+        assert_eq!(
+            choice(&entries, "Automatic brightness"),
+            (
+                false,
+                Some(Change::Backlight(BacklightChange::Automatic(true)))
+            )
+        );
+        let keys: Vec<_> = choices(&entries)
+            .into_iter()
+            .filter(|(title, ..)| title == "Caps Lock" || title == "Insert" || title == "Num Lock")
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                (
+                    "Caps Lock".to_owned(),
+                    true,
+                    Some(Change::DisabledKeys(unknown))
+                ),
+                (
+                    "Insert".to_owned(),
+                    false,
+                    Some(Change::DisabledKeys(
+                        DisableKeysMask::CAPS_LOCK | DisableKeysMask::INSERT | unknown
+                    ))
+                ),
+            ],
+            "only the keys it supports, each toggled alone"
+        );
+    }
+
+    /// A keyboard that answered: Fn lock off, its backlight on and held, and
+    /// Caps Lock and an unknown key disabled, with Insert disableable too.
+    fn read_keyboard() -> (DeviceRow, DeviceMemory, DisableKeysMask) {
+        let row = row(keyboard(true), &Config::default());
+        let unknown = DisableKeysMask::from_bits_retain(0x80);
+        let mut memory = DeviceMemory::default();
+        memory.reading.fn_lock = Read::Value(false);
+        memory.reading.backlight = Read::Value(backlight(true, BacklightMode::PermanentManual));
+        memory.reading.disabled_keys = Read::Value(DisableKeysState {
+            supported: DisableKeysMask::CAPS_LOCK | DisableKeysMask::INSERT | unknown,
+            disabled: DisableKeysMask::CAPS_LOCK | unknown,
+        });
+        (row, memory, unknown)
+    }
+
+    #[test]
+    fn a_keyboard_change_shows_at_once_and_greys_out_offline() {
+        let (row, mut memory, unknown) = read_keyboard();
+        // A change made from the menu shows at the next opening, before the
+        // keyboard is read again.
+        let mut changed = memory;
+        changed.reading.record(Change::FnLock(true));
+        changed
+            .reading
+            .record(Change::DisabledKeys(DisableKeysMask::INSERT | unknown));
+        changed
+            .reading
+            .record(Change::Backlight(BacklightChange::Enabled(false)));
+        let entries = row.entries(&changed);
+        assert!(choice(&entries, "Fn Lock").0);
+        assert!(!choice(&entries, "Caps Lock").0);
+        assert!(choice(&entries, "Insert").0);
+        assert!(!choice(&entries, "Backlight").0);
+
+        // A dark backlight has no brightness to automate.
+        memory.reading.backlight = Read::Value(backlight(false, BacklightMode::Automatic));
+        let entries = row.entries(&memory);
+        assert_eq!(choice(&entries, "Automatic brightness"), (false, None));
+
+        // Offline, what it last read still shows, greyed out.
+        let offline = super::super::DeviceRow {
+            state: super::super::DeviceState::Offline(None),
+            ..row.clone()
+        };
+        let entries = offline.entries(&memory);
+        assert!(
+            choices(&entries)
+                .iter()
+                .filter(|(title, ..)| title != "Managed by OpenLogi")
+                .all(|(.., change)| change.is_none())
+        );
+        assert_eq!(
+            choice(&entries, "Managed by OpenLogi").1,
+            Some(Change::Managed(false)),
+            "saved, so it changes offline"
+        );
+        assert_eq!(
+            notes(&entries),
+            ["Changes are saved now and apply when it reconnects."]
+        );
+    }
+
+    #[test]
+    fn a_headset_offers_five_sidetone_levels_while_it_answers() {
+        let capabilities = Capabilities {
+            sidetone: true,
+            ..Capabilities::default()
+        };
+        let headset = bolt_device(DeviceKind::Headset, capabilities, true);
+        let row = row(headset, &Config::default());
+        let mut memory = DeviceMemory::default();
+        memory.reading.sidetone = Read::Value(SidetoneLevel::clamped(50));
+        let entries = row.entries(&memory);
+        let level = |percent| Some(Change::Sidetone(SidetoneLevel::clamped(percent)));
+        assert_eq!(
+            choices(&entries),
+            [
+                ("Off".to_owned(), false, level(0)),
+                ("25%".to_owned(), false, level(25)),
+                ("50%".to_owned(), true, level(50)),
+                ("75%".to_owned(), false, level(75)),
+                ("100%".to_owned(), false, level(100)),
+            ],
+            "a headset is not managed, so sidetone is all it offers"
+        );
+
+        memory.reading.sidetone = Read::Failed;
+        let entries = row.entries(&memory);
+        assert_eq!(notes(&entries), ["Couldn't read the device."]);
+        assert!(
+            choices(&entries)
+                .iter()
+                .all(|(.., change)| change.is_none())
+        );
+    }
+
+    /// A Litra Glow, plugged in.
+    fn litra() -> StandaloneDevice {
+        StandaloneDevice {
+            address: RawDeviceAddress {
+                vendor_id: 0x046d,
+                product_id: 0xc900,
+                usage_page: 0xff43,
+                usage_id: 0x0202,
+                identity: "serial:litra01".to_owned(),
+            },
+            display_name: "Litra Glow".to_owned(),
+            manufacturer: None,
+            serial_number: Some("LITRA01".to_owned()),
+            unit_id: [0; 4],
+            kind: DeviceKind::Light,
+            online: true,
+            capabilities: None,
+            light_capabilities: None,
+            driver_id: "litra".to_owned(),
+            registry_model_id: None,
+        }
+    }
+
+    #[test]
+    fn a_light_offers_power_and_the_presets_its_range_can_show() {
+        let light = litra();
+        let capabilities = LightCapabilities {
+            power: true,
+            brightness: Some(
+                LightValueRange::new(20, 250, 1, LightValueUnit::Lumens).expect("a range"),
+            ),
+            // A light no warmer than 5000 K: warm and neutral land on one stop.
+            temperature: Some(
+                LightValueRange::new(5000, 6500, 100, LightValueUnit::Kelvin).expect("a range"),
+            ),
+            color: false,
+            zones: false,
+        };
+        let observed = |on| ObservedLight {
+            route: light.route(),
+            state: LightState {
+                capabilities,
+                on,
+                brightness: Some(193),
+                temperature_kelvin: Some(5000),
+                brightness_limit: None,
+            },
+            changed_on_light: ChangedOnLight::default(),
+        };
+        let row_with = |light: &StandaloneDevice, on| {
+            let mut snapshot: AgentSnapshot = snapshot();
+            snapshot.standalone = vec![light.clone()];
+            snapshot.lights = vec![observed(on)];
+            TrayMenu::new(&snapshot, &Config::default()).devices[0].clone()
+        };
+        let command = |command| Some(Change::Light(command));
+
+        let lit = row_with(&light, true).entries(&DeviceMemory::default());
+        let item = |title: &str, checked, command| {
+            (title.to_owned(), checked, Some(Change::Light(command)))
+        };
+        assert_eq!(
+            choices(&lit),
+            [
+                item("Light On", true, LightCommand::Power(false)),
+                item("25%", false, LightCommand::BrightnessPercent(25)),
+                item("50%", false, LightCommand::BrightnessPercent(50)),
+                item("75%", true, LightCommand::BrightnessPercent(75)),
+                item("100%", false, LightCommand::BrightnessPercent(100)),
+                item("Cool 6500 K", false, LightCommand::TemperatureKelvin(6500)),
+                item(
+                    "Neutral 5000 K",
+                    true,
+                    LightCommand::TemperatureKelvin(5000)
+                ),
+            ]
+        );
+
+        let dark = row_with(&light, false).entries(&DeviceMemory::default());
+        assert_eq!(
+            choice(&dark, "Light On"),
+            (false, command(LightCommand::Power(true)))
+        );
+        assert!(
+            choices(&dark)
+                .iter()
+                .skip(1)
+                .all(|(.., change)| change.is_none()),
+            "a dark light has no brightness or colour to change"
+        );
+        assert_eq!(
+            choice(&dark, "75%"),
+            (true, None),
+            "what it comes back on at"
+        );
+
+        let unplugged = StandaloneDevice {
+            online: false,
+            light_capabilities: Some(capabilities),
+            ..light.clone()
+        };
+        let entries = row_with(&unplugged, true).entries(&DeviceMemory::default());
+        assert_eq!(
+            choices(&entries).len(),
+            7,
+            "the light's controls, greyed out"
+        );
+        assert!(
+            choices(&entries)
+                .iter()
+                .all(|(.., change)| change.is_none())
+        );
+        assert!(!row_with(&unplugged, true).reads().any());
+    }
+
+    #[test]
+    fn a_change_that_did_not_take_says_why_once() {
+        let conflict = SettingError::NotSaved(ConfigError::Conflict {
+            path: openlogi_core::paths::CONFIG_FILE.into(),
+        });
+        assert_eq!(Failure::of(&conflict), Failure::Conflict);
+        assert_eq!(
+            Failure::of(&SettingError::Refused(DeviceEditError::LinkOverride)),
+            Failure::LinkOverride
+        );
+        assert_eq!(
+            Failure::of(&SettingError::Write(WriteError::DeviceNotFound)),
+            Failure::Device
+        );
+        assert_eq!(
+            Failure::of(&SettingError::Refused(DeviceEditError::NoConfigKey)),
+            Failure::NotSaved
+        );
+
+        let row = row(mouse(true), &Config::default());
+        let memory = DeviceMemory {
+            failure: Some(Failure::LinkOverride),
+            ..DeviceMemory::default()
+        };
+        assert_eq!(
+            notes(&row.entries(&memory))[0],
+            "Not saved: this connection has its own value. Change it in OpenLogi."
+        );
+    }
+
+    #[test]
+    fn cameras_list_by_name_and_open_their_preview_or_their_settings() {
+        let mut config = Config::default();
+        config.set_device_custom_name("camera:046d:0893", Some("Desk cam".to_owned()));
+        let cameras = [
+            SeenCamera {
+                name: "StreamCam".to_owned(),
+                key: "camera:046d:0893".to_owned(),
+                in_use: true,
+            },
+            SeenCamera {
+                name: "C920".to_owned(),
+                key: "camera:046d:082d:serial:ab12".to_owned(),
+                in_use: false,
+            },
+        ];
+        let rows = CameraRow::all(&cameras, &config);
+        assert_eq!(
+            rows.iter()
+                .map(|row| (row.name.as_str(), row.state_text()))
+                .collect::<Vec<_>>(),
+            [
+                ("C920", "Not in Use".to_owned()),
+                ("Desk cam", "In Use".to_owned())
+            ]
+        );
+        assert_eq!(
+            rows[0].preview.to_url(),
+            "openlogi://preview-camera/camera:046d:082d:serial:ab12"
+        );
+        assert_eq!(
+            rows[1].settings.to_url(),
+            "openlogi://open-camera/camera:046d:0893"
+        );
+    }
+}

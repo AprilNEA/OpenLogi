@@ -19,9 +19,9 @@ impl AgentServer {
     /// The device settings the menu-bar item changes: written to the device,
     /// saved in `config.toml` and reloaded, with the effect of the same
     /// change in the settings app.
-    #[expect(
-        dead_code,
-        reason = "the menu-bar item's device controls are the first caller"
+    #[cfg_attr(
+        not(target_os = "macos"),
+        expect(dead_code, reason = "only the macOS menu-bar item has device controls")
     )]
     pub fn device_settings(&self) -> DeviceSettings<Self> {
         DeviceSettings::new(

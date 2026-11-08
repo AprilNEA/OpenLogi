@@ -13,6 +13,15 @@
 //! the one thing pushed: the core marks it when something needs the user
 //! ([`watch_attention`]).
 //!
+//! A device's submenu also changes its settings. Opening it shows what the
+//! tray last read from the device, starts a fresh read on the core's runtime,
+//! and fills in the answer when it lands, while the submenu is open. A click
+//! runs its change on the core the same way — through the layer the IPC
+//! handlers call, not the IPC — and the submenu shows a change that did not
+//! take the next time it opens. Webcams are listed from a scan on a blocking
+//! thread, refreshed each time the menu opens; the scan reads metadata only, so
+//! the agent never asks for the Camera permission.
+//!
 //! GUI-directed actions open [`DeeplinkCommand`] `openlogi://` URLs which macOS
 //! delivers to the GUI via Apple Events — works for both cold start (app
 //! launched then URL delivered) and warm reactivation (URL delivered to the
@@ -31,6 +40,7 @@
 )]
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use dispatch2::DispatchQueue;
@@ -40,28 +50,44 @@ use objc2::{
     AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel,
 };
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSColor, NSEventModifierFlags, NSImage, NSMenu,
-    NSMenuDelegate, NSMenuItem, NSRunningApplication, NSStatusItem, NSWorkspace,
-    NSWorkspaceSessionDidBecomeActiveNotification, NSWorkspaceSessionDidResignActiveNotification,
+    NSApplication, NSApplicationActivationPolicy, NSColor, NSControlStateValueOff,
+    NSControlStateValueOn, NSEventModifierFlags, NSImage, NSMenu, NSMenuDelegate, NSMenuItem,
+    NSRunningApplication, NSStatusItem, NSWorkspace, NSWorkspaceSessionDidBecomeActiveNotification,
+    NSWorkspaceSessionDidResignActiveNotification,
 };
 use objc2_foundation::{NSNotification, NSObjectProtocol, NSString};
 use openlogi_agent_core::observable::ObservableState;
+use openlogi_agent_core::orchestrator::SharedHandles;
 use openlogi_core::brand::{self, DeeplinkCommand};
 use openlogi_core::config::{AppIcon, Config};
 use openlogi_core::device::{BatteryAttention, BatteryInfo, DeviceKind};
-use openlogi_hid::DeviceIoSignal;
+use openlogi_hid::{DeviceIoSignal, DeviceRoute, WriteError};
 use openlogi_ipc::Observation;
 use rust_i18n::t;
 use tokio::sync::watch;
 use tracing::{info, warn};
 
 use crate::activity_macos::{self, ActivityGate};
+use crate::server::{self, AgentServer};
 use crate::shutdown::{self, ShutdownRequestSender};
 use crate::status_item::{self, Trailing, TrailingTitles};
 use crate::tray_model::{
-    AppRow, BatteryFill, Detail, DeviceRow, FlowRow, Issue, Permission, TrayMenu, battery_text,
+    AppRow, BatteryFill, CameraRow, Change, Detail, DeviceMemory, DeviceRow, Entry, Failure,
+    FlowRow, Issue, Permission, Read, Reading, Reads, SeenCamera, TrayMenu, battery_text,
     is_charging, needs_attention,
 };
+
+/// What the menu needs from the async core, handed over when the agent arms.
+#[derive(Clone)]
+pub(crate) struct Backend {
+    /// The agent state the menu is built from.
+    pub(crate) observable: Arc<ObservableState>,
+    /// The core's runtime, where every device read and write runs.
+    pub(crate) runtime: tokio::runtime::Handle,
+    /// The IPC server, whose device settings and backlight writes the menu
+    /// shares.
+    pub(crate) server: AgentServer,
+}
 
 /// The installed menu-bar item, which a later config reload restyles or
 /// removes, plus the target its menu and menu items only weakly reference.
@@ -69,9 +95,11 @@ struct TrayState {
     item: Retained<NSStatusItem>,
     /// The app icon whose glyph the item shows.
     icon: AppIcon,
-    /// Never read: held so the menu's delegate and the items' action target
-    /// live exactly as long as the item.
-    _target: Retained<MenuTarget>,
+    /// The item's menu, rebuilt when a camera scan changes the list.
+    menu: Retained<NSMenu>,
+    /// The menu's delegate and the items' action target, held so it lives
+    /// exactly as long as the item.
+    target: Retained<MenuTarget>,
 }
 
 thread_local! {
@@ -91,6 +119,13 @@ thread_local! {
     /// Whether the icon carries its attention mark. Kept apart from [`TRAY`]
     /// so an item installed later starts with the current mark.
     static ATTENTION: Cell<bool> = const { Cell::new(false) };
+    /// What an item installed by a later reload is built from.
+    static BACKEND: RefCell<Option<Backend>> = const { RefCell::new(None) };
+    /// What the menu remembers of each device, so a submenu opens on the
+    /// last reading instead of waiting for the device.
+    static MEMORY: RefCell<HashMap<DeviceRoute, DeviceMemory>> = RefCell::default();
+    /// The webcams the last scan found, and whether a scan is under way.
+    static CAMERAS: RefCell<(Vec<SeenCamera>, bool)> = const { RefCell::new((Vec::new(), false)) };
 }
 
 /// The menu-bar glyph for `icon`: a monochrome template the system tints for
@@ -173,16 +208,17 @@ pub async fn watch_attention(mut changes: watch::Receiver<Observation>) {
 /// Show or hide the menu-bar item to match the "Show in menu bar" setting,
 /// after a config reload — so the toggle applies without an agent restart.
 /// Same shape as [`set_icon`]: the work hops to the main queue. Installing
-/// an already-shown item or removing a hidden one is a no-op. `observable` is
-/// the state an installed item's menu is built from.
-pub fn set_visible(show: bool, app_icon: AppIcon, observable: Arc<ObservableState>) {
+/// an already-shown item or removing a hidden one is a no-op.
+pub fn set_visible(show: bool, app_icon: AppIcon) {
     DispatchQueue::main().exec_async(move || {
         let Some(mtm) = MainThreadMarker::new() else {
             return;
         };
         let installed = TRAY.with_borrow(Option::is_some);
         if show && !installed {
-            install_status_item(mtm, app_icon, observable);
+            if let Some(backend) = BACKEND.with_borrow(Clone::clone) {
+                install_status_item(mtm, app_icon, backend);
+            }
         } else if !show && let Some(state) = TRAY.take() {
             status_item::remove_status_item(&state.item);
             info!("menu-bar item removed");
@@ -224,11 +260,14 @@ impl SessionTarget {
 }
 
 struct MenuTargetIvars {
-    /// The agent state the menu is built from.
-    observable: Arc<ObservableState>,
+    /// What the menu is built from, and where its reads and writes run.
+    backend: Backend,
     /// What each row built from [`TrayMenu`] does when clicked, indexed by
     /// the row's tag. Refilled with the menu.
     actions: RefCell<Vec<Action>>,
+    /// Each device submenu of the current menu, with the row it was built
+    /// for. Refilled with the menu.
+    submenus: RefCell<Vec<(Retained<NSMenu>, DeviceRow)>>,
 }
 
 /// What clicking a row built from [`TrayMenu`] does.
@@ -240,6 +279,8 @@ enum Action {
     Pane(Permission),
     /// Show the log directory in Finder.
     ShowLogs,
+    /// Make this change to the device at this route.
+    Change(DeviceRoute, Change),
 }
 
 define_class!(
@@ -287,25 +328,46 @@ define_class!(
     // which `MenuTarget` subclasses.
     unsafe impl NSObjectProtocol for MenuTarget {}
 
-    // SAFETY: the one method implemented matches the protocol's
-    // `menuNeedsUpdate:` signature, and `MenuTarget` is main-thread-only, as
+    // SAFETY: both methods match the protocol's `menuNeedsUpdate:` and
+    // `menuDidClose:` signatures, and `MenuTarget` is main-thread-only, as
     // the protocol requires.
     unsafe impl NSMenuDelegate for MenuTarget {
-        // AppKit calls this just before the menu opens, so the rebuild picks
-        // up the state and the locale of that moment.
+        // AppKit calls this just before a menu opens, so the rebuild picks
+        // up the state and the locale of that moment. A device's submenu
+        // asks its device for a fresh reading at the same time.
         #[unsafe(method(menuNeedsUpdate:))]
         fn menu_needs_update(&self, menu: &NSMenu) {
-            menu.removeAllItems();
-            populate_menu(menu, self);
+            if let Some(row) = self.row_of(menu) {
+                self.read(&row);
+                fill_device_menu(menu, self, &row);
+            } else {
+                scan_cameras(&self.ivars().backend.runtime);
+                menu.removeAllItems();
+                populate_menu(menu, self);
+            }
+        }
+
+        // A change that did not take is said once: the submenu that showed
+        // it forgets it as it closes.
+        #[unsafe(method(menuDidClose:))]
+        fn menu_did_close(&self, menu: &NSMenu) {
+            if let Some(route) = self.row_of(menu).and_then(|row| row.route) {
+                MEMORY.with_borrow_mut(|memory| {
+                    if let Some(device) = memory.get_mut(&route) {
+                        device.failure = None;
+                    }
+                });
+            }
         }
     }
 );
 
 impl MenuTarget {
-    fn new(mtm: MainThreadMarker, observable: Arc<ObservableState>) -> Retained<Self> {
+    fn new(mtm: MainThreadMarker, backend: Backend) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(MenuTargetIvars {
-            observable,
+            backend,
             actions: RefCell::default(),
+            submenus: RefCell::default(),
         });
         // SAFETY: `init` initializes our freshly-allocated NSObject subclass and
         // returns it (the two-phase construction objc2's `define_class!` uses).
@@ -339,9 +401,205 @@ impl MenuTarget {
                 Permission::InputMonitoring => openlogi_permissions::Permission::InputMonitoring,
             }),
             Some(Action::ShowLogs) => show_logs(),
+            Some(Action::Change(route, change)) => self.change(route, change),
             None => warn!(tag, "menu-bar item with no action"),
         }
     }
+
+    /// The device row `menu` is the submenu of, or `None` for the menu
+    /// itself.
+    fn row_of(&self, menu: &NSMenu) -> Option<DeviceRow> {
+        self.ivars()
+            .submenus
+            .borrow()
+            .iter()
+            .find(|(submenu, _)| std::ptr::eq(Retained::as_ptr(submenu), menu))
+            .map(|(_, row)| row.clone())
+    }
+
+    /// Read `row`'s device on the core, unless a read is under way, and
+    /// refill its submenus with the answer.
+    fn read(&self, row: &DeviceRow) {
+        let reads = row.reads();
+        let Some(route) = row.route.clone().filter(|_| reads.any()) else {
+            return;
+        };
+        let started = MEMORY.with_borrow_mut(|memory| {
+            let device = memory.entry(route.clone()).or_default();
+            !std::mem::replace(&mut device.reading_now, true)
+        });
+        if !started {
+            return;
+        }
+        let shared = self.ivars().backend.server.shared.clone();
+        self.ivars().backend.runtime.spawn(async move {
+            let fresh = Box::pin(read_device(&shared, &route, reads)).await;
+            DispatchQueue::main().exec_async(move || {
+                MEMORY.with_borrow_mut(|memory| {
+                    let device = memory.entry(route.clone()).or_default();
+                    device.reading.merge(reads, fresh);
+                    device.reading_now = false;
+                });
+                refill(&route);
+            });
+        });
+    }
+
+    /// Make `change` to the device at `route` on the core, then remember it
+    /// — or why it did not take — for the next opening of its submenu.
+    fn change(&self, route: DeviceRoute, change: Change) {
+        let server = self.ivars().backend.server.clone();
+        self.ivars().backend.runtime.spawn(async move {
+            let result = apply(&server, &route, change).await;
+            DispatchQueue::main().exec_async(move || {
+                MEMORY.with_borrow_mut(|memory| {
+                    let device = memory.entry(route.clone()).or_default();
+                    match result {
+                        Ok(()) => {
+                            device.reading.record(change);
+                            device.failure = None;
+                        }
+                        Err(failure) => device.failure = Some(failure),
+                    }
+                });
+                refill(&route);
+            });
+        });
+    }
+}
+
+/// Read what `reads` asks of the device at `route`, all at once.
+async fn read_device(shared: &SharedHandles, route: &DeviceRoute, reads: Reads) -> Reading {
+    async fn when<T>(wanted: bool, read: impl Future<Output = Result<T, WriteError>>) -> Read<T> {
+        if wanted {
+            Read::of(read.await)
+        } else {
+            Read::Unread
+        }
+    }
+    let (dpi, wheel, fn_lock, backlight, disabled_keys, sidetone) = tokio::join!(
+        when(reads.dpi, async {
+            shared.read_dpi(route).await.map(|info| info.current)
+        }),
+        when(reads.wheel, shared.read_smartshift(route)),
+        when(reads.fn_lock, async {
+            shared.read_fn_lock(route).await.map(|state| state.fn_lock)
+        }),
+        when(reads.backlight, shared.read_backlight(route)),
+        when(reads.disabled_keys, shared.read_disable_keys(route)),
+        when(reads.sidetone, shared.read_sidetone(route)),
+    );
+    Reading {
+        dpi,
+        wheel,
+        fn_lock,
+        backlight,
+        disabled_keys,
+        sidetone,
+    }
+}
+
+/// Make `change` to the device at `route` as the settings app would: saved
+/// settings through the agent's device settings, the backlight and sidetone,
+/// which the device keeps itself, on the device alone.
+async fn apply(server: &AgentServer, route: &DeviceRoute, change: Change) -> Result<(), Failure> {
+    let settings = server.device_settings();
+    let saved = match change {
+        Change::Dpi(dpi) => settings.set_dpi(route, dpi).await,
+        Change::Wheel(status) => settings.set_smartshift(route, status).await,
+        Change::Managed(managed) => settings.set_enabled(route, managed).await,
+        Change::FnLock(fn_lock) => settings.set_fn_lock(route, fn_lock).await,
+        Change::DisabledKeys(disabled) => settings.set_disabled_keys(route, disabled).await,
+        Change::Light(command) => settings.set_light(route, command).await,
+        Change::Backlight(backlight) => {
+            let orchestrator = Arc::clone(&server.orchestrator);
+            return server::backlight::write(
+                orchestrator,
+                &server.shared,
+                route.clone(),
+                backlight,
+            )
+            .await
+            .map(drop)
+            .map_err(|error| {
+                warn!(%route, %error, "menu-bar backlight change failed");
+                Failure::Device
+            });
+        }
+        Change::Sidetone(level) => {
+            return server
+                .shared
+                .set_sidetone(route, level)
+                .await
+                .map(drop)
+                .map_err(|error| {
+                    warn!(%route, %error, "menu-bar sidetone change failed");
+                    Failure::Device
+                });
+        }
+    };
+    saved.map_err(|error| {
+        warn!(%route, %error, ?change, "menu-bar setting change failed");
+        Failure::of(&error)
+    })
+}
+
+/// Refill every submenu of the device at `route` from what the menu now
+/// remembers of it — while it is open, too.
+fn refill(route: &DeviceRoute) {
+    let Some(target) = TRAY.with_borrow(|state| state.as_ref().map(|state| state.target.clone()))
+    else {
+        return;
+    };
+    let submenus: Vec<_> = target
+        .ivars()
+        .submenus
+        .borrow()
+        .iter()
+        .filter(|(_, row)| row.route.as_ref() == Some(route))
+        .cloned()
+        .collect();
+    for (submenu, row) in submenus {
+        fill_device_menu(&submenu, &target, &row);
+    }
+}
+
+/// Scan for webcams on a blocking thread of the core, unless a scan is under
+/// way, and rebuild the menu when the list changed. AVFoundation's device
+/// list and its in-use flag are metadata: no capture, so no Camera prompt.
+fn scan_cameras(runtime: &tokio::runtime::Handle) {
+    let started = CAMERAS.with_borrow_mut(|(_, scanning)| !std::mem::replace(scanning, true));
+    if !started {
+        return;
+    }
+    runtime.spawn_blocking(|| {
+        let cameras = openlogi_camera::enumerate_cameras();
+        let in_use = openlogi_camera::cameras_in_use();
+        let seen: Vec<SeenCamera> = cameras
+            .into_iter()
+            .map(|camera| SeenCamera {
+                in_use: in_use.contains(&camera.unique_id),
+                key: camera.config_key(),
+                name: camera.name,
+            })
+            .collect();
+        DispatchQueue::main().exec_async(move || {
+            let changed = CAMERAS.with_borrow_mut(|(cameras, scanning)| {
+                *scanning = false;
+                let changed = *cameras != seen;
+                *cameras = seen;
+                changed
+            });
+            if changed {
+                TRAY.with_borrow(|state| {
+                    if let Some(state) = state.as_ref() {
+                        state.menu.removeAllItems();
+                        populate_menu(&state.menu, &state.target);
+                    }
+                });
+            }
+        });
+    });
 }
 
 fn open_url(url: &str) {
@@ -415,16 +673,18 @@ fn gui_is_running() -> bool {
 /// tokio core still does all the work). A later config reload flips it live
 /// through [`set_visible`], and hands the menu the new config through
 /// [`set_config`].
-/// `observable` is the agent state the menu is built from.
-/// `device_io_signal` is the hardware gate; it opens only while the Mac is in
-/// a full wake and this login session owns the console (`activity_macos`).
+/// `backend` is what the menu is built from and where its reads and writes
+/// run. `device_io_signal` is the hardware gate; it opens only while the Mac
+/// is in a full wake and this login session owns the console
+/// (`activity_macos`).
 pub fn run_app_loop(
     config: Arc<Config>,
-    observable: Arc<ObservableState>,
+    backend: Backend,
     device_io_signal: DeviceIoSignal,
     shutdown_tx: ShutdownRequestSender,
 ) -> ! {
     SHUTDOWN_TX.with_borrow_mut(|slot| *slot = Some(shutdown_tx));
+    BACKEND.set(Some(backend.clone()));
     let show_in_menu_bar = config.app_settings.show_in_menu_bar;
     let app_icon = config.app_settings.app_icon;
     CONFIG.set(config);
@@ -444,7 +704,7 @@ pub fn run_app_loop(
     // `TRAY` keeps the status item (which retains its menu) and the target
     // the menu and its items only weakly reference alive past `run()`.
     if show_in_menu_bar {
-        install_status_item(mtm, app_icon, observable);
+        install_status_item(mtm, app_icon, backend);
     }
 
     // AppKit documents that an app launched into an inactive session receives
@@ -501,8 +761,10 @@ fn install_session_observer(gate: Arc<ActivityGate>) -> Retained<SessionTarget> 
 /// reference alive until [`set_visible`] removes it.
 ///
 /// The menu starts empty: its delegate fills it each time it is about to open.
-fn install_status_item(mtm: MainThreadMarker, app_icon: AppIcon, observable: Arc<ObservableState>) {
-    let target = MenuTarget::new(mtm, observable);
+/// The first camera scan starts here, so the first opening lists them.
+fn install_status_item(mtm: MainThreadMarker, app_icon: AppIcon, backend: Backend) {
+    scan_cameras(&backend.runtime);
+    let target = MenuTarget::new(mtm, backend);
     let status_item = status_item::create_status_item();
     let menu = status_item::new_menu(mtm);
     menu.setDelegate(Some(ProtocolObject::from_ref(&*target)));
@@ -510,7 +772,8 @@ fn install_status_item(mtm: MainThreadMarker, app_icon: AppIcon, observable: Arc
     let state = TrayState {
         item: status_item,
         icon: app_icon,
-        _target: target,
+        menu,
+        target,
     };
     draw_icon(&state, mtm);
     TRAY.set(Some(state));
@@ -522,9 +785,13 @@ fn install_status_item(mtm: MainThreadMarker, app_icon: AppIcon, observable: Arc
 /// locale, each item sending its action to `target`.
 fn populate_menu(menu: &NSMenu, target: &MenuTarget) {
     let mtm = target.mtm();
-    let snapshot = target.ivars().observable.snapshot();
-    let model = CONFIG.with_borrow(|config| TrayMenu::new(&snapshot, config));
+    let snapshot = target.ivars().backend.observable.snapshot();
+    let (model, cameras) = CONFIG.with_borrow(|config| {
+        let cameras = CAMERAS.with_borrow(|(cameras, _)| CameraRow::all(cameras, config));
+        (TrayMenu::new(&snapshot, config), cameras)
+    });
     target.ivars().actions.borrow_mut().clear();
+    target.ivars().submenus.borrow_mut().clear();
     // Every trailing part of this menu ends on one right edge.
     let mut titles = TrailingTitles::default();
 
@@ -536,7 +803,7 @@ fn populate_menu(menu: &NSMenu, target: &MenuTarget) {
     }
 
     menu.addItem(&status_item::section_header(mtm, &t!("device.devices")));
-    if model.devices.is_empty() {
+    if model.devices.is_empty() && cameras.is_empty() {
         menu.addItem(&status_item::info_item(
             mtm,
             &t!("device.no_devices_connected"),
@@ -553,6 +820,15 @@ fn populate_menu(menu: &NSMenu, target: &MenuTarget) {
         titles.push(&link, row.name.clone(), Trailing::text(row.link.text()));
         alternate(&link, NSEventModifierFlags::Option);
         menu.addItem(&link);
+    }
+    for camera in &cameras {
+        let item = camera_item(target, camera);
+        titles.push(
+            &item,
+            camera.name.clone(),
+            Trailing::text(camera.state_text()),
+        );
+        menu.addItem(&item);
     }
     status_item::add_separator(menu, mtm);
 
@@ -686,8 +962,8 @@ fn issue_item(
     item
 }
 
-/// The row for one device, with its submenu: what the menu knows about it,
-/// then the way to its settings.
+/// The row for one device, with its submenu, which fills itself each time it
+/// opens ([`fill_device_menu`]).
 fn device_item(target: &MenuTarget, row: &DeviceRow) -> Retained<NSMenuItem> {
     let mtm = target.mtm();
     let item = NSMenuItem::new(mtm);
@@ -696,13 +972,91 @@ fn device_item(target: &MenuTarget, row: &DeviceRow) -> Retained<NSMenuItem> {
         item.setImage(Some(&image));
     }
     let submenu = status_item::new_menu(mtm);
+    submenu.setDelegate(Some(ProtocolObject::from_ref(target)));
+    fill_device_menu(&submenu, target, row);
+    target
+        .ivars()
+        .submenus
+        .borrow_mut()
+        .push((submenu.clone(), row.clone()));
+    item.setSubmenu(Some(&submenu));
+    item
+}
+
+/// Fill a device's empty or stale `submenu`: what the menu knows about the
+/// device, what it can change as the menu remembers it, then the way to its
+/// settings.
+fn fill_device_menu(submenu: &NSMenu, target: &MenuTarget, row: &DeviceRow) {
+    let mtm = target.mtm();
+    submenu.removeAllItems();
     for line in row.info() {
         submenu.addItem(&status_item::info_item(mtm, &line));
     }
-    status_item::add_separator(&submenu, mtm);
+    let memory = row
+        .route
+        .as_ref()
+        .and_then(|route| MEMORY.with_borrow(|memory| memory.get(route).copied()))
+        .unwrap_or_default();
+    let entries = row.entries(&memory);
+    if !entries.is_empty() {
+        status_item::add_separator(submenu, mtm);
+    }
+    for entry in entries {
+        let item = match entry {
+            Entry::Header(title) => status_item::section_header(mtm, &title),
+            Entry::Note(text) => status_item::info_item(mtm, &text),
+            Entry::Choice {
+                title,
+                checked,
+                change,
+            } => {
+                let item = match (change, &row.route) {
+                    (Some(change), Some(route)) => {
+                        target.action_item(&title, Action::Change(route.clone(), change))
+                    }
+                    _ => status_item::info_item(mtm, &title),
+                };
+                item.setState(if checked {
+                    NSControlStateValueOn
+                } else {
+                    NSControlStateValueOff
+                });
+                item
+            }
+            Entry::Open { title, link } => target.action_item(&title, Action::Open(link)),
+            Entry::Separator => {
+                status_item::add_separator(submenu, mtm);
+                continue;
+            }
+        };
+        submenu.addItem(&item);
+    }
+    status_item::add_separator(submenu, mtm);
     submenu.addItem(&target.action_item(
         &t!("tray.open_device_settings"),
         Action::Open(row.settings.clone()),
+    ));
+}
+
+/// The row for one webcam, with its submenu: whether it is in use, then the
+/// ways to its preview and its settings.
+fn camera_item(target: &MenuTarget, camera: &CameraRow) -> Retained<NSMenuItem> {
+    let mtm = target.mtm();
+    let item = NSMenuItem::new(mtm);
+    item.setTitle(&NSString::from_str(&camera.name));
+    if let Some(image) = status_item::symbol(kind_symbol(DeviceKind::Camera), None) {
+        item.setImage(Some(&image));
+    }
+    let submenu = status_item::new_menu(mtm);
+    submenu.addItem(&status_item::info_item(mtm, &camera.state_text()));
+    status_item::add_separator(&submenu, mtm);
+    submenu.addItem(&target.action_item(
+        &t!("tray.open_camera_preview"),
+        Action::Open(camera.preview.clone()),
+    ));
+    submenu.addItem(&target.action_item(
+        &t!("tray.open_device_settings"),
+        Action::Open(camera.settings.clone()),
     ));
     item.setSubmenu(Some(&submenu));
     item

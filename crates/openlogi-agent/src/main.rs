@@ -136,7 +136,8 @@ fn main() {
         // The tray waits for the core to declare the agent *armed*: a dormant
         // agent (launch_at_login off, started at login, no client yet) must
         // not put an icon in the menu bar only to vanish seconds later. Arming
-        // hands over the state the menu is built from. A dropped sender means
+        // hands over the state the menu is built from and the core its device
+        // reads and writes run on. A dropped sender means
         // the core exited without arming — fall through and let the process
         // end.
         let (armed_tx, armed_rx) = std::sync::mpsc::channel();
@@ -149,8 +150,8 @@ fn main() {
             warn!(error = %e, "could not spawn the agent core thread; exiting");
             return;
         }
-        if let Ok(observable) = armed_rx.recv() {
-            tray::run_app_loop(tray_config, observable, device_io_signal, shutdown_tx);
+        if let Ok(backend) = armed_rx.recv() {
+            tray::run_app_loop(tray_config, backend, device_io_signal, shutdown_tx);
         }
     }
     #[cfg(not(target_os = "macos"))]
