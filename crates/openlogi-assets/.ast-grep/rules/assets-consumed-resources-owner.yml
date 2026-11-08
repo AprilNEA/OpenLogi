@@ -1,0 +1,51 @@
+# Owner: openlogi_assets::manifest — which depot manifest resources OpenLogi
+# draws or reads, and so which files the per-device sync downloads
+# (DepotManifest::consumed_srcs_for) and the offline bundle ships
+# (DepotManifest::consumed_srcs).
+id: assets-consumed-resources-owner
+language: rust
+severity: error
+message: Which manifest resources OpenLogi consumes is openlogi_assets::manifest's; ask DepotManifest::consumed_srcs_for (one variant) or consumed_srcs (every variant) instead of listing resource keys here.
+note: |
+  The per-device sync listed the keys it downloads while the bundle picked
+  files by name pattern, so an offline build left out every render a G HUB
+  manifest names by path (#2459). See "Single source of truth" in AGENTS.md.
+files:
+  - crates/**/*.rs
+ignores:
+  - crates/openlogi-assets/src/manifest.rs
+  - "**/tests.rs"
+  - "**/tests/**"
+rule:
+  all:
+    - any:
+        # A key list: `for key in ["device_image", "device_side", …]`.
+        - kind: array_expression
+          all:
+            - has:
+                kind: string_literal
+                regex: '^"device_image"$'
+            - has:
+                kind: string_literal
+                regex: '^"(device_buttons_image|device_side|device_camera_image|image_metadata)"$'
+        # A key match: `"device_image" | "device_side" => …`.
+        - kind: or_pattern
+          not:
+            inside:
+              kind: or_pattern
+          all:
+            - has:
+                stopBy: end
+                kind: string_literal
+                regex: '^"device_image"$'
+            - has:
+                stopBy: end
+                kind: string_literal
+                regex: '^"(device_buttons_image|device_side|device_camera_image|image_metadata)"$'
+    - not:
+        inside:
+          kind: mod_item
+          stopBy: end
+          has:
+            field: name
+            regex: '^tests$'

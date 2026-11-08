@@ -28,9 +28,11 @@
 //! }
 //! ```
 //!
-//! Only `device_image` is consumed today — that's the PNG the GUI
-//! renders. The rest of the schema is parsed permissively so additional
-//! fields don't break older clients.
+//! OpenLogi consumes five resources: the front, buttons, side and camera
+//! renders and the hotspot metadata. [`DepotManifest::consumed_srcs_for`]
+//! names the files one variant needs, [`DepotManifest::consumed_srcs`] the
+//! files every variant needs. The rest of the schema is parsed permissively
+//! so additional fields don't break older clients.
 
 use std::path::Path;
 
@@ -38,6 +40,18 @@ use serde::Deserialize;
 
 use crate::error::AssetError;
 use crate::http;
+
+/// The resource keys whose `src` OpenLogi draws or reads. The per-device
+/// sync downloads these for the connected variant and the offline bundle
+/// ships them for every variant, so both ask [`DepotManifest`] instead of
+/// listing keys themselves.
+const CONSUMED_KEYS: [&str; 5] = [
+    "device_image",
+    "device_buttons_image",
+    "device_side",
+    "device_camera_image",
+    "image_metadata",
+];
 
 /// Top-level `manifest.json` document.
 #[derive(Debug, Deserialize)]
@@ -104,6 +118,42 @@ impl DepotManifest {
     ) -> Option<&str> {
         self.resource_for(&variant_model_id(base_model_id, ext), resource_key)
     }
+
+    /// The files one colour variant draws or reads: for each consumed
+    /// resource, the `src` of the first base in `bases` whose `ext` variant
+    /// names it. `bases` is every model id the depot answers to, in priority
+    /// order, because a manifest is keyed on whichever id Logi authored it
+    /// against. Empty when no base knows the variant.
+    #[must_use]
+    pub fn consumed_srcs_for<S: AsRef<str>>(&self, bases: &[S], ext: u8) -> Vec<&str> {
+        let mut srcs = Vec::new();
+        for key in CONSUMED_KEYS {
+            let src = bases
+                .iter()
+                .find_map(|base| self.resource_for_variant(base.as_ref(), ext, key));
+            if let Some(src) = src
+                && !srcs.contains(&src)
+            {
+                srcs.push(src);
+            }
+        }
+        srcs
+    }
+
+    /// Every file any variant of this depot draws or reads, once each, in
+    /// manifest order. An offline bundle has to carry all of them to draw
+    /// every variant without the network.
+    #[must_use]
+    pub fn consumed_srcs(&self) -> Vec<&str> {
+        let mut srcs = Vec::new();
+        for resource in self.devices.iter().flat_map(|d| &d.resources) {
+            let src = resource.src.as_str();
+            if CONSUMED_KEYS.contains(&resource.key.as_str()) && !srcs.contains(&src) {
+                srcs.push(src);
+            }
+        }
+        srcs
+    }
 }
 
 /// Build the variant model-id string a HID++ device should match
@@ -121,5 +171,88 @@ pub fn variant_model_id(base: &str, ext: u8) -> String {
         base.to_string()
     } else {
         format!("{base}_ext{ext}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DepotManifest;
+
+    /// A G HUB depot in the G502 X PLUS's shape: the base keeps its front at
+    /// the depot root, every other render sits under `images/device/`, and
+    /// the manifest also names files OpenLogi never draws.
+    fn g_hub_manifest() -> DepotManifest {
+        serde_json::from_str(
+            r#"{"devices":[
+                {"modelId":"g502x_plus","resources":[
+                    {"key":"device_image","src":"front.png"},
+                    {"key":"device_side","src":"images/device/base-side"},
+                    {"key":"onboarding_data","src":"images/device/onboarding"}]},
+                {"modelId":"g502x_plus_ext1","resources":[
+                    {"key":"device_image","src":"images/device/white-front"},
+                    {"key":"device_side","src":"images/device/white-side"},
+                    {"key":"image_metadata","src":"metadata.json"}]},
+                {"modelId":"g502x_plus_ext2","resources":[
+                    {"key":"device_image","src":"images/device/white-front"}]}
+            ]}"#,
+        )
+        .expect("manifest parses")
+    }
+
+    #[test]
+    fn every_variant_names_its_consumed_files_once_and_skips_the_rest() {
+        assert_eq!(
+            g_hub_manifest().consumed_srcs(),
+            [
+                "front.png",
+                "images/device/base-side",
+                "images/device/white-front",
+                "images/device/white-side",
+                "metadata.json",
+            ]
+        );
+    }
+
+    #[test]
+    fn one_variant_names_only_its_own_consumed_files() {
+        let manifest = g_hub_manifest();
+        assert_eq!(
+            manifest.consumed_srcs_for(&["c095", "g502x_plus"], 1),
+            [
+                "images/device/white-front",
+                "images/device/white-side",
+                "metadata.json",
+            ]
+        );
+        assert_eq!(
+            manifest.consumed_srcs_for(&["g502x_plus"], 0),
+            ["front.png", "images/device/base-side"]
+        );
+    }
+
+    #[test]
+    fn the_first_base_naming_a_resource_wins_for_that_resource() {
+        let manifest: DepotManifest = serde_json::from_str(
+            r#"{"devices":[
+                {"modelId":"4099_ext1","resources":[
+                    {"key":"device_image","src":"front_ext1.png"}]},
+                {"modelId":"c095_ext1","resources":[
+                    {"key":"device_image","src":"front_ext_1.png"},
+                    {"key":"device_side","src":"side_ext_1.png"}]}
+            ]}"#,
+        )
+        .expect("manifest parses");
+        assert_eq!(
+            manifest.consumed_srcs_for(&["4099", "c095"], 1),
+            ["front_ext1.png", "side_ext_1.png"]
+        );
+    }
+
+    #[test]
+    fn a_variant_no_base_knows_needs_no_files() {
+        let manifest = g_hub_manifest();
+        assert!(manifest.consumed_srcs_for(&["c095"], 1).is_empty());
+        assert!(manifest.consumed_srcs_for(&["g502x_plus"], 9).is_empty());
+        assert!(manifest.consumed_srcs_for::<&str>(&[], 0).is_empty());
     }
 }
