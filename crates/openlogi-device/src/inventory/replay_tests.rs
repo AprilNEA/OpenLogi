@@ -641,6 +641,14 @@ async fn a_direct_channel_capture_reports_dead_retires_on_the_next_pass() {
     let replacement = registry.lookup(&route).expect("replacement published");
     assert!(registry.is_current(&replacement));
     assert_eq!(backend.open_count(&node_id).expect("known node"), 2);
+    enumerator
+        .enumerate()
+        .await
+        .expect("the replacement keeps serving");
+    assert!(
+        !enumerator.replaced_channels_last_tick(),
+        "only the pass that opens a replacement reports it"
+    );
     backend
         .channel_completion(DIRECT_CHANNEL)
         .expect("known channel")

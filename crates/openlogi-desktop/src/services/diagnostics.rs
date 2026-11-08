@@ -145,7 +145,7 @@ fn collect_devices(state: &AppState) -> Vec<DeviceDiag> {
                 kind: record.kind,
                 codename: record.codename.clone(),
                 connection: connection_for(record.route.as_ref(), record.receiver_brand, model),
-                online: record.online,
+                online: record.is_online(),
                 battery: record.battery.clone(),
                 capabilities: record.capabilities,
                 dpi: dpi_summary(state.dpi_load_for(&record.device_key())),

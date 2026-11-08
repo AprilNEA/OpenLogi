@@ -14,6 +14,7 @@ use gpui_kit::component::{
     h_flex,
     scroll::ScrollableElement as _,
     tag::Tag,
+    tooltip::Tooltip,
     v_flex,
 };
 use openlogi_core::config::{OnboardMemory, ScrollResolution};
@@ -42,7 +43,8 @@ use crate::state::{AppState, BindingLayer, DeviceRecord, Load, StateEvents};
 use crate::ui::battery::BatteryIndicator;
 use crate::ui::components::{PanelCard, Toggle, toggle_row};
 use crate::ui::theme::{
-    self, ContentWidth, DETAIL_RAIL_W, HEADER_H, Palette, SCREEN_PAD, Typography as _,
+    self, ContentWidth, DETAIL_RAIL_W, HEADER_H, Palette, PressableStyle as _, SCREEN_PAD,
+    SelectableStyle as _, Typography as _,
 };
 
 mod backlight;
@@ -68,7 +70,7 @@ pub(super) fn detail_header(
         || tr!("device.device").to_string(),
         |r| r.display_name.clone(),
     );
-    let online = record.map(|r| r.online);
+    let online = record.map(DeviceRecord::is_online);
     let battery = record
         .and_then(|r| r.battery.as_ref())
         .map(BatteryIndicator::inline);
@@ -126,7 +128,7 @@ pub(super) fn detail_content(
     let pal = theme::palette(cx);
     let online = AppState::try_read(cx)
         .and_then(AppState::current_record)
-        .is_some_and(|record| record.online);
+        .is_some_and(DeviceRecord::is_online);
     let content = match active {
         DetailTab::Buttons => {
             buttons_tab(panels.mouse_model, profile_icons, app_catalog, cx).into_any_element()
@@ -207,12 +209,17 @@ fn detail_navigation(
         .p_3()
         .children(tabs.iter().copied().enumerate().map(|(index, tab)| {
             let selected = tab == active;
+            let label = tab.label();
+            let tip = label.clone();
             BaseButton::new(("detail-navigation", index))
                 .debug_selector(move || format!("detail-navigation-{tab:?}"))
                 .role(Role::Tab)
                 .selected(selected)
-                .accessibility_label(tab.label())
+                .accessibility_label(label.clone())
                 .aria_selected(selected)
+                // A long localized name at a large scale clips; the tip
+                // carries the whole word.
+                .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
                 .w_full()
                 .flex()
                 .items_center()
@@ -229,13 +236,7 @@ fn detail_navigation(
                     pal.text_muted
                 })
                 .when(selected, |row| row.bg(crate::ui::theme::accent_tint()))
-                .hover(move |row| {
-                    row.bg(if selected {
-                        crate::ui::theme::accent_tint_hover()
-                    } else {
-                        pal.control_hover
-                    })
-                })
+                .pressable_fill(selected, pal)
                 .focus_visible(move |style| style.focus_ring(pal))
                 .child(
                     Icon::empty()
@@ -243,7 +244,7 @@ fn detail_navigation(
                         .size_4()
                         .flex_none(),
                 )
-                .child(tab.label())
+                .child(div().flex_1().min_w_0().truncate().child(label))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.active_tab = tab;
                     if tab == DetailTab::Pointer {
@@ -312,12 +313,14 @@ fn gshift_layer_bar(cx: &mut Context<AppView>) -> Option<impl IntoElement> {
                     .child(
                         Button::new("gshift-layer-normal")
                             .label(tr!("actions.g_shift_normal"))
-                            .selected(!gshift),
+                            .selected(!gshift)
+                            .selected_segment(!gshift, cx),
                     )
                     .child(
                         Button::new("gshift-layer-shift")
                             .label(tr!("actions.g_shift"))
-                            .selected(gshift),
+                            .selected(gshift)
+                            .selected_segment(gshift, cx),
                     )
                     .on_click(|indices, _window, cx| {
                         let layer = if indices.first() == Some(&1) {
@@ -510,7 +513,7 @@ fn onboard_card(pal: Palette, cx: &mut Context<AppView>) -> Option<impl IntoElem
             v_flex().gap_4().child(setting_row(
                 tr!("pointer.onboard_active"),
                 memory_description,
-                onboard_memory_control(memory, openlogi.into_iter().chain(profiles).collect()),
+                onboard_memory_control(memory, openlogi.into_iter().chain(profiles).collect(), cx),
                 pal,
             )),
         )
@@ -547,21 +550,23 @@ fn setting_row(
 fn onboard_memory_control(
     selected: Option<OnboardMemory>,
     choices: Vec<(OnboardMemory, String)>,
+    cx: &gpui::App,
 ) -> impl IntoElement {
     let values: Vec<OnboardMemory> = choices.iter().map(|(value, _)| *value).collect();
-    choices
-        .into_iter()
-        .enumerate()
-        .fold(
-            ButtonGroup::new("onboard-memory").w_full().outline(),
-            |group, (index, (value, label))| {
-                group.child(
+    ButtonGroup::new("onboard-memory")
+        .w_full()
+        .outline()
+        .children(
+            choices
+                .into_iter()
+                .enumerate()
+                .map(|(index, (value, label))| {
                     Button::new(("onboard-memory", index))
                         .flex_1()
                         .label(label)
-                        .selected(selected == Some(value)),
-                )
-            },
+                        .selected(selected == Some(value))
+                        .selected_segment(selected == Some(value), cx)
+                }),
         )
         .on_click(move |indices, _window, cx| {
             if let Some(value) = indices.first().and_then(|i| values.get(*i)) {
@@ -677,6 +682,7 @@ fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
             Toggle::new("invert-scroll-toggle")
                 .selected(inverted)
                 .disabled(!inversion_supported)
+                .accessibility_label(tr!("pointer.invert_scroll_direction"))
                 .label((!inversion_supported).then(|| tr!("common.unavailable")))
                 .on_change(|inverted, _window, cx| {
                     AppState::apply(cx, |state| state.commit_invert_scroll(*inverted));
@@ -771,8 +777,6 @@ fn wheel_resolution_control(
     enabled: bool,
     cx: &gpui::App,
 ) -> impl IntoElement {
-    use crate::ui::theme::SelectableStyle as _;
-
     let values = [
         None,
         Some(ScrollResolution::Low),
@@ -904,7 +908,7 @@ fn light_tab(
             let record = state.current_record();
             (
                 record.and_then(|record| record.asset.as_ref()),
-                record.is_some_and(|record| record.online),
+                record.is_some_and(DeviceRecord::is_online),
                 state.light_enabled(),
                 state.light(),
             )
@@ -1071,7 +1075,7 @@ fn device_details_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElem
                         &record.display_name,
                         &record.model_name,
                         record.kind,
-                        record.online,
+                        record.is_online(),
                         pal,
                     ))
                     .when_some(record.battery.as_ref(), |this, battery| {

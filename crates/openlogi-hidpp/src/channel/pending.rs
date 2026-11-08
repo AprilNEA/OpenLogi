@@ -1,14 +1,16 @@
 //! The channel's pending requests: what is awaiting a reply, and which
 //! headers stay reserved for replies nobody waits for any more.
 //!
-//! [`PendingQueue`] is that state and its registration rule; a
-//! [`PendingRequest`] is one caller's entry in it, parked until its header is
-//! free and abandoned on drop. The parent module's read loop resolves incoming
-//! reports against the queue, and its module docs say why two requests never
-//! share a header.
+//! [`PendingQueue`] owns the lifecycle of every [`CorrelationKey`] — free, in
+//! flight, or stale ([`KeyState`]) — and is the only code that moves a key
+//! between those states. A [`PendingRequest`] is one caller's entry in it,
+//! parked until its key is free and abandoned on drop. The parent module's
+//! read loop hands every incoming report to [`PendingQueue::resolve`], and its
+//! module docs say why two requests never share a header.
 
 use std::{
     collections::VecDeque,
+    num::NonZeroUsize,
     sync::{Arc, Mutex},
     time::Instant,
 };
@@ -22,6 +24,9 @@ use super::{
 };
 use crate::sync::lock;
 
+#[cfg(test)]
+mod tests;
+
 /// The bytes every reply is matched on before any predicate runs: device
 /// index, feature index (HID++1.0: sub id), and function/software id
 /// (HID++1.0: register address) — the first three payload bytes of every
@@ -29,44 +34,112 @@ use crate::sync::lock;
 /// nothing on the wire can tell apart.
 type CorrelationKey = (u8, u8, u8);
 
-/// The requests awaiting a reply, plus the requests parked because one of
-/// those shares their [`CorrelationKey`].
+/// Every correlation key that is not free, plus the requests parked until
+/// theirs is.
 #[derive(Default)]
 pub(super) struct PendingQueue {
-    /// Sent messages waiting for a response, oldest first.
-    pub(super) messages: VecDeque<PendingMessage>,
+    /// Each held key with its state, in the order it entered that state —
+    /// the order replies are matched in: a reply answers the oldest in-flight
+    /// request that accepts it, or else is discarded against the oldest stale
+    /// key that accepts it. A key absent here is free. One present is present
+    /// once: entering a state goes through [`PendingQueue::hold`].
+    keys: VecDeque<HeldKey>,
 
-    /// Requests abandoned unanswered whose replies may still land. Each keeps
-    /// its key taken until its replies arrive and are discarded, or its grace
-    /// runs out — see [`STALE_REPLY_GRACE`].
-    pub(super) stale: Vec<StaleKey>,
-
-    /// Woken whenever `messages` or `stale` changes, so a parked request can
-    /// re-check whether its key is free.
+    /// Woken whenever a key leaves the in-flight state or its last owed reply
+    /// is discarded, so a parked request can re-check whether its key is
+    /// free.
     key_waiters: Vec<oneshot::Sender<()>>,
 }
 
-/// A request that timed out or was cancelled with replies outstanding.
-pub(super) struct StaleKey {
-    /// The header bytes the outstanding replies will carry.
-    pub(super) key: CorrelationKey,
+/// A key the queue holds: the request it was taken for, and where in its
+/// lifecycle it is.
+struct HeldKey {
+    correlation: Correlation,
+    state: KeyState,
+}
+
+/// How a request's replies are recognised. A key keeps this from the request
+/// that took it for as long as it is held.
+struct Correlation {
+    /// The header bytes the replies carry.
+    key: CorrelationKey,
 
     /// The request as sent, so a byte-identical re-ask that asks to adopt
     /// the outstanding replies can be recognised.
-    pub(super) request: HidppMessage,
+    request: HidppMessage,
 
-    /// Recognises an outstanding reply, so it can be discarded on arrival.
-    pub(super) response_predicate: Box<dyn Fn(&HidppMessage) -> bool + Send>,
+    /// The predicate that has to match for an incoming message to be
+    /// classified as a reply.
+    response_predicate: Box<dyn Fn(&HidppMessage) -> bool + Send>,
+}
 
+/// Where a held key is in its lifecycle. A key the queue does not hold is
+/// free.
+///
+/// Every transition is a [`PendingQueue`] method:
+///
+/// - free → in flight: a request registers ([`PendingQueue::try_register`]).
+/// - in flight → free: its reply lands with nothing more owed
+///   ([`PendingQueue::resolve`]).
+/// - in flight → stale: the requester gives up — a timeout, a cancellation,
+///   a failed write ([`PendingQueue::abandon`]) — or its reply lands while
+///   adopted replies are still owed ([`PendingQueue::resolve`]).
+/// - stale → in flight: a byte-identical re-ask under
+///   [`AbandonedReply::AdoptIdentical`] adopts the owed replies
+///   ([`PendingQueue::try_register`]).
+/// - stale → stale: one of several owed replies is discarded
+///   ([`PendingQueue::resolve`]).
+/// - stale → free: the last owed reply is discarded
+///   ([`PendingQueue::resolve`]), or the grace runs out
+///   ([`PendingQueue::try_register`] prunes it).
+enum KeyState {
+    /// A registered request awaits its reply.
+    InFlight(InFlight),
+    /// No request waits for the replies with this key, but some are still
+    /// owed.
+    Stale(Stale),
+}
+
+/// The in-flight state: the request awaiting the reply.
+struct InFlight {
+    /// Unique ID used to find this request when its waiter goes away.
+    id: u64,
+
+    /// Hands the reply to the waiting request.
+    sender: oneshot::Sender<HidppMessage>,
+
+    /// Replies still owed to earlier, abandoned sends of this same request,
+    /// adopted on registration under [`AbandonedReply::AdoptIdentical`].
+    /// Whichever reply comes first answers this request; the rest are then
+    /// owed under a stale key.
+    extra_replies: usize,
+}
+
+/// The stale state: replies owed to a request nobody waits for any more.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Stale {
     /// How many replies are still owed: one per time the request went out
     /// unanswered.
-    pub(super) outstanding: usize,
+    outstanding: NonZeroUsize,
 
     /// When the key is given up on even without them.
-    pub(super) expires: Instant,
+    expires: Instant,
+}
+
+/// A request asking to take its key; registering it puts the key in flight.
+struct Registration {
+    id: u64,
+    correlation: Correlation,
+
+    /// What to do about replies still owed to an abandoned request with the
+    /// same header.
+    abandoned: AbandonedReply,
+
+    sender: oneshot::Sender<HidppMessage>,
 }
 
 /// What a request that could not register has to wait for.
+#[derive(Debug, PartialEq, Eq)]
 enum Wait {
     /// A pending request with the same key; until it leaves the queue.
     InFlight,
@@ -75,10 +148,21 @@ enum Wait {
     Stale(Instant),
 }
 
+/// What an incoming report was to the pending requests.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Resolution {
+    /// The reply of the in-flight request with this ID, now handed to it.
+    Answered(u64),
+    /// A reply still owed to an abandoned request, discarded.
+    Discarded,
+    /// Nothing a request of this channel waits for or is owed.
+    Unmatched,
+}
+
 impl PendingQueue {
-    /// Registers `message` if nothing holds its key as of `now`, else hands it
-    /// back with what it is waiting for. Prunes stale keys whose grace has
-    /// passed.
+    /// Registers `registration` if nothing holds its key as of `now`, else
+    /// hands it back with what it is waiting for. Prunes stale keys whose
+    /// grace has passed.
     ///
     /// A stale key blocks whatever the new request's bytes are: byte equality
     /// with the abandoned request does not by itself make the outstanding
@@ -86,99 +170,162 @@ impl PendingQueue {
     /// Only a request that asks to ([`AbandonedReply::AdoptIdentical`]) and
     /// is byte-identical registers at once and adopts them — it is answered
     /// by whichever reply comes first, and the rest stay owed (see
-    /// [`PendingMessage::extra_replies`]).
+    /// [`InFlight::extra_replies`]).
     fn try_register(
         &mut self,
-        mut message: PendingMessage,
+        registration: Registration,
         now: Instant,
-    ) -> Result<(), (PendingMessage, Wait)> {
-        self.stale.retain(|stale| stale.expires > now);
-        if self
-            .messages
+    ) -> Result<(), (Registration, Wait)> {
+        self.keys.retain(|held| !held.state.expired(now));
+        let key = registration.correlation.key;
+        let adopted = match self
+            .keys
             .iter()
-            .any(|pending| pending.key == message.key)
+            .position(|held| held.correlation.key == key)
         {
-            return Err((message, Wait::InFlight));
-        }
-        let adopts = |stale: &StaleKey| {
-            message.abandoned == AbandonedReply::AdoptIdentical && stale.request == message.request
+            None => None,
+            Some(pos) => {
+                let held = &self.keys[pos];
+                let stale = match held.state {
+                    KeyState::InFlight(_) => return Err((registration, Wait::InFlight)),
+                    KeyState::Stale(stale) => stale,
+                };
+                if !registration.adopts(&held.correlation) {
+                    return Err((registration, Wait::Stale(stale.expires)));
+                }
+                self.keys.remove(pos);
+                Some(stale)
+            }
         };
-        if let Some(until) = self
-            .stale
-            .iter()
-            .filter(|stale| stale.key == message.key && !adopts(stale))
-            .map(|stale| stale.expires)
-            .max()
-        {
-            return Err((message, Wait::Stale(until)));
-        }
-        message.extra_replies = self
-            .stale
-            .iter()
-            .filter(|stale| stale.key == message.key)
-            .map(|stale| stale.outstanding)
-            .sum();
-        self.stale.retain(|stale| stale.key != message.key);
-        self.messages.push_back(message);
+        self.hold(registration.register(adopted));
         Ok(())
     }
 
     /// Gives up on the request with `id`, if it is still awaiting its reply:
-    /// it leaves the queue but its key stays taken for [`STALE_REPLY_GRACE`],
+    /// it leaves the queue but its key stays stale for [`STALE_REPLY_GRACE`],
     /// so the reply — should it still come — is discarded rather than handed
     /// to the next request with that key. Wakes parked requests so they
     /// re-check what they are waiting for.
+    ///
+    /// A request whose write failed is abandoned the same way. The transport's
+    /// error does not say whether the report left —
+    /// [`RawHidChannel::write_report`] promises nothing either way — and a
+    /// reply it did provoke would answer the next request with this key.
+    /// Replies it adopted are owed regardless. The price is one grace window
+    /// for the next same-header request on a channel whose write just failed.
+    ///
+    /// [`RawHidChannel::write_report`]: super::RawHidChannel::write_report
     fn abandon(&mut self, id: u64, now: Instant) {
-        let Some(pos) = self.messages.iter().position(|message| message.id == id) else {
+        let found = self
+            .keys
+            .iter()
+            .enumerate()
+            .find_map(|(pos, held)| match &held.state {
+                KeyState::InFlight(in_flight) if in_flight.id == id => {
+                    Some((pos, in_flight.abandoned(now)))
+                }
+                KeyState::InFlight(_) | KeyState::Stale(_) => None,
+            });
+        let Some((pos, stale)) = found else {
             return;
         };
-        let Some(abandoned) = self.messages.remove(pos) else {
-            return;
-        };
-        // Its own reply, plus any it had adopted from earlier abandoned sends
-        // of the same request.
-        let outstanding = abandoned.extra_replies + 1;
-        self.owe_replies(abandoned, outstanding, now);
+        if let Some(mut held) = self.keys.remove(pos) {
+            // Drops the request's sender: its requester has given up.
+            held.state = KeyState::Stale(stale);
+            self.hold(held);
+        }
         self.wake_key_waiters();
     }
 
-    /// Keeps `message`'s key taken for `outstanding` more replies, for the
-    /// grace from `now`.
-    fn owe_replies(&mut self, message: PendingMessage, outstanding: usize, now: Instant) {
-        let PendingMessage {
-            key,
-            request,
-            response_predicate,
-            ..
-        } = message;
-        self.stale.push(StaleKey {
-            key,
-            request,
-            response_predicate,
-            outstanding,
-            expires: now + STALE_REPLY_GRACE,
-        });
-    }
-
-    /// Discards `msg` if it is an outstanding reply of an abandoned request,
-    /// freeing that request's key once none is owed.
-    pub(super) fn discard_stale_reply(&mut self, msg: &HidppMessage) -> bool {
+    /// Resolves an incoming report: the reply of the oldest in-flight request
+    /// that accepts it, or else an owed reply to the oldest stale key that
+    /// accepts it, discarded. Discarding the last owed reply is what frees a
+    /// stale key's header for the next request.
+    pub(super) fn resolve(&mut self, reply: HidppMessage, now: Instant) -> Resolution {
+        let accepts = |held: &HeldKey| (held.correlation.response_predicate)(&reply);
+        // Each predicate runs at most once: in-flight keys first, then only
+        // the stale ones.
         let Some(pos) = self
-            .stale
+            .keys
             .iter()
-            .position(|stale| (stale.response_predicate)(msg))
+            .position(|held| matches!(held.state, KeyState::InFlight(_)) && accepts(held))
+            .or_else(|| {
+                self.keys
+                    .iter()
+                    .position(|held| matches!(held.state, KeyState::Stale(_)) && accepts(held))
+            })
         else {
-            return false;
+            return Resolution::Unmatched;
         };
-        self.stale[pos].outstanding -= 1;
-        if self.stale[pos].outstanding == 0 {
-            self.stale.remove(pos);
-            self.wake_key_waiters();
-        }
-        true
+        let Some(HeldKey { correlation, state }) = self.keys.remove(pos) else {
+            return Resolution::Unmatched;
+        };
+        let resolution = match state {
+            KeyState::InFlight(in_flight) => {
+                let id = in_flight.id;
+                if let Some(stale) = in_flight.answer(reply, now) {
+                    // Answered by one of several replies it was owed: the
+                    // others are still coming and must not answer the next
+                    // request with this header.
+                    self.hold(HeldKey {
+                        correlation,
+                        state: KeyState::Stale(stale),
+                    });
+                }
+                Resolution::Answered(id)
+            }
+            KeyState::Stale(stale) => {
+                if let Some(rest) = stale.discard_one() {
+                    // Still stale: it keeps its place, and nothing was freed
+                    // to wake for.
+                    self.keys.insert(
+                        pos,
+                        HeldKey {
+                            correlation,
+                            state: KeyState::Stale(rest),
+                        },
+                    );
+                    return Resolution::Discarded;
+                }
+                Resolution::Discarded
+            }
+        };
+        self.wake_key_waiters();
+        resolution
     }
 
-    pub(super) fn wake_key_waiters(&mut self) {
+    /// How many requests are awaiting their reply.
+    pub(super) fn in_flight_count(&self) -> usize {
+        self.keys
+            .iter()
+            .filter(|held| matches!(held.state, KeyState::InFlight(_)))
+            .count()
+    }
+
+    /// How many keys are stale.
+    #[cfg(test)]
+    pub(super) fn stale_count(&self) -> usize {
+        self.keys
+            .iter()
+            .filter(|held| matches!(held.state, KeyState::Stale(_)))
+            .count()
+    }
+
+    /// Puts `held` at the back: its key has just entered its state. Every
+    /// caller has just found the key free or taken it out, so a key is never
+    /// held twice.
+    fn hold(&mut self, held: HeldKey) {
+        debug_assert!(
+            self.keys
+                .iter()
+                .all(|other| other.correlation.key != held.correlation.key),
+            "correlation key {:?} is already held",
+            held.correlation.key
+        );
+        self.keys.push_back(held);
+    }
+
+    fn wake_key_waiters(&mut self) {
         for waiter in self.key_waiters.drain(..) {
             // A parked request that was cancelled meanwhile has dropped its
             // receiver; nothing to wake.
@@ -187,35 +334,69 @@ impl PendingQueue {
     }
 }
 
-/// Represents a message that was sent and is waiting for a response.
-pub(super) struct PendingMessage {
-    /// Unique ID used to remove this request when its waiter goes away.
-    pub(super) id: u64,
+impl KeyState {
+    /// Whether the key is stale and its grace has passed as of `now`.
+    fn expired(&self, now: Instant) -> bool {
+        matches!(self, Self::Stale(stale) if stale.expires <= now)
+    }
+}
 
-    /// The header bytes this request's reply will carry.
-    pub(super) key: CorrelationKey,
+impl InFlight {
+    /// The stale state an abandoned request leaves its key in: its own reply
+    /// is owed, plus any it had adopted from earlier abandoned sends of the
+    /// same request.
+    fn abandoned(&self, now: Instant) -> Stale {
+        Stale::owing(NonZeroUsize::MIN.saturating_add(self.extra_replies), now)
+    }
 
-    /// The request as sent, so an abandoned one can be recognised when it is
-    /// re-asked.
-    pub(super) request: HidppMessage,
+    /// Hands `reply` to the waiting request, and returns the stale state the
+    /// key stays in while adopted replies are still owed.
+    fn answer(self, reply: HidppMessage, now: Instant) -> Option<Stale> {
+        // The waiter may have given up meanwhile; the reply is consumed
+        // either way.
+        let _ = self.sender.send(reply);
+        NonZeroUsize::new(self.extra_replies).map(|outstanding| Stale::owing(outstanding, now))
+    }
+}
 
-    /// What to do about replies still owed to an abandoned request with the
-    /// same header.
-    abandoned: AbandonedReply,
+impl Stale {
+    /// A key owing `outstanding` replies, kept for the grace from `now` —
+    /// the one place a stale key's expiry is decided.
+    fn owing(outstanding: NonZeroUsize, now: Instant) -> Self {
+        Self {
+            outstanding,
+            expires: now + STALE_REPLY_GRACE,
+        }
+    }
 
-    /// The predicate that has to match for an incoming message to be classified
-    /// as the response.
-    pub(super) response_predicate: Box<dyn Fn(&HidppMessage) -> bool + Send>,
+    /// The state once one owed reply has been discarded, or `None` when that
+    /// was the last.
+    fn discard_one(self) -> Option<Self> {
+        NonZeroUsize::new(self.outstanding.get() - 1).map(|outstanding| Self {
+            outstanding,
+            ..self
+        })
+    }
+}
 
-    /// The oneshot sender used to provide the response message to the receiving
-    /// end.
-    pub(super) sender: oneshot::Sender<HidppMessage>,
+impl Registration {
+    /// Whether this request takes the replies owed under `held` as its own.
+    fn adopts(&self, held: &Correlation) -> bool {
+        self.abandoned == AbandonedReply::AdoptIdentical && held.request == self.correlation.request
+    }
 
-    /// Replies still owed to earlier, abandoned sends of this same request,
-    /// adopted on registration under [`AbandonedReply::AdoptIdentical`].
-    /// Whichever reply comes first answers this request; the rest are then
-    /// owed under a stale key.
-    pub(super) extra_replies: usize,
+    /// Puts the key in flight for this request, taking over the replies
+    /// still owed under `adopted`, if any.
+    fn register(self, adopted: Option<Stale>) -> HeldKey {
+        HeldKey {
+            correlation: self.correlation,
+            state: KeyState::InFlight(InFlight {
+                id: self.id,
+                sender: self.sender,
+                extra_replies: adopted.map_or(0, |stale| stale.outstanding.get()),
+            }),
+        }
+    }
 }
 
 /// One registered request and the receiver waiting for its response.
@@ -247,27 +428,28 @@ impl PendingRequest {
     ) -> Self {
         let (sender, receiver) = oneshot::channel();
         let key = request.header();
-        let mut message = PendingMessage {
+        let mut registration = Registration {
             id,
-            key,
-            request,
+            correlation: Correlation {
+                key,
+                request,
+                response_predicate: Box::new(response_predicate),
+            },
             abandoned,
-            response_predicate: Box::new(response_predicate),
             sender,
-            extra_replies: 0,
         };
         loop {
             let now = Instant::now();
             let (parked, stale_until) = {
                 let mut queue = lock(&pending_messages);
-                let stale_until = match queue.try_register(message, now) {
+                let stale_until = match queue.try_register(registration, now) {
                     Ok(()) => break,
                     Err((returned, Wait::InFlight)) => {
-                        message = returned;
+                        registration = returned;
                         None
                     }
                     Err((returned, Wait::Stale(expires))) => {
-                        message = returned;
+                        registration = returned;
                         Some(expires)
                     }
                 };

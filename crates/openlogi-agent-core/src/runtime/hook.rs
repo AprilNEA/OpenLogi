@@ -148,127 +148,218 @@ pub type SharedHookMaps = Arc<RwLock<HookMaps>>;
 /// (keycode + modifiers).
 pub type SharedKeyboardBindings = Arc<RwLock<BTreeMap<KeyTrigger, Action>>>;
 
-/// Tracks which OS-hook gesture button (Middle/Back/Forward) is mid-hold and defers the
-/// swipe detection itself to a shared [`SwipeAccumulator`], which commits a swipe
-/// *mid-motion* like the HID++ gesture-button path in `openlogi-hid`. This wrapper
-/// adds only the button identity the accumulator doesn't track; a press that
-/// never commits a direction is a plain click, fired on release.
 /// A gesture hold this old is presumed stale — real hold+swipe interactions
 /// finish in well under a second, and only a lost button-up (with no OS
-/// interrupt to trigger [`HoldState::cancel`]) leaves one lingering.
+/// interrupt to end it, see [`press_transition`]) leaves one lingering.
 const HOLD_STALE_AFTER: Duration = Duration::from_secs(10);
 
-#[derive(Default)]
-struct HoldState {
-    current: Option<GestureHold>,
+/// A gesture button's (Middle/Back/Forward) press held for a swipe. The swipe
+/// detection itself is the hold's own [`SwipeAccumulator`], which commits a
+/// swipe *mid-motion* like the HID++ gesture-button path in `openlogi-hid`; a
+/// hold that never commits a direction is a plain click, fired on release.
+/// The accumulator begins and ends with the hold that owns it.
+#[derive(Debug)]
+struct GestureHold {
+    started_at: Instant,
+    press: PressToken,
     swipe: SwipeAccumulator,
 }
 
-struct GestureHold {
-    button: ButtonId,
-    started_at: Instant,
-    press: PressToken,
+impl GestureHold {
+    /// Hold the press the accepted lifecycle `Down` returned.
+    fn new(press: PressToken, now: Instant) -> Self {
+        let mut swipe = SwipeAccumulator::default();
+        swipe.begin();
+        Self {
+            started_at: now,
+            press,
+            swipe,
+        }
+    }
+
+    /// End the hold, returning its exact token and whether it was a click. A
+    /// hold that committed a swipe returns `false`.
+    fn end(mut self) -> (PressToken, bool) {
+        let was_click = self.swipe.end();
+        (self.press, was_click)
+    }
 }
 
+/// Where a press of an OS-hook button stands on its callback thread. A button
+/// with no phase recorded is up. Both edges of a press get its phase's
+/// [`disposition`](Self::disposition), so the hook and the desktop never split
+/// a press: a release follows its press, not the bindings in force when it
+/// arrives.
+#[derive(Debug)]
+enum PressPhase {
+    /// A gesture press whose lifecycle the runtime accepted. At most one
+    /// button per thread holds: a gesture press is first admitted by
+    /// [`ButtonPresses::admit_gesture`], which refuses it while another
+    /// button's hold is live and ends one that went stale.
+    HeldAsGesture { hold: GestureHold },
+    /// A remapped press whose lifecycle the runtime accepted. Its release is
+    /// suppressed too, even when moving the pointer restores a native binding
+    /// before the physical release.
+    Suppressed,
+    /// A press judged against a HID++ diversion. Its release follows the
+    /// press, even if the capture session ends in between.
+    Diverted(DivertedPress),
+    /// A press delivered natively: unbound, bound to its own native click, or
+    /// refused by the runtime.
+    Passthrough,
+}
+
+impl PressPhase {
+    fn disposition(&self) -> EventDisposition {
+        match self {
+            Self::HeldAsGesture { .. } | Self::Suppressed => EventDisposition::Suppress,
+            Self::Diverted(diverted) => diverted.disposition(),
+            Self::Passthrough => EventDisposition::PassThrough,
+        }
+    }
+}
+
+/// An input to one button's [`PressPhase`].
+enum PressEvent {
+    /// The button went down, and the hook gave the press this phase.
+    Pressed(PressPhase),
+    /// The button came up.
+    Released,
+    /// The OS dropped input, possibly a release with it.
+    CaptureInterrupted,
+}
+
+/// What a [`PressEvent`] does to a button's recorded phase.
+#[derive(Debug)]
+enum NextPhase {
+    /// The phase stays as recorded.
+    Keep,
+    /// The button is up; a release hands its press back for the I/O that ends it.
+    Up,
+    /// The button enters this phase.
+    Enter(PressPhase),
+}
+
+/// The per-button press machine: what `event` does to a button whose recorded
+/// phase is `phase` (`None`: up). Pure and total; [`ButtonPresses`] applies it
+/// and the hook performs the I/O.
+fn press_transition(phase: Option<&PressPhase>, event: PressEvent) -> NextPhase {
+    match (phase, event) {
+        // A button cannot be pressed while it is down, so a phase still
+        // recorded here belongs to a press whose release was lost. The new
+        // press replaces it. Kept beside the new press, a stale hold would
+        // claim its release — suppressing it even when the press went native,
+        // a stuck button — and turn its motion into phantom swipes.
+        (_, PressEvent::Pressed(next)) => NextPhase::Enter(next),
+        // A release ends its press. An interrupt ends a hold: it may have
+        // dropped the hold's release, and a hold left behind turns the next
+        // stray pointer move into a phantom swipe.
+        (_, PressEvent::Released)
+        | (Some(PressPhase::HeldAsGesture { .. }), PressEvent::CaptureInterrupted) => NextPhase::Up,
+        // Any other press keeps its disposition for a release that still comes.
+        (_, PressEvent::CaptureInterrupted) => NextPhase::Keep,
+    }
+}
+
+/// The admission of a gesture press to its thread's one hold.
 enum HoldAdmission {
     Begin,
+    /// Begin after ending another button's stale hold, whose press this is.
     Replace(PressToken),
     Refuse,
 }
 
-impl HoldState {
-    /// Prepare a hold for `button`. With several gesture buttons the first live
-    /// hold wins, so a second button cannot hijack accumulated motion. The
-    /// caller obtains a fresh [`PressToken`] only after this admission step.
+/// The [`PressPhase`] of every OS-hook button down on one callback thread.
+#[derive(Default)]
+struct ButtonPresses {
+    phases: HashMap<ButtonId, PressPhase>,
+}
+
+impl ButtonPresses {
+    /// Record a press of `id` in `phase`, returning the phase it displaced,
+    /// which only a lost release leaves behind.
+    fn press(&mut self, id: ButtonId, phase: PressPhase) -> Option<PressPhase> {
+        self.apply(id, PressEvent::Pressed(phase))
+    }
+
+    /// Release `id`, returning the press it ends, or `None` for a stray release.
+    fn release(&mut self, id: ButtonId) -> Option<PressPhase> {
+        self.apply(id, PressEvent::Released)
+    }
+
+    /// The OS interrupted capture: a hold ends without firing anything.
+    fn interrupt(&mut self) {
+        self.phases.retain(|_, phase| {
+            matches!(
+                press_transition(Some(phase), PressEvent::CaptureInterrupted),
+                NextPhase::Keep
+            )
+        });
+    }
+
+    /// Apply `event` to `id`, returning the phase it ended or displaced.
+    fn apply(&mut self, id: ButtonId, event: PressEvent) -> Option<PressPhase> {
+        match press_transition(self.phases.get(&id), event) {
+            NextPhase::Keep => None,
+            NextPhase::Up => self.phases.remove(&id),
+            NextPhase::Enter(phase) => self.phases.insert(id, phase),
+        }
+    }
+
+    /// Admit a gesture press of `id` to the hold. With several gesture buttons
+    /// the first live hold wins, so a second button cannot hijack accumulated
+    /// motion. The caller obtains a fresh [`PressToken`] only after this
+    /// admission step.
     ///
     /// Two presses recover a hold whose button-up was lost (nothing else ever
     /// clears it when the OS drops a release without an interrupt): a re-press
-    /// of the held button itself — a button cannot be pressed while down, so
-    /// this is proof the release was lost — and any press once the hold has
-    /// aged past [`HOLD_STALE_AFTER`], without which every other gesture button
-    /// would stay refused indefinitely.
-    fn prepare_begin(&mut self, button: ButtonId) -> HoldAdmission {
-        let Some(held) = self.current.take() else {
+    /// of the held button itself, whose new phase replaces the hold, and any
+    /// press once the hold has aged past [`HOLD_STALE_AFTER`], without which
+    /// every other gesture button would stay refused indefinitely.
+    fn admit_gesture(&mut self, id: ButtonId, now: Instant) -> HoldAdmission {
+        let other = self.phases.iter().find_map(|(&button, phase)| match phase {
+            PressPhase::HeldAsGesture { hold } if button != id => Some((button, hold)),
+            _ => None,
+        });
+        let Some((button, hold)) = other else {
             return HoldAdmission::Begin;
         };
-        if held.button != button && held.started_at.elapsed() < HOLD_STALE_AFTER {
-            self.current = Some(held);
+        if now.saturating_duration_since(hold.started_at) < HOLD_STALE_AFTER {
             return HoldAdmission::Refuse;
         }
-
-        self.swipe.end();
-        if held.button == button {
-            HoldAdmission::Begin
-        } else {
-            HoldAdmission::Replace(held.press)
-        }
+        let stale = hold.press.clone();
+        self.phases.remove(&button);
+        HoldAdmission::Replace(stale)
     }
 
-    /// Store the token returned by the accepted lifecycle `Down`.
-    fn begin(&mut self, button: ButtonId, press: PressToken) {
-        self.current = Some(GestureHold {
-            button,
-            started_at: Instant::now(),
-            press,
-        });
-        self.swipe.begin();
-    }
-
-    /// Feed a pointer-move delta into the active hold, tagging a committed swipe
-    /// with its exact press token and held button. Returns one commit per hold,
-    /// or `None` while still too short, already fired, or not holding.
+    /// Feed a pointer-move delta into the hold, tagging a committed swipe with
+    /// its exact press token and held button. Returns `None` while still too
+    /// short, already fired, or not holding.
     fn accumulate(&mut self, dx: i32, dy: i32) -> Option<(PressToken, ButtonId, GestureDirection)> {
-        let held = self.current.as_ref()?;
-        self.swipe
+        let (button, hold) = self
+            .phases
+            .iter_mut()
+            .find_map(|(&button, phase)| match phase {
+                PressPhase::HeldAsGesture { hold } => Some((button, hold)),
+                _ => None,
+            })?;
+        hold.swipe
             .accumulate(dx, dy)
-            .map(|dir| (held.press.clone(), held.button, dir))
-    }
-
-    /// End the hold for `button`, returning its exact token and whether it was a
-    /// click. A swipe returns `false`; a stray release returns `None`.
-    fn end(&mut self, button: ButtonId) -> Option<(PressToken, bool)> {
-        let held = self.current.take_if(|held| held.button == button)?;
-        let was_click = self.swipe.end();
-        Some((held.press, was_click))
-    }
-
-    /// Cancel any in-progress hold without firing anything — used when the OS
-    /// interrupts capture. A dropped button-up would otherwise leave a stale hold
-    /// that the next stray pointer move turns into a phantom swipe.
-    fn cancel(&mut self) {
-        self.current = None;
-        self.swipe.end();
-    }
-
-    /// Age the current hold past the staleness horizon, so tests can exercise
-    /// the lost-button-up recovery without sleeping.
-    #[cfg(test)]
-    fn backdate_for_test(&mut self) {
-        if let Some(held) = &mut self.current
-            && let Some(aged) = Instant::now().checked_sub(HOLD_STALE_AFTER)
-        {
-            held.started_at = aged;
-        }
+            .map(|dir| (hold.press.clone(), button, dir))
     }
 }
 
 thread_local! {
-    /// In-progress gesture hold, one instance per hook-callback thread: the
-    /// single macOS tap thread, or — on Linux — one thread per device, so two
-    /// mice never share a hold (a press on one can't hijack the other's swipe).
+    /// The OS-hook button presses of one hook-callback thread: the single
+    /// macOS tap thread, or — on Linux — one thread per device, so two mice
+    /// never share a hold (a press on one can't hijack the other's swipe).
     /// Thread-local rather than a shared `Mutex` keeps the hot path lock-free and
     /// free of cross-thread contention on the freeze-sensitive callback.
-    static HOLD: RefCell<HoldState> = RefCell::new(HoldState::default());
-    /// Accepted non-gesture presses retain their edge disposition even when
-    /// moving the pointer changes the binding before physical release.
-    static SUPPRESSED_PRESSES: RefCell<HashSet<ButtonId>> = RefCell::new(HashSet::new());
-    /// Presses judged against a HID++ diversion. Their release follows the
-    /// press, even if the capture session ends in between.
-    static DIVERTED_PRESSES: RefCell<HashMap<ButtonId, DivertedPress>> =
-        RefCell::new(HashMap::new());
+    static PRESSES: RefCell<ButtonPresses> = RefCell::new(ButtonPresses::default());
     /// Function keys whose held action owns an accepted lifecycle. Repeated
     /// key-down events are auto-repeat, not replacement presses; their first
-    /// matching key-up ends the lifecycle.
+    /// matching key-up ends the lifecycle. A button's repeated press is the
+    /// opposite, a lost release, which is why keys stay out of `PRESSES`.
     static HELD_KEYS: RefCell<HashSet<u16>> = RefCell::new(HashSet::new());
 }
 
@@ -346,6 +437,11 @@ fn handle_button(
     if !id.is_os_hook_button() || !button_source_may_remap(device) {
         return EventDisposition::PassThrough;
     }
+    if !pressed {
+        // Drop the PRESSES borrow before any queueing (re-entrancy freeze hazard).
+        let released = PRESSES.with_borrow_mut(|presses| presses.release(id));
+        return end_press(id, released, hooks, dispatcher);
+    }
     // `try_read` only: a blocking read on the tap thread freezes every pointer
     // event while a config rebuild holds the write lock. Fail open if unavailable.
     let (binding, is_gesture, pointer, diverted) =
@@ -358,36 +454,88 @@ fn handle_button(
                 maps.diverted_press(id, device),
             )
         });
-    let diverted =
-        DIVERTED_PRESSES.with_borrow_mut(|judged| diverted_edge(id, pressed, diverted, judged));
-    if let Some(diverted) = diverted {
-        return diverted.disposition();
-    }
-    let action_target = if pressed {
-        ActionDispatchTarget::for_pointer(pointer, capture_safari_pid)
-    } else {
-        ActionDispatchTarget::Keyboard
+    let phase = match diverted {
+        Some(diverted) => PressPhase::Diverted(diverted),
+        None => start_press(
+            id,
+            binding,
+            is_gesture,
+            ActionDispatchTarget::for_pointer(pointer, capture_safari_pid),
+            dispatcher,
+        ),
     };
-    if pressed {
-        // A refused begin — a second gesture button pressed mid-hold — falls
-        // through to the single-action path: the first hold wins and this press
-        // still means its plain click.
-        let admission = is_gesture.then(|| HOLD.with_borrow_mut(|h| h.prepare_begin(id)));
-        if let Some(HoldAdmission::Begin | HoldAdmission::Replace(_)) = &admission {
-            if let Some(HoldAdmission::Replace(stale)) = &admission {
-                dispatcher.cancel_stale_hook_press(stale);
+    let disposition = phase.disposition();
+    // A lifecycle the runtime accepted for this press replaces a lost one on
+    // the same button. Any other press must end a displaced hold's lifecycle
+    // itself, or a shortcut it holds stays down.
+    let restarted = matches!(
+        phase,
+        PressPhase::HeldAsGesture { .. } | PressPhase::Suppressed
+    );
+    let displaced = PRESSES.with_borrow_mut(|presses| presses.press(id, phase));
+    if !restarted && let Some(PressPhase::HeldAsGesture { hold }) = displaced {
+        dispatcher.cancel_stale_hook_press(&hold.press);
+    }
+    disposition
+}
+
+/// Offer a press the hook may remap to the runtime, returning the phase it
+/// enters.
+fn start_press(
+    id: ButtonId,
+    binding: Option<Binding>,
+    is_gesture: bool,
+    target: ActionDispatchTarget,
+    dispatcher: &ActionDispatcher,
+) -> PressPhase {
+    if is_gesture {
+        // A refused admission — a second gesture button pressed mid-hold —
+        // falls through to the single-action path: the first hold wins and
+        // this press still means its plain click.
+        let now = Instant::now();
+        match PRESSES.with_borrow_mut(|presses| presses.admit_gesture(id, now)) {
+            HoldAdmission::Refuse => {}
+            admission => {
+                if let HoldAdmission::Replace(stale) = &admission {
+                    dispatcher.cancel_stale_hook_press(stale);
+                }
+                return dispatcher.try_hook_button_down(id, None, target).map_or(
+                    PressPhase::Passthrough,
+                    |press| PressPhase::HeldAsGesture {
+                        hold: GestureHold::new(press, now),
+                    },
+                );
             }
-            if let Some(press) = dispatcher.try_hook_button_down(id, None, action_target) {
-                HOLD.with_borrow_mut(|h| h.begin(id, press));
-                return EventDisposition::Suppress;
-            }
-            return SUPPRESSED_PRESSES
-                .with_borrow_mut(|s| remapped_press_disposition(id, false, s));
         }
+    }
+    let accepted = binding.is_some_and(|binding| {
+        !binding_is_native_click(id, &binding)
+            && dispatcher
+                .try_hook_button_down(id, Some(&binding), target)
+                .is_some()
+    });
+    if accepted {
+        PressPhase::Suppressed
     } else {
-        // Drop the HOLD borrow before any queueing (re-entrancy freeze hazard).
-        let ended = HOLD.with_borrow_mut(|h| h.end(id));
-        if let Some((press, was_click)) = ended {
+        PressPhase::Passthrough
+    }
+}
+
+/// Finish the release of `id`, whose press was `released`: give it that
+/// press's disposition and end the lifecycle the runtime accepted for it.
+fn end_press(
+    id: ButtonId,
+    released: Option<PressPhase>,
+    hooks: &SharedHookMaps,
+    dispatcher: &ActionDispatcher,
+) -> EventDisposition {
+    let Some(phase) = released else {
+        return EventDisposition::PassThrough;
+    };
+    let disposition = phase.disposition();
+    match phase {
+        PressPhase::HeldAsGesture { hold } => {
+            let (press, was_click) = hold.end();
             if was_click {
                 let action = hooks
                     .try_read()
@@ -398,26 +546,13 @@ fn handle_button(
                 }
             }
             dispatcher.try_hook_button_up(id);
-            return EventDisposition::Suppress;
         }
-        let disposition =
-            SUPPRESSED_PRESSES.with_borrow_mut(|s| remapped_release_disposition(id, s));
-        if disposition == EventDisposition::Suppress {
+        PressPhase::Suppressed => {
             dispatcher.try_hook_button_up(id);
         }
-        return disposition;
+        PressPhase::Diverted(_) | PressPhase::Passthrough => {}
     }
-
-    let Some(binding) = binding else {
-        return SUPPRESSED_PRESSES.with_borrow_mut(|s| remapped_press_disposition(id, false, s));
-    };
-    if binding_is_native_click(id, &binding) {
-        return SUPPRESSED_PRESSES.with_borrow_mut(|s| remapped_press_disposition(id, false, s));
-    }
-    let queued = dispatcher
-        .try_hook_button_down(id, Some(&binding), action_target)
-        .is_some();
-    SUPPRESSED_PRESSES.with_borrow_mut(|s| remapped_press_disposition(id, queued, s))
+    disposition
 }
 
 /// Whether the hook should let the press through natively. A long press
@@ -426,54 +561,6 @@ fn handle_button(
 /// click, which stays native when that is the button's own action.
 fn binding_is_native_click(id: ButtonId, binding: &Binding) -> bool {
     !matches!(binding, Binding::LongPress(_)) && is_native_click(id, &binding.click_action())
-}
-
-/// The diversion verdict for one edge of `id`. A press takes `verdict` and
-/// remembers it; a release takes whatever its press was given, so the two
-/// edges never split between the hook and the desktop.
-fn diverted_edge(
-    id: ButtonId,
-    pressed: bool,
-    verdict: Option<DivertedPress>,
-    judged: &mut HashMap<ButtonId, DivertedPress>,
-) -> Option<DivertedPress> {
-    if !pressed {
-        return judged.remove(&id);
-    }
-    if let Some(verdict) = verdict {
-        judged.insert(id, verdict);
-    } else {
-        judged.remove(&id);
-    }
-    verdict
-}
-
-/// Press of a remapped single-action button: suppress when the action was
-/// queued, and remember that decision so release uses the same disposition.
-fn remapped_press_disposition(
-    id: ButtonId,
-    queued: bool,
-    suppressed: &mut HashSet<ButtonId>,
-) -> EventDisposition {
-    if queued {
-        suppressed.insert(id);
-        EventDisposition::Suppress
-    } else {
-        suppressed.remove(&id);
-        EventDisposition::PassThrough
-    }
-}
-
-/// A release follows its matching press, not the pointer's current profile.
-fn remapped_release_disposition(
-    id: ButtonId,
-    suppressed: &mut HashSet<ButtonId>,
-) -> EventDisposition {
-    if suppressed.remove(&id) {
-        EventDisposition::Suppress
-    } else {
-        EventDisposition::PassThrough
-    }
 }
 
 /// Suppress only input accepted by an off-thread runtime. Rejected input must
@@ -493,7 +580,7 @@ fn handle_moved(
     hooks: &SharedHookMaps,
     dispatcher: &ActionDispatcher,
 ) -> EventDisposition {
-    let commit = HOLD.with_borrow_mut(|h| h.accumulate(delta_x, delta_y));
+    let commit = PRESSES.with_borrow_mut(|presses| presses.accumulate(delta_x, delta_y));
     if let Some((press, button, dir)) = commit {
         let action = hooks.try_read().ok().map(|m| {
             m.gestures
@@ -579,8 +666,8 @@ pub fn start(
     // Actions never run on the tap callback thread (HID CGEventTap freeze hazard).
     let action_tx = spawn_action_worker(dispatcher.clone());
 
-    // The per-hold pointer accumulator lives in the thread-local `HOLD`; the
-    // callback must never block — see the freeze-hazard note in `macos.rs`.
+    // The per-hold pointer accumulator lives in the thread-local `PRESSES`;
+    // the callback must never block — see the freeze-hazard note in `macos.rs`.
     let result = Hook::start(move |event| match event {
         HookEvent::Mouse(event) => {
             monitor.record(&event);
@@ -602,7 +689,7 @@ pub fn start(
                     handle_moved(delta_x, delta_y, &hooks, &dispatcher)
                 }
                 MouseEvent::CaptureInterrupted => {
-                    HOLD.with_borrow_mut(HoldState::cancel);
+                    PRESSES.with_borrow_mut(ButtonPresses::interrupt);
                     HELD_KEYS.with_borrow_mut(HashSet::clear);
                     dispatcher.cancel_hook_thread_buttons();
                     scroll.cancel_hooks();

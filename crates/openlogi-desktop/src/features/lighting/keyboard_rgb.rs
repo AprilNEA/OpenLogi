@@ -8,7 +8,7 @@
 use crate::ui::theme::FocusRingStyle as _;
 use gpui::{
     Context, InteractiveElement, IntoElement, ParentElement, Render, Role,
-    StatefulInteractiveElement as _, Styled, Subscription, Toggled, Window, px, rgb,
+    StatefulInteractiveElement as _, Styled, Subscription, Toggled, Window, div, px, rgb,
 };
 use gpui_kit::base::Button as BaseButton;
 use gpui_kit::component::{Selectable as _, h_flex, slider::Slider, v_flex};
@@ -21,7 +21,11 @@ use crate::ui::components::{Toggle, toggle_row};
 use crate::ui::slider_row::SliderRow;
 use crate::ui::theme::{self, Palette};
 
-const SWATCH: f32 = 28.;
+/// The coloured face of a swatch.
+const SWATCH: f32 = 24.;
+/// The selection ring around a swatch, and the clear gap between the two.
+const SWATCH_RING: f32 = 2.;
+const SWATCH_RING_GAP: f32 = 2.;
 
 /// Preset colors. Deliberately small — covering the common keyboard accent
 /// colors.
@@ -106,7 +110,9 @@ impl Render for LightingPanel {
                         });
                     }),
             ))
-            .child(h_flex().gap_2().flex_wrap().children(swatches))
+            // The rings' clear gaps already space the faces; a full gap on top
+            // would spread the row.
+            .child(h_flex().gap_1().flex_wrap().children(swatches))
             .child(
                 SliderRow::new(
                     tr!("camera.brightness"),
@@ -121,8 +127,14 @@ impl Render for LightingPanel {
 }
 
 /// One color swatch. Clicking it turns lighting on and sets that color.
+///
+/// The selection ring sits a gap outside the colour, the way the keypad's
+/// photo keys are ringed: a ring drawn on the swatch's own edge vanishes
+/// against a blue or indigo swatch. The ring also shows, muted, under the
+/// pointer, so the swatches read as pressable before one is pressed.
 fn swatch(color: Rgb, current: &Lighting, pal: Palette) -> impl IntoElement {
     let selected = current.enabled && current.color == color;
+    let outer = SWATCH_RING + SWATCH_RING_GAP;
     BaseButton::new(("light-swatch", color.packed()))
         .role(Role::RadioButton)
         .selected(selected)
@@ -137,17 +149,34 @@ fn swatch(color: Rgb, current: &Lighting, pal: Palette) -> impl IntoElement {
             Toggled::False
         })
         .aria_selected(selected)
-        .size(px(SWATCH))
-        .rounded(pal.control_radius)
-        .border_2()
+        .size(px(SWATCH + 2. * outer))
+        .p(px(SWATCH_RING_GAP))
+        // The ring follows the swatch's corner, one gap further out.
+        .rounded(pal.control_radius + px(outer))
+        .border(px(SWATCH_RING))
         .border_color(if selected {
             theme::accent()
         } else {
-            pal.border
+            gpui::transparent_black()
         })
-        .bg(rgb(color.packed()))
+        .hover(move |style| {
+            style.border_color(if selected {
+                theme::accent()
+            } else {
+                pal.text_muted
+            })
+        })
         .cursor_pointer()
         .focus_visible(move |style| style.focus_ring(pal))
+        .child(
+            // The hairline keeps a white or pale swatch visible on the card.
+            div()
+                .size_full()
+                .rounded(pal.control_radius)
+                .border_1()
+                .border_color(pal.border)
+                .bg(rgb(color.packed())),
+        )
         .on_click(move |_event, _window, cx| {
             AppState::apply(cx, |state| {
                 let mut next = state.lighting();

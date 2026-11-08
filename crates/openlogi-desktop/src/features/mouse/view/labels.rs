@@ -6,7 +6,7 @@ use super::super::thumbwheel::ThumbwheelPreset;
 use crate::features::binding_editor::{GESTURE_BUTTON_ICON, action_icon_path};
 use crate::ui::action::localized_action_label;
 use crate::ui::theme::FocusRingStyle as _;
-use crate::ui::theme::{self, ACCENT_BLUE, Typography as _};
+use crate::ui::theme::{self, ACCENT_BLUE, PressableStyle as _, Typography as _};
 use gpui::{
     App, ElementId, Entity, Hsla, IndentAdjustment, InteractiveElement, IntoElement, LineFragment,
     ParentElement, Pixels, Refineable as _, RenderOnce, SharedString,
@@ -288,13 +288,7 @@ impl RenderOnce for LabelTrigger {
                 pal.control
             })
             .cursor_pointer()
-            .hover(move |s| {
-                s.bg(if highlighted {
-                    theme::accent_tint_hover()
-                } else {
-                    pal.control_hover
-                })
-            })
+            .pressable_fill(highlighted, pal)
             .focus_visible(move |style| style.focus_ring(pal))
             // Button name — the caption (xs / muted), the same size as the
             // inspector title and category headers it shares the binding flow with.

@@ -7,7 +7,7 @@
 use super::theme::FocusRingStyle as _;
 use gpui::{
     AnyElement, App, ClickEvent, Div, ElementId, Entity, InteractiveElement, Interactivity,
-    IntoElement, ParentElement, Pixels, RenderOnce, Role, SharedString, Stateful,
+    IntoElement, ParentElement, RenderOnce, Role, SharedString, Stateful,
     StatefulInteractiveElement, Styled, Window, div, prelude::FluentBuilder as _, px, rgb,
 };
 use gpui_kit::base::Button as BaseButton;
@@ -24,7 +24,7 @@ use gpui_kit::component::{
     v_flex,
 };
 
-use super::theme::{self, ACCENT_BLUE, SelectableStyle as _, Typography as _};
+use super::theme::{self, ACCENT_BLUE, PressableStyle as _, SelectableStyle as _, Typography as _};
 
 /// A gpui-component button at the house control height.
 ///
@@ -98,7 +98,16 @@ pub(crate) fn control_select<D: SearchableListDelegate + 'static>(
     Select::new(state).small().min_h(px(theme::CONTROL_H))
 }
 
-/// A controlled on/off switch with a compact state label.
+/// A controlled on/off switch.
+///
+/// It carries no "On" / "Off" word: the row or heading beside it names the
+/// setting, and the switch's position says the state — the word shifted the
+/// switch sideways as its length changed between states and languages, and a
+/// screen reader took it for the switch's name. A [`Toggle::label`] is for a
+/// word the position alone cannot say, such as "Unavailable". The name a
+/// screen reader announces is the [`Toggle::accessibility_label`];
+/// [`toggle_row`] fills it in from its title, and a switch placed by hand
+/// passes the setting's name itself.
 #[derive(IntoElement)]
 pub(crate) struct Toggle {
     id: ElementId,
@@ -108,7 +117,6 @@ pub(crate) struct Toggle {
     label: Option<SharedString>,
     accessibility_label: Option<SharedString>,
     icon: Option<IconName>,
-    min_width: Option<Pixels>,
     on_change: Option<SwitchHandler>,
 }
 
@@ -124,19 +132,22 @@ impl Toggle {
             label: None,
             accessibility_label: None,
             icon: None,
-            min_width: None,
             on_change: None,
         }
     }
 
+    /// A word shown beside the switch that its position cannot say —
+    /// "Unavailable" on a disabled switch, or the setting's own name where no
+    /// row names it. Not the state: the switch shows that itself.
     #[must_use]
     pub(crate) fn label(mut self, label: impl Into<Option<SharedString>>) -> Self {
         self.label = label.into();
         self
     }
 
-    /// The name a screen reader announces, when the switch's subject is shown
-    /// beside it rather than in its On/Off label.
+    /// The name a screen reader announces: the setting the switch controls.
+    /// Without one, the switch is announced by its visible [`Toggle::label`],
+    /// which for "Unavailable" names the wrong thing.
     #[must_use]
     pub(crate) fn accessibility_label(mut self, label: impl Into<SharedString>) -> Self {
         self.accessibility_label = Some(label.into());
@@ -146,12 +157,6 @@ impl Toggle {
     #[must_use]
     pub(crate) fn icon(mut self, icon: impl Into<Option<IconName>>) -> Self {
         self.icon = icon.into();
-        self
-    }
-
-    #[must_use]
-    pub(crate) fn min_width(mut self, width: impl Into<Option<Pixels>>) -> Self {
-        self.min_width = width.into();
         self
     }
 
@@ -192,19 +197,15 @@ impl Sizable for Toggle {
 
 impl RenderOnce for Toggle {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
-        let label = self.label.unwrap_or_else(|| {
-            if self.selected {
-                tr!("common.on")
-            } else {
-                tr!("common.off")
-            }
-        });
+        // The checked fill is the theme's `primary`, the same one the Settings
+        // pages' stock switches take, so one page shows one kind of switch.
         let mut toggle = Switch::new(self.id)
             .checked(self.selected)
             .disabled(self.disabled)
-            .with_size(self.size)
-            .label(label)
-            .color(rgb(ACCENT_BLUE));
+            .with_size(self.size);
+        if let Some(label) = self.label {
+            toggle = toggle.label(label);
+        }
         if let Some(name) = self.accessibility_label {
             toggle = toggle.accessibility_label(name);
         }
@@ -214,26 +215,27 @@ impl RenderOnce for Toggle {
         h_flex()
             .items_center()
             .gap_2()
-            .when_some(self.min_width, |row, width| {
-                row.min_w(width).justify_center()
-            })
             .when_some(self.icon, |row, icon| row.child(Icon::new(icon).size_3()))
             .child(toggle)
     }
 }
 
-/// One setting: a title and a caption on the left, its control — a toggle, or
-/// a compact segmented choice — on the right. The caption column shrinks and
-/// wraps, so a long translation cannot push the control out of its card or
-/// panel. `selector` names the row for layout tests, and `{selector}-control`
+/// One setting: a title and a caption on the left, its toggle on the right.
+/// The caption column shrinks and wraps, so a long translation cannot push the
+/// toggle out of its card or panel. The title is the setting's name, so it is
+/// what a screen reader announces for the toggle unless the toggle names
+/// itself. `selector` names the row for layout tests, and `{selector}-control`
 /// the control's slot.
 pub(crate) fn toggle_row(
     selector: &'static str,
     pal: theme::Palette,
     title: SharedString,
     description: SharedString,
-    control: impl IntoElement,
+    mut control: Toggle,
 ) -> impl IntoElement {
+    if control.accessibility_label.is_none() {
+        control.accessibility_label = Some(title.clone());
+    }
     h_flex()
         .debug_selector(move || selector.into())
         .justify_between()
@@ -435,13 +437,7 @@ impl RenderOnce for MenuRow {
             .text_body()
             .text_color(pal.text_primary)
             .selected_fill(selected)
-            .hover(move |style| {
-                style.bg(if selected {
-                    theme::accent_tint_hover()
-                } else {
-                    pal.control_hover
-                })
-            })
+            .pressable_fill(selected, pal)
             .focus_visible(move |style| style.focus_ring(pal))
             .children(self.children)
             .when_some(self.on_click, |row, handler| {
@@ -562,13 +558,7 @@ impl RenderOnce for ProfileTab {
             } else {
                 pal.control
             })
-            .hover(move |style| {
-                style.bg(if self.selected {
-                    theme::accent_tint_hover()
-                } else {
-                    pal.control_hover
-                })
-            })
+            .pressable_fill(self.selected, pal)
             .focus_visible(move |style| style.focus_ring(pal))
             .when_some(self.icon, |tab, icon| tab.child(icon.size_3()))
             .child(label.clone())
@@ -588,7 +578,11 @@ impl RenderOnce for ProfileTab {
                         .justify_center()
                         .rounded_full()
                         .text_color(pal.text_muted)
-                        .hover(|style| style.text_color(pal.text_primary).bg(pal.control_hover))
+                        // The glyph brightens instead of taking a fill: a fill
+                        // would match the tab's own hover fill under it, and
+                        // the tab, hovered and pressed along with the glyph,
+                        // already gives the press feedback.
+                        .hover(|style| style.text_color(pal.text_primary))
                         .focus_visible(move |style| style.focus_ring(pal))
                         .child(Icon::new(IconName::Close).size_3())
                         .on_click(move |event, window, cx| {
@@ -648,13 +642,7 @@ impl RenderOnce for PresetChip {
             .selected_border(selected, pal)
             .bg(pal.control)
             .selected_fill(selected)
-            .hover(move |style| {
-                style.bg(if selected {
-                    theme::accent_tint_hover()
-                } else {
-                    pal.control_hover
-                })
-            })
+            .pressable_fill(selected, pal)
             .children(self.children)
     }
 }

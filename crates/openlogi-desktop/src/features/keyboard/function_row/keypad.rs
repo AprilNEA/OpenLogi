@@ -30,7 +30,9 @@ use super::{
 use crate::features::mouse::geometry::asset_dimensions_for_png;
 use crate::services::assets::ResolvedAsset;
 use crate::state::AppState;
-use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
+use crate::ui::theme::{
+    self, ACCENT_BLUE, Palette, PressableStyle as _, SelectableStyle as _, Typography as _,
+};
 
 /// A keypad's last binding page — the one the page bar can remove.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,6 +51,7 @@ pub(super) fn keypad_page_bar(
     last_page: LastPage,
     view: &Entity<FunctionRowView>,
     pal: &Palette,
+    cx: &App,
 ) -> impl IntoElement {
     let last = last_page.page;
     let pages: Vec<KeypadPage> = last.through().collect();
@@ -68,6 +71,7 @@ pub(super) fn keypad_page_bar(
             Button::new(("keypad-page", usize::from(candidate.number())))
                 .label(candidate.to_string())
                 .selected(*candidate == page)
+                .selected_segment(*candidate == page, cx)
         }))
         .on_click(select);
     let added = KeypadPage::new(last.number().saturating_add(1));
@@ -490,13 +494,7 @@ impl RenderOnce for KeyCap {
                 pal.control
             })
             .cursor_pointer()
-            .hover(move |s| {
-                s.bg(if highlighted {
-                    theme::accent_tint_hover()
-                } else {
-                    pal.control_hover
-                })
-            })
+            .pressable_fill(highlighted, pal)
             .child(
                 div()
                     .max_w(px(cap_w - 8.))

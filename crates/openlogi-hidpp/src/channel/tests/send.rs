@@ -189,7 +189,7 @@ fn cancelled_send_removes_pending_before_a_late_response() {
         ));
 
         assert!(futures::poll!(send.as_mut()).is_pending());
-        assert_eq!(channel.pending_messages.lock().unwrap().messages.len(), 1);
+        assert_eq!(pending_len(&channel), 1);
 
         drop(send);
         assert_pending_empty(&channel);

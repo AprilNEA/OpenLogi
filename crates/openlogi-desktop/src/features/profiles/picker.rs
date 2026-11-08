@@ -21,7 +21,7 @@ use super::shell::application_mark;
 use super::{AddAppChoices, CatalogPresentation, ProfileChoice, ProfileScopeActions};
 use crate::features::binding_editor::{compact_panel, divider, title};
 use crate::ui::components::{MenuRow, control_button, control_input};
-use crate::ui::theme::{self, Palette, SelectableStyle as _, Typography as _};
+use crate::ui::theme::{Palette, PressableStyle as _, SelectableStyle as _, Typography as _};
 
 const APP_ROW_H: f32 = 44.;
 /// Icon tile edge inside picker rows: the height of the two-line text block,
@@ -243,13 +243,7 @@ fn applications_toggle(
             pal.text_muted
         })
         .selected_fill(expanded)
-        .hover(move |button| {
-            button.bg(if expanded {
-                theme::accent_tint_hover()
-            } else {
-                pal.control_hover
-            })
-        })
+        .pressable_fill(expanded, pal)
         .focus_visible(move |style| style.focus_ring(pal))
         .child(
             // The chevron sits centred in a row-icon-wide slot so the label

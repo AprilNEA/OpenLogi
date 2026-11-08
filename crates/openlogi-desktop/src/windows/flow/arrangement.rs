@@ -20,7 +20,7 @@ use openlogi_core::config::{FlowEdge, FlowPeerName};
 
 use super::{FlowModel, FlowView, PeerModel, link_dot, link_label};
 use crate::state::{AppState, FlowHost};
-use crate::ui::theme::{self, Palette, Typography as _};
+use crate::ui::theme::{self, Palette, PressableStyle as _, Typography as _};
 
 const TILE_W: f32 = 136.;
 const SCREEN_W: f32 = 120.;
@@ -390,7 +390,7 @@ fn tray_chip(
         })
         .bg(pal.panel)
         .cursor_pointer()
-        .hover(|style| style.bg(pal.control_hover))
+        .pressable_fill(false, pal)
         .focus_visible(move |style| style.focus_ring(pal))
         .text_caption()
         .child(

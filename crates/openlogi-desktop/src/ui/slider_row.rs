@@ -20,7 +20,7 @@ use gpui::{
 use gpui_kit::base::Button as BaseButton;
 use gpui_kit::component::{h_flex, v_flex};
 
-use super::theme::{self, FocusRingStyle as _, Palette, Typography as _};
+use super::theme::{self, FocusRingStyle as _, Palette, PressableStyle as _, Typography as _};
 
 /// Selects a row's value column in GPUI tests.
 const VALUE_SELECTOR: &str = "slider-row-value";
@@ -237,7 +237,7 @@ fn entry_button(button: BaseButton, number: Div, pal: Palette) -> BaseButton {
         .border_1()
         .border_color(pal.border)
         .bg(pal.control)
-        .hover(move |style| style.bg(pal.control_hover))
+        .pressable_fill(false, pal)
         .focus_visible(move |style| style.focus_ring(pal))
         .child(number)
 }

@@ -33,7 +33,7 @@ use openlogi_ipc::{
 use super::FlowView;
 use crate::state::{AppState, FlowHost, FlowPairingRefusal};
 use crate::ui::components::{control_input, localize_placeholder};
-use crate::ui::theme::{self, Palette, Typography as _};
+use crate::ui::theme::{self, Palette, PressableStyle as _, Typography as _};
 
 /// What the dialog keeps while it is open: the user's own choices.
 pub(super) struct PairingForm {
@@ -433,8 +433,7 @@ fn nearby_row(
         .border_color(if chosen { theme::accent() } else { pal.border })
         .when(chosen, |row| row.bg(theme::accent_tint()))
         .when(!nearby.added, |row| {
-            row.cursor_pointer()
-                .hover(|style| style.bg(pal.control_hover))
+            row.cursor_pointer().pressable_fill(chosen, pal)
         })
         .when(nearby.added, |row| row.opacity(0.6))
         .child(
