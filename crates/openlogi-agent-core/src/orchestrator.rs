@@ -443,7 +443,8 @@ impl SharedHandles {
     /// shows, and darkens the DPI LED when the precision speed ends with it.
     /// It is ordered with the precision button, the DPI preset actions and
     /// the reconnect reapply. A write superseded before its turn writes
-    /// nothing.
+    /// nothing and answers [`WriteError::WriteSuperseded`], so its caller
+    /// saves nothing: the newer write decides the DPI.
     pub async fn set_dpi(&self, route: &DeviceRoute, dpi: Dpi) -> Result<(), WriteError> {
         let AppWrite { ticket, restore } = self
             .pointer_speeds
@@ -469,11 +470,16 @@ impl SharedHandles {
                     }
                     Ok(())
                 },
-                |_| async { Ok(()) },
+                |_| async {
+                    Err(WriteError::WriteSuperseded {
+                        operation: HidppOperation::WriteDpi,
+                    })
+                },
             )
             .await;
-        // A rejected write leaves the mouse where it was, which only a
-        // reading of it can tell.
+        // A rejected write leaves the mouse where it was, and a superseded
+        // one where the newer write puts it, which only a reading of it can
+        // tell.
         if result.is_err()
             && let Ok(mut cycles) = self.dpi_cycle.write()
         {
