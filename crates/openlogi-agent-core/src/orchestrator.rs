@@ -588,10 +588,6 @@ pub struct Orchestrator {
     panel_generations: HashMap<DeviceRoute, u64>,
     /// The last panel epoch handed out.
     panel_epoch: u64,
-    /// Whether the last enumeration pass failed to open HID++ nodes; published
-    /// atomically with the inventory so no observation pairs a fresh device
-    /// set with a stale flag.
-    hid_open_failures: bool,
     /// Physical identities of devices first sighted (or targeted after wake)
     /// recently, with remaining confirming re-apply budget: the first write can
     /// race the device's own boot or reconnect and be lost.
@@ -670,6 +666,9 @@ enum InventoryState {
     Ready {
         inventories: Vec<DeviceInventory>,
         standalone: Vec<StandaloneDevice>,
+        /// Whether this pass failed to open HID++ nodes. It travels with the
+        /// device set so no observation pairs a fresh set with a stale flag.
+        hid_open_failures: bool,
     },
     /// Enumeration has never succeeded (broken HID backend / dead watcher).
     Unavailable,
@@ -839,7 +838,6 @@ impl Orchestrator {
             capture_route_generations: HashMap::new(),
             panel_generations: HashMap::new(),
             panel_epoch: 0,
-            hid_open_failures: false,
             reapply_followup: BTreeMap::new(),
             disabled_keys_recovery: BTreeMap::new(),
             settings_epochs: Vec::new(),
@@ -1500,10 +1498,10 @@ impl Orchestrator {
         // Even an empty snapshot is a *completed* enumeration — the watcher
         // skips failed ticks — so the device set is now known either way (and
         // a recovered backend upgrades `Unavailable` back to live data).
-        self.hid_open_failures = hid_open_failures;
         self.inventory = InventoryState::Ready {
             inventories: inventories.to_vec(),
             standalone: standalone.to_vec(),
+            hid_open_failures,
         };
         self.publish_inventory();
         let devices = build_devices(&self.config, inventories, standalone);
@@ -2100,18 +2098,14 @@ impl Orchestrator {
             InventoryState::Ready {
                 inventories,
                 standalone,
+                hid_open_failures,
             } => {
                 let inventories = published_inventories(inventories, &self.settings_epochs);
-                self.observable.set_inventory(
-                    health,
-                    &inventories,
-                    standalone,
-                    self.hid_open_failures,
-                );
+                self.observable
+                    .set_inventory(health, &inventories, standalone, *hid_open_failures);
             }
             InventoryState::Pending | InventoryState::Unavailable => {
-                self.observable
-                    .set_inventory(health, &[], &[], self.hid_open_failures);
+                self.observable.set_inventory(health, &[], &[], false);
             }
         }
     }
