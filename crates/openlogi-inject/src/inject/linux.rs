@@ -152,8 +152,6 @@ fn dispatch_native(action: &Action, native: NativeAction) {
 }
 
 fn dispatch_generic_linux_native(action: &Action, native: NativeAction) {
-    let ctrl = KeyCode::KEY_LEFTCTRL;
-    let alt = KeyCode::KEY_LEFTALT;
     match native {
         // On KDE, KWin's Overview effect via its global-shortcut component.
         // GNOME's overlay key toggles the Activities overview on a bare tap;
@@ -196,15 +194,23 @@ fn dispatch_generic_linux_native(action: &Action, native: NativeAction) {
         NativeAction::LaunchpadShow => {
             gnome_key_or_skip(action, &[KeyCode::KEY_LEFTMETA], KeyCode::KEY_A);
         }
-        // Ctrl+Alt+←/→ is the default in GNOME and KDE; on KDE, drive KWin's
-        // D-Bus API directly and fall back to the key combo elsewhere.
+        // On KDE, drive KWin's D-Bus API directly; elsewhere press the
+        // desktop's own workspace chord (see `desktop_switch_mods`).
         NativeAction::PreviousDesktop => {
-            kwin_switch_desktop("previousDesktop")
-                .unwrap_or_else(|| press_key(&[ctrl, alt], KeyCode::KEY_LEFT));
+            kwin_switch_desktop("previousDesktop").unwrap_or_else(|| {
+                press_key(
+                    desktop_switch_mods(current_desktop().as_deref()),
+                    KeyCode::KEY_LEFT,
+                );
+            });
         }
         NativeAction::NextDesktop => {
-            kwin_switch_desktop("nextDesktop")
-                .unwrap_or_else(|| press_key(&[ctrl, alt], KeyCode::KEY_RIGHT));
+            kwin_switch_desktop("nextDesktop").unwrap_or_else(|| {
+                press_key(
+                    desktop_switch_mods(current_desktop().as_deref()),
+                    KeyCode::KEY_RIGHT,
+                );
+            });
         }
         // logind LockSession() via the system bus; falls back to Super+L.
         NativeAction::LockScreen => lock_screen(),
@@ -998,6 +1004,20 @@ fn capture_region_mods(desktop: Option<&str>) -> Vec<KeyCode> {
     }
 }
 
+/// The modifiers that turn ←/→ into the previous/next-workspace chord, chosen
+/// from the (colon-separated) `$XDG_CURRENT_DESKTOP` value.
+///
+/// Ctrl+Alt is GNOME's stock binding, and what an unset or unrecognised
+/// desktop keeps. COSMIC binds Super+Ctrl+←/→ instead and leaves Ctrl+Alt+←/→
+/// unbound.
+fn desktop_switch_mods(desktop: Option<&str>) -> &'static [KeyCode] {
+    if desktop.is_some_and(|desktop| desktop.split(':').any(|d| d == "cosmic")) {
+        &[KeyCode::KEY_LEFTMETA, KeyCode::KEY_LEFTCTRL]
+    } else {
+        &[KeyCode::KEY_LEFTCTRL, KeyCode::KEY_LEFTALT]
+    }
+}
+
 /// Suspend the system via logind's `Suspend()` on the system bus. The
 /// `false` argument declines the "interactive" polkit prompt — if the
 /// session isn't allowed to suspend, the call fails and is logged rather
@@ -1202,10 +1222,10 @@ mod tests {
 
     use super::{
         HELPER_PREFIXES, KEY_CAPABILITIES, ScrollOutput, action_scroll, capture_region_mods, combo,
-        generic_linux_lock_fallback_chord, hid_usage_to_linux, hyprland_helper,
-        hyprland_lock_fallback_chord, hyprland_lock_helper, hyprland_session_from_signature,
-        key_ev, key_phase_events, modifiers_to_keycodes, rel_ev, resolve_allowlisted_under,
-        scroll_events, syn, unheld_modifiers, wait_with_retry,
+        desktop_switch_mods, generic_linux_lock_fallback_chord, hid_usage_to_linux,
+        hyprland_helper, hyprland_lock_fallback_chord, hyprland_lock_helper,
+        hyprland_session_from_signature, key_ev, key_phase_events, modifiers_to_keycodes, rel_ev,
+        resolve_allowlisted_under, scroll_events, syn, unheld_modifiers, wait_with_retry,
     };
     use crate::inject::{HeldOutput, KeyPhase};
 
@@ -1522,5 +1542,27 @@ mod tests {
         // GNOME-on-Ubuntu reports "ubuntu:gnome" — the compound string must
         // still resolve to the GNOME (no-op) branch, not fall through.
         assert_eq!(capture_region_mods(Some("ubuntu:gnome")), vec![]);
+    }
+
+    #[test]
+    fn desktop_switch_mods_picks_the_desktops_chord() {
+        let ctrl_alt: &[KeyCode] = &[KeyCode::KEY_LEFTCTRL, KeyCode::KEY_LEFTALT];
+        let super_ctrl: &[KeyCode] = &[KeyCode::KEY_LEFTMETA, KeyCode::KEY_LEFTCTRL];
+        for (desktop, expected) in [
+            (None, ctrl_alt),
+            (Some("gnome"), ctrl_alt),
+            (Some("ubuntu:gnome"), ctrl_alt),
+            (Some("cosmic"), super_ctrl),
+            // Any entry of the colon-separated list selects COSMIC's chord...
+            (Some("pop:cosmic"), super_ctrl),
+            // ...but only a whole entry, not a substring of another name.
+            (Some("cosmic-like"), ctrl_alt),
+        ] {
+            assert_eq!(
+                desktop_switch_mods(desktop),
+                expected,
+                "XDG_CURRENT_DESKTOP={desktop:?}"
+            );
+        }
     }
 }
