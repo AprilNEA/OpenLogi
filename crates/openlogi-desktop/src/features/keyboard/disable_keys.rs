@@ -95,12 +95,12 @@ fn recovery_content(
                 )
                 .into_any_element(),
         ),
-        DisableKeysPersistenceStatus::SavedNotReloaded(_)
-        | DisableKeysPersistenceStatus::SavedNotReloadedDetached(_)
-        | DisableKeysPersistenceStatus::ReconcileRequired(_) => {
+        DisableKeysPersistenceStatus::SavedNotReloaded { .. }
+        | DisableKeysPersistenceStatus::SavedNotReloadedDetached { .. }
+        | DisableKeysPersistenceStatus::ReconcileRequired { .. } => {
             let message = if matches!(
                 persistence,
-                DisableKeysPersistenceStatus::ReconcileRequired(_)
+                DisableKeysPersistenceStatus::ReconcileRequired { .. }
             ) {
                 tr!("keyboard.disable_keys_refresh_failed")
             } else {
@@ -117,7 +117,7 @@ fn recovery_content(
         | DisableKeysPersistenceStatus::AwaitingReconciliationReload(_) => {
             Some(status_line(tr!("keyboard.applying_and_confirming"), pal).into_any_element())
         }
-        DisableKeysPersistenceStatus::Idle => None,
+        DisableKeysPersistenceStatus::Idle { .. } => None,
     }
 }
 
