@@ -73,15 +73,19 @@ jobs:
       fail-fast: false
       matrix:
         # Most of the build is the serial fat-LTO tail of the release
-        # profile, so 16 vCPUs bought little over 8. Memory peaked at 12 GB,
+        # profile, so 16 vCPUs bought little over 8. Memory peaked at 14 GB,
         # hence 32 GB rather than 16.
         include:
           - system: x86_64-linux
             machine: x86_64
             runner: nscloud-ubuntu-24.04-amd64-8x32
+          # That serial tail made aarch64 take 34 minutes on AmpereOne,
+          # against 15 for x86_64, so aarch64 runs on Namespace's Linux on
+          # Apple Silicon. There 16x32 costs the same as 8x32, and labels
+          # cannot select 12x24.
           - system: aarch64-linux
             machine: aarch64
-            runner: nscloud-ubuntu-24.04-arm64-8x32
+            runner: nscloud-ubuntu-24.04-arm64-16x32;linux-on-apple-silicon=true
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
