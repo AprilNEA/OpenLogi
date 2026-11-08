@@ -200,13 +200,42 @@ fn a_reload_withdraws_queued_layout_writes_the_user_opted_out_of() {
 }
 
 #[test]
-fn pointer_reapply_policy_requires_pointer_device_for_default_curve() {
-    assert!(!should_apply_os_pointer_settings(false, false, true));
-    assert!(should_apply_os_pointer_settings(true, false, true));
-    assert!(!should_apply_os_pointer_settings(true, false, false));
-    // A saved speed/acceleration setting remains explicit even when capability
-    // discovery has not identified the device as a pointing device.
-    assert!(should_apply_os_pointer_settings(false, true, false));
+fn unconfigured_mouse_writes_no_global_pointer_settings() {
+    use openlogi_core::compositor::Compositor;
+    assert!(pointer_commands(Compositor::Hyprland, None, None).is_empty());
+    assert!(pointer_commands(Compositor::Sway, None, None).is_empty());
+}
+
+#[test]
+fn hyprland_curve_carries_the_speed_without_a_sensitivity_command() {
+    use openlogi_core::compositor::Compositor;
+    let commands = pointer_commands(Compositor::Hyprland, Some(0.3), None);
+    assert_eq!(commands.len(), 1);
+    assert!(commands[0][2].contains("accel_profile"));
+    assert!(!commands[0][2].contains("sensitivity"));
+}
+
+#[test]
+fn hyprland_adaptive_profile_keeps_the_sensitivity() {
+    use openlogi_core::compositor::Compositor;
+    let commands = pointer_commands(Compositor::Hyprland, Some(0.3), Some(false));
+    assert_eq!(commands.len(), 2);
+    assert!(commands[0][2].contains("'adaptive'"));
+    assert!(commands[1][2].contains("input:sensitivity 0.3"));
+}
+
+#[test]
+fn sway_speed_is_a_single_sensitivity_command() {
+    use openlogi_core::compositor::Compositor;
+    assert_eq!(
+        pointer_commands(Compositor::Sway, Some(-0.5), None),
+        vec![
+            vec!["swaymsg", "input", "*", "pointer_accel", "-0.5"]
+                .into_iter()
+                .map(String::from)
+                .collect::<Vec<_>>()
+        ]
+    );
 }
 
 #[test]
