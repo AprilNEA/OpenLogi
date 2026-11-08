@@ -302,6 +302,12 @@ pub enum DeeplinkCommand {
     OpenAppProfile(String),
     /// Open the Flow window.
     OpenFlow,
+    /// Open a camera's page on its device information, which leaves the
+    /// camera off — by the camera's settings key (`camera:…`), never empty.
+    OpenCamera(String),
+    /// Open a camera's live preview, which turns the camera on — by the
+    /// camera's settings key (`camera:…`), never empty.
+    PreviewCamera(String),
 }
 
 /// A device an `openlogi://` link may open: a [`PhysicalDeviceKey`] that names
@@ -352,6 +358,8 @@ impl DeeplinkCommand {
             Self::AddDevice => ("add-device", None),
             Self::OpenAppProfile(app) => ("open-app-profile", Some(app)),
             Self::OpenFlow => ("open-flow", None),
+            Self::OpenCamera(camera) => ("open-camera", Some(camera)),
+            Self::PreviewCamera(camera) => ("preview-camera", Some(camera)),
         }
     }
 
@@ -370,6 +378,8 @@ impl DeeplinkCommand {
             ("add-device", _) => Self::AddDevice,
             ("open-app-profile", Some(app)) => Self::OpenAppProfile(app),
             ("open-flow", _) => Self::OpenFlow,
+            ("open-camera", Some(camera)) => Self::OpenCamera(camera),
+            ("preview-camera", Some(camera)) => Self::PreviewCamera(camera),
             _ => return None,
         })
     }
@@ -446,6 +456,8 @@ mod tests {
             app(r"c:\program files\adobe\photoshop 2026\photoshop.exe"),
             app("/Applications/Zed.app/Contents/MacOS/zed"),
             app("org.example.Ünïcødé"),
+            DeeplinkCommand::OpenCamera("camera:046d:0893:serial:a1/b2 c3".into()),
+            DeeplinkCommand::PreviewCamera("camera:046d:085e".into()),
         ];
         for command in commands {
             let url = command.to_url();
@@ -518,6 +530,8 @@ mod tests {
             "openlogi://open-app-profile//Applications/Zed.app",
             // Not UTF-8 once unescaped.
             "openlogi://open-app-profile/%FF",
+            "openlogi://open-camera",
+            "openlogi://preview-camera/",
         ] {
             assert_eq!(DeeplinkCommand::parse_url(url), None, "{url}");
         }

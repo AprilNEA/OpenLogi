@@ -7,6 +7,7 @@
 
 use gpui::App;
 use openlogi_core::brand::{DeeplinkCommand, DeviceLink};
+use openlogi_core::device::DeviceKind;
 use openlogi_ipc::InventoryHealth;
 use tracing::warn;
 
@@ -37,6 +38,8 @@ enum Page {
     /// The selected device's profile for an application, by
     /// [`ForegroundApp::id`](openlogi_core::app::ForegroundApp::id).
     AppProfile(String),
+    /// A camera's page on `tab`, by the camera's settings key.
+    Camera { key: String, tab: DetailTab },
 }
 
 impl Deeplinks {
@@ -80,6 +83,20 @@ impl Deeplinks {
             }
             Cmd::OpenDevice(device) => self.open(Page::Device(device), cx),
             Cmd::OpenAppProfile(app) => self.open(Page::AppProfile(app), cx),
+            Cmd::OpenCamera(key) => self.open(
+                Page::Camera {
+                    key,
+                    tab: DetailTab::Device,
+                },
+                cx,
+            ),
+            Cmd::PreviewCamera(key) => self.open(
+                Page::Camera {
+                    key,
+                    tab: DetailTab::Camera,
+                },
+                cx,
+            ),
         }
     }
 
@@ -139,6 +156,23 @@ impl Page {
                     view.active_tab = tab;
                 });
                 AppState::apply(cx, |state| state.open_app_profile(app));
+            }
+            Self::Camera { key, tab } => {
+                // Two serial-less units of one model share a key; the link
+                // opens the first, as the gallery lists them.
+                let Some(record_key) = state
+                    .devices()
+                    .iter()
+                    .find(|record| record.kind == DeviceKind::Camera && record.config_key == *key)
+                    .map(DeviceRecord::record_key)
+                else {
+                    return false;
+                };
+                let tab = *tab;
+                windows::main_window::navigate(cx, |view, cx| {
+                    view.open_device(record_key, cx);
+                    view.active_tab = tab;
+                });
             }
         }
         true
