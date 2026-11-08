@@ -510,19 +510,13 @@ impl Agent for AgentServer {
         route: DeviceRoute,
         enabled: bool,
     ) -> Result<(), WriteError> {
-        self.shared
-            .hardware()
-            .apply_light(&route, LightCommand::Power(enabled))
-            .await?;
-        if !self
-            .orchestrator
-            .lock()
-            .await
-            .set_manual_light_power(&route, enabled)
-        {
-            warn!(?route, "manual light power applied without camera override");
-        }
-        Ok(())
+        orchestrator::write_manual_light_power(
+            &self.orchestrator,
+            &self.shared.hardware(),
+            &route,
+            enabled,
+        )
+        .await
     }
 
     async fn next_action_ring(self, _: Context) -> Option<ActionRingInvocation> {
