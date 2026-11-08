@@ -37,9 +37,12 @@ fn is_optional_asset(name: &str) -> bool {
     // (`images/device/side_hero.png`); match on the basename so those are
     // fetched too.
     let basename = name.rsplit('/').next().unwrap_or(name);
+    let is_png = std::path::Path::new(basename)
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("png"));
     if basename == "side_core.png"
         || basename == "side.png"
-        || (basename.starts_with("side_") && basename.ends_with(".png"))
+        || (basename.starts_with("side_") && is_png)
     {
         return true;
     }
