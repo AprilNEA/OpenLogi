@@ -8,7 +8,7 @@ use tokio::sync::Mutex;
 
 /// Keep the ordered hardware attempt and its settings invalidation together,
 /// independently of the requesting client's lifetime.
-pub(super) async fn write(
+pub(crate) async fn write(
     orchestrator: Arc<Mutex<Orchestrator>>,
     shared: &SharedHandles,
     route: DeviceRoute,

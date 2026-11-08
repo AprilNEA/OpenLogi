@@ -13,14 +13,20 @@ use openlogi_core::app::ForegroundApp;
 use openlogi_core::brand::{DeeplinkCommand, DeviceLink};
 use openlogi_core::config::{Config, canonical_device_key};
 use openlogi_core::device::{
-    BatteryAttention, BatteryInfo, BatteryLevel, BatteryStatus, DeviceKind, StandaloneDevice,
-    prettify_codename,
+    BatteryAttention, BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceKind,
+    LightCapabilities, StandaloneDevice, prettify_codename,
 };
-use openlogi_core::device_order::{DeviceIdentity, DeviceStableId};
+use openlogi_core::device_order::{DeviceIdentity, DeviceStableId, PhysicalDeviceKey};
 use openlogi_core::diagnostics::ConnectionKind;
 use openlogi_core::hid::{DIRECT_DEVICE_INDEX, DeviceRoute, find_receiver};
 use openlogi_ipc::{AgentSnapshot, AgentStatus, FlowLinkState, ObservedLight};
 use rust_i18n::t;
+
+mod controls;
+
+pub use controls::{
+    Change, Controls, DeviceMemory, DpiControl, Entry, Failure, Read, Reading, Reads,
+};
 
 /// How many recently used applications the current-app submenu lists besides
 /// the current one.
@@ -169,6 +175,10 @@ pub struct DeviceRow {
     /// or the main window for a device no link can name (one known only by
     /// its receiver slot).
     pub settings: DeeplinkCommand,
+    /// Where the agent reads and writes it, when it knows.
+    pub route: Option<DeviceRoute>,
+    /// What its submenu can change.
+    pub controls: Controls,
 }
 
 /// What a device row reports.
@@ -394,6 +404,14 @@ fn devices(snapshot: &AgentSnapshot, config: &Config) -> Vec<DeviceRow> {
             let stable = DeviceStableId::from_parts(route.as_ref(), device.slot, serial, unit_id);
             let identity = DeviceIdentity::from_parts(serial, unit_id);
             let known = Known::of(config, &stable, device.online.then_some(&identity));
+            let capabilities = device.capabilities.unwrap_or_else(|| {
+                if device.hidpp10 {
+                    Capabilities::presumed_for_hidpp10(device.kind)
+                } else {
+                    Capabilities::presumed_from_kind(device.kind)
+                }
+            });
+            let controls = known.controls(config, device.kind, capabilities, &stable);
             let name = known
                 .name
                 .or_else(|| device.codename.as_deref().map(prettify_codename))
@@ -422,6 +440,8 @@ fn devices(snapshot: &AgentSnapshot, config: &Config) -> Vec<DeviceRow> {
                     state,
                     link,
                     settings: known.settings,
+                    route,
+                    controls,
                 },
             ));
         }
@@ -444,16 +464,23 @@ fn standalone_row(
         DeviceStableId::from_parts(Some(&route), DIRECT_DEVICE_INDEX, serial, device.unit_id);
     let identity = DeviceIdentity::from_parts(serial, device.unit_id);
     let known = Known::of(config, &stable, device.online.then_some(&identity));
+    let observed = lights
+        .iter()
+        .find(|light| light.route == route)
+        .filter(|_| device.online);
+    let capabilities = device
+        .capabilities
+        .unwrap_or_else(|| Capabilities::presumed_from_kind(device.kind));
+    let mut controls = known.controls(config, device.kind, capabilities, &stable);
+    controls.light = observed
+        .map(|light| light.state.capabilities)
+        .or(device.light_capabilities)
+        .filter(|light| *light != LightCapabilities::default());
     let name = known.name.unwrap_or_else(|| device.display_name.clone());
-    let state = if device.online {
-        lights
-            .iter()
-            .find(|light| light.route == route)
-            .map_or(DeviceState::Online, |light| {
-                DeviceState::Light(LightReading::of(light))
-            })
-    } else {
-        DeviceState::Offline(None)
+    let state = match (device.online, observed) {
+        (true, Some(light)) => DeviceState::Light(LightReading::of(light)),
+        (true, None) => DeviceState::Online,
+        (false, _) => DeviceState::Offline(None),
     };
     let link = Link {
         kind: ConnectionKind::of(Some(&route), None, None),
@@ -465,12 +492,16 @@ fn standalone_row(
         state,
         link,
         settings: known.settings,
+        route: Some(route),
+        controls,
     };
     (stable, row)
 }
 
 /// What the config knows about one device.
 struct Known {
+    /// The key its settings live under, or would be saved under.
+    key: Option<PhysicalDeviceKey>,
     /// The name the user gave it in the settings app.
     name: Option<String>,
     /// The link that opens its page in the settings app.
@@ -487,11 +518,106 @@ impl Known {
             .as_ref()
             .and_then(|key| config.device_custom_name(key.as_str()))
             .map(str::to_owned);
+        let key = key.or_else(|| canonical_device_key(stable, identity));
         let settings = key
-            .or_else(|| canonical_device_key(stable, identity))
+            .clone()
             .and_then(DeviceLink::new)
             .map_or(DeeplinkCommand::Show, DeeplinkCommand::OpenDevice);
-        Self { name, settings }
+        Self {
+            key,
+            name,
+            settings,
+        }
+    }
+
+    /// What a device of `kind` with `capabilities` can change from the menu,
+    /// with the values the config saved for it on the link `stable` names —
+    /// the values the agent writes when it reconnects.
+    fn controls(
+        &self,
+        config: &Config,
+        kind: DeviceKind,
+        capabilities: Capabilities,
+        stable: &DeviceStableId,
+    ) -> Controls {
+        let key = self.key.as_ref().map(PhysicalDeviceKey::as_str);
+        let device = key.and_then(|key| config.devices.get(key));
+        let route_key = stable.route_key();
+        Controls {
+            dpi: capabilities.pointer.then(|| DpiControl {
+                presets: key.map(|key| config.dpi_presets(key)).unwrap_or_default(),
+                saved: device.and_then(|device| device.effective_dpi(&route_key)),
+            }),
+            wheel: capabilities.pointer,
+            saved_wheel: device
+                .and_then(|device| device.effective_smartshift(&route_key))
+                .map(Into::into),
+            managed: (matches!(kind, DeviceKind::Mouse | DeviceKind::Trackball)
+                || kind.is_keyboard_family())
+            .then(|| key.is_none_or(|key| config.device_enabled(key))),
+            fn_lock: capabilities.fn_lock,
+            saved_fn_lock: key.and_then(|key| config.fn_lock(key)),
+            backlight: capabilities.backlight,
+            disable_keys: capabilities.disable_keys,
+            sidetone: capabilities.sidetone,
+            light: None,
+        }
+    }
+}
+
+/// A webcam the agent found, as the tray scanned it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SeenCamera {
+    /// The name it reports.
+    pub name: String,
+    /// The key its settings live under (`camera:…`).
+    pub key: String,
+    /// Whether an application is capturing from it.
+    pub in_use: bool,
+}
+
+/// One webcam in the menu.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CameraRow {
+    /// The user's name for it, or the name it reports.
+    pub name: String,
+    /// Whether an application is capturing from it.
+    pub in_use: bool,
+    /// What its "Open Preview…" item opens.
+    pub preview: DeeplinkCommand,
+    /// What its "Open Device Settings…" item opens: its page on the tab that
+    /// leaves the camera off.
+    pub settings: DeeplinkCommand,
+}
+
+impl CameraRow {
+    /// A row for each of `cameras`, by name.
+    #[must_use]
+    pub fn all(cameras: &[SeenCamera], config: &Config) -> Vec<Self> {
+        let mut rows: Vec<Self> = cameras
+            .iter()
+            .map(|camera| Self {
+                name: config
+                    .device_custom_name(&camera.key)
+                    .map_or_else(|| camera.name.clone(), str::to_owned),
+                in_use: camera.in_use,
+                preview: DeeplinkCommand::PreviewCamera(camera.key.clone()),
+                settings: DeeplinkCommand::OpenCamera(camera.key.clone()),
+            })
+            .collect();
+        rows.sort_by(|a, b| a.name.cmp(&b.name));
+        rows
+    }
+
+    /// Whether it is in use, in words.
+    #[must_use]
+    pub fn state_text(&self) -> String {
+        if self.in_use {
+            t!("tray.camera_in_use")
+        } else {
+            t!("tray.camera_idle")
+        }
+        .into_owned()
     }
 }
 
