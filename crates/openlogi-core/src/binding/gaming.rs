@@ -143,7 +143,7 @@ const fn stock_number_key(usage: u8) -> Action {
     let Ok(key) = KeyboardUsage::try_new(usage) else {
         panic!("invalid HID usage for stock key");
     };
-    Action::CustomShortcut(KeyCombo::unmodified(key))
+    Action::HoldShortcut(KeyCombo::unmodified(key))
 }
 
 /// A gaming mouse whose layout nobody has dumped. Its first five slots are
@@ -396,6 +396,22 @@ mod tests {
             ]
         );
         assert_eq!(layout.remappable().count(), 11);
+    }
+
+    #[test]
+    fn g604_stock_number_keys_hold_until_release() {
+        let layout = GamingLayout::for_model_key("0b024").unwrap();
+        for (button, digit) in [
+            (ButtonId::G7, "3"),
+            (ButtonId::G8, "2"),
+            (ButtonId::G9, "1"),
+        ] {
+            let combo = digit.parse().unwrap();
+            assert_eq!(
+                layout.stock_action(button),
+                Some(Action::HoldShortcut(combo))
+            );
+        }
     }
 
     #[test]

@@ -613,6 +613,19 @@ mod tests {
     }
 
     #[test]
+    fn g604_fallback_has_every_remappable_button() {
+        let layout = GamingLayout::for_model_key("0b024").unwrap();
+        let mut expected: Vec<MouseControlId> = layout.remappable().map(Into::into).collect();
+        let mut drawn: Vec<_> = fallback_hotspots(Some(layout), false)
+            .into_iter()
+            .map(|hotspot| hotspot.id)
+            .collect();
+        expected.sort_unstable();
+        drawn.sort_unstable();
+        assert_eq!(drawn, expected);
+    }
+
+    #[test]
     fn an_unverified_gaming_depot_marks_only_the_standard_buttons() {
         use openlogi_core::binding::STANDARD_BUTTONS;
         let asset = g502_asset();
