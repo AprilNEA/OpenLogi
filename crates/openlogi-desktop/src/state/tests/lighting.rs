@@ -201,7 +201,7 @@ fn a_change_made_while_the_light_is_offline_replaces_a_write_still_in_flight() {
     ];
 
     for record in &mut state.devices.records {
-        record.online = false;
+        record.presence = Presence::Listed(Link::Offline);
     }
     let offline_choice = LightSettings::new(true, 70, None);
     let _ = state.commit_light(offline_choice);

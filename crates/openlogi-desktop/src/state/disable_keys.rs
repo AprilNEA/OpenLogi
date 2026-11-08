@@ -310,14 +310,8 @@ impl AppState {
     pub(super) fn load_current_disable_keys(&mut self, cx: &mut Context<Self>) {
         let Some((key, route)) = self.current_record().and_then(|record| {
             let supported = record.capabilities.unwrap_or_default().disable_keys;
-            (record.online && supported)
-                .then(|| {
-                    record
-                        .route
-                        .clone()
-                        .map(|route| (record.device_key(), route))
-                })
-                .flatten()
+            let route = record.addressable_route().filter(|_| supported)?;
+            Some((record.device_key(), route.clone()))
         }) else {
             return;
         };
@@ -592,8 +586,7 @@ impl AppState {
         &mut self,
         key: &DeviceKey,
     ) -> Option<DisableKeysRequestContext> {
-        let record = self.devices.record(key).filter(|record| record.online)?;
-        let route = record.route.clone()?;
+        let route = self.devices.record(key)?.addressable_route()?.clone();
         let route_generation = self.disable_keys_reads.generation(key)?;
         let request_id = self.next_disable_keys_request_id;
         self.next_disable_keys_request_id = self.next_disable_keys_request_id.saturating_add(1);
@@ -660,7 +653,7 @@ impl AppState {
         WriteGate {
             reconciliation: self.disable_keys_config_reconciliation(),
             config_writable: self.config.is_writable(),
-            online: record.is_some_and(|record| record.online),
+            online: record.is_some_and(DeviceRecord::is_online),
             persistent: record.is_some_and(DeviceRecord::is_persistent),
             load: &self.disable_keys_reads.load(key),
             phase: self.disable_keys_status(key),

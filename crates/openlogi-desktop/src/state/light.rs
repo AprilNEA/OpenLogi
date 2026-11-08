@@ -564,7 +564,7 @@ impl AppState {
                 .devices
                 .records
                 .iter()
-                .find(|record| record.online && record.route.as_ref() == Some(&light.route))
+                .find(|record| record.addressable_route() == Some(&light.route))
                 .map(|record| {
                     (
                         record.device_key(),
@@ -673,17 +673,14 @@ impl AppState {
     /// advertised device command succeeds; failures roll optimistic state back.
     pub fn commit_light(&mut self, light: LightSettings) -> StateEvents {
         let events = self.for_current_device(StateEvent::LightingChanged);
-        let Some((runtime_key, key, route, online, capabilities)) =
-            self.current_record().map(|record| {
-                (
-                    record.device_key(),
-                    record.persistent_config_key().map(str::to_string),
-                    record.route.clone(),
-                    record.online,
-                    record.light_capabilities,
-                )
-            })
-        else {
+        let Some((runtime_key, key, route, capabilities)) = self.current_record().map(|record| {
+            (
+                record.device_key(),
+                record.persistent_config_key().map(str::to_string),
+                record.addressable_route().cloned(),
+                record.light_capabilities,
+            )
+        }) else {
             debug!("no active device — light change ignored");
             return events;
         };
@@ -720,7 +717,7 @@ impl AppState {
             .light
             .volatile_settings = Some(light);
         if let Some(sent) = NonZeroUsize::new(commands.len()) {
-            if online && let Some(route) = route {
+            if let Some(route) = route {
                 let request_id = self.begin_light_write(
                     &runtime_key,
                     sent,
@@ -762,12 +759,11 @@ impl AppState {
     /// but the runtime override lasts only until the next camera transition.
     pub fn commit_manual_light_power(&mut self, enabled: bool) -> StateEvents {
         let events = self.for_current_device(StateEvent::LightingChanged);
-        let Some((runtime_key, key, route, online)) = self.current_record().map(|record| {
+        let Some((runtime_key, key, route)) = self.current_record().map(|record| {
             (
                 record.device_key(),
                 record.persistent_config_key().map(str::to_string),
-                record.route.clone(),
-                record.online,
+                record.addressable_route().cloned(),
             )
         }) else {
             debug!("no active device — manual light power ignored");
@@ -795,7 +791,7 @@ impl AppState {
             entry.light.volatile_settings = Some(light);
         }
 
-        if online && let Some(route) = route {
+        if let Some(route) = route {
             let request_id = self.begin_light_write(
                 &runtime_key,
                 NonZeroUsize::MIN,
