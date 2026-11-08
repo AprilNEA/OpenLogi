@@ -30,7 +30,7 @@ use openlogi_core::device::{
 use openlogi_core::device_order::{DeviceIdentity, DeviceStableId, PhysicalDeviceKey};
 use openlogi_hid::{
     BacklightChange, BacklightState, CaptureChannelSlot, ChannelPool, ChannelRegistry,
-    DeviceIoGate, DeviceRoute, DisableKeysMask, Dpi, EasySwitchHosts, FnLockState,
+    DeviceIoGate, DeviceRoute, DisableKeysMask, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
     ForceSensingInfo, GamingWanted, HidppOperation, HostOs, PointerSpeed, ReportRate,
     ReportRateInfo, SidetoneLevel, SmartShiftStatus, WriteError, commands_for_light_settings,
     is_reserved_keyboard_control, key_display_for,
@@ -260,6 +260,55 @@ impl SharedHandles {
     /// control back.
     pub async fn release_rgb_control(&self) {
         crate::hardware::release_session_rgb_control(&self.device_access()).await;
+    }
+
+    /// Read the Fn-lock state of the keyboard at `route`, through the
+    /// keyboard's own capture channel, as its writes go.
+    pub async fn read_fn_lock(&self, route: &DeviceRoute) -> Result<FnLockState, WriteError> {
+        self.keyboard_device(route)
+            .run(HidppOperation::ReadFnLock, |c| async move {
+                openlogi_hid::get_fn_lock_on(&c).await
+            })
+            .await
+    }
+
+    /// Read the backlight of the keyboard at `route`.
+    pub async fn read_backlight(&self, route: &DeviceRoute) -> Result<BacklightState, WriteError> {
+        self.device(route)
+            .run(HidppOperation::ReadBacklight, |c| async move {
+                openlogi_hid::get_backlight_on(&c).await
+            })
+            .await
+    }
+
+    /// Read the sidetone level of the headset at `route`.
+    pub async fn read_sidetone(&self, route: &DeviceRoute) -> Result<SidetoneLevel, WriteError> {
+        self.device(route)
+            .run(HidppOperation::ReadSidetone, |c| async move {
+                openlogi_hid::get_sidetone_on(&c).await
+            })
+            .await
+    }
+
+    /// Read the DPI and the DPI values of the mouse at `route`.
+    pub async fn read_dpi(&self, route: &DeviceRoute) -> Result<DpiInfo, WriteError> {
+        self.device(route)
+            .run(HidppOperation::ReadDpiCapabilities, |c| async move {
+                openlogi_hid::get_dpi_info_on(&c).await
+            })
+            .await
+    }
+
+    /// Read the SmartShift wheel of the mouse at `route`.
+    pub async fn read_smartshift(
+        &self,
+        route: &DeviceRoute,
+    ) -> Result<SmartShiftStatus, WriteError> {
+        self.device(route)
+            .run(HidppOperation::ReadSmartShift, |c| async move {
+                openlogi_hid::get_smartshift_status_on(&c).await
+            })
+            .await
     }
 
     /// Write `fn_lock` to the keyboard at `route` and return its echo. When a
