@@ -293,3 +293,17 @@ fn a_refresh_checks_a_keyboard_whose_layout_support_shows_up_late() {
     orch.refresh_inventory(std::slice::from_ref(&inventory), &[], false);
     assert!(orch.kept_os_layouts.contains(&key, host()));
 }
+
+#[test]
+fn turning_keep_on_replaces_a_pin_queued_while_the_keyboard_is_offline() {
+    let mut orch = orchestrator(pinned(PinnedOs::Windows));
+    let mut keyboard = layout_keyboard("kbd", 1);
+    keyboard.online = false;
+    orch.devices = vec![keyboard];
+    let windows = platform(OsMask::WINDOWS);
+    orch.kept_os_layouts.keep("kbd", windows);
+    let mut keep = orch.config.clone();
+    keep.set_keep_os_layout("kbd", true);
+    orch.replace_config(keep);
+    assert!(!orch.kept_os_layouts.contains("kbd", windows));
+}

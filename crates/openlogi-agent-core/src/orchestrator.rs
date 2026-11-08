@@ -2271,13 +2271,12 @@ impl Orchestrator {
     /// withdraws a layout write still queued for it.
     fn apply_enabled_os_layouts(&self, previous: &Config) {
         self.kept_os_layouts.retain(|key, host| {
-            config_keeps_os_layout(&self.config, key)
-                || self
-                    .devices
-                    .iter()
-                    .find(|dev| dev.config_key == key)
-                    .and_then(|dev| os_layout_target(&self.config, dev))
-                    == Some(host)
+            match self.devices.iter().find(|dev| dev.config_key == key) {
+                // A write queued for another platform stops here, even while the
+                // keyboard is offline: the current target no longer names it.
+                Some(dev) => os_layout_target(&self.config, dev) == Some(host),
+                None => config_keeps_os_layout(&self.config, key),
+            }
         });
         for dev in newly_kept_os_layouts(previous, &self.config, &self.devices) {
             self.keep_os_layout(dev);
