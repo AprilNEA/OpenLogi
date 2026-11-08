@@ -2436,17 +2436,10 @@ fn pointer_commands(
         let gain = (4.8 * (1.0 + f64::from(speed.unwrap_or(0.0)))).max(0.3);
         let (_step, points) = openlogi_core::macos_accel::generate(1000.0, 120.0, 0.5, 64, gain);
         let lut = openlogi_core::macos_accel::format_lut(0.5, &points);
-        commands.push(sh_command(format!(
-            "hyprctl eval \"hl.config({{input={{accel_profile='{lut}'}}}})\"; \
-             hyprctl keyword input:accel_profile '{lut}'"
-        )));
+        commands.push(hyprland_accel_profile(&lut));
     } else {
         if is_hyprland {
-            commands.push(sh_command(
-                "hyprctl eval \"hl.config({input={accel_profile='adaptive'}})\"; \
-                 hyprctl keyword input:accel_profile 'adaptive'"
-                    .to_string(),
-            ));
+            commands.push(hyprland_accel_profile("adaptive"));
         }
         if let Some(factor) = speed
             && let Some(command) =
@@ -2460,6 +2453,15 @@ fn pointer_commands(
 
 fn sh_command(script: String) -> Vec<String> {
     vec!["sh".to_string(), "-c".to_string(), script]
+}
+
+/// Sets Hyprland's libinput `accel_profile` through `hyprctl eval` and
+/// `hyprctl keyword`.
+fn hyprland_accel_profile(profile: &str) -> Vec<String> {
+    sh_command(format!(
+        "hyprctl eval \"hl.config({{input={{accel_profile='{profile}'}}}})\"; \
+         hyprctl keyword input:accel_profile '{profile}'"
+    ))
 }
 
 /// Queues a compositor command on one worker thread that runs them in the
