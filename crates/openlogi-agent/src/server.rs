@@ -228,12 +228,7 @@ impl Agent for AgentServer {
     }
 
     async fn read_dpi(self, _: Context, route: DeviceRoute) -> Result<DpiInfo, WriteError> {
-        self.shared
-            .device(&route)
-            .run(HidppOperation::ReadDpiCapabilities, |c| async move {
-                openlogi_hid::get_dpi_info_on(&c).await
-            })
-            .await
+        self.shared.read_dpi(&route).await
     }
 
     async fn read_smartshift(
@@ -241,12 +236,7 @@ impl Agent for AgentServer {
         _: Context,
         route: DeviceRoute,
     ) -> Result<SmartShiftStatus, WriteError> {
-        self.shared
-            .device(&route)
-            .run(HidppOperation::ReadSmartShift, |c| async move {
-                openlogi_hid::get_smartshift_status_on(&c).await
-            })
-            .await
+        self.shared.read_smartshift(&route).await
     }
 
     async fn read_wheel(
@@ -267,21 +257,11 @@ impl Agent for AgentServer {
         _: Context,
         route: DeviceRoute,
     ) -> Result<BacklightState, WriteError> {
-        self.shared
-            .device(&route)
-            .run(HidppOperation::ReadBacklight, |c| async move {
-                openlogi_hid::get_backlight_on(&c).await
-            })
-            .await
+        self.shared.read_backlight(&route).await
     }
 
     async fn read_fn_lock(self, _: Context, route: DeviceRoute) -> Result<FnLockState, WriteError> {
-        self.shared
-            .keyboard_device(&route)
-            .run(HidppOperation::ReadFnLock, |c| async move {
-                openlogi_hid::get_fn_lock_on(&c).await
-            })
-            .await
+        self.shared.read_fn_lock(&route).await
     }
 
     async fn read_disable_keys(
@@ -472,12 +452,7 @@ impl Agent for AgentServer {
         _: Context,
         route: DeviceRoute,
     ) -> Result<SidetoneLevel, WriteError> {
-        self.shared
-            .device(&route)
-            .run(HidppOperation::ReadSidetone, |c| async move {
-                openlogi_hid::get_sidetone_on(&c).await
-            })
-            .await
+        self.shared.read_sidetone(&route).await
     }
 
     async fn set_sidetone(
