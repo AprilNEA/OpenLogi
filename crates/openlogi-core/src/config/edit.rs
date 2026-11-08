@@ -14,9 +14,9 @@ use std::time::Duration;
 
 use thiserror::Error;
 
-use super::{Config, ConfigError, ConfigFile, ConfigRevision, SmartShift};
+use super::{Config, ConfigError, ConfigFile, ConfigRevision, DisableKey, SmartShift};
 use crate::device_order::{DeviceIdentity, DeviceStableId};
-use crate::hid::{Dpi, ReportRate};
+use crate::hid::{DisableKeysMask, Dpi, LightCommand, ReportRate};
 
 /// How many times a save waits for another writer to release the lock.
 const LOCK_WAITS: u32 = 5;
@@ -90,6 +90,15 @@ pub enum DeviceSetting {
     KeepOsLayout(bool),
     /// [`DeviceConfig::report_rate`](super::DeviceConfig::report_rate).
     ReportRate(ReportRate),
+    /// The known keys a keyboard disables:
+    /// [`DeviceConfig::disabled_keys`](super::DeviceConfig::disabled_keys),
+    /// from the mask the keyboard confirmed.
+    DisabledKeys(DisableKeysMask),
+    /// A command a standalone light took, kept in its
+    /// [`DeviceConfig::light`](super::DeviceConfig::light) settings. A light
+    /// with no saved settings keeps none: the agent applies nothing to it when
+    /// it reconnects, so the light holds the command on its own.
+    Light(LightCommand),
 }
 
 /// Why a device setting cannot be saved.
@@ -163,7 +172,9 @@ impl DeviceEdit {
             DeviceSetting::Enabled(_)
             | DeviceSetting::FnLock(_)
             | DeviceSetting::KeepOsLayout(_)
-            | DeviceSetting::ReportRate(_) => false,
+            | DeviceSetting::ReportRate(_)
+            | DeviceSetting::DisabledKeys(_)
+            | DeviceSetting::Light(_) => false,
         };
         if overridden {
             return Err(DeviceEditError::LinkOverride);
@@ -181,6 +192,15 @@ impl DeviceEdit {
             DeviceSetting::FnLock(fn_lock) => config.set_fn_lock(key, fn_lock),
             DeviceSetting::KeepOsLayout(keep) => config.set_keep_os_layout(key, keep),
             DeviceSetting::ReportRate(rate) => config.set_report_rate(key, rate),
+            DeviceSetting::DisabledKeys(mask) => {
+                config.set_disabled_keys(key, DisableKey::disabled_in(mask));
+            }
+            DeviceSetting::Light(command) => {
+                if let Some(mut light) = config.light(key) {
+                    light.apply(command);
+                    config.set_light(key, light);
+                }
+            }
         }
         Ok(())
     }

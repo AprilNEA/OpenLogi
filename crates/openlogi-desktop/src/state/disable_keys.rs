@@ -663,13 +663,7 @@ impl AppState {
 }
 
 fn confirmed_known_set(state: DisableKeysState) -> BTreeSet<DisableKey> {
-    DisableKey::ALL
-        .into_iter()
-        .filter(|key| {
-            let bit = key.mask();
-            state.supported.contains(bit) && state.disabled.contains(bit)
-        })
-        .collect()
+    DisableKey::disabled_in(state.disabled & state.supported)
 }
 
 #[cfg(test)]

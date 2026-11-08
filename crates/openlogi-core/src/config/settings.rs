@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::binding::ButtonId;
 use crate::color::Rgb;
 use crate::device::ChangedOnLight;
-use crate::hid::{SmartShiftAutoDisengage, SmartShiftThreshold, TunableTorque};
+use crate::hid::{LightCommand, SmartShiftAutoDisengage, SmartShiftThreshold, TunableTorque};
 use crate::update_feed::UpdateChannel;
 
 /// Light/dark appearance preference. `System` follows the OS appearance (the
@@ -790,6 +790,18 @@ impl LightSettings {
             brightness_percent: brightness_percent.min(100),
             temperature_kelvin,
             color: None,
+        }
+    }
+
+    /// The settings once a light has taken `command`. A brightness in the
+    /// light's native unit changes nothing saved: settings keep brightness as
+    /// a percentage of the light's range, which the command does not name.
+    pub fn apply(&mut self, command: LightCommand) {
+        match command {
+            LightCommand::Power(enabled) => self.enabled = enabled,
+            LightCommand::BrightnessPercent(percent) => self.brightness_percent = percent.min(100),
+            LightCommand::TemperatureKelvin(kelvin) => self.temperature_kelvin = Some(kelvin),
+            LightCommand::BrightnessNative(_) => {}
         }
     }
 
