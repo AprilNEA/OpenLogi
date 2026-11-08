@@ -10,12 +10,13 @@ use openlogi_core::config::{ConfigError, DisableKey, SmartShift, WheelMode};
 use openlogi_core::hid::{
     DisableKeysMask, SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus,
 };
-use openlogi_hid::HidppOperation;
+use openlogi_hid::{HidppOperation, WriteError};
 use openlogi_ipc::ConfigReloadError;
 use tokio::sync::Mutex;
 
 use super::*;
 use crate::orchestrator::{ConfigReload, DeviceSettings, SettingError};
+use crate::receiver_access::ExclusiveAccessReason;
 use crate::test_support::publish_dpi_mouse;
 
 const KEY: &str = "unit:12345678";
@@ -264,6 +265,92 @@ async fn an_offline_keyboards_fn_lock_and_disabled_keys_are_only_saved() {
         Some(&BTreeSet::from([DisableKey::CapsLock]))
     );
     assert_eq!(agent.reloads.load(Ordering::SeqCst), 2);
+}
+
+/// A keyboard at `route` in `registry` with `0x40a2` Fn inversion, which
+/// keeps the state written and starts with Fn lock off. Counts its writes.
+async fn publish_fn_lock_keyboard(
+    registry: &openlogi_hid::ChannelRegistry,
+    route: DeviceRoute,
+) -> Arc<AtomicUsize> {
+    const FN_INVERSION: u8 = 5;
+    let writes = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&writes);
+    // Inversion on: the bare F-keys run their special functions.
+    let inversion = std::sync::Mutex::new(1u8);
+    openlogi_device::test_support::publish_scripted_channel(
+        registry,
+        "fn-lock-keyboard",
+        route,
+        move |request| {
+            let mut response = vec![0; 20];
+            response[..4].copy_from_slice(request.get(..4)?);
+            response[0] = 0x11;
+            let mut inversion = inversion.lock().unwrap();
+            match (request[2], request[3] >> 4) {
+                (0, 1) => response[4] = 4,
+                (0, 0) => {
+                    response[4] = if request[4..6] == [0x40, 0xa2] {
+                        FN_INVERSION
+                    } else {
+                        0
+                    }
+                }
+                (FN_INVERSION, 0) => response[4..6].copy_from_slice(&[*inversion, 1]),
+                (FN_INVERSION, 1) => {
+                    counted.fetch_add(1, Ordering::SeqCst);
+                    *inversion = request[4];
+                    response[4..6].copy_from_slice(&[*inversion, 1]);
+                }
+                _ => return None,
+            }
+            Some(response)
+        },
+    )
+    .await;
+    writes
+}
+
+/// A Fn-lock change a newer write superseded before its turn read the
+/// keyboard instead of writing it, so it saves nothing: the newer write
+/// decides the state, and the file must not say otherwise.
+#[tokio::test]
+async fn a_superseded_fn_lock_is_not_saved() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(openlogi_core::paths::CONFIG_FILE);
+    let agent = Agent::new(&path, true);
+    let shared = agent.shared().await;
+    let writes = publish_fn_lock_keyboard(&shared.channel_registry, agent.route.clone()).await;
+    let before = std::fs::read_to_string(&path).unwrap();
+    let lease = shared
+        .receiver_access
+        .acquire_exclusive(ExclusiveAccessReason::Pairing)
+        .await;
+
+    let settings = agent.settings.clone();
+    let route = agent.route.clone();
+    let older = tokio::spawn(async move { settings.set_fn_lock(&route, true).await });
+    while shared.fn_lock_order.requested(&agent.route) == 0 {
+        tokio::task::yield_now().await;
+    }
+    let mut newer = std::pin::pin!(shared.set_fn_lock(&agent.route, false));
+    assert!(futures_lite::future::poll_once(&mut newer).await.is_none());
+    drop(lease);
+
+    let error = older.await.unwrap().unwrap_err();
+    assert!(
+        matches!(
+            error,
+            SettingError::Write(WriteError::WriteSuperseded {
+                operation: HidppOperation::WriteFnLock,
+            })
+        ),
+        "{error:?}"
+    );
+    assert!(!newer.await.unwrap().fn_lock);
+    assert_eq!(writes.load(Ordering::SeqCst), 1, "only the newer write");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+    assert_eq!(agent.reloads.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
