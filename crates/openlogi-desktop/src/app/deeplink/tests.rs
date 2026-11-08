@@ -228,3 +228,41 @@ fn window_links_open_their_window_and_replace_a_waiting_device_link(cx: &mut Tes
         assert_eq!(cx.windows().len(), 3);
     });
 }
+
+#[gpui::test]
+fn camera_links_open_the_camera_on_its_preview_or_its_device_information(cx: &mut TestAppContext) {
+    const KEY: &str = "camera:046d:0893:serial:ab12";
+    cx.update(gpui_kit::init);
+    cx.update(|cx| {
+        launch(Config::ephemeral(), ConfigPersistence::MemoryOnly, cx);
+        let mut links = Deeplinks::default();
+        let camera = openlogi_camera::Camera {
+            name: "StreamCam".into(),
+            unique_id: "0x14100000046d0893".into(),
+            serial_number: Some("AB12".into()),
+            vendor_id: 0x046d,
+            product_id: 0x0893,
+            max_resolution: None,
+            max_fps: None,
+        };
+        assert_eq!(camera.config_key(), KEY);
+
+        // Cold: the link waits for the device list the camera joins.
+        links.dispatch(link(&format!("openlogi://preview-camera/{KEY}")), cx);
+        assert_eq!(page(cx).0, Route::Home);
+        AppState::update(cx, |state, _| {
+            let _ = state.apply_agent_snapshot(
+                &snapshot_candidate(&profile()),
+                &AssetResolver::new(),
+                &[camera],
+            );
+        });
+        links.retry(cx);
+        assert_eq!(page(cx), (device_page(KEY), DetailTab::Camera));
+
+        // Warm: its settings open on the tab that leaves the camera off.
+        links.dispatch(DeeplinkCommand::OpenCamera(KEY.into()), cx);
+        assert_eq!(page(cx), (device_page(KEY), DetailTab::Device));
+        assert_eq!(selected(cx), KEY);
+    });
+}
