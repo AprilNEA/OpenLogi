@@ -13,17 +13,21 @@ fn level(raw: u8) -> SidetoneLevel {
 }
 
 /// A direct device with the G535's capabilities: sidetone only, or none.
-fn headset_state(sidetone: bool) -> (AppState, tokio::sync::mpsc::UnboundedReceiver<Command>) {
+fn headset_inventory(sidetone: bool) -> DeviceInventory {
     let mut inventory = direct_inventory([0x0a, 0xc4, 0x00, 0x01]);
     inventory.paired[0].kind = DeviceKind::Headset;
     inventory.paired[0].capabilities = Some(Capabilities {
         sidetone,
         ..Capabilities::default()
     });
+    inventory
+}
+
+fn headset_state(sidetone: bool) -> (AppState, tokio::sync::mpsc::UnboundedReceiver<Command>) {
     let resolver = AssetResolver::new();
     let (commands, receiver) = tokio::sync::mpsc::unbounded_channel();
     let state = AppState::new(Sources {
-        inventories: &[inventory],
+        inventories: &[headset_inventory(sidetone)],
         ..Sources::in_memory(Config::ephemeral(), &resolver, commands)
     });
     (state, receiver)
@@ -151,4 +155,26 @@ fn the_reading_lands_and_a_refusal_reads_the_headset_again(cx: &mut gpui::TestAp
     );
     cx.run_until_parked();
     assert_eq!(current_load(cx), Load::Ready(Arc::new(level(25))));
+}
+
+/// The agent changed the sidetone itself — from the menu-bar menu — and
+/// moved the headset's settings revision, so the slider reads it again.
+#[gpui::test]
+fn a_moved_settings_revision_reads_the_headset_again(cx: &mut gpui::TestAppContext) {
+    let (state, mut receiver) = headset_state(true);
+    install(state, cx);
+    let route = answer_read(&mut receiver, level(40));
+    cx.run_until_parked();
+
+    let mut moved = headset_inventory(true);
+    moved.paired[0].settings_revision = 1;
+    let _ = cx.update(|cx| {
+        AppState::update(cx, |state, _| {
+            state.refresh_inventories(&[moved], &[], &AssetResolver::new(), &[])
+        })
+    });
+    cx.run_until_parked();
+    assert_eq!(answer_read(&mut receiver, level(75)), route);
+    cx.run_until_parked();
+    assert_eq!(current_load(cx), Load::Ready(Arc::new(level(75))));
 }

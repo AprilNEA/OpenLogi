@@ -557,8 +557,8 @@ mod controls {
     use openlogi_ipc::{AgentSnapshot, ObservedLight};
 
     use super::super::{
-        CameraRow, Change, DeviceMemory, DeviceRow, Entry, Failure, Read, Reads, SeenCamera,
-        TrayMenu,
+        CameraRow, Change, DeviceMemory, DeviceRow, Entry, Failure, Read, Reading, Reads,
+        SeenCamera, TrayMenu,
     };
     use super::{BOLT, paired, receiver, snapshot};
 
@@ -1016,6 +1016,51 @@ mod controls {
             notes(&entries),
             ["Changes are saved now and apply when it reconnects."]
         );
+    }
+
+    #[test]
+    fn a_read_under_way_does_not_undo_a_change_made_meanwhile() {
+        let dpi_and_wheel = Reads {
+            dpi: true,
+            wheel: true,
+            ..Reads::default()
+        };
+        let ratchet = SmartShiftStatus {
+            mode: SmartShiftMode::Ratchet,
+            auto_disengage: SmartShiftAutoDisengage::Permanent,
+            tunable_torque: None,
+        };
+        let answered = |dpi_value| Reading {
+            dpi: Read::Value(dpi(dpi_value)),
+            wheel: Read::Value(ratchet),
+            ..Reading::default()
+        };
+        let mut memory = DeviceMemory::default();
+
+        // The read reached the mouse before the change did.
+        assert!(memory.start_reading());
+        assert!(!memory.start_reading(), "one read at a time");
+        memory.changed(Ok(Some(Change::Dpi(dpi(1600)))));
+        memory.finish_reading(dpi_and_wheel, answered(800));
+        assert_eq!(memory.reading.dpi, Read::Value(dpi(1600)));
+        assert_eq!(memory.reading.wheel, Read::Value(ratchet));
+
+        // The next read, begun after the change landed, is the device's word.
+        memory.start_reading();
+        memory.finish_reading(dpi_and_wheel, answered(2400));
+        assert_eq!(memory.reading.dpi, Read::Value(dpi(2400)));
+
+        // So is a read that begins after a change made while none ran.
+        memory.changed(Ok(Some(Change::Dpi(dpi(1600)))));
+        memory.start_reading();
+        memory.finish_reading(dpi_and_wheel, answered(800));
+        assert_eq!(memory.reading.dpi, Read::Value(dpi(800)));
+
+        // A change a newer write superseded records nothing and is no failure.
+        memory.failure = Some(Failure::Device);
+        memory.changed(Ok(None));
+        assert_eq!(memory.reading.dpi, Read::Value(dpi(800)));
+        assert_eq!(memory.failure, None);
     }
 
     #[test]

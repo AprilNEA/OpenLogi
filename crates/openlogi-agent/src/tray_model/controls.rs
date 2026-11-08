@@ -87,6 +87,42 @@ pub struct DeviceMemory {
     /// Why the last change made from the menu did not take, until the
     /// submenu has shown it.
     pub failure: Option<Failure>,
+    /// The values changes from the menu set while the read under way runs.
+    pub changed_while_reading: Reads,
+}
+
+impl DeviceMemory {
+    /// Start a read of the device, unless one is under way.
+    pub fn start_reading(&mut self) -> bool {
+        !std::mem::replace(&mut self.reading_now, true)
+    }
+
+    /// Take what the read of `reads` answered. A value a change set while
+    /// it ran stays: the read may have reached the device before the change.
+    pub fn finish_reading(&mut self, reads: Reads, fresh: Reading) {
+        self.reading
+            .merge(reads.without(self.changed_while_reading), fresh);
+        self.changed_while_reading = Reads::default();
+        self.reading_now = false;
+    }
+
+    /// Take what a change made from the menu came to: the change the device
+    /// and config took, `None` when a newer write superseded it — the next
+    /// read shows where that write left the device — or why it failed.
+    pub fn changed(&mut self, outcome: Result<Option<Change>, Failure>) {
+        match outcome {
+            Ok(change) => {
+                if let Some(change) = change {
+                    self.reading.record(change);
+                    if self.reading_now {
+                        self.changed_while_reading = self.changed_while_reading.or(change.reads());
+                    }
+                }
+                self.failure = None;
+            }
+            Err(failure) => self.failure = Some(failure),
+        }
+    }
 }
 
 /// What the agent last read back from one device. Each value outlives the
@@ -225,6 +261,47 @@ impl Reads {
             || self.backlight
             || self.disabled_keys
             || self.sidetone
+    }
+
+    /// The reads in either.
+    const fn or(self, other: Self) -> Self {
+        Self {
+            dpi: self.dpi || other.dpi,
+            wheel: self.wheel || other.wheel,
+            fn_lock: self.fn_lock || other.fn_lock,
+            backlight: self.backlight || other.backlight,
+            disabled_keys: self.disabled_keys || other.disabled_keys,
+            sidetone: self.sidetone || other.sidetone,
+        }
+    }
+
+    /// These reads, except those in `other`.
+    const fn without(self, other: Self) -> Self {
+        Self {
+            dpi: self.dpi && !other.dpi,
+            wheel: self.wheel && !other.wheel,
+            fn_lock: self.fn_lock && !other.fn_lock,
+            backlight: self.backlight && !other.backlight,
+            disabled_keys: self.disabled_keys && !other.disabled_keys,
+            sidetone: self.sidetone && !other.sidetone,
+        }
+    }
+}
+
+impl Change {
+    /// The read whose value this change sets.
+    fn reads(self) -> Reads {
+        let mut reads = Reads::default();
+        match self {
+            Self::Dpi(_) => reads.dpi = true,
+            Self::Wheel(_) => reads.wheel = true,
+            Self::FnLock(_) => reads.fn_lock = true,
+            Self::Backlight(_) => reads.backlight = true,
+            Self::DisabledKeys(_) => reads.disabled_keys = true,
+            Self::Sidetone(_) => reads.sidetone = true,
+            Self::Managed(_) | Self::Light(_) => {}
+        }
+        reads
     }
 }
 
