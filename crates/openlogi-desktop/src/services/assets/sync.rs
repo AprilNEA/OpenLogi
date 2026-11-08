@@ -171,26 +171,15 @@ fn sync_depot(
         }
     }
 
-    // Optional second pass: download the manifest-mapped resources — the
-    // colour variant matching the device's `extended_model_id` for the front
+    // Optional second pass: download every file the manifest names for the
+    // colour variant matching the device's `extended_model_id` — the front
     // (gallery) and side / buttons (mouse-model) views, the camera hero
-    // (`device_camera_image` — camera depots ship no bare `front*.png`, so the
-    // baseline fetch above brings no render for them at all), and this
-    // variant's hotspot metadata (`image_metadata`, the only place a depot
-    // with handed variants names its metadata file). Failure is non-fatal —
-    // `AssetResolver.load_files` falls back to whatever landed.
-    let manifest_path = dir.join("manifest.json");
-    for resource_key in [
-        "device_image",
-        "device_buttons_image",
-        super::SIDE_VIEW_KEY,
-        "device_camera_image",
-        "image_metadata",
-    ] {
-        let Some(variant) = pick_variant_filename(&manifest_path, entry, depot, ext, resource_key)
-        else {
-            continue;
-        };
+    // (camera depots ship no bare `front*.png`, so the baseline fetch above
+    // brings no render for them at all), and the variant's hotspot metadata
+    // (the only place a depot with handed variants names its metadata file).
+    // Failure is non-fatal — `AssetResolver.load_files` falls back to
+    // whatever landed.
+    for variant in variant_filenames(&dir.join("manifest.json"), entry, depot, ext) {
         if fetched.contains(&variant.as_str()) {
             continue;
         }
@@ -226,36 +215,36 @@ fn fetch_to_cache(
     Ok(())
 }
 
-/// Parse a freshly-downloaded `manifest.json` and resolve the colour
-/// variant filename for `resource_key` (e.g. `"device_image"` or
-/// `"device_camera_image"`). `ext == 0` resolves the base-model entry —
-/// needed for depots whose base render isn't a baseline `front*.png` (the
-/// caller's skip list keeps already-fetched baseline names from re-fetching).
-/// `None` when the manifest is missing, malformed, or lacks the variant.
+/// Parse a freshly-downloaded `manifest.json` and name every file the colour
+/// variant `ext` draws or reads ([`DepotManifest::consumed_srcs_for`]).
+/// `ext == 0` names the base model's files — needed for depots whose base
+/// render isn't a baseline `front*.png` (the caller's skip list keeps
+/// already-fetched baseline names from re-fetching). Empty when the manifest
+/// is missing, malformed, or lacks the variant.
 ///
 /// Every model id the depot answers to is tried as the variant base, the
 /// same way the resolver does: a manifest is keyed on whichever pid Logi
 /// authored it against, which isn't always the index primary.
-fn pick_variant_filename(
+fn variant_filenames(
     manifest_path: &Path,
     entry: &DeviceEntry,
     depot: &str,
     ext: u8,
-    resource_key: &str,
-) -> Option<String> {
+) -> Vec<String> {
     if !manifest_path.exists() {
-        return None;
+        return Vec::new();
     }
-    let manifest = DepotManifest::load_from(manifest_path)
+    let Ok(manifest) = DepotManifest::load_from(manifest_path)
         .map_err(|e| warn!(error = %e, path = %manifest_path.display(), "manifest unreadable"))
-        .ok()?;
-    let candidates = super::images::candidate_manifest_bases(entry, depot);
-    for base in candidates {
-        if let Some(src) = manifest.resource_for_variant(&base, ext, resource_key) {
-            return Some(src.to_string());
-        }
-    }
-    None
+    else {
+        return Vec::new();
+    };
+    let bases = super::images::candidate_manifest_bases(entry, depot);
+    manifest
+        .consumed_srcs_for(&bases, ext)
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
 }
 
 /// A manual asset action requested from the Settings → Assets tab, pushed to
@@ -498,19 +487,11 @@ mod tests {
             asset_path: "assets/g513/".into(),
             files: Vec::new(),
         };
-        for (key, expected) in [
-            ("device_image", "front_ext6.png"),
-            ("image_metadata", "metadata.json"),
-        ] {
-            assert_eq!(
-                super::pick_variant_filename(&manifest, &entry, "g513", 6, key).as_deref(),
-                Some(expected)
-            );
-            assert_eq!(
-                super::pick_variant_filename(&manifest, &entry, "g513", 5, key),
-                None
-            );
-        }
+        assert_eq!(
+            super::variant_filenames(&manifest, &entry, "g513", 6),
+            ["front_ext6.png", "metadata.json"]
+        );
+        assert!(super::variant_filenames(&manifest, &entry, "g513", 5).is_empty());
     }
 
     #[test]
