@@ -243,11 +243,17 @@ impl PendingQueue {
     /// stale key's header for the next request.
     pub(super) fn resolve(&mut self, reply: HidppMessage, now: Instant) -> Resolution {
         let accepts = |held: &HeldKey| (held.correlation.response_predicate)(&reply);
+        // Each predicate runs at most once: in-flight keys first, then only
+        // the stale ones.
         let Some(pos) = self
             .keys
             .iter()
             .position(|held| matches!(held.state, KeyState::InFlight(_)) && accepts(held))
-            .or_else(|| self.keys.iter().position(accepts))
+            .or_else(|| {
+                self.keys
+                    .iter()
+                    .position(|held| matches!(held.state, KeyState::Stale(_)) && accepts(held))
+            })
         else {
             return Resolution::Unmatched;
         };
