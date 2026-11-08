@@ -2,11 +2,14 @@
 //! file and the reloaded orchestrator agree, a file another writer changed
 //! is not overwritten, and an offline device's settings are only saved.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use openlogi_core::config::{ConfigError, SmartShift, WheelMode};
-use openlogi_core::hid::{SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus};
+use openlogi_core::config::{ConfigError, DisableKey, SmartShift, WheelMode};
+use openlogi_core::hid::{
+    DisableKeysMask, SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus,
+};
 use openlogi_hid::HidppOperation;
 use openlogi_ipc::ConfigReloadError;
 use tokio::sync::Mutex;
@@ -231,6 +234,36 @@ async fn an_offline_device_is_only_saved() {
     let orchestrator = agent.orchestrator.lock().await;
     assert_eq!(orchestrator.config.dpi(KEY), Some(Dpi::new(1600)));
     assert!(!orchestrator.config.device_enabled(KEY));
+}
+
+/// An offline keyboard's Fn lock and disabled keys are saved for the
+/// reapply to write when it reconnects; a disabled key this version does not
+/// know is not saved.
+#[tokio::test]
+async fn an_offline_keyboards_fn_lock_and_disabled_keys_are_only_saved() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(openlogi_core::paths::CONFIG_FILE);
+    let agent = Agent::new(&path, false);
+    let unknown = DisableKeysMask::from_bits_retain(0x80);
+
+    agent
+        .settings
+        .set_fn_lock(&agent.route, true)
+        .await
+        .unwrap();
+    agent
+        .settings
+        .set_disabled_keys(&agent.route, DisableKeysMask::CAPS_LOCK | unknown)
+        .await
+        .unwrap();
+
+    let saved = Config::load_from_path(&path).unwrap();
+    assert_eq!(saved.fn_lock(KEY), Some(true));
+    assert_eq!(
+        saved.disabled_keys(KEY),
+        Some(&BTreeSet::from([DisableKey::CapsLock]))
+    );
+    assert_eq!(agent.reloads.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]

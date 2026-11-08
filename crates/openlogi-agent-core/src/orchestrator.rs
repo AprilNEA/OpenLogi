@@ -69,7 +69,9 @@ mod devices;
 mod lights;
 mod settings;
 
-pub use lights::{ConfigSource, LightWriteClaim, TakenLightChange, write_light};
+pub use lights::{
+    ConfigSource, LightWriteClaim, TakenLightChange, write_light, write_manual_light_power,
+};
 pub use settings::{ConfigReload, DeviceSettings, SettingError};
 
 use devices::reapply_targets;
