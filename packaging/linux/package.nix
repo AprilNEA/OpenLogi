@@ -160,6 +160,8 @@ rustPlatform.buildRustPackage {
     "--workspace"
     "--exclude=openlogi-desktop"
   ];
+  # GPUI's debug_bounds needs debug_assertions.
+  checkType = "debug";
 
   installPhase = ''
     runHook preInstall
