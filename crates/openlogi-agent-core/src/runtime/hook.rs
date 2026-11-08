@@ -276,12 +276,10 @@ struct ButtonPresses {
 }
 
 impl ButtonPresses {
-    /// Record a press of `id` in `phase`, returning the disposition both its
-    /// edges get.
-    fn press(&mut self, id: ButtonId, phase: PressPhase) -> EventDisposition {
-        let disposition = phase.disposition();
-        self.apply(id, PressEvent::Pressed(phase));
-        disposition
+    /// Record a press of `id` in `phase`, returning the phase it displaced,
+    /// which only a lost release leaves behind.
+    fn press(&mut self, id: ButtonId, phase: PressPhase) -> Option<PressPhase> {
+        self.apply(id, PressEvent::Pressed(phase))
     }
 
     /// Release `id`, returning the press it ends, or `None` for a stray release.
@@ -299,14 +297,12 @@ impl ButtonPresses {
         });
     }
 
+    /// Apply `event` to `id`, returning the phase it ended or displaced.
     fn apply(&mut self, id: ButtonId, event: PressEvent) -> Option<PressPhase> {
         match press_transition(self.phases.get(&id), event) {
             NextPhase::Keep => None,
             NextPhase::Up => self.phases.remove(&id),
-            NextPhase::Enter(phase) => {
-                self.phases.insert(id, phase);
-                None
-            }
+            NextPhase::Enter(phase) => self.phases.insert(id, phase),
         }
     }
 
@@ -468,7 +464,19 @@ fn handle_button(
             dispatcher,
         ),
     };
-    PRESSES.with_borrow_mut(|presses| presses.press(id, phase))
+    let disposition = phase.disposition();
+    // A lifecycle the runtime accepted for this press replaces a lost one on
+    // the same button. Any other press must end a displaced hold's lifecycle
+    // itself, or a shortcut it holds stays down.
+    let restarted = matches!(
+        phase,
+        PressPhase::HeldAsGesture { .. } | PressPhase::Suppressed
+    );
+    let displaced = PRESSES.with_borrow_mut(|presses| presses.press(id, phase));
+    if !restarted && let Some(PressPhase::HeldAsGesture { hold }) = displaced {
+        dispatcher.cancel_stale_hook_press(&hold.press);
+    }
+    disposition
 }
 
 /// Offer a press the hook may remap to the runtime, returning the phase it

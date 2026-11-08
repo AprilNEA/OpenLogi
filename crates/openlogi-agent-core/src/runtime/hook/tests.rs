@@ -313,18 +313,12 @@ fn fail_open_press_pairs_release() {
             .map_or(EventDisposition::PassThrough, |press| press.disposition())
     };
     let mut presses = ButtonPresses::default();
-    assert_eq!(
-        presses.press(ButtonId::Back, PressPhase::Suppressed),
-        EventDisposition::Suppress
-    );
+    presses.press(ButtonId::Back, PressPhase::Suppressed);
     assert_eq!(
         release(&mut presses, ButtonId::Back),
         EventDisposition::Suppress
     );
-    assert_eq!(
-        presses.press(ButtonId::Forward, PressPhase::Passthrough),
-        EventDisposition::PassThrough
-    );
+    presses.press(ButtonId::Forward, PressPhase::Passthrough);
     assert_eq!(
         release(&mut presses, ButtonId::Forward),
         EventDisposition::PassThrough
@@ -1080,6 +1074,21 @@ fn an_unattributed_press_keeps_the_selected_binding_while_that_device_has_not_di
     assert!(owner.shutdown());
 }
 
+/// Wait for the runtime to end `hold`'s lifecycle as a stale hold.
+fn assert_stale_hold_ended(
+    events: &mpsc::Receiver<super::super::button::ButtonRuntimeEvent>,
+    hold: &super::super::button::ActivePress,
+) {
+    use super::super::button::{ButtonRuntimeEvent, CancelReason, EndReason};
+    assert!(matches!(
+        events.recv_timeout(Duration::from_secs(1)).expect("ended"),
+        ButtonRuntimeEvent::Ended {
+            press,
+            reason: EndReason::Canceled(CancelReason::StaleHold),
+        } if press.token() == hold.token()
+    ));
+}
+
 /// A press the runtime refused as a gesture went native, so its release must
 /// too, even though an earlier press of the button was suppressed and lost its
 /// release. Suppressing this release would leave the button stuck down on the
@@ -1117,10 +1126,12 @@ fn a_refused_gesture_press_after_a_lost_release_passes_both_edges() {
 
 /// The same for a gesture hold that lost its release: it must not claim the
 /// release of the button's next press, which went native once the button
-/// stopped being a gesture button.
+/// stopped being a gesture button. The hold's lifecycle, which may hold a
+/// shortcut down, ends at that press instead.
 #[test]
 fn a_native_press_after_a_lost_hold_passes_both_edges() {
-    let (dispatcher, mut owner, _events) = test_dispatcher();
+    use super::super::button::ButtonRuntimeEvent;
+    let (dispatcher, mut owner, events) = test_dispatcher();
     let hooks = Arc::new(RwLock::new(HookMaps {
         gestures: BTreeMap::from([(ButtonId::Back, BTreeMap::new())]),
         ..HookMaps::default()
@@ -1137,9 +1148,15 @@ fn a_native_press_after_a_lost_hold_passes_both_edges() {
         )
     };
     assert_eq!(back(true), EventDisposition::Suppress);
+    let ButtonRuntimeEvent::Started(hold) =
+        events.recv_timeout(Duration::from_secs(1)).expect("down")
+    else {
+        panic!("started");
+    };
     // That release is lost, and Back goes back to its native click.
     hooks.write().expect("maps").gestures.clear();
     assert_eq!(back(true), EventDisposition::PassThrough);
+    assert_stale_hold_ended(&events, &hold);
     assert_eq!(back(false), EventDisposition::PassThrough);
     assert!(owner.shutdown());
 }
@@ -1147,7 +1164,7 @@ fn a_native_press_after_a_lost_hold_passes_both_edges() {
 /// A gesture hold that lost its release ends at the button's next press, even
 /// one that is no gesture: here an echo of a HID++ diversion recorded since.
 /// Left behind, the hold would turn that press's motion into a phantom swipe
-/// and dispatch it on the still-live lifecycle.
+/// and dispatch it on the still-live lifecycle, which ends at the press instead.
 #[test]
 fn a_re_press_ends_a_lost_hold_before_its_motion_commits_a_phantom_swipe() {
     use super::super::button::ButtonRuntimeEvent;
@@ -1170,10 +1187,11 @@ fn a_re_press_ends_a_lost_hold_before_its_motion_commits_a_phantom_swipe() {
         )
     };
     assert_eq!(back(true), EventDisposition::Suppress);
-    assert!(matches!(
-        events.recv_timeout(Duration::from_secs(1)),
-        Ok(ButtonRuntimeEvent::Started(_))
-    ));
+    let ButtonRuntimeEvent::Started(hold) =
+        events.recv_timeout(Duration::from_secs(1)).expect("down")
+    else {
+        panic!("started");
+    };
     // That release is lost, and a capture session diverts Back.
     hooks.write().expect("maps").diverted_buttons.record(
         &m650_session(7),
@@ -1181,6 +1199,7 @@ fn a_re_press_ends_a_lost_hold_before_its_motion_commits_a_phantom_swipe() {
         ButtonId::Back,
     );
     assert_eq!(back(true), EventDisposition::Suppress);
+    assert_stale_hold_ended(&events, &hold);
 
     thread::sleep(GESTURE_HOLD_FOR_SWIPE);
     assert_eq!(
