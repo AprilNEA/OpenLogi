@@ -160,6 +160,11 @@ rustPlatform.buildRustPackage {
     "--workspace"
     "--exclude=openlogi-desktop"
   ];
+  # Test in the dev profile, as Linux CI does. GPUI records the element
+  # bounds that layout tests read (`debug_bounds`) only with
+  # debug_assertions, and the check no longer rebuilds the workspace with
+  # fat LTO. The installed binaries still come from the release build.
+  checkType = "debug";
 
   installPhase = ''
     runHook preInstall
