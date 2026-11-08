@@ -81,44 +81,152 @@ fn settled_direct_inventory_publishes_one_direct_route() {
     );
 }
 
+type NodeChannels = ChannelCache<u8, Arc<()>>;
+
+/// Drives node 1 to the pass that may open it.
+type History = fn(&mut NodeChannels);
+
+fn quiescent(channel: &Arc<()>) -> bool {
+    Arc::strong_count(channel) == 1
+}
+
+/// Node 1's share of one `prepare_nodes` pass, in its order, with node 1
+/// listed or not. Returns whether the pass would open the node.
+fn channel_pass(cache: &mut NodeChannels, listed: bool) -> bool {
+    cache.begin_pass();
+    let seen = if listed {
+        HashSet::from([1])
+    } else {
+        HashSet::new()
+    };
+    let opens = listed && cache.prepare_open(&1, quiescent) && cache.get(&1).is_none();
+    cache.retire_absent(&seen);
+    cache.reap_absent(&seen, quiescent);
+    opens
+}
+
+/// Node 1's channel fails and drains while the OS keeps listing the node.
+fn evict_and_drain(cache: &mut NodeChannels) {
+    cache.open(1, Arc::new(()), || false);
+    assert!(cache.evict(&1), "a serving channel retires");
+    assert!(
+        !channel_pass(cache, true),
+        "the pass that drops the drained retirement still skips opening"
+    );
+}
+
 #[test]
 fn channel_cache_retires_and_defers_reopen_until_a_later_tick() {
-    let mut cache = ChannelCache::<u8, Arc<()>>::default();
+    let mut cache = NodeChannels::default();
     let channel = Arc::new(());
-    cache.insert(1, Arc::clone(&channel));
+    cache.open(1, Arc::clone(&channel), || false);
 
-    assert!(cache.retire_node(&1));
+    assert!(cache.evict(&1));
     assert!(cache.get(&1).is_none());
-    assert!(!cache.prepare_open(&1, |channel| Arc::strong_count(channel) == 1));
+    assert!(!cache.prepare_open(&1, quiescent));
 
     drop(channel);
     assert!(cache.is_retiring(&1));
     assert!(
-        !cache.prepare_open(&1, |channel| Arc::strong_count(channel) == 1),
+        !cache.prepare_open(&1, quiescent),
         "the tick that drops retirement still skips opening"
     );
     assert!(!cache.is_retiring(&1));
     assert!(
-        cache.prepare_open(&1, |channel| Arc::strong_count(channel) == 1),
+        cache.prepare_open(&1, quiescent),
         "only a later tick may reopen"
     );
 }
 
 #[test]
 fn absent_channels_retire_and_quiescent_absent_retirement_is_reaped() {
-    let mut cache = ChannelCache::<u8, Arc<()>>::default();
-    cache.insert(1, Arc::new(()));
-    cache.insert(2, Arc::new(()));
+    let mut cache = NodeChannels::default();
+    cache.open(1, Arc::new(()), || false);
+    cache.open(2, Arc::new(()), || false);
 
     let retired = cache.retire_absent(&HashSet::from([2]));
     assert_eq!(retired, 1, "one absent channel retires once");
     assert!(cache.is_retiring(&1));
     assert!(cache.get(&2).is_some());
 
-    cache.reap_absent(&HashSet::from([2]), |channel| {
-        Arc::strong_count(channel) == 1
-    });
+    cache.reap_absent(&HashSet::from([2]), quiescent);
     assert!(!cache.is_retiring(&1));
+}
+
+/// Every way a node reaches its next open, against whether the ledger still
+/// replays it online: only a failed channel that drained while the OS kept
+/// listing its node, and is still replayed online, comes back as the
+/// replacement no snapshot showed — and reports it for that one pass.
+#[test]
+fn only_a_drained_failed_channel_still_replayed_online_reopens_as_a_replacement() {
+    let histories: [(&str, History, bool); 5] = [
+        ("never opened", |_| {}, false),
+        ("failed and drained while listed", evict_and_drain, true),
+        (
+            "failed, then left the listing while draining",
+            |cache| {
+                let holder = Arc::new(());
+                cache.open(1, Arc::clone(&holder), || false);
+                assert!(cache.evict(&1));
+                assert!(!channel_pass(cache, false));
+                drop(holder);
+                assert!(!channel_pass(cache, true));
+            },
+            false,
+        ),
+        (
+            "failed and drained, then left the listing",
+            |cache| {
+                evict_and_drain(cache);
+                assert!(!channel_pass(cache, false));
+            },
+            false,
+        ),
+        (
+            "left the listing",
+            |cache| {
+                cache.open(1, Arc::new(()), || false);
+                assert!(!channel_pass(cache, false));
+            },
+            false,
+        ),
+    ];
+    for (history, reach, awaits_replacement) in histories {
+        for replayed_online in [false, true] {
+            let mut cache = NodeChannels::default();
+            reach(&mut cache);
+            assert!(channel_pass(&mut cache, true), "{history}: the node opens");
+            cache.open(1, Arc::new(()), || replayed_online);
+
+            assert_eq!(
+                cache.has_replacement(),
+                awaits_replacement && replayed_online,
+                "{history}, replayed online: {replayed_online}"
+            );
+            assert!(cache.get(&1).is_some(), "{history}: the reopen serves");
+            assert!(!channel_pass(&mut cache, true), "{history}: no second open");
+            assert!(
+                !cache.has_replacement(),
+                "{history}: the next pass serves the replacement as an ordinary channel"
+            );
+            assert!(cache.get(&1).is_some());
+        }
+    }
+}
+
+/// A replacement whose own pass publishes nothing for the node surfaces it
+/// offline, so the agent observes the return; the channel keeps serving.
+#[test]
+fn a_replacement_surfaced_offline_is_an_ordinary_reconnect() {
+    let mut cache = NodeChannels::default();
+    evict_and_drain(&mut cache);
+    assert!(channel_pass(&mut cache, true));
+    cache.open(1, Arc::new(()), || true);
+    assert!(cache.has_replacement());
+
+    cache.surfaced_offline(&1);
+    assert!(!cache.has_replacement());
+    assert!(cache.get(&1).is_some(), "the replacement keeps serving");
 }
 
 #[test]
