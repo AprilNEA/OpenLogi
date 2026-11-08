@@ -276,6 +276,61 @@ fn premature_finalization_and_use_after_close_are_explicit_failures() {
     drop(capture);
 }
 
+#[test]
+fn recorder_state_admits_exactly_capacity_events_then_stays_failed() {
+    let mut state = RecorderState::new(2);
+    assert_eq!(state.admit().unwrap(), RecordingSequence(1));
+    assert_eq!(state.admit().unwrap(), RecordingSequence(2));
+
+    let overflow = NativeRecordingError::Overflow { capacity: 2 };
+    assert_eq!(state.admit().unwrap_err(), overflow);
+    assert_eq!(state.begin_channel().unwrap_err(), overflow);
+    assert_eq!(state.close().unwrap(), Some(overflow));
+}
+
+#[test]
+fn recorder_state_reports_live_producers_unless_a_failure_came_first() {
+    let mut state = RecorderState::new(8);
+    assert_eq!(state.begin_channel().unwrap(), RecordedChannelId(1));
+    assert_eq!(state.begin_raw_writer().unwrap(), RecordedRawWriterId(1));
+    assert_eq!(state.begin_channel().unwrap(), RecordedChannelId(2));
+    state.end_producer();
+    assert_eq!(
+        state.close().unwrap(),
+        Some(NativeRecordingError::ActiveProducers { count: 2 })
+    );
+
+    let mut failed = RecorderState::new(8);
+    failed.begin_channel().unwrap();
+    failed.fail(NativeRecordingError::WorkerUnavailable);
+    assert_eq!(
+        failed.close().unwrap(),
+        Some(NativeRecordingError::WorkerUnavailable)
+    );
+}
+
+#[test]
+fn recorder_state_keeps_the_first_failure_and_closes_exactly_once() {
+    let first = NativeRecordingError::RawReportTooLong {
+        length: 65,
+        max: 64,
+    };
+    let mut state = RecorderState::new(8);
+    state.fail(first.clone());
+    state.fail(NativeRecordingError::WorkerUnavailable);
+    assert_eq!(state.begin_raw_writer().unwrap_err(), first);
+    assert_eq!(state.close().unwrap(), Some(first));
+
+    // Closed outranks the earlier failure, a later one is ignored, and the
+    // recorder cannot be finalized twice.
+    state.fail(NativeRecordingError::WorkerUnavailable);
+    assert_eq!(state.admit().unwrap_err(), NativeRecordingError::Closed);
+    assert_eq!(
+        state.close().unwrap_err(),
+        NativeRecordingError::AlreadyFinalized
+    );
+}
+
 #[tokio::test]
 async fn default_channel_construction_remains_unobserved_and_writes_normally() {
     let (raw, handle) = FakeRawHidChannel::new();
@@ -317,14 +372,10 @@ fn assert_request_complete(request: &RecordedRequest, response: HidppMessage) {
 async fn wait_for_accepted(recorder: &NativeRecorder, expected: usize) {
     let started = Instant::now();
     while started.elapsed() < Duration::from_secs(1) {
-        if recorder
-            .shared
-            .state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .accepted
-            >= expected
-        {
+        if matches!(
+            &*recorder.shared.lock_state(),
+            RecorderState::Open(open) if open.accepted >= expected
+        ) {
             return;
         }
         tokio::time::sleep(Duration::from_millis(5)).await;
