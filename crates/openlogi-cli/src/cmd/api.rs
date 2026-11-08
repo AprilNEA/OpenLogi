@@ -200,7 +200,10 @@ async fn execute(
     // Preserve typed transport failures for the JSON boundary; the human-facing
     // agent::snapshot helper intentionally turns them into prose.
     let snapshot = agent::call(client.snapshot(context::current())).await?;
+    // A read changes nothing, so it must not stage a save even with --save.
+    let reads_saved_speed = matches!(command, ApiCommand::PointerSpeed { set: None, .. });
     let mut save = path
+        .filter(|_| !reads_saved_speed)
         .map(|path| Save::prepare(path, &snapshot, &command))
         .transpose()?;
     let mut result = match command {
@@ -263,6 +266,12 @@ async fn execute(
         }
         ApiCommand::PointerSpeed { device, set } => {
             if let Some(factor) = set {
+                if !openlogi_core::config::is_valid_os_pointer_speed(factor) {
+                    return Err(ApiError::new(
+                        "invalid_value",
+                        "pointer-speed must be a finite factor between -1.0 and 1.0",
+                    ));
+                }
                 let Some(save) = save.as_mut() else {
                     return Err(ApiError::new(
                         "invalid_value",
@@ -276,13 +285,10 @@ async fn execute(
                     "os_pointer_speed": factor,
                 }))
             } else {
-                let current = save
-                    .as_ref()
-                    .and_then(persistence::Save::os_pointer_speed)
-                    .unwrap_or(1.0);
+                let saved = persistence::Save::saved_os_pointer_speed(&snapshot, &device)?;
                 Ok(json!({
                     "device": device,
-                    "os_pointer_speed": current,
+                    "os_pointer_speed": saved,
                 }))
             }
         }

@@ -59,6 +59,26 @@ impl Save {
                 ));
             }
         };
+        Self::open(path, snapshot, device, Some(command))
+    }
+
+    /// The device's saved OS pointer speed, read without writing anything.
+    /// `None` when no speed is saved for the device.
+    pub(super) fn saved_os_pointer_speed(
+        snapshot: &AgentSnapshot,
+        device: &str,
+    ) -> Result<Option<f32>, ApiError> {
+        let path = openlogi_core::paths::config_path()
+            .map_err(|error| ApiError::new("config_error", error.to_string()))?;
+        Ok(Self::open(&path, snapshot, device, None)?.os_pointer_speed())
+    }
+
+    fn open(
+        path: &Path,
+        snapshot: &AgentSnapshot,
+        device: &str,
+        command: Option<&ApiCommand>,
+    ) -> Result<Self, ApiError> {
         let route = select_device(snapshot, device)?;
         let (config, file) = ConfigFile::load_from_path(path)
             .map_err(|error| ApiError::new("config_error", error.to_string()))?;
@@ -109,8 +129,8 @@ impl Save {
             .and_then(|device| device.links.get(&stable.route_key()))
         {
             let overridden = match command {
-                ApiCommand::Dpi { .. } => link.overrides.dpi.is_some(),
-                ApiCommand::Smartshift(_) => link.overrides.smartshift.is_some(),
+                Some(ApiCommand::Dpi { .. }) => link.overrides.dpi.is_some(),
+                Some(ApiCommand::Smartshift(_)) => link.overrides.smartshift.is_some(),
                 _ => false,
             };
             if overridden {
