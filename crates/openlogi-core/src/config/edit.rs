@@ -141,15 +141,23 @@ impl DeviceEdit {
         stable: &DeviceStableId,
         identity: Option<&DeviceIdentity>,
     ) -> Result<Self, DeviceEditError> {
-        let edit = ConfigEdit::load(path)?;
+        let mut edit = ConfigEdit::load(path)?;
         let key = edit
             .config
             .resolve_device_key(stable, identity)
             .ok_or(DeviceEditError::NoConfigKey)?;
+        let link = stable.route_key();
+        // An online device's settings go under its own identity, which only
+        // the route index leads back to while it sleeps. Record the route
+        // there, as the settings app does when it sees the device, so a save
+        // made while it sleeps reaches the same settings.
+        if identity.is_some() && key.as_str() != link {
+            edit.config.adopt_route(&key, &link, None);
+        }
         Ok(Self {
             edit,
             key: key.into_string(),
-            link: stable.route_key(),
+            link,
         })
     }
 
