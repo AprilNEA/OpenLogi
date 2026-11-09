@@ -120,7 +120,7 @@ Per-application profiles switch with the focused app. An `[apps]` alias lets one
 <table>
     <tr>
         <td width="50%"><img src="https://assets.openlogi.org/screenshots/macos/light/cards/dpi.png" width="400" alt="Pointer tuning card with a DPI slider"></td>
-        <td width="50%"><b>Pointer</b><ul><li>DPI presets with cycle and set-preset actions</li><li>Pointer speed and report rate</li><li>Precision Mode: one button switches the mouse to its slowest speed and back</li></ul></td>
+        <td width="50%"><b>Pointer</b><ul><li>DPI presets with cycle and set-preset actions</li><li>Pointer speed and report rate; system pointer speed and acceleration on mice that scale their pointer</li><li>Precision Mode: one button switches the mouse to its slowest speed and back</li></ul></td>
     </tr>
     <tr>
         <td width="50%"><img src="https://assets.openlogi.org/screenshots/macos/light/cards/smartshift.png" width="400" alt="SmartShift card with wheel mode, sensitivity, and scrolling force"></td>

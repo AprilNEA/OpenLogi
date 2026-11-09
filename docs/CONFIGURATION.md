@@ -145,7 +145,7 @@ Common device fields are:
 
 - `custom_name`, `enabled`, `dpi`, `dpi_presets`, thumb-wheel sensitivity,
   scroll inversion, and scroll resolution
-- `os_pointer_speed` (optional): the desktop's pointer-sensitivity factor, applied to every mouse (global, not per device)
+- `os_pointer_speed` (optional): the desktop's pointer-sensitivity factor, applied to every mouse that scales its own pointer (HID++ `0x2205`, see `pointer_speed`); keyboards never receive it (global, not per device)
   factor, from `-1.0` to `1.0`. The Pointer tab slider saves it; an online,
   enabled device gets changed values immediately and again when it reconnects.
   When unset, OpenLogi leaves the system's existing pointer sensitivity
@@ -284,6 +284,10 @@ Common device fields are:
 - `keep_os_layout` for keyboards whose key layout software can set (HID++
   `0x4531`): absent or `true` keeps the layout on the host OS, as Logi Options+
   does; `false` leaves the keyboard's layout to its own shortcuts
+- `os_layout_pin` for keyboards whose key layout software can set (HID++
+  `0x4531`) with `keep_os_layout` off: `macos`, `windows`, or `linux` names
+  the host OS the keyboard's layout follows. Absent pins nothing.
+  `keep_os_layout` overrides the pin while it is on
 - `report_rate` for mice with an adjustable report rate (HID++ `0x8060` or
   `0x8061`), in hertz. The agent writes it when the mouse reconnects over a
   connection that offers that rate; absent leaves the mouse's own rate
