@@ -81,7 +81,7 @@ mod tests {
 
     fn lock_held_elsewhere() -> std::result::Result<(), InstanceError> {
         Err(InstanceError::AlreadyRunning {
-            path: PathBuf::from("agent.lock"),
+            path: PathBuf::from("held-elsewhere"),
         })
     }
 
