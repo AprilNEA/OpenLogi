@@ -374,43 +374,50 @@ fn queued_key_action_retains_its_press_time_target() {
 /// A held action needs the key's release, which the one-shot action queue
 /// never delivers.
 #[test]
-fn dpi_shift_on_a_key_runs_as_a_held_press() {
+fn held_actions_on_a_key_run_as_held_presses() {
     use super::super::button::ButtonRuntimeEvent;
 
-    let (dispatcher, mut owner, events) = test_dispatcher();
-    let keycode = 0x7a;
-    let modifiers = KeyModifiers::default();
-    let bindings = Arc::new(RwLock::new(BTreeMap::from([(
-        KeyTrigger { keycode, modifiers },
+    for action in [
         Action::DpiShift,
-    )])));
-    let (actions, queued) = mpsc::sync_channel(1);
-    let key = |pressed| {
-        handle_key(
-            KeyEvent {
-                keycode,
-                pressed,
-                modifiers,
-            },
-            &bindings,
-            &actions,
-            &dispatcher,
-            ActionDispatchTarget::capture,
-        )
-    };
+        Action::HoldShortcut("Ctrl+F18".parse().expect("valid chord")),
+        Action::TapKeyHoldingModifiers("Alt+F19".parse().expect("valid chord")),
+        Action::HoldModifier("Ctrl+Shift".parse().expect("valid modifiers")),
+    ] {
+        let (dispatcher, mut owner, events) = test_dispatcher();
+        let keycode = 0x7a;
+        let modifiers = KeyModifiers::default();
+        let bindings = Arc::new(RwLock::new(BTreeMap::from([(
+            KeyTrigger { keycode, modifiers },
+            action,
+        )])));
+        let (actions, queued) = mpsc::sync_channel(1);
+        let key = |pressed| {
+            handle_key(
+                KeyEvent {
+                    keycode,
+                    pressed,
+                    modifiers,
+                },
+                &bindings,
+                &actions,
+                &dispatcher,
+                ActionDispatchTarget::capture,
+            )
+        };
 
-    assert_eq!(key(true), EventDisposition::Suppress);
-    queued.try_recv().unwrap_err();
-    assert!(matches!(
-        events.recv_timeout(Duration::from_secs(1)),
-        Ok(ButtonRuntimeEvent::Started(_))
-    ));
-    assert_eq!(key(false), EventDisposition::Suppress);
-    assert!(matches!(
-        events.recv_timeout(Duration::from_secs(1)),
-        Ok(ButtonRuntimeEvent::Ended { .. })
-    ));
-    assert!(owner.shutdown());
+        assert_eq!(key(true), EventDisposition::Suppress);
+        queued.try_recv().unwrap_err();
+        assert!(matches!(
+            events.recv_timeout(Duration::from_secs(1)),
+            Ok(ButtonRuntimeEvent::Started(_))
+        ));
+        assert_eq!(key(false), EventDisposition::Suppress);
+        assert!(matches!(
+            events.recv_timeout(Duration::from_secs(1)),
+            Ok(ButtonRuntimeEvent::Ended { .. })
+        ));
+        assert!(owner.shutdown());
+    }
 }
 
 #[test]

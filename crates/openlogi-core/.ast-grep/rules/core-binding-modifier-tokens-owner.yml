@@ -1,0 +1,24 @@
+# Owner: openlogi_core::binding::Modifiers — the shortcut modifier bit layout
+# and the names a binding spells them with (`Modifiers::from_token`).
+id: core-binding-modifier-tokens-owner
+language: rust
+severity: error
+message: Shortcut modifier names belong to openlogi_core::binding::Modifiers; parse a chord or a modifier set with KeyCombo's or BareModifiers' FromStr instead of matching the names here.
+note: |
+  KeyCombo once kept its own token table and bit constants, so any other
+  parser of the same names would have had to track them by hand.
+  `config/key_trigger.rs` is exempt: a function-key trigger has its own
+  vocabulary (`KeyModifiers`, no Super), not a shortcut's.
+  See "Single source of truth" in AGENTS.md.
+files:
+  - crates/**/*.rs
+  - xtask/**/*.rs
+ignores:
+  - crates/openlogi-core/src/binding/modifiers.rs
+  - crates/openlogi-core/src/config/key_trigger.rs
+rule:
+  kind: string_literal
+  regex: '^"(cmd|command|ctrl|control|alt|option|shift|super|win|meta)"$'
+  inside:
+    kind: match_pattern
+    stopBy: end

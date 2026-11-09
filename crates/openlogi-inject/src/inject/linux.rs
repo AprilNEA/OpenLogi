@@ -1228,7 +1228,7 @@ mod tests {
         hyprland_session_from_signature, key_ev, key_phase_events, modifiers_to_keycodes, rel_ev,
         resolve_allowlisted_under, scroll_events, syn, unheld_modifiers, wait_with_retry,
     };
-    use crate::inject::{HeldOutput, KeyPhase};
+    use crate::inject::{HeldChordKind, HeldOutput, KeyPhase};
 
     #[test]
     fn held_chord_edges_use_inverse_key_order() {
@@ -1264,14 +1264,15 @@ mod tests {
 
         let mut output = HeldOutput::default();
         let chord: KeyCombo = "Cmd+X".parse().expect("test chord must be valid");
-        let _ = output.transition(None, Some((&chord, HeldKeys::ModifiersOnly)));
+        let chord = HeldChordKind::Chord(chord, HeldKeys::ModifiersOnly);
+        let _ = output.transition(None, Some(&chord));
         assert_eq!(
             unheld_modifiers(&mods, &output),
             [KeyCode::KEY_LEFTSHIFT],
             "the held chord's Ctrl must get neither edge"
         );
 
-        let _ = output.transition(Some((&chord, HeldKeys::ModifiersOnly)), None);
+        let _ = output.transition(Some(&chord), None);
         assert_eq!(
             unheld_modifiers(&mods, &output),
             mods,
