@@ -61,6 +61,22 @@ pub fn canonical_device_key(
         .or_else(|| stable.physical_key())
 }
 
+impl DeviceStableId {
+    /// The key an online device names by itself: its own identity, or the
+    /// route of a device that reports only its model.
+    ///
+    /// A model-only device's key is its route, so the `links` index must not
+    /// answer for it: that index records the device last seen on the route,
+    /// which may be a unit of the same model on a direct route, or the unit
+    /// that held a receiver slot before this device was paired into it.
+    fn own_key(&self, identity: &DeviceIdentity) -> Option<PhysicalDeviceKey> {
+        match identity.config_key() {
+            Some(key) => PhysicalDeviceKey::parse(&key),
+            None => self.physical_key(),
+        }
+    }
+}
+
 impl Config {
     /// Restore the route index's one-owner invariant after loading and schema
     /// migration.
@@ -128,10 +144,7 @@ impl Config {
         stable: &DeviceStableId,
         identity: Option<&DeviceIdentity>,
     ) -> Option<PhysicalDeviceKey> {
-        if let Some(key) = identity
-            .and_then(DeviceIdentity::config_key)
-            .and_then(|key| PhysicalDeviceKey::parse(&key))
-        {
+        if let Some(key) = identity.and_then(|identity| stable.own_key(identity)) {
             let holds_settings = |key: &str| {
                 self.devices
                     .get(key)
@@ -204,9 +217,12 @@ impl Config {
                 changed = true;
             }
         }
-        let legacy = (route_key != canonical.as_str())
-            .then(|| self.devices.remove(route_key))
-            .flatten();
+        // A direct route key keys the entry of a device that reports only its
+        // model. Nothing says it was this device, so it is not a legacy entry.
+        let legacy = (route_key != canonical.as_str()
+            && DeviceStableId::direct_route_of_key(route_key).is_none())
+        .then(|| self.devices.remove(route_key))
+        .flatten();
         let device = self
             .devices
             .entry(canonical.as_str().to_string())
@@ -742,6 +758,89 @@ mod tests {
         let device = &config.devices["direct:046d:c07e"];
         assert_eq!(device.dpi, Some(Dpi::new(1600)));
         assert!(device.links.contains_key("direct:046d:c07e"));
+    }
+
+    /// A model-only device's entry, `direct:046d:c08d`, holding its DPI.
+    fn config_with_a_model_entry() -> Config {
+        let mut config = Config::default();
+        config.set_dpi("direct:046d:c08d", Dpi::new(1600));
+        let canonical = PhysicalDeviceKey::parse("direct:046d:c08d").expect("valid");
+        config.adopt_route(&canonical, "direct:046d:c08d", None);
+        config
+    }
+
+    #[test]
+    fn units_of_a_model_do_not_read_the_model_entry() {
+        // Nothing on disk says the model-only device was either unit: the
+        // recorded identity carries no unit id. Reading it would hand both
+        // mice the settings of a third device.
+        let config = config_with_a_model_entry();
+        for unit_id in [[0x6b, 0xe9, 0xd3, 0x00], [0x01, 0x02, 0x03, 0x04]] {
+            let unit = DeviceIdentity::from_parts(None, unit_id);
+            let stable = DeviceStableId::Direct {
+                vendor_id: 0x046d,
+                product_id: 0xc08d,
+                identity: Some(unit.clone()),
+            };
+            assert_eq!(
+                config
+                    .resolve_device_key(&stable, Some(&unit))
+                    .map(PhysicalDeviceKey::into_string),
+                unit.config_key(),
+            );
+        }
+    }
+
+    #[test]
+    fn adopting_a_unit_leaves_the_model_entry_alone() {
+        let mut config = config_with_a_model_entry();
+        let canonical = PhysicalDeviceKey::parse("unit:6be9d300").expect("valid");
+
+        config.adopt_route(&canonical, "direct:046d:c08d", None);
+
+        assert_eq!(
+            config.devices["direct:046d:c08d"].dpi,
+            Some(Dpi::new(1600)),
+            "the model-only device keeps its settings"
+        );
+        assert_eq!(config.devices["unit:6be9d300"].dpi, None);
+    }
+
+    #[test]
+    fn a_model_identity_does_not_read_the_unit_that_last_indexed_its_route() {
+        let mut config = config_with_a_model_entry();
+        config.set_dpi("unit:6be9d300", Dpi::new(800));
+        let unit = PhysicalDeviceKey::parse("unit:6be9d300").expect("valid");
+        config.adopt_route(&unit, "direct:046d:c08d", None);
+        let model = DeviceStableId::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xc08d,
+            identity: Some(DeviceIdentity::Model),
+        };
+
+        assert_eq!(
+            config
+                .resolve_device_key(&model, Some(&DeviceIdentity::Model))
+                .map(PhysicalDeviceKey::into_string)
+                .as_deref(),
+            Some("direct:046d:c08d")
+        );
+    }
+
+    #[test]
+    fn a_model_identity_does_not_read_the_unit_that_last_held_its_receiver_slot() {
+        let mut config = Config::default();
+        config.set_dpi("unit:6be9d300", Dpi::new(800));
+        let unit = PhysicalDeviceKey::parse("unit:6be9d300").expect("valid");
+        config.adopt_route(&unit, "receiver:82839805:slot:1", None);
+
+        assert_eq!(
+            config
+                .resolve_device_key(&on_receiver(), Some(&DeviceIdentity::Model))
+                .map(PhysicalDeviceKey::into_string)
+                .as_deref(),
+            Some("receiver:82839805:slot:1")
+        );
     }
 
     #[test]
