@@ -58,9 +58,18 @@ Rules that drive most reports:
   app bundle. Bundles built before the rename spell that directory
   `OpenLogiAgent.app`; both are the same identity (`org.openlogi.agent`), and
   the grant survived the rename because the path is not part of the designated
-  requirement. The System Settings `+` picker will not browse into a bundle, so
-  they have to use Go-to-Folder. Say this explicitly; do not tell someone to
-  "grant OpenLogi permission".
+  requirement. Say this explicitly; do not tell someone to "grant OpenLogi
+  permission".
+- The System Settings `+` picker cannot browse into a bundle. To add the agent
+  to the Accessibility or Input Monitoring list, give the steps for the
+  reporter's release:
+  - After 0.9.0: click **Open** on that permission in OpenLogi's Settings →
+    Permissions, then drag **OpenLogi Agent** from the panel over System
+    Settings into the list. The panel appears unless the agent already reports
+    the grant, and it closes when the agent reports the grant.
+  - 0.9.0 and earlier, or when no panel appears: click `+`, press ⇧⌘G (Go to
+    Folder), enter `/Applications/OpenLogi.app/Contents/Library/LoginItems`,
+    and choose the agent bundle there.
 - A grant to the GUI does nothing for the agent, and vice versa. There is no
   bundle-wide grant.
 - **Every copy is its own identity.** A dev build (`org.openlogi.agent-dev`), a
@@ -185,7 +194,9 @@ Re-check linked upstream transport issues before attributing a probe timeout to 
 
 Say so plainly rather than promising a fix:
 
-- Apple's `+` picker not browsing into bundles.
+- Apple's `+` picker not browsing into bundles. The drag guide (§2) avoids the
+  picker only when the user starts from OpenLogi's **Open** button. A user who
+  opens System Settings another way still needs Go to Folder.
 - `IOHIDDeviceOpen`'s silent denial — we can only infer it by checking access
   separately.
 - A stale `tccd` decision that needs a full logout, or an MDM policy.

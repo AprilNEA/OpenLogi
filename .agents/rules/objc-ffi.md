@@ -69,12 +69,19 @@ notifications — the `com.apple.accessibility.api` distributed notification and
 tccd's `com.apple.tcc.access.changed` Darwin notification — are observed by the
 external [`axwatch`](https://crates.io/crates/axwatch) crate
 (`CFNotificationCenter` there, not here); `openlogi-hook`'s `grant::ProbeCue`
-and `openlogi-agent-core`'s grant watchers only consume its wakes.
+and `openlogi-agent-core`'s grant watchers only consume its wakes. The System
+Settings drag guide for the agent's Accessibility and Input Monitoring grants
+lives in the external [`gpui-tcc`](https://github.com/AprilNEA/gpui-tcc) crate
+(the `NSWorkspace` icon and frontmost-app reads, the
+`CGWindowListCopyWindowInfo` lookup of the System Settings window, and the
+overlay `NSWindow` level and `NSVisualEffectView` material are there, not
+here); `openlogi-desktop/src/platform/permission_guide.rs` only decides when
+to present it and which agent bundle it holds.
 
-The rest of `openlogi-desktop/src/platform/` (`updater.rs`, on `gpui_updater`)
-carries **no** ObjC FFI — don't add any. Neither do `openlogi-core`'s
-`single_instance.rs` (fs4 lock) or `openlogi-agent`'s `autostart/macos.rs`
-(legacy-plist cleanup via `std::fs`).
+The rest of `openlogi-desktop/src/platform/` (`updater.rs`, on `gpui_updater`,
+and `permission_guide.rs`, on `gpui_tcc`) carries **no** ObjC FFI — don't add
+any. Neither do `openlogi-core`'s `single_instance.rs` (fs4 lock) or
+`openlogi-agent`'s `autostart/macos.rs` (legacy-plist cleanup via `std::fs`).
 
 ## Ownership: `Retained<T>`, never raw `id`
 
@@ -157,13 +164,14 @@ Rules:
 - **Checking never prompts; prompting belongs to whoever owns the resource.**
   The agent raises the Accessibility prompt (it owns the tap) and calls
   `IOHIDRequestAccess` before opening HID; the GUI only reads status and
-  deep-links to System Settings (`open_pane`). Never call the prompting half from
-  the GUI — the grant would land on the wrong code-signing identity (issue #214,
-  see `disclaim`). This split is also why the ready-made permission crates don't
-  fit: they model one app asking for itself. `permission-flow` additionally
-  brings its own onboarding UI and links the Swift runtime into every downstream
-  binary; `macos-accessibility-client` is a raw-`extern` wrapper where this file
-  requires typed bindings.
+  deep-links to System Settings (`open_pane`, or the `gpui-tcc` drag guide,
+  which opens the same pane and prompts nothing). Never call the prompting
+  half from the GUI — the grant would land on the wrong code-signing identity
+  (issue #214, see `disclaim`). This split is also why the ready-made
+  permission crates don't fit: they model one app asking for itself.
+  `permission-flow` additionally brings its own onboarding UI and links the
+  Swift runtime into every downstream binary; `macos-accessibility-client` is
+  a raw-`extern` wrapper where this file requires typed bindings.
 - **TCC matches the full Designated Requirement, not the bundle ID** ([TN3127]).
   Re-signing one bundle ID with a different *kind* of certificate leaves a record
   that can never match again, and toggling the checkbox does not rewrite the
