@@ -296,14 +296,21 @@ fn a_refresh_checks_a_keyboard_whose_layout_support_shows_up_late() {
 
 #[test]
 fn turning_keep_on_replaces_a_pin_queued_while_the_keyboard_is_offline() {
-    let mut orch = orchestrator(pinned(PinnedOs::Windows));
+    // Pin to an OS other than the host: on the host OS the kept entry would
+    // still match the target and the assertion would hold for the wrong reason.
+    let (target, stale) = if host().os == OsMask::WINDOWS {
+        (PinnedOs::Linux, OsMask::LINUX)
+    } else {
+        (PinnedOs::Windows, OsMask::WINDOWS)
+    };
+    let mut orch = orchestrator(pinned(target));
     let mut keyboard = layout_keyboard("kbd", 1);
     keyboard.online = false;
     orch.devices = vec![keyboard];
-    let windows = platform(OsMask::WINDOWS);
-    orch.kept_os_layouts.keep("kbd", windows);
+    let stale = platform(stale);
+    orch.kept_os_layouts.keep("kbd", stale);
     let mut keep = orch.config.clone();
     keep.set_keep_os_layout("kbd", true);
     orch.replace_config(keep);
-    assert!(!orch.kept_os_layouts.contains("kbd", windows));
+    assert!(!orch.kept_os_layouts.contains("kbd", stale));
 }

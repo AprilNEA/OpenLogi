@@ -9,7 +9,7 @@ use gpui_kit::component::{Selectable as _, v_flex};
 use crate::state::{AppState, DeviceKey};
 use crate::ui::commit_slider::{CommitSlider, SliderRange};
 use crate::ui::slider_row::SliderRow;
-use crate::ui::theme::{FocusRingStyle as _, Palette, Typography as _};
+use crate::ui::theme::{FocusRingStyle as _, Palette, PressableStyle as _, Typography as _};
 
 const MIN_SPEED: i32 = -100;
 const MAX_SPEED: i32 = 100;
@@ -122,7 +122,7 @@ fn reset_button(pal: Palette) -> BaseButton {
         .border_1()
         .border_color(pal.border)
         .bg(pal.control)
-        .hover(|s| s.bg(pal.control_hover))
+        .pressable_fill(false, pal)
         .focus_visible(move |s| s.focus_ring(pal))
         .text_caption()
         .text_color(pal.text_muted)
