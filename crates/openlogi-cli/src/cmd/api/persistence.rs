@@ -77,12 +77,6 @@ impl Save {
                 )
             })?;
         let identity = DeviceIdentity::from_parts(model.serial_number.as_deref(), model.unit_id);
-        if identity.config_key().is_none() {
-            return Err(ApiError::new(
-                "identity_unavailable",
-                "device has no persistent physical identity",
-            ));
-        }
         let stable = DeviceStableId::from_parts(Some(&route), slot, Some(identity.clone()));
         let key = config
             .resolve_device_key(&stable, Some(&identity))

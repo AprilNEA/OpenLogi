@@ -1,4 +1,5 @@
 use std::fs;
+use std::path::Path;
 
 use openlogi_core::config::Config;
 use openlogi_core::device::{DeviceModelInfo, DeviceTransports};
@@ -172,6 +173,146 @@ async fn rejects_unidentified_devices_reads_and_link_overrides_before_hardware_i
     let overridden = run_script_at(identified_snapshot(), dpi_command(), vec![], Some(&path)).await;
     assert_eq!(overridden["error"]["code"], "link_override");
     assert_eq!(fs::read_to_string(path).unwrap(), original);
+}
+
+/// A device whose DeviceInformation answer carries neither a serial nor a
+/// unit id, as the G402 (`046d:c07e`) reports over its cable.
+fn model_only_snapshot(direct: bool) -> AgentSnapshot {
+    let mut snapshot = snapshot();
+    let inventory = &mut snapshot.inventory[0];
+    if direct {
+        inventory.receiver.product_id = 0xc07e;
+        inventory.receiver.unique_id = None;
+        inventory.paired[0].slot = openlogi_core::hid::DIRECT_DEVICE_INDEX;
+    }
+    inventory.paired[0].model_info = Some(DeviceModelInfo {
+        entity_count: 3,
+        serial_number: None,
+        unit_id: [0; 4],
+        transports: DeviceTransports::default(),
+        model_ids: [0, 0, 0],
+        extended_model_id: 0,
+    });
+    snapshot
+}
+
+/// Set the DPI of the device on `on` with `--save` against the configuration
+/// file at `path`, and return the envelope.
+async fn save_dpi_at(path: &Path, snapshot: AgentSnapshot, on: DeviceRoute) -> Value {
+    let read = |current: u16, expected: DeviceRoute| -> Step {
+        Box::new(move |request| {
+            let AgentRequest::ReadDpi { route } = request else {
+                panic!("expected DPI read, got {request:?}");
+            };
+            assert_eq!(route, expected);
+            AgentResponse::ReadDpi(Ok(DpiInfo {
+                current: current.into(),
+                capabilities: DpiCapabilities::new(vec![400, 1200, 2600]).unwrap(),
+            }))
+        })
+    };
+    let write_route = on.clone();
+    run_script_at(
+        snapshot,
+        ApiCommand::Dpi {
+            device: on.to_string(),
+            set: Some(1200),
+        },
+        vec![
+            read(400, on.clone()),
+            Box::new(move |request| {
+                let AgentRequest::SetDpi { route, dpi } = request else {
+                    panic!("unexpected {request:?}")
+                };
+                assert_eq!(route, write_route);
+                assert_eq!(dpi, Dpi::from(1200));
+                AgentResponse::SetDpi(Ok(()))
+            }),
+            read(1200, on),
+            Box::new(|request| {
+                assert!(matches!(request, AgentRequest::ReloadConfig {}));
+                AgentResponse::ReloadConfig(Ok(()))
+            }),
+        ],
+        Some(path),
+    )
+    .await
+}
+
+/// Set the DPI of the device on `on` with `--save` in a fresh configuration,
+/// and return the envelope plus the configuration that was saved.
+async fn save_dpi_on(snapshot: AgentSnapshot, on: DeviceRoute) -> (Value, Config) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(CONFIG_FILE);
+    let result = save_dpi_at(&path, snapshot, on).await;
+    (result, Config::load_from_path(&path).unwrap())
+}
+
+#[tokio::test]
+async fn saves_a_direct_device_known_only_by_its_model_under_its_route() {
+    let (result, saved) = save_dpi_on(
+        model_only_snapshot(true),
+        DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xc07e,
+        },
+    )
+    .await;
+
+    assert_eq!(result["ok"], true, "{result}");
+    assert_eq!(result["data"]["persistence"], "saved");
+    assert_eq!(saved.dpi("direct:046d:c07e"), Some(1200.into()));
+    assert_eq!(saved.devices.len(), 1);
+}
+
+#[tokio::test]
+async fn saves_a_receiver_device_known_only_by_its_model_under_its_slot() {
+    // Its receiver slot was always its key; the CLI now saves it there, as
+    // the GUI already did, instead of refusing it for lack of a unit id.
+    let (result, saved) = save_dpi_on(model_only_snapshot(false), route()).await;
+
+    assert_eq!(result["ok"], true, "{result}");
+    assert_eq!(
+        saved.dpi("receiver:test-receiver:slot:3"),
+        Some(1200.into())
+    );
+    assert_eq!(saved.devices.len(), 1);
+}
+
+#[tokio::test]
+async fn a_model_only_device_does_not_save_into_the_unit_that_last_held_its_slot() {
+    // The `links` index still names the unit that held the slot, but an online
+    // device reporting only its model says it is not that unit.
+    const UNIT_SETTINGS: &str = "[devices.\"unit:12345678\"]\n\
+        # set for the unit that held this slot\n\
+        dpi = 2600\n";
+    const UNIT_LINK: &str = "[devices.\"unit:12345678\".links.\"receiver:test-receiver:slot:3\"]\n";
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(CONFIG_FILE);
+    fs::write(
+        &path,
+        format!("schema_version = 6\n{UNIT_SETTINGS}\n{UNIT_LINK}"),
+    )
+    .unwrap();
+
+    let result = save_dpi_at(&path, model_only_snapshot(false), route()).await;
+
+    assert_eq!(result["ok"], true, "{result}");
+    let written = fs::read_to_string(&path).unwrap();
+    assert_eq!(
+        Config::load_from_path(&path)
+            .unwrap()
+            .dpi("receiver:test-receiver:slot:3"),
+        Some(1200.into()),
+        "the save did not land on the device's own entry:\n{written}"
+    );
+    // Checked table by table: the new entry may be written between the two.
+    for unchanged in [UNIT_SETTINGS, UNIT_LINK] {
+        assert!(
+            written.contains(unchanged),
+            "the previous occupant's entry changed:\n{written}"
+        );
+    }
 }
 
 #[tokio::test]
