@@ -3624,6 +3624,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e0f9dae92b9bc15baa6e530c90bdd4c689d3710bd4d18c3566deb1d6ae182daf"
 
 [[package]]
+name = "gpui-tcc"
+version = "0.1.1"
+source = "git+https://github.com/AprilNEA/gpui-tcc?tag=v0.1.1#f8665efaaa36d0504c2bcf98de2e56a1c0d010d8"
+dependencies = [
+ "anyhow",
+ "gpui-pre",
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
+ "objc2-foundation 0.3.2",
+ "objc2-quartz-core 0.3.2",
+ "raw-window-handle",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "gpui-updater-core"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6109,6 +6126,7 @@ dependencies = [
  "disclaim",
  "embed-resource",
  "gpui-kit",
+ "gpui-tcc",
  "gpui-updater-pre",
  "gpui-updater-sparkle",
  "image",
