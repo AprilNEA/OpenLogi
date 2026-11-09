@@ -267,6 +267,41 @@ async fn an_offline_keyboards_fn_lock_and_disabled_keys_are_only_saved() {
     assert_eq!(agent.reloads.load(Ordering::SeqCst), 2);
 }
 
+/// A key toggled from a keyboard's disabled keys as it read them reaches a
+/// keyboard that also reports a disabled key this version does not know: the
+/// keyboard keeps that key, and the known one changes.
+#[tokio::test]
+async fn a_disabled_key_change_keeps_a_key_this_version_does_not_know() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(openlogi_core::paths::CONFIG_FILE);
+    let agent = Agent::new(&path, true);
+    let shared = agent.shared().await;
+    let keyboard = super::disabled_keys::Keyboard::publish_on(&shared, agent.route.clone()).await;
+
+    // Caps Lock and an unknown key read as disabled (`0x81`); Caps Lock is
+    // turned back on.
+    let read = DisableKeysMask::from_bits_retain(0x81);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        agent
+            .settings
+            .set_disabled_keys(&agent.route, read & !DisableKeysMask::CAPS_LOCK),
+    )
+    .await
+    .expect("the write finishes")
+    .unwrap();
+
+    keyboard.assert_writes(&[0x80]);
+    let saved = Config::load_from_path(&path).unwrap();
+    assert!(
+        saved
+            .disabled_keys(KEY)
+            .is_none_or(|keys| !keys.contains(&DisableKey::CapsLock)),
+        "{:?}",
+        saved.disabled_keys(KEY)
+    );
+}
+
 /// A keyboard at `route` in `registry` with `0x40a2` Fn inversion, which
 /// keeps the state written and starts with Fn lock off. Counts its writes.
 async fn publish_fn_lock_keyboard(

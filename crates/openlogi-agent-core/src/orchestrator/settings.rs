@@ -140,11 +140,16 @@ impl<R: ConfigReload> DeviceSettings<R> {
 
     /// Disable the known keys in `disabled` on the keyboard at `route`, and
     /// enable the rest, then save the keys the keyboard confirms it disabled.
+    /// A disabled key this version does not know stays as the keyboard has
+    /// it, whatever `disabled` says of it.
     pub async fn set_disabled_keys(
         &self,
         route: &DeviceRoute,
         disabled: DisableKeysMask,
     ) -> Result<(), SettingError> {
+        // The keyboard refuses a request that names a key outside the known
+        // set, and keeps the unknown keys it reports itself.
+        let disabled = disabled & DisableKeysMask::KNOWN;
         let (mut edit, online) = self
             .stage(route, DeviceSetting::DisabledKeys(disabled))
             .await?;
