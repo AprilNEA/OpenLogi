@@ -1,4 +1,6 @@
+use std::future::Future;
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::time::Duration;
 
 use super::*;
 use hidpp::feature::FeatureType;
@@ -1836,6 +1838,17 @@ fn zone_effect_params(handle: &crate::replay::ReplayChannelHandle) -> Vec<(u8, u
         .collect()
 }
 
+/// How long one lighting test may take, setup included, before it fails
+/// instead of leaving CI waiting on a stuck write.
+const LIGHTING_TEST_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// `test`, failed with a clear message once [`LIGHTING_TEST_TIMEOUT`] passes.
+async fn bounded<T>(test: impl Future<Output = T>) -> T {
+    tokio::time::timeout(LIGHTING_TEST_TIMEOUT, test)
+        .await
+        .expect("the lighting test did not finish within LIGHTING_TEST_TIMEOUT")
+}
+
 fn period(ms: u16) -> LightingEffectPeriod {
     LightingEffectPeriod::try_new(ms).expect("valid lighting effect period")
 }
@@ -1883,45 +1896,51 @@ const G733_ZONES: ScriptedZones = &[
 
 #[tokio::test]
 async fn breathing_targets_each_devices_own_breathing_index() -> Result<(), WriteError> {
-    let breathing = LightingAnimation::Breathing {
-        period: period(4_000),
-    };
-    // Colour 11 22 33, 4000 ms = 0x0fa0, default waveform, full intensity.
-    let params = [0x11, 0x22, 0x33, 0x0f, 0xa0, 0, 0, 0, 0, 0];
+    bounded(async {
+        let breathing = LightingAnimation::Breathing {
+            period: period(4_000),
+        };
+        // Colour 11 22 33, 4000 ms = 0x0fa0, default waveform, full intensity.
+        let params = [0x11, 0x22, 0x33, 0x0f, 0xa0, 0, 0, 0, 0, 0];
 
-    let (shared, handle) = color_led_effects_shared(G203_PRODIGY_ZONES).await;
-    assert!(animate(&shared, breathing).await?.is_none());
-    assert_eq!(zone_effect_params(&handle), [(0, 3, params)]);
+        let (shared, handle) = color_led_effects_shared(G203_PRODIGY_ZONES).await;
+        assert!(animate(&shared, breathing).await?.is_none());
+        assert_eq!(zone_effect_params(&handle), [(0, 3, params)]);
 
-    let (shared, handle) = color_led_effects_shared(G733_ZONES).await;
-    assert!(animate(&shared, breathing).await?.is_none());
-    assert_eq!(
-        zone_effect_params(&handle),
-        [(0, 2, params), (1, 2, params)]
-    );
-    Ok(())
+        let (shared, handle) = color_led_effects_shared(G733_ZONES).await;
+        assert!(animate(&shared, breathing).await?.is_none());
+        assert_eq!(
+            zone_effect_params(&handle),
+            [(0, 2, params), (1, 2, params)]
+        );
+        Ok(())
+    })
+    .await
 }
 
 #[tokio::test]
 async fn a_colour_cycle_carries_its_period_and_intensity() -> Result<(), WriteError> {
-    let cycle = LightingAnimation::ColorCycle {
-        period: period(10_000),
-        intensity: EffectIntensity::from_percent(40),
-    };
-    // 10000 ms = 0x2710 at bytes 5–6, intensity at byte 7.
-    let params = [0, 0, 0, 0, 0, 0x27, 0x10, 40, 0, 0];
+    bounded(async {
+        let cycle = LightingAnimation::ColorCycle {
+            period: period(10_000),
+            intensity: EffectIntensity::from_percent(40),
+        };
+        // 10000 ms = 0x2710 at bytes 5–6, intensity at byte 7.
+        let params = [0, 0, 0, 0, 0, 0x27, 0x10, 40, 0, 0];
 
-    let (shared, handle) = color_led_effects_shared(G203_PRODIGY_ZONES).await;
-    animate(&shared, cycle).await?;
-    assert_eq!(zone_effect_params(&handle), [(0, 2, params)]);
+        let (shared, handle) = color_led_effects_shared(G203_PRODIGY_ZONES).await;
+        animate(&shared, cycle).await?;
+        assert_eq!(zone_effect_params(&handle), [(0, 2, params)]);
 
-    let (shared, handle) = color_led_effects_shared(G733_ZONES).await;
-    animate(&shared, cycle).await?;
-    assert_eq!(
-        zone_effect_params(&handle),
-        [(0, 3, params), (1, 3, params)]
-    );
-    Ok(())
+        let (shared, handle) = color_led_effects_shared(G733_ZONES).await;
+        animate(&shared, cycle).await?;
+        assert_eq!(
+            zone_effect_params(&handle),
+            [(0, 3, params), (1, 3, params)]
+        );
+        Ok(())
+    })
+    .await
 }
 
 #[tokio::test]
@@ -1929,26 +1948,29 @@ async fn zones_without_the_animation_are_left_alone() -> Result<(), WriteError> 
     // Zone 1 lists only a fixed colour, zone 2 neither effect. Writing the
     // fixed colour to zone 1 would cancel zone 0's animation on a keyboard
     // like the G213, whose zone 0 drives every key.
-    const ZONES: ScriptedZones = &[
-        (0x0002, &[0x0001, 0x000a]),
-        (0x0001, &[0x0000, 0x0001]),
-        (0x0003, &[0x0004]),
-    ];
-    let (shared, handle) = color_led_effects_shared(ZONES).await;
+    bounded(async {
+        const ZONES: ScriptedZones = &[
+            (0x0002, &[0x0001, 0x000a]),
+            (0x0001, &[0x0000, 0x0001]),
+            (0x0003, &[0x0004]),
+        ];
+        let (shared, handle) = color_led_effects_shared(ZONES).await;
 
-    animate(
-        &shared,
-        LightingAnimation::Breathing {
-            period: period(2_000),
-        },
-    )
-    .await?;
+        animate(
+            &shared,
+            LightingAnimation::Breathing {
+                period: period(2_000),
+            },
+        )
+        .await?;
 
-    assert_eq!(
-        zone_effect_params(&handle),
-        [(0, 1, [0x11, 0x22, 0x33, 0x07, 0xd0, 0, 0, 0, 0, 0])]
-    );
-    Ok(())
+        assert_eq!(
+            zone_effect_params(&handle),
+            [(0, 1, [0x11, 0x22, 0x33, 0x07, 0xd0, 0, 0, 0, 0, 0])]
+        );
+        Ok(())
+    })
+    .await
 }
 
 // The G213 (wired `046d:c336`) as jockel09 measured it on #2023: zone 0
@@ -1965,71 +1987,80 @@ const G213_ZONES: ScriptedZones = &[
 
 #[tokio::test]
 async fn the_g213_animates_through_zone_0_alone() -> Result<(), WriteError> {
-    let (shared, handle) = color_led_effects_shared(G213_ZONES).await;
-    animate(
-        &shared,
-        LightingAnimation::Breathing {
-            period: period(2_000),
-        },
-    )
-    .await?;
-    assert_eq!(
-        zone_effect_params(&handle),
-        [(0, 2, [0x11, 0x22, 0x33, 0x07, 0xd0, 0, 0, 0, 0, 0])]
-    );
+    bounded(async {
+        let (shared, handle) = color_led_effects_shared(G213_ZONES).await;
+        animate(
+            &shared,
+            LightingAnimation::Breathing {
+                period: period(2_000),
+            },
+        )
+        .await?;
+        assert_eq!(
+            zone_effect_params(&handle),
+            [(0, 2, [0x11, 0x22, 0x33, 0x07, 0xd0, 0, 0, 0, 0, 0])]
+        );
 
-    let (shared, handle) = color_led_effects_shared(G213_ZONES).await;
-    animate(
-        &shared,
-        LightingAnimation::ColorCycle {
-            period: period(3_000),
-            intensity: EffectIntensity::FULL,
-        },
-    )
-    .await?;
-    assert_eq!(
-        zone_effect_params(&handle),
-        [(0, 3, [0, 0, 0, 0, 0, 0x0b, 0xb8, 0, 0, 0])]
-    );
-    Ok(())
+        let (shared, handle) = color_led_effects_shared(G213_ZONES).await;
+        animate(
+            &shared,
+            LightingAnimation::ColorCycle {
+                period: period(3_000),
+                intensity: EffectIntensity::FULL,
+            },
+        )
+        .await?;
+        assert_eq!(
+            zone_effect_params(&handle),
+            [(0, 3, [0, 0, 0, 0, 0, 0x0b, 0xb8, 0, 0, 0])]
+        );
+        Ok(())
+    })
+    .await
 }
 
 #[tokio::test]
 async fn a_steady_colour_on_the_g213_reaches_every_zone() -> Result<(), WriteError> {
     // Going back to a steady colour must overwrite zone 0's animation, and
     // colour the five zones the animation left alone.
-    let (shared, handle) = color_led_effects_shared(G213_ZONES).await;
-    animate(&shared, LightingAnimation::Static).await?;
-    let fixed = [0x11, 0x22, 0x33, 0, 0, 0, 0, 0, 0, 0];
-    assert_eq!(
-        zone_effect_params(&handle),
-        (0..6).map(|zone| (zone, 1, fixed)).collect::<Vec<_>>()
-    );
-    Ok(())
+    bounded(async {
+        let (shared, handle) = color_led_effects_shared(G213_ZONES).await;
+        animate(&shared, LightingAnimation::Static).await?;
+        let fixed = [0x11, 0x22, 0x33, 0, 0, 0, 0, 0, 0, 0];
+        assert_eq!(
+            zone_effect_params(&handle),
+            (0..6).map(|zone| (zone, 1, fixed)).collect::<Vec<_>>()
+        );
+        Ok(())
+    })
+    .await
 }
 
 #[tokio::test]
 async fn a_device_that_cannot_animate_shows_the_colour_instead() -> Result<(), WriteError> {
     // No zone lists a colour cycle: nothing animated is written, and every
     // zone that has a fixed colour shows it, from one walk of the zones.
-    const ZONES: ScriptedZones = &[(0x0002, &[0x0000, 0x0001]), (0x0001, &[0x0001, 0x000a])];
-    let cycle = LightingAnimation::ColorCycle {
-        period: period(5_000),
-        intensity: EffectIntensity::FULL,
-    };
-    let fixed = [0x11, 0x22, 0x33, 0, 0, 0, 0, 0, 0, 0];
+    bounded(async {
+        const ZONES: ScriptedZones = &[(0x0002, &[0x0000, 0x0001]), (0x0001, &[0x0001, 0x000a])];
+        let cycle = LightingAnimation::ColorCycle {
+            period: period(5_000),
+            intensity: EffectIntensity::FULL,
+        };
+        let fixed = [0x11, 0x22, 0x33, 0, 0, 0, 0, 0, 0, 0];
 
-    for method in [LightingMethod::Auto, LightingMethod::Effects] {
-        let (shared, handle) = color_led_effects_shared(ZONES).await;
-        animate_with(&shared, method, cycle).await?;
-        assert_eq!(
-            zone_effect_params(&handle),
-            [(0, 1, fixed), (1, 0, fixed)],
-            "{method:?}"
-        );
-        assert_eq!(zone_info_reads(&handle), ZONES.len(), "{method:?}");
-    }
-    Ok(())
+        for method in [LightingMethod::Auto, LightingMethod::Effects] {
+            let (shared, handle) = color_led_effects_shared(ZONES).await;
+            animate_with(&shared, method, cycle).await?;
+            assert_eq!(
+                zone_effect_params(&handle),
+                [(0, 1, fixed), (1, 0, fixed)],
+                "{method:?}"
+            );
+            assert_eq!(zone_info_reads(&handle), ZONES.len(), "{method:?}");
+        }
+        Ok(())
+    })
+    .await
 }
 
 #[test]
