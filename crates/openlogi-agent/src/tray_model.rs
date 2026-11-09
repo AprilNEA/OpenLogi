@@ -413,11 +413,15 @@ fn devices(snapshot: &AgentSnapshot, config: &Config) -> Vec<DeviceRow> {
         for device in &inventory.paired {
             let route = DeviceRoute::for_slot(inventory, device.slot);
             let model = device.model_info.as_ref();
-            let serial = model.and_then(|model| model.serial_number.as_deref());
             let unit_id = model.map_or([0; 4], |model| model.unit_id);
-            let stable = DeviceStableId::from_parts(route.as_ref(), device.slot, serial, unit_id);
-            let identity = DeviceIdentity::from_parts(serial, unit_id);
-            let known = Known::of(config, &stable, device.online.then_some(&identity));
+            // Only an answered DeviceInformation read yields an identity, as in
+            // the settings app: a device whose probe never got there has none,
+            // not even its model, and stays transient until it does.
+            let identity = model.map(|model| {
+                DeviceIdentity::from_parts(model.serial_number.as_deref(), model.unit_id)
+            });
+            let stable = DeviceStableId::from_parts(route.as_ref(), device.slot, identity.clone());
+            let known = Known::of(config, &stable, identity.as_ref().filter(|_| device.online));
             let capabilities = device.capabilities.unwrap_or_else(|| {
                 if device.hidpp10 {
                     Capabilities::presumed_for_hidpp10(device.kind)
@@ -474,10 +478,9 @@ fn standalone_row(
     config: &Config,
 ) -> (DeviceStableId, DeviceRow) {
     let route = device.route();
-    let serial = device.serial_number.as_deref();
+    let identity = DeviceIdentity::from_parts(device.serial_number.as_deref(), device.unit_id);
     let stable =
-        DeviceStableId::from_parts(Some(&route), DIRECT_DEVICE_INDEX, serial, device.unit_id);
-    let identity = DeviceIdentity::from_parts(serial, device.unit_id);
+        DeviceStableId::from_parts(Some(&route), DIRECT_DEVICE_INDEX, Some(identity.clone()));
     let known = Known::of(config, &stable, device.online.then_some(&identity));
     let observed = lights
         .iter()

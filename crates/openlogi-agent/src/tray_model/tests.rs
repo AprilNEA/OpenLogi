@@ -570,7 +570,7 @@ mod controls {
         Capabilities, ChangedOnLight, DeviceKind, LightCapabilities, LightState, LightValueRange,
         LightValueUnit, PairedDevice, RawDeviceAddress, StandaloneDevice,
     };
-    use openlogi_core::device_order::{DeviceStableId, PhysicalDeviceKey};
+    use openlogi_core::device_order::{DeviceIdentity, DeviceStableId, PhysicalDeviceKey};
     use openlogi_core::hid::{
         BacklightChange, BacklightControls, BacklightMode, BacklightState, BacklightStatus,
         DeviceRoute, DisableKeysMask, DisableKeysState, Dpi, LightCommand, SidetoneLevel,
@@ -616,7 +616,8 @@ mod controls {
     fn route_key(device: &PairedDevice) -> String {
         let inventory = receiver(BOLT, "AA", vec![device.clone()]);
         let route = DeviceRoute::for_slot(&inventory, device.slot);
-        DeviceStableId::from_parts(route.as_ref(), device.slot, None, UNIT).route_key()
+        let identity = DeviceIdentity::from_parts(None, UNIT);
+        DeviceStableId::from_parts(route.as_ref(), device.slot, Some(identity)).route_key()
     }
 
     /// Each choice as (title, checked, what clicking it changes).
