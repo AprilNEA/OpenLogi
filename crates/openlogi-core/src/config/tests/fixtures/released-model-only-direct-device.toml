@@ -1,0 +1,64 @@
+# A configuration written by a released OpenLogi (schema 11) for a G402, a
+# direct device that reports neither a serial nor a unit id: released builds
+# keyed it by the all-zero unit id. Copied from a real file, interface
+# preferences removed.
+schema_version = 11
+
+[devices."direct:046d:c07e:unit:00000000"]
+dpi_presets = [
+    1512,
+    840,
+    1008,
+]
+dpi = 1008
+
+[devices."direct:046d:c07e:unit:00000000".identity]
+display_name = "Gaming Mouse G402"
+codename = "Gaming Mouse G402"
+kind = "mouse"
+
+[devices."direct:046d:c07e:unit:00000000".identity.model_info]
+entity_count = 3
+unit_id = [
+    0,
+    0,
+    0,
+    0,
+]
+model_ids = [
+    0,
+    0,
+    0,
+]
+extended_model_id = 0
+
+[devices."direct:046d:c07e:unit:00000000".identity.model_info.transports]
+usb = false
+equad = false
+btle = false
+bluetooth = false
+
+[devices."direct:046d:c07e:unit:00000000".identity.capabilities]
+buttons = false
+pointer = true
+lighting = false
+scroll_inversion = false
+hires_wheel = false
+thumbwheel = false
+haptic_feedback = false
+haptic_panel = false
+dpi_gestures = false
+fn_lock = false
+os_layout = false
+report_rate = false
+backlight = false
+easy_switch = false
+virtual_thumbwheel = false
+pointer_scaling = false
+force_sensing = false
+disable_keys = false
+onboard_profiles = false
+button_spy = false
+sidetone = false
+
+[keyboard]
