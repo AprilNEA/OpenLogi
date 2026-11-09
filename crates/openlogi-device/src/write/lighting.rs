@@ -514,13 +514,12 @@ async fn resolve_feature_index(
     Ok(info.map(|i| i.index))
 }
 
-/// Play `wanted` through `ColorLedEffects` (`0x8070`): on every zone that
-/// lists its effect, and `fallback` on a zone that lists only that one — a
-/// zone that cannot breathe still shows the colour, and so does a device none
-/// of whose zones can. Stored in RAM only (overrides the running onboard
-/// profile without touching flash). `FeatureUnsupported` when the device
-/// exposes no `0x8070` or no zone lists either effect, including a device that
-/// reports no zones.
+/// Play `wanted` through `ColorLedEffects` (`0x8070`) on every zone that
+/// lists its effect, or, when none does, `fallback` on every zone that lists
+/// that one, so a device that cannot animate still shows the colour. Stored
+/// in RAM only (overrides the running onboard profile without touching
+/// flash). `FeatureUnsupported` when the device exposes no `0x8070` or no
+/// zone lists either effect, including a device that reports no zones.
 ///
 /// For a solid colour `wanted` and `fallback` are the same fixed colour.
 ///
@@ -583,9 +582,15 @@ async fn set_zone_effects(
     Ok(())
 }
 
-/// The `(zone, effect index, parameters)` to write in each of zones
-/// `0..zone_count`: `wanted` where the zone lists its effect, else `fallback`
-/// where it lists that one. Each index is read from the zone's own effect
+/// The `(zone, effect index, parameters)` to write among zones
+/// `0..zone_count`: `wanted` on every zone that lists its effect, and only
+/// when none does, `fallback` on every zone that lists that one.
+///
+/// A zone that lists only the fallback is left alone while another zone
+/// animates. On a G213 zone 0 lists the animations and drives the whole
+/// keyboard, while zones 1–5 list only Disabled and Fixed; a fixed colour
+/// written to those zones cancels zone 0's animation, and the keyboard
+/// stays static. Each index is read from the zone's own effect
 /// list, as Logi Options+ does — the lists are not in one order across
 /// devices (a G203 lists the colour cycle before breathing, a G733 after). A
 /// zone listing neither is skipped: a guessed index would drive whatever
@@ -601,7 +606,8 @@ async fn zone_targets(
     wanted: ZoneEffectParams,
     fallback: ZoneEffectParams,
 ) -> Result<Vec<(u8, u8, ZoneEffectParams)>, WriteError> {
-    let mut targets = Vec::new();
+    let mut animated = Vec::new();
+    let mut fixed = Vec::new();
     for zone in 0..zone_count {
         let effects_number = match feature.get_zone_info(zone).await {
             Ok(info) => info.effects_number,
@@ -615,11 +621,11 @@ async fn zone_targets(
             Err(error) => return Err(classify_lighting_error(error)),
         };
         let mut fallback_index = None;
-        let mut target = None;
         for effect in 0..effects_number {
             match feature.get_zone_effect_info(zone, effect).await {
                 Ok(info) if info.effect_id == wanted.effect_id() => {
-                    target = Some((zone, effect, wanted));
+                    animated.push((zone, effect, wanted));
+                    fallback_index = None;
                     break;
                 }
                 Ok(info) if info.effect_id == fallback.effect_id() => {
@@ -629,9 +635,9 @@ async fn zone_targets(
                 Err(error) => return Err(classify_lighting_error(error)),
             }
         }
-        targets.extend(target.or_else(|| fallback_index.map(|effect| (zone, effect, fallback))));
+        fixed.extend(fallback_index.map(|effect| (zone, effect, fallback)));
     }
-    Ok(targets)
+    Ok(if animated.is_empty() { fixed } else { animated })
 }
 
 /// The `0x8070` form of a colour.

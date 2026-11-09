@@ -1925,8 +1925,10 @@ async fn a_colour_cycle_carries_its_period_and_intensity() -> Result<(), WriteEr
 }
 
 #[tokio::test]
-async fn a_zone_without_the_animation_shows_the_colour() -> Result<(), WriteError> {
-    // Zone 1 lists only a fixed colour, zone 2 neither effect.
+async fn zones_without_the_animation_are_left_alone() -> Result<(), WriteError> {
+    // Zone 1 lists only a fixed colour, zone 2 neither effect. Writing the
+    // fixed colour to zone 1 would cancel zone 0's animation on a keyboard
+    // like the G213, whose zone 0 drives every key.
     const ZONES: ScriptedZones = &[
         (0x0002, &[0x0001, 0x000a]),
         (0x0001, &[0x0000, 0x0001]),
@@ -1944,10 +1946,7 @@ async fn a_zone_without_the_animation_shows_the_colour() -> Result<(), WriteErro
 
     assert_eq!(
         zone_effect_params(&handle),
-        [
-            (0, 1, [0x11, 0x22, 0x33, 0x07, 0xd0, 0, 0, 0, 0, 0]),
-            (1, 1, [0x11, 0x22, 0x33, 0, 0, 0, 0, 0, 0, 0]),
-        ]
+        [(0, 1, [0x11, 0x22, 0x33, 0x07, 0xd0, 0, 0, 0, 0, 0])]
     );
     Ok(())
 }
