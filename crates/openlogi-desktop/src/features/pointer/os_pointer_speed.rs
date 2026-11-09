@@ -26,6 +26,9 @@ pub(super) struct OsPointerSpeedFacts {
 impl OsPointerSpeedFacts {
     pub(super) fn current(cx: &App) -> Option<Self> {
         let state = AppState::try_read(cx)?;
+        if !state.os_pointer_speed_settable() {
+            return None;
+        }
         let record = state.current_record()?;
         let configured_speed = state.current_os_pointer_speed();
         let accel_enabled = state.current_os_pointer_accel();

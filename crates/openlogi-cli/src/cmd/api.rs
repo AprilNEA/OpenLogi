@@ -177,13 +177,17 @@ pub async fn run(args: ApiArgs) -> Result<ExitCode> {
     })
 }
 
-/// Whether the agent measured the device at `route` and found that software
-/// cannot set its key layout. Unmeasured capabilities are not a refusal.
-fn measured_without_os_layout(snapshot: &AgentSnapshot, route: &DeviceRoute) -> bool {
+/// Whether the agent measured the device at `route` and found that `refuses`
+/// holds for its capabilities. Unmeasured capabilities are not a refusal.
+fn measured_capabilities_refuse(
+    snapshot: &AgentSnapshot,
+    route: &DeviceRoute,
+    refuses: impl Fn(openlogi_core::device::Capabilities) -> bool,
+) -> bool {
     snapshot.inventory.iter().any(|inventory| {
         inventory.paired.iter().any(|paired| {
             DeviceRoute::for_slot(inventory, paired.slot).as_ref() == Some(route)
-                && paired.capabilities.is_some_and(|caps| !caps.os_layout)
+                && paired.capabilities.is_some_and(&refuses)
         })
     })
 }
@@ -250,7 +254,7 @@ async fn execute(
                     "os-layout changes an agent setting; add --save",
                 ));
             };
-            if measured_without_os_layout(&snapshot, &route) {
+            if measured_capabilities_refuse(&snapshot, &route, |caps| !caps.os_layout) {
                 return Err(ApiError::new(
                     "unsupported_feature",
                     "the keyboard does not let software set its key layout",
@@ -278,6 +282,15 @@ async fn execute(
                         "pointer-speed changes an agent setting; add --save",
                     ));
                 };
+                let route = select_device(&snapshot, &device)?;
+                if measured_capabilities_refuse(&snapshot, &route, |caps| {
+                    !caps.sets_os_pointer_speed()
+                }) {
+                    return Err(ApiError::new(
+                        "unsupported_feature",
+                        "OpenLogi sets the pointer speed of mice that scale pointer movement only",
+                    ));
+                }
                 save.set_os_pointer_speed(factor);
                 Ok(json!({
                     "device": device,

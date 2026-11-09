@@ -225,10 +225,18 @@ impl AppState {
             .reads
             .ensure_pointer_speed(key, route, self.ipc_sender(), cx);
     }
+
+    /// Whether the active device's OS pointer speed can be set and saved: a
+    /// mouse whose speed OpenLogi sets, with a persistent key to save it under.
+    pub fn os_pointer_speed_settable(&self) -> bool {
+        self.current_record().is_some_and(|record| {
+            record.persistent_config_key().is_some() && scales_pointer(record)
+        })
+    }
 }
 
 fn scales_pointer(record: &DeviceRecord) -> bool {
     record
         .capabilities
-        .is_some_and(|capabilities| capabilities.pointer_scaling)
+        .is_some_and(|capabilities| capabilities.sets_os_pointer_speed())
 }

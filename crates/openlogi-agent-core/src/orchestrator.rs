@@ -2311,7 +2311,7 @@ impl Orchestrator {
     /// the system's pre-existing default value.
     fn apply_changed_os_pointer_speeds(&self, previous: &Config) {
         let compositor = openlogi_core::compositor::Compositor::detect();
-        for dev in self.devices.iter().filter(|dev| dev.online) {
+        for dev in self.devices.iter().filter(|dev| sets_os_pointer_speed(dev)) {
             let key = &dev.config_key;
             let unchanged = self.config.os_pointer_speed(key) == previous.os_pointer_speed(key)
                 && self.config.os_pointer_accel(key) == previous.os_pointer_accel(key);
@@ -2527,21 +2527,54 @@ fn hyprland_accel_profile(profile: &str) -> Vec<String> {
 
 /// Queues a compositor command on one worker thread that runs them in the
 /// order they were queued. Separate detached processes could finish out of
-/// order, letting an older speed overwrite a newer one.
+/// order, letting an older speed overwrite a newer one. A command that cannot
+/// start or exits unsuccessfully is logged, since nothing else reports it.
 fn queue_compositor_command(command: Vec<String>) {
     static QUEUE: std::sync::LazyLock<std::sync::mpsc::Sender<Vec<String>>> =
         std::sync::LazyLock::new(|| {
             let (tx, rx) = std::sync::mpsc::channel::<Vec<String>>();
             std::thread::spawn(move || {
                 for command in rx {
-                    if let Some((program, args)) = command.split_first() {
-                        let _ = std::process::Command::new(program).args(args).status();
+                    if let Err(error) = run_compositor_command(&command, &mut run_process) {
+                        tracing::warn!(%error, "compositor pointer command failed");
                     }
                 }
             });
             tx
         });
     let _ = QUEUE.send(command);
+}
+
+/// Runs `command` through `run`, which reports whether the process started
+/// and exited successfully. The error names the command and what went wrong.
+fn run_compositor_command(
+    command: &[String],
+    run: &mut impl FnMut(&str, &[String]) -> std::io::Result<bool>,
+) -> Result<(), String> {
+    let Some((program, args)) = command.split_first() else {
+        return Ok(());
+    };
+    match run(program, args) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(format!("{program} exited unsuccessfully")),
+        Err(error) => Err(format!("{program} could not start: {error}")),
+    }
+}
+
+fn run_process(program: &str, args: &[String]) -> std::io::Result<bool> {
+    std::process::Command::new(program)
+        .args(args)
+        .status()
+        .map(|status| status.success())
+}
+
+/// Whether OpenLogi sets this device's OS pointer speed: an online device
+/// whose measured capabilities scale its pointer. Keyboards never qualify.
+fn sets_os_pointer_speed(dev: &AgentDevice) -> bool {
+    dev.online
+        && dev
+            .capabilities
+            .is_some_and(|caps| caps.sets_os_pointer_speed())
 }
 
 /// One standalone-light write a config reload queues.

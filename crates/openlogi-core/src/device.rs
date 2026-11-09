@@ -250,6 +250,14 @@ pub struct Capabilities {
 }
 
 impl Capabilities {
+    /// Whether OpenLogi sets this device's OS pointer speed from its saved
+    /// config: the HID++ `0x2205` scaled mice. The one owner of that decision;
+    /// the agent, the CLI, and the settings app all ask it.
+    #[must_use]
+    pub const fn sets_os_pointer_speed(&self) -> bool {
+        self.pointer_scaling
+    }
+
     /// A gaming device with no ReprogControls to divert controls through: it
     /// carries the gaming control tables (`0x8100` / `0x8110`) instead. Only
     /// its OS-visible middle/back/forward can be remapped, by the input hook,
