@@ -215,7 +215,7 @@ impl AppState {
     pub(super) fn load_current_pointer_speed(&mut self, cx: &mut gpui::Context<Self>) {
         let Some((key, route)) = self
             .current_record()
-            .filter(|record| scales_pointer(record))
+            .filter(|record| reads_pointer_scaling(record))
             .and_then(|record| Some((record.device_key(), record.route.clone()?)))
         else {
             return;
@@ -239,4 +239,12 @@ fn scales_pointer(record: &DeviceRecord) -> bool {
     record
         .capabilities
         .is_some_and(|capabilities| capabilities.sets_os_pointer_speed())
+}
+
+/// Whether the mouse's HID++ `0x2205` speed can be read. Only scaled mice
+/// answer it; a DPI-only mouse gets no read.
+fn reads_pointer_scaling(record: &DeviceRecord) -> bool {
+    record
+        .capabilities
+        .is_some_and(|capabilities| capabilities.pointer_scaling)
 }
