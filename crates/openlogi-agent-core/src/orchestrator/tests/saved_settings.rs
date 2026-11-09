@@ -311,9 +311,9 @@ async fn publish_fn_lock_keyboard(
     writes
 }
 
-/// A Fn-lock change a newer write superseded before its turn read the
-/// keyboard instead of writing it, so it saves nothing: the newer write
-/// decides the state, and the file must not say otherwise.
+/// A Fn-lock change a newer write superseded before its turn writes and
+/// saves nothing, even when the keyboard already has the state it asked for:
+/// the newer write decides the state, and the file must not say otherwise.
 #[tokio::test]
 async fn a_superseded_fn_lock_is_not_saved() {
     let dir = tempfile::tempdir().unwrap();
@@ -327,17 +327,28 @@ async fn a_superseded_fn_lock_is_not_saved() {
         .acquire_exclusive(ExclusiveAccessReason::Pairing)
         .await;
 
-    let settings = agent.settings.clone();
-    let route = agent.route.clone();
-    let older = tokio::spawn(async move { settings.set_fn_lock(&route, true).await });
-    while shared.fn_lock_order.requested(&agent.route) == 0 {
-        tokio::task::yield_now().await;
-    }
-    let mut newer = std::pin::pin!(shared.set_fn_lock(&agent.route, false));
-    assert!(futures_lite::future::poll_once(&mut newer).await.is_none());
-    drop(lease);
+    let (older, newer) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        // The keyboard starts with Fn lock off, which the older change asks.
+        let settings = agent.settings.clone();
+        let route = agent.route.clone();
+        let older = tokio::spawn(async move { settings.set_fn_lock(&route, false).await });
+        while shared.fn_lock_order.requested(&agent.route) == 0 {
+            assert!(
+                !older.is_finished(),
+                "the older change ended before its write: {:?}",
+                older.await
+            );
+            tokio::task::yield_now().await;
+        }
+        let mut newer = std::pin::pin!(shared.set_fn_lock(&agent.route, true));
+        assert!(futures_lite::future::poll_once(&mut newer).await.is_none());
+        drop(lease);
+        (older.await.unwrap(), newer.await)
+    })
+    .await
+    .expect("both Fn-lock writes finish");
 
-    let error = older.await.unwrap().unwrap_err();
+    let error = older.unwrap_err();
     assert!(
         matches!(
             error,
@@ -347,7 +358,7 @@ async fn a_superseded_fn_lock_is_not_saved() {
         ),
         "{error:?}"
     );
-    assert!(!newer.await.unwrap().fn_lock);
+    assert!(newer.unwrap().fn_lock);
     assert_eq!(writes.load(Ordering::SeqCst), 1, "only the newer write");
     assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
     assert_eq!(agent.reloads.load(Ordering::SeqCst), 0);

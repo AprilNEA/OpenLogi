@@ -16,9 +16,7 @@ use std::sync::Arc;
 
 use openlogi_core::config::{ConfigError, DeviceEdit, DeviceEditError, DeviceSetting};
 use openlogi_core::device_order::DeviceIdentity;
-use openlogi_hid::{
-    DeviceRoute, DisableKeysMask, Dpi, HidppOperation, LightCommand, SmartShiftStatus, WriteError,
-};
+use openlogi_hid::{DeviceRoute, DisableKeysMask, Dpi, LightCommand, SmartShiftStatus, WriteError};
 use openlogi_ipc::ConfigReloadError;
 use thiserror::Error;
 use tokio::sync::Mutex;
@@ -127,8 +125,7 @@ impl<R: ConfigReload> DeviceSettings<R> {
     }
 
     /// Set Fn lock on the keyboard at `route` and save it. A write a newer
-    /// one superseded reads the keyboard instead, and saves nothing unless
-    /// the keyboard already had `fn_lock`: the newer write decides.
+    /// one superseded saves nothing: the newer write decides.
     pub async fn set_fn_lock(
         &self,
         route: &DeviceRoute,
@@ -136,14 +133,7 @@ impl<R: ConfigReload> DeviceSettings<R> {
     ) -> Result<(), SettingError> {
         let (edit, online) = self.stage(route, DeviceSetting::FnLock(fn_lock)).await?;
         if online {
-            // A write the keyboard took echoes `fn_lock`, or fails; only the
-            // read of a superseded write answers another state.
-            let confirmed = self.shared.set_fn_lock(route, fn_lock).await?;
-            if confirmed.fn_lock != fn_lock {
-                return Err(SettingError::Write(WriteError::WriteSuperseded {
-                    operation: HidppOperation::WriteFnLock,
-                }));
-            }
+            self.shared.set_fn_lock(route, fn_lock).await?;
         }
         self.save(edit).await
     }
