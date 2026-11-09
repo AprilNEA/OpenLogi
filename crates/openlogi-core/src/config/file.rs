@@ -339,6 +339,7 @@ fn parse_config(path: &Path, source: &str) -> Result<(Config, u32), ConfigError>
     if header.schema_version <= 6 {
         config.migrate_thumbwheel_native_direction();
     }
+    config.migrate_zero_unit_direct_keys();
     config.repair_duplicate_routes();
     if let Some((device, key)) = config.undefined_app_alias() {
         return Err(ConfigError::UndefinedAppAlias {

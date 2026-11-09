@@ -19,6 +19,7 @@ mod migrations;
 mod per_app;
 mod schema;
 mod wheel_hold;
+mod zero_unit_keys;
 
 fn write_and_read(config: &Config) -> Config {
     let dir = tempfile::tempdir().expect("tempdir");

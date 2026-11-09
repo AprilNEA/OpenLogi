@@ -19,7 +19,10 @@ saved, its DPI presets included.
   id neither reads it nor folds it into `unit:<hex>`, since nothing on disk
   says it was that device (the recorded identity keeps no unit id), and the
   model-only device is keyed by its route, never by whichever unit the `links`
-  index last saw there.
+  index last saw there. Settings released builds saved for such a
+  device under `direct:<vid>:<pid>:unit:00000000` move to its route key on
+  load; an entry already there keeps its values and the older one only fills
+  what it leaves unset.
 - **A v0 answer is a whole answer.** DeviceInformation v0 reports the entity
   count and nothing else. That is the device's complete answer, not a lost
   reply: the probe keeps its model info and does not flag the identity as

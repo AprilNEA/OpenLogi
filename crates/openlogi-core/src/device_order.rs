@@ -337,6 +337,22 @@ impl PhysicalDeviceKey {
         identity_fragment_is_physical(&self.0).then(|| Self(self.0.to_ascii_lowercase()))
     }
 
+    /// The model key `direct:<vid>:<pid>` of a direct key whose identity is
+    /// the all-zero unit id, or `None` for any other key.
+    ///
+    /// Released builds wrote such a key for a direct device that reported
+    /// neither a serial nor a unit id; that device is keyed by its route now.
+    /// The same key also names a probe that never read the identity, so the
+    /// key alone does not say which of the two it was.
+    #[must_use]
+    pub fn model_key_of_zero_unit_direct(value: &str) -> Option<Self> {
+        let route = value
+            .strip_suffix(UNREAD_UNIT_FRAGMENT)?
+            .strip_suffix(':')?;
+        direct_identity_fragment(value)?;
+        DeviceStableId::direct_route_of_key(route).map(|_| Self(route.to_string()))
+    }
+
     /// Whether `value` is a structurally valid runtime key whose only device
     /// identity is the all-zero unit id.
     #[must_use]
@@ -550,6 +566,22 @@ mod tests {
         assert!(PhysicalDeviceKey::is_transient(legacy));
         assert!(PhysicalDeviceKey::parse(legacy).is_none());
         assert!(!PhysicalDeviceKey::is_transient("direct:046d:c07e"));
+    }
+
+    #[test]
+    fn a_zero_unit_direct_key_names_the_model_key_it_moves_to() {
+        let model = |key| {
+            PhysicalDeviceKey::model_key_of_zero_unit_direct(key)
+                .map(PhysicalDeviceKey::into_string)
+        };
+        assert_eq!(
+            model("direct:046d:c07e:unit:00000000"),
+            Some("direct:046d:c07e".to_string())
+        );
+        assert_eq!(model("direct:046d:c07e:unit:6be9d300"), None);
+        assert_eq!(model("direct:046d:c07e"), None);
+        assert_eq!(model("unknown:slot:1:unit:00000000"), None);
+        assert_eq!(model("direct:046d:unit:00000000"), None);
     }
 
     #[test]
