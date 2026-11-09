@@ -73,8 +73,8 @@ use crate::shutdown::{self, ShutdownRequestSender};
 use crate::status_item::{self, Trailing, TrailingTitles};
 use crate::tray_model::{
     AppRow, BatteryFill, CameraRow, Change, Detail, DeviceMemory, DeviceRow, Entry, Failure,
-    FlowRow, Issue, Permission, Read, Reading, Reads, SeenCamera, TrayMenu, battery_text,
-    is_charging, needs_attention,
+    FlowRow, Issue, Permission, Read, Reading, Reads, RoutedDevice, SeenCamera, TrayMenu,
+    battery_text, is_charging, needs_attention,
 };
 
 /// What the menu needs from the async core, handed over when the agent arms.
@@ -123,7 +123,7 @@ thread_local! {
     static BACKEND: RefCell<Option<Backend>> = const { RefCell::new(None) };
     /// What the menu remembers of each device, so a submenu opens on the
     /// last reading instead of waiting for the device.
-    static MEMORY: RefCell<HashMap<DeviceRoute, DeviceMemory>> = RefCell::default();
+    static MEMORY: RefCell<HashMap<RoutedDevice, DeviceMemory>> = RefCell::default();
     /// The webcams the last scan found, and whether a scan is under way.
     static CAMERAS: RefCell<(Vec<SeenCamera>, bool)> = const { RefCell::new((Vec::new(), false)) };
 }
@@ -279,8 +279,8 @@ enum Action {
     Pane(Permission),
     /// Show the log directory in Finder.
     ShowLogs,
-    /// Make this change to the device at this route.
-    Change(DeviceRoute, Change),
+    /// Make this change to this device.
+    Change(RoutedDevice, Change),
 }
 
 define_class!(
@@ -351,9 +351,9 @@ define_class!(
         // it forgets it as it closes.
         #[unsafe(method(menuDidClose:))]
         fn menu_did_close(&self, menu: &NSMenu) {
-            if let Some(route) = self.row_of(menu).and_then(|row| row.route) {
+            if let Some(routed) = self.row_of(menu).and_then(|row| row.routed()) {
                 MEMORY.with_borrow_mut(|memory| {
-                    if let Some(device) = memory.get_mut(&route) {
+                    if let Some(device) = memory.get_mut(&routed) {
                         device.failure = None;
                     }
                 });
@@ -401,7 +401,7 @@ impl MenuTarget {
                 Permission::InputMonitoring => openlogi_permissions::Permission::InputMonitoring,
             }),
             Some(Action::ShowLogs) => show_logs(),
-            Some(Action::Change(route, change)) => self.change(route, change),
+            Some(Action::Change(device, change)) => self.change(device, change),
             None => warn!(tag, "menu-bar item with no action"),
         }
     }
@@ -421,40 +421,40 @@ impl MenuTarget {
     /// refill its submenus with the answer.
     fn read(&self, row: &DeviceRow) {
         let reads = row.reads();
-        let Some(route) = row.route.clone().filter(|_| reads.any()) else {
+        let Some(device) = row.routed().filter(|_| reads.any()) else {
             return;
         };
         let started = MEMORY
-            .with_borrow_mut(|memory| memory.entry(route.clone()).or_default().start_reading());
+            .with_borrow_mut(|memory| memory.entry(device.clone()).or_default().start_reading());
         if !started {
             return;
         }
         let shared = self.ivars().backend.server.shared.clone();
         self.ivars().backend.runtime.spawn(async move {
-            let fresh = Box::pin(read_device(&shared, &route, reads)).await;
+            let fresh = Box::pin(read_device(&shared, &device.route, reads)).await;
             DispatchQueue::main().exec_async(move || {
                 MEMORY.with_borrow_mut(|memory| {
                     memory
-                        .entry(route.clone())
+                        .entry(device.clone())
                         .or_default()
                         .finish_reading(reads, fresh);
                 });
-                refill(&route);
+                refill(&device);
             });
         });
     }
 
-    /// Make `change` to the device at `route` on the core, then remember it
-    /// — or why it did not take — for the next opening of its submenu.
-    fn change(&self, route: DeviceRoute, change: Change) {
+    /// Make `change` to `device` on the core, then remember it — or why it
+    /// did not take — for the next opening of its submenu.
+    fn change(&self, device: RoutedDevice, change: Change) {
         let server = self.ivars().backend.server.clone();
         self.ivars().backend.runtime.spawn(async move {
-            let outcome = apply(&server, &route, change).await;
+            let outcome = apply(&server, &device.route, change).await;
             DispatchQueue::main().exec_async(move || {
                 MEMORY.with_borrow_mut(|memory| {
-                    memory.entry(route.clone()).or_default().changed(outcome);
+                    memory.entry(device.clone()).or_default().changed(outcome);
                 });
-                refill(&route);
+                refill(&device);
             });
         });
     }
@@ -554,9 +554,9 @@ async fn apply(
     }
 }
 
-/// Refill every submenu of the device at `route` from what the menu now
-/// remembers of it — while it is open, too.
-fn refill(route: &DeviceRoute) {
+/// Refill every submenu of `device` from what the menu now remembers of it
+/// — while it is open, too.
+fn refill(device: &RoutedDevice) {
     let Some(target) = TRAY.with_borrow(|state| state.as_ref().map(|state| state.target.clone()))
     else {
         return;
@@ -566,7 +566,7 @@ fn refill(route: &DeviceRoute) {
         .submenus
         .borrow()
         .iter()
-        .filter(|(_, row)| row.route.as_ref() == Some(route))
+        .filter(|(_, row)| row.routed().as_ref() == Some(device))
         .cloned()
         .collect();
     for (submenu, row) in submenus {
@@ -1002,10 +1002,10 @@ fn fill_device_menu(submenu: &NSMenu, target: &MenuTarget, row: &DeviceRow) {
     for line in row.info() {
         submenu.addItem(&status_item::info_item(mtm, &line));
     }
-    let memory = row
-        .route
+    let routed = row.routed();
+    let memory = routed
         .as_ref()
-        .and_then(|route| MEMORY.with_borrow(|memory| memory.get(route).copied()))
+        .and_then(|device| MEMORY.with_borrow(|memory| memory.get(device).copied()))
         .unwrap_or_default();
     let entries = row.entries(&memory);
     if !entries.is_empty() {
@@ -1020,9 +1020,9 @@ fn fill_device_menu(submenu: &NSMenu, target: &MenuTarget, row: &DeviceRow) {
                 checked,
                 change,
             } => {
-                let item = match (change, &row.route) {
-                    (Some(change), Some(route)) => {
-                        target.action_item(&title, Action::Change(route.clone(), change))
+                let item = match (change, &routed) {
+                    (Some(change), Some(device)) => {
+                        target.action_item(&title, Action::Change(device.clone(), change))
                     }
                     _ => status_item::info_item(mtm, &title),
                 };

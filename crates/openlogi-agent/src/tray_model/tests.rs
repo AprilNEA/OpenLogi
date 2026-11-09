@@ -236,6 +236,29 @@ fn a_device_known_only_by_its_receiver_slot_opens_the_main_window() {
     assert_eq!(menu.devices[0].state, DeviceState::Offline(None));
 }
 
+/// The menu remembers readings by device, not by receiver slot alone: a
+/// keyboard paired into a mouse's slot must not start from the mouse's
+/// readings, while the mouse asleep is still the mouse.
+#[test]
+fn a_device_paired_into_another_s_slot_is_remembered_apart_from_it() {
+    let routed = |device: PairedDevice| {
+        let mut snapshot = snapshot();
+        snapshot.inventory = vec![receiver(BOLT, "AA", vec![device])];
+        TrayMenu::new(&snapshot, &Config::default()).devices[0]
+            .routed()
+            .expect("a receiver slot is a route")
+    };
+    let mouse = routed(paired(1, "MX Master 3S", [1, 2, 3, 4], true));
+    let keyboard = routed(paired(1, "MX Keys S", [5, 6, 7, 8], true));
+
+    assert_eq!(mouse.route, keyboard.route);
+    assert_ne!(mouse, keyboard);
+    assert_eq!(
+        routed(paired(1, "MX Master 3S", [1, 2, 3, 4], false)),
+        mouse
+    );
+}
+
 #[test]
 fn an_offline_device_keeps_its_last_battery_for_the_submenu_only() {
     let mut mouse = paired(1, "MX Master 3S", [1, 2, 3, 4], false);

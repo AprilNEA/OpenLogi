@@ -179,6 +179,18 @@ pub struct DeviceRow {
     pub route: Option<DeviceRoute>,
     /// What its submenu can change.
     pub controls: Controls,
+    /// Which device it is, wherever it is reached.
+    identity: DeviceIdentity,
+}
+
+/// A device at its route: what the menu remembers a device's readings under,
+/// so one paired into another's receiver slot neither starts from the other's
+/// readings nor takes a read or a change made on the other.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RoutedDevice {
+    /// Where the agent reads and writes the device.
+    pub route: DeviceRoute,
+    identity: DeviceIdentity,
 }
 
 /// What a device row reports.
@@ -254,6 +266,15 @@ impl Link {
 }
 
 impl DeviceRow {
+    /// The device at its route, when the agent knows the route.
+    #[must_use]
+    pub fn routed(&self) -> Option<RoutedDevice> {
+        self.route.clone().map(|route| RoutedDevice {
+            route,
+            identity: self.identity.clone(),
+        })
+    }
+
     /// What the row's right side shows, or `None`.
     #[must_use]
     pub fn detail(&self) -> Option<Detail> {
@@ -442,6 +463,7 @@ fn devices(snapshot: &AgentSnapshot, config: &Config) -> Vec<DeviceRow> {
                     settings: known.settings,
                     route,
                     controls,
+                    identity,
                 },
             ));
         }
@@ -494,6 +516,7 @@ fn standalone_row(
         settings: known.settings,
         route: Some(route),
         controls,
+        identity,
     };
     (stable, row)
 }
