@@ -123,8 +123,47 @@ fn build_devices_still_finds_settings_left_under_a_pre_upgrade_receiver_key() {
 }
 
 #[test]
-fn build_devices_skips_transient_zero_unit_direct_identity() {
-    assert!(build_devices(&Config::default(), &[direct_inventory(None, [0; 4])], &[]).is_empty());
+fn a_model_identified_direct_device_cycles_the_presets_saved_under_its_route() {
+    // DeviceInformation answered with every identity field zero (the G402
+    // shape): the device is one instance of its model, and the agent cycles
+    // the DPI presets the GUI saved under its route.
+    let presets = vec![Dpi::new(400), Dpi::new(800), Dpi::new(1600)];
+    let mut config = Config::default();
+    config.set_dpi_presets("direct:046d:c07e", presets.clone());
+    let mut orch = orchestrator(config);
+
+    orch.refresh_inventory(
+        &[direct_inventory_state(0xc07e, None, [0; 4], true)],
+        &[],
+        false,
+    );
+
+    assert_eq!(orch.devices.len(), 1);
+    assert_eq!(orch.devices[0].config_key, "direct:046d:c07e");
+    let Ok(cycles) = orch.shared.dpi_cycle.read() else {
+        panic!("DPI cycle lock should not be poisoned");
+    };
+    let cycle = cycles
+        .by_key
+        .get("direct:046d:c07e")
+        .expect("the agent cycles the device's DPI");
+    assert_eq!(cycle.presets, presets);
+    assert_eq!(
+        cycle.target,
+        Some(DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xc07e,
+        })
+    );
+}
+
+#[test]
+fn build_devices_skips_a_device_whose_identity_was_never_read() {
+    // No DeviceInformation answer at all: the agent has nothing to key on and
+    // waits for the next probe rather than applying defaults.
+    let mut inventory = direct_inventory(None, [0; 4]);
+    inventory.paired[0].model_info = None;
+    assert!(build_devices(&Config::default(), &[inventory], &[]).is_empty());
 
     let devices = build_devices(
         &Config::default(),
@@ -188,7 +227,7 @@ fn direct_stable_id() -> DeviceStableId {
     DeviceStableId::Direct {
         vendor_id: 0x046d,
         product_id: 0xc08d,
-        identity: DeviceIdentity::Unit([0; 4]),
+        identity: Some(DeviceIdentity::Model),
     }
 }
 

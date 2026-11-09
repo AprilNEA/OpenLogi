@@ -96,7 +96,7 @@ fn a_save_while_the_device_sleeps_reaches_its_online_settings() {
         receiver_uid: "82839805".to_owned(),
         slot: 1,
     };
-    let identity = DeviceIdentity::Unit([0x6b, 0xe9, 0xd3, 0x00]);
+    let identity = DeviceIdentity::from_parts(None, [0x6b, 0xe9, 0xd3, 0x00]);
     let save = |identity: Option<&DeviceIdentity>, setting| {
         let mut edit = DeviceEdit::load(&path, &stable, identity).expect("load");
         edit.set(setting).expect("set");
