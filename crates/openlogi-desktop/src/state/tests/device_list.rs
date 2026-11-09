@@ -1035,6 +1035,47 @@ fn a_refused_leftover_unpair_keeps_the_forgotten_device() {
     assert_eq!(state.devices().len(), 1);
 }
 
+/// An asleep keyboard's card keeps rendering its last Disable Keys snapshot;
+/// forgetting the keyboard takes that snapshot with the card. Nothing else
+/// would: the catalog-wide cleanup runs only on a rescan that changes the
+/// list, and the list did not change since the drop.
+#[test]
+fn a_forgotten_keyboard_takes_its_disable_keys_snapshot_with_it() {
+    use crate::services::ipc::{Command, UnpairDevice};
+    use openlogi_core::hid::{DisableKeysMask, DisableKeysState};
+
+    let resolver = AssetResolver::new();
+    let (mut state, mut commands) = state_with(&[keyboard_pairings(&[4], Some(4))]);
+    let record_key = state.devices()[0].record_key();
+    let device_key = state.devices()[0].device_key();
+    state.disable_keys_reads.set_confirmed(
+        &device_key,
+        DisableKeysState {
+            supported: DisableKeysMask::CAPS_LOCK,
+            disabled: DisableKeysMask::CAPS_LOCK,
+        },
+    );
+    let _ = state.refresh_inventories(&[keyboard_pairings(&[4], None)], &[], &resolver, &[]);
+    assert!(
+        matches!(state.disable_keys_reads.load(&device_key), Load::Ready(_)),
+        "the asleep card still shows its last snapshot"
+    );
+    while commands.try_recv().is_ok() {}
+
+    assert!(state.forget_device(&record_key).is_empty());
+    let Ok(Command::UnpairDevice(UnpairDevice { route, intent })) = commands.try_recv() else {
+        panic!("forgetting a receiver keyboard unpairs it first");
+    };
+    assert_eq!(
+        state.apply_unpaired(&route, intent, Ok(())),
+        [StateEvent::InventoryChanged]
+    );
+
+    assert!(state.devices().is_empty());
+    assert!(state.disable_keys_reads.confirmed(&device_key).is_none());
+    assert_eq!(state.disable_keys_reads.load(&device_key), Load::Unknown);
+}
+
 /// With every slot asleep and the settings saved under a legacy slot key, the
 /// card stays on that slot, so its panels read the saved settings rather than
 /// defaults.
