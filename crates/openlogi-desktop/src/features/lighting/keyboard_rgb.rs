@@ -30,6 +30,9 @@ const SWATCH: f32 = 24.;
 const SWATCH_RING: f32 = 2.;
 const SWATCH_RING_GAP: f32 = 2.;
 
+/// The cycle-length slider, for tests that drive it.
+pub(crate) const PERIOD_SLIDER: &str = "lighting-effect-period-slider";
+
 /// Preset colors. Deliberately small — covering the common keyboard accent
 /// colors.
 const PALETTE: &[Rgb] = &[
@@ -162,7 +165,10 @@ impl Render for LightingPanel {
                     panel.child(
                         SliderRow::new(
                             tr!("lighting.effect_period"),
-                            Slider::new(self.period.slider()).horizontal(),
+                            div()
+                                .w_full()
+                                .debug_selector(|| PERIOD_SLIDER.into())
+                                .child(Slider::new(self.period.slider()).horizontal()),
                         )
                         .value(
                             seconds(self.period.shown(lighting.effect_period_ms)),
