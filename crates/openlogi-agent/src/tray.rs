@@ -449,7 +449,7 @@ impl MenuTarget {
     fn change(&self, device: RoutedDevice, change: Change) {
         let server = self.ivars().backend.server.clone();
         self.ivars().backend.runtime.spawn(async move {
-            let outcome = apply(&server, &device.route, change).await;
+            let outcome = apply(&server, &device, change).await;
             DispatchQueue::main().exec_async(move || {
                 MEMORY.with_borrow_mut(|memory| {
                     memory.entry(device.clone()).or_default().changed(outcome);
@@ -491,28 +491,32 @@ async fn read_device(shared: &SharedHandles, route: &DeviceRoute, reads: Reads) 
     }
 }
 
-/// Make `change` to the device at `route` as the settings app would: saved
-/// settings through the agent's device settings, the backlight and sidetone,
-/// which the device keeps itself, on the device alone. Answers the change
-/// the device took, or `None` when a newer write superseded it.
+/// Make `change` to `device` as the settings app would: saved settings
+/// through the agent's device settings, the backlight and sidetone, which
+/// the device keeps itself, on the device alone. Answers the change the
+/// device took, or `None` when a newer write superseded it. A change reaches
+/// only `device`: another device the agent knows on its route, or that
+/// answers there when the change is written, such as one paired into the
+/// receiver slot since the menu listed `device`, takes none of it.
 async fn apply(
     server: &AgentServer,
-    route: &DeviceRoute,
+    device: &RoutedDevice,
     change: Change,
 ) -> Result<Option<Change>, Failure> {
+    let route = &device.route;
     let settings = server.device_settings();
     let saved = match change {
-        Change::Dpi(dpi) => settings.set_dpi(route, dpi).await,
-        Change::Wheel(status) => settings.set_smartshift(route, status).await,
-        Change::Managed(managed) => settings.set_enabled(route, managed).await,
-        Change::FnLock(fn_lock) => settings.set_fn_lock(route, fn_lock).await,
-        Change::DisabledKeys(disabled) => settings.set_disabled_keys(route, disabled).await,
-        Change::Light(command) => settings.set_light(route, command).await,
+        Change::Dpi(dpi) => settings.set_dpi(device, dpi).await,
+        Change::Wheel(status) => settings.set_smartshift(device, status).await,
+        Change::Managed(managed) => settings.set_enabled(device, managed).await,
+        Change::FnLock(fn_lock) => settings.set_fn_lock(device, fn_lock).await,
+        Change::DisabledKeys(disabled) => settings.set_disabled_keys(device, disabled).await,
+        Change::Light(command) => settings.set_light(device, command).await,
         Change::Backlight(backlight) => {
             let orchestrator = Arc::clone(&server.orchestrator);
             return server::backlight::write(
                 orchestrator,
-                &server.shared,
+                &server.shared.reaching(device.unit),
                 route.clone(),
                 backlight,
             )
@@ -524,7 +528,11 @@ async fn apply(
             });
         }
         Change::Sidetone(level) => {
-            let written = server.shared.set_sidetone(route, level).await;
+            let written = server
+                .shared
+                .reaching(device.unit)
+                .set_sidetone(route, level)
+                .await;
             // The settings app re-reads it, as it does after a backlight
             // change the agent made.
             server

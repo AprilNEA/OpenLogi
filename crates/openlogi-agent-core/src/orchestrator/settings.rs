@@ -23,6 +23,7 @@ use tokio::sync::Mutex;
 
 use super::devices::stable_id;
 use super::{Orchestrator, SharedHandles, write_light, write_manual_light_power};
+use crate::hardware::known_unit;
 
 /// The agent's reload of `config.toml`, which every saved edit is followed
 /// by. The agent binary owns it, since a reload also restyles its menu-bar
@@ -35,8 +36,9 @@ pub trait ConfigReload: Send + Sync {
 /// Why a setting was not changed and saved.
 #[derive(Debug, Error)]
 pub enum SettingError {
-    /// The agent knows no device at the route.
-    #[error("no device is known at {0}")]
+    /// The agent knows no device at the route, or knows another device there
+    /// than the one the change is for.
+    #[error("the device is not known at {0}")]
     UnknownDevice(DeviceRoute),
     /// The configuration cannot take the setting, or could not be read.
     /// Nothing was written.
@@ -53,6 +55,18 @@ pub enum SettingError {
     /// `config.toml` was saved, but the agent did not reload it.
     #[error("config.toml was saved, but the agent did not reload it: {}", .0.message)]
     NotReloaded(ConfigReloadError),
+}
+
+/// A device at the route the agent reaches it by, told apart from another
+/// device later on that route, such as one paired into the same receiver
+/// slot, by the HID++ `0x0003` unit ID it reported. An all-zero unit ID,
+/// which a device never probed has, tells no device apart.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RoutedDevice {
+    /// Where the agent reads and writes the device.
+    pub route: DeviceRoute,
+    /// Its `0x0003` unit ID.
+    pub unit: [u8; 4],
 }
 
 /// Changes, saves and reloads the settings of the devices the agent knows.
@@ -88,73 +102,80 @@ impl<R: ConfigReload> DeviceSettings<R> {
         }
     }
 
-    /// Set the DPI of the mouse at `route` — one of its `dpi_presets`, or any
+    /// Set the DPI of the mouse `device` — one of its `dpi_presets`, or any
     /// other value it supports — and save it.
-    pub async fn set_dpi(&self, route: &DeviceRoute, dpi: Dpi) -> Result<(), SettingError> {
-        let (edit, online) = self.stage(route, DeviceSetting::Dpi(dpi)).await?;
+    pub async fn set_dpi(&self, device: &RoutedDevice, dpi: Dpi) -> Result<(), SettingError> {
+        let (edit, online) = self.stage(device, DeviceSetting::Dpi(dpi)).await?;
         if online {
-            self.shared.set_dpi(route, dpi).await?;
+            self.reaching(device).set_dpi(&device.route, dpi).await?;
         }
         self.save(edit).await
     }
 
-    /// Set the SmartShift wheel of the mouse at `route` and save it.
+    /// Set the SmartShift wheel of the mouse `device` and save it.
     pub async fn set_smartshift(
         &self,
-        route: &DeviceRoute,
+        device: &RoutedDevice,
         status: SmartShiftStatus,
     ) -> Result<(), SettingError> {
         let (edit, online) = self
-            .stage(route, DeviceSetting::SmartShift(status.into()))
+            .stage(device, DeviceSetting::SmartShift(status.into()))
             .await?;
         if online {
-            self.shared.set_smartshift(route, status).await?;
+            self.reaching(device)
+                .set_smartshift(&device.route, status)
+                .await?;
         }
         self.save(edit).await
     }
 
-    /// Set whether OpenLogi manages the device at `route` and save it. The
-    /// reload puts it into effect: a device no longer managed is left native.
+    /// Set whether OpenLogi manages `device` and save it. The reload puts it
+    /// into effect: a device no longer managed is left native.
     pub async fn set_enabled(
         &self,
-        route: &DeviceRoute,
+        device: &RoutedDevice,
         enabled: bool,
     ) -> Result<(), SettingError> {
-        let (edit, _) = self.stage(route, DeviceSetting::Enabled(enabled)).await?;
+        let (edit, _) = self.stage(device, DeviceSetting::Enabled(enabled)).await?;
         self.save(edit).await
     }
 
-    /// Set Fn lock on the keyboard at `route` and save it. A write a newer
-    /// one superseded saves nothing: the newer write decides.
+    /// Set Fn lock on the keyboard `device` and save it. A write a newer one
+    /// superseded saves nothing: the newer write decides.
     pub async fn set_fn_lock(
         &self,
-        route: &DeviceRoute,
+        device: &RoutedDevice,
         fn_lock: bool,
     ) -> Result<(), SettingError> {
-        let (edit, online) = self.stage(route, DeviceSetting::FnLock(fn_lock)).await?;
+        let (edit, online) = self.stage(device, DeviceSetting::FnLock(fn_lock)).await?;
         if online {
-            self.shared.set_fn_lock(route, fn_lock).await?;
+            self.reaching(device)
+                .set_fn_lock(&device.route, fn_lock)
+                .await?;
         }
         self.save(edit).await
     }
 
-    /// Disable the known keys in `disabled` on the keyboard at `route`, and
+    /// Disable the known keys in `disabled` on the keyboard `device`, and
     /// enable the rest, then save the keys the keyboard confirms it disabled.
     /// A disabled key this version does not know stays as the keyboard has
     /// it, whatever `disabled` says of it.
     pub async fn set_disabled_keys(
         &self,
-        route: &DeviceRoute,
+        device: &RoutedDevice,
         disabled: DisableKeysMask,
     ) -> Result<(), SettingError> {
         // The keyboard refuses a request that names a key outside the known
         // set, and keeps the unknown keys it reports itself.
         let disabled = disabled & DisableKeysMask::KNOWN;
         let (mut edit, online) = self
-            .stage(route, DeviceSetting::DisabledKeys(disabled))
+            .stage(device, DeviceSetting::DisabledKeys(disabled))
             .await?;
         if online {
-            let confirmed = self.shared.set_disable_keys(route, disabled).await?;
+            let confirmed = self
+                .reaching(device)
+                .set_disable_keys(&device.route, disabled)
+                .await?;
             edit.set(DeviceSetting::DisabledKeys(
                 confirmed.disabled & confirmed.supported,
             ))?;
@@ -162,17 +183,19 @@ impl<R: ConfigReload> DeviceSettings<R> {
         self.save(edit).await
     }
 
-    /// Have the standalone light at `route` take `command`, and save it in
-    /// the light's settings. A camera-linked light keeps its power as a
-    /// manual choice until the next camera transition, as the settings
-    /// app's power switch keeps it. Writes the light whether or not the
-    /// agent saw it online: a light answers only while it is.
+    /// Have the standalone light `device` take `command`, and save it in the
+    /// light's settings. A camera-linked light keeps its power as a manual
+    /// choice until the next camera transition, as the settings app's power
+    /// switch keeps it. Writes the light whether or not the agent saw it
+    /// online: a light answers only while it is. A light's route names the
+    /// light itself, so no other device can answer on it.
     pub async fn set_light(
         &self,
-        route: &DeviceRoute,
+        device: &RoutedDevice,
         command: LightCommand,
     ) -> Result<(), SettingError> {
-        let (edit, _) = self.stage(route, DeviceSetting::Light(command)).await?;
+        let (edit, _) = self.stage(device, DeviceSetting::Light(command)).await?;
+        let route = &device.route;
         let hardware = self.shared.hardware();
         match command {
             LightCommand::Power(enabled) if self.camera_linked(route).await => {
@@ -191,6 +214,12 @@ impl<R: ConfigReload> DeviceSettings<R> {
         self.save(edit).await
     }
 
+    /// The handles a write to `device` goes through, which refuse another
+    /// device on its route.
+    fn reaching(&self, device: &RoutedDevice) -> SharedHandles {
+        self.shared.reaching(device.unit)
+    }
+
     /// Whether the light at `route` turns on and off with the camera.
     async fn camera_linked(&self, route: &DeviceRoute) -> bool {
         let orchestrator = self.orchestrator.lock().await;
@@ -202,25 +231,36 @@ impl<R: ConfigReload> DeviceSettings<R> {
             .is_some_and(|light| light.auto_camera)
     }
 
-    /// Read `config.toml` and change `setting` of the device at `route` in
-    /// it, under the key the agent resolves that device's settings by. Also
-    /// answers whether the device is online.
+    /// Read `config.toml` and change `setting` of `device` in it, under the
+    /// key the agent resolves that device's settings by. Also answers
+    /// whether the device is online. A device the agent now knows by another
+    /// unit ID on the route, such as one paired into the receiver slot
+    /// `device` left, is not `device`; a unit ID no probe read, on either
+    /// side, tells no device apart.
     async fn stage(
         &self,
-        route: &DeviceRoute,
+        device: &RoutedDevice,
         setting: DeviceSetting,
     ) -> Result<(DeviceEdit, bool), SettingError> {
+        let route = &device.route;
         let (stable, identity, online) = {
             let orchestrator = self.orchestrator.lock().await;
-            let device = orchestrator
+            let unknown = || SettingError::UnknownDevice(route.clone());
+            let known = orchestrator
                 .devices
                 .iter()
-                .find(|device| device.route.as_ref() == Some(route))
-                .ok_or_else(|| SettingError::UnknownDevice(route.clone()))?;
+                .find(|known| known.route.as_ref() == Some(route))
+                .ok_or_else(unknown)?;
+            if known_unit(device.unit)
+                .zip(known_unit(known.unit_id))
+                .is_some_and(|(asked, found)| asked != found)
+            {
+                return Err(unknown());
+            }
             (
-                stable_id(device),
-                DeviceIdentity::from_parts(device.serial.as_deref(), device.unit_id),
-                device.online,
+                stable_id(known),
+                DeviceIdentity::from_parts(known.serial.as_deref(), known.unit_id),
+                known.online,
             )
         };
         let path = self.path.clone();
