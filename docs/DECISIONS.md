@@ -23,7 +23,9 @@ saved, its DPI presets included.
   DeviceInformation answer carries no identity at all
   (`DeviceStableId` holds `Option<DeviceIdentity>`), and stays transient
   until it does. Folding that case into `Model` would save settings for a
-  device we have not identified.
+  device we have not identified. A probe that lost the serial read of a
+  device whose unit id is all-zero reports no identity either: its model
+  info would otherwise read as a model identity.
 - **No branch on the device.** Such a device takes the same paths as any
   other through IPC, inventory and GUI, with no precedence rules of its own:
   only its key differs.
