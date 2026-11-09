@@ -29,6 +29,23 @@ fn catalog_has_at_least_29_entries() {
 }
 
 #[test]
+fn explicit_disable_roundtrips_separately_from_none() {
+    assert!(!Action::catalog().contains(&Action::Disable));
+    let disable = Binding::Single(Action::Disable);
+    let native = Binding::Single(Action::None);
+    let encoded = toml::to_string(&BTreeMap::from([(
+        ButtonId::GestureButton,
+        disable.clone(),
+    )]))
+    .expect("disable binding serializes");
+    let decoded: BTreeMap<ButtonId, Binding> =
+        toml::from_str(&encoded).expect("disable binding parses");
+    assert_eq!(decoded.get(&ButtonId::GestureButton), Some(&disable));
+    assert_ne!(disable, native);
+    assert!(matches!(Action::Disable.effect(), Effect::None));
+}
+
+#[test]
 fn catalog_excludes_custom_shortcut() {
     let catalog = Action::catalog();
     for action in &catalog {
@@ -406,6 +423,7 @@ fn persisted_name(action: Action) -> String {
 fn persisted_action_variant_names_are_stable() {
     let mut actions = Action::catalog();
     actions.extend([
+        Action::Disable,
         Action::SetDpiPreset(0),
         Action::DpiShift,
         Action::CustomShortcut(
@@ -442,6 +460,7 @@ fn persisted_action_variant_names_are_stable() {
         "CustomShortcut",
         "Cut",
         "CycleDpiPresets",
+        "Disable",
         "DpiShift",
         "Find",
         "HorizontalScrollLeft",

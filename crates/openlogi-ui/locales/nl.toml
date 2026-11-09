@@ -248,6 +248,7 @@ select_device_button_description = "Selecteer een knop op het apparaat om de fun
 remove_profile_description = "Hiermee verwijder je de eigen knoptoewijzingen in dit profiel. Standaardtoewijzingen blijven behouden."
 
 [pointer]
+disable = "Disable"
 mouse_button_profiles = "Muisknopprofielen"
 mouse_profile_pointer = "Muisaanwijzer"
 mouse_profile_focused = "App met focus"

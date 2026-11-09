@@ -186,6 +186,14 @@ fn empty_inspector(app: Option<&str>, override_count: usize, pal: Palette) -> gp
         .child(div().text_body().text_color(pal.text_muted).child(summary))
 }
 
+fn single_action_extras(button: ButtonId, extra: &[Action]) -> Vec<Action> {
+    let mut actions = extra.to_vec();
+    if matches!(button, ButtonId::GestureButton | ButtonId::HapticPanel) {
+        actions.push(Action::Disable);
+    }
+    actions
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "the button inspector lays out its rows inline"
@@ -214,6 +222,7 @@ fn button_inspector(
         return inherited_gesture_inspector(button, app, data, picker, pal, cx);
     }
 
+    let extra_actions = single_action_extras(button, data.extra_actions);
     let action = data
         .bindings
         .get(&button)
@@ -296,7 +305,7 @@ fn button_inspector(
                 Some(&action),
                 picker,
                 ActionOffer {
-                    extra: data.extra_actions,
+                    extra: &extra_actions,
                     hidden: data.hidden_actions,
                 },
                 &on_pick,
@@ -396,6 +405,7 @@ fn inherited_gesture_inspector(
     pal: Palette,
     cx: &Context<MouseModelView>,
 ) -> gpui::Div {
+    let extra_actions = single_action_extras(button, data.extra_actions);
     let observer = picker.view.clone();
     let on_pick: PickFn = Rc::new(move |action, _window, cx| {
         AppState::apply(cx, |state| state.commit_binding(button, action));
@@ -438,7 +448,7 @@ fn inherited_gesture_inspector(
                 // The pick replaces the gestures with a button binding,
                 // which gets a release, so held actions fit here.
                 ActionOffer {
-                    extra: data.extra_actions,
+                    extra: &extra_actions,
                     hidden: data.hidden_actions,
                 },
                 &on_pick,
@@ -1046,6 +1056,14 @@ fn gesture_action(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn disable_is_offered_for_physical_gesture_sources() {
+        for button in [ButtonId::GestureButton, ButtonId::HapticPanel] {
+            assert!(single_action_extras(button, &[]).contains(&Action::Disable));
+        }
+        assert!(!single_action_extras(ButtonId::Back, &[]).contains(&Action::Disable));
+    }
 
     #[test]
     fn default_profile_offers_gestures_for_every_supported_button() {

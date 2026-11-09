@@ -66,7 +66,7 @@ pub(crate) fn gesture_direction_icon(direction: GestureDirection) -> Icon {
 /// must deliberately choose an icon.
 pub(crate) fn action_icon_path(action: &Action) -> &'static str {
     match action {
-        Action::None => "action-icons/ban.svg",
+        Action::None | Action::Disable => "action-icons/ban.svg",
         Action::LeftClick | Action::RightClick => "action-icons/mouse-pointer-click.svg",
         Action::MiddleClick => "action-icons/mouse.svg",
         Action::MouseBack => "action-icons/circle-arrow-left.svg",
@@ -421,6 +421,14 @@ mod tests {
     }
 
     #[test]
+    fn disable_has_a_distinct_label_from_do_nothing() {
+        assert_ne!(
+            Action::Disable.translation_key(),
+            Action::None.translation_key()
+        );
+    }
+
+    #[test]
     fn run_command_field_commits_its_text_and_rejects_a_blank_command() {
         assert_eq!(
             run_command_action("snipaste snip".to_string()),
@@ -443,6 +451,7 @@ mod tests {
 
         let combo = || "Ctrl+A".parse().expect("Ctrl+A is a valid combo");
         let uncataloged = [
+            Action::Disable,
             Action::SetDpiPreset(0),
             Action::CustomShortcut(combo()),
             Action::HoldShortcut(combo()),

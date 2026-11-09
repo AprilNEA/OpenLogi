@@ -248,6 +248,7 @@ select_device_button_description = "Välj en knapp på enheten för att ändra d
 remove_profile_description = "Detta tar bort profilens anpassade knappbindningar. Standardbindningar påverkas inte."
 
 [pointer]
+disable = "Disable"
 mouse_button_profiles = "Profiler för musknappar"
 mouse_profile_pointer = "Muspekare"
 mouse_profile_focused = "App med fokus"
