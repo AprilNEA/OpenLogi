@@ -65,7 +65,7 @@ pub enum DeviceStableId {
 }
 
 /// A device's own identity, used to disambiguate two same-model direct devices.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum DeviceIdentity {
     /// Case-folded serial number.
     Serial(String),
