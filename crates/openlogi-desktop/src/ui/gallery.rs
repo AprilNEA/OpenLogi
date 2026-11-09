@@ -31,8 +31,8 @@ use super::components::{
 use super::slider_row::{SliderRow, disabled_track};
 use super::status::{retry_line, status_line};
 use super::theme::{
-    self, ContentWidth, OPENLOGI_DARK, OPENLOGI_LIGHT, Palette, SelectableStyle as _,
-    Typography as _,
+    self, ContentWidth, OPENLOGI_DARK, OPENLOGI_LIGHT, Palette, PressableStyle as _,
+    SelectableStyle as _, Typography as _,
 };
 
 const TITLE: &str = "OpenLogi Component Gallery";
@@ -300,11 +300,6 @@ impl ComponentGallery {
     }
 
     fn toggle_panel(&self, pal: Palette, cx: &mut Context<Self>) -> gpui::Div {
-        let label = if self.toggle_selected {
-            "Enabled"
-        } else {
-            "Disabled"
-        };
         gallery_panel(
             "Toggle",
             IconName::Settings,
@@ -313,7 +308,7 @@ impl ComponentGallery {
                 .child(
                     Toggle::new("gallery-toggle")
                         .selected(self.toggle_selected)
-                        .label(Some(SharedString::from(label)))
+                        .accessibility_label("Toggle")
                         .on_change(cx.listener(|this, selected: &bool, _, cx| {
                             this.toggle_selected = *selected;
                             cx.notify();
@@ -322,6 +317,7 @@ impl ComponentGallery {
                 .child(
                     Toggle::new("gallery-toggle-disabled")
                         .selected(true)
+                        .accessibility_label("Disabled toggle")
                         .label(Some(SharedString::from("Unavailable")))
                         .disabled(true),
                 )
@@ -584,7 +580,7 @@ impl ComponentGallery {
                 } else {
                     pal.text_muted
                 })
-                .hover(move |style| style.bg(pal.control_hover))
+                .pressable_fill(auto, pal)
                 .focus_visible(move |style| style.focus_ring(pal))
                 .child("Auto")
                 .on_click(cx.listener(|this, _, _, cx| {
@@ -758,7 +754,7 @@ fn choice_card(id: &'static str, label: &'static str, selected: bool, pal: Palet
             pal.border
         })
         .bg(pal.control)
-        .hover(move |style| style.bg(pal.control_hover))
+        .pressable_fill(false, pal)
         .focus_visible(move |style| style.focus_ring(pal))
         .gap_1()
         // A preview strip above the label: the stacked shape the settings

@@ -201,6 +201,59 @@ fn a_light_with_a_gui_write_in_flight_keeps_its_change_until_the_write_settles()
 }
 
 #[test]
+fn a_write_the_ipc_client_can_no_longer_answer_stops_holding_back_changes_on_the_light() {
+    let light = saved_glow();
+    let (mut state, mut receiver) = state_with(&light, Config::ephemeral());
+    let key = state.current_record().expect("light record").device_key();
+    let _ = state.commit_light(LightSettings::new(false, 80, None));
+    let sent: Vec<_> = drain(&mut receiver)
+        .into_iter()
+        .filter_map(|command| match command {
+            Command::SetLight(SetLight {
+                command,
+                request_id,
+                ..
+            }) => Some((command, request_id)),
+            _ => None,
+        })
+        .collect();
+    let [(power, request_id), _never_answered] = sent.as_slice() else {
+        panic!("expected a power and a brightness write, got {sent:?}");
+    };
+    let _ = state.apply_light_command_result(key.clone(), *request_id, *power, Ok(()));
+    let lights = [observed(
+        &light,
+        (false, 60, 4000),
+        brightness_changed_to(17),
+    )];
+    assert_eq!(state.adopt_changes_on_lights(&lights), []);
+    assert_eq!(
+        state.light_command_status(),
+        Some(LightCommandStatus::Pending)
+    );
+
+    assert_eq!(state.abandon_light_writes(), [lighting_changed(&key)]);
+    assert_eq!(
+        state.light_command_status(),
+        Some(LightCommandStatus::Failed(
+            WriteError::AgentUnavailable.to_string()
+        ))
+    );
+    // The confirmed power write is kept; the unconfirmed brightness rolls back.
+    let accepted = LightSettings::new(false, LightSettings::default().brightness_percent, None);
+    assert_eq!(state.config.light(key.as_str()), Some(accepted));
+    drain(&mut receiver);
+    assert_eq!(
+        state.adopt_changes_on_lights(&lights),
+        [lighting_changed(&key)]
+    );
+    assert_eq!(
+        state.config.light(key.as_str()),
+        Some(LightSettings::new(false, 17, None))
+    );
+}
+
+#[test]
 fn a_light_saved_after_keeping_a_session_value_shows_the_change_it_saves() {
     let light = glow("id:saved-later", None, true);
     let (mut state, mut receiver) = state_with(&light, Config::ephemeral());

@@ -156,10 +156,13 @@ pub(crate) fn glow_canvas(geom: Arc<GlowGeometry>, color: Hsla) -> impl IntoElem
 /// A device card in the Home grid and carousel: product image with the
 /// connectivity-and-battery glance in its corner, then the identity line and
 /// the transport it is reachable over.
-/// The `active` device keeps a persistent accent ring and faint fill; inactive
-/// cards gain the same ring on hover or keyboard focus.
 /// Returns an unstyled semantic button so the gallery can add its activation
-/// handler without giving up keyboard behavior.
+/// handler without giving up keyboard behavior. The gallery marks the active
+/// device with [`SelectableStyle::selected_border`] and `selected_fill`, the
+/// house selected look, and gives the other cards the accent ring on hover
+/// or keyboard focus; this card paints only the disabled ring itself.
+///
+/// [`SelectableStyle::selected_border`]: crate::ui::theme::SelectableStyle::selected_border
 #[expect(
     clippy::too_many_arguments,
     reason = "each argument is one fact the gallery reads from AppState for this card"
@@ -203,7 +206,7 @@ fn device_card(
                         // truthful treatment available for an offline card
                         // without generating a second asset that edits the
                         // manufacturer's artwork.
-                        .opacity(if record.online { 1. } else { 0.38 })
+                        .opacity(if record.is_online() { 1. } else { 0.38 })
                         .when_some(glow, |this, (geom, color)| {
                             this.child(glow_canvas(geom, color))
                         })
@@ -400,7 +403,7 @@ pub(super) fn device_menu(
     let display_name = record.display_name.clone();
     // A live device would simply re-register on the next inventory snapshot,
     // so deletion is only offered once it is offline.
-    let deletable = record.persistent && !record.online;
+    let deletable = record.persistent && !record.is_online();
     let has_stale_pairings = !record.stale_pairings.is_empty();
     move |menu, _window, _cx| {
         let menu = menu.item(
@@ -652,7 +655,7 @@ fn device_image(
         return light_visual::gallery(
             record.asset.as_ref(),
             light_visual::LightView {
-                online: record.online,
+                online: record.is_online(),
                 enabled: light_enabled,
             },
             light_settings,

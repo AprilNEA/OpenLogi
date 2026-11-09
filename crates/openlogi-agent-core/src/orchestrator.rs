@@ -575,16 +575,9 @@ pub struct Orchestrator {
     /// the distinction (as [`InventoryHealth`]) so the GUI can tell them
     /// apart.
     inventory: InventoryState,
-    /// Set after a system wake or a device's own reconnect broadcast: devices
-    /// may have power-cycled while their set/route/online state looks
-    /// identical across the gap, so the next refresh re-applies volatile
-    /// settings to every online device. The value is the confirming re-apply
-    /// budget the forced targets are queued with — a system wake keeps the
-    /// boot-race ladder, a device reconnect needs only a link-race confirm.
-    forced_reapply_budget: Option<u8>,
-    /// System resume must rearm every online capture; an identity-free device
-    /// wake only reapplies settings, since each armed listener owns its wake.
-    forced_capture_rearm: bool,
+    /// What the next inventory refresh forces after a reset no snapshot can
+    /// show; every refresh drains it, and nothing else does.
+    forced_reapply: ForcedReapply,
     /// Rearm epochs belong to exact routes. Discovery or wake on one link
     /// must not retire a still-running capture on another link.
     capture_route_generations: HashMap<DeviceRoute, u64>,
@@ -595,10 +588,6 @@ pub struct Orchestrator {
     panel_generations: HashMap<DeviceRoute, u64>,
     /// The last panel epoch handed out.
     panel_epoch: u64,
-    /// Whether the last enumeration pass failed to open HID++ nodes; published
-    /// atomically with the inventory so no observation pairs a fresh device
-    /// set with a stale flag.
-    hid_open_failures: bool,
     /// Physical identities of devices first sighted (or targeted after wake)
     /// recently, with remaining confirming re-apply budget: the first write can
     /// race the device's own boot or reconnect and be lost.
@@ -609,8 +598,9 @@ pub struct Orchestrator {
     disabled_keys_recovery: BTreeMap<DeviceStableId, u8>,
     /// Agent-owned settings changes on each route, added to the published
     /// [`PairedDevice::settings_revision`](openlogi_core::device::PairedDevice::settings_revision).
-    /// Disable Keys recovery and backlight writes can change the keyboard
-    /// without a firmware broadcast, so clients need this move to read again.
+    /// Disable Keys recovery and backlight writes can change the keyboard,
+    /// and a DPI action the mouse, without a firmware broadcast, so clients
+    /// need this move to read again.
     settings_epochs: Vec<(DeviceRoute, u64)>,
     /// Last successful aggregate camera-use sample. `None` means the macOS
     /// watcher has not produced its first usable observation yet.
@@ -676,9 +666,92 @@ enum InventoryState {
     Ready {
         inventories: Vec<DeviceInventory>,
         standalone: Vec<StandaloneDevice>,
+        /// Whether this pass failed to open HID++ nodes. It travels with the
+        /// device set so no observation pairs a fresh set with a stale flag.
+        hid_open_failures: bool,
     },
     /// Enumeration has never succeeded (broken HID backend / dead watcher).
     Unavailable,
+}
+
+/// The forced re-apply latched for the next inventory refresh. After a system
+/// wake or an unobserved device reconnect, devices may have power-cycled while
+/// their set/route/online state looks identical across the gap, so the
+/// refresh re-applies volatile settings to every online device instead of
+/// only the ones whose snapshot shows a reconnect. Requests coalesce until one
+/// refresh drains the latch back to [`Self::Quiet`] (its `Default`).
+///
+/// Only the transitions below write a pending variant, and the refresh reads
+/// both of its decisions — [`Self::budget`] and [`Self::rearms_every_capture`]
+/// — off the one drained value. The `agent-forced-reapply-owner` ast-grep rule
+/// keeps every other path from naming a variant.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum ForcedReapply {
+    /// Nothing forced.
+    #[default]
+    Quiet,
+    /// Re-apply settings to every online device, queueing `budget` confirming
+    /// passes. Captures follow their own route and listener transitions: an
+    /// armed listener owns its device's wake.
+    ReapplyPending { budget: u8 },
+    /// The system resumed: re-apply as [`Self::ReapplyPending`] and also rearm
+    /// every online capture, which may have lost its volatile diversion.
+    ResumePending { budget: u8 },
+}
+
+impl ForcedReapply {
+    /// Volatile settings may have reset (a node change or recovery): re-apply
+    /// with the boot-race ladder.
+    #[must_use]
+    fn settings_reset(self) -> Self {
+        self.reapply(VOLATILE_REAPPLY_CONFIRM_RETRIES)
+    }
+
+    /// A device reconnected unobserved. It was already booted, so its forced
+    /// re-apply needs only the link-race confirm.
+    #[must_use]
+    fn device_reconnected(self) -> Self {
+        self.reapply(RECONNECT_REAPPLY_CONFIRM_RETRIES)
+    }
+
+    /// The system resumed: re-apply with the boot-race ladder and rearm every
+    /// online capture.
+    #[must_use]
+    fn system_resumed(self) -> Self {
+        Self::ResumePending {
+            budget: self.coalesce(VOLATILE_REAPPLY_CONFIRM_RETRIES),
+        }
+    }
+
+    /// A settings request keeps a pending resume's rearm, and the larger
+    /// budget: a device reconnect arriving between a system wake and its
+    /// snapshot must not shrink the wake's boot-race ladder.
+    fn reapply(self, budget: u8) -> Self {
+        let budget = self.coalesce(budget);
+        match self {
+            Self::Quiet | Self::ReapplyPending { .. } => Self::ReapplyPending { budget },
+            Self::ResumePending { .. } => Self::ResumePending { budget },
+        }
+    }
+
+    fn coalesce(self, budget: u8) -> u8 {
+        self.budget().map_or(budget, |pending| pending.max(budget))
+    }
+
+    /// The confirming re-apply budget every online device is forced with, or
+    /// `None` when nothing is forced.
+    fn budget(self) -> Option<u8> {
+        match self {
+            Self::Quiet => None,
+            Self::ReapplyPending { budget } | Self::ResumePending { budget } => Some(budget),
+        }
+    }
+
+    /// Whether every online capture rearms, not only those whose own online
+    /// transition requires it.
+    fn rearms_every_capture(self) -> bool {
+        matches!(self, Self::ResumePending { .. })
+    }
 }
 
 impl Orchestrator {
@@ -761,12 +834,10 @@ impl Orchestrator {
                 target: openlogi_hook::PointerTarget::Unavailable,
             },
             inventory: InventoryState::Pending,
-            forced_reapply_budget: None,
-            forced_capture_rearm: false,
+            forced_reapply: ForcedReapply::default(),
             capture_route_generations: HashMap::new(),
             panel_generations: HashMap::new(),
             panel_epoch: 0,
-            hid_open_failures: false,
             reapply_followup: BTreeMap::new(),
             disabled_keys_recovery: BTreeMap::new(),
             settings_epochs: Vec::new(),
@@ -1427,10 +1498,10 @@ impl Orchestrator {
         // Even an empty snapshot is a *completed* enumeration — the watcher
         // skips failed ticks — so the device set is now known either way (and
         // a recovered backend upgrades `Unavailable` back to live data).
-        self.hid_open_failures = hid_open_failures;
         self.inventory = InventoryState::Ready {
             inventories: inventories.to_vec(),
             standalone: standalone.to_vec(),
+            hid_open_failures,
         };
         self.publish_inventory();
         let devices = build_devices(&self.config, inventories, standalone);
@@ -1460,10 +1531,10 @@ impl Orchestrator {
         // device's own `0x1d4b` reconnect broadcast, or a channel the
         // enumerator replaced after retiring it, where none of those
         // transitions are observable.
-        let forced = self.forced_reapply_budget.take();
+        let forced = std::mem::take(&mut self.forced_reapply);
         let next_current = pick_current(&devices, self.config.selected_device());
-        self.rearm_capture_routes(&devices);
-        self.repaint_panels(&devices, forced.is_some());
+        self.rearm_capture_routes(&devices, forced);
+        self.repaint_panels(&devices, forced.budget().is_some());
         // Manual cancellation can happen long after the boot/reconnect ladder
         // drained. Its owner requests only a Disable Keys recovery, and does
         // not consume a request while a successor still owns the setting.
@@ -1485,8 +1556,13 @@ impl Orchestrator {
             plan_disabled_keys_recovery(&devices, &disabled_keys_recovery, confirm_reapply);
         self.disabled_keys_recovery = next_disabled_keys_recovery;
         let followup = std::mem::take(&mut self.reapply_followup);
-        let (targets, next_followup) =
-            plan_reapply(&self.devices, &devices, &followup, forced, confirm_reapply);
+        let (targets, next_followup) = plan_reapply(
+            &self.devices,
+            &devices,
+            &followup,
+            forced.budget(),
+            confirm_reapply,
+        );
         self.reapply_followup = next_followup;
         // A keyboard switched to another platform on the device (a platform
         // key combination) is put back, as Logi Options+ does on its
@@ -1615,13 +1691,12 @@ impl Orchestrator {
         }
     }
 
-    /// Advance only the captures whose own online transition requires it.
-    /// Keep a resume request latched until an authoritative snapshot arrives.
-    fn rearm_capture_routes(&mut self, devices: &[AgentDevice]) {
-        let all = std::mem::take(&mut self.forced_capture_rearm);
+    /// Advance only the captures whose own online transition requires it, or
+    /// every online capture when `forced` carries a system resume.
+    fn rearm_capture_routes(&mut self, devices: &[AgentDevice], forced: ForcedReapply) {
         self.capture_route_generations
             .retain(|route, _| devices.iter().any(|dev| dev.route.as_ref() == Some(route)));
-        let targets = reapply_targets(&self.devices, devices, all);
+        let targets = reapply_targets(&self.devices, devices, forced.rearms_every_capture());
         if targets.is_empty() {
             return;
         }
@@ -1664,15 +1739,14 @@ impl Orchestrator {
     /// or recovery. Capture follows its own route and listener transitions;
     /// a general settings request must not cycle unrelated capture epochs.
     pub fn reapply_volatile_on_next_refresh(&mut self) {
-        self.force_reapply(VOLATILE_REAPPLY_CONFIRM_RETRIES);
+        self.forced_reapply = self.forced_reapply.settings_reset();
     }
 
     /// After system resume, reapply settings and rearm every online capture.
     /// Devices may have lost volatile diversion even when the snapshot looks
     /// identical; retain this intent until an authoritative refresh arrives.
     pub fn reapply_after_system_resume(&mut self) {
-        self.forced_capture_rearm = true;
-        self.reapply_volatile_on_next_refresh();
+        self.forced_reapply = self.forced_reapply.system_resumed();
     }
 
     /// Force a volatile-settings re-apply on the next inventory refresh
@@ -1687,15 +1761,7 @@ impl Orchestrator {
     /// re-applies; the writes are idempotent and the confirm budget is the
     /// short link-race one, not the boot ladder.
     pub fn reapply_reconnected_on_next_refresh(&mut self) {
-        self.force_reapply(RECONNECT_REAPPLY_CONFIRM_RETRIES);
-    }
-
-    /// Coalesce forced re-apply requests, keeping the largest confirm budget:
-    /// a device reconnect arriving between a system wake and its snapshot must
-    /// not shrink the wake's boot-race ladder.
-    fn force_reapply(&mut self, confirm_retries: u8) {
-        self.forced_reapply_budget =
-            Some(self.forced_reapply_budget.unwrap_or(0).max(confirm_retries));
+        self.forced_reapply = self.forced_reapply.device_reconnected();
     }
 
     /// Push the persisted volatile settings (lighting, sensor DPI, SmartShift,
@@ -2044,18 +2110,14 @@ impl Orchestrator {
             InventoryState::Ready {
                 inventories,
                 standalone,
+                hid_open_failures,
             } => {
                 let inventories = published_inventories(inventories, &self.settings_epochs);
-                self.observable.set_inventory(
-                    health,
-                    &inventories,
-                    standalone,
-                    self.hid_open_failures,
-                );
+                self.observable
+                    .set_inventory(health, &inventories, standalone, *hid_open_failures);
             }
             InventoryState::Pending | InventoryState::Unavailable => {
-                self.observable
-                    .set_inventory(health, &[], &[], self.hid_open_failures);
+                self.observable.set_inventory(health, &[], &[], false);
             }
         }
     }

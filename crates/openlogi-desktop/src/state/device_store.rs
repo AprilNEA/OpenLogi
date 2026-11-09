@@ -57,8 +57,8 @@ impl DeviceStore {
     }
 
     fn observe_connections(&mut self) {
-        for record in self.records.iter().filter(|record| record.online) {
-            let transport = match record.route.as_ref() {
+        for record in &self.records {
+            let transport = match record.addressable_route() {
                 Some(DeviceRoute::Direct { product_id, .. }) => record
                     .model_info
                     .as_ref()

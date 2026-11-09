@@ -17,6 +17,7 @@ pub mod battery;
 pub mod controls;
 pub mod dpi;
 pub mod features;
+pub mod hidpp;
 pub mod host_switch;
 pub mod lighting;
 pub mod mouse_buttons;
@@ -31,6 +32,8 @@ pub mod zones;
 pub enum DiagCmd {
     /// Dump every HID++ feature the active device reports.
     Features(features::FeaturesArgs),
+    /// Call one HID++ 2.0 feature with raw parameters and print its answers.
+    Hidpp(hidpp::HidppArgs),
     /// Dump HID++ 0x1b04 reprogrammable controls and capability flags.
     Controls(controls::ControlsArgs),
     /// Read the raw battery report (0x1004, 0x1000, or 0x1F20 fields).
@@ -66,6 +69,7 @@ impl DiagCmd {
 
         match self {
             Self::Features(args) => features::run(args).await,
+            Self::Hidpp(args) => hidpp::run(args).await,
             Self::Controls(args) => controls::run(args).await,
             Self::Battery(args) => battery::run(args).await,
             Self::Dpi(args) => dpi::run(args).await,

@@ -21,10 +21,12 @@ use tracing::{debug, error};
 use crate::ForegroundApp;
 
 mod gnome_shell;
+mod lifecycle;
 mod stop;
 mod wlr_foreign_toplevel;
 pub(super) mod x11;
 
+use lifecycle::{ActiveSnapshot, Feed, ObserverLifecycle, Published, Start};
 use stop::{PollResult, StopControl, StopToken, poll_source_or_stop, stop_pair};
 pub(super) use x11::X11Source;
 
@@ -215,10 +217,7 @@ impl Subscriber {
 }
 
 struct PublicationState {
-    active: bool,
-    initialized: bool,
-    version: u64,
-    current: Option<ForegroundApp>,
+    feed: Feed,
     subscribers: HashMap<u64, Arc<Subscriber>>,
 }
 
@@ -226,48 +225,30 @@ struct Publication {
     state: Mutex<PublicationState>,
 }
 
-enum ActiveSnapshot {
-    Idle,
-    Active(Option<ForegroundApp>),
-}
-
 impl Publication {
     fn new() -> Self {
         Self {
             state: Mutex::new(PublicationState {
-                active: false,
-                initialized: false,
-                version: 0,
-                current: None,
+                feed: Feed::new(),
                 subscribers: HashMap::new(),
             }),
         }
     }
 
     fn begin(&self) {
-        let mut state = lock_unpoisoned(&self.state);
-        state.active = true;
-        state.initialized = false;
-        state.current = None;
+        lock_unpoisoned(&self.state).feed.begin();
     }
 
     fn finish(&self) {
-        let mut state = lock_unpoisoned(&self.state);
-        state.active = false;
-        state.initialized = false;
-        state.current = None;
+        lock_unpoisoned(&self.state).feed.finish();
     }
 
-    fn subscribe(
-        &self,
-        id: u64,
-        subscriber: &Arc<Subscriber>,
-    ) -> Option<(u64, Option<ForegroundApp>)> {
+    /// Add `subscriber` and return the change it must replay: the active
+    /// session's latest, if any.
+    fn subscribe(&self, id: u64, subscriber: &Arc<Subscriber>) -> Option<Published> {
         let mut state = lock_unpoisoned(&self.state);
         state.subscribers.insert(id, Arc::clone(subscriber));
-        state
-            .initialized
-            .then(|| (state.version, state.current.clone()))
+        state.feed.latest().cloned()
     }
 
     fn unsubscribe(&self, id: u64) {
@@ -284,41 +265,101 @@ impl Publication {
     }
 
     fn publish(&self, app_id: Option<String>) {
-        let app = app_id.map(ForegroundApp::unnamed);
-        let (version, subscribers) = {
+        let (published, subscribers) = {
             let mut state = lock_unpoisoned(&self.state);
-            if state.initialized && state.current == app {
+            let Some(published) = state
+                .feed
+                .publish(app_id.map(ForegroundApp::unnamed))
+                .cloned()
+            else {
                 return;
-            }
-            state.initialized = true;
-            state.version += 1;
-            state.current.clone_from(&app);
+            };
             (
-                state.version,
+                published,
                 state.subscribers.values().cloned().collect::<Vec<_>>(),
             )
         };
         for subscriber in subscribers {
-            subscriber.deliver(version, app.clone());
+            subscriber.deliver(published.version, published.app.clone());
         }
     }
 
     fn active_snapshot(&self) -> ActiveSnapshot {
-        let state = lock_unpoisoned(&self.state);
-        if state.active {
-            ActiveSnapshot::Active(state.current.clone())
-        } else {
-            ActiveSnapshot::Idle
+        lock_unpoisoned(&self.state).feed.snapshot()
+    }
+}
+
+type ObserverWorkerStart = (Box<dyn FrontmostSource>, StopToken, PublishAppId);
+
+/// A worker thread, spawned and blocked until it is handed its source.
+struct PendingWorker {
+    start: mpsc::SyncSender<ObserverWorkerStart>,
+    stop: StopControl,
+    stop_token: StopToken,
+    thread: thread::JoinHandle<Box<dyn FrontmostSource>>,
+}
+
+impl PendingWorker {
+    /// Spawn a worker thread that waits for its source.
+    fn spawn() -> Result<Self, ForegroundApplicationObserverError> {
+        let (stop, stop_token) =
+            stop_pair().map_err(ForegroundApplicationObserverError::StopPipe)?;
+        let (start, start_rx) = mpsc::sync_channel::<ObserverWorkerStart>(0);
+        let thread = thread::Builder::new()
+            .name("openlogi-frontmost".into())
+            .spawn(move || match start_rx.recv() {
+                Ok((source, stop_token, publish)) => source.observe(stop_token, publish),
+                Err(_) => Box::new(NullSource),
+            })
+            .map_err(ForegroundApplicationObserverError::ThreadSpawn)?;
+        Ok(Self {
+            start,
+            stop,
+            stop_token,
+            thread,
+        })
+    }
+
+    /// Hand the worker `source`, which it observes with until stopped. A
+    /// worker that exited before taking it is joined, and gives the source
+    /// back.
+    fn hand_off(
+        self,
+        source: Box<dyn FrontmostSource>,
+        publish: PublishAppId,
+    ) -> Result<ObserverWorker, Box<dyn FrontmostSource>> {
+        match self.start.send((source, self.stop_token, publish)) {
+            Ok(()) => Ok(ObserverWorker {
+                stop: self.stop,
+                thread: self.thread,
+            }),
+            Err(mpsc::SendError((source, _, _))) => {
+                // Only a thread that dropped its receiver refuses the send,
+                // so it is already returning, with nothing worth keeping.
+                let _ = self.thread.join();
+                Err(source)
+            }
         }
     }
 }
 
+/// A worker observing with the source it was handed.
 struct ObserverWorker {
     stop: StopControl,
     thread: thread::JoinHandle<Box<dyn FrontmostSource>>,
 }
 
-type ObserverWorkerStart = (Box<dyn FrontmostSource>, StopToken, PublishAppId);
+impl ObserverWorker {
+    /// Wake the worker and join it, taking back its source. A worker that
+    /// panicked lost its source, so a freshly detected one takes its place.
+    fn shut_down(self) -> Box<dyn FrontmostSource> {
+        self.stop.request();
+        self.thread.join().unwrap_or_else(|panic| {
+            error!("foreground-application worker panicked on shutdown: {panic:?}");
+            detect_frontmost_source()
+        })
+    }
+}
 
 #[derive(Debug, Error)]
 pub(crate) enum ForegroundApplicationObserverError {
@@ -331,12 +372,18 @@ pub(crate) enum ForegroundApplicationObserverError {
 }
 
 struct FrontmostRuntime {
-    source: Option<Box<dyn FrontmostSource>>,
-    worker: Option<ObserverWorker>,
-    stopping: bool,
+    lifecycle: ObserverLifecycle<Box<dyn FrontmostSource>, ObserverWorker>,
     next_subscriber_id: u64,
 }
 
+/// The process's one frontmost source and the observers sharing it.
+///
+/// The publication is active exactly while the lifecycle observes or stops:
+/// [`Self::launch`] begins it before the worker holds the source, and
+/// [`Self::remove_observer`] finishes it as the source comes back, both under
+/// the runtime lock. A snapshot read that finds the publication inactive
+/// under that lock, once no worker is stopping, therefore finds the source
+/// idle.
 pub(super) struct FrontmostController {
     runtime: Mutex<FrontmostRuntime>,
     worker_stopped: Condvar,
@@ -347,14 +394,21 @@ impl FrontmostController {
     fn new(source: Box<dyn FrontmostSource>) -> Arc<Self> {
         Arc::new(Self {
             runtime: Mutex::new(FrontmostRuntime {
-                source: Some(source),
-                worker: None,
-                stopping: false,
+                lifecycle: ObserverLifecycle::new(source),
                 next_subscriber_id: 0,
             }),
             worker_stopped: Condvar::new(),
             publication: Arc::new(Publication::new()),
         })
+    }
+
+    /// Lock the runtime once no worker is stopping.
+    fn settled_runtime(&self) -> MutexGuard<'_, FrontmostRuntime> {
+        self.worker_stopped
+            .wait_while(lock_unpoisoned(&self.runtime), |runtime| {
+                runtime.lifecycle.is_stopping()
+            })
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     pub(super) fn frontmost_app(&self) -> Option<ForegroundApp> {
@@ -363,18 +417,12 @@ impl FrontmostController {
             ActiveSnapshot::Idle => {}
         }
 
-        let mut runtime = lock_unpoisoned(&self.runtime);
-        while runtime.stopping {
-            runtime = self
-                .worker_stopped
-                .wait(runtime)
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-        }
+        let mut runtime = self.settled_runtime();
         match self.publication.active_snapshot() {
             ActiveSnapshot::Active(app) => app,
             ActiveSnapshot::Idle => runtime
-                .source
-                .as_mut()
+                .lifecycle
+                .idle_source()
                 .and_then(|source| source.frontmost_app_id())
                 .map(ForegroundApp::unnamed),
         }
@@ -385,56 +433,26 @@ impl FrontmostController {
         callback: impl Fn(Option<ForegroundApp>) + Send + Sync + 'static,
     ) -> Result<ForegroundApplicationObserver, ForegroundApplicationObserverError> {
         let subscriber = Arc::new(Subscriber::new(callback));
-        let mut runtime = lock_unpoisoned(&self.runtime);
-        while runtime.stopping {
-            runtime = self
-                .worker_stopped
-                .wait(runtime)
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-        }
+        let mut runtime = self.settled_runtime();
 
         let id = runtime.next_subscriber_id;
         runtime.next_subscriber_id += 1;
-        let initial = if runtime.worker.is_none() {
-            let (stop, stop_token) =
-                stop_pair().map_err(ForegroundApplicationObserverError::StopPipe)?;
-            let (start_tx, start_rx) = mpsc::sync_channel::<ObserverWorkerStart>(0);
-            let thread = thread::Builder::new()
-                .name("openlogi-frontmost".into())
-                .spawn(move || match start_rx.recv() {
-                    Ok((source, stop_token, publish)) => source.observe(stop_token, publish),
-                    Err(_) => Box::new(NullSource),
-                })
-                .map_err(ForegroundApplicationObserverError::ThreadSpawn)?;
-
-            self.publication.begin();
-            let initial = self.publication.subscribe(id, &subscriber);
-            let source = runtime
-                .source
-                .take()
-                .unwrap_or_else(|| Box::new(NullSource));
-            let publication = Arc::clone(&self.publication);
-            let publish: PublishAppId = Arc::new(move |app| publication.publish(app));
-            if let Err(error) = start_tx.send((source, stop_token, publish)) {
-                let (source, _, _) = error.0;
-                runtime.source = Some(source);
+        // The first observer subscribes before its worker can publish, so it
+        // replays nothing; a later one replays the session's latest change.
+        let initial = self.publication.subscribe(id, &subscriber);
+        match runtime.lifecycle.start(|source| self.launch(source)) {
+            Start::Busy | Start::Started => {}
+            Start::Failed(error) => {
                 self.publication.unsubscribe(id);
-                self.publication.finish();
-                drop(runtime);
-                let _ = thread.join();
-                return Err(ForegroundApplicationObserverError::WorkerStoppedDuringStartup);
+                return Err(error);
             }
-            runtime.worker = Some(ObserverWorker { stop, thread });
-            initial
-        } else {
-            self.publication.subscribe(id, &subscriber)
-        };
+        }
         drop(runtime);
 
         // Do not call user code while holding the controller lock. If the
         // worker published a newer version first, Subscriber::deliver ignores
         // this older snapshot rather than reversing callback order.
-        if let Some((version, app)) = initial {
+        if let Some(Published { version, app }) = initial {
             subscriber.deliver(version, app);
         }
 
@@ -444,11 +462,36 @@ impl FrontmostController {
         })
     }
 
+    /// Start a worker with the idle `source`: spawn it, open the publication
+    /// before it can publish, and hand the source over. A launch that fails
+    /// leaves the publication closed and gives the source back. Neither path
+    /// unwinds, as [`ObserverLifecycle::start`] requires.
+    fn launch(
+        &self,
+        source: Box<dyn FrontmostSource>,
+    ) -> Result<ObserverWorker, (Box<dyn FrontmostSource>, ForegroundApplicationObserverError)>
+    {
+        let pending = match PendingWorker::spawn() {
+            Ok(pending) => pending,
+            Err(error) => return Err((source, error)),
+        };
+        self.publication.begin();
+        let publication = Arc::clone(&self.publication);
+        let publish: PublishAppId = Arc::new(move |app| publication.publish(app));
+        pending.hand_off(source, publish).map_err(|source| {
+            self.publication.finish();
+            (
+                source,
+                ForegroundApplicationObserverError::WorkerStoppedDuringStartup,
+            )
+        })
+    }
+
     fn check_health(&self) -> Result<(), &'static str> {
         let runtime = lock_unpoisoned(&self.runtime);
         if runtime
-            .worker
-            .as_ref()
+            .lifecycle
+            .worker()
             .is_some_and(|worker| worker.thread.is_finished())
         {
             Err("Linux foreground observer worker stopped")
@@ -461,33 +504,21 @@ impl FrontmostController {
         self.publication.unsubscribe(id);
 
         let worker = {
-            let mut runtime = lock_unpoisoned(&self.runtime);
-            while runtime.stopping {
-                runtime = self
-                    .worker_stopped
-                    .wait(runtime)
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-            }
+            let mut runtime = self.settled_runtime();
             if !self.publication.is_empty() {
                 return;
             }
-            let Some(worker) = runtime.worker.take() else {
+            let Some(worker) = runtime.lifecycle.stop() else {
                 return;
             };
-            runtime.stopping = true;
             worker
         };
 
-        worker.stop.request();
-        let source = worker.thread.join().unwrap_or_else(|panic| {
-            error!("foreground-application worker panicked on shutdown: {panic:?}");
-            detect_frontmost_source()
-        });
+        let source = worker.shut_down();
 
         let mut runtime = lock_unpoisoned(&self.runtime);
-        runtime.source = Some(source);
+        runtime.lifecycle.stopped(source);
         self.publication.finish();
-        runtime.stopping = false;
         self.worker_stopped.notify_all();
     }
 }
@@ -616,6 +647,47 @@ mod tests {
             controller.frontmost_app().map(|app| app.id).as_deref(),
             Some("org.example.App")
         );
+    }
+
+    #[test]
+    fn a_later_observer_replays_the_latest_change_and_only_the_last_one_stops_the_worker() {
+        let stopped = Arc::new(AtomicBool::new(false));
+        let controller = FrontmostController::new(Box::new(FakeFrontmostSource {
+            stopped: Arc::clone(&stopped),
+        }));
+        let (first_tx, first_rx) = mpsc::channel();
+        let first = controller
+            .watch(move |app| {
+                first_tx.send(app).expect("test receiver remains alive");
+            })
+            .expect("first observer starts the worker");
+        first_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("the worker publishes its initial snapshot");
+
+        let (second_tx, second_rx) = mpsc::channel();
+        let second = controller
+            .watch(move |app| {
+                second_tx.send(app).expect("test receiver remains alive");
+            })
+            .expect("second observer joins the worker");
+        // The fake publishes once, so only the replay can have delivered it,
+        // and `watch` replays before it returns.
+        assert_eq!(
+            second_rx
+                .try_recv()
+                .expect("the second observer replays the latest change")
+                .map(|app| app.id)
+                .as_deref(),
+            Some("org.example.App")
+        );
+
+        drop(first);
+        assert!(!stopped.load(Ordering::Acquire), "an observer remains");
+        second.check_health().expect("the worker still runs");
+
+        drop(second);
+        assert!(stopped.load(Ordering::Acquire));
     }
 
     #[test]

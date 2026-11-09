@@ -563,6 +563,19 @@ Print Screen, such as ShareX or Greenshot, receives it. On Windows and macOS,
 the `Screenshot` and `CaptureRegion` actions press the system's own screenshot
 shortcuts instead.
 
+Keypad keys have their own names, since `+` separates chord tokens and a keypad
+digit is a different key from the top-row one: `Numpad0`–`Numpad9`,
+`NumpadPlus`, `NumpadMinus`, `NumpadMultiply`, `NumpadDivide`, `NumpadDecimal`,
+`NumpadEnter`, and `NumpadEquals` (the `=` key on Mac keypads), as in
+`Ctrl+Alt+Shift+NumpadMinus`. `NumpadEnter` stays distinct from `Enter`.
+Num Lock and Clear are not shortcut keys: HID usage `0x53` means Num Lock on
+PC keyboards and Clear on Mac keyboards, and the separate Keypad Clear usage
+`0xD8` has no portable mapping. OpenLogi does not toggle Num Lock to send a
+keypad shortcut. As on a physical keypad, Linux and Windows may read a keypad
+digit as its navigation key while Num Lock is off. On Windows, `NumpadEquals`
+uses the OEM keypad-equals virtual key; support depends on the keyboard layout
+and receiving application.
+
 `CustomShortcut` emits an immediate key-down/key-up pair. `HoldShortcut` keeps
 the chord down until the originating physical button is released, and also
 releases it if capture is interrupted, the binding becomes invalid, or the
@@ -578,6 +591,22 @@ and dismiss it. The same shape covers ``Cmd+` ``, `Alt+Tab`, and an IDE's
 `Ctrl+Tab`. A chord with no modifier degrades to a plain tap of its key. If
 another button is already holding the same key through `HoldShortcut`, the tap
 is skipped and only the modifiers go down, so that button keeps its key held.
+
+`HoldModifier` holds one or more bare modifiers with no ordinary key, under
+those same lifetime and release rules. The shortcut actions all require a key
+and reject a bare modifier string, so this is the shape that binds a button to
+Ctrl, Shift, Alt, Cmd, or Super alone. The held modifier composes with input
+from other devices: hold it on the mouse, type on the keyboard, and the
+keystroke arrives modified. Combine modifiers with `+`, as in `HoldModifier =
+"Ctrl+Shift"`, using the chord modifier names above.
+
+On macOS the held modifier composes through the virtual HID keyboard that
+release builds type synthesized keys on: a modifier it holds is part of the
+hardware modifier state, exactly like one held on a real keyboard. Builds
+without that keyboard, such as local and development builds, post keys as
+`CGEvent`s instead. There the modifier is still held, so menus switch to their
+alternate items, but keys typed on another keyboard do not pick it up, as with
+every other synthesized key.
 
 A `{ short = ..., long = ... }` binding waits for the button's outcome instead
 of firing on press. Releasing before 500 ms fires `short`; keeping the button

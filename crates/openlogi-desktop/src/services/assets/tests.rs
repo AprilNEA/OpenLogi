@@ -119,7 +119,7 @@ fn registry_files(names: &[&str]) -> Vec<openlogi_assets::FileEntry> {
 }
 
 /// A 24-byte PNG: signature + an `IHDR` chunk header carrying only the
-/// width/height — all `read_png_dimensions` actually reads.
+/// width/height — all `read_image_dimensions` reads of a PNG.
 fn png_header(width: u32, height: u32) -> Vec<u8> {
     let mut bytes = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
     bytes.extend_from_slice(&13u32.to_be_bytes());
@@ -1028,6 +1028,86 @@ fn renders_are_recognised_by_their_bytes() {
     assert!(!images::is_drawable_image(&root.path().join("missing.png")));
 }
 
+/// The head of a WebP file: the `RIFF` header, then the first chunk's `tag`
+/// and the start of its `data`. The reader skips both lengths, so they stay
+/// zero.
+fn webp_header(tag: [u8; 4], data: &[u8]) -> Vec<u8> {
+    let mut bytes = b"RIFF\0\0\0\0WEBP".to_vec();
+    bytes.extend_from_slice(&tag);
+    bytes.extend_from_slice(&[0; 4]);
+    bytes.extend_from_slice(data);
+    bytes
+}
+
+/// An extended-format WebP head, the shape of the catalog's WebP renders: the
+/// alpha flag and reserved bits, then the canvas width and height minus one,
+/// each 24-bit little-endian.
+fn webp_vp8x_header(width: u32, height: u32) -> Vec<u8> {
+    let mut data = vec![0x10, 0, 0, 0];
+    data.extend_from_slice(&(width - 1).to_le_bytes()[..3]);
+    data.extend_from_slice(&(height - 1).to_le_bytes()[..3]);
+    webp_header(*b"VP8X", &data)
+}
+
+/// #2460: the size behind each render's hotspots, read from the header of
+/// either format the catalog ships.
+#[test]
+fn render_sizes_are_read_from_png_and_webp_headers() {
+    let root = tempfile::tempdir().expect("create temp dir");
+    let size_of = |bytes: &[u8]| {
+        let path = root.path().join("1b909bb1-911c-42b7-bf07-b60be1655de5");
+        std::fs::write(&path, bytes).expect("write render");
+        images::read_image_dimensions(&path).ok()
+    };
+    // Lossy: a key-frame tag and the start code, then 640 with the scale bits
+    // set, and 480.
+    let lossy = [0x30, 0x01, 0x00, 0x9d, 0x01, 0x2a, 0x80, 0x42, 0xe0, 0x01];
+    // Lossless: the signature, then 300 and 200 minus one with the alpha bit.
+    let mut lossless = vec![0x2f];
+    lossless.extend_from_slice(&((300 - 1) | ((200 - 1) << 14) | (1_u32 << 28)).to_le_bytes());
+
+    assert_eq!(size_of(&png_header(1391, 2700)), Some((1391, 2700)));
+    assert_eq!(
+        size_of(&webp_vp8x_header(1157, 2800)),
+        Some((1157, 2800)),
+        "the G502 X PLUS ext2 side render"
+    );
+    assert_eq!(size_of(&webp_header(*b"VP8 ", &lossy)), Some((640, 480)));
+    assert_eq!(size_of(&webp_header(*b"VP8L", &lossless)), Some((300, 200)));
+}
+
+#[test]
+fn a_render_without_a_readable_size_has_none() {
+    let root = tempfile::tempdir().expect("create temp dir");
+    let size_of = |bytes: &[u8]| {
+        let path = root.path().join("render");
+        std::fs::write(&path, bytes).expect("write render");
+        images::read_image_dimensions(&path).ok()
+    };
+    let no_start_code = [0x30, 0x01, 0x00, 0, 0, 0, 0x80, 0x02, 0xe0, 0x01];
+
+    assert_eq!(
+        size_of(b"RIFF\x10\0\0\0WEBPVP8 "),
+        None,
+        "a WebP head cut short"
+    );
+    assert_eq!(size_of(&webp_vp8x_header(1157, 2800)[..28]), None);
+    assert_eq!(size_of(&png_header(1391, 2700)[..20]), None);
+    assert_eq!(size_of(&webp_header(*b"VP8 ", &no_start_code)), None);
+    assert_eq!(
+        size_of(&webp_header(*b"VP8L", &[0; 5])),
+        None,
+        "no lossless signature"
+    );
+    assert_eq!(size_of(&webp_header(*b"ANIM", &[0; 10])), None);
+    assert_eq!(size_of(&ghub_encrypted_blob()), None);
+    assert_eq!(size_of(b""), None);
+    assert_eq!(
+        images::read_image_dimensions(&root.path().join("missing")).ok(),
+        None
+    );
+}
+
 /// The `g502_wireless` depot as the catalog serves it: the black base model
 /// in PNG, the purple `ext2` variant as `variant_render` with metadata
 /// calibrated for it, everything keyed on the depot name.
@@ -1140,4 +1220,82 @@ fn a_drawable_colour_variant_keeps_its_renders_and_metadata() {
         dir.join("58ee56b0-5ca6-4e7b-b764-2d1746094b78")
     );
     assert_eq!(first_front_marker_x(&asset), Some(535.0));
+}
+
+const G502X_PLUS_EXT2_FRONT: &str = "3253a30b-28e6-4704-85ea-a14a2e5b5df6";
+const G502X_PLUS_EXT2_SIDE: &str = "1b909bb1-911c-42b7-bf07-b60be1655de5";
+
+/// A depot whose colour variant ships its renders as WebP and no `side.png`,
+/// sized like the G502 X PLUS `ext2` (#2460). Its metadata origins are smaller
+/// than the renders, as in the catalog. The catalog keys the variant on the
+/// depot name under `images/device/`; this one keys it on the registry model
+/// id with flat names, so only the size check decides the side view.
+fn write_webp_variant_depot(root: &Path) -> PathBuf {
+    let dir = root.join("g502x_plus");
+    std::fs::create_dir_all(&dir).expect("create depot dir");
+    std::fs::write(
+        dir.join("manifest.json"),
+        format!(
+            r#"{{"devices":[
+                {{"modelId":"c095_ext2","resources":[
+                    {{"key":"device_image","src":"{G502X_PLUS_EXT2_FRONT}"}},
+                    {{"key":"device_side","src":"{G502X_PLUS_EXT2_SIDE}"}}]}}
+            ]}}"#,
+        ),
+    )
+    .expect("write manifest");
+    std::fs::write(
+        dir.join("metadata.json"),
+        r#"{"images":[
+            {"key":"device_image","origin":{"width":1391,"height":2700},
+             "assignments":[{"slotId":"g502x_plus_g1_m1",
+                             "marker":{"x":538,"y":614}}]},
+            {"key":"device_side","origin":{"width":936,"height":2700},
+             "assignments":[{"slotId":"g502x_plus_g4_m1",
+                             "marker":{"x":580,"y":1800}}]}
+        ]}"#,
+    )
+    .expect("write metadata");
+    std::fs::write(
+        dir.join(G502X_PLUS_EXT2_FRONT),
+        webp_vp8x_header(1662, 2800),
+    )
+    .expect("write front render");
+    std::fs::write(dir.join(G502X_PLUS_EXT2_SIDE), webp_vp8x_header(1157, 2800))
+        .expect("write side render");
+    dir
+}
+
+/// #2460: a WebP side render got no side view, and a WebP main view took the
+/// metadata origin for its size, so its hotspots were scaled wrong.
+#[test]
+fn a_webp_colour_variant_gets_both_views_at_their_own_size() {
+    let root = tempfile::tempdir().expect("create temp dir");
+    let dir = write_webp_variant_depot(root.path());
+    let index = index_of(
+        "g502x_plus",
+        DeviceEntry {
+            model_id: "c095".into(),
+            model_ids: vec!["c095".into(), "4099".into()],
+            display_name: "G502 X PLUS".into(),
+            kind: "MOUSE".into(),
+            asset_path: "v1/devices/g502x_plus/".into(),
+            files: Vec::new(),
+        },
+    );
+    let resolver = resolver_over(&[root.path()], Some(index));
+    let model = DeviceModelInfo {
+        model_ids: [0x4099, 0xc095, 0x0000],
+        extended_model_id: 2,
+        ..bare_model()
+    };
+
+    let asset = resolver
+        .resolve(&model, None)
+        .expect("the G502 X PLUS ext2 resolves");
+    let side = asset.side_view.as_ref().expect("the WebP side view");
+    assert_eq!(side.image_path, dir.join(G502X_PLUS_EXT2_SIDE));
+    assert_eq!((side.png_width, side.png_height), (1157, 2800));
+    assert_eq!(asset.image_path, dir.join(G502X_PLUS_EXT2_FRONT));
+    assert_eq!((asset.png_width, asset.png_height), (1662, 2800));
 }

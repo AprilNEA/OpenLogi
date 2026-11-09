@@ -60,97 +60,231 @@ fn test_dispatcher() -> (
     (dispatcher, owner, received)
 }
 
+/// A hold of `press` begun now.
+fn held(press: PressToken) -> PressPhase {
+    PressPhase::HeldAsGesture {
+        hold: GestureHold::new(press, Instant::now()),
+    }
+}
+
+/// A hold of `press` already past the swipe gate, so its next long-enough
+/// motion commits.
+fn held_for_swipe(press: PressToken) -> PressPhase {
+    let mut hold = GestureHold::new(press, Instant::now());
+    hold.swipe.backdate_hold_for_test();
+    PressPhase::HeldAsGesture { hold }
+}
+
+/// The token of a released hold and whether it was a click; `None` for any
+/// other release.
+fn ended_hold(released: Option<PressPhase>) -> Option<(PressToken, bool)> {
+    match released? {
+        PressPhase::HeldAsGesture { hold } => Some(hold.end()),
+        _ => None,
+    }
+}
+
+/// Every recorded phase against every event: a press enters its own phase
+/// whatever was recorded, a release ends the press, and an interrupt ends only
+/// a hold.
+#[test]
+fn press_transition_truth_table() {
+    use EventDisposition::{PassThrough, Suppress};
+    let phases = || {
+        [
+            (held(token(1, ButtonId::Back)), Suppress),
+            (PressPhase::Suppressed, Suppress),
+            (PressPhase::Diverted(DivertedPress::Echo), Suppress),
+            (
+                PressPhase::Diverted(DivertedPress::OtherDevice),
+                PassThrough,
+            ),
+            (PressPhase::Passthrough, PassThrough),
+        ]
+    };
+    let recorded = || {
+        [None]
+            .into_iter()
+            .chain(phases().map(|(phase, _)| Some(phase)))
+    };
+    for phase in recorded() {
+        for (pressed, disposition) in phases() {
+            assert_eq!(pressed.disposition(), disposition, "{pressed:?}");
+            let kind = std::mem::discriminant(&pressed);
+            let NextPhase::Enter(next) =
+                press_transition(phase.as_ref(), PressEvent::Pressed(pressed))
+            else {
+                panic!("a press over {phase:?} enters its own phase");
+            };
+            assert_eq!(std::mem::discriminant(&next), kind, "over {phase:?}");
+            assert_eq!(next.disposition(), disposition, "over {phase:?}");
+        }
+        assert!(
+            matches!(
+                press_transition(phase.as_ref(), PressEvent::Released),
+                NextPhase::Up
+            ),
+            "{phase:?}"
+        );
+        let interrupted = press_transition(phase.as_ref(), PressEvent::CaptureInterrupted);
+        match phase {
+            Some(PressPhase::HeldAsGesture { .. }) => {
+                assert!(matches!(interrupted, NextPhase::Up), "{interrupted:?}");
+            }
+            _ => assert!(matches!(interrupted, NextPhase::Keep), "{phase:?}"),
+        }
+    }
+}
+
 // The mid-swipe gate itself is unit-tested on `SwipeAccumulator` in
-// `openlogi-core`; these cover only what `HoldState` adds on top — tagging a
+// `openlogi-core`; these cover only what a hold adds on top — tagging a
 // commit with the exact press and held button, and matching the release.
 
 #[test]
 fn accumulate_tags_a_committed_swipe_with_the_held_press() {
-    let mut hold = HoldState::default();
+    let mut presses = ButtonPresses::default();
     let press = token(1, ButtonId::Back);
-    hold.begin(ButtonId::Back, press.clone());
-    hold.swipe.backdate_hold_for_test();
+    presses.press(ButtonId::Back, held_for_swipe(press.clone()));
 
     assert_eq!(
-        hold.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
+        presses.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
         Some((press.clone(), ButtonId::Back, GestureDirection::Right))
     );
     assert_eq!(
-        hold.accumulate(50, 0),
+        presses.accumulate(50, 0),
         None,
         "continuing the same swipe does not repeat"
     );
-    assert_eq!(hold.end(ButtonId::Back), Some((press, false)));
+    assert_eq!(
+        ended_hold(presses.release(ButtonId::Back)),
+        Some((press, false))
+    );
 }
 
 #[test]
 fn a_same_button_repress_restarts_the_stale_hold() {
-    let mut hold = HoldState::default();
-    let old = token(1, ButtonId::Back);
+    let mut presses = ButtonPresses::default();
+    let now = Instant::now();
     assert!(matches!(
-        hold.prepare_begin(ButtonId::Back),
+        presses.admit_gesture(ButtonId::Back, now),
         HoldAdmission::Begin
     ));
-    hold.begin(ButtonId::Back, old);
+    presses.press(ButtonId::Back, held(token(1, ButtonId::Back)));
 
     let replacement = token(2, ButtonId::Back);
     assert!(
-        matches!(hold.prepare_begin(ButtonId::Back), HoldAdmission::Begin),
+        matches!(
+            presses.admit_gesture(ButtonId::Back, now),
+            HoldAdmission::Begin
+        ),
         "a same-button re-press is proof of a lost release"
     );
-    hold.begin(ButtonId::Back, replacement.clone());
-    hold.swipe.backdate_hold_for_test();
+    presses.press(ButtonId::Back, held_for_swipe(replacement.clone()));
     assert_eq!(
-        hold.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
+        presses.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
         Some((replacement, ButtonId::Back, GestureDirection::Right))
     );
 }
 
 #[test]
 fn an_aged_hold_yields_to_a_new_buttons_press() {
-    let mut hold = HoldState::default();
-    hold.begin(ButtonId::Back, token(1, ButtonId::Back));
-    hold.backdate_for_test();
+    let mut presses = ButtonPresses::default();
+    let pressed_at = Instant::now();
+    presses.press(
+        ButtonId::Back,
+        PressPhase::HeldAsGesture {
+            hold: GestureHold::new(token(1, ButtonId::Back), pressed_at),
+        },
+    );
+    assert!(
+        matches!(
+            presses.admit_gesture(
+                ButtonId::Forward,
+                pressed_at + HOLD_STALE_AFTER.saturating_sub(Duration::from_millis(1))
+            ),
+            HoldAdmission::Refuse
+        ),
+        "a hold short of the horizon is still live"
+    );
 
     let replacement = token(2, ButtonId::Forward);
-    let HoldAdmission::Replace(stale) = hold.prepare_begin(ButtonId::Forward) else {
+    let HoldAdmission::Replace(stale) =
+        presses.admit_gesture(ButtonId::Forward, pressed_at + HOLD_STALE_AFTER)
+    else {
         panic!("an aged hold must yield to a new press");
     };
     assert_eq!(stale, token(1, ButtonId::Back));
-    hold.begin(ButtonId::Forward, replacement.clone());
-    hold.swipe.backdate_hold_for_test();
+    presses.press(ButtonId::Forward, held_for_swipe(replacement.clone()));
     assert_eq!(
-        hold.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
+        presses.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
         Some((replacement, ButtonId::Forward, GestureDirection::Right))
+    );
+    assert!(
+        presses.release(ButtonId::Back).is_none(),
+        "the replaced hold's late release is a stray"
     );
 }
 
 #[test]
 fn begin_is_first_wins_while_a_hold_is_active() {
-    let mut hold = HoldState::default();
+    let mut presses = ButtonPresses::default();
     let first = token(1, ButtonId::Back);
-    hold.begin(ButtonId::Back, first.clone());
-    hold.swipe.backdate_hold_for_test();
+    presses.press(ButtonId::Back, held_for_swipe(first.clone()));
     assert!(
-        matches!(hold.prepare_begin(ButtonId::Forward), HoldAdmission::Refuse),
+        matches!(
+            presses.admit_gesture(ButtonId::Forward, Instant::now()),
+            HoldAdmission::Refuse
+        ),
         "a second press must not hijack the active hold"
     );
+    // The refused press takes the single-action path instead.
+    presses.press(ButtonId::Forward, PressPhase::Suppressed);
 
     assert_eq!(
-        hold.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
+        presses.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
         Some((first.clone(), ButtonId::Back, GestureDirection::Right))
     );
-    assert_eq!(hold.end(ButtonId::Forward), None);
-    assert_eq!(hold.end(ButtonId::Back), Some((first, false)));
+    assert!(matches!(
+        presses.release(ButtonId::Forward),
+        Some(PressPhase::Suppressed)
+    ));
+    assert_eq!(
+        ended_hold(presses.release(ButtonId::Back)),
+        Some((first, false))
+    );
 }
 
 #[test]
 fn end_matches_the_held_button_and_returns_its_token() {
-    let mut hold = HoldState::default();
+    let mut presses = ButtonPresses::default();
     let press = token(1, ButtonId::Back);
-    hold.begin(ButtonId::Back, press.clone());
-    assert_eq!(hold.end(ButtonId::Forward), None);
-    assert_eq!(hold.end(ButtonId::Back), Some((press, true)));
+    presses.press(ButtonId::Back, held(press.clone()));
+    assert_eq!(ended_hold(presses.release(ButtonId::Forward)), None);
+    assert_eq!(
+        ended_hold(presses.release(ButtonId::Back)),
+        Some((press, true))
+    );
+}
+
+/// The OS may drop a hold's release with the interrupt. The hold ends with
+/// it, so the next stray pointer move cannot commit a phantom swipe, while
+/// other presses keep their release's disposition.
+#[test]
+fn an_interrupt_ends_the_hold_before_it_commits_a_phantom_swipe() {
+    let mut presses = ButtonPresses::default();
+    presses.press(ButtonId::Back, held_for_swipe(token(1, ButtonId::Back)));
+    presses.press(ButtonId::Forward, PressPhase::Suppressed);
+    presses.interrupt();
+
+    assert_eq!(presses.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0), None);
+    assert!(
+        presses.release(ButtonId::Back).is_none(),
+        "the hold's late release is a stray"
+    );
+    assert!(matches!(
+        presses.release(ButtonId::Forward),
+        Some(PressPhase::Suppressed)
+    ));
 }
 
 #[test]
@@ -173,25 +307,24 @@ fn resolve_gesture_click_prefers_explicit_then_falls_back_to_default() {
 
 #[test]
 fn fail_open_press_pairs_release() {
-    let mut fail_open = HashSet::new();
+    let release = |presses: &mut ButtonPresses, id| {
+        presses
+            .release(id)
+            .map_or(EventDisposition::PassThrough, |press| press.disposition())
+    };
+    let mut presses = ButtonPresses::default();
+    presses.press(ButtonId::Back, PressPhase::Suppressed);
     assert_eq!(
-        remapped_press_disposition(ButtonId::Back, true, &mut fail_open),
+        release(&mut presses, ButtonId::Back),
         EventDisposition::Suppress
     );
+    presses.press(ButtonId::Forward, PressPhase::Passthrough);
     assert_eq!(
-        remapped_release_disposition(ButtonId::Back, &mut fail_open),
-        EventDisposition::Suppress
-    );
-    assert_eq!(
-        remapped_press_disposition(ButtonId::Forward, false, &mut fail_open),
+        release(&mut presses, ButtonId::Forward),
         EventDisposition::PassThrough
     );
     assert_eq!(
-        remapped_release_disposition(ButtonId::Forward, &mut fail_open),
-        EventDisposition::PassThrough
-    );
-    assert_eq!(
-        remapped_release_disposition(ButtonId::Forward, &mut fail_open),
+        release(&mut presses, ButtonId::Forward),
         EventDisposition::PassThrough
     );
 }
@@ -241,43 +374,50 @@ fn queued_key_action_retains_its_press_time_target() {
 /// A held action needs the key's release, which the one-shot action queue
 /// never delivers.
 #[test]
-fn dpi_shift_on_a_key_runs_as_a_held_press() {
+fn held_actions_on_a_key_run_as_held_presses() {
     use super::super::button::ButtonRuntimeEvent;
 
-    let (dispatcher, mut owner, events) = test_dispatcher();
-    let keycode = 0x7a;
-    let modifiers = KeyModifiers::default();
-    let bindings = Arc::new(RwLock::new(BTreeMap::from([(
-        KeyTrigger { keycode, modifiers },
+    for action in [
         Action::DpiShift,
-    )])));
-    let (actions, queued) = mpsc::sync_channel(1);
-    let key = |pressed| {
-        handle_key(
-            KeyEvent {
-                keycode,
-                pressed,
-                modifiers,
-            },
-            &bindings,
-            &actions,
-            &dispatcher,
-            ActionDispatchTarget::capture,
-        )
-    };
+        Action::HoldShortcut("Ctrl+F18".parse().expect("valid chord")),
+        Action::TapKeyHoldingModifiers("Alt+F19".parse().expect("valid chord")),
+        Action::HoldModifier("Ctrl+Shift".parse().expect("valid modifiers")),
+    ] {
+        let (dispatcher, mut owner, events) = test_dispatcher();
+        let keycode = 0x7a;
+        let modifiers = KeyModifiers::default();
+        let bindings = Arc::new(RwLock::new(BTreeMap::from([(
+            KeyTrigger { keycode, modifiers },
+            action,
+        )])));
+        let (actions, queued) = mpsc::sync_channel(1);
+        let key = |pressed| {
+            handle_key(
+                KeyEvent {
+                    keycode,
+                    pressed,
+                    modifiers,
+                },
+                &bindings,
+                &actions,
+                &dispatcher,
+                ActionDispatchTarget::capture,
+            )
+        };
 
-    assert_eq!(key(true), EventDisposition::Suppress);
-    queued.try_recv().unwrap_err();
-    assert!(matches!(
-        events.recv_timeout(Duration::from_secs(1)),
-        Ok(ButtonRuntimeEvent::Started(_))
-    ));
-    assert_eq!(key(false), EventDisposition::Suppress);
-    assert!(matches!(
-        events.recv_timeout(Duration::from_secs(1)),
-        Ok(ButtonRuntimeEvent::Ended { .. })
-    ));
-    assert!(owner.shutdown());
+        assert_eq!(key(true), EventDisposition::Suppress);
+        queued.try_recv().unwrap_err();
+        assert!(matches!(
+            events.recv_timeout(Duration::from_secs(1)),
+            Ok(ButtonRuntimeEvent::Started(_))
+        ));
+        assert_eq!(key(false), EventDisposition::Suppress);
+        assert!(matches!(
+            events.recv_timeout(Duration::from_secs(1)),
+            Ok(ButtonRuntimeEvent::Ended { .. })
+        ));
+        assert!(owner.shutdown());
+    }
 }
 
 #[test]
@@ -938,5 +1078,145 @@ fn an_unattributed_press_keeps_the_selected_binding_while_that_device_has_not_di
         events.recv_timeout(Duration::from_secs(1)).expect("up"),
         ButtonRuntimeEvent::Ended { .. }
     ));
+    assert!(owner.shutdown());
+}
+
+/// Wait for the runtime to end `hold`'s lifecycle as a stale hold.
+fn assert_stale_hold_ended(
+    events: &mpsc::Receiver<super::super::button::ButtonRuntimeEvent>,
+    hold: &super::super::button::ActivePress,
+) {
+    use super::super::button::{ButtonRuntimeEvent, CancelReason, EndReason};
+    assert!(matches!(
+        events.recv_timeout(Duration::from_secs(1)).expect("ended"),
+        ButtonRuntimeEvent::Ended {
+            press,
+            reason: EndReason::Canceled(CancelReason::StaleHold),
+        } if press.token() == hold.token()
+    ));
+}
+
+/// A press the runtime refused as a gesture went native, so its release must
+/// too, even though an earlier press of the button was suppressed and lost its
+/// release. Suppressing this release would leave the button stuck down on the
+/// desktop.
+#[test]
+fn a_refused_gesture_press_after_a_lost_release_passes_both_edges() {
+    let (dispatcher, mut owner, _events) = test_dispatcher();
+    let hooks = Arc::new(RwLock::new(HookMaps {
+        bindings: BTreeMap::from([(ButtonId::Back, Action::NextTab.into())]),
+        ..HookMaps::default()
+    }));
+    let mouse = m650_bluetooth();
+    let back = |pressed| {
+        handle_button(
+            ButtonId::Back,
+            pressed,
+            Some(&mouse),
+            &hooks,
+            &dispatcher,
+            || None,
+        )
+    };
+    assert_eq!(back(true), EventDisposition::Suppress);
+    // That release is lost. Back becomes a gesture button, and the runtime
+    // refuses the next lifecycle.
+    hooks
+        .write()
+        .expect("maps")
+        .gestures
+        .insert(ButtonId::Back, BTreeMap::new());
+    assert!(owner.shutdown());
+    assert_eq!(back(true), EventDisposition::PassThrough);
+    assert_eq!(back(false), EventDisposition::PassThrough);
+}
+
+/// The same for a gesture hold that lost its release: it must not claim the
+/// release of the button's next press, which went native once the button
+/// stopped being a gesture button. The hold's lifecycle, which may hold a
+/// shortcut down, ends at that press instead.
+#[test]
+fn a_native_press_after_a_lost_hold_passes_both_edges() {
+    use super::super::button::ButtonRuntimeEvent;
+    let (dispatcher, mut owner, events) = test_dispatcher();
+    let hooks = Arc::new(RwLock::new(HookMaps {
+        gestures: BTreeMap::from([(ButtonId::Back, BTreeMap::new())]),
+        ..HookMaps::default()
+    }));
+    let mouse = m650_bluetooth();
+    let back = |pressed| {
+        handle_button(
+            ButtonId::Back,
+            pressed,
+            Some(&mouse),
+            &hooks,
+            &dispatcher,
+            || None,
+        )
+    };
+    assert_eq!(back(true), EventDisposition::Suppress);
+    let ButtonRuntimeEvent::Started(hold) =
+        events.recv_timeout(Duration::from_secs(1)).expect("down")
+    else {
+        panic!("started");
+    };
+    // That release is lost, and Back goes back to its native click.
+    hooks.write().expect("maps").gestures.clear();
+    assert_eq!(back(true), EventDisposition::PassThrough);
+    assert_stale_hold_ended(&events, &hold);
+    assert_eq!(back(false), EventDisposition::PassThrough);
+    assert!(owner.shutdown());
+}
+
+/// A gesture hold that lost its release ends at the button's next press, even
+/// one that is no gesture: here an echo of a HID++ diversion recorded since.
+/// Left behind, the hold would turn that press's motion into a phantom swipe
+/// and dispatch it on the still-live lifecycle, which ends at the press instead.
+#[test]
+fn a_re_press_ends_a_lost_hold_before_its_motion_commits_a_phantom_swipe() {
+    use super::super::button::ButtonRuntimeEvent;
+    use openlogi_core::binding::GESTURE_HOLD_FOR_SWIPE;
+
+    let (dispatcher, mut owner, events) = test_dispatcher();
+    let hooks = Arc::new(RwLock::new(HookMaps {
+        gestures: BTreeMap::from([(ButtonId::Back, BTreeMap::new())]),
+        ..HookMaps::default()
+    }));
+    let m650 = m650_bluetooth();
+    let back = |pressed| {
+        handle_button(
+            ButtonId::Back,
+            pressed,
+            Some(&m650),
+            &hooks,
+            &dispatcher,
+            || None,
+        )
+    };
+    assert_eq!(back(true), EventDisposition::Suppress);
+    let ButtonRuntimeEvent::Started(hold) =
+        events.recv_timeout(Duration::from_secs(1)).expect("down")
+    else {
+        panic!("started");
+    };
+    // That release is lost, and a capture session diverts Back.
+    hooks.write().expect("maps").diverted_buttons.record(
+        &m650_session(7),
+        &m650_route(),
+        ButtonId::Back,
+    );
+    assert_eq!(back(true), EventDisposition::Suppress);
+    assert_stale_hold_ended(&events, &hold);
+
+    thread::sleep(GESTURE_HOLD_FOR_SWIPE);
+    assert_eq!(
+        handle_moved(GESTURE_SWIPE_THRESHOLD + 10, 0, &hooks, &dispatcher),
+        EventDisposition::PassThrough
+    );
+    assert!(
+        events.recv_timeout(Duration::from_millis(200)).is_err(),
+        "no swipe fired"
+    );
+    assert_eq!(back(false), EventDisposition::Suppress);
     assert!(owner.shutdown());
 }
