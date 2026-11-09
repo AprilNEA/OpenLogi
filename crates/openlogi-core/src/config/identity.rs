@@ -241,7 +241,7 @@ impl Config {
         let Some(legacy) = legacy else {
             return changed;
         };
-        fold(device, legacy, route_key);
+        fold(device, legacy, canonical.as_str(), route_key);
         self.repoint_references(route_key, canonical.as_str());
         true
     }
@@ -278,12 +278,32 @@ impl Config {
 /// before schema 5, so a route-keyed entry on disk cannot carry one — but
 /// [`Config::migrate_transport_scoped_keys`] folds two *renamed* entries that
 /// each already carry the route they were renamed out of.
-pub(super) fn fold(device: &mut DeviceConfig, mut legacy: DeviceConfig, route_key: &str) {
+///
+/// A legacy entry reached by the route that keys the canonical entry itself
+/// (`route_key == canonical_key`, a model-only direct device) has no other
+/// route to scope an override to: an override there would shadow the
+/// canonical value on every sighting, so the canonical value wins and the
+/// disagreement is logged.
+pub(super) fn fold(
+    device: &mut DeviceConfig,
+    mut legacy: DeviceConfig,
+    canonical_key: &str,
+    route_key: &str,
+) {
+    let scoped = route_key != canonical_key;
     for (key, value) in std::mem::take(&mut legacy.links) {
         device.links.entry(key).or_insert(value);
     }
     fold_maps(device, &mut legacy, route_key);
+    fold_bare_choices(device, &legacy);
 
+    let warn_kept = |field: &str| {
+        tracing::warn!(
+            %route_key,
+            field,
+            "value differs between merged entries; keeping the canonical one"
+        );
+    };
     let link = device.links.entry(route_key.to_string()).or_default();
     if let Some(capabilities) = legacy
         .identity
@@ -303,9 +323,10 @@ pub(super) fn fold(device: &mut DeviceConfig, mut legacy: DeviceConfig, route_ke
         ($field:ident) => {
             match (&device.$field, legacy.$field) {
                 (None, Some(value)) => device.$field = Some(value),
-                (Some(ours), Some(theirs)) if *ours != theirs => {
+                (Some(ours), Some(theirs)) if *ours != theirs && scoped => {
                     link.overrides.$field = Some(theirs);
                 }
+                (Some(ours), Some(theirs)) if *ours != theirs => warn_kept(stringify!($field)),
                 _ => {}
             }
         };
@@ -321,18 +342,11 @@ pub(super) fn fold(device: &mut DeviceConfig, mut legacy: DeviceConfig, route_ke
     // wrongly (a device that simply never had the setting touched) than
     // rightly.
     if device.invert_scroll != legacy.invert_scroll && legacy.invert_scroll {
-        link.overrides.invert_scroll = Some(legacy.invert_scroll);
-    }
-    // `smooth_wheel` is a bare opt-in with no per-link slot: for the same
-    // reason only a legacy `true` is evidence of a choice, so it carries over.
-    device.smooth_wheel |= legacy.smooth_wheel;
-    // Handing the G-keys to OpenLogi is the same kind of bare opt-in.
-    if legacy.g_key_owner == GKeyOwner::OpenLogi {
-        device.g_key_owner = GKeyOwner::OpenLogi;
-    }
-    // Only a mode the user picked is evidence; the default is never-set.
-    if device.gaming_key_mode == GamingKeyMode::default() {
-        device.gaming_key_mode = legacy.gaming_key_mode;
+        if scoped {
+            link.overrides.invert_scroll = Some(legacy.invert_scroll);
+        } else {
+            warn_kept("invert_scroll");
+        }
     }
 
     // Scalar values with no per-link override slot: take the legacy value
@@ -343,13 +357,7 @@ pub(super) fn fold(device: &mut DeviceConfig, mut legacy: DeviceConfig, route_ke
         ($field:ident) => {
             match (&device.$field, legacy.$field) {
                 (None, Some(value)) => device.$field = Some(value),
-                (Some(ours), Some(theirs)) if *ours != theirs => {
-                    tracing::warn!(
-                        %route_key,
-                        field = stringify!($field),
-                        "value differs between merged entries; keeping the canonical one"
-                    );
-                }
+                (Some(ours), Some(theirs)) if *ours != theirs => warn_kept(stringify!($field)),
                 _ => {}
             }
         };
@@ -416,6 +424,23 @@ pub(super) fn fold(device: &mut DeviceConfig, mut legacy: DeviceConfig, route_ke
     // that must not be lost under a canonical entry that never opted out.
     if device.enabled && !legacy.enabled {
         device.enabled = false;
+    }
+}
+
+/// The settings of [`fold`] that have no per-link override slot and whose
+/// default means never-set, split out to keep that function inside the
+/// workspace's line budget.
+///
+/// Only a non-default legacy value is evidence of a choice, so it carries over
+/// and a default one changes nothing. No choice can be lost here: each setting
+/// has a single non-default value, so two choices cannot disagree.
+fn fold_bare_choices(device: &mut DeviceConfig, legacy: &DeviceConfig) {
+    device.smooth_wheel |= legacy.smooth_wheel;
+    if legacy.g_key_owner == GKeyOwner::OpenLogi {
+        device.g_key_owner = GKeyOwner::OpenLogi;
+    }
+    if device.gaming_key_mode == GamingKeyMode::default() {
+        device.gaming_key_mode = legacy.gaming_key_mode;
     }
 }
 
@@ -1196,5 +1221,108 @@ mod tests {
             !config.devices["unit:6be9d300"].enabled,
             "the legacy opt-out survives adoption"
         );
+    }
+
+    /// Records the `field` of every warning logged under it. A setting `fold`
+    /// discards leaves no other trace, so the log is what a test must observe.
+    #[derive(Clone, Default)]
+    struct WarnedFields(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+
+    #[derive(Default)]
+    struct FieldValue(Option<String>);
+
+    impl tracing::field::Visit for FieldValue {
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            if field.name() == "field" {
+                self.0 = Some(value.to_string());
+            }
+        }
+
+        fn record_debug(&mut self, _: &tracing::field::Field, _: &dyn std::fmt::Debug) {}
+    }
+
+    impl tracing::Subscriber for WarnedFields {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            if *event.metadata().level() != tracing::Level::WARN {
+                return;
+            }
+            let mut value = FieldValue::default();
+            event.record(&mut value);
+            self.0
+                .lock()
+                .expect("no test panics while holding it")
+                .extend(value.0);
+        }
+
+        fn enter(&self, _: &tracing::span::Id) {}
+
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    /// The settings `action` warned about on this thread, so tests running in
+    /// parallel cannot pollute each other's result.
+    fn fields_warned_about(action: impl FnOnce()) -> Vec<String> {
+        let warned = WarnedFields::default();
+        tracing::subscriber::with_default(warned.clone(), action);
+        warned
+            .0
+            .lock()
+            .expect("no test panics while holding it")
+            .clone()
+    }
+
+    #[test]
+    fn a_legacy_inverted_scroll_is_kept_on_its_link_or_logged_as_lost() {
+        // Only a legacy `true` is evidence of a choice. On its own route it
+        // survives as an override; reached by the route that keys the
+        // canonical entry it has nowhere to go, so the loss must be logged.
+        const CANONICAL: &str = "unit:6be9d300";
+        const OTHER_ROUTE: &str = "receiver:82839805:slot:1";
+        const LOST: &[&str] = &["invert_scroll"];
+        const KEPT: &[&str] = &[];
+
+        let cases = [
+            (OTHER_ROUTE, false, false, None, KEPT),
+            (OTHER_ROUTE, false, true, Some(true), KEPT),
+            (OTHER_ROUTE, true, false, None, KEPT),
+            (OTHER_ROUTE, true, true, None, KEPT),
+            (CANONICAL, false, false, None, KEPT),
+            (CANONICAL, false, true, None, LOST),
+            (CANONICAL, true, false, None, KEPT),
+            (CANONICAL, true, true, None, KEPT),
+        ];
+
+        for (route, canonical, legacy, expected_override, expected_warnings) in cases {
+            let mut device = DeviceConfig {
+                invert_scroll: canonical,
+                ..DeviceConfig::default()
+            };
+            let legacy_entry = DeviceConfig {
+                invert_scroll: legacy,
+                ..DeviceConfig::default()
+            };
+
+            let warned = fields_warned_about(|| fold(&mut device, legacy_entry, CANONICAL, route));
+
+            let case = format!("route={route}, canonical={canonical}, legacy={legacy}");
+            assert_eq!(device.invert_scroll, canonical, "canonical wins: {case}");
+            assert_eq!(
+                device.links[route].overrides.invert_scroll, expected_override,
+                "override: {case}"
+            );
+            assert_eq!(warned, expected_warnings, "warnings: {case}");
+        }
     }
 }

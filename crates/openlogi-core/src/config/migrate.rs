@@ -188,7 +188,7 @@ impl Config {
             // performs at runtime, so the second entry's disagreements land
             // as overrides on the route they were set for.
             match self.devices.get_mut(new) {
-                Some(existing) => identity::fold(existing, device, route),
+                Some(existing) => identity::fold(existing, device, new, route),
                 None => {
                     self.devices.insert(new.clone(), device);
                 }
