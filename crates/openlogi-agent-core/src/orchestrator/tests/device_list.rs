@@ -123,6 +123,27 @@ fn build_devices_still_finds_settings_left_under_a_pre_upgrade_receiver_key() {
 }
 
 #[test]
+fn a_model_only_device_does_not_take_the_settings_of_the_unit_that_last_held_its_slot() {
+    // The agent never adopts a route, so with the GUI closed the `links` index
+    // still names the unit. The device answering there says it is not one.
+    let mut config = Config::default();
+    let previous = config
+        .devices
+        .entry("unit:6be9d300".to_string())
+        .or_default();
+    previous.dpi = Some(Dpi::new(3200));
+    previous.links.insert(
+        "receiver:82839805:slot:1".to_string(),
+        LinkConfig::default(),
+    );
+
+    let devices = build_devices(&config, &[bolt_inventory([0; 4])], &[]);
+
+    let device = devices.first().expect("one paired device");
+    assert_eq!(device.config_key, "receiver:82839805:slot:1");
+}
+
+#[test]
 fn a_model_identified_direct_device_cycles_the_presets_saved_under_its_route() {
     // DeviceInformation answered with every identity field zero (the G402
     // shape): the device is one instance of its model, and the agent cycles
@@ -155,6 +176,32 @@ fn a_model_identified_direct_device_cycles_the_presets_saved_under_its_route() {
             product_id: 0xc07e,
         })
     );
+}
+
+#[test]
+fn units_of_a_model_do_not_take_the_settings_saved_under_its_model_key() {
+    // `direct:<vid>:<pid>` holds the settings of a device of that model that
+    // reports neither a serial nor a unit id. Nothing says it was either of
+    // these mice, so each keeps its own, still empty, entry.
+    let mut config = Config::default();
+    config.set_dpi("direct:046d:c08d", Dpi::new(1600));
+    let mut orch = orchestrator(config);
+
+    orch.refresh_inventory(
+        &[
+            direct_inventory_state(0xc08d, None, [0x6b, 0xe9, 0xd3, 0x00], true),
+            direct_inventory_state(0xc08d, None, [0x01, 0x02, 0x03, 0x04], true),
+        ],
+        &[],
+        false,
+    );
+
+    let keys: Vec<&str> = orch
+        .devices
+        .iter()
+        .map(|device| device.config_key.as_str())
+        .collect();
+    assert_eq!(keys, ["unit:01020304", "unit:6be9d300"]);
 }
 
 #[test]
