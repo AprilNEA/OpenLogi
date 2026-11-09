@@ -243,7 +243,7 @@ fn pointer_policy_rejects_keyboards() {
     keyboard.capabilities = Some(Capabilities::default());
     assert!(!sets_os_pointer_speed(&keyboard));
     assert!(sets_os_pointer_speed(&scaled_mouse()));
-    assert!(!sets_os_pointer_speed(&dpi_mouse()));
+    assert!(sets_os_pointer_speed(&dpi_mouse()));
     let mut offline = scaled_mouse();
     offline.online = false;
     assert!(!sets_os_pointer_speed(&offline));

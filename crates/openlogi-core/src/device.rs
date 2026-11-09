@@ -251,11 +251,13 @@ pub struct Capabilities {
 
 impl Capabilities {
     /// Whether OpenLogi sets this device's OS pointer speed from its saved
-    /// config: the HID++ `0x2205` scaled mice. The one owner of that decision;
-    /// the agent, the CLI, and the settings app all ask it.
+    /// config: any mouse, whether its sensor DPI (`pointer`) or its HID++
+    /// `0x2205` motion scaling (`pointer_scaling`) sets the speed. Keyboards
+    /// have neither. The one owner of that decision; the agent, the CLI, and
+    /// the settings app all ask it.
     #[must_use]
     pub const fn sets_os_pointer_speed(&self) -> bool {
-        self.pointer_scaling
+        self.pointer || self.pointer_scaling
     }
 
     /// A gaming device with no ReprogControls to divert controls through: it
@@ -1163,6 +1165,21 @@ mod tests {
             Capabilities::presumed_from_kind(DeviceKind::Unknown),
             Capabilities::default()
         );
+    }
+
+    #[test]
+    fn os_pointer_speed_covers_every_mouse_and_no_keyboard() {
+        let dpi = Capabilities {
+            pointer: true,
+            ..Capabilities::default()
+        };
+        let scaled = Capabilities {
+            pointer_scaling: true,
+            ..Capabilities::default()
+        };
+        assert!(dpi.sets_os_pointer_speed());
+        assert!(scaled.sets_os_pointer_speed());
+        assert!(!Capabilities::default().sets_os_pointer_speed());
     }
 
     #[test]
