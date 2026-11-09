@@ -9,7 +9,7 @@
 use crate::ui::theme::FocusRingStyle as _;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Context, InteractiveElement, IntoElement, ParentElement, Render, Role,
+    App, Context, InteractiveElement, IntoElement, ParentElement, Render, Role,
     StatefulInteractiveElement as _, Styled, Subscription, Toggled, Window, div, px, rgb,
 };
 use gpui_kit::base::Button as BaseButton;
@@ -22,7 +22,7 @@ use crate::state::{AppState, StateEvent};
 use crate::ui::commit_slider::{CommitSlider, SliderRange};
 use crate::ui::components::{Toggle, toggle_row};
 use crate::ui::slider_row::SliderRow;
-use crate::ui::theme::{self, Palette, Typography as _};
+use crate::ui::theme::{self, Palette, SelectableStyle as _, Typography as _};
 
 /// The coloured face of a swatch.
 const SWATCH: f32 = 24.;
@@ -157,7 +157,7 @@ impl Render for LightingPanel {
                             .text_color(pal.text_muted)
                             .child(tr!("lighting.effect")),
                     )
-                    .child(effect_segment(lighting.effect))
+                    .child(effect_segment(lighting.effect, cx))
             })
             .when(
                 animates && lighting.effect != LightingEffect::Static,
@@ -186,7 +186,7 @@ impl Render for LightingPanel {
 /// Each button commits its own effect: `ButtonGroup::on_click` runs only on a
 /// pointer click on the group, so Enter and Space on a focused button would
 /// not reach it.
-fn effect_segment(current: LightingEffect) -> ButtonGroup {
+fn effect_segment(current: LightingEffect, cx: &App) -> ButtonGroup {
     const EFFECTS: [(LightingEffect, &str); 3] = [
         (LightingEffect::Static, "lighting-effect-static"),
         (LightingEffect::Breathing, "lighting-effect-breathing"),
@@ -205,6 +205,7 @@ fn effect_segment(current: LightingEffect) -> ButtonGroup {
                 .flex_1()
                 .label(label)
                 .selected(current == effect)
+                .selected_segment(current == effect, cx)
                 .debug_selector(move || id.into())
                 .on_click(move |_, _, cx| {
                     AppState::apply(cx, |state| {
