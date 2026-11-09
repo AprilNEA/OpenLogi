@@ -82,28 +82,47 @@ pub struct DpiControl {
 pub struct DeviceMemory {
     /// What the device last answered.
     pub reading: Reading,
-    /// Whether a read of the device is under way.
-    pub reading_now: bool,
     /// Why the last change made from the menu did not take, until the
     /// submenu has shown it.
     pub failure: Option<Failure>,
-    /// The values changes from the menu set while the read under way runs.
-    pub changed_while_reading: Reads,
+    phase: ReadPhase,
+}
+
+/// Whether a read of a device is under way.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum ReadPhase {
+    #[default]
+    Idle,
+    /// A read is under way. `changed` holds the values changes from the
+    /// menu set since it began, which its answer leaves alone.
+    Reading { changed: Reads },
 }
 
 impl DeviceMemory {
     /// Start a read of the device, unless one is under way.
     pub fn start_reading(&mut self) -> bool {
-        !std::mem::replace(&mut self.reading_now, true)
+        if self.reading_now() {
+            return false;
+        }
+        self.phase = ReadPhase::Reading {
+            changed: Reads::default(),
+        };
+        true
+    }
+
+    /// Whether a read of the device is under way.
+    #[must_use]
+    pub fn reading_now(&self) -> bool {
+        matches!(self.phase, ReadPhase::Reading { .. })
     }
 
     /// Take what the read of `reads` answered. A value a change set while
     /// it ran stays: the read may have reached the device before the change.
+    /// An answer with no read under way is not taken.
     pub fn finish_reading(&mut self, reads: Reads, fresh: Reading) {
-        self.reading
-            .merge(reads.without(self.changed_while_reading), fresh);
-        self.changed_while_reading = Reads::default();
-        self.reading_now = false;
+        if let ReadPhase::Reading { changed } = std::mem::take(&mut self.phase) {
+            self.reading.merge(reads.without(changed), fresh);
+        }
     }
 
     /// Take what a change made from the menu came to: the change the device
@@ -114,8 +133,8 @@ impl DeviceMemory {
             Ok(change) => {
                 if let Some(change) = change {
                     self.reading.record(change);
-                    if self.reading_now {
-                        self.changed_while_reading = self.changed_while_reading.or(change.reads());
+                    if let ReadPhase::Reading { changed } = &mut self.phase {
+                        *changed = changed.or(change.reads());
                     }
                 }
                 self.failure = None;
@@ -566,7 +585,7 @@ impl DeviceRow {
             (reads.disabled_keys, reading.disabled_keys.state()),
             (reads.sidetone, reading.sidetone.state()),
         ];
-        if memory.reading_now && answers.contains(&(true, Read::Unread)) {
+        if memory.reading_now() && answers.contains(&(true, Read::Unread)) {
             status.push(Entry::Note(t!("tray.reading").into_owned()));
         } else if answers[2..].contains(&(true, Read::Failed)) {
             // DPI and the wheel fall back on the config; the rest grey out.

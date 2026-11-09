@@ -680,10 +680,8 @@ mod controls {
         let row = row(mouse(true), &config);
         assert!(row.reads().dpi && row.reads().wheel);
 
-        let mut memory = DeviceMemory {
-            reading_now: true,
-            ..DeviceMemory::default()
-        };
+        let mut memory = DeviceMemory::default();
+        memory.start_reading();
         let entries = row.entries(&memory);
         assert_eq!(notes(&entries), ["Reading…"]);
         assert_eq!(
@@ -704,7 +702,7 @@ mod controls {
         );
 
         // The mouse's own DPI button moved it on from what the config holds.
-        memory.reading_now = false;
+        memory.finish_reading(Reads::default(), super::super::Reading::default());
         memory.reading.dpi = Read::Value(dpi(3200));
         let entries = row.entries(&memory);
         assert!(choice(&entries, "3200 DPI").0);
@@ -725,13 +723,8 @@ mod controls {
     #[test]
     fn a_mouse_without_presets_shows_its_dpi_and_the_way_to_set_presets() {
         let row = row(mouse(true), &Config::default());
-        let memory = DeviceMemory {
-            reading: super::super::Reading {
-                dpi: Read::Value(dpi(1200)),
-                ..Default::default()
-            },
-            ..DeviceMemory::default()
-        };
+        let mut memory = DeviceMemory::default();
+        memory.reading.dpi = Read::Value(dpi(1200));
         let entries = row.entries(&memory);
         assert_eq!(headers(&entries)[0], "DPI presets");
         assert!(entries.contains(&Entry::Note("Current: 1200 DPI".to_owned())));
@@ -899,10 +892,8 @@ mod controls {
             "a keyboard reads what it has, and nothing of a mouse's"
         );
 
-        let mut memory = DeviceMemory {
-            reading_now: true,
-            ..DeviceMemory::default()
-        };
+        let mut memory = DeviceMemory::default();
+        memory.start_reading();
         let entries = row.entries(&memory);
         assert_eq!(notes(&entries), ["Reading…"]);
         assert_eq!(
@@ -932,8 +923,7 @@ mod controls {
             ..Default::default()
         };
         memory.reading.dpi = Read::Value(dpi(800));
-        memory.reading.merge(reads, fresh);
-        memory.reading_now = false;
+        memory.finish_reading(reads, fresh);
         assert_eq!(memory.reading.dpi, Read::Value(dpi(800)));
         let entries = row.entries(&memory);
         assert!(notes(&entries).is_empty());
@@ -1059,6 +1049,10 @@ mod controls {
             ..Reading::default()
         };
         let mut memory = DeviceMemory::default();
+
+        // An answer with no read under way is not taken.
+        memory.finish_reading(dpi_and_wheel, answered(2400));
+        assert_eq!(memory.reading, Reading::default());
 
         // The read reached the mouse before the change did.
         assert!(memory.start_reading());
@@ -1255,10 +1249,8 @@ mod controls {
         );
 
         let row = row(mouse(true), &Config::default());
-        let memory = DeviceMemory {
-            failure: Some(Failure::LinkOverride),
-            ..DeviceMemory::default()
-        };
+        let mut memory = DeviceMemory::default();
+        memory.failure = Some(Failure::LinkOverride);
         assert_eq!(
             notes(&row.entries(&memory))[0],
             "Not saved: this connection has its own value. Change it in OpenLogi."
