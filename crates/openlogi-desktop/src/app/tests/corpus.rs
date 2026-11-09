@@ -42,7 +42,7 @@ fn contributed_corpus_projects_identity_battery_capabilities_and_detail_tabs() {
                 assert_eq!(record.kind, device.kind);
                 assert_eq!(record.capabilities, device.capabilities);
                 assert_eq!(record.battery, device.battery);
-                assert_eq!(record.online, device.online);
+                assert_eq!(record.is_online(), device.online);
                 let expected = reviewed_detail_tabs(&fixture.manifest().id);
                 assert_eq!(
                     DetailTab::tabs_for(record),
@@ -65,7 +65,7 @@ fn contributed_corpus_projects_identity_battery_capabilities_and_detail_tabs() {
             }
         }
         state.apply_agent_snapshot(&snapshot, &resolver, &[]);
-        assert!(state.devices().iter().all(|record| !record.online));
+        assert!(state.devices().iter().all(|record| !record.is_online()));
         assert_eq!(
             state
                 .devices()
@@ -83,7 +83,7 @@ fn contributed_corpus_projects_identity_battery_capabilities_and_detail_tabs() {
             tabs
         );
         state.apply_agent_snapshot(&snapshot_candidate(fixture.profile()), &resolver, &[]);
-        assert!(state.devices().iter().all(|record| record.online));
+        assert!(state.devices().iter().all(DeviceRecord::is_online));
         assert_eq!(
             state
                 .devices()

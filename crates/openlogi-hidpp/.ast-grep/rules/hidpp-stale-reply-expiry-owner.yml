@@ -1,0 +1,50 @@
+# Owner: hidpp::channel::pending — Stale::owing is the one place a stale
+# correlation key's expiry (now + STALE_REPLY_GRACE) is decided, and every
+# transition into the stale state is a PendingQueue method that goes through it.
+id: hidpp-stale-reply-expiry-owner
+language: rust
+severity: error
+message: A stale key's expiry belongs to channel::pending (Stale::owing); move the key through a PendingQueue transition instead of adding STALE_REPLY_GRACE to an instant here.
+note: |
+  The read loop pushed a StaleKey with its own Instant::now() + STALE_REPLY_GRACE
+  beside PendingQueue::owe_replies, so two writers decided when a stale key
+  expires. A Duration budget built from the grace (STALE_REPLY_GRACE +
+  Duration::from_secs(2)) is not an expiry and passes. See "Single source of
+  truth" in AGENTS.md.
+files:
+  - crates/**/*.rs
+ignores:
+  - crates/openlogi-hidpp/src/channel/pending.rs
+  - crates/openlogi-hidpp/src/channel/pending/**
+utils:
+  grace:
+    any:
+      - kind: identifier
+        regex: '^STALE_REPLY_GRACE$'
+      - kind: scoped_identifier
+        regex: '::STALE_REPLY_GRACE$'
+  duration:
+    kind: call_expression
+    regex: '^(\w+::)*Duration::'
+rule:
+  any:
+    # `instant + grace`, `grace + instant`, `instant += grace`.
+    - all:
+        - any:
+            - kind: binary_expression
+            - kind: compound_assignment_expr
+        - has:
+            field: operator
+            regex: '^\+=?$'
+        - has:
+            matches: grace
+        - not:
+            has:
+              matches: duration
+    # `instant.checked_add(grace)`.
+    - all:
+        - pattern: $INSTANT.checked_add($GRACE)
+        - has:
+            field: arguments
+            has:
+              matches: grace

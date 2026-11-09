@@ -10,8 +10,9 @@ use std::collections::HashSet;
 
 use super::{
     Camera, Capabilities, DeviceIdentity, DeviceKind, DeviceModelInfo, DeviceRecord,
-    DeviceTransports, adopt_transient_record, append_offline_known, build_device_list,
-    direct_key_prefix, effective_kind, fold_by_inventory_key, offline_record, pick_initial_device,
+    DeviceTransports, Link, Presence, adopt_transient_record, append_offline_known,
+    build_device_list, direct_key_prefix, effective_kind, fold_by_inventory_key, offline_record,
+    pick_initial_device,
 };
 use crate::state::inventory::adopt_routes;
 use openlogi_core::hid::{DeviceRoute, Dpi, ReceiverBrand};
@@ -200,7 +201,7 @@ fn an_adopted_card_takes_its_receiver_family_from_the_live_route() {
     );
 }
 
-fn online_record(key: &str) -> DeviceRecord {
+pub(super) fn online_record(key: &str) -> DeviceRecord {
     DeviceRecord {
         config_key: key.to_string(),
         canonical_key: None,
@@ -225,7 +226,7 @@ fn online_record(key: &str) -> DeviceRecord {
         hidpp10: false,
         light_capabilities: None,
         slot: 1,
-        online: true,
+        presence: Presence::Listed(Link::Online),
         battery: None,
         settings_revision: 0,
         stale_pairings: Vec::new(),
@@ -241,7 +242,7 @@ fn folding_two_records_of_one_device_keeps_the_online_one() {
     for live_first in [true, false] {
         let live = online_record("unit:6be9d300");
         let mut asleep = online_record("unit:6be9d300");
-        asleep.online = false;
+        asleep.presence = Presence::Listed(Link::Offline);
         asleep.route_key = "direct:046d:c08d".to_string();
         let list = if live_first {
             vec![live, asleep]
@@ -251,7 +252,7 @@ fn folding_two_records_of_one_device_keeps_the_online_one() {
 
         let folded = fold_by_inventory_key(list);
         let record = &folded["unit:6be9d300"];
-        assert!(record.online, "live_first = {live_first}");
+        assert!(record.is_online(), "live_first = {live_first}");
         assert_eq!(
             record.route_key, "unit:6be9d300",
             "the live record's route survives, live_first = {live_first}"
@@ -270,7 +271,7 @@ fn folding_two_routes_keeps_the_leftover_pairings() {
     for live_first in [true, false] {
         let live = online_record("unit:6be9d300");
         let mut asleep = online_record("unit:6be9d300");
-        asleep.online = false;
+        asleep.presence = Presence::Listed(Link::Offline);
         asleep.stale_pairings = vec![leftover.clone()];
         let list = if live_first {
             vec![live, asleep]
@@ -280,7 +281,7 @@ fn folding_two_routes_keeps_the_leftover_pairings() {
 
         let folded = fold_by_inventory_key(list);
         let record = &folded["unit:6be9d300"];
-        assert!(record.online, "live_first = {live_first}");
+        assert!(record.is_online(), "live_first = {live_first}");
         assert_eq!(
             record.stale_pairings,
             std::slice::from_ref(&leftover),
@@ -475,7 +476,7 @@ fn offline_record_is_present_but_inert() {
     let rec = offline_record("2b034", &id, &resolver);
     assert_eq!(rec.config_key, "2b034");
     assert_eq!(rec.display_name, "MX Master 3S");
-    assert!(!rec.online);
+    assert!(!rec.is_online());
     assert!(rec.route.is_none());
     assert_eq!(rec.capabilities, Some(id.capabilities));
 }
@@ -529,11 +530,11 @@ fn known_devices_are_appended_only_when_absent_from_live() {
 
     assert_eq!(list.len(), 2);
     assert!(
-        list.iter().any(|r| r.config_key == "A" && r.online),
+        list.iter().any(|r| r.config_key == "A" && r.is_online()),
         "the live record for A must win over its identity"
     );
     assert!(
-        list.iter().any(|r| r.config_key == "B" && !r.online),
+        list.iter().any(|r| r.config_key == "B" && !r.is_online()),
         "B is added back as a persisted offline placeholder"
     );
 }
@@ -820,7 +821,7 @@ fn webcams_are_appended_as_camera_records() {
     assert_eq!(list[0].display_name, "Logitech StreamCam");
     assert!(list[0].route.is_none());
     assert!(list[0].capabilities.is_none());
-    assert!(list[0].online);
+    assert!(list[0].is_online());
 }
 
 #[test]

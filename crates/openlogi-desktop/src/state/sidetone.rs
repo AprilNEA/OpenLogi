@@ -36,8 +36,8 @@ impl AppState {
     fn writable_sidetone(&self) -> Option<(&DeviceRecord, &DeviceRoute)> {
         let record = self
             .current_record()
-            .filter(|record| record.online && has_sidetone(record))?;
-        Some((record, record.route.as_ref()?))
+            .filter(|record| has_sidetone(record))?;
+        Some((record, record.addressable_route()?))
     }
 
     /// What is known of the active headset's sidetone reading.

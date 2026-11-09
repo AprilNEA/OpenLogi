@@ -20,10 +20,8 @@ use gpui_kit::component::{
     h_flex,
     slider::Slider,
 };
-use openlogi_core::binding::ButtonId;
 use openlogi_core::hid::ForceSensingInfo;
 
-use super::hotspots::MouseControlId;
 use crate::state::{AppState, DeviceKey, ForceSensingLoad};
 use crate::ui::commit_slider::{CommitSlider, SliderRange};
 use crate::ui::slider_row::SliderRow;
@@ -45,16 +43,13 @@ pub(super) struct ForceSensingFacts {
 }
 
 impl ForceSensingFacts {
-    /// The selected device's facts, or `None` when the row must not show:
-    /// `selected` is not the haptic panel, an app profile is being edited
-    /// (the force is device-wide, as the wheel-hold switch is), no device is
-    /// selected, the device has no force-sensing button whose force its
-    /// probe found changeable, it has no route to write through, or its
-    /// reading says the force may not change.
-    pub(super) fn current(selected: Option<MouseControlId>, cx: &App) -> Option<Self> {
-        if selected != Some(MouseControlId::Button(ButtonId::HapticPanel)) {
-            return None;
-        }
+    /// The selected device's facts for the selected haptic panel's
+    /// inspector, or `None` when the row must not show: an app profile is
+    /// being edited (the force is device-wide, as the wheel-hold switch is),
+    /// no device is selected, the device has no force-sensing button whose
+    /// force its probe found changeable, it has no route to write through,
+    /// or its reading says the force may not change.
+    pub(super) fn current(cx: &App) -> Option<Self> {
         let state = AppState::try_read(cx)?;
         if state.editing_app().is_some() || !state.current_force_sensing_supported() {
             return None;
@@ -291,10 +286,7 @@ mod tests {
         cx: &VisualTestContext,
     ) -> Option<Entity<SliderState>> {
         panel.read_with(cx, |panel, _| {
-            panel
-                .force_sensing
-                .as_ref()
-                .map(|row| row.slider.slider().clone())
+            panel.press_force().map(|row| row.slider.slider().clone())
         })
     }
 
@@ -303,7 +295,7 @@ mod tests {
         let (panel, cx, mut receiver) = panel(PANEL, cx);
         let slider = slider(&panel, cx).expect("a changeable force shows the slider");
         panel.read_with(cx, |panel, cx| {
-            let row = panel.force_sensing.as_ref().expect("the row");
+            let row = panel.press_force().expect("the row");
             assert_eq!(row.slider.value(cx), PANEL.current);
         });
         slider.read_with(cx, |state, _| {
@@ -367,7 +359,7 @@ mod tests {
         cx.update(|window, cx| window.draw(cx).clear(cx));
 
         panel.read_with(cx, |panel, cx| {
-            let row = panel.force_sensing.as_ref().expect("the row");
+            let row = panel.press_force().expect("the row");
             assert_eq!(row.slider.value(cx), 4500);
         });
     }

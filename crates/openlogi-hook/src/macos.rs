@@ -14,7 +14,6 @@ mod translate;
 mod watchdog;
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::Duration;
@@ -44,7 +43,7 @@ use translate::{VERTICAL, translate, translate_key};
 use watchdog::{
     CALLBACK_POLL_INTERVAL, CallbackActivity, CallbackWatchdog, LIFECYCLE_POLL_INTERVAL,
     LifecycleDecision, LifecycleExitReason, LifecycleObservation, LifecycleWatchdog, PowerEpoch,
-    RearmBudget, TapPhase, WatchdogSignals,
+    RearmBudget, TapPhase, Transition, WatchdogSignals,
 };
 
 /// Everything `Hook` needs to control the background thread.
@@ -112,7 +111,7 @@ impl HookBackend for Backend {
             {
                 Ok(thread) => thread,
                 Err(error) => {
-                    signals.set_phase(TapPhase::ThreadExited);
+                    signals.publish(Transition::SpawnFailed);
                     lifecycle_watchdog.thread().unpark();
                     let _ = lifecycle_watchdog.join();
                     return Err(HookError::MacOsTap(error.to_string()));
@@ -579,12 +578,7 @@ fn spawn_lifecycle_watchdog(
 
 /// Service the tap until it has to be released: an explicit stop, a stopped run
 /// loop, a revoked permission, or a tap the OS will not keep enabled.
-fn service_tap(
-    tap: &CGEventTap<'_>,
-    signals: &WatchdogSignals,
-    tap_disabled: &AtomicBool,
-    probe: &ProbeCue,
-) {
+fn service_tap(tap: &CGEventTap<'_>, signals: &WatchdogSignals, probe: &ProbeCue) {
     // Service the tap in short slices instead of an unbounded
     // `run_current()`. Between slices, when the grant watch cues it, we
     // re-check that we may still filter events: an active tap at the HID
@@ -616,14 +610,13 @@ fn service_tap(
             CFRunLoopRunResult::Stopped | CFRunLoopRunResult::Finished => break,
             CFRunLoopRunResult::TimedOut | CFRunLoopRunResult::HandledSource => {}
         }
-        signals.mark_tap_progress();
         // Everything below this point is a WindowServer or TCC round trip, not
         // tap servicing. Publish that so the lifecycle watchdog judges it
         // against `TAP_PROBE_BUDGET`: around a sleep transition these calls
         // have been measured at ~1.6 s, and charging them to the 1.5 s stall
         // budget force-exited a perfectly healthy agent (#952). The capability
         // probe itself runs only when the cue says the grant may have changed.
-        signals.set_phase(TapPhase::Probing);
+        signals.publish(Transition::EnterProbing);
         if probe.take() && !Backend::has_accessibility() {
             warn!(
                 "Accessibility revoked while the event tap was live — \
@@ -635,7 +628,7 @@ fn service_tap(
         // TapDisabledBy* notification, while the port state catches the
         // sleep/wake edge where CoreGraphics disables the tap without one.
         // Either one consumes the same bounded re-arm budget.
-        let was_disabled = tap_disabled.swap(false, Ordering::AcqRel) || !tap_is_enabled(tap);
+        let was_disabled = signals.take_os_disabled() || !tap_is_enabled(tap);
         if was_disabled && !rearm.allow(signals.now()) {
             error!(
                 "the OS keeps disabling the HID tap — releasing it instead of \
@@ -646,7 +639,7 @@ fn service_tap(
         // Enabling is idempotent while the tap is already live. Only reached
         // while the live capability probe above still succeeds.
         tap.enable();
-        signals.mark_armed();
+        signals.publish(Transition::Arm);
     }
 }
 
@@ -667,18 +660,13 @@ fn thread_main(
 
     // A successful CGEventTapCreate may install the HID tap before returning,
     // so lifecycle monitoring must be armed before entering CoreGraphics.
-    signals.mark_tap_progress();
-    signals.set_phase(TapPhase::Arming);
+    signals.publish(Transition::BeginArming);
 
     let callback_activity = Arc::new(CallbackActivity::default());
-    // Latched by the callback when the OS disables the tap, consumed by the
-    // run-loop slice that decides whether to re-arm it.
-    let tap_disabled = Arc::new(AtomicBool::new(false));
 
     let tap_result = {
         let callback_signals = Arc::clone(&signals);
         let callback_activity = Arc::clone(&callback_activity);
-        let tap_disabled = Arc::clone(&tap_disabled);
         CGEventTap::new(
             CGEventTapLocation::HID,
             CGEventTapPlacement::HeadInsertEventTap,
@@ -689,7 +677,9 @@ fn thread_main(
                     etype,
                     CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput
                 ) {
-                    tap_disabled.store(true, Ordering::Release);
+                    // Consumed by the run-loop slice that decides whether to
+                    // re-arm the tap.
+                    callback_signals.note_os_disabled();
                 }
                 callback_activity.enter(callback_signals.now_millis());
                 let disposition = run_tap_callback(cb.as_ref(), etype, event);
@@ -729,7 +719,7 @@ fn thread_main(
     }
     signals.mark_tap_progress();
     tap.enable();
-    signals.mark_armed();
+    signals.publish(Transition::Arm);
 
     if rl_tx.send(run_loop.clone()).is_err() {
         debug!("hook parent dropped before run loop was ready; stopping");
@@ -738,17 +728,17 @@ fn thread_main(
         run_loop.remove_source(&loop_source, unsafe { kCFRunLoopCommonModes });
         drop(loop_source);
         drop(tap);
-        signals.set_phase(TapPhase::TapStopped);
+        signals.publish(Transition::TapDestroyed);
         return;
     }
 
     // Armed on the tap thread and dropped with it, so the grant watch's
     // observers go away when the tap does.
     let probe = ProbeCue::arm();
-    service_tap(&tap, &signals, &tap_disabled, &probe);
+    service_tap(&tap, &signals, &probe);
     // Every exit uses the short teardown budget, including a revoked grant
     // or exhausted re-arm budget that leaves the loop in `Probing`.
-    signals.mark_armed();
+    signals.publish(Transition::BeginTeardown);
 
     // Detach the tap from the event stream synchronously before unwinding,
     // so input recovers immediately rather than whenever CF happens to
@@ -758,7 +748,7 @@ fn thread_main(
     run_loop.remove_source(&loop_source, unsafe { kCFRunLoopCommonModes });
     drop(loop_source);
     drop(tap);
-    signals.set_phase(TapPhase::TapStopped);
+    signals.publish(Transition::TapDestroyed);
 }
 
 fn duration_millis(duration: Duration) -> u64 {

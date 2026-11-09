@@ -276,7 +276,7 @@ mod tests {
 
     use crate::services::assets::AssetResolver;
     use crate::state::Sources;
-    use crate::state::devices::DeviceRecord;
+    use crate::state::devices::{DeviceRecord, Link, Presence};
 
     use super::AppState;
 
@@ -309,7 +309,7 @@ mod tests {
                 hidpp10: false,
                 light_capabilities: None,
                 slot: 1,
-                online: true,
+                presence: Presence::Listed(Link::Online),
                 battery: None,
                 settings_revision: 0,
                 stale_pairings: Vec::new(),

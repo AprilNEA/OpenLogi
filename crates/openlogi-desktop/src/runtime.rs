@@ -157,12 +157,15 @@ pub(crate) fn spawn(startup: Startup, cx: &mut gpui::App) {
                 update = updates.recv(), if ipc_open => {
                     // `None` means the IPC client thread is gone (runtime /
                     // thread spawn failure) — without this the window would
-                    // show its connecting spinner forever.
+                    // show its connecting spinner forever. Every answer it sent
+                    // has been drained, so the commands it still held will never
+                    // be answered.
                     let Some(update) = update else {
                         ipc_open = false;
                         warn!("IPC update channel closed — agent state unavailable");
                         cx.update(|cx| {
                             set_agent_link(state::AgentLink::Unreachable { retrying: false }, cx);
+                            AppState::apply(cx, AppState::abandon_light_writes);
                         });
                         continue;
                     };

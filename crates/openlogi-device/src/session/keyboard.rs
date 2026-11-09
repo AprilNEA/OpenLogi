@@ -192,8 +192,6 @@ async fn arm_keyboard(
         channel: Arc::clone(shared.channel()),
         device_index: shared.device_index(),
         gaming: Arc::default(),
-        g_row_taken: None,
-        gaming_looked_up: false,
         reporting_changes,
         wanted,
     };
@@ -384,13 +382,123 @@ impl GridKeys {
     }
 }
 
-/// Where a keyboard's gaming-cluster features sit in its feature table, or
-/// `None` for one it lacks.
+/// Where a keyboard's M-key and MR features sit in its feature table, or
+/// `None` for one it lacks. The G-key row's `0x8010` index travels in its
+/// [`GRow`].
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct GamingFeatures {
-    g_keys: Option<u8>,
     m_keys: Option<u8>,
     macro_record: Option<u8>,
+}
+
+/// Who owns a G-series keyboard's `0x8010` G-key row, as far as the session
+/// has written it. A write passes through an owed state while it is in
+/// flight and stays there when it fails, since a transport failure does not
+/// prove the firmware ignored it.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum GRow {
+    /// The gaming cluster has not been looked up: nothing has asked for it.
+    #[default]
+    NotLookedUp,
+    /// The keyboard has no `0x8010`, so it has no row to take.
+    NoGKeys,
+    /// The row runs its onboard actions.
+    Free { index: u8 },
+    /// The take has been written but has not landed.
+    TakeOwed { index: u8 },
+    /// The firmware reports the row instead of running its onboard actions.
+    Taken { index: u8 },
+    /// The release has been written but has not landed.
+    ReleaseOwed { index: u8 },
+}
+
+impl GRow {
+    /// The `0x8010` index the row's reports arrive on, once looked up.
+    fn index(self) -> Option<u8> {
+        match self {
+            Self::NotLookedUp | Self::NoGKeys => None,
+            Self::Free { index }
+            | Self::TakeOwed { index }
+            | Self::Taken { index }
+            | Self::ReleaseOwed { index } => Some(index),
+        }
+    }
+
+    /// The row's index from the moment its take is written until its
+    /// release is: the firmware has been asked to report the row. Its
+    /// reports dispatch from before the take lands, so the first one is not
+    /// dropped, and a wake takes it again. A row being handed back does
+    /// neither: the owner no longer wants it, and a press it dispatched
+    /// would lose its release once the firmware has the row back.
+    fn claimed(self) -> Option<u8> {
+        match self {
+            Self::TakeOwed { index } | Self::Taken { index } => Some(index),
+            Self::NotLookedUp | Self::NoGKeys | Self::Free { .. } | Self::ReleaseOwed { .. } => {
+                None
+            }
+        }
+    }
+
+    /// The row's index while the firmware may hold it, so teardown hands it
+    /// back: exactly the states [`Self::release`] writes from.
+    fn owed(self) -> Option<u8> {
+        self.release().map(RowWrite::index)
+    }
+
+    /// The write that takes the row, or `None` when it is taken or there is
+    /// none. An owed row is written again either way.
+    fn take(self) -> Option<RowWrite> {
+        match self {
+            Self::Free { index } | Self::TakeOwed { index } | Self::ReleaseOwed { index } => {
+                Some(RowWrite::Take { index })
+            }
+            Self::NotLookedUp | Self::NoGKeys | Self::Taken { .. } => None,
+        }
+    }
+
+    /// The write that hands the row back, or `None` when it is free or there
+    /// is none.
+    fn release(self) -> Option<RowWrite> {
+        match self {
+            Self::TakeOwed { index } | Self::Taken { index } | Self::ReleaseOwed { index } => {
+                Some(RowWrite::Release { index })
+            }
+            Self::NotLookedUp | Self::NoGKeys | Self::Free { .. } => None,
+        }
+    }
+}
+
+/// One ownership write to a G-key row, from [`GRow::take`] or
+/// [`GRow::release`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RowWrite {
+    Take { index: u8 },
+    Release { index: u8 },
+}
+
+impl RowWrite {
+    fn index(self) -> u8 {
+        match self {
+            Self::Take { index } | Self::Release { index } => index,
+        }
+    }
+
+    /// The row from before the write is sent until it lands. It is owed
+    /// before the write, so a failed one is still handed back.
+    fn owed(self) -> GRow {
+        match self {
+            Self::Take { index } => GRow::TakeOwed { index },
+            Self::Release { index } => GRow::ReleaseOwed { index },
+        }
+    }
+
+    /// The row once the write has landed.
+    fn landed(self) -> GRow {
+        match self {
+            Self::Take { index } => GRow::Taken { index },
+            Self::Release { index } => GRow::Free { index },
+        }
+    }
 }
 
 /// The gaming-cluster keys a session reports, and which of them are held.
@@ -399,11 +507,11 @@ struct GamingFeatures {
 /// [`DivertedKeys`].
 #[derive(Debug, Default)]
 struct GamingKeys {
-    /// The cluster's feature indices, once looked up.
+    /// Who owns the G-key row. Its G-key reports dispatch while it is
+    /// [`GRow::claimed`].
+    row: GRow,
+    /// The M-key and MR feature indices, once looked up.
     features: GamingFeatures,
-    /// Whether G-key reports dispatch: the row is taken, or its taking has
-    /// been written.
-    g_row: bool,
     /// The keys above the row whose presses dispatch.
     mode_keys: BTreeSet<ModeKey>,
     g_held: GKeys,
@@ -429,7 +537,7 @@ impl GamingKeys {
         let index = Some(header.feature_index);
         let function = header.function_id.to_lo();
         let payload = msg.extend_payload();
-        if index == self.features.g_keys {
+        if index == self.row.index() {
             if let Some(GamingGKeysEvent::Held(held)) = GamingGKeysEvent::decode(function, &payload)
             {
                 self.on_g_keys(held, sink);
@@ -447,7 +555,11 @@ impl GamingKeys {
     }
 
     fn on_g_keys(&mut self, held: GKeys, sink: &mpsc::UnboundedSender<CapturedInput>) {
-        let held = if self.g_row { held } else { GKeys::empty() };
+        let held = if self.row.claimed().is_some() {
+            held
+        } else {
+            GKeys::empty()
+        };
         for key in GKey::ALL {
             let bit = GKeys::from_bits_retain(1 << (key.number() - 1));
             edge(
@@ -483,13 +595,20 @@ impl GamingKeys {
         self.mr_held = now;
     }
 
-    /// Report `wanted`'s keys from now on. A held key that leaves the set is
-    /// forgotten without a release edge, as [`DivertedKeys::remove`] does.
-    fn follow(&mut self, g_row: bool, wanted: &BTreeSet<ModeKey>) {
-        self.g_row = g_row;
-        if !g_row {
+    /// Move the G-key row to `row`. A held G-key is forgotten without a
+    /// release edge once the row stops dispatching, as
+    /// [`DivertedKeys::remove`] forgets a key.
+    fn set_row(&mut self, row: GRow) {
+        self.row = row;
+        if row.claimed().is_none() {
             self.g_held = GKeys::empty();
         }
+    }
+
+    /// Report `wanted`'s mode keys from now on. A held key that leaves the
+    /// set is forgotten without a release edge, as [`DivertedKeys::remove`]
+    /// does.
+    fn follow(&mut self, wanted: &BTreeSet<ModeKey>) {
         self.mode_keys.clone_from(wanted);
         for (key, bit) in [
             (ModeKey::M1, MKeys::M1),
@@ -511,7 +630,7 @@ impl GamingKeys {
     /// back on M1, so the profile the agent selected for G1–G5 starts over.
     fn interrupt(&mut self) {
         let held = !self.g_held.is_empty() || !self.m_held.is_empty() || self.mr_held;
-        if (held || self.g_row)
+        if (held || self.row.claimed().is_some())
             && let Some(sink) = &self.sink
         {
             let _ = sink.send(CapturedInput::Interrupted);
@@ -550,13 +669,9 @@ struct ArmedKeys {
     /// The session's channel and device, for the gaming-cluster writes.
     channel: Arc<HidppChannel>,
     device_index: u8,
-    /// What the report handler dispatches for the gaming cluster.
+    /// What the report handler dispatches for the gaming cluster, and who
+    /// owns the G-key row.
     gaming: Arc<Mutex<GamingKeys>>,
-    /// The `0x8010` index while the G-key row may be taken — set before the
-    /// write, so a failed write is still handed back.
-    g_row_taken: Option<u8>,
-    /// Whether the gaming cluster's features have been looked up.
-    gaming_looked_up: bool,
     /// Other clients' reporting changes on `controls`, until the running
     /// session takes them.
     reporting_changes: Option<ReportingChangeStream>,
@@ -586,51 +701,51 @@ impl ArmedKeys {
     /// names. The row is taken only from a keyboard whose column OpenLogi
     /// models whole; a longer one would silence keys nothing can bind.
     async fn follow_gaming(&mut self, wanted: &GamingWanted) -> Result<(), CaptureError> {
-        if *wanted != GamingWanted::default() && !self.gaming_looked_up {
+        if *wanted != GamingWanted::default() && self.gaming().row == GRow::NotLookedUp {
             let root = Arc::clone(&self.root);
             let index = |id| {
                 let root = Arc::clone(&root);
                 async move { Ok::<_, CaptureError>(root.get_feature(id).await?.map(|info| info.index)) }
             };
+            let g_keys = index(GamingGKeysFeature::ID).await?;
             let features = GamingFeatures {
-                g_keys: index(GamingGKeysFeature::ID).await?,
                 m_keys: index(gaming_m_keys::FEATURE_ID).await?,
                 macro_record: index(macro_record::FEATURE_ID).await?,
             };
-            self.gaming().features = features;
-            self.gaming_looked_up = true;
+            let mut gaming = self.gaming();
+            gaming.features = features;
+            gaming.set_row(g_keys.map_or(GRow::NoGKeys, |index| GRow::Free { index }));
         }
-        let g_keys = self.gaming().features.g_keys;
-        let take = wanted.take_g_row.then_some(g_keys).flatten();
-        match (take, self.g_row_taken) {
-            (Some(index), None) => {
-                let feature = self.g_key_feature(index);
-                let count = feature.key_count().await?;
+        // Mode keys report only while the row is taken, so they can follow
+        // the new set ahead of the row's write.
+        self.gaming().follow(&wanted.mode_keys);
+        let row = self.gaming().row;
+        let write = match (wanted.take_g_row, row) {
+            (false, _) => row.release(),
+            (true, GRow::Free { index }) => {
+                let count = self.g_key_feature(index).key_count().await?;
                 if usize::from(count) > GKey::ALL.len() {
                     warn!(
                         count,
                         "G-key column longer than OpenLogi models — left onboard"
                     );
+                    None
                 } else {
-                    // Owed before the write: a transport failure does not
-                    // prove the firmware ignored it.
-                    self.g_row_taken = Some(index);
-                    // Dispatched before the write lands, so the first report
-                    // is not dropped.
-                    self.gaming().follow(true, &wanted.mode_keys);
-                    feature.take_row().await?;
+                    row.take()
                 }
             }
-            (None, Some(index)) => {
-                self.gaming().follow(false, &wanted.mode_keys);
-                self.g_key_feature(index).release_row().await?;
-                self.g_row_taken = None;
+            (true, _) => row.take(),
+        };
+        if let Some(write) = write {
+            let feature = self.g_key_feature(write.index());
+            self.gaming().set_row(write.owed());
+            match write {
+                RowWrite::Take { .. } => feature.take_row().await?,
+                RowWrite::Release { .. } => feature.release_row().await?,
             }
-            _ => {}
+            self.gaming().set_row(write.landed());
         }
-        let taken = self.g_row_taken.is_some();
-        self.gaming().follow(taken, &wanted.mode_keys);
-        if wanted.take_g_row && g_keys.is_none() {
+        if wanted.take_g_row && row == GRow::NoGKeys {
             debug!("G-key row requested on a keyboard without 0x8010 — nothing to take");
         }
         Ok(())
@@ -688,7 +803,7 @@ impl ArmedCapture for ArmedKeys {
             index = device_index,
             keys = self.keys().buttons.len(),
             grid_keys = self.grid().buttons.len(),
-            g_row = self.g_row_taken.is_some(),
+            g_row = self.gaming().row.owed().is_some(),
             wake_rearm,
             "keyboard key capture active"
         );
@@ -757,7 +872,8 @@ impl ArmedCapture for ArmedKeys {
         // The keyboard forgets a taken row when it power-cycles. Left onboard,
         // every G-key would run its onboard action instead of its binding, so
         // a failed retake ends the session and capture arms again.
-        if let Some(index) = self.g_row_taken
+        let retake = self.gaming().row.claimed();
+        if let Some(index) = retake
             && let Err(error) = self.g_key_feature(index).take_row().await
         {
             warn!(%error, "retaking the G-key row after wake failed");
@@ -803,18 +919,12 @@ impl ArmedCapture for ArmedKeys {
     }
 
     fn into_pending(self, retired: &SharedChannel) -> Option<PendingCaptureRestore> {
+        let g_keys = self.gaming().row.owed().map(GKeysRestore::new);
         let reprog = self
             .controls
             .as_ref()
             .and_then(|controls| ReprogRestore::new(controls.feature_index(), self.reporting));
-        PendingCaptureRestore::new(
-            retired,
-            reprog,
-            None,
-            None,
-            None,
-            self.g_row_taken.map(GKeysRestore::new),
-        )
+        PendingCaptureRestore::new(retired, reprog, None, None, None, g_keys)
     }
 }
 
@@ -868,20 +978,20 @@ mod tests {
     const MR: u8 = 5;
 
     fn cluster(
-        g_row: bool,
+        row: GRow,
         mode_keys: &[ModeKey],
     ) -> (GamingKeys, mpsc::UnboundedReceiver<CapturedInput>) {
         let (sink, inputs) = mpsc::unbounded_channel();
         let mut keys = GamingKeys {
             features: GamingFeatures {
-                g_keys: Some(G),
                 m_keys: Some(M),
                 macro_record: Some(MR),
             },
             sink: Some(sink),
             ..GamingKeys::default()
         };
-        keys.follow(g_row, &mode_keys.iter().copied().collect());
+        keys.set_row(row);
+        keys.follow(&mode_keys.iter().copied().collect());
         (keys, inputs)
     }
 
@@ -890,9 +1000,86 @@ mod tests {
         keys.report(&gaming_report(index, held), 0xff, &sink);
     }
 
+    /// Each row write is owed from before it is sent, so a session torn
+    /// down while the write waits, or after it failed, still hands the row
+    /// back.
+    #[test]
+    fn a_row_write_is_owed_back_from_before_it_is_sent() {
+        let take = GRow::Free { index: G }
+            .take()
+            .expect("a free row can be taken");
+        assert_eq!(take.owed().owed(), Some(G));
+        assert_eq!(take.landed(), GRow::Taken { index: G });
+        let release = take
+            .landed()
+            .release()
+            .expect("a taken row can be handed back");
+        assert_eq!(release.owed().owed(), Some(G));
+        assert_eq!(release.landed(), GRow::Free { index: G });
+    }
+
+    /// A failed write leaves the row owed the way it was going, since a
+    /// transport failure does not prove the firmware ignored it. A take
+    /// owed still dispatches, is taken again on wake, and is written again;
+    /// a release owed does neither, and is written again by teardown or the
+    /// next change. Neither is mistaken for the other.
+    #[test]
+    fn a_failed_row_write_stays_owed_the_way_it_was_going() {
+        let take = Some(RowWrite::Take { index: G });
+        let release = Some(RowWrite::Release { index: G });
+        // The row, then what it claims (dispatch and wake), what teardown
+        // hands back, and the take and release writes from it.
+        let table = [
+            (GRow::NotLookedUp, None, None, None, None),
+            (GRow::NoGKeys, None, None, None, None),
+            (GRow::Free { index: G }, None, None, take, None),
+            (GRow::TakeOwed { index: G }, Some(G), Some(G), take, release),
+            (GRow::Taken { index: G }, Some(G), Some(G), None, release),
+            (GRow::ReleaseOwed { index: G }, None, Some(G), take, release),
+        ];
+        for (row, claimed, owed, take, release) in table {
+            assert_eq!(
+                (row.claimed(), row.owed(), row.take(), row.release()),
+                (claimed, owed, take, release),
+                "{row:?}"
+            );
+        }
+    }
+
+    /// G-key reports dispatch from the moment the take is written, so the
+    /// first report is not dropped while the write waits for its reply.
+    /// They stop when the release is written: a key held then is forgotten
+    /// without a release edge, and a press the firmware reports before the
+    /// release lands starts nothing it could no longer end.
+    #[test]
+    fn g_keys_dispatch_from_the_take_write_to_the_release_write() {
+        let (mut keys, mut inputs) = cluster(GRow::Free { index: G }, &[]);
+        report(&mut keys, G, &[0b001]);
+        let take = keys.row.take().expect("a free row can be taken");
+        keys.set_row(take.owed());
+        report(&mut keys, G, &[0b010]);
+        keys.set_row(take.landed());
+        report(&mut keys, G, &[0b000]);
+        report(&mut keys, G, &[0b100]);
+        let release = keys.row.release().expect("a taken row can be handed back");
+        keys.set_row(release.owed());
+        report(&mut keys, G, &[0b000]);
+        report(&mut keys, G, &[0b001]);
+        keys.set_row(release.landed());
+        report(&mut keys, G, &[0b000]);
+        assert_eq!(
+            drain(&mut inputs),
+            vec![
+                CapturedInput::ButtonDown(ButtonId::g_key(GKey::G2)),
+                CapturedInput::ButtonUp(ButtonId::g_key(GKey::G2)),
+                CapturedInput::ButtonDown(ButtonId::g_key(GKey::G3)),
+            ]
+        );
+    }
+
     #[test]
     fn g_key_masks_emit_one_balanced_edge_per_key() {
-        let (mut keys, mut inputs) = cluster(true, &[]);
+        let (mut keys, mut inputs) = cluster(GRow::Taken { index: G }, &[]);
         report(&mut keys, G, &[0b0_0001]);
         report(&mut keys, G, &[0b0_0001]);
         report(&mut keys, G, &[0b1_0001]);
@@ -911,7 +1098,7 @@ mod tests {
 
     #[test]
     fn an_untaken_row_and_unwanted_mode_keys_report_nothing() {
-        let (mut keys, mut inputs) = cluster(false, &[ModeKey::M2]);
+        let (mut keys, mut inputs) = cluster(GRow::Free { index: G }, &[ModeKey::M2]);
         report(&mut keys, G, &[0b1]);
         report(&mut keys, M, &[0b101]);
         report(&mut keys, MR, &[1]);
@@ -934,7 +1121,7 @@ mod tests {
     /// action would not run.
     #[test]
     fn a_reconnect_interrupts_held_keys_and_the_next_press_goes_down() {
-        let (mut keys, mut inputs) = cluster(true, &[ModeKey::MacroRecord]);
+        let (mut keys, mut inputs) = cluster(GRow::Taken { index: G }, &[ModeKey::MacroRecord]);
         report(&mut keys, G, &[0b10]);
         report(&mut keys, MR, &[1]);
         keys.interrupt();
@@ -951,12 +1138,13 @@ mod tests {
             ]
         );
         // Nothing held, nothing to interrupt.
-        keys.follow(false, &BTreeSet::new());
+        keys.set_row(GRow::Free { index: G });
+        keys.follow(&BTreeSet::new());
         keys.interrupt();
         assert_eq!(drain(&mut inputs), vec![]);
         // With the row taken a wake is reported even with nothing held: the
         // keyboard is back on M1, so the agent's selected profile starts over.
-        keys.follow(true, &BTreeSet::new());
+        keys.set_row(GRow::Taken { index: G });
         keys.interrupt();
         assert_eq!(drain(&mut inputs), vec![CapturedInput::Interrupted]);
     }
@@ -1211,7 +1399,8 @@ mod tests {
     }
 
     /// A wake that cannot take the G-key row back leaves every G-key on its
-    /// onboard action, so the session has to end and arm again.
+    /// onboard action, so the session has to end and arm again. A row whose
+    /// release is still owed is not taken again.
     #[tokio::test]
     async fn a_g_key_row_that_cannot_be_retaken_after_wake_ends_the_session() {
         use crate::channel::scripted::{ScriptedRawHidChannel, scripted_channel};
@@ -1252,14 +1441,15 @@ mod tests {
             channel,
             device_index: 0xff,
             gaming: Arc::default(),
-            g_row_taken: Some(G),
-            gaming_looked_up: true,
             reporting_changes: None,
             wanted: watch::channel(KeyboardWanted::default()).1,
         };
+        armed.gaming().set_row(GRow::Taken { index: G });
 
         assert!(armed.rearm().await, "a retaken row keeps the session");
         take_fails.store(true, Ordering::Relaxed);
         assert!(!armed.rearm().await, "a row left onboard ends the session");
+        armed.gaming().set_row(GRow::ReleaseOwed { index: G });
+        assert!(armed.rearm().await, "a row owed back is not retaken");
     }
 }

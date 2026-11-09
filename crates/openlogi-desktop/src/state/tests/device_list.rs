@@ -131,7 +131,7 @@ fn canonical_profile_projects_identity_routes_capabilities_and_battery() {
         .iter()
         .find(|record| record.slot == 2)
         .expect("offline receiver slot is projected");
-    assert!(!offline_mouse.online);
+    assert!(!offline_mouse.is_online());
     assert_eq!(
         offline_mouse.route,
         Some(DeviceRoute::Bolt {
@@ -194,7 +194,7 @@ fn canonical_profile_snapshots_replace_online_state_and_remove_absent_receivers(
         state
             .devices()
             .iter()
-            .any(|record| record.slot == 2 && !record.online)
+            .any(|record| record.slot == 2 && !record.is_online())
     );
 
     let mut replaced = snapshot_candidate(&profile);
@@ -206,11 +206,11 @@ fn canonical_profile_snapshots_replace_online_state_and_remove_absent_receivers(
     replaced.inventory[1].paired[0].capabilities = None;
     state.apply_agent_snapshot(&replaced, &resolver, &[]);
     let receiver_mouse = profile_device(&state, [79, 76, 68, 1]);
-    assert!(!receiver_mouse.online);
+    assert!(!receiver_mouse.is_online());
     assert_eq!(receiver_mouse.battery, None);
     assert_eq!(receiver_mouse.capabilities, None);
     let direct_mouse = profile_device(&state, [79, 76, 68, 3]);
-    assert!(!direct_mouse.online);
+    assert!(!direct_mouse.is_online());
     assert_eq!(direct_mouse.battery, None);
     assert_eq!(direct_mouse.capabilities, None);
 
@@ -228,11 +228,58 @@ fn canonical_profile_snapshots_replace_online_state_and_remove_absent_receivers(
         "all absent receiver records are removed after the probe-miss grace"
     );
     assert!(state.devices().iter().any(|record| {
-        matches!(record.route, Some(DeviceRoute::Direct { .. })) && !record.online
+        matches!(record.route, Some(DeviceRoute::Direct { .. })) && !record.is_online()
     }));
     assert!(state.devices().iter().any(|record| {
-        matches!(record.route, Some(DeviceRoute::RawHid { .. })) && record.online
+        matches!(record.route, Some(DeviceRoute::RawHid { .. })) && record.is_online()
     }));
+}
+
+/// A device whose receiver drops out of the snapshot keeps its card as the
+/// last listing showed it — online, writable on its route — through the miss
+/// grace, and goes on the next miss. Until then nothing on screen changed, so
+/// no snapshot reports a change. A listing in between starts the grace over.
+#[test]
+fn a_card_missing_from_snapshots_stays_as_last_listed_through_the_grace() {
+    let resolver = AssetResolver::new();
+    let (mut state, _commands) = state_with(&[receiver_inventory()]);
+    let [listed] = state.devices().to_vec().try_into().expect("one card");
+    let route = DeviceRoute::Bolt {
+        receiver_uid: "82839805".to_string(),
+        slot: 1,
+    };
+    assert_eq!(listed.addressable_route(), Some(&route));
+
+    assert!(
+        state
+            .refresh_inventories(&[], &[], &resolver, &[])
+            .is_empty()
+    );
+    let relisted = state.refresh_inventories(&[receiver_inventory()], &[], &resolver, &[]);
+    assert!(relisted.is_empty());
+    assert_eq!(
+        state.devices(),
+        std::slice::from_ref(&listed),
+        "listed again"
+    );
+
+    for misses in 1..=INVENTORY_MISS_GRACE {
+        let events = state.refresh_inventories(&[], &[], &resolver, &[]);
+        assert!(events.is_empty(), "after {misses} misses: {events:?}");
+        let [kept] = state.devices() else {
+            panic!("the card went after {misses} misses");
+        };
+        assert!(kept.is_online(), "after {misses} misses");
+        assert_eq!(
+            kept.addressable_route(),
+            Some(&route),
+            "after {misses} misses"
+        );
+        assert!(kept.shows_as(&listed), "after {misses} misses");
+    }
+    let events = state.refresh_inventories(&[], &[], &resolver, &[]);
+    assert_eq!(events, [StateEvent::InventoryChanged]);
+    assert!(state.devices().is_empty(), "the grace ran out");
 }
 
 #[test]
@@ -268,7 +315,7 @@ fn canonical_profile_light_setting_errors_reach_desktop_state() {
     }
     assert!(reloads > 0);
     let light = state.current_record().expect("canonical light is selected");
-    assert!(light.online);
+    assert!(light.is_online());
     assert_eq!(light.route.as_ref(), Some(&raw_settings.route));
     assert_eq!(
         openlogi_core::hid::commands_for_light_settings(
@@ -388,6 +435,37 @@ fn failed_fold_persist_does_not_orphan_the_device_list() {
     }
 }
 
+/// A card kept through the miss grace is not a sighting, even while it shows
+/// online. A probe that half-read a receiver mouse (no unit id) lists it under
+/// the legacy key its settings still live under; once the full read folds
+/// that key into the mouse's identity, the half-read card is grace-kept
+/// under the retired key and must not write an entry back under it.
+#[test]
+fn a_grace_kept_card_does_not_bring_back_the_key_adoption_retired() {
+    let resolver = AssetResolver::new();
+    let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut config = Config::ephemeral();
+    config.set_dpi("receiver:82839805:slot:1", Dpi::new(3200));
+    let mut state = AppState::new(Sources::in_memory(config, &resolver, commands));
+    let mut half_read = receiver_inventory();
+    half_read.paired[0]
+        .model_info
+        .as_mut()
+        .expect("the fixture carries model info")
+        .unit_id = [0; 4];
+    let _ = state.refresh_inventories(&[half_read], &[], &resolver, &[]);
+    assert_eq!(state.devices()[0].config_key, "receiver:82839805:slot:1");
+
+    for snapshot in 1..=INVENTORY_MISS_GRACE + 1 {
+        let _ = state.refresh_inventories(&[receiver_inventory()], &[], &resolver, &[]);
+        assert_eq!(
+            state.config.devices.keys().collect::<Vec<_>>(),
+            ["unit:6be9d300"],
+            "after {snapshot} full reads"
+        );
+    }
+}
+
 /// A battery reading that changed on an otherwise identical device must reach
 /// the device list. The old guard compared nine hand-picked fields and
 /// `battery` was not among them, so the rebuilt list — carrying the fresh
@@ -492,7 +570,7 @@ fn state_with_an_offline_identity(persistence: ConfigPersistence) -> AppState {
 fn forgetting_an_offline_device_drops_its_card_and_config_entry() {
     let mut state = state_with_an_offline_identity(ConfigPersistence::MemoryOnly);
     assert_eq!(state.devices().len(), 1);
-    assert!(!state.devices()[0].online);
+    assert!(!state.devices()[0].is_online());
     assert!(
         state.devices()[0].route.is_none(),
         "the fixture has no USB or receiver route"
@@ -663,7 +741,7 @@ fn forget_then_see(after: DeviceInventory) -> (AppState, String, DeviceRoute, St
     let (record_key, config_key) = forget_target(&mut state);
     let route = state.devices()[0].route.clone().expect("a Bolt route");
     let _ = state.refresh_inventories(&[after], &[], &resolver, &[]);
-    assert!(state.devices()[0].online);
+    assert!(state.devices()[0].is_online());
     (state, record_key, route, config_key)
 }
 
@@ -680,7 +758,7 @@ fn an_unpair_answer_leaves_a_device_back_through_another_route() {
             .apply_device_unpaired(&record_key, &route, Some(&config_key), Ok(()))
             .is_empty()
     );
-    assert!(state.devices()[0].online);
+    assert!(state.devices()[0].is_online());
     assert!(state.config.devices.contains_key(&config_key));
 }
 
@@ -764,7 +842,7 @@ fn leftover_pairings_of_one_device_fold_into_its_live_card() {
     let [card] = state.devices() else {
         panic!("one keyboard must be one card: {:?}", state.devices());
     };
-    assert!(card.online);
+    assert!(card.is_online());
     assert_eq!(card.route, Some(bolt_slot(4)));
     assert_eq!(card.stale_pairings, [bolt_slot(2), bolt_slot(3)]);
 }
@@ -785,7 +863,7 @@ fn an_asleep_device_stays_one_card_on_the_slot_owning_its_settings() {
             state.devices()
         );
     };
-    assert!(!card.online);
+    assert!(!card.is_online());
     assert_eq!(card.route, Some(bolt_slot(4)));
     assert_eq!(card.config_key, config_key);
     assert_eq!(card.stale_pairings, [bolt_slot(2), bolt_slot(3)]);
