@@ -1951,6 +1951,63 @@ async fn zones_without_the_animation_are_left_alone() -> Result<(), WriteError> 
     Ok(())
 }
 
+// The G213 (wired `046d:c336`) as jockel09 measured it on #2023: zone 0
+// drives every key and offers the animations, zones 1 to 5 offer only a
+// fixed colour.
+const G213_ZONES: ScriptedZones = &[
+    (0x0001, &[0x0000, 0x0001, 0x000a, 0x0003, 0x0004]),
+    (0x0006, &[0x0000, 0x0001]),
+    (0x0007, &[0x0000, 0x0001]),
+    (0x0008, &[0x0000, 0x0001]),
+    (0x0009, &[0x0000, 0x0001]),
+    (0x000a, &[0x0000, 0x0001]),
+];
+
+#[tokio::test]
+async fn the_g213_animates_through_zone_0_alone() -> Result<(), WriteError> {
+    let (shared, handle) = color_led_effects_shared(G213_ZONES).await;
+    animate(
+        &shared,
+        LightingAnimation::Breathing {
+            period: period(2_000),
+        },
+    )
+    .await?;
+    assert_eq!(
+        zone_effect_params(&handle),
+        [(0, 2, [0x11, 0x22, 0x33, 0x07, 0xd0, 0, 0, 0, 0, 0])]
+    );
+
+    let (shared, handle) = color_led_effects_shared(G213_ZONES).await;
+    animate(
+        &shared,
+        LightingAnimation::ColorCycle {
+            period: period(3_000),
+            intensity: EffectIntensity::FULL,
+        },
+    )
+    .await?;
+    assert_eq!(
+        zone_effect_params(&handle),
+        [(0, 3, [0, 0, 0, 0, 0, 0x0b, 0xb8, 0, 0, 0])]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_steady_colour_on_the_g213_reaches_every_zone() -> Result<(), WriteError> {
+    // Going back to a steady colour must overwrite zone 0's animation, and
+    // colour the five zones the animation left alone.
+    let (shared, handle) = color_led_effects_shared(G213_ZONES).await;
+    animate(&shared, LightingAnimation::Static).await?;
+    let fixed = [0x11, 0x22, 0x33, 0, 0, 0, 0, 0, 0, 0];
+    assert_eq!(
+        zone_effect_params(&handle),
+        (0..6).map(|zone| (zone, 1, fixed)).collect::<Vec<_>>()
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_device_that_cannot_animate_shows_the_colour_instead() -> Result<(), WriteError> {
     // No zone lists a colour cycle: nothing animated is written, and every
