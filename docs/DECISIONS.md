@@ -4,6 +4,46 @@ Durable "why we did it this way" records that are not obvious from the code.
 Add a dated entry when a non-obvious architectural or dependency decision is
 made or revisited.
 
+## 2026-11: A direct device that reports only its model is keyed by its route
+
+The G402 answers DeviceInformation v0: no serial, an all-zero unit id. Such a
+direct device had no configuration key, so nothing the GUI set for it was
+saved, its DPI presets included.
+
+- **Its model is its identity.** `DeviceIdentity` gains `Model`, the most
+  specific thing such hardware says about itself, and the all-zero unit id
+  stops being a `Unit` value: it is the wire sentinel for "not reported". A
+  direct device identified by its model is keyed `direct:<vid>:<pid>`, which
+  is also its route key, so it indexes its own entry.
+- **A v0 answer is a whole answer.** DeviceInformation v0 reports the entity
+  count and nothing else. That is the device's complete answer, not a lost
+  reply: the probe keeps its model info and does not flag the identity as
+  incomplete.
+- **Unread is not an identity.** A device whose probe never got a
+  DeviceInformation answer carries no identity at all
+  (`DeviceStableId` holds `Option<DeviceIdentity>`), and stays transient
+  until it does. Folding that case into `Model` would save settings for a
+  device we have not identified.
+- **No branch on the device.** Such a device takes the same paths as any
+  other through IPC, inventory and GUI, with no precedence rules of its own:
+  only its key differs.
+- **Two of one model are one entry.** A device that reports neither a serial
+  nor a unit id cannot be told apart from another of its model: two G402s
+  plugged in at once share one configuration entry and one card. This is not
+  the merge #342 and #1562 were refused for: on a receiver the slot tells two
+  identical mice apart, and merging them loses that. A direct route carries
+  only `vid:pid` and the device adds nothing to it, so there is nothing to
+  lose, and without this key the device keeps no setting at all. The rest of
+  #1562 still holds: identity is offered only online
+  (`online.then_some(&identity)`), and the agent's list stays per route, both
+  G402s listed under their one key, while folding them into one card is the
+  GUI's call.
+- **No hardware fixture yet.** The probe test is scripted from the v0 answer
+  shape, not recorded from a G402. A recording could only pin the profile:
+  `openlogi fixture contribute` refuses a cassette for a device with neither
+  a serial nor a unit id, since it has no synthetic identity to relate the
+  cassette to, so only `--profile-only` applies.
+
 ## 2026-11: The agent saves a paired Flow computer in `config.toml`
 
 Until now the agent only read `config.toml`; the GUI and `openlogi api` wrote
@@ -813,6 +853,8 @@ took `serial` and `unit_id` and discarded both for receiver routes.
   the slot empty.
 - A device whose unit id reads all-zero keeps its route key and never
   correlates — degradation, not an assumption about hardware we cannot sample.
+  Revisited in 2026-11: a direct device reporting neither serial nor unit id
+  is now keyed by that route key, see above.
 - Capabilities are measured per link, because they genuinely differ per link:
   a G502 LIGHTSPEED publishes `0x2121 HiResWheel` over its receiver and
   `0x00c2 DfuControlSigned` over USB, same firmware image either way (#660).

@@ -551,7 +551,10 @@ fn model_info(ext: u8, pid: u16) -> DeviceModelInfo {
 }
 
 #[test]
-fn zero_unit_direct_inventory_is_transient() {
+fn model_identified_direct_inventory_persists_under_its_route() {
+    // DeviceInformation answered with every identity field zero (the G402
+    // shape): the device is one instance of its model, and the route is its
+    // key, so its DPI presets can be saved.
     let resolver = AssetResolver::new();
     let list = build_device_list(
         &[direct_inventory(model_info(2, 0xb034))],
@@ -560,6 +563,21 @@ fn zero_unit_direct_inventory_is_transient() {
         &Config::default(),
         &[],
     );
+
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].config_key, "direct:046d:b023");
+    assert!(list[0].is_persistent());
+    assert_eq!(list[0].persistent_config_key(), Some("direct:046d:b023"));
+}
+
+#[test]
+fn half_read_direct_inventory_is_transient() {
+    // No DeviceInformation answer yet: nothing identifies the device, not
+    // even its model, so nothing may be written for it.
+    let resolver = AssetResolver::new();
+    let mut inventory = direct_inventory(model_info(2, 0xb034));
+    inventory.paired[0].model_info = None;
+    let list = build_device_list(&[inventory], &[], &resolver, &Config::default(), &[]);
 
     assert_eq!(list.len(), 1);
     assert_eq!(list[0].config_key, "direct:046d:b023:unit:00000000");

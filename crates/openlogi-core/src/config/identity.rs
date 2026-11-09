@@ -16,11 +16,11 @@ use crate::device_order::{DeviceIdentity, DeviceStableId, PhysicalDeviceKey};
 use crate::hid::Dpi;
 
 impl DeviceIdentity {
-    /// This identity as a transport-free configuration key, or `None` when the
-    /// device reported no identity worth keying on.
+    /// This identity as a transport-free configuration key, or `None` for a
+    /// model identity, whose key is the route itself.
     #[must_use]
     pub fn config_key(&self) -> Option<String> {
-        self.is_physical().then(|| self.key())
+        self.fragment()
     }
 }
 
@@ -444,7 +444,7 @@ mod tests {
         DeviceStableId::Direct {
             vendor_id: 0x046d,
             product_id: 0xc08d,
-            identity: DeviceIdentity::Unit([0x6b, 0xe9, 0xd3, 0x00]),
+            identity: Some(DeviceIdentity::from_parts(None, [0x6b, 0xe9, 0xd3, 0x00])),
         }
     }
 
@@ -458,7 +458,7 @@ mod tests {
     #[test]
     fn a_known_unit_keys_the_entry_directly() {
         let config = Config::default();
-        let unit = DeviceIdentity::Unit([0x6b, 0xe9, 0xd3, 0x00]);
+        let unit = DeviceIdentity::from_parts(None, [0x6b, 0xe9, 0xd3, 0x00]);
         let key = config
             .resolve_device_key(&cabled(), Some(&unit))
             .expect("a non-zero unit is a physical identity");
@@ -469,7 +469,7 @@ mod tests {
     fn the_same_unit_resolves_alike_on_either_route() {
         // The whole point: one mouse, two routes, one entry.
         let config = Config::default();
-        let unit = DeviceIdentity::Unit([0x6b, 0xe9, 0xd3, 0x00]);
+        let unit = DeviceIdentity::from_parts(None, [0x6b, 0xe9, 0xd3, 0x00]);
         assert_eq!(
             config.resolve_device_key(&cabled(), Some(&unit)),
             config.resolve_device_key(&on_receiver(), Some(&unit)),
@@ -502,7 +502,7 @@ mod tests {
             },
         );
 
-        let unit = DeviceIdentity::Unit([0x6b, 0xe9, 0xd3, 0x00]);
+        let unit = DeviceIdentity::from_parts(None, [0x6b, 0xe9, 0xd3, 0x00]);
         let key = config
             .resolve_device_key(&on_receiver(), Some(&unit))
             .expect("resolves");
@@ -555,7 +555,7 @@ mod tests {
         );
         config.devices.insert("unit:6be9d300".to_string(), bare);
 
-        let unit = DeviceIdentity::Unit([0x6b, 0xe9, 0xd3, 0x00]);
+        let unit = DeviceIdentity::from_parts(None, [0x6b, 0xe9, 0xd3, 0x00]);
         let key = config
             .resolve_device_key(&on_receiver(), Some(&unit))
             .expect("resolves");
@@ -583,7 +583,7 @@ mod tests {
             },
         );
 
-        let unit = DeviceIdentity::Unit([0x6b, 0xe9, 0xd3, 0x00]);
+        let unit = DeviceIdentity::from_parts(None, [0x6b, 0xe9, 0xd3, 0x00]);
         let key = config
             .resolve_device_key(&on_receiver(), Some(&unit))
             .expect("resolves");
@@ -608,7 +608,7 @@ mod tests {
         }
         let unknown = DeviceStableId::Unknown {
             slot: 2,
-            identity: DeviceIdentity::Unit([0x6b, 0xe9, 0xd3, 0x00]),
+            identity: Some(DeviceIdentity::from_parts(None, [0x6b, 0xe9, 0xd3, 0x00])),
         };
         assert_eq!(
             unknown.route_key(),
@@ -685,26 +685,63 @@ mod tests {
     }
 
     #[test]
-    fn an_all_zero_unit_over_a_receiver_keeps_its_route_key() {
+    fn a_model_identity_over_a_receiver_keeps_its_route_key() {
         // Not every device reports a unit id. Such a device simply never
-        // correlates across transports rather than colliding on `unit:00000000`.
+        // correlates across transports; the receiver slot stays its key.
         let config = Config::default();
-        let zero = DeviceIdentity::Unit([0; 4]);
         let key = config
-            .resolve_device_key(&on_receiver(), Some(&zero))
-            .expect("falls back rather than failing");
+            .resolve_device_key(&on_receiver(), Some(&DeviceIdentity::Model))
+            .expect("receiver keys are physical");
         assert_eq!(key.as_str(), "receiver:82839805:slot:1");
     }
 
+    fn model_identified_cable() -> DeviceStableId {
+        DeviceStableId::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xc07e,
+            identity: Some(DeviceIdentity::Model),
+        }
+    }
+
     #[test]
-    fn a_direct_device_with_no_identity_stays_non_persistent() {
+    fn a_direct_device_identified_by_its_model_persists_under_its_route() {
         let config = Config::default();
-        let anonymous = DeviceStableId::Direct {
+        let key = config
+            .resolve_device_key(&model_identified_cable(), Some(&DeviceIdentity::Model))
+            .expect("the model is the device's most specific identity");
+        assert_eq!(key.as_str(), "direct:046d:c07e");
+        assert_eq!(
+            canonical_device_key(&model_identified_cable(), Some(&DeviceIdentity::Model))
+                .map(PhysicalDeviceKey::into_string),
+            Some("direct:046d:c07e".to_string())
+        );
+    }
+
+    #[test]
+    fn a_direct_device_whose_identity_was_never_read_stays_non_persistent() {
+        let config = Config::default();
+        let unread = DeviceStableId::Direct {
             vendor_id: 0x046d,
             product_id: 0xc08d,
-            identity: DeviceIdentity::Unit([0; 4]),
+            identity: None,
         };
-        assert_eq!(config.resolve_device_key(&anonymous, None), None);
+        assert_eq!(config.resolve_device_key(&unread, None), None);
+    }
+
+    #[test]
+    fn a_model_identified_device_adopts_its_own_route_without_folding() {
+        // The route key and the canonical key are the same string, so the
+        // legacy fold has nothing to consume; the entry simply indexes itself.
+        let mut config = Config::default();
+        config.set_dpi("direct:046d:c07e", Dpi::new(1600));
+        let canonical = PhysicalDeviceKey::parse("direct:046d:c07e").expect("valid");
+
+        assert!(config.adopt_route(&canonical, "direct:046d:c07e", None));
+        assert!(!config.adopt_route(&canonical, "direct:046d:c07e", None));
+
+        let device = &config.devices["direct:046d:c07e"];
+        assert_eq!(device.dpi, Some(Dpi::new(1600)));
+        assert!(device.links.contains_key("direct:046d:c07e"));
     }
 
     #[test]

@@ -83,12 +83,7 @@ impl Save {
                 "device has no persistent physical identity",
             ));
         }
-        let stable = DeviceStableId::from_parts(
-            Some(&route),
-            slot,
-            model.serial_number.as_deref(),
-            model.unit_id,
-        );
+        let stable = DeviceStableId::from_parts(Some(&route), slot, Some(identity.clone()));
         let key = config
             .resolve_device_key(&stable, Some(&identity))
             .ok_or_else(|| {

@@ -14,10 +14,16 @@ use crate::hid::DeviceRoute;
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PhysicalDeviceKey(String);
 
+/// The identity fragment of a runtime key whose device identity was never
+/// read: the all-zero unit id HID++ reports in that case, kept verbatim so
+/// keys written before model identities existed stay recognizable.
+const UNREAD_UNIT_FRAGMENT: &str = "unit:00000000";
+
 /// A route-derived identity used to order devices deterministically.
 ///
-/// Receiver UID + slot and serial/non-zero unit identities are stable and
-/// unique. OS-node identities on raw HID routes are deliberately retained here
+/// Receiver UID + slot, serial and unit identities are stable and unique; a
+/// direct device reporting neither is as stable as its model, which its route
+/// already names. OS-node identities on raw HID routes are deliberately retained here
 /// only so a transient inventory record can still be ordered; they cannot
 /// become a [`PhysicalDeviceKey`].
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -37,8 +43,10 @@ pub enum DeviceStableId {
         vendor_id: u16,
         /// USB product id.
         product_id: u16,
-        /// Disambiguates two same-model direct devices.
-        identity: DeviceIdentity,
+        /// What the device said about itself, or `None` while the probe has
+        /// not read DeviceInformation yet (HID++ 1.0 hardware, or a feature
+        /// walk that timed out). Only an answered probe can key settings.
+        identity: Option<DeviceIdentity>,
     },
     /// A standalone raw-HID device, addressed by its USB/usage identifiers
     /// plus an OS-node- or serial-derived identity string.
@@ -59,42 +67,73 @@ pub enum DeviceStableId {
     Unknown {
         /// Pairing slot, when known.
         slot: u8,
-        /// Disambiguates two same-model routeless devices.
-        identity: DeviceIdentity,
+        /// What the device said about itself, `None` while unread — see
+        /// [`Self::Direct`].
+        identity: Option<DeviceIdentity>,
     },
 }
 
-/// A device's own identity, used to disambiguate two same-model direct devices.
+/// The most specific identity a device reports about itself, from a serial
+/// number down to nothing beyond its model.
+///
+/// Ordered from most to least specific; [`Self::from_parts`] always picks the
+/// most specific one the probe returned.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum DeviceIdentity {
     /// Case-folded serial number.
     Serial(String),
-    /// Raw HID++ unit id, used when no serial is reported.
-    Unit([u8; 4]),
+    /// HID++ unit id, used when no serial is reported.
+    Unit(UnitId),
+    /// The device reports neither: it is one instance of its model, and only
+    /// the route it was reached by tells it apart from another one. Firmware
+    /// answering DeviceInformation v0 (the G402, for instance) lands here.
+    Model,
+}
+
+/// A HID++ unit id that the device actually filled in.
+///
+/// The all-zero unit id is the wire sentinel for "not reported", so it has no
+/// value here; [`DeviceIdentity::from_parts`] turns it into
+/// [`DeviceIdentity::Model`] instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct UnitId([u8; 4]);
+
+impl UnitId {
+    /// Wrap a reported unit id, or `None` for the all-zero sentinel.
+    #[must_use]
+    pub fn new(unit_id: [u8; 4]) -> Option<Self> {
+        (unit_id != [0; 4]).then_some(Self(unit_id))
+    }
+
+    fn hex(self) -> String {
+        let [a, b, c, d] = self.0;
+        format!("{a:02x}{b:02x}{c:02x}{d:02x}")
+    }
 }
 
 impl DeviceIdentity {
-    /// Prefer the serial number (case-folded) when present, else the unit id.
+    /// Prefer the serial number (case-folded) when present, then the unit id,
+    /// and fall back to the model when the device reports neither.
     #[must_use]
     pub fn from_parts(serial: Option<&str>, unit_id: [u8; 4]) -> Self {
         serial
             .filter(|serial| !serial.is_empty())
-            .map_or(Self::Unit(unit_id), |serial| {
-                Self::Serial(serial.to_ascii_lowercase())
-            })
+            .map(|serial| Self::Serial(serial.to_ascii_lowercase()))
+            .or_else(|| UnitId::new(unit_id).map(Self::Unit))
+            .unwrap_or(Self::Model)
     }
 }
 
 impl DeviceStableId {
-    /// Build the stable id from a device's route plus its identity fields.
-    /// `slot` is only consulted for a routeless device (the Bolt/Direct cases
-    /// carry their own slot / addressing inside the route).
+    /// Build the stable id from a device's route plus the identity its probe
+    /// read, `None` while DeviceInformation has not been answered. `slot` is
+    /// only consulted for a routeless device (the Bolt/Direct cases carry
+    /// their own slot / addressing inside the route).
     #[must_use]
     pub fn from_parts(
         route: Option<&DeviceRoute>,
         slot: u8,
-        serial: Option<&str>,
-        unit_id: [u8; 4],
+        identity: Option<DeviceIdentity>,
     ) -> Self {
         match route {
             Some(
@@ -110,7 +149,7 @@ impl DeviceStableId {
             }) => Self::Direct {
                 vendor_id: *vendor_id,
                 product_id: *product_id,
-                identity: DeviceIdentity::from_parts(serial, unit_id),
+                identity,
             },
             Some(DeviceRoute::RawHid {
                 vendor_id,
@@ -125,23 +164,26 @@ impl DeviceStableId {
                 usage_id: *usage_id,
                 identity: identity.to_ascii_lowercase(),
             },
-            None => Self::Unknown {
-                slot,
-                identity: DeviceIdentity::from_parts(serial, unit_id),
-            },
+            None => Self::Unknown { slot, identity },
         }
     }
 
     /// Route-derived key used while a device is present in a runtime snapshot.
     ///
-    /// Unlike [`Self::physical_key`], this also represents a direct or
-    /// routeless device whose only reported identity is an all-zero unit id.
-    /// Such a key is suitable for short-lived UI bookkeeping only and must not
-    /// be written to configuration.
+    /// Unlike [`Self::physical_key`], this also represents a device whose
+    /// identity was never read, a routeless device known only by its model, or
+    /// a raw-HID device known only by its OS node. Such a key is suitable for
+    /// short-lived UI bookkeeping only and must not be written to
+    /// configuration.
     ///
     /// This intentionally keys receiver-connected devices by receiver UID +
     /// pairing slot rather than model id, so two identical mice paired to the
-    /// same receiver can carry different settings.
+    /// same receiver can carry different settings. A direct device is keyed by
+    /// its route plus whatever identity it reports; for a model identity the
+    /// key *is* the route. An identity the probe has not read yet is written
+    /// as the all-zero unit id it stands for, so
+    /// [`PhysicalDeviceKey::is_transient`] reads live and historical keys
+    /// alike.
     #[must_use]
     pub fn runtime_key(&self) -> String {
         match self {
@@ -150,7 +192,10 @@ impl DeviceStableId {
                 vendor_id,
                 product_id,
                 identity,
-            } => format!("direct:{vendor_id:04x}:{product_id:04x}:{}", identity.key()),
+            } => with_identity(
+                format!("direct:{vendor_id:04x}:{product_id:04x}"),
+                identity.as_ref(),
+            ),
             Self::RawHid {
                 vendor_id,
                 product_id,
@@ -160,7 +205,9 @@ impl DeviceStableId {
             } => format!(
                 "raw:{vendor_id:04x}:{product_id:04x}:{usage_page:04x}:{usage_id:04x}:{identity}"
             ),
-            Self::Unknown { slot, identity } => format!("unknown:slot:{slot}:{}", identity.key()),
+            Self::Unknown { slot, identity } => {
+                with_identity(format!("unknown:slot:{slot}"), identity.as_ref())
+            }
         }
     }
 
@@ -206,17 +253,23 @@ impl DeviceStableId {
     /// Stable key for persisted per-physical-device configuration.
     ///
     /// Receiver-connected devices are identified by receiver UID + pairing
-    /// slot. Direct and routeless devices require either a non-empty serial
-    /// number or a non-zero unit id. Raw HID devices require a serial-backed
-    /// route identity; OS node identities and all-zero unit ids are transient
-    /// probe results, not physical identities.
+    /// slot. A direct device is identified by its route plus the identity it
+    /// reports, down to the route alone for a model identity: the USB model is
+    /// the most specific thing such hardware says about itself. A routeless
+    /// device needs a serial or unit id, since nothing else about it survives
+    /// a reconnect. Raw HID devices require a serial-backed route identity; OS
+    /// node identities are transient probe results, not physical identities.
     #[must_use]
     pub fn physical_key(&self) -> Option<PhysicalDeviceKey> {
         match self {
             Self::Bolt { .. } => Some(PhysicalDeviceKey(self.runtime_key())),
-            Self::Direct { identity, .. } | Self::Unknown { identity, .. } => identity
-                .is_physical()
-                .then(|| PhysicalDeviceKey(self.runtime_key())),
+            Self::Direct { identity, .. } => identity
+                .as_ref()
+                .map(|_| PhysicalDeviceKey(self.runtime_key())),
+            Self::Unknown { identity, .. } => identity
+                .as_ref()
+                .and_then(DeviceIdentity::fragment)
+                .map(|_| PhysicalDeviceKey(self.runtime_key())),
             Self::RawHid { identity, .. } => {
                 raw_identity_is_physical(identity).then(|| PhysicalDeviceKey(self.runtime_key()))
             }
@@ -224,27 +277,30 @@ impl DeviceStableId {
     }
 }
 
-impl DeviceIdentity {
-    /// Whether this identity is non-trivial: a non-empty serial, or a unit id
-    /// that is not all-zero.
-    ///
-    /// A device that reports neither has no identity worth keying on, either
-    /// for [`DeviceStableId::physical_key`] or for a route-independent
-    /// [`Self::key`].
-    pub(crate) fn is_physical(&self) -> bool {
-        match self {
-            Self::Serial(serial) => !serial.is_empty(),
-            Self::Unit(unit) => *unit != [0; 4],
-        }
+/// Append a device's identity fragment to the key of the route it sits on.
+///
+/// An identity the probe never read is spelled as the all-zero unit id; a
+/// model identity adds nothing, the route already names the model.
+fn with_identity(route: String, identity: Option<&DeviceIdentity>) -> String {
+    let fragment = identity.map_or_else(
+        || Some(UNREAD_UNIT_FRAGMENT.to_string()),
+        DeviceIdentity::fragment,
+    );
+    match fragment {
+        Some(fragment) => format!("{route}:{fragment}"),
+        None => route,
     }
+}
 
-    /// This identity formatted as a bare `serial:`/`unit:` fragment, with no
-    /// route information. Callers that only want a key for a physical
-    /// identity should gate this behind [`Self::is_physical`] first.
-    pub(crate) fn key(&self) -> String {
+impl DeviceIdentity {
+    /// This identity as a bare `serial:`/`unit:` fragment carrying no route
+    /// information, or `None` for a model identity, which only means
+    /// something next to the route it was reached by.
+    pub(crate) fn fragment(&self) -> Option<String> {
         match self {
-            Self::Serial(serial) => format!("serial:{serial}"),
-            Self::Unit(unit) => format!("unit:{}", hex_unit(*unit)),
+            Self::Serial(serial) => Some(format!("serial:{serial}")),
+            Self::Unit(unit) => Some(format!("unit:{}", unit.hex())),
+            Self::Model => None,
         }
     }
 }
@@ -252,12 +308,15 @@ impl DeviceIdentity {
 impl PhysicalDeviceKey {
     /// Parse a key emitted by [`DeviceStableId::physical_key`].
     ///
-    /// Legacy model-scoped configuration keys intentionally return `None`;
-    /// callers can use that distinction when applying compatibility behavior
-    /// without treating a model identifier as a physical identity.
+    /// A bare `direct:<vid>:<pid>` key is the identity of a direct device that
+    /// reports nothing beyond its model. Keys whose identity fragment is the
+    /// all-zero unit id, and model names that predate route keys, return
+    /// `None`; callers use that distinction when applying compatibility
+    /// behavior.
     #[must_use]
     pub fn parse(value: &str) -> Option<Self> {
         if receiver_key_is_valid(value)
+            || DeviceStableId::direct_route_of_key(value).is_some()
             || direct_identity_fragment(value).is_some_and(identity_fragment_is_physical)
             || raw_identity_fragment(value).is_some_and(raw_identity_is_physical)
             || unknown_identity_fragment(value).is_some_and(identity_fragment_is_physical)
@@ -284,7 +343,7 @@ impl PhysicalDeviceKey {
     pub fn is_transient(value: &str) -> bool {
         direct_identity_fragment(value)
             .or_else(|| unknown_identity_fragment(value))
-            .is_some_and(|identity| identity == "unit:00000000")
+            .is_some_and(|identity| identity == UNREAD_UNIT_FRAGMENT)
             || raw_identity_fragment(value)
                 .is_some_and(|identity| identity.starts_with("id:") || identity.is_empty())
     }
@@ -361,18 +420,11 @@ fn is_hex_word(value: &str) -> bool {
     value.len() == 4 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-fn hex_unit(unit: [u8; 4]) -> String {
-    format!(
-        "{:02x}{:02x}{:02x}{:02x}",
-        unit[0], unit[1], unit[2], unit[3]
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use crate::hid::DeviceRoute;
 
-    use super::{DeviceIdentity, DeviceStableId, PhysicalDeviceKey};
+    use super::{DeviceIdentity, DeviceStableId, PhysicalDeviceKey, UnitId};
 
     #[test]
     fn unifying_route_maps_to_bolt_stable_id() {
@@ -380,7 +432,11 @@ mod tests {
             receiver_uid: "DA2699E1".into(),
             slot: 2,
         };
-        let id = DeviceStableId::from_parts(Some(&route), 2, None, [0; 4]);
+        let id = DeviceStableId::from_parts(
+            Some(&route),
+            2,
+            Some(DeviceIdentity::from_parts(None, [0; 4])),
+        );
         // Unifying and Bolt share the same stable-id variant so the GUI and
         // agent agree on carousel order regardless of receiver family.
         assert!(
@@ -401,8 +457,16 @@ mod tests {
             slot: 1,
         };
         assert_eq!(
-            DeviceStableId::from_parts(Some(&bolt), 1, None, [0; 4]),
-            DeviceStableId::from_parts(Some(&unifying), 1, None, [0; 4]),
+            DeviceStableId::from_parts(
+                Some(&bolt),
+                1,
+                Some(DeviceIdentity::from_parts(None, [0; 4]))
+            ),
+            DeviceStableId::from_parts(
+                Some(&unifying),
+                1,
+                Some(DeviceIdentity::from_parts(None, [0; 4]))
+            ),
         );
     }
 
@@ -414,24 +478,88 @@ mod tests {
         };
 
         assert_eq!(
-            DeviceStableId::from_parts(Some(&route), 2, Some("SERIAL"), [1, 2, 3, 4])
-                .physical_key()
-                .map(PhysicalDeviceKey::into_string),
+            DeviceStableId::from_parts(
+                Some(&route),
+                2,
+                Some(DeviceIdentity::from_parts(Some("SERIAL"), [1, 2, 3, 4]))
+            )
+            .physical_key()
+            .map(PhysicalDeviceKey::into_string),
             Some("receiver:aabb:slot:2".to_string())
         );
     }
 
     #[test]
-    fn zero_unit_direct_identity_is_transient() {
+    fn a_device_reporting_neither_serial_nor_unit_is_identified_by_its_model() {
+        assert_eq!(
+            DeviceIdentity::from_parts(None, [0; 4]),
+            DeviceIdentity::Model
+        );
+        assert_eq!(
+            DeviceIdentity::from_parts(Some(""), [0; 4]),
+            DeviceIdentity::Model
+        );
+        assert!(UnitId::new([0; 4]).is_none());
+    }
+
+    #[test]
+    fn model_identified_direct_device_persists_under_its_route() {
+        // A G402 answers DeviceInformation v0: every identity field is zero.
+        // Its most specific identity is the USB model, so the route *is* the
+        // key, exactly as for a device whose settings predate per-unit keys.
+        let route = DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xc07e,
+        };
+        let id = DeviceStableId::from_parts(
+            Some(&route),
+            0xff,
+            Some(DeviceIdentity::from_parts(None, [0; 4])),
+        );
+
+        assert_eq!(id.runtime_key(), "direct:046d:c07e");
+        assert_eq!(id.runtime_key(), id.route_key());
+        assert_eq!(
+            id.physical_key().map(PhysicalDeviceKey::into_string),
+            Some("direct:046d:c07e".to_string())
+        );
+        assert!(PhysicalDeviceKey::parse("direct:046d:c07e").is_some());
+    }
+
+    #[test]
+    fn an_unread_identity_is_transient_and_never_persisted() {
+        // HID++ 1.0 hardware, or a feature walk that timed out: nothing has
+        // been read yet, so there is no identity to key on, not even the model.
         let route = DeviceRoute::Direct {
             vendor_id: 0x046d,
             product_id: 0xb023,
         };
-        let id = DeviceStableId::from_parts(Some(&route), 0xff, None, [0; 4]);
+        let id = DeviceStableId::from_parts(Some(&route), 0xff, None);
 
-        assert!(id.physical_key().is_none());
         assert_eq!(id.runtime_key(), "direct:046d:b023:unit:00000000");
         assert!(PhysicalDeviceKey::is_transient(&id.runtime_key()));
+        assert!(id.physical_key().is_none());
+        assert!(PhysicalDeviceKey::parse(&id.runtime_key()).is_none());
+    }
+
+    #[test]
+    fn historical_zero_unit_keys_stay_transient() {
+        // Before model identities existed, an identityless direct device was
+        // written as `unit:00000000`. Such a key never resolves to a device.
+        let legacy = "direct:046d:b023:unit:00000000";
+        assert!(PhysicalDeviceKey::is_transient(legacy));
+        assert!(PhysicalDeviceKey::parse(legacy).is_none());
+        assert!(!PhysicalDeviceKey::is_transient("direct:046d:c07e"));
+    }
+
+    #[test]
+    fn model_identity_without_a_route_cannot_be_persisted() {
+        // A routeless device has nothing but its slot once its model is all
+        // it reports, and a slot alone survives no reconnect.
+        let id = DeviceStableId::from_parts(None, 1, Some(DeviceIdentity::Model));
+
+        assert_eq!(id.runtime_key(), "unknown:slot:1");
+        assert!(id.physical_key().is_none());
         assert!(PhysicalDeviceKey::parse(&id.runtime_key()).is_none());
     }
 
@@ -441,9 +569,13 @@ mod tests {
             vendor_id: 0x046d,
             product_id: 0xb023,
         };
-        let key = DeviceStableId::from_parts(Some(&route), 0xff, Some("ABCDEF"), [0; 4])
-            .physical_key()
-            .map(PhysicalDeviceKey::into_string);
+        let key = DeviceStableId::from_parts(
+            Some(&route),
+            0xff,
+            Some(DeviceIdentity::from_parts(Some("ABCDEF"), [0; 4])),
+        )
+        .physical_key()
+        .map(PhysicalDeviceKey::into_string);
 
         assert_eq!(key, Some("direct:046d:b023:serial:abcdef".to_string()));
     }
@@ -454,9 +586,13 @@ mod tests {
             vendor_id: 0x046d,
             product_id: 0xb023,
         };
-        let key = DeviceStableId::from_parts(Some(&route), 0xff, None, [0xa3, 0x93, 0xca, 0xe0])
-            .physical_key()
-            .map(PhysicalDeviceKey::into_string);
+        let key = DeviceStableId::from_parts(
+            Some(&route),
+            0xff,
+            Some(DeviceIdentity::from_parts(None, [0xa3, 0x93, 0xca, 0xe0])),
+        )
+        .physical_key()
+        .map(PhysicalDeviceKey::into_string);
 
         assert_eq!(key, Some("direct:046d:b023:unit:a393cae0".to_string()));
     }
@@ -484,8 +620,16 @@ mod tests {
             usage_id: 0x0202,
             identity: "id:new-node".into(),
         };
-        let old_id = DeviceStableId::from_parts(Some(&old), 0xff, None, [0; 4]);
-        let new_id = DeviceStableId::from_parts(Some(&new), 0xff, None, [0; 4]);
+        let old_id = DeviceStableId::from_parts(
+            Some(&old),
+            0xff,
+            Some(DeviceIdentity::from_parts(None, [0; 4])),
+        );
+        let new_id = DeviceStableId::from_parts(
+            Some(&new),
+            0xff,
+            Some(DeviceIdentity::from_parts(None, [0; 4])),
+        );
         assert_ne!(old_id.runtime_key(), new_id.runtime_key());
         assert!(old_id.physical_key().is_none());
         assert!(new_id.physical_key().is_none());
@@ -500,9 +644,13 @@ mod tests {
             usage_id: 0x0202,
             identity: "serial:glow-1".into(),
         };
-        let key = DeviceStableId::from_parts(Some(&route), 0xff, Some("glow-1"), [0; 4])
-            .physical_key()
-            .map(PhysicalDeviceKey::into_string);
+        let key = DeviceStableId::from_parts(
+            Some(&route),
+            0xff,
+            Some(DeviceIdentity::from_parts(Some("glow-1"), [0; 4])),
+        )
+        .physical_key()
+        .map(PhysicalDeviceKey::into_string);
         assert_eq!(key, Some("raw:046d:c900:ff43:0202:serial:glow-1".into()));
     }
 
@@ -513,7 +661,7 @@ mod tests {
         let id = DeviceStableId::Direct {
             vendor_id: 0x046d,
             product_id: 0xc08d,
-            identity: DeviceIdentity::Unit([0x6b, 0xe9, 0xd3, 0x00]),
+            identity: Some(DeviceIdentity::from_parts(None, [0x6b, 0xe9, 0xd3, 0x00])),
         };
         assert_eq!(id.runtime_key(), "direct:046d:c08d:unit:6be9d300");
         assert_eq!(id.route_key(), "direct:046d:c08d");
@@ -533,7 +681,7 @@ mod tests {
 
         let unknown = DeviceStableId::Unknown {
             slot: 255,
-            identity: DeviceIdentity::Unit([1, 2, 3, 4]),
+            identity: Some(DeviceIdentity::from_parts(None, [1, 2, 3, 4])),
         };
         assert_eq!(unknown.route_key(), unknown.runtime_key());
     }
@@ -547,7 +695,7 @@ mod tests {
         let id = DeviceStableId::Direct {
             vendor_id: 0x046d,
             product_id: 0xc354,
-            identity: DeviceIdentity::from_parts(Some("2603WD7076V8"), [0; 4]),
+            identity: Some(DeviceIdentity::from_parts(Some("2603WD7076V8"), [0; 4])),
         };
         assert_eq!(
             DeviceStableId::direct_route_of_key(&id.route_key()),
