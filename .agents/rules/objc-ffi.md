@@ -28,7 +28,7 @@ files; **keep this table in sync when you add or move one**:
 |---|---|
 | `openlogi-agent/src/activity_macos.rs` | the device-I/O gate's levels: the `IOPMConnection` powerd subscription (hand-declared SPI, see below) and the `CGSessionCopyCurrentDictionary` console read |
 | `openlogi-agent/src/status_item.rs` | safe `objc2` wrappers over `NSStatusItem` / `NSMenu` / `NSMenuItem` |
-| `openlogi-agent/src/tray.rs` | the menu-bar semantics, `MenuTarget` + `SessionTarget` + the `NSApplicationDelegate` `AppDelegate` (`define_class!`), the Accessory `NSApplication` loop, the `NSWorkspace` session (fast-user-switch) notifications, `terminate:` routed to the graceful exit |
+| `openlogi-agent/src/tray.rs` | the menu-bar semantics, `MenuTarget` + `SessionTarget` + the `NSApplicationDelegate` `AppDelegate` (`define_class!`), the Accessory `NSApplication` loop, the `NSWorkspace` session (fast-user-switch) notifications, `terminate:` routed to the graceful exit, the `NSRunningApplication` quit of a running GUI |
 | `openlogi-agent-core/src/watchers/camera.rs` | the CoreMediaIO "camera is running" property read |
 | `openlogi-camera/src/capture_macos.rs` | `AVCaptureSession` capture + the `define_class!` frame delegate, and the Camera TCC prompt |
 | `openlogi-camera/src/macos.rs` | `AVCaptureDevice` enumeration (`class!` + `msg_send!`) |

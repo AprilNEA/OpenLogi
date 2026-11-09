@@ -19,7 +19,11 @@
 //! shutdown — arrives at [`AppDelegate`], which hands it to the same lifecycle
 //! exit as the menu's Quit so firmware capture is restored before the process
 //! is gone. Without a delegate, `NSApplication` answers `terminate:` with a
-//! bare `exit()` that skips restore entirely.
+//! bare `exit()` that skips restore entirely. Both exits take a running GUI
+//! with them ([`quit_gui`]): the agent is OpenLogi's lifetime — the GUI is
+//! on-demand and the menu-bar item can be hidden, so a quit addressed to the
+//! agent is the user quitting OpenLogi — and a GUI left behind would answer
+//! the lost socket by starting the agent again.
 //!
 //! macOS-only. AppKit objects are `Retained<T>` (no #99-style leaks); the run
 //! loop owns the main thread for the agent's lifetime.
@@ -206,7 +210,7 @@ define_class!(
 
         #[unsafe(method(quitOpenLogi:))]
         fn quit_openlogi(&self, _sender: Option<&AnyObject>) {
-            quit_agent();
+            exit_gracefully("menu-bar Quit");
         }
     }
 );
@@ -232,9 +236,9 @@ define_class!(
 
     unsafe impl NSApplicationDelegate for AppDelegate {
         /// `terminate:` asks here before AppKit ends the process. The answer is
-        /// the graceful exit itself: it blocks this main thread until the core
-        /// has restored firmware capture and called `process::exit`, so no
-        /// reply is ever returned.
+        /// the graceful exit itself — GUI, overlay, firmware restore, then
+        /// `process::exit`: it blocks this main thread until the core has
+        /// ended the process, so no reply is ever returned.
         #[unsafe(method(applicationShouldTerminate:))]
         fn application_should_terminate(
             &self,
@@ -267,53 +271,53 @@ fn open_command(command: DeeplinkCommand) {
     open_url(&command.to_url());
 }
 
-/// Menu-bar Quit: the user asked for *OpenLogi* to stop, so take a running GUI
-/// with us before leaving through [`exit_gracefully`].
+/// Hand process termination to the lifecycle that owns firmware capture and
+/// the input hook, after taking the GUI and the overlay with us. Blocks the
+/// calling (main) thread until the core has ended the process.
+///
+/// The one exit for every deliberate termination of *this process* — the
+/// menu's Quit and AppKit's `terminate:` alike — and each of them ends
+/// OpenLogi, not one of its processes (see the module docs). A GUI that is
+/// already quitting — at logout every app receives its own `terminate:` — is
+/// merely asked twice.
 ///
 /// Kept out of `define_class!` so the lint set actually sees the exit — clippy
 /// does not look inside macro expansions.
-fn quit_agent() -> ! {
-    // Tell a *running* GUI to quit too, but don't let `open` cold-launch one
-    // just to immediately quit it (it would flash a window — and on first run
-    // the update-consent prompt — before exiting). The gate keeps the target
-    // warm in the common case, so the blocking `.output()` (which guarantees
-    // Apple-Event delivery) returns at once; a GUI that races to exit after the
-    // check was quitting anyway.
-    if gui_is_running() {
-        let _ = std::process::Command::new("open")
-            .arg(DeeplinkCommand::Quit.to_url())
-            .output();
-    }
-    exit_gracefully("menu-bar Quit")
-}
-
-/// Hand process termination to the lifecycle that owns firmware capture and
-/// the input hook, after asking the overlay to leave. Blocks the calling
-/// (main) thread until the core has ended the process.
-///
-/// The one exit for every deliberate termination of *this process* — the
-/// menu's Quit and AppKit's `terminate:` alike. Unlike [`quit_agent`] it does
-/// not fan out to the GUI: a quit addressed to the agent (Activity Monitor, a
-/// cask uninstall, logout) is not a request to stop anything else, and at
-/// logout the GUI receives its own.
 fn exit_gracefully(trigger: &str) -> ! {
+    quit_gui();
     crate::overlay::evict_on_quit();
     info!(trigger, "requesting graceful agent shutdown");
     let requests = SHUTDOWN_TX.with_borrow(Clone::clone);
     shutdown::request_tray_quit(requests.as_ref(), 0)
 }
 
-/// Whether an OpenLogi GUI process is currently running (prod or dev bundle).
-/// Used to avoid cold-launching the GUI from the Quit handler just to quit it.
-fn gui_is_running() -> bool {
+/// Ask every running OpenLogi GUI (release or dev bundle) to quit: a quit
+/// Apple Event straight to each process, as `osascript`'s `quit app` sends
+/// one. Only running instances are addressed, so nothing is launched just to
+/// be quit (a cold start would flash a window — on first run the
+/// update-consent prompt — before exiting), and LaunchServices is not
+/// consulted, so a GUI running from a bundle already in the Trash is reached
+/// too. AppKit queues the event and returns; the GUI runs its own shutdown
+/// and is gone long before the reflex that would restart the agent may fire.
+///
+/// Callable from any thread — `NSRunningApplication` is `Send + Sync` — which
+/// the uninstall exit on the binary watcher's thread relies on.
+pub(crate) fn quit_gui() {
     // Release and dev; the agent's own id is `brand::AGENT_ID`, so neither
     // matches the agent itself.
     let dev = brand::dev_id(brand::APP_ID);
-    [brand::APP_ID, dev.as_str()].iter().any(|id| {
+    for id in [brand::APP_ID, dev.as_str()] {
         let running =
             NSRunningApplication::runningApplicationsWithBundleIdentifier(&NSString::from_str(id));
-        !running.is_empty()
-    })
+        for gui in &running {
+            let pid = gui.processIdentifier();
+            if gui.terminate() {
+                info!(bundle = id, pid, "asked the GUI to quit");
+            } else {
+                warn!(bundle = id, pid, "could not ask the GUI to quit");
+            }
+        }
+    }
 }
 
 /// Run the agent's AppKit main loop: an `Accessory` `NSApplication` (no Dock

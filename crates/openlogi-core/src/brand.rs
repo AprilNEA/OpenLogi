@@ -282,8 +282,6 @@ pub enum DeeplinkCommand {
     /// Run a manual update check and open Settings on the Updates page, where
     /// its status is rendered.
     CheckForUpdates,
-    /// Quit the GUI.
-    Quit,
 }
 
 impl DeeplinkCommand {
@@ -298,7 +296,6 @@ impl DeeplinkCommand {
             Self::OpenSettings => "open-settings",
             Self::OpenAbout => "open-about",
             Self::CheckForUpdates => "check-for-updates",
-            Self::Quit => "quit",
         }
     }
 
@@ -316,7 +313,6 @@ impl DeeplinkCommand {
             "open-settings" => Some(Self::OpenSettings),
             "open-about" => Some(Self::OpenAbout),
             "check-for-updates" => Some(Self::CheckForUpdates),
-            "quit" => Some(Self::Quit),
             _ => None,
         }
     }
@@ -342,12 +338,11 @@ mod tests {
         is_dev_id, is_openlogi_foreground_id,
     };
 
-    const ALL: [DeeplinkCommand; 5] = [
+    const ALL: [DeeplinkCommand; 4] = [
         DeeplinkCommand::Show,
         DeeplinkCommand::OpenSettings,
         DeeplinkCommand::OpenAbout,
         DeeplinkCommand::CheckForUpdates,
-        DeeplinkCommand::Quit,
     ];
 
     #[test]

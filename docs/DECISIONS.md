@@ -4,6 +4,41 @@ Durable "why we did it this way" records that are not obvious from the code.
 Add a dated entry when a non-obvious architectural or dependency decision is
 made or revisited.
 
+## 2026-11: Every deliberate exit of the agent quits the GUI
+
+The agent is OpenLogi's lifetime: it is the always-on process, the GUI is
+on-demand, and the menu-bar item can be hidden by preference. So a quit
+addressed to the agent — the menu's Quit, an Apple-Event `quit` from
+`osascript`, Activity Monitor, or a cask `uninstall`, and the binary
+watcher's "the app was removed" — is the user quitting OpenLogi, and a GUI
+left behind is not a harmless leftover: its unreachable→spawn reflex answers
+the lost socket by kickstarting the agent again, undoing the quit — or, after
+an uninstall, retrying a service whose binary is gone every 30 s. Until now
+only the menu's Quit took the GUI along; `terminate:` and the uninstall exit
+left it behind.
+
+- **One call, three exits.** `tray::quit_gui` (macOS) and
+  `tray_windows::quit_gui` (Windows) run before the agent requests its own
+  graceful exit: from the menu's Quit, from `applicationShouldTerminate:`, and
+  from the binary watcher's uninstall tick. Signals (`SIGTERM` from launchd,
+  logout, or the stale-agent takeover) and the self-restart on update do not
+  cascade: those have their own owner, and the GUI must survive a replacement.
+- **A quit Apple Event to the running process, not a deep link.** macOS asks
+  each running GUI (release and dev bundle id) through
+  `NSRunningApplication::terminate`, as `osascript`'s `quit app` would. It
+  addresses running instances only, so nothing is cold-launched just to be
+  quit; it does not consult LaunchServices, so it reaches a GUI whose bundle
+  is already in the Trash — which the `open openlogi://quit` dispatch the menu
+  used could not promise; and `NSRunningApplication` is `Send + Sync`, so the
+  binary watcher's thread can call it. Windows keeps its by-PID kill.
+- **The `openlogi://quit` command and the GUI's `SUITE_QUITTING` flag are
+  gone.** The flag was added (2026-08-26) after the reflex resurrected a quit
+  agent mid-teardown; the loss grace `SPAWN_AFTER_LOSS` that landed the next
+  day is the structural guard — the reflex waits 2 s after a lost connection —
+  and the agent quits the GUI before it drops the socket, so the GUI is gone
+  before the reflex may fire. Linux has no GUI quit: it has no tray, and the
+  GUI's spawn of a removed binary fails harmlessly.
+
 ## 2026-11: `0x1b04` reporting is released at arm, not remembered across runs
 
 The temporary diversion bits a capture session writes (`divert`, `rawXY`,
@@ -975,10 +1010,6 @@ mature crates (`tempfile`, `which`, `plist`, `walkdir`, `xshell`, `sysinfo`,
   backends (for example abstract Unix sockets on Linux) and does not preserve
   OpenLogi's data-dir lock-file path, per-role names, and error classification
   closely enough to be a safe deletion.
-- Agent tray Quit's `openlogi://quit` dispatch keeps
-  `std::process::Command::output()` intentionally: it blocks until
-  LaunchServices accepts the Apple Event, while generic opener crates only
-  guarantee process spawn.
 - GUI helper launch keeps `/usr/bin/open -g -n` intentionally: it needs
   LaunchServices-specific flags to start the packaged agent under its own TCC
   identity, which generic opener crates do not expose. (Since 2026-08 it is

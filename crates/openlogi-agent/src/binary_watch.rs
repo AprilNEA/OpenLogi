@@ -18,7 +18,8 @@
 //! is ambiguous for one tick (every replace unlinks before it writes), so it
 //! only means "uninstalled" once it has held for [`MISSING_TICKS_UNTIL_GONE`]
 //! ticks, and then the agent shuts down through its normal path, which drops
-//! the hook and detaches the tap.
+//! the hook and detaches the tap — and takes a running GUI with it, as every
+//! deliberate exit does.
 //!
 //! Limitation: the path is resolved once via `current_exe`, which returns the
 //! fully-resolved target (`/proc/self/exe` on Linux). Installs that update by
@@ -223,6 +224,13 @@ pub fn spawn(requests: ShutdownRequestSender) {
                             path = %path.display(),
                             "own executable is gone — the app was removed; shutting down"
                         );
+                        // The GUI goes too, as on every deliberate exit: left
+                        // behind, its unreachable→spawn reflex would keep
+                        // kickstarting a service whose binary is gone.
+                        #[cfg(target_os = "macos")]
+                        crate::tray::quit_gui();
+                        #[cfg(target_os = "windows")]
+                        crate::tray_windows::quit_gui();
                         let _ = requests.send(ShutdownRequest::Uninstalled);
                         return;
                     }

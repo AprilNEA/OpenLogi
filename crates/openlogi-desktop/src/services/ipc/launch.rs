@@ -12,27 +12,16 @@ use std::path::PathBuf;
 
 use tracing::{info, warn};
 
-/// Set when the agent announced a deliberate suite shutdown (the tray's Quit
-/// arrives as the `openlogi://quit` deep link before the agent exits) — the
-/// unreachable→spawn reflex has been observed resurrecting the agent seconds
-/// after Quit. Never cleared: this process is quitting too.
-static SUITE_QUITTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-/// Record that the user quit the whole suite from the agent's tray, so the
-/// IPC client stops respawning the agent during this GUI's teardown.
-pub fn mark_suite_quitting() {
-    SUITE_QUITTING.store(true, std::sync::atomic::Ordering::Relaxed);
-}
-
 /// Launch the agent once when the socket is unreachable. Detached so it
 /// outlives the GUI (the agent is the always-on process); logs and moves on if
 /// the binary can't be found / started — the user may start it via launchd or by
 /// hand, and the observe loop keeps retrying the connection regardless.
+///
+/// Not guarded against the agent's own deliberate exit: the agent quits this
+/// GUI before it drops the socket, and the reflex waits out
+/// [`super::reflex::SPAWN_AFTER_LOSS`] after a loss, so a GUI being quit is
+/// gone before it could fire.
 pub(super) fn spawn_agent() {
-    if SUITE_QUITTING.load(std::sync::atomic::Ordering::Relaxed) {
-        info!("suite is quitting — leaving the agent down");
-        return;
-    }
     // Kickstart is idempotent, the process comes up supervised, and launchd
     // makes it its own TCC responsible process. Production tries only the two
     // supervised rungs below; direct launch is reserved for dev profiles.
