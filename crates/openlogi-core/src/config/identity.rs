@@ -5,6 +5,7 @@
 //! When the device is asleep its identity is unreadable and only the route is
 //! known, so the entry's `links` table doubles as a route index.
 
+use crate::binding::KeypadPage;
 #[cfg(test)]
 use crate::binding::{Action, ButtonId};
 use crate::config::{Config, DeviceConfig, GKeyOwner, GamingKeyMode};
@@ -380,6 +381,8 @@ pub(super) fn fold(
     // one field here a user typed by hand, so the loss is the most visible.
     fold_option_field!(custom_name);
 
+    fold_keypad_pages(device, legacy.keypad_pages, warn_kept);
+
     if device.identity.is_none() {
         device.identity = legacy.identity.take();
     }
@@ -441,6 +444,25 @@ fn fold_bare_choices(device: &mut DeviceConfig, legacy: &DeviceConfig) {
     }
     if device.gaming_key_mode == GamingKeyMode::default() {
         device.gaming_key_mode = legacy.gaming_key_mode;
+    }
+}
+
+/// The keypad page count of [`fold`], split out to keep that function inside
+/// the workspace's line budget.
+///
+/// A page count has no "unset" to match on: one page is the default, so a
+/// legacy count only displaces a single-page canonical entry. Links have no
+/// override slot for it, so two real counts cannot both survive and the
+/// displaced one is reported through `warn_kept`.
+fn fold_keypad_pages(
+    device: &mut DeviceConfig,
+    legacy_pages: KeypadPage,
+    warn_kept: impl Fn(&str),
+) {
+    if device.keypad_pages == KeypadPage::FIRST {
+        device.keypad_pages = legacy_pages;
+    } else if legacy_pages != KeypadPage::FIRST && legacy_pages != device.keypad_pages {
+        warn_kept("keypad_pages");
     }
 }
 
@@ -1323,6 +1345,48 @@ mod tests {
                 "override: {case}"
             );
             assert_eq!(warned, expected_warnings, "warnings: {case}");
+        }
+    }
+
+    #[test]
+    fn a_legacy_page_count_fills_a_single_page_keypad_or_is_logged_as_lost() {
+        // One page is the default, so it cannot be told from never-set: only
+        // a canonical single page yields to the legacy count. Links have no
+        // override slot for it, so on every route a count the canonical entry
+        // disagrees with is lost and must be logged.
+        const CANONICAL: &str = "unit:6be9d300";
+        const OTHER_ROUTE: &str = "receiver:82839805:slot:1";
+        const LOST: &[&str] = &["keypad_pages"];
+        const KEPT: &[&str] = &[];
+
+        let cases = [
+            (1, 1, 1, KEPT),
+            (1, 3, 3, KEPT),
+            (3, 1, 3, KEPT),
+            (3, 3, 3, KEPT),
+            (2, 3, 2, LOST),
+            (3, 2, 3, LOST),
+        ];
+        let page = |number| KeypadPage::new(number).expect("a page in range");
+
+        for route in [OTHER_ROUTE, CANONICAL] {
+            for (canonical, legacy, expected, expected_warnings) in cases {
+                let mut device = DeviceConfig {
+                    keypad_pages: page(canonical),
+                    ..DeviceConfig::default()
+                };
+                let legacy_entry = DeviceConfig {
+                    keypad_pages: page(legacy),
+                    ..DeviceConfig::default()
+                };
+
+                let warned =
+                    fields_warned_about(|| fold(&mut device, legacy_entry, CANONICAL, route));
+
+                let case = format!("route={route}, canonical={canonical}, legacy={legacy}");
+                assert_eq!(device.keypad_pages, page(expected), "pages: {case}");
+                assert_eq!(warned, expected_warnings, "warnings: {case}");
+            }
         }
     }
 }
