@@ -315,9 +315,10 @@ impl SharedHandles {
 
     /// Write `fn_lock` to the keyboard at `route` and return its echo. When a
     /// newer Fn-lock write for the keyboard is requested before this one gets
-    /// its turn, this one reads the keyboard instead of writing a value that
-    /// is about to be replaced. Waiting for the turn does not count against
-    /// the write's deadline.
+    /// its turn, this one writes nothing and answers
+    /// [`WriteError::WriteSuperseded`], so its caller saves nothing: the
+    /// newer write decides the state. Waiting for the turn does not count
+    /// against the write's deadline.
     pub async fn set_fn_lock(
         &self,
         route: &DeviceRoute,
@@ -329,7 +330,11 @@ impl SharedHandles {
                 HidppOperation::WriteFnLock,
                 &ticket,
                 |c| async move { openlogi_hid::set_fn_lock_on(&c, fn_lock).await },
-                |c| async move { openlogi_hid::get_fn_lock_on(&c).await },
+                |_| async {
+                    Err(WriteError::WriteSuperseded {
+                        operation: HidppOperation::WriteFnLock,
+                    })
+                },
             )
             .await
     }

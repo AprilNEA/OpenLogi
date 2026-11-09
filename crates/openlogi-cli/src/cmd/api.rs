@@ -287,8 +287,8 @@ async fn fn_lock(
             }
             let observed =
                 agent::call(client.set_fn_lock(context::current(), route, requested)).await??;
-            // A superseded agent request reads instead of writing; Ok alone
-            // does not guarantee that our requested state won.
+            // A superseded request answers `WriteSuperseded`; a keyboard
+            // that answers with another state did not take the requested one.
             if observed.fn_lock != requested {
                 return Err(ApiError::new(
                     "readback_mismatch",
