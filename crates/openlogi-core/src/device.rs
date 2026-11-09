@@ -250,13 +250,24 @@ pub struct Capabilities {
     /// The lighting can play an animated effect — breathing or a colour
     /// cycle — through HID++ `0x8070 ColorLedEffects`. Measured only from
     /// feature-table presence; a zone that lists neither effect shows the
-    /// colour instead. Appended after `disable_keys`: crosses the IPC and the
-    /// persisted identity.
+    /// colour instead. Read it through [`Self::animated_lighting`], which
+    /// also asks for `lighting`. Appended after `disable_keys`: crosses the
+    /// IPC and the persisted identity.
     #[serde(default)]
     pub lighting_effects: bool,
 }
 
 impl Capabilities {
+    /// Whether the Lighting tab can offer animated effects: the device has a
+    /// lighting panel at all, and its `0x8070` engine plays them. The one
+    /// verdict every reader asks, so a record carrying `lighting_effects`
+    /// without `lighting` (a hand-edited or partial snapshot) offers no
+    /// effects rather than effects for a hidden tab.
+    #[must_use]
+    pub const fn animated_lighting(&self) -> bool {
+        self.lighting && self.lighting_effects
+    }
+
     /// A gaming device with no ReprogControls to divert controls through: it
     /// carries the gaming control tables (`0x8100` / `0x8110`) instead. Only
     /// its OS-visible middle/back/forward can be remapped, by the input hook,
@@ -1089,6 +1100,15 @@ mod tests {
         assert!(!Capabilities::from_feature_ids(&[0x0001, 0x1982]).lighting);
         // Only the 0x8070 effect engine plays breathing and colour cycles.
         assert!(Capabilities::from_feature_ids(&[0x0001, 0x8070]).lighting_effects);
+        assert!(Capabilities::from_feature_ids(&[0x0001, 0x8070]).animated_lighting());
+        let effects_without_a_panel = Capabilities {
+            lighting: false,
+            ..Capabilities::from_feature_ids(&[0x0001, 0x8070])
+        };
+        assert!(
+            !effects_without_a_panel.animated_lighting(),
+            "effects need the lighting panel they play on"
+        );
         for id in [0x8071, 0x8080, 0x8081] {
             assert!(
                 !Capabilities::from_feature_ids(&[0x0001, id]).lighting_effects,
