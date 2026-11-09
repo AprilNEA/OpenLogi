@@ -634,6 +634,7 @@ impl super::AppState {
         self.devices.replace(records, selected);
         self.devices.sessions.remove(&device_key);
         self.pointer.reads.remove(&device_key);
+        self.disable_keys_reads.forget(&device_key);
         StateEvent::InventoryChanged.into()
     }
 }
