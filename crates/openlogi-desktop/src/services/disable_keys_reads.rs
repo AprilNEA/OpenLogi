@@ -257,6 +257,14 @@ impl DisableKeysReads {
         }
     }
 
+    /// Forget a device that left the catalog: its subscription goes as in
+    /// [`Self::remove`], and so does the snapshot that method retains, since
+    /// there is no card left to render it.
+    pub(crate) fn forget(&mut self, key: &DeviceKey) {
+        self.remove(key);
+        self.confirmed.remove(key);
+    }
+
     /// Forget devices no longer represented by any catalog record.
     pub(crate) fn retain_present(&mut self, present: impl Fn(&str) -> bool) {
         let removed: BTreeSet<_> = self
@@ -267,8 +275,7 @@ impl DisableKeysReads {
             .cloned()
             .collect();
         for key in removed {
-            self.remove(&key);
-            self.confirmed.remove(&key);
+            self.forget(&key);
         }
     }
 
