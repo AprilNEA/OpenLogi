@@ -223,6 +223,30 @@ pub struct Capabilities {
     /// HID++ `0x8110` button spy.
     #[serde(default)]
     pub button_spy: bool,
+    /// A headset's sidetone level can be read and changed — HID++ `0x8300
+    /// Sidetone`. Appended after `button_spy`: crosses the IPC and the
+    /// persisted identity.
+    #[serde(default)]
+    pub sidetone: bool,
+    /// A G-series keyboard's G-key column can be handed to software — HID++
+    /// `0x8010 GamingGKeys`. Appended after `sidetone`: crosses the IPC and
+    /// the persisted identity.
+    #[serde(default)]
+    pub g_keys: bool,
+    /// The keyboard reports its M1–M3 bank keys — HID++ `0x8020
+    /// GamingMKeys`. Appended: crosses the IPC and the persisted identity.
+    #[serde(default)]
+    pub m_keys: bool,
+    /// The keyboard reports its MR key — HID++ `0x8030 MacroRecord`.
+    /// Appended: crosses the IPC and the persisted identity.
+    #[serde(default)]
+    pub macro_record: bool,
+    /// The device can be moved to another Easy-Switch host slot — HID++
+    /// `0x1814 ChangeHost`. Unlike [`Self::easy_switch`], it does not need
+    /// the slots' names. Appended: crosses the IPC and the persisted
+    /// identity.
+    #[serde(default)]
+    pub change_host: bool,
 }
 
 impl Capabilities {
@@ -278,6 +302,11 @@ impl Capabilities {
             disable_keys: ids.contains(&0x4521),
             onboard_profiles: ids.contains(&0x8100),
             button_spy: ids.contains(&0x8110),
+            sidetone: ids.contains(&0x8300),
+            g_keys: ids.contains(&0x8010),
+            m_keys: ids.contains(&0x8020),
+            macro_record: ids.contains(&0x8030),
+            change_host: ids.contains(&0x1814),
         }
     }
 
@@ -826,6 +855,11 @@ mod tests {
                     disable_keys: false,
                     onboard_profiles: false,
                     button_spy: false,
+                    sidetone: false,
+                    g_keys: false,
+                    m_keys: false,
+                    macro_record: false,
+                    change_host: false,
                 }),
                 settings_revision: 0,
                 hidpp10: false,
@@ -950,6 +984,11 @@ mod tests {
                 disable_keys: false,
                 onboard_profiles: false,
                 button_spy: false,
+                sidetone: false,
+                g_keys: false,
+                m_keys: false,
+                macro_record: false,
+                change_host: false,
             }
         );
         assert!(!Capabilities::from_feature_ids(&[0x0003, 0x1b04]).thumbwheel);
@@ -978,8 +1017,17 @@ mod tests {
                 disable_keys: false,
                 onboard_profiles: false,
                 button_spy: false,
+                sidetone: false,
+                g_keys: false,
+                m_keys: false,
+                macro_record: false,
+                change_host: false,
             }
         );
+        // A G713: the gaming-key features and onboard profiles, no
+        // ReprogControls — its G-keys never make `buttons` true.
+        let g713 = Capabilities::from_feature_ids(&[0x0001, 0x8010, 0x8020, 0x8030, 0x8100]);
+        assert!(g713.g_keys && g713.m_keys && g713.macro_record && !g713.buttons);
         // No driving features → nothing offered.
         assert_eq!(
             Capabilities::from_feature_ids(&[0x0000, 0x0003]),
@@ -999,6 +1047,9 @@ mod tests {
         // alone switches channels but cannot name them.
         assert!(Capabilities::from_feature_ids(&[0x0001, 0x1815]).easy_switch);
         assert!(!Capabilities::from_feature_ids(&[0x0001, 0x1814]).easy_switch);
+        // 0x1814 ChangeHost moves the device between slots without 0x1815.
+        assert!(Capabilities::from_feature_ids(&[0x0001, 0x1814]).change_host);
+        assert!(!Capabilities::from_feature_ids(&[0x0001, 0x1815]).change_host);
         // 0x2205 sets the speed only where no DPI feature does (M590, MX
         // Ergo); a mouse with both keeps its DPI control.
         let scaled = Capabilities::from_feature_ids(&[0x0001, 0x2205]);
@@ -1009,6 +1060,9 @@ mod tests {
         // changed; the 0x19b0 haptic engine alone does not.
         assert!(Capabilities::from_feature_ids(&[0x0001, 0x19c0]).force_sensing);
         assert!(!Capabilities::from_feature_ids(&[0x0001, 0x19b0]).force_sensing);
+        // The G535's table: sidetone, and battery through 0x1f20.
+        let headset = Capabilities::from_feature_ids(&[0x0001, 0x0003, 0x0005, 0x8300, 0x1f20]);
+        assert!(headset.sidetone && !headset.buttons && !headset.pointer);
     }
 
     #[test]

@@ -3,16 +3,19 @@
 use std::collections::BTreeMap;
 
 use openlogi_core::config::{
-    FlowConfig, FlowConfigParts, FlowDevice, FlowEdge, FlowHostSlot, FlowLayout, FlowPeer,
-    FlowPeerName, FlowPublicKey,
+    Config, ConfigFile, FlowConfig, FlowConfigParts, FlowDevice, FlowEdge, FlowHostSlot,
+    FlowLayout, FlowPeer, FlowPeerName, FlowPublicKey,
 };
 use openlogi_core::device_order::PhysicalDeviceKey;
-use openlogi_ipc::FlowLinkState;
+use openlogi_ipc::{FlowLinkState, FlowPairingPeer, FlowPairingPhase, FlowPlatform, FlowStatus};
 
 use crate::services::assets::AssetResolver;
+use crate::services::ipc::Command;
 use crate::state::flow::{forgotten, placed, readiness, with_channel};
 use crate::state::tests::direct_inventory;
-use crate::state::{AppState, FlowDeviceRow, FlowHealth, FlowHost, FlowIssue, Sources};
+use crate::state::{
+    AppState, ConfigPersistence, FlowDeviceRow, FlowHealth, FlowHost, FlowIssue, Sources,
+};
 
 fn name(name: &str) -> FlowPeerName {
     FlowPeerName::new(name).unwrap()
@@ -418,5 +421,62 @@ fn a_device_named_by_its_unit_id_is_found_when_listed_by_its_serial() {
             .flow_readiness()
             .issues
             .contains(&FlowIssue::DevicesAway(name("work")))
+    );
+}
+
+/// The agent saves a paired computer into `config.toml` itself. Once its
+/// snapshot says so, the window adopts that file: the computer shows, and the
+/// next save from here does not find the file changed under it.
+#[test]
+fn a_computer_the_agent_paired_is_adopted_before_the_next_save() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(openlogi_core::paths::CONFIG_FILE);
+    let (config, file) = ConfigFile::load_from_path(&path).unwrap();
+    let resolver = AssetResolver::new();
+    let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = AppState::new(Sources {
+        persistence: ConfigPersistence::UserFile(file),
+        ..Sources::in_memory(config, &resolver, commands)
+    });
+
+    let (mut saved, mut agent_file) = ConfigFile::load_from_path(&path).unwrap();
+    saved.flow = FlowConfig::try_from(FlowConfigParts {
+        enabled: false,
+        require_modifier: false,
+        peers: vec![FlowPeer {
+            name: name("devbox"),
+            public_key: FlowPublicKey::from_bytes([9; 32]),
+            addresses: Vec::new(),
+        }],
+        layout: Vec::new(),
+        devices: Vec::new(),
+    })
+    .unwrap();
+    agent_file.save(&saved).unwrap();
+    while receiver.try_recv().is_ok() {}
+
+    let _ = state.set_flow_status(&FlowStatus {
+        enabled: false,
+        peers: Vec::new(),
+        pairing: Some(FlowPairingPhase::Paired {
+            peer: FlowPairingPeer {
+                name: "devbox".into(),
+                public_key: FlowPublicKey::from_bytes([9; 32]),
+                platform: FlowPlatform::Linux,
+            },
+            name: name("devbox"),
+        }),
+    });
+    assert!(state.flow_config().peer("devbox").is_some());
+    assert!(
+        matches!(receiver.try_recv(), Ok(Command::ReloadConfig(_))),
+        "the agent confirms the revision the window adopted"
+    );
+
+    let _ = state.commit_flow_edge(&name("devbox"), FlowEdge::Left);
+    assert_eq!(state.config_issue(), None);
+    assert_eq!(
+        edge_of(&Config::load_from_path(&path).unwrap().flow, "devbox"),
+        Some(FlowEdge::Left)
     );
 }

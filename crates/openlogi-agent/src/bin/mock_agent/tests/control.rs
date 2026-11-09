@@ -1,9 +1,10 @@
 //! The control console's commands, parsed as a developer types them and
 //! applied through the mock as a client would then see them.
 
-use openlogi_ipc::AgentClient;
+use openlogi_ipc::{AgentClient, FlowLinkState};
 
 use super::super::control::{Command, Fault, parse};
+use super::super::flow::FlowCommand;
 use super::super::*;
 use super::{demo_state, mouse_route, test_state};
 
@@ -168,11 +169,11 @@ fn indicator_and_session_commands_parse() {
             Some(Command::Advance(Duration::from_secs(30))),
         ),
         (
-            "flow Work PC unstable",
-            Some(Command::FlowLink {
+            "flow link Work PC unstable",
+            Some(Command::Flow(FlowCommand::Link {
                 peer: "Work PC".to_owned(),
                 state: FlowLinkState::Degraded,
-            }),
+            })),
         ),
         ("disconnect", Some(Command::Disconnect)),
     ];
@@ -206,6 +207,9 @@ fn malformed_commands_are_refused() {
         "advance -1",
         "advance soon",
         "devices now",
+        "flow Work PC unstable",
+        "flow link unstable",
+        "flow link Work PC maybe",
         "disconnect all",
     ] {
         parse(line).expect_err(line);

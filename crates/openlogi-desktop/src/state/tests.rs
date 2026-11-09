@@ -34,6 +34,7 @@ use crate::services::ipc::SetLightManualPower;
 
 use super::bindings::apply_thumbwheel_pair;
 use super::devices::build_device_list;
+use super::devices::presence::INVENTORY_MISS_GRACE;
 use super::dpi::resolve_dpi;
 use super::scroll::set_scroll_resolution_if_supported;
 use super::smartshift::{
@@ -41,8 +42,8 @@ use super::smartshift::{
     smartshift_write_outcome,
 };
 use super::{
-    AppState, ConfigPersistence, DeviceKey, DeviceRecord, INVENTORY_MISS_GRACE, LightCommandStatus,
-    Load, Sources, StateEvent,
+    AppState, ConfigPersistence, DeviceKey, DeviceRecord, LightCommandStatus, Link, Load, Presence,
+    Sources, StateEvent,
 };
 
 mod asset_targets;
@@ -64,6 +65,7 @@ mod pointer_speed;
 mod profile_scope;
 mod reload;
 mod report_rate;
+mod sidetone;
 mod smartshift;
 mod smooth_wheel;
 mod transient_identity;

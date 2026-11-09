@@ -27,6 +27,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt as _;
+use openlogi_agent_core::action_ring::ActionRingRelease;
 use openlogi_agent_core::backlight_overlay::BacklightOverlayManager;
 use openlogi_agent_core::event_monitor::EventMonitor;
 use openlogi_agent_core::observable::ObservableState;
@@ -342,12 +343,20 @@ impl Armed {
                     ActionRequest::ShowActionsRing { device_key } => {
                         running.begin_action_ring(device_key.as_deref()).await;
                     }
+                    ActionRequest::ActionsRingTriggerReleased => running.release_action_ring(),
                     ActionRequest::TurnKeypadPage { device_key, turn } => {
                         running
                             .orchestrator
                             .lock()
                             .await
                             .turn_keypad_page(device_key.as_deref(), turn);
+                    }
+                    ActionRequest::SettingsWritten { route } => {
+                        running
+                            .orchestrator
+                            .lock()
+                            .await
+                            .announce_settings_changed(&route);
                     }
                 },
                 Ok(()) = ring.changed() => {
@@ -601,6 +610,26 @@ impl Running {
             // overlay can only hover once it has observed the invocation.
             self.ring_haptics
                 .begin_session(invocation.session_id, haptic_route);
+        }
+    }
+
+    /// The trigger that opened the ring was let go: a held release chooses
+    /// the highlighted slot, or closes the ring over none.
+    fn release_action_ring(&self) {
+        match self.inputs.ring.release() {
+            ActionRingRelease::Kept => {}
+            ActionRingRelease::Cancelled { session_id } => {
+                self.ring_haptics.end_session(session_id);
+            }
+            ActionRingRelease::Activated {
+                session_id,
+                activation,
+            } => server::run_ring_activation(
+                &self.inputs.dispatcher,
+                &self.ring_haptics,
+                session_id,
+                activation,
+            ),
         }
     }
 

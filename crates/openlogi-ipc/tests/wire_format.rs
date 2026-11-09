@@ -34,7 +34,8 @@ use std::fmt::Write;
 use bincode::Options;
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{
-    Action, ActionRingIcon, ActionRingSlot, ButtonId, GridKey, GridSlot, KeyCombo, KeypadPage,
+    Action, ActionRingIcon, ActionRingSize, ActionRingSlot, ButtonId, GKey, GKeyProfile, GKeySlot,
+    GridKey, GridSlot, KeyCombo, KeypadPage, ModeKey,
 };
 use openlogi_core::config::{
     ConfigRevision, FlowPeerName, FlowPublicKey, Lighting, ScrollResolution,
@@ -50,17 +51,19 @@ use openlogi_core::hid::{
     DpiInfo, EasySwitchHosts, EasySwitchSlot, FnLockState, ForceSensingInfo, HidppFeatureErrorKind,
     HidppOperation, HostConnection, HostOsInfo, HostOsKind, LightCommand, OnboardMode,
     OnboardProfile, OnboardState, PasskeyMethod, ProfileIndex, ReceiverSelector, ReportRate,
-    ReportRateInfo, ScrollReportingTarget, ScrollWheelMode, SmartShiftAutoDisengage,
+    ReportRateInfo, ScrollReportingTarget, ScrollWheelMode, SidetoneLevel, SmartShiftAutoDisengage,
     SmartShiftMode, SmartShiftStatus, SmartShiftThreshold, TunableTorque, WriteError,
 };
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, ActionRingPresentation, AgentRequest,
     AgentResponse, AgentSnapshot, AgentStatus, BacklightObservation, ChosenLight, ClientKind,
-    ConfigReloadError, FlowLinkState, FlowPeerStatus, FlowStatus, ForegroundApps, FoundDevice,
-    Identity, InventoryHealth, LockKeyChange, LockKeyObservation, MonitorEvent, Notice, NoticeKind,
-    NoticeObservation, Observation, ObservedLight, PROTOCOL_VERSION, PairingCommandError,
-    PairingFailure, PairingPhase, PairingUpdate, RingObservation, SavedConfig, SavedConfigVerdict,
-    SecureInput, VirtualKeyboardStatus,
+    ConfigReloadError, FlowIdentity, FlowLinkState, FlowPairTarget, FlowPairingCommandError,
+    FlowPairingFailure, FlowPairingPeer, FlowPairingPhase, FlowPeerStatus, FlowPlatform,
+    FlowStatus, ForegroundApps, FoundDevice, Identity, InventoryHealth, LockKeyChange,
+    LockKeyObservation, MonitorEvent, Notice, NoticeKind, NoticeObservation, Observation,
+    ObservedLight, PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingPhase,
+    PairingUpdate, RingObservation, SavedConfig, SavedConfigVerdict, SecureInput,
+    VirtualKeyboardStatus,
 };
 use succession::{Compat, Run};
 
@@ -116,7 +119,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// unreleased version and leave this pin alone (`crates/openlogi-ipc/AGENTS.md`).
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 44);
+    assert_eq!(PROTOCOL_VERSION, 46);
 }
 
 #[test]
@@ -377,6 +380,32 @@ fn reload_saved_config() {
     );
 }
 
+/// The sidetone calls follow the saved-config verdict, and carry the level
+/// as one byte.
+#[test]
+fn sidetone_calls() {
+    let route = DeviceRoute::Direct {
+        vendor_id: 0x046d,
+        product_id: 0x0ac4,
+    };
+    let level = SidetoneLevel::try_new(40).expect("a level in range");
+    assert_wire(&HidppOperation::ReadSidetone, "1f");
+    assert_wire(&HidppOperation::WriteSidetone, "20");
+    assert_wire(&level, "28");
+    assert_wire(&Ok::<SidetoneLevel, WriteError>(level), "0028");
+    assert_wire(
+        &AgentRequest::ReadSidetone {
+            route: route.clone(),
+        },
+        "3102fb6d04fbc40a",
+    );
+    assert_wire(
+        &AgentRequest::SetSidetone { route, level },
+        "3202fb6d04fbc40a28",
+    );
+    assert_wire(&AgentResponse::SetSidetone(Ok(level)), "320028");
+}
+
 /// The overlay long-polls the backlight indicator by generation, like
 /// the other observe calls.
 #[test]
@@ -471,6 +500,16 @@ fn key_combo_modifier_bits() {
     assert_wire(&combo("PrintScreen"), "0046");
 }
 
+/// A bare-modifier hold crosses the wire as its variant index and one byte of
+/// modifier bits. Appended at the end of `Action`, so every earlier index is
+/// unchanged.
+#[test]
+fn hold_modifier_bits() {
+    use openlogi_core::binding::Action;
+    let ctrl_shift = "Ctrl+Shift".parse().expect("valid modifier set");
+    assert_wire(&Action::HoldModifier(ctrl_shift), "3d06");
+}
+
 /// The agent identity is frozen: a helper from any build has to be able to
 /// decode it, so both halves stay plain `u64`s and this golden never changes.
 #[test]
@@ -495,8 +534,10 @@ fn action_ring_types() {
                 },
             )]),
             language: Some("fr".to_string()),
+            size: ActionRingSize::Large,
         },
-        "2a010003437574000701026672",
+        // The size is one trailing byte after the locale.
+        "2a01000343757400070102667202",
     );
     // The literal flag is one byte between label and icon.
     assert_wire(
@@ -507,6 +548,8 @@ fn action_ring_types() {
         },
         "034375740107",
     );
+    assert_wire(&ActionRingSize::Small, "00");
+    assert_wire(&ActionRingSize::Large, "02");
     assert_wire(&ActionRingSlot::Top, "00");
     assert_wire(&ActionRingSlot::TopLeft, "07");
     assert_wire(&ActionRingIcon::Keyboard, "07");
@@ -528,6 +571,8 @@ fn action_ring_types() {
     );
     assert_wire(&ActionRingCommandError::SessionNotFound, "00");
     assert_wire(&ActionRingCommandError::SlotEmpty, "01");
+    // Appended after the Flow pairing methods.
+    assert_wire(&AgentRequest::ActionRingUnhover { session_id: 7 }, "3907");
     assert_wire(&HidppOperation::WriteFnLock, "0c");
     assert_wire(&HidppOperation::PlayHaptic, "0e");
     assert_wire(&HidppOperation::ReadFnLock, "0f");
@@ -552,6 +597,19 @@ fn keypad_page_actions_and_slots() {
         }),
         "1070616765323a677269644d6964646c65",
     );
+}
+
+/// A G-key's slot and an M key cross the wire by their persisted names.
+#[test]
+fn g_key_slots_and_mode_keys() {
+    assert_wire(
+        &ButtonId::GKey(GKeySlot {
+            profile: GKeyProfile::M2,
+            key: GKey::G1,
+        }),
+        "084d323a4b65794731",
+    );
+    assert_wire(&ButtonId::ModeKey(ModeKey::MacroRecord), "054b65794d52");
 }
 
 #[test]
@@ -635,7 +693,7 @@ fn agent_snapshot() {
     };
     assert_wire(
         &snapshot,
-        "010001010705302e362e3601000000000000000000000000",
+        "010001010705302e362e360100000000000000000000000000",
     );
 
     // The observation is the snapshot with its generation in front.
@@ -645,7 +703,7 @@ fn agent_snapshot() {
     };
     assert_wire(
         &observed,
-        "03010001010705302e362e3601000000000000000000000000",
+        "03010001010705302e362e360100000000000000000000000000",
     );
 }
 
@@ -656,7 +714,7 @@ fn flow_status() {
     assert_wire(&FlowLinkState::Connected, "00");
     assert_wire(&FlowLinkState::Degraded, "01");
     assert_wire(&FlowLinkState::Lost, "02");
-    assert_wire(&FlowStatus::default(), "0000");
+    assert_wire(&FlowStatus::default(), "000000");
     assert_wire(
         &FlowStatus {
             enabled: true,
@@ -665,10 +723,121 @@ fn flow_status() {
                 public_key: FlowPublicKey::from_bytes([0xab; 32]),
                 state: FlowLinkState::Degraded,
             }],
+            pairing: Some(FlowPairingPhase::Searching),
         },
         "0101046465736b48656432353531393a\
          61626162616261626162616261626162616261626162616261626162616261626162616261626162\
-         61626162616261626162616261626162616261626162616201",
+         616261626162616261626162616261626162616261626162010100",
+    );
+}
+
+/// Flow pairing: the six methods append after `set_sidetone`, and every
+/// phase, failure, and command error is wire format.
+#[test]
+fn flow_pairing() {
+    let key = FlowPublicKey::from_bytes([0xcd; 32]);
+    let key_hex = "48656432353531393a".to_owned() + &"6364".repeat(32);
+    let peer = FlowPairingPeer {
+        name: "iMac".into(),
+        public_key: key,
+        platform: FlowPlatform::Macos,
+    };
+    let peer_hex = format!("04694d6163{key_hex}01");
+
+    assert_wire(&AgentRequest::ReadFlowIdentity {}, "33");
+    assert_wire(&AgentRequest::StartFlowPairing {}, "34");
+    assert_wire(
+        &AgentRequest::PairFlowPeer {
+            target: FlowPairTarget::Nearby(key),
+        },
+        &format!("3500{key_hex}"),
+    );
+    assert_wire(
+        &AgentRequest::PairFlowPeer {
+            target: FlowPairTarget::Address("10.0.0.7".into()),
+        },
+        "35010831302e302e302e37",
+    );
+    assert_wire(&AgentRequest::ConfirmFlowPairing {}, "36");
+    assert_wire(&AgentRequest::CancelFlowPairing {}, "37");
+    assert_wire(&AgentRequest::StopFlowPairing {}, "38");
+
+    assert_wire(
+        &FlowIdentity {
+            machine_name: "desk".into(),
+            public_key: key,
+        },
+        &format!("046465736b{key_hex}"),
+    );
+    assert_wire(&FlowPlatform::Unknown, "00");
+    assert_wire(&FlowPlatform::Linux, "03");
+
+    assert_wire(&FlowPairingPhase::Searching, "00");
+    assert_wire(
+        &FlowPairingPhase::Found(vec![peer.clone()]),
+        &format!("0101{peer_hex}"),
+    );
+    assert_wire(&FlowPairingPhase::Connecting { peer: None }, "0200");
+    assert_wire(
+        &FlowPairingPhase::ShowingCode {
+            peer: peer.clone(),
+            code: "418672".into(),
+        },
+        &format!("03{peer_hex}06343138363732"),
+    );
+    assert_wire(
+        &FlowPairingPhase::WaitingForPeer {
+            peer: peer.clone(),
+            code: "418672".into(),
+        },
+        &format!("04{peer_hex}06343138363732"),
+    );
+    assert_wire(
+        &FlowPairingPhase::Paired {
+            peer: peer.clone(),
+            name: FlowPeerName::new("iMac").expect("valid peer name"),
+        },
+        &format!("05{peer_hex}04694d6163"),
+    );
+    assert_wire(
+        &FlowPairingPhase::Failed {
+            peer: Some(peer),
+            reason: FlowPairingFailure::PeerCancelled,
+        },
+        &format!("0601{peer_hex}00"),
+    );
+
+    for (index, reason) in [
+        FlowPairingFailure::PeerCancelled,
+        FlowPairingFailure::CodeMismatch,
+        FlowPairingFailure::TimedOut,
+        FlowPairingFailure::Unreachable,
+        FlowPairingFailure::PeerBusy,
+        FlowPairingFailure::IncompatibleVersion,
+        FlowPairingFailure::ConnectionLost,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_wire(&reason, &format!("{index:02x}"));
+    }
+    assert_wire(
+        &FlowPairingFailure::SaveFailed {
+            message: "full".into(),
+        },
+        "070466756c6c",
+    );
+
+    let refused = |error: FlowPairingCommandError| Err::<(), _>(error);
+    assert_wire(&refused(FlowPairingCommandError::NotStarted), "0100");
+    assert_wire(&refused(FlowPairingCommandError::Busy), "0101");
+    assert_wire(&refused(FlowPairingCommandError::UnknownPeer), "0102");
+    assert_wire(&refused(FlowPairingCommandError::NothingToConfirm), "0103");
+    assert_wire(
+        &refused(FlowPairingCommandError::Unavailable {
+            message: "port".into(),
+        }),
+        "010404706f7274",
     );
 }
 
@@ -778,6 +947,11 @@ fn device_inventory() {
                 disable_keys: false,
                 onboard_profiles: false,
                 button_spy: false,
+                sidetone: true,
+                g_keys: false,
+                m_keys: false,
+                macro_record: false,
+                change_host: false,
             }),
             settings_revision: 7,
             hidpp10: false,
@@ -785,7 +959,7 @@ fn device_inventory() {
     }];
     assert_wire(
         &inventory,
-        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b00001010150020001030106323134304c5a0102030400010100fb34b0fb8240000b0101010000010101010100010101010101010000000700",
+        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b00001010150020001030106323134304c5a0102030400010100fb34b0fb8240000b01010100000101010101000101010101010100000001000000000700",
     );
 }
 

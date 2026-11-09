@@ -1,0 +1,45 @@
+# Owner: openlogi-agent's pairing::PublishedSession::transition — the one
+# writer of the published pairing phase. It publishes SessionOwner::phase, the
+# session owner's projection, after every transition and before the owner's
+# lock is released. ObservableState::set_pairing is the cell's only pairing
+# setter.
+id: agent-pairing-phase-owner
+language: rust
+severity: error
+message: The published pairing phase is SessionOwner::phase, published only by PublishedSession::transition (openlogi-agent src/pairing.rs); run a SessionOwner transition instead of writing the phase here.
+note: |
+  Eleven sites hand-wrote the phase beside the owner's own state, and a second
+  setter accumulated discovered devices in the cell itself. Ordering comments
+  and a generation check kept the copies aligned. See "Single source of truth"
+  in AGENTS.md.
+files:
+  - crates/openlogi-agent/**/*.rs
+  - crates/openlogi-agent-core/**/*.rs
+rule:
+  any:
+    - all:
+        - pattern: $CELL.set_pairing($$$ARGS)
+        - not:
+            inside:
+              kind: function_item
+              stopBy: end
+              has:
+                field: name
+                regex: '^transition$'
+              inside:
+                kind: impl_item
+                stopBy: end
+                has:
+                  field: type
+                  regex: '^PublishedSession$'
+    - all:
+        - any:
+            - pattern: snapshot.pairing = $VALUE
+            - pattern: snapshot.pairing.take()
+        - not:
+            inside:
+              kind: function_item
+              stopBy: end
+              has:
+                field: name
+                regex: '^set_pairing$'

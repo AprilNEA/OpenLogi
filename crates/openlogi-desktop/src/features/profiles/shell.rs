@@ -1,11 +1,12 @@
 //! Reusable profile tabs and feature-independent controls.
 
+use crate::ui::theme::FocusRingStyle as _;
 use gpui::{
     App, Entity, InteractiveElement, IntoElement, ParentElement, RenderOnce, Role,
     StatefulInteractiveElement as _, Styled, Window, div, img, prelude::FluentBuilder as _, px,
 };
-use gpui_base::Button as BaseButton;
-use gpui_component::{
+use gpui_kit::base::Button as BaseButton;
+use gpui_kit::component::{
     IconName, Sizable as _,
     button::ButtonVariants as _,
     h_flex,
@@ -17,7 +18,7 @@ use super::catalog::{AppCatalogPicker, ApplicationIconState, ProfileIconCache};
 use super::picker::add_app_popover;
 use super::{ProfileChoice, ProfileScopeActions, ProfileScopeModel};
 use crate::ui::components::control_button;
-use crate::ui::theme::{self, Palette, SelectableStyle as _, Typography as _};
+use crate::ui::theme::{self, Palette, PressableStyle as _, SelectableStyle as _, Typography as _};
 
 /// Icon edge inside single-line profile tabs.
 const TAB_ICON_EDGE: f32 = 18.;
@@ -175,20 +176,8 @@ fn profile_tab(
         .text_body()
         .text_color(pal.text_primary)
         .selected_fill(selected)
-        .hover(move |tab| {
-            tab.bg(if selected {
-                theme::accent_tint_hover()
-            } else {
-                pal.control_hover
-            })
-        })
-        .focus_visible(move |tab| {
-            tab.bg(if selected {
-                theme::accent_tint_hover()
-            } else {
-                pal.control_hover
-            })
-        })
+        .pressable_fill(selected, pal)
+        .focus_visible(move |style| style.focus_ring(pal))
         .children(leading)
         .child(label)
 }

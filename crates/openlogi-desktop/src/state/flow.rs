@@ -13,11 +13,16 @@ use openlogi_core::config::{
 };
 use openlogi_core::device::DeviceKind;
 use openlogi_core::device_order::PhysicalDeviceKey;
-use openlogi_ipc::{FlowLinkState, FlowStatus};
+use openlogi_ipc::{
+    FlowLinkState, FlowPairTarget, FlowPairingCommandError, FlowPairingPhase, FlowStatus,
+};
 use tracing::warn;
 
 use super::events::StateEvents;
 use super::{AppState, Load, StateEvent};
+use crate::services::ipc::{
+    CancelFlowPairing, Command, ConfirmFlowPairing, PairFlowPeer, StartFlowPairing, StopFlowPairing,
+};
 
 /// A computer one of a device's Easy-Switch channels leads to.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -397,7 +402,7 @@ impl AppState {
                 .map_or(identity, |device| device.key().clone());
             // A device reached on two routes has a record for each; like the
             // agent, the online, addressable one decides.
-            let online = record.online && record.route.is_some();
+            let online = record.addressable_route().is_some();
             let switchable = !record.hidpp10;
             if let Some(row) = rows.iter_mut().find(|row| row.key == key) {
                 row.online |= online;
@@ -514,7 +519,91 @@ impl AppState {
         if self.agent.flow == *status {
             return StateEvents::none();
         }
+        let phase_changed = self.agent.flow.pairing != status.pairing;
+        if phase_changed {
+            // A refusal belongs to the phase it was refused in.
+            self.agent.flow_pairing_refusal = None;
+        }
         self.agent.flow = status.clone();
+        let events = StateEvents::from(StateEvent::FlowChanged);
+        // The agent saved the peer into `config.toml` itself. Adopt that file
+        // now: the next save from here would otherwise find it changed and
+        // refuse to overwrite it.
+        if phase_changed && matches!(status.pairing, Some(FlowPairingPhase::Paired { .. })) {
+            events.and(self.reconcile_saved_config())
+        } else {
+            events
+        }
+    }
+
+    /// Where Flow pairing stands, while the agent is connected and pairing
+    /// is open.
+    #[must_use]
+    pub(crate) fn flow_pairing(&self) -> Option<&FlowPairingPhase> {
+        self.agent_status()?;
+        self.agent.flow.pairing.as_ref()
+    }
+
+    /// Why the agent did not take the last Flow pairing command.
+    #[must_use]
+    pub(crate) fn flow_pairing_refusal(&self) -> Option<&FlowPairingRefusal> {
+        self.agent.flow_pairing_refusal.as_ref()
+    }
+
+    /// Open Flow pairing.
+    pub(crate) fn start_flow_pairing(&mut self) -> StateEvents {
+        self.send_flow_pairing(StartFlowPairing)
+    }
+
+    /// Pair with `target`.
+    pub(crate) fn pair_flow_peer(&mut self, target: FlowPairTarget) -> StateEvents {
+        self.send_flow_pairing(PairFlowPeer { target })
+    }
+
+    /// The user saw the same code on both computers.
+    pub(crate) fn confirm_flow_pairing(&mut self) -> StateEvents {
+        self.send_flow_pairing(ConfirmFlowPairing)
+    }
+
+    /// End the current pairing attempt, or dismiss its result.
+    pub(crate) fn cancel_flow_pairing(&mut self) -> StateEvents {
+        self.send_flow_pairing(CancelFlowPairing)
+    }
+
+    /// Close Flow pairing.
+    pub(crate) fn stop_flow_pairing(&mut self) -> StateEvents {
+        self.send_flow_pairing(StopFlowPairing)
+    }
+
+    /// The agent did not take a pairing command.
+    pub(crate) fn apply_flow_pairing_refusal(
+        &mut self,
+        refusal: FlowPairingRefusal,
+    ) -> StateEvents {
+        self.set_flow_pairing_refusal(Some(refusal))
+    }
+
+    /// Send a pairing command, clearing the last refusal; a command that
+    /// cannot even be queued is refused as the agent being unreachable.
+    fn send_flow_pairing(&mut self, command: impl Into<Command>) -> StateEvents {
+        let refusal = (!self.send_ipc(command)).then_some(FlowPairingRefusal::AgentUnreachable);
+        self.set_flow_pairing_refusal(refusal)
+    }
+
+    fn set_flow_pairing_refusal(&mut self, refusal: Option<FlowPairingRefusal>) -> StateEvents {
+        if self.agent.flow_pairing_refusal == refusal {
+            return StateEvents::none();
+        }
+        self.agent.flow_pairing_refusal = refusal;
         StateEvent::FlowChanged.into()
     }
+}
+
+/// Why the agent did not take a Flow pairing command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum FlowPairingRefusal {
+    /// No agent could be reached for it.
+    AgentUnreachable,
+    /// The agent refused it.
+    Refused(FlowPairingCommandError),
 }

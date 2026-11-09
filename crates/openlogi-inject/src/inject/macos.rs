@@ -386,7 +386,7 @@ fn post_cg_key_phase(vk: u16, flags: CGEventFlags, phase: KeyPhase) {
 
 /// One keyboard edge for `vk` with `flags` set, tagged as OpenLogi's own so
 /// the hook lets it through.
-fn key_event(vk: u16, flags: CGEventFlags, phase: KeyPhase) -> Option<CGEvent> {
+fn key_event(vk: u16, mut flags: CGEventFlags, phase: KeyPhase) -> Option<CGEvent> {
     let Ok(src) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
         tracing::warn!("CGEventSource::new failed");
         return None;
@@ -396,6 +396,11 @@ fn key_event(vk: u16, flags: CGEventFlags, phase: KeyPhase) -> Option<CGEvent> {
         tracing::warn!(?phase, "CGEvent::new_keyboard_event failed");
         return None;
     };
+    // Include keypad identity in the explicit flag mask for taps, held
+    // edges, and virtual-HID failure recovery alike.
+    if matches!(keycode::macos_to_hid_usage(vk), Some(0x54..=0x63 | 0x67)) {
+        flags |= CGEventFlags::CGEventFlagNumericPad;
+    }
     event.set_flags(flags);
     tag_synthetic(&event);
     Some(event)
@@ -411,25 +416,51 @@ fn post_key(vk: u16, flags: CGEventFlags) {
     }
 }
 
-/// Type an arbitrary unicode string by emitting one key event per character,
-/// each carrying its unicode payload via `CGEventKeyboardSetUnicodeString`.
+/// The keys a typed character can go down on: A, S, D. The unicode payload
+/// decides the inserted character, so the key is only a placeholder.
+const TYPED_TEXT_KEYS: [u16; 3] = [0x00, 0x01, 0x02];
+
+/// Type an arbitrary unicode string, one key press per character, each
+/// carrying its unicode payload via `CGEventKeyboardSetUnicodeString`.
+///
+/// The events are built and posted under the held-chord lock, on a key no
+/// held chord keeps down: a key-up on a held key would end that hold early.
+/// Every event is built before the first is posted.
 pub(super) fn type_text(text: &str) {
-    let Ok(src) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
-        tracing::warn!("CGEventSource::new failed for type_text");
-        return;
-    };
-    for ch in text.chars() {
-        // Keycode 0 (A) is a placeholder; the unicode payload determines the
-        // actual inserted character.
-        let Ok(ev) = CGEvent::new_keyboard_event(src.clone(), 0, true) else {
-            tracing::warn!("CGEvent::new_keyboard_event failed in type_text");
-            continue;
+    super::with_held_modifiers(|_| {
+        let Some(vk) = typed_text_key() else {
+            tracing::warn!("held chords keep every TypeText key down");
+            return;
         };
+        let Some(events) = text_events(text, vk) else {
+            return;
+        };
+        for event in events {
+            event.post(CGEventTapLocation::HID);
+        }
+    });
+}
+
+/// The first of [`TYPED_TEXT_KEYS`] no held chord keeps down. Only meaningful
+/// under the held-chord lock, as [`held_key_down`] is.
+fn typed_text_key() -> Option<u16> {
+    TYPED_TEXT_KEYS.into_iter().find(|&vk| !held_key_down(vk))
+}
+
+/// A key-down and a key-up on `vk` for each character of `text`, as a
+/// keyboard types it. The flags are cleared, so a modifier the user or a held
+/// chord holds cannot turn a character into a shortcut.
+fn text_events(text: &str, vk: u16) -> Option<Vec<CGEvent>> {
+    let mut events = Vec::new();
+    for ch in text.chars() {
         let s = ch.to_string();
-        ev.set_string(&s);
-        tag_synthetic(&ev);
-        ev.post(CGEventTapLocation::HID);
+        for phase in [KeyPhase::Down, KeyPhase::Up] {
+            let event = key_event(vk, CGEventFlags::empty(), phase)?;
+            event.set_string(&s);
+            events.push(event);
+        }
     }
+    Some(events)
 }
 
 /// Press a key chord described by a `KeyCombo` modifier bitmask + virtual
@@ -573,15 +604,15 @@ fn combo_flags(combo: &KeyCombo) -> CGEventFlags {
 }
 
 pub(super) fn run_apple_script(src: &str) {
-    let _ = std::process::Command::new("osascript")
-        .args(["-e", src])
-        .output();
+    let mut command = std::process::Command::new("/usr/bin/osascript");
+    command.args(["-e", src]);
+    super::run_to_end(command, "AppleScript");
 }
 
 pub(super) fn run_shell_command(cmd: &str) {
-    let _ = std::process::Command::new("/bin/sh")
-        .args(["-c", cmd])
-        .output();
+    let mut command = std::process::Command::new("/bin/sh");
+    command.args(["-c", cmd]);
+    super::run_to_end(command, "shell command");
 }
 
 /// Post a media/system key event (play/pause, track navigation, volume).

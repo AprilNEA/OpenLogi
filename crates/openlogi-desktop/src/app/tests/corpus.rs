@@ -42,7 +42,7 @@ fn contributed_corpus_projects_identity_battery_capabilities_and_detail_tabs() {
                 assert_eq!(record.kind, device.kind);
                 assert_eq!(record.capabilities, device.capabilities);
                 assert_eq!(record.battery, device.battery);
-                assert_eq!(record.online, device.online);
+                assert_eq!(record.is_online(), device.online);
                 let expected = reviewed_detail_tabs(&fixture.manifest().id);
                 assert_eq!(
                     DetailTab::tabs_for(record),
@@ -65,7 +65,7 @@ fn contributed_corpus_projects_identity_battery_capabilities_and_detail_tabs() {
             }
         }
         state.apply_agent_snapshot(&snapshot, &resolver, &[]);
-        assert!(state.devices().iter().all(|record| !record.online));
+        assert!(state.devices().iter().all(|record| !record.is_online()));
         assert_eq!(
             state
                 .devices()
@@ -83,7 +83,7 @@ fn contributed_corpus_projects_identity_battery_capabilities_and_detail_tabs() {
             tabs
         );
         state.apply_agent_snapshot(&snapshot_candidate(fixture.profile()), &resolver, &[]);
-        assert!(state.devices().iter().all(|record| record.online));
+        assert!(state.devices().iter().all(DeviceRecord::is_online));
         assert_eq!(
             state
                 .devices()
@@ -111,7 +111,8 @@ fn reviewed_detail_tabs(id: &str) -> Vec<DetailTab> {
             DetailTab::ActionsRing,
             DetailTab::Device,
         ],
-        "mx-master-4-001" | "mx-master-3s-001" | "mx-master-3-001" | "mx-anywhere-3s-001" => vec![
+        "mx-master-4-001" | "mx-master-3s-001" | "mx-master-3-001" | "mx-master-2s-001"
+        | "mx-anywhere-3s-001" => vec![
             DetailTab::Buttons,
             DetailTab::ActionsRing,
             DetailTab::Pointer,
@@ -126,9 +127,11 @@ fn reviewed_detail_tabs(id: &str) -> Vec<DetailTab> {
         "mx-mechanical-mini-mac-001" | "mx-keys-s-001" | "mx-creative-keypad-001" => {
             vec![DetailTab::Keys, DetailTab::ActionsRing, DetailTab::Device]
         }
-        // The G915 is the same kind of keyboard, and its RGB effect engine
-        // (0x8071) and per-key lighting (0x8081) add the Lighting tab.
-        "g915-001" => vec![
+        // The G915 and G512 are the same kind of keyboard. The G915's RGB
+        // effect engine (0x8071) and per-key lighting (0x8081) add the
+        // Lighting tab; the G512 reaches it through the older 0x8070 and
+        // 0x8080 pair.
+        "g512-001" | "g915-001" => vec![
             DetailTab::Keys,
             DetailTab::ActionsRing,
             DetailTab::Lighting,

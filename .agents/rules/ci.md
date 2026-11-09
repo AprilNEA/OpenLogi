@@ -155,19 +155,23 @@ warning that host clippy `-D warnings` does not surface still fails CI.
 | `MSRV (cargo check, <os>)` | `RUSTUP_TOOLCHAIN=<rust-version> cargo check --workspace --all-targets` | macOS and Linux. `<rust-version>` is `rust-version` in the root `Cargo.toml` |
 | `rustdoc (non-GUI crates)` | `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items --exclude openlogi-ui --exclude openlogi-desktop --exclude openlogi-overlay --exclude openlogi-agent` | any |
 | `tests (linux)` | `cargo test --workspace --exclude openlogi-desktop` | Linux |
-| `tests (macos, <arch>)` | `cargo test --workspace --all-targets` | macOS. CI matrix is arm64 (`macos-latest`) and x86_64 (`macos-15-intel`) |
+| `tests (macos, <arch>)` | `cargo test --workspace --all-targets`; the x86_64 leg adds `--target x86_64-apple-darwin` | macOS. CI runs both legs on Apple Silicon, x86_64 under Rosetta 2, so an Apple Silicon Mac can run either; `cargo xtask ci` runs only the host arch |
 | `tests (windows)` | `cargo test --workspace --exclude openlogi-desktop` | **Windows** only — the one place the `cfg(windows)` tests execute; nothing reproduces it elsewhere |
 | `cargo-deny` | `cargo deny --config .cargo/deny.toml --all-features --manifest-path crates/openlogi/Cargo.toml check` | any (needs `cargo-deny`; `nix run nixpkgs#cargo-deny -- …` also works) |
 | `clippy (windows)` | `cargo clippy --workspace --all-targets -- -D warnings` | **Windows**. Elsewhere: `devenv tasks run openlogi:check-windows` (ring-free subset, not the full workspace) |
-| `clippy (macos)` | `cargo clippy --workspace --all-targets -- -D warnings` | **macOS** only. CI runs it on `macos-latest` (arm64); it is the one job that lints the macOS `cfg` (`tests (macos)` compiles it, without clippy), and no other host can reproduce it |
+| `clippy (macos)` | `cargo clippy --workspace --all-targets -- -D warnings` | **macOS** only. CI runs it on Apple Silicon; it is the one job that lints the macOS `cfg` (`tests (macos)` compiles it, without clippy), and no other host can reproduce it |
 | `wasm (portable crates)` | `cargo check -p openlogi-hidpp -p openlogi-device --target wasm32-unknown-unknown` then `cargo check -p openlogi-core --no-default-features --target wasm32-unknown-unknown` | any (needs the `wasm32-unknown-unknown` std; devenv installs it) |
 | `CI results` | none — the aggregate every other job feeds, and the one status check the master ruleset requires. Passes when every job succeeded or was skipped by the path filter; fails on any failure or cancellation. `ci_results_needs_every_job` fails when a job is missing from its `needs` | n/a |
 
 CI always sets `CARGO_TERM_COLOR=always`, `CARGO_INCREMENTAL=0`, and
 `RUSTFLAGS=-D warnings`. Compilation jobs also set `RUSTC_WRAPPER=sccache`;
 `cargo-deny` clears it because metadata probes rustc without compiling and the
-job deliberately skips sccache setup. `rust-cache` stores only Cargo registry/git
-inputs (`cache-targets: false`); sccache owns compiler outputs. PRs read the
+job deliberately skips sccache setup. The Linux `clippy`, `MSRV`, `rustdoc`, and
+`tests (linux)` jobs keep Cargo's registry, git sources, and `target/` on a
+per-job Namespace cache volume that only a push to master commits; each empties
+`target/` once it passes `CACHED_TARGET_LIMIT_MB`, because Cargo never prunes it.
+In the other jobs `rust-cache` stores only Cargo registry/git inputs
+(`cache-targets: false`). sccache owns compiler outputs everywhere. PRs read the
 default branch's sccache objects but do not write their isolated merge-ref cache.
 
 The `fmt` job selects all workspace test jobs with the path filter in `ci.yml`. Source, fixture, test-resource, dependency, toolchain, and CI changes run those jobs; pure Markdown and unrelated design assets skip them. The workflow still reports each skipped job, so required checks do not remain pending. PRs use the full PR diff; pushes use the full pushed range. Local test commands always run, regardless of changed paths.

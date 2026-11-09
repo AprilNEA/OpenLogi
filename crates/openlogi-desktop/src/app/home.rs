@@ -15,8 +15,8 @@ use gpui::{
     IntoElement, ParentElement, SharedString, StatefulInteractiveElement as _, Styled, Svg, Window,
     canvas, div, fill, img, point, prelude::FluentBuilder as _, px, rgb, svg,
 };
-use gpui_base::Button as BaseButton;
-use gpui_component::{
+use gpui_kit::base::Button as BaseButton;
+use gpui_kit::component::{
     Icon, IconName, Sizable as _, WindowExt as _,
     button::{Button, ButtonVariant, ButtonVariants as _},
     dialog::DialogButtonProps,
@@ -34,7 +34,7 @@ use openlogi_ipc::PairingFailure;
 use super::AppView;
 use super::status::{loading_body, notice_body};
 use super::widgets::{
-    add_device_button, connection_summary, connectivity_dot, flow_button, kind_label,
+    Connectivity, add_device_button, connection_summary, connectivity_dot, flow_button, kind_label,
     receiver_slot_label, settings_button,
 };
 use crate::features::lighting::visual as light_visual;
@@ -84,7 +84,7 @@ pub(super) fn home_header(cx: &mut Context<AppView>) -> impl IntoElement {
         .child(views::device_view_switcher(current_mode, view))
         .child(flow_button())
         .child(settings_button())
-        .child(add_device_button())
+        .child(add_device_button("header-add-device"))
 }
 
 /// Opacity the lighting colour is painted at over the device image, in both the
@@ -156,12 +156,20 @@ pub(crate) fn glow_canvas(geom: Arc<GlowGeometry>, color: Hsla) -> impl IntoElem
 /// A device card in the Home grid and carousel: product image with the
 /// connectivity-and-battery glance in its corner, then the identity line and
 /// the transport it is reachable over.
-/// The `active` device keeps a persistent accent ring and faint fill; inactive
-/// cards gain the same ring on hover or keyboard focus.
 /// Returns an unstyled semantic button so the gallery can add its activation
-/// handler without giving up keyboard behavior.
+/// handler without giving up keyboard behavior. The gallery marks the active
+/// device with [`SelectableStyle::selected_border`] and `selected_fill`, the
+/// house selected look, and gives the other cards the accent ring on hover
+/// or keyboard focus; this card paints only the disabled ring itself.
+///
+/// [`SelectableStyle::selected_border`]: crate::ui::theme::SelectableStyle::selected_border
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each argument is one fact the gallery reads from AppState for this card"
+)]
 fn device_card(
     record: &DeviceRecord,
+    connectivity: Connectivity,
     saved_transport: Option<ObservedConnection>,
     enabled: bool,
     glow: Option<(Arc<GlowGeometry>, Hsla)>,
@@ -198,7 +206,7 @@ fn device_card(
                         // truthful treatment available for an offline card
                         // without generating a second asset that edits the
                         // manufacturer's artwork.
-                        .opacity(if record.online { 1. } else { 0.38 })
+                        .opacity(if record.is_online() { 1. } else { 0.38 })
                         .when_some(glow, |this, (geom, color)| {
                             this.child(glow_canvas(geom, color))
                         })
@@ -211,7 +219,7 @@ fn device_card(
                         .absolute()
                         .top_0()
                         .left_0()
-                        .child(transport_glance(record, pal, saved_transport)),
+                        .child(transport_glance(record, connectivity, pal, saved_transport)),
                 )
                 .when_some(record.battery.as_ref(), |image, battery| {
                     image.child(
@@ -219,7 +227,7 @@ fn device_card(
                             .absolute()
                             .top_0()
                             .right_0()
-                            .child(battery_glance(battery, record)),
+                            .child(battery_glance(battery, record, connectivity)),
                     )
                 }),
         )
@@ -295,27 +303,25 @@ pub(super) fn transport_icon(
 }
 
 /// [`transport_icon`] in the card corner; the connectivity words ride its
-/// hover tip and the dimmed render already marks an offline card.
+/// hover tip and the dimmed render already marks an offline card. While the
+/// window reconnects, the reconnecting dot leads it, so a card the agent can
+/// no longer confirm does not pass for a live one.
 fn transport_glance(
     record: &DeviceRecord,
+    connectivity: Connectivity,
     pal: Palette,
     saved_transport: Option<ObservedConnection>,
 ) -> impl IntoElement {
-    let hint: SharedString = format!(
-        "{} · {}",
-        if record.online {
-            tr!("device.connected")
-        } else {
-            tr!("device.offline")
-        },
-        connection_summary(record)
-    )
-    .into();
+    let hint: SharedString =
+        format!("{} · {}", connectivity.label(), connection_summary(record)).into();
     h_flex()
         .id((ElementId::from("transport-glance"), record.record_key()))
         .flex_none()
         .items_center()
         .gap_1()
+        .when(connectivity == Connectivity::Reconnecting, |glance| {
+            glance.child(connectivity_dot(connectivity, pal))
+        })
         .child(transport_icon(record, saved_transport, pal).size_4())
         .when_some(receiver_slot_label(record), |glance, slot| {
             glance.child(div().text_caption().text_color(pal.text_muted).child(slot))
@@ -328,13 +334,28 @@ fn transport_glance(
 fn battery_glance(
     battery: &openlogi_core::device::BatteryInfo,
     record: &DeviceRecord,
+    connectivity: Connectivity,
 ) -> impl IntoElement {
-    let hint: SharedString = glance_hint(battery, record.online).into();
+    let hint: SharedString = glance_hint(battery, connectivity == Connectivity::Connected).into();
     div()
         .id((ElementId::from("battery-glance"), record.record_key()))
         .flex_none()
-        .child(BatteryIndicator::glance(battery))
+        .child(battery_reading(
+            BatteryIndicator::glance(battery),
+            connectivity,
+        ))
         .tooltip(move |window, cx| Tooltip::new(hint.clone()).build(window, cx))
+}
+
+/// A battery `reading` as the gallery may present it. While the window
+/// reconnects, the last reading stays there to read but dimmed: the agent no
+/// longer confirms it.
+fn battery_reading(reading: BatteryIndicator, connectivity: Connectivity) -> Div {
+    div()
+        .when(connectivity == Connectivity::Reconnecting, |dimmed| {
+            dimmed.opacity(0.5)
+        })
+        .child(reading)
 }
 
 fn device_ring(enabled: bool) -> Hsla {
@@ -382,7 +403,7 @@ pub(super) fn device_menu(
     let display_name = record.display_name.clone();
     // A live device would simply re-register on the next inventory snapshot,
     // so deletion is only offered once it is offline.
-    let deletable = record.persistent && !record.online;
+    let deletable = record.persistent && !record.is_online();
     let has_stale_pairings = !record.stale_pairings.is_empty();
     move |menu, _window, _cx| {
         let menu = menu.item(
@@ -448,11 +469,14 @@ pub(super) fn device_menu(
 /// The card corner's ellipsis button, opening the same menu the card offers
 /// on right-click.
 pub(super) fn device_menu_button(record: &DeviceRecord, pal: Palette) -> impl IntoElement {
+    let label = tr!("device.more_actions_for", name => record.display_name.clone());
     Button::new((ElementId::from("device-menu"), record.record_key()))
         .ghost()
-        .xsmall()
+        .small()
         .text_color(pal.text_muted)
         .icon(IconName::Ellipsis)
+        .accessibility_label(label.clone())
+        .tooltip(label)
         .dropdown_menu_with_anchor(Anchor::TopRight, device_menu(record))
 }
 
@@ -595,6 +619,7 @@ pub(super) fn open_rename_dialog(
 
 fn connection_view(
     record: &DeviceRecord,
+    connectivity: Connectivity,
     pal: Palette,
     saved_transport: Option<ObservedConnection>,
 ) -> impl IntoElement {
@@ -605,12 +630,8 @@ fn connection_view(
         .items_center()
         .text_caption()
         .text_color(pal.text_muted)
-        .child(connectivity_dot(record.online, pal))
-        .child(if record.online {
-            tr!("device.connected")
-        } else {
-            tr!("device.offline")
-        })
+        .child(connectivity_dot(connectivity, pal))
+        .child(connectivity.label())
         .child("·")
         .child(transport_icon(record, saved_transport, pal).size_3())
         .child(div().min_w_0().truncate().child(connection_summary(record)))
@@ -634,7 +655,7 @@ fn device_image(
         return light_visual::gallery(
             record.asset.as_ref(),
             light_visual::LightView {
-                online: record.online,
+                online: record.is_online(),
                 enabled: light_enabled,
             },
             light_settings,
@@ -808,13 +829,7 @@ pub(super) fn device_empty_state(cx: &App) -> Div {
                 .text_center()
                 .child(tr!("device.device_connection_help")),
         )
-        .child(
-            Button::new("empty-add-device")
-                .primary()
-                .icon(IconName::Plus)
-                .label(tr!("pairing.add_device"))
-                .on_click(|_, _, cx| crate::windows::add_device::open(cx)),
-        )
+        .child(add_device_button("empty-add-device"))
         .child(
             div()
                 .mt_1()

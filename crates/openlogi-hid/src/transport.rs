@@ -11,6 +11,7 @@
 use std::collections::BTreeSet;
 #[cfg(not(target_os = "windows"))]
 use std::error::Error;
+use std::ops::RangeInclusive;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex as StdMutex, PoisonError};
 
@@ -139,8 +140,33 @@ fn node_info(info: &DeviceInfo) -> NodeInfo {
     }
 }
 
-/// The HID++ software ids (`1..=15`) leased by this process's channels, as
-/// `(node lock name, id)` — see [`sw_id_lock_name`].
+/// The software id the Linux kernel's `hid-logitech-hidpp` driver puts on
+/// every HID++ 2.0 request it sends (`LINUX_KERNEL_SW_ID` in
+/// `drivers/hid/hid-logitech-hidpp.c`).
+///
+/// That driver binds the devices paired to every Logitech receiver and the
+/// directly connected devices it lists. `hid-logitech-dj` forwards each
+/// receiver HID++ report to it and still hands the report to hid-core, so the
+/// kernel's replies reach every hidraw reader of the node. The driver runs
+/// its connect work — a root ping, root `getFeature` lookups, battery
+/// queries — on every `0x41` connection notification, including the ones a
+/// receiver sends when OpenLogi triggers device arrival, so its requests
+/// overlap OpenLogi's probe of the same device. It matches replies by header
+/// alone, as a channel does, and no lease can see it: a channel on this id
+/// and the kernel take each other's replies (#2376).
+///
+/// Reserved on every host, not only Linux. It is also
+/// [`SwIdPolicy::default`]'s id, the one any HID++ client without an
+/// allocator sends, and one pool keeps the leases and their lock files the
+/// same everywhere. The cost is one id of fifteen.
+const LINUX_KERNEL_SW_ID: u8 = 0x01;
+
+/// The software ids a channel can lease: every nonzero id above
+/// [`LINUX_KERNEL_SW_ID`].
+const LEASABLE_SW_IDS: RangeInclusive<u8> = LINUX_KERNEL_SW_ID + 1..=0x0f;
+
+/// The HID++ software ids ([`LEASABLE_SW_IDS`]) leased by this process's
+/// channels, as `(node lock name, id)` — see [`sw_id_lock_name`].
 ///
 /// HID++ correlates request/response by `(device, feature, function, software_id)`.
 /// Every open of the same physical HID node gets a private pending queue but
@@ -155,8 +181,8 @@ fn node_info(info: &DeviceInfo) -> NodeInfo {
 /// via [`SwIdPolicy::Leased`].
 ///
 /// Ids are scoped to the node: report streams of different nodes never meet,
-/// so each node has the whole pool, and fifteen channels on one node do not
-/// refuse the sixteenth on another. A lease is held two ways: an entry here,
+/// so each node has the whole pool, and a node whose pool is exhausted does
+/// not refuse an open on another. A lease is held two ways: an entry here,
 /// which arbitrates between channels of this process, and an exclusive OS
 /// lock on the id's file in the host lock directory, which arbitrates between
 /// OpenLogi processes — the agent and a CLI or GUI opening the node while it
@@ -240,10 +266,13 @@ const HIDPP_LONG_COLLECTIONS: [(u16, u16, bool); 4] = [
     (0xff00, 0x0002, false),
     (0xff43, 0x0202, true),
     (0xff43, 0x0602, false),
-    // Wired MX Creative Keypad. Its five collections share one registry entry
-    // and accept standard short/long framing on any handle (measured live);
-    // only this vendor pair is listed so the device enumerates as one HID++
-    // node. Its grid keys additionally push vendor report 0x13 on this node.
+    // Wired MX Creative Keypad. Only this vendor pair is listed so the device
+    // enumerates as one HID++ node. On macOS its five collections share one
+    // registry entry and accept standard short/long framing on any handle
+    // (measured live), so its vendor reports — grid-key input 0x13 and LCD
+    // image output 0x14 — ride this node too. Windows gives them the sibling
+    // collections 0x1a08 and 0x1a10, which `windows::WindowsHidppChannel`
+    // pairs by usage (#2281).
     (0xff43, 0x1a02, false),
 ];
 
@@ -421,12 +450,13 @@ fn sw_id_lock_name(node: &NodeId, id: u8) -> String {
     format!("{}-sw-{id:02}", host_lock::node_lock_name(node))
 }
 
-/// Lease one software id in `1..=15` on `node` that no channel of this process
-/// and no other OpenLogi process holds, or `None` if all 15 are taken.
+/// Lease one software id in [`LEASABLE_SW_IDS`] on `node` that no channel of
+/// this process and no other OpenLogi process holds, or `None` if every one
+/// is taken.
 fn try_lease_sw_id(node: &NodeId) -> Option<SwIdLease> {
     let node_name = host_lock::node_lock_name(node);
     let mut leases = SW_ID_LEASES.lock().unwrap_or_else(PoisonError::into_inner);
-    for sw_id in (1u8..=15).filter_map(|id| RequestSwId::new(U4::from_lo(id))) {
+    for sw_id in LEASABLE_SW_IDS.filter_map(|id| RequestSwId::new(U4::from_lo(id))) {
         let id = sw_id.get().to_lo();
         let key = (node_name.clone(), id);
         if leases.contains(&key) {
@@ -458,20 +488,20 @@ fn try_lease_sw_id(node: &NodeId) -> Option<SwIdLease> {
 }
 
 /// Give `channel` a fixed software id on `node` for its lifetime, or refuse
-/// when all 15 ids are leased.
+/// when every id in [`LEASABLE_SW_IDS`] is leased.
 ///
 /// The `Leased` policy is fixed-id by construction — rotation cannot be
 /// combined with it, which is the point: concurrent channels that share a
 /// rotating `1..=15` sequence eventually reuse the same id and cross-match.
-/// Refusing on exhaustion is equally deliberate: with the pool empty, the
-/// default id 1 is by construction held by a live channel, so falling back to
-/// it would silently recreate the response cross-matching this allocator
-/// exists to prevent. A refused open surfaces as a failed probe, which the
-/// ledger replays and retries next tick.
+/// Refusing on exhaustion is equally deliberate: the default id is
+/// [`LINUX_KERNEL_SW_ID`], which the pool leaves out, so falling back to it
+/// would silently recreate the response cross-matching this allocator exists
+/// to prevent. A refused open surfaces as a failed probe, which the ledger
+/// replays and retries next tick.
 fn configure_channel_sw_ids(channel: &mut HidppChannel, node: &NodeId) -> Result<(), BackendError> {
     let lease = try_lease_sw_id(node).ok_or_else(|| {
         BackendError::Backend(
-            "all 15 HID++ software ids on this node are leased by this or other OpenLogi processes — refusing an open that would share one".into(),
+            "every leasable HID++ software id on this node is leased by this or other OpenLogi processes — refusing an open that would share one".into(),
         )
     })?;
     channel.set_sw_id_policy(SwIdPolicy::Leased {
@@ -572,7 +602,7 @@ mod sw_id_lease_tests {
     use openlogi_device::backend::NodeId;
     use openlogi_device::host_lock;
 
-    use super::{SW_ID_LEASES, sw_id_lock_name, try_lease_sw_id};
+    use super::{LEASABLE_SW_IDS, SW_ID_LEASES, sw_id_lock_name, try_lease_sw_id};
 
     /// A node no real device has, unique to this process and test, so tests
     /// neither lease each other's ids nor a running agent's.
@@ -611,18 +641,35 @@ mod sw_id_lease_tests {
     #[test]
     fn lease_skips_an_id_held_by_another_process() {
         let node = node("skip");
-        let foreign = host_lock::try_lock(&sw_id_lock_name(&node, 1))
+        let first = *LEASABLE_SW_IDS.start();
+        let foreign = host_lock::try_lock(&sw_id_lock_name(&node, first))
             .unwrap()
             .expect("nothing else locks this test's node");
 
-        let lease = try_lease_sw_id(&node).expect("fourteen ids remain");
+        let lease = try_lease_sw_id(&node).expect("the rest of the pool remains");
         assert_ne!(
             lease.id().get().to_lo(),
-            1,
+            first,
             "an id locked by another process must be skipped"
         );
         drop(lease);
         drop(foreign);
+    }
+
+    /// The kernel's `hid-logitech-hidpp` sends every request with software id
+    /// 1, outside any lease, so the pool never hands that id out: not first
+    /// on a fresh node, and not once every other id is taken (#2376).
+    #[test]
+    fn the_pool_never_leases_the_linux_kernels_sw_id() {
+        let node = node("kernel");
+        let pool: Vec<_> = std::iter::from_fn(|| try_lease_sw_id(&node)).collect();
+        let ids: Vec<u8> = pool.iter().map(|lease| lease.id().get().to_lo()).collect();
+        assert_eq!(
+            ids,
+            (2..=15).collect::<Vec<u8>>(),
+            "the pool is 2..=15 in order: id 1 belongs to the Linux kernel"
+        );
+        drop(pool);
     }
 
     #[test]
@@ -645,16 +692,16 @@ mod sw_id_lease_tests {
     fn unrelated_nodes_do_not_share_one_pool() {
         let left = node("left");
         let right = node("right");
-        let all_of_left: Vec<_> = (0..15)
-            .map(|_| try_lease_sw_id(&left).expect("fifteen ids per node"))
+        let all_of_left: Vec<_> = LEASABLE_SW_IDS
+            .map(|_| try_lease_sw_id(&left).expect("a fresh node has every id free"))
             .collect();
         assert!(
             try_lease_sw_id(&left).is_none(),
-            "the sixteenth channel on one node is refused"
+            "a channel past the pool on one node is refused"
         );
 
         let on_right = try_lease_sw_id(&right).expect("another node is unaffected");
-        assert_eq!(on_right.id().get().to_lo(), 1);
+        assert_eq!(on_right.id().get().to_lo(), *LEASABLE_SW_IDS.start());
         drop(on_right);
         drop(all_of_left);
     }

@@ -2,22 +2,23 @@
 //! follow the pointer to each one, and whether Flow can switch now.
 //!
 //! Every change goes through [`AppState`]'s `commit_flow_*` methods into
-//! `[flow]`; each peer's link state comes from the agent's snapshot. Peers are
-//! paired outside this window for now: they come from `config.toml`.
+//! `[flow]`; each peer's link state comes from the agent's snapshot. A new
+//! peer is paired from the Add Computer dialog.
 
 mod arrangement;
 mod inspector;
+mod pairing;
 #[cfg(test)]
 mod tests;
 
 use gpui::{
-    App, Context, FocusHandle, Hsla, InteractiveElement as _, IntoElement, ParentElement as _,
-    Render, SharedString, Size, Styled as _, Subscription, Window, div,
+    App, Context, Entity, FocusHandle, Hsla, InteractiveElement as _, IntoElement,
+    ParentElement as _, Render, SharedString, Size, Styled as _, Subscription, Window, div,
     prelude::FluentBuilder as _, px, rgb,
 };
-use gpui_component::Selectable as _;
-use gpui_component::{
-    Icon, IconName, Root, Sizable as _,
+use gpui_kit::component::Selectable as _;
+use gpui_kit::component::{
+    Icon, IconName, Sizable as _,
     button::Button,
     h_flex,
     radio::{Radio, RadioGroup},
@@ -26,7 +27,6 @@ use gpui_component::{
 use openlogi_core::config::{FlowConfig, FlowEdge, FlowPeerName};
 use openlogi_ipc::FlowLinkState;
 
-use crate::app::menu::{CloseWindow, Minimize, Zoom};
 use crate::state::{
     AppState, FlowDeviceRow, FlowHealth, FlowHost, FlowIssue, FlowReadiness, StateEvent,
 };
@@ -107,31 +107,47 @@ pub struct FlowView {
     focus_handle: FocusHandle,
     /// The computer the inspector shows.
     selected: FlowHost,
+    /// The Add Computer dialog's form, while the dialog is open.
+    pairing: Option<Entity<pairing::PairingForm>>,
     appearance_obs: Option<Subscription>,
     #[expect(dead_code, reason = "held to repaint on Flow and agent changes")]
     state_obs: Subscription,
+    #[expect(dead_code, reason = "held to stop pairing when the window goes")]
+    release_obs: Subscription,
 }
 
 impl FlowView {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
-        let state_obs = cx.subscribe(&AppState::global(cx), |_, _, event: &StateEvent, cx| {
-            if matches!(
-                event,
-                StateEvent::FlowChanged
-                    | StateEvent::AgentChanged
-                    | StateEvent::InventoryChanged
-                    | StateEvent::SettingsChanged
-            ) {
-                cx.notify();
-            }
-        });
+        let state_obs = cx.subscribe_in(
+            &AppState::global(cx),
+            window,
+            |this, _, event: &StateEvent, window, cx| {
+                if matches!(event, StateEvent::FlowChanged) {
+                    this.follow_pairing(window, cx);
+                }
+                if matches!(
+                    event,
+                    StateEvent::FlowChanged
+                        | StateEvent::AgentChanged
+                        | StateEvent::InventoryChanged
+                        | StateEvent::SettingsChanged
+                ) {
+                    cx.notify();
+                }
+            },
+        );
+        // Pairing is open only while its dialog is; the window closing takes
+        // the dialog with it.
+        let release_obs = cx.on_release(Self::end_pairing);
         Self {
             focus_handle,
             selected: FlowHost::This,
+            pairing: None,
             appearance_obs: None,
             state_obs,
+            release_obs,
         }
     }
 
@@ -166,14 +182,11 @@ impl Render for FlowView {
             .bg(pal.page)
             .text_color(pal.text_primary)
             .track_focus(&self.focus_handle)
-            .on_action(|_: &CloseWindow, window, _| window.remove_window())
-            .on_action(|_: &Minimize, window, _| window.minimize_window())
-            .on_action(|_: &Zoom, window, _| window.zoom_window())
             .when(windows::needs_client_titlebar(window), |this| {
                 this.child(windows::aux_title_bar(window_title(), cx))
             })
             .when_some(model, |this, model| {
-                this.child(toolbar(&model, pal)).child(
+                this.child(toolbar(&model, pal, cx)).child(
                     h_flex()
                         .flex_1()
                         .min_h_0()
@@ -188,14 +201,12 @@ impl Render for FlowView {
                         .child(inspector::panel(&model, &self.selected, pal, window, cx)),
                 )
             })
-            // Root owns the dialog state, but each window mounts its layer:
-            // without it the remove confirmation never paints.
-            .children(Root::render_dialog_layer(window, cx))
     }
 }
 
-/// The switch that turns Flow on, and its status in one line.
-fn toolbar(model: &FlowModel, pal: Palette) -> impl IntoElement {
+/// The switch that turns Flow on, its status in one line, and the way to add
+/// another computer.
+fn toolbar(model: &FlowModel, pal: Palette, cx: &Context<FlowView>) -> impl IntoElement {
     h_flex()
         .flex_none()
         .h(px(52.))
@@ -227,6 +238,16 @@ fn toolbar(model: &FlowModel, pal: Palette) -> impl IntoElement {
                     row.child(dot(color, false))
                 })
                 .child(status_text(&model.readiness)),
+        )
+        .child(div().flex_1())
+        .child(
+            Button::new("flow-add")
+                .outline()
+                .small()
+                .icon(IconName::Plus)
+                .label(tr!("flow.add"))
+                .debug_selector(|| "flow-add".into())
+                .on_click(cx.listener(|this, _, window, cx| this.open_pairing(window, cx))),
         )
 }
 
@@ -436,9 +457,9 @@ fn channel_segment(
     device: &FlowDeviceRow,
     host: &FlowHost,
     cx: &App,
-) -> gpui_component::button::ButtonGroup {
+) -> gpui_kit::component::button::ButtonGroup {
     use crate::ui::theme::SelectableStyle as _;
-    use gpui_component::Disableable as _;
+    use gpui_kit::component::Disableable as _;
     use openlogi_core::config::FlowHostSlot;
 
     let current = device.slot(host);
@@ -484,7 +505,7 @@ fn channel_segment(
                 }),
         )
     });
-    gpui_component::button::ButtonGroup::new(id("channels"))
+    gpui_kit::component::button::ButtonGroup::new(id("channels"))
         .outline()
         .xsmall()
         .child(off)

@@ -47,8 +47,8 @@ use actor::{Actor, ActorInputs, ActorPeer};
 pub(crate) use sender::FlowHardware;
 use sender::SendReport;
 
-const PROTOCOL_MIN: u32 = 1;
-const PROTOCOL_MAX: u32 = 1;
+pub(super) const PROTOCOL_MIN: u32 = 1;
+pub(super) const PROTOCOL_MAX: u32 = 1;
 /// Events from the peer tasks waiting for the actor.
 const EVENT_QUEUE: usize = 64;
 /// Transfer frames waiting for one peer's writer.
@@ -348,7 +348,7 @@ fn peer_config(
 /// Bind `address`. The IPv6 wildcard binds dual-stack, so a peer reachable
 /// only over IPv6 connects too; on a host without IPv6 it falls back to the
 /// IPv4 wildcard on the same port.
-fn bind(
+pub(super) fn bind(
     address: SocketAddr,
     identity: MachineIdentity,
     trust: PeerTrust,
@@ -371,7 +371,7 @@ fn bind(
     }
 }
 
-fn hello(local_key: PublicKey) -> proto::Hello {
+pub(super) fn hello(local_key: PublicKey) -> proto::Hello {
     proto::Hello {
         proto_min: PROTOCOL_MIN,
         proto_max: PROTOCOL_MAX,
@@ -405,16 +405,19 @@ fn browse() -> Option<Arc<dyn CandidateSource>> {
     }
 }
 
-/// The name peers show for this machine. Presentation only.
-fn machine_name() -> String {
-    std::env::var("HOSTNAME")
-        .or_else(|_| std::env::var("COMPUTERNAME"))
-        .ok()
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| "OpenLogi".to_owned())
+/// The name peers show for this machine: its host name, without the
+/// `.local` suffix macOS gives it. Presentation only.
+pub(super) fn machine_name() -> String {
+    let host = gethostname::gethostname().to_string_lossy().into_owned();
+    let name = host.strip_suffix(".local").unwrap_or(&host).trim();
+    if name.is_empty() {
+        "OpenLogi".to_owned()
+    } else {
+        name.to_owned()
+    }
 }
 
-fn platform() -> proto::Platform {
+pub(super) fn platform() -> proto::Platform {
     if cfg!(target_os = "macos") {
         proto::Platform::Macos
     } else if cfg!(target_os = "windows") {

@@ -43,10 +43,7 @@ pub async fn run(_args: ListArgs) -> Result<ExitCode> {
             Some(snapshot.status),
         )
     } else {
-        eprintln!(
-            "(no agent reachable — reading hardware directly; macOS judges this \
-             process's Input Monitoring grant, not the agent's)"
-        );
+        eprintln!("({})", direct_read_note());
         let inventories = openlogi_hid::enumerate()
             .await
             .context("failed to enumerate HID++ devices")?;
@@ -177,6 +174,18 @@ fn print_empty_notes(status: Option<&AgentStatus>, hid_only: &[HidOnlyProduct]) 
                  packages; for a source build see docs/INSTALL-linux.md)."
             );
         }
+    }
+}
+
+/// The provenance note for a listing read without the agent. Only macOS gates
+/// device opens on a per-process grant, so only there does reading directly
+/// change whose permission is judged.
+fn direct_read_note() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "no agent reachable — reading hardware directly; macOS judges this process's \
+         Input Monitoring grant, not the agent's"
+    } else {
+        "no agent reachable — reading hardware directly"
     }
 }
 

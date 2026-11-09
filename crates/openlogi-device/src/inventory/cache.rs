@@ -76,9 +76,11 @@ pub(super) struct Cached {
 /// cannot gauge charge under load, so the reading stays trackable.
 ///
 /// - The legacy `0x1000` feature (MX2S-era mice) reports `discharge_level = 0`
-///   while charging, which reads as no percentage. Only that charging reading
-///   without a percentage is held; a genuine 0% while discharging is
-///   untouched.
+///   while charging, which reads as no percentage and an unknown level. Only
+///   that charging reading is held. The last-known percentage carries through
+///   it, or the last-known level of a device without mileage, whose readings
+///   carry no percentage. A genuine 0% while discharging is untouched, and so
+///   is a level that a device without mileage reports while charging.
 /// - The voltage sources `0x1001` and `0x1F20` report millivolt, and the
 ///   charge current lifts that reading: a G733 at an estimated 65% on battery
 ///   reads 96% seconds after being plugged in. Every charging reading is held.
@@ -108,7 +110,9 @@ fn hold_percentage_while_charging(
     };
     match (probe, prev) {
         (BatteryProbe::Legacy { .. }, Some(p))
-            if fresh.percentage.is_none() && p.percentage.is_some_and(|p| p > 0) =>
+            if fresh.percentage.is_none()
+                && fresh.level == BatteryLevel::Unknown
+                && legacy_reading_to_hold(p) =>
         {
             held(p)
         }
@@ -121,6 +125,15 @@ fn hold_percentage_while_charging(
         // A `0x1004` device that legitimately reports 0% while charging must
         // surface that, not a stale prior reading.
         _ => fresh,
+    }
+}
+
+/// Whether a prior `0x1000` reading is worth carrying through a charge: a
+/// non-zero percentage, or the level of a device without mileage.
+fn legacy_reading_to_hold(battery: &BatteryInfo) -> bool {
+    match battery.percentage {
+        Some(percentage) => percentage > 0,
+        None => battery.level != BatteryLevel::Unknown,
     }
 }
 
@@ -415,6 +428,16 @@ mod hold_tests {
         }
     }
 
+    /// The "charging, no reading" shape a `0x1000` device reports while it
+    /// charges with a discharge level of `0`.
+    fn no_reading(status: BatteryStatus) -> BatteryInfo {
+        BatteryInfo {
+            percentage: None,
+            level: BatteryLevel::Unknown,
+            status,
+        }
+    }
+
     const UNIFIED: BatteryProbe = BatteryProbe::Unified {
         index: 0,
         state_of_charge: true,
@@ -425,7 +448,7 @@ mod hold_tests {
         for mileage in [true, false] {
             let legacy = BatteryProbe::Legacy { index: 0, mileage };
             let held = hold_percentage_while_charging(
-                battery(None, BatteryStatus::Charging),
+                no_reading(BatteryStatus::Charging),
                 Some(&battery(Some(85), BatteryStatus::Discharging)),
                 legacy,
             );
@@ -452,8 +475,49 @@ mod hold_tests {
         assert_eq!(live.percentage, Some(40));
 
         let cold =
-            hold_percentage_while_charging(battery(None, BatteryStatus::Charging), None, legacy);
+            hold_percentage_while_charging(no_reading(BatteryStatus::Charging), None, legacy);
         assert_eq!(cold.percentage, None);
+    }
+
+    #[test]
+    fn a_legacy_device_without_mileage_holds_its_last_level_while_charging() {
+        let legacy = BatteryProbe::Legacy {
+            index: 0,
+            mileage: false,
+        };
+        let good = battery(None, BatteryStatus::Discharging);
+
+        let held = hold_percentage_while_charging(
+            no_reading(BatteryStatus::Charging),
+            Some(&good),
+            legacy,
+        );
+        assert_eq!(
+            held,
+            BatteryInfo {
+                percentage: None,
+                level: BatteryLevel::Good,
+                status: BatteryStatus::Charging,
+            }
+        );
+
+        // A level the device reports while charging is live, not replaced by
+        // the last one.
+        let fresh = BatteryInfo {
+            percentage: None,
+            level: BatteryLevel::Low,
+            status: BatteryStatus::Charging,
+        };
+        let live = hold_percentage_while_charging(fresh.clone(), Some(&good), legacy);
+        assert_eq!(live, fresh);
+
+        // A prior reading without a level has nothing to hold.
+        let cold = hold_percentage_while_charging(
+            no_reading(BatteryStatus::Charging),
+            Some(&no_reading(BatteryStatus::Charging)),
+            legacy,
+        );
+        assert_eq!(cold, no_reading(BatteryStatus::Charging));
     }
 
     #[test]

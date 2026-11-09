@@ -11,6 +11,7 @@ mod devices;
 pub mod edge;
 mod handoff;
 mod identity;
+mod pairing;
 mod pointer;
 mod runtime;
 #[cfg(test)]
@@ -18,3 +19,4 @@ mod test_support;
 
 pub use controller::{FlowController, FlowInput};
 pub(crate) use devices::InventoryDevice;
+pub use pairing::{FlowPairing, PairedPeer, SavePeerError, save_peer};

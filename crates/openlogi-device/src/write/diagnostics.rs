@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use hidpp::{
-    channel::HidppChannel,
+    channel::{HidppChannel, LONG_REPORT_LENGTH},
     device::Device,
     feature::CreatableFeature,
     feature::FeatureType,
@@ -12,8 +12,10 @@ use hidpp::{
         DeviceEntityFirmwareInfo, DeviceEntityType, DeviceInformationFeature,
     },
     feature::feature_set::FeatureSetFeature,
+    feature::root::RootFeature,
     feature::unified_battery::{BatteryInfo as UnifiedBatteryInfo, UnifiedBatteryFeature},
-    protocol::v20::{ErrorType, Hidpp20Error},
+    nibble::U4,
+    protocol::v20::{self, ErrorType, Hidpp20Error},
 };
 
 use crate::backend::HidBackend;
@@ -127,6 +129,148 @@ pub(crate) async fn dump_features_on_channel(
         });
     }
     Ok(entries)
+}
+
+/// Parameter bytes one long HID++ 2.0 report carries, and the length of
+/// every [`RawFeatureReply::Payload`].
+pub const RAW_FEATURE_PARAMS: usize = LONG_REPORT_LENGTH - 4;
+
+/// One raw call to a HID++ 2.0 feature, for [`raw_feature_calls`]: a
+/// function number and the parameters of a long report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RawFeatureCall {
+    function: U4,
+    params: [u8; RAW_FEATURE_PARAMS],
+}
+
+impl RawFeatureCall {
+    /// The call of `function` with `params`, or `None` past function 15: a
+    /// HID++ 2.0 function number is four bits, and a larger one would go out
+    /// as a different function.
+    #[must_use]
+    pub fn new(function: u8, params: [u8; RAW_FEATURE_PARAMS]) -> Option<Self> {
+        if function > 0x0f {
+            return None;
+        }
+        Some(Self {
+            function: U4::from_lo(function),
+            params,
+        })
+    }
+
+    /// The function number, 0–15.
+    #[must_use]
+    pub fn function(&self) -> u8 {
+        self.function.to_lo()
+    }
+
+    /// The parameter bytes, as sent.
+    #[must_use]
+    pub fn params(&self) -> &[u8; RAW_FEATURE_PARAMS] {
+        &self.params
+    }
+}
+
+/// What one raw call to a HID++ 2.0 feature got back. For
+/// [`raw_feature_calls`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RawFeatureReply {
+    /// The response payload; a short response is zero-padded to
+    /// [`RAW_FEATURE_PARAMS`] bytes.
+    Payload([u8; RAW_FEATURE_PARAMS]),
+    /// The error the feature answered with.
+    Error(ErrorType),
+}
+
+/// What [`raw_feature_calls`] got back from one feature.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawFeatureAnswers {
+    /// The feature's index in the device's feature table.
+    pub index: u8,
+    /// One reply per call, in call order, up to the first call that got
+    /// none.
+    pub replies: Vec<RawFeatureReply>,
+    /// Why the call after the last reply got no answer; the calls after it
+    /// were not sent. `None` when every call was answered.
+    pub failure: Option<WriteError>,
+}
+
+/// Call feature `feature_id` of the device on `route` once for each of
+/// `calls`, in order, over one channel, and return what they got back.
+/// `None` when the device has no such feature. Each call goes out as a long
+/// report.
+///
+/// A call that gets no answer stops the rest, and the answers before it are
+/// kept: earlier calls may already have changed the device.
+///
+/// For `openlogi diag hidpp`, to learn an undocumented feature's functions
+/// from their answers. Nothing checks what a function does: a call can write
+/// as easily as read, so the caller picks the functions.
+pub async fn raw_feature_calls(
+    backend: &dyn HidBackend,
+    route: &DeviceRoute,
+    feature_id: u16,
+    calls: &[RawFeatureCall],
+) -> Result<Option<RawFeatureAnswers>, WriteError> {
+    let index = route.device_index();
+    with_route(backend, route, move |channel| async move {
+        raw_feature_calls_on_channel(&channel, index, feature_id, calls).await
+    })
+    .await
+}
+
+/// [`raw_feature_calls`] against an already-open channel, the shape the
+/// tests drive a scripted device through.
+pub(crate) async fn raw_feature_calls_on_channel(
+    channel: &Arc<HidppChannel>,
+    index: u8,
+    feature_id: u16,
+    calls: &[RawFeatureCall],
+) -> Result<Option<RawFeatureAnswers>, WriteError> {
+    let device = Device::new(Arc::clone(channel), index)
+        .await
+        .map_err(|_| WriteError::DeviceUnreachable { index })?;
+    // The root answers a lookup of itself with index 0, which reads as
+    // absent, but it lives at index 0 on every HID++ 2.0 device.
+    let feature_index = if feature_id == RootFeature::ID {
+        0
+    } else {
+        let Some(info) = device
+            .root()
+            .get_feature(feature_id)
+            .await
+            .map_err(|e| classify_hidpp_error(e, HidppOperation::ResolveFeature, feature_id))?
+        else {
+            return Ok(None);
+        };
+        info.index
+    };
+    let mut answers = RawFeatureAnswers {
+        index: feature_index,
+        replies: Vec::with_capacity(calls.len()),
+        failure: None,
+    };
+    for call in calls {
+        let header = v20::MessageHeader {
+            device_index: index,
+            feature_index,
+            function_id: call.function,
+            software_id: channel.get_sw_id(),
+        };
+        let reply = match channel
+            .send_v20(v20::Message::Long(header, call.params))
+            .await
+        {
+            Ok(response) => RawFeatureReply::Payload(response.extend_payload()),
+            Err(Hidpp20Error::Feature(error)) => RawFeatureReply::Error(error),
+            Err(error) => {
+                answers.failure = Some(WriteError::Hidpp(format!("{error:?}")));
+                break;
+            }
+        };
+        answers.replies.push(reply);
+    }
+    Ok(Some(answers))
 }
 
 /// Enumerate the device's HID++ `0x1b04` reprogrammable controls. This is a

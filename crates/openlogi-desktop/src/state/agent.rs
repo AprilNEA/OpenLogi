@@ -27,6 +27,9 @@ pub(super) struct AgentSession {
     foreground: ForegroundApps,
     /// Whether Flow runs and the link state of each configured peer.
     pub(super) flow: FlowStatus,
+    /// Why the agent did not take the last Flow pairing command, until the
+    /// pairing phase moves on or another command is sent.
+    pub(super) flow_pairing_refusal: Option<super::FlowPairingRefusal>,
     last_ready_inventory: Vec<DeviceInventory>,
     #[cfg(all(target_os = "macos", debug_assertions))]
     monitor_events: std::collections::VecDeque<openlogi_ipc::MonitorEvent>,
@@ -40,6 +43,7 @@ impl Default for AgentSession {
             link: AgentLink::Connecting,
             foreground: ForegroundApps::default(),
             flow: FlowStatus::default(),
+            flow_pairing_refusal: None,
             last_ready_inventory: Vec::new(),
             #[cfg(all(target_os = "macos", debug_assertions))]
             monitor_events: std::collections::VecDeque::new(),

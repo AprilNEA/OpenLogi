@@ -4,18 +4,23 @@
 //! A peer moves by dragging its tile onto another edge, or with the arrow
 //! keys once it is selected. Peers with no edge wait in a tray underneath.
 
+use crate::ui::theme::FocusRingStyle as _;
 use gpui::{
     AppContext as _, Context, InteractiveElement as _, IntoElement, KeyDownEvent,
     ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Window,
     div, prelude::FluentBuilder as _, px,
 };
-use gpui_base::Button as BaseButton;
-use gpui_component::{Icon, h_flex, v_flex};
+use gpui_kit::base::Button as BaseButton;
+use gpui_kit::component::{
+    Icon, Sizable as _,
+    button::{Button, ButtonVariants as _},
+    h_flex, v_flex,
+};
 use openlogi_core::config::{FlowEdge, FlowPeerName};
 
 use super::{FlowModel, FlowView, PeerModel, link_dot, link_label};
 use crate::state::{AppState, FlowHost};
-use crate::ui::theme::{self, Palette, Typography as _};
+use crate::ui::theme::{self, Palette, PressableStyle as _, Typography as _};
 
 const TILE_W: f32 = 136.;
 const SCREEN_W: f32 = 120.;
@@ -104,7 +109,7 @@ pub(super) fn canvas(
         }
     }
     if model.peers.is_empty() {
-        grid = grid.child(empty_state(pal));
+        grid = grid.child(empty_state(pal, cx));
     }
 
     let chips: Vec<_> = unplaced
@@ -159,7 +164,7 @@ pub(super) fn canvas(
 }
 
 /// With no peer, the row under this computer says how one gets here.
-fn empty_state(pal: Palette) -> impl IntoElement {
+fn empty_state(pal: Palette, cx: &Context<FlowView>) -> impl IntoElement {
     let (_, y) = origin(Some(FlowEdge::Bottom));
     v_flex()
         .absolute()
@@ -175,6 +180,16 @@ fn empty_state(pal: Palette) -> impl IntoElement {
                 .text_caption()
                 .text_color(pal.text_muted)
                 .child(tr!("flow.empty_body")),
+        )
+        .child(
+            div().pt_2().child(
+                Button::new("flow-add-empty")
+                    .primary()
+                    .small()
+                    .label(tr!("flow.add"))
+                    .debug_selector(|| "flow-add-empty".into())
+                    .on_click(cx.listener(|this, _, window, cx| this.open_pairing(window, cx))),
+            ),
         )
 }
 
@@ -237,7 +252,12 @@ fn monitor_icon(pal: Palette) -> Icon {
         .text_color(pal.text_muted)
 }
 
-fn tile_frame(id: SharedString, label: SharedString, edge: Option<FlowEdge>) -> BaseButton {
+fn tile_frame(
+    id: SharedString,
+    label: SharedString,
+    edge: Option<FlowEdge>,
+    pal: Palette,
+) -> BaseButton {
     let (x, y) = origin(edge);
     let selector = id.to_string();
     BaseButton::new(id)
@@ -255,15 +275,16 @@ fn tile_frame(id: SharedString, label: SharedString, edge: Option<FlowEdge>) -> 
         // however many lines sit under them.
         .justify_start()
         .gap_1()
+        .rounded(pal.control_radius)
         .cursor_pointer()
+        .focus_visible(move |style| style.focus_ring(pal))
 }
 
 fn this_tile(selected: bool, pal: Palette, cx: &Context<FlowView>) -> BaseButton {
-    tile_frame("flow-tile-self".into(), tr!("flow.this_computer"), None)
+    tile_frame("flow-tile-self".into(), tr!("flow.this_computer"), None, pal)
         .selected(selected)
         .on_click(cx.listener(|this, _, _, cx| this.select(FlowHost::This, cx)))
-        .focus_visible(|style| style.opacity(0.85))
-        // The name sits inside the screen: below it is where the bar of a
+                // The name sits inside the screen: below it is where the bar of a
         // bottom edge goes.
         .child(
             screen(pal, true, selected, false).child(
@@ -298,7 +319,7 @@ fn peer_tile(
         name: peer.name.clone(),
         pal,
     };
-    tile_frame(tile_id(peer, edge), label, Some(edge))
+    tile_frame(tile_id(peer, edge), label, Some(edge), pal)
         .selected(is_selected)
         .on_click(cx.listener(move |this, _, _, cx| this.select(host.clone(), cx)))
         .on_drag(dragged, |dragged, _, _, cx| cx.new(|_| dragged.clone()))
@@ -369,7 +390,8 @@ fn tray_chip(
         })
         .bg(pal.panel)
         .cursor_pointer()
-        .hover(|style| style.bg(pal.control_hover))
+        .pressable_fill(false, pal)
+        .focus_visible(move |style| style.focus_ring(pal))
         .text_caption()
         .child(
             Icon::empty()

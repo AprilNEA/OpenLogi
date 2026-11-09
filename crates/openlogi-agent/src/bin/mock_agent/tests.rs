@@ -638,6 +638,8 @@ fn unpairing_drops_the_slot_from_the_rendered_inventory() {
 mod control;
 #[path = "tests/corpus.rs"]
 mod corpus;
+#[path = "tests/flow_pairing.rs"]
+mod flow_pairing;
 
 /// The built-in profile, with the mouse slot offering `hosts` as its
 /// Easy-Switch channels.

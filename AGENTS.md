@@ -175,6 +175,12 @@ loaded for any Rust or `Cargo.toml` edit.
   written in English.**
 - **Never add AI attribution** ("Generated with …", AI co-author trailers) to commits,
   PRs, or issues — including when adopting contributors' work.
+- In an Amp orb, Git defaults to `Amp <amp@ampcode.com>`, and the orb's global
+  `prepare-commit-msg` hook adds a `Co-authored-by` trailer to every commit,
+  `--amend` included. Before the first commit, set `git config user.name` and
+  `user.email` to the human committer and restore the repository's hooks:
+  `git config core.hooksPath "$(git rev-parse --path-format=absolute --git-common-dir)/hooks"`.
+  Check `git log -1 --format=%B` after committing.
 - Never post to external repos or reply publicly on the maintainer's behalf — draft the
   text for approval. Keep public drafts short, casual, and problem-focused.
 

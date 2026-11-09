@@ -88,10 +88,10 @@ let
   # at a separate checkout. The rev must match Cargo.lock (a mismatch fails
   # the build with a hash error, so it cannot drift silently); the hash is
   # shared with outputHashes below.
-  gpuiComponentRev = "1ac69bd51f744f3664361d9abd609bfc16de489f";
-  gpuiComponentHash = "sha256-up6s9rM5brgtiBQq9CSQRf8vJ4vE2ZhY4d8wRE1nfDk=";
+  gpuiComponentRev = "99576db58ec8103417c41a092e891b4022d24e7e";
+  gpuiComponentHash = "sha256-pynML4ywHoqD95/HYpBUDDUGtABYI48AtTAIab4EZug=";
   gpuiComponentSrc = fetchgit {
-    url = "https://github.com/AprilNEA/gpui-kit";
+    url = "https://github.com/longbridge/gpui-kit";
     rev = gpuiComponentRev;
     hash = gpuiComponentHash;
   };
@@ -111,7 +111,8 @@ rustPlatform.buildRustPackage {
     # `nix-prefetch-git <url> --rev <rev>`.
     outputHashes = {
       "appicon-0.1.0" = "sha256-XY8NS2qrpPbUXZ3xCPGjZbbT0tSVpapbcTbgA2H5+/I=";
-      "gpui-component-0.6.1" = gpuiComponentHash;
+      "gpui-tcc-0.1.1" = "sha256-UvEzrdEkW1G59WmQcBdFWmiYbPUiVC2vSkjIyuYCuco=";
+      "gpui-kit-0.8.1" = gpuiComponentHash;
     };
   };
 
@@ -160,6 +161,8 @@ rustPlatform.buildRustPackage {
     "--workspace"
     "--exclude=openlogi-desktop"
   ];
+  # GPUI's debug_bounds needs debug_assertions.
+  checkType = "debug";
 
   installPhase = ''
     runHook preInstall

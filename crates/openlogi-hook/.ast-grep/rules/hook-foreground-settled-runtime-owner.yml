@@ -1,0 +1,27 @@
+# Owner: linux::foreground::FrontmostController::settled_runtime — the one wait
+# for a stopping foreground-observer worker.
+id: hook-foreground-settled-runtime-owner
+language: rust
+severity: error
+message: Lock the foreground runtime with FrontmostController::settled_runtime. It is the one wait on worker_stopped, so every caller waits out a stopping worker on the same condition.
+note: |
+  frontmost_app, watch and remove_observer each carried their own
+  `while runtime.stopping { wait }` loop over a separate `stopping` flag. The
+  stage is now ObserverLifecycle's, and settled_runtime is the one place that
+  waits for it to leave Stopping. See "Single source of truth" in AGENTS.md.
+files:
+  - crates/openlogi-hook/src/linux/foreground.rs
+  - crates/openlogi-hook/src/linux/foreground/**/*.rs
+rule:
+  all:
+    - pattern: $CONTROLLER.worker_stopped.$WAIT($$$ARGS)
+    - not:
+        inside:
+          kind: function_item
+          has:
+            field: name
+            regex: ^settled_runtime$
+          stopBy: end
+constraints:
+  WAIT:
+    regex: ^wait

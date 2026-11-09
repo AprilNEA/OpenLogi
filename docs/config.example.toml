@@ -67,6 +67,8 @@ Back = "BrowserBack"
 Forward = { TapKeyHoldingModifiers = "Cmd+Tab" }
 # Hold the whole chord for exactly as long as the physical button is held.
 MiddleClick = { HoldShortcut = "Ctrl+Space" }
+# Hold bare Cmd while the button is held; keys typed arrive modified.
+WheelTiltLeft = { HoldModifier = "Cmd" }
 # Release before 500 ms runs `short`; reaching 500 ms runs `long` once.
 DpiToggle = { short = "ShowDesktop", long = "MissionControl" }
 # On a mouse without a thumb wheel, hold Back and turn the main wheel to scroll
@@ -132,6 +134,22 @@ KeySearch = "MissionControl"
 KeyScreenCapture = "Sleep"
 KeyCalculator = { OpenApplication = { path = "/System/Applications/Calculator.app", display_name = "Calculator" } }
 "control:0x01f3" = { CustomShortcut = "Cmd+Shift+4" }
+
+# A G-series keyboard's G-keys are OpenLogi's only once the device opts in;
+# M1–M3 then switch G1–G5 between profiles ("profiles"), or every key above
+# the row is a key of its own ("nine_buttons").
+[devices."serial:G915EXAMPLE"]
+g_key_owner = "openlogi"
+gaming_key_mode = "profiles"
+
+[devices."serial:G915EXAMPLE".bindings]
+KeyG1 = "VolumeUp"
+KeyG2 = "VolumeDown"
+"M2:KeyG1" = "Copy"
+"M2:KeyG2" = "Paste"
+
+[devices."serial:G915EXAMPLE".g_key_profile_names]
+M2 = "Work"
 
 # Since schema 5 a device is keyed by what it *is* — `unit:<hex>` or
 # `serial:<s>` — rather than by the route it was reached on, so its settings

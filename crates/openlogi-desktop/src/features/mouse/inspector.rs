@@ -1,5 +1,6 @@
 //! Fixed binding inspector for the Buttons workspace.
 
+use crate::ui::theme::FocusRingStyle as _;
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
@@ -7,8 +8,8 @@ use gpui::{
     Context, Entity, FocusHandle, InteractiveElement, IntoElement, ParentElement, Role,
     StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px, rgb, svg,
 };
-use gpui_base::Button as BaseButton;
-use gpui_component::{
+use gpui_kit::base::Button as BaseButton;
+use gpui_kit::component::{
     Disableable as _, Icon, IconName, Selectable as _, Sizable as _, button::Button, h_flex,
     input::InputState, scroll::ScrollableElement as _, v_flex,
 };
@@ -16,8 +17,8 @@ use openlogi_core::binding::{
     Action, ButtonId, GamingLayout, GestureDirection, default_binding, default_binding_on,
 };
 
+use super::editor_mode::Selection;
 use super::force_sensing::{PressForce, force_sensing_row};
-use super::hotspots::MouseControlId;
 use super::thumbwheel::ThumbwheelPreset;
 use super::view::MouseModelView;
 use crate::features::binding_editor::{
@@ -27,14 +28,15 @@ use crate::features::binding_editor::{
 use crate::state::AppState;
 use crate::ui::action::localized_action_label;
 use crate::ui::components::{MenuRow, Toggle, control_button, control_input, toggle_row};
-use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
+use crate::ui::theme::{
+    self, ACCENT_BLUE, Palette, PressableStyle as _, SelectableStyle as _, Typography as _,
+};
 
 pub(super) const INSPECTOR_W: f32 = 328.;
 
 #[derive(Clone, Copy)]
 pub(super) struct BindingInspectorData<'a> {
-    pub selected: Option<MouseControlId>,
-    pub gesture_direction: Option<GestureDirection>,
+    pub selected: Option<&'a Selection>,
     pub bindings: &'a BTreeMap<ButtonId, Action>,
     /// The device's G-series layout, which names the stock functions of its
     /// G buttons. `None` for a device without one.
@@ -96,8 +98,9 @@ pub(super) enum ShortcutError {
 }
 
 /// Whether the custom shortcut editor records a tapped or a held chord.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum ShortcutMode {
+    #[default]
     Tap,
     Hold,
 }
@@ -123,14 +126,18 @@ pub(super) fn binding_inspector(
             data.overridden.map_or(0, BTreeMap::len),
             pal,
         ),
-        Some(MouseControlId::ThumbwheelRotation) => thumbwheel_inspector(
-            data.bindings,
-            data.editing_app,
-            data.overridden,
-            picker,
-            pal,
-        ),
-        Some(MouseControlId::Button(button)) => button_inspector(button, &data, picker, pal, cx),
+        Some(selection) => match selection.button() {
+            Some((button, direction)) => {
+                button_inspector(button, direction, &data, picker, pal, cx)
+            }
+            None => thumbwheel_inspector(
+                data.bindings,
+                data.editing_app,
+                data.overridden,
+                picker,
+                pal,
+            ),
+        },
     };
 
     v_flex()
@@ -185,6 +192,7 @@ fn empty_inspector(app: Option<&str>, override_count: usize, pal: Palette) -> gp
 )]
 fn button_inspector(
     button: ButtonId,
+    direction: GestureDirection,
     data: &BindingInspectorData<'_>,
     picker: ActionPickerContext<'_>,
     pal: Palette,
@@ -197,7 +205,7 @@ fn button_inspector(
     if data.editing_app.is_none()
         && let Some(gesture_map) = gesture_map
     {
-        return gesture_inspector(button, gesture_map, data, picker, pal, cx);
+        return gesture_inspector(button, gesture_map, direction, data, picker, pal, cx);
     }
     if let Some(app) = data.editing_app
         && !overridden
@@ -264,7 +272,7 @@ fn button_inspector(
                         .on_click(move |_, _, cx| {
                             AppState::apply(cx, |state| state.commit_gesture_mode(button, true));
                             observer.update(cx, |view, cx| {
-                                view.set_gesture_selected_dir(Some(GestureDirection::Click));
+                                view.select_gesture_direction(GestureDirection::Click);
                                 cx.notify();
                             });
                         }),
@@ -352,8 +360,8 @@ fn wheel_hold_section(
 /// binding carried over from another mouse can be removed.
 ///
 /// The gesture inspector offers it too. Turning it on there leaves gesture
-/// mode, stashing the direction map, so the selected direction is cleared
-/// as "Use a single action" does.
+/// mode, stashing the direction map, so the selected direction goes back
+/// to Click as "Use a single action" does.
 fn wheel_hold_row(
     button: ButtonId,
     enabled: bool,
@@ -372,7 +380,7 @@ fn wheel_hold_row(
                 AppState::apply(cx, |state| state.commit_wheel_hold(button, *enabled));
                 if *enabled {
                     observer.update(cx, |view, cx| {
-                        view.set_gesture_selected_dir(None);
+                        view.select_gesture_direction(GestureDirection::Click);
                         cx.notify();
                     });
                 }
@@ -417,7 +425,7 @@ fn inherited_gesture_inspector(
                 .on_click(move |_, _, cx| {
                     AppState::apply(cx, |state| state.set_editing_app(None));
                     edit_default.update(cx, |view, cx| {
-                        view.set_gesture_selected_dir(Some(GestureDirection::Click));
+                        view.select_gesture_direction(GestureDirection::Click);
                         cx.notify();
                     });
                 }),
@@ -443,12 +451,12 @@ fn inherited_gesture_inspector(
 fn gesture_inspector(
     button: ButtonId,
     gesture_map: &BTreeMap<GestureDirection, Action>,
+    direction: GestureDirection,
     data: &BindingInspectorData<'_>,
     picker: ActionPickerContext<'_>,
     pal: Palette,
     cx: &Context<MouseModelView>,
 ) -> gpui::Div {
-    let direction = data.gesture_direction.unwrap_or(GestureDirection::Click);
     // Gesture mode never holds the wheel, so the switch here is off and only
     // turning it on is useful, which needs measured raw wheel.
     let offer_wheel_hold = button.supports_wheel_hold() && data.virtual_thumbwheel;
@@ -490,7 +498,7 @@ fn gesture_inspector(
                 .on_click(move |_, _, cx| {
                     AppState::apply(cx, |state| state.commit_gesture_mode(button, false));
                     turn_off.update(cx, |view, cx| {
-                        view.set_gesture_selected_dir(None);
+                        view.select_gesture_direction(GestureDirection::Click);
                         cx.notify();
                     });
                 }),
@@ -577,7 +585,7 @@ fn gesture_directions(
                         })
                         .on_click(move |_, _, cx| {
                             view.update(cx, |view, cx| {
-                                view.set_gesture_selected_dir(Some(direction));
+                                view.select_gesture_direction(direction);
                                 cx.notify();
                             });
                         })
@@ -751,7 +759,6 @@ fn selection_card(
     pal: Palette,
 ) -> impl IntoElement {
     let toggle = picker.view.clone();
-    let search = picker.search.clone();
     let opening = !picker.open;
     let accessible_label = value.clone();
     BaseButton::new(id)
@@ -768,8 +775,8 @@ fn selection_card(
         .bg(pal.control)
         .p_3()
         .cursor_pointer()
-        .hover(move |card| card.bg(pal.control_hover))
-        .focus_visible(move |card| card.bg(pal.control_hover).border_color(rgb(ACCENT_BLUE)))
+        .pressable_fill(false, pal)
+        .focus_visible(move |card| card.focus_ring(pal))
         .child(
             div()
                 .text_caption()
@@ -808,14 +815,12 @@ fn selection_card(
                 ),
         )
         .on_click(move |_, window, cx| {
-            if opening {
-                search.update(cx, |search, cx| search.set_value("", window, cx));
-            }
             toggle.update(cx, |view, cx| {
                 if opening {
-                    view.clear_custom_action_drafts(window, cx);
+                    view.open_action_picker(window, cx);
+                } else {
+                    view.close_action_picker();
                 }
-                view.toggle_action_picker();
                 cx.notify();
             });
         })
@@ -844,7 +849,7 @@ fn action_library(
                 let view = picker.view.clone();
                 move |cx| {
                     view.update(cx, |view, cx| {
-                        view.invalid_drafts.application = true;
+                        view.edit_picker_drafts(|drafts| drafts.invalid.application = true);
                         cx.notify();
                     });
                 }
@@ -860,7 +865,7 @@ fn action_library(
                 let view = picker.view.clone();
                 move |cx| {
                     view.update(cx, |view, cx| {
-                        view.invalid_drafts.command = true;
+                        view.edit_picker_drafts(|drafts| drafts.invalid.command = true);
                         cx.notify();
                     });
                 }
@@ -902,31 +907,27 @@ fn custom_shortcut_editor(
     let view = picker.view;
     let submit_input = input.clone();
     let on_pick = on_pick.clone();
-    let mode_button = |option: ShortcutMode| {
-        let (id, label) = match option {
-            ShortcutMode::Tap => ("tap", tr!("actions.shortcut_tap")),
-            ShortcutMode::Hold => ("hold", tr!("actions.shortcut_hold")),
-        };
-        let view = view.clone();
-        control_button(format!("{id_prefix}-shortcut-{id}"))
-            .debug_selector(move || format!("{id_prefix}-shortcut-{id}"))
-            .selected(mode == option)
-            .label(label)
-            .on_click(move |_, _, cx| {
-                view.update(cx, |view, cx| {
-                    view.shortcut_mode = option;
-                    cx.notify();
-                });
-            })
-    };
-    let tap_button = mode_button(ShortcutMode::Tap);
-    let hold_button = mode_button(ShortcutMode::Hold);
     let record_view = view.clone();
     let view = view.clone();
     v_flex()
         .gap_1()
         .child(editor_section(tr!("action_ring.custom_shortcut"), pal))
-        .child(h_flex().gap_2().child(tap_button).child(hold_button))
+        .child(
+            h_flex()
+                .gap_2()
+                .child(shortcut_mode_button(
+                    id_prefix,
+                    picker,
+                    ShortcutMode::Tap,
+                    pal,
+                ))
+                .child(shortcut_mode_button(
+                    id_prefix,
+                    picker,
+                    ShortcutMode::Hold,
+                    pal,
+                )),
+        )
         .child(
             h_flex()
                 .gap_2()
@@ -965,8 +966,9 @@ fn custom_shortcut_editor(
                             match shortcut.parse::<openlogi_core::binding::KeyCombo>() {
                                 Ok(combo) => (on_pick)(mode.action(combo), window, cx),
                                 Err(_) => view.update(cx, |view, cx| {
-                                    view.invalid_drafts.shortcut =
-                                        Some(ShortcutError::Unrecognized);
+                                    view.edit_picker_drafts(|drafts| {
+                                        drafts.invalid.shortcut = Some(ShortcutError::Unrecognized);
+                                    });
                                     cx.notify();
                                 }),
                             }
@@ -987,7 +989,7 @@ fn custom_shortcut_editor(
                 div()
                     .debug_selector(move || format!("{id_prefix}-custom-shortcut-error"))
                     .text_caption()
-                    .text_color(rgb(0x00ef_4444))
+                    .text_color(pal.text_danger)
                     .child(match error {
                         ShortcutError::Unrecognized => {
                             tr!("action_ring.custom_action_invalid_input")
@@ -995,6 +997,35 @@ fn custom_shortcut_editor(
                         ShortcutError::ShiftedSymbol => tr!("actions.shifted_symbol_unrecordable"),
                     }),
             )
+        })
+}
+
+/// One Tap / Hold segment of the custom shortcut editor; the current mode
+/// takes the selected border and fill.
+fn shortcut_mode_button(
+    id_prefix: &'static str,
+    picker: &ActionPickerContext<'_>,
+    option: ShortcutMode,
+    pal: Palette,
+) -> impl IntoElement {
+    let (id, label) = match option {
+        ShortcutMode::Tap => ("tap", tr!("actions.shortcut_tap")),
+        ShortcutMode::Hold => ("hold", tr!("actions.shortcut_hold")),
+    };
+    let selected = picker.shortcut_mode == option;
+    let view = picker.view.clone();
+    control_button(format!("{id_prefix}-shortcut-{id}"))
+        .debug_selector(move || format!("{id_prefix}-shortcut-{id}"))
+        .selected(selected)
+        .when(selected, |button| {
+            button.selected_border(true, pal).selected_fill(true)
+        })
+        .label(label)
+        .on_click(move |_, _, cx| {
+            view.update(cx, |view, cx| {
+                view.edit_picker_drafts(|drafts| drafts.shortcut_mode = option);
+                cx.notify();
+            });
         })
 }
 
@@ -1050,8 +1081,7 @@ mod tests {
         wheel_hold: &'a BTreeSet<ButtonId>,
     ) -> BindingInspectorData<'a> {
         BindingInspectorData {
-            selected: Some(MouseControlId::Button(ButtonId::Back)),
-            gesture_direction: None,
+            selected: None,
             bindings,
             layout: None,
             gesture_maps,

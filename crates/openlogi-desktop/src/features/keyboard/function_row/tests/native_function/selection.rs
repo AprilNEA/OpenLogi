@@ -5,7 +5,7 @@ use super::*;
 const APP: &str = "com.example.Editor";
 
 fn inspector(cx: &mut gpui::TestAppContext) -> (&mut gpui::VisualTestContext, tempfile::TempDir) {
-    cx.update(gpui_component::init);
+    cx.update(gpui_kit::init);
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join(openlogi_core::paths::CONFIG_FILE);
     let (mut config, mut file) = ConfigFile::load_from_path(&path).unwrap();
@@ -28,6 +28,7 @@ fn redraw(cx: &mut gpui::VisualTestContext) {
     cx.update(|window, cx| window.draw(cx).clear(cx));
 }
 
+/// Callers hold `LOCALE_LOCK`.
 fn click(cx: &mut gpui::VisualTestContext, selector: &'static str) {
     let bounds = cx.debug_bounds(selector).expect("action row is rendered");
     cx.simulate_click(bounds.center(), gpui::Modifiers::default());
@@ -68,6 +69,7 @@ fn keyboard_native_inherited_copy_has_only_the_default_checkmark(cx: &mut gpui::
 fn keyboard_native_inherited_copy_can_be_explicitly_selected_and_cleared(
     cx: &mut gpui::TestAppContext,
 ) {
+    let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
     let (cx, dir) = inspector(cx);
     click(cx, "panel-action-Copy");
     assert_copy_selection(cx, false);
@@ -101,6 +103,7 @@ fn keyboard_native_inherited_copy_can_be_explicitly_selected_and_cleared(
 
 #[gpui::test]
 fn keyboard_native_device_default_copy_is_selected_and_clears(cx: &mut gpui::TestAppContext) {
+    let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
     let (cx, _dir) = inspector(cx);
     cx.update(|_, cx| AppState::apply(cx, |state| state.set_editing_app(None)));
     redraw(cx);

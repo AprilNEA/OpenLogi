@@ -393,12 +393,20 @@ Everything Flow needs from the local IPC is ordinary appending under the
 existing rules (`.claude/rules/ipc-protocol.md`): bump `PROTOCOL_VERSION`,
 append methods/fields, regenerate the golden tests.
 
-- RPCs: manual `switch_host(route, host)` (also the milestone-1 deliverable),
-  flow enable/disable, pairing confirm/reject, layout set.
+- RPCs: manual `switch_host(route, host)` (also the milestone-1 deliverable)
+  and pairing: `read_flow_identity`, `start_flow_pairing`, `pair_flow_peer`,
+  `confirm_flow_pairing`, `cancel_flow_pairing`, `stop_flow_pairing`. Flow
+  enable/disable and the layout are ordinary config edits.
 - State: a `flow` field appended to `AgentSnapshot` — enabled, peers with
-  **coarse** link state, pairing session as `FlowPairingPhase { Discovering,
-  ConfirmCode(..), Paired, Failed(..) }` following the `PairingPhase`
-  "state, not stream" precedent (agent-restart self-healing comes with it).
+  **coarse** link state, and while pairing is open `FlowPairingPhase {
+  Searching, Found, Connecting, ShowingCode, WaitingForPeer, Paired, Failed }`
+  following the `PairingPhase` "state, not stream" precedent (agent-restart
+  self-healing comes with it).
+- Pairing runs on its own endpoint (UDP 42425, mDNS `_openlogi-pair._udp`)
+  only while the GUI keeps it open. It trusts no key, so the runtime's
+  endpoint never admits an unknown one. The agent saves the paired key in
+  `config.toml` itself (DECISIONS.md, 2026-11) and reloads it, so the new peer
+  joins the runtime like a hand-edited one, with no screen edge yet.
 - Churn rule: `Agent::observe` re-sends the whole snapshot on every generation
   bump, so per-heartbeat facts (RTT, last-seen timestamps) must not live in
   `AgentSnapshot`. Quantize link state to `Connected/Degraded/Lost`. If Flow

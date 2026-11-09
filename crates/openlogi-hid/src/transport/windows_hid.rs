@@ -28,19 +28,10 @@ pub(crate) struct NativeHidWriter {
 
 impl NativeHidWriter {
     pub(crate) fn new(info: &DeviceInfo) -> Option<Self> {
-        let DeviceId::UncPath(path) = &info.id else {
-            return None;
-        };
-        // `HSTRING` derefs to its UTF-16 code units (`[u16]`, sans terminator);
-        // copy them directly instead of round-tripping through a lossy UTF-8
-        // `String`, which would corrupt a path with unpaired surrogates.
-        // CreateFileW needs the path NUL-terminated.
-        let mut path: Vec<u16> = path.to_vec();
-        path.push(0);
-        Some(Self { path })
+        nul_terminated_path(info).map(|path| Self { path })
     }
 
-    pub(crate) fn write_report(&self, report: &[u8]) -> Result<(), NativeWriteError> {
+    pub(crate) fn write_report(&self, report: &[u8]) -> Result<(), NativeHidError> {
         let mut errors = Vec::new();
         for desired_access in [GENERIC_READ | GENERIC_WRITE, GENERIC_WRITE, 0] {
             let handle = match HidHandle::open(&self.path, desired_access) {
@@ -76,8 +67,46 @@ impl NativeHidWriter {
             return Ok(());
         }
 
-        Err(NativeWriteError::AllMethodsFailed(errors))
+        Err(NativeHidError::AllMethodsFailed(errors))
     }
+}
+
+/// The input and output report lengths, in bytes and report id included, that
+/// one HID collection declares. A zero length means the collection declares no
+/// report of that kind.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ReportLengths {
+    pub(crate) input: u16,
+    pub(crate) output: u16,
+}
+
+impl ReportLengths {
+    /// Read the lengths `info`'s collection declares, over a handle opened
+    /// without read or write access, as enumeration opens it.
+    pub(crate) fn query(info: &DeviceInfo) -> Result<Self, NativeHidError> {
+        let path = nul_terminated_path(info).ok_or(NativeHidError::NotAPath)?;
+        let handle =
+            HidHandle::open(&path, 0).map_err(|e| NativeHidError::LastOsError("CreateFileW", e))?;
+        let caps = handle.caps()?;
+        Ok(Self {
+            input: caps.InputReportByteLength,
+            output: caps.OutputReportByteLength,
+        })
+    }
+}
+
+/// `info`'s device path as the NUL-terminated UTF-16 string `CreateFileW`
+/// takes, or `None` for an id that is not a path.
+fn nul_terminated_path(info: &DeviceInfo) -> Option<Vec<u16>> {
+    let DeviceId::UncPath(path) = &info.id else {
+        return None;
+    };
+    // `HSTRING` derefs to its UTF-16 code units (`[u16]`, sans terminator);
+    // copy them directly instead of round-tripping through a lossy UTF-8
+    // `String`, which would corrupt a path with unpaired surrogates.
+    let mut path: Vec<u16> = path.to_vec();
+    path.push(0);
+    Some(path)
 }
 
 fn try_write_methods(handle: HANDLE, caps: &HIDP_CAPS, report: &[u8]) -> Result<(), String> {
@@ -190,7 +219,7 @@ struct HidHandle(HANDLE);
 impl HidHandle {
     fn open(path: &[u16], desired_access: u32) -> Result<Self, io::Error> {
         // SAFETY: `path` is a NUL-terminated UTF-16 string (the terminator is
-        // pushed in `NativeHidWriter::new`); the other arguments are valid
+        // pushed in `nul_terminated_path`); the other arguments are valid
         // share/disposition constants and null security/template pointers.
         // Returns INVALID_HANDLE_VALUE on failure, checked below.
         let handle = unsafe {
@@ -215,7 +244,7 @@ impl HidHandle {
         self.0
     }
 
-    fn caps(&self) -> Result<HIDP_CAPS, NativeWriteError> {
+    fn caps(&self) -> Result<HIDP_CAPS, NativeHidError> {
         let mut attributes = HIDD_ATTRIBUTES {
             Size: size_of::<HIDD_ATTRIBUTES>().try_into().unwrap_or(u32::MAX),
             VendorID: 0,
@@ -225,7 +254,7 @@ impl HidHandle {
         // SAFETY: `self.0` is a live HID handle; `attributes` is a valid,
         // Size-initialized HIDD_ATTRIBUTES the call fills in.
         if !unsafe { HidD_GetAttributes(self.0, &raw mut attributes) } {
-            return Err(NativeWriteError::LastOsError(
+            return Err(NativeHidError::LastOsError(
                 "HidD_GetAttributes",
                 io::Error::last_os_error(),
             ));
@@ -236,7 +265,7 @@ impl HidHandle {
         // out-pointer. On success the OS allocates a blob that must be released
         // via HidD_FreePreparsedData — owned by the `PreparsedData` guard below.
         if !unsafe { HidD_GetPreparsedData(self.0, &raw mut preparsed) } {
-            return Err(NativeWriteError::LastOsError(
+            return Err(NativeHidError::LastOsError(
                 "HidD_GetPreparsedData",
                 io::Error::last_os_error(),
             ));
@@ -248,7 +277,7 @@ impl HidHandle {
         // `_preparsed`; `caps` is a valid out-parameter the call fills in.
         let status = unsafe { HidP_GetCaps(preparsed, &raw mut caps) };
         if status != HIDP_STATUS_SUCCESS {
-            return Err(NativeWriteError::HidpStatus("HidP_GetCaps", status));
+            return Err(NativeHidError::HidpStatus("HidP_GetCaps", status));
         }
 
         Ok(caps)
@@ -278,9 +307,11 @@ impl Drop for PreparsedData {
 }
 
 #[derive(Debug, Error)]
-pub(crate) enum NativeWriteError {
+pub(crate) enum NativeHidError {
     #[error("all native Windows HID write methods failed: {}", .0.join("; "))]
     AllMethodsFailed(Vec<String>),
+    #[error("the device id is not a Windows device path")]
+    NotAPath,
     #[error("{0} returned NTSTATUS {1:#010x}")]
     HidpStatus(&'static str, i32),
     #[error("{0}: {1}")]

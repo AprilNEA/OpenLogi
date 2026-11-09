@@ -17,7 +17,7 @@ pub(super) use gpui::{
     StatefulInteractiveElement, Styled, Subscription, Window, div, img, prelude::FluentBuilder, px,
     rgb,
 };
-pub(super) use gpui_component::{
+pub(super) use gpui_kit::component::{
     ActiveTheme, Disableable, Icon, IconName, IndexPath, Selectable, Sizable, TITLE_BAR_HEIGHT,
     Theme, ThemeColor, ThemeMode, ThemeRegistry,
     button::{Button, ButtonGroup, ButtonVariants},
@@ -37,7 +37,6 @@ pub(super) use openlogi_core::config::{
     Appearance, AssetSourcePreference, ThumbwheelSensitivity, UiScale, VerticalScrollSensitivity,
 };
 
-pub(super) use crate::app::menu::{CloseWindow, Minimize, Zoom};
 use crate::features::pointer::momentum::{MomentumPanel, MomentumScope};
 pub(super) use crate::services::assets::sync::{AssetCommand, AssetControl};
 pub(super) use crate::state::{AppState, StateEvent};
@@ -155,6 +154,10 @@ pub struct SettingsView {
     /// General page's "switched off in System Settings" notice while keeping
     /// the render path on this intentional cache.
     registration_status: crate::platform::registration::ServiceStatus,
+    /// The Permissions page's "Grant access…" run, which installs the udev
+    /// rules through pkexec.
+    #[cfg(target_os = "linux")]
+    input_access_grant: permissions::InputAccessGrant,
     /// Drives the debug live event monitor: polls the agent on a timer while the
     /// Settings window is open. Dropping it with the view stops polling, which
     /// lets the agent's idle janitor turn monitoring back off.
@@ -278,6 +281,8 @@ impl SettingsView {
             copied_gen: 0,
             asset_cache_desc: assets::cache_size_description(),
             registration_status: crate::platform::registration::status(),
+            #[cfg(target_os = "linux")]
+            input_access_grant: permissions::InputAccessGrant::default(),
             #[cfg(all(target_os = "macos", debug_assertions))]
             _monitor_task: monitor_task,
         }
@@ -469,7 +474,7 @@ impl Render for SettingsView {
         // Registered only where grants exist to manage — see the `mod
         // permissions` cfg for why Windows skips it.
         #[cfg(any(target_os = "macos", target_os = "linux"))]
-        let settings = settings.page(permissions::permissions_page(has_camera));
+        let settings = settings.page(permissions::permissions_page(view.clone(), has_camera));
         let settings = settings
             .page(appearance::appearance_page(
                 view.clone(),
@@ -495,9 +500,6 @@ impl Render for SettingsView {
             .bg(pal.page)
             .text_color(pal.text_primary)
             .track_focus(&self.focus_handle)
-            .on_action(|_: &CloseWindow, window, _| window.remove_window())
-            .on_action(|_: &Minimize, window, _| window.minimize_window())
-            .on_action(|_: &Zoom, window, _| window.zoom_window())
             // Only where the compositor left the chrome to us, and as an
             // absolute overlay (with matching top padding) rather than a
             // flex-column row — the `Settings` sidebar uses `h_resizable`

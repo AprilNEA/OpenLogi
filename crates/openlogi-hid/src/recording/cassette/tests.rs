@@ -15,12 +15,15 @@ use tokio::sync::{Mutex as AsyncMutex, mpsc};
 
 use super::*;
 use crate::recording::{
-    NativeRecorder, RecordedChannel, RecordedChannelOpenOutcome, RecordedRequestFact,
+    NativeRecorder, RecordedChannel, RecordedChannelOpenOutcome, RecordedRequestFact, RecorderState,
 };
 
 const DEVICE: u8 = 1;
 const CAPTURE_SW_ID: u8 = 3;
 const REPLAY_SW_ID: u8 = 9;
+/// The software ID Linux's hid-logitech-hidpp tags its own requests with,
+/// and the first one the transport leases.
+const KERNEL_SW_ID: u8 = 1;
 const UNIT_ID: [u8; 4] = [0x12, 0x34, 0x56, 0x78];
 const DEVICE_SERIAL: &[u8; 12] = b"SERIAL123456";
 const BOLT_UNIQUE_ID: &[u8; 16] = b"ABCDEF0123456789";
@@ -332,19 +335,75 @@ async fn rejects_pairing_passkeys_unknown_and_unclassified_identity_features() {
 }
 
 #[tokio::test]
-async fn rejects_malformed_unmatched_and_unproven_fire_and_forget_evidence() {
-    let evidence = record_unassociated(vec![
-        vec![0x10, 0xff, 0x01],
-        short(DEVICE, 0, 0x01, [1, 2, 3]),
-    ])
-    .await;
+async fn rejects_malformed_and_unproven_fire_and_forget_evidence() {
+    let evidence = record_unassociated(vec![vec![0x10, 0xff, 0x01]]).await;
     let report = evidence.build_hid_cassette(metadata());
     assert_rejected(&report, &CassetteRejectionReason::MalformedIncomingReport);
-    assert_rejected(&report, &CassetteRejectionReason::UnmatchedIncomingReport);
 
     let fire_and_forget = record_fire_and_forget(short(DEVICE, 0, 0x11, [1, 2, 3])).await;
     let report = fire_and_forget.build_hid_cassette(metadata());
     assert_rejected(&report, &CassetteRejectionReason::UnprovenFireAndForget);
+}
+
+#[tokio::test]
+async fn unsolicited_hidpp_input_no_recorded_request_asked_for_adds_no_rejection() {
+    // A Linux feature-table capture through a Lightspeed receiver saw the
+    // first three of these unmatched (#2374). hid-logitech-dj and
+    // hid-logitech-hidpp drive the receiver through the node the capture
+    // reads, on the software ID the capture's lease also took.
+    let ping = (
+        short(DEVICE, 0, 0x10 | KERNEL_SW_ID, [0; 3]),
+        long(DEVICE, 0, 0x10 | KERNEL_SW_ID, &ping_reply(0x00)),
+    );
+    let unsolicited = vec![
+        // The receiver's device-connection notification.
+        short(DEVICE, 0x41, 0x11, [0xb2, 0x9f, 0x40]),
+        // The receiver acknowledging hid-logitech-dj's device-arrival query.
+        short(0xff, 0x80, 0x02, [0; 3]),
+        // hid-logitech-hidpp's connection-event ping reply, echoing its 0x5a.
+        long(DEVICE, 0, 0x10 | KERNEL_SW_ID, &ping_reply(0x5a)),
+        // A HID++ 2.0 event: software ID 0 answers no request.
+        long(DEVICE, 6, 0x00, &[50; 16]),
+        // A retransmission repeating a recorded answer byte for byte.
+        ping.1.clone(),
+    ];
+    let report = record_successes_then_unsolicited(
+        vec![ping, root_mapping(KERNEL_SW_ID, 0x0003, 5)],
+        unsolicited,
+    )
+    .await
+    .build_hid_cassette(metadata());
+
+    assert!(report.is_committable(), "{:?}", report.rejections);
+    assert_eq!(report.cassette.expect("cassette").exchanges.len(), 2);
+}
+
+#[tokio::test]
+async fn rejects_an_unmatched_report_that_could_answer_a_recorded_request() {
+    let ping = short(DEVICE, 0, 0x10 | KERNEL_SW_ID, [0; 3]);
+    // The channel took another sender's ping reply for this ping's answer.
+    let taken = long(DEVICE, 0, 0x10 | KERNEL_SW_ID, &ping_reply(0x5a));
+    for unmatched in [
+        // This ping's own answer, which arrived second.
+        long(DEVICE, 0, 0x10 | KERNEL_SW_ID, &ping_reply(0x00)),
+        // A root getFeature reply carries no feature ID, so any reply on the
+        // recorded header could have been the one this lookup needed.
+        short(DEVICE, 0, KERNEL_SW_ID, [7, 0, 4]),
+        // A HID++ 2.0 error echoing the recorded getFeature header.
+        short(DEVICE, 0xff, 0, [KERNEL_SW_ID, 0x05, 0]),
+    ] {
+        let report = record_successes_then_unsolicited(
+            vec![
+                (ping.clone(), taken.clone()),
+                root_mapping(KERNEL_SW_ID, 0x0003, 5),
+            ],
+            vec![unmatched],
+        )
+        .await
+        .build_hid_cassette(metadata());
+
+        assert_rejected(&report, &CassetteRejectionReason::UnmatchedIncomingReport);
+    }
 }
 
 #[tokio::test]
@@ -359,7 +418,7 @@ async fn foreign_protocol_reports_from_the_same_node_add_no_rejection() {
     let request = short(0xff, 0x83, 0xfb, [0, 0, 0]);
     let response = long(0xff, 0x83, 0xfb, BOLT_UNIQUE_ID);
 
-    let report = record_successes_with_foreign_reports(
+    let report = record_successes_then_unsolicited(
         vec![(request.clone(), response.clone())],
         vec![dj_notification],
     )
@@ -591,11 +650,11 @@ async fn record_successes_with_support(
     recorder.finish().unwrap().channels.remove(0)
 }
 
-async fn record_successes_with_foreign_reports(
+async fn record_successes_then_unsolicited(
     transactions: Vec<(Vec<u8>, Vec<u8>)>,
-    foreign: Vec<Vec<u8>>,
+    unsolicited: Vec<Vec<u8>>,
 ) -> RecordedChannel {
-    let foreign_count = foreign.len();
+    let unsolicited_count = unsolicited.len();
     let recorder = NativeRecorder::new(256).unwrap();
     let sink = recorder.sink();
     let mut capture = sink.begin_channel(test_node()).unwrap();
@@ -620,11 +679,11 @@ async fn record_successes_with_foreign_reports(
         let (result, ()) = tokio::join!(send, respond);
         assert_eq!(result.unwrap(), expected);
     }
-    for report in foreign {
+    for report in unsolicited {
         handle.send_raw(report);
     }
 
-    wait_for_accepted(&recorder, 2 + transactions.len() * 3 + foreign_count).await;
+    wait_for_accepted(&recorder, 2 + transactions.len() * 3 + unsolicited_count).await;
     drop(channel);
     wait_for_closed(&recorder).await;
     recorder.finish().unwrap().channels.remove(0)
@@ -777,17 +836,20 @@ fn long(device: u8, feature: u8, function: u8, payload: &[u8]) -> Vec<u8> {
     report
 }
 
+/// A HID++ 4.2 Root ping reply payload echoing `data`.
+fn ping_reply(data: u8) -> [u8; 16] {
+    let mut payload = [0; 16];
+    payload[..3].copy_from_slice(&[4, 2, data]);
+    payload
+}
+
 async fn wait_for_accepted(recorder: &NativeRecorder, expected: usize) {
     let started = Instant::now();
     while started.elapsed() < Duration::from_secs(1) {
-        if recorder
-            .shared
-            .state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .accepted
-            >= expected
-        {
+        if matches!(
+            &*recorder.shared.lock_state(),
+            RecorderState::Open(open) if open.accepted >= expected
+        ) {
             return;
         }
         tokio::time::sleep(Duration::from_millis(5)).await;
@@ -798,14 +860,10 @@ async fn wait_for_accepted(recorder: &NativeRecorder, expected: usize) {
 async fn wait_for_closed(recorder: &NativeRecorder) {
     let started = Instant::now();
     while started.elapsed() < Duration::from_secs(1) {
-        if recorder
-            .shared
-            .state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .active_producers
-            == 0
-        {
+        if matches!(
+            &*recorder.shared.lock_state(),
+            RecorderState::Open(open) if open.producers == 0
+        ) {
             return;
         }
         tokio::time::sleep(Duration::from_millis(5)).await;
