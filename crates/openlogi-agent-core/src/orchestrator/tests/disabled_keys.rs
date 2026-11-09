@@ -7,7 +7,7 @@ use openlogi_core::hid::{DisableKeysMask, HidppOperation, WriteError};
 use openlogi_device::test_support::publish_scripted_channel;
 use std::sync::atomic::{AtomicU8, Ordering};
 
-struct Keyboard {
+pub(super) struct Keyboard {
     route: DeviceRoute,
     disabled: Arc<AtomicU8>,
     writes: Arc<std::sync::Mutex<Vec<u8>>>,
@@ -25,7 +25,10 @@ impl Keyboard {
         Self::publish_on(shared, route).await
     }
 
-    async fn publish_on(shared: &SharedHandles, route: DeviceRoute) -> Self {
+    /// A keyboard at `route` that supports Caps Lock, Insert and a key this
+    /// version does not know (`0xa1`), and starts with Caps Lock and that
+    /// unknown key disabled (`0x81`).
+    pub(super) async fn publish_on(shared: &SharedHandles, route: DeviceRoute) -> Self {
         let disabled = Arc::new(AtomicU8::new(0x81));
         let device_disabled = Arc::clone(&disabled);
         let writes = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -82,7 +85,7 @@ impl Keyboard {
             .sync_policy(&self.route, Some(DisableKeysMask::CAPS_LOCK));
     }
 
-    fn assert_writes(&self, expected: &[u8]) {
+    pub(super) fn assert_writes(&self, expected: &[u8]) {
         assert_eq!(*self.writes.lock().expect("writes"), expected);
     }
 
