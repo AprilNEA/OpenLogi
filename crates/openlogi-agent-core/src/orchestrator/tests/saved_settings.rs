@@ -15,9 +15,9 @@ use openlogi_ipc::ConfigReloadError;
 use tokio::sync::Mutex;
 
 use super::*;
-use crate::orchestrator::{ConfigReload, DeviceSettings, SettingError};
+use crate::orchestrator::{ConfigReload, DeviceSettings, RoutedDevice, SettingError};
 use crate::receiver_access::ExclusiveAccessReason;
-use crate::test_support::publish_dpi_mouse;
+use crate::test_support::{UNIT, publish_dpi_mouse, reporting_unit};
 
 const KEY: &str = "unit:12345678";
 
@@ -46,6 +46,8 @@ struct Agent {
     settings: DeviceSettings<Reload>,
     reloads: Arc<AtomicUsize>,
     route: DeviceRoute,
+    /// The mouse, as a menu lists it.
+    device: RoutedDevice,
 }
 
 impl Agent {
@@ -54,7 +56,7 @@ impl Agent {
     /// offline mouse is known by the route it was last seen on.
     fn new(path: &Path, online: bool) -> Self {
         let mouse = AgentDevice {
-            unit_id: [0x12, 0x34, 0x56, 0x78],
+            unit_id: UNIT,
             ..dev(KEY, 1, online)
         };
         let route = mouse.route.clone().unwrap();
@@ -84,6 +86,10 @@ impl Agent {
             orchestrator,
             settings,
             reloads,
+            device: RoutedDevice {
+                route: route.clone(),
+                unit: UNIT,
+            },
             route,
         }
     }
@@ -119,7 +125,7 @@ async fn an_online_dpi_is_written_saved_and_reloaded() {
 
     agent
         .settings
-        .set_dpi(&agent.route, Dpi::new(1600))
+        .set_dpi(&agent.device, Dpi::new(1600))
         .await
         .unwrap();
 
@@ -151,7 +157,7 @@ async fn a_refused_dpi_is_not_saved() {
 
     let error = agent
         .settings
-        .set_dpi(&agent.route, Dpi::new(1600))
+        .set_dpi(&agent.device, Dpi::new(1600))
         .await
         .unwrap_err();
 
@@ -181,7 +187,7 @@ async fn a_file_changed_after_it_was_read_is_not_overwritten() {
 
     let error = agent
         .settings
-        .set_dpi(&agent.route, Dpi::new(1600))
+        .set_dpi(&agent.device, Dpi::new(1600))
         .await
         .unwrap_err();
 
@@ -210,17 +216,17 @@ async fn an_offline_device_is_only_saved() {
 
     agent
         .settings
-        .set_dpi(&agent.route, Dpi::new(1600))
+        .set_dpi(&agent.device, Dpi::new(1600))
         .await
         .unwrap();
     agent
         .settings
-        .set_smartshift(&agent.route, wheel)
+        .set_smartshift(&agent.device, wheel)
         .await
         .unwrap();
     agent
         .settings
-        .set_enabled(&agent.route, false)
+        .set_enabled(&agent.device, false)
         .await
         .unwrap();
 
@@ -249,12 +255,12 @@ async fn an_offline_keyboards_fn_lock_and_disabled_keys_are_only_saved() {
 
     agent
         .settings
-        .set_fn_lock(&agent.route, true)
+        .set_fn_lock(&agent.device, true)
         .await
         .unwrap();
     agent
         .settings
-        .set_disabled_keys(&agent.route, DisableKeysMask::CAPS_LOCK | unknown)
+        .set_disabled_keys(&agent.device, DisableKeysMask::CAPS_LOCK | unknown)
         .await
         .unwrap();
 
@@ -265,6 +271,59 @@ async fn an_offline_keyboards_fn_lock_and_disabled_keys_are_only_saved() {
         Some(&BTreeSet::from([DisableKey::CapsLock]))
     );
     assert_eq!(agent.reloads.load(Ordering::SeqCst), 2);
+}
+
+/// A change asked for one device reaches no other on its route, such as a
+/// device paired into the same receiver slot. One that answers there when
+/// the change is written, before inventory has seen it, takes no write; one
+/// the agent already knows there has nothing saved for it either. The
+/// device itself still takes the change.
+#[tokio::test]
+async fn a_replaced_receiver_slot_refuses_an_old_menu_action() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(openlogi_core::paths::CONFIG_FILE);
+    let agent = Agent::new(&path, true);
+    let unit = publish_dpi_mouse(
+        &agent.shared().await.channel_registry,
+        agent.route.clone(),
+        || true,
+    )
+    .await;
+    let before = std::fs::read_to_string(&path).unwrap();
+    let other = [0x87, 0x65, 0x43, 0x21];
+
+    *unit.lock().unwrap() = other;
+    let error = agent
+        .settings
+        .set_dpi(&agent.device, Dpi::new(1600))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, SettingError::Write(WriteError::DeviceNotFound)),
+        "{error:?}"
+    );
+    assert_eq!(agent.device_dpi().await, Dpi::new(800));
+
+    let replaced = RoutedDevice {
+        route: agent.route.clone(),
+        unit: other,
+    };
+    let error = agent
+        .settings
+        .set_enabled(&replaced, false)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, SettingError::UnknownDevice(_)), "{error:?}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+    assert_eq!(agent.reloads.load(Ordering::SeqCst), 0);
+
+    *unit.lock().unwrap() = UNIT;
+    agent
+        .settings
+        .set_dpi(&agent.device, Dpi::new(1600))
+        .await
+        .unwrap();
+    assert_eq!(agent.device_dpi().await, Dpi::new(1600));
 }
 
 /// A key toggled from a keyboard's disabled keys as it read them reaches a
@@ -285,7 +344,7 @@ async fn a_disabled_key_change_keeps_a_key_this_version_does_not_know() {
         std::time::Duration::from_secs(10),
         agent
             .settings
-            .set_disabled_keys(&agent.route, read & !DisableKeysMask::CAPS_LOCK),
+            .set_disabled_keys(&agent.device, read & !DisableKeysMask::CAPS_LOCK),
     )
     .await
     .expect("the write finishes")
@@ -317,7 +376,7 @@ async fn publish_fn_lock_keyboard(
         registry,
         "fn-lock-keyboard",
         route,
-        move |request| {
+        reporting_unit(Arc::new(std::sync::Mutex::new(UNIT)), move |request| {
             let mut response = vec![0; 20];
             response[..4].copy_from_slice(request.get(..4)?);
             response[0] = 0x11;
@@ -340,7 +399,7 @@ async fn publish_fn_lock_keyboard(
                 _ => return None,
             }
             Some(response)
-        },
+        }),
     )
     .await;
     writes
@@ -365,8 +424,8 @@ async fn a_superseded_fn_lock_is_not_saved() {
     let (older, newer) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
         // The keyboard starts with Fn lock off, which the older change asks.
         let settings = agent.settings.clone();
-        let route = agent.route.clone();
-        let older = tokio::spawn(async move { settings.set_fn_lock(&route, false).await });
+        let device = agent.device.clone();
+        let older = tokio::spawn(async move { settings.set_fn_lock(&device, false).await });
         while shared.fn_lock_order.requested(&agent.route) == 0 {
             assert!(
                 !older.is_finished(),
@@ -412,7 +471,13 @@ async fn an_unknown_route_changes_nothing() {
 
     let error = agent
         .settings
-        .set_enabled(&elsewhere, false)
+        .set_enabled(
+            &RoutedDevice {
+                route: elsewhere,
+                unit: UNIT,
+            },
+            false,
+        )
         .await
         .unwrap_err();
 

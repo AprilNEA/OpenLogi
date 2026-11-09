@@ -72,7 +72,7 @@ mod settings;
 pub use lights::{
     ConfigSource, LightWriteClaim, TakenLightChange, write_light, write_manual_light_power,
 };
-pub use settings::{ConfigReload, DeviceSettings, SettingError};
+pub use settings::{ConfigReload, DeviceSettings, RoutedDevice, SettingError};
 
 use devices::reapply_targets;
 use devices::{
@@ -208,6 +208,10 @@ pub struct SharedHandles {
     /// The running inventory watcher's refresh handle, published at arming;
     /// `None` while no watcher runs.
     inventory_refresh: Arc<RwLock<Option<InventoryRefresh>>>,
+    /// The `0x0003` unit ID of the one device these handles' device
+    /// operations reach (see [`Self::reaching`]); `None` for the agent's own
+    /// handles, which reach whichever device is on a route.
+    reaching: Option<[u8; 4]>,
 }
 
 impl SharedHandles {
@@ -243,16 +247,32 @@ impl SharedHandles {
         }
     }
 
+    /// These handles, with every device operation built through
+    /// [`Self::device`] and [`Self::keyboard_device`] bound to the device
+    /// that reports `unit` through HID++ `0x0003`, for a change asked for
+    /// one device: a write confirms that device is still the one on the
+    /// route before it writes, and refuses another one with
+    /// [`WriteError::DeviceNotFound`] (see `DeviceOp::confirming`). An
+    /// all-zero `unit`, which a device never probed has, names no device:
+    /// the operations then reach whichever device is on the route.
+    #[must_use]
+    pub fn reaching(&self, unit: [u8; 4]) -> Self {
+        Self {
+            reaching: crate::hardware::known_unit(unit),
+            ..self.clone()
+        }
+    }
+
     /// Bind a device operation to `route` through [`Self::device_access`].
     #[must_use]
     pub fn device(&self, route: &DeviceRoute) -> DeviceOp {
-        self.device_access().op(route)
+        self.device_access().op(route).confirming(self.reaching)
     }
 
     /// Bind a device operation to `route` through [`Self::keyboard_access`].
     #[must_use]
     pub fn keyboard_device(&self, route: &DeviceRoute) -> DeviceOp {
-        self.keyboard_access().op(route)
+        self.keyboard_access().op(route).confirming(self.reaching)
     }
 
     /// Return the `0x8071` software control this session's lighting writes
@@ -900,6 +920,7 @@ impl Orchestrator {
             follower_cookie_order: WriteOrder::default(),
             disabled_keys_order: WriteOrder::default(),
             inventory_refresh: Arc::new(RwLock::new(None)),
+            reaching: None,
         };
         let orch = Self {
             config,

@@ -258,8 +258,16 @@ impl DeviceAccess {
         DeviceOp {
             access: self.clone(),
             route: route.clone(),
+            unit: None,
         }
     }
+}
+
+/// `unit` as a unit ID that tells a device from another one on its route:
+/// `None` for the all-zero ID of a device whose HID++ `0x0003` was never
+/// read, which names no device.
+pub(crate) fn known_unit(unit: [u8; 4]) -> Option<[u8; 4]> {
+    (unit != [0; 4]).then_some(unit)
 }
 
 /// One device's HID++ write or read, bound to the agent's capture and
@@ -271,6 +279,10 @@ impl DeviceAccess {
 pub struct DeviceOp {
     access: DeviceAccess,
     route: DeviceRoute,
+    /// The `0x0003` unit ID the device on the route must report for the op
+    /// to reach it (see [`Self::confirming`]); `None` reaches whichever
+    /// device is there.
+    unit: Option<[u8; 4]>,
 }
 
 /// Why a device operation has no channel to write through right now.
@@ -280,6 +292,9 @@ enum Unresolved {
     IoSuspended,
     /// Inventory publishes no channel for the route.
     NoChannel,
+    /// The op is bound to one device, which only a write's own preflight
+    /// confirms (see [`DeviceOp::confirming`]).
+    Unconfirmed,
 }
 
 impl fmt::Display for Unresolved {
@@ -287,6 +302,7 @@ impl fmt::Display for Unresolved {
         f.write_str(match self {
             Self::IoSuspended => "host device I/O suspended",
             Self::NoChannel => "no inventory channel",
+            Self::Unconfirmed => "the device on the route is not confirmed",
         })
     }
 }
@@ -299,11 +315,33 @@ impl From<Unresolved> for WriteError {
 }
 
 impl DeviceOp {
+    /// Reach only the device on the route that reports `unit` through HID++
+    /// `0x0003`, as `None` reaches any. [`Self::run`], [`Self::run_in_turn`],
+    /// [`Self::run_in_order`] and the manual Disable Keys write read the unit
+    /// ID on the channel they write through, after they hold the receiver
+    /// lease, and refuse another device with [`WriteError::DeviceNotFound`]:
+    /// a device paired into a receiver slot after a change was asked for
+    /// the one that left it never takes that change. Every other write
+    /// cannot confirm the device and refuses a bound op the same way.
+    pub(crate) fn confirming(self, unit: Option<[u8; 4]>) -> Self {
+        Self { unit, ..self }
+    }
+
     /// Resolve the authoritative channel without acquiring the receiver
     /// lease. Callers that manage their own lease/thread lifecycle across
     /// more than one write (the volatile-settings reapply sequence) resolve
     /// once up front through this instead of [`Self::run`]/[`Self::detach`].
+    /// An op bound to one device does not resolve: only [`Self::reach`]
+    /// confirms that device.
     fn resolve(&self) -> Result<SharedChannel, Unresolved> {
+        if self.unit.is_some() {
+            return Err(Unresolved::Unconfirmed);
+        }
+        self.route_channel()
+    }
+
+    /// [`Self::resolve`] for any device on the route.
+    fn route_channel(&self) -> Result<SharedChannel, Unresolved> {
         if !self.access.device_io.allows_io() {
             return Err(Unresolved::IoSuspended);
         }
@@ -313,6 +351,21 @@ impl DeviceOp {
             &self.route,
         )
         .map_err(|_| Unresolved::NoChannel)
+    }
+
+    /// Resolve the channel for `operation`, held under the receiver lease,
+    /// and for an op bound to one device confirm that device is the one on
+    /// it.
+    async fn reach(&self, operation: HidppOperation) -> Result<SharedChannel, WriteError> {
+        let shared = self.route_channel()?;
+        if let Some(unit) = self.unit {
+            let found = openlogi_hid::get_unit_id_on(&shared, operation).await?;
+            if found != Some(unit) {
+                debug!(route = %self.route, ?operation, "another device answers on the route; not writing");
+                return Err(WriteError::DeviceNotFound);
+            }
+        }
+        Ok(shared)
     }
 
     /// Lease the receiver, wait for this transport's HID turn, resolve the
@@ -342,8 +395,7 @@ impl DeviceOp {
         let turn = self.access.transport_turns.turn_for(&self.route);
         let _lease = self.access.receiver_access.acquire_for_io().await;
         after_transport_turn(&turn, async {
-            let shared = self.resolve()?;
-            timed(op, f(shared)).await
+            timed(op, async { f(self.reach(op).await?).await }).await
         })
         .await
     }
@@ -378,8 +430,8 @@ impl DeviceOp {
         within_turn(
             ticket,
             &turn,
-            || async { write(self.resolve()?).await },
-            || async { superseded(self.resolve()?).await },
+            || async { write(self.reach(op).await?).await },
+            || async { superseded(self.reach(op).await?).await },
         )
         .await
         .map_err(|_| WriteError::RequestTimedOut { operation: op })?
@@ -412,8 +464,7 @@ impl DeviceOp {
             .in_order(|| async {
                 let _lease = self.access.receiver_access.acquire_for_io().await;
                 after_transport_turn(&turn, async {
-                    let shared = self.resolve()?;
-                    timed(op, write(shared)).await
+                    timed(op, async { write(self.reach(op).await?).await }).await
                 })
                 .await
             })
@@ -1238,7 +1289,11 @@ pub(crate) fn reapply_mouse_volatile_in_background(
                 );
                 return;
             }
-            let op = DeviceOp { access, route };
+            let op = DeviceOp {
+                access,
+                route,
+                unit: None,
+            };
             let turn = op.access.transport_turns.turn_for(&op.route);
             if let Some(change) = wheel {
                 let (plans, route) = (&capture_plans, &op.route);

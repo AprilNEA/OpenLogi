@@ -174,9 +174,10 @@ fn spawn_disable_keys<Log>(
 where
     Log: FnOnce(&Result<DisableKeysState, WriteError>) + Send + 'static,
 {
-    // Reject a missing route synchronously, but resolve again only after the
-    // worker owns both ordering turns and the receiver lease.
-    drop(op.resolve()?);
+    // Reject a missing route synchronously, but resolve again, and confirm
+    // the device for an op bound to one, only after the worker owns both
+    // ordering turns and the receiver lease.
+    drop(op.route_channel()?);
 
     // Published synchronously: a reread issued after reload must not overtake
     // this worker just because its OS thread has not started polling yet.
@@ -258,7 +259,8 @@ async fn run_disable_keys(
         Ok(())
     };
     check()?;
-    let shared = op.resolve()?;
+    let shared = op.reach(HidppOperation::WriteDisableKeys).await?;
+    check()?;
     let _ = started.send(());
     // Cancellation can stop admission, but must never drop an in-flight
     // native report. The write-through checkpoints still run between reports.

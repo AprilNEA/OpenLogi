@@ -41,32 +41,35 @@ impl Keyboard {
             &shared.channel_registry,
             "keyboard",
             route.clone(),
-            move |request| {
-                if request.len() < 7 {
-                    return None;
-                }
-                let value = match (request[2], request[3] >> 4) {
-                    (0, 1) => 4,
-                    (0, 0) => {
-                        let feature = u16::from_be_bytes([request[4], request[5]]);
-                        device_requested_features
-                            .lock()
-                            .expect("requested features")
-                            .push(feature);
-                        if feature == 0x4521 { 5 } else { 0 }
+            crate::test_support::reporting_unit(
+                Arc::new(std::sync::Mutex::new(crate::test_support::UNIT)),
+                move |request| {
+                    if request.len() < 7 {
+                        return None;
                     }
-                    (5, 0) => 0xa1,
-                    (5, 1) => device_disabled.load(Ordering::SeqCst),
-                    (5, 2) => {
-                        device_writes.lock().expect("writes").push(request[4]);
-                        device_disabled.store(request[4], Ordering::SeqCst);
-                        device_notice.notify_one();
-                        0
-                    }
-                    _ => return None,
-                };
-                Some(vec![0x10, request[1], request[2], request[3], value, 0, 0])
-            },
+                    let value = match (request[2], request[3] >> 4) {
+                        (0, 1) => 4,
+                        (0, 0) => {
+                            let feature = u16::from_be_bytes([request[4], request[5]]);
+                            device_requested_features
+                                .lock()
+                                .expect("requested features")
+                                .push(feature);
+                            if feature == 0x4521 { 5 } else { 0 }
+                        }
+                        (5, 0) => 0xa1,
+                        (5, 1) => device_disabled.load(Ordering::SeqCst),
+                        (5, 2) => {
+                            device_writes.lock().expect("writes").push(request[4]);
+                            device_disabled.store(request[4], Ordering::SeqCst);
+                            device_notice.notify_one();
+                            0
+                        }
+                        _ => return None,
+                    };
+                    Some(vec![0x10, request[1], request[2], request[3], value, 0, 0])
+                },
+            ),
         )
         .await;
         Self {
@@ -509,6 +512,30 @@ async fn retired_policy_cannot_be_recovered_by_late_manual_cancellation() {
         assert!(!orchestrator.needs_reapply_confirmation());
         keyboard.assert_writes(&[0x81, 0x80]);
     }
+}
+
+/// A manual write bound to one keyboard writes nothing to another one that
+/// answers on its route, such as a keyboard paired into the same receiver
+/// slot, and reaches the keyboard it names.
+#[tokio::test]
+async fn a_manual_write_for_another_keyboard_writes_nothing() {
+    let shared = orchestrator(Config::default()).shared();
+    let keyboard = Keyboard::publish(&shared).await;
+
+    let error = shared
+        .reaching([0x87, 0x65, 0x43, 0x21])
+        .set_disable_keys(&keyboard.route, DisableKeysMask::EMPTY)
+        .await
+        .expect_err("another keyboard answers on the route");
+    assert!(matches!(error, WriteError::DeviceNotFound), "{error:?}");
+    keyboard.assert_writes(&[]);
+
+    shared
+        .reaching(crate::test_support::UNIT)
+        .set_disable_keys(&keyboard.route, DisableKeysMask::EMPTY)
+        .await
+        .expect("the keyboard it names");
+    keyboard.assert_writes(&[0x80]);
 }
 
 #[tokio::test]
