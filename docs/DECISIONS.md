@@ -14,7 +14,12 @@ saved, its DPI presets included.
   specific thing such hardware says about itself, and the all-zero unit id
   stops being a `Unit` value: it is the wire sentinel for "not reported". A
   direct device identified by its model is keyed `direct:<vid>:<pid>`, which
-  is also its route key, so it indexes its own entry.
+  is also its route key, so it indexes its own entry. That entry belongs to
+  the model-only device alone: a device of the same model that reports a unit
+  id neither reads it nor folds it into `unit:<hex>`, since nothing on disk
+  says it was that device (the recorded identity keeps no unit id), and the
+  model-only device is keyed by its route, never by whichever unit the `links`
+  index last saw there.
 - **A v0 answer is a whole answer.** DeviceInformation v0 reports the entity
   count and nothing else. That is the device's complete answer, not a lost
   reply: the probe keeps its model info and does not flag the identity as
@@ -29,6 +34,10 @@ saved, its DPI presets included.
 - **No branch on the device.** Such a device takes the same paths as any
   other through IPC, inventory and GUI, with no precedence rules of its own:
   only its key differs.
+- **A slot is not the unit it last held.** A device paired to a receiver that
+  reports only its model is keyed by its slot, never by the unit the `links`
+  index last saw there, so neither the agent nor `openlogi api --save` touches
+  that unit's entry.
 - **Two of one model are one entry.** A device that reports neither a serial
   nor a unit id cannot be told apart from another of its model: two G402s
   plugged in at once share one configuration entry and one card. This is not
