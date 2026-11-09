@@ -28,6 +28,7 @@ use hidpp::{
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, Capabilities, DeviceKind, DeviceModelInfo, DeviceTransports,
 };
+use openlogi_core::device_order::UnitId;
 use serde::{Deserialize, Serialize};
 use tokio::time::timeout;
 use tracing::debug;
@@ -62,7 +63,8 @@ pub(super) struct ProbedFeatures {
     /// the identity fields above may be missing data the device does have.
     /// This is intentionally independent of `model_info`: `true` with `Some`
     /// means only the serial-number read failed, while `true` with `None` means
-    /// the whole device-information read failed.
+    /// the whole device-information read failed, or the serial-number read of a
+    /// device whose unit id is all-zero, which leaves nothing identifying it.
     pub(super) identity_incomplete: bool,
     /// The battery feature answered that the battery-powered end is not
     /// linked: a headset dongle whose headset is switched off. Volatile like
@@ -546,19 +548,27 @@ async fn probe_hidpp20(
                 } else {
                     None
                 };
-                Some(DeviceModelInfo {
-                    entity_count: info.entity_count,
-                    serial_number,
-                    unit_id: info.unit_id,
-                    transports: DeviceTransports {
-                        usb: info.transport.contains(DeviceTransport::USB),
-                        equad: info.transport.contains(DeviceTransport::E_QUAD),
-                        btle: info.transport.contains(DeviceTransport::BTLE),
-                        bluetooth: info.transport.contains(DeviceTransport::BLUETOOTH),
-                    },
-                    model_ids: info.model_id,
-                    extended_model_id: info.extended_model_id,
-                })
+                // With its serial lost and an all-zero unit id, the model info
+                // would read as a model identity and key the device by its
+                // route alone, which is not what the device said. No identity
+                // until the serial read succeeds or the cache backfills it.
+                if identity_incomplete && UnitId::new(info.unit_id).is_none() {
+                    None
+                } else {
+                    Some(DeviceModelInfo {
+                        entity_count: info.entity_count,
+                        serial_number,
+                        unit_id: info.unit_id,
+                        transports: DeviceTransports {
+                            usb: info.transport.contains(DeviceTransport::USB),
+                            equad: info.transport.contains(DeviceTransport::E_QUAD),
+                            btle: info.transport.contains(DeviceTransport::BTLE),
+                            bluetooth: info.transport.contains(DeviceTransport::BLUETOOTH),
+                        },
+                        model_ids: info.model_id,
+                        extended_model_id: info.extended_model_id,
+                    })
+                }
             }
             Err(e) => {
                 debug!(slot, error = ?e, "DeviceInformation read failed");
@@ -1023,6 +1033,53 @@ mod tests {
         assert!(
             !probe.identity_incomplete,
             "nothing was lost, the device has no more to say"
+        );
+        assert!(probe.capabilities().is_some());
+    }
+
+    #[tokio::test]
+    async fn a_lost_serial_read_beside_a_zero_unit_id_is_no_identity() {
+        // The device says it has a serial number, but the read of it fails and
+        // its unit id is all-zero. Its model info would then read as a model
+        // identity and key it by its route alone, which is not what the device
+        // said: nothing may identify it until the serial read succeeds.
+        let (raw, _) = ScriptedRawHidChannel::with_dynamic_responder(|request| {
+            let mut response = vec![0; 20];
+            response[..4].copy_from_slice(&request[..4]);
+            response[0] = 0x11;
+            match (request[2], request[3] >> 4) {
+                (0, 1) => response[4] = 4,
+                (0, 0) => {
+                    response[4] = match u16::from_be_bytes([request[4], request[5]]) {
+                        0x0001 => 1,
+                        0x0003 => 2,
+                        _ => 0,
+                    };
+                }
+                (1, 0) => response[4] = 2,
+                (1, 1) => response[4..6].copy_from_slice(
+                    &[0x0001u16, 0x0003][usize::from(request[4]) - 1].to_be_bytes(),
+                ),
+                // DeviceInformation: a serial number is supported, the unit id
+                // is all-zero.
+                (2, 0) => {
+                    response[4] = 3;
+                    response[18] = 0x01;
+                }
+                (2, 2) => return Some(feature_error(request, 0x08)),
+                _ => panic!("unexpected request: {request:02x?}"),
+            }
+            Some(response)
+        });
+        let channel = within_deadline("opening the channel", scripted_channel(raw)).await;
+
+        let (probe, _, _) =
+            within_deadline("the probe", probe_features(&channel, 0xff, None, None)).await;
+
+        assert_eq!(probe.model_info, None, "no identity was read");
+        assert!(
+            probe.identity_incomplete,
+            "the device has an identity the probe failed to read"
         );
         assert!(probe.capabilities().is_some());
     }
