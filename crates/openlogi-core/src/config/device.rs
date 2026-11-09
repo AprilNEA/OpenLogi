@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
+use super::KeyRemap;
 use super::button_map::{deserialize_button_map, deserialize_button_maps_by_app};
 use super::settings::{
     CameraControls, CameraStreamMode, GKeyOwner, GamingKeyMode, GestureOwner, LightSettings,
@@ -344,6 +345,13 @@ pub struct DeviceConfig {
     /// means "never set — leave the keyboard alone".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fn_lock: Option<bool>,
+    /// Keys a keyboard with HID++ `0x1b05` key customisation sends something
+    /// else for, per layer. The keyboard forgets them when it powers off, so
+    /// the agent writes them when the keyboard connects and when a reload
+    /// changes them, like [`Self::fn_lock`]. `None` means "never set — leave
+    /// the keyboard's keys alone".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_remap: Option<KeyRemap>,
     /// Keep a multi-platform keyboard's key layout (HID++ `0x4531`) on the
     /// host OS, the "keep keyboard in OS layout" setting of Logi Options+. The
     /// agent writes the host's platform when the keyboard connects and again
@@ -506,6 +514,7 @@ impl Default for DeviceConfig {
             momentum_scrolling: None,
             host_switch_targets: Vec::new(),
             fn_lock: None,
+            key_remap: None,
             keep_os_layout: None,
             report_rate: None,
             pointer_speed: None,
@@ -674,6 +683,8 @@ struct RawDeviceConfig {
     #[serde(default)]
     fn_lock: Option<bool>,
     #[serde(default)]
+    key_remap: Option<KeyRemap>,
+    #[serde(default)]
     keep_os_layout: Option<bool>,
     #[serde(default)]
     report_rate: Option<ReportRate>,
@@ -756,6 +767,7 @@ impl From<RawDeviceConfig> for DeviceConfig {
             momentum_scrolling: raw.momentum_scrolling,
             host_switch_targets: raw.host_switch_targets,
             fn_lock: raw.fn_lock,
+            key_remap: raw.key_remap,
             keep_os_layout: raw.keep_os_layout,
             report_rate: raw.report_rate,
             pointer_speed: raw.pointer_speed,

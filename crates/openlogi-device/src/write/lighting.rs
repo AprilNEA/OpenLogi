@@ -18,6 +18,7 @@ use hidpp::{
     nibble::U4,
     protocol::v20::{self, Hidpp20Error},
 };
+use openlogi_device_registry::keyboard::PerKeyZones;
 use tracing::debug;
 
 use crate::SharedChannel;
@@ -117,26 +118,33 @@ pub async fn set_keyboard_color_with(
     LightingWrite {
         method,
         color: openlogi_core::color::Rgb::new(r, g, b),
+        keys: Vec::new(),
     }
     .apply(backend, route, || false, || true)
     .await
     .map(drop)
 }
 
-/// One complete solid-colour transaction, including RGB ownership rollback.
-#[derive(Clone, Copy)]
+/// One complete lighting transaction, including RGB ownership rollback.
+#[derive(Clone)]
 pub struct LightingWrite {
     /// Preferred protocol path.
     pub method: LightingMethod,
     /// The colour after applying the configured brightness.
     pub color: openlogi_core::color::Rgb,
+    /// Colours for single keys over [`Self::color`], as `(HID keyboard
+    /// usage, colour)` after the same brightness. Drawn through `0x8081`
+    /// only on a keyboard whose zone map
+    /// [`openlogi_device_registry::keyboard`] knows; any other device shows
+    /// [`Self::color`] alone.
+    pub keys: Vec<(u8, openlogi_core::color::Rgb)>,
 }
 
 impl LightingWrite {
     /// Open a standalone route and apply with the same ownership contract as
     /// [`Self::apply_on`]. The native worker owns this channel through cleanup.
     pub async fn apply(
-        self,
+        &self,
         backend: &dyn HidBackend,
         route: &DeviceRoute,
         cancelled: impl Fn() -> bool,
@@ -165,7 +173,7 @@ impl LightingWrite {
     /// [`release_rgb_control`] when it leaves; a standalone command leaves the
     /// colour in place.
     pub async fn apply_on(
-        self,
+        &self,
         shared: &SharedChannel,
         cancelled: impl Fn() -> bool,
         available: impl Fn() -> bool,
@@ -199,6 +207,24 @@ impl LightingWrite {
             }
             LightingMethod::Auto => {}
         }
+        if !self.keys.is_empty() {
+            // Per-key colours need 0x8081 and a known zone map. Every probe
+            // precedes the first claim, so a keyboard without either falls
+            // back to one colour below without mutating anything.
+            let engine = rgb::probe(channel, index, &scope).await?;
+            match scope.read(PerKeyV2Target::open(channel, index)).await {
+                Ok(target) if target.zone_map.is_some() => {
+                    return self.paint_v2(&target, index, engine.as_ref(), &scope).await;
+                }
+                Ok(_) => debug!("no per-key zone map for this keyboard; painting one colour"),
+                Err(WriteError::FeatureUnsupported { feature_hex })
+                    if feature_hex == PerKeyLightingFeature::ID =>
+                {
+                    debug!("no 0x8081 per-key lighting; painting one colour");
+                }
+                Err(error) => return Err(error),
+            }
+        }
         match scope.read(set_color_effects(channel, index, r, g, b)).await {
             Err(WriteError::FeatureUnsupported { feature_hex })
                 if feature_hex == COLOR_LED_EFFECTS_FEATURE =>
@@ -211,6 +237,20 @@ impl LightingWrite {
         // falls back without mutating the device.
         let engine = rgb::probe(channel, index, &scope).await?;
         if let Some(engine) = engine.as_ref().filter(|engine| engine.is_complete()) {
+            // Per-key paint is a sub-mode of Static, so a keyboard painted key
+            // by key keeps that frame under a new Static colour. One whose zone
+            // map is known gets the colour as a whole frame instead, which
+            // clears the key colours an earlier write left.
+            if engine.has_known_zone_map() {
+                match scope.read(PerKeyV2Target::open(channel, index)).await {
+                    Ok(target) => {
+                        return self.paint_v2(&target, index, Some(engine), &scope).await;
+                    }
+                    Err(WriteError::FeatureUnsupported { feature_hex })
+                        if feature_hex == PerKeyLightingFeature::ID => {}
+                    Err(error) => return Err(error),
+                }
+            }
             return engine.apply(index, self.color, &scope).await.map(Some);
         }
         debug!("no supported 0x8071 static effect — trying per-key paths");
@@ -236,27 +276,36 @@ impl LightingWrite {
     /// discovery precedes the claim, so a device without usable zones still
     /// falls back without mutation.
     async fn per_key_v2(
-        self,
+        &self,
         channel: &Arc<HidppChannel>,
         index: u8,
         engine: Option<&rgb::RgbEngine>,
         scope: &WriteScope<impl Fn() -> bool, impl Fn() -> bool>,
     ) -> Result<Option<RgbControlLease>, WriteError> {
         let target = scope.read(PerKeyV2Target::open(channel, index)).await?;
-        let (r, g, b) = self.color.components();
-        let color = Rgb {
-            red: r,
-            green: g,
-            blue: b,
-        };
+        self.paint_v2(&target, index, engine, scope).await
+    }
+
+    /// Paint [`Self::color`] and the [`Self::keys`] the target's zone map
+    /// places as one `0x8081` frame, under the effect engine's control when
+    /// there is one.
+    async fn paint_v2(
+        &self,
+        target: &PerKeyV2Target,
+        index: u8,
+        engine: Option<&rgb::RgbEngine>,
+        scope: &WriteScope<impl Fn() -> bool, impl Fn() -> bool>,
+    ) -> Result<Option<RgbControlLease>, WriteError> {
+        let color = hidpp_rgb(self.color);
+        let overrides = target.key_zones(&self.keys);
         match engine {
             None => scope
-                .read(target.paint(index, color, scope))
+                .read(target.paint_frame(index, color, &overrides, scope))
                 .await
                 .map(|()| None),
             Some(engine) => engine
                 .apply_per_key(index, self.color, scope, async || {
-                    target.paint(index, color, scope).await
+                    target.paint_frame(index, color, &overrides, scope).await
                 })
                 .await
                 .map(Some),
@@ -548,6 +597,9 @@ fn classify_lighting_error(error: Hidpp20Error) -> WriteError {
 struct PerKeyV2Target {
     feature: Arc<PerKeyLightingFeature>,
     zones: Vec<u8>,
+    /// Which zone lights which key, when the product is one
+    /// [`openlogi_device_registry::keyboard`] knows.
+    zone_map: Option<PerKeyZones>,
 }
 
 impl PerKeyV2Target {
@@ -569,28 +621,80 @@ impl PerKeyV2Target {
                 feature_hex: PerKeyLightingFeature::ID,
             });
         }
-        Ok(Self { feature, zones })
+        let zone_map = rgb::model_id(&mut device)
+            .await?
+            .and_then(openlogi_device_registry::keyboard::per_key_zones);
+        Ok(Self {
+            feature,
+            zones,
+            zone_map,
+        })
     }
 
-    /// Paint every present zone `color`, then commit the frame. `scope` is
-    /// checked before each request, so a retired channel, suspended host I/O,
-    /// cancellation or the deadline stops the frame between requests without
-    /// cutting one off in flight.
+    /// The present zone and colour for each of `keys` the zone map places,
+    /// one entry per zone: a key listed more than once takes its last colour.
+    /// A key the map has no zone for, or whose zone the device does not
+    /// report, is left out.
+    fn key_zones(&self, keys: &[(u8, openlogi_core::color::Rgb)]) -> Vec<(u8, Rgb)> {
+        let Some(map) = self.zone_map else {
+            return Vec::new();
+        };
+        let mut zones: Vec<(u8, Rgb)> = Vec::with_capacity(keys.len());
+        for &(usage, color) in keys {
+            let Some(zone) = map.zone(usage).filter(|zone| self.zones.contains(zone)) else {
+                debug!(usage, "no present 0x8081 zone for this key");
+                continue;
+            };
+            let color = hidpp_rgb(color);
+            match zones.iter_mut().find(|(known, _)| *known == zone) {
+                Some(entry) => entry.1 = color,
+                None => zones.push((zone, color)),
+            }
+        }
+        zones
+    }
+
+    /// Paint every present zone `color`, then commit the frame.
     async fn paint(
         &self,
         index: u8,
         color: Rgb,
         scope: &WriteScope<impl Fn() -> bool, impl Fn() -> bool>,
     ) -> Result<(), WriteError> {
+        self.paint_frame(index, color, &[], scope).await
+    }
+
+    /// Paint every present zone `base`, then each `(zone, colour)` of
+    /// `overrides`, and commit it all as one frame. `scope` is checked before
+    /// each request, so a retired channel, suspended host I/O, cancellation or
+    /// the deadline stops the frame between requests without cutting one off
+    /// in flight.
+    async fn paint_frame(
+        &self,
+        index: u8,
+        base: Rgb,
+        overrides: &[(u8, Rgb)],
+        scope: &WriteScope<impl Fn() -> bool, impl Fn() -> bool>,
+    ) -> Result<(), WriteError> {
         // One request carries at most MAX_SINGLE_VALUE_ZONES ids and silently
-        // ignores the rest, so the chunking is the caller's job.
+        // ignores the rest, so the chunking is the caller's job. Zones sharing
+        // a colour go out together.
+        let mut by_color: Vec<(Rgb, Vec<u8>)> = vec![(base, self.zones.clone())];
+        for &(zone, color) in overrides {
+            match by_color[1..].iter_mut().find(|(known, _)| *known == color) {
+                Some((_, zones)) => zones.push(zone),
+                None => by_color.push((color, vec![zone])),
+            }
+        }
         let feature = &self.feature;
-        for chunk in self.zones.chunks(MAX_SINGLE_VALUE_ZONES) {
-            scope.check()?;
-            retry_busy(scope, async || {
-                feature.set_rgb_zones_single_value(color, chunk).await
-            })
-            .await?;
+        for (color, zones) in &by_color {
+            for chunk in zones.chunks(MAX_SINGLE_VALUE_ZONES) {
+                scope.check()?;
+                retry_busy(scope, async || {
+                    feature.set_rgb_zones_single_value(*color, chunk).await
+                })
+                .await?;
+            }
         }
         scope.check()?;
         retry_busy(scope, async || {
@@ -600,7 +704,8 @@ impl PerKeyV2Target {
         debug!(
             index,
             zone_count = self.zones.len(),
-            ?color,
+            ?base,
+            key_count = overrides.len(),
             "set keyboard colour via typed 0x8081"
         );
         Ok(())
@@ -746,6 +851,12 @@ async fn retry_busy<T>(
         }
     }
     request().await.map_err(classify_per_key_v2_error)
+}
+
+/// `color` in the `0x8081` wire form.
+fn hidpp_rgb(color: openlogi_core::color::Rgb) -> Rgb {
+    let (red, green, blue) = color.components();
+    Rgb { red, green, blue }
 }
 
 /// Classify a HID++ error from the `PerKeyLighting2` functions.
@@ -906,6 +1017,7 @@ pub async fn set_keyboard_color_with_on(
     LightingWrite {
         method,
         color: openlogi_core::color::Rgb::new(r, g, b),
+        keys: Vec::new(),
     }
     .apply_on(shared, || false, || shared.channel().is_connected())
     .await
