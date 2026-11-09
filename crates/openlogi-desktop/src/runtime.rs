@@ -452,6 +452,8 @@ impl Runtime {
                         state.asset_models(),
                     )
                 });
+            #[cfg(target_os = "macos")]
+            crate::platform::permission_guide::dismiss_once_granted(&snapshot.status, cx);
             // A reconnect can drop an in-flight reply without changing the
             // inventory. Retry any cache entry that the reply lifecycle reset
             // to Unknown on every completed snapshot; resolved entries no-op.

@@ -1,8 +1,8 @@
 use crate::ui::theme::FocusRingStyle as _;
 use gpui::{
-    App, AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement,
-    MouseButton, NavigationDirection, ParentElement, Render, Styled, Subscription, Window, div,
-    prelude::FluentBuilder as _, rgb,
+    App, AppContext as _, ClickEvent, Context, Entity, FocusHandle, Focusable, InteractiveElement,
+    IntoElement, MouseButton, NavigationDirection, ParentElement, Render, Styled, Subscription,
+    Window, div, prelude::FluentBuilder as _, rgb,
 };
 use gpui_kit::base::Button as BaseButton;
 use gpui_kit::component::{
@@ -523,7 +523,7 @@ impl AppView {
                     .primary()
                     .icon(IconName::Settings)
                     .label(tr!("permissions.open_system_settings_to_grant_access"))
-                    .on_click(|_, _, cx| request_accessibility(cx)),
+                    .on_click(request_accessibility),
             )
             .child(
                 div()
@@ -548,16 +548,25 @@ impl AppView {
     }
 }
 
-fn request_accessibility(cx: &mut App) {
-    use openlogi_permissions::{self as permissions, Permission};
+fn request_accessibility(origin: &ClickEvent, window: &mut Window, cx: &mut App) {
     // Ask the *agent* to fire the prompt (it owns the hook, so the system dialog
     // must name and authorize openlogi-agent — prompting in the GUI would grant
     // the wrong binary), then open the System Settings pane so the user can flip
-    // the switch. Shared by the gate button, the footer, and the Settings window.
+    // the switch, or drag the agent in when its row is missing. Shared by the
+    // gate button, the footer, and the Settings window.
     if let Some(state) = AppState::try_global(cx) {
         state.read(cx).request_accessibility_prompt();
     }
-    permissions::open_pane(Permission::Accessibility);
+    #[cfg(target_os = "macos")]
+    crate::platform::permission_guide::open(
+        openlogi_permissions::Permission::Accessibility,
+        origin,
+        window,
+        cx,
+    );
+    // No other platform has a pane to open.
+    #[cfg(not(target_os = "macos"))]
+    let _ = (origin, window);
 }
 
 /// Client-side main-window titlebar: window controls (minimize / maximize /
