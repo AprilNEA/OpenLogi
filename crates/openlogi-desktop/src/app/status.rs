@@ -318,7 +318,7 @@ fn accessibility_status(pal: Palette) -> impl IntoElement {
                 .bg(rgb(theme::STATUS_CONNECTING)),
         )
         .child(div().child(tr!("permissions.accessibility_not_granted_click_to_grant")))
-        .on_click(|_, _, cx| super::request_accessibility(cx))
+        .on_click(super::request_accessibility)
 }
 
 #[cfg(not(target_os = "macos"))]
