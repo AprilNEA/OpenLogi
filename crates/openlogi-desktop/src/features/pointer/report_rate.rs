@@ -8,7 +8,7 @@
 //! the mouse; the read-back then replaces the optimistic pick.
 
 use gpui::{AnyElement, App, IntoElement, ParentElement, Styled, div};
-use gpui_kit::component::{Disableable as _, Selectable as _, h_flex, v_flex};
+use gpui_kit::component::{Selectable as _, h_flex, v_flex};
 use openlogi_core::hid::ReportRate;
 
 use crate::state::{AppState, DeviceKey, ReportRateLoad};
@@ -105,14 +105,22 @@ pub(super) fn report_rate_section(
 }
 
 /// One rate pill. Clicking it writes `rate` to the selected mouse.
-fn rate_pill(rate: ReportRate, selected: bool, locked: bool) -> impl IntoElement {
+fn rate_pill(rate: ReportRate, selected: bool, _locked: bool) -> impl IntoElement {
     Pill::new(
         ("report-rate", usize::from(rate.into_inner())),
         tr!("pointer.report_rate_hz", rate => rate),
     )
     .selected(selected)
-    .disabled(locked)
     .on_click(move |_event, _window, cx| {
-        AppState::apply(cx, |state| state.commit_report_rate(rate));
+        AppState::apply(cx, |state| {
+            let mut events = if state.current_report_rate_locked() {
+                state.commit_onboard_memory(openlogi_core::config::OnboardMemory::Off)
+            } else {
+                crate::state::StateEvents::none()
+            };
+            events = events.and(state.commit_report_rate(rate));
+            events
+        });
+        AppState::refresh_onboard_later(cx);
     })
 }

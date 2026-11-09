@@ -9,13 +9,14 @@
 //! exposes exact device-supported values once the list is known.
 
 use gpui::{
-    AnyElement, Context, Entity, IntoElement, ParentElement, Render, Styled, Subscription, Window,
-    div, px,
+    AnyElement, AppContext as _, ClickEvent, Context, Entity, IntoElement, ParentElement, Render,
+    Styled, Subscription, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_kit::component::{
-    Icon, IconName, Selectable as _, Sizable as _,
+    Icon, IconName, Selectable as _, Sizable as _, WindowExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
+    input::InputState,
     slider::{Slider, SliderState},
     v_flex,
 };
@@ -26,7 +27,7 @@ use super::pointer_speed::{PointerSpeedFacts, PointerSpeedSlider, pointer_speed_
 use super::report_rate::{ReportRateFacts, report_rate_section};
 use crate::state::{AppState, DeviceKey, DpiLoad, StateEvent};
 use crate::ui::commit_slider::{CommitSlider, SliderRange};
-use crate::ui::components::PresetChip;
+use crate::ui::components::{PresetChip, control_input, save_cancel_footer};
 use crate::ui::slider_row::SliderRow;
 use crate::ui::status::{retry_line, status_line};
 use crate::ui::theme::{self, Palette, Typography as _};
@@ -99,7 +100,7 @@ impl DpiPanel {
         let shape = SliderShape {
             min: capabilities.min(),
             max: capabilities.max(),
-            step: capabilities.step_hint(),
+            step: Dpi::new(1),
         };
         if let Some(current) = self
             .slider
@@ -148,6 +149,56 @@ impl DpiPanel {
             key: key.clone(),
             shape,
             slider,
+        });
+    }
+
+    fn open_dpi_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let snapshot = dpi_panel_snapshot(cx);
+        let DpiLoad::Ready(ref info) = snapshot.status else {
+            return;
+        };
+        let capabilities = info.capabilities.clone();
+        let current_dpi = snapshot.dpi;
+        let input = cx.new(|cx| {
+            let mut input = InputState::new(window, cx);
+            input.set_value(current_dpi.to_string(), window, cx);
+            input
+        });
+
+        window.open_dialog(cx, move |dialog, window, cx| {
+            input.update(cx, |input, cx| input.focus(window, cx));
+            dialog
+                .w(px(320.))
+                .title(tr!("pointer.dpi"))
+                .child(
+                    v_flex().gap_2().child(control_input(&input)).child(
+                        div()
+                            .text_caption()
+                            .text_color(theme::palette(cx).text_muted)
+                            .child(format!(
+                                "{}–{}",
+                                capabilities.min(),
+                                capabilities.max()
+                            )),
+                    ),
+                )
+                .footer(save_cancel_footer())
+                .on_ok({
+                    let input = input.clone();
+                    let capabilities = capabilities.clone();
+                    move |_, _, cx| {
+                        let Ok(value) = input.read(cx).value().trim().parse::<u16>() else {
+                            return false;
+                        };
+                        let target = Dpi::new(value);
+                        if target < capabilities.min() || target > capabilities.max() {
+                            return false;
+                        }
+                        let resolved = capabilities.nearest(target);
+                        AppState::apply(cx, |state| state.commit_dpi(resolved));
+                        true
+                    }
+                })
         });
     }
 }
@@ -220,6 +271,15 @@ impl DpiPanel {
             .child(
                 SliderRow::new(tr!("pointer.dpi"), slider)
                     .value(snapshot.dpi.to_string(), [widest.to_string()])
+                    .when(matches!(snapshot.status, DpiLoad::Ready(_)), |row| {
+                        row.value_entry(
+                            "dpi-value-entry",
+                            tr!("pointer.dpi"),
+                            cx.listener(move |panel, _: &ClickEvent, window, cx| {
+                                panel.open_dpi_dialog(window, cx);
+                            }),
+                        )
+                    })
                     .hint(range_label),
             )
             .child(
@@ -282,7 +342,7 @@ fn dpi_range_label(status: &DpiLoad, reachable: bool) -> AnyElement {
                 info.capabilities.max()
             ))
             .child(Icon::empty().path("action-icons/dot.svg").size_3())
-            .child(tr!("pointer.dpi_step", step => info.capabilities.step_hint()))
+            .child(tr!("pointer.dpi_step", step => Dpi::new(1)))
             .into_any_element(),
         DpiLoad::Unknown | DpiLoad::Loading if !reachable => {
             tr!("pointer.dpi_range_device_offline").into_any_element()

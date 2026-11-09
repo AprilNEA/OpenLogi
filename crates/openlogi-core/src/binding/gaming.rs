@@ -126,7 +126,7 @@ pub const STANDARD_BUTTONS: GamingLayout = GamingLayout {
         Slot::native(ButtonId::Back),
         Slot::native(ButtonId::Forward),
     ],
-    stock_dpi_presets: &[],
+    stock_dpi_presets: &[400, 800, 1600, 3200],
 };
 
 const LAYOUTS: &[&GamingLayout] = &[&G502_LIGHTSPEED, &G903_LIGHTSPEED];

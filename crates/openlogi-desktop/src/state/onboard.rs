@@ -22,8 +22,15 @@ impl AppState {
 
     #[must_use]
     pub fn current_gaming_layout(&self) -> Option<&'static GamingLayout> {
-        self.current_record()
-            .and_then(|record| GamingLayout::for_model_key(&record.model_key))
+        self.current_record().and_then(|record| {
+            GamingLayout::for_model_key(&record.model_key).or_else(|| {
+                if self.current_onboard_supported() {
+                    Some(&openlogi_core::binding::STANDARD_BUTTONS)
+                } else {
+                    None
+                }
+            })
+        })
     }
 
     /// The buttons the Buttons panel draws for a gaming mouse: its model's

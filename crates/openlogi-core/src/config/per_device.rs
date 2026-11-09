@@ -15,7 +15,7 @@ use super::{
 };
 use crate::binding::{
     Action, ActionRingConfig, ActionRingIcon, ActionRingSize, ActionRingSlot, Binding, ButtonId,
-    GKeyProfile, GamingLayout, KeypadPage, RingAction, default_binding_on,
+    GKeyProfile, GamingLayout, KeypadPage, RingAction, STANDARD_BUTTONS, default_binding_on,
 };
 use crate::hid::{Dpi, PointerSpeed, ReportRate};
 
@@ -572,7 +572,7 @@ impl Config {
         if device.onboard_memory.is_some() {
             return device.onboard_memory;
         }
-        let layout = layout?;
+        let layout = layout.unwrap_or(&STANDARD_BUTTONS);
         let customized = |button: &ButtonId, binding: &Binding| {
             layout.needs_host_mode(*button)
                 && (!matches!(binding, Binding::Single(_))

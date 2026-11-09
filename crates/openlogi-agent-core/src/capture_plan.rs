@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use openlogi_core::binding::{
-    Action, Binding, ButtonId, GamingLayout, GestureDirection, default_binding,
+    Action, Binding, ButtonId, GamingLayout, GestureDirection, STANDARD_BUTTONS, default_binding,
 };
 use openlogi_core::bindings::{button_bindings_for, hidpp_gesture_maps_for, oshook_gestures_for};
 use openlogi_core::config::{Config, MomentumScrolling, OnboardMemory, ThumbwheelSensitivity};
@@ -113,9 +113,10 @@ impl DeviceCapturePlan {
         self.target.spec.onboard = match config.effective_onboard_memory(key, layout) {
             None => None,
             Some(OnboardMemory::Profile(index)) => Some(OnboardTarget::Profile(index)),
-            Some(OnboardMemory::Off) => layout.map(|layout| {
+            Some(OnboardMemory::Off) => {
+                let layout = layout.unwrap_or(&STANDARD_BUTTONS);
                 let diverted = &self.target.spec.divert_buttons;
-                OnboardTarget::Host(HostMode {
+                Some(OnboardTarget::Host(HostMode {
                     slots: layout
                         .buttons()
                         .map(|button| {
@@ -134,8 +135,8 @@ impl DeviceCapturePlan {
                         })
                         .collect(),
                     report_rate: config.report_rate(key),
-                })
-            }),
+                }))
+            }
         };
         self
     }
